@@ -76,6 +76,7 @@ class PtraceCoverage:
         self._func_ranges: list[tuple[int, int]] = []
         self._elf_data: bytes = b""
         self._load_segments: list[tuple[int, int, int, int]] = []
+        self._is_pie: bool = True  # assume PIE until proven otherwise
 
         if self.deep_coverage:
             self._disassembler = Cs(CS_ARCH_X86, CS_MODE_64)
@@ -98,6 +99,9 @@ class PtraceCoverage:
         is_le = data[5] == 1
         if not (is_64 and is_le):
             return
+
+        e_type = struct.unpack_from("<H", data, 16)[0]
+        self._is_pie = (e_type == 3)  # ET_DYN = PIE, ET_EXEC = non-PIE
 
         e_shoff = struct.unpack_from("<Q", data, 40)[0]
         e_shnum = struct.unpack_from("<H", data, 60)[0]
@@ -326,7 +330,7 @@ class PtraceCoverage:
             pass
 
     def _resolve_addr(self, rel_addr: int) -> int:
-        if self._base_address is not None:
+        if self._is_pie and self._base_address is not None:
             return self._base_address + rel_addr
         return rel_addr
 
@@ -601,7 +605,10 @@ class Fuzzer:
                     break
 
             if last_action == "cont":
-                _, status = os.waitpid(pid, 0)
+                _, status = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
+                if os.WIFSTOPPED(status):
+                    libc.ptrace(PTRACE_CONT, pid, None, None)
+                    _, status = os.waitpid(pid, 0)
             else:
                 os.kill(pid, signal.SIGKILL)
                 os.waitpid(pid, 0)
