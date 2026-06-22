@@ -17,6 +17,13 @@ import sys
 import time
 from pathlib import Path
 
+try:
+    from capstone import Cs, CS_ARCH_X86, CS_MODE_64, CS_OPT_DETAIL
+    from capstone.x86_const import X86_GRP_JUMP, X86_GRP_CALL, X86_GRP_RET, X86_GRP_INT
+    HAS_CAPSTONE = True
+except ImportError:
+    HAS_CAPSTONE = False
+
 
 INTERESTING_8 = [0, 1, 0x7F, 0x80, 0xFF]
 INTERESTING_16 = [0x7FFF, 0x8000, 0xFFFF, 0, 1]
@@ -299,9 +306,11 @@ class PtraceCoverage:
 
     Strategy: disassemble the first bytes of each function (from ELF symtab/dynsym),
     place int3 at each basic block entry, record (prev, curr) edges.
+    With --deep-coverage, uses capstone to discover all basic blocks.
     """
 
-    def __init__(self, target_path: str, map_size: int = 65536):
+    def __init__(self, target_path: str, map_size: int = 65536,
+                 deep_coverage: bool = False, max_bps: int = 50000):
         self.target_path = target_path
         self.map_size = map_size
         self.bb_addrs: list[int] = []  # relative (file) addresses
@@ -309,11 +318,27 @@ class PtraceCoverage:
         self.edge_map: bytearray = bytearray(map_size)
         self.prev_location = 0
         self.total_edges = 0
+        self.cumulative_edges = 0
+        self.total_bp_hits = 0
         self._base_address: int | None = None
+        self._map_snapshot = bytes(self.edge_map)
+        self.deep_coverage = deep_coverage and HAS_CAPSTONE
+        self.max_bps = max_bps
+        self._discovered_bbs: set[int] = set()
+        self._func_ranges: list[tuple[int, int]] = []  # (start, end) sorted
+        self._elf_data: bytes = b""
+        self._load_segments: list[tuple[int, int, int, int]] = []  # vaddr, offset, filesz, memsz
+
+        if self.deep_coverage:
+            self._disassembler = Cs(CS_ARCH_X86, CS_MODE_64)
+            self._disassembler.detail = True
+            self._parse_elf_segments()
+
         self._collect_basic_blocks()
 
     def _collect_basic_blocks(self):
-        """Parse ELF to find function entry points as basic block targets."""
+        """Parse ELF to find function entry points as basic block targets.
+        With deep_coverage, also discovers internal basic blocks via capstone."""
         try:
             with open(self.target_path, "rb") as f:
                 data = f.read()
@@ -362,6 +387,12 @@ class PtraceCoverage:
         if not self.bb_addrs:
             self._parse_symbol_table(data, dynsym_sec, dynstr_sec)
 
+        if self.deep_coverage and HAS_CAPSTONE:
+            func_entries = list(self.bb_addrs)
+            for func_va, func_size in self._func_ranges:
+                self._collect_function_bbs(func_va, func_size)
+            self.bb_addrs = sorted(set(self.bb_addrs))
+
     def _parse_symbol_table(self, data: bytes, sym_sec: int | None, str_sec: int | None):
         if sym_sec is None or str_sec is None:
             return
@@ -382,7 +413,155 @@ class PtraceCoverage:
             st_type = st_info & 0xf
             if st_type == 2 and st_value > 0 and st_size > 0:  # STT_FUNC
                 self.bb_addrs.append(st_value)
+                self._func_ranges.append((st_value, st_value + st_size))
         self.bb_addrs.sort()
+        self._func_ranges.sort()
+
+    def _parse_elf_segments(self):
+        """Parse ELF program headers to find PT_LOAD segments."""
+        try:
+            with open(self.target_path, "rb") as f:
+                self._elf_data = f.read()
+        except Exception:
+            return
+
+        data = self._elf_data
+        if len(data) < 64 or data[:4] != b"\x7fELF":
+            return
+        if data[4] != 2 or data[5] != 1:
+            return
+
+        e_phoff = struct.unpack_from("<Q", data, 32)[0]
+        e_phentsize = struct.unpack_from("<H", data, 54)[0]
+        e_phnum = struct.unpack_from("<H", data, 56)[0]
+
+        for i in range(min(e_phnum, 100)):
+            ph = e_phoff + i * e_phentsize
+            if ph + 56 > len(data):
+                break
+            p_type = struct.unpack_from("<I", data, ph)[0]
+            if p_type == 1:  # PT_LOAD
+                p_offset = struct.unpack_from("<Q", data, ph + 8)[0]
+                p_vaddr = struct.unpack_from("<Q", data, ph + 16)[0]
+                p_filesz = struct.unpack_from("<Q", data, ph + 32)[0]
+                p_memsz = struct.unpack_from("<Q", data, ph + 40)[0]
+                self._load_segments.append((p_vaddr, p_offset, p_filesz, p_memsz))
+
+    def _read_func_bytes(self, func_va: int, max_len: int = 512) -> bytes | None:
+        """Read bytes from ELF file for a function at virtual address func_va."""
+        for vaddr, offset, filesz, memsz in self._load_segments:
+            if vaddr <= func_va < vaddr + filesz:
+                file_offset = offset + (func_va - vaddr)
+                end = min(file_offset + max_len, offset + filesz)
+                return self._elf_data[file_offset:end]
+        return None
+
+    def _collect_function_bbs(self, func_va: int, func_size: int):
+        """Disassemble a function and discover basic block entries."""
+        if not self.deep_coverage or not HAS_CAPSTONE:
+            return
+
+        func_bytes = self._read_func_bytes(func_va, max_len=min(func_size, 2048))
+        if not func_bytes:
+            return
+
+        try:
+            for insn in self._disassembler.disasm(func_bytes, func_va):
+                is_jump = X86_GRP_JUMP in insn.groups
+                is_call = X86_GRP_CALL in insn.groups
+                is_ret = X86_GRP_RET in insn.groups
+                is_int = X86_GRP_INT in insn.groups
+
+                if is_jump:
+                    if insn.op_str.startswith("0x"):
+                        target = int(insn.op_str, 16)
+                        if func_va <= target < func_va + func_size:
+                            if target not in self._discovered_bbs:
+                                self.bb_addrs.append(target)
+                                self._discovered_bbs.add(target)
+                    next_addr = insn.address + insn.size
+                    if next_addr not in self._discovered_bbs:
+                        self.bb_addrs.append(next_addr)
+                        self._discovered_bbs.add(next_addr)
+                elif is_call or is_ret or is_int:
+                    next_addr = insn.address + insn.size
+                    if next_addr not in self._discovered_bbs:
+                        self.bb_addrs.append(next_addr)
+                        self._discovered_bbs.add(next_addr)
+        except Exception:
+            pass
+
+    def discover_new_bbs(self, pid: int, bp_addr: int, max_discover: int = 32):
+        """After hitting a breakpoint, disassemble forward and install new BPs."""
+        if not self.deep_coverage or len(self.original_bytes) >= self.max_bps:
+            return 0
+
+        # Convert absolute bp_addr back to relative for ELF lookup
+        if self._base_address is not None:
+            rel_addr = bp_addr - self._base_address
+        else:
+            rel_addr = bp_addr
+
+        # Find which function this belongs to
+        func_start = None
+        func_size = 0
+        for start, end in self._func_ranges:
+            if start <= rel_addr < end:
+                func_start = start
+                func_size = end - start
+                break
+        if func_start is None:
+            return 0
+
+        # Read bytes from ELF for this function, starting from bp
+        scan_start = rel_addr
+        func_bytes = self._read_func_bytes(scan_start, max_len=min(func_size - (scan_start - func_start), 512))
+        if not func_bytes:
+            return 0
+
+        count = 0
+        try:
+            for insn in self._disassembler.disasm(func_bytes, scan_start):
+                if count >= max_discover or len(self.original_bytes) >= self.max_bps:
+                    break
+
+                is_jump = X86_GRP_JUMP in insn.groups
+                is_call = X86_GRP_CALL in insn.groups
+                is_ret = X86_GRP_RET in insn.groups
+                is_int = X86_GRP_INT in insn.groups
+
+                new_targets = []
+                if is_jump and insn.op_str.startswith("0x"):
+                    target = int(insn.op_str, 16)
+                    if func_start <= target < func_start + func_size:
+                        new_targets.append(target)
+                    next_addr = insn.address + insn.size
+                    if func_start <= next_addr < func_start + func_size:
+                        new_targets.append(next_addr)
+                elif is_call or is_ret or is_int:
+                    next_addr = insn.address + insn.size
+                    if func_start <= next_addr < func_start + func_size:
+                        new_targets.append(next_addr)
+
+                for target in new_targets:
+                    if target in self._discovered_bbs:
+                        continue
+                    self._discovered_bbs.add(target)
+                    abs_target = self._resolve_addr(target)
+                    try:
+                        val = self._read_memory(pid, abs_target)
+                        orig = val & 0xFF
+                        if orig != INT3:
+                            self.original_bytes[abs_target] = orig
+                            self._write_memory(pid, abs_target, (val & ~0xFF) | INT3)
+                            self.bb_addrs.append(target)
+                            count += 1
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        return count
 
     def resolve_base(self, pid: int):
         """Read /proc/pid/maps to find the base address of the main executable."""
@@ -459,9 +638,11 @@ class PtraceCoverage:
     def record_edge(self, addr: int) -> bool:
         bucket = (addr ^ self.prev_location) % self.map_size
         self.prev_location = addr % self.map_size
+        self.total_bp_hits += 1
         if self.edge_map[bucket] == 0:
             self.edge_map[bucket] = 1
             self.total_edges += 1
+            self.cumulative_edges += 1
             return True
         return False
 
@@ -472,6 +653,7 @@ class PtraceCoverage:
 class Fuzzer:
     def __init__(self, target, corpus_dir, crashes_dir, max_len=4096,
                  timeout=5, mutations_per_input=8, use_coverage=False,
+                 deep_coverage=False, max_bps=50000,
                  dictionary=None, file_mode=False, target_args=None,
                  markov_order=1, markov_generate=False,
                  mc_bandit=False, mc_cem=False,
@@ -492,10 +674,11 @@ class Fuzzer:
 
         self.ptrace_cov: PtraceCoverage | None = None
         if self.use_coverage:
-            cov = PtraceCoverage(target)
+            cov = PtraceCoverage(target, deep_coverage=deep_coverage, max_bps=max_bps)
             if cov.bb_addrs:
                 self.ptrace_cov = cov
-                print(f"[*] Coverage: {len(cov.bb_addrs)} breakpoints, "
+                mode = "deep (capstone)" if cov.deep_coverage else "function-entry"
+                print(f"[*] Coverage: {len(cov.bb_addrs)} breakpoints ({mode}), "
                       f"map={cov.map_size}")
             else:
                 print("[!] Coverage: no symbols found in ELF, "
@@ -621,6 +804,10 @@ class Fuzzer:
             os.dup2(stdin_r, 0)
             os.close(stdin_r)
             os.close(stdin_w)
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull, 1)
+            os.dup2(devnull, 2)
+            os.close(devnull)
             libc.ptrace(PTRACE_TRACEME, 0, None, None)
             signal.signal(signal.SIGTRAP, signal.SIG_IGN)
             os.execv(self.target, [self.target])
@@ -666,6 +853,9 @@ class Fuzzer:
                             val = cov._read_memory(pid, bp_addr)
                             cov._write_memory(pid, bp_addr, (val & ~0xFF) | orig)
                             del cov.original_bytes[bp_addr]
+                            # Dynamic BB discovery for deep coverage
+                            cov.discover_new_bbs(pid, bp_addr)
+                            # fix RIP: INT3 sets RIP past the byte, move back
                             regs_buf2 = (ctypes.c_char * (27 * 8))()
                             libc.ptrace(PTRACE_GETREGS, pid, None, regs_buf2)
                             regs = bytearray(regs_buf2)
@@ -959,7 +1149,9 @@ class Fuzzer:
             markov_str += "+gen"
         cov_str = ""
         if self.ptrace_cov:
-            cov_str = f" | edges: {self.ptrace_cov.total_edges}"
+            cov_str = f" | edges: {self.ptrace_cov.cumulative_edges} hits: {self.ptrace_cov.total_bp_hits}"
+            if self.ptrace_cov.deep_coverage:
+                cov_str += f" bps:{len(self.ptrace_cov.original_bytes)}"
         mc_str = ""
         if self.mc:
             parts = []
@@ -1028,6 +1220,10 @@ def main():
     parser.add_argument("-n", "--iterations", type=int, default=0, help="Number of iterations (0=infinite)")
     parser.add_argument("-M", "--mutations", type=int, default=8, help="Mutations per input")
     parser.add_argument("-c", "--coverage", action="store_true", help="Enable coverage-guided mode")
+    parser.add_argument("--deep-coverage", action="store_true",
+                        help="Enable capstone-based basic block discovery (requires -c)")
+    parser.add_argument("--max-bps", type=int, default=50000,
+                        help="Max breakpoints for deep coverage (default: 50000)")
     parser.add_argument("-D", "--dict", help="Dictionary file (one token per line, NAME=value or raw bytes)")
     parser.add_argument("-F", "--file-mode", action="store_true",
                         help="Write input to temp file instead of stdin")
@@ -1075,6 +1271,8 @@ def main():
         timeout=args.timeout,
         mutations_per_input=args.mutations,
         use_coverage=args.coverage,
+        deep_coverage=args.deep_coverage,
+        max_bps=args.max_bps,
         dictionary=dictionary,
         file_mode=args.file_mode,
         target_args=args.target_args,
