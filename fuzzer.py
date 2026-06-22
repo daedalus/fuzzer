@@ -3,14 +3,16 @@
 
 import argparse
 import collections
+import ctypes
+import ctypes.util
 import hashlib
 import math
 import os
 import random
 import re
 import signal
-import subprocess
 import struct
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -255,6 +257,218 @@ class SanitizerReport:
         return bool(self.sanitizer and self.error_type)
 
 
+def parse_dict_line(line: str) -> bytes | None:
+    line = line.strip()
+    if not line or line.startswith("#"):
+        return None
+    parts = line.split("=", 1)
+    token = parts[-1] if len(parts) == 2 else line
+    return token.encode("raw_unicode_escape").decode("unicode_escape").encode("latin-1")
+
+
+def load_dictionary(path: str) -> list[bytes]:
+    d = []
+    with open(path, "r", errors="replace") as f:
+        for line in f:
+            tok = parse_dict_line(line)
+            if tok is not None:
+                d.append(tok)
+    return d
+
+
+# ptrace constants
+PTRACE_TRACEME = 0
+PTRACE_PEEKDATA = 2
+PTRACE_POKEDATA = 5
+PTRACE_CONT = 7
+PTRACE_SINGLESTEP = 9
+PTRACE_GETREGS = 12
+PTRACE_SETREGS = 13
+PTRACE_SETOPTIONS = 0x4200
+PTRACE_O_TRACESYSGOOD = 1
+PTRACE_EVENT_FORK = 1
+PTRACE_EVENT_VFORK = 2
+PTRACE_EVENT_CLONE = 3
+PTRACE_EVENT_EXEC = 4
+INT3 = 0xCC
+INT3_BYTE = bytes([INT3])
+
+
+class PtraceCoverage:
+    """Edge coverage via ptrace breakpoints on closed-source binaries.
+
+    Strategy: disassemble the first bytes of each function (from ELF symtab/dynsym),
+    place int3 at each basic block entry, record (prev, curr) edges.
+    """
+
+    def __init__(self, target_path: str, map_size: int = 65536):
+        self.target_path = target_path
+        self.map_size = map_size
+        self.bb_addrs: list[int] = []  # relative (file) addresses
+        self.original_bytes: dict[int, int] = {}
+        self.edge_map: bytearray = bytearray(map_size)
+        self.prev_location = 0
+        self.total_edges = 0
+        self._base_address: int | None = None
+        self._collect_basic_blocks()
+
+    def _collect_basic_blocks(self):
+        """Parse ELF to find function entry points as basic block targets."""
+        try:
+            with open(self.target_path, "rb") as f:
+                data = f.read()
+        except Exception:
+            return
+
+        if data[:4] != b"\x7fELF":
+            return
+
+        is_64 = data[4] == 2
+        is_le = data[5] == 1
+        if not (is_64 and is_le):
+            return
+
+        e_shoff = struct.unpack_from("<Q", data, 40)[0]
+        e_shnum = struct.unpack_from("<H", data, 60)[0]
+        e_shentsize = struct.unpack_from("<H", data, 58)[0]
+        e_shstrndx = struct.unpack_from("<H", data, 62)[0]
+
+        if e_shnum == 0 or e_shstrndx >= e_shnum:
+            return
+
+        shstr_off = e_shoff + e_shstrndx * e_shentsize
+        shstr_offset = struct.unpack_from("<Q", data, shstr_off + 24)[0]
+
+        symtab_sec = None
+        strtab_sec = None
+        dynsym_sec = None
+        dynstr_sec = None
+        for i in range(e_shnum):
+            sh = e_shoff + i * e_shentsize
+            sh_type = struct.unpack_from("<I", data, sh + 4)[0]
+            sh_name_idx = struct.unpack_from("<I", data, sh)[0]
+            name = data[shstr_offset + sh_name_idx:shstr_offset + sh_name_idx + 32].split(b"\x00")[0]
+            if sh_type == 2:  # SHT_SYMTAB
+                symtab_sec = sh
+            elif sh_type == 11:  # SHT_DYNSYM
+                dynsym_sec = sh
+            elif sh_type == 3:
+                if name == b".strtab" and strtab_sec is None:
+                    strtab_sec = sh
+                elif name == b".dynstr" and dynstr_sec is None:
+                    dynstr_sec = sh
+
+        self._parse_symbol_table(data, symtab_sec, strtab_sec)
+        if not self.bb_addrs:
+            self._parse_symbol_table(data, dynsym_sec, dynstr_sec)
+
+    def _parse_symbol_table(self, data: bytes, sym_sec: int | None, str_sec: int | None):
+        if sym_sec is None or str_sec is None:
+            return
+
+        sym_offset = struct.unpack_from("<Q", data, sym_sec + 24)[0]
+        sym_size = struct.unpack_from("<Q", data, sym_sec + 32)[0]
+        sym_entsize = struct.unpack_from("<Q", data, sym_sec + 56)[0]
+        if sym_entsize == 0:
+            sym_entsize = 24
+        sym_count = sym_size // sym_entsize if sym_entsize else 0
+        strtab_offset = struct.unpack_from("<Q", data, str_sec + 24)[0]
+
+        for i in range(min(sym_count, 10000)):
+            sym = sym_offset + i * sym_entsize
+            st_info = data[sym + 4]
+            st_value = struct.unpack_from("<Q", data, sym + 8)[0]
+            st_size = struct.unpack_from("<Q", data, sym + 16)[0]
+            st_type = st_info & 0xf
+            if st_type == 2 and st_value > 0 and st_size > 0:  # STT_FUNC
+                self.bb_addrs.append(st_value)
+        self.bb_addrs.sort()
+
+    def resolve_base(self, pid: int):
+        """Read /proc/pid/maps to find the base address of the main executable."""
+        try:
+            with open(f"/proc/{pid}/maps") as f:
+                for line in f:
+                    if self.target_path in line or line.split()[-1].endswith("/" + os.path.basename(self.target_path)):
+                        parts = line.split()
+                        addr_range = parts[0].split("-")
+                        self._base_address = int(addr_range[0], 16)
+                        return
+            # fallback: first r-xp mapping
+            with open(f"/proc/{pid}/maps") as f:
+                for line in f:
+                    parts = line.split()
+                    if len(parts) >= 2 and parts[1] == "r-xp":
+                        addr_range = parts[0].split("-")
+                        self._base_address = int(addr_range[0], 16)
+                        return
+        except Exception:
+            pass
+
+    def _resolve_addr(self, rel_addr: int) -> int:
+        if self._base_address is not None:
+            return self._base_address + rel_addr
+        return rel_addr
+
+    def _ptrace(self, request, pid, addr=None, data=None):
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        libc.ptrace.argtypes = [ctypes.c_long, ctypes.c_long,
+                                ctypes.c_void_p, ctypes.c_void_p]
+        libc.ptrace.restype = ctypes.c_long
+        ctypes.set_errno(0)
+        result = libc.ptrace(request, pid,
+                            ctypes.c_void_p(addr) if addr else None,
+                            ctypes.c_void_p(data) if data else None)
+        return result
+
+    def _read_memory(self, pid: int, addr: int) -> int:
+        val = self._ptrace(PTRACE_PEEKDATA, pid, addr)
+        return val & 0xFFFFFFFFFFFFFFFF
+
+    def _write_memory(self, pid: int, addr: int, data_8: int):
+        self._ptrace(PTRACE_POKEDATA, pid, addr, data_8)
+
+    def install_breakpoints(self, pid: int):
+        self.resolve_base(pid)
+        self.original_bytes.clear()
+        for rel_addr in self.bb_addrs:
+            addr = self._resolve_addr(rel_addr)
+            try:
+                val = self._read_memory(pid, addr)
+                self.original_bytes[addr] = val & 0xFF
+                new_val = (val & ~0xFF) | INT3
+                self._write_memory(pid, addr, new_val)
+            except Exception:
+                pass
+
+    def remove_breakpoints(self, pid: int):
+        for addr, orig in self.original_bytes.items():
+            try:
+                val = self._read_memory(pid, addr)
+                new_val = (val & ~0xFF) | orig
+                self._write_memory(pid, addr, new_val)
+            except Exception:
+                pass
+        self.original_bytes.clear()
+
+    def reset_edge_map(self):
+        self.prev_location = 0
+        self.total_edges = 0
+        self._map_snapshot = bytes(self.edge_map)
+
+    def record_edge(self, addr: int) -> bool:
+        bucket = (addr ^ self.prev_location) % self.map_size
+        self.prev_location = addr % self.map_size
+        if self.edge_map[bucket] == 0:
+            self.edge_map[bucket] = 1
+            self.total_edges += 1
+            return True
+        return False
+
+    def is_new_coverage(self) -> bool:
+        return bytes(self.edge_map) != self._map_snapshot
+
+
 class Fuzzer:
     def __init__(self, target, corpus_dir, crashes_dir, max_len=4096,
                  timeout=5, mutations_per_input=8, use_coverage=False,
@@ -275,6 +489,19 @@ class Fuzzer:
         self._tmp_dir = Path("/tmp") / f"fuzzer_{os.getpid()}"
         if self.file_mode:
             self._tmp_dir.mkdir(parents=True, exist_ok=True)
+
+        self.ptrace_cov: PtraceCoverage | None = None
+        if self.use_coverage:
+            cov = PtraceCoverage(target)
+            if cov.bb_addrs:
+                self.ptrace_cov = cov
+                print(f"[*] Coverage: {len(cov.bb_addrs)} breakpoints, "
+                      f"map={cov.map_size}")
+            else:
+                print("[!] Coverage: no symbols found in ELF, "
+                      "coverage disabled (use -g to compile with symbols)")
+                print("[!] For closed-source binaries, use AFL++ QEMU mode: "
+                      "afl-qemu-trace ./target")
 
         self.corpus_dir.mkdir(parents=True, exist_ok=True)
         self.crashes_dir.mkdir(parents=True, exist_ok=True)
@@ -327,6 +554,8 @@ class Fuzzer:
 
     def _run_target(self, data: bytes) -> tuple[int, str]:
         """Execute target, return (returncode, stderr)."""
+        if self.ptrace_cov:
+            return self._run_target_ptrace(data)
         try:
             env = os.environ.copy()
             if self.use_coverage:
@@ -375,6 +604,105 @@ class Fuzzer:
                     return -1, "timeout"
         except Exception as e:
             return -2, str(e)
+
+    def _run_target_ptrace(self, data: bytes) -> tuple[int, str]:
+        """Run target under ptrace for edge coverage."""
+        cov = self.ptrace_cov
+        cov.reset_edge_map()
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        libc.ptrace.argtypes = [ctypes.c_long, ctypes.c_long,
+                                ctypes.c_void_p, ctypes.c_void_p]
+        libc.ptrace.restype = ctypes.c_long
+
+        stdin_r, stdin_w = os.pipe()
+        pid = os.fork()
+        if pid == 0:
+            os.setsid()
+            os.dup2(stdin_r, 0)
+            os.close(stdin_r)
+            os.close(stdin_w)
+            libc.ptrace(PTRACE_TRACEME, 0, None, None)
+            signal.signal(signal.SIGTRAP, signal.SIG_IGN)
+            os.execv(self.target, [self.target])
+            os._exit(127)
+
+        os.close(stdin_r)
+        os.write(stdin_w, data)
+        os.close(stdin_w)
+
+        try:
+            _, status = os.waitpid(pid, 0)
+            if not (os.WIFSTOPPED(status) and os.WSTOPSIG(status) == signal.SIGTRAP):
+                os.kill(pid, signal.SIGKILL)
+                os.waitpid(pid, 0)
+                return -2, "exec failed"
+
+            cov.install_breakpoints(pid)
+            libc.ptrace(PTRACE_CONT, pid, None, None)
+
+            deadline = time.time() + self.timeout
+
+            last_action = None
+            while time.time() < deadline:
+                _, status = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
+                if status == 0:
+                    time.sleep(0.0005)
+                    continue
+
+                if os.WIFEXITED(status) or os.WIFSIGNALED(status):
+                    break
+
+                if os.WIFSTOPPED(status):
+                    sig = os.WSTOPSIG(status)
+                    if sig == signal.SIGTRAP:
+                        regs_buf = (ctypes.c_char * (27 * 8))()
+                        libc.ptrace(PTRACE_GETREGS, pid, None, regs_buf)
+                        rip = struct.unpack_from("<Q", bytes(regs_buf), 128)[0]
+                        bp_addr = rip - 1
+
+                        if bp_addr in cov.original_bytes:
+                            orig = cov.original_bytes[bp_addr]
+                            cov.record_edge(bp_addr)
+                            val = cov._read_memory(pid, bp_addr)
+                            cov._write_memory(pid, bp_addr, (val & ~0xFF) | orig)
+                            del cov.original_bytes[bp_addr]
+                            regs_buf2 = (ctypes.c_char * (27 * 8))()
+                            libc.ptrace(PTRACE_GETREGS, pid, None, regs_buf2)
+                            regs = bytearray(regs_buf2)
+                            struct.pack_into("<Q", regs, 128, bp_addr)
+                            libc.ptrace(PTRACE_SETREGS, pid, None, bytes(regs))
+                        libc.ptrace(PTRACE_CONT, pid, None, None)
+                        last_action = "cont"
+                    else:
+                        break
+                else:
+                    break
+
+            if last_action == "cont":
+                _, status = os.waitpid(pid, 0)
+            else:
+                os.kill(pid, signal.SIGKILL)
+                os.waitpid(pid, 0)
+
+            returncode = (os.WEXITSTATUS(status) if os.WIFEXITED(status)
+                          else -abs(os.WTERMSIG(status)))
+            return returncode, ""
+
+        except ChildProcessError:
+            return 0, ""
+        except Exception as e:
+            try:
+                os.kill(pid, signal.SIGKILL)
+                os.waitpid(pid, 0)
+            except Exception:
+                pass
+            return -2, str(e)
+
+    def _getregs(self, pid: int) -> int:
+        """Get instruction pointer (RIP on x86-64)."""
+        buf = (ctypes.c_char * (27 * 8))()
+        ctypes.CDLL(None).ptrace(PTRACE_GETREGS, pid, None, buf)
+        return struct.unpack_from("<Q", bytes(buf), 16)[0]  # RIP offset 16
 
     SIGNAL_CRASH_CODES = {134, 135, 136, 139}  # SIGABRT, SIGBUS, SIGFPE, SIGSEGV
 
@@ -595,7 +923,8 @@ class Fuzzer:
 
         is_crash = self._is_crash(returncode, stderr)
         is_interesting = self._is_interesting(returncode, stderr)
-        success = is_crash or is_interesting
+        has_new_coverage = (self.ptrace_cov and self.ptrace_cov.is_new_coverage())
+        success = is_crash or is_interesting or has_new_coverage
 
         if self.mc and self.mc_bandit:
             seen = set()
@@ -612,7 +941,7 @@ class Fuzzer:
                 self.mc.maybe_refit()
             return True
 
-        if is_interesting:
+        if is_interesting or has_new_coverage:
             self.save_to_corpus(mutated)
             if self.mc and self.mc_cem:
                 self.mc.add_elite(mutated, 2)
@@ -628,6 +957,9 @@ class Fuzzer:
         markov_str = " | markov: trained" if self.markov_trained else ""
         if self.markov_generate:
             markov_str += "+gen"
+        cov_str = ""
+        if self.ptrace_cov:
+            cov_str = f" | edges: {self.ptrace_cov.total_edges}"
         mc_str = ""
         if self.mc:
             parts = []
@@ -640,7 +972,7 @@ class Fuzzer:
         sig_str = f" | sigs: {len(self.crash_sigs)}" if self.crash_sigs else ""
         print(f"\r[*] execs: {self.exec_count} | corpus: {len(self.corpus)} | "
               f"crashes: {self.crash_count}{sig_str} | eps: {eps:.0f} | "
-              f"time: {elapsed:.0f}s{dict_str}{markov_str}{mc_str}", end="", flush=True)
+              f"time: {elapsed:.0f}s{dict_str}{markov_str}{cov_str}{mc_str}", end="", flush=True)
 
     def run(self, iterations=0):
         print(f"[*] Target: {self.target}")
