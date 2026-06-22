@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""Coverage-guided binary fuzzer."""
+"""Binary fuzzer with ASAN/MSAN detection, dictionary and Markov mutations."""
 
 import argparse
+import collections
 import hashlib
+import math
 import os
 import random
+import re
 import signal
 import subprocess
 import struct
@@ -36,29 +39,138 @@ DICT_MUTATIONS = [
 ]
 
 
-def parse_dict_line(line: str) -> bytes | None:
-    line = line.strip()
-    if not line or line.startswith("#"):
-        return None
-    parts = line.split("=", 1)
-    token = parts[-1] if len(parts) == 2 else line
-    return token.encode("raw_unicode_escape").decode("unicode_escape").encode("latin-1")
+class MarkovChain:
+    """Byte-level Markov chain for fuzz input generation."""
+
+    def __init__(self, order=1, smoothing=1e-6):
+        self.order = order
+        self.smoothing = smoothing
+        self.transitions = collections.defaultdict(lambda: collections.Counter())
+        self._contexts_seen = 0
+
+    def train(self, data: bytes):
+        for i in range(len(data)):
+            ctx = bytes(data[max(0, i - self.order):i]) if self.order else b""
+            self.transitions[ctx][data[i]] += 1
+            self._contexts_seen += 1
+
+    def train_corpus(self, corpus: list[bytes]):
+        for data in corpus:
+            self.train(data)
+
+    def generate(self, length: int) -> bytes:
+        result = bytearray()
+        ctx = b"\x00" * self.order
+        for _ in range(length):
+            counts = self.transitions.get(ctx)
+            if counts is None or not counts:
+                result.append(random.randint(0, 255))
+                ctx = bytes(result[max(0, len(result) - self.order):])
+                continue
+            total = sum(counts.values()) + self.smoothing * 256
+            r = random.random() * total
+            cumulative = 0.0
+            for byte_val, count in counts.items():
+                cumulative += count + self.smoothing
+                if r <= cumulative:
+                    result.append(byte_val)
+                    break
+            else:
+                result.append(random.randint(0, 255))
+            ctx = bytes(result[max(0, len(result) - self.order):])
+        return bytes(result)
+
+    def sample_byte(self, ctx: bytes) -> int:
+        counts = self.transitions.get(ctx)
+        if counts is None or not counts:
+            return random.randint(0, 255)
+        total = sum(counts.values()) + self.smoothing * 256
+        r = random.random() * total
+        cumulative = 0.0
+        for byte_val, count in counts.items():
+            cumulative += count + self.smoothing
+            if r <= cumulative:
+                return byte_val
+        return random.randint(0, 255)
+
+    def is_trained(self) -> bool:
+        return self._contexts_seen > 0
 
 
-def load_dictionary(path: str) -> list[bytes]:
-    d = []
-    with open(path, "r", errors="replace") as f:
-        for line in f:
-            tok = parse_dict_line(line)
-            if tok is not None:
-                d.append(tok)
-    return d
+# Sanitizer error patterns
+SANITIZER_PATTERNS = [
+    (r"AddressSanitizer:\s*(heap-buffer-overflow|stack-buffer-overflow|heap-use-after-free"
+     r"|global-buffer-overflow|stack-buffer-underflow|heap-buffer-overflow-|"
+     r"dynamic-stack-buffer-overflow|stack-use-after-return|stack-use-after-scope"
+     r"|allocation-size-too-big|double-free|invalid-malloc-size"
+     r"|attempting-free-on-non-deallocated-memory|"
+     r"negative-size-param|heap-use-after-scope", "ASAN"),
+    (r"MemorySanitizer:\s*(use-of-uninitialized-value)", "MSAN"),
+    (r"ThreadSanitizer:\s*(data-race|heap-use-after-race|lock-order-inversion", "TSAN"),
+    (r"LeakSanitizer:\s*(leak)", "LSAN"),
+    (r"UndefinedBehaviorSanitizer:\s*(undefined|shift-exponent|signed-integer-overflow"
+     r"|null-pointer-use|integer-divide-by-zero)", "UBSAN"),
+]
+
+SANITIZER_ERROR_RE = re.compile(
+    r"(AddressSanitizer|MemorySanitizer|ThreadSanitizer|LeakSanitizer|UndefinedBehaviorSanitizer)"
+    r":\s*(\S+(?:\s+\S+)?)",
+    re.IGNORECASE,
+)
+SANITIZER_STACK_FRAME_RE = re.compile(
+    r"#\d+\s+0x[0-9a-f]+\s+in\s+(\S+)\s+.*"
+)
+SANITIZER_FAULT_ADDR_RE = re.compile(
+    r"(?:Address|Memory)Sanitizer.*(?:on|at) address\s+(0x[0-9a-f]+)",
+    re.IGNORECASE,
+)
+
+
+class SanitizerReport:
+    """Parse sanitizer output from a crashed process."""
+
+    __slots__ = ("sanitizer", "error_type", "fault_addr", "frames", "raw", "signature")
+
+    def __init__(self, sanitizer: str, error_type: str, fault_addr: str,
+                 frames: list[str], raw: str):
+        self.sanitizer = sanitizer
+        self.error_type = error_type
+        self.fault_addr = fault_addr
+        self.frames = frames
+        self.raw = raw
+        self.signature = self._build_signature()
+
+    def _build_signature(self) -> str:
+        key = f"{self.sanitizer}:{self.error_type}"
+        for f in self.frames[:6]:
+            key += f"@{f}"
+        return key
+
+    @classmethod
+    def parse(cls, stderr: str) -> "SanitizerReport | None":
+        m = SANITIZER_ERROR_RE.search(stderr)
+        if not m:
+            return None
+        sanitizer = m.group(1)
+        error_type = m.group(2).strip()
+
+        fault_addr = ""
+        addr_m = SANITIZER_FAULT_ADDR_RE.search(stderr)
+        if addr_m:
+            fault_addr = addr_m.group(1)
+
+        frames = SANITIZER_STACK_FRAME_RE.findall(stderr)
+        return cls(sanitizer, error_type, fault_addr, frames, stderr)
+
+    def is_valid(self) -> bool:
+        return bool(self.sanitizer and self.error_type)
 
 
 class Fuzzer:
     def __init__(self, target, corpus_dir, crashes_dir, max_len=4096,
                  timeout=5, mutations_per_input=8, use_coverage=False,
-                 dictionary=None):
+                 dictionary=None, file_mode=False, target_args=None,
+                 markov_order=1, markov_generate=False):
         self.target = target
         self.corpus_dir = Path(corpus_dir)
         self.crashes_dir = Path(crashes_dir)
@@ -67,6 +179,11 @@ class Fuzzer:
         self.mutations_per_input = mutations_per_input
         self.use_coverage = use_coverage
         self.dictionary = dictionary or []
+        self.file_mode = file_mode
+        self.target_args = target_args or []
+        self._tmp_dir = Path("/tmp") / f"fuzzer_{os.getpid()}"
+        if self.file_mode:
+            self._tmp_dir.mkdir(parents=True, exist_ok=True)
 
         self.corpus_dir.mkdir(parents=True, exist_ok=True)
         self.crashes_dir.mkdir(parents=True, exist_ok=True)
@@ -74,11 +191,20 @@ class Fuzzer:
         self.corpus: list[bytes] = []
         self.seen_hashes: set[str] = set()
         self.crash_hashes: set[str] = set()
+        self.crash_sigs: dict[str, int] = {}  # signature -> count
         self.exec_count = 0
         self.crash_count = 0
         self.start_time = time.time()
+        self.last_report: SanitizerReport | None = None
+
+        self.markov = MarkovChain(order=markov_order)
+        self.markov_generate = markov_generate
+        self.markov_trained = False
 
         self._load_corpus()
+        if self.corpus:
+            self.markov.train_corpus(self.corpus)
+            self.markov_trained = self.markov.is_trained()
 
     def _hash(self, data: bytes) -> str:
         return hashlib.sha256(data).hexdigest()[:16]
@@ -101,21 +227,47 @@ class Fuzzer:
             if self.use_coverage:
                 env["AFL_MAP_SIZE"] = "65536"
 
-            proc = subprocess.Popen(
-                [self.target],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                env=env,
-                preexec_fn=os.setsid,
-            )
-            try:
-                _, stderr = proc.communicate(input=data, timeout=self.timeout)
-                return proc.returncode, stderr.decode(errors="replace")
-            except subprocess.TimeoutExpired:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                proc.wait()
-                return -1, "timeout"
+            if self.file_mode:
+                tmp_file = self._tmp_dir / f"fuzz_{os.getpid()}"
+                tmp_file.write_bytes(data)
+                cmd = [self.target] + [
+                    a.replace("{file}", str(tmp_file)) for a in self.target_args
+                ]
+                try:
+                    proc = subprocess.Popen(
+                        cmd,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.PIPE,
+                        env=env,
+                        preexec_fn=os.setsid,
+                    )
+                    _, stderr = proc.communicate(timeout=self.timeout)
+                    return proc.returncode, stderr.decode(errors="replace")
+                except subprocess.TimeoutExpired:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    proc.wait()
+                    return -1, "timeout"
+                finally:
+                    try:
+                        tmp_file.unlink()
+                    except OSError:
+                        pass
+            else:
+                proc = subprocess.Popen(
+                    [self.target],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    env=env,
+                    preexec_fn=os.setsid,
+                )
+                try:
+                    _, stderr = proc.communicate(input=data, timeout=self.timeout)
+                    return proc.returncode, stderr.decode(errors="replace")
+                except subprocess.TimeoutExpired:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    proc.wait()
+                    return -1, "timeout"
         except Exception as e:
             return -2, str(e)
 
@@ -135,16 +287,21 @@ class Fuzzer:
         return False
 
     def _is_crash(self, returncode: int, stderr: str) -> bool:
+        self.last_report = None
         if returncode == -2:
             return False
+
+        report = SanitizerReport.parse(stderr)
+        if report and report.is_valid():
+            self.last_report = report
+            return True
+
         if returncode in self.SIGNAL_CRASH_CODES:
             return True
         if returncode < 0:
             return True
         if any(sig in stderr for sig in ["SIGSEGV", "SIGABRT", "SIGFPE", "SIGBUS",
-                                         "Segmentation fault", "Aborted",
-                                         "AddressSanitizer", "heap-buffer-overflow",
-                                         "stack-buffer-overflow", "use-after-free"]):
+                                         "Segmentation fault", "Aborted"]):
             return True
         return False
 
@@ -156,6 +313,8 @@ class Fuzzer:
         ops = list(MUTATIONS)
         if self.dictionary:
             ops.extend(DICT_MUTATIONS)
+        if self.markov_trained:
+            ops.append("markov_bytes")
 
         for _ in range(self.mutations_per_input):
             op = random.choice(ops)
@@ -218,6 +377,11 @@ class Fuzzer:
                 end = min(idx + len(token), len(buf))
                 buf[idx:end] = token[:end - idx]
 
+            elif op == "markov_bytes" and buf:
+                idx = random.randint(0, len(buf) - 1)
+                ctx = bytes(buf[max(0, idx - self.markov.order):idx]) if self.markov.order else b""
+                buf[idx] = self.markov.sample_byte(ctx)
+
             elif op == "havoc":
                 return bytes(self._havoc_mutate(buf))
 
@@ -254,12 +418,34 @@ class Fuzzer:
         h = self._hash(data)
         if h in self.crash_hashes:
             return
+
+        report = SanitizerReport.parse(stderr)
+        sig = report.signature if report and report.is_valid() else f"signal:{abs(returncode)}"
         self.crash_hashes.add(h)
+        self.crash_sigs[sig] = self.crash_sigs.get(sig, 0) + 1
+
         ts = int(time.time())
         crash_file = self.crashes_dir / f"crash_{ts}_{h}"
         crash_file.write_bytes(data)
+
         meta = crash_file.with_suffix(".txt")
-        meta.write_text(f"returncode: {returncode}\nstderr:\n{stderr}\n")
+        lines = [f"returncode: {returncode}"]
+        if report and report.is_valid():
+            lines.extend([
+                f"sanitizer: {report.sanitizer}",
+                f"error: {report.error_type}",
+                f"fault_addr: {report.fault_addr}",
+                f"signature: {sig}",
+                f"seen: {self.crash_sigs[sig]}x",
+                "",
+                "=== stack trace ===",
+            ])
+            for i, frame in enumerate(report.frames[:12]):
+                lines.append(f"  #{i} {frame}")
+            lines.extend(["", "=== raw stderr ===", report.raw])
+        else:
+            lines.extend(["", "=== stderr ===", stderr])
+        meta.write_text("\n".join(lines))
 
     def save_to_corpus(self, data: bytes):
         h = self._hash(data)
@@ -267,8 +453,18 @@ class Fuzzer:
             return
         self.seen_hashes.add(h)
         self.corpus.append(data)
+        self.markov.train(data)
+        self.markov_trained = self.markov.is_trained()
         corpus_file = self.corpus_dir / f"id_{h}"
         corpus_file.write_bytes(data)
+
+    def _pick_seed(self) -> bytes:
+        if self.markov_generate and self.markov_trained and random.random() < 0.15:
+            length = random.randint(1, self.max_len)
+            return self.markov.generate(length)
+        if self.corpus:
+            return random.choice(self.corpus)
+        return b"AAAAAAAA"
 
     def fuzz_one(self, data: bytes) -> bool:
         mutated = self.mutate(data)
@@ -290,9 +486,13 @@ class Fuzzer:
         elapsed = time.time() - self.start_time
         eps = self.exec_count / elapsed if elapsed > 0 else 0
         dict_str = f" | dict: {len(self.dictionary)}" if self.dictionary else ""
+        markov_str = " | markov: trained" if self.markov_trained else ""
+        if self.markov_generate:
+            markov_str += "+gen"
+        sig_str = f" | sigs: {len(self.crash_sigs)}" if self.crash_sigs else ""
         print(f"\r[*] execs: {self.exec_count} | corpus: {len(self.corpus)} | "
-              f"crashes: {self.crash_count} | eps: {eps:.0f} | "
-              f"time: {elapsed:.0f}s{dict_str}", end="", flush=True)
+              f"crashes: {self.crash_count}{sig_str} | eps: {eps:.0f} | "
+              f"time: {elapsed:.0f}s{dict_str}{markov_str}", end="", flush=True)
 
     def run(self, iterations=0):
         print(f"[*] Target: {self.target}")
@@ -302,6 +502,11 @@ class Fuzzer:
         print(f"[*] Timeout: {self.timeout}s")
         if self.dictionary:
             print(f"[*] Dictionary: {len(self.dictionary)} tokens")
+        if self.markov_trained:
+            print(f"[*] Markov chain: order={self.markov.order}, "
+                  f"transitions={len(self.markov.transitions)}")
+        if self.markov_generate:
+            print(f"[*] Markov generation: enabled (15% of seeds)")
         print(f"[*] Starting fuzzing...\n")
 
         i = 0
@@ -309,7 +514,7 @@ class Fuzzer:
             while True:
                 if iterations and i >= iterations:
                     break
-                seed = random.choice(self.corpus)
+                seed = self._pick_seed()
                 self.fuzz_one(seed)
                 i += 1
                 if i % 100 == 0:
@@ -318,9 +523,13 @@ class Fuzzer:
             pass
 
         self.print_stats()
-        print(f"\n\n[*] Fuzzing stopped. {self.crash_count} crashes found.")
-        if self.crash_count:
-            print(f"[*] Crash files in: {self.crashes_dir}")
+        print(f"\n\n[*] Fuzzing stopped. {self.crash_count} crashes found "
+              f"({len(self.crash_sigs)} unique signatures).")
+        if self.crash_sigs:
+            print("[*] Crash signatures:")
+            for sig, count in sorted(self.crash_sigs.items(), key=lambda x: -x[1]):
+                print(f"    {sig} ({count}x)")
+            print(f"\n[*] Crash files in: {self.crashes_dir}")
 
 
 def main():
@@ -334,6 +543,16 @@ def main():
     parser.add_argument("-M", "--mutations", type=int, default=8, help="Mutations per input")
     parser.add_argument("-c", "--coverage", action="store_true", help="Enable coverage-guided mode")
     parser.add_argument("-D", "--dict", help="Dictionary file (one token per line, NAME=value or raw bytes)")
+    parser.add_argument("-F", "--file-mode", action="store_true",
+                        help="Write input to temp file instead of stdin")
+    parser.add_argument("-A", "--target-args", nargs=argparse.REMAINDER,
+                        help="Target arguments (use {file} as placeholder for temp file)")
+    parser.add_argument("--markov", action="store_true",
+                        help="Enable Markov chain mutation (trained on corpus)")
+    parser.add_argument("--markov-gen", action="store_true",
+                        help="Enable Markov chain seed generation (15%% of seeds)")
+    parser.add_argument("--markov-order", type=int, default=1,
+                        help="Markov chain order (default: 1)")
     args = parser.parse_args()
 
     if not os.path.isfile(args.target):
@@ -352,6 +571,8 @@ def main():
         dictionary = load_dictionary(args.dict)
         print(f"[*] Loaded {len(dictionary)} tokens from {args.dict}")
 
+    use_markov = args.markov or args.markov_gen
+
     fuzzer = Fuzzer(
         target=args.target,
         corpus_dir=args.corpus,
@@ -361,6 +582,10 @@ def main():
         mutations_per_input=args.mutations,
         use_coverage=args.coverage,
         dictionary=dictionary,
+        file_mode=args.file_mode,
+        target_args=args.target_args,
+        markov_order=args.markov_order if use_markov else 0,
+        markov_generate=args.markov_gen,
     )
     fuzzer.run(iterations=args.iterations)
 
