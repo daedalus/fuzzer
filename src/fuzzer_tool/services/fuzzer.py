@@ -1,291 +1,37 @@
-#!/usr/bin/env python3
-"""Binary fuzzer with ASAN/MSAN detection, dictionary and Markov mutations."""
+"""Fuzzer orchestration: coordinates mutations, execution, and coverage."""
 
-import argparse
-import collections
 import ctypes
-import ctypes.util
-import hashlib
 import json
-import math
 import os
 import random
-import re
 import resource
 import signal
 import struct
-import subprocess
-import sys
 import time
 from pathlib import Path
 
+from fuzzer_tool.adapters.filesystem import load_corpus, save_crash, save_to_corpus
+from fuzzer_tool.adapters.process import SIGNAL_CRASH_CODES, run_target_file, run_target_stdin
+from fuzzer_tool.core.markov import MarkovChain
+from fuzzer_tool.core.montecarlo import MonteCarloScheduler
+from fuzzer_tool.core.mutations import (
+    DICT_MUTATIONS,
+    INTERESTING_8,
+    INTERESTING_16,
+    INTERESTING_32,
+    MUTATIONS,
+)
+from fuzzer_tool.core.sanitizer import SanitizerReport
+
 try:
-    from capstone import Cs, CS_ARCH_X86, CS_MODE_64, CS_OPT_DETAIL
-    from capstone.x86_const import X86_GRP_JUMP, X86_GRP_CALL, X86_GRP_RET, X86_GRP_INT
+    from capstone import CS_ARCH_X86, CS_MODE_64, Cs
+    from capstone.x86_const import X86_GRP_CALL, X86_GRP_INT, X86_GRP_JUMP, X86_GRP_RET
+
     HAS_CAPSTONE = True
 except ImportError:
     HAS_CAPSTONE = False
 
 
-INTERESTING_8 = [0, 1, 0x7F, 0x80, 0xFF]
-INTERESTING_16 = [0x7FFF, 0x8000, 0xFFFF, 0, 1]
-INTERESTING_32 = [0x7FFFFFFF, 0x80000000, 0xFFFFFFFF, 0, 1]
-
-MUTATIONS = [
-    "bit_flip",
-    "byte_flip",
-    "interesting_8",
-    "interesting_16",
-    "interesting_32",
-    "random_bytes",
-    "block_insert",
-    "block_delete",
-    "block_duplicate",
-    "havoc",
-]
-
-DICT_MUTATIONS = [
-    "dict_insert",
-    "dict_replace",
-]
-
-
-class MarkovChain:
-    """Byte-level Markov chain for fuzz input generation."""
-
-    def __init__(self, order=1, smoothing=1e-6):
-        self.order = order
-        self.smoothing = smoothing
-        self.transitions = collections.defaultdict(lambda: collections.Counter())
-        self._contexts_seen = 0
-
-    def train(self, data: bytes):
-        for i in range(len(data)):
-            ctx = bytes(data[max(0, i - self.order):i]) if self.order else b""
-            self.transitions[ctx][data[i]] += 1
-            self._contexts_seen += 1
-
-    def train_corpus(self, corpus: list[bytes]):
-        for data in corpus:
-            self.train(data)
-
-    def generate(self, length: int) -> bytes:
-        result = bytearray()
-        ctx = b"\x00" * self.order
-        for _ in range(length):
-            counts = self.transitions.get(ctx)
-            if counts is None or not counts:
-                result.append(random.randint(0, 255))
-                ctx = bytes(result[max(0, len(result) - self.order):])
-                continue
-            total = sum(counts.values()) + self.smoothing * 256
-            r = random.random() * total
-            cumulative = 0.0
-            for byte_val, count in counts.items():
-                cumulative += count + self.smoothing
-                if r <= cumulative:
-                    result.append(byte_val)
-                    break
-            else:
-                result.append(random.randint(0, 255))
-            ctx = bytes(result[max(0, len(result) - self.order):])
-        return bytes(result)
-
-    def sample_byte(self, ctx: bytes) -> int:
-        counts = self.transitions.get(ctx)
-        if counts is None or not counts:
-            return random.randint(0, 255)
-        total = sum(counts.values()) + self.smoothing * 256
-        r = random.random() * total
-        cumulative = 0.0
-        for byte_val, count in counts.items():
-            cumulative += count + self.smoothing
-            if r <= cumulative:
-                return byte_val
-        return random.randint(0, 255)
-
-    def is_trained(self) -> bool:
-        return self._contexts_seen > 0
-
-
-class MonteCarloScheduler:
-    """Thompson sampling bandit for mutation ops + CEM byte distribution."""
-
-    ELITE_MAX = 200
-
-    def __init__(self, elite_frac=0.1, refit_interval=1000):
-        self.arm_alpha: dict[str, float] = {}
-        self.arm_beta: dict[str, float] = {}
-        self.elite_frac = elite_frac
-        self.refit_interval = refit_interval
-        self.execs_since_refit = 0
-        self.elite_set: list[tuple[int, bytes]] = []
-        self.byte_freq: dict[int, dict[int, int]] = {}
-        self.cem_fitted = False
-
-    def init_arm(self, name: str):
-        if name not in self.arm_alpha:
-            self.arm_alpha[name] = 1.0
-            self.arm_beta[name] = 1.0
-
-    def select_op(self, ops: list[str]) -> str:
-        best_op = ops[0]
-        best_val = -1.0
-        for op in ops:
-            a = self.arm_alpha.get(op, 1.0)
-            b = self.arm_beta.get(op, 1.0)
-            val = random.betavariate(a, b)
-            if val > best_val:
-                best_val = val
-                best_op = op
-        return best_op
-
-    def record(self, name: str, success: bool):
-        if success:
-            self.arm_alpha[name] = self.arm_alpha.get(name, 1.0) + 1
-        else:
-            self.arm_beta[name] = self.arm_beta.get(name, 1.0) + 1
-
-    def add_elite(self, data: bytes, score: int):
-        self.elite_set.append((score, data))
-        if len(self.elite_set) > self.ELITE_MAX:
-            self.elite_set.sort(key=lambda x: x[0])
-            self.elite_set.pop(0)
-
-    def maybe_refit(self):
-        self.execs_since_refit += 1
-        if self.execs_since_refit < self.refit_interval:
-            return
-        self.execs_since_refit = 0
-        if not self.elite_set:
-            return
-        n_elite = max(1, int(len(self.elite_set) * self.elite_frac))
-        sorted_elite = sorted(self.elite_set, key=lambda x: x[0], reverse=True)
-        elite = [d for _, d in sorted_elite[:n_elite]]
-        self.byte_freq = {}
-        for pos in range(max(len(d) for d in elite)):
-            freq: dict[int, int] = {}
-            for data in elite:
-                if pos < len(data):
-                    b = data[pos]
-                    freq[b] = freq.get(b, 0) + 1
-            self.byte_freq[pos] = freq
-        self.cem_fitted = True
-
-    def cem_byte(self, pos: int) -> int:
-        freq = self.byte_freq.get(pos)
-        if not freq:
-            return random.randint(0, 255)
-        total = sum(freq.values()) + 256
-        r = random.random() * total
-        cumulative = 0
-        for byte_val, count in freq.items():
-            cumulative += count + 1
-            if r <= cumulative:
-                return byte_val
-        return random.randint(0, 255)
-
-    def cem_sample(self, length: int) -> bytes:
-        return bytes(self.cem_byte(i) for i in range(length))
-
-    def bandit_stats(self) -> dict[str, tuple[float, float]]:
-        result = {}
-        for name in sorted(self.arm_alpha):
-            a = self.arm_alpha[name]
-            b = self.arm_beta[name]
-            result[name] = (a - 1, b - 1)
-        return result
-
-
-# Sanitizer error patterns
-SANITIZER_PATTERNS = [
-    (r"AddressSanitizer:\s*(heap-buffer-overflow|stack-buffer-overflow|heap-use-after-free"
-     r"|global-buffer-overflow|stack-buffer-underflow|heap-buffer-overflow-|"
-     r"dynamic-stack-buffer-overflow|stack-use-after-return|stack-use-after-scope"
-     r"|allocation-size-too-big|double-free|invalid-malloc-size"
-     r"|attempting-free-on-non-deallocated-memory|"
-     r"negative-size-param|heap-use-after-scope", "ASAN"),
-    (r"MemorySanitizer:\s*(use-of-uninitialized-value)", "MSAN"),
-    (r"ThreadSanitizer:\s*(data-race|heap-use-after-race|lock-order-inversion", "TSAN"),
-    (r"LeakSanitizer:\s*(leak)", "LSAN"),
-    (r"UndefinedBehaviorSanitizer:\s*(undefined|shift-exponent|signed-integer-overflow"
-     r"|null-pointer-use|integer-divide-by-zero)", "UBSAN"),
-]
-
-SANITIZER_ERROR_RE = re.compile(
-    r"(AddressSanitizer|MemorySanitizer|ThreadSanitizer|LeakSanitizer|UndefinedBehaviorSanitizer)"
-    r":\s*(\S+(?:\s+\S+)?)",
-    re.IGNORECASE,
-)
-SANITIZER_STACK_FRAME_RE = re.compile(
-    r"#\d+\s+0x[0-9a-f]+\s+in\s+(\S+)\s+.*"
-)
-SANITIZER_FAULT_ADDR_RE = re.compile(
-    r"(?:Address|Memory)Sanitizer.*(?:on|at) address\s+(0x[0-9a-f]+)",
-    re.IGNORECASE,
-)
-
-
-class SanitizerReport:
-    """Parse sanitizer output from a crashed process."""
-
-    __slots__ = ("sanitizer", "error_type", "fault_addr", "frames", "raw", "signature")
-
-    def __init__(self, sanitizer: str, error_type: str, fault_addr: str,
-                 frames: list[str], raw: str):
-        self.sanitizer = sanitizer
-        self.error_type = error_type
-        self.fault_addr = fault_addr
-        self.frames = frames
-        self.raw = raw
-        self.signature = self._build_signature()
-
-    def _build_signature(self) -> str:
-        key = f"{self.sanitizer}:{self.error_type}"
-        for f in self.frames[:6]:
-            key += f"@{f}"
-        return key
-
-    @classmethod
-    def parse(cls, stderr: str) -> "SanitizerReport | None":
-        m = SANITIZER_ERROR_RE.search(stderr)
-        if not m:
-            return None
-        sanitizer = m.group(1)
-        error_type = m.group(2).strip()
-
-        fault_addr = ""
-        addr_m = SANITIZER_FAULT_ADDR_RE.search(stderr)
-        if addr_m:
-            fault_addr = addr_m.group(1)
-
-        frames = SANITIZER_STACK_FRAME_RE.findall(stderr)
-        return cls(sanitizer, error_type, fault_addr, frames, stderr)
-
-    def is_valid(self) -> bool:
-        return bool(self.sanitizer and self.error_type)
-
-
-def parse_dict_line(line: str) -> bytes | None:
-    line = line.strip()
-    if not line or line.startswith("#"):
-        return None
-    parts = line.split("=", 1)
-    token = parts[-1] if len(parts) == 2 else line
-    return token.encode("raw_unicode_escape").decode("unicode_escape").encode("latin-1")
-
-
-def load_dictionary(path: str) -> list[bytes]:
-    d = []
-    with open(path, "r", errors="replace") as f:
-        for line in f:
-            tok = parse_dict_line(line)
-            if tok is not None:
-                d.append(tok)
-    return d
-
-
-# ptrace constants
 PTRACE_TRACEME = 0
 PTRACE_PEEKDATA = 2
 PTRACE_POKEDATA = 5
@@ -295,12 +41,7 @@ PTRACE_GETREGS = 12
 PTRACE_SETREGS = 13
 PTRACE_SETOPTIONS = 0x4200
 PTRACE_O_TRACESYSGOOD = 1
-PTRACE_EVENT_FORK = 1
-PTRACE_EVENT_VFORK = 2
-PTRACE_EVENT_CLONE = 3
-PTRACE_EVENT_EXEC = 4
 INT3 = 0xCC
-INT3_BYTE = bytes([INT3])
 
 
 class PtraceCoverage:
@@ -311,11 +52,16 @@ class PtraceCoverage:
     With --deep-coverage, uses capstone to discover all basic blocks.
     """
 
-    def __init__(self, target_path: str, map_size: int = 65536,
-                 deep_coverage: bool = False, max_bps: int = 50000):
+    def __init__(
+        self,
+        target_path: str,
+        map_size: int = 65536,
+        deep_coverage: bool = False,
+        max_bps: int = 50000,
+    ):
         self.target_path = target_path
         self.map_size = map_size
-        self.bb_addrs: list[int] = []  # relative (file) addresses
+        self.bb_addrs: list[int] = []
         self.original_bytes: dict[int, int] = {}
         self.edge_map: bytearray = bytearray(map_size)
         self.prev_location = 0
@@ -327,9 +73,9 @@ class PtraceCoverage:
         self.deep_coverage = deep_coverage and HAS_CAPSTONE
         self.max_bps = max_bps
         self._discovered_bbs: set[int] = set()
-        self._func_ranges: list[tuple[int, int]] = []  # (start, end) sorted
+        self._func_ranges: list[tuple[int, int]] = []
         self._elf_data: bytes = b""
-        self._load_segments: list[tuple[int, int, int, int]] = []  # vaddr, offset, filesz, memsz
+        self._load_segments: list[tuple[int, int, int, int]] = []
 
         if self.deep_coverage:
             self._disassembler = Cs(CS_ARCH_X86, CS_MODE_64)
@@ -339,8 +85,6 @@ class PtraceCoverage:
         self._collect_basic_blocks()
 
     def _collect_basic_blocks(self):
-        """Parse ELF to find function entry points as basic block targets.
-        With deep_coverage, also discovers internal basic blocks via capstone."""
         try:
             with open(self.target_path, "rb") as f:
                 data = f.read()
@@ -374,10 +118,12 @@ class PtraceCoverage:
             sh = e_shoff + i * e_shentsize
             sh_type = struct.unpack_from("<I", data, sh + 4)[0]
             sh_name_idx = struct.unpack_from("<I", data, sh)[0]
-            name = data[shstr_offset + sh_name_idx:shstr_offset + sh_name_idx + 32].split(b"\x00")[0]
-            if sh_type == 2:  # SHT_SYMTAB
+            name = data[shstr_offset + sh_name_idx : shstr_offset + sh_name_idx + 32].split(
+                b"\x00"
+            )[0]
+            if sh_type == 2:
                 symtab_sec = sh
-            elif sh_type == 11:  # SHT_DYNSYM
+            elif sh_type == 11:
                 dynsym_sec = sh
             elif sh_type == 3:
                 if name == b".strtab" and strtab_sec is None:
@@ -390,7 +136,6 @@ class PtraceCoverage:
             self._parse_symbol_table(data, dynsym_sec, dynstr_sec)
 
         if self.deep_coverage and HAS_CAPSTONE:
-            func_entries = list(self.bb_addrs)
             for func_va, func_size in self._func_ranges:
                 self._collect_function_bbs(func_va, func_size)
             self.bb_addrs = sorted(set(self.bb_addrs))
@@ -405,22 +150,20 @@ class PtraceCoverage:
         if sym_entsize == 0:
             sym_entsize = 24
         sym_count = sym_size // sym_entsize if sym_entsize else 0
-        strtab_offset = struct.unpack_from("<Q", data, str_sec + 24)[0]
 
         for i in range(min(sym_count, 10000)):
             sym = sym_offset + i * sym_entsize
             st_info = data[sym + 4]
             st_value = struct.unpack_from("<Q", data, sym + 8)[0]
             st_size = struct.unpack_from("<Q", data, sym + 16)[0]
-            st_type = st_info & 0xf
-            if st_type == 2 and st_value > 0 and st_size > 0:  # STT_FUNC
+            st_type = st_info & 0xF
+            if st_type == 2 and st_value > 0 and st_size > 0:
                 self.bb_addrs.append(st_value)
                 self._func_ranges.append((st_value, st_value + st_size))
         self.bb_addrs.sort()
         self._func_ranges.sort()
 
     def _parse_elf_segments(self):
-        """Parse ELF program headers to find PT_LOAD segments."""
         try:
             with open(self.target_path, "rb") as f:
                 self._elf_data = f.read()
@@ -442,7 +185,7 @@ class PtraceCoverage:
             if ph + 56 > len(data):
                 break
             p_type = struct.unpack_from("<I", data, ph)[0]
-            if p_type == 1:  # PT_LOAD
+            if p_type == 1:
                 p_offset = struct.unpack_from("<Q", data, ph + 8)[0]
                 p_vaddr = struct.unpack_from("<Q", data, ph + 16)[0]
                 p_filesz = struct.unpack_from("<Q", data, ph + 32)[0]
@@ -450,8 +193,7 @@ class PtraceCoverage:
                 self._load_segments.append((p_vaddr, p_offset, p_filesz, p_memsz))
 
     def _read_func_bytes(self, func_va: int, max_len: int = 512) -> bytes | None:
-        """Read bytes from ELF file for a function at virtual address func_va."""
-        for vaddr, offset, filesz, memsz in self._load_segments:
+        for vaddr, offset, filesz, _memsz in self._load_segments:
             if vaddr <= func_va < vaddr + filesz:
                 file_offset = offset + (func_va - vaddr)
                 end = min(file_offset + max_len, offset + filesz)
@@ -459,7 +201,6 @@ class PtraceCoverage:
         return None
 
     def _collect_function_bbs(self, func_va: int, func_size: int):
-        """Disassemble a function and discover basic block entries."""
         if not self.deep_coverage or not HAS_CAPSTONE:
             return
 
@@ -494,17 +235,14 @@ class PtraceCoverage:
             pass
 
     def discover_new_bbs(self, pid: int, bp_addr: int, max_discover: int = 32):
-        """After hitting a breakpoint, disassemble forward and install new BPs."""
         if not self.deep_coverage or len(self.original_bytes) >= self.max_bps:
             return 0
 
-        # Convert absolute bp_addr back to relative for ELF lookup
         if self._base_address is not None:
             rel_addr = bp_addr - self._base_address
         else:
             rel_addr = bp_addr
 
-        # Find which function this belongs to
         func_start = None
         func_size = 0
         for start, end in self._func_ranges:
@@ -515,9 +253,11 @@ class PtraceCoverage:
         if func_start is None:
             return 0
 
-        # Read bytes from ELF for this function, starting from bp
         scan_start = rel_addr
-        func_bytes = self._read_func_bytes(scan_start, max_len=min(func_size - (scan_start - func_start), 512))
+        func_bytes = self._read_func_bytes(
+            scan_start,
+            max_len=min(func_size - (scan_start - func_start), 512),
+        )
         if not func_bytes:
             return 0
 
@@ -566,16 +306,16 @@ class PtraceCoverage:
         return count
 
     def resolve_base(self, pid: int):
-        """Read /proc/pid/maps to find the base address of the main executable."""
         try:
             with open(f"/proc/{pid}/maps") as f:
                 for line in f:
-                    if self.target_path in line or line.split()[-1].endswith("/" + os.path.basename(self.target_path)):
+                    if self.target_path in line or line.split()[-1].endswith(
+                        "/" + os.path.basename(self.target_path)
+                    ):
                         parts = line.split()
                         addr_range = parts[0].split("-")
                         self._base_address = int(addr_range[0], 16)
                         return
-            # fallback: first r-xp mapping
             with open(f"/proc/{pid}/maps") as f:
                 for line in f:
                     parts = line.split()
@@ -593,13 +333,20 @@ class PtraceCoverage:
 
     def _ptrace(self, request, pid, addr=None, data=None):
         libc = ctypes.CDLL("libc.so.6", use_errno=True)
-        libc.ptrace.argtypes = [ctypes.c_long, ctypes.c_long,
-                                ctypes.c_void_p, ctypes.c_void_p]
+        libc.ptrace.argtypes = [
+            ctypes.c_long,
+            ctypes.c_long,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
         libc.ptrace.restype = ctypes.c_long
         ctypes.set_errno(0)
-        result = libc.ptrace(request, pid,
-                            ctypes.c_void_p(addr) if addr else None,
-                            ctypes.c_void_p(data) if data else None)
+        result = libc.ptrace(
+            request,
+            pid,
+            ctypes.c_void_p(addr) if addr else None,
+            ctypes.c_void_p(data) if data else None,
+        )
         return result
 
     def _read_memory(self, pid: int, addr: int) -> int:
@@ -653,14 +400,29 @@ class PtraceCoverage:
 
 
 class Fuzzer:
-    def __init__(self, target, corpus_dir, crashes_dir, max_len=4096,
-                 timeout=5, mutations_per_input=8, use_coverage=False,
-                 deep_coverage=False, max_bps=50000,
-                 dictionary=None, file_mode=False, target_args=None,
-                 markov_order=1, markov_generate=False,
-                 mc_bandit=False, mc_cem=False,
-                 mc_elite_frac=0.1, mc_refit_interval=1000,
-                 stats_file=None, stats_interval=1000):
+    def __init__(
+        self,
+        target,
+        corpus_dir,
+        crashes_dir,
+        max_len=4096,
+        timeout=5,
+        mutations_per_input=8,
+        use_coverage=False,
+        deep_coverage=False,
+        max_bps=50000,
+        dictionary=None,
+        file_mode=False,
+        target_args=None,
+        markov_order=1,
+        markov_generate=False,
+        mc_bandit=False,
+        mc_cem=False,
+        mc_elite_frac=0.1,
+        mc_refit_interval=1000,
+        stats_file=None,
+        stats_interval=1000,
+    ):
         self.target = target
         self.corpus_dir = Path(corpus_dir)
         self.crashes_dir = Path(crashes_dir)
@@ -681,13 +443,15 @@ class Fuzzer:
             if cov.bb_addrs:
                 self.ptrace_cov = cov
                 mode = "deep (capstone)" if cov.deep_coverage else "function-entry"
-                print(f"[*] Coverage: {len(cov.bb_addrs)} breakpoints ({mode}), "
-                      f"map={cov.map_size}")
+                print(f"[*] Coverage: {len(cov.bb_addrs)} breakpoints ({mode}), map={cov.map_size}")
             else:
-                print("[!] Coverage: no symbols found in ELF, "
-                      "coverage disabled (use -g to compile with symbols)")
-                print("[!] For closed-source binaries, use AFL++ QEMU mode: "
-                      "afl-qemu-trace ./target")
+                print(
+                    "[!] Coverage: no symbols found in ELF, "
+                    "coverage disabled (use -g to compile with symbols)"
+                )
+                print(
+                    "[!] For closed-source binaries, use AFL++ QEMU mode: afl-qemu-trace ./target"
+                )
 
         self.corpus_dir.mkdir(parents=True, exist_ok=True)
         self.crashes_dir.mkdir(parents=True, exist_ok=True)
@@ -695,7 +459,7 @@ class Fuzzer:
         self.corpus: list[bytes] = []
         self.seen_hashes: set[str] = set()
         self.crash_hashes: set[str] = set()
-        self.crash_sigs: dict[str, int] = {}  # signature -> count
+        self.crash_sigs: dict[str, int] = {}
         self.exec_count = 0
         self.crash_count = 0
         self.timeout_count = 0
@@ -718,10 +482,14 @@ class Fuzzer:
 
         self.mc_bandit = mc_bandit
         self.mc_cem = mc_cem
-        self.mc = MonteCarloScheduler(
-            elite_frac=mc_elite_frac,
-            refit_interval=mc_refit_interval,
-        ) if (mc_bandit or mc_cem) else None
+        self.mc = (
+            MonteCarloScheduler(
+                elite_frac=mc_elite_frac,
+                refit_interval=mc_refit_interval,
+            )
+            if (mc_bandit or mc_cem)
+            else None
+        )
         self._last_ops_used: list[str] = []
 
         if self.mc and self.mc_bandit:
@@ -730,80 +498,38 @@ class Fuzzer:
             for op in DICT_MUTATIONS:
                 self.mc.init_arm(op)
 
-    def _hash(self, data: bytes) -> str:
-        return hashlib.sha256(data).hexdigest()[:16]
-
     def _load_corpus(self):
-        for f in self.corpus_dir.iterdir():
-            if f.is_file():
-                data = f.read_bytes()
-                h = self._hash(data)
-                if h not in self.seen_hashes:
-                    self.seen_hashes.add(h)
-                    self.corpus.append(data)
-        if not self.corpus:
-            self.corpus.append(b"AAAAAAAA")
+        self.corpus, self.seen_hashes = load_corpus(self.corpus_dir)
 
     def _run_target(self, data: bytes) -> tuple[int, str]:
-        """Execute target, return (returncode, stderr)."""
         if self.ptrace_cov:
             return self._run_target_ptrace(data)
-        try:
-            env = os.environ.copy()
-            if self.use_coverage:
-                env["AFL_MAP_SIZE"] = "65536"
 
-            if self.file_mode:
-                tmp_file = self._tmp_dir / f"fuzz_{os.getpid()}"
-                tmp_file.write_bytes(data)
-                cmd = [self.target] + [
-                    a.replace("{file}", str(tmp_file)) for a in self.target_args
-                ]
-                try:
-                    proc = subprocess.Popen(
-                        cmd,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.PIPE,
-                        env=env,
-                        preexec_fn=os.setsid,
-                    )
-                    _, stderr = proc.communicate(timeout=self.timeout)
-                    return proc.returncode, stderr.decode(errors="replace")
-                except subprocess.TimeoutExpired:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                    proc.wait()
-                    return -1, "timeout"
-                finally:
-                    try:
-                        tmp_file.unlink()
-                    except OSError:
-                        pass
-            else:
-                proc = subprocess.Popen(
-                    [self.target],
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                    env=env,
-                    preexec_fn=os.setsid,
-                )
-                try:
-                    _, stderr = proc.communicate(input=data, timeout=self.timeout)
-                    return proc.returncode, stderr.decode(errors="replace")
-                except subprocess.TimeoutExpired:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                    proc.wait()
-                    return -1, "timeout"
-        except Exception as e:
-            return -2, str(e)
+        env = os.environ.copy()
+        if self.use_coverage:
+            env["AFL_MAP_SIZE"] = "65536"
+
+        if self.file_mode:
+            return run_target_file(
+                self.target,
+                data,
+                self.timeout,
+                str(self._tmp_dir),
+                self.target_args,
+                env=env,
+            )
+        return run_target_stdin(self.target, data, self.timeout, env=env)
 
     def _run_target_ptrace(self, data: bytes) -> tuple[int, str]:
-        """Run target under ptrace for edge coverage."""
         cov = self.ptrace_cov
         cov.reset_edge_map()
         libc = ctypes.CDLL("libc.so.6", use_errno=True)
-        libc.ptrace.argtypes = [ctypes.c_long, ctypes.c_long,
-                                ctypes.c_void_p, ctypes.c_void_p]
+        libc.ptrace.argtypes = [
+            ctypes.c_long,
+            ctypes.c_long,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
         libc.ptrace.restype = ctypes.c_long
 
         stdin_r, stdin_w = os.pipe()
@@ -862,9 +588,7 @@ class Fuzzer:
                             val = cov._read_memory(pid, bp_addr)
                             cov._write_memory(pid, bp_addr, (val & ~0xFF) | orig)
                             del cov.original_bytes[bp_addr]
-                            # Dynamic BB discovery for deep coverage
                             cov.discover_new_bbs(pid, bp_addr)
-                            # fix RIP: INT3 sets RIP past the byte, move back
                             regs_buf2 = (ctypes.c_char * (27 * 8))()
                             libc.ptrace(PTRACE_GETREGS, pid, None, regs_buf2)
                             regs = bytearray(regs_buf2)
@@ -883,8 +607,9 @@ class Fuzzer:
                 os.kill(pid, signal.SIGKILL)
                 os.waitpid(pid, 0)
 
-            returncode = (os.WEXITSTATUS(status) if os.WIFEXITED(status)
-                          else -abs(os.WTERMSIG(status)))
+            returncode = (
+                os.WEXITSTATUS(status) if os.WIFEXITED(status) else -abs(os.WTERMSIG(status))
+            )
             return returncode, ""
 
         except ChildProcessError:
@@ -897,16 +622,8 @@ class Fuzzer:
                 pass
             return -2, str(e)
 
-    def _getregs(self, pid: int) -> int:
-        """Get instruction pointer (RIP on x86-64)."""
-        buf = (ctypes.c_char * (27 * 8))()
-        ctypes.CDLL(None).ptrace(PTRACE_GETREGS, pid, None, buf)
-        return struct.unpack_from("<Q", bytes(buf), 16)[0]  # RIP offset 16
-
-    SIGNAL_CRASH_CODES = {134, 135, 136, 139}  # SIGABRT, SIGBUS, SIGFPE, SIGSEGV
-
     def _is_interesting(self, returncode: int, stderr: str) -> bool:
-        if returncode in self.SIGNAL_CRASH_CODES:
+        if returncode in SIGNAL_CRASH_CODES:
             return True
         if returncode < 0 and returncode != -1:
             return True
@@ -928,12 +645,21 @@ class Fuzzer:
             self.last_report = report
             return True
 
-        if returncode in self.SIGNAL_CRASH_CODES:
+        if returncode in SIGNAL_CRASH_CODES:
             return True
         if returncode < 0:
             return True
-        if any(sig in stderr for sig in ["SIGSEGV", "SIGABRT", "SIGFPE", "SIGBUS",
-                                         "Segmentation fault", "Aborted"]):
+        if any(
+            sig in stderr
+            for sig in [
+                "SIGSEGV",
+                "SIGABRT",
+                "SIGFPE",
+                "SIGBUS",
+                "Segmentation fault",
+                "Aborted",
+            ]
+        ):
             return True
         return False
 
@@ -963,7 +689,7 @@ class Fuzzer:
             if op == "bit_flip" and buf:
                 byte_idx = random.randint(0, len(buf) - 1)
                 bit_idx = random.randint(0, 7)
-                buf[byte_idx] ^= (1 << bit_idx)
+                buf[byte_idx] ^= 1 << bit_idx
 
             elif op == "byte_flip" and buf:
                 byte_idx = random.randint(0, len(buf) - 1)
@@ -997,12 +723,12 @@ class Fuzzer:
                 max_size = min(32, len(buf) - idx, len(buf) - 1)
                 if max_size >= 1:
                     size = random.randint(1, max_size)
-                    del buf[idx:idx + size]
+                    del buf[idx : idx + size]
 
             elif op == "block_duplicate" and len(buf) < self.max_len:
                 idx = random.randint(0, len(buf) - 1)
                 size = random.randint(1, min(16, len(buf) - idx))
-                block = buf[idx:idx + size]
+                block = buf[idx : idx + size]
                 ins = random.randint(0, len(buf))
                 buf[ins:ins] = block
 
@@ -1016,11 +742,13 @@ class Fuzzer:
                 token = random.choice(self.dictionary)
                 idx = random.randint(0, len(buf) - 1)
                 end = min(idx + len(token), len(buf))
-                buf[idx:end] = token[:end - idx]
+                buf[idx:end] = token[: end - idx]
 
             elif op == "markov_bytes" and buf:
                 idx = random.randint(0, len(buf) - 1)
-                ctx = bytes(buf[max(0, idx - self.markov.order):idx]) if self.markov.order else b""
+                ctx = (
+                    bytes(buf[max(0, idx - self.markov.order) : idx]) if self.markov.order else b""
+                )
                 buf[idx] = self.markov.sample_byte(ctx)
 
             elif op == "cem_bytes" and self.mc and self.mc.cem_fitted:
@@ -1048,7 +776,7 @@ class Fuzzer:
         op = random.randint(0, 4)
         if op == 0:
             idx = random.randint(0, len(buf) - 1)
-            buf[idx] ^= (1 << random.randint(0, 7))
+            buf[idx] ^= 1 << random.randint(0, 7)
         elif op == 1:
             idx = random.randint(0, len(buf) - 1)
             buf[idx] = random.randint(0, 255)
@@ -1061,51 +789,23 @@ class Fuzzer:
         elif op == 4 and len(buf) > 1:
             idx = random.randint(0, len(buf) - 1)
             size = random.randint(1, min(len(buf) - 1, len(buf) - idx))
-            del buf[idx:idx + size]
+            del buf[idx : idx + size]
 
     def save_crash(self, data: bytes, returncode: int, stderr: str):
-        h = self._hash(data)
-        if h in self.crash_hashes:
-            return
-
-        report = SanitizerReport.parse(stderr)
-        sig = report.signature if report and report.is_valid() else f"signal:{abs(returncode)}"
-        self.crash_hashes.add(h)
-        self.crash_sigs[sig] = self.crash_sigs.get(sig, 0) + 1
-
-        ts = int(time.time())
-        crash_file = self.crashes_dir / f"crash_{ts}_{h}"
-        crash_file.write_bytes(data)
-
-        meta = crash_file.with_suffix(".txt")
-        lines = [f"returncode: {returncode}"]
-        if report and report.is_valid():
-            lines.extend([
-                f"sanitizer: {report.sanitizer}",
-                f"error: {report.error_type}",
-                f"fault_addr: {report.fault_addr}",
-                f"signature: {sig}",
-                f"seen: {self.crash_sigs[sig]}x",
-                "",
-                "=== stack trace ===",
-            ])
-            for i, frame in enumerate(report.frames[:12]):
-                lines.append(f"  #{i} {frame}")
-            lines.extend(["", "=== raw stderr ===", report.raw])
-        else:
-            lines.extend(["", "=== stderr ===", stderr])
-        meta.write_text("\n".join(lines))
+        save_crash(
+            data,
+            returncode,
+            stderr,
+            self.crashes_dir,
+            self.crash_hashes,
+            self.crash_sigs,
+        )
 
     def save_to_corpus(self, data: bytes):
-        h = self._hash(data)
-        if h in self.seen_hashes:
-            return
-        self.seen_hashes.add(h)
-        self.corpus.append(data)
-        self.markov.train(data)
-        self.markov_trained = self.markov.is_trained()
-        corpus_file = self.corpus_dir / f"id_{h}"
-        corpus_file.write_bytes(data)
+        if save_to_corpus(data, self.corpus_dir, self.seen_hashes):
+            self.corpus.append(data)
+            self.markov.train(data)
+            self.markov_trained = self.markov.is_trained()
 
     def _pick_seed(self) -> bytes:
         if self.markov_generate and self.markov_trained and random.random() < 0.15:
@@ -1134,7 +834,7 @@ class Fuzzer:
 
         is_crash = self._is_crash(returncode, stderr)
         is_interesting = self._is_interesting(returncode, stderr)
-        has_new_coverage = (self.ptrace_cov and self.ptrace_cov.is_new_coverage())
+        has_new_coverage = self.ptrace_cov and self.ptrace_cov.is_new_coverage()
         success = is_crash or is_interesting or has_new_coverage
 
         if success:
@@ -1185,8 +885,7 @@ class Fuzzer:
         }
         if self.mc and self.mc_bandit:
             stats["bandit_stats"] = {
-                k: {"successes": v[0], "failures": v[1]}
-                for k, v in self.mc.bandit_stats().items()
+                k: {"successes": v[0], "failures": v[1]} for k, v in self.mc.bandit_stats().items()
             }
         if self.mc and self.mc_cem:
             stats["cem_elite_size"] = len(self.mc.elite_set)
@@ -1206,7 +905,10 @@ class Fuzzer:
             markov_str += "+gen"
         cov_str = ""
         if self.ptrace_cov:
-            cov_str = f" | edges: {self.ptrace_cov.cumulative_edges} hits: {self.ptrace_cov.total_bp_hits}"
+            cov_str = (
+                f" | edges: {self.ptrace_cov.cumulative_edges}"
+                f" hits: {self.ptrace_cov.total_bp_hits}"
+            )
             if self.ptrace_cov.deep_coverage:
                 cov_str += f" bps:{len(self.ptrace_cov.original_bytes)}"
         mc_str = ""
@@ -1230,10 +932,13 @@ class Fuzzer:
                 pct = succ / count * 100 if count else 0
                 rates.append(f"{op}:{pct:.0f}%")
             ops_str = " | ops: " + " ".join(rates)
-        print(f"\r[*] execs: {self.exec_count} | corpus: {len(self.corpus)} | "
-              f"crashes: {self.crash_count}{sig_str}{timeout_str} | eps: {eps:.0f} | "
-              f"time: {elapsed:.0f}s{rss_str}{ops_str}{dict_str}{markov_str}{cov_str}{mc_str}",
-              end="", flush=True)
+        print(
+            f"\r[*] execs: {self.exec_count} | corpus: {len(self.corpus)} | "
+            f"crashes: {self.crash_count}{sig_str}{timeout_str} | eps: {eps:.0f} | "
+            f"time: {elapsed:.0f}s{rss_str}{ops_str}{dict_str}{markov_str}{cov_str}{mc_str}",
+            end="",
+            flush=True,
+        )
 
     def run(self, iterations=0):
         print(f"[*] Target: {self.target}")
@@ -1244,19 +949,23 @@ class Fuzzer:
         if self.dictionary:
             print(f"[*] Dictionary: {len(self.dictionary)} tokens")
         if self.markov_trained:
-            print(f"[*] Markov chain: order={self.markov.order}, "
-                  f"transitions={len(self.markov.transitions)}")
+            print(
+                f"[*] Markov chain: order={self.markov.order}, "
+                f"transitions={len(self.markov.transitions)}"
+            )
         if self.markov_generate:
-            print(f"[*] Markov generation: enabled (15% of seeds)")
+            print("[*] Markov generation: enabled (15% of seeds)")
         if self.mc:
             if self.mc_bandit:
                 print(f"[*] MC bandit: Thompson sampling over {len(self.mc.arm_alpha)} arms")
             if self.mc_cem:
-                print(f"[*] MC CEM: elite_frac={self.mc.elite_frac}, "
-                      f"refit_interval={self.mc.refit_interval}")
+                print(
+                    f"[*] MC CEM: elite_frac={self.mc.elite_frac}, "
+                    f"refit_interval={self.mc.refit_interval}"
+                )
         if self.stats_file:
             print(f"[*] Stats: {self.stats_file} every {self.stats_interval} iterations")
-        print(f"[*] Starting fuzzing...\n")
+        print("[*] Starting fuzzing...\n")
 
         i = 0
         try:
@@ -1275,8 +984,10 @@ class Fuzzer:
 
         self._dump_stats()
         self.print_stats()
-        print(f"\n\n[*] Fuzzing stopped. {self.crash_count} crashes found "
-              f"({len(self.crash_sigs)} unique signatures).")
+        print(
+            f"\n\n[*] Fuzzing stopped. {self.crash_count} crashes found "
+            f"({len(self.crash_sigs)} unique signatures)."
+        )
         if self.crash_sigs:
             print("[*] Crash signatures:")
             for sig, count in sorted(self.crash_sigs.items(), key=lambda x: -x[1]):
@@ -1284,101 +995,10 @@ class Fuzzer:
             print(f"\n[*] Crash files in: {self.crashes_dir}")
         if self.mc and self.mc_bandit:
             print("\n[*] Bandit convergence:")
-            for name, (succ, fail) in sorted(self.mc.bandit_stats().items(),
-                                              key=lambda x: -(x[1][0] / max(x[1][0] + x[1][1], 1))):
+            for name, (succ, fail) in sorted(
+                self.mc.bandit_stats().items(),
+                key=lambda x: -(x[1][0] / max(x[1][0] + x[1][1], 1)),
+            ):
                 total = succ + fail
                 pct = succ / total * 100 if total else 0
                 print(f"    {name:20s}: {succ:.0f}/{fail:.0f} ({pct:.0f}% success)")
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Coverage-guided binary fuzzer")
-    parser.add_argument("target", help="Path to target binary")
-    parser.add_argument("-d", "--corpus", default=None,
-                        help="Corpus directory (default: ~/fuzzing/<target>/corpus)")
-    parser.add_argument("-o", "--crashes", default=None,
-                        help="Crashes directory (default: ~/fuzzing/<target>/crashes)")
-    parser.add_argument("-m", "--max-len", type=int, default=4096, help="Max input length")
-    parser.add_argument("-t", "--timeout", type=float, default=5, help="Timeout in seconds")
-    parser.add_argument("-n", "--iterations", type=int, default=0, help="Number of iterations (0=infinite)")
-    parser.add_argument("-M", "--mutations", type=int, default=8, help="Mutations per input")
-    parser.add_argument("-c", "--coverage", action="store_true", help="Enable coverage-guided mode")
-    parser.add_argument("--deep-coverage", action="store_true",
-                        help="Enable capstone-based basic block discovery (requires -c)")
-    parser.add_argument("--max-bps", type=int, default=50000,
-                        help="Max breakpoints for deep coverage (default: 50000)")
-    parser.add_argument("-D", "--dict", help="Dictionary file (one token per line, NAME=value or raw bytes)")
-    parser.add_argument("-F", "--file-mode", action="store_true",
-                        help="Write input to temp file instead of stdin")
-    parser.add_argument("-A", "--target-args", nargs=argparse.REMAINDER,
-                        help="Target arguments (use {file} as placeholder for temp file)")
-    parser.add_argument("--markov", action="store_true",
-                        help="Enable Markov chain mutation (trained on corpus)")
-    parser.add_argument("--markov-gen", action="store_true",
-                        help="Enable Markov chain seed generation (15%% of seeds)")
-    parser.add_argument("--markov-order", type=int, default=1,
-                        help="Markov chain order (default: 1)")
-    parser.add_argument("--mc-bandit", action="store_true",
-                        help="Enable Thompson sampling for mutation operator selection")
-    parser.add_argument("--mc-cem", action="store_true",
-                        help="Enable cross-entropy method for byte distribution learning")
-    parser.add_argument("--mc-elite-frac", type=float, default=0.1,
-                        help="Fraction of elite set to fit CEM (default: 0.1)")
-    parser.add_argument("--mc-refit-int", type=int, default=1000,
-                        help="Refit CEM every N executions (default: 1000)")
-    parser.add_argument("--stats-file", default=None,
-                        help="Save stats to JSON file periodically")
-    parser.add_argument("--stats-interval", type=int, default=1000,
-                        help="Stats dump interval in iterations (default: 1000)")
-    args = parser.parse_args()
-
-    if not os.path.isfile(args.target):
-        print(f"[-] Target not found: {args.target}")
-        sys.exit(1)
-
-    if not os.access(args.target, os.X_OK):
-        print(f"[-] Target not executable: {args.target}")
-        sys.exit(1)
-
-    target_name = os.path.basename(os.path.abspath(args.target))
-    fuzz_dir = Path.home() / "fuzzing" / target_name
-    corpus_dir = args.corpus or str(fuzz_dir / "corpus")
-    crashes_dir = args.crashes or str(fuzz_dir / "crashes")
-
-    dictionary = []
-    if args.dict:
-        if not os.path.isfile(args.dict):
-            print(f"[-] Dictionary not found: {args.dict}")
-            sys.exit(1)
-        dictionary = load_dictionary(args.dict)
-        print(f"[*] Loaded {len(dictionary)} tokens from {args.dict}")
-
-    use_markov = args.markov or args.markov_gen
-
-    fuzzer = Fuzzer(
-        target=args.target,
-        corpus_dir=corpus_dir,
-        crashes_dir=crashes_dir,
-        max_len=args.max_len,
-        timeout=args.timeout,
-        mutations_per_input=args.mutations,
-        use_coverage=args.coverage,
-        deep_coverage=args.deep_coverage,
-        max_bps=args.max_bps,
-        dictionary=dictionary,
-        file_mode=args.file_mode,
-        target_args=args.target_args,
-        markov_order=args.markov_order if use_markov else 0,
-        markov_generate=args.markov_gen,
-        mc_bandit=args.mc_bandit,
-        mc_cem=args.mc_cem,
-        mc_elite_frac=args.mc_elite_frac,
-        mc_refit_interval=args.mc_refit_int,
-        stats_file=args.stats_file,
-        stats_interval=args.stats_interval,
-    )
-    fuzzer.run(iterations=args.iterations)
-
-
-if __name__ == "__main__":
-    main()
