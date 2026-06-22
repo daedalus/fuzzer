@@ -480,11 +480,10 @@ class Fuzzer:
         self.ptrace_cov: PtraceCoverage | None = None
         self.shm_cov: ShmCoverage | None = None
         if self.use_coverage:
-            afl_shm_id = os.environ.get("__AFL_SHM_ID")
-            if afl_shm_id:
+            try:
                 self.shm_cov = ShmCoverage()
-                print(f"[*] Coverage: AFL SHM bitmap, id={afl_shm_id}")
-            else:
+                print(f"[*] Coverage: AFL SHM bitmap, id={self.shm_cov.env_id}")
+            except OSError:
                 cov = PtraceCoverage(target, deep_coverage=deep_coverage, max_bps=max_bps)
                 if cov.bb_addrs:
                     self.ptrace_cov = cov
@@ -853,12 +852,12 @@ class Fuzzer:
                 a = random.choice(self.corpus)
                 b = random.choice(self.corpus)
                 if a is not data and b is not data:
-                    buf = bytearray(splice(a, b))
-                elif len(self.corpus) >= 2:
+                    buf = bytearray(splice(a, b)[: self.max_len])
+                else:
                     others = [c for c in self.corpus if c is not data]
                     if others:
                         other = random.choice(others)
-                        buf = bytearray(splice(data, other))
+                        buf = bytearray(splice(bytes(buf), other)[: self.max_len])
 
             elif op == "havoc":
                 return bytes(self._havoc_mutate(buf))

@@ -94,7 +94,6 @@ class TestSplice:
         found_valid = False
         for _ in range(200):
             result = splice(a, b)
-            assert result[:1] in (a[:1], b[:1]) or True
             if result.startswith(b"A") and result.endswith(b"B"):
                 found_valid = True
                 break

@@ -35,6 +35,9 @@ class ShmCoverage:
     and compare the bitmap for new coverage detection.  Pass the
     ``env_id`` as ``__AFL_SHM_ID`` in the target environment so the
     instrumented binary writes edge counts directly into the region.
+
+    The instrumented binary updates the bitmap in-place via shared
+    memory — ``record_edge`` is a fallback for manual/test use only.
     """
 
     def __init__(self, size: int = SHM_MAP_SIZE):
@@ -56,15 +59,21 @@ class ShmCoverage:
         return bytes(self._map)
 
     def reset_edge_map(self):
+        """Zero the bitmap and snapshot for the next execution."""
         ctypes.memset(self._ptr, 0, self.size)
         self._snapshot = bytes(self._map)
 
     def reset(self):
+        """Full reset: zero bitmap, snapshot, and cumulative counters."""
         self.reset_edge_map()
         self.total_edges = 0
-        self._snapshot = bytes(self._map)
 
     def record_edge(self, edge_id: int) -> bool:
+        """Manually record an edge — fallback for manual/test use.
+
+        With AFL-instrumented binaries the instrumented code writes
+        directly into SHM, so this is not called in normal operation.
+        """
         idx = edge_id % self.size
         if self._map[idx] == 0:
             self._map[idx] = 1
