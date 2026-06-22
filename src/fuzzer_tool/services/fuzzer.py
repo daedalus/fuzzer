@@ -218,10 +218,12 @@ class PtraceCoverage:
                 if is_jump:
                     if insn.op_str.startswith("0x"):
                         target = int(insn.op_str, 16)
-                        if func_va <= target < func_va + func_size:
-                            if target not in self._discovered_bbs:
-                                self.bb_addrs.append(target)
-                                self._discovered_bbs.add(target)
+                        if (
+                            func_va <= target < func_va + func_size
+                            and target not in self._discovered_bbs
+                        ):
+                            self.bb_addrs.append(target)
+                            self._discovered_bbs.add(target)
                     next_addr = insn.address + insn.size
                     if next_addr not in self._discovered_bbs:
                         self.bb_addrs.append(next_addr)
@@ -238,10 +240,7 @@ class PtraceCoverage:
         if not self.deep_coverage or len(self.original_bytes) >= self.max_bps:
             return 0
 
-        if self._base_address is not None:
-            rel_addr = bp_addr - self._base_address
-        else:
-            rel_addr = bp_addr
+        rel_addr = bp_addr - self._base_address if self._base_address is not None else bp_addr
 
         func_start = None
         func_size = 0
@@ -631,9 +630,7 @@ class Fuzzer:
             return True
         if "Segmentation fault" in stderr:
             return True
-        if "Aborted" in stderr:
-            return True
-        return False
+        return "Aborted" in stderr
 
     def _is_crash(self, returncode: int, stderr: str) -> bool:
         self.last_report = None
@@ -649,7 +646,7 @@ class Fuzzer:
             return True
         if returncode < 0:
             return True
-        if any(
+        return any(
             sig in stderr
             for sig in [
                 "SIGSEGV",
@@ -659,9 +656,7 @@ class Fuzzer:
                 "Segmentation fault",
                 "Aborted",
             ]
-        ):
-            return True
-        return False
+        )
 
     def mutate(self, data: bytes) -> bytes:
         buf = bytearray(data)

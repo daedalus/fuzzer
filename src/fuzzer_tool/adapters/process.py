@@ -1,5 +1,6 @@
 """Target process execution adapter."""
 
+import contextlib
 import os
 import signal
 import subprocess
@@ -86,9 +87,7 @@ def run_target_file(
             proc.wait()
             return -1, "timeout"
         finally:
-            try:
+            with contextlib.suppress(OSError):
                 tmp_file.unlink()
-            except OSError:
-                pass
     except Exception as e:
         return -2, str(e)
