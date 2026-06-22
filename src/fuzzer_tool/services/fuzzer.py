@@ -461,6 +461,10 @@ class Fuzzer:
         mc_refit_interval=1000,
         stats_file=None,
         stats_interval=1000,
+        coverage_report=None,
+        grammar=None,
+        persistent=False,
+        seed=42,
     ):
         self.target = target
         self.corpus_dir = Path(corpus_dir)
@@ -472,6 +476,11 @@ class Fuzzer:
         self.dictionary = dictionary or []
         self.file_mode = file_mode
         self.target_args = target_args or []
+        self.coverage_report = Path(coverage_report) if coverage_report else None
+        self.grammar = grammar
+        self.persistent = persistent
+        self.seed = seed
+        random.seed(seed)
         self._tmp_dir = Path("/tmp") / f"fuzzer_{os.getpid()}"
         if self.file_mode:
             self._tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -548,6 +557,19 @@ class Fuzzer:
                 self.mc.init_arm(op)
             self.mc.init_arm("markov_bytes")
             self.mc.init_arm("cem_bytes")
+            if self.grammar:
+                self.mc.init_arm("grammar_mutate")
+
+        self._persistent_runner = None
+        if self.persistent:
+            from fuzzer_tool.adapters.persistent import PersistentRunner
+
+            self._persistent_runner = PersistentRunner(target=self.target, timeout=self.timeout)
+            if self._persistent_runner.start():
+                print("[*] Persistent mode: target started")
+            else:
+                print("[!] Persistent mode: failed to start target, falling back to fork")
+                self._persistent_runner = None
 
     def _load_corpus(self):
         self.corpus, self.seen_hashes = load_corpus(self.corpus_dir, self.bloom)
@@ -563,6 +585,9 @@ class Fuzzer:
             }
 
     def _run_target(self, data: bytes) -> tuple[int, str]:
+        if self._persistent_runner:
+            return self._persistent_runner.run_one(data)
+
         if self.ptrace_cov:
             return self._run_target_ptrace(data)
 
@@ -768,6 +793,8 @@ class Fuzzer:
             ops.append("markov_bytes")
         if self.mc and self.mc_cem and self.mc.cem_fitted:
             ops.append("cem_bytes")
+        if self.grammar:
+            ops.append("grammar_mutate")
 
         self._last_ops_used = []
 
@@ -858,6 +885,10 @@ class Fuzzer:
                     if others:
                         other = random.choice(others)
                         buf = bytearray(splice(bytes(buf), other)[: self.max_len])
+
+            elif op == "grammar_mutate" and self.grammar:
+                mutated = self.grammar.mutate(bytes(buf), max_len=self.max_len)
+                buf = bytearray(mutated[: self.max_len])
 
             elif op == "havoc":
                 return bytes(self._havoc_mutate(buf))
@@ -1028,6 +1059,40 @@ class Fuzzer:
         except OSError:
             log.debug("Failed to write stats to %s", self.stats_file, exc_info=True)
 
+    def _dump_coverage_report(self):
+        if not self.coverage_report:
+            return
+        edge_map = None
+        if self.shm_cov:
+            edge_map = self.shm_cov.edge_map
+        elif self.ptrace_cov:
+            edge_map = self.ptrace_cov.edge_map
+        if edge_map is None:
+            print("[!] No coverage data available for report")
+            return
+
+        hit_edges = []
+        cumulative = 0
+        for i, val in enumerate(edge_map):
+            if val:
+                hit_edges.append(i)
+                cumulative += 1
+
+        report = {
+            "map_size": len(edge_map),
+            "cumulative_edges": cumulative,
+            "hit_edges": hit_edges,
+            "coverage_pct": round(cumulative / len(edge_map) * 100, 4),
+            "exec_count": self.exec_count,
+            "corpus_size": len(self.corpus),
+        }
+        self.coverage_report.parent.mkdir(parents=True, exist_ok=True)
+        self.coverage_report.write_text(json.dumps(report, indent=2))
+        print(
+            f"\n[*] Coverage report: {self.coverage_report} "
+            f"({cumulative}/{len(edge_map)} edges, {report['coverage_pct']}%)"
+        )
+
     def print_stats(self):
         elapsed = time.time() - self.start_time
         eps = self.exec_count / elapsed if elapsed > 0 else 0
@@ -1080,6 +1145,11 @@ class Fuzzer:
         print(f"[*] Crashes: {self.crashes_dir}")
         print(f"[*] Max input length: {self.max_len}")
         print(f"[*] Timeout: {self.timeout}s")
+        print(f"[*] Seed: {self.seed}")
+        if self.grammar:
+            print(f"[*] Grammar: {len(self.grammar.rules)} rules")
+        if self.persistent:
+            print("[*] Persistent mode: enabled")
         if self.dictionary:
             print(f"[*] Dictionary: {len(self.dictionary)} tokens")
         if self.markov_trained:
@@ -1117,6 +1187,7 @@ class Fuzzer:
             pass
 
         self._dump_stats()
+        self._dump_coverage_report()
         self.print_stats()
         print(
             f"\n\n[*] Fuzzing stopped. {self.crash_count} crashes found "

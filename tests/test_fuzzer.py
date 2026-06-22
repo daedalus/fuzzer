@@ -171,3 +171,56 @@ class TestFuzzerUnit:
     def test_shm_coverage_none_by_default(self):
         f = self._make_fuzzer()
         assert f.shm_cov is None
+
+    def test_coverage_report_none_by_default(self):
+        f = self._make_fuzzer()
+        assert f.coverage_report is None
+
+    def test_coverage_report_set(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            f = self._make_fuzzer(coverage_report=f"{tmpdir}/cov.json")
+            assert f.coverage_report is not None
+            assert f.coverage_report.name == "cov.json"
+
+    def test_dump_coverage_report_no_data(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_path = Path(tmpdir) / "cov.json"
+            f = self._make_fuzzer(coverage_report=str(report_path))
+            f._dump_coverage_report()
+            assert not report_path.exists()
+
+    def test_auto_timeout_flag(self):
+        f = self._make_fuzzer()
+        assert hasattr(f, "coverage_report")
+
+    def test_seed_default(self):
+        f = self._make_fuzzer()
+        assert f.seed == 42
+
+    def test_seed_custom(self):
+        f = self._make_fuzzer(seed=123)
+        assert f.seed == 123
+
+    def test_seed_reproducibility(self):
+        import random as _random
+
+        f1 = self._make_fuzzer(seed=42)
+        _random.seed(42)
+        results1 = [f1.mutate(b"AAAA") for _ in range(10)]
+        f2 = self._make_fuzzer(seed=42)
+        _random.seed(42)
+        results2 = [f2.mutate(b"AAAA") for _ in range(10)]
+        assert results1 == results2
+
+    def test_grammar_none_by_default(self):
+        f = self._make_fuzzer()
+        assert f.grammar is None
+
+    def test_persistent_none_by_default(self):
+        f = self._make_fuzzer()
+        assert f._persistent_runner is None

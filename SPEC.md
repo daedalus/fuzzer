@@ -37,8 +37,15 @@ Coverage-guided binary fuzzer with ASAN/MSAN/TSAN/UBSAN detection, dictionary mu
 ### CLI
 
 ```
-fuzzer-tool <target> [options]
+fuzzer-tool <command> [options]
 ```
+
+Commands:
+- `fuzz` (default): Run coverage-guided fuzzing
+- `tmin`: Minimize a crash input to smallest reproducer
+- `minimize`: Minimize a corpus by removing redundant inputs
+
+#### fuzzer-tool fuzz
 
 Arguments:
 - `target` (required): Path to target binary
@@ -65,6 +72,45 @@ Options:
 - `--mc-refit-int N`: CEM refit interval (default: 1000)
 - `--stats-file FILE`: Save stats to JSON file periodically
 - `--stats-interval N`: Stats dump interval (default: 1000)
+- `--coverage-report FILE`: Dump edge coverage map to JSON on exit
+- `--auto-timeout`: Auto-tune timeout by probing target at startup
+- `-g, --grammar SPEC`: Grammar spec (built-in: json, http_request, elf) or path to .gram file
+- `-j, --jobs N`: Number of parallel fuzzing workers (default: 1)
+- `--sync-interval N`: Seconds between corpus sync in parallel mode (default: 30)
+- `--persistent`: Use persistent mode for AFL-loop targets (no fork per iteration)
+- `-s, --seed N`: RNG seed for reproducibility (default: 42)
+
+#### fuzzer-tool tmin
+
+Minimize a crash input to find the smallest reproducer using delta-debugging.
+
+Arguments:
+- `target` (required): Path to target binary
+- `crash_file` (required): Path to crashing input file
+
+Options:
+- `-t, --timeout SEC`: Timeout in seconds (default: 5)
+- `-F, --file-mode`: Write input to temp file instead of stdin
+- `-A, --target-args ...`: Target arguments ({file} placeholder)
+- `-c, --coverage`: Enable SHM coverage
+- `--max-stages N`: Max reduction stages (default: 128)
+- `-O, --output FILE`: Output file (default: stdout)
+
+#### fuzzer-tool minimize
+
+Minimize a corpus by removing inputs that don't contribute unique coverage.
+Uses greedy set cover over edge coverage maps.
+
+Arguments:
+- `target` (required): Path to target binary
+
+Options:
+- `-d, --corpus DIR`: Corpus directory (required)
+- `-t, --timeout SEC`: Timeout in seconds (default: 5)
+- `-F, --file-mode`: Write input to temp file instead of stdin
+- `-A, --target-args ...`: Target arguments ({file} placeholder)
+- `-c, --coverage`: Enable SHM coverage
+- `-o, --output DIR`: Output directory (default: overwrite in-place)
 
 ### Core Classes
 
@@ -97,6 +143,17 @@ Options:
 - `fuzz_one(data: bytes) -> bool`: Mutate, execute, check result
 - `mutate(data: bytes) -> bytes`: Apply mutation operators
 - `run(iterations=0)`: Main fuzzing loop
+
+#### `Grammar`
+- `parse(spec: str)`: Parse grammar specification
+- `parse_file(path: str)`: Parse grammar from file
+- `generate(rule=None, max_len=4096) -> bytes`: Generate input from grammar
+- `mutate(data: bytes, max_len=4096) -> bytes`: Grammar-aware mutation
+
+#### `PersistentRunner`
+- `start() -> bool`: Start target in persistent mode
+- `run_one(data: bytes) -> tuple[int, str]`: Send one input and get result
+- `stop()`: Stop target gracefully
 
 ### Module-level Functions
 

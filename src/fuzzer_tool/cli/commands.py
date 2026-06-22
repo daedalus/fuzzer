@@ -9,8 +9,8 @@ from fuzzer_tool.core.mutations import load_dictionary
 from fuzzer_tool.services.fuzzer import Fuzzer
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Coverage-guided binary fuzzer")
+def _add_common_args(parser):
+    """Add arguments shared by fuzz and subcommands."""
     parser.add_argument("target", help="Path to target binary")
     parser.add_argument(
         "-d",
@@ -24,119 +24,42 @@ def main() -> int:
         default=None,
         help="Crashes directory (default: ~/fuzzing/<target>/crashes)",
     )
-    parser.add_argument("-m", "--max-len", type=int, default=4096, help="Max input length")
     parser.add_argument("-t", "--timeout", type=float, default=5, help="Timeout in seconds")
     parser.add_argument(
-        "-n",
-        "--iterations",
-        type=int,
-        default=0,
-        help="Number of iterations (0=infinite)",
-    )
-    parser.add_argument(
-        "-M",
-        "--mutations",
-        type=int,
-        default=8,
-        help="Mutations per input",
-    )
-    parser.add_argument(
-        "-c",
-        "--coverage",
-        action="store_true",
-        help="Enable coverage-guided mode",
-    )
-    parser.add_argument(
-        "--deep-coverage",
-        action="store_true",
-        help="Enable capstone-based basic block discovery (requires -c)",
-    )
-    parser.add_argument(
-        "--max-bps",
-        type=int,
-        default=50000,
-        help="Max breakpoints for deep coverage (default: 50000)",
-    )
-    parser.add_argument(
-        "-D",
-        "--dict",
-        help="Dictionary file (one token per line, NAME=value or raw bytes)",
-    )
-    parser.add_argument(
-        "-F",
-        "--file-mode",
-        action="store_true",
-        help="Write input to temp file instead of stdin",
+        "-F", "--file-mode", action="store_true", help="Write input to temp file instead of stdin"
     )
     parser.add_argument(
         "-A",
         "--target-args",
         nargs=argparse.REMAINDER,
-        help="Target arguments (use {file} as placeholder for temp file)",
+        help="Target arguments ({file} placeholder)",
     )
-    parser.add_argument(
-        "--markov",
-        action="store_true",
-        help="Enable Markov chain mutation (trained on corpus)",
-    )
-    parser.add_argument(
-        "--markov-gen",
-        action="store_true",
-        help="Enable Markov chain seed generation (15%% of seeds)",
-    )
-    parser.add_argument(
-        "--markov-order",
-        type=int,
-        default=1,
-        help="Markov chain order (default: 1)",
-    )
-    parser.add_argument(
-        "--mc-bandit",
-        action="store_true",
-        help="Enable Thompson sampling for mutation operator selection",
-    )
-    parser.add_argument(
-        "--mc-cem",
-        action="store_true",
-        help="Enable cross-entropy method for byte distribution learning",
-    )
-    parser.add_argument(
-        "--mc-elite-frac",
-        type=float,
-        default=0.1,
-        help="Fraction of elite set to fit CEM (default: 0.1)",
-    )
-    parser.add_argument(
-        "--mc-refit-int",
-        type=int,
-        default=1000,
-        help="Refit CEM every N executions (default: 1000)",
-    )
-    parser.add_argument(
-        "--stats-file",
-        default=None,
-        help="Save stats to JSON file periodically",
-    )
-    parser.add_argument(
-        "--stats-interval",
-        type=int,
-        default=1000,
-        help="Stats dump interval in iterations (default: 1000)",
-    )
-    args = parser.parse_args()
+    parser.add_argument("-c", "--coverage", action="store_true", help="Enable coverage-guided mode")
 
-    if not os.path.isfile(args.target):
-        print(f"[-] Target not found: {args.target}")
-        sys.exit(1)
 
-    if not os.access(args.target, os.X_OK):
-        print(f"[-] Target not executable: {args.target}")
-        sys.exit(1)
-
-    target_name = os.path.basename(os.path.abspath(args.target))
+def _get_dirs(args, target):
+    """Resolve corpus/crashes directories."""
+    target_name = os.path.basename(os.path.abspath(target))
     fuzz_dir = Path.home() / "fuzzing" / target_name
     corpus_dir = args.corpus or str(fuzz_dir / "corpus")
     crashes_dir = args.crashes or str(fuzz_dir / "crashes")
+    return corpus_dir, crashes_dir
+
+
+def _validate_target(target):
+    """Check target binary exists and is executable."""
+    if not os.path.isfile(target):
+        print(f"[-] Target not found: {target}")
+        sys.exit(1)
+    if not os.access(target, os.X_OK):
+        print(f"[-] Target not executable: {target}")
+        sys.exit(1)
+
+
+def cmd_fuzz(args):
+    """Main fuzzing command."""
+    _validate_target(args.target)
+    corpus_dir, crashes_dir = _get_dirs(args, args.target)
 
     dictionary = []
     if args.dict:
@@ -148,12 +71,59 @@ def main() -> int:
 
     use_markov = args.markov or args.markov_gen
 
+    # Auto-tune timeout if requested
+    timeout = args.timeout
+    if args.auto_timeout:
+        timeout = _auto_tune_timeout(args.target, args.file_mode, args.target_args)
+        print(f"[*] Auto-tuned timeout: {timeout:.2f}s")
+
+    # Load grammar if specified
+    grammar = None
+    if args.grammar:
+        from fuzzer_tool.core.grammar import load_grammar
+
+        grammar = load_grammar(args.grammar)
+        print(f"[*] Grammar loaded: {len(grammar.rules)} rules")
+
+    # Parallel mode
+    if args.jobs and args.jobs > 1:
+        from fuzzer_tool.services.parallel import run_parallel
+
+        run_parallel(
+            target=args.target,
+            jobs=args.jobs,
+            corpus_dir=corpus_dir,
+            crashes_dir=crashes_dir,
+            max_len=args.max_len,
+            timeout=timeout,
+            mutations_per_input=args.mutations,
+            use_coverage=args.coverage,
+            deep_coverage=args.deep_coverage,
+            max_bps=args.max_bps,
+            dictionary=dictionary,
+            file_mode=args.file_mode,
+            target_args=args.target_args,
+            markov_order=args.markov_order if use_markov else 0,
+            markov_generate=args.markov_gen,
+            mc_bandit=args.mc_bandit,
+            mc_cem=args.mc_cem,
+            mc_elite_frac=args.mc_elite_frac,
+            mc_refit_interval=args.mc_refit_int,
+            stats_file=args.stats_file,
+            stats_interval=args.stats_interval,
+            coverage_report=args.coverage_report,
+            iterations=args.iterations,
+            sync_interval=args.sync_interval,
+            seed=args.seed,
+        )
+        return 0
+
     fuzzer = Fuzzer(
         target=args.target,
         corpus_dir=corpus_dir,
         crashes_dir=crashes_dir,
         max_len=args.max_len,
-        timeout=args.timeout,
+        timeout=timeout,
         mutations_per_input=args.mutations,
         use_coverage=args.coverage,
         deep_coverage=args.deep_coverage,
@@ -169,6 +139,252 @@ def main() -> int:
         mc_refit_interval=args.mc_refit_int,
         stats_file=args.stats_file,
         stats_interval=args.stats_interval,
+        coverage_report=args.coverage_report,
+        grammar=grammar,
+        persistent=args.persistent,
+        seed=args.seed,
     )
     fuzzer.run(iterations=args.iterations)
     return 0
+
+
+def _auto_tune_timeout(target, file_mode=False, target_args=None, runs=10):
+    """Run the target N times on empty input and set timeout to 5x median."""
+    import time as _time
+
+    from fuzzer_tool.adapters.process import run_target_file, run_target_stdin
+
+    tmp_dir = Path("/tmp") / f"tune_{os.getpid()}"
+    if file_mode:
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+
+    times = []
+    for _ in range(runs):
+        start = _time.monotonic()
+        if file_mode:
+            run_target_file(target, b"\n", 30, str(tmp_dir), target_args or [])
+        else:
+            run_target_stdin(target, b"\n", 30)
+        elapsed = _time.monotonic() - start
+        times.append(elapsed)
+
+    if tmp_dir.exists():
+        import shutil
+
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    times.sort()
+    median = times[len(times) // 2]
+    return max(5 * median, 0.5)
+
+
+def cmd_tmin(args):
+    """Crash minimizer subcommand."""
+    _validate_target(args.target)
+    from fuzzer_tool.services.tmin import tmin
+
+    minimized = tmin(
+        target=args.target,
+        crash_file=args.crash_file,
+        timeout=args.timeout,
+        file_mode=args.file_mode,
+        target_args=args.target_args,
+        use_coverage=args.coverage,
+        max_stages=args.max_stages,
+    )
+
+    if minimized is None:
+        return 1
+
+    if args.output:
+        Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.output).write_bytes(minimized)
+        print(f"[+] Saved to {args.output}")
+    else:
+        sys.stdout.buffer.write(minimized)
+    return 0
+
+
+def cmd_minimize(args):
+    """Corpus minimization subcommand."""
+    _validate_target(args.target)
+    from fuzzer_tool.services.minimize import minimize_corpus
+
+    kept, removed = minimize_corpus(
+        target=args.target,
+        corpus_dir=args.corpus,
+        timeout=args.timeout,
+        file_mode=args.file_mode,
+        target_args=args.target_args,
+        use_coverage=args.coverage,
+        output_dir=args.output,
+    )
+
+    if removed == 0:
+        print("[*] Corpus already minimal")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="fuzzer-tool",
+        description="Coverage-guided binary fuzzer with crash analysis tools",
+    )
+    subparsers = parser.add_subparsers(dest="command")
+
+    # --- fuzz (default) ---
+    fuzz_parser = subparsers.add_parser("fuzz", help="Run coverage-guided fuzzing")
+    fuzz_parser.add_argument("target", help="Path to target binary")
+    fuzz_parser.add_argument(
+        "-d", "--corpus", default=None, help="Corpus directory (default: ~/fuzzing/<target>/corpus)"
+    )
+    fuzz_parser.add_argument(
+        "-o",
+        "--crashes",
+        default=None,
+        help="Crashes directory (default: ~/fuzzing/<target>/crashes)",
+    )
+    fuzz_parser.add_argument("-m", "--max-len", type=int, default=4096, help="Max input length")
+    fuzz_parser.add_argument("-t", "--timeout", type=float, default=5, help="Timeout in seconds")
+    fuzz_parser.add_argument(
+        "-n", "--iterations", type=int, default=0, help="Number of iterations (0=infinite)"
+    )
+    fuzz_parser.add_argument("-M", "--mutations", type=int, default=8, help="Mutations per input")
+    fuzz_parser.add_argument(
+        "-c", "--coverage", action="store_true", help="Enable coverage-guided mode"
+    )
+    fuzz_parser.add_argument(
+        "--deep-coverage", action="store_true", help="Enable capstone-based basic block discovery"
+    )
+    fuzz_parser.add_argument(
+        "--max-bps", type=int, default=50000, help="Max breakpoints for deep coverage"
+    )
+    fuzz_parser.add_argument("-D", "--dict", help="Dictionary file")
+    fuzz_parser.add_argument(
+        "-F", "--file-mode", action="store_true", help="Write input to temp file instead of stdin"
+    )
+    fuzz_parser.add_argument(
+        "-A",
+        "--target-args",
+        nargs=argparse.REMAINDER,
+        help="Target arguments ({file} placeholder)",
+    )
+    fuzz_parser.add_argument("--markov", action="store_true", help="Enable Markov chain mutation")
+    fuzz_parser.add_argument(
+        "--markov-gen", action="store_true", help="Enable Markov chain seed generation"
+    )
+    fuzz_parser.add_argument(
+        "--markov-order", type=int, default=1, help="Markov chain order (default: 1)"
+    )
+    fuzz_parser.add_argument(
+        "--mc-bandit", action="store_true", help="Enable Thompson sampling bandit"
+    )
+    fuzz_parser.add_argument("--mc-cem", action="store_true", help="Enable cross-entropy method")
+    fuzz_parser.add_argument(
+        "--mc-elite-frac", type=float, default=0.1, help="CEM elite fraction (default: 0.1)"
+    )
+    fuzz_parser.add_argument(
+        "--mc-refit-int", type=int, default=1000, help="CEM refit interval (default: 1000)"
+    )
+    fuzz_parser.add_argument(
+        "--stats-file", default=None, help="Save stats to JSON file periodically"
+    )
+    fuzz_parser.add_argument(
+        "--stats-interval", type=int, default=1000, help="Stats dump interval (default: 1000)"
+    )
+    fuzz_parser.add_argument(
+        "--coverage-report",
+        default=None,
+        metavar="FILE",
+        help="Dump edge coverage map to JSON file on exit",
+    )
+    fuzz_parser.add_argument(
+        "--auto-timeout", action="store_true", help="Auto-tune timeout by probing target at startup"
+    )
+    fuzz_parser.add_argument(
+        "-g",
+        "--grammar",
+        default=None,
+        help="Grammar spec (built-in: json, http_request, elf) or path to .gram file",
+    )
+    fuzz_parser.add_argument(
+        "-j",
+        "--jobs",
+        type=int,
+        default=1,
+        help="Number of parallel fuzzing workers (default: 1)",
+    )
+    fuzz_parser.add_argument(
+        "--sync-interval",
+        type=int,
+        default=30,
+        help="Seconds between corpus sync in parallel mode (default: 30)",
+    )
+    fuzz_parser.add_argument(
+        "--persistent",
+        action="store_true",
+        help="Use persistent mode for AFL-loop targets (no fork per iteration)",
+    )
+    fuzz_parser.add_argument(
+        "-s",
+        "--seed",
+        type=int,
+        default=42,
+        help="RNG seed for reproducibility (default: 42)",
+    )
+    fuzz_parser.set_defaults(func=cmd_fuzz)
+
+    # --- tmin ---
+    tmin_parser = subparsers.add_parser("tmin", help="Minimize a crash to smallest reproducer")
+    tmin_parser.add_argument("target", help="Path to target binary")
+    tmin_parser.add_argument("crash_file", help="Path to crashing input file")
+    tmin_parser.add_argument("-t", "--timeout", type=float, default=5, help="Timeout in seconds")
+    tmin_parser.add_argument(
+        "-F", "--file-mode", action="store_true", help="Write input to temp file instead of stdin"
+    )
+    tmin_parser.add_argument(
+        "-A",
+        "--target-args",
+        nargs=argparse.REMAINDER,
+        help="Target arguments ({file} placeholder)",
+    )
+    tmin_parser.add_argument("-c", "--coverage", action="store_true", help="Enable SHM coverage")
+    tmin_parser.add_argument(
+        "--max-stages", type=int, default=128, help="Max reduction stages (default: 128)"
+    )
+    tmin_parser.add_argument(
+        "-O", "--output", default=None, help="Output file for minimized input (default: stdout)"
+    )
+    tmin_parser.set_defaults(func=cmd_tmin)
+
+    # --- minimize ---
+    min_parser = subparsers.add_parser(
+        "minimize", help="Minimize corpus by removing redundant inputs"
+    )
+    min_parser.add_argument("target", help="Path to target binary")
+    min_parser.add_argument("-d", "--corpus", required=True, help="Corpus directory")
+    min_parser.add_argument("-t", "--timeout", type=float, default=5, help="Timeout in seconds")
+    min_parser.add_argument(
+        "-F", "--file-mode", action="store_true", help="Write input to temp file instead of stdin"
+    )
+    min_parser.add_argument(
+        "-A",
+        "--target-args",
+        nargs=argparse.REMAINDER,
+        help="Target arguments ({file} placeholder)",
+    )
+    min_parser.add_argument("-c", "--coverage", action="store_true", help="Enable SHM coverage")
+    min_parser.add_argument(
+        "-o", "--output", default=None, help="Output directory (default: overwrite in-place)"
+    )
+    min_parser.set_defaults(func=cmd_minimize)
+
+    args = parser.parse_args()
+
+    # Default to fuzz if no subcommand given
+    if args.command is None:
+        # Re-parse with fuzz defaults for backwards compatibility
+        sys.argv.insert(1, "fuzz")
+        args = parser.parse_args()
+
+    return args.func(args)

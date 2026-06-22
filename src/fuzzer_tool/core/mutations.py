@@ -99,3 +99,59 @@ def load_dictionary(path: str) -> list[bytes]:
             if tok is not None:
                 d.append(tok)
     return d
+
+
+def minimize_bytes(data: bytes, interesting_fn, max_stages: int = 128) -> bytes:
+    """Delta-debugging style minimizer: binary-search for the smallest input
+    that still triggers the same behavior.
+
+    Args:
+        data: The original input to minimize.
+        interesting_fn: Callable(bytes) -> bool, returns True if input is still interesting.
+        max_stages: Maximum number of reduction stages before stopping.
+
+    Returns:
+        Minimized input that still triggers the same behavior.
+    """
+    if not data or not interesting_fn(data):
+        return data
+
+    best = bytearray(data)
+    stage = 0
+
+    while stage < max_stages and len(best) > 1:
+        improved = False
+
+        for chunk_size in _divisor_sizes(len(best)):
+            if chunk_size > len(best):
+                continue
+            offset = 0
+            while offset + chunk_size <= len(best):
+                candidate = best[:offset] + best[offset + chunk_size :]
+                if candidate and interesting_fn(bytes(candidate)):
+                    best = candidate
+                    improved = True
+                    break
+                offset += chunk_size
+            if improved:
+                break
+
+        if not improved:
+            break
+        stage += 1
+
+    return bytes(best)
+
+
+def _divisor_sizes(n: int) -> list[int]:
+    """Return reduction chunk sizes for delta-debugging, from large to small.
+
+    Uses halving then 1/4, 1/8, ..., then individual bytes.
+    """
+    sizes = set()
+    s = n // 2
+    while s >= 1:
+        sizes.add(s)
+        s //= 2
+    sizes.add(1)
+    return sorted(sizes, reverse=True)

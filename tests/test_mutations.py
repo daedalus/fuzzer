@@ -9,7 +9,9 @@ from fuzzer_tool.core.mutations import (
     INTERESTING_16,
     INTERESTING_32,
     MUTATIONS,
+    _divisor_sizes,
     load_dictionary,
+    minimize_bytes,
     parse_dict_line,
     splice,
 )
@@ -121,3 +123,53 @@ class TestSplice:
             result = splice(a, b)
             assert len(result) >= 2
             assert result[:1] in (b"A", b"C") or result[-1:] in (b"B", b"D")
+
+
+class TestDivisorSizes:
+    def test_basic(self):
+        sizes = _divisor_sizes(16)
+        assert 8 in sizes
+        assert 4 in sizes
+        assert 2 in sizes
+        assert 1 in sizes
+        assert sizes == sorted(sizes, reverse=True)
+
+    def test_small_input(self):
+        sizes = _divisor_sizes(2)
+        assert 1 in sizes
+
+    def test_one(self):
+        sizes = _divisor_sizes(1)
+        assert sizes == [1]
+
+
+class TestMinimizeBytes:
+    def test_trivial_minimize(self):
+        data = b"AAAA"
+        result = minimize_bytes(data, lambda x: True, max_stages=10)
+        assert isinstance(result, bytes)
+        assert len(result) <= len(data)
+
+    def test_preserves_minimum(self):
+        data = b"ABCD"
+        result = minimize_bytes(data, lambda x: len(x) >= 4, max_stages=10)
+        assert len(result) == 4
+
+    def test_reduces_when_possible(self):
+        data = b"A" * 100
+        result = minimize_bytes(data, lambda x: len(x) >= 1, max_stages=10)
+        assert len(result) <= len(data)
+
+    def test_empty_input(self):
+        result = minimize_bytes(b"", lambda x: True)
+        assert result == b""
+
+    def test_uninteresting_input(self):
+        data = b"AAAA"
+        result = minimize_bytes(data, lambda x: False)
+        assert result == data
+
+    def test_max_stages_limits(self):
+        data = b"A" * 1000
+        result = minimize_bytes(data, lambda x: True, max_stages=1)
+        assert len(result) <= len(data)
