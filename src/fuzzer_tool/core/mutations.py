@@ -1,5 +1,7 @@
 """Mutation operators and dictionary handling."""
 
+import re
+
 INTERESTING_8 = [0, 1, 0x7F, 0x80, 0xFF]
 INTERESTING_16 = [0x7FFF, 0x8000, 0xFFFF, 0, 1]
 INTERESTING_32 = [0x7FFFFFFF, 0x80000000, 0xFFFFFFFF, 0, 1]
@@ -23,8 +25,15 @@ DICT_MUTATIONS = [
 ]
 
 
+_HEX_ESCAPE_RE = re.compile(r"\\x([0-9a-fA-F]{2})")
+
+
 def parse_dict_line(line: str) -> bytes | None:
     """Parse a single dictionary line.
+
+    Handles ``NAME=value`` format and ``\\x??`` hex escapes (like AFL).
+    Literal backslash-x followed by exactly two hex digits is decoded;
+    everything else is encoded as raw UTF-8.
 
     Args:
         line: Raw line from dictionary file.
@@ -37,7 +46,14 @@ def parse_dict_line(line: str) -> bytes | None:
         return None
     parts = line.split("=", 1)
     token = parts[-1] if len(parts) == 2 else line
-    return token.encode("raw_unicode_escape").decode("unicode_escape").encode("latin-1")
+    result = bytearray()
+    last = 0
+    for m in _HEX_ESCAPE_RE.finditer(token):
+        result.extend(token[last : m.start()].encode("utf-8"))
+        result.append(int(m.group(1), 16))
+        last = m.end()
+    result.extend(token[last:].encode("utf-8"))
+    return bytes(result)
 
 
 def load_dictionary(path: str) -> list[bytes]:

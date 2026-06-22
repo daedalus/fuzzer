@@ -90,7 +90,6 @@ class MonteCarloScheduler:
 
     def maybe_refit(self) -> None:
         """Refit the CEM byte distribution if interval has been reached."""
-        self.execs_since_refit += 1
         if self.execs_since_refit < self.refit_interval:
             return
         self.execs_since_refit = 0

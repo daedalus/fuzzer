@@ -25,7 +25,7 @@ class BloomFilter:
         self.m = 1 << max(1, int(m_ideal).bit_length())
         self._mask = self.m - 1
         self._bits_per_slice = self.m.bit_length() - 1
-        self._k = max(1, 256 // self._bits_per_slice)
+        self._k = max(1, round(self.m / n * math.log(2)))
 
         self._byte_len = (self.m + 7) // 8
         self._bits = bytearray(self._byte_len)

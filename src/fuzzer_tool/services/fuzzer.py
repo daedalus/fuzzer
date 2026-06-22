@@ -1,12 +1,15 @@
 """Fuzzer orchestration: coordinates mutations, execution, and coverage."""
 
+import atexit
 import ctypes
 import json
+import logging
 import os
 import random
 import resource
 import signal
 import struct
+import threading
 import time
 from pathlib import Path
 
@@ -24,6 +27,8 @@ from fuzzer_tool.core.mutations import (
 )
 from fuzzer_tool.core.sanitizer import SanitizerReport
 
+log = logging.getLogger(__name__)
+
 try:
     from capstone import CS_ARCH_X86, CS_MODE_64, Cs
     from capstone.x86_const import X86_GRP_CALL, X86_GRP_INT, X86_GRP_JUMP, X86_GRP_RET
@@ -31,6 +36,27 @@ try:
     HAS_CAPSTONE = True
 except ImportError:
     HAS_CAPSTONE = False
+
+
+def _write_and_close(fd: int, data: bytes) -> None:
+    """Write *data* to *fd* then close it — designed to run in a thread."""
+    try:
+        os.write(fd, data)
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            log.debug("Failed to close fd %d (already closed?)", fd)
+
+
+def _cleanup_tmp_dir(path: Path) -> None:
+    """Remove temp directory on exit."""
+    import shutil
+
+    try:
+        shutil.rmtree(path, ignore_errors=True)
+    except Exception:
+        log.debug("Failed to clean up %s", path, exc_info=True)
 
 
 PTRACE_TRACEME = 0
@@ -91,6 +117,7 @@ class PtraceCoverage:
             with open(self.target_path, "rb") as f:
                 data = f.read()
         except Exception:
+            log.debug("Failed to read ELF from %s", self.target_path, exc_info=True)
             return
 
         if data[:4] != b"\x7fELF":
@@ -153,7 +180,8 @@ class PtraceCoverage:
         sym_size = struct.unpack_from("<Q", data, sym_sec + 32)[0]
         sym_entsize = struct.unpack_from("<Q", data, sym_sec + 56)[0]
         if sym_entsize == 0:
-            sym_entsize = 24
+            log.debug("sym_entsize == 0 in section, skipping malformed symbol table")
+            return
         sym_count = sym_size // sym_entsize if sym_entsize else 0
 
         for i in range(min(sym_count, 10000)):
@@ -173,6 +201,7 @@ class PtraceCoverage:
             with open(self.target_path, "rb") as f:
                 self._elf_data = f.read()
         except Exception:
+            log.debug("Failed to read ELF segments from %s", self.target_path, exc_info=True)
             return
 
         data = self._elf_data
@@ -239,7 +268,7 @@ class PtraceCoverage:
                         self.bb_addrs.append(next_addr)
                         self._discovered_bbs.add(next_addr)
         except Exception:
-            pass
+            log.debug("Failed to disassemble function at %#x", func_va, exc_info=True)
 
     def discover_new_bbs(self, pid: int, bp_addr: int, max_discover: int = 32):
         if not self.deep_coverage or len(self.original_bytes) >= self.max_bps:
@@ -303,9 +332,9 @@ class PtraceCoverage:
                             self.bb_addrs.append(target)
                             count += 1
                     except Exception:
-                        pass
+                        log.debug("Failed to install bp at %#x", target, exc_info=True)
         except Exception:
-            pass
+            log.debug("Failed to discover BBs from %#x", rel_addr, exc_info=True)
 
         return count
 
@@ -328,7 +357,7 @@ class PtraceCoverage:
                         self._base_address = int(addr_range[0], 16)
                         return
         except Exception:
-            pass
+            log.debug("Failed to resolve base address from /proc/%d/maps", pid, exc_info=True)
 
     def _resolve_addr(self, rel_addr: int) -> int:
         if self._is_pie and self._base_address is not None:
@@ -371,7 +400,7 @@ class PtraceCoverage:
                 new_val = (val & ~0xFF) | INT3
                 self._write_memory(pid, addr, new_val)
             except Exception:
-                pass
+                log.debug("Failed to install bp at %#x", addr, exc_info=True)
 
     def remove_breakpoints(self, pid: int):
         for addr, orig in self.original_bytes.items():
@@ -380,7 +409,7 @@ class PtraceCoverage:
                 new_val = (val & ~0xFF) | orig
                 self._write_memory(pid, addr, new_val)
             except Exception:
-                pass
+                log.debug("Failed to restore bp at %#x", addr, exc_info=True)
         self.original_bytes.clear()
 
     def reset_edge_map(self):
@@ -389,8 +418,11 @@ class PtraceCoverage:
         self._map_snapshot = bytes(self.edge_map)
 
     def record_edge(self, addr: int) -> bool:
-        bucket = (addr ^ self.prev_location) % self.map_size
-        self.prev_location = addr % self.map_size
+        # Use relative addresses for edge hashing (consistent with AFL).
+        # Absolute addresses cause spurious collisions under PIE/ASLR.
+        rel = addr - self._base_address if self._base_address else addr
+        bucket = (rel ^ self.prev_location) % self.map_size
+        self.prev_location = rel % self.map_size
         self.total_bp_hits += 1
         if self.edge_map[bucket] == 0:
             self.edge_map[bucket] = 1
@@ -440,6 +472,7 @@ class Fuzzer:
         self._tmp_dir = Path("/tmp") / f"fuzzer_{os.getpid()}"
         if self.file_mode:
             self._tmp_dir.mkdir(parents=True, exist_ok=True)
+            atexit.register(_cleanup_tmp_dir, self._tmp_dir)
 
         self.ptrace_cov: PtraceCoverage | None = None
         if self.use_coverage:
@@ -502,6 +535,8 @@ class Fuzzer:
                 self.mc.init_arm(op)
             for op in DICT_MUTATIONS:
                 self.mc.init_arm(op)
+            self.mc.init_arm("markov_bytes")
+            self.mc.init_arm("cem_bytes")
 
     def _load_corpus(self):
         self.corpus, self.seen_hashes = load_corpus(self.corpus_dir, self.bloom)
@@ -554,8 +589,11 @@ class Fuzzer:
             os._exit(127)
 
         os.close(stdin_r)
-        os.write(stdin_w, data)
-        os.close(stdin_w)
+        # Write data in a thread to avoid deadlock when data > PIPE_BUF (~64KB).
+        # The child may be stopped at exec's SIGTRAP before reading stdin, so a
+        # blocking write would stall the parent before it can call waitpid.
+        writer = threading.Thread(target=_write_and_close, args=(stdin_w, data))
+        writer.start()
 
         try:
             _, status = os.waitpid(pid, 0)
@@ -597,6 +635,7 @@ class Fuzzer:
                     if sig == signal.SIGTRAP:
                         regs_buf = (ctypes.c_char * (27 * 8))()
                         libc.ptrace(PTRACE_GETREGS, pid, None, regs_buf)
+                        # RIP is at offset 128 in user_regs_struct (x86-64 Linux)
                         rip = struct.unpack_from("<Q", bytes(regs_buf), 128)[0]
                         bp_addr = rip - 1
 
@@ -647,7 +686,7 @@ class Fuzzer:
                 os.kill(pid, signal.SIGKILL)
                 os.waitpid(pid, 0)
             except Exception:
-                pass
+                log.debug("Failed to kill orphan pid %d", pid, exc_info=True)
             return -2, str(e)
 
     def _is_interesting(self, returncode: int, stderr: str) -> bool:
@@ -699,10 +738,6 @@ class Fuzzer:
             ops.append("markov_bytes")
         if self.mc and self.mc_cem and self.mc.cem_fitted:
             ops.append("cem_bytes")
-            self.mc.init_arm("cem_bytes")
-        if self.mc and self.mc_bandit:
-            for op in ops:
-                self.mc.init_arm(op)
 
         self._last_ops_used = []
 
@@ -843,6 +878,8 @@ class Fuzzer:
         mutated = self.mutate(data)
         returncode, stderr = self._run_target(mutated)
         self.exec_count += 1
+        if self.mc:
+            self.mc.execs_since_refit += 1
 
         if self.exec_count % 100 == 0:
             rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
@@ -918,7 +955,7 @@ class Fuzzer:
             self.stats_file.parent.mkdir(parents=True, exist_ok=True)
             self.stats_file.write_text(json.dumps(stats, indent=2))
         except OSError:
-            pass
+            log.debug("Failed to write stats to %s", self.stats_file, exc_info=True)
 
     def print_stats(self):
         elapsed = time.time() - self.start_time

@@ -62,8 +62,9 @@ class TestMonteCarloScheduler:
         mc = MonteCarloScheduler(refit_interval=3)
         for i in range(50):
             mc.add_elite(bytes([i % 256] * 4), score=i)
-        for _ in range(3):
-            mc.maybe_refit()
+        # Simulate fuzz_one incrementing execs_since_refit
+        mc.execs_since_refit = 3
+        mc.maybe_refit()
         assert mc.cem_fitted
 
     def test_cem_byte_range(self):
