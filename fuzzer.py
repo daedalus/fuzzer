@@ -97,6 +97,95 @@ class MarkovChain:
         return self._contexts_seen > 0
 
 
+class MonteCarloScheduler:
+    """Thompson sampling bandit for mutation ops + CEM byte distribution."""
+
+    ELITE_MAX = 200
+
+    def __init__(self, elite_frac=0.1, refit_interval=1000):
+        self.arm_alpha: dict[str, float] = {}
+        self.arm_beta: dict[str, float] = {}
+        self.elite_frac = elite_frac
+        self.refit_interval = refit_interval
+        self.execs_since_refit = 0
+        self.elite_set: list[tuple[int, bytes]] = []
+        self.byte_freq: dict[int, dict[int, int]] = {}
+        self.cem_fitted = False
+
+    def init_arm(self, name: str):
+        if name not in self.arm_alpha:
+            self.arm_alpha[name] = 1.0
+            self.arm_beta[name] = 1.0
+
+    def select_op(self, ops: list[str]) -> str:
+        best_op = ops[0]
+        best_val = -1.0
+        for op in ops:
+            a = self.arm_alpha.get(op, 1.0)
+            b = self.arm_beta.get(op, 1.0)
+            val = random.betavariate(a, b)
+            if val > best_val:
+                best_val = val
+                best_op = op
+        return best_op
+
+    def record(self, name: str, success: bool):
+        if success:
+            self.arm_alpha[name] = self.arm_alpha.get(name, 1.0) + 1
+        else:
+            self.arm_beta[name] = self.arm_beta.get(name, 1.0) + 1
+
+    def add_elite(self, data: bytes, score: int):
+        self.elite_set.append((score, data))
+        if len(self.elite_set) > self.ELITE_MAX:
+            self.elite_set.sort(key=lambda x: x[0])
+            self.elite_set.pop(0)
+
+    def maybe_refit(self):
+        self.execs_since_refit += 1
+        if self.execs_since_refit < self.refit_interval:
+            return
+        self.execs_since_refit = 0
+        if not self.elite_set:
+            return
+        n_elite = max(1, int(len(self.elite_set) * self.elite_frac))
+        sorted_elite = sorted(self.elite_set, key=lambda x: x[0], reverse=True)
+        elite = [d for _, d in sorted_elite[:n_elite]]
+        self.byte_freq = {}
+        for pos in range(max(len(d) for d in elite)):
+            freq: dict[int, int] = {}
+            for data in elite:
+                if pos < len(data):
+                    b = data[pos]
+                    freq[b] = freq.get(b, 0) + 1
+            self.byte_freq[pos] = freq
+        self.cem_fitted = True
+
+    def cem_byte(self, pos: int) -> int:
+        freq = self.byte_freq.get(pos)
+        if not freq:
+            return random.randint(0, 255)
+        total = sum(freq.values()) + 256
+        r = random.random() * total
+        cumulative = 0
+        for byte_val, count in freq.items():
+            cumulative += count + 1
+            if r <= cumulative:
+                return byte_val
+        return random.randint(0, 255)
+
+    def cem_sample(self, length: int) -> bytes:
+        return bytes(self.cem_byte(i) for i in range(length))
+
+    def bandit_stats(self) -> dict[str, tuple[float, float]]:
+        result = {}
+        for name in sorted(self.arm_alpha):
+            a = self.arm_alpha[name]
+            b = self.arm_beta[name]
+            result[name] = (a - 1, b - 1)
+        return result
+
+
 # Sanitizer error patterns
 SANITIZER_PATTERNS = [
     (r"AddressSanitizer:\s*(heap-buffer-overflow|stack-buffer-overflow|heap-use-after-free"
@@ -170,7 +259,9 @@ class Fuzzer:
     def __init__(self, target, corpus_dir, crashes_dir, max_len=4096,
                  timeout=5, mutations_per_input=8, use_coverage=False,
                  dictionary=None, file_mode=False, target_args=None,
-                 markov_order=1, markov_generate=False):
+                 markov_order=1, markov_generate=False,
+                 mc_bandit=False, mc_cem=False,
+                 mc_elite_frac=0.1, mc_refit_interval=1000):
         self.target = target
         self.corpus_dir = Path(corpus_dir)
         self.crashes_dir = Path(crashes_dir)
@@ -205,6 +296,20 @@ class Fuzzer:
         if self.corpus:
             self.markov.train_corpus(self.corpus)
             self.markov_trained = self.markov.is_trained()
+
+        self.mc_bandit = mc_bandit
+        self.mc_cem = mc_cem
+        self.mc = MonteCarloScheduler(
+            elite_frac=mc_elite_frac,
+            refit_interval=mc_refit_interval,
+        ) if (mc_bandit or mc_cem) else None
+        self._last_ops_used: list[str] = []
+
+        if self.mc and self.mc_bandit:
+            for op in MUTATIONS:
+                self.mc.init_arm(op)
+            for op in DICT_MUTATIONS:
+                self.mc.init_arm(op)
 
     def _hash(self, data: bytes) -> str:
         return hashlib.sha256(data).hexdigest()[:16]
@@ -315,9 +420,18 @@ class Fuzzer:
             ops.extend(DICT_MUTATIONS)
         if self.markov_trained:
             ops.append("markov_bytes")
+        if self.mc and self.mc_cem and self.mc.cem_fitted:
+            ops.append("cem_bytes")
+            self.mc.init_arm("cem_bytes")
+        if self.mc and self.mc_bandit:
+            for op in ops:
+                self.mc.init_arm(op)
+
+        self._last_ops_used = []
 
         for _ in range(self.mutations_per_input):
-            op = random.choice(ops)
+            op = self.mc.select_op(ops) if self.mc and self.mc_bandit else random.choice(ops)
+            self._last_ops_used.append(op)
 
             if op == "bit_flip" and buf:
                 byte_idx = random.randint(0, len(buf) - 1)
@@ -381,6 +495,14 @@ class Fuzzer:
                 idx = random.randint(0, len(buf) - 1)
                 ctx = bytes(buf[max(0, idx - self.markov.order):idx]) if self.markov.order else b""
                 buf[idx] = self.markov.sample_byte(ctx)
+
+            elif op == "cem_bytes" and self.mc and self.mc.cem_fitted:
+                if buf:
+                    idx = random.randint(0, len(buf) - 1)
+                    buf[idx] = self.mc.cem_byte(idx)
+                else:
+                    length = random.randint(1, min(32, self.max_len))
+                    buf = bytearray(self.mc.cem_sample(length))
 
             elif op == "havoc":
                 return bytes(self._havoc_mutate(buf))
@@ -471,13 +593,30 @@ class Fuzzer:
         returncode, stderr = self._run_target(mutated)
         self.exec_count += 1
 
-        if self._is_crash(returncode, stderr):
+        is_crash = self._is_crash(returncode, stderr)
+        is_interesting = self._is_interesting(returncode, stderr)
+        success = is_crash or is_interesting
+
+        if self.mc and self.mc_bandit:
+            seen = set()
+            for op in self._last_ops_used:
+                if op not in seen:
+                    self.mc.record(op, success)
+                    seen.add(op)
+
+        if is_crash:
             self.crash_count += 1
             self.save_crash(mutated, returncode, stderr)
+            if self.mc and self.mc_cem:
+                self.mc.add_elite(mutated, 3)
+                self.mc.maybe_refit()
             return True
 
-        if self._is_interesting(returncode, stderr):
+        if is_interesting:
             self.save_to_corpus(mutated)
+            if self.mc and self.mc_cem:
+                self.mc.add_elite(mutated, 2)
+                self.mc.maybe_refit()
             return True
 
         return False
@@ -489,10 +628,19 @@ class Fuzzer:
         markov_str = " | markov: trained" if self.markov_trained else ""
         if self.markov_generate:
             markov_str += "+gen"
+        mc_str = ""
+        if self.mc:
+            parts = []
+            if self.mc_bandit:
+                parts.append("bandit")
+            if self.mc_cem:
+                parts.append(f"cem:{len(self.mc.elite_set)}")
+            if parts:
+                mc_str = " | mc: " + "+".join(parts)
         sig_str = f" | sigs: {len(self.crash_sigs)}" if self.crash_sigs else ""
         print(f"\r[*] execs: {self.exec_count} | corpus: {len(self.corpus)} | "
               f"crashes: {self.crash_count}{sig_str} | eps: {eps:.0f} | "
-              f"time: {elapsed:.0f}s{dict_str}{markov_str}", end="", flush=True)
+              f"time: {elapsed:.0f}s{dict_str}{markov_str}{mc_str}", end="", flush=True)
 
     def run(self, iterations=0):
         print(f"[*] Target: {self.target}")
@@ -507,6 +655,12 @@ class Fuzzer:
                   f"transitions={len(self.markov.transitions)}")
         if self.markov_generate:
             print(f"[*] Markov generation: enabled (15% of seeds)")
+        if self.mc:
+            if self.mc_bandit:
+                print(f"[*] MC bandit: Thompson sampling over {len(self.mc.arm_alpha)} arms")
+            if self.mc_cem:
+                print(f"[*] MC CEM: elite_frac={self.mc.elite_frac}, "
+                      f"refit_interval={self.mc.refit_interval}")
         print(f"[*] Starting fuzzing...\n")
 
         i = 0
@@ -553,6 +707,14 @@ def main():
                         help="Enable Markov chain seed generation (15%% of seeds)")
     parser.add_argument("--markov-order", type=int, default=1,
                         help="Markov chain order (default: 1)")
+    parser.add_argument("--mc-bandit", action="store_true",
+                        help="Enable Thompson sampling for mutation operator selection")
+    parser.add_argument("--mc-cem", action="store_true",
+                        help="Enable cross-entropy method for byte distribution learning")
+    parser.add_argument("--mc-elite-frac", type=float, default=0.1,
+                        help="Fraction of elite set to fit CEM (default: 0.1)")
+    parser.add_argument("--mc-refit-int", type=int, default=1000,
+                        help="Refit CEM every N executions (default: 1000)")
     args = parser.parse_args()
 
     if not os.path.isfile(args.target):
@@ -586,6 +748,10 @@ def main():
         target_args=args.target_args,
         markov_order=args.markov_order if use_markov else 0,
         markov_generate=args.markov_gen,
+        mc_bandit=args.mc_bandit,
+        mc_cem=args.mc_cem,
+        mc_elite_frac=args.mc_elite_frac,
+        mc_refit_interval=args.mc_refit_int,
     )
     fuzzer.run(iterations=args.iterations)
 
