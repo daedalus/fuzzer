@@ -157,9 +157,17 @@ class TestFuzzerUnit:
         assert counts[b"BBBB"] > counts[b"AAAA"]
 
     def test_save_to_corpus_adds_metadata(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            f = self._make_fuzzer(corpus_dir=f"{tmpdir}/corpus", crashes_dir=f"{tmpdir}/crashes")
+            initial_count = len(f.seed_meta)
+            f.save_to_corpus(b"test_data_5678")
+            assert len(f.seed_meta) == initial_count + 1
+            meta = f.seed_meta[b"test_data_5678"]
+            assert meta["fuzz_count"] == 0
+            assert meta["coverage_edges"] == 0
+
+    def test_shm_coverage_none_by_default(self):
         f = self._make_fuzzer()
-        f.save_to_corpus(b"test_data_5678")
-        assert len(f.seed_meta) == 1
-        meta = list(f.seed_meta.values())[0]
-        assert meta["fuzz_count"] == 0
-        assert meta["coverage_edges"] == 0
+        assert f.shm_cov is None

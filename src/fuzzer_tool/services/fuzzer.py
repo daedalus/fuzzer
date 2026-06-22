@@ -16,6 +16,7 @@ from pathlib import Path
 
 from fuzzer_tool.adapters.filesystem import load_corpus, save_crash, save_to_corpus
 from fuzzer_tool.adapters.process import SIGNAL_CRASH_CODES, run_target_file, run_target_stdin
+from fuzzer_tool.adapters.shm import ShmCoverage
 from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.markov import MarkovChain
 from fuzzer_tool.core.montecarlo import MonteCarloScheduler
@@ -477,20 +478,28 @@ class Fuzzer:
             atexit.register(_cleanup_tmp_dir, self._tmp_dir)
 
         self.ptrace_cov: PtraceCoverage | None = None
+        self.shm_cov: ShmCoverage | None = None
         if self.use_coverage:
-            cov = PtraceCoverage(target, deep_coverage=deep_coverage, max_bps=max_bps)
-            if cov.bb_addrs:
-                self.ptrace_cov = cov
-                mode = "deep (capstone)" if cov.deep_coverage else "function-entry"
-                print(f"[*] Coverage: {len(cov.bb_addrs)} breakpoints ({mode}), map={cov.map_size}")
+            afl_shm_id = os.environ.get("__AFL_SHM_ID")
+            if afl_shm_id:
+                self.shm_cov = ShmCoverage()
+                print(f"[*] Coverage: AFL SHM bitmap, id={afl_shm_id}")
             else:
-                print(
-                    "[!] Coverage: no symbols found in ELF, "
-                    "coverage disabled (use -g to compile with symbols)"
-                )
-                print(
-                    "[!] For closed-source binaries, use AFL++ QEMU mode: afl-qemu-trace ./target"
-                )
+                cov = PtraceCoverage(target, deep_coverage=deep_coverage, max_bps=max_bps)
+                if cov.bb_addrs:
+                    self.ptrace_cov = cov
+                    mode = "deep (capstone)" if cov.deep_coverage else "function-entry"
+                    print(
+                        f"[*] Coverage: {len(cov.bb_addrs)} breakpoints ({mode}), map={cov.map_size}"
+                    )
+                else:
+                    print(
+                        "[!] Coverage: no symbols found in ELF, "
+                        "coverage disabled (use -g to compile with symbols)"
+                    )
+                    print(
+                        "[!] For closed-source binaries, use AFL++ QEMU mode: afl-qemu-trace ./target"
+                    )
 
         self.corpus_dir.mkdir(parents=True, exist_ok=True)
         self.crashes_dir.mkdir(parents=True, exist_ok=True)
@@ -558,9 +567,14 @@ class Fuzzer:
         if self.ptrace_cov:
             return self._run_target_ptrace(data)
 
+        if self.shm_cov:
+            self.shm_cov.reset_edge_map()
+
         env = os.environ.copy()
         if self.use_coverage:
             env["AFL_MAP_SIZE"] = "65536"
+        if self.shm_cov:
+            env["__AFL_SHM_ID"] = self.shm_cov.env_id
 
         if self.file_mode:
             return run_target_file(
@@ -891,6 +905,11 @@ class Fuzzer:
     def save_to_corpus(self, data: bytes):
         if save_to_corpus(data, self.corpus_dir, self.seen_hashes, self.bloom):
             self.corpus.append(data)
+            self.seed_meta[data] = {
+                "fuzz_count": 0,
+                "coverage_edges": 0,
+                "added_at": time.time(),
+            }
             self.markov.train(data)
             self.markov_trained = self.markov.is_trained()
 
@@ -898,11 +917,32 @@ class Fuzzer:
         if self.markov_generate and self.markov_trained and random.random() < 0.15:
             length = random.randint(1, self.max_len)
             return self.markov.generate(length)
+        if self.corpus and self.seed_meta:
+            return self._weighted_pick_seed()
         if self.corpus:
             return random.choice(self.corpus)
         return b"AAAAAAAA"
 
+    def _weighted_pick_seed(self) -> bytes:
+        now = time.time()
+        weights = []
+        for seed in self.corpus:
+            meta = self.seed_meta.get(seed)
+            if meta is None:
+                weights.append(1.0)
+                continue
+            fuzz_count = max(meta["fuzz_count"], 1)
+            coverage = meta["coverage_edges"]
+            age = now - meta["added_at"]
+            w = (1.0 / math.sqrt(fuzz_count)) * (1.0 + coverage * 0.5) / (1.0 + age * 0.01)
+            weights.append(max(w, 1e-6))
+        return random.choices(self.corpus, weights=weights, k=1)[0]
+
     def fuzz_one(self, data: bytes) -> bool:
+        meta = self.seed_meta.get(data)
+        if meta is not None:
+            meta["fuzz_count"] += 1
+
         mutated = self.mutate(data)
         returncode, stderr = self._run_target(mutated)
         self.exec_count += 1
@@ -923,7 +963,9 @@ class Fuzzer:
 
         is_crash = self._is_crash(returncode, stderr)
         is_interesting = self._is_interesting(returncode, stderr)
-        has_new_coverage = self.ptrace_cov and self.ptrace_cov.is_new_coverage()
+        has_new_coverage = (self.ptrace_cov and self.ptrace_cov.is_new_coverage()) or (
+            self.shm_cov and self.shm_cov.is_new_coverage()
+        )
         success = is_crash or is_interesting or has_new_coverage
 
         if success:
@@ -946,6 +988,8 @@ class Fuzzer:
             return True
 
         if is_interesting or has_new_coverage:
+            if meta is not None and has_new_coverage:
+                meta["coverage_edges"] += 1
             self.save_to_corpus(mutated)
             if self.mc and self.mc_cem:
                 self.mc.add_elite(mutated, 2)
@@ -993,7 +1037,9 @@ class Fuzzer:
         if self.markov_generate:
             markov_str += "+gen"
         cov_str = ""
-        if self.ptrace_cov:
+        if self.shm_cov:
+            cov_str = f" | shm-edges: {self.shm_cov.cumulative_edges}"
+        elif self.ptrace_cov:
             cov_str = (
                 f" | edges: {self.ptrace_cov.cumulative_edges}"
                 f" hits: {self.ptrace_cov.total_bp_hits}"
