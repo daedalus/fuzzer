@@ -1,5 +1,6 @@
 """Mutation operators and dictionary handling."""
 
+import random
 import re
 
 INTERESTING_8 = [0, 1, 0x7F, 0x80, 0xFF]
@@ -16,8 +17,31 @@ MUTATIONS = [
     "block_insert",
     "block_delete",
     "block_duplicate",
+    "splice",
     "havoc",
 ]
+
+
+def splice(a: bytes, b: bytes) -> bytes:
+    """Cross two inputs at random offsets to produce a structural hybrid.
+
+    Takes the prefix of *a* up to a random cut point, then appends the
+    suffix of *b* from a random cut point.  Returns *a* unchanged when
+    either input is too short (< 2 bytes) to produce a meaningful splice.
+
+    Args:
+        a: First input.
+        b: Second input.
+
+    Returns:
+        Spliced bytes combining prefix of *a* with suffix of *b*.
+    """
+    if len(a) < 2 or len(b) < 2:
+        return a
+    cut_a = random.randint(1, len(a) - 1)
+    cut_b = random.randint(1, len(b) - 1)
+    return a[:cut_a] + b[cut_b:]
+
 
 DICT_MUTATIONS = [
     "dict_insert",

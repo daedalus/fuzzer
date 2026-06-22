@@ -11,6 +11,7 @@ from fuzzer_tool.core.mutations import (
     MUTATIONS,
     load_dictionary,
     parse_dict_line,
+    splice,
 )
 
 
@@ -33,7 +34,8 @@ class TestConstants:
     def test_mutations_list(self):
         assert "bit_flip" in MUTATIONS
         assert "havoc" in MUTATIONS
-        assert len(MUTATIONS) == 10
+        assert "splice" in MUTATIONS
+        assert len(MUTATIONS) == 11
 
     def test_dict_mutations_list(self):
         assert "dict_insert" in DICT_MUTATIONS
@@ -76,3 +78,47 @@ class TestLoadDictionary:
 
         with pytest.raises(FileNotFoundError):
             load_dictionary("/nonexistent/path.txt")
+
+
+class TestSplice:
+    def test_basic_splice(self):
+        a = b"AAAA"
+        b = b"BBBB"
+        result = splice(a, b)
+        assert isinstance(result, bytes)
+        assert len(result) >= 2
+
+    def test_result_prefix_from_a_suffix_from_b(self):
+        a = b"AAAA"
+        b = b"BBBB"
+        found_valid = False
+        for _ in range(200):
+            result = splice(a, b)
+            assert result[:1] in (a[:1], b[:1]) or True
+            if result.startswith(b"A") and result.endswith(b"B"):
+                found_valid = True
+                break
+        assert found_valid
+
+    def test_short_a_returns_a(self):
+        assert splice(b"A", b"BBBB") == b"A"
+        assert splice(b"", b"BBBB") == b""
+
+    def test_short_b_returns_a(self):
+        assert splice(b"AAAA", b"B") == b"AAAA"
+
+    def test_both_short_returns_a(self):
+        assert splice(b"A", b"B") == b"A"
+
+    def test_both_two_bytes(self):
+        result = splice(b"AB", b"CD")
+        assert isinstance(result, bytes)
+        assert 2 <= len(result) <= 2
+
+    def test_result_is_combination(self):
+        a = b"AABB"
+        b = b"CCDD"
+        for _ in range(200):
+            result = splice(a, b)
+            assert len(result) >= 2
+            assert result[:1] in (b"A", b"C") or result[-1:] in (b"B", b"D")

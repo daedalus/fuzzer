@@ -20,9 +20,7 @@ def hash_data(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()[:16]
 
 
-def load_corpus(
-    corpus_dir: Path, bloom: BloomFilter | None = None
-) -> tuple[list[bytes], set[str]]:
+def load_corpus(corpus_dir: Path, bloom: BloomFilter | None = None) -> tuple[list[bytes], set[str]]:
     """Load existing corpus from directory.
 
     Args:

@@ -91,3 +91,75 @@ class TestFuzzerUnit:
         f.corpus = []
         seed = f._pick_seed()
         assert seed == b"AAAAAAAA"
+
+    def test_mutate_includes_splice(self):
+        f = self._make_fuzzer(mutations_per_input=64)
+        f.corpus = [b"AAAA", b"BBBB"]
+        results = {f.mutate(b"AAAA") for _ in range(200)}
+        assert any(len(r) >= 2 for r in results)
+
+    def test_splice_mutation_operator(self):
+        f = self._make_fuzzer(mutations_per_input=64)
+        f.corpus = [b"AAAA", b"BBBB"]
+        splice_count = 0
+        for _ in range(200):
+            result = f.mutate(b"AAAA")
+            assert isinstance(result, bytes)
+            if len(result) != 4:
+                splice_count += 1
+        assert splice_count > 0
+
+    def test_seed_metadata_initialized(self):
+        f = self._make_fuzzer()
+        f.corpus = [b"AAAA", b"BBBB"]
+        f._init_seed_metadata()
+        assert len(f.seed_meta) == 2
+        for meta in f.seed_meta.values():
+            assert meta["fuzz_count"] == 0
+            assert meta["coverage_edges"] == 0
+
+    def test_pick_seed_weights_less_fuzzed(self):
+        f = self._make_fuzzer()
+        f.corpus = [b"AAAA", b"BBBB"]
+        f._init_seed_metadata()
+        f.seed_meta[b"AAAA"]["fuzz_count"] = 100
+        f.seed_meta[b"BBBB"]["fuzz_count"] = 0
+        counts = {b"AAAA": 0, b"BBBB": 0}
+        for _ in range(200):
+            seed = f._pick_seed()
+            counts[seed] = counts.get(seed, 0) + 1
+        assert counts[b"BBBB"] > counts[b"AAAA"]
+
+    def test_pick_seed_weights_coverage(self):
+        f = self._make_fuzzer()
+        f.corpus = [b"AAAA", b"BBBB"]
+        f._init_seed_metadata()
+        f.seed_meta[b"AAAA"]["coverage_edges"] = 50
+        f.seed_meta[b"BBBB"]["coverage_edges"] = 0
+        counts = {b"AAAA": 0, b"BBBB": 0}
+        for _ in range(200):
+            seed = f._pick_seed()
+            counts[seed] = counts.get(seed, 0) + 1
+        assert counts[b"AAAA"] > counts[b"BBBB"]
+
+    def test_pick_seed_weights_recency(self):
+        import time
+
+        f = self._make_fuzzer()
+        f.corpus = [b"AAAA", b"BBBB"]
+        f._init_seed_metadata()
+        f.seed_meta[b"AAAA"]["added_at"] = time.time() - 1000
+        f.seed_meta[b"BBBB"]["added_at"] = time.time()
+        counts = {b"AAAA": 0, b"BBBB": 0}
+        for _ in range(200):
+            seed = f._pick_seed()
+            counts[seed] = counts.get(seed, 0) + 1
+        assert counts[b"BBBB"] > counts[b"AAAA"]
+
+    def test_save_to_corpus_adds_metadata(self):
+        f = self._make_fuzzer()
+        f.save_to_corpus(b"test_data_5678")
+        assert len(f.seed_meta) == 1
+        meta = list(f.seed_meta.values())[0]
+        assert meta["fuzz_count"] == 0
+        assert meta["coverage_edges"] == 0

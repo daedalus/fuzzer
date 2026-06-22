@@ -4,6 +4,7 @@ import atexit
 import ctypes
 import json
 import logging
+import math
 import os
 import random
 import resource
@@ -24,6 +25,7 @@ from fuzzer_tool.core.mutations import (
     INTERESTING_16,
     INTERESTING_32,
     MUTATIONS,
+    splice,
 )
 from fuzzer_tool.core.sanitizer import SanitizerReport
 
@@ -129,7 +131,7 @@ class PtraceCoverage:
             return
 
         e_type = struct.unpack_from("<H", data, 16)[0]
-        self._is_pie = (e_type == 3)  # ET_DYN = PIE, ET_EXEC = non-PIE
+        self._is_pie = e_type == 3  # ET_DYN = PIE, ET_EXEC = non-PIE
 
         e_shoff = struct.unpack_from("<Q", data, 40)[0]
         e_shnum = struct.unpack_from("<H", data, 60)[0]
@@ -514,6 +516,7 @@ class Fuzzer:
         self.markov_trained = False
 
         self._load_corpus()
+        self._init_seed_metadata()
         if self.corpus:
             self.markov.train_corpus(self.corpus)
             self.markov_trained = self.markov.is_trained()
@@ -540,6 +543,16 @@ class Fuzzer:
 
     def _load_corpus(self):
         self.corpus, self.seen_hashes = load_corpus(self.corpus_dir, self.bloom)
+
+    def _init_seed_metadata(self):
+        now = time.time()
+        self.seed_meta: dict[bytes, dict] = {}
+        for seed in self.corpus:
+            self.seed_meta[seed] = {
+                "fuzz_count": 0,
+                "coverage_edges": 0,
+                "added_at": now,
+            }
 
     def _run_target(self, data: bytes) -> tuple[int, str]:
         if self.ptrace_cov:
@@ -821,6 +834,17 @@ class Fuzzer:
                 else:
                     length = random.randint(1, min(32, self.max_len))
                     buf = bytearray(self.mc.cem_sample(length))
+
+            elif op == "splice" and len(self.corpus) >= 2:
+                a = random.choice(self.corpus)
+                b = random.choice(self.corpus)
+                if a is not data and b is not data:
+                    buf = bytearray(splice(a, b))
+                elif len(self.corpus) >= 2:
+                    others = [c for c in self.corpus if c is not data]
+                    if others:
+                        other = random.choice(others)
+                        buf = bytearray(splice(data, other))
 
             elif op == "havoc":
                 return bytes(self._havoc_mutate(buf))
