@@ -573,6 +573,7 @@ class Fuzzer:
         libc.ptrace.restype = ctypes.c_long
 
         stdin_r, stdin_w = os.pipe()
+        writer = None
         pid = os.fork()
         if pid == 0:
             os.setsid()
@@ -689,7 +690,8 @@ class Fuzzer:
                 log.debug("Failed to kill orphan pid %d", pid, exc_info=True)
             return -2, str(e)
         finally:
-            writer.join(timeout=self.timeout)
+            if writer is not None:
+                writer.join(timeout=self.timeout)
 
     def _is_interesting(self, returncode: int, stderr: str) -> bool:
         if returncode in SIGNAL_CRASH_CODES:
