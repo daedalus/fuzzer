@@ -688,6 +688,8 @@ class Fuzzer:
             except Exception:
                 log.debug("Failed to kill orphan pid %d", pid, exc_info=True)
             return -2, str(e)
+        finally:
+            writer.join(timeout=self.timeout)
 
     def _is_interesting(self, returncode: int, stderr: str) -> bool:
         if returncode in SIGNAL_CRASH_CODES:
