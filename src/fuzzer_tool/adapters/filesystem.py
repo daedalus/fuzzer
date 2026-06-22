@@ -4,6 +4,7 @@ import hashlib
 import time
 from pathlib import Path
 
+from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.sanitizer import SanitizerReport
 
 
@@ -19,11 +20,14 @@ def hash_data(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()[:16]
 
 
-def load_corpus(corpus_dir: Path) -> tuple[list[bytes], set[str]]:
+def load_corpus(
+    corpus_dir: Path, bloom: BloomFilter | None = None
+) -> tuple[list[bytes], set[str]]:
     """Load existing corpus from directory.
 
     Args:
         corpus_dir: Path to corpus directory.
+        bloom: Optional bloom filter to populate for fast dedup.
 
     Returns:
         Tuple of (corpus list, seen hashes set).
@@ -37,26 +41,41 @@ def load_corpus(corpus_dir: Path) -> tuple[list[bytes], set[str]]:
                 h = hash_data(data)
                 if h not in seen:
                     seen.add(h)
+                    if bloom is not None:
+                        bloom.add(h)
                     corpus.append(data)
     if not corpus:
         corpus.append(b"AAAAAAAA")
     return corpus, seen
 
 
-def save_to_corpus(data: bytes, corpus_dir: Path, seen_hashes: set[str]) -> bool:
+def save_to_corpus(
+    data: bytes, corpus_dir: Path, seen_hashes: set[str], bloom: BloomFilter | None = None
+) -> bool:
     """Save input to corpus if not already seen.
+
+    Uses bloom filter as fast pre-check when available. False positives
+    (bloom says "seen" but set says "new") fall through to the authoritative set.
 
     Args:
         data: Input bytes to save.
         corpus_dir: Path to corpus directory.
         seen_hashes: Set of already-seen hashes.
+        bloom: Optional bloom filter for fast pre-check.
 
     Returns:
         True if saved (new), False if duplicate.
     """
     h = hash_data(data)
-    if h in seen_hashes:
-        return False
+    if bloom is not None:
+        if not bloom.query(h):
+            pass  # definitely new
+        elif h in seen_hashes:
+            return False  # confirmed duplicate
+        bloom.add(h)
+    else:
+        if h in seen_hashes:
+            return False
     seen_hashes.add(h)
     corpus_dir.mkdir(parents=True, exist_ok=True)
     corpus_file = corpus_dir / f"id_{h}"

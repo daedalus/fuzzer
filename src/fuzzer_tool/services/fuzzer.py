@@ -12,6 +12,7 @@ from pathlib import Path
 
 from fuzzer_tool.adapters.filesystem import load_corpus, save_crash, save_to_corpus
 from fuzzer_tool.adapters.process import SIGNAL_CRASH_CODES, run_target_file, run_target_stdin
+from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.markov import MarkovChain
 from fuzzer_tool.core.montecarlo import MonteCarloScheduler
 from fuzzer_tool.core.mutations import (
@@ -461,6 +462,7 @@ class Fuzzer:
 
         self.corpus: list[bytes] = []
         self.seen_hashes: set[str] = set()
+        self.bloom = BloomFilter(capacity=100_000)
         self.crash_hashes: set[str] = set()
         self.crash_sigs: dict[str, int] = {}
         self.exec_count = 0
@@ -502,7 +504,7 @@ class Fuzzer:
                 self.mc.init_arm(op)
 
     def _load_corpus(self):
-        self.corpus, self.seen_hashes = load_corpus(self.corpus_dir)
+        self.corpus, self.seen_hashes = load_corpus(self.corpus_dir, self.bloom)
 
     def _run_target(self, data: bytes) -> tuple[int, str]:
         if self.ptrace_cov:
@@ -804,7 +806,7 @@ class Fuzzer:
         )
 
     def save_to_corpus(self, data: bytes):
-        if save_to_corpus(data, self.corpus_dir, self.seen_hashes):
+        if save_to_corpus(data, self.corpus_dir, self.seen_hashes, self.bloom):
             self.corpus.append(data)
             self.markov.train(data)
             self.markov_trained = self.markov.is_trained()
