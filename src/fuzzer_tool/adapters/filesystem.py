@@ -68,11 +68,14 @@ def save_to_corpus(
     """
     h = hash_data(data)
     if bloom is not None:
+        # Bloom says definitely new → save without checking set
         if not bloom.query(h):
-            pass  # definitely new
+            bloom.add(h)
+        # Bloom says maybe seen → check authoritative set
         elif h in seen_hashes:
             return False  # confirmed duplicate
-        bloom.add(h)
+        else:
+            bloom.add(h)  # false positive, still new
     else:
         if h in seen_hashes:
             return False

@@ -52,9 +52,9 @@ class TestFuzzerUnit:
         assert f._is_crash(-6, "")
         assert f._is_crash(-11, "")
 
-    def test_is_crash_timeout(self):
+    def test_is_not_crash_timeout(self):
         f = self._make_fuzzer()
-        assert f._is_crash(-1, "timeout")
+        assert not f._is_crash(-1, "timeout")
 
     def test_is_interesting_signal(self):
         f = self._make_fuzzer()

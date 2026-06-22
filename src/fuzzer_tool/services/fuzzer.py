@@ -559,7 +559,18 @@ class Fuzzer:
 
         try:
             _, status = os.waitpid(pid, 0)
-            if not (os.WIFSTOPPED(status) and os.WSTOPSIG(status) == signal.SIGTRAP):
+            if os.WIFSTOPPED(status) and os.WSTOPSIG(status) == signal.SIGTRAP:
+                pass  # normal: child stopped at exec, install breakpoints
+            elif os.WIFSTOPPED(status):
+                sig = os.WSTOPSIG(status)
+                os.kill(pid, signal.SIGKILL)
+                os.waitpid(pid, 0)
+                return -sig, ""  # child crashed before we could instrument it
+            elif os.WIFSIGNALED(status):
+                return -os.WTERMSIG(status), ""
+            elif os.WIFEXITED(status):
+                return os.WEXITSTATUS(status), ""
+            else:
                 os.kill(pid, signal.SIGKILL)
                 os.waitpid(pid, 0)
                 return -2, "exec failed"
@@ -570,6 +581,7 @@ class Fuzzer:
             deadline = time.time() + self.timeout
 
             last_action = None
+            last_sig = 0
             while time.time() < deadline:
                 _, status = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
                 if status == 0:
@@ -581,6 +593,7 @@ class Fuzzer:
 
                 if os.WIFSTOPPED(status):
                     sig = os.WSTOPSIG(status)
+                    last_sig = sig
                     if sig == signal.SIGTRAP:
                         regs_buf = (ctypes.c_char * (27 * 8))()
                         libc.ptrace(PTRACE_GETREGS, pid, None, regs_buf)
@@ -606,7 +619,7 @@ class Fuzzer:
                 else:
                     break
 
-            if last_action == "cont":
+            if last_action == "cont" and last_sig == signal.SIGTRAP:
                 _, status = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
                 if os.WIFSTOPPED(status):
                     libc.ptrace(PTRACE_CONT, pid, None, None)
@@ -615,9 +628,16 @@ class Fuzzer:
                 os.kill(pid, signal.SIGKILL)
                 os.waitpid(pid, 0)
 
-            returncode = (
-                os.WEXITSTATUS(status) if os.WIFEXITED(status) else -abs(os.WTERMSIG(status))
-            )
+            if os.WIFSIGNALED(status):
+                returncode = -os.WTERMSIG(status)
+            elif os.WIFEXITED(status):
+                returncode = os.WEXITSTATUS(status)
+            elif os.WIFSTOPPED(status):
+                returncode = -os.WSTOPSIG(status)
+                os.kill(pid, signal.SIGKILL)
+                os.waitpid(pid, 0)
+            else:
+                returncode = 0
             return returncode, ""
 
         except ChildProcessError:
@@ -643,7 +663,7 @@ class Fuzzer:
 
     def _is_crash(self, returncode: int, stderr: str) -> bool:
         self.last_report = None
-        if returncode == -2:
+        if returncode in (-2, -1):
             return False
 
         report = SanitizerReport.parse(stderr)

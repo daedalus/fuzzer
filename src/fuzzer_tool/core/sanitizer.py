@@ -9,11 +9,11 @@ SANITIZER_PATTERNS = [
         r"dynamic-stack-buffer-overflow|stack-use-after-return|stack-use-after-scope"
         r"|allocation-size-too-big|double-free|invalid-malloc-size"
         r"|attempting-free-on-non-deallocated-memory|"
-        r"negative-size-param|heap-use-after-scope",
+        r"negative-size-param|heap-use-after-scope)",
         "ASAN",
     ),
     (r"MemorySanitizer:\s*(use-of-uninitialized-value)", "MSAN"),
-    (r"ThreadSanitizer:\s*(data-race|heap-use-after-race|lock-order-inversion", "TSAN"),
+    (r"ThreadSanitizer:\s*(data-race|heap-use-after-race|lock-order-inversion)", "TSAN"),
     (r"LeakSanitizer:\s*(leak)", "LSAN"),
     (
         r"UndefinedBehaviorSanitizer:\s*(undefined|shift-exponent|signed-integer-overflow"
