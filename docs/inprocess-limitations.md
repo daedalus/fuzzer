@@ -182,3 +182,43 @@ subprocess mode with `-c`.
 │  └──────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────┘
 ```
+
+---
+
+## Coverage: Working Approach (Standalone Executables + C Loader)
+
+Coverage-guided fuzzing now works by:
+
+1. Compiling the target as a standalone executable with `-fsanitize-coverage=inline-8bit-counters`
+2. Adding a coverage dump shim (intercepts `__sanitizer_cov_8bit_counters_init`, writes bitmap to `_COV_BITMAP_OUT`)
+3. Using the C loader (`fuzz_loader.c`) which forks+execs the target and reads the bitmap file
+
+**Performance:** ~350 execs/sec with libpng + coverage (17x faster than per-call subprocess).
+
+**Usage:**
+```bash
+# Build target with coverage dump shim
+clang -O1 -fsanitize-coverage=inline-8bit-counters \
+  -o fuzz_target fuzz_target.c -lpng -lz
+
+# Fuzz with coverage
+fuzzer-tool fuzz ./fuzz_target --inprocess -c -d corpus/ -D png.dict
+```
+
+**Target must implement coverage dump:**
+```c
+static uint8_t *cov_bitmap = NULL;
+static size_t cov_size = 0;
+void __sanitizer_cov_8bit_counters_init(uint8_t *start, uint8_t *stop) {
+    cov_bitmap = start; cov_size = stop - start;
+}
+int main(void) {
+    // ... run target ...
+    const char *out = getenv("_COV_BITMAP_OUT");
+    if (out && cov_bitmap) {
+        FILE *f = fopen(out, "wb");
+        fwrite(cov_bitmap, 1, cov_size, f);
+        fclose(f);
+    }
+}
+```
