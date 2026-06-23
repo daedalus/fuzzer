@@ -113,13 +113,15 @@ def _worker_main(
         f"\n{prefix} Done. execs={fuzzer.exec_count} crashes={fuzzer.crash_count} "
         f"eps={eps:.0f} corpus={len(fuzzer.corpus)}"
     )
-    result_queue.put({
-        "worker_id": worker_id,
-        "exec_count": fuzzer.exec_count,
-        "crash_count": fuzzer.crash_count,
-        "corpus_size": len(fuzzer.corpus),
-        "timeout_count": fuzzer.timeout_count,
-    })
+    result_queue.put(
+        {
+            "worker_id": worker_id,
+            "exec_count": fuzzer.exec_count,
+            "crash_count": fuzzer.crash_count,
+            "corpus_size": len(fuzzer.corpus),
+            "timeout_count": fuzzer.timeout_count,
+        }
+    )
 
 
 def _sync_corpus_in(parent_dir: Path, fuzzer, max_new: int = 50):
