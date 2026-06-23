@@ -89,8 +89,11 @@ class MonteCarloScheduler:
             self.elite_set.pop(0)
 
     def maybe_refit(self) -> None:
-        """Refit the CEM byte distribution if interval has been reached."""
-        if self.execs_since_refit < self.refit_interval:
+        """Refit the CEM byte distribution if enough data exists."""
+        self.execs_since_refit += 1
+        # Refit when: (a) interval reached, OR (b) enough elite inputs (min 10)
+        has_enough_elite = len(self.elite_set) >= 10
+        if self.execs_since_refit < self.refit_interval and not has_enough_elite:
             return
         self.execs_since_refit = 0
         if not self.elite_set:
