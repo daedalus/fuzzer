@@ -154,8 +154,9 @@ class PersistentLoader:
     LLVMFuzzerTestOneInput repeatedly via stdin/stdout pipes.
     """
 
-    def __init__(self, target: str, function_name: str = "LLVMFuzzerTestOneInput",
-                 timeout: float = 5.0):
+    def __init__(
+        self, target: str, function_name: str = "LLVMFuzzerTestOneInput", timeout: float = 5.0
+    ):
         self.target = target
         self.function_name = function_name
         self.timeout = timeout
@@ -175,6 +176,7 @@ class PersistentLoader:
         env = os.environ.copy()
         # Pass shim path for coverage
         from fuzzer_tool.adapters.shim_factory import build_minimal_shim
+
         shim = build_minimal_shim()
         if shim:
             env["_COV_SHM_PATH"] = shim

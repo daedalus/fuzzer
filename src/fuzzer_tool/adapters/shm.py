@@ -1,5 +1,6 @@
 """AFL-style shared memory coverage adapter."""
 
+import atexit
 import ctypes
 import ctypes.util
 import os
@@ -52,6 +53,7 @@ class ShmCoverage:
         self._map = (ctypes.c_char * size).from_address(self._ptr)
         self.env_id = str(self.shm_id)
         self._snapshot = bytes(self._map)
+        self._register_atexit()
         self.total_edges = 0
         self.cumulative_edges = 0
 
@@ -98,3 +100,6 @@ class ShmCoverage:
 
     def __del__(self):
         self.cleanup()
+
+    def _register_atexit(self):
+        atexit.register(self.cleanup)

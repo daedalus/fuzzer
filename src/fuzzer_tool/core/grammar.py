@@ -92,15 +92,18 @@ class Grammar:
             r"|(\w+)\*"  # *
             r"|(\w+)"  # bare rule_ref
         )
+        _MAX_REPEAT = 32
         for m in pattern.finditer(alt):
             if m.group(1) is not None:
                 tokens.append(("lit", bytes(m.group(1), "utf-8")))
             elif m.group(2) is not None:
                 tokens.append(("lit", bytes(m.group(2), "utf-8")))
             elif m.group(3) is not None:
-                tokens.append(("repeat", m.group(3), int(m.group(4)), int(m.group(5))))
+                lo, hi = int(m.group(4)), int(m.group(5))
+                tokens.append(("repeat", m.group(3), min(lo, _MAX_REPEAT), min(hi, _MAX_REPEAT)))
             elif m.group(6) is not None:
-                tokens.append(("repeat", m.group(6), int(m.group(7)), int(m.group(7))))
+                n = min(int(m.group(7)), _MAX_REPEAT)
+                tokens.append(("repeat", m.group(6), n, n))
             elif m.group(8) is not None:
                 tokens.append(("repeat", m.group(8), 1, 8))
             elif m.group(9) is not None:

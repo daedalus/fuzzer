@@ -110,7 +110,7 @@ class PersistentRunner:
         if not self._started or self.pid is None:
             return -2, "persistent runner not started"
 
-        data_len = min(len(data), self.map_size - self.HEADER_SIZE)
+        data_len = min(len(data), self.map_size - self.HEADER_SIZE - 4)
         buf = struct.pack("<I", data_len) + b"\x00" * 4 + data[:data_len]
         ctypes.memmove(self.shm_ptr, buf, len(buf))
 

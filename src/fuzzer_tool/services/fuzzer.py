@@ -11,6 +11,7 @@ import random
 import resource
 import signal
 import struct
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -166,6 +167,8 @@ class PtraceCoverage:
             return
 
         shstr_off = e_shoff + e_shstrndx * e_shentsize
+        if shstr_off + e_shentsize > len(data):
+            return
         shstr_offset = struct.unpack_from("<Q", data, shstr_off + 24)[0]
 
         symtab_sec = None
@@ -174,6 +177,8 @@ class PtraceCoverage:
         dynstr_sec = None
         for i in range(e_shnum):
             sh = e_shoff + i * e_shentsize
+            if sh + e_shentsize > len(data):
+                return
             sh_type = struct.unpack_from("<I", data, sh + 4)[0]
             sh_name_idx = struct.unpack_from("<I", data, sh)[0]
             name = data[shstr_offset + sh_name_idx : shstr_offset + sh_name_idx + 32].split(
@@ -212,6 +217,8 @@ class PtraceCoverage:
 
         for i in range(min(sym_count, 10000)):
             sym = sym_offset + i * sym_entsize
+            if sym + sym_entsize > len(data):
+                break
             st_info = data[sym + 4]
             st_value = struct.unpack_from("<Q", data, sym + 8)[0]
             st_size = struct.unpack_from("<Q", data, sym + 16)[0]
@@ -417,6 +424,8 @@ class PtraceCoverage:
 
     def install_breakpoints(self, pid: int):
         self.resolve_base(pid)
+        if self._is_pie and self._base_address is None:
+            log.warning("Could not resolve PIE base address, breakpoints may be incorrect")
         self.original_bytes.clear()
         for rel_addr in self.bb_addrs:
             addr = self._resolve_addr(rel_addr)
@@ -511,10 +520,11 @@ class Fuzzer:
         self.persistent = persistent
         self.seed = seed
         random.seed(seed)
-        self._tmp_dir = Path("/tmp") / f"fuzzer_{os.getpid()}"
         if self.file_mode:
-            self._tmp_dir.mkdir(parents=True, exist_ok=True)
+            self._tmp_dir = Path(tempfile.mkdtemp(prefix="fuzzer_"))
             atexit.register(_cleanup_tmp_dir, self._tmp_dir)
+        else:
+            self._tmp_dir = Path("/tmp") / f"fuzzer_{os.getpid()}"
 
         self.ptrace_cov: PtraceCoverage | None = None
         self.shm_cov: ShmCoverage | None = None
@@ -742,6 +752,13 @@ class Fuzzer:
                     sig = os.WSTOPSIG(status)
                     last_sig = sig
                     if sig == signal.SIGTRAP:
+                        import platform
+
+                        if platform.machine() != "x86_64":
+                            log.warning(
+                                "ptrace coverage requires x86_64, found %s", platform.machine()
+                            )
+                            break
                         regs_buf = (ctypes.c_char * (27 * 8))()
                         libc.ptrace(PTRACE_GETREGS, pid, None, regs_buf)
                         # RIP is at offset 128 in user_regs_struct (x86-64 Linux)

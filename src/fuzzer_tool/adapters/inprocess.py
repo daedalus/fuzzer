@@ -170,9 +170,7 @@ class InProcessRunner:
                         log.warning("BitmapReader: no sancov counters in target")
             except OSError as e:
                 if shim_loaded:
-                    log.warning(
-                        "Direct mode failed (%s), falling back to subprocess", e
-                    )
+                    log.warning("Direct mode failed (%s), falling back to subprocess", e)
                     self.direct = False
                     self._lib = None
                 else:
@@ -182,6 +180,7 @@ class InProcessRunner:
             if cov:
                 # Use persistent subprocess for coverage — one process, many calls
                 from fuzzer_tool.adapters.persistent_loader import PersistentLoader
+
                 self._persistent = PersistentLoader(
                     target=self.target,
                     function_name=self.function_name,
@@ -197,13 +196,18 @@ class InProcessRunner:
                 os.write(fd, _LOADER_SCRIPT.encode())
                 os.close(fd)
                 if cov:
-                    self._bitmap_out = tempfile.mktemp(suffix=".cov", prefix="fuzz_cov_")
+                    fd, self._bitmap_out = tempfile.mkstemp(suffix=".cov", prefix="fuzz_cov_")
+                    os.close(fd)
 
         self._is_c = True
-        loader_type = "persistent" if self._persistent else ("loader" if self._loader_path else "none")
+        loader_type = (
+            "persistent" if self._persistent else ("loader" if self._loader_path else "none")
+        )
         log.info(
             "In-process C target: %s::%s (mode=%s, coverage=%s, loader=%s)",
-            self.target, self.function_name, mode,
+            self.target,
+            self.function_name,
+            mode,
             self._shim.coverage_type if self._shim else "none",
             loader_type,
         )

@@ -253,7 +253,9 @@ def run_parallel(
                         restart_counts[i] += 1
                         # Fresh seed: base + worker_id + restart_count * jobs
                         new_seed = seed + i + restart_counts[i] * jobs
-                        print(f"\n[!] Worker-{i} died (signal={abs(exitcode)}), restarting (attempt {restart_counts[i]})...")
+                        print(
+                            f"\n[!] Worker-{i} died (signal={abs(exitcode)}), restarting (attempt {restart_counts[i]})..."
+                        )
                         processes[i] = _spawn_worker(i, new_seed)
 
             alive = any(p.is_alive() for p in processes)

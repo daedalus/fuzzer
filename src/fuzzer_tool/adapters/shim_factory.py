@@ -132,7 +132,9 @@ def _parse_elf_sancov_offsets(target: str) -> tuple[int, int] | None:
             sh = e_shoff + i * e_shentsize
             sh_type = struct.unpack_from("<I", elf, sh + 4)[0]
             sh_name_idx = struct.unpack_from("<I", elf, sh)[0]
-            name = elf[shstr_offset + sh_name_idx:shstr_offset + sh_name_idx + 32].split(b"\x00")[0]
+            name = elf[shstr_offset + sh_name_idx : shstr_offset + sh_name_idx + 32].split(b"\x00")[
+                0
+            ]
             if sh_type == 2:
                 symtab_sec = sh
             elif sh_type == 3 and name == b".strtab":
@@ -151,7 +153,11 @@ def _parse_elf_sancov_offsets(target: str) -> tuple[int, int] | None:
             sym = sym_offset + i * sym_entsize
             st_value = struct.unpack_from("<Q", elf, sym + 8)[0]
             st_name_idx = struct.unpack_from("<I", elf, sym)[0]
-            name = elf[strtab_offset + st_name_idx:strtab_offset + st_name_idx + 64].split(b"\x00")[0].decode(errors="replace")
+            name = (
+                elf[strtab_offset + st_name_idx : strtab_offset + st_name_idx + 64]
+                .split(b"\x00")[0]
+                .decode(errors="replace")
+            )
             if name == "__start___sancov_cntrs" and st_value > 0:
                 start_addr = st_value
             elif name == "__stop___sancov_cntrs" and st_value > 0:
@@ -254,7 +260,9 @@ class BitmapReader:
             self._bitmap_size = self._runtime_stop - self._runtime_start
             log.info(
                 "BitmapReader: counters at 0x%x-0x%x (%d bytes)",
-                self._runtime_start, self._runtime_stop, self._bitmap_size,
+                self._runtime_start,
+                self._runtime_stop,
+                self._bitmap_size,
             )
 
     @property
