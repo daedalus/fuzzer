@@ -485,6 +485,7 @@ class Fuzzer:
         stats_file=None,
         stats_interval=1000,
         coverage_report=None,
+        coverage_log=None,
         grammar=None,
         persistent=False,
         seed=42,
@@ -500,6 +501,7 @@ class Fuzzer:
         self.file_mode = file_mode
         self.target_args = target_args or []
         self.coverage_report = Path(coverage_report) if coverage_report else None
+        self.coverage_log = Path(coverage_log) if coverage_log else None
         self.grammar = grammar
         self.persistent = persistent
         self.seed = seed
@@ -1116,6 +1118,22 @@ class Fuzzer:
             f"({cumulative}/{len(edge_map)} edges, {report['coverage_pct']}%)"
         )
 
+    def _append_coverage_log(self):
+        if not self.coverage_log:
+            return
+        cumulative = 0
+        if self.shm_cov:
+            cumulative = self.shm_cov.cumulative_edges
+        elif self.ptrace_cov:
+            cumulative = self.ptrace_cov.cumulative_edges
+        elapsed = time.time() - self.start_time
+        line = (
+            f"{elapsed:.1f},{self.exec_count},{cumulative},{len(self.corpus)},{self.crash_count}\n"
+        )
+        self.coverage_log.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.coverage_log, "a") as f:
+            f.write(line)
+
     def print_stats(self):
         elapsed = time.time() - self.start_time
         eps = self.exec_count / elapsed if elapsed > 0 else 0
@@ -1204,6 +1222,7 @@ class Fuzzer:
                 i += 1
                 if i % 100 == 0:
                     self.print_stats()
+                    self._append_coverage_log()
                 if self.stats_file and i % self.stats_interval == 0:
                     self._dump_stats()
         except (KeyboardInterrupt, SystemExit, OSError):

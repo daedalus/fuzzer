@@ -94,6 +94,10 @@ def save_crash(
 ) -> bool:
     """Save crash input with metadata.
 
+    Deduplicates by crash signature (sanitizer:type@frames) so that two
+    different inputs triggering the same bug only save the first one.
+    Input-hash dedup is also checked as a fast path.
+
     Args:
         data: Crashing input bytes.
         returncode: Process return code.
@@ -111,8 +115,15 @@ def save_crash(
 
     report = SanitizerReport.parse(stderr)
     sig = report.signature if report and report.is_valid() else f"signal:{abs(returncode)}"
+
+    # Deduplicate by signature: skip if this crash signature was already seen
+    if sig in crash_sigs:
+        crash_hashes.add(h)
+        crash_sigs[sig] += 1
+        return False
+
     crash_hashes.add(h)
-    crash_sigs[sig] = crash_sigs.get(sig, 0) + 1
+    crash_sigs[sig] = 1
 
     ts = int(time.time())
     crash_file = crashes_dir / f"crash_{ts}_{h}"

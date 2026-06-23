@@ -1,0 +1,34 @@
+# Simple PNG grammar for structure-aware fuzzing
+# Generates structurally valid-ish PNG chunks
+
+png     = signature ihdr plte_or_not idat_chain iend
+signature = \x89PNG\r\n\x1a\n
+
+ihdr    = len_ihdr chunk_ihdr crc_ihdr
+len_ihdr = \x00\x00\x00\x0d
+chunk_ihdr = IHDR width height bit_depth color_type \x00\x00\x00
+crc_ihdr = \x00\x00\x00\x00
+
+width   = \x00\x00\x00\x01 | \x00\x00\x00\x02 | \x00\x00\x00\x04 | \x00\x00\x00\x08 | \x00\x00\x00\x10 | \x00\x00\x01\x00
+height  = \x00\x00\x00\x01 | \x00\x00\x00\x02 | \x00\x00\x00\x04 | \x00\x00\x00\x08 | \x00\x00\x00\x10 | \x00\x00\x01\x00
+bit_depth = \x08
+color_type = \x02 | \x06
+
+plte_or_not = plte | \x00
+plte = len_plte chunk_plte crc_plte
+len_plte = \x00\x00\x00\x30
+chunk_plte = PLTE entries{16}
+entries = \xff\x00\x00 | \x00\xff\x00 | \x00\x00\xff | \xff\xff\x00 | \xff\x00\xff | \x00\xff\xff
+crc_plte = \x00\x00\x00\x00
+
+idat_chain = idat+
+idat = len_idat chunk_idat crc_idat
+len_idat = \x00\x00\x00\x08
+chunk_idat = IDAT filter_data{4}
+filter_data = \x00\x80\x40\xC0
+crc_idat = \x00\x00\x00\x00
+
+iend = len_iend chunk_iend crc_iend
+len_iend = \x00\x00\x00\x00
+chunk_iend = IEND
+crc_iend = \x00\x00\x00\x00

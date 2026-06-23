@@ -199,49 +199,61 @@ def run_parallel(
     signal.signal(signal.SIGTERM, _signal_handler)
 
     processes = []
-    for worker_id in range(jobs):
+    worker_kwargs = dict(
+        result_queue=result_queue,
+        target=target,
+        corpus_dir=corpus_dir,
+        crashes_dir=crashes_dir,
+        max_len=max_len,
+        timeout=timeout,
+        mutations_per_input=mutations_per_input,
+        use_coverage=use_coverage,
+        deep_coverage=deep_coverage,
+        max_bps=max_bps,
+        dictionary=dictionary or [],
+        file_mode=file_mode,
+        target_args=target_args or [],
+        markov_order=markov_order,
+        markov_generate=markov_generate,
+        mc_bandit=mc_bandit,
+        mc_cem=mc_cem,
+        mc_elite_frac=mc_elite_frac,
+        mc_refit_interval=mc_refit_interval,
+        stats_file=stats_file,
+        stats_interval=stats_interval,
+        coverage_report=coverage_report,
+        iterations=iterations,
+        sync_interval=sync_interval,
+        stop_event=stop_event,
+        rng_seed=seed,
+    )
+
+    def _spawn_worker(worker_id: int) -> multiprocessing.Process:
         p = multiprocessing.Process(
             target=_worker_main,
-            kwargs=dict(
-                worker_id=worker_id,
-                result_queue=result_queue,
-                target=target,
-                corpus_dir=corpus_dir,
-                crashes_dir=crashes_dir,
-                max_len=max_len,
-                timeout=timeout,
-                mutations_per_input=mutations_per_input,
-                use_coverage=use_coverage,
-                deep_coverage=deep_coverage,
-                max_bps=max_bps,
-                dictionary=dictionary or [],
-                file_mode=file_mode,
-                target_args=target_args or [],
-                markov_order=markov_order,
-                markov_generate=markov_generate,
-                mc_bandit=mc_bandit,
-                mc_cem=mc_cem,
-                mc_elite_frac=mc_elite_frac,
-                mc_refit_interval=mc_refit_interval,
-                stats_file=stats_file,
-                stats_interval=stats_interval,
-                coverage_report=coverage_report,
-                iterations=iterations,
-                sync_interval=sync_interval,
-                stop_event=stop_event,
-                rng_seed=seed,
-            ),
+            kwargs={**worker_kwargs, "worker_id": worker_id, "rng_seed": seed + worker_id},
             daemon=True,
         )
-        processes.append(p)
         p.start()
+        return p
+
+    for worker_id in range(jobs):
+        processes.append(_spawn_worker(worker_id))
 
     try:
         while not stop_event.is_set():
+            # Restart dead workers
+            for i, p in enumerate(processes):
+                if not p.is_alive() and not stop_event.is_set():
+                    exitcode = p.exitcode
+                    if exitcode is not None and exitcode != 0:
+                        print(f"\n[!] Worker-{i} died (exit={exitcode}), restarting...")
+                        processes[i] = _spawn_worker(i)
+
             alive = any(p.is_alive() for p in processes)
             if not alive:
                 break
-            stop_event.wait(timeout=1)
+            stop_event.wait(timeout=2)
     except KeyboardInterrupt:
         stop_event.set()
 

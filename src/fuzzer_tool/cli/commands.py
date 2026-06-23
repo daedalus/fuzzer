@@ -2,6 +2,7 @@
 
 import argparse
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -140,6 +141,7 @@ def cmd_fuzz(args):
         stats_file=args.stats_file,
         stats_interval=args.stats_interval,
         coverage_report=args.coverage_report,
+        coverage_log=args.coverage_log,
         grammar=grammar,
         persistent=args.persistent,
         seed=args.seed,
@@ -225,6 +227,63 @@ def cmd_minimize(args):
     return 0
 
 
+def cmd_replay(args):
+    """Replay a crash input against the target."""
+    _validate_target(args.target)
+
+    crash_path = Path(args.crash_file)
+    if not crash_path.is_file():
+        print(f"[-] Crash file not found: {args.crash_file}", file=sys.stderr)
+        return 1
+
+    data = crash_path.read_bytes()
+    print(f"[*] Replaying {len(data)} bytes from {args.crash_file}")
+
+    from fuzzer_tool.adapters.process import run_target_file, run_target_stdin
+    from fuzzer_tool.core.sanitizer import SanitizerReport
+
+    env = os.environ.copy()
+    if args.file_mode:
+        tmp_dir = Path("/tmp") / f"replay_{os.getpid()}"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        returncode, stderr = run_target_file(
+            target=args.target,
+            data=data,
+            timeout=args.timeout,
+            tmp_dir=str(tmp_dir),
+            target_args=args.target_args or [],
+            env=env,
+        )
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+    else:
+        returncode, stderr = run_target_stdin(
+            target=args.target, data=data, timeout=args.timeout, env=env
+        )
+
+    if returncode == -1 and stderr == "timeout":
+        print(f"[*] Target timed out after {args.timeout}s")
+        return 1
+
+    report = SanitizerReport.parse(stderr)
+    if report and report.is_valid():
+        print(f"[+] Crash reproduced: {report.sanitizer}:{report.error_type}")
+        print(f"    Fault address: {report.fault_addr}")
+        if report.frames:
+            print("    Stack trace:")
+            for i, frame in enumerate(report.frames[:8]):
+                print(f"      #{i} {frame}")
+        return 0
+
+    if returncode in (-11, -6, -7, -8, -4):  # SIGSEGV, SIGABRT, SIGFPE, SIGBUS, SIGILL)
+        print(f"[+] Crash reproduced: signal {-returncode}")
+        return 0
+
+    print(f"[*] No crash detected (returncode={returncode})")
+    if stderr.strip():
+        print(f"    stderr: {stderr[:200]}")
+    return 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="fuzzer-tool",
@@ -300,6 +359,12 @@ def main() -> int:
     )
     fuzz_parser.add_argument(
         "--auto-timeout", action="store_true", help="Auto-tune timeout by probing target at startup"
+    )
+    fuzz_parser.add_argument(
+        "--coverage-log",
+        default=None,
+        metavar="FILE",
+        help="Append (timestamp, edge_count) lines to file for coverage-over-time plots",
     )
     fuzz_parser.add_argument(
         "-g",
@@ -378,6 +443,22 @@ def main() -> int:
         "-o", "--output", default=None, help="Output directory (default: overwrite in-place)"
     )
     min_parser.set_defaults(func=cmd_minimize)
+
+    # --- replay ---
+    replay_parser = subparsers.add_parser("replay", help="Replay a crash input against the target")
+    replay_parser.add_argument("target", help="Path to target binary")
+    replay_parser.add_argument("crash_file", help="Path to crash input file")
+    replay_parser.add_argument("-t", "--timeout", type=float, default=5, help="Timeout in seconds")
+    replay_parser.add_argument(
+        "-F", "--file-mode", action="store_true", help="Write input to temp file instead of stdin"
+    )
+    replay_parser.add_argument(
+        "-A",
+        "--target-args",
+        nargs=argparse.REMAINDER,
+        help="Target arguments ({file} placeholder)",
+    )
+    replay_parser.set_defaults(func=cmd_replay)
 
     args = parser.parse_args()
 
