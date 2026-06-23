@@ -1206,7 +1206,7 @@ class Fuzzer:
                     self.print_stats()
                 if self.stats_file and i % self.stats_interval == 0:
                     self._dump_stats()
-        except (KeyboardInterrupt, SystemExit):
+        except (KeyboardInterrupt, SystemExit, OSError):
             pass
 
         self._dump_stats()

@@ -6,10 +6,12 @@ Two modes:
   2. Without coverage: content-hash dedup (kept if unique hash).
 """
 
+import ctypes
 import hashlib
 import os
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -89,8 +91,6 @@ def _minimize_with_coverage(
     corpus_path: Path,
 ) -> tuple[int, int]:
     """Greedy set-cover over SHM edge bitmaps."""
-    import tempfile
-
     from fuzzer_tool.adapters.process import run_target_file, run_target_stdin
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="cmin_"))
@@ -103,8 +103,6 @@ def _minimize_with_coverage(
         env["AFL_MAP_SIZE"] = str(edge_map_size)
 
         # Create a unique SHM segment for this run
-        import ctypes
-
         libc = ctypes.CDLL("libc.so.6", use_errno=True)
         shmid = libc.shmget(0, edge_map_size, 0o600 | 0o2000)  # IPC_PRIVATE
         if shmid < 0:
@@ -157,7 +155,7 @@ def _minimize_with_coverage(
                 total_coverage[j] = 1
         remaining.remove(best_file)
 
-    return _write_output(corpus_files, covered_files, output_dir, corpus_path)
+    return _commit_results(corpus_files, covered_files, output_dir, corpus_path)
 
 
 def _minimize_by_hash(
@@ -176,10 +174,10 @@ def _minimize_by_hash(
             seen_hashes.add(h)
             kept_files.append(str(fpath))
 
-    return _write_output(corpus_files, kept_files, output_dir, corpus_path)
+    return _commit_results(corpus_files, kept_files, output_dir, corpus_path)
 
 
-def _write_output(
+def _commit_results(
     corpus_files: list[Path],
     kept: list[str],
     output_dir: str | None,
