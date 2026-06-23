@@ -25,9 +25,12 @@ Example (HTTP request):
     body    = {} | {"key":"value"} | <html></html>
 """
 
+import logging
 import random
 import re
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 
 class Grammar:
@@ -130,6 +133,7 @@ class Grammar:
     def _expand_rule(self, name: str, depth: int) -> bytes:
         """Expand a rule into bytes."""
         if depth <= 0 or name not in self.rules:
+            log.debug("Grammar depth limit or unknown rule: %s (depth=%d)", name, depth)
             return b"?"
 
         alts = self.rules[name]
@@ -247,8 +251,8 @@ array   = "[" "]"
 string  = "\\"" text "\\""
 text    = word* | ""
 word    = letter | digit | space
-letter  = a | b | c | d | e | f | g | h | i | j | k | l | m | n | o | p | q | r | s | t | u | v | w | x | y | z
-digit   = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
+letter  = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z"
+digit   = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"
 space   = \\x20 | \\t
 """,
     "http_request": """

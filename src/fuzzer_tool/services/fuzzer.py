@@ -1,6 +1,7 @@
 """Fuzzer orchestration: coordinates mutations, execution, and coverage."""
 
 import atexit
+import contextlib
 import ctypes
 import json
 import logging
@@ -15,7 +16,12 @@ import time
 from pathlib import Path
 
 from fuzzer_tool.adapters.filesystem import load_corpus, save_crash, save_to_corpus
-from fuzzer_tool.adapters.process import SIGNAL_CRASH_CODES, run_target_file, run_target_stdin
+from fuzzer_tool.adapters.process import (
+    SIGNAL_CRASH_CODES,
+    _child_pids,
+    run_target_file,
+    run_target_stdin,
+)
 from fuzzer_tool.adapters.shm import ShmCoverage
 from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.markov import MarkovChain
@@ -31,6 +37,23 @@ from fuzzer_tool.core.mutations import (
 from fuzzer_tool.core.sanitizer import SanitizerReport
 
 log = logging.getLogger(__name__)
+
+_shutdown = False
+
+
+def _kill_children(sig=None, frame=None):
+    global _shutdown
+    _shutdown = True
+    for pid in list(_child_pids):
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
+    _child_pids.clear()
+
+
+atexit.register(_kill_children)
+signal.signal(signal.SIGTERM, _kill_children)
+signal.signal(signal.SIGINT, _kill_children)
+
 
 try:
     from capstone import CS_ARCH_X86, CS_MODE_64, Cs
@@ -1173,7 +1196,7 @@ class Fuzzer:
 
         i = 0
         try:
-            while True:
+            while not _shutdown:
                 if iterations and i >= iterations:
                     break
                 seed = self._pick_seed()
@@ -1183,7 +1206,7 @@ class Fuzzer:
                     self.print_stats()
                 if self.stats_file and i % self.stats_interval == 0:
                     self._dump_stats()
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, SystemExit):
             pass
 
         self._dump_stats()

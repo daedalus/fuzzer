@@ -1,7 +1,18 @@
-"""Persistent mode adapter: run AFL-loop targets without fork overhead.
+"""Persistent mode adapter for custom SIGUSR1-handling targets.
 
-For targets compiled with __AFL_LOOP(N), keeps a single process alive
-and signals it between iterations using shared memory + SIGSTOP/SIGCONT.
+IMPORTANT: This does NOT implement the standard AFL persistent mode protocol
+(fd 198/199 status pipe). Standard AFL-instrumented targets using __AFL_LOOP()
+communicate via a status pipe, not signals. This runner is for CUSTOM targets
+that explicitly handle SIGUSR1 and read from __AFL_SHM_ID shared memory.
+
+For standard AFL persistent targets, use afl-showmap -P or AFL++'s own
+persistent mode support instead.
+
+Protocol:
+  - Runner writes [4-byte length][input data] to SHM
+  - Runner sends SIGUSR1 to the target
+  - Target processes input, writes result, sends SIGSTOP (via __AFL_LOOP exit)
+  - Runner reads result from SHM, resumes target with SIGCONT
 """
 
 import ctypes
@@ -13,37 +24,18 @@ import time
 
 log = logging.getLogger(__name__)
 
-# Signal to tell the target to process the next input
-PERSISTENT_SIGNAL = signal.SIGUSR1
-# Signal to tell the target to exit
-PERSISTENT_EXIT = signal.SIGUSR2
+IPC_RMID = 0
+IPC_PRIVATE = 0
 
 
 class PersistentRunner:
-    """Run a target compiled with __AFL_LOOP() in persistent mode.
+    """Run a custom SIGUSR1-handling target in persistent mode.
 
-    Instead of forking a new process for each input, keeps the target alive
-    and signals it between iterations. Requires the target to be compiled
-    with AFL-style persistent mode support:
-
-        __AFL_HAVE_MANUAL_CONTROL
-
-        int main() {
-            __AFL_INIT();
-            unsigned char *buf = __AFL_FUZZ_TEST_CASE_BUF;
-            while (__AFL_LOOP(1000)) {
-                int len = __AFL_FUZZ_TEST_CASE_LEN;
-                // process buf[0..len]
-            }
-        }
-
-    The runner communicates via a shared memory segment that holds:
-    - 4 bytes: input length
-    - N bytes: input data
-    - 4 bytes: return code (written by target, read by runner)
+    Uses IPC_PRIVATE shared memory (no key collisions across workers).
+    Target must: read input from __AFL_SHM_ID, handle SIGUSR1, SIGSTOP on
+    each iteration boundary.
     """
 
-    SHM_KEY = 0x414C4552  # "ALER" as int
     HEADER_SIZE = 8  # 4 bytes len + 4 bytes padding
 
     def __init__(self, target: str, timeout: float = 5.0, map_size: int = 65536):
@@ -52,44 +44,33 @@ class PersistentRunner:
         self.map_size = map_size
         self.pid: int | None = None
         self.shm_id: int | None = None
-        self.shm_ptr: ctypes.c_void_p | None = None
+        self.shm_ptr: int = 0
         self._started = False
+        self._libc = ctypes.CDLL("libc.so.6", use_errno=True)
 
     def start(self) -> bool:
-        """Start the target in persistent mode.
-
-        Returns True if the target started successfully.
-        """
         if self._started:
             return True
 
-        # Create shared memory for input/output
-        libc = ctypes.CDLL("libc.so.6", use_errno=True)
-
-        # shmget(IPC_CREAT, size, 0o600)
-        self.shm_id = libc.shmget(self.SHM_KEY, self.map_size, 0o600 | 0o2000)
+        # Use IPC_PRIVATE to avoid key collisions between parallel workers
+        self.shm_id = self._libc.shmget(IPC_PRIVATE, self.map_size, 0o600)
         if self.shm_id < 0:
-            errno = ctypes.get_errno()
-            log.warning("shmget failed with errno %d", errno)
+            log.warning("shmget failed with errno %d", ctypes.get_errno())
             return False
 
-        # shmat(shmid, NULL, 0)
-        self.shm_ptr = libc.shmat(self.shm_id, None, 0)
-        if self.shm_ptr == ctypes.c_void_p(-1):
+        ptr = self._libc.shmat(self.shm_id, None, 0)
+        if ptr == -1:
             log.warning("shmat failed")
             self._cleanup_shm()
             return False
+        self.shm_ptr = ptr
 
-        # Set environment for the target
         env = os.environ.copy()
         env["__AFL_SHM_ID"] = str(self.shm_id)
-        env["__AFL_HAVE_MANUAL_CONTROL"] = "1"
 
-        # Start the target
         stdin_r, stdin_w = os.pipe()
         pid = os.fork()
         if pid == 0:
-            # Child
             os.setsid()
             os.dup2(stdin_r, 0)
             os.close(stdin_r)
@@ -105,21 +86,18 @@ class PersistentRunner:
         os.close(stdin_w)
         self.pid = pid
 
-        # Wait for the target to start (it should stop at __AFL_LOOP)
         try:
             _, status = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
-            if os.WIFSTOPPED(status) and os.WSTOPSIG(status) == signal.SIGSTOP:
+            if os.WIFSTOPPED(status):
                 self._started = True
                 log.info("Persistent target started (pid=%d)", pid)
                 return True
-            # If not stopped yet, give it a moment
             time.sleep(0.05)
             _, status = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
             if os.WIFSTOPPED(status):
                 self._started = True
                 log.info("Persistent target started (pid=%d)", pid)
                 return True
-            # Target might have exited already
             log.warning("Persistent target exited immediately")
             self._cleanup()
             return False
@@ -129,29 +107,18 @@ class PersistentRunner:
             return False
 
     def run_one(self, data: bytes) -> tuple[int, str]:
-        """Send one input to the persistent target and get the result.
-
-        Args:
-            data: Input bytes to send.
-
-        Returns:
-            Tuple of (returncode, stderr_output).
-        """
-        if not self._started or self.pid is None or self.shm_ptr is None:
+        if not self._started or self.pid is None:
             return -2, "persistent runner not started"
 
-        # Write input to shared memory: [4 bytes len][input data]
         data_len = min(len(data), self.map_size - self.HEADER_SIZE)
         buf = struct.pack("<I", data_len) + b"\x00" * 4 + data[:data_len]
         ctypes.memmove(self.shm_ptr, buf, len(buf))
 
-        # Signal the target to process
         try:
-            os.kill(self.pid, PERSISTENT_SIGNAL)
+            os.kill(self.pid, signal.SIGUSR1)
         except ProcessLookupError:
             return -2, "target process not found"
 
-        # Wait for it to stop again (indicating it processed the input)
         deadline = time.time() + self.timeout
         while time.time() < deadline:
             _, status = os.waitpid(self.pid, os.WNOHANG | os.WUNTRACED)
@@ -167,47 +134,38 @@ class PersistentRunner:
                 return -os.WTERMSIG(status), ""
             if os.WIFSTOPPED(status):
                 sig = os.WSTOPSIG(status)
-                if sig == signal.SIGSTOP or sig == signal.SIGTRAP:
-                    # Normal: target stopped, ready for next input
-                    # Read return code from shared memory if available
-                    try:
-                        rc_bytes = ctypes.string_at(self.shm_ptr + self.HEADER_SIZE + data_len, 4)
-                        returncode = struct.unpack("<i", rc_bytes)[0]
-                    except Exception:
-                        returncode = 0
+                if sig in (signal.SIGSTOP, signal.SIGTRAP):
+                    # Read return code via ctypes.cast (safe pointer arithmetic)
+                    rc_ptr = ctypes.cast(
+                        self.shm_ptr + self.HEADER_SIZE + data_len,
+                        ctypes.POINTER(ctypes.c_int),
+                    )
+                    returncode = rc_ptr.contents.value
                     return returncode, ""
-                elif sig == PERSISTENT_EXIT:
-                    self._started = False
-                    return 0, ""
                 else:
                     self._started = False
                     return -sig, ""
 
-        # Timeout: kill the target
+        # Timeout: SIGKILL and reap
         try:
             os.kill(self.pid, signal.SIGKILL)
             os.waitpid(self.pid, 0)
-        except Exception:
+        except (ProcessLookupError, ChildProcessError):
             pass
         self._started = False
         return -1, "timeout"
 
     def stop(self):
-        """Stop the persistent target gracefully."""
+        """Stop the target. SIGUSR2 is dead code for __AFL_LOOP targets — just SIGKILL."""
         if self.pid is not None and self._started:
             try:
-                os.kill(self.pid, PERSISTENT_EXIT)
-                time.sleep(0.1)
-                _, status = os.waitpid(self.pid, os.WNOHANG)
-                if not os.WIFEXITED(status):
-                    os.kill(self.pid, signal.SIGKILL)
-                    os.waitpid(self.pid, 0)
-            except ProcessLookupError:
+                os.kill(self.pid, signal.SIGKILL)
+                os.waitpid(self.pid, 0)
+            except (ProcessLookupError, ChildProcessError):
                 pass
         self._cleanup()
 
     def _cleanup(self):
-        """Clean up shared memory and process."""
         self._cleanup_shm()
         if self.pid is not None:
             try:
@@ -216,18 +174,15 @@ class PersistentRunner:
             except (ProcessLookupError, ChildProcessError):
                 pass
             self.pid = None
+        self._started = False
 
     def _cleanup_shm(self):
-        """Remove the shared memory segment."""
-        if self.shm_ptr is not None:
-            libc = ctypes.CDLL("libc.so.6", use_errno=True)
-            libc.shmdt(self.shm_ptr)
-            self.shm_ptr = None
+        if self.shm_ptr:
+            self._libc.shmdt(self.shm_ptr)
+            self.shm_ptr = 0
         if self.shm_id is not None:
-            libc = ctypes.CDLL("libc.so.6", use_errno=True)
-            libc.shmctl(self.shm_id, 0, None)  # IPC_RMID = 0
+            self._libc.shmctl(self.shm_id, IPC_RMID, None)
             self.shm_id = None
-        self._started = False
 
     def __enter__(self):
         self.start()

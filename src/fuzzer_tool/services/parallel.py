@@ -9,6 +9,7 @@ from pathlib import Path
 
 def _worker_main(
     worker_id: int,
+    result_queue: multiprocessing.Queue,
     target: str,
     corpus_dir: str,
     crashes_dir: str,
@@ -33,21 +34,16 @@ def _worker_main(
     iterations: int,
     sync_interval: int,
     stop_event: multiprocessing.Event,
-    seed: int = 42,
+    rng_seed: int = 42,
 ):
     """Entry point for each fuzzing worker process."""
     from fuzzer_tool.services.fuzzer import Fuzzer
 
-    # Each worker prints with its ID for distinguishability
     prefix = f"[worker-{worker_id}]"
 
-    # Resolve corpus/crashes with worker suffix for write isolation during sync
-    # Workers write to a per-worker subdir, then merge into the shared dir
     worker_corpus = Path(corpus_dir) / f".w{worker_id}"
-    worker_crashes = Path(crashes_dir)
     worker_corpus.mkdir(parents=True, exist_ok=True)
 
-    # If stats_file is set, make it per-worker
     worker_stats = None
     if stats_file:
         p = Path(stats_file)
@@ -56,7 +52,7 @@ def _worker_main(
     fuzzer = Fuzzer(
         target=target,
         corpus_dir=str(worker_corpus),
-        crashes_dir=str(worker_crashes),
+        crashes_dir=crashes_dir,
         max_len=max_len,
         timeout=timeout,
         mutations_per_input=mutations_per_input,
@@ -75,7 +71,7 @@ def _worker_main(
         stats_file=worker_stats,
         stats_interval=stats_interval,
         coverage_report=coverage_report,
-        seed=seed + worker_id,
+        seed=rng_seed + worker_id,
     )
 
     print(f"{prefix} Started (target={target})")
@@ -87,14 +83,13 @@ def _worker_main(
             if iterations and i >= iterations:
                 break
 
-            # Periodic corpus sync: pick new seeds from the shared parent dir
             now = time.time()
             if now - last_sync >= sync_interval:
-                _sync_corpus_in(worker_corpus, Path(corpus_dir), fuzzer)
+                _sync_corpus_in(Path(corpus_dir), fuzzer)
                 last_sync = now
 
-            seed = fuzzer._pick_seed()
-            fuzzer.fuzz_one(seed)
+            seed_data = fuzzer._pick_seed()
+            fuzzer.fuzz_one(seed_data)
             i += 1
 
             if i % 100 == 0:
@@ -118,51 +113,35 @@ def _worker_main(
         f"\n{prefix} Done. execs={fuzzer.exec_count} crashes={fuzzer.crash_count} "
         f"eps={eps:.0f} corpus={len(fuzzer.corpus)}"
     )
-    return {
+    result_queue.put({
         "worker_id": worker_id,
         "exec_count": fuzzer.exec_count,
         "crash_count": fuzzer.crash_count,
         "corpus_size": len(fuzzer.corpus),
         "timeout_count": fuzzer.timeout_count,
-    }
+    })
 
 
-def _sync_corpus_in(worker_corpus: Path, shared_corpus: Path, fuzzer, max_new: int = 50):
-    """Pull new corpus entries from the shared directory into the worker."""
+def _sync_corpus_in(parent_dir: Path, fuzzer, max_new: int = 50):
+    """Pull new corpus entries from sibling worker dirs."""
     from fuzzer_tool.adapters.filesystem import hash_data
 
-    if not shared_corpus.exists():
-        return
-
     added = 0
-    for f in sorted(shared_corpus.iterdir()):
-        if not f.is_file() or f.suffix in (".txt", ".log"):
+    for sibling_dir in sorted(parent_dir.iterdir()):
+        if not sibling_dir.is_dir() or not sibling_dir.name.startswith(".w"):
             continue
         if added >= max_new:
             break
-        data = f.read_bytes()
-        h = hash_data(data)
-        if h not in fuzzer.seen_hashes:
-            fuzzer.save_to_corpus(data)
-            added += 1
-
-    # Also scan parent for entries from other workers
-    if shared_corpus.parent.exists():
-        for f in sorted(shared_corpus.parent.iterdir()):
-            if not f.is_dir() or f.name.startswith(".w") or f == shared_corpus:
+        for entry in sorted(sibling_dir.iterdir()):
+            if not entry.is_file() or entry.suffix in (".txt", ".log"):
                 continue
             if added >= max_new:
                 break
-            for entry in sorted(f.iterdir()):
-                if not entry.is_file() or entry.suffix in (".txt", ".log"):
-                    continue
-                if added >= max_new:
-                    break
-                data = entry.read_bytes()
-                h = hash_data(data)
-                if h not in fuzzer.seen_hashes:
-                    fuzzer.save_to_corpus(data)
-                    added += 1
+            data = entry.read_bytes()
+            h = hash_data(data)
+            if h not in fuzzer.seen_hashes:
+                fuzzer.save_to_corpus(data)
+                added += 1
 
 
 def run_parallel(
@@ -195,16 +174,8 @@ def run_parallel(
     """Launch N parallel fuzzer workers sharing the same corpus directory.
 
     Each worker writes to its own corpus subdirectory (.w0, .w1, ...) and
-    periodically pulls new entries from siblings and the shared parent.
-    Crashes are written directly to the shared crashes directory.
-
-    Args:
-        target: Path to target binary.
-        jobs: Number of parallel workers.
-        corpus_dir: Shared corpus directory.
-        crashes_dir: Shared crashes directory.
-        sync_interval: Seconds between corpus syncs.
-        **kwargs: All other Fuzzer parameters forwarded to each worker.
+    periodically pulls new entries from siblings. Crashes go to the shared
+    crashes directory.
     """
     target_name = os.path.basename(os.path.abspath(target))
     print(f"[*] Parallel fuzzing: {jobs} workers on {target_name}")
@@ -212,11 +183,11 @@ def run_parallel(
     print(f"[*] Crashes: {crashes_dir}")
     print(f"[*] Sync interval: {sync_interval}s")
 
-    # Ensure shared dirs exist
     Path(corpus_dir).mkdir(parents=True, exist_ok=True)
     Path(crashes_dir).mkdir(parents=True, exist_ok=True)
 
     stop_event = multiprocessing.Event()
+    result_queue = multiprocessing.Queue()
 
     def _signal_handler(sig, frame):
         print(f"\n[*] Received signal {sig}, stopping workers...")
@@ -231,6 +202,7 @@ def run_parallel(
             target=_worker_main,
             kwargs=dict(
                 worker_id=worker_id,
+                result_queue=result_queue,
                 target=target,
                 corpus_dir=corpus_dir,
                 crashes_dir=crashes_dir,
@@ -255,14 +227,13 @@ def run_parallel(
                 iterations=iterations,
                 sync_interval=sync_interval,
                 stop_event=stop_event,
-                seed=seed,
+                rng_seed=seed,
             ),
             daemon=True,
         )
         processes.append(p)
         p.start()
 
-    # Wait for all workers or stop event
     try:
         while not stop_event.is_set():
             alive = any(p.is_alive() for p in processes)
@@ -272,18 +243,21 @@ def run_parallel(
     except KeyboardInterrupt:
         stop_event.set()
 
-    # Give workers time to finish gracefully
     for p in processes:
         p.join(timeout=5)
         if p.is_alive():
             p.terminate()
 
-    # Final summary
-    print(f"\n[*] All {jobs} workers stopped.")
+    # Collect results from queue
     total_execs = 0
     total_crashes = 0
-    for p in processes:
-        if hasattr(p, "_result"):
-            total_execs += p._result.get("exec_count", 0)
-            total_crashes += p._result.get("crash_count", 0)
+    while not result_queue.empty():
+        try:
+            result = result_queue.get_nowait()
+            total_execs += result["exec_count"]
+            total_crashes += result["crash_count"]
+        except Exception:
+            break
+
+    print(f"\n[*] All {jobs} workers stopped.")
     print(f"[*] Total: {total_execs} execs, {total_crashes} crashes")

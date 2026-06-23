@@ -7,6 +7,16 @@ import subprocess
 
 SIGNAL_CRASH_CODES = {134, 135, 136, 139}  # SIGABRT, SIGBUS, SIGFPE, SIGSEGV
 
+_child_pids: set[int] = set()
+
+
+def _track(pid: int):
+    _child_pids.add(pid)
+
+
+def _untrack(pid: int):
+    _child_pids.discard(pid)
+
 
 def run_target_stdin(
     target: str,
@@ -34,13 +44,22 @@ def run_target_stdin(
             env=env or os.environ.copy(),
             preexec_fn=os.setsid,
         )
+        _track(proc.pid)
         try:
             _, stderr = proc.communicate(input=data, timeout=timeout)
             return proc.returncode, stderr.decode(errors="replace")
         except subprocess.TimeoutExpired:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            proc.wait()
+            with contextlib.suppress(OSError):
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            for _ in range(10):
+                try:
+                    proc.wait(timeout=0.5)
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
             return -1, "timeout"
+        finally:
+            _untrack(proc.pid)
     except Exception as e:
         return -2, str(e)
 
@@ -79,14 +98,22 @@ def run_target_file(
             env=env or os.environ.copy(),
             preexec_fn=os.setsid,
         )
+        _track(proc.pid)
         try:
             _, stderr = proc.communicate(timeout=timeout)
             return proc.returncode, stderr.decode(errors="replace")
         except subprocess.TimeoutExpired:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            proc.wait()
+            with contextlib.suppress(OSError):
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            for _ in range(10):
+                try:
+                    proc.wait(timeout=0.5)
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
             return -1, "timeout"
         finally:
+            _untrack(proc.pid)
             with contextlib.suppress(OSError):
                 tmp_file.unlink()
     except Exception as e:

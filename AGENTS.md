@@ -45,3 +45,7 @@ src/fuzzer_tool/
 - Lint: ruff check
 - Docstrings: Google style
 - Type hints: strict mypy
+
+## Rules
+
+- **Always improve the corpus, never delete it.** Corpus files represent discovered coverage and crash triggers. Only add new inputs, never remove existing ones. Use `fuzzer-tool minimize` to prune redundancies — that preserves coverage while reducing size.
