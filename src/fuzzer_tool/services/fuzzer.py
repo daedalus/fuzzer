@@ -488,6 +488,9 @@ class Fuzzer:
         coverage_log=None,
         grammar=None,
         persistent=False,
+        inprocess=False,
+        inprocess_direct=False,
+        inprocess_func="LLVMFuzzerTestOneInput",
         seed=42,
     ):
         self.target = target
@@ -598,6 +601,22 @@ class Fuzzer:
                 print("[!] Persistent mode: failed to start target, falling back to fork")
                 self._persistent_runner = None
 
+        self._inprocess_runner = None
+        if inprocess:
+            from fuzzer_tool.adapters.inprocess import InProcessRunner
+
+            cov_env_id = self.shm_cov.env_id if self.shm_cov else None
+            self._inprocess_runner = InProcessRunner(
+                target=self.target,
+                function_name=inprocess_func,
+                timeout=self.timeout,
+                direct=inprocess_direct,
+                coverage_env_id=cov_env_id,
+            )
+            mode = "direct ctypes" if inprocess_direct else "subprocess loader"
+            cov_note = f", SHM cov id={cov_env_id}" if cov_env_id else ""
+            print(f"[*] In-process mode ({mode}{cov_note}): {self.target}::{inprocess_func}")
+
     def _load_corpus(self):
         self.corpus, self.seen_hashes = load_corpus(self.corpus_dir, self.bloom)
 
@@ -612,6 +631,17 @@ class Fuzzer:
             }
 
     def _run_target(self, data: bytes) -> tuple[int, str]:
+        if self._inprocess_runner:
+            if self.shm_cov:
+                self.shm_cov.reset_edge_map()
+            rc, err = self._inprocess_runner.run_one(data)
+            # Read coverage bitmap from runner and copy into SHM
+            if self.shm_cov:
+                bitmap = self._inprocess_runner.read_bitmap()
+                if bitmap and len(bitmap) <= self.shm_cov.size:
+                    ctypes.memmove(self.shm_cov._ptr, bitmap, len(bitmap))
+            return rc, err
+
         if self._persistent_runner:
             return self._persistent_runner.run_one(data)
 
@@ -1192,6 +1222,8 @@ class Fuzzer:
             print(f"[*] Grammar: {len(self.grammar.rules)} rules")
         if self.persistent:
             print("[*] Persistent mode: enabled")
+        if self._inprocess_runner:
+            print("[*] In-process mode: enabled")
         if self.dictionary:
             print(f"[*] Dictionary: {len(self.dictionary)} tokens")
         if self.markov_trained:

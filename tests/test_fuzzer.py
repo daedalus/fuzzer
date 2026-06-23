@@ -2,6 +2,7 @@
 
 from unittest.mock import patch
 
+from fuzzer_tool.adapters.shim_factory import ShimResult
 from fuzzer_tool.core.markov import MarkovChain
 from fuzzer_tool.core.montecarlo import MonteCarloScheduler
 from fuzzer_tool.services.fuzzer import Fuzzer
@@ -224,3 +225,214 @@ class TestFuzzerUnit:
     def test_persistent_none_by_default(self):
         f = self._make_fuzzer()
         assert f._persistent_runner is None
+
+    def test_inprocess_none_by_default(self):
+        f = self._make_fuzzer()
+        assert f._inprocess_runner is None
+
+
+class TestInProcessRunner:
+    """Tests for in-process target execution."""
+
+    def _make_runner(self, **kwargs):
+        from fuzzer_tool.adapters.inprocess import InProcessRunner
+
+        defaults = dict(
+            target="/bin/true",
+            function_name="LLVMFuzzerTestOneInput",
+            timeout=1,
+        )
+        defaults.update(kwargs)
+        with patch("fuzzer_tool.adapters.inprocess.InProcessRunner._start"):
+            r = InProcessRunner(**defaults)
+        return r
+
+    def test_init_with_mock(self):
+        r = self._make_runner()
+        assert r.target == "/bin/true"
+        assert r.timeout == 1
+
+    def test_no_shim_by_default(self):
+        r = self._make_runner()
+        assert r._shim is None
+
+    def test_shim_built_with_coverage_env_id(self):
+        from fuzzer_tool.adapters.inprocess import InProcessRunner
+
+        with patch("fuzzer_tool.adapters.inprocess.build_shim") as mock_build:
+            mock_build.return_value = ShimResult(
+                shim_path="/tmp/fake.so",
+                coverage_type="inline_8bit",
+                needs_preload=True,
+            )
+            with patch("fuzzer_tool.adapters.inprocess.load_shim"):
+                with patch("ctypes.CDLL"):
+                    r = InProcessRunner(
+                        target="/tmp/fake.so",
+                        coverage_env_id="12345",
+                    )
+                    assert r._shim is not None
+                    assert r._shim.coverage_type == "inline_8bit"
+                    mock_build.assert_called_once()
+
+    def test_read_bitmap_returns_none_without_shim(self):
+        r = self._make_runner()
+        assert r.read_bitmap() is None
+
+    def test_reset_bitmap_noop_without_shim(self):
+        r = self._make_runner()
+        r.reset_bitmap()
+
+    def test_run_one_python_func(self):
+        from fuzzer_tool.adapters.inprocess import InProcessRunner
+
+        with patch.object(InProcessRunner, "_start"):
+            r = InProcessRunner.__new__(InProcessRunner)
+            r.target = "test"
+            r.function_name = "func"
+            r.timeout = 1
+            r.shm_size = 65536
+            r.direct = False
+            r.coverage_env_id = None
+            r._lib = None
+            r._is_c = False
+            r._shim = None
+            r._shim_handle = None
+            r._loader_path = None
+            r._bitmap_out = None
+            r._func = lambda data: 0
+
+            rc, err = r.run_one(b"hello")
+            assert rc == 0
+            assert err == ""
+
+    def test_run_one_python_func_exception(self):
+        from fuzzer_tool.adapters.inprocess import InProcessRunner
+
+        with patch.object(InProcessRunner, "_start"):
+            r = InProcessRunner.__new__(InProcessRunner)
+            r.target = "test"
+            r.function_name = "func"
+            r.timeout = 1
+            r.shm_size = 65536
+            r.direct = False
+            r.coverage_env_id = None
+            r._lib = None
+            r._is_c = False
+            r._shim = None
+            r._shim_handle = None
+            r._loader_path = None
+            r._bitmap_out = None
+            r._func = lambda data: (_ for _ in ()).throw(ValueError("boom"))
+
+            rc, err = r.run_one(b"hello")
+            assert rc == -2
+            assert "boom" in err
+
+    def test_run_one_python_func_returns_int(self):
+        from fuzzer_tool.adapters.inprocess import InProcessRunner
+
+        with patch.object(InProcessRunner, "_start"):
+            r = InProcessRunner.__new__(InProcessRunner)
+            r.target = "test"
+            r.function_name = "func"
+            r.timeout = 1
+            r.shm_size = 65536
+            r.direct = False
+            r.coverage_env_id = None
+            r._lib = None
+            r._is_c = False
+            r._shim = None
+            r._shim_handle = None
+            r._loader_path = None
+            r._bitmap_out = None
+            r._func = lambda data: 42
+
+            rc, err = r.run_one(b"hello")
+            assert rc == 42
+            assert err == ""
+
+    def test_stop(self):
+        r = self._make_runner()
+        r._shim = ShimResult(shim_path="/tmp/fake.so", coverage_type="none")
+        with patch("fuzzer_tool.adapters.inprocess.cleanup_shim") as mock_cleanup:
+            r.stop()
+            mock_cleanup.assert_called_once_with("/tmp/fake.so")
+        assert r._func is None
+        assert r._lib is None
+        assert r._shim is None
+
+    def test_run_c_subprocess_crash_detection(self):
+        """Test that subprocess-based C execution detects SIGSEGV in child."""
+        import signal
+        import subprocess
+        import tempfile
+
+        from fuzzer_tool.adapters.inprocess import InProcessRunner
+
+        crash_c = b"""
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <stddef.h>
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
+    if (size >= 1 && data[0] == 'X') {
+        ((void(*)())0)();
+    }
+    return 0;
+}
+"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            so_path = f"{tmpdir}/crash.so"
+            c_path = f"{tmpdir}/crash.c"
+            with open(c_path, "wb") as f:
+                f.write(crash_c)
+            subprocess.run(
+                ["gcc", "-shared", "-fPIC", "-o", so_path, c_path],
+                check=True,
+                capture_output=True,
+            )
+
+            r = InProcessRunner(target=so_path, timeout=2)
+
+            rc, err = r.run_one(b"hello")
+            assert rc == 0
+
+            rc, err = r.run_one(b"X")
+            assert rc == -signal.SIGSEGV
+
+            r.stop()
+
+
+class TestInProcessFuzzer:
+    def _make_fuzzer(self, **kwargs):
+        defaults = dict(
+            target="/bin/true",
+            corpus_dir="/tmp/fuzz_test_corpus",
+            crashes_dir="/tmp/fuzz_test_crashes",
+            max_len=256,
+            timeout=1,
+            mutations_per_input=2,
+        )
+        defaults.update(kwargs)
+        with (
+            patch("os.path.isfile", return_value=True),
+            patch("os.access", return_value=True),
+        ):
+            f = Fuzzer(**defaults)
+        return f
+
+    def test_fuzzer_with_inprocess(self):
+        from fuzzer_tool.adapters.inprocess import InProcessRunner
+
+        with patch.object(InProcessRunner, "_start"):
+            f = self._make_fuzzer(
+                inprocess=True,
+                inprocess_func="my_func",
+            )
+            assert f._inprocess_runner is not None
+            assert f._inprocess_runner.function_name == "my_func"
+
+    def test_fuzzer_inprocess_none_by_default(self):
+        f = self._make_fuzzer()
+        assert f._inprocess_runner is None

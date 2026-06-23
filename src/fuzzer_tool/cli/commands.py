@@ -59,7 +59,8 @@ def _validate_target(target):
 
 def cmd_fuzz(args):
     """Main fuzzing command."""
-    _validate_target(args.target)
+    if not args.inprocess and not args.inprocess_direct:
+        _validate_target(args.target)
     corpus_dir, crashes_dir = _get_dirs(args, args.target)
 
     dictionary = []
@@ -144,6 +145,9 @@ def cmd_fuzz(args):
         coverage_log=args.coverage_log,
         grammar=grammar,
         persistent=args.persistent,
+        inprocess=args.inprocess or args.inprocess_direct,
+        inprocess_direct=args.inprocess_direct,
+        inprocess_func=args.inprocess_func,
         seed=args.seed,
     )
     fuzzer.run(iterations=args.iterations)
@@ -393,6 +397,21 @@ def main() -> int:
         "--persistent",
         action="store_true",
         help="Use persistent mode for AFL-loop targets (no fork per iteration)",
+    )
+    fuzz_parser.add_argument(
+        "--inprocess",
+        action="store_true",
+        help="Call target function in-process (C .so or Python module:function)",
+    )
+    fuzz_parser.add_argument(
+        "--inprocess-direct",
+        action="store_true",
+        help="Direct ctypes.CDLL call — zero overhead, target must not SIGSEGV",
+    )
+    fuzz_parser.add_argument(
+        "--inprocess-func",
+        default="LLVMFuzzerTestOneInput",
+        help="Function name for in-process mode (default: LLVMFuzzerTestOneInput)",
     )
     fuzz_parser.add_argument(
         "-s",
