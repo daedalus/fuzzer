@@ -94,65 +94,120 @@ parts = header.strip().split()
 target_path = parts[1]
 func_name = parts[2]
 
-# Load target
-shim_path = os.environ.get("_COV_SHM_PATH")
-if shim_path and os.path.exists(shim_path):
-    ctypes.CDLL(shim_path, mode=ctypes.RTLD_GLOBAL)
+# Detect target type
+is_executable = (os.path.isfile(target_path) and os.access(target_path, os.X_OK)
+                 and not target_path.endswith(('.so', '.dylib', '.dll')))
 
-lib = ctypes.CDLL(target_path)
-fn_ptr = getattr(lib, func_name)
-fn_ptr.restype = ctypes.c_int
-fn_ptr.argtypes = [ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t]
+if is_executable:
+    # Standalone executable — run as subprocess, read bitmap from file
+    import subprocess as _subprocess
+    bitmap_out = os.environ.get('_COV_BITMAP_OUT', '')
 
-# Find sancov counters via ELF parsing + /proc/self/maps
-elf_start, elf_stop = parse_elf_sancov(target_path)
-if elf_start is not None and elf_stop is not None:
-    base = find_base_addr(target_path)
-    if base is not None:
-        # The ELF vaddr is relative to the first LOAD segment (vaddr=0)
-        bitmap_start = base + elf_start
-        bitmap_size = elf_stop - elf_start
-
-sys.stdout.buffer.write(b"READY\n")
-sys.stdout.buffer.flush()
-
-while True:
-    line = sys.stdin.buffer.readline()
-    if not line:
-        break
-    cmd = line.decode().strip()
-    if cmd == "QUIT":
-        break
-    if cmd.startswith("RUN "):
-        data_len = int(cmd.split()[1])
-        data = sys.stdin.buffer.read(data_len)
-        buf = (ctypes.c_uint8 * len(data))(*data)
+    def run_executable(data):
+        env = os.environ.copy()
+        if bitmap_out:
+            env['_COV_BITMAP_OUT'] = bitmap_out
+        proc = _subprocess.Popen(
+            [target_path],
+            stdin=_subprocess.PIPE,
+            stdout=_subprocess.DEVNULL,
+            stderr=_subprocess.DEVNULL,
+            env=env,
+        )
         try:
-            rc = fn_ptr(buf, len(data))
-        except Exception:
-            rc = -11
-
-        bmp = b""
-        if bitmap_start and bitmap_size > 0:
+            proc.communicate(input=data, timeout=float(os.environ.get('_TIMEOUT', '5')))
+        except _subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        bmp = b''
+        if bitmap_out and os.path.exists(bitmap_out):
             try:
-                bmp = bytes((ctypes.c_uint8 * bitmap_size).from_address(bitmap_start))
+                with open(bitmap_out, 'rb') as f:
+                    bmp = f.read()
             except Exception:
                 pass
+        return proc.returncode, bmp
 
-        resp = f"RC {rc} {len(bmp)}\n".encode()
-        sys.stdout.buffer.write(resp)
-        if bmp:
-            sys.stdout.buffer.write(bmp)
-        sys.stdout.buffer.flush()
+    sys.stdout.buffer.write(b"READY\n")
+    sys.stdout.buffer.flush()
+
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            break
+        cmd = line.decode().strip()
+        if cmd == "QUIT":
+            break
+        if cmd.startswith("RUN "):
+            data_len = int(cmd.split()[1])
+            data = sys.stdin.buffer.read(data_len)
+            rc, bmp = run_executable(data)
+            resp = f"RC {rc} {len(bmp)}\n".encode()
+            sys.stdout.buffer.write(resp)
+            if bmp:
+                sys.stdout.buffer.write(bmp)
+            sys.stdout.buffer.flush()
+
+else:
+    # Shared library — load via ctypes
+    shim_path = os.environ.get("_COV_SHM_PATH")
+    if shim_path and os.path.exists(shim_path):
+        ctypes.CDLL(shim_path, mode=ctypes.RTLD_GLOBAL)
+
+    lib = ctypes.CDLL(target_path)
+    fn_ptr = getattr(lib, func_name)
+    fn_ptr.restype = ctypes.c_int
+    fn_ptr.argtypes = [ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t]
+
+    elf_start, elf_stop = parse_elf_sancov(target_path)
+    if elf_start is not None and elf_stop is not None:
+        base = find_base_addr(target_path)
+        if base is not None:
+            bitmap_start = base + elf_start
+            bitmap_size = elf_stop - elf_start
+
+    sys.stdout.buffer.write(b"READY\n")
+    sys.stdout.buffer.flush()
+
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            break
+        cmd = line.decode().strip()
+        if cmd == "QUIT":
+            break
+        if cmd.startswith("RUN "):
+            data_len = int(cmd.split()[1])
+            data = sys.stdin.buffer.read(data_len)
+            buf = (ctypes.c_uint8 * len(data))(*data)
+            try:
+                rc = fn_ptr(buf, len(data))
+            except Exception:
+                rc = -11
+
+            bmp = b""
+            if bitmap_start and bitmap_size > 0:
+                try:
+                    bmp = bytes((ctypes.c_uint8 * bitmap_size).from_address(bitmap_start))
+                except Exception:
+                    pass
+
+            resp = f"RC {rc} {len(bmp)}\n".encode()
+            sys.stdout.buffer.write(resp)
+            if bmp:
+                sys.stdout.buffer.write(bmp)
+            sys.stdout.buffer.flush()
 """
 
 
 class PersistentLoader:
     """Persistent subprocess — one process, many calls.
 
-    The subprocess loads the target .so once and calls
-    LLVMFuzzerTestOneInput repeatedly via stdin/stdout pipes.
+    Uses a C loader (compiled at startup) for maximum speed.
+    Falls back to Python loader if C compilation fails.
     """
+
+    _c_loader_path: str | None = None
 
     def __init__(
         self, target: str, function_name: str = "LLVMFuzzerTestOneInput", timeout: float = 5.0
@@ -164,22 +219,103 @@ class PersistentLoader:
         self._loader_path: str | None = None
         self._ready = False
         self._last_bitmap: bytes | None = None
+        self._bitmap_out: str | None = None
+
+    @classmethod
+    def _ensure_c_loader(cls) -> str | None:
+        """Compile the C loader if not already done. Returns path to binary."""
+        if cls._c_loader_path and os.path.exists(cls._c_loader_path):
+            return cls._c_loader_path
+
+        loader_c = os.path.join(os.path.dirname(__file__), "fuzz_loader.c")
+        if not os.path.exists(loader_c):
+            return None
+
+        # Compile C loader
+        out_path = os.path.join(tempfile.gettempdir(), "fuzz_loader_bin")
+        try:
+            result = subprocess.run(
+                ["gcc", "-O2", "-o", out_path, loader_c],
+                capture_output=True, timeout=10,
+            )
+            if result.returncode == 0 and os.path.exists(out_path):
+                cls._c_loader_path = out_path
+                return out_path
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+        # Try clang as fallback
+        try:
+            result = subprocess.run(
+                ["clang", "-O2", "-o", out_path, loader_c],
+                capture_output=True, timeout=10,
+            )
+            if result.returncode == 0 and os.path.exists(out_path):
+                cls._c_loader_path = out_path
+                return out_path
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+        return None
 
     def start(self) -> bool:
         if self._proc and self._proc.poll() is None:
             return True
 
+        # Try C loader first, fall back to Python
+        c_loader = self._ensure_c_loader()
+        if c_loader:
+            self._use_c_loader(c_loader)
+        else:
+            self._use_python_loader()
+
+        if self._proc and self._ready:
+            return True
+
+        log.warning("Persistent loader failed to start")
+        return False
+
+    def _use_c_loader(self, c_loader_path: str):
+        """Start the C loader subprocess."""
+        self._bitmap_out = tempfile.mktemp(suffix=".cov", prefix="fuzz_cov_")
+        env = os.environ.copy()
+        env["_COV_BITMAP_OUT"] = self._bitmap_out
+        env["_TIMEOUT"] = str(self.timeout)
+
+        self._proc = subprocess.Popen(
+            [c_loader_path],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=env,
+        )
+
+        init = f"INIT {self.target} {self.function_name} {self._bitmap_out}\n"
+        self._proc.stdin.write(init.encode())
+        self._proc.stdin.flush()
+
+        resp = self._proc.stdout.readline()
+        if resp.strip() == b"READY":
+            self._ready = True
+            log.info("Persistent C loader started: %s", self.target)
+            return
+
+        log.warning("Persistent C loader failed to start")
+
+    def _use_python_loader(self):
+        """Start the Python loader subprocess (fallback)."""
         fd, self._loader_path = tempfile.mkstemp(suffix=".py", prefix="fuzz_persist_")
         os.write(fd, _PERSISTENT_LOADER.encode())
         os.close(fd)
 
         env = os.environ.copy()
-        # Pass shim path for coverage
         from fuzzer_tool.adapters.shim_factory import build_minimal_shim
-
         shim = build_minimal_shim()
         if shim:
             env["_COV_SHM_PATH"] = shim
+        self._bitmap_out = tempfile.mktemp(suffix=".cov", prefix="fuzz_cov_")
+        env["_COV_BITMAP_OUT"] = self._bitmap_out
+        env["_TIMEOUT"] = str(self.timeout)
 
         self._proc = subprocess.Popen(
             [sys.executable, self._loader_path],
@@ -196,11 +332,7 @@ class PersistentLoader:
         resp = self._proc.stdout.readline()
         if resp.strip() == b"READY":
             self._ready = True
-            log.info("Persistent loader started: %s", self.target)
-            return True
-
-        log.warning("Persistent loader failed to start")
-        return False
+            log.info("Persistent Python loader started: %s", self.target)
 
     def run_one(self, data: bytes) -> tuple[int, bytes | None]:
         if not self._ready or not self._proc:
