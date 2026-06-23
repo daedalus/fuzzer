@@ -265,15 +265,17 @@ class TestInProcessRunner:
                 coverage_type="inline_8bit",
                 needs_preload=True,
             )
-            with patch("fuzzer_tool.adapters.inprocess.load_shim"):
-                with patch("ctypes.CDLL"):
-                    r = InProcessRunner(
-                        target="/tmp/fake.so",
-                        coverage_env_id="12345",
-                    )
-                    assert r._shim is not None
-                    assert r._shim.coverage_type == "inline_8bit"
-                    mock_build.assert_called_once()
+            with (
+                patch("fuzzer_tool.adapters.inprocess.load_shim"),
+                patch("ctypes.CDLL"),
+            ):
+                r = InProcessRunner(
+                    target="/tmp/fake.so",
+                    coverage_env_id="12345",
+                )
+                assert r._shim is not None
+                assert r._shim.coverage_type == "inline_8bit"
+                mock_build.assert_called_once()
 
     def test_read_bitmap_returns_none_without_shim(self):
         r = self._make_runner()

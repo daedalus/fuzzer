@@ -117,6 +117,7 @@ class InProcessRunner:
 
         self._func: Callable[[bytes], int] | None = None
         self._lib: ctypes.CDLL | None = None
+        self._func_ptr = None  # cached function pointer
         self._is_c = False
         self._loader_path: str | None = None
         self._bitmap_out: str | None = None
@@ -164,6 +165,7 @@ class InProcessRunner:
                     ctypes.POINTER(ctypes.c_uint8),
                     ctypes.c_size_t,
                 ]
+                self._func_ptr = fn_ptr  # cache the resolved symbol
                 if cov and self._lib:
                     self._bitmap_reader = BitmapReader(self.target, self._lib)
                     if not self._bitmap_reader.valid:
@@ -220,10 +222,6 @@ class InProcessRunner:
         self._is_c = False
         log.info("In-process Python target: %s:%s", mod_path, func_name)
 
-    @property
-    def _func_ptr(self):
-        return getattr(self._lib, self.function_name)
-
     # ------------------------------------------------------------------
     # Coverage
     # ------------------------------------------------------------------
@@ -271,8 +269,14 @@ class InProcessRunner:
             return -2, str(e)
 
     def _run_c_direct(self, data: bytes) -> tuple[int, str]:
-        """Direct ctypes.CDLL call — zero overhead."""
-        if self._func_ptr is None:
+        """Direct ctypes.CDLL call — zero overhead.
+
+        NOTE: SIGSEGV in the target kills the fuzzer process and cannot
+        be caught with Python exceptions. The target MUST handle errors
+        internally (setjmp/longjmp, ASAN-instrumented builds, or
+        signal-safe handlers).
+        """
+        if self._lib is None or self._func_ptr is None:
             return -2, "runner not initialized"
         if self._coverage_enabled():
             self.reset_bitmap()
@@ -280,8 +284,6 @@ class InProcessRunner:
             buf = (ctypes.c_uint8 * len(data))(*data)
             rc = self._func_ptr(buf, len(data))
             return rc, ""
-        except OSError:
-            return -signal.SIGSEGV, ""
         except Exception as e:
             return -2, str(e)
 
@@ -335,6 +337,8 @@ class InProcessRunner:
     def stop(self):
         self._func = None
         self._lib = None
+        self._func_ptr = None
+        self._is_c = False
         self._shim_handle = None
         if self._persistent:
             self._persistent.stop()

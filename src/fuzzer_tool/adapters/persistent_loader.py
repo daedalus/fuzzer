@@ -16,6 +16,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 
 log = logging.getLogger(__name__)
 
@@ -236,7 +237,8 @@ class PersistentLoader:
         try:
             result = subprocess.run(
                 ["gcc", "-O2", "-o", out_path, loader_c],
-                capture_output=True, timeout=10,
+                capture_output=True,
+                timeout=10,
             )
             if result.returncode == 0 and os.path.exists(out_path):
                 cls._c_loader_path = out_path
@@ -248,7 +250,8 @@ class PersistentLoader:
         try:
             result = subprocess.run(
                 ["clang", "-O2", "-o", out_path, loader_c],
-                capture_output=True, timeout=10,
+                capture_output=True,
+                timeout=10,
             )
             if result.returncode == 0 and os.path.exists(out_path):
                 cls._c_loader_path = out_path
@@ -290,7 +293,7 @@ class PersistentLoader:
             env=env,
         )
 
-        init = f"INIT {self.target} {self.function_name} {self._bitmap_out}\n"
+        init = f"INIT {self.target} {self.function_name} {self._bitmap_out} {int(self.timeout)}\n"
         self._proc.stdin.write(init.encode())
         self._proc.stdin.flush()
 
@@ -310,6 +313,7 @@ class PersistentLoader:
 
         env = os.environ.copy()
         from fuzzer_tool.adapters.shim_factory import build_minimal_shim
+
         shim = build_minimal_shim()
         if shim:
             env["_COV_SHM_PATH"] = shim
@@ -356,7 +360,24 @@ class PersistentLoader:
 
         bitmap = None
         if bmp_len > 0:
-            bitmap = self._proc.stdout.read(bmp_len)
+            # Use a thread to read bitmap with timeout, preventing indefinite block
+            # if the subprocess stalls mid-response
+            result = [None]
+
+            def _read():
+                result[0] = self._proc.stdout.read(bmp_len)
+
+            t = threading.Thread(target=_read, daemon=True)
+            t.start()
+            t.join(timeout=self.timeout)
+            if t.is_alive():
+                log.warning("Bitmap read timed out after %.1fs, killing loader", self.timeout)
+                with contextlib.suppress(Exception):
+                    self._proc.kill()
+                    self._proc.wait()
+                self._ready = False
+                return -1, None
+            bitmap = result[0]
 
         self._last_bitmap = bitmap
         return rc, bitmap

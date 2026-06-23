@@ -20,7 +20,7 @@ Protocol (stdin/stdout binary):
 #include <unistd.h>
 #include <signal.h>
 
-#define MAX_DATA 65536
+#define MAX_DATA 65535
 #define MAX_BMP  65536
 
 typedef int (*fuzz_fn)(const uint8_t *, size_t);
@@ -68,6 +68,12 @@ static int read_bitmap_file(uint8_t *buf, int maxlen) {
 }
 
 static char target_path_global[256] = {0};
+static int timeout_seconds = 5;
+
+static void alarm_handler(int sig) {
+    (void)sig;
+    /* alarm fired — child will be reaped below */
+}
 
 /* Run standalone executable: fork, exec with stdin pipe, read bitmap file */
 static int run_executable(const uint8_t *data, size_t len, uint8_t *bmp, int *bmp_len) {
@@ -83,6 +89,7 @@ static int run_executable(const uint8_t *data, size_t len, uint8_t *bmp, int *bm
         dup2(pipefd[0], STDIN_FILENO);
         close(pipefd[0]);
         signal(SIGCHLD, SIG_DFL);
+        signal(SIGALRM, SIG_DFL);
         /* Set _COV_BITMAP_OUT for the target */
         setenv("_COV_BITMAP_OUT", bitmap_out, 1);
         execl(target_path_global, target_path_global, (char *)NULL);
@@ -99,9 +106,20 @@ static int run_executable(const uint8_t *data, size_t len, uint8_t *bmp, int *bm
     }
     close(pipefd[1]);
 
+    /* Set alarm for child timeout */
+    struct sigaction sa;
+    sa.sa_handler = alarm_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGALRM, &sa, NULL);
+    alarm(timeout_seconds);
+
     /* Wait for child */
     int status = 0;
     waitpid(pid, &status, 0);
+
+    alarm(0); /* cancel alarm */
+    signal(SIGALRM, SIG_DFL);
 
     int rc = -2;
     if (WIFEXITED(status)) rc = WEXITSTATUS(status);
@@ -121,7 +139,10 @@ int main(void) {
     if (!read_line(line, sizeof(line))) return 1;
     /* INIT <target> <func> <bitmap_out> */
     char func_name[256];
-    sscanf(line, "INIT %255s %255s %255s", target_path_global, func_name, bitmap_out);
+    char timeout_str[16] = "5";
+    sscanf(line, "INIT %255s %255s %255s %15s", target_path_global, func_name, bitmap_out, timeout_str);
+    timeout_seconds = atoi(timeout_str);
+    if (timeout_seconds <= 0) timeout_seconds = 5;
 
     /* Check if target is executable */
     is_executable = (access(target_path_global, X_OK) == 0);

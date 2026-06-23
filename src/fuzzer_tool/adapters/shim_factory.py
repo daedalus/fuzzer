@@ -105,6 +105,23 @@ def _inspect_target(target: str) -> dict:
                     info["has_sancov_counters"] = True
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
+
+    # Fallback: try nm without -D for static symbols in executables
+    if not info["has_sancov_counters"] and not info["has_undefined_sancov_init"]:
+        try:
+            r = subprocess.run(["nm", target], capture_output=True, timeout=10)
+            if r.returncode == 0:
+                for line in r.stdout.decode(errors="replace").splitlines():
+                    parts = line.split()
+                    if len(parts) < 3:
+                        continue
+                    _, stype, sname = parts[0], parts[1], parts[2]
+                    if sname == "__sanitizer_cov_8bit_counters_init" and stype == "U":
+                        info["has_undefined_sancov_init"] = True
+                    if "__start___sancov_cntrs" in sname:
+                        info["has_sancov_counters"] = True
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
     if info["has_sancov_counters"] or info["has_undefined_sancov_init"]:
         info["coverage_type"] = "inline_8bit"
     return info
@@ -279,8 +296,8 @@ class BitmapReader:
             return None
         if self._snapshot is None:
             return current
-        # Return delta: bytes where current > snapshot
-        return bytes(max(0, c - s) for c, s in zip(current, self._snapshot, strict=True))
+        # Return delta: bytes where current > snapshot (handles size mismatch)
+        return bytes(max(0, c - s) for c, s in zip(current, self._snapshot, strict=False))
 
     def reset_bitmap(self):
         """Reset by snapshotting current state and detecting deltas later."""
