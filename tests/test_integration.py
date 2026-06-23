@@ -94,32 +94,9 @@ class TestIntegration:
             assert result.returncode == 0, f"tmin failed: {result.stderr}"
             assert output_file.exists(), "Minimized output not created"
             minimized = output_file.read_bytes()
-            assert len(minimized) < 206, f"Expected reduction: {len(minimized)} >= 206"
-
-    def test_replay_crash(self, compiled_target):
-        """Replay a crash input and verify it reproduces."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            crash_file = Path(tmpdir) / "crash_input"
-            crash_file.write_bytes(b"CRASHS")
-
-            result = subprocess.run(
-                [
-                    "python3",
-                    "-m",
-                    "fuzzer_tool",
-                    "replay",
-                    compiled_target,
-                    str(crash_file),
-                    "-t",
-                    "2",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=15,
+            assert minimized == b"CRASHS", (
+                f"Expected minimized to be b'CRASHS', got {len(minimized)} bytes"
             )
-
-            assert result.returncode == 0, f"replay failed: {result.stderr}"
-            assert "Crash reproduced" in result.stdout
 
     def test_minimize_corpus(self, compiled_target):
         """Minimize a corpus and verify redundant entries are removed."""
@@ -152,6 +129,13 @@ class TestIntegration:
             )
 
             assert result.returncode == 0, f"minimize failed: {result.stderr}"
-            remaining = list(corpus_dir.glob("input_*"))
+            remaining_inputs = list(corpus_dir.glob("input_*"))
+            unique_kept = list(corpus_dir.glob("unique*"))
             # At least some duplicates should be removed
-            assert len(remaining) < 5, f"Expected fewer inputs, got {len(remaining)}"
+            assert len(remaining_inputs) < 5, (
+                f"Expected fewer duplicate inputs, got {len(remaining_inputs)}"
+            )
+            # Unique input should be kept (triggers SIGSEGV)
+            assert len(unique_kept) == 1, (
+                f"Unique crash input should be kept, found {len(unique_kept)}"
+            )

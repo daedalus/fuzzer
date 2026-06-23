@@ -199,6 +199,7 @@ def run_parallel(
     signal.signal(signal.SIGTERM, _signal_handler)
 
     processes = []
+    restart_counts = [0] * jobs
     worker_kwargs = dict(
         result_queue=result_queue,
         target=target,
@@ -228,17 +229,17 @@ def run_parallel(
         rng_seed=seed,
     )
 
-    def _spawn_worker(worker_id: int) -> multiprocessing.Process:
+    def _spawn_worker(worker_id: int, rng_seed: int) -> multiprocessing.Process:
         p = multiprocessing.Process(
             target=_worker_main,
-            kwargs={**worker_kwargs, "worker_id": worker_id, "rng_seed": seed + worker_id},
+            kwargs={**worker_kwargs, "worker_id": worker_id, "rng_seed": rng_seed},
             daemon=True,
         )
         p.start()
         return p
 
     for worker_id in range(jobs):
-        processes.append(_spawn_worker(worker_id))
+        processes.append(_spawn_worker(worker_id, seed + worker_id))
 
     try:
         while not stop_event.is_set():
@@ -246,9 +247,14 @@ def run_parallel(
             for i, p in enumerate(processes):
                 if not p.is_alive() and not stop_event.is_set():
                     exitcode = p.exitcode
-                    if exitcode is not None and exitcode != 0:
-                        print(f"\n[!] Worker-{i} died (exit={exitcode}), restarting...")
-                        processes[i] = _spawn_worker(i)
+                    # Only restart on abnormal exit (not clean exit from iterations limit)
+                    abnormal = exitcode is not None and exitcode < 0
+                    if abnormal:
+                        restart_counts[i] += 1
+                        # Fresh seed: base + worker_id + restart_count * jobs
+                        new_seed = seed + i + restart_counts[i] * jobs
+                        print(f"\n[!] Worker-{i} died (signal={abs(exitcode)}), restarting (attempt {restart_counts[i]})...")
+                        processes[i] = _spawn_worker(i, new_seed)
 
             alive = any(p.is_alive() for p in processes)
             if not alive:

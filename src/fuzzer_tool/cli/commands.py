@@ -239,26 +239,30 @@ def cmd_replay(args):
     data = crash_path.read_bytes()
     print(f"[*] Replaying {len(data)} bytes from {args.crash_file}")
 
-    from fuzzer_tool.adapters.process import run_target_file, run_target_stdin
+    from fuzzer_tool.adapters.process import SIGNAL_CRASH_CODES, run_target_file, run_target_stdin
     from fuzzer_tool.core.sanitizer import SanitizerReport
 
     env = os.environ.copy()
-    if args.file_mode:
-        tmp_dir = Path("/tmp") / f"replay_{os.getpid()}"
-        tmp_dir.mkdir(parents=True, exist_ok=True)
-        returncode, stderr = run_target_file(
-            target=args.target,
-            data=data,
-            timeout=args.timeout,
-            tmp_dir=str(tmp_dir),
-            target_args=args.target_args or [],
-            env=env,
-        )
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-    else:
-        returncode, stderr = run_target_stdin(
-            target=args.target, data=data, timeout=args.timeout, env=env
-        )
+    tmp_dir = None
+    try:
+        if args.file_mode:
+            tmp_dir = Path("/tmp") / f"replay_{os.getpid()}"
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            returncode, stderr = run_target_file(
+                target=args.target,
+                data=data,
+                timeout=args.timeout,
+                tmp_dir=str(tmp_dir),
+                target_args=args.target_args or [],
+                env=env,
+            )
+        else:
+            returncode, stderr = run_target_stdin(
+                target=args.target, data=data, timeout=args.timeout, env=env
+            )
+    finally:
+        if tmp_dir and tmp_dir.exists():
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
     if returncode == -1 and stderr == "timeout":
         print(f"[*] Target timed out after {args.timeout}s")
@@ -274,8 +278,8 @@ def cmd_replay(args):
                 print(f"      #{i} {frame}")
         return 0
 
-    if returncode in (-11, -6, -7, -8, -4):  # SIGSEGV, SIGABRT, SIGFPE, SIGBUS, SIGILL)
-        print(f"[+] Crash reproduced: signal {-returncode}")
+    if abs(returncode) in SIGNAL_CRASH_CODES:
+        print(f"[+] Crash reproduced: signal {abs(returncode)}")
         return 0
 
     print(f"[*] No crash detected (returncode={returncode})")

@@ -502,6 +502,8 @@ class Fuzzer:
         self.target_args = target_args or []
         self.coverage_report = Path(coverage_report) if coverage_report else None
         self.coverage_log = Path(coverage_log) if coverage_log else None
+        if self.coverage_log:
+            self.coverage_log.parent.mkdir(parents=True, exist_ok=True)
         self.grammar = grammar
         self.persistent = persistent
         self.seed = seed
@@ -1130,7 +1132,6 @@ class Fuzzer:
         line = (
             f"{elapsed:.1f},{self.exec_count},{cumulative},{len(self.corpus)},{self.crash_count}\n"
         )
-        self.coverage_log.parent.mkdir(parents=True, exist_ok=True)
         with open(self.coverage_log, "a") as f:
             f.write(line)
 
