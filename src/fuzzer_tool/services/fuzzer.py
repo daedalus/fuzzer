@@ -507,6 +507,7 @@ class Fuzzer:
         inprocess=False,
         inprocess_direct=False,
         inprocess_func="LLVMFuzzerTestOneInput",
+        cmplog=False,
         seed=42,
     ):
         self.target = target
@@ -527,6 +528,19 @@ class Fuzzer:
         self.persistent = persistent
         self.seed = seed
         random.seed(seed)
+
+        # Cmplog: comparison tracing via LD_PRELOAD
+        self._cmplog = None
+        if cmplog:
+            from fuzzer_tool.core.cmplog import CmplogCollector
+
+            self._cmplog = CmplogCollector()
+            if self._cmplog.start():
+                print("[*] Cmplog: comparison tracing enabled (memcmp/strcmp/strncmp/memchr)")
+            else:
+                print("[!] Cmplog: failed to compile shim, disabling")
+                self._cmplog = None
+
         if self.file_mode:
             self._tmp_dir = Path(tempfile.mkdtemp(prefix="fuzzer_"))
             atexit.register(_cleanup_tmp_dir, self._tmp_dir)
@@ -673,6 +687,8 @@ class Fuzzer:
             env["AFL_MAP_SIZE"] = "65536"
         if self.shm_cov:
             env["__AFL_SHM_ID"] = self.shm_cov.env_id
+        if self._cmplog:
+            env = self._cmplog.setup_env(env)
 
         if self.file_mode:
             return run_target_file(
@@ -1096,6 +1112,13 @@ class Fuzzer:
         self.exec_count += 1
         if self.mc:
             self.mc.execs_since_refit += 1
+
+        # Collect cmplog tokens after each execution
+        if self._cmplog:
+            new_tokens = self._cmplog.collect_tokens()
+            for token in new_tokens:
+                if token and token not in self.dictionary:
+                    self.dictionary.append(token)
 
         if self.exec_count % 100 == 0:
             rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss

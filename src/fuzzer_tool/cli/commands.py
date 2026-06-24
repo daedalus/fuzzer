@@ -145,9 +145,7 @@ def cmd_fuzz(args):
         coverage_log=args.coverage_log,
         grammar=grammar,
         persistent=args.persistent,
-        inprocess=args.inprocess or args.inprocess_direct,
-        inprocess_direct=args.inprocess_direct,
-        inprocess_func=args.inprocess_func,
+        cmplog=args.cmplog,
         seed=args.seed,
     )
     fuzzer.run(iterations=args.iterations)
@@ -367,6 +365,11 @@ def main() -> int:
     )
     fuzz_parser.add_argument(
         "--auto-timeout", action="store_true", help="Auto-tune timeout by probing target at startup"
+    )
+    fuzz_parser.add_argument(
+        "--cmplog",
+        action="store_true",
+        help="Enable comparison tracing via LD_PRELOAD (memcmp/strcmp/strncmp/memchr interception)",
     )
     fuzz_parser.add_argument(
         "--coverage-log",
