@@ -124,8 +124,8 @@ static int run_executable(const uint8_t *data, size_t len, uint8_t *bmp, int *bm
     int rc = -2;
     if (waited < 0) {
         /* waitpid interrupted (by SIGALRM) — child timed out, kill it */
-        kill(pid, SIGKILL);
-        waitpid(pid, NULL, 0);
+        if (kill(pid, SIGKILL) == 0)
+            waitpid(pid, NULL, 0);
         rc = -1; /* timeout */
     } else if (WIFEXITED(status)) {
         rc = WEXITSTATUS(status);

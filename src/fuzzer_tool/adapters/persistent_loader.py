@@ -221,6 +221,7 @@ class PersistentLoader:
         self._ready = False
         self._last_bitmap: bytes | None = None
         self._bitmap_out: str | None = None
+        self._restarting: bool = False
 
     @classmethod
     def _ensure_c_loader(cls) -> str | None:
@@ -376,9 +377,14 @@ class PersistentLoader:
                     self._proc.kill()
                     self._proc.wait()
                 self._ready = False
-                # Auto-restart: attempt to start a fresh loader
-                if self.start():
-                    return self.run_one(data)
+                # Auto-restart (once) to avoid unbounded recursion
+                if not self._restarting:
+                    self._restarting = True
+                    try:
+                        if self.start():
+                            return self.run_one(data)
+                    finally:
+                        self._restarting = False
                 return -1, None
             bitmap = result[0]
 
