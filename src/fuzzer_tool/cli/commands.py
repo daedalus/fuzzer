@@ -146,6 +146,7 @@ def cmd_fuzz(args):
         grammar=grammar,
         persistent=args.persistent,
         cmplog=args.cmplog,
+        max_corpus=args.max_corpus,
         seed=args.seed,
     )
     fuzzer.run(iterations=args.iterations)
@@ -390,6 +391,12 @@ def main() -> int:
         "--cmplog",
         action="store_true",
         help="Enable comparison tracing via LD_PRELOAD (memcmp/strcmp/strncmp/memchr interception)",
+    )
+    fuzz_parser.add_argument(
+        "--max-corpus",
+        type=int,
+        default=0,
+        help="Auto-minimize corpus when it exceeds N entries (0=unlimited)",
     )
     fuzz_parser.add_argument(
         "--coverage-log",

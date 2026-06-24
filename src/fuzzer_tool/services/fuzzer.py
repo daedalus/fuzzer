@@ -508,6 +508,7 @@ class Fuzzer:
         inprocess_direct=False,
         inprocess_func="LLVMFuzzerTestOneInput",
         cmplog=False,
+        max_corpus=0,
         seed=42,
     ):
         self.target = target
@@ -520,6 +521,7 @@ class Fuzzer:
         self.dictionary = dictionary or []
         self.file_mode = file_mode
         self.target_args = target_args or []
+        self.max_corpus = max_corpus
         self.coverage_report = Path(coverage_report) if coverage_report else None
         self.coverage_log = Path(coverage_log) if coverage_log else None
         if self.coverage_log:
@@ -658,10 +660,14 @@ class Fuzzer:
             self.seed_meta[seed] = {
                 "fuzz_count": 0,
                 "coverage_edges": 0,
-                "edge_bitmap": bytearray(0),  # per-seed edge set
-                "redqueen_offsets": [],  # byte offsets that caused branch comparisons
+                "edge_bitmap": bytearray(0),
+                "redqueen_offsets": [],
                 "added_at": now,
             }
+        # Per-seed edge tracking for subsumption-aware scheduling
+        from fuzzer_tool.core.edge_tracker import EdgeTracker
+
+        self._edge_tracker = EdgeTracker()
 
     def _run_target(self, data: bytes) -> tuple[int, str]:
         if self._inprocess_runner:
@@ -1092,6 +1098,54 @@ class Fuzzer:
             }
             self.markov.train(data)
             self.markov_trained = self.markov.is_trained()
+            # Auto-minimize if corpus exceeds max
+            if self.max_corpus > 0 and len(self.corpus) > self.max_corpus:
+                self._auto_minimize_corpus()
+
+    def _auto_minimize_corpus(self):
+        """Inline corpus minimization: hash dedup + subsumption pruning."""
+        if not self.corpus:
+            return
+
+        from fuzzer_tool.adapters.filesystem import hash_data
+
+        # Deduplicate by content hash
+        seen: set[str] = set()
+        unique: list[bytes] = []
+        for seed in self.corpus:
+            h = hash_data(seed)
+            if h not in seen:
+                seen.add(h)
+                unique.append(seed)
+
+        # Prune subsumed seeds
+        if len(unique) > self.max_corpus:
+            # Score each seed: unique edges * inverse fuzz count
+            scored = []
+            for seed in unique:
+                seed_key = str(hash(seed))
+                edge_count = self._edge_tracker.get_seed_edge_count(seed_key)
+                meta = self.seed_meta.get(seed)
+                fuzz = meta["fuzz_count"] if meta else 0
+                score = edge_count * 10 + (1.0 / max(fuzz, 1))
+                scored.append((score, seed))
+            scored.sort(key=lambda x: x[0], reverse=True)
+            unique = [s for _, s in scored[: self.max_corpus]]
+
+        removed = len(self.corpus) - len(unique)
+        if removed > 0:
+            self.corpus = unique
+            # Rebuild seed_meta for kept seeds
+            new_meta = {}
+            for seed in unique:
+                if seed in self.seed_meta:
+                    new_meta[seed] = self.seed_meta[seed]
+            self.seed_meta = new_meta
+            log.info(
+                "Auto-minimized corpus: %d -> %d seeds",
+                len(self.corpus) + removed,
+                len(self.corpus),
+            )
 
     def _pick_seed(self) -> bytes:
         if self.markov_generate and self.markov_trained and random.random() < 0.15:
@@ -1115,6 +1169,10 @@ class Fuzzer:
             coverage = meta["coverage_edges"]
             age = now - meta["added_at"]
             w = (1.0 / math.sqrt(fuzz_count)) * (1.0 + coverage * 0.5) / (1.0 + age * 0.01)
+            # Apply subsumption penalty from edge tracker
+            seed_key = hash(seed)
+            subsumption = self._edge_tracker.compute_subsumption_weight(str(seed_key))
+            w *= subsumption
             weights.append(max(w, 1e-6))
         return random.choices(self.corpus, weights=weights, k=1)[0]
 
@@ -1170,6 +1228,16 @@ class Fuzzer:
         has_new_coverage = (self.ptrace_cov and self.ptrace_cov.is_new_coverage()) or (
             self.shm_cov and self.shm_cov.is_new_coverage()
         )
+
+        # Record edges for per-seed tracking
+        if has_new_coverage:
+            edge_bitmap = self._get_current_edge_bitmap()
+            if edge_bitmap:
+                seed_key = str(hash(data))
+                new = self._edge_tracker.record_edges(seed_key, edge_bitmap)
+                if meta is not None and new:
+                    meta["coverage_edges"] += len(new)
+
         success = is_crash or is_interesting or has_new_coverage
 
         if success:
@@ -1275,12 +1343,22 @@ class Fuzzer:
             cumulative = self.shm_cov.cumulative_edges
         elif self.ptrace_cov:
             cumulative = self.ptrace_cov.cumulative_edges
+        elif hasattr(self, "_edge_tracker"):
+            cumulative = self._edge_tracker.get_cumulative_edge_count()
         elapsed = time.time() - self.start_time
         line = (
             f"{elapsed:.1f},{self.exec_count},{cumulative},{len(self.corpus)},{self.crash_count}\n"
         )
         with open(self.coverage_log, "a") as f:
             f.write(line)
+
+    def _get_current_edge_bitmap(self) -> bytes | None:
+        """Get the current coverage edge bitmap."""
+        if self.shm_cov:
+            return bytes(self.shm_cov.edge_map)
+        if self.ptrace_cov:
+            return bytes(self.ptrace_cov.edge_map)
+        return None
 
     def _format_elapsed(self) -> str:
         elapsed = time.time() - self.start_time

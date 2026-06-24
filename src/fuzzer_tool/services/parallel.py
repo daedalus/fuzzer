@@ -200,6 +200,8 @@ def run_parallel(
 
     processes = []
     restart_counts = [0] * jobs
+    # Live aggregated stats
+    worker_stats: dict[int, dict] = {}
     worker_kwargs = dict(
         result_queue=result_queue,
         target=target,
@@ -258,6 +260,14 @@ def run_parallel(
                         )
                         processes[i] = _spawn_worker(i, new_seed)
 
+            # Drain result_queue for live aggregated stats
+            while not result_queue.empty():
+                try:
+                    result = result_queue.get_nowait()
+                    worker_stats[result["worker_id"]] = result
+                except Exception:
+                    break
+
             alive = any(p.is_alive() for p in processes)
             if not alive:
                 break
@@ -270,16 +280,22 @@ def run_parallel(
         if p.is_alive():
             p.terminate()
 
-    # Collect results from queue
-    total_execs = 0
-    total_crashes = 0
+    # Final summary from aggregated stats (drain any remaining)
     while not result_queue.empty():
         try:
             result = result_queue.get_nowait()
-            total_execs += result["exec_count"]
-            total_crashes += result["crash_count"]
+            wid = result["worker_id"]
+            worker_stats[wid] = result
         except Exception:
             break
 
+    total_execs = sum(r["exec_count"] for r in worker_stats.values())
+    total_crashes = sum(r["crash_count"] for r in worker_stats.values())
+    total_corpus = sum(r["corpus_size"] for r in worker_stats.values())
+    total_timeouts = sum(r["timeout_count"] for r in worker_stats.values())
+
     print(f"\n[*] All {jobs} workers stopped.")
-    print(f"[*] Total: {total_execs} execs, {total_crashes} crashes")
+    print(
+        f"[*] Total: {total_execs} execs, {total_crashes} crashes, "
+        f"{total_corpus} corpus, {total_timeouts} timeouts"
+    )
