@@ -669,6 +669,9 @@ class Fuzzer:
 
         self._edge_tracker = EdgeTracker()
 
+        # Corpus size distribution: track sizes of entries that produce new coverage
+        self._corpus_size_history: list[int] = []
+
     def _run_target(self, data: bytes) -> tuple[int, str]:
         if self._inprocess_runner:
             if self.shm_cov:
@@ -930,6 +933,30 @@ class Fuzzer:
                 val = random.choice(INTERESTING_32)
                 struct.pack_into("<I", buf, idx, val)
 
+            elif op == "arithmetic" and buf:
+                from fuzzer_tool.core.mutations import ARITHMETIC_DELTAS
+
+                # Try arithmetic on 1/2/4-byte aligned integers
+                width = random.choice([1, 2, 4])
+                if len(buf) >= width:
+                    # Align to width boundary
+                    max_start = len(buf) - width
+                    idx = (random.randint(0, max_start) // width) * width
+                    delta = random.choice(ARITHMETIC_DELTAS)
+                    if random.random() < 0.5:
+                        delta = -delta
+                    if width == 1:
+                        val = (buf[idx] + delta) & 0xFF
+                        buf[idx] = val
+                    elif width == 2:
+                        val = struct.unpack_from("<H", buf, idx)[0]
+                        val = (val + delta) & 0xFFFF
+                        struct.pack_into("<H", buf, idx, val)
+                    elif width == 4:
+                        val = struct.unpack_from("<I", buf, idx)[0]
+                        val = (val + delta) & 0xFFFFFFFF
+                        struct.pack_into("<I", buf, idx, val)
+
             elif op == "random_bytes" and buf:
                 idx = random.randint(0, len(buf) - 1)
                 buf[idx] = random.randint(0, 255)
@@ -997,8 +1024,20 @@ class Fuzzer:
 
             elif op == "redqueen" and buf and parent_meta:
                 offsets = parent_meta.get("redqueen_offsets", [])
-                if offsets:
-                    # Flip bytes at known comparison offsets
+                # True redqueen: replace bytes at comparison offsets with the
+                # other cmplog operand, not just flip. This solves magic bytes
+                # without search.
+                if offsets and self._cmplog and self._cmplog.tokens:
+                    for _ in range(random.randint(1, min(4, len(offsets)))):
+                        off = random.choice(offsets)
+                        if off < len(buf):
+                            # Pick a random cmplog token as replacement
+                            token = random.choice(self._cmplog.tokens)
+                            for j, b_val in enumerate(token):
+                                if off + j < len(buf):
+                                    buf[off + j] = b_val
+                elif offsets:
+                    # Fallback: flip bytes at known offsets
                     for _ in range(random.randint(1, min(4, len(offsets)))):
                         off = random.choice(offsets)
                         if off < len(buf):
@@ -1098,6 +1137,10 @@ class Fuzzer:
             }
             self.markov.train(data)
             self.markov_trained = self.markov.is_trained()
+            # Track corpus size distribution for dynamic max_len
+            self._corpus_size_history.append(len(data))
+            if len(self._corpus_size_history) > 1000:
+                self._corpus_size_history = self._corpus_size_history[-500:]
             # Auto-minimize if corpus exceeds max
             if self.max_corpus > 0 and len(self.corpus) > self.max_corpus:
                 self._auto_minimize_corpus()
@@ -1168,7 +1211,20 @@ class Fuzzer:
             fuzz_count = max(meta["fuzz_count"], 1)
             coverage = meta["coverage_edges"]
             age = now - meta["added_at"]
+
+            # Base weight: inverse fuzz count, boosted by coverage, decayed by age
             w = (1.0 / math.sqrt(fuzz_count)) * (1.0 + coverage * 0.5) / (1.0 + age * 0.01)
+
+            # Energy burst: newly added seeds get up to 5x boost (decays over 60s)
+            burst_factor = max(1.0, 5.0 - (age / 60.0))
+            w *= burst_factor
+
+            # Stale seed detection: seeds fuzzed many times with zero coverage
+            # are nearly eliminated (1% probability kept for rediscovery)
+            staleness = fuzz_count / max(coverage + 1, 1)
+            if staleness > 50:
+                w *= 0.01
+
             # Apply subsumption penalty from edge tracker
             seed_key = hash(seed)
             subsumption = self._edge_tracker.compute_subsumption_weight(str(seed_key))

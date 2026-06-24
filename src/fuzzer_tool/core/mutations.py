@@ -7,12 +7,15 @@ INTERESTING_8 = [0, 1, 0x7F, 0x80, 0xFF]
 INTERESTING_16 = [0x7FFF, 0x8000, 0xFFFF, 0, 1]
 INTERESTING_32 = [0x7FFFFFFF, 0x80000000, 0xFFFFFFFF, 0, 1]
 
+ARITHMETIC_DELTAS = [1, 2, 4, 8, 16, 32]
+
 MUTATIONS = [
     "bit_flip",
     "byte_flip",
     "interesting_8",
     "interesting_16",
     "interesting_32",
+    "arithmetic",
     "random_bytes",
     "block_insert",
     "block_delete",

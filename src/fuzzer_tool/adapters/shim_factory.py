@@ -86,6 +86,7 @@ def _inspect_target(target: str) -> dict:
         "coverage_type": "none",
         "has_sancov_counters": False,
         "has_undefined_sancov_init": False,
+        "has_asan": False,
     }
     if not os.path.isfile(target):
         return info
@@ -104,6 +105,9 @@ def _inspect_target(target: str) -> dict:
                     info["has_undefined_sancov_init"] = True
                 if "__start___sancov_cntrs" in sname:
                     info["has_sancov_counters"] = True
+                # ASAN detection: look for __asan_init or __asan_register_globals
+                if "__asan_init" in sname or "__asan_register_globals" in sname:
+                    info["has_asan"] = True
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
 
