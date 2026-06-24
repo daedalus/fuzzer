@@ -658,6 +658,8 @@ class Fuzzer:
             self.seed_meta[seed] = {
                 "fuzz_count": 0,
                 "coverage_edges": 0,
+                "edge_bitmap": bytearray(0),  # per-seed edge set
+                "redqueen_offsets": [],  # byte offsets that caused branch comparisons
                 "added_at": now,
             }
 
@@ -888,6 +890,10 @@ class Fuzzer:
             ops.append("cem_bytes")
         if self.grammar:
             ops.append("grammar_mutate")
+        # Redqueen: if we know which bytes caused branch comparisons, prefer flipping them
+        parent_meta = self.seed_meta.get(data)
+        if parent_meta and parent_meta.get("redqueen_offsets"):
+            ops.append("redqueen")
 
         self._last_ops_used = []
 
@@ -983,6 +989,15 @@ class Fuzzer:
                 mutated = self.grammar.mutate(bytes(buf), max_len=self.max_len)
                 buf = bytearray(mutated[: self.max_len])
 
+            elif op == "redqueen" and buf and parent_meta:
+                offsets = parent_meta.get("redqueen_offsets", [])
+                if offsets:
+                    # Flip bytes at known comparison offsets
+                    for _ in range(random.randint(1, min(4, len(offsets)))):
+                        off = random.choice(offsets)
+                        if off < len(buf):
+                            buf[off] ^= 0xFF
+
             elif op == "havoc":
                 return bytes(self._havoc_mutate(buf))
 
@@ -1071,6 +1086,8 @@ class Fuzzer:
             self.seed_meta[data] = {
                 "fuzz_count": 0,
                 "coverage_edges": 0,
+                "edge_bitmap": bytearray(0),
+                "redqueen_offsets": [],
                 "added_at": time.time(),
             }
             self.markov.train(data)
@@ -1119,6 +1136,22 @@ class Fuzzer:
             for token in new_tokens:
                 if token and token not in self.dictionary:
                     self.dictionary.append(token)
+            # Record redqueen offsets: which bytes in the input caused comparisons
+            if new_tokens and meta is not None:
+                offsets = set(meta.get("redqueen_offsets", []))
+                for token in new_tokens:
+                    if len(token) < 2:
+                        continue
+                    # Find where this token appears in the mutated input
+                    pos = 0
+                    while pos <= len(mutated) - len(token):
+                        idx = mutated.find(token, pos)
+                        if idx == -1:
+                            break
+                        for j in range(idx, idx + len(token)):
+                            offsets.add(j)
+                        pos = idx + 1
+                meta["redqueen_offsets"] = list(offsets)[:50]
 
         if self.exec_count % 100 == 0:
             rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss

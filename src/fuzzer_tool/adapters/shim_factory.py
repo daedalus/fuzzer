@@ -140,6 +140,27 @@ def build_minimal_shim() -> str | None:
     return None
 
 
+def build_sancov_shim() -> str | None:
+    """Build a sanitizer coverage LD_PRELOAD shim for Clang-instrumented binaries.
+
+    Intercepts __sanitizer_cov_trace_pc_guard and writes edge indices
+    to a bitmap file. Provides coverage feedback without AFL or ptrace.
+
+    Returns:
+        Path to compiled .so, or None on failure.
+    """
+    shim_src = os.path.join(os.path.dirname(__file__), "sancov_shim.c")
+    if not os.path.exists(shim_src):
+        return None
+
+    out_path = os.path.join(tempfile.gettempdir(), "fuzz_sancov_shim.so")
+    with open(shim_src) as f:
+        src = f.read()
+    if _compile_source(src, out_path):
+        return out_path
+    return None
+
+
 class BitmapReader:
     """Read the sancov coverage bitmap from a loaded target .so.
 

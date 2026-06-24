@@ -182,6 +182,26 @@ def _auto_tune_timeout(target, file_mode=False, target_args=None, runs=10):
     return max(5 * median, 0.5)
 
 
+def cmd_import(args):
+    """Import corpus from AFL/libFuzzer/honggfuzz."""
+    from fuzzer_tool.services.import_corpus import (
+        import_from_afl,
+        import_from_honggfuzz,
+        import_from_libfuzzer,
+    )
+
+    if args.format == "afl":
+        seeds, crashes = import_from_afl(args.source_dir, args.corpus, args.crashes)
+        print(f"[+] Imported {seeds} seeds, {crashes} crashes from AFL output")
+    elif args.format == "libfuzzer":
+        imported = import_from_libfuzzer(args.source_dir, args.corpus)
+        print(f"[+] Imported {imported} seeds from libFuzzer corpus")
+    elif args.format == "honggfuzz":
+        imported, _ = import_from_honggfuzz(args.source_dir, args.corpus, args.crashes)
+        print(f"[+] Imported {imported} seeds from honggfuzz")
+    return 0
+
+
 def cmd_tmin(args):
     """Crash minimizer subcommand."""
     _validate_target(args.target)
@@ -485,6 +505,23 @@ def main() -> int:
         help="Target arguments ({file} placeholder)",
     )
     replay_parser.set_defaults(func=cmd_replay)
+
+    # --- import ---
+    import_parser = subparsers.add_parser(
+        "import", help="Import corpus from AFL/libFuzzer/honggfuzz"
+    )
+    import_parser.add_argument("source_dir", help="Source directory")
+    import_parser.add_argument("-d", "--corpus", required=True, help="Destination corpus directory")
+    import_parser.add_argument(
+        "-o", "--crashes", default=None, help="Destination crashes directory"
+    )
+    import_parser.add_argument(
+        "--format",
+        choices=["afl", "libfuzzer", "honggfuzz"],
+        default="afl",
+        help="Source format (default: afl)",
+    )
+    import_parser.set_defaults(func=cmd_import)
 
     args = parser.parse_args()
 
