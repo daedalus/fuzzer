@@ -131,6 +131,7 @@ class PtraceCoverage:
         self._elf_data: bytes = b""
         self._load_segments: list[tuple[int, int, int, int]] = []
         self._is_pie: bool = True  # assume PIE until proven otherwise
+        self._is_x86_64: bool = False  # cached platform check
 
         if self.deep_coverage:
             self._disassembler = Cs(CS_ARCH_X86, CS_MODE_64)
@@ -138,6 +139,11 @@ class PtraceCoverage:
             self._parse_elf_segments()
 
         self._collect_basic_blocks()
+
+        # Cache platform check once (avoids import + call in hot SIGTRAP loop)
+        import platform as _platform
+
+        self._is_x86_64 = _platform.machine() == "x86_64"
 
     def _collect_basic_blocks(self):
         try:
@@ -752,12 +758,8 @@ class Fuzzer:
                     sig = os.WSTOPSIG(status)
                     last_sig = sig
                     if sig == signal.SIGTRAP:
-                        import platform
-
-                        if platform.machine() != "x86_64":
-                            log.warning(
-                                "ptrace coverage requires x86_64, found %s", platform.machine()
-                            )
+                        if not self._is_x86_64:
+                            log.warning("ptrace coverage requires x86_64")
                             break
                         regs_buf = (ctypes.c_char * (27 * 8))()
                         libc.ptrace(PTRACE_GETREGS, pid, None, regs_buf)

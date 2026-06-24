@@ -371,11 +371,14 @@ class PersistentLoader:
             t.start()
             t.join(timeout=self.timeout)
             if t.is_alive():
-                log.warning("Bitmap read timed out after %.1fs, killing loader", self.timeout)
+                log.warning("Bitmap read timed out after %.1fs, restarting loader", self.timeout)
                 with contextlib.suppress(Exception):
                     self._proc.kill()
                     self._proc.wait()
                 self._ready = False
+                # Auto-restart: attempt to start a fresh loader
+                if self.start():
+                    return self.run_one(data)
                 return -1, None
             bitmap = result[0]
 

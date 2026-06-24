@@ -14,10 +14,11 @@ import ctypes
 import hashlib
 import logging
 import os
-import struct
 import subprocess
 import tempfile
 from dataclasses import dataclass
+
+from fuzzer_tool.core.elf import find_load_segment, parse_sancov_offsets
 
 log = logging.getLogger(__name__)
 
@@ -127,84 +128,6 @@ def _inspect_target(target: str) -> dict:
     return info
 
 
-def _parse_elf_sancov_offsets(target: str) -> tuple[int, int] | None:
-    """Parse ELF to find __start/__stop___sancov_cntrs virtual addresses."""
-    try:
-        with open(target, "rb") as f:
-            elf = f.read()
-        if len(elf) < 64 or elf[:4] != b"\x7fELF":
-            return None
-        if elf[4] != 2 or elf[5] != 1:  # ELF64, little-endian
-            return None
-        e_shoff = struct.unpack_from("<Q", elf, 40)[0]
-        e_shnum = struct.unpack_from("<H", elf, 60)[0]
-        e_shentsize = struct.unpack_from("<H", elf, 58)[0]
-        e_shstrndx = struct.unpack_from("<H", elf, 62)[0]
-        if e_shnum == 0 or e_shstrndx >= e_shnum:
-            return None
-        shstr_off = e_shoff + e_shstrndx * e_shentsize
-        shstr_offset = struct.unpack_from("<Q", elf, shstr_off + 24)[0]
-        symtab_sec = strtab_sec = None
-        for i in range(e_shnum):
-            sh = e_shoff + i * e_shentsize
-            sh_type = struct.unpack_from("<I", elf, sh + 4)[0]
-            sh_name_idx = struct.unpack_from("<I", elf, sh)[0]
-            name = elf[shstr_offset + sh_name_idx : shstr_offset + sh_name_idx + 32].split(b"\x00")[
-                0
-            ]
-            if sh_type == 2:
-                symtab_sec = sh
-            elif sh_type == 3 and name == b".strtab":
-                strtab_sec = sh
-        if symtab_sec is None or strtab_sec is None:
-            return None
-        sym_offset = struct.unpack_from("<Q", elf, symtab_sec + 24)[0]
-        sym_size = struct.unpack_from("<Q", elf, symtab_sec + 32)[0]
-        sym_entsize = struct.unpack_from("<Q", elf, symtab_sec + 56)[0]
-        if sym_entsize == 0:
-            return None
-        sym_count = sym_size // sym_entsize
-        strtab_offset = struct.unpack_from("<Q", elf, strtab_sec + 24)[0]
-        start_addr = stop_addr = None
-        for i in range(min(sym_count, 10000)):
-            sym = sym_offset + i * sym_entsize
-            st_value = struct.unpack_from("<Q", elf, sym + 8)[0]
-            st_name_idx = struct.unpack_from("<I", elf, sym)[0]
-            name = (
-                elf[strtab_offset + st_name_idx : strtab_offset + st_name_idx + 64]
-                .split(b"\x00")[0]
-                .decode(errors="replace")
-            )
-            if name == "__start___sancov_cntrs" and st_value > 0:
-                start_addr = st_value
-            elif name == "__stop___sancov_cntrs" and st_value > 0:
-                stop_addr = st_value
-        if start_addr is not None and stop_addr is not None:
-            return (start_addr, stop_addr)
-    except Exception as e:
-        log.debug("ELF parse failed: %s", e)
-    return None
-
-
-def _find_load_segment(elf_data: bytes, vaddr: int) -> tuple[int, int, int] | None:
-    """Find the LOAD segment containing vaddr. Returns (base_vaddr, filesz, memsz)."""
-    if len(elf_data) < 64 or elf_data[:4] != b"\x7fELF":
-        return None
-    e_phoff = struct.unpack_from("<Q", elf_data, 32)[0]
-    e_phentsize = struct.unpack_from("<H", elf_data, 54)[0]
-    e_phnum = struct.unpack_from("<H", elf_data, 56)[0]
-    for i in range(e_phnum):
-        off = e_phoff + i * e_phentsize
-        p_type = struct.unpack_from("<I", elf_data, off)[0]
-        if p_type == 1:  # PT_LOAD
-            p_vaddr = struct.unpack_from("<Q", elf_data, off + 16)[0]
-            p_filesz = struct.unpack_from("<Q", elf_data, off + 32)[0]
-            p_memsz = struct.unpack_from("<Q", elf_data, off + 40)[0]
-            if p_vaddr <= vaddr < p_vaddr + p_memsz:
-                return (p_vaddr, p_filesz, p_memsz)
-    return None
-
-
 def build_minimal_shim() -> str | None:
     """Build a minimal shim that only provides __sanitizer_cov_8bit_counters_init."""
     key = _cache_key("minimal_shim", "noop")
@@ -236,7 +159,7 @@ class BitmapReader:
 
     def _setup(self):
         # Parse ELF to find sancov counter virtual addresses
-        self._counter_offsets = _parse_elf_sancov_offsets(self.target)
+        self._counter_offsets = parse_sancov_offsets(self.target)
         if self._counter_offsets is None:
             log.warning("No sancov counters found in %s", self.target)
             return
@@ -258,7 +181,7 @@ class BitmapReader:
 
         if self._base_address is None:
             # Fallback: try to find via the first LOAD segment
-            vaddr, _, _ = _find_load_segment(self._elf_data, self._counter_offsets[0]) or (0, 0, 0)
+            vaddr, _, _ = find_load_segment(self._elf_data, self._counter_offsets[0]) or (0, 0, 0)
             # Get base from the loaded library's first symbol
             try:
                 first_sym = (ctypes.c_char * 1).in_dll(self.lib, "__start___sancov_cntrs")
@@ -269,7 +192,7 @@ class BitmapReader:
 
         # Calculate runtime addresses
         start_elf, stop_elf = self._counter_offsets
-        seg = _find_load_segment(self._elf_data, start_elf)
+        seg = find_load_segment(self._elf_data, start_elf)
         if seg:
             seg_vaddr = seg[0]
             self._runtime_start = self._base_address + (start_elf - seg_vaddr)
@@ -337,7 +260,7 @@ def build_shim(target: str, mode: str = "auto") -> ShimResult:
         shim_path = build_minimal_shim()
         if shim_path:
             # Find sancov counter offsets via ELF parsing
-            offsets = _parse_elf_sancov_offsets(target)
+            offsets = parse_sancov_offsets(target)
             bitmap_size = 0
             if offsets:
                 bitmap_size = offsets[1] - offsets[0]

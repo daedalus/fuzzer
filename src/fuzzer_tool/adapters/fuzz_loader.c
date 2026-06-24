@@ -116,14 +116,22 @@ static int run_executable(const uint8_t *data, size_t len, uint8_t *bmp, int *bm
 
     /* Wait for child */
     int status = 0;
-    waitpid(pid, &status, 0);
+    pid_t waited = waitpid(pid, &status, 0);
 
     alarm(0); /* cancel alarm */
     signal(SIGALRM, SIG_DFL);
 
     int rc = -2;
-    if (WIFEXITED(status)) rc = WEXITSTATUS(status);
-    else if (WIFSIGNALED(status)) rc = -WTERMSIG(status);
+    if (waited < 0) {
+        /* waitpid interrupted (by SIGALRM) — child timed out, kill it */
+        kill(pid, SIGKILL);
+        waitpid(pid, NULL, 0);
+        rc = -1; /* timeout */
+    } else if (WIFEXITED(status)) {
+        rc = WEXITSTATUS(status);
+    } else if (WIFSIGNALED(status)) {
+        rc = -WTERMSIG(status);
+    }
 
     /* Read bitmap from file */
     *bmp_len = read_bitmap_file(bmp, MAX_BMP);
