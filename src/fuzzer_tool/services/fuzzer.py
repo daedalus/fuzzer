@@ -3,6 +3,7 @@
 import atexit
 import contextlib
 import ctypes
+import hashlib
 import json
 import logging
 import math
@@ -999,6 +1000,45 @@ class Fuzzer:
             del buf[idx : idx + size]
 
     def save_crash(self, data: bytes, returncode: int, stderr: str):
+        from fuzzer_tool.adapters.filesystem import hash_data
+        from fuzzer_tool.core.crash_metadata import CrashMetadata, find_nearest_corpus
+
+        meta = CrashMetadata()
+        meta.exec_count = self.exec_count
+        meta.corpus_size = len(self.corpus)
+        meta.target = self.target
+        meta.mutation_ops = list(self._last_ops_used)
+        meta.elapsed = self._format_elapsed()
+
+        # Parent seed hash (the seed that was mutated)
+        if self.corpus:
+            parent = self._last_parent_seed if hasattr(self, "_last_parent_seed") else None
+            if parent:
+                meta.parent_seed_hash = hash_data(parent)
+
+        # Target SHA256 (computed once, cached)
+        if not hasattr(self, "_target_sha256"):
+            try:
+                self._target_sha256 = hashlib.sha256(Path(self.target).read_bytes()).hexdigest()[
+                    :16
+                ]
+            except Exception:
+                self._target_sha256 = "unknown"
+        meta.target_sha256 = self._target_sha256
+
+        # Nearest corpus entry
+        if self.corpus:
+            label, sim, diffs = find_nearest_corpus(data, self.corpus)
+            meta.nearest_corpus_file = label
+            meta.nearest_similarity = sim
+            meta.diff_bytes = diffs
+
+        # Register state from ptrace (if active)
+        if self.ptrace_cov and hasattr(self, "_last_regs"):
+            meta.rip = self._last_regs.get("rip", 0)
+            meta.rsp = self._last_regs.get("rsp", 0)
+            meta.rbp = self._last_regs.get("rbp", 0)
+
         save_crash(
             data,
             returncode,
@@ -1006,6 +1046,7 @@ class Fuzzer:
             self.crashes_dir,
             self.crash_hashes,
             self.crash_sigs,
+            metadata=meta,
         )
 
     def save_to_corpus(self, data: bytes):
@@ -1045,6 +1086,7 @@ class Fuzzer:
         return random.choices(self.corpus, weights=weights, k=1)[0]
 
     def fuzz_one(self, data: bytes) -> bool:
+        self._last_parent_seed = data
         meta = self.seed_meta.get(data)
         if meta is not None:
             meta["fuzz_count"] += 1
@@ -1183,6 +1225,12 @@ class Fuzzer:
         )
         with open(self.coverage_log, "a") as f:
             f.write(line)
+
+    def _format_elapsed(self) -> str:
+        elapsed = time.time() - self.start_time
+        h, rem = divmod(int(elapsed), 3600)
+        m, s = divmod(rem, 60)
+        return f"{h:02d}:{m:02d}:{s:02d}"
 
     def print_stats(self):
         elapsed = time.time() - self.start_time

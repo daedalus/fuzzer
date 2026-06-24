@@ -1,10 +1,12 @@
 """Filesystem operations for corpus and crash management."""
 
 import hashlib
+import os
 import time
 from pathlib import Path
 
 from fuzzer_tool.core.bloom import BloomFilter
+from fuzzer_tool.core.crash_metadata import CrashMetadata
 from fuzzer_tool.core.sanitizer import SanitizerReport
 
 
@@ -91,12 +93,15 @@ def save_crash(
     crashes_dir: Path,
     crash_hashes: set[str],
     crash_sigs: dict[str, int],
+    metadata: CrashMetadata | None = None,
 ) -> bool:
-    """Save crash input with metadata.
+    """Save crash input with enriched triage metadata.
 
-    Deduplicates by crash signature (sanitizer:type@frames) so that two
-    different inputs triggering the same bug only save the first one.
-    Input-hash dedup is also checked as a fast path.
+    Deduplicates by crash signature. Generates:
+    - .bin — crash input bytes
+    - .txt — enriched sidecar with all context
+    - .sh — self-contained reproducer script
+    - .hex — hexdump of input
 
     Args:
         data: Crashing input bytes.
@@ -105,6 +110,7 @@ def save_crash(
         crashes_dir: Path to crashes directory.
         crash_hashes: Set of already-seen crash hashes.
         crash_sigs: Dict of signature -> count.
+        metadata: Optional pre-built CrashMetadata from the fuzzer.
 
     Returns:
         True if saved (new crash), False if duplicate.
@@ -125,28 +131,60 @@ def save_crash(
     crash_hashes.add(h)
     crash_sigs[sig] = 1
 
+    # Build CrashMetadata if not provided
+    if metadata is None:
+        metadata = CrashMetadata()
+
+    metadata.build_cluster_id(sig)
+
+    # Derive error short name for filename
+    if report and report.is_valid():
+        error_short = report.error_type.replace("-", "")[:20]
+        sanitizer_short = report.sanitizer.replace("Sanitizer", "")[:4].lower()
+    else:
+        error_short = f"signal{abs(returncode)}"
+        sanitizer_short = "sig"
+
+    # Fill timestamp if not set
+    if not metadata.timestamp:
+        metadata.timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    if not metadata.fuzzer_pid:
+        metadata.fuzzer_pid = os.getpid()
+
     ts = int(time.time())
-    crash_file = crashes_dir / f"crash_{ts}_{h}"
+    base_name = f"crash_{ts}_{metadata.cluster_id}_{sanitizer_short}_{error_short}"
+
+    # Write crash input
+    crash_file = crashes_dir / f"{base_name}.bin"
     crash_file.write_bytes(data)
 
-    meta = crash_file.with_suffix(".txt")
-    lines = [f"returncode: {returncode}"]
-    if report and report.is_valid():
-        lines.extend(
-            [
-                f"sanitizer: {report.sanitizer}",
-                f"error: {report.error_type}",
-                f"fault_addr: {report.fault_addr}",
-                f"signature: {sig}",
-                f"seen: {crash_sigs[sig]}x",
-                "",
-                "=== stack trace ===",
-            ]
-        )
-        for i, frame in enumerate(report.frames[:12]):
-            lines.append(f"  #{i} {frame}")
-        lines.extend(["", "=== raw stderr ===", report.raw])
+    # Build and write enriched sidecar
+    if report:
+        metadata.sanitizer = report.sanitizer
+        metadata.error_type = report.error_type
+        metadata.fault_addr = report.fault_addr
+        metadata.frames = report.frames
+        metadata.access_type = report.access_type
+        metadata.access_size = report.access_size
+        metadata.shadow_info = report.shadow_info
+        metadata.alloc_frames = report.alloc_frames
+        metadata.dealloc_frames = report.dealloc_frames
+        metadata.exploitability = report.exploitability
     else:
-        lines.extend(["", "=== stderr ===", stderr])
-    meta.write_text("\n".join(lines))
+        metadata._returncode = returncode
+
+    sidecar = crashes_dir / f"{base_name}.txt"
+    sidecar.write_text(metadata.format_sidecar())
+
+    # Write reproducer script
+    script = crashes_dir / f"{base_name}.sh"
+    script.write_text(metadata.format_reproducer(data, metadata.target or "./target"))
+    script.chmod(0o755)
+
+    # Write hexdump
+    hexdump_file = crashes_dir / f"{base_name}.hex"
+    metadata.build_hexdump(data)
+    metadata.build_text_repr(data)
+    hexdump_file.write_text(metadata.input_hexdump + "\n\n" + metadata.input_text_repr + "\n")
+
     return True

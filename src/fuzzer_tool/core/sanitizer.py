@@ -33,6 +33,45 @@ SANITIZER_FAULT_ADDR_RE = re.compile(
     re.IGNORECASE,
 )
 
+# New patterns for enriched ASAN output
+SANITIZER_ACCESS_RE = re.compile(
+    r"(READ|WRITE|FREE)\s+of\s+size\s+(\d+)",
+    re.IGNORECASE,
+)
+SANITIZER_SHADOW_RE = re.compile(
+    r"(0x[0-9a-f]+,\s*(?:heap-.*|stack-.*|global-.*|freed|allocated|addressable|partial)\b[^\n]*)",
+    re.IGNORECASE,
+)
+SANITIZER_ALLOC_RE = re.compile(
+    r"allocated by thread (?:T\d+ )?(?:here|C\d+)\s*:?\s*\n(.*?)(?=\n\n|SUMMARY|\Z)",
+    re.DOTALL | re.IGNORECASE,
+)
+SANITIZER_DEALLOC_RE = re.compile(
+    r"freed by thread (?:T\d+ )?(?:here|C\d+)\s*:?\s*\n(.*?)(?=\n\n|SUMMARY|\Z)",
+    re.DOTALL | re.IGNORECASE,
+)
+
+# Exploitability lookup
+ASAN_EXPLOITABILITY = {
+    # WRITE variants → CRITICAL
+    "heap-buffer-overflow": "CRITICAL",
+    "stack-buffer-overflow": "CRITICAL",
+    "global-buffer-overflow": "CRITICAL",
+    "heap-use-after-free": "CRITICAL",
+    "double-free": "CRITICAL",
+    "heap-buffer-overflow-": "CRITICAL",
+    "dynamic-stack-buffer-overflow": "CRITICAL",
+    # READ variants → MEDIUM-HIGH
+    "stack-buffer-underflow": "HIGH",
+    "stack-use-after-return": "HIGH",
+    "stack-use-after-scope": "HIGH",
+    "heap-use-after-scope": "MEDIUM",
+    "allocation-size-too-big": "MEDIUM",
+    "invalid-malloc-size": "MEDIUM",
+    "attempting-free-on-non-deallocated-memory": "MEDIUM",
+    "negative-size-param": "MEDIUM",
+}
+
 
 class SanitizerReport:
     """Parsed sanitizer output from a crashed process.
@@ -44,16 +83,28 @@ class SanitizerReport:
         frames: List of stack frame function names.
         raw: Raw stderr output.
         signature: Unique crash signature string.
-
-    Examples:
-        >>> report = SanitizerReport.parse("AddressSanitizer: heap-buffer-overflow")
-        >>> report.sanitizer
-        'AddressSanitizer'
-        >>> report.error_type
-        'heap-buffer-overflow'
+        access_type: "READ", "WRITE", or "FREE" if detected.
+        access_size: Memory access size in bytes if detected.
+        shadow_info: Shadow memory description string.
+        alloc_frames: Stack frames from allocation site.
+        dealloc_frames: Stack frames from deallocation site.
+        exploitability: Estimated exploitability (CRITICAL/HIGH/MEDIUM/LOW).
     """
 
-    __slots__ = ("sanitizer", "error_type", "fault_addr", "frames", "raw", "signature")
+    __slots__ = (
+        "sanitizer",
+        "error_type",
+        "fault_addr",
+        "frames",
+        "raw",
+        "signature",
+        "access_type",
+        "access_size",
+        "shadow_info",
+        "alloc_frames",
+        "dealloc_frames",
+        "exploitability",
+    )
 
     def __init__(
         self,
@@ -69,6 +120,49 @@ class SanitizerReport:
         self.frames = frames
         self.raw = raw
         self.signature = self._build_signature()
+
+        # Enriched fields
+        self.access_type: str | None = None
+        self.access_size: int | None = None
+        self.shadow_info: str = ""
+        self.alloc_frames: list[str] | None = None
+        self.dealloc_frames: list[str] | None = None
+        self.exploitability: str = "UNKNOWN"
+        self._parse_enriched_fields()
+
+    def _parse_enriched_fields(self):
+        """Parse additional fields from the raw stderr."""
+        if not self.raw:
+            return
+
+        # Access type and size
+        m = SANITIZER_ACCESS_RE.search(self.raw)
+        if m:
+            self.access_type = m.group(1).upper()
+            self.access_size = int(m.group(2))
+
+        # Shadow memory info
+        m = SANITIZER_SHADOW_RE.search(self.raw)
+        if m:
+            self.shadow_info = m.group(1).strip()
+
+        # Allocation stack
+        m = SANITIZER_ALLOC_RE.search(self.raw)
+        if m:
+            self.alloc_frames = SANITIZER_STACK_FRAME_RE.findall(m.group(1))
+
+        # Deallocation stack
+        m = SANITIZER_DEALLOC_RE.search(self.raw)
+        if m:
+            self.dealloc_frames = SANITIZER_STACK_FRAME_RE.findall(m.group(1))
+
+        # Exploitability
+        if self.sanitizer == "AddressSanitizer":
+            self.exploitability = ASAN_EXPLOITABILITY.get(self.error_type, "MEDIUM")
+        elif self.sanitizer == "MemorySanitizer" or self.sanitizer == "ThreadSanitizer":
+            self.exploitability = "MEDIUM"
+        elif self.sanitizer == "UndefinedBehaviorSanitizer" or self.sanitizer == "LeakSanitizer":
+            self.exploitability = "LOW"
 
     def _build_signature(self) -> str:
         key = f"{self.sanitizer}:{self.error_type}"
