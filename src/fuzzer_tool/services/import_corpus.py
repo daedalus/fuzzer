@@ -6,14 +6,11 @@ Supports importing seeds from:
 - Honggfuzz output: findings/ directory files
 """
 
-import hashlib
 import shutil
 import sys
 from pathlib import Path
 
-
-def _hash_data(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()[:16]
+from fuzzer_tool.adapters.filesystem import hash_data
 
 
 def import_from_afl(
@@ -41,7 +38,7 @@ def import_from_afl(
     # Import existing corpus to avoid re-importing
     for f in corpus_out.iterdir():
         if f.is_file():
-            seen_hashes.add(_hash_data(f.read_bytes()))
+            seen_hashes.add(hash_data(f.read_bytes()))
 
     seeds_imported = 0
     crashes_imported = 0
@@ -53,7 +50,7 @@ def import_from_afl(
             if not f.is_file():
                 continue
             data = f.read_bytes()
-            h = _hash_data(data)
+            h = hash_data(data)
             if h not in seen_hashes:
                 seen_hashes.add(h)
                 dest = corpus_out / f"id_{h}"
@@ -69,7 +66,7 @@ def import_from_afl(
             if not f.is_file() or f.suffix == ".txt":
                 continue
             data = f.read_bytes()
-            h = _hash_data(data)
+            h = hash_data(data)
             dest = crash_out / f"imported_{h}.bin"
             if not dest.exists():
                 dest.write_bytes(data)
@@ -103,7 +100,7 @@ def import_from_libfuzzer(corpus_dir: str, target_corpus: str) -> int:
 
     for f in dest.iterdir():
         if f.is_file():
-            seen_hashes.add(_hash_data(f.read_bytes()))
+            seen_hashes.add(hash_data(f.read_bytes()))
 
     imported = 0
     for f in sorted(src.iterdir()):
@@ -112,7 +109,7 @@ def import_from_libfuzzer(corpus_dir: str, target_corpus: str) -> int:
         data = f.read_bytes()
         if not data:
             continue
-        h = _hash_data(data)
+        h = hash_data(data)
         if h not in seen_hashes:
             seen_hashes.add(h)
             (dest / f"id_{h}").write_bytes(data)
@@ -145,7 +142,7 @@ def import_from_honggfuzz(
 
     for f in dest.iterdir():
         if f.is_file():
-            seen_hashes.add(_hash_data(f.read_bytes()))
+            seen_hashes.add(hash_data(f.read_bytes()))
 
     imported = 0
     for f in sorted(src.iterdir()):
@@ -154,7 +151,7 @@ def import_from_honggfuzz(
         data = f.read_bytes()
         if not data:
             continue
-        h = _hash_data(data)
+        h = hash_data(data)
         if h not in seen_hashes:
             seen_hashes.add(h)
             (dest / f"id_{h}").write_bytes(data)

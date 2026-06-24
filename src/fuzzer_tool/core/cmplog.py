@@ -24,6 +24,7 @@ class CmplogCollector:
     def __init__(self):
         self.log_path: str | None = None
         self.tokens: list[bytes] = []
+        self._token_set: set[bytes] = set()
         self._shim_path: str | None = None
         self._shim_handle = None
 
@@ -31,10 +32,33 @@ class CmplogCollector:
         """Compile and prepare the cmplog shim."""
         from fuzzer_tool.adapters.shim_factory import _find_compiler
 
-        shim_src = os.path.join(os.path.dirname(__file__), "cmplog_shim.c")
+        shim_src = os.path.join(os.path.dirname(__file__), "..", "adapters", "cmplog_shim.c")
         if not os.path.exists(shim_src):
             log.warning("cmplog_shim.c not found at %s", shim_src)
             return False
+
+        # Cache shim in tempdir — don't recompile if already exists
+        out_path = os.path.join(tempfile.gettempdir(), "fuzz_cmplog_shim.so")
+        if os.path.exists(out_path):
+            self._shim_path = out_path
+            log.info("Cmplog shim cached: %s", out_path)
+            return True
+
+        try:
+            compiler = _find_compiler()
+            result = __import__("subprocess").run(
+                [compiler, "-shared", "-fPIC", "-O2", "-ldl", "-o", out_path, shim_src],
+                capture_output=True,
+                timeout=30,
+            )
+            if result.returncode == 0 and os.path.exists(out_path):
+                self._shim_path = out_path
+                log.info("Cmplog shim compiled: %s", out_path)
+                return True
+            log.warning("Cmplog shim compilation failed: %s", result.stderr.decode()[:200])
+        except Exception as e:
+            log.warning("Cmplog shim compilation error: %s", e)
+        return False
 
         out_path = os.path.join(tempfile.gettempdir(), "fuzz_cmplog_shim.so")
         try:
@@ -112,7 +136,8 @@ class CmplogCollector:
         with contextlib.suppress(OSError):
             os.unlink(self.log_path)
 
-        new_tokens = [t for t in tokens if t not in self.tokens]
+        new_tokens = [t for t in tokens if t not in self._token_set]
+        self._token_set.update(tokens)
         self.tokens.extend(new_tokens)
 
         if new_tokens:
@@ -125,12 +150,8 @@ class CmplogCollector:
         return self.tokens
 
     def stop(self):
-        """Clean up shim and log file."""
+        """Clean up log file only (shim is cached in tempdir for reuse)."""
         if self.log_path and os.path.exists(self.log_path):
-            with __import__("contextlib").suppress(OSError):
+            with contextlib.suppress(OSError):
                 os.unlink(self.log_path)
             self.log_path = None
-        if self._shim_path and os.path.exists(self._shim_path):
-            with __import__("contextlib").suppress(OSError):
-                os.unlink(self._shim_path)
-            self._shim_path = None

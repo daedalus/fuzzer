@@ -52,19 +52,26 @@ class CrashMetadata:
     rbp: int = 0
     instruction_bytes: str = ""
 
+    # Return code for non-sanitizer crashes
+    returncode: int | None = None
+
     def build_cluster_id(self, signature: str) -> str:
         """Build 8-char cluster ID from crash signature."""
         self.cluster_id = hashlib.sha256(signature.encode()).hexdigest()[:8]
         return self.cluster_id
 
     def build_hexdump(self, data: bytes) -> str:
-        """Build hexdump -C style output of the crash input."""
+        """Build hexdump -C style output of the crash input (capped at 512 bytes)."""
+        capped = data[:512]
+        truncated = len(data) > 512
         lines = []
-        for offset in range(0, len(data), 16):
-            chunk = data[offset : offset + 16]
+        for offset in range(0, len(capped), 16):
+            chunk = capped[offset : offset + 16]
             hex_part = " ".join(f"{b:02x}" for b in chunk)
             ascii_part = "".join(chr(b) if 32 <= b < 127 else "." for b in chunk)
             lines.append(f"{offset:08x}  {hex_part:<48s}  |{ascii_part}|")
+        if truncated:
+            lines.append(f"... ({len(data) - 512} more bytes truncated)")
         self.input_hexdump = "\n".join(lines)
         return self.input_hexdump
 
@@ -112,9 +119,8 @@ class CrashMetadata:
             lines.append(f"exploitability: {self.exploitability}")
             lines.append(f"cluster_id:    {self.cluster_id}")
         else:
-            rc = getattr(self, "_returncode", None)
-            if rc is not None:
-                lines.append(f"returncode:    {rc}")
+            if self.returncode is not None:
+                lines.append(f"returncode:    {self.returncode}")
             else:
                 lines.append("returncode:    signal (see raw stderr)")
         lines.append("")
@@ -198,11 +204,27 @@ class CrashMetadata:
             "",
             "set -e",
             "",
-            f"echo '{b64}' | base64 -d | \\",
-            "  ASAN_OPTIONS=abort_on_error=1:symbolize=1:detect_leaks=0 \\",
-            f"  {target}",
-            "",
         ]
+        # Use printf for inputs > 128KB to avoid shell arg length limits
+        if len(b64) > 128 * 1024:
+            lines.extend(
+                [
+                    "B64_DATA=$(cat <<'ENDOFB64'",
+                    b64,
+                    "ENDOFB64",
+                    ")",
+                    "printf '%s' \"$B64_DATA\" | base64 -d | \\",
+                ]
+            )
+        else:
+            lines.append(f"printf '%s' '{b64}' | base64 -d | \\")
+        lines.extend(
+            [
+                "  ASAN_OPTIONS=abort_on_error=1:symbolize=1:detect_leaks=0 \\",
+                f"  {target}",
+                "",
+            ]
+        )
         return "\n".join(lines)
 
 
@@ -249,5 +271,5 @@ def find_nearest_corpus(
     diff = [i for i in range(min_len) if crash_data[i] != nearest[i]]
     diff += list(range(min_len, max(len(crash_data), len(nearest))))
 
-    label = f"corpus/seed_{best_idx}"
+    label = f"seed_{best_idx}"
     return label, best_sim, diff[:30]

@@ -19,9 +19,9 @@ class EdgeTracker:
 
     def __init__(self, map_size: int = 65536):
         self.map_size = map_size
-        # Per-seed edge sets: seed_hash -> set of edge indices
+        # Per-seed edge sets: seed_key -> set of edge indices
         self.seed_edges: dict[str, set[int]] = {}
-        # Global cumulative edge set
+        # Global cumulative edge set (all edges ever seen)
         self.cumulative_edges: set[int] = set()
 
     def record_edges(self, seed_key: str, edge_bitmap: bytes) -> set[int]:
@@ -51,7 +51,11 @@ class EdgeTracker:
     def compute_subsumption_weight(self, seed_key: str) -> float:
         """Compute a weight multiplier based on edge subsumption.
 
-        Returns 1.0 if the seed has unique edges, lower if fully subsumed.
+        Returns 1.0 if the seed has unique edges, lower if fully subsumed
+        by other seeds' coverage.
+
+        The key insight: we check if this seed's edges are ALL covered
+        by the UNION of other seeds' edges (not including this seed).
         """
         if seed_key not in self.seed_edges:
             return 1.0
@@ -60,19 +64,20 @@ class EdgeTracker:
         if not seed_edges:
             return 0.5  # no coverage data → slightly deprioritize
 
-        unique = seed_edges - self.cumulative_edges
-        if unique:
-            return 1.0  # has unique edges
-
-        # Check if fully subsumed by other seeds
-        other_edges = set()
+        # Compute edges covered by OTHER seeds (excluding this seed)
+        other_edges: set[int] = set()
         for k, edges in self.seed_edges.items():
             if k != seed_key:
                 other_edges.update(edges)
 
-        subsumed = seed_edges.issubset(other_edges)
-        if subsumed:
-            return 0.1  # fully subsumed, heavily deprioritize
+        # Check what this seed uniquely contributes
+        unique_to_seed = seed_edges - other_edges
+        if unique_to_seed:
+            return 1.0  # has edges no other seed covers
+
+        # Fully subsumed — all this seed's edges are covered by others
+        if seed_edges.issubset(other_edges):
+            return 0.1  # heavily deprioritize
 
         return 0.8  # partially covered
 

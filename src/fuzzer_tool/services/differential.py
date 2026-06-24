@@ -1,7 +1,8 @@
 """Differential fuzzing: run same input through two targets, flag divergence."""
 
 import os
-from pathlib import Path
+import shutil
+import tempfile
 
 from fuzzer_tool.adapters.process import run_target_file, run_target_stdin
 from fuzzer_tool.core.sanitizer import SanitizerReport
@@ -21,31 +22,27 @@ def diff_run(
         Tuple of (diverged: bool, description: str).
     """
     env = os.environ.copy()
-    tmp_dir = Path("/tmp") / f"diff_{os.getpid()}"
-    if file_mode:
-        tmp_dir.mkdir(parents=True, exist_ok=True)
+    tmp_dir = tempfile.mkdtemp(prefix="diff_") if file_mode else None
 
-    # Run target A
-    if file_mode:
-        rc_a, stderr_a = run_target_file(
-            target_a, data, timeout, str(tmp_dir), target_args or [], env=env
-        )
-    else:
-        rc_a, stderr_a = run_target_stdin(target_a, data, timeout, env=env)
+    try:
+        # Run target A
+        if file_mode:
+            rc_a, stderr_a = run_target_file(
+                target_a, data, timeout, tmp_dir, target_args or [], env=env
+            )
+        else:
+            rc_a, stderr_a = run_target_stdin(target_a, data, timeout, env=env)
 
-    # Run target B
-    if file_mode:
-        rc_b, stderr_b = run_target_file(
-            target_b, data, timeout, str(tmp_dir), target_args or [], env=env
-        )
-    else:
-        rc_b, stderr_b = run_target_stdin(target_b, data, timeout, env=env)
-
-    # Clean up
-    if tmp_dir.exists():
-        import shutil
-
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+        # Run target B
+        if file_mode:
+            rc_b, stderr_b = run_target_file(
+                target_b, data, timeout, tmp_dir, target_args or [], env=env
+            )
+        else:
+            rc_b, stderr_b = run_target_stdin(target_b, data, timeout, env=env)
+    finally:
+        if tmp_dir:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
     # Compare results
     diverged = False

@@ -171,7 +171,7 @@ def save_crash(
         metadata.dealloc_frames = report.dealloc_frames
         metadata.exploitability = report.exploitability
     else:
-        metadata._returncode = returncode
+        metadata.returncode = returncode
 
     sidecar = crashes_dir / f"{base_name}.txt"
     sidecar.write_text(metadata.format_sidecar())

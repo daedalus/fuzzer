@@ -51,7 +51,7 @@ SANITIZER_DEALLOC_RE = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 
-# Exploitability lookup
+# Exploitability lookup (base estimates, refined by access_type)
 ASAN_EXPLOITABILITY = {
     # WRITE variants → CRITICAL
     "heap-buffer-overflow": "CRITICAL",
@@ -70,6 +70,13 @@ ASAN_EXPLOITABILITY = {
     "invalid-malloc-size": "MEDIUM",
     "attempting-free-on-non-deallocated-memory": "MEDIUM",
     "negative-size-param": "MEDIUM",
+}
+
+# READ access downgrades CRITICAL to HIGH for heap overflow types
+_ASAN_READ_DOWNGRADE = {
+    "heap-buffer-overflow",
+    "heap-buffer-overflow-",
+    "global-buffer-overflow",
 }
 
 
@@ -156,9 +163,14 @@ class SanitizerReport:
         if m:
             self.dealloc_frames = SANITIZER_STACK_FRAME_RE.findall(m.group(1))
 
-        # Exploitability
+        # Exploitability — base estimate, then refine by access type
         if self.sanitizer == "AddressSanitizer":
-            self.exploitability = ASAN_EXPLOITABILITY.get(self.error_type, "MEDIUM")
+            base = ASAN_EXPLOITABILITY.get(self.error_type, "MEDIUM")
+            # READ access downgrades CRITICAL to HIGH for overflow types
+            if self.access_type == "READ" and self.error_type in _ASAN_READ_DOWNGRADE:
+                self.exploitability = "HIGH"
+            else:
+                self.exploitability = base
         elif self.sanitizer == "MemorySanitizer" or self.sanitizer == "ThreadSanitizer":
             self.exploitability = "MEDIUM"
         elif self.sanitizer == "UndefinedBehaviorSanitizer" or self.sanitizer == "LeakSanitizer":

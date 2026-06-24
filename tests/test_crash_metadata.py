@@ -46,7 +46,7 @@ class TestCrashMetadata:
 
     def test_format_sidecar_signal(self):
         meta = CrashMetadata()
-        meta._returncode = -11
+        meta.returncode = -11
         meta.timestamp = "2026-01-01T00:00:00Z"
         result = meta.format_sidecar()
         assert "returncode:    -11" in result
@@ -163,7 +163,7 @@ class TestFindNearestCorpus:
         corpus = [b"AABBCCDE", b"XXXXXXXX", b"YYYYYYYY"]
         label, sim, diffs = find_nearest_corpus(data, corpus)
         assert sim > 0.3
-        assert label.startswith("corpus/")
+        assert label.startswith("seed_")
 
     def test_empty_corpus(self):
         label, sim, diffs = find_nearest_corpus(b"AAAA", [])
@@ -173,7 +173,7 @@ class TestFindNearestCorpus:
     def test_max_check_limits(self):
         corpus = [bytes([i % 256]) * 4 for i in range(200)]
         label, sim, diffs = find_nearest_corpus(b"\x00\x00\x00\x00", corpus, max_check=10)
-        assert label.startswith("corpus/")
+        assert label.startswith("seed_")
 
 
 class TestSaveCrashEnriched:

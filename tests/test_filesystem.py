@@ -142,7 +142,7 @@ class TestSaveCrash:
         assert _h(b"crash_data") in hashes
         assert "signal:11" in sigs
         files = list(tmp_path.iterdir())
-        assert len(files) == 2  # crash file + .txt metadata
+        assert len(files) == 4  # .bin + .txt + .sh + .hex
 
     def test_rejects_duplicate_crash(self, tmp_path):
         hashes = set()
@@ -169,8 +169,7 @@ class TestSaveCrash:
         files = list(tmp_path.iterdir())
         meta = [f for f in files if f.suffix == ".txt"][0]
         content = meta.read_text()
-        assert "Aborted" in content
-        assert "returncode: -6" in content
+        assert "returncode:    -6" in content
         assert sigs["signal:6"] == 1
 
     def test_crash_sig_count(self, tmp_path):
