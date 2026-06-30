@@ -1640,6 +1640,7 @@ class Fuzzer:
                     self._append_coverage_log()
                 if self.stats_file and i % self.stats_interval == 0:
                     self._dump_stats()
+                    self._save_state()
         except (KeyboardInterrupt, SystemExit, OSError):
             pass
 

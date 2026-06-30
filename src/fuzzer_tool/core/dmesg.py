@@ -6,6 +6,12 @@ timestamp tracking to match crash events with fuzzer execution timeline.
 
 Uses ``dmesg -l err,warn --json`` for structured output with fallback
 to text parsing when JSON is unavailable.
+
+Real dmesg --json output shape (NOT NDJSON):
+    {"dmesg": [{"pri": 4, "time": 12345.67, "msg": "...", ...}, ...]}
+
+Each entry has fields: pri, time (boot-relative seconds), msg, fac, car,
+pid, comm. The "time" field is seconds since boot, not epoch.
 """
 
 import json
@@ -65,6 +71,10 @@ class DmesgParser:
 
     Tracks the last-read timestamp so each poll only returns new events.
     Falls back to text parsing when ``--json`` output is unavailable.
+
+    Note on timestamps: dmesg --json "time" field is boot-relative seconds,
+    not epoch. For filtering, we use it as a monotonically increasing
+    counter — absolute value doesn't matter, only ordering.
     """
 
     def __init__(self, boot_time: float | None = None):
@@ -114,7 +124,6 @@ class DmesgParser:
                 ["dmesg", "-l", "err,warn", "--json", "-w"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
-                text=True,
                 bufsize=1,
             )
             self._stream_thread = threading.Thread(
@@ -142,26 +151,84 @@ class DmesgParser:
         log.info("dmesg async stream stopped")
 
     def _stream_reader(self):
-        """Background thread: read dmesg --json -w lines and buffer crashes."""
+        """Background thread: read dmesg --json -w output and buffer crashes.
+
+        The -w watch mode outputs one JSON document per new event:
+            {"dmesg": [{"pri": 4, "time": 123.45, "msg": "...", ...}]}
+
+        We accumulate bytes and try to parse complete JSON objects.
+        """
         proc = self._stream_proc
         if proc is None or proc.stdout is None:
             return
-        for line in proc.stdout:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            msg = entry.get("msg", "") or entry.get("MESSAGE", "")
-            pid = entry.get("pid") or entry.get("SYSLOG_PID")
-            proc_name = entry.get("comm") or entry.get("SYSLOG_IDENTIFIER")
-            ts = self._parse_timestamp(entry)
-            kc = self._match_crash(ts or time.time(), msg, pid, proc_name)
-            if kc:
-                with self._stream_lock:
-                    self._stream_buffer.append(kc)
+        buf = b""
+        for chunk in iter(proc.stdout.read, b""):
+            buf += chunk
+            # Try to extract complete JSON objects from buffer
+            while buf:
+                # Find the end of the first JSON object
+                try:
+                    # Try parsing the whole buffer as one document first
+                    text = buf.decode(errors="replace")
+                    obj = json.loads(text)
+                    entries = obj.get("dmesg", [])
+                    if isinstance(entries, list):
+                        for entry in entries:
+                            self._process_entry(entry)
+                    buf = b""
+                    break
+                except (json.JSONDecodeError, ValueError):
+                    pass
+
+                # Try to find a complete {...} boundary
+                depth = 0
+                in_string = False
+                escape = False
+                end_idx = -1
+                for i, b_val in enumerate(buf):
+                    if escape:
+                        escape = False
+                        continue
+                    if b_val == ord("\\"):
+                        escape = True
+                        continue
+                    if b_val == ord('"'):
+                        in_string = not in_string
+                        continue
+                    if in_string:
+                        continue
+                    if b_val == ord("{"):
+                        depth += 1
+                    elif b_val == ord("}"):
+                        depth -= 1
+                        if depth == 0:
+                            end_idx = i
+                            break
+
+                if end_idx >= 0:
+                    obj_bytes = buf[: end_idx + 1]
+                    buf = buf[end_idx + 1 :]
+                    try:
+                        obj = json.loads(obj_bytes)
+                        entries = obj.get("dmesg", [])
+                        if isinstance(entries, list):
+                            for entry in entries:
+                                self._process_entry(entry)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+                else:
+                    break  # incomplete object, wait for more data
+
+    def _process_entry(self, entry: dict):
+        """Process a single dmesg JSON entry."""
+        msg = entry.get("msg", "") or entry.get("MESSAGE", "")
+        pid = entry.get("pid") or entry.get("SYSLOG_PID")
+        proc_name = entry.get("comm") or entry.get("SYSLOG_IDENTIFIER")
+        ts = self._parse_timestamp(entry)
+        kc = self._match_crash(ts or time.time(), msg, pid, proc_name)
+        if kc:
+            with self._stream_lock:
+                self._stream_buffer.append(kc)
 
     def drain_stream(self, pid: int | None = None) -> list[KernelCrash]:
         """Drain buffered crashes from the async stream.
@@ -182,11 +249,13 @@ class DmesgParser:
         return crashes
 
     def poll(self, since: float | None = None, pid: int | None = None) -> DmesgSnapshot:
-        """Poll dmesg for new crash events since *since* (epoch seconds).
+        """Poll dmesg for new crash events since *since*.
 
         Args:
             since: Only return events after this timestamp. If None, uses
-                   the last-polled timestamp.
+                   the last-polled timestamp. For JSON mode this is
+                   boot-relative seconds; for text mode it's also
+                   boot-relative (from ``[  123.45]`` brackets).
             pid: If provided, only return crashes attributed to this PID.
 
         Returns:
@@ -214,7 +283,13 @@ class DmesgParser:
         return snap
 
     def _poll_json(self, since: float) -> list[KernelCrash] | None:
-        """Parse dmesg --json output. Returns None if format unavailable."""
+        """Parse dmesg --json output.
+
+        Real output is a single JSON document: {"dmesg": [{...}, ...]}
+        NOT NDJSON (one object per line).
+
+        Returns None if JSON parsing fails (triggers text fallback).
+        """
         try:
             result = subprocess.run(
                 ["dmesg", "-l", "err,warn", "--json"],
@@ -224,21 +299,17 @@ class DmesgParser:
             if result.returncode != 0:
                 return None
 
-            data = result.stdout.decode(errors="replace").strip()
-            if not data:
+            raw = result.stdout.decode(errors="replace").strip()
+            if not raw:
                 return []
 
-            # dmesg --json may produce concatenated JSON objects or NDJSON
-            crashes = []
-            for line in data.splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
+            doc = json.loads(raw)
+            entries = doc.get("dmesg", [])
+            if not isinstance(entries, list):
+                return None  # unexpected format, fall back to text
 
+            crashes = []
+            for entry in entries:
                 ts = self._parse_timestamp(entry)
                 if ts is not None and ts <= since:
                     continue
@@ -252,6 +323,9 @@ class DmesgParser:
                     crashes.append(kc)
 
             return crashes
+        except (json.JSONDecodeError, ValueError):
+            log.debug("dmesg --json produced unparseable output, falling back to text")
+            return None
         except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError):
             return None
 
@@ -276,7 +350,7 @@ class DmesgParser:
                     continue
                 if ts <= since:
                     continue
-                msg = line[m.end():].strip()
+                msg = line[m.end() :].strip()
                 kc = self._match_crash(ts, msg)
                 if kc:
                     crashes.append(kc)
@@ -285,14 +359,18 @@ class DmesgParser:
             return []
 
     def _parse_timestamp(self, entry: dict) -> float | None:
-        """Extract timestamp from a dmesg JSON entry."""
-        for key in ("ts", " TIMESTAMP", "__REALTIME_TIMESTAMP"):
+        """Extract boot-relative timestamp from a dmesg JSON entry.
+
+        The "time" field is seconds since boot (monotonically increasing).
+        Also checks legacy field names for compatibility.
+        """
+        for key in ("time", "ts", "__REALTIME_TIMESTAMP"):
             val = entry.get(key)
             if val is not None:
                 try:
                     v = float(val)
                     # __REALTIME_TIMESTAMP is microseconds
-                    if v > 1e12:
+                    if key == "__REALTIME_TIMESTAMP" and v > 1e12:
                         return v / 1_000_000.0
                     return v
                 except (ValueError, TypeError):
