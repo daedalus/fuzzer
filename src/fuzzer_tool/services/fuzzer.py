@@ -554,38 +554,13 @@ class Fuzzer:
         self.shm_cov: ShmCoverage | None = None
         if self.use_coverage:
             if no_shm:
-                cov = PtraceCoverage(target, deep_coverage=deep_coverage, max_bps=max_bps)
-                if cov.bb_addrs:
-                    self.ptrace_cov = cov
-                    mode = "deep (capstone)" if cov.deep_coverage else "function-entry"
-                    print(
-                        f"[*] Coverage: {len(cov.bb_addrs)} breakpoints ({mode}), map={cov.map_size}"
-                    )
-                else:
-                    print(
-                        "[!] Coverage: no symbols found in ELF, "
-                        "coverage disabled (use -g to compile with symbols)"
-                    )
+                self._setup_ptrace(target, deep_coverage, max_bps)
             else:
                 try:
                     self.shm_cov = ShmCoverage()
                     print(f"[*] Coverage: AFL SHM bitmap, id={self.shm_cov.env_id}")
                 except OSError:
-                    cov = PtraceCoverage(target, deep_coverage=deep_coverage, max_bps=max_bps)
-                    if cov.bb_addrs:
-                        self.ptrace_cov = cov
-                        mode = "deep (capstone)" if cov.deep_coverage else "function-entry"
-                        print(
-                            f"[*] Coverage: {len(cov.bb_addrs)} breakpoints ({mode}), map={cov.map_size}"
-                        )
-                    else:
-                        print(
-                            "[!] Coverage: no symbols found in ELF, "
-                            "coverage disabled (use -g to compile with symbols)"
-                        )
-                        print(
-                            "[!] For closed-source binaries, use AFL++ QEMU mode: afl-qemu-trace ./target"
-                        )
+                    self._setup_ptrace(target, deep_coverage, max_bps, fallback_hint=True)
 
         self.corpus_dir.mkdir(parents=True, exist_ok=True)
         self.crashes_dir.mkdir(parents=True, exist_ok=True)
@@ -609,6 +584,7 @@ class Fuzzer:
 
         self._dmesg = DmesgParser()
         self._kernel_crashes: list = []
+        self._last_child_pid: int | None = None
         self.stats_file = Path(stats_file) if stats_file else None
         self.stats_interval = stats_interval
 
@@ -619,12 +595,14 @@ class Fuzzer:
 
         self._load_corpus()
         self._init_seed_metadata()
-        # Load persisted Markov state, then merge with current corpus
+        # Load persisted Markov state; skip retrain if loaded (avoids
+        # double-counting the same corpus transitions across restarts)
+        loaded = False
         if self._markov_path.exists():
-            self.markov.load(str(self._markov_path))
-        if self.corpus:
+            loaded = self.markov.load(str(self._markov_path))
+        if self.corpus and not loaded:
             self.markov.train_corpus(self.corpus)
-            self.markov_trained = self.markov.is_trained()
+        self.markov_trained = self.markov.is_trained()
 
         self.mc_bandit = mc_bandit
         self.mc_cem = mc_cem
@@ -674,6 +652,24 @@ class Fuzzer:
             mode = "direct ctypes" if inprocess_direct else "subprocess loader"
             cov_note = f", SHM cov id={cov_env_id}" if cov_env_id else ""
             print(f"[*] In-process mode ({mode}{cov_note}): {self.target}::{inprocess_func}")
+
+    def _setup_ptrace(self, target, deep_coverage, max_bps, fallback_hint=False):
+        cov = PtraceCoverage(target, deep_coverage=deep_coverage, max_bps=max_bps)
+        if cov.bb_addrs:
+            self.ptrace_cov = cov
+            mode = "deep (capstone)" if cov.deep_coverage else "function-entry"
+            print(
+                f"[*] Coverage: {len(cov.bb_addrs)} breakpoints ({mode}), map={cov.map_size}"
+            )
+        else:
+            print(
+                "[!] Coverage: no symbols found in ELF, "
+                "coverage disabled (use -g to compile with symbols)"
+            )
+            if fallback_hint:
+                print(
+                    "[!] For closed-source binaries, use AFL++ QEMU mode: afl-qemu-trace ./target"
+                )
 
     def _load_corpus(self):
         self.corpus, self.seen_hashes = load_corpus(self.corpus_dir, self.bloom)
@@ -755,6 +751,7 @@ class Fuzzer:
         stdin_r, stdin_w = os.pipe()
         writer = None
         pid = os.fork()
+        self._last_child_pid = pid
         if pid == 0:
             os.setsid()
             os.dup2(stdin_r, 0)
@@ -1358,7 +1355,7 @@ class Fuzzer:
             self.crash_count += 1
             self.save_crash(mutated, returncode, stderr)
             # Verify crash at kernel level via dmesg
-            snap = self._dmesg.poll()
+            snap = self._dmesg.poll(pid=getattr(self, "_last_child_pid", None))
             if snap.crashes:
                 for kc in snap.crashes:
                     self._kernel_crashes.append(kc)

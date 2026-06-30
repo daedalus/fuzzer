@@ -93,12 +93,13 @@ class DmesgParser:
             self._warned = True
         return self._available
 
-    def poll(self, since: float | None = None) -> DmesgSnapshot:
+    def poll(self, since: float | None = None, pid: int | None = None) -> DmesgSnapshot:
         """Poll dmesg for new crash events since *since* (epoch seconds).
 
         Args:
             since: Only return events after this timestamp. If None, uses
                    the last-polled timestamp.
+            pid: If provided, only return crashes attributed to this PID.
 
         Returns:
             DmesgSnapshot with any new kernel crashes found.
@@ -113,6 +114,10 @@ class DmesgParser:
         crashes = self._poll_json(since)
         if crashes is None:
             crashes = self._poll_text(since)
+
+        # Filter by PID if requested
+        if pid is not None and crashes:
+            crashes = [kc for kc in crashes if kc.pid == pid]
 
         snap.crashes = crashes
         if crashes:
