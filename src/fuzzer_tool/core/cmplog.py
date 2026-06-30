@@ -60,23 +60,6 @@ class CmplogCollector:
             log.warning("Cmplog shim compilation error: %s", e)
         return False
 
-        out_path = os.path.join(tempfile.gettempdir(), "fuzz_cmplog_shim.so")
-        try:
-            compiler = _find_compiler()
-            result = __import__("subprocess").run(
-                [compiler, "-shared", "-fPIC", "-O2", "-ldl", "-o", out_path, shim_src],
-                capture_output=True,
-                timeout=30,
-            )
-            if result.returncode == 0 and os.path.exists(out_path):
-                self._shim_path = out_path
-                log.info("Cmplog shim compiled: %s", out_path)
-                return True
-            log.warning("Cmplog shim compilation failed: %s", result.stderr.decode()[:200])
-        except Exception as e:
-            log.warning("Cmplog shim compilation error: %s", e)
-        return False
-
     def setup_env(self, env: dict[str, str]) -> dict[str, str]:
         """Add cmplog env vars to the execution environment.
 

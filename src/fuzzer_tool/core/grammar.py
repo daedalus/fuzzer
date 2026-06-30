@@ -136,7 +136,10 @@ class Grammar:
     def _expand_rule(self, name: str, depth: int) -> bytes:
         """Expand a rule into bytes."""
         if depth <= 0 or name not in self.rules:
-            log.debug("Grammar depth limit or unknown rule: %s (depth=%d)", name, depth)
+            if depth <= 0:
+                log.warning("Grammar recursion depth exhausted at rule '%s' — possible cyclic grammar", name)
+            else:
+                log.debug("Grammar unknown rule: %s (depth=%d)", name, depth)
             return b"?"
 
         alts = self.rules[name]

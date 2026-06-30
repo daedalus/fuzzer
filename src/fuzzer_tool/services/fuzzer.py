@@ -672,6 +672,9 @@ class Fuzzer:
         # Corpus size distribution: track sizes of entries that produce new coverage
         self._corpus_size_history: list[int] = []
 
+    def _seed_key(self, data: bytes) -> str:
+        return str(hash(data))
+
     def _run_target(self, data: bytes) -> tuple[int, str]:
         if self._inprocess_runner:
             if self.shm_cov:
@@ -936,26 +939,29 @@ class Fuzzer:
             elif op == "arithmetic" and buf:
                 from fuzzer_tool.core.mutations import ARITHMETIC_DELTAS
 
-                # Try arithmetic on 1/2/4-byte aligned integers
-                width = random.choice([1, 2, 4])
+                width = random.choice([1, 2, 4, 8])
                 if len(buf) >= width:
-                    # Align to width boundary
                     max_start = len(buf) - width
                     idx = (random.randint(0, max_start) // width) * width
                     delta = random.choice(ARITHMETIC_DELTAS)
                     if random.random() < 0.5:
                         delta = -delta
+                    endian = random.choice(["<", ">"])
                     if width == 1:
                         val = (buf[idx] + delta) & 0xFF
                         buf[idx] = val
                     elif width == 2:
-                        val = struct.unpack_from("<H", buf, idx)[0]
+                        val = struct.unpack_from(f"{endian}H", buf, idx)[0]
                         val = (val + delta) & 0xFFFF
-                        struct.pack_into("<H", buf, idx, val)
+                        struct.pack_into(f"{endian}H", buf, idx, val)
                     elif width == 4:
-                        val = struct.unpack_from("<I", buf, idx)[0]
+                        val = struct.unpack_from(f"{endian}I", buf, idx)[0]
                         val = (val + delta) & 0xFFFFFFFF
-                        struct.pack_into("<I", buf, idx, val)
+                        struct.pack_into(f"{endian}I", buf, idx, val)
+                    elif width == 8:
+                        val = struct.unpack_from(f"{endian}Q", buf, idx)[0]
+                        val = (val + delta) & 0xFFFFFFFFFFFFFFFF
+                        struct.pack_into(f"{endian}Q", buf, idx, val)
 
             elif op == "random_bytes" and buf:
                 idx = random.randint(0, len(buf) - 1)
@@ -1144,6 +1150,11 @@ class Fuzzer:
             # Auto-minimize if corpus exceeds max
             if self.max_corpus > 0 and len(self.corpus) > self.max_corpus:
                 self._auto_minimize_corpus()
+            # Dynamic max_len: adjust based on corpus size distribution
+            if len(self._corpus_size_history) >= 100:
+                sorted_sizes = sorted(self._corpus_size_history)
+                p90 = sorted_sizes[-len(sorted_sizes) // 10]
+                self.max_len = max(self.max_len, min(p90 * 2, 65536))
 
     def _auto_minimize_corpus(self):
         """Inline corpus minimization: hash dedup + subsumption pruning."""
@@ -1226,8 +1237,8 @@ class Fuzzer:
                 w *= 0.01
 
             # Apply subsumption penalty from edge tracker
-            seed_key = hash(seed)
-            subsumption = self._edge_tracker.compute_subsumption_weight(str(seed_key))
+            seed_key = self._seed_key(seed)
+            subsumption = self._edge_tracker.compute_subsumption_weight(seed_key)
             w *= subsumption
             weights.append(max(w, 1e-6))
         return random.choices(self.corpus, weights=weights, k=1)[0]
@@ -1289,7 +1300,7 @@ class Fuzzer:
         if has_new_coverage:
             edge_bitmap = self._get_current_edge_bitmap()
             if edge_bitmap:
-                seed_key = str(hash(data))
+                seed_key = self._seed_key(data)
                 new = self._edge_tracker.record_edges(seed_key, edge_bitmap)
                 if meta is not None and new:
                     meta["coverage_edges"] += len(new)
@@ -1316,8 +1327,6 @@ class Fuzzer:
             return True
 
         if is_interesting or has_new_coverage:
-            if meta is not None and has_new_coverage:
-                meta["coverage_edges"] += 1
             self.save_to_corpus(mutated)
             if self.mc and self.mc_cem:
                 self.mc.add_elite(mutated, 2)
