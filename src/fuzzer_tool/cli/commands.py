@@ -147,6 +147,7 @@ def cmd_fuzz(args):
         persistent=args.persistent,
         cmplog=args.cmplog,
         max_corpus=args.max_corpus,
+        no_shm=args.no_shm,
         seed=args.seed,
     )
     fuzzer.run(iterations=args.iterations)
@@ -344,6 +345,11 @@ def main() -> int:
     )
     fuzz_parser.add_argument(
         "--max-bps", type=int, default=50000, help="Max breakpoints for deep coverage"
+    )
+    fuzz_parser.add_argument(
+        "--no-shm",
+        action="store_true",
+        help="Skip AFL SHM coverage, use ptrace instead (for uninstrumented binaries)",
     )
     fuzz_parser.add_argument("-D", "--dict", help="Dictionary file")
     fuzz_parser.add_argument(

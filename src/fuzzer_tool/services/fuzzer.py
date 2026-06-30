@@ -509,6 +509,7 @@ class Fuzzer:
         inprocess_func="LLVMFuzzerTestOneInput",
         cmplog=False,
         max_corpus=0,
+        no_shm=False,
         seed=42,
     ):
         self.target = target
@@ -552,10 +553,7 @@ class Fuzzer:
         self.ptrace_cov: PtraceCoverage | None = None
         self.shm_cov: ShmCoverage | None = None
         if self.use_coverage:
-            try:
-                self.shm_cov = ShmCoverage()
-                print(f"[*] Coverage: AFL SHM bitmap, id={self.shm_cov.env_id}")
-            except OSError:
+            if no_shm:
                 cov = PtraceCoverage(target, deep_coverage=deep_coverage, max_bps=max_bps)
                 if cov.bb_addrs:
                     self.ptrace_cov = cov
@@ -568,9 +566,26 @@ class Fuzzer:
                         "[!] Coverage: no symbols found in ELF, "
                         "coverage disabled (use -g to compile with symbols)"
                     )
-                    print(
-                        "[!] For closed-source binaries, use AFL++ QEMU mode: afl-qemu-trace ./target"
-                    )
+            else:
+                try:
+                    self.shm_cov = ShmCoverage()
+                    print(f"[*] Coverage: AFL SHM bitmap, id={self.shm_cov.env_id}")
+                except OSError:
+                    cov = PtraceCoverage(target, deep_coverage=deep_coverage, max_bps=max_bps)
+                    if cov.bb_addrs:
+                        self.ptrace_cov = cov
+                        mode = "deep (capstone)" if cov.deep_coverage else "function-entry"
+                        print(
+                            f"[*] Coverage: {len(cov.bb_addrs)} breakpoints ({mode}), map={cov.map_size}"
+                        )
+                    else:
+                        print(
+                            "[!] Coverage: no symbols found in ELF, "
+                            "coverage disabled (use -g to compile with symbols)"
+                        )
+                        print(
+                            "[!] For closed-source binaries, use AFL++ QEMU mode: afl-qemu-trace ./target"
+                        )
 
         self.corpus_dir.mkdir(parents=True, exist_ok=True)
         self.crashes_dir.mkdir(parents=True, exist_ok=True)
@@ -739,6 +754,17 @@ class Fuzzer:
             os.dup2(devnull, 1)
             os.dup2(devnull, 2)
             os.close(devnull)
+            # Strip LD_PRELOAD to avoid conflicts with ASAN
+            # (e.g. libksm_preload.so loaded before ASAN causes abort)
+            ld_preload = os.environ.get("LD_PRELOAD", "")
+            if ld_preload:
+                cleaned = [
+                    p for p in ld_preload.split(":") if "ksm_preload" not in p
+                ]
+                if cleaned:
+                    os.environ["LD_PRELOAD"] = ":".join(cleaned)
+                else:
+                    os.environ.pop("LD_PRELOAD", None)
             libc.ptrace(PTRACE_TRACEME, 0, None, None)
             signal.signal(signal.SIGTRAP, signal.SIG_IGN)
             os.execv(self.target, [self.target])
@@ -789,7 +815,7 @@ class Fuzzer:
                     sig = os.WSTOPSIG(status)
                     last_sig = sig
                     if sig == signal.SIGTRAP:
-                        if not self._is_x86_64:
+                        if not cov._is_x86_64:
                             log.warning("ptrace coverage requires x86_64")
                             break
                         regs_buf = (ctypes.c_char * (27 * 8))()
