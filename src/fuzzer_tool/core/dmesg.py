@@ -41,6 +41,7 @@ _CRASH_PATTERNS = [
 
 _TEXT_TIMESTAMP_RE = re.compile(r"^\[\s*(\d+\.\d+)\]")
 _PID_IN_MSG_RE = re.compile(r"\w+\[(\d+)\]")
+_DMESG_LEVELS = "err,warn,info"
 
 
 @dataclass
@@ -113,8 +114,8 @@ class DmesgParser:
     def start_stream(self) -> bool:
         """Start async dmesg streaming in background thread.
 
-        Runs ``dmesg -l err,warn,info --json -w`` and accumulates crash events
-        in a thread-safe buffer that poll() drains.
+        Uses text format (not --json) for reliable line-by-line parsing.
+        Each line is ``[  123.456789] comm[pid]: message``.
         """
         if self._stream_proc is not None:
             return True
@@ -122,9 +123,10 @@ class DmesgParser:
             return False
         try:
             self._stream_proc = subprocess.Popen(
-                ["dmesg", "-l", "err,warn,info", "--json", "-w"],
+                ["dmesg", "-l", _DMESG_LEVELS, "-w"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
+                text=True,
                 bufsize=1,
             )
             self._stream_thread = threading.Thread(
@@ -152,73 +154,33 @@ class DmesgParser:
         log.info("dmesg async stream stopped")
 
     def _stream_reader(self):
-        """Background thread: read dmesg --json -w output and buffer crashes.
+        """Background thread: read dmesg text -w output and buffer crashes.
 
-        The -w watch mode outputs one JSON document per new event:
-            {"dmesg": [{"pri": 4, "time": 123.45, "msg": "...", ...}]}
-
-        We accumulate bytes and try to parse complete JSON objects.
+        Each line format: ``[  123.456789] comm[pid]: message``
         """
         proc = self._stream_proc
         if proc is None or proc.stdout is None:
             return
-        buf = b""
-        for chunk in iter(proc.stdout.read, b""):
-            buf += chunk
-            # Try to extract complete JSON objects from buffer
-            while buf:
-                # Find the end of the first JSON object
-                try:
-                    # Try parsing the whole buffer as one document first
-                    text = buf.decode(errors="replace")
-                    obj = json.loads(text)
-                    entries = obj.get("dmesg", [])
-                    if isinstance(entries, list):
-                        for entry in entries:
-                            self._process_entry(entry)
-                    buf = b""
-                    break
-                except (json.JSONDecodeError, ValueError):
-                    pass
-
-                # Try to find a complete {...} boundary
-                depth = 0
-                in_string = False
-                escape = False
-                end_idx = -1
-                for i, b_val in enumerate(buf):
-                    if escape:
-                        escape = False
-                        continue
-                    if b_val == ord("\\"):
-                        escape = True
-                        continue
-                    if b_val == ord('"'):
-                        in_string = not in_string
-                        continue
-                    if in_string:
-                        continue
-                    if b_val == ord("{"):
-                        depth += 1
-                    elif b_val == ord("}"):
-                        depth -= 1
-                        if depth == 0:
-                            end_idx = i
-                            break
-
-                if end_idx >= 0:
-                    obj_bytes = buf[: end_idx + 1]
-                    buf = buf[end_idx + 1 :]
-                    try:
-                        obj = json.loads(obj_bytes)
-                        entries = obj.get("dmesg", [])
-                        if isinstance(entries, list):
-                            for entry in entries:
-                                self._process_entry(entry)
-                    except (json.JSONDecodeError, ValueError):
-                        continue
-                else:
-                    break  # incomplete object, wait for more data
+        for line in proc.stdout:
+            line = line.rstrip("\n")
+            if not line:
+                continue
+            m = _TEXT_TIMESTAMP_RE.match(line)
+            if not m:
+                continue
+            ts = float(m.group(1))
+            msg = line[m.end() :].strip()
+            # Extract PID from "comm[pid]: message" format
+            pid = None
+            proc_name = None
+            pid_match = _PID_IN_MSG_RE.search(msg)
+            if pid_match:
+                pid = int(pid_match.group(1))
+                proc_name = pid_match.group(0).split("[")[0]
+            kc = self._match_crash(ts, msg, pid, proc_name)
+            if kc:
+                with self._stream_lock:
+                    self._stream_buffer.append(kc)
 
     def _process_entry(self, entry: dict):
         """Process a single dmesg JSON entry."""
