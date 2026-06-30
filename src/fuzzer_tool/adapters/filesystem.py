@@ -113,7 +113,8 @@ def save_crash(
         metadata: Optional pre-built CrashMetadata from the fuzzer.
 
     Returns:
-        True if saved (new crash), False if duplicate.
+        Base name of saved files (e.g. "crash_1234567890_abc12345_sig_signal6"),
+        or False if duplicate.
     """
     h = hash_data(data)
     if h in crash_hashes:
@@ -187,4 +188,4 @@ def save_crash(
     metadata.build_text_repr(data)
     hexdump_file.write_text(metadata.input_hexdump + "\n\n" + metadata.input_text_repr + "\n")
 
-    return True
+    return base_name

@@ -183,7 +183,7 @@ class TestSaveCrashEnriched:
         hashes = set()
         sigs = {}
         result = save_crash(b"crash_data", -11, "SIGSEGV", tmp_path, hashes, sigs)
-        assert result is True
+        assert result  # returns base_name string on success, False on duplicate
         files = list(tmp_path.iterdir())
         suffixes = {f.suffix for f in files}
         assert ".bin" in suffixes

@@ -511,6 +511,7 @@ class Fuzzer:
         max_corpus=0,
         no_shm=False,
         resume=False,
+        trace_crashes=False,
         seed=42,
     ):
         self.target = target
@@ -618,6 +619,12 @@ class Fuzzer:
             else None
         )
         self._last_ops_used: list[str] = []
+
+        # Crash tracing: GDB backtrace + strace on crash inputs
+        self._tracer = None
+        if trace_crashes:
+            from fuzzer_tool.core.trace import CrashTracer
+            self._tracer = CrashTracer(target)
 
         if self.mc and self.mc_bandit:
             for op in MUTATIONS:
@@ -1425,7 +1432,11 @@ class Fuzzer:
 
         if is_crash:
             self.crash_count += 1
-            self.save_crash(mutated, returncode, stderr)
+            crash_name = self.save_crash(mutated, returncode, stderr)
+            # Generate GDB/strace trace report if enabled
+            if self._tracer and crash_name:
+                report = self._tracer.trace(mutated, returncode)
+                self._tracer.save_report(report, str(self.crashes_dir), crash_name)
             # Verify crash at kernel level via dmesg (async stream)
             kernel_hits = self._dmesg.drain_stream(pid=getattr(self, "_last_child_pid", None))
             if kernel_hits:

@@ -149,6 +149,7 @@ def cmd_fuzz(args):
         max_corpus=args.max_corpus,
         no_shm=args.no_shm,
         resume=args.resume,
+        trace_crashes=args.trace,
         seed=args.seed,
     )
     fuzzer.run(iterations=args.iterations)
@@ -409,6 +410,11 @@ def main() -> int:
         "--resume",
         action="store_true",
         help="Resume from saved fuzzer state (corpus, stats, edge tracker)",
+    )
+    fuzz_parser.add_argument(
+        "--trace",
+        action="store_true",
+        help="Generate GDB backtrace + strace reports for crash inputs",
     )
     fuzz_parser.add_argument(
         "--coverage-log",

@@ -138,7 +138,7 @@ class TestSaveCrash:
         hashes = set()
         sigs = {}
         result = save_crash(b"crash_data", -11, "SIGSEGV", tmp_path, hashes, sigs)
-        assert result is True
+        assert result  # returns base_name string on success
         assert _h(b"crash_data") in hashes
         assert "signal:11" in sigs
         files = list(tmp_path.iterdir())
