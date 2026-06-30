@@ -12,6 +12,7 @@ import json
 import logging
 import re
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, field
 
@@ -71,6 +72,11 @@ class DmesgParser:
         self._last_ts: float = boot_time or 0.0
         self._boot_time = boot_time
         self._warned = False
+        # Async streaming state
+        self._stream_proc: subprocess.Popen | None = None
+        self._stream_thread: threading.Thread | None = None
+        self._stream_buffer: list[KernelCrash] = []
+        self._stream_lock = threading.Lock()
 
     def is_available(self) -> bool:
         """Check if dmesg is accessible."""
@@ -92,6 +98,88 @@ class DmesgParser:
             )
             self._warned = True
         return self._available
+
+    def start_stream(self) -> bool:
+        """Start async dmesg streaming in background thread.
+
+        Runs ``dmesg -l err,warn --json -w`` and accumulates crash events
+        in a thread-safe buffer that poll() drains.
+        """
+        if self._stream_proc is not None:
+            return True
+        if not self.is_available():
+            return False
+        try:
+            self._stream_proc = subprocess.Popen(
+                ["dmesg", "-l", "err,warn", "--json", "-w"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                bufsize=1,
+            )
+            self._stream_thread = threading.Thread(
+                target=self._stream_reader, daemon=True
+            )
+            self._stream_thread.start()
+            log.info("dmesg async stream started")
+            return True
+        except (FileNotFoundError, PermissionError, OSError) as e:
+            log.debug("Failed to start dmesg stream: %s", e)
+            return False
+
+    def stop_stream(self):
+        """Stop the async dmesg stream."""
+        if self._stream_proc is not None:
+            self._stream_proc.terminate()
+            try:
+                self._stream_proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self._stream_proc.kill()
+            self._stream_proc = None
+        if self._stream_thread is not None:
+            self._stream_thread.join(timeout=2)
+            self._stream_thread = None
+        log.info("dmesg async stream stopped")
+
+    def _stream_reader(self):
+        """Background thread: read dmesg --json -w lines and buffer crashes."""
+        proc = self._stream_proc
+        if proc is None or proc.stdout is None:
+            return
+        for line in proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            msg = entry.get("msg", "") or entry.get("MESSAGE", "")
+            pid = entry.get("pid") or entry.get("SYSLOG_PID")
+            proc_name = entry.get("comm") or entry.get("SYSLOG_IDENTIFIER")
+            ts = self._parse_timestamp(entry)
+            kc = self._match_crash(ts or time.time(), msg, pid, proc_name)
+            if kc:
+                with self._stream_lock:
+                    self._stream_buffer.append(kc)
+
+    def drain_stream(self, pid: int | None = None) -> list[KernelCrash]:
+        """Drain buffered crashes from the async stream.
+
+        Args:
+            pid: If provided, only return crashes attributed to this PID.
+
+        Returns:
+            List of kernel crashes since last drain.
+        """
+        with self._stream_lock:
+            crashes = list(self._stream_buffer)
+            self._stream_buffer.clear()
+        if pid is not None:
+            crashes = [kc for kc in crashes if kc.pid == pid]
+        if crashes:
+            self._last_ts = max(c.timestamp for c in crashes)
+        return crashes
 
     def poll(self, since: float | None = None, pid: int | None = None) -> DmesgSnapshot:
         """Poll dmesg for new crash events since *since* (epoch seconds).

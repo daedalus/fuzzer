@@ -510,11 +510,13 @@ class Fuzzer:
         cmplog=False,
         max_corpus=0,
         no_shm=False,
+        resume=False,
         seed=42,
     ):
         self.target = target
         self.corpus_dir = Path(corpus_dir)
         self.crashes_dir = Path(crashes_dir)
+        self.resume = resume
         self.max_len = max_len
         self.timeout = timeout
         self.mutations_per_input = mutations_per_input
@@ -585,6 +587,7 @@ class Fuzzer:
         self._dmesg = DmesgParser()
         self._kernel_crashes: list = []
         self._last_child_pid: int | None = None
+        self._dmesg.start_stream()
         self.stats_file = Path(stats_file) if stats_file else None
         self.stats_interval = stats_interval
 
@@ -675,6 +678,8 @@ class Fuzzer:
         self.corpus, self.seen_hashes = load_corpus(self.corpus_dir, self.bloom)
 
     def _init_seed_metadata(self):
+        self._state_path = self.corpus_dir / "state.json"
+        self._edge_tracker_path = self.corpus_dir / "edge_tracker.json"
         now = time.time()
         self.seed_meta: dict[bytes, dict] = {}
         for seed in self.corpus:
@@ -685,16 +690,82 @@ class Fuzzer:
                 "redqueen_offsets": [],
                 "added_at": now,
             }
-        # Per-seed edge tracking for subsumption-aware scheduling
         from fuzzer_tool.core.edge_tracker import EdgeTracker
 
         self._edge_tracker = EdgeTracker()
-
-        # Corpus size distribution: track sizes of entries that produce new coverage
         self._corpus_size_history: list[int] = []
+
+        # Load persisted state if resuming
+        if self.resume:
+            self._load_state()
 
     def _seed_key(self, data: bytes) -> str:
         return hashlib.sha256(data).hexdigest()[:16]
+
+    def _save_state(self):
+        """Persist fuzzer state for resume."""
+        state = {
+            "exec_count": self.exec_count,
+            "crash_count": self.crash_count,
+            "timeout_count": self.timeout_count,
+            "crash_sigs": self.crash_sigs,
+            "op_counts": self.op_counts,
+            "op_success": self.op_success,
+            "corpus_size_history": self._corpus_size_history[-500:],
+            "seed_meta": {},
+        }
+        for seed, meta in self.seed_meta.items():
+            key = seed.hex()
+            state["seed_meta"][key] = {
+                "fuzz_count": meta["fuzz_count"],
+                "coverage_edges": meta["coverage_edges"],
+                "redqueen_offsets": meta["redqueen_offsets"],
+                "added_at": meta["added_at"],
+            }
+        try:
+            self._state_path.write_text(json.dumps(state, separators=(",", ":")))
+        except OSError as e:
+            log.debug("Failed to save state: %s", e)
+        self._edge_tracker.save(str(self._edge_tracker_path))
+
+    def _load_state(self):
+        """Load persisted fuzzer state for resume."""
+        if not self._state_path.exists():
+            return
+        try:
+            state = json.loads(self._state_path.read_text())
+        except (OSError, json.JSONDecodeError) as e:
+            log.debug("Failed to load state: %s", e)
+            return
+        self.exec_count = state.get("exec_count", 0)
+        self.crash_count = state.get("crash_count", 0)
+        self.timeout_count = state.get("timeout_count", 0)
+        self.crash_sigs = state.get("crash_sigs", {})
+        self.op_counts = state.get("op_counts", {})
+        self.op_success = state.get("op_success", {})
+        self._corpus_size_history = state.get("corpus_size_history", [])
+        # Merge seed metadata for seeds still in corpus
+        saved_meta = state.get("seed_meta", {})
+        for seed in self.corpus:
+            key = seed.hex()
+            if key in saved_meta:
+                sm = saved_meta[key]
+                self.seed_meta[seed].update({
+                    "fuzz_count": sm.get("fuzz_count", 0),
+                    "coverage_edges": sm.get("coverage_edges", 0),
+                    "redqueen_offsets": sm.get("redqueen_offsets", []),
+                    "added_at": sm.get("added_at", self.seed_meta[seed]["added_at"]),
+                })
+        self._edge_tracker.load(str(self._edge_tracker_path))
+        if self.resume:
+            print(
+                f"[*] Resumed: {self.exec_count} execs, "
+                f"{self.crash_count} crashes, {len(self.corpus)} seeds"
+            )
+        log.info(
+            "Fuzzer state loaded: execs=%d, crashes=%d, corpus=%d",
+            self.exec_count, self.crash_count, len(self.corpus),
+        )
 
     def _run_target(self, data: bytes) -> tuple[int, str]:
         if self._inprocess_runner:
@@ -1354,10 +1425,10 @@ class Fuzzer:
         if is_crash:
             self.crash_count += 1
             self.save_crash(mutated, returncode, stderr)
-            # Verify crash at kernel level via dmesg
-            snap = self._dmesg.poll(pid=getattr(self, "_last_child_pid", None))
-            if snap.crashes:
-                for kc in snap.crashes:
+            # Verify crash at kernel level via dmesg (async stream)
+            kernel_hits = self._dmesg.drain_stream(pid=getattr(self, "_last_child_pid", None))
+            if kernel_hits:
+                for kc in kernel_hits:
                     self._kernel_crashes.append(kc)
                     log.info(
                         "Kernel crash verified: %s at ip=%s (ts=%.3f)",
@@ -1575,6 +1646,8 @@ class Fuzzer:
         self._dump_coverage_report()
         if self.markov.is_trained():
             self.markov.save(str(self._markov_path))
+        self._save_state()
+        self._dmesg.stop_stream()
         self.print_stats()
         print(
             f"\n\n[*] Fuzzing stopped. {self.crash_count} crashes found "

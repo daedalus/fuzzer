@@ -148,6 +148,7 @@ def cmd_fuzz(args):
         cmplog=args.cmplog,
         max_corpus=args.max_corpus,
         no_shm=args.no_shm,
+        resume=args.resume,
         seed=args.seed,
     )
     fuzzer.run(iterations=args.iterations)
@@ -403,6 +404,11 @@ def main() -> int:
         type=int,
         default=0,
         help="Auto-minimize corpus when it exceeds N entries (0=unlimited)",
+    )
+    fuzz_parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume from saved fuzzer state (corpus, stats, edge tracker)",
     )
     fuzz_parser.add_argument(
         "--coverage-log",

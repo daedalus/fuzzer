@@ -164,6 +164,6 @@ class MarkovChain:
         self.transitions = collections.defaultdict(collections.Counter)
         for ctx_hex, counts in data.get("transitions", {}).items():
             ctx = bytes.fromhex(ctx_hex)
-            self.transitions[ctx] = collections.Counter(counts)
+            self.transitions[ctx] = collections.Counter({int(k): v for k, v in counts.items()})
         log.info("Markov chain loaded: %s (%d contexts)", path, self._contexts_seen)
         return True

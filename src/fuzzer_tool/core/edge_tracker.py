@@ -4,6 +4,7 @@ Tracks which coverage edges each seed contributes, enabling the fuzzer
 to deprioritize seeds whose coverage is fully subsumed by others.
 """
 
+import json
 import logging
 
 log = logging.getLogger(__name__)
@@ -88,3 +89,33 @@ class EdgeTracker:
     def get_seed_edge_count(self, seed_key: str) -> int:
         """Get number of edges a specific seed covers."""
         return len(self.seed_edges.get(seed_key, set()))
+
+    def save(self, path: str) -> bool:
+        """Save tracker state to JSON."""
+        data = {
+            "map_size": self.map_size,
+            "cumulative_edges": sorted(self.cumulative_edges),
+            "seed_edges": {k: sorted(v) for k, v in self.seed_edges.items()},
+        }
+        try:
+            with open(path, "w") as f:
+                json.dump(data, f, separators=(",", ":"))
+            log.info("Edge tracker saved: %s (%d seeds, %d edges)", path, len(self.seed_edges), len(self.cumulative_edges))
+            return True
+        except OSError as e:
+            log.warning("Failed to save edge tracker: %s", e)
+            return False
+
+    def load(self, path: str) -> bool:
+        """Load tracker state from JSON."""
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            log.debug("Failed to load edge tracker: %s", e)
+            return False
+        self.map_size = data.get("map_size", self.map_size)
+        self.cumulative_edges = set(data.get("cumulative_edges", []))
+        self.seed_edges = {k: set(v) for k, v in data.get("seed_edges", {}).items()}
+        log.info("Edge tracker loaded: %s (%d seeds, %d edges)", path, len(self.seed_edges), len(self.cumulative_edges))
+        return True
