@@ -673,7 +673,7 @@ class Fuzzer:
         self._corpus_size_history: list[int] = []
 
     def _seed_key(self, data: bytes) -> str:
-        return str(hash(data))
+        return hashlib.sha256(data).hexdigest()[:16]
 
     def _run_target(self, data: bytes) -> tuple[int, str]:
         if self._inprocess_runner:
@@ -1177,7 +1177,7 @@ class Fuzzer:
             # Score each seed: unique edges * inverse fuzz count
             scored = []
             for seed in unique:
-                seed_key = str(hash(seed))
+                seed_key = self._seed_key(seed)
                 edge_count = self._edge_tracker.get_seed_edge_count(seed_key)
                 meta = self.seed_meta.get(seed)
                 fuzz = meta["fuzz_count"] if meta else 0
