@@ -609,9 +609,13 @@ class Fuzzer:
         self.markov = MarkovChain(order=markov_order)
         self.markov_generate = markov_generate
         self.markov_trained = False
+        self._markov_path = self.corpus_dir / "markov.json"
 
         self._load_corpus()
         self._init_seed_metadata()
+        # Load persisted Markov state, then merge with current corpus
+        if self._markov_path.exists():
+            self.markov.load(str(self._markov_path))
         if self.corpus:
             self.markov.train_corpus(self.corpus)
             self.markov_trained = self.markov.is_trained()
@@ -1555,6 +1559,8 @@ class Fuzzer:
 
         self._dump_stats()
         self._dump_coverage_report()
+        if self.markov.is_trained():
+            self.markov.save(str(self._markov_path))
         self.print_stats()
         print(
             f"\n\n[*] Fuzzing stopped. {self.crash_count} crashes found "

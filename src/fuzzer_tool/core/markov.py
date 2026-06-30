@@ -1,7 +1,11 @@
 """Byte-level Markov chain for fuzz input generation."""
 
 import collections
+import json
+import logging
 import random
+
+log = logging.getLogger(__name__)
 
 
 class MarkovChain:
@@ -110,3 +114,56 @@ class MarkovChain:
             True if any training data has been observed.
         """
         return self._contexts_seen > 0
+
+    def save(self, path: str) -> bool:
+        """Save chain state to a JSON file.
+
+        Args:
+            path: File path to write.
+
+        Returns:
+            True on success.
+        """
+        data = {
+            "order": self.order,
+            "smoothing": self.smoothing,
+            "contexts_seen": self._contexts_seen,
+            "transitions": {
+                ctx.hex(): dict(counts)
+                for ctx, counts in self.transitions.items()
+            },
+        }
+        try:
+            with open(path, "w") as f:
+                json.dump(data, f, separators=(",", ":"))
+            log.info("Markov chain saved: %s (%d contexts)", path, self._contexts_seen)
+            return True
+        except OSError as e:
+            log.warning("Failed to save Markov chain: %s", e)
+            return False
+
+    def load(self, path: str) -> bool:
+        """Load chain state from a JSON file.
+
+        Args:
+            path: File path to read.
+
+        Returns:
+            True on success.
+        """
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            log.debug("Failed to load Markov chain: %s", e)
+            return False
+
+        self.order = data.get("order", self.order)
+        self.smoothing = data.get("smoothing", self.smoothing)
+        self._contexts_seen = data.get("contexts_seen", 0)
+        self.transitions = collections.defaultdict(collections.Counter)
+        for ctx_hex, counts in data.get("transitions", {}).items():
+            ctx = bytes.fromhex(ctx_hex)
+            self.transitions[ctx] = collections.Counter(counts)
+        log.info("Markov chain loaded: %s (%d contexts)", path, self._contexts_seen)
+        return True
