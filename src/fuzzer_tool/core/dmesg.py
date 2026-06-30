@@ -40,6 +40,7 @@ _CRASH_PATTERNS = [
 ]
 
 _TEXT_TIMESTAMP_RE = re.compile(r"^\[\s*(\d+\.\d+)\]")
+_PID_IN_MSG_RE = re.compile(r"\w+\[(\d+)\]")
 
 
 @dataclass
@@ -224,6 +225,12 @@ class DmesgParser:
         msg = entry.get("msg", "") or entry.get("MESSAGE", "")
         pid = entry.get("pid") or entry.get("SYSLOG_PID")
         proc_name = entry.get("comm") or entry.get("SYSLOG_IDENTIFIER")
+        # dmesg embeds PID in msg as "comm[pid]: message"
+        if pid is None and not proc_name:
+            m = _PID_IN_MSG_RE.search(msg)
+            if m:
+                pid = int(m.group(1))
+                proc_name = m.group(0).split("[")[0]
         ts = self._parse_timestamp(entry)
         kc = self._match_crash(ts or time.time(), msg, pid, proc_name)
         if kc:
@@ -317,7 +324,12 @@ class DmesgParser:
                 msg = entry.get("msg", "") or entry.get("MESSAGE", "")
                 pid = entry.get("pid") or entry.get("SYSLOG_PID")
                 proc = entry.get("comm") or entry.get("SYSLOG_IDENTIFIER")
-
+                # dmesg embeds PID in msg as "comm[pid]: message"
+                if pid is None and not proc:
+                    m = _PID_IN_MSG_RE.search(msg)
+                    if m:
+                        pid = int(m.group(1))
+                        proc = m.group(0).split("[")[0]  # "python3[123]" → "python3"
                 kc = self._match_crash(ts or 0.0, msg, pid, proc)
                 if kc:
                     crashes.append(kc)
