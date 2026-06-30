@@ -1,8 +1,26 @@
-/* Fuzz target for libpng — reads PNG from stdin or file */
+/* Fuzz target for libpng — reads PNG from stdin or file.
+ *
+ * No setjmp error handling: libpng errors abort the process,
+ * allowing the fuzzer to detect crashes and explore deeper paths.
+ */
 #include <png.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+
+/* Custom error handler: abort so fuzzer detects the crash as SIGABRT */
+static void png_abort_handler(png_structp png_ptr, png_const_charp msg) {
+    (void)png_ptr;
+    (void)msg;
+    abort();
+}
+
+/* Custom warning handler: no-op */
+static void png_warning_handler(png_structp png_ptr, png_const_charp msg) {
+    (void)png_ptr;
+    (void)msg;
+}
 
 static void user_read_data(png_structp png_ptr, png_bytep data, png_size_t length) {
     FILE *f = (FILE *)png_get_io_ptr(png_ptr);
@@ -16,17 +34,14 @@ static void fuzz_png(const unsigned char *buf, size_t size) {
     /* Verify PNG signature */
     if (png_sig_cmp(buf, 0, 8)) return;
 
-    png_structp png_ptr = png_create_read_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
+    /* Custom error/warning handlers — no setjmp needed */
+    png_structp png_ptr = png_create_read_struct(
+        PNG_LIBPNG_VER_STRING, NULL, png_abort_handler, png_warning_handler);
     if (!png_ptr) return;
 
     png_infop info_ptr = png_create_info_struct(png_ptr);
     if (!info_ptr) {
         png_destroy_read_struct(&png_ptr, NULL, NULL);
-        return;
-    }
-
-    if (setjmp(png_jmpbuf(png_ptr))) {
-        png_destroy_read_struct(&png_ptr, &info_ptr, NULL);
         return;
     }
 

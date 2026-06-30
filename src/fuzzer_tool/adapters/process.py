@@ -5,7 +5,7 @@ import os
 import signal
 import subprocess
 
-SIGNAL_CRASH_CODES = {134, 135, 136, 139}  # SIGABRT, SIGBUS, SIGFPE, SIGSEGV
+SIGNAL_CRASH_CODES = {134, 135, 136, 139, -6, -7, -8, -11}  # SIGABRT/SIGBUS/SIGFPE/SIGSEGV
 
 _child_pids: set[int] = set()
 
@@ -16,6 +16,19 @@ def _track(pid: int):
 
 def _untrack(pid: int):
     _child_pids.discard(pid)
+
+
+def _clean_env(env: dict[str, str] | None = None) -> dict[str, str]:
+    """Copy env and strip LD_PRELOAD entries that conflict with sanitizers."""
+    e = dict(env or os.environ)
+    ld = e.get("LD_PRELOAD", "")
+    if ld:
+        cleaned = [p for p in ld.split(":") if "ksm_preload" not in p]
+        if cleaned:
+            e["LD_PRELOAD"] = ":".join(cleaned)
+        else:
+            e.pop("LD_PRELOAD", None)
+    return e
 
 
 def run_target_stdin(
@@ -41,7 +54,7 @@ def run_target_stdin(
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
-            env=env or os.environ.copy(),
+            env=_clean_env(env),
             preexec_fn=os.setsid,
         )
         _track(proc.pid)
@@ -95,7 +108,7 @@ def run_target_file(
             cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
-            env=env or os.environ.copy(),
+            env=_clean_env(env),
             preexec_fn=os.setsid,
         )
         _track(proc.pid)

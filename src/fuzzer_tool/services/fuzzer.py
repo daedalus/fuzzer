@@ -936,8 +936,9 @@ class Fuzzer:
                 returncode = os.WEXITSTATUS(status)
             elif os.WIFSTOPPED(status):
                 returncode = -os.WSTOPSIG(status)
-                os.kill(pid, signal.SIGKILL)
-                os.waitpid(pid, 0)
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(pid, signal.SIGKILL)
+                    os.waitpid(pid, 0)
             else:
                 returncode = 0
             return returncode, ""
