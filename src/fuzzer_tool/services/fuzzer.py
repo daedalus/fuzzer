@@ -603,6 +603,12 @@ class Fuzzer:
         self.op_counts: dict[str, int] = {}
         self.op_success: dict[str, int] = {}
         self._peak_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+
+        # Kernel-level crash verification via dmesg
+        from fuzzer_tool.core.dmesg import DmesgParser
+
+        self._dmesg = DmesgParser()
+        self._kernel_crashes: list = []
         self.stats_file = Path(stats_file) if stats_file else None
         self.stats_interval = stats_interval
 
@@ -1351,6 +1357,17 @@ class Fuzzer:
         if is_crash:
             self.crash_count += 1
             self.save_crash(mutated, returncode, stderr)
+            # Verify crash at kernel level via dmesg
+            snap = self._dmesg.poll()
+            if snap.crashes:
+                for kc in snap.crashes:
+                    self._kernel_crashes.append(kc)
+                    log.info(
+                        "Kernel crash verified: %s at ip=%s (ts=%.3f)",
+                        kc.crash_type,
+                        kc.ip or "?",
+                        kc.timestamp,
+                    )
             if self.mc and self.mc_cem:
                 self.mc.add_elite(mutated, 3)
                 self.mc.maybe_refit()
@@ -1571,6 +1588,15 @@ class Fuzzer:
             for sig, count in sorted(self.crash_sigs.items(), key=lambda x: -x[1]):
                 print(f"    {sig} ({count}x)")
             print(f"\n[*] Crash files in: {self.crashes_dir}")
+        if self._kernel_crashes:
+            print(f"\n[*] Kernel-verified crashes: {len(self._kernel_crashes)}")
+            by_type: dict[str, int] = {}
+            for kc in self._kernel_crashes:
+                by_type[kc.crash_type] = by_type.get(kc.crash_type, 0) + 1
+            for ctype, count in sorted(by_type.items(), key=lambda x: -x[1]):
+                print(f"    {ctype}: {count}")
+        elif self._dmesg.is_available():
+            print("\n[*] dmesg: no kernel crashes detected")
         if self.mc and self.mc_bandit:
             print("\n[*] Bandit convergence:")
             for name, (succ, fail) in sorted(
