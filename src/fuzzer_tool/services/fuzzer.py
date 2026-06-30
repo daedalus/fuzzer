@@ -164,6 +164,7 @@ class PtraceCoverage:
 
         e_type = struct.unpack_from("<H", data, 16)[0]
         self._is_pie = e_type == 3  # ET_DYN = PIE, ET_EXEC = non-PIE
+        self._elf_entry = struct.unpack_from("<Q", data, 24)[0]  # e_entry
 
         e_shoff = struct.unpack_from("<Q", data, 40)[0]
         e_shnum = struct.unpack_from("<H", data, 60)[0]
@@ -182,6 +183,8 @@ class PtraceCoverage:
         strtab_sec = None
         dynsym_sec = None
         dynstr_sec = None
+        text_start = 0
+        text_end = 0
         for i in range(e_shnum):
             sh = e_shoff + i * e_shentsize
             if sh + e_shentsize > len(data):
@@ -200,17 +203,27 @@ class PtraceCoverage:
                     strtab_sec = sh
                 elif name == b".dynstr" and dynstr_sec is None:
                     dynstr_sec = sh
+            elif name == b".text":
+                text_start = struct.unpack_from("<Q", data, sh + 24)[0]
+                text_size = struct.unpack_from("<Q", data, sh + 32)[0]
+                text_end = text_start + text_size
 
-        self._parse_symbol_table(data, symtab_sec, strtab_sec)
+        self._parse_symbol_table(data, symtab_sec, strtab_sec, text_start, text_end)
         if not self.bb_addrs:
-            self._parse_symbol_table(data, dynsym_sec, dynstr_sec)
+            self._parse_symbol_table(data, dynsym_sec, dynstr_sec, text_start, text_end)
 
         if self.deep_coverage and HAS_CAPSTONE:
             for func_va, func_size in self._func_ranges:
                 self._collect_function_bbs(func_va, func_size)
-            self.bb_addrs = sorted(set(self.bb_addrs))
 
-    def _parse_symbol_table(self, data: bytes, sym_sec: int | None, str_sec: int | None):
+        # Exclude _start (entry point) — stack not set up yet, re-executing
+        # instructions there causes SIGSEGV from push to RSP=0.
+        # Must run after all collection (symbol table + capstone discovery).
+        self.bb_addrs = [a for a in set(self.bb_addrs) if a != self._elf_entry]
+        self.bb_addrs.sort()
+
+    def _parse_symbol_table(self, data: bytes, sym_sec: int | None, str_sec: int | None,
+                            text_start: int = 0, text_end: int = 0):
         if sym_sec is None or str_sec is None:
             return
 
@@ -222,6 +235,26 @@ class PtraceCoverage:
             return
         sym_count = sym_size // sym_entsize if sym_entsize else 0
 
+        # Valid x86-64 function entry opcodes (first byte of instruction)
+        valid_opcodes = {
+            0xF3,  # endbr64 prefix
+            0x55,  # push %rbp
+            0x48,  # rex.W prefix (mov, sub, lea, etc.)
+            0x41,  # rex.B prefix (push, mov, etc.)
+            0x53,  # push %rbx
+            0x56,  # push %rsi
+            0x57,  # push %rdi
+            0x83,  # sub $imm, r/m
+            0x81,  # sub $imm32, r/m
+            0x31,  # xor r/m, r
+            0x33,  # xor r, r/m
+            0x89,  # mov r/m, r
+            0xE8,  # call rel32
+            0xFF,  # call/jmp indir
+            0xB8,  # mov eax, imm32
+            0xC3,  # ret (shouldn't be entry, but safe)
+        }
+
         for i in range(min(sym_count, 10000)):
             sym = sym_offset + i * sym_entsize
             if sym + sym_entsize > len(data):
@@ -230,9 +263,17 @@ class PtraceCoverage:
             st_value = struct.unpack_from("<Q", data, sym + 8)[0]
             st_size = struct.unpack_from("<Q", data, sym + 16)[0]
             st_type = st_info & 0xF
-            if st_type == 2 and st_value > 0 and st_size > 0:
+            if (
+                st_type == 2
+                and st_value > 0
+                and st_size > 0
+                and st_value < len(data)
+                and data[st_value] in valid_opcodes
+                and (text_start == 0 or text_start <= st_value < text_end)
+            ):
                 self.bb_addrs.append(st_value)
                 self._func_ranges.append((st_value, st_value + st_size))
+
         self.bb_addrs.sort()
         self._func_ranges.sort()
 
@@ -887,13 +928,18 @@ class Fuzzer:
 
             last_action = None
             last_sig = 0
+            returncode = 0
             while time.time() < deadline:
                 _, status = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
                 if status == 0:
                     time.sleep(0.0005)
                     continue
 
-                if os.WIFEXITED(status) or os.WIFSIGNALED(status):
+                if os.WIFEXITED(status):
+                    returncode = os.WEXITSTATUS(status)
+                    break
+                if os.WIFSIGNALED(status):
+                    returncode = -os.WTERMSIG(status)
                     break
 
                 if os.WIFSTOPPED(status):
@@ -911,16 +957,55 @@ class Fuzzer:
 
                         if bp_addr in cov.original_bytes:
                             orig = cov.original_bytes[bp_addr]
-                            cov.record_edge(bp_addr)
                             val = cov._read_memory(pid, bp_addr)
                             cov._write_memory(pid, bp_addr, (val & ~0xFF) | orig)
                             del cov.original_bytes[bp_addr]
                             cov.discover_new_bbs(pid, bp_addr)
-                            regs_buf2 = (ctypes.c_char * (27 * 8))()
-                            libc.ptrace(PTRACE_GETREGS, pid, None, regs_buf2)
-                            regs = bytearray(regs_buf2)
-                            struct.pack_into("<Q", regs, 128, bp_addr)
-                            libc.ptrace(PTRACE_SETREGS, pid, None, bytes(regs))
+                            # Only record edge and re-execute if stack is
+                            # set up (RSP > 0x1000).  At early init RSP=0,
+                            # breakpoints fire before user code runs — skip
+                            # them to avoid false edge coverage.
+                            rsp = struct.unpack_from("<Q", bytes(regs_buf), 128 + 48)[0]
+                            if rsp > 0x1000:
+                                cov.record_edge(bp_addr)
+                                regs_buf2 = (ctypes.c_char * (27 * 8))()
+                                libc.ptrace(PTRACE_GETREGS, pid, None, regs_buf2)
+                                regs = bytearray(regs_buf2)
+                                struct.pack_into("<Q", regs, 128, bp_addr)
+                                libc.ptrace(PTRACE_SETREGS, pid, None, bytes(regs))
+                                libc.ptrace(PTRACE_CONT, pid, None, None)
+                                last_action = "cont"
+                            else:
+                                libc.ptrace(PTRACE_CONT, pid, None, None)
+                                last_action = "cont"
+                        else:
+                            libc.ptrace(PTRACE_CONT, pid, None, None)
+                            last_action = "cont"
+                    else:
+                        break
+                        regs_buf = (ctypes.c_char * (27 * 8))()
+                        libc.ptrace(PTRACE_GETREGS, pid, None, regs_buf)
+                        # RIP is at offset 128 in user_regs_struct (x86-64 Linux)
+                        rip = struct.unpack_from("<Q", bytes(regs_buf), 128)[0]
+                        bp_addr = rip - 1
+
+                if bp_addr in cov.original_bytes:
+                    orig = cov.original_bytes[bp_addr]
+                    cov.record_edge(bp_addr)
+                    val = cov._read_memory(pid, bp_addr)
+                    cov._write_memory(pid, bp_addr, (val & ~0xFF) | orig)
+                    del cov.original_bytes[bp_addr]
+                    cov.discover_new_bbs(pid, bp_addr)
+                    # Only re-execute if stack is set up (RSP > 0x1000).
+                    # At _start and early libc init, RSP=0 and push/pop
+                    # instructions cause SIGSEGV — just continue past them.
+                    rsp = struct.unpack_from("<Q", bytes(regs_buf), 128 + 48)[0]
+                    if rsp > 0x1000:
+                        regs_buf2 = (ctypes.c_char * (27 * 8))()
+                        libc.ptrace(PTRACE_GETREGS, pid, None, regs_buf2)
+                        regs = bytearray(regs_buf2)
+                        struct.pack_into("<Q", regs, 128, bp_addr)
+                        libc.ptrace(PTRACE_SETREGS, pid, None, bytes(regs))
                         libc.ptrace(PTRACE_CONT, pid, None, None)
                         last_action = "cont"
                     else:
@@ -929,23 +1014,33 @@ class Fuzzer:
                     break
 
             if last_action == "cont" and last_sig == signal.SIGTRAP:
+                # Child may have already exited in the loop — only wait if
+                # it hasn't been reaped yet (status 0 means already gone).
                 _, status = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
-                if os.WIFSTOPPED(status):
+                if status != 0 and os.WIFSTOPPED(status):
                     libc.ptrace(PTRACE_CONT, pid, None, None)
                     _, status = os.waitpid(pid, 0)
+                elif status != 0:
+                    # Child stopped with a different signal — capture it
+                    if os.WIFSIGNALED(status):
+                        returncode = -os.WTERMSIG(status)
+                    elif os.WIFEXITED(status):
+                        returncode = os.WEXITSTATUS(status)
             else:
                 os.kill(pid, signal.SIGKILL)
                 os.waitpid(pid, 0)
 
-            if os.WIFSIGNALED(status):
-                returncode = -os.WTERMSIG(status)
-            elif os.WIFEXITED(status):
-                returncode = os.WEXITSTATUS(status)
-            elif os.WIFSTOPPED(status):
-                returncode = -os.WSTOPSIG(status)
-                with contextlib.suppress(ProcessLookupError):
-                    os.kill(pid, signal.SIGKILL)
-                    os.waitpid(pid, 0)
+            if returncode == 0:
+                # Only override if we didn't already capture the exit code
+                if os.WIFSIGNALED(status):
+                    returncode = -os.WTERMSIG(status)
+                elif os.WIFEXITED(status):
+                    returncode = os.WEXITSTATUS(status)
+                elif os.WIFSTOPPED(status):
+                    returncode = -os.WSTOPSIG(status)
+                    with contextlib.suppress(ProcessLookupError):
+                        os.kill(pid, signal.SIGKILL)
+                        os.waitpid(pid, 0)
             else:
                 returncode = 0
             return returncode, ""
