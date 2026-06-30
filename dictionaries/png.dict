@@ -1,41 +1,43 @@
-# PNG chunk types for dictionary-based mutations
-# Critical chunks
-IHDR=\x49\x48\x44\x52
-PLTE=\x50\x4c\x54\x45
-IDAT=\x49\x44\x41\x54
-IEND=\x49\x45\x4e\x44
-# Ancillary chunks
-gAMA=\x67\x41\x4d\x41
-cHRM=\x63\x48\x52\x4d
-sRGB=\x73\x52\x47\x42
-iCCP=\x69\x43\x43\x50
-sBIT=\x73\x42\x49\x54
-sCAL=\x73\x43\x41\x4c
-pHYs=\x70\x48\x59\x73
-sPLT=\x73\x50\x4c\x54
-hIST=\x68\x49\x53\x54
-tIME=\x74\x49\x4d\x45
-iTXt=\x69\x54\x58\x74
-tEXt=\x74\x45\x58\x74
-zTXt=\x7a\x54\x58\x74
-bKGD=\x62\x4b\x47\x44
-tRNS=\x74\x52\x4e\x53
-# Common PNG signatures
-PNG_HEADER=\x89\x50\x4e\x47\x0d\x0a\x1a\x0a
-# Common values
-FILTER_0=\x00
-FILTER_1=\x01
-FILTER_2=\x02
-FILTER_3=\x03
-FILTER_4=\x04
-# Color types
+# PNG format tokens
+PNG_SIG=\x89PNG\r\n\x1a\n
+IHDR=IHDR
+IDAT=IDAT
+IEND=IEND
+PLTE=PLTE
+tEXt=tEXt
+zTXt=zTXt
+iTXt=iTXt
+gAMA=gAMA
+cHRM=cHRM
+sRGB=sRGB
+bKGD=bKGD
+pHYs=pHYS
+tIME=tIME
+# Common PNG color types
 GRAYSCALE=\x00
 RGB=\x02
 PALETTE=\x03
 GRAY_ALPHA=\x04
 RGBA=\x06
+# Common bit depths
+BIT8=\x08
+BIT16=\x10
+# Filter types
+FILTER_NONE=\x00
+FILTER_SUB=\x01
+FILTER_UP=\x02
+FILTER_AVG=\x03
+FILTER_PAETH=\x04
 # Compression
-DEFLATE=\x08
-ZLIB_DEFAULT=\x78\x9c
-ZLIB_BEST=\x78\x01
-ZLIB_NONE=\x78\x00
+DEFLATE=\x00
+# Interlace
+INTERLACE_NONE=\x00
+INTERLACE_ADAM7=\x01
+# Chunk length values
+LEN_0=\x00\x00\x00\x00
+LEN_1=\x00\x00\x00\x01
+LEN_13=\x00\x00\x00\x0d
+LEN_256=\x00\x00\x01\x00
+# Null and padding
+NULL=\x00
+FF=\xff
