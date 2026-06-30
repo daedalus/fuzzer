@@ -5,7 +5,7 @@ import os
 import signal
 import subprocess
 
-SIGNAL_CRASH_CODES = {134, 135, 136, 139, -6, -7, -8, -11}  # SIGABRT/SIGBUS/SIGFPE/SIGSEGV
+SIGNAL_CRASH_CODES = {1, 134, 135, 136, 139, -6, -7, -8, -11}  # exit(1)/SIGABRT/SIGBUS/SIGFPE/SIGSEGV
 
 _child_pids: set[int] = set()
 

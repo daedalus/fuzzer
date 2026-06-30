@@ -1,7 +1,9 @@
 /* Fuzz target for libpng — reads PNG from stdin or file.
  *
- * No setjmp error handling: libpng errors abort the process,
- * allowing the fuzzer to detect crashes and explore deeper paths.
+ * Uses setjmp/longjmp for libpng error handling (the intended mechanism).
+ * On error, longjmp returns to setjmp which exits with code 1 — the
+ * fuzzer detects this as a crash (non-zero return) while libpng cleanup
+ * happens properly via png_destroy_read_struct.
  */
 #include <png.h>
 #include <stdio.h>
@@ -9,11 +11,13 @@
 #include <string.h>
 #include <unistd.h>
 
-/* Custom error handler: abort so fuzzer detects the crash as SIGABRT */
-static void png_abort_handler(png_structp png_ptr, png_const_charp msg) {
+static jmp_buf png_jmpbuf;
+
+/* Custom error handler: longjmp back to setjmp — proper libpng error flow */
+static void png_error_handler(png_structp png_ptr, png_const_charp msg) {
     (void)png_ptr;
     (void)msg;
-    abort();
+    longjmp(png_jmpbuf, 1);
 }
 
 /* Custom warning handler: no-op */
@@ -34,9 +38,8 @@ static void fuzz_png(const unsigned char *buf, size_t size) {
     /* Verify PNG signature */
     if (png_sig_cmp(buf, 0, 8)) return;
 
-    /* Custom error/warning handlers — no setjmp needed */
     png_structp png_ptr = png_create_read_struct(
-        PNG_LIBPNG_VER_STRING, NULL, png_abort_handler, png_warning_handler);
+        PNG_LIBPNG_VER_STRING, NULL, png_error_handler, png_warning_handler);
     if (!png_ptr) return;
 
     png_infop info_ptr = png_create_info_struct(png_ptr);
@@ -45,7 +48,7 @@ static void fuzz_png(const unsigned char *buf, size_t size) {
         return;
     }
 
-    /* Write buf to temp file and read from it */
+    /* Write buf to temp file — create before setjmp so it's in scope */
     FILE *f = tmpfile();
     if (!f) {
         png_destroy_read_struct(&png_ptr, &info_ptr, NULL);
@@ -53,6 +56,15 @@ static void fuzz_png(const unsigned char *buf, size_t size) {
     }
     fwrite(buf, 1, size, f);
     rewind(f);
+
+    /* setjmp: on error, longjmp returns here with val=1 */
+    if (setjmp(png_jmpbuf)) {
+        /* Error occurred — libpng called our handler which longjmp'd.
+         * Clean up and exit non-zero so the fuzzer detects the error. */
+        png_destroy_read_struct(&png_ptr, &info_ptr, NULL);
+        fclose(f);
+        exit(1);
+    }
 
     png_set_read_fn(png_ptr, f, user_read_data);
     png_read_info(png_ptr, info_ptr);
