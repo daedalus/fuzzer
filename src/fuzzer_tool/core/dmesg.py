@@ -4,7 +4,7 @@ Parses dmesg output to detect kernel-reported crashes (segfaults, traps,
 OOM kills, etc.) that correlate with fuzzer-discovered inputs. Provides
 timestamp tracking to match crash events with fuzzer execution timeline.
 
-Uses ``dmesg -l err,warn --json`` for structured output with fallback
+Uses ``dmesg -l err,warn,info --json`` for structured output with fallback
 to text parsing when JSON is unavailable.
 
 Real dmesg --json output shape (NOT NDJSON):
@@ -95,7 +95,7 @@ class DmesgParser:
             return self._available
         try:
             result = subprocess.run(
-                ["dmesg", "-l", "err,warn", "--json"],
+                ["dmesg", "-l", "err,warn,info", "--json"],
                 capture_output=True,
                 timeout=2,
             )
@@ -113,7 +113,7 @@ class DmesgParser:
     def start_stream(self) -> bool:
         """Start async dmesg streaming in background thread.
 
-        Runs ``dmesg -l err,warn --json -w`` and accumulates crash events
+        Runs ``dmesg -l err,warn,info --json -w`` and accumulates crash events
         in a thread-safe buffer that poll() drains.
         """
         if self._stream_proc is not None:
@@ -122,7 +122,7 @@ class DmesgParser:
             return False
         try:
             self._stream_proc = subprocess.Popen(
-                ["dmesg", "-l", "err,warn", "--json", "-w"],
+                ["dmesg", "-l", "err,warn,info", "--json", "-w"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 bufsize=1,
@@ -299,7 +299,7 @@ class DmesgParser:
         """
         try:
             result = subprocess.run(
-                ["dmesg", "-l", "err,warn", "--json"],
+                ["dmesg", "-l", "err,warn,info", "--json"],
                 capture_output=True,
                 timeout=2,
             )
@@ -345,7 +345,7 @@ class DmesgParser:
         """Fallback: parse dmesg text output."""
         try:
             result = subprocess.run(
-                ["dmesg", "-l", "err,warn"],
+                ["dmesg", "-l", "err,warn,info"],
                 capture_output=True,
                 timeout=2,
             )
