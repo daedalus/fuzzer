@@ -1647,7 +1647,7 @@ class Fuzzer:
     def _get_current_edge_bitmap(self) -> bytes | None:
         """Get the current coverage edge bitmap."""
         if self.shm_cov:
-            return bytes(self.shm_cov.edge_map)
+            return bytes(self.shm_cov._map)
         if self.ptrace_cov:
             return bytes(self.ptrace_cov.edge_map)
         return None

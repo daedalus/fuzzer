@@ -150,6 +150,9 @@ def cmd_fuzz(args):
         no_shm=args.no_shm,
         resume=args.resume,
         trace_crashes=args.trace,
+        inprocess=args.inprocess,
+        inprocess_direct=args.inprocess_direct,
+        inprocess_func=args.inprocess_func,
         seed=args.seed,
         extra_crash_codes=args.crash_codes,
     )

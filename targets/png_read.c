@@ -43,28 +43,28 @@ static void user_read_data(png_structp png_ptr, png_bytep data, png_size_t lengt
 }
 
 __attribute__((visibility("default")))
-void fuzz_png(const unsigned char *buf, size_t size) {
+int fuzz_png(const unsigned char *buf, size_t size) {
     __afl_map_edge(0x1000);
-    if (size < 8) { __afl_map_edge(0x1001); return; }
+    if (size < 8) { __afl_map_edge(0x1001); return 0; }
 
     /* Verify PNG signature */
-    if (png_sig_cmp(buf, 0, 8)) { __afl_map_edge(0x1002); return; }
+    if (png_sig_cmp(buf, 0, 8)) { __afl_map_edge(0x1002); return 0; }
     __afl_map_edge(0x1003);
 
     png_structp png_ptr = png_create_read_struct(
         PNG_LIBPNG_VER_STRING, NULL, png_error_handler, png_warning_handler);
-    if (!png_ptr) { __afl_map_edge(0x1004); return; }
+    if (!png_ptr) { __afl_map_edge(0x1004); return 0; }
     __afl_map_edge(0x1005);
 
     png_infop info_ptr = png_create_info_struct(png_ptr);
-    if (!info_ptr) { __afl_map_edge(0x1006); png_destroy_read_struct(&png_ptr, NULL, NULL); return; }
+    if (!info_ptr) { __afl_map_edge(0x1006); png_destroy_read_struct(&png_ptr, NULL, NULL); return 0; }
     __afl_map_edge(0x1007);
 
     /* Write buf to temp file — create before setjmp so it's in scope */
     FILE *f = tmpfile();
     if (!f) {
         png_destroy_read_struct(&png_ptr, &info_ptr, NULL);
-        return;
+        return 0;
     }
     fwrite(buf, 1, size, f);
     rewind(f);
@@ -72,11 +72,11 @@ void fuzz_png(const unsigned char *buf, size_t size) {
     /* setjmp: on error, longjmp returns here with val=1 */
     if (setjmp(png_jmpbuf)) {
         /* Error occurred — libpng called our handler which longjmp'd.
-         * Clean up and exit non-zero so the fuzzer detects the error. */
+         * Clean up and return non-zero so the fuzzer detects the error. */
         __afl_map_edge(0x1100);
         png_destroy_read_struct(&png_ptr, &info_ptr, NULL);
         fclose(f);
-        exit(1);
+        return 1;
     }
     __afl_map_edge(0x1101);
 
@@ -101,7 +101,7 @@ void fuzz_png(const unsigned char *buf, size_t size) {
         __afl_map_edge(0x1200);
         png_destroy_read_struct(&png_ptr, &info_ptr, NULL);
         fclose(f);
-        return;
+        return 0;
     }
     __afl_map_edge(0x1201);
 
