@@ -171,18 +171,18 @@ def _corpus_overview(f, corpus_dir) -> str:
     if not p.exists():
         return ""
 
-    pngs = [f for f in p.iterdir() if f.is_file() and not f.name.endswith((".json",))]
+    entries = [f for f in p.iterdir() if f.is_file() and not f.name.endswith((".json",))]
 
-    if not pngs:
+    if not entries:
         return ""
 
-    sizes = sorted([f.stat().st_size for f in pngs])
+    sizes = sorted([f.stat().st_size for f in entries])
     total_size = sum(sizes)
 
     lines = [
         "",
         "--- Corpus Overview ---",
-        f"  Files:           {len(pngs)}",
+        f"  Files:           {len(entries)}",
         f"  Total size:      {_human_size(total_size)}",
         f"  Smallest:        {_human_size(sizes[0])}",
         f"  Median:          {_human_size(sizes[len(sizes)//2])}",

@@ -20,6 +20,25 @@ from dataclasses import dataclass, field
 log = logging.getLogger(__name__)
 
 
+def _get_exported_functions(target: str, max_funcs: int = 20) -> list[str]:
+    """Discover exported function names from a binary via nm -D."""
+    try:
+        result = subprocess.run(
+            ["nm", "-D", "--defined-only", target],
+            capture_output=True, text=True, timeout=5,
+        )
+        funcs = []
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            if len(parts) >= 3 and parts[1] == "T":
+                name = parts[2]
+                if not name.startswith("_") and len(name) > 2:
+                    funcs.append(name)
+        return funcs[:max_funcs]
+    except Exception:
+        return []
+
+
 @dataclass
 class TraceReport:
     """Structured crash trace data."""
@@ -181,8 +200,8 @@ class CrashTracer:
             "thread apply all bt",
             "disassemble $pc",
         ]
-        # Also try to disassemble common libpng functions
-        for func in ["png_read_row", "png_error", "png_process_data"]:
+        # Also disassemble exported functions from the target binary
+        for func in _get_exported_functions(self.target_path):
             cmds.append(f"disassemble {func}")
 
         # Each command as separate -ex (newlines in one -ex break GDB)
