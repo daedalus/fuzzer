@@ -1,6 +1,7 @@
 """Crash minimizer: binary-search for smallest input that still triggers a crash."""
 
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -21,6 +22,9 @@ def tmin(
 
     Replays the crash input against the target, then uses delta-debugging
     to find the smallest subset of bytes that still triggers the same crash.
+    Each candidate is checked against the original crash's signature (ASAN
+    error type + top frame, or raw signal number) to prevent drift to an
+    unrelated bug.
 
     Args:
         target: Path to the target binary.
@@ -53,67 +57,70 @@ def tmin(
     if file_mode:
         tmp_dir.mkdir(parents=True, exist_ok=True)
 
-    def _is_crash(data_bytes: bytes) -> bool:
-        env = os.environ.copy()
-        if use_coverage:
-            env["AFL_MAP_SIZE"] = "65536"
+    try:
+        def _run_target(data_bytes: bytes) -> tuple[int, str]:
+            env = os.environ.copy()
+            if use_coverage:
+                env["AFL_MAP_SIZE"] = "65536"
+            if file_mode:
+                return run_target_file(target, data_bytes, timeout, str(tmp_dir),
+                                       target_args or [], env=env)
+            return run_target_stdin(target, data_bytes, timeout, env=env)
 
-        if file_mode:
-            returncode, stderr = run_target_file(
-                target,
-                data_bytes,
-                timeout,
-                str(tmp_dir),
-                target_args or [],
-                env=env,
-            )
-        else:
-            returncode, stderr = run_target_stdin(
-                target,
-                data_bytes,
-                timeout,
-                env=env,
-            )
+        def _crash_signature(returncode: int, stderr: str) -> str | None:
+            """Extract a crash signature for comparison. Returns None if no crash."""
+            if returncode in (-2, -1):
+                return None
+            report = SanitizerReport.parse(stderr)
+            if report and report.is_valid():
+                return report.signature
+            if returncode in SIGNAL_CRASH_CODES or returncode < 0:
+                return f"signal:{abs(returncode)}"
+            for sig in ["SIGSEGV", "SIGABRT", "SIGFPE", "SIGBUS",
+                         "Segmentation fault", "Aborted"]:
+                if sig in stderr:
+                    return f"signal:{sig}"
+            return None
 
-        if returncode in (-2, -1):
-            return False
-        report = SanitizerReport.parse(stderr)
-        if report and report.is_valid():
-            return True
-        if returncode in SIGNAL_CRASH_CODES:
-            return True
-        if returncode < 0:
-            return True
-        return any(
-            sig in stderr
-            for sig in [
-                "SIGSEGV",
-                "SIGABRT",
-                "SIGFPE",
-                "SIGBUS",
-                "Segmentation fault",
-                "Aborted",
-            ]
+        def _is_crash(data_bytes: bytes, expected_sig: str | None = None) -> str | None:
+            """Run target and return matching crash signature, or None."""
+            returncode, stderr = _run_target(data_bytes)
+            sig = _crash_signature(returncode, stderr)
+            if sig is None:
+                return None
+            if expected_sig is not None and sig != expected_sig:
+                return None
+            return sig
+
+        # Reproduce and capture original signature
+        original_sig = _is_crash(data)
+        if original_sig is None:
+            print("[-] Crash not reproduced with original input", file=sys.stderr)
+            return None
+
+        print(f"[*] Reproduced. Original signature: {original_sig}")
+        print(f"[*] Starting minimization (max {max_stages} stages)...")
+
+        # Wrap minimize_bytes with signature-checked interesting_fn
+        def _signature_matches(data_bytes: bytes) -> bool:
+            return _is_crash(data_bytes, expected_sig=original_sig) is not None
+
+        minimized = minimize_bytes(data, _signature_matches, max_stages=max_stages)
+
+        print(
+            f"[+] Minimized: {len(data)} -> {len(minimized)} bytes "
+            f"({100 - len(minimized) / len(data) * 100:.0f}% reduction)"
         )
 
-    if not _is_crash(data):
-        print("[-] Crash not reproduced with original input", file=sys.stderr)
-        return None
+        if _is_crash(minimized, expected_sig=original_sig) is None:
+            print("[-] Minimized input no longer triggers the original crash! "
+                  "Falling back to original.", file=sys.stderr)
+            return data
 
-    print(f"[*] Reproduced. Starting minimization (max {max_stages} stages)...")
-
-    minimized = minimize_bytes(data, _is_crash, max_stages=max_stages)
-
-    print(
-        f"[+] Minimized: {len(data)} -> {len(minimized)} bytes "
-        f"({100 - len(minimized) / len(data) * 100:.0f}% reduction)"
-    )
-
-    if not _is_crash(minimized):
-        print("[-] Minimized input no longer crashes! Falling back to original.", file=sys.stderr)
-        return data
-
-    return minimized
+        return minimized
+    finally:
+        if file_mode and tmp_dir.exists():
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def main():
