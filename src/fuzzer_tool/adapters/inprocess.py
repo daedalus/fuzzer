@@ -157,6 +157,10 @@ class InProcessRunner:
             if self._shim and self._shim.shim_path and self._shim.needs_preload:
                 self._shim_handle = load_shim(self._shim.shim_path, mode="direct")
                 shim_loaded = True
+            # Set __AFL_SHM_ID BEFORE loading library so the instrumented
+            # code can attach to SHM during initialization
+            if self.coverage_env_id:
+                os.environ["__AFL_SHM_ID"] = self.coverage_env_id
             try:
                 self._lib = ctypes.CDLL(self.target)
                 fn_ptr = getattr(self._lib, self.function_name)

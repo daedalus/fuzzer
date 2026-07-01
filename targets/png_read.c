@@ -4,8 +4,12 @@
  * On error, longjmp returns to setjmp which exits with code 1 — the
  * fuzzer detects this as a crash (non-zero return) while libpng cleanup
  * happens properly via png_destroy_read_struct.
+ *
+ * To build as shared library for in-process mode:
+ *   clang -O2 -g -shared -fPIC -o png_read.so png_read.c -lpng -lz -Wl,--export-dynamic
  */
 #include <png.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
