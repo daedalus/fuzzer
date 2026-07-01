@@ -126,9 +126,7 @@ class CrashTracer:
     @staticmethod
     def _check_tool(name: str) -> bool:
         try:
-            result = subprocess.run(
-                ["which", name], capture_output=True, timeout=2
-            )
+            result = subprocess.run(["which", name], capture_output=True, timeout=2)
             return result.returncode == 0
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return False
@@ -147,8 +145,12 @@ class CrashTracer:
 
         # Determine signal from returncode
         signal_map = {
-            -6: ("SIGABRT", 6), -7: ("SIGBUS", 7), -8: ("SIGFPE", 8),
-            -11: ("SIGSEGV", 11), -4: ("SIGILL", 4), -5: ("SIGTRAP", 5),
+            -6: ("SIGABRT", 6),
+            -7: ("SIGBUS", 7),
+            -8: ("SIGFPE", 8),
+            -11: ("SIGSEGV", 11),
+            -4: ("SIGILL", 4),
+            -5: ("SIGTRAP", 5),
         }
         if returncode in signal_map:
             report.signal, report.signal_num = signal_map[returncode]
@@ -177,12 +179,8 @@ class CrashTracer:
             "info registers",
             "bt full",
             "thread apply all bt",
+            "disassemble $pc",
         ]
-        # Try to disassemble around crash
-        if report.frames:
-            crash_func = report.frames[0].get("func", "")
-            if crash_func:
-                cmds.append(f"disassemble {crash_func}")
         # Also try to disassemble common libpng functions
         for func in ["png_read_row", "png_error", "png_process_data"]:
             cmds.append(f"disassemble {func}")
@@ -220,7 +218,7 @@ class CrashTracer:
         reg_lines = []
         in_regs = False
         for line in lines:
-            if "rax" in line and "0x" in line:
+            if re.match(r"^\s*(rax|rbx|rcx|rdx|rsi|rdi|rbp|rsp|r\d+|rip|eflags)\s+0x", line):
                 in_regs = True
             if in_regs:
                 if line.strip() and "0x" in line:
@@ -266,10 +264,30 @@ class CrashTracer:
             report.backtrace = "\n".join(bt_lines)
 
         # Extract source context (from `list` or bt source lines)
+        # GDB source lines follow the pattern: linenum  source_code  [filename:line]
         src_lines = []
+        in_source = False
         for line in lines:
-            if re.match(r"\d+\s+.*at targets/", line) or re.match(r"\d+\s+.+\d+", line):
+            # GDB source context lines start with whitespace + line number + whitespace + code
+            # e.g. "   10   if (x > 0) {"
+            # Avoid matching register output or backtrace lines
+            stripped = line.strip()
+            if (
+                not stripped
+                or stripped.startswith("#")
+                or stripped.startswith("rax")
+                or stripped.startswith("0x")
+            ):
+                in_source = False
+                continue
+            m = re.match(r"^\s+\d+\s+\S", line)
+            if m and not re.match(r"^\s+(rax|rbx|rcx|rdx|rsi|rdi|rbp|rsp|r\d+|rip|eflags)\s", line):
+                in_source = True
                 src_lines.append(line.rstrip())
+                if len(src_lines) >= 20:
+                    break
+            elif in_source:
+                break
         if src_lines:
             report.source_context = "\n".join(src_lines[:20])
 
@@ -284,9 +302,17 @@ class CrashTracer:
                 if line.strip() == "End of assembler dump.":
                     disasm_lines.append(line.rstrip())
                     in_disasm = False
-                elif line.strip() and ("0x" in line or "push" in line or "call" in line
-                                       or "mov" in line or "ret" in line or "jmp" in line
-                                       or "lea" in line or "cmp" in line or "xor" in line):
+                elif line.strip() and (
+                    "0x" in line
+                    or "push" in line
+                    or "call" in line
+                    or "mov" in line
+                    or "ret" in line
+                    or "jmp" in line
+                    or "lea" in line
+                    or "cmp" in line
+                    or "xor" in line
+                ):
                     disasm_lines.append(line.rstrip())
         if disasm_lines:
             report.disassembly = "\n".join(disasm_lines)
@@ -295,9 +321,15 @@ class CrashTracer:
         """Run strace to capture syscall trace."""
         try:
             result = subprocess.run(
-                ["strace", "-f", "-e", "trace=read,write,mmap,mprotect,open,close,"
-                 "madvise,brk,rt_sigaction,clone,futex",
-                 self.target_path, input_path],
+                [
+                    "strace",
+                    "-f",
+                    "-e",
+                    "trace=read,write,mmap,mprotect,open,close,"
+                    "madvise,brk,rt_sigaction,clone,futex",
+                    self.target_path,
+                    input_path,
+                ],
                 capture_output=True,
                 timeout=self.timeout,
             )
@@ -330,10 +362,9 @@ class CrashTracer:
     def _build_repro(self, data: bytes, report: TraceReport):
         """Build a reproducer command."""
         import base64
+
         encoded = base64.b64encode(data).decode()
-        report.repro_cmd = (
-            f"printf '%s' '{encoded}' | base64 -d | {self.target_path}"
-        )
+        report.repro_cmd = f"printf '%s' '{encoded}' | base64 -d | {self.target_path}"
 
     def save_report(self, report: TraceReport, crash_dir: str, name: str):
         """Save trace report as .trace file alongside crash files.

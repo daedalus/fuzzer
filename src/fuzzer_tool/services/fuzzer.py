@@ -222,8 +222,14 @@ class PtraceCoverage:
         self.bb_addrs = [a for a in set(self.bb_addrs) if a != self._elf_entry]
         self.bb_addrs.sort()
 
-    def _parse_symbol_table(self, data: bytes, sym_sec: int | None, str_sec: int | None,
-                            text_start: int = 0, text_end: int = 0):
+    def _parse_symbol_table(
+        self,
+        data: bytes,
+        sym_sec: int | None,
+        str_sec: int | None,
+        text_start: int = 0,
+        text_end: int = 0,
+    ):
         if sym_sec is None or str_sec is None:
             return
 
@@ -554,11 +560,13 @@ class Fuzzer:
         resume=False,
         trace_crashes=False,
         seed=42,
+        extra_crash_codes=None,
     ):
         self.target = target
         self.corpus_dir = Path(corpus_dir)
         self.crashes_dir = Path(crashes_dir)
         self.resume = resume
+        self.extra_crash_codes = set(extra_crash_codes) if extra_crash_codes else set()
         self.max_len = max_len
         self.timeout = timeout
         self.mutations_per_input = mutations_per_input
@@ -665,6 +673,7 @@ class Fuzzer:
         self._tracer = None
         if trace_crashes:
             from fuzzer_tool.core.trace import CrashTracer
+
             self._tracer = CrashTracer(target)
 
         if self.mc and self.mc_bandit:
@@ -709,9 +718,7 @@ class Fuzzer:
         if cov.bb_addrs:
             self.ptrace_cov = cov
             mode = "deep (capstone)" if cov.deep_coverage else "function-entry"
-            print(
-                f"[*] Coverage: {len(cov.bb_addrs)} breakpoints ({mode}), map={cov.map_size}"
-            )
+            print(f"[*] Coverage: {len(cov.bb_addrs)} breakpoints ({mode}), map={cov.map_size}")
         else:
             print(
                 "[!] Coverage: no symbols found in ELF, "
@@ -798,12 +805,14 @@ class Fuzzer:
             key = seed.hex()
             if key in saved_meta:
                 sm = saved_meta[key]
-                self.seed_meta[seed].update({
-                    "fuzz_count": sm.get("fuzz_count", 0),
-                    "coverage_edges": sm.get("coverage_edges", 0),
-                    "redqueen_offsets": sm.get("redqueen_offsets", []),
-                    "added_at": sm.get("added_at", self.seed_meta[seed]["added_at"]),
-                })
+                self.seed_meta[seed].update(
+                    {
+                        "fuzz_count": sm.get("fuzz_count", 0),
+                        "coverage_edges": sm.get("coverage_edges", 0),
+                        "redqueen_offsets": sm.get("redqueen_offsets", []),
+                        "added_at": sm.get("added_at", self.seed_meta[seed]["added_at"]),
+                    }
+                )
         self._edge_tracker.load(str(self._edge_tracker_path))
         if self.resume:
             print(
@@ -812,7 +821,9 @@ class Fuzzer:
             )
         log.info(
             "Fuzzer state loaded: execs=%d, crashes=%d, corpus=%d",
-            self.exec_count, self.crash_count, len(self.corpus),
+            self.exec_count,
+            self.crash_count,
+            len(self.corpus),
         )
 
     def _run_target(self, data: bytes) -> tuple[int, str]:
@@ -884,9 +895,7 @@ class Fuzzer:
             # (e.g. libksm_preload.so loaded before ASAN causes abort)
             ld_preload = os.environ.get("LD_PRELOAD", "")
             if ld_preload:
-                cleaned = [
-                    p for p in ld_preload.split(":") if "ksm_preload" not in p
-                ]
+                cleaned = [p for p in ld_preload.split(":") if "ksm_preload" not in p]
                 if cleaned:
                     os.environ["LD_PRELOAD"] = ":".join(cleaned)
                 else:
@@ -1059,7 +1068,7 @@ class Fuzzer:
                 writer.join(timeout=self.timeout)
 
     def _is_interesting(self, returncode: int, stderr: str) -> bool:
-        if returncode in SIGNAL_CRASH_CODES:
+        if returncode in SIGNAL_CRASH_CODES or returncode in self.extra_crash_codes:
             return True
         if returncode < 0 and returncode != -1:
             return True
@@ -1079,7 +1088,7 @@ class Fuzzer:
             self.last_report = report
             return True
 
-        if returncode in SIGNAL_CRASH_CODES:
+        if returncode in SIGNAL_CRASH_CODES or returncode in self.extra_crash_codes:
             return True
         if returncode < 0:
             return True
@@ -1328,7 +1337,7 @@ class Fuzzer:
             meta.rsp = self._last_regs.get("rsp", 0)
             meta.rbp = self._last_regs.get("rbp", 0)
 
-        save_crash(
+        return save_crash(
             data,
             returncode,
             stderr,

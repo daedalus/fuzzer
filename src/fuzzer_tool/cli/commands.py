@@ -151,6 +151,7 @@ def cmd_fuzz(args):
         resume=args.resume,
         trace_crashes=args.trace,
         seed=args.seed,
+        extra_crash_codes=args.crash_codes,
     )
     fuzzer.run(iterations=args.iterations)
     return 0
@@ -415,6 +416,13 @@ def main() -> int:
         "--trace",
         action="store_true",
         help="Generate GDB backtrace + strace reports for crash inputs",
+    )
+    fuzz_parser.add_argument(
+        "--crash-codes",
+        nargs="+",
+        type=int,
+        default=None,
+        help="Additional exit codes to treat as crashes (e.g. --crash-codes 1 126)",
     )
     fuzz_parser.add_argument(
         "--coverage-log",
