@@ -137,6 +137,7 @@ class PtraceCoverage:
         self._load_segments: list[tuple[int, int, int, int]] = []
         self._is_pie: bool = True  # assume PIE until proven otherwise
         self._is_x86_64: bool = False  # cached platform check
+        self._stack_initialized: bool = False  # True after first valid RSP seen
 
         if self.deep_coverage:
             self._disassembler = Cs(CS_ARCH_X86, CS_MODE_64)
@@ -880,6 +881,12 @@ class Fuzzer:
     def _ptrace_handle_breakpoint(self, pid: int, libc, cov: PtraceCoverage, regs_buf) -> bool:
         """Handle a SIGTRAP: restore bp, record edge, re-exec if RSP is valid.
 
+        Before the stack is initialized (RSP=0), breakpoints fire during
+        dynamic linker and libc startup. We skip edge recording and
+        re-execution for those — just restore the byte and continue.
+        Once we observe RSP > 0x1000, the stack is set up and all
+        subsequent breakpoints are safe to instrument.
+
         Returns True if execution should continue, False to break the loop.
         """
         if not cov._is_x86_64:
@@ -900,7 +907,7 @@ class Fuzzer:
 
         rsp = struct.unpack_from("<Q", bytes(regs_buf), 128 + 48)[0]
         if rsp > 0x1000:
-            # Stack is set up — safe to record edge and re-execute
+            cov._stack_initialized = True
             cov.record_edge(bp_addr)
             cov.discover_new_bbs(pid, bp_addr)
             regs_buf2 = (ctypes.c_char * (27 * 8))()
@@ -908,8 +915,8 @@ class Fuzzer:
             regs = bytearray(regs_buf2)
             struct.pack_into("<Q", regs, 128, bp_addr)
             libc.ptrace(PTRACE_SETREGS, pid, None, bytes(regs))
-        # Always continue — at RSP=0 just skip the breakpoint and let
-        # the child continue past the early-init instruction.
+        # Continue — at RSP=0 just skip the breakpoint past the
+        # early-init instruction.
         libc.ptrace(PTRACE_CONT, pid, None, None)
         return True
 
