@@ -61,9 +61,8 @@ class ShmCoverage:
         return bytes(self._map)
 
     def reset_edge_map(self):
-        """Zero the bitmap and snapshot for the next execution."""
+        """Reset the coverage bitmap to zero."""
         ctypes.memset(self._ptr, 0, self.size)
-        self._snapshot = bytes(self._map)
 
     def reset(self):
         """Full reset: zero bitmap, snapshot, and cumulative counters."""
@@ -94,6 +93,7 @@ class ShmCoverage:
         if new_edges > self.cumulative_edges:
             self.cumulative_edges = new_edges
         self.total_edges += 1
+        self._snapshot = current
         return True
 
     def commit_snapshot(self):
