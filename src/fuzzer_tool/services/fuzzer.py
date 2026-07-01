@@ -897,16 +897,19 @@ class Fuzzer:
         val = cov._read_memory(pid, bp_addr)
         cov._write_memory(pid, bp_addr, (val & ~0xFF) | orig)
         del cov.original_bytes[bp_addr]
-        cov.discover_new_bbs(pid, bp_addr)
 
         rsp = struct.unpack_from("<Q", bytes(regs_buf), 128 + 48)[0]
         if rsp > 0x1000:
+            # Stack is set up — safe to record edge and re-execute
             cov.record_edge(bp_addr)
+            cov.discover_new_bbs(pid, bp_addr)
             regs_buf2 = (ctypes.c_char * (27 * 8))()
             libc.ptrace(PTRACE_GETREGS, pid, None, regs_buf2)
             regs = bytearray(regs_buf2)
             struct.pack_into("<Q", regs, 128, bp_addr)
             libc.ptrace(PTRACE_SETREGS, pid, None, bytes(regs))
+        # Always continue — at RSP=0 just skip the breakpoint and let
+        # the child continue past the early-init instruction.
         libc.ptrace(PTRACE_CONT, pid, None, None)
         return True
 
