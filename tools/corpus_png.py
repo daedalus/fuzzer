@@ -36,9 +36,10 @@ def make_png(
     interlace: int = 0,
 ) -> bytes:
     sig = b"\x89PNG\r\n\x1a\n"
+    # IHDR: compression_method=0 (deflate), filter_method=0 (adaptive), interlace
     ihdr = make_chunk(
         b"IHDR",
-        struct.pack(">IIBBBBB", width, height, bit_depth, color_type, filter_type, compression, interlace),
+        struct.pack(">IIBBBBB", width, height, bit_depth, color_type, 0, 0, interlace),
     )
 
     if pixel_func is None:
@@ -49,7 +50,7 @@ def make_png(
 
     raw = b""
     for y in range(height):
-        raw += b"\x00"
+        raw += bytes([filter_type & 0x07])
         raw += pixel_func(width, y)
 
     compressed = zlib.compress(raw, compression)
