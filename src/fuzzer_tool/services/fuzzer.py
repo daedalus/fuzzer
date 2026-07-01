@@ -716,6 +716,7 @@ class Fuzzer:
                 timeout=self.timeout,
                 direct=inprocess_direct,
                 coverage_env_id=cov_env_id,
+                cov=bool(cov_env_id),
             )
             mode = "direct ctypes" if inprocess_direct else "subprocess loader"
             cov_note = f", SHM cov id={cov_env_id}" if cov_env_id else ""

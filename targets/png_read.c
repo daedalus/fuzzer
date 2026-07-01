@@ -5,8 +5,9 @@
  * fuzzer detects this as a crash (non-zero return) while libpng cleanup
  * happens properly via png_destroy_read_struct.
  *
- * To build as shared library for in-process mode:
- *   clang -O2 -g -shared -fPIC -o png_read.so png_read.c -lpng -lz -Wl,--export-dynamic
+ * Includes AFL-style edge coverage via afl_shim.c. Compile with:
+ *   gcc -O2 -g -shared -fPIC -include src/fuzzer_tool/adapters/afl_shim.c \
+ *       -o png_read.so png_read.c -lpng -lz -Wl,--export-dynamic
  */
 #include <png.h>
 #include <signal.h>
@@ -14,6 +15,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
+/* AFL edge coverage — provided by afl_shim.c */
+extern void __afl_map_edge(unsigned int cur_loc);
+
+static jmp_buf png_jmpbuf;
 
 static jmp_buf png_jmpbuf;
 
@@ -38,20 +44,21 @@ static void user_read_data(png_structp png_ptr, png_bytep data, png_size_t lengt
 
 __attribute__((visibility("default")))
 void fuzz_png(const unsigned char *buf, size_t size) {
-    if (size < 8) return;
+    __afl_map_edge(0x1000);
+    if (size < 8) { __afl_map_edge(0x1001); return; }
 
     /* Verify PNG signature */
-    if (png_sig_cmp(buf, 0, 8)) return;
+    if (png_sig_cmp(buf, 0, 8)) { __afl_map_edge(0x1002); return; }
+    __afl_map_edge(0x1003);
 
     png_structp png_ptr = png_create_read_struct(
         PNG_LIBPNG_VER_STRING, NULL, png_error_handler, png_warning_handler);
-    if (!png_ptr) return;
+    if (!png_ptr) { __afl_map_edge(0x1004); return; }
+    __afl_map_edge(0x1005);
 
     png_infop info_ptr = png_create_info_struct(png_ptr);
-    if (!info_ptr) {
-        png_destroy_read_struct(&png_ptr, NULL, NULL);
-        return;
-    }
+    if (!info_ptr) { __afl_map_edge(0x1006); png_destroy_read_struct(&png_ptr, NULL, NULL); return; }
+    __afl_map_edge(0x1007);
 
     /* Write buf to temp file — create before setjmp so it's in scope */
     FILE *f = tmpfile();
@@ -66,13 +73,17 @@ void fuzz_png(const unsigned char *buf, size_t size) {
     if (setjmp(png_jmpbuf)) {
         /* Error occurred — libpng called our handler which longjmp'd.
          * Clean up and exit non-zero so the fuzzer detects the error. */
+        __afl_map_edge(0x1100);
         png_destroy_read_struct(&png_ptr, &info_ptr, NULL);
         fclose(f);
         exit(1);
     }
+    __afl_map_edge(0x1101);
 
     png_set_read_fn(png_ptr, f, user_read_data);
+    __afl_map_edge(0x1102);
     png_read_info(png_ptr, info_ptr);
+    __afl_map_edge(0x1103);
 
     /* Force transforms */
     png_set_expand(png_ptr);
@@ -87,20 +98,26 @@ void fuzz_png(const unsigned char *buf, size_t size) {
 
     /* Bounds to prevent OOM */
     if (width > 16384 || height > 16384) {
+        __afl_map_edge(0x1200);
         png_destroy_read_struct(&png_ptr, &info_ptr, NULL);
         fclose(f);
         return;
     }
+    __afl_map_edge(0x1201);
 
     png_read_update_info(png_ptr, info_ptr);
+    __afl_map_edge(0x1300);
 
     size_t rowbytes = png_get_rowbytes(png_ptr, info_ptr);
     unsigned char *row = malloc(rowbytes);
     if (row) {
-        for (png_uint_32 y = 0; y < height; y++)
+        for (png_uint_32 y = 0; y < height; y++) {
             png_read_row(png_ptr, row, NULL);
+            __afl_map_edge(0x1400 + (y & 0xFF));
+        }
         free(row);
     }
+    __afl_map_edge(0x1500);
 
     png_destroy_read_struct(&png_ptr, &info_ptr, NULL);
     fclose(f);

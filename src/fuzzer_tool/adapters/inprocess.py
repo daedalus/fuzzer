@@ -33,6 +33,7 @@ log = logging.getLogger(__name__)
 
 _LOADER_SCRIPT = """\
 import ctypes
+import ctypes.util
 import os
 import subprocess
 import sys
@@ -85,6 +86,23 @@ if shim_path and os.path.exists(shim_path):
     except OSError:
         pass
 
+# Also try reading from SHM (AFL shim targets)
+shm_id_str = os.environ.get("__AFL_SHM_ID")
+if shm_id_str:
+    try:
+        libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6")
+        libc.shmat.restype = ctypes.c_void_p
+        ptr = libc.shmat(int(shm_id_str), None, 0)
+        if ptr and ptr != -1:
+            map_size = int(os.environ.get("AFL_MAP_SIZE", "65536"))
+            bitmap = (ctypes.c_uint8 * map_size).from_address(ptr)
+            out_path = os.environ.get("_COV_BITMAP_OUT")
+            if out_path:
+                with open(out_path, "wb") as f:
+                    f.write(bytes(bitmap))
+    except Exception:
+        pass
+
 sys.exit(max(0, min(rc, 125)))
 """
 
@@ -107,6 +125,7 @@ class InProcessRunner:
         shm_size: int = 65536,
         direct: bool = False,
         coverage_env_id: str | None = None,
+        cov: bool = False,
     ):
         self.target = target
         self.function_name = function_name
@@ -161,6 +180,9 @@ class InProcessRunner:
             # code can attach to SHM during initialization
             if self.coverage_env_id:
                 os.environ["__AFL_SHM_ID"] = self.coverage_env_id
+            if cov and not self._bitmap_out:
+                fd, self._bitmap_out = tempfile.mkstemp(suffix=".cov", prefix="fuzz_cov_")
+                os.close(fd)
             try:
                 self._lib = ctypes.CDLL(self.target)
                 fn_ptr = getattr(self._lib, self.function_name)
@@ -204,6 +226,10 @@ class InProcessRunner:
                 if cov:
                     fd, self._bitmap_out = tempfile.mkstemp(suffix=".cov", prefix="fuzz_cov_")
                     os.close(fd)
+            elif cov and not self._bitmap_out:
+                # Also set bitmap_out for persistent mode
+                fd, self._bitmap_out = tempfile.mkstemp(suffix=".cov", prefix="fuzz_cov_")
+                os.close(fd)
 
         self._is_c = True
         loader_type = (
@@ -231,9 +257,18 @@ class InProcessRunner:
     # ------------------------------------------------------------------
 
     def read_bitmap(self) -> bytes | None:
-        """Read the coverage bitmap."""
+        """Read the coverage bitmap.
+
+        Checks sancov counters first, then SHM (for AFL shim targets).
+        If sancov counters are all zeros (target uses SHM instead), falls
+        through to read from SHM directly.
+        """
+        # Try sancov counters first
         if self.direct and self._bitmap_reader and self._bitmap_reader.valid:
-            return self._bitmap_reader.read_bitmap()
+            bm = self._bitmap_reader.read_bitmap()
+            if bm and any(b != 0 for b in bm):
+                return bm
+            # sancov counters empty — target may use SHM instead
         if self._persistent:
             return self._persistent._last_bitmap
         if self._bitmap_out and os.path.exists(self._bitmap_out):
@@ -242,12 +277,35 @@ class InProcessRunner:
                     return f.read()
             except OSError:
                 return None
+        # Read from SHM (AFL shim targets write here)
+        if self.coverage_env_id:
+            try:
+                import ctypes.util
+                libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6")
+                libc.shmat.restype = ctypes.c_void_p
+                ptr = libc.shmat(int(self.coverage_env_id), None, 0)
+                if ptr and ptr != -1:
+                    return (ctypes.c_uint8 * self.shm_size).from_address(ptr)
+            except Exception:
+                pass
         return None
 
     def reset_bitmap(self):
         """Reset the coverage bitmap to zero."""
         if self.direct and self._bitmap_reader and self._bitmap_reader.valid:
             self._bitmap_reader.reset_bitmap()
+        # Also reset SHM for AFL shim targets
+        if self.coverage_env_id:
+            try:
+                import ctypes as _ct
+                import ctypes.util
+                libc = _ct.CDLL(ctypes.util.find_library("c") or "libc.so.6")
+                libc.shmat.restype = _ct.c_void_p
+                ptr = libc.shmat(int(self.coverage_env_id), None, 0)
+                if ptr and ptr != -1:
+                    _ct.memset(ptr, 0, self.shm_size)
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Execution

@@ -222,6 +222,19 @@ else:
                     bmp = bytes((ctypes.c_uint8 * bitmap_size).from_address(bitmap_start))
                 except Exception:
                     pass
+            # Also try reading from SHM (AFL shim targets)
+            if not bmp:
+                shm_id_str = os.environ.get("__AFL_SHM_ID")
+                if shm_id_str:
+                    try:
+                        libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6")
+                        libc.shmat.restype = ctypes.c_void_p
+                        ptr = libc.shmat(int(shm_id_str), None, 0)
+                        if ptr and ptr != -1:
+                            map_size = int(os.environ.get("AFL_MAP_SIZE", "65536"))
+                            bmp = bytes((ctypes.c_uint8 * map_size).from_address(ptr))
+                    except Exception:
+                        pass
 
             resp = f"RC {rc} {len(bmp)}\n".encode()
             sys.stdout.buffer.write(resp)
@@ -319,6 +332,9 @@ class PersistentLoader:
         env = os.environ.copy()
         env["_COV_BITMAP_OUT"] = self._bitmap_out
         env["_TIMEOUT"] = str(self.timeout)
+        # Pass SHM ID so the target library can attach to SHM
+        if "AFL_MAP_SIZE" not in env:
+            env["AFL_MAP_SIZE"] = "65536"
 
         self._proc = subprocess.Popen(
             [c_loader_path],
