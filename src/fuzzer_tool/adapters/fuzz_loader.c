@@ -189,8 +189,56 @@ int main(void) {
         if (is_executable) {
             rc = run_executable(data, data_len, bmp, &bmp_len);
         } else if (target_fn) {
-            rc = target_fn(data, data_len);
-            /* Read bitmap from file if available */
+            /* Fork child to enforce timeout on direct .so calls */
+            int result_pipe[2];
+            if (pipe(result_pipe) < 0) {
+                rc = -2;
+            } else {
+                pid_t child = fork();
+                if (child < 0) {
+                    close(result_pipe[0]); close(result_pipe[1]);
+                    rc = -2;
+                } else if (child == 0) {
+                    /* Child: run target_fn, write result to pipe */
+                    close(result_pipe[0]);
+                    struct sigaction sa_ch;
+                    sa_ch.sa_handler = alarm_handler;
+                    sigemptyset(&sa_ch.sa_mask);
+                    sa_ch.sa_flags = 0;
+                    sigaction(SIGALRM, &sa_ch, NULL);
+                    alarm(timeout_seconds);
+                    int child_rc = target_fn(data, data_len);
+                    alarm(0);
+                    /* Atomic write of 4-byte int */
+                    write(result_pipe[1], &child_rc, sizeof(child_rc));
+                    close(result_pipe[1]);
+                    _exit(0);
+                }
+                /* Parent: wait for child with alarm */
+                close(result_pipe[1]);
+                struct sigaction sa;
+                sa.sa_handler = alarm_handler;
+                sigemptyset(&sa.sa_mask);
+                sa.sa_flags = 0;
+                sigaction(SIGALRM, &sa, NULL);
+                alarm(timeout_seconds);
+                int status = 0;
+                pid_t waited = waitpid(child, &status, 0);
+                alarm(0);
+                signal(SIGALRM, SIG_DFL);
+                if (waited < 0) {
+                    /* Interrupted by SIGALRM — child timed out */
+                    kill(child, SIGKILL);
+                    waitpid(child, NULL, 0);
+                    close(result_pipe[0]);
+                    rc = -1;
+                } else {
+                    int child_rc = -2;
+                    ssize_t n = read(result_pipe[0], &child_rc, sizeof(child_rc));
+                    close(result_pipe[0]);
+                    rc = (n == sizeof(child_rc)) ? child_rc : -2;
+                }
+            }
             bmp_len = read_bitmap_file(bmp, MAX_BMP);
         }
 

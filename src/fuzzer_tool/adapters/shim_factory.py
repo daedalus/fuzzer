@@ -14,6 +14,7 @@ import ctypes
 import hashlib
 import logging
 import os
+import struct
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -137,10 +138,13 @@ def build_minimal_shim() -> str | None:
     key = _cache_key("minimal_shim", "noop")
     if key in _shim_cache and os.path.exists(_shim_cache[key]):
         return _shim_cache[key]
-    so_path = os.path.join(tempfile.gettempdir(), "fuzz_minimal_shim.so")
+    fd, so_path = tempfile.mkstemp(suffix=".so", prefix=f"fuzz_minimal_shim_{os.getpid()}_")
+    os.close(fd)
     if _compile_source(_MINIMAL_SHIM_SRC, so_path):
         _shim_cache[key] = so_path
         return so_path
+    with contextlib.suppress(OSError):
+        os.unlink(so_path)
     return None
 
 
@@ -157,11 +161,14 @@ def build_sancov_shim() -> str | None:
     if not os.path.exists(shim_src):
         return None
 
-    out_path = os.path.join(tempfile.gettempdir(), "fuzz_sancov_shim.so")
+    fd, out_path = tempfile.mkstemp(suffix=".so", prefix=f"fuzz_sancov_shim_{os.getpid()}_")
+    os.close(fd)
     with open(shim_src) as f:
         src = f.read()
     if _compile_source(src, out_path):
         return out_path
+    with contextlib.suppress(OSError):
+        os.unlink(out_path)
     return None
 
 
@@ -193,8 +200,13 @@ class BitmapReader:
         with open(self.target, "rb") as f:
             self._elf_data = f.read()
 
-        # Find base address from /proc/self/maps
+        # Find runtime base address and ELF vaddr of the r-xp LOAD segment.
+        # Both are needed to compute the ELF load bias (runtime - vaddr),
+        # which is then applied to ALL target virtual addresses regardless
+        # of which LOAD segment they live in.
         target_name = os.path.basename(self.target)
+        self._base_address = None
+        self._rxp_vaddr = None
         try:
             with open(f"/proc/{os.getpid()}/maps") as f:
                 for line in f:
@@ -204,31 +216,62 @@ class BitmapReader:
         except Exception:
             pass
 
-        if self._base_address is None:
-            # Fallback: try to find via the first LOAD segment
-            vaddr, _, _ = find_load_segment(self._elf_data, self._counter_offsets[0]) or (0, 0, 0)
-            # Get base from the loaded library's first symbol
+        if self._base_address is not None:
+            # Find the ELF vaddr of the r-xp segment to compute the bias
+            e_phoff = struct.unpack_from("<Q", self._elf_data, 32)[0]
+            e_phentsize = struct.unpack_from("<H", self._elf_data, 54)[0]
+            e_phnum = struct.unpack_from("<H", self._elf_data, 56)[0]
+            for i in range(e_phnum):
+                off = e_phoff + i * e_phentsize
+                p_type = struct.unpack_from("<I", self._elf_data, off)[0]
+                if p_type == 1:  # PT_LOAD
+                    p_vaddr = struct.unpack_from("<Q", self._elf_data, off + 16)[0]
+                    p_flags = struct.unpack_from("<I", self._elf_data, off + 4)[0]
+                    if p_flags & 0x5:  # PF_R | PF_X = r-x
+                        self._rxp_vaddr = p_vaddr
+                        break
+        if self._base_address is None or self._rxp_vaddr is None:
+            # Fallback: try to find via ctypes symbol address
             try:
                 first_sym = (ctypes.c_char * 1).in_dll(self.lib, "__start___sancov_cntrs")
-                self._base_address = ctypes.addressof(first_sym) - self._counter_offsets[0]
+                sym_addr = ctypes.addressof(first_sym)
+                vaddr = self._counter_offsets[0]
+                # Find the LOAD segment containing vaddr
+                seg = find_load_segment(self._elf_data, vaddr)
+                if seg:
+                    # For PIE libraries: first LOAD segment starts at vaddr 0,
+                    # so bias = runtime address of first LOAD = sym_addr - seg_vaddr.
+                    # But for non-zero-base ELFs, use: bias = sym_addr - vaddr.
+                    self._base_address = sym_addr - vaddr
+                    self._rxp_vaddr = 0  # bias is already computed directly
             except (ValueError, AttributeError):
                 log.warning("Cannot determine base address for %s", self.target)
                 return
 
-        # Calculate runtime addresses
+        # Compute ELF load bias: runtime_addr - elf_vaddr of the same segment
+        # This is the single offset that translates ANY ELF vaddr to runtime.
         start_elf, stop_elf = self._counter_offsets
-        seg = find_load_segment(self._elf_data, start_elf)
-        if seg:
-            seg_vaddr = seg[0]
-            self._runtime_start = self._base_address + (start_elf - seg_vaddr)
-            self._runtime_stop = self._base_address + (stop_elf - seg_vaddr)
-            self._bitmap_size = self._runtime_stop - self._runtime_start
-            log.info(
-                "BitmapReader: counters at 0x%x-0x%x (%d bytes)",
-                self._runtime_start,
-                self._runtime_stop,
-                self._bitmap_size,
-            )
+        if self._rxp_vaddr is not None and self._rxp_vaddr > 0:
+            bias = self._base_address - self._rxp_vaddr
+        else:
+            # Fallback: compute bias from the counters' own segment
+            seg = find_load_segment(self._elf_data, start_elf)
+            if seg:
+                bias = self._base_address - seg[0]
+            else:
+                log.warning("Cannot compute load bias for %s", self.target)
+                return
+
+        self._runtime_start = bias + start_elf
+        self._runtime_stop = bias + stop_elf
+        self._bitmap_size = self._runtime_stop - self._runtime_start
+        log.info(
+            "BitmapReader: counters at 0x%x-0x%x (%d bytes, bias=0x%x)",
+            self._runtime_start,
+            self._runtime_stop,
+            self._bitmap_size,
+            bias,
+        )
 
     @property
     def bitmap_size(self) -> int:

@@ -78,7 +78,8 @@ def parse_elf_sancov(path):
     return None, None
 
 def find_base_addr(target_path):
-    # Find the runtime base address from /proc/self/maps.
+    # Find the runtime base address and ELF vaddr of the r-xp LOAD segment.
+    # Both are needed to compute the ELF load bias.
     basename = os.path.basename(target_path)
     try:
         with open(f'/proc/{os.getpid()}/maps') as f:
@@ -87,6 +88,23 @@ def find_base_addr(target_path):
                     return int(line.split('-')[0], 16)
     except Exception:
         pass
+    return None
+
+def find_rxp_vaddr(elf_data):
+    # Find the ELF virtual address of the first r-xp LOAD segment.
+    if len(elf_data) < 64 or elf_data[:4] != b'\\x7fELF' or elf_data[4] != 2 or elf_data[5] != 1:
+        return None
+    e_phoff = struct.unpack_from('<Q', elf_data, 32)[0]
+    e_phentsize = struct.unpack_from('<H', elf_data, 54)[0]
+    e_phnum = struct.unpack_from('<H', elf_data, 56)[0]
+    for i in range(e_phnum):
+        off = e_phoff + i * e_phentsize
+        p_type = struct.unpack_from('<I', elf_data, off)[0]
+        if p_type == 1:  # PT_LOAD
+            p_vaddr = struct.unpack_from('<Q', elf_data, off + 16)[0]
+            p_flags = struct.unpack_from('<I', elf_data, off + 4)[0]
+            if p_flags & 0x5:  # PF_R | PF_X = r-x
+                return p_vaddr
     return None
 
 # Read init
@@ -164,8 +182,20 @@ else:
     if elf_start is not None and elf_stop is not None:
         base = find_base_addr(target_path)
         if base is not None:
-            bitmap_start = base + elf_start
-            bitmap_size = elf_stop - elf_start
+            # Read ELF to find r-xp segment vaddr for bias computation
+            with open(target_path, 'rb') as f:
+                elf_data = f.read()
+            rxp_vaddr = find_rxp_vaddr(elf_data)
+            if rxp_vaddr is not None:
+                # ELF load bias = runtime_rxp_start - elf_rxp_vaddr
+                # This single offset translates ANY ELF vaddr to runtime
+                bias = base - rxp_vaddr
+                bitmap_start = bias + elf_start
+                bitmap_size = elf_stop - elf_start
+            else:
+                # Fallback: assume base is already the bias (PIE with 0-base)
+                bitmap_start = base + elf_start
+                bitmap_size = elf_stop - elf_start
 
     sys.stdout.buffer.write(b"READY\n")
     sys.stdout.buffer.flush()
@@ -233,8 +263,9 @@ class PersistentLoader:
         if not os.path.exists(loader_c):
             return None
 
-        # Compile C loader
-        out_path = os.path.join(tempfile.gettempdir(), "fuzz_loader_bin")
+        # Compile C loader — include PID to avoid races under --jobs N
+        fd, out_path = tempfile.mkstemp(suffix="_loader", prefix=f"fuzz_loader_{os.getpid()}_")
+        os.close(fd)
         try:
             result = subprocess.run(
                 ["gcc", "-O2", "-o", out_path, loader_c],
@@ -260,6 +291,8 @@ class PersistentLoader:
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
 
+        with contextlib.suppress(OSError):
+            os.unlink(out_path)
         return None
 
     def start(self) -> bool:
@@ -281,7 +314,8 @@ class PersistentLoader:
 
     def _use_c_loader(self, c_loader_path: str):
         """Start the C loader subprocess."""
-        self._bitmap_out = tempfile.mktemp(suffix=".cov", prefix="fuzz_cov_")
+        fd, self._bitmap_out = tempfile.mkstemp(suffix=".cov", prefix=f"fuzz_cov_{os.getpid()}_")
+        os.close(fd)
         env = os.environ.copy()
         env["_COV_BITMAP_OUT"] = self._bitmap_out
         env["_TIMEOUT"] = str(self.timeout)
@@ -318,7 +352,8 @@ class PersistentLoader:
         shim = build_minimal_shim()
         if shim:
             env["_COV_SHM_PATH"] = shim
-        self._bitmap_out = tempfile.mktemp(suffix=".cov", prefix="fuzz_cov_")
+        fd, self._bitmap_out = tempfile.mkstemp(suffix=".cov", prefix=f"fuzz_cov_{os.getpid()}_")
+        os.close(fd)
         env["_COV_BITMAP_OUT"] = self._bitmap_out
         env["_TIMEOUT"] = str(self.timeout)
 
