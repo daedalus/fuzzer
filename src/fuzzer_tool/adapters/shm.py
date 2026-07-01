@@ -52,7 +52,7 @@ class ShmCoverage:
             raise OSError(f"shmat failed: {os.strerror(ctypes.get_errno())}")
         self._map = (ctypes.c_char * size).from_address(self._ptr)
         self.env_id = str(self.shm_id)
-        self._snapshot = bytes(self._map)
+        self._seen = bytearray(size)  # cumulative "ever seen" bitmap
         self._register_atexit()
         self.total_edges = 0
         self.cumulative_edges = 0
@@ -78,26 +78,37 @@ class ShmCoverage:
         idx = edge_id % self.size
         if self._map[idx] == 0:
             self._map[idx] = 1
+            self._seen[idx] = 1
             self.total_edges += 1
-            self.cumulative_edges += 1
+            self.cumulative_edges = sum(self._seen)
             return True
         return False
 
     def is_new_coverage(self) -> bool:
-        """Check if the current bitmap differs from the snapshot."""
+        """Check if current bitmap has any edge not seen before (AFL-style).
+
+        Maintains a cumulative 'seen' bitmap across all runs. Only returns
+        True when a previously-zero byte becomes non-zero, meaning the
+        target explored genuinely new code paths.
+        """
         current = bytes(self._map)
-        if current == self._snapshot:
-            return False
-        # Update cumulative edge count from bitmap
-        new_edges = sum(1 for b in current if b != 0)
-        if new_edges > self.cumulative_edges:
-            self.cumulative_edges = new_edges
-        self.total_edges += 1
-        self._snapshot = current
-        return True
+        has_new = False
+        for i in range(self.size):
+            if current[i] and not self._seen[i]:
+                self._seen[i] = 1
+                has_new = True
+        if has_new:
+            self.cumulative_edges = sum(self._seen)
+            self.total_edges += 1
+        return has_new
 
     def commit_snapshot(self):
-        self._snapshot = bytes(self._map)
+        """Update the cumulative 'seen' bitmap to include all current edges."""
+        current = bytes(self._map)
+        for i in range(self.size):
+            if current[i]:
+                self._seen[i] = 1
+        self.cumulative_edges = sum(self._seen)
 
     def cleanup(self):
         if self._ptr is not None:
