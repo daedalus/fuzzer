@@ -85,7 +85,16 @@ class ShmCoverage:
         return False
 
     def is_new_coverage(self) -> bool:
-        return bytes(self._map) != self._snapshot
+        """Check if the current bitmap differs from the snapshot."""
+        current = bytes(self._map)
+        if current == self._snapshot:
+            return False
+        # Update cumulative edge count from bitmap
+        new_edges = sum(1 for b in current if b != 0)
+        if new_edges > self.cumulative_edges:
+            self.cumulative_edges = new_edges
+        self.total_edges += 1
+        return True
 
     def commit_snapshot(self):
         self._snapshot = bytes(self._map)

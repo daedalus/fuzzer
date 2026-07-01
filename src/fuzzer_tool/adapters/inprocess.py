@@ -205,29 +205,11 @@ class InProcessRunner:
                     raise
 
         if not self.direct:
+            # Per-call subprocess mode (works with AFL shim targets)
+            fd, self._loader_path = tempfile.mkstemp(suffix=".py", prefix="fuzz_loader_")
+            os.write(fd, _LOADER_SCRIPT.encode())
+            os.close(fd)
             if cov:
-                # Use persistent subprocess for coverage — one process, many calls
-                from fuzzer_tool.adapters.persistent_loader import PersistentLoader
-
-                self._persistent = PersistentLoader(
-                    target=self.target,
-                    function_name=self.function_name,
-                    timeout=self.timeout,
-                )
-                if not self._persistent.start():
-                    log.warning("Persistent loader failed, falling back to per-call")
-                    self._persistent = None
-
-            if not self._persistent:
-                # Per-call subprocess mode
-                fd, self._loader_path = tempfile.mkstemp(suffix=".py", prefix="fuzz_loader_")
-                os.write(fd, _LOADER_SCRIPT.encode())
-                os.close(fd)
-                if cov:
-                    fd, self._bitmap_out = tempfile.mkstemp(suffix=".cov", prefix="fuzz_cov_")
-                    os.close(fd)
-            elif cov and not self._bitmap_out:
-                # Also set bitmap_out for persistent mode
                 fd, self._bitmap_out = tempfile.mkstemp(suffix=".cov", prefix="fuzz_cov_")
                 os.close(fd)
 
