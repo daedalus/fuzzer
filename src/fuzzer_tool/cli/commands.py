@@ -32,7 +32,7 @@ def _add_common_args(parser):
     parser.add_argument(
         "-A",
         "--target-args",
-        nargs=argparse.REMAINDER,
+        nargs="*",
         help="Target arguments ({file} placeholder)",
     )
     parser.add_argument("-c", "--coverage", action="store_true", help="Enable coverage-guided mode")
@@ -361,7 +361,7 @@ def main() -> int:
     fuzz_parser.add_argument(
         "-A",
         "--target-args",
-        nargs=argparse.REMAINDER,
+        nargs="*",
         help="Target arguments ({file} placeholder)",
     )
     fuzz_parser.add_argument("--markov", action="store_true", help="Enable Markov chain mutation")
