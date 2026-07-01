@@ -103,7 +103,7 @@ def find_rxp_vaddr(elf_data):
         if p_type == 1:  # PT_LOAD
             p_vaddr = struct.unpack_from('<Q', elf_data, off + 16)[0]
             p_flags = struct.unpack_from('<I', elf_data, off + 4)[0]
-            if p_flags & 0x5:  # PF_R | PF_X = r-x
+            if (p_flags & 0x5) == 0x5:  # PF_R | PF_X = r-x
                 return p_vaddr
     return None
 

@@ -227,7 +227,7 @@ class BitmapReader:
                 if p_type == 1:  # PT_LOAD
                     p_vaddr = struct.unpack_from("<Q", self._elf_data, off + 16)[0]
                     p_flags = struct.unpack_from("<I", self._elf_data, off + 4)[0]
-                    if p_flags & 0x5:  # PF_R | PF_X = r-x
+                    if (p_flags & 0x5) == 0x5:  # PF_R | PF_X = r-x
                         self._rxp_vaddr = p_vaddr
                         break
         if self._base_address is None or self._rxp_vaddr is None:

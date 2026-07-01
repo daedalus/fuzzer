@@ -150,7 +150,7 @@ def _sync_corpus_in(parent_dir: Path, fuzzer, max_new: int = 50):
             if e.is_file() and e.suffix not in (".txt", ".log")
         )
         new_entries = entries[cursor:]
-        _sync_cursors[key] = len(entries)
+        consumed = 0
         for entry in new_entries:
             if added >= max_new:
                 break
@@ -159,6 +159,8 @@ def _sync_corpus_in(parent_dir: Path, fuzzer, max_new: int = 50):
             if h not in fuzzer.seen_hashes:
                 fuzzer.save_to_corpus(data)
                 added += 1
+            consumed += 1
+        _sync_cursors[key] = cursor + consumed
 
 
 def run_parallel(
