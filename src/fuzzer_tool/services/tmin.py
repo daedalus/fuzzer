@@ -63,9 +63,11 @@ def tmin(
             if use_coverage:
                 env["AFL_MAP_SIZE"] = "65536"
             if file_mode:
-                return run_target_file(target, data_bytes, timeout, str(tmp_dir),
+                rc, stderr, _pid = run_target_file(target, data_bytes, timeout, str(tmp_dir),
                                        target_args or [], env=env)
-            return run_target_stdin(target, data_bytes, timeout, env=env)
+                return rc, stderr
+            rc, stderr, _pid = run_target_stdin(target, data_bytes, timeout, env=env)
+            return rc, stderr
 
         def _crash_signature(returncode: int, stderr: str) -> str | None:
             """Extract a crash signature for comparison. Returns None if no crash."""

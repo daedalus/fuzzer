@@ -36,7 +36,7 @@ def run_target_stdin(
     data: bytes,
     timeout: float,
     env: dict[str, str] | None = None,
-) -> tuple[int, str]:
+) -> tuple[int, str, int]:
     """Execute target with data on stdin.
 
     Args:
@@ -46,7 +46,7 @@ def run_target_stdin(
         env: Optional environment variables.
 
     Returns:
-        Tuple of (returncode, stderr).
+        Tuple of (returncode, stderr, subprocess_pid).
     """
     try:
         proc = subprocess.Popen(
@@ -60,7 +60,7 @@ def run_target_stdin(
         _track(proc.pid)
         try:
             _, stderr = proc.communicate(input=data, timeout=timeout)
-            return proc.returncode, stderr.decode(errors="replace")
+            return proc.returncode, stderr.decode(errors="replace"), proc.pid
         except subprocess.TimeoutExpired:
             with contextlib.suppress(OSError):
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
@@ -70,11 +70,11 @@ def run_target_stdin(
                     break
                 except subprocess.TimeoutExpired:
                     continue
-            return -1, "timeout"
+            return -1, "timeout", proc.pid
         finally:
             _untrack(proc.pid)
     except Exception as e:
-        return -2, str(e)
+        return -2, str(e), 0
 
 
 def run_target_file(
@@ -84,7 +84,7 @@ def run_target_file(
     tmp_dir: str,
     target_args: list[str],
     env: dict[str, str] | None = None,
-) -> tuple[int, str]:
+) -> tuple[int, str, int]:
     """Execute target with data written to a temp file.
 
     Args:
@@ -96,7 +96,7 @@ def run_target_file(
         env: Optional environment variables.
 
     Returns:
-        Tuple of (returncode, stderr).
+        Tuple of (returncode, stderr, subprocess_pid).
     """
     from pathlib import Path
 
@@ -114,7 +114,7 @@ def run_target_file(
         _track(proc.pid)
         try:
             _, stderr = proc.communicate(timeout=timeout)
-            return proc.returncode, stderr.decode(errors="replace")
+            return proc.returncode, stderr.decode(errors="replace"), proc.pid
         except subprocess.TimeoutExpired:
             with contextlib.suppress(OSError):
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
@@ -124,10 +124,10 @@ def run_target_file(
                     break
                 except subprocess.TimeoutExpired:
                     continue
-            return -1, "timeout"
+            return -1, "timeout", proc.pid
         finally:
             _untrack(proc.pid)
             with contextlib.suppress(OSError):
                 tmp_file.unlink()
     except Exception as e:
-        return -2, str(e)
+        return -2, str(e), 0

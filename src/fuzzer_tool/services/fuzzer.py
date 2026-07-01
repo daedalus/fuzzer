@@ -41,6 +41,7 @@ from fuzzer_tool.core.sanitizer import SanitizerReport
 log = logging.getLogger(__name__)
 
 _shutdown = False
+_active_dmesg_parser = None  # module-level ref for atexit cleanup
 
 
 def _kill_children(sig=None, frame=None):
@@ -50,6 +51,9 @@ def _kill_children(sig=None, frame=None):
         with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
             os.killpg(os.getpgid(pid), signal.SIGKILL)
     _child_pids.clear()
+    # Stop dmesg streaming to avoid orphan -w subprocess
+    if _active_dmesg_parser is not None:
+        _active_dmesg_parser.stop_stream()
 
 
 atexit.register(_kill_children)
@@ -638,6 +642,9 @@ class Fuzzer:
         self._kernel_crashes: list = []
         self._last_child_pid: int | None = None
         self._dmesg.start_stream()
+        # Register for atexit cleanup to avoid orphan dmesg -w subprocess
+        global _active_dmesg_parser
+        _active_dmesg_parser = self._dmesg
         self.stats_file = Path(stats_file) if stats_file else None
         self.stats_interval = stats_interval
 
@@ -856,7 +863,7 @@ class Fuzzer:
             env = self._cmplog.setup_env(env)
 
         if self.file_mode:
-            return run_target_file(
+            rc, stderr, pid = run_target_file(
                 self.target,
                 data,
                 self.timeout,
@@ -864,7 +871,11 @@ class Fuzzer:
                 self.target_args,
                 env=env,
             )
-        return run_target_stdin(self.target, data, self.timeout, env=env)
+            self._last_child_pid = pid
+            return rc, stderr
+        rc, stderr, pid = run_target_stdin(self.target, data, self.timeout, env=env)
+        self._last_child_pid = pid
+        return rc, stderr
 
     def _ptrace_handle_breakpoint(self, pid: int, libc, cov: PtraceCoverage, regs_buf) -> bool:
         """Handle a SIGTRAP: restore bp, record edge, re-exec if RSP is valid.
