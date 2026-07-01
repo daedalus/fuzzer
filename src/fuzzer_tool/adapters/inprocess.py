@@ -314,6 +314,7 @@ class InProcessRunner:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
                 env=env,
+                preexec_fn=os.setsid,
             )
             try:
                 _, stderr = proc.communicate(input=data, timeout=self.timeout)

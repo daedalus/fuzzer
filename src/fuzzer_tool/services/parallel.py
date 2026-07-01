@@ -124,9 +124,18 @@ def _worker_main(
     )
 
 
+_sync_cursors: dict[str, int] = {}
+
+
 def _sync_corpus_in(parent_dir: Path, fuzzer, max_new: int = 50):
-    """Pull new corpus entries from sibling worker dirs."""
+    """Pull new corpus entries from sibling worker dirs.
+
+    Tracks a per-sibling file-count cursor so each sync only processes
+    files added since the last round, avoiding O(total_corpus) re-scans.
+    """
     from fuzzer_tool.adapters.filesystem import hash_data
+
+    global _sync_cursors
 
     added = 0
     for sibling_dir in sorted(parent_dir.iterdir()):
@@ -134,9 +143,15 @@ def _sync_corpus_in(parent_dir: Path, fuzzer, max_new: int = 50):
             continue
         if added >= max_new:
             break
-        for entry in sorted(sibling_dir.iterdir()):
-            if not entry.is_file() or entry.suffix in (".txt", ".log"):
-                continue
+        key = str(sibling_dir)
+        cursor = _sync_cursors.get(key, 0)
+        entries = sorted(
+            e for e in sibling_dir.iterdir()
+            if e.is_file() and e.suffix not in (".txt", ".log")
+        )
+        new_entries = entries[cursor:]
+        _sync_cursors[key] = len(entries)
+        for entry in new_entries:
             if added >= max_new:
                 break
             data = entry.read_bytes()
@@ -249,14 +264,15 @@ def run_parallel(
             for i, p in enumerate(processes):
                 if not p.is_alive() and not stop_event.is_set():
                     exitcode = p.exitcode
-                    # Only restart on abnormal exit (not clean exit from iterations limit)
-                    abnormal = exitcode is not None and exitcode < 0
+                    # Restart on abnormal exit: signal-killed (< 0) or
+                    # unhandled exception (> 0, not clean exit code 0)
+                    abnormal = exitcode is not None and exitcode != 0
                     if abnormal:
                         restart_counts[i] += 1
                         # Fresh seed: base + worker_id + restart_count * jobs
                         new_seed = seed + i + restart_counts[i] * jobs
                         print(
-                            f"\n[!] Worker-{i} died (signal={abs(exitcode)}), restarting (attempt {restart_counts[i]})..."
+                            f"\n[!] Worker-{i} died (exitcode={exitcode}), restarting (attempt {restart_counts[i]})..."
                         )
                         processes[i] = _spawn_worker(i, new_seed)
 
