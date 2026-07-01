@@ -157,6 +157,18 @@ def cmd_fuzz(args):
         extra_crash_codes=args.crash_codes,
     )
     fuzzer.run(iterations=args.iterations)
+
+    if args.report is not None:
+        from fuzzer_tool.services.report import generate_report
+
+        report = generate_report(fuzzer, corpus_dir, crashes_dir)
+        if args.report == "-":
+            print(report)
+        else:
+            Path(args.report).parent.mkdir(parents=True, exist_ok=True)
+            Path(args.report).write_text(report)
+            print(f"[*] Report saved to {args.report}")
+
     return 0
 
 
@@ -432,6 +444,14 @@ def main() -> int:
         default=None,
         metavar="FILE",
         help="Append (timestamp, edge_count) lines to file for coverage-over-time plots",
+    )
+    fuzz_parser.add_argument(
+        "--report",
+        default=None,
+        nargs="?",
+        const="-",
+        metavar="FILE",
+        help="Generate explainability report after run (default: stdout, or specify output file)",
     )
     fuzz_parser.add_argument(
         "-g",
