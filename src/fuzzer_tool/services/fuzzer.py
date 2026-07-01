@@ -866,6 +866,39 @@ class Fuzzer:
             )
         return run_target_stdin(self.target, data, self.timeout, env=env)
 
+    def _ptrace_handle_breakpoint(self, pid: int, libc, cov: PtraceCoverage, regs_buf) -> bool:
+        """Handle a SIGTRAP: restore bp, record edge, re-exec if RSP is valid.
+
+        Returns True if execution should continue, False to break the loop.
+        """
+        if not cov._is_x86_64:
+            log.warning("ptrace coverage requires x86_64")
+            return False
+        libc.ptrace(PTRACE_GETREGS, pid, None, regs_buf)
+        rip = struct.unpack_from("<Q", bytes(regs_buf), 128)[0]
+        bp_addr = rip - 1
+
+        if bp_addr not in cov.original_bytes:
+            libc.ptrace(PTRACE_CONT, pid, None, None)
+            return True
+
+        orig = cov.original_bytes[bp_addr]
+        val = cov._read_memory(pid, bp_addr)
+        cov._write_memory(pid, bp_addr, (val & ~0xFF) | orig)
+        del cov.original_bytes[bp_addr]
+        cov.discover_new_bbs(pid, bp_addr)
+
+        rsp = struct.unpack_from("<Q", bytes(regs_buf), 128 + 48)[0]
+        if rsp > 0x1000:
+            cov.record_edge(bp_addr)
+            regs_buf2 = (ctypes.c_char * (27 * 8))()
+            libc.ptrace(PTRACE_GETREGS, pid, None, regs_buf2)
+            regs = bytearray(regs_buf2)
+            struct.pack_into("<Q", regs, 128, bp_addr)
+            libc.ptrace(PTRACE_SETREGS, pid, None, bytes(regs))
+        libc.ptrace(PTRACE_CONT, pid, None, None)
+        return True
+
     def _run_target_ptrace(self, data: bytes) -> tuple[int, str]:
         cov = self.ptrace_cov
         cov.reset_edge_map()
@@ -955,72 +988,13 @@ class Fuzzer:
                     sig = os.WSTOPSIG(status)
                     last_sig = sig
                     if sig == signal.SIGTRAP:
-                        if not cov._is_x86_64:
-                            log.warning("ptrace coverage requires x86_64")
-                            break
                         regs_buf = (ctypes.c_char * (27 * 8))()
-                        libc.ptrace(PTRACE_GETREGS, pid, None, regs_buf)
-                        # RIP is at offset 128 in user_regs_struct (x86-64 Linux)
-                        rip = struct.unpack_from("<Q", bytes(regs_buf), 128)[0]
-                        bp_addr = rip - 1
-
-                        if bp_addr in cov.original_bytes:
-                            orig = cov.original_bytes[bp_addr]
-                            val = cov._read_memory(pid, bp_addr)
-                            cov._write_memory(pid, bp_addr, (val & ~0xFF) | orig)
-                            del cov.original_bytes[bp_addr]
-                            cov.discover_new_bbs(pid, bp_addr)
-                            # Only record edge and re-execute if stack is
-                            # set up (RSP > 0x1000).  At early init RSP=0,
-                            # breakpoints fire before user code runs — skip
-                            # them to avoid false edge coverage.
-                            rsp = struct.unpack_from("<Q", bytes(regs_buf), 128 + 48)[0]
-                            if rsp > 0x1000:
-                                cov.record_edge(bp_addr)
-                                regs_buf2 = (ctypes.c_char * (27 * 8))()
-                                libc.ptrace(PTRACE_GETREGS, pid, None, regs_buf2)
-                                regs = bytearray(regs_buf2)
-                                struct.pack_into("<Q", regs, 128, bp_addr)
-                                libc.ptrace(PTRACE_SETREGS, pid, None, bytes(regs))
-                                libc.ptrace(PTRACE_CONT, pid, None, None)
-                                last_action = "cont"
-                            else:
-                                libc.ptrace(PTRACE_CONT, pid, None, None)
-                                last_action = "cont"
-                        else:
-                            libc.ptrace(PTRACE_CONT, pid, None, None)
+                        if self._ptrace_handle_breakpoint(pid, libc, cov, regs_buf):
                             last_action = "cont"
+                        else:
+                            break
                     else:
                         break
-                        regs_buf = (ctypes.c_char * (27 * 8))()
-                        libc.ptrace(PTRACE_GETREGS, pid, None, regs_buf)
-                        # RIP is at offset 128 in user_regs_struct (x86-64 Linux)
-                        rip = struct.unpack_from("<Q", bytes(regs_buf), 128)[0]
-                        bp_addr = rip - 1
-
-                if bp_addr in cov.original_bytes:
-                    orig = cov.original_bytes[bp_addr]
-                    cov.record_edge(bp_addr)
-                    val = cov._read_memory(pid, bp_addr)
-                    cov._write_memory(pid, bp_addr, (val & ~0xFF) | orig)
-                    del cov.original_bytes[bp_addr]
-                    cov.discover_new_bbs(pid, bp_addr)
-                    # Only re-execute if stack is set up (RSP > 0x1000).
-                    # At _start and early libc init, RSP=0 and push/pop
-                    # instructions cause SIGSEGV — just continue past them.
-                    rsp = struct.unpack_from("<Q", bytes(regs_buf), 128 + 48)[0]
-                    if rsp > 0x1000:
-                        regs_buf2 = (ctypes.c_char * (27 * 8))()
-                        libc.ptrace(PTRACE_GETREGS, pid, None, regs_buf2)
-                        regs = bytearray(regs_buf2)
-                        struct.pack_into("<Q", regs, 128, bp_addr)
-                        libc.ptrace(PTRACE_SETREGS, pid, None, bytes(regs))
-                        libc.ptrace(PTRACE_CONT, pid, None, None)
-                        last_action = "cont"
-                    else:
-                        break
-                else:
-                    break
 
             if last_action == "cont" and last_sig == signal.SIGTRAP:
                 # Child may have already exited in the loop — only wait if
