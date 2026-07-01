@@ -32,7 +32,8 @@ static void user_read_data(png_structp png_ptr, png_bytep data, png_size_t lengt
         png_error(png_ptr, "read error");
 }
 
-static void fuzz_png(const unsigned char *buf, size_t size) {
+__attribute__((visibility("default")))
+void fuzz_png(const unsigned char *buf, size_t size) {
     if (size < 8) return;
 
     /* Verify PNG signature */
