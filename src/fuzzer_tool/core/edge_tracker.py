@@ -62,6 +62,11 @@ class EdgeTracker:
         self.cumulative_edges: set[int] = set()
         # Cached aggregate hit-count distribution (rebuilt lazily)
         self._aggregate_cache: dict[int, float] | None = None
+        # Good-Turing: global cumulative hit count per edge (across all seeds)
+        self._global_edge_hits: dict[int, int] = {}
+        self._spectrum_dirty = True
+        self._frequency_spectrum: dict[int, int] = {}
+        self.max_hit_count: int = 0
 
     def record_edges(self, seed_key: str, edge_bitmap: bytes) -> set[int]:
         """Record edges hit by a seed execution.
@@ -95,6 +100,16 @@ class EdgeTracker:
                 hc[i] = val
 
         self._aggregate_cache = None  # invalidate
+
+        # Update global edge hits for Good-Turing estimation
+        for i, val in enumerate(edge_bitmap):
+            if val and i < self.map_size:
+                old = self._global_edge_hits.get(i, 0)
+                new = old + val
+                self._global_edge_hits[i] = new
+                self._spectrum_dirty = True
+                if new > self.max_hit_count:
+                    self.max_hit_count = new
 
         return new_contributions
 
@@ -307,6 +322,55 @@ class EdgeTracker:
         """Get total unique edges seen across all seeds."""
         return len(self.cumulative_edges)
 
+    def _rebuild_frequency_spectrum(self):
+        """Rebuild frequency spectrum from global edge hits (lazy)."""
+        if not self._spectrum_dirty:
+            return
+        self._frequency_spectrum.clear()
+        for count in self._global_edge_hits.values():
+            self._frequency_spectrum[count] = self._frequency_spectrum.get(count, 0) + 1
+        self._spectrum_dirty = False
+
+    def good_turing_estimate(self) -> dict:
+        """Estimate undiscovered edges using Good-Turing frequency analysis.
+
+        Returns dict with:
+          - n: total distinct edges observed
+          - n1: edges seen exactly once (singletons)
+          - n2: edges seen exactly twice
+          - estimated_undiscovered: N1^2 / (2 * N2)
+          - saturation: 1.0 - (N1^2 / (2 * N2 * N)) — how close to done
+          - confidence: low/medium/high based on N1/N ratio
+        """
+        self._rebuild_frequency_spectrum()
+        n = len(self.cumulative_edges)
+        if n == 0:
+            return {"n": 0, "n1": 0, "n2": 0, "estimated_undiscovered": 0,
+                    "saturation": 0.0, "confidence": "low"}
+        n1 = self._frequency_spectrum.get(1, 0)
+        n2 = self._frequency_spectrum.get(2, 0)
+        if n2 > 0:
+            est_undiscovered = (n1 * n1) / (2 * n2)
+        elif n1 > 0:
+            est_undiscovered = float(n1)
+        else:
+            est_undiscovered = 0.0
+        total = n + est_undiscovered
+        saturation = 1.0 - (est_undiscovered / total) if total > 0 else 1.0
+        ratio = n1 / n if n > 0 else 1.0
+        if ratio < 0.05:
+            confidence = "high"
+        elif ratio < 0.20:
+            confidence = "medium"
+        else:
+            confidence = "low"
+        return {"n": n, "n1": n1, "n2": n2, "estimated_undiscovered": int(est_undiscovered),
+                "saturation": saturation, "confidence": confidence}
+
+    def bitmap_density(self) -> float:
+        """Fraction of the edge map that has been hit (0.0 to 1.0)."""
+        return len(self._global_edge_hits) / self.map_size if self.map_size else 0.0
+
     def get_seed_edge_count(self, seed_key: str) -> int:
         """Get number of edges a specific seed covers."""
         return len(self.seed_edges.get(seed_key, set()))
@@ -321,6 +385,7 @@ class EdgeTracker:
                 k: {str(e): c for e, c in hc.items()}
                 for k, hc in self.seed_hit_counts.items()
             },
+            "global_edge_hits": {str(e): c for e, c in self._global_edge_hits.items()},
         }
         try:
             with open(path, "w") as f:
@@ -346,6 +411,8 @@ class EdgeTracker:
             k: {int(e): c for e, c in hc.items()}
             for k, hc in data.get("seed_hit_counts", {}).items()
         }
+        self._global_edge_hits = {int(e): c for e, c in data.get("global_edge_hits", {}).items()}
+        self._spectrum_dirty = True
         self._aggregate_cache = None
         log.info("Edge tracker loaded: %s (%d seeds, %d edges)", path, len(self.seed_edges), len(self.cumulative_edges))
         return True

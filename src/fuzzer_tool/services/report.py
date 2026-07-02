@@ -15,11 +15,14 @@ def generate_report(fuzzer, corpus_dir: str, crashes_dir: str) -> str:
     sections = []
     sections.append(_header(fuzzer))
     sections.append(_run_summary(fuzzer))
+    sections.append(_good_turing(fuzzer))
     sections.append(_coverage_analysis(fuzzer))
     sections.append(_mutation_effectiveness(fuzzer))
     sections.append(_seed_contribution(fuzzer))
     sections.append(_corpus_overview(fuzzer, corpus_dir))
     sections.append(_crash_analysis(fuzzer, crashes_dir))
+    sections.append(_crash_reproducibility(fuzzer))
+    sections.append(_disk_footprint(corpus_dir))
     sections.append(_edge_map_analysis(fuzzer))
     return "\n".join(s for s in sections if s)
 
@@ -241,6 +244,68 @@ def _crash_analysis(f, crashes_dir) -> str:
     for c in sorted(crashes, key=lambda x: x.name)[:5]:
         lines.append(f"    {c.name} ({_human_size(c.stat().st_size)})")
 
+    return "\n".join(lines)
+
+
+def _good_turing(f) -> str:
+    if not hasattr(f, "_edge_tracker"):
+        return ""
+    gt = f._edge_tracker.good_turing_estimate()
+    if gt["n"] == 0:
+        return ""
+    lines = [
+        "",
+        "--- Good-Turing Coverage Estimation ---",
+        f"  Edges observed:       {gt['n']}",
+        f"  Singletons (1x):     {gt['n1']}",
+        f"  Doubletons (2x):     {gt['n2']}",
+        f"  Est. undiscovered:   {gt['estimated_undiscovered']}",
+        f"  Saturation:          {gt['saturation']:.1%}",
+        f"  Confidence:          {gt['confidence']}",
+    ]
+    if f.discovery_rate() > 0:
+        lines.append(f"  Discovery rate:       {f.discovery_rate():.1f} edges/1k execs")
+    return "\n".join(lines)
+
+
+def _crash_reproducibility(f) -> str:
+    if not f._crash_replays:
+        return ""
+    lines = ["", "--- Crash Reproducibility ---"]
+    total = 0
+    reproducible = 0
+    for sig, replays in f._crash_replays.items():
+        if len(replays) >= f.replay_n:
+            total += 1
+            rate = sum(1 for r in replays if r >= 0) / len(replays)
+            reproducible += rate
+            lines.append(f"  {sig[:40]}: {rate:.0%} ({len(replays)} replays)")
+    if total > 0:
+        avg = reproducible / total
+        lines.insert(2, f"  Overall repro rate:   {avg:.0%} ({total} crashes replayed)")
+    return "\n".join(lines)
+
+
+def _disk_footprint(corpus_dir: str) -> str:
+    p = Path(corpus_dir)
+    if not p.exists():
+        return ""
+    entries = [f for f in p.iterdir() if f.is_file() and not f.name.endswith((".json",))]
+    if not entries:
+        return ""
+    total_size = sum(f.stat().st_size for f in entries)
+    lines = [
+        "",
+        "--- Disk Footprint ---",
+        f"  Corpus files:    {len(entries)}",
+        f"  Total size:      {_human_size(total_size)}",
+    ]
+    # Delta vs full analysis: check if any files are very small (< 100 bytes) vs large
+    small = [f for f in entries if f.stat().st_size < 100]
+    large = [f for f in entries if f.stat().st_size >= 100]
+    if small:
+        lines.append(f"  Small (<100B):   {len(small)} files (potential deltas)")
+        lines.append(f"  Large (>=100B):  {len(large)} files")
     return "\n".join(lines)
 
 

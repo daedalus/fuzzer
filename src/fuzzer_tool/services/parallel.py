@@ -120,6 +120,8 @@ def _worker_main(
             "crash_count": fuzzer.crash_count,
             "corpus_size": len(fuzzer.corpus),
             "timeout_count": fuzzer.timeout_count,
+            "edges": fuzzer.shm_cov.cumulative_edges if fuzzer.shm_cov else 0,
+            "elapsed": elapsed,
         }
     )
 
@@ -289,6 +291,18 @@ def run_parallel(
             alive = any(p.is_alive() for p in processes)
             if not alive:
                 break
+            # Show per-worker stats
+            if worker_stats:
+                parts = []
+                for wid in sorted(worker_stats):
+                    w = worker_stats[wid]
+                    eps = w["exec_count"] / w["elapsed"] if w["elapsed"] > 0 else 0
+                    parts.append(f"W{wid}: {eps:.0f} eps")
+                total_eps = sum(
+                    w["exec_count"] / w["elapsed"]
+                    for w in worker_stats.values() if w["elapsed"] > 0
+                )
+                print(f"\r[*] {' | '.join(parts)} | total: {total_eps:.0f} eps", end="", flush=True)
             stop_event.wait(timeout=2)
     except KeyboardInterrupt:
         stop_event.set()

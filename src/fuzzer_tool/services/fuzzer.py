@@ -566,6 +566,7 @@ class Fuzzer:
         trace_crashes=False,
         seed=42,
         extra_crash_codes=None,
+        replay_n=0,
     ):
         self.target = target
         self.corpus_dir = Path(corpus_dir)
@@ -635,6 +636,10 @@ class Fuzzer:
         self.op_counts: dict[str, int] = {}
         self.op_success: dict[str, int] = {}
         self._peak_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        self._discovery_history: list[tuple[int, int]] = []  # (exec_count, edges)
+        self._replay_budget_ms: float = 0.2  # max 200ms per batch for crash replay
+        self._crash_replays: dict[str, list[int]] = {}  # sig -> list of replay return codes
+        self.replay_n: int = replay_n  # --replay-N: replay each crash N times
 
         # Kernel-level crash verification via dmesg
         from fuzzer_tool.core.dmesg import DmesgParser
@@ -1505,15 +1510,24 @@ class Fuzzer:
         if meta is not None:
             meta["fuzz_count"] += 1
 
+        t_start = time.monotonic()
         mutated = self.mutate(data)
         returncode, stderr = self._run_target(mutated)
+        t_elapsed = time.monotonic() - t_start
         self.exec_count += 1
+
+        # Per-seed wall-clock cost
+        if meta is not None:
+            meta["total_time"] = meta.get("total_time", 0.0) + t_elapsed
+
         if self.mc:
             self.mc.execs_since_refit += 1
 
         # Collect cmplog tokens after each execution
+        cmplog_found = False
         if self._cmplog:
             new_tokens = self._cmplog.collect_tokens()
+            cmplog_found = bool(new_tokens)
             for token in new_tokens:
                 if token and token not in self.dictionary:
                     self.dictionary.append(token)
@@ -1523,7 +1537,6 @@ class Fuzzer:
                 for token in new_tokens:
                     if len(token) < 2:
                         continue
-                    # Find where this token appears in the mutated input
                     pos = 0
                     while pos <= len(mutated) - len(token):
                         idx = mutated.find(token, pos)
@@ -1541,6 +1554,10 @@ class Fuzzer:
 
         for op in set(self._last_ops_used):
             self.op_counts[op] = self.op_counts.get(op, 0) + 1
+
+        # Track cmplog as its own operator
+        if cmplog_found:
+            self.op_counts["cmplog"] = self.op_counts.get("cmplog", 0) + 1
 
         is_timeout = returncode == -1 and stderr == "timeout"
         if is_timeout:
@@ -1566,6 +1583,8 @@ class Fuzzer:
         if success:
             for op in set(self._last_ops_used):
                 self.op_success[op] = self.op_success.get(op, 0) + 1
+            if cmplog_found:
+                self.op_success["cmplog"] = self.op_success.get("cmplog", 0) + 1
 
         if self.mc and self.mc_bandit:
             seen = set()
@@ -1595,6 +1614,11 @@ class Fuzzer:
             if self.mc and self.mc_cem:
                 self.mc.add_elite(mutated, 3)
                 self.mc.maybe_refit()
+            # Schedule crash replay for reproducibility check
+            if self.replay_n > 0 and crash_name:
+                sig = self.crash_sigs.get(crash_name, crash_name)
+                if sig not in self._crash_replays:
+                    self._crash_replays[sig] = []
             return True
 
         if is_interesting or has_new_coverage:
@@ -1605,6 +1629,66 @@ class Fuzzer:
             return True
 
         return False
+
+    def _record_discovery_snapshot(self):
+        """Record (exec_count, cumulative_edges) for discovery rate calculation."""
+        edges = 0
+        if self.shm_cov:
+            edges = self.shm_cov.cumulative_edges
+        elif self.ptrace_cov:
+            edges = self.ptrace_cov.cumulative_edges
+        self._discovery_history.append((self.exec_count, edges))
+        if len(self._discovery_history) > 500:
+            self._discovery_history = self._discovery_history[-250:]
+
+    def discovery_rate(self) -> float:
+        """Edges discovered per 1000 execs, over a sliding window of last 5 snapshots."""
+        if len(self._discovery_history) < 2:
+            return 0.0
+        window = self._discovery_history[-5:]
+        first_exec, first_edges = window[0]
+        last_exec, last_edges = window[-1]
+        exec_delta = last_exec - first_exec
+        edge_delta = last_edges - first_edges
+        if exec_delta <= 0:
+            return 0.0
+        return edge_delta / exec_delta * 1000
+
+    def _run_crash_replays(self, budget_ms: float = 200):
+        """Replay pending crashes for reproducibility scoring (non-blocking)."""
+        if self.replay_n <= 0 or not self._crash_replays:
+            return
+        from fuzzer_tool.adapters.process import run_target_stdin
+        t0 = time.monotonic()
+        pending = [(sig, replays) for sig, replays in self._crash_replays.items()
+                   if len(replays) < self.replay_n]
+        for sig, replays in pending:
+            if (time.monotonic() - t0) * 1000 > budget_ms:
+                break
+            crash_file = None
+            for f in self.crashes_dir.iterdir():
+                if f.is_file() and not f.name.endswith((".json", ".txt")):
+                    try:
+                        crash_data = f.read_bytes()
+                        if self._seed_key(crash_data) == sig or f.stem.startswith(sig[:12]):
+                            crash_file = f
+                            break
+                    except Exception:
+                        continue
+            if crash_file is None:
+                for f in self.crashes_dir.iterdir():
+                    if f.is_file() and sig[:12] in f.name:
+                        crash_file = f
+                        break
+            if crash_file is None:
+                replays.append(-3)
+                continue
+            try:
+                data = crash_file.read_bytes()
+                rc, _ = run_target_stdin(self.target, data, self.timeout)
+                replays.append(rc)
+            except Exception:
+                replays.append(-2)
 
     def _dump_stats(self):
         if not self.stats_file:
@@ -1729,7 +1813,8 @@ class Fuzzer:
             if parts:
                 mc_str = " | mc: " + "+".join(parts)
         sig_str = f"({len(self.crash_sigs)}sigs)" if self.crash_sigs else ""
-        timeout_str = f" | timeouts: {self.timeout_count}" if self.timeout_count else ""
+        timeout_pct = self.timeout_count / self.exec_count * 100 if self.exec_count else 0
+        timeout_str = f" | timeouts: {self.timeout_count} ({timeout_pct:.1f}%)"
         rss_kb = self._peak_rss
         rss_str = f" | rss: {rss_kb // 1024}MB" if rss_kb >= 1024 else f" | rss: {rss_kb}KB"
         ops_str = ""
@@ -1744,10 +1829,26 @@ class Fuzzer:
         if len(self._edge_tracker.seed_hit_counts) >= 2:
             diversity = self._edge_tracker.compute_corpus_diversity()
             div_str = f" | div: {diversity:.0f}"
+        # Discovery rate
+        dr = self.discovery_rate()
+        dr_str = f" | rate: {dr:.1f} ed/kexec" if self.exec_count > 100 else ""
+        # Bitmap density
+        density = self._edge_tracker.bitmap_density() * 100
+        density_str = f" | map: {density:.1f}%"
+        # Crash reproducibility
+        repro_str = ""
+        if self._crash_replays:
+            done = [v for v in self._crash_replays.values() if len(v) >= self.replay_n]
+            if done:
+                avg_repro = sum(
+                    sum(1 for r in replays if r >= 0) / len(replays)
+                    for replays in done
+                ) / len(done) * 100
+                repro_str = f" | repro: {avg_repro:.0f}%"
         print(
             f"\r[*] execs: {self.exec_count} | corpus: {len(self.corpus)} | "
             f"crashes: {self.crash_count}{sig_str}{timeout_str} | eps: {eps:.0f} | "
-            f"time: {elapsed:.0f}s{rss_str}{ops_str}{dict_str}{markov_str}{cov_str}{mc_str}{div_str}",
+            f"time: {elapsed:.0f}s{rss_str}{ops_str}{dict_str}{markov_str}{cov_str}{mc_str}{div_str}{dr_str}{density_str}{repro_str}",
             end="",
             flush=True,
         )
@@ -1797,6 +1898,9 @@ class Fuzzer:
                 if i % 100 == 0:
                     self.print_stats()
                     self._append_coverage_log()
+                    self._record_discovery_snapshot()
+                if i % 500 == 0 and self.replay_n > 0:
+                    self._run_crash_replays()
                 if self.stats_file and i % self.stats_interval == 0:
                     self._dump_stats()
                     self._save_state()

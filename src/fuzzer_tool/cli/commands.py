@@ -155,6 +155,7 @@ def cmd_fuzz(args):
         inprocess_func=args.inprocess_func,
         seed=args.seed,
         extra_crash_codes=args.crash_codes,
+        replay_n=args.replay_n,
     )
     fuzzer.run(iterations=args.iterations)
 
@@ -452,6 +453,13 @@ def main() -> int:
         const="-",
         metavar="FILE",
         help="Generate explainability report after run (default: stdout, or specify output file)",
+    )
+    fuzz_parser.add_argument(
+        "--replay-n",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Replay each crash N times for reproducibility scoring (default: 0 = off)",
     )
     fuzz_parser.add_argument(
         "-g",
