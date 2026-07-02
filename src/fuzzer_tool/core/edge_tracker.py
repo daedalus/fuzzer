@@ -19,6 +19,124 @@ import math
 log = logging.getLogger(__name__)
 
 
+def ks_two_sample(samples_a: list[float], samples_b: list[float]) -> tuple[float, float]:
+    """Two-sample Kolmogorov–Smirnov test.
+
+    Computes the KS statistic D and its p-value using the asymptotic
+    Kolmogorov distribution. Works for any sample sizes — the p-value
+    naturally tightens as more data accumulates.
+
+    Args:
+        samples_a: Observations from sample A.
+        samples_b: Observations from sample B.
+
+    Returns:
+        (D, p_value) where D ∈ [0,1] and p_value ∈ [0,1].
+        Low p_value (< 0.05) indicates the samples come from different distributions.
+    """
+    if not samples_a or not samples_b:
+        return 0.0, 1.0
+
+    a = sorted(samples_a)
+    b = sorted(samples_b)
+    n, m = len(a), len(b)
+
+    # Walk merged sorted values, tracking empirical CDF jumps
+    i = j = 0
+    d = 0.0
+    fi = fj = 0.0
+
+    while i < n and j < m:
+        if a[i] < b[j]:
+            fi = (i + 1) / n
+            d = max(d, abs(fi - fj))
+            i += 1
+        elif a[i] > b[j]:
+            fj = (j + 1) / m
+            d = max(d, abs(fi - fj))
+            j += 1
+        else:
+            # Tie: advance both (CDFs jump at the same point)
+            fi = (i + 1) / n
+            fj = (j + 1) / m
+            d = max(d, abs(fi - fj))
+            i += 1
+            j += 1
+
+    # Check remaining elements
+    while i < n:
+        fi = (i + 1) / n
+        d = max(d, abs(fi - fj))
+        i += 1
+    while j < m:
+        fj = (j + 1) / m
+        d = max(d, abs(fi - fj))
+        j += 1
+
+    # P-value from asymptotic Kolmogorov distribution
+    p = _kolmogorov_pvalue(d, n, m)
+    return d, p
+
+
+def _kolmogorov_pvalue(d: float, n: int, m: int) -> float:
+    """P-value for two-sample KS test using asymptotic Kolmogorov distribution.
+
+    Uses the series: P(D >= d) = 2 * sum_{k=1}^{inf} (-1)^{k-1} exp(-2 k^2 lambda^2)
+    where lambda = d * sqrt(n*m / (n+m)).
+    Converges rapidly — 20 terms suffice for all practical values.
+    """
+    if d <= 0:
+        return 1.0
+    if d >= 1.0:
+        return 0.0
+
+    # Effective sample size
+    nm = n * m / (n + m)
+    lam = d * math.sqrt(nm)
+    lam2 = lam * lam
+
+    # Series converges fast; 20 terms covers everything
+    p = 0.0
+    for k in range(1, 21):
+        term = ((-1) ** (k - 1)) * math.exp(-2.0 * k * k * lam2)
+        p += term
+    p = max(0.0, min(1.0, 2.0 * p))
+    return p
+
+
+def _ks_p_from_cdf_diff(max_cdf_diff: float, n_samples: int) -> float:
+    """P-value for one-sample KS test against a fully specified distribution.
+
+    Uses Kolmogorov distribution directly: P(D >= d) = 2 * sum exp(-2 k^2 n d^2).
+    """
+    if max_cdf_diff <= 0 or n_samples <= 0:
+        return 1.0
+    nd = n_samples * max_cdf_diff * max_cdf_diff * 2.0
+    p = 0.0
+    for k in range(1, 21):
+        p += ((-1) ** (k - 1)) * math.exp(-k * k * nd)
+    return max(0.0, min(1.0, 2.0 * p))
+
+
+def ks_significance_threshold(n_samples: int, alpha: float = 0.05) -> float:
+    """Minimum KS D-statistic needed for significance at level alpha with n samples.
+
+    Inverts the Kolmogorov distribution to find the critical value.
+    For small n, the threshold is high (need large D to be significant).
+    For large n, it drops (subtle differences become detectable).
+
+    This replaces fixed magnitude thresholds with sample-size-aware ones:
+    instead of "JS < 0.01 → plateau", use "JS-equivalent D < threshold(n) → plateau".
+    """
+    if n_samples <= 0:
+        return 1.0
+    # Asymptotic: D_crit ≈ c(alpha) / sqrt(n), where c(alpha) is the Kolmogorov critical value
+    # c(0.05) ≈ 1.358, c(0.01) ≈ 1.628, c(0.10) ≈ 1.224
+    _crit_values = {0.01: 1.628, 0.05: 1.358, 0.10: 1.224, 0.20: 1.073}
+    c = _crit_values.get(alpha, 1.358)
+    return c / math.sqrt(n_samples)
+
+
 def _js_divergence(p: dict[int, float], q: dict[int, float]) -> float:
     """Compute Jensen-Shannon divergence between two discrete distributions.
 

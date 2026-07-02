@@ -12,6 +12,8 @@ import logging
 import math
 import random
 
+from fuzzer_tool.core.edge_tracker import ks_significance_threshold
+
 log = logging.getLogger(__name__)
 
 
@@ -229,18 +231,23 @@ class MonteCarloScheduler:
         return 0.5 * kl(p, m) + 0.5 * kl(q, m)
 
     def _adapt_interval(self) -> None:
-        """Adapt refit interval based on JS divergence.
+        """Adapt refit interval based on JS divergence with sample-size-aware thresholds.
 
-        - JS < 0.01: distribution very stable → double interval (cap at 4x base)
-        - JS > 0.1: still changing → halve interval (floor at 0.25x base)
+        Uses KS critical values instead of fixed thresholds:
+        - JS below KS threshold at alpha=0.05: distribution stable → double interval
+        - JS above KS threshold at alpha=0.01: still changing → halve interval
         - In between: no change
         """
         min_interval = max(1, self.base_refit_interval // 4)
         max_interval = self.base_refit_interval * 4
 
-        if self.last_js_divergence < 0.01:
+        n = sum(self.arm_alpha.values()) + sum(self.arm_beta.values())
+        stable_threshold = ks_significance_threshold(max(1, int(n / 2)), alpha=0.05)
+        unstable_threshold = ks_significance_threshold(max(1, int(n / 2)), alpha=0.01)
+
+        if self.last_js_divergence < stable_threshold:
             self.refit_interval = min(self.refit_interval * 2, max_interval)
-        elif self.last_js_divergence > 0.1:
+        elif self.last_js_divergence > unstable_threshold:
             self.refit_interval = max(self.refit_interval // 2, min_interval)
 
     def cem_byte(self, pos: int) -> int:

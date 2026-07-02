@@ -13,6 +13,7 @@ import tempfile
 from collections import Counter
 
 from fuzzer_tool.adapters.process import run_target_file, run_target_stdin
+from fuzzer_tool.core.edge_tracker import ks_two_sample
 from fuzzer_tool.core.sanitizer import SanitizerReport
 
 
@@ -108,6 +109,11 @@ class DifferentialTracker:
         self.last_kl_signature: float = 0.0
         self.drift_detected: bool = False
         self.drift_description: str = ""
+        # Execution time tracking for continuous-output KS testing
+        self.exec_times_a: list[float] = []
+        self.exec_times_b: list[float] = []
+        self.last_ks_exec_time: float = 0.0
+        self.last_ks_exec_time_p: float = 1.0
 
     def record(
         self,
@@ -115,6 +121,8 @@ class DifferentialTracker:
         stderr_a: str,
         rc_b: int,
         stderr_b: str,
+        time_a: float = 0.0,
+        time_b: float = 0.0,
     ) -> None:
         """Record outputs from both targets for one input.
 
@@ -123,6 +131,8 @@ class DifferentialTracker:
             stderr_a: Stderr from target A.
             rc_b: Return code from target B.
             stderr_b: Stderr from target B.
+            time_a: Execution time for target A in seconds (optional).
+            time_b: Execution time for target B in seconds (optional).
         """
         self.rc_counts_a[rc_a] += 1
         self.rc_counts_b[rc_b] += 1
@@ -133,6 +143,16 @@ class DifferentialTracker:
         sig_b = self._extract_signature(stderr_b, rc_b)
         self.sig_counts_a[sig_a] += 1
         self.sig_counts_b[sig_b] += 1
+
+        # Track execution times for continuous KS test
+        if time_a > 0:
+            self.exec_times_a.append(time_a)
+            if len(self.exec_times_a) > 1000:
+                self.exec_times_a = self.exec_times_a[-500:]
+        if time_b > 0:
+            self.exec_times_b.append(time_b)
+            if len(self.exec_times_b) > 1000:
+                self.exec_times_b = self.exec_times_b[-500:]
 
         # Recompute drift periodically (every 10 inputs for efficiency)
         if self.total_inputs % 10 == 0:
@@ -154,7 +174,7 @@ class DifferentialTracker:
         return "clean"
 
     def _check_drift(self) -> None:
-        """Recompute KL divergence and check for drift."""
+        """Recompute KL divergence and KS test, check for drift."""
         if self.total_inputs < 20:
             return
 
@@ -165,8 +185,20 @@ class DifferentialTracker:
             self.sig_counts_b, self.sig_counts_a
         )
 
+        # Two-sample KS test on execution times (continuous output)
+        if len(self.exec_times_a) >= 10 and len(self.exec_times_b) >= 10:
+            self.last_ks_exec_time, self.last_ks_exec_time_p = ks_two_sample(
+                self.exec_times_a, self.exec_times_b
+            )
+
         max_kl = max(self.last_kl_returncode, self.last_kl_signature)
-        self.drift_detected = max_kl > self.drift_threshold
+        # Drift if KL exceeds threshold OR exec time KS is significant at p < 0.01
+        ks_drift = (
+            self.last_ks_exec_time_p < 0.01
+            and len(self.exec_times_a) >= 10
+            and len(self.exec_times_b) >= 10
+        )
+        self.drift_detected = max_kl > self.drift_threshold or ks_drift
 
         if self.drift_detected:
             reasons = []
@@ -180,7 +212,23 @@ class DifferentialTracker:
                     f"signature KL={self.last_kl_signature:.4f} "
                     f"(A: {dict(self.sig_counts_a)}, B: {dict(self.sig_counts_b)})"
                 )
+            if ks_drift:
+                reasons.append(
+                    f"exec_time KS D={self.last_ks_exec_time:.4f} p={self.last_ks_exec_time_p:.4e} "
+                    f"(A p50={self._median(self.exec_times_a)*1000:.1f}ms "
+                    f"B p50={self._median(self.exec_times_b)*1000:.1f}ms)"
+                )
             self.drift_description = "; ".join(reasons)
+
+    @staticmethod
+    def _median(data: list[float]) -> float:
+        if not data:
+            return 0.0
+        s = sorted(data)
+        n = len(s)
+        if n % 2 == 0:
+            return (s[n // 2 - 1] + s[n // 2]) / 2
+        return s[n // 2]
 
     @staticmethod
     def _kl_divergence(

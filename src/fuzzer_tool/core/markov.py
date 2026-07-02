@@ -11,6 +11,8 @@ import logging
 import math
 import random
 
+from fuzzer_tool.core.edge_tracker import ks_significance_threshold
+
 log = logging.getLogger(__name__)
 
 
@@ -148,10 +150,15 @@ class MarkovChain:
             )
         self._prev_snapshot = snapshot
 
-        # Plateau: JS < 0.01 means the distribution stopped changing
+        # Plateau: JS divergence is below what noise alone would produce
+        # at this sample size — the distribution isn't meaningfully changing.
+        # This replaces the fixed JS < 0.01 with a sample-size-aware threshold.
+        threshold = ks_significance_threshold(
+            self._contexts_seen, alpha=0.05
+        )
         return (
             self._prev_snapshot is not None
-            and self.last_js_divergence < 0.01
+            and self.last_js_divergence < threshold
             and self._contexts_seen > self._snapshot_interval * 2
         )
 
