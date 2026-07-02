@@ -1,9 +1,12 @@
 """Filesystem operations for corpus and crash management.
 
-Supports delta-encoded corpus storage: mutations are typically small edits
-to a parent, so storing (parent_hash, patch) instead of full bytes saves
-disk and preserves mutation lineage. Falls back to full storage when the
-delta isn't smaller.
+Supports delta-encoded corpus storage with periodic full snapshots:
+- Mutations are typically small edits to a parent, so storing
+  (parent_hash, patch) instead of full bytes saves disk and preserves
+  lineage. Falls back to full storage when diff > 25% of input.
+- Every SNAPSHOT_INTERVAL generations, writes a full snapshot instead
+  of a delta. This caps worst-case reconstruction cost (like git's
+  loose/packed object split) and prevents unbounded chain depth.
 """
 
 import hashlib
@@ -15,6 +18,8 @@ from pathlib import Path
 from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.crash_metadata import CrashMetadata
 from fuzzer_tool.core.sanitizer import SanitizerReport
+
+SNAPSHOT_INTERVAL = 20
 
 
 def compute_delta(parent: bytes, child: bytes) -> list[list[int]] | None:
@@ -114,13 +119,15 @@ def load_corpus(corpus_dir: Path, bloom: BloomFilter | None = None) -> tuple[lis
                 bloom.add(h)
             corpus.append(data)
 
-    # Reconstruct delta files (may need multiple passes for chains)
+    # Reconstruct delta chains via topological resolution.
+    # Each delta depends on its parent; resolve in order from full snapshots.
     if delta_files:
         resolved: dict[str, bytes] = dict(full_files)
-        max_passes = 5  # prevent infinite loops on circular refs
         remaining = dict(delta_files)
 
-        for _ in range(max_passes):
+        # Resolve in passes: each pass resolves deltas whose parent is already resolved.
+        # Caps at SNAPSHOT_INTERVAL passes since chains can't be deeper than that.
+        for _ in range(SNAPSHOT_INTERVAL + 1):
             if not remaining:
                 break
             still_remaining = {}
@@ -155,7 +162,7 @@ def save_to_corpus(
     seen_hashes: set[str],
     bloom: BloomFilter | None = None,
     parent: bytes | None = None,
-    corpus_hashes: dict[str, bytes] | None = None,
+    lineage_depth: int = 0,
 ) -> bool:
     """Save input to corpus if not already seen.
 
@@ -163,8 +170,8 @@ def save_to_corpus(
     (bloom says "seen" but set says "new") fall through to the authoritative set.
 
     When parent is provided and the diff is compact (< 25% of child size),
-    stores a delta file instead of the full input. Delta files are smaller
-    and preserve mutation lineage.
+    stores a delta file instead of the full input. Every SNAPSHOT_INTERVAL
+    generations, forces a full snapshot to cap chain depth.
 
     Args:
         data: Input bytes to save.
@@ -172,30 +179,34 @@ def save_to_corpus(
         seen_hashes: Set of already-seen hashes.
         bloom: Optional bloom filter for fast pre-check.
         parent: Parent input bytes (for delta encoding).
-        corpus_hashes: Mapping of hash -> full bytes for delta reconstruction.
+        lineage_depth: Number of delta hops from the nearest full snapshot.
 
     Returns:
         True if saved (new), False if duplicate.
     """
     h = hash_data(data)
     if bloom is not None:
-        # bloom.query=False → definitely not in filter (new)
         if not bloom.query(h):
             bloom.add(h)
-        # bloom.query=True → maybe in filter; check authoritative set
         elif h in seen_hashes:
-            return False  # confirmed duplicate
+            return False
         else:
-            bloom.add(h)  # false positive, still new
+            bloom.add(h)
     else:
         if h in seen_hashes:
             return False
     seen_hashes.add(h)
     corpus_dir.mkdir(parents=True, exist_ok=True)
 
-    # Try delta encoding if parent is available
+    # Force full snapshot at interval to cap chain depth
+    use_delta = (
+        parent is not None
+        and len(data) == len(parent)
+        and lineage_depth < SNAPSHOT_INTERVAL
+    )
+
     delta = None
-    if parent is not None and len(data) == len(parent):
+    if use_delta:
         diff = compute_delta(parent, data)
         if diff is not None:
             parent_hash = hash_data(parent)

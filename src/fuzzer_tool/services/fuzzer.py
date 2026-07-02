@@ -785,6 +785,7 @@ class Fuzzer:
                 "coverage_edges": meta["coverage_edges"],
                 "redqueen_offsets": meta["redqueen_offsets"],
                 "added_at": meta["added_at"],
+                "lineage_depth": meta.get("lineage_depth", 0),
             }
         try:
             self._state_path.write_text(json.dumps(state, separators=(",", ":")))
@@ -820,6 +821,7 @@ class Fuzzer:
                         "coverage_edges": sm.get("coverage_edges", 0),
                         "redqueen_offsets": sm.get("redqueen_offsets", []),
                         "added_at": sm.get("added_at", self.seed_meta[seed]["added_at"]),
+                        "lineage_depth": sm.get("lineage_depth", 0),
                     }
                 )
         self._edge_tracker.load(str(self._edge_tracker_path))
@@ -1344,9 +1346,16 @@ class Fuzzer:
         )
 
     def save_to_corpus(self, data: bytes, parent: bytes | None = None):
+        # Compute lineage depth: child depth = parent depth + 1
+        parent_depth = 0
+        if parent is not None:
+            parent_meta = self.seed_meta.get(parent)
+            if parent_meta is not None:
+                parent_depth = parent_meta.get("lineage_depth", 0)
+
         if save_to_corpus(
             data, self.corpus_dir, self.seen_hashes, self.bloom,
-            parent=parent,
+            parent=parent, lineage_depth=parent_depth,
         ):
             self.corpus.append(data)
             self.seed_meta[data] = {
@@ -1355,6 +1364,7 @@ class Fuzzer:
                 "edge_bitmap": bytearray(0),
                 "redqueen_offsets": [],
                 "added_at": time.time(),
+                "lineage_depth": parent_depth + 1 if parent else 0,
             }
             self.markov.train(data)
             self.markov_trained = self.markov.is_trained()
