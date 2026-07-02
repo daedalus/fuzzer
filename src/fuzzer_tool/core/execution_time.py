@@ -65,28 +65,36 @@ class ExecutionTimeTracker:
         """CRPS of a point observation against the running empirical CDF.
 
         CRPS(F, x) = ∫(F(y) - 𝟙[y ≥ x])² dy
-        Approximated via the sorted empirical CDF over observed times.
+
+        Uses incremental cdf_diff tracking: walk sorted observation points,
+        maintain signed difference (F(y) - indicator), accumulate cdf_diff² * gap.
+        Same pattern as EdgeTracker._cdf_norms for Wasserstein.
         """
         if not self._sorted:
             return 0.0
         n = len(self._sorted)
         crps = 0.0
-        # Integrate over the sorted observation points
-        for i, val in enumerate(self._sorted):
-            gap = val - (self._sorted[i - 1] if i > 0 else val)
-            if gap <= 0:
-                continue
-            # Empirical CDF at this point: fraction of observations ≤ val
-            f_val = (i + 1) / n
-            # Indicator: 1 if observation ≥ val (i.e., observation > val, or equal)
-            indicator = 1.0 if observation >= val else 0.0
-            crps += (f_val - indicator) ** 2 * gap
+        cdf_diff = 0.0
+        prev = self._sorted[0]
 
-        # Also add the region above the max observation
-        max_val = self._sorted[-1] if self._sorted else 0
+        for i, val in enumerate(self._sorted):
+            gap = val - prev
+            if gap > 0:
+                crps += cdf_diff * cdf_diff * gap
+            # CDF at this point: fraction of observations ≤ val
+            f_val = (i + 1) / n
+            # 𝟙[y ≥ x]: 1 when val ≥ observation, 0 when val < observation
+            indicator = 1.0 if val >= observation else 0.0
+            cdf_diff = f_val - indicator
+            prev = val
+
+        # Region from last observation to observation (if obs > max):
+        # F(y) = 1 for y ≥ max_val, 𝟙[y ≥ obs] = 0 for max_val ≤ y < obs
+        # → cdf_diff = 1, contribution = 1² × gap
+        max_val = self._sorted[-1]
         if observation > max_val:
             gap = observation - max_val
-            crps += (1.0 - 1.0) ** 2 * gap  # F=1, indicator=1 → 0
+            crps += 1.0 * gap  # (1 - 0)² * gap
 
         return crps
 
