@@ -268,7 +268,7 @@ class InProcessRunner:
             if bm and any(b != 0 for b in bm):
                 return bm
             # sancov counters empty — target may use SHM instead
-        if self._persistent:
+        if self._persistent and self._persistent._last_bitmap is not None:
             return self._persistent._last_bitmap
         if self._bitmap_out and os.path.exists(self._bitmap_out):
             try:

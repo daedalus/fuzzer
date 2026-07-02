@@ -122,6 +122,19 @@ while True:
         sys.stdout.buffer.flush()
 """
 
+# Bitmap-free loader: keeps fork-per-call for crash isolation but skips SHM read.
+_LOADER_NO_BMP = _PERSISTENT_LOADER.replace(
+    'bmp = read_shm()\n'
+    '        resp = f"RC {rc} {len(bmp)}\\n".encode()\n'
+    '        sys.stdout.buffer.write(resp)\n'
+    '        if bmp:\n'
+    '            sys.stdout.buffer.write(bmp)\n'
+    '        sys.stdout.buffer.flush()',
+    'resp = f"RC {rc} 0\\n".encode()\n'
+    '        sys.stdout.buffer.write(resp)\n'
+    '        sys.stdout.buffer.flush()',
+)
+
 
 class PersistentLoader:
     """Persistent subprocess — one process, many calls.
@@ -146,7 +159,8 @@ class PersistentLoader:
             return True
 
         fd, self._loader_path = tempfile.mkstemp(suffix=".py", prefix="fuzz_persist_")
-        os.write(fd, _PERSISTENT_LOADER.encode())
+        # Use bitmap-free loader: parent reads SHM directly, no 65KB pipe transfer
+        os.write(fd, _LOADER_NO_BMP.encode())
         os.close(fd)
 
         env = os.environ.copy()
@@ -157,7 +171,7 @@ class PersistentLoader:
             [sys.executable, self._loader_path],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             env=env,
         )
 
@@ -179,9 +193,21 @@ class PersistentLoader:
             return -2, None
 
         cmd = f"RUN {len(data)}\n"
-        self._proc.stdin.write(cmd.encode())
-        self._proc.stdin.write(data)
-        self._proc.stdin.flush()
+        try:
+            self._proc.stdin.write(cmd.encode())
+            self._proc.stdin.write(data)
+            self._proc.stdin.flush()
+        except (BrokenPipeError, OSError):
+            # Subprocess died — try restart
+            self._ready = False
+            if not self._restarting:
+                self._restarting = True
+                try:
+                    if self.start():
+                        return self.run_one(data)
+                finally:
+                    self._restarting = False
+            return -2, None
 
         # Threaded readline with timeout — prevents hang if loader gets stuck
         result = [None]
