@@ -1,6 +1,15 @@
-"""Monte Carlo scheduler: Thompson sampling bandit + CEM byte distribution."""
+"""Monte Carlo scheduler: Thompson sampling bandit + CEM byte distribution.
 
+Uses JS divergence to adaptively control CEM refit frequency:
+- JS → 0 after refit: distribution stabilized, refit less often
+- JS stays high: elite set still shifting, refit more aggressively
+"""
+
+import logging
+import math
 import random
+
+log = logging.getLogger(__name__)
 
 
 class MonteCarloScheduler:
@@ -28,11 +37,14 @@ class MonteCarloScheduler:
         self.arm_alpha: dict[str, float] = {}
         self.arm_beta: dict[str, float] = {}
         self.elite_frac = elite_frac
+        self.base_refit_interval = refit_interval
         self.refit_interval = refit_interval
         self.execs_since_refit = 0
         self.elite_set: list[tuple[int, bytes]] = []
         self.byte_freq: dict[int, dict[int, int]] = {}
+        self._prev_byte_freq: dict[int, dict[int, int]] = {}
         self.cem_fitted = False
+        self.last_js_divergence: float = 0.0
 
     def init_arm(self, name: str) -> None:
         """Register a mutation operator arm with prior (1, 1).
@@ -89,15 +101,26 @@ class MonteCarloScheduler:
             self.elite_set.pop(0)
 
     def maybe_refit(self) -> None:
-        """Refit the CEM byte distribution if enough data exists."""
+        """Refit the CEM byte distribution if enough data exists.
+
+        After refitting, computes JS divergence between the new and previous
+        byte_freq distributions to adaptively control refit frequency:
+        - JS → 0: distribution stabilized → double the interval (up to 4x base)
+        - JS > 0.1: still shifting → halve the interval (down to 0.25x base)
+        """
         self.execs_since_refit += 1
-        # Refit when: (a) interval reached, OR (b) enough elite inputs (min 10)
         has_enough_elite = len(self.elite_set) >= 10
         if self.execs_since_refit < self.refit_interval and not has_enough_elite:
             return
         self.execs_since_refit = 0
         if not self.elite_set:
             return
+
+        # Snapshot previous distribution for JS comparison
+        self._prev_byte_freq = {
+            pos: dict(freq) for pos, freq in self.byte_freq.items()
+        }
+
         n_elite = max(1, int(len(self.elite_set) * self.elite_frac))
         sorted_elite = sorted(self.elite_set, key=lambda x: x[0], reverse=True)
         elite = [d for _, d in sorted_elite[:n_elite]]
@@ -110,6 +133,67 @@ class MonteCarloScheduler:
                     freq[b] = freq.get(b, 0) + 1
             self.byte_freq[pos] = freq
         self.cem_fitted = True
+
+        # Compute JS divergence and adapt refit interval
+        self.last_js_divergence = self._compute_js()
+        self._adapt_interval()
+
+    def _freq_to_dist(self, freq: dict[int, int]) -> dict[int, float]:
+        """Convert a raw frequency dict to a normalized distribution."""
+        total = sum(freq.values())
+        if total == 0:
+            return {}
+        return {k: v / total for k, v in freq.items()}
+
+    def _compute_js(self) -> float:
+        """Compute JS divergence between current and previous byte_freq.
+
+        Averages the per-position JS divergence across all positions
+        that exist in either distribution.
+        """
+        if not self._prev_byte_freq or not self.byte_freq:
+            return 0.0
+
+        all_positions = set(self._prev_byte_freq) | set(self.byte_freq)
+        js_values = []
+        for pos in all_positions:
+            p = self._freq_to_dist(self._prev_byte_freq.get(pos, {}))
+            q = self._freq_to_dist(self.byte_freq.get(pos, {}))
+            if not p and not q:
+                continue
+            js_values.append(self._js_two(p, q))
+        return sum(js_values) / len(js_values) if js_values else 0.0
+
+    @staticmethod
+    def _js_two(p: dict[int, float], q: dict[int, float]) -> float:
+        """JS divergence between two sparse distributions."""
+        m: dict[int, float] = {}
+        for k in set(p) | set(q):
+            m[k] = 0.5 * (p.get(k, 0.0) + q.get(k, 0.0))
+
+        def kl(a: dict[int, float], b: dict[int, float]) -> float:
+            return sum(
+                pa * math.log(pa / b[k])
+                for k, pa in a.items()
+                if pa > 0.0 and b.get(k, 0.0) > 0.0
+            )
+
+        return 0.5 * kl(p, m) + 0.5 * kl(q, m)
+
+    def _adapt_interval(self) -> None:
+        """Adapt refit interval based on JS divergence.
+
+        - JS < 0.01: distribution very stable → double interval (cap at 4x base)
+        - JS > 0.1: still changing → halve interval (floor at 0.25x base)
+        - In between: no change
+        """
+        min_interval = max(1, self.base_refit_interval // 4)
+        max_interval = self.base_refit_interval * 4
+
+        if self.last_js_divergence < 0.01:
+            self.refit_interval = min(self.refit_interval * 2, max_interval)
+        elif self.last_js_divergence > 0.1:
+            self.refit_interval = max(self.refit_interval // 2, min_interval)
 
     def cem_byte(self, pos: int) -> int:
         """Sample a byte at a given position from the CEM distribution.

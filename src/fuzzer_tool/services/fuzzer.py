@@ -1355,6 +1355,12 @@ class Fuzzer:
             }
             self.markov.train(data)
             self.markov_trained = self.markov.is_trained()
+            # Check if markov model has plateaued (no new patterns learned)
+            if self.markov.snapshot_and_check_plateau():
+                log.info(
+                    "Markov plateau detected (JS=%.4f) — reducing generation rate",
+                    self.markov.last_js_divergence,
+                )
             # Track corpus size distribution for dynamic max_len
             self._corpus_size_history.append(len(data))
             if len(self._corpus_size_history) > 1000:
@@ -1414,7 +1420,12 @@ class Fuzzer:
             )
 
     def _pick_seed(self) -> bytes:
-        if self.markov_generate and self.markov_trained and random.random() < 0.15:
+        if self.markov_generate and self.markov_trained:
+            # Reduce markov generation rate when model has plateaued
+            gen_rate = 0.03 if self.markov.last_js_divergence < 0.01 else 0.15
+            if random.random() < gen_rate:
+                length = random.randint(1, self.max_len)
+                return self.markov.generate(length)
             length = random.randint(1, self.max_len)
             return self.markov.generate(length)
         if self.corpus and self.seed_meta:

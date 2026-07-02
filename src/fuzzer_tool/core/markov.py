@@ -1,8 +1,14 @@
-"""Byte-level Markov chain for fuzz input generation."""
+"""Byte-level Markov chain for fuzz input generation.
+
+Tracks JS divergence between periodic transition snapshots to detect
+plateaus — a flattening JS curve signals the mutation model has stopped
+learning from new corpus entries.
+"""
 
 import collections
 import json
 import logging
+import math
 import random
 
 log = logging.getLogger(__name__)
@@ -35,6 +41,10 @@ class MarkovChain:
             collections.Counter
         )
         self._contexts_seen = 0
+        self._prev_snapshot: dict[bytes, dict[int, float]] | None = None
+        self.last_js_divergence: float = 0.0
+        self._snapshot_interval: int = 50  # snapshot every N train_corpus calls
+        self._trains_since_snapshot: int = 0
 
     def train(self, data: bytes) -> None:
         """Learn byte transitions from a single input.
@@ -114,6 +124,74 @@ class MarkovChain:
             True if any training data has been observed.
         """
         return self._contexts_seen > 0
+
+    def snapshot_and_check_plateau(self) -> bool:
+        """Snapshot current transitions and check if learning has plateaued.
+
+        Computes JS divergence between the current transition distribution
+        and the previous snapshot. A flattening JS curve (divergence → 0
+        after initial high values) signals the model has stopped learning.
+
+        Returns:
+            True if plateau detected (JS divergence < 0.01 after at least
+            2 snapshots), False otherwise.
+        """
+        self._trains_since_snapshot += 1
+        if self._trains_since_snapshot < self._snapshot_interval:
+            return False
+        self._trains_since_snapshot = 0
+
+        snapshot = self._build_snapshot()
+        if self._prev_snapshot is not None:
+            self.last_js_divergence = self._js_between_snapshots(
+                self._prev_snapshot, snapshot
+            )
+        self._prev_snapshot = snapshot
+
+        # Plateau: JS < 0.01 means the distribution stopped changing
+        return (
+            self._prev_snapshot is not None
+            and self.last_js_divergence < 0.01
+            and self._contexts_seen > self._snapshot_interval * 2
+        )
+
+    def _build_snapshot(self) -> dict[bytes, dict[int, float]]:
+        """Build a normalized snapshot of current transition distributions."""
+        snapshot: dict[bytes, dict[int, float]] = {}
+        for ctx, counts in self.transitions.items():
+            total = sum(counts.values())
+            if total > 0:
+                snapshot[ctx] = {b: c / total for b, c in counts.items()}
+        return snapshot
+
+    @staticmethod
+    def _js_between_snapshots(
+        p: dict[bytes, dict[int, float]], q: dict[bytes, dict[int, float]]
+    ) -> float:
+        """JS divergence between two transition snapshots.
+
+        Averages per-context JS across all contexts in either snapshot.
+        """
+        all_ctx = set(p) | set(q)
+        js_values = []
+        for ctx in all_ctx:
+            p_dist = p.get(ctx, {})
+            q_dist = q.get(ctx, {})
+            if not p_dist and not q_dist:
+                continue
+            m: dict[int, float] = {}
+            for b in set(p_dist) | set(q_dist):
+                m[b] = 0.5 * (p_dist.get(b, 0.0) + q_dist.get(b, 0.0))
+
+            def kl(a: dict[int, float], b: dict[int, float]) -> float:
+                return sum(
+                    pa * math.log(pa / b[k])
+                    for k, pa in a.items()
+                    if pa > 0.0 and b.get(k, 0.0) > 0.0
+                )
+
+            js_values.append(0.5 * kl(p_dist, m) + 0.5 * kl(q_dist, m))
+        return sum(js_values) / len(js_values) if js_values else 0.0
 
     def save(self, path: str) -> bool:
         """Save chain state to a JSON file.
