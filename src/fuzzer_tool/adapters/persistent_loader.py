@@ -226,16 +226,23 @@ class PersistentLoader:
         return rc, bitmap
 
     def stop(self):
-        if self._proc:
-            with contextlib.suppress(Exception):
-                self._proc.stdin.write(b"QUIT\n")
-                self._proc.stdin.flush()
-                self._proc.wait(timeout=2)
-            with contextlib.suppress(Exception):
-                self._proc.kill()
-                self._proc.wait()
-            self._proc = None
+        proc = self._proc
+        self._proc = None
         self._ready = False
+        if proc is None:
+            return
+        try:
+            proc.stdin.write(b"QUIT\n")
+            proc.stdin.flush()
+        except (BrokenPipeError, OSError):
+            pass
+        try:
+            proc.wait(timeout=2)
+        except Exception:
+            with contextlib.suppress(OSError, ValueError):
+                proc.kill()
+            with contextlib.suppress(Exception):
+                proc.wait(timeout=1)
 
     def __del__(self):
         self.stop()

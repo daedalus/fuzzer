@@ -735,6 +735,8 @@ class Fuzzer:
             mode = "direct ctypes" if inprocess_direct else "subprocess loader"
             cov_note = f", SHM cov id={cov_env_id}" if cov_env_id else ""
             print(f"[*] In-process mode ({mode}{cov_note}): {self.target}::{inprocess_func}")
+            if self._inprocess_runner._persistent:
+                print("[*] Persistent loader: enabled (1 process, many calls)")
 
     def _setup_ptrace(self, target, deep_coverage, max_bps, fallback_hint=False):
         cov = PtraceCoverage(target, deep_coverage=deep_coverage, max_bps=max_bps)
