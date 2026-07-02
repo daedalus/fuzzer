@@ -91,3 +91,55 @@ class TestMonteCarloScheduler:
         mc.record("bit_flip", success=False)
         stats = mc.bandit_stats()
         assert stats["bit_flip"] == (1.0, 1.0)
+
+    def test_brier_score_empty(self):
+        mc = MonteCarloScheduler()
+        assert mc.brier_score() == 0.0
+
+    def test_brier_score_perfect_calibration(self):
+        mc = MonteCarloScheduler()
+        mc.init_arm("test")
+        # Record many successes — prediction should converge to high prob
+        for _ in range(50):
+            mc.record_brier("test", success=True)
+        bs = mc.brier_score()
+        # With perfect successes, Brier should be low
+        assert bs < 0.5
+
+    def test_brier_score_worst(self):
+        mc = MonteCarloScheduler()
+        mc.init_arm("test")
+        # Alternate success/failure — prediction oscillates
+        for i in range(100):
+            mc.record_brier("test", success=(i % 2 == 0))
+        bs = mc.brier_score()
+        assert 0.0 < bs <= 0.5
+
+    def test_record_brier(self):
+        mc = MonteCarloScheduler()
+        mc.init_arm("bit_flip")
+        mc.record_brier("bit_flip", success=True)
+        assert len(mc._brier_predictions) == 1
+        pred, outcome = mc._brier_predictions[0]
+        assert outcome == 1.0
+        assert 0.0 <= pred <= 1.0
+
+    def test_calibration_report_empty(self):
+        mc = MonteCarloScheduler()
+        assert mc.calibration_report() == {}
+
+    def test_calibration_report_with_data(self):
+        mc = MonteCarloScheduler()
+        mc.init_arm("test")
+        for _ in range(20):
+            mc.record_brier("test", success=True)
+        report = mc.calibration_report()
+        # Should have at least one bin
+        assert len(report) > 0
+
+    def test_brier_predictions_capped(self):
+        mc = MonteCarloScheduler()
+        mc.init_arm("test")
+        for _ in range(600):
+            mc.record_brier("test", success=True)
+        assert len(mc._brier_predictions) <= 500

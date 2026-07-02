@@ -45,3 +45,48 @@ class TestMarkovChain:
         assert mc.is_trained()
         result = mc.generate(4)
         assert len(result) == 4
+
+    def test_codelength_trained_input(self):
+        mc = MarkovChain(order=1)
+        mc.train(b"ABABABAB")
+        # Known pattern should have low codelength
+        cl = mc.codelength(b"ABABABAB")
+        assert cl < 8 * 8  # less than random (64 bits)
+
+    def test_codelength_random_input(self):
+        mc = MarkovChain(order=1)
+        mc.train(b"AAAA")
+        # Random bytes should have high codelength
+        cl = mc.codelength(bytes(range(256)))
+        assert cl > 0
+
+    def test_codelength_empty(self):
+        mc = MarkovChain(order=1)
+        mc.train(b"ABCD")
+        assert mc.codelength(b"") == 0.0
+
+    def test_codelength_untrained(self):
+        mc = MarkovChain(order=1)
+        # No training — falls back to 8 bits/byte
+        cl = mc.codelength(b"ABC")
+        assert cl == 3 * 8.0
+
+    def test_codelength_ratio(self):
+        mc = MarkovChain(order=1)
+        mc.train(b"ABABABAB")
+        ratio = mc.codelength_ratio(b"ABABABAB")
+        assert 0.0 <= ratio <= 8.0
+
+    def test_codelength_ratio_empty(self):
+        mc = MarkovChain(order=1)
+        assert mc.codelength_ratio(b"") == 0.0
+
+    def test_snapshot_and_check_plateau_not_trained(self):
+        mc = MarkovChain()
+        assert not mc.snapshot_and_check_plateau()
+
+    def test_snapshot_and_check_plateau_too_few(self):
+        mc = MarkovChain()
+        mc._contexts_seen = 10
+        mc._trains_since_snapshot = 1  # below interval
+        assert not mc.snapshot_and_check_plateau()
