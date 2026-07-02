@@ -50,13 +50,19 @@ class EdgeTracker:
         return new_contributions
 
     def compute_subsumption_weight(self, seed_key: str) -> float:
-        """Compute a weight multiplier based on edge subsumption.
+        """Compute a weight multiplier based on Jaccard similarity of edge sets.
 
-        Returns 1.0 if the seed has unique edges, lower if fully subsumed
-        by other seeds' coverage.
+        Returns a continuous weight in [0.1, 1.0] based on how much this
+        seed's coverage overlaps with other seeds.
 
-        The key insight: we check if this seed's edges are ALL covered
-        by the UNION of other seeds' edges (not including this seed).
+        Jaccard(A, B) = |A ∩ B| / |A ∪ B| where A = seed edges,
+        B = union of all other seeds' edges. High overlap → low weight,
+        novel edges → high weight.
+
+        This replaces the previous binary check (unique / subsumed / partial)
+        with a continuous score, so near-duplicate seeds that technically have
+        1 unique edge among 100 shared ones get deprioritized instead of
+        receiving full weight.
         """
         if seed_key not in self.seed_edges:
             return 1.0
@@ -71,16 +77,15 @@ class EdgeTracker:
             if k != seed_key:
                 other_edges.update(edges)
 
-        # Check what this seed uniquely contributes
-        unique_to_seed = seed_edges - other_edges
-        if unique_to_seed:
-            return 1.0  # has edges no other seed covers
+        if not other_edges:
+            return 1.0  # only seed — all edges are novel
 
-        # Fully subsumed — all this seed's edges are covered by others
-        if seed_edges.issubset(other_edges):
-            return 0.1  # heavily deprioritize
+        intersection = len(seed_edges & other_edges)
+        union = len(seed_edges | other_edges)
+        jaccard = intersection / union if union else 0.0
 
-        return 0.8  # partially covered
+        # Scale: high overlap (jaccard → 1.0) → low weight, novel → high weight
+        return max(0.1, 1.0 - jaccard)
 
     def get_cumulative_edge_count(self) -> int:
         """Get total unique edges seen across all seeds."""
