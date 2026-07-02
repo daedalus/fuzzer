@@ -278,18 +278,7 @@ class EdgeTracker:
         if not aggregate:
             return 1.0
 
-        # Build a "centroid seed key" — we compute Wasserstein against
-        # the aggregate by converting it to the same sparse format
-        # We use a synthetic key by summing all hit counts
-        centroid_counts: dict[int, float] = {}
-        for hc_other in self.seed_hit_counts.values():
-            for edge, count in hc_other.items():
-                centroid_counts[edge] = centroid_counts.get(edge, 0.0) + count
-
-        total = sum(centroid_counts.values())
-        if total == 0:
-            return 1.0
-        centroid_dist = {e: c / total for e, c in centroid_counts.items()}
+        centroid_dist = aggregate
 
         # Build seed distribution
         seed_total = sum(hc.values())

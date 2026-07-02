@@ -131,7 +131,7 @@ def load_corpus(corpus_dir: Path, bloom: BloomFilter | None = None) -> tuple[lis
             if not remaining:
                 break
             still_remaining = {}
-            for h, f in remaining:
+            for h, f in remaining.items():
                 try:
                     delta = json.loads(f.read_text())
                     parent_hash = delta["parent"]
