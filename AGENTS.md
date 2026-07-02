@@ -97,5 +97,6 @@ Fuzzer state is saved to `{corpus_dir}/state.json` on shutdown. Use `--resume` t
 ## Rules
 
 - **Always improve the corpus, never delete it.** Corpus files represent discovered coverage and crash triggers. Only add new inputs, never remove existing ones. Use `fuzzer-tool minimize` to prune redundancies — that preserves coverage while reducing size.
+- **Do not clean the corpus between runs.** The corpus directory accumulates discovered inputs across sessions. Running `rm -rf corpus/*` destroys coverage history and forces the fuzzer to rediscover everything from scratch. Always use `--resume` to continue. When generating a new corpus (e.g. `corpus_png.py`), write to a fresh directory, not an existing one.
 - **Verify claims against code.** Before acting on behavior, type, or API shape, read the source. Don't infer from names.
 - **Run the full test suite after changes.** `pytest` must pass before considering any change complete.
