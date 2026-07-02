@@ -16,11 +16,12 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 
 log = logging.getLogger(__name__)
 
 _PERSISTENT_LOADER = r"""#!/usr/bin/env python3
-import ctypes, ctypes.util, os, sys
+import ctypes, ctypes.util, os, signal, sys
 
 target = None
 func = None
@@ -59,6 +60,8 @@ else:
     sys.stdout.buffer.flush()
     sys.exit(1)
 
+timeout_seconds = int(os.environ.get("_TIMEOUT", "5"))
+
 # Main loop
 while True:
     line = sys.stdin.buffer.readline()
@@ -71,10 +74,46 @@ while True:
         data_len = int(cmd.split()[1])
         data = sys.stdin.buffer.read(data_len)
         buf = (ctypes.c_uint8 * len(data))(*data)
+
+        # Fork child to enforce timeout on .so target calls.
+        # Without this, a hanging func() wedges the entire fuzzer.
+        read_pipe, write_pipe = os.pipe()
+        child_pid = os.fork()
+        if child_pid == 0:
+            # Child: run target function, write rc to pipe, exit
+            os.close(read_pipe)
+            try:
+                rc = func(buf, len(data))
+            except Exception:
+                rc = -11
+            rc = max(0, min(rc, 125))
+            os.write(write_pipe, bytes([rc]))
+            os.close(write_pipe)
+            os._exit(0)
+
+        # Parent: wait for child with alarm-based timeout
+        os.close(write_pipe)
+        signal.signal(signal.SIGALRM, lambda s, f: None)
+        signal.alarm(timeout_seconds)
         try:
-            rc = func(buf, len(data))
-        except Exception:
-            rc = -11
+            os.waitpid(child_pid, 0)
+            signal.alarm(0)
+            rc_byte = os.read(read_pipe, 1)
+            rc = rc_byte[0] if rc_byte else -2
+        except ChildProcessError:
+            signal.alarm(0)
+            rc = -2
+        except OSError:
+            # Alarm fired — child timed out, kill it
+            signal.alarm(0)
+            try:
+                os.kill(child_pid, signal.SIGKILL)
+                os.waitpid(child_pid, 0)
+            except OSError:
+                pass
+            rc = -1
+        os.close(read_pipe)
+
         bmp = read_shm()
         resp = f"RC {rc} {len(bmp)}\n".encode()
         sys.stdout.buffer.write(resp)
@@ -144,7 +183,31 @@ class PersistentLoader:
         self._proc.stdin.write(data)
         self._proc.stdin.flush()
 
-        header = self._proc.stdout.readline()
+        # Threaded readline with timeout — prevents hang if loader gets stuck
+        result = [None]
+
+        def _readline():
+            result[0] = self._proc.stdout.readline()
+
+        t = threading.Thread(target=_readline, daemon=True)
+        t.start()
+        t.join(timeout=self.timeout)
+        if t.is_alive():
+            log.warning("Persistent loader timed out after %.1fs, restarting", self.timeout)
+            with contextlib.suppress(Exception):
+                self._proc.kill()
+                self._proc.wait()
+            self._ready = False
+            if not self._restarting:
+                self._restarting = True
+                try:
+                    if self.start():
+                        return self.run_one(data)
+                finally:
+                    self._restarting = False
+            return -1, None
+
+        header = result[0]
         if not header:
             return -2, None
 
