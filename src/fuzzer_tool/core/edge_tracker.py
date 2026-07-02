@@ -2,9 +2,14 @@
 
 Tracks which coverage edges each seed contributes, enabling the fuzzer
 to deprioritize seeds whose coverage is fully subsumed by others.
-Also tracks per-seed hit-count distributions for JS divergence-based
-diversity scoring — seeds with unusual execution profiles (e.g. hitting
-a loop 500x vs 5x) get priority even without new edges.
+Also tracks per-seed hit-count distributions for JS divergence and
+Wasserstein distance-based diversity scoring.
+
+Wasserstein distance on edge indices treats the edge map as a 1D metric
+space — two seeds hitting adjacent edges are "close" even if they share
+no edges, while two seeds hitting the same number of edges at opposite
+ends of the map are "far". This captures coverage spatial diversity that
+Jaccard (set overlap) and JS (frequency divergence) miss.
 """
 
 import json
@@ -185,6 +190,128 @@ class EdgeTracker:
         # Normalize: max JS is ln(2) ≈ 0.693
         normalized = min(js / math.log(2), 1.0)
         # Scale to [0.5, 2.0]: low divergence → 0.5, high → 2.0
+        return 0.5 + 1.5 * normalized
+
+    def compute_wasserstein_distance(
+        self, seed_key_a: str, seed_key_b: str
+    ) -> float:
+        """Compute 1D Wasserstein distance between two seeds' edge profiles.
+
+        Treats edge indices as positions on a line, so adjacent edges
+        are "close" even with no overlap. This captures coverage spatial
+        diversity that Jaccard and JS divergence miss — two seeds hitting
+        different but nearby edges are more similar than two seeds hitting
+        the same number of edges at opposite ends of the map.
+
+        Uses CDF-based algorithm: W = integral of |F_p(x) - F_q(x)| dx
+        over sorted edge positions. O(n log n) where n = |keys_a| + |keys_b|.
+        """
+        hc_a = self.seed_hit_counts.get(seed_key_a, {})
+        hc_b = self.seed_hit_counts.get(seed_key_b, {})
+        if not hc_a or not hc_b:
+            return float(self.map_size)  # max distance if no data
+
+        total_a = sum(hc_a.values())
+        total_b = sum(hc_b.values())
+        if total_a == 0 or total_b == 0:
+            return float(self.map_size)
+
+        # Merge all edge positions and sort
+        all_edges = sorted(set(hc_a) | set(hc_b))
+
+        # Walk sorted edges, accumulating CDF difference
+        cdf_diff = 0.0
+        wasserstein = 0.0
+        prev_edge = all_edges[0] if all_edges else 0
+
+        for edge in all_edges:
+            # Distance from previous edge position
+            gap = edge - prev_edge
+            wasserstein += abs(cdf_diff) * gap
+
+            # Update CDF at this position
+            cdf_diff += hc_a.get(edge, 0) / total_a - hc_b.get(edge, 0) / total_b
+            prev_edge = edge
+
+        return wasserstein
+
+    def compute_corpus_diversity(self) -> float:
+        """Compute average pairwise Wasserstein distance across all seeds.
+
+        Returns a value in [0, map_size] where:
+        - 0 = all seeds hit exactly the same edges with same frequencies
+        - high = seeds are spread across the edge map (diverse coverage)
+
+        This is O(n^2) in the number of tracked seeds, so it's called
+        periodically (not every iteration) and cached.
+        """
+        keys = list(self.seed_hit_counts.keys())
+        if len(keys) < 2:
+            return 0.0
+
+        total = 0.0
+        count = 0
+        for i in range(len(keys)):
+            for j in range(i + 1, len(keys)):
+                total += self.compute_wasserstein_distance(keys[i], keys[j])
+                count += 1
+
+        return total / count if count else 0.0
+
+    def compute_wasserstein_weight(self, seed_key: str) -> float:
+        """Compute scheduling weight based on Wasserstein distance to corpus centroid.
+
+        Seeds whose coverage profile is far from the corpus average (high
+        Wasserstein distance to the aggregate) are spatially diverse and
+        should be explored more. Seeds clustered near the centroid are
+        redundant in terms of coverage location.
+
+        Returns a weight in [0.5, 2.0]:
+        - 0.5 = profile is at the centroid (spatially redundant)
+        - 2.0 = profile is far from centroid (spatially novel)
+        """
+        hc = self.seed_hit_counts.get(seed_key)
+        if not hc:
+            return 1.0
+
+        aggregate = self._build_aggregate_distribution()
+        if not aggregate:
+            return 1.0
+
+        # Build a "centroid seed key" — we compute Wasserstein against
+        # the aggregate by converting it to the same sparse format
+        # We use a synthetic key by summing all hit counts
+        centroid_counts: dict[int, float] = {}
+        for hc_other in self.seed_hit_counts.values():
+            for edge, count in hc_other.items():
+                centroid_counts[edge] = centroid_counts.get(edge, 0.0) + count
+
+        total = sum(centroid_counts.values())
+        if total == 0:
+            return 1.0
+        centroid_dist = {e: c / total for e, c in centroid_counts.items()}
+
+        # Build seed distribution
+        seed_total = sum(hc.values())
+        if seed_total == 0:
+            return 1.0
+        seed_dist = {e: c / seed_total for e, c in hc.items()}
+
+        # Wasserstein between seed and centroid
+        all_edges = sorted(set(seed_dist) | set(centroid_dist))
+        cdf_diff = 0.0
+        wasserstein = 0.0
+        prev_edge = all_edges[0] if all_edges else 0
+
+        for edge in all_edges:
+            gap = edge - prev_edge
+            wasserstein += abs(cdf_diff) * gap
+            cdf_diff += seed_dist.get(edge, 0.0) - centroid_dist.get(edge, 0.0)
+            prev_edge = edge
+
+        # Normalize: max possible Wasserstein is map_size
+        normalized = min(wasserstein / self.map_size, 1.0)
+        # Scale to [0.5, 2.0]
         return 0.5 + 1.5 * normalized
 
     def get_cumulative_edge_count(self) -> int:

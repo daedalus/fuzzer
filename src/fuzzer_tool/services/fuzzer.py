@@ -1470,6 +1470,11 @@ class Fuzzer:
             diversity = self._edge_tracker.compute_hitcount_diversity_weight(seed_key)
             w *= diversity
 
+            # Wasserstein: seeds whose coverage is spatially distant from the
+            # corpus centroid get a boost — they explore different code regions.
+            spatial = self._edge_tracker.compute_wasserstein_weight(seed_key)
+            w *= spatial
+
             weights.append(max(w, 1e-6))
         return random.choices(self.corpus, weights=weights, k=1)[0]
 
@@ -1714,10 +1719,14 @@ class Fuzzer:
                 pct = succ / count * 100 if count else 0
                 rates.append(f"{op}:{pct:.0f}%")
             ops_str = " | ops: " + " ".join(rates)
+        div_str = ""
+        if len(self._edge_tracker.seed_hit_counts) >= 2:
+            diversity = self._edge_tracker.compute_corpus_diversity()
+            div_str = f" | div: {diversity:.0f}"
         print(
             f"\r[*] execs: {self.exec_count} | corpus: {len(self.corpus)} | "
             f"crashes: {self.crash_count}{sig_str}{timeout_str} | eps: {eps:.0f} | "
-            f"time: {elapsed:.0f}s{rss_str}{ops_str}{dict_str}{markov_str}{cov_str}{mc_str}",
+            f"time: {elapsed:.0f}s{rss_str}{ops_str}{dict_str}{markov_str}{cov_str}{mc_str}{div_str}",
             end="",
             flush=True,
         )
