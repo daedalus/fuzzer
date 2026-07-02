@@ -641,6 +641,10 @@ class Fuzzer:
         self._crash_replays: dict[str, list[int]] = {}  # sig -> list of replay return codes
         self.replay_n: int = replay_n  # --replay-N: replay each crash N times
 
+        # Execution time tracking for adaptive timeout calibration
+        from fuzzer_tool.core.execution_time import ExecutionTimeTracker
+        self._exec_time_tracker = ExecutionTimeTracker()
+
         # Kernel-level crash verification via dmesg
         from fuzzer_tool.core.dmesg import DmesgParser
 
@@ -1520,6 +1524,9 @@ class Fuzzer:
         if meta is not None:
             meta["total_time"] = meta.get("total_time", 0.0) + t_elapsed
 
+        # Record execution time for adaptive timeout calibration
+        self._exec_time_tracker.record(t_elapsed)
+
         if self.mc:
             self.mc.execs_since_refit += 1
 
@@ -1591,6 +1598,7 @@ class Fuzzer:
             for op in self._last_ops_used:
                 if op not in seen:
                     self.mc.record(op, success)
+                    self.mc.record_brier(op, success)
                     seen.add(op)
 
         if is_crash:
@@ -1845,10 +1853,18 @@ class Fuzzer:
                     for replays in done
                 ) / len(done) * 100
                 repro_str = f" | repro: {avg_repro:.0f}%"
+        # Bandit calibration (Brier score)
+        brier_str = ""
+        if self.mc and self.mc_bandit and self.mc.brier_score() > 0:
+            brier_str = f" | brier: {self.mc.brier_score():.3f}"
+        # Exec time CRPS
+        crps_str = ""
+        if self._exec_time_tracker.count > 20:
+            crps_str = f" | crps: {self._exec_time_tracker.mean_crps():.4f}"
         print(
             f"\r[*] execs: {self.exec_count} | corpus: {len(self.corpus)} | "
             f"crashes: {self.crash_count}{sig_str}{timeout_str} | eps: {eps:.0f} | "
-            f"time: {elapsed:.0f}s{rss_str}{ops_str}{dict_str}{markov_str}{cov_str}{mc_str}{div_str}{dr_str}{density_str}{repro_str}",
+            f"time: {elapsed:.0f}s{rss_str}{ops_str}{dict_str}{markov_str}{cov_str}{mc_str}{div_str}{dr_str}{density_str}{repro_str}{brier_str}{crps_str}",
             end="",
             flush=True,
         )

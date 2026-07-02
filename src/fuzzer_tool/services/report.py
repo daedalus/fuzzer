@@ -18,6 +18,8 @@ def generate_report(fuzzer, corpus_dir: str, crashes_dir: str) -> str:
     sections.append(_good_turing(fuzzer))
     sections.append(_coverage_analysis(fuzzer))
     sections.append(_mutation_effectiveness(fuzzer))
+    sections.append(_bandit_calibration(fuzzer))
+    sections.append(_execution_time_analysis(fuzzer))
     sections.append(_seed_contribution(fuzzer))
     sections.append(_corpus_overview(fuzzer, corpus_dir))
     sections.append(_crash_analysis(fuzzer, crashes_dir))
@@ -306,6 +308,45 @@ def _disk_footprint(corpus_dir: str) -> str:
     if small:
         lines.append(f"  Small (<100B):   {len(small)} files (potential deltas)")
         lines.append(f"  Large (>=100B):  {len(large)} files")
+    return "\n".join(lines)
+
+
+def _bandit_calibration(f) -> str:
+    if not f.mc or not f.mc_bandit:
+        return ""
+    brier = f.mc.brier_score()
+    if brier == 0:
+        return ""
+    lines = [
+        "",
+        "--- Bandit Calibration (Brier Score) ---",
+        f"  Brier score:       {brier:.4f} (0=perfect, 0.25=random, 0.5=worst)",
+    ]
+    cal = f.mc.calibration_report()
+    if cal:
+        lines.append("  Calibration by predicted probability bin:")
+        lines.append(f"    {'Bin':<12s} {'Predicted':>10s} {'Actual':>10s} {'Samples':>8s}")
+        for bin_label, (pred, actual) in cal.items():
+            lines.append(f"    {bin_label:<12s} {pred:>10.3f} {actual:>10.3f}")
+    return "\n".join(lines)
+
+
+def _execution_time_analysis(f) -> str:
+    tracker = f._exec_time_tracker
+    if tracker.count < 10:
+        return ""
+    lines = [
+        "",
+        "--- Execution Time Analysis ---",
+        f"  Observations:   {tracker.count}",
+        f"  p50:            {tracker.p50*1000:.1f}ms",
+        f"  p99:            {tracker.p99*1000:.1f}ms",
+        f"  Suggested timeout: {tracker.suggested_timeout():.2f}s",
+        f"  CRPS (mean):    {tracker.mean_crps():.6f}",
+        f"  CRPS trend:     {tracker.crps_trend():.6f} (+ = degrading)",
+    ]
+    if tracker.crps_trend() > 0.001:
+        lines.append("  WARNING: CRPS rising — target runtime behavior is drifting")
     return "\n".join(lines)
 
 

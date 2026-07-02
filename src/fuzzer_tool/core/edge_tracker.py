@@ -210,7 +210,7 @@ class EdgeTracker:
     def compute_wasserstein_distance(
         self, seed_key_a: str, seed_key_b: str
     ) -> float:
-        """Compute 1D Wasserstein distance between two seeds' edge profiles.
+        """Compute 1D Wasserstein-1 distance between two seeds' edge profiles.
 
         Treats edge indices as positions on a line, so adjacent edges
         are "close" even with no overlap. This captures coverage spatial
@@ -221,34 +221,68 @@ class EdgeTracker:
         Uses CDF-based algorithm: W = integral of |F_p(x) - F_q(x)| dx
         over sorted edge positions. O(n log n) where n = |keys_a| + |keys_b|.
         """
+        wasserstein, _ks, _crps = self._cdf_norms(seed_key_a, seed_key_b)
+        return wasserstein
+
+    def compute_ks_distance(
+        self, seed_key_a: str, seed_key_b: str
+    ) -> float:
+        """Kolmogorov-Smirnov statistic between two seeds' edge profiles.
+
+        Maximum absolute CDF difference — L∞ norm of the same quantity
+        Wasserstein measures in L¹. KS ∈ [0, 1].
+        """
+        _w, ks, _crps = self._cdf_norms(seed_key_a, seed_key_b)
+        return ks
+
+    def compute_crps(
+        self, seed_key_a: str, seed_key_b: str
+    ) -> float:
+        """CRPS (Continuous Ranked Probability Score) between two edge profiles.
+
+        L² integral of the CDF difference: ∫(F_a - F_b)² dy.
+        CRPS ∈ [0, map_size]. Measured in the same units as the edge index
+        space, so interpretable directly.
+        """
+        _w, _ks, crps = self._cdf_norms(seed_key_a, seed_key_b)
+        return crps
+
+    def _cdf_norms(
+        self, seed_key_a: str, seed_key_b: str
+    ) -> tuple[float, float, float]:
+        """Compute Wasserstein-1, KS, and CRPS from a single CDF walk.
+
+        Returns (wasserstein, ks, crps) — L¹, L∞, and L² norms of the
+        same CDF difference, computed in one pass over sorted edge positions.
+        """
         hc_a = self.seed_hit_counts.get(seed_key_a, {})
         hc_b = self.seed_hit_counts.get(seed_key_b, {})
         if not hc_a or not hc_b:
-            return float(self.map_size)  # max distance if no data
+            return float(self.map_size), 1.0, float(self.map_size)
 
         total_a = sum(hc_a.values())
         total_b = sum(hc_b.values())
         if total_a == 0 or total_b == 0:
-            return float(self.map_size)
+            return float(self.map_size), 1.0, float(self.map_size)
 
-        # Merge all edge positions and sort
         all_edges = sorted(set(hc_a) | set(hc_b))
 
-        # Walk sorted edges, accumulating CDF difference
         cdf_diff = 0.0
         wasserstein = 0.0
+        ks = 0.0
+        crps = 0.0
         prev_edge = all_edges[0] if all_edges else 0
 
         for edge in all_edges:
-            # Distance from previous edge position
             gap = edge - prev_edge
-            wasserstein += abs(cdf_diff) * gap
-
-            # Update CDF at this position
+            abs_diff = abs(cdf_diff)
+            wasserstein += abs_diff * gap
+            ks = max(ks, abs_diff)
+            crps += cdf_diff * cdf_diff * gap
             cdf_diff += hc_a.get(edge, 0) / total_a - hc_b.get(edge, 0) / total_b
             prev_edge = edge
 
-        return wasserstein
+        return wasserstein, ks, crps
 
     def compute_corpus_diversity(self) -> float:
         """Compute average pairwise Wasserstein distance across all seeds.

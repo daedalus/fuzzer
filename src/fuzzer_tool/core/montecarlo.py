@@ -3,8 +3,11 @@
 Uses JS divergence to adaptively control CEM refit frequency:
 - JS → 0 after refit: distribution stabilized, refit less often
 - JS stays high: elite set still shifting, refit more aggressively
+
+Also tracks Brier score (binary CRPS) for bandit calibration diagnostics.
 """
 
+import collections
 import logging
 import math
 import random
@@ -45,6 +48,8 @@ class MonteCarloScheduler:
         self._prev_byte_freq: dict[int, dict[int, int]] = {}
         self.cem_fitted = False
         self.last_js_divergence: float = 0.0
+        # Brier score tracking for bandit calibration diagnostics
+        self._brier_predictions: collections.deque = collections.deque(maxlen=500)
 
     def init_arm(self, name: str) -> None:
         """Register a mutation operator arm with prior (1, 1).
@@ -87,6 +92,49 @@ class MonteCarloScheduler:
             self.arm_alpha[name] = self.arm_alpha.get(name, 1.0) + 1
         else:
             self.arm_beta[name] = self.arm_beta.get(name, 1.0) + 1
+
+    def record_brier(self, name: str, success: bool) -> None:
+        """Record a prediction-outcome pair for Brier score diagnostics.
+
+        The predicted probability is the Beta distribution mean for this arm
+        at the time of selection. The outcome is 1.0 (success) or 0.0.
+        Brier score = mean((predicted - actual)²) — lower is better.
+        """
+        a = self.arm_alpha.get(name, 1.0)
+        b = self.arm_beta.get(name, 1.0)
+        predicted = a / (a + b)  # Beta mean = expected success probability
+        outcome = 1.0 if success else 0.0
+        self._brier_predictions.append((predicted, outcome))
+
+    def brier_score(self) -> float:
+        """Mean Brier score over recent predictions.
+
+        Returns 0.0 if no data. Lower is better calibrated:
+        - 0.0 = perfect calibration
+        - 0.25 = random baseline
+        - 0.5 = worst possible
+        """
+        if not self._brier_predictions:
+            return 0.0
+        return sum((p - o) ** 2 for p, o in self._brier_predictions) / len(self._brier_predictions)
+
+    def calibration_report(self) -> dict[str, float]:
+        """Compute per-bin calibration: among predictions in [0,0.1), [0.1,0.2), etc.,
+        what fraction actually succeeded? Returns bins where we have enough data."""
+        if not self._brier_predictions:
+            return {}
+        bins: dict[int, list[tuple[float, float]]] = {}
+        for pred, outcome in self._brier_predictions:
+            b = min(int(pred * 10), 9)
+            bins.setdefault(b, []).append((pred, outcome))
+        report = {}
+        for b, pairs in sorted(bins.items()):
+            if len(pairs) < 5:
+                continue
+            mean_pred = sum(p for p, _ in pairs) / len(pairs)
+            mean_actual = sum(o for _, o in pairs) / len(pairs)
+            report[f"{b*10}-{b*10+10}%"] = (mean_pred, mean_actual)
+        return report
 
     def add_elite(self, data: bytes, score: int) -> None:
         """Add an input to the elite set for CEM fitting.
