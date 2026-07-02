@@ -5,10 +5,17 @@ via dlopen or standalone executable via fork+exec), calls
 LLVMFuzzerTestOneInput, and returns the coverage bitmap.
 
 Protocol (stdin/stdout binary):
-  Init:   "INIT <target> <func> <bitmap_out>\n"
+  Init:   "INIT <target> <func> <bitmap_out> <timeout>\n"
+          NOTE: target path must not contain whitespace (%s sscanf).
   Run:    "RUN <len>\n<data>"
+          len is capped at PIPE_BUF_LIMIT (56KB) to avoid pipe deadlock.
   Quit:   "QUIT\n"
   Reply:  "RC <rc> <bmp_len>\n<bmp>"
+
+Timeout enforcement:
+  .so targets: sigsetjmp/siglongjmp via SIGALRM — no fork overhead.
+  executables: fork+exec with SIGALRM-interrupted waitpid — child is
+               SIGKILL'd if waitpid returns EINTR.
 */
 
 #include <stdio.h>
@@ -21,7 +28,10 @@ Protocol (stdin/stdout binary):
 #include <signal.h>
 #include <setjmp.h>
 
-#define MAX_DATA 65535
+/* Pipe buffer on Linux is 65536 (PIPE_BUF). Cap data well below that
+   to avoid deadlock: parent write() blocks when buffer is full, but
+   the child may not have started reading yet. */
+#define MAX_DATA 57344  /* 56KB — safely under 64KB pipe buffer */
 #define MAX_BMP  65536
 
 typedef int (*fuzz_fn)(const uint8_t *, size_t);
@@ -81,9 +91,14 @@ static void timeout_handler(int sig) {
     siglongjmp(timeout_jmp, 1);
 }
 
-/* Fork+exec path for standalone executables (unchanged) */
-static void alarm_handler(int sig) {
+/* SIGALRM handler for fork/exec path — kills the child, then waitpid reaps */
+static pid_t exec_child_pid = -1;
+
+static void exec_alarm_handler(int sig) {
     (void)sig;
+    if (exec_child_pid > 0) {
+        kill(exec_child_pid, SIGKILL);
+    }
 }
 
 static int run_executable(const uint8_t *data, size_t len, uint8_t *bmp, int *bmp_len) {
@@ -113,25 +128,24 @@ static int run_executable(const uint8_t *data, size_t len, uint8_t *bmp, int *bm
     }
     close(pipefd[1]);
 
+    /* Set up alarm: handler kills child directly, then waitpid reaps it */
+    exec_child_pid = pid;
     struct sigaction sa;
-    sa.sa_handler = alarm_handler;
+    sa.sa_handler = exec_alarm_handler;
     sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
+    sa.sa_flags = 0;  /* NO SA_RESTART — we want waitpid interrupted */
     sigaction(SIGALRM, &sa, NULL);
     alarm(timeout_seconds);
 
     int status = 0;
-    pid_t waited = waitpid(pid, &status, 0);
+    waitpid(pid, &status, 0);
 
     alarm(0);
     signal(SIGALRM, SIG_DFL);
+    exec_child_pid = -1;
 
     int rc = -2;
-    if (waited < 0) {
-        if (kill(pid, SIGKILL) == 0)
-            waitpid(pid, NULL, 0);
-        rc = -1;
-    } else if (WIFEXITED(status)) {
+    if (WIFEXITED(status)) {
         rc = WEXITSTATUS(status);
     } else if (WIFSIGNALED(status)) {
         rc = -WTERMSIG(status);
