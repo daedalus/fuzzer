@@ -138,14 +138,20 @@ static int run_executable(const uint8_t *data, size_t len, uint8_t *bmp, int *bm
     alarm(timeout_seconds);
 
     int status = 0;
-    waitpid(pid, &status, 0);
+    int waited = waitpid(pid, &status, 0);
 
     alarm(0);
     signal(SIGALRM, SIG_DFL);
     exec_child_pid = -1;
 
     int rc = -2;
-    if (WIFEXITED(status)) {
+    if (waited < 0) {
+        /* waitpid interrupted by SIGALRM — handler already SIGKILL'd child,
+           but status may be uninitialized. Force reap and report timeout. */
+        kill(pid, SIGKILL);
+        waitpid(pid, NULL, 0);
+        rc = -1;
+    } else if (WIFEXITED(status)) {
         rc = WEXITSTATUS(status);
     } else if (WIFSIGNALED(status)) {
         rc = -WTERMSIG(status);
