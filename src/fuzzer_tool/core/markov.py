@@ -119,6 +119,45 @@ class MarkovChain:
                 return byte_val
         return random.randint(0, 255)
 
+    def codelength(self, data: bytes) -> float:
+        """Compute cross-entropy of input under the trained model (in bits).
+
+        This is the MDL codelength: sum(-log2(P(byte|context))) for each byte.
+        An input that the model considers "surprising" has high codelength —
+        it's structurally novel relative to what the corpus has taught the model.
+        An input the model can explain well has low codelength.
+
+        Returns:
+            Total codelength in bits. Higher = more surprising to the model.
+        """
+        if not self.transitions or not data:
+            return len(data) * 8.0  # fall back to raw bit count
+
+        total_bits = 0.0
+        ctx = b"\x00" * self.order
+        for i, byte_val in enumerate(data):
+            counts = self.transitions.get(ctx)
+            if counts is None or not counts:
+                total_bits += 8.0  # uniform: log2(256) = 8 bits
+            else:
+                total = sum(counts.values()) + self.smoothing * 256
+                p = (counts.get(byte_val, 0) + self.smoothing) / total
+                total_bits += -math.log2(p)
+            # Slide context window
+            ctx = data[max(0, i + 1 - self.order) : i + 1]
+        return total_bits
+
+    def codelength_ratio(self, data: bytes) -> float:
+        """Codelength per byte, normalized to [0, 8].
+
+        0 = model predicts every byte perfectly (zero surprise).
+        8 = model has no information (uniform random).
+        > 8 = model is actively surprised (assigns low probability).
+        """
+        if not data:
+            return 0.0
+        return self.codelength(data) / len(data)
+
     def is_trained(self) -> bool:
         """Check if the chain has learned any transitions.
 

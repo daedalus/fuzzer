@@ -20,6 +20,7 @@ def generate_report(fuzzer, corpus_dir: str, crashes_dir: str) -> str:
     sections.append(_mutation_effectiveness(fuzzer))
     sections.append(_bandit_calibration(fuzzer))
     sections.append(_execution_time_analysis(fuzzer))
+    sections.append(_mdl_codelength(fuzzer))
     sections.append(_seed_contribution(fuzzer))
     sections.append(_corpus_health(fuzzer))
     sections.append(_corpus_overview(fuzzer, corpus_dir))
@@ -134,6 +135,49 @@ def _mutation_effectiveness(f) -> str:
         lines.append(f"  {op:<22s} {count:>7d} {succ:>8d} {rate:>6.1f}%")
 
     lines.append(f"  {'TOTAL':<22s} {total:>7d} {total_success:>8d} {total_success/total*100:>6.1f}%" if total else "")
+    return "\n".join(lines)
+
+
+def _mdl_codelength(f) -> str:
+    """MDL codelength analysis: how surprising is the corpus to the Markov model."""
+    if not hasattr(f, "markov") or not f.markov.is_trained():
+        return ""
+    if not f.corpus:
+        return ""
+
+    ratios = []
+    for seed in f.corpus[:200]:  # cap to avoid slow reports on huge corpora
+        ratios.append(f.markov.codelength_ratio(seed))
+
+    if not ratios:
+        return ""
+
+    avg_cl = sum(ratios) / len(ratios)
+    min_cl = min(ratios)
+    max_cl = max(ratios)
+    s = sorted(ratios)
+    p10 = s[len(s) // 10]
+    p90 = s[-len(s) // 10]
+
+    lines = [
+        "",
+        "--- MDL Codelength (Markov Surprise) ---",
+        f"  Avg codelength:    {avg_cl:.2f} bits/byte (8.0 = random, 0 = fully predicted)",
+        f"  Range:             {min_cl:.2f} - {max_cl:.2f}",
+        f"  p10/p90:           {p10:.2f} / {p90:.2f}",
+    ]
+
+    # NCD sample: top 2 seeds by codelength — are the surprising ones related?
+    if len(ratios) >= 2:
+        indexed = list(enumerate(ratios))
+        indexed.sort(key=lambda x: -x[1])
+        top_i, top_cl = indexed[0]
+        second_i, second_cl = indexed[1]
+        if top_i < len(f.corpus) and second_i < len(f.corpus):
+            from fuzzer_tool.core.edge_tracker import normalized_compression_distance
+            ncd = normalized_compression_distance(f.corpus[top_i], f.corpus[second_i])
+            lines.append(f"  NCD (top 2):       {ncd:.4f} (0=same structure, 1=unrelated)")
+
     return "\n".join(lines)
 
 

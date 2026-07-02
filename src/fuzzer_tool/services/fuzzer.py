@@ -1460,7 +1460,12 @@ class Fuzzer:
     def _pick_seed(self) -> bytes:
         if self.markov_generate and self.markov_trained:
             # Reduce markov generation rate when model has plateaued
-            gen_rate = 0.03 if self.markov.last_js_divergence < 0.01 else 0.15
+            # Use KS-aware threshold instead of fixed JS < 0.01
+            from fuzzer_tool.core.edge_tracker import ks_significance_threshold
+            plateau_threshold = ks_significance_threshold(
+                max(1, self.markov._contexts_seen), alpha=0.05
+            )
+            gen_rate = 0.03 if self.markov.last_js_divergence < plateau_threshold else 0.15
             if random.random() < gen_rate:
                 length = random.randint(1, self.max_len)
                 return self.markov.generate(length)
@@ -1512,6 +1517,15 @@ class Fuzzer:
             # corpus centroid get a boost — they explore different code regions.
             spatial = self._edge_tracker.compute_wasserstein_weight(seed_key)
             w *= spatial
+
+            # MDL codelength: seeds that are surprising to the Markov model
+            # are structurally novel — not explained by learned patterns.
+            # High codelength → high weight (1.0-2.0x boost).
+            if self.markov_trained:
+                cl_ratio = self.markov.codelength_ratio(seed)
+                # cl_ratio ∈ [0, 8+]. Map to weight: 0→1.0, 4→1.5, 8→2.0
+                mdl_weight = 1.0 + min(cl_ratio / 8.0, 1.0)
+                w *= mdl_weight
 
             weights.append(max(w, 1e-6))
         return random.choices(self.corpus, weights=weights, k=1)[0]

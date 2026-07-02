@@ -15,6 +15,7 @@ Jaccard (set overlap) and JS (frequency divergence) miss.
 import json
 import logging
 import math
+import zlib
 
 log = logging.getLogger(__name__)
 
@@ -135,6 +136,28 @@ def ks_significance_threshold(n_samples: int, alpha: float = 0.05) -> float:
     _crit_values = {0.01: 1.628, 0.05: 1.358, 0.10: 1.224, 0.20: 1.073}
     c = _crit_values.get(alpha, 1.358)
     return c / math.sqrt(n_samples)
+
+
+def normalized_compression_distance(x: bytes, y: bytes) -> float:
+    """Normalized Compression Distance — proxy for Kolmogorov similarity.
+
+    NCD(x,y) = (C(xy) - min(C(x), C(y))) / max(C(x), C(y))
+
+    Where C is compressed size via zlib. Values near 0 mean x and y are
+    algorithmically similar (share structure). Values near 1 mean unrelated.
+
+    Note: noisy on small inputs (< ~200 bytes) due to zlib header overhead.
+    Gate calls with a minimum-size check for reliable results.
+    """
+    if not x or not y:
+        return 1.0
+    cx = len(zlib.compress(x, 9))
+    cy = len(zlib.compress(y, 9))
+    cxy = len(zlib.compress(x + y, 9))
+    denom = max(cx, cy)
+    if denom == 0:
+        return 0.0
+    return max(0.0, (cxy - min(cx, cy)) / denom)
 
 
 def _js_divergence(p: dict[int, float], q: dict[int, float]) -> float:
