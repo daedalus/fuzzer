@@ -1,6 +1,13 @@
-"""Filesystem operations for corpus and crash management."""
+"""Filesystem operations for corpus and crash management.
+
+Supports delta-encoded corpus storage: mutations are typically small edits
+to a parent, so storing (parent_hash, patch) instead of full bytes saves
+disk and preserves mutation lineage. Falls back to full storage when the
+delta isn't smaller.
+"""
 
 import hashlib
+import json
 import os
 import time
 from pathlib import Path
@@ -8,6 +15,50 @@ from pathlib import Path
 from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.crash_metadata import CrashMetadata
 from fuzzer_tool.core.sanitizer import SanitizerReport
+
+
+def compute_delta(parent: bytes, child: bytes) -> list[list[int]] | None:
+    """Compute a compact byte-level diff between parent and child.
+
+    Returns a list of [offset, new_byte] pairs for bytes that differ,
+    or None if the diff isn't worth storing (> 25% of child size, or
+    different lengths).
+
+    The delta format is deliberately simple: just positions and new values.
+    Parent bytes at those positions are overwritten; everything else is
+    inherited. This is cheaper than a full diff algorithm and works well
+    for fuzzer mutations (bit flips, byte replacements, small insertions
+    that happen to preserve length).
+    """
+    if len(parent) != len(child):
+        return None
+
+    diff = []
+    for i in range(len(parent)):
+        if parent[i] != child[i]:
+            diff.append([i, child[i]])
+
+    # Not worth delta-encoding if diff covers > 25% of the input
+    if len(diff) > len(child) // 4:
+        return None
+
+    return diff
+
+
+def apply_delta(parent: bytes, diff: list[list[int]]) -> bytes:
+    """Reconstruct child bytes from parent and delta.
+
+    Args:
+        parent: Full parent input bytes.
+        diff: List of [offset, new_byte] pairs from compute_delta.
+
+    Returns:
+        Reconstructed child bytes.
+    """
+    child = bytearray(parent)
+    for offset, new_byte in diff:
+        child[offset] = new_byte
+    return bytes(child)
 
 
 def hash_data(data: bytes) -> str:
@@ -25,6 +76,9 @@ def hash_data(data: bytes) -> str:
 def load_corpus(corpus_dir: Path, bloom: BloomFilter | None = None) -> tuple[list[bytes], set[str]]:
     """Load existing corpus from directory.
 
+    Handles both full files (id_*.*) and delta-encoded files (delta_*.json).
+    Delta files are reconstructed from their parent chain.
+
     Args:
         corpus_dir: Path to corpus directory.
         bloom: Optional bloom filter to populate for fast dedup.
@@ -34,34 +88,91 @@ def load_corpus(corpus_dir: Path, bloom: BloomFilter | None = None) -> tuple[lis
     """
     corpus: list[bytes] = []
     seen: set[str] = set()
+
+    # First pass: load all full files and build hash lookup for delta reconstruction
+    full_files: dict[str, bytes] = {}
+    delta_files: list[tuple[str, Path]] = []
+
     if corpus_dir.exists():
         for f in corpus_dir.iterdir():
-            if f.is_file():
+            if not f.is_file():
+                continue
+            if f.suffix == ".json" and f.name.startswith("delta_"):
+                h = f.name[6:-5]  # strip "delta_" prefix and ".json" suffix
+                delta_files.append((h, f))
+            else:
+                # Full file: id_*, legacy names, etc.
                 data = f.read_bytes()
                 h = hash_data(data)
-                if h not in seen:
-                    seen.add(h)
-                    if bloom is not None:
-                        bloom.add(h)
-                    corpus.append(data)
+                full_files[h] = data
+
+    # Load full files
+    for h, data in full_files.items():
+        if h not in seen:
+            seen.add(h)
+            if bloom is not None:
+                bloom.add(h)
+            corpus.append(data)
+
+    # Reconstruct delta files (may need multiple passes for chains)
+    if delta_files:
+        resolved: dict[str, bytes] = dict(full_files)
+        max_passes = 5  # prevent infinite loops on circular refs
+        remaining = dict(delta_files)
+
+        for _ in range(max_passes):
+            if not remaining:
+                break
+            still_remaining = {}
+            for h, f in remaining:
+                try:
+                    delta = json.loads(f.read_text())
+                    parent_hash = delta["parent"]
+                    if parent_hash in resolved:
+                        reconstructed = apply_delta(resolved[parent_hash], delta["diff"])
+                        resolved[h] = reconstructed
+                    else:
+                        still_remaining[h] = f
+                except (json.JSONDecodeError, KeyError, IndexError):
+                    pass  # corrupt delta — skip
+            remaining = still_remaining
+
+        for h, _ in delta_files:
+            if h in resolved and h not in seen:
+                seen.add(h)
+                if bloom is not None:
+                    bloom.add(h)
+                corpus.append(resolved[h])
+
     if not corpus:
         corpus.append(b"AAAAAAAA")
     return corpus, seen
 
 
 def save_to_corpus(
-    data: bytes, corpus_dir: Path, seen_hashes: set[str], bloom: BloomFilter | None = None
+    data: bytes,
+    corpus_dir: Path,
+    seen_hashes: set[str],
+    bloom: BloomFilter | None = None,
+    parent: bytes | None = None,
+    corpus_hashes: dict[str, bytes] | None = None,
 ) -> bool:
     """Save input to corpus if not already seen.
 
     Uses bloom filter as fast pre-check when available. False positives
     (bloom says "seen" but set says "new") fall through to the authoritative set.
 
+    When parent is provided and the diff is compact (< 25% of child size),
+    stores a delta file instead of the full input. Delta files are smaller
+    and preserve mutation lineage.
+
     Args:
         data: Input bytes to save.
         corpus_dir: Path to corpus directory.
         seen_hashes: Set of already-seen hashes.
         bloom: Optional bloom filter for fast pre-check.
+        parent: Parent input bytes (for delta encoding).
+        corpus_hashes: Mapping of hash -> full bytes for delta reconstruction.
 
     Returns:
         True if saved (new), False if duplicate.
@@ -81,8 +192,21 @@ def save_to_corpus(
             return False
     seen_hashes.add(h)
     corpus_dir.mkdir(parents=True, exist_ok=True)
-    corpus_file = corpus_dir / f"id_{h}"
-    corpus_file.write_bytes(data)
+
+    # Try delta encoding if parent is available
+    delta = None
+    if parent is not None and len(data) == len(parent):
+        diff = compute_delta(parent, data)
+        if diff is not None:
+            parent_hash = hash_data(parent)
+            delta = {"parent": parent_hash, "diff": diff}
+
+    if delta is not None:
+        delta_file = corpus_dir / f"delta_{h}.json"
+        delta_file.write_text(json.dumps(delta, separators=(",", ":")))
+    else:
+        corpus_file = corpus_dir / f"id_{h}"
+        corpus_file.write_bytes(data)
     return True
 
 

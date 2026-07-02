@@ -1343,8 +1343,11 @@ class Fuzzer:
             metadata=meta,
         )
 
-    def save_to_corpus(self, data: bytes):
-        if save_to_corpus(data, self.corpus_dir, self.seen_hashes, self.bloom):
+    def save_to_corpus(self, data: bytes, parent: bytes | None = None):
+        if save_to_corpus(
+            data, self.corpus_dir, self.seen_hashes, self.bloom,
+            parent=parent,
+        ):
             self.corpus.append(data)
             self.seed_meta[data] = {
                 "fuzz_count": 0,
@@ -1390,16 +1393,24 @@ class Fuzzer:
                 seen.add(h)
                 unique.append(seed)
 
-        # Prune subsumed seeds
+        # Prune subsumed seeds using Wasserstein diversity scoring
         if len(unique) > self.max_corpus:
-            # Score each seed: unique edges * inverse fuzz count
             scored = []
             for seed in unique:
                 seed_key = self._seed_key(seed)
                 edge_count = self._edge_tracker.get_seed_edge_count(seed_key)
                 meta = self.seed_meta.get(seed)
                 fuzz = meta["fuzz_count"] if meta else 0
-                score = edge_count * 10 + (1.0 / max(fuzz, 1))
+
+                # Edge coverage score: unique edges are valuable
+                edge_score = edge_count * 10 + (1.0 / max(fuzz, 1))
+
+                # Wasserstein diversity: spatially distant seeds are valuable
+                # (they explore different code regions)
+                wasserstein_weight = self._edge_tracker.compute_wasserstein_weight(seed_key)
+
+                # Combine: edge coverage + spatial diversity
+                score = edge_score * wasserstein_weight
                 scored.append((score, seed))
             scored.sort(key=lambda x: x[0], reverse=True)
             unique = [s for _, s in scored[: self.max_corpus]]
@@ -1577,7 +1588,7 @@ class Fuzzer:
             return True
 
         if is_interesting or has_new_coverage:
-            self.save_to_corpus(mutated)
+            self.save_to_corpus(mutated, parent=data)
             if self.mc and self.mc_cem:
                 self.mc.add_elite(mutated, 2)
                 self.mc.maybe_refit()
