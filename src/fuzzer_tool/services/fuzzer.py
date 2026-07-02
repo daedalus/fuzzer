@@ -1452,6 +1452,13 @@ class Fuzzer:
             seed_key = self._seed_key(seed)
             subsumption = self._edge_tracker.compute_subsumption_weight(seed_key)
             w *= subsumption
+
+            # JS divergence: seeds with unusual hit-count profiles get a boost.
+            # A seed that exercises the same edges but with very different
+            # frequencies (e.g. deep loop vs shallow) is behaviorally distinct.
+            diversity = self._edge_tracker.compute_hitcount_diversity_weight(seed_key)
+            w *= diversity
+
             weights.append(max(w, 1e-6))
         return random.choices(self.corpus, weights=weights, k=1)[0]
 
