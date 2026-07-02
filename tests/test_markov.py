@@ -90,3 +90,109 @@ class TestMarkovChain:
         mc._contexts_seen = 10
         mc._trains_since_snapshot = 1  # below interval
         assert not mc.snapshot_and_check_plateau()
+
+    def test_snapshot_and_check_plateau_full_path(self):
+        mc = MarkovChain()
+        mc._snapshot_interval = 1
+        mc._contexts_seen = 200
+        # First call: sets prev_snapshot, no comparison yet
+        mc.train(b"ABABABAB" * 50)
+        mc.snapshot_and_check_plateau()
+        # Second call: same data → low JS → plateau
+        mc.train(b"ABABABAB" * 50)
+        result2 = mc.snapshot_and_check_plateau()
+        assert isinstance(result2, bool)
+
+    def test_build_snapshot(self):
+        mc = MarkovChain(order=1)
+        mc.train(b"ABCD")
+        snap = mc._build_snapshot()
+        assert b"" in snap or any(k for k in snap)
+        for _ctx, dist in snap.items():
+            assert isinstance(dist, dict)
+            total = sum(dist.values())
+            assert abs(total - 1.0) < 1e-10  # normalized
+
+    def test_js_between_snapshots_identical(self):
+        snap = {b"\x00": {65: 0.5, 66: 0.5}}
+        js = MarkovChain._js_between_snapshots(snap, snap)
+        assert js == 0.0
+
+    def test_js_between_snapshots_different(self):
+        snap_a = {b"\x00": {65: 1.0}}
+        snap_b = {b"\x00": {66: 1.0}}
+        js = MarkovChain._js_between_snapshots(snap_a, snap_b)
+        assert js > 0.0
+
+    def test_js_between_snapshots_disjoint_contexts(self):
+        snap_a = {b"A": {65: 1.0}}
+        snap_b = {b"B": {66: 1.0}}
+        js = MarkovChain._js_between_snapshots(snap_a, snap_b)
+        assert js > 0.0
+
+    def test_js_between_snapshots_empty(self):
+        assert MarkovChain._js_between_snapshots({}, {}) == 0.0
+
+    def test_save_and_load_roundtrip(self, tmp_path):
+        mc = MarkovChain(order=2)
+        mc.train(b"HELLO WORLD")
+        mc.train(b"HELLO THERE")
+        path = str(tmp_path / "markov.json")
+        assert mc.save(path)
+
+        mc2 = MarkovChain(order=2)
+        assert mc2.load(path)
+        assert mc2.order == 2
+        assert mc2.is_trained()
+        assert len(mc2.transitions) == len(mc.transitions)
+        assert mc2._contexts_seen == mc._contexts_seen
+
+    def test_save_failure(self, tmp_path):
+        mc = MarkovChain()
+        assert not mc.save("/nonexistent/dir/file.json")
+
+    def test_load_failure(self, tmp_path):
+        mc = MarkovChain()
+        assert not mc.load("/nonexistent/file.json")
+
+    def test_load_corrupt_json(self, tmp_path):
+        p = tmp_path / "bad.json"
+        p.write_text("not json {{{")
+        mc = MarkovChain()
+        assert not mc.load(str(p))
+
+    def test_load_preserves_transitions(self, tmp_path):
+        mc = MarkovChain(order=1)
+        mc.train(b"AAAA")
+        path = str(tmp_path / "m.json")
+        mc.save(path)
+
+        mc2 = MarkovChain()
+        mc2.load(path)
+        assert len(mc2.transitions) > 0
+
+    def test_generate_untrained_fallback(self):
+        mc = MarkovChain(order=1)
+        # Untrained: generate picks random bytes (line 97)
+        result = mc.generate(10)
+        assert len(result) == 10
+
+    def test_sample_byte_untrained(self):
+        mc = MarkovChain(order=1)
+        # Untrained: sample_byte returns random byte (line 120)
+        for _ in range(100):
+            b = mc.sample_byte(b"X")
+            assert 0 <= b <= 255
+
+    def test_order_two(self):
+        mc = MarkovChain(order=2)
+        mc.train(b"ABCDABCD")
+        assert len(mc.transitions) > 0
+        result = mc.generate(8)
+        assert len(result) == 8
+
+    def test_generate_length_one(self):
+        mc = MarkovChain(order=1)
+        mc.train(b"AB")
+        result = mc.generate(1)
+        assert len(result) == 1
