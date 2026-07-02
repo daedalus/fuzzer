@@ -196,3 +196,50 @@ class TestMarkovChain:
         mc.train(b"AB")
         result = mc.generate(1)
         assert len(result) == 1
+
+
+class TestPerplexity:
+    def test_perplexity_trained_input(self):
+        """Known pattern → low perplexity (model explains it)."""
+        mc = MarkovChain(order=1)
+        mc.train(b"ABABABAB")
+        pp = mc.perplexity(b"ABABABAB")
+        assert 1.0 <= pp <= 256.0
+        # Model has strong prediction → PP should be low
+        assert pp < 20
+
+    def test_perplexity_random_input(self):
+        """Random bytes → high perplexity (model can't explain)."""
+        mc = MarkovChain(order=1)
+        mc.train(b"AAAA")
+        pp = mc.perplexity(bytes(range(256)))
+        assert pp > 100
+
+    def test_perplexity_empty(self):
+        mc = MarkovChain()
+        assert mc.perplexity(b"") == 1.0
+
+    def test_perplexity_untrained(self):
+        mc = MarkovChain()
+        pp = mc.perplexity(b"ABC")
+        assert pp == 256.0  # uniform: 2^8 = 256
+
+    def test_perplexity_range(self):
+        mc = MarkovChain(order=1)
+        mc.train(b"ABCD" * 100)
+        pp = mc.perplexity(b"ABCD")
+        assert pp >= 1.0
+        assert pp <= 256.0
+
+    def test_corpus_perplexity(self):
+        mc = MarkovChain(order=1)
+        mc.train(b"ABABABAB")
+        stats = mc.corpus_perplexity([b"ABABABAB", b"ABABABAB"])
+        assert stats["mean"] > 0
+        assert stats["median"] > 0
+        assert stats["low_surprise_count"] >= 1  # well-predicted inputs
+
+    def test_corpus_perplexity_empty(self):
+        mc = MarkovChain()
+        stats = mc.corpus_perplexity([])
+        assert stats["mean"] == 0

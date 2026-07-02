@@ -41,6 +41,10 @@ def _make_mock_fuzzer(**overrides):
     f.markov = MagicMock()
     f.markov.is_trained.return_value = True
     f.markov.codelength_ratio.return_value = 3.5
+    f.markov.corpus_perplexity.return_value = {
+        "mean": 12.0, "median": 10.0, "p10": 5.0, "p90": 20.0,
+        "low_surprise_count": 1, "high_surprise_count": 0,
+    }
     f.mc = None
     f.shm_cov = MagicMock()
     f.shm_cov.cumulative_edges = 18
@@ -107,7 +111,8 @@ class TestReportSections:
         f = _make_mock_fuzzer()
         with tempfile.TemporaryDirectory() as td:
             report = generate_report(f, td, td)
-        assert "MDL Codelength" in report
+        assert "Markov Model Quality" in report
+        assert "Perplexity" in report
 
     def test_corpus_health_present(self):
         f = _make_mock_fuzzer()

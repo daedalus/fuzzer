@@ -158,6 +158,48 @@ class MarkovChain:
             return 0.0
         return self.codelength(data) / len(data)
 
+    def perplexity(self, data: bytes) -> float:
+        """Perplexity of input under the trained model.
+
+        PP = 2^(codelength_per_byte). Equivalent to: the model is as
+        confused as if choosing uniformly from PP distinct outcomes.
+
+        Returns:
+            Perplexity in [1, 256+] range.
+            1 = perfect prediction, 256 = uniform random byte,
+            >256 = model is actively surprised.
+        """
+        if not data:
+            return 1.0
+        return 2.0 ** self.codelength_ratio(data)
+
+    def corpus_perplexity(self, corpus: list[bytes]) -> dict:
+        """Compute perplexity statistics across a corpus.
+
+        Returns dict with:
+          - mean: average perplexity
+          - median: median perplexity
+          - p10/p90: percentile values
+          - low_surprise_count: seeds with PP < 10 (well-predicted)
+          - high_surprise_count: seeds with PP > 200 (model is lost)
+        """
+        if not corpus:
+            return {"mean": 0, "median": 0, "p10": 0, "p90": 0,
+                    "low_surprise_count": 0, "high_surprise_count": 0}
+
+        pps = [self.perplexity(seed) for seed in corpus[:200]]
+        pps_sorted = sorted(pps)
+        n = len(pps_sorted)
+
+        return {
+            "mean": sum(pps) / n,
+            "median": pps_sorted[n // 2],
+            "p10": pps_sorted[n // 10],
+            "p90": pps_sorted[-n // 10],
+            "low_surprise_count": sum(1 for p in pps if p < 10),
+            "high_surprise_count": sum(1 for p in pps if p > 200),
+        }
+
     def is_trained(self) -> bool:
         """Check if the chain has learned any transitions.
 

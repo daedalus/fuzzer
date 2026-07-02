@@ -1468,9 +1468,30 @@ class Fuzzer:
                 max(1, self.markov._contexts_seen), alpha=0.05
             )
             gen_rate = 0.03 if self.markov.last_js_divergence < plateau_threshold else 0.15
+
+            # Perplexity gate: if model's average perplexity on corpus is high
+            # (>200), it hasn't learned the format well — generate more to
+            # explore. If low (<10), the model is well-calibrated — generate less.
+            if not hasattr(self, '_last_corpus_pp'):
+                self._last_corpus_pp = 256.0
+            if self.exec_count % 500 == 0 and self.corpus:
+                pp_stats = self.markov.corpus_perplexity(self.corpus)
+                self._last_corpus_pp = pp_stats["mean"]
+            if self._last_corpus_pp > 200:
+                gen_rate = min(gen_rate * 2, 0.40)
+            elif self._last_corpus_pp < 10:
+                gen_rate = max(gen_rate * 0.3, 0.01)
+
             if random.random() < gen_rate:
                 length = random.randint(1, self.max_len)
-                return self.markov.generate(length)
+                # Reject generated inputs with extreme perplexity (>512)
+                # — they're pure noise, not useful mutations
+                for _ in range(3):
+                    candidate = self.markov.generate(length)
+                    pp = self.markov.perplexity(candidate)
+                    if pp < 512:
+                        return candidate
+                return candidate  # fallback: return last attempt
             length = random.randint(1, self.max_len)
             return self.markov.generate(length)
         if self.corpus and self.seed_meta:
@@ -1481,6 +1502,16 @@ class Fuzzer:
 
     def _weighted_pick_seed(self) -> bytes:
         now = time.time()
+
+        # Recompute edge tracker weights only when cumulative_edges changed
+        if not hasattr(self, '_last_edge_count'):
+            self._last_edge_count = -1
+        if self.shm_cov and self.shm_cov.cumulative_edges != self._last_edge_count:
+            self._last_edge_count = self.shm_cov.cumulative_edges
+            self._cached_weights = {}
+        elif not hasattr(self, '_cached_weights'):
+            self._cached_weights = {}
+
         weights = []
         for seed in self.corpus:
             meta = self.seed_meta.get(seed)
@@ -1506,19 +1537,15 @@ class Fuzzer:
 
             # Apply subsumption penalty from edge tracker
             seed_key = self._seed_key(seed)
-            subsumption = self._edge_tracker.compute_subsumption_weight(seed_key)
-            w *= subsumption
-
-            # JS divergence: seeds with unusual hit-count profiles get a boost.
-            # A seed that exercises the same edges but with very different
-            # frequencies (e.g. deep loop vs shallow) is behaviorally distinct.
-            diversity = self._edge_tracker.compute_hitcount_diversity_weight(seed_key)
-            w *= diversity
-
-            # Wasserstein: seeds whose coverage is spatially distant from the
-            # corpus centroid get a boost — they explore different code regions.
-            spatial = self._edge_tracker.compute_wasserstein_weight(seed_key)
-            w *= spatial
+            if seed_key not in self._cached_weights:
+                sub = self._edge_tracker.compute_subsumption_weight(seed_key)
+                div = self._edge_tracker.compute_hitcount_diversity_weight(seed_key)
+                spa = self._edge_tracker.compute_wasserstein_weight(seed_key)
+                self._cached_weights[seed_key] = (sub, div, spa)
+            sub, div, spa = self._cached_weights[seed_key]
+            w *= sub
+            w *= div
+            w *= spa
 
             # MDL codelength: seeds that are surprising to the Markov model
             # are structurally novel — not explained by learned patterns.
