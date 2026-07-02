@@ -637,6 +637,11 @@ class Fuzzer:
         self.op_success: dict[str, int] = {}
         self._peak_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         self._discovery_history: list[tuple[int, int]] = []  # (exec_count, edges)
+        self._crash_rate_history: list[tuple[int, int]] = []  # (exec_count, crash_count)
+        self._duplicate_reject_count = 0
+        self._total_corpus_attempts = 0
+        self._peak_eps = 0.0
+        self._total_exec_time = 0.0
         self._replay_budget_ms: float = 0.2  # max 200ms per batch for crash replay
         self._crash_replays: dict[str, list[int]] = {}  # sig -> list of replay return codes
         self.replay_n: int = replay_n  # --replay-N: replay each crash N times
@@ -1362,6 +1367,7 @@ class Fuzzer:
             if parent_meta is not None:
                 parent_depth = parent_meta.get("lineage_depth", 0)
 
+        self._total_corpus_attempts += 1
         if save_to_corpus(
             data, self.corpus_dir, self.seen_hashes, self.bloom,
             parent=parent, lineage_depth=parent_depth,
@@ -1395,6 +1401,8 @@ class Fuzzer:
                 sorted_sizes = sorted(self._corpus_size_history)
                 p90 = sorted_sizes[-len(sorted_sizes) // 10]
                 self.max_len = max(self.max_len, min(p90 * 2, 65536))
+        else:
+            self._duplicate_reject_count += 1
 
     def _auto_minimize_corpus(self):
         """Inline corpus minimization: hash dedup + subsumption pruning."""
@@ -1558,6 +1566,11 @@ class Fuzzer:
             rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
             if rss > self._peak_rss:
                 self._peak_rss = rss
+            elapsed = time.time() - self.start_time
+            eps = self.exec_count / elapsed if elapsed > 0 else 0
+            if eps > self._peak_eps:
+                self._peak_eps = eps
+            self._crash_rate_history.append((self.exec_count, self.crash_count))
 
         for op in set(self._last_ops_used):
             self.op_counts[op] = self.op_counts.get(op, 0) + 1
@@ -1697,6 +1710,85 @@ class Fuzzer:
                 replays.append(rc)
             except Exception:
                 replays.append(-2)
+
+    def _print_run_summary(self):
+        """Print session-level summary statistics at run exit."""
+        elapsed = time.time() - self.start_time
+        eps = self.exec_count / elapsed if elapsed > 0 else 0
+
+        print(f"\n{'=' * 60}")
+        print("  RUN SUMMARY")
+        print(f"{'=' * 60}")
+        print(f"  Duration:          {elapsed:.0f}s")
+        print(f"  Executions:        {self.exec_count:,}")
+        print(f"  Avg eps:           {eps:.1f}")
+        print(f"  Peak eps:          {self._peak_eps:.1f}")
+
+        # Corpus growth
+        added = self._total_corpus_attempts
+        rejected = self._duplicate_reject_count
+        print(f"  Corpus:            {len(self.corpus)} entries")
+        print(f"  Seeds added:       {added}")
+        print(f"  Duplicates rejected: {rejected}")
+
+        # Coverage
+        edges = 0
+        if self.shm_cov:
+            edges = self.shm_cov.cumulative_edges
+        elif self.ptrace_cov:
+            edges = self.ptrace_cov.cumulative_edges
+        density = self._edge_tracker.bitmap_density() * 100
+        print(f"  Edges discovered:  {edges}")
+        print(f"  Map density:       {density:.2f}%")
+
+        # Good-Turing
+        gt = self._edge_tracker.good_turing_estimate()
+        if gt["n"] > 0:
+            print(f"  Est. remaining:    {gt['estimated_undiscovered']} edges")
+            print(f"  Saturation:        {gt['saturation']:.1%} ({gt['confidence']} confidence)")
+
+        # Lineage depth distribution
+        if self.seed_meta:
+            depths = [m.get("lineage_depth", 0) for m in self.seed_meta.values()]
+            if depths:
+                print(f"  Max lineage depth: {max(depths)}")
+                avg_depth = sum(depths) / len(depths)
+                print(f"  Avg lineage depth: {avg_depth:.1f}")
+
+        # Input size distribution
+        if self._corpus_size_history:
+            s = sorted(self._corpus_size_history)
+            print(f"  Input sizes:       min={s[0]} p50={s[len(s)//2]} p90={s[-len(s)//10]} max={s[-1]}")
+
+        # Crash summary
+        print(f"  Crashes:           {self.crash_count} ({len(self.crash_sigs)} unique)")
+        if self.crash_sigs:
+            for sig, count in sorted(self.crash_sigs.items(), key=lambda x: -x[1])[:5]:
+                print(f"    {sig[:48]} ({count}x)")
+
+        # Operator ROI
+        if self.op_counts:
+            print("\n  Operator ROI:")
+            print(f"    {'Operator':<22s} {'Count':>7s} {'Success':>8s} {'Rate':>7s}")
+            print(f"    {'-'*22} {'-'*7} {'-'*8} {'-'*7}")
+            for op, count in sorted(self.op_counts.items(), key=lambda x: -self.op_success.get(x[0], 0))[:8]:
+                succ = self.op_success.get(op, 0)
+                rate = succ / count * 100 if count else 0
+                print(f"    {op:<22s} {count:>7d} {succ:>8d} {rate:>6.1f}%")
+
+        # Duplicate rejection trend
+        if self._total_corpus_attempts > 0:
+            dup_rate = rejected / self._total_corpus_attempts * 100
+            print(f"\n  Dup rejection rate: {dup_rate:.1f}% ({rejected}/{self._total_corpus_attempts})")
+
+        # Execution time
+        tracker = self._exec_time_tracker
+        if tracker.count > 0:
+            print(f"  Exec time p50:     {tracker.p50*1000:.1f}ms")
+            print(f"  Exec time p99:     {tracker.p99*1000:.1f}ms")
+            print(f"  Suggested timeout: {tracker.suggested_timeout():.2f}s")
+
+        print(f"{'=' * 60}")
 
     def _dump_stats(self):
         if not self.stats_file:
@@ -1957,3 +2049,4 @@ class Fuzzer:
                 total = succ + fail
                 pct = succ / total * 100 if total else 0
                 print(f"    {name:20s}: {succ:.0f}/{fail:.0f} ({pct:.0f}% success)")
+        self._print_run_summary()

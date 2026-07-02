@@ -21,8 +21,10 @@ def generate_report(fuzzer, corpus_dir: str, crashes_dir: str) -> str:
     sections.append(_bandit_calibration(fuzzer))
     sections.append(_execution_time_analysis(fuzzer))
     sections.append(_seed_contribution(fuzzer))
+    sections.append(_corpus_health(fuzzer))
     sections.append(_corpus_overview(fuzzer, corpus_dir))
     sections.append(_crash_analysis(fuzzer, crashes_dir))
+    sections.append(_crash_exploitability(fuzzer, crashes_dir))
     sections.append(_crash_reproducibility(fuzzer))
     sections.append(_disk_footprint(corpus_dir))
     sections.append(_edge_map_analysis(fuzzer))
@@ -347,6 +349,70 @@ def _execution_time_analysis(f) -> str:
     ]
     if tracker.crps_trend() > 0.001:
         lines.append("  WARNING: CRPS rising — target runtime behavior is drifting")
+    return "\n".join(lines)
+
+
+def _corpus_health(f) -> str:
+    """Corpus health: entropy, lineage depth, duplicate rate."""
+    if not f.seed_meta:
+        return ""
+    lines = ["", "--- Corpus Health ---"]
+
+    # Lineage depth distribution
+    depths = [m.get("lineage_depth", 0) for m in f.seed_meta.values()]
+    if depths:
+        avg_d = sum(depths) / len(depths)
+        lines.append(f"  Lineage depth:     min={min(depths)} avg={avg_d:.1f} max={max(depths)}")
+
+    # Input size distribution
+    if f._corpus_size_history:
+        s = sorted(f._corpus_size_history)
+        lines.append(f"  Input sizes:       min={s[0]} p50={s[len(s)//2]} p90={s[-len(s)//10]} max={s[-1]}")
+
+    # Duplicate rejection rate
+    if f._total_corpus_attempts > 0:
+        dup_rate = f._duplicate_reject_count / f._total_corpus_attempts * 100
+        lines.append(f"  Dup rejection:     {dup_rate:.1f}% ({f._duplicate_reject_count}/{f._total_corpus_attempts})")
+
+    # Shannon entropy of corpus byte distribution
+    byte_freq = [0] * 256
+    total_bytes = 0
+    for seed in f.corpus:
+        for b in seed[:4096]:  # cap per-seed to avoid huge corpus bias
+            byte_freq[b] += 1
+            total_bytes += 1
+    if total_bytes > 0:
+        entropy = 0.0
+        for count in byte_freq:
+            if count > 0:
+                p = count / total_bytes
+                entropy -= p * __import__('math').log2(p)
+        lines.append(f"  Byte entropy:      {entropy:.2f} bits (max=8.0)")
+    return "\n".join(lines)
+
+
+def _crash_exploitability(f, crashes_dir: str) -> str:
+    """Exploitability tier distribution from crash metadata."""
+    p = Path(crashes_dir)
+    if not p.exists():
+        return ""
+    # Scan .json metadata files for exploitability
+    tiers: dict[str, int] = {}
+    for meta_file in p.glob("*.json"):
+        try:
+            data = json.loads(meta_file.read_text())
+            tier = data.get("exploitability", "UNKNOWN")
+            tiers[tier] = tiers.get(tier, 0) + 1
+        except Exception:
+            continue
+    if not tiers:
+        return ""
+    lines = [
+        "",
+        "--- Crash Exploitability ---",
+    ]
+    for tier, count in sorted(tiers.items(), key=lambda x: -x[1]):
+        lines.append(f"  {tier:<12s}: {count}")
     return "\n".join(lines)
 
 
