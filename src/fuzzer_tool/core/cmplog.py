@@ -25,6 +25,9 @@ class CmplogCollector:
         self.log_path: str | None = None
         self.tokens: list[bytes] = []
         self._token_set: set[bytes] = set()
+        # Operand pairs: (operand_a, operand_b) for input-to-state matching
+        self.pairs: list[tuple[bytes, bytes]] = []
+        self._pair_set: set[tuple[bytes, bytes]] = set()
         self._shim_path: str | None = None
         self._shim_handle = None
 
@@ -86,15 +89,18 @@ class CmplogCollector:
         return env
 
     def collect_tokens(self) -> list[bytes]:
-        """Read the cmplog file and extract operand tokens.
+        """Read the cmplog file and extract operand tokens and pairs.
 
         Returns:
             List of unique byte sequences found in comparison operands.
+            Also populates self.pairs with (operand_a, operand_b) tuples
+            for input-to-state redqueen matching.
         """
         if not self.log_path or not os.path.exists(self.log_path):
             return []
 
         tokens = set()
+        new_pairs = []
         try:
             with open(self.log_path) as f:
                 for line in f:
@@ -110,6 +116,11 @@ class CmplogCollector:
                         operand_b = bytes.fromhex(hex_b)
                         tokens.add(operand_a)
                         tokens.add(operand_b)
+                        # Track pairs for input-to-state matching
+                        pair = (operand_a, operand_b)
+                        if pair not in self._pair_set:
+                            self._pair_set.add(pair)
+                            new_pairs.append(pair)
                     except ValueError:
                         continue
         except OSError as e:
@@ -122,9 +133,13 @@ class CmplogCollector:
         new_tokens = [t for t in tokens if t not in self._token_set]
         self._token_set.update(tokens)
         self.tokens.extend(new_tokens)
+        self.pairs.extend(new_pairs)
 
         if new_tokens:
-            log.info("Cmplog: found %d new tokens (total: %d)", len(new_tokens), len(self.tokens))
+            log.info(
+                "Cmplog: found %d new tokens, %d new pairs (total: %d tokens, %d pairs)",
+                len(new_tokens), len(new_pairs), len(self.tokens), len(self.pairs),
+            )
 
         return new_tokens
 

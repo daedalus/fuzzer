@@ -156,6 +156,7 @@ def cmd_fuzz(args):
         seed=args.seed,
         extra_crash_codes=args.crash_codes,
         replay_n=args.replay_n,
+        schedule_ablation=getattr(args, 'schedule_ablation', None),
     )
     fuzzer.run(iterations=args.iterations)
 
@@ -460,6 +461,12 @@ def main() -> int:
         default=0,
         metavar="N",
         help="Replay each crash N times for reproducibility scoring (default: 0 = off)",
+    )
+    fuzz_parser.add_argument(
+        "--schedule-ablation",
+        default=None,
+        metavar="FILE",
+        help="Log per-iteration scheduling signal contributions to CSV for backtesting",
     )
     fuzz_parser.add_argument(
         "-g",

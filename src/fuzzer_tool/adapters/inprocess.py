@@ -149,6 +149,9 @@ class InProcessRunner:
         # Persistent loader state
         self._persistent = None
 
+        # Forkserver state
+        self._forkserver = None
+
         self._start()
 
     def _start(self):
@@ -221,7 +224,22 @@ class InProcessRunner:
                     log.warning("Persistent loader failed, falling back to per-call")
                     self._persistent = None
 
-            if not self._persistent:
+            # Try forkserver (C binary) for standalone executables only.
+            # .so targets use PersistentLoader (crash isolation via fork-per-call).
+            is_so = self.target.lower().endswith((".so", ".dylib", ".dll"))
+            if not self._persistent and not is_so:
+                from fuzzer_tool.adapters.forkserver import ForkserverRunner
+                self._forkserver = ForkserverRunner(
+                    target=self.target,
+                    function_name=self.function_name,
+                    timeout=self.timeout,
+                )
+                if self._forkserver.start():
+                    log.info("Forkserver: using C binary for %s", self.target)
+                else:
+                    self._forkserver = None
+
+            if not self._persistent and not self._forkserver:
                 # Per-call subprocess mode (fallback)
                 fd, self._loader_path = tempfile.mkstemp(suffix=".py", prefix="fuzz_loader_")
                 os.write(fd, _LOADER_SCRIPT.encode())
@@ -231,9 +249,14 @@ class InProcessRunner:
                     os.close(fd)
 
         self._is_c = True
-        loader_type = (
-            "persistent" if self._persistent else ("loader" if self._loader_path else "none")
-        )
+        if self._forkserver:
+            loader_type = "forkserver"
+        elif self._persistent:
+            loader_type = "persistent"
+        elif self._loader_path:
+            loader_type = "loader"
+        else:
+            loader_type = "none"
         log.info(
             "In-process C target: %s::%s (mode=%s, coverage=%s, loader=%s)",
             self.target,
@@ -270,6 +293,8 @@ class InProcessRunner:
             # sancov counters empty — target may use SHM instead
         if self._persistent and self._persistent._last_bitmap is not None:
             return self._persistent._last_bitmap
+        if self._forkserver and self._forkserver._last_bitmap is not None:
+            return self._forkserver._last_bitmap
         if self._bitmap_out and os.path.exists(self._bitmap_out):
             try:
                 with open(self._bitmap_out, "rb") as f:
@@ -317,6 +342,8 @@ class InProcessRunner:
                 return self._run_c_direct(data)
             if self._persistent:
                 return self._run_c_persistent(data)
+            if self._forkserver:
+                return self._run_c_forkserver(data)
             return self._run_c_subprocess(data)
         return self._run_python(data)
 
@@ -352,6 +379,12 @@ class InProcessRunner:
         """Persistent subprocess — one process, many calls."""
         rc, bitmap = self._persistent.run_one(data)
         self._persistent._last_bitmap = bitmap
+        return rc, ""
+
+    def _run_c_forkserver(self, data: bytes) -> tuple[int, str]:
+        """Forkserver via compiled C binary."""
+        rc, bitmap = self._forkserver.run_one(data)
+        self._forkserver._last_bitmap = bitmap
         return rc, ""
 
     def _run_c_subprocess(self, data: bytes) -> tuple[int, str]:
@@ -405,6 +438,9 @@ class InProcessRunner:
         if self._persistent:
             self._persistent.stop()
             self._persistent = None
+        if self._forkserver:
+            self._forkserver.stop()
+            self._forkserver = None
         if self._shim and self._shim.shim_path:
             cleanup_shim(self._shim.shim_path)
             self._shim = None

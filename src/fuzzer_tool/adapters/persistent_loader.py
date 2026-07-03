@@ -48,6 +48,8 @@ def read_shm():
         pass
     return b""
 
+NO_BMP = os.environ.get("_LOADER_NO_BMP", "0") == "1"
+
 # Read init line
 header = sys.stdin.buffer.readline().decode()
 parts = header.strip().split()
@@ -114,26 +116,18 @@ while True:
             rc = -1
         os.close(read_pipe)
 
-        bmp = read_shm()
-        resp = f"RC {rc} {len(bmp)}\n".encode()
-        sys.stdout.buffer.write(resp)
-        if bmp:
-            sys.stdout.buffer.write(bmp)
-        sys.stdout.buffer.flush()
+        if NO_BMP:
+            resp = f"RC {rc} 0\n".encode()
+            sys.stdout.buffer.write(resp)
+            sys.stdout.buffer.flush()
+        else:
+            bmp = read_shm()
+            resp = f"RC {rc} {len(bmp)}\n".encode()
+            sys.stdout.buffer.write(resp)
+            if bmp:
+                sys.stdout.buffer.write(bmp)
+            sys.stdout.buffer.flush()
 """
-
-# Bitmap-free loader: keeps fork-per-call for crash isolation but skips SHM read.
-_LOADER_NO_BMP = _PERSISTENT_LOADER.replace(
-    'bmp = read_shm()\n'
-    '        resp = f"RC {rc} {len(bmp)}\\n".encode()\n'
-    '        sys.stdout.buffer.write(resp)\n'
-    '        if bmp:\n'
-    '            sys.stdout.buffer.write(bmp)\n'
-    '        sys.stdout.buffer.flush()',
-    'resp = f"RC {rc} 0\\n".encode()\n'
-    '        sys.stdout.buffer.write(resp)\n'
-    '        sys.stdout.buffer.flush()',
-)
 
 
 class PersistentLoader:
@@ -159,13 +153,14 @@ class PersistentLoader:
             return True
 
         fd, self._loader_path = tempfile.mkstemp(suffix=".py", prefix="fuzz_persist_")
-        # Use bitmap-free loader: parent reads SHM directly, no 65KB pipe transfer
-        os.write(fd, _LOADER_NO_BMP.encode())
+        os.write(fd, _PERSISTENT_LOADER.encode())
         os.close(fd)
 
         env = os.environ.copy()
         if "AFL_MAP_SIZE" not in env:
             env["AFL_MAP_SIZE"] = "65536"
+        # Bitmap-free mode: parent reads SHM directly, no 65KB pipe transfer
+        env["_LOADER_NO_BMP"] = "1"
 
         self._proc = subprocess.Popen(
             [sys.executable, self._loader_path],
@@ -174,6 +169,11 @@ class PersistentLoader:
             stderr=subprocess.PIPE,
             env=env,
         )
+
+        # Drain stderr in background — prevents pipe-buffer deadlock when
+        # ASAN/instrumented targets write diagnostic output to stderr.
+        self._stderr_thread = threading.Thread(target=self._drain_stderr, daemon=True)
+        self._stderr_thread.start()
 
         init = f"INIT {self.target} {self.function_name}\n"
         self._proc.stdin.write(init.encode())
@@ -187,6 +187,20 @@ class PersistentLoader:
 
         log.warning("Persistent loader failed to start")
         return False
+
+    def _drain_stderr(self):
+        """Consume stderr to prevent pipe-buffer deadlock."""
+        proc = self._proc
+        if proc is None or proc.stderr is None:
+            return
+        try:
+            for line in proc.stderr:
+                # Log first 200 chars to avoid flooding; drop the rest
+                text = line.decode(errors="replace").rstrip()
+                if text:
+                    log.debug("loader stderr: %s", text[:200])
+        except (ValueError, OSError):
+            pass
 
     def run_one(self, data: bytes) -> tuple[int, bytes | None]:
         if not self._ready or not self._proc:

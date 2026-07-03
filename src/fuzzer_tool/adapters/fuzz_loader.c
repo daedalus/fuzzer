@@ -27,12 +27,20 @@ Timeout enforcement:
 #include <unistd.h>
 #include <signal.h>
 #include <setjmp.h>
+#include <fcntl.h>
 
 /* Pipe buffer on Linux is 65536 (PIPE_BUF). Cap data well below that
    to avoid deadlock: parent write() blocks when buffer is full, but
    the child may not have started reading yet. */
 #define MAX_DATA 57344  /* 56KB — safely under 64KB pipe buffer */
 #define MAX_BMP  65536
+
+#ifndef min
+#define min(a, b) ((a) < (b) ? (a) : (b))
+#endif
+#ifndef max
+#define max(a, b) ((a) > (b) ? (a) : (b))
+#endif
 
 typedef int (*fuzz_fn)(const uint8_t *, size_t);
 
@@ -43,12 +51,14 @@ static int is_executable = 0;
 static sigjmp_buf timeout_jmp;
 static volatile sig_atomic_t timed_out = 0;
 
-/* Read a line from stdin (up to newline, not including it) */
+/* Read a line from stdin (up to newline, not including it).
+   Uses raw read() syscall to avoid stdio buffering issues across fork(). */
 static int read_line(char *buf, int maxlen) {
     int i = 0;
     while (i < maxlen - 1) {
-        int c = fgetc(stdin);
-        if (c == EOF || c == '\n') break;
+        char c;
+        ssize_t r = read(0, &c, 1);
+        if (r <= 0 || c == '\n') break;
         buf[i++] = c;
     }
     buf[i] = '\0';
@@ -59,16 +69,20 @@ static int read_line(char *buf, int maxlen) {
 static void read_bytes(uint8_t *buf, size_t n) {
     size_t got = 0;
     while (got < n) {
-        size_t r = fread(buf + got, 1, n - got, stdin);
-        if (r == 0) break;
+        ssize_t r = read(0, buf + got, n - got);
+        if (r <= 0) break;
         got += r;
     }
 }
 
 /* Write exactly n bytes to stdout */
 static void write_bytes(const uint8_t *buf, size_t n) {
-    fwrite(buf, 1, n, stdout);
-    fflush(stdout);
+    size_t written = 0;
+    while (written < n) {
+        ssize_t w = write(1, buf + written, n - written);
+        if (w <= 0) break;
+        written += w;
+    }
 }
 
 /* Read coverage bitmap from file */
@@ -166,6 +180,10 @@ int main(void) {
     uint8_t data[MAX_DATA];
     uint8_t bmp[MAX_BMP];
 
+    /* Disable stdio buffering on stdin — fork() inherits the buffer and
+       _exit() in the child discards the copy, losing read-ahead data. */
+    setvbuf(stdin, NULL, _IONBF, 0);
+
     if (!read_line(line, sizeof(line))) return 1;
     char func_name[256];
     char timeout_str[16] = "5";
@@ -173,7 +191,19 @@ int main(void) {
     timeout_seconds = atoi(timeout_str);
     if (timeout_seconds <= 0) timeout_seconds = 5;
 
-    is_executable = (access(target_path_global, X_OK) == 0);
+    /* Detect shared libraries by extension, not execute permission.
+       .so/.dylib files often have +x set but must be loaded via dlopen,
+       not exec. Only truly standalone ELF binaries use the exec path. */
+    {
+        size_t tlen = strlen(target_path_global);
+        is_executable = 1;  /* default: assume executable */
+        if (tlen >= 3 && strcasecmp(target_path_global + tlen - 3, ".so") == 0)
+            is_executable = 0;
+        else if (tlen >= 6 && strcasecmp(target_path_global + tlen - 6, ".dylib") == 0)
+            is_executable = 0;
+        else if (tlen >= 4 && strcasecmp(target_path_global + tlen - 4, ".dll") == 0)
+            is_executable = 0;
+    }
 
     if (!is_executable) {
         void *handle = dlopen(target_path_global, RTLD_NOW);
@@ -206,7 +236,10 @@ int main(void) {
         if (is_executable) {
             rc = run_executable(data, data_len, bmp, &bmp_len);
         } else if (target_fn) {
-            /* Direct call with sigsetjmp timeout — no fork overhead */
+            /* Direct call with sigsetjmp timeout — no fork overhead.
+               NOTE: SIGSEGV in the target kills fuzz_loader. For crash
+               isolation on .so targets, use the persistent_loader adapter
+               (which forks per-call) or compile with ASAN. */
             struct sigaction sa_new, sa_old;
             sa_new.sa_handler = timeout_handler;
             sigemptyset(&sa_new.sa_mask);

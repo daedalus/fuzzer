@@ -567,6 +567,7 @@ class Fuzzer:
         seed=42,
         extra_crash_codes=None,
         replay_n=0,
+        schedule_ablation=None,
     ):
         self.target = target
         self.corpus_dir = Path(corpus_dir)
@@ -662,6 +663,19 @@ class Fuzzer:
         _active_dmesg_parser = self._dmesg
         self.stats_file = Path(stats_file) if stats_file else None
         self.stats_interval = stats_interval
+
+        # Schedule ablation: per-iteration CSV log of signal contributions
+        self._ablation_path = Path(schedule_ablation) if schedule_ablation else None
+        self._ablation_file = None
+        if self._ablation_path:
+            self._ablation_path.parent.mkdir(parents=True, exist_ok=True)
+            self._ablation_file = open(self._ablation_path, "w")  # noqa: SIM115
+            self._ablation_file.write(
+                "iter,seed_idx,seed_hash,fuzz_count,coverage_edges,age_s,"
+                "base_w,burst,penalty,subsumption,diversity,spatial,mdl,"
+                "final_w,new_coverage,new_crash\n"
+            )
+            self._ablation_file.flush()
 
         self.markov = MarkovChain(order=markov_order)
         self.markov_generate = markov_generate
@@ -796,10 +810,14 @@ class Fuzzer:
         }
         for seed, meta in self.seed_meta.items():
             key = seed.hex()
+            # Serialize redqueen_matches as hex strings for JSON compat
+            rm = meta.get("redqueen_matches", [])
+            rm_ser = [[m[0], m[1].hex(), m[2].hex()] for m in rm]
             state["seed_meta"][key] = {
                 "fuzz_count": meta["fuzz_count"],
                 "coverage_edges": meta["coverage_edges"],
                 "redqueen_offsets": meta["redqueen_offsets"],
+                "redqueen_matches": rm_ser,
                 "added_at": meta["added_at"],
                 "lineage_depth": meta.get("lineage_depth", 0),
             }
@@ -840,6 +858,13 @@ class Fuzzer:
                         "lineage_depth": sm.get("lineage_depth", 0),
                     }
                 )
+                # Deserialize redqueen_matches from hex strings
+                rm_ser = sm.get("redqueen_matches", [])
+                if rm_ser:
+                    self.seed_meta[seed]["redqueen_matches"] = [
+                        (m[0], bytes.fromhex(m[1]), bytes.fromhex(m[2]))
+                        for m in rm_ser
+                    ]
         self._edge_tracker.load(str(self._edge_tracker_path))
         if self.resume:
             print(
@@ -1134,7 +1159,7 @@ class Fuzzer:
             ops.append("grammar_mutate")
         # Redqueen: if we know which bytes caused branch comparisons, prefer flipping them
         parent_meta = self.seed_meta.get(data)
-        if parent_meta and parent_meta.get("redqueen_offsets"):
+        if parent_meta and (parent_meta.get("redqueen_matches") or parent_meta.get("redqueen_offsets")):
             ops.append("redqueen")
 
         self._last_ops_used = []
@@ -1259,21 +1284,31 @@ class Fuzzer:
                 buf = bytearray(mutated[: self.max_len])
 
             elif op == "redqueen" and buf and parent_meta:
+                matches = parent_meta.get("redqueen_matches", [])
                 offsets = parent_meta.get("redqueen_offsets", [])
-                # True redqueen: replace bytes at comparison offsets with the
-                # other cmplog operand, not just flip. This solves magic bytes
-                # without search.
-                if offsets and self._cmplog and self._cmplog.tokens:
+                if matches:
+                    # Input-to-state: for each recorded (offset, A, B),
+                    # check if current input still has A at that offset.
+                    # If yes, replace A with B. This is the precise redqueen path.
+                    for _ in range(random.randint(1, min(4, len(matches)))):
+                        off, op_a, op_b = random.choice(matches)
+                        # Verify the input still has operand A at this offset
+                        end = off + len(op_a)
+                        if end <= len(buf) and bytes(buf[off:end]) == op_a:
+                            for j, b_val in enumerate(op_b):
+                                if off + j < len(buf):
+                                    buf[off + j] = b_val
+                elif offsets and self._cmplog and self._cmplog.tokens:
+                    # Fallback: random token at random offset (legacy path)
                     for _ in range(random.randint(1, min(4, len(offsets)))):
                         off = random.choice(offsets)
                         if off < len(buf):
-                            # Pick a random cmplog token as replacement
                             token = random.choice(self._cmplog.tokens)
                             for j, b_val in enumerate(token):
                                 if off + j < len(buf):
                                     buf[off + j] = b_val
                 elif offsets:
-                    # Fallback: flip bytes at known offsets
+                    # Last resort: XOR flip at known offsets
                     for _ in range(random.randint(1, min(4, len(offsets)))):
                         off = random.choice(offsets)
                         if off < len(buf):
@@ -1523,19 +1558,19 @@ class Fuzzer:
             age = now - meta["added_at"]
 
             # Base weight: inverse fuzz count, boosted by coverage, decayed by age
-            w = (1.0 / math.sqrt(fuzz_count)) * (1.0 + coverage * 0.5) / (1.0 + age * 0.01)
+            base_w = (1.0 / math.sqrt(fuzz_count)) * (1.0 + coverage * 0.5) / (1.0 + age * 0.01)
+            w = base_w
 
             # Energy burst: newly added seeds get up to 5x boost (decays over 60s)
             burst_factor = max(1.0, 5.0 - (age / 60.0))
             w *= burst_factor
 
-            # Stale seed detection: seeds fuzzed many times with zero coverage
-            # are nearly eliminated (1% probability kept for rediscovery)
+            # Stale seed detection
             staleness = fuzz_count / max(coverage + 1, 1)
-            if staleness > 50:
-                w *= 0.01
+            penalty = 0.01 if staleness > 50 else 1.0
+            w *= penalty
 
-            # Apply subsumption penalty from edge tracker
+            # Edge tracker signals
             seed_key = self._seed_key(seed)
             if seed_key not in self._cached_weights:
                 sub = self._edge_tracker.compute_subsumption_weight(seed_key)
@@ -1547,17 +1582,53 @@ class Fuzzer:
             w *= div
             w *= spa
 
-            # MDL codelength: seeds that are surprising to the Markov model
-            # are structurally novel — not explained by learned patterns.
-            # High codelength → high weight (1.0-2.0x boost).
+            # MDL codelength
+            mdl_weight = 1.0
             if self.markov_trained:
                 cl_ratio = self.markov.codelength_ratio(seed)
-                # cl_ratio ∈ [0, 8+]. Map to weight: 0→1.0, 4→1.5, 8→2.0
                 mdl_weight = 1.0 + min(cl_ratio / 8.0, 1.0)
                 w *= mdl_weight
 
             weights.append(max(w, 1e-6))
-        return random.choices(self.corpus, weights=weights, k=1)[0]
+
+        selected = random.choices(self.corpus, weights=weights, k=1)[0]
+
+        # Cache signal data for ablation logging (consumed by fuzz_one)
+        if self._ablation_file:
+            meta = self.seed_meta.get(selected)
+            if meta:
+                seed_key = self._seed_key(selected)
+                cached = self._cached_weights.get(seed_key, (1.0, 1.0, 1.0))
+                fuzz_count = max(meta["fuzz_count"], 1)
+                coverage = meta["coverage_edges"]
+                age = now - meta["added_at"]
+                base_w = (1.0 / math.sqrt(fuzz_count)) * (1.0 + coverage * 0.5) / (1.0 + age * 0.01)
+                burst_factor = max(1.0, 5.0 - (age / 60.0))
+                staleness = fuzz_count / max(coverage + 1, 1)
+                penalty = 0.01 if staleness > 50 else 1.0
+                w = base_w * burst_factor * penalty * cached[0] * cached[1] * cached[2]
+                mdl_weight = 1.0
+                if self.markov_trained:
+                    cl_ratio = self.markov.codelength_ratio(selected)
+                    mdl_weight = 1.0 + min(cl_ratio / 8.0, 1.0)
+                    w *= mdl_weight
+                self._last_pick_signals = {
+                    "seed_idx": self.corpus.index(selected),
+                    "seed_hash": selected[:4].hex(),
+                    "fuzz_count": fuzz_count,
+                    "coverage_edges": coverage,
+                    "age_s": f"{age:.1f}",
+                    "base_w": f"{base_w:.4f}",
+                    "burst": f"{burst_factor:.2f}",
+                    "penalty": f"{penalty:.2f}",
+                    "subsumption": f"{cached[0]:.4f}",
+                    "diversity": f"{cached[1]:.4f}",
+                    "spatial": f"{cached[2]:.4f}",
+                    "mdl": f"{mdl_weight:.2f}",
+                    "final_w": f"{w:.6f}",
+                }
+
+        return selected
 
     def fuzz_one(self, data: bytes) -> bool:
         self._last_parent_seed = data
@@ -1589,21 +1660,29 @@ class Fuzzer:
             for token in new_tokens:
                 if token and token not in self.dictionary:
                     self.dictionary.append(token)
-            # Record redqueen offsets: which bytes in the input caused comparisons
-            if new_tokens and meta is not None:
-                offsets = set(meta.get("redqueen_offsets", []))
-                for token in new_tokens:
-                    if len(token) < 2:
+            # Record redqueen matches: (offset, operand_a, operand_b)
+            # for input-to-state matching during mutation
+            if self._cmplog.pairs and meta is not None:
+                matches = list(meta.get("redqueen_matches", []))
+                seen = {(m[1], m[2]) for m in matches}  # dedup by (A, B)
+                for op_a, op_b in self._cmplog.pairs:
+                    if len(op_a) < 2 or (op_a, op_b) in seen:
                         continue
                     pos = 0
-                    while pos <= len(mutated) - len(token):
-                        idx = mutated.find(token, pos)
+                    while pos <= len(mutated) - len(op_a):
+                        idx = mutated.find(op_a, pos)
                         if idx == -1:
                             break
-                        for j in range(idx, idx + len(token)):
-                            offsets.add(j)
+                        matches.append((idx, op_a, op_b))
+                        seen.add((op_a, op_b))
                         pos = idx + 1
-                meta["redqueen_offsets"] = list(offsets)[:50]
+                        if len(matches) >= 50:
+                            break
+                    if len(matches) >= 50:
+                        break
+                meta["redqueen_matches"] = matches[:50]
+                # Keep legacy field for state compat
+                meta["redqueen_offsets"] = [m[0] for m in meta["redqueen_matches"]]
 
         if self.exec_count % 100 == 0:
             rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
@@ -1631,6 +1710,20 @@ class Fuzzer:
         has_new_coverage = (self.ptrace_cov and self.ptrace_cov.is_new_coverage()) or (
             self.shm_cov and self.shm_cov.is_new_coverage()
         )
+
+        # Write ablation log row: signal data + outcome
+        if self._ablation_file and hasattr(self, '_last_pick_signals'):
+            ps = self._last_pick_signals
+            self._ablation_file.write(
+                f"{self.exec_count},{ps['seed_idx']},{ps['seed_hash']},"
+                f"{ps['fuzz_count']},{ps['coverage_edges']},{ps['age_s']},"
+                f"{ps['base_w']},{ps['burst']},{ps['penalty']},"
+                f"{ps['subsumption']},{ps['diversity']},{ps['spatial']},"
+                f"{ps['mdl']},{ps['final_w']},"
+                f"{1 if has_new_coverage else 0},{1 if is_crash else 0}\n"
+            )
+            if self.exec_count % 100 == 0:
+                self._ablation_file.flush()
 
         # Record edges for per-seed tracking
         if has_new_coverage:
@@ -2063,6 +2156,11 @@ class Fuzzer:
         if self.markov.is_trained():
             self.markov.save(str(self._markov_path))
         self._save_state()
+        if self._ablation_file:
+            self._ablation_file.flush()
+            self._ablation_file.close()
+            self._ablation_file = None
+            print(f"[*] Schedule ablation log: {self._ablation_path}")
         self._dmesg.stop_stream()
         self.print_stats()
         print(

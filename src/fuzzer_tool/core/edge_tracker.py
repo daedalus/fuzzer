@@ -15,6 +15,7 @@ Jaccard (set overlap) and JS (frequency divergence) miss.
 import json
 import logging
 import math
+import random
 import zlib
 
 log = logging.getLogger(__name__)
@@ -185,6 +186,150 @@ def _js_divergence(p: dict[int, float], q: dict[int, float]) -> float:
     return 0.5 * _kl(p, m) + 0.5 * _kl(q, m)
 
 
+class MinHashLSH:
+    """MinHash + Locality-Sensitive Hashing for approximate Jaccard similarity.
+
+    Computes a fixed-size signature (num_perm hash values) per seed's edge
+    set, then hashes signatures into LSH buckets so "find similar seeds"
+    becomes a bucket lookup instead of a full corpus scan.
+
+    Approximate Jaccard: matching positions / total positions in two signatures.
+    LSH: signatures are split into bands; two seeds collide if ANY band matches,
+    giving sub-linear "find similar" queries.
+    """
+
+    def __init__(self, num_perm: int = 64, num_bands: int = 8, seed: int = 42):
+        self.num_perm = num_perm
+        self.num_bands = num_bands
+        self.band_size = num_perm // num_bands
+        # Per-seed MinHash signatures: seed_key -> list[int] of length num_perm
+        self.signatures: dict[str, list[int]] = {}
+        # LSH buckets: (band_idx, band_hash) -> set of seed_keys
+        self.buckets: dict[tuple[int, int], set[str]] = {}
+        # Precomputed hash function coefficients: a*x + b (mod large prime)
+        rng = random.Random(seed)
+        self._prime = (1 << 61) - 1  # Mersenne prime
+        self._coeffs = [(rng.randint(1, self._prime - 1), rng.randint(0, self._prime - 1))
+                        for _ in range(num_perm)]
+
+    def compute_signature(self, edge_set: set[int]) -> list[int]:
+        """Compute MinHash signature for a set of edge indices.
+
+        Uses k independent hash functions of the form h(x) = (a*x + b) mod p,
+        taking the minimum hash value across all elements in the set.
+        """
+        sig = [self._prime] * self.num_perm
+        for edge in edge_set:
+            for i, (a, b) in enumerate(self._coeffs):
+                h = (a * edge + b) % self._prime
+                if h < sig[i]:
+                    sig[i] = h
+        return sig
+
+    def add(self, seed_key: str, sig: list[int]):
+        """Add a seed's signature to the index."""
+        self.signatures[seed_key] = sig
+        # Insert into LSH buckets
+        for band_idx in range(self.num_bands):
+            start = band_idx * self.band_size
+            end = start + self.band_size
+            band_hash = hash(tuple(sig[start:end]))
+            bucket_key = (band_idx, band_hash)
+            if bucket_key not in self.buckets:
+                self.buckets[bucket_key] = set()
+            self.buckets[bucket_key].add(seed_key)
+
+    def remove(self, seed_key: str):
+        """Remove a seed from the index."""
+        sig = self.signatures.pop(seed_key, None)
+        if sig is None:
+            return
+        for band_idx in range(self.num_bands):
+            start = band_idx * self.band_size
+            end = start + self.band_size
+            band_hash = hash(tuple(sig[start:end]))
+            bucket_key = (band_idx, band_hash)
+            bucket = self.buckets.get(bucket_key)
+            if bucket:
+                bucket.discard(seed_key)
+                if not bucket:
+                    del self.buckets[bucket_key]
+
+    def approximate_jaccard(self, key_a: str, key_b: str) -> float:
+        """Estimate Jaccard similarity between two seeds via MinHash signatures.
+
+        Returns value in [0, 1] where 1 = identical edge sets.
+        """
+        sig_a = self.signatures.get(key_a)
+        sig_b = self.signatures.get(key_b)
+        if sig_a is None or sig_b is None:
+            return 0.0
+        matches = sum(1 for a, b in zip(sig_a, sig_b, strict=False) if a == b)
+        return matches / self.num_perm
+
+    def find_similar(self, seed_key: str, min_jaccard: float = 0.3) -> set[str]:
+        """Find seeds with approximate Jaccard >= min_jaccard via LSH buckets.
+
+        Returns set of similar seed_keys (excluding the query seed itself).
+        Uses band-based LSH: two seeds are candidates if they share ANY band.
+        Then filters by full-signature Jaccard threshold.
+        """
+        sig = self.signatures.get(seed_key)
+        if sig is None:
+            return set()
+
+        # Collect all candidates from LSH buckets
+        candidates: set[str] = set()
+        for band_idx in range(self.num_bands):
+            start = band_idx * self.band_size
+            end = start + self.band_size
+            band_hash = hash(tuple(sig[start:end]))
+            bucket_key = (band_idx, band_hash)
+            bucket = self.buckets.get(bucket_key)
+            if bucket:
+                candidates.update(bucket)
+        candidates.discard(seed_key)
+
+        # Filter by full Jaccard threshold
+        if min_jaccard <= 0:
+            return candidates
+        return {k for k in candidates
+                if self.approximate_jaccard(seed_key, k) >= min_jaccard}
+
+    def corpus_minhash(self, seed_keys: set[str] | None = None) -> list[int]:
+        """Compute MinHash of the union of all seeds' edge sets.
+
+        The union's MinHash is the element-wise minimum of individual
+        signatures — this is a property of MinHash, not an approximation.
+        """
+        if seed_keys is None:
+            seed_keys = set(self.signatures.keys())
+        if not seed_keys:
+            return [self._prime] * self.num_perm
+        # Start with first seed's signature as baseline
+        first = next(iter(seed_keys))
+        result = list(self.signatures.get(first, [self._prime] * self.num_perm))
+        for key in seed_keys:
+            sig = self.signatures.get(key)
+            if sig:
+                for i in range(self.num_perm):
+                    if sig[i] < result[i]:
+                        result[i] = sig[i]
+        return result
+
+    def approximate_union_jaccard(self, seed_key: str, corpus_sig: list[int]) -> float:
+        """Estimate Jaccard(seed, corpus_union) using precomputed corpus signature.
+
+        This replaces the O(n) other_edges union scan with an O(k) signature
+        comparison, where k = num_perm (typically 64).
+        """
+        sig = self.signatures.get(seed_key)
+        if sig is None:
+            return 0.0
+        matches = sum(1 for a, b in zip(sig, corpus_sig, strict=False) if a == b)
+        return matches / self.num_perm
+
+
 class EdgeTracker:
     """Track coverage edges per seed for smarter scheduling.
 
@@ -201,13 +346,18 @@ class EdgeTracker:
         self.seed_hit_counts: dict[str, dict[int, int]] = {}
         # Global cumulative edge set (all edges ever seen)
         self.cumulative_edges: set[int] = set()
-        # Cached aggregate hit-count distribution (rebuilt lazily)
+        # Aggregate distribution: maintained incrementally, not rebuilt from scratch
+        self._aggregate_totals: dict[int, int] = {}
+        self._aggregate_total_count: int = 0
         self._aggregate_cache: dict[int, float] | None = None
         # Good-Turing: global cumulative hit count per edge (across all seeds)
         self._global_edge_hits: dict[int, int] = {}
         self._spectrum_dirty = True
         self._frequency_spectrum: dict[int, int] = {}
         self.max_hit_count: int = 0
+        # MinHash/LSH for approximate Jaccard and subsumption
+        self._minhash = MinHashLSH(num_perm=64, num_bands=8)
+        self._corpus_sig: list[int] | None = None
 
     def record_edges(self, seed_key: str, edge_bitmap: bytes) -> set[int]:
         """Record edges hit by a seed execution.
@@ -240,7 +390,19 @@ class EdgeTracker:
             if val and i < self.map_size:
                 hc[i] = val
 
-        self._aggregate_cache = None  # invalidate
+        # Update MinHash signature and LSH index
+        sig = self._minhash.compute_signature(self.seed_edges[seed_key])
+        self._minhash.add(seed_key, sig)
+
+        # Incrementally update aggregate distribution (avoids full O(n) rebuild)
+        for i, val in enumerate(edge_bitmap):
+            if val and i < self.map_size:
+                old = self._aggregate_totals.get(i, 0)
+                self._aggregate_totals[i] = old + val
+                self._aggregate_total_count += val
+        # Invalidate normalized cache (totals changed, need re-normalize)
+        self._aggregate_cache = None
+        self._corpus_sig = None  # invalidate MinHash corpus signature
 
         # Update global edge hits for Good-Turing estimation
         for i, val in enumerate(edge_bitmap):
@@ -257,17 +419,12 @@ class EdgeTracker:
     def compute_subsumption_weight(self, seed_key: str) -> float:
         """Compute a weight multiplier based on Jaccard similarity of edge sets.
 
+        Uses MinHash to approximate Jaccard(seed, corpus_union) in O(k) time
+        instead of O(n) full-set union. The corpus MinHash signature (element-wise
+        minimum of all individual signatures) is precomputed and cached.
+
         Returns a continuous weight in [0.1, 1.0] based on how much this
         seed's coverage overlaps with other seeds.
-
-        Jaccard(A, B) = |A ∩ B| / |A ∪ B| where A = seed edges,
-        B = union of all other seeds' edges. High overlap → low weight,
-        novel edges → high weight.
-
-        This replaces the previous binary check (unique / subsumed / partial)
-        with a continuous score, so near-duplicate seeds that technically have
-        1 unique edge among 100 shared ones get deprioritized instead of
-        receiving full weight.
         """
         if seed_key not in self.seed_edges:
             return 1.0
@@ -276,18 +433,15 @@ class EdgeTracker:
         if not seed_edges:
             return 0.5  # no coverage data → slightly deprioritize
 
-        # Compute edges covered by OTHER seeds (excluding this seed)
-        other_edges: set[int] = set()
-        for k, edges in self.seed_edges.items():
-            if k != seed_key:
-                other_edges.update(edges)
-
-        if not other_edges:
+        if len(self.seed_edges) <= 1:
             return 1.0  # only seed — all edges are novel
 
-        intersection = len(seed_edges & other_edges)
-        union = len(seed_edges | other_edges)
-        jaccard = intersection / union if union else 0.0
+        # Use MinHash: Jaccard ≈ matching positions / num_perm
+        # corpus_sig is the element-wise min of all signatures (= union MinHash)
+        if self._corpus_sig is None:
+            self._corpus_sig = self._minhash.corpus_minhash()
+
+        jaccard = self._minhash.approximate_union_jaccard(seed_key, self._corpus_sig)
 
         # Scale: high overlap (jaccard → 1.0) → low weight, novel → high weight
         return max(0.1, 1.0 - jaccard)
@@ -295,23 +449,77 @@ class EdgeTracker:
     def _build_aggregate_distribution(self) -> dict[int, float]:
         """Build the corpus-wide aggregate hit-count distribution.
 
-        Sums hit counts across all seeds for each edge, then normalizes
-        to a probability distribution. Cached until a new seed is recorded.
+        Uses precomputed running totals maintained incrementally by
+        record_edges — only normalizes to probabilities, no iteration
+        over all seeds. O(k) where k = number of distinct edges.
         """
         if self._aggregate_cache is not None:
             return self._aggregate_cache
 
-        totals: dict[int, int] = {}
-        for hc in self.seed_hit_counts.values():
-            for edge, count in hc.items():
-                totals[edge] = totals.get(edge, 0) + count
-
-        total_count = sum(totals.values())
-        if total_count == 0:
+        if self._aggregate_total_count == 0:
             return {}
 
-        self._aggregate_cache = {e: c / total_count for e, c in totals.items()}
+        self._aggregate_cache = {
+            e: c / self._aggregate_total_count
+            for e, c in self._aggregate_totals.items()
+        }
         return self._aggregate_cache
+
+    def _js_divergence_vs_aggregate(self, seed_dist: dict[int, float]) -> float:
+        """Compute JS divergence between a seed's distribution and the aggregate.
+
+        Only iterates edges where the seed has non-zero probability —
+        edges where the seed is zero contribute 0 to KL(P || M).
+        O(|seed_edges|) instead of O(|all_edges|).
+        """
+        total = self._aggregate_total_count
+        if total == 0:
+            return 0.0
+
+        js = 0.0
+        for e, p in seed_dist.items():
+            if p <= 0.0:
+                continue
+            q = self._aggregate_totals.get(e, 0.0) / total
+            m = 0.5 * (p + q)
+            if m > 0.0:
+                js += p * math.log(p / m)
+                if q > 0.0:
+                    js += q * math.log(q / m)
+        return 0.5 * js
+
+    def _wasserstein_vs_aggregate(self, seed_dist: dict[int, float]) -> float:
+        """Compute Wasserstein-1 distance between a seed and the aggregate centroid.
+
+        Only iterates edges present in the seed (aggregate-only edges
+        contribute zero CDF difference since seed CDF is flat there).
+        O(|seed_edges|) instead of O(|all_edges|).
+        """
+        total = self._aggregate_total_count
+        if total == 0:
+            return float(self.map_size)
+
+        all_edges = sorted(seed_dist.keys())
+        if not all_edges:
+            return 0.0
+
+        cdf_diff = 0.0
+        wasserstein = 0.0
+        prev_edge = all_edges[0]
+
+        for edge in all_edges:
+            gap = edge - prev_edge
+            wasserstein += abs(cdf_diff) * gap
+            p = seed_dist.get(edge, 0.0)
+            q = self._aggregate_totals.get(edge, 0.0) / total
+            cdf_diff += p - q
+            prev_edge = edge
+
+        # Account for remaining aggregate mass after last seed edge
+        if cdf_diff != 0.0:
+            wasserstein += abs(cdf_diff) * (self.map_size - prev_edge)
+
+        return wasserstein
 
     def compute_hitcount_diversity_weight(self, seed_key: str) -> float:
         """Compute weight based on JS divergence of hit-count distribution.
@@ -332,8 +540,7 @@ class EdgeTracker:
         if not hc:
             return 1.0
 
-        aggregate = self._build_aggregate_distribution()
-        if not aggregate:
+        if self._aggregate_total_count == 0:
             return 1.0
 
         # Build normalized distribution for this seed
@@ -342,7 +549,8 @@ class EdgeTracker:
             return 1.0
         seed_dist = {e: c / total for e, c in hc.items()}
 
-        js = _js_divergence(seed_dist, aggregate)
+        # JS divergence computed directly against aggregate (no dict materialization)
+        js = self._js_divergence_vs_aggregate(seed_dist)
         # Normalize: max JS is ln(2) ≈ 0.693
         normalized = min(js / math.log(2), 1.0)
         # Scale to [0.5, 2.0]: low divergence → 0.5, high → 2.0
@@ -426,27 +634,31 @@ class EdgeTracker:
         return wasserstein, ks, crps
 
     def compute_corpus_diversity(self) -> float:
-        """Compute average pairwise Wasserstein distance across all seeds.
+        """Estimate corpus diversity using MinHash signatures.
 
-        Returns a value in [0, map_size] where:
-        - 0 = all seeds hit exactly the same edges with same frequencies
-        - high = seeds are spread across the edge map (diverse coverage)
+        Instead of O(n²) pairwise Wasserstein, computes average MinHash
+        distance from each seed to the corpus centroid. This is O(n) and
+        gives a diversity estimate correlated with the true pairwise metric.
 
-        This is O(n^2) in the number of tracked seeds, so it's called
-        periodically (not every iteration) and cached.
+        Returns a value in [0, 1] where:
+        - 0 = all seeds have identical edge sets
+        - 1 = seeds are maximally diverse
         """
         keys = list(self.seed_hit_counts.keys())
         if len(keys) < 2:
             return 0.0
 
-        total = 0.0
-        count = 0
-        for i in range(len(keys)):
-            for j in range(i + 1, len(keys)):
-                total += self.compute_wasserstein_distance(keys[i], keys[j])
-                count += 1
+        corpus_sig = self._minhash.corpus_minhash()
+        total_dist = 0.0
+        for key in keys:
+            sig = self._minhash.signatures.get(key)
+            if sig:
+                # Jaccard distance = 1 - Jaccard similarity
+                matches = sum(1 for a, b in zip(sig, corpus_sig, strict=False) if a == b)
+                jaccard = matches / self._minhash.num_perm
+                total_dist += 1.0 - jaccard
 
-        return total / count if count else 0.0
+        return total_dist / len(keys) if keys else 0.0
 
     def compute_wasserstein_weight(self, seed_key: str) -> float:
         """Compute scheduling weight based on Wasserstein distance to corpus centroid.
@@ -464,11 +676,8 @@ class EdgeTracker:
         if not hc:
             return 1.0
 
-        aggregate = self._build_aggregate_distribution()
-        if not aggregate:
+        if self._aggregate_total_count == 0:
             return 1.0
-
-        centroid_dist = aggregate
 
         # Build seed distribution
         seed_total = sum(hc.values())
@@ -476,17 +685,8 @@ class EdgeTracker:
             return 1.0
         seed_dist = {e: c / seed_total for e, c in hc.items()}
 
-        # Wasserstein between seed and centroid
-        all_edges = sorted(set(seed_dist) | set(centroid_dist))
-        cdf_diff = 0.0
-        wasserstein = 0.0
-        prev_edge = all_edges[0] if all_edges else 0
-
-        for edge in all_edges:
-            gap = edge - prev_edge
-            wasserstein += abs(cdf_diff) * gap
-            cdf_diff += seed_dist.get(edge, 0.0) - centroid_dist.get(edge, 0.0)
-            prev_edge = edge
+        # Wasserstein computed directly against aggregate (no dict materialization)
+        wasserstein = self._wasserstein_vs_aggregate(seed_dist)
 
         # Normalize: max possible Wasserstein is map_size
         normalized = min(wasserstein / self.map_size, 1.0)
@@ -561,6 +761,9 @@ class EdgeTracker:
                 for k, hc in self.seed_hit_counts.items()
             },
             "global_edge_hits": {str(e): c for e, c in self._global_edge_hits.items()},
+            "minhash_sigs": {k: sig for k, sig in self._minhash.signatures.items()},
+            "aggregate_totals": {str(e): c for e, c in self._aggregate_totals.items()},
+            "aggregate_total_count": self._aggregate_total_count,
         }
         try:
             with open(path, "w") as f:
@@ -589,5 +792,26 @@ class EdgeTracker:
         self._global_edge_hits = {int(e): c for e, c in data.get("global_edge_hits", {}).items()}
         self._spectrum_dirty = True
         self._aggregate_cache = None
+        # Restore incremental aggregate totals
+        self._aggregate_totals = {int(e): c for e, c in data.get("aggregate_totals", {}).items()}
+        self._aggregate_total_count = data.get("aggregate_total_count", 0)
+        # If no saved totals, rebuild from seed_hit_counts (legacy state files)
+        if not self._aggregate_totals and self.seed_hit_counts:
+            for hc in self.seed_hit_counts.values():
+                for edge, count in hc.items():
+                    self._aggregate_totals[edge] = self._aggregate_totals.get(edge, 0) + count
+                    self._aggregate_total_count += count
+        # Restore MinHash signatures and rebuild LSH index
+        self._minhash = MinHashLSH(num_perm=64, num_bands=8)
+        self._corpus_sig = None
+        saved_sigs = data.get("minhash_sigs", {})
+        if saved_sigs:
+            for k, sig in saved_sigs.items():
+                self._minhash.add(k, sig)
+        else:
+            # Rebuild from seed_edges for older state files
+            for k, edges in self.seed_edges.items():
+                sig = self._minhash.compute_signature(edges)
+                self._minhash.add(k, sig)
         log.info("Edge tracker loaded: %s (%d seeds, %d edges)", path, len(self.seed_edges), len(self.cumulative_edges))
         return True
