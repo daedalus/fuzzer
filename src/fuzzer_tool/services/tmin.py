@@ -17,6 +17,7 @@ def tmin(
     target_args: list[str] | None = None,
     use_coverage: bool = False,
     max_stages: int = 128,
+    grammar=None,
 ) -> bytes | None:
     """Minimize a crash input to find the smallest reproducer.
 
@@ -26,6 +27,11 @@ def tmin(
     error type + top frame, or raw signal number) to prevent drift to an
     unrelated bug.
 
+    When a grammar is provided, first attempts hierarchical tree-level
+    shrinking (removing whole nonterminal subtrees) before falling back
+    to byte-level delta debugging. This produces minimal reproducers that
+    are structurally meaningful and human-readable.
+
     Args:
         target: Path to the target binary.
         crash_file: Path to the crashing input file.
@@ -34,6 +40,7 @@ def tmin(
         target_args: Target arguments ({file} placeholder).
         use_coverage: Enable SHM coverage (passed to env).
         max_stages: Maximum reduction stages.
+        grammar: Optional Grammar for tree-level shrinking.
 
     Returns:
         Minimized bytes, or None if the crash could not be reproduced.
@@ -103,7 +110,20 @@ def tmin(
         print(f"[*] Reproduced. Original signature: {original_sig}")
         print(f"[*] Starting minimization (max {max_stages} stages)...")
 
-        # Wrap minimize_bytes with signature-checked interesting_fn
+        # Phase 1: Hierarchical tree-level shrinking (if grammar available)
+        if grammar is not None:
+            from fuzzer_tool.core.grammar import TreeMutator
+            tree_mutator = TreeMutator(grammar)
+            tree_rounds = min(max_stages // 4, 32)
+            tree_result = tree_mutator.hierarchical_shrink(
+                data, lambda d: _is_crash(d, original_sig) is not None,
+                max_rounds=tree_rounds,
+            )
+            if len(tree_result) < len(data):
+                print(f"[+] Tree shrink: {len(data)} -> {len(tree_result)} bytes")
+                data = tree_result
+
+        # Phase 2: Byte-level delta debugging
         def _signature_matches(data_bytes: bytes) -> bool:
             return _is_crash(data_bytes, expected_sig=original_sig) is not None
 

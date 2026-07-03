@@ -229,6 +229,12 @@ def cmd_tmin(args):
     _validate_target(args.target)
     from fuzzer_tool.services.tmin import tmin
 
+    grammar = None
+    if args.grammar:
+        from fuzzer_tool.core.grammar import load_grammar
+        grammar = load_grammar(args.grammar)
+        print(f"[*] Grammar loaded: {len(grammar.rules)} rules (tree-level shrinking enabled)")
+
     minimized = tmin(
         target=args.target,
         crash_file=args.crash_file,
@@ -237,6 +243,7 @@ def cmd_tmin(args):
         target_args=args.target_args,
         use_coverage=args.coverage,
         max_stages=args.max_stages,
+        grammar=grammar,
     )
 
     if minimized is None:
@@ -533,6 +540,11 @@ def main() -> int:
     tmin_parser.add_argument("-c", "--coverage", action="store_true", help="Enable SHM coverage")
     tmin_parser.add_argument(
         "--max-stages", type=int, default=128, help="Max reduction stages (default: 128)"
+    )
+    tmin_parser.add_argument(
+        "-g", "--grammar",
+        default=None,
+        help="Grammar for tree-level shrinking (built-in: json, http_request, elf or .gram file)",
     )
     tmin_parser.add_argument(
         "-O", "--output", default=None, help="Output file for minimized input (default: stdout)"

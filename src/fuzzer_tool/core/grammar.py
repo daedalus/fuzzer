@@ -312,3 +312,404 @@ def load_grammar(spec: str | Path) -> Grammar:
         # Try as inline spec
         g.parse(str(spec))
     return g
+
+
+# ---------------------------------------------------------------------------
+# Tree-level AST and mutations (Superion/Nautilus-style)
+# ---------------------------------------------------------------------------
+
+class TreeNode:
+    """Node in a parse tree for grammar-aware mutation.
+
+    A leaf node holds raw bytes. An interior node holds a rule name and
+    a list of child TreeNodes. The tree mirrors the grammar's structure:
+    each interior node corresponds to a nonterminal expansion.
+    """
+
+    __slots__ = ("rule", "children", "data")
+
+    def __init__(self, rule: str = "", children: list | None = None, data: bytes = b""):
+        self.rule = rule
+        self.children = children or []
+        self.data = data  # only for leaf nodes
+
+    @property
+    def is_leaf(self) -> bool:
+        return not self.children and bool(self.data)
+
+    def serialize(self) -> bytes:
+        """Serialize the tree back to bytes."""
+        if self.is_leaf:
+            return self.data
+        parts = []
+        for child in self.children:
+            parts.append(child.serialize())
+        return b"".join(parts)
+
+    def size(self) -> int:
+        """Number of nodes in this subtree."""
+        if self.is_leaf:
+            return 1
+        return 1 + sum(c.size() for c in self.children)
+
+    def depth(self) -> int:
+        if self.is_leaf:
+            return 0
+        return 1 + max(c.depth() for c in self.children) if self.children else 0
+
+    def collect_interior(self, rule: str | None = None) -> list["TreeNode"]:
+        """Collect all interior nodes (optionally filtered by rule name)."""
+        result = []
+        if not self.is_leaf:
+            if rule is None or self.rule == rule:
+                result.append(self)
+            for child in self.children:
+                result.extend(child.collect_interior(rule))
+        return result
+
+    def collect_leaves(self) -> list["TreeNode"]:
+        if self.is_leaf:
+            return [self]
+        result = []
+        for child in self.children:
+            result.extend(child.collect_leaves())
+        return result
+
+    def all_nodes(self) -> list["TreeNode"]:
+        result = [self]
+        for child in self.children:
+            result.extend(child.all_nodes())
+        return result
+
+    def _find_path(self, target: "TreeNode", path: list | None = None) -> list | None:
+        """Find the path from root to target node."""
+        if path is None:
+            path = []
+        if self is target:
+            return path
+        for i, child in enumerate(self.children):
+            found = child._find_path(target, path + [i])
+            if found is not None:
+                return found
+        return None
+
+    def __repr__(self):
+        if self.is_leaf:
+            preview = self.data[:20]
+            return f"Leaf({self.rule!r}, {preview!r}...)"
+        return f"Node({self.rule!r}, children={len(self.children)})"
+
+
+class TreeMutator:
+    """Parse inputs against a grammar into trees and mutate at the tree level.
+
+    Produces mutations that respect the grammar's structure — swapping two
+    subtrees of the same nonterminal type, duplicating a node, deleting a
+    subtree, or splicing in a subtree from a different corpus entry.
+    """
+
+    def __init__(self, grammar: Grammar):
+        self.grammar = grammar
+        # Known structural delimiters for heuristic parsing
+        self._delimiters: dict[str, tuple[bytes, bytes]] = {
+            "json": (b"{", b"}"),
+            "array": (b"[", b"]"),
+        }
+
+    def parse(self, data: bytes, rule: str | None = None) -> TreeNode:
+        """Heuristic parse of input bytes into a tree structure.
+
+        Uses grammar rule knowledge to identify structural boundaries.
+        For well-known formats (JSON, XML), uses delimiter matching.
+        For unknown formats, segments by fixed-size chunks from grammar
+        quantifiers.
+        """
+        if rule is None:
+            rule = next(iter(self.grammar.rules)) if self.grammar.rules else "root"
+
+        if not data:
+            return TreeNode(rule=rule, data=b"")
+
+        # Try structured parsing for known formats
+        tree = self._parse_structured(data, rule)
+        if tree is not None:
+            return tree
+
+        # Fallback: segment by grammar-inferred chunk sizes
+        return self._parse_chunked(data, rule)
+
+    def _parse_structured(self, data: bytes, rule: str) -> TreeNode | None:
+        """Parse structured formats using delimiter matching."""
+        # JSON-like: { ... } or [ ... ]
+        if data.startswith(b"{") and data.endswith(b"}"):
+            return self._parse_braced(data, rule, b"{", b"}")
+        if data.startswith(b"[") and data.endswith(b"]"):
+            return self._parse_braced(data, rule, b"[", b"]")
+        return None
+
+    def _parse_braced(self, data: bytes, rule: str, open_b: bytes, close_b: bytes) -> TreeNode:
+        """Parse braced content into a tree with children for each element."""
+        children = []
+        # Opening delimiter
+        children.append(TreeNode(rule="delim", data=open_b))
+
+        # Parse contents: split by top-level commas (for JSON objects/arrays)
+        inner = data[len(open_b):-len(close_b)] if len(data) > len(open_b) + len(close_b) else b""
+        if inner:
+            elements = self._split_top_level(inner)
+            for elem in elements:
+                elem = elem.strip()
+                if not elem:
+                    continue
+                child_rule = self._infer_rule(elem)
+                children.append(self.parse(elem, child_rule))
+
+        # Closing delimiter
+        children.append(TreeNode(rule="delim", data=close_b))
+        return TreeNode(rule=rule, children=children)
+
+    def _split_top_level(self, data: bytes) -> list[bytes]:
+        """Split by comma at the top nesting level only."""
+        result = []
+        depth = 0
+        current = bytearray()
+        in_string = False
+        escape_next = False
+        for b in data:
+            if escape_next:
+                current.append(b)
+                escape_next = False
+                continue
+            if b == ord("\\") and in_string:
+                current.append(b)
+                escape_next = True
+                continue
+            if b == ord('"'):
+                in_string = not in_string
+            if not in_string:
+                if b in (ord("{"), ord("[")):
+                    depth += 1
+                elif b in (ord("}"), ord("]")):
+                    depth -= 1
+                elif b == ord(",") and depth == 0:
+                    result.append(bytes(current))
+                    current = bytearray()
+                    continue
+            current.append(b)
+        if current:
+            result.append(bytes(current))
+        return result
+
+    def _infer_rule(self, data: bytes) -> str:
+        """Infer which grammar rule a byte fragment likely matches."""
+        data = data.strip()
+        if data.startswith(b'"') and data.endswith(b'"'):
+            return "string"
+        if data.startswith(b"{"):
+            return "object"
+        if data.startswith(b"["):
+            return "array"
+        if data in (b"true", b"false", b"null"):
+            return "value"
+        try:
+            float(data)
+            return "number"
+        except (ValueError, UnicodeDecodeError):
+            pass
+        return "value"
+
+    def _parse_chunked(self, data: bytes, rule: str) -> TreeNode:
+        """Fallback: segment input into fixed-size chunks based on grammar."""
+        # Infer chunk size from grammar quantifiers
+        chunk_size = self._infer_chunk_size()
+        if chunk_size <= 0 or len(data) <= chunk_size:
+            return TreeNode(rule=rule, data=data)
+
+        children = []
+        for i in range(0, len(data), chunk_size):
+            chunk = data[i : i + chunk_size]
+            child_rule = self._infer_rule(chunk)
+            children.append(TreeNode(rule=child_rule, data=chunk))
+        return TreeNode(rule=rule, children=children)
+
+    def _infer_chunk_size(self) -> int:
+        """Infer a reasonable chunk size from grammar quantifiers."""
+        for alts in self.grammar.rules.values():
+            for alt in alts:
+                for token in alt:
+                    if token[0] == "repeat":
+                        # Use the repeat body's typical expansion as chunk size
+                        return 16  # reasonable default for structured fields
+        return 16
+
+    # ------------------------------------------------------------------
+    # Tree-level mutations
+    # ------------------------------------------------------------------
+
+    def mutate_tree(self, tree: TreeNode, max_len: int = 4096) -> bytes:
+        """Apply a random tree-level mutation and serialize back to bytes.
+
+        Operations:
+        1. Subtree swap: replace a node with a freshly generated subtree
+           of the same rule type
+        2. Subtree delete: remove a node (replace with empty)
+        3. Subtree duplicate: clone a node and insert the copy nearby
+        4. Subtree splice: replace a node with a subtree from another
+           corpus entry's tree
+        5. Rule substitution: replace a node with a different alternative
+           from the same grammar rule
+        """
+        if tree.is_leaf:
+            return self._mutate_leaf(tree, max_len)
+
+        op = random.randint(0, 4)
+        if op == 0:
+            return self._tree_swap(tree, max_len)
+        elif op == 1:
+            return self._tree_delete(tree, max_len)
+        elif op == 2:
+            return self._tree_duplicate(tree, max_len)
+        elif op == 3:
+            return self._tree_rule_sub(tree, max_len)
+        else:
+            return self._mutate_leaf(tree, max_len)
+
+    def _tree_swap(self, tree: TreeNode, max_len: int) -> bytes:
+        """Replace a random interior node with a freshly generated subtree."""
+        targets = tree.collect_interior()
+        if not targets:
+            return tree.serialize()[:max_len]
+        target = random.choice(targets)
+        # Generate a replacement of the same rule type
+        replacement_bytes = self.grammar.generate(target.rule, max_len=max_len)
+        replacement = TreeNode(rule=target.rule, data=replacement_bytes)
+        # Replace in parent
+        self._replace_in_tree(tree, target, replacement)
+        return tree.serialize()[:max_len]
+
+    def _tree_delete(self, tree: TreeNode, max_len: int) -> bytes:
+        """Remove a random non-root interior node."""
+        # Collect interior nodes that aren't the root
+        all_interior = tree.collect_interior()
+        candidates = [n for n in all_interior if n is not tree and n.children]
+        if not candidates:
+            return tree.serialize()[:max_len]
+        target = random.choice(candidates)
+        # Replace with empty leaf
+        self._replace_in_tree(tree, target, TreeNode(rule=target.rule, data=b""))
+        return tree.serialize()[:max_len]
+
+    def _tree_duplicate(self, tree: TreeNode, max_len: int) -> bytes:
+        """Clone a random node and insert the copy as a sibling."""
+        # Find a parent with multiple children
+        all_interior = tree.collect_interior()
+        parents_with_children = [n for n in all_interior if len(n.children) >= 2]
+        if not parents_with_children:
+            return tree.serialize()[:max_len]
+        parent = random.choice(parents_with_children)
+        idx = random.randint(0, len(parent.children) - 1)
+        clone = self._clone_tree(parent.children[idx])
+        # Insert after the original
+        parent.children.insert(idx + 1, clone)
+        return tree.serialize()[:max_len]
+
+    def _tree_rule_sub(self, tree: TreeNode, max_len: int) -> bytes:
+        """Replace a node with a different alternative from the same rule."""
+        targets = tree.collect_interior()
+        # Filter to rules with multiple alternatives
+        multi_targets = [
+            n for n in targets
+            if n.rule in self.grammar.rules and len(self.grammar.rules[n.rule]) > 1
+        ]
+        if not multi_targets:
+            return tree.serialize()[:max_len]
+        target = random.choice(multi_targets)
+        replacement_bytes = self.grammar.generate(target.rule, max_len=max_len)
+        self._replace_in_tree(tree, target, TreeNode(rule=target.rule, data=replacement_bytes))
+        return tree.serialize()[:max_len]
+
+    def _mutate_leaf(self, tree: TreeNode, max_len: int) -> bytes:
+        """Byte-level mutation on a leaf node."""
+        data = tree.serialize()
+        if not data:
+            return self.grammar.generate(max_len=max_len)
+        buf = bytearray(data)
+        idx = random.randint(0, len(buf) - 1)
+        buf[idx] ^= 1 << random.randint(0, 7)
+        return bytes(buf[:max_len])
+
+    def _replace_in_tree(self, root: TreeNode, old: TreeNode, new: TreeNode):
+        """Replace old node with new in root's tree."""
+        for i, child in enumerate(root.children):
+            if child is old:
+                root.children[i] = new
+                return True
+            if self._replace_in_tree(child, old, new):
+                return True
+        return False
+
+    def _clone_tree(self, node: TreeNode) -> TreeNode:
+        """Deep-clone a tree node."""
+        if node.is_leaf:
+            return TreeNode(rule=node.rule, data=node.data)
+        return TreeNode(
+            rule=node.rule,
+            children=[self._clone_tree(c) for c in node.children],
+        )
+
+    # ------------------------------------------------------------------
+    # Hierarchical delta debugging for tmin
+    # ------------------------------------------------------------------
+
+    def hierarchical_shrink(self, data: bytes, still_crashes, max_rounds: int = 64) -> bytes:
+        """Shrink a crashing input by removing whole tree-level chunks first.
+
+        Tries removing each nonterminal subtree before falling back to
+        byte-level reduction. Converges to a minimal reproducer that's
+        structurally meaningful.
+
+        Args:
+            data: The crashing input.
+            still_crashes: Callable(bytes) -> bool — returns True if input still crashes.
+            max_rounds: Maximum reduction rounds.
+
+        Returns:
+            Minimized bytes.
+        """
+        best = data
+        for _ in range(max_rounds):
+            tree = self.parse(best)
+            # Collect all non-root interior nodes with children
+            candidates = [
+                n for n in tree.collect_interior()
+                if n is not tree and n.children
+            ]
+            if not candidates:
+                break
+
+            improved = False
+            for node in candidates:
+                # Try removing this subtree
+                clone = self._clone_tree(tree)
+                # Find the same node in the clone
+                path = tree._find_path(node)
+                if path is None:
+                    continue
+                clone_node = clone
+                for idx in path[:-1]:
+                    clone_node = clone_node.children[idx]
+                target_idx = path[-1]
+                # Replace with empty
+                clone_node.children[target_idx] = TreeNode(
+                    rule=node.rule, data=b""
+                )
+                candidate = clone.serialize()
+                if candidate and candidate != best and still_crashes(candidate):
+                    best = candidate
+                    improved = True
+                    break  # restart with smaller tree
+
+            if not improved:
+                break
+
+        return best

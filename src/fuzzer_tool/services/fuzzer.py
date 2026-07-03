@@ -721,6 +721,7 @@ class Fuzzer:
             self.mc.init_arm("cem_bytes")
             if self.grammar:
                 self.mc.init_arm("grammar_mutate")
+                self.mc.init_arm("grammar_tree_mutate")
 
         self._persistent_runner = None
         if self.persistent:
@@ -1157,6 +1158,7 @@ class Fuzzer:
             ops.append("cem_bytes")
         if self.grammar:
             ops.append("grammar_mutate")
+            ops.append("grammar_tree_mutate")
         # Redqueen: if we know which bytes caused branch comparisons, prefer flipping them
         parent_meta = self.seed_meta.get(data)
         if parent_meta and (parent_meta.get("redqueen_matches") or parent_meta.get("redqueen_offsets")):
@@ -1281,6 +1283,14 @@ class Fuzzer:
 
             elif op == "grammar_mutate" and self.grammar:
                 mutated = self.grammar.mutate(bytes(buf), max_len=self.max_len)
+                buf = bytearray(mutated[: self.max_len])
+
+            elif op == "grammar_tree_mutate" and self.grammar:
+                from fuzzer_tool.core.grammar import TreeMutator
+                if not hasattr(self, '_tree_mutator'):
+                    self._tree_mutator = TreeMutator(self.grammar)
+                tree = self._tree_mutator.parse(bytes(buf))
+                mutated = self._tree_mutator.mutate_tree(tree, max_len=self.max_len)
                 buf = bytearray(mutated[: self.max_len])
 
             elif op == "redqueen" and buf and parent_meta:
