@@ -2253,6 +2253,10 @@ class Fuzzer:
                     self.print_stats()
                     self._append_coverage_log()
                     self._record_discovery_snapshot()
+                    # Periodic GC to return freed memory to OS
+                    if i % 500 == 0:
+                        import gc
+                        gc.collect()
                 if i % 500 == 0 and self.replay_n > 0:
                     self._run_crash_replays()
                 if self.stats_file and i % self.stats_interval == 0:

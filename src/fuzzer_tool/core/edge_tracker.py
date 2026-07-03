@@ -338,7 +338,7 @@ class EdgeTracker:
     priority; seeds fully subsumed by others get deprioritized.
     """
 
-    def __init__(self, map_size: int = 65536, max_tracked_seeds: int = 500):
+    def __init__(self, map_size: int = 65536, max_tracked_seeds: int = 200):
         self.map_size = map_size
         self.max_tracked_seeds = max_tracked_seeds
         # Per-seed edge sets: seed_key -> set of edge indices
