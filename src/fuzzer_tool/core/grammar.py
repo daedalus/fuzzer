@@ -28,6 +28,7 @@ Example (HTTP request):
 import logging
 import random
 import re
+import struct
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -712,4 +713,302 @@ class TreeMutator:
             if not improved:
                 break
 
-        return best
+
+# ---------------------------------------------------------------------------
+# PNG format-aware mutations
+# ---------------------------------------------------------------------------
+
+# PNG chunk types that control code paths in libpng
+_IHDR_TYPES = {b"IHDR", b"PLTE", b"tRNS", b"IDAT", b"IEND",
+               b"bKGD", b"cHRM", b"gAMA", b"hIST", b"iCCP",
+               b"sBIT", b"sCAL", b"pHYs", b"sPLT", b"tEXt",
+               b"iTXt", b"zTXt", b"fdAT", b"fcTL"}
+
+# Valid IHDR bit depths per color type
+_IHDR_BIT_DEPTHS = {
+    0: [1, 2, 4, 8, 16],       # grayscale
+    2: [8, 16],                  # RGB
+    3: [1, 2, 4, 8],             # indexed
+    4: [8, 16],                  # grayscale+alpha
+    6: [8, 16],                  # RGBA
+}
+
+# Valid color types
+_IHDR_COLOR_TYPES = [0, 2, 3, 4, 6]
+
+
+class PngChunk:
+    """A single PNG chunk: type(4) + data(length) + crc(4)."""
+    __slots__ = ("chunk_type", "data")
+
+    def __init__(self, chunk_type: bytes, data: bytes):
+        self.chunk_type = chunk_type
+        self.data = data
+
+    def serialize(self) -> bytes:
+        length = struct.pack(">I", len(self.data))
+        crc = struct.pack(">I", self._compute_crc())
+        return length + self.chunk_type + self.data + crc
+
+    def _compute_crc(self) -> int:
+        import zlib
+        return zlib.crc32(self.chunk_type + self.data) & 0xFFFFFFFF
+
+
+def parse_png_chunks(data: bytes) -> list[PngChunk] | None:
+    """Parse PNG data into a list of chunks. Returns None if invalid."""
+    if len(data) < 8 or data[:8] != b"\x89PNG\r\n\x1a\n":
+        return None
+
+    chunks = []
+    pos = 8
+    while pos + 8 <= len(data):
+        if pos + 8 > len(data):
+            break
+        length = struct.unpack_from(">I", data, pos)[0]
+        chunk_type = data[pos + 4 : pos + 8]
+
+        if pos + 12 + length > len(data):
+            break  # truncated
+
+        chunk_data = data[pos + 8 : pos + 8 + length]
+        chunks.append(PngChunk(chunk_type, chunk_data))
+        pos += 12 + length  # 4(len) + 4(type) + data + 4(crc)
+
+        if chunk_type == b"IEND":
+            break
+
+    return chunks if chunks else None
+
+
+def serialize_png_chunks(chunks: list[PngChunk]) -> bytes:
+    """Serialize chunks back to PNG bytes."""
+    result = b"\x89PNG\r\n\x1a\n"
+    for chunk in chunks:
+        result += chunk.serialize()
+    return result
+
+
+class PngChunkMutator:
+    """Format-aware mutations for PNG files.
+
+    Operates on parsed PNG chunks to produce mutations that respect
+    the PNG structure while exercising different code paths in libpng:
+
+    1. IHDR field mutations — change width/height/bit_depth/color_type
+       to trigger different decompression paths
+    2. PLTE mutations — corrupt palette entries for indexed-color PNGs
+    3. IDAT mutations — corrupt compressed data to trigger inflate errors
+    4. Chunk duplication — duplicate IDAT/PLTE to test chunk counting
+    5. Chunk deletion — remove required chunks to test error handling
+    6. Chunk reordering — swap chunk order to test parser robustness
+    7. CRC corruption — break CRC validation paths
+    8. Length manipulation — lie about chunk data length
+    """
+
+    def mutate(self, data: bytes, max_len: int = 4096) -> bytes:
+        """Apply a random format-aware PNG mutation."""
+        chunks = parse_png_chunks(data)
+        if not chunks:
+            return self._generate_random_png(max_len)
+
+        op = random.randint(0, 7)
+        if op == 0:
+            return self._mutate_ihdr(chunks, max_len)
+        elif op == 1:
+            return self._mutate_plte(chunks, max_len)
+        elif op == 2:
+            return self._mutate_idat(chunks, max_len)
+        elif op == 3:
+            return self._duplicate_chunk(chunks, max_len)
+        elif op == 4:
+            return self._delete_chunk(chunks, max_len)
+        elif op == 5:
+            return self._reorder_chunks(chunks, max_len)
+        elif op == 6:
+            return self._corrupt_crc(chunks, max_len)
+        else:
+            return self._mutate_length(chunks, max_len)
+
+    def _mutate_ihdr(self, chunks: list[PngChunk], max_len: int) -> bytes:
+        """Mutate IHDR fields: width, height, bit_depth, color_type."""
+        ihdr = self._find_chunk(chunks, b"IHDR")
+        if not ihdr or len(ihdr.data) < 13:
+            return serialize_png_chunks(chunks)[:max_len]
+
+        d = bytearray(ihdr.data)
+        field = random.randint(0, 4)
+        if field == 0:  # width
+            w = struct.unpack_from(">I", d, 0)[0]
+            w = self._mutate_int(w, 0, 65535)
+            struct.pack_into(">I", d, 0, w)
+        elif field == 1:  # height
+            h = struct.unpack_from(">I", d, 4)[0]
+            h = self._mutate_int(h, 0, 65535)
+            struct.pack_into(">I", d, 4, h)
+        elif field == 2:  # bit_depth
+            ct = d[6]
+            valid = _IHDR_BIT_DEPTHS.get(ct, [8])
+            d[7] = random.choice(valid + [0, 32, 128, 255])  # include invalid
+        elif field == 3:  # color_type
+            d[6] = random.choice(_IHDR_COLOR_TYPES + [1, 5, 7, 128, 255])
+        else:  # compression, filter, interlace
+            d[8 + field - 4] = random.randint(0, 255)
+
+        ihdr.data = bytes(d)
+        return serialize_png_chunks(chunks)[:max_len]
+
+    def _mutate_plte(self, chunks: list[PngChunk], max_len: int) -> bytes:
+        """Mutate PLTE palette entries or create a PLTE chunk."""
+        plte = self._find_chunk(chunks, b"PLTE")
+        if plte and len(plte.data) >= 3:
+            # Mutate random palette entry
+            d = bytearray(plte.data)
+            idx = random.randint(0, len(d) // 3 - 1) * 3
+            for i in range(3):
+                d[idx + i] = random.randint(0, 255)
+            plte.data = bytes(d)
+        else:
+            # Insert a PLTE chunk before first IDAT
+            idat_idx = self._find_chunk_index(chunks, b"IDAT")
+            if idat_idx >= 0:
+                plte_data = bytes(random.randint(0, 255) for _ in range(768))
+                chunks.insert(idat_idx, PngChunk(b"PLTE", plte_data))
+
+        return serialize_png_chunks(chunks)[:max_len]
+
+    def _mutate_idat(self, chunks: list[PngChunk], max_len: int) -> bytes:
+        """Mutate IDAT compressed data to trigger inflate errors."""
+        idat = self._find_chunk(chunks, b"IDAT")
+        if not idat or len(idat.data) < 2:
+            return serialize_png_chunks(chunks)[:max_len]
+
+        d = bytearray(idat.data)
+        if random.random() < 0.3:
+            # Corrupt zlib header (first 2 bytes)
+            d[0] = random.randint(0, 255)
+            d[1] = random.randint(0, 255)
+        else:
+            # Flip random byte in compressed data
+            idx = random.randint(0, len(d) - 1)
+            d[idx] ^= random.randint(1, 255)
+
+        idat.data = bytes(d)
+        return serialize_png_chunks(chunks)[:max_len]
+
+    def _duplicate_chunk(self, chunks: list[PngChunk], max_len: int) -> bytes:
+        """Duplicate a random chunk (tests chunk counting)."""
+        if len(chunks) < 2:
+            return serialize_png_chunks(chunks)[:max_len]
+
+        idx = random.randint(1, len(chunks) - 1)  # skip IHDR
+        clone = PngChunk(chunks[idx].chunk_type, chunks[idx].data)
+        insert_at = random.randint(idx, len(chunks))
+        chunks.insert(insert_at, clone)
+        return serialize_png_chunks(chunks)[:max_len]
+
+    def _delete_chunk(self, chunks: list[PngChunk], max_len: int) -> bytes:
+        """Delete a random non-IHDR chunk."""
+        if len(chunks) < 3:
+            return serialize_png_chunks(chunks)[:max_len]
+
+        candidates = [(i, c) for i, c in enumerate(chunks) if c.chunk_type != b"IHDR"]
+        if candidates:
+            idx, _ = random.choice(candidates)
+            del chunks[idx]
+        return serialize_png_chunks(chunks)[:max_len]
+
+    def _reorder_chunks(self, chunks: list[PngChunk], max_len: int) -> bytes:
+        """Swap two random chunks (tests parser order-sensitivity)."""
+        if len(chunks) < 3:
+            return serialize_png_chunks(chunks)[:max_len]
+
+        i = random.randint(1, len(chunks) - 2)
+        j = random.randint(i + 1, len(chunks) - 1)
+        chunks[i], chunks[j] = chunks[j], chunks[i]
+        return serialize_png_chunks(chunks)[:max_len]
+
+    def _corrupt_crc(self, chunks: list[PngChunk], max_len: int) -> bytes:
+        """Corrupt a chunk's CRC (tests CRC validation paths)."""
+        if not chunks:
+            return serialize_png_chunks(chunks)[:max_len]
+
+        idx = random.randint(0, len(chunks) - 1)
+        # Serialize with corrupted CRC by manipulating the raw bytes
+        result = b"\x89PNG\r\n\x1a\n"
+        for i, chunk in enumerate(chunks):
+            length = struct.pack(">I", len(chunk.data))
+            if i == idx:
+                # Write wrong CRC
+                crc = struct.pack(">I", random.randint(0, 0xFFFFFFFF))
+            else:
+                crc = struct.pack(">I", chunk._compute_crc())
+            result += length + chunk.chunk_type + chunk.data + crc
+            if chunk.chunk_type == b"IEND":
+                break
+        return result[:max_len]
+
+    def _mutate_length(self, chunks: list[PngChunk], max_len: int) -> bytes:
+        """Lie about a chunk's data length."""
+        if not chunks:
+            return serialize_png_chunks(chunks)[:max_len]
+
+        idx = random.randint(0, len(chunks) - 1)
+        result = b"\x89PNG\r\n\x1a\n"
+        for i, chunk in enumerate(chunks):
+            if i == idx:
+                # Write wrong length (too long or too short)
+                fake_len = random.choice([
+                    len(chunk.data) + random.randint(1, 100),
+                    max(0, len(chunk.data) - random.randint(0, min(10, len(chunk.data)))),
+                ])
+                length = struct.pack(">I", fake_len)
+            else:
+                length = struct.pack(">I", len(chunk.data))
+            crc = struct.pack(">I", chunk._compute_crc())
+            result += length + chunk.chunk_type + chunk.data + crc
+            if chunk.chunk_type == b"IEND":
+                break
+        return result[:max_len]
+
+    def _generate_random_png(self, max_len: int) -> bytes:
+        """Generate a minimal valid PNG for mutation seeding."""
+        # Minimal IHDR: 1x1, 8-bit RGBA
+        ihdr_data = struct.pack(">IIBBBBB", 1, 1, 8, 6, 0, 0, 0)
+        ihdr = PngChunk(b"IHDR", ihdr_data)
+        # Minimal IDAT: single filter byte (none) + 4 bytes (RGBA pixel)
+        import zlib
+        raw = b"\x00\x80\x00\x00\x80"  # filter=none + RGBA pixel
+        idat_data = zlib.compress(raw)
+        idat = PngChunk(b"IDAT", idat_data)
+        iend = PngChunk(b"IEND", b"")
+        return serialize_png_chunks([ihdr, idat, iend])[:max_len]
+
+    @staticmethod
+    def _find_chunk(chunks: list[PngChunk], chunk_type: bytes) -> PngChunk | None:
+        for c in chunks:
+            if c.chunk_type == chunk_type:
+                return c
+        return None
+
+    @staticmethod
+    def _find_chunk_index(chunks: list[PngChunk], chunk_type: bytes) -> int:
+        for i, c in enumerate(chunks):
+            if c.chunk_type == chunk_type:
+                return i
+        return -1
+
+    @staticmethod
+    def _mutate_int(val: int, lo: int, hi: int) -> int:
+        """Mutate an integer with various strategies."""
+        op = random.randint(0, 4)
+        if op == 0:
+            return random.randint(lo, hi)
+        elif op == 1:
+            return 0
+        elif op == 2:
+            return val + random.randint(-10, 10)
+        elif op == 3:
+            return val ^ (1 << random.randint(0, 31))
+        else:
+            return val * 2

@@ -749,6 +749,7 @@ class Fuzzer:
             if self.grammar:
                 self.mc.init_arm("grammar_mutate")
                 self.mc.init_arm("grammar_tree_mutate")
+            self.mc.init_arm("png_chunk_mutate")
         if self._mopt:
             for op in MUTATIONS:
                 self._mopt.init_arm(op)
@@ -759,6 +760,7 @@ class Fuzzer:
             if self.grammar:
                 self._mopt.init_arm("grammar_mutate")
                 self._mopt.init_arm("grammar_tree_mutate")
+            self._mopt.init_arm("png_chunk_mutate")
 
         self._persistent_runner = None
         if self.persistent:
@@ -1196,6 +1198,7 @@ class Fuzzer:
         if self.grammar:
             ops.append("grammar_mutate")
             ops.append("grammar_tree_mutate")
+        ops.append("png_chunk_mutate")
         # Redqueen: if we know which bytes caused branch comparisons, prefer flipping them
         parent_meta = self.seed_meta.get(data)
         if parent_meta and (parent_meta.get("redqueen_matches") or parent_meta.get("redqueen_offsets")):
@@ -1333,6 +1336,17 @@ class Fuzzer:
                     self._tree_mutator = TreeMutator(self.grammar)
                 tree = self._tree_mutator.parse(bytes(buf))
                 mutated = self._tree_mutator.mutate_tree(tree, max_len=self.max_len)
+                buf = bytearray(mutated[: self.max_len])
+
+            elif op == "png_chunk_mutate":
+                from fuzzer_tool.core.grammar import PngChunkMutator, parse_png_chunks
+                if not hasattr(self, '_png_mutator'):
+                    self._png_mutator = PngChunkMutator()
+                # Only apply if input looks like PNG, otherwise generate one
+                if parse_png_chunks(bytes(buf)):
+                    mutated = self._png_mutator.mutate(bytes(buf), max_len=self.max_len)
+                else:
+                    mutated = self._png_mutator._generate_random_png(self.max_len)
                 buf = bytearray(mutated[: self.max_len])
 
             elif op == "redqueen" and buf and parent_meta:
