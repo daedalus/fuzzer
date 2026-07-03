@@ -374,51 +374,43 @@ class EdgeTracker:
             Set of NEW edge indices not previously seen.
         """
         new_edges = set()
-        for i, val in enumerate(edge_bitmap):
-            if val and i < self.map_size:
-                new_edges.add(i)
-
-        new_contributions = new_edges - self.cumulative_edges
-        self.cumulative_edges.update(new_edges)
-
         if seed_key not in self.seed_edges:
             self.seed_edges[seed_key] = set()
-        self.seed_edges[seed_key].update(new_edges)
-
-        # Store sparse hit-count vector for JS divergence scoring
         if seed_key not in self.seed_hit_counts:
             self.seed_hit_counts[seed_key] = {}
         hc = self.seed_hit_counts[seed_key]
+
+        # Single pass over bitmap: extract edges, hit counts, aggregate, global hits
         for i, val in enumerate(edge_bitmap):
             if val and i < self.map_size:
+                new_edges.add(i)
                 hc[i] = val
+                # Aggregate totals
+                old_agg = self._aggregate_totals.get(i, 0)
+                self._aggregate_totals[i] = old_agg + val
+                self._aggregate_total_count += val
+                # Global edge hits
+                old_gh = self._global_edge_hits.get(i, 0)
+                new_gh = old_gh + val
+                self._global_edge_hits[i] = new_gh
+                self._spectrum_dirty = True
+                if new_gh > self.max_hit_count:
+                    self.max_hit_count = new_gh
+
+        new_contributions = new_edges - self.cumulative_edges
+        self.cumulative_edges.update(new_edges)
+        self.seed_edges[seed_key].update(new_edges)
 
         # Update MinHash signature and LSH index
         sig = self._minhash.compute_signature(self.seed_edges[seed_key])
         self._minhash.add(seed_key, sig)
 
-        # Incrementally update aggregate distribution (avoids full O(n) rebuild)
-        for i, val in enumerate(edge_bitmap):
-            if val and i < self.map_size:
-                old = self._aggregate_totals.get(i, 0)
-                self._aggregate_totals[i] = old + val
-                self._aggregate_total_count += val
-        # Invalidate normalized cache (totals changed, need re-normalize)
+        # Invalidate caches
         self._aggregate_cache = None
-        self._corpus_sig = None  # invalidate MinHash corpus signature
+        self._corpus_sig = None
 
         # Prune old seeds if over limit
         self._maybe_prune()
-
-        # Update global edge hits for Good-Turing estimation
-        for i, val in enumerate(edge_bitmap):
-            if val and i < self.map_size:
-                old = self._global_edge_hits.get(i, 0)
-                new = old + val
-                self._global_edge_hits[i] = new
-                self._spectrum_dirty = True
-                if new > self.max_hit_count:
-                    self.max_hit_count = new
 
         return new_contributions
 
