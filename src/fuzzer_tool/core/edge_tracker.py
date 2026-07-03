@@ -338,8 +338,9 @@ class EdgeTracker:
     priority; seeds fully subsumed by others get deprioritized.
     """
 
-    def __init__(self, map_size: int = 65536):
+    def __init__(self, map_size: int = 65536, max_tracked_seeds: int = 500):
         self.map_size = map_size
+        self.max_tracked_seeds = max_tracked_seeds
         # Per-seed edge sets: seed_key -> set of edge indices
         self.seed_edges: dict[str, set[int]] = {}
         # Per-seed hit counts: seed_key -> {edge_index: hit_count} (sparse)
@@ -406,6 +407,9 @@ class EdgeTracker:
         self._aggregate_cache = None
         self._corpus_sig = None  # invalidate MinHash corpus signature
 
+        # Prune old seeds if over limit
+        self._maybe_prune()
+
         # Update global edge hits for Good-Turing estimation
         for i, val in enumerate(edge_bitmap):
             if val and i < self.map_size:
@@ -417,6 +421,28 @@ class EdgeTracker:
                     self.max_hit_count = new
 
         return new_contributions
+
+    def _maybe_prune(self):
+        """Prune oldest seeds when tracked count exceeds max_tracked_seeds.
+
+        Keeps the most recent seeds and removes their edge data.
+        This bounds memory usage while preserving recent coverage information.
+        """
+        if len(self.seed_edges) <= self.max_tracked_seeds:
+            return
+
+        # Find excess seeds to prune (oldest first by insertion order)
+        excess = len(self.seed_edges) - self.max_tracked_seeds
+        keys_to_prune = list(self.seed_edges.keys())[:excess]
+
+        for key in keys_to_prune:
+            self.seed_edges.pop(key, None)
+            self.seed_hit_counts.pop(key, None)
+            self.seed_edge_traces.pop(key, None)
+            self._minhash.remove(key)
+
+        self._aggregate_cache = None
+        self._corpus_sig = None
 
     def record_edge_trace(self, seed_key: str, edges: set[tuple[int, int]]):
         """Record the (prev, curr) edge trace for a seed.
