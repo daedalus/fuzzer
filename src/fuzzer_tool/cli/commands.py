@@ -139,6 +139,7 @@ def cmd_fuzz(args):
         mc_cem=args.mc_cem,
         mopt=getattr(args, 'mopt', False),
         targets=getattr(args, 'targets', None),
+        anneal_budget=getattr(args, 'anneal_budget', 0),
         mc_elite_frac=args.mc_elite_frac,
         mc_refit_interval=args.mc_refit_int,
         stats_file=args.stats_file,
@@ -410,6 +411,14 @@ def main() -> int:
         default=None,
         metavar="FUNC",
         help="Target functions for directed fuzzing (names or hex addresses)",
+    )
+    fuzz_parser.add_argument(
+        "--anneal-budget",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Annealing budget in iterations (0=no annealing, default). "
+             "Temperature decays linearly from 1.0 to 0.1 over N iterations.",
     )
     fuzz_parser.add_argument(
         "--mc-elite-frac", type=float, default=0.1, help="CEM elite fraction (default: 0.1)"

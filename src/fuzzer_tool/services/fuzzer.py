@@ -550,6 +550,7 @@ class Fuzzer:
         mc_cem=False,
         mopt=False,
         targets=None,
+        anneal_budget=0,
         mc_elite_frac=0.1,
         mc_refit_interval=1000,
         stats_file=None,
@@ -726,6 +727,10 @@ class Fuzzer:
             else:
                 print("[!] Directed mode: failed to load target distances, falling back to coverage")
                 self._distance = None
+
+        # Simulated annealing temperature schedule
+        self._anneal_budget = anneal_budget  # 0 = no annealing (temperature always 1.0)
+        self._temperature = 1.0
 
         # Crash tracing: GDB backtrace + strace on crash inputs
         self._tracer = None
@@ -1585,6 +1590,12 @@ class Fuzzer:
     def _weighted_pick_seed(self) -> bytes:
         now = time.time()
 
+        # Update simulated annealing temperature
+        if self._anneal_budget > 0:
+            self._temperature = max(0.1, 1.0 - self.exec_count / self._anneal_budget)
+        else:
+            self._temperature = 1.0
+
         # Recompute edge tracker weights only when cumulative_edges changed
         if not hasattr(self, '_last_edge_count'):
             self._last_edge_count = -1
@@ -1604,17 +1615,27 @@ class Fuzzer:
             coverage = meta["coverage_edges"]
             age = now - meta["added_at"]
 
+            # Temperature: scales exploration-favoring signals
+            T = self._temperature
+
             # Base weight: inverse fuzz count, boosted by coverage, decayed by age
-            base_w = (1.0 / math.sqrt(fuzz_count)) * (1.0 + coverage * 0.5) / (1.0 + age * 0.01)
+            # Temperature scales the exploration part (1/sqrt(fuzz_count))
+            explore_part = T * (1.0 / math.sqrt(fuzz_count))
+            exploit_part = (1.0 + coverage * 0.5) / (1.0 + age * 0.01)
+            base_w = explore_part * exploit_part
             w = base_w
 
             # Energy burst: newly added seeds get up to 5x boost (decays over 60s)
-            burst_factor = max(1.0, 5.0 - (age / 60.0))
+            # Temperature scales the burst — at low T, burst is suppressed
+            burst_factor = max(1.0, 1.0 + T * (5.0 - 1.0) - (age / 60.0) * T)
             w *= burst_factor
 
-            # Stale seed detection
+            # Stale seed detection: temperature relaxes the staleness threshold
+            # At high T, even stale seeds get some play (low threshold = fewer penalized)
+            # At low T, staleness is punished strictly (high threshold = more penalized)
             staleness = fuzz_count / max(coverage + 1, 1)
-            penalty = 0.01 if staleness > 50 else 1.0
+            stale_threshold = 50.0 * T  # relaxed at high T, strict at low T
+            penalty = 0.01 if staleness > stale_threshold else 1.0
             w *= penalty
 
             # Edge tracker signals
