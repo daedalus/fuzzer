@@ -548,6 +548,7 @@ class Fuzzer:
         markov_generate=False,
         mc_bandit=False,
         mc_cem=False,
+        mopt=False,
         mc_elite_frac=0.1,
         mc_refit_interval=1000,
         stats_file=None,
@@ -695,14 +696,20 @@ class Fuzzer:
 
         self.mc_bandit = mc_bandit
         self.mc_cem = mc_cem
+        self._use_mopt = mopt
         self.mc = (
             MonteCarloScheduler(
                 elite_frac=mc_elite_frac,
                 refit_interval=mc_refit_interval,
             )
-            if (mc_bandit or mc_cem)
+            if (mc_bandit or mc_cem or mopt)
             else None
         )
+        self._mopt = None
+        if mopt:
+            from fuzzer_tool.core.montecarlo import MOptScheduler
+            self._mopt = MOptScheduler(n_particles=5, window_size=200)
+            log.info("MOpt PSO scheduling enabled (5 particles, window=200)")
         self._last_ops_used: list[str] = []
 
         # Crash tracing: GDB backtrace + strace on crash inputs
@@ -722,6 +729,16 @@ class Fuzzer:
             if self.grammar:
                 self.mc.init_arm("grammar_mutate")
                 self.mc.init_arm("grammar_tree_mutate")
+        if self._mopt:
+            for op in MUTATIONS:
+                self._mopt.init_arm(op)
+            for op in DICT_MUTATIONS:
+                self._mopt.init_arm(op)
+            self._mopt.init_arm("markov_bytes")
+            self._mopt.init_arm("cem_bytes")
+            if self.grammar:
+                self._mopt.init_arm("grammar_mutate")
+                self._mopt.init_arm("grammar_tree_mutate")
 
         self._persistent_runner = None
         if self.persistent:
@@ -1167,7 +1184,12 @@ class Fuzzer:
         self._last_ops_used = []
 
         for _ in range(self.mutations_per_input):
-            op = self.mc.select_op(ops) if self.mc and self.mc_bandit else random.choice(ops)
+            if self._use_mopt and self._mopt:
+                op = self._mopt.select_op(ops)
+            elif self.mc and self.mc_bandit:
+                op = self.mc.select_op(ops)
+            else:
+                op = random.choice(ops)
             self._last_ops_used.append(op)
 
             if op == "bit_flip" and buf:
@@ -1758,6 +1780,13 @@ class Fuzzer:
                 if op not in seen:
                     self.mc.record(op, success)
                     self.mc.record_brier(op, success)
+                    seen.add(op)
+
+        if self._mopt:
+            seen = set()
+            for op in self._last_ops_used:
+                if op not in seen:
+                    self._mopt.record(op, success)
                     seen.add(op)
 
         if is_crash:

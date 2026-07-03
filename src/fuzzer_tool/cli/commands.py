@@ -137,6 +137,7 @@ def cmd_fuzz(args):
         markov_generate=args.markov_gen,
         mc_bandit=args.mc_bandit,
         mc_cem=args.mc_cem,
+        mopt=getattr(args, 'mopt', False),
         mc_elite_frac=args.mc_elite_frac,
         mc_refit_interval=args.mc_refit_int,
         stats_file=args.stats_file,
@@ -399,6 +400,9 @@ def main() -> int:
         "--mc-bandit", action="store_true", help="Enable Thompson sampling bandit"
     )
     fuzz_parser.add_argument("--mc-cem", action="store_true", help="Enable cross-entropy method")
+    fuzz_parser.add_argument(
+        "--mopt", action="store_true", help="Enable MOpt PSO operator scheduling (alternative to bandit)"
+    )
     fuzz_parser.add_argument(
         "--mc-elite-frac", type=float, default=0.1, help="CEM elite fraction (default: 0.1)"
     )
