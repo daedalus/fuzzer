@@ -358,6 +358,8 @@ class EdgeTracker:
         # MinHash/LSH for approximate Jaccard and subsumption
         self._minhash = MinHashLSH(num_perm=64, num_bands=8)
         self._corpus_sig: list[int] | None = None
+        # Per-seed edge traces for directed distance: seed_key -> set of (prev, curr) edges
+        self.seed_edge_traces: dict[str, set[tuple[int, int]]] = {}
 
     def record_edges(self, seed_key: str, edge_bitmap: bytes) -> set[int]:
         """Record edges hit by a seed execution.
@@ -415,6 +417,22 @@ class EdgeTracker:
                     self.max_hit_count = new
 
         return new_contributions
+
+    def record_edge_trace(self, seed_key: str, edges: set[tuple[int, int]]):
+        """Record the (prev, curr) edge trace for a seed.
+
+        Used by directed distance computation to know which basic blocks
+        a seed's execution passed through.
+
+        Args:
+            seed_key: Hash of the seed input.
+            edges: Set of (prev_edge_index, curr_edge_index) pairs.
+        """
+        if edges:
+            if seed_key in self.seed_edge_traces:
+                self.seed_edge_traces[seed_key].update(edges)
+            else:
+                self.seed_edge_traces[seed_key] = set(edges)
 
     def compute_subsumption_weight(self, seed_key: str) -> float:
         """Compute a weight multiplier based on Jaccard similarity of edge sets.
@@ -764,6 +782,10 @@ class EdgeTracker:
             "minhash_sigs": {k: sig for k, sig in self._minhash.signatures.items()},
             "aggregate_totals": {str(e): c for e, c in self._aggregate_totals.items()},
             "aggregate_total_count": self._aggregate_total_count,
+            "edge_traces": {
+                k: [list(e) for e in v]
+                for k, v in self.seed_edge_traces.items()
+            },
         }
         try:
             with open(path, "w") as f:
@@ -801,6 +823,11 @@ class EdgeTracker:
                 for edge, count in hc.items():
                     self._aggregate_totals[edge] = self._aggregate_totals.get(edge, 0) + count
                     self._aggregate_total_count += count
+        # Restore edge traces
+        self.seed_edge_traces = {
+            k: {(e[0], e[1]) for e in v}
+            for k, v in data.get("edge_traces", {}).items()
+        }
         # Restore MinHash signatures and rebuild LSH index
         self._minhash = MinHashLSH(num_perm=64, num_bands=8)
         self._corpus_sig = None

@@ -549,6 +549,7 @@ class Fuzzer:
         mc_bandit=False,
         mc_cem=False,
         mopt=False,
+        targets=None,
         mc_elite_frac=0.1,
         mc_refit_interval=1000,
         stats_file=None,
@@ -711,6 +712,20 @@ class Fuzzer:
             self._mopt = MOptScheduler(n_particles=5, window_size=200)
             log.info("MOpt PSO scheduling enabled (5 particles, window=200)")
         self._last_ops_used: list[str] = []
+
+        # Directed distance for targeted fuzzing
+        self._distance = None
+        self._distance_targets = targets
+        self._anneal_progress = 0.0  # 0.0 = pure coverage, 1.0 = pure distance
+        if targets:
+            from fuzzer_tool.core.distance import TargetDistance
+            self._distance = TargetDistance(target, targets)
+            if self._distance.load():
+                print(f"[*] Directed mode: {len(self._distance.target_addrs)} target(s), "
+                      f"{len(self._distance.functions)} functions mapped")
+            else:
+                print("[!] Directed mode: failed to load target distances, falling back to coverage")
+                self._distance = None
 
         # Crash tracing: GDB backtrace + strace on crash inputs
         self._tracer = None
@@ -1621,6 +1636,19 @@ class Fuzzer:
                 mdl_weight = 1.0 + min(cl_ratio / 8.0, 1.0)
                 w *= mdl_weight
 
+            # Directed distance: anneal from coverage-maximizing to distance-minimizing
+            if self._distance:
+                seed_dist = meta.get("avg_distance", self._distance.max_distance)
+                max_d = self._distance.max_distance
+                norm_dist = min(seed_dist / max_d, 1.0) if max_d > 0 else 0.5
+                # Anneal: early runs favor coverage (alpha~0), later favor distance (alpha~1)
+                # Anneal over first 50% of expected run, then stay at full distance bias
+                alpha = min(self._anneal_progress * 2, 1.0)
+                # Distance weight: exp(-distance) gives higher weight to closer seeds
+                dist_weight = math.exp(-norm_dist * 5.0 * alpha)
+                # Blend: (1-alpha) * 1.0 + alpha * dist_weight
+                w *= (1.0 - alpha) + alpha * dist_weight
+
             weights.append(max(w, 1e-6))
 
         selected = random.choices(self.corpus, weights=weights, k=1)[0]
@@ -1765,6 +1793,28 @@ class Fuzzer:
                 new = self._edge_tracker.record_edges(seed_key, edge_bitmap)
                 if meta is not None and new:
                     meta["coverage_edges"] += len(new)
+
+        # Compute directed distance for targeted fuzzing
+        if self._distance and meta is not None and has_new_coverage:
+            edge_bitmap = self._get_current_edge_bitmap()
+            if edge_bitmap:
+                # Use edge bitmap positions as basic block proxies
+                hit_bbs = {i for i, v in enumerate(edge_bitmap) if v > 0}
+                # Record edge trace for distance computation
+                seed_key = self._seed_key(data)
+                edge_pairs = {(i, i) for i in hit_bbs}  # self-loops as BB proxies
+                self._edge_tracker.record_edge_trace(seed_key, edge_pairs)
+                # Compute average distance
+                avg_dist = self._distance.seed_distance(
+                    {(i, i) for i in hit_bbs}
+                )
+                meta["avg_distance"] = avg_dist
+
+        # Update annealing progress for directed mode
+        if self._distance and self.exec_count > 0:
+            # Anneal over first 20% of max_len-scaled iterations
+            anneal_target = max(5000, self.max_len * 10)
+            self._anneal_progress = min(1.0, self.exec_count / anneal_target)
 
         success = is_crash or is_interesting or has_new_coverage
 
