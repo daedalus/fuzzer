@@ -1007,8 +1007,8 @@ class PngChunkMutator:
         elif op == 1:
             return 0
         elif op == 2:
-            return val + random.randint(-10, 10)
+            return max(lo, min(hi, val + random.randint(-10, 10)))
         elif op == 3:
-            return val ^ (1 << random.randint(0, 31))
+            return max(lo, min(hi, val ^ (1 << random.randint(0, 31))))
         else:
-            return val * 2
+            return max(lo, min(hi, val * 2))
