@@ -2189,6 +2189,11 @@ class Fuzzer:
         if len(self._edge_tracker.seed_hit_counts) >= 2:
             diversity = self._edge_tracker.compute_corpus_diversity()
             div_str = f" | div: {diversity:.0f}"
+        # Jaccard index: average pairwise overlap between seeds
+        jac_str = ""
+        if len(self._edge_tracker.seed_hit_counts) >= 2:
+            avg_jac = self._edge_tracker.compute_average_jaccard()
+            jac_str = f" | jac: {avg_jac:.2f}"
         # Discovery rate
         dr = self.discovery_rate()
         dr_str = f" | rate: {dr:.1f} ed/kexec" if self.exec_count > 100 else ""
@@ -2216,7 +2221,7 @@ class Fuzzer:
         print(
             f"\r[*] execs: {self.exec_count} | corpus: {len(self.corpus)} | "
             f"crashes: {self.crash_count}{sig_str}{timeout_str} | eps: {eps:.0f} | "
-            f"time: {elapsed:.0f}s{rss_str}{ops_str}{dict_str}{markov_str}{cov_str}{mc_str}{div_str}{dr_str}{density_str}{repro_str}{brier_str}{crps_str}",
+            f"time: {elapsed:.0f}s{rss_str}{ops_str}{dict_str}{markov_str}{cov_str}{mc_str}{div_str}{jac_str}{dr_str}{density_str}{repro_str}{brier_str}{crps_str}",
             end="",
             flush=True,
         )

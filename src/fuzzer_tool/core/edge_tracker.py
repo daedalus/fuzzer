@@ -696,6 +696,29 @@ class EdgeTracker:
 
         return total_dist / len(keys) if keys else 0.0
 
+    def compute_average_jaccard(self) -> float:
+        """Compute average pairwise Jaccard similarity across all seeds.
+
+        Uses MinHash signatures for O(1) per pair. Returns value in [0, 1]
+        where 0 = all seeds have disjoint edge sets, 1 = all identical.
+
+        This is the Jaccard index exposed as a metric — useful for monitoring
+        corpus redundancy over time. High average Jaccard means the corpus
+        is heavily redundant; low means seeds cover diverse code regions.
+        """
+        keys = list(self._minhash.signatures.keys())
+        if len(keys) < 2:
+            return 0.0
+
+        total_jaccard = 0.0
+        count = 0
+        for i in range(len(keys)):
+            for j in range(i + 1, len(keys)):
+                total_jaccard += self._minhash.approximate_jaccard(keys[i], keys[j])
+                count += 1
+
+        return total_jaccard / count if count else 0.0
+
     def compute_wasserstein_weight(self, seed_key: str) -> float:
         """Compute scheduling weight based on Wasserstein distance to corpus centroid.
 
