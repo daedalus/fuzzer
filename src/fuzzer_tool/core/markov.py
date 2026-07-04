@@ -225,7 +225,8 @@ class MarkovChain:
         self._trains_since_snapshot = 0
 
         snapshot = self._build_snapshot()
-        if self._prev_snapshot is not None:
+        has_previous = self._prev_snapshot is not None
+        if has_previous:
             self.last_js_divergence = self._js_between_snapshots(
                 self._prev_snapshot, snapshot
             )
@@ -233,12 +234,12 @@ class MarkovChain:
 
         # Plateau: JS divergence is below what noise alone would produce
         # at this sample size — the distribution isn't meaningfully changing.
-        # This replaces the fixed JS < 0.01 with a sample-size-aware threshold.
+        # Requires a previous snapshot to compare against (not the first one).
         threshold = ks_significance_threshold(
             self._contexts_seen, alpha=0.05
         )
         return (
-            self._prev_snapshot is not None
+            has_previous
             and self.last_js_divergence < threshold
             and self._contexts_seen > self._snapshot_interval * 2
         )

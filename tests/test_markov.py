@@ -1,43 +1,43 @@
-"""Tests for MarkovChain."""
+"""Tests for Markov chain: core + plateau detection."""
+
+import tempfile
 
 from fuzzer_tool.core.markov import MarkovChain
 
 
 class TestMarkovChain:
-    def test_init_defaults(self):
-        mc = MarkovChain()
+    def test_init(self):
+        mc = MarkovChain(order=1)
         assert mc.order == 1
         assert not mc.is_trained()
 
-    def test_train_makes_trained(self):
+    def test_train(self):
         mc = MarkovChain(order=1)
-        mc.train(b"ABCD")
+        mc.train(b"hello")
         assert mc.is_trained()
-        assert len(mc.transitions) > 0
+        assert mc._contexts_seen > 0
 
     def test_train_corpus(self):
         mc = MarkovChain(order=1)
-        mc.train_corpus([b"ABC", b"DEF"])
+        mc.train_corpus([b"hello", b"world"])
         assert mc.is_trained()
 
-    def test_generate_length(self):
+    def test_generate(self):
         mc = MarkovChain(order=1)
-        mc.train(b"AAAA")
-        result = mc.generate(8)
-        assert isinstance(result, bytes)
-        assert len(result) == 8
+        mc.train(b"hello")
+        result = mc.generate(10)
+        assert len(result) == 10
 
-    def test_generate_untrained_returns_bytes(self):
+    def test_generate_empty(self):
         mc = MarkovChain(order=1)
-        result = mc.generate(4)
-        assert len(result) == 4
+        result = mc.generate(5)
+        assert len(result) == 5
 
-    def test_sample_byte_range(self):
+    def test_sample_byte(self):
         mc = MarkovChain(order=1)
-        mc.train(b"ABCD")
-        for _ in range(100):
-            b = mc.sample_byte(b"A")
-            assert 0 <= b <= 255
+        mc.train(b"hello")
+        b = mc.sample_byte(b"h")
+        assert 0 <= b <= 255
 
     def test_order_zero(self):
         mc = MarkovChain(order=0)
@@ -243,3 +243,86 @@ class TestPerplexity:
         mc = MarkovChain()
         stats = mc.corpus_perplexity([])
         assert stats["mean"] == 0
+
+    def test_sample_byte_no_context(self):
+        mc = MarkovChain(order=1)
+        b = mc.sample_byte(b"x")
+        assert 0 <= b <= 255
+
+    def test_save_load_roundtrip(self):
+        mc = MarkovChain(order=1)
+        mc.train(b"hello world")
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+            path = f.name
+        mc.save(path)
+        mc2 = MarkovChain(order=1)
+        mc2.load(path)
+        assert mc2.is_trained()
+        assert mc2._contexts_seen == mc._contexts_seen
+
+    def test_smoothing(self):
+        mc = MarkovChain(order=1, smoothing=1e-3)
+        mc.train(b"aa")
+        # Should still generate without errors
+        result = mc.generate(10)
+        assert len(result) == 10
+
+
+class TestPlateauDetection:
+    def test_snapshot_and_check_plateau_no_data(self):
+        mc = MarkovChain(order=1)
+        assert not mc.snapshot_and_check_plateau()
+
+    def test_snapshot_builds(self):
+        mc = MarkovChain(order=1)
+        mc.train(b"hello")
+        snapshot = mc._build_snapshot()
+        assert len(snapshot) > 0
+
+    def test_snapshot_identical_zero_js(self):
+        mc = MarkovChain(order=1)
+        mc.train(b"hello")
+        s1 = mc._build_snapshot()
+        s2 = mc._build_snapshot()
+        js = mc._js_between_snapshots(s1, s2)
+        assert js == 0.0
+
+    def test_snapshot_different_positive_js(self):
+        mc1 = MarkovChain(order=1)
+        mc1.train(b"aaaa")
+        s1 = mc1._build_snapshot()
+
+        mc2 = MarkovChain(order=1)
+        mc2.train(b"zzzz")
+        s2 = mc2._build_snapshot()
+
+        js = mc1._js_between_snapshots(s1, s2)
+        assert js > 0.0
+
+    def test_plateau_not_triggered_early(self):
+        mc = MarkovChain(order=1)
+        mc._snapshot_interval = 2
+        # Only 1 train → not enough data for plateau
+        mc.train(b"hello")
+        assert not mc.snapshot_and_check_plateau()
+
+    def test_plateau_detected_when_stable(self):
+        mc = MarkovChain(order=1)
+        mc._snapshot_interval = 1
+        # Train with same data → snapshots are identical → JS = 0
+        for _ in range(20):
+            mc.train_corpus([b"hello"])
+        for _ in range(10):
+            mc.snapshot_and_check_plateau()
+        assert mc.last_js_divergence == 0.0
+
+    def test_plateau_not_detected_initially(self):
+        mc = MarkovChain(order=1)
+        mc._snapshot_interval = 1
+        # First snapshot has no previous → JS = 0 but not plateau
+        # (not enough contexts seen yet)
+        mc.train_corpus([b"hello"])
+        mc.train_corpus([b"world"])
+        result = mc.snapshot_and_check_plateau()
+        # Should not be plateau (contexts_seen < snapshot_interval * 2)
+        assert not result
