@@ -21,7 +21,9 @@ extern void __afl_map_edge(unsigned int cur_loc);
 
 static jmp_buf png_jmpbuf;
 
-static jmp_buf png_jmpbuf;
+/* Track row allocation for cleanup on longjmp — setjmp error path
+ * cannot see locals declared after setjmp, so we use a static. */
+static unsigned char *volatile _row_ptr = NULL;
 
 /* Custom error handler: longjmp back to setjmp — proper libpng error flow */
 static void png_error_handler(png_structp png_ptr, png_const_charp msg) {
@@ -72,8 +74,10 @@ int fuzz_png(const unsigned char *buf, size_t size) {
     /* setjmp: on error, longjmp returns here with val=1 */
     if (setjmp(png_jmpbuf)) {
         /* Error occurred — libpng called our handler which longjmp'd.
-         * Clean up and return non-zero so the fuzzer detects the error. */
+         * Clean up everything including the row buffer (tracked via static). */
         __afl_map_edge(0x1100);
+        free(_row_ptr);
+        _row_ptr = NULL;
         png_destroy_read_struct(&png_ptr, &info_ptr, NULL);
         fclose(f);
         return 1;
@@ -110,12 +114,14 @@ int fuzz_png(const unsigned char *buf, size_t size) {
 
     size_t rowbytes = png_get_rowbytes(png_ptr, info_ptr);
     unsigned char *row = malloc(rowbytes);
+    _row_ptr = row;
     if (row) {
         for (png_uint_32 y = 0; y < height; y++) {
             png_read_row(png_ptr, row, NULL);
             __afl_map_edge(0x1400 + (y & 0xFF));
         }
         free(row);
+        _row_ptr = NULL;
     }
     __afl_map_edge(0x1500);
 
