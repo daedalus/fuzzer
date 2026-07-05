@@ -2228,6 +2228,11 @@ class Fuzzer:
 
     def run(self, iterations=0):
         print(f"[*] Target: {self.target}")
+        # Static branch density: conditional branches per KB of .text
+        from fuzzer_tool.core.elf import branch_density
+        bd = branch_density(self.target)
+        if bd is not None:
+            print(f"[*] Branch density: {bd:.1f} cond branches/KB")
         print(f"[*] Corpus: {self.corpus_dir} ({len(self.corpus)} seeds)")
         print(f"[*] Crashes: {self.crashes_dir}")
         print(f"[*] Max input length: {self.max_len}")
