@@ -1690,7 +1690,12 @@ class Fuzzer:
         else:
             self._temperature = 1.0
 
-        # Invalidate cached weights when corpus or edge tracker changes
+        # Invalidate cached weights when corpus structure or edge tracker changes.
+        # We accept slightly stale weights for time-dependent signals (age, burst,
+        # temperature) since they change gradually — recomputing every iteration
+        # is not worth the cost. The cache is invalidated when:
+        # - corpus_version changes: new seed added/removed (changes weight vector length)
+        # - edge_version changes: new edge discovered (changes edge tracker signals)
         corpus_version = len(self.corpus)
         edge_version = self.shm_cov.cumulative_edges if self.shm_cov else 0
         if not hasattr(self, '_weight_cache'):
