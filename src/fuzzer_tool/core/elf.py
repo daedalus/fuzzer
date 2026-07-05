@@ -237,3 +237,81 @@ def _branch_density_objdump(target: str) -> float | None:
         pass
 
     return None
+
+
+def _text_size(target: str) -> int | None:
+    """Get .text section size in bytes from ELF binary."""
+    try:
+        with open(target, "rb") as f:
+            elf = f.read()
+    except OSError:
+        return None
+
+    if len(elf) < 64 or elf[:4] != b"\x7fELF" or elf[4] != 2 or elf[5] != 1:
+        return None
+
+    e_shoff = struct.unpack_from("<Q", elf, 40)[0]
+    e_shnum = struct.unpack_from("<H", elf, 60)[0]
+    e_shentsize = struct.unpack_from("<H", elf, 58)[0]
+    e_shstrndx = struct.unpack_from("<H", elf, 62)[0]
+    if e_shnum == 0 or e_shstrndx >= e_shnum:
+        return None
+
+    shstr_off = e_shoff + e_shstrndx * e_shentsize
+    shstr_offset = struct.unpack_from("<Q", elf, shstr_off + 24)[0]
+
+    for i in range(e_shnum):
+        sh = e_shoff + i * e_shentsize
+        if sh + e_shentsize > len(elf):
+            break
+        sh_type = struct.unpack_from("<I", elf, sh + 4)[0]
+        sh_name_idx = struct.unpack_from("<I", elf, sh)[0]
+        name = elf[shstr_offset + sh_name_idx : shstr_offset + sh_name_idx + 32].split(b"\x00")[0]
+        if sh_type == 1 and name == b".text":
+            return struct.unpack_from("<Q", elf, sh + 32)[0]
+    return None
+
+
+def _next_power_of_2(n: int) -> int:
+    """Return the smallest power of 2 >= n."""
+    if n <= 0:
+        return 1
+    n -= 1
+    n |= n >> 1
+    n |= n >> 2
+    n |= n >> 4
+    n |= n >> 8
+    n |= n >> 16
+    return n + 1
+
+
+def estimate_map_size(target: str) -> int:
+    """Estimate optimal AFL_MAP_SIZE from branch density and .text size.
+
+    Formula:
+        estimated_edges = branch_density (branches/KB) × .text_size (KB)
+        map_size = next_power_of_2(estimated_edges × 2)  # 2x headroom
+
+    Clamped to [4096, 1048576] (AFL's practical range).
+
+    Args:
+        target: Path to ELF binary.
+
+    Returns:
+        Recommended map size (int), defaults to 65536 on failure.
+    """
+    DEFAULT = 65536
+
+    bd = branch_density(target)
+    ts = _text_size(target)
+    if bd is None or ts is None or ts == 0:
+        return DEFAULT
+
+    # Estimated edge count: density (per KB) × size (KB)
+    estimated_edges = bd * (ts / 1024)
+
+    # 2x headroom for hash collisions and edge aliasing
+    map_size = _next_power_of_2(int(estimated_edges * 2))
+
+    # Clamp to AFL's practical range
+    return max(4096, min(1048576, map_size))

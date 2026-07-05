@@ -594,6 +594,10 @@ class Fuzzer:
         self.seed = seed
         random.seed(seed)
 
+        # Auto-size edge bitmap from branch density
+        from fuzzer_tool.core.elf import estimate_map_size
+        self.map_size = estimate_map_size(target)
+
         # Cmplog: comparison tracing via LD_PRELOAD
         self._cmplog = None
         if cmplog:
@@ -826,7 +830,7 @@ class Fuzzer:
             }
         from fuzzer_tool.core.edge_tracker import EdgeTracker
 
-        self._edge_tracker = EdgeTracker()
+        self._edge_tracker = EdgeTracker(map_size=self.map_size)
         self._corpus_size_history: list[int] = []
 
         # Load persisted state if resuming
@@ -941,7 +945,7 @@ class Fuzzer:
 
         env = os.environ.copy()
         if self.use_coverage:
-            env["AFL_MAP_SIZE"] = "65536"
+            env["AFL_MAP_SIZE"] = str(self.map_size)
         if self.shm_cov:
             env["__AFL_SHM_ID"] = self.shm_cov.env_id
         if self._cmplog:
@@ -2233,6 +2237,7 @@ class Fuzzer:
         bd = branch_density(self.target)
         if bd is not None:
             print(f"[*] Branch density: {bd:.1f} cond branches/KB")
+        print(f"[*] Edge bitmap: {self.map_size:,} bytes (auto-sized)")
         print(f"[*] Corpus: {self.corpus_dir} ({len(self.corpus)} seeds)")
         print(f"[*] Crashes: {self.crashes_dir}")
         print(f"[*] Max input length: {self.max_len}")
