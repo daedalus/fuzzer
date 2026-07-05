@@ -1623,24 +1623,8 @@ class Fuzzer:
             return random.choice(self.corpus)
         return b"AAAAAAAA"
 
-    def _weighted_pick_seed(self) -> bytes:
-        now = time.time()
-
-        # Update simulated annealing temperature
-        if self._anneal_budget > 0:
-            self._temperature = max(0.1, 1.0 - self.exec_count / self._anneal_budget)
-        else:
-            self._temperature = 1.0
-
-        # Recompute edge tracker weights only when cumulative_edges changed
-        if not hasattr(self, '_last_edge_count'):
-            self._last_edge_count = -1
-        if self.shm_cov and self.shm_cov.cumulative_edges != self._last_edge_count:
-            self._last_edge_count = self.shm_cov.cumulative_edges
-            self._cached_weights = {}
-        elif not hasattr(self, '_cached_weights'):
-            self._cached_weights = {}
-
+    def _compute_weights(self, now: float) -> list[float]:
+        """Compute seed selection weights. Cached until corpus/edge-tracker changes."""
         weights = []
         for seed in self.corpus:
             meta = self.seed_meta.get(seed)
@@ -1651,62 +1635,79 @@ class Fuzzer:
             coverage = meta["coverage_edges"]
             age = now - meta["added_at"]
 
-            # Temperature: scales exploration-favoring signals
             T = self._temperature
 
             # Base weight: inverse fuzz count, boosted by coverage, decayed by age
-            # Temperature scales the exploration part (1/sqrt(fuzz_count))
             explore_part = T * (1.0 / math.sqrt(fuzz_count))
             exploit_part = (1.0 + coverage * 0.5) / (1.0 + age * 0.01)
-            base_w = explore_part * exploit_part
-            w = base_w
+            w = explore_part * exploit_part
 
             # Energy burst: newly added seeds get up to 5x boost (decays over 60s)
-            # Temperature scales the burst — at low T, burst is suppressed
             burst_factor = max(1.0, 1.0 + T * (5.0 - 1.0) - (age / 60.0) * T)
             w *= burst_factor
 
-            # Stale seed detection: temperature relaxes the staleness threshold
-            # At high T, even stale seeds get some play (low threshold = fewer penalized)
-            # At low T, staleness is punished strictly (high threshold = more penalized)
+            # Stale seed detection
             staleness = fuzz_count / max(coverage + 1, 1)
-            stale_threshold = 50.0 * T  # relaxed at high T, strict at low T
-            penalty = 0.01 if staleness > stale_threshold else 1.0
-            w *= penalty
+            stale_threshold = 50.0 * T
+            w *= 0.01 if staleness > stale_threshold else 1.0
 
-            # Edge tracker signals
+            # Edge tracker signals (skip expensive calls for seeds with no edges)
             seed_key = self._seed_key(seed)
             if seed_key not in self._cached_weights:
-                sub = self._edge_tracker.compute_subsumption_weight(seed_key)
-                div = self._edge_tracker.compute_hitcount_diversity_weight(seed_key)
-                spa = self._edge_tracker.compute_wasserstein_weight(seed_key)
-                self._cached_weights[seed_key] = (sub, div, spa)
+                if seed_key in self._edge_tracker.seed_edges and self._edge_tracker.seed_edges[seed_key]:
+                    sub = self._edge_tracker.compute_subsumption_weight(seed_key)
+                    div = self._edge_tracker.compute_hitcount_diversity_weight(seed_key)
+                    spa = self._edge_tracker.compute_wasserstein_weight(seed_key)
+                    self._cached_weights[seed_key] = (sub, div, spa)
+                else:
+                    self._cached_weights[seed_key] = (1.0, 1.0, 1.0)
             sub, div, spa = self._cached_weights[seed_key]
-            w *= sub
-            w *= div
-            w *= spa
+            w *= sub * div * spa
 
             # MDL codelength
-            mdl_weight = 1.0
             if self.markov_trained:
                 cl_ratio = self.markov.codelength_ratio(seed)
-                mdl_weight = 1.0 + min(cl_ratio / 8.0, 1.0)
-                w *= mdl_weight
+                w *= 1.0 + min(cl_ratio / 8.0, 1.0)
 
-            # Directed distance: anneal from coverage-maximizing to distance-minimizing
+            # Directed distance
             if self._distance:
                 seed_dist = meta.get("avg_distance", self._distance.max_distance)
                 max_d = self._distance.max_distance
                 norm_dist = min(seed_dist / max_d, 1.0) if max_d > 0 else 0.5
-                # Anneal: early runs favor coverage (alpha~0), later favor distance (alpha~1)
-                # Anneal over first 50% of expected run, then stay at full distance bias
                 alpha = min(self._anneal_progress * 2, 1.0)
-                # Distance weight: exp(-distance) gives higher weight to closer seeds
                 dist_weight = math.exp(-norm_dist * 5.0 * alpha)
-                # Blend: (1-alpha) * 1.0 + alpha * dist_weight
                 w *= (1.0 - alpha) + alpha * dist_weight
 
             weights.append(max(w, 1e-6))
+        return weights
+
+    def _weighted_pick_seed(self) -> bytes:
+        now = time.time()
+
+        # Update simulated annealing temperature
+        if self._anneal_budget > 0:
+            self._temperature = max(0.1, 1.0 - self.exec_count / self._anneal_budget)
+        else:
+            self._temperature = 1.0
+
+        # Invalidate cached weights when corpus or edge tracker changes
+        corpus_version = len(self.corpus)
+        edge_version = self.shm_cov.cumulative_edges if self.shm_cov else 0
+        if not hasattr(self, '_weight_cache'):
+            self._weight_cache = None
+            self._weight_cache_key = (-1, -1)
+            self._cached_weights = {}
+        cache_key = (corpus_version, edge_version)
+        if cache_key != self._weight_cache_key:
+            self._weight_cache = None
+            self._cached_weights = {}
+            self._weight_cache_key = cache_key
+
+        if self._weight_cache is not None:
+            weights = self._weight_cache
+        else:
+            weights = self._compute_weights(now)
+            self._weight_cache = weights
 
         selected = random.choices(self.corpus, weights=weights, k=1)[0]
 
