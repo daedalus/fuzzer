@@ -1,7 +1,5 @@
 """Tests for filesystem adapter: save_crash, load_corpus, save_to_corpus."""
 
-import hashlib
-
 from fuzzer_tool.adapters.filesystem import (
     hash_data,
     load_corpus,
@@ -12,7 +10,7 @@ from fuzzer_tool.core.bloom import BloomFilter
 
 
 def _h(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()[:16]
+    return hash_data(data)
 
 
 class TestHashData:

@@ -618,6 +618,7 @@ class Fuzzer:
 
         self.ptrace_cov: PtraceCoverage | None = None
         self.shm_cov: ShmCoverage | None = None
+        self._forkserver = None
         if self.use_coverage:
             if no_shm:
                 self._setup_ptrace(target, deep_coverage, max_bps)
@@ -796,6 +797,13 @@ class Fuzzer:
             if self._inprocess_runner._persistent:
                 print("[*] Persistent loader: enabled (1 process, many calls)")
 
+        # Forkserver: use C fuzz_loader for default execution path when available
+        if not self._inprocess_runner and not self._persistent_runner and not self.ptrace_cov:
+            from fuzzer_tool.adapters.forkserver import ForkserverRunner
+            self._forkserver = ForkserverRunner(target, timeout=self.timeout)
+            if self._forkserver.start():
+                log.info("Forkserver started for default execution path")
+
     def _setup_ptrace(self, target, deep_coverage, max_bps, fallback_hint=False):
         cov = PtraceCoverage(target, deep_coverage=deep_coverage, max_bps=max_bps)
         if cov.bb_addrs:
@@ -939,6 +947,13 @@ class Fuzzer:
 
         if self.ptrace_cov:
             return self._run_target_ptrace(data)
+
+        # Forkserver: use C fuzz_loader (avoids Python subprocess overhead)
+        if self._forkserver and self._forkserver._ready:
+            rc, bitmap = self._forkserver.run_one(data)
+            if bitmap and self.shm_cov and len(bitmap) <= self.shm_cov.size:
+                ctypes.memmove(self.shm_cov._ptr, bitmap, len(bitmap))
+            return rc, ""
 
         if self.shm_cov:
             self.shm_cov.reset_edge_map()

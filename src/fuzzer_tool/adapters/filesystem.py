@@ -67,13 +67,29 @@ def apply_delta(parent: bytes, diff: list[list[int]]) -> bytes:
 
 
 def hash_data(data: bytes) -> str:
-    """Compute SHA-256 hash prefix for deduplication.
+    """Compute fast hash for deduplication (xxhash, ~20x faster than SHA-256).
+
+    Falls back to SHA-256 if xxhash is not installed.
+    For crash filenames where collision resistance matters, use hash_data_crypto().
 
     Args:
         data: Raw bytes to hash.
 
     Returns:
         16-character hex digest.
+    """
+    try:
+        import xxhash
+        return xxhash.xxh64(data).hexdigest()[:16]
+    except ImportError:
+        return hashlib.sha256(data).hexdigest()[:16]
+
+
+def hash_data_crypto(data: bytes) -> str:
+    """Compute SHA-256 hash for crash filenames (collision-resistant).
+
+    Used where cryptographic hash properties matter (crash filenames,
+    reproducibility). For corpus dedup, use hash_data() instead.
     """
     return hashlib.sha256(data).hexdigest()[:16]
 
