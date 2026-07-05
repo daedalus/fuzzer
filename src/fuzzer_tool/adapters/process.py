@@ -9,7 +9,6 @@ import os
 import signal
 import subprocess
 import threading
-import time
 
 SIGNAL_CRASH_CODES = {134, 135, 136, 139, -6, -7, -8, -11}  # SIGABRT/SIGBUS/SIGFPE/SIGSEGV
 
@@ -37,6 +36,15 @@ def _clean_env(env: dict[str, str] | None = None) -> dict[str, str]:
     return e
 
 
+def _write_and_close(stream, data: bytes):
+    """Write data to a stream and close it, ignoring errors."""
+    try:
+        stream.write(data)
+        stream.close()
+    except (BrokenPipeError, OSError):
+        pass
+
+
 def run_target_stdin(
     target: str,
     data: bytes,
@@ -45,14 +53,13 @@ def run_target_stdin(
 ) -> tuple[int, str, int]:
     """Execute target with data on stdin.
 
-    Uses blocking os.waitpid instead of communicate(timeout=...) to avoid
-    CPython's busy-poll backoff (~24% wall time in profiling). Timeout is
-    handled at the fuzzer level via the outer execution loop.
+    Uses blocking os.waitpid + watchdog thread instead of
+    communicate(timeout=...) to avoid CPython's busy-poll backoff.
 
     Args:
         target: Path to target binary.
         data: Input data.
-        timeout: Timeout in seconds (used by watchdog thread).
+        timeout: Timeout in seconds.
         env: Optional environment variables.
 
     Returns:
@@ -76,15 +83,20 @@ def run_target_stdin(
         writer.start()
 
         # Watchdog: kill process group if still alive after timeout.
-        # Uses a separate event to distinguish "watchdog fired" from "cancelled".
-        watchdog_fired = threading.Event()
+        # `done` is set by the main thread the instant waitpid() returns, which
+        # interrupts the watchdog's wait() immediately instead of it sleeping
+        # for the full `timeout` regardless of how fast the child actually exited.
+        # `timed_out` is set only by the watchdog itself, and only on a genuine
+        # timeout — it's what the return value below actually checks.
+        done = threading.Event()
+        timed_out = threading.Event()
 
         def _watchdog():
-            time.sleep(timeout)
-            if not watchdog_fired.is_set():
-                watchdog_fired.set()
-                with contextlib.suppress(OSError):
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            if done.wait(timeout=timeout):
+                return  # main thread finished first — nothing to do
+            timed_out.set()
+            with contextlib.suppress(OSError):
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
 
         w = threading.Thread(target=_watchdog, daemon=True)
         w.start()
@@ -101,25 +113,16 @@ def run_target_stdin(
         except ChildProcessError:
             proc.returncode = -2
 
-        w.join(timeout=0.1)
+        done.set()  # wake the watchdog immediately; no join needed — daemon thread
         _untrack(proc.pid)
 
-        if watchdog_fired.is_set():
+        if timed_out.is_set():
             return -1, "timeout", proc.pid
 
         stderr = proc.stderr.read()
         return proc.returncode, stderr.decode(errors="replace"), proc.pid
     except Exception as e:
         return -2, str(e), 0
-
-
-def _write_and_close(stream, data: bytes):
-    """Write data to a stream and close it, ignoring errors."""
-    try:
-        stream.write(data)
-        stream.close()
-    except (BrokenPipeError, OSError):
-        pass
 
 
 def run_target_file(
@@ -132,13 +135,14 @@ def run_target_file(
 ) -> tuple[int, str, int]:
     """Execute target with data written to a temp file.
 
-    Uses blocking os.waitpid instead of communicate(timeout=...) to avoid
-    CPython's busy-poll backoff. Timeout is handled at the fuzzer level.
+    Uses blocking os.waitpid + watchdog thread. The watchdog uses
+    Event.wait(timeout) so it returns instantly when the main thread
+    signals completion, instead of sleeping for the full timeout.
 
     Args:
         target: Path to target binary.
         data: Input data.
-        timeout: Timeout in seconds (used by watchdog thread).
+        timeout: Timeout in seconds.
         tmp_dir: Temporary directory for input files.
         target_args: Target arguments ({file} is replaced with temp file path).
         env: Optional environment variables.
@@ -161,15 +165,16 @@ def run_target_file(
         )
         _track(proc.pid)
 
-        # Watchdog: kill process group if still alive after timeout
-        watchdog_fired = threading.Event()
+        # Watchdog: kill process group if still alive after timeout.
+        done = threading.Event()
+        timed_out = threading.Event()
 
         def _watchdog():
-            time.sleep(timeout)
-            if not watchdog_fired.is_set():
-                watchdog_fired.set()
-                with contextlib.suppress(OSError):
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            if done.wait(timeout=timeout):
+                return
+            timed_out.set()
+            with contextlib.suppress(OSError):
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
 
         w = threading.Thread(target=_watchdog, daemon=True)
         w.start()
@@ -186,12 +191,12 @@ def run_target_file(
         except ChildProcessError:
             proc.returncode = -2
 
-        w.join(timeout=0.1)
+        done.set()
         _untrack(proc.pid)
         with contextlib.suppress(OSError):
             tmp_file.unlink()
 
-        if watchdog_fired.is_set():
+        if timed_out.is_set():
             return -1, "timeout", proc.pid
 
         stderr = proc.stderr.read()
