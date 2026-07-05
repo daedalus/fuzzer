@@ -1,9 +1,15 @@
-"""Target process execution adapter."""
+"""Target process execution adapter.
+
+Uses blocking os.waitpid + watchdog thread instead of communicate(timeout=...)
+to avoid CPython's busy-poll backoff (24% wall time in profiling).
+"""
 
 import contextlib
 import os
 import signal
 import subprocess
+import threading
+import time
 
 SIGNAL_CRASH_CODES = {134, 135, 136, 139, -6, -7, -8, -11}  # SIGABRT/SIGBUS/SIGFPE/SIGSEGV
 
@@ -39,6 +45,9 @@ def run_target_stdin(
 ) -> tuple[int, str, int]:
     """Execute target with data on stdin.
 
+    Uses blocking os.waitpid + watchdog thread instead of
+    communicate(timeout=...) to avoid CPython's busy-poll backoff.
+
     Args:
         target: Path to target binary.
         data: Input data.
@@ -58,23 +67,57 @@ def run_target_stdin(
             preexec_fn=os.setsid,
         )
         _track(proc.pid)
+
+        # Write data in a thread to avoid pipe deadlock
+        writer = threading.Thread(
+            target=_write_and_close, args=(proc.stdin, data), daemon=True
+        )
+        writer.start()
+
+        # Watchdog: kill process group if still alive after timeout
+        watchdog_fired = threading.Event()
+
+        def _watchdog():
+            time.sleep(timeout)
+            if not watchdog_fired.is_set():
+                watchdog_fired.set()
+                with contextlib.suppress(OSError):
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+
+        w = threading.Thread(target=_watchdog, daemon=True)
+        w.start()
+
+        # Blocking wait — no busy-poll like communicate(timeout=)
         try:
-            _, stderr = proc.communicate(input=data, timeout=timeout)
-            return proc.returncode, stderr.decode(errors="replace"), proc.pid
-        except subprocess.TimeoutExpired:
-            with contextlib.suppress(OSError):
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            for _ in range(10):
-                try:
-                    proc.wait(timeout=0.5)
-                    break
-                except subprocess.TimeoutExpired:
-                    continue
+            _, status = os.waitpid(proc.pid, 0)
+            if os.WIFEXITED(status):
+                proc.returncode = os.WEXITSTATUS(status)
+            elif os.WIFSIGNALED(status):
+                proc.returncode = -os.WTERMSIG(status)
+            else:
+                proc.returncode = -2
+        except ChildProcessError:
+            proc.returncode = -2
+
+        w.join(timeout=0.1)
+        _untrack(proc.pid)
+
+        if watchdog_fired.is_set():
             return -1, "timeout", proc.pid
-        finally:
-            _untrack(proc.pid)
+
+        stderr = proc.stderr.read()
+        return proc.returncode, stderr.decode(errors="replace"), proc.pid
     except Exception as e:
         return -2, str(e), 0
+
+
+def _write_and_close(stream, data: bytes):
+    """Write data to a stream and close it, ignoring errors."""
+    try:
+        stream.write(data)
+        stream.close()
+    except (BrokenPipeError, OSError):
+        pass
 
 
 def run_target_file(
@@ -86,6 +129,9 @@ def run_target_file(
     env: dict[str, str] | None = None,
 ) -> tuple[int, str, int]:
     """Execute target with data written to a temp file.
+
+    Uses blocking os.waitpid + watchdog thread instead of
+    communicate(timeout=...) to avoid CPython's busy-poll backoff.
 
     Args:
         target: Path to target binary.
@@ -112,22 +158,41 @@ def run_target_file(
             preexec_fn=os.setsid,
         )
         _track(proc.pid)
+
+        # Watchdog: kill process group if still alive after timeout
+        watchdog_fired = threading.Event()
+
+        def _watchdog():
+            time.sleep(timeout)
+            if not watchdog_fired.is_set():
+                watchdog_fired.set()
+                with contextlib.suppress(OSError):
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+
+        w = threading.Thread(target=_watchdog, daemon=True)
+        w.start()
+
+        # Blocking wait — no busy-poll like communicate(timeout=)
         try:
-            _, stderr = proc.communicate(timeout=timeout)
-            return proc.returncode, stderr.decode(errors="replace"), proc.pid
-        except subprocess.TimeoutExpired:
-            with contextlib.suppress(OSError):
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            for _ in range(10):
-                try:
-                    proc.wait(timeout=0.5)
-                    break
-                except subprocess.TimeoutExpired:
-                    continue
+            _, status = os.waitpid(proc.pid, 0)
+            if os.WIFEXITED(status):
+                proc.returncode = os.WEXITSTATUS(status)
+            elif os.WIFSIGNALED(status):
+                proc.returncode = -os.WTERMSIG(status)
+            else:
+                proc.returncode = -2
+        except ChildProcessError:
+            proc.returncode = -2
+
+        w.join(timeout=0.1)
+        _untrack(proc.pid)
+        with contextlib.suppress(OSError):
+            tmp_file.unlink()
+
+        if watchdog_fired.is_set():
             return -1, "timeout", proc.pid
-        finally:
-            _untrack(proc.pid)
-            with contextlib.suppress(OSError):
-                tmp_file.unlink()
+
+        stderr = proc.stderr.read()
+        return proc.returncode, stderr.decode(errors="replace"), proc.pid
     except Exception as e:
         return -2, str(e), 0
