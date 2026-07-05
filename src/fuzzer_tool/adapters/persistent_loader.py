@@ -13,6 +13,7 @@ Protocol:
 import contextlib
 import logging
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -63,6 +64,8 @@ else:
     sys.exit(1)
 
 timeout_seconds = int(os.environ.get("_TIMEOUT", "5"))
+# Track child PID file so outer layer can kill orphaned grandchild on timeout
+child_pid_file = os.environ.get("_CHILD_PID_FILE", "")
 
 # Main loop
 while True:
@@ -78,12 +81,17 @@ while True:
         buf = (ctypes.c_uint8 * len(data))(*data)
 
         # Fork child to enforce timeout on .so target calls.
-        # Without this, a hanging func() wedges the entire fuzzer.
+        # Child calls os.setsid() to create its own process group, so the
+        # outer layer can kill it (and any of its children) on timeout.
+        # PEP 475 causes Python's os.waitpid to silently retry on EINTR,
+        # making signal.alarm ineffective here — the actual timeout is
+        # enforced by PersistentLoader.run_one's threaded readline.
         read_pipe, write_pipe = os.pipe()
         child_pid = os.fork()
         if child_pid == 0:
-            # Child: run target function, write rc to pipe, exit
+            # Child: own process group, run target function, write rc
             os.close(read_pipe)
+            os.setsid()
             try:
                 rc = func(buf, len(data))
             except Exception:
@@ -93,28 +101,27 @@ while True:
             os.close(write_pipe)
             os._exit(0)
 
-        # Parent: wait for child with alarm-based timeout
+        # Parent: track child PID for outer timeout cleanup
         os.close(write_pipe)
-        signal.signal(signal.SIGALRM, lambda s, f: None)
-        signal.alarm(timeout_seconds)
+        if child_pid_file:
+            try:
+                with open(child_pid_file, "w") as f:
+                    f.write(str(child_pid))
+            except OSError:
+                pass
         try:
             os.waitpid(child_pid, 0)
-            signal.alarm(0)
             rc_byte = os.read(read_pipe, 1)
             rc = rc_byte[0] if rc_byte else -2
         except ChildProcessError:
-            signal.alarm(0)
             rc = -2
-        except OSError:
-            # Alarm fired — child timed out, kill it
-            signal.alarm(0)
+        os.close(read_pipe)
+        # Clean up PID file
+        if child_pid_file:
             try:
-                os.kill(child_pid, signal.SIGKILL)
-                os.waitpid(child_pid, 0)
+                os.unlink(child_pid_file)
             except OSError:
                 pass
-            rc = -1
-        os.close(read_pipe)
 
         if NO_BMP:
             resp = f"RC {rc} 0\n".encode()
@@ -135,6 +142,12 @@ class PersistentLoader:
 
     Keeps a single Python subprocess alive. Each call loads the library
     once and calls the target function many times via stdin/stdout protocol.
+
+    Timeout enforcement:
+    - Loader script forks a child per call with os.setsid() (own process group)
+    - Loader writes child PID to a temp file for outer-layer cleanup
+    - run_one uses threaded readline with timeout
+    - On timeout: kills loader + orphaned grandchild (via PID file or process tree)
     """
 
     def __init__(
@@ -147,6 +160,7 @@ class PersistentLoader:
         self._ready = False
         self._last_bitmap = None
         self._restarting = False
+        self._child_pid_file: str | None = None
 
     def start(self) -> bool:
         if self._proc and self._proc.poll() is None:
@@ -156,11 +170,15 @@ class PersistentLoader:
         os.write(fd, _PERSISTENT_LOADER.encode())
         os.close(fd)
 
+        # Create PID file for grandchild tracking across timeouts
+        pid_fd, self._child_pid_file = tempfile.mkstemp(suffix=".pid", prefix="fuzz_child_")
+        os.close(pid_fd)
+
         env = os.environ.copy()
         if "AFL_MAP_SIZE" not in env:
             env["AFL_MAP_SIZE"] = "65536"
-        # Bitmap-free mode: parent reads SHM directly, no 65KB pipe transfer
         env["_LOADER_NO_BMP"] = "1"
+        env["_CHILD_PID_FILE"] = self._child_pid_file
 
         self._proc = subprocess.Popen(
             [sys.executable, self._loader_path],
@@ -234,6 +252,9 @@ class PersistentLoader:
         t.join(timeout=self.timeout)
         if t.is_alive():
             log.warning("Persistent loader timed out after %.1fs, restarting", self.timeout)
+            # Kill orphaned grandchild first (it's in its own process group)
+            self._kill_orphaned_child()
+            # Then kill the loader itself
             with contextlib.suppress(Exception):
                 self._proc.kill()
                 self._proc.wait()
@@ -269,6 +290,7 @@ class PersistentLoader:
         proc = self._proc
         self._proc = None
         self._ready = False
+        self._kill_orphaned_child()
         if proc is None:
             return
         try:
@@ -283,6 +305,27 @@ class PersistentLoader:
                 proc.kill()
             with contextlib.suppress(Exception):
                 proc.wait(timeout=1)
+        # Clean up PID file
+        if self._child_pid_file:
+            with contextlib.suppress(OSError):
+                os.unlink(self._child_pid_file)
+            self._child_pid_file = None
+
+    def _kill_orphaned_child(self):
+        """Kill the grandchild process (target function) if it was orphaned by timeout.
+
+        The loader script writes the grandchild PID to a temp file before
+        waiting. On timeout, we read that file and SIGKILL the process group.
+        """
+        if not self._child_pid_file:
+            return
+        try:
+            with open(self._child_pid_file) as f:
+                child_pid = int(f.read().strip())
+            # Kill the process group (grandchild called os.setsid())
+            os.killpg(child_pid, signal.SIGKILL)
+        except (OSError, ValueError, ProcessLookupError):
+            pass  # child already dead or PID file missing
 
     def __del__(self):
         self.stop()
