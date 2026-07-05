@@ -35,3 +35,4 @@ Thumbs.db
 fuzzing/
 *.core
 targets/png_read.so
+targets/png_read
