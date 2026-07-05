@@ -797,12 +797,15 @@ class Fuzzer:
             if self._inprocess_runner._persistent:
                 print("[*] Persistent loader: enabled (1 process, many calls)")
 
-        # Forkserver: use C fuzz_loader for default execution path when available
-        if not self._inprocess_runner and not self._persistent_runner and not self.ptrace_cov:
-            from fuzzer_tool.adapters.forkserver import ForkserverRunner
-            self._forkserver = ForkserverRunner(target, timeout=self.timeout)
-            if self._forkserver.start():
-                log.info("Forkserver started for default execution path")
+        # Forkserver: use C fuzz_loader for default execution path when available.
+        # Currently disabled: fuzz_loader reads bitmap from file while target
+        # writes to SHM — these are disconnected. Enable when fuzz_loader.c
+        # is updated to read from SHM via __AFL_SHM_ID.
+        # if not self._inprocess_runner and not self._persistent_runner and not self.ptrace_cov:
+        #     from fuzzer_tool.adapters.forkserver import ForkserverRunner
+        #     self._forkserver = ForkserverRunner(target, timeout=self.timeout)
+        #     if self._forkserver.start():
+        #         log.info("Forkserver started for default execution path")
 
     def _setup_ptrace(self, target, deep_coverage, max_bps, fallback_hint=False):
         cov = PtraceCoverage(target, deep_coverage=deep_coverage, max_bps=max_bps)
