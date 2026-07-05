@@ -623,7 +623,7 @@ class Fuzzer:
                 self._setup_ptrace(target, deep_coverage, max_bps)
             else:
                 try:
-                    self.shm_cov = ShmCoverage()
+                    self.shm_cov = ShmCoverage(size=self.map_size)
                     print(f"[*] Coverage: AFL SHM bitmap, id={self.shm_cov.env_id}")
                 except OSError:
                     self._setup_ptrace(target, deep_coverage, max_bps, fallback_hint=True)
