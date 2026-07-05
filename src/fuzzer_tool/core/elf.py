@@ -217,6 +217,9 @@ def _branch_density_objdump(target: str) -> float | None:
     cond_branches = len(cond_pattern.findall(output))
 
     # Get .text size from readelf
+    # readelf -S --wide format (fixed columns):
+    #   [Nr] Name  Type  Addr  Off  Size  ES  Flg ...
+    # Size is column 5 (0-indexed), Addr is column 3
     try:
         result = subprocess.run(
             ["readelf", "-S", "--wide", target],
@@ -225,14 +228,13 @@ def _branch_density_objdump(target: str) -> float | None:
         for line in result.stdout.decode(errors="replace").splitlines():
             if ".text" in line:
                 parts = line.split()
-                # .text section: size is typically at index 5 or 6
-                for p in parts:
+                if len(parts) >= 6:
                     try:
-                        size = int(p, 16)
-                        if size > 100:
+                        size = int(parts[5], 16)
+                        if size > 0:
                             return (cond_branches / size) * 1024
                     except ValueError:
-                        continue
+                        pass
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
 

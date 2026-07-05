@@ -251,7 +251,7 @@ class PersistentLoader:
         t.start()
         t.join(timeout=self.timeout)
         if t.is_alive():
-            log.warning("Persistent loader timed out after %.1fs, restarting", self.timeout)
+            log.warning("Persistent loader timed out after %.1fs", self.timeout)
             # Kill orphaned grandchild first (it's in its own process group)
             self._kill_orphaned_child()
             # Then kill the loader itself
@@ -259,11 +259,13 @@ class PersistentLoader:
                 self._proc.kill()
                 self._proc.wait()
             self._ready = False
+            # Don't retry — hangs are input-deterministic, retrying just
+            # costs another full timeout wait for the same hung input.
+            # Restart the loader so future inputs work, but return immediately.
             if not self._restarting:
                 self._restarting = True
                 try:
-                    if self.start():
-                        return self.run_one(data)
+                    self.start()
                 finally:
                     self._restarting = False
             return -1, None
