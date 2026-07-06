@@ -1599,11 +1599,11 @@ class Fuzzer:
                 buf[idx : idx + width] = val.to_bytes(width, "big")
         elif op == 8 and len(buf) > 2:
             del buf[random.randint(2, len(buf) - 1) :]
-        elif op == 9 and buf:
+        elif op == 9 and buf and len(buf) < self.max_len:
             size = random.randint(1, min(16, self.max_len - len(buf)))
             if size > 0:
                 buf.extend(random.randint(0, 255) for _ in range(size))
-        elif op == 10 and buf:
+        elif op == 10 and buf and len(buf) < self.max_len:
             idx = random.randint(0, len(buf) - 1)
             size = random.randint(1, min(16, len(buf) - idx))
             block = buf[idx : idx + size]
