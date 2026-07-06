@@ -1658,11 +1658,14 @@ class Fuzzer:
                     sub = self._edge_tracker.compute_subsumption_weight(seed_key)
                     div = self._edge_tracker.compute_hitcount_diversity_weight(seed_key)
                     spa = self._edge_tracker.compute_wasserstein_weight(seed_key)
-                    self._cached_weights[seed_key] = (sub, div, spa)
+                    cov = self._edge_tracker.compute_coverage_proximity(seed_key)
+                    self._cached_weights[seed_key] = (sub, div, spa, cov)
                 else:
-                    self._cached_weights[seed_key] = (1.0, 1.0, 1.0)
-            sub, div, spa = self._cached_weights[seed_key]
+                    self._cached_weights[seed_key] = (1.0, 1.0, 1.0, 0.5)
+            sub, div, spa, cov = self._cached_weights[seed_key]
             w *= sub * div * spa
+            # Coverage proximity: boost seeds close to uncovered edges
+            w *= 0.5 + cov  # scale [0,1] to [0.5, 1.5]
 
             # MDL codelength
             if self.markov_trained:
@@ -1730,6 +1733,8 @@ class Fuzzer:
                 staleness = fuzz_count / max(coverage + 1, 1)
                 penalty = 0.01 if staleness > 50 else 1.0
                 w = base_w * burst_factor * penalty * cached[0] * cached[1] * cached[2]
+                # Coverage proximity weight
+                w *= 0.5 + cached[3]
                 mdl_weight = 1.0
                 if self.markov_trained:
                     cl_ratio = self.markov.codelength_ratio(selected)

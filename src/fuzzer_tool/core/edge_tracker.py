@@ -669,6 +669,39 @@ class EdgeTracker:
 
         return wasserstein, ks, crps
 
+    def compute_coverage_proximity(self, seed_key: str, radius: int = 5) -> float:
+        """Compute how close a seed's edges are to uncovered edges.
+
+        For each edge the seed hits, check if any uncovered edge is within
+        `radius` positions in the bitmap. Seeds close to uncovered edges
+        are more likely to reveal new code paths when mutated.
+
+        Returns a weight in [0.0, 1.0]:
+        - 0.0 = seed is far from any uncovered edge
+        - 1.0 = seed is adjacent to uncovered edges
+        """
+        seed_edges = self.seed_edges.get(seed_key)
+        if not seed_edges or not self.cumulative_edges:
+            return 0.5
+
+        # Compute uncovered edge positions
+        max_edge = max(self.cumulative_edges) + radius + 1
+        all_edges = set(range(min(self.map_size, max_edge)))
+        uncovered = all_edges - self.cumulative_edges
+        if not uncovered:
+            return 0.0
+
+        # Count how many of this seed's edges are within radius of an uncovered edge
+        close_count = 0
+        for edge in seed_edges:
+            for offset in range(-radius, radius + 1):
+                neighbor = edge + offset
+                if 0 <= neighbor < self.map_size and neighbor in uncovered:
+                    close_count += 1
+                    break
+
+        return close_count / len(seed_edges) if seed_edges else 0.0
+
     def compute_corpus_diversity(self) -> float:
         """Estimate corpus diversity using MinHash signatures.
 
