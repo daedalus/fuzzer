@@ -664,6 +664,7 @@ class Fuzzer:
         self._duplicate_reject_count = 0
         self._total_corpus_attempts = 0
         self._pruned_count = 0
+        self._exec_baseline = 0
         self._peak_eps = 0.0
         self._total_exec_time = 0.0
         self._replay_budget_ms: float = 0.2  # max 200ms per batch for crash replay
@@ -2329,14 +2330,14 @@ class Fuzzer:
                 self.mc.maybe_refit()
             # Periodic minimization based on edge stats
             if (self.minimize_every_execs > 0
-                    and self.exec_count % self.minimize_every_execs == 0
+                    and (self.exec_count - self._exec_baseline) % self.minimize_every_execs == 0
                     and len(self.corpus) > 1):
                 self._auto_minimize_corpus()
             return True
 
         # Periodic minimization (also for non-interesting iterations)
         if (self.minimize_every_execs > 0
-                and self.exec_count % self.minimize_every_execs == 0
+                and (self.exec_count - self._exec_baseline) % self.minimize_every_execs == 0
                 and len(self.corpus) > 1):
             self._auto_minimize_corpus()
 
@@ -2796,6 +2797,11 @@ class Fuzzer:
                 if self._is_crash(returncode, stderr):
                     self.crash_count += 1
                     self.save_crash(seed, returncode, stderr)
+            # Baseline exec_count after initial seed replay — used for
+            # periodic minimization modulus so it fires at clean intervals
+            # regardless of initial corpus size.
+            _exec_baseline = self.exec_count
+            self._exec_baseline = _exec_baseline
 
             while not _shutdown:
                 if iterations and i >= iterations:
