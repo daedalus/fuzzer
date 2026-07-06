@@ -22,6 +22,14 @@ MUTATIONS = [
     "block_duplicate",
     "splice",
     "havoc",
+    "crossover",
+    "length_grow",
+    "length_shrink",
+    "repeat_clone",
+    "truncate",
+    "swap_regions",
+    "swap_bytes",
+    "endianness_swap",
 ]
 
 
@@ -46,9 +54,39 @@ def splice(a: bytes, b: bytes) -> bytes:
     return a[:cut_a] + b[cut_b:]
 
 
+def crossover(a: bytes, b: bytes) -> bytes:
+    """Two-point crossover: exchange a middle segment between two inputs.
+
+    Picks two random cut points in *a* and replaces the segment between
+    them with the corresponding segment from *b*.  Returns *a* unchanged
+    when either input is too short (< 4 bytes).
+
+    Args:
+        a: First input (base).
+        b: Second input (donor).
+
+    Returns:
+        Hybrid bytes with a middle segment swapped from *b*.
+    """
+    if len(a) < 4 or len(b) < 4:
+        return a
+    cut1 = random.randint(1, len(a) - 3)
+    cut2 = random.randint(cut1 + 1, len(a) - 1)
+    seg_len = cut2 - cut1
+    b_start = random.randint(0, max(0, len(b) - seg_len))
+    result = bytearray(a)
+    result[cut1:cut2] = b[b_start : b_start + seg_len]
+    return bytes(result)
+
+
 DICT_MUTATIONS = [
     "dict_insert",
     "dict_replace",
+    "dict_overwrite",
+    "dict_prepend",
+    "dict_append",
+    "checksum_repair",
+    "token_dup",
 ]
 
 

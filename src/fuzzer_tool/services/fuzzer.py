@@ -1388,6 +1388,33 @@ class Fuzzer:
                 end = min(idx + len(token), len(buf))
                 buf[idx:end] = token[: end - idx]
 
+            elif op == "dict_overwrite" and self.dictionary:
+                token = random.choice(self.dictionary)
+                buf = bytearray(token[: self.max_len])
+
+            elif op == "dict_prepend" and self.dictionary:
+                token = random.choice(self.dictionary)
+                if len(buf) + len(token) <= self.max_len:
+                    buf = bytearray(token) + buf
+
+            elif op == "dict_append" and self.dictionary:
+                token = random.choice(self.dictionary)
+                if len(buf) + len(token) <= self.max_len:
+                    buf.extend(token)
+
+            elif op == "checksum_repair" and buf and len(buf) >= 4:
+                import zlib
+                # Try CRC32 at end (4 bytes, big-endian)
+                pos = random.randint(0, max(0, len(buf) - 4))
+                data_portion = bytes(buf[:pos])
+                buf[pos : pos + 4] = zlib.crc32(data_portion).to_bytes(4, "big")
+
+            elif op == "token_dup" and self.dictionary and buf:
+                token = random.choice(self.dictionary)
+                if len(buf) + len(token) <= self.max_len:
+                    idx = random.randint(0, len(buf))
+                    buf[idx:idx] = token
+
             elif op == "markov_bytes" and buf:
                 idx = random.randint(0, len(buf) - 1)
                 ctx = (
@@ -1413,6 +1440,59 @@ class Fuzzer:
                     if others:
                         other = random.choice(others)
                         buf = bytearray(splice(bytes(buf), other)[: self.max_len])
+
+            elif op == "crossover" and len(self.corpus) >= 2 and buf:
+                from fuzzer_tool.core.mutations import crossover
+                a = random.choice(self.corpus)
+                b = random.choice(self.corpus)
+                if a is not data and b is not data:
+                    buf = bytearray(crossover(a, b)[: self.max_len])
+                else:
+                    others = [c for c in self.corpus if c is not data]
+                    if others:
+                        other = random.choice(others)
+                        buf = bytearray(crossover(bytes(buf), other)[: self.max_len])
+
+            elif op == "length_grow" and buf:
+                size = random.randint(1, min(64, self.max_len - len(buf)))
+                if size > 0:
+                    buf.extend(random.randint(0, 255) for _ in range(size))
+
+            elif op == "length_shrink" and len(buf) > 2:
+                cut = random.randint(1, len(buf) - 1)
+                del buf[cut:]
+
+            elif op == "repeat_clone" and buf:
+                idx = random.randint(0, len(buf) - 1)
+                size = random.randint(1, min(16, len(buf) - idx))
+                block = buf[idx : idx + size]
+                ins = idx + size
+                if ins <= len(buf) and len(buf) + len(block) <= self.max_len:
+                    buf[ins:ins] = block
+
+            elif op == "truncate" and len(buf) > 2:
+                cut = random.randint(2, len(buf))
+                del buf[cut:]
+
+            elif op == "swap_regions" and len(buf) >= 4:
+                i = random.randint(0, len(buf) - 3)
+                j = random.randint(i + 2, len(buf) - 1)
+                size = random.randint(1, min(j - i, 16))
+                a = buf[i : i + size]
+                b = buf[j : j + size]
+                buf[i : i + size] = b
+                buf[j : j + size] = a
+
+            elif op == "swap_bytes" and len(buf) >= 2:
+                i, j = random.sample(range(len(buf)), 2)
+                buf[i], buf[j] = buf[j], buf[i]
+
+            elif op == "endianness_swap" and buf:
+                width = random.choice([2, 4, 8])
+                if len(buf) >= width:
+                    idx = random.randint(0, len(buf) - width)
+                    val = int.from_bytes(buf[idx : idx + width], "little")
+                    buf[idx : idx + width] = val.to_bytes(width, "big")
 
             elif op == "grammar_mutate" and self.grammar:
                 mutated = self.grammar.mutate(bytes(buf), max_len=self.max_len)
@@ -1482,7 +1562,7 @@ class Fuzzer:
         if not buf:
             buf.extend(random.randint(0, 255) for _ in range(random.randint(1, 16)))
             return
-        op = random.randint(0, 4)
+        op = random.randint(0, 10)
         if op == 0:
             idx = random.randint(0, len(buf) - 1)
             buf[idx] ^= 1 << random.randint(0, 7)
@@ -1499,6 +1579,37 @@ class Fuzzer:
             idx = random.randint(0, len(buf) - 1)
             size = random.randint(1, min(len(buf) - 1, len(buf) - idx))
             del buf[idx : idx + size]
+        elif op == 5 and len(buf) >= 4:
+            import zlib
+            pos = random.randint(0, max(0, len(buf) - 4))
+            buf[pos : pos + 4] = zlib.crc32(bytes(buf[:pos])).to_bytes(4, "big")
+        elif op == 6 and len(buf) >= 2:
+            i = random.randint(0, len(buf) - 2)
+            j = random.randint(i + 1, len(buf) - 1)
+            size = random.randint(1, min(j - i, 8))
+            a = buf[i : i + size]
+            b = buf[j : j + size]
+            buf[i : i + size] = b
+            buf[j : j + size] = a
+        elif op == 7 and buf:
+            width = random.choice([2, 4])
+            if len(buf) >= width:
+                idx = random.randint(0, len(buf) - width)
+                val = int.from_bytes(buf[idx : idx + width], "little")
+                buf[idx : idx + width] = val.to_bytes(width, "big")
+        elif op == 8 and len(buf) > 2:
+            del buf[random.randint(2, len(buf) - 1) :]
+        elif op == 9 and buf:
+            size = random.randint(1, min(16, self.max_len - len(buf)))
+            if size > 0:
+                buf.extend(random.randint(0, 255) for _ in range(size))
+        elif op == 10 and buf:
+            idx = random.randint(0, len(buf) - 1)
+            size = random.randint(1, min(16, len(buf) - idx))
+            block = buf[idx : idx + size]
+            ins = idx + size
+            if ins <= len(buf) and len(buf) + len(block) <= self.max_len:
+                buf[ins:ins] = block
 
     def save_crash(self, data: bytes, returncode: int, stderr: str):
         from fuzzer_tool.adapters.filesystem import hash_data
