@@ -17,6 +17,7 @@ import logging
 import math
 import random
 import zlib
+from collections import defaultdict
 
 log = logging.getLogger(__name__)
 
@@ -867,6 +868,86 @@ class EdgeTracker:
 
         return {"total": total, "singleton": singleton, "cold": cold,
                 "warm": warm, "hot": hot, "avg_seeds_per_edge": avg}
+
+    def edge_hit_distribution(self) -> dict[int, dict]:
+        """Per-edge hit statistics across all seeds.
+
+        Returns dict mapping edge_index -> {
+            "hit_count": total hit count (sum of all seed hit counts),
+            "seed_count": number of distinct seeds hitting this edge,
+            "mean_hit_per_seed": average hits per seed,
+        }
+        """
+        result = {}
+        for edge, total_hits in self._global_edge_hits.items():
+            # Count distinct seeds hitting this edge
+            seed_count = 0
+            for seed_key, hc in self.seed_hit_counts.items():
+                if edge in hc:
+                    seed_count += 1
+            mean_per_seed = total_hits / seed_count if seed_count > 0 else 0.0
+            result[edge] = {
+                "hit_count": total_hits,
+                "seed_count": seed_count,
+                "mean_hit_per_seed": mean_per_seed,
+            }
+        return result
+
+    def edge_cooccurrence(self, top_k: int = 10) -> list[tuple[int, int, float]]:
+        """Find edges that co-occur most frequently in seeds.
+
+        Returns list of (edge_a, edge_b, jaccard_similarity) sorted
+        by similarity descending. Only considers edges hit by >= 2 seeds.
+        """
+        # Build edge -> seed set mapping
+        edge_to_seeds: dict[int, set[str]] = {}
+        for seed_key, edges in self.seed_edges.items():
+            for e in edges:
+                if e not in edge_to_seeds:
+                    edge_to_seeds[e] = set()
+                edge_to_seeds[e].add(seed_key)
+
+        # Only consider edges with >= 2 seeds
+        common = {e: s for e, s in edge_to_seeds.items() if len(s) >= 2}
+        edges = list(common.keys())
+
+        pairs = []
+        for i in range(min(len(edges), 200)):  # cap for performance
+            for j in range(i + 1, min(len(edges), 200)):
+                a, b = edges[i], edges[j]
+                intersection = len(common[a] & common[b])
+                union = len(common[a] | common[b])
+                if union > 0:
+                    jaccard = intersection / union
+                    if jaccard > 0.1:  # only meaningful co-occurrences
+                        pairs.append((a, b, jaccard))
+
+        pairs.sort(key=lambda x: x[2], reverse=True)
+        return pairs[:top_k]
+
+    def seed_uniqueness(self) -> dict[str, int]:
+        """For each seed, count how many edges ONLY it covers.
+
+        Returns dict mapping seed_key -> number of singleton edges.
+        Seeds with high uniqueness are irreplaceable.
+        """
+        # Build edge -> [seeds] mapping
+        edge_seeds: dict[int, list[str]] = {}
+        for seed_key, edges in self.seed_edges.items():
+            for e in edges:
+                if e not in edge_seeds:
+                    edge_seeds[e] = []
+                edge_seeds[e].append(seed_key)
+
+        # Singleton edges (hit by exactly 1 seed)
+        singletons = {e: seeds[0] for e, seeds in edge_seeds.items()
+                      if len(seeds) == 1}
+
+        # Count singletons per seed
+        result = defaultdict(int)
+        for edge, seed_key in singletons.items():
+            result[seed_key] += 1
+        return dict(result)
 
     def save(self, path: str) -> bool:
         """Save tracker state to JSON."""

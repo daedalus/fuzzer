@@ -2496,6 +2496,20 @@ class Fuzzer:
                   f"{rarity['cold']} cold / {rarity['warm']} warm / {rarity['hot']} hot")
             print(f"  Avg seeds/edge:    {rarity['avg_seeds_per_edge']:.1f}")
 
+            # Seed uniqueness: how many singleton edges each seed covers
+            uniqueness = self._edge_tracker.seed_uniqueness()
+            if uniqueness:
+                irreplaceable = sum(1 for v in uniqueness.values() if v > 0)
+                print(f"  Irreplaceable:     {irreplaceable} seeds cover singleton edges")
+
+            # Top co-occurring edges
+            cooccur = self._edge_tracker.edge_cooccurrence(top_k=3)
+            if cooccur:
+                pairs_str = ", ".join(
+                    f"e{a}↔e{b}({j:.0%})" for a, b, j in cooccur
+                )
+                print(f"  Edge co-occurrence:{pairs_str}")
+
         # Input size distribution
         if self._corpus_size_history:
             s = sorted(self._corpus_size_history)
