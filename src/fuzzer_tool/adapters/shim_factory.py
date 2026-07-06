@@ -354,9 +354,12 @@ def build_shim(target: str, mode: str = "auto") -> ShimResult:
 def load_shim(shim_path: str, mode: str = "direct") -> ctypes.CDLL | None:
     if not shim_path or not os.path.exists(shim_path):
         return None
-    if mode == "direct":
-        return ctypes.CDLL(shim_path, mode=ctypes.RTLD_GLOBAL)
-    return ctypes.CDLL(shim_path)
+    try:
+        if mode == "direct":
+            return ctypes.CDLL(shim_path, mode=ctypes.RTLD_GLOBAL)
+        return ctypes.CDLL(shim_path)
+    except OSError:
+        return None
 
 
 def read_bitmap(shim_handle: ctypes.CDLL) -> bytes | None:

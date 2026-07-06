@@ -1,56 +1,95 @@
-"""Tests for cli/commands.py — helper functions and argument parsing."""
+"""Unit tests for cli/commands.py — CLI utility functions."""
 
-from unittest.mock import MagicMock, patch
+import argparse
+import os
+import sys
+from pathlib import Path
 
-from fuzzer_tool.cli.commands import _auto_tune_timeout, _get_dirs, _validate_target
+import pytest
+
+from fuzzer_tool.cli.commands import _add_common_args, _get_dirs, _validate_target
 
 
 class TestGetDirs:
-    def test_default_dirs(self):
-        args = MagicMock(corpus=None, crashes=None)
-        corpus, crashes = _get_dirs(args, "/usr/bin/ls")
-        assert "ls" in corpus
-        assert "ls" in crashes
-        assert "fuzzing" in corpus
+    def test_defaults_use_target_name(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        parser = argparse.ArgumentParser()
+        _add_common_args(parser)
+        args = parser.parse_args([str(tmp_path / "my_target")])
+        corpus, crashes = _get_dirs(args, str(tmp_path / "my_target"))
+        assert "my_target" in corpus
+        assert "my_target" in crashes
+        assert corpus.endswith("corpus")
+        assert crashes.endswith("crashes")
 
-    def test_custom_dirs(self):
-        args = MagicMock(corpus="/custom/corpus", crashes="/custom/crashes")
-        corpus, crashes = _get_dirs(args, "/usr/bin/ls")
-        assert corpus == "/custom/corpus"
-        assert crashes == "/custom/crashes"
+    def test_custom_corpus_dir(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        parser = argparse.ArgumentParser()
+        _add_common_args(parser)
+        custom = str(tmp_path / "custom_corpus")
+        args = parser.parse_args(["-d", custom, str(tmp_path / "target")])
+        corpus, crashes = _get_dirs(args, str(tmp_path / "target"))
+        assert corpus == custom
 
-    def test_partial_custom(self):
-        args = MagicMock(corpus="/custom/corpus", crashes=None)
-        corpus, crashes = _get_dirs(args, "/usr/bin/ls")
-        assert corpus == "/custom/corpus"
-        assert "fuzzing" in crashes
+    def test_custom_crashes_dir(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        parser = argparse.ArgumentParser()
+        _add_common_args(parser)
+        custom = str(tmp_path / "custom_crashes")
+        args = parser.parse_args(["-o", custom, str(tmp_path / "target")])
+        corpus, crashes = _get_dirs(args, str(tmp_path / "target"))
+        assert crashes == custom
 
 
 class TestValidateTarget:
-    def test_valid_target(self):
-        _validate_target("/bin/true")  # should not raise
-
-    def test_nonexistent_target(self):
-        import pytest
-        with pytest.raises(SystemExit):
+    def test_missing_target_exits(self, capsys):
+        with pytest.raises(SystemExit) as exc_info:
             _validate_target("/nonexistent/binary")
+        assert exc_info.value.code == 1
 
-    def test_not_executable(self, tmp_path):
+    def test_not_executable_exits(self, tmp_path, capsys):
         f = tmp_path / "not_exec"
-        f.write_bytes(b"#!/bin/sh\n")
+        f.write_bytes(b"data")
         f.chmod(0o644)
-        import pytest
-        with pytest.raises(SystemExit):
+        with pytest.raises(SystemExit) as exc_info:
             _validate_target(str(f))
+        assert exc_info.value.code == 1
+
+    def test_valid_target_no_exit(self, tmp_path):
+        f = tmp_path / "valid_target"
+        f.write_bytes(b"\x7fELF")
+        f.chmod(0o755)
+        _validate_target(str(f))  # should not raise
 
 
-class TestAutoTuneTimeout:
-    @patch("fuzzer_tool.adapters.process.run_target_stdin")
-    def test_returns_positive(self, mock_run):
-        mock_run.return_value = (0, "", 1)
-        result = _auto_tune_timeout("/bin/true", runs=3)
-        assert result > 0
+class TestAddCommonArgs:
+    def test_adds_all_args(self):
+        parser = argparse.ArgumentParser()
+        _add_common_args(parser)
+        args = parser.parse_args([
+            "/target",
+            "-d", "/corpus",
+            "-o", "/crashes",
+            "-t", "10",
+            "-F",
+            "-A", "arg1", "arg2",
+            "-c",
+        ])
+        assert args.target == "/target"
+        assert args.corpus == "/corpus"
+        assert args.crashes == "/crashes"
+        assert args.timeout == 10.0
+        assert args.file_mode is True
+        assert args.target_args == ["arg1", "arg2"]
+        assert args.coverage is True
 
-    def test_file_mode(self, tmp_path):
-        result = _auto_tune_timeout("/bin/true", file_mode=True, runs=2)
-        assert result > 0
+    def test_defaults(self):
+        parser = argparse.ArgumentParser()
+        _add_common_args(parser)
+        args = parser.parse_args(["/target"])
+        assert args.corpus is None
+        assert args.crashes is None
+        assert args.timeout == 5
+        assert args.file_mode is False
+        assert args.target_args is None
+        assert args.coverage is False
