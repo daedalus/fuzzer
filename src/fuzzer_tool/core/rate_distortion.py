@@ -66,7 +66,6 @@ class RateDistortionCorpus:
         if total_edges == 0:
             return [(len(seed_edges), 0.0)]
 
-        remaining_edges = set(all_edges)
         remaining_seeds = dict(seed_edges)
         curve = [(len(remaining_seeds), 1.0)]
 
@@ -89,7 +88,11 @@ class RateDistortionCorpus:
 
             # Remove the seed
             removed_edges = remaining_seeds.pop(best_key)
-            remaining_edges -= removed_edges
+
+            # Recompute covered edges from remaining seeds
+            remaining_edges = set()
+            for edges in remaining_seeds.values():
+                remaining_edges |= edges
 
             # Record point on curve
             if len(remaining_seeds) % step_size == 0 or not remaining_seeds:
