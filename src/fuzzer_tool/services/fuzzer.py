@@ -1529,6 +1529,73 @@ class Fuzzer:
         else:
             self._duplicate_reject_count += 1
 
+    def _trim_new_coverage(self, data: bytes, parent: bytes) -> None:
+        """Trim input to minimal size that still hits the same edges.
+
+        After a mutation produces new coverage, try removing chunks of bytes
+        and re-executing. If the trimmed input still hits the same new edges,
+        keep it removed. This produces smaller, more focused crash inputs and
+        reduces corpus bloat.
+        """
+        # Get the current edge set as our "must-hit" target
+        if self.shm_cov:
+            current_edges = self.shm_cov.read_bitmap()
+        elif self.ptrace_cov:
+            current_edges = bytes(self.ptrace_cov.edge_map)
+        else:
+            return
+
+        # Binary search for minimal input size
+        best = data
+        step = max(1, len(data) // 8)
+
+        while len(best) > step:
+            # Try removing a chunk from the end
+            trimmed = best[:-step]
+            rc, _ = self._run_target(trimmed)
+            if rc in (-2, -1):
+                break  # timeout or error — stop trimming
+
+            # Check if same edges are still hit
+            if self.shm_cov:
+                trimmed_edges = self.shm_cov.read_bitmap()
+            elif self.ptrace_cov:
+                trimmed_edges = bytes(self.ptrace_cov.edge_map)
+            else:
+                break
+
+            # If the new edges from the original are still present, accept trim
+            if self._edges_subset_of(trimmed_edges, current_edges):
+                best = trimmed
+            else:
+                break  # lost edges — stop trimming
+
+        if len(best) < len(data):
+            # Replace in corpus if trimmed version is smaller
+            seed_key = self._seed_key(data)
+            if data in self.seed_meta:
+                self.seed_meta.pop(data, None)
+            if data in self.corpus:
+                idx = self.corpus.index(data)
+                self.corpus[idx] = best
+            self.seed_meta[best] = {
+                "fuzz_count": 0,
+                "coverage_edges": self._edge_tracker.get_seed_edge_count(seed_key),
+                "edge_bitmap": bytearray(0),
+                "redqueen_offsets": [],
+                "added_at": time.time(),
+                "lineage_depth": self.seed_meta.get(data, {}).get("lineage_depth", 0) + 1,
+            }
+            log.debug("Trimmed %d -> %d bytes", len(data), len(best))
+
+    @staticmethod
+    def _edges_subset_of(candidate: bytes, reference: bytes) -> bool:
+        """Check if all non-zero positions in reference are also non-zero in candidate."""
+        for i in range(min(len(candidate), len(reference))):
+            if reference[i] and not candidate[i]:
+                return False
+        return True
+
     def _auto_minimize_corpus(self):
         """Inline corpus minimization: hash dedup + subsumption pruning."""
         if not self.corpus:
@@ -1937,6 +2004,9 @@ class Fuzzer:
 
         if is_interesting or has_new_coverage:
             self.save_to_corpus(mutated, parent=data)
+            # Coverage-guided trimming: try to minimize inputs that hit new edges
+            if has_new_coverage and len(mutated) > 10:
+                self._trim_new_coverage(mutated, data)
             if self.mc and self.mc_cem:
                 self.mc.add_elite(mutated, 2)
                 self.mc.maybe_refit()
