@@ -664,6 +664,7 @@ class Fuzzer:
         self._duplicate_reject_count = 0
         self._total_corpus_attempts = 0
         self._pruned_count = 0
+        self._last_minimize_exec = 0
         self._peak_eps = 0.0
         self._total_exec_time = 0.0
         self._replay_budget_ms: float = 0.2  # max 200ms per batch for crash replay
@@ -1684,9 +1685,14 @@ class Fuzzer:
                 stale_count += 1
         stale_ratio = stale_count / max(len(unique), 1)
         target_size = self.max_corpus if self.max_corpus > 0 else len(unique)
-        if stale_ratio > 0.3 and len(unique) > target_size:
-            # Reduce target by stale ratio — prune the dead weight
-            target_size = max(target_size, int(len(unique) * (1.0 - stale_ratio)))
+        if stale_ratio > 0.3:
+            # Stale seeds detected — prune them even if under max_corpus.
+            # Reduce target by stale ratio to remove dead weight.
+            if len(unique) > target_size:
+                target_size = max(target_size, int(len(unique) * (1.0 - stale_ratio)))
+            else:
+                # Under max_corpus but many stale seeds — still prune them
+                target_size = int(len(unique) * (1.0 - stale_ratio))
 
         # Prune subsumed seeds using edge coverage + diversity scoring
         if len(unique) > target_size:
@@ -1741,6 +1747,10 @@ class Fuzzer:
                 if seed in self.seed_meta:
                     new_meta[seed] = self.seed_meta[seed]
             self.seed_meta = new_meta
+            # Invalidate weight caches (corpus changed)
+            self._weight_cache = None
+            self._cached_weights = {}
+            self._last_minimize_exec = self.exec_count
             self._pruned_count += removed
             log.info(
                 "Auto-minimized corpus: %d -> %d seeds -> pruned/ (stale_ratio=%.1f)",
@@ -2192,7 +2202,20 @@ class Fuzzer:
             if self.mc and self.mc_cem:
                 self.mc.add_elite(mutated, 2)
                 self.mc.maybe_refit()
+            # Periodic minimization based on edge stats
+            if (self.minimize_every_execs > 0
+                    and self.exec_count - self._last_minimize_exec >= self.minimize_every_execs
+                    and len(self.corpus) > 1):
+                self._auto_minimize_corpus()
+                self._last_minimize_exec = self.exec_count
             return True
+
+        # Periodic minimization (also for non-interesting iterations)
+        if (self.minimize_every_execs > 0
+                and self.exec_count - self._last_minimize_exec >= self.minimize_every_execs
+                and len(self.corpus) > 1):
+            self._auto_minimize_corpus()
+            self._last_minimize_exec = self.exec_count
 
         return False
 
@@ -2665,11 +2688,6 @@ class Fuzzer:
                     if i % 500 == 0:
                         import gc
                         gc.collect()
-                # Periodic minimization based on edge stats
-                if (self.minimize_every_execs > 0
-                        and self.exec_count % self.minimize_every_execs == 0
-                        and len(self.corpus) > 1):
-                    self._auto_minimize_corpus()
                 if i % 500 == 0 and self.replay_n > 0:
                     self._run_crash_replays()
                 if self.stats_file and i % self.stats_interval == 0:
