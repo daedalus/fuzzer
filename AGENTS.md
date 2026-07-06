@@ -100,3 +100,6 @@ Fuzzer state is saved to `{corpus_dir}/state.json` on shutdown. Use `--resume` t
 - **Do not clean the corpus between runs.** The corpus directory accumulates discovered inputs across sessions. Running `rm -rf corpus/*` destroys coverage history and forces the fuzzer to rediscover everything from scratch. Always use `--resume` to continue. When generating a new corpus (e.g. `corpus_png.py`), write to a fresh directory, not an existing one.
 - **Verify claims against code.** Before acting on behavior, type, or API shape, read the source. Don't infer from names.
 - **Run the full test suite after changes.** `pytest` must pass before considering any change complete.
+- **Hash functions must be consistent.** When matching filenames against content (corpus eviction, dedup), use `hash_data()` from `fuzzer_tool.adapters.filesystem` — not `hashlib.sha256()` directly. `hash_data()` prefers xxhash when installed; hardcoding SHA-256 causes silent data loss.
+- **Cache invalidation on method renames.** When renaming a method that has side-effect calls (e.g. `_invalidate_*_cache()`), grep for all call sites. A renamed method silently drops its callers' invalidation hooks.
+- **No hardcoded counts in tests.** Use `>=` for minimum bounds, not `==`. Operators and features are added frequently; `assert len(X) == N` breaks on every addition.
