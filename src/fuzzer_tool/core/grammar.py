@@ -812,7 +812,7 @@ class PngChunkMutator:
         if not chunks:
             return self._generate_random_png(max_len)
 
-        op = random.randint(0, 15)
+        op = random.randint(0, 21)
         if op == 0:
             return self._mutate_ihdr(chunks, max_len)
         elif op == 1:
@@ -843,8 +843,20 @@ class PngChunkMutator:
             return self._mutate_idat_multi(chunks, max_len)
         elif op == 14:
             return self._mutate_color_depth(chunks, max_len)
-        else:
+        elif op == 15:
             return self._large_input(chunks, max_len)
+        elif op == 16:
+            return self._add_trns(chunks, max_len)
+        elif op == 17:
+            return self._mutate_ancillary(chunks, max_len)
+        elif op == 18:
+            return self._micro_idat(chunks, max_len)
+        elif op == 19:
+            return self._duplicate_ihdr(chunks, max_len)
+        elif op == 20:
+            return self._move_after_iend(chunks, max_len)
+        else:
+            return self._generate_random_png(max_len)
 
     def _mutate_ihdr(self, chunks: list[PngChunk], max_len: int) -> bytes:
         """Mutate IHDR fields: width, height, bit_depth, color_type."""
@@ -1133,6 +1145,99 @@ class PngChunkMutator:
             return max(lo, min(hi, val ^ (1 << random.randint(0, 31))))
         else:
             return max(lo, min(hi, val * 2))
+
+    def _add_trns(self, chunks: list[PngChunk], max_len: int) -> bytes:
+        """Add tRNS (transparency) chunk — triggers alpha/transparency code paths."""
+        ihdr = self._find_chunk(chunks, b"IHDR")
+        ct = ihdr.data[6] if ihdr and len(ihdr.data) >= 7 else 2
+
+        # tRNS format depends on color type
+        if ct == 0:  # grayscale: 2-byte value
+            trns_data = struct.pack(">H", random.randint(0, 65535))
+        elif ct == 2:  # RGB: 6-byte value
+            trns_data = struct.pack(">HHH",
+                random.randint(0, 65535),
+                random.randint(0, 65535),
+                random.randint(0, 65535))
+        elif ct == 3:  # palette: up to 256 alpha values
+            n = random.randint(1, 8)
+            trns_data = bytes(random.randint(0, 255) for _ in range(n))
+        else:
+            trns_data = b"\x00" * 2
+
+        chunks.insert(random.randint(1, len(chunks)), PngChunk(b"tRNS", trns_data))
+        return serialize_png_chunks(chunks)[:max_len]
+
+    def _mutate_ancillary(self, chunks: list[PngChunk], max_len: int) -> bytes:
+        """Mutate ancillary chunk values (gAMA, cHRM, pHYs, sRGB)."""
+        # Add or mutate gAMA (gamma value, 4 bytes)
+        if random.random() < 0.5:
+            gama_value = random.choice([
+                0x0000B18F,  # 1.0 gamma
+                0x00002303,  # 0.4545 gamma
+                0x00000000,  # zero gamma (invalid)
+                0xFFFFFFFF,  # max gamma
+                random.randint(0, 0xFFFFFFFF),
+            ])
+            gama_data = struct.pack(">I", gama_value)
+            # Remove existing gAMA if present
+            chunks = [c for c in chunks if c.chunk_type != b"gAMA"]
+            chunks.insert(random.randint(1, len(chunks)), PngChunk(b"gAMA", gama_data))
+        else:
+            # Mutate pHYs (pixels per unit)
+            phys_data = struct.pack(">IIB",
+                random.randint(0, 10000),  # x
+                random.randint(0, 10000),  # y
+                random.choice([0, 1]))     # unit: 0=unknown, 1=meter
+            chunks = [c for c in chunks if c.chunk_type != b"pHYs"]
+            chunks.insert(random.randint(1, len(chunks)), PngChunk(b"pHYs", phys_data))
+
+        return serialize_png_chunks(chunks)[:max_len]
+
+    def _micro_idat(self, chunks: list[PngChunk], max_len: int) -> bytes:
+        """Replace IDAT with minimal 1-byte compressed data (edge case in inflate)."""
+        idat = self._find_chunk(chunks, b"IDAT")
+        if not idat:
+            return serialize_png_chunks(chunks)[:max_len]
+
+        # 1-byte zlib stream: just the header + empty block
+        idat.data = b"\x78\x01\x03\x00\x00\x00\x00\x01"
+        return serialize_png_chunks(chunks)[:max_len]
+
+    def _duplicate_ihdr(self, chunks: list[PngChunk], max_len: int) -> bytes:
+        """Duplicate the IHDR chunk (tests critical chunk duplication handling)."""
+        ihdr = self._find_chunk(chunks, b"IHDR")
+        if not ihdr:
+            return serialize_png_chunks(chunks)[:max_len]
+
+        clone = PngChunk(b"IHDR", ihdr.data)
+        chunks.insert(random.randint(0, len(chunks)), clone)
+        return serialize_png_chunks(chunks)[:max_len]
+
+    def _move_after_iend(self, chunks: list[PngChunk], max_len: int) -> bytes:
+        """Move a chunk after IEND (tests IEND-not-last handling)."""
+        if len(chunks) < 3:
+            return serialize_png_chunks(chunks)[:max_len]
+
+        # Find IEND
+        iend_idx = -1
+        for i, c in enumerate(chunks):
+            if c.chunk_type == b"IEND":
+                iend_idx = i
+                break
+        if iend_idx < 0:
+            return serialize_png_chunks(chunks)[:max_len]
+
+        # Pick a non-IEND, non-IHDR chunk to move
+        candidates = [(i, c) for i, c in enumerate(chunks)
+                      if c.chunk_type not in (b"IHDR", b"IEND")]
+        if not candidates:
+            return serialize_png_chunks(chunks)[:max_len]
+
+        idx, chunk = random.choice(candidates)
+        del chunks[idx]
+        chunks.insert(iend_idx + 1, chunk)
+        return serialize_png_chunks(chunks)[:max_len]
 
     def _mutate_color_depth(self, chunks: list[PngChunk], max_len: int) -> bytes:
         """Force specific color_type + bit_depth combinations to test transform paths."""
