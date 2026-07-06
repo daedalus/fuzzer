@@ -1649,7 +1649,14 @@ class Fuzzer:
         return True
 
     def _auto_minimize_corpus(self):
-        """Inline corpus minimization: hash dedup + subsumption pruning."""
+        """Inline corpus minimization: hash dedup + subsumption pruning.
+
+        Keeps inputs that discovered the most edges. Removed inputs are
+        moved to ``corpus/pruned/`` by the caller (save_to_corpus).
+        Triggered either by max_corpus limit or dynamically when the
+        corpus accumulates too many stale seeds (high fuzz_count, zero
+        new edges).
+        """
         if not self.corpus:
             return
 
@@ -1664,27 +1671,46 @@ class Fuzzer:
                 seen.add(h)
                 unique.append(seed)
 
-        # Prune subsumed seeds using Wasserstein diversity scoring
-        if len(unique) > self.max_corpus:
+        # Dynamic trigger: if >30% of seeds have 0 edges after 50+ fuzzes,
+        # the corpus is bloated — prune even if under max_corpus.
+        stale_count = 0
+        for seed in unique:
+            meta = self.seed_meta.get(seed)
+            if meta and meta["fuzz_count"] >= 50 and meta["coverage_edges"] == 0:
+                stale_count += 1
+        stale_ratio = stale_count / max(len(unique), 1)
+        target_size = self.max_corpus if self.max_corpus > 0 else len(unique)
+        if stale_ratio > 0.3 and len(unique) > target_size:
+            # Reduce target by stale ratio — prune the dead weight
+            target_size = max(target_size, int(len(unique) * (1.0 - stale_ratio)))
+
+        # Prune subsumed seeds using edge coverage + diversity scoring
+        if len(unique) > target_size:
             scored = []
             for seed in unique:
                 seed_key = self._seed_key(seed)
                 edge_count = self._edge_tracker.get_seed_edge_count(seed_key)
                 meta = self.seed_meta.get(seed)
                 fuzz = meta["fuzz_count"] if meta else 0
+                discovered = meta["coverage_edges"] if meta else 0
 
-                # Edge coverage score: unique edges are valuable
-                edge_score = edge_count * 10 + (1.0 / max(fuzz, 1))
+                # Edge coverage score: seeds that discovered edges are valuable
+                # Penalize seeds that were fuzzed many times without discoveries
+                edge_score = discovered * 10
+                if fuzz > 0 and discovered == 0:
+                    # Stale seed: penalize proportionally to fuzz count
+                    edge_score *= max(0.01, 1.0 / (1.0 + fuzz * 0.01))
+                else:
+                    # Fresh or productive seed: slight boost for low fuzz count
+                    edge_score += 1.0 / max(fuzz, 1)
 
                 # Wasserstein diversity: spatially distant seeds are valuable
-                # (they explore different code regions)
                 wasserstein_weight = self._edge_tracker.compute_wasserstein_weight(seed_key)
 
-                # Combine: edge coverage + spatial diversity
                 score = edge_score * wasserstein_weight
                 scored.append((score, seed))
             scored.sort(key=lambda x: x[0], reverse=True)
-            unique = [s for _, s in scored[: self.max_corpus]]
+            unique = [s for _, s in scored[:target_size]]
 
         removed = len(self.corpus) - len(unique)
         if removed > 0:
@@ -1696,9 +1722,10 @@ class Fuzzer:
                     new_meta[seed] = self.seed_meta[seed]
             self.seed_meta = new_meta
             log.info(
-                "Auto-minimized corpus: %d -> %d seeds",
+                "Auto-minimized corpus: %d -> %d seeds (stale_ratio=%.1f)",
                 len(self.corpus) + removed,
                 len(self.corpus),
+                stale_ratio,
             )
 
     def _pick_seed(self) -> bytes:
@@ -2251,6 +2278,18 @@ class Fuzzer:
                 print(f"  Max lineage depth: {max(depths)}")
                 avg_depth = sum(depths) / len(depths)
                 print(f"  Avg lineage depth: {avg_depth:.1f}")
+
+        # Per-seed edge discovery stats
+        if self.seed_meta:
+            edges_per_seed = [m.get("coverage_edges", 0) for m in self.seed_meta.values()]
+            productive = sum(1 for e in edges_per_seed if e > 0)
+            stale = sum(
+                1 for m in self.seed_meta.values()
+                if m.get("fuzz_count", 0) >= 50 and m.get("coverage_edges", 0) == 0
+            )
+            total_seeds = len(self.seed_meta)
+            print(f"  Productive seeds:  {productive}/{total_seeds} discovered edges")
+            print(f"  Stale seeds:       {stale}/{total_seeds} (50+ fuzzes, 0 edges)")
 
         # Input size distribution
         if self._corpus_size_history:

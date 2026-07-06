@@ -203,7 +203,13 @@ def _commit_results(
     output_dir: str | None,
     corpus_path: Path,
 ) -> tuple[int, int]:
-    """Write minimized corpus to output dir or prune in-place."""
+    """Write minimized corpus to output dir or prune in-place.
+
+    When no output_dir is specified, removed files are moved to a
+    ``pruned/`` subfolder inside the corpus directory instead of being
+    deleted.  This preserves coverage-redundant inputs for later
+    analysis while keeping the active corpus lean.
+    """
     kept_set = set(kept)
     out_path = Path(output_dir) if output_dir else corpus_path
 
@@ -216,12 +222,15 @@ def _commit_results(
             if meta.exists():
                 shutil.copy2(meta, out_path / meta.name)
     else:
+        pruned_dir = corpus_path / "pruned"
+        pruned_dir.mkdir(parents=True, exist_ok=True)
         for fpath in corpus_files:
             if str(fpath) not in kept_set:
-                fpath.unlink(missing_ok=True)
+                dest = pruned_dir / fpath.name
+                shutil.move(str(fpath), str(dest))
                 meta = fpath.with_suffix(".txt")
                 if meta.exists():
-                    meta.unlink(missing_ok=True)
+                    shutil.move(str(meta), str(pruned_dir / meta.name))
 
     removed = len(corpus_files) - len(kept)
     return len(kept), removed
