@@ -842,6 +842,32 @@ class EdgeTracker:
         """Get number of edges a specific seed covers."""
         return len(self.seed_edges.get(seed_key, set()))
 
+    def edge_rarity_stats(self) -> dict:
+        """Compute per-edge rarity statistics.
+
+        Returns dict with:
+          - total: number of discovered edges
+          - singleton: edges hit by exactly 1 seed (rare — lossy if pruned)
+          - cold: edges hit by 2-3 seeds (fragile coverage)
+          - warm: edges hit by 4-10 seeds
+          - hot: edges hit by >10 seeds (redundant — safe to prune)
+          - avg_seeds_per_edge: average number of seeds hitting each edge
+        """
+        if not self._global_edge_hits:
+            return {"total": 0, "singleton": 0, "cold": 0, "warm": 0,
+                    "hot": 0, "avg_seeds_per_edge": 0.0}
+
+        counts = list(self._global_edge_hits.values())
+        total = len(counts)
+        singleton = sum(1 for c in counts if c == 1)
+        cold = sum(1 for c in counts if 2 <= c <= 3)
+        warm = sum(1 for c in counts if 4 <= c <= 10)
+        hot = sum(1 for c in counts if c > 10)
+        avg = sum(counts) / total if total else 0.0
+
+        return {"total": total, "singleton": singleton, "cold": cold,
+                "warm": warm, "hot": hot, "avg_seeds_per_edge": avg}
+
     def save(self, path: str) -> bool:
         """Save tracker state to JSON."""
         data = {

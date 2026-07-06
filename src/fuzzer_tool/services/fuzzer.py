@@ -1992,6 +1992,18 @@ class Fuzzer:
             w *= sub * div * spa
             w *= 0.5 + cov
 
+            # Rare edge boost: seeds hitting singleton/cold edges are
+            # irreplaceable — multiply weight to prevent pruning and
+            # encourage re-fuzzing to find deeper paths from those edges.
+            seed_edges = self._edge_tracker.seed_edges.get(seed_key, set())
+            if seed_edges:
+                rare_count = sum(
+                    1 for e in seed_edges
+                    if self._edge_tracker._global_edge_hits.get(e, 0) <= 2
+                )
+                if rare_count > 0:
+                    w *= 1.0 + rare_count * 0.5
+
             # Directed distance (cheap, always include)
             if self._distance:
                 seed_dist = meta.get("avg_distance", self._distance.max_distance)
@@ -2476,6 +2488,13 @@ class Fuzzer:
             total_seeds = len(self.seed_meta)
             print(f"  Productive seeds:  {productive}/{total_seeds} discovered edges")
             print(f"  Stale seeds:       {stale}/{total_seeds} (50+ fuzzes, 0 edges)")
+
+        # Edge rarity stats
+        rarity = self._edge_tracker.edge_rarity_stats()
+        if rarity["total"] > 0:
+            print(f"  Edge rarity:       {rarity['singleton']} singleton / "
+                  f"{rarity['cold']} cold / {rarity['warm']} warm / {rarity['hot']} hot")
+            print(f"  Avg seeds/edge:    {rarity['avg_seeds_per_edge']:.1f}")
 
         # Input size distribution
         if self._corpus_size_history:
