@@ -812,6 +812,64 @@ class PngChunkMutator:
         if not chunks:
             return self._generate_random_png(max_len)
 
+        op = random.randint(0, 27)
+        if op == 0:
+            return self._mutate_ihdr(chunks, max_len)
+        elif op == 1:
+            return self._mutate_plte(chunks, max_len)
+        elif op == 2:
+            return self._mutate_idat(chunks, max_len)
+        elif op == 3:
+            return self._duplicate_chunk(chunks, max_len)
+        elif op == 4:
+            return self._delete_chunk(chunks, max_len)
+        elif op == 5:
+            return self._reorder_chunks(chunks, max_len)
+        elif op == 6:
+            return self._corrupt_crc(chunks, max_len)
+        elif op == 7:
+            return self._mutate_length(chunks, max_len)
+        elif op == 8:
+            return self._split_idat(chunks, max_len)
+        elif op == 9:
+            return self._mutate_filter(chunks, max_len)
+        elif op == 10:
+            return self._mutate_interlace(chunks, max_len)
+        elif op == 11:
+            return self._add_empty_chunks(chunks, max_len)
+        elif op == 12:
+            return self._corrupt_signature(data, max_len)
+        elif op == 13:
+            return self._mutate_idat_multi(chunks, max_len)
+        elif op == 14:
+            return self._mutate_color_depth(chunks, max_len)
+        elif op == 15:
+            return self._large_input(chunks, max_len)
+        elif op == 16:
+            return self._add_trns(chunks, max_len)
+        elif op == 17:
+            return self._mutate_ancillary(chunks, max_len)
+        elif op == 18:
+            return self._micro_idat(chunks, max_len)
+        elif op == 19:
+            return self._duplicate_ihdr(chunks, max_len)
+        elif op == 20:
+            return self._move_after_iend(chunks, max_len)
+        elif op == 21:
+            return self._mutate_chrm(chunks, max_len)
+        elif op == 22:
+            return self._mutate_sbit(chunks, max_len)
+        elif op == 23:
+            return self._mutate_iccp(chunks, max_len)
+        elif op == 24:
+            return self._duplicate_plte(chunks, max_len)
+        elif op == 25:
+            return self._corrupt_idat_data(chunks, max_len)
+        elif op == 26:
+            return self._extreme_dimensions(chunks, max_len)
+        else:
+            return self._generate_random_png(max_len)
+
         op = random.randint(0, 21)
         if op == 0:
             return self._mutate_ihdr(chunks, max_len)
@@ -1237,6 +1295,93 @@ class PngChunkMutator:
         idx, chunk = random.choice(candidates)
         del chunks[idx]
         chunks.insert(iend_idx + 1, chunk)
+        return serialize_png_chunks(chunks)[:max_len]
+
+    def _mutate_chrm(self, chunks: list[PngChunk], max_len: int) -> bytes:
+        """Add or mutate cHRM (chromaticity) chunk — tests color space handling."""
+        chrm_data = struct.pack(">8I",
+            random.randint(0, 100000),  # white point x
+            random.randint(0, 100000),  # white point y
+            random.randint(0, 100000),  # red x
+            random.randint(0, 100000),  # red y
+            random.randint(0, 100000),  # green x
+            random.randint(0, 100000),  # green y
+            random.randint(0, 100000),  # blue x
+            random.randint(0, 100000),  # blue y
+        )
+        chunks = [c for c in chunks if c.chunk_type != b"cHRM"]
+        chunks.insert(random.randint(1, len(chunks)), PngChunk(b"cHRM", chrm_data))
+        return serialize_png_chunks(chunks)[:max_len]
+
+    def _mutate_sbit(self, chunks: list[PngChunk], max_len: int) -> bytes:
+        """Add or mutate sBIT (significant bits) chunk — tests precision handling."""
+        ihdr = self._find_chunk(chunks, b"IHDR")
+        ct = ihdr.data[6] if ihdr and len(ihdr.data) >= 7 else 2
+
+        if ct in (0, 4):  # grayscale or gray+alpha: 2 values
+            sbit_data = bytes([random.randint(1, 16), random.randint(1, 16)])
+        elif ct in (2, 6):  # RGB or RGBA: 4-6 values
+            n = 4 if ct == 2 else 6
+            sbit_data = bytes(random.randint(1, 16) for _ in range(n))
+        elif ct == 3:  # palette: 3 values
+            sbit_data = bytes(random.randint(1, 8) for _ in range(3))
+        else:
+            sbit_data = b"\x08" * 3
+
+        chunks = [c for c in chunks if c.chunk_type != b"sBIT"]
+        chunks.insert(random.randint(1, len(chunks)), PngChunk(b"sBIT", sbit_data))
+        return serialize_png_chunks(chunks)[:max_len]
+
+    def _mutate_iccp(self, chunks: list[PngChunk], max_len: int) -> bytes:
+        """Add iCCP (ICC profile) chunk — tests color management paths."""
+        # Minimal ICC profile: just a valid header
+        iccp_name = b"icc"
+        compression = 0  # zlib
+        profile_data = zlib.compress(b"\x00" * 64) if 'zlib' in dir() else b"\x00" * 64
+        iccp_data = iccp_name + bytes([compression]) + profile_data
+
+        chunks = [c for c in chunks if c.chunk_type != b"iCCP"]
+        chunks.insert(random.randint(1, len(chunks)), PngChunk(b"iCCP", iccp_data))
+        return serialize_png_chunks(chunks)[:max_len]
+
+    def _duplicate_plte(self, chunks: list[PngChunk], max_len: int) -> bytes:
+        """Duplicate PLTE chunk — tests duplicate palette handling."""
+        plte = self._find_chunk(chunks, b"PLTE")
+        if not plte:
+            return serialize_png_chunks(chunks)[:max_len]
+
+        clone = PngChunk(b"PLTE", plte.data)
+        idx = chunks.index(plte)
+        chunks.insert(idx + 1, clone)
+        return serialize_png_chunks(chunks)[:max_len]
+
+    def _corrupt_idat_data(self, chunks: list[PngChunk], max_len: int) -> bytes:
+        """Replace IDAT data with random bytes (tests inflate error handling)."""
+        idat = self._find_chunk(chunks, b"IDAT")
+        if not idat:
+            return serialize_png_chunks(chunks)[:max_len]
+
+        # Replace with random bytes that look like zlib but aren't
+        idat.data = bytes(random.randint(0, 255) for _ in range(random.randint(4, 32)))
+        return serialize_png_chunks(chunks)[:max_len]
+
+    def _extreme_dimensions(self, chunks: list[PngChunk], max_len: int) -> bytes:
+        """Set extreme width/height values to test dimension handling."""
+        ihdr = self._find_chunk(chunks, b"IHDR")
+        if not ihdr or len(ihdr.data) < 13:
+            return serialize_png_chunks(chunks)[:max_len]
+
+        d = bytearray(ihdr.data)
+        # Set very large or very small dimensions
+        dim = random.choice([
+            (1, 1),      # minimal
+            (1, 65535),  # max height
+            (65535, 1),  # max width
+            (10000, 10000),  # large square
+        ])
+        struct.pack_into(">I", d, 0, dim[0])
+        struct.pack_into(">I", d, 4, dim[1])
+        ihdr.data = bytes(d)
         return serialize_png_chunks(chunks)[:max_len]
 
     def _mutate_color_depth(self, chunks: list[PngChunk], max_len: int) -> bytes:
