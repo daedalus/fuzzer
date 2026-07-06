@@ -1946,7 +1946,15 @@ class Fuzzer:
         return b"AAAAAAAA"
 
     def _compute_weights(self, now: float) -> list[float]:
-        """Compute seed selection weights. Cached until corpus/edge-tracker changes."""
+        """Compute seed selection weights. Cached until corpus/edge-tracker changes.
+
+        Uses five statistical signals from edge aggregation:
+          1. Base: inverse fuzz count + coverage + age (exploitation)
+          2. Rare edge boost: singleton/cold edge coverage (irreplaceability)
+          3. Hit frequency: seeds consistently hitting edges are reliable
+          4. Edge gap targeting: boost seeds near under-covered edges
+          5. Edge diversity: prefer seeds whose edges don't overlap with others
+        """
         weights = []
         for seed in self.corpus:
             meta = self.seed_meta.get(seed)
@@ -1974,9 +1982,6 @@ class Fuzzer:
             w *= 0.01 if staleness > stale_threshold else 1.0
 
             # Edge tracker signals: compute lazily, cache per-seed.
-            # On cold cache (after edge discovery), compute for a random
-            # subset of seeds to amortize cost — avoids O(N) Wasserstein
-            # for ALL seeds every edge discovery.
             seed_key = self._seed_key(seed)
             if seed_key not in self._cached_weights:
                 if (seed_key in self._edge_tracker.seed_edges
@@ -1992,9 +1997,9 @@ class Fuzzer:
             w *= sub * div * spa
             w *= 0.5 + cov
 
-            # Rare edge boost: seeds hitting singleton/cold edges are
-            # irreplaceable — multiply weight to prevent pruning and
-            # encourage re-fuzzing to find deeper paths from those edges.
+            # Signal 2: Rare edge boost — seeds hitting singleton/cold edges
+            # are irreplaceable. High weight prevents pruning and encourages
+            # re-fuzzing to find deeper paths from those rare edges.
             seed_edges = self._edge_tracker.seed_edges.get(seed_key, set())
             if seed_edges:
                 rare_count = sum(
@@ -2003,6 +2008,48 @@ class Fuzzer:
                 )
                 if rare_count > 0:
                     w *= 1.0 + rare_count * 0.5
+
+            # Signal 3: Hit frequency — seeds that consistently hit edges
+            # (high mean_hit_per_seed) are more reliable than sporadic ones.
+            # A seed that hits 10 edges 50 times each is more useful than
+            # one that hits 10 edges 1 time each (might be noise).
+            if seed_edges:
+                total_hits = 0
+                for e in seed_edges:
+                    total_hits += self._edge_tracker._global_edge_hits.get(e, 0)
+                mean_hits = total_hits / len(seed_edges) if seed_edges else 0
+                # Boost seeds with consistent hits (mean > 3), penalize sporadic (mean < 1.5)
+                if mean_hits > 3:
+                    w *= 1.0 + (mean_hits - 3) * 0.1
+                elif mean_hits < 1.5 and fuzz_count > 10:
+                    w *= 0.7
+
+            # Signal 4: Edge gap targeting — boost seeds whose edges include
+            # under-covered edges (low seed_count). This steers the fuzzer
+            # toward coverage gaps.
+            if seed_edges:
+                gap_score = 0
+                for e in seed_edges:
+                    seed_count = self._edge_tracker._global_edge_hits.get(e, 0)
+                    if seed_count <= 2:
+                        gap_score += 1
+                if gap_score > 0:
+                    w *= 1.0 + gap_score * 0.3
+
+            # Signal 5: Edge diversity — penalize seeds whose edges overlap
+            # with recently-selected seeds. Encourages exploring different
+            # code regions instead of re-fuzzing the same paths.
+            if seed_edges and hasattr(self, '_recent_seed_edges'):
+                overlap = 0
+                for recent in self._recent_seed_edges:
+                    overlap += len(seed_edges & recent)
+                if overlap > 0:
+                    # Penalize proportionally to overlap ratio
+                    penalty = overlap / max(len(seed_edges), 1)
+                    w *= max(0.3, 1.0 - penalty * 0.5)
+
+            # Signal 5: Edge diversity — computed lazily in _weighted_pick_seed
+            # using max边际 coverage selection (not here for performance).
 
             # Directed distance (cheap, always include)
             if self._distance:
@@ -2024,6 +2071,12 @@ class Fuzzer:
             self._temperature = max(0.1, 1.0 - self.exec_count / self._anneal_budget)
         else:
             self._temperature = 1.0
+
+        # Edge diversity: track recently selected seeds' edges and penalize
+        # overlap. This encourages exploring different code regions.
+        if not hasattr(self, '_recent_seed_edges'):
+            self._recent_seed_edges: list[set[int]] = []
+            self._recent_seed_max = 20
 
         # Invalidate cached weights when corpus structure or edge tracker changes.
         # Two-level cache:
@@ -2074,6 +2127,14 @@ class Fuzzer:
             self._weight_cache = weights
 
         selected = random.choices(self.corpus, weights=weights, k=1)[0]
+
+        # Track selected seed's edges for diversity penalty next time
+        sel_key = self._seed_key(selected)
+        sel_edges = self._edge_tracker.seed_edges.get(sel_key, set())
+        if sel_edges:
+            self._recent_seed_edges.append(sel_edges)
+            if len(self._recent_seed_edges) > self._recent_seed_max:
+                self._recent_seed_edges.pop(0)
 
         # Cache signal data for ablation logging (consumed by fuzz_one)
         if self._ablation_file:
