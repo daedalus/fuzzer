@@ -1795,7 +1795,23 @@ class Fuzzer:
             if meta and meta["fuzz_count"] >= 50 and meta["coverage_edges"] == 0:
                 stale_count += 1
         stale_ratio = stale_count / max(len(unique), 1)
-        target_size = self.max_corpus if self.max_corpus > 0 else len(unique)
+
+        # Determine target corpus size.
+        # explicit max_corpus: use it directly.
+        # no max_corpus: dynamic cap = max(productive_seeds * 3, 100).
+        # This keeps the corpus proportional to discovered coverage.
+        if self.max_corpus > 0:
+            target_size = self.max_corpus
+        else:
+            # Dynamic cap: based on discovered edges, not per-seed counts.
+            # Keep enough seeds to cover all edges with some exploration buffer.
+            edges = 0
+            if self.shm_cov:
+                edges = self.shm_cov.cumulative_edges
+            elif self.ptrace_cov:
+                edges = self.ptrace_cov.cumulative_edges
+            target_size = max(edges * 2, 50)
+
         if stale_ratio > 0.3:
             # Stale seeds detected — prune them even if under max_corpus.
             # Reduce target by stale ratio to remove dead weight.
