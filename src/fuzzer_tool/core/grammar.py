@@ -812,7 +812,7 @@ class PngChunkMutator:
         if not chunks:
             return self._generate_random_png(max_len)
 
-        op = random.randint(0, 7)
+        op = random.randint(0, 15)
         if op == 0:
             return self._mutate_ihdr(chunks, max_len)
         elif op == 1:
@@ -827,8 +827,24 @@ class PngChunkMutator:
             return self._reorder_chunks(chunks, max_len)
         elif op == 6:
             return self._corrupt_crc(chunks, max_len)
-        else:
+        elif op == 7:
             return self._mutate_length(chunks, max_len)
+        elif op == 8:
+            return self._split_idat(chunks, max_len)
+        elif op == 9:
+            return self._mutate_filter(chunks, max_len)
+        elif op == 10:
+            return self._mutate_interlace(chunks, max_len)
+        elif op == 11:
+            return self._add_empty_chunks(chunks, max_len)
+        elif op == 12:
+            return self._corrupt_signature(data, max_len)
+        elif op == 13:
+            return self._mutate_idat_multi(chunks, max_len)
+        elif op == 14:
+            return self._mutate_color_depth(chunks, max_len)
+        else:
+            return self._large_input(chunks, max_len)
 
     def _mutate_ihdr(self, chunks: list[PngChunk], max_len: int) -> bytes:
         """Mutate IHDR fields: width, height, bit_depth, color_type."""
@@ -971,6 +987,111 @@ class PngChunkMutator:
                 break
         return result[:max_len]
 
+    def _split_idat(self, chunks: list[PngChunk], max_len: int) -> bytes:
+        """Split one IDAT into multiple chunks (tests chunk assembly)."""
+        idat = self._find_chunk(chunks, b"IDAT")
+        if not idat or len(idat.data) < 4:
+            return serialize_png_chunks(chunks)[:max_len]
+
+        d = idat.data
+        n_chunks = random.randint(2, min(4, len(d)))
+        chunk_size = len(d) // n_chunks
+        pieces = []
+        for i in range(n_chunks):
+            start = i * chunk_size
+            end = start + chunk_size if i < n_chunks - 1 else len(d)
+            pieces.append(PngChunk(b"IDAT", d[start:end]))
+
+        idx = chunks.index(idat)
+        chunks[idx:idx + 1] = pieces
+        return serialize_png_chunks(chunks)[:max_len]
+
+    def _mutate_filter(self, chunks: list[PngChunk], max_len: int) -> bytes:
+        """Mutate PNG row filter type (first byte of each scanline)."""
+        idat = self._find_chunk(chunks, b"IDAT")
+        if not idat or len(idat.data) < 2:
+            return serialize_png_chunks(chunks)[:max_len]
+
+        import zlib
+        try:
+            raw = zlib.decompress(idat.data)
+        except zlib.error:
+            return serialize_png_chunks(chunks)[:max_len]
+
+        if len(raw) < 2:
+            return serialize_png_chunks(chunks)[:max_len]
+
+        ihdr = self._find_chunk(chunks, b"IHDR")
+        if ihdr and len(ihdr.data) >= 9:
+            width = struct.unpack_from(">I", ihdr.data, 0)[0]
+            ct = ihdr.data[6]
+            bd = ihdr.data[7]
+            bpp = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}.get(ct, 4) * (bd // 8)
+            stride = 1 + width * bpp
+        else:
+            stride = 4
+
+        row_idx = random.randint(0, (len(raw) // stride) - 1) if stride > 0 else 0
+        filter_pos = row_idx * stride
+        if filter_pos < len(raw):
+            raw_list = bytearray(raw)
+            raw_list[filter_pos] = random.randint(0, 8)
+            raw = bytes(raw_list)
+
+        try:
+            idat.data = zlib.compress(raw)
+        except zlib.error:
+            pass
+        return serialize_png_chunks(chunks)[:max_len]
+
+    def _mutate_interlace(self, chunks: list[PngChunk], max_len: int) -> bytes:
+        """Toggle Adam7 interlacing in IHDR."""
+        ihdr = self._find_chunk(chunks, b"IHDR")
+        if not ihdr or len(ihdr.data) < 13:
+            return serialize_png_chunks(chunks)[:max_len]
+
+        d = bytearray(ihdr.data)
+        d[12] = random.choice([0, 1])
+        ihdr.data = bytes(d)
+        return serialize_png_chunks(chunks)[:max_len]
+
+    def _add_empty_chunks(self, chunks: list[PngChunk], max_len: int) -> bytes:
+        """Add empty or truncated chunks to test error handling."""
+        n = random.randint(1, 3)
+        for _ in range(n):
+            chunk_type = bytes([random.randint(0x41, 0x5A)] * 4)
+            chunks.insert(random.randint(1, len(chunks)), PngChunk(chunk_type, b""))
+        return serialize_png_chunks(chunks)[:max_len]
+
+    def _corrupt_signature(self, data: bytes, max_len: int) -> bytes:
+        """Corrupt PNG signature bytes."""
+        if len(data) < 8:
+            return self._generate_random_png(max_len)
+        result = bytearray(data)
+        n_corrupt = random.randint(1, 3)
+        for _ in range(n_corrupt):
+            result[random.randint(4, 7)] = random.randint(0, 255)
+        return bytes(result)[:max_len]
+
+    def _mutate_idat_multi(self, chunks: list[PngChunk], max_len: int) -> bytes:
+        """Multiple IDAT mutations in one pass (complex combinations)."""
+        idat = self._find_chunk(chunks, b"IDAT")
+        if not idat or len(idat.data) < 4:
+            return serialize_png_chunks(chunks)[:max_len]
+
+        d = bytearray(idat.data)
+        for _ in range(random.randint(2, 4)):
+            mut_type = random.randint(0, 2)
+            if mut_type == 0:
+                d[random.randint(0, len(d) - 1)] ^= random.randint(1, 255)
+            elif mut_type == 1:
+                d.insert(random.randint(0, len(d)), random.randint(0, 255))
+            elif len(d) > 1:
+                del d[random.randint(0, len(d) - 1)]
+
+        idat.data = bytes(d)
+        return serialize_png_chunks(chunks)[:max_len]
+
     def _generate_random_png(self, max_len: int) -> bytes:
         """Generate a minimal valid PNG for mutation seeding."""
         # Minimal IHDR: 1x1, 8-bit RGBA
@@ -1012,3 +1133,61 @@ class PngChunkMutator:
             return max(lo, min(hi, val ^ (1 << random.randint(0, 31))))
         else:
             return max(lo, min(hi, val * 2))
+
+    def _mutate_color_depth(self, chunks: list[PngChunk], max_len: int) -> bytes:
+        """Force specific color_type + bit_depth combinations to test transform paths."""
+        ihdr = self._find_chunk(chunks, b"IHDR")
+        if not ihdr or len(ihdr.data) < 13:
+            return serialize_png_chunks(chunks)[:max_len]
+
+        # Valid combinations that exercise different transform paths
+        combos = [
+            (0, 1),   # grayscale 1-bit
+            (0, 2),   # grayscale 2-bit
+            (0, 4),   # grayscale 4-bit
+            (0, 8),   # grayscale 8-bit
+            (0, 16),  # grayscale 16-bit
+            (2, 8),   # RGB 8-bit
+            (2, 16),  # RGB 16-bit
+            (3, 1),   # palette 1-bit
+            (3, 2),   # palette 2-bit
+            (3, 4),   # palette 4-bit
+            (3, 8),   # palette 8-bit
+            (4, 8),   # gray+alpha 8-bit
+            (4, 16),  # gray+alpha 16-bit
+            (6, 8),   # RGBA 8-bit
+            (6, 16),  # RGBA 16-bit
+            # Invalid combinations
+            (0, 128), (2, 255), (6, 0), (3, 16),
+        ]
+        ct, bd = random.choice(combos)
+        d = bytearray(ihdr.data)
+        d[6] = ct
+        d[7] = bd
+        ihdr.data = bytes(d)
+        return serialize_png_chunks(chunks)[:max_len]
+
+    def _large_input(self, chunks: list[PngChunk], max_len: int) -> bytes:
+        """Generate large IDAT data to trigger memory allocation paths."""
+        idat = self._find_chunk(chunks, b"IDAT")
+        if not idat:
+            return serialize_png_chunks(chunks)[:max_len]
+
+        import zlib
+        # Create large raw data: fill with repeating pattern
+        pattern = random.choice([
+            b"\x00" * 64,      # zeros (compresses well)
+            b"\xff" * 64,      # ones
+            bytes(range(64)),   # sequential
+            b"\x80" * 64,      # mid values
+        ])
+        # Scale to use most of max_len
+        raw_size = max(1024, max_len // 4)
+        raw = pattern * (raw_size // len(pattern) + 1)
+        raw = raw[:raw_size]
+
+        try:
+            idat.data = zlib.compress(raw, 1)  # fast compression
+        except zlib.error:
+            pass
+        return serialize_png_chunks(chunks)[:max_len]

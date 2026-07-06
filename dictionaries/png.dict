@@ -13,31 +13,97 @@ sRGB=sRGB
 bKGD=bKGD
 pHYs=pHYS
 tIME=tIME
-# Common PNG color types
+sBIT=sBIT
+sPLT=sPLT
+hIST=hIST
+tRNS=tRNS
+iCCP=iCCP
+sCAL=sCAL
+pCAL=pCAL
+
+# IHDR field values
+WIDTH_1=\x00\x00\x00\x01
+WIDTH_2=\x00\x00\x00\x02
+WIDTH_4=\x00\x00\x00\x04
+WIDTH_8=\x00\x00\x00\x08
+WIDTH_16=\x00\x00\x00\x10
+WIDTH_256=\x00\x00\x01\x00
+WIDTH_MAX=\x7f\xff\xff\xff
+HEIGHT_1=\x00\x00\x00\x01
+HEIGHT_2=\x00\x00\x00\x02
+HEIGHT_4=\x00\x00\x00\x04
+HEIGHT_8=\x00\x00\x00\x08
+HEIGHT_16=\x00\x00\x00\x10
+HEIGHT_MAX=\x7f\xff\xff\xff
+
+# Color types (all valid + invalid)
 GRAYSCALE=\x00
 RGB=\x02
 PALETTE=\x03
 GRAY_ALPHA=\x04
 RGBA=\x06
-# Common bit depths
+INVALID_CT_1=\x01
+INVALID_CT_5=\x05
+INVALID_CT_7=\x07
+INVALID_CT_128=\x80
+INVALID_CT_255=\xff
+
+# Bit depths
+BIT1=\x01
+BIT2=\x02
+BIT4=\x04
 BIT8=\x08
 BIT16=\x10
+BIT32=\x20
+BIT128=\x80
+BIT255=\xff
+
 # Filter types
 FILTER_NONE=\x00
 FILTER_SUB=\x01
 FILTER_UP=\x02
 FILTER_AVG=\x03
 FILTER_PAETH=\x04
-# Compression
-DEFLATE=\x00
+FILTER_5=\x05
+FILTER_255=\xff
+
 # Interlace
 INTERLACE_NONE=\x00
 INTERLACE_ADAM7=\x01
-# Chunk length values
+
+# Compression
+DEFLATE_DEFAULT=\x78\x01
+DEFLATE_BEST=\x78\xda
+DEFLATE_FAST=\x78\x9c
+CORRUPT_DEFLATE=\x00\x00
+EMPTY_DEFLATE=
+
+# Chunk lengths
 LEN_0=\x00\x00\x00\x00
 LEN_1=\x00\x00\x00\x01
+LEN_2=\x00\x00\x00\x02
+LEN_4=\x00\x00\x00\x04
+LEN_8=\x00\x00\x00\x08
 LEN_13=\x00\x00\x00\x0d
 LEN_256=\x00\x00\x01\x00
+LEN_1K=\x00\x00\x04\x00
+LEN_MAX=\xff\xff\xff\xff
+
 # Null and padding
 NULL=\x00
 FF=\xff
+ONES=\x01\x01\x01\x01
+
+# Common byte patterns for triggering rare paths
+ALL_ZERO=\x00\x00\x00\x00\x00\x00\x00\x00
+ALL_ONES=\x01\x01\x01\x01\x01\x01\x01\x01
+MAX_U32=\xff\xff\xff\xff
+ZERO_U32=\x00\x00\x00\x00
+ONE_U32=\x00\x00\x00\x01
+
+# Large IDAT payloads (compressed)
+IDAT_EMPTY=\x78\x9c\x03\x00\x00\x00\x00\x01
+IDAT_SINGLE_BYTE=\x78\x9c\x4b\x04\x00\x00\x00\x00
+
+# Chunk ordering tests (IEND must be last)
+EARLY_IEND=IEND
