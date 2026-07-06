@@ -1453,7 +1453,7 @@ class Fuzzer:
                         other = random.choice(others)
                         buf = bytearray(crossover(bytes(buf), other)[: self.max_len])
 
-            elif op == "length_grow" and buf:
+            elif op == "length_grow" and buf and len(buf) < self.max_len:
                 size = random.randint(1, min(64, self.max_len - len(buf)))
                 if size > 0:
                     buf.extend(random.randint(0, 255) for _ in range(size))
@@ -1462,7 +1462,7 @@ class Fuzzer:
                 cut = random.randint(1, len(buf) - 1)
                 del buf[cut:]
 
-            elif op == "repeat_clone" and buf:
+            elif op == "repeat_clone" and buf and len(buf) < self.max_len:
                 idx = random.randint(0, len(buf) - 1)
                 size = random.randint(1, min(16, len(buf) - idx))
                 block = buf[idx : idx + size]
