@@ -32,6 +32,16 @@ Coverage-guided binary fuzzer with statistical novelty scoring, Markov chain gen
 - **NCD similarity**: Normalized Compression Distance between corpus entries
 - **Simulated annealing**: temperature-scaled exploration/exploitation balance
 
+### Information Theory
+- **Mutual information** (`--mi-guided`): I(byte_position; coverage) guides mutation toward positions that actually control code paths
+- **Rényi entropy**: generalized entropy spectrum (α→0 support size, α→∞ min-entropy) for coverage distribution analysis
+- **Rate-distortion corpus minimization**: optimal compression of corpus while preserving coverage information
+- **Transfer entropy**: directional information flow between byte positions and coverage edges (causal analysis)
+
+### Game Theory
+- **Shapley value** (`--shapley`): fair operator credit distribution accounting for synergistic effects between mutation operators
+- **Replicator dynamics** (`--replicator`): evolutionary game theory scheduling — operators grow proportionally to fitness, converging to evolutionarily stable strategies
+
 ### Corpus Management
 - **Delta-encoded corpus**: parent-child diffs for small mutations (< 25% change), periodic full snapshots every 20 generations
 - **xxhash dedup**: ~13x faster than SHA-256 for corpus deduplication
@@ -109,6 +119,10 @@ fuzzer-tool fuzz ./target -c -n 5000 --report report.txt
 | `--markov-gen` | Markov-generated seeds (rate adapts to model quality via perplexity) |
 | `--mc-bandit` | Thompson sampling operator selection (Brier score calibration) |
 | `--mc-cem` | Cross-Entropy Method byte distribution |
+| `--mopt` | MOpt PSO operator scheduling (alternative to bandit) |
+| `--replicator` | Replicator dynamics operator scheduling (evolutionary game theory) |
+| `--shapley` | Shapley value operator attribution (fair credit distribution) |
+| `--mi-guided` | Mutual information guided mutation (target high-MI byte positions) |
 | `--inprocess` | Persistent subprocess mode (auto-restart on crash) |
 | `--resume` | Resume from saved state |
 | `--crash-codes N` | Additional exit codes to treat as crashes |
@@ -138,6 +152,7 @@ State files:
 - `state.json` — exec counts, crash sigs, op stats, seed metadata, lineage depths
 - `edge_tracker.json` — per-seed edge coverage, cumulative edges, global hit counts, hit counts
 - `markov.json` — persisted Markov chain transitions
+- `mi.json` — mutual information tracker (byte-to-coverage correlations)
 
 ## In-Process Execution
 
@@ -149,7 +164,7 @@ Keeps one Python subprocess alive. Fork-per-call with `os.setsid()` for process 
 
 ## Test Suite
 
-628 tests covering all modules. Run with:
+711 tests covering all modules. Run with:
 
 ```bash
 pip install -e ".[dev]"

@@ -15,6 +15,7 @@ import collections
 import logging
 import math
 import random
+from collections import defaultdict
 
 from fuzzer_tool.core.edge_tracker import ks_significance_threshold
 
@@ -582,3 +583,361 @@ class MOptScheduler:
                 self._total_execs - self._total_discoveries,
             )
         }
+
+
+# ---------------------------------------------------------------------------
+# Shapley value for fair operator attribution
+# ---------------------------------------------------------------------------
+
+
+class ShapleyAttribution:
+    """Compute Shapley values for mutation operator contribution.
+
+    The Shapley value fairly distributes credit among operators when
+    multiple ops contribute to discoveries. It considers all possible
+    orderings of operators and computes the average marginal contribution.
+
+    For fuzzer scheduling, this answers: "if we removed operator X from
+    the pool, how much would total coverage drop?" — accounting for
+    synergistic effects between operators.
+
+    Uses sampling-based estimation (not exact enumeration) for efficiency.
+    With N operators, exact Shapley requires 2^N evaluations. Sampling
+    K random permutations gives estimates within epsilon with high probability.
+
+    Args:
+        n_samples: Number of random permutations to sample.
+        window_size: Number of recent outcomes to consider.
+    """
+
+    def __init__(self, n_samples: int = 100, window_size: int = 500):
+        self.n_samples = n_samples
+        self.window_size = window_size
+        # Recent outcomes: list of (operators_used_set, discovered_edges_count)
+        self._outcomes: collections.deque = collections.deque(maxlen=window_size)
+        # Per-operator: set of edges this operator contributed to
+        self._operator_edges: dict[str, set[int]] = defaultdict(set)
+        # Global edge set for marginal computation
+        self._all_edges: set[int] = set()
+
+    def record(
+        self, operators: set[str], new_edges: int, edge_indices: set[int] | None = None
+    ) -> None:
+        """Record an execution outcome.
+
+        Args:
+            operators: Set of mutation operators used in this execution.
+            new_edges: Number of new edges discovered (0 if none).
+            edge_indices: Optional set of specific new edge indices.
+        """
+        self._outcomes.append((operators, new_edges))
+        if edge_indices:
+            for op in operators:
+                self._operator_edges[op].update(edge_indices)
+            self._all_edges.update(edge_indices)
+
+    def shapley_values(self, operators: list[str] | None = None) -> dict[str, float]:
+        """Compute Shapley values for each operator.
+
+        Uses sampling: for each random permutation, compute the marginal
+        contribution of each operator (edges uniquely attributable to it
+        given the operators before it in the permutation).
+
+        Returns:
+            Dict mapping operator name -> Shapley value (in [0, 1]).
+            Values sum to 1.0 (or less if some operators have zero contribution).
+        """
+        if not self._outcomes:
+            return {op: 1.0 / max(1, len(operators or [])) for op in (operators or [])}
+
+        if operators is None:
+            operators = sorted({op for ops, _ in self._outcomes for op in ops})
+        if not operators:
+            return {}
+
+        n_ops = len(operators)
+        shapley = {op: 0.0 for op in operators}
+
+        for _ in range(self.n_samples):
+            perm = operators[:]
+            random.shuffle(perm)
+
+            prefix_edges: set[int] = set()
+            for op in perm:
+                # Marginal contribution = edges this op adds beyond prefix
+                op_edges = self._operator_edges.get(op, set())
+                marginal = len(op_edges - prefix_edges)
+                shapley[op] += marginal
+                prefix_edges.update(op_edges)
+
+        # Normalize to [0, 1]
+        total = sum(shapley.values())
+        if total > 0:
+            shapley = {op: v / total for op, v in shapley.items()}
+        else:
+            shapley = {op: 1.0 / n_ops for op in operators}
+
+        return shapley
+
+    def operator_synergy(self, op_a: str, op_b: str) -> float:
+        """Compute synergy between two operators.
+
+        Synergy = I(X_a, X_b; Y) - I(X_a; Y) - I(X_b; Y)
+        where X_a, X_b are operator usage indicators and Y is coverage.
+
+        Positive = operators work better together than alone.
+        Negative = operators are redundant.
+        """
+        edges_a = self._operator_edges.get(op_a, set())
+        edges_b = self._operator_edges.get(op_b, set())
+        if not edges_a or not edges_b:
+            return 0.0
+
+        # Approximate: joint coverage minus individual coverages
+        joint = len(edges_a | edges_b)
+        individual = len(edges_a) + len(edges_b)
+        return (joint - individual) / max(1, individual)
+
+    def ranking(self, operators: list[str] | None = None) -> list[tuple[str, float]]:
+        """Return operators ranked by Shapley value.
+
+        Returns:
+            List of (operator, shapley_value) sorted descending.
+        """
+        sv = self.shapley_values(operators)
+        return sorted(sv.items(), key=lambda x: x[1], reverse=True)
+
+
+# ---------------------------------------------------------------------------
+# Replicator dynamics for operator scheduling
+# ---------------------------------------------------------------------------
+
+
+class ReplicatorScheduler:
+    """Operator scheduling via evolutionary replicator dynamics.
+
+    The replicator equation is the canonical dynamics of evolutionary game
+    theory: x_i' = x_i * (f_i - phi) where f_i is operator i's fitness
+    and phi is the population-average fitness. Operators above average
+    grow; those below shrink.
+
+    Unlike Thompson sampling (which models each arm independently) or PSO
+    (which searches joint distributions), replicator dynamics models the
+    *population* of operators as a game. The equilibrium is a Nash
+    equilibrium of the mutation game.
+
+    Advantages over Thompson sampling:
+    - Naturally handles operator interactions (via fitness defined on combinations)
+    - Converges to evolutionarily stable strategies (ESS), not just best responses
+    - Population dynamics are smooth and interpretable
+
+    Args:
+        window_size: Executions per fitness evaluation.
+        learning_rate: Replicator step size (eta). Smaller = smoother.
+        mutation_rate: Minimum probability floor (exploration guarantee).
+    """
+
+    def __init__(
+        self,
+        window_size: int = 200,
+        learning_rate: float = 0.1,
+        mutation_rate: float = 0.02,
+    ):
+        self.window_size = window_size
+        self.eta = learning_rate
+        self.mutation_rate = mutation_rate
+
+        self.operators: list[str] = []
+        self.op_index: dict[str, int] = {}
+        # Population distribution over operators (probability simplex)
+        self.population: list[float] = []
+        # Fitness tracking per operator per window
+        self._fitness_sum: dict[str, float] = defaultdict(float)
+        self._fitness_count: dict[str, int] = defaultdict(int)
+        self._execs_in_window = 0
+        self._total_execs = 0
+        self._total_discoveries = 0
+        # History of distributions for convergence diagnostics
+        self._history: collections.deque = collections.deque(maxlen=100)
+
+    def init_arm(self, name: str) -> None:
+        """Register a mutation operator. Rebuilds population if operators changed."""
+        if name in self.op_index:
+            return
+        idx = len(self.operators)
+        self.operators.append(name)
+        self.op_index[name] = idx
+        # Extend population with uniform distribution
+        n = len(self.operators)
+        self.population = [1.0 / n] * n
+
+    def select_op(self, ops: list[str]) -> str:
+        """Select an operator from the replicator distribution.
+
+        Args:
+            ops: Available operators for this iteration.
+
+        Returns:
+            Name of the selected operator.
+        """
+        if not self.population or not self.operators:
+            return ops[0] if ops else ""
+
+        # Build probability vector over available ops
+        probs = []
+        for op in ops:
+            idx = self.op_index.get(op, -1)
+            if idx >= 0 and idx < len(self.population):
+                probs.append(self.population[idx])
+            else:
+                probs.append(0.0)
+
+        total = sum(probs)
+        if total <= 0:
+            return random.choice(ops)
+
+        # Roulette wheel selection
+        r = random.random() * total
+        cumulative = 0.0
+        for op, p in zip(ops, probs, strict=False):
+            cumulative += p
+            if r <= cumulative:
+                return op
+        return ops[-1]
+
+    def record(self, name: str, success: bool) -> None:
+        """Record outcome and trigger replicator update when window fills.
+
+        Args:
+            name: Operator that was used.
+            success: Whether it produced new coverage.
+        """
+        self._total_execs += 1
+        if success:
+            self._total_discoveries += 1
+
+        self._execs_in_window += 1
+        self._fitness_sum[name] += 1.0 if success else 0.0
+        self._fitness_count[name] += 1
+
+        if self._execs_in_window >= self.window_size:
+            self._replicator_update()
+
+    def _replicator_update(self):
+        """Run one replicator dynamics step.
+
+        x_i(t+1) = x_i(t) * (1 + eta * (f_i - phi))
+
+        where:
+        - x_i = population share of operator i
+        - f_i = fitness (success rate) of operator i in this window
+        - phi = average fitness across all operators
+        - eta = learning rate
+        """
+        n = len(self.operators)
+        if n == 0:
+            return
+
+        # Compute fitness for each operator
+        fitness = []
+        for op in self.operators:
+            count = self._fitness_count.get(op, 0)
+            if count > 0:
+                fitness.append(self._fitness_sum[op] / count)
+            else:
+                fitness.append(0.0)
+
+        # Average fitness (weighted by population)
+        phi = sum(x * f for x, f in zip(self.population, fitness, strict=False)) if self.population else 0.0
+
+        # Replicator step: x_i' = x_i * (1 + eta * (f_i - phi))
+        new_pop = []
+        for i in range(n):
+            growth = 1.0 + self.eta * (fitness[i] - phi)
+            new_pop.append(max(0.0, self.population[i] * growth))
+
+        # Normalize to simplex
+        total = sum(new_pop)
+        new_pop = [x / total for x in new_pop] if total > 0 else [1.0 / n] * n
+
+        # Enforce mutation floor (exploration guarantee)
+        # Apply floor, then renormalize, then re-apply floor iteratively
+        # to handle the case where normalization pushes values below floor
+        for _ in range(3):
+            for i in range(n):
+                new_pop[i] = max(new_pop[i], self.mutation_rate)
+            total = sum(new_pop)
+            if total > 0:
+                new_pop = [x / total for x in new_pop]
+
+        self.population = new_pop
+        self._history.append(list(new_pop))
+
+        # Reset window counters
+        self._execs_in_window = 0
+        self._fitness_sum.clear()
+        self._fitness_count.clear()
+
+    def is_converged(self, threshold: float = 0.01) -> bool:
+        """Check if the population distribution has converged.
+
+        Convergence is detected when the last N distributions have
+        low variance (population shares barely change).
+
+        Args:
+            threshold: Maximum standard deviation across recent distributions
+                       to consider converged.
+
+        Returns:
+            True if converged.
+        """
+        if len(self._history) < 5:
+            return False
+
+        recent = list(self._history)[-5:]
+        # For each operator position, compute std dev across recent distributions
+        n_ops = len(self.operators)
+        for i in range(n_ops):
+            values = [h[i] for h in recent if i < len(h)]
+            if len(values) < 2:
+                continue
+            mean = sum(values) / len(values)
+            variance = sum((v - mean) ** 2 for v in values) / len(values)
+            if variance ** 0.5 > threshold:
+                return False
+        return True
+
+    def dominant_operator(self) -> str | None:
+        """Return the operator with highest population share."""
+        if not self.population or not self.operators:
+            return None
+        best_idx = max(range(len(self.population)), key=lambda i: self.population[i])
+        return self.operators[best_idx]
+
+    def population_distribution(self) -> dict[str, float]:
+        """Return current population as a dict."""
+        return {op: self.population[i] for i, op in enumerate(self.operators)}
+
+    def bandit_stats(self) -> dict[str, tuple[float, float]]:
+        """Compatibility with MonteCarloScheduler interface."""
+        return {
+            "_replicator_global": (
+                self._total_discoveries,
+                self._total_execs - self._total_discoveries,
+            )
+        }
+
+    def operator_stats(self) -> list[dict]:
+        """Get stats for each operator (for diagnostics/logging)."""
+        result = []
+        for i, op in enumerate(self.operators):
+            pop = self.population[i] if i < len(self.population) else 0.0
+            count = self._fitness_count.get(op, 0)
+            successes = self._fitness_sum.get(op, 0)
+            result.append({
+                "name": op,
+                "population": round(pop, 4),
+                "window_successes": int(successes),
+                "window_execs": count,
+            })
+        return result

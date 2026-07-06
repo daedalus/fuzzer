@@ -160,6 +160,9 @@ def cmd_fuzz(args):
         extra_crash_codes=args.crash_codes,
         replay_n=args.replay_n,
         schedule_ablation=getattr(args, 'schedule_ablation', None),
+        replicator=getattr(args, 'replicator', False),
+        shapley=getattr(args, 'shapley', False),
+        mi_guided=getattr(args, 'mi_guided', False),
     )
     fuzzer.run(iterations=args.iterations)
 
@@ -404,6 +407,18 @@ def main() -> int:
     fuzz_parser.add_argument("--mc-cem", action="store_true", help="Enable cross-entropy method")
     fuzz_parser.add_argument(
         "--mopt", action="store_true", help="Enable MOpt PSO operator scheduling (alternative to bandit)"
+    )
+    fuzz_parser.add_argument(
+        "--replicator", action="store_true",
+        help="Enable replicator dynamics operator scheduling (evolutionary game theory)"
+    )
+    fuzz_parser.add_argument(
+        "--shapley", action="store_true",
+        help="Enable Shapley value operator attribution (fair credit distribution)"
+    )
+    fuzz_parser.add_argument(
+        "--mi-guided", action="store_true",
+        help="Enable mutual information guided mutation (target high-MI byte positions)"
     )
     fuzz_parser.add_argument(
         "--targets",

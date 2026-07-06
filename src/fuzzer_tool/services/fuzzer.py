@@ -27,7 +27,13 @@ from fuzzer_tool.adapters.process import (
 from fuzzer_tool.adapters.shm import ShmCoverage
 from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.markov import MarkovChain
-from fuzzer_tool.core.montecarlo import MonteCarloScheduler
+from fuzzer_tool.core.montecarlo import (
+    MOptScheduler,
+    MonteCarloScheduler,
+    ReplicatorScheduler,
+    ShapleyAttribution,
+)
+from fuzzer_tool.core.mi import MutualInformationTracker
 from fuzzer_tool.core.mutations import (
     DICT_MUTATIONS,
     INTERESTING_8,
@@ -571,6 +577,9 @@ class Fuzzer:
         extra_crash_codes=None,
         replay_n=0,
         schedule_ablation=None,
+        replicator=False,
+        shapley=False,
+        mi_guided=False,
     ):
         self.target = target
         self.corpus_dir = Path(corpus_dir)
@@ -689,6 +698,7 @@ class Fuzzer:
         self.markov_generate = markov_generate
         self.markov_trained = False
         self._markov_path = self.corpus_dir / "markov.json"
+        self._mi_path = self.corpus_dir / "mi.json"
 
         self._load_corpus()
         self._init_seed_metadata()
@@ -714,9 +724,21 @@ class Fuzzer:
         )
         self._mopt = None
         if mopt:
-            from fuzzer_tool.core.montecarlo import MOptScheduler
             self._mopt = MOptScheduler(n_particles=5, window_size=200)
             log.info("MOpt PSO scheduling enabled (5 particles, window=200)")
+        self._use_replicator = replicator
+        self._replicator = None
+        if replicator:
+            self._replicator = ReplicatorScheduler(window_size=200, learning_rate=0.1)
+            log.info("Replicator dynamics scheduling enabled (window=200, eta=0.1)")
+        self._use_shapley = shapley
+        self._shapley = ShapleyAttribution(n_samples=100, window_size=500) if shapley else None
+        self._use_mi = mi_guided
+        self._mi = MutualInformationTracker(max_positions=max_len, min_observations=50) if mi_guided else None
+        # Load persisted MI state
+        if self._use_mi and self._mi and self._mi_path.exists():
+            self._mi.load(str(self._mi_path))
+            log.info("MI tracker loaded from %s", self._mi_path)
         self._last_ops_used: list[str] = []
 
         # Directed distance for targeted fuzzing
@@ -1229,7 +1251,9 @@ class Fuzzer:
         self._last_ops_used = []
 
         for _ in range(self.mutations_per_input):
-            if self._use_mopt and self._mopt:
+            if self._use_replicator and self._replicator:
+                op = self._replicator.select_op(ops)
+            elif self._use_mopt and self._mopt:
                 op = self._mopt.select_op(ops)
             elif self.mc and self.mc_bandit:
                 op = self.mc.select_op(ops)
@@ -1237,18 +1261,21 @@ class Fuzzer:
                 op = random.choice(ops)
             self._last_ops_used.append(op)
 
+            # MI-guided position selection for byte-level mutations
+            if self._use_mi and self._mi and buf:
+                byte_idx = self._mi.weighted_position(len(buf))
+            else:
+                byte_idx = random.randint(0, len(buf) - 1) if buf else 0
+
             if op == "bit_flip" and buf:
-                byte_idx = random.randint(0, len(buf) - 1)
                 bit_idx = random.randint(0, 7)
                 buf[byte_idx] ^= 1 << bit_idx
 
             elif op == "byte_flip" and buf:
-                byte_idx = random.randint(0, len(buf) - 1)
                 buf[byte_idx] ^= 0xFF
 
             elif op == "interesting_8" and buf:
-                idx = random.randint(0, len(buf) - 1)
-                buf[idx] = random.choice(INTERESTING_8)
+                buf[byte_idx] = random.choice(INTERESTING_8)
 
             elif op == "interesting_16" and len(buf) >= 2:
                 idx = random.randint(0, len(buf) - 2)
@@ -1964,6 +1991,24 @@ class Fuzzer:
                     self._mopt.record(op, success)
                     seen.add(op)
 
+        if self._use_replicator and self._replicator:
+            seen = set()
+            for op in self._last_ops_used:
+                if op not in seen:
+                    self._replicator.record(op, success)
+                    seen.add(op)
+
+        if self._use_shapley and self._shapley:
+            edge_bitmap = self._get_current_edge_bitmap()
+            if edge_bitmap:
+                new_edges = {i for i, v in enumerate(edge_bitmap) if v > 0}
+                self._shapley.record(set(self._last_ops_used), len(new_edges), new_edges)
+
+        if self._use_mi and self._mi:
+            edge_bitmap = self._get_current_edge_bitmap()
+            if edge_bitmap:
+                self._mi.record(data, edge_bitmap, self.map_size)
+
         if is_crash:
             self.crash_count += 1
             crash_name = self.save_crash(mutated, returncode, stderr)
@@ -2168,6 +2213,23 @@ class Fuzzer:
         if self.mc and self.mc_cem:
             stats["cem_elite_size"] = len(self.mc.elite_set)
             stats["cem_fitted"] = self.mc.cem_fitted
+        if self._use_replicator and self._replicator:
+            stats["replicator"] = {
+                "distribution": self._replicator.population_distribution(),
+                "converged": self._replicator.is_converged(),
+                "dominant": self._replicator.dominant_operator(),
+            }
+        if self._use_shapley and self._shapley:
+            sv = self._shapley.shapley_values()
+            stats["shapley"] = {k: round(v, 4) for k, v in sv.items()}
+        if self._use_mi and self._mi:
+            stats["mi"] = {
+                "observations": self._mi.total_observations,
+                "top_positions": [
+                    {"pos": p, "mi_bits": round(v, 4)}
+                    for p, v in self._mi.top_positions(k=5, input_length=self.max_len)
+                ],
+            }
         try:
             self.stats_file.parent.mkdir(parents=True, exist_ok=True)
             self.stats_file.write_text(json.dumps(stats, indent=2))
@@ -2387,6 +2449,8 @@ class Fuzzer:
         self._dump_coverage_report()
         if self.markov.is_trained():
             self.markov.save(str(self._markov_path))
+        if self._use_mi and self._mi:
+            self._mi.save(str(self._mi_path))
         self._save_state()
         if self._ablation_file:
             self._ablation_file.flush()
