@@ -1714,7 +1714,10 @@ class Fuzzer:
                 gen_rate = max(gen_rate * 0.3, 0.01)
 
             if random.random() < gen_rate:
-                length = random.randint(1, self.max_len)
+                # Cap generated seed size to 256 bytes — large markov seeds
+                # (1-4KB) slow down weighted_position (O(n) filter) without
+                # proportional coverage benefit.
+                length = random.randint(1, min(256, self.max_len))
                 # Reject generated inputs with extreme perplexity (>512)
                 # — they're pure noise, not useful mutations
                 for _ in range(3):
@@ -1723,7 +1726,7 @@ class Fuzzer:
                     if pp < 512:
                         return candidate
                 return candidate  # fallback: return last attempt
-            length = random.randint(1, self.max_len)
+            length = random.randint(1, min(256, self.max_len))
             return self.markov.generate(length)
         if self.corpus and self.seed_meta:
             return self._weighted_pick_seed()
@@ -1759,39 +1762,16 @@ class Fuzzer:
             stale_threshold = 50.0 * T
             w *= 0.01 if staleness > stale_threshold else 1.0
 
-            # Edge tracker signals (skip expensive calls for seeds with no edges)
+            # Edge tracker signals: only compute when cache is warm (avoids
+            # recomputing expensive Wasserstein/subsumption/diversity for ALL
+            # seeds on every edge discovery during early fuzzing).
             seed_key = self._seed_key(seed)
-            if seed_key not in self._cached_weights:
-                if seed_key in self._edge_tracker.seed_edges and self._edge_tracker.seed_edges[seed_key]:
-                    sub = self._edge_tracker.compute_subsumption_weight(seed_key)
-                    div = self._edge_tracker.compute_hitcount_diversity_weight(seed_key)
-                    spa = self._edge_tracker.compute_wasserstein_weight(seed_key)
-                    cov = self._edge_tracker.compute_coverage_proximity(seed_key)
-                    self._cached_weights[seed_key] = (sub, div, spa, cov)
-                else:
-                    self._cached_weights[seed_key] = (1.0, 1.0, 1.0, 0.5)
-            sub, div, spa, cov = self._cached_weights[seed_key]
-            w *= sub * div * spa
-            # Coverage proximity: boost seeds close to uncovered edges
-            w *= 0.5 + cov  # scale [0,1] to [0.5, 1.5]
+            if seed_key in self._cached_weights:
+                sub, div, spa, cov = self._cached_weights[seed_key]
+                w *= sub * div * spa
+                w *= 0.5 + cov
 
-            # MDL codelength
-            if self.markov_trained:
-                cl_ratio = self.markov.codelength_ratio(seed)
-                w *= 1.0 + min(cl_ratio / 8.0, 1.0)
-
-            # Rényi coverage uniformity: boost seeds that exercise rare edges
-            if self._use_renyi_weight and seed_key in self._edge_tracker.seed_hit_counts:
-                hc = self._edge_tracker.seed_hit_counts[seed_key]
-                if hc:
-                    from fuzzer_tool.core.renyi import RenyiEntropy
-                    renyi = RenyiEntropy()
-                    # Min-entropy / support entropy: low ratio → coverage concentrated on hot edges
-                    uniformity = renyi.coverage_uniformity(list(hc.values()))
-                    # Low uniformity → this seed exercises cold edges → boost
-                    w *= 0.5 + 1.5 * (1.0 - uniformity)
-
-            # Directed distance
+            # Directed distance (cheap, always include)
             if self._distance:
                 seed_dist = meta.get("avg_distance", self._distance.max_distance)
                 max_d = self._distance.max_distance
@@ -1927,9 +1907,36 @@ class Fuzzer:
         if self._cmplog:
             new_tokens = self._cmplog.collect_tokens()
             cmplog_found = bool(new_tokens)
+            if not hasattr(self, '_dict_set'):
+                self._dict_set = set(self.dictionary)
+                self._dict_eps_window: list[float] = []
+                self._dict_last_prune = 0
             for token in new_tokens:
-                if token and token not in self.dictionary:
+                if token and token not in self._dict_set:
                     self.dictionary.append(token)
+                    self._dict_set.add(token)
+
+            # Dynamic cap: scale with recent throughput.
+            # High EPS → larger dictionary (more mutations explore more).
+            # Low EPS → smaller dictionary (reduce overhead).
+            # Window: last 500 iterations. Range: [64, 1024].
+            window = 500
+            if self.exec_count > 0 and self.exec_count % 100 == 0:
+                elapsed = time.time() - self.start_time
+                eps = self.exec_count / elapsed if elapsed > 0 else 0
+                self._dict_eps_window.append(eps)
+                if len(self._dict_eps_window) > 10:
+                    self._dict_eps_window.pop(0)
+
+            if self._dict_eps_window and self.exec_count - self._dict_last_prune >= window:
+                avg_eps = sum(self._dict_eps_window) / len(self._dict_eps_window)
+                # Map EPS to cap: 10 eps → 128, 30 eps → 256, 100+ eps → 1024
+                dyn_cap = max(64, min(1024, int(avg_eps * 8)))
+                if len(self.dictionary) > dyn_cap:
+                    keep = max(dyn_cap // 2, 32)
+                    self.dictionary = self.dictionary[-keep:]
+                    self._dict_set = set(self.dictionary)
+                    self._dict_last_prune = self.exec_count
             # Record redqueen matches: (offset, operand_a, operand_b)
             # for input-to-state matching during mutation
             if self._cmplog.pairs and meta is not None:

@@ -30,6 +30,7 @@ class MutualInformationTracker:
         self.max_positions = max_positions
         self.min_observations = min_observations
         self._max_mi_cache: dict[int, float] = {}  # input_length -> max_mi
+        self._total_edges: int | None = None  # cached sum(edge_marginal.values())
 
         # Per-position: byte_value -> edge_index -> count
         # P(X_i = v, Y = e)
@@ -57,7 +58,16 @@ class MutualInformationTracker:
             map_size: Maximum edge index to consider.
         """
         self.total_observations += 1
-        self._invalidate_max_mi_cache()
+        # MI values change slowly — don't rebuild precomputed weights on every
+        # record(). Only invalidate when new positions are observed (rare).
+        self._total_edges = None
+        if hasattr(self, '_wp_all_positions') and self._wp_all_positions is not None:
+            # Invalidate if we see a position we haven't tracked yet
+            max_pos = len(input_bytes) - 1 if input_bytes else 0
+            if max_pos >= self.max_positions:
+                max_pos = self.max_positions - 1
+            if max_pos not in {p for p in self._wp_all_positions}:
+                self._wp_all_positions = None
         # Find which edges were hit
         hit_edges = {i for i, v in enumerate(edge_bitmap) if v > 0 and i < map_size}
 
@@ -81,7 +91,9 @@ class MutualInformationTracker:
         if n < self.min_observations:
             return 0.0
 
-        total_edges = sum(self.edge_marginal.values())
+        if self._total_edges is None:
+            self._total_edges = sum(self.edge_marginal.values())
+        total_edges = self._total_edges
         if total_edges == 0:
             return 0.0
 
@@ -140,11 +152,10 @@ class MutualInformationTracker:
         if mi_val <= 0:
             return 0.1
 
-        # Find max MI across all positions for normalization (cached per input_length)
+        # Find max MI across observed positions for normalization (cached per input_length)
         if input_length not in self._max_mi_cache:
-            self._max_mi_cache[input_length] = max(
-                self.mi(pos) for pos in range(input_length) if pos in self.position_counts
-            ) if any(pos in self.position_counts for pos in range(input_length)) else 0.0
+            candidates = [self.mi(pos) for pos in self.position_counts if pos < input_length]
+            self._max_mi_cache[input_length] = max(candidates) if candidates else 0.0
         max_mi = self._max_mi_cache[input_length]
         if max_mi <= 0:
             return 1.0
@@ -157,16 +168,45 @@ class MutualInformationTracker:
 
         Uses MI-weighted roulette wheel selection. Returns a position
         in [0, input_length) that is more likely to be information-rich.
+        Precomputes all weights once using max_positions; subsequent calls
+        filter to positions < input_length.
         """
         if not self.position_counts:
             return 0
 
-        weights = []
-        positions = []
-        for pos in range(min(input_length, self.max_positions)):
-            if pos in self.position_counts:
-                weights.append(self.mutation_weight(pos, input_length))
-                positions.append(pos)
+        if not hasattr(self, '_wp_all_positions'):
+            self._wp_all_positions = None
+            self._wp_all_weights = None
+
+        if self._wp_all_positions is None:
+            # Precompute weights for ALL observed positions
+            self._wp_all_positions = []
+            self._wp_all_weights = []
+            for pos in self.position_counts:
+                if self.position_counts[pos] >= self.min_observations:
+                    self._wp_all_positions.append(pos)
+                    self._wp_all_weights.append(
+                        self.mutation_weight(pos, self.max_positions)
+                    )
+
+        all_pos = self._wp_all_positions
+        all_w = self._wp_all_weights
+        if not all_w:
+            return 0
+
+        # Filter to positions within input_length
+        if input_length >= self.max_positions:
+            positions, weights = all_pos, all_w
+        else:
+            # Filter: keep positions < input_length
+            # Weights are precomputed with max_positions as reference —
+            # this is an approximation; _max_mi is the same regardless
+            positions = []
+            weights = []
+            for i, p in enumerate(all_pos):
+                if p < input_length:
+                    positions.append(p)
+                    weights.append(all_w[i])
 
         if not weights:
             return 0
