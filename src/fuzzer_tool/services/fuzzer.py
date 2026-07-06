@@ -664,7 +664,6 @@ class Fuzzer:
         self._duplicate_reject_count = 0
         self._total_corpus_attempts = 0
         self._pruned_count = 0
-        self._last_minimize_exec = 0
         self._peak_eps = 0.0
         self._total_exec_time = 0.0
         self._replay_budget_ms: float = 0.2  # max 200ms per batch for crash replay
@@ -2204,18 +2203,16 @@ class Fuzzer:
                 self.mc.maybe_refit()
             # Periodic minimization based on edge stats
             if (self.minimize_every_execs > 0
-                    and self.exec_count - self._last_minimize_exec >= self.minimize_every_execs
+                    and self.exec_count % self.minimize_every_execs == 0
                     and len(self.corpus) > 1):
                 self._auto_minimize_corpus()
-                self._last_minimize_exec = self.exec_count
             return True
 
         # Periodic minimization (also for non-interesting iterations)
         if (self.minimize_every_execs > 0
-                and self.exec_count - self._last_minimize_exec >= self.minimize_every_execs
+                and self.exec_count % self.minimize_every_execs == 0
                 and len(self.corpus) > 1):
             self._auto_minimize_corpus()
-            self._last_minimize_exec = self.exec_count
 
         return False
 
