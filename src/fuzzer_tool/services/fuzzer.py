@@ -9,6 +9,7 @@ import logging
 import math
 import os
 import random
+import shutil
 import resource
 import signal
 import struct
@@ -662,6 +663,7 @@ class Fuzzer:
         self._crash_rate_history: list[tuple[int, int]] = []  # (exec_count, crash_count)
         self._duplicate_reject_count = 0
         self._total_corpus_attempts = 0
+        self._pruned_count = 0
         self._peak_eps = 0.0
         self._total_exec_time = 0.0
         self._replay_budget_ms: float = 0.2  # max 200ms per batch for crash replay
@@ -1716,6 +1718,22 @@ class Fuzzer:
 
         removed = len(self.corpus) - len(unique)
         if removed > 0:
+            # Move pruned files to corpus/pruned/ before removing from memory
+            pruned_dir = self.corpus_dir / "pruned"
+            pruned_dir.mkdir(parents=True, exist_ok=True)
+            kept_set = {hashlib.sha256(s).hexdigest()[:16] for s in unique}
+            for f in self.corpus_dir.iterdir():
+                if not f.is_file():
+                    continue
+                if f.suffix == ".json" and f.name.startswith("delta_"):
+                    h = f.name[6:-5]
+                elif f.name.startswith("id_"):
+                    h = f.name[3:]
+                else:
+                    continue
+                if h not in kept_set:
+                    shutil.move(str(f), str(pruned_dir / f.name))
+
             self.corpus = unique
             # Rebuild seed_meta for kept seeds
             new_meta = {}
@@ -1723,8 +1741,9 @@ class Fuzzer:
                 if seed in self.seed_meta:
                     new_meta[seed] = self.seed_meta[seed]
             self.seed_meta = new_meta
+            self._pruned_count += removed
             log.info(
-                "Auto-minimized corpus: %d -> %d seeds (stale_ratio=%.1f)",
+                "Auto-minimized corpus: %d -> %d seeds -> pruned/ (stale_ratio=%.1f)",
                 len(self.corpus) + removed,
                 len(self.corpus),
                 stale_ratio,
@@ -2256,6 +2275,8 @@ class Fuzzer:
         print(f"  Corpus:            {len(self.corpus)} entries")
         print(f"  Seeds added:       {added}")
         print(f"  Duplicates rejected: {rejected}")
+        if self._pruned_count > 0:
+            print(f"  Seeds pruned:      {self._pruned_count}")
 
         # Coverage
         edges = 0
