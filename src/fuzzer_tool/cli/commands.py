@@ -150,6 +150,7 @@ def cmd_fuzz(args):
         persistent=args.persistent,
         cmplog=args.cmplog,
         max_corpus=args.max_corpus,
+        minimize_every_execs=getattr(args, 'minimize_every_execs', 0),
         no_shm=args.no_shm,
         resume=args.resume,
         trace_crashes=args.trace,
@@ -480,6 +481,12 @@ def main() -> int:
         type=int,
         default=0,
         help="Auto-minimize corpus when it exceeds N entries (0=unlimited)",
+    )
+    fuzz_parser.add_argument(
+        "--minimize-every-execs",
+        type=int,
+        default=0,
+        help="Fire corpus minimization every N executions (0=disabled)",
     )
     fuzz_parser.add_argument(
         "--resume",

@@ -570,6 +570,7 @@ class Fuzzer:
         inprocess_func="LLVMFuzzerTestOneInput",
         cmplog=False,
         max_corpus=0,
+        minimize_every_execs=0,
         no_shm=False,
         resume=False,
         trace_crashes=False,
@@ -596,6 +597,7 @@ class Fuzzer:
         self.file_mode = file_mode
         self.target_args = target_args or []
         self.max_corpus = max_corpus
+        self.minimize_every_execs = minimize_every_execs
         self.coverage_report = Path(coverage_report) if coverage_report else None
         self.coverage_log = Path(coverage_log) if coverage_log else None
         if self.coverage_log:
@@ -2613,6 +2615,8 @@ class Fuzzer:
                 )
         if self.stats_file:
             print(f"[*] Stats: {self.stats_file} every {self.stats_interval} iterations")
+        if self.minimize_every_execs > 0:
+            print(f"[*] Minimize: every {self.minimize_every_execs} execs")
         print("[*] Starting fuzzing...\n")
 
         i = 0
@@ -2640,6 +2644,11 @@ class Fuzzer:
                     if i % 500 == 0:
                         import gc
                         gc.collect()
+                # Periodic minimization based on edge stats
+                if (self.minimize_every_execs > 0
+                        and self.exec_count % self.minimize_every_execs == 0
+                        and len(self.corpus) > 1):
+                    self._auto_minimize_corpus()
                 if i % 500 == 0 and self.replay_n > 0:
                     self._run_crash_replays()
                 if self.stats_file and i % self.stats_interval == 0:
