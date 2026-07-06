@@ -1101,7 +1101,7 @@ class PngChunkMutator:
         else:
             stride = 4
 
-        row_idx = random.randint(0, (len(raw) // stride) - 1) if stride > 0 else 0
+        row_idx = random.randint(0, max(0, (len(raw) // stride) - 1)) if stride > 0 and len(raw) >= stride else 0
         filter_pos = row_idx * stride
         if filter_pos < len(raw):
             raw_list = bytearray(raw)
