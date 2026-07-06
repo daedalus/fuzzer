@@ -180,6 +180,7 @@ def _branch_density_capstone(target: str) -> float | None:
 
     # Disassemble and count conditional branches
     md = Cs(CS_ARCH_X86, CS_MODE_64)
+    md.detail = True
     cond_branches = 0
     for insn in md.disasm(text_data, text_vaddr):
         if X86_GRP_JUMP in insn.groups:

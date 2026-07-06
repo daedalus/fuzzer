@@ -114,9 +114,15 @@ def load_corpus(corpus_dir: Path, bloom: BloomFilter | None = None) -> tuple[lis
     full_files: dict[str, bytes] = {}
     delta_files: list[tuple[str, Path]] = []
 
+    # Metadata files to skip when loading corpus
+    _SKIP_NAMES = {"state.json", "edge_tracker.json", "markov.json", "mi.json"}
+
     if corpus_dir.exists():
         for f in corpus_dir.iterdir():
             if not f.is_file():
+                continue
+            # Skip known metadata files
+            if f.name in _SKIP_NAMES:
                 continue
             if f.suffix == ".json" and f.name.startswith("delta_"):
                 h = f.name[6:-5]  # strip "delta_" prefix and ".json" suffix

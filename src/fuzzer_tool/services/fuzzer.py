@@ -1813,11 +1813,11 @@ class Fuzzer:
             self._temperature = 1.0
 
         # Invalidate cached weights when corpus structure or edge tracker changes.
-        # We accept slightly stale weights for time-dependent signals (age, burst,
-        # temperature) since they change gradually — recomputing every iteration
-        # is not worth the cost. The cache is invalidated when:
-        # - corpus_version changes: new seed added/removed (changes weight vector length)
-        # - edge_version changes: new edge discovered (changes edge tracker signals)
+        # Two-level cache:
+        #   _cached_weights: per-seed expensive signals (subsumption, diversity,
+        #     spatial, coverage proximity) — only invalidated when edges change.
+        #   _weight_cache: final weight vector — extended incrementally when
+        #     corpus grows; fully invalidated when edges change.
         corpus_version = len(self.corpus)
         edge_version = self.shm_cov.cumulative_edges if self.shm_cov else 0
         if not hasattr(self, '_weight_cache'):
@@ -1826,9 +1826,32 @@ class Fuzzer:
             self._cached_weights = {}
         cache_key = (corpus_version, edge_version)
         if cache_key != self._weight_cache_key:
-            self._weight_cache = None
-            self._cached_weights = {}
+            edge_changed = self._weight_cache_key[1] != edge_version
             self._weight_cache_key = cache_key
+            if edge_changed:
+                # Edge discovery: invalidate both caches (signal recomputation needed)
+                self._weight_cache = None
+                self._cached_weights = {}
+            elif self._weight_cache is not None and len(self._weight_cache) < corpus_version:
+                # Corpus grew but edges unchanged: extend weight list for new seeds
+                now = time.time()
+                for seed in self.corpus[len(self._weight_cache):]:
+                    meta = self.seed_meta.get(seed)
+                    if meta is None:
+                        self._weight_cache.append(1.0)
+                        continue
+                    fuzz_count = max(meta["fuzz_count"], 1)
+                    coverage = meta["coverage_edges"]
+                    age = now - meta["added_at"]
+                    T = self._temperature
+                    explore_part = T * (1.0 / math.sqrt(fuzz_count))
+                    exploit_part = (1.0 + coverage * 0.5) / (1.0 + age * 0.01)
+                    w = explore_part * exploit_part
+                    burst_factor = max(1.0, 1.0 + T * (5.0 - 1.0) - (age / 60.0) * T)
+                    w *= burst_factor
+                    staleness = fuzz_count / max(coverage + 1, 1)
+                    w *= 0.01 if staleness > 50.0 * T else 1.0
+                    self._weight_cache.append(max(w, 1e-6))
 
         if self._weight_cache is not None:
             weights = self._weight_cache
@@ -2526,6 +2549,15 @@ class Fuzzer:
 
         i = 0
         try:
+            # Run each seed as-is before mutating — catches crashes in the
+            # initial corpus and gathers baseline coverage.
+            for seed in list(self.corpus):
+                returncode, stderr = self._run_target(seed)
+                self.exec_count += 1
+                if self._is_crash(returncode, stderr):
+                    self.crash_count += 1
+                    self.save_crash(seed, returncode, stderr)
+
             while not _shutdown:
                 if iterations and i >= iterations:
                     break

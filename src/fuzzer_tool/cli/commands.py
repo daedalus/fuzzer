@@ -209,7 +209,7 @@ def _auto_tune_timeout(target, file_mode=False, target_args=None, runs=10):
 
     times.sort()
     median = times[len(times) // 2]
-    return max(5 * median, 0.5)
+    return max(5 * median, 0.05)
 
 
 def cmd_import(args):
@@ -350,6 +350,8 @@ def cmd_replay(args):
 
 
 def main() -> int:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
     parser = argparse.ArgumentParser(
         prog="fuzzer-tool",
         description="Coverage-guided binary fuzzer with crash analysis tools",

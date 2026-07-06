@@ -29,6 +29,7 @@ class MutualInformationTracker:
     def __init__(self, max_positions: int = 4096, min_observations: int = 50):
         self.max_positions = max_positions
         self.min_observations = min_observations
+        self._max_mi_cache: dict[int, float] = {}  # input_length -> max_mi
 
         # Per-position: byte_value -> edge_index -> count
         # P(X_i = v, Y = e)
@@ -56,6 +57,7 @@ class MutualInformationTracker:
             map_size: Maximum edge index to consider.
         """
         self.total_observations += 1
+        self._invalidate_max_mi_cache()
         # Find which edges were hit
         hit_edges = {i for i, v in enumerate(edge_bitmap) if v > 0 and i < map_size}
 
@@ -120,6 +122,10 @@ class MutualInformationTracker:
         sorted_pos = sorted(profile.items(), key=lambda x: x[1], reverse=True)
         return sorted_pos[:k]
 
+    def _invalidate_max_mi_cache(self):
+        """Invalidate max_mi cache when new observations are recorded."""
+        self._max_mi_cache.clear()
+
     def mutation_weight(self, position: int, input_length: int) -> float:
         """Compute a mutation weight for a position based on MI.
 
@@ -134,8 +140,12 @@ class MutualInformationTracker:
         if mi_val <= 0:
             return 0.1
 
-        # Find max MI across all positions for normalization
-        max_mi = max(self.mi(pos) for pos in range(input_length) if pos in self.position_counts)
+        # Find max MI across all positions for normalization (cached per input_length)
+        if input_length not in self._max_mi_cache:
+            self._max_mi_cache[input_length] = max(
+                self.mi(pos) for pos in range(input_length) if pos in self.position_counts
+            ) if any(pos in self.position_counts for pos in range(input_length)) else 0.0
+        max_mi = self._max_mi_cache[input_length]
         if max_mi <= 0:
             return 1.0
 
