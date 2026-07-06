@@ -812,7 +812,7 @@ class PngChunkMutator:
         if not chunks:
             return self._generate_random_png(max_len)
 
-        op = random.randint(0, 27)
+        op = random.randint(0, 32)
         if op == 0:
             return self._mutate_ihdr(chunks, max_len)
         elif op == 1:
@@ -867,6 +867,16 @@ class PngChunkMutator:
             return self._corrupt_idat_data(chunks, max_len)
         elif op == 26:
             return self._extreme_dimensions(chunks, max_len)
+        elif op == 27:
+            return self._recompress_idat(chunks, max_len)
+        elif op == 28:
+            return self._mutate_palette_count(chunks, max_len)
+        elif op == 29:
+            return self._corrupt_ancillary(chunks, max_len)
+        elif op == 30:
+            return self._force_colortype_combo(chunks, max_len)
+        elif op == 31:
+            return self._insert_random_chunks(chunks, max_len)
         else:
             return self._generate_random_png(max_len)
 
@@ -1363,6 +1373,96 @@ class PngChunkMutator:
 
         # Replace with random bytes that look like zlib but aren't
         idat.data = bytes(random.randint(0, 255) for _ in range(random.randint(4, 32)))
+        return serialize_png_chunks(chunks)[:max_len]
+
+    def _recompress_idat(self, chunks: list[PngChunk], max_len: int) -> bytes:
+        """Recompress IDAT data with different zlib parameters."""
+        idat = self._find_chunk(chunks, b"IDAT")
+        if not idat:
+            return serialize_png_chunks(chunks)[:max_len]
+
+        import zlib
+        try:
+            raw = zlib.decompress(idat.data)
+        except zlib.error:
+            return serialize_png_chunks(chunks)[:max_len]
+
+        # Recompress with different compression level
+        level = random.choice([1, 3, 6, 9])
+        try:
+            idat.data = zlib.compress(raw, level)
+        except zlib.error:
+            pass
+        return serialize_png_chunks(chunks)[:max_len]
+
+    def _mutate_palette_count(self, chunks: list[PngChunk], max_len: int) -> bytes:
+        """Add extra palette entries to test bounds checking."""
+        plte = self._find_chunk(chunks, b"PLTE")
+        if not plte:
+            return serialize_png_chunks(chunks)[:max_len]
+
+        d = bytearray(plte.data)
+        # Add 1-10 random palette entries (3 bytes each)
+        n_add = random.randint(1, 10)
+        for _ in range(n_add):
+            d.extend(random.randint(0, 255) for _ in range(3))
+        plte.data = bytes(d)
+        return serialize_png_chunks(chunks)[:max_len]
+
+    def _corrupt_ancillary(self, chunks: list[PngChunk], max_len: int) -> bytes:
+        """Corrupt specific bytes within ancillary chunks."""
+        ancillary_types = {b"gAMA", b"cHRM", b"pHYs", b"sRGB", b"sBIT"}
+        ancillary = [c for c in chunks if c.chunk_type in ancillary_types]
+        if not ancillary:
+            return serialize_png_chunks(chunks)[:max_len]
+
+        chunk = random.choice(ancillary)
+        if len(chunk.data) > 0:
+            d = bytearray(chunk.data)
+            idx = random.randint(0, len(d) - 1)
+            d[idx] = random.randint(0, 255)
+            chunk.data = bytes(d)
+        return serialize_png_chunks(chunks)[:max_len]
+
+    def _force_colortype_combo(self, chunks: list[PngChunk], max_len: int) -> bytes:
+        """Force specific color_type + bit_depth + filter combinations."""
+        ihdr = self._find_chunk(chunks, b"IHDR")
+        if not ihdr or len(ihdr.data) < 13:
+            return serialize_png_chunks(chunks)[:max_len]
+
+        # Force specific combos that exercise different transform paths
+        combos = [
+            (0, 1, 0),   # gray 1-bit, no filter
+            (0, 8, 4),   # gray 8-bit, paeth filter
+            (2, 8, 2),   # RGB 8-bit, up filter
+            (2, 16, 3),  # RGB 16-bit, avg filter
+            (3, 1, 0),   # palette 1-bit, no filter
+            (3, 8, 1),   # palette 8-bit, sub filter
+            (4, 8, 0),   # gray+alpha 8-bit, no filter
+            (6, 8, 4),   # RGBA 8-bit, paeth filter
+            (6, 16, 2),  # RGBA 16-bit, up filter
+        ]
+        ct, bd, filt = random.choice(combos)
+        d = bytearray(ihdr.data)
+        d[6] = ct
+        d[7] = bd
+        ihdr.data = bytes(d)
+        return serialize_png_chunks(chunks)[:max_len]
+
+    def _insert_random_chunks(self, chunks: list[PngChunk], max_len: int) -> bytes:
+        """Insert 1-3 random chunks at random positions."""
+        chunk_types = [b"tEXt", b"zTXt", b"iTXt", b"sPLT", b"hIST"]
+        n = random.randint(1, 3)
+        for _ in range(n):
+            ct = random.choice(chunk_types)
+            # Minimal chunk data
+            if ct == b"tEXt":
+                data = b"Key\x00Value"
+            elif ct == b"zTXt":
+                data = b"Key\x00\x00" + b"\x00" * 5
+            else:
+                data = b"\x00" * random.randint(1, 10)
+            chunks.insert(random.randint(1, len(chunks)), PngChunk(ct, data))
         return serialize_png_chunks(chunks)[:max_len]
 
     def _extreme_dimensions(self, chunks: list[PngChunk], max_len: int) -> bytes:
