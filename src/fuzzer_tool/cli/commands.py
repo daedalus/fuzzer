@@ -163,6 +163,8 @@ def cmd_fuzz(args):
         replicator=getattr(args, 'replicator', False),
         shapley=getattr(args, 'shapley', False),
         mi_guided=getattr(args, 'mi_guided', False),
+        renyi_weight=getattr(args, 'renyi_weight', False),
+        transfer_entropy=getattr(args, 'transfer_entropy', False),
     )
     fuzzer.run(iterations=args.iterations)
 
@@ -277,6 +279,8 @@ def cmd_minimize(args):
         target_args=args.target_args,
         use_coverage=args.coverage,
         output_dir=args.output,
+        rate_distortion=getattr(args, 'rate_distortion', False),
+        target_frac=getattr(args, 'target_frac', 0.95),
     )
 
     if removed == 0:
@@ -419,6 +423,14 @@ def main() -> int:
     fuzz_parser.add_argument(
         "--mi-guided", action="store_true",
         help="Enable mutual information guided mutation (target high-MI byte positions)"
+    )
+    fuzz_parser.add_argument(
+        "--renyi-weight", action="store_true",
+        help="Enable Rényi entropy weighting in seed selection (boost cold-edge seeds)"
+    )
+    fuzz_parser.add_argument(
+        "--transfer-entropy", action="store_true",
+        help="Enable transfer entropy causal tracking (byte→edge influence detection)"
     )
     fuzz_parser.add_argument(
         "--targets",
@@ -606,6 +618,14 @@ def main() -> int:
     min_parser.add_argument("-c", "--coverage", action="store_true", help="Enable SHM coverage")
     min_parser.add_argument(
         "-o", "--output", default=None, help="Output directory (default: overwrite in-place)"
+    )
+    min_parser.add_argument(
+        "--rate-distortion", action="store_true",
+        help="Use rate-distortion optimal pruning (preserves coverage diversity)"
+    )
+    min_parser.add_argument(
+        "--target-frac", type=float, default=0.95,
+        help="Target coverage fraction for rate-distortion (default: 0.95)"
     )
     min_parser.set_defaults(func=cmd_minimize)
 

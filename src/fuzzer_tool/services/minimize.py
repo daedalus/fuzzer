@@ -37,6 +37,8 @@ def minimize_corpus(
     target_args: list[str] | None = None,
     use_coverage: bool = False,
     output_dir: str | None = None,
+    rate_distortion: bool = False,
+    target_frac: float = 0.95,
 ) -> tuple[int, int]:
     """Minimize a corpus by removing redundant inputs.
 
@@ -52,6 +54,8 @@ def minimize_corpus(
         target_args: Target arguments ({file} placeholder).
         use_coverage: Enable SHM coverage (passed to env).
         output_dir: Output directory for minimized corpus. If None, overwrites in-place.
+        rate_distortion: Use rate-distortion optimal pruning instead of greedy set-cover.
+        target_frac: Target coverage fraction for rate-distortion (default: 0.95).
 
     Returns:
         Tuple of (files_kept, files_removed).
@@ -72,7 +76,8 @@ def minimize_corpus(
 
     if use_coverage:
         kept, removed = _minimize_with_coverage(
-            corpus_files, target, timeout, file_mode, target_args, output_dir, corpus_path
+            corpus_files, target, timeout, file_mode, target_args, output_dir, corpus_path,
+            rate_distortion=rate_distortion, target_frac=target_frac,
         )
     else:
         kept, removed = _minimize_by_hash(corpus_files, output_dir, corpus_path)
@@ -89,8 +94,10 @@ def _minimize_with_coverage(
     target_args: list[str] | None,
     output_dir: str | None,
     corpus_path: Path,
+    rate_distortion: bool = False,
+    target_frac: float = 0.95,
 ) -> tuple[int, int]:
-    """Greedy set-cover over SHM edge bitmaps."""
+    """Greedy set-cover or rate-distortion optimal pruning over SHM edge bitmaps."""
     from fuzzer_tool.adapters.process import run_target_file, run_target_stdin
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="cmin_"))
@@ -131,29 +138,42 @@ def _minimize_with_coverage(
 
     shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    # Greedy set cover
-    total_coverage = bytearray(edge_map_size)
-    covered_files: list[str] = []
-    remaining = list(file_edges.keys())
+    # Convert to sets for rate-distortion module
+    seed_edges = {}
+    for fpath, bm in file_edges.items():
+        seed_edges[fpath] = {j for j in range(edge_map_size) if bm[j]}
 
-    while remaining:
-        best_file = None
-        best_new_edges = 0
-        for fpath in remaining:
-            edges = file_edges[fpath]
-            new = sum(1 for j in range(edge_map_size) if edges[j] and not total_coverage[j])
-            if new > best_new_edges:
-                best_new_edges = new
-                best_file = fpath
+    if rate_distortion:
+        print("[*] Using rate-distortion optimal pruning...")
+        from fuzzer_tool.core.rate_distortion import RateDistortionCorpus
+        rd = RateDistortionCorpus(map_size=edge_map_size)
+        covered_files, actual_frac = rd.optimal_pruning(seed_edges, target_fraction=target_frac)
+        print(f"[*] Rate-distortion: kept {len(covered_files)}/{len(corpus_files)} "
+              f"files ({actual_frac:.1%} coverage)")
+    else:
+        # Greedy set cover
+        total_coverage = bytearray(edge_map_size)
+        covered_files: list[str] = []
+        remaining = list(file_edges.keys())
 
-        if best_file is None or best_new_edges == 0:
-            break
+        while remaining:
+            best_file = None
+            best_new_edges = 0
+            for fpath in remaining:
+                edges = file_edges[fpath]
+                new = sum(1 for j in range(edge_map_size) if edges[j] and not total_coverage[j])
+                if new > best_new_edges:
+                    best_new_edges = new
+                    best_file = fpath
 
-        covered_files.append(best_file)
-        for j in range(edge_map_size):
-            if file_edges[best_file][j]:
-                total_coverage[j] = 1
-        remaining.remove(best_file)
+            if best_file is None or best_new_edges == 0:
+                break
+
+            covered_files.append(best_file)
+            for j in range(edge_map_size):
+                if file_edges[best_file][j]:
+                    total_coverage[j] = 1
+            remaining.remove(best_file)
 
     return _commit_results(corpus_files, covered_files, output_dir, corpus_path)
 

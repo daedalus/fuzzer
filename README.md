@@ -34,13 +34,14 @@ Coverage-guided binary fuzzer with statistical novelty scoring, Markov chain gen
 
 ### Information Theory
 - **Mutual information** (`--mi-guided`): I(byte_position; coverage) guides mutation toward positions that actually control code paths
-- **Rényi entropy**: generalized entropy spectrum (α→0 support size, α→∞ min-entropy) for coverage distribution analysis
-- **Rate-distortion corpus minimization**: optimal compression of corpus while preserving coverage information
-- **Transfer entropy**: directional information flow between byte positions and coverage edges (causal analysis)
+- **Rényi entropy** (`--renyi-weight`): generalized entropy spectrum for seed weighting — boosts seeds exercising rare (cold) edges
+- **Rate-distortion corpus minimization** (`--rate-distortion`): optimal compression of corpus preserving coverage diversity
+- **Transfer entropy** (`--transfer-entropy`): directional causal flow between byte positions and coverage edges
 
 ### Game Theory
 - **Shapley value** (`--shapley`): fair operator credit distribution accounting for synergistic effects between mutation operators
 - **Replicator dynamics** (`--replicator`): evolutionary game theory scheduling — operators grow proportionally to fitness, converging to evolutionarily stable strategies
+- **MOpt PSO** (`--mopt`): particle swarm optimization over operator distributions (alternative to Thompson sampling)
 
 ### Corpus Management
 - **Delta-encoded corpus**: parent-child diffs for small mutations (< 25% change), periodic full snapshots every 20 generations
@@ -123,6 +124,8 @@ fuzzer-tool fuzz ./target -c -n 5000 --report report.txt
 | `--replicator` | Replicator dynamics operator scheduling (evolutionary game theory) |
 | `--shapley` | Shapley value operator attribution (fair credit distribution) |
 | `--mi-guided` | Mutual information guided mutation (target high-MI byte positions) |
+| `--renyi-weight` | Rényi entropy weighting in seed selection (boost cold-edge seeds) |
+| `--transfer-entropy` | Transfer entropy causal tracking (byte→edge influence detection) |
 | `--inprocess` | Persistent subprocess mode (auto-restart on crash) |
 | `--resume` | Resume from saved state |
 | `--crash-codes N` | Additional exit codes to treat as crashes |
@@ -161,6 +164,16 @@ Calls target function directly via `ctypes.CDLL`. No crash isolation. ~2k–34k 
 
 ### Persistent subprocess (`--inprocess`)
 Keeps one Python subprocess alive. Fork-per-call with `os.setsid()` for process group isolation. Timeout enforced via outer threaded readline. Auto-restarts on subprocess death. ~65–120 eps.
+
+## Corpus Minimization
+
+```bash
+# Basic minimization (greedy set-cover)
+fuzzer-tool minimize ./target -d corpus -c
+
+# Rate-distortion optimal pruning (preserves coverage diversity)
+fuzzer-tool minimize ./target -d corpus -c --rate-distortion --target-frac 0.95
+```
 
 ## Test Suite
 

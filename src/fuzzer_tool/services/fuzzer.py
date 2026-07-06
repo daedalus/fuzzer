@@ -580,6 +580,8 @@ class Fuzzer:
         replicator=False,
         shapley=False,
         mi_guided=False,
+        renyi_weight=False,
+        transfer_entropy=False,
     ):
         self.target = target
         self.corpus_dir = Path(corpus_dir)
@@ -739,6 +741,18 @@ class Fuzzer:
         if self._use_mi and self._mi and self._mi_path.exists():
             self._mi.load(str(self._mi_path))
             log.info("MI tracker loaded from %s", self._mi_path)
+
+        self._use_renyi_weight = renyi_weight
+        self._use_transfer_entropy = transfer_entropy
+        self._te = None
+        self._te_byte_edges: dict[int, dict[int, int]] = {}  # pos → {edge: count}
+        if transfer_entropy:
+            from fuzzer_tool.core.transfer_entropy import TransferEntropy
+            self._te = TransferEntropy(history_length=1)
+            self._te_input_history: list[bytes] = []
+            self._te_edge_history: list[bytes] = []
+            self._te_history_max = 500
+            log.info("Transfer entropy tracking enabled")
         self._last_ops_used: list[str] = []
 
         # Directed distance for targeted fuzzing
@@ -1261,11 +1275,21 @@ class Fuzzer:
                 op = random.choice(ops)
             self._last_ops_used.append(op)
 
-            # MI-guided position selection for byte-level mutations
-            if self._use_mi and self._mi and buf:
-                byte_idx = self._mi.weighted_position(len(buf))
+            # Position selection: MI, TE, or random
+            if buf:
+                te_pos = self._get_te_weighted_position(len(buf)) if self._use_transfer_entropy and self._te else None
+                mi_pos = self._mi.weighted_position(len(buf)) if self._use_mi and self._mi else None
+                if te_pos is not None and mi_pos is not None:
+                    # Blend: 50% TE, 50% MI
+                    byte_idx = te_pos if random.random() < 0.5 else mi_pos
+                elif te_pos is not None:
+                    byte_idx = te_pos
+                elif mi_pos is not None:
+                    byte_idx = mi_pos
+                else:
+                    byte_idx = random.randint(0, len(buf) - 1)
             else:
-                byte_idx = random.randint(0, len(buf) - 1) if buf else 0
+                byte_idx = 0
 
             if op == "bit_flip" and buf:
                 bit_idx = random.randint(0, 7)
@@ -1756,6 +1780,17 @@ class Fuzzer:
                 cl_ratio = self.markov.codelength_ratio(seed)
                 w *= 1.0 + min(cl_ratio / 8.0, 1.0)
 
+            # Rényi coverage uniformity: boost seeds that exercise rare edges
+            if self._use_renyi_weight and seed_key in self._edge_tracker.seed_hit_counts:
+                hc = self._edge_tracker.seed_hit_counts[seed_key]
+                if hc:
+                    from fuzzer_tool.core.renyi import RenyiEntropy
+                    renyi = RenyiEntropy()
+                    # Min-entropy / support entropy: low ratio → coverage concentrated on hot edges
+                    uniformity = renyi.coverage_uniformity(list(hc.values()))
+                    # Low uniformity → this seed exercises cold edges → boost
+                    w *= 0.5 + 1.5 * (1.0 - uniformity)
+
             # Directed distance
             if self._distance:
                 seed_dist = meta.get("avg_distance", self._distance.max_distance)
@@ -2009,6 +2044,18 @@ class Fuzzer:
             if edge_bitmap:
                 self._mi.record(data, edge_bitmap, self.map_size)
 
+        if self._use_transfer_entropy and self._te:
+            edge_bitmap = self._get_current_edge_bitmap()
+            if edge_bitmap:
+                self._te_input_history.append(data[:64] if len(data) > 64 else data)
+                self._te_edge_history.append(edge_bitmap)
+                if len(self._te_input_history) > self._te_history_max:
+                    self._te_input_history = self._te_input_history[-self._te_history_max:]
+                    self._te_edge_history = self._te_edge_history[-self._te_history_max:]
+                # Update byte→edge causal map periodically
+                if len(self._te_input_history) % 100 == 0 and len(self._te_input_history) > 50:
+                    self._update_te_causal_map()
+
         if is_crash:
             self.crash_count += 1
             crash_name = self.save_crash(mutated, returncode, stderr)
@@ -2230,6 +2277,21 @@ class Fuzzer:
                     for p, v in self._mi.top_positions(k=5, input_length=self.max_len)
                 ],
             }
+        if self._use_renyi_weight:
+            edge_hits = dict(self._edge_tracker._global_edge_hits) if hasattr(self._edge_tracker, '_global_edge_hits') else {}
+            if edge_hits:
+                from fuzzer_tool.core.renyi import RenyiEntropy
+                renyi = RenyiEntropy()
+                stats["renyi"] = {
+                    "uniformity": round(renyi.coverage_uniformity(list(edge_hits.values())), 4),
+                    "min_entropy": round(renyi.min_entropy(list(edge_hits.values())), 4),
+                    "spectrum": {k: round(v, 4) for k, v in renyi.entropy_spectrum(list(edge_hits.values())).items()},
+                }
+        if self._use_transfer_entropy:
+            stats["transfer_entropy"] = {
+                "history_len": len(self._te_input_history),
+                "causal_positions": len(self._te_byte_edges),
+            }
         try:
             self.stats_file.parent.mkdir(parents=True, exist_ok=True)
             self.stats_file.write_text(json.dumps(stats, indent=2))
@@ -2286,6 +2348,47 @@ class Fuzzer:
         )
         with open(self.coverage_log, "a") as f:
             f.write(line)
+
+    def _update_te_causal_map(self):
+        """Update byte→edge causal map using transfer entropy."""
+        if not self._te or len(self._te_input_history) < 10:
+            return
+        # Compute TE for top byte positions
+        max_pos = min(64, min(len(b) for b in self._te_input_history))
+        map_size = min(self.map_size, 1024)  # limit edge space for efficiency
+        for pos in range(max_pos):
+            source = [b[pos] if pos < len(b) else 0 for b in self._te_input_history]
+            # Find dominant edge in each step
+            target = []
+            for eb in self._te_edge_history:
+                max_edge = 0
+                max_val = 0
+                for i in range(min(map_size, len(eb))):
+                    if eb[i] > max_val:
+                        max_val = eb[i]
+                        max_edge = i
+                target.append(max_edge)
+            te_val = self._te.transfer_entropy(source, target)
+            if te_val > 0.01:
+                # Store which edges this position causally influences
+                edge_counts: dict[int, int] = {}
+                for eb in self._te_edge_history[-50:]:
+                    for i in range(min(map_size, len(eb))):
+                        if eb[i] > 0:
+                            edge_counts[i] = edge_counts.get(i, 0) + 1
+                if edge_counts:
+                    self._te_byte_edges[pos] = edge_counts
+
+    def _get_te_weighted_position(self, input_length: int) -> int | None:
+        """Get a byte position weighted by transfer entropy causal influence.
+
+        Returns position with highest TE to coverage, or None if no TE data.
+        """
+        if not self._te_byte_edges:
+            return None
+        # Find position with most causal influence
+        best_pos = max(self._te_byte_edges.keys())
+        return best_pos if best_pos < input_length else None
 
     def _get_current_edge_bitmap(self) -> bytes | None:
         """Get the current coverage edge bitmap."""
