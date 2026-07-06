@@ -2661,7 +2661,7 @@ class Fuzzer:
             return
         edge_map = None
         if self.shm_cov:
-            edge_map = self.shm_cov.edge_map
+            edge_map = self.shm_cov._seen
         elif self.ptrace_cov:
             edge_map = self.ptrace_cov.edge_map
         if edge_map is None:

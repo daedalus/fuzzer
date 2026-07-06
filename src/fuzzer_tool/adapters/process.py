@@ -155,7 +155,10 @@ def run_target_file(
     tmp_file = Path(tmp_dir) / f"fuzz_{os.getpid()}"
     try:
         tmp_file.write_bytes(data)
-        cmd = [target] + [a.replace("{file}", str(tmp_file)) for a in target_args]
+        if target_args:
+            cmd = [target] + [a.replace("{file}", str(tmp_file)) for a in target_args]
+        else:
+            cmd = [target, str(tmp_file)]
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.DEVNULL,
