@@ -58,9 +58,8 @@ class MutualInformationTracker:
             map_size: Maximum edge index to consider.
         """
         self.total_observations += 1
-        # MI values change slowly — don't rebuild precomputed weights on every
-        # record(). Only invalidate when new positions are observed (rare).
         self._total_edges = None
+        self._invalidate_max_mi_cache()
         if hasattr(self, '_wp_all_positions') and self._wp_all_positions is not None:
             # Invalidate if we see a position we haven't tracked yet
             max_pos = len(input_bytes) - 1 if input_bytes else 0

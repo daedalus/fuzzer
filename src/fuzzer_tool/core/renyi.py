@@ -30,13 +30,10 @@ class RenyiEntropy:
 
     Works with raw count data (normalizes internally) or pre-normalized
     probability distributions.
-
-    Args:
-        smoothing: Laplace smoothing factor for zero probabilities.
     """
 
-    def __init__(self, smoothing: float = 1e-10):
-        self.smoothing = smoothing
+    def __init__(self):
+        pass
 
     def renyi(self, counts: dict | Counter | list, alpha: float) -> float:
         """Compute Rényi-α entropy in bits.

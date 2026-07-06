@@ -1869,7 +1869,8 @@ class Fuzzer:
             # Move pruned files to corpus/pruned/ before removing from memory
             pruned_dir = self.corpus_dir / "pruned"
             pruned_dir.mkdir(parents=True, exist_ok=True)
-            kept_set = {hashlib.sha256(s).hexdigest()[:16] for s in unique}
+            from fuzzer_tool.adapters.filesystem import hash_data as _hash
+            kept_set = {_hash(s) for s in unique}
             for f in self.corpus_dir.iterdir():
                 if not f.is_file():
                     continue
@@ -2095,30 +2096,16 @@ class Fuzzer:
             edge_changed = self._weight_cache_key[1] != edge_version
             self._weight_cache_key = cache_key
             if edge_changed:
-                # Edge discovery: only invalidate weight vector (recompute base
-                # weights). Keep _cached_weights — edge signals change slowly
-                # and stale values are acceptable vs 4ms rebuild per seed.
+                # Edge discovery: invalidate weight vector (recompute all weights).
+                # Keep _cached_weights — expensive signals (subsumption, diversity,
+                # spatial, proximity) change slowly and are safe to reuse.
                 self._weight_cache = None
-            elif self._weight_cache is not None and len(self._weight_cache) < corpus_version:
-                # Corpus grew but edges unchanged: extend weight list for new seeds
-                now = time.time()
-                for seed in self.corpus[len(self._weight_cache):]:
-                    meta = self.seed_meta.get(seed)
-                    if meta is None:
-                        self._weight_cache.append(1.0)
-                        continue
-                    fuzz_count = max(meta["fuzz_count"], 1)
-                    coverage = meta["coverage_edges"]
-                    age = now - meta["added_at"]
-                    T = self._temperature
-                    explore_part = T * (1.0 / math.sqrt(fuzz_count))
-                    exploit_part = (1.0 + coverage * 0.5) / (1.0 + age * 0.01)
-                    w = explore_part * exploit_part
-                    burst_factor = max(1.0, 1.0 + T * (5.0 - 1.0) - (age / 60.0) * T)
-                    w *= burst_factor
-                    staleness = fuzz_count / max(coverage + 1, 1)
-                    w *= 0.01 if staleness > 50.0 * T else 1.0
-                    self._weight_cache.append(max(w, 1e-6))
+            elif self._weight_cache is not None and len(self._weight_cache) != corpus_version:
+                # Corpus changed: fully recompute weights so fuzz_count-dependent
+                # terms (explore_part, burst_factor, staleness) reflect current
+                # exec counts for ALL seeds, not just new ones.  Expensive
+                # per-seed signals are still cached in _cached_weights.
+                self._weight_cache = None
 
         if self._weight_cache is not None:
             weights = self._weight_cache

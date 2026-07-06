@@ -8,10 +8,6 @@ from fuzzer_tool.core.transfer_entropy import TransferEntropy
 
 
 class TestRenyiEntropy:
-    def test_init(self):
-        r = RenyiEntropy()
-        assert r.smoothing == 1e-10
-
     def test_shannon_uniform(self):
         r = RenyiEntropy()
         # Uniform over 4 elements: H = log2(4) = 2.0

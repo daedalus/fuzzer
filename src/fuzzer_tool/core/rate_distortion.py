@@ -75,8 +75,11 @@ class RateDistortionCorpus:
             best_key = None
             best_loss = float("inf")
             for key, edges in remaining_seeds.items():
-                # Loss = edges unique to this seed
-                loss = len(edges - (remaining_edges - edges))
+                other_edges = set()
+                for other_key, other_set in remaining_seeds.items():
+                    if other_key != key:
+                        other_edges |= other_set
+                loss = len(edges - other_edges)
                 if loss < best_loss:
                     best_loss = loss
                     best_key = key
