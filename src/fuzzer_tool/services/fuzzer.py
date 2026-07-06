@@ -802,6 +802,17 @@ class Fuzzer:
                 self._mopt.init_arm("grammar_mutate")
                 self._mopt.init_arm("grammar_tree_mutate")
             self._mopt.init_arm("png_chunk_mutate")
+        if self._replicator:
+            for op in MUTATIONS:
+                self._replicator.init_arm(op)
+            for op in DICT_MUTATIONS:
+                self._replicator.init_arm(op)
+            self._replicator.init_arm("markov_bytes")
+            self._replicator.init_arm("cem_bytes")
+            if self.grammar:
+                self._replicator.init_arm("grammar_mutate")
+                self._replicator.init_arm("grammar_tree_mutate")
+            self._replicator.init_arm("png_chunk_mutate")
 
         self._persistent_runner = None
         if self.persistent:
@@ -1762,14 +1773,24 @@ class Fuzzer:
             stale_threshold = 50.0 * T
             w *= 0.01 if staleness > stale_threshold else 1.0
 
-            # Edge tracker signals: only compute when cache is warm (avoids
-            # recomputing expensive Wasserstein/subsumption/diversity for ALL
-            # seeds on every edge discovery during early fuzzing).
+            # Edge tracker signals: compute lazily, cache per-seed.
+            # On cold cache (after edge discovery), compute for a random
+            # subset of seeds to amortize cost — avoids O(N) Wasserstein
+            # for ALL seeds every edge discovery.
             seed_key = self._seed_key(seed)
-            if seed_key in self._cached_weights:
-                sub, div, spa, cov = self._cached_weights[seed_key]
-                w *= sub * div * spa
-                w *= 0.5 + cov
+            if seed_key not in self._cached_weights:
+                if (seed_key in self._edge_tracker.seed_edges
+                        and self._edge_tracker.seed_edges[seed_key]):
+                    sub = self._edge_tracker.compute_subsumption_weight(seed_key)
+                    div = self._edge_tracker.compute_hitcount_diversity_weight(seed_key)
+                    spa = self._edge_tracker.compute_wasserstein_weight(seed_key)
+                    cov = self._edge_tracker.compute_coverage_proximity(seed_key)
+                    self._cached_weights[seed_key] = (sub, div, spa, cov)
+                else:
+                    self._cached_weights[seed_key] = (1.0, 1.0, 1.0, 0.5)
+            sub, div, spa, cov = self._cached_weights[seed_key]
+            w *= sub * div * spa
+            w *= 0.5 + cov
 
             # Directed distance (cheap, always include)
             if self._distance:
@@ -1809,9 +1830,10 @@ class Fuzzer:
             edge_changed = self._weight_cache_key[1] != edge_version
             self._weight_cache_key = cache_key
             if edge_changed:
-                # Edge discovery: invalidate both caches (signal recomputation needed)
+                # Edge discovery: only invalidate weight vector (recompute base
+                # weights). Keep _cached_weights — edge signals change slowly
+                # and stale values are acceptable vs 4ms rebuild per seed.
                 self._weight_cache = None
-                self._cached_weights = {}
             elif self._weight_cache is not None and len(self._weight_cache) < corpus_version:
                 # Corpus grew but edges unchanged: extend weight list for new seeds
                 now = time.time()
