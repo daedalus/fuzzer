@@ -1804,6 +1804,16 @@ class Fuzzer:
                 # Under max_corpus but many stale seeds — still prune them
                 target_size = int(len(unique) * (1.0 - stale_ratio))
 
+        # Floor: corpus cannot be smaller than the number of productive seeds
+        # (seeds that discovered at least one edge). This ensures every
+        # discovered edge retains at least one covering seed.
+        productive = sum(
+            1 for seed in unique
+            if self.seed_meta.get(seed, {}).get("coverage_edges", 0) > 0
+        )
+        if productive > 0:
+            target_size = max(target_size, productive)
+
         # Prune subsumed seeds using edge coverage + diversity scoring
         if len(unique) > target_size:
             scored = []
@@ -1830,7 +1840,12 @@ class Fuzzer:
                 score = edge_score * wasserstein_weight
                 scored.append((score, seed))
             scored.sort(key=lambda x: x[0], reverse=True)
-            unique = [s for _, s in scored[:target_size]]
+            # Keep top target_size, but enforce floor: never prune below
+            # the number of productive seeds.
+            keep = min(target_size, len(scored))
+            if keep < productive:
+                keep = min(productive, len(scored))
+            unique = [s for _, s in scored[:keep]]
 
         removed = len(self.corpus) - len(unique)
         if removed > 0:
