@@ -1,6 +1,6 @@
 # fuzzer-tool
 
-Coverage-guided binary fuzzer with statistical novelty scoring, Markov chain generation, Monte Carlo mutations, kernel crash verification, and format-aware grammar mutations.
+Coverage-guided binary fuzzer with static target analysis, statistical novelty scoring, Markov chain generation, Monte Carlo mutations, kernel crash verification, and format-aware grammar mutations.
 
 ## Features
 
@@ -11,6 +11,12 @@ Coverage-guided binary fuzzer with statistical novelty scoring, Markov chain gen
 - **Markov chain**: learn byte-level transition probabilities from corpus, generate statistically similar inputs, persist across runs
 - **Monte Carlo scheduling**: Thompson sampling bandit for operator selection + Cross-Entropy Method for byte distribution learning
 - **Perplexity-gated generation**: model quality dynamically scales generation rate (more generation when model is lost, less when well-calibrated); rejects extreme-perplexity outputs as pure noise
+
+### Static Target Analysis
+- **TargetProfiler**: ELF static analysis at startup — extracts string constants, function boundaries, magic bytes, and input format hints
+- **Auto-populated dictionary**: interesting strings (format specifiers, error messages, keywords) and magic bytes extracted from `.rodata`
+- **Format-aware seed generation**: produces structurally meaningful initial seeds (PNG headers, text protocols, JSON, XML, HTML) based on inferred format
+- **Hot-function weighting**: seeds exercising high-branch-density functions get a proportional boost in selection
 
 ### Coverage & Scoring
 - **AFL SHM bitmap** coverage for instrumented targets (~65-200 eps)
@@ -104,6 +110,12 @@ fuzzer-tool fuzz ./target -c --resume
 
 # Full report after run
 fuzzer-tool fuzz ./target -c -n 5000 --report report.txt
+
+# Rank corpus seeds by interestingness
+fuzzer-tool rank ./target -d corpus -n 20
+
+# Dump top 10 most interesting seeds to files
+fuzzer-tool rank ./target -d corpus -n 10 --dump top_seeds
 ```
 
 ## Fuzzing Options
@@ -133,6 +145,31 @@ fuzzer-tool fuzz ./target -c -n 5000 --report report.txt
 | `--max-corpus N` | Auto-minimize corpus at N entries |
 | `--replay-n N` | Replay each crash N times for reproducibility scoring |
 | `--report [FILE]` | Generate explainability report (stdout or file) |
+
+## Subcommands
+
+| Command | Description |
+|---------|-------------|
+| `fuzz` | Run coverage-guided fuzzing (default) |
+| `rank` | Rank corpus seeds by interestingness (edge coverage, rarity, subsumption) |
+| `minimize` | Minimize corpus by removing redundant inputs |
+| `tmin` | Minimize a crash to smallest reproducer |
+| `replay` | Replay a crash input against the target |
+| `import` | Import corpus from AFL/libFuzzer/honggfuzz |
+
+### Rank Seeds
+
+Rank corpus seeds by a composite interestingness score based on edge coverage, singleton edge rarity, subsumption (irreplaceability), and coverage proximity.
+
+```bash
+fuzzer-tool rank <target> -d <corpus> [-n TOP] [--dump PREFIX]
+```
+
+| Flag | Description |
+|------|-------------|
+| `-d DIR` | Corpus directory |
+| `-n N` | Number of top seeds to show (default 10) |
+| `--dump PREFIX` | Dump top seeds to files `PREFIX.0`, `PREFIX.1`, ... |
 
 ## Coverage Modes
 
@@ -177,7 +214,7 @@ fuzzer-tool minimize ./target -d corpus -c --rate-distortion --target-frac 0.95
 
 ## Test Suite
 
-711 tests covering all modules. Run with:
+890 tests covering all modules. Run with:
 
 ```bash
 pip install -e ".[dev]"
