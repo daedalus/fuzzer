@@ -807,6 +807,7 @@ class Fuzzer:
                 self.mc.init_arm("grammar_mutate")
                 self.mc.init_arm("grammar_tree_mutate")
             self.mc.init_arm("png_chunk_mutate")
+            self.mc.init_arm("crc_fix")
         if self._mopt:
             for op in MUTATIONS:
                 self._mopt.init_arm(op)
@@ -818,6 +819,7 @@ class Fuzzer:
                 self._mopt.init_arm("grammar_mutate")
                 self._mopt.init_arm("grammar_tree_mutate")
             self._mopt.init_arm("png_chunk_mutate")
+            self._mopt.init_arm("crc_fix")
         if self._replicator:
             for op in MUTATIONS:
                 self._replicator.init_arm(op)
@@ -829,6 +831,7 @@ class Fuzzer:
                 self._replicator.init_arm("grammar_mutate")
                 self._replicator.init_arm("grammar_tree_mutate")
             self._replicator.init_arm("png_chunk_mutate")
+            self._replicator.init_arm("crc_fix")
 
         self._persistent_runner = None
         if self.persistent:
@@ -1528,6 +1531,33 @@ class Fuzzer:
                 else:
                     mutated = self._png_mutator._generate_random_png(self.max_len)
                 buf = bytearray(mutated[: self.max_len])
+
+            elif op == "crc_fix" and buf:
+                # CRC-aware mutation: parse PNG, mutate chunk data, fix CRC.
+                # This lets mutations pass CRC validation and reach deeper
+                # decompression/code paths that CRC-corrupting mutations miss.
+                from fuzzer_tool.core.grammar import parse_png_chunks, serialize_png_chunks
+                chunks = parse_png_chunks(bytes(buf))
+                if chunks and len(chunks) > 1:
+                    # Pick a non-IEND chunk to mutate
+                    candidates = [i for i, c in enumerate(chunks)
+                                  if c.chunk_type != b"IEND"]
+                    if candidates:
+                        idx = random.choice(candidates)
+                        chunk = chunks[idx]
+                        # Mutate chunk data: flip random bytes
+                        if chunk.data:
+                            data = bytearray(chunk.data)
+                            for _ in range(random.randint(1, min(4, len(data)))):
+                                pos = random.randint(0, len(data) - 1)
+                                data[pos] ^= 1 << random.randint(0, 7)
+                            chunk.data = bytes(data)
+                        else:
+                            # Empty chunk: add some data
+                            chunk.data = bytes(random.randint(0, 255)
+                                               for _ in range(random.randint(1, 32)))
+                        # Serialize with fixed CRC (chunk.serialize() recomputes)
+                        buf = bytearray(serialize_png_chunks(chunks)[: self.max_len])
 
             elif op == "redqueen" and buf and parent_meta:
                 matches = parent_meta.get("redqueen_matches", [])
