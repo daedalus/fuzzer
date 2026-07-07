@@ -56,7 +56,7 @@ LOOKUP_U16: list[int] = _build_u16_table()
 
 
 def classify_counts(trace_bits: bytearray | bytes) -> bytearray:
-    """Classify edge hit counts in-place using the logarithmic lookup table.
+    """Classify edge hit counts using the logarithmic lookup table.
 
     Processes the trace buffer 2 bytes at a time using the u16 table.
     Each byte's count is independently bucketized into one of 9 classes.
@@ -98,34 +98,48 @@ def new_bits(
 ) -> int:
     """Check if a classified trace has new coverage vs a virgin map.
 
-    Compares trace against virgin bitmap using 8-byte word operations.
+    Implements AFL's has_new_bits semantics:
+    - For each byte, if trace[i] & virgin[i] is nonzero: overlap (potential new info)
+    - If trace[i] & ~virgin[i] is nonzero: trace has bits virgin doesn't (new edge)
+    - If trace[i] is nonzero and virgin[i] is 0: entirely new edge
 
     Returns:
         0 = no new bits
-        1 = new bits in previously-hit bytes (count changed)
-        2 = entirely new bytes (virgin byte was 0xFF)
+        1 = overlap — trace has bits where virgin also has bits (count changed)
+        2 = new edge — trace has bits where virgin is 0
     """
-    result = 0
     length = min(len(trace), len(virgin))
+    if length == 0:
+        return 0
 
-    # Process 8 bytes at a time
-    for i in range(0, length - 7, 8):
+    has_overlap = False
+
+    # Process 8 bytes at a time for efficiency
+    i = 0
+    while i + 7 < length:
         t = int.from_bytes(trace[i:i + 8], "little")
         v = int.from_bytes(virgin[i:i + 8], "little")
 
-        if t & v:
-            result = 1
-
+        # New edge: trace has bits where virgin is 0
         if t & ~v:
             return 2
 
+        # Overlap: trace has bits where virgin also has bits
+        if t & v:
+            has_overlap = True
+
+        i += 8
+
     # Handle remaining bytes
-    for i in range(length - (length % 8), length):
-        t = trace[i] if isinstance(trace, (bytes, bytearray)) else trace[i]
-        v = virgin[i] if isinstance(virgin, (bytes, bytearray)) else virgin[i]
-        if t and v:
-            result = 1
+    while i < length:
+        t = trace[i]
+        v = virgin[i]
+
         if t and not v:
             return 2
+        if t and v:
+            has_overlap = True
 
-    return result
+        i += 1
+
+    return 1 if has_overlap else 0
