@@ -20,18 +20,19 @@ from fuzzer_tool.core.mutations import (
 class TestConstants:
     def test_interesting_8_values(self):
         assert 0 in INTERESTING_8
-        assert 0xFF in INTERESTING_8
-        assert len(INTERESTING_8) == 5
+        assert 127 in INTERESTING_8
+        assert -128 in INTERESTING_8
+        assert len(INTERESTING_8) == 9
 
     def test_interesting_16_values(self):
-        assert 0x7FFF in INTERESTING_16
-        assert 0x8000 in INTERESTING_16
-        assert len(INTERESTING_16) == 5
+        assert 32767 in INTERESTING_16
+        assert -32768 in INTERESTING_16
+        assert len(INTERESTING_16) == 10
 
     def test_interesting_32_values(self):
-        assert 0x7FFFFFFF in INTERESTING_32
-        assert 0x80000000 in INTERESTING_32
-        assert len(INTERESTING_32) == 5
+        assert 2147483647 in INTERESTING_32
+        assert -2147483648 in INTERESTING_32
+        assert len(INTERESTING_32) == 9
 
     def test_mutations_list(self):
         assert "bit_flip" in MUTATIONS

@@ -1329,17 +1329,17 @@ class Fuzzer:
                 buf[byte_idx] ^= 0xFF
 
             elif op == "interesting_8" and buf:
-                buf[byte_idx] = random.choice(INTERESTING_8)
+                buf[byte_idx] = random.choice(INTERESTING_8) & 0xFF
 
             elif op == "interesting_16" and len(buf) >= 2:
                 idx = random.randint(0, len(buf) - 2)
                 val = random.choice(INTERESTING_16)
-                struct.pack_into("<H", buf, idx, val)
+                struct.pack_into("<h", buf, idx, val)
 
             elif op == "interesting_32" and len(buf) >= 4:
                 idx = random.randint(0, len(buf) - 4)
                 val = random.choice(INTERESTING_32)
-                struct.pack_into("<I", buf, idx, val)
+                struct.pack_into("<i", buf, idx, val)
 
             elif op == "arithmetic" and buf:
                 from fuzzer_tool.core.mutations import ARITHMETIC_DELTAS
