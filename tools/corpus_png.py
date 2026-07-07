@@ -2,7 +2,8 @@
 """Generate a diverse PNG corpus for fuzzing libpng.
 
 Creates minimal PNGs with varied properties (dimensions, color types,
-bit depths, compression levels, filter types) plus downloads real-world
+bit depths, compression levels, filter types, ancillary chunks) plus
+zlib-aware seeds for decompression testing and downloads real-world
 PNGs from public sources when network is available.
 
 Usage:
@@ -13,6 +14,7 @@ Output is a directory of .png files suitable as fuzzer seed corpus.
 
 import argparse
 import os
+import random
 import struct
 import sys
 import urllib.request
@@ -34,9 +36,9 @@ def make_png(
     compression: int = 9,
     filter_type: int = 0,
     interlace: int = 0,
+    extra_chunks: list[tuple[bytes, bytes]] | None = None,
 ) -> bytes:
     sig = b"\x89PNG\r\n\x1a\n"
-    # IHDR: compression_method=0 (deflate), filter_method=0 (adaptive), interlace
     ihdr = make_chunk(
         b"IHDR",
         struct.pack(">IIBBBBB", width, height, bit_depth, color_type, 0, 0, interlace),
@@ -56,7 +58,13 @@ def make_png(
     compressed = zlib.compress(raw, compression)
     idat = make_chunk(b"IDAT", compressed)
     iend = make_chunk(b"IEND", b"")
-    return sig + ihdr + idat + iend
+
+    parts = [sig, ihdr]
+    if extra_chunks:
+        for ct, cd in extra_chunks:
+            parts.append(make_chunk(ct, cd))
+    parts.extend([idat, iend])
+    return b"".join(parts)
 
 
 def make_variants() -> list[tuple[str, bytes]]:
@@ -91,10 +99,9 @@ def make_variants() -> list[tuple[str, bytes]]:
         seeds.append((name, make_png(w, h, 2, 8)))
 
     # Noise patterns
-    import random
-    random.seed(42)
+    rng = random.Random(42)
     for w, h in [(64, 64), (128, 128)]:
-        def noise(w, y, _rng=random):
+        def noise(w, y, _rng=rng):
             return bytes(_rng.randint(0, 255) for _ in range(w * 3))
         seeds.append((f"noise_{w}x{h}.png", make_png(w, h, 2, 8, pixel_func=noise)))
 
@@ -111,6 +118,112 @@ def make_variants() -> list[tuple[str, bytes]]:
         v = 255 if (y // 4) % 2 == 0 else 0
         return bytes([v, 0, 0]) * w
     seeds.append(("stripes_128x128.png", make_png(128, 128, 2, 8, pixel_func=stripes)))
+
+    return seeds
+
+
+def make_zlib_variants() -> list[tuple[str, bytes]]:
+    """Generate zlib-aware seeds for decompression path coverage."""
+    seeds = []
+    rng = random.Random(42)
+
+    # Raw zlib streams at various compression levels and sizes
+    for level in range(0, 10):
+        for size in [64, 256, 1024, 4096]:
+            raw = bytes(rng.randint(0, 255) for _ in range(size))
+            compressed = zlib.compress(raw, level)
+            seeds.append((f"zlib_L{level}_s{size}.bin", compressed))
+
+    # PNGs with complex (random) pixel data
+    for w, h in [(1, 1), (8, 8), (32, 32), (64, 64), (128, 128)]:
+        for ct, bd in [(0, 8), (2, 8), (3, 8), (4, 8), (6, 8)]:
+            channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}[ct]
+            raw = b""
+            for y in range(h):
+                raw += bytes([0])  # filter None
+                raw += bytes(rng.randint(0, 255) for _ in range(w * channels))
+            # Bind raw data into a closure for the pixel_func
+            pixel_data = raw
+            def _make_pf(pd):
+                def pf(w, y):
+                    row_size = w * {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}[ct]
+                    start = y * (row_size + 1) + 1  # skip filter byte
+                    return pd[start:start + row_size]
+                return pf
+            seeds.append((f"complex_ct{ct}_bd{bd}_{w}x{h}.png",
+                          make_png(w, h, ct, bd, pixel_func=_make_pf(pixel_data))))
+
+    # PNGs with multiple IDAT chunks (split compressed data)
+    for w, h in [(16, 16), (32, 32), (64, 64)]:
+        raw = bytes(rng.randint(0, 255) for _ in range(w * h * 3))
+        compressed = zlib.compress(raw, 6)
+        sig = b"\x89PNG\r\n\x1a\n"
+        ihdr = make_chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+        mid = len(compressed) // 2
+        idat1 = make_chunk(b"IDAT", compressed[:mid])
+        idat2 = make_chunk(b"IDAT", compressed[mid:])
+        iend = make_chunk(b"IEND", b"")
+        seeds.append((f"split_idat_{w}x{h}.png", sig + ihdr + idat1 + idat2 + iend))
+
+    # PNGs with ancillary chunks
+    for chunk_name, chunk_data in [
+        (b"tEXt", b"Key=Value"),
+        (b"gAMA", struct.pack(">I", 45455)),
+        (b"pHYs", struct.pack(">IIb", 3780, 3780, 1)),
+        (b"tIME", struct.pack(">HBBBBB", 2024, 1, 1, 0, 0, 0)),
+    ]:
+        seeds.append((f"chunk_{chunk_name.decode()}.png",
+                      make_png(8, 8, 2, 8,
+                               pixel_func=lambda w, y: bytes([0x80] * (w * 3)),
+                               extra_chunks=[(chunk_name, chunk_data)])))
+
+    # Minimal valid PNGs for all color_type × bit_depth combos
+    for ct, bd in [
+        (0, 1), (0, 2), (0, 4), (0, 8), (0, 16),
+        (2, 8), (2, 16),
+        (3, 1), (3, 2), (3, 4), (3, 8),
+        (4, 8),
+        (6, 8), (6, 16),
+    ]:
+        channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}[ct]
+        row_bytes = max(1, (channels * bd + 7) // 8)
+        raw = bytes([0]) + bytes([0x80] * row_bytes)
+        seeds.append((f"minimal_ct{ct}_bd{bd}.png", make_png(1, 1, ct, bd,
+                      pixel_func=lambda w, y, _r=raw: _r[1:1 + w * {0:1,2:3,3:1,4:2,6:4}[ct]])))
+
+    # Interlaced PNGs
+    for w, h in [(16, 16), (32, 32)]:
+        seeds.append((f"interlace_{w}x{h}.png",
+                      make_png(w, h, 2, 8, interlace=1,
+                               pixel_func=lambda w, y: bytes(rng.randint(0, 255) for _ in range(w * 3)))))
+
+    # Zlib-wrapped raw data (for decompression testing)
+    for data_name, raw in [
+        ("zeros", b"\x00" * 1024),
+        ("repeating", b"\x41\x42\x43\x44" * 256),
+        ("random", bytes(rng.randint(0, 255) for _ in range(1024))),
+        ("incremental", bytes(range(256)) * 4),
+    ]:
+        for level in [0, 6, 9]:
+            compressed = zlib.compress(raw, level)
+            seeds.append((f"zlib_{data_name}_L{level}.bin", compressed))
+
+    # PNGs with palette data
+    for palette_size in [2, 4, 16, 256]:
+        w, h = 16, 16
+        palette = bytes(rng.randint(0, 255) for _ in range(palette_size * 3))
+        raw = b""
+        for y in range(h):
+            raw += bytes([0])
+            raw += bytes(rng.randint(0, palette_size - 1) for _ in range(w))
+        sig = b"\x89PNG\r\n\x1a\n"
+        ihdr = make_chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 3, 0, 0, 0))
+        plte = make_chunk(b"PLTE", palette)
+        compressed = zlib.compress(raw, 6)
+        idat = make_chunk(b"IDAT", compressed)
+        iend = make_chunk(b"IEND", b"")
+        seeds.append((f"palette_{palette_size}.png",
+                      sig + ihdr + plte + idat + iend))
 
     return seeds
 
@@ -142,12 +255,18 @@ def main():
     parser.add_argument("--out", default="corpus_png", help="Output directory (default: corpus_png)")
     parser.add_argument("--count", type=int, default=0, help="Max seeds (0=all)")
     parser.add_argument("--download", action="store_true", help="Also download real-world PNGs")
+    parser.add_argument("--zlib-only", action="store_true",
+                        help="Only generate zlib-aware seeds (skip basic variants)")
     args = parser.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
 
     print(f"[*] Generating PNG corpus in {args.out}/")
-    seeds = make_variants()
+    seeds = []
+    if not args.zlib_only:
+        seeds.extend(make_variants())
+    seeds.extend(make_zlib_variants())
+
     if args.count > 0:
         seeds = seeds[: args.count]
 
