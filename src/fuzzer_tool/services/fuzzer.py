@@ -1522,7 +1522,7 @@ class Fuzzer:
                 buf = bytearray(mutated[: self.max_len])
 
             elif op == "png_chunk_mutate":
-                from fuzzer_tool.core.grammar import PngChunkMutator, parse_png_chunks
+                from fuzzer_tool.core.png_mutations import PngChunkMutator, parse_png_chunks
                 if not hasattr(self, '_png_mutator'):
                     self._png_mutator = PngChunkMutator()
                 # Only apply if input looks like PNG, otherwise generate one
@@ -1536,7 +1536,7 @@ class Fuzzer:
                 # CRC-aware mutation: parse PNG, mutate chunk data, fix CRC.
                 # This lets mutations pass CRC validation and reach deeper
                 # decompression/code paths that CRC-corrupting mutations miss.
-                from fuzzer_tool.core.grammar import parse_png_chunks, serialize_png_chunks
+                from fuzzer_tool.core.png_mutations import parse_png_chunks, serialize_png_chunks
                 chunks = parse_png_chunks(bytes(buf))
                 if chunks and len(chunks) > 1:
                     # Pick a non-IEND chunk to mutate
