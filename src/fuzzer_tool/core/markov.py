@@ -334,3 +334,224 @@ class MarkovChain:
             self.transitions[ctx] = collections.Counter({int(k): v for k, v in counts.items()})
         log.info("Markov chain loaded: %s (%d contexts)", path, self._contexts_seen)
         return True
+
+
+class MarkovEnsemble:
+    """Ensemble of Markov chains with different orders, trained simultaneously.
+
+    During generation, a random order is selected weighted by each chain's
+    information content (higher-order chains that have learned useful
+    transitions get more weight). This produces diverse inputs that
+    capture both local byte patterns (low order) and longer-range
+    structure (high order).
+
+    Args:
+        orders: List of n-gram orders to use (e.g. [0, 1, 2]).
+        smoothing: Laplace smoothing factor for each chain.
+        blend: If True, blend probability distributions instead of
+               selecting a single order. Produces smoother output but
+               is slower.
+
+    Examples:
+        >>> ens = MarkovEnsemble(orders=[0, 1, 2])
+        >>> ens.train(b"HTTP/1.1 200 OK")
+        >>> sample = ens.generate(20)
+        >>> len(sample)
+        20
+    """
+
+    def __init__(
+        self,
+        orders: list[int] | None = None,
+        smoothing: float = 1e-6,
+        blend: bool = False,
+    ):
+        if orders is None:
+            orders = [0, 1, 2]
+        self.orders = orders
+        self.blend = blend
+        self.chains: dict[int, MarkovChain] = {
+            o: MarkovChain(order=o, smoothing=smoothing) for o in orders
+        }
+        # Convenience attributes for compatibility with single-chain code
+        self.order = orders[0] if orders else 0
+        self.smoothing = smoothing
+        self.transitions = self.chains[self.order].transitions
+        self._contexts_seen = 0
+        self.last_js_divergence = 0.0
+        self._snapshot_interval = 50
+        self._trains_since_snapshot = 0
+
+    def train(self, data: bytes) -> None:
+        """Train all chains on the same input."""
+        for chain in self.chains.values():
+            chain.train(data)
+        self._contexts_seen += len(data)
+        self.transitions = self.chains[self.order].transitions
+
+    def train_corpus(self, corpus: list[bytes]) -> None:
+        """Train all chains on multiple inputs."""
+        for data in corpus:
+            self.train(data)
+
+    def _select_chain(self) -> MarkovChain:
+        """Select a chain weighted by information content (contexts learned).
+
+        Chains that have learned more transitions are more useful — they
+        capture real patterns rather than falling back to random bytes.
+        """
+        if len(self.chains) == 1:
+            return list(self.chains.values())[0]
+
+        # Weight by contexts_seen (proxy for information content)
+        weights = []
+        for order in self.orders:
+            chain = self.chains[order]
+            # Higher-order chains need more data to be useful — boost
+            # their weight proportionally to avoid starvation
+            w = max(chain._contexts_seen, 1) * (1 + order * 0.5)
+            weights.append(w)
+
+        total = sum(weights)
+        r = random.random() * total
+        cumulative = 0.0
+        for i, w in enumerate(weights):
+            cumulative += w
+            if r <= cumulative:
+                self.order = self.orders[i]
+                self.transitions = self.chains[self.order].transitions
+                return self.chains[self.order]
+        self.order = self.orders[-1]
+        self.transitions = self.chains[self.order].transitions
+        return self.chains[self.order]
+
+    def generate(self, length: int) -> bytes:
+        """Generate a new input using a randomly selected chain order."""
+        chain = self._select_chain()
+        return chain.generate(length)
+
+    def sample_byte(self, ctx: bytes) -> int:
+        """Sample a single byte from a randomly selected chain."""
+        chain = self._select_chain()
+        # Adjust context to match chain's order
+        if chain.order > 0:
+            ctx = ctx[-chain.order:] if len(ctx) >= chain.order else ctx
+        return chain.sample_byte(ctx)
+
+    def is_trained(self) -> bool:
+        """True if any chain has learned transitions."""
+        return any(c.is_trained() for c in self.chains.values())
+
+    def perplexity(self, data: bytes) -> float:
+        """Compute perplexity using the best-fitting chain."""
+        if not self.chains:
+            return float("inf")
+        # Use the chain with the most contexts for perplexity
+        best = max(self.chains.values(), key=lambda c: c._contexts_seen)
+        return best.perplexity(data)
+
+    def codelength(self, data: bytes) -> float:
+        """Compute codelength using the best-fitting chain."""
+        if not self.chains:
+            return len(data) * 8.0
+        best = max(self.chains.values(), key=lambda c: c._contexts_seen)
+        return best.codelength(data)
+
+    def codelength_ratio(self, data: bytes) -> float:
+        """Codelength per byte, normalized to [0, 8]."""
+        if not data:
+            return 0.0
+        return self.codelength(data) / len(data)
+
+    def corpus_perplexity(self, corpus: list[bytes]) -> dict:
+        """Perplexity statistics across corpus using the best chain."""
+        if not self.chains:
+            return {"mean": 0, "median": 0, "p10": 0, "p90": 0,
+                    "low_surprise_count": 0, "high_surprise_count": 0}
+        best = max(self.chains.values(), key=lambda c: c._contexts_seen)
+        return best.corpus_perplexity(corpus)
+
+    def snapshot_and_check_plateau(self) -> bool:
+        """Check if any chain has plateaued."""
+        results = [c.snapshot_and_check_plateau() for c in self.chains.values()]
+        self.last_js_divergence = max(
+            (c.last_js_divergence for c in self.chains.values()), default=0.0
+        )
+        return any(results)
+
+    def save(self, path: str) -> bool:
+        """Save all chains to a JSON file."""
+        data = {
+            "orders": self.orders,
+            "blend": self.blend,
+            "chains": {},
+        }
+        for order, chain in self.chains.items():
+            data["chains"][str(order)] = {
+                "order": chain.order,
+                "smoothing": chain.smoothing,
+                "contexts_seen": chain._contexts_seen,
+                "transitions": {
+                    ctx.hex(): dict(counts)
+                    for ctx, counts in chain.transitions.items()
+                },
+            }
+        try:
+            with open(path, "w") as f:
+                json.dump(data, f, separators=(",", ":"))
+            log.info("Markov ensemble saved: %s (%d orders)", path, len(self.chains))
+            return True
+        except OSError as e:
+            log.warning("Failed to save Markov ensemble: %s", e)
+            return False
+
+    def load(self, path: str) -> bool:
+        """Load ensemble state from a JSON file.
+
+        Handles both legacy single-chain format and ensemble format.
+        """
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            log.warning("Failed to load Markov ensemble: %s", e)
+            return False
+
+        # Detect format: ensemble has "chains" key, legacy has "transitions"
+        if "chains" in data:
+            # Ensemble format
+            self.orders = data.get("orders", self.orders)
+            self.blend = data.get("blend", False)
+            self.chains = {}
+            for order_str, chain_data in data["chains"].items():
+                order = int(order_str)
+                chain = MarkovChain(order=order, smoothing=chain_data.get("smoothing", 1e-6))
+                chain._contexts_seen = chain_data.get("contexts_seen", 0)
+                chain.transitions = collections.defaultdict(collections.Counter)
+                for ctx_hex, counts in chain_data.get("transitions", {}).items():
+                    ctx = bytes.fromhex(ctx_hex)
+                    chain.transitions[ctx] = collections.Counter(
+                        {int(k): v for k, v in counts.items()}
+                    )
+                self.chains[order] = chain
+            self.order = self.orders[0] if self.orders else 0
+            self.transitions = self.chains.get(self.order, MarkovChain()).transitions
+        else:
+            # Legacy single-chain format — upgrade to ensemble
+            chain = MarkovChain(order=data.get("order", 1), smoothing=data.get("smoothing", 1e-6))
+            chain._contexts_seen = data.get("contexts_seen", 0)
+            chain.transitions = collections.defaultdict(collections.Counter)
+            for ctx_hex, counts in data.get("transitions", {}).items():
+                ctx = bytes.fromhex(ctx_hex)
+                chain.transitions[ctx] = collections.Counter({int(k): v for k, v in counts.items()})
+            self.chains = {chain.order: chain}
+            self.orders = [chain.order]
+            self.order = chain.order
+            self.transitions = chain.transitions
+
+        total_ctx = sum(c._contexts_seen for c in self.chains.values())
+        log.info(
+            "Markov ensemble loaded: %s (%d orders, %d total contexts)",
+            path, len(self.chains), total_ctx,
+        )
+        return True

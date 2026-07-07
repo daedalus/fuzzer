@@ -105,8 +105,9 @@ def cmd_fuzz(args):
             dictionary=dictionary,
             file_mode=args.file_mode,
             target_args=args.target_args,
-            markov_order=args.markov_order if use_markov else 0,
+            markov_order=args.markov_order if use_markov else "0",
             markov_generate=args.markov_gen,
+            markov_blend=getattr(args, 'markov_blend', False),
             mc_bandit=args.mc_bandit,
             mc_cem=args.mc_cem,
             mc_elite_frac=args.mc_elite_frac,
@@ -406,7 +407,12 @@ def main() -> int:
         "--markov-gen", action="store_true", help="Enable Markov chain seed generation"
     )
     fuzz_parser.add_argument(
-        "--markov-order", type=int, default=1, help="Markov chain order (default: 1)"
+        "--markov-order", type=str, default="1",
+        help="Markov chain order(s), comma-separated (e.g. '0,1,2' for ensemble)"
+    )
+    fuzz_parser.add_argument(
+        "--markov-blend", action="store_true",
+        help="Blend probability distributions across orders (slower but smoother)"
     )
     fuzz_parser.add_argument(
         "--mc-bandit", action="store_true", help="Enable Thompson sampling bandit"

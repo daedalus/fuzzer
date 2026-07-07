@@ -27,7 +27,7 @@ from fuzzer_tool.adapters.process import (
 )
 from fuzzer_tool.adapters.shm import ShmCoverage
 from fuzzer_tool.core.bloom import BloomFilter
-from fuzzer_tool.core.markov import MarkovChain
+from fuzzer_tool.core.markov import MarkovChain, MarkovEnsemble
 from fuzzer_tool.core.montecarlo import (
     MOptScheduler,
     MonteCarloScheduler,
@@ -553,6 +553,7 @@ class Fuzzer:
         target_args=None,
         markov_order=1,
         markov_generate=False,
+        markov_blend=False,
         mc_bandit=False,
         mc_cem=False,
         mopt=False,
@@ -701,7 +702,17 @@ class Fuzzer:
             )
             self._ablation_file.flush()
 
-        self.markov = MarkovChain(order=markov_order)
+        # Support multiple markov orders via comma-separated list or single int
+        if isinstance(markov_order, str):
+            orders = [int(o.strip()) for o in markov_order.split(",")]
+        elif isinstance(markov_order, list):
+            orders = markov_order
+        else:
+            orders = [markov_order]
+        if len(orders) > 1:
+            self.markov = MarkovEnsemble(orders=orders, blend=markov_blend)
+        else:
+            self.markov = MarkovChain(order=orders[0])
         self.markov_generate = markov_generate
         self.markov_trained = False
         self._markov_path = self.corpus_dir / "markov.json"
@@ -2864,10 +2875,16 @@ class Fuzzer:
         if self.dictionary:
             print(f"[*] Dictionary: {len(self.dictionary)} tokens")
         if self.markov_trained:
-            print(
-                f"[*] Markov chain: order={self.markov.order}, "
-                f"transitions={len(self.markov.transitions)}"
-            )
+            if hasattr(self.markov, 'chains'):
+                orders_str = ",".join(str(o) for o in self.markov.orders)
+                total_ctx = sum(c._contexts_seen for c in self.markov.chains.values())
+                print(f"[*] Markov ensemble: orders=[{orders_str}], "
+                      f"total_contexts={total_ctx}")
+            else:
+                print(
+                    f"[*] Markov chain: order={self.markov.order}, "
+                    f"transitions={len(self.markov.transitions)}"
+                )
         if self.markov_generate:
             print("[*] Markov generation: enabled (15% of seeds)")
         if self.mc:
