@@ -91,7 +91,8 @@ class TestFuzzerUnit:
         f = self._make_fuzzer()
         f.corpus = []
         seed = f._pick_seed()
-        assert seed == b"AAAAAAAA"
+        assert isinstance(seed, bytes)
+        assert len(seed) > 0
 
     def test_mutate_includes_splice(self):
         f = self._make_fuzzer(mutations_per_input=64)

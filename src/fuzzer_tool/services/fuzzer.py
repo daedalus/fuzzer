@@ -189,6 +189,22 @@ class Fuzzer:
         from fuzzer_tool.core.elf import estimate_map_size
         self.map_size = estimate_map_size(target)
 
+        # Static analysis: profile target for string extraction, function
+        # boundaries, input format hints, and call graph structure.
+        from fuzzer_tool.core.target_profiler import TargetProfiler
+        self._profile = TargetProfiler(target).profile()
+
+        # Auto-populate dictionary from extracted strings and magic bytes
+        if self._profile.interesting_strings:
+            for s in self._profile.interesting_strings[:200]:
+                token = s.encode("utf-8", errors="replace")
+                if token not in self.dictionary:
+                    self.dictionary.append(token)
+        if self._profile.magic_bytes:
+            for mb in self._profile.magic_bytes:
+                if mb not in self.dictionary:
+                    self.dictionary.append(mb)
+
         # Cmplog: comparison tracing via LD_PRELOAD
         self._cmplog = None
         if cmplog:
@@ -1585,7 +1601,46 @@ class Fuzzer:
             return self._weighted_pick_seed()
         if self.corpus:
             return random.choice(self.corpus)
-        return b"AAAAAAAA"
+        # Format-aware seed generation: use profile hints to produce
+        # structurally meaningful inputs when corpus is empty
+        return self._format_aware_seed()
+
+    def _format_aware_seed(self) -> bytes:
+        """Generate a seed that matches the target's inferred input format."""
+        fmt = getattr(self._profile, "format_signature", None)
+        if fmt == "png":
+            # Minimal valid PNG: signature + IHDR + IEND
+            import binascii
+            ihdr_data = b"\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02"  # 1x1, 8-bit RGB
+            ihdr_chunk = b"IHDR" + ihdr_data
+            ihdr_crc = struct.pack(">I", binascii.crc32(ihdr_chunk))
+            iend_chunk = b"IEND"
+            iend_crc = struct.pack(">I", binascii.crc32(iend_chunk))
+            return (
+                b"\x89PNG\r\n\x1a\n"
+                + struct.pack(">I", len(ihdr_data)) + ihdr_chunk + ihdr_crc
+                + struct.pack(">I", 0) + iend_chunk + iend_crc
+            )
+        if fmt == "text":
+            # Text-like: common delimiters and keywords from the target
+            parts = [b"GET / HTTP/1.1\r\n", b"Host: localhost\r\n"]
+            if self._profile.boundary_markers:
+                sep = self._profile.boundary_markers[0]
+                parts.append(sep * 4)
+            return b"".join(parts)
+        if fmt == "json":
+            return b'{"key": "value", "num": 0}'
+        if fmt == "xml":
+            return b'<?xml version="1.0"?><root><data/></root>'
+        if fmt == "elf":
+            return b"\x7fELF" + b"\x00" * 12
+        if fmt == "html":
+            return b"<!DOCTYPE html><html><body></body></html>"
+        # Fallback: fill with boundary markers if known, else zeros
+        if self._profile.boundary_markers:
+            marker = self._profile.boundary_markers[0]
+            return marker * min(16, self.max_len)
+        return b"\x00" * min(64, self.max_len)
 
     def _compute_weights(self, now: float) -> list[float]:
         """Compute seed selection weights. Cached until corpus/edge-tracker changes.
@@ -1701,6 +1756,25 @@ class Fuzzer:
                 alpha = min(self._anneal_progress * 2, 1.0)
                 dist_weight = math.exp(-norm_dist * 5.0 * alpha)
                 w *= (1.0 - alpha) + alpha * dist_weight
+
+            # Hot-function weighting: seeds exercising code paths through
+            # high-branch-density functions get a proportional boost.  We
+            # approximate this via coverage_edges (more edges ≈ more code
+            # paths ≈ more hot functions hit).
+            if self._profile.hot_functions and self._profile.functions:
+                hot_density = sum(
+                    self._profile.functions[f].branch_density
+                    for f in self._profile.hot_functions
+                    if f in self._profile.functions
+                ) / max(len(self._profile.hot_functions), 1)
+                all_density = sum(
+                    fi.branch_density for fi in self._profile.functions.values()
+                ) / max(len(self._profile.functions), 1)
+                if all_density > 0:
+                    hotness_ratio = hot_density / all_density
+                    # Boost seeds with above-median coverage by hotness ratio
+                    if coverage > 0:
+                        w *= 1.0 + (hotness_ratio - 1.0) * min(coverage / 50.0, 1.0)
 
             weights.append(max(w, 1e-6))
         return weights
@@ -2415,6 +2489,13 @@ class Fuzzer:
         print(f"[*] Max input length: {self.max_len}")
         print(f"[*] Timeout: {self.timeout}s")
         print(f"[*] Seed: {self.seed}")
+        # Target profile summary
+        if self._profile.functions:
+            print(
+                f"[*] Profile: {len(self._profile.functions)} functions, "
+                f"{len(self._profile.hot_functions)} hot, "
+                f"format={self._profile.format_signature or 'unknown'}"
+            )
         if self.grammar:
             print(f"[*] Grammar: {len(self.grammar.rules)} rules")
         if self.persistent:
