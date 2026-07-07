@@ -2096,14 +2096,21 @@ class Fuzzer:
                 report = self._tracer.trace(mutated, returncode)
                 self._tracer.save_report(report, str(self.crashes_dir), crash_name)
             # Verify crash at kernel level via dmesg.
-            # First drain the async stream; if empty, fall back to a
-            # synchronous poll to catch races where the stream thread
-            # hasn't consumed the /dev/kmsg line yet.
+            # First drain the async stream; if empty, do a synchronous
+            # poll with a generous time window to catch crashes the
+            # stream thread hasn't consumed yet.
             child_pid = getattr(self, "_last_child_pid", None)
             kernel_hits = self._dmesg.drain_stream(pid=child_pid)
             if not kernel_hits:
-                snap = self._dmesg.poll(pid=child_pid)
-                kernel_hits = snap.crashes
+                import time as _time
+                _time.sleep(0.05)  # let stream consume /dev/kmsg
+                kernel_hits = self._dmesg.drain_stream(pid=child_pid)
+            if not kernel_hits:
+                # Synchronous fallback: read dmesg directly, no PID filter
+                # (the crash we just detected IS the one we're looking for)
+                text_crashes = self._dmesg._poll_text(since=0)
+                if text_crashes:
+                    kernel_hits = [kc for kc in text_crashes if kc.pid == child_pid] if child_pid else text_crashes
             if kernel_hits:
                 for kc in kernel_hits:
                     self._kernel_crashes.append(kc)

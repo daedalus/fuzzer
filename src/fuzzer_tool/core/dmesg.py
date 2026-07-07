@@ -325,7 +325,14 @@ class DmesgParser:
                 if ts <= since:
                     continue
                 msg = line[m.end() :].strip()
-                kc = self._match_crash(ts, msg)
+                # Extract PID from "comm[pid]: message" format
+                pid = None
+                proc_name = None
+                pid_match = _PID_IN_MSG_RE.search(msg)
+                if pid_match:
+                    pid = int(pid_match.group(1))
+                    proc_name = pid_match.group(0).split("[")[0]
+                kc = self._match_crash(ts, msg, pid, proc_name)
                 if kc:
                     crashes.append(kc)
             return crashes
