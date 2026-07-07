@@ -2560,6 +2560,19 @@ class Fuzzer:
                 if self._is_crash(returncode, stderr):
                     self.crash_count += 1
                     self.save_crash(seed, returncode, stderr)
+                    # Kernel crash verification (same as fuzz_one path)
+                    child_pid = getattr(self, "_last_child_pid", None)
+                    kernel_hits = self._dmesg.drain_stream(pid=child_pid)
+                    if not kernel_hits:
+                        import time as _time
+                        _time.sleep(0.05)
+                        kernel_hits = self._dmesg.drain_stream(pid=child_pid)
+                    if not kernel_hits:
+                        text_crashes = self._dmesg._poll_text(since=0)
+                        if text_crashes:
+                            kernel_hits = [kc for kc in text_crashes if kc.pid == child_pid] if child_pid else text_crashes
+                    for kc in kernel_hits:
+                        self._kernel_crashes.append(kc)
             # Baseline exec_count after initial seed replay — used for
             # periodic minimization modulus so it fires at clean intervals
             # regardless of initial corpus size.
