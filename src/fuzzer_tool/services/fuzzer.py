@@ -1064,6 +1064,10 @@ class Fuzzer:
                 from fuzzer_tool.core.mutations import byte_insert
                 buf = bytearray(byte_insert(bytes(buf), self.max_len)[: self.max_len])
 
+            elif op == "insert_ascii_num" and buf and len(buf) < self.max_len:
+                from fuzzer_tool.core.mutations import insert_ascii_num
+                buf = bytearray(insert_ascii_num(bytes(buf), self.max_len)[: self.max_len])
+
             elif op == "length_grow" and buf and len(buf) < self.max_len:
                 size = random.randint(1, min(64, self.max_len - len(buf)))
                 if size > 0:

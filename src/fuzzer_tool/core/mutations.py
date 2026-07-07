@@ -71,6 +71,7 @@ MUTATIONS = [
     "byte_shuffle",
     "byte_delete",
     "byte_insert",
+    "insert_ascii_num",
 ]
 
 
@@ -527,6 +528,29 @@ def ascii_num_replace(data: bytes) -> bytes:
     result[idx:end] = num_str[: end - idx]
 
     return bytes(result)
+
+
+def insert_ascii_num(data: bytes, max_len: int = 65536) -> bytes:
+    """Insert an ASCII number string at a random position.
+
+    Like ascii_num_replace but inserts rather than overwrites.
+    Useful for fuzzing fields that accept numeric values.
+
+    Args:
+        data: Input bytes.
+        max_len: Maximum output length.
+
+    Returns:
+        Bytes with an ASCII number inserted.
+    """
+    if len(data) >= max_len:
+        return data
+
+    idx = random.randint(0, len(data))
+    num = random.randint(0, 99999)
+    num_str = str(num).encode("ascii")
+    result = data[:idx] + num_str + data[idx:]
+    return result[:max_len]
 
 
 def byte_shuffle(data: bytes) -> bytes:
