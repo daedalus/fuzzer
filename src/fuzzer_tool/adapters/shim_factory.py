@@ -370,7 +370,7 @@ def read_bitmap(shim_handle: ctypes.CDLL) -> bytes | None:
         size = shim_handle.cov_get_size()
         if not ptr or not size:
             return None
-        return (ctypes.c_uint8 * size).from_address(ptr).tobytes()
+        return bytes((ctypes.c_uint8 * size).from_address(ptr))
     except (AttributeError, OSError):
         return None
 
