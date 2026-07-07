@@ -44,6 +44,29 @@ from fuzzer_tool.core.mutations import (
     splice,
 )
 from fuzzer_tool.core.sanitizer import SanitizerReport
+from fuzzer_tool.services.ptrace_coverage import (
+    HAS_CAPSTONE,
+    INT3,
+    PTRACE_CONT,
+    PTRACE_GETREGS,
+    PTRACE_PEEKDATA,
+    PTRACE_POKEDATA,
+    PTRACE_SETOPTIONS,
+    PTRACE_SETREGS,
+    PTRACE_SINGLESTEP,
+    PTRACE_TRACEME,
+    PtraceCoverage,
+)
+from fuzzer_tool.services.te_position import (
+    get_te_weighted_position,
+    update_te_causal_map,
+)
+from fuzzer_tool.services.stats_reporter import (
+    discovery_rate as _discovery_rate,
+    format_elapsed as _format_elapsed_fn,
+    record_discovery_snapshot as _record_discovery_snapshot_fn,
+    run_crash_replays as _run_crash_replays_fn,
+)
 
 log = logging.getLogger(__name__)
 
@@ -68,15 +91,6 @@ signal.signal(signal.SIGTERM, _kill_children)
 signal.signal(signal.SIGINT, _kill_children)
 
 
-try:
-    from capstone import CS_ARCH_X86, CS_MODE_64, Cs
-    from capstone.x86_const import X86_GRP_CALL, X86_GRP_INT, X86_GRP_JUMP, X86_GRP_RET
-
-    HAS_CAPSTONE = True
-except ImportError:
-    HAS_CAPSTONE = False
-
-
 def _write_and_close(fd: int, data: bytes) -> None:
     """Write *data* to *fd* then close it — designed to run in a thread."""
     try:
@@ -96,444 +110,6 @@ def _cleanup_tmp_dir(path: Path) -> None:
         shutil.rmtree(path, ignore_errors=True)
     except Exception:
         log.debug("Failed to clean up %s", path, exc_info=True)
-
-
-PTRACE_TRACEME = 0
-PTRACE_PEEKDATA = 2
-PTRACE_POKEDATA = 5
-PTRACE_CONT = 7
-PTRACE_SINGLESTEP = 9
-PTRACE_GETREGS = 12
-PTRACE_SETREGS = 13
-PTRACE_SETOPTIONS = 0x4200
-PTRACE_O_TRACESYSGOOD = 1
-INT3 = 0xCC
-
-
-class PtraceCoverage:
-    """Edge coverage via ptrace breakpoints on closed-source binaries.
-
-    Strategy: disassemble the first bytes of each function (from ELF symtab/dynsym),
-    place int3 at each basic block entry, record (prev, curr) edges.
-    With --deep-coverage, uses capstone to discover all basic blocks.
-    """
-
-    def __init__(
-        self,
-        target_path: str,
-        map_size: int = 65536,
-        deep_coverage: bool = False,
-        max_bps: int = 50000,
-    ):
-        self.target_path = target_path
-        self.map_size = map_size
-        self.bb_addrs: list[int] = []
-        self.original_bytes: dict[int, int] = {}
-        self.edge_map: bytearray = bytearray(map_size)
-        self.prev_location = 0
-        self.total_edges = 0
-        self.cumulative_edges = 0
-        self.total_bp_hits = 0
-        self._base_address: int | None = None
-        self._map_snapshot = bytes(self.edge_map)
-        self.deep_coverage = deep_coverage and HAS_CAPSTONE
-        self.max_bps = max_bps
-        self._discovered_bbs: set[int] = set()
-        self._func_ranges: list[tuple[int, int]] = []
-        self._elf_data: bytes = b""
-        self._load_segments: list[tuple[int, int, int, int]] = []
-        self._is_pie: bool = True  # assume PIE until proven otherwise
-        self._is_x86_64: bool = False  # cached platform check
-        self._stack_initialized: bool = False  # True after first valid RSP seen
-
-        if self.deep_coverage:
-            self._disassembler = Cs(CS_ARCH_X86, CS_MODE_64)
-            self._disassembler.detail = True
-            self._parse_elf_segments()
-
-        self._collect_basic_blocks()
-
-        # Cache platform check once (avoids import + call in hot SIGTRAP loop)
-        import platform as _platform
-
-        self._is_x86_64 = _platform.machine() == "x86_64"
-
-    def _collect_basic_blocks(self):
-        try:
-            with open(self.target_path, "rb") as f:
-                data = f.read()
-        except Exception:
-            log.debug("Failed to read ELF from %s", self.target_path, exc_info=True)
-            return
-
-        if data[:4] != b"\x7fELF":
-            return
-
-        is_64 = data[4] == 2
-        is_le = data[5] == 1
-        if not (is_64 and is_le):
-            return
-
-        e_type = struct.unpack_from("<H", data, 16)[0]
-        self._is_pie = e_type == 3  # ET_DYN = PIE, ET_EXEC = non-PIE
-        self._elf_entry = struct.unpack_from("<Q", data, 24)[0]  # e_entry
-
-        e_shoff = struct.unpack_from("<Q", data, 40)[0]
-        e_shnum = struct.unpack_from("<H", data, 60)[0]
-        e_shentsize = struct.unpack_from("<H", data, 58)[0]
-        e_shstrndx = struct.unpack_from("<H", data, 62)[0]
-
-        if e_shnum == 0 or e_shstrndx >= e_shnum:
-            return
-
-        shstr_off = e_shoff + e_shstrndx * e_shentsize
-        if shstr_off + e_shentsize > len(data):
-            return
-        shstr_offset = struct.unpack_from("<Q", data, shstr_off + 24)[0]
-
-        symtab_sec = None
-        strtab_sec = None
-        dynsym_sec = None
-        dynstr_sec = None
-        text_start = 0
-        text_end = 0
-        for i in range(e_shnum):
-            sh = e_shoff + i * e_shentsize
-            if sh + e_shentsize > len(data):
-                return
-            sh_type = struct.unpack_from("<I", data, sh + 4)[0]
-            sh_name_idx = struct.unpack_from("<I", data, sh)[0]
-            name = data[shstr_offset + sh_name_idx : shstr_offset + sh_name_idx + 32].split(
-                b"\x00"
-            )[0]
-            if sh_type == 2:
-                symtab_sec = sh
-            elif sh_type == 11:
-                dynsym_sec = sh
-            elif sh_type == 3:
-                if name == b".strtab" and strtab_sec is None:
-                    strtab_sec = sh
-                elif name == b".dynstr" and dynstr_sec is None:
-                    dynstr_sec = sh
-            elif name == b".text":
-                text_start = struct.unpack_from("<Q", data, sh + 24)[0]
-                text_size = struct.unpack_from("<Q", data, sh + 32)[0]
-                text_end = text_start + text_size
-
-        self._parse_symbol_table(data, symtab_sec, strtab_sec, text_start, text_end)
-        if not self.bb_addrs:
-            self._parse_symbol_table(data, dynsym_sec, dynstr_sec, text_start, text_end)
-
-        if self.deep_coverage and HAS_CAPSTONE:
-            for func_va, func_size in self._func_ranges:
-                self._collect_function_bbs(func_va, func_size)
-
-        # Exclude _start (entry point) — stack not set up yet, re-executing
-        # instructions there causes SIGSEGV from push to RSP=0.
-        # Must run after all collection (symbol table + capstone discovery).
-        self.bb_addrs = [a for a in set(self.bb_addrs) if a != self._elf_entry]
-        self.bb_addrs.sort()
-
-    def _parse_symbol_table(
-        self,
-        data: bytes,
-        sym_sec: int | None,
-        str_sec: int | None,
-        text_start: int = 0,
-        text_end: int = 0,
-    ):
-        if sym_sec is None or str_sec is None:
-            return
-
-        sym_offset = struct.unpack_from("<Q", data, sym_sec + 24)[0]
-        sym_size = struct.unpack_from("<Q", data, sym_sec + 32)[0]
-        sym_entsize = struct.unpack_from("<Q", data, sym_sec + 56)[0]
-        if sym_entsize == 0:
-            log.debug("sym_entsize == 0 in section, skipping malformed symbol table")
-            return
-        sym_count = sym_size // sym_entsize if sym_entsize else 0
-
-        # Valid x86-64 function entry opcodes (first byte of instruction)
-        valid_opcodes = {
-            0xF3,  # endbr64 prefix
-            0x55,  # push %rbp
-            0x48,  # rex.W prefix (mov, sub, lea, etc.)
-            0x41,  # rex.B prefix (push, mov, etc.)
-            0x53,  # push %rbx
-            0x56,  # push %rsi
-            0x57,  # push %rdi
-            0x83,  # sub $imm, r/m
-            0x81,  # sub $imm32, r/m
-            0x31,  # xor r/m, r
-            0x33,  # xor r, r/m
-            0x89,  # mov r/m, r
-            0xE8,  # call rel32
-            0xFF,  # call/jmp indir
-            0xB8,  # mov eax, imm32
-            0xC3,  # ret (shouldn't be entry, but safe)
-        }
-
-        for i in range(min(sym_count, 10000)):
-            sym = sym_offset + i * sym_entsize
-            if sym + sym_entsize > len(data):
-                break
-            st_info = data[sym + 4]
-            st_value = struct.unpack_from("<Q", data, sym + 8)[0]
-            st_size = struct.unpack_from("<Q", data, sym + 16)[0]
-            st_type = st_info & 0xF
-            if (
-                st_type == 2
-                and st_value > 0
-                and st_size > 0
-                and st_value < len(data)
-                and data[st_value] in valid_opcodes
-                and (text_start == 0 or text_start <= st_value < text_end)
-            ):
-                self.bb_addrs.append(st_value)
-                self._func_ranges.append((st_value, st_value + st_size))
-
-        self.bb_addrs.sort()
-        self._func_ranges.sort()
-
-    def _parse_elf_segments(self):
-        try:
-            with open(self.target_path, "rb") as f:
-                self._elf_data = f.read()
-        except Exception:
-            log.debug("Failed to read ELF segments from %s", self.target_path, exc_info=True)
-            return
-
-        data = self._elf_data
-        if len(data) < 64 or data[:4] != b"\x7fELF":
-            return
-        if data[4] != 2 or data[5] != 1:
-            return
-
-        e_phoff = struct.unpack_from("<Q", data, 32)[0]
-        e_phentsize = struct.unpack_from("<H", data, 54)[0]
-        e_phnum = struct.unpack_from("<H", data, 56)[0]
-
-        for i in range(min(e_phnum, 100)):
-            ph = e_phoff + i * e_phentsize
-            if ph + 56 > len(data):
-                break
-            p_type = struct.unpack_from("<I", data, ph)[0]
-            if p_type == 1:
-                p_offset = struct.unpack_from("<Q", data, ph + 8)[0]
-                p_vaddr = struct.unpack_from("<Q", data, ph + 16)[0]
-                p_filesz = struct.unpack_from("<Q", data, ph + 32)[0]
-                p_memsz = struct.unpack_from("<Q", data, ph + 40)[0]
-                self._load_segments.append((p_vaddr, p_offset, p_filesz, p_memsz))
-
-    def _read_func_bytes(self, func_va: int, max_len: int = 512) -> bytes | None:
-        for vaddr, offset, filesz, _memsz in self._load_segments:
-            if vaddr <= func_va < vaddr + filesz:
-                file_offset = offset + (func_va - vaddr)
-                end = min(file_offset + max_len, offset + filesz)
-                return self._elf_data[file_offset:end]
-        return None
-
-    def _collect_function_bbs(self, func_va: int, func_size: int):
-        if not self.deep_coverage or not HAS_CAPSTONE:
-            return
-
-        func_bytes = self._read_func_bytes(func_va, max_len=min(func_size, 2048))
-        if not func_bytes:
-            return
-
-        try:
-            for insn in self._disassembler.disasm(func_bytes, func_va):
-                is_jump = X86_GRP_JUMP in insn.groups
-                is_call = X86_GRP_CALL in insn.groups
-                is_ret = X86_GRP_RET in insn.groups
-                is_int = X86_GRP_INT in insn.groups
-
-                if is_jump:
-                    if insn.op_str.startswith("0x"):
-                        target = int(insn.op_str, 16)
-                        if (
-                            func_va <= target < func_va + func_size
-                            and target not in self._discovered_bbs
-                        ):
-                            self.bb_addrs.append(target)
-                            self._discovered_bbs.add(target)
-                    next_addr = insn.address + insn.size
-                    if next_addr not in self._discovered_bbs:
-                        self.bb_addrs.append(next_addr)
-                        self._discovered_bbs.add(next_addr)
-                elif is_call or is_ret or is_int:
-                    next_addr = insn.address + insn.size
-                    if next_addr not in self._discovered_bbs:
-                        self.bb_addrs.append(next_addr)
-                        self._discovered_bbs.add(next_addr)
-        except Exception:
-            log.debug("Failed to disassemble function at %#x", func_va, exc_info=True)
-
-    def discover_new_bbs(self, pid: int, bp_addr: int, max_discover: int = 32):
-        if not self.deep_coverage or len(self.original_bytes) >= self.max_bps:
-            return 0
-
-        rel_addr = bp_addr - self._base_address if self._base_address is not None else bp_addr
-
-        func_start = None
-        func_size = 0
-        for start, end in self._func_ranges:
-            if start <= rel_addr < end:
-                func_start = start
-                func_size = end - start
-                break
-        if func_start is None:
-            return 0
-
-        scan_start = rel_addr
-        func_bytes = self._read_func_bytes(
-            scan_start,
-            max_len=min(func_size - (scan_start - func_start), 512),
-        )
-        if not func_bytes:
-            return 0
-
-        count = 0
-        try:
-            for insn in self._disassembler.disasm(func_bytes, scan_start):
-                if count >= max_discover or len(self.original_bytes) >= self.max_bps:
-                    break
-
-                is_jump = X86_GRP_JUMP in insn.groups
-                is_call = X86_GRP_CALL in insn.groups
-                is_ret = X86_GRP_RET in insn.groups
-                is_int = X86_GRP_INT in insn.groups
-
-                new_targets = []
-                if is_jump and insn.op_str.startswith("0x"):
-                    target = int(insn.op_str, 16)
-                    if func_start <= target < func_start + func_size:
-                        new_targets.append(target)
-                    next_addr = insn.address + insn.size
-                    if func_start <= next_addr < func_start + func_size:
-                        new_targets.append(next_addr)
-                elif is_call or is_ret or is_int:
-                    next_addr = insn.address + insn.size
-                    if func_start <= next_addr < func_start + func_size:
-                        new_targets.append(next_addr)
-
-                for target in new_targets:
-                    if target in self._discovered_bbs:
-                        continue
-                    self._discovered_bbs.add(target)
-                    abs_target = self._resolve_addr(target)
-                    try:
-                        val = self._read_memory(pid, abs_target)
-                        orig = val & 0xFF
-                        if orig != INT3:
-                            self.original_bytes[abs_target] = orig
-                            self._write_memory(pid, abs_target, (val & ~0xFF) | INT3)
-                            self.bb_addrs.append(target)
-                            count += 1
-                    except Exception:
-                        log.debug("Failed to install bp at %#x", target, exc_info=True)
-        except Exception:
-            log.debug("Failed to discover BBs from %#x", rel_addr, exc_info=True)
-
-        return count
-
-    def resolve_base(self, pid: int):
-        try:
-            with open(f"/proc/{pid}/maps") as f:
-                for line in f:
-                    if self.target_path in line or line.split()[-1].endswith(
-                        "/" + os.path.basename(self.target_path)
-                    ):
-                        parts = line.split()
-                        addr_range = parts[0].split("-")
-                        self._base_address = int(addr_range[0], 16)
-                        return
-            with open(f"/proc/{pid}/maps") as f:
-                for line in f:
-                    parts = line.split()
-                    if len(parts) >= 2 and parts[1] == "r-xp":
-                        addr_range = parts[0].split("-")
-                        self._base_address = int(addr_range[0], 16)
-                        return
-        except Exception:
-            log.debug("Failed to resolve base address from /proc/%d/maps", pid, exc_info=True)
-
-    def _resolve_addr(self, rel_addr: int) -> int:
-        if self._is_pie and self._base_address is not None:
-            return self._base_address + rel_addr
-        return rel_addr
-
-    def _ptrace(self, request, pid, addr=None, data=None):
-        libc = ctypes.CDLL("libc.so.6", use_errno=True)
-        libc.ptrace.argtypes = [
-            ctypes.c_long,
-            ctypes.c_long,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-        ]
-        libc.ptrace.restype = ctypes.c_long
-        ctypes.set_errno(0)
-        result = libc.ptrace(
-            request,
-            pid,
-            ctypes.c_void_p(addr) if addr else None,
-            ctypes.c_void_p(data) if data else None,
-        )
-        return result
-
-    def _read_memory(self, pid: int, addr: int) -> int:
-        val = self._ptrace(PTRACE_PEEKDATA, pid, addr)
-        return val & 0xFFFFFFFFFFFFFFFF
-
-    def _write_memory(self, pid: int, addr: int, data_8: int):
-        self._ptrace(PTRACE_POKEDATA, pid, addr, data_8)
-
-    def install_breakpoints(self, pid: int):
-        self.resolve_base(pid)
-        if self._is_pie and self._base_address is None:
-            log.warning("Could not resolve PIE base address, breakpoints may be incorrect")
-        self.original_bytes.clear()
-        for rel_addr in self.bb_addrs:
-            addr = self._resolve_addr(rel_addr)
-            try:
-                val = self._read_memory(pid, addr)
-                self.original_bytes[addr] = val & 0xFF
-                new_val = (val & ~0xFF) | INT3
-                self._write_memory(pid, addr, new_val)
-            except Exception:
-                log.debug("Failed to install bp at %#x", addr, exc_info=True)
-
-    def remove_breakpoints(self, pid: int):
-        for addr, orig in self.original_bytes.items():
-            try:
-                val = self._read_memory(pid, addr)
-                new_val = (val & ~0xFF) | orig
-                self._write_memory(pid, addr, new_val)
-            except Exception:
-                log.debug("Failed to restore bp at %#x", addr, exc_info=True)
-        self.original_bytes.clear()
-
-    def reset_edge_map(self):
-        self.prev_location = 0
-        self.total_edges = 0
-        self._map_snapshot = bytes(self.edge_map)
-
-    def record_edge(self, addr: int) -> bool:
-        # Use relative addresses for edge hashing (consistent with AFL).
-        # Absolute addresses cause spurious collisions under PIE/ASLR.
-        rel = addr - self._base_address if self._base_address else addr
-        bucket = (rel ^ self.prev_location) % self.map_size
-        self.prev_location = rel % self.map_size
-        self.total_bp_hits += 1
-        if self.edge_map[bucket] == 0:
-            self.edge_map[bucket] = 1
-            self.total_edges += 1
-            self.cumulative_edges += 1
-            return True
-        return False
-
-    def is_new_coverage(self) -> bool:
-        return bytes(self.edge_map) != self._map_snapshot
 
 
 class Fuzzer:
@@ -1471,6 +1047,22 @@ class Fuzzer:
             elif op == "type_replace" and buf:
                 from fuzzer_tool.core.mutations import type_replace
                 buf = bytearray(type_replace(bytes(buf))[: self.max_len])
+
+            elif op == "ascii_num" and buf:
+                from fuzzer_tool.core.mutations import ascii_num_replace
+                buf = bytearray(ascii_num_replace(bytes(buf))[: self.max_len])
+
+            elif op == "byte_shuffle" and buf and len(buf) > 1:
+                from fuzzer_tool.core.mutations import byte_shuffle
+                buf = bytearray(byte_shuffle(bytes(buf))[: self.max_len])
+
+            elif op == "byte_delete" and buf and len(buf) > 1:
+                from fuzzer_tool.core.mutations import byte_delete
+                buf = bytearray(byte_delete(bytes(buf))[: self.max_len])
+
+            elif op == "byte_insert" and buf and len(buf) < self.max_len:
+                from fuzzer_tool.core.mutations import byte_insert
+                buf = bytearray(byte_insert(bytes(buf), self.max_len)[: self.max_len])
 
             elif op == "length_grow" and buf and len(buf) < self.max_len:
                 size = random.randint(1, min(64, self.max_len - len(buf)))
@@ -2465,64 +2057,18 @@ class Fuzzer:
         return False
 
     def _record_discovery_snapshot(self):
-        """Record (exec_count, cumulative_edges) for discovery rate calculation."""
-        edges = 0
-        if self.shm_cov:
-            edges = self.shm_cov.cumulative_edges
-        elif self.ptrace_cov:
-            edges = self.ptrace_cov.cumulative_edges
-        self._discovery_history.append((self.exec_count, edges))
-        if len(self._discovery_history) > 500:
-            self._discovery_history = self._discovery_history[-250:]
+        _record_discovery_snapshot_fn(
+            self.exec_count, self.shm_cov, self.ptrace_cov, self._discovery_history,
+        )
 
     def discovery_rate(self) -> float:
-        """Edges discovered per 1000 execs, over a sliding window of last 5 snapshots."""
-        if len(self._discovery_history) < 2:
-            return 0.0
-        window = self._discovery_history[-5:]
-        first_exec, first_edges = window[0]
-        last_exec, last_edges = window[-1]
-        exec_delta = last_exec - first_exec
-        edge_delta = last_edges - first_edges
-        if exec_delta <= 0:
-            return 0.0
-        return edge_delta / exec_delta * 1000
+        return _discovery_rate(self._discovery_history)
 
     def _run_crash_replays(self, budget_ms: float = 200):
-        """Replay pending crashes for reproducibility scoring (non-blocking)."""
-        if self.replay_n <= 0 or not self._crash_replays:
-            return
-        from fuzzer_tool.adapters.process import run_target_stdin
-        t0 = time.monotonic()
-        pending = [(sig, replays) for sig, replays in self._crash_replays.items()
-                   if len(replays) < self.replay_n]
-        for sig, replays in pending:
-            if (time.monotonic() - t0) * 1000 > budget_ms:
-                break
-            crash_file = None
-            for f in self.crashes_dir.iterdir():
-                if f.is_file() and not f.name.endswith((".json", ".txt")):
-                    try:
-                        crash_data = f.read_bytes()
-                        if self._seed_key(crash_data) == sig or f.stem.startswith(sig[:12]):
-                            crash_file = f
-                            break
-                    except Exception:
-                        continue
-            if crash_file is None:
-                for f in self.crashes_dir.iterdir():
-                    if f.is_file() and sig[:12] in f.name:
-                        crash_file = f
-                        break
-            if crash_file is None:
-                replays.append(-3)
-                continue
-            try:
-                data = crash_file.read_bytes()
-                rc, _ = run_target_stdin(self.target, data, self.timeout)
-                replays.append(rc)
-            except Exception:
-                replays.append(-2)
+        _run_crash_replays_fn(
+            self.crashes_dir, self.target, self.timeout,
+            self._crash_replays, self.replay_n, self._seed_key, budget_ms,
+        )
 
     def _print_run_summary(self):
         """Print session-level summary statistics at run exit."""
@@ -2753,45 +2299,13 @@ class Fuzzer:
             f.write(line)
 
     def _update_te_causal_map(self):
-        """Update byte→edge causal map using transfer entropy."""
-        if not self._te or len(self._te_input_history) < 10:
-            return
-        # Compute TE for top byte positions
-        max_pos = min(64, min(len(b) for b in self._te_input_history))
-        map_size = min(self.map_size, 1024)  # limit edge space for efficiency
-        for pos in range(max_pos):
-            source = [b[pos] if pos < len(b) else 0 for b in self._te_input_history]
-            # Find dominant edge in each step
-            target = []
-            for eb in self._te_edge_history:
-                max_edge = 0
-                max_val = 0
-                for i in range(min(map_size, len(eb))):
-                    if eb[i] > max_val:
-                        max_val = eb[i]
-                        max_edge = i
-                target.append(max_edge)
-            te_val = self._te.transfer_entropy(source, target)
-            if te_val > 0.01:
-                # Store which edges this position causally influences
-                edge_counts: dict[int, int] = {}
-                for eb in self._te_edge_history[-50:]:
-                    for i in range(min(map_size, len(eb))):
-                        if eb[i] > 0:
-                            edge_counts[i] = edge_counts.get(i, 0) + 1
-                if edge_counts:
-                    self._te_byte_edges[pos] = edge_counts
+        update_te_causal_map(
+            self._te, self._te_input_history, self._te_edge_history,
+            self.map_size, self._te_byte_edges,
+        )
 
     def _get_te_weighted_position(self, input_length: int) -> int | None:
-        """Get a byte position weighted by transfer entropy causal influence.
-
-        Returns position with highest TE to coverage, or None if no TE data.
-        """
-        if not self._te_byte_edges:
-            return None
-        # Find position with most causal influence
-        best_pos = max(self._te_byte_edges.keys())
-        return best_pos if best_pos < input_length else None
+        return get_te_weighted_position(self._te_byte_edges, input_length)
 
     def _get_current_edge_bitmap(self) -> bytes | None:
         """Get the current coverage edge bitmap."""
@@ -2802,10 +2316,7 @@ class Fuzzer:
         return None
 
     def _format_elapsed(self) -> str:
-        elapsed = time.time() - self.start_time
-        h, rem = divmod(int(elapsed), 3600)
-        m, s = divmod(rem, 60)
-        return f"{h:02d}:{m:02d}:{s:02d}"
+        return _format_elapsed_fn(self.start_time)
 
     def print_stats(self):
         elapsed = time.time() - self.start_time

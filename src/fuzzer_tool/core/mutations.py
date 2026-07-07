@@ -67,6 +67,10 @@ MUTATIONS = [
     "crc_fix",
     "endianness_swap",
     "type_replace",
+    "ascii_num",
+    "byte_shuffle",
+    "byte_delete",
+    "byte_insert",
 ]
 
 
@@ -488,3 +492,135 @@ def could_be_interest(old_val: int, new_val: int, blen: int, check_le: bool = Tr
                 return True
 
     return False
+
+
+# ---------------------------------------------------------------------------
+# Supplementary mutations (from AFL++ afl-mutations.h)
+# ---------------------------------------------------------------------------
+
+
+def ascii_num_replace(data: bytes) -> bytes:
+    """Replace a random position with an ASCII number string.
+
+    Picks a random position and replaces a short segment with a random
+    ASCII decimal number (0-99999). Useful for fuzzing numeric fields
+    in text-based formats.
+
+    Args:
+        data: Input bytes.
+
+    Returns:
+        Mutated bytes with an ASCII number inserted.
+    """
+    if not data:
+        return data
+
+    result = bytearray(data)
+    idx = random.randint(0, len(result) - 1)
+
+    # Generate a random number as ASCII digits
+    num = random.randint(0, 99999)
+    num_str = str(num).encode("ascii")
+
+    # Replace at position (truncate if near end)
+    end = min(idx + len(num_str), len(result))
+    result[idx:end] = num_str[: end - idx]
+
+    return bytes(result)
+
+
+def byte_shuffle(data: bytes) -> bytes:
+    """Shuffle all bytes in the input randomly.
+
+    Preserves the multiset of bytes but randomizes their order.
+    Useful for discovering order-dependent behavior.
+
+    Args:
+        data: Input bytes.
+
+    Returns:
+        Shuffled bytes.
+    """
+    if len(data) <= 1:
+        return data
+
+    result = bytearray(data)
+    random.shuffle(result)
+    return bytes(result)
+
+
+def byte_delete(data: bytes) -> bytes:
+    """Delete a single random byte from the input.
+
+    Args:
+        data: Input bytes.
+
+    Returns:
+        Bytes with one byte removed, or original if too short.
+    """
+    if len(data) <= 1:
+        return data
+
+    idx = random.randint(0, len(data) - 1)
+    return data[:idx] + data[idx + 1:]
+
+
+def byte_insert(data: bytes, max_len: int = 65536) -> bytes:
+    """Insert a single random byte at a random position.
+
+    Args:
+        data: Input bytes.
+        max_len: Maximum output length.
+
+    Returns:
+        Bytes with one random byte inserted.
+    """
+    if len(data) >= max_len:
+        return data
+
+    idx = random.randint(0, len(data))
+    val = random.randint(0, 255)
+    return data[:idx] + bytes([val]) + data[idx:]
+
+
+def splice_diff_located(a: bytes, b: bytes) -> bytes:
+    """Splice two inputs at optimal cut points found via diff locating.
+
+    Unlike random splice, this finds the first and last differing bytes
+    between a and b, then picks cut points only within that range.
+    This produces more meaningful hybrids.
+
+    Ported from AFL's locate_diffs + splice logic.
+
+    Args:
+        a: First input (base).
+        b: Second input (donor).
+
+    Returns:
+        Spliced bytes, or a unchanged if inputs are too short or identical.
+    """
+    if len(a) < 2 or len(b) < 2:
+        return a
+
+    min_len = min(len(a), len(b))
+
+    # Find first and last differing positions
+    first_diff = -1
+    last_diff = -1
+    for i in range(min_len):
+        if a[i] != b[i]:
+            if first_diff == -1:
+                first_diff = i
+            last_diff = i
+
+    if first_diff == -1:
+        # Identical up to min_len — just do random splice
+        cut_a = random.randint(1, len(a) - 1)
+        cut_b = random.randint(1, len(b) - 1)
+        return a[:cut_a] + b[cut_b:]
+
+    # Pick cut points within the diff range
+    cut_a = random.randint(first_diff, last_diff)
+    cut_b = random.randint(first_diff, min(last_diff, len(b) - 1))
+
+    return a[:cut_a] + b[cut_b:]
