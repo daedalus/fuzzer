@@ -66,6 +66,7 @@ def run_target_stdin(
         Tuple of (returncode, stderr, subprocess_pid).
     """
     try:
+        proc = None
         proc = subprocess.Popen(
             [target],
             stdin=subprocess.PIPE,
@@ -122,7 +123,11 @@ def run_target_stdin(
         stderr = proc.stderr.read()
         return proc.returncode, stderr.decode(errors="replace"), proc.pid
     except Exception as e:
-        return -2, str(e), 0
+        # Return actual pid if process was created, else 0.
+        # Callers use pid for dmesg filtering — wrong pid would
+        # match kernel messages from the wrong process.
+        real_pid = proc.pid if proc is not None else 0
+        return -2, str(e), real_pid
 
 
 def run_target_file(
@@ -154,6 +159,7 @@ def run_target_file(
 
     tmp_file = Path(tmp_dir) / f"fuzz_{os.getpid()}"
     try:
+        proc = None
         tmp_file.write_bytes(data)
         if target_args:
             cmd = [target] + [a.replace("{file}", str(tmp_file)) for a in target_args]
@@ -205,4 +211,8 @@ def run_target_file(
         stderr = proc.stderr.read()
         return proc.returncode, stderr.decode(errors="replace"), proc.pid
     except Exception as e:
-        return -2, str(e), 0
+        # Return actual pid if process was created, else 0.
+        # Callers use pid for dmesg filtering — wrong pid would
+        # match kernel messages from the wrong process.
+        real_pid = proc.pid if proc is not None else 0
+        return -2, str(e), real_pid

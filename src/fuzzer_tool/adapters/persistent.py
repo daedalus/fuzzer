@@ -170,7 +170,8 @@ class PersistentRunner:
         self._cleanup()
 
     def _cleanup(self):
-        self._cleanup_shm()
+        # Kill process FIRST, then detach SHM — detaching while the
+        # target is still writing to shared memory can cause SEGV.
         if self.pid is not None:
             try:
                 os.kill(self.pid, signal.SIGKILL)
@@ -178,6 +179,7 @@ class PersistentRunner:
             except (ProcessLookupError, ChildProcessError):
                 pass
             self.pid = None
+        self._cleanup_shm()
         self._started = False
 
     def _cleanup_shm(self):

@@ -814,7 +814,9 @@ class Fuzzer:
             return returncode, ""
 
         except ChildProcessError:
-            return 0, ""
+            # Child already reaped (race with watchdog). Return -2
+            # (unknown) instead of 0 (success) to avoid masking crashes.
+            return -2, ""
         except Exception as e:
             try:
                 os.kill(pid, signal.SIGKILL)
@@ -2598,8 +2600,10 @@ class Fuzzer:
                 if self.stats_file and i % self.stats_interval == 0:
                     self._dump_stats()
                     self._save_state()
-        except (KeyboardInterrupt, SystemExit, OSError):
+        except (KeyboardInterrupt, SystemExit):
             pass
+        except OSError as e:
+            log.warning("Fuzzing interrupted by OS error: %s", e)
 
         self._dump_stats()
         self._dump_coverage_report()
