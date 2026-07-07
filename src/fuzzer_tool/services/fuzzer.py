@@ -756,6 +756,7 @@ class Fuzzer:
             last_action = None
             last_sig = 0
             returncode = 0
+            child_reaped = False
             while time.time() < deadline:
                 _, status = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
                 if status == 0:
@@ -764,9 +765,11 @@ class Fuzzer:
 
                 if os.WIFEXITED(status):
                     returncode = os.WEXITSTATUS(status)
+                    child_reaped = True
                     break
                 if os.WIFSIGNALED(status):
                     returncode = -os.WTERMSIG(status)
+                    child_reaped = True
                     break
 
                 if os.WIFSTOPPED(status):
@@ -781,15 +784,16 @@ class Fuzzer:
                     else:
                         break
 
-            if last_action == "cont" and last_sig == signal.SIGTRAP:
-                # Child may have already exited in the loop — only wait if
-                # it hasn't been reaped yet (status 0 means already gone).
+            if child_reaped:
+                pass  # loop already captured the definitive returncode
+            elif last_action == "cont" and last_sig == signal.SIGTRAP:
+                # Child stopped at breakpoint but loop exited (deadline?)
+                # Resume and wait for final outcome.
                 _, status = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
                 if status != 0 and os.WIFSTOPPED(status):
                     libc.ptrace(PTRACE_CONT, pid, None, None)
                     _, status = os.waitpid(pid, 0)
                 elif status != 0:
-                    # Child stopped with a different signal — capture it
                     if os.WIFSIGNALED(status):
                         returncode = -os.WTERMSIG(status)
                     elif os.WIFEXITED(status):
@@ -798,8 +802,7 @@ class Fuzzer:
                 os.kill(pid, signal.SIGKILL)
                 os.waitpid(pid, 0)
 
-            if returncode == 0:
-                # Only override if we didn't already capture the exit code
+            if returncode == 0 and not child_reaped:
                 if os.WIFSIGNALED(status):
                     returncode = -os.WTERMSIG(status)
                 elif os.WIFEXITED(status):
@@ -809,8 +812,6 @@ class Fuzzer:
                     with contextlib.suppress(ProcessLookupError):
                         os.kill(pid, signal.SIGKILL)
                         os.waitpid(pid, 0)
-            else:
-                returncode = 0
             return returncode, ""
 
         except ChildProcessError:
