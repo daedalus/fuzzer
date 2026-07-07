@@ -351,6 +351,147 @@ def cmd_replay(args):
     return 1
 
 
+def cmd_rank(args):
+    """Rank corpus seeds by interestingness."""
+    _validate_target(args.target)
+    import hashlib
+    import json
+    import math
+    import time
+
+    from fuzzer_tool.adapters.filesystem import load_corpus
+    from fuzzer_tool.core.bloom import BloomFilter
+    from fuzzer_tool.core.edge_tracker import EdgeTracker
+    from fuzzer_tool.core.elf import estimate_map_size
+
+    corpus_dir = Path(args.corpus)
+    if not corpus_dir.is_dir():
+        print(f"[-] Corpus not found: {corpus_dir}", file=sys.stderr)
+        return 1
+
+    state_path = corpus_dir / "state.json"
+    edge_path = corpus_dir / "edge_tracker.json"
+
+    bloom = BloomFilter(capacity=100_000)
+    corpus, seen_hashes = load_corpus(corpus_dir, bloom)
+    if not corpus:
+        print("[-] Empty corpus", file=sys.stderr)
+        return 1
+
+    map_size = estimate_map_size(args.target)
+    et = EdgeTracker(map_size=map_size)
+    if edge_path.exists():
+        et.load(str(edge_path))
+
+    # Load seed metadata from state.json
+    seed_meta = {}
+    now = time.time()
+    if state_path.exists():
+        try:
+            state = json.loads(state_path.read_text())
+            saved = state.get("seed_meta", {})
+            for seed in corpus:
+                key = seed.hex()
+                if key in saved:
+                    sm = saved[key]
+                    seed_meta[seed] = {
+                        "fuzz_count": sm.get("fuzz_count", 0),
+                        "coverage_edges": sm.get("coverage_edges", 0),
+                        "added_at": sm.get("added_at", now),
+                    }
+                else:
+                    seed_meta[seed] = {"fuzz_count": 0, "coverage_edges": 0, "added_at": now}
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    if not seed_meta:
+        for seed in corpus:
+            seed_meta[seed] = {"fuzz_count": 0, "coverage_edges": 0, "added_at": now}
+
+    def score(seed):
+        meta = seed_meta.get(seed, {})
+        fuzz_count = max(meta.get("fuzz_count", 0), 1)
+        coverage = meta.get("coverage_edges", 0)
+        age = now - meta.get("added_at", now)
+        key = hashlib.sha256(seed).hexdigest()[:16]
+
+        # Edge tracker signals (only if this seed is tracked)
+        seed_edges = et.seed_edges.get(key, set())
+        edge_count = len(seed_edges)
+        rare = sum(1 for e in seed_edges if et._global_edge_hits.get(e, 0) <= 2)
+        sub = et.compute_subsumption_weight(key) if seed_edges else 1.0
+        prox = et.compute_coverage_proximity(key) if seed_edges else 0.0
+
+        # Composite score:
+        #   - coverage_edges (from state.json) is the primary signal:
+        #     seeds that discovered more edges are more interesting
+        #   - edge tracker signals (rarity, subsumption, proximity) add
+        #     granularity when available
+        #   - fuzz_count penalizes over-explored seeds
+        #   - seed length penalizes very large inputs (harder to mutate)
+        w = 1.0 + coverage * 2.0  # primary: edge discovery
+        if edge_count > 0:
+            w *= (1.0 + rare * 0.5) * sub * (0.5 + prox)
+        w /= math.sqrt(fuzz_count)
+        # Slight penalty for very large seeds (diminishing returns)
+        w *= 1.0 / (1.0 + len(seed) / 4096.0)
+
+        return {
+            "score": w,
+            "edges": edge_count or coverage,
+            "rare": rare,
+            "fuzz_count": fuzz_count,
+            "coverage": coverage,
+            "subsumption": sub,
+            "proximity": prox,
+        }
+
+    scored = [(score(s), s) for s in corpus]
+    scored.sort(key=lambda x: x[0]["score"], reverse=True)
+
+    n = min(args.top, len(scored))
+    n_edges = len(et.cumulative_edges) if hasattr(et.cumulative_edges, '__len__') else et.cumulative_edges
+    print(f"[*] Corpus: {len(corpus)} seeds, {len(et.seed_edges)} tracked, "
+          f"{n_edges} edges\n")
+    print(f"{'#':>4}  {'Score':>7}  {'Edges':>5}  {'Rare':>4}  {'Fuzz':>5}  "
+          f"{'Sub':>5}  {'Prox':>5}  {'Hash':>16}  Preview")
+    print("-" * 95)
+
+    for i, (s, seed) in enumerate(scored[:n]):
+        h = hashlib.sha256(seed).hexdigest()[:16]
+        # Show hex preview for binary, text preview for printable
+        raw = seed[:32]
+        printable = sum(1 for b in raw if 32 <= b < 127)
+        if printable > len(raw) * 0.7:
+            pstr = raw.decode("ascii", errors="replace")
+            if len(seed) > 32:
+                pstr += "..."
+        else:
+            pstr = raw.hex()
+            if len(seed) > 32:
+                pstr += "..."
+        print(
+            f"{i+1:>4}  {s['score']:>7.2f}  {s['edges']:>5}  {s['rare']:>4}  "
+            f"{s['fuzz_count']:>5}  {s['subsumption']:>5.2f}  "
+            f"{s['proximity']:>5.2f}  {h}  {pstr}"
+        )
+
+    if args.dump:
+        out = Path(args.dump)
+        with open(out, "w") as f:
+            for i, (s, seed) in enumerate(scored[:n]):
+                h = hashlib.sha256(seed).hexdigest()[:16]
+                f.write(seed)
+                print(f"  wrote seed #{i+1} ({len(seed)} bytes) -> {out}.{i}")
+        # Also write each seed to a separate file
+        for i, (s, seed) in enumerate(scored[:n]):
+            seed_path = out.parent / f"{out.name}.{i}"
+            seed_path.write_bytes(seed)
+        print(f"[*] Dumped top {n} seeds to {out}.{0}..{n-1}")
+
+    return 0
+
+
 def main() -> int:
     sys.stdout.reconfigure(line_buffering=True)
     sys.stderr.reconfigure(line_buffering=True)
@@ -676,6 +817,21 @@ def main() -> int:
         help="Source format (default: afl)",
     )
     import_parser.set_defaults(func=cmd_import)
+
+    # --- rank ---
+    rank_parser = subparsers.add_parser(
+        "rank", help="Rank corpus seeds by interestingness"
+    )
+    rank_parser.add_argument("target", help="Path to target binary")
+    rank_parser.add_argument("-d", "--corpus", required=True, help="Corpus directory")
+    rank_parser.add_argument(
+        "-n", "--top", type=int, default=10, help="Number of top seeds to show"
+    )
+    rank_parser.add_argument(
+        "--dump", default=None, metavar="PREFIX",
+        help="Dump top seeds to files named PREFIX.0, PREFIX.1, ..."
+    )
+    rank_parser.set_defaults(func=cmd_rank)
 
     args = parser.parse_args()
 
