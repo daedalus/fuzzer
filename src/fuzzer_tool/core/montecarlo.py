@@ -16,6 +16,7 @@ import logging
 import math
 import random
 from collections import defaultdict
+from pathlib import Path
 
 from fuzzer_tool.core.edge_tracker import ks_significance_threshold
 
@@ -43,7 +44,8 @@ class MonteCarloScheduler:
 
     ELITE_MAX = 200
 
-    def __init__(self, elite_frac: float = 0.1, refit_interval: int = 1000):
+    def __init__(self, elite_frac: float = 0.1, refit_interval: int = 1000,
+                 pairwise_blend: float = 0.0):
         self.arm_alpha: dict[str, float] = {}
         self.arm_beta: dict[str, float] = {}
         self.elite_frac = elite_frac
@@ -58,6 +60,17 @@ class MonteCarloScheduler:
         # Brier score tracking for bandit calibration diagnostics
         self._brier_predictions: collections.deque = collections.deque(maxlen=500)
 
+        # Pairwise transition matrix: P(next_op | prev_op)
+        # transition_counts[prev][next] = discoveries from (prev, next) pairs
+        # transition_total[prev] = total attempts where next followed prev
+        self.transition_counts: dict[str, dict[str, int]] = defaultdict(
+            lambda: defaultdict(int)
+        )
+        self.transition_total: dict[str, int] = defaultdict(int)
+        self._prev_op: str | None = None
+        # Blend factor: 0.0 = pure Thompson, 1.0 = pure pairwise
+        self.pairwise_blend = pairwise_blend
+
     def init_arm(self, name: str) -> None:
         """Register a mutation operator arm with prior (1, 1).
 
@@ -68,24 +81,49 @@ class MonteCarloScheduler:
             self.arm_alpha[name] = 1.0
             self.arm_beta[name] = 1.0
 
-    def select_op(self, ops: list[str]) -> str:
-        """Select mutation operator via Thompson sampling.
+    def select_op(self, ops: list[str], prev_op: str | None = None) -> str:
+        """Select mutation operator via Thompson sampling with pairwise transitions.
+
+        When pairwise_blend > 0 and prev_op has transition data, blends
+        the unconditional Thompson sample with a pairwise-conditional sample
+        that favors operators that historically followed prev_op.
 
         Args:
             ops: Available mutation operators.
+            prev_op: The operator used in the previous mutation step (for
+                pairwise transition weighting).
 
         Returns:
             Name of the selected operator.
         """
-        best_op = ops[0]
-        best_val = -1.0
+        # Unconditional Thompson sample for each op
+        thompson_vals = {}
         for op in ops:
             a = self.arm_alpha.get(op, 1.0)
             b = self.arm_beta.get(op, 1.0)
-            val = random.betavariate(a, b)
-            if val > best_val:
-                best_val = val
-                best_op = op
+            thompson_vals[op] = random.betavariate(a, b)
+
+        # If no pairwise data or blend is zero, use pure Thompson
+        if self.pairwise_blend <= 0 or prev_op is None or prev_op not in self.transition_total:
+            best_op = max(ops, key=lambda o: thompson_vals[o])
+            return best_op
+
+        # Pairwise score: Dirichlet-Multinomial over transition counts
+        # With uniform prior (alpha=1), score = count + 1
+        total = self.transition_total[prev_op]
+        pair_scores = {}
+        for op in ops:
+            count = self.transition_counts[prev_op].get(op, 0)
+            pair_scores[op] = (count + 1) / (total + len(ops))
+
+        # Blend: w * pair + (1-w) * thompson
+        w = self.pairwise_blend
+        blended = {}
+        for op in ops:
+            blended[op] = w * pair_scores[op] + (1 - w) * thompson_vals[op]
+
+        best_op = max(ops, key=lambda o: blended[o])
+        self._prev_op = best_op
         return best_op
 
     def record(self, name: str, success: bool) -> None:
@@ -99,6 +137,11 @@ class MonteCarloScheduler:
             self.arm_alpha[name] = self.arm_alpha.get(name, 1.0) + 1
         else:
             self.arm_beta[name] = self.arm_beta.get(name, 1.0) + 1
+
+        # Update pairwise transition matrix on success
+        if success and self._prev_op is not None and self._prev_op != name:
+            self.transition_counts[self._prev_op][name] += 1
+            self.transition_total[self._prev_op] += 1
 
     def record_brier(self, name: str, success: bool) -> None:
         """Record a prediction-outcome pair for Brier score diagnostics.
@@ -299,6 +342,40 @@ class MonteCarloScheduler:
             b = self.arm_beta[name]
             result[name] = (a - 1, b - 1)
         return result
+
+    def transition_stats(self) -> dict[str, dict[str, int]]:
+        """Get pairwise transition counts.
+
+        Returns:
+            Dict mapping prev_op -> {next_op: discovery_count}.
+        """
+        return {k: dict(v) for k, v in self.transition_counts.items() if v}
+
+    def save_transitions(self, path: str) -> None:
+        """Save transition matrix to JSON."""
+        import json
+        data = {
+            "transition_counts": {k: dict(v) for k, v in self.transition_counts.items()},
+            "transition_total": dict(self.transition_total),
+        }
+        try:
+            Path(path).write_text(json.dumps(data, separators=(",", ":")))
+        except OSError as e:
+            log.debug("Failed to save transitions: %s", e)
+
+    def load_transitions(self, path: str) -> bool:
+        """Load transition matrix from JSON. Returns True if loaded."""
+        import json
+        try:
+            data = json.loads(Path(path).read_text())
+            for k, v in data.get("transition_counts", {}).items():
+                for k2, v2 in v.items():
+                    self.transition_counts[k][k2] = v2
+            for k, v in data.get("transition_total", {}).items():
+                self.transition_total[k] = v
+            return True
+        except (OSError, json.JSONDecodeError, KeyError):
+            return False
 
 
 class _MOptParticle:

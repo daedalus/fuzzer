@@ -160,6 +160,90 @@ class TestMonteCarloScheduler:
         assert len(mc._brier_predictions) <= 500
 
 
+class TestPairwiseTransitions:
+    def test_transition_counts_on_success(self):
+        mc = MonteCarloScheduler(pairwise_blend=0.5)
+        mc.init_arm("a")
+        mc.init_arm("b")
+        mc._prev_op = "a"
+        mc.record("b", success=True)
+        assert mc.transition_counts["a"]["b"] == 1
+        assert mc.transition_total["a"] == 1
+
+    def test_no_transition_on_failure(self):
+        mc = MonteCarloScheduler(pairwise_blend=0.5)
+        mc.init_arm("a")
+        mc.init_arm("b")
+        mc._prev_op = "a"
+        mc.record("b", success=False)
+        assert "a" not in mc.transition_counts
+
+    def test_no_transition_when_same_op(self):
+        mc = MonteCarloScheduler(pairwise_blend=0.5)
+        mc.init_arm("a")
+        mc._prev_op = "a"
+        mc.record("a", success=True)
+        assert "a" not in mc.transition_counts
+
+    def test_select_op_uses_transitions(self):
+        mc = MonteCarloScheduler(pairwise_blend=1.0)
+        mc.init_arm("a")
+        mc.init_arm("b")
+        mc.init_arm("c")
+        # Build transition: a -> b is highly successful
+        for _ in range(50):
+            mc._prev_op = "a"
+            mc.record("b", success=True)
+        # With blend=1.0 and prev_op="a", should almost always pick "b"
+        picks = [mc.select_op(["a", "b", "c"], prev_op="a") for _ in range(100)]
+        assert picks.count("b") > 90
+
+    def test_select_op_no_prev_op_falls_back(self):
+        mc = MonteCarloScheduler(pairwise_blend=1.0)
+        mc.init_arm("a")
+        mc.init_arm("b")
+        # No transitions, no prev_op — should not crash
+        op = mc.select_op(["a", "b"])
+        assert op in ("a", "b")
+
+    def test_transition_stats(self):
+        mc = MonteCarloScheduler(pairwise_blend=0.5)
+        mc.init_arm("a")
+        mc.init_arm("b")
+        mc._prev_op = "a"
+        mc.record("b", success=True)
+        stats = mc.transition_stats()
+        assert "a" in stats
+        assert stats["a"]["b"] == 1
+
+    def test_save_load_transitions(self, tmp_path):
+        mc = MonteCarloScheduler(pairwise_blend=0.5)
+        mc.init_arm("a")
+        mc.init_arm("b")
+        mc._prev_op = "a"
+        mc.record("b", success=True)
+
+        path = str(tmp_path / "trans.json")
+        mc.save_transitions(path)
+
+        mc2 = MonteCarloScheduler(pairwise_blend=0.5)
+        mc2.init_arm("a")
+        mc2.init_arm("b")
+        assert mc2.load_transitions(path)
+        assert mc2.transition_counts["a"]["b"] == 1
+        assert mc2.transition_total["a"] == 1
+
+    def test_pairwise_blend_zero_ignores_transitions(self):
+        mc = MonteCarloScheduler(pairwise_blend=0.0)
+        mc.init_arm("a")
+        mc.init_arm("b")
+        mc._prev_op = "a"
+        mc.record("b", success=True)
+        # With blend=0, transitions should not affect selection
+        stats = mc.transition_stats()
+        assert "a" in stats  # still recorded
+
+
 class TestMOptScheduler:
     def test_init_particles(self):
         mopt = MOptScheduler(n_particles=3)

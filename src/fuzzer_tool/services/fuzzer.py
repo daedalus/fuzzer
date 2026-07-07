@@ -889,6 +889,8 @@ class Fuzzer:
 
         self._last_ops_used = []
         self._last_mopt_particles = []  # particle_id per op, for mopt attribution
+        if not hasattr(self, "_prev_bandit_op"):
+            self._prev_bandit_op = None
 
         for _ in range(self.mutations_per_input):
             if self._use_replicator and self._replicator:
@@ -898,7 +900,8 @@ class Fuzzer:
                 op, pid = self._mopt.select_op(ops)
                 self._last_mopt_particles.append(pid)
             elif self.mc and self.mc_bandit:
-                op = self.mc.select_op(ops)
+                op = self.mc.select_op(ops, prev_op=self._prev_bandit_op)
+                self._prev_bandit_op = op
                 self._last_mopt_particles.append(None)
             else:
                 op = random.choice(ops)
