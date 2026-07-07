@@ -87,17 +87,21 @@ class PersistentRunner:
         self.pid = pid
 
         try:
-            _, status = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
-            if os.WIFSTOPPED(status):
-                self._started = True
-                log.info("Persistent target started (pid=%d)", pid)
-                return True
-            time.sleep(0.05)
-            _, status = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
-            if os.WIFSTOPPED(status):
-                self._started = True
-                log.info("Persistent target started (pid=%d)", pid)
-                return True
+            # Poll for child status with retries.  In a multi-threaded
+            # process, WNOHANG can miss a fast-exiting child on the first
+            # try — the kernel may not have reaped it yet.  Retry for up
+            # to 200ms to handle this race reliably.
+            deadline = time.monotonic() + 0.2
+            while time.monotonic() < deadline:
+                _, status = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
+                if os.WIFSTOPPED(status):
+                    self._started = True
+                    log.info("Persistent target started (pid=%d)", pid)
+                    return True
+                if status != 0:
+                    # Child exited/signaled — not a persistent target
+                    break
+                time.sleep(0.01)
             log.warning("Persistent target exited immediately")
             self._cleanup()
             return False

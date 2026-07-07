@@ -398,7 +398,7 @@ class MOptScheduler:
         if not self.global_best_pos or len(self.global_best_pos) != n:
             self.global_best_pos = [1.0 / n] * n
 
-    def select_op(self, ops: list[str]) -> str:
+    def select_op(self, ops: list[str]) -> tuple[str, int]:
         """Select an operator using MOpt's PSO-guided selection.
 
         1. Evaluate particle fitness from recent discoveries
@@ -409,10 +409,11 @@ class MOptScheduler:
             ops: Available mutation operators for this iteration.
 
         Returns:
-            Name of the selected operator.
+            (operator_name, particle_index) — the particle index is needed
+            by record() to attribute discoveries to the correct particle.
         """
         if not self.particles or not self.operators:
-            return ops[0] if ops else ""
+            return (ops[0] if ops else "", 0)
 
         # Update fitness for all particles
         for p in self.particles:
@@ -427,14 +428,17 @@ class MOptScheduler:
         r = random.random() * total_f
         cumulative = 0.0
         selected_particle = valid[0]
-        for p, f in zip(valid, fitnesses, strict=False):
+        selected_idx = 0
+        for i, (p, f) in enumerate(zip(valid, fitnesses, strict=False)):
             cumulative += f
             if r <= cumulative:
                 selected_particle = p
+                selected_idx = self.particles.index(p)
                 break
 
         # Sample operator from selected particle's distribution
-        return self._sample_from_particle(selected_particle, ops)
+        op = self._sample_from_particle(selected_particle, ops)
+        return (op, selected_idx)
 
     def _sample_from_particle(self, particle: _MOptParticle, ops: list[str]) -> str:
         """Sample an operator from a particle's probability distribution."""
@@ -459,21 +463,31 @@ class MOptScheduler:
                 return op
         return ops[-1]
 
-    def record(self, name: str, success: bool) -> None:
+    def record(self, name: str, success: bool, particle_id: int | None = None) -> None:
         """Record outcome for fitness tracking.
 
         Args:
             name: Operator that was used.
             success: Whether it produced new coverage.
+            particle_id: Index of the particle that selected this operator.
+                When None (backward compat), updates all particles.
         """
         self._total_execs += 1
         if success:
             self._total_discoveries += 1
 
-        # Record discovery in all particles' windows
-        for p in self.particles:
+        # Record discovery only in the particle that selected this operator.
+        # This is the core fix: each particle's fitness reflects only the
+        # outcomes of operators IT chose, enabling PSO to differentiate.
+        if particle_id is not None and 0 <= particle_id < len(self.particles):
+            p = self.particles[particle_id]
             p.execs_in_window += 1
             p.discoveries.append(1 if success else 0)
+        else:
+            # Backward compat: update all particles
+            for p in self.particles:
+                p.execs_in_window += 1
+                p.discoveries.append(1 if success else 0)
 
         # Trigger PSO update when window fills
         if self._total_execs % self.window_size == 0 and self._total_execs > 0:

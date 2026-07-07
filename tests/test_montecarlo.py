@@ -190,8 +190,9 @@ class TestMOptScheduler:
         mopt.init_arm("byte_flip")
         ops = ["bit_flip", "byte_flip"]
         for _ in range(20):
-            op = mopt.select_op(ops)
+            op, pid = mopt.select_op(ops)
             assert op in ops
+            assert 0 <= pid < mopt.n_particles
 
     def test_record_tracks_discoveries(self):
         mopt = MOptScheduler(n_particles=3, window_size=10)
@@ -247,12 +248,12 @@ class TestMOptScheduler:
         ops = ["good", "bad1", "bad2"]
         # "good" succeeds 50% of the time, others 5%
         for _ in range(200):
-            op = mopt.select_op(ops)
+            op, pid = mopt.select_op(ops)
             if op == "good":
                 success = __import__("random").random() < 0.50
             else:
                 success = __import__("random").random() < 0.05
-            mopt.record(op, success)
+            mopt.record(op, success, particle_id=pid)
         # After convergence, most particles should favor "good"
         stats = mopt.particle_stats()
         good_count = sum(1 for s in stats if s["top_op"] == "good")
@@ -296,8 +297,9 @@ class TestMOptScheduler:
 
     def test_empty_ops_fallback(self):
         mopt = MOptScheduler(n_particles=3)
-        op = mopt.select_op(["only_one"])
+        op, pid = mopt.select_op(["only_one"])
         assert op == "only_one"
+        assert pid == 0
 
     def test_multiple_windows_convergence(self):
         """Run enough iterations for multiple PSO updates and verify convergence."""
@@ -307,16 +309,51 @@ class TestMOptScheduler:
         ops = ["fast", "slow"]
         # fast has 80% success, slow has 10%
         for _ in range(100):
-            op = mopt.select_op(ops)
+            op, pid = mopt.select_op(ops)
             success = (op == "fast" and __import__("random").random() < 0.80) or \
                       (op == "slow" and __import__("random").random() < 0.10)
-            mopt.record(op, success)
+            mopt.record(op, success, particle_id=pid)
         # After 10 PSO updates, fast should dominate
         stats = mopt.particle_stats()
         fast_probs = [s["top_prob"] for s in stats if s["top_op"] == "fast"]
         # At least one particle should have fast with >30% probability
         assert any(p > 0.30 for p in fast_probs), \
             f"No particle strongly favors 'fast': {[s['top_prob'] for s in stats]}"
+
+    def test_particle_attribution_isolates_fitness(self):
+        """Verify that record() with particle_id only updates the target particle.
+
+        This is the core fix: without it, all particles converge on identical
+        fitness because every particle's window gets the same discoveries.
+        """
+        mopt = MOptScheduler(n_particles=3, window_size=100)
+        mopt.init_arm("a")
+        mopt.init_arm("b")
+
+        # Manually assign: particle 0 always picks "a", particle 1 always "b"
+        # Record successes only for particle 0
+        for _ in range(5):
+            mopt.record("a", success=True, particle_id=0)
+            mopt.record("b", success=False, particle_id=1)
+            mopt.record("a", success=True, particle_id=0)
+
+        # Particle 0 should have discoveries, particle 1 should not
+        p0 = mopt.particles[0]
+        p1 = mopt.particles[1]
+        p2 = mopt.particles[2]
+        assert sum(p0.discoveries) == 10, f"p0 expected 10 discoveries, got {sum(p0.discoveries)}"
+        assert sum(p1.discoveries) == 0, f"p1 expected 0 discoveries, got {sum(p1.discoveries)}"
+        assert sum(p2.discoveries) == 0, f"p2 expected 0 discoveries, got {sum(p2.discoveries)}"
+        assert p0.execs_in_window == 10
+        assert p1.execs_in_window == 5
+        assert p2.execs_in_window == 0
+
+        # Fitness should differ
+        mopt._update_fitness(p0)
+        mopt._update_fitness(p1)
+        assert p0.fitness > p1.fitness, (
+            f"p0 fitness ({p0.fitness}) should exceed p1 ({p1.fitness})"
+        )
 
 
 class TestAdaptiveRefit:
