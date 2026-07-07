@@ -42,6 +42,8 @@ INTERESTING_32 = [
 
 ARITHMETIC_DELTAS = [1, 2, 4, 8, 16, 32, 64, 128]
 
+ARITH_MAX = 35
+
 MUTATIONS = [
     "bit_flip",
     "byte_flip",
@@ -64,6 +66,7 @@ MUTATIONS = [
     "swap_bytes",
     "crc_fix",
     "endianness_swap",
+    "type_replace",
 ]
 
 
@@ -230,3 +233,258 @@ def _divisor_sizes(n: int) -> list[int]:
         s //= 2
     sizes.add(1)
     return sorted(sizes, reverse=True)
+
+
+# ---------------------------------------------------------------------------
+# Type-aware mutation (ported from AFL++ redqueen.c type_replace)
+# ---------------------------------------------------------------------------
+
+
+# Character class ranges: (start, end) inclusive
+_CHAR_CLASSES = [
+    (0x41, 0x46),  # A-F
+    (0x61, 0x66),  # a-f
+    (0x32, 0x39),  # 2-9
+    (0x47, 0x5A),  # G-Z
+    (0x67, 0x7A),  # g-z
+    (0x21, 0x2A),  # ! to *
+    (0x2C, 0x2E),  # , to .
+    (0x3A, 0x40),  # : to @
+    (0x5B, 0x60),  # [ to `
+    (0x7B, 0x7E),  # { to ~
+]
+
+# Direct swaps within/between classes
+_SWAP_MAP = {
+    0x2B: 0x2F,  # + <-> /
+    0x2F: 0x2B,
+    0x20: 0x09,  # space <-> tab
+    0x09: 0x20,
+    0x0D: 0x0A,  # CR <-> LF
+    0x0A: 0x0D,
+    0x00: 0x01,  # NUL <-> SOH
+    0x01: 0x00,
+    0xFF: 0x00,
+}
+
+
+def _in_class(b: int) -> tuple[int, int] | None:
+    """Return the character class range for a byte, or None."""
+    for start, end in _CHAR_CLASSES:
+        if start <= b <= end:
+            return (start, end)
+    return None
+
+
+def type_replace_byte(b: int) -> int:
+    """Replace a byte with a different value from the same character class.
+
+    Preserves the 'type' of the byte: hex digits stay hex, digits stay
+    digits, uppercase stays uppercase, etc. This is useful for fuzzing
+    text-based formats where structural tokens must remain valid.
+
+    Ported from AFL++ redqueen.c type_replace.
+
+    Args:
+        b: Original byte value (0-255).
+
+    Returns:
+        A different byte value from the same character class.
+    """
+    # Direct swaps
+    if b in _SWAP_MAP:
+        return _SWAP_MAP[b]
+
+    # Character class ranges
+    rng = _in_class(b)
+    if rng:
+        start, end = rng
+        size = end - start
+        if size == 0:
+            # Single-member class (like '0' or '1'), flip to the other
+            if b == 0x30:
+                return 0x31  # '0' -> '1'
+            if b == 0x31:
+                return 0x30  # '1' -> '0'
+            return b ^ 0x01
+        c = b
+        while c == b:
+            c = start + random.randint(0, size)
+        return c
+
+    # Default: XOR to flip bits while staying in printable-ish range
+    if b < 32:
+        return b ^ 0x1F
+    return b ^ 0x7F
+
+
+def type_replace(data: bytes) -> bytes:
+    """Replace all bytes with different values from the same character class.
+
+    Mutates every byte in the input while preserving its character class.
+    This keeps the input structurally valid for text-based formats.
+
+    Args:
+        data: Input bytes to mutate.
+
+    Returns:
+        Mutated bytes with each byte replaced within its class.
+    """
+    result = bytearray(data)
+    for i in range(len(result)):
+        result[i] = type_replace_byte(result[i])
+    return bytes(result)
+
+
+# ---------------------------------------------------------------------------
+# Duplicate elimination helpers (ported from AFL++ afl-fuzz-one.c)
+# ---------------------------------------------------------------------------
+
+
+def could_be_bitflip(xor_val: int) -> bool:
+    """Check if an XOR difference could be produced by a bitflip stage.
+
+    Deterministic bitflip stages flip 1, 2, or 4 contiguous bits, or
+    flip whole bytes (XOR 0xFF). If xor_val matches one of these patterns,
+    a later arithmetic or interesting-value stage would produce a duplicate.
+
+    Args:
+        xor_val: XOR between old and new byte/word value.
+
+    Returns:
+        True if the difference is already covered by bitflip stages.
+    """
+    if not xor_val:
+        return True
+
+    # Find position of lowest set bit
+    sh = 0
+    v = xor_val
+    while not (v & 1):
+        sh += 1
+        v >>= 1
+
+    # 1-, 2-, and 4-bit patterns are covered anywhere
+    if v in (1, 3, 15):
+        return True
+
+    # 8-, 16-, 32-bit patterns only at byte boundaries
+    if sh & 7:
+        return False
+
+    if v in (0xFF, 0xFFFF, 0xFFFFFFFF):
+        return True
+
+    return False
+
+
+def could_be_arith(old_val: int, new_val: int, blen: int) -> bool:
+    """Check if a value change could be produced by an arithmetic stage.
+
+    Arithmetic stages add/subtract small values (1..ARITH_MAX) to individual
+    bytes, words, or dwords. This checks if the old->new difference at any
+    byte/word/dword boundary is within ARITH_MAX.
+
+    Args:
+        old_val: Original value (u32).
+        new_val: New value (u32).
+        blen: Byte length of the value (1, 2, or 4).
+
+    Returns:
+        True if the difference is already covered by arithmetic stages.
+    """
+    if old_val == new_val:
+        return True
+
+    # Check single-byte adjustments
+    diffs = 0
+    ov = nv = 0
+    for i in range(blen):
+        a = (old_val >> (8 * i)) & 0xFF
+        b = (new_val >> (8 * i)) & 0xFF
+        if a != b:
+            diffs += 1
+            ov, nv = a, b
+
+    if diffs == 1:
+        if ((ov - nv) & 0xFF) <= ARITH_MAX or ((nv - ov) & 0xFF) <= ARITH_MAX:
+            return True
+
+    if blen == 1:
+        return False
+
+    # Check two-byte (word) adjustments
+    diffs = 0
+    for i in range(blen // 2):
+        a = (old_val >> (16 * i)) & 0xFFFF
+        b = (new_val >> (16 * i)) & 0xFFFF
+        if a != b:
+            diffs += 1
+            ov, nv = a, b
+
+    if diffs == 1:
+        # Little-endian check
+        if ((ov - nv) & 0xFFFF) <= ARITH_MAX or ((nv - ov) & 0xFFFF) <= ARITH_MAX:
+            return True
+        # Big-endian check (byte-swap)
+        ov_be = ((ov & 0xFF) << 8) | ((ov >> 8) & 0xFF)
+        nv_be = ((nv & 0xFF) << 8) | ((nv >> 8) & 0xFF)
+        if ((ov_be - nv_be) & 0xFFFF) <= ARITH_MAX or ((nv_be - ov_be) & 0xFFFF) <= ARITH_MAX:
+            return True
+
+    # Check dword adjustments
+    if blen == 4:
+        if ((old_val - new_val) & 0xFFFFFFFF) <= ARITH_MAX or ((new_val - old_val) & 0xFFFFFFFF) <= ARITH_MAX:
+            return True
+
+    return False
+
+
+def could_be_interest(old_val: int, new_val: int, blen: int, check_le: bool = True) -> bool:
+    """Check if a value change could be produced by an interesting-value stage.
+
+    Interesting-value stages replace bytes/words/dwords with specific
+    boundary values (-128, 0, 1, 127, 255, 32767, etc.). This checks
+    if old_val with one such replacement at any position yields new_val.
+
+    Args:
+        old_val: Original value (u32).
+        new_val: New value (u32).
+        blen: Byte length (1, 2, or 4).
+        check_le: Also check LE word insertions before BE attempts.
+
+    Returns:
+        True if the difference is already covered by interesting-value stages.
+    """
+    if old_val == new_val:
+        return True
+
+    # Check single-byte insertions
+    for i in range(blen):
+        for j in range(len(INTERESTING_8)):
+            tval = (old_val & ~(0xFF << (8 * i))) | ((INTERESTING_8[j] & 0xFF) << (8 * i))
+            if new_val == tval:
+                return True
+
+    if blen == 2 and not check_le:
+        return False
+
+    # Check two-byte (word) insertions
+    for i in range(blen - 1):
+        for j in range(len(INTERESTING_16)):
+            tval = (old_val & ~(0xFFFF << (8 * i))) | ((INTERESTING_16[j] & 0xFFFF) << (8 * i))
+            if new_val == tval:
+                return True
+            if blen > 2:
+                # Big-endian variant
+                swapped = ((INTERESTING_16[j] & 0xFF) << 8) | ((INTERESTING_16[j] >> 8) & 0xFF)
+                tval = (old_val & ~(0xFFFF << (8 * i))) | (swapped << (8 * i))
+                if new_val == tval:
+                    return True
+
+    if blen == 4 and check_le:
+        for j in range(len(INTERESTING_32)):
+            if new_val == (INTERESTING_32[j] & 0xFFFFFFFF):
+                return True
+
+    return False

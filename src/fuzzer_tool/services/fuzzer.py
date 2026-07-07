@@ -1468,6 +1468,10 @@ class Fuzzer:
                         other = random.choice(others)
                         buf = bytearray(crossover(bytes(buf), other)[: self.max_len])
 
+            elif op == "type_replace" and buf:
+                from fuzzer_tool.core.mutations import type_replace
+                buf = bytearray(type_replace(bytes(buf))[: self.max_len])
+
             elif op == "length_grow" and buf and len(buf) < self.max_len:
                 size = random.randint(1, min(64, self.max_len - len(buf)))
                 if size > 0:
