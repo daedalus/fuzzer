@@ -885,16 +885,21 @@ class Fuzzer:
             ops.append("redqueen")
 
         self._last_ops_used = []
+        self._last_mopt_particles = []  # particle_id per op, for mopt attribution
 
         for _ in range(self.mutations_per_input):
             if self._use_replicator and self._replicator:
                 op = self._replicator.select_op(ops)
+                self._last_mopt_particles.append(None)
             elif self._use_mopt and self._mopt:
-                op = self._mopt.select_op(ops)
+                op, pid = self._mopt.select_op(ops)
+                self._last_mopt_particles.append(pid)
             elif self.mc and self.mc_bandit:
                 op = self.mc.select_op(ops)
+                self._last_mopt_particles.append(None)
             else:
                 op = random.choice(ops)
+                self._last_mopt_particles.append(None)
             self._last_ops_used.append(op)
 
             # Position selection: MI, TE, or random
@@ -2048,9 +2053,9 @@ class Fuzzer:
 
         if self._mopt:
             seen = set()
-            for op in self._last_ops_used:
+            for op, pid in zip(self._last_ops_used, self._last_mopt_particles, strict=False):
                 if op not in seen:
-                    self._mopt.record(op, success)
+                    self._mopt.record(op, success, particle_id=pid)
                     seen.add(op)
 
         if self._use_replicator and self._replicator:
@@ -2090,8 +2095,15 @@ class Fuzzer:
             if self._tracer and crash_name:
                 report = self._tracer.trace(mutated, returncode)
                 self._tracer.save_report(report, str(self.crashes_dir), crash_name)
-            # Verify crash at kernel level via dmesg (async stream)
-            kernel_hits = self._dmesg.drain_stream(pid=getattr(self, "_last_child_pid", None))
+            # Verify crash at kernel level via dmesg.
+            # First drain the async stream; if empty, fall back to a
+            # synchronous poll to catch races where the stream thread
+            # hasn't consumed the /dev/kmsg line yet.
+            child_pid = getattr(self, "_last_child_pid", None)
+            kernel_hits = self._dmesg.drain_stream(pid=child_pid)
+            if not kernel_hits:
+                snap = self._dmesg.poll(pid=child_pid)
+                kernel_hits = snap.crashes
             if kernel_hits:
                 for kc in kernel_hits:
                     self._kernel_crashes.append(kc)

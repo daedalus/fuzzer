@@ -265,3 +265,25 @@ class TestDmesgParser:
         kc = dp._match_crash(1.0, "[1.0] Out of memory: Killed process 1234")
         assert kc is not None
         assert kc.crash_type == "oom"
+
+    def test_poll_returns_crashes(self):
+        """poll() should return crashes from the system dmesg log."""
+        dp = DmesgParser()
+        if not dp.is_available():
+            pytest.skip("dmesg not available")
+        snap = dp.poll(since=0)
+        assert isinstance(snap.crashes, list)
+
+    def test_drain_then_poll_fallback(self):
+        """Verify drain_stream + poll fallback pattern used by fuzzer."""
+        dp = DmesgParser()
+        if not dp.is_available():
+            pytest.skip("dmesg not available")
+        # First drain catches everything
+        first = dp.drain_stream()
+        # Second drain is empty (buffer cleared)
+        second = dp.drain_stream()
+        assert len(second) == 0
+        # Poll should still find historical crashes
+        snap = dp.poll(since=0)
+        assert len(snap.crashes) > 0
