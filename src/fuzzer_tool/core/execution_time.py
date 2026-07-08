@@ -23,9 +23,11 @@ class ExecutionTimeTracker:
         timeout_factor: Multiply the selected percentile by this to get timeout.
     """
 
-    def __init__(self, window_size: int = 200, timeout_factor: float = 5.0):
+    def __init__(self, window_size: int = 200, timeout_factor: float = 1.0,
+                 correction_factor: float = 1.5):
         self.window_size = window_size
         self.timeout_factor = timeout_factor
+        self.correction_factor = correction_factor
         self._times: collections.deque = collections.deque(maxlen=window_size)
         self._sorted: list[float] = []
         self._crps_history: collections.deque = collections.deque(maxlen=100)
@@ -120,7 +122,7 @@ class ExecutionTimeTracker:
         mean = sum(self._sorted) / len(self._sorted)
         variance = sum((x - mean) ** 2 for x in self._sorted) / len(self._sorted)
         std_dev = variance ** 0.5
-        return p99 + std_dev
+        return p99 + std_dev * self.correction_factor
 
     def mean_crps(self) -> float:
         """Mean CRPS over recent observations — lower is better calibrated."""
