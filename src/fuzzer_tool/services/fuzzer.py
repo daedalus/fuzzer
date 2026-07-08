@@ -2556,6 +2556,9 @@ class Fuzzer:
             print(f"[*] Stats: {self.stats_file} every {self.stats_interval} iterations")
         if self.minimize_every_execs > 0:
             print(f"[*] Minimize: every {self.minimize_every_execs} execs")
+        import datetime
+        epoch_start = time.time()
+        print(f"[*] Epoch start: {epoch_start:.3f} ({datetime.datetime.fromtimestamp(epoch_start).isoformat()})")
         print("[*] Starting fuzzing...\n")
 
         i = 0
@@ -2653,3 +2656,5 @@ class Fuzzer:
                 pct = succ / total * 100 if total else 0
                 print(f"    {name:20s}: {succ:.0f}/{fail:.0f} ({pct:.0f}% success)")
         self._print_run_summary()
+        epoch_end = time.time()
+        print(f"\n[*] Epoch end: {epoch_end:.3f} ({datetime.datetime.fromtimestamp(epoch_end).isoformat()})")
