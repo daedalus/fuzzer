@@ -164,6 +164,13 @@ class Fuzzer:
         transfer_entropy=False,
     ):
         self.target = target
+        # Record boot time at init — before any child processes are spawned.
+        # Use -2s tolerance so crashes logged just before this read are included.
+        try:
+            with open("/proc/uptime") as f:
+                self._run_boot_start = float(f.read().split()[0]) - 2.0
+        except OSError:
+            self._run_boot_start = 0.0
         self.corpus_dir = Path(corpus_dir)
         self.crashes_dir = Path(crashes_dir)
         self.resume = resume
@@ -2120,11 +2127,11 @@ class Fuzzer:
                 if text_crashes:
                     kernel_hits = [kc for kc in text_crashes if kc.pid == child_pid] if child_pid else text_crashes
             if kernel_hits:
-                # Only count crashes from THIS run (after boot start)
-                run_start = getattr(self, "_run_boot_start", 0.0)
+                # PID filter already restricts to crashes from our child
+                # processes.  Boot-time filtering was unreliable because the
+                # kernel logs the crash before we read /proc/uptime, so the
+                # crash timestamp is always slightly before our window.
                 for kc in kernel_hits:
-                    if kc.timestamp < run_start:
-                        continue  # historical crash from a previous run
                     self._kernel_crashes.append(kc)
                     log.info(
                         "Kernel crash verified: %s at ip=%s (ts=%.3f)",
@@ -2508,13 +2515,6 @@ class Fuzzer:
         )
 
     def run(self, iterations=0):
-        # Record boot time at start to filter kernel crashes to this run only
-        try:
-            with open("/proc/uptime") as f:
-                self._run_boot_start = float(f.read().split()[0])
-        except OSError:
-            self._run_boot_start = 0.0
-
         print(f"[*] Target: {self.target}")
         # Static branch density: conditional branches per KB of .text
         from fuzzer_tool.core.elf import branch_density
@@ -2600,10 +2600,7 @@ class Fuzzer:
                         text_crashes = self._dmesg._poll_text(since=0)
                         if text_crashes:
                             kernel_hits = [kc for kc in text_crashes if kc.pid == child_pid] if child_pid else text_crashes
-                    run_start = getattr(self, "_run_boot_start", 0.0)
                     for kc in kernel_hits:
-                        if kc.timestamp < run_start:
-                            continue
                         self._kernel_crashes.append(kc)
             # Baseline exec_count after initial seed replay — used for
             # periodic minimization modulus so it fires at clean intervals
