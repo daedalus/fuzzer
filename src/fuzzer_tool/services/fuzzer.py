@@ -857,8 +857,8 @@ class Fuzzer:
             _time.sleep(0.05)
             kernel_hits = self._dmesg.drain_stream(pid=child_pid)
         if not kernel_hits:
-            # Synchronous fallback: read dmesg directly
-            text_crashes = self._dmesg._poll_text(since=0)
+            # Synchronous fallback: read dmesg from last known timestamp
+            text_crashes = self._dmesg._poll_text(since=self._dmesg._last_ts)
             if text_crashes:
                 kernel_hits = [kc for kc in text_crashes if kc.pid == child_pid]
 
