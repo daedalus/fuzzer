@@ -56,6 +56,34 @@ class TestExecutionTimeTracker:
             t.record(0.01)
         assert t.suggested_timeout() < 1.0
 
+    def test_correction_factor(self):
+        """suggested_timeout = p99 + std_dev * correction_factor"""
+        # Constant input: std_dev = 0, so timeout = p99 regardless of factor
+        t1 = ExecutionTimeTracker(correction_factor=1.0)
+        t2 = ExecutionTimeTracker(correction_factor=5.0)
+        for _ in range(50):
+            t1.record(0.05)
+            t2.record(0.05)
+        assert t1.suggested_timeout() == t2.suggested_timeout()
+
+    def test_correction_factor_scales_std_dev(self):
+        """Higher correction_factor should give larger timeout for variable input."""
+        t_low = ExecutionTimeTracker(correction_factor=0.5)
+        t_high = ExecutionTimeTracker(correction_factor=2.0)
+        # Variable input: uniform 0.01 to 0.10 → nonzero std_dev
+        for i in range(100):
+            val = 0.01 + i * 0.001
+            t_low.record(val)
+            t_high.record(val)
+        assert t_high.suggested_timeout() > t_low.suggested_timeout()
+
+    def test_std_dev_contribution(self):
+        """timeout should be >= p99 (std_dev is non-negative)."""
+        t = ExecutionTimeTracker(correction_factor=1.5)
+        for i in range(100):
+            t.record(0.01 + i * 0.001)
+        assert t.suggested_timeout() >= t.p99
+
     def test_crps_stable_constant_input(self):
         t = ExecutionTimeTracker()
         for _ in range(50):
