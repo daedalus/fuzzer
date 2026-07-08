@@ -137,6 +137,7 @@ class Fuzzer:
         anneal_budget=0,
         mc_elite_frac=0.1,
         mc_refit_interval=1000,
+        pairwise_blend=0.0,
         stats_file=None,
         stats_interval=1000,
         coverage_report=None,
@@ -328,6 +329,7 @@ class Fuzzer:
             MonteCarloScheduler(
                 elite_frac=mc_elite_frac,
                 refit_interval=mc_refit_interval,
+                pairwise_blend=pairwise_blend,
             )
             if (mc_bandit or mc_cem or mopt)
             else None

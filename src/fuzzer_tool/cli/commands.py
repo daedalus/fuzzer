@@ -112,6 +112,7 @@ def cmd_fuzz(args):
             mc_cem=args.mc_cem,
             mc_elite_frac=args.mc_elite_frac,
             mc_refit_interval=args.mc_refit_int,
+            pairwise_blend=getattr(args, 'pairwise_blend', 0.0),
             stats_file=args.stats_file,
             stats_interval=args.stats_interval,
             coverage_report=args.coverage_report,
@@ -143,6 +144,7 @@ def cmd_fuzz(args):
         anneal_budget=getattr(args, 'anneal_budget', 0),
         mc_elite_frac=args.mc_elite_frac,
         mc_refit_interval=args.mc_refit_int,
+        pairwise_blend=getattr(args, 'pairwise_blend', 0.0),
         stats_file=args.stats_file,
         stats_interval=args.stats_interval,
         coverage_report=args.coverage_report,
@@ -557,6 +559,10 @@ def main() -> int:
     )
     fuzz_parser.add_argument(
         "--mc-bandit", action="store_true", help="Enable Thompson sampling bandit"
+    )
+    fuzz_parser.add_argument(
+        "--pairwise-blend", type=float, default=0.0,
+        help="Blend factor for pairwise operator transitions (0.0=pure Thompson, 1.0=pure pairwise)"
     )
     fuzz_parser.add_argument("--mc-cem", action="store_true", help="Enable cross-entropy method")
     fuzz_parser.add_argument(
