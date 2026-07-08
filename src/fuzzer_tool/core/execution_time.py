@@ -99,7 +99,7 @@ class ExecutionTimeTracker:
         return crps
 
     def suggested_timeout(self, percentile: float = 99.0) -> float:
-        """Suggest a timeout based on the empirical CDF percentile.
+        """Suggest a timeout based on the empirical CDF percentile + std dev.
 
         Args:
             percentile: Which percentile to use (0-100). Default 99th.
@@ -113,7 +113,14 @@ class ExecutionTimeTracker:
             int(len(self._sorted) * percentile / 100),
             len(self._sorted) - 1,
         )
-        return self._sorted[idx] * self.timeout_factor
+        p99 = self._sorted[idx]
+        # Add one standard deviation for headroom instead of a flat multiplier.
+        # This adapts to the actual variance: tight distributions get small
+        # headroom, high-variance targets get more.
+        mean = sum(self._sorted) / len(self._sorted)
+        variance = sum((x - mean) ** 2 for x in self._sorted) / len(self._sorted)
+        std_dev = variance ** 0.5
+        return p99 + std_dev
 
     def mean_crps(self) -> float:
         """Mean CRPS over recent observations — lower is better calibrated."""
