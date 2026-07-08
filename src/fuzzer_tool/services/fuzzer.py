@@ -838,6 +838,40 @@ class Fuzzer:
             if writer is not None:
                 writer.join(timeout=self.timeout)
 
+    def _verify_kernel_crash(self, child_pid: int | None) -> bool:
+        """Try to verify a crash via dmesg. Returns True if dmesg confirmed it.
+
+        Two cases:
+        1. dmesg HAS the crash (not rate-limited) → verify and count it
+        2. dmesg DOESN'T have it (rate-limited) → return False, caller
+           still counts the crash via exit code (primary detection)
+        """
+        if not child_pid:
+            return False
+
+        # Drain the async stream
+        kernel_hits = self._dmesg.drain_stream(pid=child_pid)
+        if not kernel_hits:
+            # Let the stream reader consume /dev/kmsg
+            import time as _time
+            _time.sleep(0.05)
+            kernel_hits = self._dmesg.drain_stream(pid=child_pid)
+        if not kernel_hits:
+            # Synchronous fallback: read dmesg directly
+            text_crashes = self._dmesg._poll_text(since=0)
+            if text_crashes:
+                kernel_hits = [kc for kc in text_crashes if kc.pid == child_pid]
+
+        if kernel_hits:
+            for kc in kernel_hits:
+                self._kernel_crashes.append(kc)
+                log.info(
+                    "Kernel crash verified: %s at ip=%s (ts=%.3f)",
+                    kc.crash_type, kc.ip or "?", kc.timestamp,
+                )
+            return True
+        return False
+
     def _is_interesting(self, returncode: int, stderr: str) -> bool:
         if returncode in SIGNAL_CRASH_CODES or returncode in self.extra_crash_codes:
             return True
@@ -2110,35 +2144,8 @@ class Fuzzer:
             if self._tracer and crash_name:
                 report = self._tracer.trace(mutated, returncode)
                 self._tracer.save_report(report, str(self.crashes_dir), crash_name)
-            # Verify crash at kernel level via dmesg.
-            # First drain the async stream; if empty, do a synchronous
-            # poll with a generous time window to catch crashes the
-            # stream thread hasn't consumed yet.
-            child_pid = getattr(self, "_last_child_pid", None)
-            kernel_hits = self._dmesg.drain_stream(pid=child_pid)
-            if not kernel_hits:
-                import time as _time
-                _time.sleep(0.05)  # let stream consume /dev/kmsg
-                kernel_hits = self._dmesg.drain_stream(pid=child_pid)
-            if not kernel_hits:
-                # Synchronous fallback: read dmesg directly, no PID filter
-                # (the crash we just detected IS the one we're looking for)
-                text_crashes = self._dmesg._poll_text(since=0)
-                if text_crashes:
-                    kernel_hits = [kc for kc in text_crashes if kc.pid == child_pid] if child_pid else text_crashes
-            if kernel_hits:
-                # PID filter already restricts to crashes from our child
-                # processes.  Boot-time filtering was unreliable because the
-                # kernel logs the crash before we read /proc/uptime, so the
-                # crash timestamp is always slightly before our window.
-                for kc in kernel_hits:
-                    self._kernel_crashes.append(kc)
-                    log.info(
-                        "Kernel crash verified: %s at ip=%s (ts=%.3f)",
-                        kc.crash_type,
-                        kc.ip or "?",
-                        kc.timestamp,
-                    )
+            # Verify crash at kernel level via dmesg (supplementary to exit code)
+            self._verify_kernel_crash(getattr(self, "_last_child_pid", None))
             if self.mc and self.mc_cem:
                 self.mc.add_elite(mutated, 3)
                 self.mc.maybe_refit()
@@ -2590,18 +2597,7 @@ class Fuzzer:
                     self.crash_count += 1
                     self.save_crash(seed, returncode, stderr)
                     # Kernel crash verification (same as fuzz_one path)
-                    child_pid = getattr(self, "_last_child_pid", None)
-                    kernel_hits = self._dmesg.drain_stream(pid=child_pid)
-                    if not kernel_hits:
-                        import time as _time
-                        _time.sleep(0.05)
-                        kernel_hits = self._dmesg.drain_stream(pid=child_pid)
-                    if not kernel_hits:
-                        text_crashes = self._dmesg._poll_text(since=0)
-                        if text_crashes:
-                            kernel_hits = [kc for kc in text_crashes if kc.pid == child_pid] if child_pid else text_crashes
-                    for kc in kernel_hits:
-                        self._kernel_crashes.append(kc)
+                    self._verify_kernel_crash(getattr(self, "_last_child_pid", None))
             # Baseline exec_count after initial seed replay — used for
             # periodic minimization modulus so it fires at clean intervals
             # regardless of initial corpus size.
@@ -2663,7 +2659,11 @@ class Fuzzer:
             for ctype, count in sorted(by_type.items(), key=lambda x: -x[1]):
                 print(f"    {ctype}: {count}")
         elif self._dmesg.is_available():
-            print("\n[*] dmesg: no kernel crashes detected")
+            if self.crash_count > 0:
+                print("\n[*] dmesg: crashes detected via exit code but not in dmesg "
+                      "(likely rate-limited by kernel)")
+            else:
+                print("\n[*] dmesg: no kernel crashes detected")
         if self.mc and self.mc_bandit:
             print("\n[*] Bandit convergence:")
             for name, (succ, fail) in sorted(
