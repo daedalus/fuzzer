@@ -621,7 +621,7 @@ def _fuzzing_strategy(f) -> str:
 
     # Replicator
     if f._replicator:
-        strategies.append(f"  Replicator:       window={f._replicator.window_size}, eta={f._replicator.learning_rate}")
+        strategies.append(f"  Replicator:       window={f._replicator.window_size}, eta={f._replicator.eta}")
 
     # Markov
     if f.markov_trained:
@@ -638,7 +638,7 @@ def _fuzzing_strategy(f) -> str:
 
     # Transfer entropy
     if f._use_transfer_entropy and f._te:
-        strategies.append(f"  Transfer entropy: history={f._te.history_length}")
+        strategies.append(f"  Transfer entropy: history={f._te.k}")
 
     # Secretary
     if f._secretary:
