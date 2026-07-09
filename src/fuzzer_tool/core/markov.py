@@ -36,7 +36,7 @@ class MarkovChain:
         4
     """
 
-    def __init__(self, order: int = 1, smoothing: float = 1e-6):
+    def __init__(self, order: int = 1, smoothing: float = 0.01):
         self.order = order
         self.smoothing = smoothing
         self.transitions: dict[bytes, collections.Counter] = collections.defaultdict(
@@ -47,6 +47,7 @@ class MarkovChain:
         self.last_js_divergence: float = 0.0
         self._snapshot_interval: int = 50  # snapshot every N train_corpus calls
         self._trains_since_snapshot: int = 0
+        self._global_freq: collections.Counter = collections.Counter()
 
     def train(self, data: bytes) -> None:
         """Learn byte transitions from a single input.
@@ -58,6 +59,9 @@ class MarkovChain:
             ctx = bytes(data[max(0, i - self.order) : i]) if self.order else b""
             self.transitions[ctx][data[i]] += 1
             self._contexts_seen += 1
+        # Track global byte frequency for fallback generation
+        for b in data:
+            self._global_freq[b] += 1
 
     def train_corpus(self, corpus: list[bytes]) -> None:
         """Train on multiple inputs.
@@ -82,7 +86,11 @@ class MarkovChain:
         for _ in range(length):
             counts = self.transitions.get(ctx)
             if counts is None or not counts:
-                result.append(random.randint(0, 255))
+                # Fallback: use global byte frequency instead of uniform random
+                if self._global_freq:
+                    result.append(self._global_freq.most_common(1)[0][0])
+                else:
+                    result.append(random.randint(0, 255))
                 ctx = bytes(result[max(0, len(result) - self.order) :])
                 continue
             total = sum(counts.values()) + self.smoothing * 256
@@ -109,6 +117,8 @@ class MarkovChain:
         """
         counts = self.transitions.get(ctx)
         if counts is None or not counts:
+            if self._global_freq:
+                return self._global_freq.most_common(1)[0][0]
             return random.randint(0, 255)
         total = sum(counts.values()) + self.smoothing * 256
         r = random.random() * total
@@ -299,6 +309,7 @@ class MarkovChain:
                 ctx.hex(): dict(counts)
                 for ctx, counts in self.transitions.items()
             },
+            "global_freq": dict(self._global_freq),
         }
         try:
             with open(path, "w") as f:
@@ -332,6 +343,7 @@ class MarkovChain:
         for ctx_hex, counts in data.get("transitions", {}).items():
             ctx = bytes.fromhex(ctx_hex)
             self.transitions[ctx] = collections.Counter({int(k): v for k, v in counts.items()})
+        self._global_freq = collections.Counter(data.get("global_freq", {}))
         log.info("Markov chain loaded: %s (%d contexts)", path, self._contexts_seen)
         return True
 
@@ -363,7 +375,7 @@ class MarkovEnsemble:
     def __init__(
         self,
         orders: list[int] | None = None,
-        smoothing: float = 1e-6,
+        smoothing: float = 0.01,
         blend: bool = False,
     ):
         if orders is None:
@@ -446,15 +458,15 @@ class MarkovEnsemble:
         """Compute perplexity using the best-fitting chain."""
         if not self.chains:
             return float("inf")
-        # Use the chain with the most contexts for perplexity
-        best = max(self.chains.values(), key=lambda c: c._contexts_seen)
+        # Use the chain with lowest perplexity (most predictive), not most contexts
+        best = min(self.chains.values(), key=lambda c: c.perplexity(data))
         return best.perplexity(data)
 
     def codelength(self, data: bytes) -> float:
         """Compute codelength using the best-fitting chain."""
         if not self.chains:
             return len(data) * 8.0
-        best = max(self.chains.values(), key=lambda c: c._contexts_seen)
+        best = min(self.chains.values(), key=lambda c: c.codelength(data))
         return best.codelength(data)
 
     def codelength_ratio(self, data: bytes) -> float:
@@ -468,7 +480,8 @@ class MarkovEnsemble:
         if not self.chains:
             return {"mean": 0, "median": 0, "p10": 0, "p90": 0,
                     "low_surprise_count": 0, "high_surprise_count": 0}
-        best = max(self.chains.values(), key=lambda c: c._contexts_seen)
+        # Use the chain with lowest average perplexity
+        best = min(self.chains.values(), key=lambda c: c.corpus_perplexity(corpus)["mean"])
         return best.corpus_perplexity(corpus)
 
     def snapshot_and_check_plateau(self) -> bool:
@@ -495,6 +508,7 @@ class MarkovEnsemble:
                     ctx.hex(): dict(counts)
                     for ctx, counts in chain.transitions.items()
                 },
+                "global_freq": dict(chain._global_freq),
             }
         try:
             with open(path, "w") as f:
@@ -533,6 +547,7 @@ class MarkovEnsemble:
                     chain.transitions[ctx] = collections.Counter(
                         {int(k): v for k, v in counts.items()}
                     )
+                chain._global_freq = collections.Counter(chain_data.get("global_freq", {}))
                 self.chains[order] = chain
             self.order = self.orders[0] if self.orders else 0
             self.transitions = self.chains.get(self.order, MarkovChain()).transitions
