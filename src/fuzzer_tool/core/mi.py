@@ -75,9 +75,14 @@ class MutualInformationTracker:
                 break
             self.position_counts[pos] += 1
             self.byte_marginal[pos][byte_val] += 1
-            for edge in hit_edges:
-                self.joint[pos][byte_val][edge] += 1
-                self.edge_marginal[edge] += 1
+            # Only update the expensive joint distribution once the position
+            # has enough observations to compute MI.  Below the threshold we
+            # just track counts — the joint update is O(edges) per position
+            # and dominates runtime for large inputs.
+            if self.position_counts[pos] >= self.min_observations:
+                for edge in hit_edges:
+                    self.joint[pos][byte_val][edge] += 1
+                    self.edge_marginal[edge] += 1
 
     def mi(self, position: int) -> float:
         """Compute I(X_pos; Y) in bits.
