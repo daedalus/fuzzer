@@ -353,7 +353,7 @@ class Fuzzer:
         self._use_shapley = shapley
         self._shapley = ShapleyAttribution(n_samples=100, window_size=500) if shapley else None
         self._use_mi = mi_guided
-        self._mi = MutualInformationTracker(max_positions=max_len, min_observations=50) if mi_guided else None
+        self._mi = MutualInformationTracker(max_positions=min(max_len, 1024), min_observations=50) if mi_guided else None
         # Load persisted MI state
         if self._use_mi and self._mi and self._mi_path.exists():
             self._mi.load(str(self._mi_path))
