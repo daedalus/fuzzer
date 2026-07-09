@@ -478,6 +478,7 @@ class Fuzzer:
                 target=self.target,
                 function_name=inprocess_func,
                 timeout=self.timeout,
+                shm_size=self.map_size,
                 direct=inprocess_direct,
                 coverage_env_id=cov_env_id,
                 cov=bool(cov_env_id),
@@ -1161,6 +1162,34 @@ class Fuzzer:
             elif op == "insert_ascii_num" and buf and len(buf) < self.max_len:
                 from fuzzer_tool.core.mutations import insert_ascii_num
                 buf = bytearray(insert_ascii_num(bytes(buf), self.max_len)[: self.max_len])
+
+            elif op == "transpose_16" and len(buf) >= 2:
+                from fuzzer_tool.core.mutations import transpose_bytes
+                buf = bytearray(transpose_bytes(bytes(buf), 2)[: self.max_len])
+
+            elif op == "transpose_32" and len(buf) >= 4:
+                from fuzzer_tool.core.mutations import transpose_bytes
+                buf = bytearray(transpose_bytes(bytes(buf), 4)[: self.max_len])
+
+            elif op == "transpose_64" and len(buf) >= 8:
+                from fuzzer_tool.core.mutations import transpose_bytes
+                buf = bytearray(transpose_bytes(bytes(buf), 8)[: self.max_len])
+
+            elif op == "bit_transpose_8" and buf:
+                from fuzzer_tool.core.mutations import bit_transpose
+                buf = bytearray(bit_transpose(bytes(buf), 1)[: self.max_len])
+
+            elif op == "bit_transpose_16" and len(buf) >= 2:
+                from fuzzer_tool.core.mutations import bit_transpose
+                buf = bytearray(bit_transpose(bytes(buf), 2)[: self.max_len])
+
+            elif op == "bit_transpose_32" and len(buf) >= 4:
+                from fuzzer_tool.core.mutations import bit_transpose
+                buf = bytearray(bit_transpose(bytes(buf), 4)[: self.max_len])
+
+            elif op == "bit_transpose_64" and len(buf) >= 8:
+                from fuzzer_tool.core.mutations import bit_transpose
+                buf = bytearray(bit_transpose(bytes(buf), 8)[: self.max_len])
 
             elif op == "length_grow" and buf and len(buf) < self.max_len:
                 size = random.randint(1, min(64, self.max_len - len(buf)))

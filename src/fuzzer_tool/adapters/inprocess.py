@@ -208,9 +208,13 @@ class InProcessRunner:
                     raise
 
         if not self.direct:
-            # Set __AFL_SHM_ID in process env so subprocess loaders inherit it
+            # Set __AFL_SHM_ID and AFL_MAP_SIZE in process env so
+            # subprocess loaders and forkserver inherit the correct values.
+            # Without AFL_MAP_SIZE, the forkserver defaults to 65536 which
+            # mismatches the auto-sized SHM and causes OOB writes.
             if self.coverage_env_id:
                 os.environ["__AFL_SHM_ID"] = self.coverage_env_id
+                os.environ["AFL_MAP_SIZE"] = str(self.shm_size)
 
             # Try persistent subprocess first (faster: one process, many calls)
             if cov:
