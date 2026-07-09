@@ -20,6 +20,7 @@ def generate_report(fuzzer, corpus_dir: str, crashes_dir: str) -> str:
     sections.append(_coverage_analysis(fuzzer))
     sections.append(_mutation_effectiveness(fuzzer))
     sections.append(_operator_diversity(fuzzer))
+    sections.append(_elo_ratings(fuzzer))
     sections.append(_bandit_calibration(fuzzer))
     sections.append(_fuzzing_strategy(fuzzer))
     sections.append(_execution_time_analysis(fuzzer))
@@ -749,6 +750,66 @@ def _format_duration(seconds: float) -> str:
         h, remainder = divmod(int(seconds), 3600)
         m, s = divmod(remainder, 60)
         return f"{h}h {m}m {s}s"
+
+
+def _elo_ratings(f) -> str:
+    """Elo operator rankings and comparison with bandit rankings."""
+    if not f._use_elo or not f._elo or not f._elo.ratings:
+        return ""
+
+    ranking = f._elo.get_ranking()
+    lines = [
+        "",
+        "--- Elo Operator Ratings ---",
+        f"  K-factor:        {f._elo.k_factor}",
+        f"  Decay:           {f._elo.decay}",
+        f"  Total matches:   {sum(f._elo._match_count.values()) // 2}",
+    ]
+
+    # Top 10 and bottom 5
+    lines.append(f"  {'Rank':<6s} {'Operator':<22s} {'Rating':>8s} {'Matches':>8s}")
+    lines.append(f"  {'-'*6} {'-'*22} {'-'*8} {'-'*8}")
+    for i, (op, rating) in enumerate(ranking[:10], 1):
+        matches = f._elo._match_count.get(op, 0)
+        lines.append(f"  {i:<6d} {op:<22s} {rating:>8.0f} {matches:>8d}")
+    if len(ranking) > 10:
+        lines.append(f"  {'...':<6s}")
+        for i, (op, rating) in enumerate(ranking[-5:], len(ranking) - 4):
+            matches = f._elo._match_count.get(op, 0)
+            lines.append(f"  {i:<6d} {op:<22s} {rating:>8.0f} {matches:>8d}")
+
+    # Crash-specific Elo if available
+    if f._elo.crash_track and f._elo.crash_ratings:
+        crash_ranking = f._elo.get_ranking(crash=True)
+        if crash_ranking and crash_ranking[0][1] != f._elo.default_rating:
+            lines.append("")
+            lines.append("  Crash-specific Elo:")
+            for i, (op, rating) in enumerate(crash_ranking[:5], 1):
+                delta = rating - f._elo.default_rating
+                sign = "+" if delta >= 0 else ""
+                lines.append(f"    {i}. {op:<20s} {rating:>7.0f} ({sign}{delta:.0f})")
+
+    # Compare with bandit if available
+    if f.mc and f.mc_bandit and f.mc.arm_alpha:
+        bandit_ranking = sorted(
+            f.mc.arm_alpha.items(),
+            key=lambda x: -x[1] / (x[1] + f.mc.arm_beta.get(x[0], 1)),
+        )
+        elo_rank = {op: i for i, (op, _) in enumerate(ranking)}
+        bandit_rank = {op: i for i, (op, _) in enumerate(bandit_ranking)}
+        if elo_rank and bandit_rank:
+            common = set(elo_rank) & set(bandit_rank)
+            if common:
+                rank_diffs = [abs(elo_rank[op] - bandit_rank[op]) for op in common]
+                avg_diff = sum(rank_diffs) / len(rank_diffs)
+                max_diff = max(rank_diffs)
+                lines.append("")
+                lines.append(
+                    f"  Elo vs Bandit:    avg rank diff={avg_diff:.1f}, "
+                    f"max={max_diff} ({len(common)} shared operators)"
+                )
+
+    return "\n".join(lines)
 
 
 def _human_size(n: int) -> str:

@@ -172,6 +172,7 @@ def cmd_fuzz(args):
         mi_guided=getattr(args, 'mi_guided', False),
         renyi_weight=getattr(args, 'renyi_weight', False),
         transfer_entropy=getattr(args, 'transfer_entropy', False),
+        elo=getattr(args, 'elo', False),
         secretary=getattr(args, 'secretary', False),
         secretary_window=getattr(args, 'secretary_window', 500),
         secretary_exploration=getattr(args, 'secretary_exploration', 0.368),
@@ -593,6 +594,10 @@ def main() -> int:
     fuzz_parser.add_argument(
         "--transfer-entropy", action="store_true",
         help="Enable transfer entropy causal tracking (byte→edge influence detection)"
+    )
+    fuzz_parser.add_argument(
+        "--elo", action="store_true",
+        help="Enable Elo rating system for operator scheduling (complementary signal)"
     )
     fuzz_parser.add_argument(
         "--secretary", action="store_true",

@@ -166,6 +166,7 @@ class Fuzzer:
         secretary=False,
         secretary_window=500,
         secretary_exploration=None,
+        elo=False,
     ):
         self.target = target
         # Record boot time at init — before any child processes are spawned.
@@ -376,6 +377,20 @@ class Fuzzer:
             log.info("Transfer entropy tracking enabled")
         self._last_ops_used: list[str] = []
 
+        # Elo rating system for operator scheduling
+        self._use_elo = elo
+        self._elo = None
+        if elo:
+            from fuzzer_tool.core.elo import EloTracker
+            self._elo = EloTracker(k_factor=32, decay=0.99, crash_track=True)
+            self._elo_path = self.corpus_dir / "elo.json"
+            if self._elo_path.exists():
+                self._elo.load(str(self._elo_path))
+                log.info("Elo tracker loaded from %s", self._elo_path)
+            log.info("Elo rating system enabled (k=32, decay=0.99)")
+            self._elo_decay_interval = 100  # apply decay every N iterations
+            self._elo_match_window: list[tuple[str, str, float, bool]] = []
+
         # Secretary-problem optimal stopping
         self._secretary = secretary
         self._secretary_window = secretary_window
@@ -457,6 +472,19 @@ class Fuzzer:
                 self._replicator.init_arm("grammar_tree_mutate")
             self._replicator.init_arm("png_chunk_mutate")
             self._replicator.init_arm("crc_fix")
+
+        if self._elo:
+            for op in MUTATIONS:
+                self._elo.init_arm(op)
+            for op in DICT_MUTATIONS:
+                self._elo.init_arm(op)
+            self._elo.init_arm("markov_bytes")
+            self._elo.init_arm("cem_bytes")
+            if self.grammar:
+                self._elo.init_arm("grammar_mutate")
+                self._elo.init_arm("grammar_tree_mutate")
+            self._elo.init_arm("png_chunk_mutate")
+            self._elo.init_arm("crc_fix")
 
         self._persistent_runner = None
         if self.persistent:
@@ -573,6 +601,8 @@ class Fuzzer:
         except OSError as e:
             log.debug("Failed to save state: %s", e)
         self._edge_tracker.save(str(self._edge_tracker_path))
+        if self._use_elo and self._elo:
+            self._elo.save(str(self._elo_path))
 
     def _load_state(self):
         """Load persisted fuzzer state for resume."""
@@ -2204,6 +2234,18 @@ class Fuzzer:
                     self._replicator.record(op, success)
                     seen.add(op)
 
+        # Elo: record matches between operators that were used
+        if self._use_elo and self._elo and len(self._last_ops_used) >= 2:
+            unique_ops = list(dict.fromkeys(self._last_ops_used))  # preserve order, dedup
+            winners = set(self._last_ops_used) if success else set()
+            if winners:
+                self._elo.record_round(unique_ops, winners, crash=is_crash)
+            # Apply periodic decay
+            self._elo_decay_counter = getattr(self, '_elo_decay_counter', 0) + 1
+            if self._elo_decay_counter >= self._elo_decay_interval:
+                self._elo_decay_counter = 0
+                self._elo.apply_decay()
+
         if self._use_shapley and self._shapley:
             edge_bitmap = self._get_current_edge_bitmap()
             if edge_bitmap:
@@ -2382,6 +2424,14 @@ class Fuzzer:
                 succ = self.op_success.get(op, 0)
                 rate = succ / count * 100 if count else 0
                 print(f"    {op:<22s} {count:>7d} {succ:>8d} {rate:>6.1f}%")
+
+        # Elo ratings
+        if self._use_elo and self._elo and self._elo.ratings:
+            ranking = self._elo.get_ranking()
+            print(f"\n  Elo Ratings (top 10):")
+            for i, (op, rating) in enumerate(ranking[:10], 1):
+                matches = self._elo._match_count.get(op, 0)
+                print(f"    {i:>2d}. {op:<22s} {rating:>7.0f} ({matches} matches)")
 
         # Duplicate rejection trend
         if self._total_corpus_attempts > 0:
