@@ -343,7 +343,7 @@ class MarkovChain:
         for ctx_hex, counts in data.get("transitions", {}).items():
             ctx = bytes.fromhex(ctx_hex)
             self.transitions[ctx] = collections.Counter({int(k): v for k, v in counts.items()})
-        self._global_freq = collections.Counter(data.get("global_freq", {}))
+        self._global_freq = collections.Counter({int(k): v for k, v in data.get("global_freq", {}).items()})
         log.info("Markov chain loaded: %s (%d contexts)", path, self._contexts_seen)
         return True
 
@@ -547,7 +547,7 @@ class MarkovEnsemble:
                     chain.transitions[ctx] = collections.Counter(
                         {int(k): v for k, v in counts.items()}
                     )
-                chain._global_freq = collections.Counter(chain_data.get("global_freq", {}))
+                chain._global_freq = collections.Counter({int(k): v for k, v in chain_data.get("global_freq", {}).items()})
                 self.chains[order] = chain
             self.order = self.orders[0] if self.orders else 0
             self.transitions = self.chains.get(self.order, MarkovChain()).transitions
