@@ -34,6 +34,7 @@ from fuzzer_tool.core.montecarlo import (
     ReplicatorScheduler,
     ShapleyAttribution,
 )
+from fuzzer_tool.core.secretary import DEFAULT_EXPLORATION_FRAC, SecretaryStopping
 from fuzzer_tool.core.mi import MutualInformationTracker
 from fuzzer_tool.core.mutations import (
     DICT_MUTATIONS,
@@ -162,6 +163,9 @@ class Fuzzer:
         mi_guided=False,
         renyi_weight=False,
         transfer_entropy=False,
+        secretary=False,
+        secretary_window=500,
+        secretary_exploration=None,
     ):
         self.target = target
         # Record boot time at init — before any child processes are spawned.
@@ -353,7 +357,7 @@ class Fuzzer:
         self._use_shapley = shapley
         self._shapley = ShapleyAttribution(n_samples=100, window_size=500) if shapley else None
         self._use_mi = mi_guided
-        self._mi = MutualInformationTracker(max_positions=min(max_len, 1024), min_observations=50) if mi_guided else None
+        self._mi = MutualInformationTracker(max_positions=max_len, min_observations=50) if mi_guided else None
         # Load persisted MI state
         if self._use_mi and self._mi and self._mi_path.exists():
             self._mi.load(str(self._mi_path))
@@ -371,6 +375,26 @@ class Fuzzer:
             self._te_history_max = 500
             log.info("Transfer entropy tracking enabled")
         self._last_ops_used: list[str] = []
+
+        # Secretary-problem optimal stopping
+        self._secretary = secretary
+        self._secretary_window = secretary_window
+        self._secretary_exploration = (
+            secretary_exploration
+            if secretary_exploration is not None
+            else DEFAULT_EXPLORATION_FRAC
+        )
+        self._seed_secretary: dict[str, SecretaryStopping] = {}
+        self._op_secretary: dict[str, SecretaryStopping] = {}
+        self._corpus_secretary = (
+            SecretaryStopping(
+                window_size=secretary_window,
+                exploration_frac=self._secretary_exploration,
+                min_observations=30,
+            )
+            if secretary
+            else None
+        )
 
         # Directed distance for targeted fuzzing
         self._distance = None
@@ -1407,6 +1431,14 @@ class Fuzzer:
             self._corpus_size_history.append(len(data))
             if len(self._corpus_size_history) > 1000:
                 self._corpus_size_history = self._corpus_size_history[-500:]
+            # Secretary-problem: track corpus discovery rate for optimal stopping
+            if self._corpus_secretary:
+                dr = self.discovery_rate()
+                self._corpus_secretary.observe(dr)
+                stop, _reason = self._corpus_secretary.should_stop()
+                if stop:
+                    log.info("Corpus secretary stopping: %s", _reason)
+                    self._auto_minimize_corpus()
             # Auto-minimize if corpus exceeds max
             if self.max_corpus > 0 and len(self.corpus) > self.max_corpus:
                 self._auto_minimize_corpus()
@@ -1734,6 +1766,13 @@ class Fuzzer:
 
             # Edge tracker signals: compute lazily, cache per-seed.
             seed_key = self._seed_key(seed)
+
+            # Secretary-problem optimal stopping: dampen seeds that have
+            # been explored enough (rank-based plateau detection)
+            if self._secretary and seed_key in self._seed_secretary:
+                stop, _reason = self._seed_secretary[seed_key].should_stop()
+                if stop:
+                    w *= 0.01
             if seed_key not in self._cached_weights:
                 if (seed_key in self._edge_tracker.seed_edges
                         and self._edge_tracker.seed_edges[seed_key]):
@@ -2061,6 +2100,16 @@ class Fuzzer:
                 new = self._edge_tracker.record_edges(seed_key, edge_bitmap)
                 if meta is not None and new:
                     meta["coverage_edges"] += len(new)
+                # Secretary-problem: track seed discovery rate for optimal stopping
+                if self._secretary and seed_key:
+                    if seed_key not in self._seed_secretary:
+                        self._seed_secretary[seed_key] = SecretaryStopping(
+                            window_size=self._secretary_window,
+                            exploration_frac=self._secretary_exploration,
+                        )
+                    fuzz_count = max(meta["fuzz_count"], 1) if meta else 1
+                    discovery_rate = len(new) / fuzz_count
+                    self._seed_secretary[seed_key].observe(discovery_rate)
 
         # Compute directed distance for targeted fuzzing
         if self._distance and meta is not None and has_new_coverage:
@@ -2099,6 +2148,18 @@ class Fuzzer:
                     self.mc.record(op, success)
                     self.mc.record_brier(op, success)
                     seen.add(op)
+                    # Secretary-problem: track operator quality for optimal stopping
+                    if self._secretary:
+                        if op not in self._op_secretary:
+                            self._op_secretary[op] = SecretaryStopping(
+                                window_size=self._secretary_window,
+                                exploration_frac=self._secretary_exploration,
+                                min_observations=50,
+                            )
+                        a = self.mc.arm_alpha.get(op, 1.0)
+                        b = self.mc.arm_beta.get(op, 1.0)
+                        rate = a / (a + b)
+                        self._op_secretary[op].observe(rate)
 
         if self._mopt:
             seen = set()

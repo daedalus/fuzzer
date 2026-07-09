@@ -119,6 +119,9 @@ def cmd_fuzz(args):
             iterations=args.iterations,
             sync_interval=args.sync_interval,
             seed=args.seed,
+            secretary=getattr(args, 'secretary', False),
+            secretary_window=getattr(args, 'secretary_window', 500),
+            secretary_exploration=getattr(args, 'secretary_exploration', 0.368),
         )
         return 0
 
@@ -169,6 +172,9 @@ def cmd_fuzz(args):
         mi_guided=getattr(args, 'mi_guided', False),
         renyi_weight=getattr(args, 'renyi_weight', False),
         transfer_entropy=getattr(args, 'transfer_entropy', False),
+        secretary=getattr(args, 'secretary', False),
+        secretary_window=getattr(args, 'secretary_window', 500),
+        secretary_exploration=getattr(args, 'secretary_exploration', 0.368),
     )
     fuzzer.run(iterations=args.iterations)
 
@@ -587,6 +593,18 @@ def main() -> int:
     fuzz_parser.add_argument(
         "--transfer-entropy", action="store_true",
         help="Enable transfer entropy causal tracking (byte→edge influence detection)"
+    )
+    fuzz_parser.add_argument(
+        "--secretary", action="store_true",
+        help="Enable secretary-problem optimal stopping for seed/operator/corpus scheduling"
+    )
+    fuzz_parser.add_argument(
+        "--secretary-window", type=int, default=500,
+        help="Sliding window size for secretary quality observations (default: 500)"
+    )
+    fuzz_parser.add_argument(
+        "--secretary-exploration", type=float, default=0.368,
+        help="Exploration fraction threshold for secretary stopping (default: 0.368 = 1/e)"
     )
     fuzz_parser.add_argument(
         "--targets",

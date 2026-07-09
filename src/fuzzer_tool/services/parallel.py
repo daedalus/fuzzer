@@ -35,6 +35,9 @@ def _worker_main(
     sync_interval: int,
     stop_event: multiprocessing.Event,
     rng_seed: int = 42,
+    secretary: bool = False,
+    secretary_window: int = 500,
+    secretary_exploration: float = 0.368,
 ):
     """Entry point for each fuzzing worker process."""
     from fuzzer_tool.services.fuzzer import Fuzzer
@@ -72,6 +75,9 @@ def _worker_main(
         stats_interval=stats_interval,
         coverage_report=coverage_report,
         seed=rng_seed + worker_id,
+        secretary=secretary,
+        secretary_window=secretary_window,
+        secretary_exploration=secretary_exploration,
     )
 
     print(f"{prefix} Started (target={target})")
@@ -191,6 +197,9 @@ def run_parallel(
     iterations: int = 0,
     sync_interval: int = 30,
     seed: int = 42,
+    secretary: bool = False,
+    secretary_window: int = 500,
+    secretary_exploration: float = 0.368,
 ):
     """Launch N parallel fuzzer workers sharing the same corpus directory.
 
@@ -248,6 +257,9 @@ def run_parallel(
         sync_interval=sync_interval,
         stop_event=stop_event,
         rng_seed=seed,
+        secretary=secretary,
+        secretary_window=secretary_window,
+        secretary_exploration=secretary_exploration,
     )
 
     def _spawn_worker(worker_id: int, rng_seed: int) -> multiprocessing.Process:
