@@ -121,7 +121,7 @@ class TestEloTracker:
         assert elo.select_op([]) == ""
 
     def test_get_ranking(self):
-        elo = EloTracker(k_factor=100)
+        elo = EloTracker(k_factor=100, min_matches=0)
         elo.init_arm("A")
         elo.init_arm("B")
         elo.init_arm("C")
@@ -174,3 +174,103 @@ class TestEloTracker:
             elo.record_match("strong", "weak", score_a=1.0)
         # Strong should be much higher rated
         assert elo.ratings["strong"] > elo.ratings["weak"] + 200
+
+    def test_k_factor_half_produces_smaller_swings(self):
+        elo_32 = EloTracker(k_factor=32, min_matches=0)
+        elo_16 = EloTracker(k_factor=16, min_matches=0)
+        for elo in (elo_32, elo_16):
+            elo.init_arm("A")
+            elo.init_arm("B")
+            elo.record_match("A", "B", score_a=1.0)
+        # K=16 should produce smaller rating change
+        assert abs(elo_16.ratings["A"] - 1500.0) < abs(elo_32.ratings["A"] - 1500.0)
+
+    def test_min_matches_excludes_from_ranking(self):
+        elo = EloTracker(min_matches=10)
+        elo.init_arm("rated")
+        elo.init_arm("unrated")
+        # Give "rated" 10 matches but "unrated" only 3
+        for _ in range(3):
+            elo.record_match("rated", "unrated", score_a=1.0)
+        elo.record_match("rated", "third", score_a=1.0)
+        elo.record_match("rated", "third", score_a=1.0)
+        elo.record_match("rated", "third", score_a=1.0)
+        elo.record_match("rated", "third", score_a=1.0)
+        elo.record_match("rated", "third", score_a=1.0)
+        elo.record_match("rated", "third", score_a=1.0)
+        elo.record_match("rated", "third", score_a=1.0)
+        # rated=10, unrated=3, third=7
+        ranking = elo.get_ranking()
+        assert len(ranking) == 1  # only "rated" has >= 10 matches
+        assert ranking[0][0] == "rated"
+
+    def test_min_matches_excludes_from_select(self):
+        elo = EloTracker(k_factor=100, min_matches=5)
+        elo.init_arm("rated")
+        elo.init_arm("unrated")
+        for _ in range(10):
+            elo.record_match("rated", "unrated", score_a=1.0)
+        # select_op should skip "unrated" (only 5 matches < 5 threshold... wait)
+        # "unrated" has 5 matches, threshold is 5, so it IS rated
+        # Let's use min_matches=10
+        elo2 = EloTracker(k_factor=100, min_matches=10)
+        elo2.init_arm("rated")
+        elo2.init_arm("unrated")
+        for _ in range(5):
+            elo2.record_match("rated", "unrated", score_a=1.0)
+        # "unrated" has 5 matches < 10 threshold
+        # select_op should skip it and return "rated"
+        counts = {"rated": 0, "unrated": 0}
+        for _ in range(100):
+            op = elo2.select_op(["rated", "unrated"])
+            counts[op] += 1
+        assert counts["rated"] == 100
+        assert counts["unrated"] == 0
+
+    def test_get_unrated(self):
+        elo = EloTracker(min_matches=5)
+        elo.init_arm("A")
+        elo.init_arm("B")
+        elo.init_arm("C")
+        elo.record_match("A", "B", score_a=1.0)  # A: 1, B: 1
+        elo.record_match("A", "C", score_a=1.0)  # A: 2, C: 1
+        elo.record_match("A", "B", score_a=1.0)  # A: 3, B: 2
+        elo.record_match("A", "C", score_a=1.0)  # A: 4, C: 2
+        elo.record_match("A", "B", score_a=1.0)  # A: 5, B: 3
+        elo.record_match("A", "C", score_a=1.0)  # A: 6, C: 3
+        elo.record_match("A", "B", score_a=1.0)  # A: 7, B: 4
+        elo.record_match("A", "C", score_a=1.0)  # A: 8, C: 4
+        elo.record_match("A", "B", score_a=1.0)  # A: 9, B: 5
+        elo.record_match("A", "C", score_a=1.0)  # A: 10, C: 5
+        elo.record_match("B", "C", score_a=1.0)  # B: 6, C: 6
+        elo.record_match("B", "C", score_a=1.0)  # B: 7, C: 7
+        elo.record_match("B", "C", score_a=1.0)  # B: 8, C: 8
+        elo.record_match("B", "C", score_a=1.0)  # B: 9, C: 9
+        elo.record_match("B", "C", score_a=1.0)  # B: 10, C: 10
+        # All have >= 5 matches
+        assert elo.get_unrated() == []
+
+    def test_min_matches_save_load(self):
+        elo = EloTracker(min_matches=20)
+        elo.init_arm("A")
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+            path = f.name
+        elo.save(path)
+        elo2 = EloTracker()
+        elo2.load(path)
+        assert elo2.min_matches == 20
+        Path(path).unlink()
+
+    def test_record_round_edge_counts(self):
+        elo = EloTracker(k_factor=32, min_matches=0)
+        for op in ["A", "B", "C"]:
+            elo.init_arm(op)
+        # A found 10 edges, B found 5, C found 0
+        elo.record_round(
+            ["A", "B", "C"], winners={"A", "B"},
+            edge_counts={"A": 10, "B": 5, "C": 0}
+        )
+        # A should have higher rating than B (proportional scoring)
+        assert elo.ratings["A"] > elo.ratings["B"]
+        # Both should beat C
+        assert elo.ratings["B"] > elo.ratings["C"]

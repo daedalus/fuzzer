@@ -758,25 +758,39 @@ def _elo_ratings(f) -> str:
         return ""
 
     ranking = f._elo.get_ranking()
+    unrated = f._elo.get_unrated()
     lines = [
         "",
         "--- Elo Operator Ratings ---",
         f"  K-factor:        {f._elo.k_factor}",
         f"  Decay:           {f._elo.decay}",
+        f"  Min matches:     {f._elo.min_matches}",
         f"  Total matches:   {sum(f._elo._match_count.values()) // 2}",
+        f"  Rated:           {len(ranking)} operators",
+        f"  Unrated:         {len(unrated)} operators (< {f._elo.min_matches} matches)",
     ]
 
-    # Top 10 and bottom 5
-    lines.append(f"  {'Rank':<6s} {'Operator':<22s} {'Rating':>8s} {'Matches':>8s}")
-    lines.append(f"  {'-'*6} {'-'*22} {'-'*8} {'-'*8}")
-    for i, (op, rating) in enumerate(ranking[:10], 1):
-        matches = f._elo._match_count.get(op, 0)
-        lines.append(f"  {i:<6d} {op:<22s} {rating:>8.0f} {matches:>8d}")
-    if len(ranking) > 10:
-        lines.append(f"  {'...':<6s}")
-        for i, (op, rating) in enumerate(ranking[-5:], len(ranking) - 4):
+    # Top 10 and bottom 5 of rated operators
+    if ranking:
+        lines.append(f"  {'Rank':<6s} {'Operator':<22s} {'Rating':>8s} {'Matches':>8s}")
+        lines.append(f"  {'-'*6} {'-'*22} {'-'*8} {'-'*8}")
+        for i, (op, rating) in enumerate(ranking[:10], 1):
             matches = f._elo._match_count.get(op, 0)
             lines.append(f"  {i:<6d} {op:<22s} {rating:>8.0f} {matches:>8d}")
+        if len(ranking) > 10:
+            lines.append(f"  {'...':<6s}")
+            for i, (op, rating) in enumerate(ranking[-5:], len(ranking) - 4):
+                matches = f._elo._match_count.get(op, 0)
+                lines.append(f"  {i:<6d} {op:<22s} {rating:>8.0f} {matches:>8d}")
+
+    # Unrated operators
+    if unrated:
+        lines.append("")
+        lines.append(f"  Not yet rated ({len(unrated)} operators):")
+        unrated_sample = unrated[:8]
+        lines.append(f"    {', '.join(unrated_sample)}")
+        if len(unrated) > 8:
+            lines.append(f"    ... and {len(unrated) - 8} more")
 
     # Crash-specific Elo if available
     if f._elo.crash_track and f._elo.crash_ratings:
@@ -806,7 +820,7 @@ def _elo_ratings(f) -> str:
                 lines.append("")
                 lines.append(
                     f"  Elo vs Bandit:    avg rank diff={avg_diff:.1f}, "
-                    f"max={max_diff} ({len(common)} shared operators)"
+                    f"max={max_diff} ({len(common)} rated operators)"
                 )
 
     return "\n".join(lines)

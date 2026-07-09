@@ -382,7 +382,7 @@ class Fuzzer:
         self._elo = None
         if elo:
             from fuzzer_tool.core.elo import EloTracker
-            self._elo = EloTracker(k_factor=32, decay=0.99, crash_track=True)
+            self._elo = EloTracker(k_factor=16, decay=0.99, crash_track=True, min_matches=10)
             self._elo_path = self.corpus_dir / "elo.json"
             if self._elo_path.exists():
                 self._elo.load(str(self._elo_path))

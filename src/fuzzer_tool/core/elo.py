@@ -10,7 +10,7 @@ Replicator dynamics. Unlike those mechanisms, Elo offers:
   - Crash-specific ranking (separate track where "win" = finding a crash)
 
 Usage:
-    elo = EloTracker(k_factor=32)
+    elo = EloTracker(k_factor=16)
     elo.init_arm("bit_flip")
     elo.init_arm("byte_insert")
     # After execution: bit_flip found new edges, byte_insert didn't
@@ -22,7 +22,6 @@ import json
 import logging
 import math
 import random
-from collections import deque
 
 log = logging.getLogger(__name__)
 
@@ -35,19 +34,23 @@ class EloTracker:
         default_rating: Starting Elo rating for new operators.
         decay: Exponential decay factor per apply_decay() call (0.99 = 1% decay).
         crash_track: If True, maintain separate crash-focused ratings.
+        min_matches: Minimum matches before an operator is considered "rated".
+            Unrated operators are excluded from ranking and selection.
     """
 
     def __init__(
         self,
-        k_factor: float = 32.0,
+        k_factor: float = 16.0,
         default_rating: float = 1500.0,
         decay: float = 0.99,
         crash_track: bool = True,
+        min_matches: int = 10,
     ):
         self.k_factor = k_factor
         self.default_rating = default_rating
         self.decay = decay
         self.crash_track = crash_track
+        self.min_matches = min_matches
 
         self.ratings: dict[str, float] = {}
         self.crash_ratings: dict[str, float] = {}
@@ -97,42 +100,60 @@ class EloTracker:
             self.crash_ratings[op_b] = crb + self.k_factor * ((1.0 - score_a) - cb)
 
     def record_round(
-        self, operators: list[str], winners: set[str], crash: bool = False
+        self,
+        operators: list[str],
+        winners: set[str],
+        edge_counts: dict[str, int] | None = None,
+        crash: bool = False,
     ) -> None:
         """Record outcomes for a group of operators used in one iteration.
 
-        Winners found new edges (or crashes). Non-winners didn't.
-        Every winner beats every non-winner. Ties among winners/losers
-        are not recorded (no information gain).
+        When edge_counts is provided with multiple operators having edges,
+        uses proportional scoring (edges[op] / max_edges) instead of binary
+        win/loss. This gives finer-grained signal.
 
-        If all operators are winners (or all losers), compare against
-        the previous round's operators to generate matches.
+        When all operators are winners (or all losers), falls back to
+        cross-iteration comparison with blended scoring.
 
         Args:
             operators: All operators used this iteration.
             winners: Subset that found new edges or crashes.
+            edge_counts: Per-operator edge discovery counts (optional).
             crash: If True, also update crash ratings.
         """
         losers = [op for op in operators if op not in winners]
+
         if losers:
             # Normal case: winners beat losers
-            for w in winners:
-                for l in losers:
-                    self.record_match(w, l, score_a=1.0, crash=crash)
+            if edge_counts and len(winners) > 1:
+                # Multiple winners — use proportional scoring among them
+                max_edges = max(edge_counts.get(w, 0) for w in winners) or 1
+                for w in winners:
+                    w_edges = edge_counts.get(w, 0)
+                    score = w_edges / max_edges  # proportional
+                    for l in losers:
+                        self.record_match(w, l, score_a=score, crash=crash)
+            else:
+                for w in winners:
+                    for l in losers:
+                        self.record_match(w, l, score_a=1.0, crash=crash)
+
         elif len(operators) >= 2:
-            # All winners (or all losers) — compare against previous round
+            # All winners or all losers — cross-iteration comparison
             if hasattr(self, '_prev_operators') and self._prev_operators:
                 prev_ops = self._prev_operators
                 if winners:
-                    # Current round found coverage — current ops beat previous ops
+                    # Current round found coverage — blend with previous
+                    blend = 0.7
                     for w in operators:
                         for p in prev_ops:
-                            self.record_match(w, p, score_a=1.0, crash=crash)
+                            self.record_match(w, p, score_a=blend, crash=crash)
                 else:
-                    # Current round didn't find coverage — previous ops beat current
+                    # Current round didn't find coverage
                     for w in prev_ops:
                         for p in operators:
-                            self.record_match(w, p, score_a=1.0, crash=crash)
+                            self.record_match(w, p, score_a=0.7, crash=crash)
+
         self._prev_operators = operators
 
     def select_op(
@@ -140,19 +161,29 @@ class EloTracker:
     ) -> str:
         """Select an operator weighted by Elo rating.
 
+        Only considers operators with >= min_matches matches.
+
         Args:
             operators: Candidate operators.
             temperature: Higher = more uniform selection, lower = more greedy.
 
         Returns:
-            Selected operator name.
+            Selected operator name, or first operator if none rated.
         """
         if not operators:
             return ""
         if len(operators) == 1:
             return operators[0]
 
-        ratings = [self.ratings.get(op, self.default_rating) for op in operators]
+        # Filter to rated operators
+        rated = [
+            op for op in operators
+            if self._match_count.get(op, 0) >= self.min_matches
+        ]
+        if not rated:
+            return operators[0]  # fallback: return first candidate
+
+        ratings = [self.ratings.get(op, self.default_rating) for op in rated]
         max_r = max(ratings)
         weights = [math.exp((r - max_r) / temperature) for r in ratings]
         total = sum(weights)
@@ -161,8 +192,8 @@ class EloTracker:
         for i, w in enumerate(weights):
             cumulative += w
             if r <= cumulative:
-                return operators[i]
-        return operators[-1]
+                return rated[i]
+        return rated[-1]
 
     def select_crash_op(self, operators: list[str], temperature: float = 400.0) -> str:
         """Select operator weighted by crash-specific Elo rating."""
@@ -173,8 +204,15 @@ class EloTracker:
         if len(operators) == 1:
             return operators[0]
 
+        rated = [
+            op for op in operators
+            if self._match_count.get(op, 0) >= self.min_matches
+        ]
+        if not rated:
+            return operators[0]
+
         ratings = [
-            self.crash_ratings.get(op, self.default_rating) for op in operators
+            self.crash_ratings.get(op, self.default_rating) for op in rated
         ]
         max_r = max(ratings)
         weights = [math.exp((r - max_r) / temperature) for r in ratings]
@@ -184,11 +222,13 @@ class EloTracker:
         for i, w in enumerate(weights):
             cumulative += w
             if r <= cumulative:
-                return operators[i]
-        return operators[-1]
+                return rated[i]
+        return rated[-1]
 
     def get_ranking(self, crash: bool = False) -> list[tuple[str, float]]:
-        """Return operators sorted by rating (highest first).
+        """Return rated operators sorted by rating (highest first).
+
+        Only includes operators with >= min_matches matches.
 
         Args:
             crash: If True, rank by crash-specific ratings.
@@ -197,7 +237,17 @@ class EloTracker:
             List of (operator_name, rating) tuples.
         """
         src = self.crash_ratings if crash and self.crash_track else self.ratings
-        return sorted(src.items(), key=lambda x: -x[1])
+        return [
+            (op, r) for op, r in sorted(src.items(), key=lambda x: -x[1])
+            if self._match_count.get(op, 0) >= self.min_matches
+        ]
+
+    def get_unrated(self) -> list[str]:
+        """Return operators with fewer than min_matches matches."""
+        return [
+            op for op, count in self._match_count.items()
+            if count < self.min_matches
+        ]
 
     def apply_decay(self) -> None:
         """Apply exponential decay to all ratings (call periodically)."""
@@ -229,6 +279,7 @@ class EloTracker:
             "default_rating": self.default_rating,
             "decay": self.decay,
             "crash_track": self.crash_track,
+            "min_matches": self.min_matches,
             "ratings": self.ratings,
             "crash_ratings": self.crash_ratings,
             "match_count": self._match_count,
@@ -256,6 +307,7 @@ class EloTracker:
         self.default_rating = data.get("default_rating", self.default_rating)
         self.decay = data.get("decay", self.decay)
         self.crash_track = data.get("crash_track", self.crash_track)
+        self.min_matches = data.get("min_matches", self.min_matches)
         self.ratings = data.get("ratings", {})
         self.crash_ratings = data.get("crash_ratings", {})
         self._match_count = data.get("match_count", {})
