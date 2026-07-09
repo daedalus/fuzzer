@@ -13,6 +13,12 @@ Also provides:
 import math
 from collections import defaultdict
 
+# Maximum edges tracked per (position, byte_val) pair in the joint
+# distribution.  Without this cap the joint dict grows without bound
+# and record() becomes O(positions × total_edges).  With the cap we
+# bound it to O(positions × MAX_EDGES_PER_CELL).
+MAX_EDGES_PER_CELL = 64
+
 
 class MutualInformationTracker:
     """Track mutual information between byte positions and coverage edges.
@@ -30,7 +36,7 @@ class MutualInformationTracker:
         self.max_positions = max_positions
         self.min_observations = min_observations
         self._max_mi_cache: dict[int, float] = {}  # input_length -> max_mi
-        self._total_edges: int | None = None  # cached sum(edge_marginal.values())
+        self._total_edges: int | None = None  # cached sum(edge_marginal)
 
         # Per-position: byte_value -> edge_index -> count
         # P(X_i = v, Y = e)
@@ -41,8 +47,9 @@ class MutualInformationTracker:
         self.byte_marginal: dict[int, dict[int, int]] = defaultdict(
             lambda: defaultdict(int)
         )
-        # Global: edge_index -> count
-        self.edge_marginal: dict[int, int] = defaultdict(int)
+        # Global: edge_index -> count (dense list for O(1) access)
+        self.edge_marginal: list[int] = []
+        self._edge_marginal_size = 0
         # Total observations per position
         self.position_counts: dict[int, int] = defaultdict(int)
         self.total_observations: int = 0
@@ -61,7 +68,6 @@ class MutualInformationTracker:
         self._total_edges = None
         self._invalidate_max_mi_cache()
         if hasattr(self, '_wp_all_positions') and self._wp_all_positions is not None:
-            # Invalidate if we see a position we haven't tracked yet
             max_pos = len(input_bytes) - 1 if input_bytes else 0
             if max_pos >= self.max_positions:
                 max_pos = self.max_positions - 1
@@ -76,13 +82,21 @@ class MutualInformationTracker:
             self.position_counts[pos] += 1
             self.byte_marginal[pos][byte_val] += 1
             # Only update the expensive joint distribution once the position
-            # has enough observations to compute MI.  Below the threshold we
-            # just track counts — the joint update is O(edges) per position
-            # and dominates runtime for large inputs.
+            # has enough observations to compute MI.
             if self.position_counts[pos] >= self.min_observations:
+                bv_edges = 0
                 for edge in hit_edges:
                     self.joint[pos][byte_val][edge] += 1
+                    # Update edge marginal array
+                    if edge >= self._edge_marginal_size:
+                        self.edge_marginal.extend(
+                            [0] * (edge + 1 - self._edge_marginal_size)
+                        )
+                        self._edge_marginal_size = edge + 1
                     self.edge_marginal[edge] += 1
+                    bv_edges += 1
+                    if bv_edges >= MAX_EDGES_PER_CELL:
+                        break
 
     def mi(self, position: int) -> float:
         """Compute I(X_pos; Y) in bits.
@@ -96,7 +110,7 @@ class MutualInformationTracker:
             return 0.0
 
         if self._total_edges is None:
-            self._total_edges = sum(self.edge_marginal.values())
+            self._total_edges = sum(self.edge_marginal)
         total_edges = self._total_edges
         if total_edges == 0:
             return 0.0
@@ -109,7 +123,7 @@ class MutualInformationTracker:
             p_x = bv_count / n
             for edge, joint_count in joint_pos.get(byte_val, {}).items():
                 p_xy = joint_count / n
-                p_y = self.edge_marginal[edge] / total_edges
+                p_y = self.edge_marginal[edge] / total_edges if edge < self._edge_marginal_size else 0
                 if p_xy > 0 and p_y > 0:
                     mi_value += p_xy * math.log2(p_xy / (p_x * p_y))
 
@@ -287,7 +301,7 @@ class MutualInformationTracker:
             "min_observations": self.min_observations,
             "total_observations": self.total_observations,
             "position_counts": dict(self.position_counts),
-            "edge_marginal": {str(k): v for k, v in self.edge_marginal.items()},
+            "edge_marginal": self.edge_marginal,
             "byte_marginal": {
                 str(pos): {str(bv): c for bv, c in counts.items()}
                 for pos, counts in self.byte_marginal.items()
@@ -321,7 +335,16 @@ class MutualInformationTracker:
         self.min_observations = data.get("min_observations", self.min_observations)
         self.total_observations = data.get("total_observations", 0)
         self.position_counts = defaultdict(int, {int(k): v for k, v in data.get("position_counts", {}).items()})
-        self.edge_marginal = defaultdict(int, {int(k): v for k, v in data.get("edge_marginal", {}).items()})
+        em = data.get("edge_marginal", [])
+        if isinstance(em, dict):
+            # Old format: {"edge_index": count, ...}
+            max_idx = max((int(k) for k in em), default=-1) + 1 if em else 0
+            self.edge_marginal = [0] * max_idx
+            for k, v in em.items():
+                self.edge_marginal[int(k)] = v
+        else:
+            self.edge_marginal = em
+        self._edge_marginal_size = len(self.edge_marginal)
         self.byte_marginal = defaultdict(
             lambda: defaultdict(int),
             {
@@ -329,17 +352,31 @@ class MutualInformationTracker:
                 for pos, counts in data.get("byte_marginal", {}).items()
             },
         )
-        self.joint = defaultdict(
-            lambda: defaultdict(lambda: defaultdict(int)),
-            {
-                int(pos): defaultdict(
-                    lambda: defaultdict(int),
+        raw_joint = data.get("joint", {})
+        if raw_joint:
+            first_val = next(iter(raw_joint.values()))
+            if isinstance(first_val, dict):
+                # New format: {pos: {bv: {edge: count}}}
+                self.joint = defaultdict(
+                    lambda: defaultdict(lambda: defaultdict(int)),
                     {
-                        int(bv): defaultdict(int, {int(e): c for e, c in edges.items()})
-                        for bv, edges in byte_vals.items()
+                        int(pos): defaultdict(
+                            lambda: defaultdict(int),
+                            {
+                                int(bv): defaultdict(int, {int(e): c for e, c in edges.items()})
+                                for bv, edges in byte_vals.items()
+                            },
+                        )
+                        for pos, byte_vals in raw_joint.items()
                     },
                 )
-                for pos, byte_vals in data.get("joint", {}).items()
-            },
-        )
+            else:
+                # Flat format from previous iteration: {key: count}
+                self.joint = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
+                for k, v in raw_joint.items():
+                    key = int(k)
+                    pos = (key >> 16) & 0xFFFF
+                    bv = (key >> 8) & 0xFF
+                    edge = key & 0xFF
+                    self.joint[pos][bv][edge] = v
         return True
