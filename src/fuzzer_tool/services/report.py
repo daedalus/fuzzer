@@ -15,18 +15,23 @@ def generate_report(fuzzer, corpus_dir: str, crashes_dir: str) -> str:
     sections = []
     sections.append(_header(fuzzer))
     sections.append(_run_summary(fuzzer))
+    sections.append(_runtime_performance(fuzzer))
     sections.append(_good_turing(fuzzer))
     sections.append(_coverage_analysis(fuzzer))
     sections.append(_mutation_effectiveness(fuzzer))
+    sections.append(_operator_diversity(fuzzer))
     sections.append(_bandit_calibration(fuzzer))
+    sections.append(_fuzzing_strategy(fuzzer))
     sections.append(_execution_time_analysis(fuzzer))
     sections.append(_mdl_codelength(fuzzer))
     sections.append(_seed_contribution(fuzzer))
+    sections.append(_edge_rarity(fuzzer))
     sections.append(_corpus_health(fuzzer))
     sections.append(_corpus_overview(fuzzer, corpus_dir))
     sections.append(_crash_analysis(fuzzer, crashes_dir))
     sections.append(_crash_exploitability(fuzzer, crashes_dir))
     sections.append(_crash_reproducibility(fuzzer))
+    sections.append(_crash_rate_trend(fuzzer))
     sections.append(_disk_footprint(corpus_dir))
     sections.append(_edge_map_analysis(fuzzer))
     return "\n".join(s for s in sections if s)
@@ -502,6 +507,248 @@ def _edge_map_analysis(f) -> str:
         lines.append(f"    0x{s:04x}-0x{e:04x}: {filled}/{span} bytes ({pct:.1f}% filled)")
 
     return "\n".join(lines)
+
+
+def _runtime_performance(f) -> str:
+    """Wall-clock time, memory, throughput, and corpus growth."""
+    import resource as _resource
+    import time
+
+    elapsed = time.time() - f.start_time
+    eps = f.exec_count / elapsed if elapsed > 0 else 0
+    rss_kb = f._peak_rss
+    rss_str = f"{rss_kb // 1024}MB" if rss_kb >= 1024 else f"{rss_kb}KB"
+
+    lines = [
+        "",
+        "--- Runtime Performance ---",
+        f"  Duration:         {_format_duration(elapsed)}",
+        f"  Executions:       {f.exec_count:,}",
+        f"  Avg throughput:   {eps:.1f} execs/sec",
+        f"  Peak throughput:  {f._peak_eps:.1f} execs/sec",
+        f"  Peak RSS:         {rss_str}",
+        f"  Map size:         {f.map_size:,} bytes",
+    ]
+
+    # Corpus growth
+    added = f._total_corpus_attempts
+    rejected = f._duplicate_reject_count
+    pruned = f._pruned_count
+    lines.append(f"  Seeds added:      {added}")
+    lines.append(f"  Duplicates:       {rejected} rejected")
+    if pruned > 0:
+        lines.append(f"  Seeds pruned:     {pruned}")
+
+    # Dup rejection rate
+    if f._total_corpus_attempts > 0:
+        dup_rate = rejected / f._total_corpus_attempts * 100
+        lines.append(f"  Dup rejection:    {dup_rate:.1f}%")
+
+    # Input size distribution
+    if f._corpus_size_history:
+        s = sorted(f._corpus_size_history)
+        lines.append(
+            f"  Input sizes:      min={s[0]} p50={s[len(s)//2]} "
+            f"p90={s[-len(s)//10]} max={s[-1]}"
+        )
+
+    return "\n".join(lines)
+
+
+def _operator_diversity(f) -> str:
+    """Operator usage diversity — entropy of the operator distribution."""
+    if not f.op_counts:
+        return ""
+
+    total = sum(f.op_counts.values())
+    if total == 0:
+        return ""
+
+    # Shannon entropy of operator distribution
+    import math
+    entropy = 0.0
+    for count in f.op_counts.values():
+        if count > 0:
+            p = count / total
+            entropy -= p * math.log2(p)
+
+    max_entropy = math.log2(len(f.op_counts)) if f.op_counts else 0
+    norm_entropy = entropy / max_entropy if max_entropy > 0 else 0
+
+    lines = [
+        "",
+        "--- Operator Diversity ---",
+        f"  Operators used:   {len(f.op_counts)}",
+        f"  Shannon entropy:  {entropy:.2f} bits (max={max_entropy:.2f})",
+        f"  Normalized:       {norm_entropy:.2%} (1.0=uniform, 0.0=single op)",
+    ]
+
+    # Most/least used
+    sorted_ops = sorted(f.op_counts.items(), key=lambda x: -x[1])
+    if sorted_ops:
+        lines.append(f"  Most used:        {sorted_ops[0][0]} ({sorted_ops[0][1]}x)")
+        lines.append(f"  Least used:       {sorted_ops[-1][0]} ({sorted_ops[-1][1]}x)")
+
+    # Effective operators (those that found new coverage or crashes)
+    effective = [op for op, c in f.op_success.items() if c > 0]
+    lines.append(f"  Effective ops:    {len(effective)}/{len(f.op_counts)} produced results")
+
+    return "\n".join(lines)
+
+
+def _fuzzing_strategy(f) -> str:
+    """Active scheduling strategies and their states."""
+    lines = ["", "--- Fuzzing Strategy ---"]
+
+    strategies = []
+
+    # MC bandit
+    if f.mc and f.mc_bandit:
+        strategies.append(f"  MC Bandit:        Thompson sampling, {len(f.mc.arm_alpha)} arms")
+        if f.mc.brier_score() > 0:
+            strategies.append(f"    Brier score:    {f.mc.brier_score():.4f}")
+
+    # MC CEM
+    if f.mc and f.mc_cem:
+        strategies.append(
+            f"  MC CEM:           elite_frac={f.mc.elite_frac}, "
+            f"elite_set={len(f.mc.elite_set)}"
+        )
+
+    # MOpt
+    if f._mopt:
+        strategies.append(f"  MOpt PSO:         {f._mopt.n_particles} particles, window={f._mopt.window_size}")
+
+    # Replicator
+    if f._replicator:
+        strategies.append(f"  Replicator:       window={f._replicator.window_size}, eta={f._replicator.learning_rate}")
+
+    # Markov
+    if f.markov_trained:
+        if hasattr(f.markov, "chains"):
+            orders = ",".join(str(o) for o in f.markov.orders)
+            strategies.append(f"  Markov ensemble:  orders=[{orders}]")
+        else:
+            strategies.append(f"  Markov chain:     order={f.markov.order}")
+        strategies.append(f"    Generation:     {'enabled' if f.markov_generate else 'disabled'}")
+
+    # MI guided
+    if f._use_mi and f._mi:
+        strategies.append(f"  MI-guided:        max_positions={f._mi.max_positions}")
+
+    # Transfer entropy
+    if f._use_transfer_entropy and f._te:
+        strategies.append(f"  Transfer entropy: history={f._te.history_length}")
+
+    # Secretary
+    if f._secretary:
+        strategies.append(
+            f"  Secretary:        window={f._secretary_window}, "
+            f"exploration={f._secretary_exploration:.0%}"
+        )
+        if f._corpus_secretary:
+            stop, reason = f._corpus_secretary.should_stop()
+            status = f"STOP ({reason})" if stop else "active"
+            strategies.append(f"    Corpus status:  {status}")
+
+    # Annealing
+    if f._anneal_budget > 0:
+        strategies.append(
+            f"  Annealing:        budget={f._anneal_budget}, "
+            f"progress={f._anneal_progress:.1%}"
+        )
+
+    # Grammar
+    if f.grammar:
+        strategies.append(f"  Grammar:          {len(f.grammar.rules)} rules")
+
+    # Dictionary
+    if f.dictionary:
+        strategies.append(f"  Dictionary:       {len(f.dictionary)} tokens")
+
+    if not strategies:
+        strategies.append("  Mode:             random mutation (no scheduling)")
+
+    lines.extend(strategies)
+    return "\n".join(lines)
+
+
+def _edge_rarity(f) -> str:
+    """Edge rarity distribution and seed irreplaceability."""
+    if not hasattr(f, "_edge_tracker"):
+        return ""
+    rarity = f._edge_tracker.edge_rarity_stats()
+    if rarity["total"] == 0:
+        return ""
+
+    lines = [
+        "",
+        "--- Edge Rarity ---",
+        f"  Total edges:      {rarity['total']}",
+        f"  Singleton (1x):   {rarity['singleton']}",
+        f"  Cold (2-5x):      {rarity['cold']}",
+        f"  Warm (6-20x):     {rarity['warm']}",
+        f"  Hot (>20x):       {rarity['hot']}",
+        f"  Avg seeds/edge:   {rarity['avg_seeds_per_edge']:.1f}",
+    ]
+
+    # Seed irreplaceability
+    uniqueness = f._edge_tracker.seed_uniqueness()
+    if uniqueness:
+        irreplaceable = sum(1 for v in uniqueness.values() if v > 0)
+        lines.append(f"  Irreplaceable:    {irreplaceable} seeds cover singleton edges")
+
+    # Top co-occurring edges
+    cooccur = f._edge_tracker.edge_cooccurrence(top_k=3)
+    if cooccur:
+        pairs_str = ", ".join(
+            f"e{a}<->e{b}({j:.0%})" for a, b, j in cooccur
+        )
+        lines.append(f"  Co-occurrence:    {pairs_str}")
+
+    return "\n".join(lines)
+
+
+def _crash_rate_trend(f) -> str:
+    """Crash rate over time."""
+    if not f._crash_rate_history or len(f._crash_rate_history) < 2:
+        return ""
+
+    lines = ["", "--- Crash Rate Trend ---"]
+
+    # Sample at milestones
+    history = f._crash_rate_history
+    milestones = [100, 500, 1000, 5000, 10000]
+    shown = set()
+    for m in milestones:
+        for exec_c, crash_c in history:
+            if exec_c >= m and m not in shown:
+                rate = crash_c / exec_c * 100 if exec_c > 0 else 0
+                lines.append(f"  iter {m:>5d}: {crash_c:>5d} crashes ({rate:.1f}%)")
+                shown.add(m)
+                break
+
+    # Final
+    if history:
+        last_exec, last_crash = history[-1]
+        rate = last_crash / last_exec * 100 if last_exec > 0 else 0
+        if last_exec not in shown:
+            lines.append(f"  iter {last_exec:>5d}: {last_crash:>5d} crashes ({rate:.1f}%)")
+
+    return "\n".join(lines)
+
+
+def _format_duration(seconds: float) -> str:
+    """Format seconds into human-readable duration."""
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    elif seconds < 3600:
+        m, s = divmod(int(seconds), 60)
+        return f"{m}m {s}s"
+    else:
+        h, remainder = divmod(int(seconds), 3600)
+        m, s = divmod(remainder, 60)
+        return f"{h}h {m}m {s}s"
 
 
 def _human_size(n: int) -> str:

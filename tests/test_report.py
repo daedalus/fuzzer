@@ -17,6 +17,7 @@ def _make_mock_fuzzer(**overrides):
     f.timeout_count = 2
     f.corpus = [b"seed1", b"seed2"]
     f.max_len = 4096
+    f.map_size = 65536
     f.timeout = 5.0
     f.use_coverage = True
     f._inprocess_runner = MagicMock()
@@ -37,6 +38,9 @@ def _make_mock_fuzzer(**overrides):
     f._crash_replays = {}
     f.replay_n = 0
     f._peak_rss = 29000
+    f._peak_eps = 33.7
+    f._pruned_count = 0
+    f._crash_rate_history = [(100, 5), (200, 12), (300, 18)]
     f.start_time = 0.0
     f.markov = MagicMock()
     f.markov.is_trained.return_value = True
@@ -46,6 +50,19 @@ def _make_mock_fuzzer(**overrides):
         "low_surprise_count": 1, "high_surprise_count": 0,
     }
     f.mc = None
+    f._mopt = None
+    f._replicator = None
+    f.markov_trained = True
+    f._use_mi = False
+    f._mi = None
+    f._use_transfer_entropy = False
+    f._te = None
+    f._secretary = False
+    f._corpus_secretary = None
+    f._anneal_budget = 0
+    f._anneal_progress = 0.0
+    f.grammar = None
+    f.dictionary = [b"\x89PNG"]
     f.shm_cov = MagicMock()
     f.shm_cov.cumulative_edges = 18
     f.shm_cov.size = 65536
@@ -60,6 +77,12 @@ def _make_mock_fuzzer(**overrides):
     f._edge_tracker.map_size = 65536
     f._edge_tracker.seed_hit_counts = {"a": {1: 5, 2: 3}, "b": {3: 4}}
     f._edge_tracker.seed_edges = {"a": {1, 2}, "b": {3}}
+    f._edge_tracker.edge_rarity_stats.return_value = {
+        "total": 18, "singleton": 3, "cold": 5, "warm": 7, "hot": 3,
+        "avg_seeds_per_edge": 1.4,
+    }
+    f._edge_tracker.seed_uniqueness.return_value = {"a": 2, "b": 1}
+    f._edge_tracker.edge_cooccurrence.return_value = [(1, 2, 0.8)]
     f._edge_tracker.good_turing_estimate.return_value = {
         "n": 18, "n1": 5, "n2": 2, "estimated_undiscovered": 6,
         "saturation": 0.75, "confidence": "medium",
