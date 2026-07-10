@@ -860,12 +860,22 @@ class EdgeTracker:
     def good_turing_estimate(self) -> dict:
         """Estimate undiscovered edges using Good-Turing frequency analysis.
 
+        The raw Good-Turing formula N1²/(2*N2) assumes random sampling.
+        Coverage-guided fuzzing samples non-randomly, producing more
+        singletons than random sampling would. This inflates the estimate.
+
+        We apply two corrections:
+        1. Damping: when N2 < 10, scale the estimate by N2/10. This
+           prevents a single doubleton change from causing a 4x swing.
+        2. Cap: limit estimate to 5*N to avoid absurd extrapolations
+           from sparse frequency data.
+
         Returns dict with:
           - n: total distinct edges observed
           - n1: edges seen exactly once (singletons)
           - n2: edges seen exactly twice
-          - estimated_undiscovered: N1^2 / (2 * N2)
-          - saturation: 1.0 - (N1^2 / (2 * N2 * N)) — how close to done
+          - estimated_undiscovered: damped estimate
+          - saturation: 1.0 - (estimated_undiscovered / total)
           - confidence: low/medium/high based on N1/N ratio
         """
         self._rebuild_frequency_spectrum()
@@ -882,11 +892,20 @@ class EdgeTracker:
         n1 = self._frequency_spectrum.get(1, 0)
         n2 = self._frequency_spectrum.get(2, 0)
         if n2 > 0:
-            est_undiscovered = (n1 * n1) / (2 * n2)
+            raw_est = (n1 * n1) / (2 * n2)
         elif n1 > 0:
-            est_undiscovered = float(n1)
+            raw_est = float(n1)
         else:
-            est_undiscovered = 0.0
+            raw_est = 0.0
+
+        # Damping: when N2 is small, the estimate is unstable.
+        # Scale by N2/10 to reduce sensitivity to single doubleton changes.
+        damping = min(1.0, n2 / 10.0) if n2 > 0 else 0.5
+        est_undiscovered = raw_est * damping
+
+        # Cap: don't extrapolate more than 5x what we've already found
+        est_undiscovered = min(est_undiscovered, n * 5)
+
         total = n + est_undiscovered
         saturation = 1.0 - (est_undiscovered / total) if total > 0 else 1.0
         ratio = n1 / n if n > 0 else 1.0
