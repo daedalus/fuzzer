@@ -363,21 +363,31 @@ class InProcessRunner:
     def _run_c_direct(self, data: bytes) -> tuple[int, str]:
         """Direct ctypes.CDLL call — zero overhead.
 
-        NOTE: SIGSEGV in the target kills the fuzzer process and cannot
-        be caught with Python exceptions. The target MUST handle errors
-        internally (setjmp/longjmp, ASAN-instrumented builds, or
-        signal-safe handlers).
+        Catches SIGSEGV via signal handler so target crashes don't
+        kill the fuzzer process.
         """
         if self._lib is None or self._func_ptr is None:
             return -2, "runner not initialized"
         if self._coverage_enabled():
             self.reset_bitmap()
+
+        crashed = False
+
+        def _sigsegv_handler(signum, frame):
+            nonlocal crashed
+            crashed = True
+
+        old_handler = signal.signal(signal.SIGSEGV, _sigsegv_handler)
         try:
             buf = (ctypes.c_uint8 * len(data))(*data)
             rc = self._func_ptr(buf, len(data))
             return rc, ""
         except Exception as e:
             return -2, str(e)
+        finally:
+            signal.signal(signal.SIGSEGV, old_handler)
+            if crashed:
+                return 139, "SIGSEGV"  # 128 + 11 (SIGSEGV)
 
     def _run_c_persistent(self, data: bytes) -> tuple[int, str]:
         """Persistent subprocess — one process, many calls."""

@@ -37,8 +37,8 @@ Coverage-guided binary fuzzer with static target analysis, statistical novelty s
 - **Perplexity (MDL codelength)**: structurally novel seeds get 1.0-2.0x weight
 - **NCD similarity**: Normalized Compression Distance between corpus entries
 - **Simulated annealing**: temperature-scaled exploration/exploitation balance
-- **Pairwise transition matrix**: tracks P(next_op | prev_op) for operator sequence learning, blended with Thompson sampling via `--pairwise-blend`
-- **Brier score calibration**: per-bin calibration diagnostics for bandit predictions, reported in `--report`
+- **Hamming bitmap distance**: fast byte-level seed-to-seed similarity on edge bitmaps
+- **Near-duplicate detection**: finds seed pairs with near-identical coverage via Hamming + LSH
 
 ### Information Theory
 - **Mutual information** (`--mi-guided`): I(byte_position; coverage) guides mutation toward positions that actually control code paths
@@ -51,21 +51,12 @@ Coverage-guided binary fuzzer with static target analysis, statistical novelty s
 - **Replicator dynamics** (`--replicator`): evolutionary game theory scheduling — operators grow proportionally to fitness, converging to evolutionarily stable strategies
 - **MOpt PSO** (`--mopt`): particle swarm optimization over operator distributions (alternative to Thompson sampling)
 
-### Matrix Bandit Analysis
-- **Stationary distribution**: power iteration on the transition Markov chain to find π such that πP = π — identifies which operator sequences the fuzzer naturally settles into
-- **Spectral gap**: second eigenvalue of the transition matrix via deflation — detects operator stagnation (small gap = stuck in narrow cycles, large gap = fast mixing)
-- **Operator covariance**: per-window success-rate covariance matrix — reveals redundant operators (positive cov), complementary operators (negative cov), and independent operators
-- **Operator kernel**: Jaccard similarity matrix on edge coverage overlap — drives bandit pruning, warm-starting new arms, and spectral clustering
-- **Correlated Thompson sampling**: samples from a multivariate normal whose covariance is the empirical operator covariance — correlated arms get similar score boosts, so they're selected together rather than fighting each other
-- **Matrix UCB**: adjusts UCB exploration bonuses using the precision matrix — arms correlated with high-performing arms get reduced exploration (less informative to pull), uncorrelated/negative arms get increased exploration
-- **Spectral embedding**: Laplacian eigenmap on the operator similarity kernel — produces low-dimensional coordinates where similar operators cluster, useful for PSO initialization and visualization
-- **Redundant operator detection**: finds operator pairs with Jaccard similarity ≥ threshold — candidates for pruning without coverage loss
-
 ### Corpus Management
 - **Delta-encoded corpus**: parent-child diffs for small mutations (< 25% change), periodic full snapshots every 20 generations
 - **xxhash dedup**: ~13x faster than SHA-256 for corpus deduplication
 - **Delta snapshotting**: caps chain depth at 20 hops, prevents unbounded reconstruction cost
 - **Auto-minimize**: corpus pruning guided by Wasserstein spatial diversity
+- **Hamming fuzzy dedup**: near-duplicate detection via Hamming distance on equal-length seeds (`--fuzzy-dedup N`)
 
 ### Crash Analysis
 - **Sanitizer detection**: automatic ASAN/MSAN/TSAN/LSAN/UBSAN crash classification
@@ -73,6 +64,8 @@ Coverage-guided binary fuzzer with static target analysis, statistical novelty s
 - **Crash minimization**: delta-debugging with signature-matching to prevent drift to unrelated bugs
 - **Corpus minimization**: greedy set-cover over SHM edge bitmaps (`minimize` subcommand)
 - **Crash exploitability tiers**: ASAN_EXPLOITABILITY classification in reports
+- **Levenshtein crash clustering**: groups crashes with similar stack traces (same root cause, different offsets)
+- **Fuzzy corpus similarity**: Hamming + Levenshtein + 4-gram Jaccard for crash-to-corpus nearest-neighbor search
 
 ### Observability
 - **Branch density**: static analysis at startup (`cond branches/KB`)
@@ -114,9 +107,6 @@ fuzzer-tool fuzz -F -A "{file}" ./target
 # With Markov and Monte Carlo
 fuzzer-tool fuzz --markov --markov-gen --mc-bandit --mc-cem ./target
 
-# Monte Carlo with pairwise transition blending
-fuzzer-tool fuzz --mc-bandit --mc-cem --pairwise-blend 0.3 ./target
-
 # Grammar-aware PNG fuzzing
 fuzzer-tool fuzz targets/png_read -c -D dictionaries/png.dict -g dictionaries/png.gram
 
@@ -150,7 +140,6 @@ fuzzer-tool rank ./target -d corpus -n 10 --dump top_seeds
 | `--mopt` | MOpt PSO operator scheduling (alternative to bandit) |
 | `--replicator` | Replicator dynamics operator scheduling (evolutionary game theory) |
 | `--shapley` | Shapley value operator attribution (fair credit distribution) |
-| `--pairwise-blend W` | Blend Thompson sampling with pairwise transition matrix (0.0=pure Thompson, 1.0=pure pairwise) |
 | `--mi-guided` | Mutual information guided mutation (target high-MI byte positions) |
 | `--renyi-weight` | Rényi entropy weighting in seed selection (boost cold-edge seeds) |
 | `--transfer-entropy` | Transfer entropy causal tracking (byte→edge influence detection) |
@@ -208,13 +197,12 @@ State files:
 - `state.json` — exec counts, crash sigs, op stats, seed metadata, lineage depths
 - `edge_tracker.json` — per-seed edge coverage, cumulative edges, global hit counts, hit counts
 - `markov.json` — persisted Markov chain transitions
-- `transitions.json` — pairwise operator transition matrix (P(next_op | prev_op))
 - `mi.json` — mutual information tracker (byte-to-coverage correlations)
 
 ## In-Process Execution
 
 ### Direct ctypes (`--inprocess-direct`)
-Calls target function directly via `ctypes.CDLL`. No crash isolation. ~2k–34k eps.
+Calls target function directly via `ctypes.CDLL`. Catches SIGSEGV via signal handler. ~2k–34k eps.
 
 ### Persistent subprocess (`--inprocess`)
 Keeps one Python subprocess alive. Fork-per-call with `os.setsid()` for process group isolation. Timeout enforced via outer threaded readline. Auto-restarts on subprocess death. ~65–120 eps.
@@ -231,7 +219,7 @@ fuzzer-tool minimize ./target -d corpus -c --rate-distortion --target-frac 0.95
 
 ## Test Suite
 
-890 tests covering all modules. Run with:
+1024 tests covering all modules. Run with:
 
 ```bash
 pip install -e ".[dev]"
