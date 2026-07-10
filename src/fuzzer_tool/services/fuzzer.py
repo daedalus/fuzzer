@@ -389,6 +389,19 @@ class Fuzzer:
         self._last_ops_used: list[str] = []
         self._last_hamming_distance: int = -1
 
+        # Per-byte sensitivity tracker (Lyapunov exponent)
+        self._use_sensitivity = False  # enabled via --sensitivity
+        from fuzzer_tool.core.sensitivity import ByteSensitivityTracker
+        self._sensitivity = ByteSensitivityTracker(
+            max_seeds=50, max_bytes=max_len, sample_rate=0.02
+        )
+
+        # Critical slowing down detector
+        from fuzzer_tool.core.critical_slowing import CriticalSlowingDown
+        self._csd = CriticalSlowingDown(
+            window_size=50, rise_threshold=1.5, min_observations=20
+        )
+
         # Elo rating system for operator scheduling
         self._use_elo = elo
         self._elo = None
@@ -630,6 +643,12 @@ class Fuzzer:
         self._edge_tracker.save(str(self._edge_tracker_path))
         if self._use_elo and self._elo:
             self._elo.save(str(self._elo_path))
+        # Save sensitivity tracker
+        sens_path = self.corpus_dir / "sensitivity.json"
+        try:
+            sens_path.write_text(json.dumps(self._sensitivity.save(), separators=(",", ":")))
+        except OSError:
+            pass
 
     def _load_state(self):
         """Load persisted fuzzer state for resume."""
@@ -672,6 +691,13 @@ class Fuzzer:
                         (m[0], bytes.fromhex(m[1]), bytes.fromhex(m[2])) for m in rm_ser
                     ]
         self._edge_tracker.load(str(self._edge_tracker_path))
+        # Load sensitivity tracker
+        sens_path = self.corpus_dir / "sensitivity.json"
+        if sens_path.exists():
+            try:
+                self._sensitivity.load(json.loads(sens_path.read_text()))
+            except (OSError, json.JSONDecodeError):
+                pass
         if self.resume:
             print(
                 f"[*] Resumed: {self.exec_count} execs, "
@@ -1055,7 +1081,7 @@ class Fuzzer:
                 self._last_mopt_particles.append(None)
             self._last_ops_used.append(op)
 
-            # Position selection: MI, TE, or random
+            # Position selection: MI, TE, sensitivity, or random
             if buf:
                 te_pos = (
                     self._get_te_weighted_position(len(buf))
@@ -1063,13 +1089,11 @@ class Fuzzer:
                     else None
                 )
                 mi_pos = self._mi.weighted_position(len(buf)) if self._use_mi and self._mi else None
-                if te_pos is not None and mi_pos is not None:
-                    # Blend: 50% TE, 50% MI
-                    byte_idx = te_pos if random.random() < 0.5 else mi_pos
-                elif te_pos is not None:
-                    byte_idx = te_pos
-                elif mi_pos is not None:
-                    byte_idx = mi_pos
+                sens_pos = self._sensitivity.get_weighted_position(data, len(buf))
+                # Pick from available sources, bias toward sensitivity if available
+                candidates = [p for p in [sens_pos, te_pos, mi_pos] if p is not None]
+                if candidates:
+                    byte_idx = random.choice(candidates)
                 else:
                     byte_idx = random.randint(0, len(buf) - 1)
             else:
@@ -2471,6 +2495,21 @@ class Fuzzer:
 
         if is_interesting or has_new_coverage:
             self.save_to_corpus(mutated, parent=data)
+            # Analyze byte sensitivity for seeds that found new coverage (optional)
+            if has_new_coverage and self.shm_cov and self._use_sensitivity:
+                try:
+                    edge_bitmap = bytes(self.shm_cov._map)[:self.shm_cov.size]
+                    edges = {i for i, v in enumerate(edge_bitmap) if v}
+                    if edges:
+                        def _exec_fn(data):
+                            rc, _ = self._run_target(data)
+                            if self.shm_cov:
+                                bm = bytes(self.shm_cov._map)[:self.shm_cov.size]
+                                return {i for i, v in enumerate(bm) if v}
+                            return set()
+                        self._sensitivity.analyze_seed(mutated, edges, _exec_fn)
+                except Exception:
+                    pass
             # Coverage-guided trimming: try to minimize inputs that hit new edges
             if has_new_coverage and len(mutated) > 10:
                 self._trim_new_coverage(mutated, data)
@@ -2863,6 +2902,12 @@ class Fuzzer:
         # Discovery rate
         dr = self.discovery_rate()
         dr_str = f" | rate: {dr:.1f} ed/kexec" if self.exec_count > 100 else ""
+        # Critical slowing down: observe discovery rate for phase transition signals
+        if self.exec_count > 100:
+            self._csd.observe(dr)
+            detected, csd_reason = self._csd.is_approaching_transition()
+            if detected:
+                dr_str += f" [CSD: {csd_reason}]"
         # Bitmap density
         density = self._edge_tracker.bitmap_density() * 100
         collision_risk = self._edge_tracker.birthday_collision_risk() * 100

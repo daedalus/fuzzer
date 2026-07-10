@@ -177,6 +177,7 @@ def cmd_fuzz(args):
         secretary=getattr(args, "secretary", False),
         secretary_window=getattr(args, "secretary_window", 500),
         secretary_exploration=getattr(args, "secretary_exploration", 0.368),
+        sensitivity=getattr(args, "sensitivity", False),
     )
     fuzzer.run(iterations=args.iterations)
 

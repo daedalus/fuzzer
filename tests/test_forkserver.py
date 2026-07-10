@@ -83,14 +83,12 @@ class TestForkserverRunner:
         fd, bmp = tempfile.mkstemp(suffix=".bmp")
         os.close(fd)
         r._bitmap_out = bmp
-        # Simulate a dead process
+        class FakeStdin:
+            def write(self, data): pass
+            def flush(self): pass
         class FakeProc:
             def poll(self): return 0
-            class stdin:
-                @staticmethod
-                def write(data): pass
-                @staticmethod
-                def flush(): pass
+            stdin = FakeStdin()
             def wait(self, timeout=0): pass
         r._proc = FakeProc()
         r.stop()

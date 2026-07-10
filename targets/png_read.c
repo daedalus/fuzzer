@@ -150,14 +150,17 @@ int main(int argc, char **argv) {
         unsigned char *buf = malloc(size);
         if (buf) {
             fread(buf, 1, size, f);
-            fuzz_png(buf, size);
+            int rc = fuzz_png(buf, size);
             free(buf);
+            fclose(f);
+            return rc;
         }
         fclose(f);
+        return 1;
     } else {
         unsigned char buf[65536];
         size_t n = fread(buf, 1, sizeof(buf), stdin);
-        if (n > 0) fuzz_png(buf, n);
+        if (n > 0) return fuzz_png(buf, n);
     }
     return 0;
 }

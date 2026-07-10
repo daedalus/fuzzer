@@ -63,7 +63,7 @@ class ByteSensitivityTracker:
         Returns:
             List of sensitivity scores (0.0-1.0) per byte position.
         """
-        seed_key = seed[:64]
+        seed_key = bytes(seed[:64])
         if seed_key in self._analyzed:
             return self._sensitivity.get(seed_key, [])
 
@@ -88,7 +88,7 @@ class ByteSensitivityTracker:
             except Exception:
                 pass
 
-        seed_key = seed[:64]
+        seed_key = bytes(seed[:64])
         self._sensitivity[seed_key] = scores
         self._analyzed.add(seed_key)
 
@@ -112,7 +112,7 @@ class ByteSensitivityTracker:
         Returns:
             Byte position index, or None if no data.
         """
-        seed_key = seed[:64]
+        seed_key = bytes(seed[:64])
         scores = self._sensitivity.get(seed_key)
         if not scores or len(scores) < buf_len:
             return None
@@ -131,7 +131,7 @@ class ByteSensitivityTracker:
 
     def has_data(self, seed: bytes) -> bool:
         """Check if sensitivity data exists for a seed."""
-        return seed[:64] in self._analyzed
+        return bytes(seed[:64]) in self._analyzed
 
     def save(self) -> dict:
         """Serialize state."""
