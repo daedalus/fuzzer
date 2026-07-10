@@ -5,7 +5,9 @@ from dataclasses import dataclass, field
 
 from fuzzer_tool.core.similarity import (
     crash_signature_similarity,
+    frame_sequence_similarity,
     hamming_similarity,
+    levenshtein_diff_offsets,
     levenshtein_similarity,
 )
 
@@ -239,23 +241,25 @@ def find_nearest_corpus(
 ) -> tuple[str, float, list[int]]:
     """Find the corpus entry most similar to the crash input.
 
-    Combines three signals for robust similarity:
-      1. 4-gram Jaccard (structural similarity, length-agnostic)
-      2. Hamming distance (fast byte-level for equal-length inputs)
-      3. Levenshtein similarity (handles length changes from mutations)
+    Architecture: cheap 4-gram Jaccard scan to find the candidate, then
+    one expensive Levenshtein alignment against the winner to produce the
+    actual diff. Neither technique does both jobs.
+
+    Jaccard picks the target (O(n) per entry, length-agnostic);
+    Levenshtein describes what actually changed (exact edit positions).
 
     Returns:
-        Tuple of (nearest_label, similarity, diff_byte_offsets).
+        Tuple of (nearest_label, similarity, diff_byte_offsets via Levenshtein).
     """
     if not corpus:
         return "", 0.0, []
 
-    best_sim = 0.0
+    # Phase 1: cheap Jaccard scan to find nearest candidate
+    best_jaccard = 0.0
     best_idx = 0
     checked = corpus[:max_check]
 
     for idx, seed in enumerate(checked):
-        # 4-gram Jaccard
         crash_4grams = set()
         for i in range(max(0, len(crash_data) - 3)):
             crash_4grams.add(crash_data[i : i + 4])
@@ -271,39 +275,39 @@ def find_nearest_corpus(
             union = len(crash_4grams | seed_4grams)
             jaccard = intersection / union if union else 0.0
 
-        # Hamming (equal-length) or Levenshtein (unequal-length)
-        if len(crash_data) == len(seed):
-            byte_sim = hamming_similarity(crash_data, seed)
-        else:
-            byte_sim = levenshtein_similarity(crash_data, seed)
-
-        # Weighted combination: 40% Jaccard + 60% byte-level similarity
-        sim = 0.4 * jaccard + 0.6 * byte_sim
-        if sim > best_sim:
-            best_sim = sim
+        if jaccard > best_jaccard:
+            best_jaccard = jaccard
             best_idx = idx
 
-    # Compute diff bytes
+    # Phase 2: one Levenshtein alignment against the winner for the diff
     nearest = checked[best_idx]
-    min_len = min(len(crash_data), len(nearest))
-    diff = [i for i in range(min_len) if crash_data[i] != nearest[i]]
-    diff += list(range(min_len, max(len(crash_data), len(nearest))))
+    diff = levenshtein_diff_offsets(crash_data, nearest)
+
+    # Combined similarity score for the metadata
+    if len(crash_data) == len(nearest):
+        byte_sim = hamming_similarity(crash_data, nearest)
+    else:
+        byte_sim = levenshtein_similarity(crash_data, nearest)
+    sim = 0.4 * best_jaccard + 0.6 * byte_sim
 
     label = f"seed_{best_idx}"
-    return label, best_sim, diff[:30]
+    return label, sim, diff[:30]
 
 
 def cluster_crashes(
     signatures: list[str],
+    frame_lists: list[list[str]] | None = None,
     threshold: float = 0.7,
 ) -> list[list[int]]:
     """Cluster crash signatures by Levenshtein similarity.
 
-    Groups crashes with similar signatures (same root cause, different
-    instruction offsets or inlined frames) into clusters.
+    When frame_lists is provided, uses order-aware frame-sequence
+    Levenshtein (correctly distinguishes A->B->C from C->B->A).
+    Otherwise falls back to signature-string Levenshtein.
 
     Args:
         signatures: List of crash signature strings.
+        frame_lists: Optional list of frame lists (in call order) per crash.
         threshold: Minimum similarity to group into the same cluster.
 
     Returns:
@@ -329,7 +333,10 @@ def cluster_crashes(
 
     for i in range(n):
         for j in range(i + 1, n):
-            sim = crash_signature_similarity(signatures[i], signatures[j])
+            if frame_lists and i < len(frame_lists) and j < len(frame_lists):
+                sim = frame_sequence_similarity(frame_lists[i], frame_lists[j])
+            else:
+                sim = crash_signature_similarity(signatures[i], signatures[j])
             if sim >= threshold:
                 union(i, j)
 

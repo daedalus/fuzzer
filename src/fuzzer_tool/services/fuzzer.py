@@ -996,7 +996,6 @@ class Fuzzer:
         if not buf:
             buf = bytearray(b"\x00" * random.randint(1, 32))
 
-        original_len = len(buf)
         ops = list(MUTATIONS)
         if self.dictionary:
             ops.extend(DICT_MUTATIONS)

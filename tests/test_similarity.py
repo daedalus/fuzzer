@@ -4,10 +4,14 @@ import pytest
 
 from fuzzer_tool.core.similarity import (
     crash_signature_similarity,
+    edit_script_summary,
     find_nearest_bytes,
+    frame_sequence_similarity,
     hamming_distance,
     hamming_distance_padded,
     hamming_similarity,
+    levenshtein_align,
+    levenshtein_diff_offsets,
     levenshtein_distance,
     levenshtein_similarity,
     normalize_frame,
@@ -248,3 +252,195 @@ class TestFindNearestBytes:
         idx, sim = find_nearest_bytes(target, candidates)
         assert idx == 0
         assert sim > 0.5
+
+
+class TestLevenshteinAlign:
+    def test_identical(self):
+        script = levenshtein_align(b"ABC", b"ABC")
+        assert all(op == "match" for op, _, _ in script)
+        assert len(script) == 3
+
+    def test_single_substitution(self):
+        script = levenshtein_align(b"ABC", b"AXC")
+        ops = [(op, pos, data) for op, pos, data in script if op != "match"]
+        assert len(ops) == 1
+        assert ops[0][0] == "replace"
+        assert ops[0][2] == b"X"
+
+    def test_single_insertion(self):
+        script = levenshtein_align(b"AC", b"ABC")
+        ops = [(op, pos, data) for op, pos, data in script if op != "match"]
+        assert len(ops) == 1
+        assert ops[0][0] == "insert"
+        assert ops[0][2] == b"B"
+
+    def test_single_deletion(self):
+        script = levenshtein_align(b"ABC", b"AC")
+        ops = [(op, pos, data) for op, pos, data in script if op != "match"]
+        assert len(ops) == 1
+        assert ops[0][0] == "delete"
+
+    def test_reconstruction(self):
+        """Applying the edit script should produce the target."""
+        a = b"hello world"
+        b = b"hello brave new world"
+        script = levenshtein_align(a, b)
+        # Reconstruct by applying ops
+        result = bytearray(a)
+        offset_delta = 0
+        for op, pos, data in script:
+            adjusted = pos + offset_delta
+            if op == "replace":
+                result[adjusted] = data[0]
+            elif op == "insert":
+                result[adjusted:adjusted] = data
+                offset_delta += 1
+            elif op == "delete":
+                del result[adjusted]
+                offset_delta -= 1
+        assert bytes(result) == b
+
+    def test_empty_both(self):
+        script = levenshtein_align(b"", b"")
+        assert len(script) == 0
+
+    def test_empty_a(self):
+        script = levenshtein_align(b"", b"ABC")
+        ops = [(opname, pos, data) for opname, pos, data in script if opname != "match"]
+        assert all(opname == "insert" for opname, _, _ in ops)
+        assert len(ops) == 3
+
+    def test_empty_b(self):
+        script = levenshtein_align(b"ABC", b"")
+        ops = [(opname, pos, data) for opname, pos, data in script if opname != "match"]
+        assert all(opname == "delete" for opname, _, _ in ops)
+        assert len(ops) == 3
+
+
+class TestEditScriptSummary:
+    def test_identical(self):
+        assert edit_script_summary(b"ABC", b"ABC") == "identical"
+
+    def test_single_substitution(self):
+        summary = edit_script_summary(b"ABC", b"AXC")
+        assert "substitution" in summary
+
+    def test_insertion(self):
+        summary = edit_script_summary(b"AC", b"ABC")
+        assert "insertion" in summary
+
+    def test_deletion(self):
+        summary = edit_script_summary(b"ABC", b"AC")
+        assert "deletion" in summary
+
+    def test_multiple_ops(self):
+        summary = edit_script_summary(b"AAAA", b"BBBB")
+        assert "4 substitution" in summary
+
+
+class TestLevenshteinDiffOffsets:
+    def test_identical(self):
+        assert levenshtein_diff_offsets(b"ABC", b"ABC") == []
+
+    def test_substitution(self):
+        offsets = levenshtein_diff_offsets(b"ABC", b"AXC")
+        assert offsets == [1]
+
+    def test_insertion_at_start(self):
+        """The textbook case the old positional diff got wrong."""
+        a = b"\x00" * 25
+        b = b"\x00" * 13 + b"\xff" + b"\x00" * 12
+        # Insert \xff at offset 13 — old code would report 24 diffs
+        offsets = levenshtein_diff_offsets(a, b)
+        assert len(offsets) == 1
+        assert offsets[0] == 13
+
+    def test_max_ops(self):
+        offsets = levenshtein_diff_offsets(b"AAAA", b"BBBB", max_ops=2)
+        assert len(offsets) == 2
+
+
+class TestFrameSequenceSimilarity:
+    def test_identical(self):
+        frames = ["parse", "main", "__libc_start_main"]
+        assert frame_sequence_similarity(frames, frames) == 1.0
+
+    def test_order_matters(self):
+        """A->B->C should differ from C->B->A."""
+        a = ["A", "B", "C"]
+        b = ["C", "B", "A"]
+        sim = frame_sequence_similarity(a, b)
+        assert sim < 0.8  # should be low, not 1.0 like Jaccard-on-sets
+
+    def test_extra_frame(self):
+        a = ["parse", "main"]
+        b = ["parse", "handle_input", "main"]
+        sim = frame_sequence_similarity(a, b)
+        assert sim > 0.3  # one insertion — still similar
+
+    def test_completely_different(self):
+        a = ["parse", "main"]
+        b = ["compute", "worker"]
+        sim = frame_sequence_similarity(a, b)
+        assert sim < 0.5
+
+    def test_empty_frames(self):
+        assert frame_sequence_similarity([], []) == 1.0
+
+
+class TestDeltaV2:
+    def test_same_length_substitution(self):
+        from fuzzer_tool.adapters.filesystem import apply_delta_v2, compute_delta_v2
+
+        parent = b"AAAA"
+        child = b"ABBA"
+        diff = compute_delta_v2(parent, child)
+        assert diff is not None
+        reconstructed = apply_delta_v2(parent, diff)
+        assert reconstructed == child
+
+    def test_insertion(self):
+        from fuzzer_tool.adapters.filesystem import apply_delta_v2, compute_delta_v2
+
+        parent = b"AC"
+        child = b"ABC"
+        diff = compute_delta_v2(parent, child)
+        assert diff is not None
+        reconstructed = apply_delta_v2(parent, diff)
+        assert reconstructed == child
+
+    def test_deletion(self):
+        from fuzzer_tool.adapters.filesystem import apply_delta_v2, compute_delta_v2
+
+        parent = b"ABC"
+        child = b"AC"
+        diff = compute_delta_v2(parent, child)
+        assert diff is not None
+        reconstructed = apply_delta_v2(parent, diff)
+        assert reconstructed == child
+
+    def test_splice_like(self):
+        from fuzzer_tool.adapters.filesystem import apply_delta_v2, compute_delta_v2
+
+        parent = b"hello world"
+        child = b"hello brave new world"
+        diff = compute_delta_v2(parent, child)
+        assert diff is not None
+        reconstructed = apply_delta_v2(parent, diff)
+        assert reconstructed == child
+
+    def test_large_diff_returns_none(self):
+        from fuzzer_tool.adapters.filesystem import compute_delta_v2
+
+        parent = b"\x00" * 100
+        child = b"\xff" * 100
+        diff = compute_delta_v2(parent, child)
+        assert diff is None  # > 25% of child size
+
+    def test_empty_parent(self):
+        from fuzzer_tool.adapters.filesystem import apply_delta_v2, compute_delta_v2
+
+        diff = compute_delta_v2(b"", b"ABC")
+        assert diff is not None
+        reconstructed = apply_delta_v2(b"", diff)
+        assert reconstructed == b"ABC"

@@ -184,6 +184,173 @@ def crash_signature_similarity(sig_a: str, sig_b: str) -> float:
     return levenshtein_similarity(norm_a, norm_b)
 
 
+def levenshtein_align(a: bytes, b: bytes) -> list[tuple[str, int, bytes]]:
+    """Compute Levenshtein alignment as an edit script.
+
+    Returns a list of (op, offset, data) tuples:
+      ("match", pos, b"")     -- a[pos] matched b[pos]
+      ("replace", pos, byte)  -- a[pos] replaced with byte
+      ("insert", pos, byte)   -- byte inserted before a[pos]
+      ("delete", pos, b"")    -- a[pos] deleted
+
+    Uses the full DP table for traceback. O(n*m) time, O(n*m) space.
+
+    Args:
+        a: Original byte sequence.
+        b: Target byte sequence.
+
+    Returns:
+        Edit script as list of (op, offset, data) tuples.
+    """
+    if a == b:
+        return [("match", i, b"") for i in range(len(a))]
+
+    n, m = len(a), len(b)
+
+    # Build full DP table for traceback
+    dp = [[0] * (m + 1) for _ in range(n + 1)]
+    for i in range(n + 1):
+        dp[i][0] = i
+    for j in range(m + 1):
+        dp[0][j] = j
+
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            cost = 0 if a[i - 1] == b[j - 1] else 1
+            dp[i][j] = min(
+                dp[i - 1][j] + 1,  # delete from a
+                dp[i][j - 1] + 1,  # insert into a
+                dp[i - 1][j - 1] + cost,  # replace or match
+            )
+
+    # Traceback
+    ops: list[tuple[str, int, bytes]] = []
+    i, j = n, m
+    while i > 0 or j > 0:
+        if i > 0 and j > 0 and a[i - 1] == b[j - 1] and dp[i][j] == dp[i - 1][j - 1]:
+            ops.append(("match", i - 1, b""))
+            i -= 1
+            j -= 1
+        elif i > 0 and j > 0 and dp[i][j] == dp[i - 1][j - 1] + 1:
+            ops.append(("replace", i - 1, bytes([b[j - 1]])))
+            i -= 1
+            j -= 1
+        elif j > 0 and dp[i][j] == dp[i][j - 1] + 1:
+            ops.append(("insert", i, bytes([b[j - 1]])))
+            j -= 1
+        elif i > 0:
+            ops.append(("delete", i - 1, b""))
+            i -= 1
+        else:
+            break
+
+    ops.reverse()
+    return ops
+
+
+def edit_script_summary(a: bytes, b: bytes) -> str:
+    """Human-readable summary of the edit distance between two byte sequences.
+
+    Returns a concise description like "3 substitutions, 1 insertion at offset 42"
+    or "identical".
+
+    Args:
+        a: Original byte sequence.
+        b: Target byte sequence.
+
+    Returns:
+        Human-readable edit description.
+    """
+    if a == b:
+        return "identical"
+
+    script = levenshtein_align(a, b)
+
+    replaces = []
+    inserts = []
+    deletes = []
+    for op, pos, data in script:
+        if op == "replace":
+            replaces.append(pos)
+        elif op == "insert":
+            inserts.append((pos, data))
+        elif op == "delete":
+            deletes.append(pos)
+
+    parts = []
+    if replaces:
+        if len(replaces) <= 3:
+            offsets = ", ".join(f"0x{o:02x}" for o in replaces)
+            parts.append(f"{len(replaces)} substitution(s) at offset [{offsets}]")
+        else:
+            parts.append(f"{len(replaces)} substitutions")
+    if inserts:
+        if len(inserts) <= 3:
+            offsets = ", ".join(f"0x{pos:02x}" for pos, _ in inserts)
+            parts.append(f"{len(inserts)} insertion(s) at offset [{offsets}]")
+        else:
+            parts.append(f"{len(inserts)} insertions")
+    if deletes:
+        if len(deletes) <= 3:
+            offsets = ", ".join(f"0x{o:02x}" for o in deletes)
+            parts.append(f"{len(deletes)} deletion(s) at offset [{offsets}]")
+        else:
+            parts.append(f"{len(deletes)} deletions")
+
+    return "; ".join(parts) if parts else "no edit ops"
+
+
+def levenshtein_diff_offsets(a: bytes, b: bytes, max_ops: int = 30) -> list[int]:
+    """Compute Levenshtein-aligned diff offsets between two byte sequences.
+
+    Unlike the naive positional diff (which misaligns after insertions/deletions),
+    this produces the actual edit positions by running Levenshtein alignment.
+    Returns a list of byte positions where the sequences differ, in order.
+
+    Args:
+        a: Original byte sequence.
+        b: Target byte sequence.
+        max_ops: Maximum number of offsets to return.
+
+    Returns:
+        List of byte positions where edits occurred.
+    """
+    if a == b:
+        return []
+
+    script = levenshtein_align(a, b)
+    offsets = []
+    for op, pos, _data in script:
+        if op != "match":
+            offsets.append(pos)
+            if len(offsets) >= max_ops:
+                break
+    return offsets
+
+
+def frame_sequence_similarity(frames_a: list[str], frames_b: list[str]) -> float:
+    """Levenshtein similarity on frame sequences (order-aware).
+
+    Unlike Jaccard on frame sets (which discards call order), this
+    correctly distinguishes A->B->C from C->B->A while still tolerating
+    one extra inlined frame (a single insertion gives small edit distance).
+
+    Args:
+        frames_a: Stack frame names from crash A (in call order).
+        frames_b: Stack frame names from crash B (in call order).
+
+    Returns:
+        Similarity in [0.0, 1.0].
+    """
+    norm_a = [normalize_frame(f) for f in frames_a[:8]]
+    norm_b = [normalize_frame(f) for f in frames_b[:8]]
+
+    # Treat frames as tokens, compute Levenshtein on token sequences
+    token_a = "\x00".join(norm_a).encode()
+    token_b = "\x00".join(norm_b).encode()
+    return levenshtein_similarity(token_a, token_b)
+
+
 def find_nearest_bytes(
     target: bytes,
     candidates: list[bytes],

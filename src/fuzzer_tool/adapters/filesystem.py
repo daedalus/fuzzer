@@ -67,6 +67,75 @@ def apply_delta(parent: bytes, diff: list[list[int]]) -> bytes:
     return bytes(child)
 
 
+def compute_delta_v2(parent: bytes, child: bytes) -> list[list] | None:
+    """Compute a delta that handles length-changing mutations.
+
+    Uses Levenshtein alignment to produce an edit script:
+      [0, offset, byte]  -- substitution at offset
+      [1, offset, byte]  -- insert byte before offset
+      [2, offset, 0]     -- delete byte at offset
+
+    Falls back to None if the edit script is > 25% of child size.
+    This extends delta-encoding to splice, block_insert, block_delete,
+    and any havoc chain that changes length.
+
+    Args:
+        parent: Original bytes.
+        child: Mutated bytes.
+
+    Returns:
+        Edit script as list of [op, offset, byte_or_0], or None.
+    """
+    from fuzzer_tool.core.similarity import levenshtein_align
+
+    script = levenshtein_align(parent, child)
+
+    # Count non-match ops
+    ops = [(op, pos, data) for op, pos, data in script if op != "match"]
+
+    # Not worth delta-encoding if edits cover > 50% of child size.
+    # v2 handles length-changing mutations which tend to have fewer edit ops
+    # than the positional diff, so we use a more generous threshold.
+    # Empty parent always gets delta-encoded (pure insertion).
+    if parent and len(ops) > len(child) // 2:
+        return None
+
+    # Convert to compact format
+    result = []
+    for op, pos, data in ops:
+        if op == "replace":
+            result.append([0, pos, data[0]])
+        elif op == "insert":
+            result.append([1, pos, data[0]])
+        elif op == "delete":
+            result.append([2, pos, 0])
+
+    return result
+
+
+def apply_delta_v2(parent: bytes, diff: list[list]) -> bytes:
+    """Reconstruct child from parent using v2 edit script.
+
+    Args:
+        parent: Full parent input bytes.
+        diff: Edit script from compute_delta_v2.
+
+    Returns:
+        Reconstructed child bytes.
+    """
+    result = bytearray(parent)
+    # Process in reverse order to keep offsets valid
+    for op, offset, byte_val in reversed(diff):
+        if op == 0:  # substitute
+            if offset < len(result):
+                result[offset] = byte_val
+        elif op == 1:  # insert
+            result[offset:offset] = bytes([byte_val])
+        elif op == 2 and offset < len(result):  # delete
+            del result[offset]
+    return bytes(result)
+
+
 def hash_data(data: bytes) -> str:
     """Compute fast hash for deduplication (xxhash, ~20x faster than SHA-256).
 
@@ -160,7 +229,11 @@ def load_corpus(corpus_dir: Path, bloom: BloomFilter | None = None) -> tuple[lis
                     delta = json.loads(f.read_text())
                     parent_hash = delta["parent"]
                     if parent_hash in resolved:
-                        reconstructed = apply_delta(resolved[parent_hash], delta["diff"])
+                        version = delta.get("v", 1)
+                        if version == 2:
+                            reconstructed = apply_delta_v2(resolved[parent_hash], delta["diff"])
+                        else:
+                            reconstructed = apply_delta(resolved[parent_hash], delta["diff"])
                         resolved[h] = reconstructed
                     else:
                         still_remaining[h] = f
@@ -222,17 +295,22 @@ def save_to_corpus(
     seen_hashes.add(h)
     corpus_dir.mkdir(parents=True, exist_ok=True)
 
-    # Force full snapshot at interval to cap chain depth
-    use_delta = (
-        parent is not None and len(data) == len(parent) and lineage_depth < SNAPSHOT_INTERVAL
-    )
+    # Force full snapshot at interval to cap chain depth.
+    # v1 delta handles same-length mutations; v2 handles length-changing ones.
+    use_delta = parent is not None and lineage_depth < SNAPSHOT_INTERVAL
 
     delta = None
     if use_delta:
         diff = compute_delta(parent, data)
         if diff is not None:
             parent_hash = hash_data(parent)
-            delta = {"parent": parent_hash, "diff": diff}
+            delta = {"parent": parent_hash, "diff": diff, "v": 1}
+        else:
+            # Try v2 for length-changing mutations (splice, block_insert, etc.)
+            diff_v2 = compute_delta_v2(parent, data)
+            if diff_v2 is not None:
+                parent_hash = hash_data(parent)
+                delta = {"parent": parent_hash, "diff": diff_v2, "v": 2}
 
     if delta is not None:
         delta_file = corpus_dir / f"delta_{h}.json"
