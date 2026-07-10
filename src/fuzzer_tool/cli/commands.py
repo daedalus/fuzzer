@@ -13,12 +13,14 @@ from fuzzer_tool.services.fuzzer import Fuzzer
 
 def _detect_asan(target: str) -> bool:
     """Detect if a binary is ASAN-instrumented by checking for __asan_init symbol."""
-    try:
-        r = subprocess.run(["nm", target], capture_output=True, timeout=10)
-        if r.returncode == 0:
-            return b"__asan_init" in r.stdout or b"__asan_register_globals" in r.stdout
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
+    for flags in [[], ["-D"]]:
+        try:
+            r = subprocess.run(["nm"] + flags + [target], capture_output=True, timeout=10)
+            if r.returncode == 0:
+                if b"__asan_init" in r.stdout or b"__asan_register_globals" in r.stdout:
+                    return True
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
     return False
 
 
@@ -76,17 +78,34 @@ def cmd_fuzz(args):
     corpus_dir, crashes_dir = _get_dirs(args, args.target)
 
     # Auto-detect ASAN instrumentation
-    target_is_asan = False
-    if not getattr(args, "inprocess", False) and not getattr(args, "inprocess_direct", False):
-        target_is_asan = _detect_asan(args.target)
-        if target_is_asan:
-            print(f"[*] ASAN detected in {args.target}")
+    target_is_asan = _detect_asan(args.target)
+    if target_is_asan:
+        print(f"[*] ASAN detected in {args.target}")
+
+        # For .so targets loaded via ctypes, ASAN must be first in library list.
+        # Set LD_PRELOAD to ensure ASAN loads before Python's libraries.
+        is_so = args.target.lower().endswith(('.so', '.dylib', '.dll'))
+        if is_so:
+            # Find full path to libasan (ctypes.util.find_library may return relative name)
+            libasan = "/usr/lib/x86_64-linux-gnu/libasan.so.8"
+            if not os.path.exists(libasan):
+                import ctypes.util
+                libasan = ctypes.util.find_library("asan") or libasan
+            existing = os.environ.get("LD_PRELOAD", "")
+            if libasan not in existing:
+                if existing:
+                    os.environ["LD_PRELOAD"] = f"{libasan}:{existing}"
+                else:
+                    os.environ["LD_PRELOAD"] = libasan
+                print(f"[*] LD_PRELOAD={libasan} (ASAN must load first for .so targets)")
 
     # ASAN calls _exit() which kills inprocess-direct mode.
     # Fall back to subprocess mode so stderr is captured.
     if target_is_asan and getattr(args, "inprocess_direct", False):
         print("[*] ASAN + --inprocess-direct: falling back to subprocess mode")
         args.inprocess_direct = False
+        # Enable inprocess mode so InProcessRunner is created with direct=False
+        args.inprocess = True
 
     dictionary = []
     if args.dict:

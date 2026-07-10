@@ -363,8 +363,8 @@ class InProcessRunner:
     def _run_c_direct(self, data: bytes) -> tuple[int, str]:
         """Direct ctypes.CDLL call — zero overhead.
 
-        Catches SIGSEGV via signal handler so target crashes don't
-        kill the fuzzer process.
+        Catches SIGSEGV/SIGABRT via signal handler so target crashes
+        and ASAN errors don't kill the fuzzer process.
         """
         if self._lib is None or self._func_ptr is None:
             return -2, "runner not initialized"
@@ -372,22 +372,51 @@ class InProcessRunner:
             self.reset_bitmap()
 
         crashed = False
+        crashed_sig = 0
+        stderr_buf = []
 
-        def _sigsegv_handler(signum, frame):
-            nonlocal crashed
+        def _crash_handler(signum, frame):
+            nonlocal crashed, crashed_sig
             crashed = True
+            crashed_sig = signum
 
-        old_handler = signal.signal(signal.SIGSEGV, _sigsegv_handler)
+        old_segv = signal.signal(signal.SIGSEGV, _crash_handler)
+        old_abrt = signal.signal(signal.SIGABRT, _crash_handler)
         try:
+            # Capture stderr for ASAN output
+            old_stderr_fd = os.dup(2)
+            read_fd, write_fd = os.pipe()
+            os.dup2(write_fd, 2)
+            os.close(write_fd)
+
             buf = (ctypes.c_uint8 * len(data))(*data)
             rc = self._func_ptr(buf, len(data))
-            return rc, ""
+
+            # Restore stderr and read any captured output
+            os.dup2(old_stderr_fd, 2)
+            os.close(old_stderr_fd)
+            os.set_blocking(read_fd, False)
+            try:
+                stderr_buf.append(os.read(read_fd, 65536))
+            except OSError:
+                pass
+            os.close(read_fd)
+
+            return rc, b"".join(stderr_buf).decode(errors="replace")
         except Exception as e:
+            # Restore stderr on exception
+            try:
+                os.dup2(old_stderr_fd, 2)
+                os.close(old_stderr_fd)
+            except Exception:
+                pass
             return -2, str(e)
         finally:
-            signal.signal(signal.SIGSEGV, old_handler)
+            signal.signal(signal.SIGSEGV, old_segv)
+            signal.signal(signal.SIGABRT, old_abrt)
             if crashed:
-                return 139, "SIGSEGV"  # 128 + 11 (SIGSEGV)
+                # 128 + signal number
+                return 128 + crashed_sig, ""
 
     def _run_c_persistent(self, data: bytes) -> tuple[int, str]:
         """Persistent subprocess — one process, many calls."""

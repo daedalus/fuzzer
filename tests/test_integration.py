@@ -10,6 +10,7 @@ TARGET_SRC = Path(__file__).parent.parent / "targets" / "test_target.c"
 TARGET_BIN = Path(__file__).parent.parent / "targets" / "test_target"
 ASAN_SRC = Path(__file__).parent.parent / "targets" / "asan_target.c"
 ASAN_BIN = Path(__file__).parent.parent / "targets" / "asan_target"
+ASAN_SO = Path(__file__).parent.parent / "targets" / "asan_target.so"
 
 
 @pytest.fixture(scope="module")
@@ -36,6 +37,20 @@ def compiled_asan_target():
         )
         assert result.returncode == 0, f"ASAN compilation failed: {result.stderr}"
     yield str(ASAN_BIN)
+
+
+@pytest.fixture(scope="module")
+def compiled_asan_so():
+    """Compile asan_target.c as shared library with ASAN if not already built."""
+    if not ASAN_SO.exists() or ASAN_SRC.stat().st_mtime > ASAN_SO.stat().st_mtime:
+        result = subprocess.run(
+            ["gcc", "-g", "-fsanitize=address", "-shared", "-fPIC",
+             "-o", str(ASAN_SO), str(ASAN_SRC)],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, f"ASAN .so compilation failed: {result.stderr}"
+    yield str(ASAN_SO)
 
 
 class TestIntegration:
@@ -208,3 +223,59 @@ class TestIntegration:
             report = txt_files[0].read_text()
             assert "AddressSanitizer" in report, f"Missing AddressSanitizer in report"
             assert "heap-buffer-overflow" in report, f"Missing heap-buffer-overflow in report"
+
+    @pytest.mark.parametrize("mode_args,target_fixture,mode_label", [
+        ([], "compiled_asan_target", "default_subprocess"),
+        (["--inprocess", "--inprocess-func", "fuzz"], "compiled_asan_so", "inprocess_subprocess"),
+        (["--inprocess-direct", "--inprocess-func", "fuzz"], "compiled_asan_so", "inprocess_direct"),
+        (["--no-shm"], "compiled_asan_target", "ptrace"),
+    ])
+    def test_asan_all_modes(self, request, mode_args, target_fixture, mode_label):
+        """Verify ASAN detection works in all execution modes."""
+        target = request.getfixturevalue(target_fixture)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            corpus_dir = Path(tmpdir) / "corpus"
+            crashes_dir = Path(tmpdir) / "crashes"
+            corpus_dir.mkdir()
+            crashes_dir.mkdir()
+
+            # Seed with "BUG!H" to trigger heap-buffer-overflow quickly
+            (corpus_dir / "seed").write_bytes(b"BUG!H")
+
+            cmd = [
+                "python3", "-m", "fuzzer_tool", "fuzz",
+                target,
+                "-d", str(corpus_dir),
+                "-o", str(crashes_dir),
+                "-n", "100",
+                "-t", "2",
+                "-s", "42",
+            ] + mode_args
+
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            assert result.returncode == 0, (
+                f"[{mode_label}] Fuzzer failed: {result.stderr}\nstdout: {result.stdout}"
+            )
+
+            # Check ASAN was detected
+            assert "ASAN detected" in result.stdout, (
+                f"[{mode_label}] ASAN not detected in output:\n{result.stdout}"
+            )
+
+            # Check crash found
+            crash_files = list(crashes_dir.glob("crash_*"))
+            assert len(crash_files) > 0, (
+                f"[{mode_label}] No crashes found. Output:\n{result.stdout}"
+            )
+
+            # Check crash is ASAN heap-buffer-overflow
+            bin_files = [f for f in crash_files if f.suffix == ".bin"]
+            assert any("heapbufferoverflow" in f.name for f in bin_files), (
+                f"[{mode_label}] Expected heap-buffer-overflow, got: {[f.name for f in bin_files]}"
+            )
