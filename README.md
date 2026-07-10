@@ -144,7 +144,6 @@ fuzzer-tool rank ./target -d corpus -n 10 --dump top_seeds
 | `--renyi-weight` | Rényi entropy weighting in seed selection (boost cold-edge seeds) |
 | `--transfer-entropy` | Transfer entropy causal tracking (byte→edge influence detection) |
 | `--inprocess` | Persistent subprocess mode (auto-restart on crash) |
-| `--asan` | Preload AddressSanitizer runtime (LD_PRELOAD=libasan.so) |
 | `--resume` | Resume from saved state |
 | `--crash-codes N` | Additional exit codes to treat as crashes |
 | `-j N` | Parallel fuzzing with N workers |
@@ -203,10 +202,13 @@ State files:
 ## In-Process Execution
 
 ### Direct ctypes (`--inprocess-direct`)
-Calls target function directly via `ctypes.CDLL`. Catches SIGSEGV via signal handler. ~2k–34k eps.
+Calls target function directly via `ctypes.CDLL`. Catches SIGSEGV/SIGABRT via signal handler. ~2k–34k eps.
 
 ### Persistent subprocess (`--inprocess`)
 Keeps one Python subprocess alive. Fork-per-call with `os.setsid()` for process group isolation. Timeout enforced via outer threaded readline. Auto-restarts on subprocess death. ~65–120 eps.
+
+### ASAN support (`--asan`)
+Preloads AddressSanitizer runtime. When combined with `--inprocess-direct`, automatically falls back to subprocess mode (ASAN calls `_exit()` which kills in-process targets). ASAN catches heap-buffer-overflow, use-after-free, stack-buffer-overflow, and other memory errors.
 
 ## Corpus Minimization
 

@@ -64,7 +64,7 @@ def cmd_fuzz(args):
     corpus_dir, crashes_dir = _get_dirs(args, args.target)
 
     # Set LD_PRELOAD for ASAN if requested
-    if args.asan:
+    if getattr(args, "asan", False):
         import ctypes.util
         libasan = ctypes.util.find_library("asan")
         if not libasan:
@@ -76,6 +76,12 @@ def cmd_fuzz(args):
         else:
             os.environ["LD_PRELOAD"] = libasan
         print(f"[*] ASAN enabled: LD_PRELOAD={libasan}")
+
+        # ASAN calls _exit() which kills inprocess-direct mode.
+        # Fall back to subprocess mode so stderr is captured.
+        if getattr(args, "inprocess_direct", False):
+            print("[*] --asan + --inprocess-direct: falling back to subprocess mode")
+            args.inprocess_direct = False
 
     dictionary = []
     if args.dict:
@@ -789,11 +795,6 @@ def main() -> int:
         "--inprocess-direct",
         action="store_true",
         help="Direct ctypes.CDLL call — zero overhead, target must not SIGSEGV",
-    )
-    fuzz_parser.add_argument(
-        "--asan",
-        action="store_true",
-        help="Preload AddressSanitizer runtime (LD_PRELOAD=libasan.so)",
     )
     fuzz_parser.add_argument(
         "--inprocess-func",
