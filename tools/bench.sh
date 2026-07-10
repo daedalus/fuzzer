@@ -13,7 +13,7 @@
 #   enhanced+: elo + meta-elo + bandit + mopt + markov + replicator + shapley
 #              + renyi + transfer-entropy + grammar
 #   optimal:   elo + mopt + replicator + markov (ensemble 0,1,2,3) + markov-gen
-#              Best edges at -n 1k (sweep-validated: 74 edges vs 61 baseline)
+#              Best edges at -n 1k (74 vs 61 baseline) and -n 10k (184 vs 167 baseline)
 
 set -euo pipefail
 
@@ -195,7 +195,7 @@ cleanup_shm
 sleep 1
 
 # Run optimal (elo + mopt + replicator + markov ensemble + markov-gen)
-# Sweep-validated best at -n 1k: 74 edges vs 61 baseline, 70 enhanced+.
+# Sweep-validated: 74 edges at -n 1k, 184 edges at -n 10k (vs 167 baseline, 172 enhanced+).
 echo "[*] Running optimal (elo + mopt + replicator + markov ensemble)..."
 run_with_retry /tmp/fuzz_bench_optimal.log \
     fuzz "$TARGET" -d "$OPTIMAL_DIR" -c -n "$ITERS" \
