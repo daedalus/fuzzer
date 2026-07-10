@@ -45,10 +45,15 @@ class MonteCarloScheduler:
     ELITE_MAX = 200
 
     def __init__(
-        self, elite_frac: float = 0.1, refit_interval: int = 1000, pairwise_blend: float = 0.0
+        self,
+        elite_frac: float = 0.1,
+        refit_interval: int = 1000,
+        pairwise_blend: float = 0.0,
+        arm_decay: float = 0.999,
     ):
         self.arm_alpha: dict[str, float] = {}
         self.arm_beta: dict[str, float] = {}
+        self.arm_decay = arm_decay
         self.elite_frac = elite_frac
         self.base_refit_interval = refit_interval
         self.refit_interval = refit_interval
@@ -128,10 +133,19 @@ class MonteCarloScheduler:
     def record(self, name: str, success: bool) -> None:
         """Record outcome for a mutation operator arm.
 
+        Applies exponential decay to all arms before incrementing,
+        giving recent evidence more weight (non-stationary bandit).
+
         Args:
             name: Name of the mutation operator.
             success: Whether the mutation produced an interesting result.
         """
+        if self.arm_decay < 1.0:
+            for k in self.arm_alpha:
+                self.arm_alpha[k] *= self.arm_decay
+            for k in self.arm_beta:
+                self.arm_beta[k] *= self.arm_decay
+
         if success:
             self.arm_alpha[name] = self.arm_alpha.get(name, 1.0) + 1
         else:

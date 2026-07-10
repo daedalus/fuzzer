@@ -219,7 +219,7 @@ fuzzer-tool minimize ./target -d corpus -c --rate-distortion --target-frac 0.95
 
 ## Test Suite
 
-1022 tests covering all modules. Run with:
+1024 tests covering all modules. Run with:
 
 ```bash
 pip install -e ".[dev]"

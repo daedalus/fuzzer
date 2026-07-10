@@ -1528,6 +1528,7 @@ class Fuzzer:
 
         # Extract frames for crash clustering
         from fuzzer_tool.core.sanitizer import SanitizerReport
+
         report = SanitizerReport.parse(stderr)
         if report and report.is_valid():
             sig = report.signature
@@ -1565,6 +1566,7 @@ class Fuzzer:
             self.seed_meta[data] = {
                 "fuzz_count": 0,
                 "coverage_edges": 0,
+                "momentum": 0.0,
                 "edge_bitmap": bytearray(0),
                 "redqueen_offsets": [],
                 "added_at": time.time(),
@@ -1644,6 +1646,7 @@ class Fuzzer:
             self.seed_meta[trimmed] = {
                 "fuzz_count": 0,
                 "coverage_edges": self._edge_tracker.get_seed_edge_count(seed_key),
+                "momentum": 0.0,
                 "edge_bitmap": bytearray(0),
                 "redqueen_offsets": [],
                 "added_at": time.time(),
@@ -2094,9 +2097,9 @@ class Fuzzer:
             # hamming_distance == -1 means unknown (length-changing mutation).
             hd = meta.get("hamming_distance", -1)
             if hd == 0:
-                w *= 0.1   # identical to parent — almost certainly redundant
+                w *= 0.1  # identical to parent — almost certainly redundant
             elif 0 < hd <= 2:
-                w *= 0.5   # tiny perturbation — low novelty expected
+                w *= 0.5  # tiny perturbation — low novelty expected
             # hd >= 3 or hd == -1: no penalty (normal or unknown perturbation)
 
             weights.append(max(w, 1e-6))

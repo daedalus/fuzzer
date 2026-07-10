@@ -33,18 +33,35 @@ class TestMonteCarloScheduler:
         assert op in ("bit_flip", "byte_flip")
 
     def test_record_success(self):
-        mc = MonteCarloScheduler()
+        mc = MonteCarloScheduler(arm_decay=1.0)
         mc.init_arm("bit_flip")
         mc.record("bit_flip", success=True)
         assert mc.arm_alpha["bit_flip"] == 2.0
         assert mc.arm_beta["bit_flip"] == 1.0
 
     def test_record_failure(self):
-        mc = MonteCarloScheduler()
+        mc = MonteCarloScheduler(arm_decay=1.0)
         mc.init_arm("bit_flip")
         mc.record("bit_flip", success=False)
         assert mc.arm_alpha["bit_flip"] == 1.0
         assert mc.arm_beta["bit_flip"] == 2.0
+
+    def test_arm_decay_reduces_old_evidence(self):
+        mc = MonteCarloScheduler(arm_decay=0.5)
+        mc.init_arm("A")
+        for _ in range(10):
+            mc.record("A", success=True)
+        alpha_before = mc.arm_alpha["A"]
+        mc.record("A", success=False)
+        # Alpha should be < alpha_before * decay + 1 because decay applies first
+        assert mc.arm_alpha["A"] < alpha_before + 1.0
+
+    def test_arm_decay_no_effect_when_one(self):
+        mc = MonteCarloScheduler(arm_decay=1.0)
+        mc.init_arm("A")
+        for _ in range(10):
+            mc.record("A", success=True)
+        assert mc.arm_alpha["A"] == 11.0
 
     def test_add_elite(self):
         mc = MonteCarloScheduler()
@@ -144,7 +161,7 @@ class TestMonteCarloScheduler:
         assert len(sample) == 10
 
     def test_bandit_stats(self):
-        mc = MonteCarloScheduler()
+        mc = MonteCarloScheduler(arm_decay=1.0)
         mc.init_arm("bit_flip")
         mc.record("bit_flip", success=True)
         mc.record("bit_flip", success=False)
