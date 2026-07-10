@@ -110,8 +110,8 @@ fuzzer-tool fuzz --markov --markov-gen --mc-bandit --mc-cem ./target
 # Grammar-aware PNG fuzzing
 fuzzer-tool fuzz targets/png_read -c -D dictionaries/png.dict -g dictionaries/png.gram
 
-# ASAN fuzzing (catches heap-buffer-overflow, use-after-free, etc.)
-fuzzer-tool fuzz targets/asan_target --asan
+# ASAN fuzzing (auto-detected, catches heap-buffer-overflow, use-after-free, etc.)
+fuzzer-tool fuzz targets/asan_target
 
 # Resume a previous fuzzing session
 fuzzer-tool fuzz ./target -c --resume
@@ -211,7 +211,7 @@ Calls target function directly via `ctypes.CDLL`. Catches SIGSEGV/SIGABRT via si
 Keeps one Python subprocess alive. Fork-per-call with `os.setsid()` for process group isolation. Timeout enforced via outer threaded readline. Auto-restarts on subprocess death. ~65–120 eps.
 
 ### ASAN support
-Automatically detects ASAN-instrumented targets by checking for `__asan_init` symbols. Use `--asan` to manually preload ASAN for non-instrumented targets. Falls back from `--inprocess-direct` to subprocess mode when ASAN is detected (ASAN calls `_exit()` which kills in-process targets).
+Automatically detects ASAN-instrumented targets by checking for `__asan_init` symbols. Falls back from `--inprocess-direct` to subprocess mode when ASAN is detected (ASAN calls `_exit()` which kills in-process targets).
 
 ## Corpus Minimization
 
