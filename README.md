@@ -246,13 +246,16 @@ ruff format src/ tests/
 Compare fuzzer configurations on a target:
 
 ```bash
-# Baseline vs enhanced (elo + meta-elo + bandit + mopt)
-tools/bench.sh targets/png_read 10000
-
-# 3-way comparison: baseline vs enhanced vs enhanced+
-# Enhanced+ adds: markov, replicator, shapley, renyi, transfer-entropy, grammar
+# 4-way comparison: baseline vs enhanced vs enhanced+ vs optimal
 tools/bench.sh targets/png_read 10000
 ```
+
+Configurations:
+- **baseline**: no features
+- **enhanced**: elo + meta-elo + bandit + mopt
+- **enhanced+**: all enhanced + markov + replicator + shapley + renyi + transfer-entropy + grammar
+- **optimal**: elo + mopt + replicator + markov ensemble (orders 0,1,2,3) + markov-gen
+  - Best edge coverage at -n 1k (sweep-validated: 74 edges vs 61 baseline, 70 enhanced+)
 
 ## License
 
