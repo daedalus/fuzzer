@@ -3,11 +3,23 @@
 import argparse
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
 from fuzzer_tool.core.mutations import load_dictionary
 from fuzzer_tool.services.fuzzer import Fuzzer
+
+
+def _detect_asan(target: str) -> bool:
+    """Detect if a binary is ASAN-instrumented by checking for __asan_init symbol."""
+    try:
+        r = subprocess.run(["nm", target], capture_output=True, timeout=10)
+        if r.returncode == 0:
+            return b"__asan_init" in r.stdout or b"__asan_register_globals" in r.stdout
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return False
 
 
 def _add_common_args(parser):
@@ -63,25 +75,30 @@ def cmd_fuzz(args):
         _validate_target(args.target)
     corpus_dir, crashes_dir = _get_dirs(args, args.target)
 
-    # Set LD_PRELOAD for ASAN if requested
-    if getattr(args, "asan", False):
+    # Auto-detect ASAN or set LD_PRELOAD if requested
+    target_is_asan = False
+    if not getattr(args, "inprocess", False) and not getattr(args, "inprocess_direct", False):
+        target_is_asan = _detect_asan(args.target)
+        if target_is_asan:
+            print(f"[*] ASAN detected in {args.target}")
+
+    if getattr(args, "asan", False) and not target_is_asan:
         import ctypes.util
         libasan = ctypes.util.find_library("asan")
         if not libasan:
-            # Fallback to known path
             libasan = "/usr/lib/x86_64-linux-gnu/libasan.so.8"
         existing = os.environ.get("LD_PRELOAD", "")
         if existing:
             os.environ["LD_PRELOAD"] = f"{libasan}:{existing}"
         else:
             os.environ["LD_PRELOAD"] = libasan
-        print(f"[*] ASAN enabled: LD_PRELOAD={libasan}")
+        print(f"[*] ASAN enabled via LD_PRELOAD={libasan}")
 
-        # ASAN calls _exit() which kills inprocess-direct mode.
-        # Fall back to subprocess mode so stderr is captured.
-        if getattr(args, "inprocess_direct", False):
-            print("[*] --asan + --inprocess-direct: falling back to subprocess mode")
-            args.inprocess_direct = False
+    # ASAN calls _exit() which kills inprocess-direct mode.
+    # Fall back to subprocess mode so stderr is captured.
+    if (getattr(args, "asan", False) or target_is_asan) and getattr(args, "inprocess_direct", False):
+        print("[*] ASAN + --inprocess-direct: falling back to subprocess mode")
+        args.inprocess_direct = False
 
     dictionary = []
     if args.dict:

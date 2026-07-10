@@ -210,8 +210,8 @@ Calls target function directly via `ctypes.CDLL`. Catches SIGSEGV/SIGABRT via si
 ### Persistent subprocess (`--inprocess`)
 Keeps one Python subprocess alive. Fork-per-call with `os.setsid()` for process group isolation. Timeout enforced via outer threaded readline. Auto-restarts on subprocess death. ~65–120 eps.
 
-### ASAN support (`--asan`)
-Preloads AddressSanitizer runtime. When combined with `--inprocess-direct`, automatically falls back to subprocess mode (ASAN calls `_exit()` which kills in-process targets). ASAN catches heap-buffer-overflow, use-after-free, stack-buffer-overflow, and other memory errors.
+### ASAN support
+Automatically detects ASAN-instrumented targets by checking for `__asan_init` symbols. Use `--asan` to manually preload ASAN for non-instrumented targets. Falls back from `--inprocess-direct` to subprocess mode when ASAN is detected (ASAN calls `_exit()` which kills in-process targets).
 
 ## Corpus Minimization
 
