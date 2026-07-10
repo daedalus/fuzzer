@@ -2,14 +2,16 @@
 # Benchmark baseline vs enhanced fuzzer configurations on a target.
 #
 # Usage:
-#   tools/bench.sh [target] [iterations]
+#   tools/bench.sh [target] [iterations] [extra_enhanced_flags]
 #
 # Defaults: targets/png_read, 5000 iterations
+# Example:  tools/bench.sh targets/png_read 3000 "--sensitivity"
 
 set -euo pipefail
 
 TARGET="${1:-targets/png_read}"
 ITERS="${2:-5000}"
+EXTRA_FLAGS="${3:-}"
 BASE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BASELINE_DIR="/tmp/fuzz_bench_baseline"
 ENHANCED_DIR="/tmp/fuzz_bench_enhanced"
@@ -24,6 +26,7 @@ echo "============================================================"
 echo " Benchmark: baseline vs enhanced"
 echo " Target:    $TARGET"
 echo " Iterations: $ITERS"
+echo " Extra flags: ${EXTRA_FLAGS:-none}"
 echo "============================================================"
 echo ""
 
@@ -33,8 +36,8 @@ python -m fuzzer_tool fuzz "$TARGET" -d "$BASELINE_DIR" -c -n "$ITERS" 2>&1 | te
 echo ""
 
 # Run enhanced (all features)
-echo "[*] Running enhanced (elo + meta-elo + bandit + mopt)..."
-python -m fuzzer_tool fuzz "$TARGET" -d "$ENHANCED_DIR" -c -n "$ITERS" --elo --meta-elo --mc-bandit --mopt 2>&1 | tee /tmp/fuzz_bench_enhanced.log
+echo "[*] Running enhanced (elo + meta-elo + bandit + mopt${EXTRA_FLAGS:+$EXTRA_FLAGS})..."
+python -m fuzzer_tool fuzz "$TARGET" -d "$ENHANCED_DIR" -c -n "$ITERS" --elo --meta-elo --mc-bandit --mopt $EXTRA_FLAGS 2>&1 | tee /tmp/fuzz_bench_enhanced.log
 echo ""
 
 # Extract metrics from run summaries
