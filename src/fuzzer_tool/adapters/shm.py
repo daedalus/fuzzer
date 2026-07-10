@@ -122,13 +122,19 @@ class ShmCoverage:
         """Resize the shared memory bitmap, preserving existing data.
 
         Allocates a new SHM, copies the old bitmap, detaches the old SHM,
-        and updates internal pointers.
+        and updates internal pointers.  Preserves the cumulative _seen
+        bitmap across resizes (the SHM itself may be zeroed between runs).
 
         Args:
             new_size: New map size in bytes (must be > current size).
         """
         if new_size <= self.size:
             return
+
+        # Save cumulative state before resize (SHM may be zeroed)
+        old_seen = bytes(self._seen)
+        old_cumulative = self.cumulative_edges
+        old_total = self.total_edges
 
         # Allocate new SHM
         new_shm_id = _libc.shmget(0, new_size, IPC_CREAT | SHM_R | SHM_W)
@@ -157,13 +163,12 @@ class ShmCoverage:
         self.size = new_size
         self._map = (ctypes.c_char * new_size).from_address(self._ptr)
         self.env_id = str(self.shm_id)
+
+        # Restore cumulative _seen from pre-resize state
         self._seen = bytearray(new_size)
-        # Rebuild cumulative from the copied bitmap (only old region has data)
-        old_bitmap = bytes(self._map)[:old_size]
-        for i in range(old_size):
-            if old_bitmap[i]:
-                self._seen[i] = 1
-        self.cumulative_edges = sum(self._seen)
+        self._seen[:len(old_seen)] = old_seen
+        self.cumulative_edges = old_cumulative
+        self.total_edges = old_total
 
     def __del__(self):
         self.cleanup()
