@@ -258,8 +258,10 @@ class Fuzzer:
         self.corpus: list[bytes] = []
         self.seen_hashes: set[str] = set()
         self.bloom = BloomFilter(capacity=100_000)
+        self.bloom.init_fuzzy(max_recent=200)
         self.crash_hashes: set[str] = set()
         self.crash_sigs: dict[str, int] = {}
+        self.crash_frames: dict[str, list[str]] = {}  # sig -> frames for clustering
         self.exec_count = 0
         self.crash_count = 0
         self.timeout_count = 0
@@ -576,6 +578,7 @@ class Fuzzer:
             self.seed_meta[seed] = {
                 "fuzz_count": 0,
                 "coverage_edges": 0,
+                "momentum": 0.0,
                 "edge_bitmap": bytearray(0),
                 "redqueen_offsets": [],
                 "added_at": now,
@@ -603,6 +606,7 @@ class Fuzzer:
             "op_success": self.op_success,
             "corpus_size_history": self._corpus_size_history[-500:],
             "seed_meta": {},
+            "crash_frames": self.crash_frames,
         }
         for seed, meta in self.seed_meta.items():
             key = seed.hex()
@@ -612,6 +616,7 @@ class Fuzzer:
             state["seed_meta"][key] = {
                 "fuzz_count": meta["fuzz_count"],
                 "coverage_edges": meta["coverage_edges"],
+                "momentum": meta.get("momentum", 0.0),
                 "redqueen_offsets": meta["redqueen_offsets"],
                 "redqueen_matches": rm_ser,
                 "added_at": meta["added_at"],
@@ -639,6 +644,7 @@ class Fuzzer:
         self.crash_count = state.get("crash_count", 0)
         self.timeout_count = state.get("timeout_count", 0)
         self.crash_sigs = state.get("crash_sigs", {})
+        self.crash_frames = state.get("crash_frames", {})
         self.op_counts = state.get("op_counts", {})
         self.op_success = state.get("op_success", {})
         self._corpus_size_history = state.get("corpus_size_history", [])
@@ -652,6 +658,7 @@ class Fuzzer:
                     {
                         "fuzz_count": sm.get("fuzz_count", 0),
                         "coverage_edges": sm.get("coverage_edges", 0),
+                        "momentum": sm.get("momentum", 0.0),
                         "redqueen_offsets": sm.get("redqueen_offsets", []),
                         "added_at": sm.get("added_at", self.seed_meta[seed]["added_at"]),
                         "lineage_depth": sm.get("lineage_depth", 0),
@@ -1519,6 +1526,14 @@ class Fuzzer:
             meta.rsp = self._last_regs.get("rsp", 0)
             meta.rbp = self._last_regs.get("rbp", 0)
 
+        # Extract frames for crash clustering
+        from fuzzer_tool.core.sanitizer import SanitizerReport
+        report = SanitizerReport.parse(stderr)
+        if report and report.is_valid():
+            sig = report.signature
+            if sig not in self.crash_frames:
+                self.crash_frames[sig] = report.frames
+
         return save_crash(
             data,
             returncode,
@@ -1782,6 +1797,62 @@ class Fuzzer:
                 stale_ratio,
             )
 
+    def _deprioritize_near_duplicates(self):
+        """Find seeds with near-identical edge bitmaps and merge them.
+
+        Uses Hamming distance on edge bitmaps (via edge_tracker) to find
+        seed pairs that are coverage-redundant. When found, the seed with
+        fewer new edges is removed from the corpus.
+
+        Called periodically alongside corpus minimization.
+        """
+        if len(self.corpus) < 10:
+            return
+
+        near_dupes = self._edge_tracker.find_near_duplicate_seeds(max_hamming=0.05)
+        if not near_dupes:
+            return
+
+        # Collect seeds to remove: keep the one with more coverage_edges
+        to_remove: set[bytes] = set()
+        for key_a, key_b, hdist in near_dupes:
+            # Find the actual seed bytes from keys
+            seed_a = None
+            seed_b = None
+            for s in self.corpus:
+                if self._seed_key(s) == key_a:
+                    seed_a = s
+                elif self._seed_key(s) == key_b:
+                    seed_b = s
+                if seed_a and seed_b:
+                    break
+            if not seed_a or not seed_b:
+                continue
+            if seed_a in to_remove or seed_b in to_remove:
+                continue
+
+            meta_a = self.seed_meta.get(seed_a, {})
+            meta_b = self.seed_meta.get(seed_b, {})
+            edges_a = meta_a.get("coverage_edges", 0)
+            edges_b = meta_b.get("coverage_edges", 0)
+
+            # Remove the one with fewer discovered edges
+            if edges_a <= edges_b:
+                to_remove.add(seed_a)
+            else:
+                to_remove.add(seed_b)
+
+        if to_remove:
+            self.corpus = [s for s in self.corpus if s not in to_remove]
+            for s in to_remove:
+                self.seed_meta.pop(s, None)
+            self._weight_cache = None
+            self._cached_weights = {}
+            log.info(
+                "Deprioritized %d near-duplicate seeds (Hamming <= 0.05 on edge bitmaps)",
+                len(to_remove),
+            )
+
     def _pick_seed(self) -> bytes:
         if self.markov_generate and self.markov_trained:
             # Reduce markov generation rate when model has plateaued
@@ -1898,6 +1969,10 @@ class Fuzzer:
             exploit_part = (1.0 + coverage * 0.5) / (1.0 + age * 0.01)
             w = explore_part * exploit_part
 
+            # Momentum: recent discovery velocity boosts weight
+            momentum = meta.get("momentum", 0.0)
+            w *= 1.0 + momentum * 2.0
+
             # Energy burst: newly added seeds get up to 5x boost (decays over 60s)
             burst_factor = max(1.0, 1.0 + T * (5.0 - 1.0) - (age / 60.0) * T)
             w *= burst_factor
@@ -2012,6 +2087,17 @@ class Fuzzer:
                     # Boost seeds with above-median coverage by hotness ratio
                     if coverage > 0:
                         w *= 1.0 + (hotness_ratio - 1.0) * min(coverage / 50.0, 1.0)
+
+            # Signal 6: Mutation perturbation — seeds with very low hamming_distance
+            # to their parent are minimally perturbed and unlikely to discover new
+            # paths. Penalize them to avoid wasting execs on near-identical inputs.
+            # hamming_distance == -1 means unknown (length-changing mutation).
+            hd = meta.get("hamming_distance", -1)
+            if hd == 0:
+                w *= 0.1   # identical to parent — almost certainly redundant
+            elif 0 < hd <= 2:
+                w *= 0.5   # tiny perturbation — low novelty expected
+            # hd >= 3 or hd == -1: no penalty (normal or unknown perturbation)
 
             weights.append(max(w, 1e-6))
         return weights
@@ -2244,6 +2330,9 @@ class Fuzzer:
                 new = self._edge_tracker.record_edges(seed_key, edge_bitmap)
                 if meta is not None and new:
                     meta["coverage_edges"] += len(new)
+                    meta["momentum"] = 0.8 * meta["momentum"] + 0.2 * 1.0
+                elif meta is not None:
+                    meta["momentum"] = 0.8 * meta["momentum"]
                 # Secretary-problem: track seed discovery rate for optimal stopping
                 if self._secretary and seed_key:
                     if seed_key not in self._seed_secretary:
@@ -2392,6 +2481,7 @@ class Fuzzer:
                 and len(self.corpus) > 1
             ):
                 self._auto_minimize_corpus()
+                self._deprioritize_near_duplicates()
             return True
 
         # Periodic minimization (also for non-interesting iterations)
@@ -2523,6 +2613,20 @@ class Fuzzer:
         if self.crash_sigs:
             for sig, count in sorted(self.crash_sigs.items(), key=lambda x: -x[1])[:5]:
                 print(f"    {sig[:48]} ({count}x)")
+
+        # Crash clustering (order-aware frame-sequence Levenshtein)
+        if len(self.crash_sigs) >= 2 and self.crash_frames:
+            from fuzzer_tool.core.crash_metadata import cluster_crashes
+
+            sigs = list(self.crash_sigs.keys())
+            frames = [self.crash_frames.get(s, []) for s in sigs]
+            clusters = cluster_crashes(sigs, frame_lists=frames, threshold=0.7)
+            multi = [c for c in clusters if len(c) > 1]
+            if multi:
+                print(f"  Crash clusters:    {len(multi)} group(s) from {len(sigs)} signatures")
+                for cl in multi[:3]:
+                    sigs_in = [sigs[i][:36] for i in cl]
+                    print(f"    [{len(cl)} crashes] {' ~ '.join(sigs_in)}")
 
         # Operator ROI
         if self.op_counts:
