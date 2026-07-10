@@ -641,6 +641,11 @@ def main() -> int:
         help="Exploration fraction threshold for secretary stopping (default: 0.368 = 1/e)",
     )
     fuzz_parser.add_argument(
+        "--sensitivity",
+        action="store_true",
+        help="Enable per-byte sensitivity analysis (Lyapunov exponent) for mutation targeting",
+    )
+    fuzz_parser.add_argument(
         "--targets",
         nargs="+",
         default=None,

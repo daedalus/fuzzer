@@ -168,6 +168,7 @@ class Fuzzer:
         secretary_exploration=None,
         elo=False,
         meta_elo=False,
+        sensitivity=False,
     ):
         self.target = target
         # Record boot time at init — before any child processes are spawned.
@@ -390,7 +391,7 @@ class Fuzzer:
         self._last_hamming_distance: int = -1
 
         # Per-byte sensitivity tracker (Lyapunov exponent)
-        self._use_sensitivity = False  # enabled via --sensitivity
+        self._use_sensitivity = sensitivity
         from fuzzer_tool.core.sensitivity import ByteSensitivityTracker
         self._sensitivity = ByteSensitivityTracker(
             max_seeds=50, max_bytes=max_len, sample_rate=0.02
