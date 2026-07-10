@@ -241,6 +241,19 @@ ruff check src/ tests/
 ruff format src/ tests/
 ```
 
+## Benchmarking
+
+Compare fuzzer configurations on a target:
+
+```bash
+# Baseline vs enhanced (elo + meta-elo + bandit + mopt)
+tools/bench.sh targets/png_read 10000
+
+# 3-way comparison: baseline vs enhanced vs enhanced+
+# Enhanced+ adds: markov, replicator, shapley, renyi, transfer-entropy, grammar
+tools/bench.sh targets/png_read 10000
+```
+
 ## License
 
 MIT

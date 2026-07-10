@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
-# Benchmark baseline vs enhanced fuzzer configurations on a target.
+# Benchmark baseline vs enhanced vs enhanced+ fuzzer configurations on a target.
 #
 # Usage:
 #   tools/bench.sh [target] [iterations] [extra_enhanced_flags]
 #
 # Defaults: targets/png_read, 5000 iterations
 # Example:  tools/bench.sh targets/png_read 3000 "--sensitivity"
+#
+# Configurations:
+#   baseline:  no features
+#   enhanced:  elo + meta-elo + bandit + mopt
+#   enhanced+: elo + meta-elo + bandit + mopt + markov + replicator + shapley
+#              + renyi + transfer-entropy + grammar
 
 set -euo pipefail
 
@@ -15,6 +21,7 @@ EXTRA_FLAGS="${3:-}"
 BASE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BASELINE_DIR="/tmp/fuzz_bench_baseline"
 ENHANCED_DIR="/tmp/fuzz_bench_enhanced"
+ENHANCEDP_DIR="/tmp/fuzz_bench_enhanced+"
 
 cd "$BASE_DIR"
 
@@ -137,12 +144,12 @@ run_with_retry() {
 # ── Main ──────────────────────────────────────────────────────────────
 
 # Clean previous runs and orphaned SHM
-rm -rf "$BASELINE_DIR" "$ENHANCED_DIR"
-mkdir -p "$BASELINE_DIR" "$ENHANCED_DIR"
+rm -rf "$BASELINE_DIR" "$ENHANCED_DIR" "$ENHANCEDP_DIR"
+mkdir -p "$BASELINE_DIR" "$ENHANCED_DIR" "$ENHANCEDP_DIR"
 cleanup_shm
 
 echo "============================================================"
-echo " Benchmark: baseline vs enhanced"
+echo " Benchmark: baseline vs enhanced vs enhanced+"
 echo " Target:    $TARGET"
 echo " Iterations: $ITERS"
 echo " Extra flags: ${EXTRA_FLAGS:-none}"
@@ -152,7 +159,7 @@ echo ""
 # Run baseline
 echo "[*] Running baseline (no features)..."
 run_with_retry /tmp/fuzz_bench_baseline.log \
-    fuzz "$TARGET" -d "$BASELINE_DIR" -c -n "$ITERS"
+    fuzz "$TARGET" -d "$BASELINE_DIR" -c -n "$ITERS" $EXTRA_FLAGS
 echo ""
 
 # Clean SHM between runs to prevent stale segment interference
@@ -163,6 +170,21 @@ sleep 1
 echo "[*] Running enhanced (elo + meta-elo + bandit + mopt${EXTRA_FLAGS:+$EXTRA_FLAGS})..."
 run_with_retry /tmp/fuzz_bench_enhanced.log \
     fuzz "$TARGET" -d "$ENHANCED_DIR" -c -n "$ITERS" --elo --meta-elo --mc-bandit --mopt $EXTRA_FLAGS
+echo ""
+
+# Clean SHM between runs
+cleanup_shm
+sleep 1
+
+# Run enhanced+ (markov + replicator + shapley + renyi + transfer-entropy + grammar)
+echo "[*] Running enhanced+ (all enhanced + markov + replicator + shapley + renyi + transfer-entropy + grammar)..."
+run_with_retry /tmp/fuzz_bench_enhanced+.log \
+    fuzz "$TARGET" -d "$ENHANCEDP_DIR" -c -n "$ITERS" \
+    --elo --meta-elo --mc-bandit --mopt \
+    --markov --markov-gen --markov-order 0,1,2,3 \
+    --replicator --shapley --renyi-weight --transfer-entropy \
+    -g dictionaries/png.gram \
+    $EXTRA_FLAGS
 echo ""
 
 # ── Extract metrics ───────────────────────────────────────────────────
@@ -177,46 +199,31 @@ extract() {
 
 b_edges=$(extract "Edges discovered:\s+\K[0-9]+" /tmp/fuzz_bench_baseline.log)
 e_edges=$(extract "Edges discovered:\s+\K[0-9]+" /tmp/fuzz_bench_enhanced.log)
+p_edges=$(extract "Edges discovered:\s+\K[0-9]+" /tmp/fuzz_bench_enhanced+.log)
 b_corpus=$(extract "Corpus:\s+\K[0-9]+" /tmp/fuzz_bench_baseline.log)
 e_corpus=$(extract "Corpus:\s+\K[0-9]+" /tmp/fuzz_bench_enhanced.log)
+p_corpus=$(extract "Corpus:\s+\K[0-9]+" /tmp/fuzz_bench_enhanced+.log)
 b_eps=$(extract "Avg eps:\s+\K[0-9.]+" /tmp/fuzz_bench_baseline.log)
 e_eps=$(extract "Avg eps:\s+\K[0-9.]+" /tmp/fuzz_bench_enhanced.log)
+p_eps=$(extract "Avg eps:\s+\K[0-9.]+" /tmp/fuzz_bench_enhanced+.log)
 b_dur=$(extract "Duration:\s+\K[0-9s]+" /tmp/fuzz_bench_baseline.log)
 e_dur=$(extract "Duration:\s+\K[0-9s]+" /tmp/fuzz_bench_enhanced.log)
+p_dur=$(extract "Duration:\s+\K[0-9s]+" /tmp/fuzz_bench_enhanced+.log)
 b_time=$(extract "Exec time p50:\s+\K[0-9.]+ms" /tmp/fuzz_bench_baseline.log)
 e_time=$(extract "Exec time p50:\s+\K[0-9.]+ms" /tmp/fuzz_bench_enhanced.log)
+p_time=$(extract "Exec time p50:\s+\K[0-9.]+ms" /tmp/fuzz_bench_enhanced+.log)
 b_collision=$(extract "Collision risk:\s+\K[0-9.]+" /tmp/fuzz_bench_baseline.log)
 e_collision=$(extract "Collision risk:\s+\K[0-9.]+" /tmp/fuzz_bench_enhanced.log)
+p_collision=$(extract "Collision risk:\s+\K[0-9.]+" /tmp/fuzz_bench_enhanced+.log)
 
-printf "%-25s %12s %12s %10s\n" "Metric" "Baseline" "Enhanced" "Delta"
-printf "%-25s %12s %12s %10s\n" "-------------------------" "------------" "------------" "----------"
-printf "%-25s %12s %12s" "Edges discovered" "${b_edges:-?}" "${e_edges:-?}"
-if [[ -n "$b_edges" && -n "$e_edges" && "$b_edges" -gt 0 ]]; then
-    pct=$(python3 -c "print(f'{($e_edges - $b_edges) / $b_edges * 100:+.1f}%')")
-    printf " %10s\n" "$pct"
-else
-    printf " %10s\n" "?"
-fi
-
-printf "%-25s %12s %12s" "Corpus entries" "${b_corpus:-?}" "${e_corpus:-?}"
-if [[ -n "$b_corpus" && -n "$e_corpus" && "$b_corpus" -gt 0 ]]; then
-    pct=$(python3 -c "print(f'{($e_corpus - $b_corpus) / $b_corpus * 100:+.1f}%')")
-    printf " %10s\n" "$pct"
-else
-    printf " %10s\n" "?"
-fi
-
-printf "%-25s %12s %12s" "Avg eps" "${b_eps:-?}" "${e_eps:-?}"
-if [[ -n "$b_eps" && -n "$e_eps" ]]; then
-    pct=$(python3 -c "print(f'{($e_eps - $b_eps) / $b_eps * 100:+.1f}%')")
-    printf " %10s\n" "$pct"
-else
-    printf " %10s\n" "?"
-fi
-
-printf "%-25s %12s %12s %10s\n" "Duration" "${b_dur:-?}" "${e_dur:-?}" ""
-printf "%-25s %12s %12s %10s\n" "Exec time p50" "${b_time:-?}" "${e_time:-?}" ""
-printf "%-25s %12s %12s %10s\n" "Collision risk" "${b_collision:-0}%" "${e_collision:-0}%" ""
+printf "%-25s %12s %12s %12s\n" "Metric" "Baseline" "Enhanced" "Enhanced+"
+printf "%-25s %12s %12s %12s\n" "-------------------------" "------------" "------------" "------------"
+printf "%-25s %12s %12s %12s\n" "Edges discovered" "${b_edges:-?}" "${e_edges:-?}" "${p_edges:-?}"
+printf "%-25s %12s %12s %12s\n" "Corpus entries" "${b_corpus:-?}" "${e_corpus:-?}" "${p_corpus:-?}"
+printf "%-25s %12s %12s %12s\n" "Avg eps" "${b_eps:-?}" "${e_eps:-?}" "${p_eps:-?}"
+printf "%-25s %12s %12s %12s\n" "Duration" "${b_dur:-?}" "${e_dur:-?}" "${p_dur:-?}"
+printf "%-25s %12s %12s %12s\n" "Exec time p50" "${b_time:-?}" "${e_time:-?}" "${p_time:-?}"
+printf "%-25s %12s %12s %12s\n" "Collision risk" "${b_collision:-0}%" "${e_collision:-0}%" "${p_collision:-0}%"
 
 echo ""
-echo "Full logs: /tmp/fuzz_bench_baseline.log, /tmp/fuzz_bench_enhanced.log"
+echo "Full logs: /tmp/fuzz_bench_baseline.log, /tmp/fuzz_bench_enhanced.log, /tmp/fuzz_bench_enhanced+.log"
