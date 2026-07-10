@@ -3064,13 +3064,13 @@ class Fuzzer:
                 print("\n[*] dmesg: no kernel crashes detected")
         if self.mc and self.mc_bandit:
             print("\n[*] Bandit convergence:")
-            for name, (succ, fail) in sorted(
-                self.mc.bandit_stats().items(),
+            for name, (a, b) in sorted(
+                self.mc.bandit_stats_raw().items(),
                 key=lambda x: -(x[1][0] / max(x[1][0] + x[1][1], 1)),
             ):
-                total = succ + fail
-                pct = succ / total * 100 if total else 0
-                print(f"    {name:20s}: {succ:.0f}/{fail:.0f} ({pct:.0f}% success)")
+                total = a + b
+                pct = a / total * 100 if total else 0
+                print(f"    {name:20s}: {a:.1f}/{b:.1f} ({pct:.0f}% success)")
         self._print_run_summary()
         epoch_end = time.time()
         boot_end = time.monotonic()

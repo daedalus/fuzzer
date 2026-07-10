@@ -368,6 +368,17 @@ class MonteCarloScheduler:
             result[name] = (max(0.0, a - 1), max(0.0, b - 1))
         return result
 
+    def bandit_stats_raw(self) -> dict[str, tuple[float, float]]:
+        """Get raw alpha/beta values for each arm (no prior subtraction).
+
+        Returns:
+            Dict mapping operator name to (alpha, beta).
+        """
+        result = {}
+        for name in sorted(self.arm_alpha):
+            result[name] = (self.arm_alpha[name], self.arm_beta[name])
+        return result
+
     def transition_stats(self) -> dict[str, dict[str, int]]:
         """Get pairwise transition counts.
 
