@@ -44,8 +44,9 @@ class MonteCarloScheduler:
 
     ELITE_MAX = 200
 
-    def __init__(self, elite_frac: float = 0.1, refit_interval: int = 1000,
-                 pairwise_blend: float = 0.0):
+    def __init__(
+        self, elite_frac: float = 0.1, refit_interval: int = 1000, pairwise_blend: float = 0.0
+    ):
         self.arm_alpha: dict[str, float] = {}
         self.arm_beta: dict[str, float] = {}
         self.elite_frac = elite_frac
@@ -63,9 +64,7 @@ class MonteCarloScheduler:
         # Pairwise transition matrix: P(next_op | prev_op)
         # transition_counts[prev][next] = discoveries from (prev, next) pairs
         # transition_total[prev] = total attempts where next followed prev
-        self.transition_counts: dict[str, dict[str, int]] = defaultdict(
-            lambda: defaultdict(int)
-        )
+        self.transition_counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
         self.transition_total: dict[str, int] = defaultdict(int)
         self._prev_op: str | None = None
         # Blend factor: 0.0 = pure Thompson, 1.0 = pure pairwise
@@ -183,20 +182,36 @@ class MonteCarloScheduler:
                 continue
             mean_pred = sum(p for p, _ in pairs) / len(pairs)
             mean_actual = sum(o for _, o in pairs) / len(pairs)
-            report[f"{b*10}-{b*10+10}%"] = (mean_pred, mean_actual)
+            report[f"{b * 10}-{b * 10 + 10}%"] = (mean_pred, mean_actual)
         return report
 
-    def add_elite(self, data: bytes, score: int) -> None:
+    def add_elite(self, data: bytes, score: int, temperature: float = 1.0) -> None:
         """Add an input to the elite set for CEM fitting.
+
+        Uses Metropolis criterion: if the elite set is full and the new
+        score is worse than the worst in the set, accept with probability
+        exp(-ΔE/T) where ΔE = worst_score - score. This lets the elite
+        set escape local optima early (high T) while converging greedily
+        late (low T).
 
         Args:
             data: The input bytes.
             score: Quality score (higher is better).
+            temperature: SA temperature (1.0 = fully exploratory, 0.0 = greedy).
         """
-        self.elite_set.append((score, data))
-        if len(self.elite_set) > self.ELITE_MAX:
-            self.elite_set.sort(key=lambda x: x[0])
-            self.elite_set.pop(0)
+        if len(self.elite_set) < self.ELITE_MAX:
+            self.elite_set.append((score, data))
+            return
+
+        self.elite_set.sort(key=lambda x: x[0])
+        worst_score = self.elite_set[0][0]
+        if score > worst_score:
+            self.elite_set[0] = (score, data)
+        elif temperature > 0.01:
+            delta_e = worst_score - score
+            acceptance = math.exp(-delta_e / temperature)
+            if random.random() < acceptance:
+                self.elite_set[0] = (score, data)
 
     def maybe_refit(self) -> None:
         """Refit the CEM byte distribution if enough data exists.
@@ -215,9 +230,7 @@ class MonteCarloScheduler:
             return
 
         # Snapshot previous distribution for JS comparison
-        self._prev_byte_freq = {
-            pos: dict(freq) for pos, freq in self.byte_freq.items()
-        }
+        self._prev_byte_freq = {pos: dict(freq) for pos, freq in self.byte_freq.items()}
 
         n_elite = max(1, int(len(self.elite_set) * self.elite_frac))
         sorted_elite = sorted(self.elite_set, key=lambda x: x[0], reverse=True)
@@ -271,9 +284,7 @@ class MonteCarloScheduler:
 
         def kl(a: dict[int, float], b: dict[int, float]) -> float:
             return sum(
-                pa * math.log(pa / b[k])
-                for k, pa in a.items()
-                if pa > 0.0 and b.get(k, 0.0) > 0.0
+                pa * math.log(pa / b[k]) for k, pa in a.items() if pa > 0.0 and b.get(k, 0.0) > 0.0
             )
 
         return 0.5 * kl(p, m) + 0.5 * kl(q, m)
@@ -354,6 +365,7 @@ class MonteCarloScheduler:
     def save_transitions(self, path: str) -> None:
         """Save transition matrix to JSON."""
         import json
+
         data = {
             "transition_counts": {k: dict(v) for k, v in self.transition_counts.items()},
             "transition_total": dict(self.transition_total),
@@ -366,6 +378,7 @@ class MonteCarloScheduler:
     def load_transitions(self, path: str) -> bool:
         """Load transition matrix from JSON. Returns True if loaded."""
         import json
+
         try:
             data = json.loads(Path(path).read_text())
             for k, v in data.get("transition_counts", {}).items():
@@ -381,8 +394,16 @@ class MonteCarloScheduler:
 class _MOptParticle:
     """A single particle in MOpt's PSO over operator probability space."""
 
-    __slots__ = ("pos", "vel", "pbest_pos", "pbest_fitness", "fitness",
-                 "name", "discoveries", "execs_in_window")
+    __slots__ = (
+        "pos",
+        "vel",
+        "pbest_pos",
+        "pbest_fitness",
+        "fitness",
+        "name",
+        "discoveries",
+        "execs_in_window",
+    )
 
     def __init__(self, name: str, n_ops: int):
         self.name = name
@@ -654,13 +675,15 @@ class MOptScheduler:
                 best_op = self.operators[best_idx] if best_idx < len(self.operators) else "?"
             else:
                 best_op = "?"
-            result.append({
-                "name": p.name,
-                "fitness": round(p.fitness, 4),
-                "pbest": round(p.pbest_fitness, 4),
-                "top_op": best_op,
-                "top_prob": round(max(p.pos), 3) if p.pos else 0.0,
-            })
+            result.append(
+                {
+                    "name": p.name,
+                    "fitness": round(p.fitness, 4),
+                    "pbest": round(p.pbest_fitness, 4),
+                    "top_op": best_op,
+                    "top_prob": round(max(p.pos), 3) if p.pos else 0.0,
+                }
+            )
         return result
 
     def bandit_stats(self) -> dict[str, tuple[float, float]]:
@@ -939,7 +962,11 @@ class ReplicatorScheduler:
                 fitness.append(0.0)
 
         # Average fitness (weighted by population)
-        phi = sum(x * f for x, f in zip(self.population, fitness, strict=False)) if self.population else 0.0
+        phi = (
+            sum(x * f for x, f in zip(self.population, fitness, strict=False))
+            if self.population
+            else 0.0
+        )
 
         # Replicator step: x_i' = x_i * (1 + eta * (f_i - phi))
         new_pop = []
@@ -994,7 +1021,7 @@ class ReplicatorScheduler:
                 continue
             mean = sum(values) / len(values)
             variance = sum((v - mean) ** 2 for v in values) / len(values)
-            if variance ** 0.5 > threshold:
+            if variance**0.5 > threshold:
                 return False
         return True
 
@@ -1025,10 +1052,12 @@ class ReplicatorScheduler:
             pop = self.population[i] if i < len(self.population) else 0.0
             count = self._fitness_count.get(op, 0)
             successes = self._fitness_sum.get(op, 0)
-            result.append({
-                "name": op,
-                "population": round(pop, 4),
-                "window_successes": int(successes),
-                "window_execs": count,
-            })
+            result.append(
+                {
+                    "name": op,
+                    "population": round(pop, 4),
+                    "window_successes": int(successes),
+                    "window_execs": count,
+                }
+            )
         return result

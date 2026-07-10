@@ -909,6 +909,42 @@ class EdgeTracker:
         """Fraction of the edge map that has been hit (0.0 to 1.0)."""
         return len(self._global_edge_hits) / self.map_size if self.map_size else 0.0
 
+    def birthday_collision_risk(self) -> float:
+        """Estimate birthday-paradox collision probability for current edge count.
+
+        Uses the standard birthday bound: P(collision) ≈ 1 - exp(-n²/(2m))
+        where n = number of distinct edges, m = map_size.
+
+        Returns:
+            Collision probability as a fraction (0.0 to 1.0).
+        """
+        n = len(self._global_edge_hits)
+        m = self.map_size
+        if m == 0 or n == 0:
+            return 0.0
+        return max(0.0, min(1.0, 1.0 - math.exp(-(n * n) / (2.0 * m))))
+
+    def recommended_map_size(self) -> int:
+        """Recommend a larger map_size if collision risk is high.
+
+        Based on birthday bound: to keep collision probability < 1%,
+        need map_size >= n² / (2 * ln(0.99)) ≈ n² / 0.02.
+
+        Returns:
+            Recommended map_size (next power of 2), or 0 if current size is adequate.
+        """
+        n = len(self._global_edge_hits)
+        if n < 100:
+            return 0
+        needed = int(n * n / 0.02)
+        recommended = 1
+        while recommended < needed:
+            recommended *= 2
+        recommended = max(4096, min(1048576, recommended))
+        if recommended <= self.map_size:
+            return 0
+        return recommended
+
     def get_seed_edge_count(self, seed_key: str) -> int:
         """Get number of edges a specific seed covers."""
         return len(self.seed_edges.get(seed_key, set()))

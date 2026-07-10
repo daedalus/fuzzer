@@ -26,6 +26,7 @@ class TestKSTwoSample:
 
     def test_overlapping_distributions(self):
         import random
+
         random.seed(42)
         a = [random.gauss(10, 1) for _ in range(50)]
         b = [random.gauss(11, 1) for _ in range(50)]
@@ -44,6 +45,7 @@ class TestKSTwoSample:
 
     def test_large_samples_converge(self):
         import random
+
         random.seed(0)
         a = [random.gauss(0, 1) for _ in range(500)]
         b = [random.gauss(0, 1) for _ in range(500)]
@@ -327,6 +329,45 @@ class TestGoodTuring:
         et.record_edges("s", bytes(bm))
         d = et.bitmap_density()
         assert abs(d - 3 / 256) < 1e-6
+
+    def test_birthday_collision_risk_zero_edges(self):
+        et = EdgeTracker(map_size=256)
+        assert et.birthday_collision_risk() == 0.0
+
+    def test_birthday_collision_risk_low(self):
+        et = EdgeTracker(map_size=65536)
+        bm = bytearray(65536)
+        for i in range(10):
+            bm[i] = 1
+        et.record_edges("s", bytes(bm))
+        risk = et.birthday_collision_risk()
+        assert risk < 0.01
+
+    def test_birthday_collision_risk_high(self):
+        et = EdgeTracker(map_size=256)
+        bm = bytearray(256)
+        for i in range(100):
+            bm[i % 256] = 1
+        et.record_edges("s", bytes(bm))
+        risk = et.birthday_collision_risk()
+        assert risk > 0.5
+
+    def test_recommended_map_size_adequate(self):
+        et = EdgeTracker(map_size=65536)
+        bm = bytearray(65536)
+        for i in range(10):
+            bm[i] = 1
+        et.record_edges("s", bytes(bm))
+        assert et.recommended_map_size() == 0
+
+    def test_recommended_map_size_needed(self):
+        et = EdgeTracker(map_size=4096)
+        bm = bytearray(4096)
+        for i in range(500):
+            bm[i % 4096] = 1
+        et.record_edges("s", bytes(bm))
+        rec = et.recommended_map_size()
+        assert rec > et.map_size
 
 
 class TestAggregateDistribution:

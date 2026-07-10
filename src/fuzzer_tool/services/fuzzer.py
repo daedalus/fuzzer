@@ -385,6 +385,7 @@ class Fuzzer:
             self._te_history_max = 500
             log.info("Transfer entropy tracking enabled")
         self._last_ops_used: list[str] = []
+        self._last_hamming_distance: int = -1
 
         # Elo rating system for operator scheduling
         self._use_elo = elo
@@ -615,6 +616,7 @@ class Fuzzer:
                 "redqueen_matches": rm_ser,
                 "added_at": meta["added_at"],
                 "lineage_depth": meta.get("lineage_depth", 0),
+                "hamming_distance": meta.get("hamming_distance", -1),
             }
         try:
             self._state_path.write_text(json.dumps(state, separators=(",", ":")))
@@ -653,6 +655,7 @@ class Fuzzer:
                         "redqueen_offsets": sm.get("redqueen_offsets", []),
                         "added_at": sm.get("added_at", self.seed_meta[seed]["added_at"]),
                         "lineage_depth": sm.get("lineage_depth", 0),
+                        "hamming_distance": sm.get("hamming_distance", -1),
                     }
                 )
                 # Deserialize redqueen_matches from hex strings
@@ -987,10 +990,13 @@ class Fuzzer:
         )
 
     def mutate(self, data: bytes) -> bytes:
+        from fuzzer_tool.core.similarity import hamming_distance
+
         buf = bytearray(data)
         if not buf:
             buf = bytearray(b"\x00" * random.randint(1, 32))
 
+        original_len = len(buf)
         ops = list(MUTATIONS)
         if self.dictionary:
             ops.extend(DICT_MUTATIONS)
@@ -1403,9 +1409,17 @@ class Fuzzer:
                             buf[off] ^= 0xFF
 
             elif op == "havoc":
-                return bytes(self._havoc_mutate(buf))
+                mutated = bytes(self._havoc_mutate(buf))
+                self._last_hamming_distance = (
+                    hamming_distance(data, mutated) if len(data) == len(mutated) else -1
+                )
+                return mutated
 
-        return bytes(buf)
+        result = bytes(buf)
+        self._last_hamming_distance = (
+            hamming_distance(data, result) if len(data) == len(result) else -1
+        )
+        return result
 
     def _havoc_mutate(self, buf: bytearray) -> bytearray:
         for _ in range(random.randint(2, 8)):
@@ -1541,6 +1555,7 @@ class Fuzzer:
                 "redqueen_offsets": [],
                 "added_at": time.time(),
                 "lineage_depth": parent_depth + 1 if parent else 0,
+                "hamming_distance": self._last_hamming_distance,
             }
             self.markov.train(data)
             self.markov_trained = self.markov.is_trained()
@@ -2354,7 +2369,7 @@ class Fuzzer:
             # Verify crash at kernel level via dmesg (supplementary to exit code)
             self._verify_kernel_crash(getattr(self, "_last_child_pid", None))
             if self.mc and self.mc_cem:
-                self.mc.add_elite(mutated, 3)
+                self.mc.add_elite(mutated, 3, temperature=self._temperature)
                 self.mc.maybe_refit()
             # Schedule crash replay for reproducibility check
             if self.replay_n > 0 and crash_name:
@@ -2369,7 +2384,7 @@ class Fuzzer:
             if has_new_coverage and len(mutated) > 10:
                 self._trim_new_coverage(mutated, data)
             if self.mc and self.mc_cem:
-                self.mc.add_elite(mutated, 2)
+                self.mc.add_elite(mutated, 2, temperature=self._temperature)
                 self.mc.maybe_refit()
             # Periodic minimization based on edge stats
             if (
@@ -2441,8 +2456,13 @@ class Fuzzer:
         elif self.ptrace_cov:
             edges = self.ptrace_cov.cumulative_edges
         density = self._edge_tracker.bitmap_density() * 100
+        collision_risk = self._edge_tracker.birthday_collision_risk() * 100
         print(f"  Edges discovered:  {edges}")
         print(f"  Map density:       {density:.2f}%")
+        print(f"  Collision risk:    {collision_risk:.2f}% (birthday paradox)")
+        rec = self._edge_tracker.recommended_map_size()
+        if rec:
+            print(f"  Recommended map:   {rec:,} bytes (current: {self.map_size:,})")
 
         # Good-Turing
         gt = self._edge_tracker.good_turing_estimate()
@@ -2739,7 +2759,17 @@ class Fuzzer:
         dr_str = f" | rate: {dr:.1f} ed/kexec" if self.exec_count > 100 else ""
         # Bitmap density
         density = self._edge_tracker.bitmap_density() * 100
+        collision_risk = self._edge_tracker.birthday_collision_risk() * 100
         density_str = f" | map: {density:.1f}%"
+        if collision_risk > 10:
+            density_str += f" (collision: {collision_risk:.0f}%)"
+            if collision_risk > 50 and not getattr(self, "_collision_warned", False):
+                log.warning(
+                    "Birthday-paradox collision risk %.0f%% — "
+                    "bitmap signal is degrading. Consider larger map_size.",
+                    collision_risk,
+                )
+                self._collision_warned = True
         # Crash reproducibility
         repro_str = ""
         if self._crash_replays:

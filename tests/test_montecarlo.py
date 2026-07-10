@@ -58,6 +58,50 @@ class TestMonteCarloScheduler:
             mc.add_elite(bytes([i % 256]), score=i)
         assert len(mc.elite_set) == mc.ELITE_MAX
 
+    def test_add_elite_metropolis_rejects_worse_at_low_temp(self):
+        mc = MonteCarloScheduler()
+        for i in range(mc.ELITE_MAX):
+            mc.add_elite(bytes([i % 256]), score=100)
+        # All elite scores are 100. Try to add score=1 at T=0.001 (greedy).
+        # delta_e=99, exp(-99/0.001) ≈ 0 — should never accept.
+        accepted = 0
+        for _ in range(100):
+            before = list(mc.elite_set)
+            mc.add_elite(b"worst", score=1, temperature=0.001)
+            if mc.elite_set != before:
+                accepted += 1
+            mc.elite_set = before
+        assert accepted == 0
+
+    def test_add_elite_metropolis_accepts_worse_at_high_temp(self):
+        mc = MonteCarloScheduler()
+        for i in range(mc.ELITE_MAX):
+            mc.add_elite(bytes([i % 256]), score=100)
+        # Try to add score=99 at T=100 (very hot). delta_e=1, exp(-1/100)≈0.99
+        # Should almost always accept.
+        accepted = 0
+        for _ in range(100):
+            before = list(mc.elite_set)
+            mc.add_elite(b"slightly_worse", score=99, temperature=100.0)
+            if mc.elite_set != before:
+                accepted += 1
+            mc.elite_set = before
+        assert accepted > 90
+
+    def test_add_elite_metropolis_accepts_better_always(self):
+        mc = MonteCarloScheduler()
+        for i in range(mc.ELITE_MAX):
+            mc.add_elite(bytes([i % 256]), score=50)
+        # Better score should always be accepted regardless of temperature
+        accepted = 0
+        for _ in range(100):
+            before = list(mc.elite_set)
+            mc.add_elite(b"better", score=100, temperature=0.001)
+            if mc.elite_set != before:
+                accepted += 1
+            mc.elite_set = before
+        assert accepted == 100
+
     def test_maybe_refit_needs_data(self):
         mc = MonteCarloScheduler(refit_interval=1)
         mc.execs_since_refit = 1
@@ -394,15 +438,17 @@ class TestMOptScheduler:
         # fast has 80% success, slow has 10%
         for _ in range(100):
             op, pid = mopt.select_op(ops)
-            success = (op == "fast" and __import__("random").random() < 0.80) or \
-                      (op == "slow" and __import__("random").random() < 0.10)
+            success = (op == "fast" and __import__("random").random() < 0.80) or (
+                op == "slow" and __import__("random").random() < 0.10
+            )
             mopt.record(op, success, particle_id=pid)
         # After 10 PSO updates, fast should dominate
         stats = mopt.particle_stats()
         fast_probs = [s["top_prob"] for s in stats if s["top_op"] == "fast"]
         # At least one particle should have fast with >30% probability
-        assert any(p > 0.30 for p in fast_probs), \
+        assert any(p > 0.30 for p in fast_probs), (
             f"No particle strongly favors 'fast': {[s['top_prob'] for s in stats]}"
+        )
 
     def test_particle_attribution_isolates_fitness(self):
         """Verify that record() with particle_id only updates the target particle.
@@ -435,9 +481,7 @@ class TestMOptScheduler:
         # Fitness should differ
         mopt._update_fitness(p0)
         mopt._update_fitness(p1)
-        assert p0.fitness > p1.fitness, (
-            f"p0 fitness ({p0.fitness}) should exceed p1 ({p1.fitness})"
-        )
+        assert p0.fitness > p1.fitness, f"p0 fitness ({p0.fitness}) should exceed p1 ({p1.fitness})"
 
 
 class TestAdaptiveRefit:
