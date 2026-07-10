@@ -63,6 +63,20 @@ def cmd_fuzz(args):
         _validate_target(args.target)
     corpus_dir, crashes_dir = _get_dirs(args, args.target)
 
+    # Set LD_PRELOAD for ASAN if requested
+    if args.asan:
+        import ctypes.util
+        libasan = ctypes.util.find_library("asan")
+        if not libasan:
+            # Fallback to known path
+            libasan = "/usr/lib/x86_64-linux-gnu/libasan.so.8"
+        existing = os.environ.get("LD_PRELOAD", "")
+        if existing:
+            os.environ["LD_PRELOAD"] = f"{libasan}:{existing}"
+        else:
+            os.environ["LD_PRELOAD"] = libasan
+        print(f"[*] ASAN enabled: LD_PRELOAD={libasan}")
+
     dictionary = []
     if args.dict:
         if not os.path.isfile(args.dict):
@@ -775,6 +789,11 @@ def main() -> int:
         "--inprocess-direct",
         action="store_true",
         help="Direct ctypes.CDLL call — zero overhead, target must not SIGSEGV",
+    )
+    fuzz_parser.add_argument(
+        "--asan",
+        action="store_true",
+        help="Preload AddressSanitizer runtime (LD_PRELOAD=libasan.so)",
     )
     fuzz_parser.add_argument(
         "--inprocess-func",

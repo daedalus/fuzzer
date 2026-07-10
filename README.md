@@ -144,6 +144,7 @@ fuzzer-tool rank ./target -d corpus -n 10 --dump top_seeds
 | `--renyi-weight` | Rényi entropy weighting in seed selection (boost cold-edge seeds) |
 | `--transfer-entropy` | Transfer entropy causal tracking (byte→edge influence detection) |
 | `--inprocess` | Persistent subprocess mode (auto-restart on crash) |
+| `--asan` | Preload AddressSanitizer runtime (LD_PRELOAD=libasan.so) |
 | `--resume` | Resume from saved state |
 | `--crash-codes N` | Additional exit codes to treat as crashes |
 | `-j N` | Parallel fuzzing with N workers |
