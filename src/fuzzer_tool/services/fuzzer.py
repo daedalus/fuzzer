@@ -2869,12 +2869,22 @@ class Fuzzer:
         density_str = f" | map: {density:.1f}%"
         if collision_risk > 10:
             density_str += f" (collision: {collision_risk:.0f}%)"
-            if collision_risk > 50 and not getattr(self, "_collision_warned", False):
-                log.warning(
-                    "Birthday-paradox collision risk %.0f%% — "
-                    "bitmap signal is degrading. Consider larger map_size.",
-                    collision_risk,
-                )
+            if collision_risk > 50 and self.shm_cov and not getattr(self, "_collision_warned", False):
+                # Compute needed map size from birthday formula: n² / (2 * ln(1/(1-p)))
+                n_edges = len(self._edge_tracker._global_edge_hits)
+                if n_edges > 10:
+                    import math
+                    needed = int(n_edges * n_edges / 0.02)  # ~1% collision target
+                    needed = max(4096, min(1048576, 1 << (needed - 1).bit_length()))
+                    if needed > self.shm_cov.size:
+                        log.warning(
+                            "Collision risk %.0f%% — resizing bitmap %d → %d bytes",
+                            collision_risk, self.shm_cov.size, needed,
+                        )
+                        self.shm_cov.resize(needed)
+                        self.map_size = needed
+                        self._edge_tracker.map_size = needed
+                        density_str = f" | map: {self._edge_tracker.bitmap_density() * 100:.1f}% (collision: {collision_risk:.0f}%)"
                 self._collision_warned = True
         # Crash reproducibility
         repro_str = ""

@@ -118,6 +118,52 @@ class ShmCoverage:
             _libc.shmctl(self.shm_id, IPC_RMID, None)
             self.shm_id = -1
 
+    def resize(self, new_size: int) -> None:
+        """Resize the shared memory bitmap, preserving existing data.
+
+        Allocates a new SHM, copies the old bitmap, detaches the old SHM,
+        and updates internal pointers.
+
+        Args:
+            new_size: New map size in bytes (must be > current size).
+        """
+        if new_size <= self.size:
+            return
+
+        # Allocate new SHM
+        new_shm_id = _libc.shmget(0, new_size, IPC_CREAT | SHM_R | SHM_W)
+        if new_shm_id < 0:
+            raise OSError(f"shmget resize failed: {os.strerror(ctypes.get_errno())}")
+
+        new_ptr = _libc.shmat(new_shm_id, None, 0)
+        if new_ptr == ctypes.c_void_p(-1).value or new_ptr is None:
+            _libc.shmctl(new_shm_id, IPC_RMID, None)
+            raise OSError(f"shmat resize failed: {os.strerror(ctypes.get_errno())}")
+
+        # Zero the new region, then copy old bitmap
+        ctypes.memset(new_ptr, 0, new_size)
+        ctypes.memmove(new_ptr, self._ptr, self.size)
+
+        # Detach and remove old SHM
+        old_ptr = self._ptr
+        old_shm_id = self.shm_id
+        _libc.shmdt(old_ptr)
+        _libc.shmctl(old_shm_id, IPC_RMID, None)
+
+        # Update state
+        self._ptr = new_ptr
+        self.shm_id = new_shm_id
+        old_size = self.size
+        self.size = new_size
+        self._map = (ctypes.c_char * new_size).from_address(self._ptr)
+        self.env_id = str(self.shm_id)
+        self._seen = bytearray(new_size)
+        # Rebuild cumulative from the copied bitmap (only old region has data)
+        for i in range(old_size):
+            if self._map[i]:
+                self._seen[i] = 1
+        self.cumulative_edges = sum(self._seen)
+
     def __del__(self):
         self.cleanup()
 
