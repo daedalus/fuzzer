@@ -18,31 +18,89 @@ ENHANCED_DIR="/tmp/fuzz_bench_enhanced"
 
 cd "$BASE_DIR"
 
+# ── SHM cleanup ───────────────────────────────────────────────────────
+# Remove all orphaned SHM segments owned by the current user.
+# Previous fuzzer runs (especially those killed by signals) leave
+# segments behind. Accumulation can cause shmget to fail or the
+# target to attach to stale segments.
+cleanup_shm() {
+    local before
+    before=$(ipcs -m 2>/dev/null | grep -c "$(whoami)" || true)
+    # Remove all segments owned by current user
+    ipcs -m 2>/dev/null | grep "$(whoami)" | awk '{print $2}' | while read -r shmid; do
+        ipcrm -m "$shmid" 2>/dev/null || true
+    done
+    local after
+    after=$(ipcs -m 2>/dev/null | grep -c "$(whoami)" || true)
+    if [[ "$before" -gt 0 ]]; then
+        echo "[*] Cleaned $((before - after)) orphaned SHM segments ($before -> $after)"
+    fi
+}
+
+# ── SHM verification ──────────────────────────────────────────────────
+# After a fuzzer run, verify that the SHM bitmap actually received data.
+# This is more reliable than checking log messages — it checks the
+# actual SHM segment that was created during the run.
+verify_shm() {
+    local log="$1"
+    local label="$2"
+
+    # Extract the SHM ID from the log
+    local shm_id
+    shm_id=$(grep -oP "SHM bitmap, id=\K[0-9]+" "$log" | tail -1)
+
+    if [[ -z "$shm_id" ]]; then
+        echo "FAIL: $label — no SHM ID found in log (coverage not enabled?)"
+        return 1
+    fi
+
+    # Try to attach and check if bitmap has any non-zero bytes
+    local has_data
+    has_data=$(python3 -c "
+import ctypes, ctypes.util
+libc = ctypes.CDLL(ctypes.util.find_library('c') or 'libc.so.6', use_errno=True)
+libc.shmat.restype = ctypes.c_void_p
+ptr = libc.shmat($shm_id, None, 0)
+if ptr is None or ptr == -1:
+    print('FAIL')
+else:
+    size = 4096  # default map size
+    bitmap = (ctypes.c_uint8 * size).from_address(ptr)
+    non_zero = sum(1 for i in range(size) if bitmap[i] != 0)
+    libc.shmdt(ptr)
+    if non_zero > 0:
+        print(f'OK:{non_zero}')
+    else:
+        print('EMPTY')
+" 2>/dev/null)
+
+    if [[ "$has_data" == FAIL ]]; then
+        echo "FAIL: $label — SHM segment $shm_id could not be attached"
+        return 1
+    elif [[ "$has_data" == EMPTY ]]; then
+        echo "FAIL: $label — SHM segment $shm_id has 0 non-zero bytes (coverage-blind)"
+        return 1
+    else
+        local nedges="${has_data#OK:}"
+        echo "[+] $label — SHM verified: $nedges non-zero bytes in bitmap"
+        return 0
+    fi
+}
+
 # ── Coverage-attachment sanity check ──────────────────────────────────
-# Verify that the SHM bitmap actually receives data before trusting
-# any "edges discovered" numbers. Without this, a silently-broken
-# SHM attachment produces 0 edges that look like legitimate "no coverage
-# found" rather than "coverage not attached."
+# Combine log-based and SHM-based checks for maximum reliability.
 check_coverage() {
     local log="$1"
     local label="$2"
 
-    # Check for explicit SHM failure messages
+    # Check for explicit SHM failure messages in the log
     if grep -qi "SHM not attached\|AFL shim area is NULL\|shmat.*failed\|Coverage data will be empty" "$log"; then
         echo "FAIL: $label — SHM coverage did not attach (coverage-blind run)"
-        echo "  This run produced meaningless edge counts. Re-run or investigate SHM setup."
         return 1
     fi
 
-    # Check for shm-edges = 0 when the run completed (not just initial seed replay)
-    local edges
-    edges=$(grep -oP "Edges discovered:\s+\K[0-9]+" "$log" | tail -1)
-    local execs
-    execs=$(grep -oP "Executions:\s+\K[0-9]+" "$log" | tail -1)
-
-    if [[ -n "$execs" && "$execs" -gt 500 && "${edges:-0}" -eq 0 ]]; then
-        echo "WARN: $label — 0 edges after ${execs} executions. Coverage may not be attached."
-        echo "  SHM bitmap received no writes. This likely means instrumentation failed."
+    # Verify actual SHM bitmap has data
+    if ! verify_shm "$log" "$label"; then
         return 1
     fi
 
@@ -50,8 +108,6 @@ check_coverage() {
 }
 
 # ── Run with retry ────────────────────────────────────────────────────
-# Run fuzzer and retry up to MAX_RETRIES times if coverage fails to attach.
-# Intermittent SHM failures happen under resource pressure.
 MAX_RETRIES=3
 
 run_with_retry() {
@@ -67,10 +123,10 @@ run_with_retry() {
             return 0
         fi
 
-        echo "[*] Coverage did not attach. Retrying (attempt $((attempt+1))/$MAX_RETRIES)..."
+        echo "[*] Coverage did not attach. Cleaning SHM and retrying..."
+        cleanup_shm
+        sleep 2
         attempt=$((attempt + 1))
-        # Brief pause to let IPC resources settle
-        sleep 1
     done
 
     echo "FAIL: Coverage failed to attach after $MAX_RETRIES attempts."
@@ -78,9 +134,12 @@ run_with_retry() {
     return 1
 }
 
-# Clean previous runs
+# ── Main ──────────────────────────────────────────────────────────────
+
+# Clean previous runs and orphaned SHM
 rm -rf "$BASELINE_DIR" "$ENHANCED_DIR"
 mkdir -p "$BASELINE_DIR" "$ENHANCED_DIR"
+cleanup_shm
 
 echo "============================================================"
 echo " Benchmark: baseline vs enhanced"
@@ -90,13 +149,17 @@ echo " Extra flags: ${EXTRA_FLAGS:-none}"
 echo "============================================================"
 echo ""
 
-# Run baseline (no features) with coverage-attachment check
+# Run baseline
 echo "[*] Running baseline (no features)..."
 run_with_retry /tmp/fuzz_bench_baseline.log \
     fuzz "$TARGET" -d "$BASELINE_DIR" -c -n "$ITERS"
 echo ""
 
-# Run enhanced (all features) with coverage-attachment check
+# Clean SHM between runs to prevent stale segment interference
+cleanup_shm
+sleep 1
+
+# Run enhanced
 echo "[*] Running enhanced (elo + meta-elo + bandit + mopt${EXTRA_FLAGS:+$EXTRA_FLAGS})..."
 run_with_retry /tmp/fuzz_bench_enhanced.log \
     fuzz "$TARGET" -d "$ENHANCED_DIR" -c -n "$ITERS" --elo --meta-elo --mc-bandit --mopt $EXTRA_FLAGS
