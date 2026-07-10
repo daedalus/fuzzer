@@ -159,8 +159,9 @@ class ShmCoverage:
         self.env_id = str(self.shm_id)
         self._seen = bytearray(new_size)
         # Rebuild cumulative from the copied bitmap (only old region has data)
+        old_bitmap = bytes(self._map)[:old_size]
         for i in range(old_size):
-            if self._map[i]:
+            if old_bitmap[i]:
                 self._seen[i] = 1
         self.cumulative_edges = sum(self._seen)
 
