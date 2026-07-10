@@ -2623,7 +2623,7 @@ class Fuzzer:
 
             sigs = list(self.crash_sigs.keys())
             frames = [self.crash_frames.get(s, []) for s in sigs]
-            clusters = cluster_crashes(sigs, frame_lists=frames, threshold=0.7)
+            clusters = cluster_crashes(sigs, frame_lists=frames, threshold=0.6)
             multi = [c for c in clusters if len(c) > 1]
             if multi:
                 print(f"  Crash clusters:    {len(multi)} group(s) from {len(sigs)} signatures")

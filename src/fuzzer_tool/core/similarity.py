@@ -328,12 +328,45 @@ def levenshtein_diff_offsets(a: bytes, b: bytes, max_ops: int = 30) -> list[int]
     return offsets
 
 
+def _levenshtein_tokens(a: list[str], b: list[str]) -> int:
+    """Levenshtein distance on token sequences (list of strings).
+
+    O(len(a) * len(b)) time, O(min(len(a), len(b))) space.
+    """
+    if a == b:
+        return 0
+    if not a:
+        return len(b)
+    if not b:
+        return len(a)
+
+    if len(a) > len(b):
+        a, b = b, a
+
+    prev = list(range(len(a) + 1))
+    curr = [0] * (len(a) + 1)
+
+    for j in range(1, len(b) + 1):
+        curr[0] = j
+        for i in range(1, len(a) + 1):
+            cost = 0 if a[i - 1] == b[j - 1] else 1
+            curr[i] = min(
+                prev[i] + 1,
+                curr[i - 1] + 1,
+                prev[i - 1] + cost,
+            )
+        prev, curr = curr, prev
+
+    return prev[len(a)]
+
+
 def frame_sequence_similarity(frames_a: list[str], frames_b: list[str]) -> float:
-    """Levenshtein similarity on frame sequences (order-aware).
+    """Levenshtein similarity on frame sequences (order-aware, token-level).
 
     Unlike Jaccard on frame sets (which discards call order), this
     correctly distinguishes A->B->C from C->B->A while still tolerating
-    one extra inlined frame (a single insertion gives small edit distance).
+    one extra inlined frame (a single token insertion gives small edit
+    distance, not the byte-level explosion that joined-string Levenshtein produces).
 
     Args:
         frames_a: Stack frame names from crash A (in call order).
@@ -345,10 +378,11 @@ def frame_sequence_similarity(frames_a: list[str], frames_b: list[str]) -> float
     norm_a = [normalize_frame(f) for f in frames_a[:8]]
     norm_b = [normalize_frame(f) for f in frames_b[:8]]
 
-    # Treat frames as tokens, compute Levenshtein on token sequences
-    token_a = "\x00".join(norm_a).encode()
-    token_b = "\x00".join(norm_b).encode()
-    return levenshtein_similarity(token_a, token_b)
+    if not norm_a and not norm_b:
+        return 1.0
+    dist = _levenshtein_tokens(norm_a, norm_b)
+    max_len = max(len(norm_a), len(norm_b))
+    return 1.0 - dist / max_len if max_len > 0 else 1.0
 
 
 def find_nearest_bytes(
