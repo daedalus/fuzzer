@@ -2192,6 +2192,62 @@ class Fuzzer:
 
         return front
 
+    def _pick_from_pareto_front(
+        self, weights: list[float], now: float
+    ) -> bytes:
+        """Select a seed using Pareto frontier sampling.
+
+        When the Pareto front (non-dominated seeds on the
+        novelty/freshness/diversity frontier) contains enough seeds,
+        sample from the front using the existing weights. This makes
+        tradeoffs visible: a seed that's moderately novel but very fresh
+        beats one that's highly novel but stale, because freshness is an
+        independent axis.
+
+        Falls back to full corpus selection when:
+        - Fewer than 3 seeds in the corpus
+        - Fewer than 2 seeds on the Pareto front (frontier too small
+          to be meaningful — likely all seeds are comparable)
+        - No edge tracker data available
+
+        Args:
+            weights: Pre-computed selection weights.
+            now: Current timestamp for freshness computation.
+
+        Returns:
+            Selected seed bytes.
+        """
+        if len(self.corpus) < 3 or not self.seed_meta:
+            return random.choices(self.corpus, weights=weights, k=1)[0]
+
+        # Compute Pareto objective scores for all seeds
+        pareto_scores: list[tuple[float, float, float]] = []
+        for seed in self.corpus:
+            meta = self.seed_meta.get(seed)
+            if meta is None:
+                pareto_scores.append((1.0, 1.0, 1.0))
+                continue
+            seed_key = self._seed_key(seed)
+            sub, div, spa, _cov = self._cached_weights.get(
+                seed_key, (1.0, 1.0, 1.0, 0.5)
+            )
+            age = now - meta["added_at"]
+            burst = max(1.0, 1.0 + self._temperature * (5.0 - 1.0) - (age / 60.0) * self._temperature)
+            pareto_scores.append((sub, burst, spa))
+
+        # Find the Pareto front
+        front = self._pareto_front(pareto_scores, window=100)
+
+        if len(front) >= 2:
+            # Sample from the Pareto front using weights
+            front_indices = sorted(front)
+            front_weights = [weights[i] for i in front_indices]
+            front_seeds = [self.corpus[i] for i in front_indices]
+            return random.choices(front_seeds, weights=front_weights, k=1)[0]
+        else:
+            # Frontier too small — fall back to full corpus
+            return random.choices(self.corpus, weights=weights, k=1)[0]
+
     def _weighted_pick_seed(self) -> bytes:
         now = time.time()
 
@@ -2241,7 +2297,12 @@ class Fuzzer:
             weights = self._compute_weights(now)
             self._weight_cache = weights
 
-        selected = random.choices(self.corpus, weights=weights, k=1)[0]
+        # Pareto frontier selection: when enough seeds are non-dominated,
+        # sample from the frontier rather than the full corpus. This makes
+        # the tradeoff structure visible in selection — a seed that's
+        # moderately novel but very fresh gets selected over one that's
+        # highly novel but stale, because freshness is an independent axis.
+        selected = self._pick_from_pareto_front(weights, now)
 
         # Track selected seed's edges for diversity penalty next time
         sel_key = self._seed_key(selected)
