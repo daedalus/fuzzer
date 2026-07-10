@@ -8,6 +8,8 @@ import pytest
 
 TARGET_SRC = Path(__file__).parent.parent / "targets" / "test_target.c"
 TARGET_BIN = Path(__file__).parent.parent / "targets" / "test_target"
+ASAN_SRC = Path(__file__).parent.parent / "targets" / "asan_target.c"
+ASAN_BIN = Path(__file__).parent.parent / "targets" / "asan_target"
 
 
 @pytest.fixture(scope="module")
@@ -21,6 +23,19 @@ def compiled_target():
         )
         assert result.returncode == 0, f"Compilation failed: {result.stderr}"
     yield str(TARGET_BIN)
+
+
+@pytest.fixture(scope="module")
+def compiled_asan_target():
+    """Compile asan_target.c with ASAN if not already built."""
+    if not ASAN_BIN.exists() or ASAN_SRC.stat().st_mtime > ASAN_BIN.stat().st_mtime:
+        result = subprocess.run(
+            ["gcc", "-g", "-fsanitize=address", "-o", str(ASAN_BIN), str(ASAN_SRC)],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, f"ASAN compilation failed: {result.stderr}"
+    yield str(ASAN_BIN)
 
 
 class TestIntegration:
@@ -139,3 +154,57 @@ class TestIntegration:
             assert len(unique_kept) == 1, (
                 f"Unique crash input should be kept, found {len(unique_kept)}"
             )
+
+    def test_asan_finds_heap_buffer_overflow(self, compiled_asan_target):
+        """Fuzz ASAN-instrumented target and verify heap-buffer-overflow detected."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            corpus_dir = Path(tmpdir) / "corpus"
+            crashes_dir = Path(tmpdir) / "crashes"
+            corpus_dir.mkdir()
+            crashes_dir.mkdir()
+
+            # Seed with "BUG!H" to trigger heap-buffer-overflow quickly
+            (corpus_dir / "seed").write_bytes(b"BUG!H")
+
+            result = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "fuzzer_tool",
+                    "fuzz",
+                    compiled_asan_target,
+                    "-d",
+                    str(corpus_dir),
+                    "-o",
+                    str(crashes_dir),
+                    "-n",
+                    "100",
+                    "-t",
+                    "2",
+                    "-s",
+                    "42",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            assert result.returncode == 0, f"Fuzzer failed: {result.stderr}"
+            crash_files = list(crashes_dir.glob("crash_*"))
+            assert len(crash_files) > 0, (
+                f"No crashes found in {crashes_dir}. Output:\n{result.stdout}"
+            )
+
+            # Verify crash is identified as heap-buffer-overflow
+            bin_files = [f for f in crash_files if f.suffix == ".bin"]
+            assert len(bin_files) > 0, "No .bin crash files found"
+            assert any("heapbufferoverflow" in f.name for f in bin_files), (
+                f"Expected heap-buffer-overflow in crash filenames, got: {[f.name for f in bin_files]}"
+            )
+
+            # Verify crash report contains ASAN output
+            txt_files = [f for f in crash_files if f.suffix == ".txt"]
+            assert len(txt_files) > 0, "No .txt crash reports found"
+            report = txt_files[0].read_text()
+            assert "AddressSanitizer" in report, f"Missing AddressSanitizer in report"
+            assert "heap-buffer-overflow" in report, f"Missing heap-buffer-overflow in report"

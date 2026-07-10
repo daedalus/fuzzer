@@ -110,6 +110,9 @@ fuzzer-tool fuzz --markov --markov-gen --mc-bandit --mc-cem ./target
 # Grammar-aware PNG fuzzing
 fuzzer-tool fuzz targets/png_read -c -D dictionaries/png.dict -g dictionaries/png.gram
 
+# ASAN fuzzing (catches heap-buffer-overflow, use-after-free, etc.)
+fuzzer-tool fuzz targets/asan_target --asan
+
 # Resume a previous fuzzing session
 fuzzer-tool fuzz ./target -c --resume
 

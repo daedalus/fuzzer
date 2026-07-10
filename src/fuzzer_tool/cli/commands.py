@@ -797,6 +797,11 @@ def main() -> int:
         help="Direct ctypes.CDLL call — zero overhead, target must not SIGSEGV",
     )
     fuzz_parser.add_argument(
+        "--asan",
+        action="store_true",
+        help="Preload AddressSanitizer runtime (LD_PRELOAD=libasan.so)",
+    )
+    fuzz_parser.add_argument(
         "--inprocess-func",
         default="LLVMFuzzerTestOneInput",
         help="Function name for in-process mode (default: LLVMFuzzerTestOneInput)",
