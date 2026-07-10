@@ -167,6 +167,7 @@ class Fuzzer:
         secretary_window=500,
         secretary_exploration=None,
         elo=False,
+        meta_elo=False,
     ):
         self.target = target
         # Record boot time at init — before any child processes are spawned.
@@ -200,11 +201,13 @@ class Fuzzer:
 
         # Auto-size edge bitmap from branch density
         from fuzzer_tool.core.elf import estimate_map_size
+
         self.map_size = estimate_map_size(target)
 
         # Static analysis: profile target for string extraction, function
         # boundaries, input format hints, and call graph structure.
         from fuzzer_tool.core.target_profiler import TargetProfiler
+
         self._profile = TargetProfiler(target).profile()
 
         # Auto-populate dictionary from extracted strings and magic bytes
@@ -279,6 +282,7 @@ class Fuzzer:
 
         # Execution time tracking for adaptive timeout calibration
         from fuzzer_tool.core.execution_time import ExecutionTimeTracker
+
         self._exec_time_tracker = ExecutionTimeTracker()
 
         # Kernel-level crash verification via dmesg
@@ -358,7 +362,11 @@ class Fuzzer:
         self._use_shapley = shapley
         self._shapley = ShapleyAttribution(n_samples=100, window_size=500) if shapley else None
         self._use_mi = mi_guided
-        self._mi = MutualInformationTracker(max_positions=max_len, min_observations=50) if mi_guided else None
+        self._mi = (
+            MutualInformationTracker(max_positions=max_len, min_observations=50)
+            if mi_guided
+            else None
+        )
         # Load persisted MI state
         if self._use_mi and self._mi and self._mi_path.exists():
             self._mi.load(str(self._mi_path))
@@ -370,6 +378,7 @@ class Fuzzer:
         self._te_byte_edges: dict[int, dict[int, int]] = {}  # pos → {edge: count}
         if transfer_entropy:
             from fuzzer_tool.core.transfer_entropy import TransferEntropy
+
             self._te = TransferEntropy(history_length=1)
             self._te_input_history: list[bytes] = []
             self._te_edge_history: list[bytes] = []
@@ -382,6 +391,7 @@ class Fuzzer:
         self._elo = None
         if elo:
             from fuzzer_tool.core.elo import EloTracker
+
             self._elo = EloTracker(k_factor=16, decay=0.99, crash_track=True, min_matches=10)
             self._elo_path = self.corpus_dir / "elo.json"
             if self._elo_path.exists():
@@ -391,13 +401,18 @@ class Fuzzer:
             self._elo_decay_interval = 100  # apply decay every N iterations
             self._elo_match_window: list[tuple[str, str, float, bool]] = []
 
+        # Meta-scheduler: Elo arbitrates between bandit and MOpt
+        self._use_meta_elo = meta_elo and elo and mc_bandit and mopt
+        self._meta_strategy: str | None = None
+        if self._use_meta_elo:
+            log.info("Meta-scheduler enabled: Elo arbitrating bandit vs MOpt")
+            self._meta_strategy_choices: list[str] = []
+
         # Secretary-problem optimal stopping
         self._secretary = secretary
         self._secretary_window = secretary_window
         self._secretary_exploration = (
-            secretary_exploration
-            if secretary_exploration is not None
-            else DEFAULT_EXPLORATION_FRAC
+            secretary_exploration if secretary_exploration is not None else DEFAULT_EXPLORATION_FRAC
         )
         self._seed_secretary: dict[str, SecretaryStopping] = {}
         self._op_secretary: dict[str, SecretaryStopping] = {}
@@ -417,12 +432,17 @@ class Fuzzer:
         self._anneal_progress = 0.0  # 0.0 = pure coverage, 1.0 = pure distance
         if targets:
             from fuzzer_tool.core.distance import TargetDistance
+
             self._distance = TargetDistance(target, targets)
             if self._distance.load():
-                print(f"[*] Directed mode: {len(self._distance.target_addrs)} target(s), "
-                      f"{len(self._distance.functions)} functions mapped")
+                print(
+                    f"[*] Directed mode: {len(self._distance.target_addrs)} target(s), "
+                    f"{len(self._distance.functions)} functions mapped"
+                )
             else:
-                print("[!] Directed mode: failed to load target distances, falling back to coverage")
+                print(
+                    "[!] Directed mode: failed to load target distances, falling back to coverage"
+                )
                 self._distance = None
 
         # Simulated annealing temperature schedule
@@ -639,8 +659,7 @@ class Fuzzer:
                 rm_ser = sm.get("redqueen_matches", [])
                 if rm_ser:
                     self.seed_meta[seed]["redqueen_matches"] = [
-                        (m[0], bytes.fromhex(m[1]), bytes.fromhex(m[2]))
-                        for m in rm_ser
+                        (m[0], bytes.fromhex(m[1]), bytes.fromhex(m[2])) for m in rm_ser
                     ]
         self._edge_tracker.load(str(self._edge_tracker_path))
         if self.resume:
@@ -909,6 +928,7 @@ class Fuzzer:
         if not kernel_hits:
             # Let the stream reader consume /dev/kmsg
             import time as _time
+
             _time.sleep(0.05)
             kernel_hits = self._dmesg.drain_stream(pid=child_pid)
         if not kernel_hits:
@@ -922,7 +942,9 @@ class Fuzzer:
                 self._kernel_crashes.append(kc)
                 log.info(
                     "Kernel crash verified: %s at ip=%s (ts=%.3f)",
-                    kc.crash_type, kc.ip or "?", kc.timestamp,
+                    kc.crash_type,
+                    kc.ip or "?",
+                    kc.timestamp,
                 )
             return True
         return False
@@ -982,18 +1004,33 @@ class Fuzzer:
         ops.append("png_chunk_mutate")
         # Redqueen: if we know which bytes caused branch comparisons, prefer flipping them
         parent_meta = self.seed_meta.get(data)
-        if parent_meta and (parent_meta.get("redqueen_matches") or parent_meta.get("redqueen_offsets")):
+        if parent_meta and (
+            parent_meta.get("redqueen_matches") or parent_meta.get("redqueen_offsets")
+        ):
             ops.append("redqueen")
 
         self._last_ops_used = []
         self._last_mopt_particles = []  # particle_id per op, for mopt attribution
         if not hasattr(self, "_prev_bandit_op"):
             self._prev_bandit_op = None
+        self._meta_strategy = None
 
         for _ in range(self.mutations_per_input):
             if self._use_replicator and self._replicator:
                 op = self._replicator.select_op(ops)
                 self._last_mopt_particles.append(None)
+            elif self._use_meta_elo and self._elo and self.mc and self._mopt:
+                bandit_op = self.mc.select_op(ops, prev_op=self._prev_bandit_op)
+                mopt_op, mopt_pid = self._mopt.select_op(ops)
+                strategy = self._elo.select_strategy(["bandit", "mopt"])
+                self._meta_strategy = strategy
+                if strategy == "bandit":
+                    op = bandit_op
+                    self._prev_bandit_op = op
+                    self._last_mopt_particles.append(None)
+                else:
+                    op = mopt_op
+                    self._last_mopt_particles.append(mopt_pid)
             elif self._use_mopt and self._mopt:
                 op, pid = self._mopt.select_op(ops)
                 self._last_mopt_particles.append(pid)
@@ -1008,7 +1045,11 @@ class Fuzzer:
 
             # Position selection: MI, TE, or random
             if buf:
-                te_pos = self._get_te_weighted_position(len(buf)) if self._use_transfer_entropy and self._te else None
+                te_pos = (
+                    self._get_te_weighted_position(len(buf))
+                    if self._use_transfer_entropy and self._te
+                    else None
+                )
                 mi_pos = self._mi.weighted_position(len(buf)) if self._use_mi and self._mi else None
                 if te_pos is not None and mi_pos is not None:
                     # Blend: 50% TE, 50% MI
@@ -1120,6 +1161,7 @@ class Fuzzer:
 
             elif op == "checksum_repair" and buf and len(buf) >= 4:
                 import zlib
+
                 # Try CRC32 at end (4 bytes, big-endian)
                 pos = random.randint(0, max(0, len(buf) - 4))
                 data_portion = bytes(buf[:pos])
@@ -1159,6 +1201,7 @@ class Fuzzer:
 
             elif op == "crossover" and len(self.corpus) >= 2 and buf:
                 from fuzzer_tool.core.mutations import crossover
+
                 a = random.choice(self.corpus)
                 b = random.choice(self.corpus)
                 if a is not data and b is not data:
@@ -1171,54 +1214,67 @@ class Fuzzer:
 
             elif op == "type_replace" and buf:
                 from fuzzer_tool.core.mutations import type_replace
+
                 buf = bytearray(type_replace(bytes(buf))[: self.max_len])
 
             elif op == "ascii_num" and buf:
                 from fuzzer_tool.core.mutations import ascii_num_replace
+
                 buf = bytearray(ascii_num_replace(bytes(buf))[: self.max_len])
 
             elif op == "byte_shuffle" and buf and len(buf) > 1:
                 from fuzzer_tool.core.mutations import byte_shuffle
+
                 buf = bytearray(byte_shuffle(bytes(buf))[: self.max_len])
 
             elif op == "byte_delete" and buf and len(buf) > 1:
                 from fuzzer_tool.core.mutations import byte_delete
+
                 buf = bytearray(byte_delete(bytes(buf))[: self.max_len])
 
             elif op == "byte_insert" and buf and len(buf) < self.max_len:
                 from fuzzer_tool.core.mutations import byte_insert
+
                 buf = bytearray(byte_insert(bytes(buf), self.max_len)[: self.max_len])
 
             elif op == "insert_ascii_num" and buf and len(buf) < self.max_len:
                 from fuzzer_tool.core.mutations import insert_ascii_num
+
                 buf = bytearray(insert_ascii_num(bytes(buf), self.max_len)[: self.max_len])
 
             elif op == "transpose_16" and len(buf) >= 2:
                 from fuzzer_tool.core.mutations import transpose_bytes
+
                 buf = bytearray(transpose_bytes(bytes(buf), 2)[: self.max_len])
 
             elif op == "transpose_32" and len(buf) >= 4:
                 from fuzzer_tool.core.mutations import transpose_bytes
+
                 buf = bytearray(transpose_bytes(bytes(buf), 4)[: self.max_len])
 
             elif op == "transpose_64" and len(buf) >= 8:
                 from fuzzer_tool.core.mutations import transpose_bytes
+
                 buf = bytearray(transpose_bytes(bytes(buf), 8)[: self.max_len])
 
             elif op == "bit_transpose_8" and buf:
                 from fuzzer_tool.core.mutations import bit_transpose
+
                 buf = bytearray(bit_transpose(bytes(buf), 1)[: self.max_len])
 
             elif op == "bit_transpose_16" and len(buf) >= 2:
                 from fuzzer_tool.core.mutations import bit_transpose
+
                 buf = bytearray(bit_transpose(bytes(buf), 2)[: self.max_len])
 
             elif op == "bit_transpose_32" and len(buf) >= 4:
                 from fuzzer_tool.core.mutations import bit_transpose
+
                 buf = bytearray(bit_transpose(bytes(buf), 4)[: self.max_len])
 
             elif op == "bit_transpose_64" and len(buf) >= 8:
                 from fuzzer_tool.core.mutations import bit_transpose
+
                 buf = bytearray(bit_transpose(bytes(buf), 8)[: self.max_len])
 
             elif op == "length_grow" and buf and len(buf) < self.max_len:
@@ -1268,7 +1324,8 @@ class Fuzzer:
 
             elif op == "grammar_tree_mutate" and self.grammar:
                 from fuzzer_tool.core.grammar import TreeMutator
-                if not hasattr(self, '_tree_mutator'):
+
+                if not hasattr(self, "_tree_mutator"):
                     self._tree_mutator = TreeMutator(self.grammar)
                 tree = self._tree_mutator.parse(bytes(buf))
                 mutated = self._tree_mutator.mutate_tree(tree, max_len=self.max_len)
@@ -1276,7 +1333,8 @@ class Fuzzer:
 
             elif op == "png_chunk_mutate":
                 from fuzzer_tool.core.png_mutations import PngChunkMutator, parse_png_chunks
-                if not hasattr(self, '_png_mutator'):
+
+                if not hasattr(self, "_png_mutator"):
                     self._png_mutator = PngChunkMutator()
                 # Only apply if input looks like PNG, otherwise generate one
                 if parse_png_chunks(bytes(buf)):
@@ -1290,11 +1348,11 @@ class Fuzzer:
                 # This lets mutations pass CRC validation and reach deeper
                 # decompression/code paths that CRC-corrupting mutations miss.
                 from fuzzer_tool.core.png_mutations import parse_png_chunks, serialize_png_chunks
+
                 chunks = parse_png_chunks(bytes(buf))
                 if chunks and len(chunks) > 1:
                     # Pick a non-IEND chunk to mutate
-                    candidates = [i for i, c in enumerate(chunks)
-                                  if c.chunk_type != b"IEND"]
+                    candidates = [i for i, c in enumerate(chunks) if c.chunk_type != b"IEND"]
                     if candidates:
                         idx = random.choice(candidates)
                         chunk = chunks[idx]
@@ -1307,8 +1365,9 @@ class Fuzzer:
                             chunk.data = bytes(data)
                         else:
                             # Empty chunk: add some data
-                            chunk.data = bytes(random.randint(0, 255)
-                                               for _ in range(random.randint(1, 32)))
+                            chunk.data = bytes(
+                                random.randint(0, 255) for _ in range(random.randint(1, 32))
+                            )
                         # Serialize with fixed CRC (chunk.serialize() recomputes)
                         buf = bytearray(serialize_png_chunks(chunks)[: self.max_len])
 
@@ -1376,6 +1435,7 @@ class Fuzzer:
             del buf[idx : idx + size]
         elif op == 5 and len(buf) >= 4:
             import zlib
+
             pos = random.randint(0, max(0, len(buf) - 4))
             buf[pos : pos + 4] = zlib.crc32(bytes(buf[:pos])).to_bytes(4, "big")
         elif op == 6 and len(buf) >= 2:
@@ -1466,8 +1526,12 @@ class Fuzzer:
 
         self._total_corpus_attempts += 1
         if save_to_corpus(
-            data, self.corpus_dir, self.seen_hashes, self.bloom,
-            parent=parent, lineage_depth=parent_depth,
+            data,
+            self.corpus_dir,
+            self.seen_hashes,
+            self.bloom,
+            parent=parent,
+            lineage_depth=parent_depth,
         ):
             self.corpus.append(data)
             self.seed_meta[data] = {
@@ -1627,8 +1691,7 @@ class Fuzzer:
         # (seeds that discovered at least one edge). This ensures every
         # discovered edge retains at least one covering seed.
         productive = sum(
-            1 for seed in unique
-            if self.seed_meta.get(seed, {}).get("coverage_edges", 0) > 0
+            1 for seed in unique if self.seed_meta.get(seed, {}).get("coverage_edges", 0) > 0
         )
         if productive > 0:
             target_size = max(target_size, productive)
@@ -1672,6 +1735,7 @@ class Fuzzer:
             pruned_dir = self.corpus_dir / "pruned"
             pruned_dir.mkdir(parents=True, exist_ok=True)
             from fuzzer_tool.adapters.filesystem import hash_data as _hash
+
             kept_set = {_hash(s) for s in unique}
             for f in self.corpus_dir.iterdir():
                 if not f.is_file():
@@ -1709,6 +1773,7 @@ class Fuzzer:
             # Reduce markov generation rate when model has plateaued
             # Use KS-aware threshold instead of fixed JS < 0.01
             from fuzzer_tool.core.edge_tracker import ks_significance_threshold
+
             plateau_threshold = ks_significance_threshold(
                 max(1, self.markov._contexts_seen), alpha=0.05
             )
@@ -1717,7 +1782,7 @@ class Fuzzer:
             # Perplexity gate: if model's average perplexity on corpus is high
             # (>200), it hasn't learned the format well — generate more to
             # explore. If low (<10), the model is well-calibrated — generate less.
-            if not hasattr(self, '_last_corpus_pp'):
+            if not hasattr(self, "_last_corpus_pp"):
                 self._last_corpus_pp = 256.0
             if self.exec_count % 500 == 0 and self.corpus:
                 pp_stats = self.markov.corpus_perplexity(self.corpus)
@@ -1756,6 +1821,7 @@ class Fuzzer:
         if fmt == "png":
             # Minimal valid PNG: signature + IHDR + IEND
             import binascii
+
             ihdr_data = b"\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02"  # 1x1, 8-bit RGB
             ihdr_chunk = b"IHDR" + ihdr_data
             ihdr_crc = struct.pack(">I", binascii.crc32(ihdr_chunk))
@@ -1763,8 +1829,12 @@ class Fuzzer:
             iend_crc = struct.pack(">I", binascii.crc32(iend_chunk))
             return (
                 b"\x89PNG\r\n\x1a\n"
-                + struct.pack(">I", len(ihdr_data)) + ihdr_chunk + ihdr_crc
-                + struct.pack(">I", 0) + iend_chunk + iend_crc
+                + struct.pack(">I", len(ihdr_data))
+                + ihdr_chunk
+                + ihdr_crc
+                + struct.pack(">I", 0)
+                + iend_chunk
+                + iend_crc
             )
         if fmt == "text":
             # Text-like: common delimiters and keywords from the target
@@ -1833,8 +1903,10 @@ class Fuzzer:
                 if stop:
                     w *= 0.01
             if seed_key not in self._cached_weights:
-                if (seed_key in self._edge_tracker.seed_edges
-                        and self._edge_tracker.seed_edges[seed_key]):
+                if (
+                    seed_key in self._edge_tracker.seed_edges
+                    and self._edge_tracker.seed_edges[seed_key]
+                ):
                     sub = self._edge_tracker.compute_subsumption_weight(seed_key)
                     div = self._edge_tracker.compute_hitcount_diversity_weight(seed_key)
                     spa = self._edge_tracker.compute_wasserstein_weight(seed_key)
@@ -1852,8 +1924,7 @@ class Fuzzer:
             seed_edges = self._edge_tracker.seed_edges.get(seed_key, set())
             if seed_edges:
                 rare_count = sum(
-                    1 for e in seed_edges
-                    if self._edge_tracker._global_edge_hits.get(e, 0) <= 2
+                    1 for e in seed_edges if self._edge_tracker._global_edge_hits.get(e, 0) <= 2
                 )
                 if rare_count > 0:
                     w *= 1.0 + rare_count * 0.5
@@ -1888,7 +1959,7 @@ class Fuzzer:
             # Signal 5: Edge diversity — penalize seeds whose edges overlap
             # with recently-selected seeds. Encourages exploring different
             # code regions instead of re-fuzzing the same paths.
-            if seed_edges and hasattr(self, '_recent_seed_edges'):
+            if seed_edges and hasattr(self, "_recent_seed_edges"):
                 overlap = 0
                 for recent in self._recent_seed_edges:
                     overlap += len(seed_edges & recent)
@@ -1942,7 +2013,7 @@ class Fuzzer:
 
         # Edge diversity: track recently selected seeds' edges and penalize
         # overlap. This encourages exploring different code regions.
-        if not hasattr(self, '_recent_seed_edges'):
+        if not hasattr(self, "_recent_seed_edges"):
             self._recent_seed_edges: list[set[int]] = []
             self._recent_seed_max = 20
 
@@ -1954,7 +2025,7 @@ class Fuzzer:
         #     corpus grows; fully invalidated when edges change.
         corpus_version = len(self.corpus)
         edge_version = self.shm_cov.cumulative_edges if self.shm_cov else 0
-        if not hasattr(self, '_weight_cache'):
+        if not hasattr(self, "_weight_cache"):
             self._weight_cache = None
             self._weight_cache_key = (-1, -1)
             self._cached_weights = {}
@@ -2056,7 +2127,7 @@ class Fuzzer:
         if self._cmplog:
             new_tokens = self._cmplog.collect_tokens()
             cmplog_found = bool(new_tokens)
-            if not hasattr(self, '_dict_set'):
+            if not hasattr(self, "_dict_set"):
                 self._dict_set = set(self.dictionary)
                 self._dict_eps_window: list[float] = []
                 self._dict_last_prune = 0
@@ -2138,7 +2209,7 @@ class Fuzzer:
         )
 
         # Write ablation log row: signal data + outcome
-        if self._ablation_file and hasattr(self, '_last_pick_signals'):
+        if self._ablation_file and hasattr(self, "_last_pick_signals"):
             ps = self._last_pick_signals
             self._ablation_file.write(
                 f"{self.exec_count},{ps['seed_idx']},{ps['seed_hash']},"
@@ -2181,9 +2252,7 @@ class Fuzzer:
                 edge_pairs = {(i, i) for i in hit_bbs}  # self-loops as BB proxies
                 self._edge_tracker.record_edge_trace(seed_key, edge_pairs)
                 # Compute average distance
-                avg_dist = self._distance.seed_distance(
-                    {(i, i) for i in hit_bbs}
-                )
+                avg_dist = self._distance.seed_distance({(i, i) for i in hit_bbs})
                 meta["avg_distance"] = avg_dist
 
         # Update annealing progress for directed mode
@@ -2220,7 +2289,7 @@ class Fuzzer:
                         rate = a / (a + b)
                         self._op_secretary[op].observe(rate)
 
-        if self._mopt:
+        if self._mopt and (not self._use_meta_elo or self._meta_strategy == "mopt"):
             seen = set()
             for op, pid in zip(self._last_ops_used, self._last_mopt_particles, strict=False):
                 if op not in seen:
@@ -2241,10 +2310,16 @@ class Fuzzer:
             if winners:
                 self._elo.record_round(unique_ops, winners, crash=is_crash)
             # Apply periodic decay
-            self._elo_decay_counter = getattr(self, '_elo_decay_counter', 0) + 1
+            self._elo_decay_counter = getattr(self, "_elo_decay_counter", 0) + 1
             if self._elo_decay_counter >= self._elo_decay_interval:
                 self._elo_decay_counter = 0
                 self._elo.apply_decay()
+
+        # Meta-elo: record strategy-level match (bandit vs MOpt)
+        if self._use_meta_elo and self._elo and self._meta_strategy:
+            other = "mopt" if self._meta_strategy == "bandit" else "bandit"
+            score = 1.0 if success else 0.0
+            self._elo.record_strategy_match(self._meta_strategy, other, score)
 
         if self._use_shapley and self._shapley:
             edge_bitmap = self._get_current_edge_bitmap()
@@ -2263,8 +2338,8 @@ class Fuzzer:
                 self._te_input_history.append(data[:64] if len(data) > 64 else data)
                 self._te_edge_history.append(edge_bitmap)
                 if len(self._te_input_history) > self._te_history_max:
-                    self._te_input_history = self._te_input_history[-self._te_history_max:]
-                    self._te_edge_history = self._te_edge_history[-self._te_history_max:]
+                    self._te_input_history = self._te_input_history[-self._te_history_max :]
+                    self._te_edge_history = self._te_edge_history[-self._te_history_max :]
                 # Update byte→edge causal map periodically
                 if len(self._te_input_history) % 100 == 0 and len(self._te_input_history) > 50:
                     self._update_te_causal_map()
@@ -2297,23 +2372,30 @@ class Fuzzer:
                 self.mc.add_elite(mutated, 2)
                 self.mc.maybe_refit()
             # Periodic minimization based on edge stats
-            if (self.minimize_every_execs > 0
-                    and (self.exec_count - self._exec_baseline) % self.minimize_every_execs == 0
-                    and len(self.corpus) > 1):
+            if (
+                self.minimize_every_execs > 0
+                and (self.exec_count - self._exec_baseline) % self.minimize_every_execs == 0
+                and len(self.corpus) > 1
+            ):
                 self._auto_minimize_corpus()
             return True
 
         # Periodic minimization (also for non-interesting iterations)
-        if (self.minimize_every_execs > 0
-                and (self.exec_count - self._exec_baseline) % self.minimize_every_execs == 0
-                and len(self.corpus) > 1):
+        if (
+            self.minimize_every_execs > 0
+            and (self.exec_count - self._exec_baseline) % self.minimize_every_execs == 0
+            and len(self.corpus) > 1
+        ):
             self._auto_minimize_corpus()
 
         return False
 
     def _record_discovery_snapshot(self):
         _record_discovery_snapshot_fn(
-            self.exec_count, self.shm_cov, self.ptrace_cov, self._discovery_history,
+            self.exec_count,
+            self.shm_cov,
+            self.ptrace_cov,
+            self._discovery_history,
         )
 
     def discovery_rate(self) -> float:
@@ -2321,8 +2403,13 @@ class Fuzzer:
 
     def _run_crash_replays(self, budget_ms: float = 200):
         _run_crash_replays_fn(
-            self.crashes_dir, self.target, self.timeout,
-            self._crash_replays, self.replay_n, self._seed_key, budget_ms,
+            self.crashes_dir,
+            self.target,
+            self.timeout,
+            self._crash_replays,
+            self.replay_n,
+            self._seed_key,
+            budget_ms,
         )
 
     def _print_run_summary(self):
@@ -2376,7 +2463,8 @@ class Fuzzer:
             edges_per_seed = [m.get("coverage_edges", 0) for m in self.seed_meta.values()]
             productive = sum(1 for e in edges_per_seed if e > 0)
             stale = sum(
-                1 for m in self.seed_meta.values()
+                1
+                for m in self.seed_meta.values()
                 if m.get("fuzz_count", 0) >= 50 and m.get("coverage_edges", 0) == 0
             )
             total_seeds = len(self.seed_meta)
@@ -2386,8 +2474,10 @@ class Fuzzer:
         # Edge rarity stats
         rarity = self._edge_tracker.edge_rarity_stats()
         if rarity["total"] > 0:
-            print(f"  Edge rarity:       {rarity['singleton']} singleton / "
-                  f"{rarity['cold']} cold / {rarity['warm']} warm / {rarity['hot']} hot")
+            print(
+                f"  Edge rarity:       {rarity['singleton']} singleton / "
+                f"{rarity['cold']} cold / {rarity['warm']} warm / {rarity['hot']} hot"
+            )
             print(f"  Avg seeds/edge:    {rarity['avg_seeds_per_edge']:.1f}")
 
             # Seed uniqueness: how many singleton edges each seed covers
@@ -2399,15 +2489,15 @@ class Fuzzer:
             # Top co-occurring edges
             cooccur = self._edge_tracker.edge_cooccurrence(top_k=3)
             if cooccur:
-                pairs_str = ", ".join(
-                    f"e{a}↔e{b}({j:.0%})" for a, b, j in cooccur
-                )
+                pairs_str = ", ".join(f"e{a}↔e{b}({j:.0%})" for a, b, j in cooccur)
                 print(f"  Edge co-occurrence:{pairs_str}")
 
         # Input size distribution
         if self._corpus_size_history:
             s = sorted(self._corpus_size_history)
-            print(f"  Input sizes:       min={s[0]} p50={s[len(s)//2]} p90={s[-len(s)//10]} max={s[-1]}")
+            print(
+                f"  Input sizes:       min={s[0]} p50={s[len(s) // 2]} p90={s[-len(s) // 10]} max={s[-1]}"
+            )
 
         # Crash summary
         print(f"  Crashes:           {self.crash_count} ({len(self.crash_sigs)} unique)")
@@ -2419,8 +2509,10 @@ class Fuzzer:
         if self.op_counts:
             print("\n  Operator ROI:")
             print(f"    {'Operator':<22s} {'Count':>7s} {'Success':>8s} {'Rate':>7s}")
-            print(f"    {'-'*22} {'-'*7} {'-'*8} {'-'*7}")
-            for op, count in sorted(self.op_counts.items(), key=lambda x: -self.op_success.get(x[0], 0))[:8]:
+            print(f"    {'-' * 22} {'-' * 7} {'-' * 8} {'-' * 7}")
+            for op, count in sorted(
+                self.op_counts.items(), key=lambda x: -self.op_success.get(x[0], 0)
+            )[:8]:
                 succ = self.op_success.get(op, 0)
                 rate = succ / count * 100 if count else 0
                 print(f"    {op:<22s} {count:>7d} {succ:>8d} {rate:>6.1f}%")
@@ -2436,13 +2528,15 @@ class Fuzzer:
         # Duplicate rejection trend
         if self._total_corpus_attempts > 0:
             dup_rate = rejected / self._total_corpus_attempts * 100
-            print(f"\n  Dup rejection rate: {dup_rate:.1f}% ({rejected}/{self._total_corpus_attempts})")
+            print(
+                f"\n  Dup rejection rate: {dup_rate:.1f}% ({rejected}/{self._total_corpus_attempts})"
+            )
 
         # Execution time
         tracker = self._exec_time_tracker
         if tracker.count > 0:
-            print(f"  Exec time p50:     {tracker.p50*1000:.1f}ms")
-            print(f"  Exec time p99:     {tracker.p99*1000:.1f}ms")
+            print(f"  Exec time p50:     {tracker.p50 * 1000:.1f}ms")
+            print(f"  Exec time p99:     {tracker.p99 * 1000:.1f}ms")
             print(f"  Suggested timeout: {tracker.suggested_timeout():.2f}s")
 
         print(f"{'=' * 60}")
@@ -2490,14 +2584,22 @@ class Fuzzer:
                 ],
             }
         if self._use_renyi_weight:
-            edge_hits = dict(self._edge_tracker._global_edge_hits) if hasattr(self._edge_tracker, '_global_edge_hits') else {}
+            edge_hits = (
+                dict(self._edge_tracker._global_edge_hits)
+                if hasattr(self._edge_tracker, "_global_edge_hits")
+                else {}
+            )
             if edge_hits:
                 from fuzzer_tool.core.renyi import RenyiEntropy
+
                 renyi = RenyiEntropy()
                 stats["renyi"] = {
                     "uniformity": round(renyi.coverage_uniformity(list(edge_hits.values())), 4),
                     "min_entropy": round(renyi.min_entropy(list(edge_hits.values())), 4),
-                    "spectrum": {k: round(v, 4) for k, v in renyi.entropy_spectrum(list(edge_hits.values())).items()},
+                    "spectrum": {
+                        k: round(v, 4)
+                        for k, v in renyi.entropy_spectrum(list(edge_hits.values())).items()
+                    },
                 }
         if self._use_transfer_entropy:
             stats["transfer_entropy"] = {
@@ -2563,8 +2665,11 @@ class Fuzzer:
 
     def _update_te_causal_map(self):
         update_te_causal_map(
-            self._te, self._te_input_history, self._te_edge_history,
-            self.map_size, self._te_byte_edges,
+            self._te,
+            self._te_input_history,
+            self._te_edge_history,
+            self.map_size,
+            self._te_byte_edges,
         )
 
     def _get_te_weighted_position(self, input_length: int) -> int | None:
@@ -2640,10 +2745,11 @@ class Fuzzer:
         if self._crash_replays:
             done = [v for v in self._crash_replays.values() if len(v) >= self.replay_n]
             if done:
-                avg_repro = sum(
-                    sum(1 for r in replays if r >= 0) / len(replays)
-                    for replays in done
-                ) / len(done) * 100
+                avg_repro = (
+                    sum(sum(1 for r in replays if r >= 0) / len(replays) for replays in done)
+                    / len(done)
+                    * 100
+                )
                 repro_str = f" | repro: {avg_repro:.0f}%"
         # Bandit calibration (Brier score)
         brier_str = ""
@@ -2665,6 +2771,7 @@ class Fuzzer:
         print(f"[*] Target: {self.target}")
         # Static branch density: conditional branches per KB of .text
         from fuzzer_tool.core.elf import branch_density
+
         bd = branch_density(self.target)
         if bd is not None:
             print(f"[*] Branch density: {bd:.1f} cond branches/KB")
@@ -2690,11 +2797,10 @@ class Fuzzer:
         if self.dictionary:
             print(f"[*] Dictionary: {len(self.dictionary)} tokens")
         if self.markov_trained:
-            if hasattr(self.markov, 'chains'):
+            if hasattr(self.markov, "chains"):
                 orders_str = ",".join(str(o) for o in self.markov.orders)
                 total_ctx = sum(c._contexts_seen for c in self.markov.chains.values())
-                print(f"[*] Markov ensemble: orders=[{orders_str}], "
-                      f"total_contexts={total_ctx}")
+                print(f"[*] Markov ensemble: orders=[{orders_str}], total_contexts={total_ctx}")
             else:
                 print(
                     f"[*] Markov chain: order={self.markov.order}, "
@@ -2715,6 +2821,7 @@ class Fuzzer:
         if self.minimize_every_execs > 0:
             print(f"[*] Minimize: every {self.minimize_every_execs} execs")
         import datetime
+
         epoch_start = time.time()
         boot_start = time.monotonic()
         try:
@@ -2722,7 +2829,9 @@ class Fuzzer:
                 boot_start = float(f.read().split()[0])
         except OSError:
             pass
-        print(f"[*] Epoch start: {epoch_start:.3f} ({datetime.datetime.fromtimestamp(epoch_start).isoformat()})")
+        print(
+            f"[*] Epoch start: {epoch_start:.3f} ({datetime.datetime.fromtimestamp(epoch_start).isoformat()})"
+        )
         print(f"[*] Boot ticks start: {boot_start:.3f}")
         print("[*] Starting fuzzing...\n")
 
@@ -2757,6 +2866,7 @@ class Fuzzer:
                     # Periodic GC to return freed memory to OS
                     if i % 500 == 0:
                         import gc
+
                         gc.collect()
                 if i % 500 == 0 and self.replay_n > 0:
                     self._run_crash_replays()
@@ -2800,8 +2910,10 @@ class Fuzzer:
                 print(f"    {ctype}: {count}")
         elif self._dmesg.is_available():
             if self.crash_count > 0:
-                print("\n[*] dmesg: crashes detected via exit code but not in dmesg "
-                      "(likely rate-limited by kernel)")
+                print(
+                    "\n[*] dmesg: crashes detected via exit code but not in dmesg "
+                    "(likely rate-limited by kernel)"
+                )
             else:
                 print("\n[*] dmesg: no kernel crashes detected")
         if self.mc and self.mc_bandit:
@@ -2821,6 +2933,8 @@ class Fuzzer:
                 boot_end = float(f.read().split()[0])
         except OSError:
             pass
-        print(f"\n[*] Epoch end: {epoch_end:.3f} ({datetime.datetime.fromtimestamp(epoch_end).isoformat()})")
+        print(
+            f"\n[*] Epoch end: {epoch_end:.3f} ({datetime.datetime.fromtimestamp(epoch_end).isoformat()})"
+        )
         print(f"[*] Boot ticks end: {boot_end:.3f}")
         print(f"[*] dmesg window: {boot_start:.3f} - {boot_end:.3f}")

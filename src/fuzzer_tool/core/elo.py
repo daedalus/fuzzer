@@ -57,6 +57,9 @@ class EloTracker:
         self._match_count: dict[str, int] = {}
         self._decay_ticks: int = 0
 
+        self._strategy_ratings: dict[str, float] = {}
+        self._strategy_match_count: dict[str, int] = {}
+
     def init_arm(self, name: str) -> None:
         """Register an operator for tracking."""
         if name not in self.ratings:
@@ -69,9 +72,7 @@ class EloTracker:
         """Expected score for player A against player B."""
         return 1.0 / (1.0 + 10.0 ** ((rb - ra) / 400.0))
 
-    def record_match(
-        self, op_a: str, op_b: str, score_a: float, crash: bool = False
-    ) -> None:
+    def record_match(self, op_a: str, op_b: str, score_a: float, crash: bool = False) -> None:
         """Record a match between two operators.
 
         Args:
@@ -140,7 +141,7 @@ class EloTracker:
 
         elif len(operators) >= 2:
             # All winners or all losers — cross-iteration comparison
-            if hasattr(self, '_prev_operators') and self._prev_operators:
+            if hasattr(self, "_prev_operators") and self._prev_operators:
                 prev_ops = self._prev_operators
                 if winners:
                     # Current round found coverage — blend with previous
@@ -156,9 +157,7 @@ class EloTracker:
 
         self._prev_operators = operators
 
-    def select_op(
-        self, operators: list[str], temperature: float = 400.0
-    ) -> str:
+    def select_op(self, operators: list[str], temperature: float = 400.0) -> str:
         """Select an operator weighted by Elo rating.
 
         Only considers operators with >= min_matches matches.
@@ -176,10 +175,7 @@ class EloTracker:
             return operators[0]
 
         # Filter to rated operators
-        rated = [
-            op for op in operators
-            if self._match_count.get(op, 0) >= self.min_matches
-        ]
+        rated = [op for op in operators if self._match_count.get(op, 0) >= self.min_matches]
         if not rated:
             return operators[0]  # fallback: return first candidate
 
@@ -204,16 +200,11 @@ class EloTracker:
         if len(operators) == 1:
             return operators[0]
 
-        rated = [
-            op for op in operators
-            if self._match_count.get(op, 0) >= self.min_matches
-        ]
+        rated = [op for op in operators if self._match_count.get(op, 0) >= self.min_matches]
         if not rated:
             return operators[0]
 
-        ratings = [
-            self.crash_ratings.get(op, self.default_rating) for op in rated
-        ]
+        ratings = [self.crash_ratings.get(op, self.default_rating) for op in rated]
         max_r = max(ratings)
         weights = [math.exp((r - max_r) / temperature) for r in ratings]
         total = sum(weights)
@@ -238,15 +229,77 @@ class EloTracker:
         """
         src = self.crash_ratings if crash and self.crash_track else self.ratings
         return [
-            (op, r) for op, r in sorted(src.items(), key=lambda x: -x[1])
+            (op, r)
+            for op, r in sorted(src.items(), key=lambda x: -x[1])
             if self._match_count.get(op, 0) >= self.min_matches
         ]
 
     def get_unrated(self) -> list[str]:
         """Return operators with fewer than min_matches matches."""
+        return [op for op, count in self._match_count.items() if count < self.min_matches]
+
+    def record_strategy_match(self, strategy_a: str, strategy_b: str, score_a: float) -> None:
+        """Record a match between two operator-selection strategies.
+
+        Used by the meta-scheduler to arbitrate between bandit and MOpt.
+        Each strategy is tracked with its own Elo rating pool, separate
+        from the per-operator ratings.
+
+        Args:
+            strategy_a: First strategy name (e.g. "bandit", "mopt").
+            strategy_b: Second strategy name.
+            score_a: Score for strategy_a (1.0=win, 0.5=draw, 0.0=loss).
+        """
+        ra = self._strategy_ratings.get(strategy_a, self.default_rating)
+        rb = self._strategy_ratings.get(strategy_b, self.default_rating)
+
+        ea = self._expected_score(ra, rb)
+        eb = self._expected_score(rb, ra)
+
+        self._strategy_ratings[strategy_a] = ra + self.k_factor * (score_a - ea)
+        self._strategy_ratings[strategy_b] = rb + self.k_factor * ((1.0 - score_a) - eb)
+        self._strategy_match_count[strategy_a] = self._strategy_match_count.get(strategy_a, 0) + 1
+        self._strategy_match_count[strategy_b] = self._strategy_match_count.get(strategy_b, 0) + 1
+
+    def select_strategy(self, strategies: list[str], temperature: float = 400.0) -> str:
+        """Select a strategy weighted by Elo rating.
+
+        Used by the meta-scheduler to pick bandit vs MOpt probabilistically.
+
+        Args:
+            strategies: Candidate strategy names.
+            temperature: Higher = more uniform, lower = more greedy.
+
+        Returns:
+            Selected strategy name, or first strategy if none rated.
+        """
+        if not strategies:
+            return ""
+        if len(strategies) == 1:
+            return strategies[0]
+
+        rated = [s for s in strategies if self._strategy_match_count.get(s, 0) >= self.min_matches]
+        if not rated:
+            return strategies[0]
+
+        ratings = [self._strategy_ratings.get(s, self.default_rating) for s in rated]
+        max_r = max(ratings)
+        weights = [math.exp((r - max_r) / temperature) for r in ratings]
+        total = sum(weights)
+        r = random.random() * total
+        cumulative = 0.0
+        for i, w in enumerate(weights):
+            cumulative += w
+            if r <= cumulative:
+                return rated[i]
+        return rated[-1]
+
+    def get_strategy_ranking(self) -> list[tuple[str, float]]:
+        """Return strategies sorted by Elo rating (highest first)."""
         return [
-            op for op, count in self._match_count.items()
-            if count < self.min_matches
+            (s, r)
+            for s, r in sorted(self._strategy_ratings.items(), key=lambda x: -x[1])
+            if self._strategy_match_count.get(s, 0) >= self.min_matches
         ]
 
     def apply_decay(self) -> None:
@@ -254,8 +307,7 @@ class EloTracker:
         self._decay_ticks += 1
         for name in self.ratings:
             self.ratings[name] = (
-                self.default_rating
-                + (self.ratings[name] - self.default_rating) * self.decay
+                self.default_rating + (self.ratings[name] - self.default_rating) * self.decay
             )
         if self.crash_track:
             for name in self.crash_ratings:
@@ -263,6 +315,11 @@ class EloTracker:
                     self.default_rating
                     + (self.crash_ratings[name] - self.default_rating) * self.decay
                 )
+        for name in self._strategy_ratings:
+            self._strategy_ratings[name] = (
+                self.default_rating
+                + (self._strategy_ratings[name] - self.default_rating) * self.decay
+            )
 
     def get_rating(self, name: str) -> float:
         """Get current Elo rating for an operator."""
@@ -284,6 +341,8 @@ class EloTracker:
             "crash_ratings": self.crash_ratings,
             "match_count": self._match_count,
             "decay_ticks": self._decay_ticks,
+            "strategy_ratings": self._strategy_ratings,
+            "strategy_match_count": self._strategy_match_count,
         }
         try:
             with open(path, "w") as f:
@@ -312,5 +371,7 @@ class EloTracker:
         self.crash_ratings = data.get("crash_ratings", {})
         self._match_count = data.get("match_count", {})
         self._decay_ticks = data.get("decay_ticks", 0)
+        self._strategy_ratings = data.get("strategy_ratings", {})
+        self._strategy_match_count = data.get("strategy_match_count", {})
         log.info("Elo tracker loaded: %s (%d operators)", path, len(self.ratings))
         return True

@@ -1,5 +1,11 @@
 # AGENTS.md — fuzzer-tool
 
+RULES:
+Always create TODOs.
+Always update the README.md with the new features added.
+Always git commit and push after finish a task.
+
+
 ## Overview
 
 Coverage-guided binary fuzzer with ASAN/MSAN/TSAN/UBSAN detection, dictionary mutations, Markov chain generation, Monte Carlo optimization, kernel crash verification, and state persistence. CLI tool for fuzzing arbitrary binaries.
@@ -90,6 +96,13 @@ Fuzzer state is saved to `{corpus_dir}/state.json` on shutdown. Use `--resume` t
 - Markov chain saved to `markov.json` on exit
 - Loaded on init; skip retrain if loaded to avoid double-counting
 - Transitions accumulate across sessions
+
+### Meta-Scheduler (Elo Arbitration)
+- `--meta-elo` enables Elo-based arbitration between bandit and MOpt strategies
+- Requires `--elo --mc-bandit --mopt` to be active
+- Both strategies run in shadow; Elo picks which one to trust each iteration
+- Strategy ratings tracked in `elo.json` under `strategy_ratings` / `strategy_match_count`
+- Probabilistic selection via softmax over Elo gap (temperature=400)
 
 ## Code Style
 

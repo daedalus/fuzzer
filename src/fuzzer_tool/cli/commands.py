@@ -107,21 +107,21 @@ def cmd_fuzz(args):
             target_args=args.target_args,
             markov_order=args.markov_order if use_markov else "0",
             markov_generate=args.markov_gen,
-            markov_blend=getattr(args, 'markov_blend', False),
+            markov_blend=getattr(args, "markov_blend", False),
             mc_bandit=args.mc_bandit,
             mc_cem=args.mc_cem,
             mc_elite_frac=args.mc_elite_frac,
             mc_refit_interval=args.mc_refit_int,
-            pairwise_blend=getattr(args, 'pairwise_blend', 0.0),
+            pairwise_blend=getattr(args, "pairwise_blend", 0.0),
             stats_file=args.stats_file,
             stats_interval=args.stats_interval,
             coverage_report=args.coverage_report,
             iterations=args.iterations,
             sync_interval=args.sync_interval,
             seed=args.seed,
-            secretary=getattr(args, 'secretary', False),
-            secretary_window=getattr(args, 'secretary_window', 500),
-            secretary_exploration=getattr(args, 'secretary_exploration', 0.368),
+            secretary=getattr(args, "secretary", False),
+            secretary_window=getattr(args, "secretary_window", 500),
+            secretary_exploration=getattr(args, "secretary_exploration", 0.368),
         )
         return 0
 
@@ -142,12 +142,12 @@ def cmd_fuzz(args):
         markov_generate=args.markov_gen,
         mc_bandit=args.mc_bandit,
         mc_cem=args.mc_cem,
-        mopt=getattr(args, 'mopt', False),
-        targets=getattr(args, 'targets', None),
-        anneal_budget=getattr(args, 'anneal_budget', 0),
+        mopt=getattr(args, "mopt", False),
+        targets=getattr(args, "targets", None),
+        anneal_budget=getattr(args, "anneal_budget", 0),
         mc_elite_frac=args.mc_elite_frac,
         mc_refit_interval=args.mc_refit_int,
-        pairwise_blend=getattr(args, 'pairwise_blend', 0.0),
+        pairwise_blend=getattr(args, "pairwise_blend", 0.0),
         stats_file=args.stats_file,
         stats_interval=args.stats_interval,
         coverage_report=args.coverage_report,
@@ -156,7 +156,7 @@ def cmd_fuzz(args):
         persistent=args.persistent,
         cmplog=args.cmplog,
         max_corpus=args.max_corpus,
-        minimize_every_execs=getattr(args, 'minimize_every_execs', 0),
+        minimize_every_execs=getattr(args, "minimize_every_execs", 0),
         no_shm=args.no_shm,
         resume=args.resume,
         trace_crashes=args.trace,
@@ -166,16 +166,17 @@ def cmd_fuzz(args):
         seed=args.seed,
         extra_crash_codes=args.crash_codes,
         replay_n=args.replay_n,
-        schedule_ablation=getattr(args, 'schedule_ablation', None),
-        replicator=getattr(args, 'replicator', False),
-        shapley=getattr(args, 'shapley', False),
-        mi_guided=getattr(args, 'mi_guided', False),
-        renyi_weight=getattr(args, 'renyi_weight', False),
-        transfer_entropy=getattr(args, 'transfer_entropy', False),
-        elo=getattr(args, 'elo', False),
-        secretary=getattr(args, 'secretary', False),
-        secretary_window=getattr(args, 'secretary_window', 500),
-        secretary_exploration=getattr(args, 'secretary_exploration', 0.368),
+        schedule_ablation=getattr(args, "schedule_ablation", None),
+        replicator=getattr(args, "replicator", False),
+        shapley=getattr(args, "shapley", False),
+        mi_guided=getattr(args, "mi_guided", False),
+        renyi_weight=getattr(args, "renyi_weight", False),
+        transfer_entropy=getattr(args, "transfer_entropy", False),
+        elo=getattr(args, "elo", False),
+        meta_elo=getattr(args, "meta_elo", False),
+        secretary=getattr(args, "secretary", False),
+        secretary_window=getattr(args, "secretary_window", 500),
+        secretary_exploration=getattr(args, "secretary_exploration", 0.368),
     )
     fuzzer.run(iterations=args.iterations)
 
@@ -251,6 +252,7 @@ def cmd_tmin(args):
     grammar = None
     if args.grammar:
         from fuzzer_tool.core.grammar import load_grammar
+
         grammar = load_grammar(args.grammar)
         print(f"[*] Grammar loaded: {len(grammar.rules)} rules (tree-level shrinking enabled)")
 
@@ -290,8 +292,8 @@ def cmd_minimize(args):
         target_args=args.target_args,
         use_coverage=args.coverage,
         output_dir=args.output,
-        rate_distortion=getattr(args, 'rate_distortion', False),
-        target_frac=getattr(args, 'target_frac', 0.95),
+        rate_distortion=getattr(args, "rate_distortion", False),
+        target_frac=getattr(args, "target_frac", 0.95),
     )
 
     if removed == 0:
@@ -459,11 +461,14 @@ def cmd_rank(args):
     scored.sort(key=lambda x: x[0]["score"], reverse=True)
 
     n = min(args.top, len(scored))
-    n_edges = len(et.cumulative_edges) if hasattr(et.cumulative_edges, '__len__') else et.cumulative_edges
-    print(f"[*] Corpus: {len(corpus)} seeds, {len(et.seed_edges)} tracked, "
-          f"{n_edges} edges\n")
-    print(f"{'#':>4}  {'Score':>7}  {'Edges':>5}  {'Rare':>4}  {'Fuzz':>5}  "
-          f"{'Sub':>5}  {'Prox':>5}  {'Hash':>16}  Preview")
+    n_edges = (
+        len(et.cumulative_edges) if hasattr(et.cumulative_edges, "__len__") else et.cumulative_edges
+    )
+    print(f"[*] Corpus: {len(corpus)} seeds, {len(et.seed_edges)} tracked, {n_edges} edges\n")
+    print(
+        f"{'#':>4}  {'Score':>7}  {'Edges':>5}  {'Rare':>4}  {'Fuzz':>5}  "
+        f"{'Sub':>5}  {'Prox':>5}  {'Hash':>16}  Preview"
+    )
     print("-" * 95)
 
     for i, (s, seed) in enumerate(scored[:n]):
@@ -480,7 +485,7 @@ def cmd_rank(args):
             if len(seed) > 32:
                 pstr += "..."
         print(
-            f"{i+1:>4}  {s['score']:>7.2f}  {s['edges']:>5}  {s['rare']:>4}  "
+            f"{i + 1:>4}  {s['score']:>7.2f}  {s['edges']:>5}  {s['rare']:>4}  "
             f"{s['fuzz_count']:>5}  {s['subsumption']:>5.2f}  "
             f"{s['proximity']:>5.2f}  {h}  {pstr}"
         )
@@ -491,12 +496,12 @@ def cmd_rank(args):
             for i, (s, seed) in enumerate(scored[:n]):
                 h = hashlib.sha256(seed).hexdigest()[:16]
                 f.write(seed)
-                print(f"  wrote seed #{i+1} ({len(seed)} bytes) -> {out}.{i}")
+                print(f"  wrote seed #{i + 1} ({len(seed)} bytes) -> {out}.{i}")
         # Also write each seed to a separate file
         for i, (s, seed) in enumerate(scored[:n]):
             seed_path = out.parent / f"{out.name}.{i}"
             seed_path.write_bytes(seed)
-        print(f"[*] Dumped top {n} seeds to {out}.{0}..{n-1}")
+        print(f"[*] Dumped top {n} seeds to {out}.{0}..{n - 1}")
 
     return 0
 
@@ -557,59 +562,82 @@ def main() -> int:
         "--markov-gen", action="store_true", help="Enable Markov chain seed generation"
     )
     fuzz_parser.add_argument(
-        "--markov-order", type=str, default="1",
-        help="Markov chain order(s), comma-separated (e.g. '0,1,2' for ensemble)"
+        "--markov-order",
+        type=str,
+        default="1",
+        help="Markov chain order(s), comma-separated (e.g. '0,1,2' for ensemble)",
     )
     fuzz_parser.add_argument(
-        "--markov-blend", action="store_true",
-        help="Blend probability distributions across orders (slower but smoother)"
+        "--markov-blend",
+        action="store_true",
+        help="Blend probability distributions across orders (slower but smoother)",
     )
     fuzz_parser.add_argument(
         "--mc-bandit", action="store_true", help="Enable Thompson sampling bandit"
     )
     fuzz_parser.add_argument(
-        "--pairwise-blend", type=float, default=0.0,
-        help="Blend factor for pairwise operator transitions (0.0=pure Thompson, 1.0=pure pairwise)"
+        "--pairwise-blend",
+        type=float,
+        default=0.0,
+        help="Blend factor for pairwise operator transitions (0.0=pure Thompson, 1.0=pure pairwise)",
     )
     fuzz_parser.add_argument("--mc-cem", action="store_true", help="Enable cross-entropy method")
     fuzz_parser.add_argument(
-        "--mopt", action="store_true", help="Enable MOpt PSO operator scheduling (alternative to bandit)"
+        "--mopt",
+        action="store_true",
+        help="Enable MOpt PSO operator scheduling (alternative to bandit)",
     )
     fuzz_parser.add_argument(
-        "--replicator", action="store_true",
-        help="Enable replicator dynamics operator scheduling (evolutionary game theory)"
+        "--replicator",
+        action="store_true",
+        help="Enable replicator dynamics operator scheduling (evolutionary game theory)",
     )
     fuzz_parser.add_argument(
-        "--shapley", action="store_true",
-        help="Enable Shapley value operator attribution (fair credit distribution)"
+        "--shapley",
+        action="store_true",
+        help="Enable Shapley value operator attribution (fair credit distribution)",
     )
     fuzz_parser.add_argument(
-        "--mi-guided", action="store_true",
-        help="Enable mutual information guided mutation (target high-MI byte positions)"
+        "--mi-guided",
+        action="store_true",
+        help="Enable mutual information guided mutation (target high-MI byte positions)",
     )
     fuzz_parser.add_argument(
-        "--renyi-weight", action="store_true",
-        help="Enable Rényi entropy weighting in seed selection (boost cold-edge seeds)"
+        "--renyi-weight",
+        action="store_true",
+        help="Enable Rényi entropy weighting in seed selection (boost cold-edge seeds)",
     )
     fuzz_parser.add_argument(
-        "--transfer-entropy", action="store_true",
-        help="Enable transfer entropy causal tracking (byte→edge influence detection)"
+        "--transfer-entropy",
+        action="store_true",
+        help="Enable transfer entropy causal tracking (byte→edge influence detection)",
     )
     fuzz_parser.add_argument(
-        "--elo", action="store_true",
-        help="Enable Elo rating system for operator scheduling (complementary signal)"
+        "--elo",
+        action="store_true",
+        help="Enable Elo rating system for operator scheduling (complementary signal)",
     )
     fuzz_parser.add_argument(
-        "--secretary", action="store_true",
-        help="Enable secretary-problem optimal stopping for seed/operator/corpus scheduling"
+        "--meta-elo",
+        action="store_true",
+        help="Enable Elo-based meta-scheduler: lets Elo arbitrate between bandit and MOpt strategies",
     )
     fuzz_parser.add_argument(
-        "--secretary-window", type=int, default=500,
-        help="Sliding window size for secretary quality observations (default: 500)"
+        "--secretary",
+        action="store_true",
+        help="Enable secretary-problem optimal stopping for seed/operator/corpus scheduling",
     )
     fuzz_parser.add_argument(
-        "--secretary-exploration", type=float, default=0.368,
-        help="Exploration fraction threshold for secretary stopping (default: 0.368 = 1/e)"
+        "--secretary-window",
+        type=int,
+        default=500,
+        help="Sliding window size for secretary quality observations (default: 500)",
+    )
+    fuzz_parser.add_argument(
+        "--secretary-exploration",
+        type=float,
+        default=0.368,
+        help="Exploration fraction threshold for secretary stopping (default: 0.368 = 1/e)",
     )
     fuzz_parser.add_argument(
         "--targets",
@@ -624,7 +652,7 @@ def main() -> int:
         default=0,
         metavar="N",
         help="Annealing budget in iterations (0=no annealing, default). "
-             "Temperature decays linearly from 1.0 to 0.1 over N iterations.",
+        "Temperature decays linearly from 1.0 to 0.1 over N iterations.",
     )
     fuzz_parser.add_argument(
         "--mc-elite-frac", type=float, default=0.1, help="CEM elite fraction (default: 0.1)"
@@ -775,7 +803,8 @@ def main() -> int:
         "--max-stages", type=int, default=128, help="Max reduction stages (default: 128)"
     )
     tmin_parser.add_argument(
-        "-g", "--grammar",
+        "-g",
+        "--grammar",
         default=None,
         help="Grammar for tree-level shrinking (built-in: json, http_request, elf or .gram file)",
     )
@@ -805,12 +834,15 @@ def main() -> int:
         "-o", "--output", default=None, help="Output directory (default: overwrite in-place)"
     )
     min_parser.add_argument(
-        "--rate-distortion", action="store_true",
-        help="Use rate-distortion optimal pruning (preserves coverage diversity)"
+        "--rate-distortion",
+        action="store_true",
+        help="Use rate-distortion optimal pruning (preserves coverage diversity)",
     )
     min_parser.add_argument(
-        "--target-frac", type=float, default=0.95,
-        help="Target coverage fraction for rate-distortion (default: 0.95)"
+        "--target-frac",
+        type=float,
+        default=0.95,
+        help="Target coverage fraction for rate-distortion (default: 0.95)",
     )
     min_parser.set_defaults(func=cmd_minimize)
 
@@ -848,17 +880,17 @@ def main() -> int:
     import_parser.set_defaults(func=cmd_import)
 
     # --- rank ---
-    rank_parser = subparsers.add_parser(
-        "rank", help="Rank corpus seeds by interestingness"
-    )
+    rank_parser = subparsers.add_parser("rank", help="Rank corpus seeds by interestingness")
     rank_parser.add_argument("target", help="Path to target binary")
     rank_parser.add_argument("-d", "--corpus", required=True, help="Corpus directory")
     rank_parser.add_argument(
         "-n", "--top", type=int, default=10, help="Number of top seeds to show"
     )
     rank_parser.add_argument(
-        "--dump", default=None, metavar="PREFIX",
-        help="Dump top seeds to files named PREFIX.0, PREFIX.1, ..."
+        "--dump",
+        default=None,
+        metavar="PREFIX",
+        help="Dump top seeds to files named PREFIX.0, PREFIX.1, ...",
     )
     rank_parser.set_defaults(func=cmd_rank)
 

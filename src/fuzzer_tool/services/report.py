@@ -63,8 +63,8 @@ def _run_summary(f) -> str:
         f"  In-process:      {f._inprocess_runner is not None}",
     ]
     if execs > 0:
-        lines.append(f"  Crash rate:      {crashes/execs*100:.4f}%")
-        lines.append(f"  Timeout rate:    {timeouts/execs*100:.4f}%")
+        lines.append(f"  Crash rate:      {crashes / execs * 100:.4f}%")
+        lines.append(f"  Timeout rate:    {timeouts / execs * 100:.4f}%")
     return "\n".join(lines)
 
 
@@ -95,7 +95,7 @@ def _coverage_analysis(f) -> str:
         lines.append("  Top clusters (256-byte buckets):")
         for bucket, count in sorted(buckets.items(), key=lambda x: -x[1])[:10]:
             addr = bucket * 256
-            lines.append(f"    0x{addr:04x}-0x{addr+255:04x}: {count:3d} edges")
+            lines.append(f"    0x{addr:04x}-0x{addr + 255:04x}: {count:3d} edges")
 
     # Coverage growth timeline from edge tracker
     et_path = Path(f.corpus_dir) / "edge_tracker.json"
@@ -132,7 +132,7 @@ def _mutation_effectiveness(f) -> str:
         "",
         "--- Mutation Effectiveness ---",
         f"  {'Operation':<22s} {'Count':>7s} {'Success':>8s} {'Rate':>7s}",
-        f"  {'-'*22} {'-'*7} {'-'*8} {'-'*7}",
+        f"  {'-' * 22} {'-' * 7} {'-' * 8} {'-' * 7}",
     ]
 
     for op, count in sorted(counts.items(), key=lambda x: -x[1]):
@@ -140,7 +140,11 @@ def _mutation_effectiveness(f) -> str:
         rate = succ / count * 100 if count else 0
         lines.append(f"  {op:<22s} {count:>7d} {succ:>8d} {rate:>6.1f}%")
 
-    lines.append(f"  {'TOTAL':<22s} {total:>7d} {total_success:>8d} {total_success/total*100:>6.1f}%" if total else "")
+    lines.append(
+        f"  {'TOTAL':<22s} {total:>7d} {total_success:>8d} {total_success / total * 100:>6.1f}%"
+        if total
+        else ""
+    )
     return "\n".join(lines)
 
 
@@ -172,8 +176,7 @@ def _mdl_codelength(f) -> str:
         f"p10={pp_stats['p10']:.1f}  p90={pp_stats['p90']:.1f}",
         f"  Well-predicted:    {pp_stats['low_surprise_count']} seeds (PP < 10)",
         f"  Model lost:        {pp_stats['high_surprise_count']} seeds (PP > 200)",
-        f"  Avg codelength:    {avg_cl:.2f} bits/byte  "
-        f"range=[{s[0]:.2f}, {s[-1]:.2f}]",
+        f"  Avg codelength:    {avg_cl:.2f} bits/byte  range=[{s[0]:.2f}, {s[-1]:.2f}]",
     ]
 
     # NCD between most surprising seeds
@@ -184,6 +187,7 @@ def _mdl_codelength(f) -> str:
         second_i = indexed[1][0]
         if top_i < len(f.corpus) and second_i < len(f.corpus):
             from fuzzer_tool.core.edge_tracker import normalized_compression_distance
+
             ncd = normalized_compression_distance(f.corpus[top_i], f.corpus[second_i])
             lines.append(f"  NCD (top 2):       {ncd:.4f} (0=same structure, 1=unrelated)")
 
@@ -247,7 +251,7 @@ def _corpus_overview(f, corpus_dir) -> str:
         f"  Files:           {len(entries)}",
         f"  Total size:      {_human_size(total_size)}",
         f"  Smallest:        {_human_size(sizes[0])}",
-        f"  Median:          {_human_size(sizes[len(sizes)//2])}",
+        f"  Median:          {_human_size(sizes[len(sizes) // 2])}",
         f"  Largest:         {_human_size(sizes[-1])}",
     ]
 
@@ -396,8 +400,8 @@ def _execution_time_analysis(f) -> str:
         "",
         "--- Execution Time Analysis ---",
         f"  Observations:   {tracker.count}",
-        f"  p50:            {tracker.p50*1000:.1f}ms",
-        f"  p99:            {tracker.p99*1000:.1f}ms",
+        f"  p50:            {tracker.p50 * 1000:.1f}ms",
+        f"  p99:            {tracker.p99 * 1000:.1f}ms",
         f"  Suggested timeout: {tracker.suggested_timeout():.2f}s",
         f"  CRPS (mean):    {tracker.mean_crps():.6f}",
         f"  CRPS trend:     {tracker.crps_trend():.6f} (+ = degrading)",
@@ -422,12 +426,16 @@ def _corpus_health(f) -> str:
     # Input size distribution
     if f._corpus_size_history:
         s = sorted(f._corpus_size_history)
-        lines.append(f"  Input sizes:       min={s[0]} p50={s[len(s)//2]} p90={s[-len(s)//10]} max={s[-1]}")
+        lines.append(
+            f"  Input sizes:       min={s[0]} p50={s[len(s) // 2]} p90={s[-len(s) // 10]} max={s[-1]}"
+        )
 
     # Duplicate rejection rate
     if f._total_corpus_attempts > 0:
         dup_rate = f._duplicate_reject_count / f._total_corpus_attempts * 100
-        lines.append(f"  Dup rejection:     {dup_rate:.1f}% ({f._duplicate_reject_count}/{f._total_corpus_attempts})")
+        lines.append(
+            f"  Dup rejection:     {dup_rate:.1f}% ({f._duplicate_reject_count}/{f._total_corpus_attempts})"
+        )
 
     # Shannon entropy of corpus byte distribution
     byte_freq = [0] * 256
@@ -441,7 +449,7 @@ def _corpus_health(f) -> str:
         for count in byte_freq:
             if count > 0:
                 p = count / total_bytes
-                entropy -= p * __import__('math').log2(p)
+                entropy -= p * __import__("math").log2(p)
         lines.append(f"  Byte entropy:      {entropy:.2f} bits (max=8.0)")
     return "\n".join(lines)
 
@@ -549,8 +557,8 @@ def _runtime_performance(f) -> str:
     if f._corpus_size_history:
         s = sorted(f._corpus_size_history)
         lines.append(
-            f"  Input sizes:      min={s[0]} p50={s[len(s)//2]} "
-            f"p90={s[-len(s)//10]} max={s[-1]}"
+            f"  Input sizes:      min={s[0]} p50={s[len(s) // 2]} "
+            f"p90={s[-len(s) // 10]} max={s[-1]}"
         )
 
     return "\n".join(lines)
@@ -567,6 +575,7 @@ def _operator_diversity(f) -> str:
 
     # Shannon entropy of operator distribution
     import math
+
     entropy = 0.0
     for count in f.op_counts.values():
         if count > 0:
@@ -612,17 +621,20 @@ def _fuzzing_strategy(f) -> str:
     # MC CEM
     if f.mc and f.mc_cem:
         strategies.append(
-            f"  MC CEM:           elite_frac={f.mc.elite_frac}, "
-            f"elite_set={len(f.mc.elite_set)}"
+            f"  MC CEM:           elite_frac={f.mc.elite_frac}, elite_set={len(f.mc.elite_set)}"
         )
 
     # MOpt
     if f._mopt:
-        strategies.append(f"  MOpt PSO:         {f._mopt.n_particles} particles, window={f._mopt.window_size}")
+        strategies.append(
+            f"  MOpt PSO:         {f._mopt.n_particles} particles, window={f._mopt.window_size}"
+        )
 
     # Replicator
     if f._replicator:
-        strategies.append(f"  Replicator:       window={f._replicator.window_size}, eta={f._replicator.eta}")
+        strategies.append(
+            f"  Replicator:       window={f._replicator.window_size}, eta={f._replicator.eta}"
+        )
 
     # Markov
     if f.markov_trained:
@@ -655,8 +667,7 @@ def _fuzzing_strategy(f) -> str:
     # Annealing
     if f._anneal_budget > 0:
         strategies.append(
-            f"  Annealing:        budget={f._anneal_budget}, "
-            f"progress={f._anneal_progress:.1%}"
+            f"  Annealing:        budget={f._anneal_budget}, progress={f._anneal_progress:.1%}"
         )
 
     # Grammar
@@ -702,9 +713,7 @@ def _edge_rarity(f) -> str:
     # Top co-occurring edges
     cooccur = f._edge_tracker.edge_cooccurrence(top_k=3)
     if cooccur:
-        pairs_str = ", ".join(
-            f"e{a}<->e{b}({j:.0%})" for a, b, j in cooccur
-        )
+        pairs_str = ", ".join(f"e{a}<->e{b}({j:.0%})" for a, b, j in cooccur)
         lines.append(f"  Co-occurrence:    {pairs_str}")
 
     return "\n".join(lines)
@@ -773,7 +782,7 @@ def _elo_ratings(f) -> str:
     # Top 10 and bottom 5 of rated operators
     if ranking:
         lines.append(f"  {'Rank':<6s} {'Operator':<22s} {'Rating':>8s} {'Matches':>8s}")
-        lines.append(f"  {'-'*6} {'-'*22} {'-'*8} {'-'*8}")
+        lines.append(f"  {'-' * 6} {'-' * 22} {'-' * 8} {'-' * 8}")
         for i, (op, rating) in enumerate(ranking[:10], 1):
             matches = f._elo._match_count.get(op, 0)
             lines.append(f"  {i:<6d} {op:<22s} {rating:>8.0f} {matches:>8d}")
@@ -803,6 +812,18 @@ def _elo_ratings(f) -> str:
                 sign = "+" if delta >= 0 else ""
                 lines.append(f"    {i}. {op:<20s} {rating:>7.0f} ({sign}{delta:.0f})")
 
+    # Meta-scheduler strategy ranking (bandit vs MOpt)
+    if f._use_meta_elo and f._elo:
+        strategy_ranking = f._elo.get_strategy_ranking()
+        if strategy_ranking:
+            lines.append("")
+            lines.append("  Meta-scheduler (bandit vs MOpt):")
+            for s, rating in strategy_ranking:
+                delta = rating - f._elo.default_rating
+                sign = "+" if delta >= 0 else ""
+                matches = f._elo._strategy_match_count.get(s, 0)
+                lines.append(f"    {s:<12s} {rating:>7.0f} ({sign}{delta:.0f}, {matches} matches)")
+
     # Compare with bandit if available
     if f.mc and f.mc_bandit and f.mc.arm_alpha:
         bandit_ranking = sorted(
@@ -830,6 +851,6 @@ def _human_size(n: int) -> str:
     if n < 1024:
         return f"{n}B"
     elif n < 1024 * 1024:
-        return f"{n/1024:.1f}KB"
+        return f"{n / 1024:.1f}KB"
     else:
-        return f"{n/1024/1024:.1f}MB"
+        return f"{n / 1024 / 1024:.1f}MB"

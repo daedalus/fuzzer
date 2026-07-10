@@ -1,6 +1,5 @@
 """Tests for Elo rating tracker."""
 
-import json
 import tempfile
 from pathlib import Path
 
@@ -266,11 +265,67 @@ class TestEloTracker:
         for op in ["A", "B", "C"]:
             elo.init_arm(op)
         # A found 10 edges, B found 5, C found 0
-        elo.record_round(
-            ["A", "B", "C"], winners={"A", "B"},
-            edge_counts={"A": 10, "B": 5, "C": 0}
-        )
+        elo.record_round(["A", "B", "C"], winners={"A", "B"}, edge_counts={"A": 10, "B": 5, "C": 0})
         # A should have higher rating than B (proportional scoring)
         assert elo.ratings["A"] > elo.ratings["B"]
         # Both should beat C
         assert elo.ratings["B"] > elo.ratings["C"]
+
+    def test_record_strategy_match(self):
+        elo = EloTracker(min_matches=0)
+        elo.record_strategy_match("bandit", "mopt", score_a=1.0)
+        assert elo._strategy_ratings["bandit"] > elo._strategy_ratings["mopt"]
+        assert elo._strategy_match_count["bandit"] == 1
+        assert elo._strategy_match_count["mopt"] == 1
+
+    def test_record_strategy_match_loss(self):
+        elo = EloTracker(min_matches=0)
+        elo.record_strategy_match("bandit", "mopt", score_a=0.0)
+        assert elo._strategy_ratings["mopt"] > elo._strategy_ratings["bandit"]
+
+    def test_select_strategy(self):
+        elo = EloTracker(min_matches=0)
+        for _ in range(20):
+            elo.record_strategy_match("bandit", "mopt", score_a=1.0)
+        # bandit should be selected most of the time (higher rating)
+        counts = {"bandit": 0, "mopt": 0}
+        for _ in range(100):
+            s = elo.select_strategy(["bandit", "mopt"])
+            counts[s] += 1
+        assert counts["bandit"] > counts["mopt"]
+
+    def test_select_strategy_single(self):
+        elo = EloTracker(min_matches=0)
+        assert elo.select_strategy(["bandit"]) == "bandit"
+
+    def test_select_strategy_empty(self):
+        elo = EloTracker(min_matches=0)
+        assert elo.select_strategy([]) == ""
+
+    def test_get_strategy_ranking(self):
+        elo = EloTracker(min_matches=0)
+        elo.record_strategy_match("bandit", "mopt", score_a=1.0)
+        ranking = elo.get_strategy_ranking()
+        assert len(ranking) == 2
+        assert ranking[0][0] == "bandit"
+
+    def test_strategy_decay(self):
+        elo = EloTracker(min_matches=0, decay=0.5)
+        elo.record_strategy_match("bandit", "mopt", score_a=1.0)
+        before = elo._strategy_ratings["bandit"]
+        elo.apply_decay()
+        after = elo._strategy_ratings["bandit"]
+        # Decay should move rating toward default (1500)
+        assert after != before
+
+    def test_strategy_save_load(self):
+        elo = EloTracker(min_matches=0)
+        elo.record_strategy_match("bandit", "mopt", score_a=1.0)
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+            path = f.name
+        elo.save(path)
+        elo2 = EloTracker()
+        elo2.load(path)
+        assert elo2._strategy_ratings == elo._strategy_ratings
+        assert elo2._strategy_match_count == elo._strategy_match_count
+        Path(path).unlink()
