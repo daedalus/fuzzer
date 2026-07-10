@@ -2977,6 +2977,16 @@ class Fuzzer:
             # initial corpus and gathers baseline coverage.
             for seed in list(self.corpus):
                 returncode, stderr = self._run_target(seed)
+                # Validate AFL shim on first execution
+                if not getattr(self, '_shim_checked', False):
+                    self._shim_checked = True
+                    if '[shim]' in stderr:
+                        log.info("AFL shim: %s", stderr.strip())
+                        if 'area=(nil)' in stderr and self.shm_cov:
+                            log.warning(
+                                "AFL shim area is NULL — SHM not attached. "
+                                "Coverage data will be empty."
+                            )
                 self.exec_count += 1
                 if self._is_crash(returncode, stderr):
                     self.crash_count += 1

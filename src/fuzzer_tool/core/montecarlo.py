@@ -365,7 +365,7 @@ class MonteCarloScheduler:
         for name in sorted(self.arm_alpha):
             a = self.arm_alpha[name]
             b = self.arm_beta[name]
-            result[name] = (a - 1, b - 1)
+            result[name] = (max(0.0, a - 1), max(0.0, b - 1))
         return result
 
     def transition_stats(self) -> dict[str, dict[str, int]]:
