@@ -1979,12 +1979,23 @@ class Fuzzer:
           3. Hit frequency: seeds consistently hitting edges are reliable
           4. Edge gap targeting: boost seeds near under-covered edges
           5. Edge diversity: prefer seeds whose edges don't overlap with others
+
+        After computing base weights, applies a sliding-window Pareto
+        dominance boost: seeds that are non-dominated on the
+        (novelty, freshness, diversity) frontier get a 2x boost;
+        dominated seeds get a 0.5x dampening. This preserves the
+        information that multiplication destroys — two seeds with the
+        same weight can now be distinguished by their Pareto status.
         """
         weights = []
+        # Collect per-seed objective scores for Pareto analysis
+        pareto_scores: list[tuple[float, float, float]] = []
+
         for seed in self.corpus:
             meta = self.seed_meta.get(seed)
             if meta is None:
                 weights.append(1.0)
+                pareto_scores.append((1.0, 1.0, 1.0))
                 continue
             fuzz_count = max(meta["fuzz_count"], 1)
             coverage = meta["coverage_edges"]
@@ -2003,7 +2014,6 @@ class Fuzzer:
 
             # Energy burst: newly added seeds get up to 5x boost (decays over 60s)
             burst_factor = max(1.0, 1.0 + T * (5.0 - 1.0) - (age / 60.0) * T)
-            w *= burst_factor
 
             # Stale seed detection
             staleness = fuzz_count / max(coverage + 1, 1)
@@ -2128,7 +2138,59 @@ class Fuzzer:
             # hd >= 3 or hd == -1: no penalty (normal or unknown perturbation)
 
             weights.append(max(w, 1e-6))
+
+            # Collect Pareto objective scores:
+            # novelty (subsumption), freshness (burst), diversity (wasserstein)
+            novelty = sub
+            freshness = burst_factor
+            diversity = spa
+            pareto_scores.append((novelty, freshness, diversity))
+
+        # Sliding-window Pareto dominance boost
+        if len(pareto_scores) >= 3:
+            front = self._pareto_front(pareto_scores, window=100)
+            for i in range(len(weights)):
+                if i in front:
+                    weights[i] *= 2.0  # boost non-dominated seeds
+                else:
+                    weights[i] *= 0.5  # dampen dominated seeds
+
         return weights
+
+    @staticmethod
+    def _pareto_front(
+        scores: list[tuple[float, float, float]], window: int = 100
+    ) -> set[int]:
+        """Find indices of non-dominated points in a sliding window.
+
+        A point is non-dominated if no other point in the window is
+        better on ALL three objectives simultaneously.
+
+        Args:
+            scores: List of (novelty, freshness, diversity) per seed.
+            window: Only check dominance within the most recent N seeds.
+
+        Returns:
+            Set of indices that are on the Pareto front.
+        """
+        n = len(scores)
+        start = max(0, n - window)
+        front: set[int] = set(range(start, n))
+
+        for i in range(start, n):
+            if i not in front:
+                continue
+            ni, fi, di = scores[i]
+            for j in range(start, n):
+                if j == i or j not in front:
+                    continue
+                nj, fj, dj = scores[j]
+                # j dominates i if j is >= on all axes and > on at least one
+                if nj >= ni and fj >= fi and dj >= di and (nj > ni or fj > fi or dj > di):
+                    front.discard(i)
+                    break
+
+        return front
 
     def _weighted_pick_seed(self) -> bytes:
         now = time.time()
