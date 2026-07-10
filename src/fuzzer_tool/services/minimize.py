@@ -3,7 +3,8 @@
 Two modes:
   1. With SHM coverage (-c): greedy set-cover over edge maps. Requires target
      to be AFL-instrumented and __AFL_SHM_ID set.
-  2. Without coverage: content-hash dedup (kept if unique hash).
+  2. Without coverage: content-hash dedup (kept if unique hash),
+     with optional Hamming-based fuzzy dedup for near-duplicates.
 """
 
 import ctypes
@@ -39,6 +40,7 @@ def minimize_corpus(
     output_dir: str | None = None,
     rate_distortion: bool = False,
     target_frac: float = 0.95,
+    fuzzy_dedup: int = 0,
 ) -> tuple[int, int]:
     """Minimize a corpus by removing redundant inputs.
 
@@ -56,6 +58,9 @@ def minimize_corpus(
         output_dir: Output directory for minimized corpus. If None, overwrites in-place.
         rate_distortion: Use rate-distortion optimal pruning instead of greedy set-cover.
         target_frac: Target coverage fraction for rate-distortion (default: 0.95).
+        fuzzy_dedup: Maximum Hamming distance for near-duplicate detection.
+            0 disables fuzzy dedup. Only used without coverage mode.
+            e.g. fuzzy_dedup=3 removes seeds that differ by <=3 bytes.
 
     Returns:
         Tuple of (files_kept, files_removed).
@@ -76,11 +81,18 @@ def minimize_corpus(
 
     if use_coverage:
         kept, removed = _minimize_with_coverage(
-            corpus_files, target, timeout, file_mode, target_args, output_dir, corpus_path,
-            rate_distortion=rate_distortion, target_frac=target_frac,
+            corpus_files,
+            target,
+            timeout,
+            file_mode,
+            target_args,
+            output_dir,
+            corpus_path,
+            rate_distortion=rate_distortion,
+            target_frac=target_frac,
         )
     else:
-        kept, removed = _minimize_by_hash(corpus_files, output_dir, corpus_path)
+        kept, removed = _minimize_by_hash(corpus_files, output_dir, corpus_path, fuzzy_dedup)
 
     print(f"[+] Minimized: {len(corpus_files)} -> {kept} files ({removed} removed)")
     return kept, removed
@@ -146,10 +158,13 @@ def _minimize_with_coverage(
     if rate_distortion:
         print("[*] Using rate-distortion optimal pruning...")
         from fuzzer_tool.core.rate_distortion import RateDistortionCorpus
+
         rd = RateDistortionCorpus(map_size=edge_map_size)
         covered_files, actual_frac = rd.optimal_pruning(seed_edges, target_fraction=target_frac)
-        print(f"[*] Rate-distortion: kept {len(covered_files)}/{len(corpus_files)} "
-              f"files ({actual_frac:.1%} coverage)")
+        print(
+            f"[*] Rate-distortion: kept {len(covered_files)}/{len(corpus_files)} "
+            f"files ({actual_frac:.1%} coverage)"
+        )
     else:
         # Greedy set cover
         total_coverage = bytearray(edge_map_size)
@@ -182,17 +197,43 @@ def _minimize_by_hash(
     corpus_files: list[Path],
     output_dir: str | None,
     corpus_path: Path,
+    fuzzy_dedup: int = 0,
 ) -> tuple[int, int]:
-    """Content-hash dedup: keep first occurrence of each SHA-256."""
+    """Content-hash dedup: keep first occurrence of each SHA-256.
+
+    When fuzzy_dedup > 0, also removes entries that are within Hamming
+    distance of an already-kept entry (near-duplicate detection).
+    """
+    from fuzzer_tool.core.similarity import hamming_distance
+
     seen_hashes: set[str] = set()
     kept_files: list[str] = []
+    kept_data: list[bytes] = []
 
     for fpath in corpus_files:
         data = fpath.read_bytes()
         h = hashlib.sha256(data).hexdigest()[:16]
-        if h not in seen_hashes:
-            seen_hashes.add(h)
-            kept_files.append(str(fpath))
+        if h in seen_hashes:
+            continue
+
+        # Fuzzy dedup: skip if within Hamming distance of any kept entry
+        if fuzzy_dedup > 0 and kept_data:
+            is_near_dup = False
+            for kept in kept_data:
+                if len(kept) == len(data):
+                    try:
+                        if hamming_distance(data, kept) <= fuzzy_dedup:
+                            is_near_dup = True
+                            break
+                    except ValueError:
+                        pass
+            if is_near_dup:
+                continue
+
+        seen_hashes.add(h)
+        kept_files.append(str(fpath))
+        if fuzzy_dedup > 0:
+            kept_data.append(data)
 
     return _commit_results(corpus_files, kept_files, output_dir, corpus_path)
 
@@ -260,6 +301,12 @@ def main():
         default=None,
         help="Output directory for minimized corpus (default: overwrite in-place)",
     )
+    parser.add_argument(
+        "--fuzzy-dedup",
+        type=int,
+        default=0,
+        help="Maximum Hamming distance for near-duplicate detection (0=disabled)",
+    )
     args = parser.parse_args()
 
     if not os.path.isfile(args.target):
@@ -274,6 +321,7 @@ def main():
         target_args=args.target_args,
         use_coverage=args.coverage,
         output_dir=args.output,
+        fuzzy_dedup=args.fuzzy_dedup,
     )
 
     if removed == 0:

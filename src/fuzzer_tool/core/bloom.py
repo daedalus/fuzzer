@@ -1,7 +1,13 @@
-"""Bloom filter for probabilistic membership testing."""
+"""Bloom filter for probabilistic membership testing.
+
+Includes fuzzy near-duplicate detection via Hamming distance on stored keys.
+"""
 
 import hashlib
 import math
+from collections import deque
+
+from fuzzer_tool.core.similarity import hamming_distance
 
 
 class BloomFilter:
@@ -76,3 +82,49 @@ class BloomFilter:
 
     def clear(self) -> None:
         self._bits = bytearray(self._byte_len)
+
+    def add_bytes(self, key: bytes, max_hamming: int = 0) -> bool:
+        """Add bytes as a key, optionally checking for near-duplicates via Hamming distance.
+
+        When max_hamming > 0, checks the most recent N keys (where N = max_hamming's
+        reciprocal heuristic, capped at 200) before adding. Returns True if a
+        near-duplicate was found (key NOT added), False if unique (key added).
+
+        Args:
+            key: Raw bytes to add.
+            max_hamming: Maximum Hamming distance to consider a near-duplicate.
+                0 disables fuzzy checking (exact-only, same as add()).
+
+        Returns:
+            True if a near-duplicate was found and key was skipped.
+        """
+        if max_hamming <= 0 or not hasattr(self, "_recent_keys"):
+            self.add(key.hex())
+            return False
+
+        key_hex = key.hex()
+        if self._check(self._digest(key_hex)):
+            return True  # exact match already in filter
+
+        for recent in self._recent_keys:
+            try:
+                if hamming_distance(key, recent) <= max_hamming:
+                    return True
+            except ValueError:
+                continue
+
+        self._set(self._digest(key_hex))
+        self._recent_keys.append(key)
+        if len(self._recent_keys) > 200:
+            self._recent_keys.popleft()
+        return False
+
+    def init_fuzzy(self, max_recent: int = 200) -> None:
+        """Initialize recent-keys buffer for fuzzy Hamming dedup.
+
+        Must be called before add_bytes() with max_hamming > 0.
+
+        Args:
+            max_recent: Maximum recent keys to track for Hamming comparison.
+        """
+        self._recent_keys: deque[bytes] = deque(maxlen=max_recent)

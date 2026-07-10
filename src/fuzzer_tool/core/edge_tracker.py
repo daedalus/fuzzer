@@ -19,6 +19,8 @@ import random
 import zlib
 from collections import defaultdict
 
+from fuzzer_tool.core.similarity import hamming_distance
+
 log = logging.getLogger(__name__)
 
 
@@ -210,8 +212,10 @@ class MinHashLSH:
         # Precomputed hash function coefficients: a*x + b (mod large prime)
         rng = random.Random(seed)
         self._prime = (1 << 61) - 1  # Mersenne prime
-        self._coeffs = [(rng.randint(1, self._prime - 1), rng.randint(0, self._prime - 1))
-                        for _ in range(num_perm)]
+        self._coeffs = [
+            (rng.randint(1, self._prime - 1), rng.randint(0, self._prime - 1))
+            for _ in range(num_perm)
+        ]
 
     def compute_signature(self, edge_set: set[int]) -> list[int]:
         """Compute MinHash signature for a set of edge indices.
@@ -294,8 +298,7 @@ class MinHashLSH:
         # Filter by full Jaccard threshold
         if min_jaccard <= 0:
             return candidates
-        return {k for k in candidates
-                if self.approximate_jaccard(seed_key, k) >= min_jaccard}
+        return {k for k in candidates if self.approximate_jaccard(seed_key, k) >= min_jaccard}
 
     def corpus_minhash(self, seed_keys: set[str] | None = None) -> list[int]:
         """Compute MinHash of the union of all seeds' edge sets.
@@ -497,8 +500,7 @@ class EdgeTracker:
             return {}
 
         self._aggregate_cache = {
-            e: c / self._aggregate_total_count
-            for e, c in self._aggregate_totals.items()
+            e: c / self._aggregate_total_count for e, c in self._aggregate_totals.items()
         }
         return self._aggregate_cache
 
@@ -593,9 +595,7 @@ class EdgeTracker:
         # Scale to [0.5, 2.0]: low divergence → 0.5, high → 2.0
         return 0.5 + 1.5 * normalized
 
-    def compute_wasserstein_distance(
-        self, seed_key_a: str, seed_key_b: str
-    ) -> float:
+    def compute_wasserstein_distance(self, seed_key_a: str, seed_key_b: str) -> float:
         """Compute 1D Wasserstein-1 distance between two seeds' edge profiles.
 
         Treats edge indices as positions on a line, so adjacent edges
@@ -610,9 +610,7 @@ class EdgeTracker:
         wasserstein, _ks, _crps = self._cdf_norms(seed_key_a, seed_key_b)
         return wasserstein
 
-    def compute_ks_distance(
-        self, seed_key_a: str, seed_key_b: str
-    ) -> float:
+    def compute_ks_distance(self, seed_key_a: str, seed_key_b: str) -> float:
         """Kolmogorov-Smirnov statistic between two seeds' edge profiles.
 
         Maximum absolute CDF difference — L∞ norm of the same quantity
@@ -621,9 +619,7 @@ class EdgeTracker:
         _w, ks, _crps = self._cdf_norms(seed_key_a, seed_key_b)
         return ks
 
-    def compute_crps(
-        self, seed_key_a: str, seed_key_b: str
-    ) -> float:
+    def compute_crps(self, seed_key_a: str, seed_key_b: str) -> float:
         """CRPS (Continuous Ranked Probability Score) between two edge profiles.
 
         L² integral of the CDF difference: ∫(F_a - F_b)² dy.
@@ -633,9 +629,7 @@ class EdgeTracker:
         _w, _ks, crps = self._cdf_norms(seed_key_a, seed_key_b)
         return crps
 
-    def _cdf_norms(
-        self, seed_key_a: str, seed_key_b: str
-    ) -> tuple[float, float, float]:
+    def _cdf_norms(self, seed_key_a: str, seed_key_b: str) -> tuple[float, float, float]:
         """Compute Wasserstein-1, KS, and CRPS from a single CDF walk.
 
         Returns (wasserstein, ks, crps) — L¹, L∞, and L² norms of the
@@ -786,6 +780,70 @@ class EdgeTracker:
         # Scale to [0.5, 2.0]
         return 0.5 + 1.5 * normalized
 
+    def compute_hamming_bitmap_distance(self, seed_key_a: str, seed_key_b: str) -> float:
+        """Compute Hamming distance between two seeds' edge bitmaps.
+
+        Converts each seed's edge set to a fixed-length bitmap and counts
+        differing positions. Faster than Jaccard/Wasserstein for detecting
+        seeds that are byte-level near-duplicates.
+
+        Args:
+            seed_key_a: First seed key.
+            seed_key_b: Second seed key.
+
+        Returns:
+            Normalized Hamming distance in [0.0, 1.0].
+                0.0 = identical bitmaps, 1.0 = all bits differ.
+        """
+        edges_a = self.seed_edges.get(seed_key_a, set())
+        edges_b = self.seed_edges.get(seed_key_b, set())
+        if not edges_a and not edges_b:
+            return 0.0
+        if not edges_a or not edges_b:
+            return 1.0
+
+        # Build compact bitmaps
+        max_edge = max(max(edges_a), max(edges_b)) + 1
+        size = (max_edge + 7) // 8
+        bm_a = bytearray(size)
+        bm_b = bytearray(size)
+        for e in edges_a:
+            bm_a[e >> 3] |= 1 << (e & 7)
+        for e in edges_b:
+            bm_b[e >> 3] |= 1 << (e & 7)
+
+        dist = hamming_distance(bytes(bm_a), bytes(bm_b))
+        return dist / (size * 8) if size > 0 else 0.0
+
+    def find_near_duplicate_seeds(self, max_hamming: float = 0.05) -> list[tuple[str, str, float]]:
+        """Find pairs of seeds with near-identical edge bitmaps.
+
+        Uses Hamming distance on edge bitmaps. Only checks seed pairs that
+        share a MinHash LSH bucket for sub-linear performance.
+
+        Args:
+            max_hamming: Maximum normalized Hamming distance to report.
+
+        Returns:
+            List of (seed_key_a, seed_key_b, hamming_distance) tuples.
+        """
+        candidates = set()
+        keys = list(self.seed_edges.keys())
+        for key in keys:
+            similar = self._minhash.find_similar(key, min_jaccard=0.5)
+            for other in similar:
+                pair = tuple(sorted((key, other)))
+                candidates.add(pair)
+
+        results = []
+        for a, b in candidates:
+            hdist = self.compute_hamming_bitmap_distance(a, b)
+            if 0 < hdist <= max_hamming:
+                results.append((a, b, hdist))
+
+        results.sort(key=lambda x: x[2])
+        return results
+
     def get_cumulative_edge_count(self) -> int:
         """Get total unique edges seen across all seeds."""
         return len(self.cumulative_edges)
@@ -813,8 +871,14 @@ class EdgeTracker:
         self._rebuild_frequency_spectrum()
         n = len(self.cumulative_edges)
         if n == 0:
-            return {"n": 0, "n1": 0, "n2": 0, "estimated_undiscovered": 0,
-                    "saturation": 0.0, "confidence": "low"}
+            return {
+                "n": 0,
+                "n1": 0,
+                "n2": 0,
+                "estimated_undiscovered": 0,
+                "saturation": 0.0,
+                "confidence": "low",
+            }
         n1 = self._frequency_spectrum.get(1, 0)
         n2 = self._frequency_spectrum.get(2, 0)
         if n2 > 0:
@@ -832,8 +896,14 @@ class EdgeTracker:
             confidence = "medium"
         else:
             confidence = "low"
-        return {"n": n, "n1": n1, "n2": n2, "estimated_undiscovered": int(est_undiscovered),
-                "saturation": saturation, "confidence": confidence}
+        return {
+            "n": n,
+            "n1": n1,
+            "n2": n2,
+            "estimated_undiscovered": int(est_undiscovered),
+            "saturation": saturation,
+            "confidence": confidence,
+        }
 
     def bitmap_density(self) -> float:
         """Fraction of the edge map that has been hit (0.0 to 1.0)."""
@@ -855,8 +925,14 @@ class EdgeTracker:
           - avg_seeds_per_edge: average number of seeds hitting each edge
         """
         if not self._global_edge_hits:
-            return {"total": 0, "singleton": 0, "cold": 0, "warm": 0,
-                    "hot": 0, "avg_seeds_per_edge": 0.0}
+            return {
+                "total": 0,
+                "singleton": 0,
+                "cold": 0,
+                "warm": 0,
+                "hot": 0,
+                "avg_seeds_per_edge": 0.0,
+            }
 
         counts = list(self._global_edge_hits.values())
         total = len(counts)
@@ -866,8 +942,14 @@ class EdgeTracker:
         hot = sum(1 for c in counts if c > 10)
         avg = sum(counts) / total if total else 0.0
 
-        return {"total": total, "singleton": singleton, "cold": cold,
-                "warm": warm, "hot": hot, "avg_seeds_per_edge": avg}
+        return {
+            "total": total,
+            "singleton": singleton,
+            "cold": cold,
+            "warm": warm,
+            "hot": hot,
+            "avg_seeds_per_edge": avg,
+        }
 
     def edge_hit_distribution(self) -> dict[int, dict]:
         """Per-edge hit statistics across all seeds.
@@ -882,7 +964,7 @@ class EdgeTracker:
         for edge, total_hits in self._global_edge_hits.items():
             # Count distinct seeds hitting this edge
             seed_count = 0
-            for seed_key, hc in self.seed_hit_counts.items():
+            for _seed_key, hc in self.seed_hit_counts.items():
                 if edge in hc:
                     seed_count += 1
             mean_per_seed = total_hits / seed_count if seed_count > 0 else 0.0
@@ -940,12 +1022,11 @@ class EdgeTracker:
                 edge_seeds[e].append(seed_key)
 
         # Singleton edges (hit by exactly 1 seed)
-        singletons = {e: seeds[0] for e, seeds in edge_seeds.items()
-                      if len(seeds) == 1}
+        singletons = {e: seeds[0] for e, seeds in edge_seeds.items() if len(seeds) == 1}
 
         # Count singletons per seed
         result = defaultdict(int)
-        for edge, seed_key in singletons.items():
+        for _edge, seed_key in singletons.items():
             result[seed_key] += 1
         return dict(result)
 
@@ -956,22 +1037,23 @@ class EdgeTracker:
             "cumulative_edges": sorted(self.cumulative_edges),
             "seed_edges": {k: sorted(v) for k, v in self.seed_edges.items()},
             "seed_hit_counts": {
-                k: {str(e): c for e, c in hc.items()}
-                for k, hc in self.seed_hit_counts.items()
+                k: {str(e): c for e, c in hc.items()} for k, hc in self.seed_hit_counts.items()
             },
             "global_edge_hits": {str(e): c for e, c in self._global_edge_hits.items()},
             "minhash_sigs": {k: sig for k, sig in self._minhash.signatures.items()},
             "aggregate_totals": {str(e): c for e, c in self._aggregate_totals.items()},
             "aggregate_total_count": self._aggregate_total_count,
-            "edge_traces": {
-                k: [list(e) for e in v]
-                for k, v in self.seed_edge_traces.items()
-            },
+            "edge_traces": {k: [list(e) for e in v] for k, v in self.seed_edge_traces.items()},
         }
         try:
             with open(path, "w") as f:
                 json.dump(data, f, separators=(",", ":"))
-            log.info("Edge tracker saved: %s (%d seeds, %d edges)", path, len(self.seed_edges), len(self.cumulative_edges))
+            log.info(
+                "Edge tracker saved: %s (%d seeds, %d edges)",
+                path,
+                len(self.seed_edges),
+                len(self.cumulative_edges),
+            )
             return True
         except OSError as e:
             log.warning("Failed to save edge tracker: %s", e)
@@ -1006,8 +1088,7 @@ class EdgeTracker:
                     self._aggregate_total_count += count
         # Restore edge traces
         self.seed_edge_traces = {
-            k: {(e[0], e[1]) for e in v}
-            for k, v in data.get("edge_traces", {}).items()
+            k: {(e[0], e[1]) for e in v} for k, v in data.get("edge_traces", {}).items()
         }
         # Restore MinHash signatures and rebuild LSH index
         self._minhash = MinHashLSH(num_perm=64, num_bands=8)
@@ -1021,5 +1102,10 @@ class EdgeTracker:
             for k, edges in self.seed_edges.items():
                 sig = self._minhash.compute_signature(edges)
                 self._minhash.add(k, sig)
-        log.info("Edge tracker loaded: %s (%d seeds, %d edges)", path, len(self.seed_edges), len(self.cumulative_edges))
+        log.info(
+            "Edge tracker loaded: %s (%d seeds, %d edges)",
+            path,
+            len(self.seed_edges),
+            len(self.cumulative_edges),
+        )
         return True

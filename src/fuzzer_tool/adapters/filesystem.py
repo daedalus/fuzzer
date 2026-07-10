@@ -18,6 +18,7 @@ from pathlib import Path
 from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.crash_metadata import CrashMetadata
 from fuzzer_tool.core.sanitizer import SanitizerReport
+from fuzzer_tool.core.similarity import crash_signature_similarity
 
 SNAPSHOT_INTERVAL = 20
 
@@ -80,6 +81,7 @@ def hash_data(data: bytes) -> str:
     """
     try:
         import xxhash
+
         return xxhash.xxh64(data).hexdigest()[:16]
     except ImportError:
         return hashlib.sha256(data).hexdigest()[:16]
@@ -222,9 +224,7 @@ def save_to_corpus(
 
     # Force full snapshot at interval to cap chain depth
     use_delta = (
-        parent is not None
-        and len(data) == len(parent)
-        and lineage_depth < SNAPSHOT_INTERVAL
+        parent is not None and len(data) == len(parent) and lineage_depth < SNAPSHOT_INTERVAL
     )
 
     delta = None
@@ -280,11 +280,21 @@ def save_crash(
     report = SanitizerReport.parse(stderr)
     sig = report.signature if report and report.is_valid() else f"signal:{abs(returncode)}"
 
-    # Deduplicate by signature: skip if this crash signature was already seen
+    # Deduplicate by signature: skip if this crash signature was already seen.
+    # Uses Levenshtein similarity for fuzzy matching — crashes at the same
+    # function with different instruction offsets or inlined frames are grouped.
+    # Only fuzzy-match sanitizer signatures (contain @); exact-match signal fallbacks.
     if sig in crash_sigs:
         crash_hashes.add(h)
         crash_sigs[sig] += 1
         return False
+
+    if "@" in sig:
+        for existing_sig in crash_sigs:
+            if crash_signature_similarity(sig, existing_sig) >= 0.8:
+                crash_hashes.add(h)
+                crash_sigs[existing_sig] += 1
+                return False
 
     crash_hashes.add(h)
     crash_sigs[sig] = 1

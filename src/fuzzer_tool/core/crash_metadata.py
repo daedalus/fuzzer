@@ -3,6 +3,12 @@
 import hashlib
 from dataclasses import dataclass, field
 
+from fuzzer_tool.core.similarity import (
+    crash_signature_similarity,
+    hamming_similarity,
+    levenshtein_similarity,
+)
+
 
 @dataclass
 class CrashMetadata:
@@ -233,7 +239,10 @@ def find_nearest_corpus(
 ) -> tuple[str, float, list[int]]:
     """Find the corpus entry most similar to the crash input.
 
-    Uses 4-gram Jaccard similarity on up to max_check corpus entries.
+    Combines three signals for robust similarity:
+      1. 4-gram Jaccard (structural similarity, length-agnostic)
+      2. Hamming distance (fast byte-level for equal-length inputs)
+      3. Levenshtein similarity (handles length changes from mutations)
 
     Returns:
         Tuple of (nearest_label, similarity, diff_byte_offsets).
@@ -241,26 +250,35 @@ def find_nearest_corpus(
     if not corpus:
         return "", 0.0, []
 
-    crash_4grams = set()
-    for i in range(max(0, len(crash_data) - 3)):
-        crash_4grams.add(crash_data[i : i + 4])
-
     best_sim = 0.0
     best_idx = 0
     checked = corpus[:max_check]
 
     for idx, seed in enumerate(checked):
+        # 4-gram Jaccard
+        crash_4grams = set()
+        for i in range(max(0, len(crash_data) - 3)):
+            crash_4grams.add(crash_data[i : i + 4])
         seed_4grams = set()
         for i in range(max(0, len(seed) - 3)):
             seed_4grams.add(seed[i : i + 4])
         if not crash_4grams and not seed_4grams:
-            sim = 1.0
+            jaccard = 1.0
         elif not crash_4grams or not seed_4grams:
-            sim = 0.0
+            jaccard = 0.0
         else:
             intersection = len(crash_4grams & seed_4grams)
             union = len(crash_4grams | seed_4grams)
-            sim = intersection / union if union else 0.0
+            jaccard = intersection / union if union else 0.0
+
+        # Hamming (equal-length) or Levenshtein (unequal-length)
+        if len(crash_data) == len(seed):
+            byte_sim = hamming_similarity(crash_data, seed)
+        else:
+            byte_sim = levenshtein_similarity(crash_data, seed)
+
+        # Weighted combination: 40% Jaccard + 60% byte-level similarity
+        sim = 0.4 * jaccard + 0.6 * byte_sim
         if sim > best_sim:
             best_sim = sim
             best_idx = idx
@@ -273,3 +291,51 @@ def find_nearest_corpus(
 
     label = f"seed_{best_idx}"
     return label, best_sim, diff[:30]
+
+
+def cluster_crashes(
+    signatures: list[str],
+    threshold: float = 0.7,
+) -> list[list[int]]:
+    """Cluster crash signatures by Levenshtein similarity.
+
+    Groups crashes with similar signatures (same root cause, different
+    instruction offsets or inlined frames) into clusters.
+
+    Args:
+        signatures: List of crash signature strings.
+        threshold: Minimum similarity to group into the same cluster.
+
+    Returns:
+        List of clusters, where each cluster is a list of indices into
+        the signatures list.
+    """
+    if not signatures:
+        return []
+
+    n = len(signatures)
+    parent = list(range(n))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(x: int, y: int) -> None:
+        px, py = find(x), find(y)
+        if px != py:
+            parent[px] = py
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            sim = crash_signature_similarity(signatures[i], signatures[j])
+            if sim >= threshold:
+                union(i, j)
+
+    clusters_map: dict[int, list[int]] = {}
+    for i in range(n):
+        root = find(i)
+        clusters_map.setdefault(root, []).append(i)
+
+    return list(clusters_map.values())

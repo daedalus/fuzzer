@@ -37,6 +37,8 @@ Coverage-guided binary fuzzer with static target analysis, statistical novelty s
 - **Perplexity (MDL codelength)**: structurally novel seeds get 1.0-2.0x weight
 - **NCD similarity**: Normalized Compression Distance between corpus entries
 - **Simulated annealing**: temperature-scaled exploration/exploitation balance
+- **Hamming bitmap distance**: fast byte-level seed-to-seed similarity on edge bitmaps
+- **Near-duplicate detection**: finds seed pairs with near-identical coverage via Hamming + LSH
 
 ### Information Theory
 - **Mutual information** (`--mi-guided`): I(byte_position; coverage) guides mutation toward positions that actually control code paths
@@ -54,6 +56,7 @@ Coverage-guided binary fuzzer with static target analysis, statistical novelty s
 - **xxhash dedup**: ~13x faster than SHA-256 for corpus deduplication
 - **Delta snapshotting**: caps chain depth at 20 hops, prevents unbounded reconstruction cost
 - **Auto-minimize**: corpus pruning guided by Wasserstein spatial diversity
+- **Hamming fuzzy dedup**: near-duplicate detection via Hamming distance on equal-length seeds (`--fuzzy-dedup N`)
 
 ### Crash Analysis
 - **Sanitizer detection**: automatic ASAN/MSAN/TSAN/LSAN/UBSAN crash classification
@@ -61,6 +64,8 @@ Coverage-guided binary fuzzer with static target analysis, statistical novelty s
 - **Crash minimization**: delta-debugging with signature-matching to prevent drift to unrelated bugs
 - **Corpus minimization**: greedy set-cover over SHM edge bitmaps (`minimize` subcommand)
 - **Crash exploitability tiers**: ASAN_EXPLOITABILITY classification in reports
+- **Levenshtein crash clustering**: groups crashes with similar stack traces (same root cause, different offsets)
+- **Fuzzy corpus similarity**: Hamming + Levenshtein + 4-gram Jaccard for crash-to-corpus nearest-neighbor search
 
 ### Observability
 - **Branch density**: static analysis at startup (`cond branches/KB`)
