@@ -65,6 +65,8 @@ class MonteCarloScheduler:
         self.last_js_divergence: float = 0.0
         # Brier score tracking for bandit calibration diagnostics
         self._brier_predictions: collections.deque = collections.deque(maxlen=500)
+        # Success history for covariance computation
+        self._op_success_history: collections.deque = collections.deque(maxlen=2000)
 
         # Pairwise transition matrix: P(next_op | prev_op)
         # transition_counts[prev][next] = discoveries from (prev, next) pairs
@@ -140,6 +142,8 @@ class MonteCarloScheduler:
             name: Name of the mutation operator.
             success: Whether the mutation produced an interesting result.
         """
+        self._op_success_history.append((name, success))
+
         if self.arm_decay < 1.0:
             for k in self.arm_alpha:
                 self.arm_alpha[k] *= self.arm_decay
@@ -414,6 +418,440 @@ class MonteCarloScheduler:
             return True
         except (OSError, json.JSONDecodeError, KeyError):
             return False
+
+    def stationary_distribution(
+        self, max_iter: int = 200, tol: float = 1e-8
+    ) -> dict[str, float]:
+        """Compute the stationary distribution π of the transition Markov chain.
+
+        Uses power iteration: π_{k+1} = π_k · P until convergence.
+        The stationary distribution satisfies πP = π — it tells you which
+        operator sequences the fuzzer naturally settles into.
+
+        Args:
+            max_iter: Maximum power iteration steps.
+            tol: Convergence tolerance (L1 norm of change).
+
+        Returns:
+            Dict mapping operator name -> stationary probability.
+        """
+        if not self.transition_total:
+            return {}
+
+        operators = sorted(
+            set(self.transition_total.keys()) | {
+                op for targets in self.transition_counts.values() for op in targets
+            }
+        )
+        n = len(operators)
+        if n == 0:
+            return {}
+        if n == 1:
+            return {operators[0]: 1.0}
+
+        op_idx = {op: i for i, op in enumerate(operators)}
+
+        # Build row-stochastic matrix P
+        p_matrix: list[list[float]] = [[0.0] * n for _ in range(n)]
+        for prev_op, total in self.transition_total.items():
+            if total <= 0 or prev_op not in op_idx:
+                continue
+            i = op_idx[prev_op]
+            targets = self.transition_counts.get(prev_op, {})
+            for next_op, count in targets.items():
+                if next_op in op_idx:
+                    p_matrix[i][op_idx[next_op]] = count / total
+
+        # Handle absorbing states
+        for i in range(n):
+            if sum(p_matrix[i]) < 1e-12:
+                p_matrix[i][i] = 1.0
+
+        # Power iteration
+        pi = [1.0 / n] * n
+        for _ in range(max_iter):
+            new_pi = [0.0] * n
+            for j in range(n):
+                for i in range(n):
+                    new_pi[j] += pi[i] * p_matrix[i][j]
+            total = sum(new_pi)
+            if total > 0:
+                new_pi = [x / total for x in new_pi]
+            diff = sum(abs(a - b) for a, b in zip(pi, new_pi, strict=False))
+            pi = new_pi
+            if diff < tol:
+                break
+
+        return {op: pi[op_idx[op]] for op in operators}
+
+    def spectral_gap(self, max_iter: int = 200, tol: float = 1e-8) -> float:
+        """Compute the spectral gap of the transition Markov chain.
+
+        The spectral gap is 1 - λ₂ where λ₂ is the second-largest
+        eigenvalue. Measures how quickly the operator sequence converges
+        to its stationary distribution.
+
+        - Large gap (→1): fast mixing
+        - Small gap (→0): slow mixing, stuck in narrow cycles
+
+        Returns:
+            Spectral gap in [0, 1].
+        """
+        if not self.transition_total:
+            return 1.0
+
+        operators = sorted(
+            set(self.transition_total.keys()) | {
+                op for targets in self.transition_counts.values() for op in targets
+            }
+        )
+        n = len(operators)
+        if n <= 1:
+            return 1.0
+
+        op_idx = {op: i for i, op in enumerate(operators)}
+
+        p_matrix: list[list[float]] = [[0.0] * n for _ in range(n)]
+        for prev_op, total in self.transition_total.items():
+            if total <= 0 or prev_op not in op_idx:
+                continue
+            i = op_idx[prev_op]
+            targets = self.transition_counts.get(prev_op, {})
+            for next_op, count in targets.items():
+                if next_op in op_idx:
+                    p_matrix[i][op_idx[next_op]] = count / total
+
+        for i in range(n):
+            if sum(p_matrix[i]) < 1e-12:
+                p_matrix[i][i] = 1.0
+
+        # Power iteration for dominant eigenvector
+        v = [1.0 / n] * n
+        for _ in range(max_iter):
+            new_v = [0.0] * n
+            for j in range(n):
+                for i in range(n):
+                    new_v[j] += p_matrix[i][j] * v[i]
+            norm = math.sqrt(sum(x * x for x in new_v))
+            if norm < 1e-12:
+                break
+            new_v = [x / norm for x in new_v]
+            diff = math.sqrt(sum((a - b) ** 2 for a, b in zip(v, new_v, strict=False)))
+            v = new_v
+            if diff < tol:
+                break
+
+        # Deflate: P_deflated = P - v * v^T
+        deflated: list[list[float]] = [
+            [p_matrix[i][j] - v[i] * v[j] for j in range(n)]
+            for i in range(n)
+        ]
+
+        # Power iteration on deflated matrix for λ₂
+        w = [random.random() for _ in range(n)]
+        norm = math.sqrt(sum(x * x for x in w))
+        w = [x / norm for x in w]
+
+        eigenvalue2 = 0.0
+        for _ in range(max_iter):
+            new_w = [0.0] * n
+            for j in range(n):
+                for i in range(n):
+                    new_w[j] += deflated[i][j] * w[i]
+            dot = sum(a * b for a, b in zip(w, new_w, strict=False))
+            eigenvalue2 = abs(dot)
+            norm = math.sqrt(sum(x * x for x in new_w))
+            if norm < 1e-12:
+                break
+            new_w = [x / norm for x in new_w]
+            diff = math.sqrt(sum((a - b) ** 2 for a, b in zip(w, new_w, strict=False)))
+            w = new_w
+            if diff < tol:
+                break
+
+        return max(0.0, min(1.0, 1.0 - eigenvalue2))
+
+    def should_explore(self, gap_threshold: float = 0.1) -> bool:
+        """Check if the fuzzer is stuck in an operator cycle.
+
+        Args:
+            gap_threshold: Spectral gap below which exploration is recommended.
+
+        Returns:
+            True if spectral gap < gap_threshold (stagnation detected).
+        """
+        return self.spectral_gap() < gap_threshold
+
+    def correlated_select(self, ops: list[str], segment_size: int = 50) -> str:
+        """Select operator via correlated Thompson sampling.
+
+        Adds multivariate normal noise whose covariance is the empirical
+        operator covariance. Correlated arms get similar score boosts,
+        so they're selected together rather than fighting each other.
+
+        Falls back to standard Thompson sampling when insufficient data.
+
+        Args:
+            ops: Available mutation operators.
+            segment_size: Segments per covariance estimate.
+
+        Returns:
+            Name of the selected operator.
+        """
+        if len(ops) < 3:
+            return self._standard_thompson(ops)
+
+        cov = self.operator_covariance(window=2000, segment_size=segment_size)
+        if not cov or not all(op in cov for op in ops):
+            return self._standard_thompson(ops)
+
+        n = len(ops)
+        cov_matrix = [
+            [cov[ops[i]].get(ops[j], 0.0) for j in range(n)]
+            for i in range(n)
+        ]
+
+        chol = self._chol(cov_matrix)
+        if chol is None:
+            return self._standard_thompson(ops)
+
+        z = [random.gauss(0, 1) for _ in range(n)]
+        noise = [0.0] * n
+        for i in range(n):
+            for j in range(i + 1):
+                noise[i] += chol[i][j] * z[j]
+
+        scores = {}
+        for i, op in enumerate(ops):
+            a = self.arm_alpha.get(op, 1.0)
+            b = self.arm_beta.get(op, 1.0)
+            scores[op] = a / (a + b) + noise[i]
+
+        return max(ops, key=lambda o: scores[o])
+
+    def _standard_thompson(self, ops: list[str]) -> str:
+        """Pure Thompson sampling without correlation structure."""
+        best_op = None
+        best_val = -1.0
+        for op in ops:
+            a = self.arm_alpha.get(op, 1.0)
+            b = self.arm_beta.get(op, 1.0)
+            val = random.betavariate(a, b)
+            if val > best_val:
+                best_val = val
+                best_op = op
+        return best_op if best_op is not None else ops[0]
+
+    @staticmethod
+    def _chol(matrix: list[list[float]]) -> list[list[float]] | None:
+        """Cholesky decomposition with regularization.
+
+        Decomposes A = L @ L^T where L is lower triangular.
+        Returns None if decomposition fails after regularization.
+        """
+        n = len(matrix)
+        if n == 0:
+            return None
+
+        a = [row[:] for row in matrix]
+        for i in range(n):
+            if a[i][i] <= 0:
+                a[i][i] = 1.0
+        diag_min = min(a[i][i] for i in range(n))
+        reg = max(diag_min * 0.01, 1e-6)
+        for i in range(n):
+            a[i][i] += reg
+
+        l = [[0.0] * n for _ in range(n)]
+        for i in range(n):
+            for j in range(i + 1):
+                s = sum(l[i][k] * l[j][k] for k in range(j))
+                if i == j:
+                    val = a[i][i] - s
+                    if val <= 0:
+                        return None
+                    l[i][j] = math.sqrt(val)
+                else:
+                    l[i][j] = (a[i][j] - s) / l[j][j] if l[j][j] > 0 else 0.0
+        return l
+
+    def matrix_ucb_select(
+        self, ops: list[str], beta: float = 2.0, segment_size: int = 50
+    ) -> str:
+        """Select operator via matrix-based Upper Confidence Bound.
+
+        Adjusts UCB exploration bonuses using the covariance structure.
+        Arms correlated with high-performing arms get reduced exploration.
+
+        Falls back to standard UCB when insufficient data.
+
+        Args:
+            ops: Available mutation operators.
+            beta: Exploration parameter.
+            segment_size: Segments per covariance estimate.
+
+        Returns:
+            Name of the selected operator.
+        """
+        if len(ops) < 3:
+            return self._standard_ucb(ops, beta)
+
+        means = {}
+        for op in ops:
+            a = self.arm_alpha.get(op, 1.0)
+            b = self.arm_beta.get(op, 1.0)
+            means[op] = a / (a + b)
+
+        cov = self.operator_covariance(window=2000, segment_size=segment_size)
+        if not cov or not all(op in cov for op in ops):
+            return self._standard_ucb(ops, beta)
+
+        n = len(ops)
+        mu = [means[ops[i]] for i in range(n)]
+
+        cov_matrix = [
+            [cov[ops[i]].get(ops[j], 0.0) for j in range(n)]
+            for i in range(n)
+        ]
+
+        chol = self._chol(cov_matrix)
+        if chol is None:
+            return self._standard_ucb(ops, beta)
+
+        inv_cov = self._solve_cholesky(chol, [[1.0 if i == j else 0.0
+                                                for j in range(n)]
+                                               for i in range(n)])
+        if inv_cov is None:
+            return self._standard_ucb(ops, beta)
+
+        base = 0.0
+        for i in range(n):
+            for j in range(n):
+                base += mu[i] * inv_cov[i][j] * mu[j]
+
+        t = sum(self.arm_alpha.values()) + sum(self.arm_beta.values()) - 2 * len(self.arm_alpha)
+        t = max(t, 1)
+
+        scores = {}
+        for i, op in enumerate(ops):
+            penalty = 0.0
+            for j in range(n):
+                penalty += inv_cov[i][j] * mu[j]
+            penalty = base - 2 * penalty
+            exploration = beta * math.sqrt(max(0.0, math.log(t) + penalty))
+            scores[op] = mu[i] + exploration
+
+        return max(ops, key=lambda o: scores[o])
+
+    def _standard_ucb(self, ops: list[str], beta: float = 2.0) -> str:
+        """Standard UCB1 without covariance adjustment."""
+        total = sum(self.arm_alpha.values()) + sum(self.arm_beta.values()) - 2 * len(self.arm_alpha)
+        total = max(total, 1)
+
+        best_op = None
+        best_score = -1.0
+        for op in ops:
+            a = self.arm_alpha.get(op, 1.0)
+            b = self.arm_beta.get(op, 1.0)
+            n_i = max(a + b - 2, 1)
+            mean = a / (a + b)
+            exploration = beta * math.sqrt(math.log(total) / n_i)
+            score = mean + exploration
+            if score > best_score:
+                best_score = score
+                best_op = op
+        return best_op if best_op is not None else ops[0]
+
+    @staticmethod
+    def _solve_cholesky(
+        chol: list[list[float]], rhs: list[list[float]]
+    ) -> list[list[float]] | None:
+        """Solve L @ L^T @ X = rhs using forward/back substitution."""
+        n = len(chol)
+        if n == 0:
+            return None
+        m = len(rhs[0]) if rhs else 0
+
+        y = [[0.0] * m for _ in range(n)]
+        for col in range(m):
+            for i in range(n):
+                s = sum(chol[i][k] * y[k][col] for k in range(i))
+                y[i][col] = (rhs[i][col] - s) / chol[i][i] if chol[i][i] > 0 else 0.0
+
+        x = [[0.0] * m for _ in range(n)]
+        for col in range(m):
+            for i in range(n - 1, -1, -1):
+                s = sum(chol[k][i] * x[k][col] for k in range(i + 1, n))
+                x[i][col] = (y[i][col] - s) / chol[i][i] if chol[i][i] > 0 else 0.0
+
+        return x
+
+    def operator_covariance(
+        self, window: int = 500, segment_size: int = 50
+    ) -> dict[str, dict[str, float]]:
+        """Compute pairwise covariance of operator success rates.
+
+        Divides history into segments and computes per-operator success
+        rate per segment. High positive covariance = redundant operators.
+
+        Args:
+            window: Number of recent observations to consider.
+            segment_size: Observations per segment.
+
+        Returns:
+            Nested dict: covariance[op_a][op_b] = Cov(success_a, success_b).
+        """
+        if not self._op_success_history:
+            return {}
+
+        recent = list(self._op_success_history)[-window:]
+        if len(recent) < 2 * segment_size:
+            return {}
+
+        operators = sorted(set(self.arm_alpha.keys()) | {op for op, _ in recent})
+        if len(operators) < 1:
+            return {}
+
+        op_idx = {op: i for i, op in enumerate(operators)}
+        n_ops = len(operators)
+
+        segments: list[list[float]] = []
+        for start in range(0, len(recent) - segment_size + 1, segment_size):
+            chunk = recent[start : start + segment_size]
+            rates = [0.0] * n_ops
+            counts = [0] * n_ops
+            for op, success in chunk:
+                if op in op_idx:
+                    i = op_idx[op]
+                    counts[i] += 1
+                    rates[i] += 1.0 if success else 0.0
+            for i in range(n_ops):
+                if counts[i] > 0:
+                    rates[i] /= counts[i]
+            segments.append(rates)
+
+        if len(segments) < 2:
+            return {}
+
+        n_seg = len(segments)
+        means = [sum(s[i] for s in segments) / n_seg for i in range(n_ops)]
+
+        cov_matrix: dict[str, dict[str, float]] = {op: {} for op in operators}
+
+        for i, op_i in enumerate(operators):
+            for j, op_j in enumerate(operators):
+                if i == j:
+                    var = sum((s[i] - means[i]) ** 2 for s in segments) / (n_seg - 1)
+                    cov_matrix[op_i][op_j] = var
+                elif i < j:
+                    cov_val = (
+                        sum((s[i] - means[i]) * (s[j] - means[j]) for s in segments)
+                        / (n_seg - 1)
+                    )
+                    cov_matrix[op_i][op_j] = cov_val
+                    cov_matrix[op_j][op_i] = cov_val
+
+        return cov_matrix
 
 
 class _MOptParticle:
@@ -836,6 +1274,157 @@ class ShapleyAttribution:
         joint = len(edges_a | edges_b)
         individual = len(edges_a) + len(edges_b)
         return (joint - individual) / max(1, individual)
+
+    def operator_kernel(
+        self, operators: list[str] | None = None
+    ) -> dict[str, dict[str, float]]:
+        """Build a kernel matrix measuring operator similarity via Jaccard.
+
+        K(i,j) = |E_i ∩ E_j| / |E_i ∪ E_j|
+        High K → redundant operators. Low K → complementary.
+
+        Args:
+            operators: Operators to include. If None, uses all.
+
+        Returns:
+            Nested dict: kernel[op_a][op_b] = Jaccard similarity in [0, 1].
+        """
+        if operators is None:
+            operators = sorted(self._operator_edges.keys())
+        if len(operators) < 2:
+            return {op: {op: 1.0} for op in operators}
+
+        kernel: dict[str, dict[str, float]] = {op: {} for op in operators}
+
+        for i, op_i in enumerate(operators):
+            edges_i = self._operator_edges.get(op_i, set())
+            for j, op_j in enumerate(operators):
+                if i == j:
+                    kernel[op_i][op_j] = 1.0
+                elif i < j:
+                    edges_j = self._operator_edges.get(op_j, set())
+                    if not edges_i and not edges_j:
+                        sim = 0.0
+                    else:
+                        intersection = len(edges_i & edges_j)
+                        union = len(edges_i | edges_j)
+                        sim = intersection / union if union > 0 else 0.0
+                    kernel[op_i][op_j] = sim
+                    kernel[op_j][op_i] = sim
+
+        return kernel
+
+    def operator_similarity(self, op_a: str, op_b: str) -> float:
+        """Compute Jaccard similarity between two operators."""
+        edges_a = self._operator_edges.get(op_a, set())
+        edges_b = self._operator_edges.get(op_b, set())
+        if not edges_a and not edges_b:
+            return 0.0
+        intersection = len(edges_a & edges_b)
+        union = len(edges_a | edges_b)
+        return intersection / union if union > 0 else 0.0
+
+    def redundant_operators(
+        self, threshold: float = 0.9, operators: list[str] | None = None
+    ) -> list[tuple[str, str, float]]:
+        """Find pairs of operators that are near-duplicates.
+
+        Returns pairs where K(i,j) >= threshold, sorted by similarity.
+
+        Args:
+            threshold: Minimum Jaccard similarity to consider redundant.
+            operators: Operators to check. If None, uses all.
+
+        Returns:
+            List of (op_a, op_b, similarity) tuples.
+        """
+        kernel = self.operator_kernel(operators)
+        pairs = []
+        seen = set()
+        for op_a in kernel:
+            for op_b in kernel[op_a]:
+                if op_a == op_b:
+                    continue
+                key = (min(op_a, op_b), max(op_a, op_b))
+                if key in seen:
+                    continue
+                seen.add(key)
+                sim = kernel[op_a][op_b]
+                if sim >= threshold:
+                    pairs.append((op_a, op_b, sim))
+        return sorted(pairs, key=lambda x: x[2], reverse=True)
+
+    def spectral_embedding(
+        self, operators: list[str] | None = None, k: int = 2
+    ) -> dict[str, list[float]]:
+        """Spectral embedding of operators using Laplacian eigenmap.
+
+        Returns low-dimensional coordinates where similar operators cluster.
+
+        Args:
+            operators: Operators to embed. If None, uses all.
+            k: Number of embedding dimensions.
+
+        Returns:
+            Dict mapping operator name -> [dim_0, dim_1, ...] coordinates.
+        """
+        if operators is None:
+            operators = sorted(self._operator_edges.keys())
+        n = len(operators)
+        if n < k + 1:
+            return {op: [0.0] * k for op in operators}
+
+        kernel = self.operator_kernel(operators)
+
+        degrees = [0.0] * n
+        for i in range(n):
+            for j in range(n):
+                degrees[i] += kernel[operators[i]].get(operators[j], 0.0)
+
+        # Normalized Laplacian: L_norm = I - D^{-1/2} W D^{-1/2}
+        laplacian: list[list[float]] = [[0.0] * n for _ in range(n)]
+        for i in range(n):
+            for j in range(n):
+                w_ij = kernel[operators[i]].get(operators[j], 0.0)
+                d_i = math.sqrt(degrees[i]) if degrees[i] > 0 else 1.0
+                d_j = math.sqrt(degrees[j]) if degrees[j] > 0 else 1.0
+                laplacian[i][j] = -w_ij / (d_i * d_j)
+            laplacian[i][i] = 1.0
+
+        # Inverse iteration with deflation for k smallest eigenvectors
+        eigenvectors: list[list[float]] = []
+
+        for _ in range(k):
+            w = [random.gauss(0, 1) for _ in range(n)]
+            norm = math.sqrt(sum(x * x for x in w))
+            w = [x / norm for x in w]
+
+            for _ in range(100):
+                lw = [0.0] * n
+                for i in range(n):
+                    for j in range(n):
+                        lw[i] += laplacian[i][j] * w[j]
+                new_w = [w[i] - 0.5 * lw[i] for i in range(n)]
+                norm = math.sqrt(sum(x * x for x in new_w))
+                if norm < 1e-12:
+                    break
+                new_w = [x / norm for x in new_w]
+                diff = math.sqrt(sum((a - b) ** 2 for a, b in zip(w, new_w, strict=False)))
+                w = new_w
+                if diff < 1e-8:
+                    break
+
+            eigenvectors.append(w)
+
+            for i in range(n):
+                for j in range(n):
+                    laplacian[i][j] -= w[i] * w[j]
+
+        embedding: dict[str, list[float]] = {}
+        for idx, op in enumerate(operators):
+            embedding[op] = [eigenvectors[d][idx] for d in range(k)]
+
+        return embedding
 
     def ranking(self, operators: list[str] | None = None) -> list[tuple[str, float]]:
         """Return operators ranked by Shapley value.

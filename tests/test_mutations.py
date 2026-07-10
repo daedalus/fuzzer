@@ -10,10 +10,12 @@ from fuzzer_tool.core.mutations import (
     INTERESTING_32,
     MUTATIONS,
     _divisor_sizes,
+    bit_transpose,
     load_dictionary,
     minimize_bytes,
     parse_dict_line,
     splice,
+    transpose_bytes,
 )
 
 
@@ -39,7 +41,14 @@ class TestConstants:
         assert "havoc" in MUTATIONS
         assert "splice" in MUTATIONS
         assert "arithmetic" in MUTATIONS
-        assert len(MUTATIONS) >= 12
+        assert "transpose_16" in MUTATIONS
+        assert "transpose_32" in MUTATIONS
+        assert "transpose_64" in MUTATIONS
+        assert "bit_transpose_8" in MUTATIONS
+        assert "bit_transpose_16" in MUTATIONS
+        assert "bit_transpose_32" in MUTATIONS
+        assert "bit_transpose_64" in MUTATIONS
+        assert len(MUTATIONS) >= 19
 
     def test_dict_mutations_list(self):
         assert "dict_insert" in DICT_MUTATIONS
@@ -175,3 +184,93 @@ class TestMinimizeBytes:
         data = b"A" * 1000
         result = minimize_bytes(data, lambda x: True, max_stages=1)
         assert len(result) <= len(data)
+
+
+class TestTransposeBytes:
+    def test_preserves_length(self):
+        data = bytes(range(32))
+        for width in (2, 4, 8):
+            result = transpose_bytes(data, width)
+            assert len(result) == len(data)
+
+    def test_short_input_returns_original(self):
+        data = b"\x01\x02"
+        assert transpose_bytes(data, 4) == data
+        assert transpose_bytes(data, 8) == data
+
+    def test_permutes_bytes(self):
+        data = b"\x00\x01\x02\x03\x04\x05\x06\x07"
+        changed = False
+        for _ in range(50):
+            result = transpose_bytes(data, 4)
+            assert sorted(result) == sorted(data)
+            if result != data:
+                changed = True
+        assert changed
+
+    def test_transpose_16_swaps_pair(self):
+        data = b"\xAA\xBB\xCC\xDD"
+        found = False
+        for _ in range(50):
+            result = transpose_bytes(data, 2)
+            # Must be a valid permutation of the original bytes
+            assert sorted(result) == sorted(data)
+            if result != data:
+                found = True
+        assert found
+
+    def test_transpose_64(self):
+        data = bytes(range(16))
+        found = False
+        for _ in range(50):
+            result = transpose_bytes(data, 8)
+            assert len(result) == len(data)
+            # Each 8-byte block should be a permutation of the original block
+            for off in range(0, len(data), 8):
+                assert sorted(result[off : off + 8]) == sorted(data[off : off + 8])
+            if result != data:
+                found = True
+        assert found
+
+
+class TestBitTranspose:
+    def test_preserves_length(self):
+        data = bytes(range(16))
+        for width in (1, 2, 4, 8):
+            result = bit_transpose(data, width)
+            assert len(result) == len(data)
+
+    def test_short_input_returns_original(self):
+        data = b"\x01"
+        assert bit_transpose(data, 2) == data
+        assert bit_transpose(data, 4) == data
+        assert bit_transpose(data, 8) == data
+
+    def test_bit_transpose_8_permutes_bits(self):
+        data = bytes([0b10101010])
+        found = False
+        for _ in range(50):
+            result = bit_transpose(data, 1)
+            assert len(result) == 1
+            # Popcount must be preserved
+            assert bin(result[0]).count("1") == 4
+            if result != data:
+                found = True
+        assert found
+
+    def test_bit_transpose_preserves_popcount(self):
+        data = bytes([0b10101010, 0b11001100, 0b11110000, 0b00001111])
+        expected_popcount = sum(bin(b).count("1") for b in data)
+        for width in (2, 4):
+            for _ in range(20):
+                result = bit_transpose(data, width)
+                result_popcount = sum(bin(b).count("1") for b in result)
+                assert result_popcount == expected_popcount
+
+    def test_bit_transpose_64(self):
+        data = bytes(range(16))
+        result = bit_transpose(data, 8)
+        assert len(result) == len(data)
+        expected_popcount = sum(bin(b).count("1") for b in data)
+        result_popcount = sum(bin(b).count("1") for b in result)
+        assert result_popcount == expected_popcount

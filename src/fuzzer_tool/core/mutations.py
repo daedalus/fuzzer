@@ -72,6 +72,13 @@ MUTATIONS = [
     "byte_delete",
     "byte_insert",
     "insert_ascii_num",
+    "transpose_16",
+    "transpose_32",
+    "transpose_64",
+    "bit_transpose_8",
+    "bit_transpose_16",
+    "bit_transpose_32",
+    "bit_transpose_64",
 ]
 
 
@@ -648,3 +655,61 @@ def splice_diff_located(a: bytes, b: bytes) -> bytes:
     cut_b = random.randint(first_diff, min(last_diff, len(b) - 1))
 
     return a[:cut_a] + b[cut_b:]
+
+
+# ---------------------------------------------------------------------------
+# Block transposition mutations
+# ---------------------------------------------------------------------------
+
+
+def transpose_bytes(data: bytes, width: int) -> bytes:
+    """Permute bytes within a randomly-selected aligned block of *width* bytes.
+
+    For width=2: swaps the two bytes. For width=4 or 8: applies a random
+    permutation of all bytes in the block. Preserves input length.
+
+    Args:
+        data: Input bytes.
+        width: Block width in bytes (2, 4, or 8).
+
+    Returns:
+        Bytes with one block's bytes transposed.
+    """
+    if len(data) < width:
+        return data
+    max_start = len(data) - width
+    start = (random.randint(0, max_start) // width) * width
+    block = bytearray(data[start : start + width])
+    random.shuffle(block)
+    result = bytearray(data)
+    result[start : start + width] = block
+    return bytes(result)
+
+
+def bit_transpose(data: bytes, width: int) -> bytes:
+    """Permute bits within a randomly-selected block of *width* bytes.
+
+    Reads the block as a little-endian integer, extracts all 8*width bits,
+    applies a random permutation, and writes back. Preserves input length.
+
+    Args:
+        data: Input bytes.
+        width: Block width in bytes (1, 2, 4, or 8).
+
+    Returns:
+        Bytes with one block's bits transposed.
+    """
+    if len(data) < width:
+        return data
+    max_start = len(data) - width
+    start = (random.randint(0, max_start) // width) * width
+    val = int.from_bytes(data[start : start + width], "little")
+    total_bits = 8 * width
+    bits = [(val >> i) & 1 for i in range(total_bits)]
+    random.shuffle(bits)
+    new_val = 0
+    for i, b in enumerate(bits):
+        new_val |= b << i
+    result = bytearray(data)
+    result[start : start + width] = new_val.to_bytes(width, "little")
+    return bytes(result)
