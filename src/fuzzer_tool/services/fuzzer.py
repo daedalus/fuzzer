@@ -506,8 +506,9 @@ class Fuzzer:
                 self.mc.init_arm("grammar_tree_mutate")
             self.mc.init_arm("png_chunk_mutate")
             self.mc.init_arm("jpeg_chunk_mutate")
+            self.mc.init_arm("jpeg_crc_fix")
             self.mc.init_arm("bmp_chunk_mutate")
-            self.mc.init_arm("crc_fix")
+            self.mc.init_arm("png_crc_fix")
         if self._mopt:
             for op in MUTATIONS:
                 self._mopt.init_arm(op)
@@ -520,8 +521,9 @@ class Fuzzer:
                 self._mopt.init_arm("grammar_tree_mutate")
             self._mopt.init_arm("png_chunk_mutate")
             self._mopt.init_arm("jpeg_chunk_mutate")
+            self._mopt.init_arm("jpeg_crc_fix")
             self._mopt.init_arm("bmp_chunk_mutate")
-            self._mopt.init_arm("crc_fix")
+            self._mopt.init_arm("png_crc_fix")
         if self._replicator:
             for op in MUTATIONS:
                 self._replicator.init_arm(op)
@@ -534,8 +536,9 @@ class Fuzzer:
                 self._replicator.init_arm("grammar_tree_mutate")
             self._replicator.init_arm("png_chunk_mutate")
             self._replicator.init_arm("jpeg_chunk_mutate")
+            self._replicator.init_arm("jpeg_crc_fix")
             self._replicator.init_arm("bmp_chunk_mutate")
-            self._replicator.init_arm("crc_fix")
+            self._replicator.init_arm("png_crc_fix")
 
         if self._elo:
             for op in MUTATIONS:
@@ -549,8 +552,9 @@ class Fuzzer:
                 self._elo.init_arm("grammar_tree_mutate")
             self._elo.init_arm("png_chunk_mutate")
             self._elo.init_arm("jpeg_chunk_mutate")
+            self._elo.init_arm("jpeg_crc_fix")
             self._elo.init_arm("bmp_chunk_mutate")
-            self._elo.init_arm("crc_fix")
+            self._elo.init_arm("png_crc_fix")
 
         self._persistent_runner = None
         if self.persistent:
@@ -1071,6 +1075,7 @@ class Fuzzer:
             ops.append("grammar_tree_mutate")
         ops.append("png_chunk_mutate")
         ops.append("jpeg_chunk_mutate")
+        ops.append("jpeg_crc_fix")
         ops.append("bmp_chunk_mutate")
         # Redqueen: if we know which bytes caused branch comparisons, prefer flipping them
         parent_meta = self.seed_meta.get(data)
@@ -1422,6 +1427,41 @@ class Fuzzer:
                     mutated = self._jpeg_mutator._generate_random_jpeg(max_len=self.max_len)
                 buf = bytearray(mutated[: self.max_len])
 
+            elif op == "jpeg_crc_fix" and buf:
+                # JPEG-aware mutation: parse markers, mutate payload, fix length field.
+                # Lets corrupted data reach DCT/Huffman decode paths instead of
+                # being rejected by the parser due to length mismatch.
+                import struct as _struct
+                from fuzzer_tool.core.jpeg_mutations import (
+                    parse_jpeg_markers,
+                    serialize_jpeg_markers,
+                    SOI,
+                    EOI,
+                    STANDALONE_MARKERS,
+                )
+
+                markers = parse_jpeg_markers(bytes(buf))
+                if markers and len(markers) > 2:
+                    # Pick a marker with payload (not SOI/EOI/RST)
+                    candidates = [
+                        i
+                        for i, m in enumerate(markers)
+                        if m.marker not in STANDALONE_MARKERS and len(m.data) > 0
+                    ]
+                    if candidates:
+                        idx = random.choice(candidates)
+                        marker = markers[idx]
+                        # Mutate payload: flip random bytes
+                        data = bytearray(marker.data)
+                        for _ in range(random.randint(1, min(4, len(data)))):
+                            pos = random.randint(0, len(data) - 1)
+                            data[pos] ^= 1 << random.randint(0, 7)
+                        marker.data = bytes(data)
+                        # Recompute length field (length = payload_size + 2)
+                        # The length is stored in the serialized header, not in marker.data
+                        # serialize_jpeg_markers handles this automatically via JpegMarker.serialize()
+                        buf = bytearray(serialize_jpeg_markers(markers)[: self.max_len])
+
             elif op == "bmp_chunk_mutate":
                 from fuzzer_tool.core.bmp_mutations import BmpMutator, parse_bmp
 
@@ -1433,7 +1473,7 @@ class Fuzzer:
                     mutated = self._bmp_mutator._generate_random_bmp(max_len=self.max_len)
                 buf = bytearray(mutated[: self.max_len])
 
-            elif op == "crc_fix" and buf:
+            elif op == "png_crc_fix" and buf:
                 # CRC-aware mutation: parse PNG, mutate chunk data, fix CRC.
                 # This lets mutations pass CRC validation and reach deeper
                 # decompression/code paths that CRC-corrupting mutations miss.

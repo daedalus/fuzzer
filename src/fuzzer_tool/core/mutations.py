@@ -64,7 +64,6 @@ MUTATIONS = [
     "truncate",
     "swap_regions",
     "swap_bytes",
-    "crc_fix",
     "endianness_swap",
     "type_replace",
     "ascii_num",
