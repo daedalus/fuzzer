@@ -105,7 +105,7 @@ class PngChunkMutator:
             # Not valid PNG — generate a minimal one
             return self._generate_random_png(max_len)
 
-        op = random.randint(0, 15)
+        op = random.randint(0, 23)
         if op == 0:
             return self._mutate_ihdr(chunks, max_len)
         elif op == 1:
@@ -136,8 +136,24 @@ class PngChunkMutator:
             return self._duplicate_ihdr(chunks, max_len)
         elif op == 14:
             return self._move_after_iend(chunks, max_len)
-        else:
+        elif op == 15:
             return self._mutate_plte(chunks, max_len)
+        elif op == 16:
+            return self._mutate_chrm(chunks, max_len)
+        elif op == 17:
+            return self._mutate_sbit(chunks, max_len)
+        elif op == 18:
+            return self._mutate_iccp(chunks, max_len)
+        elif op == 19:
+            return self._mutate_trns(chunks, max_len)
+        elif op == 20:
+            return self._mutate_ancillary(chunks, max_len)
+        elif op == 21:
+            return self._micro_idat(chunks, max_len)
+        elif op == 22:
+            return self._corrupt_signature(max_len)
+        else:
+            return self._swap_idat_chunks(chunks, max_len)
 
     def _mutate_ihdr(self, chunks: list[PngChunk], max_len: int) -> bytes:
         """Corrupt IHDR — test dimension/color validation."""
@@ -515,6 +531,22 @@ class PngChunkMutator:
             return serialize_png_chunks(chunks)[:max_len]
         compressed = zlib.compress(b"\x00", 0)
         idat.data = compressed
+        return serialize_png_chunks(chunks)[:max_len]
+
+    def _corrupt_signature(self, max_len: int) -> bytes:
+        """Corrupt the 8-byte PNG signature."""
+        sig = bytearray(b"\x89PNG\r\n\x1a\n")
+        idx = random.randint(0, 7)
+        sig[idx] = random.randint(0, 255)
+        return bytes(sig) + b"".join(c.serialize() for c in [PngChunk(b"IHDR", b"\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02"), PngChunk(b"IEND", b"")])[:max_len]
+
+    def _swap_idat_chunks(self, chunks: list[PngChunk], max_len: int) -> bytes:
+        """Swap two IDAT chunks to test decompressor ordering tolerance."""
+        idats = [i for i, c in enumerate(chunks) if c.chunk_type == b"IDAT"]
+        if len(idats) < 2:
+            return self._generate_random_png(max_len)
+        a, b = random.sample(idats, 2)
+        chunks[a], chunks[b] = chunks[b], chunks[a]
         return serialize_png_chunks(chunks)[:max_len]
 
     @staticmethod
