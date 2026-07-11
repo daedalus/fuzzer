@@ -2754,12 +2754,13 @@ class Fuzzer:
         if self._pruned_count > 0:
             print(f"  Seeds pruned:      {self._pruned_count}")
 
-        # Coverage
-        edges = 0
-        if self.shm_cov:
-            edges = self.shm_cov.cumulative_edges
-        elif self.ptrace_cov:
-            edges = self.ptrace_cov.cumulative_edges
+        # Coverage — prefer edge_tracker (authoritative), fall back to SHM/ptrace
+        edges = self._edge_tracker.get_cumulative_edge_count()
+        if not edges:
+            if self.shm_cov:
+                edges = self.shm_cov.cumulative_edges
+            elif self.ptrace_cov:
+                edges = self.ptrace_cov.cumulative_edges
         density = self._edge_tracker.bitmap_density() * 100
         collision_risk = self._edge_tracker.birthday_collision_risk() * 100
         print(f"  Edges discovered:  {edges}")
