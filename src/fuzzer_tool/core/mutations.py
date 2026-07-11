@@ -80,6 +80,17 @@ MUTATIONS = [
     "bit_transpose_64",
 ]
 
+# Format-aware mutations: structure-aware operators for specific file formats.
+# Every scheduler (mc, mopt, replicator, elo) must register all of these.
+FORMAT_MUTATIONS = [
+    "png_chunk_mutate",
+    "png_crc_fix",
+    "jpeg_chunk_mutate",
+    "jpeg_crc_fix",
+    "bmp_chunk_mutate",
+    "gzip_chunk_mutate",
+]
+
 
 def splice(a: bytes, b: bytes) -> bytes:
     """Cross two inputs at random offsets to produce a structural hybrid.

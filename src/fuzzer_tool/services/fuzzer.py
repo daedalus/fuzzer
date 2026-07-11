@@ -38,6 +38,7 @@ from fuzzer_tool.core.secretary import DEFAULT_EXPLORATION_FRAC, SecretaryStoppi
 from fuzzer_tool.core.mi import MutualInformationTracker
 from fuzzer_tool.core.mutations import (
     DICT_MUTATIONS,
+    FORMAT_MUTATIONS,
     INTERESTING_8,
     INTERESTING_16,
     INTERESTING_32,
@@ -504,11 +505,8 @@ class Fuzzer:
             if self.grammar:
                 self.mc.init_arm("grammar_mutate")
                 self.mc.init_arm("grammar_tree_mutate")
-            self.mc.init_arm("png_chunk_mutate")
-            self.mc.init_arm("jpeg_chunk_mutate")
-            self.mc.init_arm("jpeg_crc_fix")
-            self.mc.init_arm("bmp_chunk_mutate")
-            self.mc.init_arm("png_crc_fix")
+            for op in FORMAT_MUTATIONS:
+                self.mc.init_arm(op)
         if self._mopt:
             for op in MUTATIONS:
                 self._mopt.init_arm(op)
@@ -519,11 +517,8 @@ class Fuzzer:
             if self.grammar:
                 self._mopt.init_arm("grammar_mutate")
                 self._mopt.init_arm("grammar_tree_mutate")
-            self._mopt.init_arm("png_chunk_mutate")
-            self._mopt.init_arm("jpeg_chunk_mutate")
-            self._mopt.init_arm("jpeg_crc_fix")
-            self._mopt.init_arm("bmp_chunk_mutate")
-            self._mopt.init_arm("png_crc_fix")
+            for op in FORMAT_MUTATIONS:
+                self._mopt.init_arm(op)
         if self._replicator:
             for op in MUTATIONS:
                 self._replicator.init_arm(op)
@@ -534,11 +529,8 @@ class Fuzzer:
             if self.grammar:
                 self._replicator.init_arm("grammar_mutate")
                 self._replicator.init_arm("grammar_tree_mutate")
-            self._replicator.init_arm("png_chunk_mutate")
-            self._replicator.init_arm("jpeg_chunk_mutate")
-            self._replicator.init_arm("jpeg_crc_fix")
-            self._replicator.init_arm("bmp_chunk_mutate")
-            self._replicator.init_arm("png_crc_fix")
+            for op in FORMAT_MUTATIONS:
+                self._replicator.init_arm(op)
 
         if self._elo:
             for op in MUTATIONS:
@@ -550,11 +542,8 @@ class Fuzzer:
             if self.grammar:
                 self._elo.init_arm("grammar_mutate")
                 self._elo.init_arm("grammar_tree_mutate")
-            self._elo.init_arm("png_chunk_mutate")
-            self._elo.init_arm("jpeg_chunk_mutate")
-            self._elo.init_arm("jpeg_crc_fix")
-            self._elo.init_arm("bmp_chunk_mutate")
-            self._elo.init_arm("png_crc_fix")
+            for op in FORMAT_MUTATIONS:
+                self._elo.init_arm(op)
 
         self._persistent_runner = None
         if self.persistent:
@@ -1073,10 +1062,7 @@ class Fuzzer:
         if self.grammar:
             ops.append("grammar_mutate")
             ops.append("grammar_tree_mutate")
-        ops.append("png_chunk_mutate")
-        ops.append("jpeg_chunk_mutate")
-        ops.append("jpeg_crc_fix")
-        ops.append("bmp_chunk_mutate")
+        ops.extend(FORMAT_MUTATIONS)
         # Redqueen: if we know which bytes caused branch comparisons, prefer flipping them
         parent_meta = self.seed_meta.get(data)
         if parent_meta and (
@@ -1461,6 +1447,17 @@ class Fuzzer:
                         # The length is stored in the serialized header, not in marker.data
                         # serialize_jpeg_markers handles this automatically via JpegMarker.serialize()
                         buf = bytearray(serialize_jpeg_markers(markers)[: self.max_len])
+
+            elif op == "gzip_chunk_mutate":
+                from fuzzer_tool.core.gzip_mutations import GzipMutator, parse_gzip
+
+                if not hasattr(self, "_gzip_mutator"):
+                    self._gzip_mutator = GzipMutator()
+                if parse_gzip(bytes(buf)):
+                    mutated = self._gzip_mutator.mutate(bytes(buf), max_len=self.max_len)
+                else:
+                    mutated = self._gzip_mutator._generate_random_gzip(max_len=self.max_len)
+                buf = bytearray(mutated[: self.max_len])
 
             elif op == "bmp_chunk_mutate":
                 from fuzzer_tool.core.bmp_mutations import BmpMutator, parse_bmp
