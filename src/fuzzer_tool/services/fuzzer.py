@@ -1076,22 +1076,44 @@ class Fuzzer:
         return ops
 
     def _select_op(self, ops: list[str]) -> str:
-        """Select a mutation operator using the active scheduling strategy."""
+        """Select a mutation operator using the active scheduling strategy.
+
+        Hierarchy: Elo arbitrates all strategies when enabled.
+        Falls through to individual strategies if Elo is not active.
+        """
+        # Build list of available strategies
+        available = []
         if self._use_replicator and self._replicator:
+            available.append("replicator")
+        if self.mc and self.mc_bandit:
+            available.append("bandit")
+        if self._use_mopt and self._mopt:
+            available.append("mopt")
+
+        # Elo sits on top: pick which strategy to use
+        if self._use_meta_elo and self._elo and len(available) >= 2:
+            strategy = self._elo.select_strategy(available)
+            self._meta_strategy = strategy
+        elif self._use_meta_elo and self._elo and available:
+            strategy = available[0]
+            self._meta_strategy = strategy
+        else:
+            strategy = None
+
+        # Execute selected strategy
+        if strategy == "replicator" and self._replicator:
             op = self._replicator.select_op(ops)
             self._last_mopt_particles.append(None)
-        elif self._use_meta_elo and self._elo and self.mc and self._mopt:
-            bandit_op = self.mc.select_op(ops, prev_op=self._prev_bandit_op)
-            mopt_op, mopt_pid = self._mopt.select_op(ops)
-            strategy = self._elo.select_strategy(["bandit", "mopt"])
-            self._meta_strategy = strategy
-            if strategy == "bandit":
-                op = bandit_op
-                self._prev_bandit_op = op
-                self._last_mopt_particles.append(None)
-            else:
-                op = mopt_op
-                self._last_mopt_particles.append(mopt_pid)
+        elif strategy == "mopt" and self._mopt:
+            op, pid = self._mopt.select_op(ops)
+            self._last_mopt_particles.append(pid)
+        elif strategy == "bandit" and self.mc and self.mc_bandit:
+            op = self.mc.select_op(ops, prev_op=self._prev_bandit_op)
+            self._prev_bandit_op = op
+            self._last_mopt_particles.append(None)
+        elif self._use_replicator and self._replicator:
+            op = self._replicator.select_op(ops)
+            self._last_mopt_particles.append(None)
         elif self._use_mopt and self._mopt:
             op, pid = self._mopt.select_op(ops)
             self._last_mopt_particles.append(pid)
@@ -2714,11 +2736,20 @@ class Fuzzer:
                 self._elo_decay_counter = 0
                 self._elo.apply_decay()
 
-        # Meta-elo: record strategy-level match (bandit vs MOpt)
+        # Meta-elo: record strategy-level match against all other available strategies
         if self._use_meta_elo and self._elo and self._meta_strategy:
-            other = "mopt" if self._meta_strategy == "bandit" else "bandit"
             score = 1.0 if success else 0.0
-            self._elo.record_strategy_match(self._meta_strategy, other, score)
+            # Record against each non-selected strategy
+            all_strategies = []
+            if self._use_replicator and self._replicator:
+                all_strategies.append("replicator")
+            if self.mc and self.mc_bandit:
+                all_strategies.append("bandit")
+            if self._use_mopt and self._mopt:
+                all_strategies.append("mopt")
+            for other in all_strategies:
+                if other != self._meta_strategy:
+                    self._elo.record_strategy_match(self._meta_strategy, other, score)
 
         if self._use_shapley and self._shapley:
             edge_bitmap = self._get_current_edge_bitmap()
