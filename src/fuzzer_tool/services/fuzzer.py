@@ -495,55 +495,28 @@ class Fuzzer:
 
             self._tracer = CrashTracer(target)
 
-        if self.mc and self.mc_bandit:
+        def _register_arms(scheduler):
+            """Register all mutation arms on a scheduler (mc, mopt, replicator, elo)."""
             for op in MUTATIONS:
-                self.mc.init_arm(op)
+                scheduler.init_arm(op)
             for op in DICT_MUTATIONS:
-                self.mc.init_arm(op)
-            self.mc.init_arm("markov_bytes")
-            self.mc.init_arm("cem_bytes")
+                scheduler.init_arm(op)
+            scheduler.init_arm("markov_bytes")
+            scheduler.init_arm("cem_bytes")
             if self.grammar:
-                self.mc.init_arm("grammar_mutate")
-                self.mc.init_arm("grammar_tree_mutate")
+                scheduler.init_arm("grammar_mutate")
+                scheduler.init_arm("grammar_tree_mutate")
             for op in FORMAT_MUTATIONS:
-                self.mc.init_arm(op)
-        if self._mopt:
-            for op in MUTATIONS:
-                self._mopt.init_arm(op)
-            for op in DICT_MUTATIONS:
-                self._mopt.init_arm(op)
-            self._mopt.init_arm("markov_bytes")
-            self._mopt.init_arm("cem_bytes")
-            if self.grammar:
-                self._mopt.init_arm("grammar_mutate")
-                self._mopt.init_arm("grammar_tree_mutate")
-            for op in FORMAT_MUTATIONS:
-                self._mopt.init_arm(op)
-        if self._replicator:
-            for op in MUTATIONS:
-                self._replicator.init_arm(op)
-            for op in DICT_MUTATIONS:
-                self._replicator.init_arm(op)
-            self._replicator.init_arm("markov_bytes")
-            self._replicator.init_arm("cem_bytes")
-            if self.grammar:
-                self._replicator.init_arm("grammar_mutate")
-                self._replicator.init_arm("grammar_tree_mutate")
-            for op in FORMAT_MUTATIONS:
-                self._replicator.init_arm(op)
+                scheduler.init_arm(op)
 
+        if self.mc and self.mc_bandit:
+            _register_arms(self.mc)
+        if self._mopt:
+            _register_arms(self._mopt)
+        if self._replicator:
+            _register_arms(self._replicator)
         if self._elo:
-            for op in MUTATIONS:
-                self._elo.init_arm(op)
-            for op in DICT_MUTATIONS:
-                self._elo.init_arm(op)
-            self._elo.init_arm("markov_bytes")
-            self._elo.init_arm("cem_bytes")
-            if self.grammar:
-                self._elo.init_arm("grammar_mutate")
-                self._elo.init_arm("grammar_tree_mutate")
-            for op in FORMAT_MUTATIONS:
-                self._elo.init_arm(op)
+            _register_arms(self._elo)
 
         self._persistent_runner = None
         if self.persistent:
