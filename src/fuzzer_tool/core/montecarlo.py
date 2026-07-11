@@ -50,10 +50,12 @@ class MonteCarloScheduler:
         refit_interval: int = 1000,
         pairwise_blend: float = 0.0,
         arm_decay: float = 0.999,
+        decay_interval: int = 100,
     ):
         self.arm_alpha: dict[str, float] = {}
         self.arm_beta: dict[str, float] = {}
         self.arm_decay = arm_decay
+        self.decay_interval = decay_interval
         self.elite_frac = elite_frac
         self.base_refit_interval = refit_interval
         self.refit_interval = refit_interval
@@ -144,8 +146,8 @@ class MonteCarloScheduler:
         """
         self._op_success_history.append((name, success))
 
-        # Decay only every 100 calls to avoid zeroing out alpha/beta
-        if self.arm_decay < 1.0 and len(self._op_success_history) % 100 == 0:
+        # Decay periodically to avoid zeroing out alpha/beta
+        if self.arm_decay < 1.0 and self.decay_interval > 0 and len(self._op_success_history) % self.decay_interval == 0:
             for k in self.arm_alpha:
                 self.arm_alpha[k] *= self.arm_decay
             for k in self.arm_beta:

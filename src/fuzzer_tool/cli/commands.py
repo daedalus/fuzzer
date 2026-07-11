@@ -157,6 +157,7 @@ def cmd_fuzz(args):
             mc_cem=args.mc_cem,
             mc_elite_frac=args.mc_elite_frac,
             mc_refit_interval=args.mc_refit_int,
+            mc_decay_interval=getattr(args, "mc_decay_interval", 100),
             pairwise_blend=getattr(args, "pairwise_blend", 0.0),
             stats_file=args.stats_file,
             stats_interval=args.stats_interval,
@@ -192,6 +193,7 @@ def cmd_fuzz(args):
         anneal_budget=getattr(args, "anneal_budget", 0),
         mc_elite_frac=args.mc_elite_frac,
         mc_refit_interval=args.mc_refit_int,
+        mc_decay_interval=getattr(args, "mc_decay_interval", 100),
         pairwise_blend=getattr(args, "pairwise_blend", 0.0),
         stats_file=args.stats_file,
         stats_interval=args.stats_interval,
@@ -765,6 +767,12 @@ def main() -> int:
     )
     fuzz_parser.add_argument(
         "--mc-refit-int", type=int, default=1000, help="CEM refit interval (default: 1000)"
+    )
+    fuzz_parser.add_argument(
+        "--mc-decay-interval",
+        type=int,
+        default=100,
+        help="Bandit decay interval: apply arm_decay every N calls (default: 100)",
     )
     fuzz_parser.add_argument(
         "--stats-file", default=None, help="Save stats to JSON file periodically"
