@@ -1613,7 +1613,7 @@ class Fuzzer:
                 from fuzzer_tool.core.ga import Individual
 
                 seed_key = _hashlib.sha256(data).hexdigest()[:16]
-                edge_count = len(self.edge_tracker.seed_edges.get(seed_key, set()))
+                edge_count = len(self._edge_tracker.seed_edges.get(seed_key, set()))
                 ind = Individual(
                     data=data,
                     edge_count=edge_count,
@@ -2656,11 +2656,11 @@ class Fuzzer:
             # GA: add new-coverage individual to population
             if self.ga and has_new_coverage:
                 edge_count = (
-                    len(self.edge_tracker.seed_edges.get(self.edge_tracker._last_seed_key, set()))
-                    if hasattr(self.edge_tracker, "_last_seed_key")
+                    len(self._edge_tracker.seed_edges.get(self._edge_tracker._last_seed_key, set()))
+                    if hasattr(self._edge_tracker, "_last_seed_key")
                     else 0
                 )
-                ind = self.ga.on_fuzz_result(mutated, True, edge_count, self.edge_tracker)
+                ind = self.ga.on_fuzz_result(mutated, True, edge_count, self._edge_tracker)
                 if ind is not None:
                     self.ga.add_to_population(ind)
             # Analyze byte sensitivity for seeds that found new coverage (optional)
@@ -2706,7 +2706,7 @@ class Fuzzer:
 
         # GA: trigger generation boundary for non-coverage iterations
         if self.ga:
-            self.ga.on_fuzz_result(mutated, False, 0, self.edge_tracker)
+            self.ga.on_fuzz_result(mutated, False, 0, self._edge_tracker)
 
         return False
 
@@ -3240,7 +3240,7 @@ class Fuzzer:
                     generation_size=self._ga_gen_size,
                     speciation_threshold=self._ga_speciation_threshold,
                 )
-                self.ga.initialize(self.corpus, self.edge_tracker)
+                self.ga.initialize(self.corpus, self._edge_tracker)
                 ga_path = self.corpus_dir / "ga.json"
                 if self.resume and ga_path.exists():
                     self.ga.load(ga_path)
