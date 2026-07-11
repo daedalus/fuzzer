@@ -135,7 +135,7 @@ class MonteCarloScheduler:
     def record(self, name: str, success: bool) -> None:
         """Record outcome for a mutation operator arm.
 
-        Applies exponential decay to all arms before incrementing,
+        Applies exponential decay to all arms periodically (every 100 calls),
         giving recent evidence more weight (non-stationary bandit).
 
         Args:
@@ -144,7 +144,8 @@ class MonteCarloScheduler:
         """
         self._op_success_history.append((name, success))
 
-        if self.arm_decay < 1.0:
+        # Decay only every 100 calls to avoid zeroing out alpha/beta
+        if self.arm_decay < 1.0 and len(self._op_success_history) % 100 == 0:
             for k in self.arm_alpha:
                 self.arm_alpha[k] *= self.arm_decay
             for k in self.arm_beta:
