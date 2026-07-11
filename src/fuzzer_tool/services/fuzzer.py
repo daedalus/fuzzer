@@ -504,6 +504,7 @@ class Fuzzer:
                 self.mc.init_arm("grammar_tree_mutate")
             self.mc.init_arm("png_chunk_mutate")
             self.mc.init_arm("jpeg_chunk_mutate")
+            self.mc.init_arm("bmp_chunk_mutate")
             self.mc.init_arm("crc_fix")
         if self._mopt:
             for op in MUTATIONS:
@@ -517,6 +518,7 @@ class Fuzzer:
                 self._mopt.init_arm("grammar_tree_mutate")
             self._mopt.init_arm("png_chunk_mutate")
             self._mopt.init_arm("jpeg_chunk_mutate")
+            self._mopt.init_arm("bmp_chunk_mutate")
             self._mopt.init_arm("crc_fix")
         if self._replicator:
             for op in MUTATIONS:
@@ -530,6 +532,7 @@ class Fuzzer:
                 self._replicator.init_arm("grammar_tree_mutate")
             self._replicator.init_arm("png_chunk_mutate")
             self._replicator.init_arm("jpeg_chunk_mutate")
+            self._replicator.init_arm("bmp_chunk_mutate")
             self._replicator.init_arm("crc_fix")
 
         if self._elo:
@@ -544,6 +547,7 @@ class Fuzzer:
                 self._elo.init_arm("grammar_tree_mutate")
             self._elo.init_arm("png_chunk_mutate")
             self._elo.init_arm("jpeg_chunk_mutate")
+            self._elo.init_arm("bmp_chunk_mutate")
             self._elo.init_arm("crc_fix")
 
         self._persistent_runner = None
@@ -1065,6 +1069,7 @@ class Fuzzer:
             ops.append("grammar_tree_mutate")
         ops.append("png_chunk_mutate")
         ops.append("jpeg_chunk_mutate")
+        ops.append("bmp_chunk_mutate")
         # Redqueen: if we know which bytes caused branch comparisons, prefer flipping them
         parent_meta = self.seed_meta.get(data)
         if parent_meta and (
@@ -1413,6 +1418,17 @@ class Fuzzer:
                     mutated = self._jpeg_mutator.mutate(bytes(buf), max_len=self.max_len)
                 else:
                     mutated = self._jpeg_mutator._generate_random_jpeg(max_len=self.max_len)
+                buf = bytearray(mutated[: self.max_len])
+
+            elif op == "bmp_chunk_mutate":
+                from fuzzer_tool.core.bmp_mutations import BmpMutator, parse_bmp
+
+                if not hasattr(self, "_bmp_mutator"):
+                    self._bmp_mutator = BmpMutator()
+                if parse_bmp(bytes(buf)):
+                    mutated = self._bmp_mutator.mutate(bytes(buf), max_len=self.max_len)
+                else:
+                    mutated = self._bmp_mutator._generate_random_bmp(max_len=self.max_len)
                 buf = bytearray(mutated[: self.max_len])
 
             elif op == "crc_fix" and buf:
