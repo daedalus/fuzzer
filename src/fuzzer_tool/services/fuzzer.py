@@ -380,6 +380,7 @@ class Fuzzer:
             self._mopt = MOptScheduler(n_particles=5, window_size=200)
             log.info("MOpt PSO scheduling enabled (5 particles, window=200)")
         self._use_replicator = replicator
+        self._op_dispatch = self._build_dispatch()
         self._replicator = None
         if replicator:
             self._replicator = ReplicatorScheduler(window_size=200, learning_rate=0.1)
@@ -1025,6 +1026,37 @@ class Fuzzer:
         if not buf:
             buf = bytearray(b"\x00" * random.randint(1, 32))
 
+        ops = self._build_ops(data)
+        self._last_ops_used = []
+        self._last_mopt_particles = []
+        if not hasattr(self, "_prev_bandit_op"):
+            self._prev_bandit_op = None
+        self._meta_strategy = None
+
+        for _ in range(self.mutations_per_input):
+            op = self._select_op(ops)
+            self._last_ops_used.append(op)
+
+            byte_idx = self._select_position(buf, data)
+
+            result = self._op_dispatch[op](buf, byte_idx, data)
+            if result is not None:
+                # Handler returned new bytes (havoc, format mutators, dict overwrite, etc.)
+                if op == "havoc":
+                    self._last_hamming_distance = (
+                        hamming_distance(data, result) if len(data) == len(result) else -1
+                    )
+                    return result
+                buf = bytearray(result[: self.max_len])
+
+        result = bytes(buf)
+        self._last_hamming_distance = (
+            hamming_distance(data, result) if len(data) == len(result) else -1
+        )
+        return result
+
+    def _build_ops(self, data: bytes) -> list[str]:
+        """Build the list of available mutation operators from ground truth."""
         ops = list(MUTATIONS)
         if self.dictionary:
             ops.extend(DICT_MUTATIONS)
@@ -1036,484 +1068,519 @@ class Fuzzer:
             ops.append("grammar_mutate")
             ops.append("grammar_tree_mutate")
         ops.extend(FORMAT_MUTATIONS)
-        # Redqueen: if we know which bytes caused branch comparisons, prefer flipping them
         parent_meta = self.seed_meta.get(data)
         if parent_meta and (
             parent_meta.get("redqueen_matches") or parent_meta.get("redqueen_offsets")
         ):
             ops.append("redqueen")
+        return ops
 
-        self._last_ops_used = []
-        self._last_mopt_particles = []  # particle_id per op, for mopt attribution
-        if not hasattr(self, "_prev_bandit_op"):
-            self._prev_bandit_op = None
-        self._meta_strategy = None
-
-        for _ in range(self.mutations_per_input):
-            if self._use_replicator and self._replicator:
-                op = self._replicator.select_op(ops)
-                self._last_mopt_particles.append(None)
-            elif self._use_meta_elo and self._elo and self.mc and self._mopt:
-                bandit_op = self.mc.select_op(ops, prev_op=self._prev_bandit_op)
-                mopt_op, mopt_pid = self._mopt.select_op(ops)
-                strategy = self._elo.select_strategy(["bandit", "mopt"])
-                self._meta_strategy = strategy
-                if strategy == "bandit":
-                    op = bandit_op
-                    self._prev_bandit_op = op
-                    self._last_mopt_particles.append(None)
-                else:
-                    op = mopt_op
-                    self._last_mopt_particles.append(mopt_pid)
-            elif self._use_mopt and self._mopt:
-                op, pid = self._mopt.select_op(ops)
-                self._last_mopt_particles.append(pid)
-            elif self.mc and self.mc_bandit:
-                op = self.mc.select_op(ops, prev_op=self._prev_bandit_op)
+    def _select_op(self, ops: list[str]) -> str:
+        """Select a mutation operator using the active scheduling strategy."""
+        if self._use_replicator and self._replicator:
+            op = self._replicator.select_op(ops)
+            self._last_mopt_particles.append(None)
+        elif self._use_meta_elo and self._elo and self.mc and self._mopt:
+            bandit_op = self.mc.select_op(ops, prev_op=self._prev_bandit_op)
+            mopt_op, mopt_pid = self._mopt.select_op(ops)
+            strategy = self._elo.select_strategy(["bandit", "mopt"])
+            self._meta_strategy = strategy
+            if strategy == "bandit":
+                op = bandit_op
                 self._prev_bandit_op = op
                 self._last_mopt_particles.append(None)
             else:
-                op = random.choice(ops)
-                self._last_mopt_particles.append(None)
-            self._last_ops_used.append(op)
+                op = mopt_op
+                self._last_mopt_particles.append(mopt_pid)
+        elif self._use_mopt and self._mopt:
+            op, pid = self._mopt.select_op(ops)
+            self._last_mopt_particles.append(pid)
+        elif self.mc and self.mc_bandit:
+            op = self.mc.select_op(ops, prev_op=self._prev_bandit_op)
+            self._prev_bandit_op = op
+            self._last_mopt_particles.append(None)
+        else:
+            op = random.choice(ops)
+            self._last_mopt_particles.append(None)
+        return op
 
-            # Position selection: MI, TE, sensitivity, or random
+    def _select_position(self, buf: bytearray, data: bytes) -> int:
+        """Select a byte position for mutation using MI/TE/sensitivity/random."""
+        if not buf:
+            return 0
+        te_pos = (
+            self._get_te_weighted_position(len(buf))
+            if self._use_transfer_entropy and self._te
+            else None
+        )
+        mi_pos = self._mi.weighted_position(len(buf)) if self._use_mi and self._mi else None
+        sens_pos = self._sensitivity.get_weighted_position(data, len(buf))
+        candidates = [p for p in [sens_pos, te_pos, mi_pos] if p is not None]
+        if candidates:
+            return random.choice(candidates)
+        return random.randint(0, len(buf) - 1)
+
+    # ── Operator handlers ──────────────────────────────────────────────
+    # Each handler: (buf, byte_idx, data) -> None (in-place) or bytes (replace buf)
+
+    def _op_bit_flip(self, buf, byte_idx, _data):
+        if buf:
+            buf[byte_idx] ^= 1 << random.randint(0, 7)
+
+    def _op_byte_flip(self, buf, byte_idx, _data):
+        if buf:
+            buf[byte_idx] ^= 0xFF
+
+    def _op_interesting_8(self, buf, byte_idx, _data):
+        if buf:
+            buf[byte_idx] = random.choice(INTERESTING_8) & 0xFF
+
+    def _op_interesting_16(self, buf, _byte_idx, _data):
+        if len(buf) >= 2:
+            idx = random.randint(0, len(buf) - 2)
+            struct.pack_into("<h", buf, idx, random.choice(INTERESTING_16))
+
+    def _op_interesting_32(self, buf, _byte_idx, _data):
+        if len(buf) >= 4:
+            idx = random.randint(0, len(buf) - 4)
+            struct.pack_into("<i", buf, idx, random.choice(INTERESTING_32))
+
+    def _op_arithmetic(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations import ARITHMETIC_DELTAS
+
+        width = random.choice([1, 2, 4, 8])
+        if len(buf) >= width:
+            max_start = len(buf) - width
+            idx = (random.randint(0, max_start) // width) * width
+            delta = random.choice(ARITHMETIC_DELTAS)
+            if random.random() < 0.5:
+                delta = -delta
+            endian = random.choice(["<", ">"])
+            if width == 1:
+                buf[idx] = (buf[idx] + delta) & 0xFF
+            elif width == 2:
+                val = (struct.unpack_from(f"{endian}H", buf, idx)[0] + delta) & 0xFFFF
+                struct.pack_into(f"{endian}H", buf, idx, val)
+            elif width == 4:
+                val = (struct.unpack_from(f"{endian}I", buf, idx)[0] + delta) & 0xFFFFFFFF
+                struct.pack_into(f"{endian}I", buf, idx, val)
+            elif width == 8:
+                val = (struct.unpack_from(f"{endian}Q", buf, idx)[0] + delta) & 0xFFFFFFFFFFFFFFFF
+                struct.pack_into(f"{endian}Q", buf, idx, val)
+
+    def _op_random_bytes(self, buf, _byte_idx, _data):
+        if buf:
+            buf[random.randint(0, len(buf) - 1)] = random.randint(0, 255)
+
+    def _op_block_insert(self, buf, _byte_idx, _data):
+        if len(buf) < self.max_len:
+            idx = random.randint(0, len(buf))
+            size = random.randint(1, min(32, self.max_len - len(buf)))
+            buf[idx:idx] = bytes(random.randint(0, 255) for _ in range(size))
+
+    def _op_block_delete(self, buf, _byte_idx, _data):
+        if len(buf) > 1:
+            idx = random.randint(0, len(buf) - 1)
+            max_size = min(32, len(buf) - idx, len(buf) - 1)
+            if max_size >= 1:
+                del buf[idx : idx + random.randint(1, max_size)]
+
+    def _op_block_duplicate(self, buf, _byte_idx, _data):
+        if len(buf) < self.max_len:
+            idx = random.randint(0, len(buf) - 1)
+            size = random.randint(1, min(16, len(buf) - idx))
+            block = buf[idx : idx + size]
+            ins = random.randint(0, len(buf))
+            buf[ins:ins] = block
+
+    def _op_dict_insert(self, buf, _byte_idx, _data):
+        if self.dictionary:
+            token = random.choice(self.dictionary)
+            if len(buf) + len(token) <= self.max_len:
+                buf[random.randint(0, len(buf)):0] = token  # insert at random pos
+
+    def _op_dict_replace(self, buf, _byte_idx, _data):
+        if self.dictionary and buf:
+            token = random.choice(self.dictionary)
+            idx = random.randint(0, len(buf) - 1)
+            end = min(idx + len(token), len(buf))
+            buf[idx:end] = token[: end - idx]
+
+    def _op_dict_overwrite(self, buf, _byte_idx, _data):
+        if self.dictionary:
+            return bytearray(random.choice(self.dictionary)[: self.max_len])
+
+    def _op_dict_prepend(self, buf, _byte_idx, _data):
+        if self.dictionary:
+            token = random.choice(self.dictionary)
+            if len(buf) + len(token) <= self.max_len:
+                return bytearray(token) + buf
+
+    def _op_dict_append(self, buf, _byte_idx, _data):
+        if self.dictionary:
+            token = random.choice(self.dictionary)
+            if len(buf) + len(token) <= self.max_len:
+                buf.extend(token)
+
+    def _op_checksum_repair(self, buf, _byte_idx, _data):
+        import zlib
+
+        if buf and len(buf) >= 4:
+            pos = random.randint(0, max(0, len(buf) - 4))
+            buf[pos : pos + 4] = zlib.crc32(bytes(buf[:pos])).to_bytes(4, "big")
+
+    def _op_token_dup(self, buf, _byte_idx, _data):
+        if self.dictionary and buf:
+            token = random.choice(self.dictionary)
+            if len(buf) + len(token) <= self.max_len:
+                buf[random.randint(0, len(buf)):0] = token
+
+    def _op_markov_bytes(self, buf, _byte_idx, _data):
+        if buf:
+            idx = random.randint(0, len(buf) - 1)
+            ctx = (
+                bytes(buf[max(0, idx - self.markov.order) : idx]) if self.markov.order else b""
+            )
+            buf[idx] = self.markov.sample_byte(ctx)
+
+    def _op_cem_bytes(self, buf, _byte_idx, _data):
+        if self.mc and self.mc.cem_fitted:
             if buf:
-                te_pos = (
-                    self._get_te_weighted_position(len(buf))
-                    if self._use_transfer_entropy and self._te
-                    else None
-                )
-                mi_pos = self._mi.weighted_position(len(buf)) if self._use_mi and self._mi else None
-                sens_pos = self._sensitivity.get_weighted_position(data, len(buf))
-                # Pick from available sources, bias toward sensitivity if available
-                candidates = [p for p in [sens_pos, te_pos, mi_pos] if p is not None]
-                if candidates:
-                    byte_idx = random.choice(candidates)
-                else:
-                    byte_idx = random.randint(0, len(buf) - 1)
+                buf[random.randint(0, len(buf) - 1)] = self.mc.cem_byte(random.randint(0, len(buf) - 1))
             else:
-                byte_idx = 0
+                return bytearray(self.mc.cem_sample(random.randint(1, min(32, self.max_len))))
 
-            if op == "bit_flip" and buf:
-                bit_idx = random.randint(0, 7)
-                buf[byte_idx] ^= 1 << bit_idx
+    def _op_splice(self, buf, _byte_idx, data):
+        if len(self.corpus) >= 2:
+            a = random.choice(self.corpus)
+            b = random.choice(self.corpus)
+            if a is not data and b is not data:
+                return bytearray(splice(a, b)[: self.max_len])
+            others = [c for c in self.corpus if c is not data]
+            if others:
+                return bytearray(splice(bytes(buf), random.choice(others))[: self.max_len])
 
-            elif op == "byte_flip" and buf:
-                buf[byte_idx] ^= 0xFF
+    def _op_crossover(self, buf, _byte_idx, data):
+        from fuzzer_tool.core.mutations import crossover
 
-            elif op == "interesting_8" and buf:
-                buf[byte_idx] = random.choice(INTERESTING_8) & 0xFF
+        if len(self.corpus) >= 2 and buf:
+            a = random.choice(self.corpus)
+            b = random.choice(self.corpus)
+            if a is not data and b is not data:
+                return bytearray(crossover(a, b)[: self.max_len])
+            others = [c for c in self.corpus if c is not data]
+            if others:
+                return bytearray(crossover(bytes(buf), random.choice(others))[: self.max_len])
 
-            elif op == "interesting_16" and len(buf) >= 2:
-                idx = random.randint(0, len(buf) - 2)
-                val = random.choice(INTERESTING_16)
-                struct.pack_into("<h", buf, idx, val)
+    def _op_type_replace(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations import type_replace
 
-            elif op == "interesting_32" and len(buf) >= 4:
-                idx = random.randint(0, len(buf) - 4)
-                val = random.choice(INTERESTING_32)
-                struct.pack_into("<i", buf, idx, val)
+        if buf:
+            return bytearray(type_replace(bytes(buf))[: self.max_len])
 
-            elif op == "arithmetic" and buf:
-                from fuzzer_tool.core.mutations import ARITHMETIC_DELTAS
+    def _op_ascii_num(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations import ascii_num_replace
 
-                width = random.choice([1, 2, 4, 8])
-                if len(buf) >= width:
-                    max_start = len(buf) - width
-                    idx = (random.randint(0, max_start) // width) * width
-                    delta = random.choice(ARITHMETIC_DELTAS)
-                    if random.random() < 0.5:
-                        delta = -delta
-                    endian = random.choice(["<", ">"])
-                    if width == 1:
-                        val = (buf[idx] + delta) & 0xFF
-                        buf[idx] = val
-                    elif width == 2:
-                        val = struct.unpack_from(f"{endian}H", buf, idx)[0]
-                        val = (val + delta) & 0xFFFF
-                        struct.pack_into(f"{endian}H", buf, idx, val)
-                    elif width == 4:
-                        val = struct.unpack_from(f"{endian}I", buf, idx)[0]
-                        val = (val + delta) & 0xFFFFFFFF
-                        struct.pack_into(f"{endian}I", buf, idx, val)
-                    elif width == 8:
-                        val = struct.unpack_from(f"{endian}Q", buf, idx)[0]
-                        val = (val + delta) & 0xFFFFFFFFFFFFFFFF
-                        struct.pack_into(f"{endian}Q", buf, idx, val)
+        if buf:
+            return bytearray(ascii_num_replace(bytes(buf))[: self.max_len])
 
-            elif op == "random_bytes" and buf:
-                idx = random.randint(0, len(buf) - 1)
-                buf[idx] = random.randint(0, 255)
+    def _op_byte_shuffle(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations import byte_shuffle
 
-            elif op == "block_insert" and len(buf) < self.max_len:
-                idx = random.randint(0, len(buf))
-                size = random.randint(1, min(32, self.max_len - len(buf)))
-                buf[idx:idx] = bytes(random.randint(0, 255) for _ in range(size))
+        if buf and len(buf) > 1:
+            return bytearray(byte_shuffle(bytes(buf))[: self.max_len])
 
-            elif op == "block_delete" and len(buf) > 1:
-                idx = random.randint(0, len(buf) - 1)
-                max_size = min(32, len(buf) - idx, len(buf) - 1)
-                if max_size >= 1:
-                    size = random.randint(1, max_size)
-                    del buf[idx : idx + size]
+    def _op_byte_delete(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations import byte_delete
 
-            elif op == "block_duplicate" and len(buf) < self.max_len:
-                idx = random.randint(0, len(buf) - 1)
-                size = random.randint(1, min(16, len(buf) - idx))
-                block = buf[idx : idx + size]
-                ins = random.randint(0, len(buf))
+        if buf and len(buf) > 1:
+            return bytearray(byte_delete(bytes(buf))[: self.max_len])
+
+    def _op_byte_insert(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations import byte_insert
+
+        if buf and len(buf) < self.max_len:
+            return bytearray(byte_insert(bytes(buf), self.max_len)[: self.max_len])
+
+    def _op_insert_ascii_num(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations import insert_ascii_num
+
+        if buf and len(buf) < self.max_len:
+            return bytearray(insert_ascii_num(bytes(buf), self.max_len)[: self.max_len])
+
+    def _op_transpose_16(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations import transpose_bytes
+
+        if len(buf) >= 2:
+            return bytearray(transpose_bytes(bytes(buf), 2)[: self.max_len])
+
+    def _op_transpose_32(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations import transpose_bytes
+
+        if len(buf) >= 4:
+            return bytearray(transpose_bytes(bytes(buf), 4)[: self.max_len])
+
+    def _op_transpose_64(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations import transpose_bytes
+
+        if len(buf) >= 8:
+            return bytearray(transpose_bytes(bytes(buf), 8)[: self.max_len])
+
+    def _op_bit_transpose_8(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations import bit_transpose
+
+        if buf:
+            return bytearray(bit_transpose(bytes(buf), 1)[: self.max_len])
+
+    def _op_bit_transpose_16(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations import bit_transpose
+
+        if len(buf) >= 2:
+            return bytearray(bit_transpose(bytes(buf), 2)[: self.max_len])
+
+    def _op_bit_transpose_32(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations import bit_transpose
+
+        if len(buf) >= 4:
+            return bytearray(bit_transpose(bytes(buf), 4)[: self.max_len])
+
+    def _op_bit_transpose_64(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations import bit_transpose
+
+        if len(buf) >= 8:
+            return bytearray(bit_transpose(bytes(buf), 8)[: self.max_len])
+
+    def _op_length_grow(self, buf, _byte_idx, _data):
+        if buf and len(buf) < self.max_len:
+            size = random.randint(1, min(64, self.max_len - len(buf)))
+            if size > 0:
+                buf.extend(random.randint(0, 255) for _ in range(size))
+
+    def _op_length_shrink(self, buf, _byte_idx, _data):
+        if len(buf) > 2:
+            del buf[random.randint(1, len(buf) - 1) :]
+
+    def _op_repeat_clone(self, buf, _byte_idx, _data):
+        if buf and len(buf) < self.max_len:
+            idx = random.randint(0, len(buf) - 1)
+            size = random.randint(1, min(16, len(buf) - idx))
+            block = buf[idx : idx + size]
+            ins = idx + size
+            if ins <= len(buf) and len(buf) + len(block) <= self.max_len:
                 buf[ins:ins] = block
 
-            elif op == "dict_insert" and self.dictionary:
-                token = random.choice(self.dictionary)
-                if len(buf) + len(token) <= self.max_len:
-                    idx = random.randint(0, len(buf))
-                    buf[idx:idx] = token
+    def _op_truncate(self, buf, _byte_idx, _data):
+        if len(buf) > 2:
+            del buf[random.randint(2, len(buf)) :]
 
-            elif op == "dict_replace" and self.dictionary and buf:
-                token = random.choice(self.dictionary)
-                idx = random.randint(0, len(buf) - 1)
-                end = min(idx + len(token), len(buf))
-                buf[idx:end] = token[: end - idx]
+    def _op_swap_regions(self, buf, _byte_idx, _data):
+        if len(buf) >= 4:
+            i = random.randint(0, len(buf) - 3)
+            j = random.randint(i + 2, len(buf) - 1)
+            size = random.randint(1, min(j - i, 16))
+            a, b = buf[i : i + size], buf[j : j + size]
+            buf[i : i + size] = b
+            buf[j : j + size] = a
 
-            elif op == "dict_overwrite" and self.dictionary:
-                token = random.choice(self.dictionary)
-                buf = bytearray(token[: self.max_len])
+    def _op_swap_bytes(self, buf, _byte_idx, _data):
+        if len(buf) >= 2:
+            i, j = random.sample(range(len(buf)), 2)
+            buf[i], buf[j] = buf[j], buf[i]
 
-            elif op == "dict_prepend" and self.dictionary:
-                token = random.choice(self.dictionary)
-                if len(buf) + len(token) <= self.max_len:
-                    buf = bytearray(token) + buf
+    def _op_endianness_swap(self, buf, _byte_idx, _data):
+        if buf:
+            width = random.choice([2, 4, 8])
+            if len(buf) >= width:
+                idx = random.randint(0, len(buf) - width)
+                val = int.from_bytes(buf[idx : idx + width], "little")
+                buf[idx : idx + width] = val.to_bytes(width, "big")
 
-            elif op == "dict_append" and self.dictionary:
-                token = random.choice(self.dictionary)
-                if len(buf) + len(token) <= self.max_len:
-                    buf.extend(token)
+    def _op_grammar_mutate(self, buf, _byte_idx, _data):
+        if self.grammar:
+            return bytearray(self.grammar.mutate(bytes(buf), max_len=self.max_len)[: self.max_len])
 
-            elif op == "checksum_repair" and buf and len(buf) >= 4:
-                import zlib
+    def _op_grammar_tree_mutate(self, buf, _byte_idx, _data):
+        if self.grammar:
+            from fuzzer_tool.core.grammar import TreeMutator
 
-                # Try CRC32 at end (4 bytes, big-endian)
-                pos = random.randint(0, max(0, len(buf) - 4))
-                data_portion = bytes(buf[:pos])
-                buf[pos : pos + 4] = zlib.crc32(data_portion).to_bytes(4, "big")
+            if not hasattr(self, "_tree_mutator"):
+                self._tree_mutator = TreeMutator(self.grammar)
+            tree = self._tree_mutator.parse(bytes(buf))
+            return bytearray(self._tree_mutator.mutate_tree(tree, max_len=self.max_len)[: self.max_len])
 
-            elif op == "token_dup" and self.dictionary and buf:
-                token = random.choice(self.dictionary)
-                if len(buf) + len(token) <= self.max_len:
-                    idx = random.randint(0, len(buf))
-                    buf[idx:idx] = token
+    def _op_png_chunk_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.png_mutations import PngChunkMutator, parse_png_chunks
 
-            elif op == "markov_bytes" and buf:
-                idx = random.randint(0, len(buf) - 1)
-                ctx = (
-                    bytes(buf[max(0, idx - self.markov.order) : idx]) if self.markov.order else b""
-                )
-                buf[idx] = self.markov.sample_byte(ctx)
+        if not hasattr(self, "_png_mutator"):
+            self._png_mutator = PngChunkMutator()
+        if parse_png_chunks(bytes(buf)):
+            mutated = self._png_mutator.mutate(bytes(buf), max_len=self.max_len)
+        else:
+            mutated = self._png_mutator._generate_random_png(self.max_len)
+        return bytearray(mutated[: self.max_len])
 
-            elif op == "cem_bytes" and self.mc and self.mc.cem_fitted:
-                if buf:
-                    idx = random.randint(0, len(buf) - 1)
-                    buf[idx] = self.mc.cem_byte(idx)
-                else:
-                    length = random.randint(1, min(32, self.max_len))
-                    buf = bytearray(self.mc.cem_sample(length))
+    def _op_jpeg_chunk_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.jpeg_mutations import JpegMutator, parse_jpeg_markers
 
-            elif op == "splice" and len(self.corpus) >= 2:
-                a = random.choice(self.corpus)
-                b = random.choice(self.corpus)
-                if a is not data and b is not data:
-                    buf = bytearray(splice(a, b)[: self.max_len])
-                else:
-                    others = [c for c in self.corpus if c is not data]
-                    if others:
-                        other = random.choice(others)
-                        buf = bytearray(splice(bytes(buf), other)[: self.max_len])
+        if not hasattr(self, "_jpeg_mutator"):
+            self._jpeg_mutator = JpegMutator()
+        if parse_jpeg_markers(bytes(buf)):
+            mutated = self._jpeg_mutator.mutate(bytes(buf), max_len=self.max_len)
+        else:
+            mutated = self._jpeg_mutator._generate_random_jpeg(max_len=self.max_len)
+        return bytearray(mutated[: self.max_len])
 
-            elif op == "crossover" and len(self.corpus) >= 2 and buf:
-                from fuzzer_tool.core.mutations import crossover
-
-                a = random.choice(self.corpus)
-                b = random.choice(self.corpus)
-                if a is not data and b is not data:
-                    buf = bytearray(crossover(a, b)[: self.max_len])
-                else:
-                    others = [c for c in self.corpus if c is not data]
-                    if others:
-                        other = random.choice(others)
-                        buf = bytearray(crossover(bytes(buf), other)[: self.max_len])
-
-            elif op == "type_replace" and buf:
-                from fuzzer_tool.core.mutations import type_replace
-
-                buf = bytearray(type_replace(bytes(buf))[: self.max_len])
-
-            elif op == "ascii_num" and buf:
-                from fuzzer_tool.core.mutations import ascii_num_replace
-
-                buf = bytearray(ascii_num_replace(bytes(buf))[: self.max_len])
-
-            elif op == "byte_shuffle" and buf and len(buf) > 1:
-                from fuzzer_tool.core.mutations import byte_shuffle
-
-                buf = bytearray(byte_shuffle(bytes(buf))[: self.max_len])
-
-            elif op == "byte_delete" and buf and len(buf) > 1:
-                from fuzzer_tool.core.mutations import byte_delete
-
-                buf = bytearray(byte_delete(bytes(buf))[: self.max_len])
-
-            elif op == "byte_insert" and buf and len(buf) < self.max_len:
-                from fuzzer_tool.core.mutations import byte_insert
-
-                buf = bytearray(byte_insert(bytes(buf), self.max_len)[: self.max_len])
-
-            elif op == "insert_ascii_num" and buf and len(buf) < self.max_len:
-                from fuzzer_tool.core.mutations import insert_ascii_num
-
-                buf = bytearray(insert_ascii_num(bytes(buf), self.max_len)[: self.max_len])
-
-            elif op == "transpose_16" and len(buf) >= 2:
-                from fuzzer_tool.core.mutations import transpose_bytes
-
-                buf = bytearray(transpose_bytes(bytes(buf), 2)[: self.max_len])
-
-            elif op == "transpose_32" and len(buf) >= 4:
-                from fuzzer_tool.core.mutations import transpose_bytes
-
-                buf = bytearray(transpose_bytes(bytes(buf), 4)[: self.max_len])
-
-            elif op == "transpose_64" and len(buf) >= 8:
-                from fuzzer_tool.core.mutations import transpose_bytes
-
-                buf = bytearray(transpose_bytes(bytes(buf), 8)[: self.max_len])
-
-            elif op == "bit_transpose_8" and buf:
-                from fuzzer_tool.core.mutations import bit_transpose
-
-                buf = bytearray(bit_transpose(bytes(buf), 1)[: self.max_len])
-
-            elif op == "bit_transpose_16" and len(buf) >= 2:
-                from fuzzer_tool.core.mutations import bit_transpose
-
-                buf = bytearray(bit_transpose(bytes(buf), 2)[: self.max_len])
-
-            elif op == "bit_transpose_32" and len(buf) >= 4:
-                from fuzzer_tool.core.mutations import bit_transpose
-
-                buf = bytearray(bit_transpose(bytes(buf), 4)[: self.max_len])
-
-            elif op == "bit_transpose_64" and len(buf) >= 8:
-                from fuzzer_tool.core.mutations import bit_transpose
-
-                buf = bytearray(bit_transpose(bytes(buf), 8)[: self.max_len])
-
-            elif op == "length_grow" and buf and len(buf) < self.max_len:
-                size = random.randint(1, min(64, self.max_len - len(buf)))
-                if size > 0:
-                    buf.extend(random.randint(0, 255) for _ in range(size))
-
-            elif op == "length_shrink" and len(buf) > 2:
-                cut = random.randint(1, len(buf) - 1)
-                del buf[cut:]
-
-            elif op == "repeat_clone" and buf and len(buf) < self.max_len:
-                idx = random.randint(0, len(buf) - 1)
-                size = random.randint(1, min(16, len(buf) - idx))
-                block = buf[idx : idx + size]
-                ins = idx + size
-                if ins <= len(buf) and len(buf) + len(block) <= self.max_len:
-                    buf[ins:ins] = block
-
-            elif op == "truncate" and len(buf) > 2:
-                cut = random.randint(2, len(buf))
-                del buf[cut:]
-
-            elif op == "swap_regions" and len(buf) >= 4:
-                i = random.randint(0, len(buf) - 3)
-                j = random.randint(i + 2, len(buf) - 1)
-                size = random.randint(1, min(j - i, 16))
-                a = buf[i : i + size]
-                b = buf[j : j + size]
-                buf[i : i + size] = b
-                buf[j : j + size] = a
-
-            elif op == "swap_bytes" and len(buf) >= 2:
-                i, j = random.sample(range(len(buf)), 2)
-                buf[i], buf[j] = buf[j], buf[i]
-
-            elif op == "endianness_swap" and buf:
-                width = random.choice([2, 4, 8])
-                if len(buf) >= width:
-                    idx = random.randint(0, len(buf) - width)
-                    val = int.from_bytes(buf[idx : idx + width], "little")
-                    buf[idx : idx + width] = val.to_bytes(width, "big")
-
-            elif op == "grammar_mutate" and self.grammar:
-                mutated = self.grammar.mutate(bytes(buf), max_len=self.max_len)
-                buf = bytearray(mutated[: self.max_len])
-
-            elif op == "grammar_tree_mutate" and self.grammar:
-                from fuzzer_tool.core.grammar import TreeMutator
-
-                if not hasattr(self, "_tree_mutator"):
-                    self._tree_mutator = TreeMutator(self.grammar)
-                tree = self._tree_mutator.parse(bytes(buf))
-                mutated = self._tree_mutator.mutate_tree(tree, max_len=self.max_len)
-                buf = bytearray(mutated[: self.max_len])
-
-            elif op == "png_chunk_mutate":
-                from fuzzer_tool.core.png_mutations import PngChunkMutator, parse_png_chunks
-
-                if not hasattr(self, "_png_mutator"):
-                    self._png_mutator = PngChunkMutator()
-                # Only apply if input looks like PNG, otherwise generate one
-                if parse_png_chunks(bytes(buf)):
-                    mutated = self._png_mutator.mutate(bytes(buf), max_len=self.max_len)
-                else:
-                    mutated = self._png_mutator._generate_random_png(self.max_len)
-                buf = bytearray(mutated[: self.max_len])
-
-            elif op == "jpeg_chunk_mutate":
-                from fuzzer_tool.core.jpeg_mutations import JpegMutator, parse_jpeg_markers
-
-                if not hasattr(self, "_jpeg_mutator"):
-                    self._jpeg_mutator = JpegMutator()
-                if parse_jpeg_markers(bytes(buf)):
-                    mutated = self._jpeg_mutator.mutate(bytes(buf), max_len=self.max_len)
-                else:
-                    mutated = self._jpeg_mutator._generate_random_jpeg(max_len=self.max_len)
-                buf = bytearray(mutated[: self.max_len])
-
-            elif op == "jpeg_crc_fix" and buf:
-                # JPEG-aware mutation: parse markers, mutate payload, fix length field.
-                # Lets corrupted data reach DCT/Huffman decode paths instead of
-                # being rejected by the parser due to length mismatch.
-                import struct as _struct
-                from fuzzer_tool.core.jpeg_mutations import (
-                    parse_jpeg_markers,
-                    serialize_jpeg_markers,
-                    SOI,
-                    EOI,
-                    STANDALONE_MARKERS,
-                )
-
-                markers = parse_jpeg_markers(bytes(buf))
-                if markers and len(markers) > 2:
-                    # Pick a marker with payload (not SOI/EOI/RST)
-                    candidates = [
-                        i
-                        for i, m in enumerate(markers)
-                        if m.marker not in STANDALONE_MARKERS and len(m.data) > 0
-                    ]
-                    if candidates:
-                        idx = random.choice(candidates)
-                        marker = markers[idx]
-                        # Mutate payload: flip random bytes
-                        data = bytearray(marker.data)
-                        for _ in range(random.randint(1, min(4, len(data)))):
-                            pos = random.randint(0, len(data) - 1)
-                            data[pos] ^= 1 << random.randint(0, 7)
-                        marker.data = bytes(data)
-                        # Recompute length field (length = payload_size + 2)
-                        # The length is stored in the serialized header, not in marker.data
-                        # serialize_jpeg_markers handles this automatically via JpegMarker.serialize()
-                        buf = bytearray(serialize_jpeg_markers(markers)[: self.max_len])
-
-            elif op == "gzip_chunk_mutate":
-                from fuzzer_tool.core.gzip_mutations import GzipMutator, parse_gzip
-
-                if not hasattr(self, "_gzip_mutator"):
-                    self._gzip_mutator = GzipMutator()
-                if parse_gzip(bytes(buf)):
-                    mutated = self._gzip_mutator.mutate(bytes(buf), max_len=self.max_len)
-                else:
-                    mutated = self._gzip_mutator._generate_random_gzip(max_len=self.max_len)
-                buf = bytearray(mutated[: self.max_len])
-
-            elif op == "bmp_chunk_mutate":
-                from fuzzer_tool.core.bmp_mutations import BmpMutator, parse_bmp
-
-                if not hasattr(self, "_bmp_mutator"):
-                    self._bmp_mutator = BmpMutator()
-                if parse_bmp(bytes(buf)):
-                    mutated = self._bmp_mutator.mutate(bytes(buf), max_len=self.max_len)
-                else:
-                    mutated = self._bmp_mutator._generate_random_bmp(max_len=self.max_len)
-                buf = bytearray(mutated[: self.max_len])
-
-            elif op == "png_crc_fix" and buf:
-                # CRC-aware mutation: parse PNG, mutate chunk data, fix CRC.
-                # This lets mutations pass CRC validation and reach deeper
-                # decompression/code paths that CRC-corrupting mutations miss.
-                from fuzzer_tool.core.png_mutations import parse_png_chunks, serialize_png_chunks
-
-                chunks = parse_png_chunks(bytes(buf))
-                if chunks and len(chunks) > 1:
-                    # Pick a non-IEND chunk to mutate
-                    candidates = [i for i, c in enumerate(chunks) if c.chunk_type != b"IEND"]
-                    if candidates:
-                        idx = random.choice(candidates)
-                        chunk = chunks[idx]
-                        # Mutate chunk data: flip random bytes
-                        if chunk.data:
-                            data = bytearray(chunk.data)
-                            for _ in range(random.randint(1, min(4, len(data)))):
-                                pos = random.randint(0, len(data) - 1)
-                                data[pos] ^= 1 << random.randint(0, 7)
-                            chunk.data = bytes(data)
-                        else:
-                            # Empty chunk: add some data
-                            chunk.data = bytes(
-                                random.randint(0, 255) for _ in range(random.randint(1, 32))
-                            )
-                        # Serialize with fixed CRC (chunk.serialize() recomputes)
-                        buf = bytearray(serialize_png_chunks(chunks)[: self.max_len])
-
-            elif op == "redqueen" and buf and parent_meta:
-                matches = parent_meta.get("redqueen_matches", [])
-                offsets = parent_meta.get("redqueen_offsets", [])
-                if matches:
-                    # Input-to-state: for each recorded (offset, A, B),
-                    # check if current input still has A at that offset.
-                    # If yes, replace A with B. This is the precise redqueen path.
-                    for _ in range(random.randint(1, min(4, len(matches)))):
-                        off, op_a, op_b = random.choice(matches)
-                        # Verify the input still has operand A at this offset
-                        end = off + len(op_a)
-                        if end <= len(buf) and bytes(buf[off:end]) == op_a:
-                            for j, b_val in enumerate(op_b):
-                                if off + j < len(buf):
-                                    buf[off + j] = b_val
-                elif offsets and self._cmplog and self._cmplog.tokens:
-                    # Fallback: random token at random offset (legacy path)
-                    for _ in range(random.randint(1, min(4, len(offsets)))):
-                        off = random.choice(offsets)
-                        if off < len(buf):
-                            token = random.choice(self._cmplog.tokens)
-                            for j, b_val in enumerate(token):
-                                if off + j < len(buf):
-                                    buf[off + j] = b_val
-                elif offsets:
-                    # Last resort: XOR flip at known offsets
-                    for _ in range(random.randint(1, min(4, len(offsets)))):
-                        off = random.choice(offsets)
-                        if off < len(buf):
-                            buf[off] ^= 0xFF
-
-            elif op == "havoc":
-                mutated = bytes(self._havoc_mutate(buf))
-                self._last_hamming_distance = (
-                    hamming_distance(data, mutated) if len(data) == len(mutated) else -1
-                )
-                return mutated
-
-        result = bytes(buf)
-        self._last_hamming_distance = (
-            hamming_distance(data, result) if len(data) == len(result) else -1
+    def _op_jpeg_crc_fix(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.jpeg_mutations import (
+            parse_jpeg_markers,
+            serialize_jpeg_markers,
+            STANDALONE_MARKERS,
         )
-        return result
+
+        if buf:
+            markers = parse_jpeg_markers(bytes(buf))
+            if markers and len(markers) > 2:
+                candidates = [
+                    i
+                    for i, m in enumerate(markers)
+                    if m.marker not in STANDALONE_MARKERS and len(m.data) > 0
+                ]
+                if candidates:
+                    idx = random.choice(candidates)
+                    marker = markers[idx]
+                    data = bytearray(marker.data)
+                    for _ in range(random.randint(1, min(4, len(data)))):
+                        data[random.randint(0, len(data) - 1)] ^= 1 << random.randint(0, 7)
+                    marker.data = bytes(data)
+                    return bytearray(serialize_jpeg_markers(markers)[: self.max_len])
+
+    def _op_gzip_chunk_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.gzip_mutations import GzipMutator, parse_gzip
+
+        if not hasattr(self, "_gzip_mutator"):
+            self._gzip_mutator = GzipMutator()
+        if parse_gzip(bytes(buf)):
+            mutated = self._gzip_mutator.mutate(bytes(buf), max_len=self.max_len)
+        else:
+            mutated = self._gzip_mutator._generate_random_gzip(max_len=self.max_len)
+        return bytearray(mutated[: self.max_len])
+
+    def _op_bmp_chunk_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.bmp_mutations import BmpMutator, parse_bmp
+
+        if not hasattr(self, "_bmp_mutator"):
+            self._bmp_mutator = BmpMutator()
+        if parse_bmp(bytes(buf)):
+            mutated = self._bmp_mutator.mutate(bytes(buf), max_len=self.max_len)
+        else:
+            mutated = self._bmp_mutator._generate_random_bmp(max_len=self.max_len)
+        return bytearray(mutated[: self.max_len])
+
+    def _op_png_crc_fix(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.png_mutations import parse_png_chunks, serialize_png_chunks
+
+        if buf:
+            chunks = parse_png_chunks(bytes(buf))
+            if chunks and len(chunks) > 1:
+                candidates = [i for i, c in enumerate(chunks) if c.chunk_type != b"IEND"]
+                if candidates:
+                    idx = random.choice(candidates)
+                    chunk = chunks[idx]
+                    if chunk.data:
+                        data = bytearray(chunk.data)
+                        for _ in range(random.randint(1, min(4, len(data)))):
+                            data[random.randint(0, len(data) - 1)] ^= 1 << random.randint(0, 7)
+                        chunk.data = bytes(data)
+                    else:
+                        chunk.data = bytes(random.randint(0, 255) for _ in range(random.randint(1, 32)))
+                    return bytearray(serialize_png_chunks(chunks)[: self.max_len])
+
+    def _op_redqueen(self, buf, _byte_idx, data):
+        parent_meta = self.seed_meta.get(data)
+        if not (buf and parent_meta):
+            return
+        matches = parent_meta.get("redqueen_matches", [])
+        offsets = parent_meta.get("redqueen_offsets", [])
+        if matches:
+            for _ in range(random.randint(1, min(4, len(matches)))):
+                off, op_a, op_b = random.choice(matches)
+                end = off + len(op_a)
+                if end <= len(buf) and bytes(buf[off:end]) == op_a:
+                    for j, b_val in enumerate(op_b):
+                        if off + j < len(buf):
+                            buf[off + j] = b_val
+        elif offsets and self._cmplog and self._cmplog.tokens:
+            for _ in range(random.randint(1, min(4, len(offsets)))):
+                off = random.choice(offsets)
+                if off < len(buf):
+                    token = random.choice(self._cmplog.tokens)
+                    for j, b_val in enumerate(token):
+                        if off + j < len(buf):
+                            buf[off + j] = b_val
+        elif offsets:
+            for _ in range(random.randint(1, min(4, len(offsets)))):
+                off = random.choice(offsets)
+                if off < len(buf):
+                    buf[off] ^= 0xFF
+
+    def _op_havoc(self, buf, _byte_idx, data):
+        return bytes(self._havoc_mutate(buf))
+
+    # ── Dispatch table: op name → handler method ───────────────────────
+    def _build_dispatch(self):
+        return {
+            "bit_flip": self._op_bit_flip,
+            "byte_flip": self._op_byte_flip,
+            "interesting_8": self._op_interesting_8,
+            "interesting_16": self._op_interesting_16,
+            "interesting_32": self._op_interesting_32,
+            "arithmetic": self._op_arithmetic,
+            "random_bytes": self._op_random_bytes,
+            "block_insert": self._op_block_insert,
+            "block_delete": self._op_block_delete,
+            "block_duplicate": self._op_block_duplicate,
+            "dict_insert": self._op_dict_insert,
+            "dict_replace": self._op_dict_replace,
+            "dict_overwrite": self._op_dict_overwrite,
+            "dict_prepend": self._op_dict_prepend,
+            "dict_append": self._op_dict_append,
+            "checksum_repair": self._op_checksum_repair,
+            "token_dup": self._op_token_dup,
+            "markov_bytes": self._op_markov_bytes,
+            "cem_bytes": self._op_cem_bytes,
+            "splice": self._op_splice,
+            "crossover": self._op_crossover,
+            "type_replace": self._op_type_replace,
+            "ascii_num": self._op_ascii_num,
+            "byte_shuffle": self._op_byte_shuffle,
+            "byte_delete": self._op_byte_delete,
+            "byte_insert": self._op_byte_insert,
+            "insert_ascii_num": self._op_insert_ascii_num,
+            "transpose_16": self._op_transpose_16,
+            "transpose_32": self._op_transpose_32,
+            "transpose_64": self._op_transpose_64,
+            "bit_transpose_8": self._op_bit_transpose_8,
+            "bit_transpose_16": self._op_bit_transpose_16,
+            "bit_transpose_32": self._op_bit_transpose_32,
+            "bit_transpose_64": self._op_bit_transpose_64,
+            "length_grow": self._op_length_grow,
+            "length_shrink": self._op_length_shrink,
+            "repeat_clone": self._op_repeat_clone,
+            "truncate": self._op_truncate,
+            "swap_regions": self._op_swap_regions,
+            "swap_bytes": self._op_swap_bytes,
+            "endianness_swap": self._op_endianness_swap,
+            "grammar_mutate": self._op_grammar_mutate,
+            "grammar_tree_mutate": self._op_grammar_tree_mutate,
+            "png_chunk_mutate": self._op_png_chunk_mutate,
+            "jpeg_chunk_mutate": self._op_jpeg_chunk_mutate,
+            "jpeg_crc_fix": self._op_jpeg_crc_fix,
+            "gzip_chunk_mutate": self._op_gzip_chunk_mutate,
+            "bmp_chunk_mutate": self._op_bmp_chunk_mutate,
+            "png_crc_fix": self._op_png_crc_fix,
+            "redqueen": self._op_redqueen,
+            "havoc": self._op_havoc,
+        }
 
     def _havoc_mutate(self, buf: bytearray) -> bytearray:
         for _ in range(random.randint(2, 8)):
