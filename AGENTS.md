@@ -44,6 +44,7 @@ src/fuzzer_tool/
 │   ├── markov.py       # Byte-level Markov chain (with save/load persistence)
 │   ├── montecarlo.py   # Thompson sampling + CEM
 │   ├── mutations.py    # Mutation operators
+│   ├── ga.py           # Genetic algorithm lifecycle (fitness, speciation, population)
 │   ├── sanitizer.py    # ASAN/MSAN/TSAN output parsing
 │   ├── edge_tracker.py # Per-seed coverage tracking (with save/load)
 │   ├── dmesg.py        # Kernel crash verification via dmesg

@@ -84,12 +84,13 @@ def cmd_fuzz(args):
 
         # For .so targets loaded via ctypes, ASAN must be first in library list.
         # Set LD_PRELOAD to ensure ASAN loads before Python's libraries.
-        is_so = args.target.lower().endswith(('.so', '.dylib', '.dll'))
+        is_so = args.target.lower().endswith((".so", ".dylib", ".dll"))
         if is_so:
             # Find full path to libasan (ctypes.util.find_library may return relative name)
             libasan = "/usr/lib/x86_64-linux-gnu/libasan.so.8"
             if not os.path.exists(libasan):
                 import ctypes.util
+
                 libasan = ctypes.util.find_library("asan") or libasan
             existing = os.environ.get("LD_PRELOAD", "")
             if libasan not in existing:
@@ -222,6 +223,14 @@ def cmd_fuzz(args):
         secretary_window=getattr(args, "secretary_window", 500),
         secretary_exploration=getattr(args, "secretary_exploration", 0.368),
         sensitivity=getattr(args, "sensitivity", False),
+        ga=getattr(args, "ga", False),
+        ga_pop_size=getattr(args, "ga_pop_size", 200),
+        ga_gen_size=getattr(args, "ga_gen_size", 500),
+        ga_elite_frac=getattr(args, "ga_elite_frac", 0.1),
+        ga_crossover_rate=getattr(args, "ga_crossover_rate", 0.7),
+        ga_mutation_rate=getattr(args, "ga_mutation_rate", 0.3),
+        ga_tournament_size=getattr(args, "ga_tournament_size", 3),
+        ga_speciation_threshold=getattr(args, "ga_speciation_threshold", 0.3),
     )
     fuzzer.run(iterations=args.iterations)
 
@@ -688,6 +697,53 @@ def main() -> int:
         "--sensitivity",
         action="store_true",
         help="Enable per-byte sensitivity analysis (Lyapunov exponent) for mutation targeting",
+    )
+    fuzz_parser.add_argument(
+        "--ga",
+        action="store_true",
+        help="Enable genetic algorithm lifecycle mode",
+    )
+    fuzz_parser.add_argument(
+        "--ga-pop-size",
+        type=int,
+        default=200,
+        help="GA population size (default: 200)",
+    )
+    fuzz_parser.add_argument(
+        "--ga-gen-size",
+        type=int,
+        default=500,
+        help="Fuzz iterations per GA generation (default: 500)",
+    )
+    fuzz_parser.add_argument(
+        "--ga-elite-frac",
+        type=float,
+        default=0.1,
+        help="GA elite fraction (default: 0.1)",
+    )
+    fuzz_parser.add_argument(
+        "--ga-crossover-rate",
+        type=float,
+        default=0.7,
+        help="GA crossover probability (default: 0.7)",
+    )
+    fuzz_parser.add_argument(
+        "--ga-mutation-rate",
+        type=float,
+        default=0.3,
+        help="GA mutation probability (default: 0.3)",
+    )
+    fuzz_parser.add_argument(
+        "--ga-tournament-size",
+        type=int,
+        default=3,
+        help="GA tournament selection size (default: 3)",
+    )
+    fuzz_parser.add_argument(
+        "--ga-speciation-threshold",
+        type=float,
+        default=0.3,
+        help="MinHash Jaccard threshold for species grouping (default: 0.3)",
     )
     fuzz_parser.add_argument(
         "--targets",

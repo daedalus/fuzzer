@@ -844,6 +844,20 @@ class EdgeTracker:
         results.sort(key=lambda x: x[2])
         return results
 
+    def find_similar_seeds(self, seed_key: str, min_jaccard: float = 0.3) -> set[str]:
+        """Find seeds with approximate Jaccard >= min_jaccard via LSH buckets.
+
+        Thin wrapper around MinHashLSH.find_similar() for use by GA speciation.
+
+        Args:
+            seed_key: Seed to find similar ones for.
+            min_jaccard: Minimum Jaccard similarity threshold.
+
+        Returns:
+            Set of similar seed_keys (excluding the query seed itself).
+        """
+        return self._minhash.find_similar(seed_key, min_jaccard=min_jaccard)
+
     def get_cumulative_edge_count(self) -> int:
         """Get total unique edges seen across all seeds."""
         return len(self.cumulative_edges)

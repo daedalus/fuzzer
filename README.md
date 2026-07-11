@@ -51,6 +51,15 @@ Coverage-guided binary fuzzer with static target analysis, statistical novelty s
 - **Replicator dynamics** (`--replicator`): evolutionary game theory scheduling — operators grow proportionally to fitness, converging to evolutionarily stable strategies
 - **MOpt PSO** (`--mopt`): particle swarm optimization over operator distributions (alternative to Thompson sampling)
 
+### Genetic Algorithm Lifecycle (`--ga`)
+- **Finite population**: replaces monotonically growing corpus with bounded, evolving population (`--ga-pop-size`)
+- **Unified fitness function**: single score combining novelty (edge coverage), diversity (Wasserstein distance), freshness (recency), and mutation potential
+- **Fitness-proportional parent selection**: tournament selection for crossover parents instead of random corpus picks
+- **Speciation**: MinHash LSH-based species partitioning prevents dominant lineages from monopolizing selection
+- **Generational replacement**: periodic evolution cycles with elitism — top fraction always survives, low-fitness individuals culled
+- **Crash preservation**: crash-triggering seeds get infinite fitness bonus, never culled
+- **State persistence**: population and generation state saved to `ga.json`, survives `--resume`
+
 ### Corpus Management
 - **Delta-encoded corpus**: parent-child diffs for small mutations (< 25% change), periodic full snapshots every 20 generations
 - **xxhash dedup**: ~13x faster than SHA-256 for corpus deduplication

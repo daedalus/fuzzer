@@ -169,6 +169,14 @@ class Fuzzer:
         elo=False,
         meta_elo=False,
         sensitivity=False,
+        ga=False,
+        ga_pop_size=200,
+        ga_gen_size=500,
+        ga_elite_frac=0.1,
+        ga_crossover_rate=0.7,
+        ga_mutation_rate=0.3,
+        ga_tournament_size=3,
+        ga_speciation_threshold=0.3,
     ):
         self.target = target
         # Record boot time at init — before any child processes are spawned.
@@ -199,6 +207,17 @@ class Fuzzer:
         self.persistent = persistent
         self.seed = seed
         random.seed(seed)
+
+        # GA lifecycle parameters
+        self._ga_enabled = ga
+        self._ga_pop_size = ga_pop_size
+        self._ga_gen_size = ga_gen_size
+        self._ga_elite_frac = ga_elite_frac
+        self._ga_crossover_rate = ga_crossover_rate
+        self._ga_mutation_rate = ga_mutation_rate
+        self._ga_tournament_size = ga_tournament_size
+        self._ga_speciation_threshold = ga_speciation_threshold
+        self.ga = None  # Initialized in run() when --ga is set
 
         # Auto-size edge bitmap from branch density
         from fuzzer_tool.core.elf import estimate_map_size
@@ -393,15 +412,15 @@ class Fuzzer:
         # Per-byte sensitivity tracker (Lyapunov exponent)
         self._use_sensitivity = sensitivity
         from fuzzer_tool.core.sensitivity import ByteSensitivityTracker
+
         self._sensitivity = ByteSensitivityTracker(
             max_seeds=50, max_bytes=max_len, sample_rate=0.02
         )
 
         # Critical slowing down detector
         from fuzzer_tool.core.critical_slowing import CriticalSlowingDown
-        self._csd = CriticalSlowingDown(
-            window_size=50, rise_threshold=1.5, min_observations=20
-        )
+
+        self._csd = CriticalSlowingDown(window_size=50, rise_threshold=1.5, min_observations=20)
 
         # Elo rating system for operator scheduling
         self._use_elo = elo
@@ -1588,6 +1607,20 @@ class Fuzzer:
             lineage_depth=parent_depth,
         ):
             self.corpus.append(data)
+            # GA: add to population if enabled
+            if self.ga:
+                import hashlib as _hashlib
+                from fuzzer_tool.core.ga import Individual
+
+                seed_key = _hashlib.sha256(data).hexdigest()[:16]
+                edge_count = len(self.edge_tracker.seed_edges.get(seed_key, set()))
+                ind = Individual(
+                    data=data,
+                    edge_count=edge_count,
+                    generation=self.ga.generation,
+                    seed_key=seed_key,
+                )
+                self.ga.add_to_population(ind)
             self.seed_meta[data] = {
                 "fuzz_count": 0,
                 "coverage_edges": 0,
@@ -1696,6 +1729,9 @@ class Fuzzer:
         corpus accumulates too many stale seeds (high fuzz_count, zero
         new edges).
         """
+        # GA mode handles population bounds via generational culling
+        if self.ga:
+            return
         if not self.corpus:
             return
 
@@ -1882,6 +1918,8 @@ class Fuzzer:
             )
 
     def _pick_seed(self) -> bytes:
+        if self.ga:
+            return self.ga.pick_seed()
         if self.markov_generate and self.markov_trained:
             # Reduce markov generation rate when model has plateaued
             # Use KS-aware threshold instead of fixed JS < 0.01
@@ -2158,9 +2196,7 @@ class Fuzzer:
         return weights
 
     @staticmethod
-    def _pareto_front(
-        scores: list[tuple[float, float, float]], window: int = 100
-    ) -> set[int]:
+    def _pareto_front(scores: list[tuple[float, float, float]], window: int = 100) -> set[int]:
         """Find indices of non-dominated points in a sliding window.
 
         A point is non-dominated if no other point in the window is
@@ -2192,9 +2228,7 @@ class Fuzzer:
 
         return front
 
-    def _pick_from_pareto_front(
-        self, weights: list[float], now: float
-    ) -> bytes:
+    def _pick_from_pareto_front(self, weights: list[float], now: float) -> bytes:
         """Select a seed using Pareto frontier sampling.
 
         When the Pareto front (non-dominated seeds on the
@@ -2228,11 +2262,11 @@ class Fuzzer:
                 pareto_scores.append((1.0, 1.0, 1.0))
                 continue
             seed_key = self._seed_key(seed)
-            sub, div, spa, _cov = self._cached_weights.get(
-                seed_key, (1.0, 1.0, 1.0, 0.5)
-            )
+            sub, div, spa, _cov = self._cached_weights.get(seed_key, (1.0, 1.0, 1.0, 0.5))
             age = now - meta["added_at"]
-            burst = max(1.0, 1.0 + self._temperature * (5.0 - 1.0) - (age / 60.0) * self._temperature)
+            burst = max(
+                1.0, 1.0 + self._temperature * (5.0 - 1.0) - (age / 60.0) * self._temperature
+            )
             pareto_scores.append((sub, burst, spa))
 
         # Find the Pareto front
@@ -2619,18 +2653,30 @@ class Fuzzer:
 
         if is_interesting or has_new_coverage:
             self.save_to_corpus(mutated, parent=data)
+            # GA: add new-coverage individual to population
+            if self.ga and has_new_coverage:
+                edge_count = (
+                    len(self.edge_tracker.seed_edges.get(self.edge_tracker._last_seed_key, set()))
+                    if hasattr(self.edge_tracker, "_last_seed_key")
+                    else 0
+                )
+                ind = self.ga.on_fuzz_result(mutated, True, edge_count, self.edge_tracker)
+                if ind is not None:
+                    self.ga.add_to_population(ind)
             # Analyze byte sensitivity for seeds that found new coverage (optional)
             if has_new_coverage and self.shm_cov and self._use_sensitivity:
                 try:
-                    edge_bitmap = bytes(self.shm_cov._map)[:self.shm_cov.size]
+                    edge_bitmap = bytes(self.shm_cov._map)[: self.shm_cov.size]
                     edges = {i for i, v in enumerate(edge_bitmap) if v}
                     if edges:
+
                         def _exec_fn(data):
                             rc, _ = self._run_target(data)
                             if self.shm_cov:
-                                bm = bytes(self.shm_cov._map)[:self.shm_cov.size]
+                                bm = bytes(self.shm_cov._map)[: self.shm_cov.size]
                                 return {i for i, v in enumerate(bm) if v}
                             return set()
+
                         self._sensitivity.analyze_seed(mutated, edges, _exec_fn)
                 except Exception:
                     pass
@@ -2657,6 +2703,10 @@ class Fuzzer:
             and len(self.corpus) > 1
         ):
             self._auto_minimize_corpus()
+
+        # GA: trigger generation boundary for non-coverage iterations
+        if self.ga:
+            self.ga.on_fuzz_result(mutated, False, 0, self.edge_tracker)
 
         return False
 
@@ -3046,7 +3096,9 @@ class Fuzzer:
                 if new_size > current:
                     log.warning(
                         "Collision risk %.0f%% — resizing bitmap %d → %d bytes",
-                        collision_risk, current, new_size,
+                        collision_risk,
+                        current,
+                        new_size,
                     )
                     self.shm_cov.resize(new_size)
                     self.map_size = new_size
@@ -3154,11 +3206,11 @@ class Fuzzer:
             for seed in list(self.corpus):
                 returncode, stderr = self._run_target(seed)
                 # Validate AFL shim on first execution
-                if not getattr(self, '_shim_checked', False):
+                if not getattr(self, "_shim_checked", False):
                     self._shim_checked = True
-                    if '[shim]' in stderr:
+                    if "[shim]" in stderr:
                         log.info("AFL shim: %s", stderr.strip())
-                        if 'area=(nil)' in stderr and self.shm_cov:
+                        if "area=(nil)" in stderr and self.shm_cov:
                             log.warning(
                                 "AFL shim area is NULL — SHM not attached. "
                                 "Coverage data will be empty."
@@ -3174,6 +3226,32 @@ class Fuzzer:
             # regardless of initial corpus size.
             _exec_baseline = self.exec_count
             self._exec_baseline = _exec_baseline
+
+            # Initialize GA lifecycle if enabled
+            if self._ga_enabled:
+                from fuzzer_tool.core.ga import GALifecycle
+
+                self.ga = GALifecycle(
+                    pop_size=self._ga_pop_size,
+                    elite_fraction=self._ga_elite_frac,
+                    crossover_rate=self._ga_crossover_rate,
+                    mutation_rate=self._ga_mutation_rate,
+                    tournament_size=self._ga_tournament_size,
+                    generation_size=self._ga_gen_size,
+                    speciation_threshold=self._ga_speciation_threshold,
+                )
+                self.ga.initialize(self.corpus, self.edge_tracker)
+                ga_path = self.corpus_dir / "ga.json"
+                if self.resume and ga_path.exists():
+                    self.ga.load(ga_path)
+                    print(f"[*] GA: loaded state from {ga_path} (gen={self.ga.generation})")
+                print(
+                    f"[*] GA: pop_size={self.ga.pop_size}, "
+                    f"gen_size={self.ga.generation_size}, "
+                    f"elite={self.ga.elite_fraction:.0%}, "
+                    f"crossover={self.ga.crossover_rate:.0%}, "
+                    f"mutation={self.ga.mutation_rate:.0%}"
+                )
 
             while not _shutdown:
                 if iterations and i >= iterations:
@@ -3207,6 +3285,10 @@ class Fuzzer:
         if self._use_mi and self._mi:
             self._mi.save(str(self._mi_path))
         self._save_state()
+        if self.ga:
+            ga_path = self.corpus_dir / "ga.json"
+            self.ga.save(ga_path)
+            print(f"[*] GA: saved state to {ga_path} (gen={self.ga.generation})")
         if self._ablation_file:
             self._ablation_file.flush()
             self._ablation_file.close()
