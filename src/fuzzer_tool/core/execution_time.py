@@ -157,3 +157,16 @@ class ExecutionTimeTracker:
         if not self._sorted:
             return 0.0
         return self._sorted[min(int(len(self._sorted) * 0.99), len(self._sorted) - 1)]
+
+    @property
+    def variance(self) -> float:
+        """Variance of observed execution times."""
+        if len(self._sorted) < 2:
+            return 0.0
+        mean = sum(self._sorted) / len(self._sorted)
+        return sum((x - mean) ** 2 for x in self._sorted) / (len(self._sorted) - 1)
+
+    @property
+    def std(self) -> float:
+        """Standard deviation of observed execution times."""
+        return self.variance ** 0.5

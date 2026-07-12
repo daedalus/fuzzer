@@ -5,9 +5,53 @@ seed contribution analysis, and crash triage. Can output to stdout or a file.
 """
 
 import json
+import math
 import os
 from collections import Counter
 from pathlib import Path
+
+
+def _confidence_interval(n, success_count=None):
+    """Compute ±1σ, ±2σ, ±3σ confidence intervals.
+
+    For binomial proportions (success_count is not None):
+        se = sqrt(p * (1-p) / n)
+        ci_k = p ± k * se
+
+    For continuous values (success_count is None):
+        Returns (0, 0, 0, 0) — caller must provide std.
+
+    Returns (mean, se, ci_1, ci_2, ci_3) where ci_k is the half-width.
+    """
+    if n <= 0:
+        return (0.0, 0.0, 0.0, 0.0, 0.0)
+    if success_count is not None:
+        p = success_count / n
+        se = math.sqrt(p * (1 - p) / n) if n > 1 else 0.0
+        return (p, se, se, se * 2, se * 3)
+    return (0.0, 0.0, 0.0, 0.0, 0.0)
+
+
+def _format_ci(mean, ci_1, ci_2, ci_3, fmt=".1f", pct=False):
+    """Format ±1σ, ±2σ, ±3σ as a compact string."""
+    if pct:
+        return f"{mean * 100:{fmt}}%  ±{ci_1 * 100:{fmt}}% ±{ci_2 * 100:{fmt}}% ±{ci_3 * 100:{fmt}}%"
+    return f"{mean:{fmt}}  ±{ci_1:{fmt}} ±{ci_2:{fmt}} ±{ci_3:{fmt}}"
+
+
+def _format_ci_inline(mean, ci_1, ci_2, ci_3, fmt=".1f", pct=False):
+    """Format as: mean ±1σ: lo-hi  ±2σ: lo-hi  ±3σ: lo-hi"""
+    # Convert to float to handle MagicMock objects in tests
+    m = float(mean)
+    s1, s2, s3 = float(ci_1), float(ci_2), float(ci_3)
+    if pct:
+        m, s1, s2, s3 = m * 100, s1 * 100, s2 * 100, s3 * 100
+    return (
+        f"{m:{fmt}}  "
+        f"±1σ: {m - s1:{fmt}}-{m + s1:{fmt}}  "
+        f"±2σ: {m - s2:{fmt}}-{m + s2:{fmt}}  "
+        f"±3σ: {m - s3:{fmt}}-{m + s3:{fmt}}"
+    )
 
 
 def generate_report(fuzzer, corpus_dir: str, crashes_dir: str) -> str:
@@ -63,8 +107,14 @@ def _run_summary(f) -> str:
         f"  In-process:      {f._inprocess_runner is not None}",
     ]
     if execs > 0:
-        lines.append(f"  Crash rate:      {crashes / execs * 100:.4f}%")
-        lines.append(f"  Timeout rate:    {timeouts / execs * 100:.4f}%")
+        _, _, c1, c2, c3 = _confidence_interval(execs, crashes)
+        lines.append(
+            f"  Crash rate:      {_format_ci_inline(crashes / execs, c1, c2, c3, '.4f', True)}"
+        )
+        _, _, t1, t2, t3 = _confidence_interval(execs, timeouts)
+        lines.append(
+            f"  Timeout rate:    {_format_ci_inline(timeouts / execs, t1, t2, t3, '.4f', True)}"
+        )
     return "\n".join(lines)
 
 
@@ -131,14 +181,18 @@ def _mutation_effectiveness(f) -> str:
     lines = [
         "",
         "--- Mutation Effectiveness ---",
-        f"  {'Operation':<22s} {'Count':>7s} {'Success':>8s} {'Rate':>7s}",
-        f"  {'-' * 22} {'-' * 7} {'-' * 8} {'-' * 7}",
+        f"  {'Operation':<22s} {'Count':>7s} {'Success':>8s} {'Rate':>7s}  {'±1σ':>7s} {'±2σ':>7s} {'±3σ':>7s}",
+        f"  {'-' * 22} {'-' * 7} {'-' * 8} {'-' * 7}  {'-' * 7} {'-' * 7} {'-' * 7}",
     ]
 
     for op, count in sorted(counts.items(), key=lambda x: -x[1]):
         succ = successes.get(op, 0)
+        _, se, c1, c2, c3 = _confidence_interval(count, succ)
         rate = succ / count * 100 if count else 0
-        lines.append(f"  {op:<22s} {count:>7d} {succ:>8d} {rate:>6.1f}%")
+        lines.append(
+            f"  {op:<22s} {count:>7d} {succ:>8d} {rate:>6.1f}%  "
+            f"{c1 * 100:>6.1f}% {c2 * 100:>6.1f}% {c3 * 100:>6.1f}%"
+        )
 
     lines.append(
         f"  {'TOTAL':<22s} {total:>7d} {total_success:>8d} {total_success / total * 100:>6.1f}%"
@@ -381,8 +435,24 @@ def _bandit_calibration(f) -> str:
     lines = [
         "",
         "--- Bandit Calibration (Brier Score) ---",
-        f"  Brier score:       {brier:.4f} (0=perfect, 0.25=random, 0.5=worst)",
     ]
+
+    # Brier score CI from individual prediction errors
+    brier_history = f.mc._brier_history if hasattr(f.mc, "_brier_history") else []
+    if brier_history and len(brier_history) >= 10:
+        n = len(brier_history)
+        mean = sum(brier_history) / n
+        var = sum((x - mean) ** 2 for x in brier_history) / (n - 1) if n > 1 else 0
+        se = (var / n) ** 0.5
+        ci1, ci2, ci3 = se, se * 2, se * 3
+        lines.append(
+            f"  Brier score:       {_format_ci_inline(mean, ci1, ci2, ci3, '.4f')} "
+            f"(0=perfect, 0.25=random, 0.5=worst)"
+        )
+    else:
+        lines.append(
+            f"  Brier score:       {brier:.4f} (0=perfect, 0.25=random, 0.5=worst)"
+        )
     cal = f.mc.calibration_report()
     if cal:
         lines.append("  Calibration by predicted probability bin:")
@@ -533,11 +603,31 @@ def _runtime_performance(f) -> str:
         "--- Runtime Performance ---",
         f"  Duration:         {_format_duration(elapsed)}",
         f"  Executions:       {f.exec_count:,}",
-        f"  Avg throughput:   {eps:.1f} execs/sec",
-        f"  Peak throughput:  {f._peak_eps:.1f} execs/sec",
-        f"  Peak RSS:         {rss_str}",
-        f"  Map size:         {f.map_size:,} bytes",
     ]
+
+    # Throughput with CI
+    tracker = f._exec_time_tracker
+    if tracker and tracker.count >= 2:
+        # Throughput CI: uses std of execution times to estimate throughput variance
+        # SE(throughput) ≈ throughput * (std / mean) / sqrt(n)
+        mean_t = tracker.p50  # use median as robust mean proxy
+        std_t = tracker.std
+        n = tracker.count
+        if mean_t > 0 and n > 1:
+            cv = std_t / mean_t  # coefficient of variation
+            se_eps = eps * cv / math.sqrt(n)
+            ci1, ci2, ci3 = se_eps, se_eps * 2, se_eps * 3
+            lines.append(
+                f"  Avg throughput:   {_format_ci_inline(eps, ci1, ci2, ci3, '.1f')} execs/sec"
+            )
+        else:
+            lines.append(f"  Avg throughput:   {eps:.1f} execs/sec")
+    else:
+        lines.append(f"  Avg throughput:   {eps:.1f} execs/sec")
+
+    lines.append(f"  Peak throughput:  {f._peak_eps:.1f} execs/sec")
+    lines.append(f"  Peak RSS:         {rss_str}")
+    lines.append(f"  Map size:         {f.map_size:,} bytes")
 
     # Corpus growth
     added = f._total_corpus_attempts
