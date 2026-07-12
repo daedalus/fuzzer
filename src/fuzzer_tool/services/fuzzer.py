@@ -3463,8 +3463,9 @@ class Fuzzer:
                 )
             else:
                 print("\n[*] dmesg: no kernel crashes detected")
+        # Show convergence stats for every active scheduler
         if self.mc and self.mc_bandit:
-            print("\n[*] Bandit convergence:")
+            print("\n[*] Bandit convergence (Thompson sampling):")
             for name, (a, b) in sorted(
                 self.mc.bandit_stats_raw().items(),
                 key=lambda x: -(x[1][0] / max(x[1][0] + x[1][1], 1)),
@@ -3472,6 +3473,22 @@ class Fuzzer:
                 total = a + b
                 pct = a / total * 100 if total else 0
                 print(f"    {name:20s}: {a:.1f}/{b:.1f} ({pct:.0f}% success)")
+        if self._mopt:
+            print("\n[*] MOpt convergence (PSO):")
+            for p in self._mopt.particle_stats()[:5]:
+                print(
+                    f"    {p['name']:<20s}: fitness={p['fitness']:.4f} "
+                    f"top={p['top_op']}({p['top_prob']:.1%})"
+                )
+        if self._replicator:
+            print("\n[*] Replicator convergence:")
+            for s in self._replicator.operator_stats():
+                if s["window_execs"] > 0:
+                    rate = s["window_successes"] / s["window_execs"] * 100
+                    print(
+                        f"    {s['name']:<20s}: pop={s['population']:.4f} "
+                        f"({s['window_successes']}/{s['window_execs']} = {rate:.0f}%)"
+                    )
         self._print_run_summary()
         epoch_end = time.time()
         boot_end = time.monotonic()
