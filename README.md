@@ -6,7 +6,7 @@ Coverage-guided binary fuzzer with static target analysis, statistical novelty s
 
 ### Mutation & Generation
 - **Mutation operators**: bit flip, byte flip, interesting values (8/16/32-bit), arithmetic (1/2/4/8-byte, LE/BE), block insert/delete/duplicate, havoc mode
-- **Grammar-aware mutations**: format-specific mutations for PNG (IHDR fields, IDAT splitting, filter types, interlace, CRC corruption, color/depth combos, large inputs)
+- **Grammar-aware mutations**: format-specific structure-aware mutations for PNG (IHDR, IDAT, CRC, filter types, interlace), JPEG (SOF, DHT, DQT, DRI, SOS, scan data), BMP (header fields, pixel data), and gzip (header flags, deflate stream, trailer, extra fields)
 - **Dictionary support**: inject protocol tokens from dictionary files
 - **Markov chain**: learn byte-level transition probabilities from corpus, generate statistically similar inputs, persist across runs
 - **Monte Carlo scheduling**: Thompson sampling bandit for operator selection + Cross-Entropy Method for byte distribution learning
