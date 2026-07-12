@@ -380,6 +380,7 @@ class Fuzzer:
             self._mopt = MOptScheduler(n_particles=5, window_size=200)
             log.info("MOpt PSO scheduling enabled (5 particles, window=200)")
         self._use_replicator = replicator
+        self._seed_strategy = None
         self._op_dispatch = self._build_dispatch()
         self._replicator = None
         if replicator:
@@ -2051,53 +2052,83 @@ class Fuzzer:
             )
 
     def _pick_seed(self) -> bytes:
+        # Elo-arbitrated seed selection: pick between strategies
+        if self._use_elo and self._elo:
+            available = []
+            if self.ga:
+                available.append("ga")
+            available.append("weighted")
+            if self.corpus and self.seed_meta:
+                available.append("pareto")
+            if self._profile.format_signature:
+                available.append("format")
+
+            if len(available) >= 2:
+                strategy = self._elo.select_strategy(available)
+                self._seed_strategy = strategy
+            elif available:
+                strategy = available[0]
+                self._seed_strategy = strategy
+            else:
+                strategy = None
+
+            if strategy == "ga" and self.ga:
+                return self.ga.pick_seed()
+            elif strategy == "pareto" and self.corpus and self.seed_meta:
+                return self._pick_pareto_only()
+            elif strategy == "format":
+                return self._format_aware_seed()
+            # else: fall through to weighted
+
+        # Non-elo paths
         if self.ga:
             return self.ga.pick_seed()
         if self.markov_generate and self.markov_trained:
-            # Reduce markov generation rate when model has plateaued
-            # Use KS-aware threshold instead of fixed JS < 0.01
-            from fuzzer_tool.core.edge_tracker import ks_significance_threshold
-
-            plateau_threshold = ks_significance_threshold(
-                max(1, self.markov._contexts_seen), alpha=0.05
-            )
-            gen_rate = 0.03 if self.markov.last_js_divergence < plateau_threshold else 0.15
-
-            # Perplexity gate: if model's average perplexity on corpus is high
-            # (>200), it hasn't learned the format well — generate more to
-            # explore. If low (<10), the model is well-calibrated — generate less.
-            if not hasattr(self, "_last_corpus_pp"):
-                self._last_corpus_pp = 256.0
-            if self.exec_count % 500 == 0 and self.corpus:
-                pp_stats = self.markov.corpus_perplexity(self.corpus)
-                self._last_corpus_pp = pp_stats["mean"]
-            if self._last_corpus_pp > 200:
-                gen_rate = min(gen_rate * 2, 0.40)
-            elif self._last_corpus_pp < 10:
-                gen_rate = max(gen_rate * 0.3, 0.01)
-
-            if random.random() < gen_rate:
-                # Cap generated seed size to 256 bytes — large markov seeds
-                # (1-4KB) slow down weighted_position (O(n) filter) without
-                # proportional coverage benefit.
-                length = random.randint(1, min(256, self.max_len))
-                # Reject generated inputs with extreme perplexity (>512)
-                # — they're pure noise, not useful mutations
-                for _ in range(3):
-                    candidate = self.markov.generate(length)
-                    pp = self.markov.perplexity(candidate)
-                    if pp < 512:
-                        return candidate
-                return candidate  # fallback: return last attempt
-            length = random.randint(1, min(256, self.max_len))
-            return self.markov.generate(length)
+            return self._pick_markov_seed()
         if self.corpus and self.seed_meta:
             return self._weighted_pick_seed()
         if self.corpus:
             return random.choice(self.corpus)
-        # Format-aware seed generation: use profile hints to produce
-        # structurally meaningful inputs when corpus is empty
         return self._format_aware_seed()
+
+    def _pick_markov_seed(self) -> bytes:
+        """Generate a seed from the Markov chain."""
+        from fuzzer_tool.core.edge_tracker import ks_significance_threshold
+
+        plateau_threshold = ks_significance_threshold(
+            max(1, self.markov._contexts_seen), alpha=0.05
+        )
+        gen_rate = 0.03 if self.markov.last_js_divergence < plateau_threshold else 0.15
+
+        if not hasattr(self, "_last_corpus_pp"):
+            self._last_corpus_pp = 256.0
+        if self.exec_count % 500 == 0 and self.corpus:
+            pp_stats = self.markov.corpus_perplexity(self.corpus)
+            self._last_corpus_pp = pp_stats["mean"]
+        if self._last_corpus_pp > 200:
+            gen_rate = min(gen_rate * 2, 0.40)
+        elif self._last_corpus_pp < 10:
+            gen_rate = max(gen_rate * 0.3, 0.01)
+
+        if random.random() < gen_rate:
+            length = random.randint(1, min(256, self.max_len))
+            for _ in range(3):
+                candidate = self.markov.generate(length)
+                pp = self.markov.perplexity(candidate)
+                if pp < 512:
+                    return candidate
+            return candidate
+        length = random.randint(1, min(256, self.max_len))
+        return self.markov.generate(length)
+
+    def _pick_pareto_only(self) -> bytes:
+        """Select a seed using only the Pareto frontier (no weighted scoring)."""
+        if len(self.corpus) < 3 or not self.seed_meta:
+            return random.choice(self.corpus)
+        now = time.time()
+        # Use equal weights — pure Pareto selection
+        weights = [1.0] * len(self.corpus)
+        return self._pick_from_pareto_front(weights, now)
 
     def _format_aware_seed(self) -> bytes:
         """Generate a seed that matches the target's inferred input format."""
@@ -2736,10 +2767,9 @@ class Fuzzer:
                 self._elo_decay_counter = 0
                 self._elo.apply_decay()
 
-        # Meta-elo: record strategy-level match against all other available strategies
+        # Meta-elo: record operator strategy-level match
         if self._use_meta_elo and self._elo and self._meta_strategy:
             score = 1.0 if success else 0.0
-            # Record against each non-selected strategy
             all_strategies = []
             if self._use_replicator and self._replicator:
                 all_strategies.append("replicator")
@@ -2750,6 +2780,14 @@ class Fuzzer:
             for other in all_strategies:
                 if other != self._meta_strategy:
                     self._elo.record_strategy_match(self._meta_strategy, other, score)
+
+        # Meta-elo: record seed strategy-level match
+        if self._use_elo and self._elo and self._seed_strategy:
+            score = 1.0 if success else 0.0
+            seed_strategies = ["ga", "weighted", "pareto", "format"]
+            for other in seed_strategies:
+                if other != self._seed_strategy:
+                    self._elo.record_strategy_match(f"seed_{self._seed_strategy}", f"seed_{other}", score)
 
         if self._use_shapley and self._shapley:
             edge_bitmap = self._get_current_edge_bitmap()
@@ -3489,6 +3527,25 @@ class Fuzzer:
                         f"    {s['name']:<20s}: pop={s['population']:.4f} "
                         f"({s['window_successes']}/{s['window_execs']} = {rate:.0f}%)"
                     )
+        # Seed strategy convergence
+        if self._use_elo and self._elo:
+            seed_strategies = ["ga", "weighted", "pareto", "format"]
+            has_seed_data = any(
+                self._elo._strategy_match_count.get(f"seed_{s}", 0) > 0
+                for s in seed_strategies
+            )
+            if has_seed_data:
+                print("\n[*] Seed strategy convergence:")
+                for s in seed_strategies:
+                    key = f"seed_{s}"
+                    count = self._elo._strategy_match_count.get(key, 0)
+                    if count > 0:
+                        rating = self._elo._strategy_ratings.get(key, self._elo.default_rating)
+                        delta = rating - self._elo.default_rating
+                        sign = "+" if delta >= 0 else ""
+                        print(
+                            f"    {s:<20s}: {rating:>7.0f} ({sign}{delta:.0f}, {count} matches)"
+                        )
         self._print_run_summary()
         epoch_end = time.time()
         boot_end = time.monotonic()
