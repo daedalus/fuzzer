@@ -8,6 +8,7 @@ BASE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 RESULTS_DIR="/tmp/fuzz_sweep_results"
 DICT="-D dictionaries/png.dict"
 GRAMMAR="-g dictionaries/png.gram"
+REPORT_FLAG="${BENCH_REPORT:-}"
 
 cd "$BASE_DIR"
 
@@ -19,6 +20,21 @@ cleanup_shm() {
 
 extract() {
     grep -oP "$1" "$2" 2>/dev/null | tail -1
+}
+
+extract_ci() {
+    local log="$1"
+    local line
+    line=$(grep -P "Crash rate:" "$log" 2>/dev/null | tail -1)
+    if [[ -z "$line" ]]; then
+        echo "-|-|-"
+        return
+    fi
+    local ci1 ci2 ci3
+    ci1=$(echo "$line" | grep -oP '±1σ:\s+\K[0-9.]+')
+    ci2=$(echo "$line" | grep -oP '±2σ:\s+\K[0-9.]+')
+    ci3=$(echo "$line" | grep -oP '±3σ:\s+\K[0-9.]+')
+    echo "${ci1:--}|${ci2:--}|${ci3:--}"
 }
 
 run_combo() {
@@ -34,18 +50,24 @@ run_combo() {
 
     echo "[*] Running: $name"
     python -m fuzzer_tool fuzz "$TARGET" -d "$dir" -c -n "$ITERS" \
-        $DICT $GRAMMAR "${flags[@]}" 2>&1 | tee "$log" || true
+        $DICT $GRAMMAR "${flags[@]}" $REPORT_FLAG 2>&1 | tee "$log" || true
 
-    local edges corpus eps dur p50 coll
+    local edges corpus eps dur p50 coll crash_ci
     edges=$(extract "Edges discovered:\s+\K[0-9]+" "$log")
     corpus=$(extract "Corpus:\s+\K[0-9]+" "$log")
     eps=$(extract "Avg eps:\s+\K[0-9.]+" "$log")
     dur=$(extract "Duration:\s+\K[0-9s]+" "$log")
     p50=$(extract "Exec time p50:\s+\K[0-9.]+ms" "$log")
     coll=$(extract "Collision risk:\s+\K[0-9.]+" "$log")
+    crash_ci=$(extract_ci "$log")
 
-    echo "${name},${edges:-0},${corpus:-0},${eps:-0},${dur:-0},${p50:-0},${coll:-0}" >> "$RESULTS_DIR/sweep.csv"
-    printf "  -> edges=%-5s corpus=%-5s eps=%-8s dur=%-8s\n" "${edges:-?}" "${corpus:-?}" "${eps:-?}" "${dur:-?}"
+    local ci1 ci2 ci3
+    ci1=$(echo "$crash_ci" | cut -d'|' -f1)
+    ci2=$(echo "$crash_ci" | cut -d'|' -f2)
+    ci3=$(echo "$crash_ci" | cut -d'|' -f3)
+
+    echo "${name},${edges:-0},${corpus:-0},${eps:-0},${dur:-0},${p50:-0},${coll:-0},${ci1},${ci2},${ci3}" >> "$RESULTS_DIR/sweep.csv"
+    printf "  -> edges=%-5s corpus=%-5s eps=%-8s dur=%-8s crash_ci=[%s,%s,%s]\n" "${edges:-?}" "${corpus:-?}" "${eps:-?}" "${dur:-?}" "${ci1:--}" "${ci2:--}" "${ci3:--}"
 
     cleanup_shm
     sleep 1
