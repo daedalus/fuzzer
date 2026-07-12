@@ -169,7 +169,6 @@ class Fuzzer:
         secretary_window=500,
         secretary_exploration=None,
         elo=False,
-        meta_elo=False,
         sensitivity=False,
         ga=False,
         ga_pop_size=200,
@@ -442,10 +441,9 @@ class Fuzzer:
             self._elo_decay_interval = 100  # apply decay every N iterations
             self._elo_match_window: list[tuple[str, str, float, bool]] = []
 
-        # Meta-scheduler: Elo arbitrates between bandit and MOpt
-        self._use_meta_elo = meta_elo and elo and mc_bandit and mopt
+        # Elo arbitrates between all available strategies when enabled
         self._meta_strategy: str | None = None
-        if self._use_meta_elo:
+        if self._use_elo:
             log.info("Meta-scheduler enabled: Elo arbitrating bandit vs MOpt")
             self._meta_strategy_choices: list[str] = []
 
@@ -1092,10 +1090,10 @@ class Fuzzer:
             available.append("mopt")
 
         # Elo sits on top: pick which strategy to use
-        if self._use_meta_elo and self._elo and len(available) >= 2:
+        if self._use_elo and self._elo and len(available) >= 2:
             strategy = self._elo.select_strategy(available)
             self._meta_strategy = strategy
-        elif self._use_meta_elo and self._elo and available:
+        elif self._use_elo and self._elo and available:
             strategy = available[0]
             self._meta_strategy = strategy
         else:
@@ -2741,7 +2739,7 @@ class Fuzzer:
                         rate = a / (a + b)
                         self._op_secretary[op].observe(rate)
 
-        if self._mopt and (not self._use_meta_elo or self._meta_strategy == "mopt"):
+        if self._mopt and (not self._use_elo or self._meta_strategy == "mopt"):
             seen = set()
             for op, pid in zip(self._last_ops_used, self._last_mopt_particles, strict=False):
                 if op not in seen:
@@ -2768,7 +2766,7 @@ class Fuzzer:
                 self._elo.apply_decay()
 
         # Meta-elo: record operator strategy-level match
-        if self._use_meta_elo and self._elo and self._meta_strategy:
+        if self._use_elo and self._elo and self._meta_strategy:
             score = 1.0 if success else 0.0
             all_strategies = []
             if self._use_replicator and self._replicator:

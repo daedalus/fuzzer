@@ -220,7 +220,6 @@ def cmd_fuzz(args):
         renyi_weight=getattr(args, "renyi_weight", False),
         transfer_entropy=getattr(args, "transfer_entropy", False),
         elo=getattr(args, "elo", False),
-        meta_elo=getattr(args, "meta_elo", False),
         secretary=getattr(args, "secretary", False),
         secretary_window=getattr(args, "secretary_window", 500),
         secretary_exploration=getattr(args, "secretary_exploration", 0.368),
@@ -671,12 +670,7 @@ def main() -> int:
     fuzz_parser.add_argument(
         "--elo",
         action="store_true",
-        help="Enable Elo rating system for operator scheduling (complementary signal)",
-    )
-    fuzz_parser.add_argument(
-        "--meta-elo",
-        action="store_true",
-        help="Enable Elo-based meta-scheduler: lets Elo arbitrate between bandit and MOpt strategies",
+        help="Enable Elo scheduling: arbitrates between operator strategies (bandit/MOpt/replicator) AND seed strategies (ga/weighted/pareto/format)",
     )
     fuzz_parser.add_argument(
         "--secretary",
