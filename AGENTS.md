@@ -176,6 +176,10 @@ These rules are extracted from ~85 `fix:` commits in project history. Each names
 
 - **Assert on behavior, not on stale or accidentally-inverted expectations.** Some past bugs shipped *with* a passing test because the assertion checked the wrong direction (e.g. asserting a timeout counts as a crash) or referenced an error string that had since changed. When fixing a bug, re-read the failing test's assertion and confirm it actually encodes the intended behavior, not just "no exception was raised."
 
+### Dispatch table & half-shipped features
+
+- **Every entry in `_build_dispatch()` must have a corresponding module and class.** If an operator name is registered in `MUTATIONS` / `FORMAT_MUTATIONS` and wired into the dispatch table, but the module it imports doesn't exist, the fuzzer crashes with `ModuleNotFoundError` the moment the scheduler picks that operator. This is invisible to unit tests because they never exercise the live dispatch path. The integration smoke test (`test_operator_smoke.py::test_all_ops_fire`) catches this by calling every handler once — it must pass before any release.
+
 ### Silent error swallowing
 
 - **Never `except Exception: pass` in production code paths.** A broad except that swallows errors hides real failures (disk full, permission denied, EMFILE). At minimum, log at `warning` level. Reserve `log.debug` for genuinely expected/recoverable situations only.
