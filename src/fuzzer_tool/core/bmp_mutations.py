@@ -155,11 +155,12 @@ def _corrupt_field(data: bytearray, offset: int, size: int, signed: bool = False
             elif method == 1:
                 val = random.choice([0, 1, -1, 0x7FFFFFFF, -0x80000000])
             elif method == 2:
-                val += random.choice([-2, -1, 1, 2, 256, 65536])
+                val = max(-0x80000000, min(0x7FFFFFFF, val + random.choice([-2, -1, 1, 2, 256, 65536])))
             elif method == 3:
                 val = random.randint(-0x80000000, 0x7FFFFFFF)
             else:
                 val = random.randint(0, 256)
+            val = max(-0x80000000, min(0x7FFFFFFF, val))
             struct.pack_into("<i", data, offset, val)
         else:
             if method == 0:
@@ -167,11 +168,12 @@ def _corrupt_field(data: bytearray, offset: int, size: int, signed: bool = False
             elif method == 1:
                 val = random.choice([0, 1, 0x7FFFFFFF, 0xFFFFFFFF])
             elif method == 2:
-                val = max(0, val + random.choice([-2, -1, 1, 2, 256, 65536]))
+                val = max(0, min(0xFFFFFFFF, val + random.choice([-2, -1, 1, 2, 256, 65536])))
             elif method == 3:
                 val = random.randint(0, 0xFFFFFFFF)
             else:
                 val = random.randint(0, 256)
+            val = max(0, min(0xFFFFFFFF, val))
             struct.pack_into("<I", data, offset, val)
 
 
