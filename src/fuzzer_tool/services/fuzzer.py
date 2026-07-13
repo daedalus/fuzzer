@@ -198,6 +198,7 @@ class Fuzzer:
         self._stall_threshold = stall_threshold
         self._last_new_edge_exec = 0
         self._stall_recovery_active = False
+        self._stall_level = 0  # 0=off, 1=more mutations, 2=havoc forced, 3=random pick
         self.extra_crash_codes = set(extra_crash_codes) if extra_crash_codes else set()
         self.max_len = max_len
         self.timeout = timeout
@@ -1040,10 +1041,21 @@ class Fuzzer:
             self._prev_bandit_op = None
         self._meta_strategy = None
 
-        # Stall recovery: increase mutation intensity
+        # Stall level 2: force havoc immediately (complete replacement)
+        if self._stall_level >= 2:
+            if "havoc" in ops:
+                result = self._op_dispatch["havoc"](buf, 0, data)
+                if result is not None:
+                    self._last_ops_used = ["havoc"]
+                    self._last_hamming_distance = (
+                        hamming_distance(data, result) if len(data) == len(result) else -1
+                    )
+                    return result
+
+        # Stall recovery level 1: increase mutation intensity
         n_mutations = self.mutations_per_input
-        if self._stall_recovery_active:
-            n_mutations = max(n_mutations, 16)  # at least 16 mutations during stall
+        if self._stall_level >= 1:
+            n_mutations = max(n_mutations, 16)
 
         for _ in range(n_mutations):
             op = self._select_op(ops)
@@ -2067,6 +2079,11 @@ class Fuzzer:
             )
 
     def _pick_seed(self) -> bytes:
+        # Stall level 3: bypass all smart strategies, pick randomly
+        if self._stall_level >= 3 and self.corpus:
+            self._seed_strategy = "random_stall"
+            return random.choice(self.corpus)
+
         # Elo-arbitrated seed selection: pick between strategies
         if self._use_elo and self._elo:
             available = []
@@ -2694,7 +2711,11 @@ class Fuzzer:
                 new = self._edge_tracker.record_edges(seed_key, edge_bitmap)
                 if new:
                     self._last_new_edge_exec = self.exec_count
-                    self._stall_recovery_active = False
+                    if self._stall_recovery_active:
+                        print(f"\n[*] STALL RECOVERED: found {len(new)} new edges at exec "
+                              f"{self.exec_count}, deactivating recovery")
+                        self._stall_recovery_active = False
+                        self._stall_level = 0
                 if meta is not None and new:
                     meta["coverage_edges"] += len(new)
                     meta["momentum"] = 0.8 * meta["momentum"] + 0.2 * 1.0
@@ -3546,14 +3567,20 @@ class Fuzzer:
                     self._record_discovery_snapshot()
                     # Stall detection: no new edges in threshold execs
                     execs_since_edge = self.exec_count - self._last_new_edge_exec
-                    if (
-                        not self._stall_recovery_active
-                        and execs_since_edge >= self._stall_threshold
-                        and self.exec_count > 0
-                    ):
-                        print(f"\n[*] STALL: no new edges in {execs_since_edge} execs, "
-                              f"activating recovery mode")
-                        self._stall_recovery_active = True
+                    if execs_since_edge >= self._stall_threshold and self.exec_count > 0:
+                        if not self._stall_recovery_active:
+                            print(f"\n[*] STALL: no new edges in {execs_since_edge} execs, "
+                                  f"activating recovery level 1 (more mutations)")
+                            self._stall_recovery_active = True
+                            self._stall_level = 1
+                        elif self._stall_level == 1 and execs_since_edge >= self._stall_threshold * 2:
+                            print(f"\n[*] STALL L2: still stalled after {execs_since_edge} execs, "
+                                  f"forcing havoc mutations")
+                            self._stall_level = 2
+                        elif self._stall_level == 2 and execs_since_edge >= self._stall_threshold * 4:
+                            print(f"\n[*] STALL L3: still stalled after {execs_since_edge} execs, "
+                                  f"switching to random seed selection")
+                            self._stall_level = 3
                     # Periodic GC to return freed memory to OS
                     if i % 500 == 0:
                         import gc
