@@ -175,9 +175,7 @@ def cmd_fuzz(args):
     coverage_log_arg = args.coverage_log
     if getattr(args, "plot_graph", None) is not None:
         plot_graph_path = (
-            str(Path(corpus_dir) / "report.html")
-            if args.plot_graph == "-"
-            else args.plot_graph
+            str(Path(corpus_dir) / "report.html") if args.plot_graph == "-" else args.plot_graph
         )
         if not coverage_log_arg:
             coverage_log_arg = str(Path(corpus_dir) / ".plot_graph_coverage_log.csv")
@@ -244,6 +242,7 @@ def cmd_fuzz(args):
         ga_tournament_size=getattr(args, "ga_tournament_size", 3),
         ga_speciation_threshold=getattr(args, "ga_speciation_threshold", 0.3),
         continue_until_crash=getattr(args, "continue_until_crash", False),
+        calibrate=getattr(args, "calibrate", 0),
     )
     fuzzer.run(iterations=args.iterations)
 
@@ -926,6 +925,14 @@ def main() -> int:
             "standalone -- does not require --coverage-log to be set "
             "separately, an internal log is used automatically if needed."
         ),
+    )
+    fuzz_parser.add_argument(
+        "--calibrate",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Run N calibration execs (seed replay + cheap mutations) to bootstrap "
+        "coverage stats before the main fuzz loop (default: 0 = off)",
     )
     fuzz_parser.set_defaults(func=cmd_fuzz)
 

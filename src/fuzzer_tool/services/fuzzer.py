@@ -178,6 +178,7 @@ class Fuzzer:
         ga_mutation_rate=0.3,
         ga_tournament_size=3,
         ga_speciation_threshold=0.3,
+        calibrate=0,
         continue_until_crash=False,
     ):
         self.target = target
@@ -192,6 +193,7 @@ class Fuzzer:
         self.crashes_dir = Path(crashes_dir)
         self.resume = resume
         self.continue_until_crash = continue_until_crash
+        self._calibrate = calibrate
         self.extra_crash_codes = set(extra_crash_codes) if extra_crash_codes else set()
         self.max_len = max_len
         self.timeout = timeout
@@ -1220,7 +1222,7 @@ class Fuzzer:
         if self.dictionary:
             token = random.choice(self.dictionary)
             if len(buf) + len(token) <= self.max_len:
-                buf[random.randint(0, len(buf)):0] = token  # insert at random pos
+                buf[random.randint(0, len(buf)) : 0] = token  # insert at random pos
 
     def _op_dict_replace(self, buf, _byte_idx, _data):
         if self.dictionary and buf:
@@ -1256,20 +1258,20 @@ class Fuzzer:
         if self.dictionary and buf:
             token = random.choice(self.dictionary)
             if len(buf) + len(token) <= self.max_len:
-                buf[random.randint(0, len(buf)):0] = token
+                buf[random.randint(0, len(buf)) : 0] = token
 
     def _op_markov_bytes(self, buf, _byte_idx, _data):
         if buf:
             idx = random.randint(0, len(buf) - 1)
-            ctx = (
-                bytes(buf[max(0, idx - self.markov.order) : idx]) if self.markov.order else b""
-            )
+            ctx = bytes(buf[max(0, idx - self.markov.order) : idx]) if self.markov.order else b""
             buf[idx] = self.markov.sample_byte(ctx)
 
     def _op_cem_bytes(self, buf, _byte_idx, _data):
         if self.mc and self.mc.cem_fitted:
             if buf:
-                buf[random.randint(0, len(buf) - 1)] = self.mc.cem_byte(random.randint(0, len(buf) - 1))
+                buf[random.randint(0, len(buf) - 1)] = self.mc.cem_byte(
+                    random.randint(0, len(buf) - 1)
+                )
             else:
                 return bytearray(self.mc.cem_sample(random.randint(1, min(32, self.max_len))))
 
@@ -1429,7 +1431,9 @@ class Fuzzer:
             if not hasattr(self, "_tree_mutator"):
                 self._tree_mutator = TreeMutator(self.grammar)
             tree = self._tree_mutator.parse(bytes(buf))
-            return bytearray(self._tree_mutator.mutate_tree(tree, max_len=self.max_len)[: self.max_len])
+            return bytearray(
+                self._tree_mutator.mutate_tree(tree, max_len=self.max_len)[: self.max_len]
+            )
 
     def _op_png_chunk_mutate(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.png_mutations import PngChunkMutator, parse_png_chunks
@@ -1515,7 +1519,9 @@ class Fuzzer:
                             data[random.randint(0, len(data) - 1)] ^= 1 << random.randint(0, 7)
                         chunk.data = bytes(data)
                     else:
-                        chunk.data = bytes(random.randint(0, 255) for _ in range(random.randint(1, 32)))
+                        chunk.data = bytes(
+                            random.randint(0, 255) for _ in range(random.randint(1, 32))
+                        )
                     return bytearray(serialize_png_chunks(chunks)[: self.max_len])
 
     def _op_redqueen(self, buf, _byte_idx, data):
@@ -2787,7 +2793,9 @@ class Fuzzer:
             seed_strategies = ["ga", "weighted", "pareto", "format"]
             for other in seed_strategies:
                 if other != self._seed_strategy:
-                    self._elo.record_strategy_match(f"seed_{self._seed_strategy}", f"seed_{other}", score)
+                    self._elo.record_strategy_match(
+                        f"seed_{self._seed_strategy}", f"seed_{other}", score
+                    )
 
         if self._use_shapley and self._shapley:
             edge_bitmap = self._get_current_edge_bitmap()
@@ -2896,6 +2904,48 @@ class Fuzzer:
             self.shm_cov,
             self.ptrace_cov,
             self._discovery_history,
+        )
+
+    def _run_calibration(self, max_execs: int = 1000) -> None:
+        """Run a short calibration pass to bootstrap coverage stats.
+
+        Replays seed corpus + cheap mutations to populate EdgeTracker
+        and _discovery_history before the main fuzz loop.
+        """
+        from fuzzer_tool.core.mutations import byte_insert
+
+        log.info("Calibration: running %d execs to bootstrap stats", max_execs)
+        if not self.corpus:
+            log.warning("Calibration: no seeds found, skipping")
+            return
+
+        exec_count = 0
+        for seed in list(self.corpus):
+            if exec_count >= max_execs:
+                break
+            self._run_target(seed)
+            self.exec_count += 1
+            exec_count += 1
+
+            for _ in range(min(3, max_execs - exec_count)):
+                if random.random() < 0.5:
+                    mutated = bytearray(seed)
+                    if mutated:
+                        mutated[random.randint(0, len(mutated) - 1)] ^= 1 << random.randint(0, 7)
+                    mutated = bytes(mutated)
+                else:
+                    mutated = byte_insert(seed)
+                self._run_target(mutated)
+                self.exec_count += 1
+                exec_count += 1
+                if exec_count >= max_execs:
+                    break
+
+        self._record_discovery_snapshot()
+        log.info(
+            "Calibration done: %d execs, %d edges discovered",
+            exec_count,
+            len(self._edge_tracker._global_edge_hits),
         )
 
     def discovery_rate(self) -> float:
@@ -3408,6 +3458,10 @@ class Fuzzer:
             _exec_baseline = self.exec_count
             self._exec_baseline = _exec_baseline
 
+            # Calibration pass: bootstrap coverage stats before main loop
+            if self._calibrate > 0:
+                self._run_calibration(self._calibrate)
+
             # Initialize GA lifecycle if enabled
             if self._ga_enabled:
                 from fuzzer_tool.core.ga import GALifecycle
@@ -3533,8 +3587,7 @@ class Fuzzer:
         if self._use_elo and self._elo:
             seed_strategies = ["ga", "weighted", "pareto", "format"]
             has_seed_data = any(
-                self._elo._strategy_match_count.get(f"seed_{s}", 0) > 0
-                for s in seed_strategies
+                self._elo._strategy_match_count.get(f"seed_{s}", 0) > 0 for s in seed_strategies
             )
             if has_seed_data:
                 print("\n[*] Seed strategy convergence:")
@@ -3545,9 +3598,7 @@ class Fuzzer:
                         rating = self._elo._strategy_ratings.get(key, self._elo.default_rating)
                         delta = rating - self._elo.default_rating
                         sign = "+" if delta >= 0 else ""
-                        print(
-                            f"    {s:<20s}: {rating:>7.0f} ({sign}{delta:.0f}, {count} matches)"
-                        )
+                        print(f"    {s:<20s}: {rating:>7.0f} ({sign}{delta:.0f}, {count} matches)")
         self._print_run_summary()
         epoch_end = time.time()
         boot_end = time.monotonic()
