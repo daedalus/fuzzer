@@ -232,6 +232,7 @@ def cmd_fuzz(args):
         ga_mutation_rate=getattr(args, "ga_mutation_rate", 0.3),
         ga_tournament_size=getattr(args, "ga_tournament_size", 3),
         ga_speciation_threshold=getattr(args, "ga_speciation_threshold", 0.3),
+        continue_until_crash=getattr(args, "continue_until_crash", False),
     )
     fuzzer.run(iterations=args.iterations)
 
@@ -586,6 +587,11 @@ def main() -> int:
     fuzz_parser.add_argument("-t", "--timeout", type=float, default=5, help="Timeout in seconds")
     fuzz_parser.add_argument(
         "-n", "--iterations", type=int, default=0, help="Number of iterations (0=infinite)"
+    )
+    fuzz_parser.add_argument(
+        "--continue-until-crash",
+        action="store_true",
+        help="Ignore -n, fuzz until the first crash is found",
     )
     fuzz_parser.add_argument("-M", "--mutations", type=int, default=8, help="Mutations per input")
     fuzz_parser.add_argument(

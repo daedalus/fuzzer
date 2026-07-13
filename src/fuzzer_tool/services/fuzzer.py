@@ -178,6 +178,7 @@ class Fuzzer:
         ga_mutation_rate=0.3,
         ga_tournament_size=3,
         ga_speciation_threshold=0.3,
+        continue_until_crash=False,
     ):
         self.target = target
         # Record boot time at init — before any child processes are spawned.
@@ -190,6 +191,7 @@ class Fuzzer:
         self.corpus_dir = Path(corpus_dir)
         self.crashes_dir = Path(crashes_dir)
         self.resume = resume
+        self.continue_until_crash = continue_until_crash
         self.extra_crash_codes = set(extra_crash_codes) if extra_crash_codes else set()
         self.max_len = max_len
         self.timeout = timeout
@@ -3434,6 +3436,8 @@ class Fuzzer:
 
             while not _shutdown:
                 if iterations and i >= iterations:
+                    break
+                if self.continue_until_crash and self.crash_count > 0:
                     break
                 seed = self._pick_seed()
                 self.fuzz_one(seed)
