@@ -578,6 +578,56 @@ def cmd_rank(args):
     return 0
 
 
+def cmd_estimate(args):
+    """Estimate executions to first crash."""
+    from fuzzer_tool.core.crash_eta import (
+        estimate_execs_to_first_crash,
+        estimate_risky_density,
+    )
+    from fuzzer_tool.core.target_profiler import TargetProfiler
+    from fuzzer_tool.services.fuzzer import Fuzzer
+
+    print(f"Target: {args.target}")
+    print(f"Corpus: {args.corpus}")
+    print(f"Calibration: {args.calibrate} execs\n")
+
+    # Static analysis
+    print("Running static analysis...")
+    profiler = TargetProfiler(args.target)
+    profile = profiler.profile()
+    rho = estimate_risky_density(profile)
+    print(f"  Risky density (ρ): {rho:.4f}")
+    print(f"  Functions analyzed: {len(profile.functions)}")
+    print(f"  Error-related strings: {len(profile.rodata_strings)}\n")
+
+    # Calibration pass
+    print(f"Running calibration ({args.calibrate} execs)...")
+    fuzzer = Fuzzer(
+        target=args.target,
+        corpus_dir=args.corpus,
+        crashes_dir=args.corpus + "/crashes",
+        timeout=5,
+        calibrate=args.calibrate,
+    )
+    fuzzer._run_calibration(args.calibrate)
+
+    # Get stats
+    gt = fuzzer._edge_tracker.good_turing_estimate()
+    dr = fuzzer.discovery_rate()
+    print(f"  Edges discovered: {gt['n']}")
+    print(f"  Estimated total: {gt['n'] + gt['estimated_undiscovered']}")
+    print(f"  Discovery rate: {dr:.1f} edges/1k execs")
+    print(f"  GT confidence: {gt['confidence']}\n")
+
+    # Estimate
+    eta = estimate_execs_to_first_crash(profile, gt, dr)
+    print("=== Crash ETA Estimate ===")
+    print(f"  Point estimate: {eta.point_est:,} execs")
+    print(f"  Range: {eta.low:,} - {eta.high:,} execs")
+    print(f"  Confidence: {eta.confidence}")
+    print(f"  Reasoning: {eta.reasoning}")
+
+
 def main() -> int:
     sys.stdout.reconfigure(line_buffering=True)
     sys.stderr.reconfigure(line_buffering=True)
@@ -1045,6 +1095,21 @@ def main() -> int:
         help="Dump top seeds to files named PREFIX.0, PREFIX.1, ...",
     )
     rank_parser.set_defaults(func=cmd_rank)
+
+    # --- estimate ---
+    est_parser = subparsers.add_parser(
+        "estimate",
+        help="Estimate executions to first crash",
+    )
+    est_parser.add_argument("target", help="Path to target binary")
+    est_parser.add_argument("--corpus", required=True, help="Corpus directory")
+    est_parser.add_argument(
+        "--calibrate",
+        type=int,
+        default=1000,
+        help="Number of calibration executions (default: 1000)",
+    )
+    est_parser.set_defaults(func=cmd_estimate)
 
     args = parser.parse_args()
 
