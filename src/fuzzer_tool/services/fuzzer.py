@@ -179,6 +179,7 @@ class Fuzzer:
         ga_tournament_size=3,
         ga_speciation_threshold=0.3,
         calibrate=0,
+        stall_threshold=1000,
         continue_until_crash=False,
     ):
         self.target = target
@@ -194,6 +195,9 @@ class Fuzzer:
         self.resume = resume
         self.continue_until_crash = continue_until_crash
         self._calibrate = calibrate
+        self._stall_threshold = stall_threshold
+        self._last_new_edge_exec = 0
+        self._stall_recovery_active = False
         self.extra_crash_codes = set(extra_crash_codes) if extra_crash_codes else set()
         self.max_len = max_len
         self.timeout = timeout
@@ -1036,7 +1040,12 @@ class Fuzzer:
             self._prev_bandit_op = None
         self._meta_strategy = None
 
-        for _ in range(self.mutations_per_input):
+        # Stall recovery: increase mutation intensity
+        n_mutations = self.mutations_per_input
+        if self._stall_recovery_active:
+            n_mutations = max(n_mutations, 16)  # at least 16 mutations during stall
+
+        for _ in range(n_mutations):
             op = self._select_op(ops)
             self._last_ops_used.append(op)
 
@@ -2683,6 +2692,9 @@ class Fuzzer:
             if edge_bitmap:
                 seed_key = self._seed_key(data)
                 new = self._edge_tracker.record_edges(seed_key, edge_bitmap)
+                if new:
+                    self._last_new_edge_exec = self.exec_count
+                    self._stall_recovery_active = False
                 if meta is not None and new:
                     meta["coverage_edges"] += len(new)
                     meta["momentum"] = 0.8 * meta["momentum"] + 0.2 * 1.0
@@ -3532,6 +3544,16 @@ class Fuzzer:
                     self.print_stats()
                     self._append_coverage_log()
                     self._record_discovery_snapshot()
+                    # Stall detection: no new edges in threshold execs
+                    execs_since_edge = self.exec_count - self._last_new_edge_exec
+                    if (
+                        not self._stall_recovery_active
+                        and execs_since_edge >= self._stall_threshold
+                        and self.exec_count > 0
+                    ):
+                        print(f"\n[*] STALL: no new edges in {execs_since_edge} execs, "
+                              f"activating recovery mode")
+                        self._stall_recovery_active = True
                     # Periodic GC to return freed memory to OS
                     if i % 500 == 0:
                         import gc
