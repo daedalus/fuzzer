@@ -171,6 +171,17 @@ def cmd_fuzz(args):
         )
         return 0
 
+    plot_graph_path = None
+    coverage_log_arg = args.coverage_log
+    if getattr(args, "plot_graph", None) is not None:
+        plot_graph_path = (
+            str(Path(corpus_dir) / "report.html")
+            if args.plot_graph == "-"
+            else args.plot_graph
+        )
+        if not coverage_log_arg:
+            coverage_log_arg = str(Path(corpus_dir) / ".plot_graph_coverage_log.csv")
+
     fuzzer = Fuzzer(
         target=args.target,
         corpus_dir=corpus_dir,
@@ -198,7 +209,7 @@ def cmd_fuzz(args):
         stats_file=args.stats_file,
         stats_interval=args.stats_interval,
         coverage_report=args.coverage_report,
-        coverage_log=args.coverage_log,
+        coverage_log=coverage_log_arg,
         grammar=grammar,
         persistent=args.persistent,
         cmplog=args.cmplog,
@@ -246,6 +257,12 @@ def cmd_fuzz(args):
             Path(args.report).parent.mkdir(parents=True, exist_ok=True)
             Path(args.report).write_text(report)
             print(f"[*] Report saved to {args.report}")
+
+    if plot_graph_path is not None:
+        from fuzzer_tool.core.plotting import generate_html_report
+
+        written = generate_html_report(fuzzer, coverage_log_arg, plot_graph_path)
+        print(f"[*] Plot graph saved to {written}")
 
     return 0
 
@@ -895,6 +912,20 @@ def main() -> int:
         type=int,
         default=42,
         help="RNG seed for reproducibility (default: 42)",
+    )
+    fuzz_parser.add_argument(
+        "--plot-graph",
+        nargs="?",
+        const="-",
+        default=None,
+        metavar="FILE",
+        help=(
+            "Write a self-contained HTML report with SVG charts of edges, "
+            "corpus size, exec rate, crashes, and operator success rates "
+            "over the run (default: <corpus_dir>/report.html). Works "
+            "standalone -- does not require --coverage-log to be set "
+            "separately, an internal log is used automatically if needed."
+        ),
     )
     fuzz_parser.set_defaults(func=cmd_fuzz)
 
