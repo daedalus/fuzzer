@@ -1104,7 +1104,13 @@ class Fuzzer:
 
         Hierarchy: Elo arbitrates all strategies when enabled.
         Falls through to individual strategies if Elo is not active.
+        Stall recovery: pick randomly to maximize diversity.
         """
+        # Stall recovery: bypass all strategies, pick randomly
+        if self._stall_recovery_active:
+            self._meta_strategy = "random_stall"
+            return random.choice(ops)
+
         # Build list of available strategies
         available = []
         if self._use_replicator and self._replicator:
