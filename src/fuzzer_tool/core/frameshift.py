@@ -13,6 +13,7 @@ affect the target's execution behavior.
 """
 
 import logging
+import random
 import struct
 from dataclasses import dataclass, field
 
@@ -251,7 +252,6 @@ class FrameShift:
                 candidates.append((pos, 1))
 
         # Try to create relations from candidates
-        import random
         for pos, strength in candidates:
             if len(self.relations) >= max_relations:
                 break
