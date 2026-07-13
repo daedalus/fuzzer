@@ -2966,6 +2966,12 @@ class Fuzzer:
         print(f"\r[*] Calibration done: {exec_count} execs, {edges} edges discovered, "
               f"GT confidence={gt['confidence']}, discovery_rate={dr:.1f}/1k execs   ")
 
+        # Crash ETA estimate
+        from fuzzer_tool.core.crash_eta import estimate_execs_to_first_crash
+        eta = estimate_execs_to_first_crash(self._profile, gt, dr, exec_count)
+        print(f"[*] ETA to first crash: ~{eta.point_est:,} execs "
+              f"(range: {eta.low:,} - {eta.high:,}, confidence: {eta.confidence})")
+
     def discovery_rate(self) -> float:
         return _discovery_rate(self._discovery_history)
 
