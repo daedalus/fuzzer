@@ -13,7 +13,7 @@ from fuzzer_tool.core.target_profiler import TargetProfile
 
 # Matches error-related keywords in function names and rodata strings.
 _ERROR_RE = re.compile(
-    r"error|invalid|overflow|underflow|corrupt|malformed|bad|failed|unable",
+    r"error|invalid|overflow|underflow|corrupt|malformed|bad |failed|unable",
     re.IGNORECASE,
 )
 
