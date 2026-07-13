@@ -2926,6 +2926,11 @@ class Fuzzer:
             self._run_target(seed)
             self.exec_count += 1
             exec_count += 1
+            # Feed edge bitmap to EdgeTracker so good_turing_estimate() has data
+            edge_bitmap = self._get_current_edge_bitmap()
+            if edge_bitmap:
+                seed_key = self._seed_key(seed)
+                self._edge_tracker.record_edges(seed_key, edge_bitmap)
 
             for _ in range(min(3, max_execs - exec_count)):
                 if random.random() < 0.5:
@@ -2938,6 +2943,11 @@ class Fuzzer:
                 self._run_target(mutated)
                 self.exec_count += 1
                 exec_count += 1
+                # Feed edge bitmap to EdgeTracker for mutated inputs too
+                edge_bitmap = self._get_current_edge_bitmap()
+                if edge_bitmap:
+                    seed_key = self._seed_key(mutated)
+                    self._edge_tracker.record_edges(seed_key, edge_bitmap)
                 if exec_count >= max_execs:
                     break
 
