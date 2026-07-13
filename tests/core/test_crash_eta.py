@@ -101,3 +101,59 @@ def test_estimate_risky_density_clamped():
     )
     density = estimate_risky_density(profile)
     assert density == 1.0
+
+
+def test_estimate_execs_basic():
+    from fuzzer_tool.core.crash_eta import estimate_execs_to_first_crash
+
+    profile = TargetProfile(
+        rodata_strings=[(0x1000, "error handler")],
+        interesting_strings=[],
+        magic_bytes=[],
+        functions={
+            "main": FunctionInfo(addr=0x100, size=50, name="main"),
+            "parse_input": FunctionInfo(addr=0x200, size=30, name="parse_input"),
+            "error_check": FunctionInfo(addr=0x300, size=40, name="error_check"),
+        },
+        hot_functions=[],
+        entry_points=[],
+        input_parsers=[],
+        boundary_markers=[],
+        format_signature=None,
+        call_graph={},
+        reverse_calls={},
+    )
+    gt = {"n": 100, "n1": 10, "n2": 5, "confidence": "medium"}
+    discovery = 5.0  # 5 edges per 1000 execs
+
+    eta = estimate_execs_to_first_crash(profile, gt, discovery)
+    assert eta.point_est > 0
+    assert eta.low > 0
+    assert eta.high >= eta.point_est
+    assert eta.confidence in ("low", "medium", "high")
+
+
+def test_estimate_execs_zero_density():
+    from fuzzer_tool.core.crash_eta import estimate_execs_to_first_crash
+
+    profile = TargetProfile(
+        rodata_strings=[],
+        interesting_strings=[],
+        magic_bytes=[],
+        functions={
+            "main": FunctionInfo(addr=0x100, size=50, name="main"),
+        },
+        hot_functions=[],
+        entry_points=[],
+        input_parsers=[],
+        boundary_markers=[],
+        format_signature=None,
+        call_graph={},
+        reverse_calls={},
+    )
+    gt = {"n": 50, "n1": 2, "n2": 1, "confidence": "low"}
+    discovery = 10.0
+
+    eta = estimate_execs_to_first_crash(profile, gt, discovery)
+    # Zero density -> infinity -> capped at large value
+    assert eta.point_est > 1_000_000
