@@ -81,19 +81,28 @@ def estimate_execs_to_first_crash(
     e_total = gt_result.get("n", 0) + gt_result.get("estimated_undiscovered", 0)
     confidence = gt_result.get("confidence", "low")
 
-    if rho <= 0 or e_total <= 0 or discovery_rate <= 0:
+    if rho <= 0 or e_total <= 0:
         return CrashETA(
             point_est=10_000_000,
             low=1_000_000,
             high=100_000_000,
             edges_to_crash=0,
             confidence="low",
-            reasoning="Insufficient data: zero density, edges, or discovery rate",
+            reasoning="Insufficient data: zero density or edges",
         )
 
     risky_edges_needed = 1.0 / rho
     edges_to_crash = int(risky_edges_needed)
-    execs = (risky_edges_needed / discovery_rate) * 1000
+
+    if discovery_rate > 0:
+        execs = (risky_edges_needed / discovery_rate) * 1000
+    elif calibration_execs > 0 and e_total > 0:
+        # Coverage saturated: estimate from observed edge density
+        # We discovered e_total edges in calibration_execs execs
+        # Need edges_to_crash risky edges → scale proportionally
+        execs = edges_to_crash * (calibration_execs / e_total)
+    else:
+        execs = 10_000_000
 
     # Base multiplier ranges by GT confidence
     if confidence == "high":
