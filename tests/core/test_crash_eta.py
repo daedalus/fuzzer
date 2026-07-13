@@ -218,7 +218,7 @@ def test_calibration_execs_in_reasoning():
     gt = {"n": 50, "n1": 5, "n2": 2, "confidence": "low"}
     eta = estimate_execs_to_first_crash(profile, gt, 5.0, calibration_execs=2000)
     assert "calib_execs=2000" in eta.reasoning
-    assert "CI_scale=" in eta.reasoning
+    assert "mode=" in eta.reasoning
 
 
 def test_no_calibration_widest_interval():

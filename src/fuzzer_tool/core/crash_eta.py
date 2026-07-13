@@ -94,41 +94,46 @@ def estimate_execs_to_first_crash(
     risky_edges_needed = 1.0 / rho
     edges_to_crash = int(risky_edges_needed)
 
+    saturated = discovery_rate <= 0 and calibration_execs > 0
+
     if discovery_rate > 0:
         execs = (risky_edges_needed / discovery_rate) * 1000
-    elif calibration_execs > 0 and e_total > 0:
-        # Coverage saturated: estimate from observed edge density
-        # We discovered e_total edges in calibration_execs execs
-        # Need edges_to_crash risky edges → scale proportionally
-        execs = edges_to_crash * (calibration_execs / e_total)
+    elif saturated:
+        # Coverage saturated: crash is hard to find despite full coverage.
+        # The crash likely requires specific data values, not just reaching
+        # new code. Conservative estimate: more risky edges → more likely
+        # to find crash in existing coverage, but still needs many execs.
+        base_multiplier = 10.0 + (1.0 - rho) * 90.0  # 10x (high rho) to 100x (low rho)
+        execs = calibration_execs * base_multiplier
     else:
         execs = 10_000_000
 
-    # Base multiplier ranges by GT confidence
-    if confidence == "high":
-        base_low, base_high = 0.5, 2.0
-    elif confidence == "medium":
-        base_low, base_high = 0.2, 5.0
+    # Confidence interval
+    if saturated:
+        # Saturated case: use fixed 0.3x-3x range around the conservative estimate
+        low = max(100, int(execs * 0.3))
+        high = int(execs * 3.0)
     else:
-        base_low, base_high = 0.1, 10.0
+        # Normal case: CI scaling based on GT confidence and calibration execs
+        if confidence == "high":
+            base_low, base_high = 0.5, 2.0
+        elif confidence == "medium":
+            base_low, base_high = 0.2, 5.0
+        else:
+            base_low, base_high = 0.1, 10.0
 
-    # Scale by calibration execs: more execs → tighter interval
-    # Reference baseline is 1000 execs; scale via 1/sqrt(N/N_ref)
-    if calibration_execs > 0:
-        scale = math.sqrt(1000.0 / max(1, calibration_execs))
-        # Clamp scale to [0.3, 3.0] so very few execs don't blow out
-        # and very many don't collapse to a point
-        scale = max(0.3, min(3.0, scale))
-    else:
-        scale = 3.0  # no calibration → widest interval
+        if calibration_execs > 0:
+            scale = math.sqrt(1000.0 / max(1, calibration_execs))
+            scale = max(0.3, min(3.0, scale))
+        else:
+            scale = 3.0
 
-    multiplier_low = base_low * scale
-    multiplier_high = base_high * scale
+        low = max(100, int(execs * base_low * scale))
+        high = int(execs * base_high * scale)
 
-    low = max(100, int(execs * multiplier_low))
-    high = int(execs * multiplier_high)
     point = int(execs)
 
+    mode = "saturated" if saturated else "geometric"
     return CrashETA(
         point_est=point,
         low=low,
@@ -140,7 +145,7 @@ def estimate_execs_to_first_crash(
             f"E_total={e_total}, "
             f"discovery_rate={discovery_rate:.1f}/1k, "
             f"calib_execs={calibration_execs}, "
-            f"CI_scale={scale:.2f}, "
-            f"geometric ETA={execs:.0f}"
+            f"mode={mode}, "
+            f"ETA={execs:.0f}"
         ),
     )
