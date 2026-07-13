@@ -243,6 +243,7 @@ def cmd_fuzz(args):
         ga_speciation_threshold=getattr(args, "ga_speciation_threshold", 0.3),
         continue_until_crash=getattr(args, "continue_until_crash", False),
         calibrate=getattr(args, "calibrate", 0),
+        stall_threshold=getattr(args, "stall", 1000),
     )
     fuzzer.run(iterations=args.iterations)
 
@@ -983,6 +984,14 @@ def main() -> int:
         metavar="N",
         help="Run N calibration execs (seed replay + cheap mutations) to bootstrap "
         "coverage stats before the main fuzz loop (default: 0 = off)",
+    )
+    fuzz_parser.add_argument(
+        "--stall",
+        type=int,
+        default=1000,
+        metavar="N",
+        help="Detect stall after N execs without new edges and activate "
+        "recovery mode with more aggressive mutations (default: 1000)",
     )
     fuzz_parser.set_defaults(func=cmd_fuzz)
 
