@@ -3004,14 +3004,18 @@ class Fuzzer:
 
         # Coverage — prefer edge_tracker (authoritative), fall back to SHM/ptrace
         edges = self._edge_tracker.get_cumulative_edge_count()
+        shm_edges = self.shm_cov.cumulative_edges if self.shm_cov else 0
         if not edges:
             if self.shm_cov:
-                edges = self.shm_cov.cumulative_edges
+                edges = shm_edges
             elif self.ptrace_cov:
                 edges = self.ptrace_cov.cumulative_edges
         density = self._edge_tracker.bitmap_density() * 100
         collision_risk = self._edge_tracker.birthday_collision_risk() * 100
-        print(f"  Edges discovered:  {edges}")
+        if self.shm_cov and shm_edges != edges:
+            print(f"  Edges discovered:  {edges} (SHM bitmap: {shm_edges})")
+        else:
+            print(f"  Edges discovered:  {edges}")
         print(f"  Map density:       {density:.2f}%")
         print(f"  Collision risk:    {collision_risk:.2f}% (birthday paradox)")
         rec = self._edge_tracker.recommended_map_size()
@@ -3283,7 +3287,8 @@ class Fuzzer:
             markov_str += "+gen"
         cov_str = ""
         if self.shm_cov:
-            cov_str = f" | shm-edges: {self.shm_cov.cumulative_edges}"
+            et_edges = self._edge_tracker.get_cumulative_edge_count()
+            cov_str = f" | shm: {self.shm_cov.cumulative_edges} et: {et_edges}"
         elif self.ptrace_cov:
             cov_str = (
                 f" | edges: {self.ptrace_cov.cumulative_edges}"
