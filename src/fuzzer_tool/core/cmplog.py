@@ -75,7 +75,8 @@ class CmplogCollector:
         if not self._shim_path:
             return env
 
-        self.log_path = tempfile.mktemp(suffix=".cmplog", prefix="fuzz_cmplog_")
+        fd, self.log_path = tempfile.mkstemp(suffix=".cmplog", prefix="fuzz_cmplog_")
+        os.close(fd)
         env = dict(env)  # copy
         env["_CMPLOG_OUT"] = self.log_path
 
