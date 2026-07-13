@@ -1,5 +1,7 @@
 # fuzzer-tool
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/daedalus/fuzzer)
+
 Coverage-guided binary fuzzer with static target analysis, statistical novelty scoring, Markov chain generation, Monte Carlo mutations, kernel crash verification, and format-aware grammar mutations.
 
 ## Features
@@ -173,6 +175,7 @@ fuzzer-tool rank ./target -d corpus -n 10 --dump top_seeds
 | `minimize` | Minimize corpus by removing redundant inputs |
 | `tmin` | Minimize a crash to smallest reproducer |
 | `replay` | Replay a crash input against the target |
+| `estimate` | Estimate execs to first crash via static analysis + calibration |
 | `import` | Import corpus from AFL/libFuzzer/honggfuzz |
 
 ### Rank Seeds
@@ -188,6 +191,19 @@ fuzzer-tool rank <target> -d <corpus> [-n TOP] [--dump PREFIX]
 | `-d DIR` | Corpus directory |
 | `-n N` | Number of top seeds to show (default 10) |
 | `--dump PREFIX` | Dump top seeds to files `PREFIX.0`, `PREFIX.1`, ... |
+
+### Estimate Crash ETA
+
+Estimate executions to first crash using static risky density, Good-Turing edge estimates, and optional calibration runs.
+
+```bash
+fuzzer-tool estimate <target> --corpus <dir> [--calibrate N]
+```
+
+| Flag | Description |
+|------|-------------|
+| `--corpus DIR` | Corpus directory for Good-Turing edge estimation |
+| `--calibrate N` | Number of calibration executions (default: 1000) |
 
 ## Coverage Modes
 
