@@ -98,8 +98,19 @@ class BloomFilter:
         Returns:
             True if a near-duplicate was found and key was skipped.
         """
-        if max_hamming <= 0 or not hasattr(self, "_recent_keys"):
+        if not hasattr(self, "_recent_keys"):
             self.add(key.hex())
+            return False
+
+        key_hex = key.hex()
+        if self._check(self._digest(key_hex)):
+            return True  # exact match already in filter
+
+        if max_hamming <= 0:
+            self._set(self._digest(key_hex))
+            self._recent_keys.append(key)
+            if len(self._recent_keys) > 200:
+                self._recent_keys.popleft()
             return False
 
         key_hex = key.hex()
