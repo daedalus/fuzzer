@@ -53,10 +53,12 @@ def test_crash_eta_dataclass():
         point_est=5000,
         low=1000,
         high=20000,
+        edges_to_crash=100,
         confidence="low",
         reasoning="test",
     )
     assert eta.point_est == 5000
+    assert eta.edges_to_crash == 100
     assert eta.low < eta.point_est < eta.high
 
 

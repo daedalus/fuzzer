@@ -25,6 +25,7 @@ class CrashETA:
     point_est: int
     low: int
     high: int
+    edges_to_crash: int  # estimated risky edges needed before first crash
     confidence: str  # "low", "medium", "high"
     reasoning: str
 
@@ -85,11 +86,13 @@ def estimate_execs_to_first_crash(
             point_est=10_000_000,
             low=1_000_000,
             high=100_000_000,
+            edges_to_crash=0,
             confidence="low",
             reasoning="Insufficient data: zero density, edges, or discovery rate",
         )
 
     risky_edges_needed = 1.0 / rho
+    edges_to_crash = int(risky_edges_needed)
     execs = (risky_edges_needed / discovery_rate) * 1000
 
     # Base multiplier ranges by GT confidence
@@ -121,6 +124,7 @@ def estimate_execs_to_first_crash(
         point_est=point,
         low=low,
         high=high,
+        edges_to_crash=edges_to_crash,
         confidence=confidence,
         reasoning=(
             f"rho={rho:.3f} (risky density), "
