@@ -620,7 +620,7 @@ def cmd_estimate(args):
     print(f"  GT confidence: {gt['confidence']}\n")
 
     # Estimate
-    eta = estimate_execs_to_first_crash(profile, gt, dr)
+    eta = estimate_execs_to_first_crash(profile, gt, dr, args.calibrate)
     print("=== Crash ETA Estimate ===")
     print(f"  Point estimate: {eta.point_est:,} execs")
     print(f"  Range: {eta.low:,} - {eta.high:,} execs")

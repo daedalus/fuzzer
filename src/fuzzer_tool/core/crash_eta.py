@@ -61,6 +61,7 @@ def estimate_execs_to_first_crash(
     profile: TargetProfile,
     gt_result: dict,
     discovery_rate: float,
+    calibration_execs: int = 0,
 ) -> CrashETA:
     """Estimate executions needed to reach the first crash.
 
@@ -68,7 +69,13 @@ def estimate_execs_to_first_crash(
     - Static risky density (rho) from TargetProfiler
     - Good-Turing total edge estimate from EdgeTracker
     - Calibrated discovery rate (edges per 1000 execs)
+    - Calibration execs count for confidence interval scaling
+
+    More calibration execs tighten the interval via 1/sqrt(N) scaling
+    relative to a 1000-exec baseline.
     """
+    import math
+
     rho = estimate_risky_density(profile)
     e_total = gt_result.get("n", 0) + gt_result.get("estimated_undiscovered", 0)
     confidence = gt_result.get("confidence", "low")
@@ -85,12 +92,26 @@ def estimate_execs_to_first_crash(
     risky_edges_needed = 1.0 / rho
     execs = (risky_edges_needed / discovery_rate) * 1000
 
+    # Base multiplier ranges by GT confidence
     if confidence == "high":
-        multiplier_low, multiplier_high = 0.5, 2.0
+        base_low, base_high = 0.5, 2.0
     elif confidence == "medium":
-        multiplier_low, multiplier_high = 0.2, 5.0
+        base_low, base_high = 0.2, 5.0
     else:
-        multiplier_low, multiplier_high = 0.1, 10.0
+        base_low, base_high = 0.1, 10.0
+
+    # Scale by calibration execs: more execs → tighter interval
+    # Reference baseline is 1000 execs; scale via 1/sqrt(N/N_ref)
+    if calibration_execs > 0:
+        scale = math.sqrt(1000.0 / max(1, calibration_execs))
+        # Clamp scale to [0.3, 3.0] so very few execs don't blow out
+        # and very many don't collapse to a point
+        scale = max(0.3, min(3.0, scale))
+    else:
+        scale = 3.0  # no calibration → widest interval
+
+    multiplier_low = base_low * scale
+    multiplier_high = base_high * scale
 
     low = max(100, int(execs * multiplier_low))
     high = int(execs * multiplier_high)
@@ -105,6 +126,8 @@ def estimate_execs_to_first_crash(
             f"rho={rho:.3f} (risky density), "
             f"E_total={e_total}, "
             f"discovery_rate={discovery_rate:.1f}/1k, "
+            f"calib_execs={calibration_execs}, "
+            f"CI_scale={scale:.2f}, "
             f"geometric ETA={execs:.0f}"
         ),
     )
