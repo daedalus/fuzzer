@@ -2914,49 +2914,57 @@ class Fuzzer:
         """
         from fuzzer_tool.core.mutations import byte_insert
 
-        log.info("Calibration: running %d execs to bootstrap stats", max_execs)
+        print(f"[*] Calibration: running {max_execs} execs to bootstrap coverage stats...")
         if not self.corpus:
-            log.warning("Calibration: no seeds found, skipping")
+            print("[*] Calibration: no seeds found, skipping")
             return
 
         exec_count = 0
-        for seed in list(self.corpus):
+        report_interval = max(100, max_execs // 10)
+        seeds = list(self.corpus)
+
+        # Phase 1: replay each seed as-is
+        for seed in seeds:
             if exec_count >= max_execs:
                 break
             self._run_target(seed)
             self.exec_count += 1
             exec_count += 1
-            # Feed edge bitmap to EdgeTracker so good_turing_estimate() has data
             edge_bitmap = self._get_current_edge_bitmap()
             if edge_bitmap:
-                seed_key = self._seed_key(seed)
-                self._edge_tracker.record_edges(seed_key, edge_bitmap)
+                self._edge_tracker.record_edges(self._seed_key(seed), edge_bitmap)
 
-            for _ in range(min(3, max_execs - exec_count)):
-                if random.random() < 0.5:
-                    mutated = bytearray(seed)
-                    if mutated:
-                        mutated[random.randint(0, len(mutated) - 1)] ^= 1 << random.randint(0, 7)
-                    mutated = bytes(mutated)
-                else:
-                    mutated = byte_insert(seed)
-                self._run_target(mutated)
-                self.exec_count += 1
-                exec_count += 1
-                # Feed edge bitmap to EdgeTracker for mutated inputs too
-                edge_bitmap = self._get_current_edge_bitmap()
-                if edge_bitmap:
-                    seed_key = self._seed_key(mutated)
-                    self._edge_tracker.record_edges(seed_key, edge_bitmap)
-                if exec_count >= max_execs:
-                    break
+        # Phase 2: cheap mutations until budget exhausted
+        while exec_count < max_execs:
+            seed = random.choice(seeds)
+            if random.random() < 0.5:
+                mutated = bytearray(seed)
+                if mutated:
+                    mutated[random.randint(0, len(mutated) - 1)] ^= 1 << random.randint(0, 7)
+                mutated = bytes(mutated)
+            else:
+                mutated = byte_insert(seed)
+            self._run_target(mutated)
+            self.exec_count += 1
+            exec_count += 1
+            edge_bitmap = self._get_current_edge_bitmap()
+            if edge_bitmap:
+                self._edge_tracker.record_edges(self._seed_key(mutated), edge_bitmap)
+            if exec_count % report_interval == 0:
+                edges = len(self._edge_tracker._global_edge_hits)
+                print(
+                    f"\r[*] Calibration: {exec_count}/{max_execs} execs, "
+                    f"{edges} edges discovered",
+                    end="",
+                    flush=True,
+                )
 
         self._record_discovery_snapshot()
-        log.info(
-            "Calibration done: %d execs, %d edges discovered",
-            exec_count,
-            len(self._edge_tracker._global_edge_hits),
-        )
+        edges = len(self._edge_tracker._global_edge_hits)
+        gt = self._edge_tracker.good_turing_estimate()
+        dr = self.discovery_rate()
+        print(f"\r[*] Calibration done: {exec_count} execs, {edges} edges discovered, "
+              f"GT confidence={gt['confidence']}, discovery_rate={dr:.1f}/1k execs   ")
 
     def discovery_rate(self) -> float:
         return _discovery_rate(self._discovery_history)
@@ -3395,6 +3403,8 @@ class Fuzzer:
             )
         if self.grammar:
             print(f"[*] Grammar: {len(self.grammar.rules)} rules")
+        if self._calibrate > 0:
+            print(f"[*] Calibration: {self._calibrate} execs before main loop")
         if self.persistent:
             print("[*] Persistent mode: enabled")
         if self._inprocess_runner:
