@@ -3418,27 +3418,17 @@ class Fuzzer:
             detected, csd_reason = self._csd.is_approaching_transition()
             if detected:
                 dr_str += f" [CSD: {csd_reason}]"
-        # Bitmap density
+        # Bitmap density — dynamic resize is disabled because AFL's hash-based
+        # coverage (edge_id = hash(src, dst) % map_size) means resizing changes
+        # which bitmap position each edge maps to, breaking edge deduplication.
         density = self._edge_tracker.bitmap_density() * 100
         collision_risk = self._edge_tracker.birthday_collision_risk() * 100
         density_str = f" | map: {density:.1f}%"
         if collision_risk > 10:
             density_str += f" (collision: {collision_risk:.0f}%)"
-            # Resize at 40% collision risk to stay ahead of saturation
-            if collision_risk > 40 and self.shm_cov:
-                current = self.shm_cov.size
-                # Grow in powers of 2 — double current size
-                new_size = current * 2
-                new_size = min(1048576, max(4096, 1 << (new_size - 1).bit_length()))
-                if new_size > current:
-                    print(
-                        f"\n[*] Collision risk {collision_risk:.0f}% — resizing bitmap "
-                        f"{current:,} → {new_size:,} bytes"
-                    )
-                    self.shm_cov.resize(new_size)
-                    self.map_size = new_size
-                    self._edge_tracker.map_size = new_size
-                    density_str = f" | map: {self._edge_tracker.bitmap_density() * 100:.1f}% (collision: {collision_risk:.0f}%)"
+            # Warn but don't resize — resizing breaks edge tracking
+            if collision_risk > 50:
+                density_str += " [SATURATED]"
         # Crash reproducibility
         repro_str = ""
         if self._crash_replays:

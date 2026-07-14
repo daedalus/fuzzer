@@ -323,12 +323,16 @@ def estimate_map_size(target: str) -> int:
     # Estimated edge count: density (per KB) × size (KB)
     estimated_edges = bd * (ts / 1024)
 
-    # 16x headroom for hash collisions, edge aliasing, and static analysis underestimation.
-    # Static analysis consistently underestimates by 5-10x because it misses:
-    # - Indirect branches, switch tables, function pointers
-    # - Dynamic code paths in format parsers
-    # - Edge aliasing in AFL's hash-based coverage
-    map_size = _next_power_of_2(int(estimated_edges * 16))
+    # Static analysis underestimates actual edges by 5-10x. We use the
+    # branch count (2 edges per branch) as a more reliable estimate.
+    # Each branch creates 2 edges (taken + not-taken), and AFL hashes
+    # (src, dst) pairs into bitmap positions.
+    #
+    # Formula: branches = bd * (ts / 1024), edges ≈ branches * 2
+    # Map size = edges * 8 (8x headroom for hash collisions)
+    branches = bd * (ts / 1024)
+    estimated_edges = branches * 2  # 2 edges per branch
+    map_size = _next_power_of_2(int(estimated_edges * 8))
 
-    # Minimum 65536 (64KB) — anything smaller saturates too quickly
-    return max(65536, min(1048576, map_size))
+    # Minimum 256KB — anything smaller saturates for real targets
+    return max(262144, min(1048576, map_size))
