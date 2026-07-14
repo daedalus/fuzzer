@@ -93,6 +93,21 @@ signal.signal(signal.SIGTERM, _kill_children)
 signal.signal(signal.SIGINT, _kill_children)
 
 
+def _handle_sigsegv(signum, frame):
+    """Handle SIGSEGV in the fuzzer process itself."""
+    import traceback
+
+    print("\n[FATAL] Segmentation fault in fuzzer process!")
+    print(f"Signal: {signum}")
+    if frame:
+        print(f"Frame: {frame}")
+    traceback.print_stack(frame)
+    sys.exit(1)
+
+
+signal.signal(signal.SIGSEGV, _handle_sigsegv)
+
+
 def _write_and_close(fd: int, data: bytes) -> None:
     """Write *data* to *fd* then close it — designed to run in a thread."""
     try:
