@@ -198,6 +198,8 @@ class Fuzzer:
         self._stall_threshold = stall_threshold
         self._last_new_edge_exec = 0
         self._stall_recovery_active = False
+        self._stall_recovery_count = 0  # times recovery was activated
+        self._stall_recovery_execs = 0  # execs spent in recovery mode
         self.extra_crash_codes = set(extra_crash_codes) if extra_crash_codes else set()
         self.max_len = max_len
         self.timeout = timeout
@@ -2586,6 +2588,8 @@ class Fuzzer:
         returncode, stderr = self._run_target(mutated)
         t_elapsed = time.monotonic() - t_start
         self.exec_count += 1
+        if self._stall_recovery_active:
+            self._stall_recovery_execs += 1
 
         # Per-seed wall-clock cost
         if meta is not None:
@@ -3034,6 +3038,12 @@ class Fuzzer:
         print(f"  Duplicates rejected: {rejected}")
         if self._pruned_count > 0:
             print(f"  Seeds pruned:      {self._pruned_count}")
+
+        # Stall recovery stats
+        if self._stall_recovery_count > 0:
+            print(f"  Recovery entries:  {self._stall_recovery_count}")
+            print(f"  Recovery execs:    {self._stall_recovery_execs:,} "
+                  f"({self._stall_recovery_execs / max(1, self.exec_count) * 100:.1f}%)")
 
         # Coverage — prefer edge_tracker (authoritative), fall back to SHM/ptrace
         edges = self._edge_tracker.get_cumulative_edge_count()
@@ -3565,8 +3575,9 @@ class Fuzzer:
                         and execs_since_edge >= self._stall_threshold
                         and self.exec_count > 0
                     ):
-                        print(f"\n[*] STALL: no new edges in {execs_since_edge} execs, "
-                              f"switching to random mode")
+                        self._stall_recovery_count += 1
+                        print(f"\n[*] STALL #{self._stall_recovery_count}: no new edges in "
+                              f"{execs_since_edge} execs, switching to random mode")
                         self._stall_recovery_active = True
                     # Periodic GC to return freed memory to OS
                     if i % 500 == 0:
