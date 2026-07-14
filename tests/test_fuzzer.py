@@ -1,6 +1,6 @@
 """Tests for Fuzzer service (unit tests, no real target execution)."""
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from fuzzer_tool.adapters.shim_factory import ShimResult
 from fuzzer_tool.core.markov import MarkovChain
@@ -439,3 +439,280 @@ class TestInProcessFuzzer:
     def test_fuzzer_inprocess_none_by_default(self):
         f = self._make_fuzzer()
         assert f._inprocess_runner is None
+
+
+class TestFuzzerHelpers:
+    """Test helper methods that don't require process execution."""
+
+    def _make_fuzzer(self, **kwargs):
+        defaults = dict(
+            target="/bin/true",
+            corpus_dir="/tmp/fuzz_test_corpus",
+            crashes_dir="/tmp/fuzz_test_crashes",
+            max_len=256,
+            timeout=1,
+            mutations_per_input=2,
+        )
+        defaults.update(kwargs)
+        with (
+            patch("os.path.isfile", return_value=True),
+            patch("os.access", return_value=True),
+        ):
+            f = Fuzzer(**defaults)
+        return f
+
+    def test_seed_key(self):
+        f = self._make_fuzzer()
+        key = f._seed_key(b"test data")
+        assert isinstance(key, str)
+        assert len(key) > 0
+
+    def test_seed_key_deterministic(self):
+        f = self._make_fuzzer()
+        assert f._seed_key(b"test") == f._seed_key(b"test")
+
+    def test_seed_key_different(self):
+        f = self._make_fuzzer()
+        assert f._seed_key(b"aaa") != f._seed_key(b"bbb")
+
+    def test_build_ops_basic(self):
+        f = self._make_fuzzer()
+        ops = f._build_ops(b"test")
+        assert isinstance(ops, list)
+        assert len(ops) > 0
+        assert "bit_flip" in ops
+
+    def test_build_ops_with_dict(self):
+        f = self._make_fuzzer(dictionary=[b"token1", b"token2"])
+        ops = f._build_ops(b"test")
+        assert "dict_insert" in ops
+        assert "dict_replace" in ops
+
+    def test_build_ops_with_markov(self):
+        f = self._make_fuzzer(markov_order=1)
+        ops = f._build_ops(b"test")
+        assert "markov_bytes" in ops
+
+    def test_select_op(self):
+        f = self._make_fuzzer()
+        f._last_mopt_particles = []
+        ops = ["bit_flip", "byte_flip", "arithmetic"]
+        op = f._select_op(ops)
+        assert op in ops
+
+    def test_select_position(self):
+        f = self._make_fuzzer()
+        buf = bytearray(b"test data")
+        pos = f._select_position(buf, b"test data")
+        assert 0 <= pos < len(buf)
+
+    def test_op_bit_flip(self):
+        f = self._make_fuzzer()
+        buf = bytearray(b"\x00" * 10)
+        original = bytes(buf)
+        f._op_bit_flip(buf, 0, b"")
+        assert buf != original  # bit was flipped
+
+    def test_op_byte_flip(self):
+        f = self._make_fuzzer()
+        buf = bytearray(b"\x00" * 10)
+        original = bytes(buf)
+        f._op_byte_flip(buf, 0, b"")
+        assert buf != original
+
+    def test_op_interesting_8(self):
+        f = self._make_fuzzer()
+        buf = bytearray(b"\x00" * 10)
+        f._op_interesting_8(buf, 0, b"")
+
+    def test_op_interesting_16(self):
+        f = self._make_fuzzer()
+        buf = bytearray(b"\x00" * 10)
+        f._op_interesting_16(buf, 0, b"")
+
+    def test_op_interesting_32(self):
+        f = self._make_fuzzer()
+        buf = bytearray(b"\x00" * 10)
+        f._op_interesting_32(buf, 0, b"")
+
+    def test_op_arithmetic(self):
+        f = self._make_fuzzer()
+        buf = bytearray(b"\x00" * 10)
+        f._op_arithmetic(buf, 0, b"")
+
+    def test_op_random_bytes(self):
+        f = self._make_fuzzer()
+        buf = bytearray(b"\x00" * 10)
+        f._op_random_bytes(buf, 0, b"")
+
+    def test_op_block_insert(self):
+        f = self._make_fuzzer()
+        buf = bytearray(b"\x00" * 10)
+        f._op_block_insert(buf, 0, b"")
+
+    def test_op_block_delete(self):
+        f = self._make_fuzzer()
+        buf = bytearray(b"\x00" * 10)
+        f._op_block_delete(buf, 0, b"")
+
+    def test_op_block_duplicate(self):
+        f = self._make_fuzzer()
+        buf = bytearray(b"\x00" * 10)
+        f._op_block_duplicate(buf, 0, b"")
+
+    def test_op_dict_insert(self):
+        f = self._make_fuzzer(dictionary=[b"token1", b"token2"])
+        buf = bytearray(b"\x00" * 10)
+        f._op_dict_insert(buf, 0, b"")
+
+    def test_op_dict_replace(self):
+        f = self._make_fuzzer(dictionary=[b"token1", b"token2"])
+        buf = bytearray(b"\x00" * 10)
+        f._op_dict_replace(buf, 0, b"")
+
+    def test_op_checksum_repair(self):
+        f = self._make_fuzzer()
+        buf = bytearray(b"\x00" * 10)
+        f._op_checksum_repair(buf, 0, b"")
+
+    def test_op_type_replace(self):
+        f = self._make_fuzzer()
+        buf = bytearray(b"\x00" * 10)
+        f._op_type_replace(buf, 0, b"")
+
+    def test_op_ascii_num(self):
+        f = self._make_fuzzer()
+        buf = bytearray(b"\x00" * 10)
+        f._op_ascii_num(buf, 0, b"")
+
+    def test_op_byte_shuffle(self):
+        f = self._make_fuzzer()
+        buf = bytearray(b"\x00" * 10)
+        f._op_byte_shuffle(buf, 0, b"")
+
+    def test_op_byte_delete(self):
+        f = self._make_fuzzer()
+        buf = bytearray(b"\x00" * 10)
+        f._op_byte_delete(buf, 0, b"")
+
+    def test_op_byte_insert(self):
+        f = self._make_fuzzer()
+        buf = bytearray(b"\x00" * 10)
+        f._op_byte_insert(buf, 0, b"")
+
+    def test_op_insert_ascii_num(self):
+        f = self._make_fuzzer()
+        buf = bytearray(b"\x00" * 10)
+        f._op_insert_ascii_num(buf, 0, b"")
+
+    def test_op_transpose_16(self):
+        f = self._make_fuzzer()
+        buf = bytearray(b"\x00" * 10)
+        f._op_transpose_16(buf, 0, b"")
+
+    def test_op_transpose_32(self):
+        f = self._make_fuzzer()
+        buf = bytearray(b"\x00" * 10)
+        f._op_transpose_32(buf, 0, b"")
+
+    def test_op_transpose_64(self):
+        f = self._make_fuzzer()
+        buf = bytearray(b"\x00" * 10)
+        f._op_transpose_64(buf, 0, b"")
+
+    def test_op_bit_transpose_8(self):
+        f = self._make_fuzzer()
+        buf = bytearray(b"\x00" * 10)
+        f._op_bit_transpose_8(buf, 0, b"")
+
+    def test_op_bit_transpose_16(self):
+        f = self._make_fuzzer()
+        buf = bytearray(b"\x00" * 10)
+        f._op_bit_transpose_16(buf, 0, b"")
+
+    def test_op_bit_transpose_32(self):
+        f = self._make_fuzzer()
+        buf = bytearray(b"\x00" * 10)
+        f._op_bit_transpose_32(buf, 0, b"")
+
+    def test_op_bit_transpose_64(self):
+        f = self._make_fuzzer()
+        buf = bytearray(b"\x00" * 10)
+        f._op_bit_transpose_64(buf, 0, b"")
+
+    def test_op_length_grow(self):
+        f = self._make_fuzzer()
+        buf = bytearray(b"\x00" * 10)
+        f._op_length_grow(buf, 0, b"")
+
+    def test_op_length_shrink(self):
+        f = self._make_fuzzer()
+        buf = bytearray(b"\x00" * 10)
+        f._op_length_shrink(buf, 0, b"")
+
+    def test_op_repeat_clone(self):
+        f = self._make_fuzzer()
+        buf = bytearray(b"\x00" * 10)
+        f._op_repeat_clone(buf, 0, b"")
+
+    def test_op_truncate(self):
+        f = self._make_fuzzer()
+        buf = bytearray(b"\x00" * 10)
+        f._op_truncate(buf, 0, b"")
+
+    def test_op_swap_regions(self):
+        f = self._make_fuzzer()
+        buf = bytearray(b"\x00" * 10)
+        f._op_swap_regions(buf, 0, b"")
+
+    def test_op_swap_bytes(self):
+        f = self._make_fuzzer()
+        buf = bytearray(b"\x00" * 10)
+        f._op_swap_bytes(buf, 0, b"")
+
+    def test_op_endianness_swap(self):
+        f = self._make_fuzzer()
+        buf = bytearray(b"\x00" * 10)
+        f._op_endianness_swap(buf, 0, b"")
+
+    def test_discovery_rate(self):
+        f = self._make_fuzzer()
+        f._discovery_history = [(100, 10), (200, 15), (300, 20)]
+        rate = f.discovery_rate()
+        assert rate >= 0
+
+    def test_discovery_rate_empty(self):
+        f = self._make_fuzzer()
+        f._discovery_history = []
+        rate = f.discovery_rate()
+        assert rate == 0.0
+
+    def test_pareto_front(self):
+        scores = [(1.0, 2.0, 0.5), (2.0, 1.0, 0.5), (1.5, 1.5, 0.5)]
+        front = Fuzzer._pareto_front(scores)
+        assert isinstance(front, set)
+
+    def test_pareto_front_empty(self):
+        front = Fuzzer._pareto_front([])
+        assert front == set()
+
+    def test_check_python_crashes(self):
+        from fuzzer_tool.core.dmesg import KernelCrash
+
+        f = self._make_fuzzer()
+        f._dmesg = MagicMock()
+        # Simulate a Python segfault in dmesg
+        kc = KernelCrash(
+            timestamp=100.0,
+            raw_message="python3[12345]: segfault at 0 ip 0000000000000000",
+            pid=12345,
+            process_name="python3",
+            crash_type="segfault",
+            ip="0",
+        )
+        f._dmesg._poll_text.return_value = [kc]
+        f._dmesg._last_ts = 99.0
+        f._kernel_crashes = []
+        f._check_python_crashes()
+        assert len(f._kernel_crashes) == 1
+        assert f._kernel_crashes[0].crash_type == "python_segfault"

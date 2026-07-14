@@ -961,10 +961,10 @@ class Fuzzer:
     def _verify_kernel_crash(self, child_pid: int | None) -> bool:
         """Try to verify a crash via dmesg. Returns True if dmesg confirmed it.
 
-        Two cases:
-        1. dmesg HAS the crash (not rate-limited) → verify and count it
-        2. dmesg DOESN'T have it (rate-limited) → return False, caller
-           still counts the crash via exit code (primary detection)
+        Checks for:
+        1. Target process crashes (matched by child_pid)
+        2. Python subprocess crashes (any python3/python process) - these indicate
+           fuzzer infrastructure issues or malformed inputs causing interpreter crashes
         """
         if not child_pid:
             return False
@@ -993,7 +993,32 @@ class Fuzzer:
                     kc.timestamp,
                 )
             return True
+
+        # Also check for Python process crashes (fuzzer infrastructure issues)
+        self._check_python_crashes()
+
         return False
+
+    def _check_python_crashes(self):
+        """Check for Python process crashes in dmesg that may indicate fuzzer issues."""
+        import time as _time
+
+        # Get recent crashes from dmesg (not filtered by PID)
+        all_crashes = self._dmesg._poll_text(since=self._dmesg._last_ts)
+        for kc in all_crashes:
+            # Check for Python process crashes
+            if kc.process_name and "python" in kc.process_name.lower():
+                if kc.crash_type == "segfault":
+                    log.warning(
+                        "Python process crash detected: pid=%s, ip=%s, "
+                        "type=%s (may indicate fuzzer infrastructure issue)",
+                        kc.pid,
+                        kc.ip or "?",
+                        kc.crash_type,
+                    )
+                    # Record as a special type of crash for diagnostics
+                    kc.crash_type = "python_segfault"
+                    self._kernel_crashes.append(kc)
 
     def _is_interesting(self, returncode: int, stderr: str) -> bool:
         if returncode in SIGNAL_CRASH_CODES or returncode in self.extra_crash_codes:
