@@ -164,11 +164,12 @@ class ShmCoverage:
         self._map = (ctypes.c_char * new_size).from_address(self._ptr)
         self.env_id = str(self.shm_id)
 
-        # Restore cumulative _seen from pre-resize state
+        # Clear cumulative state — positions change after resize
+        # AFL's hash (edge_id = hash(src,dst) % map_size) maps the same
+        # logical edge to different positions in the new bitmap.
         self._seen = bytearray(new_size)
-        self._seen[:len(old_seen)] = old_seen
-        self.cumulative_edges = old_cumulative
-        self.total_edges = old_total
+        self.cumulative_edges = 0
+        self.total_edges = 0
 
     def __del__(self):
         self.cleanup()

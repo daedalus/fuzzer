@@ -418,6 +418,24 @@ class EdgeTracker:
 
         return new_contributions
 
+    def reset_after_resize(self):
+        """Clear all position-based state after bitmap resize.
+
+        When the bitmap resizes, AFL's hash (edge_id = hash(src,dst) % map_size)
+        maps the same logical edge to a different position. All position-based
+        tracking must be cleared to avoid stale entries.
+        """
+        self.cumulative_edges.clear()
+        self._global_edge_hits.clear()
+        self.seed_edges.clear()
+        self.seed_hit_counts.clear()
+        self.seed_edge_traces.clear()
+        self._aggregate_totals.clear()
+        self._aggregate_total_count = 0
+        self._aggregate_cache = None
+        self._spectrum_dirty = True
+        self.max_hit_count = 0
+
     def _maybe_prune(self):
         """Prune oldest seeds when tracked count exceeds max_tracked_seeds.
 

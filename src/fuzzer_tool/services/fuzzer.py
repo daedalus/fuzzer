@@ -3438,8 +3438,8 @@ class Fuzzer:
                     self.shm_cov.resize(new_size)
                     self.map_size = new_size
                     self._edge_tracker.map_size = new_size
-                    self._edge_tracker._spectrum_dirty = True
-                    self._edge_tracker._aggregate_cache = None
+                    # Clear all position-based tracking — positions change after resize
+                    self._edge_tracker.reset_after_resize()
                     density_str = f" | map: {self._edge_tracker.bitmap_density() * 100:.1f}% (collision: {collision_risk:.0f}%)"
         # Crash reproducibility
         repro_str = ""
