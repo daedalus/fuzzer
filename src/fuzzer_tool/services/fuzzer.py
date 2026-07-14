@@ -180,6 +180,7 @@ class Fuzzer:
         ga_speciation_threshold=0.3,
         calibrate=0,
         stall_threshold=1000,
+        map_size=0,
         continue_until_crash=False,
     ):
         self.target = target
@@ -230,10 +231,13 @@ class Fuzzer:
         self._ga_speciation_threshold = ga_speciation_threshold
         self.ga = None  # Initialized in run() when --ga is set
 
-        # Auto-size edge bitmap from branch density
-        from fuzzer_tool.core.elf import estimate_map_size
+        # Edge bitmap size: use provided value or auto-size from branch density
+        if map_size > 0:
+            self.map_size = map_size
+        else:
+            from fuzzer_tool.core.elf import estimate_map_size
 
-        self.map_size = estimate_map_size(target)
+            self.map_size = estimate_map_size(target)
 
         # Static analysis: profile target for string extraction, function
         # boundaries, input format hints, and call graph structure.
