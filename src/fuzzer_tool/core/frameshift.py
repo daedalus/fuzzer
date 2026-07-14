@@ -34,6 +34,7 @@ class Relation:
         le: Whether the field is little-endian.
         enabled: Whether this relation is still valid.
     """
+
     pos: int
     size: int
     anchor: int
@@ -91,7 +92,7 @@ class FrameShift:
         for rel in self.relations:
             if not rel.enabled:
                 continue
-            if not self._rel_on_insert(rel, idx, data_size):
+            if not self._rel_insert_invalid(rel, idx, data_size):
                 continue
             if ignore_invalid:
                 rel.enabled = False
@@ -144,7 +145,7 @@ class FrameShift:
             rel.insert_point = rel._old_insert_point
             rel.enabled = True
 
-    def _rel_on_insert(self, rel: Relation, idx: int, size: int) -> bool:
+    def _rel_insert_invalid(self, rel: Relation, idx: int, size: int) -> bool:
         """Update a relation after an insertion. Returns True if invalid."""
         # Error if insert is inside the field
         if rel.pos < idx < rel.pos + rel.size:
@@ -277,6 +278,7 @@ class FrameShift:
 
         log.debug(
             "FrameShift: discovered %d relations from %d execs",
-            len(self.relations), exec_count,
+            len(self.relations),
+            exec_count,
         )
         return len(self.relations)

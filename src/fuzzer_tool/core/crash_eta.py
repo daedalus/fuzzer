@@ -12,8 +12,9 @@ from dataclasses import dataclass
 from fuzzer_tool.core.target_profiler import TargetProfile
 
 # Matches error-related keywords in function names and rodata strings.
+# Note: "bad" without trailing space to match C identifiers like bad_alloc.
 _ERROR_RE = re.compile(
-    r"error|invalid|overflow|underflow|corrupt|malformed|bad |failed|unable",
+    r"error|invalid|overflow|underflow|corrupt|malformed|bad|failed|unable",
     re.IGNORECASE,
 )
 
@@ -36,26 +37,28 @@ def estimate_risky_density(profile: TargetProfile) -> float:
     Uses ERROR_KEYWORDS matches in function names and rodata strings as a
     proxy for defensive/error-handling paths in the binary.
 
+    Normalizes function-risk and string-risk separately against their own
+    totals, then combines via weighted average (60% function, 40% string).
+
     Returns a value in [0.0, 1.0].
     """
     if not profile.functions:
         return 0.0
 
-    risky = 0
+    # Function-risk: fraction of functions with error-handling names
+    risky_funcs = sum(1 for f in profile.functions if _ERROR_RE.search(f))
+    func_density = risky_funcs / len(profile.functions)
 
-    # Count functions whose names suggest error handling / defensive paths.
-    for func_name in profile.functions:
-        if _ERROR_RE.search(func_name):
-            risky += 1
+    # String-risk: fraction of rodata strings that are error messages
+    if profile.rodata_strings:
+        risky_strings = sum(1 for _, s in profile.rodata_strings if _ERROR_RE.search(s))
+        string_density = risky_strings / len(profile.rodata_strings)
+    else:
+        string_density = 0.0
 
-    # Also count rodata error strings as additional risky-signal contributions.
-    for _offset, s in profile.rodata_strings:
-        if _ERROR_RE.search(s):
-            risky += 1
-
-    # Clamp to [0, 1].
-    density = min(1.0, risky / max(1, len(profile.functions)))
-    return density
+    # Weighted combination: functions are more indicative of code structure
+    density = 0.6 * func_density + 0.4 * string_density
+    return min(1.0, density)
 
 
 def estimate_execs_to_first_crash(

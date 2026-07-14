@@ -83,8 +83,8 @@ def test_estimate_risky_density_no_error_keywords():
     assert density == 0.0
 
 
-def test_estimate_risky_density_clamped():
-    """Density should be clamped to 1.0 when all functions match."""
+def test_estimate_risky_density_all_functions_match():
+    """Density when all functions match: 0.6 * 1.0 + 0.4 * 0.0 = 0.6."""
     profile = TargetProfile(
         rodata_strings=[],
         interesting_strings=[],
@@ -102,7 +102,72 @@ def test_estimate_risky_density_clamped():
         reverse_calls={},
     )
     density = estimate_risky_density(profile)
+    # func_density = 2/2 = 1.0, string_density = 0 (no strings)
+    # weighted = 0.6 * 1.0 + 0.4 * 0.0 = 0.6
+    assert density == 0.6
+
+
+def test_estimate_risky_density_clamped():
+    """Density should be clamped to 1.0 when both populations max out."""
+    profile = TargetProfile(
+        rodata_strings=[
+            (0x1000, "error: something"),
+            (0x2000, "invalid input"),
+        ],
+        interesting_strings=[],
+        magic_bytes=[],
+        functions={
+            "error_a": FunctionInfo(addr=0x100, size=50, name="error_a"),
+            "invalid_b": FunctionInfo(addr=0x200, size=30, name="invalid_b"),
+        },
+        hot_functions=[],
+        entry_points=[],
+        input_parsers=[],
+        boundary_markers=[],
+        format_signature=None,
+        call_graph={},
+        reverse_calls={},
+    )
+    density = estimate_risky_density(profile)
+    # func_density = 2/2 = 1.0, string_density = 2/2 = 1.0
+    # weighted = 0.6 * 1.0 + 0.4 * 1.0 = 1.0
     assert density == 1.0
+
+
+def test_estimate_risky_density_mixed_normalization():
+    """Risky strings should not inflate density beyond function-risk signal.
+
+    Regression test: previously, summing risky functions + risky strings
+    and dividing only by function count could saturate density to 1.0
+    even when no functions matched (e.g., 10 error strings, 3 functions).
+    """
+    # No risky functions, but many risky strings
+    profile = TargetProfile(
+        rodata_strings=[
+            (0x1000, "invalid magic bytes"),
+            (0x2000, "corrupt chunk type"),
+            (0x3000, "error: buffer overflow"),
+            (0x4000, "unable to allocate"),
+        ],
+        interesting_strings=[],
+        magic_bytes=[],
+        functions={
+            "main": FunctionInfo(addr=0x100, size=50, name="main"),
+            "parse": FunctionInfo(addr=0x200, size=30, name="parse"),
+            "init": FunctionInfo(addr=0x300, size=40, name="init"),
+        },
+        hot_functions=[],
+        entry_points=[],
+        input_parsers=[],
+        boundary_markers=[],
+        format_signature=None,
+        call_graph={},
+        reverse_calls={},
+    )
+    density = estimate_risky_density(profile)
+    # func_density = 0/3 = 0.0, string_density = 4/4 = 1.0
+    # weighted = 0.6*0.0 + 0.4*1.0 = 0.4
+    assert density == 0.4
 
 
 def test_estimate_execs_basic():

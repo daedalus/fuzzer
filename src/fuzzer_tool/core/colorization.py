@@ -25,6 +25,7 @@ log = logging.getLogger(__name__)
 @dataclass
 class TaintRegion:
     """A contiguous range of bytes that can be safely diversified."""
+
     start: int
     end: int  # inclusive
 
@@ -32,6 +33,7 @@ class TaintRegion:
 @dataclass
 class ColorizationResult:
     """Result of colorizing an input for CmpLog."""
+
     # The colorized input (bytes where safe ranges have been diversified)
     colorized: bytes
     # Taint regions (contiguous ranges that can be mutated freely)
@@ -58,7 +60,7 @@ def colorize(
         exec_fn: Callable(bytes) -> int, returns execution path checksum.
             Should return the same checksum for inputs that take the same path.
         use_type_aware: If True, use type-aware replacement (preserves character
-            classes). If True, use random replacement.
+            classes). If False, use random replacement.
         max_execs: Maximum executions (0 = unlimited, use 2 * len(data)).
 
     Returns:
@@ -80,6 +82,7 @@ def colorize(
 
     if use_type_aware:
         from fuzzer_tool.core.mutations import type_replace_byte
+
         changed = bytearray(type_replace_byte(b) for b in data)
     else:
         changed = bytearray(length)
@@ -104,7 +107,7 @@ def colorize(
 
         # Replace this range in the original with changed values
         test = bytearray(data)
-        test[start:end + 1] = changed[start:end + 1]
+        test[start : end + 1] = changed[start : end + 1]
 
         cksum = exec_fn(bytes(test))
         exec_count += 1
@@ -122,14 +125,17 @@ def colorize(
     # Build colorized output: apply safe ranges
     colorized = bytearray(data)
     for start, end in safe_ranges:
-        colorized[start:end + 1] = changed[start:end + 1]
+        colorized[start : end + 1] = changed[start : end + 1]
 
     # Merge adjacent safe ranges into taint regions
     taints = _merge_ranges(safe_ranges)
 
     log.debug(
         "Colorization: %d/%d ranges safe, %d taints, %d execs",
-        len(safe_ranges), length, len(taints), exec_count,
+        len(safe_ranges),
+        length,
+        len(taints),
+        exec_count,
     )
 
     return ColorizationResult(

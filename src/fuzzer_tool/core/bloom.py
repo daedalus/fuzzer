@@ -113,10 +113,6 @@ class BloomFilter:
                 self._recent_keys.popleft()
             return False
 
-        key_hex = key.hex()
-        if self._check(self._digest(key_hex)):
-            return True  # exact match already in filter
-
         for recent in self._recent_keys:
             try:
                 if hamming_distance(key, recent) <= max_hamming:
