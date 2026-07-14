@@ -245,6 +245,7 @@ def cmd_fuzz(args):
         calibrate=getattr(args, "calibrate", 0),
         stall_threshold=getattr(args, "stall", 1000),
         map_size=getattr(args, "map_size", 0),
+        max_collision_risk=getattr(args, "max_collision_risk", 30),
     )
     fuzzer.run(iterations=args.iterations)
 
@@ -1000,6 +1001,13 @@ def main() -> int:
         default=0,
         metavar="N",
         help="Initial edge bitmap size in bytes (default: 0 = auto-size from branch density)",
+    )
+    fuzz_parser.add_argument(
+        "--max-collision-risk",
+        type=int,
+        default=30,
+        metavar="N",
+        help="Resize bitmap when collision risk exceeds N%% (default: 30)",
     )
     fuzz_parser.set_defaults(func=cmd_fuzz)
 

@@ -196,6 +196,7 @@ class Fuzzer:
         calibrate=0,
         stall_threshold=1000,
         map_size=0,
+        max_collision_risk=30,
         continue_until_crash=False,
     ):
         self.target = target
@@ -212,6 +213,7 @@ class Fuzzer:
         self.continue_until_crash = continue_until_crash
         self._calibrate = calibrate
         self._stall_threshold = stall_threshold
+        self._max_collision_risk = max_collision_risk
         self._last_new_edge_exec = 0
         self._stall_recovery_active = False
         self._stall_recovery_count = 0  # times recovery was activated
@@ -3418,17 +3420,28 @@ class Fuzzer:
             detected, csd_reason = self._csd.is_approaching_transition()
             if detected:
                 dr_str += f" [CSD: {csd_reason}]"
-        # Bitmap density — dynamic resize is disabled because AFL's hash-based
-        # coverage (edge_id = hash(src, dst) % map_size) means resizing changes
-        # which bitmap position each edge maps to, breaking edge deduplication.
+        # Bitmap density
         density = self._edge_tracker.bitmap_density() * 100
         collision_risk = self._edge_tracker.birthday_collision_risk() * 100
         density_str = f" | map: {density:.1f}%"
         if collision_risk > 10:
             density_str += f" (collision: {collision_risk:.0f}%)"
-            # Warn but don't resize — resizing breaks edge tracking
-            if collision_risk > 50:
-                density_str += " [SATURATED]"
+            # Resize at 30% collision risk, starting small and doubling
+            if collision_risk > self._max_collision_risk and self.shm_cov:
+                current = self.shm_cov.size
+                new_size = min(1048576, current * 2)
+                if new_size > current:
+                    print(
+                        f"\n[*] Collision risk {collision_risk:.0f}% — resizing bitmap "
+                        f"{current:,} → {new_size:,} bytes"
+                    )
+                    self.shm_cov.resize(new_size)
+                    self.map_size = new_size
+                    self._edge_tracker.map_size = new_size
+                    # Clear edge tracker caches to force rebuild with new map size
+                    self._edge_tracker._spectrum_dirty = True
+                    self._edge_tracker._aggregate_cache = None
+                    density_str = f" | map: {self._edge_tracker.bitmap_density() * 100:.1f}% (collision: {collision_risk:.0f}%)"
         # Crash reproducibility
         repro_str = ""
         if self._crash_replays:
