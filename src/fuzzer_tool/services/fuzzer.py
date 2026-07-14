@@ -3398,13 +3398,10 @@ class Fuzzer:
         rss_kb = self._peak_rss
         rss_str = f" | rss: {rss_kb // 1024}MB" if rss_kb >= 1024 else f" | rss: {rss_kb}KB"
         ops_str = ""
-        if self.op_counts:
-            rates = []
-            for op, count in sorted(self.op_counts.items(), key=lambda x: -x[1])[:3]:
-                succ = self.op_success.get(op, 0)
-                pct = succ / count * 100 if count else 0
-                rates.append(f"{op}:{pct:.0f}%")
-            ops_str = " | ops: " + " ".join(rates)
+        if self._last_ops_used:
+            # Show last 3 operators selected (most recent first, deduped)
+            recent = list(dict.fromkeys(reversed(self._last_ops_used)))[:3]
+            ops_str = " | ops: " + " ".join(recent)
         div_str = ""
         if len(self._edge_tracker.seed_hit_counts) >= 2:
             diversity = self._edge_tracker.compute_corpus_diversity()
