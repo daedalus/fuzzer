@@ -3371,8 +3371,11 @@ class Fuzzer:
             markov_str += "+gen"
         cov_str = ""
         if self.shm_cov:
-            et_edges = self._edge_tracker.get_cumulative_edge_count()
-            cov_str = f" | shm: {self.shm_cov.cumulative_edges} et: {et_edges}"
+            shm_edges = self.shm_cov.cumulative_edges
+            gt = self._edge_tracker.good_turing_estimate()
+            max_edges = gt["n"] + gt["estimated_undiscovered"]
+            sat = gt["saturation"] * 100 if max_edges > 0 else 0
+            cov_str = f" | shm: {shm_edges} max: {max_edges} sat: {sat:.0f}%"
         elif self.ptrace_cov:
             cov_str = (
                 f" | edges: {self.ptrace_cov.cumulative_edges}"
