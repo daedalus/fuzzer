@@ -3424,13 +3424,12 @@ class Fuzzer:
         crps_str = ""
         if self._exec_time_tracker.count > 20:
             crps_str = f" | crps: {self._exec_time_tracker.mean_crps():.4f}"
-        print(
-            f"\r[*] execs: {self.exec_count} | corpus: {len(self.corpus)} | "
+        line = (
+            f"[*] execs: {self.exec_count} | corpus: {len(self.corpus)} | "
             f"crashes: {self.crash_count}{sig_str}{timeout_str} | eps: {eps:.0f} | "
-            f"time: {elapsed:.0f}s{rss_str}{ops_str}{dict_str}{markov_str}{cov_str}{mc_str}{div_str}{jac_str}{dr_str}{density_str}{repro_str}{brier_str}{crps_str}",
-            end="",
-            flush=True,
+            f"time: {elapsed:.0f}s{rss_str}{ops_str}{dict_str}{markov_str}{cov_str}{mc_str}{div_str}{jac_str}{dr_str}{density_str}{repro_str}{brier_str}{crps_str}"
         )
+        print(line, flush=True)
 
     def run(self, iterations=0):
         print(f"[*] Target: {self.target}")
