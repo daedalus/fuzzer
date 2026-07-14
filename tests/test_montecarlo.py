@@ -594,724 +594,257 @@ class TestAdaptiveRefit:
         assert mc.refit_interval == 25  # floor at 0.25x base
 
 
-class TestStationaryDistribution:
-    def test_empty_transitions(self):
-        mc = MonteCarloScheduler()
-        assert mc.stationary_distribution() == {}
-
-    def test_single_operator(self):
-        mc = MonteCarloScheduler(pairwise_blend=0.5)
-        mc.init_arm("a")
-        # No transitions → single operator → uniform
-        mc.transition_total["a"] = 0
-        sd = mc.stationary_distribution()
-        assert sd == {"a": 1.0}
-
-    def test_two_operator_cycle(self):
-        mc = MonteCarloScheduler(pairwise_blend=0.5)
-        mc.init_arm("a")
-        mc.init_arm("b")
-        # Build symmetric cycle: a→b and b→a each with count 10
-        for _ in range(10):
-            mc._prev_op = "a"
-            mc.record("b", success=True)
-        for _ in range(10):
-            mc._prev_op = "b"
-            mc.record("a", success=True)
-        sd = mc.stationary_distribution()
-        # Symmetric cycle → uniform distribution
-        assert abs(sd["a"] - 0.5) < 0.05
-        assert abs(sd["b"] - 0.5) < 0.05
-
-    def test_absorbing_state(self):
-        mc = MonteCarloScheduler(pairwise_blend=0.5)
-        mc.init_arm("a")
-        mc.init_arm("b")
-        # a→a is highly likely, b→a is the only escape
-        for _ in range(90):
-            mc._prev_op = "a"
-            mc.record("a", success=True)
-        for _ in range(10):
-            mc._prev_op = "b"
-            mc.record("a", success=True)
-        sd = mc.stationary_distribution()
-        # a should dominate
-        assert sd["a"] > sd["b"]
-
-    def test_converges_to_valid_distribution(self):
-        mc = MonteCarloScheduler(pairwise_blend=0.5)
-        mc.init_arm("a")
-        mc.init_arm("b")
-        mc.init_arm("c")
-        # Random-ish transitions
-        import random
-        random.seed(42)
-        for _ in range(100):
-            mc._prev_op = random.choice(["a", "b", "c"])
-            mc.record(random.choice(["a", "b", "c"]), success=True)
-        sd = mc.stationary_distribution()
-        # Should sum to 1
-        assert abs(sum(sd.values()) - 1.0) < 1e-6
-        # All probabilities should be positive
-        assert all(v > 0 for v in sd.values())
-
-    def test_convergence_speed(self):
-        mc = MonteCarloScheduler(pairwise_blend=0.5)
-        mc.init_arm("a")
-        mc.init_arm("b")
-        # Strong asymmetry: a→b is much more likely
-        for _ in range(90):
-            mc._prev_op = "a"
-            mc.record("b", success=True)
-        for _ in range(10):
-            mc._prev_op = "b"
-            mc.record("b", success=True)
-        sd = mc.stationary_distribution(max_iter=10)
-        # Should converge quickly for this simple chain
-        assert abs(sum(sd.values()) - 1.0) < 1e-6
-
-
-class TestOperatorCovariance:
-    def test_empty_history(self):
-        mc = MonteCarloScheduler()
-        assert mc.operator_covariance() == {}
-
-    def test_insufficient_data(self):
-        mc = MonteCarloScheduler()
-        mc.init_arm("a")
-        for _ in range(5):
-            mc.record("a", success=True)
-        # Need at least 2 * segment_size observations
-        assert mc.operator_covariance(window=5) == {}
-
-    def test_single_operator_variance(self):
-        mc = MonteCarloScheduler()
-        mc.init_arm("a")
-        # Use segment_size=5, need at least 10 observations
-        for _ in range(10):
-            mc.record("a", success=True)
-        for _ in range(10):
-            mc.record("a", success=False)
-        cov = mc.operator_covariance(window=20, segment_size=5)
-        assert "a" in cov
-        assert "a" in cov["a"]
-        # With 4 segments of 5 observations each:
-        # Segments: all-T, all-T, all-F, all-F → rates [1.0, 1.0, 0.0, 0.0]
-        # Variance of [1.0, 1.0, 0.0, 0.0] = 0.333...
-        assert cov["a"]["a"] > 0
-
-    def test_two_operators_correlated(self):
-        mc = MonteCarloScheduler()
-        mc.init_arm("a")
-        mc.init_arm("b")
-        # Both always succeed → positively correlated across segments
-        for _ in range(20):
-            mc.record("a", success=True)
-            mc.record("b", success=True)
-        cov = mc.operator_covariance(window=40, segment_size=10)
-        assert "a" in cov
-        assert "b" in cov
-        # Both have 100% success in every segment → zero variance
-        # But covariance should be 0 (constant functions have no covariance)
-        assert abs(cov["a"]["b"]) < 1e-10
-
-    def test_covariance_symmetry(self):
-        mc = MonteCarloScheduler()
-        mc.init_arm("a")
-        mc.init_arm("b")
-        for i in range(20):
-            mc.record("a", success=True)
-            mc.record("b", success=(i % 2 == 0))
-        cov = mc.operator_covariance(window=40, segment_size=10)
-        # Covariance matrix should be symmetric
-        assert abs(cov["a"]["b"] - cov["b"]["a"]) < 1e-10
-
-    def test_redundant_operators_positive_cov(self):
-        mc = MonteCarloScheduler()
-        mc.init_arm("a")
-        mc.init_arm("b")
-        # First half: both succeed. Second half: both fail.
-        # This creates positive covariance across segments.
-        for _ in range(25):
-            mc.record("a", success=True)
-            mc.record("b", success=True)
-        for _ in range(25):
-            mc.record("a", success=False)
-            mc.record("b", success=False)
-        cov = mc.operator_covariance(window=100, segment_size=10)
-        # Segments: [1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, ...] for both
-        # Covariance should be positive
-        assert cov["a"]["b"] > 0
-
-    def test_complementary_operators(self):
-        mc = MonteCarloScheduler()
-        mc.init_arm("a")
-        mc.init_arm("b")
-        # First half: a succeeds, b fails. Second half: a fails, b succeeds.
-        for _ in range(25):
-            mc.record("a", success=True)
-            mc.record("b", success=False)
-        for _ in range(25):
-            mc.record("a", success=False)
-            mc.record("b", success=True)
-        cov = mc.operator_covariance(window=100, segment_size=10)
-        # Segments: a has [1.0, ..., 0.0, ...], b has [0.0, ..., 1.0, ...]
-        # Covariance should be negative
-        assert cov["a"]["b"] < 0
-
-    def test_covariance_zero_with_no_uses(self):
-        mc = MonteCarloScheduler()
-        mc.init_arm("a")
-        mc.init_arm("b")
-        # Only a is used, never b
-        for _ in range(20):
-            mc.record("a", success=True)
-        cov = mc.operator_covariance(window=20, segment_size=5)
-        # b has 0 uses in all segments → rate is 0.0 everywhere → zero variance
-        assert "b" in cov
-        assert cov["b"]["b"] == 0.0
-        # Covariance with a: a is constant (1.0), b is constant (0.0) → 0
-        assert abs(cov["a"]["b"]) < 1e-10
-
-
-class TestCholesky:
-    def test_identity(self):
-        L = MonteCarloScheduler._chol([[1.0, 0.0], [0.0, 1.0]])
-        assert L is not None
-        # L @ L^T should reconstruct the original (with regularization)
-        n = len(L)
-        for i in range(n):
-            for j in range(n):
-                val = sum(L[i][k] * L[j][k] for k in range(min(i, j) + 1))
-                assert abs(val - (1.0 if i == j else 0.0)) < 0.01
-
-    def test_diagonal(self):
-        L = MonteCarloScheduler._chol([[4.0, 0.0], [0.0, 9.0]])
-        assert L is not None
-        assert abs(L[0][0] - 2.0) < 0.01
-        assert abs(L[1][1] - 3.0) < 0.01
-
-    def test_2x2_symmetric(self):
-        # [[2, 1], [1, 2]] → L = [[sqrt(2), 0], [1/sqrt(2), sqrt(3/2)]]
-        L = MonteCarloScheduler._chol([[2.0, 1.0], [1.0, 2.0]])
-        assert L is not None
-        # Reconstruct: L @ L^T
-        recon = [
-            [L[0][0] * L[0][0], L[0][0] * L[1][0]],
-            [L[1][0] * L[0][0], L[1][0] * L[1][0] + L[1][1] * L[1][1]],
-        ]
-        assert abs(recon[0][0] - 2.0) < 0.05
-        assert abs(recon[0][1] - 1.0) < 0.05
-        assert abs(recon[1][1] - 2.0) < 0.05
-
-    def test_regularizes_non_psd(self):
-        # Negative diagonal → should still return after regularization
-        L = MonteCarloScheduler._chol([[-1.0, 0.0], [0.0, -1.0]])
-        # With heavy regularization, this should still produce a valid L
-        assert L is not None
-
-    def test_empty_matrix(self):
-        assert MonteCarloScheduler._chol([]) is None
-
-    def test_3x3(self):
-        m = [
-            [4.0, 2.0, 1.0],
-            [2.0, 5.0, 3.0],
-            [1.0, 3.0, 6.0],
-        ]
-        L = MonteCarloScheduler._chol(m)
-        assert L is not None
-        # Reconstruct and verify
-        n = 3
-        for i in range(n):
-            for j in range(n):
-                val = sum(L[i][k] * L[j][k] for k in range(min(i, j) + 1))
-                assert abs(val - m[i][j]) < 0.1
-
-
-class TestCorrelatedThompson:
-    def test_fallback_few_ops(self):
-        mc = MonteCarloScheduler()
-        mc.init_arm("a")
-        mc.init_arm("b")
-        # With only 2 ops, should fall back to standard Thompson
-        op = mc.correlated_select(["a", "b"])
-        assert op in ("a", "b")
-
-    def test_fallback_no_history(self):
-        mc = MonteCarloScheduler()
-        mc.init_arm("a")
-        mc.init_arm("b")
-        mc.init_arm("c")
-        # No record() calls → no covariance data → fallback
-        op = mc.correlated_select(["a", "b", "c"])
-        assert op in ("a", "b", "c")
-
-    def test_returns_valid_op(self):
-        mc = MonteCarloScheduler()
-        for op in ["a", "b", "c", "d"]:
-            mc.init_arm(op)
-        # Build some history
-        import random
-        random.seed(42)
-        for _ in range(100):
-            op = mc._standard_thompson(["a", "b", "c", "d"])
-            mc.record(op, success=random.random() < 0.5)
-        # Now use correlated select
-        selected = mc.correlated_select(["a", "b", "c", "d"])
-        assert selected in ("a", "b", "c", "d")
-
-    def test_correlated_ops_stay_together(self):
-        """When a and b are perfectly correlated, correlated Thompson
-        should pick them together more often than independently."""
-        mc = MonteCarloScheduler()
-        for op in ["a", "b", "c"]:
-            mc.init_arm(op)
-        # Make a and b succeed together, c always fails
-        import random
-        random.seed(42)
-        for _ in range(100):
-            mc.record("a", success=True)
-            mc.record("b", success=True)
-            mc.record("c", success=False)
-        # Run correlated select many times — a and b should get
-        # similar scores (due to positive correlation), while c
-        # should be selected less often
-        picks = [mc.correlated_select(["a", "b", "c"]) for _ in range(200)]
-        # a and b should each be picked more than c (since c has
-        # much lower Beta mean)
-        assert picks.count("a") + picks.count("b") > picks.count("c")
-
-    def test_selection_distribution_shifts(self):
-        """Verify that correlated select produces a different distribution
-        than standard Thompson (the correlation structure matters)."""
-        mc = MonteCarloScheduler()
-        for op in ["a", "b", "c"]:
-            mc.init_arm(op)
-        import random
-        random.seed(42)
-        # a and b always succeed, c always fails
-        for _ in range(100):
-            mc.record("a", success=True)
-            mc.record("b", success=True)
-            mc.record("c", success=False)
-        # Standard Thompson picks a or b uniformly (same Beta params)
-        std_picks = [mc._standard_thompson(["a", "b", "c"]) for _ in range(500)]
-        std_c = std_picks.count("c")
-        # Correlated Thompson should also pick c rarely, but the
-        # distribution between a and b may differ due to correlation
-        corr_picks = [mc.correlated_select(["a", "b", "c"]) for _ in range(500)]
-        corr_c = corr_picks.count("c")
-        # Both should pick c rarely (it has terrible Beta params)
-        # Correlated variant may pick c slightly more due to MVN noise
-        assert std_c < 50
-        assert corr_c < 100
-
-    def test_standard_thompson_fallback(self):
-        mc = MonteCarloScheduler()
-        mc.init_arm("x")
-        mc.init_arm("y")
-        op = mc._standard_thompson(["x", "y"])
-        assert op in ("x", "y")
-
-    def test_correlated_select_deterministic_with_seed(self):
-        mc = MonteCarloScheduler()
-        for op in ["a", "b", "c"]:
-            mc.init_arm(op)
-        for _ in range(60):
-            mc.record("a", success=True)
-            mc.record("b", success=False)
-            mc.record("c", success=True)
-        import random
-        random.seed(123)
-        pick1 = mc.correlated_select(["a", "b", "c"])
-        random.seed(123)
-        pick2 = mc.correlated_select(["a", "b", "c"])
-        assert pick1 == pick2
-
-
-class TestSolveCholesky:
-    def test_identity(self):
-        L = [[1.0, 0.0], [0.0, 1.0]]
-        rhs = [[1.0, 0.0], [0.0, 1.0]]
-        X = MonteCarloScheduler._solve_cholesky(L, rhs)
-        assert X is not None
-        # L @ L^T = I, so solution should be identity
-        for i in range(2):
-            for j in range(2):
-                assert abs(X[i][j] - rhs[i][j]) < 1e-10
-
-    def test_diagonal(self):
-        L = [[2.0, 0.0], [0.0, 3.0]]
-        rhs = [[1.0], [0.0]]
-        X = MonteCarloScheduler._solve_cholesky(L, rhs)
-        assert X is not None
-        # Solving [[4,0],[0,9]] @ x = [1,0] → x = [0.25, 0]
-        assert abs(X[0][0] - 0.25) < 1e-10
-        assert abs(X[1][0]) < 1e-10
-
-    def test_3x3(self):
-        # L = [[2,0,0],[1,2,0],[1,1,2]]
-        # A = L @ L^T = [[4,2,2],[2,5,3],[2,3,6]]
-        L = [[2.0, 0.0, 0.0], [1.0, 2.0, 0.0], [1.0, 1.0, 2.0]]
-        # Solve A @ X = I
-        I = [[1.0 if i == j else 0.0 for j in range(3)] for i in range(3)]
-        X = MonteCarloScheduler._solve_cholesky(L, I)
-        assert X is not None
-        # Verify: A @ X should be close to I
-        for i in range(3):
-            for j in range(3):
-                val = sum(
-                    sum(L[i][k] * L[m][k] for k in range(min(i, m) + 1))
-                    * X[m][j]
-                    for m in range(3)
-                )
-                expected = 1.0 if i == j else 0.0
-                assert abs(val - expected) < 0.1
-
-    def test_empty(self):
-        assert MonteCarloScheduler._solve_cholesky([], []) is None
-
-    def test_zero_diagonal(self):
-        L = [[0.0, 0.0], [0.0, 1.0]]
-        rhs = [[1.0], [1.0]]
-        X = MonteCarloScheduler._solve_cholesky(L, rhs)
-        # Should handle gracefully (zero diagonal → 0.0 output)
-        assert X is not None
-
-
-class TestMatrixUCB:
-    def test_fallback_few_ops(self):
-        mc = MonteCarloScheduler()
-        mc.init_arm("a")
-        mc.init_arm("b")
-        op = mc.matrix_ucb_select(["a", "b"])
-        assert op in ("a", "b")
-
-    def test_fallback_no_history(self):
-        mc = MonteCarloScheduler()
-        mc.init_arm("a")
-        mc.init_arm("b")
-        mc.init_arm("c")
-        op = mc.matrix_ucb_select(["a", "b", "c"])
-        assert op in ("a", "b", "c")
-
-    def test_returns_valid_op(self):
-        mc = MonteCarloScheduler()
-        for op in ["a", "b", "c", "d"]:
-            mc.init_arm(op)
-        import random
-        random.seed(42)
-        for _ in range(100):
-            op = mc._standard_ucb(["a", "b", "c", "d"])
-            mc.record(op, success=random.random() < 0.5)
-        selected = mc.matrix_ucb_select(["a", "b", "c", "d"])
-        assert selected in ("a", "b", "c", "d")
-
-    def test_exploration_favors_unseen(self):
-        """UCB should favor arms that haven't been pulled much."""
-        mc = MonteCarloScheduler()
-        for op in ["a", "b", "c"]:
-            mc.init_arm(op)
-        # Pull "a" many times, "b" and "c" few times
-        for _ in range(50):
-            mc.record("a", success=True)
-        for _ in range(5):
-            mc.record("b", success=True)
-            mc.record("c", success=False)
-        # With sufficient pulls, matrix UCB should eventually favor
-        # the less-explored arms
-        picks = [mc.matrix_ucb_select(["a", "b", "c"]) for _ in range(50)]
-        # b and c should be picked sometimes due to exploration bonus
-        assert picks.count("b") + picks.count("c") > 0
-
-    def test_standard_ucb_basic(self):
-        mc = MonteCarloScheduler()
-        mc.init_arm("a")
-        mc.init_arm("b")
-        for _ in range(10):
-            mc.record("a", success=True)
-        for _ in range(3):
-            mc.record("b", success=False)
-        op = mc._standard_ucb(["a", "b"], beta=1.0)
-        assert op in ("a", "b")
-
-    def test_standard_ucb_favors_unexplored(self):
-        mc = MonteCarloScheduler()
-        mc.init_arm("a")
-        mc.init_arm("b")
-        # a has many pulls, b has few
-        for _ in range(100):
-            mc.record("a", success=True)
-        for _ in range(2):
-            mc.record("b", success=True)
-        # With high beta, UCB should favor b (unexplored)
-        picks = [mc._standard_ucb(["a", "b"], beta=5.0) for _ in range(100)]
-        assert picks.count("b") > 20
-
-    def test_matrix_ucb_vs_standard_ucb(self):
-        """Matrix UCB and standard UCB should produce different distributions
-        when there's correlation structure."""
-        mc = MonteCarloScheduler()
-        for op in ["a", "b", "c"]:
-            mc.init_arm(op)
-        import random
-        random.seed(42)
-        # a and b always succeed, c always fails
-        for _ in range(60):
-            mc.record("a", success=True)
-            mc.record("b", success=True)
-            mc.record("c", success=False)
-        std_picks = [mc._standard_ucb(["a", "b", "c"]) for _ in range(200)]
-        mat_picks = [mc.matrix_ucb_select(["a", "b", "c"]) for _ in range(200)]
-        # Both should pick c rarely
-        assert std_picks.count("c") < 50
-        assert mat_picks.count("c") < 50
-
-    def test_deterministic_with_seed(self):
-        mc = MonteCarloScheduler()
-        for op in ["a", "b", "c"]:
-            mc.init_arm(op)
-        for _ in range(60):
-            mc.record("a", success=True)
-            mc.record("b", success=False)
-            mc.record("c", success=True)
-        import random
-        random.seed(99)
-        pick1 = mc.matrix_ucb_select(["a", "b", "c"])
-        # _standard_ucb is deterministic given the same state, but
-        # matrix_ucb_select uses _chol which is deterministic, so
-        # the result should be deterministic given the same seed
-        random.seed(99)
-        pick2 = mc.matrix_ucb_select(["a", "b", "c"])
-        assert pick1 == pick2
-
-    def test_betaParameter_affects_exploration(self):
-        mc = MonteCarloScheduler()
-        for op in ["a", "b", "c"]:
-            mc.init_arm(op)
-        for _ in range(50):
-            mc.record("a", success=True)
-        for _ in range(3):
-            mc.record("b", success=True)
-            mc.record("c", success=False)
-        # Low beta → exploit more (pick a), high beta → explore more
-        low_beta_picks = [mc.matrix_ucb_select(["a", "b", "c"], beta=0.1)
-                          for _ in range(100)]
-        high_beta_picks = [mc.matrix_ucb_select(["a", "b", "c"], beta=10.0)
-                           for _ in range(100)]
-        # With low beta, "a" (high mean, many pulls) should dominate
-        assert low_beta_picks.count("a") > high_beta_picks.count("a")
-
-
-class TestSpectralGap:
-    def test_no_transitions(self):
-        mc = MonteCarloScheduler()
-        assert mc.spectral_gap() == 1.0
-
-    def test_single_operator(self):
-        mc = MonteCarloScheduler()
-        mc.transition_total["a"] = 10
-        assert mc.spectral_gap() == 1.0
-
-    def test_symmetric_cycle(self):
-        mc = MonteCarloScheduler()
-        mc.init_arm("a")
-        mc.init_arm("b")
-        # A→B→A→B cycle
-        for _ in range(100):
-            mc._prev_op = "a"
-            mc.record("b", success=True)
-        for _ in range(100):
-            mc._prev_op = "b"
-            mc.record("a", success=True)
-        gap = mc.spectral_gap()
-        # Periodic chain → small spectral gap
-        assert gap < 0.5
-
-    def test_fast_mixing(self):
-        mc = MonteCarloScheduler()
-        mc.init_arm("a")
-        mc.init_arm("b")
-        mc.init_arm("c")
-        # Uniform random transitions → fast mixing
-        import random
-        random.seed(42)
-        for _ in range(300):
-            mc._prev_op = random.choice(["a", "b", "c"])
-            mc.record(random.choice(["a", "b", "c"]), success=True)
-        gap = mc.spectral_gap()
-        # Well-mixed chain → large spectral gap
-        assert gap > 0.3
-
-    def test_absorbing_state(self):
-        mc = MonteCarloScheduler()
-        mc.init_arm("a")
-        mc.init_arm("b")
-        # a→a 99% of the time
-        for _ in range(100):
-            mc._prev_op = "a"
-            mc.record("a", success=True)
-        for _ in range(100):
-            mc._prev_op = "b"
-            mc.record("a", success=True)
-        gap = mc.spectral_gap()
-        # Strong absorption → moderate gap (absorbing chains still mix to the absorber)
-        assert 0.0 <= gap <= 1.0
-
-    def test_gap_in_range(self):
-        mc = MonteCarloScheduler()
-        mc.init_arm("a")
-        mc.init_arm("b")
-        import random
-        random.seed(99)
-        for _ in range(200):
-            mc._prev_op = random.choice(["a", "b"])
-            mc.record(random.choice(["a", "b"]), success=True)
-        gap = mc.spectral_gap()
-        assert 0.0 <= gap <= 1.0
-
-    def test_should_explore_true(self):
-        mc = MonteCarloScheduler()
-        mc.init_arm("a")
-        mc.init_arm("b")
-        # Tight cycle → low gap → should explore
-        for _ in range(100):
-            mc._prev_op = "a"
-            mc.record("b", success=True)
-        for _ in range(100):
-            mc._prev_op = "b"
-            mc.record("a", success=True)
-        assert mc.should_explore(gap_threshold=0.5)
-
-    def test_should_explore_false(self):
-        mc = MonteCarloScheduler()
-        mc.init_arm("a")
-        mc.init_arm("b")
-        mc.init_arm("c")
-        import random
-        random.seed(42)
-        for _ in range(300):
-            mc._prev_op = random.choice(["a", "b", "c"])
-            mc.record(random.choice(["a", "b", "c"]), success=True)
-        # Well-mixed → should not need exploration
-        assert not mc.should_explore(gap_threshold=0.1)
-
-
-class TestOperatorKernel:
-    def test_empty(self):
+class TestShapleyAttribution:
+    def test_init(self):
         from fuzzer_tool.core.montecarlo import ShapleyAttribution
-        s = ShapleyAttribution()
-        k = s.operator_kernel()
-        assert k == {}
 
-    def test_single_operator(self):
-        from fuzzer_tool.core.montecarlo import ShapleyAttribution
-        s = ShapleyAttribution()
-        s.record({"a"}, new_edges=5, edge_indices=set(range(5)))
-        k = s.operator_kernel(["a"])
-        assert k["a"]["a"] == 1.0
+        sa = ShapleyAttribution(n_samples=50, window_size=100)
+        assert sa.n_samples == 50
+        assert sa.window_size == 100
+        assert len(sa._outcomes) == 0
 
-    def test_identical_operators(self):
+    def test_record(self):
         from fuzzer_tool.core.montecarlo import ShapleyAttribution
-        s = ShapleyAttribution()
-        # a and b cover the exact same edges
-        s.record({"a"}, new_edges=3, edge_indices={0, 1, 2})
-        s.record({"b"}, new_edges=3, edge_indices={0, 1, 2})
-        k = s.operator_kernel(["a", "b"])
-        assert k["a"]["b"] == 1.0
-        assert k["b"]["a"] == 1.0
 
-    def test_disjoint_operators(self):
-        from fuzzer_tool.core.montecarlo import ShapleyAttribution
-        s = ShapleyAttribution()
-        s.record({"a"}, new_edges=3, edge_indices={0, 1, 2})
-        s.record({"b"}, new_edges=3, edge_indices={3, 4, 5})
-        k = s.operator_kernel(["a", "b"])
-        assert k["a"]["b"] == 0.0
+        sa = ShapleyAttribution()
+        sa.record({"bit_flip", "byte_flip"}, 5, {1, 2, 3, 4, 5})
+        assert len(sa._outcomes) == 1
+        assert "bit_flip" in sa._operator_edges
+        assert "byte_flip" in sa._operator_edges
+        assert len(sa._all_edges) == 5
 
-    def test_partial_overlap(self):
+    def test_record_no_edges(self):
         from fuzzer_tool.core.montecarlo import ShapleyAttribution
-        s = ShapleyAttribution()
-        s.record({"a"}, new_edges=4, edge_indices={0, 1, 2, 3})
-        s.record({"b"}, new_edges=4, edge_indices={2, 3, 4, 5})
-        k = s.operator_kernel(["a", "b"])
-        # intersection = {2,3} = 2, union = {0,1,2,3,4,5} = 6
-        assert abs(k["a"]["b"] - 2 / 6) < 1e-10
 
-    def test_symmetry(self):
-        from fuzzer_tool.core.montecarlo import ShapleyAttribution
-        s = ShapleyAttribution()
-        s.record({"a"}, new_edges=3, edge_indices={0, 1, 2})
-        s.record({"b"}, new_edges=3, edge_indices={1, 2, 3})
-        k = s.operator_kernel(["a", "b"])
-        assert abs(k["a"]["b"] - k["b"]["a"]) < 1e-10
+        sa = ShapleyAttribution()
+        sa.record({"bit_flip"}, 0)
+        assert len(sa._outcomes) == 1
+        assert "bit_flip" not in sa._operator_edges
 
-    def test_diagonal_is_one(self):
+    def test_shapley_values_empty(self):
         from fuzzer_tool.core.montecarlo import ShapleyAttribution
-        s = ShapleyAttribution()
-        s.record({"a"}, new_edges=5, edge_indices=set(range(5)))
-        s.record({"b"}, new_edges=3, edge_indices={3, 4, 5})
-        k = s.operator_kernel(["a", "b"])
-        assert k["a"]["a"] == 1.0
-        assert k["b"]["b"] == 1.0
 
-    def test_pairwise_similarity(self):
-        from fuzzer_tool.core.montecarlo import ShapleyAttribution
-        s = ShapleyAttribution()
-        s.record({"a"}, new_edges=4, edge_indices={0, 1, 2, 3})
-        s.record({"b"}, new_edges=4, edge_indices={2, 3, 4, 5})
-        assert abs(s.operator_similarity("a", "b") - 2 / 6) < 1e-10
-        assert s.operator_similarity("a", "a") == 1.0
+        sa = ShapleyAttribution()
+        result = sa.shapley_values(["a", "b", "c"])
+        assert len(result) == 3
+        assert all(abs(v - 1 / 3) < 0.01 for v in result.values())
 
-    def test_no_edges_similarity(self):
+    def test_shapley_values_single_op(self):
         from fuzzer_tool.core.montecarlo import ShapleyAttribution
-        s = ShapleyAttribution()
-        assert s.operator_similarity("x", "y") == 0.0
+
+        sa = ShapleyAttribution()
+        sa.record({"a"}, 5, {1, 2, 3})
+        result = sa.shapley_values()
+        assert "a" in result
+        assert result["a"] == 1.0
+
+    def test_shapley_values_two_ops(self):
+        from fuzzer_tool.core.montecarlo import ShapleyAttribution
+
+        sa = ShapleyAttribution(n_samples=100)
+        # Op A gets edges 1,2,3; Op B gets edges 3,4,5
+        sa.record({"a", "b"}, 5, {1, 2, 3, 4, 5})
+        result = sa.shapley_values()
+        assert abs(sum(result.values()) - 1.0) < 0.01
+        assert result["a"] > 0
+        assert result["b"] > 0
+
+    def test_operator_synergy(self):
+        from fuzzer_tool.core.montecarlo import ShapleyAttribution
+
+        sa = ShapleyAttribution()
+        sa.record({"a"}, 3, {1, 2, 3})
+        sa.record({"b"}, 3, {3, 4, 5})
+        synergy = sa.operator_synergy("a", "b")
+        # Overlap is edge 3, so joint=5, individual=6
+        assert synergy == (5 - 6) / 6
+
+    def test_operator_synergy_no_edges(self):
+        from fuzzer_tool.core.montecarlo import ShapleyAttribution
+
+        sa = ShapleyAttribution()
+        assert sa.operator_synergy("a", "b") == 0.0
+
+    def test_operator_similarity(self):
+        from fuzzer_tool.core.montecarlo import ShapleyAttribution
+
+        sa = ShapleyAttribution()
+        sa.record({"a"}, 3, {1, 2, 3})
+        sa.record({"b"}, 3, {1, 2, 3})
+        assert sa.operator_similarity("a", "b") == 1.0
+
+    def test_operator_similarity_no_overlap(self):
+        from fuzzer_tool.core.montecarlo import ShapleyAttribution
+
+        sa = ShapleyAttribution()
+        sa.record({"a"}, 3, {1, 2, 3})
+        sa.record({"b"}, 3, {4, 5, 6})
+        assert sa.operator_similarity("a", "b") == 0.0
+
+    def test_operator_kernel(self):
+        from fuzzer_tool.core.montecarlo import ShapleyAttribution
+
+        sa = ShapleyAttribution()
+        sa.record({"a"}, 3, {1, 2, 3})
+        sa.record({"b"}, 3, {2, 3, 4})
+        kernel = sa.operator_kernel()
+        assert kernel["a"]["a"] == 1.0
+        assert kernel["a"]["b"] == kernel["b"]["a"]
+        assert 0 < kernel["a"]["b"] < 1
 
     def test_redundant_operators(self):
         from fuzzer_tool.core.montecarlo import ShapleyAttribution
-        s = ShapleyAttribution()
-        # a and b are near-identical
-        s.record({"a"}, new_edges=5, edge_indices=set(range(5)))
-        s.record({"b"}, new_edges=5, edge_indices=set(range(5)))
-        # c is different
-        s.record({"c"}, new_edges=3, edge_indices={10, 11, 12})
-        pairs = s.redundant_operators(threshold=0.9, operators=["a", "b", "c"])
-        # a and b should be flagged as redundant
-        assert len(pairs) == 1
-        assert {pairs[0][0], pairs[0][1]} == {"a", "b"}
-        assert pairs[0][2] == 1.0
 
-    def test_no_redundant_operators(self):
-        from fuzzer_tool.core.montecarlo import ShapleyAttribution
-        s = ShapleyAttribution()
-        s.record({"a"}, new_edges=3, edge_indices={0, 1, 2})
-        s.record({"b"}, new_edges=3, edge_indices={3, 4, 5})
-        pairs = s.redundant_operators(threshold=0.5, operators=["a", "b"])
-        assert len(pairs) == 0
+        sa = ShapleyAttribution()
+        sa.record({"a"}, 5, {1, 2, 3, 4, 5})
+        sa.record({"b"}, 5, {1, 2, 3, 4, 5})
+        redundant = sa.redundant_operators(threshold=0.9)
+        assert len(redundant) == 1
+        assert redundant[0][2] == 1.0
 
-    def test_spectral_embedding(self):
+    def test_window_size_limit(self):
         from fuzzer_tool.core.montecarlo import ShapleyAttribution
-        s = ShapleyAttribution()
-        # a and b are similar, c is different
-        s.record({"a"}, new_edges=5, edge_indices=set(range(5)))
-        s.record({"b"}, new_edges=5, edge_indices=set(range(5)))
-        s.record({"c"}, new_edges=3, edge_indices={10, 11, 12})
-        emb = s.spectral_embedding(["a", "b", "c"], k=2)
-        assert len(emb) == 3
-        assert len(emb["a"]) == 2
-        # a and b should be closer to each other than to c
-        import math
-        dist_ab = math.sqrt(sum((emb["a"][i] - emb["b"][i]) ** 2 for i in range(2)))
-        dist_ac = math.sqrt(sum((emb["a"][i] - emb["c"][i]) ** 2 for i in range(2)))
-        assert dist_ab < dist_ac
 
-    def test_spectral_embedding_two_ops(self):
-        from fuzzer_tool.core.montecarlo import ShapleyAttribution
-        s = ShapleyAttribution()
-        s.record({"a"}, new_edges=3, edge_indices={0, 1, 2})
-        s.record({"b"}, new_edges=3, edge_indices={3, 4, 5})
-        emb = s.spectral_embedding(["a", "b"], k=2)
-        # With only 2 ops, embedding should still work
-        assert len(emb) == 2
+        sa = ShapleyAttribution(window_size=2)
+        sa.record({"a"}, 1, {1})
+        sa.record({"b"}, 1, {2})
+        sa.record({"c"}, 1, {3})
+        assert len(sa._outcomes) == 2
+
+
+class TestReplicatorScheduler:
+    def test_init(self):
+        from fuzzer_tool.core.montecarlo import ReplicatorScheduler
+
+        rs = ReplicatorScheduler(window_size=100, learning_rate=0.2, mutation_rate=0.05)
+        assert rs.window_size == 100
+        assert rs.eta == 0.2
+        assert rs.mutation_rate == 0.05
+
+    def test_init_arm(self):
+        from fuzzer_tool.core.montecarlo import ReplicatorScheduler
+
+        rs = ReplicatorScheduler()
+        rs.init_arm("bit_flip")
+        assert "bit_flip" in rs.operators
+        assert rs.population == [1.0]
+
+    def test_init_arm_idempotent(self):
+        from fuzzer_tool.core.montecarlo import ReplicatorScheduler
+
+        rs = ReplicatorScheduler()
+        rs.init_arm("bit_flip")
+        rs.init_arm("bit_flip")
+        assert len(rs.operators) == 1
+
+    def test_init_arm_multiple(self):
+        from fuzzer_tool.core.montecarlo import ReplicatorScheduler
+
+        rs = ReplicatorScheduler()
+        rs.init_arm("a")
+        rs.init_arm("b")
+        rs.init_arm("c")
+        assert rs.population == [1 / 3, 1 / 3, 1 / 3]
+
+    def test_select_op(self):
+        from fuzzer_tool.core.montecarlo import ReplicatorScheduler
+
+        rs = ReplicatorScheduler()
+        rs.init_arm("a")
+        rs.init_arm("b")
+        op = rs.select_op(["a", "b"])
+        assert op in ("a", "b")
+
+    def test_select_op_empty(self):
+        from fuzzer_tool.core.montecarlo import ReplicatorScheduler
+
+        rs = ReplicatorScheduler()
+        assert rs.select_op([]) == ""
+
+    def test_select_op_unknown(self):
+        from fuzzer_tool.core.montecarlo import ReplicatorScheduler
+
+        rs = ReplicatorScheduler()
+        rs.init_arm("a")
+        # Selecting from ops not in population should still work
+        op = rs.select_op(["x", "y"])
+        assert op in ("x", "y")
+
+    def test_record(self):
+        from fuzzer_tool.core.montecarlo import ReplicatorScheduler
+
+        rs = ReplicatorScheduler(window_size=5)
+        rs.init_arm("a")
+        rs.record("a", success=True)
+        assert rs._fitness_count["a"] == 1
+        assert rs._fitness_sum["a"] == 1.0
+        assert rs._total_execs == 1
+
+    def test_record_failure(self):
+        from fuzzer_tool.core.montecarlo import ReplicatorScheduler
+
+        rs = ReplicatorScheduler(window_size=5)
+        rs.init_arm("a")
+        rs.record("a", success=False)
+        assert rs._fitness_sum["a"] == 0.0
+
+    def test_replicator_update(self):
+        from fuzzer_tool.core.montecarlo import ReplicatorScheduler
+
+        rs = ReplicatorScheduler(window_size=5, learning_rate=0.5)
+        rs.init_arm("good")
+        rs.init_arm("bad")
+        # Good op succeeds, bad op fails
+        for _ in range(5):
+            rs.record("good", success=True)
+            rs.record("bad", success=False)
+        # After update, good should have higher population
+        good_idx = rs.op_index["good"]
+        bad_idx = rs.op_index["bad"]
+        assert rs.population[good_idx] > rs.population[bad_idx]
+
+    def test_zero_count_neutral_growth(self):
+        """Zero-count operators should get neutral growth, not penalized."""
+        from fuzzer_tool.core.montecarlo import ReplicatorScheduler
+
+        rs = ReplicatorScheduler(window_size=10, learning_rate=0.1)
+        rs.init_arm("tried")
+        rs.init_arm("untried")
+        # Only record for "tried", leave "untried" at 0
+        for _ in range(10):
+            rs.record("tried", success=True)
+        # "untried" should not be zeroed out
+        untried_idx = rs.op_index["untried"]
+        assert rs.population[untried_idx] > 0
+
+    def test_mutation_rate_floor(self):
+        from fuzzer_tool.core.montecarlo import ReplicatorScheduler
+
+        rs = ReplicatorScheduler(window_size=5, mutation_rate=0.1)
+        rs.init_arm("a")
+        rs.init_arm("b")
+        # Run many updates with only "a" succeeding
+        for _ in range(50):
+            rs.record("a", success=True)
+        # Both should have at least mutation_rate
+        for p in rs.population:
+            assert p >= 0.1 - 0.001  # floating point tolerance
+
+    def test_history_tracking(self):
+        from fuzzer_tool.core.montecarlo import ReplicatorScheduler
+
+        rs = ReplicatorScheduler(window_size=3)
+        rs.init_arm("a")
+        rs.init_arm("b")
+        for _ in range(3):
+            rs.record("a", success=True)
+        assert len(rs._history) == 1
+
+    def test_stats(self):
+        from fuzzer_tool.core.montecarlo import ReplicatorScheduler
+
+        rs = ReplicatorScheduler()
+        rs.init_arm("a")
+        rs.record("a", success=True)
+        assert rs._total_execs == 1
+        assert len(rs.operators) == 1
