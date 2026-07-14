@@ -147,7 +147,11 @@ class MonteCarloScheduler:
         self._op_success_history.append((name, success))
 
         # Decay periodically to avoid zeroing out alpha/beta
-        if self.arm_decay < 1.0 and self.decay_interval > 0 and len(self._op_success_history) % self.decay_interval == 0:
+        if (
+            self.arm_decay < 1.0
+            and self.decay_interval > 0
+            and len(self._op_success_history) % self.decay_interval == 0
+        ):
             for k in self.arm_alpha:
                 self.arm_alpha[k] *= self.arm_decay
             for k in self.arm_beta:
@@ -422,9 +426,7 @@ class MonteCarloScheduler:
         except (OSError, json.JSONDecodeError, KeyError):
             return False
 
-    def stationary_distribution(
-        self, max_iter: int = 200, tol: float = 1e-8
-    ) -> dict[str, float]:
+    def stationary_distribution(self, max_iter: int = 200, tol: float = 1e-8) -> dict[str, float]:
         """Compute the stationary distribution π of the transition Markov chain.
 
         Uses power iteration: π_{k+1} = π_k · P until convergence.
@@ -442,9 +444,8 @@ class MonteCarloScheduler:
             return {}
 
         operators = sorted(
-            set(self.transition_total.keys()) | {
-                op for targets in self.transition_counts.values() for op in targets
-            }
+            set(self.transition_total.keys())
+            | {op for targets in self.transition_counts.values() for op in targets}
         )
         n = len(operators)
         if n == 0:
@@ -504,9 +505,8 @@ class MonteCarloScheduler:
             return 1.0
 
         operators = sorted(
-            set(self.transition_total.keys()) | {
-                op for targets in self.transition_counts.values() for op in targets
-            }
+            set(self.transition_total.keys())
+            | {op for targets in self.transition_counts.values() for op in targets}
         )
         n = len(operators)
         if n <= 1:
@@ -546,8 +546,7 @@ class MonteCarloScheduler:
 
         # Deflate: P_deflated = P - v * v^T
         deflated: list[list[float]] = [
-            [p_matrix[i][j] - v[i] * v[j] for j in range(n)]
-            for i in range(n)
+            [p_matrix[i][j] - v[i] * v[j] for j in range(n)] for i in range(n)
         ]
 
         # Power iteration on deflated matrix for λ₂
@@ -609,10 +608,7 @@ class MonteCarloScheduler:
             return self._standard_thompson(ops)
 
         n = len(ops)
-        cov_matrix = [
-            [cov[ops[i]].get(ops[j], 0.0) for j in range(n)]
-            for i in range(n)
-        ]
+        cov_matrix = [[cov[ops[i]].get(ops[j], 0.0) for j in range(n)] for i in range(n)]
 
         chol = self._chol(cov_matrix)
         if chol is None:
@@ -678,9 +674,7 @@ class MonteCarloScheduler:
                     l[i][j] = (a[i][j] - s) / l[j][j] if l[j][j] > 0 else 0.0
         return l
 
-    def matrix_ucb_select(
-        self, ops: list[str], beta: float = 2.0, segment_size: int = 50
-    ) -> str:
+    def matrix_ucb_select(self, ops: list[str], beta: float = 2.0, segment_size: int = 50) -> str:
         """Select operator via matrix-based Upper Confidence Bound.
 
         Adjusts UCB exploration bonuses using the covariance structure.
@@ -712,18 +706,15 @@ class MonteCarloScheduler:
         n = len(ops)
         mu = [means[ops[i]] for i in range(n)]
 
-        cov_matrix = [
-            [cov[ops[i]].get(ops[j], 0.0) for j in range(n)]
-            for i in range(n)
-        ]
+        cov_matrix = [[cov[ops[i]].get(ops[j], 0.0) for j in range(n)] for i in range(n)]
 
         chol = self._chol(cov_matrix)
         if chol is None:
             return self._standard_ucb(ops, beta)
 
-        inv_cov = self._solve_cholesky(chol, [[1.0 if i == j else 0.0
-                                                for j in range(n)]
-                                               for i in range(n)])
+        inv_cov = self._solve_cholesky(
+            chol, [[1.0 if i == j else 0.0 for j in range(n)] for i in range(n)]
+        )
         if inv_cov is None:
             return self._standard_ucb(ops, beta)
 
@@ -847,9 +838,8 @@ class MonteCarloScheduler:
                     var = sum((s[i] - means[i]) ** 2 for s in segments) / (n_seg - 1)
                     cov_matrix[op_i][op_j] = var
                 elif i < j:
-                    cov_val = (
-                        sum((s[i] - means[i]) * (s[j] - means[j]) for s in segments)
-                        / (n_seg - 1)
+                    cov_val = sum((s[i] - means[i]) * (s[j] - means[j]) for s in segments) / (
+                        n_seg - 1
                     )
                     cov_matrix[op_i][op_j] = cov_val
                     cov_matrix[op_j][op_i] = cov_val
@@ -1173,13 +1163,21 @@ class MOptScheduler:
 class ShapleyAttribution:
     """Compute Shapley values for mutation operator contribution.
 
-    The Shapley value fairly distributes credit among operators when
-    multiple ops contribute to discoveries. It considers all possible
-    orderings of operators and computes the average marginal contribution.
+    The Shapley value distributes credit among operators when multiple
+    ops contribute to discoveries. It considers all possible orderings
+    of operators and computes the average marginal contribution.
 
-    For fuzzer scheduling, this answers: "if we removed operator X from
-    the pool, how much would total coverage drop?" — accounting for
-    synergistic effects between operators.
+    NOTE: This measures correlation, not causation. The current data
+    collection attributes ALL discovered edges to every co-occurring
+    operator in a stacked mutation, so two operators that merely
+    co-occurred with a genuinely productive one appear identical to
+    that operator. True causal attribution would require tracking
+    per-operator marginal responsibility at the mutation level (e.g.,
+    only crediting the last operator in a chain, or splitting credit
+    by chain position).
+
+    For fuzzer scheduling, this answers: "which operators co-occur
+    with discoveries?" — not "which operators caused them?"
 
     Uses sampling-based estimation (not exact enumeration) for efficiency.
     With N operators, exact Shapley requires 2^N evaluations. Sampling
@@ -1278,9 +1276,7 @@ class ShapleyAttribution:
         individual = len(edges_a) + len(edges_b)
         return (joint - individual) / max(1, individual)
 
-    def operator_kernel(
-        self, operators: list[str] | None = None
-    ) -> dict[str, dict[str, float]]:
+    def operator_kernel(self, operators: list[str] | None = None) -> dict[str, dict[str, float]]:
         """Build a kernel matrix measuring operator similarity via Jaccard.
 
         K(i,j) = |E_i ∩ E_j| / |E_i ∪ E_j|
@@ -1564,31 +1560,44 @@ class ReplicatorScheduler:
         - f_i = fitness (success rate) of operator i in this window
         - phi = average fitness across all operators
         - eta = learning rate
+
+        Operators with zero trials are excluded from phi and receive
+        neutral growth (fitness = phi), preventing starvation of
+        conditionally-relevant operators.
         """
         n = len(self.operators)
         if n == 0:
             return
 
-        # Compute fitness for each operator
+        # Compute fitness for each operator, track which have data
         fitness = []
+        has_data = []
         for op in self.operators:
             count = self._fitness_count.get(op, 0)
             if count > 0:
                 fitness.append(self._fitness_sum[op] / count)
+                has_data.append(True)
             else:
-                fitness.append(0.0)
+                fitness.append(0.0)  # placeholder, will be overridden
+                has_data.append(False)
 
-        # Average fitness (weighted by population)
-        phi = (
-            sum(x * f for x, f in zip(self.population, fitness, strict=False))
-            if self.population
-            else 0.0
-        )
+        # Average fitness: only from operators with actual trials
+        if self.population and any(has_data):
+            phi = sum(
+                x * f for x, f, hd in zip(self.population, fitness, has_data, strict=False)
+                if hd
+            ) / sum(x for x, hd in zip(self.population, has_data, strict=False))
+        else:
+            phi = 0.0
 
         # Replicator step: x_i' = x_i * (1 + eta * (f_i - phi))
+        # Zero-count operators get neutral growth (f_i = phi)
         new_pop = []
         for i in range(n):
-            growth = 1.0 + self.eta * (fitness[i] - phi)
+            if has_data[i]:
+                growth = 1.0 + self.eta * (fitness[i] - phi)
+            else:
+                growth = 1.0  # neutral: no data, no penalty
             new_pop.append(max(0.0, self.population[i] * growth))
 
         # Normalize to simplex
