@@ -3087,17 +3087,16 @@ class Fuzzer:
                   f"({self._stall_recovery_execs / max(1, self.exec_count) * 100:.1f}%)")
 
         # Coverage — prefer edge_tracker (authoritative), fall back to SHM/ptrace
-        edges = self._edge_tracker.get_cumulative_edge_count()
+        # SHM bitmap is source of truth for unique edge count
         shm_edges = self.shm_cov.cumulative_edges if self.shm_cov else 0
-        if not edges:
-            if self.shm_cov:
-                edges = shm_edges
-            elif self.ptrace_cov:
-                edges = self.ptrace_cov.cumulative_edges
+        et_edges = self._edge_tracker.get_cumulative_edge_count()
+        edges = shm_edges if shm_edges else et_edges
+        if self.ptrace_cov:
+            edges = self.ptrace_cov.cumulative_edges
         density = self._edge_tracker.bitmap_density() * 100
         collision_risk = self._edge_tracker.birthday_collision_risk() * 100
-        if self.shm_cov and shm_edges != edges:
-            print(f"  Edges discovered:  {edges} (SHM bitmap: {shm_edges})")
+        if shm_edges and et_edges and shm_edges != et_edges:
+            print(f"  Edges discovered:  {edges} (ET tracked: {et_edges})")
         else:
             print(f"  Edges discovered:  {edges}")
         print(f"  Map density:       {density:.2f}%")
@@ -3371,8 +3370,9 @@ class Fuzzer:
             markov_str += "+gen"
         cov_str = ""
         if self.shm_cov:
-            et_edges = self._edge_tracker.get_cumulative_edge_count()
-            cov_str = f" | shm: {self.shm_cov.cumulative_edges} et: {et_edges}"
+            # SHM bitmap is source of truth for unique edge count
+            # Edge tracker may have inflated counts after bitmap resize
+            cov_str = f" | shm: {self.shm_cov.cumulative_edges}"
         elif self.ptrace_cov:
             cov_str = (
                 f" | edges: {self.ptrace_cov.cumulative_edges}"
@@ -3426,7 +3426,7 @@ class Fuzzer:
         density_str = f" | map: {density:.1f}%"
         if collision_risk > 10:
             density_str += f" (collision: {collision_risk:.0f}%)"
-            # Resize at 30% collision risk, starting small and doubling
+            # Resize at collision risk threshold, starting small and doubling
             if collision_risk > self._max_collision_risk and self.shm_cov:
                 current = self.shm_cov.size
                 new_size = min(1048576, current * 2)
@@ -3438,7 +3438,6 @@ class Fuzzer:
                     self.shm_cov.resize(new_size)
                     self.map_size = new_size
                     self._edge_tracker.map_size = new_size
-                    # Clear edge tracker caches to force rebuild with new map size
                     self._edge_tracker._spectrum_dirty = True
                     self._edge_tracker._aggregate_cache = None
                     density_str = f" | map: {self._edge_tracker.bitmap_density() * 100:.1f}% (collision: {collision_risk:.0f}%)"
