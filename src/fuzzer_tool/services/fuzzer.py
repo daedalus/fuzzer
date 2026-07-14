@@ -1001,20 +1001,15 @@ class Fuzzer:
 
     def _check_python_crashes(self):
         """Check for Python process crashes in dmesg that may indicate fuzzer issues."""
-        import time as _time
-
         # Get recent crashes from dmesg (not filtered by PID)
         all_crashes = self._dmesg._poll_text(since=self._dmesg._last_ts)
         for kc in all_crashes:
             # Check for Python process crashes
             if kc.process_name and "python" in kc.process_name.lower():
                 if kc.crash_type == "segfault":
-                    log.warning(
-                        "Python process crash detected: pid=%s, ip=%s, "
-                        "type=%s (may indicate fuzzer infrastructure issue)",
-                        kc.pid,
-                        kc.ip or "?",
-                        kc.crash_type,
+                    print(
+                        f"\n[*] Python process crash detected: pid={kc.pid}, ip={kc.ip or '?'}, "
+                        f"type={kc.crash_type} (may indicate fuzzer infrastructure issue)"
                     )
                     # Record as a special type of crash for diagnostics
                     kc.crash_type = "python_segfault"
