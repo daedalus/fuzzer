@@ -3096,7 +3096,8 @@ class Fuzzer:
         density = self._edge_tracker.bitmap_density() * 100
         collision_risk = self._edge_tracker.birthday_collision_risk() * 100
         if shm_edges and et_edges and shm_edges != et_edges:
-            print(f"  Edges discovered:  {edges} (ET tracked: {et_edges})")
+            print(f"  Edges discovered:  {shm_edges} (SHM unique positions)")
+            print(f"  ET positions:      {et_edges} (includes stale positions after resize)")
         else:
             print(f"  Edges discovered:  {edges}")
         print(f"  Map density:       {density:.2f}%")
@@ -3370,9 +3371,8 @@ class Fuzzer:
             markov_str += "+gen"
         cov_str = ""
         if self.shm_cov:
-            # SHM bitmap is source of truth for unique edge count
-            # Edge tracker may have inflated counts after bitmap resize
-            cov_str = f" | shm: {self.shm_cov.cumulative_edges}"
+            et_edges = self._edge_tracker.get_cumulative_edge_count()
+            cov_str = f" | shm: {self.shm_cov.cumulative_edges} et: {et_edges}"
         elif self.ptrace_cov:
             cov_str = (
                 f" | edges: {self.ptrace_cov.cumulative_edges}"
