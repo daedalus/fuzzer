@@ -184,8 +184,9 @@ def _branch_density_capstone(target: str) -> float | None:
     cond_branches = 0
     for insn in md.disasm(text_data, text_vaddr):
         if X86_GRP_JUMP in insn.groups:
-            is_long_jcc = (insn.bytes[0] == 0x0F and len(insn.bytes) >= 2
-                           and (insn.bytes[1] & 0xF0) == 0x80)
+            is_long_jcc = (
+                insn.bytes[0] == 0x0F and len(insn.bytes) >= 2 and (insn.bytes[1] & 0xF0) == 0x80
+            )
             is_short_jcc = insn.bytes[0] in range(0x70, 0x80)
             if is_long_jcc or is_short_jcc:
                 cond_branches += 1
@@ -201,7 +202,8 @@ def _branch_density_objdump(target: str) -> float | None:
     try:
         result = subprocess.run(
             ["objdump", "-d", "--no-show-raw-insn", "-j", ".text", target],
-            capture_output=True, timeout=30,
+            capture_output=True,
+            timeout=30,
         )
         if result.returncode != 0:
             return None
@@ -224,7 +226,8 @@ def _branch_density_objdump(target: str) -> float | None:
     try:
         result = subprocess.run(
             ["readelf", "-S", "--wide", target],
-            capture_output=True, timeout=10,
+            capture_output=True,
+            timeout=10,
         )
         for line in result.stdout.decode(errors="replace").splitlines():
             if ".text" in line:
@@ -293,7 +296,14 @@ def estimate_map_size(target: str) -> int:
 
     Formula:
         estimated_edges = branch_density (branches/KB) × .text_size (KB)
-        map_size = next_power_of_2(estimated_edges × 2)  # 2x headroom
+        map_size = next_power_of_2(estimated_edges × 8)  # 8x headroom
+
+    Static analysis consistently underestimates actual edge counts by ~5-10x
+    because it doesn't account for:
+    - Indirect branches and function pointers
+    - Compiler-generated switch tables
+    - Dynamic code paths (e.g., format parsers)
+    - Edge aliasing in AFL's hash-based coverage
 
     Clamped to [4096, 1048576] (AFL's practical range).
 
@@ -313,8 +323,12 @@ def estimate_map_size(target: str) -> int:
     # Estimated edge count: density (per KB) × size (KB)
     estimated_edges = bd * (ts / 1024)
 
-    # 2x headroom for hash collisions and edge aliasing
-    map_size = _next_power_of_2(int(estimated_edges * 2))
+    # 16x headroom for hash collisions, edge aliasing, and static analysis underestimation.
+    # Static analysis consistently underestimates by 5-10x because it misses:
+    # - Indirect branches, switch tables, function pointers
+    # - Dynamic code paths in format parsers
+    # - Edge aliasing in AFL's hash-based coverage
+    map_size = _next_power_of_2(int(estimated_edges * 16))
 
-    # Clamp to AFL's practical range
-    return max(4096, min(1048576, map_size))
+    # Minimum 65536 (64KB) — anything smaller saturates too quickly
+    return max(65536, min(1048576, map_size))
