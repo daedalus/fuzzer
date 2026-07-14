@@ -3424,17 +3424,16 @@ class Fuzzer:
         density_str = f" | map: {density:.1f}%"
         if collision_risk > 10:
             density_str += f" (collision: {collision_risk:.0f}%)"
-            if collision_risk > 50 and self.shm_cov:
+            # Resize at 40% collision risk to stay ahead of saturation
+            if collision_risk > 40 and self.shm_cov:
                 current = self.shm_cov.size
-                # Grow in powers of 2 — double current size, re-evaluate each step
+                # Grow in powers of 2 — double current size
                 new_size = current * 2
                 new_size = min(1048576, max(4096, 1 << (new_size - 1).bit_length()))
                 if new_size > current:
-                    log.warning(
-                        "Collision risk %.0f%% — resizing bitmap %d → %d bytes",
-                        collision_risk,
-                        current,
-                        new_size,
+                    print(
+                        f"\n[*] Collision risk {collision_risk:.0f}% — resizing bitmap "
+                        f"{current:,} → {new_size:,} bytes"
                     )
                     self.shm_cov.resize(new_size)
                     self.map_size = new_size
