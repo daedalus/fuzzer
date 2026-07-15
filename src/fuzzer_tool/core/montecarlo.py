@@ -134,7 +134,7 @@ class MonteCarloScheduler:
         self._prev_op = best_op
         return best_op
 
-    def record(self, name: str, success: bool) -> None:
+    def record(self, name: str, success: bool, weight: float = 1.0) -> None:
         """Record outcome for a mutation operator arm.
 
         Applies exponential decay to all arms periodically (every 100 calls),
@@ -143,6 +143,8 @@ class MonteCarloScheduler:
         Args:
             name: Name of the mutation operator.
             success: Whether the mutation produced an interesting result.
+            weight: Reward weight (default 1.0). Surprisal-weighted calls
+                pass a value in (0, 1] proportional to discovery rarity.
         """
         self._op_success_history.append((name, success))
 
@@ -158,7 +160,7 @@ class MonteCarloScheduler:
                 self.arm_beta[k] *= self.arm_decay
 
         if success:
-            self.arm_alpha[name] = self.arm_alpha.get(name, 1.0) + 1
+            self.arm_alpha[name] = self.arm_alpha.get(name, 1.0) + weight
         else:
             self.arm_beta[name] = self.arm_beta.get(name, 1.0) + 1
 
@@ -167,17 +169,18 @@ class MonteCarloScheduler:
             self.transition_counts[self._prev_op][name] += 1
             self.transition_total[self._prev_op] += 1
 
-    def record_brier(self, name: str, success: bool) -> None:
+    def record_brier(self, name: str, success: bool, weight: float = 1.0) -> None:
         """Record a prediction-outcome pair for Brier score diagnostics.
 
         The predicted probability is the Beta distribution mean for this arm
-        at the time of selection. The outcome is 1.0 (success) or 0.0.
+        at the time of selection. The outcome is the reward weight (1.0 for
+        unweighted success, fractional for surprisal-weighted).
         Brier score = mean((predicted - actual)²) — lower is better.
         """
         a = self.arm_alpha.get(name, 1.0)
         b = self.arm_beta.get(name, 1.0)
         predicted = a / (a + b)  # Beta mean = expected success probability
-        outcome = 1.0 if success else 0.0
+        outcome = weight if success else 0.0
         self._brier_predictions.append((predicted, outcome))
 
     def brier_score(self) -> float:
@@ -1017,7 +1020,7 @@ class MOptScheduler:
                 return op
         return ops[-1]
 
-    def record(self, name: str, success: bool, particle_id: int | None = None) -> None:
+    def record(self, name: str, success: bool, particle_id: int | None = None, weight: float = 1.0) -> None:
         """Record outcome for fitness tracking.
 
         Args:
@@ -1025,6 +1028,8 @@ class MOptScheduler:
             success: Whether it produced new coverage.
             particle_id: Index of the particle that selected this operator.
                 When None (backward compat), updates all particles.
+            weight: Reward weight (default 1.0). Surprisal-weighted calls
+                pass a value in (0, 1] proportional to discovery rarity.
         """
         self._total_execs += 1
         if success:
@@ -1033,15 +1038,16 @@ class MOptScheduler:
         # Record discovery only in the particle that selected this operator.
         # This is the core fix: each particle's fitness reflects only the
         # outcomes of operators IT chose, enabling PSO to differentiate.
+        reward = weight if success else 0.0
         if particle_id is not None and 0 <= particle_id < len(self.particles):
             p = self.particles[particle_id]
             p.execs_in_window += 1
-            p.discoveries.append(1 if success else 0)
+            p.discoveries.append(reward)
         else:
             # Backward compat: update all particles
             for p in self.particles:
                 p.execs_in_window += 1
-                p.discoveries.append(1 if success else 0)
+                p.discoveries.append(reward)
 
         # Trigger PSO update when window fills
         if self._total_execs % self.window_size == 0 and self._total_execs > 0:
@@ -1547,19 +1553,21 @@ class ReplicatorScheduler:
                 return op
         return ops[-1]
 
-    def record(self, name: str, success: bool) -> None:
+    def record(self, name: str, success: bool, weight: float = 1.0) -> None:
         """Record outcome and trigger replicator update when window fills.
 
         Args:
             name: Operator that was used.
             success: Whether it produced new coverage.
+            weight: Reward weight (default 1.0). Surprisal-weighted calls
+                pass a value in (0, 1] proportional to discovery rarity.
         """
         self._total_execs += 1
         if success:
             self._total_discoveries += 1
 
         self._execs_in_window += 1
-        self._fitness_sum[name] += 1.0 if success else 0.0
+        self._fitness_sum[name] += weight if success else 0.0
         self._fitness_count[name] += 1
 
         if self._execs_in_window >= self.window_size:

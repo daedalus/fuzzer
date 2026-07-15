@@ -2792,6 +2792,17 @@ class Fuzzer:
 
         success = is_crash or is_interesting or has_new_coverage
 
+        # Surprisal-weighted reward: discoveries in sparse regions of the
+        # coverage bitmap carry more information than discoveries near
+        # already-saturated areas. Weight = 1 - density so rare discoveries
+        # (low density) get higher credit; saturated regions (high density)
+        # get lower credit.
+        if success and self._edge_tracker and self._edge_tracker.map_size:
+            density = self._edge_tracker.bitmap_density()
+            surprisal_weight = max(0.05, 1.0 - density)
+        else:
+            surprisal_weight = 1.0 if success else 0.0
+
         if success:
             for op in set(self._last_ops_used):
                 self.op_success[op] = self.op_success.get(op, 0) + 1
@@ -2802,8 +2813,8 @@ class Fuzzer:
             seen = set()
             for op in self._last_ops_used:
                 if op not in seen:
-                    self.mc.record(op, success)
-                    self.mc.record_brier(op, success)
+                    self.mc.record(op, success, weight=surprisal_weight)
+                    self.mc.record_brier(op, success, weight=surprisal_weight)
                     seen.add(op)
                     # Secretary-problem: track operator quality for optimal stopping
                     if self._secretary:
@@ -2822,14 +2833,14 @@ class Fuzzer:
             seen = set()
             for op, pid in zip(self._last_ops_used, self._last_mopt_particles, strict=False):
                 if op not in seen:
-                    self._mopt.record(op, success, particle_id=pid)
+                    self._mopt.record(op, success, particle_id=pid, weight=surprisal_weight)
                     seen.add(op)
 
         if self._use_replicator and self._replicator:
             seen = set()
             for op in self._last_ops_used:
                 if op not in seen:
-                    self._replicator.record(op, success)
+                    self._replicator.record(op, success, weight=surprisal_weight)
                     seen.add(op)
 
         # Elo: record matches between operators that were used
@@ -2846,7 +2857,7 @@ class Fuzzer:
 
         # Meta-elo: record operator strategy-level match
         if self._use_elo and self._elo and self._meta_strategy:
-            score = 1.0 if success else 0.0
+            score = surprisal_weight if success else 0.0
             all_strategies = []
             if self._use_replicator and self._replicator:
                 all_strategies.append("replicator")
@@ -2860,7 +2871,7 @@ class Fuzzer:
 
         # Meta-elo: record seed strategy-level match
         if self._use_elo and self._elo and self._seed_strategy:
-            score = 1.0 if success else 0.0
+            score = surprisal_weight if success else 0.0
             seed_strategies = ["ga", "weighted", "pareto", "format"]
             for other in seed_strategies:
                 if other != self._seed_strategy:
