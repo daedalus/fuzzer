@@ -76,19 +76,19 @@ run_combo() {
 echo "=== Phase 5: Game theory additions ==="
 run_combo "gt1_sched_shapley" --elo --mc-bandit --shapley
 run_combo "gt2_sched_rep_shapley" --elo --mc-bandit --replicator --shapley
-run_combo "gt3_sched_all_game" --elo --meta-elo --mc-bandit --replicator --shapley
+run_combo "gt3_sched_all_game" --elo --mc-bandit --replicator --shapley
 
 echo ""
 echo "=== Phase 6: Full combinations (top candidates) ==="
-run_combo "f1_enhanced" --elo --meta-elo --mc-bandit --mopt
-run_combo "f2_enhanced_plus" --elo --meta-elo --mc-bandit --mopt \
+run_combo "f1_enhanced" --elo --mc-bandit --mopt
+run_combo "f2_enhanced_plus" --elo --mc-bandit --mopt \
     --markov --markov-gen --markov-order 0,1,2,3 \
     --replicator --shapley --renyi-weight
 run_combo "f3_lean_best" --elo --mc-bandit --markov --markov-gen --markov-order 0,1,2,3 --renyi-weight
 run_combo "f5_elo_markov_renyi" --elo --markov --markov-gen --markov-order 0,1,2,3 --renyi-weight
 run_combo "f6_bandit_markov_renyi" --mc-bandit --markov --markov-gen --markov-order 0,1,2,3 --renyi-weight
 run_combo "f7_elo_bandit_markov_renyi" --elo --mc-bandit --markov --markov-gen --markov-order 0,1,2,3 --renyi-weight
-run_combo "f8_elo_meta_bandit_markov_rep_shapley" --elo --meta-elo --mc-bandit --markov --markov-gen --markov-order 0,1,2,3 --replicator --shapley
+run_combo "f8_elo_bandit_markov_rep_shapley" --elo --mc-bandit --markov --markov-gen --markov-order 0,1,2,3 --replicator --shapley
 run_combo "f9_elo_mopt_markov_renyi" --elo --mopt --markov --markov-gen --markov-order 0,1,2,3 --renyi-weight
 run_combo "f10_elo_bandit_markov_shapley" --elo --mc-bandit --markov --markov-gen --markov-order 0,1,2,3 --shapley
 run_combo "f11_elo_bandit_rep_markov_renyi" --elo --mc-bandit --replicator --markov --markov-gen --markov-order 0,1,2,3 --renyi-weight
@@ -97,7 +97,7 @@ run_combo "f14_elo_mopt_rep_markov" --elo --mopt --replicator --markov --markov-
 run_combo "f15_elo_bandit_markov_mi_renyi" --elo --mc-bandit --markov --markov-gen --markov-order 0,1,2,3 --mi-guided --renyi-weight
 run_combo "f16_mopt_markov_renyi_shapley" --mopt --markov --markov-gen --markov-order 0,1,2,3 --renyi-weight --shapley
 run_combo "f17_elo_mopt_rep_markov_renyi" --elo --mopt --replicator --markov --markov-gen --markov-order 0,1,2,3 --renyi-weight
-run_combo "f18_elo_meta_mopt_markov_renyi" --elo --meta-elo --mopt --markov --markov-gen --markov-order 0,1,2,3 --renyi-weight
+run_combo "f18_elo_mopt_markov_renyi" --elo --mopt --markov --markov-gen --markov-order 0,1,2,3 --renyi-weight
 
 echo ""
 echo "=== Phase 7: Advanced tuning ==="
@@ -117,8 +117,8 @@ run_combo "z1_best_a" --elo --mopt --replicator --markov --markov-gen --markov-o
 run_combo "z1_best_b" --elo --mopt --replicator --markov --markov-gen --markov-order 0,1,2,3
 run_combo "z2_second_a" --elo --mopt --markov --markov-gen --markov-order 0,1,2,3
 run_combo "z2_second_b" --elo --mopt --markov --markov-gen --markov-order 0,1,2,3
-run_combo "z3_elo_meta_bandit_a" --elo --meta-elo --mc-bandit
-run_combo "z3_elo_meta_bandit_b" --elo --meta-elo --mc-bandit
+run_combo "z3_elo_bandit_a" --elo --mc-bandit
+run_combo "z3_elo_bandit_b" --elo --mc-bandit
 run_combo "z4_elo_mopt_renyi_a" --elo --mopt --markov --markov-gen --markov-order 0,1,2,3 --renyi-weight
 run_combo "z4_elo_mopt_renyi_b" --elo --mopt --markov --markov-gen --markov-order 0,1,2,3 --renyi-weight
 

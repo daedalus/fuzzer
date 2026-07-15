@@ -9,8 +9,8 @@
 #
 # Configurations:
 #   baseline:  no features
-#   enhanced:  elo + meta-elo + bandit + mopt
-#   enhanced+: elo + meta-elo + bandit + mopt + markov + replicator + shapley
+#   enhanced:  elo + bandit + mopt
+#   enhanced+: elo + bandit + mopt + markov + replicator + shapley
 #              + renyi + transfer-entropy + grammar
 #   optimal:   elo + mopt + replicator + markov (ensemble 0,1,2,3) + markov-gen
 #              Best edges at -n 1k (74 vs 61 baseline) and -n 10k (184 vs 167 baseline)
@@ -171,9 +171,9 @@ cleanup_shm
 sleep 1
 
 # Run enhanced
-echo "[*] Running enhanced (elo + meta-elo + bandit + mopt${EXTRA_FLAGS:+$EXTRA_FLAGS})..."
+echo "[*] Running enhanced (elo + bandit + mopt${EXTRA_FLAGS:+$EXTRA_FLAGS})..."
 run_with_retry /tmp/fuzz_bench_enhanced.log \
-    fuzz "$TARGET" -d "$ENHANCED_DIR" -c -n "$ITERS" --elo --meta-elo --mc-bandit --mopt $EXTRA_FLAGS $REPORT_FLAG
+    fuzz "$TARGET" -d "$ENHANCED_DIR" -c -n "$ITERS" --elo --mc-bandit --mopt $EXTRA_FLAGS $REPORT_FLAG
 echo ""
 
 # Clean SHM between runs
@@ -184,7 +184,7 @@ sleep 1
 echo "[*] Running enhanced+ (all enhanced + markov + replicator + shapley + renyi + transfer-entropy + grammar)..."
 run_with_retry /tmp/fuzz_bench_enhanced+.log \
     fuzz "$TARGET" -d "$ENHANCEDP_DIR" -c -n "$ITERS" \
-    --elo --meta-elo --mc-bandit --mopt \
+    --elo --mc-bandit --mopt \
     --markov --markov-gen --markov-order 0,1,2,3 \
     --replicator --shapley --renyi-weight --transfer-entropy \
     -g dictionaries/png.gram \
