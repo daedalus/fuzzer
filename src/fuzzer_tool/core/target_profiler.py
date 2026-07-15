@@ -670,6 +670,8 @@ def format_operator_priors(profile: "TargetProfile") -> dict[str, tuple[float, f
         for op in _FORMAT_OPERATOR_HINTS.get(fmt, ()):
             priors[op] = _BOOSTED_PRIOR
 
+    # Boost dict-aware operators whenever static analysis extracted at least
+    # one usable token (non-empty list is truthy; empty list is falsy).
     if profile.magic_bytes or profile.boundary_markers or profile.interesting_strings:
         for op in _DICT_OPERATORS:
             priors[op] = _BOOSTED_PRIOR
