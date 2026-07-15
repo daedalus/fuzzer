@@ -78,6 +78,8 @@ MUTATIONS = [
     "bit_transpose_16",
     "bit_transpose_32",
     "bit_transpose_64",
+    "bit_offset_flip",
+    "bit_offset_span",
 ]
 
 # Format-aware mutations: structure-aware operators for specific file formats.

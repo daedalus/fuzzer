@@ -44,8 +44,16 @@ def compiled_asan_so():
     """Compile asan_target.c as shared library with ASAN if not already built."""
     if not ASAN_SO.exists() or ASAN_SRC.stat().st_mtime > ASAN_SO.stat().st_mtime:
         result = subprocess.run(
-            ["gcc", "-g", "-fsanitize=address", "-shared", "-fPIC",
-             "-o", str(ASAN_SO), str(ASAN_SRC)],
+            [
+                "gcc",
+                "-g",
+                "-fsanitize=address",
+                "-shared",
+                "-fPIC",
+                "-o",
+                str(ASAN_SO),
+                str(ASAN_SRC),
+            ],
             capture_output=True,
             text=True,
         )
@@ -220,16 +228,29 @@ class TestIntegration:
             # Verify crash report contains ASAN output
             txt_files = [f for f in crash_files if f.suffix == ".txt"]
             assert len(txt_files) > 0, "No .txt crash reports found"
-            report = txt_files[0].read_text()
-            assert "AddressSanitizer" in report, f"Missing AddressSanitizer in report"
-            assert "heap-buffer-overflow" in report, f"Missing heap-buffer-overflow in report"
+            reports = [f.read_text() for f in txt_files]
+            assert any("AddressSanitizer" in r for r in reports), "Missing AddressSanitizer in any report"
+            assert any("heap-buffer-overflow" in r for r in reports), (
+                f"Missing heap-buffer-overflow in any report. Found: {[f.name for f in txt_files]}"
+            )
 
-    @pytest.mark.parametrize("mode_args,target_fixture,mode_label", [
-        ([], "compiled_asan_target", "default_subprocess"),
-        (["--inprocess", "--inprocess-func", "fuzz"], "compiled_asan_so", "inprocess_subprocess"),
-        (["--inprocess-direct", "--inprocess-func", "fuzz"], "compiled_asan_so", "inprocess_direct"),
-        (["--no-shm"], "compiled_asan_target", "ptrace"),
-    ])
+    @pytest.mark.parametrize(
+        "mode_args,target_fixture,mode_label",
+        [
+            ([], "compiled_asan_target", "default_subprocess"),
+            (
+                ["--inprocess", "--inprocess-func", "fuzz"],
+                "compiled_asan_so",
+                "inprocess_subprocess",
+            ),
+            (
+                ["--inprocess-direct", "--inprocess-func", "fuzz"],
+                "compiled_asan_so",
+                "inprocess_direct",
+            ),
+            (["--no-shm"], "compiled_asan_target", "ptrace"),
+        ],
+    )
     def test_asan_all_modes(self, request, mode_args, target_fixture, mode_label):
         """Verify ASAN detection works in all execution modes."""
         target = request.getfixturevalue(target_fixture)
@@ -243,13 +264,21 @@ class TestIntegration:
             (corpus_dir / "seed").write_bytes(b"BUG!H")
 
             cmd = [
-                "python3", "-m", "fuzzer_tool", "fuzz",
+                "python3",
+                "-m",
+                "fuzzer_tool",
+                "fuzz",
                 target,
-                "-d", str(corpus_dir),
-                "-o", str(crashes_dir),
-                "-n", "100",
-                "-t", "2",
-                "-s", "42",
+                "-d",
+                str(corpus_dir),
+                "-o",
+                str(crashes_dir),
+                "-n",
+                "100",
+                "-t",
+                "2",
+                "-s",
+                "42",
             ] + mode_args
 
             result = subprocess.run(

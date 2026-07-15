@@ -1250,6 +1250,45 @@ class Fuzzer:
         if buf:
             buf[byte_idx] ^= 1 << random.randint(0, 7)
 
+    def _op_bit_offset_flip(self, buf, _byte_idx, _data):
+        """Flip a single bit at an arbitrary bit offset across the entire buffer.
+
+        Unlike bit_flip (which operates at byte-aligned positions), this
+        selects a bit offset from 0 to 8*len-1 and flips it — the bit
+        may be anywhere within any byte. Critical for bit-packed formats
+        (DEFLATE Huffman codes, JPEG entropy data) where the meaningful
+        unit is a bit, not a byte.
+        """
+        if not buf:
+            return
+        total_bits = len(buf) * 8
+        bit_offset = random.randint(0, total_bits - 1)
+        byte_idx = bit_offset >> 3
+        bit_idx = bit_offset & 7
+        buf[byte_idx] ^= 1 << bit_idx
+
+    def _op_bit_offset_span(self, buf, _byte_idx, _data):
+        """Flip 1-8 consecutive bits starting at an arbitrary bit offset.
+
+        Corrupts variable-length bit sequences (Huffman codes in DEFLATE,
+        JPEG markers) by flipping a span that may cross byte boundaries.
+        The span width is chosen to match common Huffman code lengths
+        (3-7 bits for DEFLATE, 2-8 for JPEG DC/AC coefficients).
+        """
+        if not buf:
+            return
+        total_bits = len(buf) * 8
+        span_width = random.choices([1, 2, 3, 4, 5, 6, 7, 8],
+                                     weights=[10, 15, 20, 20, 15, 10, 5, 5])[0]
+        start_offset = random.randint(0, max(0, total_bits - span_width))
+        for i in range(span_width):
+            bit_offset = start_offset + i
+            if bit_offset >= total_bits:
+                break
+            byte_idx = bit_offset >> 3
+            bit_idx = bit_offset & 7
+            buf[byte_idx] ^= 1 << bit_idx
+
     def _op_byte_flip(self, buf, byte_idx, _data):
         if buf:
             buf[byte_idx] ^= 0xFF
@@ -1668,6 +1707,8 @@ class Fuzzer:
     def _build_dispatch(self):
         return {
             "bit_flip": self._op_bit_flip,
+            "bit_offset_flip": self._op_bit_offset_flip,
+            "bit_offset_span": self._op_bit_offset_span,
             "byte_flip": self._op_byte_flip,
             "interesting_8": self._op_interesting_8,
             "interesting_16": self._op_interesting_16,
