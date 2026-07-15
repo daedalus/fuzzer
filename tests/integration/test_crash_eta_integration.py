@@ -2,6 +2,9 @@
 
 import subprocess
 import sys
+from pathlib import Path
+
+_PROJECT_ROOT = str(Path(__file__).resolve().parents[2])
 
 
 def test_estimate_end_to_end():
@@ -20,7 +23,7 @@ def test_estimate_end_to_end():
         ],
         capture_output=True,
         text=True,
-        cwd="/home/dclavijo/my_code/fuzzer",
+        cwd=_PROJECT_ROOT,
     )
     assert result.returncode == 0, f"stderr: {result.stderr}"
     assert "Risky density" in result.stdout, result.stdout

@@ -119,22 +119,20 @@ class ShmCoverage:
             self.shm_id = -1
 
     def resize(self, new_size: int) -> None:
-        """Resize the shared memory bitmap, preserving existing data.
+        """Resize the shared memory bitmap.
 
         Allocates a new SHM, copies the old bitmap, detaches the old SHM,
-        and updates internal pointers.  Preserves the cumulative _seen
-        bitmap across resizes (the SHM itself may be zeroed between runs).
+        and updates internal pointers.  Clears cumulative state because
+        AFL's hash (edge_id = hash(src,dst) % map_size) maps the same
+        logical edge to different bitmap positions after resize —
+        preserving the old bitmap would silently corrupt it with stale,
+        incorrectly-repositioned bits.
 
         Args:
             new_size: New map size in bytes (must be > current size).
         """
         if new_size <= self.size:
             return
-
-        # Save cumulative state before resize (SHM may be zeroed)
-        old_seen = bytes(self._seen)
-        old_cumulative = self.cumulative_edges
-        old_total = self.total_edges
 
         # Allocate new SHM
         new_shm_id = _libc.shmget(0, new_size, IPC_CREAT | SHM_R | SHM_W)
@@ -159,7 +157,6 @@ class ShmCoverage:
         # Update state
         self._ptr = new_ptr
         self.shm_id = new_shm_id
-        old_size = self.size
         self.size = new_size
         self._map = (ctypes.c_char * new_size).from_address(self._ptr)
         self.env_id = str(self.shm_id)

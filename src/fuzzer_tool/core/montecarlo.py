@@ -1163,25 +1163,16 @@ class MOptScheduler:
 class ShapleyAttribution:
     """Compute Shapley values for mutation operator contribution.
 
-    The Shapley value distributes credit among operators when multiple
-    ops contribute to discoveries. It considers all possible orderings
-    of operators and computes the average marginal contribution.
+    Uses per-edge frequency-weighted attribution: for each edge, credit
+    is distributed among operators proportional to how often each operator
+    co-occurred with that edge across all executions. Operators that
+    consistently appear when a specific edge is observed get more credit;
+    operators that merely co-occur with productive ones get less.
 
-    NOTE: This measures correlation, not causation. The current data
-    collection attributes ALL discovered edges to every co-occurring
-    operator in a stacked mutation, so two operators that merely
-    co-occurred with a genuinely productive one appear identical to
-    that operator. True causal attribution would require tracking
-    per-operator marginal responsibility at the mutation level (e.g.,
-    only crediting the last operator in a chain, or splitting credit
-    by chain position).
-
-    For fuzzer scheduling, this answers: "which operators co-occur
-    with discoveries?" — not "which operators caused them?"
-
-    Uses sampling-based estimation (not exact enumeration) for efficiency.
-    With N operators, exact Shapley requires 2^N evaluations. Sampling
-    K random permutations gives estimates within epsilon with high probability.
+    This is an improvement over naive co-occurrence attribution (giving
+    every stacked operator all edges), though it still measures
+    correlation, not causation. True causal attribution would require
+    per-operator bitmap snapshots between mutation steps.
 
     Args:
         n_samples: Number of random permutations to sample.
@@ -1193,9 +1184,13 @@ class ShapleyAttribution:
         self.window_size = window_size
         # Recent outcomes: list of (operators_used_set, discovered_edges_count)
         self._outcomes: collections.deque = collections.deque(maxlen=window_size)
-        # Per-operator: set of edges this operator contributed to
+        # Per-operator: set of edges this operator has co-occurred with
         self._operator_edges: dict[str, set[int]] = defaultdict(set)
-        # Global edge set for marginal computation
+        # Per-edge: total number of executions where this edge was observed
+        self._edge_total: dict[int, int] = defaultdict(int)
+        # Per-edge: per-operator count of executions where both co-occurred
+        self._edge_op_count: dict[int, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        # Global edge set
         self._all_edges: set[int] = set()
 
     def record(
@@ -1212,14 +1207,30 @@ class ShapleyAttribution:
         if edge_indices:
             for op in operators:
                 self._operator_edges[op].update(edge_indices)
+            for edge in edge_indices:
+                self._edge_total[edge] += 1
+                for op in operators:
+                    self._edge_op_count[edge][op] += 1
             self._all_edges.update(edge_indices)
 
-    def shapley_values(self, operators: list[str] | None = None) -> dict[str, float]:
-        """Compute Shapley values for each operator.
+    def _edge_attribution(self, edge: int) -> dict[str, float]:
+        """Compute frequency-weighted credit for a single edge.
 
-        Uses sampling: for each random permutation, compute the marginal
-        contribution of each operator (edges uniquely attributable to it
-        given the operators before it in the permutation).
+        Returns dict mapping operator -> credit weight. Credit is
+        proportional to co-occurrence frequency, normalized to sum to 1.
+        """
+        op_counts = self._edge_op_count.get(edge, {})
+        total = sum(op_counts.values())
+        if total == 0:
+            return {}
+        return {op: count / total for op, count in op_counts.items()}
+
+    def shapley_values(self, operators: list[str] | None = None) -> dict[str, float]:
+        """Compute Shapley values using per-edge frequency-weighted attribution.
+
+        For each edge, credit is distributed among operators proportional
+        to co-occurrence frequency. The Shapley computation then determines
+        marginal contributions given these per-edge credits.
 
         Returns:
             Dict mapping operator name -> Shapley value (in [0, 1]).
@@ -1242,11 +1253,15 @@ class ShapleyAttribution:
 
             prefix_edges: set[int] = set()
             for op in perm:
-                # Marginal contribution = edges this op adds beyond prefix
-                op_edges = self._operator_edges.get(op, set())
-                marginal = len(op_edges - prefix_edges)
+                # Marginal contribution: for each edge this op has credit for
+                # that isn't already covered by the prefix, add its fractional credit
+                marginal = 0.0
+                for edge in self._operator_edges.get(op, set()):
+                    if edge not in prefix_edges:
+                        attr = self._edge_attribution(edge)
+                        marginal += attr.get(op, 0.0)
                 shapley[op] += marginal
-                prefix_edges.update(op_edges)
+                prefix_edges.update(self._operator_edges.get(op, set()))
 
         # Normalize to [0, 1]
         total = sum(shapley.values())
