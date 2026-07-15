@@ -20,7 +20,7 @@ Coverage-guided binary fuzzer with static target analysis, statistical novelty s
 - **Auto-populated dictionary**: interesting strings (format specifiers, error messages, keywords) and magic bytes extracted from `.rodata`
 - **Format-aware seed generation**: produces structurally meaningful initial seeds (PNG headers, text protocols, JSON, XML, HTML) based on inferred format
 - **Hot-function weighting**: seeds exercising high-branch-density functions get a proportional boost in selection
-- **Crash ETA estimation**: combines static risky density, Good-Turing edge estimates, and calibrated discovery rate to predict executions to first crash
+- **Crash ETA estimation**: blends static risky density (keyword heuristic) with dynamic I(byte_position; crash) mutual information from actual executions, plus Good-Turing edge estimates and calibrated discovery rate — the MI signal strengthens as fuzzing accumulates near-miss data
 
 ### Coverage & Scoring
 - **AFL SHM bitmap** coverage for instrumented targets (~65-200 eps)
