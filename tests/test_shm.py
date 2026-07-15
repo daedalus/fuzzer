@@ -74,7 +74,8 @@ class TestShmCoverage:
         finally:
             cov.cleanup()
 
-    def test_resize_preserves_cumulative(self):
+    def test_resize_clears_cumulative(self):
+        """Resize clears cumulative state because AFL positions change after resize."""
         cov = ShmCoverage(size=4096)
         try:
             # Simulate edges and detection
@@ -84,14 +85,15 @@ class TestShmCoverage:
             cov.is_new_coverage()
             assert cov.cumulative_edges == 3
 
-            # Resize preserves cumulative
+            # Resize clears cumulative (positions change after resize)
             cov.resize(8192)
             assert cov.size == 8192
-            assert cov.cumulative_edges == 3
+            assert cov.cumulative_edges == 0
         finally:
             cov.cleanup()
 
-    def test_resize_preserves_after_reset(self):
+    def test_resize_clears_after_reset(self):
+        """Resize clears cumulative state even after reset."""
         cov = ShmCoverage(size=4096)
         try:
             # Edges detected, then reset zeros SHM
@@ -101,9 +103,9 @@ class TestShmCoverage:
             cov.is_new_coverage()
             cov.reset_edge_map()  # zeros SHM
 
-            # Resize still preserves cumulative (saves _seen before copy)
+            # Resize clears cumulative (positions change after resize)
             cov.resize(8192)
-            assert cov.cumulative_edges == 3
+            assert cov.cumulative_edges == 0
         finally:
             cov.cleanup()
 
