@@ -9,11 +9,14 @@
 #
 # Configurations:
 #   baseline:  no features
-#   enhanced:  elo + meta-elo + bandit + mopt
-#   enhanced+: elo + meta-elo + bandit + mopt + markov + replicator + shapley
+#   enhanced:  elo + bandit + mopt
+#   enhanced+: elo + bandit + mopt + markov + replicator + shapley
 #              + renyi + transfer-entropy + grammar
 #   optimal:   elo + mopt + replicator + markov (ensemble 0,1,2,3) + markov-gen
 #              Best edges at -n 1k (74 vs 61 baseline) and -n 10k (184 vs 167 baseline)
+#
+# For a broad sweep of individual feature/combination effects instead of
+# these four named configurations, use tools/bench_sweep.sh.
 
 set -euo pipefail
 
@@ -28,122 +31,8 @@ OPTIMAL_DIR="/tmp/fuzz_bench_optimal"
 REPORT_FLAG="${BENCH_REPORT:-}"  # set BENCH_REPORT=--report to generate full reports
 
 cd "$BASE_DIR"
-
-# ── SHM cleanup ───────────────────────────────────────────────────────
-# Remove all orphaned SHM segments owned by the current user.
-# Previous fuzzer runs (especially those killed by signals) leave
-# segments behind. Accumulation can cause shmget to fail or the
-# target to attach to stale segments.
-cleanup_shm() {
-    local before
-    before=$(ipcs -m 2>/dev/null | grep -c "$(whoami)" || true)
-    # Remove all segments owned by current user
-    ipcs -m 2>/dev/null | grep "$(whoami)" | awk '{print $2}' | while read -r shmid; do
-        ipcrm -m "$shmid" 2>/dev/null || true
-    done
-    local after
-    after=$(ipcs -m 2>/dev/null | grep -c "$(whoami)" || true)
-    if [[ "$before" -gt 0 ]]; then
-        echo "[*] Cleaned $((before - after)) orphaned SHM segments ($before -> $after)"
-    fi
-}
-
-# ── SHM verification ──────────────────────────────────────────────────
-# After a fuzzer run, verify that the SHM bitmap actually received data.
-# This is more reliable than checking log messages — it checks the
-# actual SHM segment that was created during the run.
-verify_shm() {
-    local log="$1"
-    local label="$2"
-
-    # Extract the SHM ID from the log
-    local shm_id
-    shm_id=$(grep -oP "SHM bitmap, id=\K[0-9]+" "$log" | tail -1)
-
-    if [[ -z "$shm_id" ]]; then
-        echo "FAIL: $label — no SHM ID found in log (coverage not enabled?)"
-        return 1
-    fi
-
-    # Try to attach and check if bitmap has any non-zero bytes
-    local has_data
-    has_data=$(python3 -c "
-import ctypes, ctypes.util
-libc = ctypes.CDLL(ctypes.util.find_library('c') or 'libc.so.6', use_errno=True)
-libc.shmat.restype = ctypes.c_void_p
-ptr = libc.shmat($shm_id, None, 0)
-if ptr is None or ptr == -1:
-    print('FAIL')
-else:
-    size = 4096  # default map size
-    bitmap = (ctypes.c_uint8 * size).from_address(ptr)
-    non_zero = sum(1 for i in range(size) if bitmap[i] != 0)
-    libc.shmdt(ptr)
-    if non_zero > 0:
-        print(f'OK:{non_zero}')
-    else:
-        print('EMPTY')
-" 2>/dev/null)
-
-    if [[ "$has_data" == FAIL ]]; then
-        echo "FAIL: $label — SHM segment $shm_id could not be attached"
-        return 1
-    elif [[ "$has_data" == EMPTY ]]; then
-        echo "FAIL: $label — SHM segment $shm_id has 0 non-zero bytes (coverage-blind)"
-        return 1
-    else
-        local nedges="${has_data#OK:}"
-        echo "[+] $label — SHM verified: $nedges non-zero bytes in bitmap"
-        return 0
-    fi
-}
-
-# ── Coverage-attachment sanity check ──────────────────────────────────
-# Combine log-based and SHM-based checks for maximum reliability.
-check_coverage() {
-    local log="$1"
-    local label="$2"
-
-    # Check for explicit SHM failure messages in the log
-    if grep -qi "SHM not attached\|AFL shim area is NULL\|shmat.*failed\|Coverage data will be empty" "$log"; then
-        echo "FAIL: $label — SHM coverage did not attach (coverage-blind run)"
-        return 1
-    fi
-
-    # Verify actual SHM bitmap has data
-    if ! verify_shm "$log" "$label"; then
-        return 1
-    fi
-
-    return 0
-}
-
-# ── Run with retry ────────────────────────────────────────────────────
-MAX_RETRIES=3
-
-run_with_retry() {
-    local log="$1"
-    shift
-    local attempt=1
-
-    while [[ $attempt -le $MAX_RETRIES ]]; do
-        echo "[*] Attempt $attempt/$MAX_RETRIES..."
-        python -m fuzzer_tool "$@" 2>&1 | tee "$log"
-
-        if check_coverage "$log" "attempt $attempt"; then
-            return 0
-        fi
-
-        echo "[*] Coverage did not attach. Cleaning SHM and retrying..."
-        cleanup_shm
-        sleep 2
-        attempt=$((attempt + 1))
-    done
-
-    echo "FAIL: Coverage failed to attach after $MAX_RETRIES attempts."
-    echo "  Last log: $log"
-    return 1
-}
+# shellcheck source=lib/bench_common.sh
+source "$BASE_DIR/tools/lib/bench_common.sh"
 
 # ── Main ──────────────────────────────────────────────────────────────
 
@@ -171,9 +60,9 @@ cleanup_shm
 sleep 1
 
 # Run enhanced
-echo "[*] Running enhanced (elo + meta-elo + bandit + mopt${EXTRA_FLAGS:+$EXTRA_FLAGS})..."
+echo "[*] Running enhanced (elo + bandit + mopt${EXTRA_FLAGS:+$EXTRA_FLAGS})..."
 run_with_retry /tmp/fuzz_bench_enhanced.log \
-    fuzz "$TARGET" -d "$ENHANCED_DIR" -c -n "$ITERS" --elo --meta-elo --mc-bandit --mopt $EXTRA_FLAGS $REPORT_FLAG
+    fuzz "$TARGET" -d "$ENHANCED_DIR" -c -n "$ITERS" --elo --mc-bandit --mopt $EXTRA_FLAGS $REPORT_FLAG
 echo ""
 
 # Clean SHM between runs
@@ -184,7 +73,7 @@ sleep 1
 echo "[*] Running enhanced+ (all enhanced + markov + replicator + shapley + renyi + transfer-entropy + grammar)..."
 run_with_retry /tmp/fuzz_bench_enhanced+.log \
     fuzz "$TARGET" -d "$ENHANCEDP_DIR" -c -n "$ITERS" \
-    --elo --meta-elo --mc-bandit --mopt \
+    --elo --mc-bandit --mopt \
     --markov --markov-gen --markov-order 0,1,2,3 \
     --replicator --shapley --renyi-weight --transfer-entropy \
     -g dictionaries/png.gram \
@@ -211,28 +100,6 @@ echo " COMPARISON"
 echo "============================================================"
 echo ""
 
-extract() {
-    grep -oP "$1" "$2" | tail -1
-}
-
-# Extract CI values from crash/timeout rate lines (format: "rate%  ±1σ: lo% ±2σ: lo% ±3σ: lo%")
-extract_ci() {
-    local log="$1"
-    local pattern="$2"
-    local line
-    line=$(grep -P "$pattern" "$log" 2>/dev/null | tail -1)
-    if [[ -z "$line" ]]; then
-        echo "  -  -  -"
-        return
-    fi
-    # Extract the three CI values: ±1σ, ±2σ, ±3σ
-    local ci1 ci2 ci3
-    ci1=$(echo "$line" | grep -oP '±1σ:\s+\K[0-9.]+')
-    ci2=$(echo "$line" | grep -oP '±2σ:\s+\K[0-9.]+')
-    ci3=$(echo "$line" | grep -oP '±3σ:\s+\K[0-9.]+')
-    echo "${ci1:--} ${ci2:--} ${ci3:--}"
-}
-
 b_edges=$(extract "Edges discovered:\s+\K[0-9]+" /tmp/fuzz_bench_baseline.log)
 e_edges=$(extract "Edges discovered:\s+\K[0-9]+" /tmp/fuzz_bench_enhanced.log)
 p_edges=$(extract "Edges discovered:\s+\K[0-9]+" /tmp/fuzz_bench_enhanced+.log)
@@ -258,11 +125,11 @@ e_collision=$(extract "Collision risk:\s+\K[0-9.]+" /tmp/fuzz_bench_enhanced.log
 p_collision=$(extract "Collision risk:\s+\K[0-9.]+" /tmp/fuzz_bench_enhanced+.log)
 o_collision=$(extract "Collision risk:\s+\K[0-9.]+" /tmp/fuzz_bench_optimal.log)
 
-# Extract CI for crash rates
-b_crash_ci=$(extract_ci /tmp/fuzz_bench_baseline.log "Crash rate:")
-e_crash_ci=$(extract_ci /tmp/fuzz_bench_enhanced.log "Crash rate:")
-p_crash_ci=$(extract_ci /tmp/fuzz_bench_enhanced+.log "Crash rate:")
-o_crash_ci=$(extract_ci /tmp/fuzz_bench_optimal.log "Crash rate:")
+# Extract CI for crash rates (space-delimited for direct display in the table below)
+b_crash_ci=$(extract_ci /tmp/fuzz_bench_baseline.log "Crash rate:" " ")
+e_crash_ci=$(extract_ci /tmp/fuzz_bench_enhanced.log "Crash rate:" " ")
+p_crash_ci=$(extract_ci /tmp/fuzz_bench_enhanced+.log "Crash rate:" " ")
+o_crash_ci=$(extract_ci /tmp/fuzz_bench_optimal.log "Crash rate:" " ")
 
 printf "%-25s %12s %12s %12s %12s\n" "Metric" "Baseline" "Enhanced" "Enhanced+" "Optimal"
 printf "%-25s %12s %12s %12s %12s\n" "-------------------------" "------------" "------------" "------------" "------------"
