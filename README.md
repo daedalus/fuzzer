@@ -283,6 +283,28 @@ Configurations:
 - **optimal**: elo + mopt + replicator + markov ensemble (orders 0,1,2,3) + markov-gen
   - Best edge coverage at -n 1k (sweep-validated: 74 edges vs 61 baseline, 70 enhanced+)
 
+## Troubleshooting
+
+### Zero edges discovered (ASan + LD_PRELOAD conflict)
+
+If the fuzzer runs but reports `edges: 0` and `map: 0.0%`, the target is likely crashing before AFL instrumentation initializes. The most common cause is `LD_PRELOAD` entries (e.g. `ksm_preload.so`) that load before the ASan runtime, triggering the error:
+
+```
+ASan runtime does not come first in initial library list
+```
+
+The fuzzer strips conflicting `LD_PRELOAD` entries automatically, but if you set `LD_PRELOAD` manually, ensure it does not contain sanitizer-incompatible libraries. Verify by running:
+
+```bash
+python3 -c "
+import os, sys; sys.path.insert(0, 'src')
+from fuzzer_tool.adapters.process import _clean_env
+print(_clean_env(os.environ).get('LD_PRELOAD', '(stripped)'))
+"
+```
+
+If this prints `(stripped)`, the environment is clean.
+
 ## License
 
 MIT
