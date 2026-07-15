@@ -50,7 +50,7 @@ Coverage-guided binary fuzzer with static target analysis, statistical novelty s
 - **Transfer entropy** (`--transfer-entropy`): directional causal flow between byte positions and coverage edges
 
 ### Game Theory
-- **Shapley value** (`--shapley`): fair operator credit distribution accounting for synergistic effects between mutation operators
+- **Shapley value** (`--shapley`): per-edge frequency-weighted operator attribution — credit distributed proportional to co-occurrence frequency, not naive full credit to all stacked operators
 - **Replicator dynamics** (`--replicator`): evolutionary game theory scheduling — operators grow proportionally to fitness, converging to evolutionarily stable strategies
 - **MOpt PSO** (`--mopt`): particle swarm optimization over operator distributions (alternative to Thompson sampling)
 
