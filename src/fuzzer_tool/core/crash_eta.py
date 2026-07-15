@@ -2,11 +2,15 @@
 
 Combines static analysis (TargetProfiler) with calibrated execution
 statistics to estimate how many edges/executions until the first crash.
+Also provides dynamic crash prediction via mutual information between
+input bytes and crash outcomes.
 """
 
 from __future__ import annotations
 
+import math
 import re
+from collections import defaultdict
 from dataclasses import dataclass
 
 from fuzzer_tool.core.target_profiler import TargetProfile
@@ -17,6 +21,169 @@ _ERROR_RE = re.compile(
     r"error|invalid|overflow|underflow|corrupt|malformed|bad|failed|unable",
     re.IGNORECASE,
 )
+
+
+class CrashMITracker:
+    """Track mutual information between input bytes and crash outcomes.
+
+    Computes I(X_i; C) where X_i is byte position i and C is the
+    binary crash/no-crash outcome. High-MI bytes are the ones that
+    actually control whether the program crashes — mutating them is
+    more likely to trigger crashes.
+
+    This is distinct from MutualInformationTracker (mi.py) which
+    tracks I(X_i; coverage_edges) for coverage guidance.
+
+    Args:
+        max_positions: Maximum byte positions to track.
+        min_observations: Minimum observations before computing MI.
+    """
+
+    def __init__(self, max_positions: int = 4096, min_observations: int = 20):
+        self.max_positions = max_positions
+        self.min_observations = min_observations
+        # Per-position: byte_value -> crash_count
+        self.joint_crash: dict[int, dict[int, int]] = defaultdict(lambda: defaultdict(int))
+        # Per-position: byte_value -> total_count
+        self.byte_total: dict[int, dict[int, int]] = defaultdict(lambda: defaultdict(int))
+        # Per-position: total observations
+        self.position_counts: dict[int, int] = defaultdict(int)
+        # Global: crash count, total count
+        self.total_crashes: int = 0
+        self.total_execs: int = 0
+        # Cached MI values
+        self._mi_cache: dict[int, float] = {}
+        self._cache_valid: bool = False
+
+    def record(self, input_bytes: bytes, is_crash: bool) -> None:
+        """Record one input-crash pair.
+
+        Args:
+            input_bytes: The input that was executed.
+            is_crash: Whether this execution crashed.
+        """
+        self.total_execs += 1
+        if is_crash:
+            self.total_crashes += 1
+        self._cache_valid = False
+
+        for pos, byte_val in enumerate(input_bytes):
+            if pos >= self.max_positions:
+                break
+            self.position_counts[pos] += 1
+            self.byte_total[pos][byte_val] += 1
+            if is_crash:
+                self.joint_crash[pos][byte_val] += 1
+
+    def mi(self, position: int) -> float:
+        """Compute I(X_pos; C) in bits.
+
+        I(X; C) = sum_{x,c} P(x,c) * log2(P(x,c) / (P(x) * P(c)))
+
+        Returns 0.0 if insufficient data or position not observed.
+        """
+        if self.position_counts.get(position, 0) < self.min_observations:
+            return 0.0
+        if self.total_execs == 0 or self.total_crashes == 0:
+            return 0.0
+
+        n = self.total_execs
+        p_crash = self.total_crashes / n
+        p_no_crash = 1.0 - p_crash
+
+        if p_crash == 0 or p_no_crash == 0:
+            return 0.0
+
+        mi_val = 0.0
+        pos_total = self.position_counts[position]
+
+        for byte_val, bc in self.byte_total[position].items():
+            p_x = bc / n
+            crash_count = self.joint_crash[position].get(byte_val, 0)
+            no_crash_count = bc - crash_count
+
+            if crash_count > 0:
+                p_xy = crash_count / n
+                mi_val += p_xy * math.log2(p_xy / (p_x * p_crash))
+            if no_crash_count > 0:
+                p_x_no_crash = no_crash_count / n
+                mi_val += p_x_no_crash * math.log2(p_x_no_crash / (p_x * p_no_crash))
+
+        return max(0.0, mi_val)
+
+    def all_mi(self) -> dict[int, float]:
+        """Compute MI for all observed positions."""
+        if self._cache_valid:
+            return self._mi_cache
+        self._mi_cache = {
+            pos: self.mi(pos)
+            for pos in self.position_counts
+            if self.position_counts[pos] >= self.min_observations
+        }
+        self._cache_valid = True
+        return self._mi_cache
+
+    def top_positions(self, k: int = 10) -> list[tuple[int, float]]:
+        """Return the k byte positions with highest MI (most crash-predictive)."""
+        mi_vals = self.all_mi()
+        if not mi_vals:
+            return []
+        sorted_mi = sorted(mi_vals.items(), key=lambda x: x[1], reverse=True)
+        return sorted_mi[:k]
+
+    def crash_density_estimate(self) -> float:
+        """Estimate crash probability from MI profile.
+
+        Uses the average MI across positions as a proxy for how much
+        the input controls crash outcomes. Higher average MI means
+        crashes are more input-dependent (easier to find via mutation).
+
+        Returns a value in [0.0, 1.0] where higher = more crash-predictive.
+        """
+        mi_vals = self.all_mi()
+        if not mi_vals:
+            return 0.0
+        # Average MI across positions, normalized by max possible (1 bit for binary outcome)
+        avg_mi = sum(mi_vals.values()) / len(mi_vals)
+        # Clamp to [0, 1] — MI of a binary variable is at most 1 bit
+        return min(1.0, avg_mi)
+
+    def save(self) -> dict:
+        """Serialize tracker state."""
+        return {
+            "max_positions": self.max_positions,
+            "min_observations": self.min_observations,
+            "total_crashes": self.total_crashes,
+            "total_execs": self.total_execs,
+            "position_counts": dict(self.position_counts),
+            "joint_crash": {
+                str(pos): {str(bv): c for bv, c in bv_map.items()}
+                for pos, bv_map in self.joint_crash.items()
+            },
+            "byte_total": {
+                str(pos): {str(bv): c for bv, c in bv_map.items()}
+                for pos, bv_map in self.byte_total.items()
+            },
+        }
+
+    def load(self, data: dict) -> None:
+        """Deserialize tracker state."""
+        self.max_positions = data.get("max_positions", self.max_positions)
+        self.min_observations = data.get("min_observations", self.min_observations)
+        self.total_crashes = data.get("total_crashes", 0)
+        self.total_execs = data.get("total_execs", 0)
+        self.position_counts = defaultdict(int, {
+            int(k): v for k, v in data.get("position_counts", {}).items()
+        })
+        self.joint_crash = defaultdict(lambda: defaultdict(int))
+        for pos_str, bv_map in data.get("joint_crash", {}).items():
+            for bv_str, c in bv_map.items():
+                self.joint_crash[int(pos_str)][int(bv_str)] = c
+        self.byte_total = defaultdict(lambda: defaultdict(int))
+        for pos_str, bv_map in data.get("byte_total", {}).items():
+            for bv_str, c in bv_map.items():
+                self.byte_total[int(pos_str)][int(bv_str)] = c
+        self._cache_valid = False
 
 
 @dataclass
@@ -66,21 +233,31 @@ def estimate_execs_to_first_crash(
     gt_result: dict,
     discovery_rate: float,
     calibration_execs: int = 0,
+    crash_mi: CrashMITracker | None = None,
 ) -> CrashETA:
     """Estimate executions needed to reach the first crash.
 
     Combines:
     - Static risky density (rho) from TargetProfiler
+    - Dynamic crash MI density from CrashMITracker (if available)
     - Good-Turing total edge estimate from EdgeTracker
     - Calibrated discovery rate (edges per 1000 execs)
     - Calibration execs count for confidence interval scaling
 
-    More calibration execs tighten the interval via 1/sqrt(N) scaling
-    relative to a 1000-exec baseline.
+    When crash_mi has enough data, its dynamic estimate blends with
+    the static keyword heuristic (70% dynamic, 30% static) to produce
+    a live, evidence-updating risk estimate.
     """
-    import math
+    rho_static = estimate_risky_density(profile)
 
-    rho = estimate_risky_density(profile)
+    # Blend static and dynamic if MI data is available
+    if crash_mi and crash_mi.total_execs >= crash_mi.min_observations:
+        rho_dynamic = crash_mi.crash_density_estimate()
+        # Dynamic data gets more weight as observations accumulate
+        dynamic_weight = min(0.7, crash_mi.total_execs / (crash_mi.total_execs + 1000))
+        rho = dynamic_weight * rho_dynamic + (1.0 - dynamic_weight) * rho_static
+    else:
+        rho = rho_static
     e_total = gt_result.get("n", 0) + gt_result.get("estimated_undiscovered", 0)
     confidence = gt_result.get("confidence", "low")
 

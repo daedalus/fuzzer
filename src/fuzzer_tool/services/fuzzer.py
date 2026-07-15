@@ -429,6 +429,19 @@ class Fuzzer:
             self._mi.load(str(self._mi_path))
             log.info("MI tracker loaded from %s", self._mi_path)
 
+        # Crash MI tracker: I(byte_position; crash_outcome)
+        from fuzzer_tool.core.crash_eta import CrashMITracker
+
+        self._crash_mi = CrashMITracker(max_positions=max_len, min_observations=20)
+        self._crash_mi_path = self.corpus_dir / "crash_mi.json"
+        if self._crash_mi_path.exists():
+            try:
+                self._crash_mi.load(json.loads(self._crash_mi_path.read_text()))
+                log.info("Crash MI tracker loaded: %d execs, %d crashes",
+                         self._crash_mi.total_execs, self._crash_mi.total_crashes)
+            except (OSError, json.JSONDecodeError):
+                pass
+
         self._use_renyi_weight = renyi_weight
         self._use_transfer_entropy = transfer_entropy
         self._te = None
@@ -674,6 +687,11 @@ class Fuzzer:
         sens_path = self.corpus_dir / "sensitivity.json"
         try:
             sens_path.write_text(json.dumps(self._sensitivity.save(), separators=(",", ":")))
+        except OSError:
+            pass
+        # Save crash MI tracker
+        try:
+            self._crash_mi_path.write_text(json.dumps(self._crash_mi.save(), separators=(",", ":")))
         except OSError:
             pass
 
@@ -2728,6 +2746,10 @@ class Fuzzer:
             self.shm_cov and self.shm_cov.is_new_coverage()
         )
 
+        # Record crash MI: I(byte_position; crash_outcome)
+        if self._crash_mi:
+            self._crash_mi.record(mutated, is_crash)
+
         # Write ablation log row: signal data + outcome
         if self._ablation_file and hasattr(self, "_last_pick_signals"):
             ps = self._last_pick_signals
@@ -3050,7 +3072,7 @@ class Fuzzer:
 
         # Crash ETA estimate
         from fuzzer_tool.core.crash_eta import estimate_execs_to_first_crash
-        eta = estimate_execs_to_first_crash(self._profile, gt, dr, exec_count)
+        eta = estimate_execs_to_first_crash(self._profile, gt, dr, exec_count, self._crash_mi)
         print(f"[*] ETA to first crash: ~{eta.edges_to_crash:,} risky edges, "
               f"~{eta.point_est:,} execs "
               f"(range: {eta.low:,} - {eta.high:,}, confidence: {eta.confidence})")
@@ -3650,6 +3672,10 @@ class Fuzzer:
             self.markov.save(str(self._markov_path))
         if self._use_mi and self._mi:
             self._mi.save(str(self._mi_path))
+        try:
+            self._crash_mi_path.write_text(json.dumps(self._crash_mi.save(), separators=(",", ":")))
+        except OSError:
+            pass
         self._save_state()
         if self.ga:
             ga_path = self.corpus_dir / "ga.json"
