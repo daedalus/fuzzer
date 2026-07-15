@@ -79,15 +79,25 @@ class MonteCarloScheduler:
         # Blend factor: 0.0 = pure Thompson, 1.0 = pure pairwise
         self.pairwise_blend = pairwise_blend
 
-    def init_arm(self, name: str) -> None:
-        """Register a mutation operator arm with prior (1, 1).
+    def init_arm(self, name: str, prior_alpha: float = 1.0, prior_beta: float = 1.0) -> None:
+        """Register a mutation operator arm with a Beta prior.
+
+        Defaults to the uninformative Beta(1, 1) prior. Callers with prior
+        knowledge about an operator's likely usefulness (e.g. static target
+        profiling indicating a specific file format) can pass a stronger
+        prior to bias early Thompson sampling before any evidence has been
+        observed. A no-op if the arm is already registered — the prior only
+        applies at first registration and is never overwritten by later
+        calls, matching the existing idempotent behavior of this method.
 
         Args:
             name: Name of the mutation operator.
+            prior_alpha: Prior alpha (successes + 1). Must be > 0.
+            prior_beta: Prior beta (failures + 1). Must be > 0.
         """
         if name not in self.arm_alpha:
-            self.arm_alpha[name] = 1.0
-            self.arm_beta[name] = 1.0
+            self.arm_alpha[name] = max(prior_alpha, 1e-6)
+            self.arm_beta[name] = max(prior_beta, 1e-6)
 
     def select_op(self, ops: list[str], prev_op: str | None = None) -> str:
         """Select mutation operator via Thompson sampling with pairwise transitions.

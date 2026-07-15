@@ -25,6 +25,24 @@ class TestMonteCarloScheduler:
         mc.init_arm("bit_flip")
         assert mc.arm_alpha["bit_flip"] == 1.0
 
+    def test_init_arm_informative_prior(self):
+        mc = MonteCarloScheduler()
+        mc.init_arm("png_chunk_mutate", prior_alpha=2.0, prior_beta=1.0)
+        assert mc.arm_alpha["png_chunk_mutate"] == 2.0
+        assert mc.arm_beta["png_chunk_mutate"] == 1.0
+
+    def test_init_arm_prior_not_overwritten_on_reregister(self):
+        mc = MonteCarloScheduler()
+        mc.init_arm("bit_flip", prior_alpha=5.0, prior_beta=1.0)
+        mc.init_arm("bit_flip")  # default prior, arm already registered
+        assert mc.arm_alpha["bit_flip"] == 5.0
+
+    def test_init_arm_prior_clamped_positive(self):
+        mc = MonteCarloScheduler()
+        mc.init_arm("op", prior_alpha=0.0, prior_beta=-1.0)
+        assert mc.arm_alpha["op"] > 0
+        assert mc.arm_beta["op"] > 0
+
     def test_select_op(self):
         mc = MonteCarloScheduler()
         mc.init_arm("bit_flip")
