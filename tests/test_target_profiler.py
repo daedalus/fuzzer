@@ -11,6 +11,7 @@ from fuzzer_tool.core.target_profiler import (
     TargetProfiler,
     TargetProfile,
     FunctionInfo,
+    format_operator_priors,
 )
 
 
@@ -186,3 +187,45 @@ class TestBoundaryMarkers:
         p.boundary_markers = [b":", b"/", b"\n"]
         for bm in p.boundary_markers:
             assert isinstance(bm, bytes)
+
+
+class TestFormatOperatorPriors:
+    def test_no_hints_when_profile_empty(self):
+        p = TargetProfile()
+        assert format_operator_priors(p) == {}
+
+    def test_png_format_boosts_png_operators(self):
+        p = TargetProfile()
+        p.format_signature = "png"
+        priors = format_operator_priors(p)
+        assert priors["png_chunk_mutate"] == (2.0, 1.0)
+        assert priors["png_crc_fix"] == (2.0, 1.0)
+        assert "jpeg_chunk_mutate" not in priors
+
+    def test_unknown_format_no_format_hints(self):
+        p = TargetProfile()
+        p.format_signature = "text"
+        priors = format_operator_priors(p)
+        assert not any(op.startswith(("png_", "jpeg_", "gzip_", "zlib_", "bmp_")) for op in priors)
+
+    def test_magic_bytes_boost_dict_operators(self):
+        p = TargetProfile()
+        p.magic_bytes = [b"\x89PNG\r\n\x1a\n"]
+        priors = format_operator_priors(p)
+        assert priors["dict_insert"] == (2.0, 1.0)
+        assert priors["checksum_repair"] == (2.0, 1.0)
+
+    def test_boundary_markers_boost_dict_operators(self):
+        p = TargetProfile()
+        p.boundary_markers = [b":"]
+        priors = format_operator_priors(p)
+        assert "dict_replace" in priors
+
+    def test_priors_are_positive_finite_floats(self):
+        p = TargetProfile()
+        p.format_signature = "gzip"
+        p.magic_bytes = [b"\x1f\x8b"]
+        priors = format_operator_priors(p)
+        for alpha, beta in priors.values():
+            assert alpha > 0
+            assert beta > 0

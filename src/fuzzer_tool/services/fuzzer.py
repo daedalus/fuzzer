@@ -544,22 +544,42 @@ class Fuzzer:
 
             self._tracer = CrashTracer(target)
 
-        def _register_arms(scheduler):
-            """Register all mutation arms on a scheduler (mc, mopt, replicator, elo)."""
+        def _register_arms(scheduler, priors=None):
+            """Register all mutation arms on a scheduler (mc, mopt, replicator, elo).
+
+            Args:
+                scheduler: Scheduler exposing init_arm(name).
+                priors: Optional dict of operator name -> (prior_alpha,
+                    prior_beta) overrides. Only meaningful for the
+                    Beta-Bernoulli Thompson-sampling scheduler; ignored for
+                    schedulers whose init_arm() doesn't accept a prior.
+            """
+            priors = priors or {}
+
+            def _init(op):
+                if op in priors and hasattr(scheduler, "arm_alpha"):
+                    scheduler.init_arm(op, *priors[op])
+                else:
+                    scheduler.init_arm(op)
+
             for op in MUTATIONS:
-                scheduler.init_arm(op)
+                _init(op)
             for op in DICT_MUTATIONS:
-                scheduler.init_arm(op)
-            scheduler.init_arm("markov_bytes")
-            scheduler.init_arm("cem_bytes")
+                _init(op)
+            _init("markov_bytes")
+            _init("cem_bytes")
             if self.grammar:
-                scheduler.init_arm("grammar_mutate")
-                scheduler.init_arm("grammar_tree_mutate")
+                _init("grammar_mutate")
+                _init("grammar_tree_mutate")
             for op in FORMAT_MUTATIONS:
-                scheduler.init_arm(op)
+                _init(op)
+
+        from fuzzer_tool.core.target_profiler import format_operator_priors
+
+        _format_priors = format_operator_priors(self._profile)
 
         if self.mc and self.mc_bandit:
-            _register_arms(self.mc)
+            _register_arms(self.mc, _format_priors)
         if self._mopt:
             _register_arms(self._mopt)
         if self._replicator:
