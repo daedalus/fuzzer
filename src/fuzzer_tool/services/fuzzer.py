@@ -1601,6 +1601,17 @@ class Fuzzer:
             mutated = self._bmp_mutator._generate_random_bmp(max_len=self.max_len)
         return bytearray(mutated[: self.max_len])
 
+    def _op_zlib_chunk_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.zlib_mutations import ZlibMutator, parse_zlib
+
+        if not hasattr(self, "_zlib_mutator"):
+            self._zlib_mutator = ZlibMutator()
+        if parse_zlib(bytes(buf)):
+            mutated = self._zlib_mutator.mutate(bytes(buf), max_len=self.max_len)
+        else:
+            mutated = self._zlib_mutator._generate_random_zlib(max_len=self.max_len)
+        return bytearray(mutated[: self.max_len])
+
     def _op_png_crc_fix(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.png_mutations import parse_png_chunks, serialize_png_chunks
 
@@ -1704,6 +1715,7 @@ class Fuzzer:
             "jpeg_crc_fix": self._op_jpeg_crc_fix,
             "gzip_chunk_mutate": self._op_gzip_chunk_mutate,
             "bmp_chunk_mutate": self._op_bmp_chunk_mutate,
+            "zlib_chunk_mutate": self._op_zlib_chunk_mutate,
             "png_crc_fix": self._op_png_crc_fix,
             "redqueen": self._op_redqueen,
             "havoc": self._op_havoc,
