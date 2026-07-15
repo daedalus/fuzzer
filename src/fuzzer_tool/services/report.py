@@ -903,7 +903,7 @@ def _elo_ratings(f) -> str:
                 lines.append(f"    {i}. {op:<20s} {rating:>7.0f} ({sign}{delta:.0f})")
 
     # Meta-scheduler strategy ranking (bandit vs MOpt)
-    if f._use_meta_elo and f._elo:
+    if f._use_elo and f._elo:
         strategy_ranking = f._elo.get_strategy_ranking()
         if strategy_ranking:
             lines.append("")

@@ -60,7 +60,11 @@ src/fuzzer_tool/
 
 tools/
 ├── corpus_png.py      # PNG corpus generator for libpng fuzzing
-└── release.sh         # Release automation
+├── release.sh         # Release automation
+├── bench.sh           # 4-way config comparison (baseline/enhanced/enhanced+/optimal)
+├── bench_sweep.sh      # Exhaustive feature/combination sweep
+└── lib/
+    └── bench_common.sh # Shared helpers for bench.sh and bench_sweep.sh
 
 dictionaries/
 └── png.dict           # PNG format tokens
@@ -99,9 +103,9 @@ Fuzzer state is saved to `{corpus_dir}/state.json` on shutdown. Use `--resume` t
 - Transitions accumulate across sessions
 
 ### Meta-Scheduler (Elo Arbitration)
-- `--meta-elo` enables Elo-based arbitration between bandit and MOpt strategies
-- Requires `--elo --mc-bandit --mopt` to be active
-- Both strategies run in shadow; Elo picks which one to trust each iteration
+- `--elo` alone now enables Elo-based arbitration between operator strategies (bandit/MOpt/replicator) and seed strategies (ga/weighted/pareto/format); the separate `--meta-elo` flag was consolidated into `--elo` (see `_use_elo` in `services/fuzzer.py`)
+- Enable `--mc-bandit`/`--mopt`/`--replicator` alongside `--elo` to add those strategies to the arbitration pool
+- All available strategies run in shadow; Elo picks which one to trust each iteration
 - Strategy ratings tracked in `elo.json` under `strategy_ratings` / `strategy_match_count`
 - Probabilistic selection via softmax over Elo gap (temperature=400)
 

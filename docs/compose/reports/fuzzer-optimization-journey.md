@@ -58,7 +58,7 @@ fuzzer-tool fuzz targets/png_read -d corpus/ -c -D dictionaries/png.dict
 
 # Full feature stack (as benchmarked)
 fuzzer-tool fuzz targets/png_read -d corpus/ -c \
-    --elo --meta-elo --mc-bandit --mopt \
+    --elo --mc-bandit --mopt \
     --markov --markov-gen --markov-order 0,1,2,3 \
     --mi-guided --transfer-entropy --replicator \
     --secretary --pairwise-blend 0.5
