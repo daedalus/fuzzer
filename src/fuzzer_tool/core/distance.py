@@ -80,7 +80,9 @@ class TargetDistance:
         self._loaded = True
         log.info(
             "TargetDistance: %d functions, %d targets, entry=0x%x",
-            len(self.functions), len(self.target_addrs), self._entry_addr,
+            len(self.functions),
+            len(self.target_addrs),
+            self._entry_addr,
         )
         return True
 
@@ -136,9 +138,9 @@ class TargetDistance:
             sh = e_shoff + i * e_shentsize
             sh_type = struct.unpack_from("<I", elf_data, sh + 4)[0]
             sh_name_idx = struct.unpack_from("<I", elf_data, sh)[0]
-            name = elf_data[
-                shstr_offset + sh_name_idx : shstr_offset + sh_name_idx + 32
-            ].split(b"\x00")[0]
+            name = elf_data[shstr_offset + sh_name_idx : shstr_offset + sh_name_idx + 32].split(
+                b"\x00"
+            )[0]
             if sh_type == 2:  # SHT_SYMTAB
                 symtab_sec = sh
             elif sh_type == 3 and name == b".strtab":  # SHT_STRTAB
@@ -168,7 +170,7 @@ class TargetDistance:
                 .decode(errors="replace")
             )
             # STT_FUNC = 2
-            if (st_info & 0xf) == 2 and st_value > 0 and st_value >= self._text_start:
+            if (st_info & 0xF) == 2 and st_value > 0 and st_value >= self._text_start:
                 end = st_value + st_size if st_size > 0 else st_value + 1
                 func_addrs.append((name, st_value))
                 self.functions[name] = (st_value, end)
@@ -265,52 +267,55 @@ class TargetDistance:
         return visited
 
     def _compute_distances(self):
-        """BFS from entry point through call graph to compute distances."""
-        entry_func = self._addr_to_function(self._entry_addr)
-        if entry_func is None:
-            for name in ("main", "_start", "__libc_start_main"):
-                if name in self.functions:
-                    entry_func = name
-                    break
-        if entry_func is None:
-            log.warning("Cannot find entry function, using distance=1 for all")
+        """BFS from target functions through reverse call graph to compute distances.
+
+        Builds a reverse call graph (callee → caller) and BFS outward from
+        target functions. Each function's distance is its shortest path to
+        reach a target function, not its distance from entry.
+        """
+        # Find target functions
+        target_names = set()
+        for taddr in self.target_addrs:
+            tfname = self._addr_to_function(taddr)
+            if tfname:
+                target_names.add(tfname)
+                self._distances[tfname] = 0.0
+                log.info("Target function: %s @ 0x%x (distance=0)", tfname, taddr)
+
+        if not target_names:
+            log.warning("No target functions found, using distance=1 for all")
             for fname in self.functions:
                 self._distances[fname] = 1.0
             return
 
-        # Heuristic: if _start doesn't reach main via call graph,
-        # add synthetic edges for common patterns
-        if entry_func == "_start" and "main" in self.functions and "main" not in self._reachable_from(entry_func):
-                # _start -> __libc_start_main -> main is the standard pattern
-                self.call_graph.setdefault("_start", set()).add("main")
-        if entry_func is None:
-            log.warning("Cannot find entry function, using distance=1 for all")
-            for fname in self.functions:
-                self._distances[fname] = 1.0
-            return
+        # Build reverse call graph: callee → set of callers
+        # For "distance to target", we need to follow edges backward from target
+        # Forward: caller → callee (caller calls callee)
+        # Reverse: callee → caller (caller is reachable from callee via call chain)
+        # So reverse_graph[callee] = {callers} means callee can be reached from those callers
+        reverse_graph: dict[str, set[str]] = {}
+        for caller, callees in self.call_graph.items():
+            for callee in callees:
+                reverse_graph.setdefault(callee, set()).add(caller)
 
-        # BFS from entry
-        visited: dict[str, float] = {entry_func: 0.0}
-        queue = [entry_func]
+        # BFS from target functions through reverse graph
+        # Distance = shortest path from each function to reach a target
+        visited: dict[str, float] = {t: 0.0 for t in target_names}
+        queue = list(target_names)
         while queue:
             current = queue.pop(0)
             current_dist = visited[current]
-            for callee in self.call_graph.get(current, set()):
-                if callee not in visited:
-                    visited[callee] = current_dist + 1.0
-                    queue.append(callee)
+            # reverse_graph[current] = nodes that can reach current (are one hop closer to target)
+            for caller in reverse_graph.get(current, set()):
+                if caller not in visited:
+                    visited[caller] = current_dist + 1.0
+                    queue.append(caller)
 
         # Assign distance to all functions — unreachable ones get a high penalty
         max_dist = max(visited.values()) if visited else 1.0
         for fname in self.functions:
-            self._distances[fname] = visited.get(fname, max_dist + 5.0)
-
-        # Assign distance to target functions (distance 0 by definition)
-        for taddr in self.target_addrs:
-            tfname = self._addr_to_function(taddr)
-            if tfname:
-                self._distances[tfname] = 0.0
-                log.info("Target function: %s @ 0x%x (distance=0)", tfname, taddr)
+            if fname not in self._distances:  # don't overwrite target functions
+                self._distances[fname] = visited.get(fname, max_dist + 5.0)
 
     def bb_distance(self, bb_addr: int) -> float:
         """Get the distance of a basic block address to the nearest target.
