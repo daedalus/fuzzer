@@ -11,6 +11,7 @@
 - [x] Sanitizer regex groups closed (ASAN/TSAN)
 - [x] Timeout crash detection fix
 - [x] Ptrace initial SIGTRAP crash detection
+- [x] Consolidated benchmark shell scripts: shared helpers extracted to `tools/lib/bench_common.sh`; merged `tools/bench_sweep2.sh` into `tools/bench_sweep.sh` (deduped identical combos, kept all unique variants)
 
 ## Bugs Fixed
 - [x] `--stats-file` eaten by `-A` (REMAINDER) — user must place `-A` last
