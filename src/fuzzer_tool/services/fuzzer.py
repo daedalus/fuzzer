@@ -557,7 +557,7 @@ class Fuzzer:
             priors = priors or {}
 
             def _init(op):
-                if op in priors and hasattr(scheduler, "arm_alpha"):
+                if op in priors and getattr(scheduler, "supports_priors", False):
                     scheduler.init_arm(op, *priors[op])
                 else:
                     scheduler.init_arm(op)

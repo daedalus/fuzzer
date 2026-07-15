@@ -647,8 +647,9 @@ _BOOSTED_PRIOR: tuple[float, float] = (2.0, 1.0)
 def format_operator_priors(profile: "TargetProfile") -> dict[str, tuple[float, float]]:
     """Derive informative Beta priors for mutation operators from a profile.
 
-    Static analysis (magic bytes, format signature) is prior knowledge about
-    which structure-aware mutation operators are likely to be useful *before*
+    Static analysis (magic bytes, boundary markers, extracted interesting
+    strings, format signature) is prior knowledge about which
+    structure-aware mutation operators are likely to be useful *before*
     any executions have happened. This lets the Thompson-sampling bandit
     (:class:`fuzzer_tool.core.montecarlo.MonteCarloScheduler`) start with a
     Beta prior biased toward those operators instead of the uninformative
