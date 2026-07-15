@@ -12,6 +12,7 @@ Coverage-guided binary fuzzer with static target analysis, statistical novelty s
 - **Dictionary support**: inject protocol tokens from dictionary files
 - **Markov chain**: learn byte-level transition probabilities from corpus, generate statistically similar inputs, persist across runs
 - **Monte Carlo scheduling**: Thompson sampling bandit for operator selection + Cross-Entropy Method for byte distribution learning
+- **Surprisal-weighted rewards**: all scheduling mechanisms (bandit, MOpt, Replicator, Elo) weight discovery credit by `1 - bitmap_density` — rare discoveries in sparse coverage regions get more credit than discoveries near already-saturated areas
 - **Perplexity-gated generation**: model quality dynamically scales generation rate (more generation when model is lost, less when well-calibrated); rejects extreme-perplexity outputs as pure noise
 
 ### Static Target Analysis
