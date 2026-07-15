@@ -136,7 +136,7 @@ run_with_retry() {
         python -m fuzzer_tool "$@" 2>&1 | tee "$log"
 
         if [[ ! -s "$log" ]]; then
-            echo "[*] Run produced no log output (crashed before startup?). Retrying..."
+            echo "[*] Run produced no log output (crashed before startup, or the log could not be written). Retrying..."
         elif check_coverage "$log" "attempt $attempt"; then
             return 0
         fi
