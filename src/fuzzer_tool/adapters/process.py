@@ -28,7 +28,9 @@ def _clean_env(env: dict[str, str] | None = None) -> dict[str, str]:
     e = dict(env or os.environ)
     ld = e.get("LD_PRELOAD", "")
     if ld:
-        cleaned = [p for p in ld.split(":") if "ksm_preload" not in p]
+        import re
+
+        cleaned = [p for p in re.split(r"[:\s]+", ld) if p and "ksm_preload" not in p]
         if cleaned:
             e["LD_PRELOAD"] = ":".join(cleaned)
         else:
@@ -78,9 +80,7 @@ def run_target_stdin(
         _track(proc.pid)
 
         # Write data in a thread to avoid pipe deadlock
-        writer = threading.Thread(
-            target=_write_and_close, args=(proc.stdin, data), daemon=True
-        )
+        writer = threading.Thread(target=_write_and_close, args=(proc.stdin, data), daemon=True)
         writer.start()
 
         # Watchdog: kill process group if still alive after timeout.
