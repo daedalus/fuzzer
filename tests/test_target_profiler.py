@@ -3,6 +3,7 @@
 import os
 import struct
 import tempfile
+import math
 
 import pytest
 
@@ -231,3 +232,5 @@ class TestFormatOperatorPriors:
         for alpha, beta in priors.values():
             assert alpha > 0
             assert beta > 0
+            assert math.isfinite(alpha)
+            assert math.isfinite(beta)

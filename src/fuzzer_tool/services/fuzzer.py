@@ -557,8 +557,9 @@ class Fuzzer:
             priors = priors or {}
 
             def _init(op):
-                if op in priors and getattr(scheduler, "supports_priors", False):
-                    scheduler.init_arm(op, *priors[op])
+                prior = priors.get(op) if getattr(scheduler, "supports_priors", False) else None
+                if prior is not None and len(prior) == 2:
+                    scheduler.init_arm(op, *prior)
                 else:
                     scheduler.init_arm(op)
 
