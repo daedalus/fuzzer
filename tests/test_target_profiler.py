@@ -11,6 +11,7 @@ from fuzzer_tool.core.target_profiler import (
     TargetProfiler,
     TargetProfile,
     FunctionInfo,
+    _FORMAT_OPERATOR_HINTS,
     format_operator_priors,
 )
 
@@ -206,7 +207,8 @@ class TestFormatOperatorPriors:
         p = TargetProfile()
         p.format_signature = "text"
         priors = format_operator_priors(p)
-        assert not any(op.startswith(("png_", "jpeg_", "gzip_", "zlib_", "bmp_")) for op in priors)
+        all_format_ops = {op for ops in _FORMAT_OPERATOR_HINTS.values() for op in ops}
+        assert not (set(priors) & all_format_ops)
 
     def test_magic_bytes_boost_dict_operators(self):
         p = TargetProfile()

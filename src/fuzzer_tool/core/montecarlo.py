@@ -22,6 +22,12 @@ from fuzzer_tool.core.edge_tracker import ks_significance_threshold
 
 log = logging.getLogger(__name__)
 
+# Lower clamp for Beta(alpha, beta) parameters passed to init_arm(): keeps
+# random.betavariate() numerically stable for malformed/degenerate priors
+# (e.g. a caller passing 0 or a negative value) without silently overriding
+# intentionally weak-but-valid priors above this threshold.
+MIN_BETA_PARAM = 1e-6
+
 
 class MonteCarloScheduler:
     """Thompson sampling bandit for mutation ops + CEM byte distribution.
@@ -43,6 +49,11 @@ class MonteCarloScheduler:
     """
 
     ELITE_MAX = 200
+    # Declares that init_arm() accepts an informative (prior_alpha, prior_beta)
+    # override, unlike MOptScheduler/ReplicatorScheduler/EloTracker which use
+    # non-Bayesian internal representations (particle positions, population
+    # simplex, Elo ratings).
+    supports_priors = True
 
     def __init__(
         self,
@@ -96,8 +107,8 @@ class MonteCarloScheduler:
             prior_beta: Prior beta (failures + 1). Must be > 0.
         """
         if name not in self.arm_alpha:
-            self.arm_alpha[name] = max(prior_alpha, 1e-6)
-            self.arm_beta[name] = max(prior_beta, 1e-6)
+            self.arm_alpha[name] = max(prior_alpha, MIN_BETA_PARAM)
+            self.arm_beta[name] = max(prior_beta, MIN_BETA_PARAM)
 
     def select_op(self, ops: list[str], prev_op: str | None = None) -> str:
         """Select mutation operator via Thompson sampling with pairwise transitions.
