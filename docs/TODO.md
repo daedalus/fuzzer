@@ -16,6 +16,8 @@
 - [x] `--stats-file` eaten by `-A` (REMAINDER) — user must place `-A` last
 - [x] CEM never engaging — refit now triggers at elite_set >= 10
 - [x] dict_insert/dict_replace 0/0 — was missing `-D` flag, now works
+- [x] `report.py` referenced removed `_use_meta_elo` attribute (AttributeError when `--elo` + `--report` used) — updated to `_use_elo`
+- [x] Benchmark scripts (`tools/bench.sh`, `tools/bench_sweep.sh`, `tools/bench_sweep2.sh`) still passed removed `--meta-elo` CLI flag — removed, docs updated
 
 ## Pending Bugs
 - [ ] `_apply_single_mutation` havoc doesn't enforce max_len strictly (allows +1 byte per insert, up to +8 total)

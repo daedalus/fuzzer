@@ -95,7 +95,6 @@ echo "=== Phase 1: Individual features ==="
 
 run_combo "baseline"
 run_combo "elo" --elo
-run_combo "meta_elo" --elo --meta-elo
 run_combo "bandit" --mc-bandit
 run_combo "mopt" --mopt
 run_combo "markov" --markov --markov-gen --markov-order 0,1,2,3
@@ -117,8 +116,8 @@ echo "=== Phase 2: Scheduling combinations ==="
 
 run_combo "s1_elo_bandit" --elo --mc-bandit
 run_combo "s2_elo_mopt" --elo --mopt
-run_combo "s3_elo_meta_bandit" --elo --meta-elo --mc-bandit
-run_combo "s4_elo_meta_mopt" --elo --meta-elo --mopt
+run_combo "s3_elo_bandit" --elo --mc-bandit
+run_combo "s4_elo_mopt" --elo --mopt
 run_combo "s5_bandit_mopt" --mc-bandit --mopt
 run_combo "s6_elo_bandit_replicator" --elo --mc-bandit --replicator
 run_combo "s7_elo_mopt_replicator" --elo --mopt --replicator
@@ -152,25 +151,25 @@ echo "=== Phase 5: Game theory additions ==="
 
 run_combo "gt1_sched_shapley" --elo --mc-bandit --shapley
 run_combo "gt2_sched_rep_shapley" --elo --mc-bandit --replicator --shapley
-run_combo "gt3_sched_all_game" --elo --meta-elo --mc-bandit --replicator --shapley
+run_combo "gt3_sched_all_game" --elo --mc-bandit --replicator --shapley
 
 # ── Phase 6: Full combos (best of each) ───────────────────────────
 echo ""
 echo "=== Phase 6: Full combinations ==="
 
-run_combo "f1_enhanced" --elo --meta-elo --mc-bandit --mopt
-run_combo "f2_enhanced_plus" --elo --meta-elo --mc-bandit --mopt \
+run_combo "f1_enhanced" --elo --mc-bandit --mopt
+run_combo "f2_enhanced_plus" --elo --mc-bandit --mopt \
     --markov --markov-gen --markov-order 0,1,2,3 \
     --replicator --shapley --renyi-weight --transfer-entropy
 run_combo "f3_lean_best" --elo --mc-bandit --markov --markov-gen --markov-order 0,1,2,3 --renyi-weight
-run_combo "f4_full_kitchen" --elo --meta-elo --mc-bandit --mopt \
+run_combo "f4_full_kitchen" --elo --mc-bandit --mopt \
     --markov --markov-gen --markov-order 0,1,2,3 \
     --replicator --shapley --renyi-weight --transfer-entropy \
     --mi-guided --sensitivity --secretary --mc-cem --anneal-budget 500
 run_combo "f5_elo_markov_renyi" --elo --markov --markov-gen --markov-order 0,1,2,3 --renyi-weight
 run_combo "f6_bandit_markov_renyi_transfer" --mc-bandit --markov --markov-gen --markov-order 0,1,2,3 --renyi-weight --transfer-entropy
 run_combo "f7_elo_bandit_markov_renyi_transfer" --elo --mc-bandit --markov --markov-gen --markov-order 0,1,2,3 --renyi-weight --transfer-entropy
-run_combo "f8_elo_meta_bandit_markov_rep_shapley" --elo --meta-elo --mc-bandit --markov --markov-gen --markov-order 0,1,2,3 --replicator --shapley
+run_combo "f8_elo_bandit_markov_rep_shapley" --elo --mc-bandit --markov --markov-gen --markov-order 0,1,2,3 --replicator --shapley
 run_combo "f9_elo_mopt_markov_renyi_transfer" --elo --mopt --markov --markov-gen --markov-order 0,1,2,3 --renyi-weight --transfer-entropy
 run_combo "f10_elo_bandit_markov_shapley_transfer" --elo --mc-bandit --markov --markov-gen --markov-order 0,1,2,3 --shapley --transfer-entropy
 run_combo "f11_elo_bandit_rep_markov_renyi" --elo --mc-bandit --replicator --markov --markov-gen --markov-order 0,1,2,3 --renyi-weight
