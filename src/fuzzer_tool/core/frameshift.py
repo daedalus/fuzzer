@@ -116,9 +116,14 @@ class FrameShift:
         """Write all relation values into the buffer.
 
         Updates the bytes at each relation's position with its current value.
+        Skips relations that no longer fit within the buffer (e.g. after
+        length-shrinking mutations).
         """
+        buf_len = len(buf)
         for rel in self.relations:
             if not rel.enabled:
+                continue
+            if rel.pos + rel.size > buf_len:
                 continue
             val = rel.val
             if rel.le:
