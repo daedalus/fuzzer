@@ -612,3 +612,68 @@ class TargetProfiler:
                 seen.add(p)
                 unique.append(p)
         profile.entry_points = unique
+
+
+# Format signature -> structure-aware mutation operators that are almost
+# certainly useful for that format (see core.mutations.FORMAT_MUTATIONS).
+_FORMAT_OPERATOR_HINTS: dict[str, tuple[str, ...]] = {
+    "png": ("png_chunk_mutate", "png_crc_fix"),
+    "jpeg": ("jpeg_chunk_mutate", "jpeg_crc_fix"),
+    "gzip": ("gzip_chunk_mutate",),
+    "bz2": ("gzip_chunk_mutate",),
+    "xz": ("gzip_chunk_mutate",),
+    "zlib": ("zlib_chunk_mutate",),
+    "riff": ("bmp_chunk_mutate",),
+}
+
+# Dictionary/token-aware mutation operators (see core.mutations.DICT_MUTATIONS).
+_DICT_OPERATORS: tuple[str, ...] = (
+    "dict_insert",
+    "dict_replace",
+    "dict_overwrite",
+    "dict_prepend",
+    "dict_append",
+    "checksum_repair",
+    "token_dup",
+)
+
+# Beta prior for operators the profile suggests are relevant: same total
+# "pseudo-observation" mass as the uninformative default (1, 1), but shifted
+# toward success so Thompson sampling favors them before real evidence
+# arrives. Weak enough that a handful of real failures will correct it.
+_BOOSTED_PRIOR: tuple[float, float] = (2.0, 1.0)
+
+
+def format_operator_priors(profile: "TargetProfile") -> dict[str, tuple[float, float]]:
+    """Derive informative Beta priors for mutation operators from a profile.
+
+    Static analysis (magic bytes, boundary markers, extracted interesting
+    strings, format signature) is prior knowledge about which
+    structure-aware mutation operators are likely to be useful *before*
+    any executions have happened. This lets the Thompson-sampling bandit
+    (:class:`fuzzer_tool.core.montecarlo.MonteCarloScheduler`) start with a
+    Beta prior biased toward those operators instead of the uninformative
+    Beta(1, 1) used for every arm by default.
+
+    Args:
+        profile: A populated :class:`TargetProfile`.
+
+    Returns:
+        Mapping of operator name to a (prior_alpha, prior_beta) override.
+        Operators not present in the mapping should use the default
+        Beta(1, 1) prior.
+    """
+    priors: dict[str, tuple[float, float]] = {}
+
+    fmt = profile.format_signature
+    if fmt:
+        for op in _FORMAT_OPERATOR_HINTS.get(fmt, ()):
+            priors[op] = _BOOSTED_PRIOR
+
+    # Boost dict-aware operators whenever static analysis extracted at least
+    # one usable token (non-empty list is truthy; empty list is falsy).
+    if profile.magic_bytes or profile.boundary_markers or profile.interesting_strings:
+        for op in _DICT_OPERATORS:
+            priors[op] = _BOOSTED_PRIOR
+
+    return priors

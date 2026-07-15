@@ -20,6 +20,7 @@ Coverage-guided binary fuzzer with static target analysis, statistical novelty s
 - **TargetProfiler**: ELF static analysis at startup — extracts string constants, function boundaries, magic bytes, and input format hints
 - **Auto-populated dictionary**: interesting strings (format specifiers, error messages, keywords) and magic bytes extracted from `.rodata`
 - **Format-aware seed generation**: produces structurally meaningful initial seeds (PNG headers, text protocols, JSON, XML, HTML) based on inferred format
+- **Informative Bayesian priors**: `format_operator_priors()` seeds the Thompson-sampling bandit's Beta prior toward structure-aware operators (e.g. `png_chunk_mutate`) and dictionary operators when static analysis detects a matching format or extractable tokens, instead of always starting from the uninformative Beta(1, 1)
 - **Hot-function weighting**: seeds exercising high-branch-density functions get a proportional boost in selection
 - **Crash ETA estimation**: blends static risky density (keyword heuristic) with dynamic I(byte_position; crash) mutual information from actual executions, plus Good-Turing edge estimates and calibrated discovery rate — the MI signal strengthens as fuzzing accumulates near-miss data
 
