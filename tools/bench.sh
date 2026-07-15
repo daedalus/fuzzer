@@ -125,17 +125,11 @@ e_collision=$(extract "Collision risk:\s+\K[0-9.]+" /tmp/fuzz_bench_enhanced.log
 p_collision=$(extract "Collision risk:\s+\K[0-9.]+" /tmp/fuzz_bench_enhanced+.log)
 o_collision=$(extract "Collision risk:\s+\K[0-9.]+" /tmp/fuzz_bench_optimal.log)
 
-# Extract CI for crash rates
-b_crash_ci=$(extract_ci /tmp/fuzz_bench_baseline.log "Crash rate:")
-e_crash_ci=$(extract_ci /tmp/fuzz_bench_enhanced.log "Crash rate:")
-p_crash_ci=$(extract_ci /tmp/fuzz_bench_enhanced+.log "Crash rate:")
-o_crash_ci=$(extract_ci /tmp/fuzz_bench_optimal.log "Crash rate:")
-
-# extract_ci returns "|"-joined values here; normalize to space-joined for display
-b_crash_ci="${b_crash_ci//|/ }"
-e_crash_ci="${e_crash_ci//|/ }"
-p_crash_ci="${p_crash_ci//|/ }"
-o_crash_ci="${o_crash_ci//|/ }"
+# Extract CI for crash rates (space-delimited for direct display in the table below)
+b_crash_ci=$(extract_ci /tmp/fuzz_bench_baseline.log "Crash rate:" " ")
+e_crash_ci=$(extract_ci /tmp/fuzz_bench_enhanced.log "Crash rate:" " ")
+p_crash_ci=$(extract_ci /tmp/fuzz_bench_enhanced+.log "Crash rate:" " ")
+o_crash_ci=$(extract_ci /tmp/fuzz_bench_optimal.log "Crash rate:" " ")
 
 printf "%-25s %12s %12s %12s %12s\n" "Metric" "Baseline" "Enhanced" "Enhanced+" "Optimal"
 printf "%-25s %12s %12s %12s %12s\n" "-------------------------" "------------" "------------" "------------" "------------"

@@ -33,21 +33,25 @@ extract() {
 }
 
 # Extract CI values from a "Crash rate:" line (format: "rate% ±1σ: lo% ±2σ: lo% ±3σ: lo%").
-# Usage: extract_ci <log> [pattern]  — pattern defaults to "Crash rate:"
+# Usage: extract_ci <log> [pattern] [delimiter]
+#   pattern   defaults to "Crash rate:"
+#   delimiter defaults to "|" (used to join the three CI values, e.g. for CSV rows).
+#             Pass " " for space-separated output suitable for direct display.
 extract_ci() {
     local log="$1"
     local pattern="${2:-Crash rate:}"
+    local delim="${3:-|}"
     local line
     line=$(grep -P "$pattern" "$log" 2>/dev/null | tail -1)
     if [[ -z "$line" ]]; then
-        echo "-|-|-"
+        printf -- "-%s-%s-\n" "$delim" "$delim"
         return
     fi
     local ci1 ci2 ci3
     ci1=$(echo "$line" | grep -oP '±1σ:\s+\K[0-9.]+')
     ci2=$(echo "$line" | grep -oP '±2σ:\s+\K[0-9.]+')
     ci3=$(echo "$line" | grep -oP '±3σ:\s+\K[0-9.]+')
-    echo "${ci1:--}|${ci2:--}|${ci3:--}"
+    printf -- "%s%s%s%s%s\n" "${ci1:--}" "$delim" "${ci2:--}" "$delim" "${ci3:--}"
 }
 
 # ── SHM verification ──────────────────────────────────────────────────
@@ -131,7 +135,9 @@ run_with_retry() {
         echo "[*] Attempt $attempt/$BENCH_MAX_RETRIES..."
         python -m fuzzer_tool "$@" 2>&1 | tee "$log"
 
-        if check_coverage "$log" "attempt $attempt"; then
+        if [[ ! -s "$log" ]]; then
+            echo "[*] Run produced no log output (crashed before startup?). Retrying..."
+        elif check_coverage "$log" "attempt $attempt"; then
             return 0
         fi
 
