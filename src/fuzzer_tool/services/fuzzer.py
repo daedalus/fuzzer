@@ -454,6 +454,11 @@ class Fuzzer:
             self._te_edge_history: list[bytes] = []
             self._te_history_max = 500
             log.info("Transfer entropy tracking enabled")
+
+        # FrameShift: universal length-field auto-adjustment
+        from fuzzer_tool.core.frameshift import FrameShift
+
+        self._frameshift = FrameShift(max_relations=64)
         self._last_ops_used: list[str] = []
         self._last_hamming_distance: int = -1
 
@@ -1111,16 +1116,33 @@ class Fuzzer:
             self._last_ops_used.append(op)
 
             byte_idx = self._select_position(buf, data)
+            old_len = len(buf)
 
             result = self._op_dispatch[op](buf, byte_idx, data)
             if result is not None:
                 # Handler returned new bytes (havoc, format mutators, dict overwrite, etc.)
                 if op == "havoc":
+                    # Apply FrameShift length-field fixup before returning
+                    if self._frameshift.relations:
+                        buf = bytearray(result[: self.max_len])
+                        self._frameshift.apply_to_buffer(buf)
+                        result = bytes(buf)
                     self._last_hamming_distance = (
                         hamming_distance(data, result) if len(data) == len(result) else -1
                     )
                     return result
+                # Track length change for FrameShift relations
+                new_len = min(len(result), self.max_len)
+                if self._frameshift.relations:
+                    if new_len > old_len:
+                        self._frameshift.on_insert(byte_idx, new_len - old_len)
+                    elif new_len < old_len:
+                        self._frameshift.on_delete(byte_idx, old_len - new_len)
                 buf = bytearray(result[: self.max_len])
+
+        # Apply FrameShift length-field fixup after all mutations
+        if self._frameshift.relations:
+            self._frameshift.apply_to_buffer(buf)
 
         result = bytes(buf)
         self._last_hamming_distance = (
@@ -3069,6 +3091,21 @@ class Fuzzer:
         dr = self.discovery_rate()
         print(f"\r[*] Calibration done: {exec_count} execs, {edges} edges discovered, "
               f"GT confidence={gt['confidence']}, discovery_rate={dr:.1f}/1k execs   ")
+
+        # FrameShift: discover length-field relations from the first seed
+        if self.corpus and not self._frameshift.relations:
+            seed0 = self.corpus[0]
+
+            def _exec_fn(data: bytes) -> int:
+                self._run_target(data)
+                bm = self._get_current_edge_bitmap()
+                return sum(bm) if bm else 0
+
+            n_rels = self._frameshift.discover_relations(
+                seed0, _exec_fn, max_relations=8, max_execs=200
+            )
+            if n_rels > 0:
+                print(f"[*] FrameShift: discovered {n_rels} length-field relations")
 
         # Crash ETA estimate
         from fuzzer_tool.core.crash_eta import estimate_execs_to_first_crash
