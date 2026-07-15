@@ -22,6 +22,12 @@ from fuzzer_tool.core.edge_tracker import ks_significance_threshold
 
 log = logging.getLogger(__name__)
 
+# Lower clamp for Beta(alpha, beta) parameters passed to init_arm(): keeps
+# random.betavariate() numerically stable for malformed/degenerate priors
+# (e.g. a caller passing 0 or a negative value) without silently overriding
+# intentionally weak-but-valid priors above this threshold.
+MIN_BETA_PARAM = 1e-6
+
 
 class MonteCarloScheduler:
     """Thompson sampling bandit for mutation ops + CEM byte distribution.
@@ -43,6 +49,11 @@ class MonteCarloScheduler:
     """
 
     ELITE_MAX = 200
+    # Declares that init_arm() accepts an informative (prior_alpha, prior_beta)
+    # override, unlike MOptScheduler/ReplicatorScheduler/EloTracker which use
+    # non-Bayesian internal representations (particle positions, population
+    # simplex, Elo ratings).
+    supports_priors = True
 
     def __init__(
         self,
@@ -79,15 +90,25 @@ class MonteCarloScheduler:
         # Blend factor: 0.0 = pure Thompson, 1.0 = pure pairwise
         self.pairwise_blend = pairwise_blend
 
-    def init_arm(self, name: str) -> None:
-        """Register a mutation operator arm with prior (1, 1).
+    def init_arm(self, name: str, prior_alpha: float = 1.0, prior_beta: float = 1.0) -> None:
+        """Register a mutation operator arm with a Beta prior.
+
+        Defaults to the uninformative Beta(1, 1) prior. Callers with prior
+        knowledge about an operator's likely usefulness (e.g. static target
+        profiling indicating a specific file format) can pass a stronger
+        prior to bias early Thompson sampling before any evidence has been
+        observed. A no-op if the arm is already registered — the prior only
+        applies at first registration and is never overwritten by later
+        calls, matching the existing idempotent behavior of this method.
 
         Args:
             name: Name of the mutation operator.
+            prior_alpha: Prior alpha (successes + 1). Must be > 0.
+            prior_beta: Prior beta (failures + 1). Must be > 0.
         """
         if name not in self.arm_alpha:
-            self.arm_alpha[name] = 1.0
-            self.arm_beta[name] = 1.0
+            self.arm_alpha[name] = max(prior_alpha, MIN_BETA_PARAM)
+            self.arm_beta[name] = max(prior_beta, MIN_BETA_PARAM)
 
     def select_op(self, ops: list[str], prev_op: str | None = None) -> str:
         """Select mutation operator via Thompson sampling with pairwise transitions.
