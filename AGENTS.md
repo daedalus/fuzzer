@@ -60,7 +60,11 @@ src/fuzzer_tool/
 
 tools/
 ├── corpus_png.py      # PNG corpus generator for libpng fuzzing
-└── release.sh         # Release automation
+├── release.sh         # Release automation
+├── bench.sh           # 4-way config comparison (baseline/enhanced/enhanced+/optimal)
+├── bench_sweep.sh      # Exhaustive feature/combination sweep
+└── lib/
+    └── bench_common.sh # Shared helpers for bench.sh and bench_sweep.sh
 
 dictionaries/
 └── png.dict           # PNG format tokens

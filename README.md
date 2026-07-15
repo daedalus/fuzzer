@@ -286,6 +286,11 @@ Configurations:
 - **optimal**: elo + mopt + replicator + markov ensemble (orders 0,1,2,3) + markov-gen
   - Best edge coverage at -n 1k (sweep-validated: 74 edges vs 61 baseline, 70 enhanced+)
 
+For a broader sweep across individual features and many combinations (instead
+of these four named configurations), use `tools/bench_sweep.sh`. Both scripts
+share common helpers (SHM cleanup, log metric extraction, coverage
+verification) from `tools/lib/bench_common.sh`.
+
 ## Troubleshooting
 
 ### Zero edges discovered (ASan + LD_PRELOAD conflict)
