@@ -1299,6 +1299,50 @@ class Fuzzer:
     def print_stats(self):
         return self._stats.print_stats()
 
+    def _record_entropy_sample(self, sh):
+        """Append a Shannon-entropy sample and trim history to a bounded size."""
+        self._entropy_history.append((self.exec_count, sh))
+        if len(self._entropy_history) > 200:
+            self._entropy_history = self._entropy_history[-100:]
+
+    def _compute_entropy_flat(self):
+        """Return whether the recent Shannon-entropy rate of change is flat.
+
+        Returns True if entropy has been flat over the last 4 samples,
+        False if it is still changing (redistribution, not stagnation),
+        or None if there aren't enough samples yet to measure the rate.
+        """
+        if len(self._entropy_history) < 4:
+            return None
+        recent = self._entropy_history[-4:]
+        dt = recent[-1][0] - recent[0][0]
+        if dt <= 0:
+            return None
+        dS = abs(recent[-1][1] - recent[0][1])
+        entropy_rate = dS / dt
+        return entropy_rate < 0.001
+
+    def _maybe_trigger_stall_recovery(self, execs_since_edge):
+        """Activate stall recovery unless entropy shows active redistribution.
+
+        Entropy rate confirmation: if entropy is still changing, this is
+        redistribution among existing edges, not genuine stagnation, so
+        recovery is skipped this round. If there aren't enough samples yet
+        to measure the rate (`entropy_flat is None`), fall back to the
+        no-new-edges signal alone.
+        """
+        entropy_flat = self._compute_entropy_flat()
+        if entropy_flat is False:
+            return False
+        reason = "no new edges"
+        if entropy_flat:
+            reason += " + flat entropy"
+        self._stall_recovery_count += 1
+        print(f"\n[*] STALL #{self._stall_recovery_count}: {reason} in "
+              f"{execs_since_edge} execs, switching to random mode")
+        self._stall_recovery_active = True
+        return True
+
     def run(self, iterations=0):
         print(f"[*] Target: {self.target}")
         # Static branch density: conditional branches per KB of .text
@@ -1439,9 +1483,7 @@ class Fuzzer:
                     # Sample Shannon entropy for rate-of-change tracking
                     if self._edge_tracker._global_edge_hits:
                         sh = self._edge_tracker.shannon_entropy_global()
-                        self._entropy_history.append((self.exec_count, sh))
-                        if len(self._entropy_history) > 200:
-                            self._entropy_history = self._entropy_history[-100:]
+                        self._record_entropy_sample(sh)
                     self.print_stats()
                     self._append_coverage_log()
                     self._record_discovery_snapshot()
@@ -1452,23 +1494,7 @@ class Fuzzer:
                         and execs_since_edge >= self._stall_threshold
                         and self.exec_count > 0
                     ):
-                        # Entropy rate confirmation: if entropy is also flat,
-                        # this is genuine stagnation, not redistribution
-                        entropy_flat = True
-                        if len(self._entropy_history) >= 4:
-                            recent = self._entropy_history[-4:]
-                            dt = recent[-1][0] - recent[0][0]
-                            if dt > 0:
-                                dS = abs(recent[-1][1] - recent[0][1])
-                                entropy_rate = dS / dt
-                                entropy_flat = entropy_rate < 0.001
-                        reason = "no new edges"
-                        if entropy_flat:
-                            reason += " + flat entropy"
-                        self._stall_recovery_count += 1
-                        print(f"\n[*] STALL #{self._stall_recovery_count}: {reason} in "
-                              f"{execs_since_edge} execs, switching to random mode")
-                        self._stall_recovery_active = True
+                        self._maybe_trigger_stall_recovery(execs_since_edge)
                     # Periodic GC to return freed memory to OS
                     if i % 500 == 0:
                         import gc

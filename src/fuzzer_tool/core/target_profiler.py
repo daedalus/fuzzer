@@ -386,7 +386,7 @@ class TargetProfiler:
                                 if is_jcc:
                                     cond_branches += 1
                     except Exception:
-                        log.debug("Instruction parse failed at %#x in %s", insn.address if 'insn' in dir() else 0, name, exc_info=True)
+                        log.warning("Instruction parse failed at %#x in %s", insn.address if 'insn' in dir() else 0, name, exc_info=True)
                     branch_density = (cond_branches / max(size, 1)) * 1024
 
             profile.functions[name] = FunctionInfo(
@@ -585,7 +585,7 @@ class TargetProfiler:
                                 profile.call_graph[name] = set()
                             profile.call_graph[name].add(callee)
             except Exception:
-                log.debug("Call graph extraction failed for %s", name, exc_info=True)
+                log.warning("Call graph extraction failed for %s", name, exc_info=True)
                 continue
 
         # Build reverse call graph
