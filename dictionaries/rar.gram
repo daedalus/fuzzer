@@ -1,0 +1,106 @@
+# RAR archive grammar for structure-aware fuzzing
+# Based on RAR 5.x format specification
+# Generates structurally plausible RAR headers and compressed streams
+
+rar         = rar5_signature header_chain
+rar4_signature = Rar!\x1a\x07\x00
+rar5_signature = Rar!\x1a\x07\x01
+
+# RAR5 header block
+header      = header_crc header_type header_flags header_size header_data
+header_crc  = \x00\x00\x00\x00
+header_type = main_archive | file_header | encryption_header | end_archive
+header_flags = \x00\x00
+header_size = \x00\x00\x00\x20
+header_data = \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00
+
+# Header type bytes
+main_archive   = \x01
+file_header    = \x02
+encryption_header = \x04
+end_archive    = \x05
+
+# Header flags
+hf_continued   = \x01\x00
+hf_interrupted = \x02\x00
+hf_password    = \x04\x00
+hf_directory   = \x08\x00
+hf_comment     = \x10\x00
+hf_locked      = \x20\x00
+
+# File header extra fields
+extra_field    = extra_size extra_type extra_data
+extra_size     = \x01\x00
+extra_type     = \x01
+extra_data     = \x00
+
+# Encryption header fields
+enc_version    = \x01
+enc_algorithm  = \x00 | \x01 | \x02 | \x03 | \x04 | \x05
+enc_flags      = \x00\x00
+enc_salt       = \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00
+enc_iv         = \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00
+
+# File data — compressed stream (deflate or RAR-specific)
+file_data      = compressed_block+
+compressed_block = block_size block_flags block_data
+block_size     = \x00\x20
+block_flags    = \x00
+block_data     = \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00
+
+# RAR4 format (legacy)
+rar4_header    = rar4_sig rar4_type rar4_flags rar4_size rar4_data
+rar4_sig       = Rar!\x1a\x07\x00
+rar4_type      = \x72 | \x73 | \x74 | \x75 | \x76 | \x77 | \x78
+rar4_flags     = \x00\x00
+rar4_size      = \x00\x00\x00\x00
+rar4_data      = \x00\x00\x00\x00\x00\x00\x00\x00
+
+# Compression methods
+comp_store     = \x00
+comp_deflate   = \x01
+comp_rar1      = \x02
+comp_rar2      = \x03
+comp_rar3      = \x04
+comp_rar5      = \x05
+
+# Volume flags (multi-part archives)
+vol_number     = \x01
+vol_flags      = \x00\x00
+
+# Comment block
+comment_size   = \x00\x00
+comment_body   = \x00
+
+# Directory entry
+dir_name       = \x2e\x2f | \x5c | \x2f
+dir_name_long  = long_name{16}
+long_name      = \x41 | \x42 | \x43 | \x44 | \x45
+
+# Checksum fields
+crc32          = \x00\x00\x00\x00
+crc64          = \x00\x00\x00\x00\x00\x00\x00\x00
+
+# Timestamp fields
+mtime          = \x00\x00\x00\x00\x00\x00\x00\x00
+ctime          = \x00\x00\x00\x00\x00\x00\x00\x00
+
+# File attribute fields
+attr_readonly  = \x01\x00
+attr_hidden    = \x02\x00
+attr_system    = \x04\x00
+attr_directory = \x10\x00
+attr_archive   = \x20\x00
+
+# Archive-level metadata
+archive_flags  = \x00\x00 | \x01\x00 | \x02\x00 | \x04\x00 | \x08\x00
+volume_number  = \x01\x00 | \x02\x00 | \x03\x00
+
+# Data descriptors (appended after file data)
+data_desc_crc  = \x00\x00\x00\x00
+data_desc_size = \x00\x00\x00\x00
+data_desc_packed = \x00\x00\x00\x00
+
+# Known-good structures for bootstrapping
+valid_rar5     = rar5_signature main_archive_data end_archive
+main_archive_data = header_chain
