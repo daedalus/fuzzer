@@ -55,7 +55,15 @@ src/fuzzer_tool/
 │   ├── elf.py          # ELF parsing utilities
 │   └── target_profiler.py # Static analysis for fuzzing guidance
 ├── adapters/       # Process execution, filesystem operations
-├── services/       # Fuzzer orchestration (fuzzer.py, parallel.py, etc.)
+├── services/       # Fuzzer orchestration
+│   ├── fuzzer.py           # Fuzzer class (orchestration, __init__, fuzz_one, run)
+│   ├── operators.py        # Mutation operator dispatch, selection, and handlers
+│   ├── seed_picker.py      # Seed selection strategies (weighted, Pareto, Markov, format-aware)
+│   ├── runner.py           # Target execution (fork, ptrace, in-process), crash detection
+│   ├── stats.py            # Statistics, reporting, coverage logging, calibration
+│   ├── corpus_manager.py   # Corpus persistence, state, dedup, minimize
+│   ├── parallel.py         # Multi-process fuzzing
+│   └── report.py           # HTML/JSON report generation
 └── cli/            # CLI entry point
 
 tools/
