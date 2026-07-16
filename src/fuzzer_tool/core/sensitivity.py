@@ -86,7 +86,7 @@ class ByteSensitivityTracker:
                     jaccard = intersection / union if union > 0 else 1.0
                     scores[pos] = 1.0 - jaccard
             except Exception:
-                pass
+                log.debug("Edge computation failed for position %d", pos, exc_info=True)
 
         seed_key = bytes(seed[:64])
         self._sensitivity[seed_key] = scores

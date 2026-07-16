@@ -46,7 +46,7 @@ def read_shm():
             map_size = int(os.environ.get("AFL_MAP_SIZE", "65536"))
             return bytes((ctypes.c_uint8 * map_size).from_address(ptr))
     except Exception:
-        pass
+        log.warning("shmat read failed for shm_id=%s", shm_id_str, exc_info=True)
     return b""
 
 NO_BMP = os.environ.get("_LOADER_NO_BMP", "0") == "1"

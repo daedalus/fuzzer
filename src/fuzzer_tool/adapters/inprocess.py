@@ -219,6 +219,7 @@ class InProcessRunner:
             # Try persistent subprocess first (faster: one process, many calls)
             if cov:
                 from fuzzer_tool.adapters.persistent_loader import PersistentLoader
+
                 self._persistent = PersistentLoader(
                     target=self.target,
                     function_name=self.function_name,
@@ -233,6 +234,7 @@ class InProcessRunner:
             is_so = self.target.lower().endswith((".so", ".dylib", ".dll"))
             if not self._persistent and not is_so:
                 from fuzzer_tool.adapters.forkserver import ForkserverRunner
+
                 self._forkserver = ForkserverRunner(
                     target=self.target,
                     function_name=self.function_name,
@@ -309,13 +311,14 @@ class InProcessRunner:
         if self.coverage_env_id:
             try:
                 import ctypes.util
+
                 libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6")
                 libc.shmat.restype = ctypes.c_void_p
                 ptr = libc.shmat(int(self.coverage_env_id), None, 0)
                 if ptr and ptr != -1:
                     return (ctypes.c_uint8 * self.shm_size).from_address(ptr)
             except Exception:
-                pass
+                log.warning("shmat read failed for coverage_env_id=%s", self.coverage_env_id, exc_info=True)
         return None
 
     def reset_bitmap(self):
@@ -327,13 +330,14 @@ class InProcessRunner:
             try:
                 import ctypes as _ct
                 import ctypes.util
+
                 libc = _ct.CDLL(ctypes.util.find_library("c") or "libc.so.6")
                 libc.shmat.restype = _ct.c_void_p
                 ptr = libc.shmat(int(self.coverage_env_id), None, 0)
                 if ptr and ptr != -1:
                     _ct.memset(ptr, 0, self.shm_size)
             except Exception:
-                pass
+                log.warning("shmat reset failed for coverage_env_id=%s", self.coverage_env_id, exc_info=True)
 
     # ------------------------------------------------------------------
     # Execution
