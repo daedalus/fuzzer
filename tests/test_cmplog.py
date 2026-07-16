@@ -19,12 +19,7 @@ class TestCmplogCollector:
     def test_collect_tokens_with_file(self, tmp_path):
         c = CmplogCollector()
         log_file = tmp_path / "test.cmplog"
-        log_file.write_text(
-            "CMP 48656c6c6f 576f726c64\n"
-            "CMP 4142 4344\n"
-            "OTHER line\n"
-            "\n"
-        )
+        log_file.write_text("CMP 48656c6c6f 576f726c64\nCMP 4142 4344\nOTHER line\n\n")
         c.log_path = str(log_file)
         tokens = c.collect_tokens()
         assert len(tokens) == 4  # Hello, World, AB, CD
@@ -117,7 +112,9 @@ class TestCmplogCollector:
 
     def test_start_no_shim_source(self):
         c = CmplogCollector()
-        with patch("fuzzer_tool.adapters.shim_factory._find_compiler", side_effect=Exception("no compiler")):
+        with patch(
+            "fuzzer_tool.adapters.shim_factory._find_compiler", side_effect=Exception("no compiler")
+        ):
             result = c.start()
         # If shim already cached, this returns True regardless
         if c._shim_path:

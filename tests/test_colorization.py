@@ -77,32 +77,40 @@ class TestColorize:
     def test_preserves_path(self):
         """If all changes preserve the path, entire input is a taint region."""
         data = b"ABCDEFGH"
+
         def exec_fn(d):
             return 42  # always same path
+
         result = colorize(data, exec_fn, use_type_aware=False, max_execs=100)
         assert result.original_checksum == 42
         assert len(result.taints) > 0
 
     def test_colorized_differs_from_original(self):
         data = bytes(range(32))
+
         def exec_fn(d):
             return 42
+
         result = colorize(data, exec_fn, use_type_aware=False, max_execs=100)
         # At least some bytes should differ
         assert result.colorized != data
 
     def test_type_aware_mode(self):
         data = b"ABCDEFGH"
+
         def exec_fn(d):
             return 42
+
         result = colorize(data, exec_fn, use_type_aware=True, max_execs=100)
         assert len(result.colorized) == len(data)
 
     def test_path_changing_input(self):
         """If every change breaks the path, no taint regions."""
         data = bytes(64)
+
         def exec_fn(d):
             return sum(d)  # every change → different path
+
         result = colorize(data, exec_fn, use_type_aware=False, max_execs=100)
         # Very few safe ranges since almost everything changes the path
         assert result.exec_count > 0
@@ -110,23 +118,29 @@ class TestColorize:
     def test_respects_max_execs(self):
         data = bytes(256)
         exec_count = [0]
+
         def exec_fn(d):
             exec_count[0] += 1
             return 42
+
         colorize(data, exec_fn, use_type_aware=False, max_execs=20)
         assert exec_count[0] <= 20 + 1
 
     def test_checksum_recorded(self):
         data = b"test"
+
         def exec_fn(d):
             return 999
+
         result = colorize(data, exec_fn)
         assert result.original_checksum == 999
 
     def test_exec_count_recorded(self):
         data = bytes(16)
+
         def exec_fn(d):
             return 42
+
         result = colorize(data, exec_fn, use_type_aware=False, max_execs=10)
         assert result.exec_count > 0
 
@@ -134,9 +148,11 @@ class TestColorize:
         """max_execs=0 → uses 2*len(data)."""
         data = bytes(50)
         exec_count = [0]
+
         def exec_fn(d):
             exec_count[0] += 1
             return 42
+
         colorize(data, exec_fn, use_type_aware=False, max_execs=0)
         # Should not exceed 2*50 + 1
         assert exec_count[0] <= 101

@@ -83,13 +83,23 @@ class TestForkserverRunner:
         fd, bmp = tempfile.mkstemp(suffix=".bmp")
         os.close(fd)
         r._bitmap_out = bmp
+
         class FakeStdin:
-            def write(self, data): pass
-            def flush(self): pass
+            def write(self, data):
+                pass
+
+            def flush(self):
+                pass
+
         class FakeProc:
-            def poll(self): return 0
+            def poll(self):
+                return 0
+
             stdin = FakeStdin()
-            def wait(self, timeout=0): pass
+
+            def wait(self, timeout=0):
+                pass
+
         r._proc = FakeProc()
         r.stop()
         assert r._bitmap_out is None

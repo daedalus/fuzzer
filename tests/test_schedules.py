@@ -123,9 +123,17 @@ class TestBaseSchedule:
     def test_base_uses_speed_bitmap_depth(self):
         sc = SeedScorer("base")
         score = sc.score(
-            exec_us=100, avg_exec_us=100, bitmap_size=50, avg_bitmap_size=50,
-            handicap=0, depth=0, fuzz_level=0, n_fuzz=0,
-            total_execs=1000, tc_ref=0, favored=False,
+            exec_us=100,
+            avg_exec_us=100,
+            bitmap_size=50,
+            avg_bitmap_size=50,
+            handicap=0,
+            depth=0,
+            fuzz_level=0,
+            n_fuzz=0,
+            total_execs=1000,
+            tc_ref=0,
+            favored=False,
         )
         assert score == 100.0  # all factors = 1.0
 
@@ -134,37 +142,77 @@ class TestFastSchedule:
     def test_rare_seed_gets_high_energy(self):
         sc = SeedScorer("fast")
         score = sc.score(
-            exec_us=100, avg_exec_us=100, bitmap_size=50, avg_bitmap_size=50,
-            handicap=0, depth=0, fuzz_level=1, n_fuzz=1,
-            total_execs=1000, tc_ref=0, favored=False,
+            exec_us=100,
+            avg_exec_us=100,
+            bitmap_size=50,
+            avg_bitmap_size=50,
+            handicap=0,
+            depth=0,
+            fuzz_level=1,
+            n_fuzz=1,
+            total_execs=1000,
+            tc_ref=0,
+            favored=False,
         )
         assert score > 100.0  # fast factor > 1
 
     def test_heavily_fuzzed_gets_low_energy(self):
         sc = SeedScorer("fast")
         score_heavy = sc.score(
-            exec_us=100, avg_exec_us=100, bitmap_size=50, avg_bitmap_size=50,
-            handicap=0, depth=0, fuzz_level=200, n_fuzz=200,
-            total_execs=1000, tc_ref=0, favored=False,
+            exec_us=100,
+            avg_exec_us=100,
+            bitmap_size=50,
+            avg_bitmap_size=50,
+            handicap=0,
+            depth=0,
+            fuzz_level=200,
+            n_fuzz=200,
+            total_execs=1000,
+            tc_ref=0,
+            favored=False,
         )
         score_light = sc.score(
-            exec_us=100, avg_exec_us=100, bitmap_size=50, avg_bitmap_size=50,
-            handicap=0, depth=0, fuzz_level=1, n_fuzz=1,
-            total_execs=1000, tc_ref=0, favored=False,
+            exec_us=100,
+            avg_exec_us=100,
+            bitmap_size=50,
+            avg_bitmap_size=50,
+            handicap=0,
+            depth=0,
+            fuzz_level=1,
+            n_fuzz=1,
+            total_execs=1000,
+            tc_ref=0,
+            favored=False,
         )
         assert score_heavy < score_light
 
     def test_favored_bonus(self):
         sc = SeedScorer("fast")
         score_favored = sc.score(
-            exec_us=100, avg_exec_us=100, bitmap_size=50, avg_bitmap_size=50,
-            handicap=0, depth=0, fuzz_level=100, n_fuzz=100,
-            total_execs=1000, tc_ref=0, favored=True,
+            exec_us=100,
+            avg_exec_us=100,
+            bitmap_size=50,
+            avg_bitmap_size=50,
+            handicap=0,
+            depth=0,
+            fuzz_level=100,
+            n_fuzz=100,
+            total_execs=1000,
+            tc_ref=0,
+            favored=True,
         )
         score_unfavored = sc.score(
-            exec_us=100, avg_exec_us=100, bitmap_size=50, avg_bitmap_size=50,
-            handicap=0, depth=0, fuzz_level=100, n_fuzz=100,
-            total_execs=1000, tc_ref=0, favored=False,
+            exec_us=100,
+            avg_exec_us=100,
+            bitmap_size=50,
+            avg_bitmap_size=50,
+            handicap=0,
+            depth=0,
+            fuzz_level=100,
+            n_fuzz=100,
+            total_execs=1000,
+            tc_ref=0,
+            favored=False,
         )
         assert score_favored > score_unfavored
 
@@ -191,9 +239,18 @@ class TestRareSchedule:
     def test_rare_penalty_for_overfuzzed(self):
         sc = SeedScorer("rare")
         score = sc.score(
-            exec_us=100, avg_exec_us=100, bitmap_size=50, avg_bitmap_size=50,
-            handicap=0, depth=0, fuzz_level=0, n_fuzz=900,
-            total_execs=1000, tc_ref=0, favored=False, max_depth=0,
+            exec_us=100,
+            avg_exec_us=100,
+            bitmap_size=50,
+            avg_bitmap_size=50,
+            handicap=0,
+            depth=0,
+            fuzz_level=0,
+            n_fuzz=900,
+            total_execs=1000,
+            tc_ref=0,
+            favored=False,
+            max_depth=0,
         )
         # n_fuzz/total_execs = 0.9, penalty = 0.1
         assert score < 100.0
@@ -206,9 +263,18 @@ class TestRareSchedule:
     def test_rare_zero_total_execs(self):
         sc = SeedScorer("rare")
         score = sc.score(
-            exec_us=100, avg_exec_us=100, bitmap_size=50, avg_bitmap_size=50,
-            handicap=0, depth=0, fuzz_level=0, n_fuzz=0,
-            total_execs=0, tc_ref=0, favored=False, max_depth=0,
+            exec_us=100,
+            avg_exec_us=100,
+            bitmap_size=50,
+            avg_bitmap_size=50,
+            handicap=0,
+            depth=0,
+            fuzz_level=0,
+            n_fuzz=0,
+            total_execs=0,
+            tc_ref=0,
+            favored=False,
+            max_depth=0,
         )
         # Should not crash, returns at least 1.0
         assert score >= 1.0
@@ -218,18 +284,36 @@ class TestMoptSchedule:
     def test_mopt_recent_entry_boost(self):
         sc = SeedScorer("mopt")
         score = sc.score(
-            exec_us=100, avg_exec_us=100, bitmap_size=50, avg_bitmap_size=50,
-            handicap=0, depth=25, fuzz_level=0, n_fuzz=0,
-            total_execs=1000, tc_ref=0, favored=False, max_depth=26,
+            exec_us=100,
+            avg_exec_us=100,
+            bitmap_size=50,
+            avg_bitmap_size=50,
+            handicap=0,
+            depth=25,
+            fuzz_level=0,
+            n_fuzz=0,
+            total_execs=1000,
+            tc_ref=0,
+            favored=False,
+            max_depth=26,
         )
         assert score > 100.0  # depth boost
 
     def test_mopt_old_entry_no_boost(self):
         sc = SeedScorer("mopt")
         score = sc.score(
-            exec_us=100, avg_exec_us=100, bitmap_size=50, avg_bitmap_size=50,
-            handicap=0, depth=0, fuzz_level=0, n_fuzz=0,
-            total_execs=1000, tc_ref=0, favored=False, max_depth=26,
+            exec_us=100,
+            avg_exec_us=100,
+            bitmap_size=50,
+            avg_bitmap_size=50,
+            handicap=0,
+            depth=0,
+            fuzz_level=0,
+            n_fuzz=0,
+            total_execs=1000,
+            tc_ref=0,
+            favored=False,
+            max_depth=26,
         )
         assert score == 100.0  # no depth boost
 
@@ -238,9 +322,17 @@ class TestLinSchedule:
     def test_lin_factor(self):
         sc = SeedScorer("lin")
         score = sc.score(
-            exec_us=100, avg_exec_us=100, bitmap_size=50, avg_bitmap_size=50,
-            handicap=0, depth=0, fuzz_level=10, n_fuzz=5,
-            total_execs=1000, tc_ref=0, favored=False,
+            exec_us=100,
+            avg_exec_us=100,
+            bitmap_size=50,
+            avg_bitmap_size=50,
+            handicap=0,
+            depth=0,
+            fuzz_level=10,
+            n_fuzz=5,
+            total_execs=1000,
+            tc_ref=0,
+            favored=False,
         )
         # factor = 10/6 ≈ 1.67
         assert score > 100.0
@@ -250,9 +342,17 @@ class TestQuadSchedule:
     def test_quad_factor(self):
         sc = SeedScorer("quad")
         score = sc.score(
-            exec_us=100, avg_exec_us=100, bitmap_size=50, avg_bitmap_size=50,
-            handicap=0, depth=0, fuzz_level=10, n_fuzz=5,
-            total_execs=1000, tc_ref=0, favored=False,
+            exec_us=100,
+            avg_exec_us=100,
+            bitmap_size=50,
+            avg_bitmap_size=50,
+            handicap=0,
+            depth=0,
+            fuzz_level=10,
+            n_fuzz=5,
+            total_execs=1000,
+            tc_ref=0,
+            favored=False,
         )
         # factor = 100/6 ≈ 16.67
         assert score > 100.0
@@ -262,27 +362,51 @@ class TestHandicap:
     def test_handicap_0(self):
         sc = SeedScorer("base")
         score = sc.score(
-            exec_us=100, avg_exec_us=100, bitmap_size=50, avg_bitmap_size=50,
-            handicap=0, depth=0, fuzz_level=0, n_fuzz=0,
-            total_execs=1000, tc_ref=0, favored=False,
+            exec_us=100,
+            avg_exec_us=100,
+            bitmap_size=50,
+            avg_bitmap_size=50,
+            handicap=0,
+            depth=0,
+            fuzz_level=0,
+            n_fuzz=0,
+            total_execs=1000,
+            tc_ref=0,
+            favored=False,
         )
         assert score == 100.0
 
     def test_handicap_1(self):
         sc = SeedScorer("base")
         score = sc.score(
-            exec_us=100, avg_exec_us=100, bitmap_size=50, avg_bitmap_size=50,
-            handicap=1, depth=0, fuzz_level=0, n_fuzz=0,
-            total_execs=1000, tc_ref=0, favored=False,
+            exec_us=100,
+            avg_exec_us=100,
+            bitmap_size=50,
+            avg_bitmap_size=50,
+            handicap=1,
+            depth=0,
+            fuzz_level=0,
+            n_fuzz=0,
+            total_execs=1000,
+            tc_ref=0,
+            favored=False,
         )
         assert score == 200.0  # 2x
 
     def test_handicap_4(self):
         sc = SeedScorer("base")
         score = sc.score(
-            exec_us=100, avg_exec_us=100, bitmap_size=50, avg_bitmap_size=50,
-            handicap=4, depth=0, fuzz_level=0, n_fuzz=0,
-            total_execs=1000, tc_ref=0, favored=False,
+            exec_us=100,
+            avg_exec_us=100,
+            bitmap_size=50,
+            avg_bitmap_size=50,
+            handicap=4,
+            depth=0,
+            fuzz_level=0,
+            n_fuzz=0,
+            total_execs=1000,
+            tc_ref=0,
+            favored=False,
         )
         assert score == 400.0  # 4x
 
@@ -291,18 +415,34 @@ class TestClamping:
     def test_minimum_is_1(self):
         sc = SeedScorer("base", max_mult=16)
         score = sc.score(
-            exec_us=10000, avg_exec_us=1, bitmap_size=1, avg_bitmap_size=1000,
-            handicap=0, depth=0, fuzz_level=0, n_fuzz=0,
-            total_execs=1000, tc_ref=0, favored=False,
+            exec_us=10000,
+            avg_exec_us=1,
+            bitmap_size=1,
+            avg_bitmap_size=1000,
+            handicap=0,
+            depth=0,
+            fuzz_level=0,
+            n_fuzz=0,
+            total_execs=1000,
+            tc_ref=0,
+            favored=False,
         )
         assert score >= 1.0
 
     def test_maximum_is_max_mult_times_100(self):
         sc = SeedScorer("base", max_mult=16)
         score = sc.score(
-            exec_us=1, avg_exec_us=10000, bitmap_size=1000, avg_bitmap_size=1,
-            handicap=10, depth=30, fuzz_level=0, n_fuzz=0,
-            total_execs=1000, tc_ref=0, favored=False,
+            exec_us=1,
+            avg_exec_us=10000,
+            bitmap_size=1000,
+            avg_bitmap_size=1,
+            handicap=10,
+            depth=30,
+            fuzz_level=0,
+            n_fuzz=0,
+            total_execs=1000,
+            tc_ref=0,
+            favored=False,
         )
         assert score <= 1600.0
 

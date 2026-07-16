@@ -1,6 +1,5 @@
 """Tests for services/minimize.py — corpus minimization."""
 
-
 from fuzzer_tool.services.minimize import _minimize_by_hash, minimize_corpus
 
 

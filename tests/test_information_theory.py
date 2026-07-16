@@ -27,6 +27,7 @@ class TestRenyiEntropy:
 
     def test_shannon_counter(self):
         from collections import Counter
+
         r = RenyiEntropy()
         h = r.shannon(Counter({"a": 1, "b": 1, "c": 1, "d": 1}))
         assert abs(h - 2.0) < 1e-10
@@ -251,6 +252,7 @@ class TestTransferEntropy:
         te = TransferEntropy()
         # For independent series, TE(X→Y) and TE(Y→X) should be similar
         import random
+
         random.seed(42)
         source = [random.randint(0, 10) for _ in range(200)]
         target = [random.randint(0, 10) for _ in range(200)]
@@ -265,6 +267,7 @@ class TestTransferEntropy:
         # X causes Y with noise: Y = X XOR noise
         # Source has random bits, target copies source with some delay
         import random
+
         random.seed(42)
         source = [random.randint(0, 1) for _ in range(100)]
         # Y copies X with 1-step delay (but Y's own past is noisy)
@@ -284,10 +287,11 @@ class TestTransferEntropy:
         te = TransferEntropy()
         # X causes Y with noise, but Y doesn't cause X
         import random
+
         random.seed(42)
         source = [random.randint(0, 5) for _ in range(200)]
         # Y copies X with delay + noise
-        target = [0] + [(source[i-1] + random.randint(0, 1)) % 6 for i in range(1, 200)]
+        target = [0] + [(source[i - 1] + random.randint(0, 1)) % 6 for i in range(1, 200)]
         te_xy = te.transfer_entropy(source, target)
         te_yx = te.transfer_entropy(target, source)
         # With noise, Y's past doesn't fully determine Y's future,

@@ -31,23 +31,34 @@ class TestShouldDetFuzz:
     def test_not_favored_returns_false(self):
         sd = SkipDetector(map_size=64)
         trace = bytearray(8)  # 64 bits
-        assert sd.should_det_fuzz(trace, seed_favored=False, seed_passed_det=False, current_time_ms=0) is False
+        assert (
+            sd.should_det_fuzz(trace, seed_favored=False, seed_passed_det=False, current_time_ms=0)
+            is False
+        )
 
     def test_already_passed_det_returns_false(self):
         sd = SkipDetector(map_size=64)
         trace = bytearray(8)
-        assert sd.should_det_fuzz(trace, seed_favored=True, seed_passed_det=True, current_time_ms=0) is False
+        assert (
+            sd.should_det_fuzz(trace, seed_favored=True, seed_passed_det=True, current_time_ms=0)
+            is False
+        )
 
     def test_none_trace_returns_false(self):
         sd = SkipDetector(map_size=64)
-        assert sd.should_det_fuzz(None, seed_favored=True, seed_passed_det=False, current_time_ms=0) is False
+        assert (
+            sd.should_det_fuzz(None, seed_favored=True, seed_passed_det=False, current_time_ms=0)
+            is False
+        )
 
     def test_first_seed_with_new_bits_accepted(self):
         sd = SkipDetector(map_size=64)
         # Trace with some set bits
         trace = bytearray(8)
         trace[0] = 0x0F  # bits 0-3 set
-        result = sd.should_det_fuzz(trace, seed_favored=True, seed_passed_det=False, current_time_ms=0)
+        result = sd.should_det_fuzz(
+            trace, seed_favored=True, seed_passed_det=False, current_time_ms=0
+        )
         assert result is True
 
     def test_threshold_initialized_from_first_seed(self):
@@ -82,7 +93,9 @@ class TestShouldDetFuzz:
         trace1[0] = 0x0F
         sd.should_det_fuzz(trace1, seed_favored=True, seed_passed_det=False, current_time_ms=0)
         # Second seed: same bits → 0 new bits (already in virgin_det_bits)
-        result = sd.should_det_fuzz(trace1, seed_favored=True, seed_passed_det=False, current_time_ms=1000)
+        result = sd.should_det_fuzz(
+            trace1, seed_favored=True, seed_passed_det=False, current_time_ms=1000
+        )
         assert result is False
 
     def test_subsequent_seed_above_threshold_accepted(self):
@@ -94,7 +107,9 @@ class TestShouldDetFuzz:
         # Second seed: different 4 bits → 4 new bits
         trace2 = bytearray(8)
         trace2[1] = 0xF0
-        result = sd.should_det_fuzz(trace2, seed_favored=True, seed_passed_det=False, current_time_ms=1000)
+        result = sd.should_det_fuzz(
+            trace2, seed_favored=True, seed_passed_det=False, current_time_ms=1000
+        )
         assert result is True
 
     def test_virgin_bits_marked_after_acceptance(self):
@@ -153,9 +168,11 @@ class TestBuildSkipEffMap:
         data = b"ABCDEFGH"
         # Make every single-byte flip produce a different checksum
         call_count = [0]
+
         def exec_fn(d):
             call_count[0] += 1
             return sum(d)  # different input → different checksum
+
         eff_map = sd.build_skip_eff_map(data, exec_fn, max_execs=200)
         assert all(b == 1 for b in eff_map)
 
@@ -170,9 +187,11 @@ class TestBuildSkipEffMap:
         """Some bytes effective, some not."""
         sd = SkipDetector()
         data = bytes(128)
+
         # Only byte 0 affects the checksum
         def exec_fn(d):
             return d[0]
+
         eff_map = sd.build_skip_eff_map(data, exec_fn, max_execs=500)
         assert eff_map[0] == 1
         # Others may or may not be effective depending on block flipping
@@ -181,9 +200,11 @@ class TestBuildSkipEffMap:
         sd = SkipDetector()
         data = bytes(256)
         exec_count = [0]
+
         def exec_fn(d):
             exec_count[0] += 1
             return sum(d)
+
         sd.build_skip_eff_map(data, exec_fn, max_execs=10)
         assert exec_count[0] <= 10 + 1  # +1 for baseline
 
@@ -192,9 +213,11 @@ class TestBuildSkipEffMap:
         sd = SkipDetector()
         # 256 bytes, only first 64 are effective
         data = bytes(256)
+
         def exec_fn(d):
             # Only the first 64 bytes affect checksum
             return sum(d[:64])
+
         eff_map = sd.build_skip_eff_map(data, exec_fn, max_execs=1000)
         # First 64 bytes should be marked effective
         assert sum(eff_map[:64]) > 0
@@ -226,9 +249,11 @@ class TestInference:
         sd = SkipDetector()
         data = bytes(MINIMAL_BLOCK_SIZE * 16)
         exec_count = [0]
+
         def exec_fn(d):
             exec_count[0] += 1
             return sum(d)
+
         sd.inference(data, exec_fn, max_execs=50)
         assert exec_count[0] <= 50 + 1
 
@@ -244,9 +269,11 @@ class TestInference:
         sd = SkipDetector()
         data = bytes(MINIMAL_BLOCK_SIZE * 16)
         calls = []
+
         def exec_fn(d):
             calls.append(d)
             return 42
+
         sd.inference(data, exec_fn, max_execs=100)
         assert len(calls) >= 1
         assert calls[0] == data

@@ -132,10 +132,13 @@ class TestReplicatorScheduler:
         r.init_arm("bad")
         # good succeeds 80%, bad succeeds 10%
         import random
+
         random.seed(42)
         for _ in range(5):
             op = r.select_op(["good", "bad"])
-            success = (op == "good" and random.random() < 0.8) or (op == "bad" and random.random() < 0.1)
+            success = (op == "good" and random.random() < 0.8) or (
+                op == "bad" and random.random() < 0.1
+            )
             r.record(op, success)
         # After update, good should have higher population
         dist = r.population_distribution()
@@ -146,12 +149,15 @@ class TestReplicatorScheduler:
         r.init_arm("good")
         r.init_arm("bad")
         import random
+
         random.seed(42)
         # Run many windows with strong fitness difference
         for _ in range(100):
             for _ in range(10):
                 op = r.select_op(["good", "bad"])
-                success = (op == "good" and random.random() < 0.9) or (op == "bad" and random.random() < 0.05)
+                success = (op == "good" and random.random() < 0.9) or (
+                    op == "bad" and random.random() < 0.05
+                )
                 r.record(op, success)
         # After many updates, should converge
         assert r.is_converged(threshold=0.05)
@@ -169,6 +175,7 @@ class TestReplicatorScheduler:
         r.init_arm("a")
         r.init_arm("b")
         import random
+
         random.seed(42)
         # All successes for a, all failures for b
         for _ in range(20):

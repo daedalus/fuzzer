@@ -53,6 +53,7 @@ class TestSyncCorpusIn:
         fuzzer = MagicMock()
         # Pre-populate seen_hashes so dedup works
         from fuzzer_tool.adapters.filesystem import hash_data
+
         fuzzer.seen_hashes = {hash_data(b"dup")}
         fuzzer.save_to_corpus = MagicMock()
         _sync_corpus_in(parent, fuzzer)

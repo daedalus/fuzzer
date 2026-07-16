@@ -1,6 +1,5 @@
 """Tests for services/import_corpus.py — AFL/libFuzzer/honggfuzz import."""
 
-
 from fuzzer_tool.services.import_corpus import (
     import_from_afl,
     import_from_honggfuzz,

@@ -155,7 +155,9 @@ def _corrupt_field(data: bytearray, offset: int, size: int, signed: bool = False
             elif method == 1:
                 val = random.choice([0, 1, -1, 0x7FFFFFFF, -0x80000000])
             elif method == 2:
-                val = max(-0x80000000, min(0x7FFFFFFF, val + random.choice([-2, -1, 1, 2, 256, 65536])))
+                val = max(
+                    -0x80000000, min(0x7FFFFFFF, val + random.choice([-2, -1, 1, 2, 256, 65536]))
+                )
             elif method == 3:
                 val = random.randint(-0x80000000, 0x7FFFFFFF)
             else:

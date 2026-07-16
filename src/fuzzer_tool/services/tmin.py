@@ -65,13 +65,15 @@ def tmin(
         tmp_dir.mkdir(parents=True, exist_ok=True)
 
     try:
+
         def _run_target(data_bytes: bytes) -> tuple[int, str]:
             env = os.environ.copy()
             if use_coverage:
                 env["AFL_MAP_SIZE"] = "65536"
             if file_mode:
-                rc, stderr, _pid = run_target_file(target, data_bytes, timeout, str(tmp_dir),
-                                       target_args or [], env=env)
+                rc, stderr, _pid = run_target_file(
+                    target, data_bytes, timeout, str(tmp_dir), target_args or [], env=env
+                )
                 return rc, stderr
             rc, stderr, _pid = run_target_stdin(target, data_bytes, timeout, env=env)
             return rc, stderr
@@ -85,8 +87,7 @@ def tmin(
                 return report.signature
             if returncode in SIGNAL_CRASH_CODES or returncode < 0:
                 return f"signal:{abs(returncode)}"
-            for sig in ["SIGSEGV", "SIGABRT", "SIGFPE", "SIGBUS",
-                         "Segmentation fault", "Aborted"]:
+            for sig in ["SIGSEGV", "SIGABRT", "SIGFPE", "SIGBUS", "Segmentation fault", "Aborted"]:
                 if sig in stderr:
                     return f"signal:{sig}"
             return None
@@ -113,10 +114,12 @@ def tmin(
         # Phase 1: Hierarchical tree-level shrinking (if grammar available)
         if grammar is not None:
             from fuzzer_tool.core.grammar import TreeMutator
+
             tree_mutator = TreeMutator(grammar)
             tree_rounds = min(max_stages // 4, 32)
             tree_result = tree_mutator.hierarchical_shrink(
-                data, lambda d: _is_crash(d, original_sig) is not None,
+                data,
+                lambda d: _is_crash(d, original_sig) is not None,
                 max_rounds=tree_rounds,
             )
             if len(tree_result) < len(data):
@@ -135,8 +138,11 @@ def tmin(
         )
 
         if _is_crash(minimized, expected_sig=original_sig) is None:
-            print("[-] Minimized input no longer triggers the original crash! "
-                  "Falling back to original.", file=sys.stderr)
+            print(
+                "[-] Minimized input no longer triggers the original crash! "
+                "Falling back to original.",
+                file=sys.stderr,
+            )
             return data
 
         return minimized

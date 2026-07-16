@@ -139,7 +139,10 @@ class CmplogCollector:
         if new_tokens:
             log.info(
                 "Cmplog: found %d new tokens, %d new pairs (total: %d tokens, %d pairs)",
-                len(new_tokens), len(new_pairs), len(self.tokens), len(self.pairs),
+                len(new_tokens),
+                len(new_pairs),
+                len(self.tokens),
+                len(self.pairs),
             )
 
         return new_tokens

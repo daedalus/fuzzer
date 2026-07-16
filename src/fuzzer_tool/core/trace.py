@@ -25,7 +25,9 @@ def _get_exported_functions(target: str, max_funcs: int = 20) -> list[str]:
     try:
         result = subprocess.run(
             ["nm", "-D", "--defined-only", target],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         funcs = []
         for line in result.stdout.splitlines():
