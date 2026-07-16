@@ -16,6 +16,7 @@ import json
 import logging
 import math
 import random
+import struct
 import zlib
 from collections import defaultdict
 
@@ -238,7 +239,8 @@ class MinHashLSH:
         for band_idx in range(self.num_bands):
             start = band_idx * self.band_size
             end = start + self.band_size
-            band_hash = hash(tuple(sig[start:end]))
+            band_bytes = struct.pack(f"<{end - start}Q", *sig[start:end])
+            band_hash = zlib.crc32(band_bytes)
             bucket_key = (band_idx, band_hash)
             if bucket_key not in self.buckets:
                 self.buckets[bucket_key] = set()
@@ -252,7 +254,8 @@ class MinHashLSH:
         for band_idx in range(self.num_bands):
             start = band_idx * self.band_size
             end = start + self.band_size
-            band_hash = hash(tuple(sig[start:end]))
+            band_bytes = struct.pack(f"<{end - start}Q", *sig[start:end])
+            band_hash = zlib.crc32(band_bytes)
             bucket_key = (band_idx, band_hash)
             bucket = self.buckets.get(bucket_key)
             if bucket:
@@ -288,7 +291,8 @@ class MinHashLSH:
         for band_idx in range(self.num_bands):
             start = band_idx * self.band_size
             end = start + self.band_size
-            band_hash = hash(tuple(sig[start:end]))
+            band_bytes = struct.pack(f"<{end - start}Q", *sig[start:end])
+            band_hash = zlib.crc32(band_bytes)
             bucket_key = (band_idx, band_hash)
             bucket = self.buckets.get(bucket_key)
             if bucket:
