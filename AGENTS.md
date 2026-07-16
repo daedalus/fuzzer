@@ -80,6 +80,14 @@ dictionaries/
 targets/
 ├── png_read.c         # libpng fuzz target
 ├── png_read           # Compiled target
+├── jpeg_read.c        # libjpeg fuzz target
+├── jpeg_read          # Compiled target
+├── zlib_read.c        # zlib/gzip/raw-deflate fuzz target
+├── zlib_read          # Compiled target
+├── gzip_read.c        # gzip-specific fuzz target (header parsing, multi-member)
+├── gzip_read          # Compiled target
+├── asan_target.c      # ASAN crash target
+├── asan_target        # Compiled target
 ├── test_target.c      # Minimal crash target
 └── test_target        # Compiled target
 ```
