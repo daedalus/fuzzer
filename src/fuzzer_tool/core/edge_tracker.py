@@ -20,6 +20,7 @@ import struct
 import zlib
 from collections import defaultdict
 
+from fuzzer_tool.adapters.filesystem import hash_data
 from fuzzer_tool.core.similarity import hamming_distance
 
 log = logging.getLogger(__name__)
@@ -240,7 +241,7 @@ class MinHashLSH:
             start = band_idx * self.band_size
             end = start + self.band_size
             band_bytes = struct.pack(f"<{end - start}Q", *sig[start:end])
-            band_hash = zlib.crc32(band_bytes)
+            band_hash = hash_data(band_bytes)
             bucket_key = (band_idx, band_hash)
             if bucket_key not in self.buckets:
                 self.buckets[bucket_key] = set()
@@ -255,7 +256,7 @@ class MinHashLSH:
             start = band_idx * self.band_size
             end = start + self.band_size
             band_bytes = struct.pack(f"<{end - start}Q", *sig[start:end])
-            band_hash = zlib.crc32(band_bytes)
+            band_hash = hash_data(band_bytes)
             bucket_key = (band_idx, band_hash)
             bucket = self.buckets.get(bucket_key)
             if bucket:
@@ -292,7 +293,7 @@ class MinHashLSH:
             start = band_idx * self.band_size
             end = start + self.band_size
             band_bytes = struct.pack(f"<{end - start}Q", *sig[start:end])
-            band_hash = zlib.crc32(band_bytes)
+            band_hash = hash_data(band_bytes)
             bucket_key = (band_idx, band_hash)
             bucket = self.buckets.get(bucket_key)
             if bucket:

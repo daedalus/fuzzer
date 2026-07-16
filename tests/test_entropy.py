@@ -35,21 +35,25 @@ class TestEntropyRateTracking:
 
     def test_entropy_history_records_samples(self):
         f = self._make_fuzzer()
-        # Simulate recording entropy samples
-        f._entropy_history.append((100, 1.5))
-        f._entropy_history.append((200, 1.8))
-        f._entropy_history.append((300, 2.0))
+        f.exec_count = 100
+        f._record_entropy_sample(1.5)
+        f.exec_count = 200
+        f._record_entropy_sample(1.8)
+        f.exec_count = 300
+        f._record_entropy_sample(2.0)
         assert len(f._entropy_history) == 3
+        assert f._entropy_history == [(100, 1.5), (200, 1.8), (300, 2.0)]
 
     def test_entropy_history_trims_old(self):
         f = self._make_fuzzer()
-        # Simulate 250 samples
+        # Simulate 250 samples via the real recording method, each call
+        # trimming independently once the bound is exceeded (as in run()).
         for i in range(250):
-            f._entropy_history.append((i * 100, 1.0 + i * 0.01))
-        # Trim logic (from the main loop)
-        if len(f._entropy_history) > 200:
-            f._entropy_history = f._entropy_history[-100:]
-        assert len(f._entropy_history) == 100
+            f.exec_count = i * 100
+            f._record_entropy_sample(1.0 + i * 0.01)
+            assert len(f._entropy_history) <= 200
+        # Most recent sample must always be retained.
+        assert f._entropy_history[-1] == (249 * 100, 1.0 + 249 * 0.01)
 
     def test_entropy_rate_positive(self):
         # Rising entropy → positive rate
@@ -91,34 +95,38 @@ class TestEntropyRateTracking:
             (100, 1.5), (200, 1.5), (300, 1.5), (400, 1.5)
         ]
 
-        # Simulate stall detection logic from run()
         execs_since_edge = f.exec_count - f._last_new_edge_exec
-        entropy_flat = True
-        if len(f._entropy_history) >= 4:
-            recent = f._entropy_history[-4:]
-            dt = recent[-1][0] - recent[0][0]
-            if dt > 0:
-                dS = abs(recent[-1][1] - recent[0][1])
-                entropy_rate = dS / dt
-                entropy_flat = entropy_rate < 0.001
-
         assert execs_since_edge >= f._stall_threshold
-        assert entropy_flat
+        assert f._compute_entropy_flat() is True
+        assert f._maybe_trigger_stall_recovery(execs_since_edge) is True
+        assert f._stall_recovery_active is True
+        assert f._stall_recovery_count == 1
 
     def test_stall_not_confirmed_with_changing_entropy(self):
         """When entropy is rising, stall is not confirmed even without new edges."""
         f = self._make_fuzzer()
+        f._stall_recovery_active = False
+        f._stall_recovery_count = 0
         f._entropy_history = [
             (100, 1.0), (200, 1.5), (300, 2.0), (400, 2.5)
         ]
 
-        recent = f._entropy_history[-4:]
-        dt = recent[-1][0] - recent[0][0]
-        dS = abs(recent[-1][1] - recent[0][1])
-        entropy_rate = dS / dt
-        entropy_flat = entropy_rate < 0.001
+        assert f._compute_entropy_flat() is False
+        assert f._maybe_trigger_stall_recovery(400) is False
+        assert f._stall_recovery_active is False
+        assert f._stall_recovery_count == 0
 
-        assert not entropy_flat
+    def test_stall_not_confirmed_falls_back_without_enough_samples(self):
+        """With <4 entropy samples, stall triggers on no-new-edges alone."""
+        f = self._make_fuzzer()
+        f._stall_recovery_active = False
+        f._stall_recovery_count = 0
+        f._entropy_history = [(100, 1.5)]
+
+        assert f._compute_entropy_flat() is None
+        assert f._maybe_trigger_stall_recovery(400) is True
+        assert f._stall_recovery_active is True
+        assert f._stall_recovery_count == 1
 
 
 class TestSeedPickerEntropyBonus:
