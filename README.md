@@ -51,6 +51,7 @@ Coverage-guided binary fuzzer with static target analysis, statistical novelty s
 - **Rényi entropy** (`--renyi-weight`): generalized entropy spectrum for seed weighting — boosts seeds exercising rare (cold) edges
 - **Rate-distortion corpus minimization** (`--rate-distortion`): optimal compression of corpus preserving coverage diversity
 - **Transfer entropy** (`--transfer-entropy`): directional causal flow between byte positions and coverage edges
+- **Shannon entropy rate tracking**: global edge-hit distribution entropy sampled periodically; confirms genuine stall (no new edges + flat entropy rate) vs. transient redistribution before activating random-mode recovery
 
 ### Game Theory
 - **Shapley value** (`--shapley`): per-edge frequency-weighted operator attribution — credit distributed proportional to co-occurrence frequency, not naive full credit to all stacked operators
