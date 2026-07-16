@@ -2,73 +2,46 @@
 
 import atexit
 import contextlib
-import ctypes
-import hashlib
 import json
 import logging
-import math
 import os
 import random
-import shutil
 import resource
+import shutil
 import signal
-import struct
+import sys
 import tempfile
-import threading
 import time
 from pathlib import Path
 
-from fuzzer_tool.adapters.filesystem import load_corpus, save_crash, save_to_corpus
 from fuzzer_tool.adapters.process import (
-    SIGNAL_CRASH_CODES,
     _child_pids,
-    run_target_file,
-    run_target_stdin,
 )
 from fuzzer_tool.adapters.shm import ShmCoverage
 from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.markov import MarkovChain, MarkovEnsemble
+from fuzzer_tool.core.mi import MutualInformationTracker
 from fuzzer_tool.core.montecarlo import (
-    MOptScheduler,
     MonteCarloScheduler,
+    MOptScheduler,
     ReplicatorScheduler,
     ShapleyAttribution,
 )
-from fuzzer_tool.core.secretary import DEFAULT_EXPLORATION_FRAC, SecretaryStopping
-from fuzzer_tool.core.mi import MutualInformationTracker
 from fuzzer_tool.core.mutations import (
     DICT_MUTATIONS,
     FORMAT_MUTATIONS,
-    INTERESTING_8,
-    INTERESTING_16,
-    INTERESTING_32,
     MUTATIONS,
-    splice,
 )
 from fuzzer_tool.core.sanitizer import SanitizerReport
+from fuzzer_tool.core.secretary import DEFAULT_EXPLORATION_FRAC, SecretaryStopping
+from fuzzer_tool.services.corpus_manager import CorpusManager
+from fuzzer_tool.services.operators import OperatorEngine
 from fuzzer_tool.services.ptrace_coverage import (
-    HAS_CAPSTONE,
-    INT3,
-    PTRACE_CONT,
-    PTRACE_GETREGS,
-    PTRACE_PEEKDATA,
-    PTRACE_POKEDATA,
-    PTRACE_SETOPTIONS,
-    PTRACE_SETREGS,
-    PTRACE_SINGLESTEP,
-    PTRACE_TRACEME,
     PtraceCoverage,
 )
-from fuzzer_tool.services.te_position import (
-    get_te_weighted_position,
-    update_te_causal_map,
-)
-from fuzzer_tool.services.stats_reporter import (
-    discovery_rate as _discovery_rate,
-    format_elapsed as _format_elapsed_fn,
-    record_discovery_snapshot as _record_discovery_snapshot_fn,
-    run_crash_replays as _run_crash_replays_fn,
-)
+from fuzzer_tool.services.runner import TargetRunner
+from fuzzer_tool.services.seed_picker import SeedPicker
+from fuzzer_tool.services.stats import StatsReporter
 
 log = logging.getLogger(__name__)
 
@@ -121,7 +94,6 @@ def _write_and_close(fd: int, data: bytes) -> None:
 
 def _cleanup_tmp_dir(path: Path) -> None:
     """Remove temp directory on exit."""
-    import shutil
 
     try:
         shutil.rmtree(path, ignore_errors=True)
@@ -380,6 +352,13 @@ class Fuzzer:
         self.markov_trained = False
         self._markov_path = self.corpus_dir / "markov.json"
         self._mi_path = self.corpus_dir / "mi.json"
+
+        # ── Extracted modules ──────────────────────────────────────────
+        self._operators = OperatorEngine(self)
+        self._seed_picker = SeedPicker(self)
+        self._runner = TargetRunner(self)
+        self._stats = StatsReporter(self)
+        self._corpus_manager = CorpusManager(self)
 
         self._load_corpus()
         self._init_seed_metadata()
@@ -646,2091 +625,271 @@ class Fuzzer:
                 )
 
     def _load_corpus(self):
-        self.corpus, self.seen_hashes = load_corpus(self.corpus_dir, self.bloom)
+        return self._corpus_manager.load_corpus()
 
     def _init_seed_metadata(self):
-        self._state_path = self.corpus_dir / "state.json"
-        self._edge_tracker_path = self.corpus_dir / "edge_tracker.json"
-        now = time.time()
-        self.seed_meta: dict[bytes, dict] = {}
-        for seed in self.corpus:
-            self.seed_meta[seed] = {
-                "fuzz_count": 0,
-                "coverage_edges": 0,
-                "momentum": 0.0,
-                "edge_bitmap": bytearray(0),
-                "redqueen_offsets": [],
-                "added_at": now,
-            }
-        from fuzzer_tool.core.edge_tracker import EdgeTracker
+        return self._corpus_manager.init_seed_metadata()
 
-        self._edge_tracker = EdgeTracker(map_size=self.map_size)
-        self._corpus_size_history: list[int] = []
-
-        # Load persisted state if resuming
-        if self.resume:
-            self._load_state()
-
-    def _seed_key(self, data: bytes) -> str:
-        return hashlib.sha256(data).hexdigest()[:16]
+    def _seed_key(self, data: bytes):
+        return self._corpus_manager.seed_key(data)
 
     def _save_state(self):
-        """Persist fuzzer state for resume."""
-        state = {
-            "exec_count": self.exec_count,
-            "crash_count": self.crash_count,
-            "timeout_count": self.timeout_count,
-            "crash_sigs": self.crash_sigs,
-            "op_counts": self.op_counts,
-            "op_success": self.op_success,
-            "corpus_size_history": self._corpus_size_history[-500:],
-            "seed_meta": {},
-            "crash_frames": self.crash_frames,
-        }
-        for seed, meta in self.seed_meta.items():
-            key = seed.hex()
-            # Serialize redqueen_matches as hex strings for JSON compat
-            rm = meta.get("redqueen_matches", [])
-            rm_ser = [[m[0], m[1].hex(), m[2].hex()] for m in rm]
-            state["seed_meta"][key] = {
-                "fuzz_count": meta["fuzz_count"],
-                "coverage_edges": meta["coverage_edges"],
-                "momentum": meta.get("momentum", 0.0),
-                "redqueen_offsets": meta["redqueen_offsets"],
-                "redqueen_matches": rm_ser,
-                "added_at": meta["added_at"],
-                "lineage_depth": meta.get("lineage_depth", 0),
-                "hamming_distance": meta.get("hamming_distance", -1),
-            }
-        try:
-            self._state_path.write_text(json.dumps(state, separators=(",", ":")))
-        except OSError as e:
-            log.debug("Failed to save state: %s", e)
-        self._edge_tracker.save(str(self._edge_tracker_path))
-        if self._use_elo and self._elo:
-            self._elo.save(str(self._elo_path))
-        # Save sensitivity tracker
-        sens_path = self.corpus_dir / "sensitivity.json"
-        try:
-            sens_path.write_text(json.dumps(self._sensitivity.save(), separators=(",", ":")))
-        except OSError:
-            pass
-        # Save crash MI tracker
-        try:
-            self._crash_mi_path.write_text(json.dumps(self._crash_mi.save(), separators=(",", ":")))
-        except OSError:
-            pass
+        return self._corpus_manager.save_state()
 
     def _load_state(self):
-        """Load persisted fuzzer state for resume."""
-        if not self._state_path.exists():
-            return
-        try:
-            state = json.loads(self._state_path.read_text())
-        except (OSError, json.JSONDecodeError) as e:
-            log.debug("Failed to load state: %s", e)
-            return
-        self.exec_count = state.get("exec_count", 0)
-        self.crash_count = state.get("crash_count", 0)
-        self.timeout_count = state.get("timeout_count", 0)
-        self.crash_sigs = state.get("crash_sigs", {})
-        self.crash_frames = state.get("crash_frames", {})
-        self.op_counts = state.get("op_counts", {})
-        self.op_success = state.get("op_success", {})
-        self._corpus_size_history = state.get("corpus_size_history", [])
-        # Merge seed metadata for seeds still in corpus
-        saved_meta = state.get("seed_meta", {})
-        for seed in self.corpus:
-            key = seed.hex()
-            if key in saved_meta:
-                sm = saved_meta[key]
-                self.seed_meta[seed].update(
-                    {
-                        "fuzz_count": sm.get("fuzz_count", 0),
-                        "coverage_edges": sm.get("coverage_edges", 0),
-                        "momentum": sm.get("momentum", 0.0),
-                        "redqueen_offsets": sm.get("redqueen_offsets", []),
-                        "added_at": sm.get("added_at", self.seed_meta[seed]["added_at"]),
-                        "lineage_depth": sm.get("lineage_depth", 0),
-                        "hamming_distance": sm.get("hamming_distance", -1),
-                    }
-                )
-                # Deserialize redqueen_matches from hex strings
-                rm_ser = sm.get("redqueen_matches", [])
-                if rm_ser:
-                    self.seed_meta[seed]["redqueen_matches"] = [
-                        (m[0], bytes.fromhex(m[1]), bytes.fromhex(m[2])) for m in rm_ser
-                    ]
-        self._edge_tracker.load(str(self._edge_tracker_path))
-        # Load sensitivity tracker
-        sens_path = self.corpus_dir / "sensitivity.json"
-        if sens_path.exists():
-            try:
-                self._sensitivity.load(json.loads(sens_path.read_text()))
-            except (OSError, json.JSONDecodeError):
-                pass
-        if self.resume:
-            print(
-                f"[*] Resumed: {self.exec_count} execs, "
-                f"{self.crash_count} crashes, {len(self.corpus)} seeds"
-            )
-        log.info(
-            "Fuzzer state loaded: execs=%d, crashes=%d, corpus=%d",
-            self.exec_count,
-            self.crash_count,
-            len(self.corpus),
-        )
+        return self._corpus_manager.load_state()
 
-    def _run_target(self, data: bytes) -> tuple[int, str]:
-        if self._inprocess_runner:
-            if self.shm_cov:
-                self.shm_cov.reset_edge_map()
-            rc, err = self._inprocess_runner.run_one(data)
-            # Read coverage bitmap from runner and copy into SHM
-            if self.shm_cov:
-                bitmap = self._inprocess_runner.read_bitmap()
-                if bitmap and len(bitmap) <= self.shm_cov.size:
-                    ctypes.memmove(self.shm_cov._ptr, bitmap, len(bitmap))
-            return rc, err
+    def _run_target(self, data: bytes):
+        return self._runner.run_target(data)
 
-        if self._persistent_runner:
-            return self._persistent_runner.run_one(data)
+    def _ptrace_handle_breakpoint(self, pid: int, libc, cov: PtraceCoverage, regs_buf):
+        return self._runner._ptrace_handle_breakpoint(pid, libc, cov, regs_buf)
 
-        if self.ptrace_cov:
-            return self._run_target_ptrace(data)
+    def _run_target_ptrace(self, data: bytes):
+        return self._runner._run_target_ptrace(data)
 
-        # Forkserver: use C fuzz_loader (avoids Python subprocess overhead)
-        if self._forkserver and self._forkserver._ready:
-            rc, bitmap = self._forkserver.run_one(data)
-            if bitmap and self.shm_cov and len(bitmap) <= self.shm_cov.size:
-                ctypes.memmove(self.shm_cov._ptr, bitmap, len(bitmap))
-            return rc, ""
-
-        if self.shm_cov:
-            self.shm_cov.reset_edge_map()
-
-        env = os.environ.copy()
-        if self.use_coverage:
-            env["AFL_MAP_SIZE"] = str(self.map_size)
-        if self.shm_cov:
-            env["__AFL_SHM_ID"] = self.shm_cov.env_id
-        if self._cmplog:
-            env = self._cmplog.setup_env(env)
-
-        if self.file_mode:
-            rc, stderr, pid = run_target_file(
-                self.target,
-                data,
-                self.timeout,
-                str(self._tmp_dir),
-                self.target_args,
-                env=env,
-            )
-            self._last_child_pid = pid
-            return rc, stderr
-        rc, stderr, pid = run_target_stdin(self.target, data, self.timeout, env=env)
-        self._last_child_pid = pid
-        return rc, stderr
-
-    def _ptrace_handle_breakpoint(self, pid: int, libc, cov: PtraceCoverage, regs_buf) -> bool:
-        """Handle a SIGTRAP: restore bp, record edge, re-exec if RSP is valid.
-
-        Before the stack is initialized (RSP=0), breakpoints fire during
-        dynamic linker and libc startup. We skip edge recording and
-        re-execution for those — just restore the byte and continue.
-        Once we observe RSP > 0x1000, the stack is set up and all
-        subsequent breakpoints are safe to instrument.
-
-        Returns True if execution should continue, False to break the loop.
-        """
-        if not cov._is_x86_64:
-            log.warning("ptrace coverage requires x86_64")
-            return False
-        libc.ptrace(PTRACE_GETREGS, pid, None, regs_buf)
-        rip = struct.unpack_from("<Q", bytes(regs_buf), 128)[0]
-        bp_addr = rip - 1
-
-        if bp_addr not in cov.original_bytes:
-            libc.ptrace(PTRACE_CONT, pid, None, None)
-            return True
-
-        orig = cov.original_bytes[bp_addr]
-        val = cov._read_memory(pid, bp_addr)
-        cov._write_memory(pid, bp_addr, (val & ~0xFF) | orig)
-        del cov.original_bytes[bp_addr]
-
-        rsp = struct.unpack_from("<Q", bytes(regs_buf), 128 + 48)[0]
-        if rsp > 0x1000:
-            cov._stack_initialized = True
-            cov.record_edge(bp_addr)
-            cov.discover_new_bbs(pid, bp_addr)
-            regs_buf2 = (ctypes.c_char * (27 * 8))()
-            libc.ptrace(PTRACE_GETREGS, pid, None, regs_buf2)
-            regs = bytearray(regs_buf2)
-            struct.pack_into("<Q", regs, 128, bp_addr)
-            libc.ptrace(PTRACE_SETREGS, pid, None, bytes(regs))
-        # Continue — at RSP=0 just skip the breakpoint past the
-        # early-init instruction.
-        libc.ptrace(PTRACE_CONT, pid, None, None)
-        return True
-
-    def _run_target_ptrace(self, data: bytes) -> tuple[int, str]:
-        cov = self.ptrace_cov
-        cov.reset_edge_map()
-        libc = ctypes.CDLL("libc.so.6", use_errno=True)
-        libc.ptrace.argtypes = [
-            ctypes.c_long,
-            ctypes.c_long,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-        ]
-        libc.ptrace.restype = ctypes.c_long
-
-        stdin_r, stdin_w = os.pipe()
-        writer = None
-        pid = os.fork()
-        self._last_child_pid = pid
-        if pid == 0:
-            os.setsid()
-            os.dup2(stdin_r, 0)
-            os.close(stdin_r)
-            os.close(stdin_w)
-            devnull = os.open(os.devnull, os.O_WRONLY)
-            os.dup2(devnull, 1)
-            os.dup2(devnull, 2)
-            os.close(devnull)
-            # Strip LD_PRELOAD to avoid conflicts with ASAN
-            # (e.g. libksm_preload.so loaded before ASAN causes abort)
-            ld_preload = os.environ.get("LD_PRELOAD", "")
-            if ld_preload:
-                cleaned = [p for p in ld_preload.split(":") if "ksm_preload" not in p]
-                if cleaned:
-                    os.environ["LD_PRELOAD"] = ":".join(cleaned)
-                else:
-                    os.environ.pop("LD_PRELOAD", None)
-            libc.ptrace(PTRACE_TRACEME, 0, None, None)
-            signal.signal(signal.SIGTRAP, signal.SIG_IGN)
-            os.execv(self.target, [self.target])
-            os._exit(127)
-
-        os.close(stdin_r)
-        # Write data in a thread to avoid deadlock when data > PIPE_BUF (~64KB).
-        # The child may be stopped at exec's SIGTRAP before reading stdin, so a
-        # blocking write would stall the parent before it can call waitpid.
-        writer = threading.Thread(target=_write_and_close, args=(stdin_w, data))
-        writer.start()
-
-        try:
-            _, status = os.waitpid(pid, 0)
-            if os.WIFSTOPPED(status) and os.WSTOPSIG(status) == signal.SIGTRAP:
-                pass  # normal: child stopped at exec, install breakpoints
-            elif os.WIFSTOPPED(status):
-                sig = os.WSTOPSIG(status)
-                os.kill(pid, signal.SIGKILL)
-                os.waitpid(pid, 0)
-                return -sig, ""  # child crashed before we could instrument it
-            elif os.WIFSIGNALED(status):
-                return -os.WTERMSIG(status), ""
-            elif os.WIFEXITED(status):
-                return os.WEXITSTATUS(status), ""
-            else:
-                os.kill(pid, signal.SIGKILL)
-                os.waitpid(pid, 0)
-                return -2, "exec failed"
-
-            cov.install_breakpoints(pid)
-            libc.ptrace(PTRACE_CONT, pid, None, None)
-
-            deadline = time.time() + self.timeout
-
-            last_action = None
-            last_sig = 0
-            returncode = 0
-            child_reaped = False
-            while time.time() < deadline:
-                _, status = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
-                if status == 0:
-                    time.sleep(0.0005)
-                    continue
-
-                if os.WIFEXITED(status):
-                    returncode = os.WEXITSTATUS(status)
-                    child_reaped = True
-                    break
-                if os.WIFSIGNALED(status):
-                    returncode = -os.WTERMSIG(status)
-                    child_reaped = True
-                    break
-
-                if os.WIFSTOPPED(status):
-                    sig = os.WSTOPSIG(status)
-                    last_sig = sig
-                    if sig == signal.SIGTRAP:
-                        regs_buf = (ctypes.c_char * (27 * 8))()
-                        if self._ptrace_handle_breakpoint(pid, libc, cov, regs_buf):
-                            last_action = "cont"
-                        else:
-                            break
-                    else:
-                        break
-
-            if child_reaped:
-                pass  # loop already captured the definitive returncode
-            elif last_action == "cont" and last_sig == signal.SIGTRAP:
-                # Child stopped at breakpoint but loop exited (deadline?)
-                # Resume and wait for final outcome.
-                _, status = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
-                if status != 0 and os.WIFSTOPPED(status):
-                    libc.ptrace(PTRACE_CONT, pid, None, None)
-                    _, status = os.waitpid(pid, 0)
-                elif status != 0:
-                    if os.WIFSIGNALED(status):
-                        returncode = -os.WTERMSIG(status)
-                    elif os.WIFEXITED(status):
-                        returncode = os.WEXITSTATUS(status)
-            else:
-                os.kill(pid, signal.SIGKILL)
-                os.waitpid(pid, 0)
-
-            if returncode == 0 and not child_reaped:
-                if os.WIFSIGNALED(status):
-                    returncode = -os.WTERMSIG(status)
-                elif os.WIFEXITED(status):
-                    returncode = os.WEXITSTATUS(status)
-                elif os.WIFSTOPPED(status):
-                    returncode = -os.WSTOPSIG(status)
-                    with contextlib.suppress(ProcessLookupError):
-                        os.kill(pid, signal.SIGKILL)
-                        os.waitpid(pid, 0)
-            return returncode, ""
-
-        except ChildProcessError:
-            # Child already reaped (race with watchdog). Return -2
-            # (unknown) instead of 0 (success) to avoid masking crashes.
-            return -2, ""
-        except Exception as e:
-            try:
-                os.kill(pid, signal.SIGKILL)
-                os.waitpid(pid, 0)
-            except Exception:
-                log.debug("Failed to kill orphan pid %d", pid, exc_info=True)
-            return -2, str(e)
-        finally:
-            if writer is not None:
-                writer.join(timeout=self.timeout)
-
-    def _verify_kernel_crash(self, child_pid: int | None) -> bool:
-        """Try to verify a crash via dmesg. Returns True if dmesg confirmed it.
-
-        Checks for:
-        1. Target process crashes (matched by child_pid)
-        2. Python subprocess crashes (any python3/python process) - these indicate
-           fuzzer infrastructure issues or malformed inputs causing interpreter crashes
-        """
-        if not child_pid:
-            return False
-
-        # Drain the async stream
-        kernel_hits = self._dmesg.drain_stream(pid=child_pid)
-        if not kernel_hits:
-            # Let the stream reader consume /dev/kmsg
-            import time as _time
-
-            _time.sleep(0.05)
-            kernel_hits = self._dmesg.drain_stream(pid=child_pid)
-        if not kernel_hits:
-            # Synchronous fallback: read dmesg from last known timestamp
-            text_crashes = self._dmesg._poll_text(since=self._dmesg._last_ts)
-            if text_crashes:
-                kernel_hits = [kc for kc in text_crashes if kc.pid == child_pid]
-
-        if kernel_hits:
-            for kc in kernel_hits:
-                self._kernel_crashes.append(kc)
-                log.info(
-                    "Kernel crash verified: %s at ip=%s (ts=%.3f)",
-                    kc.crash_type,
-                    kc.ip or "?",
-                    kc.timestamp,
-                )
-            return True
-
-        # Also check for Python process crashes (fuzzer infrastructure issues)
-        self._check_python_crashes()
-
-        return False
+    def _verify_kernel_crash(self, child_pid: int | None):
+        return self._runner.verify_kernel_crash(child_pid)
 
     def _check_python_crashes(self):
-        """Check for Python process crashes in dmesg that may indicate fuzzer issues."""
-        # Get recent crashes from dmesg (not filtered by PID)
-        all_crashes = self._dmesg._poll_text(since=self._dmesg._last_ts)
-        for kc in all_crashes:
-            # Check for Python process crashes
-            if kc.process_name and "python" in kc.process_name.lower():
-                if kc.crash_type == "segfault":
-                    print(
-                        f"\n[*] Python process crash detected: pid={kc.pid}, ip={kc.ip or '?'}, "
-                        f"type={kc.crash_type} (may indicate fuzzer infrastructure issue)"
-                    )
-                    # Record as a special type of crash for diagnostics
-                    kc.crash_type = "python_segfault"
-                    self._kernel_crashes.append(kc)
+        return self._runner._check_python_crashes()
 
-    def _is_interesting(self, returncode: int, stderr: str) -> bool:
-        if returncode in SIGNAL_CRASH_CODES or returncode in self.extra_crash_codes:
-            return True
-        if returncode < 0 and returncode != -1:
-            return True
-        if returncode in (-1, 0) and "ASAN" in stderr:
-            return True
-        if "Segmentation fault" in stderr:
-            return True
-        return "Aborted" in stderr
+    def _is_interesting(self, returncode: int, stderr: str):
+        return self._runner.is_interesting(returncode, stderr)
 
-    def _is_crash(self, returncode: int, stderr: str) -> bool:
-        self.last_report = None
-        if returncode in (-2, -1):
-            return False
+    def _is_crash(self, returncode: int, stderr: str):
+        return self._runner.is_crash(returncode, stderr)
 
-        report = SanitizerReport.parse(stderr)
-        if report and report.is_valid():
-            self.last_report = report
-            return True
+    def mutate(self, data: bytes):
+        return self._operators.mutate(data)
 
-        if returncode in SIGNAL_CRASH_CODES or returncode in self.extra_crash_codes:
-            return True
-        if returncode < 0:
-            return True
-        return any(
-            sig in stderr
-            for sig in [
-                "SIGSEGV",
-                "SIGABRT",
-                "SIGFPE",
-                "SIGBUS",
-                "Segmentation fault",
-                "Aborted",
-            ]
-        )
+    def _build_ops(self, data: bytes):
+        return self._operators.build_ops(data)
 
-    def mutate(self, data: bytes) -> bytes:
-        from fuzzer_tool.core.similarity import hamming_distance
+    def _select_op(self, ops: list[str]):
+        return self._operators.select_op(ops)
 
-        buf = bytearray(data)
-        if not buf:
-            buf = bytearray(b"\x00" * random.randint(1, 32))
-
-        ops = self._build_ops(data)
-        self._last_ops_used = []
-        self._last_mopt_particles = []
-        if not hasattr(self, "_prev_bandit_op"):
-            self._prev_bandit_op = None
-        self._meta_strategy = None
-
-        # Stall recovery: use more mutations
-        n_mutations = self.mutations_per_input
-        if self._stall_recovery_active:
-            n_mutations = max(n_mutations, 16)
-
-        for _ in range(n_mutations):
-            op = self._select_op(ops)
-            self._last_ops_used.append(op)
-
-            byte_idx = self._select_position(buf, data)
-            old_len = len(buf)
-
-            result = self._op_dispatch[op](buf, byte_idx, data)
-            if result is not None:
-                # Handler returned new bytes (havoc, format mutators, dict overwrite, etc.)
-                if op == "havoc":
-                    # Apply FrameShift length-field fixup before returning
-                    if self._frameshift.relations:
-                        buf = bytearray(result[: self.max_len])
-                        self._frameshift.apply_to_buffer(buf)
-                        result = bytes(buf)
-                    self._last_hamming_distance = (
-                        hamming_distance(data, result) if len(data) == len(result) else -1
-                    )
-                    return result
-                # Track length change for FrameShift relations
-                new_len = min(len(result), self.max_len)
-                if self._frameshift.relations:
-                    if new_len > old_len:
-                        self._frameshift.on_insert(byte_idx, new_len - old_len)
-                    elif new_len < old_len:
-                        self._frameshift.on_delete(byte_idx, old_len - new_len)
-                buf = bytearray(result[: self.max_len])
-
-        # Apply FrameShift length-field fixup after all mutations
-        if self._frameshift.relations:
-            self._frameshift.apply_to_buffer(buf)
-
-        result = bytes(buf)
-        self._last_hamming_distance = (
-            hamming_distance(data, result) if len(data) == len(result) else -1
-        )
-        return result
-
-    def _build_ops(self, data: bytes) -> list[str]:
-        """Build the list of available mutation operators from ground truth."""
-        ops = list(MUTATIONS)
-        if self.dictionary:
-            ops.extend(DICT_MUTATIONS)
-        if self.markov_trained:
-            ops.append("markov_bytes")
-        if self.mc and self.mc_cem and self.mc.cem_fitted:
-            ops.append("cem_bytes")
-        if self.grammar:
-            ops.append("grammar_mutate")
-            ops.append("grammar_tree_mutate")
-        ops.extend(FORMAT_MUTATIONS)
-        parent_meta = self.seed_meta.get(data)
-        if parent_meta and (
-            parent_meta.get("redqueen_matches") or parent_meta.get("redqueen_offsets")
-        ):
-            ops.append("redqueen")
-        return ops
-
-    def _select_op(self, ops: list[str]) -> str:
-        """Select a mutation operator using the active scheduling strategy.
-
-        Hierarchy: Elo arbitrates all strategies when enabled.
-        Falls through to individual strategies if Elo is not active.
-        Stall recovery: pick randomly to maximize diversity.
-        """
-        # Stall recovery: bypass all strategies, pick randomly
-        if self._stall_recovery_active:
-            self._meta_strategy = "random_stall"
-            return random.choice(ops)
-
-        # Build list of available strategies
-        available = []
-        if self._use_replicator and self._replicator:
-            available.append("replicator")
-        if self.mc and self.mc_bandit:
-            available.append("bandit")
-        if self._use_mopt and self._mopt:
-            available.append("mopt")
-
-        # Elo sits on top: pick which strategy to use
-        if self._use_elo and self._elo and len(available) >= 2:
-            strategy = self._elo.select_strategy(available)
-            self._meta_strategy = strategy
-        elif self._use_elo and self._elo and available:
-            strategy = available[0]
-            self._meta_strategy = strategy
-        else:
-            strategy = None
-
-        # Execute selected strategy
-        if strategy == "replicator" and self._replicator:
-            op = self._replicator.select_op(ops)
-            self._last_mopt_particles.append(None)
-        elif strategy == "mopt" and self._mopt:
-            op, pid = self._mopt.select_op(ops)
-            self._last_mopt_particles.append(pid)
-        elif strategy == "bandit" and self.mc and self.mc_bandit:
-            op = self.mc.select_op(ops, prev_op=self._prev_bandit_op)
-            self._prev_bandit_op = op
-            self._last_mopt_particles.append(None)
-        elif self._use_replicator and self._replicator:
-            op = self._replicator.select_op(ops)
-            self._last_mopt_particles.append(None)
-        elif self._use_mopt and self._mopt:
-            op, pid = self._mopt.select_op(ops)
-            self._last_mopt_particles.append(pid)
-        elif self.mc and self.mc_bandit:
-            op = self.mc.select_op(ops, prev_op=self._prev_bandit_op)
-            self._prev_bandit_op = op
-            self._last_mopt_particles.append(None)
-        else:
-            op = random.choice(ops)
-            self._last_mopt_particles.append(None)
-        return op
-
-    def _select_position(self, buf: bytearray, data: bytes) -> int:
-        """Select a byte position for mutation using MI/TE/sensitivity/random."""
-        if not buf:
-            return 0
-        te_pos = (
-            self._get_te_weighted_position(len(buf))
-            if self._use_transfer_entropy and self._te
-            else None
-        )
-        mi_pos = self._mi.weighted_position(len(buf)) if self._use_mi and self._mi else None
-        sens_pos = self._sensitivity.get_weighted_position(data, len(buf))
-        candidates = [p for p in [sens_pos, te_pos, mi_pos] if p is not None]
-        if candidates:
-            return random.choice(candidates)
-        return random.randint(0, len(buf) - 1)
+    def _select_position(self, buf: bytearray, data: bytes):
+        return self._operators.select_position(buf, data)
 
     # ── Operator handlers ──────────────────────────────────────────────
     # Each handler: (buf, byte_idx, data) -> None (in-place) or bytes (replace buf)
 
     def _op_bit_flip(self, buf, byte_idx, _data):
-        if buf:
-            buf[byte_idx] ^= 1 << random.randint(0, 7)
+        return self._operators._op_bit_flip(buf, byte_idx, _data)
 
     def _op_bit_offset_flip(self, buf, _byte_idx, _data):
-        """Flip a single bit at an arbitrary bit offset across the entire buffer.
-
-        Unlike bit_flip (which operates at byte-aligned positions), this
-        selects a bit offset from 0 to 8*len-1 and flips it — the bit
-        may be anywhere within any byte. Critical for bit-packed formats
-        (DEFLATE Huffman codes, JPEG entropy data) where the meaningful
-        unit is a bit, not a byte.
-        """
-        if not buf:
-            return
-        total_bits = len(buf) * 8
-        bit_offset = random.randint(0, total_bits - 1)
-        byte_idx = bit_offset >> 3
-        bit_idx = bit_offset & 7
-        buf[byte_idx] ^= 1 << bit_idx
+        return self._operators._op_bit_offset_flip(buf, _byte_idx, _data)
 
     def _op_bit_offset_span(self, buf, _byte_idx, _data):
-        """Flip 1-8 consecutive bits starting at an arbitrary bit offset.
-
-        Corrupts variable-length bit sequences (Huffman codes in DEFLATE,
-        JPEG markers) by flipping a span that may cross byte boundaries.
-        The span width is chosen to match common Huffman code lengths
-        (3-7 bits for DEFLATE, 2-8 for JPEG DC/AC coefficients).
-        """
-        if not buf:
-            return
-        total_bits = len(buf) * 8
-        span_width = random.choices([1, 2, 3, 4, 5, 6, 7, 8],
-                                     weights=[10, 15, 20, 20, 15, 10, 5, 5])[0]
-        start_offset = random.randint(0, max(0, total_bits - span_width))
-        for i in range(span_width):
-            bit_offset = start_offset + i
-            if bit_offset >= total_bits:
-                break
-            byte_idx = bit_offset >> 3
-            bit_idx = bit_offset & 7
-            buf[byte_idx] ^= 1 << bit_idx
+        return self._operators._op_bit_offset_span(buf, _byte_idx, _data)
 
     def _op_byte_flip(self, buf, byte_idx, _data):
-        if buf:
-            buf[byte_idx] ^= 0xFF
+        return self._operators._op_byte_flip(buf, byte_idx, _data)
 
     def _op_interesting_8(self, buf, byte_idx, _data):
-        if buf:
-            buf[byte_idx] = random.choice(INTERESTING_8) & 0xFF
+        return self._operators._op_interesting_8(buf, byte_idx, _data)
 
     def _op_interesting_16(self, buf, _byte_idx, _data):
-        if len(buf) >= 2:
-            idx = random.randint(0, len(buf) - 2)
-            struct.pack_into("<h", buf, idx, random.choice(INTERESTING_16))
+        return self._operators._op_interesting_16(buf, _byte_idx, _data)
 
     def _op_interesting_32(self, buf, _byte_idx, _data):
-        if len(buf) >= 4:
-            idx = random.randint(0, len(buf) - 4)
-            struct.pack_into("<i", buf, idx, random.choice(INTERESTING_32))
+        return self._operators._op_interesting_32(buf, _byte_idx, _data)
 
     def _op_arithmetic(self, buf, _byte_idx, _data):
-        from fuzzer_tool.core.mutations import ARITHMETIC_DELTAS
-
-        width = random.choice([1, 2, 4, 8])
-        if len(buf) >= width:
-            max_start = len(buf) - width
-            idx = (random.randint(0, max_start) // width) * width
-            delta = random.choice(ARITHMETIC_DELTAS)
-            if random.random() < 0.5:
-                delta = -delta
-            endian = random.choice(["<", ">"])
-            if width == 1:
-                buf[idx] = (buf[idx] + delta) & 0xFF
-            elif width == 2:
-                val = (struct.unpack_from(f"{endian}H", buf, idx)[0] + delta) & 0xFFFF
-                struct.pack_into(f"{endian}H", buf, idx, val)
-            elif width == 4:
-                val = (struct.unpack_from(f"{endian}I", buf, idx)[0] + delta) & 0xFFFFFFFF
-                struct.pack_into(f"{endian}I", buf, idx, val)
-            elif width == 8:
-                val = (struct.unpack_from(f"{endian}Q", buf, idx)[0] + delta) & 0xFFFFFFFFFFFFFFFF
-                struct.pack_into(f"{endian}Q", buf, idx, val)
+        return self._operators._op_arithmetic(buf, _byte_idx, _data)
 
     def _op_random_bytes(self, buf, _byte_idx, _data):
-        if buf:
-            buf[random.randint(0, len(buf) - 1)] = random.randint(0, 255)
+        return self._operators._op_random_bytes(buf, _byte_idx, _data)
 
     def _op_block_insert(self, buf, _byte_idx, _data):
-        if len(buf) < self.max_len:
-            idx = random.randint(0, len(buf))
-            size = random.randint(1, min(32, self.max_len - len(buf)))
-            buf[idx:idx] = bytes(random.randint(0, 255) for _ in range(size))
+        return self._operators._op_block_insert(buf, _byte_idx, _data)
 
     def _op_block_delete(self, buf, _byte_idx, _data):
-        if len(buf) > 1:
-            idx = random.randint(0, len(buf) - 1)
-            max_size = min(32, len(buf) - idx, len(buf) - 1)
-            if max_size >= 1:
-                del buf[idx : idx + random.randint(1, max_size)]
+        return self._operators._op_block_delete(buf, _byte_idx, _data)
 
     def _op_block_duplicate(self, buf, _byte_idx, _data):
-        if len(buf) < self.max_len:
-            idx = random.randint(0, len(buf) - 1)
-            size = random.randint(1, min(16, len(buf) - idx))
-            block = buf[idx : idx + size]
-            ins = random.randint(0, len(buf))
-            buf[ins:ins] = block
+        return self._operators._op_block_duplicate(buf, _byte_idx, _data)
 
     def _op_dict_insert(self, buf, _byte_idx, _data):
-        if self.dictionary:
-            token = random.choice(self.dictionary)
-            if len(buf) + len(token) <= self.max_len:
-                buf[random.randint(0, len(buf)) : 0] = token  # insert at random pos
+        return self._operators._op_dict_insert(buf, _byte_idx, _data)
 
     def _op_dict_replace(self, buf, _byte_idx, _data):
-        if self.dictionary and buf:
-            token = random.choice(self.dictionary)
-            idx = random.randint(0, len(buf) - 1)
-            end = min(idx + len(token), len(buf))
-            buf[idx:end] = token[: end - idx]
+        return self._operators._op_dict_replace(buf, _byte_idx, _data)
 
     def _op_dict_overwrite(self, buf, _byte_idx, _data):
-        if self.dictionary:
-            return bytearray(random.choice(self.dictionary)[: self.max_len])
+        return self._operators._op_dict_overwrite(buf, _byte_idx, _data)
 
     def _op_dict_prepend(self, buf, _byte_idx, _data):
-        if self.dictionary:
-            token = random.choice(self.dictionary)
-            if len(buf) + len(token) <= self.max_len:
-                return bytearray(token) + buf
+        return self._operators._op_dict_prepend(buf, _byte_idx, _data)
 
     def _op_dict_append(self, buf, _byte_idx, _data):
-        if self.dictionary:
-            token = random.choice(self.dictionary)
-            if len(buf) + len(token) <= self.max_len:
-                buf.extend(token)
+        return self._operators._op_dict_append(buf, _byte_idx, _data)
 
     def _op_checksum_repair(self, buf, _byte_idx, _data):
-        import zlib
-
-        if buf and len(buf) >= 4:
-            pos = random.randint(0, max(0, len(buf) - 4))
-            buf[pos : pos + 4] = zlib.crc32(bytes(buf[:pos])).to_bytes(4, "big")
+        return self._operators._op_checksum_repair(buf, _byte_idx, _data)
 
     def _op_token_dup(self, buf, _byte_idx, _data):
-        if self.dictionary and buf:
-            token = random.choice(self.dictionary)
-            if len(buf) + len(token) <= self.max_len:
-                buf[random.randint(0, len(buf)) : 0] = token
+        return self._operators._op_token_dup(buf, _byte_idx, _data)
 
     def _op_markov_bytes(self, buf, _byte_idx, _data):
-        if buf:
-            idx = random.randint(0, len(buf) - 1)
-            ctx = bytes(buf[max(0, idx - self.markov.order) : idx]) if self.markov.order else b""
-            buf[idx] = self.markov.sample_byte(ctx)
+        return self._operators._op_markov_bytes(buf, _byte_idx, _data)
 
     def _op_cem_bytes(self, buf, _byte_idx, _data):
-        if self.mc and self.mc.cem_fitted:
-            if buf:
-                buf[random.randint(0, len(buf) - 1)] = self.mc.cem_byte(
-                    random.randint(0, len(buf) - 1)
-                )
-            else:
-                return bytearray(self.mc.cem_sample(random.randint(1, min(32, self.max_len))))
+        return self._operators._op_cem_bytes(buf, _byte_idx, _data)
 
     def _op_splice(self, buf, _byte_idx, data):
-        if len(self.corpus) >= 2:
-            a = random.choice(self.corpus)
-            b = random.choice(self.corpus)
-            if a is not data and b is not data:
-                return bytearray(splice(a, b)[: self.max_len])
-            others = [c for c in self.corpus if c is not data]
-            if others:
-                return bytearray(splice(bytes(buf), random.choice(others))[: self.max_len])
+        return self._operators._op_splice(buf, _byte_idx, data)
 
     def _op_crossover(self, buf, _byte_idx, data):
-        from fuzzer_tool.core.mutations import crossover
-
-        if len(self.corpus) >= 2 and buf:
-            a = random.choice(self.corpus)
-            b = random.choice(self.corpus)
-            if a is not data and b is not data:
-                return bytearray(crossover(a, b)[: self.max_len])
-            others = [c for c in self.corpus if c is not data]
-            if others:
-                return bytearray(crossover(bytes(buf), random.choice(others))[: self.max_len])
+        return self._operators._op_crossover(buf, _byte_idx, data)
 
     def _op_type_replace(self, buf, _byte_idx, _data):
-        from fuzzer_tool.core.mutations import type_replace
-
-        if buf:
-            return bytearray(type_replace(bytes(buf))[: self.max_len])
+        return self._operators._op_type_replace(buf, _byte_idx, _data)
 
     def _op_ascii_num(self, buf, _byte_idx, _data):
-        from fuzzer_tool.core.mutations import ascii_num_replace
-
-        if buf:
-            return bytearray(ascii_num_replace(bytes(buf))[: self.max_len])
+        return self._operators._op_ascii_num(buf, _byte_idx, _data)
 
     def _op_byte_shuffle(self, buf, _byte_idx, _data):
-        from fuzzer_tool.core.mutations import byte_shuffle
-
-        if buf and len(buf) > 1:
-            return bytearray(byte_shuffle(bytes(buf))[: self.max_len])
+        return self._operators._op_byte_shuffle(buf, _byte_idx, _data)
 
     def _op_byte_delete(self, buf, _byte_idx, _data):
-        from fuzzer_tool.core.mutations import byte_delete
-
-        if buf and len(buf) > 1:
-            return bytearray(byte_delete(bytes(buf))[: self.max_len])
+        return self._operators._op_byte_delete(buf, _byte_idx, _data)
 
     def _op_byte_insert(self, buf, _byte_idx, _data):
-        from fuzzer_tool.core.mutations import byte_insert
-
-        if buf and len(buf) < self.max_len:
-            return bytearray(byte_insert(bytes(buf), self.max_len)[: self.max_len])
+        return self._operators._op_byte_insert(buf, _byte_idx, _data)
 
     def _op_insert_ascii_num(self, buf, _byte_idx, _data):
-        from fuzzer_tool.core.mutations import insert_ascii_num
-
-        if buf and len(buf) < self.max_len:
-            return bytearray(insert_ascii_num(bytes(buf), self.max_len)[: self.max_len])
+        return self._operators._op_insert_ascii_num(buf, _byte_idx, _data)
 
     def _op_transpose_16(self, buf, _byte_idx, _data):
-        from fuzzer_tool.core.mutations import transpose_bytes
-
-        if len(buf) >= 2:
-            return bytearray(transpose_bytes(bytes(buf), 2)[: self.max_len])
+        return self._operators._op_transpose_16(buf, _byte_idx, _data)
 
     def _op_transpose_32(self, buf, _byte_idx, _data):
-        from fuzzer_tool.core.mutations import transpose_bytes
-
-        if len(buf) >= 4:
-            return bytearray(transpose_bytes(bytes(buf), 4)[: self.max_len])
+        return self._operators._op_transpose_32(buf, _byte_idx, _data)
 
     def _op_transpose_64(self, buf, _byte_idx, _data):
-        from fuzzer_tool.core.mutations import transpose_bytes
-
-        if len(buf) >= 8:
-            return bytearray(transpose_bytes(bytes(buf), 8)[: self.max_len])
+        return self._operators._op_transpose_64(buf, _byte_idx, _data)
 
     def _op_bit_transpose_8(self, buf, _byte_idx, _data):
-        from fuzzer_tool.core.mutations import bit_transpose
-
-        if buf:
-            return bytearray(bit_transpose(bytes(buf), 1)[: self.max_len])
+        return self._operators._op_bit_transpose_8(buf, _byte_idx, _data)
 
     def _op_bit_transpose_16(self, buf, _byte_idx, _data):
-        from fuzzer_tool.core.mutations import bit_transpose
-
-        if len(buf) >= 2:
-            return bytearray(bit_transpose(bytes(buf), 2)[: self.max_len])
+        return self._operators._op_bit_transpose_16(buf, _byte_idx, _data)
 
     def _op_bit_transpose_32(self, buf, _byte_idx, _data):
-        from fuzzer_tool.core.mutations import bit_transpose
-
-        if len(buf) >= 4:
-            return bytearray(bit_transpose(bytes(buf), 4)[: self.max_len])
+        return self._operators._op_bit_transpose_32(buf, _byte_idx, _data)
 
     def _op_bit_transpose_64(self, buf, _byte_idx, _data):
-        from fuzzer_tool.core.mutations import bit_transpose
-
-        if len(buf) >= 8:
-            return bytearray(bit_transpose(bytes(buf), 8)[: self.max_len])
+        return self._operators._op_bit_transpose_64(buf, _byte_idx, _data)
 
     def _op_length_grow(self, buf, _byte_idx, _data):
-        if buf and len(buf) < self.max_len:
-            size = random.randint(1, min(64, self.max_len - len(buf)))
-            if size > 0:
-                buf.extend(random.randint(0, 255) for _ in range(size))
+        return self._operators._op_length_grow(buf, _byte_idx, _data)
 
     def _op_length_shrink(self, buf, _byte_idx, _data):
-        if len(buf) > 2:
-            del buf[random.randint(1, len(buf) - 1) :]
+        return self._operators._op_length_shrink(buf, _byte_idx, _data)
 
     def _op_repeat_clone(self, buf, _byte_idx, _data):
-        if buf and len(buf) < self.max_len:
-            idx = random.randint(0, len(buf) - 1)
-            size = random.randint(1, min(16, len(buf) - idx))
-            block = buf[idx : idx + size]
-            ins = idx + size
-            if ins <= len(buf) and len(buf) + len(block) <= self.max_len:
-                buf[ins:ins] = block
+        return self._operators._op_repeat_clone(buf, _byte_idx, _data)
 
     def _op_truncate(self, buf, _byte_idx, _data):
-        if len(buf) > 2:
-            del buf[random.randint(2, len(buf)) :]
+        return self._operators._op_truncate(buf, _byte_idx, _data)
 
     def _op_swap_regions(self, buf, _byte_idx, _data):
-        if len(buf) >= 4:
-            i = random.randint(0, len(buf) - 3)
-            j = random.randint(i + 2, len(buf) - 1)
-            size = random.randint(1, min(j - i, 16))
-            a, b = buf[i : i + size], buf[j : j + size]
-            buf[i : i + size] = b
-            buf[j : j + size] = a
+        return self._operators._op_swap_regions(buf, _byte_idx, _data)
 
     def _op_swap_bytes(self, buf, _byte_idx, _data):
-        if len(buf) >= 2:
-            i, j = random.sample(range(len(buf)), 2)
-            buf[i], buf[j] = buf[j], buf[i]
+        return self._operators._op_swap_bytes(buf, _byte_idx, _data)
 
     def _op_endianness_swap(self, buf, _byte_idx, _data):
-        if buf:
-            width = random.choice([2, 4, 8])
-            if len(buf) >= width:
-                idx = random.randint(0, len(buf) - width)
-                val = int.from_bytes(buf[idx : idx + width], "little")
-                buf[idx : idx + width] = val.to_bytes(width, "big")
+        return self._operators._op_endianness_swap(buf, _byte_idx, _data)
 
     def _op_grammar_mutate(self, buf, _byte_idx, _data):
-        if self.grammar:
-            return bytearray(self.grammar.mutate(bytes(buf), max_len=self.max_len)[: self.max_len])
+        return self._operators._op_grammar_mutate(buf, _byte_idx, _data)
 
     def _op_grammar_tree_mutate(self, buf, _byte_idx, _data):
-        if self.grammar:
-            from fuzzer_tool.core.grammar import TreeMutator
-
-            if not hasattr(self, "_tree_mutator"):
-                self._tree_mutator = TreeMutator(self.grammar)
-            tree = self._tree_mutator.parse(bytes(buf))
-            return bytearray(
-                self._tree_mutator.mutate_tree(tree, max_len=self.max_len)[: self.max_len]
-            )
+        return self._operators._op_grammar_tree_mutate(buf, _byte_idx, _data)
 
     def _op_png_chunk_mutate(self, buf, _byte_idx, _data):
-        from fuzzer_tool.core.png_mutations import PngChunkMutator, parse_png_chunks
-
-        if not hasattr(self, "_png_mutator"):
-            self._png_mutator = PngChunkMutator()
-        if parse_png_chunks(bytes(buf)):
-            mutated = self._png_mutator.mutate(bytes(buf), max_len=self.max_len)
-        else:
-            mutated = self._png_mutator._generate_random_png(self.max_len)
-        return bytearray(mutated[: self.max_len])
+        return self._operators._op_png_chunk_mutate(buf, _byte_idx, _data)
 
     def _op_jpeg_chunk_mutate(self, buf, _byte_idx, _data):
-        from fuzzer_tool.core.jpeg_mutations import JpegMutator, parse_jpeg_markers
-
-        if not hasattr(self, "_jpeg_mutator"):
-            self._jpeg_mutator = JpegMutator()
-        if parse_jpeg_markers(bytes(buf)):
-            mutated = self._jpeg_mutator.mutate(bytes(buf), max_len=self.max_len)
-        else:
-            mutated = self._jpeg_mutator._generate_random_jpeg(max_len=self.max_len)
-        return bytearray(mutated[: self.max_len])
+        return self._operators._op_jpeg_chunk_mutate(buf, _byte_idx, _data)
 
     def _op_jpeg_crc_fix(self, buf, _byte_idx, _data):
-        from fuzzer_tool.core.jpeg_mutations import (
-            parse_jpeg_markers,
-            serialize_jpeg_markers,
-            STANDALONE_MARKERS,
-        )
-
-        if buf:
-            markers = parse_jpeg_markers(bytes(buf))
-            if markers and len(markers) > 2:
-                candidates = [
-                    i
-                    for i, m in enumerate(markers)
-                    if m.marker not in STANDALONE_MARKERS and len(m.data) > 0
-                ]
-                if candidates:
-                    idx = random.choice(candidates)
-                    marker = markers[idx]
-                    data = bytearray(marker.data)
-                    for _ in range(random.randint(1, min(4, len(data)))):
-                        data[random.randint(0, len(data) - 1)] ^= 1 << random.randint(0, 7)
-                    marker.data = bytes(data)
-                    return bytearray(serialize_jpeg_markers(markers)[: self.max_len])
+        return self._operators._op_jpeg_crc_fix(buf, _byte_idx, _data)
 
     def _op_gzip_chunk_mutate(self, buf, _byte_idx, _data):
-        from fuzzer_tool.core.gzip_mutations import GzipMutator, parse_gzip
-
-        if not hasattr(self, "_gzip_mutator"):
-            self._gzip_mutator = GzipMutator()
-        if parse_gzip(bytes(buf)):
-            mutated = self._gzip_mutator.mutate(bytes(buf), max_len=self.max_len)
-        else:
-            mutated = self._gzip_mutator._generate_random_gzip(max_len=self.max_len)
-        return bytearray(mutated[: self.max_len])
+        return self._operators._op_gzip_chunk_mutate(buf, _byte_idx, _data)
 
     def _op_bmp_chunk_mutate(self, buf, _byte_idx, _data):
-        from fuzzer_tool.core.bmp_mutations import BmpMutator, parse_bmp
-
-        if not hasattr(self, "_bmp_mutator"):
-            self._bmp_mutator = BmpMutator()
-        if parse_bmp(bytes(buf)):
-            mutated = self._bmp_mutator.mutate(bytes(buf), max_len=self.max_len)
-        else:
-            mutated = self._bmp_mutator._generate_random_bmp(max_len=self.max_len)
-        return bytearray(mutated[: self.max_len])
+        return self._operators._op_bmp_chunk_mutate(buf, _byte_idx, _data)
 
     def _op_zlib_chunk_mutate(self, buf, _byte_idx, _data):
-        from fuzzer_tool.core.zlib_mutations import ZlibMutator, parse_zlib
-
-        if not hasattr(self, "_zlib_mutator"):
-            self._zlib_mutator = ZlibMutator()
-        if parse_zlib(bytes(buf)):
-            mutated = self._zlib_mutator.mutate(bytes(buf), max_len=self.max_len)
-        else:
-            mutated = self._zlib_mutator._generate_random_zlib(max_len=self.max_len)
-        return bytearray(mutated[: self.max_len])
+        return self._operators._op_zlib_chunk_mutate(buf, _byte_idx, _data)
 
     def _op_png_crc_fix(self, buf, _byte_idx, _data):
-        from fuzzer_tool.core.png_mutations import parse_png_chunks, serialize_png_chunks
-
-        if buf:
-            chunks = parse_png_chunks(bytes(buf))
-            if chunks and len(chunks) > 1:
-                candidates = [i for i, c in enumerate(chunks) if c.chunk_type != b"IEND"]
-                if candidates:
-                    idx = random.choice(candidates)
-                    chunk = chunks[idx]
-                    if chunk.data:
-                        data = bytearray(chunk.data)
-                        for _ in range(random.randint(1, min(4, len(data)))):
-                            data[random.randint(0, len(data) - 1)] ^= 1 << random.randint(0, 7)
-                        chunk.data = bytes(data)
-                    else:
-                        chunk.data = bytes(
-                            random.randint(0, 255) for _ in range(random.randint(1, 32))
-                        )
-                    return bytearray(serialize_png_chunks(chunks)[: self.max_len])
+        return self._operators._op_png_crc_fix(buf, _byte_idx, _data)
 
     def _op_redqueen(self, buf, _byte_idx, data):
-        parent_meta = self.seed_meta.get(data)
-        if not (buf and parent_meta):
-            return
-        matches = parent_meta.get("redqueen_matches", [])
-        offsets = parent_meta.get("redqueen_offsets", [])
-        if matches:
-            for _ in range(random.randint(1, min(4, len(matches)))):
-                off, op_a, op_b = random.choice(matches)
-                end = off + len(op_a)
-                if end <= len(buf) and bytes(buf[off:end]) == op_a:
-                    for j, b_val in enumerate(op_b):
-                        if off + j < len(buf):
-                            buf[off + j] = b_val
-        elif offsets and self._cmplog and self._cmplog.tokens:
-            for _ in range(random.randint(1, min(4, len(offsets)))):
-                off = random.choice(offsets)
-                if off < len(buf):
-                    token = random.choice(self._cmplog.tokens)
-                    for j, b_val in enumerate(token):
-                        if off + j < len(buf):
-                            buf[off + j] = b_val
-        elif offsets:
-            for _ in range(random.randint(1, min(4, len(offsets)))):
-                off = random.choice(offsets)
-                if off < len(buf):
-                    buf[off] ^= 0xFF
+        return self._operators._op_redqueen(buf, _byte_idx, data)
 
     def _op_havoc(self, buf, _byte_idx, data):
-        return bytes(self._havoc_mutate(buf))
+        return self._operators._op_havoc(buf, _byte_idx, data)
 
     # ── Dispatch table: op name → handler method ───────────────────────
     def _build_dispatch(self):
-        return {
-            "bit_flip": self._op_bit_flip,
-            "bit_offset_flip": self._op_bit_offset_flip,
-            "bit_offset_span": self._op_bit_offset_span,
-            "byte_flip": self._op_byte_flip,
-            "interesting_8": self._op_interesting_8,
-            "interesting_16": self._op_interesting_16,
-            "interesting_32": self._op_interesting_32,
-            "arithmetic": self._op_arithmetic,
-            "random_bytes": self._op_random_bytes,
-            "block_insert": self._op_block_insert,
-            "block_delete": self._op_block_delete,
-            "block_duplicate": self._op_block_duplicate,
-            "dict_insert": self._op_dict_insert,
-            "dict_replace": self._op_dict_replace,
-            "dict_overwrite": self._op_dict_overwrite,
-            "dict_prepend": self._op_dict_prepend,
-            "dict_append": self._op_dict_append,
-            "checksum_repair": self._op_checksum_repair,
-            "token_dup": self._op_token_dup,
-            "markov_bytes": self._op_markov_bytes,
-            "cem_bytes": self._op_cem_bytes,
-            "splice": self._op_splice,
-            "crossover": self._op_crossover,
-            "type_replace": self._op_type_replace,
-            "ascii_num": self._op_ascii_num,
-            "byte_shuffle": self._op_byte_shuffle,
-            "byte_delete": self._op_byte_delete,
-            "byte_insert": self._op_byte_insert,
-            "insert_ascii_num": self._op_insert_ascii_num,
-            "transpose_16": self._op_transpose_16,
-            "transpose_32": self._op_transpose_32,
-            "transpose_64": self._op_transpose_64,
-            "bit_transpose_8": self._op_bit_transpose_8,
-            "bit_transpose_16": self._op_bit_transpose_16,
-            "bit_transpose_32": self._op_bit_transpose_32,
-            "bit_transpose_64": self._op_bit_transpose_64,
-            "length_grow": self._op_length_grow,
-            "length_shrink": self._op_length_shrink,
-            "repeat_clone": self._op_repeat_clone,
-            "truncate": self._op_truncate,
-            "swap_regions": self._op_swap_regions,
-            "swap_bytes": self._op_swap_bytes,
-            "endianness_swap": self._op_endianness_swap,
-            "grammar_mutate": self._op_grammar_mutate,
-            "grammar_tree_mutate": self._op_grammar_tree_mutate,
-            "png_chunk_mutate": self._op_png_chunk_mutate,
-            "jpeg_chunk_mutate": self._op_jpeg_chunk_mutate,
-            "jpeg_crc_fix": self._op_jpeg_crc_fix,
-            "gzip_chunk_mutate": self._op_gzip_chunk_mutate,
-            "bmp_chunk_mutate": self._op_bmp_chunk_mutate,
-            "zlib_chunk_mutate": self._op_zlib_chunk_mutate,
-            "png_crc_fix": self._op_png_crc_fix,
-            "redqueen": self._op_redqueen,
-            "havoc": self._op_havoc,
-        }
+        return self._operators.build_dispatch()
 
-    def _havoc_mutate(self, buf: bytearray) -> bytearray:
-        for _ in range(random.randint(2, 8)):
-            self._apply_single_mutation(buf)
-        return buf
+    def _havoc_mutate(self, buf: bytearray):
+        return self._operators.havoc_mutate(buf)
 
     def _apply_single_mutation(self, buf: bytearray):
-        if not buf:
-            buf.extend(random.randint(0, 255) for _ in range(random.randint(1, 16)))
-            return
-        op = random.randint(0, 10)
-        if op == 0:
-            idx = random.randint(0, len(buf) - 1)
-            buf[idx] ^= 1 << random.randint(0, 7)
-        elif op == 1:
-            idx = random.randint(0, len(buf) - 1)
-            buf[idx] = random.randint(0, 255)
-        elif op == 2 and len(buf) > 1:
-            i, j = random.sample(range(len(buf)), 2)
-            buf[i], buf[j] = buf[j], buf[i]
-        elif op == 3 and len(buf) < self.max_len:
-            idx = random.randint(0, len(buf))
-            buf.insert(idx, random.randint(0, 255))
-        elif op == 4 and len(buf) > 1:
-            idx = random.randint(0, len(buf) - 1)
-            size = random.randint(1, min(len(buf) - 1, len(buf) - idx))
-            del buf[idx : idx + size]
-        elif op == 5 and len(buf) >= 4:
-            import zlib
-
-            pos = random.randint(0, max(0, len(buf) - 4))
-            buf[pos : pos + 4] = zlib.crc32(bytes(buf[:pos])).to_bytes(4, "big")
-        elif op == 6 and len(buf) >= 2:
-            i = random.randint(0, len(buf) - 2)
-            j = random.randint(i + 1, len(buf) - 1)
-            size = random.randint(1, min(j - i, 8))
-            a = buf[i : i + size]
-            b = buf[j : j + size]
-            buf[i : i + size] = b
-            buf[j : j + size] = a
-        elif op == 7 and buf:
-            width = random.choice([2, 4])
-            if len(buf) >= width:
-                idx = random.randint(0, len(buf) - width)
-                val = int.from_bytes(buf[idx : idx + width], "little")
-                buf[idx : idx + width] = val.to_bytes(width, "big")
-        elif op == 8 and len(buf) > 2:
-            del buf[random.randint(2, len(buf) - 1) :]
-        elif op == 9 and buf and len(buf) < self.max_len:
-            size = random.randint(1, min(16, self.max_len - len(buf)))
-            if size > 0:
-                buf.extend(random.randint(0, 255) for _ in range(size))
-        elif op == 10 and buf and len(buf) < self.max_len:
-            idx = random.randint(0, len(buf) - 1)
-            size = random.randint(1, min(16, len(buf) - idx))
-            block = buf[idx : idx + size]
-            ins = idx + size
-            if ins <= len(buf) and len(buf) + len(block) <= self.max_len:
-                buf[ins:ins] = block
+        return self._operators._apply_single_mutation(buf)
 
     def save_crash(self, data: bytes, returncode: int, stderr: str):
-        from fuzzer_tool.adapters.filesystem import hash_data
-        from fuzzer_tool.core.crash_metadata import CrashMetadata, find_nearest_corpus
-
-        meta = CrashMetadata()
-        meta.exec_count = self.exec_count
-        meta.corpus_size = len(self.corpus)
-        meta.target = self.target
-        meta.mutation_ops = list(self._last_ops_used)
-        meta.elapsed = self._format_elapsed()
-
-        # Parent seed hash (the seed that was mutated)
-        if self.corpus:
-            parent = self._last_parent_seed if hasattr(self, "_last_parent_seed") else None
-            if parent:
-                meta.parent_seed_hash = hash_data(parent)
-
-        # Target SHA256 (computed once, cached)
-        if not hasattr(self, "_target_sha256"):
-            try:
-                self._target_sha256 = hashlib.sha256(Path(self.target).read_bytes()).hexdigest()[
-                    :16
-                ]
-            except Exception:
-                self._target_sha256 = "unknown"
-        meta.target_sha256 = self._target_sha256
-
-        # Nearest corpus entry
-        if self.corpus:
-            label, sim, diffs = find_nearest_corpus(data, self.corpus)
-            meta.nearest_corpus_file = label
-            meta.nearest_similarity = sim
-            meta.diff_bytes = diffs
-
-        # Register state from ptrace (if active)
-        if self.ptrace_cov and hasattr(self, "_last_regs"):
-            meta.rip = self._last_regs.get("rip", 0)
-            meta.rsp = self._last_regs.get("rsp", 0)
-            meta.rbp = self._last_regs.get("rbp", 0)
-
-        # Extract frames for crash clustering
-        from fuzzer_tool.core.sanitizer import SanitizerReport
-
-        report = SanitizerReport.parse(stderr)
-        if report and report.is_valid():
-            sig = report.signature
-            if sig not in self.crash_frames:
-                self.crash_frames[sig] = report.frames
-
-        return save_crash(
-            data,
-            returncode,
-            stderr,
-            self.crashes_dir,
-            self.crash_hashes,
-            self.crash_sigs,
-            metadata=meta,
-        )
+        return self._corpus_manager.save_crash(data, returncode, stderr)
 
     def save_to_corpus(self, data: bytes, parent: bytes | None = None):
-        # Compute lineage depth: child depth = parent depth + 1
-        parent_depth = 0
-        if parent is not None:
-            parent_meta = self.seed_meta.get(parent)
-            if parent_meta is not None:
-                parent_depth = parent_meta.get("lineage_depth", 0)
+        return self._corpus_manager.save_to_corpus(data, parent)
 
-        self._total_corpus_attempts += 1
-        if save_to_corpus(
-            data,
-            self.corpus_dir,
-            self.seen_hashes,
-            self.bloom,
-            parent=parent,
-            lineage_depth=parent_depth,
-        ):
-            self.corpus.append(data)
-            # GA: add to population if enabled
-            if self.ga:
-                import hashlib as _hashlib
-                from fuzzer_tool.core.ga import Individual
-
-                seed_key = _hashlib.sha256(data).hexdigest()[:16]
-                edge_count = len(self._edge_tracker.seed_edges.get(seed_key, set()))
-                ind = Individual(
-                    data=data,
-                    edge_count=edge_count,
-                    generation=self.ga.generation,
-                    seed_key=seed_key,
-                )
-                self.ga.add_to_population(ind)
-            self.seed_meta[data] = {
-                "fuzz_count": 0,
-                "coverage_edges": 0,
-                "momentum": 0.0,
-                "edge_bitmap": bytearray(0),
-                "redqueen_offsets": [],
-                "added_at": time.time(),
-                "lineage_depth": parent_depth + 1 if parent else 0,
-                "hamming_distance": self._last_hamming_distance,
-            }
-            self.markov.train(data)
-            self.markov_trained = self.markov.is_trained()
-            # Check if markov model has plateaued (no new patterns learned)
-            if self.markov.snapshot_and_check_plateau():
-                log.info(
-                    "Markov plateau detected (JS=%.4f) — reducing generation rate",
-                    self.markov.last_js_divergence,
-                )
-            # Track corpus size distribution for dynamic max_len
-            self._corpus_size_history.append(len(data))
-            if len(self._corpus_size_history) > 1000:
-                self._corpus_size_history = self._corpus_size_history[-500:]
-            # Secretary-problem: track corpus discovery rate for optimal stopping
-            if self._corpus_secretary:
-                dr = self.discovery_rate()
-                self._corpus_secretary.observe(dr)
-                stop, _reason = self._corpus_secretary.should_stop()
-                if stop:
-                    log.info("Corpus secretary stopping: %s", _reason)
-                    self._auto_minimize_corpus()
-            # Auto-minimize if corpus exceeds max
-            if self.max_corpus > 0 and len(self.corpus) > self.max_corpus:
-                self._auto_minimize_corpus()
-            # Dynamic max_len: adjust based on corpus size distribution
-            if len(self._corpus_size_history) >= 100:
-                sorted_sizes = sorted(self._corpus_size_history)
-                p90 = sorted_sizes[-len(sorted_sizes) // 10]
-                self.max_len = max(self.max_len, min(p90 * 2, 65536))
-        else:
-            self._duplicate_reject_count += 1
-
-    def _trim_new_coverage(self, data: bytes, parent: bytes) -> None:
-        """Trim input to minimal size that still hits the same edges.
-
-        Single-pass: remove half the input, check edges. If it works,
-        the trimmed version replaces the corpus entry. Only 1 extra
-        target run per new-coverage event.
-        """
-        if len(data) <= 16:
-            return  # too small to trim
-
-        if self.shm_cov:
-            current_edges = self.shm_cov.read_bitmap()
-        elif self.ptrace_cov:
-            current_edges = bytes(self.ptrace_cov.edge_map)
-        else:
-            return
-
-        trimmed = data[: len(data) // 2]
-        rc, _ = self._run_target(trimmed)
-        if rc in (-2, -1):
-            return
-
-        if self.shm_cov:
-            trimmed_edges = self.shm_cov.read_bitmap()
-        elif self.ptrace_cov:
-            trimmed_edges = bytes(self.ptrace_cov.edge_map)
-        else:
-            return
-
-        if not self._edges_subset_of(trimmed_edges, current_edges):
-            return  # lost edges — keep original
-
-        # Trimmed version preserves all edges — replace in corpus
-        seed_key = self._seed_key(data)
-        if data in self.seed_meta:
-            self.seed_meta.pop(data, None)
-        if data in self.corpus:
-            idx = self.corpus.index(data)
-            self.corpus[idx] = trimmed
-            self.seed_meta[trimmed] = {
-                "fuzz_count": 0,
-                "coverage_edges": self._edge_tracker.get_seed_edge_count(seed_key),
-                "momentum": 0.0,
-                "edge_bitmap": bytearray(0),
-                "redqueen_offsets": [],
-                "added_at": time.time(),
-                "lineage_depth": self.seed_meta.get(data, {}).get("lineage_depth", 0) + 1,
-            }
-            log.debug("Trimmed %d -> %d bytes", len(data), len(trimmed))
+    def _trim_new_coverage(self, data: bytes, parent: bytes):
+        return self._corpus_manager.trim_new_coverage(data, parent)
 
     @staticmethod
-    def _edges_subset_of(candidate: bytes, reference: bytes) -> bool:
-        """Check if all non-zero positions in reference are also non-zero in candidate."""
-        for i in range(min(len(candidate), len(reference))):
-            if reference[i] and not candidate[i]:
-                return False
-        return True
+    def _edges_subset_of(candidate: bytes, reference: bytes):
+        return CorpusManager._edges_subset_of(candidate, reference)
 
     def _auto_minimize_corpus(self):
-        """Inline corpus minimization: hash dedup + subsumption pruning.
-
-        Keeps inputs that discovered the most edges. Removed inputs are
-        moved to ``corpus/pruned/`` by the caller (save_to_corpus).
-        Triggered either by max_corpus limit or dynamically when the
-        corpus accumulates too many stale seeds (high fuzz_count, zero
-        new edges).
-        """
-        # GA mode handles population bounds via generational culling
-        if self.ga:
-            return
-        if not self.corpus:
-            return
-
-        from fuzzer_tool.adapters.filesystem import hash_data
-
-        # Deduplicate by content hash
-        seen: set[str] = set()
-        unique: list[bytes] = []
-        for seed in self.corpus:
-            h = hash_data(seed)
-            if h not in seen:
-                seen.add(h)
-                unique.append(seed)
-
-        # Dynamic trigger: if >30% of seeds have 0 edges after 50+ fuzzes,
-        # the corpus is bloated — prune even if under max_corpus.
-        stale_count = 0
-        for seed in unique:
-            meta = self.seed_meta.get(seed)
-            if meta and meta["fuzz_count"] >= 50 and meta["coverage_edges"] == 0:
-                stale_count += 1
-        stale_ratio = stale_count / max(len(unique), 1)
-
-        # Determine target corpus size.
-        # explicit max_corpus: use it directly.
-        # no max_corpus: dynamic cap = max(productive_seeds * 3, 100).
-        # This keeps the corpus proportional to discovered coverage.
-        if self.max_corpus > 0:
-            target_size = self.max_corpus
-        else:
-            # Dynamic cap: based on discovered edges, not per-seed counts.
-            # Keep enough seeds to cover all edges with some exploration buffer.
-            edges = 0
-            if self.shm_cov:
-                edges = self.shm_cov.cumulative_edges
-            elif self.ptrace_cov:
-                edges = self.ptrace_cov.cumulative_edges
-            target_size = max(edges * 2, 50)
-
-        if stale_ratio > 0.3:
-            # Stale seeds detected — prune them even if under max_corpus.
-            # Reduce target by stale ratio to remove dead weight.
-            if len(unique) > target_size:
-                target_size = max(target_size, int(len(unique) * (1.0 - stale_ratio)))
-            else:
-                # Under max_corpus but many stale seeds — still prune them
-                target_size = int(len(unique) * (1.0 - stale_ratio))
-
-        # Floor: corpus cannot be smaller than the number of productive seeds
-        # (seeds that discovered at least one edge). This ensures every
-        # discovered edge retains at least one covering seed.
-        productive = sum(
-            1 for seed in unique if self.seed_meta.get(seed, {}).get("coverage_edges", 0) > 0
-        )
-        if productive > 0:
-            target_size = max(target_size, productive)
-
-        # Prune subsumed seeds using edge coverage + diversity scoring
-        if len(unique) > target_size:
-            scored = []
-            for seed in unique:
-                seed_key = self._seed_key(seed)
-                edge_count = self._edge_tracker.get_seed_edge_count(seed_key)
-                meta = self.seed_meta.get(seed)
-                fuzz = meta["fuzz_count"] if meta else 0
-                discovered = meta["coverage_edges"] if meta else 0
-
-                # Edge coverage score: seeds that discovered edges are valuable
-                # Penalize seeds that were fuzzed many times without discoveries
-                edge_score = discovered * 10
-                if fuzz > 0 and discovered == 0:
-                    # Stale seed: penalize proportionally to fuzz count
-                    edge_score *= max(0.01, 1.0 / (1.0 + fuzz * 0.01))
-                else:
-                    # Fresh or productive seed: slight boost for low fuzz count
-                    edge_score += 1.0 / max(fuzz, 1)
-
-                # Wasserstein diversity: spatially distant seeds are valuable
-                wasserstein_weight = self._edge_tracker.compute_wasserstein_weight(seed_key)
-
-                score = edge_score * wasserstein_weight
-                scored.append((score, seed))
-            scored.sort(key=lambda x: x[0], reverse=True)
-            # Keep top target_size, but enforce floor: never prune below
-            # the number of productive seeds.
-            keep = min(target_size, len(scored))
-            if keep < productive:
-                keep = min(productive, len(scored))
-            unique = [s for _, s in scored[:keep]]
-
-        removed = len(self.corpus) - len(unique)
-        if removed > 0:
-            # Move pruned files to corpus/pruned/ before removing from memory
-            pruned_dir = self.corpus_dir / "pruned"
-            pruned_dir.mkdir(parents=True, exist_ok=True)
-            from fuzzer_tool.adapters.filesystem import hash_data as _hash
-
-            kept_set = {_hash(s) for s in unique}
-            for f in self.corpus_dir.iterdir():
-                if not f.is_file():
-                    continue
-                if f.suffix == ".json" and f.name.startswith("delta_"):
-                    h = f.name[6:-5]
-                elif f.name.startswith("id_"):
-                    h = f.name[3:]
-                else:
-                    continue
-                if h not in kept_set:
-                    shutil.move(str(f), str(pruned_dir / f.name))
-
-            self.corpus = unique
-            # Rebuild seed_meta for kept seeds
-            new_meta = {}
-            for seed in unique:
-                if seed in self.seed_meta:
-                    new_meta[seed] = self.seed_meta[seed]
-            self.seed_meta = new_meta
-            # Invalidate weight caches (corpus changed)
-            self._weight_cache = None
-            self._cached_weights = {}
-            self._last_minimize_exec = self.exec_count
-            self._pruned_count += removed
-            log.info(
-                "Auto-minimized corpus: %d -> %d seeds -> pruned/ (stale_ratio=%.1f)",
-                len(self.corpus) + removed,
-                len(self.corpus),
-                stale_ratio,
-            )
+        return self._corpus_manager.auto_minimize_corpus()
 
     def _deprioritize_near_duplicates(self):
-        """Find seeds with near-identical edge bitmaps and merge them.
+        return self._corpus_manager.deprioritize_near_duplicates()
 
-        Uses Hamming distance on edge bitmaps (via edge_tracker) to find
-        seed pairs that are coverage-redundant. When found, the seed with
-        fewer new edges is removed from the corpus.
+    def _pick_seed(self):
+        return self._seed_picker.pick_seed()
 
-        Called periodically alongside corpus minimization.
-        """
-        if len(self.corpus) < 10:
-            return
+    def _pick_markov_seed(self):
+        return self._seed_picker._pick_markov_seed()
 
-        near_dupes = self._edge_tracker.find_near_duplicate_seeds(max_hamming=0.05)
-        if not near_dupes:
-            return
+    def _pick_pareto_only(self):
+        return self._seed_picker._pick_pareto_only()
 
-        # Collect seeds to remove: keep the one with more coverage_edges
-        to_remove: set[bytes] = set()
-        for key_a, key_b, hdist in near_dupes:
-            # Find the actual seed bytes from keys
-            seed_a = None
-            seed_b = None
-            for s in self.corpus:
-                if self._seed_key(s) == key_a:
-                    seed_a = s
-                elif self._seed_key(s) == key_b:
-                    seed_b = s
-                if seed_a and seed_b:
-                    break
-            if not seed_a or not seed_b:
-                continue
-            if seed_a in to_remove or seed_b in to_remove:
-                continue
+    def _format_aware_seed(self):
+        return self._seed_picker._format_aware_seed()
 
-            meta_a = self.seed_meta.get(seed_a, {})
-            meta_b = self.seed_meta.get(seed_b, {})
-            edges_a = meta_a.get("coverage_edges", 0)
-            edges_b = meta_b.get("coverage_edges", 0)
-
-            # Remove the one with fewer discovered edges
-            if edges_a <= edges_b:
-                to_remove.add(seed_a)
-            else:
-                to_remove.add(seed_b)
-
-        if to_remove:
-            self.corpus = [s for s in self.corpus if s not in to_remove]
-            for s in to_remove:
-                self.seed_meta.pop(s, None)
-            self._weight_cache = None
-            self._cached_weights = {}
-            log.info(
-                "Deprioritized %d near-duplicate seeds (Hamming <= 0.05 on edge bitmaps)",
-                len(to_remove),
-            )
-
-    def _pick_seed(self) -> bytes:
-        # Stall recovery: pick seeds randomly
-        if self._stall_recovery_active and self.corpus:
-            self._seed_strategy = "random_stall"
-            return random.choice(self.corpus)
-
-        # Elo-arbitrated seed selection: pick between strategies
-        if self._use_elo and self._elo:
-            available = []
-            if self.ga:
-                available.append("ga")
-            available.append("weighted")
-            if self.corpus and self.seed_meta:
-                available.append("pareto")
-            if self._profile.format_signature:
-                available.append("format")
-
-            if len(available) >= 2:
-                strategy = self._elo.select_strategy(available)
-                self._seed_strategy = strategy
-            elif available:
-                strategy = available[0]
-                self._seed_strategy = strategy
-            else:
-                strategy = None
-
-            if strategy == "ga" and self.ga:
-                return self.ga.pick_seed()
-            elif strategy == "pareto" and self.corpus and self.seed_meta:
-                return self._pick_pareto_only()
-            elif strategy == "format":
-                return self._format_aware_seed()
-            # else: fall through to weighted
-
-        # Non-elo paths
-        if self.ga:
-            return self.ga.pick_seed()
-        if self.markov_generate and self.markov_trained:
-            return self._pick_markov_seed()
-        if self.corpus and self.seed_meta:
-            return self._weighted_pick_seed()
-        if self.corpus:
-            return random.choice(self.corpus)
-        return self._format_aware_seed()
-
-    def _pick_markov_seed(self) -> bytes:
-        """Generate a seed from the Markov chain."""
-        from fuzzer_tool.core.edge_tracker import ks_significance_threshold
-
-        plateau_threshold = ks_significance_threshold(
-            max(1, self.markov._contexts_seen), alpha=0.05
-        )
-        gen_rate = 0.03 if self.markov.last_js_divergence < plateau_threshold else 0.15
-
-        if not hasattr(self, "_last_corpus_pp"):
-            self._last_corpus_pp = 256.0
-        if self.exec_count % 500 == 0 and self.corpus:
-            pp_stats = self.markov.corpus_perplexity(self.corpus)
-            self._last_corpus_pp = pp_stats["mean"]
-        if self._last_corpus_pp > 200:
-            gen_rate = min(gen_rate * 2, 0.40)
-        elif self._last_corpus_pp < 10:
-            gen_rate = max(gen_rate * 0.3, 0.01)
-
-        if random.random() < gen_rate:
-            length = random.randint(1, min(256, self.max_len))
-            for _ in range(3):
-                candidate = self.markov.generate(length)
-                pp = self.markov.perplexity(candidate)
-                if pp < 512:
-                    return candidate
-            return candidate
-        length = random.randint(1, min(256, self.max_len))
-        return self.markov.generate(length)
-
-    def _pick_pareto_only(self) -> bytes:
-        """Select a seed using only the Pareto frontier (no weighted scoring)."""
-        if len(self.corpus) < 3 or not self.seed_meta:
-            return random.choice(self.corpus)
-        now = time.time()
-        # Use equal weights — pure Pareto selection
-        weights = [1.0] * len(self.corpus)
-        return self._pick_from_pareto_front(weights, now)
-
-    def _format_aware_seed(self) -> bytes:
-        """Generate a seed that matches the target's inferred input format."""
-        fmt = getattr(self._profile, "format_signature", None)
-        if fmt == "png":
-            # Minimal valid PNG: signature + IHDR + IEND
-            import binascii
-
-            ihdr_data = b"\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02"  # 1x1, 8-bit RGB
-            ihdr_chunk = b"IHDR" + ihdr_data
-            ihdr_crc = struct.pack(">I", binascii.crc32(ihdr_chunk))
-            iend_chunk = b"IEND"
-            iend_crc = struct.pack(">I", binascii.crc32(iend_chunk))
-            return (
-                b"\x89PNG\r\n\x1a\n"
-                + struct.pack(">I", len(ihdr_data))
-                + ihdr_chunk
-                + ihdr_crc
-                + struct.pack(">I", 0)
-                + iend_chunk
-                + iend_crc
-            )
-        if fmt == "text":
-            # Text-like: common delimiters and keywords from the target
-            parts = [b"GET / HTTP/1.1\r\n", b"Host: localhost\r\n"]
-            if self._profile.boundary_markers:
-                sep = self._profile.boundary_markers[0]
-                parts.append(sep * 4)
-            return b"".join(parts)
-        if fmt == "json":
-            return b'{"key": "value", "num": 0}'
-        if fmt == "xml":
-            return b'<?xml version="1.0"?><root><data/></root>'
-        if fmt == "elf":
-            return b"\x7fELF" + b"\x00" * 12
-        if fmt == "html":
-            return b"<!DOCTYPE html><html><body></body></html>"
-        # Fallback: fill with boundary markers if known, else zeros
-        if self._profile.boundary_markers:
-            marker = self._profile.boundary_markers[0]
-            return marker * min(16, self.max_len)
-        return b"\x00" * min(64, self.max_len)
-
-    def _compute_weights(self, now: float) -> list[float]:
-        """Compute seed selection weights. Cached until corpus/edge-tracker changes.
-
-        Uses five statistical signals from edge aggregation:
-          1. Base: inverse fuzz count + coverage + age (exploitation)
-          2. Rare edge boost: singleton/cold edge coverage (irreplaceability)
-          3. Hit frequency: seeds consistently hitting edges are reliable
-          4. Edge gap targeting: boost seeds near under-covered edges
-          5. Edge diversity: prefer seeds whose edges don't overlap with others
-
-        After computing base weights, applies a sliding-window Pareto
-        dominance boost: seeds that are non-dominated on the
-        (novelty, freshness, diversity) frontier get a 2x boost;
-        dominated seeds get a 0.5x dampening. This preserves the
-        information that multiplication destroys — two seeds with the
-        same weight can now be distinguished by their Pareto status.
-        """
-        weights = []
-        # Collect per-seed objective scores for Pareto analysis
-        pareto_scores: list[tuple[float, float, float]] = []
-
-        for seed in self.corpus:
-            meta = self.seed_meta.get(seed)
-            if meta is None:
-                weights.append(1.0)
-                pareto_scores.append((1.0, 1.0, 1.0))
-                continue
-            fuzz_count = max(meta["fuzz_count"], 1)
-            coverage = meta["coverage_edges"]
-            age = now - meta["added_at"]
-
-            T = self._temperature
-
-            # Base weight: inverse fuzz count, boosted by coverage, decayed by age
-            explore_part = T * (1.0 / math.sqrt(fuzz_count))
-            exploit_part = (1.0 + coverage * 0.5) / (1.0 + age * 0.01)
-            w = explore_part * exploit_part
-
-            # Momentum: recent discovery velocity boosts weight
-            momentum = meta.get("momentum", 0.0)
-            w *= 1.0 + momentum * 2.0
-
-            # Energy burst: newly added seeds get up to 5x boost (decays over 60s)
-            burst_factor = max(1.0, 1.0 + T * (5.0 - 1.0) - (age / 60.0) * T)
-
-            # Stale seed detection
-            staleness = fuzz_count / max(coverage + 1, 1)
-            stale_threshold = 50.0 * T
-            w *= 0.01 if staleness > stale_threshold else 1.0
-
-            # Edge tracker signals: compute lazily, cache per-seed.
-            seed_key = self._seed_key(seed)
-
-            # Secretary-problem optimal stopping: dampen seeds that have
-            # been explored enough (rank-based plateau detection)
-            if self._secretary and seed_key in self._seed_secretary:
-                stop, _reason = self._seed_secretary[seed_key].should_stop()
-                if stop:
-                    w *= 0.01
-            if seed_key not in self._cached_weights:
-                if (
-                    seed_key in self._edge_tracker.seed_edges
-                    and self._edge_tracker.seed_edges[seed_key]
-                ):
-                    sub = self._edge_tracker.compute_subsumption_weight(seed_key)
-                    div = self._edge_tracker.compute_hitcount_diversity_weight(seed_key)
-                    spa = self._edge_tracker.compute_wasserstein_weight(seed_key)
-                    cov = self._edge_tracker.compute_coverage_proximity(seed_key)
-                    self._cached_weights[seed_key] = (sub, div, spa, cov)
-                else:
-                    self._cached_weights[seed_key] = (1.0, 1.0, 1.0, 0.5)
-            sub, div, spa, cov = self._cached_weights[seed_key]
-            w *= sub * div * spa
-            w *= 0.5 + cov
-
-            # Signal 2: Rare edge boost — seeds hitting singleton/cold edges
-            # are irreplaceable. High weight prevents pruning and encourages
-            # re-fuzzing to find deeper paths from those rare edges.
-            seed_edges = self._edge_tracker.seed_edges.get(seed_key, set())
-            if seed_edges:
-                rare_count = sum(
-                    1 for e in seed_edges if self._edge_tracker._global_edge_hits.get(e, 0) <= 2
-                )
-                if rare_count > 0:
-                    w *= 1.0 + rare_count * 0.5
-
-            # Signal 3: Hit frequency — seeds that consistently hit edges
-            # (high mean_hit_per_seed) are more reliable than sporadic ones.
-            # A seed that hits 10 edges 50 times each is more useful than
-            # one that hits 10 edges 1 time each (might be noise).
-            if seed_edges:
-                total_hits = 0
-                for e in seed_edges:
-                    total_hits += self._edge_tracker._global_edge_hits.get(e, 0)
-                mean_hits = total_hits / len(seed_edges) if seed_edges else 0
-                # Boost seeds with consistent hits (mean > 3), penalize sporadic (mean < 1.5)
-                if mean_hits > 3:
-                    w *= 1.0 + (mean_hits - 3) * 0.1
-                elif mean_hits < 1.5 and fuzz_count > 10:
-                    w *= 0.7
-
-            # Signal 4: Edge gap targeting — boost seeds whose edges include
-            # under-covered edges (low seed_count). This steers the fuzzer
-            # toward coverage gaps.
-            if seed_edges:
-                gap_score = 0
-                for e in seed_edges:
-                    seed_count = self._edge_tracker._global_edge_hits.get(e, 0)
-                    if seed_count <= 2:
-                        gap_score += 1
-                if gap_score > 0:
-                    w *= 1.0 + gap_score * 0.3
-
-            # Signal 5: Edge diversity — penalize seeds whose edges overlap
-            # with recently-selected seeds. Encourages exploring different
-            # code regions instead of re-fuzzing the same paths.
-            if seed_edges and hasattr(self, "_recent_seed_edges"):
-                overlap = 0
-                for recent in self._recent_seed_edges:
-                    overlap += len(seed_edges & recent)
-                if overlap > 0:
-                    # Penalize proportionally to overlap ratio
-                    penalty = overlap / max(len(seed_edges), 1)
-                    w *= max(0.3, 1.0 - penalty * 0.5)
-
-            # Signal 5: Edge diversity — computed lazily in _weighted_pick_seed
-            # using max边际 coverage selection (not here for performance).
-
-            # Directed distance (cheap, always include)
-            if self._distance:
-                seed_dist = meta.get("avg_distance", self._distance.max_distance)
-                max_d = self._distance.max_distance
-                norm_dist = min(seed_dist / max_d, 1.0) if max_d > 0 else 0.5
-                alpha = min(self._anneal_progress * 2, 1.0)
-                dist_weight = math.exp(-norm_dist * 5.0 * alpha)
-                w *= (1.0 - alpha) + alpha * dist_weight
-
-            # Hot-function weighting: seeds exercising code paths through
-            # high-branch-density functions get a proportional boost.  We
-            # approximate this via coverage_edges (more edges ≈ more code
-            # paths ≈ more hot functions hit).
-            if self._profile.hot_functions and self._profile.functions:
-                hot_density = sum(
-                    self._profile.functions[f].branch_density
-                    for f in self._profile.hot_functions
-                    if f in self._profile.functions
-                ) / max(len(self._profile.hot_functions), 1)
-                all_density = sum(
-                    fi.branch_density for fi in self._profile.functions.values()
-                ) / max(len(self._profile.functions), 1)
-                if all_density > 0:
-                    hotness_ratio = hot_density / all_density
-                    # Boost seeds with above-median coverage by hotness ratio
-                    if coverage > 0:
-                        w *= 1.0 + (hotness_ratio - 1.0) * min(coverage / 50.0, 1.0)
-
-            # Signal 6: Mutation perturbation — seeds with very low hamming_distance
-            # to their parent are minimally perturbed and unlikely to discover new
-            # paths. Penalize them to avoid wasting execs on near-identical inputs.
-            # hamming_distance == -1 means unknown (length-changing mutation).
-            hd = meta.get("hamming_distance", -1)
-            if hd == 0:
-                w *= 0.1  # identical to parent — almost certainly redundant
-            elif 0 < hd <= 2:
-                w *= 0.5  # tiny perturbation — low novelty expected
-            # hd >= 3 or hd == -1: no penalty (normal or unknown perturbation)
-
-            weights.append(max(w, 1e-6))
-
-            # Collect Pareto objective scores:
-            # novelty (subsumption), freshness (burst), diversity (wasserstein)
-            novelty = sub
-            freshness = burst_factor
-            diversity = spa
-            pareto_scores.append((novelty, freshness, diversity))
-
-        # Sliding-window Pareto dominance boost
-        if len(pareto_scores) >= 3:
-            front = self._pareto_front(pareto_scores, window=100)
-            for i in range(len(weights)):
-                if i in front:
-                    weights[i] *= 2.0  # boost non-dominated seeds
-                else:
-                    weights[i] *= 0.5  # dampen dominated seeds
-
-        return weights
+    def _compute_weights(self, now: float):
+        return self._seed_picker._compute_weights(now)
 
     @staticmethod
-    def _pareto_front(scores: list[tuple[float, float, float]], window: int = 100) -> set[int]:
-        """Find indices of non-dominated points in a sliding window.
+    def _pareto_front(scores: list[tuple[float, float, float]], window: int = 100):
+        return SeedPicker._pareto_front(scores, window)
 
-        A point is non-dominated if no other point in the window is
-        better on ALL three objectives simultaneously.
+    def _pick_from_pareto_front(self, weights: list[float], now: float):
+        return self._seed_picker._pick_from_pareto_front(weights, now)
 
-        Args:
-            scores: List of (novelty, freshness, diversity) per seed.
-            window: Only check dominance within the most recent N seeds.
-
-        Returns:
-            Set of indices that are on the Pareto front.
-        """
-        n = len(scores)
-        start = max(0, n - window)
-        front: set[int] = set(range(start, n))
-
-        for i in range(start, n):
-            if i not in front:
-                continue
-            ni, fi, di = scores[i]
-            for j in range(start, n):
-                if j == i or j not in front:
-                    continue
-                nj, fj, dj = scores[j]
-                # j dominates i if j is >= on all axes and > on at least one
-                if nj >= ni and fj >= fi and dj >= di and (nj > ni or fj > fi or dj > di):
-                    front.discard(i)
-                    break
-
-        return front
-
-    def _pick_from_pareto_front(self, weights: list[float], now: float) -> bytes:
-        """Select a seed using Pareto frontier sampling.
-
-        When the Pareto front (non-dominated seeds on the
-        novelty/freshness/diversity frontier) contains enough seeds,
-        sample from the front using the existing weights. This makes
-        tradeoffs visible: a seed that's moderately novel but very fresh
-        beats one that's highly novel but stale, because freshness is an
-        independent axis.
-
-        Falls back to full corpus selection when:
-        - Fewer than 3 seeds in the corpus
-        - Fewer than 2 seeds on the Pareto front (frontier too small
-          to be meaningful — likely all seeds are comparable)
-        - No edge tracker data available
-
-        Args:
-            weights: Pre-computed selection weights.
-            now: Current timestamp for freshness computation.
-
-        Returns:
-            Selected seed bytes.
-        """
-        if len(self.corpus) < 3 or not self.seed_meta:
-            return random.choices(self.corpus, weights=weights, k=1)[0]
-
-        # Compute Pareto objective scores for all seeds
-        pareto_scores: list[tuple[float, float, float]] = []
-        for seed in self.corpus:
-            meta = self.seed_meta.get(seed)
-            if meta is None:
-                pareto_scores.append((1.0, 1.0, 1.0))
-                continue
-            seed_key = self._seed_key(seed)
-            sub, div, spa, _cov = self._cached_weights.get(seed_key, (1.0, 1.0, 1.0, 0.5))
-            age = now - meta["added_at"]
-            burst = max(
-                1.0, 1.0 + self._temperature * (5.0 - 1.0) - (age / 60.0) * self._temperature
-            )
-            pareto_scores.append((sub, burst, spa))
-
-        # Find the Pareto front
-        front = self._pareto_front(pareto_scores, window=100)
-
-        if len(front) >= 2:
-            # Sample from the Pareto front using weights
-            front_indices = sorted(front)
-            front_weights = [weights[i] for i in front_indices]
-            front_seeds = [self.corpus[i] for i in front_indices]
-            return random.choices(front_seeds, weights=front_weights, k=1)[0]
-        else:
-            # Frontier too small — fall back to full corpus
-            return random.choices(self.corpus, weights=weights, k=1)[0]
-
-    def _weighted_pick_seed(self) -> bytes:
-        now = time.time()
-
-        # Update simulated annealing temperature
-        if self._anneal_budget > 0:
-            self._temperature = max(0.1, 1.0 - self.exec_count / self._anneal_budget)
-        else:
-            self._temperature = 1.0
-
-        # Edge diversity: track recently selected seeds' edges and penalize
-        # overlap. This encourages exploring different code regions.
-        if not hasattr(self, "_recent_seed_edges"):
-            self._recent_seed_edges: list[set[int]] = []
-            self._recent_seed_max = 20
-
-        # Invalidate cached weights when corpus structure or edge tracker changes.
-        # Two-level cache:
-        #   _cached_weights: per-seed expensive signals (subsumption, diversity,
-        #     spatial, coverage proximity) — only invalidated when edges change.
-        #   _weight_cache: final weight vector — extended incrementally when
-        #     corpus grows; fully invalidated when edges change.
-        corpus_version = len(self.corpus)
-        edge_version = self.shm_cov.cumulative_edges if self.shm_cov else 0
-        if not hasattr(self, "_weight_cache"):
-            self._weight_cache = None
-            self._weight_cache_key = (-1, -1)
-            self._cached_weights = {}
-        cache_key = (corpus_version, edge_version)
-        if cache_key != self._weight_cache_key:
-            edge_changed = self._weight_cache_key[1] != edge_version
-            self._weight_cache_key = cache_key
-            if edge_changed:
-                # Edge discovery: invalidate weight vector (recompute all weights).
-                # Keep _cached_weights — expensive signals (subsumption, diversity,
-                # spatial, proximity) change slowly and are safe to reuse.
-                self._weight_cache = None
-            elif self._weight_cache is not None and len(self._weight_cache) != corpus_version:
-                # Corpus changed: fully recompute weights so fuzz_count-dependent
-                # terms (explore_part, burst_factor, staleness) reflect current
-                # exec counts for ALL seeds, not just new ones.  Expensive
-                # per-seed signals are still cached in _cached_weights.
-                self._weight_cache = None
-
-        if self._weight_cache is not None:
-            weights = self._weight_cache
-        else:
-            weights = self._compute_weights(now)
-            self._weight_cache = weights
-
-        # Pareto frontier selection: when enough seeds are non-dominated,
-        # sample from the frontier rather than the full corpus. This makes
-        # the tradeoff structure visible in selection — a seed that's
-        # moderately novel but very fresh gets selected over one that's
-        # highly novel but stale, because freshness is an independent axis.
-        selected = self._pick_from_pareto_front(weights, now)
-
-        # Track selected seed's edges for diversity penalty next time
-        sel_key = self._seed_key(selected)
-        sel_edges = self._edge_tracker.seed_edges.get(sel_key, set())
-        if sel_edges:
-            self._recent_seed_edges.append(sel_edges)
-            if len(self._recent_seed_edges) > self._recent_seed_max:
-                self._recent_seed_edges.pop(0)
-
-        # Cache signal data for ablation logging (consumed by fuzz_one)
-        if self._ablation_file:
-            meta = self.seed_meta.get(selected)
-            if meta:
-                seed_key = self._seed_key(selected)
-                cached = self._cached_weights.get(seed_key, (1.0, 1.0, 1.0))
-                fuzz_count = max(meta["fuzz_count"], 1)
-                coverage = meta["coverage_edges"]
-                age = now - meta["added_at"]
-                base_w = (1.0 / math.sqrt(fuzz_count)) * (1.0 + coverage * 0.5) / (1.0 + age * 0.01)
-                burst_factor = max(1.0, 5.0 - (age / 60.0))
-                staleness = fuzz_count / max(coverage + 1, 1)
-                penalty = 0.01 if staleness > 50 else 1.0
-                w = base_w * burst_factor * penalty * cached[0] * cached[1] * cached[2]
-                # Coverage proximity weight
-                w *= 0.5 + cached[3]
-                mdl_weight = 1.0
-                if self.markov_trained:
-                    cl_ratio = self.markov.codelength_ratio(selected)
-                    mdl_weight = 1.0 + min(cl_ratio / 8.0, 1.0)
-                    w *= mdl_weight
-                self._last_pick_signals = {
-                    "seed_idx": self.corpus.index(selected),
-                    "seed_hash": selected[:4].hex(),
-                    "fuzz_count": fuzz_count,
-                    "coverage_edges": coverage,
-                    "age_s": f"{age:.1f}",
-                    "base_w": f"{base_w:.4f}",
-                    "burst": f"{burst_factor:.2f}",
-                    "penalty": f"{penalty:.2f}",
-                    "subsumption": f"{cached[0]:.4f}",
-                    "diversity": f"{cached[1]:.4f}",
-                    "spatial": f"{cached[2]:.4f}",
-                    "mdl": f"{mdl_weight:.2f}",
-                    "final_w": f"{w:.6f}",
-                }
-
-        return selected
+    def _weighted_pick_seed(self):
+        return self._seed_picker.weighted_pick_seed()
 
     def fuzz_one(self, data: bytes) -> bool:
         self._last_parent_seed = data
@@ -3099,517 +1258,43 @@ class Fuzzer:
         return False
 
     def _record_discovery_snapshot(self):
-        _record_discovery_snapshot_fn(
-            self.exec_count,
-            self.shm_cov,
-            self.ptrace_cov,
-            self._discovery_history,
-        )
+        return self._stats.record_discovery_snapshot()
 
-    def _run_calibration(self, max_execs: int = 1000) -> None:
-        """Run a short calibration pass to bootstrap coverage stats.
+    def _run_calibration(self, max_execs: int = 1000):
+        return self._stats.run_calibration(max_execs)
 
-        Replays seed corpus + cheap mutations to populate EdgeTracker
-        and _discovery_history before the main fuzz loop.
-        """
-        from fuzzer_tool.core.mutations import byte_insert
-
-        print(f"[*] Calibration: running {max_execs} execs to bootstrap coverage stats...")
-        if not self.corpus:
-            print("[*] Calibration: no seeds found, skipping")
-            return
-
-        exec_count = 0
-        report_interval = max(100, max_execs // 10)
-        seeds = list(self.corpus)
-
-        # Phase 1: replay each seed as-is
-        for seed in seeds:
-            if exec_count >= max_execs:
-                break
-            self._run_target(seed)
-            self.exec_count += 1
-            exec_count += 1
-            edge_bitmap = self._get_current_edge_bitmap()
-            if edge_bitmap:
-                self._edge_tracker.record_edges(self._seed_key(seed), edge_bitmap)
-
-        # Phase 2: cheap mutations until budget exhausted
-        while exec_count < max_execs:
-            seed = random.choice(seeds)
-            if random.random() < 0.5:
-                mutated = bytearray(seed)
-                if mutated:
-                    mutated[random.randint(0, len(mutated) - 1)] ^= 1 << random.randint(0, 7)
-                mutated = bytes(mutated)
-            else:
-                mutated = byte_insert(seed)
-            self._run_target(mutated)
-            self.exec_count += 1
-            exec_count += 1
-            edge_bitmap = self._get_current_edge_bitmap()
-            if edge_bitmap:
-                self._edge_tracker.record_edges(self._seed_key(mutated), edge_bitmap)
-            if exec_count % report_interval == 0:
-                edges = len(self._edge_tracker._global_edge_hits)
-                print(
-                    f"\r[*] Calibration: {exec_count}/{max_execs} execs, "
-                    f"{edges} edges discovered",
-                    end="",
-                    flush=True,
-                )
-
-        self._record_discovery_snapshot()
-        edges = len(self._edge_tracker._global_edge_hits)
-        gt = self._edge_tracker.good_turing_estimate()
-        dr = self.discovery_rate()
-        print(f"\r[*] Calibration done: {exec_count} execs, {edges} edges discovered, "
-              f"GT confidence={gt['confidence']}, discovery_rate={dr:.1f}/1k execs   ")
-
-        # FrameShift: discover length-field relations from the first seed
-        if self.corpus and not self._frameshift.relations:
-            seed0 = self.corpus[0]
-
-            def _exec_fn(data: bytes) -> int:
-                self._run_target(data)
-                bm = self._get_current_edge_bitmap()
-                return sum(bm) if bm else 0
-
-            n_rels = self._frameshift.discover_relations(
-                seed0, _exec_fn, max_relations=8, max_execs=200
-            )
-            if n_rels > 0:
-                print(f"[*] FrameShift: discovered {n_rels} length-field relations")
-
-        # Crash ETA estimate
-        from fuzzer_tool.core.crash_eta import estimate_execs_to_first_crash
-        eta = estimate_execs_to_first_crash(self._profile, gt, dr, exec_count, self._crash_mi)
-        print(f"[*] ETA to first crash: ~{eta.edges_to_crash:,} risky edges, "
-              f"~{eta.point_est:,} execs "
-              f"(range: {eta.low:,} - {eta.high:,}, confidence: {eta.confidence})")
-
-    def discovery_rate(self) -> float:
-        return _discovery_rate(self._discovery_history)
+    def discovery_rate(self):
+        return self._stats.discovery_rate()
 
     def _run_crash_replays(self, budget_ms: float = 200):
-        _run_crash_replays_fn(
-            self.crashes_dir,
-            self.target,
-            self.timeout,
-            self._crash_replays,
-            self.replay_n,
-            self._seed_key,
-            budget_ms,
-        )
+        return self._stats.run_crash_replays(budget_ms)
 
     def _print_run_summary(self):
-        """Print session-level summary statistics at run exit."""
-        elapsed = time.time() - self.start_time
-        eps = self.exec_count / elapsed if elapsed > 0 else 0
-
-        print(f"\n{'=' * 60}")
-        print("  RUN SUMMARY")
-        print(f"{'=' * 60}")
-        print(f"  Duration:          {elapsed:.0f}s")
-        print(f"  Executions:        {self.exec_count:,}")
-        print(f"  Avg eps:           {eps:.1f}")
-        print(f"  Peak eps:          {self._peak_eps:.1f}")
-
-        # Corpus growth
-        added = self._total_corpus_attempts
-        rejected = self._duplicate_reject_count
-        print(f"  Corpus:            {len(self.corpus)} entries")
-        print(f"  Seeds added:       {added}")
-        print(f"  Duplicates rejected: {rejected}")
-        if self._pruned_count > 0:
-            print(f"  Seeds pruned:      {self._pruned_count}")
-
-        # Stall recovery stats
-        if self._stall_recovery_count > 0:
-            print(f"  Recovery entries:  {self._stall_recovery_count}")
-            print(f"  Recovery execs:    {self._stall_recovery_execs:,} "
-                  f"({self._stall_recovery_execs / max(1, self.exec_count) * 100:.1f}%)")
-
-        # Coverage — prefer edge_tracker (authoritative), fall back to SHM/ptrace
-        # SHM bitmap is source of truth for unique edge count
-        shm_edges = self.shm_cov.cumulative_edges if self.shm_cov else 0
-        et_edges = self._edge_tracker.get_cumulative_edge_count()
-        edges = shm_edges if shm_edges else et_edges
-        if self.ptrace_cov:
-            edges = self.ptrace_cov.cumulative_edges
-        density = self._edge_tracker.bitmap_density() * 100
-        collision_risk = self._edge_tracker.birthday_collision_risk() * 100
-        if shm_edges and et_edges and shm_edges != et_edges:
-            print(f"  Edges discovered:  {shm_edges} (SHM unique positions)")
-            print(f"  ET positions:      {et_edges} (includes stale positions after resize)")
-        else:
-            print(f"  Edges discovered:  {edges}")
-        print(f"  Map density:       {density:.2f}%")
-        print(f"  Collision risk:    {collision_risk:.2f}% (birthday paradox)")
-        rec = self._edge_tracker.recommended_map_size()
-        if rec:
-            print(f"  Recommended map:   {rec:,} bytes (current: {self.map_size:,})")
-
-        # Good-Turing
-        gt = self._edge_tracker.good_turing_estimate()
-        if gt["n"] > 0:
-            print(f"  Est. remaining:    {gt['estimated_undiscovered']} edges")
-            print(f"  Saturation:        {gt['saturation']:.1%} ({gt['confidence']} confidence)")
-
-        # Lineage depth distribution
-        if self.seed_meta:
-            depths = [m.get("lineage_depth", 0) for m in self.seed_meta.values()]
-            if depths:
-                print(f"  Max lineage depth: {max(depths)}")
-                avg_depth = sum(depths) / len(depths)
-                print(f"  Avg lineage depth: {avg_depth:.1f}")
-
-        # Per-seed edge discovery stats
-        if self.seed_meta:
-            edges_per_seed = [m.get("coverage_edges", 0) for m in self.seed_meta.values()]
-            productive = sum(1 for e in edges_per_seed if e > 0)
-            stale = sum(
-                1
-                for m in self.seed_meta.values()
-                if m.get("fuzz_count", 0) >= 50 and m.get("coverage_edges", 0) == 0
-            )
-            total_seeds = len(self.seed_meta)
-            print(f"  Productive seeds:  {productive}/{total_seeds} discovered edges")
-            print(f"  Stale seeds:       {stale}/{total_seeds} (50+ fuzzes, 0 edges)")
-
-        # Edge rarity stats
-        rarity = self._edge_tracker.edge_rarity_stats()
-        if rarity["total"] > 0:
-            print(
-                f"  Edge rarity:       {rarity['singleton']} singleton / "
-                f"{rarity['cold']} cold / {rarity['warm']} warm / {rarity['hot']} hot"
-            )
-            print(f"  Avg seeds/edge:    {rarity['avg_seeds_per_edge']:.1f}")
-
-            # Seed uniqueness: how many singleton edges each seed covers
-            uniqueness = self._edge_tracker.seed_uniqueness()
-            if uniqueness:
-                irreplaceable = sum(1 for v in uniqueness.values() if v > 0)
-                print(f"  Irreplaceable:     {irreplaceable} seeds cover singleton edges")
-
-            # Top co-occurring edges
-            cooccur = self._edge_tracker.edge_cooccurrence(top_k=3)
-            if cooccur:
-                pairs_str = ", ".join(f"e{a}↔e{b}({j:.0%})" for a, b, j in cooccur)
-                print(f"  Edge co-occurrence:{pairs_str}")
-
-        # Input size distribution
-        if self._corpus_size_history:
-            s = sorted(self._corpus_size_history)
-            print(
-                f"  Input sizes:       min={s[0]} p50={s[len(s) // 2]} p90={s[-len(s) // 10]} max={s[-1]}"
-            )
-
-        # Crash summary
-        print(f"  Crashes:           {self.crash_count} ({len(self.crash_sigs)} unique)")
-        if self.crash_sigs:
-            for sig, count in sorted(self.crash_sigs.items(), key=lambda x: -x[1])[:5]:
-                print(f"    {sig[:48]} ({count}x)")
-
-        # Crash clustering (order-aware frame-sequence Levenshtein)
-        if len(self.crash_sigs) >= 2 and self.crash_frames:
-            from fuzzer_tool.core.crash_metadata import cluster_crashes
-
-            sigs = list(self.crash_sigs.keys())
-            frames = [self.crash_frames.get(s, []) for s in sigs]
-            clusters = cluster_crashes(sigs, frame_lists=frames, threshold=0.6)
-            multi = [c for c in clusters if len(c) > 1]
-            if multi:
-                print(f"  Crash clusters:    {len(multi)} group(s) from {len(sigs)} signatures")
-                for cl in multi[:3]:
-                    sigs_in = [sigs[i][:36] for i in cl]
-                    print(f"    [{len(cl)} crashes] {' ~ '.join(sigs_in)}")
-
-        # Operator ROI
-        if self.op_counts:
-            print("\n  Operator ROI:")
-            print(f"    {'Operator':<22s} {'Count':>7s} {'Success':>8s} {'Rate':>7s}")
-            print(f"    {'-' * 22} {'-' * 7} {'-' * 8} {'-' * 7}")
-            for op, count in sorted(
-                self.op_counts.items(), key=lambda x: -self.op_success.get(x[0], 0)
-            )[:8]:
-                succ = self.op_success.get(op, 0)
-                rate = succ / count * 100 if count else 0
-                print(f"    {op:<22s} {count:>7d} {succ:>8d} {rate:>6.1f}%")
-
-        # Elo ratings
-        if self._use_elo and self._elo and self._elo.ratings:
-            ranking = self._elo.get_ranking()
-            print(f"\n  Elo Ratings (top 10):")
-            for i, (op, rating) in enumerate(ranking[:10], 1):
-                matches = self._elo._match_count.get(op, 0)
-                print(f"    {i:>2d}. {op:<22s} {rating:>7.0f} ({matches} matches)")
-
-        # Duplicate rejection trend
-        if self._total_corpus_attempts > 0:
-            dup_rate = rejected / self._total_corpus_attempts * 100
-            print(
-                f"\n  Dup rejection rate: {dup_rate:.1f}% ({rejected}/{self._total_corpus_attempts})"
-            )
-
-        # Execution time
-        tracker = self._exec_time_tracker
-        if tracker.count > 0:
-            print(f"  Exec time p50:     {tracker.p50 * 1000:.1f}ms")
-            print(f"  Exec time p99:     {tracker.p99 * 1000:.1f}ms")
-            print(f"  Suggested timeout: {tracker.suggested_timeout():.2f}s")
-
-        print(f"{'=' * 60}")
+        return self._stats.print_run_summary()
 
     def _dump_stats(self):
-        if not self.stats_file:
-            return
-        elapsed = time.time() - self.start_time
-        eps = self.exec_count / elapsed if elapsed > 0 else 0
-        stats = {
-            "timestamp": time.time(),
-            "exec_count": self.exec_count,
-            "crash_count": self.crash_count,
-            "timeout_count": self.timeout_count,
-            "corpus_size": len(self.corpus),
-            "unique_crash_sigs": len(self.crash_sigs),
-            "eps": round(eps, 1),
-            "elapsed_sec": round(elapsed, 1),
-            "peak_rss_kb": self._peak_rss,
-            "op_counts": dict(self.op_counts),
-            "op_success": dict(self.op_success),
-        }
-        if self.mc and self.mc_bandit:
-            stats["bandit_stats"] = {
-                k: {"successes": v[0], "failures": v[1]} for k, v in self.mc.bandit_stats().items()
-            }
-        if self.mc and self.mc_cem:
-            stats["cem_elite_size"] = len(self.mc.elite_set)
-            stats["cem_fitted"] = self.mc.cem_fitted
-        if self._use_replicator and self._replicator:
-            stats["replicator"] = {
-                "distribution": self._replicator.population_distribution(),
-                "converged": self._replicator.is_converged(),
-                "dominant": self._replicator.dominant_operator(),
-            }
-        if self._use_shapley and self._shapley:
-            sv = self._shapley.shapley_values()
-            stats["shapley"] = {k: round(v, 4) for k, v in sv.items()}
-        if self._use_mi and self._mi:
-            stats["mi"] = {
-                "observations": self._mi.total_observations,
-                "top_positions": [
-                    {"pos": p, "mi_bits": round(v, 4)}
-                    for p, v in self._mi.top_positions(k=5, input_length=self.max_len)
-                ],
-            }
-        if self._use_renyi_weight:
-            edge_hits = (
-                dict(self._edge_tracker._global_edge_hits)
-                if hasattr(self._edge_tracker, "_global_edge_hits")
-                else {}
-            )
-            if edge_hits:
-                from fuzzer_tool.core.renyi import RenyiEntropy
-
-                renyi = RenyiEntropy()
-                stats["renyi"] = {
-                    "uniformity": round(renyi.coverage_uniformity(list(edge_hits.values())), 4),
-                    "min_entropy": round(renyi.min_entropy(list(edge_hits.values())), 4),
-                    "spectrum": {
-                        k: round(v, 4)
-                        for k, v in renyi.entropy_spectrum(list(edge_hits.values())).items()
-                    },
-                }
-        if self._use_transfer_entropy:
-            stats["transfer_entropy"] = {
-                "history_len": len(self._te_input_history),
-                "causal_positions": len(self._te_byte_edges),
-            }
-        try:
-            self.stats_file.parent.mkdir(parents=True, exist_ok=True)
-            self.stats_file.write_text(json.dumps(stats, indent=2))
-        except OSError:
-            log.debug("Failed to write stats to %s", self.stats_file, exc_info=True)
+        return self._stats.dump_stats()
 
     def _dump_coverage_report(self):
-        if not self.coverage_report:
-            return
-        edge_map = None
-        if self.shm_cov:
-            edge_map = self.shm_cov._seen
-        elif self.ptrace_cov:
-            edge_map = self.ptrace_cov.edge_map
-        if edge_map is None:
-            print("[!] No coverage data available for report")
-            return
-
-        hit_edges = []
-        cumulative = 0
-        for i, val in enumerate(edge_map):
-            if val:
-                hit_edges.append(i)
-                cumulative += 1
-
-        report = {
-            "map_size": len(edge_map),
-            "cumulative_edges": cumulative,
-            "hit_edges": hit_edges,
-            "coverage_pct": round(cumulative / len(edge_map) * 100, 4),
-            "exec_count": self.exec_count,
-            "corpus_size": len(self.corpus),
-        }
-        self.coverage_report.parent.mkdir(parents=True, exist_ok=True)
-        self.coverage_report.write_text(json.dumps(report, indent=2))
-        print(
-            f"\n[*] Coverage report: {self.coverage_report} "
-            f"({cumulative}/{len(edge_map)} edges, {report['coverage_pct']}%)"
-        )
+        return self._stats.dump_coverage_report()
 
     def _append_coverage_log(self):
-        if not self.coverage_log:
-            return
-        cumulative = 0
-        if self.shm_cov:
-            cumulative = self.shm_cov.cumulative_edges
-        elif self.ptrace_cov:
-            cumulative = self.ptrace_cov.cumulative_edges
-        elif hasattr(self, "_edge_tracker"):
-            cumulative = self._edge_tracker.get_cumulative_edge_count()
-        elapsed = time.time() - self.start_time
-        line = (
-            f"{elapsed:.1f},{self.exec_count},{cumulative},{len(self.corpus)},{self.crash_count}\n"
-        )
-        with open(self.coverage_log, "a") as f:
-            f.write(line)
+        return self._stats.append_coverage_log()
 
     def _update_te_causal_map(self):
-        update_te_causal_map(
-            self._te,
-            self._te_input_history,
-            self._te_edge_history,
-            self.map_size,
-            self._te_byte_edges,
-        )
+        return self._stats.update_te_causal_map()
 
-    def _get_te_weighted_position(self, input_length: int) -> int | None:
-        return get_te_weighted_position(self._te_byte_edges, input_length)
+    def _get_te_weighted_position(self, input_length: int):
+        return self._stats.get_te_weighted_position(input_length)
 
-    def _get_current_edge_bitmap(self) -> bytes | None:
-        """Get the current coverage edge bitmap."""
-        if self.shm_cov:
-            return bytes(self.shm_cov._map)
-        if self.ptrace_cov:
-            return bytes(self.ptrace_cov.edge_map)
-        return None
+    def _get_current_edge_bitmap(self):
+        return self._stats.get_current_edge_bitmap()
 
-    def _format_elapsed(self) -> str:
-        return _format_elapsed_fn(self.start_time)
+    def _format_elapsed(self):
+        return self._stats.format_elapsed()
 
     def print_stats(self):
-        elapsed = time.time() - self.start_time
-        eps = self.exec_count / elapsed if elapsed > 0 else 0
-        dict_str = f" | dict: {len(self.dictionary)}" if self.dictionary else ""
-        markov_str = " | markov: trained" if self.markov_trained else ""
-        if self.markov_generate:
-            markov_str += "+gen"
-        cov_str = ""
-        if self.shm_cov:
-            shm_edges = self.shm_cov.cumulative_edges
-            gt = self._edge_tracker.good_turing_estimate()
-            max_edges = gt["n"] + gt["estimated_undiscovered"]
-            sat = gt["saturation"] * 100 if max_edges > 0 else 0
-            cov_str = f" | shm: {shm_edges} max: {max_edges} sat: {sat:.0f}%"
-        elif self.ptrace_cov:
-            cov_str = (
-                f" | edges: {self.ptrace_cov.cumulative_edges}"
-                f" hits: {self.ptrace_cov.total_bp_hits}"
-            )
-            if self.ptrace_cov.deep_coverage:
-                cov_str += f" bps:{len(self.ptrace_cov.original_bytes)}"
-        mc_str = ""
-        if self.mc:
-            parts = []
-            if self.mc_bandit:
-                parts.append("bandit")
-            if self.mc_cem:
-                parts.append(f"cem:{len(self.mc.elite_set)}")
-            if parts:
-                mc_str = " | mc: " + "+".join(parts)
-        sig_str = f"({len(self.crash_sigs)}sigs)" if self.crash_sigs else ""
-        timeout_pct = self.timeout_count / self.exec_count * 100 if self.exec_count else 0
-        timeout_str = f" | timeouts: {self.timeout_count} ({timeout_pct:.1f}%)"
-        rss_kb = self._peak_rss
-        rss_str = f" | rss: {rss_kb // 1024}MB" if rss_kb >= 1024 else f" | rss: {rss_kb}KB"
-        ops_str = ""
-        if self._last_ops_used:
-            # Show last 3 operators selected (most recent first, deduped)
-            recent = list(dict.fromkeys(reversed(self._last_ops_used)))[:3]
-            ops_str = " | ops: " + " ".join(recent)
-        div_str = ""
-        if len(self._edge_tracker.seed_hit_counts) >= 2:
-            diversity = self._edge_tracker.compute_corpus_diversity()
-            div_str = f" | div: {diversity:.0f}"
-        # Jaccard index: average pairwise overlap between seeds
-        jac_str = ""
-        if len(self._edge_tracker.seed_hit_counts) >= 2:
-            avg_jac = self._edge_tracker.compute_average_jaccard()
-            jac_str = f" | jac: {avg_jac:.2f}"
-        # Discovery rate
-        dr = self.discovery_rate()
-        dr_str = f" | rate: {dr:.1f} ed/kexec" if self.exec_count > 100 else ""
-        # Critical slowing down: observe discovery rate for phase transition signals
-        if self.exec_count > 100:
-            self._csd.observe(dr)
-            detected, csd_reason = self._csd.is_approaching_transition()
-            if detected:
-                dr_str += f" [CSD: {csd_reason}]"
-        # Bitmap density
-        density = self._edge_tracker.bitmap_density() * 100
-        collision_risk = self._edge_tracker.birthday_collision_risk() * 100
-        density_str = f" | map: {density:.1f}%"
-        if collision_risk > 10:
-            density_str += f" (collision: {collision_risk:.0f}%)"
-            # Resize at collision risk threshold, starting small and doubling
-            if collision_risk > self._max_collision_risk and self.shm_cov:
-                current = self.shm_cov.size
-                new_size = min(1048576, current * 2)
-                if new_size > current:
-                    print(
-                        f"\n[*] Collision risk {collision_risk:.0f}% — resizing bitmap "
-                        f"{current:,} → {new_size:,} bytes"
-                    )
-                    self.shm_cov.resize(new_size)
-                    self.map_size = new_size
-                    self._edge_tracker.map_size = new_size
-                    # Clear all position-based tracking — positions change after resize
-                    self._edge_tracker.reset_after_resize()
-                    density_str = f" | map: {self._edge_tracker.bitmap_density() * 100:.1f}% (collision: {collision_risk:.0f}%)"
-        # Crash reproducibility
-        repro_str = ""
-        if self._crash_replays:
-            done = [v for v in self._crash_replays.values() if len(v) >= self.replay_n]
-            if done:
-                avg_repro = (
-                    sum(sum(1 for r in replays if r >= 0) / len(replays) for replays in done)
-                    / len(done)
-                    * 100
-                )
-                repro_str = f" | repro: {avg_repro:.0f}%"
-        # Bandit calibration (Brier score)
-        brier_str = ""
-        if self.mc and self.mc_bandit and self.mc.brier_score() > 0:
-            brier_str = f" | brier: {self.mc.brier_score():.3f}"
-        # Exec time CRPS
-        crps_str = ""
-        if self._exec_time_tracker.count > 20:
-            crps_str = f" | crps: {self._exec_time_tracker.mean_crps():.4f}"
-        line = (
-            f"[*] execs: {self.exec_count} | corpus: {len(self.corpus)} | "
-            f"crashes: {self.crash_count}{sig_str}{timeout_str} | eps: {eps:.0f} | "
-            f"time: {elapsed:.0f}s{rss_str}{ops_str}{dict_str}{markov_str}{cov_str}{mc_str}{div_str}{jac_str}{dr_str}{density_str}{repro_str}{brier_str}{crps_str}"
-        )
-        print(line, flush=True)
+        return self._stats.print_stats()
 
     def run(self, iterations=0):
         print(f"[*] Target: {self.target}")
@@ -3783,10 +1468,8 @@ class Fuzzer:
             self.markov.save(str(self._markov_path))
         if self._use_mi and self._mi:
             self._mi.save(str(self._mi_path))
-        try:
+        with contextlib.suppress(OSError):
             self._crash_mi_path.write_text(json.dumps(self._crash_mi.save(), separators=(",", ":")))
-        except OSError:
-            pass
         self._save_state()
         if self.ga:
             ga_path = self.corpus_dir / "ga.json"
