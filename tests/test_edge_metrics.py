@@ -150,8 +150,13 @@ class TestWassersteinDistance:
         et = EdgeTracker()
         et.seed_hit_counts["a"] = {10: 3, 20: 7}
         et.seed_hit_counts["b"] = {15: 5, 25: 5}
-        assert abs(et.compute_wasserstein_distance("a", "b") -
-                   et.compute_wasserstein_distance("b", "a")) < 1e-6
+        assert (
+            abs(
+                et.compute_wasserstein_distance("a", "b")
+                - et.compute_wasserstein_distance("b", "a")
+            )
+            < 1e-6
+        )
 
 
 class TestCorpusDiversity:
@@ -197,3 +202,121 @@ class TestWassersteinWeight:
         w = et.compute_wasserstein_weight("far")
         w_centroid = et.compute_wasserstein_weight("s0")
         assert w > w_centroid
+
+
+class TestShannonEntropyGlobal:
+    def test_empty_returns_zero(self):
+        et = EdgeTracker()
+        assert et.shannon_entropy_global() == 0.0
+
+    def test_uniform_distribution(self):
+        et = EdgeTracker()
+        # 4 edges each hit once → uniform → entropy = log2(4) = 2.0
+        bitmap = bytes([1, 1, 1, 1])
+        et.record_edges("a", bitmap)
+        h = et.shannon_entropy_global()
+        assert abs(h - 2.0) < 1e-6
+
+    def test_single_edge_zero(self):
+        et = EdgeTracker()
+        bitmap = bytes([5, 0, 0, 0])
+        et.record_edges("a", bitmap)
+        h = et.shannon_entropy_global()
+        assert h == 0.0
+
+    def test_skewed_distribution_lower(self):
+        et = EdgeTracker()
+        # Skewed: one edge dominates
+        et.record_edges("a", bytes([100, 1, 1, 1]))
+        h_skewed = et.shannon_entropy_global()
+        # Uniform: all edges equal
+        et2 = EdgeTracker()
+        et2.record_edges("a", bytes([25, 25, 25, 25]))
+        h_uniform = et2.shannon_entropy_global()
+        assert h_skewed < h_uniform
+
+    def test_multiple_seeds_accumulate(self):
+        et = EdgeTracker()
+        et.record_edges("a", bytes([1, 0, 1, 0]))
+        et.record_edges("b", bytes([0, 1, 0, 1]))
+        h = et.shannon_entropy_global()
+        # All 4 edges hit once → uniform → log2(4) = 2.0
+        assert abs(h - 2.0) < 1e-6
+
+    def test_monotonically_increases_with_diversity(self):
+        et = EdgeTracker()
+        et.record_edges("a", bytes([10, 0, 0, 0]))
+        h1 = et.shannon_entropy_global()
+        et.record_edges("b", bytes([0, 10, 0, 0]))
+        h2 = et.shannon_entropy_global()
+        et.record_edges("c", bytes([0, 0, 10, 0]))
+        h3 = et.shannon_entropy_global()
+        assert h1 < h2 < h3
+
+
+class TestSimpsonDiversityGlobal:
+    def test_empty_returns_zero(self):
+        et = EdgeTracker()
+        assert et.simpson_diversity_global() == 0.0
+
+    def test_single_edge_zero(self):
+        et = EdgeTracker()
+        et.record_edges("a", bytes([5, 0, 0]))
+        assert et.simpson_diversity_global() == 0.0
+
+    def test_uniform_distribution_high(self):
+        et = EdgeTracker()
+        # 4 edges each hit once → D = 1 - 4*(0.25²) = 1 - 0.25 = 0.75
+        et.record_edges("a", bytes([1, 1, 1, 1]))
+        d = et.simpson_diversity_global()
+        assert abs(d - 0.75) < 1e-6
+
+    def test_two_edges_equal(self):
+        et = EdgeTracker()
+        # 2 edges each hit once → D = 1 - 2*(0.5²) = 0.5
+        et.record_edges("a", bytes([1, 1]))
+        d = et.simpson_diversity_global()
+        assert abs(d - 0.5) < 1e-6
+
+    def test_skewed_lower_than_uniform(self):
+        et = EdgeTracker()
+        et.record_edges("a", bytes([100, 1, 1, 1]))
+        d_skewed = et.simpson_diversity_global()
+        et2 = EdgeTracker()
+        et2.record_edges("a", bytes([25, 25, 25, 25]))
+        d_uniform = et2.simpson_diversity_global()
+        assert d_skewed < d_uniform
+
+    def test_value_in_range(self):
+        et = EdgeTracker()
+        et.record_edges("a", bytes([3, 7, 2, 5, 1]))
+        d = et.simpson_diversity_global()
+        assert 0.0 <= d <= 1.0
+
+
+class TestShannonEntropySeed:
+    def test_missing_seed_returns_zero(self):
+        et = EdgeTracker()
+        assert et.shannon_entropy_seed("missing") == 0.0
+
+    def test_uniform_seed_high_entropy(self):
+        et = EdgeTracker()
+        et.seed_hit_counts["a"] = {0: 5, 1: 5, 2: 5, 3: 5}
+        h = et.shannon_entropy_seed("a")
+        assert abs(h - 2.0) < 1e-6
+
+    def test_single_edge_zero(self):
+        et = EdgeTracker()
+        et.seed_hit_counts["a"] = {0: 10}
+        assert et.shannon_entropy_seed("a") == 0.0
+
+    def test_two_edges(self):
+        et = EdgeTracker()
+        et.seed_hit_counts["a"] = {0: 1, 1: 1}
+        h = et.shannon_entropy_seed("a")
+        assert abs(h - 1.0) < 1e-6
+
+    def test_empty_hit_counts(self):
+        et = EdgeTracker()
+        et.seed_hit_counts["a"] = {}
+        assert et.shannon_entropy_seed("a") == 0.0
