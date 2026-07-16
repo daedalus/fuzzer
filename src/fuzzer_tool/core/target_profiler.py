@@ -42,6 +42,7 @@ DELIMITER_CHARS = set(b":/\n\r\t,;=&?#[]{}<>\\\"'!@$%^*()+|~`")
 @dataclass
 class FunctionInfo:
     """Metadata for a single function."""
+
     addr: int
     size: int
     name: str
@@ -76,12 +77,29 @@ class TargetProfile:
 
 # Functions that indicate input parsing
 INPUT_PARSER_NAMES = {
-    "fread", "fgets", "read", "fgetc", "getchar",
-    "fscanf", "scanf", "sscanf", "strtol", "strtod", "atoi", "atof",
-    "strtok", "strsep", "getline",
-    "png_create_read_struct", "png_read_image", "png_init_io",
-    "inflate", "uncompress", "BZ2_bzDecompress",
-    "XML_Parse", "yyparse",
+    "fread",
+    "fgets",
+    "read",
+    "fgetc",
+    "getchar",
+    "fscanf",
+    "scanf",
+    "sscanf",
+    "strtol",
+    "strtod",
+    "atoi",
+    "atof",
+    "strtok",
+    "strsep",
+    "getline",
+    "png_create_read_struct",
+    "png_read_image",
+    "png_init_io",
+    "inflate",
+    "uncompress",
+    "BZ2_bzDecompress",
+    "XML_Parse",
+    "yyparse",
 }
 
 # Format string patterns that indicate text input processing
@@ -106,7 +124,9 @@ class TargetProfiler:
     def __init__(self, target: str):
         self.target = target
         self._elf: bytes | None = None
-        self._sections: dict[str, tuple[int, int, int, int]] = {}  # name -> (type, offset, addr, size)
+        self._sections: dict[
+            str, tuple[int, int, int, int]
+        ] = {}  # name -> (type, offset, addr, size)
         self._shstrtab: bytes = b""
         self._symtab: list[tuple[str, int, int, int]] = []  # (name, addr, size, type)
         self._strtab: bytes = b""
@@ -175,7 +195,7 @@ class TargetProfiler:
             return
         shstr_offset = struct.unpack_from("<Q", elf, shstr_off + 24)[0]
         shstr_size = struct.unpack_from("<Q", elf, shstr_off + 32)[0]
-        self._shstrtab = elf[shstr_offset:shstr_offset + shstr_size]
+        self._shstrtab = elf[shstr_offset : shstr_offset + shstr_size]
 
         for i in range(e_shnum):
             sh = e_shoff + i * e_shentsize
@@ -183,7 +203,11 @@ class TargetProfiler:
                 break
             sh_type = struct.unpack_from("<I", elf, sh + 4)[0]
             sh_name_idx = struct.unpack_from("<I", elf, sh)[0]
-            name = self._shstrtab[sh_name_idx:sh_name_idx + 32].split(b"\x00")[0].decode(errors="replace")
+            name = (
+                self._shstrtab[sh_name_idx : sh_name_idx + 32]
+                .split(b"\x00")[0]
+                .decode(errors="replace")
+            )
             sh_offset = struct.unpack_from("<Q", elf, sh + 24)[0]
             sh_addr = struct.unpack_from("<Q", elf, sh + 16)[0]
             sh_size = struct.unpack_from("<Q", elf, sh + 32)[0]
@@ -191,7 +215,7 @@ class TargetProfiler:
 
             # Also read .strtab for symbol names
             if sh_type == 3 and name == ".strtab":
-                self._strtab = elf[sh_offset:sh_offset + sh_size]
+                self._strtab = elf[sh_offset : sh_offset + sh_size]
 
     def _parse_symbol_tables(self):
         """Parse symtab and dynsym for function entries."""
@@ -211,7 +235,7 @@ class TargetProfiler:
             strtab = self._strtab if sec_name == ".symtab" else b""
             if strtab_name in self._sections:
                 _, st_offset, _, st_size = self._sections[strtab_name]
-                strtab = elf[st_offset:st_offset + st_size]
+                strtab = elf[st_offset : st_offset + st_size]
 
             if not strtab:
                 continue
@@ -233,7 +257,11 @@ class TargetProfiler:
                 st_name_idx = struct.unpack_from("<I", elf, sym)[0]
                 st_type = st_info & 0xF
 
-                name = strtab[st_name_idx:st_name_idx + 64].split(b"\x00")[0].decode(errors="replace")
+                name = (
+                    strtab[st_name_idx : st_name_idx + 64]
+                    .split(b"\x00")[0]
+                    .decode(errors="replace")
+                )
 
                 if st_type == 2 and st_value > 0:  # STT_FUNC
                     self._symtab.append((name, st_value, st_size, st_type))
@@ -246,7 +274,7 @@ class TargetProfiler:
         # Get .rodata section
         if ".rodata" in self._sections:
             _, rodata_offset, _, rodata_size = self._sections[".rodata"]
-            rodata = self._elf[rodata_offset:rodata_offset + rodata_size]
+            rodata = self._elf[rodata_offset : rodata_offset + rodata_size]
         else:
             # Fallback: scan entire binary for strings
             rodata = self._elf
@@ -298,7 +326,7 @@ class TargetProfiler:
         # Detect magic bytes
         magic = []
         for sig, fmt in MAGIC_SIGNATURES:
-            if self._elf[:len(sig)] == sig:
+            if self._elf[: len(sig)] == sig:
                 magic.append(sig)
         # Also scan for magic bytes at common offsets in .rodata
         if ".rodata" in self._sections:
@@ -318,7 +346,7 @@ class TargetProfiler:
         text_vaddr = 0
         if ".text" in self._sections:
             _, text_offset, text_vaddr, text_size = self._sections[".text"]
-            text_data = self._elf[text_offset:text_offset + text_size]
+            text_data = self._elf[text_offset : text_offset + text_size]
 
         # Try capstone for branch counting
         capstone_available = False
@@ -326,11 +354,12 @@ class TargetProfiler:
         try:
             from capstone import CS_ARCH_X86, CS_MODE_64, Cs
             from capstone.x86_const import X86_GRP_JUMP
+
             md = Cs(CS_ARCH_X86, CS_MODE_64)
             md.detail = True
             capstone_available = True
         except ImportError:
-            pass
+            log.debug("capstone not available — deep branch density disabled")
 
         for name, addr, size, st_type in self._symtab:
             if size == 0:
@@ -350,14 +379,14 @@ class TargetProfiler:
                         for insn in md.disasm(func_bytes, addr):
                             if X86_GRP_JUMP in insn.groups:
                                 is_jcc = (
-                                    (insn.bytes[0] == 0x0F and len(insn.bytes) >= 2
-                                     and (insn.bytes[1] & 0xF0) == 0x80)
-                                    or insn.bytes[0] in range(0x70, 0x80)
-                                )
+                                    insn.bytes[0] == 0x0F
+                                    and len(insn.bytes) >= 2
+                                    and (insn.bytes[1] & 0xF0) == 0x80
+                                ) or insn.bytes[0] in range(0x70, 0x80)
                                 if is_jcc:
                                     cond_branches += 1
                     except Exception:
-                        pass
+                        log.debug("Instruction parse failed at %#x in %s", insn.address if 'insn' in dir() else 0, name, exc_info=True)
                     branch_density = (cond_branches / max(size, 1)) * 1024
 
             profile.functions[name] = FunctionInfo(
@@ -389,8 +418,13 @@ class TargetProfiler:
         func_names_lower = {n.lower() for n in func_names}
 
         # PNG detection
-        png_funcs = {"png_create_read_struct", "png_read_image", "png_init_io",
-                     "png_set_sig_bytes", "png_sig_cmp"}
+        png_funcs = {
+            "png_create_read_struct",
+            "png_read_image",
+            "png_init_io",
+            "png_set_sig_bytes",
+            "png_sig_cmp",
+        }
         if png_funcs & func_names_lower:
             profile.format_signature = "png"
             return
@@ -455,18 +489,47 @@ class TargetProfiler:
 
         for _, s in profile.rodata_strings[:300]:
             # Extract single-char and multi-char delimiters
-            for ch in (b":", b"/", b"\n", b"\r\n", b"\t", b",", b";",
-                       b"=", b"&", b"#", b"?", b"<", b">", b"{", b"}",
-                       b"[", b"]", b"(", b")"):
+            for ch in (
+                b":",
+                b"/",
+                b"\n",
+                b"\r\n",
+                b"\t",
+                b",",
+                b";",
+                b"=",
+                b"&",
+                b"#",
+                b"?",
+                b"<",
+                b">",
+                b"{",
+                b"}",
+                b"[",
+                b"]",
+                b"(",
+                b")",
+            ):
                 if ch in s.encode("ascii", errors="replace"):
                     boundary_candidates.add(ch)
 
             # Multi-char boundaries
             sb = s.encode("ascii", errors="replace")
-            for boundary in (b"HTTP/", b"Content-Type:", b"Accept:",
-                             b"Host:", b"User-Agent:", b"GET ", b"POST ",
-                             b"PUT ", b"DELETE ", b"HEAD ",
-                             b"HTTP/1.0", b"HTTP/1.1", b"HTTP/2"):
+            for boundary in (
+                b"HTTP/",
+                b"Content-Type:",
+                b"Accept:",
+                b"Host:",
+                b"User-Agent:",
+                b"GET ",
+                b"POST ",
+                b"PUT ",
+                b"DELETE ",
+                b"HEAD ",
+                b"HTTP/1.0",
+                b"HTTP/1.1",
+                b"HTTP/2",
+            ):
                 if boundary in sb:
                     boundary_candidates.add(boundary)
 
@@ -486,7 +549,7 @@ class TargetProfiler:
             return
 
         _, text_offset, text_vaddr, text_size = self._sections[".text"]
-        text_data = self._elf[text_offset:text_offset + text_size]
+        text_data = self._elf[text_offset : text_offset + text_size]
 
         # Build address -> function name map
         addr_to_func: dict[int, str] = {}
@@ -497,6 +560,7 @@ class TargetProfiler:
         try:
             from capstone import CS_ARCH_X86, CS_MODE_64, Cs
             from capstone.x86_const import X86_GRP_CALL
+
             md = Cs(CS_ARCH_X86, CS_MODE_64)
             md.detail = True
         except ImportError:
@@ -521,6 +585,7 @@ class TargetProfiler:
                                 profile.call_graph[name] = set()
                             profile.call_graph[name].add(callee)
             except Exception:
+                log.debug("Call graph extraction failed for %s", name, exc_info=True)
                 continue
 
         # Build reverse call graph

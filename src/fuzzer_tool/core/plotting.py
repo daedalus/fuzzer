@@ -17,13 +17,15 @@ def read_coverage_log(path):
             if len(parts) != 5:
                 continue
             try:
-                rows.append({
-                    "elapsed": float(parts[0]),
-                    "exec_count": int(parts[1]),
-                    "cumulative_edges": int(parts[2]),
-                    "corpus_size": int(parts[3]),
-                    "crash_count": int(parts[4]),
-                })
+                rows.append(
+                    {
+                        "elapsed": float(parts[0]),
+                        "exec_count": int(parts[1]),
+                        "cumulative_edges": int(parts[2]),
+                        "corpus_size": int(parts[3]),
+                        "crash_count": int(parts[4]),
+                    }
+                )
             except (ValueError, IndexError):
                 continue
     return rows
@@ -56,7 +58,7 @@ def _svg_line_chart(title, x_label, y_label, points, width=700, height=200):
     if not points:
         return (
             f'<svg width="{width}" height="{height}" xmlns="http://www.w3.org/2000/svg">\n'
-            f'  <text x="{width/2}" y="{height/2}" text-anchor="middle" '
+            f'  <text x="{width / 2}" y="{height / 2}" text-anchor="middle" '
             f'fill="#888" font-size="14">{escape(title)}: no data yet</text>\n</svg>'
         )
 
@@ -74,18 +76,18 @@ def _svg_line_chart(title, x_label, y_label, points, width=700, height=200):
 
     return (
         f'<svg width="{width}" height="{height}" xmlns="http://www.w3.org/2000/svg">\n'
-        f'  <text x="{width/2}" y="18" text-anchor="middle" font-size="14" '
+        f'  <text x="{width / 2}" y="18" text-anchor="middle" font-size="14" '
         f'font-weight="bold">{escape(title)}</text>\n'
         f'  <path d="{path_d}" fill="none" stroke="#2563eb" stroke-width="2"/>\n'
         f'  <text x="{pad_l - 5}" y="{pad_t + ih + 20}" font-size="11" '
         f'text-anchor="middle">{escape(x_label)}</text>\n'
-        f'  <text x="12" y="{pad_t + ih/2}" font-size="11" text-anchor="middle" '
-        f'transform="rotate(-90,12,{pad_t + ih/2})">{escape(y_label)}</text>\n'
+        f'  <text x="12" y="{pad_t + ih / 2}" font-size="11" text-anchor="middle" '
+        f'transform="rotate(-90,12,{pad_t + ih / 2})">{escape(y_label)}</text>\n'
         f'  <line x1="{pad_l}" y1="{pad_t + ih}" x2="{pad_l + iw}" '
         f'y2="{pad_t + ih}" stroke="#ccc" stroke-width="1"/>\n'
         f'  <line x1="{pad_l}" y1="{pad_t}" x2="{pad_l}" '
         f'y2="{pad_t + ih}" stroke="#ccc" stroke-width="1"/>\n'
-        f'</svg>'
+        f"</svg>"
     )
 
 
@@ -98,7 +100,7 @@ def _svg_bar_chart(title, bars, width=700, height=200):
     if not bars:
         return (
             f'<svg width="{width}" height="{height}" xmlns="http://www.w3.org/2000/svg">\n'
-            f'  <text x="{width/2}" y="{height/2}" text-anchor="middle" '
+            f'  <text x="{width / 2}" y="{height / 2}" text-anchor="middle" '
             f'fill="#888" font-size="14">no data yet</text>\n</svg>'
         )
 
@@ -114,18 +116,16 @@ def _svg_bar_chart(title, bars, width=700, height=200):
         rects.append(
             f'  <rect x="{pad_l}" y="{y:.1f}" width="{bw:.1f}" height="{bar_h:.1f}" '
             f'fill="#2563eb"/>\n'
-            f'  <text x="{pad_l - 5}" y="{y + bar_h/2 + 4:.1f}" text-anchor="end" '
+            f'  <text x="{pad_l - 5}" y="{y + bar_h / 2 + 4:.1f}" text-anchor="end" '
             f'font-size="11">{escape(label)}</text>\n'
-            f'  <text x="{pad_l + bw + 5:.1f}" y="{y + bar_h/2 + 4:.1f}" '
+            f'  <text x="{pad_l + bw + 5:.1f}" y="{y + bar_h / 2 + 4:.1f}" '
             f'font-size="11">{pct:.1f}%</text>'
         )
 
     return (
         f'<svg width="{width}" height="{height}" xmlns="http://www.w3.org/2000/svg">\n'
-        f'  <text x="{width/2}" y="18" text-anchor="middle" font-size="14" '
-        f'font-weight="bold">{escape(title)}</text>\n'
-        + "\n".join(rects)
-        + "\n</svg>"
+        f'  <text x="{width / 2}" y="18" text-anchor="middle" font-size="14" '
+        f'font-weight="bold">{escape(title)}</text>\n' + "\n".join(rects) + "\n</svg>"
     )
 
 

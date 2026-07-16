@@ -129,9 +129,7 @@ class DmesgParser:
                 text=True,
                 bufsize=1,
             )
-            self._stream_thread = threading.Thread(
-                target=self._stream_reader, daemon=True
-            )
+            self._stream_thread = threading.Thread(target=self._stream_reader, daemon=True)
             self._stream_thread.start()
             log.info("dmesg async stream started")
             return True

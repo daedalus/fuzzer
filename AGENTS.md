@@ -4,6 +4,8 @@ RULES:
 Always create TODOs.
 Always update the README.md with the new features added.
 Always git commit and push after finish a task.
+All fuzz targets must be compiled with ASAN instrumentation (`-fsanitize=address`).
+Never commit binary files or corpus directories — build targets from source, keep corpus data local.
 
 
 ## Overview
@@ -55,7 +57,15 @@ src/fuzzer_tool/
 │   ├── elf.py          # ELF parsing utilities
 │   └── target_profiler.py # Static analysis for fuzzing guidance
 ├── adapters/       # Process execution, filesystem operations
-├── services/       # Fuzzer orchestration (fuzzer.py, parallel.py, etc.)
+├── services/       # Fuzzer orchestration
+│   ├── fuzzer.py           # Fuzzer class (orchestration, __init__, fuzz_one, run)
+│   ├── operators.py        # Mutation operator dispatch, selection, and handlers
+│   ├── seed_picker.py      # Seed selection strategies (weighted, Pareto, Markov, format-aware)
+│   ├── runner.py           # Target execution (fork, ptrace, in-process), crash detection
+│   ├── stats.py            # Statistics, reporting, coverage logging, calibration
+│   ├── corpus_manager.py   # Corpus persistence, state, dedup, minimize
+│   ├── parallel.py         # Multi-process fuzzing
+│   └── report.py           # HTML/JSON report generation
 └── cli/            # CLI entry point
 
 tools/
@@ -72,6 +82,14 @@ dictionaries/
 targets/
 ├── png_read.c         # libpng fuzz target
 ├── png_read           # Compiled target
+├── jpeg_read.c        # libjpeg fuzz target
+├── jpeg_read          # Compiled target
+├── zlib_read.c        # zlib/gzip/raw-deflate fuzz target
+├── zlib_read          # Compiled target
+├── gzip_read.c        # gzip-specific fuzz target (header parsing, multi-member)
+├── gzip_read          # Compiled target
+├── asan_target.c      # ASAN crash target
+├── asan_target        # Compiled target
 ├── test_target.c      # Minimal crash target
 └── test_target        # Compiled target
 ```

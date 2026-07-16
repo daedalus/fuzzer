@@ -35,7 +35,9 @@ def _confidence_interval(n, success_count=None):
 def _format_ci(mean, ci_1, ci_2, ci_3, fmt=".1f", pct=False):
     """Format ±1σ, ±2σ, ±3σ as a compact string."""
     if pct:
-        return f"{mean * 100:{fmt}}%  ±{ci_1 * 100:{fmt}}% ±{ci_2 * 100:{fmt}}% ±{ci_3 * 100:{fmt}}%"
+        return (
+            f"{mean * 100:{fmt}}%  ±{ci_1 * 100:{fmt}}% ±{ci_2 * 100:{fmt}}% ±{ci_3 * 100:{fmt}}%"
+        )
     return f"{mean:{fmt}}  ±{ci_1:{fmt}} ±{ci_2:{fmt}} ±{ci_3:{fmt}}"
 
 
@@ -332,6 +334,9 @@ def _corpus_overview(f, corpus_dir) -> str:
 
 
 def _crash_analysis(f, crashes_dir) -> str:
+    if f.crash_count == 0:
+        return ""
+
     p = Path(crashes_dir)
     if not p.exists():
         return ""
@@ -450,9 +455,7 @@ def _bandit_calibration(f) -> str:
             f"(0=perfect, 0.25=random, 0.5=worst)"
         )
     else:
-        lines.append(
-            f"  Brier score:       {brier:.4f} (0=perfect, 0.25=random, 0.5=worst)"
-        )
+        lines.append(f"  Brier score:       {brier:.4f} (0=perfect, 0.25=random, 0.5=worst)")
     cal = f.mc.calibration_report()
     if cal:
         lines.append("  Calibration by predicted probability bin:")
@@ -526,6 +529,9 @@ def _corpus_health(f) -> str:
 
 def _crash_exploitability(f, crashes_dir: str) -> str:
     """Exploitability tier distribution from crash metadata."""
+    if f.crash_count == 0:
+        return ""
+
     p = Path(crashes_dir)
     if not p.exists():
         return ""

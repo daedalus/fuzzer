@@ -72,7 +72,11 @@ class TestDiscoveryRate:
 
     def test_basic_rate(self):
         history = [
-            (0, 0), (100, 10), (200, 20), (300, 30), (400, 40),
+            (0, 0),
+            (100, 10),
+            (200, 20),
+            (300, 30),
+            (400, 40),
         ]
         # Window: last 5 → (0,0) to (400,40) → 40 edges / 400 execs * 1000 = 100
         assert discovery_rate(history) == pytest.approx(100.0)
@@ -89,8 +93,13 @@ class TestDiscoveryRate:
     def test_sliding_window(self):
         # More than 5 entries → only last 5 used
         history = [
-            (0, 0), (100, 100),  # old
-            (200, 100), (300, 100), (400, 100), (500, 100), (600, 150),
+            (0, 0),
+            (100, 100),  # old
+            (200, 100),
+            (300, 100),
+            (400, 100),
+            (500, 100),
+            (600, 150),
         ]
         # Window: last 5 = [(200,100), (300,100), (400,100), (500,100), (600,150)]
         # 50 edges / 400 execs * 1000 = 125

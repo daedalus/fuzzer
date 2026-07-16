@@ -16,6 +16,7 @@ import json
 import logging
 import math
 import random
+import struct
 import zlib
 from collections import defaultdict
 
@@ -238,7 +239,8 @@ class MinHashLSH:
         for band_idx in range(self.num_bands):
             start = band_idx * self.band_size
             end = start + self.band_size
-            band_hash = hash(tuple(sig[start:end]))
+            band_bytes = struct.pack(f"<{end - start}Q", *sig[start:end])
+            band_hash = zlib.crc32(band_bytes)
             bucket_key = (band_idx, band_hash)
             if bucket_key not in self.buckets:
                 self.buckets[bucket_key] = set()
@@ -252,7 +254,8 @@ class MinHashLSH:
         for band_idx in range(self.num_bands):
             start = band_idx * self.band_size
             end = start + self.band_size
-            band_hash = hash(tuple(sig[start:end]))
+            band_bytes = struct.pack(f"<{end - start}Q", *sig[start:end])
+            band_hash = zlib.crc32(band_bytes)
             bucket_key = (band_idx, band_hash)
             bucket = self.buckets.get(bucket_key)
             if bucket:
@@ -288,7 +291,8 @@ class MinHashLSH:
         for band_idx in range(self.num_bands):
             start = band_idx * self.band_size
             end = start + self.band_size
-            band_hash = hash(tuple(sig[start:end]))
+            band_bytes = struct.pack(f"<{end - start}Q", *sig[start:end])
+            band_hash = zlib.crc32(band_bytes)
             bucket_key = (band_idx, band_hash)
             bucket = self.buckets.get(bucket_key)
             if bucket:
@@ -764,6 +768,65 @@ class EdgeTracker:
                 count += 1
 
         return total_jaccard / count if count else 0.0
+
+    def shannon_entropy_global(self) -> float:
+        """Shannon entropy of the global edge hit distribution in bits.
+
+        H = -Σ(p_i * log2(p_i)) where p_i = hit_count_i / total_hits.
+        High entropy → edges hit uniformly (good exploration).
+        Low entropy → a few edges dominate (stuck in loops/hot paths).
+        """
+        hits = self._global_edge_hits
+        if not hits:
+            return 0.0
+        total = sum(hits.values())
+        if total == 0:
+            return 0.0
+        h = 0.0
+        for count in hits.values():
+            if count > 0:
+                p = count / total
+                h -= p * math.log2(p)
+        return h
+
+    def simpson_diversity_global(self) -> float:
+        """Simpson's Diversity Index of global edge hits.
+
+        D = 1 - Σ(p_i²) where p_i = hit_count_i / total_hits.
+        Value in [0, 1]:
+        - 0.0 = all hits on one edge (monoculture)
+        - 1.0 = perfectly uniform distribution
+
+        Interpretable as: probability that two random hits land on
+        different edges.
+        """
+        hits = self._global_edge_hits
+        if not hits:
+            return 0.0
+        total = sum(hits.values())
+        if total == 0:
+            return 0.0
+        sum_p_sq = sum((count / total) ** 2 for count in hits.values())
+        return 1.0 - sum_p_sq
+
+    def shannon_entropy_seed(self, seed_key: str) -> float:
+        """Shannon entropy of a single seed's hit-count distribution.
+
+        Seeds with unusual entropy profiles (very high or very low relative
+        to the corpus average) are behaviorally distinct.
+        """
+        hc = self.seed_hit_counts.get(seed_key)
+        if not hc:
+            return 0.0
+        total = sum(hc.values())
+        if total == 0:
+            return 0.0
+        h = 0.0
+        for count in hc.values():
+            if count > 0:
+                p = count / total
+                h -= p * math.log2(p)
+        return h
 
     def compute_wasserstein_weight(self, seed_key: str) -> float:
         """Compute scheduling weight based on Wasserstein distance to corpus centroid.

@@ -194,8 +194,14 @@ class MarkovChain:
           - high_surprise_count: seeds with PP > 200 (model is lost)
         """
         if not corpus:
-            return {"mean": 0, "median": 0, "p10": 0, "p90": 0,
-                    "low_surprise_count": 0, "high_surprise_count": 0}
+            return {
+                "mean": 0,
+                "median": 0,
+                "p10": 0,
+                "p90": 0,
+                "low_surprise_count": 0,
+                "high_surprise_count": 0,
+            }
 
         pps = [self.perplexity(seed) for seed in corpus[:200]]
         pps_sorted = sorted(pps)
@@ -237,17 +243,13 @@ class MarkovChain:
         snapshot = self._build_snapshot()
         has_previous = self._prev_snapshot is not None
         if has_previous:
-            self.last_js_divergence = self._js_between_snapshots(
-                self._prev_snapshot, snapshot
-            )
+            self.last_js_divergence = self._js_between_snapshots(self._prev_snapshot, snapshot)
         self._prev_snapshot = snapshot
 
         # Plateau: JS divergence is below what noise alone would produce
         # at this sample size — the distribution isn't meaningfully changing.
         # Requires a previous snapshot to compare against (not the first one).
-        threshold = ks_significance_threshold(
-            self._contexts_seen, alpha=0.05
-        )
+        threshold = ks_significance_threshold(self._contexts_seen, alpha=0.05)
         return (
             has_previous
             and self.last_js_divergence < threshold
@@ -305,10 +307,7 @@ class MarkovChain:
             "order": self.order,
             "smoothing": self.smoothing,
             "contexts_seen": self._contexts_seen,
-            "transitions": {
-                ctx.hex(): dict(counts)
-                for ctx, counts in self.transitions.items()
-            },
+            "transitions": {ctx.hex(): dict(counts) for ctx, counts in self.transitions.items()},
             "global_freq": dict(self._global_freq),
         }
         try:
@@ -343,7 +342,9 @@ class MarkovChain:
         for ctx_hex, counts in data.get("transitions", {}).items():
             ctx = bytes.fromhex(ctx_hex)
             self.transitions[ctx] = collections.Counter({int(k): v for k, v in counts.items()})
-        self._global_freq = collections.Counter({int(k): v for k, v in data.get("global_freq", {}).items()})
+        self._global_freq = collections.Counter(
+            {int(k): v for k, v in data.get("global_freq", {}).items()}
+        )
         log.info("Markov chain loaded: %s (%d contexts)", path, self._contexts_seen)
         return True
 
@@ -447,7 +448,7 @@ class MarkovEnsemble:
         chain = self._select_chain()
         # Adjust context to match chain's order
         if chain.order > 0:
-            ctx = ctx[-chain.order:] if len(ctx) >= chain.order else ctx
+            ctx = ctx[-chain.order :] if len(ctx) >= chain.order else ctx
         return chain.sample_byte(ctx)
 
     def is_trained(self) -> bool:
@@ -478,8 +479,14 @@ class MarkovEnsemble:
     def corpus_perplexity(self, corpus: list[bytes]) -> dict:
         """Perplexity statistics across corpus using the best chain."""
         if not self.chains:
-            return {"mean": 0, "median": 0, "p10": 0, "p90": 0,
-                    "low_surprise_count": 0, "high_surprise_count": 0}
+            return {
+                "mean": 0,
+                "median": 0,
+                "p10": 0,
+                "p90": 0,
+                "low_surprise_count": 0,
+                "high_surprise_count": 0,
+            }
         # Use the chain with lowest average perplexity
         best = min(self.chains.values(), key=lambda c: c.corpus_perplexity(corpus)["mean"])
         return best.corpus_perplexity(corpus)
@@ -505,8 +512,7 @@ class MarkovEnsemble:
                 "smoothing": chain.smoothing,
                 "contexts_seen": chain._contexts_seen,
                 "transitions": {
-                    ctx.hex(): dict(counts)
-                    for ctx, counts in chain.transitions.items()
+                    ctx.hex(): dict(counts) for ctx, counts in chain.transitions.items()
                 },
                 "global_freq": dict(chain._global_freq),
             }
@@ -547,7 +553,9 @@ class MarkovEnsemble:
                     chain.transitions[ctx] = collections.Counter(
                         {int(k): v for k, v in counts.items()}
                     )
-                chain._global_freq = collections.Counter({int(k): v for k, v in chain_data.get("global_freq", {}).items()})
+                chain._global_freq = collections.Counter(
+                    {int(k): v for k, v in chain_data.get("global_freq", {}).items()}
+                )
                 self.chains[order] = chain
             self.order = self.orders[0] if self.orders else 0
             self.transitions = self.chains.get(self.order, MarkovChain()).transitions
@@ -567,6 +575,8 @@ class MarkovEnsemble:
         total_ctx = sum(c._contexts_seen for c in self.chains.values())
         log.info(
             "Markov ensemble loaded: %s (%d orders, %d total contexts)",
-            path, len(self.chains), total_ctx,
+            path,
+            len(self.chains),
+            total_ctx,
         )
         return True

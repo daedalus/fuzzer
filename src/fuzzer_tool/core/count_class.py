@@ -117,8 +117,8 @@ def new_bits(
     # Process 8 bytes at a time for efficiency
     i = 0
     while i + 7 < length:
-        t = int.from_bytes(trace[i:i + 8], "little")
-        v = int.from_bytes(virgin[i:i + 8], "little")
+        t = int.from_bytes(trace[i : i + 8], "little")
+        v = int.from_bytes(virgin[i : i + 8], "little")
 
         # New edge: trace has bits where virgin is 0
         if t & ~v:

@@ -44,9 +44,7 @@ class MutualInformationTracker:
             lambda: defaultdict(lambda: defaultdict(int))
         )
         # Per-position: byte_value -> count
-        self.byte_marginal: dict[int, dict[int, int]] = defaultdict(
-            lambda: defaultdict(int)
-        )
+        self.byte_marginal: dict[int, dict[int, int]] = defaultdict(lambda: defaultdict(int))
         # Global: edge_index -> count (dense list for O(1) access)
         self.edge_marginal: list[int] = []
         self._edge_marginal_size = 0
@@ -54,9 +52,7 @@ class MutualInformationTracker:
         self.position_counts: dict[int, int] = defaultdict(int)
         self.total_observations: int = 0
 
-    def record(
-        self, input_bytes: bytes, edge_bitmap: bytes, map_size: int = 65536
-    ) -> None:
+    def record(self, input_bytes: bytes, edge_bitmap: bytes, map_size: int = 65536) -> None:
         """Record one input-coverage pair.
 
         Args:
@@ -67,7 +63,7 @@ class MutualInformationTracker:
         self.total_observations += 1
         self._total_edges = None
         self._invalidate_max_mi_cache()
-        if hasattr(self, '_wp_all_positions') and self._wp_all_positions is not None:
+        if hasattr(self, "_wp_all_positions") and self._wp_all_positions is not None:
             max_pos = len(input_bytes) - 1 if input_bytes else 0
             if max_pos >= self.max_positions:
                 max_pos = self.max_positions - 1
@@ -89,9 +85,7 @@ class MutualInformationTracker:
                     self.joint[pos][byte_val][edge] += 1
                     # Update edge marginal array
                     if edge >= self._edge_marginal_size:
-                        self.edge_marginal.extend(
-                            [0] * (edge + 1 - self._edge_marginal_size)
-                        )
+                        self.edge_marginal.extend([0] * (edge + 1 - self._edge_marginal_size))
                         self._edge_marginal_size = edge + 1
                     self.edge_marginal[edge] += 1
                     bv_edges += 1
@@ -123,7 +117,9 @@ class MutualInformationTracker:
             p_x = bv_count / n
             for edge, joint_count in joint_pos.get(byte_val, {}).items():
                 p_xy = joint_count / n
-                p_y = self.edge_marginal[edge] / total_edges if edge < self._edge_marginal_size else 0
+                p_y = (
+                    self.edge_marginal[edge] / total_edges if edge < self._edge_marginal_size else 0
+                )
                 if p_xy > 0 and p_y > 0:
                     mi_value += p_xy * math.log2(p_xy / (p_x * p_y))
 
@@ -142,7 +138,9 @@ class MutualInformationTracker:
             input_length = max(self.position_counts.keys()) + 1 if self.position_counts else 0
         return {pos: self.mi(pos) for pos in range(input_length) if pos in self.position_counts}
 
-    def top_positions(self, k: int = 10, input_length: int | None = None) -> list[tuple[int, float]]:
+    def top_positions(
+        self, k: int = 10, input_length: int | None = None
+    ) -> list[tuple[int, float]]:
         """Return the k positions with highest MI.
 
         Returns:
@@ -192,7 +190,7 @@ class MutualInformationTracker:
         if not self.position_counts:
             return 0
 
-        if not hasattr(self, '_wp_all_positions'):
+        if not hasattr(self, "_wp_all_positions"):
             self._wp_all_positions = None
             self._wp_all_weights = None
 
@@ -203,9 +201,7 @@ class MutualInformationTracker:
             for pos in self.position_counts:
                 if self.position_counts[pos] >= self.min_observations:
                     self._wp_all_positions.append(pos)
-                    self._wp_all_weights.append(
-                        self.mutation_weight(pos, self.max_positions)
-                    )
+                    self._wp_all_weights.append(self.mutation_weight(pos, self.max_positions))
 
         all_pos = self._wp_all_positions
         all_w = self._wp_all_weights
@@ -334,7 +330,9 @@ class MutualInformationTracker:
         self.max_positions = data.get("max_positions", self.max_positions)
         self.min_observations = data.get("min_observations", self.min_observations)
         self.total_observations = data.get("total_observations", 0)
-        self.position_counts = defaultdict(int, {int(k): v for k, v in data.get("position_counts", {}).items()})
+        self.position_counts = defaultdict(
+            int, {int(k): v for k, v in data.get("position_counts", {}).items()}
+        )
         em = data.get("edge_marginal", [])
         if isinstance(em, dict):
             # Old format: {"edge_index": count, ...}

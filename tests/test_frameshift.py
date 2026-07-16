@@ -235,16 +235,20 @@ class TestDiscoverRelations:
         fs = FrameShift()
         # Every insertion changes the path → candidates become relations
         data = bytes(128)
+
         def exec_fn(d):
             return sum(d)
+
         count = fs.discover_relations(data, exec_fn, max_execs=100)
         assert count > 0
 
     def test_respects_max_relations(self):
         fs = FrameShift(max_relations=3)
         data = bytes(128)
+
         def exec_fn(d):
             return sum(d)
+
         count = fs.discover_relations(data, exec_fn, max_relations=2, max_execs=200)
         assert count <= 2
 
@@ -252,8 +256,10 @@ class TestDiscoverRelations:
         fs = FrameShift()
         data = bytes(256)
         exec_count = [0]
+
         def exec_fn(d):
             exec_count[0] += 1
             return sum(d)
+
         fs.discover_relations(data, exec_fn, max_execs=10)
         assert exec_count[0] <= 10 + 1

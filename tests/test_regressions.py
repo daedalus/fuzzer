@@ -46,14 +46,14 @@ class TestHashConsistency:
             assert (corpus_dir / expected_name).exists()
 
     def test_auto_minimize_kept_set_uses_hash_data(self):
-        """_auto_minimize_corpus must use hash_data(), not hashlib.sha256."""
+        """auto_minimize_corpus must use hash_data(), not hashlib.sha256."""
         import inspect
 
-        from fuzzer_tool.services.fuzzer import Fuzzer
+        from fuzzer_tool.services.corpus_manager import CorpusManager
 
-        source = inspect.getsource(Fuzzer._auto_minimize_corpus)
+        source = inspect.getsource(CorpusManager.auto_minimize_corpus)
         assert "hashlib.sha256" not in source, (
-            "_auto_minimize_corpus must not use hashlib.sha256 directly; "
+            "auto_minimize_corpus must not use hashlib.sha256 directly; "
             "use hash_data() from fuzzer_tool.adapters.filesystem instead"
         )
         assert "hash_data" in source
@@ -135,8 +135,7 @@ class TestRateDistortionLoss:
         fracs = {s: f for s, f in curve}
         # At corpus_size=2, unique should still be present → coverage=1.0
         assert fracs[2] == 1.0, (
-            f"At corpus_size=2, unique seed should still be present "
-            f"but coverage is {fracs[2]}"
+            f"At corpus_size=2, unique seed should still be present but coverage is {fracs[2]}"
         )
 
     def test_redundant_seed_removed_first(self):
@@ -152,8 +151,7 @@ class TestRateDistortionLoss:
 
         fracs = {s: f for s, f in curve}
         assert fracs[1] == 1.0, (
-            f"After removing redundant seed, coverage should be 1.0 "
-            f"but got {fracs[1]}"
+            f"After removing redundant seed, coverage should be 1.0 but got {fracs[1]}"
         )
 
 
@@ -164,9 +162,7 @@ class TestDeadParameters:
         from fuzzer_tool.core.renyi import RenyiEntropy
 
         r = RenyiEntropy()
-        assert not hasattr(r, "smoothing"), (
-            "RenyiEntropy stores 'smoothing' but never uses it"
-        )
+        assert not hasattr(r, "smoothing"), "RenyiEntropy stores 'smoothing' but never uses it"
 
     def test_renyi_docstring_no_smoothing_claim(self):
         from fuzzer_tool.core.renyi import RenyiEntropy

@@ -7,8 +7,13 @@ from fuzzer_tool.core.elf import find_load_segment, parse_sancov_offsets
 
 
 def _build_elf64_header(
-    e_shoff=0, e_shnum=0, e_shentsize=64, e_shstrndx=0,
-    e_phoff=0, e_phentsize=56, e_phnum=0,
+    e_shoff=0,
+    e_shnum=0,
+    e_shentsize=64,
+    e_shstrndx=0,
+    e_phoff=0,
+    e_phentsize=56,
+    e_phnum=0,
 ) -> bytes:
     """Build a minimal ELF64 little-endian header."""
     header = bytearray(64)
@@ -27,8 +32,9 @@ def _build_elf64_header(
     return bytes(header)
 
 
-def _build_section_header(sh_type=0, sh_name=0, sh_offset=0, sh_size=0,
-                          sh_link=0, sh_info=0, sh_addralign=0, sh_entsize=0):
+def _build_section_header(
+    sh_type=0, sh_name=0, sh_offset=0, sh_size=0, sh_link=0, sh_info=0, sh_addralign=0, sh_entsize=0
+):
     """Build a single 64-byte ELF section header."""
     sh = bytearray(64)
     struct.pack_into("<I", sh, 0, sh_name)
@@ -81,7 +87,7 @@ class TestParseSancovOffsets:
         data = bytearray(256 + len(shstrtab) + 100)
         data[:64] = header
         data[64:128] = sh
-        data[256:256 + len(shstrtab)] = shstrtab
+        data[256 : 256 + len(shstrtab)] = shstrtab
         p = tmp_path / "no_symtab"
         p.write_bytes(bytes(data))
         assert parse_sancov_offsets(str(p)) is None
@@ -90,7 +96,9 @@ class TestParseSancovOffsets:
         """ELF with symtab but no __start/__stop___sancov_cntrs."""
         header = _build_elf64_header(e_shnum=3, e_shstrndx=0, e_shentsize=64)
         shstrtab = b".shstrtab\x00.strtab\x00.symtab\x00"
-        sh_shstrtab = _build_section_header(sh_type=3, sh_name=0, sh_offset=256, sh_size=len(shstrtab))
+        sh_shstrtab = _build_section_header(
+            sh_type=3, sh_name=0, sh_offset=256, sh_size=len(shstrtab)
+        )
         strtab = b"\x00my_func\x00"
         sh_strtab = _build_section_header(sh_type=3, sh_name=10, sh_offset=512, sh_size=len(strtab))
         sym = bytearray(24)
@@ -104,8 +112,8 @@ class TestParseSancovOffsets:
         data[64:128] = sh_shstrtab
         data[128:192] = sh_strtab
         data[192:256] = sh_symtab
-        data[256:256 + len(shstrtab)] = shstrtab
-        data[512:512 + len(strtab)] = strtab
+        data[256 : 256 + len(shstrtab)] = shstrtab
+        data[512 : 512 + len(strtab)] = strtab
         data[768:792] = sym
         p = tmp_path / "no_sancov"
         p.write_bytes(bytes(data))
@@ -140,7 +148,9 @@ class TestParseSancovOffsets:
         """symtab with entsize=0 → returns None."""
         header = _build_elf64_header(e_shnum=3, e_shstrndx=0, e_shentsize=64)
         shstrtab = b".shstrtab\x00.strtab\x00.symtab\x00"
-        sh_shstrtab = _build_section_header(sh_type=3, sh_name=0, sh_offset=256, sh_size=len(shstrtab))
+        sh_shstrtab = _build_section_header(
+            sh_type=3, sh_name=0, sh_offset=256, sh_size=len(shstrtab)
+        )
         strtab = b"\x00func\x00"
         sh_strtab = _build_section_header(sh_type=3, sh_name=10, sh_offset=512, sh_size=len(strtab))
         sh_symtab = _build_section_header(
@@ -151,8 +161,8 @@ class TestParseSancovOffsets:
         data[64:128] = sh_shstrtab
         data[128:192] = sh_strtab
         data[192:256] = sh_symtab
-        data[256:256 + len(shstrtab)] = shstrtab
-        data[512:512 + len(strtab)] = strtab
+        data[256 : 256 + len(shstrtab)] = shstrtab
+        data[512 : 512 + len(strtab)] = strtab
         p = tmp_path / "entsize0"
         p.write_bytes(bytes(data))
         assert parse_sancov_offsets(str(p)) is None

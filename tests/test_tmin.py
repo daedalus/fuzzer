@@ -35,7 +35,9 @@ class TestTmin:
         asan_stderr = "ERROR: AddressSanitizer: heap-buffer-overflow\nABORTING"
         crash_file = tmp_path / "crash.bin"
         crash_file.write_bytes(b"A" * 100)
-        with patch("fuzzer_tool.adapters.process.run_target_stdin", return_value=(1, asan_stderr, 1)):
+        with patch(
+            "fuzzer_tool.adapters.process.run_target_stdin", return_value=(1, asan_stderr, 1)
+        ):
             result = tmin("/bin/false", str(crash_file))
         # ASAN crash reproduced, minimizer runs, may return minimized data
         assert result is None or isinstance(result, bytes)
@@ -66,4 +68,5 @@ class TestTmin:
 
     def test_main_exists(self):
         from fuzzer_tool.services.tmin import main
+
         assert callable(main)

@@ -154,8 +154,7 @@ def _sync_corpus_in(parent_dir: Path, fuzzer, max_new: int = 50):
         key = str(sibling_dir)
         cursor = _sync_cursors.get(key, 0)
         entries = sorted(
-            e for e in sibling_dir.iterdir()
-            if e.is_file() and e.suffix not in (".txt", ".log")
+            e for e in sibling_dir.iterdir() if e.is_file() and e.suffix not in (".txt", ".log")
         )
         new_entries = entries[cursor:]
         consumed = 0
@@ -312,7 +311,8 @@ def run_parallel(
                     parts.append(f"W{wid}: {eps:.0f} eps")
                 total_eps = sum(
                     w["exec_count"] / w["elapsed"]
-                    for w in worker_stats.values() if w["elapsed"] > 0
+                    for w in worker_stats.values()
+                    if w["elapsed"] > 0
                 )
                 print(f"\r[*] {' | '.join(parts)} | total: {total_eps:.0f} eps", end="", flush=True)
             stop_event.wait(timeout=2)

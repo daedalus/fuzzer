@@ -114,8 +114,7 @@ class TestCRPSScorer:
         # Now record an extreme outlier — should score higher
         crps_extreme = t._compute_crps(1.0)
         assert crps_extreme > crps_typical, (
-            f"Extreme outlier CRPS ({crps_extreme}) should exceed "
-            f"typical CRPS ({crps_typical})"
+            f"Extreme outlier CRPS ({crps_extreme}) should exceed typical CRPS ({crps_typical})"
         )
 
     def test_gap_observation_higher_crps(self):
@@ -157,7 +156,7 @@ class TestCRPSScorer:
         for i in range(len(crps_values) - 1):
             assert crps_values[i] <= crps_values[i + 1], (
                 f"CRPS should increase with distance: "
-                f"CRPS({vals[i]})={crps_values[i]} > CRPS({vals[i+1]})={crps_values[i+1]}"
+                f"CRPS({vals[i]})={crps_values[i]} > CRPS({vals[i + 1]})={crps_values[i + 1]}"
             )
 
     def test_crps_symmetric_for_two_sided_outlier(self):

@@ -113,8 +113,7 @@ class TestDeltaSaveLoad:
         child = bytearray(parent)
         child[0] = 0xFF
         child = bytes(child)
-        save_to_corpus(child, tmp_path, seen, parent=parent,
-                       lineage_depth=SNAPSHOT_INTERVAL)
+        save_to_corpus(child, tmp_path, seen, parent=parent, lineage_depth=SNAPSHOT_INTERVAL)
 
         files = list(tmp_path.iterdir())
         full_files = [f for f in files if f.name.startswith("id_")]
