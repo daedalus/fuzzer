@@ -214,7 +214,7 @@ class BitmapReader:
                         self._base_address = int(line.split("-")[0], 16)
                         break
         except Exception:
-            pass
+            log.warning("Failed to read /proc/%d/maps for base address", os.getpid(), exc_info=True)
 
         if self._base_address is not None:
             # Find the ELF vaddr of the r-xp segment to compute the bias
