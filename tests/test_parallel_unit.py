@@ -16,6 +16,7 @@ class MockFuzzer:
 
     def save_to_corpus(self, data):
         from fuzzer_tool.adapters.filesystem import hash_data
+
         h = hash_data(data)
         self.seen_hashes.add(h)
         self.added.append(data)

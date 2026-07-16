@@ -97,9 +97,7 @@ class TransferEntropy:
         te = h_target - h_both
         return max(0.0, te)  # TE should be non-negative
 
-    def _conditional_entropy_target(
-        self, joint: dict, count: int
-    ) -> float:
+    def _conditional_entropy_target(self, joint: dict, count: int) -> float:
         """Compute H(Y_{t+1} | Y_t^{(k)}) from joint distribution."""
         # Group by y_hist
         hist_groups: dict[tuple, dict[int, int]] = defaultdict(lambda: defaultdict(int))
@@ -119,9 +117,7 @@ class TransferEntropy:
             h += p_hist * h_given
         return h
 
-    def _conditional_entropy_both(
-        self, joint: dict, count: int
-    ) -> float:
+    def _conditional_entropy_both(self, joint: dict, count: int) -> float:
         """Compute H(Y_{t+1} | Y_t^{(k)}, X_t) from joint distribution."""
         # Group by (y_hist, x_present)
         context_groups: dict[tuple, dict[int, int]] = defaultdict(lambda: defaultdict(int))
@@ -306,8 +302,7 @@ class TransferEntropy:
 
         # Build time series for each edge (binary: hit or not)
         edge_series: dict[int, list[int]] = {
-            e: [1 if e < len(eb) and eb[e] > 0 else 0 for eb in edge_bitmaps]
-            for e in top_edges
+            e: [1 if e < len(eb) and eb[e] > 0 else 0 for eb in edge_bitmaps] for e in top_edges
         }
 
         # Compute pairwise TE
@@ -325,6 +320,7 @@ class TransferEntropy:
     def save(self, path: str) -> bool:
         """Save configuration."""
         import json
+
         try:
             with open(path, "w") as f:
                 json.dump({"k": self.k, "n_bins": self.n_bins}, f)
@@ -335,6 +331,7 @@ class TransferEntropy:
     def load(self, path: str) -> bool:
         """Load configuration."""
         import json
+
         try:
             with open(path) as f:
                 data = json.load(f)

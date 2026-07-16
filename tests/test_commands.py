@@ -66,15 +66,22 @@ class TestAddCommonArgs:
     def test_adds_all_args(self):
         parser = argparse.ArgumentParser()
         _add_common_args(parser)
-        args = parser.parse_args([
-            "/target",
-            "-d", "/corpus",
-            "-o", "/crashes",
-            "-t", "10",
-            "-F",
-            "-A", "arg1", "arg2",
-            "-c",
-        ])
+        args = parser.parse_args(
+            [
+                "/target",
+                "-d",
+                "/corpus",
+                "-o",
+                "/crashes",
+                "-t",
+                "10",
+                "-F",
+                "-A",
+                "arg1",
+                "arg2",
+                "-c",
+            ]
+        )
         assert args.target == "/target"
         assert args.corpus == "/corpus"
         assert args.crashes == "/crashes"

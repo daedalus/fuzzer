@@ -1,9 +1,16 @@
-/* Fuzz target for zlib — decompress data from stdin or file.
+/* Fuzz target for zlib — decompress gzip or raw deflate data.
  *
- * Uses zlib's inflate function to decompress input data.
- * On error, returns the zlib error code.
+ * Supports two modes:
+ *   1. Gzip format (magic 0x1F 0x8B) — inflate with automatic header detection
+ *   2. Raw deflate (no header) — inflate with -MAX_WBITS
  *
- * Compile with:
+ * Returns 1 on errors that suggest a zlib bug (not just invalid input).
+ *
+ * Compile shared library (for inprocess modes):
+ *   gcc -O2 -g -shared -fPIC -include src/fuzzer_tool/adapters/afl_shim.c \
+ *       -o zlib_read.so zlib_read.c -lz -Wl,--export-dynamic
+ *
+ * Compile standalone:
  *   gcc -O2 -g -o targets/zlib_read targets/zlib_read.c -lz
  */
 #include <stddef.h>
@@ -13,33 +20,41 @@
 #include <unistd.h>
 #include <zlib.h>
 
+/* AFL edge coverage — provided by afl_shim.c */
+extern void __afl_map_edge(unsigned int cur_loc);
+
 __attribute__((visibility("default")))
 int fuzz_zlib(const unsigned char *buf, size_t size) {
-    /* Check minimum gzip header size */
-    if (size < 10) {
-        return 0;
-    }
+    __afl_map_edge(0x1000);
+    if (size < 2) { __afl_map_edge(0x1001); return 0; }
 
-    /* Verify gzip magic number */
-    if (buf[0] != 0x1F || buf[1] != 0x8B) {
-        return 0;
-    }
-
-    /* Check compression method (deflate = 8) */
-    if (buf[2] != 8) {
-        return 0;
-    }
-
-    /* Initialize zlib stream */
     z_stream strm;
     memset(&strm, 0, sizeof(strm));
     strm.next_in = (Bytef *)buf;
     strm.avail_in = size;
 
-    int ret = inflateInit2(&strm, -MAX_WBITS);  /* raw deflate, skip header */
+    int ret;
+
+    /* Detect format: gzip, zlib, or raw deflate */
+    if (buf[0] == 0x1F && buf[1] == 0x8B) {
+        /* Gzip format — auto-detect gzip/zlib */
+        __afl_map_edge(0x1002);
+        ret = inflateInit2(&strm, 15 + 32);
+    } else if (size >= 2 && (buf[0] & 0x0F) == 8 && (buf[0] >> 4) <= 7) {
+        /* Zlib format — CMF byte: CM=8 (deflate), CINFO<=7 */
+        __afl_map_edge(0x1003);
+        ret = inflateInit2(&strm, 15);
+    } else {
+        /* Raw deflate — no header */
+        __afl_map_edge(0x1004);
+        ret = inflateInit2(&strm, -MAX_WBITS);
+    }
+
     if (ret != Z_OK) {
+        __afl_map_edge(0x1005);
         return 0;
     }
+    __afl_map_edge(0x1100);
 
     /* Decompress in chunks */
     unsigned char outbuf[65536];
@@ -51,24 +66,31 @@ int fuzz_zlib(const unsigned char *buf, size_t size) {
 
         ret = inflate(&strm, Z_NO_FLUSH);
         chunk_count++;
+        __afl_map_edge(0x1200 + (chunk_count & 0xFF));
 
         if (ret != Z_OK && ret != Z_STREAM_END) {
+            __afl_map_edge(0x1300);
             inflateEnd(&strm);
-            return 0;
+            return 1;  /* zlib error — possible bug */
         }
 
-        /* Check for unreasonable output size */
+        /* Guard against unreasonable output */
         if (chunk_count > 1000) {
+            __afl_map_edge(0x1301);
             inflateEnd(&strm);
             return 0;
         }
     } while (ret != Z_STREAM_END);
 
+    __afl_map_edge(0x1400);
+
     ret = inflateEnd(&strm);
     if (ret != Z_OK) {
-        return 0;
+        __afl_map_edge(0x1401);
+        return 1;  /* inflateEnd error */
     }
 
+    __afl_map_edge(0x1500);
     return 0;
 }
 

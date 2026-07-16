@@ -28,27 +28,27 @@ class TestGrammarParse:
 
     def test_rule_reference(self):
         g = Grammar()
-        g.parse('line = method\nmethod = GET | POST')
+        g.parse("line = method\nmethod = GET | POST")
         assert g.rules["line"] == [[("ref", "method")]]
 
     def test_repeat_n(self):
         g = Grammar()
-        g.parse('items = item{3}')
+        g.parse("items = item{3}")
         assert g.rules["items"] == [[("repeat", "item", 3, 3)]]
 
     def test_repeat_range(self):
         g = Grammar()
-        g.parse('items = item{2,5}')
+        g.parse("items = item{2,5}")
         assert g.rules["items"] == [[("repeat", "item", 2, 5)]]
 
     def test_repeat_plus(self):
         g = Grammar()
-        g.parse('items = item+')
+        g.parse("items = item+")
         assert g.rules["items"] == [[("repeat", "item", 1, 8)]]
 
     def test_repeat_star(self):
         g = Grammar()
-        g.parse('items = item*')
+        g.parse("items = item*")
         assert g.rules["items"] == [[("repeat", "item", 0, 8)]]
 
     def test_single_quoted_literal(self):
@@ -98,6 +98,7 @@ class TestGrammarGenerate:
 
     def test_generates_alternative(self):
         import random
+
         random.seed(0)
         g = Grammar()
         g.parse('method = "GET" | "POST"')
@@ -106,6 +107,7 @@ class TestGrammarGenerate:
 
     def test_generates_recursive(self):
         import random
+
         random.seed(0)
         g = Grammar()
         g.parse('line = method\nmethod = "GET" | "POST"')
@@ -115,7 +117,7 @@ class TestGrammarGenerate:
 
     def test_max_depth(self):
         g = Grammar()
-        g.parse('a = b\nb = a')
+        g.parse("a = b\nb = a")
         result = g.generate(max_depth=5)
         # Should terminate with "?" at depth limit
         assert b"?" in result

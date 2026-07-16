@@ -178,12 +178,8 @@ class DifferentialTracker:
         if self.total_inputs < 20:
             return
 
-        self.last_kl_returncode = self._kl_divergence(
-            self.rc_counts_b, self.rc_counts_a
-        )
-        self.last_kl_signature = self._kl_divergence(
-            self.sig_counts_b, self.sig_counts_a
-        )
+        self.last_kl_returncode = self._kl_divergence(self.rc_counts_b, self.rc_counts_a)
+        self.last_kl_signature = self._kl_divergence(self.sig_counts_b, self.sig_counts_a)
 
         # Two-sample KS test on execution times (continuous output)
         if len(self.exec_times_a) >= 10 and len(self.exec_times_b) >= 10:
@@ -215,8 +211,8 @@ class DifferentialTracker:
             if ks_drift:
                 reasons.append(
                     f"exec_time KS D={self.last_ks_exec_time:.4f} p={self.last_ks_exec_time_p:.4e} "
-                    f"(A p50={self._median(self.exec_times_a)*1000:.1f}ms "
-                    f"B p50={self._median(self.exec_times_b)*1000:.1f}ms)"
+                    f"(A p50={self._median(self.exec_times_a) * 1000:.1f}ms "
+                    f"B p50={self._median(self.exec_times_b) * 1000:.1f}ms)"
                 )
             self.drift_description = "; ".join(reasons)
 
@@ -231,9 +227,7 @@ class DifferentialTracker:
         return s[n // 2]
 
     @staticmethod
-    def _kl_divergence(
-        p_counts: Counter, q_counts: Counter, smoothing: float = 0.5
-    ) -> float:
+    def _kl_divergence(p_counts: Counter, q_counts: Counter, smoothing: float = 0.5) -> float:
         """Compute KL(P || Q) with Laplace smoothing.
 
         KL(P || Q) = sum_i P(i) * log(P(i) / Q(i))

@@ -28,6 +28,7 @@ FCOMMENT = 1 << 4
 @dataclass
 class GzipInfo:
     """Parsed gzip header information."""
+
     method: int
     flags: int
     mtime: int

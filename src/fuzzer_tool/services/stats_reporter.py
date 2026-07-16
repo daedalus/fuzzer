@@ -56,11 +56,7 @@ def run_crash_replays(
     from fuzzer_tool.adapters.process import run_target_stdin
 
     t0 = time.monotonic()
-    pending = [
-        (sig, replays)
-        for sig, replays in crash_replays.items()
-        if len(replays) < replay_n
-    ]
+    pending = [(sig, replays) for sig, replays in crash_replays.items() if len(replays) < replay_n]
     for sig, replays in pending:
         if (time.monotonic() - t0) * 1000 > budget_ms:
             break

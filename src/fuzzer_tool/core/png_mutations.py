@@ -26,6 +26,7 @@ import zlib
 
 class PngChunk:
     """A single PNG chunk: type(4) + data(length) + crc(4)."""
+
     __slots__ = ("chunk_type", "data")
 
     def __init__(self, chunk_type: bytes, data: bytes):
@@ -222,8 +223,7 @@ class PngChunkMutator:
         """Delete a random chunk (except IHDR and IEND)."""
         if len(chunks) < 3:
             return serialize_png_chunks(chunks)[:max_len]
-        deletable = [i for i, c in enumerate(chunks)
-                     if c.chunk_type not in (b"IHDR", b"IEND")]
+        deletable = [i for i, c in enumerate(chunks) if c.chunk_type not in (b"IHDR", b"IEND")]
         if deletable:
             del chunks[random.choice(deletable)]
         return serialize_png_chunks(chunks)[:max_len]
@@ -288,7 +288,7 @@ class PngChunkMutator:
             end = start + chunk_size if i < num_pieces - 1 else len(data)
             pieces.append(PngChunk(b"IDAT", data[start:end]))
 
-        chunks[idx:idx + 1] = pieces
+        chunks[idx : idx + 1] = pieces
         return serialize_png_chunks(chunks)[:max_len]
 
     def _mutate_filter(self, chunks: list[PngChunk], max_len: int) -> bytes:
@@ -349,7 +349,7 @@ class PngChunkMutator:
             compressed = zlib.compress(block, 6)
             new_chunks.append(PngChunk(b"IDAT", compressed))
 
-        chunks[idx:idx + 1] = new_chunks
+        chunks[idx : idx + 1] = new_chunks
         return serialize_png_chunks(chunks)[:max_len]
 
     def _generate_random_png(self, max_len: int) -> bytes:
@@ -463,14 +463,14 @@ class PngChunkMutator:
                 ct = ihdr.data[9]
                 if ct in (0, 2, 3):  # gray, rgb, palette
                     if ct == 3:
-                        trns_data = bytes(random.randint(0, 255)
-                                          for _ in range(random.randint(1, 256)))
+                        trns_data = bytes(
+                            random.randint(0, 255) for _ in range(random.randint(1, 256))
+                        )
                     elif ct == 0:
                         trns_data = struct.pack(">H", random.randint(0, 65535))
                     else:
                         trns_data = bytes(random.randint(0, 255) for _ in range(6))
-                    chunks.insert(random.randint(1, len(chunks)),
-                                  PngChunk(b"tRNS", trns_data))
+                    chunks.insert(random.randint(1, len(chunks)), PngChunk(b"tRNS", trns_data))
         return serialize_png_chunks(chunks)[:max_len]
 
     def _mutate_ancillary(self, chunks: list[PngChunk], max_len: int) -> bytes:
@@ -491,36 +491,44 @@ class PngChunkMutator:
             if phys:
                 data = bytearray(phys.data)
                 if len(data) >= 9:
-                    struct.pack_into(">II", data, 0,
-                                     random.randint(0, 0xFFFFFFFF),
-                                     random.randint(0, 0xFFFFFFFF))
+                    struct.pack_into(
+                        ">II", data, 0, random.randint(0, 0xFFFFFFFF), random.randint(0, 0xFFFFFFFF)
+                    )
                     phys.data = bytes(data)
             else:
-                phys_data = struct.pack(">IIb",
-                                        random.randint(0, 0xFFFFFFFF),
-                                        random.randint(0, 0xFFFFFFFF),
-                                        random.choice([0, 1]))
+                phys_data = struct.pack(
+                    ">IIb",
+                    random.randint(0, 0xFFFFFFFF),
+                    random.randint(0, 0xFFFFFFFF),
+                    random.choice([0, 1]),
+                )
                 chunks.insert(random.randint(1, len(chunks)), PngChunk(b"pHYs", phys_data))
         else:  # tIME
             tyme = self._find_chunk(chunks, b"tIME")
             if tyme and len(tyme.data) >= 7:
                 data = bytearray(tyme.data)
-                struct.pack_into(">HBBBBB", data, 0,
-                                 random.randint(1990, 2030),
-                                 random.randint(1, 12),
-                                 random.randint(1, 31),
-                                 random.randint(0, 23),
-                                 random.randint(0, 59),
-                                 random.randint(0, 59))
+                struct.pack_into(
+                    ">HBBBBB",
+                    data,
+                    0,
+                    random.randint(1990, 2030),
+                    random.randint(1, 12),
+                    random.randint(1, 31),
+                    random.randint(0, 23),
+                    random.randint(0, 59),
+                    random.randint(0, 59),
+                )
                 tyme.data = bytes(data)
             else:
-                tyme_data = struct.pack(">HBBBBB",
-                                        random.randint(1990, 2030),
-                                        random.randint(1, 12),
-                                        random.randint(1, 31),
-                                        random.randint(0, 23),
-                                        random.randint(0, 59),
-                                        random.randint(0, 59))
+                tyme_data = struct.pack(
+                    ">HBBBBB",
+                    random.randint(1990, 2030),
+                    random.randint(1, 12),
+                    random.randint(1, 31),
+                    random.randint(0, 23),
+                    random.randint(0, 59),
+                    random.randint(0, 59),
+                )
                 chunks.insert(random.randint(1, len(chunks)), PngChunk(b"tIME", tyme_data))
         return serialize_png_chunks(chunks)[:max_len]
 
@@ -538,7 +546,16 @@ class PngChunkMutator:
         sig = bytearray(b"\x89PNG\r\n\x1a\n")
         idx = random.randint(0, 7)
         sig[idx] = random.randint(0, 255)
-        return bytes(sig) + b"".join(c.serialize() for c in [PngChunk(b"IHDR", b"\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02"), PngChunk(b"IEND", b"")])[:max_len]
+        return (
+            bytes(sig)
+            + b"".join(
+                c.serialize()
+                for c in [
+                    PngChunk(b"IHDR", b"\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02"),
+                    PngChunk(b"IEND", b""),
+                ]
+            )[:max_len]
+        )
 
     def _swap_idat_chunks(self, chunks: list[PngChunk], max_len: int) -> bytes:
         """Swap two IDAT chunks to test decompressor ordering tolerance."""

@@ -23,8 +23,9 @@ class ExecutionTimeTracker:
         timeout_factor: Multiply the selected percentile by this to get timeout.
     """
 
-    def __init__(self, window_size: int = 200, timeout_factor: float = 1.0,
-                 correction_factor: float = 1.5):
+    def __init__(
+        self, window_size: int = 200, timeout_factor: float = 1.0, correction_factor: float = 1.5
+    ):
         self.window_size = window_size
         self.timeout_factor = timeout_factor
         self.correction_factor = correction_factor
@@ -121,7 +122,7 @@ class ExecutionTimeTracker:
         # headroom, high-variance targets get more.
         mean = sum(self._sorted) / len(self._sorted)
         variance = sum((x - mean) ** 2 for x in self._sorted) / len(self._sorted)
-        std_dev = variance ** 0.5
+        std_dev = variance**0.5
         return p99 + std_dev * self.correction_factor
 
     def mean_crps(self) -> float:
@@ -169,4 +170,4 @@ class ExecutionTimeTracker:
     @property
     def std(self) -> float:
         """Standard deviation of observed execution times."""
-        return self.variance ** 0.5
+        return self.variance**0.5

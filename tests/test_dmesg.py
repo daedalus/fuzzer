@@ -122,10 +122,7 @@ class TestDmesgParser:
 
     def test_match_crash_error_code_hex(self):
         dp = DmesgParser()
-        kc = dp._match_crash(
-            1.0,
-            "[1.0] segfault at 0 ip 0000000000401000 sp 00007fff error 14"
-        )
+        kc = dp._match_crash(1.0, "[1.0] segfault at 0 ip 0000000000401000 sp 00007fff error 14")
         assert kc is not None
         assert kc.error_code == 14
 
@@ -204,6 +201,7 @@ class TestDmesgParser:
     def test_stop_stream_kill_on_timeout(self):
         dp = DmesgParser()
         import subprocess
+
         mock_proc = MagicMock()
         mock_proc.wait.side_effect = subprocess.TimeoutExpired(cmd="dmesg", timeout=2)
         dp._stream_proc = mock_proc

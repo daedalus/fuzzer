@@ -36,6 +36,7 @@ class TestCacheKey:
 
     def test_16char_hex(self):
         import re
+
         k = _cache_key("test", "mode")
         assert len(k) == 16
         assert re.fullmatch(r"[0-9a-f]{16}", k)
@@ -86,8 +87,11 @@ class TestInspectTarget:
     def test_returns_all_keys(self):
         info = _inspect_target("/nonexistent")
         expected_keys = {
-            "is_shared_lib", "coverage_type", "has_sancov_counters",
-            "has_undefined_sancov_init", "has_asan",
+            "is_shared_lib",
+            "coverage_type",
+            "has_sancov_counters",
+            "has_undefined_sancov_init",
+            "has_asan",
         }
         assert expected_keys == set(info.keys())
 
@@ -166,7 +170,7 @@ class TestFindCompiler:
 
 class TestCompileSource:
     def test_compile_success(self, tmp_path):
-        src = 'int main() { return 0; }'
+        src = "int main() { return 0; }"
         out = str(tmp_path / "test_bin")
         result = _compile_source(src, out)
         assert result is True
@@ -179,7 +183,7 @@ class TestCompileSource:
         assert result is False
 
     def test_compile_cleanup_on_success(self, tmp_path):
-        src = 'int main() { return 0; }'
+        src = "int main() { return 0; }"
         out = str(tmp_path / "test_bin")
         _compile_source(src, out)
         # Source temp file should be cleaned up
@@ -232,9 +236,11 @@ class TestBuildSancovShim:
 
     def test_builds_with_source(self, tmp_path):
         src_path = tmp_path / "sancov_shim.c"
-        src_path.write_text('void __sanitizer_cov_trace_pc_guard(void *g) { (void)g; }')
-        with patch("fuzzer_tool.adapters.shim_factory.os.path.dirname", return_value=str(tmp_path)), \
-             patch("fuzzer_tool.adapters.shim_factory._compile_source") as mock_compile:
+        src_path.write_text("void __sanitizer_cov_trace_pc_guard(void *g) { (void)g; }")
+        with (
+            patch("fuzzer_tool.adapters.shim_factory.os.path.dirname", return_value=str(tmp_path)),
+            patch("fuzzer_tool.adapters.shim_factory._compile_source") as mock_compile,
+        ):
             mock_compile.return_value = True
             result = build_sancov_shim()
             assert result is not None
@@ -243,8 +249,10 @@ class TestBuildSancovShim:
     def test_compile_failure_returns_none(self, tmp_path):
         src_path = tmp_path / "sancov_shim.c"
         src_path.write_text("invalid C code")
-        with patch("fuzzer_tool.adapters.shim_factory.os.path.dirname", return_value=str(tmp_path)), \
-             patch("fuzzer_tool.adapters.shim_factory._compile_source", return_value=False):
+        with (
+            patch("fuzzer_tool.adapters.shim_factory.os.path.dirname", return_value=str(tmp_path)),
+            patch("fuzzer_tool.adapters.shim_factory._compile_source", return_value=False),
+        ):
             result = build_sancov_shim()
             assert result is None
 
@@ -252,19 +260,29 @@ class TestBuildSancovShim:
 class TestBuildShim:
     def test_no_coverage_returns_none_type(self):
         with patch("fuzzer_tool.adapters.shim_factory._inspect_target") as mock:
-            mock.return_value = {"coverage_type": "none", "is_shared_lib": False,
-                                 "has_sancov_counters": False,
-                                 "has_undefined_sancov_init": False, "has_asan": False}
+            mock.return_value = {
+                "coverage_type": "none",
+                "is_shared_lib": False,
+                "has_sancov_counters": False,
+                "has_undefined_sancov_init": False,
+                "has_asan": False,
+            }
             result = build_shim("/fake/target")
             assert result.coverage_type == "none"
 
     def test_direct_mode_builds_minimal_shim(self):
-        with patch("fuzzer_tool.adapters.shim_factory._inspect_target") as mock, \
-             patch("fuzzer_tool.adapters.shim_factory.build_minimal_shim") as mock_build, \
-             patch("fuzzer_tool.adapters.shim_factory.parse_sancov_offsets") as mock_offsets:
-            mock.return_value = {"coverage_type": "inline_8bit", "is_shared_lib": False,
-                                 "has_sancov_counters": False,
-                                 "has_undefined_sancov_init": True, "has_asan": False}
+        with (
+            patch("fuzzer_tool.adapters.shim_factory._inspect_target") as mock,
+            patch("fuzzer_tool.adapters.shim_factory.build_minimal_shim") as mock_build,
+            patch("fuzzer_tool.adapters.shim_factory.parse_sancov_offsets") as mock_offsets,
+        ):
+            mock.return_value = {
+                "coverage_type": "inline_8bit",
+                "is_shared_lib": False,
+                "has_sancov_counters": False,
+                "has_undefined_sancov_init": True,
+                "has_asan": False,
+            }
             mock_build.return_value = "/tmp/shim.so"
             mock_offsets.return_value = (0x100, 0x200)
             result = build_shim("/fake/target", mode="direct")
@@ -273,26 +291,38 @@ class TestBuildShim:
             assert result.bitmap_size == 0x100
 
     def test_direct_mode_compile_failure(self):
-        with patch("fuzzer_tool.adapters.shim_factory._inspect_target") as mock, \
-             patch("fuzzer_tool.adapters.shim_factory.build_minimal_shim", return_value=None):
-            mock.return_value = {"coverage_type": "inline_8bit", "is_shared_lib": False,
-                                 "has_sancov_counters": False,
-                                 "has_undefined_sancov_init": True, "has_asan": False}
+        with (
+            patch("fuzzer_tool.adapters.shim_factory._inspect_target") as mock,
+            patch("fuzzer_tool.adapters.shim_factory.build_minimal_shim", return_value=None),
+        ):
+            mock.return_value = {
+                "coverage_type": "inline_8bit",
+                "is_shared_lib": False,
+                "has_sancov_counters": False,
+                "has_undefined_sancov_init": True,
+                "has_asan": False,
+            }
             result = build_shim("/fake/target", mode="direct")
             assert result.compile_error is not None
 
     def test_subprocess_mode(self):
         with patch("fuzzer_tool.adapters.shim_factory._inspect_target") as mock:
-            mock.return_value = {"coverage_type": "inline_8bit", "is_shared_lib": False,
-                                 "has_sancov_counters": False,
-                                 "has_undefined_sancov_init": True, "has_asan": False}
+            mock.return_value = {
+                "coverage_type": "inline_8bit",
+                "is_shared_lib": False,
+                "has_sancov_counters": False,
+                "has_undefined_sancov_init": True,
+                "has_asan": False,
+            }
             result = build_shim("/fake/target", mode="subprocess")
             assert result.bitmap_size == 65536
             assert result.needs_preload is False
 
     def test_uses_cache(self):
-        with patch("fuzzer_tool.adapters.shim_factory._shim_cache") as mock_cache, \
-             patch("fuzzer_tool.adapters.shim_factory._inspect_target") as mock_inspect:
+        with (
+            patch("fuzzer_tool.adapters.shim_factory._shim_cache") as mock_cache,
+            patch("fuzzer_tool.adapters.shim_factory._inspect_target") as mock_inspect,
+        ):
             mock_cache.__contains__ = lambda self, k: True
             mock_cache.__getitem__ = lambda self, k: "/cached/shim.so"
             mock_inspect.return_value = {"coverage_type": "inline_8bit", "bitmap_size": 4096}
@@ -301,12 +331,18 @@ class TestBuildShim:
                 assert result.shim_path == "/cached/shim.so"
 
     def test_direct_mode_no_offsets(self):
-        with patch("fuzzer_tool.adapters.shim_factory._inspect_target") as mock, \
-             patch("fuzzer_tool.adapters.shim_factory.build_minimal_shim") as mock_build, \
-             patch("fuzzer_tool.adapters.shim_factory.parse_sancov_offsets", return_value=None):
-            mock.return_value = {"coverage_type": "inline_8bit", "is_shared_lib": False,
-                                 "has_sancov_counters": False,
-                                 "has_undefined_sancov_init": True, "has_asan": False}
+        with (
+            patch("fuzzer_tool.adapters.shim_factory._inspect_target") as mock,
+            patch("fuzzer_tool.adapters.shim_factory.build_minimal_shim") as mock_build,
+            patch("fuzzer_tool.adapters.shim_factory.parse_sancov_offsets", return_value=None),
+        ):
+            mock.return_value = {
+                "coverage_type": "inline_8bit",
+                "is_shared_lib": False,
+                "has_sancov_counters": False,
+                "has_undefined_sancov_init": True,
+                "has_asan": False,
+            }
             mock_build.return_value = "/tmp/shim.so"
             result = build_shim("/fake/target", mode="direct")
             assert result.bitmap_size == 0

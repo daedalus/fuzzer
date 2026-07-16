@@ -4,6 +4,7 @@ RULES:
 Always create TODOs.
 Always update the README.md with the new features added.
 Always git commit and push after finish a task.
+All fuzz targets must be compiled with ASAN instrumentation (`-fsanitize=address`).
 
 
 ## Overview

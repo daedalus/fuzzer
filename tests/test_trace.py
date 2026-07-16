@@ -30,6 +30,7 @@ class TestGetExportedFunctions:
 
     def test_nm_timeout(self):
         import subprocess
+
         with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("nm", 5)):
             assert _get_exported_functions("x") == []
 
@@ -63,16 +64,21 @@ class TestTraceReport:
 
     def test_fields(self):
         r = TraceReport(
-            backtrace="#0 main", frames=[{"frame": 0, "func": "main"}],
-            registers="rax=0x0", fault_addr="0x401000",
+            backtrace="#0 main",
+            frames=[{"frame": 0, "func": "main"}],
+            registers="rax=0x0",
+            fault_addr="0x401000",
         )
         assert r.fault_addr == "0x401000"
         assert len(r.frames) == 1
 
     def test_format_with_all_sections(self):
         r = TraceReport(
-            target="/bin/test", input_size=42,
-            signal="SIGSEGV", signal_num=11, fault_addr="0x0",
+            target="/bin/test",
+            input_size=42,
+            signal="SIGSEGV",
+            signal_num=11,
+            fault_addr="0x0",
             error_msg="bad address",
             registers="rax 0x1\nrbx 0x2",
             backtrace="#0 0x100 in main at foo.c:5",
@@ -109,12 +115,14 @@ class TestTraceReport:
 class TestCrashTracer:
     def test_check_tool_exists(self):
         from fuzzer_tool.core.trace import CrashTracer
+
         tracer = CrashTracer("targets/png_read_afl.so")
         # 'which gdb' or 'which strace' — may be True or False depending on system
         assert isinstance(tracer._has_gdb, bool)
 
     def test_build_repro(self):
         from fuzzer_tool.core.trace import CrashTracer
+
         tracer = CrashTracer("targets/png_read_afl.so")
         report = TraceReport()
         tracer._build_repro(b"test data", report)
@@ -123,6 +131,7 @@ class TestCrashTracer:
 
     def test_parse_gdb_output(self):
         from fuzzer_tool.core.trace import CrashTracer
+
         tracer = CrashTracer("targets/png_read_afl.so")
         report = TraceReport()
         gdb_output = (
@@ -151,6 +160,7 @@ class TestCrashTracer:
 
     def test_parse_gdb_no_signal(self):
         from fuzzer_tool.core.trace import CrashTracer
+
         tracer = CrashTracer("targets/png_read_afl.so")
         report = TraceReport()
         tracer._parse_gdb_output("no signal here\n", report)
@@ -158,6 +168,7 @@ class TestCrashTracer:
 
     def test_save_report(self, tmp_path):
         from fuzzer_tool.core.trace import CrashTracer
+
         tracer = CrashTracer("targets/png_read_afl.so")
         report = TraceReport(backtrace="#0 test")
         crash_dir = str(tmp_path / "crashes")
@@ -167,6 +178,7 @@ class TestCrashTracer:
 
     def test_save_report_writes_format(self, tmp_path):
         from fuzzer_tool.core.trace import CrashTracer
+
         tracer = CrashTracer("targets/png_read_afl.so")
         report = TraceReport(signal="SIGSEGV", signal_num=11)
         crash_dir = str(tmp_path / "crashes")

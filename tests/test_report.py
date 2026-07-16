@@ -46,8 +46,12 @@ def _make_mock_fuzzer(**overrides):
     f.markov.is_trained.return_value = True
     f.markov.codelength_ratio.return_value = 3.5
     f.markov.corpus_perplexity.return_value = {
-        "mean": 12.0, "median": 10.0, "p10": 5.0, "p90": 20.0,
-        "low_surprise_count": 1, "high_surprise_count": 0,
+        "mean": 12.0,
+        "median": 10.0,
+        "p10": 5.0,
+        "p90": 20.0,
+        "low_surprise_count": 1,
+        "high_surprise_count": 0,
     }
     f.mc = None
     f._mopt = None
@@ -78,14 +82,22 @@ def _make_mock_fuzzer(**overrides):
     f._edge_tracker.seed_hit_counts = {"a": {1: 5, 2: 3}, "b": {3: 4}}
     f._edge_tracker.seed_edges = {"a": {1, 2}, "b": {3}}
     f._edge_tracker.edge_rarity_stats.return_value = {
-        "total": 18, "singleton": 3, "cold": 5, "warm": 7, "hot": 3,
+        "total": 18,
+        "singleton": 3,
+        "cold": 5,
+        "warm": 7,
+        "hot": 3,
         "avg_seeds_per_edge": 1.4,
     }
     f._edge_tracker.seed_uniqueness.return_value = {"a": 2, "b": 1}
     f._edge_tracker.edge_cooccurrence.return_value = [(1, 2, 0.8)]
     f._edge_tracker.good_turing_estimate.return_value = {
-        "n": 18, "n1": 5, "n2": 2, "estimated_undiscovered": 6,
-        "saturation": 0.75, "confidence": "medium",
+        "n": 18,
+        "n1": 5,
+        "n2": 2,
+        "estimated_undiscovered": 6,
+        "saturation": 0.75,
+        "confidence": "medium",
     }
     f._edge_tracker.bitmap_density.return_value = 0.0003
     f._edge_tracker.compute_corpus_diversity.return_value = 100.0
@@ -192,8 +204,12 @@ class TestReportSections:
     def test_empty_edge_tracker_no_good_turing(self):
         f = _make_mock_fuzzer()
         f._edge_tracker.good_turing_estimate.return_value = {
-            "n": 0, "n1": 0, "n2": 0, "estimated_undiscovered": 0,
-            "saturation": 0.0, "confidence": "low",
+            "n": 0,
+            "n1": 0,
+            "n2": 0,
+            "estimated_undiscovered": 0,
+            "saturation": 0.0,
+            "confidence": "low",
         }
         with tempfile.TemporaryDirectory() as td:
             report = generate_report(f, td, td)
@@ -215,6 +231,7 @@ class TestReportBranchCoverage:
     def test_mutation_effectiveness_empty(self):
         """Line 120: empty op_counts returns empty."""
         from fuzzer_tool.services.report import _mutation_effectiveness
+
         f = _make_mock_fuzzer(op_counts={}, op_success={})
         result = _mutation_effectiveness(f)
         assert result == ""
@@ -222,6 +239,7 @@ class TestReportBranchCoverage:
     def test_mdl_not_trained(self):
         """Lines 144: markov not trained → empty."""
         from fuzzer_tool.services.report import _mdl_codelength
+
         f = _make_mock_fuzzer()
         f.markov.is_trained.return_value = False
         result = _mdl_codelength(f)
@@ -230,6 +248,7 @@ class TestReportBranchCoverage:
     def test_mdl_empty_corpus(self):
         """Line 146: empty corpus → empty."""
         from fuzzer_tool.services.report import _mdl_codelength
+
         f = _make_mock_fuzzer(corpus=[])
         result = _mdl_codelength(f)
         assert result == ""
@@ -237,6 +256,7 @@ class TestReportBranchCoverage:
     def test_seed_contribution_with_coverage(self):
         """Lines 201-217: seed contribution with coverage data."""
         from fuzzer_tool.services.report import _seed_contribution
+
         f = _make_mock_fuzzer()
         f.seed_meta = {
             b"alpha": {"coverage_edges": 10, "fuzz_count": 5},
@@ -249,6 +269,7 @@ class TestReportBranchCoverage:
     def test_seed_contribution_no_coverage(self):
         """Line 194-196: seed with zero coverage → not ranked."""
         from fuzzer_tool.services.report import _seed_contribution
+
         f = _make_mock_fuzzer()
         f.seed_meta = {b"seed": {"coverage_edges": 0, "fuzz_count": 10}}
         result = _seed_contribution(f)
@@ -257,6 +278,7 @@ class TestReportBranchCoverage:
     def test_corpus_overview_empty_dir(self):
         """Line 223: non-existent dir → empty."""
         from fuzzer_tool.services.report import _corpus_overview
+
         f = _make_mock_fuzzer()
         result = _corpus_overview(f, "/nonexistent/dir")
         assert result == ""
@@ -264,6 +286,7 @@ class TestReportBranchCoverage:
     def test_corpus_overview_various_sizes(self):
         """Lines 248-255: size distribution buckets."""
         from fuzzer_tool.services.report import _corpus_overview
+
         f = _make_mock_fuzzer()
         with tempfile.TemporaryDirectory() as td:
             Path(td, "tiny.bin").write_bytes(b"x" * 50)
@@ -282,6 +305,7 @@ class TestReportBranchCoverage:
     def test_crash_analysis_with_crashes(self):
         """Lines 268-294: crash analysis with files."""
         from fuzzer_tool.services.report import _crash_analysis
+
         f = _make_mock_fuzzer()
         with tempfile.TemporaryDirectory() as td:
             Path(td, "crash1.bin").write_bytes(b"A" * 100)
@@ -294,6 +318,7 @@ class TestReportBranchCoverage:
     def test_crash_analysis_empty(self):
         """Line 268: empty crashes dir."""
         from fuzzer_tool.services.report import _crash_analysis
+
         f = _make_mock_fuzzer()
         with tempfile.TemporaryDirectory() as td:
             result = _crash_analysis(f, td)
@@ -302,6 +327,7 @@ class TestReportBranchCoverage:
     def test_crash_reproducibility_with_data(self):
         """Lines 322-334: crash reproducibility with replays."""
         from fuzzer_tool.services.report import _crash_reproducibility
+
         f = _make_mock_fuzzer()
         f.replay_n = 3
         f._crash_replays = {"sig1": [0, 0, 0], "sig2": [0, 0, -1]}
@@ -312,6 +338,7 @@ class TestReportBranchCoverage:
     def test_disk_footprint_empty(self):
         """Line 340: empty corpus dir."""
         from fuzzer_tool.services.report import _disk_footprint
+
         with tempfile.TemporaryDirectory() as td:
             result = _disk_footprint(td)
         assert result == ""
@@ -319,6 +346,7 @@ class TestReportBranchCoverage:
     def test_disk_footprint_with_small_files(self):
         """Lines 354-356: small/large file split."""
         from fuzzer_tool.services.report import _disk_footprint
+
         with tempfile.TemporaryDirectory() as td:
             Path(td, "tiny.bin").write_bytes(b"x" * 50)
             Path(td, "big.bin").write_bytes(b"x" * 500)
@@ -329,6 +357,7 @@ class TestReportBranchCoverage:
     def test_bandit_calibration_with_data(self):
         """Lines 363-377: bandit calibration with Brier score."""
         from fuzzer_tool.services.report import _bandit_calibration
+
         f = _make_mock_fuzzer()
         f.mc = MagicMock()
         f.mc_bandit = True
@@ -341,6 +370,7 @@ class TestReportBranchCoverage:
     def test_bandit_calibration_zero_brier(self):
         """Line 364: zero Brier score → empty."""
         from fuzzer_tool.services.report import _bandit_calibration
+
         f = _make_mock_fuzzer()
         f.mc = MagicMock()
         f.mc_bandit = True
@@ -351,6 +381,7 @@ class TestReportBranchCoverage:
     def test_execution_time_warning(self):
         """Line 395: CRPS rising → warning."""
         from fuzzer_tool.services.report import _execution_time_analysis
+
         f = _make_mock_fuzzer()
         f._exec_time_tracker.crps_trend.return_value = 0.01
         result = _execution_time_analysis(f)
@@ -359,6 +390,7 @@ class TestReportBranchCoverage:
     def test_execution_time_few_observations(self):
         """Line 383: fewer than 10 observations → empty."""
         from fuzzer_tool.services.report import _execution_time_analysis
+
         f = _make_mock_fuzzer()
         f._exec_time_tracker.count = 5
         result = _execution_time_analysis(f)
@@ -367,6 +399,7 @@ class TestReportBranchCoverage:
     def test_crash_exploitability_with_metadata(self):
         """Lines 442-460: crash exploitability from JSON metadata."""
         from fuzzer_tool.services.report import _crash_exploitability
+
         f = _make_mock_fuzzer()
         with tempfile.TemporaryDirectory() as td:
             Path(td, "crash1.json").write_text(json.dumps({"exploitability": "HIGH"}))
@@ -378,6 +411,7 @@ class TestReportBranchCoverage:
     def test_crash_exploitability_corrupt_json(self):
         """Line 450: corrupt JSON → skip."""
         from fuzzer_tool.services.report import _crash_exploitability
+
         f = _make_mock_fuzzer()
         with tempfile.TemporaryDirectory() as td:
             Path(td, "bad.json").write_text("not json {{{")
@@ -387,6 +421,7 @@ class TestReportBranchCoverage:
     def test_crash_exploitability_nonexistent_dir(self):
         """Line 442: non-existent crashes dir → empty."""
         from fuzzer_tool.services.report import _crash_exploitability
+
         f = _make_mock_fuzzer()
         result = _crash_exploitability(f, "/nonexistent")
         assert result == ""
@@ -394,6 +429,7 @@ class TestReportBranchCoverage:
     def test_edge_map_empty_seen(self):
         """Line 469: no edges seen → empty."""
         from fuzzer_tool.services.report import _edge_map_analysis
+
         f = _make_mock_fuzzer()
         f.shm_cov._seen = bytearray(65536)
         result = _edge_map_analysis(f)
@@ -402,6 +438,7 @@ class TestReportBranchCoverage:
     def test_edge_map_no_shm_cov(self):
         """Line 464: no shm_cov → empty."""
         from fuzzer_tool.services.report import _edge_map_analysis
+
         f = _make_mock_fuzzer(shm_cov=None)
         result = _edge_map_analysis(f)
         assert result == ""
@@ -409,6 +446,7 @@ class TestReportBranchCoverage:
     def test_edge_map_end_of_sequence(self):
         """Line 483: edge runs to end of map."""
         from fuzzer_tool.services.report import _edge_map_analysis
+
         f = _make_mock_fuzzer()
         seen = bytearray(65536)
         seen[65530] = 1
@@ -420,4 +458,5 @@ class TestReportBranchCoverage:
     def test_human_size_mb(self):
         """Lines 505-508: MB path."""
         from fuzzer_tool.services.report import _human_size
+
         assert _human_size(2 * 1024 * 1024) == "2.0MB"

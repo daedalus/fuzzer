@@ -51,9 +51,7 @@ class TestDifferentialTracker:
         assert "signature" in dt.drift_description.lower() or dt.last_kl_signature > 0.0
 
     def test_extract_signature_asan(self):
-        sig = DifferentialTracker._extract_signature(
-            "AddressSanitizer: heap-buffer-overflow", 0
-        )
+        sig = DifferentialTracker._extract_signature("AddressSanitizer: heap-buffer-overflow", 0)
         assert sig.startswith("asan:")
 
     def test_extract_signature_signal(self):
@@ -70,11 +68,13 @@ class TestDifferentialTracker:
 
     def test_kl_divergence_identical(self):
         from collections import Counter
+
         p = Counter({0: 10, 1: 10})
         assert DifferentialTracker._kl_divergence(p, p) == 0.0
 
     def test_kl_divergence_different(self):
         from collections import Counter
+
         p = Counter({0: 10})
         q = Counter({1: 10})
         kl = DifferentialTracker._kl_divergence(p, q)
@@ -82,6 +82,7 @@ class TestDifferentialTracker:
 
     def test_kl_smoothing_prevents_zero(self):
         from collections import Counter
+
         p = Counter({0: 10})
         q = Counter({99: 10})
         # Category 0 in p but not in q — smoothing prevents log(0)

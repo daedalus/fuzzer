@@ -51,7 +51,7 @@ class TestSignalCrashCodes:
     def test_known_codes(self):
         assert 134 in SIGNAL_CRASH_CODES  # SIGABRT
         assert -11 in SIGNAL_CRASH_CODES  # SIGSEGV
-        assert -6 in SIGNAL_CRASH_CODES   # SIGABRT
+        assert -6 in SIGNAL_CRASH_CODES  # SIGABRT
 
 
 class TestRunTargetStdin:
@@ -71,6 +71,7 @@ class TestRunTargetStdin:
         # cat blocks on stdin, so it won't exit until EOF — but communicate()
         # sends data and waits. Use a command that truly blocks.
         import subprocess as sp
+
         proc = sp.Popen(["/bin/sleep", "3600"])
         rc, stderr, pid = run_target_stdin(f"/proc/{proc.pid}/exe", b"", timeout=0.1)
         proc.kill()

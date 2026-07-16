@@ -1,6 +1,5 @@
 """Tests for adapters/persistent.py — PersistentRunner init and error paths."""
 
-
 from fuzzer_tool.adapters.persistent import PersistentRunner
 
 

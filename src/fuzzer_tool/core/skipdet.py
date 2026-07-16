@@ -170,7 +170,9 @@ class SkipDetector:
 
         log.debug(
             "SkipDet eff map: %d/%d effective bytes (%d execs)",
-            sum(eff_map), length, exec_count,
+            sum(eff_map),
+            length,
+            exec_count,
         )
         return eff_map
 
@@ -239,6 +241,7 @@ class SkipDetector:
 
         log.debug(
             "SkipDet inference: %d execs, eff_map has %d effective bytes",
-            exec_count, sum(1 for b in eff_map if b),
+            exec_count,
+            sum(1 for b in eff_map if b),
         )
         return eff_map
