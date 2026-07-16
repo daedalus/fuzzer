@@ -472,9 +472,27 @@ class StatsReporter:
         crps_str = ""
         if f._exec_time_tracker.count > 20:
             crps_str = f" | crps: {f._exec_time_tracker.mean_crps():.4f}"
+        # Shannon entropy and Simpson's diversity of edge hit distribution
+        ent_str = ""
+        simp_str = ""
+        if f._edge_tracker._global_edge_hits:
+            sh = f._edge_tracker.shannon_entropy_global()
+            simp = f._edge_tracker.simpson_diversity_global()
+            ent_str = f" | ent: {sh:.2f}"
+            simp_str = f" | simp: {simp:.2f}"
+        # Entropy rate of change
+        rate_str = ""
+        if hasattr(f, "_entropy_history") and len(f._entropy_history) >= 2:
+            recent = f._entropy_history[-10:]
+            if len(recent) >= 2:
+                dt = recent[-1][0] - recent[0][0]
+                if dt > 0:
+                    dS = recent[-1][1] - recent[0][1]
+                    entropy_rate = dS / dt
+                    rate_str = f" | dS/dt: {entropy_rate:+.4f}"
         line = (
             f"[*] execs: {f.exec_count} | corpus: {len(f.corpus)} | "
             f"crashes: {f.crash_count}{sig_str}{timeout_str} | eps: {eps:.0f} | "
-            f"time: {elapsed:.0f}s{rss_str}{ops_str}{dict_str}{markov_str}{cov_str}{mc_str}{div_str}{jac_str}{dr_str}{density_str}{repro_str}{brier_str}{crps_str}"
+            f"time: {elapsed:.0f}s{rss_str}{ops_str}{dict_str}{markov_str}{cov_str}{mc_str}{div_str}{jac_str}{dr_str}{density_str}{repro_str}{brier_str}{crps_str}{ent_str}{simp_str}{rate_str}"
         )
         print(line, flush=True)
