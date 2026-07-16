@@ -493,6 +493,9 @@ class Fuzzer:
             else None
         )
 
+        # Entropy rate tracking: (exec_count, shannon_entropy) samples
+        self._entropy_history: list[tuple[int, float]] = []
+
         # Directed distance for targeted fuzzing
         self._distance = None
         self._distance_targets = targets
@@ -1433,6 +1436,12 @@ class Fuzzer:
                 self.fuzz_one(seed)
                 i += 1
                 if i % 100 == 0:
+                    # Sample Shannon entropy for rate-of-change tracking
+                    if self._edge_tracker._global_edge_hits:
+                        sh = self._edge_tracker.shannon_entropy_global()
+                        self._entropy_history.append((self.exec_count, sh))
+                        if len(self._entropy_history) > 200:
+                            self._entropy_history = self._entropy_history[-100:]
                     self.print_stats()
                     self._append_coverage_log()
                     self._record_discovery_snapshot()
@@ -1443,8 +1452,21 @@ class Fuzzer:
                         and execs_since_edge >= self._stall_threshold
                         and self.exec_count > 0
                     ):
+                        # Entropy rate confirmation: if entropy is also flat,
+                        # this is genuine stagnation, not redistribution
+                        entropy_flat = True
+                        if len(self._entropy_history) >= 4:
+                            recent = self._entropy_history[-4:]
+                            dt = recent[-1][0] - recent[0][0]
+                            if dt > 0:
+                                dS = abs(recent[-1][1] - recent[0][1])
+                                entropy_rate = dS / dt
+                                entropy_flat = entropy_rate < 0.001
+                        reason = "no new edges"
+                        if entropy_flat:
+                            reason += " + flat entropy"
                         self._stall_recovery_count += 1
-                        print(f"\n[*] STALL #{self._stall_recovery_count}: no new edges in "
+                        print(f"\n[*] STALL #{self._stall_recovery_count}: {reason} in "
                               f"{execs_since_edge} execs, switching to random mode")
                         self._stall_recovery_active = True
                     # Periodic GC to return freed memory to OS

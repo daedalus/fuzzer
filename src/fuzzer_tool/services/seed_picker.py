@@ -265,6 +265,35 @@ class SeedPicker:
                     penalty = overlap / max(len(seed_edges), 1)
                     w *= max(0.3, 1.0 - penalty * 0.5)
 
+            # Input-level Shannon entropy bonus: seeds whose hit-count
+            # distribution has unusual entropy (relative to corpus mean)
+            # are behaviorally distinct. Boost seeds with entropy far from
+            # the mean — they exercise edges in an unusual pattern.
+            seed_sh = f._edge_tracker.shannon_entropy_seed(seed_key)
+            if seed_sh > 0 and len(f._edge_tracker.seed_hit_counts) >= 3:
+                # Compute corpus mean entropy (cached)
+                if not hasattr(self, "_mean_seed_entropy"):
+                    self._mean_seed_entropy = 0.0
+                    self._mean_entropy_cache_key = -1
+                cache_key = len(f._edge_tracker.seed_hit_counts)
+                if cache_key != self._mean_entropy_cache_key:
+                    entropies = [
+                        f._edge_tracker.shannon_entropy_seed(k)
+                        for k in f._edge_tracker.seed_hit_counts
+                        if f._edge_tracker.shannon_entropy_seed(k) > 0
+                    ]
+                    self._mean_seed_entropy = (
+                        sum(entropies) / len(entropies) if entropies else 0.0
+                    )
+                    self._mean_entropy_cache_key = cache_key
+                if self._mean_seed_entropy > 0:
+                    # z-score like: boost if far from mean
+                    deviation = abs(seed_sh - self._mean_seed_entropy) / max(
+                        self._mean_seed_entropy, 0.01
+                    )
+                    # Boost up to 1.5x for high deviation
+                    w *= 1.0 + min(deviation, 1.0) * 0.5
+
             if f._distance:
                 seed_dist = meta.get("avg_distance", f._distance.max_distance)
                 max_d = f._distance.max_distance
