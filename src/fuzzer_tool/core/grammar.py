@@ -101,7 +101,9 @@ class Grammar:
                 tokens.append(("lit", bytes(m.group(2), "utf-8")))
             elif m.group(3) is not None:
                 lo, hi = int(m.group(4)), int(m.group(5))
-                tokens.append(("repeat", m.group(3), min(lo, _MAX_REPEAT), min(hi, _MAX_REPEAT)))
+                clamped_lo = min(lo, _MAX_REPEAT)
+                clamped_hi = min(hi, _MAX_REPEAT)
+                tokens.append(("repeat", m.group(3), clamped_lo, max(clamped_hi, clamped_lo)))
             elif m.group(6) is not None:
                 n = min(int(m.group(7)), _MAX_REPEAT)
                 tokens.append(("repeat", m.group(6), n, n))
@@ -142,7 +144,9 @@ class Grammar:
         """Expand a rule into bytes."""
         if depth <= 0 or name not in self.rules:
             if depth <= 0:
-                log.warning("Grammar recursion depth exhausted at rule '%s' — possible cyclic grammar", name)
+                log.warning(
+                    "Grammar recursion depth exhausted at rule '%s' — possible cyclic grammar", name
+                )
             else:
                 log.debug("Grammar unknown rule: %s (depth=%d)", name, depth)
             return b"?"
@@ -319,6 +323,7 @@ def load_grammar(spec: str | Path) -> Grammar:
 # Tree-level AST and mutations (Superion/Nautilus-style)
 # ---------------------------------------------------------------------------
 
+
 class TreeNode:
     """Node in a parse tree for grammar-aware mutation.
 
@@ -455,7 +460,7 @@ class TreeMutator:
         children.append(TreeNode(rule="delim", data=open_b))
 
         # Parse contents: split by top-level commas (for JSON objects/arrays)
-        inner = data[len(open_b):-len(close_b)] if len(data) > len(open_b) + len(close_b) else b""
+        inner = data[len(open_b) : -len(close_b)] if len(data) > len(open_b) + len(close_b) else b""
         if inner:
             elements = self._split_top_level(inner)
             for elem in elements:
@@ -619,7 +624,8 @@ class TreeMutator:
         targets = tree.collect_interior()
         # Filter to rules with multiple alternatives
         multi_targets = [
-            n for n in targets
+            n
+            for n in targets
             if n.rule in self.grammar.rules and len(self.grammar.rules[n.rule]) > 1
         ]
         if not multi_targets:
@@ -681,10 +687,7 @@ class TreeMutator:
         for _ in range(max_rounds):
             tree = self.parse(best)
             # Collect all non-root interior nodes with children
-            candidates = [
-                n for n in tree.collect_interior()
-                if n is not tree and n.children
-            ]
+            candidates = [n for n in tree.collect_interior() if n is not tree and n.children]
             if not candidates:
                 break
 
@@ -701,9 +704,7 @@ class TreeMutator:
                     clone_node = clone_node.children[idx]
                 target_idx = path[-1]
                 # Replace with empty
-                clone_node.children[target_idx] = TreeNode(
-                    rule=node.rule, data=b""
-                )
+                clone_node.children[target_idx] = TreeNode(rule=node.rule, data=b"")
                 candidate = clone.serialize()
                 if candidate and candidate != best and still_crashes(candidate):
                     best = candidate
@@ -719,18 +720,35 @@ class TreeMutator:
 # ---------------------------------------------------------------------------
 
 # PNG chunk types that control code paths in libpng
-_IHDR_TYPES = {b"IHDR", b"PLTE", b"tRNS", b"IDAT", b"IEND",
-               b"bKGD", b"cHRM", b"gAMA", b"hIST", b"iCCP",
-               b"sBIT", b"sCAL", b"pHYs", b"sPLT", b"tEXt",
-               b"iTXt", b"zTXt", b"fdAT", b"fcTL"}
+_IHDR_TYPES = {
+    b"IHDR",
+    b"PLTE",
+    b"tRNS",
+    b"IDAT",
+    b"IEND",
+    b"bKGD",
+    b"cHRM",
+    b"gAMA",
+    b"hIST",
+    b"iCCP",
+    b"sBIT",
+    b"sCAL",
+    b"pHYs",
+    b"sPLT",
+    b"tEXt",
+    b"iTXt",
+    b"zTXt",
+    b"fdAT",
+    b"fcTL",
+}
 
 # Valid IHDR bit depths per color type
 _IHDR_BIT_DEPTHS = {
-    0: [1, 2, 4, 8, 16],       # grayscale
-    2: [8, 16],                  # RGB
-    3: [1, 2, 4, 8],             # indexed
-    4: [8, 16],                  # grayscale+alpha
-    6: [8, 16],                  # RGBA
+    0: [1, 2, 4, 8, 16],  # grayscale
+    2: [8, 16],  # RGB
+    3: [1, 2, 4, 8],  # indexed
+    4: [8, 16],  # grayscale+alpha
+    6: [8, 16],  # RGBA
 }
 
 # Valid color types
@@ -743,7 +761,6 @@ from fuzzer_tool.core.png_mutations import (
     parse_png_chunks,
     serialize_png_chunks,
 )
-
 
 
 # Re-export PngChunkMutator from dedicated module for backwards compatibility
