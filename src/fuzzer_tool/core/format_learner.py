@@ -9,7 +9,7 @@ Maps the schema-harness control loop to the fuzzer's observation space:
   mechanism: how mutations in positions affect coverage paths
 
 The learner maintains:
-- A Timeline of (input, mutation_op, position, coverage_delta, sanitizer)
+- A Timeline of (input_hash, mutation_op, position, coverage_delta, sanitizer)
 - Candidate field hypotheses with confidence scores
 - A backtested format model that predicts coverage consequences of mutations
 
@@ -20,6 +20,7 @@ Core loop:
   4. Only trust hypotheses that survive full backtest
 """
 
+import hashlib
 import logging
 import math
 import random
@@ -27,6 +28,8 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 log = logging.getLogger(__name__)
+
+BACKTEST_INTERVAL = 500  # run backtest every N recorded transitions
 
 
 @dataclass
@@ -47,17 +50,18 @@ class FieldHypothesis:
 
 @dataclass
 class TimelineEntry:
-    """One observation in the append-only Timeline."""
-    input_bytes: bytes
+    """One observation in the append-only Timeline.
+
+    Stores input_hash (16 bytes) instead of full input to save memory.
+    """
+    input_hash: str  # SHA256 prefix for identification
     mutation_op: str
     mutation_offset: int
     mutation_width: int
-    coverage_before: int  # number of edges before
-    coverage_after: int   # number of edges after
-    new_edges: set        # which edges were newly discovered
-    lost_edges: set       # which edges disappeared
-    sanitizer_output: str
-    exec_time_ms: float
+    coverage_before: int
+    coverage_after: int
+    new_edges: set
+    lost_edges: set
 
 
 class FormatLearner:
@@ -70,14 +74,15 @@ class FormatLearner:
     - Action for discovery: selects mutations that discriminate hypotheses
     """
 
-    def __init__(self, max_timeline: int = 10000):
+    def __init__(self, max_timeline: int = 5000):
         self.timeline: list[TimelineEntry] = []
         self.max_timeline = max_timeline
         self.hypotheses: list[FieldHypothesis] = []
-        self.field_map: dict[int, FieldHypothesis] = {}  # offset -> hypothesis
+        self.field_map: dict[int, FieldHypothesis] = {}
         self.backtest_passes: int = 0
         self.backtest_fails: int = 0
         self.format_model_version: int = 0
+        self._transitions_since_backtest: int = 0
 
     def record_transition(
         self,
@@ -89,12 +94,15 @@ class FormatLearner:
         coverage_after: int,
         new_edges: set,
         lost_edges: set,
-        sanitizer_output: str = "",
-        exec_time_ms: float = 0.0,
     ):
-        """Append a real transition to the Timeline."""
+        """Append a real transition to the Timeline.
+
+        Stores only input hash, not full bytes, to save memory.
+        """
+        input_hash = hashlib.sha256(input_bytes).hexdigest()[:16]
+
         entry = TimelineEntry(
-            input_bytes=input_bytes,
+            input_hash=input_hash,
             mutation_op=mutation_op,
             mutation_offset=mutation_offset,
             mutation_width=mutation_width,
@@ -102,15 +110,20 @@ class FormatLearner:
             coverage_after=coverage_after,
             new_edges=new_edges,
             lost_edges=lost_edges,
-            sanitizer_output=sanitizer_output,
-            exec_time_ms=exec_time_ms,
         )
         self.timeline.append(entry)
         if len(self.timeline) > self.max_timeline:
             self.timeline = self.timeline[-self.max_timeline:]
 
-        # Update hypotheses from this observation
         self._update_hypotheses(entry)
+
+        # Periodic backtest
+        self._transitions_since_backtest += 1
+        if self._transitions_since_backtest >= BACKTEST_INTERVAL:
+            self._transitions_since_backtest = 0
+            ok, desc = self.backtest()
+            if not ok:
+                log.debug("Backtest failed: %s", desc)
 
     def _update_hypotheses(self, entry: TimelineEntry):
         """Update field hypotheses based on a new observation."""
@@ -119,7 +132,6 @@ class FormatLearner:
         delta = entry.coverage_after - entry.coverage_before
         has_effect = delta != 0 or entry.new_edges or entry.lost_edges
 
-        # Check if we already have a hypothesis for this region
         existing = None
         for h in self.hypotheses:
             if h.offset <= offset < h.offset + h.width:
@@ -133,14 +145,11 @@ class FormatLearner:
                     existing.sensitive_ops.get(entry.mutation_op, 0) + 1
                 )
                 existing.controlled_edges.update(entry.new_edges)
-                # Increase confidence when multiple ops affect this field
                 if len(existing.sensitive_ops) >= 2:
                     existing.confidence = min(1.0, existing.confidence + 0.1)
             else:
-                # Mutation had no effect — might be outside the field
                 existing.confidence = max(0.0, existing.confidence - 0.02)
         elif has_effect:
-            # New sensitive region discovered
             h = FieldHypothesis(
                 offset=offset,
                 width=max(width, 1),
@@ -153,7 +162,6 @@ class FormatLearner:
             self.hypotheses.append(h)
             self.field_map[offset] = h
 
-        # Classify fields based on accumulated evidence
         self._classify_fields()
 
     def _classify_fields(self):
@@ -162,35 +170,22 @@ class FormatLearner:
             if h.observations < 3:
                 continue
 
-            # Magic bytes: sensitive at offset 0, few observations needed
             if h.offset == 0 and h.confidence > 0.5:
                 h.field_type = "magic"
                 continue
-
-            # Length fields: changing them causes large coverage deltas
             if len(h.controlled_edges) > 5 and h.confidence > 0.4:
                 h.field_type = "length"
                 continue
-
-            # CRC fields: sensitive to many different ops (any bit change invalidates)
             if len(h.sensitive_ops) > 3 and h.confidence > 0.3:
                 h.field_type = "crc"
                 continue
-
-            # Data/content: many observations, moderate sensitivity
             if h.observations > 10 and h.confidence > 0.2:
                 h.field_type = "data"
                 continue
-
             h.field_type = "unknown"
 
     def backtest(self) -> tuple[bool, Optional[str]]:
-        """Replay the ENTIRE Timeline through the current format model.
-
-        Returns (all_match, first_mismatch_description).
-        Only checks transitions where the model has enough information
-        to make a prediction (i.e., the relevant hypothesis exists).
-        """
+        """Replay the ENTIRE Timeline through the current format model."""
         if not self.hypotheses:
             return True, None
 
@@ -202,10 +197,8 @@ class FormatLearner:
                 or bool(entry.lost_edges)
             )
 
-            # Only check transitions where the model can actually predict
-            # (i.e., we have a hypothesis covering this offset or op)
             if predicted_effect is None:
-                continue  # model doesn't know about this region yet
+                continue
 
             if predicted_effect != actual_effect:
                 self.backtest_fails += 1
@@ -223,45 +216,29 @@ class FormatLearner:
         return True, None
 
     def _predict_effect(self, entry: TimelineEntry):
-        """Predict whether a mutation should affect coverage based on hypotheses.
-
-        Returns True if model predicts effect, False if model predicts no effect,
-        or None if the model doesn't have enough information to predict.
-        """
+        """Predict whether a mutation should affect coverage."""
         offset = entry.mutation_offset
-        # Check if offset falls within any known sensitive field
         for h in self.hypotheses:
             if h.offset <= offset < h.offset + h.width and h.confidence > 0.3:
                 return True
-        # Check if mutation op is known to be effective
         for h in self.hypotheses:
             if entry.mutation_op in h.sensitive_ops and h.confidence > 0.3:
                 return True
-        # No hypothesis covers this region — model can't predict
-        if not self.hypotheses:
-            return None
-        return None  # uncertain, not "no effect"
+        return None
 
     def suggest_discriminating_mutation(self, candidates: list[str]) -> Optional[tuple[str, int]]:
-        """Suggest a mutation that would discriminate between hypotheses.
-
-        Returns (mutation_op, offset) or None if no discrimination needed.
-        """
+        """Suggest a mutation that would discriminate between hypotheses."""
         if len(self.hypotheses) < 2:
             return None
 
-        # Find two hypotheses with different predicted effects for the same mutation
         for i, h1 in enumerate(self.hypotheses):
             for h2 in self.hypotheses[i + 1:]:
                 if h1.field_type != h2.field_type:
-                    # Try mutations at h1's offset — h1 should react, h2 shouldn't
                     for op in candidates:
                         if op in h1.sensitive_ops and op not in h2.sensitive_ops:
                             return (op, h1.offset)
                         if op not in h1.sensitive_ops and op in h2.sensitive_ops:
                             return (op, h2.offset)
-
-        # No discrimination needed — all hypotheses agree
         return None
 
     def get_format_summary(self) -> dict:
@@ -294,7 +271,7 @@ class FormatLearner:
         return {
             "timeline": [
                 {
-                    "input_hex": e.input_bytes[:64].hex(),
+                    "input_hash": e.input_hash,
                     "op": e.mutation_op,
                     "offset": e.mutation_offset,
                     "width": e.mutation_width,
@@ -303,7 +280,7 @@ class FormatLearner:
                     "new_edges": list(e.new_edges),
                     "lost_edges": list(e.lost_edges),
                 }
-                for e in self.timeline[-1000:]  # keep last 1000
+                for e in self.timeline[-1000:]
             ],
             "hypotheses": [
                 {
@@ -327,7 +304,7 @@ class FormatLearner:
         self.timeline = []
         for e in state.get("timeline", []):
             self.timeline.append(TimelineEntry(
-                input_bytes=bytes.fromhex(e["input_hex"]),
+                input_hash=e.get("input_hash", ""),
                 mutation_op=e["op"],
                 mutation_offset=e["offset"],
                 mutation_width=e["width"],
@@ -335,8 +312,6 @@ class FormatLearner:
                 coverage_after=e["cov_after"],
                 new_edges=set(e.get("new_edges", [])),
                 lost_edges=set(e.get("lost_edges", [])),
-                sanitizer_output="",
-                exec_time_ms=0.0,
             ))
         self.hypotheses = []
         for h in state.get("hypotheses", []):

@@ -22,18 +22,35 @@ class TestFormatLearnerInit:
             coverage_after=15,
             new_edges={100, 101, 102},
             lost_edges=set(),
-            sanitizer_output="",
-            exec_time_ms=1.0,
         )
         assert len(fl.timeline) == 1
         assert fl.timeline[0].mutation_op == "bit_flip"
         assert fl.timeline[0].new_edges == {100, 101, 102}
+        # Verify input_hash is stored, not raw bytes
+        assert len(fl.timeline[0].input_hash) == 16
+
+    def test_timeline_stores_hash_not_bytes(self):
+        fl = FormatLearner()
+        data = b"\x00" * 10000  # large input
+        fl.record_transition(
+            input_bytes=data,
+            mutation_op="bit_flip",
+            mutation_offset=0,
+            mutation_width=1,
+            coverage_before=10,
+            coverage_after=15,
+            new_edges={100},
+            lost_edges=set(),
+        )
+        # Timeline should only store 16-byte hash, not 10KB
+        entry = fl.timeline[0]
+        assert len(entry.input_hash) == 16
+        assert not hasattr(entry, "input_bytes")
 
 
 class TestHypothesisBuilding:
     def test_sensitive_offset_creates_hypothesis(self):
         fl = FormatLearner()
-        # Multiple mutations at offset 0 that affect coverage
         for i in range(5):
             fl.record_transition(
                 input_bytes=b"\x89PNG" + b"\x00" * 12,
@@ -45,7 +62,6 @@ class TestHypothesisBuilding:
                 new_edges={100 + i},
                 lost_edges=set(),
             )
-        # Should have a hypothesis for offset 0
         assert len(fl.hypotheses) >= 1
         h = fl.hypotheses[0]
         assert h.offset == 0
@@ -53,7 +69,6 @@ class TestHypothesisBuilding:
 
     def test_no_effect_no_hypothesis(self):
         fl = FormatLearner()
-        # Mutations that don't affect coverage
         for i in range(5):
             fl.record_transition(
                 input_bytes=b"\x00" * 16,
@@ -65,14 +80,12 @@ class TestHypothesisBuilding:
                 new_edges=set(),
                 lost_edges=set(),
             )
-        # Should not create hypothesis for non-sensitive region
         assert len(fl.hypotheses) == 0
 
 
 class TestFieldClassification:
     def test_magic_bytes_classification(self):
         fl = FormatLearner()
-        # Offset 0 sensitive with multiple ops → should be classified as magic
         ops = ["bit_flip", "bit_offset_flip", "byte_flip"]
         for i in range(6):
             fl.record_transition(
@@ -92,7 +105,6 @@ class TestFieldClassification:
 
     def test_length_field_classification(self):
         fl = FormatLearner()
-        # Offset 4 with many controlled edges and multiple ops → length field
         ops = ["arithmetic", "endianness_swap", "transpose_32"]
         for i in range(6):
             fl.record_transition(
@@ -120,7 +132,6 @@ class TestBacktest:
 
     def test_backtest_passes_with_consistent_model(self):
         fl = FormatLearner()
-        # Build a consistent model: offset 0 is always sensitive
         for i in range(5):
             fl.record_transition(
                 input_bytes=b"\x89PNG\r\n\x1a\n",
@@ -133,13 +144,10 @@ class TestBacktest:
                 lost_edges=set(),
             )
         ok, desc = fl.backtest()
-        # Backtest replays the timeline — mutations at offset 0 had effects
-        # and our model predicts effects at offset 0, so it should pass
         assert ok is True
 
     def test_backtest_fails_with_inconsistent_model(self):
         fl = FormatLearner()
-        # Build model: offset 0 is sensitive
         for i in range(3):
             fl.record_transition(
                 input_bytes=b"\x89PNG",
@@ -151,8 +159,6 @@ class TestBacktest:
                 new_edges={100 + i},
                 lost_edges=set(),
             )
-        # Now add a transition where offset 5 (unknown) has an effect
-        # but the model doesn't know about it
         fl.record_transition(
             input_bytes=b"\x00" * 20,
             mutation_op="arithmetic",
@@ -164,11 +170,28 @@ class TestBacktest:
             lost_edges=set(),
         )
         ok, desc = fl.backtest()
-        # The model should fail because offset 5 had an effect
-        # but the model doesn't predict it (unless the arithmetic op
-        # happens to be in the sensitive_ops of offset 0)
-        # This depends on the exact model logic — just verify it runs
         assert isinstance(ok, bool)
+
+
+class TestPeriodicBacktest:
+    def test_backtest_triggered_at_interval(self):
+        fl = FormatLearner(max_timeline=100)
+        from fuzzer_tool.core.format_learner import BACKTEST_INTERVAL
+
+        # Record enough transitions to trigger backtest
+        for i in range(BACKTEST_INTERVAL + 1):
+            fl.record_transition(
+                input_bytes=b"\x00" * 16,
+                mutation_op="bit_flip",
+                mutation_offset=0,
+                mutation_width=1,
+                coverage_before=10,
+                coverage_after=15,
+                new_edges={100 + i},
+                lost_edges=set(),
+            )
+        # backtest should have been called at least once
+        assert fl.backtest_passes + fl.backtest_fails >= 1
 
 
 class TestDiscriminatingMutation:
@@ -178,7 +201,6 @@ class TestDiscriminatingMutation:
 
     def test_suggestion_with_different_field_types(self):
         fl = FormatLearner()
-        # Create two hypotheses with different types
         h1 = FieldHypothesis(offset=0, width=1, field_type="magic", confidence=0.8,
                              sensitive_ops={"bit_flip": 5})
         h2 = FieldHypothesis(offset=8, width=4, field_type="length", confidence=0.6,
@@ -187,7 +209,6 @@ class TestDiscriminatingMutation:
         fl.field_map = {0: h1, 8: h2}
 
         suggestion = fl.suggest_discriminating_mutation(["bit_flip", "arithmetic"])
-        # Should suggest a mutation that discriminates
         if suggestion:
             op, offset = suggestion
             assert op in ["bit_flip", "arithmetic"]
@@ -215,6 +236,7 @@ class TestSerialization:
         fl2.load_state(state)
         assert len(fl2.timeline) == 1
         assert fl2.timeline[0].mutation_op == "bit_flip"
+        assert fl2.timeline[0].input_hash == fl.timeline[0].input_hash
 
     def test_format_summary(self):
         fl = FormatLearner()

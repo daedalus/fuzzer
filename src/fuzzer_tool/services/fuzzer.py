@@ -1071,8 +1071,8 @@ class Fuzzer:
         if self._crash_mi:
             self._crash_mi.record(mutated, is_crash)
 
-        # Format learner: record mutation → coverage transition
-        if self._format_learner and self._last_ops_used:
+        # Format learner: only record when coverage actually changes
+        if self._format_learner and self._last_ops_used and has_new_coverage:
             edge_bitmap = self._get_current_edge_bitmap()
             new_edges = set()
             lost_edges = set()
@@ -1090,15 +1090,17 @@ class Fuzzer:
             self._format_learner.record_transition(
                 input_bytes=mutated,
                 mutation_op=self._last_ops_used[0] if self._last_ops_used else "unknown",
-                mutation_offset=0,  # approximate — full buffer mutation
+                mutation_offset=0,
                 mutation_width=len(mutated),
                 coverage_before=cov_before,
                 coverage_after=cov_after,
                 new_edges=new_edges,
                 lost_edges=lost_edges,
-                sanitizer_output=stderr[:200] if stderr else "",
-                exec_time_ms=t_elapsed * 1000,
             )
+        elif self._format_learner:
+            eb = self._get_current_edge_bitmap()
+            if eb:
+                self._prev_edge_bitmap = bytes(eb)
 
         # Write ablation log row: signal data + outcome
         if self._ablation_file and hasattr(self, "_last_pick_signals"):
