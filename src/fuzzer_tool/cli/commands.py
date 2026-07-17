@@ -213,6 +213,7 @@ def cmd_fuzz(args):
         cmplog=args.cmplog,
         max_corpus=args.max_corpus,
         minimize_every_execs=getattr(args, "minimize_every_execs", 0),
+        prune_corpus_max_memory=getattr(args, "prune_corpus_max_memory", 80),
         no_shm=args.no_shm,
         resume=args.resume,
         trace_crashes=args.trace,
@@ -874,6 +875,12 @@ def main() -> int:
         type=int,
         default=0,
         help="Fire corpus minimization every N executions (0=disabled)",
+    )
+    fuzz_parser.add_argument(
+        "--prune-corpus-on-max-memory",
+        type=int,
+        default=80,
+        help="Auto-prune corpus when RSS exceeds N%% of total RAM (0=disabled, default=80)",
     )
     fuzz_parser.add_argument(
         "--resume",

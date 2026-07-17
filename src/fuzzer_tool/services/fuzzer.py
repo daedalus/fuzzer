@@ -147,6 +147,7 @@ class Fuzzer:
         cmplog=False,
         max_corpus=0,
         minimize_every_execs=0,
+        prune_corpus_max_memory=80,
         no_shm=False,
         resume=False,
         trace_crashes=False,
@@ -207,6 +208,8 @@ class Fuzzer:
         self.target_args = target_args or []
         self.max_corpus = max_corpus
         self.minimize_every_execs = minimize_every_execs
+        self.prune_corpus_max_memory = prune_corpus_max_memory
+        self._last_memory_prune_exec = 0
         self.coverage_report = Path(coverage_report) if coverage_report else None
         self.coverage_log = Path(coverage_log) if coverage_log else None
         if self.coverage_log:
@@ -876,6 +879,43 @@ class Fuzzer:
     def _deprioritize_near_duplicates(self):
         return self._corpus_manager.deprioritize_near_duplicates()
 
+    def _check_memory_and_prune(self):
+        """Check RSS against total RAM and prune corpus if threshold exceeded.
+
+        Uses /proc/meminfo for total RAM and getrusage for current RSS.
+        Only triggers once per 1000 execs to avoid constant polling overhead.
+        """
+        if self.prune_corpus_max_memory <= 0:
+            return
+        if self.exec_count - self._last_memory_prune_exec < 1000:
+            return
+        self._last_memory_prune_exec = self.exec_count
+
+        try:
+            rss_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    if line.startswith("MemTotal:"):
+                        total_kb = int(line.split()[1])
+                        break
+                else:
+                    return
+        except (OSError, ValueError):
+            return
+
+        used_pct = (rss_kb / total_kb) * 100
+        if used_pct >= self.prune_corpus_max_memory:
+            before = len(self.corpus)
+            log.warning(
+                "Memory usage %.1f%% exceeds %d%% threshold — pruning corpus",
+                used_pct, self.prune_corpus_max_memory,
+            )
+            self._auto_minimize_corpus()
+            after = len(self.corpus)
+            if after < before:
+                print(f"\n[*] MEMORY PRUNE: {before} → {after} seeds "
+                      f"(RSS {rss_kb // 1024}MB / {total_kb // 1024}MB, {used_pct:.1f}%)")
+
     def _pick_seed(self):
         return self._seed_picker.pick_seed()
 
@@ -1502,6 +1542,8 @@ class Fuzzer:
                         and self.exec_count > 0
                     ):
                         self._maybe_trigger_stall_recovery(execs_since_edge)
+                    # Memory-based corpus pruning
+                    self._check_memory_and_prune()
                     # Periodic GC to return freed memory to OS
                     if i % 500 == 0:
                         import gc
