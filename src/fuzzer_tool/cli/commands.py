@@ -584,6 +584,119 @@ def cmd_rank(args):
     return 0
 
 
+def cmd_ppmd(args):
+    """Analyze corpus compressibility with PPMD and generate distribution graph."""
+    import math
+    from pathlib import Path
+    from fuzzer_tool.core.corpus_compression import CorpusCompressor
+    from fuzzer_tool.adapters.filesystem import load_corpus
+    from fuzzer_tool.core.bloom import BloomFilter
+
+    corpus_dir = Path(args.corpus)
+    if not corpus_dir.exists():
+        print(f"Error: corpus directory {corpus_dir} not found")
+        return 1
+
+    bloom = BloomFilter(capacity=100_000)
+    bloom.init_fuzzy(max_recent=200)
+    corpus, _ = load_corpus(corpus_dir, bloom)
+
+    if not corpus:
+        print(f"No seeds found in {corpus_dir}")
+        return 1
+
+    print(f"Corpus: {corpus_dir} ({len(corpus)} seeds)")
+    cc = CorpusCompressor()
+
+    # Compute ratios
+    ratios = []
+    sizes = []
+    for seed in corpus:
+        ratio = cc.compute_seed_ratio(seed)
+        ratios.append(ratio)
+        sizes.append(len(seed))
+
+    ratios.sort()
+    n = len(ratios)
+    mean_r = sum(ratios) / n
+    var_r = sum((r - mean_r) ** 2 for r in ratios) / n
+    std_r = math.sqrt(var_r)
+
+    print(f"\n--- PPMD Compression Statistics ---")
+    print(f"  Seeds:           {n}")
+    print(f"  Mean ratio:      {mean_r:.4f}")
+    print(f"  Std deviation:   {std_r:.4f}")
+    print(f"  Median ratio:    {ratios[n // 2]:.4f}")
+    print(f"  Min ratio:       {ratios[0]:.4f} (most compressible)")
+    print(f"  Max ratio:       {ratios[-1]:.4f} (most novel)")
+    print(f"  Total raw:       {sum(sizes):,} bytes")
+    print(f"  Total compressed:{sum(int(s * r) for s, r in zip(sizes, ratios)):,} bytes")
+    print(f"  Corpus ratio:    {sum(int(s * r) for s, r in zip(sizes, ratios)) / sum(sizes):.4f}")
+
+    # Top N most/least novel
+    scored = list(enumerate(ratios))
+    scored.sort(key=lambda x: x[1])
+    top = min(args.top, n)
+    print(f"\n  Top {top} most novel (highest ratio):")
+    for i in range(max(0, n - top), n):
+        idx, r = scored[i]
+        print(f"    [{idx:4d}] ratio={r:.4f}  size={sizes[idx]}B")
+
+    print(f"\n  Top {top} most redundant (lowest ratio):")
+    for i in range(top):
+        idx, r = scored[i]
+        print(f"    [{idx:4d}] ratio={r:.4f}  size={sizes[idx]}B")
+
+    # Generate graph
+    if args.graph:
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+            import numpy as np
+
+            fig, ax = plt.subplots(figsize=(10, 6))
+
+            # Histogram of PPMD ratios
+            ax.hist(ratios, bins=min(50, max(10, n // 5)), alpha=0.7,
+                    color="#2196F3", edgecolor="white", label="PPMD ratios")
+
+            # Normal distribution curve
+            x = np.linspace(max(0, mean_r - 3 * std_r), min(1, mean_r + 3 * std_r), 200)
+            if std_r > 0:
+                y = np.exp(-0.5 * ((x - mean_r) / std_r) ** 2) / (std_r * math.sqrt(2 * math.pi))
+                y_scaled = y * n * (ratios[-1] - ratios[0]) / min(50, max(10, n // 5))
+                ax.plot(x, y_scaled, "r-", linewidth=2, label=f"Normal (μ={mean_r:.3f}, σ={std_r:.3f})")
+
+            ax.set_xlabel("PPMD Compression Ratio", fontsize=12)
+            ax.set_ylabel("Count", fontsize=12)
+            ax.set_title(f"Corpus PPMD Compression Distribution ({n} seeds)", fontsize=14)
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+
+            # Add stats annotation
+            stats_text = (
+                f"Mean: {mean_r:.4f}\n"
+                f"Std:  {std_r:.4f}\n"
+                f"Min:  {ratios[0]:.4f}\n"
+                f"Max:  {ratios[-1]:.4f}\n"
+                f"Median: {ratios[n//2]:.4f}"
+            )
+            ax.text(0.98, 0.95, stats_text, transform=ax.transAxes,
+                    fontsize=10, verticalalignment="top", horizontalalignment="right",
+                    bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5))
+
+            plt.tight_layout()
+            plt.savefig(args.graph, dpi=150)
+            print(f"\n  Graph saved to: {args.graph}")
+        except ImportError:
+            print("\n  Warning: matplotlib not installed, skipping graph generation")
+        except Exception as e:
+            print(f"\n  Error generating graph: {e}")
+
+    return 0
+
+
 def cmd_estimate(args):
     """Estimate executions to first crash."""
     from fuzzer_tool.core.crash_eta import (
@@ -1154,6 +1267,29 @@ def main() -> int:
         help="Number of calibration executions (default: 1000)",
     )
     est_parser.set_defaults(func=cmd_estimate)
+
+    # --- ppmd ---
+    ppmd_parser = subparsers.add_parser(
+        "ppmd",
+        help="Analyze corpus compressibility with PPMD",
+    )
+    ppmd_parser.add_argument(
+        "-d", "--corpus",
+        required=True,
+        help="Corpus directory",
+    )
+    ppmd_parser.add_argument(
+        "-g", "--graph",
+        default=None,
+        help="Output graph PNG file (e.g. graph.png)",
+    )
+    ppmd_parser.add_argument(
+        "--top",
+        type=int,
+        default=10,
+        help="Show top N most/least novel seeds (default: 10)",
+    )
+    ppmd_parser.set_defaults(func=cmd_ppmd)
 
     args = parser.parse_args()
 
