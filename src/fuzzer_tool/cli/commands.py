@@ -218,6 +218,7 @@ def cmd_fuzz(args):
         resume=args.resume,
         trace_crashes=args.trace,
         learn_format=getattr(args, "learn_format", False),
+        corpus_ppmd=getattr(args, "corpus_ppmd", False),
         inprocess=args.inprocess,
         inprocess_direct=args.inprocess_direct,
         inprocess_func=args.inprocess_func,
@@ -897,6 +898,11 @@ def main() -> int:
         "--learn-format",
         action="store_true",
         help="Enable format structure learner (schema-harness methodology)",
+    )
+    fuzz_parser.add_argument(
+        "--corpus-ppmd",
+        action="store_true",
+        help="Enable PPMD-based corpus compression for seed novelty scoring",
     )
     fuzz_parser.add_argument(
         "--crash-codes",

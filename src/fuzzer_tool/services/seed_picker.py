@@ -302,6 +302,12 @@ class SeedPicker:
                 dist_weight = math.exp(-norm_dist * 5.0 * alpha)
                 w *= (1.0 - alpha) + alpha * dist_weight
 
+            # PPMD novelty: seeds that compress poorly are more diverse
+            if getattr(f, "_ppmd", None) and f._ppmd.enabled:
+                novelty = f._ppmd.compute_seed_novelty(seed)
+                # Boost up to 1.5x for maximally novel seeds
+                w *= 1.0 + novelty * 0.5
+
             if f._profile.hot_functions and f._profile.functions:
                 hot_density = sum(
                     f._profile.functions[fn].branch_density

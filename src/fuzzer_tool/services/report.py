@@ -837,6 +837,23 @@ def _format_learning(f) -> str:
     except (TypeError, AttributeError):
         lines.append("  Status:          not available")
 
+    # PPMD corpus compression stats
+    ppmd = getattr(f, "_ppmd", None)
+    if ppmd and getattr(ppmd, "enabled", False) and f.corpus:
+        try:
+            stats = ppmd.compute_corpus_stats(f.corpus)
+            lines.append("")
+            lines.append("  PPMD Compression:")
+            lines.append(f"    Corpus ratio:   {stats['corpus_ratio']:.4f} (lower=more novel)")
+            lines.append(f"    Mean ratio:     {stats['mean_ratio']:.4f}")
+            lines.append(f"    Median ratio:   {stats['median_ratio']:.4f}")
+            lines.append(f"    Min ratio:      {stats['min_ratio']:.4f} (most novel)")
+            lines.append(f"    Max ratio:      {stats['max_ratio']:.4f} (most redundant)")
+            lines.append(f"    Total raw:      {stats['total_raw']:,} bytes")
+            lines.append(f"    Total compressed:{stats['total_compressed']:,} bytes")
+        except (TypeError, AttributeError):
+            pass
+
     return "\n".join(lines)
 
 

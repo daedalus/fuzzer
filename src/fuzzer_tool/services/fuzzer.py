@@ -152,6 +152,7 @@ class Fuzzer:
         resume=False,
         trace_crashes=False,
         learn_format=False,
+        corpus_ppmd=False,
         seed=42,
         extra_crash_codes=None,
         replay_n=0,
@@ -471,6 +472,13 @@ class Fuzzer:
             from fuzzer_tool.core.format_learner import FormatLearner
 
             self._format_learner = FormatLearner(max_timeline=10000)
+
+        # Corpus PPMD compression for seed novelty scoring
+        self._ppmd = None
+        if corpus_ppmd:
+            from fuzzer_tool.core.corpus_compression import CorpusCompressor
+
+            self._ppmd = CorpusCompressor()
 
         # Elo rating system for operator scheduling
         self._use_elo = elo

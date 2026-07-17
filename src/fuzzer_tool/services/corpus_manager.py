@@ -396,7 +396,12 @@ class CorpusManager:
 
                 wasserstein_weight = f._edge_tracker.compute_wasserstein_weight(seed_key)
 
-                score = edge_score * wasserstein_weight
+                # PPMD novelty: incompressible seeds are more diverse
+                ppmd_bonus = 1.0
+                if getattr(f, "_ppmd", None) and f._ppmd.enabled:
+                    ppmd_bonus = 1.0 + f._ppmd.compute_seed_novelty(seed) * 0.5
+
+                score = edge_score * wasserstein_weight * ppmd_bonus
                 scored.append((score, seed))
             scored.sort(key=lambda x: x[0], reverse=True)
             keep = min(target_size, len(scored))
