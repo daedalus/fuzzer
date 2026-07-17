@@ -151,6 +151,7 @@ class Fuzzer:
         no_shm=False,
         resume=False,
         trace_crashes=False,
+        learn_format=False,
         seed=42,
         extra_crash_codes=None,
         replay_n=0,
@@ -465,9 +466,11 @@ class Fuzzer:
         self._csd = CriticalSlowingDown(window_size=50, rise_threshold=1.5, min_observations=20)
 
         # Format structure learner (schema-harness methodology)
-        from fuzzer_tool.core.format_learner import FormatLearner
+        self._format_learner = None
+        if learn_format:
+            from fuzzer_tool.core.format_learner import FormatLearner
 
-        self._format_learner = FormatLearner(max_timeline=10000)
+            self._format_learner = FormatLearner(max_timeline=10000)
 
         # Elo rating system for operator scheduling
         self._use_elo = elo
@@ -1061,7 +1064,7 @@ class Fuzzer:
             self._crash_mi.record(mutated, is_crash)
 
         # Format learner: record mutation → coverage transition
-        if self._last_ops_used:
+        if self._format_learner and self._last_ops_used:
             edge_bitmap = self._get_current_edge_bitmap()
             new_edges = set()
             lost_edges = set()

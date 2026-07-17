@@ -217,6 +217,7 @@ def cmd_fuzz(args):
         no_shm=args.no_shm,
         resume=args.resume,
         trace_crashes=args.trace,
+        learn_format=getattr(args, "learn_format", False),
         inprocess=args.inprocess,
         inprocess_direct=args.inprocess_direct,
         inprocess_func=args.inprocess_func,
@@ -891,6 +892,11 @@ def main() -> int:
         "--trace",
         action="store_true",
         help="Generate GDB backtrace + strace reports for crash inputs",
+    )
+    fuzz_parser.add_argument(
+        "--learn-format",
+        action="store_true",
+        help="Enable format structure learner (schema-harness methodology)",
     )
     fuzz_parser.add_argument(
         "--crash-codes",

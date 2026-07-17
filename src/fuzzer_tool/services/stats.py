@@ -492,7 +492,7 @@ class StatsReporter:
                     rate_str = f" | dS/dt: {entropy_rate:+.4f}"
         # Format learner summary
         fmt_str = ""
-        if hasattr(f, "_format_learner") and f._format_learner.hypotheses:
+        if getattr(f, "_format_learner", None) and f._format_learner.hypotheses:
             fl = f._format_learner
             classified = sum(1 for h in fl.hypotheses if h.field_type != "unknown")
             fmt_str = f" | fmt: {classified}/{len(fl.hypotheses)} fields v{fl.format_model_version}"
