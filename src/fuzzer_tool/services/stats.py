@@ -490,9 +490,15 @@ class StatsReporter:
                     dS = recent[-1][1] - recent[0][1]
                     entropy_rate = dS / dt
                     rate_str = f" | dS/dt: {entropy_rate:+.4f}"
+        # Format learner summary
+        fmt_str = ""
+        if hasattr(f, "_format_learner") and f._format_learner.hypotheses:
+            fl = f._format_learner
+            classified = sum(1 for h in fl.hypotheses if h.field_type != "unknown")
+            fmt_str = f" | fmt: {classified}/{len(fl.hypotheses)} fields v{fl.format_model_version}"
         line = (
             f"[*] execs: {f.exec_count} | corpus: {len(f.corpus)} | "
             f"crashes: {f.crash_count}{sig_str}{timeout_str} | eps: {eps:.0f} | "
-            f"time: {elapsed:.0f}s{rss_str}{ops_str}{dict_str}{markov_str}{cov_str}{mc_str}{div_str}{jac_str}{dr_str}{density_str}{repro_str}{brier_str}{crps_str}{ent_str}{simp_str}{rate_str}"
+            f"time: {elapsed:.0f}s{rss_str}{ops_str}{dict_str}{markov_str}{cov_str}{mc_str}{div_str}{jac_str}{dr_str}{density_str}{repro_str}{brier_str}{crps_str}{ent_str}{simp_str}{rate_str}{fmt_str}"
         )
         print(line, flush=True)

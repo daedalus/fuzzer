@@ -464,6 +464,11 @@ class Fuzzer:
 
         self._csd = CriticalSlowingDown(window_size=50, rise_threshold=1.5, min_observations=20)
 
+        # Format structure learner (schema-harness methodology)
+        from fuzzer_tool.core.format_learner import FormatLearner
+
+        self._format_learner = FormatLearner(max_timeline=10000)
+
         # Elo rating system for operator scheduling
         self._use_elo = elo
         self._elo = None
@@ -1054,6 +1059,35 @@ class Fuzzer:
         # Record crash MI: I(byte_position; crash_outcome)
         if self._crash_mi:
             self._crash_mi.record(mutated, is_crash)
+
+        # Format learner: record mutation → coverage transition
+        if self._last_ops_used:
+            edge_bitmap = self._get_current_edge_bitmap()
+            new_edges = set()
+            lost_edges = set()
+            if edge_bitmap and hasattr(self, "_prev_edge_bitmap") and self._prev_edge_bitmap:
+                for i in range(min(len(edge_bitmap), len(self._prev_edge_bitmap))):
+                    if edge_bitmap[i] and not self._prev_edge_bitmap[i]:
+                        new_edges.add(i)
+                    elif not edge_bitmap[i] and self._prev_edge_bitmap[i]:
+                        lost_edges.add(i)
+            if edge_bitmap:
+                self._prev_edge_bitmap = bytes(edge_bitmap)
+
+            cov_before = len(new_edges) if new_edges else 0
+            cov_after = len(self._edge_tracker._global_edge_hits) if hasattr(self._edge_tracker, "_global_edge_hits") else 0
+            self._format_learner.record_transition(
+                input_bytes=mutated,
+                mutation_op=self._last_ops_used[0] if self._last_ops_used else "unknown",
+                mutation_offset=0,  # approximate — full buffer mutation
+                mutation_width=len(mutated),
+                coverage_before=cov_before,
+                coverage_after=cov_after,
+                new_edges=new_edges,
+                lost_edges=lost_edges,
+                sanitizer_output=stderr[:200] if stderr else "",
+                exec_time_ms=t_elapsed * 1000,
+            )
 
         # Write ablation log row: signal data + outcome
         if self._ablation_file and hasattr(self, "_last_pick_signals"):
