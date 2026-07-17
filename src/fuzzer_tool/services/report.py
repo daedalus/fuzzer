@@ -67,6 +67,7 @@ def generate_report(fuzzer, corpus_dir: str, crashes_dir: str) -> str:
     sections.append(_mutation_effectiveness(fuzzer))
     sections.append(_operator_diversity(fuzzer))
     sections.append(_entropy_metrics(fuzzer))
+    sections.append(_format_learning(fuzzer))
     sections.append(_elo_ratings(fuzzer))
     sections.append(_bandit_calibration(fuzzer))
     sections.append(_fuzzing_strategy(fuzzer))
@@ -774,6 +775,67 @@ def _entropy_metrics(f) -> str:
                 lines.append(f"  Corpus byte entropy: {byte_ent:.2f} bits (max=8.0)")
         except (TypeError, ValueError):
             pass
+
+    return "\n".join(lines)
+
+
+def _format_learning(f) -> str:
+    """Format structure learning results (schema-harness methodology)."""
+    fl = getattr(f, "_format_learner", None)
+    if fl is None:
+        return ""
+
+    lines = ["", "--- Format Structure Learning ---"]
+
+    try:
+        if not fl.hypotheses and not fl.timeline:
+            lines.append("  Status:          not enabled or no data collected")
+            return "\n".join(lines)
+    except (TypeError, AttributeError):
+        lines.append("  Status:          not available (mock object)")
+        return "\n".join(lines)
+
+    try:
+        # Overview
+        summary = fl.get_format_summary()
+        lines.append(f"  Timeline:        {summary['timeline_size']} transitions recorded")
+        lines.append(f"  Hypotheses:      {summary['hypotheses']} total, {summary['classified']} classified")
+        lines.append(f"  Model version:   {summary['model_version']}")
+        lines.append(f"  Backtest:        {summary['backtest_passes']} passes, {summary['backtest_fails']} fails")
+
+        # Backtest verdict
+        passes = int(summary['backtest_passes'])
+        fails = int(summary['backtest_fails'])
+        if passes > 0 and fails == 0:
+            lines.append("  Model status:    CERTIFIED (all backtests passed)")
+        elif fails > 0:
+            lines.append("  Model status:    UNCERTIFIED (backtest failures detected)")
+        else:
+            lines.append("  Model status:    PENDING (no backtest run yet)")
+
+        # Field map
+        if summary["fields"]:
+            lines.append("")
+            lines.append("  Inferred format fields:")
+            lines.append(f"    {'Offset':>8s}  {'Width':>5s}  {'Type':>10s}  {'Conf':>5s}  {'Obs':>4s}  Controlled edges")
+            lines.append(f"    {'------':>8s}  {'-----':>5s}  {'----':>10s}  {'----':>5s}  {'---':>4s}  {'---------------'}")
+            for field in summary["fields"]:
+                lines.append(
+                    f"    {field['offset']:>8d}  {field['width']:>5d}  {field['type']:>10s}  "
+                    f"{field['confidence']:>5.2f}  {field['observations']:>4d}  {field['controlled_edges']}"
+                )
+
+        # Discriminating probe suggestion
+        try:
+            probe = fl.suggest_discriminating_mutation(list(f.op_counts.keys()) if f.op_counts else [])
+            if probe and isinstance(probe, tuple) and len(probe) == 2:
+                op, offset = probe
+                lines.append(f"\n  Suggested probe: {op} at offset {offset}")
+        except (TypeError, AttributeError, ValueError):
+            pass
+
+    except (TypeError, AttributeError):
+        lines.append("  Status:          not available")
 
     return "\n".join(lines)
 
