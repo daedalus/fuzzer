@@ -66,6 +66,7 @@ def generate_report(fuzzer, corpus_dir: str, crashes_dir: str) -> str:
     sections.append(_coverage_analysis(fuzzer))
     sections.append(_mutation_effectiveness(fuzzer))
     sections.append(_operator_diversity(fuzzer))
+    sections.append(_entropy_metrics(fuzzer))
     sections.append(_elo_ratings(fuzzer))
     sections.append(_bandit_calibration(fuzzer))
     sections.append(_fuzzing_strategy(fuzzer))
@@ -698,6 +699,81 @@ def _operator_diversity(f) -> str:
     # Effective operators (those that found new coverage or crashes)
     effective = [op for op, c in f.op_success.items() if c > 0]
     lines.append(f"  Effective ops:    {len(effective)}/{len(f.op_counts)} produced results")
+
+    return "\n".join(lines)
+
+
+def _entropy_metrics(f) -> str:
+    """Entropy and diversity metrics for coverage and corpus analysis."""
+    import math
+
+    lines = ["", "--- Entropy & Diversity Metrics ---"]
+
+    # Shannon entropy of edge hits
+    if f._edge_tracker and f._edge_tracker._global_edge_hits:
+        try:
+            ent = float(f._edge_tracker.shannon_entropy_global())
+            simp = float(f._edge_tracker.simpson_diversity_global())
+            n_edges = len(f._edge_tracker._global_edge_hits)
+            max_ent = math.log2(n_edges) if n_edges > 1 else 0
+            lines.append(f"  Edge entropy:     {ent:.2f} bits (max={max_ent:.2f})")
+            lines.append(f"  Simpson diversity:{simp:.4f} (0=monoculture, 1=uniform)")
+        except (TypeError, ValueError):
+            lines.append("  Edge entropy:     n/a")
+            lines.append("  Simpson diversity:n/a")
+    else:
+        lines.append("  Edge entropy:     n/a (no coverage data)")
+        lines.append("  Simpson diversity:n/a")
+
+    # Coverage uniformity via Rényi spectrum
+    if f._edge_tracker and f._edge_tracker._global_edge_hits:
+        try:
+            hits = f._edge_tracker._global_edge_hits
+            total = sum(hits.values())
+            if total > 0:
+                max_hit = max(hits.values())
+                h_inf = -math.log2(max_hit / total) if max_hit > 0 else 0
+                h_0 = math.log2(len(hits))
+                uniformity = h_inf / h_0 if h_0 > 0 else 1.0
+                lines.append(f"  Coverage uniformity: {uniformity:.4f} (1.0=perfectly uniform)")
+        except (TypeError, ValueError):
+            pass
+
+    # Entropy rate of change
+    if hasattr(f, "_entropy_history") and isinstance(f._entropy_history, list) and len(f._entropy_history) >= 2:
+        try:
+            recent = f._entropy_history[-10:]
+            if len(recent) >= 2:
+                dt = recent[-1][0] - recent[0][0]
+                if dt > 0:
+                    dS = recent[-1][1] - recent[0][1]
+                    rate = dS / dt
+                    label = "rising" if rate > 0.001 else ("falling" if rate < -0.001 else "flat")
+                    lines.append(f"  Entropy rate (dS/dt): {rate:+.6f} ({label})")
+                    lines.append(f"  Entropy samples:     {len(f._entropy_history)} (window={recent[-1][0] - recent[0][0]} execs)")
+        except (TypeError, IndexError):
+            pass
+    else:
+        lines.append("  Entropy rate:     n/a (insufficient samples)")
+
+    # Byte entropy of corpus
+    if f.corpus and isinstance(f.corpus, list):
+        try:
+            byte_counts = [0] * 256
+            total_bytes = 0
+            for seed in f.corpus:
+                for b in seed:
+                    byte_counts[b] += 1
+                    total_bytes += 1
+            if total_bytes > 0:
+                byte_ent = 0.0
+                for c in byte_counts:
+                    if c > 0:
+                        p = c / total_bytes
+                        byte_ent -= p * math.log2(p)
+                lines.append(f"  Corpus byte entropy: {byte_ent:.2f} bits (max=8.0)")
+        except (TypeError, ValueError):
+            pass
 
     return "\n".join(lines)
 
