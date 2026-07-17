@@ -101,6 +101,13 @@ def _cleanup_tmp_dir(path: Path) -> None:
         log.debug("Failed to clean up %s", path, exc_info=True)
 
 
+# ── Entropy rate tracking constants ─────────────────────────────────
+ENTROPY_HISTORY_MAX = 200      # max samples before trimming
+ENTROPY_HISTORY_TRIM = 100     # keep this many after trim
+ENTROPY_WINDOW = 4             # samples for rate-of-change computation
+ENTROPY_FLAT_THRESHOLD = 0.001 # rate below which entropy is "flat"
+
+
 class Fuzzer:
     def __init__(
         self,
@@ -1302,25 +1309,25 @@ class Fuzzer:
     def _record_entropy_sample(self, sh):
         """Append a Shannon-entropy sample and trim history to a bounded size."""
         self._entropy_history.append((self.exec_count, sh))
-        if len(self._entropy_history) > 200:
-            self._entropy_history = self._entropy_history[-100:]
+        if len(self._entropy_history) > ENTROPY_HISTORY_MAX:
+            self._entropy_history = self._entropy_history[-ENTROPY_HISTORY_TRIM:]
 
     def _compute_entropy_flat(self):
         """Return whether the recent Shannon-entropy rate of change is flat.
 
-        Returns True if entropy has been flat over the last 4 samples,
+        Returns True if entropy has been flat over the last N samples,
         False if it is still changing (redistribution, not stagnation),
         or None if there aren't enough samples yet to measure the rate.
         """
-        if len(self._entropy_history) < 4:
+        if len(self._entropy_history) < ENTROPY_WINDOW:
             return None
-        recent = self._entropy_history[-4:]
+        recent = self._entropy_history[-ENTROPY_WINDOW:]
         dt = recent[-1][0] - recent[0][0]
         if dt <= 0:
             return None
         dS = abs(recent[-1][1] - recent[0][1])
         entropy_rate = dS / dt
-        return entropy_rate < 0.001
+        return entropy_rate < ENTROPY_FLAT_THRESHOLD
 
     def _maybe_trigger_stall_recovery(self, execs_since_edge):
         """Activate stall recovery unless entropy shows active redistribution.
