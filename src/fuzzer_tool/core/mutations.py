@@ -60,6 +60,24 @@ INTERESTING_UNSIGNED_32 = [
 
 LENGTH_BOUNDARIES = [0, 1, 2, 3, 4, 5, 7, 8, 15, 16, 31, 32, 63, 64, 127, 128, 255, 256, 512, 1024, 4096]
 
+# Data lengths near AVX2/SSE2 SIMD boundaries — exercises _mm256_loadu_si256
+# overread guards and scalar fallback paths
+SIMD_BOUNDARIES = [15, 16, 17, 31, 32, 33, 47, 48, 49, 63, 64, 65]
+
+# Regex backtracking bomb patterns — stress regcomp/regexec
+REGEX_BOMBS = [
+    "(a+)+",
+    "(?:a|b?)*",
+    "(?:x{1,}){1,}",
+    "^(a+)+$",
+    "((a){1,}){1,}",
+    "(a|ab)+",
+    "([a-zA-Z]+)*$",
+    "(?:a{2,})+",
+    "(a?){1,}a{1,}",
+    "(?:xx|x)+",
+]
+
 ARITHMETIC_DELTAS = [1, 2, 4, 8, 16, 32, 64, 128]
 
 ARITH_MAX = 35
@@ -101,6 +119,8 @@ MUTATIONS = [
     "bit_transpose_64",
     "bit_offset_flip",
     "bit_offset_span",
+    "simd_boundary",
+    "regex_bomb",
 ]
 
 # Format-aware mutations: structure-aware operators for specific file formats.

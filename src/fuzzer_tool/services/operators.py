@@ -71,6 +71,35 @@ class OperatorEngine:
             bit_idx = bit_offset & 7
             buf[byte_idx] ^= 1 << bit_idx
 
+    def _op_simd_boundary(self, buf, _byte_idx, _data):
+        """Resize buffer to SIMD boundary lengths (AVX2: 32, SSE2: 16)."""
+        from fuzzer_tool.core.mutations import SIMD_BOUNDARIES
+
+        if not buf:
+            buf.extend(random.randint(0, 255) for _ in range(random.choice(SIMD_BOUNDARIES)))
+            return
+        target_len = random.choice(SIMD_BOUNDARIES)
+        current_len = len(buf)
+        if target_len == current_len:
+            return
+        elif target_len < current_len:
+            del buf[target_len:]
+        else:
+            grow = min(target_len - current_len, self.f.max_len - current_len)
+            if grow > 0:
+                buf.extend(random.randint(0, 255) for _ in range(grow))
+
+    def _op_regex_bomb(self, buf, _byte_idx, _data):
+        """Replace input with a known regex backtracking bomb pattern."""
+        from fuzzer_tool.core.mutations import REGEX_BOMBS
+
+        pattern = random.choice(REGEX_BOMBS).encode()
+        if len(buf) < len(pattern):
+            buf.extend(b'\x00' * (len(pattern) - len(buf)))
+        # Insert bomb at random position
+        pos = random.randint(0, max(0, len(buf) - len(pattern)))
+        buf[pos:pos + len(pattern)] = pattern
+
     def _op_byte_flip(self, buf, byte_idx, _data):
         if buf:
             buf[byte_idx] ^= 0xFF
@@ -565,6 +594,8 @@ class OperatorEngine:
             "bit_flip": self._op_bit_flip,
             "bit_offset_flip": self._op_bit_offset_flip,
             "bit_offset_span": self._op_bit_offset_span,
+            "simd_boundary": self._op_simd_boundary,
+            "regex_bomb": self._op_regex_bomb,
             "byte_flip": self._op_byte_flip,
             "interesting_8": self._op_interesting_8,
             "interesting_16": self._op_interesting_16,
