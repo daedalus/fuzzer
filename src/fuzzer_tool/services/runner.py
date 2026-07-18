@@ -21,6 +21,7 @@ import time
 
 from fuzzer_tool.adapters.process import (
     SIGNAL_CRASH_CODES,
+    run_target_fast,
     run_target_file,
     run_target_stdin,
 )
@@ -93,6 +94,12 @@ class TargetRunner:
             env["__AFL_SHM_ID"] = shm.env_id
         if f._cmplog:
             env = f._cmplog.setup_env(env)
+
+        # Fast path: posix_spawn + temp file (no threads, no watchdog)
+        if not f.file_mode and not f._cmplog:
+            rc, stderr, pid = run_target_fast(f.target, data, env=env)
+            f._last_child_pid = pid
+            return rc, stderr
 
         if f.file_mode:
             rc, stderr, pid = run_target_file(
