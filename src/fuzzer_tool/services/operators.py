@@ -370,9 +370,17 @@ class OperatorEngine:
             if recs:
                 target_len = random.choice(recs)
             else:
-                target_len = random.choice(LENGTH_BOUNDARIES)
+                target_len = random.choices(
+                    LENGTH_BOUNDARIES,
+                    weights=[10, 10, 10, 10, 10, 10, 10, 10, 8, 8, 8, 8,
+                             6, 6, 4, 4, 3, 3, 2, 2, 1],
+                )[0]
         else:
-            target_len = random.choice(LENGTH_BOUNDARIES)
+            target_len = random.choices(
+                LENGTH_BOUNDARIES,
+                weights=[10, 10, 10, 10, 10, 10, 10, 10, 8, 8, 8, 8,
+                         6, 6, 4, 4, 3, 3, 2, 2, 1],
+            )[0]
         current_len = len(buf)
         if target_len == current_len:
             return
