@@ -129,6 +129,19 @@ fuzzer-tool fuzz targets/png_read -c -D dictionaries/png.dict -g dictionaries/pn
 # ASAN fuzzing (auto-detected, catches heap-buffer-overflow, use-after-free, etc.)
 fuzzer-tool fuzz targets/asan_target
 
+# fgrep SIMD/regex/BMH search fuzzing
+fuzzer-tool fuzz targets/fgrep_read
+
+# fgrep-specific fuzz targets (ASAN-instrumented)
+# Regex compilation — adversarial patterns against regcomp()
+fuzzer-tool fuzz targets/fuzz_regex_compile
+
+# Pattern matching — fixed patterns, fuzzed data against regexec/SIMD search
+fuzzer-tool fuzz targets/fuzz_pattern_match
+
+# Full search pipeline — end-to-end search_data() with SIMD, regex, output
+fuzzer-tool fuzz targets/fuzz_search_pipeline
+
 # Resume a previous fuzzing session
 fuzzer-tool fuzz ./target -c --resume
 
