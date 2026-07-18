@@ -108,6 +108,18 @@ ENTROPY_WINDOW = 4             # samples for rate-of-change computation
 ENTROPY_FLAT_THRESHOLD = 0.001 # rate below which entropy is "flat"
 
 
+def _detect_afl(target_path: str) -> bool:
+    """Check if a binary has AFL edge coverage instrumentation."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["nm", target_path], capture_output=True, text=True, timeout=5,
+        )
+        return "__afl_area" in result.stdout or "__afl_map_shm" in result.stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
 class Fuzzer:
     def __init__(
         self,
@@ -1518,9 +1530,13 @@ class Fuzzer:
         if self.multi_targets:
             print(f"[*] Multi-target: {len(self.multi_targets)} targets, shared corpus")
             for i, t in enumerate(self.multi_targets):
-                print(f"  [{i}] {t}")
+                afl = _detect_afl(t)
+                tag = " [AFL]" if afl else " [no-AFL]"
+                print(f"  [{i}] {t}{tag}")
         else:
             print(f"[*] Target: {self.target}")
+            if _detect_afl(self.target):
+                print(f"[*] AFL instrumentation: detected")
         # Static branch density: conditional branches per KB of .text
         from fuzzer_tool.core.elf import branch_density
 
