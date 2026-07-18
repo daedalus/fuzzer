@@ -121,6 +121,10 @@ MUTATIONS = [
     "bit_offset_span",
     "simd_boundary",
     "regex_bomb",
+    "clone_fixed",
+    "overwrite_copy",
+    "overwrite_fixed",
+    "redqueen_xform",
 ]
 
 # Format-aware mutations: structure-aware operators for specific file formats.

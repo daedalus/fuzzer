@@ -100,6 +100,73 @@ class OperatorEngine:
         pos = random.randint(0, max(0, len(buf) - len(pattern)))
         buf[pos:pos + len(pattern)] = pattern
 
+    def _op_clone_fixed(self, buf, _byte_idx, _data):
+        """Insert a block of repeated constant bytes (AFL++ clone_fixed)."""
+        if not buf or len(buf) >= self.f.max_len:
+            return
+        fill_byte = random.choice([buf[random.randint(0, len(buf) - 1)], 0, 0xFF])
+        block_size = random.randint(1, min(32, self.f.max_len - len(buf)))
+        ins_pos = random.randint(0, len(buf))
+        buf[ins_pos:ins_pos] = bytes([fill_byte] * block_size)
+
+    def _op_overwrite_copy(self, buf, _byte_idx, _data):
+        """Overwrite a region with bytes from another position (AFL++ overwrite_copy)."""
+        if len(buf) < 2:
+            return
+        src_len = random.randint(1, min(16, len(buf)))
+        src_pos = random.randint(0, len(buf) - src_len)
+        dst_pos = random.randint(0, max(0, len(buf) - src_len))
+        if src_pos != dst_pos:
+            buf[dst_pos:dst_pos + src_len] = buf[src_pos:src_pos + src_len]
+
+    def _op_overwrite_fixed(self, buf, _byte_idx, _data):
+        """Overwrite a region with repeated constant bytes (AFL++ overwrite_fixed)."""
+        if len(buf) < 2:
+            return
+        fill_byte = random.choice([buf[random.randint(0, len(buf) - 1)], 0, 0xFF])
+        block_len = random.randint(1, min(16, len(buf)))
+        dst_pos = random.randint(0, len(buf) - block_len)
+        buf[dst_pos:dst_pos + block_len] = bytes([fill_byte] * block_len)
+
+    def _op_redqueen_xform(self, buf, byte_idx, _data):
+        """RedQueen transforms: solve comparisons via XOR/arithmetic/boundary.
+
+        When cmplog data is available, applies XOR, arithmetic, and
+        boundary transforms to crack comparison operations.
+        """
+        f = self.f
+        if not hasattr(f, "_cmplog") or not f._cmplog:
+            return
+        if not buf or len(buf) < 2:
+            return
+        matches = getattr(f._last_cmplog_matches, "matches", []) if hasattr(f, "_last_cmplog_matches") else []
+        if not matches:
+            return
+        # Pick a random cmplog match
+        offset, va, vb = random.choice(matches)
+        if offset >= len(buf):
+            return
+        transform = random.choice(["xor", "arithmetic", "boundary", "atoi", "hex"])
+        if transform == "xor":
+            # Try: if target does input ^ constant == expected, write expected ^ constant
+            const = random.randint(1, 255)
+            buf[offset] = (vb ^ const) & 0xFF
+        elif transform == "arithmetic":
+            # Try: if target does input + constant == expected, write expected - constant
+            delta = random.randint(-128, 127)
+            buf[offset] = (vb - delta) & 0xFF
+        elif transform == "boundary":
+            # Try values just above and below the comparison boundary
+            buf[offset] = (vb - 1) & 0xFF
+        elif transform == "atoi":
+            # ASCII number encoding: write the digit for the comparison value
+            digit = vb % 10
+            buf[offset] = ord('0') + digit
+        elif transform == "hex":
+            # Hex encoding: write hex char for comparison value
+            hex_chars = b"0123456789abcdef"
+            buf[offset] = hex_chars[vb % 16]
+
     def _op_byte_flip(self, buf, byte_idx, _data):
         if buf:
             buf[byte_idx] ^= 0xFF
@@ -596,6 +663,10 @@ class OperatorEngine:
             "bit_offset_span": self._op_bit_offset_span,
             "simd_boundary": self._op_simd_boundary,
             "regex_bomb": self._op_regex_bomb,
+            "clone_fixed": self._op_clone_fixed,
+            "overwrite_copy": self._op_overwrite_copy,
+            "overwrite_fixed": self._op_overwrite_fixed,
+            "redqueen_xform": self._op_redqueen_xform,
             "byte_flip": self._op_byte_flip,
             "interesting_8": self._op_interesting_8,
             "interesting_16": self._op_interesting_16,
