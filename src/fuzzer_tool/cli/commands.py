@@ -425,6 +425,85 @@ def cmd_minimize(args):
     return 0
 
 
+def cmd_verify(args):
+    """Re-run crashes with ASAN target to confirm memory bugs.
+
+    Takes a crashes directory (from fast no-ASAN fuzzing) and an
+    ASAN-instrumented target, re-runs each crash to confirm it's
+    a real memory bug detected by the sanitizer.
+    """
+    _validate_target(args.asan_target)
+
+    crashes_dir = Path(args.crashes_dir)
+    if not crashes_dir.is_dir():
+        print(f"[-] Crashes directory not found: {args.crashes_dir}", file=sys.stderr)
+        return 1
+
+    crash_files = sorted(crashes_dir.glob("*.bin")) + sorted(crashes_dir.glob("*crash*"))
+    # Deduplicate and filter to actual files
+    crash_files = [f for f in set(crash_files) if f.is_file()]
+    if not crash_files:
+        print(f"[-] No crash files found in {args.crashes_dir}")
+        return 1
+
+    print(f"[*] Verifying {len(crash_files)} crashes against {args.asan_target}")
+
+    from fuzzer_tool.adapters.process import SIGNAL_CRASH_CODES, run_target_file, run_target_stdin
+    from fuzzer_tool.core.sanitizer import SanitizerReport
+
+    confirmed = 0
+    failed = 0
+    errors = 0
+
+    for crash_file in crash_files:
+        data = crash_file.read_bytes()
+        if not data:
+            continue
+
+        try:
+            if args.file_mode:
+                tmp_dir = Path("/tmp") / f"verify_{os.getpid()}"
+                tmp_dir.mkdir(parents=True, exist_ok=True)
+                try:
+                    returncode, stderr = run_target_file(
+                        target=args.asan_target,
+                        data=data,
+                        timeout=args.timeout,
+                        tmp_dir=str(tmp_dir),
+                        env=os.environ.copy(),
+                    )
+                finally:
+                    import shutil
+                    if tmp_dir.exists():
+                        shutil.rmtree(tmp_dir, ignore_errors=True)
+            else:
+                returncode, stderr, _ = run_target_stdin(
+                    target=args.asan_target, data=data, timeout=args.timeout,
+                    env=os.environ.copy(),
+                )
+        except Exception as e:
+            print(f"  [!] {crash_file.name}: execution error: {e}")
+            errors += 1
+            continue
+
+        report = SanitizerReport.parse(stderr)
+        if report and report.is_valid():
+            print(f"  [+] {crash_file.name}: {report.sanitizer}:{report.error_type}")
+            confirmed += 1
+        elif abs(returncode) in SIGNAL_CRASH_CODES:
+            print(f"  [+] {crash_file.name}: signal {abs(returncode)}")
+            confirmed += 1
+        elif returncode == -1 and stderr == "timeout":
+            print(f"  [-] {crash_file.name}: timeout (not a crash)")
+            failed += 1
+        else:
+            print(f"  [-] {crash_file.name}: no crash (rc={returncode})")
+            failed += 1
+
+    print(f"\n[*] Results: {confirmed} confirmed, {failed} not reproduced, {errors} errors")
+    return 0 if confirmed > 0 else 1
+
+
 def cmd_replay(args):
     """Replay a crash input against the target."""
     _validate_target(args.target)
@@ -1266,6 +1345,18 @@ def main() -> int:
         help="Target arguments ({file} placeholder)",
     )
     replay_parser.set_defaults(func=cmd_replay)
+
+    # --- verify ---
+    verify_parser = subparsers.add_parser(
+        "verify", help="Re-run crashes with ASAN target to confirm memory bugs"
+    )
+    verify_parser.add_argument("asan_target", help="Path to ASAN-instrumented target binary")
+    verify_parser.add_argument("crashes_dir", help="Directory containing crash input files")
+    verify_parser.add_argument("-t", "--timeout", type=float, default=5, help="Timeout in seconds")
+    verify_parser.add_argument(
+        "-F", "--file-mode", action="store_true", help="Write input to temp file instead of stdin"
+    )
+    verify_parser.set_defaults(func=cmd_verify)
 
     # --- import ---
     import_parser = subparsers.add_parser(
