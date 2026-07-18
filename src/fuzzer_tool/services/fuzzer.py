@@ -296,8 +296,6 @@ class Fuzzer:
 
         # Per-target SHM for multi-target mode
         if self.multi_targets and self.use_coverage and not no_shm:
-            from fuzzer_tool.adapters.shm import ShmCoverage
-
             for t in self.multi_targets:
                 try:
                     self._target_shm_covs[t] = ShmCoverage(size=self.map_size)
