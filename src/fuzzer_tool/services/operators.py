@@ -197,6 +197,76 @@ class OperatorEngine:
             except (struct.error, OverflowError):
                 buf[offset] = vb & 0xFF
 
+    def _op_colorization(self, buf, _byte_idx, _data):
+        """Taint-aware byte randomization preserving character classes.
+
+        AFL++ colorization: replace each byte with a random value from
+        the same character class (digits→digits, upper→upper, lower→lower,
+        punct→punct). Used for taint analysis — comparing execution paths
+        before/after reveals which bytes are comparison-relevant.
+        """
+        if not buf:
+            return
+        # Replace 10-50% of bytes, preserving character classes
+        n_mutate = max(1, len(buf) // random.randint(2, 10))
+        for _ in range(n_mutate):
+            idx = random.randint(0, len(buf) - 1)
+            b = buf[idx]
+            if ord('0') <= b <= ord('9'):
+                buf[idx] = random.randint(ord('0'), ord('9'))
+            elif ord('A') <= b <= ord('Z'):
+                buf[idx] = random.randint(ord('A'), ord('Z'))
+            elif ord('a') <= b <= ord('z'):
+                buf[idx] = random.randint(ord('a'), ord('z'))
+            elif b in b' \t\n\r':
+                buf[idx] = random.choice(b' \t\n\r')
+            else:
+                buf[idx] = random.randint(0x21, 0x7E)
+
+    def _op_skipdet_probe(self, buf, _byte_idx, _data):
+        """Block-flip probe to identify inert byte regions.
+
+        AFL++ SkipDet: flip a block of bytes and check if the path changes.
+        If not, those bytes are inert. This operator flips a random block
+        to help discover which regions affect execution paths.
+        """
+        if len(buf) < 8:
+            return
+        # Pick a random block (10-25% of buffer) and flip all bytes
+        block_size = random.randint(len(buf) // 10, len(buf) // 4)
+        block_size = max(2, min(block_size, len(buf)))
+        start = random.randint(0, len(buf) - block_size)
+        for i in range(start, start + block_size):
+            buf[i] ^= 0xFF
+
+    def _op_auto_extras(self, buf, _byte_idx, _data):
+        """Collect and inject sequences of "interesting" bytes.
+
+        AFL++ auto-extras: during deterministic stages, consecutive bytes
+        that affect the execution path are collected as magic values.
+        This operator injects previously collected extras or generates
+        new sequences of consecutive interesting bytes.
+        """
+        if not buf:
+            return
+        f = self.f
+        # Use dictionary tokens as "auto-extras" if available
+        if f.dictionary:
+            token = random.choice(f.dictionary)
+            if isinstance(token, str):
+                token = token.encode()
+            if len(token) <= len(buf):
+                pos = random.randint(0, len(buf) - len(token))
+                buf[pos:pos + len(token)] = token
+            return
+        # Generate a short sequence of consecutive interesting bytes
+        seq_len = random.randint(2, 8)
+        seq = bytes(random.choice([0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0xFF])
+                     for _ in range(seq_len))
+        if len(buf) >= seq_len:
+            pos = random.randint(0, len(buf) - seq_len)
+            buf[pos:pos + seq_len] = seq
+
     def _op_byte_flip(self, buf, byte_idx, _data):
         if buf:
             buf[byte_idx] ^= 0xFF
@@ -697,6 +767,9 @@ class OperatorEngine:
             "overwrite_copy": self._op_overwrite_copy,
             "overwrite_fixed": self._op_overwrite_fixed,
             "redqueen_xform": self._op_redqueen_xform,
+            "colorization": self._op_colorization,
+            "skipdet_probe": self._op_skipdet_probe,
+            "auto_extras": self._op_auto_extras,
             "byte_flip": self._op_byte_flip,
             "interesting_8": self._op_interesting_8,
             "interesting_16": self._op_interesting_16,

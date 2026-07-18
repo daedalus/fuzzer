@@ -125,6 +125,9 @@ MUTATIONS = [
     "overwrite_copy",
     "overwrite_fixed",
     "redqueen_xform",
+    "colorization",
+    "skipdet_probe",
+    "auto_extras",
 ]
 
 # Format-aware mutations: structure-aware operators for specific file formats.
