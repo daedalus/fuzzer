@@ -127,7 +127,7 @@ class Fuzzer:
         corpus_dir,
         crashes_dir,
         max_len=4096,
-        timeout=5,
+        timeout=1,
         mutations_per_input=8,
         use_coverage=False,
         deep_coverage=False,
@@ -670,7 +670,7 @@ class Fuzzer:
         # Forkserver: use C fuzz_loader for default execution path when available.
         # Currently disabled: fuzz_loader reads bitmap from file while target
         # writes to SHM — these are disconnected. Enable when fuzz_loader.c
-        # is updated to read from SHM via __AFL_SHM_ID.
+        # Forkserver disabled for multi-target mode (requires single binary)
         # if not self._inprocess_runner and not self._persistent_runner and not self.ptrace_cov:
         #     from fuzzer_tool.adapters.forkserver import ForkserverRunner
         #     self._forkserver = ForkserverRunner(target, timeout=self.timeout)

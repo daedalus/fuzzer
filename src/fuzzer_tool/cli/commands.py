@@ -39,7 +39,7 @@ def _add_common_args(parser):
         default=None,
         help="Crashes directory (default: ~/fuzzing/<target>/crashes)",
     )
-    parser.add_argument("-t", "--timeout", type=float, default=5, help="Timeout in seconds")
+    parser.add_argument("-t", "--timeout", type=float, default=1, help="Timeout in seconds")
     parser.add_argument(
         "-F", "--file-mode", action="store_true", help="Write input to temp file instead of stdin"
     )
@@ -894,7 +894,7 @@ def main() -> int:
         help="Crashes directory (default: ~/fuzzing/<target>/crashes)",
     )
     fuzz_parser.add_argument("-m", "--max-len", type=int, default=4096, help="Max input length")
-    fuzz_parser.add_argument("-t", "--timeout", type=float, default=5, help="Timeout in seconds")
+    fuzz_parser.add_argument("-t", "--timeout", type=float, default=1, help="Timeout in seconds")
     fuzz_parser.add_argument(
         "-n", "--iterations", type=int, default=0, help="Number of iterations (0=infinite)"
     )
@@ -1272,7 +1272,7 @@ def main() -> int:
     tmin_parser = subparsers.add_parser("tmin", help="Minimize a crash to smallest reproducer")
     tmin_parser.add_argument("target", help="Path to target binary")
     tmin_parser.add_argument("crash_file", help="Path to crashing input file")
-    tmin_parser.add_argument("-t", "--timeout", type=float, default=5, help="Timeout in seconds")
+    tmin_parser.add_argument("-t", "--timeout", type=float, default=1, help="Timeout in seconds")
     tmin_parser.add_argument(
         "-F", "--file-mode", action="store_true", help="Write input to temp file instead of stdin"
     )
@@ -1303,7 +1303,7 @@ def main() -> int:
     )
     min_parser.add_argument("target", help="Path to target binary")
     min_parser.add_argument("-d", "--corpus", required=True, help="Corpus directory")
-    min_parser.add_argument("-t", "--timeout", type=float, default=5, help="Timeout in seconds")
+    min_parser.add_argument("-t", "--timeout", type=float, default=1, help="Timeout in seconds")
     min_parser.add_argument(
         "-F", "--file-mode", action="store_true", help="Write input to temp file instead of stdin"
     )
@@ -1334,7 +1334,7 @@ def main() -> int:
     replay_parser = subparsers.add_parser("replay", help="Replay a crash input against the target")
     replay_parser.add_argument("target", help="Path to target binary")
     replay_parser.add_argument("crash_file", help="Path to crash input file")
-    replay_parser.add_argument("-t", "--timeout", type=float, default=5, help="Timeout in seconds")
+    replay_parser.add_argument("-t", "--timeout", type=float, default=1, help="Timeout in seconds")
     replay_parser.add_argument(
         "-F", "--file-mode", action="store_true", help="Write input to temp file instead of stdin"
     )
@@ -1352,7 +1352,7 @@ def main() -> int:
     )
     verify_parser.add_argument("asan_target", help="Path to ASAN-instrumented target binary")
     verify_parser.add_argument("crashes_dir", help="Directory containing crash input files")
-    verify_parser.add_argument("-t", "--timeout", type=float, default=5, help="Timeout in seconds")
+    verify_parser.add_argument("-t", "--timeout", type=float, default=1, help="Timeout in seconds")
     verify_parser.add_argument(
         "-F", "--file-mode", action="store_true", help="Write input to temp file instead of stdin"
     )
