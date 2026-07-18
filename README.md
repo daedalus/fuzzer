@@ -4,7 +4,7 @@
 
 Coverage-guided binary fuzzer with static target analysis, statistical novelty scoring, Markov chain generation, Monte Carlo mutations, kernel crash verification, and format-aware grammar mutations.
 
-Honestly Caveat: Probably the most complex and dense fuzzer from the information theory standpoint but also the slowest. The tradeoff is speed for edge novelty.
+Honest Caveat: Probably the most complex and dense fuzzer from the information theory standpoint but also the slowest. The tradeoff is speed for edge discovery novelty.
 For production and sensitive binaries using AFL family fuzzers is the best course of action. 
 
 ## Features
@@ -35,7 +35,9 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 - **Ptrace edge coverage** with deep capstone disassembly for closed-source binaries (~18-20 eps)
 - **In-process execution**: persistent subprocess mode (~65-120 eps) with auto-restart on crash
 - **Length-edge tracking**: correlates input length with coverage edge discovery — biases seed selection and length-changing mutations toward productive lengths
-- **Branch density**: static analysis metric (conditional branches/KB) for target complexity estimation
+- **Per-target SHM coverage**: multi-target mode tracks coverage independently per target binary
+- **Cross-target seed scoring**: seeds that found edges in the least-covered target get boosted proportionally to the coverage gap
+- **Branch density**: per-target static analysis metric (conditional branches/KB) with average across targets
 - **Auto-sized edge bitmap**: `estimate_map_size()` from branch density × .text size replaces hardcoded 65536
 - **Good-Turing estimation**: prospective edge discovery count with saturation confidence
 - **KS significance testing**: replaces fixed JS thresholds with sample-size-aware p-values
@@ -73,6 +75,15 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 - **Generational replacement**: periodic evolution cycles with elitism — top fraction always survives, low-fitness individuals culled
 - **Crash preservation**: crash-triggering seeds get infinite fitness bonus, never culled
 - **State persistence**: population and generation state saved to `ga.json`, survives `--resume`
+
+### Multi-Target Fuzzing
+- **Shared corpus**: fuzz multiple binaries with the same corpus — inputs that find coverage in one target can discover paths in others
+- **Glob expansion**: `targets/fuzz_*` expands to all matching executables, automatically skips non-binaries (`.c`, `.py`, `.sh`, etc.)
+- **Per-target SHM**: each target gets its own shared memory region for independent edge tracking
+- **Weighted round-robin**: targets with fewer discovered edges get proportionally more execution time
+- **Cross-target seed scoring**: seeds productive for the least-covered target get boosted in selection
+- **Per-target stats**: startup shows `[AFL]`/`[no-AFL]` detection, branch density per target; live stats show edge counts per target
+- **AFL detection**: binary checked for `__afl_area`/`__afl_map_shm` symbols via `nm` at startup
 
 ### Corpus Management
 - **Delta-encoded corpus**: parent-child diffs for small mutations (< 25% change), periodic full snapshots every 20 generations
@@ -152,8 +163,8 @@ fuzzer-tool fuzz targets/fuzz_search_pipeline
 # Multi-target: fuzz multiple binaries with shared corpus (glob supported)
 fuzzer-tool fuzz targets/fuzz_regex_compile targets/fuzz_pattern_match targets/fuzz_search_pipeline -c -d corpus/fgrep
 
-# Multi-target with glob
-fuzzer-tool fuzz targets/fuzz_[a-z]* -c -d corpus/fgrep
+# Multi-target with glob — skips .c/.h/.py automatically
+fuzzer-tool fuzz 'targets/fuzz_*' -c -d corpus/fgrep
 
 # Resume a previous fuzzing session
 fuzzer-tool fuzz ./target -c --resume
