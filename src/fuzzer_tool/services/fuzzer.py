@@ -648,7 +648,21 @@ class Fuzzer:
                 self._persistent_runner = None
 
         self._inprocess_runner = None
-        if inprocess:
+        # Auto-detect .so targets and use in-process mode with fuzz_shm_run
+        if not inprocess and self.target.lower().endswith(('.so', '.dylib', '.dll')):
+            from fuzzer_tool.adapters.inprocess import InProcessRunner
+            cov_env_id = self.shm_cov.env_id if self.shm_cov else None
+            self._inprocess_runner = InProcessRunner(
+                target=self.target,
+                function_name="fuzz_shm_run",
+                timeout=self.timeout,
+                shm_size=self.map_size,
+                direct=True,
+                coverage_env_id=cov_env_id,
+                cov=bool(cov_env_id),
+            )
+            print(f"[*] Auto-detected .so target: in-process mode with fuzz_shm_run")
+        elif inprocess:
             from fuzzer_tool.adapters.inprocess import InProcessRunner
 
             cov_env_id = self.shm_cov.env_id if self.shm_cov else None

@@ -304,19 +304,23 @@ class InProcessRunner:
         if self._bitmap_out and os.path.exists(self._bitmap_out):
             try:
                 with open(self._bitmap_out, "rb") as f:
-                    return f.read()
+                    data = f.read()
+                    if data:  # Only return if file has content
+                        return data
             except OSError:
-                return None
+                pass
         # Read from SHM (AFL shim targets write here)
         if self.coverage_env_id:
             try:
-                import ctypes.util
+                # Cache SHM attachment for performance
+                if not hasattr(self, '_shm_ptr') or self._shm_ptr is None:
+                    import ctypes.util as _ct_util
 
-                libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6")
-                libc.shmat.restype = ctypes.c_void_p
-                ptr = libc.shmat(int(self.coverage_env_id), None, 0)
-                if ptr and ptr != -1:
-                    return (ctypes.c_uint8 * self.shm_size).from_address(ptr)
+                    libc = ctypes.CDLL(_ct_util.find_library("c") or "libc.so.6")
+                    libc.shmat.restype = ctypes.c_void_p
+                    self._shm_ptr = libc.shmat(int(self.coverage_env_id), None, 0)
+                if self._shm_ptr and self._shm_ptr != -1:
+                    return (ctypes.c_uint8 * self.shm_size).from_address(self._shm_ptr)
             except Exception:
                 log.warning("shmat read failed for coverage_env_id=%s", self.coverage_env_id, exc_info=True)
         return None
