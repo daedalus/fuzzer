@@ -7,7 +7,10 @@ Coverage-guided binary fuzzer with static target analysis, statistical novelty s
 ## Features
 
 ### Mutation & Generation
-- **Mutation operators**: bit flip, byte flip, interesting values (8/16/32-bit), arithmetic (1/2/4/8-byte, LE/BE), block insert/delete/duplicate, bit-offset flip/span (arbitrary bit positions for DEFLATE/JPEG), havoc mode
+- **Mutation operators**: bit flip, byte flip, interesting values (8/16/32-bit, signed + unsigned boundary), arithmetic (1/2/4/8-byte, LE/BE), block insert/delete/duplicate, bit-offset flip/span (arbitrary bit positions for DEFLATE/JPEG), havoc mode
+- **Length boundary operator**: systematically tries input lengths at boundary values (0, 1, 2, 3, 4, 5, 7, 8, 15, 16, 31, 32, 63, 64, 127, 128, 255, 256, 512, 1024, 4096) — discovers length-sensitive unsigned integer underflows
+- **Unsigned boundary values**: interesting values include small values (0-5) and unsigned max values (0xFF, 0xFFFF, 0xFFFFFFFF) for triggering unsigned arithmetic underflows
+- **Crash-MI-guided mutation**: CrashMITracker identifies byte positions and values correlated with crashes, biasing mutation position selection and interesting value selection toward crash-relevant bytes
 - **Grammar-aware mutations**: format-specific structure-aware mutations for PNG (IHDR, IDAT, CRC, filter types, interlace), JPEG (SOF, DHT, DQT, DRI, SOS, scan data), BMP (header fields, pixel data), gzip (header flags, deflate stream, trailer, extra fields), and zlib (CMF/FLG header, deflate stream, Adler-32 trailer)
 - **FrameShift**: automatic length-field tracking — discovers and adjusts length/count fields during insertions/deletions, applied as universal post-processing after every mutation
 - **Dictionary support**: inject protocol tokens from dictionary files
@@ -28,6 +31,7 @@ Coverage-guided binary fuzzer with static target analysis, statistical novelty s
 - **AFL SHM bitmap** coverage for instrumented targets (~65-200 eps)
 - **Ptrace edge coverage** with deep capstone disassembly for closed-source binaries (~18-20 eps)
 - **In-process execution**: persistent subprocess mode (~65-120 eps) with auto-restart on crash
+- **Length-edge tracking**: correlates input length with coverage edge discovery — biases seed selection and length-changing mutations toward productive lengths
 - **Branch density**: static analysis metric (conditional branches/KB) for target complexity estimation
 - **Auto-sized edge bitmap**: `estimate_map_size()` from branch density × .text size replaces hardcoded 65536
 - **Good-Turing estimation**: prospective edge discovery count with saturation confidence

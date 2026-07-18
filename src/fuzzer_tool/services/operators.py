@@ -20,6 +20,9 @@ from fuzzer_tool.core.mutations import (
     INTERESTING_8,
     INTERESTING_16,
     INTERESTING_32,
+    INTERESTING_UNSIGNED_8,
+    INTERESTING_UNSIGNED_16,
+    INTERESTING_UNSIGNED_32,
     MUTATIONS,
     splice,
 )
@@ -74,17 +77,47 @@ class OperatorEngine:
 
     def _op_interesting_8(self, buf, byte_idx, _data):
         if buf:
-            buf[byte_idx] = random.choice(INTERESTING_8) & 0xFF
+            if (
+                self.f._crash_mi
+                and self.f._crash_mi.total_execs >= 50
+                and random.random() < 0.3
+            ):
+                crash_vals = self.f._crash_mi.top_values(byte_idx, k=5)
+                if crash_vals:
+                    buf[byte_idx] = random.choice(crash_vals) & 0xFF
+                    return
+            vals = INTERESTING_UNSIGNED_8 if random.random() < 0.5 else INTERESTING_8
+            buf[byte_idx] = random.choice(vals) & 0xFF
 
     def _op_interesting_16(self, buf, _byte_idx, _data):
         if len(buf) >= 2:
             idx = random.randint(0, len(buf) - 2)
-            struct.pack_into("<h", buf, idx, random.choice(INTERESTING_16))
+            if (
+                self.f._crash_mi
+                and self.f._crash_mi.total_execs >= 50
+                and random.random() < 0.3
+            ):
+                crash_vals = self.f._crash_mi.top_values(idx, k=5)
+                if crash_vals:
+                    struct.pack_into("<h", buf, idx, random.choice(crash_vals))
+                    return
+            vals = INTERESTING_UNSIGNED_16 if random.random() < 0.5 else INTERESTING_16
+            struct.pack_into("<h", buf, idx, random.choice(vals))
 
     def _op_interesting_32(self, buf, _byte_idx, _data):
         if len(buf) >= 4:
             idx = random.randint(0, len(buf) - 4)
-            struct.pack_into("<i", buf, idx, random.choice(INTERESTING_32))
+            if (
+                self.f._crash_mi
+                and self.f._crash_mi.total_execs >= 50
+                and random.random() < 0.3
+            ):
+                crash_vals = self.f._crash_mi.top_values(idx, k=5)
+                if crash_vals:
+                    struct.pack_into("<i", buf, idx, random.choice(crash_vals))
+                    return
+            vals = INTERESTING_UNSIGNED_32 if random.random() < 0.5 else INTERESTING_32
+            struct.pack_into("<i", buf, idx, random.choice(vals))
 
     def _op_arithmetic(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import ARITHMETIC_DELTAS
@@ -314,6 +347,31 @@ class OperatorEngine:
         if len(buf) > 2:
             del buf[random.randint(2, len(buf)) :]
 
+    def _op_length_boundary(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations import LENGTH_BOUNDARIES
+
+        if not buf:
+            buf.extend(random.randint(0, 255) for _ in range(random.randint(1, 32)))
+            return
+        # 30% chance: bias toward lengths that historically discovered edges
+        if hasattr(self.f, "_length_tracker") and self.f._length_tracker and random.random() < 0.3:
+            recs = self.f._length_tracker.recommended_lengths(k=5)
+            if recs:
+                target_len = random.choice(recs)
+            else:
+                target_len = random.choice(LENGTH_BOUNDARIES)
+        else:
+            target_len = random.choice(LENGTH_BOUNDARIES)
+        current_len = len(buf)
+        if target_len == current_len:
+            return
+        elif target_len < current_len:
+            del buf[target_len:]
+        else:
+            grow = min(target_len - current_len, self.f.max_len - current_len)
+            if grow > 0:
+                buf.extend(random.randint(0, 255) for _ in range(grow))
+
     def _op_swap_regions(self, buf, _byte_idx, _data):
         if len(buf) >= 4:
             i = random.randint(0, len(buf) - 3)
@@ -525,6 +583,7 @@ class OperatorEngine:
             "length_shrink": self._op_length_shrink,
             "repeat_clone": self._op_repeat_clone,
             "truncate": self._op_truncate,
+            "length_boundary": self._op_length_boundary,
             "swap_regions": self._op_swap_regions,
             "swap_bytes": self._op_swap_bytes,
             "endianness_swap": self._op_endianness_swap,
@@ -677,7 +736,7 @@ class OperatorEngine:
         return op
 
     def select_position(self, buf: bytearray, data: bytes) -> int:
-        """Select a byte position for mutation using MI/TE/sensitivity/random."""
+        """Select a byte position for mutation using MI/TE/sensitivity/crash-MI/random."""
         f = self.f
         if not buf:
             return 0
@@ -688,7 +747,13 @@ class OperatorEngine:
         )
         mi_pos = f._mi.weighted_position(len(buf)) if f._use_mi and f._mi else None
         sens_pos = f._sensitivity.get_weighted_position(data, len(buf))
-        candidates = [p for p in [sens_pos, te_pos, mi_pos] if p is not None]
+        crash_mi_pos = None
+        if (
+            f._crash_mi
+            and f._crash_mi.total_execs >= f._crash_mi.min_observations
+        ):
+            crash_mi_pos = f._crash_mi.weighted_position(len(buf))
+        candidates = [p for p in [sens_pos, te_pos, mi_pos, crash_mi_pos] if p is not None]
         if candidates:
             return random.choice(candidates)
         return random.randint(0, len(buf) - 1)

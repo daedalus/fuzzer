@@ -9,6 +9,7 @@ input bytes and crash outcomes.
 from __future__ import annotations
 
 import math
+import random
 import re
 from collections import defaultdict
 from dataclasses import dataclass
@@ -130,6 +131,37 @@ class CrashMITracker:
             return []
         sorted_mi = sorted(mi_vals.items(), key=lambda x: x[1], reverse=True)
         return sorted_mi[:k]
+
+    def weighted_position(self, input_length: int) -> int:
+        """Sample a byte position weighted by crash MI."""
+        mi_vals = self.all_mi()
+        if not mi_vals:
+            return 0
+        positions = [p for p in mi_vals if p < input_length]
+        if not positions:
+            return 0
+        weights = [max(mi_vals[p], 0.01) for p in positions]
+        total = sum(weights)
+        if total <= 0:
+            return random.choice(positions)
+        r = random.random() * total
+        cumulative = 0.0
+        for p, w in zip(positions, weights):
+            cumulative += w
+            if r <= cumulative:
+                return p
+        return positions[-1]
+
+    def top_values(self, position: int, k: int = 5) -> list[int]:
+        """Return the k byte values at position with highest crash count."""
+        if position not in self.joint_crash:
+            return []
+        crash_vals = sorted(
+            self.joint_crash[position].items(),
+            key=lambda x: x[1],
+            reverse=True,
+        )
+        return [bv for bv, _ in crash_vals[:k]]
 
     def crash_density_estimate(self) -> float:
         """Estimate crash probability from MI profile.

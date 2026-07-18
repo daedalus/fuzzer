@@ -40,6 +40,26 @@ INTERESTING_32 = [
     2147483647,  # Overflow signed 32-bit when incremented
 ]
 
+INTERESTING_UNSIGNED_8 = [
+    0, 1, 2, 3, 4, 5,  # Small values — trigger len < nlen underflows
+    0xFE, 0xFF,  # Near unsigned 8-bit max
+]
+
+INTERESTING_UNSIGNED_16 = [
+    0, 1, 2, 3, 4, 5,
+    0xFFFE, 0xFFFF,  # Unsigned 16-bit max
+    0x7FFE, 0x7FFF,  # Near signed 16-bit max
+]
+
+INTERESTING_UNSIGNED_32 = [
+    0, 1, 2, 3, 4, 5,
+    0xFFFFFFFE, 0xFFFFFFFF,  # Unsigned 32-bit max (SIZE_MAX on 32-bit)
+    0x7FFFFFFE, 0x7FFFFFFF,  # Near signed 32-bit max
+    0x100, 0x400, 0x1000,  # Common buffer boundaries
+]
+
+LENGTH_BOUNDARIES = [0, 1, 2, 3, 4, 5, 7, 8, 15, 16, 31, 32, 63, 64, 127, 128, 255, 256, 512, 1024, 4096]
+
 ARITHMETIC_DELTAS = [1, 2, 4, 8, 16, 32, 64, 128]
 
 ARITH_MAX = 35
@@ -62,6 +82,7 @@ MUTATIONS = [
     "length_shrink",
     "repeat_clone",
     "truncate",
+    "length_boundary",
     "swap_regions",
     "swap_bytes",
     "endianness_swap",

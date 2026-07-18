@@ -328,6 +328,13 @@ class SeedPicker:
             elif 0 < hd <= 2:
                 w *= 0.5
 
+            # Length-productivity bonus: boost seeds whose input length
+            # has historically discovered new coverage edges.
+            if hasattr(f, "_length_tracker") and f._length_tracker:
+                seed_len = len(seed)
+                prod = f._length_tracker.length_productivity(seed_len)
+                w *= 0.5 + min(prod, 2.0) * 0.75  # [0.5, 2.0] range
+
             weights.append(max(w, 1e-6))
 
             novelty = sub

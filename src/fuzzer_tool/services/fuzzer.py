@@ -433,6 +433,18 @@ class Fuzzer:
             except (OSError, json.JSONDecodeError):
                 pass
 
+        # Length-edge tracker: input_length → coverage edges
+        from fuzzer_tool.core.length_mi import LengthEdgeTracker
+
+        self._length_tracker = LengthEdgeTracker()
+        self._length_tracker_path = self.corpus_dir / "length_tracker.json"
+        if self._length_tracker_path.exists():
+            try:
+                self._length_tracker.load(json.loads(self._length_tracker_path.read_text()))
+                log.info("Length-edge tracker loaded: %d execs", self._length_tracker.total_execs)
+            except (OSError, json.JSONDecodeError):
+                pass
+
         self._use_renyi_weight = renyi_weight
         self._use_transfer_entropy = transfer_entropy
         self._te = None
@@ -824,6 +836,9 @@ class Fuzzer:
     def _op_truncate(self, buf, _byte_idx, _data):
         return self._operators._op_truncate(buf, _byte_idx, _data)
 
+    def _op_length_boundary(self, buf, _byte_idx, _data):
+        return self._operators._op_length_boundary(buf, _byte_idx, _data)
+
     def _op_swap_regions(self, buf, _byte_idx, _data):
         return self._operators._op_swap_regions(buf, _byte_idx, _data)
 
@@ -1143,6 +1158,19 @@ class Fuzzer:
                     fuzz_count = max(meta["fuzz_count"], 1) if meta else 1
                     discovery_rate = len(new) / fuzz_count
                     self._seed_secretary[seed_key].observe(discovery_rate)
+
+        # Track input-length → edge discovery correlation
+        if has_new_coverage and self._length_tracker:
+            edge_bitmap = self._get_current_edge_bitmap()
+            if edge_bitmap:
+                new_edges = set()
+                for i, byte_val in enumerate(edge_bitmap):
+                    if byte_val:
+                        for bit in range(8):
+                            if byte_val & (1 << bit):
+                                new_edges.add(i * 8 + bit)
+                if new_edges:
+                    self._length_tracker.record(len(mutated), new_edges)
 
         # Compute directed distance for targeted fuzzing
         if self._distance and meta is not None and has_new_coverage:
@@ -1614,6 +1642,8 @@ class Fuzzer:
             self._mi.save(str(self._mi_path))
         with contextlib.suppress(OSError):
             self._crash_mi_path.write_text(json.dumps(self._crash_mi.save(), separators=(",", ":")))
+        with contextlib.suppress(OSError):
+            self._length_tracker_path.write_text(json.dumps(self._length_tracker.save(), separators=(",", ":")))
         self._save_state()
         if self.ga:
             ga_path = self.corpus_dir / "ga.json"
