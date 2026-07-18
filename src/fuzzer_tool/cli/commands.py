@@ -90,18 +90,19 @@ def cmd_fuzz(args):
     if not hasattr(args, "targets") or args.targets is None:
         args.targets = [args.target]
     # Expand glob patterns (e.g. targets/fuzz_*)
+    _GLOB_CHARS = set("*?[")
     expanded = []
     for t in args.targets:
-        matches = _glob.glob(t)
-        if matches:
-            # Filter: skip source files, scripts, docs, and non-executables
-            for m in sorted(matches):
-                ext = os.path.splitext(m)[1].lower()
-                if ext in _NON_BINARY_EXT:
-                    continue
-                if not os.path.isfile(m):
-                    continue
-                expanded.append(m)
+        if any(c in t for c in _GLOB_CHARS):
+            matches = _glob.glob(t)
+            if matches:
+                for m in sorted(matches):
+                    ext = os.path.splitext(m)[1].lower()
+                    if ext in _NON_BINARY_EXT:
+                        continue
+                    if not os.path.isfile(m):
+                        continue
+                    expanded.append(m)
         else:
             expanded.append(t)
     if not expanded:
