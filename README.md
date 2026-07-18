@@ -171,6 +171,10 @@ fuzzer-tool fuzz targets/fuzz_regex_compile targets/fuzz_pattern_match targets/f
 # Multi-target with glob — skips .c/.h/.py automatically
 fuzzer-tool fuzz 'targets/fuzz_*' -c -d corpus/fgrep
 
+# Two-pass workflow: fast fuzz without ASAN, then verify crashes with ASAN
+fuzzer-tool fuzz targets/fuzz_*_nosan -c -d corpus/fast/
+fuzzer-tool verify targets/fuzz_search_pipeline corpus/fast/crashes/
+
 # Resume a previous fuzzing session
 fuzzer-tool fuzz ./target -c --resume
 
@@ -221,6 +225,7 @@ fuzzer-tool rank ./target -d corpus -n 10 --dump top_seeds
 | `minimize` | Minimize corpus by removing redundant inputs |
 | `tmin` | Minimize a crash to smallest reproducer |
 | `replay` | Replay a crash input against the target |
+| `verify` | Re-run crashes with ASAN target to confirm memory bugs |
 | `estimate` | Estimate execs to first crash via static analysis + calibration |
 | `import` | Import corpus from AFL/libFuzzer/honggfuzz |
 
