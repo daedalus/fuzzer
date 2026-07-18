@@ -1543,9 +1543,22 @@ class Fuzzer:
         # Static branch density: conditional branches per KB of .text
         from fuzzer_tool.core.elf import branch_density
 
-        bd = branch_density(self.target)
-        if bd is not None:
-            print(f"[*] Branch density: {bd:.1f} cond branches/KB")
+        if self.multi_targets:
+            bd_total = 0
+            bd_count = 0
+            for t in self.multi_targets:
+                bd = branch_density(t)
+                if bd is not None:
+                    name = os.path.basename(t)
+                    print(f"[*] Branch density: {name} {bd:.1f} cond branches/KB")
+                    bd_total += bd
+                    bd_count += 1
+            if bd_count > 1:
+                print(f"[*] Branch density: avg {bd_total / bd_count:.1f} cond branches/KB")
+        else:
+            bd = branch_density(self.target)
+            if bd is not None:
+                print(f"[*] Branch density: {bd:.1f} cond branches/KB")
         print(f"[*] Edge bitmap: {self.map_size:,} bytes (auto-sized)")
         print(f"[*] Corpus: {self.corpus_dir} ({len(self.corpus)} seeds)")
         print(f"[*] Crashes: {self.crashes_dir}")
