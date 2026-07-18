@@ -14,6 +14,9 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 - **Length boundary operator**: systematically tries input lengths at boundary values (0, 1, 2, 3, 4, 5, 7, 8, 15, 16, 31, 32, 63, 64, 127, 128, 255, 256, 512, 1024, 4096) — discovers length-sensitive unsigned integer underflows
 - **Unsigned boundary values**: interesting values include small values (0-5) and unsigned max values (0xFF, 0xFFFF, 0xFFFFFFFF) for triggering unsigned arithmetic underflows
 - **Crash-MI-guided mutation**: CrashMITracker identifies byte positions and values correlated with crashes, biasing mutation position selection and interesting value selection toward crash-relevant bytes
+- **CrashMITracker memory pruning**: automatically caps per-position byte-value tracking to top 32 entries every 500 execs — prevents tracker JSON from growing unbounded (was 7.5MB per 15k execs, now ~500KB)
+- **Weighted length distribution**: length_boundary operator weights small lengths (0-16) 10:1 over large ones (512+) — 4096-byte inputs dropped from 4.7% to 0.5% of picks, stabilizing EPS
+- **Corrupted state recovery**: seed_meta entries with keys > 256 chars (tracker JSON loaded as corpus) are skipped on load and save — self-heals bloated state.json on first run (15MB → 6KB)
 - **Grammar-aware mutations**: format-specific structure-aware mutations for PNG (IHDR, IDAT, CRC, filter types, interlace), JPEG (SOF, DHT, DQT, DRI, SOS, scan data), BMP (header fields, pixel data), gzip (header flags, deflate stream, trailer, extra fields), and zlib (CMF/FLG header, deflate stream, Adler-32 trailer)
 - **FrameShift**: automatic length-field tracking — discovers and adjusts length/count fields during insertions/deletions, applied as universal post-processing after every mutation
 - **Dictionary support**: inject protocol tokens from dictionary files
@@ -102,7 +105,9 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 - **Fuzzy corpus similarity**: Hamming + Levenshtein + 4-gram Jaccard for crash-to-corpus nearest-neighbor search
 
 ### Observability
-- **Branch density**: static analysis at startup (`cond branches/KB`)
+- **Branch density**: per-target static analysis at startup (`cond branches/KB`) with average across targets
+- **Per-target coverage stats**: live display shows `targets: name1:N name2:N name3:N` (edge counts per target)
+- **AFL detection**: binary checked for `__afl_area`/`__afl_map_shm` symbols via `nm` — shows `[AFL]`/`[no-AFL]` per target
 - **Jaccard index**: corpus redundancy metric (`| jac: 0.XX`)
 - **Diversity score**: Wasserstein spatial diversity (`| div: N`)
 - **`--report` flag**: full explainability report with coverage, mutations, perplexity, corpus health, edge map
@@ -292,7 +297,7 @@ fuzzer-tool minimize ./target -d corpus -c --rate-distortion --target-frac 0.95
 
 ## Test Suite
 
-1024 tests covering all modules. Run with:
+1494 tests covering all modules. Run with:
 
 ```bash
 pip install -e ".[dev]"
