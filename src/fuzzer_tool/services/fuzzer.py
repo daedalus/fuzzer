@@ -657,11 +657,11 @@ class Fuzzer:
                 function_name="fuzz_shm_run",
                 timeout=self.timeout,
                 shm_size=self.map_size,
-                direct=True,
+                direct_lite=True,
                 coverage_env_id=cov_env_id,
                 cov=bool(cov_env_id),
             )
-            print(f"[*] Auto-detected .so target: in-process mode with fuzz_shm_run")
+            print(f"[*] Auto-detected .so target: in-process mode (direct_lite) with fuzz_shm_run")
         elif inprocess:
             from fuzzer_tool.adapters.inprocess import InProcessRunner
 

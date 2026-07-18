@@ -124,6 +124,7 @@ class InProcessRunner:
         timeout: float = 5.0,
         shm_size: int = 65536,
         direct: bool = False,
+        direct_lite: bool = False,
         coverage_env_id: str | None = None,
         cov: bool = False,
     ):
@@ -132,6 +133,7 @@ class InProcessRunner:
         self.timeout = timeout
         self.shm_size = shm_size
         self.direct = direct
+        self.direct_lite = direct_lite
         self.coverage_env_id = coverage_env_id
 
         self._func: Callable[[bytes], int] | None = None
@@ -173,7 +175,7 @@ class InProcessRunner:
             if self._shim.compile_error:
                 log.warning("Shim build failed: %s", self._shim.compile_error)
 
-        if self.direct:
+        if self.direct or self.direct_lite:
             # Direct mode: load shim with RTLD_GLOBAL, then load target
             shim_loaded = False
             if self._shim and self._shim.shim_path and self._shim.needs_preload:
@@ -207,7 +209,7 @@ class InProcessRunner:
                 else:
                     raise
 
-        if not self.direct:
+        if not self.direct and not self.direct_lite:
             # Set __AFL_SHM_ID and AFL_MAP_SIZE in process env so
             # subprocess loaders and forkserver inherit the correct values.
             # Without AFL_MAP_SIZE, the forkserver defaults to 65536 which
@@ -350,6 +352,8 @@ class InProcessRunner:
     def run_one(self, data: bytes) -> tuple[int, str]:
         """Execute target on one input. Returns (returncode, stderr_str)."""
         if self._is_c:
+            if self.direct_lite:
+                return self._run_c_direct_lite(data)
             if self.direct:
                 return self._run_c_direct(data)
             if self._persistent:
@@ -425,6 +429,26 @@ class InProcessRunner:
             if crashed:
                 # 128 + signal number
                 return 128 + crashed_sig, ""
+
+    def _run_c_direct_lite(self, data: bytes) -> tuple[int, str]:
+        """Lightweight direct ctypes call — minimal overhead.
+
+        Skips signal handler setup/teardown and stderr capture.
+        Uses cached ctypes buffer for maximum throughput.
+        Target crashes will kill the process (no isolation).
+        For use with stable targets where crash isolation is not needed.
+        """
+        if self._lib is None or self._func_ptr is None:
+            return -2, "runner not initialized"
+        if self._coverage_enabled():
+            self.reset_bitmap()
+        # Cache ctypes buffer allocation
+        if not hasattr(self, '_c_buf') or self._c_buf is None or len(self._c_buf) != len(data):
+            self._c_buf = (ctypes.c_uint8 * len(data))(*data)
+        else:
+            ctypes.memmove(self._c_buf, data, len(data))
+        rc = self._func_ptr(self._c_buf, len(data))
+        return rc, ""
 
     def _run_c_persistent(self, data: bytes) -> tuple[int, str]:
         """Persistent subprocess — one process, many calls."""
