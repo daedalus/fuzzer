@@ -4,6 +4,9 @@
 
 Coverage-guided binary fuzzer with static target analysis, statistical novelty scoring, Markov chain generation, Monte Carlo mutations, kernel crash verification, and format-aware grammar mutations.
 
+Honestly Caveat: Probably the most complex and dense fuzzer from the information theory standpoint but also the slowest. The tradeoff is speed for edge novelty.
+For production and sensitive binaries using AFL family fuzzers is the best course of action. 
+
 ## Features
 
 ### Mutation & Generation
