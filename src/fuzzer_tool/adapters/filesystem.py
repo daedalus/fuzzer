@@ -186,7 +186,10 @@ def load_corpus(corpus_dir: Path, bloom: BloomFilter | None = None) -> tuple[lis
     delta_files: list[tuple[str, Path]] = []
 
     # Metadata files to skip when loading corpus
-    _SKIP_NAMES = {"state.json", "edge_tracker.json", "markov.json", "mi.json"}
+    _SKIP_NAMES = {
+        "state.json", "edge_tracker.json", "markov.json", "mi.json",
+        "sensitivity.json", "crash_mi.json", "length_tracker.json",
+    }
 
     if corpus_dir.exists():
         for f in corpus_dir.iterdir():
