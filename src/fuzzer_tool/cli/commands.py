@@ -108,11 +108,18 @@ def cmd_fuzz(args):
     if not expanded:
         print("[-] No executable targets found from glob pattern")
         sys.exit(1)
+    # Filter out non-executable files (source files, scripts, etc.)
+    if not args.inprocess and not args.inprocess_direct:
+        executable = [t for t in expanded if os.access(t, os.X_OK)]
+        skipped = [t for t in expanded if not os.access(t, os.X_OK)]
+        for s in skipped:
+            print(f"[*] Skipping non-executable: {s}")
+        if not executable:
+            print("[-] No executable targets found")
+            sys.exit(1)
+        expanded = executable
     args.targets = expanded
     args.target = args.targets[0]
-    if not args.inprocess and not args.inprocess_direct:
-        for t in args.targets:
-            _validate_target(t)
     corpus_dir, crashes_dir = _get_dirs(args, args.target)
 
     # Auto-detect ASAN instrumentation
