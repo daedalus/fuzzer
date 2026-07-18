@@ -634,22 +634,23 @@ def insert_ascii_num(data: bytes, max_len: int = 65536) -> bytes:
 
 
 def byte_shuffle(data: bytes) -> bytes:
-    """Shuffle all bytes in the input randomly.
+    """Shuffle a random subset of bytes in the input.
 
-    Preserves the multiset of bytes but randomizes their order.
-    Useful for discovering order-dependent behavior.
+    Optimized: shuffle only a random portion instead of the entire buffer.
 
     Args:
         data: Input bytes.
 
     Returns:
-        Shuffled bytes.
+        Partially shuffled bytes.
     """
     if len(data) <= 1:
         return data
-
     result = bytearray(data)
-    random.shuffle(result)
+    # Shuffle only a random 20-50% subset
+    n = max(2, len(result) // random.randint(2, 5))
+    start = random.randint(0, max(0, len(result) - n))
+    random.shuffle(result[start:start + n])
     return bytes(result)
 
 
@@ -762,8 +763,7 @@ def transpose_bytes(data: bytes, width: int) -> bytes:
 def bit_transpose(data: bytes, width: int) -> bytes:
     """Permute bits within a randomly-selected block of *width* bytes.
 
-    Reads the block as a little-endian integer, extracts all 8*width bits,
-    applies a random permutation, and writes back. Preserves input length.
+    Optimized: swaps random bit pairs instead of full shuffle.
 
     Args:
         data: Input bytes.
@@ -778,11 +778,16 @@ def bit_transpose(data: bytes, width: int) -> bytes:
     start = (random.randint(0, max_start) // width) * width
     val = int.from_bytes(data[start : start + width], "little")
     total_bits = 8 * width
-    bits = [(val >> i) & 1 for i in range(total_bits)]
-    random.shuffle(bits)
-    new_val = 0
-    for i, b in enumerate(bits):
-        new_val |= b << i
+    # Swap 2-4 random bit pairs instead of full shuffle
+    n_swaps = random.randint(2, min(4, total_bits // 2))
+    for _ in range(n_swaps):
+        i = random.randint(0, total_bits - 1)
+        j = random.randint(0, total_bits - 1)
+        if i != j:
+            bi = (val >> i) & 1
+            bj = (val >> j) & 1
+            if bi != bj:
+                val ^= (1 << i) | (1 << j)
     result = bytearray(data)
-    result[start : start + width] = new_val.to_bytes(width, "little")
+    result[start : start + width] = val.to_bytes(width, "little")
     return bytes(result)

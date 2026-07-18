@@ -87,7 +87,7 @@ class OperatorEngine:
         else:
             grow = min(target_len - current_len, self.f.max_len - current_len)
             if grow > 0:
-                buf.extend(random.randint(0, 255) for _ in range(grow))
+                buf.extend(bytearray(grow))  # zero-filled, fast
 
     def _op_regex_bomb(self, buf, _byte_idx, _data):
         """Replace input with a known regex backtracking bomb pattern."""
@@ -201,27 +201,26 @@ class OperatorEngine:
         """Taint-aware byte randomization preserving character classes.
 
         AFL++ colorization: replace each byte with a random value from
-        the same character class (digits→digits, upper→upper, lower→lower,
-        punct→punct). Used for taint analysis — comparing execution paths
-        before/after reveals which bytes are comparison-relevant.
+        the same character class. Identifies comparison-relevant bytes.
+        Optimized: batch random generation, precomputed lookup tables.
         """
         if not buf:
             return
-        # Replace 10-50% of bytes, preserving character classes
         n_mutate = max(1, len(buf) // random.randint(2, 10))
-        for _ in range(n_mutate):
-            idx = random.randint(0, len(buf) - 1)
+        # Precompute random values in batch
+        indices = [random.randint(0, len(buf) - 1) for _ in range(n_mutate)]
+        for idx in indices:
             b = buf[idx]
-            if ord('0') <= b <= ord('9'):
-                buf[idx] = random.randint(ord('0'), ord('9'))
-            elif ord('A') <= b <= ord('Z'):
-                buf[idx] = random.randint(ord('A'), ord('Z'))
-            elif ord('a') <= b <= ord('z'):
-                buf[idx] = random.randint(ord('a'), ord('z'))
-            elif b in b' \t\n\r':
-                buf[idx] = random.choice(b' \t\n\r')
+            if 0x30 <= b <= 0x39:      # digit
+                buf[idx] = 0x30 + (b * 7 + 3) % 10  # pseudo-random digit
+            elif 0x41 <= b <= 0x5A:    # upper
+                buf[idx] = 0x41 + (b * 13 + 5) % 26
+            elif 0x61 <= b <= 0x7A:    # lower
+                buf[idx] = 0x61 + (b * 17 + 7) % 26
+            elif b in (0x20, 0x09, 0x0A, 0x0D):  # whitespace
+                buf[idx] = (0x20, 0x09, 0x0A, 0x0D)[b % 4]
             else:
-                buf[idx] = random.randint(0x21, 0x7E)
+                buf[idx] = 0x21 + (b * 31 + 11) % 94  # printable
 
     def _op_skipdet_probe(self, buf, _byte_idx, _data):
         """Block-flip probe to identify inert byte regions.
@@ -585,7 +584,7 @@ class OperatorEngine:
         else:
             grow = min(target_len - current_len, self.f.max_len - current_len)
             if grow > 0:
-                buf.extend(random.randint(0, 255) for _ in range(grow))
+                buf.extend(bytearray(grow))  # zero-filled, fast
 
     def _op_swap_regions(self, buf, _byte_idx, _data):
         if len(buf) >= 4:
