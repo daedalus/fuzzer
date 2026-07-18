@@ -99,10 +99,15 @@ class OperatorEngine:
             ):
                 crash_vals = self.f._crash_mi.top_values(idx, k=5)
                 if crash_vals:
-                    struct.pack_into("<h", buf, idx, random.choice(crash_vals))
+                    v = random.choice(crash_vals)
+                    fmt = "<H" if v > 32767 or v < -32768 else "<h"
+                    struct.pack_into(fmt, buf, idx, v)
                     return
-            vals = INTERESTING_UNSIGNED_16 if random.random() < 0.5 else INTERESTING_16
-            struct.pack_into("<h", buf, idx, random.choice(vals))
+            use_unsigned = random.random() < 0.5
+            vals = INTERESTING_UNSIGNED_16 if use_unsigned else INTERESTING_16
+            v = random.choice(vals)
+            fmt = "<H" if use_unsigned else "<h"
+            struct.pack_into(fmt, buf, idx, v)
 
     def _op_interesting_32(self, buf, _byte_idx, _data):
         if len(buf) >= 4:
@@ -114,10 +119,15 @@ class OperatorEngine:
             ):
                 crash_vals = self.f._crash_mi.top_values(idx, k=5)
                 if crash_vals:
-                    struct.pack_into("<i", buf, idx, random.choice(crash_vals))
+                    v = random.choice(crash_vals)
+                    fmt = "<I" if v > 2147483647 or v < -2147483648 else "<i"
+                    struct.pack_into(fmt, buf, idx, v)
                     return
-            vals = INTERESTING_UNSIGNED_32 if random.random() < 0.5 else INTERESTING_32
-            struct.pack_into("<i", buf, idx, random.choice(vals))
+            use_unsigned = random.random() < 0.5
+            vals = INTERESTING_UNSIGNED_32 if use_unsigned else INTERESTING_32
+            v = random.choice(vals)
+            fmt = "<I" if use_unsigned else "<i"
+            struct.pack_into(fmt, buf, idx, v)
 
     def _op_arithmetic(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import ARITHMETIC_DELTAS
