@@ -66,6 +66,4 @@ void __afl_map_reset(void) {
 __attribute__((constructor))
 static void __afl_auto_init(void) {
     __afl_map_shm();
-    fprintf(stderr, "[shim] map_size=%u map_mask=%u area=%p\n",
-            __afl_map_size, __afl_map_mask, (void *)__afl_area);
 }

@@ -23,8 +23,15 @@ def _untrack(pid: int):
     _child_pids.discard(pid)
 
 
+_clean_env_cache: dict[str, str] | None = None
+
+
 def _clean_env(env: dict[str, str] | None = None) -> dict[str, str]:
-    """Copy env and strip LD_PRELOAD entries that conflict with sanitizers."""
+    """Copy env and strip LD_PRELOAD entries that conflict with sanitizers.
+    Caches the result for repeated calls with the same env."""
+    global _clean_env_cache
+    if env is None and _clean_env_cache is not None:
+        return _clean_env_cache
     e = dict(env or os.environ)
     ld = e.get("LD_PRELOAD", "")
     if ld:
@@ -35,6 +42,8 @@ def _clean_env(env: dict[str, str] | None = None) -> dict[str, str]:
             e["LD_PRELOAD"] = ":".join(cleaned)
         else:
             e.pop("LD_PRELOAD", None)
+    if env is None:
+        _clean_env_cache = e
     return e
 
 
