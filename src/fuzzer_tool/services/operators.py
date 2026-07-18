@@ -129,10 +129,10 @@ class OperatorEngine:
         buf[dst_pos:dst_pos + block_len] = bytes([fill_byte] * block_len)
 
     def _op_redqueen_xform(self, buf, byte_idx, _data):
-        """RedQueen transforms: solve comparisons via XOR/arithmetic/boundary.
+        """RedQueen transforms: solve comparisons via encoding transforms.
 
-        When cmplog data is available, applies XOR, arithmetic, and
-        boundary transforms to crack comparison operations.
+        When cmplog data is available, applies XOR, arithmetic, boundary,
+        toupper/tolower, hex, and base64 transforms to crack comparisons.
         """
         f = self.f
         if not hasattr(f, "_cmplog") or not f._cmplog:
@@ -142,30 +142,60 @@ class OperatorEngine:
         matches = getattr(f._last_cmplog_matches, "matches", []) if hasattr(f, "_last_cmplog_matches") else []
         if not matches:
             return
-        # Pick a random cmplog match
         offset, va, vb = random.choice(matches)
         if offset >= len(buf):
             return
-        transform = random.choice(["xor", "arithmetic", "boundary", "atoi", "hex"])
+        transform = random.choice([
+            "xor", "arithmetic", "boundary", "atoi", "hex",
+            "toupper", "tolower", "hex_pair", "b64_nibble", "double_to_float",
+        ])
         if transform == "xor":
-            # Try: if target does input ^ constant == expected, write expected ^ constant
             const = random.randint(1, 255)
             buf[offset] = (vb ^ const) & 0xFF
         elif transform == "arithmetic":
-            # Try: if target does input + constant == expected, write expected - constant
             delta = random.randint(-128, 127)
             buf[offset] = (vb - delta) & 0xFF
         elif transform == "boundary":
-            # Try values just above and below the comparison boundary
             buf[offset] = (vb - 1) & 0xFF
         elif transform == "atoi":
-            # ASCII number encoding: write the digit for the comparison value
-            digit = vb % 10
-            buf[offset] = ord('0') + digit
+            # ASCII digit encoding: write '0'-'9' for the comparison value
+            buf[offset] = ord('0') + (vb % 10)
         elif transform == "hex":
-            # Hex encoding: write hex char for comparison value
+            # Hex char encoding
             hex_chars = b"0123456789abcdef"
             buf[offset] = hex_chars[vb % 16]
+        elif transform == "toupper":
+            # toupper transform: if target does toupper(input), write uppercase
+            if ord('a') <= buf[offset] <= ord('z'):
+                buf[offset] = buf[offset] - 0x20
+            else:
+                buf[offset] = ord('A') + (vb % 26)
+        elif transform == "tolower":
+            # tolower transform: if target does tolower(input), write lowercase
+            if ord('A') <= buf[offset] <= ord('Z'):
+                buf[offset] = buf[offset] + 0x20
+            else:
+                buf[offset] = ord('a') + (vb % 26)
+        elif transform == "hex_pair":
+            # Two-byte hex encoding: write hex chars for a 2-digit value
+            hex_chars = b"0123456789abcdef"
+            if offset + 1 < len(buf):
+                buf[offset] = hex_chars[(vb >> 4) & 0xF]
+                buf[offset + 1] = hex_chars[vb & 0xF]
+        elif transform == "b64_nibble":
+            # Base64 nibble: write base64 char for the comparison value
+            b64_chars = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+            buf[offset] = b64_chars[vb % 64]
+        elif transform == "double_to_float":
+            # Double-to-float: if target compares double vs float, try the float bits
+            import struct
+            try:
+                fval = struct.unpack("<f", struct.pack("<d", float(vb)))[0]
+                ival = struct.unpack("<I", struct.pack("<f", fval))[0]
+                if offset + 4 <= len(buf):
+                    struct.pack_into("<I", buf, offset, ival)
+            except (struct.error, OverflowError):
+                buf[offset] = vb & 0xFF
 
     def _op_byte_flip(self, buf, byte_idx, _data):
         if buf:
