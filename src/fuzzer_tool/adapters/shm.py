@@ -87,11 +87,12 @@ class ShmCoverage:
     def is_new_coverage(self) -> bool:
         """Check if current bitmap has any edge not seen before (AFL-style).
 
-        Maintains a cumulative 'seen' bitmap across all runs. Only returns
-        True when a previously-zero byte becomes non-zero, meaning the
-        target explored genuinely new code paths.
+        Optimized: fast path when no new edges (bitmap unchanged).
         """
         current = bytes(self._map)
+        if current == bytes(self._seen):
+            return False
+        # Slow path: find and record new edges
         has_new = False
         for i in range(self.size):
             if current[i] and not self._seen[i]:
