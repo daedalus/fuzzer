@@ -170,12 +170,13 @@ class OperatorEngine:
                 del buf[idx : idx + random.randint(1, max_size)]
 
     def _op_block_duplicate(self, buf, _byte_idx, _data):
-        if len(buf) < self.f.max_len:
-            idx = random.randint(0, len(buf) - 1)
-            size = random.randint(1, min(16, len(buf) - idx))
-            block = buf[idx : idx + size]
-            ins = random.randint(0, len(buf))
-            buf[ins:ins] = block
+        if len(buf) < 2 or len(buf) >= self.f.max_len:
+            return
+        idx = random.randint(0, len(buf) - 1)
+        size = random.randint(1, min(16, len(buf) - idx))
+        block = buf[idx : idx + size]
+        ins = random.randint(0, len(buf))
+        buf[ins:ins] = block
 
     def _op_dict_insert(self, buf, _byte_idx, _data):
         if self.f.dictionary:
