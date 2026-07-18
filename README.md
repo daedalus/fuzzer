@@ -146,6 +146,12 @@ fuzzer-tool fuzz targets/fuzz_pattern_match
 # Full search pipeline — end-to-end search_data() with SIMD, regex, output
 fuzzer-tool fuzz targets/fuzz_search_pipeline
 
+# Multi-target: fuzz multiple binaries with shared corpus (glob supported)
+fuzzer-tool fuzz targets/fuzz_regex_compile targets/fuzz_pattern_match targets/fuzz_search_pipeline -c -d corpus/fgrep
+
+# Multi-target with glob
+fuzzer-tool fuzz targets/fuzz_[a-z]* -c -d corpus/fgrep
+
 # Resume a previous fuzzing session
 fuzzer-tool fuzz ./target -c --resume
 

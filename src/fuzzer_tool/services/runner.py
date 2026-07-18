@@ -58,14 +58,17 @@ class TargetRunner:
 
     def run_target(self, data: bytes) -> tuple[int, str]:
         f = self.f
+        # Resolve per-target SHM for multi-target mode
+        shm = f._target_shm_covs.get(f.target, f.shm_cov) if f.multi_targets else f.shm_cov
+
         if f._inprocess_runner:
-            if f.shm_cov:
-                f.shm_cov.reset_edge_map()
+            if shm:
+                shm.reset_edge_map()
             rc, err = f._inprocess_runner.run_one(data)
-            if f.shm_cov:
+            if shm:
                 bitmap = f._inprocess_runner.read_bitmap()
-                if bitmap and len(bitmap) <= f.shm_cov.size:
-                    ctypes.memmove(f.shm_cov._ptr, bitmap, len(bitmap))
+                if bitmap and len(bitmap) <= shm.size:
+                    ctypes.memmove(shm._ptr, bitmap, len(bitmap))
             return rc, err
 
         if f._persistent_runner:
@@ -76,18 +79,18 @@ class TargetRunner:
 
         if f._forkserver and f._forkserver._ready:
             rc, bitmap = f._forkserver.run_one(data)
-            if bitmap and f.shm_cov and len(bitmap) <= f.shm_cov.size:
-                ctypes.memmove(f.shm_cov._ptr, bitmap, len(bitmap))
+            if bitmap and shm and len(bitmap) <= shm.size:
+                ctypes.memmove(shm._ptr, bitmap, len(bitmap))
             return rc, ""
 
-        if f.shm_cov:
-            f.shm_cov.reset_edge_map()
+        if shm:
+            shm.reset_edge_map()
 
         env = os.environ.copy()
         if f.use_coverage:
             env["AFL_MAP_SIZE"] = str(f.map_size)
-        if f.shm_cov:
-            env["__AFL_SHM_ID"] = f.shm_cov.env_id
+        if shm:
+            env["__AFL_SHM_ID"] = shm.env_id
         if f._cmplog:
             env = f._cmplog.setup_env(env)
 

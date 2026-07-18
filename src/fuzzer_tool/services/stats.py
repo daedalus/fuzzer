@@ -374,6 +374,10 @@ class StatsReporter:
 
     def get_current_edge_bitmap(self) -> bytes | None:
         f = self.f
+        if f.multi_targets:
+            active_shm = f._target_shm_covs.get(f.target)
+            if active_shm:
+                return bytes(active_shm._map)
         if f.shm_cov:
             return bytes(f.shm_cov._map)
         if f.ptrace_cov:

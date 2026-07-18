@@ -54,7 +54,11 @@ def _add_common_args(parser):
 
 def _get_dirs(args, target):
     """Resolve corpus/crashes directories."""
-    target_name = os.path.basename(os.path.abspath(target))
+    if hasattr(args, "targets") and len(args.targets) > 1:
+        # Multi-target: require explicit --corpus, derive from first target name
+        target_name = "multi_" + os.path.basename(os.path.abspath(args.targets[0]))
+    else:
+        target_name = os.path.basename(os.path.abspath(target))
     fuzz_dir = Path.home() / "fuzzing" / target_name
     corpus_dir = args.corpus or str(fuzz_dir / "corpus")
     crashes_dir = args.crashes or str(fuzz_dir / "crashes")
@@ -73,8 +77,41 @@ def _validate_target(target):
 
 def cmd_fuzz(args):
     """Main fuzzing command."""
+    # Normalize targets: support both old single-target and new multi-target
+    import glob as _glob
+
+    _NON_BINARY_EXT = {
+        ".c", ".h", ".py", ".sh", ".md", ".txt", ".json", ".dict",
+        ".gram", ".bak", ".bak2", ".log", ".csv", ".html", ".xml",
+        ".yaml", ".yml", ".toml", ".cfg", ".ini", ".conf", ".so",
+        ".o", ".a", ".dylib", ".dll", ".class", ".jar",
+    }
+
+    if not hasattr(args, "targets") or args.targets is None:
+        args.targets = [args.target]
+    # Expand glob patterns (e.g. targets/fuzz_*)
+    expanded = []
+    for t in args.targets:
+        matches = _glob.glob(t)
+        if matches:
+            # Filter: skip source files, scripts, docs, and non-executables
+            for m in sorted(matches):
+                ext = os.path.splitext(m)[1].lower()
+                if ext in _NON_BINARY_EXT:
+                    continue
+                if not os.path.isfile(m):
+                    continue
+                expanded.append(m)
+        else:
+            expanded.append(t)
+    if not expanded:
+        print("[-] No executable targets found from glob pattern")
+        sys.exit(1)
+    args.targets = expanded
+    args.target = args.targets[0]
     if not args.inprocess and not args.inprocess_direct:
-        _validate_target(args.target)
+        for t in args.targets:
+            _validate_target(t)
     corpus_dir, crashes_dir = _get_dirs(args, args.target)
 
     # Auto-detect ASAN instrumentation
@@ -182,6 +219,7 @@ def cmd_fuzz(args):
 
     fuzzer = Fuzzer(
         target=args.target,
+        multi_targets=args.targets if len(args.targets) > 1 else None,
         corpus_dir=corpus_dir,
         crashes_dir=crashes_dir,
         max_len=args.max_len,
@@ -758,7 +796,7 @@ def main() -> int:
 
     # --- fuzz (default) ---
     fuzz_parser = subparsers.add_parser("fuzz", help="Run coverage-guided fuzzing")
-    fuzz_parser.add_argument("target", help="Path to target binary")
+    fuzz_parser.add_argument("targets", nargs="+", help="Path(s) to target binary(ies)")
     fuzz_parser.add_argument(
         "-d", "--corpus", default=None, help="Corpus directory (default: ~/fuzzing/<target>/corpus)"
     )

@@ -180,8 +180,14 @@ class Fuzzer:
         map_size=0,
         max_collision_risk=30,
         continue_until_crash=False,
+        multi_targets=None,
     ):
         self.target = target
+        # Multi-target support: list of target binaries to fuzz with shared corpus
+        self.multi_targets = multi_targets  # None for single-target
+        self._active_target_idx = 0  # round-robin index
+        self._target_shm_covs = {}  # target_path -> ShmCoverage (per-target)
+        self._target_profiles = {}  # target_path -> TargetProfile
         # Record boot time at init — before any child processes are spawned.
         # Use -2s tolerance so crashes logged just before this read are included.
         try:
@@ -287,6 +293,18 @@ class Fuzzer:
                     print(f"[*] Coverage: AFL SHM bitmap, id={self.shm_cov.env_id}")
                 except OSError:
                     self._setup_ptrace(target, deep_coverage, max_bps, fallback_hint=True)
+
+        # Per-target SHM for multi-target mode
+        if self.multi_targets and self.use_coverage and not no_shm:
+            from fuzzer_tool.adapters.shm import ShmCoverage
+
+            for t in self.multi_targets:
+                try:
+                    self._target_shm_covs[t] = ShmCoverage(size=self.map_size)
+                except OSError:
+                    log.warning("Failed to create SHM for %s, using shared SHM", t)
+            if self._target_shm_covs:
+                print(f"[*] Multi-target: {len(self._target_shm_covs)} per-target SHM regions")
 
         self.corpus_dir.mkdir(parents=True, exist_ok=True)
         self.crashes_dir.mkdir(parents=True, exist_ok=True)
@@ -947,6 +965,30 @@ class Fuzzer:
                 print(f"\n[*] MEMORY PRUNE: {before} → {after} seeds "
                       f"(RSS {rss_kb // 1024}MB / {total_kb // 1024}MB, {used_pct:.1f}%)")
 
+    def _select_next_target(self):
+        """Select the next target for multi-target round-robin fuzzing."""
+        if not self.multi_targets:
+            return
+        # Weighted round-robin: prefer targets with fewer total edges discovered
+        if len(self.multi_targets) > 1 and self.exec_count > 100:
+            # Weight by inverse of cumulative edges (less-covered targets get more execs)
+            weights = []
+            for t in self.multi_targets:
+                shm = self._target_shm_covs.get(t)
+                edges = shm.cumulative_edges if shm else 0
+                weights.append(1.0 / max(edges, 1))
+            total = sum(weights)
+            r = random.random() * total
+            cumulative = 0.0
+            for idx, w in enumerate(weights):
+                cumulative += w
+                if r <= cumulative:
+                    self._active_target_idx = idx
+                    break
+        else:
+            self._active_target_idx = (self._active_target_idx + 1) % len(self.multi_targets)
+        self.target = self.multi_targets[self._active_target_idx]
+
     def _pick_seed(self):
         return self._seed_picker.pick_seed()
 
@@ -1078,9 +1120,18 @@ class Fuzzer:
 
         is_crash = self._is_crash(returncode, stderr)
         is_interesting = self._is_interesting(returncode, stderr)
-        has_new_coverage = (self.ptrace_cov and self.ptrace_cov.is_new_coverage()) or (
-            self.shm_cov and self.shm_cov.is_new_coverage()
-        )
+        # Check new coverage (per-target SHM in multi-target mode)
+        if self.multi_targets:
+            active_shm = self._target_shm_covs.get(self.target)
+            has_new_coverage = (self.ptrace_cov and self.ptrace_cov.is_new_coverage()) or (
+                active_shm and active_shm.is_new_coverage()
+            ) or (
+                self.shm_cov and self.shm_cov.is_new_coverage()
+            )
+        else:
+            has_new_coverage = (self.ptrace_cov and self.ptrace_cov.is_new_coverage()) or (
+                self.shm_cov and self.shm_cov.is_new_coverage()
+            )
 
         # Record crash MI: I(byte_position; crash_outcome)
         if self._crash_mi:
@@ -1466,7 +1517,12 @@ class Fuzzer:
         return True
 
     def run(self, iterations=0):
-        print(f"[*] Target: {self.target}")
+        if self.multi_targets:
+            print(f"[*] Multi-target: {len(self.multi_targets)} targets, shared corpus")
+            for i, t in enumerate(self.multi_targets):
+                print(f"  [{i}] {t}")
+        else:
+            print(f"[*] Target: {self.target}")
         # Static branch density: conditional branches per KB of .text
         from fuzzer_tool.core.elf import branch_density
 
@@ -1598,6 +1654,9 @@ class Fuzzer:
                     break
                 if self.continue_until_crash and self.crash_count > 0:
                     break
+                # Cycle through targets in multi-target mode
+                if self.multi_targets:
+                    self._select_next_target()
                 seed = self._pick_seed()
                 self.fuzz_one(seed)
                 i += 1
