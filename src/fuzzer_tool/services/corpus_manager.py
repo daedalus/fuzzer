@@ -81,6 +81,9 @@ class CorpusManager:
         }
         for seed, meta in f.seed_meta.items():
             key = seed.hex()
+            # Skip corrupted/bloated keys (tracker JSON loaded as seed)
+            if len(key) >= 256:
+                continue
             rm = meta.get("redqueen_matches", [])
             rm_ser = [[m[0], m[1].hex(), m[2].hex()] for m in rm]
             state["seed_meta"][key] = {
@@ -124,9 +127,11 @@ class CorpusManager:
         f.op_success = state.get("op_success", {})
         f._corpus_size_history = state.get("corpus_size_history", [])
         saved_meta = state.get("seed_meta", {})
+        # Skip corrupted entries: seed keys should be hex hashes (< 256 chars),
+        # not full JSON blobs from tracker files loaded as corpus seeds.
         for seed in f.corpus:
             key = seed.hex()
-            if key in saved_meta:
+            if key in saved_meta and len(key) < 256:
                 sm = saved_meta[key]
                 f.seed_meta[seed].update(
                     {
