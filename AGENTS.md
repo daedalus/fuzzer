@@ -5,6 +5,7 @@ Always create TODOs.
 Always update the README.md with the new features added.
 Always git commit and push after finish a task.
 All fuzz targets must be compiled with ASAN instrumentation (`-fsanitize=address`).
+All fuzz targets must have AFL edge coverage via `afl_shim.c` (`-include src/fuzzer_tool/adapters/afl_shim.c`). Pre-compile library sources as `.o` files, link with shim included only in the target wrapper.
 Never commit binary files or corpus directories — build targets from source, keep corpus data local.
 
 
@@ -88,6 +89,8 @@ targets/
 ├── zlib_read          # Compiled target
 ├── gzip_read.c        # gzip-specific fuzz target (header parsing, multi-member)
 ├── gzip_read          # Compiled target
+├── fgrep_read.c       # fgrep SIMD/regex/BMH search fuzz target
+├── fgrep_read         # Compiled target
 ├── asan_target.c      # ASAN crash target
 ├── asan_target        # Compiled target
 ├── test_target.c      # Minimal crash target
