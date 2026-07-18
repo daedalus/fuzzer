@@ -18,6 +18,7 @@ Extracted from Fuzzer class (~lines 3101-3613, 3435-3508). Contains:
 
 import json
 import logging
+import os
 import random
 import time
 
@@ -396,7 +397,14 @@ class StatsReporter:
         if f.markov_generate:
             markov_str += "+gen"
         cov_str = ""
-        if f.shm_cov:
+        if f.multi_targets and f._target_shm_covs:
+            parts = []
+            for t in f._target_shm_covs:
+                shm = f._target_shm_covs[t]
+                name = os.path.basename(t)
+                parts.append(f"{name}:{shm.cumulative_edges}")
+            cov_str = " | targets: " + " ".join(parts)
+        elif f.shm_cov:
             shm_edges = f.shm_cov.cumulative_edges
             gt = f._edge_tracker.good_turing_estimate()
             max_edges = gt["n"] + gt["estimated_undiscovered"]
