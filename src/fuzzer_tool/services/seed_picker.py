@@ -335,6 +335,22 @@ class SeedPicker:
                 prod = f._length_tracker.length_productivity(seed_len)
                 w *= 0.5 + min(prod, 2.0) * 0.75  # [0.5, 2.0] range
 
+            # Cross-target boost: seeds that found edges in the least-covered
+            # target get a multiplier proportional to the coverage gap.
+            if (f.multi_targets and f._edge_tracker
+                    and f._edge_tracker.target_cumulative_edges):
+                target_edges = f._edge_tracker.target_cumulative_edges
+                if len(target_edges) > 1:
+                    counts = {t: len(e) for t, e in target_edges.items()}
+                    min_target = min(counts, key=counts.get)
+                    max_target = max(counts, key=counts.get)
+                    gap = counts[max_target] - counts[min_target]
+                    if gap > 0:
+                        sk = f._seed_key(seed)
+                        seed_targets = f._edge_tracker.seed_target_edges.get(sk, {})
+                        if min_target in seed_targets and seed_targets[min_target]:
+                            w *= 1.0 + min(gap / max(counts[min_target], 1), 1.0)
+
             weights.append(max(w, 1e-6))
 
             novelty = sub

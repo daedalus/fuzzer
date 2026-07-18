@@ -369,14 +369,18 @@ class EdgeTracker:
         self._corpus_sig: list[int] | None = None
         # Per-seed edge traces for directed distance: seed_key -> set of (prev, curr) edges
         self.seed_edge_traces: dict[str, set[tuple[int, int]]] = {}
+        # Per-target cumulative edge sets: target_name -> set of edge indices
+        self.target_cumulative_edges: dict[str, set[int]] = {}
+        # Per-seed per-target edge sets: seed_key -> {target_name: set of edges}
+        self.seed_target_edges: dict[str, dict[str, set[int]]] = {}
 
-    def record_edges(self, seed_key: str, edge_bitmap: bytes) -> set[int]:
+    def record_edges(self, seed_key: str, edge_bitmap: bytes, target_name: str = "") -> set[int]:
         """Record edges hit by a seed execution.
 
         Args:
             seed_key: Hash of the seed input.
             edge_bitmap: Raw edge bitmap (bytes where > 0 = edge hit).
-                Values are hit counts (0-255), not just binary.
+            target_name: Name of the target binary (for multi-target tracking).
 
         Returns:
             Set of NEW edge indices not previously seen.
@@ -408,6 +412,17 @@ class EdgeTracker:
         new_contributions = new_edges - self.cumulative_edges
         self.cumulative_edges.update(new_edges)
         self.seed_edges[seed_key].update(new_edges)
+
+        # Per-target tracking
+        if target_name:
+            if target_name not in self.target_cumulative_edges:
+                self.target_cumulative_edges[target_name] = set()
+            self.target_cumulative_edges[target_name].update(new_edges)
+            if seed_key not in self.seed_target_edges:
+                self.seed_target_edges[seed_key] = {}
+            if target_name not in self.seed_target_edges[seed_key]:
+                self.seed_target_edges[seed_key][target_name] = set()
+            self.seed_target_edges[seed_key][target_name].update(new_edges)
 
         # Update MinHash signature and LSH index
         sig = self._minhash.compute_signature(self.seed_edges[seed_key])

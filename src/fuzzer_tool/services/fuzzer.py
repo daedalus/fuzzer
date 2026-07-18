@@ -1197,7 +1197,10 @@ class Fuzzer:
             edge_bitmap = self._get_current_edge_bitmap()
             if edge_bitmap:
                 seed_key = self._seed_key(data)
-                new = self._edge_tracker.record_edges(seed_key, edge_bitmap)
+                new = self._edge_tracker.record_edges(
+                    seed_key, edge_bitmap,
+                    target_name=os.path.basename(self.target) if self.multi_targets else "",
+                )
                 if new:
                     self._last_new_edge_exec = self.exec_count
                     if self._stall_recovery_active:

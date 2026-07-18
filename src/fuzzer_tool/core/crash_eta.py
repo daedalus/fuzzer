@@ -76,6 +76,24 @@ class CrashMITracker:
             if is_crash:
                 self.joint_crash[pos][byte_val] += 1
 
+        # Prune per-position byte values to cap memory growth
+        if self.total_execs % 500 == 0:
+            self._prune()
+
+    def _prune(self, max_values_per_pos: int = 32) -> None:
+        """Keep only the top N most frequent byte values per position."""
+        for pos in list(self.byte_total):
+            bv = self.byte_total[pos]
+            if len(bv) > max_values_per_pos + 8:
+                top = sorted(bv.items(), key=lambda x: x[1], reverse=True)[:max_values_per_pos]
+                self.byte_total[pos] = defaultdict(int, dict(top))
+                if pos in self.joint_crash:
+                    self.joint_crash[pos] = defaultdict(
+                        int, {k: v for k, v in self.joint_crash[pos].items()
+                              if k in self.byte_total[pos]}
+                    )
+        self._cache_valid = False
+
     def mi(self, position: int) -> float:
         """Compute I(X_pos; C) in bits.
 
