@@ -125,7 +125,6 @@ MUTATIONS = [
     "overwrite_copy",
     "overwrite_fixed",
     "redqueen_xform",
-    "colorization",
     "skipdet_probe",
     "auto_extras",
 ]
@@ -394,8 +393,7 @@ def type_replace_byte(b: int) -> int:
 def type_replace(data: bytes) -> bytes:
     """Replace all bytes with different values from the same character class.
 
-    Mutates every byte in the input while preserving its character class.
-    This keeps the input structurally valid for text-based formats.
+    Optimized: inlined logic with precomputed swap map, no per-byte function calls.
 
     Args:
         data: Input bytes to mutate.
@@ -405,7 +403,19 @@ def type_replace(data: bytes) -> bytes:
     """
     result = bytearray(data)
     for i in range(len(result)):
-        result[i] = type_replace_byte(result[i])
+        b = result[i]
+        if b in _SWAP_MAP:
+            result[i] = _SWAP_MAP[b]
+        elif 0x30 <= b <= 0x39:  # digit
+            result[i] = 0x30 + (b * 7 + 3) % 10
+        elif 0x41 <= b <= 0x5A:  # upper
+            result[i] = 0x41 + (b * 13 + 5) % 26
+        elif 0x61 <= b <= 0x7A:  # lower
+            result[i] = 0x61 + (b * 17 + 7) % 26
+        elif b < 32:
+            result[i] = b ^ 0x1F
+        else:
+            result[i] = b ^ 0x7F
     return bytes(result)
 
 
