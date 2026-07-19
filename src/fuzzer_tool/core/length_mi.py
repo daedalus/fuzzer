@@ -71,12 +71,18 @@ class LengthEdgeTracker:
 
     def save(self) -> dict:
         """Serialize tracker state."""
+        # Only save lengths with significant data
+        counts = {
+            k: {ek: ev for ek, ev in v.items() if ev > 0}
+            for k, v in self.length_edge_counts.items()
+            if self.length_total.get(k, 0) >= 5
+        }
         return {
             "length_edge_counts": {
                 str(k): {str(ek): ev for ek, ev in v.items()}
-                for k, v in self.length_edge_counts.items()
+                for k, v in counts.items()
             },
-            "length_total": dict(self.length_total),
+            "length_total": {str(k): v for k, v in self.length_total.items() if v >= 5},
             "total_execs": self.total_execs,
         }
 

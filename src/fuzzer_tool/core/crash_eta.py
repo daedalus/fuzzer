@@ -92,7 +92,9 @@ class CrashMITracker:
                         int, {k: v for k, v in self.joint_crash[pos].items()
                               if k in self.byte_total[pos]}
                     )
-        self._cache_valid = False
+        # Only invalidate cache periodically to avoid recomputing MI on every call
+        if self.total_execs % 50 == 0:
+            self._cache_valid = False
 
     def mi(self, position: int) -> float:
         """Compute I(X_pos; C) in bits.
@@ -139,6 +141,10 @@ class CrashMITracker:
             for pos in self.position_counts
             if self.position_counts[pos] >= self.min_observations
         }
+        # Cache sorted positions and weights for weighted_position
+        self._cached_positions = sorted(self._mi_cache.keys())
+        self._cached_weights = [max(self._mi_cache[p], 0.01) for p in self._cached_positions]
+        self._cached_total = sum(self._cached_weights)
         self._cache_valid = True
         return self._mi_cache
 
@@ -152,23 +158,23 @@ class CrashMITracker:
 
     def weighted_position(self, input_length: int) -> int:
         """Sample a byte position weighted by crash MI."""
-        mi_vals = self.all_mi()
-        if not mi_vals:
+        if not self._cache_valid:
+            self.all_mi()
+        if not self._cached_positions:
             return 0
-        positions = [p for p in mi_vals if p < input_length]
-        if not positions:
+        # Binary search for cutoff index
+        import bisect
+        idx = bisect.bisect_left(self._cached_positions, input_length)
+        if idx == 0:
             return 0
-        weights = [max(mi_vals[p], 0.01) for p in positions]
-        total = sum(weights)
-        if total <= 0:
-            return random.choice(positions)
-        r = random.random() * total
+        # Sample using precomputed weights (first idx elements)
+        r = random.random() * self._cached_total
         cumulative = 0.0
-        for p, w in zip(positions, weights):
-            cumulative += w
+        for i in range(idx):
+            cumulative += self._cached_weights[i]
             if r <= cumulative:
-                return p
-        return positions[-1]
+                return self._cached_positions[i]
+        return self._cached_positions[idx - 1]
 
     def top_values(self, position: int, k: int = 5) -> list[int]:
         """Return the k byte values at position with highest crash count."""
