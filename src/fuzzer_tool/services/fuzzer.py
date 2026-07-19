@@ -121,6 +121,49 @@ def _detect_afl(target_path: str) -> bool:
 
 
 class Fuzzer:
+    @staticmethod
+    def _probe_so_function(target):
+        """Probe a shared object for the best fuzz entry point.
+
+        Prefers fuzz_shm_run (standard wrapper), then any fuzz_* symbol.
+        Falls back to fuzz_shm_run if nothing is found.
+        """
+        import ctypes
+
+        try:
+            lib = ctypes.CDLL(target)
+        except OSError:
+            return "fuzz_shm_run"
+
+        # Prefer the standard wrapper
+        for name in ("fuzz_shm_run",):
+            try:
+                getattr(lib, name)
+                return name
+            except AttributeError:
+                pass
+
+        # Scan for any fuzz_* symbol
+        try:
+            import subprocess
+
+            result = subprocess.run(
+                ["nm", "-D", target],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            for line in result.stdout.splitlines():
+                parts = line.split()
+                if len(parts) >= 3 and parts[1] in ("T", "t", "W", "w"):
+                    sym = parts[2]
+                    if sym.startswith("fuzz_") and sym != "fuzz_shm_run":
+                        return sym
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+        return "fuzz_shm_run"
+
     def __init__(
         self,
         target,
@@ -648,20 +691,22 @@ class Fuzzer:
                 self._persistent_runner = None
 
         self._inprocess_runner = None
-        # Auto-detect .so targets and use in-process mode with fuzz_shm_run
+        # Auto-detect .so targets and use in-process mode
         if not inprocess and self.target.lower().endswith(('.so', '.dylib', '.dll')):
             from fuzzer_tool.adapters.inprocess import InProcessRunner
             cov_env_id = self.shm_cov.env_id if self.shm_cov else None
+            # Probe the shared object for a fuzz function name
+            auto_func = self._probe_so_function(self.target)
             self._inprocess_runner = InProcessRunner(
                 target=self.target,
-                function_name="fuzz_shm_run",
+                function_name=auto_func,
                 timeout=self.timeout,
                 shm_size=self.map_size,
                 direct_lite=True,
                 coverage_env_id=cov_env_id,
                 cov=bool(cov_env_id),
             )
-            print(f"[*] Auto-detected .so target: in-process mode (direct_lite) with fuzz_shm_run")
+            print(f"[*] Auto-detected .so target: in-process mode (direct_lite) with {auto_func}")
         elif inprocess:
             from fuzzer_tool.adapters.inprocess import InProcessRunner
 
@@ -1237,6 +1282,17 @@ class Fuzzer:
                     discovery_rate = len(new) / fuzz_count
                     self._seed_secretary[seed_key].observe(discovery_rate)
 
+        # Update edge lifetime tracking for every execution
+        if self._inprocess_runner or self.ptrace_cov or self.shm_cov:
+            edge_bitmap = self._get_current_edge_bitmap()
+            if edge_bitmap:
+                current_edges = set()
+                for i, val in enumerate(edge_bitmap):
+                    if val and i < self.map_size:
+                        current_edges.add(i)
+                if current_edges:
+                    self._edge_tracker.record_edge_lifetimes(current_edges, self.exec_count)
+
         # Track input-length → edge discovery correlation
         if has_new_coverage and self._length_tracker:
             edge_bitmap = self._get_current_edge_bitmap()
@@ -1712,6 +1768,8 @@ class Fuzzer:
                     self.print_stats()
                     self._append_coverage_log()
                     self._record_discovery_snapshot()
+                    # Record coverage snapshot for temporal analysis
+                    self._edge_tracker.record_coverage_snapshot(self.exec_count)
                     # Stall detection: no new edges in threshold execs
                     execs_since_edge = self.exec_count - self._last_new_edge_exec
                     if (
@@ -1737,6 +1795,8 @@ class Fuzzer:
         except OSError as e:
             log.warning("Fuzzing interrupted by OS error: %s", e)
 
+        # Final coverage snapshot for temporal analysis
+        self._edge_tracker.record_coverage_snapshot(self.exec_count)
         self._dump_stats()
         self._dump_coverage_report()
         if self.markov.is_trained():

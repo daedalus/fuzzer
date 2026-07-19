@@ -208,3 +208,9 @@ int main(int argc, char **argv) {
     return 0;
 }
 #endif
+
+/* Standard in-process entry point for fuzzer-tool .so mode */
+__attribute__((visibility("default")))
+int fuzz_shm_run(const unsigned char *buf, size_t size) {
+    return fuzz_gzip(buf, size);
+}

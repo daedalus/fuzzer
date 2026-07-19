@@ -6,11 +6,9 @@
 #include <unistd.h>
 #include <stdint.h>
 
-int main(void) {
-    uint8_t buf[512];
-    ssize_t n = read(0, buf, sizeof(buf) - 1);
+__attribute__((visibility("default")))
+int fuzz_proto(const unsigned char *buf, size_t n) {
     if (n < 4) return 0;
-    buf[n] = '\0';
 
     /* Path 1: magic header check */
     if (buf[0] == 'O' && buf[1] == 'P' && buf[2] == 'E' && buf[3] == 'N') {
@@ -82,4 +80,18 @@ int main(void) {
         }
     }
     return 0;
+}
+
+/* Standard in-process entry point for fuzzer-tool .so mode */
+__attribute__((visibility("default")))
+int fuzz_shm_run(const unsigned char *buf, size_t size) {
+    return fuzz_proto(buf, size);
+}
+
+int main(void) {
+    uint8_t buf[512];
+    ssize_t n = read(0, buf, sizeof(buf) - 1);
+    if (n < 4) return 0;
+    buf[n] = '\0';
+    return fuzz_proto(buf, (size_t)n);
 }

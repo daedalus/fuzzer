@@ -144,6 +144,24 @@ verify_afl() {
     ok "$count targets with AFL symbols"
 }
 
+# ── Verify fuzz_shm_run in .so targets ──────────────────────────
+verify_shm_run() {
+    echo "Verifying fuzz_shm_run in .so targets..."
+    local ok_count=0
+    local fail_count=0
+    for f in "$TARGETS"/*.so; do
+        [ -f "$f" ] || continue
+        if nm "$f" 2>/dev/null | grep -q "fuzz_shm_run"; then
+            ok_count=$((ok_count + 1))
+        else
+            warn "$(basename "$f"): missing fuzz_shm_run"
+            fail_count=$((fail_count + 1))
+        fi
+    done
+    ok "$ok_count .so targets with fuzz_shm_run"
+    [ "$fail_count" -gt 0 ] && warn "$fail_count .so targets missing fuzz_shm_run"
+}
+
 # ── Main ──────────────────────────────────────────────────────────
 echo "=== Building fuzz targets ==="
 
@@ -177,4 +195,5 @@ case "$OPTS" in
 esac
 
 verify_afl
+verify_shm_run
 echo "=== Done ==="
