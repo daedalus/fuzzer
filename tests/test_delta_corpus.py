@@ -98,7 +98,7 @@ class TestDeltaSaveLoad:
         save_to_corpus(parent, tmp_path, seen)
         save_to_corpus(child, tmp_path, seen, parent=parent, lineage_depth=0)
 
-        files = list(tmp_path.iterdir())
+        files = list((tmp_path / "seeds").iterdir())
         delta_files = [f for f in files if f.name.startswith("delta_")]
         full_files = [f for f in files if f.name.startswith("id_")]
         assert len(delta_files) == 1
@@ -115,7 +115,7 @@ class TestDeltaSaveLoad:
         child = bytes(child)
         save_to_corpus(child, tmp_path, seen, parent=parent, lineage_depth=SNAPSHOT_INTERVAL)
 
-        files = list(tmp_path.iterdir())
+        files = list((tmp_path / "seeds").iterdir())
         full_files = [f for f in files if f.name.startswith("id_")]
         assert len(full_files) == 2  # both parent and child as full files
 
@@ -157,15 +157,17 @@ class TestDeltaSaveLoad:
 
         # Write a corrupt delta file
         h = "corrupt"
-        (tmp_path / f"delta_{h}.json").write_text("not valid json {{{")
+        (tmp_path / "seeds" / f"delta_{h}.json").write_text("not valid json {{{")
 
         corpus, _ = load_corpus(tmp_path)
         assert len(corpus) == 1  # only the full file
 
     def test_legacy_files_still_work(self, tmp_path):
         # Files without id_ prefix (legacy)
-        (tmp_path / "f1").write_bytes(b"legacy1")
-        (tmp_path / "f2").write_bytes(b"legacy2")
+        seeds_dir = tmp_path / "seeds"
+        seeds_dir.mkdir(parents=True, exist_ok=True)
+        (seeds_dir / "f1").write_bytes(b"legacy1")
+        (seeds_dir / "f2").write_bytes(b"legacy2")
         corpus, seen = load_corpus(tmp_path)
         assert len(corpus) == 2
         assert b"legacy1" in corpus
@@ -177,7 +179,7 @@ class TestDeltaSaveLoad:
         save_to_corpus(a, tmp_path, seen)
         result = save_to_corpus(a, tmp_path, seen)
         assert result is False  # duplicate
-        assert len(list(tmp_path.iterdir())) == 1
+        assert len(list((tmp_path / "seeds").iterdir())) == 1
 
     def test_large_delta_stores_full(self, tmp_path):
         parent = b"\x00" * 40
@@ -186,6 +188,6 @@ class TestDeltaSaveLoad:
         save_to_corpus(parent, tmp_path, seen)
         save_to_corpus(child, tmp_path, seen, parent=parent, lineage_depth=0)
 
-        files = list(tmp_path.iterdir())
+        files = list((tmp_path / "seeds").iterdir())
         full_files = [f for f in files if f.name.startswith("id_")]
         assert len(full_files) == 2  # both stored as full

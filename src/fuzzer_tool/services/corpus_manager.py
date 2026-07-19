@@ -416,12 +416,13 @@ class CorpusManager:
 
         removed = len(f.corpus) - len(unique)
         if removed > 0:
-            pruned_dir = f.corpus_dir / "pruned"
+            seeds_dir = f.corpus_dir / "seeds"
+            pruned_dir = seeds_dir / "pruned"
             pruned_dir.mkdir(parents=True, exist_ok=True)
             from fuzzer_tool.adapters.filesystem import hash_data as _hash
 
             kept_set = {_hash(s) for s in unique}
-            for fh in f.corpus_dir.iterdir():
+            for fh in seeds_dir.iterdir():
                 if not fh.is_file():
                     continue
                 if fh.suffix == ".json" and fh.name.startswith("delta_"):

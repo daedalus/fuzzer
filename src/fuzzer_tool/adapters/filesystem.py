@@ -166,13 +166,13 @@ def hash_data_crypto(data: bytes) -> str:
 
 
 def load_corpus(corpus_dir: Path, bloom: BloomFilter | None = None) -> tuple[list[bytes], set[str]]:
-    """Load existing corpus from directory.
+    """Load existing corpus from corpus_dir/seeds/.
 
     Handles both full files (id_*.*) and delta-encoded files (delta_*.json).
     Delta files are reconstructed from their parent chain.
 
     Args:
-        corpus_dir: Path to corpus directory.
+        corpus_dir: Path to corpus directory (seeds live in seeds/ subdir).
         bloom: Optional bloom filter to populate for fast dedup.
 
     Returns:
@@ -180,23 +180,15 @@ def load_corpus(corpus_dir: Path, bloom: BloomFilter | None = None) -> tuple[lis
     """
     corpus: list[bytes] = []
     seen: set[str] = set()
+    seeds_dir = corpus_dir / "seeds"
 
     # First pass: load all full files and build hash lookup for delta reconstruction
     full_files: dict[str, bytes] = {}
     delta_files: list[tuple[str, Path]] = []
 
-    # Metadata files to skip when loading corpus
-    _SKIP_NAMES = {
-        "state.json", "edge_tracker.json", "markov.json", "mi.json",
-        "sensitivity.json", "crash_mi.json", "length_tracker.json",
-    }
-
-    if corpus_dir.exists():
-        for f in corpus_dir.iterdir():
+    if seeds_dir.exists():
+        for f in seeds_dir.iterdir():
             if not f.is_file():
-                continue
-            # Skip known metadata files
-            if f.name in _SKIP_NAMES:
                 continue
             if f.suffix == ".json" and f.name.startswith("delta_"):
                 h = f.name[6:-5]  # strip "delta_" prefix and ".json" suffix
@@ -296,7 +288,8 @@ def save_to_corpus(
         if h in seen_hashes:
             return False
     seen_hashes.add(h)
-    corpus_dir.mkdir(parents=True, exist_ok=True)
+    seeds_dir = corpus_dir / "seeds"
+    seeds_dir.mkdir(parents=True, exist_ok=True)
 
     # Force full snapshot at interval to cap chain depth.
     # v1 delta handles same-length mutations; v2 handles length-changing ones.
@@ -316,10 +309,10 @@ def save_to_corpus(
                 delta = {"parent": parent_hash, "diff": diff_v2, "v": 2}
 
     if delta is not None:
-        delta_file = corpus_dir / f"delta_{h}.json"
+        delta_file = seeds_dir / f"delta_{h}.json"
         delta_file.write_text(json.dumps(delta, separators=(",", ":")))
     else:
-        corpus_file = corpus_dir / f"id_{h}"
+        corpus_file = seeds_dir / f"id_{h}"
         corpus_file.write_bytes(data)
     return True
 

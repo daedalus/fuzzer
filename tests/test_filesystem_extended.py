@@ -69,24 +69,28 @@ class TestHashData:
 
 class TestLoadCorpusDelta:
     def test_load_full_files(self, tmp_path):
-        (tmp_path / "a.bin").write_bytes(b"AAAA")
-        (tmp_path / "b.bin").write_bytes(b"BBBB")
+        seeds = tmp_path / "seeds"
+        seeds.mkdir()
+        (seeds / "a.bin").write_bytes(b"AAAA")
+        (seeds / "b.bin").write_bytes(b"BBBB")
         corpus, seen = load_corpus(tmp_path)
         assert len(corpus) == 2
         assert b"AAAA" in corpus
         assert b"BBBB" in corpus
 
     def test_load_delta_chain(self, tmp_path):
+        seeds = tmp_path / "seeds"
+        seeds.mkdir()
         # Full file
         parent_data = b"AAAA"
         parent_hash = hash_data(parent_data)
-        (tmp_path / f"{parent_hash}.bin").write_bytes(parent_data)
+        (seeds / f"{parent_hash}.bin").write_bytes(parent_data)
 
         # Delta: change byte 2 to B
         child = b"AABA"
         d = compute_delta(parent_data, child)
         child_hash = hash_data(child)
-        delta_file = tmp_path / f"delta_{child_hash}.json"
+        delta_file = seeds / f"delta_{child_hash}.json"
         delta_file.write_text(json.dumps({"parent": parent_hash, "diff": d}))
 
         corpus, seen = load_corpus(tmp_path)
@@ -94,35 +98,41 @@ class TestLoadCorpusDelta:
         assert child in corpus
 
     def test_delta_with_bloom(self, tmp_path):
+        seeds = tmp_path / "seeds"
+        seeds.mkdir()
         bloom = BloomFilter(capacity=100)
         parent_data = b"AAAA"
         parent_hash = hash_data(parent_data)
-        (tmp_path / f"{parent_hash}.bin").write_bytes(parent_data)
+        (seeds / f"{parent_hash}.bin").write_bytes(parent_data)
 
         child = b"AABA"
         d = compute_delta(parent_data, child)
         child_hash = hash_data(child)
-        delta_file = tmp_path / f"delta_{child_hash}.json"
+        delta_file = seeds / f"delta_{child_hash}.json"
         delta_file.write_text(json.dumps({"parent": parent_hash, "diff": d}))
 
         corpus, seen = load_corpus(tmp_path, bloom=bloom)
         assert len(corpus) == 2
 
     def test_corrupt_delta_skipped(self, tmp_path):
+        seeds = tmp_path / "seeds"
+        seeds.mkdir()
         parent_data = b"AAAA"
         parent_hash = hash_data(parent_data)
-        (tmp_path / f"{parent_hash}.bin").write_bytes(parent_data)
+        (seeds / f"{parent_hash}.bin").write_bytes(parent_data)
 
         child_hash = "deadbeef00000001"
-        delta_file = tmp_path / f"delta_{child_hash}.json"
+        delta_file = seeds / f"delta_{child_hash}.json"
         delta_file.write_text("not valid json {{{")
 
         corpus, seen = load_corpus(tmp_path)
         assert len(corpus) == 1  # only the parent
 
     def test_missing_parent_skipped(self, tmp_path):
+        seeds = tmp_path / "seeds"
+        seeds.mkdir()
         # Delta references non-existent parent
-        delta_file = tmp_path / "delta_deadbeef00000001.json"
+        delta_file = seeds / "delta_deadbeef00000001.json"
         delta_file.write_text(json.dumps({"parent": "nope", "diff": [[0, 65]]}))
 
         corpus, seen = load_corpus(tmp_path)
@@ -139,7 +149,7 @@ class TestSaveToCorpus:
         seen = set()
         result = save_to_corpus(b"hello", tmp_path, seen)
         assert result is True
-        assert b"hello" in [f.read_bytes() for f in tmp_path.iterdir()]
+        assert b"hello" in [f.read_bytes() for f in (tmp_path / "seeds").iterdir()]
 
     def test_duplicate_rejected(self, tmp_path):
         seen = set()
@@ -159,11 +169,11 @@ class TestSaveToCorpus:
         assert result is True
 
         # Should have a delta file
-        delta_files = list(tmp_path.glob("delta_*.json"))
+        delta_files = list((tmp_path / "seeds").glob("delta_*.json"))
         assert len(delta_files) == 1
 
         # Full file should be the child hash
-        full_files = [f for f in tmp_path.iterdir() if not f.name.startswith("delta_")]
+        full_files = [f for f in (tmp_path / "seeds").iterdir() if not f.name.startswith("delta_")]
         assert len(full_files) == 1
 
     def test_with_bloom(self, tmp_path):

@@ -33,8 +33,10 @@ class TestLoadCorpus:
         assert seen == set()
 
     def test_loads_files(self, tmp_path):
-        (tmp_path / "id_aaa").write_bytes(b"alpha")
-        (tmp_path / "id_bbb").write_bytes(b"beta")
+        seeds = tmp_path / "seeds"
+        seeds.mkdir()
+        (seeds / "id_aaa").write_bytes(b"alpha")
+        (seeds / "id_bbb").write_bytes(b"beta")
         corpus, seen = load_corpus(tmp_path)
         assert len(corpus) == 2
         assert b"alpha" in corpus
@@ -43,14 +45,18 @@ class TestLoadCorpus:
         assert _h(b"beta") in seen
 
     def test_deduplicates_by_hash(self, tmp_path):
-        (tmp_path / "f1").write_bytes(b"same")
-        (tmp_path / "f2").write_bytes(b"same")
+        seeds = tmp_path / "seeds"
+        seeds.mkdir()
+        (seeds / "f1").write_bytes(b"same")
+        (seeds / "f2").write_bytes(b"same")
         corpus, seen = load_corpus(tmp_path)
         assert len(corpus) == 1
         assert len(seen) == 1
 
     def test_populates_bloom(self, tmp_path):
-        (tmp_path / "f1").write_bytes(b"data")
+        seeds = tmp_path / "seeds"
+        seeds.mkdir()
+        (seeds / "f1").write_bytes(b"data")
         bloom = BloomFilter(capacity=100)
         load_corpus(tmp_path, bloom=bloom)
         assert bloom.query(_h(b"data"))
@@ -61,8 +67,10 @@ class TestLoadCorpus:
         assert seen == set()
 
     def test_ignores_directories(self, tmp_path):
-        (tmp_path / "subdir").mkdir()
-        (tmp_path / "real").write_bytes(b"real")
+        seeds = tmp_path / "seeds"
+        seeds.mkdir()
+        (seeds / "subdir").mkdir()
+        (seeds / "real").write_bytes(b"real")
         corpus, seen = load_corpus(tmp_path)
         assert len(corpus) == 1
         assert b"real" in corpus
@@ -74,7 +82,7 @@ class TestSaveToCorpus:
         result = save_to_corpus(b"hello", tmp_path, seen)
         assert result is True
         assert _h(b"hello") in seen
-        saved = list(tmp_path.iterdir())
+        saved = list((tmp_path / "seeds").iterdir())
         assert len(saved) == 1
 
     def test_rejects_duplicate(self, tmp_path):
@@ -82,13 +90,13 @@ class TestSaveToCorpus:
         save_to_corpus(b"hello", tmp_path, seen)
         result = save_to_corpus(b"hello", tmp_path, seen)
         assert result is False
-        assert len(list(tmp_path.iterdir())) == 1
+        assert len(list((tmp_path / "seeds").iterdir())) == 1
 
     def test_saves_different_inputs(self, tmp_path):
         seen = set()
         save_to_corpus(b"aaa", tmp_path, seen)
         save_to_corpus(b"bbb", tmp_path, seen)
-        assert len(list(tmp_path.iterdir())) == 2
+        assert len(list((tmp_path / "seeds").iterdir())) == 2
 
     def test_with_bloom_new(self, tmp_path):
         seen = set()
@@ -119,7 +127,7 @@ class TestSaveToCorpus:
     def test_file_written_to_disk(self, tmp_path):
         seen = set()
         save_to_corpus(b"disk_check", tmp_path, seen)
-        files = list(tmp_path.iterdir())
+        files = list((tmp_path / "seeds").iterdir())
         assert len(files) == 1
         assert files[0].read_bytes() == b"disk_check"
 
@@ -127,8 +135,8 @@ class TestSaveToCorpus:
         subdir = tmp_path / "nested" / "corpus"
         seen = set()
         save_to_corpus(b"create", subdir, seen)
-        assert subdir.exists()
-        assert list(subdir.iterdir())
+        assert (subdir / "seeds").exists()
+        assert list((subdir / "seeds").iterdir())
 
 
 class TestSaveCrash:
