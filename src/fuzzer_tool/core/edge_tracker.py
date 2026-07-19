@@ -619,6 +619,82 @@ class EdgeTracker:
                 counts["mature"] += 1
         return counts
 
+    def coverage_growth_model(self) -> dict:
+        """Fit a coverage growth model to the edge discovery curve.
+
+        Uses the coverage timeline to estimate:
+        - current_rate: edges per exec (recent)
+        - projected_total: estimated total edges at saturation
+        - time_to_plateau: estimated execs until marginal gain < 1 edge per 1000 execs
+        - confidence: based on timeline length and fit quality
+
+        Returns:
+            Dict with growth model parameters.
+        """
+        if len(self._coverage_timeline) < 3:
+            return {
+                "current_rate": 0.0,
+                "projected_total": 0,
+                "time_to_plateau": 0,
+                "confidence": 0.0,
+            }
+
+        # Extract time series
+        execs = [t[0] for t in self._coverage_timeline]
+        edges = [t[1] for t in self._coverage_timeline]
+
+        # Simple exponential saturation model: E(t) = A * (1 - exp(-k*t))
+        # Linearize: ln(A - E(t)) = ln(A) - k*t
+        # Use last 10 points for recent rate
+        n = len(execs)
+        recent_n = min(10, n)
+        if recent_n < 2:
+            return {
+                "current_rate": 0.0,
+                "projected_total": edges[-1],
+                "time_to_plateau": 0,
+                "confidence": 0.1,
+            }
+
+        # Recent rate: edges per exec
+        recent_execs = execs[-recent_n:]
+        recent_edges = edges[-recent_n:]
+        exec_diff = recent_execs[-1] - recent_execs[0]
+        edge_diff = recent_edges[-1] - recent_edges[0]
+        current_rate = edge_diff / exec_diff if exec_diff > 0 else 0.0
+
+        # Projected total: use linear extrapolation from recent trend
+        # If rate is declining, project saturation point
+        if n >= 4:
+            mid = n // 2
+            early_rate = (edges[mid] - edges[0]) / max(1, execs[mid] - execs[0])
+            late_rate = (edges[-1] - edges[mid]) / max(1, execs[-1] - execs[mid])
+            if late_rate < early_rate * 0.5 and late_rate > 0:
+                # Rate is declining — estimate saturation
+                # Time to plateau: when rate drops below 0.001 edges/exec
+                if late_rate > 0.001:
+                    execs_to_plateau = int((edges[-1] - edges[0]) / max(0.001, late_rate))
+                else:
+                    execs_to_plateau = 0
+                projected_total = edges[-1] + execs_to_plateau * late_rate
+            else:
+                # Rate stable or increasing — project linearly
+                projected_total = edges[-1] + 10000 * current_rate
+                execs_to_plateau = 10000
+        else:
+            projected_total = edges[-1] + 10000 * current_rate
+            execs_to_plateau = 10000
+
+        # Confidence based on timeline length and rate consistency
+        confidence = min(1.0, n / 20) * min(1.0, exec_diff / 1000)
+
+        return {
+            "current_rate": current_rate,
+            "projected_total": int(projected_total),
+            "time_to_plateau": execs_to_plateau,
+            "confidence": confidence,
+        }
+
     def record_edge_trace(self, seed_key: str, edges: set[tuple[int, int]]):
         """Record the (prev, curr) edge trace for a seed.
 
@@ -1410,6 +1486,68 @@ class EdgeTracker:
             "keystone_seeds": keystone,
             "parasitic_seeds": parasitic,
         }
+
+    def coverage_dominance_tree(self) -> dict[str, list[str]]:
+        """Build a coverage dominance tree.
+
+        Seed A dominates seed B if edge(A) is a strict subset of edge(B).
+        Returns dict mapping seed_key -> list of seeds it dominates.
+
+        Uses MinHash for approximate subset checks on large edge sets,
+        exact checks for small sets (< 100 edges).
+
+        Returns:
+            Dict mapping dominator -> list of dominated seeds.
+        """
+        dominance: dict[str, list[str]] = {k: [] for k in self.seed_edges}
+
+        # Sort seeds by edge count (ascending) for efficiency
+        sorted_seeds = sorted(
+            self.seed_edges.items(),
+            key=lambda x: len(x[1]),
+        )
+
+        for i, (key_a, edges_a) in enumerate(sorted_seeds):
+            if not edges_a:
+                continue
+            for j in range(i + 1, len(sorted_seeds)):
+                key_b, edges_b = sorted_seeds[j]
+                if not edges_b:
+                    continue
+
+                # Check if edges_a ⊂ edges_b (A dominated by B)
+                if len(edges_a) > len(edges_b):
+                    continue
+
+                # For small sets, use exact check
+                if len(edges_a) <= 100 and len(edges_b) <= 100:
+                    is_subset = edges_a.issubset(edges_b)
+                else:
+                    # Use MinHash approximation
+                    if self._corpus_sig is None:
+                        self._corpus_sig = self._minhash.corpus_minhash()
+                    jaccard_ab = self._minhash.approximate_jaccard(key_a, key_b)
+                    # If Jaccard is high and |A| <= |B|, likely subset
+                    is_subset = jaccard_ab > 0.8 and len(edges_a) <= len(edges_b)
+
+                if is_subset:
+                    # A is dominated by B
+                    dominance[key_b].append(key_a)
+
+        # Remove empty entries
+        return {k: v for k, v in dominance.items() if v}
+
+    def find_redundant_seeds(self) -> list[str]:
+        """Find seeds that are fully dominated by other seeds.
+
+        Returns:
+            List of seed_keys that are redundant (can be removed).
+        """
+        tree = self.coverage_dominance_tree()
+        redundant = set()
+        for dominated_list in tree.values():
+            redundant.update(dominated_list)
+        return sorted(redundant)
 
     def save(self, path: str) -> bool:
         """Save tracker state to JSON."""
