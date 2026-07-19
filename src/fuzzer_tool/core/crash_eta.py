@@ -68,9 +68,17 @@ class CrashMITracker:
             self.total_crashes += 1
             self._cache_valid = False
 
-        for pos, byte_val in enumerate(input_bytes):
-            if pos >= self.max_positions:
-                break
+        # For crashes: track all positions. For non-crashes: sample 20%.
+        n = min(len(input_bytes), self.max_positions)
+        if is_crash:
+            positions = range(n)
+        else:
+            # Sample ~20% of positions for non-crashes to reduce overhead
+            step = max(1, n // max(1, n // 5))
+            positions = range(0, n, step)
+
+        for pos in positions:
+            byte_val = input_bytes[pos]
             self.position_counts[pos] += 1
             self.byte_total[pos][byte_val] += 1
             if is_crash:

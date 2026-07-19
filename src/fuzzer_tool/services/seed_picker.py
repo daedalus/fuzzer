@@ -396,19 +396,25 @@ class SeedPicker:
         if len(f.corpus) < 3 or not f.seed_meta:
             return random.choices(f.corpus, weights=weights, k=1)[0]
 
-        pareto_scores: list[tuple[float, float, float]] = []
-        for seed in f.corpus:
-            meta = f.seed_meta.get(seed)
-            if meta is None:
-                pareto_scores.append((1.0, 1.0, 1.0))
-                continue
-            seed_key = f._seed_key(seed)
-            sub, div, spa, _cov = f._cached_weights.get(seed_key, (1.0, 1.0, 1.0, 0.5))
-            age = now - meta["added_at"]
-            burst = max(1.0, 1.0 + f._temperature * (5.0 - 1.0) - (age / 60.0) * f._temperature)
-            pareto_scores.append((sub, burst, spa))
+        # Cache Pareto scores - recompute every 100 execs or when corpus changes
+        cache_key = len(f.corpus)
+        if not hasattr(f, "_pareto_cache") or f._pareto_cache_key != cache_key or f.exec_count % 100 == 0:
+            pareto_scores: list[tuple[float, float, float]] = []
+            for seed in f.corpus:
+                meta = f.seed_meta.get(seed)
+                if meta is None:
+                    pareto_scores.append((1.0, 1.0, 1.0))
+                    continue
+                seed_key = f._seed_key(seed)
+                sub, div, spa, _cov = f._cached_weights.get(seed_key, (1.0, 1.0, 1.0, 0.5))
+                age = now - meta["added_at"]
+                burst = max(1.0, 1.0 + f._temperature * (5.0 - 1.0) - (age / 60.0) * f._temperature)
+                pareto_scores.append((sub, burst, spa))
+            f._pareto_cache = pareto_scores
+            f._pareto_cache_key = cache_key
+            f._pareto_front_cache = self._pareto_front(pareto_scores, window=100)
 
-        front = self._pareto_front(pareto_scores, window=100)
+        front = f._pareto_front_cache
 
         if len(front) >= 2:
             front_indices = sorted(front)
