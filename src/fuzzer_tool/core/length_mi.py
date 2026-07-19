@@ -24,6 +24,9 @@ class LengthEdgeTracker:
         )
         self.length_total: dict[int, int] = defaultdict(int)
         self.total_execs: int = 0
+        self._cached_totals: dict[int, int] = {}
+        self._cached_sum: int = 0
+        self._dirty = True
 
     def record(self, input_length: int, new_edges: set[int]) -> None:
         """Record that a specific input length produced new edges."""
@@ -31,15 +34,24 @@ class LengthEdgeTracker:
         self.length_total[input_length] += 1
         for edge in new_edges:
             self.length_edge_counts[input_length][edge] += 1
+        self._dirty = True
+
+    def _rebuild_cache(self):
+        if not self._dirty:
+            return
+        self._cached_totals = {
+            length: sum(edges.values())
+            for length, edges in self.length_edge_counts.items()
+        }
+        self._cached_sum = sum(self._cached_totals.values())
+        self._dirty = False
 
     def recommended_lengths(self, k: int = 5) -> list[int]:
         """Return the k lengths that discovered the most new edges."""
-        scores = {}
-        for length, edges in self.length_edge_counts.items():
-            scores[length] = sum(edges.values())
-        if not scores:
+        self._rebuild_cache()
+        if not self._cached_totals:
             return []
-        return sorted(scores, key=scores.get, reverse=True)[:k]
+        return sorted(self._cached_totals, key=self._cached_totals.get, reverse=True)[:k]
 
     def length_productivity(self, input_length: int) -> float:
         """Return a productivity score for a given length.
@@ -49,9 +61,10 @@ class LengthEdgeTracker:
         """
         if not self.length_edge_counts:
             return 1.0
-        this_edges = sum(self.length_edge_counts.get(input_length, {}).values())
-        all_totals = [sum(e.values()) for e in self.length_edge_counts.values()]
-        mean_edges = sum(all_totals) / max(len(all_totals), 1)
+        self._rebuild_cache()
+        this_edges = self._cached_totals.get(input_length, 0)
+        n = len(self._cached_totals)
+        mean_edges = self._cached_sum / max(n, 1)
         if mean_edges <= 0:
             return 1.0
         return this_edges / mean_edges
@@ -75,3 +88,4 @@ class LengthEdgeTracker:
                 self.length_edge_counts[int(k)][int(ek)] = ev
         self.length_total = defaultdict(int, {int(k): v for k, v in data.get("length_total", {}).items()})
         self.total_execs = data.get("total_execs", 0)
+        self._dirty = True

@@ -66,7 +66,7 @@ class CrashMITracker:
         self.total_execs += 1
         if is_crash:
             self.total_crashes += 1
-        self._cache_valid = False
+            self._cache_valid = False
 
         for pos, byte_val in enumerate(input_bytes):
             if pos >= self.max_positions:

@@ -79,9 +79,10 @@ class ShmCoverage:
         idx = edge_id % self.size
         if self._map[idx] == 0:
             self._map[idx] = 1
-            self._seen[idx] = 1
+            if not self._seen[idx]:
+                self._seen[idx] = 1
+                self.cumulative_edges += 1
             self.total_edges += 1
-            self.cumulative_edges = sum(self._seen)
             return True
         return False
 
@@ -89,6 +90,7 @@ class ShmCoverage:
         """Check if current bitmap has any edge not seen before (AFL-style).
 
         Uses a cached hash for the fast path to avoid bytes() allocations.
+        Tracks cumulative_edges incrementally to avoid O(n) sum().
         """
         # Read SHM content as bytes (one allocation)
         current = bytes(self._map)
@@ -101,18 +103,18 @@ class ShmCoverage:
         for i in range(self.size):
             if current[i] and not self._seen[i]:
                 self._seen[i] = 1
+                self.cumulative_edges += 1
                 has_new = True
         if has_new:
-            self.cumulative_edges = sum(self._seen)
             self.total_edges += 1
         return has_new
 
     def commit_snapshot(self):
         """Update the cumulative 'seen' bitmap to include all current edges."""
         for i in range(self.size):
-            if self._map[i]:
+            if self._map[i] and not self._seen[i]:
                 self._seen[i] = 1
-        self.cumulative_edges = sum(self._seen)
+                self.cumulative_edges += 1
 
     def cleanup(self):
         if self._ptr is not None:

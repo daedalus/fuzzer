@@ -301,8 +301,9 @@ def save_to_corpus(
         if diff is not None:
             parent_hash = hash_data(parent)
             delta = {"parent": parent_hash, "diff": diff, "v": 1}
-        else:
-            # Try v2 for length-changing mutations (splice, block_insert, etc.)
+        elif len(data) <= 512:
+            # Try v2 for length-changing mutations on small inputs only.
+            # v2 uses levenshtein_align which is O(n*m) — skip for large inputs.
             diff_v2 = compute_delta_v2(parent, data)
             if diff_v2 is not None:
                 parent_hash = hash_data(parent)
