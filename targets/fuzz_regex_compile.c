@@ -20,31 +20,15 @@
 
 extern void __afl_map_edge(unsigned int cur_loc);
 
-int main(int argc, char **argv) {
-    unsigned char buf[65536];
-    size_t n;
-
+static int fuzz_regex_compile(const unsigned char *buf, size_t n) {
     __afl_map_edge(0x1000);
-    if (argc == 2) {
-        __afl_map_edge(0x1001);
-        FILE *f = fopen(argv[1], "rb");
-        if (!f) return 1;
-        fseek(f, 0, SEEK_END);
-        long sz = ftell(f);
-        rewind(f);
-        if (sz > (long)sizeof(buf)) sz = sizeof(buf);
-        n = fread(buf, 1, (size_t)sz, f);
-        fclose(f);
-    } else {
-        __afl_map_edge(0x1002);
-        n = fread(buf, 1, sizeof(buf), stdin);
-    }
     if (n == 0) { __afl_map_edge(0x1003); return 0; }
 
     /* Null-terminate for regcomp safety */
     char pattern[65537];
-    memcpy(pattern, buf, n);
-    pattern[n] = '\0';
+    size_t copy = n < 65536 ? n : 65536;
+    memcpy(pattern, buf, copy);
+    pattern[copy] = '\0';
 
     /* Try both fixed-string and regex compilation paths */
     fgrep_pattern_t pat;
@@ -65,7 +49,7 @@ int main(int argc, char **argv) {
     if (st == FGREP_OK) {
         __afl_map_edge(0x1201);
         size_t ms, ml;
-        fgrep_pattern_match(&pat, pattern, n, &ms, &ml);
+        fgrep_pattern_match(&pat, pattern, copy, &ms, &ml);
         fgrep_pattern_destroy(&pat);
     } else {
         __afl_map_edge(0x1202);
@@ -77,7 +61,7 @@ int main(int argc, char **argv) {
     if (st == FGREP_OK) {
         __afl_map_edge(0x1301);
         size_t ms, ml;
-        fgrep_pattern_match(&pat, pattern, n, &ms, &ml);
+        fgrep_pattern_match(&pat, pattern, copy, &ms, &ml);
         fgrep_pattern_destroy(&pat);
     } else {
         __afl_map_edge(0x1302);
@@ -86,3 +70,40 @@ int main(int argc, char **argv) {
     __afl_map_edge(0x1fff);
     return 0;
 }
+
+/* Standard in-process entry point for fuzzer-tool .so mode */
+__attribute__((visibility("default")))
+int fuzz_shm_run(const unsigned char *buf, size_t size) {
+    return fuzz_regex_compile(buf, size);
+}
+
+#ifdef __AFL_HAVE_MANUAL_CONTROL
+int main(void) {
+    __AFL_INIT();
+    unsigned char *buf = __AFL_FUZZ_TEST_CASE_BUF;
+    while (__AFL_LOOP(1000)) {
+        int len = __AFL_FUZZ_TEST_CASE_LEN;
+        fuzz_regex_compile(buf, len);
+    }
+    return 0;
+}
+#else
+int main(int argc, char **argv) {
+    unsigned char buf[65536];
+    size_t n;
+
+    if (argc == 2) {
+        FILE *f = fopen(argv[1], "rb");
+        if (!f) return 1;
+        fseek(f, 0, SEEK_END);
+        long sz = ftell(f);
+        rewind(f);
+        if (sz > (long)sizeof(buf)) sz = sizeof(buf);
+        n = fread(buf, 1, (size_t)sz, f);
+        fclose(f);
+    } else {
+        n = fread(buf, 1, sizeof(buf), stdin);
+    }
+    return fuzz_regex_compile(buf, n);
+}
+#endif
