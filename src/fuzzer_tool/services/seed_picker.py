@@ -375,21 +375,21 @@ class SeedPicker:
     def _pareto_front(scores: list[tuple[float, float, float]], window: int = 100) -> set[int]:
         n = len(scores)
         start = max(0, n - window)
-        front: set[int] = set(range(start, n))
+        front: list[int] = list(range(start, n))
 
-        for i in range(start, n):
-            if i not in front:
-                continue
-            ni, fi, di = scores[i]
-            for j in range(start, n):
-                if j == i or j not in front:
-                    continue
-                nj, fj, dj = scores[j]
-                if nj >= ni and fj >= fi and dj >= di and (nj > ni or fj > fi or dj > di):
-                    front.discard(i)
-                    break
+        # Sort by first dimension for efficient domination check
+        front.sort(key=lambda i: (-scores[i][0], -scores[i][1], -scores[i][2]))
 
-        return front
+        result = []
+        max_b = max_c = float('-inf')
+        for i in front:
+            a, b, c = scores[i]
+            if b > max_b or c > max_c:
+                result.append(i)
+                max_b = max(max_b, b)
+                max_c = max(max_c, c)
+
+        return set(result)
 
     def _pick_from_pareto_front(self, weights: list[float], now: float) -> bytes:
         f = self.f

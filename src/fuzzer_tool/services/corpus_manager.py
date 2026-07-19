@@ -16,6 +16,11 @@ Extracted from Fuzzer class (~lines 648-783, 1845-2231). Contains:
 
 import contextlib
 import hashlib
+try:
+    import xxhash
+    _use_xxhash = True
+except ImportError:
+    _use_xxhash = False
 import json
 import logging
 import shutil
@@ -64,6 +69,8 @@ class CorpusManager:
             self.load_state()
 
     def seed_key(self, data: bytes) -> str:
+        if _use_xxhash:
+            return xxhash.xxh64(data).hexdigest()[:16]
         return hashlib.sha256(data).hexdigest()[:16]
 
     def save_state(self):
@@ -239,10 +246,12 @@ class CorpusManager:
             f.corpus.append(data)
             if f.ga:
                 import hashlib as _hashlib
-
                 from fuzzer_tool.core.ga import Individual
 
-                seed_key = _hashlib.sha256(data).hexdigest()[:16]
+                if _use_xxhash:
+                    seed_key = xxhash.xxh64(data).hexdigest()[:16]
+                else:
+                    seed_key = _hashlib.sha256(data).hexdigest()[:16]
                 edge_count = len(f._edge_tracker.seed_edges.get(seed_key, set()))
                 ind = Individual(
                     data=data,

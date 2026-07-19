@@ -12,7 +12,7 @@ ends of the map are "far". This captures coverage spatial diversity that
 Jaccard (set overlap) and JS (frequency divergence) miss.
 """
 
-import json
+from fuzzer_tool.core import fast_json as json
 import logging
 import math
 import random
