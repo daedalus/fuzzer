@@ -240,8 +240,10 @@ class Fuzzer:
         max_collision_risk=30,
         continue_until_crash=False,
         multi_targets=None,
+        debug=False,
     ):
         self.target = target
+        self.debug = debug
         # Multi-target support: list of target binaries to fuzz with shared corpus
         self.multi_targets = multi_targets  # None for single-target
         self._active_target_idx = 0  # round-robin index
@@ -713,6 +715,7 @@ class Fuzzer:
                 direct_lite=True,
                 coverage_env_id=cov_env_id,
                 cov=bool(cov_env_id),
+                debug=self.debug,
             )
             print(f"[*] Auto-detected .so target: in-process mode (direct_lite) with {auto_func}")
         elif inprocess:
@@ -727,6 +730,7 @@ class Fuzzer:
                 direct=inprocess_direct,
                 coverage_env_id=cov_env_id,
                 cov=bool(cov_env_id),
+                debug=self.debug,
             )
             mode = "direct ctypes" if inprocess_direct else "subprocess loader"
             cov_note = f", SHM cov id={cov_env_id}" if cov_env_id else ""

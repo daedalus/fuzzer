@@ -470,11 +470,14 @@ class StatsReporter:
                     f.map_size = new_size
                     f._edge_tracker.map_size = new_size
                     f._edge_tracker.reset_after_resize()
+                    # Update env vars BEFORE patching target so __afl_map_shm()
+                    # reads the correct __AFL_SHM_ID and AFL_MAP_SIZE.
+                    os.environ["__AFL_SHM_ID"] = f.shm_cov.env_id
+                    os.environ["AFL_MAP_SIZE"] = str(new_size)
                     # Update inprocess runner's SHM pointers — the target's
                     # __afl_area still points to the old (detached) SHM
                     if f._inprocess_runner:
-                        f._inprocess_runner.update_shm_after_resize(f.shm_cov._ptr, new_size)
-                    os.environ["AFL_MAP_SIZE"] = str(new_size)
+                        f._inprocess_runner.update_shm_after_resize(f.shm_cov._ptr, new_size, f.shm_cov.env_id)
                     density_str = f" | map: {f._edge_tracker.bitmap_density() * 100:.1f}% (collision: {collision_risk:.0f}%)"
         repro_str = ""
         if f._crash_replays:

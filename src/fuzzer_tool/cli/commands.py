@@ -295,6 +295,7 @@ def cmd_fuzz(args):
         stall_threshold=getattr(args, "stall", 1000),
         map_size=getattr(args, "map_size", 0),
         max_collision_risk=getattr(args, "max_collision_risk", 30),
+        debug=getattr(args, "debug", False),
     )
     fuzzer.run(iterations=args.iterations)
 
@@ -1265,6 +1266,11 @@ def main() -> int:
         default=30,
         metavar="N",
         help="Resize bitmap when collision risk exceeds N%% (default: 30)",
+    )
+    fuzz_parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug output (SHM attach, coverage tracing, etc.)",
     )
     fuzz_parser.set_defaults(func=cmd_fuzz)
 

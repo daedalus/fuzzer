@@ -127,6 +127,7 @@ class InProcessRunner:
         direct_lite: bool = False,
         coverage_env_id: str | None = None,
         cov: bool = False,
+        debug: bool = False,
     ):
         self.target = target
         self.function_name = function_name
@@ -135,6 +136,7 @@ class InProcessRunner:
         self.direct = direct
         self.direct_lite = direct_lite
         self.coverage_env_id = coverage_env_id
+        self.debug = debug
 
         self._func: Callable[[bytes], int] | None = None
         self._lib: ctypes.CDLL | None = None
@@ -194,6 +196,29 @@ class InProcessRunner:
                 os.close(fd)
             try:
                 self._lib = ctypes.CDLL(self.target)
+                # The constructor __afl_auto_init may not fire during
+                # ctypes.CDLL loading (getenv() may not see os.environ
+                # updates at constructor time). Check if __afl_area was
+                # attached; if not, call __afl_map_shm() manually.
+                try:
+                    afl_area = ctypes.c_void_p.in_dll(self._lib, '__afl_area')
+                    if self.debug:
+                        print(
+                            f"  [debug] __afl_area={afl_area.value}, "
+                            f"__AFL_SHM_ID={os.environ.get('__AFL_SHM_ID')}, "
+                            f"AFL_MAP_SIZE={os.environ.get('AFL_MAP_SIZE')}",
+                            flush=True,
+                        )
+                    if not afl_area.value and self.coverage_env_id:
+                        getattr(self._lib, '__afl_map_shm')()
+                        if self.debug:
+                            afl_area2 = ctypes.c_void_p.in_dll(self._lib, '__afl_area')
+                            print(
+                                f"  [debug] After manual __afl_map_shm: __afl_area={afl_area2.value}",
+                                flush=True,
+                            )
+                except (OSError, AttributeError):
+                    pass
                 fn_ptr = getattr(self._lib, self.function_name)
                 fn_ptr.restype = ctypes.c_int
                 fn_ptr.argtypes = [
@@ -540,7 +565,7 @@ class InProcessRunner:
             self.coverage_env_id
         )
 
-    def update_shm_after_resize(self, new_ptr: int, new_size: int) -> None:
+    def update_shm_after_resize(self, new_ptr: int, new_size: int, new_env_id: str = "") -> None:
         """Patch target's __afl_area and invalidate cached SHM pointer after resize.
 
         When SHM is resized, the old segment is detached and a new one allocated.
@@ -550,22 +575,35 @@ class InProcessRunner:
         # Invalidate cached SHM pointer so read_bitmap() re-attaches
         self._shm_ptr = None
         self.shm_size = new_size
+        # Update coverage_env_id to the new SHM so read_bitmap() attaches
+        # to the correct (new) segment, not the old (removed) one.
+        if new_env_id:
+            self.coverage_env_id = new_env_id
 
-        # Patch __afl_area in the loaded target library to point to new SHM
+        # Re-run __afl_map_shm() to update __afl_area, __afl_map_size,
+        # and __afl_map_mask to the new SHM. The env vars (__AFL_SHM_ID
+        # and AFL_MAP_SIZE) are already updated by the caller.
         if self._lib is not None:
             try:
-                afl_area = ctypes.c_void_p.in_dll(self._lib, "__afl_area")
-                afl_area.value = new_ptr
-            except (ValueError, OSError):
-                pass
+                getattr(self._lib, '__afl_map_shm')()
+            except (OSError, AttributeError):
+                # Fallback: patch __afl_area directly
+                try:
+                    afl_area = ctypes.c_void_p.in_dll(self._lib, "__afl_area")
+                    afl_area.value = new_ptr
+                except (ValueError, OSError):
+                    pass
 
         # Also patch the separate shim library if loaded
         if self._shim_handle is not None:
             try:
-                afl_area = ctypes.c_void_p.in_dll(self._shim_handle, "__afl_area")
-                afl_area.value = new_ptr
-            except (ValueError, OSError):
-                pass
+                getattr(self._shim_handle, '__afl_map_shm')()
+            except (OSError, AttributeError):
+                try:
+                    afl_area = ctypes.c_void_p.in_dll(self._shim_handle, "__afl_area")
+                    afl_area.value = new_ptr
+                except (ValueError, OSError):
+                    pass
 
     def stop(self):
         self._func = None
