@@ -359,15 +359,17 @@ class PngChunkMutator:
         ct = random.choice([0, 2, 3, 4, 6])
         bd = random.choice([1, 2, 4, 8, 16])
         channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}.get(ct, 1)
-        row_bytes = max(1, (channels * bd + 7) // 8)
-        raw = b""
-        for _ in range(h):
-            raw += bytes([0])  # filter None
-            raw += bytes(random.randint(0, 255) for _ in range(w * channels))
+        # Build raw scanlines: one zero byte (filter=None) + pixel data per row
+        row_len = w * channels
+        raw = bytearray(h * (1 + row_len))
+        raw[0 :: 1 + row_len] = b"\x00" * h  # filter bytes
+        for i in range(h):
+            start = i * (1 + row_len) + 1
+            raw[start : start + row_len] = random.randbytes(row_len)
 
         ihdr_data = struct.pack(">IIBBBBB", w, h, bd, ct, 0, 0, 0)
         ihdr = PngChunk(b"IHDR", ihdr_data)
-        compressed = zlib.compress(raw, 6)
+        compressed = zlib.compress(bytes(raw), 6)
         idat = PngChunk(b"IDAT", compressed)
         iend = PngChunk(b"IEND", b"")
         return serialize_png_chunks([ihdr, idat, iend])[:max_len]

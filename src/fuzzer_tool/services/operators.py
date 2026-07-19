@@ -29,6 +29,22 @@ from fuzzer_tool.core.mutations import (
 
 log = logging.getLogger(__name__)
 
+# Precomputed colorization lookup table: byte -> different value from same class.
+# Avoids per-call table construction in _op_colorization().
+_COLORIZE_TBL = bytearray(256)
+for _b in range(256):
+    if 0x30 <= _b <= 0x39:
+        _COLORIZE_TBL[_b] = 0x30 + (_b * 7 + 3) % 10
+    elif 0x41 <= _b <= 0x5A:
+        _COLORIZE_TBL[_b] = 0x41 + (_b * 13 + 5) % 26
+    elif 0x61 <= _b <= 0x7A:
+        _COLORIZE_TBL[_b] = 0x61 + (_b * 17 + 7) % 26
+    elif _b in (0x20, 0x09, 0x0A, 0x0D):
+        _COLORIZE_TBL[_b] = (0x20, 0x09, 0x0A, 0x0D)[_b % 4]
+    else:
+        _COLORIZE_TBL[_b] = 0x21 + (_b * 31 + 11) % 94
+_COLORIZE_TBL = bytes(_COLORIZE_TBL)
+
 
 class OperatorEngine:
     """Manages mutation operator selection and execution.
@@ -60,8 +76,9 @@ class OperatorEngine:
         if not buf:
             return
         total_bits = len(buf) * 8
-        span_width = random.choices([1, 2, 3, 4, 5, 6, 7, 8],
-                                     weights=[10, 15, 20, 20, 15, 10, 5, 5])[0]
+        span_width = random.choices(
+            [1, 2, 3, 4, 5, 6, 7, 8], weights=[10, 15, 20, 20, 15, 10, 5, 5]
+        )[0]
         start_offset = random.randint(0, max(0, total_bits - span_width))
         for i in range(span_width):
             bit_offset = start_offset + i
@@ -95,10 +112,10 @@ class OperatorEngine:
 
         pattern = random.choice(REGEX_BOMBS).encode()
         if len(buf) < len(pattern):
-            buf.extend(b'\x00' * (len(pattern) - len(buf)))
+            buf.extend(b"\x00" * (len(pattern) - len(buf)))
         # Insert bomb at random position
         pos = random.randint(0, max(0, len(buf) - len(pattern)))
-        buf[pos:pos + len(pattern)] = pattern
+        buf[pos : pos + len(pattern)] = pattern
 
     def _op_clone_fixed(self, buf, _byte_idx, _data):
         """Insert a block of repeated constant bytes (AFL++ clone_fixed)."""
@@ -117,7 +134,7 @@ class OperatorEngine:
         src_pos = random.randint(0, len(buf) - src_len)
         dst_pos = random.randint(0, max(0, len(buf) - src_len))
         if src_pos != dst_pos:
-            buf[dst_pos:dst_pos + src_len] = buf[src_pos:src_pos + src_len]
+            buf[dst_pos : dst_pos + src_len] = buf[src_pos : src_pos + src_len]
 
     def _op_overwrite_fixed(self, buf, _byte_idx, _data):
         """Overwrite a region with repeated constant bytes (AFL++ overwrite_fixed)."""
@@ -126,7 +143,7 @@ class OperatorEngine:
         fill_byte = random.choice([buf[random.randint(0, len(buf) - 1)], 0, 0xFF])
         block_len = random.randint(1, min(16, len(buf)))
         dst_pos = random.randint(0, len(buf) - block_len)
-        buf[dst_pos:dst_pos + block_len] = bytes([fill_byte] * block_len)
+        buf[dst_pos : dst_pos + block_len] = bytes([fill_byte] * block_len)
 
     def _op_redqueen_xform(self, buf, byte_idx, _data):
         """RedQueen transforms: solve comparisons via encoding transforms.
@@ -139,16 +156,30 @@ class OperatorEngine:
             return
         if not buf or len(buf) < 2:
             return
-        matches = getattr(f._last_cmplog_matches, "matches", []) if hasattr(f, "_last_cmplog_matches") else []
+        matches = (
+            getattr(f._last_cmplog_matches, "matches", [])
+            if hasattr(f, "_last_cmplog_matches")
+            else []
+        )
         if not matches:
             return
         offset, va, vb = random.choice(matches)
         if offset >= len(buf):
             return
-        transform = random.choice([
-            "xor", "arithmetic", "boundary", "atoi", "hex",
-            "toupper", "tolower", "hex_pair", "b64_nibble", "double_to_float",
-        ])
+        transform = random.choice(
+            [
+                "xor",
+                "arithmetic",
+                "boundary",
+                "atoi",
+                "hex",
+                "toupper",
+                "tolower",
+                "hex_pair",
+                "b64_nibble",
+                "double_to_float",
+            ]
+        )
         if transform == "xor":
             const = random.randint(1, 255)
             buf[offset] = (vb ^ const) & 0xFF
@@ -159,23 +190,23 @@ class OperatorEngine:
             buf[offset] = (vb - 1) & 0xFF
         elif transform == "atoi":
             # ASCII digit encoding: write '0'-'9' for the comparison value
-            buf[offset] = ord('0') + (vb % 10)
+            buf[offset] = ord("0") + (vb % 10)
         elif transform == "hex":
             # Hex char encoding
             hex_chars = b"0123456789abcdef"
             buf[offset] = hex_chars[vb % 16]
         elif transform == "toupper":
             # toupper transform: if target does toupper(input), write uppercase
-            if ord('a') <= buf[offset] <= ord('z'):
+            if ord("a") <= buf[offset] <= ord("z"):
                 buf[offset] = buf[offset] - 0x20
             else:
-                buf[offset] = ord('A') + (vb % 26)
+                buf[offset] = ord("A") + (vb % 26)
         elif transform == "tolower":
             # tolower transform: if target does tolower(input), write lowercase
-            if ord('A') <= buf[offset] <= ord('Z'):
+            if ord("A") <= buf[offset] <= ord("Z"):
                 buf[offset] = buf[offset] + 0x20
             else:
-                buf[offset] = ord('a') + (vb % 26)
+                buf[offset] = ord("a") + (vb % 26)
         elif transform == "hex_pair":
             # Two-byte hex encoding: write hex chars for a 2-digit value
             hex_chars = b"0123456789abcdef"
@@ -189,6 +220,7 @@ class OperatorEngine:
         elif transform == "double_to_float":
             # Double-to-float: if target compares double vs float, try the float bits
             import struct
+
             try:
                 fval = struct.unpack("<f", struct.pack("<d", float(vb)))[0]
                 ival = struct.unpack("<I", struct.pack("<f", fval))[0]
@@ -202,25 +234,15 @@ class OperatorEngine:
 
         AFL++ colorization: replace each byte with a random value from
         the same character class. Identifies comparison-relevant bytes.
-        Optimized: batch random generation, precomputed lookup tables.
+        Optimized: precomputed module-level lookup table, batch index generation.
         """
         if not buf:
             return
         n_mutate = max(1, len(buf) // random.randint(2, 10))
-        # Precompute random values in batch
+        tbl = _COLORIZE_TBL
         indices = [random.randint(0, len(buf) - 1) for _ in range(n_mutate)]
         for idx in indices:
-            b = buf[idx]
-            if 0x30 <= b <= 0x39:      # digit
-                buf[idx] = 0x30 + (b * 7 + 3) % 10  # pseudo-random digit
-            elif 0x41 <= b <= 0x5A:    # upper
-                buf[idx] = 0x41 + (b * 13 + 5) % 26
-            elif 0x61 <= b <= 0x7A:    # lower
-                buf[idx] = 0x61 + (b * 17 + 7) % 26
-            elif b in (0x20, 0x09, 0x0A, 0x0D):  # whitespace
-                buf[idx] = (0x20, 0x09, 0x0A, 0x0D)[b % 4]
-            else:
-                buf[idx] = 0x21 + (b * 31 + 11) % 94  # printable
+            buf[idx] = tbl[buf[idx]]
 
     def _op_skipdet_probe(self, buf, _byte_idx, _data):
         """Block-flip probe to identify inert byte regions.
@@ -235,8 +257,10 @@ class OperatorEngine:
         block_size = random.randint(len(buf) // 10, len(buf) // 4)
         block_size = max(2, min(block_size, len(buf)))
         start = random.randint(0, len(buf) - block_size)
-        for i in range(start, start + block_size):
-            buf[i] ^= 0xFF
+        # Bulk XOR via memoryview (avoids per-byte Python loop)
+        mv = memoryview(buf)[start : start + block_size]
+        for i in range(block_size):
+            mv[i] ^= 0xFF
 
     def _op_auto_extras(self, buf, _byte_idx, _data):
         """Collect and inject sequences of "interesting" bytes.
@@ -256,15 +280,17 @@ class OperatorEngine:
                 token = token.encode()
             if len(token) <= len(buf):
                 pos = random.randint(0, len(buf) - len(token))
-                buf[pos:pos + len(token)] = token
+                buf[pos : pos + len(token)] = token
             return
         # Generate a short sequence of consecutive interesting bytes
         seq_len = random.randint(2, 8)
-        seq = bytes(random.choice([0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0xFF])
-                     for _ in range(seq_len))
+        seq = bytes(
+            random.choice([0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0xFF])
+            for _ in range(seq_len)
+        )
         if len(buf) >= seq_len:
             pos = random.randint(0, len(buf) - seq_len)
-            buf[pos:pos + seq_len] = seq
+            buf[pos : pos + seq_len] = seq
 
     def _op_byte_flip(self, buf, byte_idx, _data):
         if buf:
@@ -272,11 +298,7 @@ class OperatorEngine:
 
     def _op_interesting_8(self, buf, byte_idx, _data):
         if buf:
-            if (
-                self.f._crash_mi
-                and self.f._crash_mi.total_execs >= 50
-                and random.random() < 0.3
-            ):
+            if self.f._crash_mi and self.f._crash_mi.total_execs >= 50 and random.random() < 0.3:
                 crash_vals = self.f._crash_mi.top_values(byte_idx, k=5)
                 if crash_vals:
                     buf[byte_idx] = random.choice(crash_vals) & 0xFF
@@ -287,11 +309,7 @@ class OperatorEngine:
     def _op_interesting_16(self, buf, _byte_idx, _data):
         if len(buf) >= 2:
             idx = random.randint(0, len(buf) - 2)
-            if (
-                self.f._crash_mi
-                and self.f._crash_mi.total_execs >= 50
-                and random.random() < 0.3
-            ):
+            if self.f._crash_mi and self.f._crash_mi.total_execs >= 50 and random.random() < 0.3:
                 crash_vals = self.f._crash_mi.top_values(idx, k=5)
                 if crash_vals:
                     v = random.choice(crash_vals)
@@ -307,11 +325,7 @@ class OperatorEngine:
     def _op_interesting_32(self, buf, _byte_idx, _data):
         if len(buf) >= 4:
             idx = random.randint(0, len(buf) - 4)
-            if (
-                self.f._crash_mi
-                and self.f._crash_mi.total_execs >= 50
-                and random.random() < 0.3
-            ):
+            if self.f._crash_mi and self.f._crash_mi.total_execs >= 50 and random.random() < 0.3:
                 crash_vals = self.f._crash_mi.top_values(idx, k=5)
                 if crash_vals:
                     v = random.choice(crash_vals)
@@ -334,18 +348,32 @@ class OperatorEngine:
             delta = random.choice(ARITHMETIC_DELTAS)
             if random.random() < 0.5:
                 delta = -delta
-            endian = random.choice(["<", ">"])
             if width == 1:
                 buf[idx] = (buf[idx] + delta) & 0xFF
             elif width == 2:
-                val = (struct.unpack_from(f"{endian}H", buf, idx)[0] + delta) & 0xFFFF
-                struct.pack_into(f"{endian}H", buf, idx, val)
+                le = random.random() < 0.5
+                if le:
+                    val = (struct.unpack_from("<H", buf, idx)[0] + delta) & 0xFFFF
+                    struct.pack_into("<H", buf, idx, val)
+                else:
+                    val = (struct.unpack_from(">H", buf, idx)[0] + delta) & 0xFFFF
+                    struct.pack_into(">H", buf, idx, val)
             elif width == 4:
-                val = (struct.unpack_from(f"{endian}I", buf, idx)[0] + delta) & 0xFFFFFFFF
-                struct.pack_into(f"{endian}I", buf, idx, val)
+                le = random.random() < 0.5
+                if le:
+                    val = (struct.unpack_from("<I", buf, idx)[0] + delta) & 0xFFFFFFFF
+                    struct.pack_into("<I", buf, idx, val)
+                else:
+                    val = (struct.unpack_from(">I", buf, idx)[0] + delta) & 0xFFFFFFFF
+                    struct.pack_into(">I", buf, idx, val)
             elif width == 8:
-                val = (struct.unpack_from(f"{endian}Q", buf, idx)[0] + delta) & 0xFFFFFFFFFFFFFFFF
-                struct.pack_into(f"{endian}Q", buf, idx, val)
+                le = random.random() < 0.5
+                if le:
+                    val = (struct.unpack_from("<Q", buf, idx)[0] + delta) & 0xFFFFFFFFFFFFFFFF
+                    struct.pack_into("<Q", buf, idx, val)
+                else:
+                    val = (struct.unpack_from(">Q", buf, idx)[0] + delta) & 0xFFFFFFFFFFFFFFFF
+                    struct.pack_into(">Q", buf, idx, val)
 
     def _op_random_bytes(self, buf, _byte_idx, _data):
         if buf:
@@ -418,7 +446,9 @@ class OperatorEngine:
     def _op_markov_bytes(self, buf, _byte_idx, _data):
         if buf:
             idx = random.randint(0, len(buf) - 1)
-            ctx = bytes(buf[max(0, idx - self.f.markov.order) : idx]) if self.f.markov.order else b""
+            ctx = (
+                bytes(buf[max(0, idx - self.f.markov.order) : idx]) if self.f.markov.order else b""
+            )
             buf[idx] = self.f.markov.sample_byte(ctx)
 
     def _op_cem_bytes(self, buf, _byte_idx, _data):
@@ -567,14 +597,12 @@ class OperatorEngine:
             else:
                 target_len = random.choices(
                     LENGTH_BOUNDARIES,
-                    weights=[10, 10, 10, 10, 10, 10, 10, 10, 8, 8, 8, 8,
-                             6, 6, 4, 4, 3, 3, 2, 2, 1],
+                    weights=[10, 10, 10, 10, 10, 10, 10, 10, 8, 8, 8, 8, 6, 6, 4, 4, 3, 3, 2, 2, 1],
                 )[0]
         else:
             target_len = random.choices(
                 LENGTH_BOUNDARIES,
-                weights=[10, 10, 10, 10, 10, 10, 10, 10, 8, 8, 8, 8,
-                         6, 6, 4, 4, 3, 3, 2, 2, 1],
+                weights=[10, 10, 10, 10, 10, 10, 10, 10, 8, 8, 8, 8, 6, 6, 4, 4, 3, 3, 2, 2, 1],
             )[0]
         current_len = len(buf)
         if target_len == current_len:
@@ -610,7 +638,9 @@ class OperatorEngine:
 
     def _op_grammar_mutate(self, buf, _byte_idx, _data):
         if self.f.grammar:
-            return bytearray(self.f.grammar.mutate(bytes(buf), max_len=self.f.max_len)[: self.f.max_len])
+            return bytearray(
+                self.f.grammar.mutate(bytes(buf), max_len=self.f.max_len)[: self.f.max_len]
+            )
 
     def _op_grammar_tree_mutate(self, buf, _byte_idx, _data):
         if self.f.grammar:
@@ -964,17 +994,12 @@ class OperatorEngine:
         if not buf:
             return 0
         te_pos = (
-            f._get_te_weighted_position(len(buf))
-            if f._use_transfer_entropy and f._te
-            else None
+            f._get_te_weighted_position(len(buf)) if f._use_transfer_entropy and f._te else None
         )
         mi_pos = f._mi.weighted_position(len(buf)) if f._use_mi and f._mi else None
         sens_pos = f._sensitivity.get_weighted_position(data, len(buf))
         crash_mi_pos = None
-        if (
-            f._crash_mi
-            and f._crash_mi.total_execs >= f._crash_mi.min_observations
-        ):
+        if f._crash_mi and f._crash_mi.total_execs >= f._crash_mi.min_observations:
             crash_mi_pos = f._crash_mi.weighted_position(len(buf))
         candidates = [p for p in [sens_pos, te_pos, mi_pos, crash_mi_pos] if p is not None]
         if candidates:

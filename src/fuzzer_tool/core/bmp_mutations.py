@@ -401,13 +401,13 @@ class BmpMutator:
         struct.pack_into("<i", header, 38, 2835)  # 72 DPI
         struct.pack_into("<i", header, 42, 2835)
 
-        # Color table
-        color_table = bytearray()
+        # Color table (grayscale: each entry is [i, i, i, 0])
+        color_table = bytearray(num_colors * 4)
         if bit_count <= 8:
             for i in range(num_colors):
-                color_table.extend([i, i, i, 0])  # grayscale
+                color_table[i * 4 : i * 4 + 4] = bytes([i, i, i, 0])
 
         # Random pixel data
-        pixels = bytes(random.randint(0, 255) for _ in range(pixel_size))
+        pixels = random.randbytes(pixel_size)
 
         return bytes(header) + bytes(color_table) + pixels

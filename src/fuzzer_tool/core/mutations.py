@@ -41,24 +41,68 @@ INTERESTING_32 = [
 ]
 
 INTERESTING_UNSIGNED_8 = [
-    0, 1, 2, 3, 4, 5,  # Small values — trigger len < nlen underflows
-    0xFE, 0xFF,  # Near unsigned 8-bit max
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,  # Small values — trigger len < nlen underflows
+    0xFE,
+    0xFF,  # Near unsigned 8-bit max
 ]
 
 INTERESTING_UNSIGNED_16 = [
-    0, 1, 2, 3, 4, 5,
-    0xFFFE, 0xFFFF,  # Unsigned 16-bit max
-    0x7FFE, 0x7FFF,  # Near signed 16-bit max
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    0xFFFE,
+    0xFFFF,  # Unsigned 16-bit max
+    0x7FFE,
+    0x7FFF,  # Near signed 16-bit max
 ]
 
 INTERESTING_UNSIGNED_32 = [
-    0, 1, 2, 3, 4, 5,
-    0xFFFFFFFE, 0xFFFFFFFF,  # Unsigned 32-bit max (SIZE_MAX on 32-bit)
-    0x7FFFFFFE, 0x7FFFFFFF,  # Near signed 32-bit max
-    0x100, 0x400, 0x1000,  # Common buffer boundaries
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    0xFFFFFFFE,
+    0xFFFFFFFF,  # Unsigned 32-bit max (SIZE_MAX on 32-bit)
+    0x7FFFFFFE,
+    0x7FFFFFFF,  # Near signed 32-bit max
+    0x100,
+    0x400,
+    0x1000,  # Common buffer boundaries
 ]
 
-LENGTH_BOUNDARIES = [0, 1, 2, 3, 4, 5, 7, 8, 15, 16, 31, 32, 63, 64, 127, 128, 255, 256, 512, 1024, 4096]
+LENGTH_BOUNDARIES = [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    7,
+    8,
+    15,
+    16,
+    31,
+    32,
+    63,
+    64,
+    127,
+    128,
+    255,
+    256,
+    512,
+    1024,
+    4096,
+]
 
 # Data lengths near AVX2/SSE2 SIMD boundaries — exercises _mm256_loadu_si256
 # overread guards and scalar fallback paths
@@ -348,6 +392,27 @@ def _in_class(b: int) -> tuple[int, int] | None:
     return None
 
 
+# Precomputed translate table: byte -> deterministic replacement within same class.
+# Avoids per-byte Python branching in type_replace(). Each entry is a fixed
+# but different value from the same character class.
+_TYPE_REPLACE_TABLE = bytes.maketrans(b"", b"")  # identity as base
+_TYPE_REPLACE_TBL = bytearray(256)
+for _b in range(256):
+    if _b in _SWAP_MAP:
+        _TYPE_REPLACE_TBL[_b] = _SWAP_MAP[_b]
+    elif 0x30 <= _b <= 0x39:
+        _TYPE_REPLACE_TBL[_b] = 0x30 + (_b * 7 + 3) % 10
+    elif 0x41 <= _b <= 0x5A:
+        _TYPE_REPLACE_TBL[_b] = 0x41 + (_b * 13 + 5) % 26
+    elif 0x61 <= _b <= 0x7A:
+        _TYPE_REPLACE_TBL[_b] = 0x61 + (_b * 17 + 7) % 26
+    elif _b < 32:
+        _TYPE_REPLACE_TBL[_b] = _b ^ 0x1F
+    else:
+        _TYPE_REPLACE_TBL[_b] = _b ^ 0x7F
+_TYPE_REPLACE_TABLE = bytes(_TYPE_REPLACE_TBL)
+
+
 def type_replace_byte(b: int) -> int:
     """Replace a byte with a different value from the same character class.
 
@@ -393,7 +458,8 @@ def type_replace_byte(b: int) -> int:
 def type_replace(data: bytes) -> bytes:
     """Replace all bytes with different values from the same character class.
 
-    Optimized: inlined logic with precomputed swap map, no per-byte function calls.
+    Uses a precomputed 256-byte translate table for O(n) processing
+    with no per-byte Python branching.
 
     Args:
         data: Input bytes to mutate.
@@ -401,22 +467,7 @@ def type_replace(data: bytes) -> bytes:
     Returns:
         Mutated bytes with each byte replaced within its class.
     """
-    result = bytearray(data)
-    for i in range(len(result)):
-        b = result[i]
-        if b in _SWAP_MAP:
-            result[i] = _SWAP_MAP[b]
-        elif 0x30 <= b <= 0x39:  # digit
-            result[i] = 0x30 + (b * 7 + 3) % 10
-        elif 0x41 <= b <= 0x5A:  # upper
-            result[i] = 0x41 + (b * 13 + 5) % 26
-        elif 0x61 <= b <= 0x7A:  # lower
-            result[i] = 0x61 + (b * 17 + 7) % 26
-        elif b < 32:
-            result[i] = b ^ 0x1F
-        else:
-            result[i] = b ^ 0x7F
-    return bytes(result)
+    return data.translate(_TYPE_REPLACE_TABLE)
 
 
 # ---------------------------------------------------------------------------
@@ -650,7 +701,7 @@ def byte_shuffle(data: bytes) -> bytes:
     # Shuffle only a random 20-50% subset
     n = max(2, len(result) // random.randint(2, 5))
     start = random.randint(0, max(0, len(result) - n))
-    random.shuffle(result[start:start + n])
+    random.shuffle(result[start : start + n])
     return bytes(result)
 
 
@@ -753,10 +804,13 @@ def transpose_bytes(data: bytes, width: int) -> bytes:
         return data
     max_start = len(data) - width
     start = (random.randint(0, max_start) // width) * width
-    block = bytearray(data[start : start + width])
-    random.shuffle(block)
     result = bytearray(data)
-    result[start : start + width] = block
+    # Shuffle in-place on a memoryview slice
+    mv = memoryview(result)[start : start + width]
+    lst = list(mv)
+    random.shuffle(lst)
+    for i, v in enumerate(lst):
+        mv[i] = v
     return bytes(result)
 
 
@@ -764,6 +818,7 @@ def bit_transpose(data: bytes, width: int) -> bytes:
     """Permute bits within a randomly-selected block of *width* bytes.
 
     Optimized: swaps random bit pairs instead of full shuffle.
+    Uses struct.pack_into for in-place write (avoids extra copy).
 
     Args:
         data: Input bytes.
