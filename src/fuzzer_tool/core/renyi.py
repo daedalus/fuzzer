@@ -24,6 +24,13 @@ Also provides:
 import math
 from collections import Counter
 
+try:
+    import numpy as np
+
+    _HAS_NUMPY = True
+except ImportError:
+    _HAS_NUMPY = False
+
 
 class RenyiEntropy:
     """Compute Rényi entropy of order α for discrete distributions.
@@ -61,6 +68,14 @@ class RenyiEntropy:
             return self._shannon(probs)
 
         # General Rényi: H_α = 1/(1-α) * log2(sum(p_i^α))
+        if _HAS_NUMPY:
+            p_arr = np.array([x for x in probs if x > 0], dtype=np.float64)
+            if len(p_arr) == 0:
+                return 0.0
+            sum_p_alpha = float(np.sum(p_arr ** alpha))
+            if sum_p_alpha <= 0:
+                return 0.0
+            return (1.0 / (1.0 - alpha)) * math.log2(sum_p_alpha)
         sum_p_alpha = sum(p**alpha for p in probs if p > 0)
         if sum_p_alpha <= 0:
             return 0.0
@@ -98,6 +113,34 @@ class RenyiEntropy:
         - H_0 >> H_∞ → many edges but coverage concentrated
         """
         alphas = [0.0, 0.5, 1.0, 2.0, 5.0, 10.0]
+
+        if _HAS_NUMPY:
+            probs = self._to_probs(counts)
+            if not probs:
+                return {f"renyi_{a}": 0.0 for a in alphas} | {"min_entropy": 0.0}
+            p = np.array(probs, dtype=np.float64)
+            p = p[p > 0]
+            if len(p) == 0:
+                return {f"renyi_{a}": 0.0 for a in alphas} | {"min_entropy": 0.0}
+            spectrum = {}
+            a_arr = np.array(alphas, dtype=np.float64)
+            # Vectorized Rényi for all alpha != 1
+            p_alpha = p[:, np.newaxis] ** a_arr[np.newaxis, :]  # shape: (n_elements, n_alphas)
+            sum_p_alpha = np.sum(p_alpha, axis=0)  # shape: (n_alphas,)
+            # H_alpha = 1/(1-alpha) * log2(sum(p^alpha))
+            with np.errstate(divide="ignore", invalid="ignore"):
+                h = np.where(
+                    a_arr != 1.0,
+                    (1.0 / (1.0 - a_arr)) * np.log2(np.maximum(sum_p_alpha, 1e-300)),
+                    0.0,  # Shannon handled separately
+                )
+            # Handle alpha=0 (support size)
+            h[0] = np.log2(max(1, len(p)))
+            for i, a in enumerate(alphas):
+                spectrum[f"renyi_{a}"] = float(h[i]) if a != 1.0 else self._shannon(probs)
+            spectrum["min_entropy"] = -np.log2(float(np.max(p))) if np.max(p) > 0 else 0.0
+            return spectrum
+
         spectrum = {}
         for a in alphas:
             spectrum[f"renyi_{a}"] = self.renyi(counts, a)
@@ -141,6 +184,13 @@ class RenyiEntropy:
             # Shannon limit: S_1 = -sum(p_i * log(p_i))
             return self._shannon(probs)
 
+        if _HAS_NUMPY:
+            p_arr = np.array([x for x in probs if x > 0], dtype=np.float64)
+            if len(p_arr) == 0:
+                return 0.0
+            sum_p_q = float(np.sum(p_arr ** q))
+            return (1.0 / (q - 1.0)) * (1.0 - sum_p_q)
+
         sum_p_q = sum(p**q for p in probs if p > 0)
         return (1.0 / (q - 1.0)) * (1.0 - sum_p_q)
 
@@ -160,6 +210,11 @@ class RenyiEntropy:
 
     def _shannon(self, probs: list[float]) -> float:
         """Shannon entropy in bits."""
+        if _HAS_NUMPY:
+            p_arr = np.array([x for x in probs if x > 0], dtype=np.float64)
+            if len(p_arr) == 0:
+                return 0.0
+            return -float(np.sum(p_arr * np.log2(p_arr)))
         h = 0.0
         for p in probs:
             if p > 0:

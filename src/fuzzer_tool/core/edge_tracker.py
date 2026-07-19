@@ -20,6 +20,13 @@ import struct
 import zlib
 from collections import defaultdict
 
+try:
+    import numpy as np
+
+    _HAS_NUMPY = True
+except ImportError:
+    _HAS_NUMPY = False
+
 from fuzzer_tool.core.similarity import hamming_distance
 
 log = logging.getLogger(__name__)
@@ -174,8 +181,19 @@ def _js_divergence(p: dict[int, float], q: dict[int, float]) -> float:
     Both p and q are sparse dicts mapping event -> probability.
     Returns a value in [0, ln(2)] where 0 means identical distributions.
     """
-    m: dict[int, float] = {}
     all_keys = set(p) | set(q)
+    if _HAS_NUMPY and len(all_keys) > 50:
+        keys = np.array(sorted(all_keys), dtype=np.int64)
+        p_arr = np.array([p.get(int(k), 0.0) for k in keys], dtype=np.float64)
+        q_arr = np.array([q.get(int(k), 0.0) for k in keys], dtype=np.float64)
+        m = 0.5 * (p_arr + q_arr)
+        valid_p = (p_arr > 0.0) & (m > 0.0)
+        valid_q = (q_arr > 0.0) & (m > 0.0)
+        kl_pm = float(np.sum(p_arr[valid_p] * np.log(p_arr[valid_p] / m[valid_p])))
+        kl_qm = float(np.sum(q_arr[valid_q] * np.log(q_arr[valid_q] / m[valid_q])))
+        return 0.5 * kl_pm + 0.5 * kl_qm
+
+    m: dict[int, float] = {}
     for k in all_keys:
         m[k] = 0.5 * (p.get(k, 0.0) + q.get(k, 0.0))
 
@@ -1027,6 +1045,10 @@ class EdgeTracker:
         total = sum(hits.values())
         if total == 0:
             return 0.0
+        if _HAS_NUMPY and len(hits) > 50:
+            arr = np.fromiter(hits.values(), dtype=np.float64)
+            arr = arr[arr > 0] / total
+            return -float(np.sum(arr * np.log2(arr)))
         h = 0.0
         for count in hits.values():
             if count > 0:
@@ -1051,6 +1073,9 @@ class EdgeTracker:
         total = sum(hits.values())
         if total == 0:
             return 0.0
+        if _HAS_NUMPY and len(hits) > 50:
+            arr = np.fromiter(hits.values(), dtype=np.float64) / total
+            return 1.0 - float(np.sum(arr * arr))
         sum_p_sq = sum((count / total) ** 2 for count in hits.values())
         return 1.0 - sum_p_sq
 
@@ -1066,6 +1091,10 @@ class EdgeTracker:
         total = sum(hc.values())
         if total == 0:
             return 0.0
+        if _HAS_NUMPY and len(hc) > 50:
+            arr = np.fromiter(hc.values(), dtype=np.float64)
+            arr = arr[arr > 0] / total
+            return -float(np.sum(arr * np.log2(arr)))
         h = 0.0
         for count in hc.values():
             if count > 0:
