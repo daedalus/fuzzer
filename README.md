@@ -346,6 +346,21 @@ of these four named configurations), use `tools/bench_sweep.sh`. Both scripts
 share common helpers (SHM cleanup, log metric extraction, coverage
 verification) from `tools/lib/bench_common.sh`.
 
+## Building Targets
+
+```bash
+# Build all targets (ASAN + no-ASAN executables and .so shared libraries)
+tools/build_targets.sh
+
+# ASAN only
+tools/build_targets.sh --asan
+
+# No-ASAN only (faster)
+tools/build_targets.sh --fast
+```
+
+The build script compiles every target as both an executable and a `.so` shared library, in ASAN and no-ASAN variants. The no-ASAN `.so` variants (`*_nosan.so`) are suitable for high-throughput in-process fuzzing without sanitizer overhead.
+
 ## Troubleshooting
 
 ### Zero edges discovered (ASan + LD_PRELOAD conflict)
