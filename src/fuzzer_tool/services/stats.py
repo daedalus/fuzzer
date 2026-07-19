@@ -101,8 +101,7 @@ class StatsReporter:
             if exec_count % report_interval == 0:
                 edges = len(f._edge_tracker._global_edge_hits)
                 print(
-                    f"\r[*] Calibration: {exec_count}/{max_execs} execs, "
-                    f"{edges} edges discovered",
+                    f"\r[*] Calibration: {exec_count}/{max_execs} execs, {edges} edges discovered",
                     end="",
                     flush=True,
                 )
@@ -111,8 +110,10 @@ class StatsReporter:
         edges = len(f._edge_tracker._global_edge_hits)
         gt = f._edge_tracker.good_turing_estimate()
         dr = self.discovery_rate()
-        print(f"\r[*] Calibration done: {exec_count} execs, {edges} edges discovered, "
-              f"GT confidence={gt['confidence']}, discovery_rate={dr:.1f}/1k execs   ")
+        print(
+            f"\r[*] Calibration done: {exec_count} execs, {edges} edges discovered, "
+            f"GT confidence={gt['confidence']}, discovery_rate={dr:.1f}/1k execs   "
+        )
 
         if f.corpus and not f._frameshift.relations:
             seed0 = f.corpus[0]
@@ -129,10 +130,13 @@ class StatsReporter:
                 print(f"[*] FrameShift: discovered {n_rels} length-field relations")
 
         from fuzzer_tool.core.crash_eta import estimate_execs_to_first_crash
+
         eta = estimate_execs_to_first_crash(f._profile, gt, dr, exec_count, f._crash_mi)
-        print(f"[*] ETA to first crash: ~{eta.edges_to_crash:,} risky edges, "
-              f"~{eta.point_est:,} execs "
-              f"(range: {eta.low:,} - {eta.high:,}, confidence: {eta.confidence})")
+        print(
+            f"[*] ETA to first crash: ~{eta.edges_to_crash:,} risky edges, "
+            f"~{eta.point_est:,} execs "
+            f"(range: {eta.low:,} - {eta.high:,}, confidence: {eta.confidence})"
+        )
 
     def discovery_rate(self) -> float:
         return _discovery_rate(self.f._discovery_history)
@@ -172,8 +176,10 @@ class StatsReporter:
 
         if f._stall_recovery_count > 0:
             print(f"  Recovery entries:  {f._stall_recovery_count}")
-            print(f"  Recovery execs:    {f._stall_recovery_execs:,} "
-                  f"({f._stall_recovery_execs / max(1, f.exec_count) * 100:.1f}%)")
+            print(
+                f"  Recovery execs:    {f._stall_recovery_execs:,} "
+                f"({f._stall_recovery_execs / max(1, f.exec_count) * 100:.1f}%)"
+            )
 
         shm_edges = f.shm_cov.cumulative_edges if f.shm_cov else 0
         et_edges = f._edge_tracker.get_cumulative_edge_count()
@@ -354,9 +360,7 @@ class StatsReporter:
         elif hasattr(f, "_edge_tracker"):
             cumulative = f._edge_tracker.get_cumulative_edge_count()
         elapsed = time.time() - f.start_time
-        line = (
-            f"{elapsed:.1f},{f.exec_count},{cumulative},{len(f.corpus)},{f.crash_count}\n"
-        )
+        line = f"{elapsed:.1f},{f.exec_count},{cumulative},{len(f.corpus)},{f.crash_count}\n"
         with open(f.coverage_log, "a") as fh:
             fh.write(line)
 
@@ -412,8 +416,7 @@ class StatsReporter:
             cov_str = f" | shm: {shm_edges} max: {max_edges} sat: {sat:.0f}%"
         elif f.ptrace_cov:
             cov_str = (
-                f" | edges: {f.ptrace_cov.cumulative_edges}"
-                f" hits: {f.ptrace_cov.total_bp_hits}"
+                f" | edges: {f.ptrace_cov.cumulative_edges} hits: {f.ptrace_cov.total_bp_hits}"
             )
             if f.ptrace_cov.deep_coverage:
                 cov_str += f" bps:{len(f.ptrace_cov.original_bytes)}"
@@ -467,6 +470,11 @@ class StatsReporter:
                     f.map_size = new_size
                     f._edge_tracker.map_size = new_size
                     f._edge_tracker.reset_after_resize()
+                    # Update inprocess runner's SHM pointers — the target's
+                    # __afl_area still points to the old (detached) SHM
+                    if f._inprocess_runner:
+                        f._inprocess_runner.update_shm_after_resize(f.shm_cov._ptr, new_size)
+                    os.environ["AFL_MAP_SIZE"] = str(new_size)
                     density_str = f" | map: {f._edge_tracker.bitmap_density() * 100:.1f}% (collision: {collision_risk:.0f}%)"
         repro_str = ""
         if f._crash_replays:

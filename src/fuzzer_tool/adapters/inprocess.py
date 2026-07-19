@@ -181,10 +181,14 @@ class InProcessRunner:
             if self._shim and self._shim.shim_path and self._shim.needs_preload:
                 self._shim_handle = load_shim(self._shim.shim_path, mode="direct")
                 shim_loaded = True
-            # Set __AFL_SHM_ID BEFORE loading library so the instrumented
-            # code can attach to SHM during initialization
+            # Set __AFL_SHM_ID and AFL_MAP_SIZE BEFORE loading library so
+            # the instrumented code can attach to SHM during initialization
+            # with the correct size. Without AFL_MAP_SIZE, the compiled-in
+            # shim defaults to 65536 which mismatches the auto-sized SHM
+            # and causes OOB writes that hang or corrupt memory.
             if self.coverage_env_id:
                 os.environ["__AFL_SHM_ID"] = self.coverage_env_id
+                os.environ["AFL_MAP_SIZE"] = str(self.shm_size)
             if cov and not self._bitmap_out:
                 fd, self._bitmap_out = tempfile.mkstemp(suffix=".cov", prefix="fuzz_cov_")
                 os.close(fd)
@@ -315,7 +319,7 @@ class InProcessRunner:
         if self.coverage_env_id:
             try:
                 # Cache SHM attachment for performance
-                if not hasattr(self, '_shm_ptr') or self._shm_ptr is None:
+                if not hasattr(self, "_shm_ptr") or self._shm_ptr is None:
                     import ctypes.util as _ct_util
 
                     libc = ctypes.CDLL(_ct_util.find_library("c") or "libc.so.6")
@@ -324,7 +328,9 @@ class InProcessRunner:
                 if self._shm_ptr and self._shm_ptr != -1:
                     return (ctypes.c_uint8 * self.shm_size).from_address(self._shm_ptr)
             except Exception:
-                log.warning("shmat read failed for coverage_env_id=%s", self.coverage_env_id, exc_info=True)
+                log.warning(
+                    "shmat read failed for coverage_env_id=%s", self.coverage_env_id, exc_info=True
+                )
         return None
 
     def reset_bitmap(self):
@@ -335,7 +341,7 @@ class InProcessRunner:
         if self.coverage_env_id:
             try:
                 # Cache SHM attachment for performance
-                if not hasattr(self, '_shm_ptr') or self._shm_ptr is None:
+                if not hasattr(self, "_shm_ptr") or self._shm_ptr is None:
                     import ctypes.util as _ct_util
 
                     libc = ctypes.CDLL(_ct_util.find_library("c") or "libc.so.6")
@@ -344,7 +350,9 @@ class InProcessRunner:
                 if self._shm_ptr and self._shm_ptr != -1:
                     ctypes.memset(self._shm_ptr, 0, self.shm_size)
             except Exception:
-                log.warning("shmat reset failed for coverage_env_id=%s", self.coverage_env_id, exc_info=True)
+                log.warning(
+                    "shmat reset failed for coverage_env_id=%s", self.coverage_env_id, exc_info=True
+                )
 
     # ------------------------------------------------------------------
     # Execution
@@ -378,6 +386,7 @@ class InProcessRunner:
 
         Catches SIGSEGV/SIGABRT via signal handler so target crashes
         and ASAN errors don't kill the fuzzer process.
+        Timeout via SIGALRM + setitimer.
         """
         if self._lib is None or self._func_ptr is None:
             return -2, "runner not initialized"
@@ -386,6 +395,7 @@ class InProcessRunner:
 
         crashed = False
         crashed_sig = 0
+        timed_out = False
         stderr_buf = []
 
         def _crash_handler(signum, frame):
@@ -393,8 +403,14 @@ class InProcessRunner:
             crashed = True
             crashed_sig = signum
 
+        def _alarm_handler(signum, frame):
+            nonlocal timed_out
+            timed_out = True
+
         old_segv = signal.signal(signal.SIGSEGV, _crash_handler)
         old_abrt = signal.signal(signal.SIGABRT, _crash_handler)
+        old_alarm = signal.signal(signal.SIGALRM, _alarm_handler)
+        signal.setitimer(signal.ITIMER_REAL, self.timeout)
         try:
             # Capture stderr for ASAN output
             old_stderr_fd = os.dup(2)
@@ -415,6 +431,8 @@ class InProcessRunner:
                 pass
             os.close(read_fd)
 
+            if timed_out:
+                return -1, "timeout"
             return rc, b"".join(stderr_buf).decode(errors="replace")
         except Exception as e:
             # Restore stderr on exception
@@ -425,6 +443,8 @@ class InProcessRunner:
                 pass
             return -2, str(e)
         finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, old_alarm)
             signal.signal(signal.SIGSEGV, old_segv)
             signal.signal(signal.SIGABRT, old_abrt)
             if crashed:
@@ -434,20 +454,34 @@ class InProcessRunner:
     def _run_c_direct_lite(self, data: bytes) -> tuple[int, str]:
         """Lightweight direct ctypes call — minimal overhead.
 
-        Skips signal handler setup/teardown and stderr capture.
-        Uses cached ctypes buffer for maximum throughput.
-        Target crashes will kill the process (no isolation).
-        For use with stable targets where crash isolation is not needed.
+        Skips stderr capture. Uses cached ctypes buffer for maximum throughput.
+        Timeout via SIGALRM + setitimer. Target crashes kill the process.
         """
         if self._lib is None or self._func_ptr is None:
             return -2, "runner not initialized"
         # Skip bitmap reset — runner already calls shm.reset_edge_map()
         # Cache ctypes buffer allocation
-        if not hasattr(self, '_c_buf') or self._c_buf is None or len(self._c_buf) != len(data):
+        if not hasattr(self, "_c_buf") or self._c_buf is None or len(self._c_buf) != len(data):
             self._c_buf = (ctypes.c_uint8 * len(data))(*data)
         else:
             ctypes.memmove(self._c_buf, data, len(data))
-        rc = self._func_ptr(self._c_buf, len(data))
+
+        timed_out = False
+
+        def _alarm_handler(signum, frame):
+            nonlocal timed_out
+            timed_out = True
+
+        old_handler = signal.signal(signal.SIGALRM, _alarm_handler)
+        signal.setitimer(signal.ITIMER_REAL, self.timeout)
+        try:
+            rc = self._func_ptr(self._c_buf, len(data))
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, old_handler)
+
+        if timed_out:
+            return -1, "timeout"
         return rc, ""
 
     def _run_c_persistent(self, data: bytes) -> tuple[int, str]:
@@ -502,7 +536,36 @@ class InProcessRunner:
             return -2, str(e)
 
     def _coverage_enabled(self) -> bool:
-        return (self._shim is not None and self._shim.coverage_type != "none") or bool(self.coverage_env_id)
+        return (self._shim is not None and self._shim.coverage_type != "none") or bool(
+            self.coverage_env_id
+        )
+
+    def update_shm_after_resize(self, new_ptr: int, new_size: int) -> None:
+        """Patch target's __afl_area and invalidate cached SHM pointer after resize.
+
+        When SHM is resized, the old segment is detached and a new one allocated.
+        In inprocess mode the target's constructor already attached to the old
+        SHM — we must redirect it to the new one, or coverage writes go to freed memory.
+        """
+        # Invalidate cached SHM pointer so read_bitmap() re-attaches
+        self._shm_ptr = None
+        self.shm_size = new_size
+
+        # Patch __afl_area in the loaded target library to point to new SHM
+        if self._lib is not None:
+            try:
+                afl_area = ctypes.c_void_p.in_dll(self._lib, "__afl_area")
+                afl_area.value = new_ptr
+            except (ValueError, OSError):
+                pass
+
+        # Also patch the separate shim library if loaded
+        if self._shim_handle is not None:
+            try:
+                afl_area = ctypes.c_void_p.in_dll(self._shim_handle, "__afl_area")
+                afl_area.value = new_ptr
+            except (ValueError, OSError):
+                pass
 
     def stop(self):
         self._func = None

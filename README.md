@@ -290,6 +290,12 @@ Keeps one Python subprocess alive. Fork-per-call with `os.setsid()` for process 
 ### ASAN support
 Automatically detects ASAN-instrumented targets by checking for `__asan_init` symbols. Falls back from `--inprocess-direct` to subprocess mode when ASAN is detected (ASAN calls `_exit()` which kills in-process targets).
 
+### SHM resize in inprocess mode
+When collision risk exceeds the threshold, the bitmap SHM is resized. In inprocess mode, this patches the target's `__afl_area` pointer to the new SHM segment and invalidates the cached SHM attachment, so coverage writes don't go to freed memory. The target's compiled-in `__afl_map_mask` is not updated (static variable), so the target underutilizes the new bitmap — but writes remain in-bounds.
+
+### Timeout in direct mode
+`--inprocess-direct` and direct_lite mode enforce timeout via `SIGALRM` + `setitimer`. Previously these modes had no timeout protection — a hanging target would freeze the fuzzer.
+
 ## Corpus Minimization
 
 ```bash
