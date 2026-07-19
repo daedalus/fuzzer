@@ -216,6 +216,7 @@ fuzzer-tool rank ./target -d corpus -n 10 --dump top_seeds
 | `--max-corpus N` | Auto-minimize corpus at N entries |
 | `--replay-n N` | Replay each crash N times for reproducibility scoring |
 | `--report [FILE]` | Generate explainability report (stdout or file) |
+| `--stats-interval N` | Print live stats and dump stats file every N iterations (default: 1000) |
 
 ## Subcommands
 

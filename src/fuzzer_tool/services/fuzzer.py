@@ -1784,7 +1784,7 @@ class Fuzzer:
                 seed = self._pick_seed()
                 self.fuzz_one(seed)
                 i += 1
-                if i % 100 == 0:
+                if i % self.stats_interval == 0:
                     # Sample Shannon entropy for rate-of-change tracking
                     if self._edge_tracker._global_edge_hits:
                         sh = self._edge_tracker.shannon_entropy_global()
