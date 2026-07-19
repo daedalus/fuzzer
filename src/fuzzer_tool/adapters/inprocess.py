@@ -331,17 +331,18 @@ class InProcessRunner:
         """Reset the coverage bitmap to zero."""
         if self.direct and self._bitmap_reader and self._bitmap_reader.valid:
             self._bitmap_reader.reset_bitmap()
-        # Also reset SHM for AFL shim targets
+        # Reset SHM for AFL shim targets (use cached pointer)
         if self.coverage_env_id:
             try:
-                import ctypes as _ct
-                import ctypes.util
+                # Cache SHM attachment for performance
+                if not hasattr(self, '_shm_ptr') or self._shm_ptr is None:
+                    import ctypes.util as _ct_util
 
-                libc = _ct.CDLL(ctypes.util.find_library("c") or "libc.so.6")
-                libc.shmat.restype = _ct.c_void_p
-                ptr = libc.shmat(int(self.coverage_env_id), None, 0)
-                if ptr and ptr != -1:
-                    _ct.memset(ptr, 0, self.shm_size)
+                    libc = ctypes.CDLL(_ct_util.find_library("c") or "libc.so.6")
+                    libc.shmat.restype = ctypes.c_void_p
+                    self._shm_ptr = libc.shmat(int(self.coverage_env_id), None, 0)
+                if self._shm_ptr and self._shm_ptr != -1:
+                    ctypes.memset(self._shm_ptr, 0, self.shm_size)
             except Exception:
                 log.warning("shmat reset failed for coverage_env_id=%s", self.coverage_env_id, exc_info=True)
 
@@ -440,8 +441,7 @@ class InProcessRunner:
         """
         if self._lib is None or self._func_ptr is None:
             return -2, "runner not initialized"
-        if self._coverage_enabled():
-            self.reset_bitmap()
+        # Skip bitmap reset — runner already calls shm.reset_edge_map()
         # Cache ctypes buffer allocation
         if not hasattr(self, '_c_buf') or self._c_buf is None or len(self._c_buf) != len(data):
             self._c_buf = (ctypes.c_uint8 * len(data))(*data)
@@ -502,7 +502,7 @@ class InProcessRunner:
             return -2, str(e)
 
     def _coverage_enabled(self) -> bool:
-        return self._shim is not None and self._shim.coverage_type != "none"
+        return (self._shim is not None and self._shim.coverage_type != "none") or bool(self.coverage_env_id)
 
     def stop(self):
         self._func = None
