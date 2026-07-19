@@ -373,6 +373,15 @@ class EdgeTracker:
         self.target_cumulative_edges: dict[str, set[int]] = {}
         # Per-seed per-target edge sets: seed_key -> {target_name: set of edges}
         self.seed_target_edges: dict[str, dict[str, set[int]]] = {}
+        # ── Temporal coverage tracking ──────────────────────────────────────
+        # Per-edge lifetime: exec count when edge was first/last seen
+        self._edge_first_seen: dict[int, int] = {}
+        self._edge_last_seen: dict[int, int] = {}
+        # Edge discovery time-series: list of (exec_count, cumulative_edge_count)
+        self._coverage_timeline: list[tuple[int, int]] = []
+        # Branch correlation matrix: {(edge_a, edge_b): co_occurrence_count}
+        self._correlation_matrix: dict[tuple[int, int], int] = {}
+        self._correlation_total: int = 0
 
     def record_edges(self, seed_key: str, edge_bitmap: bytes, target_name: str = "") -> set[int]:
         """Record edges hit by a seed execution.
@@ -432,6 +441,10 @@ class EdgeTracker:
         self._aggregate_cache = None
         self._corpus_sig = None
 
+        # Update temporal tracking
+        self.record_edge_lifetimes(new_edges, len(self.cumulative_edges))
+        self.update_correlation(new_edges)
+
         # Prune old seeds if over limit
         self._maybe_prune()
 
@@ -476,6 +489,135 @@ class EdgeTracker:
 
         self._aggregate_cache = None
         self._corpus_sig = None
+
+    # ── Temporal coverage tracking methods ─────────────────────────────────
+
+    def record_edge_lifetimes(self, edge_set: set[int], exec_count: int):
+        """Update first/last seen timestamps for edges.
+
+        Args:
+            edge_set: Set of edge indices hit in this execution.
+            exec_count: Current execution count.
+        """
+        for edge in edge_set:
+            if edge not in self._edge_first_seen:
+                self._edge_first_seen[edge] = exec_count
+            self._edge_last_seen[edge] = exec_count
+
+    def record_coverage_snapshot(self, exec_count: int):
+        """Record a point-in-time snapshot of cumulative edge count.
+
+        Args:
+            exec_count: Current execution count.
+        """
+        self._coverage_timeline.append((exec_count, len(self.cumulative_edges)))
+
+    def update_correlation(self, edge_set: set[int]):
+        """Update branch correlation matrix with co-occurring edges.
+
+        Tracks which edges fire together in the same execution.
+        Correlation(a, b) = count(co-occurrences) / total_executions.
+
+        Args:
+            edge_set: Set of edge indices hit in this execution.
+        """
+        if len(edge_set) < 2:
+            return
+        self._correlation_total += 1
+        # Only track up to 200 edges to bound memory
+        edges = sorted(edge_set)[:200]
+        for i in range(len(edges)):
+            for j in range(i + 1, len(edges)):
+                key = (edges[i], edges[j])
+                self._correlation_matrix[key] = self._correlation_matrix.get(key, 0) + 1
+
+    def branch_correlation(self, edge_a: int, edge_b: int) -> float:
+        """Get correlation strength between two edges.
+
+        Returns:
+            Float in [0, 1] where 1 = always co-occur.
+        """
+        if self._correlation_total == 0:
+            return 0.0
+        key = (min(edge_a, edge_b), max(edge_a, edge_b))
+        count = self._correlation_matrix.get(key, 0)
+        return count / self._correlation_total
+
+    def top_correlated_pairs(self, k: int = 20) -> list[tuple[int, int, float]]:
+        """Get the top-k most correlated edge pairs.
+
+        Returns:
+            List of (edge_a, edge_b, correlation) sorted by correlation desc.
+        """
+        if not self._correlation_matrix:
+            return []
+        # Sort by count, take top k
+        sorted_pairs = sorted(
+            self._correlation_matrix.items(),
+            key=lambda x: x[1],
+            reverse=True,
+        )[:k]
+        return [(a, b, count / self._correlation_total) for (a, b), count in sorted_pairs]
+
+    def edge_lifetime_stats(self) -> dict:
+        """Compute statistics on edge lifetimes.
+
+        Returns:
+            Dict with median, mean, max lifetime (in execs).
+        """
+        if not self._edge_first_seen or not self._edge_last_seen:
+            return {"median": 0, "mean": 0.0, "max": 0}
+        lifetimes = []
+        for edge in self._edge_last_seen:
+            first = self._edge_first_seen.get(edge, 0)
+            last = self._edge_last_seen[edge]
+            lifetimes.append(last - first)
+        if not lifetimes:
+            return {"median": 0, "mean": 0.0, "max": 0}
+        lifetimes.sort()
+        n = len(lifetimes)
+        median = lifetimes[n // 2]
+        mean = sum(lifetimes) / n
+        return {"median": median, "mean": mean, "max": lifetimes[-1]}
+
+    def coverage_growth_rate(self) -> float:
+        """Compute edges-per-exec from coverage timeline.
+
+        Returns:
+            Average edges discovered per execution.
+        """
+        if len(self._coverage_timeline) < 2:
+            return 0.0
+        first_exec, first_edges = self._coverage_timeline[0]
+        last_exec, last_edges = self._coverage_timeline[-1]
+        exec_diff = last_exec - first_exec
+        if exec_diff <= 0:
+            return 0.0
+        return (last_edges - first_edges) / exec_diff
+
+    def edge_age_distribution(self) -> dict[str, int]:
+        """Classify edges by age (how recently they were first seen).
+
+        Returns:
+            Dict with counts: new (last 10%), mature, old (first 10%).
+        """
+        if not self._edge_first_seen:
+            return {"new": 0, "mature": 0, "old": 0}
+        first_vals = sorted(self._edge_first_seen.values())
+        n = len(first_vals)
+        if n < 10:
+            return {"new": n, "mature": 0, "old": 0}
+        p10 = first_vals[n // 10]
+        p90 = first_vals[9 * n // 10]
+        counts = {"new": 0, "mature": 0, "old": 0}
+        for first in self._edge_first_seen.values():
+            if first >= p90:
+                counts["new"] += 1
+            elif first <= p10:
+                counts["old"] += 1
+            else:
+                counts["mature"] += 1
+        return counts
 
     def record_edge_trace(self, seed_key: str, edges: set[tuple[int, int]]):
         """Record the (prev, curr) edge trace for a seed.
@@ -1195,6 +1337,80 @@ class EdgeTracker:
             result[seed_key] += 1
         return dict(result)
 
+    def classify_seeds(self) -> dict[str, dict]:
+        """Classify seeds as keystone, useful, parasitic, or redundant.
+
+        Classification:
+        - keystone: covers edges no other seed covers (singleton edges > 0)
+        - useful: contributes edges shared with others but not fully subsumed
+        - parasitic: all edges covered by other seeds (subsumption weight < 0.1)
+        - redundant: similar to parasitic but edge count is very low
+
+        Returns:
+            Dict mapping seed_key -> {classification, singleton_edges, edge_count, subsumption_weight}
+        """
+        uniqueness = self.seed_uniqueness()
+        result = {}
+
+        for seed_key, edges in self.seed_edges.items():
+            singleton_count = uniqueness.get(seed_key, 0)
+            edge_count = len(edges)
+
+            # Compute subsumption weight
+            if self._corpus_sig:
+                weight = self.compute_subsumption_weight(seed_key)
+            else:
+                weight = 1.0
+
+            # Classify
+            if singleton_count > 0:
+                classification = "keystone"
+            elif weight < 0.1:
+                classification = "parasitic"
+            elif edge_count < 5:
+                classification = "redundant"
+            else:
+                classification = "useful"
+
+            result[seed_key] = {
+                "classification": classification,
+                "singleton_edges": singleton_count,
+                "edge_count": edge_count,
+                "subsumption_weight": weight,
+            }
+
+        return result
+
+    def seed_contribution_graph(self) -> dict[str, dict]:
+        """Build a bipartite seed↔edge contribution graph.
+
+        Returns:
+            Dict with:
+            - seed_to_edges: {seed_key: [edge_indices]}
+            - edge_to_seeds: {edge_index: [seed_keys]}
+            - keystone_seeds: [seed_keys with singleton edges]
+            - parasitic_seeds: [seed_keys fully subsumed]
+        """
+        # Build edge -> seeds mapping
+        edge_to_seeds: dict[int, list[str]] = {}
+        for seed_key, edges in self.seed_edges.items():
+            for e in edges:
+                if e not in edge_to_seeds:
+                    edge_to_seeds[e] = []
+                edge_to_seeds[e].append(seed_key)
+
+        # Classify seeds
+        classifications = self.classify_seeds()
+        keystone = [k for k, v in classifications.items() if v["classification"] == "keystone"]
+        parasitic = [k for k, v in classifications.items() if v["classification"] == "parasitic"]
+
+        return {
+            "seed_to_edges": {k: sorted(v) for k, v in self.seed_edges.items()},
+            "edge_to_seeds": {e: s for e, s in edge_to_seeds.items()},
+            "keystone_seeds": keystone,
+            "parasitic_seeds": parasitic,
+        }
+
     def save(self, path: str) -> bool:
         """Save tracker state to JSON."""
         data = {
@@ -1209,6 +1425,11 @@ class EdgeTracker:
             "aggregate_totals": {str(e): c for e, c in self._aggregate_totals.items()},
             "aggregate_total_count": self._aggregate_total_count,
             "edge_traces": {k: [list(e) for e in v] for k, v in self.seed_edge_traces.items()},
+            "edge_first_seen": {str(e): c for e, c in self._edge_first_seen.items()},
+            "edge_last_seen": {str(e): c for e, c in self._edge_last_seen.items()},
+            "coverage_timeline": self._coverage_timeline,
+            "correlation_matrix": {f"{a},{b}": c for (a, b), c in self._correlation_matrix.items()},
+            "correlation_total": self._correlation_total,
         }
         try:
             with open(path, "w") as f:
@@ -1255,6 +1476,15 @@ class EdgeTracker:
         self.seed_edge_traces = {
             k: {(e[0], e[1]) for e in v} for k, v in data.get("edge_traces", {}).items()
         }
+        # Restore temporal tracking
+        self._edge_first_seen = {int(e): c for e, c in data.get("edge_first_seen", {}).items()}
+        self._edge_last_seen = {int(e): c for e, c in data.get("edge_last_seen", {}).items()}
+        self._coverage_timeline = [tuple(t) for t in data.get("coverage_timeline", [])]
+        corr_data = data.get("correlation_matrix", {})
+        self._correlation_matrix = {
+            (int(k.split(",")[0]), int(k.split(",")[1])): v for k, v in corr_data.items()
+        }
+        self._correlation_total = data.get("correlation_total", 0)
         # Restore MinHash signatures and rebuild LSH index
         self._minhash = MinHashLSH(num_perm=64, num_bands=8)
         self._corpus_sig = None

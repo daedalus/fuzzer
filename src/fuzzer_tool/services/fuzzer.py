@@ -102,18 +102,22 @@ def _cleanup_tmp_dir(path: Path) -> None:
 
 
 # ── Entropy rate tracking constants ─────────────────────────────────
-ENTROPY_HISTORY_MAX = 200      # max samples before trimming
-ENTROPY_HISTORY_TRIM = 100     # keep this many after trim
-ENTROPY_WINDOW = 4             # samples for rate-of-change computation
-ENTROPY_FLAT_THRESHOLD = 0.001 # rate below which entropy is "flat"
+ENTROPY_HISTORY_MAX = 200  # max samples before trimming
+ENTROPY_HISTORY_TRIM = 100  # keep this many after trim
+ENTROPY_WINDOW = 4  # samples for rate-of-change computation
+ENTROPY_FLAT_THRESHOLD = 0.001  # rate below which entropy is "flat"
 
 
 def _detect_afl(target_path: str) -> bool:
     """Check if a binary has AFL edge coverage instrumentation."""
     import subprocess
+
     try:
         result = subprocess.run(
-            ["nm", target_path], capture_output=True, text=True, timeout=5,
+            ["nm", target_path],
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         return "__afl_area" in result.stdout or "__afl_map_shm" in result.stdout
     except (OSError, subprocess.TimeoutExpired):
@@ -499,8 +503,11 @@ class Fuzzer:
         if self._crash_mi_path.exists():
             try:
                 self._crash_mi.load(json.loads(self._crash_mi_path.read_text()))
-                log.info("Crash MI tracker loaded: %d execs, %d crashes",
-                         self._crash_mi.total_execs, self._crash_mi.total_crashes)
+                log.info(
+                    "Crash MI tracker loaded: %d execs, %d crashes",
+                    self._crash_mi.total_execs,
+                    self._crash_mi.total_crashes,
+                )
             except (OSError, json.JSONDecodeError):
                 pass
 
@@ -692,8 +699,9 @@ class Fuzzer:
 
         self._inprocess_runner = None
         # Auto-detect .so targets and use in-process mode
-        if not inprocess and self.target.lower().endswith(('.so', '.dylib', '.dll')):
+        if not inprocess and self.target.lower().endswith((".so", ".dylib", ".dll")):
             from fuzzer_tool.adapters.inprocess import InProcessRunner
+
             cov_env_id = self.shm_cov.env_id if self.shm_cov else None
             # Probe the shared object for a fuzz function name
             auto_func = self._probe_so_function(self.target)
@@ -1026,13 +1034,16 @@ class Fuzzer:
             before = len(self.corpus)
             log.warning(
                 "Memory usage %.1f%% exceeds %d%% threshold — pruning corpus",
-                used_pct, self.prune_corpus_max_memory,
+                used_pct,
+                self.prune_corpus_max_memory,
             )
             self._auto_minimize_corpus()
             after = len(self.corpus)
             if after < before:
-                print(f"\n[*] MEMORY PRUNE: {before} → {after} seeds "
-                      f"(RSS {rss_kb // 1024}MB / {total_kb // 1024}MB, {used_pct:.1f}%)")
+                print(
+                    f"\n[*] MEMORY PRUNE: {before} → {after} seeds "
+                    f"(RSS {rss_kb // 1024}MB / {total_kb // 1024}MB, {used_pct:.1f}%)"
+                )
 
     def _select_next_target(self):
         """Select the next target for multi-target round-robin fuzzing."""
@@ -1192,10 +1203,10 @@ class Fuzzer:
         # Check new coverage (per-target SHM in multi-target mode)
         if self.multi_targets:
             active_shm = self._target_shm_covs.get(self.target)
-            has_new_coverage = (self.ptrace_cov and self.ptrace_cov.is_new_coverage()) or (
-                active_shm and active_shm.is_new_coverage()
-            ) or (
-                self.shm_cov and self.shm_cov.is_new_coverage()
+            has_new_coverage = (
+                (self.ptrace_cov and self.ptrace_cov.is_new_coverage())
+                or (active_shm and active_shm.is_new_coverage())
+                or (self.shm_cov and self.shm_cov.is_new_coverage())
             )
         else:
             has_new_coverage = (self.ptrace_cov and self.ptrace_cov.is_new_coverage()) or (
@@ -1221,7 +1232,11 @@ class Fuzzer:
                 self._prev_edge_bitmap = bytes(edge_bitmap)
 
             cov_before = len(new_edges) if new_edges else 0
-            cov_after = len(self._edge_tracker._global_edge_hits) if hasattr(self._edge_tracker, "_global_edge_hits") else 0
+            cov_after = (
+                len(self._edge_tracker._global_edge_hits)
+                if hasattr(self._edge_tracker, "_global_edge_hits")
+                else 0
+            )
             self._format_learner.record_transition(
                 input_bytes=mutated,
                 mutation_op=self._last_ops_used[0] if self._last_ops_used else "unknown",
@@ -1257,14 +1272,17 @@ class Fuzzer:
             if edge_bitmap:
                 seed_key = self._seed_key(data)
                 new = self._edge_tracker.record_edges(
-                    seed_key, edge_bitmap,
+                    seed_key,
+                    edge_bitmap,
                     target_name=os.path.basename(self.target) if self.multi_targets else "",
                 )
                 if new:
                     self._last_new_edge_exec = self.exec_count
                     if self._stall_recovery_active:
-                        print(f"\n[*] RECOVERED: found {len(new)} new edges at exec "
-                              f"{self.exec_count}, resuming normal mode")
+                        print(
+                            f"\n[*] RECOVERED: found {len(new)} new edges at exec "
+                            f"{self.exec_count}, resuming normal mode"
+                        )
                         self._stall_recovery_active = False
                 if meta is not None and new:
                     meta["coverage_edges"] += len(new)
@@ -1594,8 +1612,10 @@ class Fuzzer:
         if entropy_flat:
             reason += " + flat entropy"
         self._stall_recovery_count += 1
-        print(f"\n[*] STALL #{self._stall_recovery_count}: {reason} in "
-              f"{execs_since_edge} execs, switching to random mode")
+        print(
+            f"\n[*] STALL #{self._stall_recovery_count}: {reason} in "
+            f"{execs_since_edge} execs, switching to random mode"
+        )
         self._stall_recovery_active = True
         return True
 
@@ -1806,7 +1826,9 @@ class Fuzzer:
         with contextlib.suppress(OSError):
             self._crash_mi_path.write_text(json.dumps(self._crash_mi.save(), separators=(",", ":")))
         with contextlib.suppress(OSError):
-            self._length_tracker_path.write_text(json.dumps(self._length_tracker.save(), separators=(",", ":")))
+            self._length_tracker_path.write_text(
+                json.dumps(self._length_tracker.save(), separators=(",", ":"))
+            )
         self._save_state()
         if self.ga:
             ga_path = self.corpus_dir / "ga.json"
