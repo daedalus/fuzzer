@@ -204,6 +204,14 @@ class StatsReporter:
             print(f"  Est. remaining:    {gt['estimated_undiscovered']} edges")
             print(f"  Saturation:        {gt['saturation']:.1%} ({gt['confidence']} confidence)")
 
+        # Coverage growth model
+        growth = f._edge_tracker.coverage_growth_model()
+        if growth["confidence"] > 0.1:
+            print(f"  Growth rate:       {growth['current_rate']:.4f} edges/exec")
+            print(f"  Projected total:   {growth['projected_total']} edges")
+            if growth["time_to_plateau"] > 0:
+                print(f"  Plateau in:        ~{growth['time_to_plateau']:,} execs")
+
         if f.seed_meta:
             depths = [m.get("lineage_depth", 0) for m in f.seed_meta.values()]
             if depths:
@@ -222,6 +230,21 @@ class StatsReporter:
             total_seeds = len(f.seed_meta)
             print(f"  Productive seeds:  {productive}/{total_seeds} discovered edges")
             print(f"  Stale seeds:       {stale}/{total_seeds} (50+ fuzzes, 0 edges)")
+
+            # Seed classification
+            classifications = f._edge_tracker.classify_seeds()
+            keystone = sum(1 for c in classifications.values() if c["classification"] == "keystone")
+            parasitic = sum(
+                1 for c in classifications.values() if c["classification"] == "parasitic"
+            )
+            if keystone > 0 or parasitic > 0:
+                print(f"  Keystone seeds:    {keystone} (cover unique edges)")
+                print(f"  Parasitic seeds:   {parasitic} (fully subsumed)")
+
+            # Redundant seeds (dominance tree)
+            redundant = f._edge_tracker.find_redundant_seeds()
+            if redundant:
+                print(f"  Dominated seeds:   {len(redundant)} (removable)")
 
         rarity = f._edge_tracker.edge_rarity_stats()
         if rarity["total"] > 0:
@@ -477,7 +500,9 @@ class StatsReporter:
                     # Update inprocess runner's SHM pointers — the target's
                     # __afl_area still points to the old (detached) SHM
                     if f._inprocess_runner:
-                        f._inprocess_runner.update_shm_after_resize(f.shm_cov._ptr, new_size, f.shm_cov.env_id)
+                        f._inprocess_runner.update_shm_after_resize(
+                            f.shm_cov._ptr, new_size, f.shm_cov.env_id
+                        )
                     density_str = f" | map: {f._edge_tracker.bitmap_density() * 100:.1f}% (collision: {collision_risk:.0f}%)"
         repro_str = ""
         if f._crash_replays:

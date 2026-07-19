@@ -1615,6 +1615,12 @@ class Fuzzer:
         reason = "no new edges"
         if entropy_flat:
             reason += " + flat entropy"
+
+        # Check coverage growth model for saturation
+        growth = self._edge_tracker.coverage_growth_model()
+        if growth["confidence"] > 0.3 and growth["current_rate"] < 0.001:
+            reason += " + near-saturation"
+
         self._stall_recovery_count += 1
         print(
             f"\n[*] STALL #{self._stall_recovery_count}: {reason} in "

@@ -75,9 +75,7 @@ class SeedPicker:
         f = self.f
         from fuzzer_tool.core.edge_tracker import ks_significance_threshold
 
-        plateau_threshold = ks_significance_threshold(
-            max(1, f.markov._contexts_seen), alpha=0.05
-        )
+        plateau_threshold = ks_significance_threshold(max(1, f.markov._contexts_seen), alpha=0.05)
         gen_rate = 0.03 if f.markov.last_js_divergence < plateau_threshold else 0.15
 
         if not hasattr(self, "_last_corpus_pp"):
@@ -215,10 +213,7 @@ class SeedPicker:
                 if stop:
                     w *= 0.01
             if seed_key not in f._cached_weights:
-                if (
-                    seed_key in f._edge_tracker.seed_edges
-                    and f._edge_tracker.seed_edges[seed_key]
-                ):
+                if seed_key in f._edge_tracker.seed_edges and f._edge_tracker.seed_edges[seed_key]:
                     sub = f._edge_tracker.compute_subsumption_weight(seed_key)
                     div = f._edge_tracker.compute_hitcount_diversity_weight(seed_key)
                     spa = f._edge_tracker.compute_wasserstein_weight(seed_key)
@@ -229,6 +224,15 @@ class SeedPicker:
             sub, div, spa, cov = f._cached_weights[seed_key]
             w *= sub * div * spa
             w *= 0.5 + cov
+
+            # Boost keystone seeds, penalize parasitic ones
+            classifications = f._edge_tracker.classify_seeds()
+            if seed_key in classifications:
+                cls = classifications[seed_key]["classification"]
+                if cls == "keystone":
+                    w *= 2.0  # Double weight for irreplaceable seeds
+                elif cls == "parasitic":
+                    w *= 0.1  # Heavily penalize redundant seeds
 
             seed_edges = f._edge_tracker.seed_edges.get(seed_key, set())
             if seed_edges:
@@ -282,9 +286,7 @@ class SeedPicker:
                         for k in f._edge_tracker.seed_hit_counts
                         if f._edge_tracker.shannon_entropy_seed(k) > 0
                     ]
-                    self._mean_seed_entropy = (
-                        sum(entropies) / len(entropies) if entropies else 0.0
-                    )
+                    self._mean_seed_entropy = sum(entropies) / len(entropies) if entropies else 0.0
                     self._mean_entropy_cache_key = cache_key
                 if self._mean_seed_entropy > 0:
                     # z-score like: boost if far from mean
@@ -314,9 +316,9 @@ class SeedPicker:
                     for fn in f._profile.hot_functions
                     if fn in f._profile.functions
                 ) / max(len(f._profile.hot_functions), 1)
-                all_density = sum(
-                    fi.branch_density for fi in f._profile.functions.values()
-                ) / max(len(f._profile.functions), 1)
+                all_density = sum(fi.branch_density for fi in f._profile.functions.values()) / max(
+                    len(f._profile.functions), 1
+                )
                 if all_density > 0:
                     hotness_ratio = hot_density / all_density
                     if coverage > 0:
@@ -337,8 +339,7 @@ class SeedPicker:
 
             # Cross-target boost: seeds that found edges in the least-covered
             # target get a multiplier proportional to the coverage gap.
-            if (f.multi_targets and f._edge_tracker
-                    and f._edge_tracker.target_cumulative_edges):
+            if f.multi_targets and f._edge_tracker and f._edge_tracker.target_cumulative_edges:
                 target_edges = f._edge_tracker.target_cumulative_edges
                 if len(target_edges) > 1:
                     counts = {t: len(e) for t, e in target_edges.items()}
@@ -402,9 +403,7 @@ class SeedPicker:
             seed_key = f._seed_key(seed)
             sub, div, spa, _cov = f._cached_weights.get(seed_key, (1.0, 1.0, 1.0, 0.5))
             age = now - meta["added_at"]
-            burst = max(
-                1.0, 1.0 + f._temperature * (5.0 - 1.0) - (age / 60.0) * f._temperature
-            )
+            burst = max(1.0, 1.0 + f._temperature * (5.0 - 1.0) - (age / 60.0) * f._temperature)
             pareto_scores.append((sub, burst, spa))
 
         front = self._pareto_front(pareto_scores, window=100)
@@ -440,7 +439,11 @@ class SeedPicker:
         if cache_key != f._weight_cache_key:
             edge_changed = f._weight_cache_key[1] != edge_version
             f._weight_cache_key = cache_key
-            if edge_changed or f._weight_cache is not None and len(f._weight_cache) != corpus_version:
+            if (
+                edge_changed
+                or f._weight_cache is not None
+                and len(f._weight_cache) != corpus_version
+            ):
                 f._weight_cache = None
 
         if f._weight_cache is not None:
