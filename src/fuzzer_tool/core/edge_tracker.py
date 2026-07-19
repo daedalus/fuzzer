@@ -516,7 +516,7 @@ class EdgeTracker:
         """Update branch correlation matrix with co-occurring edges.
 
         Tracks which edges fire together in the same execution.
-        Correlation(a, b) = count(co-occurrences) / total_executions.
+        Uses sampling to bound O(n²) cost: samples up to 20 pairs per call.
 
         Args:
             edge_set: Set of edge indices hit in this execution.
@@ -524,10 +524,22 @@ class EdgeTracker:
         if len(edge_set) < 2:
             return
         self._correlation_total += 1
-        # Only track up to 200 edges to bound memory
-        edges = sorted(edge_set)[:200]
-        for i in range(len(edges)):
-            for j in range(i + 1, len(edges)):
+        edges = sorted(edge_set)[:50]
+        # Sample pairs instead of all O(n²) — bounds to O(1) per call
+        n = len(edges)
+        max_pairs = min(20, n * (n - 1) // 2)
+        if n <= 8:
+            # Small set: track all pairs
+            for i in range(n):
+                for j in range(i + 1, n):
+                    key = (edges[i], edges[j])
+                    self._correlation_matrix[key] = self._correlation_matrix.get(key, 0) + 1
+        else:
+            # Large set: sample random pairs
+            import random as _rand
+            for _ in range(max_pairs):
+                i = _rand.randint(0, n - 2)
+                j = _rand.randint(i + 1, n - 1)
                 key = (edges[i], edges[j])
                 self._correlation_matrix[key] = self._correlation_matrix.get(key, 0) + 1
 

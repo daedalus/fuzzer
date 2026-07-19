@@ -181,6 +181,9 @@ class SeedPicker:
         weights = []
         pareto_scores: list[tuple[float, float, float]] = []
 
+        # Cache classification once per call (avoids O(n²) recomputation per seed)
+        classifications = f._edge_tracker.classify_seeds()
+
         for seed in f.corpus:
             meta = f.seed_meta.get(seed)
             if meta is None:
@@ -226,7 +229,6 @@ class SeedPicker:
             w *= 0.5 + cov
 
             # Boost keystone seeds, penalize parasitic ones
-            classifications = f._edge_tracker.classify_seeds()
             if seed_key in classifications:
                 cls = classifications[seed_key]["classification"]
                 if cls == "keystone":
