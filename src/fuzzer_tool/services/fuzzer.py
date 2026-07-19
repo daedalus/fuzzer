@@ -1795,11 +1795,11 @@ class Fuzzer:
                     if self._edge_tracker._global_edge_hits:
                         sh = self._edge_tracker.shannon_entropy_global()
                         self._record_entropy_sample(sh)
+                    # Record coverage snapshot for temporal analysis
+                    self._edge_tracker.record_coverage_snapshot(self.exec_count)
                     self.print_stats()
                     self._append_coverage_log()
                     self._record_discovery_snapshot()
-                    # Record coverage snapshot for temporal analysis
-                    self._edge_tracker.record_coverage_snapshot(self.exec_count)
                     # Stall detection: no new edges in threshold execs
                     execs_since_edge = self.exec_count - self._last_new_edge_exec
                     if (

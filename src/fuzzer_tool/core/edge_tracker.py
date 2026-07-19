@@ -685,8 +685,8 @@ class EdgeTracker:
             projected_total = edges[-1] + 10000 * current_rate
             execs_to_plateau = 10000
 
-        # Confidence based on timeline length and rate consistency
-        confidence = min(1.0, n / 20) * min(1.0, exec_diff / 1000)
+        # Confidence based on timeline length
+        confidence = min(1.0, n / 5)
 
         return {
             "current_rate": current_rate,

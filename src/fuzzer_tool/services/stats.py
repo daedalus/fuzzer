@@ -549,4 +549,9 @@ class StatsReporter:
             f"crashes: {f.crash_count}{sig_str}{timeout_str} | eps: {eps:.0f} | "
             f"time: {elapsed:.0f}s{rss_str}{ops_str}{dict_str}{markov_str}{cov_str}{mc_str}{div_str}{jac_str}{dr_str}{density_str}{repro_str}{brier_str}{crps_str}{ent_str}{simp_str}{rate_str}{fmt_str}"
         )
+        # Add coverage growth model to stats line
+        growth = f._edge_tracker.coverage_growth_model()
+        if growth["confidence"] > 0.1:
+            growth_str = f" | gr: {growth['current_rate']:.3f}e/x proj: {growth['projected_total']} plateau: ~{growth['time_to_plateau']:,}"
+            line += growth_str
         print(line, flush=True)
