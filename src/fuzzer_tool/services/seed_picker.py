@@ -181,8 +181,10 @@ class SeedPicker:
         weights = []
         pareto_scores: list[tuple[float, float, float]] = []
 
-        # Cache classification once per call (avoids O(n²) recomputation per seed)
-        classifications = f._edge_tracker.classify_seeds()
+        # Cache classification across calls (recompute every 100 execs)
+        if not hasattr(f, "_classify_cache") or f.exec_count % 100 == 0:
+            f._classify_cache = f._edge_tracker.classify_seeds()
+        classifications = f._classify_cache
 
         for seed in f.corpus:
             meta = f.seed_meta.get(seed)

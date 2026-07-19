@@ -28,6 +28,10 @@ _libc.shmdt.restype = ctypes.c_int
 _libc.shmctl.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
 _libc.shmctl.restype = ctypes.c_int
 
+# memcmp function for fast comparison
+_libc.memcmp.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t]
+_libc.memcmp.restype = ctypes.c_int
+
 
 class ShmCoverage:
     """AFL-style shared memory bitmap for coverage tracking.
@@ -54,6 +58,7 @@ class ShmCoverage:
         self.env_id = str(self.shm_id)
         self._seen = bytearray(size)  # cumulative "ever seen" bitmap
         self._last_map_hash = 0  # cached hash for is_new_coverage fast path
+        self._last_map_ptr = ctypes.create_string_buffer(size)  # snapshot for memcmp
         self._register_atexit()
         self.total_edges = 0
         self.cumulative_edges = 0

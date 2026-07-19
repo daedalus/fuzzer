@@ -491,21 +491,27 @@ class InProcessRunner:
         else:
             ctypes.memmove(self._c_buf, data, len(data))
 
-        timed_out = False
+        # Use cached alarm handler to avoid per-call function creation
+        if not hasattr(self, "_alarm_handler"):
+            self._timed_out = False
+            def _alarm_handler(signum, frame):
+                self._timed_out = True
+            self._alarm_handler = _alarm_handler
+            self._old_alarm_handler = None
 
-        def _alarm_handler(signum, frame):
-            nonlocal timed_out
-            timed_out = True
-
-        old_handler = signal.signal(signal.SIGALRM, _alarm_handler)
+        self._timed_out = False
+        # Only save/restore handler on first call
+        if self._old_alarm_handler is None:
+            self._old_alarm_handler = signal.signal(signal.SIGALRM, self._alarm_handler)
+        else:
+            signal.signal(signal.SIGALRM, self._alarm_handler)
         signal.setitimer(signal.ITIMER_REAL, self.timeout)
         try:
             rc = self._func_ptr(self._c_buf, len(data))
         finally:
             signal.setitimer(signal.ITIMER_REAL, 0)
-            signal.signal(signal.SIGALRM, old_handler)
 
-        if timed_out:
+        if self._timed_out:
             return -1, "timeout"
         return rc, ""
 
