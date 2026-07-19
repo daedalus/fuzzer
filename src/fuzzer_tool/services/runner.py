@@ -66,7 +66,10 @@ class TargetRunner:
             if shm:
                 shm.reset_edge_map()
             rc, err = f._inprocess_runner.run_one(data)
-            if shm:
+            # In direct_lite mode the target writes directly to shm_cov's
+            # SHM via __afl_area — no read_bitmap/memmove needed.
+            # For other inprocess modes, copy from the runner's bitmap.
+            if shm and not f._inprocess_runner.direct_lite:
                 bitmap = f._inprocess_runner.read_bitmap()
                 if bitmap and len(bitmap) <= shm.size:
                     ctypes.memmove(shm._ptr, bitmap, len(bitmap))

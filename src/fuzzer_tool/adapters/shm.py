@@ -53,6 +53,7 @@ class ShmCoverage:
         self._map = (ctypes.c_char * size).from_address(self._ptr)
         self.env_id = str(self.shm_id)
         self._seen = bytearray(size)  # cumulative "ever seen" bitmap
+        self._last_map_hash = 0  # cached hash for is_new_coverage fast path
         self._register_atexit()
         self.total_edges = 0
         self.cumulative_edges = 0
@@ -87,11 +88,14 @@ class ShmCoverage:
     def is_new_coverage(self) -> bool:
         """Check if current bitmap has any edge not seen before (AFL-style).
 
-        Optimized: fast path when no new edges (bitmap unchanged).
+        Uses a cached hash for the fast path to avoid bytes() allocations.
         """
+        # Read SHM content as bytes (one allocation)
         current = bytes(self._map)
-        if current == bytes(self._seen):
+        current_hash = hash(current)
+        if current_hash == self._last_map_hash:
             return False
+        self._last_map_hash = current_hash
         # Slow path: find and record new edges
         has_new = False
         for i in range(self.size):
@@ -105,9 +109,8 @@ class ShmCoverage:
 
     def commit_snapshot(self):
         """Update the cumulative 'seen' bitmap to include all current edges."""
-        current = bytes(self._map)
         for i in range(self.size):
-            if current[i]:
+            if self._map[i]:
                 self._seen[i] = 1
         self.cumulative_edges = sum(self._seen)
 
