@@ -702,18 +702,21 @@ class EdgeTracker:
             if late_rate < early_rate * 0.5 and late_rate > 0:
                 # Rate is declining — estimate saturation
                 # Time to plateau: when rate drops below 0.001 edges/exec
+                plateau_detected = True
                 if late_rate > 0.001:
                     execs_to_plateau = int((edges[-1] - edges[0]) / max(0.001, late_rate))
                 else:
                     execs_to_plateau = 0
                 projected_total = edges[-1] + execs_to_plateau * late_rate
             else:
-                # Rate stable or increasing — project linearly
-                projected_total = edges[-1] + 10000 * current_rate
-                execs_to_plateau = 10000
+                # Rate stable or increasing — no saturation detected yet
+                plateau_detected = False
+                execs_to_plateau = 0
+                projected_total = 0
         else:
-            projected_total = edges[-1] + 10000 * current_rate
-            execs_to_plateau = 10000
+            plateau_detected = False
+            execs_to_plateau = 0
+            projected_total = 0
 
         # Confidence based on timeline length
         confidence = min(1.0, n / 5)
@@ -722,6 +725,7 @@ class EdgeTracker:
             "current_rate": current_rate,
             "projected_total": int(projected_total),
             "time_to_plateau": execs_to_plateau,
+            "plateau_detected": plateau_detected,
             "confidence": confidence,
         }
 
