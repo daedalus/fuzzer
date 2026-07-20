@@ -1429,6 +1429,7 @@ class EdgeTracker:
                         pairs.append((a, b, jaccard))
 
         pairs.sort(key=lambda x: x[2], reverse=True)
+        del edge_to_seeds, common  # free bipartite map before return
         return pairs[:top_k]
 
     def seed_uniqueness(self) -> dict[str, int]:

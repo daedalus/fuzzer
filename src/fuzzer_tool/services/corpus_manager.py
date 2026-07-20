@@ -363,6 +363,7 @@ class CorpusManager:
             if h not in seen:
                 seen.add(h)
                 unique.append(seed)
+        del seen  # free intermediate seed-hash set
 
         stale_count = 0
         for seed in unique:
@@ -415,6 +416,7 @@ class CorpusManager:
                 covered |= seed_edge_map[id(best_seed)]
                 minimal += 1
             target_size = max(target_size, minimal)
+            del seed_edge_map  # free edge map after set-cover
         else:
             productive = sum(
                 1 for seed in unique
@@ -450,6 +452,7 @@ class CorpusManager:
             scored.sort(key=lambda x: x[0], reverse=True)
             keep = min(target_size, len(scored))
             unique = [s for _, s in scored[:keep]]
+            del scored  # free scored list after sorting
 
         removed = len(f.corpus) - len(unique)
         if removed > 0:
@@ -470,6 +473,7 @@ class CorpusManager:
                     continue
                 if h not in kept_set:
                     shutil.move(str(fh), str(pruned_dir / fh.name))
+            del kept_set  # free kept hashes after file pruning
 
             f.corpus = unique
             new_meta = {}

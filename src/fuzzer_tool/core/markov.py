@@ -240,10 +240,12 @@ class MarkovChain:
             return False
         self._trains_since_snapshot = 0
 
-        snapshot = self._build_snapshot()
         has_previous = self._prev_snapshot is not None
-        if has_previous:
-            self.last_js_divergence = self._js_between_snapshots(self._prev_snapshot, snapshot)
+        prev = self._prev_snapshot
+        self._prev_snapshot = None  # allow old snapshot to be GC'd before building new one
+        snapshot = self._build_snapshot()  # only one large dict in memory at a time
+        if has_previous and prev is not None:
+            self.last_js_divergence = self._js_between_snapshots(prev, snapshot)
         self._prev_snapshot = snapshot
 
         # Plateau: JS divergence is below what noise alone would produce
