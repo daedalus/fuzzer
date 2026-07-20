@@ -216,6 +216,7 @@ class CorpusManager:
             sig = report.signature
             if sig not in f.crash_frames:
                 f.crash_frames[sig] = report.frames
+        del report  # free SanitizerReport object
 
         return save_crash(
             data,
@@ -460,6 +461,40 @@ class CorpusManager:
             keep = min(target_size, len(scored))
             unique = [s for _, s in scored[:keep]]
             del scored  # free scored list after sorting
+
+            # Verify all edges are still covered after scoring-based pruning.
+            # The scoring step sorts by edge_count*wasserstein*ppmd which can
+            # drop seeds that are the sole cover of rare edges. Re-add any
+            # essential seeds whose edge coverage went missing.
+            if all_edges:
+                covered_after = set()
+                for s in unique:
+                    sk = self.seed_key(s)
+                    e_set = et.seed_edges.get(sk, set()) if et and et.seed_edges else set()
+                    covered_after.update(e_set)
+                missing = all_edges - covered_after
+                if missing:
+                    found = []
+                    for seed in f.corpus:
+                        if seed in unique:
+                            continue
+                        sk = self.seed_key(seed)
+                        e_set = et.seed_edges.get(sk, set()) if et and et.seed_edges else set()
+                        gain = e_set & missing
+                        if gain:
+                            found.append((len(gain), gain, seed))
+                    found.sort(key=lambda x: x[0], reverse=True)
+                    for _, gap, seed in found:
+                        if not missing:
+                            break
+                        if gap & missing:
+                            unique.append(seed)
+                            missing -= gap
+                    if missing:
+                        log.warning(
+                            "Minimization: %d edges lost (no seed covers them in corpus)",
+                            len(missing),
+                        )
 
         removed = len(f.corpus) - len(unique)
         if removed > 0:
