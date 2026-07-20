@@ -724,7 +724,7 @@ class Fuzzer:
                     os.environ["LD_PRELOAD"] = f"{libasan}:{existing}" if existing else libasan
             # Probe the shared object for a fuzz function name
             auto_func = self._probe_so_function(self.target)
-            use_direct_lite = False
+            use_direct_lite = not target_is_asan
             self._inprocess_runner = InProcessRunner(
                 target=self.target,
                 function_name=auto_func,
