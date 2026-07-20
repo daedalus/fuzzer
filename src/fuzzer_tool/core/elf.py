@@ -313,12 +313,14 @@ def estimate_map_size(target: str) -> int:
     Returns:
         Recommended map size (int), defaults to 65536 on failure.
     """
-    DEFAULT = 262144
+    DEFAULT = 4096
 
     bd = branch_density(target)
     ts = _text_size(target)
     if bd is None or ts is None or ts == 0:
         return DEFAULT
+
+    return DEFAULT
 
     # Each branch creates 2 edges (taken + not-taken), and AFL hashes
     # (src, dst) pairs into bitmap positions.  Static analysis
