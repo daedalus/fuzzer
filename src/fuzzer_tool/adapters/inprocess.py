@@ -479,8 +479,10 @@ class InProcessRunner:
     def _run_c_direct_lite(self, data: bytes) -> tuple[int, str]:
         """Lightweight direct ctypes call — minimal overhead.
 
-        Skips stderr capture. Uses cached ctypes buffer for maximum throughput.
-        Timeout via SIGALRM + setitimer. Target crashes kill the process.
+        Catches SIGSEGV/SIGABRT via signal handler so target crashes
+        and ASAN errors don't kill the fuzzer process.
+        Uses cached ctypes buffer for maximum throughput.
+        Timeout via SIGALRM + setitimer.
         """
         if self._lib is None or self._func_ptr is None:
             return -2, "runner not initialized"
@@ -491,7 +493,18 @@ class InProcessRunner:
         else:
             ctypes.memmove(self._c_buf, data, len(data))
 
-        # Initialize signal handler once
+        crashed = False
+        crashed_sig = 0
+        timed_out = False
+
+        def _crash_handler(signum, frame):
+            nonlocal crashed, crashed_sig
+            crashed = True
+            crashed_sig = signum
+
+        # Initialize signal handlers
+        old_segv = signal.signal(signal.SIGSEGV, _crash_handler)
+        old_abrt = signal.signal(signal.SIGABRT, _crash_handler)
         if not hasattr(self, "_alarm_handler"):
             self._timed_out = False
             def _alarm_handler(signum, frame):
@@ -505,6 +518,10 @@ class InProcessRunner:
             rc = self._func_ptr(self._c_buf, len(data))
         finally:
             signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGSEGV, old_segv)
+            signal.signal(signal.SIGABRT, old_abrt)
+            if crashed:
+                return 128 + crashed_sig, ""
 
         if self._timed_out:
             return -1, "timeout"

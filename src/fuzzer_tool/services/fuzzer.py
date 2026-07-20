@@ -124,47 +124,54 @@ def _detect_afl(target_path: str) -> bool:
         return False
 
 
+def _detect_asan(target_path: str) -> bool:
+    """Detect if a binary is ASAN-instrumented by checking for __asan_init symbol."""
+    import subprocess
+
+    for flags in [[], ["-D"]]:
+        try:
+            r = subprocess.run(["nm"] + flags + [target_path], capture_output=True, timeout=10)
+            if r.returncode == 0:
+                if b"__asan_init" in r.stdout or b"__asan_register_globals" in r.stdout:
+                    return True
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+    return False
+
+
 class Fuzzer:
     @staticmethod
     def _probe_so_function(target):
         """Probe a shared object for the best fuzz entry point.
 
-        Prefers fuzz_shm_run (standard wrapper), then any fuzz_* symbol.
+        Uses nm -D to scan symbols without loading the library (avoids
+        ASAN issues with ctypes.CDLL loading order).
         Falls back to fuzz_shm_run if nothing is found.
         """
-        import ctypes
+        import subprocess
 
         try:
-            lib = ctypes.CDLL(target)
-        except OSError:
-            return "fuzz_shm_run"
-
-        # Prefer the standard wrapper
-        for name in ("fuzz_shm_run",):
-            try:
-                getattr(lib, name)
-                return name
-            except AttributeError:
-                pass
-
-        # Scan for any fuzz_* symbol
-        try:
-            import subprocess
-
             result = subprocess.run(
                 ["nm", "-D", target],
                 capture_output=True,
                 text=True,
                 timeout=5,
             )
-            for line in result.stdout.splitlines():
-                parts = line.split()
-                if len(parts) >= 3 and parts[1] in ("T", "t", "W", "w"):
-                    sym = parts[2]
-                    if sym.startswith("fuzz_") and sym != "fuzz_shm_run":
-                        return sym
+            symbols = result.stdout
         except (OSError, subprocess.TimeoutExpired):
-            pass
+            return "fuzz_shm_run"
+
+        # Prefer the standard wrapper
+        if "fuzz_shm_run" in symbols:
+            return "fuzz_shm_run"
+
+        # Scan for any fuzz_* symbol
+        for line in symbols.splitlines():
+            parts = line.split()
+            if len(parts) >= 3:
+                name = parts[-1]
+                if name.startswith("fuzz_"):
+                    return name
 
         return "fuzz_shm_run"
 
@@ -705,19 +712,31 @@ class Fuzzer:
             from fuzzer_tool.adapters.inprocess import InProcessRunner
 
             cov_env_id = self.shm_cov.env_id if self.shm_cov else None
+            # Detect ASAN and set LD_PRELOAD BEFORE probing (which loads the .so via ctypes.CDLL)
+            target_is_asan = _detect_asan(self.target)
+            if target_is_asan:
+                libasan = "/usr/lib/x86_64-linux-gnu/libasan.so.8"
+                if not os.path.exists(libasan):
+                    import ctypes.util
+                    libasan = ctypes.util.find_library("asan") or libasan
+                existing = os.environ.get("LD_PRELOAD", "")
+                if libasan not in existing:
+                    os.environ["LD_PRELOAD"] = f"{libasan}:{existing}" if existing else libasan
             # Probe the shared object for a fuzz function name
             auto_func = self._probe_so_function(self.target)
+            use_direct_lite = False
             self._inprocess_runner = InProcessRunner(
                 target=self.target,
                 function_name=auto_func,
                 timeout=self.timeout,
                 shm_size=self.map_size,
-                direct_lite=True,
+                direct_lite=use_direct_lite,
                 coverage_env_id=cov_env_id,
                 cov=bool(cov_env_id),
                 debug=self.debug,
             )
-            print(f"[*] Auto-detected .so target: in-process mode (direct_lite) with {auto_func}")
+            mode = "direct_lite" if use_direct_lite else "subprocess loader"
+            print(f"[*] Auto-detected .so target: in-process mode ({mode}) with {auto_func}")
         elif inprocess:
             from fuzzer_tool.adapters.inprocess import InProcessRunner
 
