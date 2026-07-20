@@ -724,10 +724,11 @@ class Fuzzer:
                     os.environ["LD_PRELOAD"] = f"{libasan}:{existing}" if existing else libasan
             # Probe the shared object for a fuzz function name
             auto_func = self._probe_so_function(self.target)
-            # Non-ASAN .so targets: use persistent loader for crash isolation
-            # (SIGSEGV from ctypes kills the process, persistent loader forks per-call).
-            # ASAN .so targets: use subprocess loader (ASAN catches crashes via exit code).
-            use_direct_lite = target_is_asan
+            # ASAN .so targets need LD_PRELOAD for ASAN to load first.
+            # LD_PRELOAD set via os.environ only affects child processes,
+            # not the current process. So direct_lite (ctypes.CDLL) fails.
+            # Use persistent loader which inherits LD_PRELOAD in child process.
+            use_direct_lite = False
             self._inprocess_runner = InProcessRunner(
                 target=self.target,
                 function_name=auto_func,
