@@ -479,45 +479,35 @@ class InProcessRunner:
     def _run_c_direct_lite(self, data: bytes) -> tuple[int, str]:
         """Lightweight direct ctypes call — minimal overhead.
 
-        Forks a child process per execution for crash isolation.
-        Target crashes (SIGSEGV/SIGABRT) are detected via waitpid.
-        ASAN errors are detected via exit code and stderr.
         Uses cached ctypes buffer for maximum throughput.
+        Timeout via SIGALRM + setitimer.
+        Note: target crashes (SIGSEGV/SIGABRT) will kill this process.
+        Use subprocess loader for targets that need crash detection.
         """
         if self._lib is None or self._func_ptr is None:
             return -2, "runner not initialized"
 
-        pid = os.fork()
-        if pid == 0:
-            # Child: install alarm handler and call the target
+        if not hasattr(self, "_c_buf") or self._c_buf is None or len(self._c_buf) != len(data):
+            self._c_buf = (ctypes.c_uint8 * len(data))(*data)
+        else:
+            ctypes.memmove(self._c_buf, data, len(data))
+
+        self._timed_out = False
+        if not hasattr(self, "_alarm_handler"):
             def _alarm_handler(signum, frame):
-                os._exit(128 + signal.SIGALRM)
+                self._timed_out = True
+            self._alarm_handler = _alarm_handler
+            self._old_alarm_handler = signal.signal(signal.SIGALRM, self._alarm_handler)
 
-            signal.signal(signal.SIGALRM, _alarm_handler)
-            signal.setitimer(signal.ITIMER_REAL, self.timeout)
-            try:
-                if not hasattr(self, "_c_buf") or self._c_buf is None or len(self._c_buf) != len(data):
-                    self._c_buf = (ctypes.c_uint8 * len(data))(*data)
-                else:
-                    ctypes.memmove(self._c_buf, data, len(data))
-                rc = self._func_ptr(self._c_buf, len(data))
-                os._exit(rc)
-            except Exception:
-                os._exit(1)
-
-        # Parent: wait for child
+        signal.setitimer(signal.ITIMER_REAL, self.timeout)
         try:
-            _, status = os.waitpid(pid, 0)
-        except ChildProcessError:
-            return -2, "child already reaped"
+            rc = self._func_ptr(self._c_buf, len(data))
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
 
-        if os.WIFEXITED(status):
-            rc = os.WEXITSTATUS(status)
-            return rc, ""
-        elif os.WIFSIGNALED(status):
-            sig = os.WTERMSIG(status)
-            return -(sig), ""
-        return -2, "unknown status"
+        if self._timed_out:
+            return -1, "timeout"
+        return rc, ""
 
     def _run_c_persistent(self, data: bytes) -> tuple[int, str]:
         """Persistent subprocess — one process, many calls."""
