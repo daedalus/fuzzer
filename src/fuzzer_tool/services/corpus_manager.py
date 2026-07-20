@@ -379,7 +379,7 @@ class CorpusManager:
                 edges = f.shm_cov.cumulative_edges
             elif f.ptrace_cov:
                 edges = f.ptrace_cov.cumulative_edges
-            target_size = max(edges * 2, 50)
+            target_size = max(edges, 50)
 
         if stale_ratio > 0.3:
             if len(unique) > target_size:
@@ -387,11 +387,41 @@ class CorpusManager:
             else:
                 target_size = int(len(unique) * (1.0 - stale_ratio))
 
-        productive = sum(
-            1 for seed in unique if f.seed_meta.get(seed, {}).get("coverage_edges", 0) > 0
-        )
-        if productive > 0:
-            target_size = max(target_size, productive)
+        # Greedy set-cover: find minimum seeds that cover all discovered edges.
+        et = f._edge_tracker
+        all_edges = et.cumulative_edges if et and et.cumulative_edges else set()
+        if all_edges and et.seed_edges:
+            covered: set[int] = set()
+            minimal = 0
+            seed_edge_map: dict[int, set[int]] = {}
+            for seed in unique:
+                sk = self.seed_key(seed)
+                s_edges = et.seed_edges.get(sk, set())
+                if s_edges:
+                    seed_edge_map[id(seed)] = s_edges
+            while covered != all_edges:
+                best_seed = None
+                best_gain = 0
+                for seed in unique:
+                    sid = id(seed)
+                    if sid not in seed_edge_map:
+                        continue
+                    gain = len(seed_edge_map[sid] - covered)
+                    if gain > best_gain:
+                        best_gain = gain
+                        best_seed = seed
+                if best_seed is None:
+                    break
+                covered |= seed_edge_map[id(best_seed)]
+                minimal += 1
+            target_size = max(target_size, minimal)
+        else:
+            productive = sum(
+                1 for seed in unique
+                if f.seed_meta.get(seed, {}).get("coverage_edges", 0) > 0
+            )
+            if productive > 0:
+                target_size = max(target_size, productive)
 
         if len(unique) > target_size:
             scored = []
@@ -419,8 +449,6 @@ class CorpusManager:
                 scored.append((score, seed))
             scored.sort(key=lambda x: x[0], reverse=True)
             keep = min(target_size, len(scored))
-            if keep < productive:
-                keep = min(productive, len(scored))
             unique = [s for _, s in scored[:keep]]
 
         removed = len(f.corpus) - len(unique)
