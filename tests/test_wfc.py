@@ -124,9 +124,9 @@ class TestWaveGridCore:
             for b in tiles:
                 adj.add_undirected(a.name, b.name)
         wave = WaveGrid(tiles, adj, width=3)
-        assert wave.superpositions[0].count(True) == 3
+        assert wave.superpositions[0].sum() == 3
         wave._observe(0)
-        assert wave.superpositions[0].count(True) == 1
+        assert wave.superpositions[0].sum() == 1
 
     def test_collapse_returns_valid_tile(self):
         """Collapsed tile was in the original superposition."""
@@ -173,7 +173,7 @@ class TestWaveGridCore:
         wave.superpositions[0][1] = False  # not B
         wave._propagate(budget=100)
         # Cell 1 should still have both options (B is compatible right of A, A is compatible right of B)
-        assert wave.superpositions[1].count(True) >= 1
+        assert wave.superpositions[1].sum() >= 1
 
     def test_run_completes_1d(self):
         """10-cell 1D wave with spec rules → all cells collapsed, no contradictions."""
@@ -276,7 +276,7 @@ class TestContradiction:
         wave = WaveGrid(tiles, adj, width=5)
         wave.run(seed=42, max_restarts=3, ac3_budget=1000)
         for i in range(wave.n):
-            assert wave.superpositions[i].count(True) >= 1
+            assert wave.superpositions[i].sum() >= 1
 
 
 # ═══════════════════════════════════════════════════════════════════

@@ -4,6 +4,10 @@ WFC is a constraint-satisfaction solver: cells with a superposition of
 possible tiles, adjacency constraints, min-entropy collapse, AC-3
 arc-consistency propagation, and bounded backtrack on contradiction.
 
+Superpositions stored as ``numpy.ndarray`` of shape ``(n_cells, n_tiles)``
+with dtype ``bool`` — ~15× less memory than ``list[list[bool]]`` (1 byte
+per bool vs 28 bytes per Python bool object).
+
 This module provides:
   - Tile: atomic building block with name and weight
   - AdjacencyTable: directional compatibility rules between tiles
@@ -22,10 +26,18 @@ Reference: Gumin, "Wave Function Collapse" 2016 (github.com/mxgmn/WaveFunctionCo
 from __future__ import annotations
 
 import collections
-import math
 import random
 from dataclasses import dataclass
 from typing import Literal
+
+# numpy optional but recommended for memory efficiency (~15× savings)
+try:
+    import numpy as np
+
+    HAVE_NUMPY = True
+except ImportError:
+    np = None  # type: ignore[assignment]
+    HAVE_NUMPY = False
 
 # ── Direction constants ───────────────────────────────────────────────
 
@@ -101,9 +113,8 @@ class AdjacencyTable:
     def compatible(self, a: bytes, b: bytes, direction: Direction) -> bool:
         """Check if tile *a* is compatible with having *b* in *direction*.
 
-        Uses a closed-world interpretation: if *a* has rules for this
-        direction, *b* must be among them. If *a* has no rules for this
-        direction, compatibility fails (the tile is not allowed there).
+        Closed-world: if *a* has rules for this direction, *b* must be
+        among them. If *a* has no rules, compatibility fails.
         """
         dir_rules = self._rules.get(a, {}).get(direction, None)
         if dir_rules is None:
@@ -148,9 +159,9 @@ class AdjacencyTable:
 class WaveGrid:
     """Constraint-satisfaction grid using Wave Function Collapse.
 
-    Maintains a superposition of possible tiles per cell, collapses the
-    most-constrained cell (min-entropy) first, propagates constraints via
-    AC-3, and restarts on contradiction with a bounded backtrack budget.
+    Superpositions stored as 2D numpy bool array:
+      superpositions[cell, tile_id] == True  → tile still possible
+      superpositions[cell, tile_id] == False → tile ruled out
 
     Two modes:
     - 1D: cells arranged in a line, left/right adjacency
@@ -169,9 +180,13 @@ class WaveGrid:
         self.w = width
         self.h = height
         self.n = width * height
+        self.n_tiles = len(tiles)
 
-        # superpositions[cell][tile_id] = True if tile is still possible
-        self.superpositions: list[list[bool]] = [[True] * len(tiles) for _ in range(self.n)]
+        # Precompute tile weights as array for vectorized operations
+        self._weights = np.array([t.weight for t in tiles], dtype=np.float64)
+
+        # superpositions[cell, tile_id] = True if tile is still possible
+        self.superpositions: np.ndarray = np.ones((self.n, self.n_tiles), dtype=bool)
 
         self.contradiction = False
 
@@ -222,7 +237,7 @@ class WaveGrid:
         while not self.contradiction:
             idx = self._find_min_entropy()
             if idx is None:
-                break  # all collapsed
+                break
             self._observe(idx)
             if not self.contradiction:
                 self._propagate(ac3_budget)
@@ -236,77 +251,72 @@ class WaveGrid:
         min_entropy = float("inf")
         best_idx = None
         for i in range(self.n):
-            count = self.superpositions[i].count(True)
+            row = self.superpositions[i]
+            count = int(row.sum())
             if count == 0:
                 self.contradiction = True
                 return None
             if count == 1:
                 continue
-            entropy = self._entropy(i) + random.random() * 1e-9
+            entropy = self._entropy(row) + random.random() * 1e-9
             if entropy < min_entropy:
                 min_entropy = entropy
                 best_idx = i
         return best_idx
 
-    def _entropy(self, idx: int) -> float:
+    def _entropy(self, row: np.ndarray) -> float:
         """Shannon entropy of a cell's superposition."""
-        total = sum(self.tiles[tid].weight for tid, ok in enumerate(self.superpositions[idx]) if ok)
+        available_mask = row.astype(bool, copy=False)
+        if not available_mask.any():
+            return 0.0
+        w = self._weights[available_mask]
+        total = w.sum()
         if total <= 0:
             return 0.0
-        h = 0.0
-        for tid, ok in enumerate(self.superpositions[idx]):
-            if not ok:
-                continue
-            p = self.tiles[tid].weight / total
-            if p > 0:
-                h -= p * math.log2(p)
-        return h
+        p = w / total
+        return float(-(p * np.log2(p)).sum())
 
     def _observe(self, idx: int):
         """Collapse cell *idx*: pick a tile weighted by probability."""
-        possible = [tid for tid, ok in enumerate(self.superpositions[idx]) if ok]
-        if not possible:
+        row = self.superpositions[idx]
+        possible = np.flatnonzero(row)
+        if len(possible) == 0:
             self.contradiction = True
             return
 
-        weights = [self.tiles[tid].weight for tid in possible]
-        total = sum(weights)
+        weights = self._weights[possible]
+        total = weights.sum()
         if total <= 0:
             chosen = random.choice(possible)
         else:
             r = random.random() * total
             cumulative = 0.0
             chosen = possible[-1]
-            for tid, w in zip(possible, weights, strict=True):
+            for tid, w in zip(possible.tolist(), weights.tolist(), strict=True):
                 cumulative += w
                 if r <= cumulative:
                     chosen = tid
                     break
 
-        for tid in range(len(self.tiles)):
-            self.superpositions[idx][tid] = tid == chosen
+        row[:] = False
+        row[chosen] = True
 
     def _propagate(self, budget: int = DEFAULT_AC3_BUDGET):
-        """AC-3 arc-consistency propagation.
-
-        Returns when stable, budget exhausted (falls back to greedy),
-        or contradiction detected.
-        """
-        # Initial full consistency pass
+        """AC-3 arc-consistency propagation."""
         queue: collections.deque[int] = collections.deque()
         changed_any = False
         for i in range(self.n):
-            if self.superpositions[i].count(True) <= 1:
+            if self.superpositions[i].sum() <= 1:
                 continue
             result = self._prune_cell(i)
             if result is None:
-                return  # contradiction
+                return
             if result:
                 queue.append(i)
                 changed_any = True
 
         if not changed_any:
-            return  # already stable
+            return
 
         iterations = 0
         while queue and iterations < budget:
@@ -314,11 +324,11 @@ class WaveGrid:
             idx = queue.popleft()
 
             for nidx in self._neighbors(idx):
-                if self.superpositions[nidx].count(True) <= 1:
+                if self.superpositions[nidx].sum() <= 1:
                     continue
                 result = self._prune_cell(nidx)
                 if result is None:
-                    return  # contradiction
+                    return
                 if result:
                     queue.append(nidx)
 
@@ -337,9 +347,11 @@ class WaveGrid:
             False if nothing changed.
             None if contradiction (cell has 0 remaining tiles).
         """
+        row = self.superpositions[idx]
         removed_any = False
-        for tid in range(len(self.tiles)):
-            if not self.superpositions[idx][tid]:
+
+        for tid in range(self.n_tiles):
+            if not row[tid]:
                 continue
 
             tile_name = self.tiles[tid].name
@@ -347,37 +359,34 @@ class WaveGrid:
 
             for nidx in self._neighbors(idx):
                 dir_from_idx = self._direction_to(idx, nidx)
-                # Check if tile_name at idx is compatible with ANY tile at nidx
-                neighbor_ok = False
-                for ntid, ok in enumerate(self.superpositions[nidx]):
-                    if not ok:
-                        continue
-                    if self.adjacency.compatible(tile_name, self.tiles[ntid].name, dir_from_idx):
-                        neighbor_ok = True
-                        break
+                nbr_row = self.superpositions[nidx]
 
-                if not neighbor_ok:
+                # Build compatibility mask for this (tile_name, direction) pair
+                compat_mask = np.array(
+                    [
+                        self.adjacency.compatible(tile_name, self.tiles[t].name, dir_from_idx)
+                        for t in range(self.n_tiles)
+                    ],
+                    dtype=bool,
+                )
+
+                if not np.any(nbr_row & compat_mask):
                     all_neighbors_ok = False
                     break
 
             if not all_neighbors_ok:
-                self.superpositions[idx][tid] = False
+                row[tid] = False
                 removed_any = True
 
-        # Check contradiction
-        if self.superpositions[idx].count(True) == 0:
+        if row.sum() == 0:
             self.contradiction = True
             return None
         return removed_any
 
     def _fallback_greedy(self):
-        """Greedy fallback when AC-3 budget exhausted.
-
-        Collapses remaining uncollapsed cells without propagation.
-        May produce invalid adjacency but guarantees completion.
-        """
+        """Greedy fallback when AC-3 budget exhausted."""
         for i in range(self.n):
-            if self.superpositions[i].count(True) > 1 and not self.contradiction:
+            if self.superpositions[i].sum() > 1 and not self.contradiction:
                 self._observe(i)
 
     # ── Grid/coordinate helpers ─────────────────────────────────────
@@ -399,11 +408,7 @@ class WaveGrid:
 
     @staticmethod
     def _direction_to(from_idx: int, to_idx: int) -> Direction:
-        """Direction from *from_idx* to *to_idx*.
-
-        Returns the direction in which *to_idx* lies relative to *from_idx*.
-        E.g., if to_idx is left of from_idx, return "left".
-        """
+        """Direction from *from_idx* to *to_idx*."""
         diff = to_idx - from_idx
         if diff == -1:
             return "left"
@@ -417,34 +422,29 @@ class WaveGrid:
 
     def _reset(self):
         """Reset superposition to all tiles possible."""
-        for i in range(self.n):
-            for tid in range(len(self.tiles)):
-                self.superpositions[i][tid] = True
+        self.superpositions[:, :] = True
         self.contradiction = False
 
     # ── Output ──────────────────────────────────────────────────────
 
     def _to_grid(self) -> list[list[bytes | None]]:
-        """Convert collapsed superpositions to a 2D grid of tile names.
-
-        If a cell has a single tile, outputs that tile name.
-        If multiple tiles remain, outputs the most-likely tile.
-        If zero tiles remain (contradiction), outputs None.
-        """
+        """Convert collapsed superpositions to a 2D grid of tile names."""
         grid: list[list[bytes | None]] = []
         for y in range(self.h):
-            row: list[bytes | None] = []
+            row_out: list[bytes | None] = []
             for x in range(self.w):
                 idx = y * self.w + x
-                choices = [tid for tid, ok in enumerate(self.superpositions[idx]) if ok]
-                if len(choices) == 1:
-                    row.append(self.tiles[choices[0]].name)
-                elif len(choices) > 1:
-                    best = max(choices, key=lambda t: self.tiles[t].weight)
-                    row.append(self.tiles[best].name)
+                row = self.superpositions[idx]
+                count = int(row.sum())
+                if count == 1:
+                    row_out.append(self.tiles[int(row.argmax())].name)
+                elif count > 1:
+                    # Most-likely tile by weight
+                    best = int((row * self._weights).argmax())
+                    row_out.append(self.tiles[best].name)
                 else:
-                    row.append(None)
-            grid.append(row)
+                    row_out.append(None)
+            grid.append(row_out)
         return grid
 
     def tile_at(self, x: int, y: int = 0) -> bytes | None:
@@ -462,7 +462,6 @@ class ConstraintSet:
     def png_chunks() -> AdjacencyTable:
         """PNG chunk ordering rules (PNG spec §4.3, §4.4)."""
         table = AdjacencyTable()
-        # IHDR can be followed by critical or ancillary chunks
         table.add_forward(b"IHDR", b"PLTE")
         ancillary = [
             b"tRNS",
@@ -483,7 +482,6 @@ class ConstraintSet:
         table.add_forward(b"IHDR", b"IDAT")
         table.add_forward(b"IHDR", b"IEND")
 
-        # PLTE → ancillary or IDAT
         table.add_forward(b"PLTE", b"tRNS")
         table.add_forward(b"PLTE", b"bKGD")
         table.add_forward(b"PLTE", b"hIST")
@@ -492,7 +490,6 @@ class ConstraintSet:
         table.add_forward(b"PLTE", b"IDAT")
         table.add_forward(b"PLTE", b"IEND")
 
-        # Ancillary ↔ Ancillary (cross-compatible)
         for a in ancillary:
             for b in ancillary:
                 if a != b:
@@ -500,10 +497,8 @@ class ConstraintSet:
             table.add_forward(a, b"IDAT")
             table.add_forward(a, b"IEND")
 
-        # IDAT → IDAT or IEND
         table.add_forward(b"IDAT", b"IDAT")
         table.add_forward(b"IDAT", b"IEND")
-
         return table
 
     @staticmethod
