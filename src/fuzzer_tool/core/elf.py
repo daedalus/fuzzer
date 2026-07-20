@@ -313,11 +313,30 @@ def estimate_map_size(target: str) -> int:
     Returns:
         Recommended map size (int), defaults to 65536 on failure.
     """
-    DEFAULT = 65536
+    DEFAULT = 262144
 
     bd = branch_density(target)
     ts = _text_size(target)
-    # Start small (4KB), let dynamic resize grow as needed.
-    # This avoids wasting memory on small targets while allowing
-    # the fuzzer to discover the right size empirically.
-    return 4096
+    if bd is None or ts is None or ts == 0:
+        return DEFAULT
+
+    # Each branch creates 2 edges (taken + not-taken), and AFL hashes
+    # (src, dst) pairs into bitmap positions.  Static analysis
+    # underestimates actual edge counts by 5-10x because it misses
+    # indirect branches, switch tables, dynamic dispatch, and
+    # compiler-generated code paths.  Use 8x headroom on top of the
+    # 2x edges-per-branch factor to compensate.
+    #
+    # Formula: branches = bd * (ts / 1024)
+    #           edges ≈ branches * 2
+    #           map_size = next_power_of_2(edges * 8)
+    branches = bd * (ts / 1024)
+    estimated_edges = branches * 2  # 2 edges per branch
+    map_size = _next_power_of_2(int(estimated_edges * 8))
+
+    # Resize is handled dynamically in stats.py via ShmCoverage.resize()
+    # when collision risk exceeds 10%, but resizing clears all cumulative
+    # coverage state because hash positions change.  Start large enough
+    # (256KB minimum) that resize fires rarely and coverage data can
+    # accumulate meaningfully.
+    return max(DEFAULT, min(1048576, map_size))
