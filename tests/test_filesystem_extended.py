@@ -81,6 +81,8 @@ class TestLoadCorpusDelta:
     def test_load_delta_chain(self, tmp_path):
         seeds = tmp_path / "seeds"
         seeds.mkdir()
+        deltas_dir = tmp_path / "deltas"
+        deltas_dir.mkdir()
         # Full file
         parent_data = b"AAAA"
         parent_hash = hash_data(parent_data)
@@ -90,7 +92,7 @@ class TestLoadCorpusDelta:
         child = b"AABA"
         d = compute_delta(parent_data, child)
         child_hash = hash_data(child)
-        delta_file = seeds / f"delta_{child_hash}.json"
+        delta_file = deltas_dir / f"delta_{child_hash}.json"
         delta_file.write_text(json.dumps({"parent": parent_hash, "diff": d}))
 
         corpus, seen = load_corpus(tmp_path)
@@ -100,6 +102,8 @@ class TestLoadCorpusDelta:
     def test_delta_with_bloom(self, tmp_path):
         seeds = tmp_path / "seeds"
         seeds.mkdir()
+        deltas_dir = tmp_path / "deltas"
+        deltas_dir.mkdir()
         bloom = BloomFilter(capacity=100)
         parent_data = b"AAAA"
         parent_hash = hash_data(parent_data)
@@ -108,7 +112,7 @@ class TestLoadCorpusDelta:
         child = b"AABA"
         d = compute_delta(parent_data, child)
         child_hash = hash_data(child)
-        delta_file = seeds / f"delta_{child_hash}.json"
+        delta_file = deltas_dir / f"delta_{child_hash}.json"
         delta_file.write_text(json.dumps({"parent": parent_hash, "diff": d}))
 
         corpus, seen = load_corpus(tmp_path, bloom=bloom)
@@ -117,12 +121,14 @@ class TestLoadCorpusDelta:
     def test_corrupt_delta_skipped(self, tmp_path):
         seeds = tmp_path / "seeds"
         seeds.mkdir()
+        deltas_dir = tmp_path / "deltas"
+        deltas_dir.mkdir()
         parent_data = b"AAAA"
         parent_hash = hash_data(parent_data)
         (seeds / f"{parent_hash}.bin").write_bytes(parent_data)
 
         child_hash = "deadbeef00000001"
-        delta_file = seeds / f"delta_{child_hash}.json"
+        delta_file = deltas_dir / f"delta_{child_hash}.json"
         delta_file.write_text("not valid json {{{")
 
         corpus, seen = load_corpus(tmp_path)
@@ -131,8 +137,10 @@ class TestLoadCorpusDelta:
     def test_missing_parent_skipped(self, tmp_path):
         seeds = tmp_path / "seeds"
         seeds.mkdir()
+        deltas_dir = tmp_path / "deltas"
+        deltas_dir.mkdir()
         # Delta references non-existent parent
-        delta_file = seeds / "delta_deadbeef00000001.json"
+        delta_file = deltas_dir / "delta_deadbeef00000001.json"
         delta_file.write_text(json.dumps({"parent": "nope", "diff": [[0, 65]]}))
 
         corpus, seen = load_corpus(tmp_path)
@@ -168,12 +176,12 @@ class TestSaveToCorpus:
         result = save_to_corpus(child, tmp_path, seen, parent=parent, lineage_depth=0)
         assert result is True
 
-        # Should have a delta file
-        delta_files = list((tmp_path / "seeds").glob("delta_*.json"))
+        # Should have a delta file in deltas/
+        delta_files = list((tmp_path / "deltas").glob("delta_*.json"))
         assert len(delta_files) == 1
 
-        # Full file should be the child hash
-        full_files = [f for f in (tmp_path / "seeds").iterdir() if not f.name.startswith("delta_")]
+        # Full file should be in seeds/
+        full_files = list((tmp_path / "seeds").iterdir())
         assert len(full_files) == 1
 
     def test_with_bloom(self, tmp_path):

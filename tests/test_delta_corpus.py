@@ -98,9 +98,10 @@ class TestDeltaSaveLoad:
         save_to_corpus(parent, tmp_path, seen)
         save_to_corpus(child, tmp_path, seen, parent=parent, lineage_depth=0)
 
-        files = list((tmp_path / "seeds").iterdir())
-        delta_files = [f for f in files if f.name.startswith("delta_")]
-        full_files = [f for f in files if f.name.startswith("id_")]
+        delta_files = list((tmp_path / "deltas").iterdir()) if (tmp_path / "deltas").exists() else []
+        delta_files = [f for f in delta_files if f.name.startswith("delta_")]
+        full_files = list((tmp_path / "seeds").iterdir())
+        full_files = [f for f in full_files if f.name.startswith("id_")]
         assert len(delta_files) == 1
         assert len(full_files) == 1
 
@@ -157,7 +158,9 @@ class TestDeltaSaveLoad:
 
         # Write a corrupt delta file
         h = "corrupt"
-        (tmp_path / "seeds" / f"delta_{h}.json").write_text("not valid json {{{")
+        deltas_dir = tmp_path / "deltas"
+        deltas_dir.mkdir(parents=True, exist_ok=True)
+        (deltas_dir / f"delta_{h}.json").write_text("not valid json {{{")
 
         corpus, _ = load_corpus(tmp_path)
         assert len(corpus) == 1  # only the full file

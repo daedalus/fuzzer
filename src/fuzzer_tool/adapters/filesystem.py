@@ -181,6 +181,7 @@ def load_corpus(corpus_dir: Path, bloom: BloomFilter | None = None) -> tuple[lis
     corpus: list[bytes] = []
     seen: set[str] = set()
     seeds_dir = corpus_dir / "seeds"
+    deltas_dir = corpus_dir / "deltas"
 
     # First pass: load all full files and build hash lookup for delta reconstruction
     full_files: dict[str, bytes] = {}
@@ -190,14 +191,18 @@ def load_corpus(corpus_dir: Path, bloom: BloomFilter | None = None) -> tuple[lis
         for f in seeds_dir.iterdir():
             if not f.is_file():
                 continue
+            # Full file: id_*, legacy names, etc.
+            data = f.read_bytes()
+            h = hash_data(data)
+            full_files[h] = data
+
+    if deltas_dir.exists():
+        for f in deltas_dir.iterdir():
+            if not f.is_file():
+                continue
             if f.suffix == ".json" and f.name.startswith("delta_"):
                 h = f.name[6:-5]  # strip "delta_" prefix and ".json" suffix
                 delta_files.append((h, f))
-            else:
-                # Full file: id_*, legacy names, etc.
-                data = f.read_bytes()
-                h = hash_data(data)
-                full_files[h] = data
 
     # Load full files
     for h, data in full_files.items():
@@ -290,6 +295,7 @@ def save_to_corpus(
     seen_hashes.add(h)
     seeds_dir = corpus_dir / "seeds"
     seeds_dir.mkdir(parents=True, exist_ok=True)
+    deltas_dir = corpus_dir / "deltas"
 
     # Force full snapshot at interval to cap chain depth.
     # v1 delta handles same-length mutations; v2 handles length-changing ones.
@@ -310,7 +316,8 @@ def save_to_corpus(
                 delta = {"parent": parent_hash, "diff": diff_v2, "v": 2}
 
     if delta is not None:
-        delta_file = seeds_dir / f"delta_{h}.json"
+        deltas_dir.mkdir(parents=True, exist_ok=True)
+        delta_file = deltas_dir / f"delta_{h}.json"
         delta_file.write_text(json.dumps(delta, separators=(",", ":")))
     else:
         corpus_file = seeds_dir / f"id_{h}"

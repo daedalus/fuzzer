@@ -457,22 +457,35 @@ class CorpusManager:
         removed = len(f.corpus) - len(unique)
         if removed > 0:
             seeds_dir = f.corpus_dir / "seeds"
+            deltas_dir = f.corpus_dir / "deltas"
             pruned_dir = seeds_dir / "pruned"
             pruned_dir.mkdir(parents=True, exist_ok=True)
             from fuzzer_tool.adapters.filesystem import hash_data as _hash
 
             kept_set = {_hash(s) for s in unique}
+            # Prune full seeds
             for fh in seeds_dir.iterdir():
                 if not fh.is_file():
                     continue
-                if fh.suffix == ".json" and fh.name.startswith("delta_"):
-                    h = fh.name[6:-5]
-                elif fh.name.startswith("id_"):
+                if fh.name.startswith("id_"):
                     h = fh.name[3:]
                 else:
                     continue
                 if h not in kept_set:
                     shutil.move(str(fh), str(pruned_dir / fh.name))
+            # Prune delta files
+            if deltas_dir.exists():
+                deltas_pruned_dir = deltas_dir / "pruned"
+                for fh in deltas_dir.iterdir():
+                    if not fh.is_file():
+                        continue
+                    if fh.suffix == ".json" and fh.name.startswith("delta_"):
+                        h = fh.name[6:-5]
+                    else:
+                        continue
+                    if h not in kept_set:
+                        deltas_pruned_dir.mkdir(parents=True, exist_ok=True)
+                        shutil.move(str(fh), str(deltas_pruned_dir / fh.name))
             del kept_set  # free kept hashes after file pruning
 
             f.corpus = unique
