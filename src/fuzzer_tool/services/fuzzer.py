@@ -705,6 +705,7 @@ class Fuzzer:
             _register_arms(self._replicator)
         if self._elo:
             _register_arms(self._elo)
+        del _format_priors  # free priors dict after arm registration
 
         self._persistent_runner = None
         if self.persistent:

@@ -1453,6 +1453,7 @@ class EdgeTracker:
         result = defaultdict(int)
         for _edge, seed_key in singletons.items():
             result[seed_key] += 1
+        del edge_seeds, singletons  # free bipartite map + singletons dict
         return dict(result)
 
     def classify_seeds(self) -> dict[str, dict]:
@@ -1497,6 +1498,7 @@ class EdgeTracker:
                 "subsumption_weight": weight,
             }
 
+        del uniqueness  # free singleton-count dict after loop
         return result
 
     def seed_contribution_graph(self) -> dict[str, dict]:
@@ -1522,12 +1524,14 @@ class EdgeTracker:
         keystone = [k for k, v in classifications.items() if v["classification"] == "keystone"]
         parasitic = [k for k, v in classifications.items() if v["classification"] == "parasitic"]
 
-        return {
+        result = {
             "seed_to_edges": {k: sorted(v) for k, v in self.seed_edges.items()},
             "edge_to_seeds": {e: s for e, s in edge_to_seeds.items()},
             "keystone_seeds": keystone,
             "parasitic_seeds": parasitic,
         }
+        del edge_to_seeds  # free bipartite map
+        return result
 
     def coverage_dominance_tree(self) -> dict[str, list[str]]:
         """Build a coverage dominance tree.

@@ -505,7 +505,8 @@ class CorpusManager:
             from fuzzer_tool.adapters.filesystem import hash_data as _hash
 
             kept_set = {_hash(s) for s in unique}
-            # Prune full seeds
+            # Prune full seeds — use two-digit hash subdirectories so no
+            # single directory accumulates too many entries.
             for fh in seeds_dir.iterdir():
                 if not fh.is_file():
                     continue
@@ -514,7 +515,9 @@ class CorpusManager:
                 else:
                     continue
                 if h not in kept_set:
-                    shutil.move(str(fh), str(pruned_dir / fh.name))
+                    sub = pruned_dir / h[:2]
+                    sub.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(fh), str(sub / fh.name))
             # Prune delta files
             if deltas_dir.exists():
                 deltas_pruned_dir = deltas_dir / "pruned"
@@ -526,8 +529,9 @@ class CorpusManager:
                     else:
                         continue
                     if h not in kept_set:
-                        deltas_pruned_dir.mkdir(parents=True, exist_ok=True)
-                        shutil.move(str(fh), str(deltas_pruned_dir / fh.name))
+                        sub = deltas_pruned_dir / h[:2]
+                        sub.mkdir(parents=True, exist_ok=True)
+                        shutil.move(str(fh), str(sub / fh.name))
             del kept_set  # free kept hashes after file pruning
 
             f.corpus = unique
