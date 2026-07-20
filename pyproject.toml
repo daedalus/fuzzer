@@ -20,7 +20,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Topic :: Security",
 ]
-dependencies = []
+dependencies = ["numpy>=2.0","ppmd>=0.1.1"]
 
 [project.optional-dependencies]
 dev = [
