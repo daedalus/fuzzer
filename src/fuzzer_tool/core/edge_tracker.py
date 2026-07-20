@@ -423,8 +423,9 @@ class EdgeTracker:
         # Scan only non-zero bytes in the bitmap via numpy flatnonzero.
         # For a 256KB bitmap with ~100 active edges this is ~2600x fewer
         # Python iterations than iterating every byte with enumerate.
-        arr = np.frombuffer(edge_bitmap, dtype=np.uint8, count=self.map_size)
+        arr = np.frombuffer(edge_bitmap, dtype=np.uint8, count=min(len(edge_bitmap), self.map_size))
         for i in np.flatnonzero(arr):
+            i = int(i)
             val = int(arr[i])
             new_edges.add(i)
             hc[i] = val
@@ -671,6 +672,7 @@ class EdgeTracker:
                 "projected_total": 0,
                 "time_to_plateau": 0,
                 "confidence": 0.0,
+                "plateau_detected": False,
             }
 
         # Extract time series
@@ -688,6 +690,7 @@ class EdgeTracker:
                 "projected_total": edges[-1],
                 "time_to_plateau": 0,
                 "confidence": 0.1,
+                "plateau_detected": False,
             }
 
         # Recent rate: edges per exec
@@ -705,19 +708,21 @@ class EdgeTracker:
             late_rate = (edges[-1] - edges[mid]) / max(1, execs[-1] - execs[mid])
             if late_rate < early_rate * 0.5 and late_rate > 0:
                 # Rate is declining — estimate saturation
-                # Time to plateau: when rate drops below 0.001 edges/exec
+                plateau_detected = True
                 if late_rate > 0.001:
                     execs_to_plateau = int((edges[-1] - edges[0]) / max(0.001, late_rate))
                 else:
                     execs_to_plateau = 0
                 projected_total = edges[-1] + execs_to_plateau * late_rate
             else:
-                # Rate stable or increasing — project linearly
-                projected_total = edges[-1] + 10000 * current_rate
-                execs_to_plateau = 10000
+                # Rate stable or increasing — no saturation detected yet
+                plateau_detected = False
+                execs_to_plateau = 0
+                projected_total = 0
         else:
-            projected_total = edges[-1] + 10000 * current_rate
-            execs_to_plateau = 10000
+            plateau_detected = False
+            execs_to_plateau = 0
+            projected_total = 0
 
         # Confidence based on timeline length
         confidence = min(1.0, n / 5)
@@ -726,6 +731,7 @@ class EdgeTracker:
             "current_rate": current_rate,
             "projected_total": int(projected_total),
             "time_to_plateau": execs_to_plateau,
+            "plateau_detected": plateau_detected,
             "confidence": confidence,
         }
 

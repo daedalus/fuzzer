@@ -229,8 +229,8 @@ class TestPruneDirectoryStructure:
             k1, k2 = h1, h2
             et.seed_edges[k1] = {1}
             et.seed_hit_counts[k1] = {1: 1}
-            et.seed_edges[k2] = {2}
-            et.seed_hit_counts[k2] = {2: 1}
+            et.seed_edges[k2] = {1}
+            et.seed_hit_counts[k2] = {1: 1}
 
             # Keep only s1, prune s2
             f.corpus = [s1, s2]
