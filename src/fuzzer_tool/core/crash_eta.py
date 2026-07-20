@@ -67,21 +67,12 @@ class CrashMITracker:
         if is_crash:
             self.total_crashes += 1
             self._cache_valid = False
-
-        # For crashes: track all positions. For non-crashes: sample 20%.
-        n = min(len(input_bytes), self.max_positions)
-        if is_crash:
-            positions = range(n)
-        else:
-            # Sample ~20% of positions for non-crashes to reduce overhead
-            step = max(1, n // max(1, n // 5))
-            positions = range(0, n, step)
-
-        for pos in positions:
-            byte_val = input_bytes[pos]
-            self.position_counts[pos] += 1
-            self.byte_total[pos][byte_val] += 1
-            if is_crash:
+            # Only track positions for crashes (non-crashes add noise)
+            n = min(len(input_bytes), self.max_positions)
+            for pos in range(n):
+                byte_val = input_bytes[pos]
+                self.position_counts[pos] += 1
+                self.byte_total[pos][byte_val] += 1
                 self.joint_crash[pos][byte_val] += 1
 
         # Prune per-position byte values to cap memory growth

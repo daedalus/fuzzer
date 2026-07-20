@@ -94,14 +94,12 @@ class ShmCoverage:
     def is_new_coverage(self) -> bool:
         """Check if current bitmap has any edge not seen before (AFL-style).
 
-        Uses cached hash for fast path. On slow path, uses direct
-        ctypes buffer access to avoid bytes() allocation.
+        Uses memcmp for fast equality check, then direct buffer access
+        for finding new edges. Avoids bytes() allocation entirely.
         """
-        # Fast path: compute hash from buffer directly (no bytes allocation)
-        current_hash = hash(bytes(self._map))
-        if current_hash == self._last_map_hash:
+        # Fast path: check if map unchanged using memcmp (no allocation)
+        if _libc.memcmp(self._map, self._last_map_ptr, self.size) == 0:
             return False
-        self._last_map_hash = current_hash
         # Slow path: find and record new edges
         has_new = False
         for i in range(self.size):
@@ -109,6 +107,8 @@ class ShmCoverage:
                 self._seen[i] = 1
                 self.cumulative_edges += 1
                 has_new = True
+        # Update snapshot for next comparison
+        ctypes.memmove(self._last_map_ptr, self._map, self.size)
         if has_new:
             self.total_edges += 1
         return has_new
