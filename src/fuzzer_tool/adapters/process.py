@@ -84,10 +84,29 @@ def run_target_fast(target: str, data: bytes, env: dict[str, str] | None = None)
         os.lseek(_fast_path_fd, 0, os.SEEK_SET)
         os.write(_fast_path_fd, data)
         os.ftruncate(_fast_path_fd, len(data))
+        os.fsync(_fast_path_fd)
 
         e = _clean_env(env)
-        pid = os.posix_spawn(target, [target, fname], e)
+        # Redirect stdin from the temp file so targets that read(0, ...) get the data.
+        stdin_fd = os.open(fname, os.O_RDONLY)
+        # Capture stderr via pipe for ASAN/sanitizer output.
+        stderr_r, stderr_w = os.pipe()
+        file_actions = (
+            (os.POSIX_SPAWN_DUP2, stdin_fd, 0),
+            (os.POSIX_SPAWN_DUP2, stderr_w, 2),
+        )
+        pid = os.posix_spawn(target, [target, fname], e, file_actions=file_actions)
+        os.close(stdin_fd)
+        os.close(stderr_w)
+
         _, status = os.waitpid(pid, 0)
+
+        # Read stderr after child exits (data is in kernel pipe buffer)
+        try:
+            stderr_data = os.read(stderr_r, 65536)
+        except OSError:
+            stderr_data = b""
+        os.close(stderr_r)
 
         if os.WIFEXITED(status):
             rc = os.WEXITSTATUS(status)
@@ -95,7 +114,7 @@ def run_target_fast(target: str, data: bytes, env: dict[str, str] | None = None)
             rc = -os.WTERMSIG(status)
         else:
             rc = -2
-        return rc, "", pid
+        return rc, stderr_data.decode(errors="replace"), pid
     except Exception as e:
         return -2, str(e), 0
 

@@ -67,11 +67,12 @@ class TestIntegration:
         with tempfile.TemporaryDirectory() as tmpdir:
             corpus_dir = Path(tmpdir) / "corpus"
             crashes_dir = Path(tmpdir) / "crashes"
-            corpus_dir.mkdir()
+            seeds_dir = corpus_dir / "seeds"
+            seeds_dir.mkdir(parents=True)
             crashes_dir.mkdir()
 
             # Seed with "CRASHS" to trigger SIGSEGV quickly
-            (corpus_dir / "seed").write_bytes(b"CRASHS")
+            (seeds_dir / "seed").write_bytes(b"CRASHS")
 
             result = subprocess.run(
                 [
@@ -183,11 +184,12 @@ class TestIntegration:
         with tempfile.TemporaryDirectory() as tmpdir:
             corpus_dir = Path(tmpdir) / "corpus"
             crashes_dir = Path(tmpdir) / "crashes"
-            corpus_dir.mkdir()
+            seeds_dir = corpus_dir / "seeds"
+            seeds_dir.mkdir(parents=True)
             crashes_dir.mkdir()
 
-            # Seed with "BUG!H" to trigger heap-buffer-overflow quickly
-            (corpus_dir / "seed").write_bytes(b"BUG!H")
+            # Seed with "BUG!S" to trigger stack-buffer-overflow quickly
+            (seeds_dir / "seed").write_bytes(b"BUG!S")
 
             result = subprocess.run(
                 [
@@ -221,8 +223,8 @@ class TestIntegration:
             # Verify crash is identified as heap-buffer-overflow
             bin_files = [f for f in crash_files if f.suffix == ".bin"]
             assert len(bin_files) > 0, "No .bin crash files found"
-            assert any("heapbufferoverflow" in f.name for f in bin_files), (
-                f"Expected heap-buffer-overflow in crash filenames, got: {[f.name for f in bin_files]}"
+            assert any("stackbufferoverflow" in f.name for f in bin_files), (
+                f"Expected stack-buffer-overflow in crash filenames, got: {[f.name for f in bin_files]}"
             )
 
             # Verify crash report contains ASAN output
@@ -230,8 +232,8 @@ class TestIntegration:
             assert len(txt_files) > 0, "No .txt crash reports found"
             reports = [f.read_text() for f in txt_files]
             assert any("AddressSanitizer" in r for r in reports), "Missing AddressSanitizer in any report"
-            assert any("heap-buffer-overflow" in r for r in reports), (
-                f"Missing heap-buffer-overflow in any report. Found: {[f.name for f in txt_files]}"
+            assert any("stack-buffer-overflow" in r for r in reports), (
+                f"Missing stack-buffer-overflow in any report. Found: {[f.name for f in txt_files]}"
             )
 
     @pytest.mark.parametrize(
@@ -257,11 +259,12 @@ class TestIntegration:
         with tempfile.TemporaryDirectory() as tmpdir:
             corpus_dir = Path(tmpdir) / "corpus"
             crashes_dir = Path(tmpdir) / "crashes"
-            corpus_dir.mkdir()
+            seeds_dir = corpus_dir / "seeds"
+            seeds_dir.mkdir(parents=True)
             crashes_dir.mkdir()
 
-            # Seed with "BUG!H" to trigger heap-buffer-overflow quickly
-            (corpus_dir / "seed").write_bytes(b"BUG!H")
+            # Seed with "BUG!S" to trigger stack-buffer-overflow quickly
+            (seeds_dir / "seed").write_bytes(b"BUG!S")
 
             cmd = [
                 "python3",
@@ -305,6 +308,6 @@ class TestIntegration:
 
             # Check crash is ASAN heap-buffer-overflow
             bin_files = [f for f in crash_files if f.suffix == ".bin"]
-            assert any("heapbufferoverflow" in f.name for f in bin_files), (
-                f"[{mode_label}] Expected heap-buffer-overflow, got: {[f.name for f in bin_files]}"
+            assert any("stackbufferoverflow" in f.name for f in bin_files), (
+                f"[{mode_label}] Expected stack-buffer-overflow, got: {[f.name for f in bin_files]}"
             )

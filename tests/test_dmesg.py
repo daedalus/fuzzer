@@ -1,5 +1,6 @@
 """Tests for core/dmesg.py — kernel crash log parsing."""
 
+import pytest
 from unittest.mock import MagicMock, patch
 
 from fuzzer_tool.core.dmesg import DmesgParser, KernelCrash

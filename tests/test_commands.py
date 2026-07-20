@@ -96,7 +96,7 @@ class TestAddCommonArgs:
         args = parser.parse_args(["/target"])
         assert args.corpus is None
         assert args.crashes is None
-        assert args.timeout == 5
+        assert args.timeout == 1
         assert args.file_mode is False
         assert args.target_args is None
         assert args.coverage is False
