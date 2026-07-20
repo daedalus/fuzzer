@@ -941,12 +941,27 @@ class EdgeTracker:
             return float(self.map_size), 1.0, float(self.map_size)
 
         all_edges = sorted(set(hc_a) | set(hc_b))
+        n = len(all_edges)
+        if n == 0:
+            return 0.0, 0.0, 0.0
 
+        # Vectorized path for larger edge sets
+        if _HAS_NUMPY and n > 20:
+            p = np.array([hc_a.get(e, 0) / total_a for e in all_edges], dtype=np.float64)
+            q = np.array([hc_b.get(e, 0) / total_b for e in all_edges], dtype=np.float64)
+            gaps = np.diff(all_edges).astype(np.float64)
+            cdf_diff = np.cumsum(p - q)
+            wasserstein = float(np.sum(np.abs(cdf_diff[:-1]) * gaps))
+            ks = float(np.max(np.abs(cdf_diff)))
+            crps = float(np.sum(cdf_diff[:-1] ** 2 * gaps))
+            return wasserstein, ks, crps
+
+        # Pure-Python path for small edge sets or numpy unavailable
         cdf_diff = 0.0
         wasserstein = 0.0
         ks = 0.0
         crps = 0.0
-        prev_edge = all_edges[0] if all_edges else 0
+        prev_edge = all_edges[0]
 
         for edge in all_edges:
             gap = edge - prev_edge
@@ -1033,10 +1048,22 @@ class EdgeTracker:
         if len(keys) < 2:
             return 0.0
 
+        n = len(keys)
+        num_perm = self._minhash.num_perm
+
+        # Vectorized path: broadcasting (n, 1, p) == (1, n, p) → (n, n, p)
+        if _HAS_NUMPY and n > 20:
+            sigs = np.array([self._minhash.signatures[k] for k in keys], dtype=np.int64)
+            matches = np.sum(sigs[:, None, :] == sigs[None, :, :], axis=2)
+            jaccard_matrix = matches / num_perm
+            triu = np.triu_indices(n, k=1)
+            return float(np.mean(jaccard_matrix[triu]))
+
+        # Pure-Python path
         total_jaccard = 0.0
         count = 0
-        for i in range(len(keys)):
-            for j in range(i + 1, len(keys)):
+        for i in range(n):
+            for j in range(i + 1, n):
                 total_jaccard += self._minhash.approximate_jaccard(keys[i], keys[j])
                 count += 1
 
