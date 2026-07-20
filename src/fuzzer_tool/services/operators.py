@@ -658,6 +658,8 @@ class OperatorEngine:
 
         if not hasattr(self.f, "_png_mutator"):
             self.f._png_mutator = PngChunkMutator()
+        # Set WFC mode from fuzzer state
+        self.f._png_mutator.use_wfc = getattr(self.f, "_wfc_enabled", False)
         if parse_png_chunks(bytes(buf)):
             mutated = self.f._png_mutator.mutate(bytes(buf), max_len=self.f.max_len)
         else:
@@ -715,6 +717,7 @@ class OperatorEngine:
 
         if not hasattr(self.f, "_bmp_mutator"):
             self.f._bmp_mutator = BmpMutator()
+        self.f._bmp_mutator.use_wfc = getattr(self.f, "_wfc_enabled", False)
         if parse_bmp(bytes(buf)):
             mutated = self.f._bmp_mutator.mutate(bytes(buf), max_len=self.f.max_len)
         else:

@@ -161,6 +161,11 @@ def cmd_fuzz(args):
         dictionary = load_dictionary(args.dict)
         print(f"[*] Loaded {len(dictionary)} tokens from {args.dict}")
 
+    # QEA and GA are mutually exclusive — QEA takes precedence
+    if getattr(args, "qea", False) and getattr(args, "ga", False):
+        print("[*] --qea and --ga both set: --ga disabled (QEA takes precedence)")
+        args.ga = False
+
     use_markov = args.markov or args.markov_gen
 
     # Auto-tune timeout if requested
@@ -283,6 +288,8 @@ def cmd_fuzz(args):
         secretary_exploration=getattr(args, "secretary_exploration", 0.368),
         sensitivity=getattr(args, "sensitivity", False),
         ga=getattr(args, "ga", False),
+        qea=getattr(args, "qea", False),
+        wfc=getattr(args, "wfc", False),
         ga_pop_size=getattr(args, "ga_pop_size", 200),
         ga_gen_size=getattr(args, "ga_gen_size", 500),
         ga_elite_frac=getattr(args, "ga_elite_frac", 0.1),
@@ -715,9 +722,10 @@ def cmd_ppmd(args):
     """Analyze corpus compressibility with PPMD and generate distribution graph."""
     import math
     from pathlib import Path
-    from fuzzer_tool.core.corpus_compression import CorpusCompressor
+
     from fuzzer_tool.adapters.filesystem import load_corpus
     from fuzzer_tool.core.bloom import BloomFilter
+    from fuzzer_tool.core.corpus_compression import CorpusCompressor
 
     corpus_dir = Path(args.corpus)
     if not corpus_dir.exists():
@@ -749,7 +757,7 @@ def cmd_ppmd(args):
     var_r = sum((r - mean_r) ** 2 for r in ratios) / n
     std_r = math.sqrt(var_r)
 
-    print(f"\n--- PPMD Compression Statistics ---")
+    print("\n--- PPMD Compression Statistics ---")
     print(f"  Seeds:           {n}")
     print(f"  Mean ratio:      {mean_r:.4f}")
     print(f"  Std deviation:   {std_r:.4f}")
@@ -1016,6 +1024,16 @@ def main() -> int:
         "--ga",
         action="store_true",
         help="Enable genetic algorithm lifecycle mode",
+    )
+    fuzz_parser.add_argument(
+        "--qea",
+        action="store_true",
+        help="Enable quantum-inspired evolutionary algorithm (QEA) encoding mode",
+    )
+    fuzz_parser.add_argument(
+        "--wfc",
+        action="store_true",
+        help="Enable Wave Function Collapse structural generation (chunk reordering, pixel generation)",
     )
     fuzz_parser.add_argument(
         "--ga-pop-size",

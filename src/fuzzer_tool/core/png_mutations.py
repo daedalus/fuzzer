@@ -79,6 +79,9 @@ def serialize_png_chunks(chunks: list[PngChunk]) -> bytes:
 class PngChunkMutator:
     """Structure-aware PNG fuzzer with chunk-level mutation operators.
 
+    When ``use_wfc=True``, the reorder operator uses Wave Function Collapse
+    to generate novel-but-valid chunk orderings instead of random swap.
+
     Mutations target specific PNG code paths while maintaining (or
     intentionally breaking) structural validity:
 
@@ -99,6 +102,8 @@ class PngChunkMutator:
     15. Empty chunk injection — test zero-length handling
     """
 
+    use_wfc: bool = False  # set to True by Fuzzer when --wfc is active
+
     def mutate(self, data: bytes, max_len: int = 4096) -> bytes:
         """Apply a random PNG-aware mutation."""
         chunks = parse_png_chunks(data)
@@ -116,6 +121,8 @@ class PngChunkMutator:
         elif op == 3:
             return self._delete_chunk(chunks, max_len)
         elif op == 4:
+            if self.use_wfc:
+                return self._wfc_reorder(chunks, max_len)
             return self._reorder_chunks(chunks, max_len)
         elif op == 5:
             return self._corrupt_crc(chunks, max_len)
@@ -236,6 +243,92 @@ class PngChunkMutator:
         j = random.randint(i + 1, len(chunks) - 1)
         chunks[i], chunks[j] = chunks[j], chunks[i]
         return serialize_png_chunks(chunks)[:max_len]
+
+    def _wfc_reorder(self, chunks: list[PngChunk], max_len: int) -> bytes:
+        """Reorder chunks using 1D Wave Function Collapse.
+
+        Extracts the chunk-type sequence, runs WFC to generate a new
+        valid ordering, preserves original chunk data in the new order.
+        Falls back to random shuffle if WFC fails or no valid ordering
+        found. Always preserves IHDR-first and IEND-last.
+        """
+        if len(chunks) < 3:
+            return serialize_png_chunks(chunks)[:max_len]
+
+        from fuzzer_tool.core.wfc import ConstraintSet, Tile, WaveGrid
+
+        # Extract unique chunk types present, preserving critical anchors
+        type_names = list(dict.fromkeys(c.chunk_type for c in chunks))
+        has_ihdr = b"IHDR" in type_names
+        has_iend = b"IEND" in type_names
+
+        # Build adjacency and tiles
+        adjacency = ConstraintSet.png_chunks()
+        tiles = [Tile(name=t) for t in type_names]
+
+        # Create 1D wave with same number of cells as we have chunks
+        wave = WaveGrid(tiles, adjacency, width=len(chunks), height=1)
+
+        # Seed the first cell to IHDR and last cell to IEND (if present)
+        if has_ihdr:
+            ihdr_tid = next(i for i, t in enumerate(tiles) if t.name == b"IHDR")
+            for j in range(len(tiles)):
+                wave.superpositions[0][j] = j == ihdr_tid
+        if has_iend:
+            iend_tid = next(i for i, t in enumerate(tiles) if t.name == b"IEND")
+            for j in range(len(tiles)):
+                wave.superpositions[-1][j] = j == iend_tid
+
+        result = wave.run(seed=random.randint(0, 2**31), max_restarts=3, ac3_budget=2000)
+
+        if result is None or result[0] is None:
+            random.shuffle(chunks)
+            # Ensure IHDR-first and IEND-last invariant
+            self._ensure_invariants(chunks)
+            return serialize_png_chunks(chunks)[:max_len]
+
+        new_order = result[0]
+
+        # Build chunk lookup by type (preserving IDAT ordering)
+        by_type: dict[bytes, list[PngChunk]] = {}
+        for c in chunks:
+            by_type.setdefault(c.chunk_type, []).append(c)
+
+        reordered: list[PngChunk] = []
+        for tile_name in new_order:
+            if tile_name is None:
+                continue
+            pool = by_type.get(tile_name, [])
+            if pool:
+                reordered.append(pool.pop(0))
+
+        # If WFC produced a shorter sequence (shouldn't happen), append remaining chunks
+        placed = {c for c in chunks if c not in sum(by_type.values(), [])}
+        remaining = [c for c in chunks if c not in placed]
+        reordered.extend(remaining)
+
+        if not reordered:
+            return serialize_png_chunks(chunks)[:max_len]
+
+        # Final invariant enforcement
+        self._ensure_invariants(reordered)
+        return serialize_png_chunks(reordered)[:max_len]
+
+    @staticmethod
+    def _ensure_invariants(chunks: list[PngChunk]):
+        """Move IHDR to first position and IEND to last position."""
+        # Find and move IHDR to front
+        for i, c in enumerate(chunks):
+            if c.chunk_type == b"IHDR":
+                if i != 0:
+                    chunks.insert(0, chunks.pop(i))
+                break
+        # Find and move IEND to end
+        for i in range(len(chunks) - 1, -1, -1):
+            if chunks[i].chunk_type == b"IEND":
+                if i != len(chunks) - 1:
+                    chunks.append(chunks.pop(i))
+                break
 
     def _corrupt_crc(self, chunks: list[PngChunk], max_len: int) -> bytes:
         """Corrupt a chunk's CRC (tests CRC validation paths)."""

@@ -39,6 +39,8 @@ class SeedPicker:
             available = []
             if f.ga:
                 available.append("ga")
+            if f.qea:
+                available.append("qea")
             available.append("weighted")
             if f.corpus and f.seed_meta:
                 available.append("pareto")
@@ -56,11 +58,15 @@ class SeedPicker:
 
             if strategy == "ga" and f.ga:
                 return f.ga.pick_seed()
+            elif strategy == "qea" and f.qea:
+                return f.qea.pick_seed()
             elif strategy == "pareto" and f.corpus and f.seed_meta:
                 return self._pick_pareto_only()
             elif strategy == "format":
                 return self._format_aware_seed()
 
+        if f.qea:
+            return f.qea.pick_seed()
         if f.ga:
             return f.ga.pick_seed()
         if f.markov_generate and f.markov_trained:

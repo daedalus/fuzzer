@@ -234,6 +234,8 @@ class Fuzzer:
         elo=False,
         sensitivity=False,
         ga=False,
+        qea=False,
+        wfc=False,
         ga_pop_size=200,
         ga_gen_size=500,
         ga_elite_frac=0.1,
@@ -307,6 +309,13 @@ class Fuzzer:
         self._ga_tournament_size = ga_tournament_size
         self._ga_speciation_threshold = ga_speciation_threshold
         self.ga = None  # Initialized in run() when --ga is set
+
+        # QEA lifecycle
+        self._qea_enabled = qea
+        self.qea = None  # Initialized in run() when --qea is set
+
+        # WFC structural generation mode
+        self._wfc_enabled = wfc
 
         # Edge bitmap size: use provided value or auto-size from branch density
         if map_size > 0:
@@ -1536,6 +1545,16 @@ class Fuzzer:
                 ind = self.ga.on_fuzz_result(mutated, True, edge_count, self._edge_tracker)
                 if ind is not None:
                     self.ga.add_to_population(ind)
+            # QEA: amplitude rotation feedback + new individual on coverage
+            if self.qea:
+                edge_count = (
+                    len(self._edge_tracker.seed_edges.get(self._edge_tracker._last_seed_key, set()))
+                    if hasattr(self._edge_tracker, "_last_seed_key")
+                    else 0
+                )
+                qea_ind = self.qea.on_fuzz_result(mutated, has_new_coverage, edge_count, self._edge_tracker)
+                if qea_ind is not None:
+                    self.qea.add_to_population(qea_ind)
             # Analyze byte sensitivity for seeds that found new coverage (optional)
             if has_new_coverage and self.shm_cov and self._use_sensitivity:
                 try:
@@ -1580,6 +1599,10 @@ class Fuzzer:
         # GA: trigger generation boundary for non-coverage iterations
         if self.ga:
             self.ga.on_fuzz_result(mutated, False, 0, self._edge_tracker)
+
+        # QEA: trigger generation boundary and rotation for non-coverage
+        if self.qea:
+            self.qea.on_fuzz_result(mutated, False, 0, self._edge_tracker)
 
         return False
 
@@ -1684,7 +1707,7 @@ class Fuzzer:
         else:
             print(f"[*] Target: {self.target}")
             if _detect_afl(self.target):
-                print(f"[*] AFL instrumentation: detected")
+                print("[*] AFL instrumentation: detected")
         # Static branch density: conditional branches per KB of .text
         from fuzzer_tool.core.elf import branch_density
 
@@ -1824,6 +1847,33 @@ class Fuzzer:
                     f"mutation={self.ga.mutation_rate:.0%}"
                 )
 
+            # Initialize QEA lifecycle if enabled
+            if self._qea_enabled:
+                from fuzzer_tool.core.qea import QEALifecycle
+
+                self.qea = QEALifecycle(
+                    pop_size=self._ga_pop_size,
+                    elite_fraction=self._ga_elite_frac,
+                    generation_size=self._ga_gen_size,
+                    tournament_size=self._ga_tournament_size,
+                    speciation_threshold=self._ga_speciation_threshold,
+                )
+                self.qea.initialize(self.corpus, self._edge_tracker)
+                qea_path = self.corpus_dir / "qea.json"
+                if self.resume and qea_path.exists():
+                    self.qea.load(qea_path)
+                    print(f"[*] QEA: loaded state from {qea_path} (gen={self.qea.generation})")
+                print(
+                    f"[*] QEA: pop_size={self.qea.pop_size}, "
+                    f"gen_size={self.qea.generation_size}, "
+                    f"rotation_angle={self.qea.rotation_angle}, "
+                    f"mutation_prob={self.qea.mutation_prob}"
+                )
+
+            # Print WFC mode status
+            if self._wfc_enabled:
+                print("[*] WFC: enabled — structural chunk reordering and pixel generation active")
+
             while not _shutdown:
                 if iterations and i >= iterations:
                     break
@@ -1889,6 +1939,10 @@ class Fuzzer:
             ga_path = self.corpus_dir / "ga.json"
             self.ga.save(ga_path)
             print(f"[*] GA: saved state to {ga_path} (gen={self.ga.generation})")
+        if self.qea:
+            qea_path = self.corpus_dir / "qea.json"
+            self.qea.save(qea_path)
+            print(f"[*] QEA: saved state to {qea_path} (gen={self.qea.generation})")
         if self._ablation_file:
             self._ablation_file.flush()
             self._ablation_file.close()

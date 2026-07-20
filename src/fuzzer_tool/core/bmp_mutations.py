@@ -182,9 +182,14 @@ def _corrupt_field(data: bytearray, offset: int, size: int, signed: bool = False
 class BmpMutator:
     """Structure-aware BMP mutator.
 
+    When ``use_wfc=True``, pixel data generation uses 2D Wave Function
+    Collapse for locally-coherent pixel textures instead of random bytes.
+
     Dispatches one of 16 mutation operations per call, targeting
     specific BMP structures for maximum code-path diversity.
     """
+
+    use_wfc: bool = False  # set to True by Fuzzer when --wfc is active
 
     def mutate(self, data: bytes, max_len: int = 4096) -> bytes:
         """Apply one structure-aware BMP mutation."""
@@ -260,12 +265,78 @@ class BmpMutator:
 
     def _mutate_pixel_data(self, info: BmpInfo, max_len: int) -> BmpInfo:
         """Flip random bytes in pixel data."""
-        if info.pixel_data:
-            pixels = bytearray(info.pixel_data)
-            for _ in range(random.randint(1, min(8, len(pixels)))):
-                idx = random.randint(0, len(pixels) - 1)
-                pixels[idx] ^= 1 << random.randint(0, 7)
-            info.pixel_data = bytes(pixels)
+        if not info.pixel_data:
+            return info
+        if self.use_wfc and abs(info.width) >= 2 and abs(info.height) >= 2:
+            return self._wfc_pixels(info, max_len)
+        pixels = bytearray(info.pixel_data)
+        for _ in range(random.randint(1, min(8, len(pixels)))):
+            idx = random.randint(0, len(pixels) - 1)
+            pixels[idx] ^= 1 << random.randint(0, 7)
+        info.pixel_data = bytes(pixels)
+        return info
+
+    def _wfc_pixels(self, info: BmpInfo, max_len: int) -> BmpInfo:
+        """Generate pixel data using 1D Wave Function Collapse.
+
+        Treats each row as a sequence of pixel-sample tiles, uses WFC
+        to generate row content with locally-coherent color transitions.
+        Falls back to random bytes if WFC fails.
+        """
+        if not info.pixel_data:
+            return info
+        w = abs(info.width)
+        h = abs(info.height)
+        bpp = max(1, info.bit_count // 8)
+        stride = ((w * bpp + 3) // 4) * 4
+        if w < 2 or h < 2 or len(info.pixel_data) < stride * 2:
+            return info
+
+        from fuzzer_tool.core.wfc import AdjacencyTable, Tile, WaveGrid
+
+        # Build per-pixel tiles from the first row (used as tile alphabet)
+        pixels = info.pixel_data
+        unique_tiles: dict[bytes, int] = {}
+        for x in range(w):
+            start = x * bpp
+            sample = pixels[start : start + bpp]
+            unique_tiles[sample] = unique_tiles.get(sample, 0) + 1
+
+        tile_list = [Tile(name=t, weight=c) for t, c in unique_tiles.items()]
+
+        # Build adjacency from existing pixel data
+        adj = AdjacencyTable()
+        for x in range(w - 1):
+            a = pixels[x * bpp : (x + 1) * bpp]
+            b = pixels[(x + 1) * bpp : (x + 2) * bpp]
+            if a in unique_tiles and b in unique_tiles:
+                adj.add_forward(a, b)
+
+        # Generate each row via WFC
+        new_pixels = bytearray()
+        for row_y in range(h):
+            wave = WaveGrid(tile_list, adj, width=w, height=1)
+            row_result = wave.run(
+                seed=random.randint(0, 2**31),
+                max_restarts=2,
+                ac3_budget=2000,
+            )
+            row_data = bytearray()
+            if row_result and row_result[0]:
+                for tile_name in row_result[0]:
+                    if tile_name is not None:
+                        row_data.extend(tile_name)
+                    else:
+                        row_data.extend(pixels[row_y * stride : row_y * stride + bpp])
+            else:
+                # Fallback: copy original row
+                row_data.extend(pixels[row_y * stride : row_y * stride + bpp])
+            # Pad to stride
+            while len(row_data) < stride:
+                row_data.append(0)
+            new_pixels.extend(row_data[:stride])
+
+        info.pixel_data = bytes(new_pixels)
         return info
 
     def _corrupt_file_size(self, info: BmpInfo, max_len: int) -> BmpInfo:

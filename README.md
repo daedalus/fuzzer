@@ -80,6 +80,25 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 - **Crash preservation**: crash-triggering seeds get infinite fitness bonus, never culled
 - **State persistence**: population and generation state saved to `ga.json`, survives `--resume`
 
+### Quantum-Inspired Evolutionary Algorithm (`--qea`)
+- **Amplitude encoding**: each bit represented as a qubit-like probability amplitude pair (α, β) with α² + β² = 1 — "this bit is P(0)=α² likely to be 0" rather than a committed value
+- **Rotation gate feedback**: amplitudes incrementally updated after each evaluation — nudging toward or away from collapsed values depending on coverage outcome
+- **Collapse-only evaluation**: concrete bytes sampled from amplitudes at evaluation time, preserving uncertainty between generations
+- **Built on GA infrastructure**: reuses the existing FitnessFunction, Speciation (MinHash LSH), and generation lifecycle
+- **Breeding by collapse + crossover**: parents' amplitudes collapsed to bytes, two-point crossover applied, child amplitudes biased toward result
+- **Diversity preservation**: continuous per-bit uncertainty maintains diversity longer than committed-value GA or batched CEM refits
+- **State persistence**: population and amplitude state saved to `qea.json`, survives `--resume`
+- **Note**: `--qea` and `--ga` are mutually exclusive; `--qea` takes precedence if both are set
+
+### Wave Function Collapse (`--wfc`)
+- **Constraint-satisfaction generation**: WFC solves local adjacency constraints via min-entropy collapse and AC-3 propagation, producing novel-but-valid chunk orderings for structured formats
+- **1D chunk reordering**: replaces random chunk swaps in PNG/JPEG/gzip structural mutations with WFC-valid orderings that respect format-specific adjacency rules (IHDR first, IEND last, ancillary interposition, IDAT contiguity)
+- **2D pixel generation**: per-row WFC for locally-coherent pixel data in BMP/PNG raw payloads, using adjacency learned from existing corpus pixels
+- **No topology assumptions**: unlike `grammar.py` (recursive CFG) and `markov.py` (causal left-to-right), WFC handles arbitrary flat adjacency constraints without causal ordering or recursion depth limits
+- **Defensive posture**: bounded backtrack (max 3 restarts), capped AC-3 iterations (5000) with greedy fallback, seeded RNG for tmin reproducibility
+- **Guarded integration**: WFC operators run at warm tier (per-input format mutation, not per-execution bit flip), and are disabled when `--wfc` is not set
+- **Independent mode**: `--wfc` is orthogonal to `--ga`/`--qea` — it controls structural generation inside format mutators, not seed selection
+
 ### Multi-Target Fuzzing
 - **Shared corpus**: fuzz multiple binaries with the same corpus — inputs that find coverage in one target can discover paths in others
 - **Glob expansion**: `targets/fuzz_*` expands to all matching executables, automatically skips non-binaries (`.c`, `.py`, `.sh`, etc.)
