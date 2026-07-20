@@ -1,6 +1,5 @@
 """Tests for core/dmesg.py — kernel crash log parsing."""
 
-import pytest
 from unittest.mock import MagicMock, patch
 
 from fuzzer_tool.core.dmesg import DmesgParser, KernelCrash
@@ -268,16 +267,17 @@ class TestDmesgParser:
     def test_poll_returns_crashes(self):
         """poll() should return crashes from the system dmesg log."""
         dp = DmesgParser()
-        if not dp.is_available():
-            pytest.skip("dmesg not available")
+        dp.is_available = MagicMock(return_value=True)
+        dp._poll_json = MagicMock(return_value=[])
         snap = dp.poll(since=0)
         assert isinstance(snap.crashes, list)
 
     def test_drain_then_poll_fallback(self):
         """Verify drain_stream + poll fallback pattern used by fuzzer."""
         dp = DmesgParser()
-        if not dp.is_available():
-            pytest.skip("dmesg not available")
+        dp.is_available = MagicMock(return_value=True)
+        kc = KernelCrash(timestamp=1.0, raw_message="segfault at 0 ip 0 sp 0 error 14", crash_type="segfault")
+        dp._poll_json = MagicMock(return_value=[kc])
         # First drain catches everything
         first = dp.drain_stream()
         # Second drain is empty (buffer cleared)
