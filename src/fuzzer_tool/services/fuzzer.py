@@ -14,6 +14,13 @@ import tempfile
 import time
 from pathlib import Path
 
+try:
+    import numpy as np
+
+    _HAS_NUMPY = True
+except ImportError:
+    _HAS_NUMPY = False
+
 from fuzzer_tool.adapters.process import (
     _child_pids,
 )
@@ -245,6 +252,7 @@ class Fuzzer:
         ga_speciation_threshold=0.3,
         calibrate=0,
         stall_threshold=1000,
+        resize_map_on_stall=False,
         map_size=0,
         max_collision_risk=30,
         continue_until_crash=False,
@@ -272,6 +280,7 @@ class Fuzzer:
         self.continue_until_crash = continue_until_crash
         self._calibrate = calibrate
         self._stall_threshold = stall_threshold
+        self._resize_map_on_stall = resize_map_on_stall
         self._max_collision_risk = max_collision_risk
         self._last_new_edge_exec = 0
         self._stall_recovery_active = False
@@ -430,6 +439,8 @@ class Fuzzer:
         _active_dmesg_parser = self._dmesg
         self.stats_file = Path(stats_file) if stats_file else None
         self.stats_interval = stats_interval
+        self._last_stats_exec = 0
+        self._eps = 0.0
 
         # Schedule ablation: per-iteration CSV log of signal contributions
         self._ablation_path = Path(schedule_ablation) if schedule_ablation else None
@@ -730,6 +741,7 @@ class Fuzzer:
                 libasan = "/usr/lib/x86_64-linux-gnu/libasan.so.8"
                 if not os.path.exists(libasan):
                     import ctypes.util
+
                     libasan = ctypes.util.find_library("asan") or libasan
                 existing = os.environ.get("LD_PRELOAD", "")
                 if libasan not in existing:
@@ -775,8 +787,10 @@ class Fuzzer:
                 target_is_asan and "libasan" not in os.environ.get("LD_PRELOAD", "")
             )
             if inprocess_direct and not direct_ok:
-                print("[!] --inprocess-direct requested but target is ASAN-instrumented "
-                      "without externally preloaded ASAN; using subprocess loader instead")
+                print(
+                    "[!] --inprocess-direct requested but target is ASAN-instrumented "
+                    "without externally preloaded ASAN; using subprocess loader instead"
+                )
             self._inprocess_runner = InProcessRunner(
                 target=self.target,
                 function_name=inprocess_func,
@@ -1375,11 +1389,17 @@ class Fuzzer:
             edge_bitmap = self._get_current_edge_bitmap()
             if edge_bitmap:
                 new_edges = set()
-                for i, byte_val in enumerate(edge_bitmap):
-                    if byte_val:
-                        for bit in range(8):
-                            if byte_val & (1 << bit):
-                                new_edges.add(i * 8 + bit)
+                if _HAS_NUMPY:
+                    bits = np.unpackbits(
+                        np.frombuffer(edge_bitmap, dtype=np.uint8)[: self.map_size]
+                    )
+                    new_edges = set(np.flatnonzero(bits))
+                else:
+                    for i, byte_val in enumerate(edge_bitmap):
+                        if byte_val:
+                            for bit in range(8):
+                                if byte_val & (1 << bit):
+                                    new_edges.add(i * 8 + bit)
                 if new_edges:
                     self._length_tracker.record(len(mutated), new_edges)
 
@@ -1553,7 +1573,9 @@ class Fuzzer:
                     if hasattr(self._edge_tracker, "_last_seed_key")
                     else 0
                 )
-                qea_ind = self.qea.on_fuzz_result(mutated, has_new_coverage, edge_count, self._edge_tracker)
+                qea_ind = self.qea.on_fuzz_result(
+                    mutated, has_new_coverage, edge_count, self._edge_tracker
+                )
                 if qea_ind is not None:
                     self.qea.add_to_population(qea_ind)
             # Analyze byte sensitivity for seeds that found new coverage (optional)
@@ -1696,6 +1718,26 @@ class Fuzzer:
             f"{execs_since_edge} execs, switching to random mode"
         )
         self._stall_recovery_active = True
+
+        # Optionally resize the coverage bitmap to reduce hash collision risk
+        if self._resize_map_on_stall and self.shm_cov:
+            new_size = self._edge_tracker.recommended_map_size()
+            if new_size > self.shm_cov.size:
+                current = self.shm_cov.size
+                print(
+                    f"[*] Resizing SHM bitmap {current:,} → {new_size:,} bytes "
+                    f"(stall-triggered, n={len(self._edge_tracker._global_edge_hits)})"
+                )
+                self.shm_cov.resize(new_size)
+                self.map_size = new_size
+                self._edge_tracker.map_size = new_size
+                self._edge_tracker.reset_after_resize()
+                os.environ["__AFL_SHM_ID"] = self.shm_cov.env_id
+                os.environ["AFL_MAP_SIZE"] = str(new_size)
+                if self._inprocess_runner:
+                    self._inprocess_runner.update_shm_after_resize(
+                        self.shm_cov._ptr, new_size, self.shm_cov.env_id
+                    )
         return True
 
     def run(self, iterations=0):
@@ -1886,7 +1928,10 @@ class Fuzzer:
                 seed = self._pick_seed()
                 self.fuzz_one(seed)
                 i += 1
-                if i % self.stats_interval == 0:
+                effective_interval = (
+                    max(1, int(10 * self._eps)) if self._eps > 0 else self.stats_interval
+                )
+                if self.exec_count - self._last_stats_exec >= effective_interval:
                     # Sample Shannon entropy for rate-of-change tracking
                     if self._edge_tracker._global_edge_hits:
                         sh = self._edge_tracker.shannon_entropy_global()
@@ -1911,11 +1956,12 @@ class Fuzzer:
                         import gc
 
                         gc.collect()
+                    self._last_stats_exec = self.exec_count
+                    if self.stats_file:
+                        self._dump_stats()
+                        self._save_state()
                 if i % 500 == 0 and self.replay_n > 0:
                     self._run_crash_replays()
-                if self.stats_file and i % self.stats_interval == 0:
-                    self._dump_stats()
-                    self._save_state()
         except (KeyboardInterrupt, SystemExit):
             pass
         except OSError as e:

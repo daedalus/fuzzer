@@ -26,6 +26,13 @@ Provides:
 import math
 from collections import defaultdict
 
+try:
+    import numpy as np
+
+    _HAS_NUMPY = True
+except ImportError:
+    _HAS_NUMPY = False
+
 
 class TransferEntropy:
     """Estimate transfer entropy between discrete signals.
@@ -249,13 +256,15 @@ class TransferEntropy:
             target = []
             for eb in edge_bitmaps[:n]:
                 if eb:
-                    # Find the most-hit edge
-                    max_edge = 0
-                    max_val = 0
-                    for i, v in enumerate(eb[:map_size]):
-                        if v > max_val:
-                            max_val = v
-                            max_edge = i
+                    if _HAS_NUMPY:
+                        max_edge = int(np.argmax(np.frombuffer(eb, dtype=np.uint8)[:map_size]))
+                    else:
+                        max_edge = 0
+                        max_val = 0
+                        for i, v in enumerate(eb[:map_size]):
+                            if v > max_val:
+                                max_val = v
+                                max_edge = i
                     target.append(max_edge)
                 else:
                     target.append(0)
@@ -291,10 +300,16 @@ class TransferEntropy:
 
         # Find top-k edges by total hit count
         total_hits: dict[int, int] = defaultdict(int)
-        for eb in edge_bitmaps:
-            for i, v in enumerate(eb[:map_size]):
-                if v > 0:
-                    total_hits[i] += v
+        if _HAS_NUMPY:
+            for eb in edge_bitmaps:
+                arr = np.frombuffer(eb, dtype=np.uint8)[:map_size]
+                for i in np.flatnonzero(arr):
+                    total_hits[i] += int(arr[i])
+        else:
+            for eb in edge_bitmaps:
+                for i, v in enumerate(eb[:map_size]):
+                    if v > 0:
+                        total_hits[i] += v
         top_edges = sorted(total_hits.keys(), key=lambda e: total_hits[e], reverse=True)[:top_k]
 
         if not top_edges:

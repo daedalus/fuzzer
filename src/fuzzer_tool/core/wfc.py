@@ -190,6 +190,18 @@ class WaveGrid:
 
         self.contradiction = False
 
+        # Precompute adjacency matrix for vectorized _prune_cell:
+        # adj_matrix[i, j, d] = compatible(tiles[i], tiles[j], direction[d])
+        self._dir_names: list[Direction] = ["left", "right", "up", "down"]
+        self._adj_matrix: np.ndarray | None = None
+        if HAVE_NUMPY:
+            mat = np.zeros((self.n_tiles, self.n_tiles, 4), dtype=bool)
+            for i, t_i in enumerate(tiles):
+                for j, t_j in enumerate(tiles):
+                    for d, dname in enumerate(self._dir_names):
+                        mat[i, j, d] = adjacency.compatible(t_i.name, t_j.name, dname)
+            self._adj_matrix = mat
+
     # ── Public API ──────────────────────────────────────────────────
 
     def run(
@@ -350,6 +362,22 @@ class WaveGrid:
         row = self.superpositions[idx]
         removed_any = False
 
+        if HAVE_NUMPY and self._adj_matrix is not None:
+            for nidx in self._neighbors(idx):
+                d = self._dir_names.index(self._direction_to(idx, nidx))
+                nbr_row = self.superpositions[nidx]
+                # compat[t] = any of tile t's compatible neighbors still possible?
+                compat = np.any(self._adj_matrix[:, :, d] & nbr_row[None, :], axis=1)
+                removed = ~compat & row
+                if removed.any():
+                    row[removed] = False
+                    removed_any = True
+                if not row.any():
+                    self.contradiction = True
+                    return None
+            return removed_any
+
+        # Pure-Python fallback
         for tid in range(self.n_tiles):
             if not row[tid]:
                 continue

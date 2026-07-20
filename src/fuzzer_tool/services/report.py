@@ -10,6 +10,13 @@ import os
 from collections import Counter
 from pathlib import Path
 
+try:
+    import numpy as np
+
+    _HAS_NUMPY = True
+except ImportError:
+    _HAS_NUMPY = False
+
 
 def _confidence_interval(n, success_count=None):
     """Compute ±1σ, ±2σ, ±3σ confidence intervals.
@@ -132,9 +139,15 @@ def _coverage_analysis(f) -> str:
 
     # Cluster analysis: group edges into 256-byte buckets
     buckets = Counter()
-    for i in range(cov.size):
-        if seen[i]:
-            buckets[i // 256] += 1
+    if _HAS_NUMPY:
+        seen_arr = np.frombuffer(seen, dtype=np.uint8)
+        bucket_indices = np.flatnonzero(seen_arr) // 256
+        for b in bucket_indices:
+            buckets[b] += 1
+    else:
+        for i in range(cov.size):
+            if seen[i]:
+                buckets[i // 256] += 1
 
     lines = [
         "",
@@ -449,7 +462,10 @@ def _bandit_calibration(f) -> str:
     if brier_history and len(brier_history) >= 10:
         n = len(brier_history)
         mean = sum(brier_history) / n
-        var = sum((x - mean) ** 2 for x in brier_history) / (n - 1) if n > 1 else 0
+        if _HAS_NUMPY:
+            var = float(np.var(brier_history, ddof=1))
+        else:
+            var = sum((x - mean) ** 2 for x in brier_history) / (n - 1) if n > 1 else 0
         se = (var / n) ** 0.5
         ci1, ci2, ci3 = se, se * 2, se * 3
         lines.append(
@@ -515,10 +531,18 @@ def _corpus_health(f) -> str:
     # Shannon entropy of corpus byte distribution
     byte_freq = [0] * 256
     total_bytes = 0
-    for seed in f.corpus:
-        for b in seed[:4096]:  # cap per-seed to avoid huge corpus bias
-            byte_freq[b] += 1
-            total_bytes += 1
+    if _HAS_NUMPY:
+        for seed in f.corpus:
+            chunk = np.frombuffer(seed[:4096], dtype=np.uint8)
+            counts = np.bincount(chunk, minlength=256)
+            for i, c in enumerate(counts):
+                byte_freq[i] += c
+            total_bytes += len(chunk)
+    else:
+        for seed in f.corpus:
+            for b in seed[:4096]:  # cap per-seed to avoid huge corpus bias
+                byte_freq[b] += 1
+                total_bytes += 1
     if total_bytes > 0:
         entropy = 0.0
         for count in byte_freq:
@@ -762,10 +786,18 @@ def _entropy_metrics(f) -> str:
         try:
             byte_counts = [0] * 256
             total_bytes = 0
-            for seed in f.corpus:
-                for b in seed:
-                    byte_counts[b] += 1
-                    total_bytes += 1
+            if _HAS_NUMPY:
+                for seed in f.corpus:
+                    chunk = np.frombuffer(seed, dtype=np.uint8)
+                    counts = np.bincount(chunk, minlength=256)
+                    for i, c in enumerate(counts):
+                        byte_counts[i] += c
+                    total_bytes += len(chunk)
+            else:
+                for seed in f.corpus:
+                    for b in seed:
+                        byte_counts[b] += 1
+                        total_bytes += 1
             if total_bytes > 0:
                 byte_ent = 0.0
                 for c in byte_counts:

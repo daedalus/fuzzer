@@ -269,7 +269,10 @@ class CoverageSpectrumAnalyzer:
 
         # Hot edge fraction: edges with hit_count > median
         median_val = sorted_vals[len(sorted_vals) // 2] if sorted_vals else 0
-        hot_edges = sum(1 for v in values if v > median_val)
+        if _HAS_NUMPY:
+            hot_edges = int(np.count_nonzero(np.array(values, dtype=np.int64) > median_val))
+        else:
+            hot_edges = sum(1 for v in values if v > median_val)
         hot_fraction = hot_edges / len(values) if values else 0.0
 
         # Uniformity from Rényi spectrum
