@@ -16,8 +16,10 @@ Extracted from Fuzzer class (~lines 648-783, 1845-2231). Contains:
 
 import contextlib
 import hashlib
+
 try:
     import xxhash
+
     _use_xxhash = True
 except ImportError:
     _use_xxhash = False
@@ -163,8 +165,7 @@ class CorpusManager:
                 f._sensitivity.load(json.loads(sens_path.read_text()))
         if f.resume:
             print(
-                f"[*] Resumed: {f.exec_count} execs, "
-                f"{f.crash_count} crashes, {len(f.corpus)} seeds"
+                f"[*] Resumed: {f.exec_count} execs, {f.crash_count} crashes, {len(f.corpus)} seeds"
             )
         log.info(
             "Fuzzer state loaded: execs=%d, crashes=%d, corpus=%d",
@@ -246,6 +247,7 @@ class CorpusManager:
             f.corpus.append(data)
             if f.ga:
                 import hashlib as _hashlib
+
                 from fuzzer_tool.core.ga import Individual
 
                 if _use_xxhash:
@@ -260,6 +262,11 @@ class CorpusManager:
                     seed_key=seed_key,
                 )
                 f.ga.add_to_population(ind)
+            # QEA manages its own bounded population — avoid unbounded corpus
+            # list growth. Still does bloom/seen_hashes/filesystem + seed_meta
+            # + markov training above; only the in-memory corpus list is skipped.
+            if hasattr(f, "qea") and f.qea:
+                f.corpus.pop()
             f.seed_meta[data] = {
                 "fuzz_count": 0,
                 "coverage_edges": 0,
@@ -380,7 +387,7 @@ class CorpusManager:
                 edges = f.shm_cov.cumulative_edges
             elif f.ptrace_cov:
                 edges = f.ptrace_cov.cumulative_edges
-            target_size = max(edges, 50)
+            target_size = min(max(edges, 50), 5000)
 
         if stale_ratio > 0.3:
             if len(unique) > target_size:
@@ -388,10 +395,11 @@ class CorpusManager:
             else:
                 target_size = int(len(unique) * (1.0 - stale_ratio))
 
-        # Greedy set-cover: find minimum seeds that cover all discovered edges.
+        # Greedy set-cover is O(n²) — only run on small corpora.
+        # For large corpora, fall back to edge-count sorting which is O(n log n).
         et = f._edge_tracker
         all_edges = et.cumulative_edges if et and et.cumulative_edges else set()
-        if all_edges and et.seed_edges:
+        if all_edges and et.seed_edges and len(unique) <= 5000:
             covered: set[int] = set()
             minimal = 0
             seed_edge_map: dict[int, set[int]] = {}
@@ -417,10 +425,9 @@ class CorpusManager:
                 minimal += 1
             target_size = max(target_size, minimal)
             del seed_edge_map  # free edge map after set-cover
-        else:
+        elif all_edges or f.corpus:
             productive = sum(
-                1 for seed in unique
-                if f.seed_meta.get(seed, {}).get("coverage_edges", 0) > 0
+                1 for seed in unique if f.seed_meta.get(seed, {}).get("coverage_edges", 0) > 0
             )
             if productive > 0:
                 target_size = max(target_size, productive)
