@@ -709,12 +709,12 @@ class Fuzzer:
                 self._persistent_runner = None
 
         self._inprocess_runner = None
-        # Auto-detect .so targets and use in-process mode
-        if not inprocess and self.target.lower().endswith((".so", ".dylib", ".dll")):
-            from fuzzer_tool.adapters.inprocess import InProcessRunner
-
-            cov_env_id = self.shm_cov.env_id if self.shm_cov else None
-            # Detect ASAN and set LD_PRELOAD BEFORE probing (which loads the .so via ctypes.CDLL)
+        # Detect ASAN and set LD_PRELOAD BEFORE probing/loading (ctypes.CDLL) for any
+        # .so/.dylib/.dll target — needed by both the auto-detect path below and the
+        # explicit --inprocess/--inprocess-direct path, or ASAN aborts on first call
+        # with "ASan runtime does not come first" instead of running the target.
+        target_is_asan = False
+        if self.target.lower().endswith((".so", ".dylib", ".dll")):
             target_is_asan = _detect_asan(self.target)
             if target_is_asan:
                 libasan = "/usr/lib/x86_64-linux-gnu/libasan.so.8"
@@ -724,6 +724,11 @@ class Fuzzer:
                 existing = os.environ.get("LD_PRELOAD", "")
                 if libasan not in existing:
                     os.environ["LD_PRELOAD"] = f"{libasan}:{existing}" if existing else libasan
+        # Auto-detect .so targets and use in-process mode
+        if not inprocess and self.target.lower().endswith((".so", ".dylib", ".dll")):
+            from fuzzer_tool.adapters.inprocess import InProcessRunner
+
+            cov_env_id = self.shm_cov.env_id if self.shm_cov else None
             # Probe the shared object for a fuzz function name
             auto_func = self._probe_so_function(self.target)
             # ASAN .so targets need LD_PRELOAD for ASAN to load first.
@@ -752,17 +757,27 @@ class Fuzzer:
             from fuzzer_tool.adapters.inprocess import InProcessRunner
 
             cov_env_id = self.shm_cov.env_id if self.shm_cov else None
+            # If the user asked for --inprocess-direct on an ASAN target but ASAN
+            # wasn't already preloaded externally, direct ctypes mode would abort
+            # on the first call ("ASan runtime does not come first"). Fall back to
+            # the subprocess loader, which now has LD_PRELOAD set above.
+            direct_ok = inprocess_direct and not (
+                target_is_asan and "libasan" not in os.environ.get("LD_PRELOAD", "")
+            )
+            if inprocess_direct and not direct_ok:
+                print("[!] --inprocess-direct requested but target is ASAN-instrumented "
+                      "without externally preloaded ASAN; using subprocess loader instead")
             self._inprocess_runner = InProcessRunner(
                 target=self.target,
                 function_name=inprocess_func,
                 timeout=self.timeout,
                 shm_size=self.map_size,
-                direct=inprocess_direct,
+                direct=direct_ok,
                 coverage_env_id=cov_env_id,
                 cov=bool(cov_env_id),
                 debug=self.debug,
             )
-            mode = "direct ctypes" if inprocess_direct else "subprocess loader"
+            mode = "direct ctypes" if direct_ok else "subprocess loader"
             cov_note = f", SHM cov id={cov_env_id}" if cov_env_id else ""
             print(f"[*] In-process mode ({mode}{cov_note}): {self.target}::{inprocess_func}")
             if self._inprocess_runner._persistent:
