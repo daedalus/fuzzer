@@ -296,6 +296,7 @@ def cmd_fuzz(args):
         map_size=getattr(args, "map_size", 0),
         max_collision_risk=getattr(args, "max_collision_risk", 30),
         debug=getattr(args, "debug", False),
+        enable_regex_bomb=getattr(args, "enable_regex_bomb_mutations", False),
     )
     fuzzer.run(iterations=args.iterations)
 
@@ -1271,6 +1272,11 @@ def main() -> int:
         "--debug",
         action="store_true",
         help="Enable debug output (SHM attach, coverage tracing, etc.)",
+    )
+    fuzz_parser.add_argument(
+        "--enable-regex-bomb-mutations",
+        action="store_true",
+        help="Enable regex backtracking bomb mutations (ReDoS patterns that cause explosive memory usage)",
     )
     fuzz_parser.set_defaults(func=cmd_fuzz)
 

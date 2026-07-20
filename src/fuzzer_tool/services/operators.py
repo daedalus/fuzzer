@@ -921,6 +921,8 @@ class OperatorEngine:
         """Build the list of available mutation operators from ground truth."""
         f = self.f
         ops = list(MUTATIONS)
+        if not getattr(f, "enable_regex_bomb", False):
+            ops = [op for op in ops if op != "regex_bomb"]
         if f.dictionary:
             ops.extend(DICT_MUTATIONS)
         if f.markov_trained:

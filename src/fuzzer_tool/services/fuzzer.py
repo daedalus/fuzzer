@@ -248,6 +248,7 @@ class Fuzzer:
         continue_until_crash=False,
         multi_targets=None,
         debug=False,
+        enable_regex_bomb=False,
     ):
         self.target = target
         self.debug = debug
@@ -292,6 +293,7 @@ class Fuzzer:
             self.coverage_log.parent.mkdir(parents=True, exist_ok=True)
         self.grammar = grammar
         self.persistent = persistent
+        self.enable_regex_bomb = enable_regex_bomb
         self.seed = seed
         random.seed(seed)
 
