@@ -178,6 +178,13 @@ class ShmCoverage:
         self.cumulative_edges = 0
         self.total_edges = 0
 
+        # Reallocate snapshot buffer to match new size — without this,
+        # is_new_coverage() does memcmp/memmove of new_size bytes into
+        # the old (smaller) buffer, causing heap overflow and
+        # "free(): invalid pointer" crashes.
+        self._last_map_ptr = ctypes.create_string_buffer(new_size)
+        self._last_map_hash = 0
+
     def __del__(self):
         self.cleanup()
 

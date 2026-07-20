@@ -127,3 +127,39 @@ class TestShmCoverage:
             assert cov.size == old_size
         finally:
             cov.cleanup()
+
+    def test_resize_reallocates_last_map_ptr(self):
+        """_last_map_ptr must match new size or is_new_coverage() heap-overflows."""
+        cov = ShmCoverage(size=4096)
+        try:
+            cov.reset_edge_map()
+            ctypes.memset(cov._ptr, 1, 1)
+            cov.is_new_coverage()  # populate _last_map_ptr
+
+            old_ptr_size = len(cov._last_map_ptr)
+            cov.resize(8192)
+            new_ptr_size = len(cov._last_map_ptr)
+
+            assert old_ptr_size == 4096
+            assert new_ptr_size == 8192
+        finally:
+            cov.cleanup()
+
+    def test_is_new_coverage_after_resize(self):
+        """is_new_coverage() must not overflow the snapshot buffer after resize."""
+        cov = ShmCoverage(size=4096)
+        try:
+            cov.reset_edge_map()
+            ctypes.memset(cov._ptr, 1, 1)
+            cov.is_new_coverage()
+
+            cov.resize(8192)
+
+            # Write into the new (larger) region — previously this overflowed
+            # the old 4096-byte _last_map_ptr causing heap corruption.
+            ctypes.memset(cov._ptr + 5000, 1, 1)
+            assert cov.is_new_coverage() is True
+            # Verify no crash on subsequent calls
+            assert cov.is_new_coverage() is False
+        finally:
+            cov.cleanup()
