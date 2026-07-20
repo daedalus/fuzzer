@@ -110,9 +110,13 @@ while True:
             except OSError:
                 pass
         try:
-            os.waitpid(child_pid, 0)
-            rc_byte = os.read(read_pipe, 1)
-            rc = rc_byte[0] if rc_byte else -2
+            _, status = os.waitpid(child_pid, 0)
+            # Check if child was killed by signal (SIGSEGV, SIGABRT, etc.)
+            if os.WIFSIGNALED(status):
+                rc = -(os.WTERMSIG(status))
+            else:
+                rc_byte = os.read(read_pipe, 1)
+                rc = rc_byte[0] if rc_byte else -2
         except ChildProcessError:
             rc = -2
         os.close(read_pipe)

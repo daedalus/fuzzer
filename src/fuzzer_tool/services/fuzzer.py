@@ -724,7 +724,10 @@ class Fuzzer:
                     os.environ["LD_PRELOAD"] = f"{libasan}:{existing}" if existing else libasan
             # Probe the shared object for a fuzz function name
             auto_func = self._probe_so_function(self.target)
-            use_direct_lite = not target_is_asan
+            # Non-ASAN .so targets: use persistent loader for crash isolation
+            # (SIGSEGV from ctypes kills the process, persistent loader forks per-call).
+            # ASAN .so targets: use subprocess loader (ASAN catches crashes via exit code).
+            use_direct_lite = target_is_asan
             self._inprocess_runner = InProcessRunner(
                 target=self.target,
                 function_name=auto_func,
@@ -735,7 +738,12 @@ class Fuzzer:
                 cov=bool(cov_env_id),
                 debug=self.debug,
             )
-            mode = "direct_lite" if use_direct_lite else "subprocess loader"
+            if use_direct_lite:
+                mode = "direct_lite"
+            elif self._inprocess_runner._persistent:
+                mode = "persistent"
+            else:
+                mode = "subprocess loader"
             print(f"[*] Auto-detected .so target: in-process mode ({mode}) with {auto_func}")
         elif inprocess:
             from fuzzer_tool.adapters.inprocess import InProcessRunner

@@ -247,8 +247,11 @@ class InProcessRunner:
                 os.environ["__AFL_SHM_ID"] = self.coverage_env_id
                 os.environ["AFL_MAP_SIZE"] = str(self.shm_size)
 
-            # Try persistent subprocess first (faster: one process, many calls)
-            if cov:
+            # Try persistent subprocess first (faster: one process, many calls).
+            # Also use for .so targets without coverage — provides crash isolation
+            # via fork-per-call (SIGSEGV from ctypes kills the process).
+            is_so = self.target.lower().endswith((".so", ".dylib", ".dll"))
+            if cov or is_so:
                 from fuzzer_tool.adapters.persistent_loader import PersistentLoader
 
                 self._persistent = PersistentLoader(
@@ -261,8 +264,6 @@ class InProcessRunner:
                     self._persistent = None
 
             # Try forkserver (C binary) for standalone executables only.
-            # .so targets use PersistentLoader (crash isolation via fork-per-call).
-            is_so = self.target.lower().endswith((".so", ".dylib", ".dll"))
             if not self._persistent and not is_so:
                 from fuzzer_tool.adapters.forkserver import ForkserverRunner
 
