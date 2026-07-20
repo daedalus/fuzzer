@@ -9,10 +9,12 @@
 
 set -e
 
-FGREP="/home/dclavijo/my_code/fgrep"
+FGREP="${FGREP_DIR:-/home/dclavijo/my_code/fgrep}"
 SHIM="src/fuzzer_tool/adapters/afl_shim.c"
 TARGETS="targets"
 OPTS="${@:---all}"
+HAS_FGREP=0
+[ -d "$FGREP/src" ] && HAS_FGREP=1
 
 # Colors
 GREEN='\033[0;32m'
@@ -165,30 +167,34 @@ verify_shm_run() {
 # ── Main ──────────────────────────────────────────────────────────
 echo "=== Building fuzz targets ==="
 
+if [ "$HAS_FGREP" -eq 0 ]; then
+    warn "fgrep directory not found at $FGREP — skipping fgrep targets"
+fi
+
 case "$OPTS" in
     --asan)
-        compile_fgrep_objects "_asan" "-fsanitize=address"
-        build_fgrep_targets "_asan" "-fsanitize=address" "ASAN"
+        [ "$HAS_FGREP" -eq 1 ] && compile_fgrep_objects "_asan" "-fsanitize=address"
+        [ "$HAS_FGREP" -eq 1 ] && build_fgrep_targets "_asan" "-fsanitize=address" "ASAN"
         build_simple_targets "_asan" "-fsanitize=address" "ASAN"
-        build_fgrep_so_targets "_asan" "-fsanitize=address" "ASAN"
+        [ "$HAS_FGREP" -eq 1 ] && build_fgrep_so_targets "_asan" "-fsanitize=address" "ASAN"
         build_simple_so_targets "_asan" "-fsanitize=address" "ASAN"
         ;;
     --fast|--nosan)
-        compile_fgrep_objects "_nosan" ""
-        build_fgrep_targets "_nosan" "" "No-ASAN"
+        [ "$HAS_FGREP" -eq 1 ] && compile_fgrep_objects "_nosan" ""
+        [ "$HAS_FGREP" -eq 1 ] && build_fgrep_targets "_nosan" "" "No-ASAN"
         build_simple_targets "_nosan" "" "No-ASAN"
-        build_fgrep_so_targets "_nosan" "" "No-ASAN"
+        [ "$HAS_FGREP" -eq 1 ] && build_fgrep_so_targets "_nosan" "" "No-ASAN"
         build_simple_so_targets "_nosan" "" "No-ASAN"
         ;;
     *)
-        compile_fgrep_objects "_asan" "-fsanitize=address"
-        compile_fgrep_objects "_nosan" ""
-        build_fgrep_targets "_asan" "-fsanitize=address" "ASAN"
-        build_fgrep_targets "_nosan" "" "No-ASAN"
+        [ "$HAS_FGREP" -eq 1 ] && compile_fgrep_objects "_asan" "-fsanitize=address"
+        [ "$HAS_FGREP" -eq 1 ] && compile_fgrep_objects "_nosan" ""
+        [ "$HAS_FGREP" -eq 1 ] && build_fgrep_targets "_asan" "-fsanitize=address" "ASAN"
+        [ "$HAS_FGREP" -eq 1 ] && build_fgrep_targets "_nosan" "" "No-ASAN"
         build_simple_targets "_asan" "-fsanitize=address" "ASAN"
         build_simple_targets "_nosan" "" "No-ASAN"
-        build_fgrep_so_targets "_asan" "-fsanitize=address" "ASAN"
-        build_fgrep_so_targets "_nosan" "" "No-ASAN"
+        [ "$HAS_FGREP" -eq 1 ] && build_fgrep_so_targets "_asan" "-fsanitize=address" "ASAN"
+        [ "$HAS_FGREP" -eq 1 ] && build_fgrep_so_targets "_nosan" "" "No-ASAN"
         build_simple_so_targets "_asan" "-fsanitize=address" "ASAN"
         build_simple_so_targets "_nosan" "" "No-ASAN"
         ;;
