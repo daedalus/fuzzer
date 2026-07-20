@@ -245,7 +245,8 @@ class CorpusManager:
             parent=parent,
             lineage_depth=parent_depth,
         ):
-            f.corpus.append(data)
+            if not f.qea:
+                f.corpus.append(data)
             if f.ga:
                 import hashlib as _hashlib
 
@@ -263,11 +264,6 @@ class CorpusManager:
                     seed_key=seed_key,
                 )
                 f.ga.add_to_population(ind)
-            # QEA manages its own bounded population — avoid unbounded corpus
-            # list growth. Still does bloom/seen_hashes/filesystem + seed_meta
-            # + markov training above; only the in-memory corpus list is skipped.
-            if hasattr(f, "qea") and f.qea:
-                f.corpus.pop()
             f.seed_meta[data] = {
                 "fuzz_count": 0,
                 "coverage_edges": 0,
@@ -357,7 +353,7 @@ class CorpusManager:
 
     def auto_minimize_corpus(self):
         f = self.f
-        if f.ga:
+        if f.ga or f.qea:
             return
         if not f.corpus:
             return

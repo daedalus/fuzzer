@@ -12,13 +12,14 @@ ends of the map are "far". This captures coverage spatial diversity that
 Jaccard (set overlap) and JS (frequency divergence) miss.
 """
 
-from fuzzer_tool.core import fast_json as json
 import logging
 import math
 import random
 import struct
 import zlib
 from collections import defaultdict
+
+from fuzzer_tool.core import fast_json as json
 
 try:
     import numpy as np
@@ -245,7 +246,7 @@ class MinHashLSH:
         sig = [self._prime] * self.num_perm
         for edge in edge_set:
             for i, (a, b) in enumerate(self._coeffs):
-                h = (a * edge + b) % self._prime
+                h = (int(a) * int(edge) + int(b)) % self._prime
                 if h < sig[i]:
                     sig[i] = h
         return sig
@@ -419,22 +420,25 @@ class EdgeTracker:
             self.seed_hit_counts[seed_key] = {}
         hc = self.seed_hit_counts[seed_key]
 
-        # Single pass over bitmap: extract edges, hit counts, aggregate, global hits
-        for i, val in enumerate(edge_bitmap):
-            if val and i < self.map_size:
-                new_edges.add(i)
-                hc[i] = val
-                # Aggregate totals
-                old_agg = self._aggregate_totals.get(i, 0)
-                self._aggregate_totals[i] = old_agg + val
-                self._aggregate_total_count += val
-                # Global edge hits
-                old_gh = self._global_edge_hits.get(i, 0)
-                new_gh = old_gh + val
-                self._global_edge_hits[i] = new_gh
-                self._spectrum_dirty = True
-                if new_gh > self.max_hit_count:
-                    self.max_hit_count = new_gh
+        # Scan only non-zero bytes in the bitmap via numpy flatnonzero.
+        # For a 256KB bitmap with ~100 active edges this is ~2600x fewer
+        # Python iterations than iterating every byte with enumerate.
+        arr = np.frombuffer(edge_bitmap, dtype=np.uint8, count=self.map_size)
+        for i in np.flatnonzero(arr):
+            val = int(arr[i])
+            new_edges.add(i)
+            hc[i] = val
+            # Aggregate totals
+            old_agg = self._aggregate_totals.get(i, 0)
+            self._aggregate_totals[i] = old_agg + val
+            self._aggregate_total_count += val
+            # Global edge hits
+            old_gh = self._global_edge_hits.get(i, 0)
+            new_gh = old_gh + val
+            self._global_edge_hits[i] = new_gh
+            self._spectrum_dirty = True
+            if new_gh > self.max_hit_count:
+                self.max_hit_count = new_gh
 
         new_contributions = new_edges - self.cumulative_edges
         self.cumulative_edges.update(new_edges)
@@ -702,21 +706,18 @@ class EdgeTracker:
             if late_rate < early_rate * 0.5 and late_rate > 0:
                 # Rate is declining — estimate saturation
                 # Time to plateau: when rate drops below 0.001 edges/exec
-                plateau_detected = True
                 if late_rate > 0.001:
                     execs_to_plateau = int((edges[-1] - edges[0]) / max(0.001, late_rate))
                 else:
                     execs_to_plateau = 0
                 projected_total = edges[-1] + execs_to_plateau * late_rate
             else:
-                # Rate stable or increasing — no saturation detected yet
-                plateau_detected = False
-                execs_to_plateau = 0
-                projected_total = 0
+                # Rate stable or increasing — project linearly
+                projected_total = edges[-1] + 10000 * current_rate
+                execs_to_plateau = 10000
         else:
-            plateau_detected = False
-            execs_to_plateau = 0
-            projected_total = 0
+            projected_total = edges[-1] + 10000 * current_rate
+            execs_to_plateau = 10000
 
         # Confidence based on timeline length
         confidence = min(1.0, n / 5)
@@ -725,7 +726,6 @@ class EdgeTracker:
             "current_rate": current_rate,
             "projected_total": int(projected_total),
             "time_to_plateau": execs_to_plateau,
-            "plateau_detected": plateau_detected,
             "confidence": confidence,
         }
 
