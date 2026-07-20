@@ -725,8 +725,7 @@ class Fuzzer:
             # Probe the shared object for a fuzz function name
             auto_func = self._probe_so_function(self.target)
             # ASAN .so targets need LD_PRELOAD for ASAN to load first.
-            # LD_PRELOAD set via os.environ only affects child processes,
-            # not the current process. So direct_lite (ctypes.CDLL) fails.
+            # LD_PRELOAD only affects child processes (not the current one).
             # Use persistent loader which inherits LD_PRELOAD in child process.
             use_direct_lite = False
             self._inprocess_runner = InProcessRunner(
