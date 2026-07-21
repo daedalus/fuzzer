@@ -21,6 +21,10 @@ from collections import defaultdict
 
 from fuzzer_tool.core import fast_json as json
 
+# ── Memory bounds ────────────────────────────────────────────────────
+CORRELATION_MATRIX_MAX = 10_000  # max edge-pair entries in branch correlation
+COVERAGE_TIMELINE_MAX = 1_000  # max snapshots in coverage timeline
+
 try:
     import numpy as np
 
@@ -540,6 +544,7 @@ class EdgeTracker:
             self.seed_edges.pop(key, None)
             self.seed_hit_counts.pop(key, None)
             self.seed_edge_traces.pop(key, None)
+            self.seed_target_edges.pop(key, None)
             self._minhash.remove(key)
 
         self._aggregate_cache = None
@@ -566,6 +571,8 @@ class EdgeTracker:
             exec_count: Current execution count.
         """
         self._coverage_timeline.append((exec_count, len(self.cumulative_edges)))
+        if len(self._coverage_timeline) > COVERAGE_TIMELINE_MAX:
+            del self._coverage_timeline[:250]
 
     def update_correlation(self, edge_set: set[int]):
         """Update branch correlation matrix with co-occurring edges.
@@ -598,6 +605,15 @@ class EdgeTracker:
                 j = _rand.randint(i + 1, n - 1)
                 key = (edges[i], edges[j])
                 self._correlation_matrix[key] = self._correlation_matrix.get(key, 0) + 1
+        if len(self._correlation_matrix) > CORRELATION_MATRIX_MAX:
+            self._prune_correlation()
+
+    def _prune_correlation(self):
+        """Keep the top 50% of correlation pairs by count."""
+        items = sorted(self._correlation_matrix.items(), key=lambda kv: kv[1], reverse=True)
+        keep = len(items) // 2
+        self._correlation_matrix = dict(items[:keep])
+        self._correlation_total = sum(c for _, c in items[:keep])
 
     def branch_correlation(self, edge_a: int, edge_b: int) -> float:
         """Get correlation strength between two edges.

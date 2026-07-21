@@ -13,6 +13,10 @@ import tempfile
 
 log = logging.getLogger(__name__)
 
+# ── Memory bounds ────────────────────────────────────────────────────
+CMPLOG_TOKENS_MAX = 10_000  # max unique operand tokens
+CMPLOG_PAIRS_MAX = 5_000  # max unique operand pairs
+
 
 class CmplogCollector:
     """Collect and process comparison tracing data from the cmplog shim.
@@ -135,6 +139,16 @@ class CmplogCollector:
         self._token_set.update(tokens)
         self.tokens.extend(new_tokens)
         self.pairs.extend(new_pairs)
+
+        # Cap token/pair lists to bound memory
+        if len(self.tokens) > CMPLOG_TOKENS_MAX:
+            half = CMPLOG_TOKENS_MAX // 2
+            self.tokens = self.tokens[-half:]
+            self._token_set = set(self.tokens)
+        if len(self.pairs) > CMPLOG_PAIRS_MAX:
+            half = CMPLOG_PAIRS_MAX // 2
+            self.pairs = self.pairs[-half:]
+            self._pair_set = set(self.pairs)
 
         if new_tokens:
             log.info(
