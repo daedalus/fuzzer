@@ -960,42 +960,68 @@ class MonteCarloScheduler:
         op_idx = {op: i for i, op in enumerate(operators)}
         n_ops = len(operators)
 
-        segments: list[list[float]] = []
-        for start in range(0, len(recent) - segment_size + 1, segment_size):
-            chunk = recent[start : start + segment_size]
-            rates = [0.0] * n_ops
-            counts = [0] * n_ops
-            for op, success in chunk:
-                if op in op_idx:
-                    i = op_idx[op]
-                    counts[i] += 1
-                    rates[i] += 1.0 if success else 0.0
-            for i in range(n_ops):
-                if counts[i] > 0:
-                    rates[i] /= counts[i]
-            segments.append(rates)
+        # Build segment success-rate matrix
+        if _HAS_NUMPY:
+            segments_list: list[list[float]] = []
+            for start in range(0, len(recent) - segment_size + 1, segment_size):
+                chunk = recent[start : start + segment_size]
+                rates = [0.0] * n_ops
+                counts = [0] * n_ops
+                for op, success in chunk:
+                    if op in op_idx:
+                        i = op_idx[op]
+                        counts[i] += 1
+                        rates[i] += 1.0 if success else 0.0
+                for i in range(n_ops):
+                    if counts[i] > 0:
+                        rates[i] /= counts[i]
+                segments_list.append(rates)
+            if len(segments_list) < 2:
+                return {}
+            seg_arr = np.array(segments_list, dtype=np.float64)
+            cov_arr = np.cov(seg_arr, rowvar=False)
+            cov_matrix: dict[str, dict[str, float]] = {op: {} for op in operators}
+            for i, op_i in enumerate(operators):
+                for j, op_j in enumerate(operators):
+                    cov_matrix[op_i][op_j] = float(cov_arr[i, j])
+            return cov_matrix
+        else:
+            segments: list[list[float]] = []
+            for start in range(0, len(recent) - segment_size + 1, segment_size):
+                chunk = recent[start : start + segment_size]
+                rates = [0.0] * n_ops
+                counts = [0] * n_ops
+                for op, success in chunk:
+                    if op in op_idx:
+                        i = op_idx[op]
+                        counts[i] += 1
+                        rates[i] += 1.0 if success else 0.0
+                for i in range(n_ops):
+                    if counts[i] > 0:
+                        rates[i] /= counts[i]
+                segments.append(rates)
 
-        if len(segments) < 2:
-            return {}
+            if len(segments) < 2:
+                return {}
 
-        n_seg = len(segments)
-        means = [sum(s[i] for s in segments) / n_seg for i in range(n_ops)]
+            n_seg = len(segments)
+            means = [sum(s[i] for s in segments) / n_seg for i in range(n_ops)]
 
-        cov_matrix: dict[str, dict[str, float]] = {op: {} for op in operators}
+            cov_matrix = {op: {} for op in operators}
 
-        for i, op_i in enumerate(operators):
-            for j, op_j in enumerate(operators):
-                if i == j:
-                    var = sum((s[i] - means[i]) ** 2 for s in segments) / (n_seg - 1)
-                    cov_matrix[op_i][op_j] = var
-                elif i < j:
-                    cov_val = sum((s[i] - means[i]) * (s[j] - means[j]) for s in segments) / (
-                        n_seg - 1
-                    )
-                    cov_matrix[op_i][op_j] = cov_val
-                    cov_matrix[op_j][op_i] = cov_val
+            for i, op_i in enumerate(operators):
+                for j, op_j in enumerate(operators):
+                    if i == j:
+                        var = sum((s[i] - means[i]) ** 2 for s in segments) / (n_seg - 1)
+                        cov_matrix[op_i][op_j] = var
+                    elif i < j:
+                        cov_val = sum(
+                            (s[i] - means[i]) * (s[j] - means[j]) for s in segments
+                        ) / (n_seg - 1)
+                        cov_matrix[op_i][op_j] = cov_val
+                        cov_matrix[op_j][op_i] = cov_val
 
-        return cov_matrix
+            return cov_matrix
 
 
 class _MOptParticle:

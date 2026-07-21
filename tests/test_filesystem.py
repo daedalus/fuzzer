@@ -127,7 +127,7 @@ class TestSaveToCorpus:
     def test_file_written_to_disk(self, tmp_path):
         seen = set()
         save_to_corpus(b"disk_check", tmp_path, seen)
-        files = list((tmp_path / "seeds").iterdir())
+        files = list((tmp_path / "seeds").rglob("id_*"))
         assert len(files) == 1
         assert files[0].read_bytes() == b"disk_check"
 
@@ -136,7 +136,7 @@ class TestSaveToCorpus:
         seen = set()
         save_to_corpus(b"create", subdir, seen)
         assert (subdir / "seeds").exists()
-        assert list((subdir / "seeds").iterdir())
+        assert list((subdir / "seeds").rglob("id_*"))
 
 
 class TestSaveCrash:

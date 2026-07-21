@@ -100,8 +100,7 @@ class TestDeltaSaveLoad:
 
         delta_files = list((tmp_path / "deltas").iterdir()) if (tmp_path / "deltas").exists() else []
         delta_files = [f for f in delta_files if f.name.startswith("delta_")]
-        full_files = list((tmp_path / "seeds").iterdir())
-        full_files = [f for f in full_files if f.name.startswith("id_")]
+        full_files = list((tmp_path / "seeds").rglob("id_*"))
         assert len(delta_files) == 1
         assert len(full_files) == 1
 
@@ -116,8 +115,8 @@ class TestDeltaSaveLoad:
         child = bytes(child)
         save_to_corpus(child, tmp_path, seen, parent=parent, lineage_depth=SNAPSHOT_INTERVAL)
 
-        files = list((tmp_path / "seeds").iterdir())
-        full_files = [f for f in files if f.name.startswith("id_")]
+        files = list((tmp_path / "seeds").rglob("id_*"))
+        full_files = [f for f in files if f.is_file()]
         assert len(full_files) == 2  # both parent and child as full files
 
     def test_load_reconstructs_delta_chain(self, tmp_path):
@@ -191,6 +190,6 @@ class TestDeltaSaveLoad:
         save_to_corpus(parent, tmp_path, seen)
         save_to_corpus(child, tmp_path, seen, parent=parent, lineage_depth=0)
 
-        files = list((tmp_path / "seeds").iterdir())
-        full_files = [f for f in files if f.name.startswith("id_")]
+        files = list((tmp_path / "seeds").rglob("id_*"))
+        full_files = [f for f in files if f.is_file()]
         assert len(full_files) == 2  # both stored as full

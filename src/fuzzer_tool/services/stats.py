@@ -208,12 +208,9 @@ class StatsReporter:
         growth = f._edge_tracker.coverage_growth_model()
         if growth["confidence"] > 0.1:
             print(f"  Growth rate:       {growth['current_rate']:.4f} edges/exec")
-            if growth["plateau_detected"]:
-                print(f"  Projected total:   {growth['projected_total']} edges")
-                if growth["time_to_plateau"] > 0:
-                    print(f"  Plateau in:        ~{growth['time_to_plateau']:,} execs")
-            else:
-                print(f"  Projected total:   (no plateau detected yet)")
+            print(f"  Projected total:   {growth['projected_total']} edges")
+            if growth["time_to_plateau"] > 0:
+                print(f"  Plateau in:        ~{growth['time_to_plateau']:,} execs")
 
         if f.seed_meta:
             depths = [m.get("lineage_depth", 0) for m in f.seed_meta.values()]
@@ -422,6 +419,7 @@ class StatsReporter:
         f = self.f
         elapsed = time.time() - f.start_time
         eps = f.exec_count / elapsed if elapsed > 0 else 0
+        f._eps = eps
         dict_str = f" | dict: {len(f.dictionary)}" if f.dictionary else ""
         markov_str = " | markov: trained" if f.markov_trained else ""
         if f.markov_generate:
@@ -555,9 +553,6 @@ class StatsReporter:
         # Add coverage growth model to stats line
         growth = f._edge_tracker.coverage_growth_model()
         if growth["confidence"] > 0.1:
-            if growth["plateau_detected"]:
-                growth_str = f" | gr: {growth['current_rate']:.3f}e/x proj:{growth['projected_total']} plateau:~{growth['time_to_plateau']:,}"
-            else:
-                growth_str = f" | gr: {growth['current_rate']:.3f}e/x (no plateau)"
+            growth_str = f" | gr: {growth['current_rate']:.3f}e/x proj: {growth['projected_total']} plateau: ~{growth['time_to_plateau']:,}"
             line += growth_str
         print(line, flush=True)

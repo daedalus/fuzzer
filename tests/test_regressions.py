@@ -42,8 +42,10 @@ class TestHashConsistency:
             seen = set()
             content = b"regression test seed"
             save_to_corpus(content, corpus_dir, seen)
-            expected_name = f"id_{hash_data(content)}"
-            assert (corpus_dir / "seeds" / expected_name).exists()
+            h = hash_data(content)
+            expected_name = f"id_{h}"
+            expected_path = corpus_dir / "seeds" / h[:2] / expected_name
+            assert expected_path.exists()
 
     def test_auto_minimize_kept_set_uses_hash_data(self):
         """auto_minimize_corpus must use hash_data(), not hashlib.sha256."""

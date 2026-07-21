@@ -1,5 +1,6 @@
 """Integration tests: compile target, fuzz, verify crashes found."""
 
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -177,6 +178,48 @@ class TestIntegration:
             # Unique input should be kept (triggers SIGSEGV)
             assert len(unique_kept) == 1, (
                 f"Unique crash input should be kept, found {len(unique_kept)}"
+            )
+
+    def test_fuzzer_eps_minimum(self, compiled_target):
+        """Verify fuzzer maintains at least 100 eps against a fast target."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            corpus_dir = Path(tmpdir) / "corpus"
+            seeds_dir = corpus_dir / "seeds"
+            seeds_dir.mkdir(parents=True)
+            (seeds_dir / "seed").write_bytes(b"safe")
+
+            result = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "fuzzer_tool",
+                    "fuzz",
+                    compiled_target,
+                    "-d",
+                    str(corpus_dir),
+                    "-n",
+                    "1000",
+                    "-t",
+                    "2",
+                    "-s",
+                    "42",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+
+            assert result.returncode == 0, f"Fuzzer failed: {result.stderr}"
+
+            # Parse EPS from stats lines (format: "eps: NNNN")
+            eps_matches = re.findall(r"eps:\s*([\d.]+)", result.stdout)
+            assert len(eps_matches) > 0, (
+                f"No EPS stats found in output:\n{result.stdout}"
+            )
+            # Use the last EPS value (most stable — steady-state rate)
+            eps = float(eps_matches[-1])
+            assert eps >= 100, (
+                f"EPS {eps:.0f} is below minimum 100. Output:\n{result.stdout}"
             )
 
     def test_asan_finds_heap_buffer_overflow(self, compiled_asan_target):

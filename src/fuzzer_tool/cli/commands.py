@@ -81,10 +81,34 @@ def cmd_fuzz(args):
     import glob as _glob
 
     _NON_BINARY_EXT = {
-        ".c", ".h", ".py", ".sh", ".md", ".txt", ".json", ".dict",
-        ".gram", ".bak", ".bak2", ".log", ".csv", ".html", ".xml",
-        ".yaml", ".yml", ".toml", ".cfg", ".ini", ".conf", ".so",
-        ".o", ".a", ".dylib", ".dll", ".class", ".jar",
+        ".c",
+        ".h",
+        ".py",
+        ".sh",
+        ".md",
+        ".txt",
+        ".json",
+        ".dict",
+        ".gram",
+        ".bak",
+        ".bak2",
+        ".log",
+        ".csv",
+        ".html",
+        ".xml",
+        ".yaml",
+        ".yml",
+        ".toml",
+        ".cfg",
+        ".ini",
+        ".conf",
+        ".so",
+        ".o",
+        ".a",
+        ".dylib",
+        ".dll",
+        ".class",
+        ".jar",
     }
 
     if not hasattr(args, "targets") or args.targets is None:
@@ -218,6 +242,7 @@ def cmd_fuzz(args):
             secretary=getattr(args, "secretary", False),
             secretary_window=getattr(args, "secretary_window", 500),
             secretary_exploration=getattr(args, "secretary_exploration", 0.368),
+            resize_map_on_stall=getattr(args, "resize_map_on_stall", False),
         )
         return 0
 
@@ -304,6 +329,7 @@ def cmd_fuzz(args):
         max_collision_risk=getattr(args, "max_collision_risk", 30),
         debug=getattr(args, "debug", False),
         enable_regex_bomb=getattr(args, "enable_regex_bomb_mutations", False),
+        resize_map_on_stall=getattr(args, "resize_map_on_stall", False),
     )
     fuzzer.run(iterations=args.iterations)
 
@@ -483,11 +509,14 @@ def cmd_verify(args):
                     )
                 finally:
                     import shutil
+
                     if tmp_dir.exists():
                         shutil.rmtree(tmp_dir, ignore_errors=True)
             else:
                 returncode, stderr, _ = run_target_stdin(
-                    target=args.asan_target, data=data, timeout=args.timeout,
+                    target=args.asan_target,
+                    data=data,
+                    timeout=args.timeout,
                     env=os.environ.copy(),
                 )
         except Exception as e:
@@ -786,6 +815,7 @@ def cmd_ppmd(args):
     if args.graph:
         try:
             import matplotlib
+
             matplotlib.use("Agg")
             import matplotlib.pyplot as plt
             import numpy as np
@@ -793,15 +823,23 @@ def cmd_ppmd(args):
             fig, ax = plt.subplots(figsize=(10, 6))
 
             # Histogram of PPMD ratios
-            ax.hist(ratios, bins=min(50, max(10, n // 5)), alpha=0.7,
-                    color="#2196F3", edgecolor="white", label="PPMD ratios")
+            ax.hist(
+                ratios,
+                bins=min(50, max(10, n // 5)),
+                alpha=0.7,
+                color="#2196F3",
+                edgecolor="white",
+                label="PPMD ratios",
+            )
 
             # Normal distribution curve
             x = np.linspace(max(0, mean_r - 3 * std_r), min(1, mean_r + 3 * std_r), 200)
             if std_r > 0:
                 y = np.exp(-0.5 * ((x - mean_r) / std_r) ** 2) / (std_r * math.sqrt(2 * math.pi))
                 y_scaled = y * n * (ratios[-1] - ratios[0]) / min(50, max(10, n // 5))
-                ax.plot(x, y_scaled, "r-", linewidth=2, label=f"Normal (μ={mean_r:.3f}, σ={std_r:.3f})")
+                ax.plot(
+                    x, y_scaled, "r-", linewidth=2, label=f"Normal (μ={mean_r:.3f}, σ={std_r:.3f})"
+                )
 
             ax.set_xlabel("PPMD Compression Ratio", fontsize=12)
             ax.set_ylabel("Count", fontsize=12)
@@ -815,11 +853,18 @@ def cmd_ppmd(args):
                 f"Std:  {std_r:.4f}\n"
                 f"Min:  {ratios[0]:.4f}\n"
                 f"Max:  {ratios[-1]:.4f}\n"
-                f"Median: {ratios[n//2]:.4f}"
+                f"Median: {ratios[n // 2]:.4f}"
             )
-            ax.text(0.98, 0.95, stats_text, transform=ax.transAxes,
-                    fontsize=10, verticalalignment="top", horizontalalignment="right",
-                    bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5))
+            ax.text(
+                0.98,
+                0.95,
+                stats_text,
+                transform=ax.transAxes,
+                fontsize=10,
+                verticalalignment="top",
+                horizontalalignment="right",
+                bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5),
+            )
 
             plt.tight_layout()
             plt.savefig(args.graph, dpi=150)
@@ -1273,6 +1318,14 @@ def main() -> int:
         "recovery mode with more aggressive mutations (default: 1000)",
     )
     fuzz_parser.add_argument(
+        "--resize-map-on-stall",
+        action="store_true",
+        default=False,
+        help="Resize the SHM coverage bitmap when stall recovery triggers, "
+        "reducing hash collision risk and potentially exposing new edges. "
+        "Uses birthday-bound (n^2/0.02) to compute the new size.",
+    )
+    fuzz_parser.add_argument(
         "--map-size",
         type=int,
         default=0,
@@ -1441,12 +1494,14 @@ def main() -> int:
         help="Analyze corpus compressibility with PPMD",
     )
     ppmd_parser.add_argument(
-        "-d", "--corpus",
+        "-d",
+        "--corpus",
         required=True,
         help="Corpus directory",
     )
     ppmd_parser.add_argument(
-        "-g", "--graph",
+        "-g",
+        "--graph",
         default=None,
         help="Output graph PNG file (e.g. graph.png)",
     )

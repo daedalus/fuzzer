@@ -157,7 +157,7 @@ class TestSaveToCorpus:
         seen = set()
         result = save_to_corpus(b"hello", tmp_path, seen)
         assert result is True
-        assert b"hello" in [f.read_bytes() for f in (tmp_path / "seeds").iterdir()]
+        assert b"hello" in [f.read_bytes() for f in (tmp_path / "seeds").rglob("id_*")]
 
     def test_duplicate_rejected(self, tmp_path):
         seen = set()

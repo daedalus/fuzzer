@@ -191,6 +191,7 @@ def load_corpus(corpus_dir: Path, bloom: BloomFilter | None = None) -> tuple[lis
     delta_files: list[tuple[str, Path]] = []
 
     if seeds_dir.exists():
+        # Read from seeds/ directly (legacy flat layout)
         for f in seeds_dir.iterdir():
             if not f.is_file():
                 continue
@@ -198,6 +199,16 @@ def load_corpus(corpus_dir: Path, bloom: BloomFilter | None = None) -> tuple[lis
             data = f.read_bytes()
             h = hash_data(data)
             full_files[h] = data
+        # Also read from two-digit subdirectories (new layout)
+        for sub in seeds_dir.iterdir():
+            if sub.is_dir() and len(sub.name) == 2 and sub.name.isalnum():
+                for f in sub.iterdir():
+                    if not f.is_file():
+                        continue
+                    if f.name.startswith("id_"):
+                        data = f.read_bytes()
+                        h = hash_data(data)
+                        full_files[h] = data
 
     if deltas_dir.exists():
         for f in deltas_dir.iterdir():
@@ -326,7 +337,11 @@ def save_to_corpus(
         delta_file = deltas_dir / f"delta_{h}.json"
         delta_file.write_text(json.dumps(delta, separators=(",", ":")))
     else:
-        corpus_file = seeds_dir / f"id_{h}"
+        # Store seeds in two-digit hash subdirectories to avoid too many
+        # files in a single directory.
+        sub_dir = seeds_dir / h[:2]
+        sub_dir.mkdir(parents=True, exist_ok=True)
+        corpus_file = sub_dir / f"id_{h}"
         corpus_file.write_bytes(data)
     return True
 
