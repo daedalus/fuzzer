@@ -98,21 +98,20 @@ class ShmCoverage:
     def is_new_coverage(self) -> bool:
         """Check if current bitmap has any edge not seen before (AFL-style).
 
-        Classifies raw hit counts into logarithmic buckets before
-        comparison, so count-magnitude noise (e.g. 47 vs 52) doesn't
-        cause spurious novelty. Uses memcmp for fast equality check on
-        the classified snapshot, then direct buffer access for finding
-        new edges.
+        Uses a two-tier approach:
+        1. Fast path: raw memcmp (zero allocation, single C call) — catches
+           the common case where the bitmap is unchanged.
+        2. Slow path: classify raw counts into logarithmic buckets, then
+           update cumulative seen maps. This filters count-magnitude noise
+           (e.g. 47 vs 52 both bucket to 32) while still detecting genuinely
+           new edges.
         """
-        # Classify the raw bitmap — collapses count-magnitude noise
-        classified = classify_counts(bytes(self._map))
-
-        # Fast path: check if classified map unchanged (no allocation beyond classify)
-        last_arr = (ctypes.c_char * self.size).from_address(ctypes.addressof(self._last_map_ptr))
-        if bytes(classified) == bytes(last_arr):
+        # Fast path: raw memcmp — no allocation, single C call
+        if _libc.memcmp(self._map, self._last_map_ptr, self.size) == 0:
             return False
 
-        # Slow path: find and record new edges using classified bitmap
+        # Slow path: classify and scan for new edges
+        classified = classify_counts(bytes(self._map))
         has_new = False
         for i in range(self.size):
             if classified[i] and not self._seen_classified[i]:
@@ -121,7 +120,7 @@ class ShmCoverage:
                 self.cumulative_edges += 1
                 has_new = True
 
-        # Update classified snapshot for next comparison
+        # Update snapshot for next comparison
         ctypes.memmove(self._last_map_ptr, bytes(classified), self.size)
         if has_new:
             self.total_edges += 1
