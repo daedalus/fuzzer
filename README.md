@@ -56,6 +56,7 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 - **Per-operator reward moments**: UCB-style exploration bonus (`mean + k * stddev`) with kurtosis-scaled stability guard — high-kurtosis operators require more observations before trusting their stddev-based bonus
 - **Format learner z-score gate**: replaces fixed `delta != 0` threshold with z-score-based outlier detection; MAD fallback under high kurtosis for robustness against zero-inflated coverage deltas
 - **Corpus bloat early-warning**: rising right skew in seed file sizes is a leading indicator of bloat that precedes RSS threshold tripping
+- **Bounded memory structures**: all accumulative data structures (correlation matrix, coverage timeline, cmplog tokens/pairs, kernel crashes, Shapley attribution edges, stderr buffer, seed secretary, seen hashes) are capped via module-level constants — RSS plateaus instead of growing linearly with exec count
 - **Report distribution diagnostics**: stddev, skewness, and kurtosis for exec time, discovery rate, per-operator rewards, and seed sizes
 
 ### Scheduling Intelligence
