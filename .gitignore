@@ -38,6 +38,7 @@ targets/*.elf
 targets/*.so
 targets/test_target
 targets/test_target_nosan
+targets/cmplog_exercise
 targets/asan_target
 targets/asan_target_nosan
 targets/fuzz_*

@@ -70,7 +70,8 @@ class CmplogCollector:
     def setup_env(self, env: dict[str, str]) -> dict[str, str]:
         """Add cmplog env vars to the execution environment.
 
-        Creates a fresh log file and adds _CMPLOG_OUT + LD_PRELOAD
+        Reuses (truncates) the existing log_path if one exists, or creates
+        a fresh log file on first call. Adds _CMPLOG_OUT + LD_PRELOAD
         to *env*. Used for subprocess execution paths (fork+exec).
 
         Args:
@@ -82,8 +83,14 @@ class CmplogCollector:
         if not self._shim_path:
             return env
 
-        fd, self.log_path = tempfile.mkstemp(suffix=".cmplog", prefix="fuzz_cmplog_")
-        os.close(fd)
+        if self.log_path is None or not os.path.exists(self.log_path):
+            fd, self.log_path = tempfile.mkstemp(suffix=".cmplog", prefix="fuzz_cmplog_")
+            os.close(fd)
+        else:
+            # Truncate so the child writes fresh data from position 0
+            with contextlib.suppress(OSError):
+                with open(self.log_path, "w") as f:
+                    f.truncate(0)
         env = dict(env)  # copy
         env["_CMPLOG_OUT"] = self.log_path
 
