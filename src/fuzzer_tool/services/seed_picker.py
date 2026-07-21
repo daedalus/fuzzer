@@ -298,7 +298,6 @@ class SeedPicker:
                     ]
                     self._mean_seed_entropy = sum(entropies) / len(entropies) if entropies else 0.0
                     self._mean_entropy_cache_key = cache_key
-                del entropies  # free entropy list after mean computed
                 if self._mean_seed_entropy > 0:
                     # z-score like: boost if far from mean
                     deviation = abs(seed_sh - self._mean_seed_entropy) / max(
