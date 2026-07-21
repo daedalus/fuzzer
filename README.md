@@ -200,6 +200,9 @@ fuzzer-tool fuzz targets/fuzz_search_pipeline
 # Multi-target: fuzz multiple binaries with shared corpus (glob supported)
 fuzzer-tool fuzz targets/fuzz_regex_compile targets/fuzz_pattern_match targets/fuzz_search_pipeline -c -d corpus/fgrep
 
+# Tailslayer hedged reader fuzzing (in-process .so mode, ~66 eps)
+fuzzer-tool fuzz targets/tailslayer_read.so -c --inprocess
+
 # Multi-target with glob — skips .c/.h/.py automatically
 fuzzer-tool fuzz 'targets/fuzz_*' -c -d corpus/fgrep
 

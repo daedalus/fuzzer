@@ -201,7 +201,7 @@ class InProcessRunner:
                 # updates at constructor time). Check if __afl_area was
                 # attached; if not, call __afl_map_shm() manually.
                 try:
-                    afl_area = ctypes.c_void_p.in_dll(self._lib, '__afl_area')
+                    afl_area = ctypes.c_void_p.in_dll(self._lib, "__afl_area")
                     if self.debug:
                         print(
                             f"  [debug] __afl_area={afl_area.value}, "
@@ -210,9 +210,9 @@ class InProcessRunner:
                             flush=True,
                         )
                     if not afl_area.value and self.coverage_env_id:
-                        getattr(self._lib, '__afl_map_shm')()
+                        getattr(self._lib, "__afl_map_shm")()
                         if self.debug:
-                            afl_area2 = ctypes.c_void_p.in_dll(self._lib, '__afl_area')
+                            afl_area2 = ctypes.c_void_p.in_dll(self._lib, "__afl_area")
                             print(
                                 f"  [debug] After manual __afl_map_shm: __afl_area={afl_area2.value}",
                                 flush=True,
@@ -495,8 +495,10 @@ class InProcessRunner:
 
         self._timed_out = False
         if not hasattr(self, "_alarm_handler"):
+
             def _alarm_handler(signum, frame):
                 self._timed_out = True
+
             self._alarm_handler = _alarm_handler
             self._old_alarm_handler = signal.signal(signal.SIGALRM, self._alarm_handler)
 
@@ -567,11 +569,14 @@ class InProcessRunner:
         )
 
     def update_shm_after_resize(self, new_ptr: int, new_size: int, new_env_id: str = "") -> None:
-        """Patch target's __afl_area and invalidate cached SHM pointer after resize.
+        """Redirect coverage writes to the resized SHM segment.
 
         When SHM is resized, the old segment is detached and a new one allocated.
         In inprocess mode the target's constructor already attached to the old
         SHM — we must redirect it to the new one, or coverage writes go to freed memory.
+
+        The caller (Fuzzer._handle_stall) has already updated os.environ with the
+        new __AFL_SHM_ID and AFL_MAP_SIZE before calling this method.
         """
         # Invalidate cached SHM pointer so read_bitmap() re-attaches
         self._shm_ptr = None
@@ -581,12 +586,20 @@ class InProcessRunner:
         if new_env_id:
             self.coverage_env_id = new_env_id
 
-        # Re-run __afl_map_shm() to update __afl_area, __afl_map_size,
-        # and __afl_map_mask to the new SHM. The env vars (__AFL_SHM_ID
-        # and AFL_MAP_SIZE) are already updated by the caller.
+        # Persistent mode: kill and restart the subprocess so it inherits
+        # the updated __AFL_SHM_ID / AFL_MAP_SIZE from os.environ.
+        # The child's __afl_area was attached at load time to the old SHM;
+        # patching the parent's ctypes handle does NOT reach the child.
+        if self._persistent:
+            self._persistent.stop()
+            self._persistent.start()
+            return
+
+        # Direct mode: re-run __afl_map_shm() to update __afl_area,
+        # __afl_map_size, and __afl_map_mask to the new SHM.
         if self._lib is not None:
             try:
-                getattr(self._lib, '__afl_map_shm')()
+                getattr(self._lib, "__afl_map_shm")()
             except (OSError, AttributeError):
                 # Fallback: patch __afl_area directly
                 try:
@@ -598,7 +611,7 @@ class InProcessRunner:
         # Also patch the separate shim library if loaded
         if self._shim_handle is not None:
             try:
-                getattr(self._shim_handle, '__afl_map_shm')()
+                getattr(self._shim_handle, "__afl_map_shm")()
             except (OSError, AttributeError):
                 try:
                     afl_area = ctypes.c_void_p.in_dll(self._shim_handle, "__afl_area")

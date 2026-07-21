@@ -94,7 +94,10 @@ targets/
 ├── asan_target.c      # ASAN crash target
 ├── asan_target        # Compiled target
 ├── test_target.c      # Minimal crash target
-└── test_target        # Compiled target
+├── test_target        # Compiled target
+├── tailslayer_read.cpp   # Tailslayer hedged reader fuzz target (C++, header-only lib)
+├── tailslayer_read       # Compiled target
+├── tailslayer_read.so    # Compiled shared library (in-process mode)
 ```
 
 ## Key Concepts
