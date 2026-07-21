@@ -62,6 +62,13 @@ class TargetRunner:
         # Resolve per-target SHM for multi-target mode
         shm = f._target_shm_covs.get(f.target, f.shm_cov) if f.multi_targets else f.shm_cov
 
+        # Set up cmplog env BEFORE any execution path — covers inprocess,
+        # persistent, ptrace, and subprocess runners. The cmplog shim
+        # (whether LD_PRELOAD'd or compiled into the target .so) needs
+        # _CMPLOG_OUT set before the target runs.
+        if f._cmplog:
+            f._cmplog.setup_env_for_run()
+
         if f._inprocess_runner:
             if shm:
                 shm.reset_edge_map()
@@ -73,6 +80,8 @@ class TargetRunner:
                 bitmap = f._inprocess_runner.read_bitmap()
                 if bitmap and len(bitmap) <= shm.size:
                     ctypes.memmove(shm._ptr, bitmap, len(bitmap))
+            # Note: cmplog log cleanup (truncation / __cmplog_reset) is
+            # handled by fuzz_one() after collect_tokens() reads the data.
             return rc, err
 
         if f._persistent_runner:

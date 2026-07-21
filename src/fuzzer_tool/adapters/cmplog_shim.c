@@ -128,3 +128,27 @@ void *memchr(const void *s, int c, size_t n) {
     }
     return result;
 }
+
+/* ── Public API for log file management ────────────────────────
+ * Called by the fuzzer via ctypes when cmplog is compiled into
+ * the target .so in direct_lite mode.
+ */
+
+__attribute__((visibility("default")))
+void __cmplog_reset(void) {
+    /* Truncate-and-reopen the log file so the fuzzer can read
+     * fresh data after each execution without deleting the file
+     * the .so still has open. */
+    if (cmplog_file) {
+        const char *path = getenv("_CMPLOG_OUT");
+        if (path && path[0]) {
+            fclose(cmplog_file);
+            cmplog_file = fopen(path, "w");
+        }
+    }
+}
+
+__attribute__((visibility("default")))
+const char *__cmplog_get_path(void) {
+    return getenv("_CMPLOG_OUT");
+}

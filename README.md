@@ -233,7 +233,7 @@ fuzzer-tool rank ./target -d corpus -n 10 --dump top_seeds
 | `-F` | File mode (write input to temp file) |
 | `-D FILE` | Load dictionary tokens |
 | `-g GRAMMAR` | Grammar-aware mutations (built-in: png, json, http_request, elf) |
-| `--cmplog` | Comparison tracing via LD_PRELOAD |
+| `--cmplog` | Comparison tracing via LD_PRELOAD (or compile `cmplog_shim.c` into target .so for direct_lite compatibility) |
 | `--markov-gen` | Markov-generated seeds (rate adapts to model quality via perplexity) |
 | `--mc-bandit` | Thompson sampling operator selection (Brier score calibration) |
 | `--mc-cem` | Cross-Entropy Method byte distribution |
@@ -392,9 +392,35 @@ tools/build_targets.sh --asan
 
 # No-ASAN only (faster)
 tools/build_targets.sh --fast
+
+# Build .so targets with cmplog compiled in (for direct_lite compatibility)
+tools/build_targets.sh --cmplog
+tools/build_targets.sh --asan --cmplog        # ASAN + cmplog
 ```
 
 The build script compiles every target as both an executable and a `.so` shared library, in ASAN and no-ASAN variants. The no-ASAN `.so` variants (`*_nosan.so`) are suitable for high-throughput in-process fuzzing without sanitizer overhead.
+
+### Build-time Cmplog for .so Targets
+
+By default, `--cmplog` uses `LD_PRELOAD` to intercept comparison functions, which requires a process boundary (fork+exec). For `.so` targets in `direct_lite` mode, this doesn't work — no exec occurs.
+
+**Solution: compile cmplog into your .so at build time.** Link `cmplog_shim.c` (needs `-ldl`) alongside your target:
+
+```bash
+gcc -shared -fPIC -O2 \
+    -include src/fuzzer_tool/adapters/afl_shim.c \
+    src/fuzzer_tool/adapters/cmplog_shim.c \
+    targets/lz4_read.c \
+    -o targets/lz4_read.so \
+    -llz4 -ldl
+```
+
+The fuzzer auto-detects the built-in cmplog by scanning for the `__cmplog_reset` symbol and keeps using `direct_lite` mode (no fork overhead). The log file is truncated between executions via `__cmplog_reset()`, which the fuzzer calls via ctypes after reading tokens.
+
+To verify cmplog is active from the .so itself, check the startup output:
+```
+[*] Cmplog: compiled into target .so (direct_lite compatible)
+```
 
 ## Troubleshooting
 

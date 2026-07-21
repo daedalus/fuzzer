@@ -139,6 +139,20 @@ def _detect_afl(target_path: str) -> bool:
         return False
 
 
+def _detect_cmplog(target_path: str) -> bool:
+    """Check if a binary has cmplog built in (i.e. exports __cmplog_reset)."""
+    import subprocess
+
+    try:
+        result = subprocess.run(["nm", "-D", target_path], capture_output=True, text=True, timeout=5)
+        if result.returncode == 0 and "__cmplog_reset" in result.stdout:
+            return True
+        result = subprocess.run(["nm", target_path], capture_output=True, text=True, timeout=5)
+        return result.returncode == 0 and "__cmplog_reset" in result.stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
 def _detect_asan(target_path: str) -> bool:
     """Detect if a binary is ASAN-instrumented by checking for __asan_init symbol."""
     import subprocess
@@ -306,6 +320,7 @@ class Fuzzer:
         self.minimize_every_execs = minimize_every_execs
         self.prune_corpus_max_memory = prune_corpus_max_memory
         self._last_memory_prune_exec = 0
+        self._last_bloat_warn_exec = 0
         self.coverage_report = Path(coverage_report) if coverage_report else None
         self.coverage_log = Path(coverage_log) if coverage_log else None
         if self.coverage_log:
@@ -767,6 +782,19 @@ class Fuzzer:
             # direct_lite works because ASAN is already loaded in the process.
             # Otherwise use persistent loader which inherits LD_PRELOAD.
             use_direct_lite = target_is_asan and "libasan" in os.environ.get("LD_PRELOAD", "")
+            # Cmplog: if the .so has cmplog compiled in, direct_lite works
+            # because the shim is part of the .so itself. Otherwise we need
+            # a process boundary for LD_PRELOAD to take effect.
+            if self._cmplog is not None:
+                has_cmplog = _detect_cmplog(self.target)
+                if not has_cmplog:
+                    use_direct_lite = False
+                else:
+                    print("[*] Cmplog: compiled into target .so (direct_lite compatible)")
+            # Set _CMPLOG_OUT before loading the .so so the cmplog
+            # constructor can open the log file at CDLL time.
+            if self._cmplog is not None and use_direct_lite:
+                self._cmplog.setup_env_for_run()
             self._inprocess_runner = InProcessRunner(
                 target=self.target,
                 function_name=auto_func,
@@ -1176,6 +1204,24 @@ class Fuzzer:
     def _weighted_pick_seed(self):
         return self._seed_picker.weighted_pick_seed()
 
+    def _reset_cmplog(self):
+        """Reset cmplog log after reading tokens.
+
+        In direct_lite mode with cmplog compiled into the target .so,
+        the .so keeps the log file open across calls. Call __cmplog_reset
+        via ctypes to reopen (truncate) the file from inside the .so's
+        address space, so subsequent writes land at position 0.
+        """
+        if self._cmplog is None:
+            return
+        runner = self._inprocess_runner
+        if runner and runner.direct_lite and runner._lib:
+            try:
+                if hasattr(runner._lib, "__cmplog_reset"):
+                    runner._lib.__cmplog_reset()
+            except (AttributeError, OSError):
+                pass
+
     def fuzz_one(self, data: bytes) -> bool:
         self._last_parent_seed = data
         meta = self.seed_meta.get(data)
@@ -1258,6 +1304,10 @@ class Fuzzer:
                 meta["redqueen_matches"] = matches[:50]
                 # Keep legacy field for state compat
                 meta["redqueen_offsets"] = [m[0] for m in meta["redqueen_matches"]]
+
+            # Reset cmplog log for next execution (truncates the .so's
+            # open file handle when cmplog is compiled into the target).
+            self._reset_cmplog()
 
         if self.exec_count % 100 == 0:
             rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss

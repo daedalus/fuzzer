@@ -45,7 +45,8 @@ class TestCmplogCollector:
         log_file.write_text("CMP 4142 4344\n")
         c.log_path = str(log_file)
         c.collect_tokens()
-        assert not log_file.exists()  # log cleared
+        assert log_file.exists()  # file kept (truncated, not deleted)
+        assert log_file.read_text() == ""  # content cleared
 
     def test_collect_tokens_corrupt_hex(self, tmp_path):
         c = CmplogCollector()

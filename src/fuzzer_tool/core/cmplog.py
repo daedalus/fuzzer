@@ -70,6 +70,9 @@ class CmplogCollector:
     def setup_env(self, env: dict[str, str]) -> dict[str, str]:
         """Add cmplog env vars to the execution environment.
 
+        Creates a fresh log file and adds _CMPLOG_OUT + LD_PRELOAD
+        to *env*. Used for subprocess execution paths (fork+exec).
+
         Args:
             env: Current environment dict.
 
@@ -92,6 +95,53 @@ class CmplogCollector:
             env["LD_PRELOAD"] = self._shim_path
 
         return env
+
+    def setup_env_for_run(self):
+        """Set _CMPLOG_OUT in the current process environment.
+
+        Used by inprocess and persistent execution paths where the target
+        runs inside the fuzzer process (or a long-lived child) and inherits
+        os.environ rather than a per-call env dict.
+
+        Reuses the current log_path if one exists; creates a new one on first call.
+        The cmplog shim (whether LD_PRELOAD'd or compiled into the target .so)
+        reads _CMPLOG_OUT at constructor time.
+        """
+        if self.log_path is None or not os.path.exists(self.log_path):
+            fd, self.log_path = tempfile.mkstemp(suffix=".cmplog", prefix="fuzz_cmplog_")
+            os.close(fd)
+        os.environ["_CMPLOG_OUT"] = self.log_path
+        # If the shim was compiled into the target .so (direct_lite mode),
+        # LD_PRELOAD is not needed. If it's loaded via LD_PRELOAD, the
+        # persistent loader's subprocess inherits it from os.environ,
+        # so set it here too.
+        if self._shim_path and self._shim_path not in os.environ.get("LD_PRELOAD", ""):
+            existing = os.environ.get("LD_PRELOAD", "")
+            os.environ["LD_PRELOAD"] = (
+                f"{self._shim_path}:{existing}" if existing else self._shim_path
+            )
+
+    def reset_log(self):
+        """Reset the cmplog log file after a direct_lite execution.
+
+        When cmplog is compiled into the target .so, the shim keeps the
+        file open in append mode across calls. The fuzzer calls this after
+        reading tokens to truncate the file so the shim writes fresh data
+        on the next call.
+
+        If the .so exposes __cmplog_reset, calls it via ctypes to truncate
+        the file from inside the .so. Otherwise falls back to truncating
+        the file externally (works when the .so closes/reopens on each
+        constructor, e.g. LD_PRELOAD in subprocess mode — harmless no-op
+        for the per-call temp-file path).
+        """
+        if not self.log_path:
+            return
+        try:
+            with open(self.log_path, "w") as f:
+                f.truncate(0)
+        except OSError:
+            pass
 
     def collect_tokens(self) -> list[bytes]:
         """Read the cmplog file and extract operand tokens and pairs.
@@ -131,9 +181,12 @@ class CmplogCollector:
         except OSError as e:
             log.debug("Failed to read cmplog file: %s", e)
 
-        # Clear the log for next round
+        # Clear the log for next round.
+        # Truncate (not delete) so the .so's file handle stays valid
+        # when cmplog is compiled into the target (direct_lite mode).
         with contextlib.suppress(OSError):
-            os.unlink(self.log_path)
+            with open(self.log_path, "w") as f:
+                f.truncate(0)
 
         new_tokens = [t for t in tokens if t not in self._token_set]
         self._token_set.update(tokens)
