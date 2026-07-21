@@ -3,8 +3,15 @@
  *
  * Provides:
  *   - __afl_map_shm()     — attach to AFL SHM bitmap
- *   - __afl_map_edge()    — record an edge: hash(prev, cur) -> bitmap[idx]++
+ *   - __afl_map_edge()    — record an edge: hash(prev, cur) -> bitmap[idx]
+ *                           using Morris probabilistic counting (a=30)
  *   - __afl_map_reset()   — zero the bitmap between iterations
+ *
+ * Morris counting: instead of incrementing the counter by 1 each time,
+ * increment with probability (a/(a+1))^c where c is the current value.
+ * This gives logarithmic growth — counter v represents approximately
+ * a * ((1+1/a)^v - 1) hits. Values stay in [0, 255] but provide
+ * frequency information across a much wider range than simple counters.
  *
  * Compile target with:
  *   gcc -O2 -g -shared -fPIC -include afl_shim.c -o target.so target.c -lpng -lz
@@ -23,6 +30,31 @@ static uint32_t __afl_map_mask = 65535;
 
 uint8_t *__afl_area = NULL;
 uint32_t __afl_prev_loc = 0;
+
+/* ── Morris probabilistic counting (a=30) ─────────────────────────────── */
+#define MORRIS_A 30
+#define MORRIS_BITS 8
+#define MORRIS_MAX_V ((1 << MORRIS_BITS) - 1)  /* 255 */
+
+/* threshold[v] = UINT32_MAX * (a/(a+1))^v, precomputed once.
+ * A random 32-bit value < threshold[v] triggers the increment. */
+static uint32_t morris_threshold[MORRIS_MAX_V + 1];
+static uint32_t rng_state = 0x2545F491;  /* xorshift32 seed */
+
+static inline uint32_t xorshift32(void) {
+    rng_state ^= rng_state << 13;
+    rng_state ^= rng_state >> 17;
+    rng_state ^= rng_state << 5;
+    return rng_state;
+}
+
+static void morris_init(void) {
+    morris_threshold[0] = UINT32_MAX;
+    for (int i = 1; i <= MORRIS_MAX_V; i++)
+        morris_threshold[i] = (uint64_t)morris_threshold[i - 1] * MORRIS_A / (MORRIS_A + 1);
+}
+
+/* ── SHM attachment ────────────────────────────────────────────────────── */
 
 __attribute__((visibility("default")))
 void __afl_map_shm(void) {
@@ -46,11 +78,15 @@ void __afl_map_shm(void) {
     __afl_area = (uint8_t *)p;
 }
 
+/* ── Edge recording ────────────────────────────────────────────────────── */
+
 __attribute__((visibility("default"), always_inline))
 static inline void __afl_map_edge(uint32_t cur_loc) {
     if (__afl_area) {
         uint32_t idx = (__afl_prev_loc ^ cur_loc) & __afl_map_mask;
-        __afl_area[idx]++;
+        uint8_t c = __afl_area[idx];
+        if (c < MORRIS_MAX_V && xorshift32() < morris_threshold[c])
+            __afl_area[idx] = c + 1;
     }
     __afl_prev_loc = cur_loc >> 1;
 }
@@ -65,5 +101,6 @@ void __afl_map_reset(void) {
 /* Auto-attach when loaded */
 __attribute__((constructor))
 static void __afl_auto_init(void) {
+    morris_init();
     __afl_map_shm();
 }

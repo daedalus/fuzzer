@@ -32,6 +32,18 @@ from fuzzer_tool.core.similarity import hamming_distance
 
 log = logging.getLogger(__name__)
 
+MORRIS_A = 30
+
+
+def morris_estimate(v: int) -> float:
+    """Convert Morris counter value to approximate count.
+
+    estimate(v) = a * ((1 + 1/a)^v - 1)
+    """
+    if v == 0:
+        return 0.0
+    return MORRIS_A * ((1.0 + 1.0 / MORRIS_A) ** v - 1.0)
+
 
 def ks_two_sample(samples_a: list[float], samples_b: list[float]) -> tuple[float, float]:
     """Two-sample Kolmogorov–Smirnov test.
@@ -365,9 +377,10 @@ class EdgeTracker:
     priority; seeds fully subsumed by others get deprioritized.
     """
 
-    def __init__(self, map_size: int = 65536, max_tracked_seeds: int = 200):
+    def __init__(self, map_size: int = 65536, max_tracked_seeds: int = 200, morris_mode: bool = False):
         self.map_size = map_size
         self.max_tracked_seeds = max_tracked_seeds
+        self._morris_mode = morris_mode
         # Per-seed edge sets: seed_key -> set of edge indices
         self.seed_edges: dict[str, set[int]] = {}
         # Per-seed hit counts: seed_key -> {edge_index: hit_count} (sparse)
@@ -402,13 +415,14 @@ class EdgeTracker:
         self._correlation_matrix: dict[tuple[int, int], int] = {}
         self._correlation_total: int = 0
 
-    def record_edges(self, seed_key: str, edge_bitmap: bytes, target_name: str = "") -> set[int]:
+    def record_edges(self, seed_key: str, edge_bitmap: bytes, target_name: str = "", morris_mode: bool = False) -> set[int]:
         """Record edges hit by a seed execution.
 
         Args:
             seed_key: Hash of the seed input.
             edge_bitmap: Raw edge bitmap (bytes where > 0 = edge hit).
             target_name: Name of the target binary (for multi-target tracking).
+            morris_mode: If True, convert Morris counter values to approximate counts.
 
         Returns:
             Set of NEW edge indices not previously seen.
@@ -426,7 +440,11 @@ class EdgeTracker:
         arr = np.frombuffer(edge_bitmap, dtype=np.uint8, count=min(len(edge_bitmap), self.map_size))
         for i in np.flatnonzero(arr):
             i = int(i)
-            val = int(arr[i])
+            raw_val = int(arr[i])
+            if morris_mode:
+                val = int(round(morris_estimate(raw_val)))
+            else:
+                val = raw_val
             new_edges.add(i)
             hc[i] = val
             # Aggregate totals
@@ -1295,8 +1313,15 @@ class EdgeTracker:
                 "saturation": 0.0,
                 "confidence": "low",
             }
-        n1 = self._frequency_spectrum.get(1, 0)
-        n2 = self._frequency_spectrum.get(2, 0)
+        if self._morris_mode:
+            # In Morris mode, frequency spectrum is coarser.
+            # Use approximate thresholds: n1=edges with count≤1, n2=count 2-3.
+            counts = list(self._global_edge_hits.values())
+            n1 = sum(1 for c in counts if c <= 1)
+            n2 = sum(1 for c in counts if 2 <= c <= 3)
+        else:
+            n1 = self._frequency_spectrum.get(1, 0)
+            n2 = self._frequency_spectrum.get(2, 0)
         if n2 > 0:
             raw_est = (n1 * n1) / (2 * n2)
         elif n1 > 0:
@@ -1397,10 +1422,17 @@ class EdgeTracker:
 
         counts = list(self._global_edge_hits.values())
         total = len(counts)
-        singleton = sum(1 for c in counts if c == 1)
-        cold = sum(1 for c in counts if 2 <= c <= 3)
-        warm = sum(1 for c in counts if 4 <= c <= 10)
-        hot = sum(1 for c in counts if c > 10)
+        if self._morris_mode:
+            # Approximate counts from Morris: thresholds adjusted for log-scale
+            singleton = sum(1 for c in counts if c <= 1)
+            cold = sum(1 for c in counts if 2 <= c <= 5)
+            warm = sum(1 for c in counts if 6 <= c <= 20)
+            hot = sum(1 for c in counts if c > 20)
+        else:
+            singleton = sum(1 for c in counts if c == 1)
+            cold = sum(1 for c in counts if 2 <= c <= 3)
+            warm = sum(1 for c in counts if 4 <= c <= 10)
+            hot = sum(1 for c in counts if c > 10)
         avg = sum(counts) / total if total else 0.0
 
         return {
@@ -1636,6 +1668,7 @@ class EdgeTracker:
         """Save tracker state to JSON."""
         data = {
             "map_size": self.map_size,
+            "morris_mode": self._morris_mode,
             "cumulative_edges": sorted(self.cumulative_edges),
             "seed_edges": {k: sorted(v) for k, v in self.seed_edges.items()},
             "seed_hit_counts": {
@@ -1675,6 +1708,7 @@ class EdgeTracker:
             log.debug("Failed to load edge tracker: %s", e)
             return False
         self.map_size = data.get("map_size", self.map_size)
+        self._morris_mode = data.get("morris_mode", self._morris_mode)
         self.cumulative_edges = set(data.get("cumulative_edges", []))
         self.seed_edges = {k: set(v) for k, v in data.get("seed_edges", {}).items()}
         self.seed_hit_counts = {

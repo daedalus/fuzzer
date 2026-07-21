@@ -1348,6 +1348,7 @@ class Fuzzer:
                     seed_key,
                     edge_bitmap,
                     target_name=os.path.basename(self.target) if self.multi_targets else "",
+                    morris_mode=self._edge_tracker._morris_mode,
                 )
                 if new:
                     self._last_new_edge_exec = self.exec_count
@@ -1390,16 +1391,12 @@ class Fuzzer:
             if edge_bitmap:
                 new_edges = set()
                 if _HAS_NUMPY:
-                    bits = np.unpackbits(
-                        np.frombuffer(edge_bitmap, dtype=np.uint8)[: self.map_size]
-                    )
-                    new_edges = set(np.flatnonzero(bits))
+                    arr = np.frombuffer(edge_bitmap, dtype=np.uint8)[: self.map_size]
+                    new_edges = set(np.flatnonzero(arr))
                 else:
                     for i, byte_val in enumerate(edge_bitmap):
-                        if byte_val:
-                            for bit in range(8):
-                                if byte_val & (1 << bit):
-                                    new_edges.add(i * 8 + bit)
+                        if byte_val and i < self.map_size:
+                            new_edges.add(i)
                 if new_edges:
                     self._length_tracker.record(len(mutated), new_edges)
 

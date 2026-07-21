@@ -16,6 +16,7 @@ Extracted from Fuzzer class (~lines 648-783, 1845-2231). Contains:
 
 import contextlib
 import hashlib
+import os
 
 try:
     import xxhash
@@ -64,7 +65,8 @@ class CorpusManager:
             }
         from fuzzer_tool.core.edge_tracker import EdgeTracker
 
-        f._edge_tracker = EdgeTracker(map_size=f.map_size)
+        morris_mode = os.environ.get("AFL_MORRIS", "1") != "0"
+        f._edge_tracker = EdgeTracker(map_size=f.map_size, morris_mode=morris_mode)
         f._corpus_size_history: list[int] = []
 
         if f.resume:
