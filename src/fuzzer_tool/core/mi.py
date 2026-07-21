@@ -36,6 +36,7 @@ class MutualInformationTracker:
         self.max_positions = max_positions
         self.min_observations = min_observations
         self._max_mi_cache: dict[int, float] = {}  # input_length -> max_mi
+        self._max_mi_cache_limit = 500  # bound cache size
         self._total_edges: int | None = None  # cached sum(edge_marginal)
 
         # Per-position: byte_value -> edge_index -> count
@@ -172,6 +173,11 @@ class MutualInformationTracker:
         if input_length not in self._max_mi_cache:
             candidates = [self.mi(pos) for pos in self.position_counts if pos < input_length]
             self._max_mi_cache[input_length] = max(candidates) if candidates else 0.0
+            # Bound cache: prune oldest half when exceeding limit
+            if len(self._max_mi_cache) > self._max_mi_cache_limit:
+                keys = list(self._max_mi_cache)[: len(self._max_mi_cache) // 2]
+                for k in keys:
+                    del self._max_mi_cache[k]
         max_mi = self._max_mi_cache[input_length]
         if max_mi <= 0:
             return 1.0

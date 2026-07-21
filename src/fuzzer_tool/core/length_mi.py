@@ -10,6 +10,10 @@ from __future__ import annotations
 import random
 from collections import defaultdict
 
+# ── Memory bounds ────────────────────────────────────────────────────
+MAX_TRACKED_LENGTHS = 500  # max unique input lengths to track
+MAX_EDGES_PER_LENGTH = 200  # max edge entries per input length
+
 
 class LengthEdgeTracker:
     """Track which input lengths discover the most new edges.
@@ -34,6 +38,26 @@ class LengthEdgeTracker:
         self.length_total[input_length] += 1
         for edge in new_edges:
             self.length_edge_counts[input_length][edge] += 1
+        self._dirty = True
+        # Bound memory: prune least-productive lengths when too many tracked
+        if len(self.length_edge_counts) > MAX_TRACKED_LENGTHS:
+            self._prune_lengths()
+        # Bound per-length edge count
+        edges = self.length_edge_counts.get(input_length)
+        if edges and len(edges) > MAX_EDGES_PER_LENGTH:
+            # Keep only top half by count
+            top = sorted(edges.items(), key=lambda kv: kv[1], reverse=True)[: MAX_EDGES_PER_LENGTH // 2]
+            self.length_edge_counts[input_length] = defaultdict(int, dict(top))
+
+    def _prune_lengths(self):
+        """Keep the top 50% of lengths by total edge count."""
+        totals = {k: sum(v.values()) for k, v in self.length_edge_counts.items()}
+        keep = sorted(totals, key=totals.get, reverse=True)[: len(totals) // 2]
+        pruned = {k: self.length_edge_counts[k] for k in keep}
+        self.length_edge_counts.clear()
+        for k, v in pruned.items():
+            self.length_edge_counts[k] = v
+        self.length_total = defaultdict(int, {k: self.length_total[k] for k in keep if k in self.length_total})
         self._dirty = True
 
     def _rebuild_cache(self):

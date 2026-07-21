@@ -451,6 +451,11 @@ class SeedPicker:
             f._weight_cache = None
             f._weight_cache_key = (-1, -1)
             f._cached_weights = {}
+        # Bound _cached_weights: prune oldest half when exceeding 2x corpus
+        if len(f._cached_weights) > max(corpus_version * 2, 4000):
+            keys = list(f._cached_weights)[: len(f._cached_weights) // 2]
+            for k in keys:
+                del f._cached_weights[k]
         cache_key = (corpus_version, edge_version)
         if cache_key != f._weight_cache_key:
             edge_changed = f._weight_cache_key[1] != edge_version
