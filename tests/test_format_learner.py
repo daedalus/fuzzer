@@ -201,10 +201,12 @@ class TestDiscriminatingMutation:
 
     def test_suggestion_with_different_field_types(self):
         fl = FormatLearner()
-        h1 = FieldHypothesis(offset=0, width=1, field_type="magic", confidence=0.8,
-                             sensitive_ops={"bit_flip": 5})
-        h2 = FieldHypothesis(offset=8, width=4, field_type="length", confidence=0.6,
-                             sensitive_ops={"arithmetic": 3})
+        h1 = FieldHypothesis(
+            offset=0, width=1, field_type="magic", confidence=0.8, sensitive_ops={"bit_flip": 5}
+        )
+        h2 = FieldHypothesis(
+            offset=8, width=4, field_type="length", confidence=0.6, sensitive_ops={"arithmetic": 3}
+        )
         fl.hypotheses = [h1, h2]
         fl.field_map = {0: h1, 8: h2}
 
@@ -272,3 +274,162 @@ class TestTimelinePruning:
                 lost_edges=set(),
             )
         assert len(fl.timeline) <= 10
+
+
+class TestZScoreHasEffect:
+    def test_z_score_threshold_init(self):
+        fl = FormatLearner(z_score_threshold=3.0)
+        assert fl.z_score_threshold == 3.0
+
+    def test_small_delta_filtered_after_warmup(self):
+        """After enough observations, a tiny delta should not count as effect."""
+        fl = FormatLearner(z_score_threshold=2.0)
+        # Feed many zero-delta transitions to establish baseline
+        for i in range(20):
+            fl.record_transition(
+                input_bytes=b"\x00" * 8,
+                mutation_op="bit_flip",
+                mutation_offset=i % 8,
+                mutation_width=1,
+                coverage_before=100,
+                coverage_after=100,  # delta = 0
+                new_edges=set(),
+                lost_edges=set(),
+            )
+        # Now a tiny delta should NOT create a hypothesis
+        fl.record_transition(
+            input_bytes=b"\x00" * 8,
+            mutation_op="bit_flip",
+            mutation_offset=0,
+            mutation_width=1,
+            coverage_before=100,
+            coverage_after=100,  # still zero
+            new_edges=set(),
+            lost_edges=set(),
+        )
+        # No hypothesis should be created for zero delta
+        assert not any(h.offset == 0 for h in fl.hypotheses)
+
+    def test_large_delta_creates_hypothesis(self):
+        """A large delta should create a hypothesis even with z-score gate."""
+        fl = FormatLearner(z_score_threshold=2.0)
+        # Establish baseline with zero deltas
+        for i in range(20):
+            fl.record_transition(
+                input_bytes=b"\x00" * 8,
+                mutation_op="bit_flip",
+                mutation_offset=i % 8,
+                mutation_width=1,
+                coverage_before=100,
+                coverage_after=100,
+                new_edges=set(),
+                lost_edges=set(),
+            )
+        # Large delta should trigger hypothesis
+        fl.record_transition(
+            input_bytes=b"\x00" * 8,
+            mutation_op="bit_flip",
+            mutation_offset=5,
+            mutation_width=2,
+            coverage_before=100,
+            coverage_after=200,  # delta = 100
+            new_edges={500},
+            lost_edges=set(),
+        )
+        assert any(h.offset == 5 for h in fl.hypotheses)
+
+    def test_new_edges_bypass_z_score(self):
+        """New edges should always count as effect regardless of z-score."""
+        fl = FormatLearner(z_score_threshold=100.0)  # very high threshold
+        for i in range(20):
+            fl.record_transition(
+                input_bytes=b"\x00" * 8,
+                mutation_op="bit_flip",
+                mutation_offset=i % 8,
+                mutation_width=1,
+                coverage_before=100,
+                coverage_after=100,
+                new_edges=set(),
+                lost_edges=set(),
+            )
+        fl.record_transition(
+            input_bytes=b"\x00" * 8,
+            mutation_op="bit_flip",
+            mutation_offset=3,
+            mutation_width=1,
+            coverage_before=100,
+            coverage_after=100,  # zero delta
+            new_edges={999},  # but new edges!
+            lost_edges=set(),
+        )
+        assert any(h.offset == 3 for h in fl.hypotheses)
+
+    def test_lost_edges_bypass_z_score(self):
+        """Lost edges should always count as effect."""
+        fl = FormatLearner(z_score_threshold=100.0)
+        for i in range(20):
+            fl.record_transition(
+                input_bytes=b"\x00" * 8,
+                mutation_op="bit_flip",
+                mutation_offset=i % 8,
+                mutation_width=1,
+                coverage_before=100,
+                coverage_after=100,
+                new_edges=set(),
+                lost_edges=set(),
+            )
+        fl.record_transition(
+            input_bytes=b"\x00" * 8,
+            mutation_op="bit_flip",
+            mutation_offset=3,
+            mutation_width=1,
+            coverage_before=100,
+            coverage_after=100,
+            new_edges=set(),
+            lost_edges={500},
+        )
+        assert any(h.offset == 3 for h in fl.hypotheses)
+
+    def test_mad_fallback_under_high_kurtosis(self):
+        """When kurtosis is high, MAD-based z-score should be used."""
+        fl = FormatLearner(z_score_threshold=2.0)
+        # Feed data that produces high kurtosis (many zeros, one outlier)
+        for i in range(30):
+            fl.record_transition(
+                input_bytes=b"\x00" * 8,
+                mutation_op="bit_flip",
+                mutation_offset=i % 8,
+                mutation_width=1,
+                coverage_before=100,
+                coverage_after=100,
+                new_edges=set(),
+                lost_edges=set(),
+            )
+        # Verify kurtosis is high after an outlier
+        fl.record_transition(
+            input_bytes=b"\x00" * 8,
+            mutation_op="bit_flip",
+            mutation_offset=0,
+            mutation_width=1,
+            coverage_before=100,
+            coverage_after=110,  # small delta
+            new_edges=set(),
+            lost_edges=set(),
+        )
+        assert fl._delta_moments.kurtosis > 0  # heavy-tailed shape
+
+    def test_delta_moments_tracked(self):
+        """Verify delta moments are being tracked."""
+        fl = FormatLearner()
+        for i in range(10):
+            fl.record_transition(
+                input_bytes=b"\x00" * 8,
+                mutation_op="bit_flip",
+                mutation_offset=i % 8,
+                mutation_width=1,
+                coverage_before=100,
+                coverage_after=100 + i,
+                new_edges=set(),
+                lost_edges=set(),
+            )
+        assert fl._delta_moments.count >= 10

@@ -27,6 +27,8 @@ import random
 from dataclasses import dataclass, field
 from typing import Optional
 
+from fuzzer_tool.core.running_stats import RunningMoments
+
 log = logging.getLogger(__name__)
 
 BACKTEST_INTERVAL = 500  # run backtest every N recorded transitions
@@ -35,6 +37,7 @@ BACKTEST_INTERVAL = 500  # run backtest every N recorded transitions
 @dataclass
 class FieldHypothesis:
     """A candidate format field with boundaries and properties."""
+
     offset: int
     width: int
     field_type: str  # "magic", "length", "crc", "flags", "data", "unknown"
@@ -54,6 +57,7 @@ class TimelineEntry:
 
     Stores input_hash (16 bytes) instead of full input to save memory.
     """
+
     input_hash: str  # SHA256 prefix for identification
     mutation_op: str
     mutation_offset: int
@@ -74,7 +78,7 @@ class FormatLearner:
     - Action for discovery: selects mutations that discriminate hypotheses
     """
 
-    def __init__(self, max_timeline: int = 5000):
+    def __init__(self, max_timeline: int = 5000, z_score_threshold: float = 2.0):
         self.timeline: list[TimelineEntry] = []
         self.max_timeline = max_timeline
         self.hypotheses: list[FieldHypothesis] = []
@@ -83,6 +87,8 @@ class FormatLearner:
         self.backtest_fails: int = 0
         self.format_model_version: int = 0
         self._transitions_since_backtest: int = 0
+        self.z_score_threshold = z_score_threshold
+        self._delta_moments: RunningMoments = RunningMoments()
 
     def record_transition(
         self,
@@ -113,7 +119,7 @@ class FormatLearner:
         )
         self.timeline.append(entry)
         if len(self.timeline) > self.max_timeline:
-            self.timeline = self.timeline[-self.max_timeline:]
+            self.timeline = self.timeline[-self.max_timeline :]
 
         self._update_hypotheses(entry)
 
@@ -130,7 +136,28 @@ class FormatLearner:
         offset = entry.mutation_offset
         width = entry.mutation_width
         delta = entry.coverage_after - entry.coverage_before
-        has_effect = delta != 0 or entry.new_edges or entry.lost_edges
+
+        # Z-score gate: a mutation only counts as "field-sensitive" if
+        # its effect is a statistical outlier relative to ambient noise,
+        # not just nonzero.  Under high excess kurtosis (zero-inflated
+        # coverage deltas), fall back to MAD-based z-score for robustness.
+        self._delta_moments.update(float(delta))
+        if self._delta_moments.count >= 3 and self._delta_moments.stddev > 0:
+            if self._delta_moments.kurtosis > 3.0:
+                # Heavy-tailed: use MAD-based robust z-score
+                mad = self._median_absolute_deviation()
+                if mad > 0:
+                    z = abs(delta - self._delta_moments.mean) / (mad * 1.4826)
+                else:
+                    z = abs(self._delta_moments.z_score(delta))
+            else:
+                z = abs(self._delta_moments.z_score(delta))
+            has_effect = (
+                z > self.z_score_threshold or bool(entry.new_edges) or bool(entry.lost_edges)
+            )
+        else:
+            # Too few observations for z-score — fall back to nonzero check
+            has_effect = delta != 0 or bool(entry.new_edges) or bool(entry.lost_edges)
 
         existing = None
         for h in self.hypotheses:
@@ -184,6 +211,18 @@ class FormatLearner:
                 continue
             h.field_type = "unknown"
 
+    def _median_absolute_deviation(self) -> float:
+        """MAD of coverage deltas — robust alternative to stddev under heavy tails."""
+        buf = self._delta_moments._buf
+        if len(buf) < 3:
+            return 0.0
+        sorted_vals = sorted(buf)
+        n = len(sorted_vals)
+        median = sorted_vals[n // 2]
+        deviations = [abs(v - median) for v in sorted_vals]
+        deviations.sort()
+        return deviations[len(deviations) // 2]
+
     def backtest(self) -> tuple[bool, Optional[str]]:
         """Replay the ENTIRE Timeline through the current format model."""
         if not self.hypotheses:
@@ -232,7 +271,7 @@ class FormatLearner:
             return None
 
         for i, h1 in enumerate(self.hypotheses):
-            for h2 in self.hypotheses[i + 1:]:
+            for h2 in self.hypotheses[i + 1 :]:
                 if h1.field_type != h2.field_type:
                     for op in candidates:
                         if op in h1.sensitive_ops and op not in h2.sensitive_ops:
@@ -246,15 +285,17 @@ class FormatLearner:
         sorted_hyps = sorted(self.hypotheses, key=lambda h: h.offset)
         fields = []
         for h in sorted_hyps:
-            fields.append({
-                "offset": h.offset,
-                "width": h.width,
-                "type": h.field_type,
-                "confidence": round(h.confidence, 3),
-                "observations": h.observations,
-                "sensitive_ops": dict(h.sensitive_ops),
-                "controlled_edges": len(h.controlled_edges),
-            })
+            fields.append(
+                {
+                    "offset": h.offset,
+                    "width": h.width,
+                    "type": h.field_type,
+                    "confidence": round(h.confidence, 3),
+                    "observations": h.observations,
+                    "sensitive_ops": dict(h.sensitive_ops),
+                    "controlled_edges": len(h.controlled_edges),
+                }
+            )
 
         return {
             "timeline_size": len(self.timeline),
@@ -303,16 +344,18 @@ class FormatLearner:
         """Restore from persistence."""
         self.timeline = []
         for e in state.get("timeline", []):
-            self.timeline.append(TimelineEntry(
-                input_hash=e.get("input_hash", ""),
-                mutation_op=e["op"],
-                mutation_offset=e["offset"],
-                mutation_width=e["width"],
-                coverage_before=e["cov_before"],
-                coverage_after=e["cov_after"],
-                new_edges=set(e.get("new_edges", [])),
-                lost_edges=set(e.get("lost_edges", [])),
-            ))
+            self.timeline.append(
+                TimelineEntry(
+                    input_hash=e.get("input_hash", ""),
+                    mutation_op=e["op"],
+                    mutation_offset=e["offset"],
+                    mutation_width=e["width"],
+                    coverage_before=e["cov_before"],
+                    coverage_after=e["cov_after"],
+                    new_edges=set(e.get("new_edges", [])),
+                    lost_edges=set(e.get("lost_edges", [])),
+                )
+            )
         self.hypotheses = []
         for h in state.get("hypotheses", []):
             hyp = FieldHypothesis(

@@ -329,3 +329,91 @@ class TestEloTracker:
         assert elo2._strategy_ratings == elo._strategy_ratings
         assert elo2._strategy_match_count == elo._strategy_match_count
         Path(path).unlink()
+
+
+class TestRewardMoments:
+    def test_record_reward(self):
+        elo = EloTracker()
+        elo.init_arm("A")
+        elo.record_reward("A", 5.0)
+        rm = elo.get_reward_moments("A")
+        assert rm is not None
+        assert rm.count == 1
+        assert rm.mean == 5.0
+
+    def test_record_reward_auto_init(self):
+        elo = EloTracker()
+        elo.record_reward("new_op", 3.0)
+        rm = elo.get_reward_moments("new_op")
+        assert rm is not None
+        assert rm.count == 1
+
+    def test_record_match_feeds_reward(self):
+        elo = EloTracker()
+        elo.init_arm("A")
+        elo.init_arm("B")
+        elo.record_match("A", "B", score_a=1.0)
+        rm_a = elo.get_reward_moments("A")
+        rm_b = elo.get_reward_moments("B")
+        assert rm_a is not None and rm_a.count >= 1
+        assert rm_b is not None and rm_b.count >= 1
+
+    def test_select_op_ucb_empty(self):
+        elo = EloTracker()
+        assert elo.select_op_ucb([]) == ""
+
+    def test_select_op_ucb_single(self):
+        elo = EloTracker()
+        assert elo.select_op_ucb(["A"]) == "A"
+
+    def test_select_op_ucb_fallback_to_elo(self):
+        """With too few reward samples, UCB falls back to Elo."""
+        elo = EloTracker(k_factor=100, min_matches=0)
+        elo.init_arm("A")
+        elo.init_arm("B")
+        # Give A a high rating via matches (also feeds reward data)
+        for _ in range(20):
+            elo.record_match("A", "B", score_a=1.0)
+        # A has mean reward 1.0, B has mean reward 0.0
+        # With very low temperature, A should dominate
+        counts = {"A": 0, "B": 0}
+        for _ in range(100):
+            op = elo.select_op_ucb(["A", "B"], temperature=1.0)
+            counts[op] += 1
+        assert counts["A"] > counts["B"]
+
+    def test_select_op_ucb_with_reward_data(self):
+        """With enough reward data, UCB should use mean + k*stddev."""
+        elo = EloTracker(min_matches=0)
+        elo.init_arm("high_reward")
+        elo.init_arm("low_reward")
+        # Feed reward data: high_reward gets high mean, low_reward gets low
+        for _ in range(30):
+            elo.record_reward("high_reward", 10.0)
+            elo.record_reward("low_reward", 1.0)
+        # With enough data and low temperature, high_reward should dominate
+        counts = {"high_reward": 0, "low_reward": 0}
+        for _ in range(100):
+            op = elo.select_op_ucb(
+                ["high_reward", "low_reward"],
+                exploration_weight=0.5,
+                temperature=10.0,
+            )
+            counts[op] += 1
+        assert counts["high_reward"] > counts["low_reward"]
+
+    def test_reward_moments_save_load(self):
+        elo = EloTracker()
+        elo.init_arm("A")
+        elo.record_reward("A", 5.0)
+        elo.record_reward("A", 3.0)
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+            path = f.name
+        elo.save(path)
+        elo2 = EloTracker()
+        elo2.load(path)
+        rm = elo2.get_reward_moments("A")
+        assert rm is not None
+        assert rm.count == 2
+        assert abs(rm.mean - 4.0) < 0.01
+        Path(path).unlink()

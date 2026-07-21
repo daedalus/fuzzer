@@ -11,14 +11,18 @@ approaching coverage jump — the fuzzer is "near a phase transition,"
 not actually plateaued. That's the moment to intensify effort on the
 current corpus region rather than concluding it's stuck.
 
-The detector uses two signals:
+The detector uses three signals:
 1. Rolling variance of discovery rate — increases as the system
    approaches a transition
 2. Lag-1 autocorrelation — increases as the system "slows down"
    near a bifurcation point
+3. Rolling skewness — rising right skew indicates occasional large
+   discovery-rate spikes against a flat baseline, a stronger signal
+   of a productive transition region
 
-When both are rising above their recent baselines, the detector
-signals "approaching transition."
+When variance + autocorrelation are rising, the detector signals
+"approaching transition."  When skewness also rises, the verdict
+upgrades to "approaching transition, and it looks productive."
 """
 
 import collections
@@ -34,6 +38,8 @@ class CriticalSlowingDown:
         window_size: Number of recent observations to track.
         rise_threshold: How much variance/autocorrelation must rise
             above baseline to trigger (multiplier). 1.5 = 50% increase.
+        skew_rise_threshold: How much skewness must rise above baseline
+            to trigger the "productive" verdict tier. 1.5 = 50% increase.
         min_observations: Minimum observations before detection is active.
     """
 
@@ -41,14 +47,17 @@ class CriticalSlowingDown:
         self,
         window_size: int = 50,
         rise_threshold: float = 1.5,
+        skew_rise_threshold: float = 1.5,
         min_observations: int = 20,
     ):
         self.window_size = window_size
         self.rise_threshold = rise_threshold
+        self.skew_rise_threshold = skew_rise_threshold
         self.min_observations = min_observations
         self._history: collections.deque = collections.deque(maxlen=window_size)
         self._variance_baseline: float | None = None
         self._autocorr_baseline: float | None = None
+        self._skewness_baseline: float | None = None
 
     def observe(self, value: float) -> None:
         """Record a discovery-rate observation.
@@ -65,6 +74,20 @@ class CriticalSlowingDown:
             return 0.0
         mean = sum(self._history) / n
         return sum((x - mean) ** 2 for x in self._history) / (n - 1)
+
+    def _compute_skewness(self) -> float:
+        """Compute skewness of the current window."""
+        n = len(self._history)
+        if n < 3:
+            return 0.0
+        data = list(self._history)
+        mean = sum(data) / n
+        m2 = sum((x - mean) ** 2 for x in data) / n
+        if m2 <= 0.0:
+            return 0.0
+        stddev = m2**0.5
+        m3 = sum((x - mean) ** 3 for x in data) / n
+        return m3 / (stddev**3)
 
     def _compute_autocorrelation(self) -> float:
         """Compute lag-1 autocorrelation of the current window."""
@@ -91,31 +114,51 @@ class CriticalSlowingDown:
 
         variance = self._compute_variance()
         autocorr = self._compute_autocorrelation()
+        skewness = self._compute_skewness()
 
         if self._variance_baseline is None:
             self._variance_baseline = variance
             self._autocorr_baseline = autocorr
+            self._skewness_baseline = skewness
             return False, "establishing baseline"
 
         var_ratio = variance / max(self._variance_baseline, 1e-10)
         acf_ratio = autocorr / max(self._autocorr_baseline, 1e-10)
+        # Skewness ratio requires the baseline to be meaningfully nonzero
+        # to avoid infinite ratios from constant-series baselines.
+        skew_rise = (
+            abs(skewness) / max(abs(self._skewness_baseline), 0.1)
+            if abs(self._skewness_baseline) > 0.01
+            else 0.0
+        )
 
         self._variance_baseline = 0.9 * self._variance_baseline + 0.1 * variance
         self._autocorr_baseline = 0.9 * self._autocorr_baseline + 0.1 * autocorr
+        self._skewness_baseline = 0.9 * self._skewness_baseline + 0.1 * skewness
 
         if var_ratio > self.rise_threshold and acf_ratio > self.rise_threshold:
+            if skew_rise > self.skew_rise_threshold:
+                return True, (
+                    f"variance {var_ratio:.2f}x, autocorrelation {acf_ratio:.2f}x, "
+                    f"skewness {skew_rise:.2f}x above baseline — "
+                    f"approaching transition, and it looks productive"
+                )
             return True, (
                 f"variance {var_ratio:.2f}x, autocorrelation {acf_ratio:.2f}x "
                 f"above baseline — approaching transition"
             )
 
-        return False, (f"variance {var_ratio:.2f}x, autocorrelation {acf_ratio:.2f}x")
+        return False, (
+            f"variance {var_ratio:.2f}x, autocorrelation {acf_ratio:.2f}x, "
+            f"skewness {skew_rise:.2f}x"
+        )
 
     def reset(self) -> None:
         """Reset detector state."""
         self._history.clear()
         self._variance_baseline = None
         self._autocorr_baseline = None
+        self._skewness_baseline = None
 
     def save(self) -> dict:
         """Serialize state."""
@@ -123,8 +166,10 @@ class CriticalSlowingDown:
             "history": list(self._history),
             "variance_baseline": self._variance_baseline,
             "autocorr_baseline": self._autocorr_baseline,
+            "skewness_baseline": self._skewness_baseline,
             "window_size": self.window_size,
             "rise_threshold": self.rise_threshold,
+            "skew_rise_threshold": self.skew_rise_threshold,
             "min_observations": self.min_observations,
         }
 
@@ -135,6 +180,8 @@ class CriticalSlowingDown:
         )
         self._variance_baseline = data.get("variance_baseline")
         self._autocorr_baseline = data.get("autocorr_baseline")
+        self._skewness_baseline = data.get("skewness_baseline")
         self.window_size = data.get("window_size", self.window_size)
         self.rise_threshold = data.get("rise_threshold", self.rise_threshold)
+        self.skew_rise_threshold = data.get("skew_rise_threshold", self.skew_rise_threshold)
         self.min_observations = data.get("min_observations", self.min_observations)

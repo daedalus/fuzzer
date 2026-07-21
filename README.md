@@ -49,6 +49,15 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 - **KS significance testing**: replaces fixed JS thresholds with sample-size-aware p-values
 - **CRPS scoring**: proper scoring rule for execution time calibration (fixed indicator direction bug)
 
+### Distribution Diagnostics
+- **Running statistics** (`core/running_stats.py`): Welford/Pébay online algorithm for O(1) mean, variance, stddev, skewness, and excess kurtosis — unbounded or sliding-window variants
+- **Execution time tail-risk detection**: skewness > 2.0 flags algorithmic-complexity inputs (regex backtracking, hash-flood) that occasionally trigger big execution-time excursions
+- **Critical slowing down skewness tier**: three-signal detector (variance + autocorrelation + skewness) — rising right skew upgrades the verdict to "approaching transition, and it looks productive"
+- **Per-operator reward moments**: UCB-style exploration bonus (`mean + k * stddev`) with kurtosis-scaled stability guard — high-kurtosis operators require more observations before trusting their stddev-based bonus
+- **Format learner z-score gate**: replaces fixed `delta != 0` threshold with z-score-based outlier detection; MAD fallback under high kurtosis for robustness against zero-inflated coverage deltas
+- **Corpus bloat early-warning**: rising right skew in seed file sizes is a leading indicator of bloat that precedes RSS threshold tripping
+- **Report distribution diagnostics**: stddev, skewness, and kurtosis for exec time, discovery rate, per-operator rewards, and seed sizes
+
 ### Scheduling Intelligence
 - **Jaccard index**: average pairwise edge-set overlap (xxhash-fast) for corpus redundancy monitoring
 - **Subsumption weighting**: MinHash-approximated Jaccard for continuous seed deprioritization

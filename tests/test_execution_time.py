@@ -170,3 +170,45 @@ class TestCRPSScorer:
         # Not perfectly symmetric but both should be > 0
         assert crps_below > 0
         assert crps_above > 0
+
+
+class TestSkewnessAndTailRisk:
+    def test_skewness_empty(self):
+        t = ExecutionTimeTracker()
+        assert t.skewness == 0.0
+
+    def test_skewness_few_observations(self):
+        t = ExecutionTimeTracker()
+        t.record(0.01)
+        t.record(0.02)
+        assert t.skewness == 0.0  # need >= 3 for skewness
+
+    def test_skewness_symmetric(self):
+        t = ExecutionTimeTracker()
+        for i in range(50):
+            t.record(0.05 + i * 0.001)
+        assert abs(t.skewness) < 0.5
+
+    def test_tail_risk_false_for_symmetric(self):
+        t = ExecutionTimeTracker()
+        for i in range(100):
+            t.record(0.05 + i * 0.001)
+        assert not t.tail_risk
+
+    def test_tail_risk_true_for_heavy_right_tail(self):
+        t = ExecutionTimeTracker()
+        for _ in range(100):
+            t.record(0.01)
+        t.record(10.0)  # extreme outlier
+        assert t.tail_risk
+
+    def test_skewness_zero_for_constant(self):
+        t = ExecutionTimeTracker()
+        for _ in range(50):
+            t.record(0.05)
+        assert t.skewness == 0.0
+        assert not t.tail_risk
+
+    def test_tail_risk_is_bool(self):
+        t = ExecutionTimeTracker()
+        assert isinstance(t.tail_risk, bool)

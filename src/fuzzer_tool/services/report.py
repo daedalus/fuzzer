@@ -79,6 +79,7 @@ def generate_report(fuzzer, corpus_dir: str, crashes_dir: str) -> str:
     sections.append(_bandit_calibration(fuzzer))
     sections.append(_fuzzing_strategy(fuzzer))
     sections.append(_execution_time_analysis(fuzzer))
+    sections.append(_distribution_diagnostics(fuzzer))
     sections.append(_mdl_codelength(fuzzer))
     sections.append(_seed_contribution(fuzzer))
     sections.append(_edge_rarity(fuzzer))
@@ -502,6 +503,81 @@ def _execution_time_analysis(f) -> str:
     return "\n".join(lines)
 
 
+def _distribution_diagnostics(f) -> str:
+    """Distribution diagnostics: stddev, skewness, kurtosis for key signal sources."""
+    lines = ["", "--- Distribution Diagnostics ---"]
+    has_data = False
+
+    # Execution time moments
+    try:
+        tracker = f._exec_time_tracker
+        if tracker and int(tracker.count) >= 3:
+            has_data = True
+            m = tracker._moments
+            lines.append(
+                f"  Exec time:       mean={float(m.mean) * 1000:.1f}ms  "
+                f"stddev={float(m.stddev) * 1000:.1f}ms  "
+                f"skew={float(m.skewness):.2f}  kurt={float(m.kurtosis):.2f}"
+            )
+            if tracker.tail_risk:
+                lines.append("                    TAIL_RISK: heavy right skew detected")
+    except (TypeError, AttributeError):
+        pass
+
+    # Discovery rate moments (from CSD detector)
+    try:
+        csd = f._csd
+        if csd and hasattr(csd, "_history") and len(csd._history) >= 3:
+            has_data = True
+            from fuzzer_tool.core.running_stats import RunningMoments
+
+            dr_moments = RunningMoments()
+            for v in csd._history:
+                dr_moments.update(float(v))
+            lines.append(
+                f"  Discovery rate:  mean={dr_moments.mean:.2f}  "
+                f"stddev={dr_moments.stddev:.2f}  "
+                f"skew={dr_moments.skewness:.2f}  kurt={dr_moments.kurtosis:.2f}"
+            )
+    except (TypeError, AttributeError):
+        pass
+
+    # Per-operator reward moments (from Elo tracker)
+    try:
+        elo = f._elo
+        if elo and hasattr(elo, "_reward_moments") and elo._reward_moments:
+            has_data = True
+            lines.append("  Operator rewards:")
+            for op, rm in sorted(elo._reward_moments.items(), key=lambda x: -(x[1].mean)):
+                if rm.count >= 3:
+                    lines.append(
+                        f"    {op:<22s} mean={rm.mean:.3f}  "
+                        f"stddev={rm.stddev:.3f}  "
+                        f"skew={rm.skewness:.2f}  kurt={rm.kurtosis:.2f}"
+                    )
+    except (TypeError, AttributeError):
+        pass
+
+    # Seed size moments (corpus bloat indicator)
+    try:
+        seed_moments = f._seed_size_moments
+        if seed_moments and int(seed_moments.count) >= 10:
+            has_data = True
+            lines.append(
+                f"  Seed sizes:      mean={float(seed_moments.mean):.0f}B  "
+                f"stddev={float(seed_moments.stddev):.0f}B  "
+                f"skew={float(seed_moments.skewness):.2f}  kurt={float(seed_moments.kurtosis):.2f}"
+            )
+            if float(seed_moments.skewness) > 2.0:
+                lines.append("                    BLOAT WARNING: rising right tail in seed sizes")
+    except (TypeError, AttributeError):
+        pass
+
+    if not has_data:
+        return ""
+    return "\n".join(lines)
+
+
 def _corpus_health(f) -> str:
     """Corpus health: entropy, lineage depth, duplicate rate."""
     if not f.seed_meta:
@@ -765,7 +841,11 @@ def _entropy_metrics(f) -> str:
             pass
 
     # Entropy rate of change
-    if hasattr(f, "_entropy_history") and isinstance(f._entropy_history, list) and len(f._entropy_history) >= 2:
+    if (
+        hasattr(f, "_entropy_history")
+        and isinstance(f._entropy_history, list)
+        and len(f._entropy_history) >= 2
+    ):
         try:
             recent = f._entropy_history[-10:]
             if len(recent) >= 2:
@@ -775,7 +855,9 @@ def _entropy_metrics(f) -> str:
                     rate = dS / dt
                     label = "rising" if rate > 0.001 else ("falling" if rate < -0.001 else "flat")
                     lines.append(f"  Entropy rate (dS/dt): {rate:+.6f} ({label})")
-                    lines.append(f"  Entropy samples:     {len(f._entropy_history)} (window={recent[-1][0] - recent[0][0]} execs)")
+                    lines.append(
+                        f"  Entropy samples:     {len(f._entropy_history)} (window={recent[-1][0] - recent[0][0]} execs)"
+                    )
         except (TypeError, IndexError):
             pass
     else:
@@ -831,13 +913,17 @@ def _format_learning(f) -> str:
         # Overview
         summary = fl.get_format_summary()
         lines.append(f"  Timeline:        {summary['timeline_size']} transitions recorded")
-        lines.append(f"  Hypotheses:      {summary['hypotheses']} total, {summary['classified']} classified")
+        lines.append(
+            f"  Hypotheses:      {summary['hypotheses']} total, {summary['classified']} classified"
+        )
         lines.append(f"  Model version:   {summary['model_version']}")
-        lines.append(f"  Backtest:        {summary['backtest_passes']} passes, {summary['backtest_fails']} fails")
+        lines.append(
+            f"  Backtest:        {summary['backtest_passes']} passes, {summary['backtest_fails']} fails"
+        )
 
         # Backtest verdict
-        passes = int(summary['backtest_passes'])
-        fails = int(summary['backtest_fails'])
+        passes = int(summary["backtest_passes"])
+        fails = int(summary["backtest_fails"])
         if passes > 0 and fails == 0:
             lines.append("  Model status:    CERTIFIED (all backtests passed)")
         elif fails > 0:
@@ -849,8 +935,12 @@ def _format_learning(f) -> str:
         if summary["fields"]:
             lines.append("")
             lines.append("  Inferred format fields:")
-            lines.append(f"    {'Offset':>8s}  {'Width':>5s}  {'Type':>10s}  {'Conf':>5s}  {'Obs':>4s}  Controlled edges")
-            lines.append(f"    {'------':>8s}  {'-----':>5s}  {'----':>10s}  {'----':>5s}  {'---':>4s}  {'---------------'}")
+            lines.append(
+                f"    {'Offset':>8s}  {'Width':>5s}  {'Type':>10s}  {'Conf':>5s}  {'Obs':>4s}  Controlled edges"
+            )
+            lines.append(
+                f"    {'------':>8s}  {'-----':>5s}  {'----':>10s}  {'----':>5s}  {'---':>4s}  {'---------------'}"
+            )
             for field in summary["fields"]:
                 lines.append(
                     f"    {field['offset']:>8d}  {field['width']:>5d}  {field['type']:>10s}  "
@@ -859,7 +949,9 @@ def _format_learning(f) -> str:
 
         # Discriminating probe suggestion
         try:
-            probe = fl.suggest_discriminating_mutation(list(f.op_counts.keys()) if f.op_counts else [])
+            probe = fl.suggest_discriminating_mutation(
+                list(f.op_counts.keys()) if f.op_counts else []
+            )
             if probe and isinstance(probe, tuple) and len(probe) == 2:
                 op, offset = probe
                 lines.append(f"\n  Suggested probe: {op} at offset {offset}")

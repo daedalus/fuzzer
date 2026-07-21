@@ -23,7 +23,14 @@ import logging
 import math
 import random
 
+from fuzzer_tool.core.running_stats import RunningMoments
+
 log = logging.getLogger(__name__)
+
+# Minimum observations before the kurtosis-scaled trust gate allows the
+# UCB bonus.  High-kurtosis reward distributions need more samples before
+# the stddev estimate is trustworthy.
+_UCB_MIN_SAMPLES_BASE = 20
 
 
 class EloTracker:
@@ -60,6 +67,9 @@ class EloTracker:
         self._strategy_ratings: dict[str, float] = {}
         self._strategy_match_count: dict[str, int] = {}
 
+        # Per-operator reward moments for UCB-style exploration bonus.
+        self._reward_moments: dict[str, RunningMoments] = {}
+
     def init_arm(self, name: str) -> None:
         """Register an operator for tracking."""
         if name not in self.ratings:
@@ -67,6 +77,78 @@ class EloTracker:
             self._match_count[name] = 0
         if self.crash_track and name not in self.crash_ratings:
             self.crash_ratings[name] = self.default_rating
+        if name not in self._reward_moments:
+            self._reward_moments[name] = RunningMoments()
+
+    def record_reward(self, op: str, reward: float) -> None:
+        """Record a scalar reward for an operator (edges gained, etc.).
+
+        Used by UCB-style selection to estimate per-operator reward
+        distributions with mean + variance.
+        """
+        if op not in self._reward_moments:
+            self._reward_moments[op] = RunningMoments()
+        self._reward_moments[op].update(reward)
+
+    def select_op_ucb(
+        self,
+        operators: list[str],
+        exploration_weight: float = 1.0,
+        temperature: float = 400.0,
+    ) -> str:
+        """Select operator using UCB-style score: mean + k * stddev.
+
+        High-kurtosis operators require more observations before trusting
+        the stddev-based bonus (kurtosis stability guard).
+
+        Only used when --bandit-variance-bonus is enabled (off by default).
+
+        Args:
+            operators: Candidate operators.
+            exploration_weight: k in mean + k * stddev.
+            temperature: Fallback Elo temperature when no reward data.
+
+        Returns:
+            Selected operator name.
+        """
+        if not operators:
+            return ""
+        if len(operators) == 1:
+            return operators[0]
+
+        # Only consider operators with enough reward samples.
+        # Scale the minimum by kurtosis: high kurtosis → need more samples.
+        scored: list[tuple[str, float]] = []
+        for op in operators:
+            moments = self._reward_moments.get(op)
+            if moments is None or moments.count < 3:
+                # Not enough data — fall back to Elo rating
+                scored.append((op, self.ratings.get(op, self.default_rating)))
+                continue
+            kurt = moments.kurtosis
+            min_samples = _UCB_MIN_SAMPLES_BASE * max(1.0, 1.0 + kurt * 0.1)
+            if moments.count < min_samples:
+                # Too few samples for this kurtosis level — use Elo
+                scored.append((op, self.ratings.get(op, self.default_rating)))
+                continue
+            score = moments.mean + exploration_weight * moments.stddev
+            scored.append((op, score))
+
+        # Select via softmax over scores
+        max_s = max(s for _, s in scored)
+        weights = [math.exp((s - max_s) / temperature) for _, s in scored]
+        total = sum(weights)
+        r = random.random() * total
+        cumulative = 0.0
+        for i, (op, _) in enumerate(scored):
+            cumulative += weights[i]
+            if r <= cumulative:
+                return op
+        return scored[-1][0]
+
+    def get_reward_moments(self, op: str) -> RunningMoments | None:
+        """Get reward statistics for an operator (for diagnostics)."""
+        return self._reward_moments.get(op)
 
     def _expected_score(self, ra: float, rb: float) -> float:
         """Expected score for player A against player B."""
@@ -91,6 +173,10 @@ class EloTracker:
         self.ratings[op_b] = rb + self.k_factor * ((1.0 - score_a) - eb)
         self._match_count[op_a] = self._match_count.get(op_a, 0) + 1
         self._match_count[op_b] = self._match_count.get(op_b, 0) + 1
+
+        # Track reward distribution per operator
+        self.record_reward(op_a, score_a)
+        self.record_reward(op_b, 1.0 - score_a)
 
         if crash and self.crash_track:
             cra = self.crash_ratings.get(op_a, self.default_rating)
@@ -331,6 +417,9 @@ class EloTracker:
 
     def save(self, path: str) -> bool:
         """Save state to JSON."""
+        reward_moments_ser = {}
+        for op, rm in self._reward_moments.items():
+            reward_moments_ser[op] = rm.save()
         data = {
             "k_factor": self.k_factor,
             "default_rating": self.default_rating,
@@ -343,6 +432,7 @@ class EloTracker:
             "decay_ticks": self._decay_ticks,
             "strategy_ratings": self._strategy_ratings,
             "strategy_match_count": self._strategy_match_count,
+            "reward_moments": reward_moments_ser,
         }
         try:
             with open(path, "w") as f:
@@ -373,5 +463,10 @@ class EloTracker:
         self._decay_ticks = data.get("decay_ticks", 0)
         self._strategy_ratings = data.get("strategy_ratings", {})
         self._strategy_match_count = data.get("strategy_match_count", {})
+        self._reward_moments = {}
+        for op, rm_data in data.get("reward_moments", {}).items():
+            rm = RunningMoments()
+            rm.load(rm_data)
+            self._reward_moments[op] = rm
         log.info("Elo tracker loaded: %s (%d operators)", path, len(self.ratings))
         return True

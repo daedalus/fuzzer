@@ -10,6 +10,14 @@ honest uncertainty quantification.
 import bisect
 import collections
 
+from fuzzer_tool.core.running_stats import RunningMoments
+
+# Skewness above this value flags the input family as "tail-risk":
+# occasional large excursions (regex backtracking, hash-flood) against
+# a modest mean — distinct from "generally slow" (high mean) or "noisy"
+# (high stddev).
+TAIL_RISK_SKEWNESS_THRESHOLD = 2.0
+
 
 class ExecutionTimeTracker:
     """Track execution times with CRPS-based calibration.
@@ -34,6 +42,7 @@ class ExecutionTimeTracker:
         self._crps_history: collections.deque = collections.deque(maxlen=100)
         self._total_observations = 0
         self._crps_sum = 0.0
+        self._moments: RunningMoments = RunningMoments(window=window_size)
 
     def record(self, elapsed: float) -> float:
         """Record an execution time and return the CRPS score.
@@ -53,6 +62,7 @@ class ExecutionTimeTracker:
         self._total_observations += 1
 
         self._times.append(elapsed)
+        self._moments.update(elapsed)
         bisect.insort(self._sorted, elapsed)
         if len(self._sorted) > self.window_size:
             # Remove oldest observation from sorted list
@@ -120,10 +130,7 @@ class ExecutionTimeTracker:
         # Add one standard deviation for headroom instead of a flat multiplier.
         # This adapts to the actual variance: tight distributions get small
         # headroom, high-variance targets get more.
-        mean = sum(self._sorted) / len(self._sorted)
-        variance = sum((x - mean) ** 2 for x in self._sorted) / len(self._sorted)
-        std_dev = variance**0.5
-        return p99 + std_dev * self.correction_factor
+        return p99 + self._moments.stddev * self.correction_factor
 
     def mean_crps(self) -> float:
         """Mean CRPS over recent observations — lower is better calibrated."""
@@ -162,12 +169,24 @@ class ExecutionTimeTracker:
     @property
     def variance(self) -> float:
         """Variance of observed execution times."""
-        if len(self._sorted) < 2:
-            return 0.0
-        mean = sum(self._sorted) / len(self._sorted)
-        return sum((x - mean) ** 2 for x in self._sorted) / (len(self._sorted) - 1)
+        return self._moments.variance
 
     @property
     def std(self) -> float:
         """Standard deviation of observed execution times."""
-        return self.variance**0.5
+        return self._moments.stddev
+
+    @property
+    def skewness(self) -> float:
+        """Skewness of observed execution times."""
+        return self._moments.skewness
+
+    @property
+    def tail_risk(self) -> bool:
+        """True when execution times show heavy right skew.
+
+        Heavy right skew with a modest mean is the profile of
+        algorithmic-complexity inputs (regex backtracking, hash-flood)
+        that occasionally trigger a big execution-time excursion.
+        """
+        return self._moments.skewness > TAIL_RISK_SKEWNESS_THRESHOLD

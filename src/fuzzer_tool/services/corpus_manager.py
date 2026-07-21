@@ -18,6 +18,8 @@ import contextlib
 import hashlib
 import os
 
+from fuzzer_tool.core.running_stats import RunningMoments
+
 try:
     import xxhash
 
@@ -68,6 +70,7 @@ class CorpusManager:
         morris_mode = os.environ.get("AFL_MORRIS", "1") != "0"
         f._edge_tracker = EdgeTracker(map_size=f.map_size, morris_mode=morris_mode)
         f._corpus_size_history: list[int] = []
+        f._seed_size_moments = RunningMoments(window=200)
 
         if f.resume:
             self.load_state()
@@ -284,6 +287,17 @@ class CorpusManager:
                     f.markov.last_js_divergence,
                 )
             f._corpus_size_history.append(len(data))
+            seed_moments = getattr(f, "_seed_size_moments", None)
+            if seed_moments is not None:
+                seed_moments.update(float(len(data)))
+                # Bloat early-warning: rising right skew in seed sizes means
+                # a few oversized seeds are growing relative to the median.
+                if seed_moments.count >= 50 and seed_moments.skewness > 2.0:
+                    log.warning(
+                        "Corpus bloat warning: seed-size skewness=%.2f "
+                        "(rising right tail — consider proactive minimization)",
+                        seed_moments.skewness,
+                    )
             if len(f._corpus_size_history) > 1000:
                 f._corpus_size_history = f._corpus_size_history[-500:]
             if f._corpus_secretary:
