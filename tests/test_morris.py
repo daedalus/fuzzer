@@ -60,12 +60,13 @@ class TestMorrisEdgeTracker:
         assert hc >= 5  # estimate(5) ≈ 5.43, rounds to 5
 
     def test_record_edges_legacy_mode(self):
-        """Legacy mode should use raw byte values."""
+        """Legacy mode classifies hit counts via count_class before recording."""
         et = EdgeTracker(map_size=4096, morris_mode=False)
         bitmap = bytearray(4096)
         bitmap[100] = 5
         et.record_edges("seed1", bytes(bitmap), morris_mode=False)
-        assert et.seed_hit_counts["seed1"][100] == 5
+        # 5 → class 4 (count_class bucketization: 4-7 → 4)
+        assert et.seed_hit_counts["seed1"][100] == 4
 
     def test_edge_rarity_stats_morris(self):
         """Morris mode uses adjusted thresholds."""

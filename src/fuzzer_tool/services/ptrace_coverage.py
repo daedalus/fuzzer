@@ -5,6 +5,8 @@ import logging
 import os
 import struct
 
+from fuzzer_tool.core.count_class import classify_counts
+
 log = logging.getLogger(__name__)
 
 try:
@@ -52,7 +54,7 @@ class PtraceCoverage:
         self.cumulative_edges = 0
         self.total_bp_hits = 0
         self._base_address: int | None = None
-        self._map_snapshot = bytes(self.edge_map)
+        self._map_snapshot = classify_counts(bytes(self.edge_map))
         self.deep_coverage = deep_coverage and HAS_CAPSTONE
         self.max_bps = max_bps
         self._discovered_bbs: set[int] = set()
@@ -433,7 +435,7 @@ class PtraceCoverage:
     def reset_edge_map(self):
         self.prev_location = 0
         self.total_edges = 0
-        self._map_snapshot = bytes(self.edge_map)
+        self._map_snapshot = classify_counts(bytes(self.edge_map))
 
     def record_edge(self, addr: int) -> bool:
         # Use relative addresses for edge hashing (consistent with AFL).
@@ -450,4 +452,13 @@ class PtraceCoverage:
         return False
 
     def is_new_coverage(self) -> bool:
-        return bytes(self.edge_map) != self._map_snapshot
+        """Check if current edge map has changed vs last snapshot.
+
+        Classifies hit counts into logarithmic buckets before comparison,
+        so count-magnitude noise doesn't cause spurious novelty detection.
+        """
+        classified = classify_counts(bytes(self.edge_map))
+        if classified == self._map_snapshot:
+            return False
+        self._map_snapshot = classified
+        return True

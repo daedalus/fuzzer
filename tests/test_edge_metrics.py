@@ -78,7 +78,8 @@ class TestRecordEdges:
         et = EdgeTracker()
         bitmap = bytes([0, 5, 0, 3, 0])
         et.record_edges("a", bitmap)
-        assert et.seed_hit_counts["a"] == {1: 5, 3: 3}
+        # 5 → class 4, 3 → class 3 (count_class bucketization)
+        assert et.seed_hit_counts["a"] == {1: 4, 3: 3}
 
     def test_returns_new_edges(self):
         et = EdgeTracker()

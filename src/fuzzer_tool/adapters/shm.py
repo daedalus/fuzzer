@@ -5,6 +5,8 @@ import ctypes
 import ctypes.util
 import os
 
+from fuzzer_tool.core.count_class import classify_counts
+
 SHM_MAP_SIZE = 65536
 
 # shmget constants
@@ -57,6 +59,7 @@ class ShmCoverage:
         self._map = (ctypes.c_char * size).from_address(self._ptr)
         self.env_id = str(self.shm_id)
         self._seen = bytearray(size)  # cumulative "ever seen" bitmap
+        self._seen_classified = bytearray(size)  # cumulative classified "ever seen"
         self._last_map_hash = 0  # cached hash for is_new_coverage fast path
         self._last_map_ptr = ctypes.create_string_buffer(size)  # snapshot for memcmp
         self._register_atexit()
@@ -73,6 +76,7 @@ class ShmCoverage:
     def reset(self):
         """Full reset: zero bitmap, snapshot, and cumulative counters."""
         self.reset_edge_map()
+        self._seen_classified = bytearray(self.size)
         self.total_edges = 0
 
     def record_edge(self, edge_id: int) -> bool:
@@ -82,7 +86,7 @@ class ShmCoverage:
         directly into SHM, so this is not called in normal operation.
         """
         idx = edge_id % self.size
-        if self._map[idx] == b'\x00':
+        if self._map[idx] == b"\x00":
             self._map[idx] = 1
             if not self._seen[idx]:
                 self._seen[idx] = 1
@@ -94,29 +98,41 @@ class ShmCoverage:
     def is_new_coverage(self) -> bool:
         """Check if current bitmap has any edge not seen before (AFL-style).
 
-        Uses memcmp for fast equality check, then direct buffer access
-        for finding new edges. Avoids bytes() allocation entirely.
+        Classifies raw hit counts into logarithmic buckets before
+        comparison, so count-magnitude noise (e.g. 47 vs 52) doesn't
+        cause spurious novelty. Uses memcmp for fast equality check on
+        the classified snapshot, then direct buffer access for finding
+        new edges.
         """
-        # Fast path: check if map unchanged using memcmp (no allocation)
-        if _libc.memcmp(self._map, self._last_map_ptr, self.size) == 0:
+        # Classify the raw bitmap — collapses count-magnitude noise
+        classified = classify_counts(bytes(self._map))
+
+        # Fast path: check if classified map unchanged (no allocation beyond classify)
+        last_arr = (ctypes.c_char * self.size).from_address(ctypes.addressof(self._last_map_ptr))
+        if bytes(classified) == bytes(last_arr):
             return False
-        # Slow path: find and record new edges
+
+        # Slow path: find and record new edges using classified bitmap
         has_new = False
         for i in range(self.size):
-            if self._map[i] != b'\x00' and not self._seen[i]:
+            if classified[i] and not self._seen_classified[i]:
+                self._seen_classified[i] = classified[i]
                 self._seen[i] = 1
                 self.cumulative_edges += 1
                 has_new = True
-        # Update snapshot for next comparison
-        ctypes.memmove(self._last_map_ptr, self._map, self.size)
+
+        # Update classified snapshot for next comparison
+        ctypes.memmove(self._last_map_ptr, bytes(classified), self.size)
         if has_new:
             self.total_edges += 1
         return has_new
 
     def commit_snapshot(self):
         """Update the cumulative 'seen' bitmap to include all current edges."""
+        classified = classify_counts(bytes(self._map))
         for i in range(self.size):
-            if self._map[i] != b'\x00' and not self._seen[i]:
+            if classified[i] and not self._seen_classified[i]:
+                self._seen_classified[i] = classified[i]
                 self._seen[i] = 1
                 self.cumulative_edges += 1
 
@@ -175,6 +191,7 @@ class ShmCoverage:
         # AFL's hash (edge_id = hash(src,dst) % map_size) maps the same
         # logical edge to different positions in the new bitmap.
         self._seen = bytearray(new_size)
+        self._seen_classified = bytearray(new_size)
         self.cumulative_edges = 0
         self.total_edges = 0
 

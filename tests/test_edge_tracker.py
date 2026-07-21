@@ -158,7 +158,8 @@ class TestEdgeTrackerCore:
         et.record_edges("seed1", bytes(bitmap))
         bitmap[10] = 3
         et.record_edges("seed1", bytes(bitmap))
-        assert et._global_edge_hits[10] == 8  # 5+3
+        # 5 → class 4, 3 → class 3 (count_class bucketization)
+        assert et._global_edge_hits[10] == 7  # 4+3
 
     def test_record_edges_invalidation(self):
         et = EdgeTracker(map_size=256)
@@ -412,8 +413,9 @@ class TestSaveLoad:
         assert et2.load(path)
         assert et2.map_size == 256
         assert 10 in et2.cumulative_edges
-        assert et2.seed_hit_counts["seed1"][10] == 5  # latest value per seed
-        assert et2._global_edge_hits[10] == 10
+        # 5 → class 4 (count_class bucketization)
+        assert et2.seed_hit_counts["seed1"][10] == 4  # latest classified value per seed
+        assert et2._global_edge_hits[10] == 8  # 4+4
 
     def test_load_nonexistent(self, tmp_path):
         et = EdgeTracker()

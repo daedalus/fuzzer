@@ -1,10 +1,8 @@
 """Core domain logic for fuzzer-tool."""
 
-from fuzzer_tool.core.mi import MutualInformationTracker
-from fuzzer_tool.core.rate_distortion import RateDistortionCorpus
-from fuzzer_tool.core.renyi import CoverageSpectrumAnalyzer, RenyiEntropy
-from fuzzer_tool.core.transfer_entropy import TransferEntropy
+from fuzzer_tool.core.count_class import classify_counts, classify_single, new_bits
 from fuzzer_tool.core.markov import MarkovChain
+from fuzzer_tool.core.mi import MutualInformationTracker
 from fuzzer_tool.core.montecarlo import (
     MOptScheduler,
     MonteCarloScheduler,
@@ -20,9 +18,15 @@ from fuzzer_tool.core.mutations import (
     load_dictionary,
     parse_dict_line,
 )
+from fuzzer_tool.core.rate_distortion import RateDistortionCorpus
+from fuzzer_tool.core.renyi import CoverageSpectrumAnalyzer, RenyiEntropy
 from fuzzer_tool.core.sanitizer import SanitizerReport
+from fuzzer_tool.core.transfer_entropy import TransferEntropy
 
 __all__ = [
+    "classify_counts",
+    "classify_single",
+    "new_bits",
     "MarkovChain",
     "MonteCarloScheduler",
     "MOptScheduler",

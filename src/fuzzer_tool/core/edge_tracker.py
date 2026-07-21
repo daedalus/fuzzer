@@ -28,6 +28,7 @@ try:
 except ImportError:
     _HAS_NUMPY = False
 
+from fuzzer_tool.core.count_class import classify_counts
 from fuzzer_tool.core.similarity import hamming_distance
 
 log = logging.getLogger(__name__)
@@ -377,7 +378,9 @@ class EdgeTracker:
     priority; seeds fully subsumed by others get deprioritized.
     """
 
-    def __init__(self, map_size: int = 65536, max_tracked_seeds: int = 200, morris_mode: bool = False):
+    def __init__(
+        self, map_size: int = 65536, max_tracked_seeds: int = 200, morris_mode: bool = False
+    ):
         self.map_size = map_size
         self.max_tracked_seeds = max_tracked_seeds
         self._morris_mode = morris_mode
@@ -415,7 +418,9 @@ class EdgeTracker:
         self._correlation_matrix: dict[tuple[int, int], int] = {}
         self._correlation_total: int = 0
 
-    def record_edges(self, seed_key: str, edge_bitmap: bytes, target_name: str = "", morris_mode: bool = False) -> set[int]:
+    def record_edges(
+        self, seed_key: str, edge_bitmap: bytes, target_name: str = "", morris_mode: bool = False
+    ) -> set[int]:
         """Record edges hit by a seed execution.
 
         Args:
@@ -434,7 +439,16 @@ class EdgeTracker:
             self.seed_hit_counts[seed_key] = {}
         hc = self.seed_hit_counts[seed_key]
 
-        # Scan only non-zero bytes in the bitmap via numpy flatnonzero.
+        # Classify hit counts before recording (non-Morris only) —
+        # collapses noise like 47 vs 52 into the same bucket (32-127),
+        # so diversity scoring (JS divergence, Wasserstein) uses
+        # bucketized magnitude rather than raw jittery counts.
+        # Morris mode skips classification because its own
+        # morris_estimate() already handles approximate counting.
+        if not morris_mode:
+            edge_bitmap = classify_counts(edge_bitmap)
+
+        # Scan only non-zero bytes via numpy flatnonzero.
         # For a 256KB bitmap with ~100 active edges this is ~2600x fewer
         # Python iterations than iterating every byte with enumerate.
         arr = np.frombuffer(edge_bitmap, dtype=np.uint8, count=min(len(edge_bitmap), self.map_size))
@@ -578,6 +592,7 @@ class EdgeTracker:
         else:
             # Large set: sample random pairs
             import random as _rand
+
             for _ in range(max_pairs):
                 i = _rand.randint(0, n - 2)
                 j = _rand.randint(i + 1, n - 1)
