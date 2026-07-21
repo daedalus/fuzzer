@@ -60,11 +60,14 @@ def _get_fast_path_file() -> str:
     global _fast_path_fd, _fast_path_name
     if _fast_path_fd is None:
         import tempfile
+
         _fast_path_fd, _fast_path_name = tempfile.mkstemp(suffix=".bin", prefix="fuzz_")
     return _fast_path_name
 
 
-def run_target_fast(target: str, data: bytes, env: dict[str, str] | None = None) -> tuple[int, str, int]:
+def run_target_fast(
+    target: str, data: bytes, env: dict[str, str] | None = None
+) -> tuple[int, str, int]:
     """Fast execution path using os.posix_spawn + temp file.
 
     Avoids thread creation, watchdog overhead, and stdin pipe buffering.

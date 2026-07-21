@@ -390,7 +390,7 @@ class SeedPicker:
         front.sort(key=lambda i: (-scores[i][0], -scores[i][1], -scores[i][2]))
 
         result = []
-        max_b = max_c = float('-inf')
+        max_b = max_c = float("-inf")
         for i in front:
             a, b, c = scores[i]
             if b > max_b or c > max_c:
@@ -407,7 +407,11 @@ class SeedPicker:
 
         # Cache Pareto scores - recompute every 100 execs or when corpus changes
         cache_key = len(f.corpus)
-        if not hasattr(f, "_pareto_cache") or f._pareto_cache_key != cache_key or f.exec_count % 100 == 0:
+        if (
+            not hasattr(f, "_pareto_cache")
+            or f._pareto_cache_key != cache_key
+            or f.exec_count % 100 == 0
+        ):
             pareto_scores: list[tuple[float, float, float]] = []
             for seed in f.corpus:
                 meta = f.seed_meta.get(seed)

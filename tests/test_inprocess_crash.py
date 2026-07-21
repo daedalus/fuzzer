@@ -25,6 +25,7 @@ ASAN_SO = TARGETS_DIR / "asan_target.so"
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_corpus_with_seed(tmpdir, seed_data):
     """Create corpus/seeds/ structure with a seed file."""
     corpus_dir = Path(tmpdir) / "corpus"
@@ -41,10 +42,21 @@ def _fuzzer_crash_test(target, seed_data, tmpdir, **extra_kwargs):
     crashes_dir.mkdir()
 
     cmd = [
-        sys.executable, "-m", "fuzzer_tool", "fuzz", str(target),
-        "-d", str(corpus_dir),
-        "-o", str(crashes_dir),
-        "-n", "100", "-t", "2", "-s", "42",
+        sys.executable,
+        "-m",
+        "fuzzer_tool",
+        "fuzz",
+        str(target),
+        "-d",
+        str(corpus_dir),
+        "-o",
+        str(crashes_dir),
+        "-n",
+        "100",
+        "-t",
+        "2",
+        "-s",
+        "42",
     ]
     for k, v in extra_kwargs.items():
         cmd.extend([f"--{k.replace('_', '-')}", str(v)])
@@ -57,6 +69,7 @@ def _fuzzer_crash_test(target, seed_data, tmpdir, **extra_kwargs):
 # ---------------------------------------------------------------------------
 # Bug class 1: _run_c_direct_lite signal handlers
 # ---------------------------------------------------------------------------
+
 
 class TestDirectLiteCrashHandler:
     """Verify _run_c_direct_lite has signal handlers installed."""
@@ -104,6 +117,7 @@ class TestDirectLiteCrashHandler:
 # Bug class 2: _probe_so_function loading .so via ctypes.CDLL
 # ---------------------------------------------------------------------------
 
+
 class TestProbeSoFunction:
     """Verify _probe_so_function doesn't load .so via ctypes.CDLL."""
 
@@ -137,6 +151,7 @@ class TestProbeSoFunction:
 # ---------------------------------------------------------------------------
 # Bug class 3: Auto-detected .so targets use subprocess loader
 # ---------------------------------------------------------------------------
+
 
 class TestAutoDetectedSoMode:
     """Verify auto-detected .so targets use subprocess loader, not direct_lite."""
@@ -198,7 +213,9 @@ class TestAutoDetectedSoMode:
         assert rc != 0, "Target should have crashed"
         assert rc == -11, f"Expected SIGSEGV (rc=-11), got rc={rc}"
 
-    @pytest.mark.skip(reason="ASAN .so needs LD_PRELOAD set before process start — testing via CLI integration test instead")
+    @pytest.mark.skip(
+        reason="ASAN .so needs LD_PRELOAD set before process start — testing via CLI integration test instead"
+    )
     def test_asan_subprocess_detects_crash(self):
         """ASAN .so targets detect crashes via exit code (direct_lite mode)."""
         from fuzzer_tool.adapters.inprocess import InProcessRunner
@@ -224,6 +241,7 @@ class TestAutoDetectedSoMode:
 # Bug class 4: run_target_fast stdin redirect and stderr capture
 # ---------------------------------------------------------------------------
 
+
 class TestRunTargetFast:
     """Verify run_target_fast redirects stdin and captures stderr."""
 
@@ -236,9 +254,7 @@ class TestRunTargetFast:
         """run_target_fast must capture stderr for ASAN output."""
         rc, stderr, pid = run_target_fast(str(TARGETS_DIR / "asan_target"), b"BUG!S")
         assert rc != 0, "ASAN target should have crashed"
-        assert "AddressSanitizer" in stderr, (
-            f"Expected ASAN report in stderr, got: {stderr[:200]}"
-        )
+        assert "AddressSanitizer" in stderr, f"Expected ASAN report in stderr, got: {stderr[:200]}"
 
 
 # Import at module level for TestRunTargetFast
@@ -248,6 +264,7 @@ from fuzzer_tool.adapters.process import run_target_fast
 # ---------------------------------------------------------------------------
 # Bug class 5: Integration — fuzzer finds crashes through all modes
 # ---------------------------------------------------------------------------
+
 
 class TestInprocessCrashIntegration:
     """Integration tests: fuzzer finds crashes through inprocess mode."""
@@ -268,9 +285,7 @@ class TestInprocessCrashIntegration:
         with tempfile.TemporaryDirectory() as tmpdir:
             result, crash_files = _fuzzer_crash_test(ASAN_SO, b"BUG!S", tmpdir)
             assert result.returncode == 0, f"Fuzzer failed: {result.stderr}"
-            assert len(crash_files) > 0, (
-                f"No crashes found in ASAN .so. Output:\n{result.stdout}"
-            )
+            assert len(crash_files) > 0, f"No crashes found in ASAN .so. Output:\n{result.stdout}"
 
     def test_nosan_standalone_finds_crash(self):
         """Fuzzer detects crashes in non-ASAN standalone binary."""

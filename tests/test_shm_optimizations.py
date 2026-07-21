@@ -1,4 +1,5 @@
 """Tests for SHM coverage data structures and optimizations."""
+
 import pytest
 import tempfile
 import os
@@ -232,13 +233,15 @@ class TestCrashETA:
         from fuzzer_tool.core.crash_eta import CrashMITracker
 
         tracker = CrashMITracker()
-        tracker.load({
-            "position_counts": {str(i): 100 for i in range(100)},
-            "byte_total": {},
-            "joint_crash": {},
-            "total_execs": 10000,
-            "total_crashes": 100,
-        })
+        tracker.load(
+            {
+                "position_counts": {str(i): 100 for i in range(100)},
+                "byte_total": {},
+                "joint_crash": {},
+                "total_execs": 10000,
+                "total_crashes": 100,
+            }
+        )
 
         # Warm up cache
         tracker.all_mi()

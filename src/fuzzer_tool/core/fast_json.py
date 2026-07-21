@@ -1,4 +1,5 @@
 """Fast JSON module using orjson when available."""
+
 try:
     import orjson
 

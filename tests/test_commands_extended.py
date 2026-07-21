@@ -457,7 +457,11 @@ class TestCmdEstimateExtended:
         mock_fuzzer = MagicMock()
         mock_fuzzer._edge_tracker = MagicMock()
         mock_fuzzer._edge_tracker.good_turing_estimate.return_value = {
-            "n": 100, "n1": 10, "n2": 5, "estimated_undiscovered": 50, "confidence": "medium"
+            "n": 100,
+            "n1": 10,
+            "n2": 5,
+            "estimated_undiscovered": 50,
+            "confidence": "medium",
         }
         mock_fuzzer.discovery_rate.return_value = 5.0
         monkeypatch.setattr("fuzzer_tool.cli.commands.Fuzzer", lambda **kwargs: mock_fuzzer)

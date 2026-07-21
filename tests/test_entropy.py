@@ -87,9 +87,7 @@ class TestEntropyRateTracking:
         f.exec_count = 500
         f._last_new_edge_exec = 100  # 400 execs since last edge
 
-        f._entropy_history = [
-            (100, 1.5), (200, 1.5), (300, 1.5), (400, 1.5)
-        ]
+        f._entropy_history = [(100, 1.5), (200, 1.5), (300, 1.5), (400, 1.5)]
 
         execs_since_edge = f.exec_count - f._last_new_edge_exec
         assert execs_since_edge >= f._stall_threshold
@@ -103,9 +101,7 @@ class TestEntropyRateTracking:
         f = self._make_fuzzer()
         f._stall_recovery_active = False
         f._stall_recovery_count = 0
-        f._entropy_history = [
-            (100, 1.0), (200, 1.5), (300, 2.0), (400, 2.5)
-        ]
+        f._entropy_history = [(100, 1.0), (200, 1.5), (300, 2.0), (400, 2.5)]
 
         assert f._compute_entropy_flat() is False
         assert f._maybe_trigger_stall_recovery(400) is False

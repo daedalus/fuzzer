@@ -88,8 +88,12 @@ class CrashMITracker:
                 self.byte_total[pos] = defaultdict(int, dict(top))
                 if pos in self.joint_crash:
                     self.joint_crash[pos] = defaultdict(
-                        int, {k: v for k, v in self.joint_crash[pos].items()
-                              if k in self.byte_total[pos]}
+                        int,
+                        {
+                            k: v
+                            for k, v in self.joint_crash[pos].items()
+                            if k in self.byte_total[pos]
+                        },
                     )
         # Only invalidate cache periodically to avoid recomputing MI on every call
         if self.total_execs % 50 == 0:
@@ -163,6 +167,7 @@ class CrashMITracker:
             return 0
         # Binary search for cutoff index
         import bisect
+
         idx = bisect.bisect_left(self._cached_positions, input_length)
         if idx == 0:
             return 0
@@ -227,9 +232,9 @@ class CrashMITracker:
         self.min_observations = data.get("min_observations", self.min_observations)
         self.total_crashes = data.get("total_crashes", 0)
         self.total_execs = data.get("total_execs", 0)
-        self.position_counts = defaultdict(int, {
-            int(k): v for k, v in data.get("position_counts", {}).items()
-        })
+        self.position_counts = defaultdict(
+            int, {int(k): v for k, v in data.get("position_counts", {}).items()}
+        )
         self.joint_crash = defaultdict(lambda: defaultdict(int))
         for pos_str, bv_map in data.get("joint_crash", {}).items():
             for bv_str, c in bv_map.items():

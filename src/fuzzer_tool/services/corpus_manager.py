@@ -292,12 +292,19 @@ class CorpusManager:
                 seed_moments.update(float(len(data)))
                 # Bloat early-warning: rising right skew in seed sizes means
                 # a few oversized seeds are growing relative to the median.
-                if seed_moments.count >= 50 and seed_moments.skewness > 2.0:
+                # Rate-limited to once per 500 execs to avoid log spam.
+                if (
+                    seed_moments.count >= 50
+                    and seed_moments.skewness > 2.0
+                    and f.exec_count - f._last_bloat_warn_exec >= 500
+                ):
+                    f._last_bloat_warn_exec = f.exec_count
                     log.warning(
                         "Corpus bloat warning: seed-size skewness=%.2f "
-                        "(rising right tail — consider proactive minimization)",
+                        "(rising right tail — minimizing)",
                         seed_moments.skewness,
                     )
+                    self.auto_minimize_corpus()
             if len(f._corpus_size_history) > 1000:
                 f._corpus_size_history = f._corpus_size_history[-500:]
             if f._corpus_secretary:

@@ -213,14 +213,10 @@ class TestIntegration:
 
             # Parse EPS from stats lines (format: "eps: NNNN")
             eps_matches = re.findall(r"eps:\s*([\d.]+)", result.stdout)
-            assert len(eps_matches) > 0, (
-                f"No EPS stats found in output:\n{result.stdout}"
-            )
+            assert len(eps_matches) > 0, f"No EPS stats found in output:\n{result.stdout}"
             # Use the last EPS value (most stable — steady-state rate)
             eps = float(eps_matches[-1])
-            assert eps >= 100, (
-                f"EPS {eps:.0f} is below minimum 100. Output:\n{result.stdout}"
-            )
+            assert eps >= 100, f"EPS {eps:.0f} is below minimum 100. Output:\n{result.stdout}"
 
     def test_asan_finds_heap_buffer_overflow(self, compiled_asan_target):
         """Fuzz ASAN-instrumented target and verify heap-buffer-overflow detected."""
@@ -274,7 +270,9 @@ class TestIntegration:
             txt_files = [f for f in crash_files if f.suffix == ".txt"]
             assert len(txt_files) > 0, "No .txt crash reports found"
             reports = [f.read_text() for f in txt_files]
-            assert any("AddressSanitizer" in r for r in reports), "Missing AddressSanitizer in any report"
+            assert any("AddressSanitizer" in r for r in reports), (
+                "Missing AddressSanitizer in any report"
+            )
             assert any("stack-buffer-overflow" in r for r in reports), (
                 f"Missing stack-buffer-overflow in any report. Found: {[f.name for f in txt_files]}"
             )

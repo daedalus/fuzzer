@@ -276,7 +276,9 @@ class TestDmesgParser:
         """Verify drain_stream + poll fallback pattern used by fuzzer."""
         dp = DmesgParser()
         dp.is_available = MagicMock(return_value=True)
-        kc = KernelCrash(timestamp=1.0, raw_message="segfault at 0 ip 0 sp 0 error 14", crash_type="segfault")
+        kc = KernelCrash(
+            timestamp=1.0, raw_message="segfault at 0 ip 0 sp 0 error 14", crash_type="segfault"
+        )
         dp._poll_json = MagicMock(return_value=[kc])
         # First drain catches everything
         first = dp.drain_stream()

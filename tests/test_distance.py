@@ -214,102 +214,102 @@ class TestDistanceAlgorithm:
     def test_dead_end_branch_gets_penalty(self):
         """B-F on dead-end branch should get penalty, not progressive distances."""
         td = self._make_td_with_graph(
-            functions={f: None for f in ['main', 'A', 'B', 'C', 'D', 'E', 'F', 'T']},
+            functions={f: None for f in ["main", "A", "B", "C", "D", "E", "F", "T"]},
             call_graph={
-                'main': {'A'},
-                'A': {'B', 'T'},
-                'B': {'C'},
-                'C': {'D'},
-                'D': {'E'},
-                'E': {'F'},
+                "main": {"A"},
+                "A": {"B", "T"},
+                "B": {"C"},
+                "C": {"D"},
+                "D": {"E"},
+                "E": {"F"},
             },
             target_addrs={0x1000},
-            addr_to_func=lambda addr: 'T' if addr == 0x1000 else None,
+            addr_to_func=lambda addr: "T" if addr == 0x1000 else None,
         )
         # T is target
-        assert td._distances['T'] == 0.0
+        assert td._distances["T"] == 0.0
         # A calls T directly
-        assert td._distances['A'] == 1.0
+        assert td._distances["A"] == 1.0
         # main calls A
-        assert td._distances['main'] == 2.0
+        assert td._distances["main"] == 2.0
         # B-F are on dead-end branch (can't reach T) — all get penalty
-        for f in ['B', 'C', 'D', 'E', 'F']:
+        for f in ["B", "C", "D", "E", "F"]:
             assert td._distances[f] > 5.0, f"{f} should have penalty distance"
 
     def test_indirect_path_to_target(self):
         """B -> C -> T should give B distance 2, C distance 1."""
         td = self._make_td_with_graph(
-            functions={f: None for f in ['main', 'A', 'B', 'C', 'T', 'D']},
+            functions={f: None for f in ["main", "A", "B", "C", "T", "D"]},
             call_graph={
-                'main': {'A', 'B'},
-                'A': {'T'},
-                'B': {'C'},
-                'C': {'T', 'D'},
+                "main": {"A", "B"},
+                "A": {"T"},
+                "B": {"C"},
+                "C": {"T", "D"},
             },
             target_addrs={0x1000},
-            addr_to_func=lambda addr: 'T' if addr == 0x1000 else None,
+            addr_to_func=lambda addr: "T" if addr == 0x1000 else None,
         )
-        assert td._distances['T'] == 0.0
-        assert td._distances['A'] == 1.0  # A -> T
-        assert td._distances['C'] == 1.0  # C -> T
-        assert td._distances['B'] == 2.0  # B -> C -> T
-        assert td._distances['main'] == 2.0  # main -> A -> T (or main -> B -> C -> T)
-        assert td._distances['D'] > 5.0  # D can't reach T
+        assert td._distances["T"] == 0.0
+        assert td._distances["A"] == 1.0  # A -> T
+        assert td._distances["C"] == 1.0  # C -> T
+        assert td._distances["B"] == 2.0  # B -> C -> T
+        assert td._distances["main"] == 2.0  # main -> A -> T (or main -> B -> C -> T)
+        assert td._distances["D"] > 5.0  # D can't reach T
 
     def test_multiple_targets(self):
         """Multiple targets: A->T1, B->T2, both should have distance 1."""
         td = self._make_td_with_graph(
-            functions={f: None for f in ['main', 'A', 'B', 'T1', 'T2']},
+            functions={f: None for f in ["main", "A", "B", "T1", "T2"]},
             call_graph={
-                'main': {'A', 'B'},
-                'A': {'T1'},
-                'B': {'T2'},
+                "main": {"A", "B"},
+                "A": {"T1"},
+                "B": {"T2"},
             },
             target_addrs={0x1000, 0x2000},
-            addr_to_func=lambda addr: {0x1000: 'T1', 0x2000: 'T2'}.get(addr),
+            addr_to_func=lambda addr: {0x1000: "T1", 0x2000: "T2"}.get(addr),
         )
-        assert td._distances['T1'] == 0.0
-        assert td._distances['T2'] == 0.0
-        assert td._distances['A'] == 1.0
-        assert td._distances['B'] == 1.0
-        assert td._distances['main'] == 2.0
+        assert td._distances["T1"] == 0.0
+        assert td._distances["T2"] == 0.0
+        assert td._distances["A"] == 1.0
+        assert td._distances["B"] == 1.0
+        assert td._distances["main"] == 2.0
 
     def test_no_targets_gives_uniform_distance(self):
         """If no targets found, all functions should get distance 1."""
         td = self._make_td_with_graph(
-            functions={'main': None, 'A': None},
-            call_graph={'main': {'A'}},
+            functions={"main": None, "A": None},
+            call_graph={"main": {"A"}},
             target_addrs=set(),
             addr_to_func=lambda addr: None,
         )
-        assert td._distances['main'] == 1.0
-        assert td._distances['A'] == 1.0
+        assert td._distances["main"] == 1.0
+        assert td._distances["A"] == 1.0
 
     def test_target_is_zero(self):
         """Target function itself should always be distance 0."""
         td = self._make_td_with_graph(
-            functions={'T': None},
+            functions={"T": None},
             call_graph={},
             target_addrs={0x1000},
-            addr_to_func=lambda addr: 'T' if addr == 0x1000 else None,
+            addr_to_func=lambda addr: "T" if addr == 0x1000 else None,
         )
-        assert td._distances['T'] == 0.0
+        assert td._distances["T"] == 0.0
 
     def test_diamond_graph(self):
         """Diamond: main -> A -> B -> T, main -> C -> B. B should be distance 1."""
         td = self._make_td_with_graph(
-            functions={f: None for f in ['main', 'A', 'B', 'C', 'T']},
+            functions={f: None for f in ["main", "A", "B", "C", "T"]},
             call_graph={
-                'main': {'A', 'C'},
-                'A': {'B'},
-                'C': {'B'},
-                'B': {'T'},
+                "main": {"A", "C"},
+                "A": {"B"},
+                "C": {"B"},
+                "B": {"T"},
             },
             target_addrs={0x1000},
-            addr_to_func=lambda addr: 'T' if addr == 0x1000 else None,
+            addr_to_func=lambda addr: "T" if addr == 0x1000 else None,
         )
-        assert td._distances['T'] == 0.0
-        assert td._distances['B'] == 1.0  # B -> T
-        assert td._distances['A'] == 2.0  # A -> B -> T
-        assert td._distances['C'] == 2.0  # C -> B -> T
-        assert td._distances['main'] == 3.0  # main -> A -> B -> T
+        assert td._distances["T"] == 0.0
+        assert td._distances["B"] == 1.0  # B -> T
+        assert td._distances["A"] == 2.0  # A -> B -> T
+        assert td._distances["C"] == 2.0  # C -> B -> T
+        assert td._distances["main"] == 3.0  # main -> A -> B -> T

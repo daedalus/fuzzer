@@ -23,9 +23,7 @@ class LengthEdgeTracker:
     """
 
     def __init__(self):
-        self.length_edge_counts: dict[int, dict[int, int]] = defaultdict(
-            lambda: defaultdict(int)
-        )
+        self.length_edge_counts: dict[int, dict[int, int]] = defaultdict(lambda: defaultdict(int))
         self.length_total: dict[int, int] = defaultdict(int)
         self.total_execs: int = 0
         self._cached_totals: dict[int, int] = {}
@@ -46,7 +44,9 @@ class LengthEdgeTracker:
         edges = self.length_edge_counts.get(input_length)
         if edges and len(edges) > MAX_EDGES_PER_LENGTH:
             # Keep only top half by count
-            top = sorted(edges.items(), key=lambda kv: kv[1], reverse=True)[: MAX_EDGES_PER_LENGTH // 2]
+            top = sorted(edges.items(), key=lambda kv: kv[1], reverse=True)[
+                : MAX_EDGES_PER_LENGTH // 2
+            ]
             self.length_edge_counts[input_length] = defaultdict(int, dict(top))
 
     def _prune_lengths(self):
@@ -57,15 +57,16 @@ class LengthEdgeTracker:
         self.length_edge_counts.clear()
         for k, v in pruned.items():
             self.length_edge_counts[k] = v
-        self.length_total = defaultdict(int, {k: self.length_total[k] for k in keep if k in self.length_total})
+        self.length_total = defaultdict(
+            int, {k: self.length_total[k] for k in keep if k in self.length_total}
+        )
         self._dirty = True
 
     def _rebuild_cache(self):
         if not self._dirty:
             return
         self._cached_totals = {
-            length: sum(edges.values())
-            for length, edges in self.length_edge_counts.items()
+            length: sum(edges.values()) for length, edges in self.length_edge_counts.items()
         }
         self._cached_sum = sum(self._cached_totals.values())
         self._dirty = False
@@ -103,8 +104,7 @@ class LengthEdgeTracker:
         }
         return {
             "length_edge_counts": {
-                str(k): {str(ek): ev for ek, ev in v.items()}
-                for k, v in counts.items()
+                str(k): {str(ek): ev for ek, ev in v.items()} for k, v in counts.items()
             },
             "length_total": {str(k): v for k, v in self.length_total.items() if v >= 5},
             "total_execs": self.total_execs,
@@ -116,6 +116,8 @@ class LengthEdgeTracker:
         for k, v in data.get("length_edge_counts", {}).items():
             for ek, ev in v.items():
                 self.length_edge_counts[int(k)][int(ek)] = ev
-        self.length_total = defaultdict(int, {int(k): v for k, v in data.get("length_total", {}).items()})
+        self.length_total = defaultdict(
+            int, {int(k): v for k, v in data.get("length_total", {}).items()}
+        )
         self.total_execs = data.get("total_execs", 0)
         self._dirty = True

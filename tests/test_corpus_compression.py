@@ -15,6 +15,7 @@ class TestPPMDAvailable:
     def test_compression_ratio_random(self):
         cc = CorpusCompressor()
         import random
+
         data = bytes(random.randint(0, 255) for _ in range(1000))
         ratio = cc.compute_seed_ratio(data)
         assert ratio > 0.5  # less compressible
@@ -28,6 +29,7 @@ class TestPPMDAvailable:
     def test_novelty_score_random(self):
         cc = CorpusCompressor()
         import random
+
         data = bytes(random.randint(0, 255) for _ in range(1000))
         novelty = cc.compute_seed_novelty(data)
         assert novelty > 0.3  # higher novelty (diverse)
@@ -51,11 +53,15 @@ class TestPPMDAvailable:
         assert cc.should_prune(b"A" * 100, threshold=0.5)
         # Random data should not be prunable
         import random
-        assert not cc.should_prune(bytes(random.randint(0, 255) for _ in range(1000)), threshold=0.5)
+
+        assert not cc.should_prune(
+            bytes(random.randint(0, 255) for _ in range(1000)), threshold=0.5
+        )
 
     def test_rank_seeds(self):
         cc = CorpusCompressor()
         import random
+
         corpus = [
             b"A" * 100,  # low novelty
             bytes(random.randint(0, 255) for _ in range(1000)),  # high novelty

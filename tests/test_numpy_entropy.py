@@ -17,6 +17,7 @@ from fuzzer_tool.core.renyi import RenyiEntropy
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _force_pure_python():
     """Disable numpy paths in both modules."""
     et_mod._HAS_NUMPY = False
@@ -42,6 +43,7 @@ def _large_skewed_dict(n=100):
 # ---------------------------------------------------------------------------
 # Shannon entropy — edge_tracker
 # ---------------------------------------------------------------------------
+
 
 class TestShannonEntropyNumpy:
     """Verify numpy and pure-Python Shannon entropy agree."""
@@ -110,6 +112,7 @@ class TestShannonEntropyNumpy:
 # Simpson diversity — edge_tracker
 # ---------------------------------------------------------------------------
 
+
 class TestSimpsonDiversityNumpy:
     def test_uniform(self):
         _force_numpy()
@@ -150,6 +153,7 @@ class TestSimpsonDiversityNumpy:
 # ---------------------------------------------------------------------------
 # JS divergence — edge_tracker
 # ---------------------------------------------------------------------------
+
 
 class TestJsDivergenceNumpy:
     def test_identical_distributions(self):
@@ -193,6 +197,7 @@ class TestJsDivergenceNumpy:
 # ---------------------------------------------------------------------------
 # Rényi entropy — renyi.py
 # ---------------------------------------------------------------------------
+
 
 class TestRenyiNumpy:
     """Verify numpy and pure-Python Rényi entropy agree."""
@@ -245,6 +250,7 @@ class TestRenyiNumpy:
 # Rényi spectrum — batch computation
 # ---------------------------------------------------------------------------
 
+
 class TestRenyiSpectrumNumpy:
     def test_spectrum_uniform(self):
         _force_numpy()
@@ -279,7 +285,7 @@ class TestRenyiSpectrumNumpy:
         alphas = ["renyi_0.0", "renyi_0.5", "renyi_1.0", "renyi_2.0", "renyi_5.0", "renyi_10.0"]
         for i in range(len(alphas) - 1):
             assert s[alphas[i]] >= s[alphas[i + 1]] - 1e-10, (
-                f"{alphas[i]}={s[alphas[i]]:.6f} < {alphas[i+1]}={s[alphas[i+1]]:.6f}"
+                f"{alphas[i]}={s[alphas[i]]:.6f} < {alphas[i + 1]}={s[alphas[i + 1]]:.6f}"
             )
         assert s[alphas[-1]] >= s["min_entropy"] - 1e-10
 
@@ -287,13 +293,22 @@ class TestRenyiSpectrumNumpy:
         _force_numpy()
         r = RenyiEntropy()
         s = r.entropy_spectrum([1, 1, 1, 1])
-        expected_keys = {"renyi_0.0", "renyi_0.5", "renyi_1.0", "renyi_2.0", "renyi_5.0", "renyi_10.0", "min_entropy"}
+        expected_keys = {
+            "renyi_0.0",
+            "renyi_0.5",
+            "renyi_1.0",
+            "renyi_2.0",
+            "renyi_5.0",
+            "renyi_10.0",
+            "min_entropy",
+        }
         assert set(s.keys()) == expected_keys
 
 
 # ---------------------------------------------------------------------------
 # Shannon (renyi helper)
 # ---------------------------------------------------------------------------
+
 
 class TestRenyiShannonNumpy:
     def test_uniform(self):
@@ -316,6 +331,7 @@ class TestRenyiShannonNumpy:
 # ---------------------------------------------------------------------------
 # Tsallis entropy
 # ---------------------------------------------------------------------------
+
 
 class TestTsallisNumpy:
     def test_q2_uniform(self):
@@ -352,6 +368,7 @@ class TestTsallisNumpy:
 # ---------------------------------------------------------------------------
 # Threshold gating
 # ---------------------------------------------------------------------------
+
 
 class TestNumpyThreshold:
     """Verify numpy path is only taken when len(data) > 50."""

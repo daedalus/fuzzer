@@ -1015,9 +1015,9 @@ class MonteCarloScheduler:
                         var = sum((s[i] - means[i]) ** 2 for s in segments) / (n_seg - 1)
                         cov_matrix[op_i][op_j] = var
                     elif i < j:
-                        cov_val = sum(
-                            (s[i] - means[i]) * (s[j] - means[j]) for s in segments
-                        ) / (n_seg - 1)
+                        cov_val = sum((s[i] - means[i]) * (s[j] - means[j]) for s in segments) / (
+                            n_seg - 1
+                        )
                         cov_matrix[op_i][op_j] = cov_val
                         cov_matrix[op_j][op_i] = cov_val
 

@@ -72,7 +72,7 @@ class RenyiEntropy:
             p_arr = np.array([x for x in probs if x > 0], dtype=np.float64)
             if len(p_arr) == 0:
                 return 0.0
-            sum_p_alpha = float(np.sum(p_arr ** alpha))
+            sum_p_alpha = float(np.sum(p_arr**alpha))
             if sum_p_alpha <= 0:
                 return 0.0
             return (1.0 / (1.0 - alpha)) * math.log2(sum_p_alpha)
@@ -188,7 +188,7 @@ class RenyiEntropy:
             p_arr = np.array([x for x in probs if x > 0], dtype=np.float64)
             if len(p_arr) == 0:
                 return 0.0
-            sum_p_q = float(np.sum(p_arr ** q))
+            sum_p_q = float(np.sum(p_arr**q))
             return (1.0 / (q - 1.0)) * (1.0 - sum_p_q)
 
         sum_p_q = sum(p**q for p in probs if p > 0)
