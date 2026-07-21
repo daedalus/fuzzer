@@ -118,6 +118,12 @@ def _run_summary(f) -> str:
         f"  Coverage mode:   {'SHM bitmap' if f.shm_cov else 'ptrace' if f.ptrace_cov else 'none'}",
         f"  In-process:      {f._inprocess_runner is not None}",
     ]
+    if f._cmplog is not None:
+        n_tok = len(f._cmplog.tokens)
+        n_prs = len(f._cmplog.pairs)
+        lines.append(f"  Cmplog:          enabled ({n_tok}t {n_prs}p)")
+    else:
+        lines.append("  Cmplog:          disabled")
     if execs > 0:
         _, _, c1, c2, c3 = _confidence_interval(execs, crashes)
         lines.append(
