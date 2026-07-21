@@ -294,6 +294,7 @@ class TargetRunner:
         kernel_hits = f._dmesg.drain_stream(pid=child_pid)
         if not kernel_hits:
             import time as _time
+
             _time.sleep(0.05)
             kernel_hits = f._dmesg.drain_stream(pid=child_pid)
         if not kernel_hits:
@@ -304,6 +305,9 @@ class TargetRunner:
         if kernel_hits:
             for kc in kernel_hits:
                 f._kernel_crashes.append(kc)
+                f._total_kernel_crash_count += 1
+                if len(f._kernel_crashes) > 500:
+                    f._kernel_crashes.pop(0)
                 log.info(
                     "Kernel crash verified: %s at ip=%s (ts=%.3f)",
                     kc.crash_type,
@@ -327,6 +331,9 @@ class TargetRunner:
                     )
                     kc.crash_type = "python_segfault"
                     f._kernel_crashes.append(kc)
+                    f._total_kernel_crash_count += 1
+                    if len(f._kernel_crashes) > 500:
+                        f._kernel_crashes.pop(0)
 
     def is_interesting(self, returncode: int, stderr: str) -> bool:
         f = self.f

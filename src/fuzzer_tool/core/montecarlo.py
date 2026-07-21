@@ -20,6 +20,9 @@ from pathlib import Path
 
 from fuzzer_tool.core.edge_tracker import ks_significance_threshold
 
+# ── Memory bounds ────────────────────────────────────────────────────
+SHAPLEY_EDGES_MAX = 10_000  # max edges tracked in Shapley attribution
+
 try:
     import numpy as np
 
@@ -708,7 +711,11 @@ class MonteCarloScheduler:
         if chol is None:
             return self._standard_thompson(ops)
 
-        z = np.random.randn(n).astype(np.float64) if _HAS_NUMPY else [random.gauss(0, 1) for _ in range(n)]
+        z = (
+            np.random.randn(n).astype(np.float64)
+            if _HAS_NUMPY
+            else [random.gauss(0, 1) for _ in range(n)]
+        )
         if _HAS_NUMPY:
             noise = chol @ z
         else:
@@ -816,7 +823,11 @@ class MonteCarloScheduler:
             return self._standard_ucb(ops, beta)
 
         n = len(ops)
-        mu = np.array([means[ops[i]] for i in range(n)], dtype=np.float64) if _HAS_NUMPY else [means[ops[i]] for i in range(n)]
+        mu = (
+            np.array([means[ops[i]] for i in range(n)], dtype=np.float64)
+            if _HAS_NUMPY
+            else [means[ops[i]] for i in range(n)]
+        )
 
         cov_matrix = [[cov[ops[i]].get(ops[j], 0.0) for j in range(n)] for i in range(n)]
 
@@ -1157,7 +1168,9 @@ class MOptScheduler:
                 return op
         return ops[-1]
 
-    def record(self, name: str, success: bool, particle_id: int | None = None, weight: float = 1.0) -> None:
+    def record(
+        self, name: str, success: bool, particle_id: int | None = None, weight: float = 1.0
+    ) -> None:
         """Record outcome for fitness tracking.
 
         Args:
@@ -1355,6 +1368,19 @@ class ShapleyAttribution:
                 for op in operators:
                     self._edge_op_count[edge][op] += 1
             self._all_edges.update(edge_indices)
+            if len(self._all_edges) > SHAPLEY_EDGES_MAX:
+                self._prune_edges()
+
+    def _prune_edges(self):
+        """Drop oldest half of tracked edges to bound memory."""
+        edges = sorted(self._all_edges)
+        drop = edges[: len(edges) // 2]
+        for edge in drop:
+            self._all_edges.discard(edge)
+            self._edge_total.pop(edge, None)
+            self._edge_op_count.pop(edge, None)
+            for op_edges in self._operator_edges.values():
+                op_edges.discard(edge)
 
     def _edge_attribution(self, edge: int) -> dict[str, float]:
         """Compute frequency-weighted credit for a single edge.
@@ -1756,8 +1782,7 @@ class ReplicatorScheduler:
         # Average fitness: only from operators with actual trials
         if self.population and any(has_data):
             phi = sum(
-                x * f for x, f, hd in zip(self.population, fitness, has_data, strict=False)
-                if hd
+                x * f for x, f, hd in zip(self.population, fitness, has_data, strict=False) if hd
             ) / sum(x for x, hd in zip(self.population, has_data, strict=False))
         else:
             phi = 0.0

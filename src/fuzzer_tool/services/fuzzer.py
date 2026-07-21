@@ -114,6 +114,14 @@ ENTROPY_HISTORY_TRIM = 100  # keep this many after trim
 ENTROPY_WINDOW = 4  # samples for rate-of-change computation
 ENTROPY_FLAT_THRESHOLD = 0.001  # rate below which entropy is "flat"
 
+# ── Memory bounds ────────────────────────────────────────────────────
+CRASH_RATE_HISTORY_MAX = 500  # max entries in _crash_rate_history
+KERNEL_CRASHES_MAX = 500  # max kernel-verified crashes retained
+SEED_SECRETARY_MAX = 500  # max per-seed SecretaryStopping entries
+SEEN_HASHES_MAX = 200_000  # max unique seed hashes retained
+ELO_MATCH_WINDOW_MAX = 1_000  # max Elo match history entries
+META_STRATEGY_CHOICES_MAX = 1_000  # max meta-strategy choice history entries
+
 
 def _detect_afl(target_path: str) -> bool:
     """Check if a binary has AFL edge coverage instrumentation."""
@@ -432,6 +440,7 @@ class Fuzzer:
 
         self._dmesg = DmesgParser()
         self._kernel_crashes: list = []
+        self._total_kernel_crash_count: int = 0
         self._last_child_pid: int | None = None
         self._dmesg.start_stream()
         # Register for atexit cleanup to avoid orphan dmesg -w subprocess
@@ -1259,6 +1268,8 @@ class Fuzzer:
             if eps > self._peak_eps:
                 self._peak_eps = eps
             self._crash_rate_history.append((self.exec_count, self.crash_count))
+            if len(self._crash_rate_history) > CRASH_RATE_HISTORY_MAX:
+                del self._crash_rate_history[:250]
 
         for op in set(self._last_ops_used):
             self.op_counts[op] = self.op_counts.get(op, 0) + 1
@@ -1370,6 +1381,10 @@ class Fuzzer:
                             window_size=self._secretary_window,
                             exploration_frac=self._secretary_exploration,
                         )
+                        if len(self._seed_secretary) > SEED_SECRETARY_MAX:
+                            # Evict oldest 100 entries (dict preserves insertion order)
+                            for k in list(self._seed_secretary)[:100]:
+                                del self._seed_secretary[k]
                     fuzz_count = max(meta["fuzz_count"], 1) if meta else 1
                     discovery_rate = len(new) / fuzz_count
                     self._seed_secretary[seed_key].observe(discovery_rate)

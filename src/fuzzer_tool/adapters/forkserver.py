@@ -26,6 +26,9 @@ log = logging.getLogger(__name__)
 
 _FUZZ_LOADER_BIN = os.path.join(os.path.dirname(__file__), "fuzz_loader")
 
+# ── Memory bounds ────────────────────────────────────────────────────
+STDERR_LINES_MAX = 100  # max stderr lines retained from child processes
+
 
 def _ensure_compiled() -> str | None:
     """Return path to compiled fuzz_loader, or None if compilation fails."""
@@ -129,6 +132,8 @@ class ForkserverRunner:
                 text = line.decode(errors="replace").rstrip()
                 if text:
                     self._stderr_lines.append(text)
+                    if len(self._stderr_lines) > STDERR_LINES_MAX:
+                        del self._stderr_lines[:50]
         except (ValueError, OSError):
             pass
 

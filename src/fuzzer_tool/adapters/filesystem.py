@@ -22,6 +22,9 @@ from fuzzer_tool.core.similarity import crash_signature_similarity
 
 SNAPSHOT_INTERVAL = 20
 
+# ── Memory bounds ────────────────────────────────────────────────────
+SEEN_HASHES_MAX = 200_000  # max unique seed hashes retained
+
 
 def compute_delta(parent: bytes, child: bytes) -> list[list[int]] | None:
     """Compute a compact byte-level diff between parent and child.
@@ -293,6 +296,9 @@ def save_to_corpus(
         if h in seen_hashes:
             return False
     seen_hashes.add(h)
+    # Cap seen_hashes to bound memory; bloom filter handles fast dedup
+    if len(seen_hashes) > SEEN_HASHES_MAX:
+        seen_hashes.clear()
     seeds_dir = corpus_dir / "seeds"
     seeds_dir.mkdir(parents=True, exist_ok=True)
     deltas_dir = corpus_dir / "deltas"
