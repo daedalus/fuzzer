@@ -15,7 +15,6 @@ from fuzzer_tool.adapters.shim_factory import (
     _find_compiler,
     _inspect_target,
     build_minimal_shim,
-    build_sancov_shim,
     build_shim,
     cleanup_shim,
     load_shim,
@@ -225,37 +224,6 @@ class TestBuildMinimalShim:
         with patch("fuzzer_tool.adapters.shim_factory._compile_source", return_value=False):
             shim = build_minimal_shim()
             assert shim is None
-
-
-class TestBuildSancovShim:
-    def test_returns_none_without_source_file(self, tmp_path):
-        # sancov_shim.c doesn't exist in a random tmp_path
-        with patch("fuzzer_tool.adapters.shim_factory.os.path.dirname", return_value=str(tmp_path)):
-            result = build_sancov_shim()
-            assert result is None
-
-    def test_builds_with_source(self, tmp_path):
-        src_path = tmp_path / "sancov_shim.c"
-        src_path.write_text("void __sanitizer_cov_trace_pc_guard(void *g) { (void)g; }")
-        with (
-            patch("fuzzer_tool.adapters.shim_factory.os.path.dirname", return_value=str(tmp_path)),
-            patch("fuzzer_tool.adapters.shim_factory._compile_source") as mock_compile,
-        ):
-            mock_compile.return_value = True
-            result = build_sancov_shim()
-            assert result is not None
-            mock_compile.assert_called_once()
-
-    def test_compile_failure_returns_none(self, tmp_path):
-        src_path = tmp_path / "sancov_shim.c"
-        src_path.write_text("invalid C code")
-        with (
-            patch("fuzzer_tool.adapters.shim_factory.os.path.dirname", return_value=str(tmp_path)),
-            patch("fuzzer_tool.adapters.shim_factory._compile_source", return_value=False),
-        ):
-            result = build_sancov_shim()
-            assert result is None
-
 
 class TestBuildShim:
     def test_no_coverage_returns_none_type(self):
