@@ -53,6 +53,8 @@ class Z3Solver:
         self.queries_attempted = 0
         self.queries_solved = 0
         self.queries_timed_out = 0
+        self.batch_attempted = 0
+        self.batch_solved = 0
         self._available = _z3_available()
         if not self._available:
             log.info("z3-solver not installed — SMT solving disabled")
@@ -94,6 +96,7 @@ class Z3Solver:
         import z3
 
         self.queries_attempted += 1
+        self.batch_attempted += 1
         z3.set_param("timeout", self.timeout_ms)
         w = width * 8
 
@@ -107,6 +110,7 @@ class Z3Solver:
                 solver.add(x + z3.BitVecVal(delta, w) == z3.BitVecVal(val_b, w))
                 if solver.check() == z3.sat:
                     self.queries_solved += 1
+                    self.batch_solved += 1
                     return {
                         "solved_bytes": val_b.to_bytes(width, "little"),
                         "width": width,
@@ -121,6 +125,7 @@ class Z3Solver:
                 solver.add(z3.BitVecVal(val_b, w) + z3.BitVecVal(delta, w) == x)
                 if solver.check() == z3.sat:
                     self.queries_solved += 1
+                    self.batch_solved += 1
                     return {
                         "solved_bytes": val_a.to_bytes(width, "little"),
                         "width": width,
@@ -136,6 +141,7 @@ class Z3Solver:
                 solver.add(x ^ z3.BitVecVal(xmask, w) == z3.BitVecVal(val_b, w))
                 if solver.check() == z3.sat:
                     self.queries_solved += 1
+                    self.batch_solved += 1
                     return {
                         "solved_bytes": val_b.to_bytes(width, "little"),
                         "width": width,
@@ -150,6 +156,7 @@ class Z3Solver:
                 solver.add(z3.BitVecVal(val_b, w) ^ z3.BitVecVal(xmask, w) == x)
                 if solver.check() == z3.sat:
                     self.queries_solved += 1
+                    self.batch_solved += 1
                     return {
                         "solved_bytes": val_a.to_bytes(width, "little"),
                         "width": width,
@@ -187,6 +194,11 @@ class Z3Solver:
         }
 
     # ── Stats ──────────────────────────────────────────────────────────
+
+    def reset_batch(self):
+        """Reset per-iteration counters. Called before each solver run."""
+        self.batch_attempted = 0
+        self.batch_solved = 0
 
     @property
     def stats(self) -> dict:

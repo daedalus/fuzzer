@@ -430,8 +430,9 @@ class StatsReporter:
         smt_str = ""
         if f._smt_solver is not None and f._smt_solver.queries_attempted > 0:
             s = f._smt_solver
-            pct = s.queries_solved / max(s.queries_attempted, 1) * 100
-            smt_str = f" | smt: {s.queries_solved}/{s.queries_attempted} ({pct:.0f}%)"
+            inc_pct = s.batch_solved / max(s.batch_attempted, 1) * 100
+            tot_pct = s.queries_solved / max(s.queries_attempted, 1) * 100
+            smt_str = f" | smt: {s.batch_solved}/{s.batch_attempted} ({inc_pct:.0f}%) tot: {s.queries_solved}/{s.queries_attempted} ({tot_pct:.0f}%)"
         if f.markov_generate:
             markov_str += "+gen"
         cov_str = ""

@@ -1439,6 +1439,8 @@ class Fuzzer:
             if self._cmplog.pairs and meta is not None and self._redqueen_index < len(self._cmplog.pairs):
                 matches = list(meta.get("redqueen_matches", []))
                 seen = {(m[1], m[2]) for m in matches}  # dedup by (A, B)
+                if self._smt_solver is not None:
+                    self._smt_solver.reset_batch()
                 for op_a, op_b in self._cmplog.pairs[self._redqueen_index :]:
                     if len(op_a) < 2 or (op_a, op_b) in seen:
                         continue
@@ -1479,12 +1481,22 @@ class Fuzzer:
                             break
                         continue
 
-                    # Pass 3: SMT solver for arithmetic constraints
-                    if self._smt_solver is not None and len(op_a) >= 2:
+                self._redqueen_index = len(self._cmplog.pairs)
+
+                # SMT sampling pass: run solver on random pairs each iteration
+                # (not just new pairs — gives fresh solver activity per exec)
+                if self._smt_solver is not None and self._cmplog.pairs:
+                    self._smt_solver.reset_batch()
+                    sample = self._cmplog.pairs[:]
+                    import random as _rand
+
+                    _rand.shuffle(sample)
+                    for op_a, op_b in sample[:5]:
+                        if len(op_a) < 2 or (op_a, op_b) in seen:
+                            continue
                         result = self._smt_solver.solve_cmplog_pair(op_a, op_b)
                         if result is not None:
                             solved = result["solved_bytes"]
-                            # Try finding either operand in mutated after solving
                             for candidate, target in [(op_a, solved), (op_b, solved)]:
                                 if len(candidate) < 2:
                                     continue
@@ -1503,8 +1515,6 @@ class Fuzzer:
                                     break
                             if len(matches) >= 50:
                                 break
-
-                self._redqueen_index = len(self._cmplog.pairs)
                 meta["redqueen_matches"] = matches[:50]
                 # Keep legacy field for state compat
                 meta["redqueen_offsets"] = [m[0] for m in meta["redqueen_matches"]]
