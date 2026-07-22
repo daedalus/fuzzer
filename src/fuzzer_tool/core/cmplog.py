@@ -1,10 +1,18 @@
 """Cmplog collector: parse comparison tracing output and feed into dictionary.
 
-Intercepts memcmp/strcmp/strncmp/memchr/strcasecmp/strncasecmp/memmem/strstr/
-strcasestr via LD_PRELOAD and collects operand pairs that differ. These
-operands are fed into the dictionary and mutation engine, enabling the fuzzer
-to discover magic bytes, protocol constants, and case-insensitive patterns
-that blind mutation cannot find.
+Two complementary interception layers, both writing to the same CMP log file:
+
+1. Symbol-based (cmplog_shim.c): intercepts libc comparison functions
+   (memcmp/strcmp/strncmp/memchr/strcasecmp/strncasecmp/memmem/strstr/
+   strcasestr) via LD_PRELOAD or build-time linking.
+
+2. Compiler-IR-based (tracecmp_shim.c): intercepts Clang's
+   -fsanitize-coverage=trace-cmp callbacks (__sanitizer_cov_trace_cmp*,
+   __sanitizer_cov_trace_switch) that fire after the compiler has inlined/
+   folded comparisons into integer compares.
+
+Both shims coexist — they export different symbols, write to the same
+_CMPLOG_OUT file, and the collector parses all CMP lines transparently.
 """
 
 import contextlib
@@ -34,11 +42,12 @@ class CmplogCollector:
         self.pairs: list[tuple[bytes, bytes]] = []
         self._pair_set: set[tuple[bytes, bytes]] = set()
         self._shim_path: str | None = None
+        self._tracecmp_shim_path: str | None = None
         self._shim_handle = None
 
     def start(self) -> bool:
-        """Compile and prepare the cmplog shim."""
-        from fuzzer_tool.adapters.shim_factory import _find_compiler
+        """Compile and prepare the cmplog shim and trace-cmp shim."""
+        from fuzzer_tool.adapters.shim_factory import _find_compiler, build_tracecmp_shim
 
         shim_src = os.path.join(os.path.dirname(__file__), "..", "adapters", "cmplog_shim.c")
         if not os.path.exists(shim_src):
@@ -50,23 +59,31 @@ class CmplogCollector:
         if os.path.exists(out_path):
             self._shim_path = out_path
             log.info("Cmplog shim cached: %s", out_path)
-            return True
+        else:
+            try:
+                compiler = _find_compiler()
+                result = __import__("subprocess").run(
+                    [compiler, "-shared", "-fPIC", "-O2", "-ldl", "-o", out_path, shim_src],
+                    capture_output=True,
+                    timeout=30,
+                )
+                if result.returncode == 0 and os.path.exists(out_path):
+                    self._shim_path = out_path
+                    log.info("Cmplog shim compiled: %s", out_path)
+                else:
+                    log.warning("Cmplog shim compilation failed: %s", result.stderr.decode()[:200])
+            except Exception as e:
+                log.warning("Cmplog shim compilation error: %s", e)
 
+        # Also build the trace-cmp shim (compiler-IR-based comparison tracing)
         try:
-            compiler = _find_compiler()
-            result = __import__("subprocess").run(
-                [compiler, "-shared", "-fPIC", "-O2", "-ldl", "-o", out_path, shim_src],
-                capture_output=True,
-                timeout=30,
-            )
-            if result.returncode == 0 and os.path.exists(out_path):
-                self._shim_path = out_path
-                log.info("Cmplog shim compiled: %s", out_path)
-                return True
-            log.warning("Cmplog shim compilation failed: %s", result.stderr.decode()[:200])
+            self._tracecmp_shim_path = build_tracecmp_shim()
+            if self._tracecmp_shim_path:
+                log.info("Trace-cmp shim compiled: %s", self._tracecmp_shim_path)
         except Exception as e:
-            log.warning("Cmplog shim compilation error: %s", e)
-        return False
+            log.debug("Trace-cmp shim build skipped: %s", e)
+
+        return self._shim_path is not None
 
     def setup_env(self, env: dict[str, str]) -> dict[str, str]:
         """Add cmplog env vars to the execution environment.
@@ -75,13 +92,17 @@ class CmplogCollector:
         a fresh log file on first call. Adds _CMPLOG_OUT + LD_PRELOAD
         to *env*. Used for subprocess execution paths (fork+exec).
 
+        Both the symbol-based shim and trace-cmp shim are prepended to
+        LD_PRELOAD when available. They export different symbols and write
+        to the same _CMPLOG_OUT file.
+
         Args:
             env: Current environment dict.
 
         Returns:
             Modified env with LD_PRELOAD and _CMPLOG_OUT set.
         """
-        if not self._shim_path:
+        if not self._shim_path and not self._tracecmp_shim_path:
             return env
 
         if self.log_path is None or not os.path.exists(self.log_path):
@@ -95,12 +116,16 @@ class CmplogCollector:
         env = dict(env)  # copy
         env["_CMPLOG_OUT"] = self.log_path
 
-        # Prepend to LD_PRELOAD
-        existing = env.get("LD_PRELOAD", "")
-        if existing:
-            env["LD_PRELOAD"] = f"{self._shim_path}:{existing}"
-        else:
-            env["LD_PRELOAD"] = self._shim_path
+        # Prepend both shims to LD_PRELOAD
+        shims = []
+        if self._shim_path:
+            shims.append(self._shim_path)
+        if self._tracecmp_shim_path:
+            shims.append(self._tracecmp_shim_path)
+        if shims:
+            existing = env.get("LD_PRELOAD", "")
+            combined = ":".join(shims)
+            env["LD_PRELOAD"] = f"{combined}:{existing}" if existing else combined
 
         return env
 
@@ -114,20 +139,28 @@ class CmplogCollector:
         Reuses the current log_path if one exists; creates a new one on first call.
         The cmplog shim (whether LD_PRELOAD'd or compiled into the target .so)
         reads _CMPLOG_OUT at constructor time.
+
+        Both shims (symbol-based + trace-cmp) are prepended to LD_PRELOAD
+        when available.
         """
         if self.log_path is None or not os.path.exists(self.log_path):
             fd, self.log_path = tempfile.mkstemp(suffix=".cmplog", prefix="fuzz_cmplog_")
             os.close(fd)
         os.environ["_CMPLOG_OUT"] = self.log_path
-        # If the shim was compiled into the target .so (direct_lite mode),
-        # LD_PRELOAD is not needed. If it's loaded via LD_PRELOAD, the
-        # persistent loader's subprocess inherits it from os.environ,
-        # so set it here too.
+
+        # Collect all shim paths to prepend to LD_PRELOAD
+        shims = []
         if self._shim_path and self._shim_path not in os.environ.get("LD_PRELOAD", ""):
+            shims.append(self._shim_path)
+        if self._tracecmp_shim_path and self._tracecmp_shim_path not in os.environ.get(
+            "LD_PRELOAD", ""
+        ):
+            shims.append(self._tracecmp_shim_path)
+
+        if shims:
             existing = os.environ.get("LD_PRELOAD", "")
-            os.environ["LD_PRELOAD"] = (
-                f"{self._shim_path}:{existing}" if existing else self._shim_path
-            )
+            combined = ":".join(shims)
+            os.environ["LD_PRELOAD"] = f"{combined}:{existing}" if existing else combined
 
     def reset_log(self):
         """Reset the cmplog log file after a direct_lite execution.

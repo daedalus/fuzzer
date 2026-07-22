@@ -187,6 +187,9 @@ fuzzer-tool fuzz targets/asan_target
 # Cmplog comparison tracing test (memcmp/strcmp/strncmp/memchr/strcasecmp/strncasecmp/memmem/strstr/strcasestr)
 fuzzer-tool fuzz targets/cmplog_exercise --cmplog
 
+# Compiler-IR comparison tracing test (requires clang -fsanitize-coverage=trace-cmp)
+fuzzer-tool fuzz targets/tracecmp_target --cmplog
+
 # fgrep SIMD/regex/BMH search fuzzing
 fuzzer-tool fuzz targets/fgrep_read
 
@@ -424,6 +427,27 @@ To verify cmplog is active from the .so itself, check the startup output:
 ```
 [*] Cmplog: compiled into target .so (direct_lite compatible)
 ```
+
+### Compiler-IR Comparison Tracing (trace-cmp)
+
+Symbol-based cmplog intercepts libc functions, but GCC -O2 inlines small constant-length `memcmp` into integer compares — no libc call exists to intercept. This is exactly the pattern for format-signature detection (PNG magic, protocol headers, etc.).
+
+**trace-cmp** solves this by using Clang's `-fsanitize-coverage=trace-cmp` instrumentation, which inserts callbacks at the IR level — after the compiler has already inlined/folded comparisons. This catches every `icmp` that survives optimization.
+
+Both shims coexist: symbol-based (cmplog_shim.c) for explicit libc calls + compiler-based (tracecmp_shim.c) for inlined comparisons. They export different symbols, write to the same `_CMPLOG_OUT` file, and the collector parses both transparently.
+
+```bash
+# Build targets with trace-cmp (requires clang)
+tools/build_targets.sh --tracecmp --clang
+
+# Build with both cmplog and trace-cmp
+tools/build_targets.sh --asan --cmplog --tracecmp --clang
+```
+
+The trace-cmp shim intercepts:
+- `__sanitizer_cov_trace_cmp{1,2,4,8}` — typed comparison callbacks
+- `__sanitizer_cov_trace_const_cmp{1,2,4,8}` — constant-operand variants
+- `__sanitizer_cov_trace_switch` — switch statement tracing
 
 ## Troubleshooting
 

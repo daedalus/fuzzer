@@ -20,10 +20,14 @@ OPTS="${@:---all}"
 HAS_FGREP=0
 [ -d "$FGREP/src" ] && HAS_FGREP=1
 WITH_CMPLOG=0
+WITH_TRACECMP=0
+USE_CLANG=0
 
-# Parse --cmplog flag (can appear anywhere)
+# Parse --cmplog, --tracecmp, --clang flags (can appear anywhere)
 for arg in "$@"; do
     [ "$arg" = "--cmplog" ] && WITH_CMPLOG=1
+    [ "$arg" = "--tracecmp" ] && WITH_TRACECMP=1
+    [ "$arg" = "--clang" ] && USE_CLANG=1
 done
 
 # Colors
@@ -272,9 +276,60 @@ verify_cmplog() {
     fi
 }
 
+# ── Build trace-cmp targets (Clang -fsanitize-coverage=trace-cmp) ─
+build_tracecmp_targets() {
+    [ "$WITH_TRACECMP" -eq 0 ] && return 0
+
+    local CC="gcc"
+    if [ "$USE_CLANG" -eq 1 ]; then
+        if command -v clang &>/dev/null; then
+            CC="clang"
+        else
+            warn "clang not found — trace-cmp targets require clang"
+            return 1
+        fi
+    elif command -v clang &>/dev/null; then
+        CC="clang"
+    else
+        warn "clang not found — trace-cmp targets require clang"
+        return 1
+    fi
+
+    echo "Building trace-cmp targets ($CC)..."
+    local TRACE_FLAGS="-fsanitize-coverage=trace-cmp,trace-pc-guard"
+
+    # tracecmp_target: exercises compiler-inlined comparisons
+    local rc=0
+    $CC -O2 -g $TRACE_FLAGS -include "$SHIM" \
+        -o "$TARGETS/tracecmp_target" "$TARGETS/tracecmp_target.c" 2>/dev/null || rc=$?
+    if [ $rc -eq 0 ]; then
+        ok "tracecmp_target (trace-cmp)"
+    else
+        warn "failed: tracecmp_target (trace-cmp)"
+    fi
+
+    # tracecmp_target.so: same with shared library
+    rc=0
+    $CC -O2 -g $TRACE_FLAGS -shared -fPIC -include "$SHIM" \
+        -o "$TARGETS/tracecmp_target.so" "$TARGETS/tracecmp_target.c" 2>/dev/null || rc=$?
+    if [ $rc -eq 0 ]; then
+        ok "tracecmp_target.so (trace-cmp)"
+    else
+        warn "failed: tracecmp_target.so (trace-cmp)"
+    fi
+
+    # Verify trace-cmp symbols in built targets
+    for f in "$TARGETS/tracecmp_target" "$TARGETS/tracecmp_target.so"; do
+        if [ -f "$f" ] && nm "$f" 2>/dev/null | grep -q "trace_cmp"; then
+            ok "$(basename "$f"): trace-cmp callbacks present"
+        fi
+    done
+}
+
 # ── Main ──────────────────────────────────────────────────────────
 echo "=== Building fuzz targets ==="
 [ "$WITH_CMPLOG" -eq 1 ] && echo "[*] Cmplog: build-time linking enabled for .so targets"
+[ "$WITH_TRACECMP" -eq 1 ] && echo "[*] Trace-cmp: compiler-IR comparison tracing enabled (requires clang)"
 
 if [ "$HAS_FGREP" -eq 0 ]; then
     warn "fgrep directory not found at $FGREP — skipping fgrep targets"
@@ -316,4 +371,5 @@ esac
 verify_afl
 verify_shm_run
 verify_cmplog
+build_tracecmp_targets
 echo "=== Done ==="

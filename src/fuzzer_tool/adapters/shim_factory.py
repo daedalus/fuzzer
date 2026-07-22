@@ -172,6 +172,31 @@ def build_sancov_shim() -> str | None:
     return None
 
 
+def build_tracecmp_shim() -> str | None:
+    """Build a trace-cmp LD_PRELOAD shim for compiler-instrumented binaries.
+
+    Intercepts __sanitizer_cov_trace_cmp* callbacks from Clang/GCC
+    -fsanitize-coverage=trace-cmp instrumented code and logs operand
+    pairs to the CMPLOG_OUT file.
+
+    Returns:
+        Path to compiled .so, or None on failure.
+    """
+    shim_src = os.path.join(os.path.dirname(__file__), "tracecmp_shim.c")
+    if not os.path.exists(shim_src):
+        return None
+
+    fd, out_path = tempfile.mkstemp(suffix=".so", prefix=f"fuzz_tracecmp_shim_{os.getpid()}_")
+    os.close(fd)
+    with open(shim_src) as f:
+        src = f.read()
+    if _compile_source(src, out_path):
+        return out_path
+    with contextlib.suppress(OSError):
+        os.unlink(out_path)
+    return None
+
+
 class BitmapReader:
     """Read the sancov coverage bitmap from a loaded target .so.
 
