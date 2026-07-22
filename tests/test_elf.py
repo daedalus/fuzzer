@@ -194,3 +194,214 @@ class TestFindLoadSegment:
             assert vaddr > 0
             assert filesz > 0
             assert memsz >= filesz
+
+
+class TestExtractCapstoneConstants:
+    """Tests for extract_capstone_constants and helpers."""
+
+    def test_no_capstone(self, monkeypatch):
+        """Returns [] when capstone is not installed."""
+        monkeypatch.setattr("fuzzer_tool.core.elf.extract_capstone_constants", lambda _: [])
+        from fuzzer_tool.core.elf import extract_capstone_constants
+
+        assert extract_capstone_constants("anything") == []
+
+    def test_non_elf(self):
+        from fuzzer_tool.core.elf import extract_capstone_constants
+
+        result = extract_capstone_constants("/dev/null")
+        assert result == []
+
+    def test_too_short(self, tmp_path):
+        from fuzzer_tool.core.elf import extract_capstone_constants
+
+        p = tmp_path / "short"
+        p.write_bytes(b"\x7fELF")
+        assert extract_capstone_constants(str(p)) == []
+
+    def test_elf32_rejected(self, tmp_path):
+        from fuzzer_tool.core.elf import extract_capstone_constants
+
+        header = bytearray(64)
+        header[0:4] = b"\x7fELF"
+        header[4] = 1  # ELFCLASS32
+        header[5] = 2  # ELFDATA2MSB
+        p = tmp_path / "elf32"
+        p.write_bytes(bytes(header))
+        assert extract_capstone_constants(str(p)) == []
+
+    def test_no_text_section(self, tmp_path):
+        """ELF with no .text section returns []."""
+        from fuzzer_tool.core.elf import extract_capstone_constants
+
+        header = _build_elf64_header(e_shnum=1, e_shstrndx=0, e_shentsize=64)
+        shstrtab = b".shstrtab\x00"
+        sh = _build_section_header(sh_type=3, sh_name=0, sh_offset=256, sh_size=len(shstrtab))
+        data = bytearray(256 + len(shstrtab) + 100)
+        data[:64] = header
+        data[64:128] = sh
+        data[256 : 256 + len(shstrtab)] = shstrtab
+        p = tmp_path / "no_text"
+        p.write_bytes(bytes(data))
+        assert extract_capstone_constants(str(p)) == []
+
+    def test_real_binary_asan_tracecmp(self):
+        """Extract constants from the ASAN+tracecmp target."""
+        from fuzzer_tool.core.elf import extract_capstone_constants
+
+        target = "targets/png_read_tracecmp_asan.so"
+        if not os.path.isfile(target):
+            return
+        result = extract_capstone_constants(target)
+        assert isinstance(result, list)
+        assert len(result) > 0
+        assert len(result) <= 256
+        # Verify format: list of bytes objects, each >= 2 bytes
+        for c in result:
+            assert isinstance(c, bytes)
+            assert len(c) >= 2
+            assert len(c) in (2, 4, 8)
+        # At least some should be multi-byte or recognizable
+        has_wide = any(len(c) >= 4 for c in result)
+        assert has_wide, f"Expected wide constants (>=4 bytes), got {result[:10]}"
+
+    def test_real_binary_tracecmp(self):
+        """Extract constants from the non-ASAN tracecmp target."""
+        from fuzzer_tool.core.elf import extract_capstone_constants
+
+        target = "targets/png_read_tracecmp.so"
+        if not os.path.isfile(target):
+            return
+        result = extract_capstone_constants(target)
+        assert isinstance(result, list)
+        assert len(result) > 0
+        for c in result:
+            assert isinstance(c, bytes)
+            assert len(c) >= 2
+
+
+class TestIsNoiseImmediate:
+    def test_zero(self):
+        from fuzzer_tool.core.elf import _is_noise_immediate
+
+        assert _is_noise_immediate(0, 4)
+
+    def test_small_positive(self):
+        from fuzzer_tool.core.elf import _is_noise_immediate
+
+        assert _is_noise_immediate(42, 4)
+        assert _is_noise_immediate(127, 4)
+
+    def test_small_negative(self):
+        from fuzzer_tool.core.elf import _is_noise_immediate
+
+        assert _is_noise_immediate(-1, 4)  # 0xFFFFFFFF
+        assert _is_noise_immediate(-128, 4)  # 0xFFFFFF80
+
+    def test_negative_one_byte(self):
+        """Single-byte negatives (128-255) are NOT filtered — they're valid constants."""
+        from fuzzer_tool.core.elf import _is_noise_immediate
+
+        # 0x89 is PNG magic, should not be filtered despite being > 127
+        assert not _is_noise_immediate(0x89, 1)
+        # 0xFF is JPEG marker, should not be filtered
+        assert not _is_noise_immediate(0xFF, 1)
+        # 0x80 is JPEG marker, should not be filtered
+        assert not _is_noise_immediate(0x80, 1)
+
+    def test_page_aligned_address(self):
+        from fuzzer_tool.core.elf import _is_noise_immediate
+
+        # 64-bit kernel-space address (high bit set + page-aligned)
+        assert _is_noise_immediate(0xFFFFFFFF80000000, 8)
+        # Low 4-byte values are NOT filtered even if page-aligned
+        # (they could be legitimate constants like file offsets)
+        assert not _is_noise_immediate(0x400000, 8)
+
+    def test_user_space_address_64bit(self):
+        from fuzzer_tool.core.elf import _is_noise_immediate
+
+        # High-bit set for 64-bit + page-aligned
+        assert _is_noise_immediate(0x800000000000, 8)
+
+    def test_interesting_values(self):
+        from fuzzer_tool.core.elf import _is_noise_immediate
+
+        # Magic constants should NOT be filtered
+        assert not _is_noise_immediate(0x89, 1)
+        assert not _is_noise_immediate(0x0A1A0A0D0A474E89, 8)
+        assert not _is_noise_immediate(0x424D, 2)  # 'BM' bitmap magic
+        assert not _is_noise_immediate(0x0D000000, 4)  # PNG IHDR length
+        assert not _is_noise_immediate(0xFFFF0000, 4)  # Mask value
+        assert not _is_noise_immediate(0x80, 1)  # JPEG marker
+
+
+class TestGuessImmWidth:
+    def test_byte_width(self):
+        from fuzzer_tool.core.elf import _guess_imm_width
+
+        assert _guess_imm_width(0) == 1
+        assert _guess_imm_width(0xFF) == 1
+
+    def test_word_width(self):
+        from fuzzer_tool.core.elf import _guess_imm_width
+
+        assert _guess_imm_width(0x100) == 2
+        assert _guess_imm_width(0xFFFF) == 2
+
+    def test_dword_width(self):
+        from fuzzer_tool.core.elf import _guess_imm_width
+
+        assert _guess_imm_width(0x10000) == 4
+        assert _guess_imm_width(0xFFFFFFFF) == 4
+
+    def test_qword_width(self):
+        from fuzzer_tool.core.elf import _guess_imm_width
+
+        assert _guess_imm_width(0x100000000) == 8
+        assert _guess_imm_width(0xFFFFFFFFFFFFFFFF) == 8
+
+
+class TestMaybeAddConstant:
+    def test_adds_valid(self):
+        from fuzzer_tool.core.elf import _maybe_add_constant
+
+        s: set[bytes] = set()
+        _maybe_add_constant(s, b"\x7fELF")
+        assert b"\x7fELF" in s
+
+    def test_skips_short(self):
+        from fuzzer_tool.core.elf import _maybe_add_constant
+
+        s: set[bytes] = set()
+        _maybe_add_constant(s, b"a")
+        assert len(s) == 0
+
+    def test_skips_empty(self):
+        from fuzzer_tool.core.elf import _maybe_add_constant
+
+        s: set[bytes] = set()
+        _maybe_add_constant(s, b"")
+        assert len(s) == 0
+
+    def test_skips_all_zeros(self):
+        from fuzzer_tool.core.elf import _maybe_add_constant
+
+        s: set[bytes] = set()
+        _maybe_add_constant(s, b"\x00\x00")
+        assert len(s) == 0
+
+    def test_skips_all_ff(self):
+        from fuzzer_tool.core.elf import _maybe_add_constant
+
+        s: set[bytes] = set()
+        _maybe_add_constant(s, b"\xff\xff")
+        assert len(s) == 0
+
+    def test_dedup(self):
+        from fuzzer_tool.core.elf import _maybe_add_constant
+
+        s: set[bytes] = set()
+        _maybe_add_constant(s, b"\x01\x02")
+        _maybe_add_constant(s, b"\x01\x02")
+        assert len(s) == 1

@@ -23,6 +23,7 @@ class TestTargetProfile:
         assert p.rodata_strings == []
         assert p.interesting_strings == []
         assert p.magic_bytes == []
+        assert p.extracted_constants == []
         assert p.functions == {}
         assert p.hot_functions == []
         assert p.entry_points == []
@@ -95,6 +96,16 @@ class TestTargetProfilerRealBinary:
     def test_call_graph_populated(self, png_profile):
         # At least some functions should have call edges
         assert len(png_profile.call_graph) > 0
+
+    def test_extracted_constants_populated(self, png_profile):
+        """Capstone constant extraction from .text disassembly."""
+        if len(png_profile.extracted_constants) == 0:
+            pytest.skip("capstone not available or binary too small")
+        assert len(png_profile.extracted_constants) > 0
+        assert len(png_profile.extracted_constants) <= 256
+        for c in png_profile.extracted_constants:
+            assert isinstance(c, bytes)
+            assert len(c) >= 2
 
     def test_format_signature_is_string(self, png_profile):
         assert isinstance(png_profile.format_signature, str)
