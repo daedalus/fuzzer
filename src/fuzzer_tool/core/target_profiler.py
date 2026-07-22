@@ -60,6 +60,9 @@ class TargetProfile:
     interesting_strings: list[str] = field(default_factory=list)
     magic_bytes: list[bytes] = field(default_factory=list)
 
+    # Capstone-based constant extraction from disassembly
+    extracted_constants: list[bytes] = field(default_factory=list)
+
     # Function analysis
     functions: dict[str, FunctionInfo] = field(default_factory=dict)
     hot_functions: list[str] = field(default_factory=list)
@@ -151,7 +154,10 @@ class TargetProfiler:
         # 1. String extraction
         self._extract_strings(profile)
 
-        # 2. Function analysis
+        # 2. Capstone compile-time constant extraction (disassembly immediates)
+        self._extract_constants(profile)
+
+        # 3. Function analysis
         self._analyze_functions(profile)
 
         # 3. Input format inference
@@ -335,6 +341,28 @@ class TargetProfiler:
                 if idx >= 0 and sig not in magic:
                     magic.append(sig)
         profile.magic_bytes = magic
+
+    def _extract_constants(self, profile: TargetProfile):
+        """Extract compile-time constants from disassembly via Capstone.
+
+        Disassembles .text and extracts immediate operands from comparison
+        instructions (CMP, TEST, AND, OR, XOR, SUB, ADD).  These catch
+        inlined magic constants, bitmasks, and boundary values that the
+        .rodata string scan misses.
+        """
+        try:
+            from fuzzer_tool.core.elf import extract_capstone_constants
+
+            constants = extract_capstone_constants(self.target)
+            if constants:
+                profile.extracted_constants = constants
+                log.info(
+                    "Capstone: extracted %d disassembly constants from %s",
+                    len(constants),
+                    self.target,
+                )
+        except Exception as e:
+            log.debug("Capstone constant extraction failed: %s", e)
 
     def _analyze_functions(self, profile: TargetProfile):
         """Analyze functions: sizes, branch density, hot functions."""

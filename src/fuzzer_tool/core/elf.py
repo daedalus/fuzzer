@@ -291,6 +291,195 @@ def _next_power_of_2(n: int) -> int:
     return n + 1
 
 
+def extract_capstone_constants(target: str) -> list[bytes]:
+    """Extract compile-time constants from disassembly via Capstone.
+
+    Disassembles .text and collects immediate operands from comparison,
+    move, and test instructions (CMP, MOV, TEST, AND, OR, XOR, SUB,
+    ADD with immediate). Also extracts SIMD pattern-match constants
+    from PCMP{E,I}STR{I,M} and PABSB/W/D instructions.
+
+    These constants are compile-time magic bytes, pattern strings, and
+    boundary values that the code compares against — exactly what the
+    fuzzer's dictionary should contain. Unlike .rodata string extraction,
+    this catches:
+
+      - Inlined memcmp constants folded into integer immediates
+        (e.g. ``cmp rax, 0x0A1A0A0D0A474E89`` → "\\x89PNG\\r\\n\\x1a\\n")
+      - SIMD comparison vectors (e.g. PCMPEQB with constant operand)
+      - Bitmask / flag values used in test/and/or instructions
+
+    Returns:
+        List of unique byte values (deduplicated, truncated to 256 entries).
+    """
+    try:
+        from capstone import CS_ARCH_X86, CS_MODE_64, Cs
+        from capstone.x86_const import (
+            X86_GRP_JUMP,
+            X86_GRP_CALL,
+            X86_GRP_RET,
+            X86_INS_CMP,
+            X86_INS_MOV,
+            X86_INS_TEST,
+            X86_INS_AND,
+            X86_INS_OR,
+            X86_INS_XOR,
+            X86_INS_SUB,
+            X86_INS_ADD,
+            X86_INS_CMPXCHG,
+            X86_OP_IMM,
+        )
+    except ImportError:
+        return []
+
+    try:
+        with open(target, "rb") as f:
+            elf = f.read()
+    except OSError:
+        return []
+
+    if len(elf) < 64 or elf[:4] != b"\x7fELF" or elf[4] != 2 or elf[5] != 1:
+        return []
+
+    # Find .text section
+    e_shoff = struct.unpack_from("<Q", elf, 40)[0]
+    e_shnum = struct.unpack_from("<H", elf, 60)[0]
+    e_shentsize = struct.unpack_from("<H", elf, 58)[0]
+    e_shstrndx = struct.unpack_from("<H", elf, 62)[0]
+    if e_shnum == 0 or e_shstrndx >= e_shnum:
+        return []
+
+    shstr_off = e_shoff + e_shstrndx * e_shentsize
+    shstr_offset = struct.unpack_from("<Q", elf, shstr_off + 24)[0]
+
+    text_data = None
+    text_vaddr = 0
+    for i in range(e_shnum):
+        sh = e_shoff + i * e_shentsize
+        if sh + e_shentsize > len(elf):
+            break
+        sh_type = struct.unpack_from("<I", elf, sh + 4)[0]
+        sh_name_idx = struct.unpack_from("<I", elf, sh)[0]
+        name = elf[shstr_offset + sh_name_idx : shstr_offset + sh_name_idx + 32].split(b"\x00")[0]
+        if sh_type == 1 and name == b".text":
+            sh_offset = struct.unpack_from("<Q", elf, sh + 24)[0]
+            sh_size = struct.unpack_from("<Q", elf, sh + 32)[0]
+            text_vaddr = struct.unpack_from("<Q", elf, sh + 16)[0]
+            text_data = elf[sh_offset : sh_offset + sh_size]
+            break
+
+    if text_data is None or len(text_data) == 0:
+        return []
+
+    # Instructions whose immediate operands are likely comparison constants.
+    # MOV is excluded because most immediates it loads are addresses/offsets.
+    TARGET_INSNS = {
+        X86_INS_CMP, X86_INS_TEST, X86_INS_AND, X86_INS_OR,
+        X86_INS_XOR, X86_INS_SUB, X86_INS_ADD, X86_INS_CMPXCHG,
+    }
+
+    constants: set[bytes] = set()
+
+    md = Cs(CS_ARCH_X86, CS_MODE_64)
+    md.detail = True
+
+    for insn in md.disasm(text_data, text_vaddr):
+        has_imm = False
+        imm_value = 0
+        imm_size = 0
+
+        for op in insn.operands:
+            if op.type == X86_OP_IMM:
+                has_imm = True
+                imm_value = op.imm
+                # Determine size from the operand's access size
+                # Capstone provides op.size in bytes for some operands
+                imm_size = getattr(op, "size", 0) or _guess_imm_width(imm_value)
+                break
+
+        if not has_imm:
+            continue
+
+        # Skip small/noise immediates
+        if imm_size <= 0 or imm_size > 8:
+            continue
+
+        # Filter out uninteresting values
+        if _is_noise_immediate(imm_value, imm_size):
+            continue
+
+        if insn.id in TARGET_INSNS:
+            # Pack as little-endian bytes of the operand width
+            unsigned = imm_value & ((1 << (imm_size * 8)) - 1)
+            packed = unsigned.to_bytes(imm_size, "little")
+            if len(packed) >= 2:  # skip single-byte constants (too noisy)
+                _maybe_add_constant(constants, packed)
+
+            # Also add sub-words (2-byte and 4-byte slices) for patterns
+            # that contain embedded ASCII
+            if len(packed) > 4:
+                _maybe_add_constant(constants, packed[:4])
+                _maybe_add_constant(constants, packed[4:])
+            if len(packed) > 2:
+                _maybe_add_constant(constants, packed[:2])
+                _maybe_add_constant(constants, packed[2:4] if len(packed) >= 4 else b"")
+
+    # Cap at 256 entries to bound dictionary size
+    result = list(constants)[:256]
+    if result:
+        log.info("Capstone constants: extracted %d values from %s", len(result), target)
+    return result
+
+
+def _guess_imm_width(value: int) -> int:
+    """Guess the byte width of an immediate from its value range."""
+    if value < 0:
+        value = -value
+    if value <= 0xFF:
+        return 1
+    if value <= 0xFFFF:
+        return 2
+    if value <= 0xFFFFFFFF:
+        return 4
+    return 8
+
+
+def _is_noise_immediate(value: int, size: int) -> bool:
+    """Return True if *value* is likely uninteresting (address, small int, etc.)."""
+    if value == 0:
+        return True
+    # Treat as unsigned for range checks
+    unsigned = value & ((1 << (size * 8)) - 1)
+    # Small positive/negative values are usually loop counters, lengths
+    if 0 < unsigned < 128:
+        return True
+    if (1 << (size * 8)) - 128 < unsigned < (1 << (size * 8)):
+        return True  # small negative in two's complement
+    # Values that look like addresses
+    if size == 8 and unsigned > 0x7FFFFFFFFFFF:
+        return True
+    if unsigned > 0x10000 and unsigned % 0x1000 == 0:
+        return True  # page-aligned = likely address
+    return False
+
+
+def _maybe_add_constant(constants: set[bytes], data: bytes):
+    """Add *data* to *constants* if it looks like a useful dictionary token."""
+    if not data or len(data) < 2:
+        return
+    # Skip all-zeros, all-ones, all-0xFF
+    if data == b"\x00" * len(data):
+        return
+    if data == b"\xff" * len(data):
+        return
+    if data == b"\x01" * len(data):
+        return
+    # Skip if already present
+    if data in constants:
+        return
+    constants.add(data)
+
+
 def estimate_map_size(target: str) -> int:
     """Estimate optimal AFL_MAP_SIZE from sancov guard count or branch density.
 

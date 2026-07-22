@@ -407,6 +407,12 @@ class Fuzzer:
                 if mb not in self.dictionary:
                     self.dictionary.append(mb)
 
+        # Auto-populate dictionary from capstone-extracted constants
+        if self._profile.extracted_constants:
+            for c in self._profile.extracted_constants:
+                if c not in self.dictionary and len(c) >= 2:
+                    self.dictionary.append(c)
+
         # Cmplog: comparison tracing via LD_PRELOAD
         self._cmplog = None
         if cmplog:
