@@ -8,6 +8,8 @@
 #   tools/build_targets.sh --fast         # No-ASAN only
 #   tools/build_targets.sh --cmplog       # Include cmplog in .so targets (build-time linking)
 #   tools/build_targets.sh --asan --cmplog  # ASAN + cmplog in .so targets
+#   tools/build_targets.sh --clang-scov   # Clang + compiler-inserted edge coverage (sancov)
+#   tools/build_targets.sh --tracecmp     # Clang + compiler-IR comparison tracing
 
 set -e
 
@@ -16,18 +18,21 @@ TAILSLAYER="${TAILSLAYER_DIR:-/home/dclavijo/code/tailslayer}"
 SHIM="src/fuzzer_tool/adapters/afl_shim.c"
 CMPLOG_SHIM="src/fuzzer_tool/adapters/cmplog_shim.c"
 TARGETS="targets"
+VENDOR="vendor"
 OPTS="${@:---all}"
 HAS_FGREP=0
 [ -d "$FGREP/src" ] && HAS_FGREP=1
 WITH_CMPLOG=0
 WITH_TRACECMP=0
+WITH_CLANG_SCOV=0
 USE_CLANG=0
 
-# Parse --cmplog, --tracecmp, --clang flags (can appear anywhere)
+# Parse flags (can appear anywhere)
 for arg in "$@"; do
     [ "$arg" = "--cmplog" ] && WITH_CMPLOG=1
     [ "$arg" = "--tracecmp" ] && WITH_TRACECMP=1
     [ "$arg" = "--clang" ] && USE_CLANG=1
+    [ "$arg" = "--clang-scov" ] && WITH_CLANG_SCOV=1
 done
 
 # Colors
@@ -40,14 +45,14 @@ warn() { echo -e "  ${YELLOW}WARN${NC}: $1"; }
 
 # ── Compile fgrep library objects ──────────────────────────────────
 compile_fgrep_objects() {
-    local suffix="$1" flags="$2"
+    local suffix="$1" flags="$2" cc="${3:-gcc}" extra_cflags="${4:-}"
     echo "Compiling fgrep objects${suffix:+ ($suffix)}..."
     for src in regex_engine simd cpu; do
-        gcc $flags -fPIC -O2 -g -I"$FGREP/include" -I"$FGREP/src" \
+        $cc $flags -fPIC -O2 -g $extra_cflags -I"$FGREP/include" -I"$FGREP/src" \
             -c "$FGREP/src/${src}.c" -o "/tmp/${src}${suffix}.o"
     done
     for src in output search bmh_simd io fileutil; do
-        gcc $flags -fPIC -O2 -g -mavx2 -I"$FGREP/include" -I"$FGREP/src" \
+        $cc $flags -fPIC -O2 -g -mavx2 $extra_cflags -I"$FGREP/include" -I"$FGREP/src" \
             -c "$FGREP/src/${src}.c" -o "/tmp/${src}${suffix}.o"
     done
     ok "fgrep objects${suffix:+ ($suffix)}"
@@ -55,13 +60,13 @@ compile_fgrep_objects() {
 
 # ── Build a target ────────────────────────────────────────────────
 build_target() {
-    local src="$1" out="$2" libs="$3" extra_flags="$4"
+    local src="$1" out="$2" libs="$3" extra_flags="$4" cc="${5:-gcc}" extra_cflags="${6:-}"
     if [ ! -f "$src" ]; then
         warn "Source not found: $src"
         return 1
     fi
     local rc=0
-    gcc $extra_flags -O2 -g -include "$SHIM" \
+    $cc $extra_flags -O2 -g $extra_cflags -include "$SHIM" \
         -o "$out" "$src" $libs 2>/dev/null || rc=$?
     if [ $rc -eq 0 ]; then
         ok "$(basename "$out")"
@@ -72,27 +77,23 @@ build_target() {
 
 # ── Build a .so target ───────────────────────────────────────────
 build_so_target() {
-    local src="$1" out="$2" libs="$3" extra_flags="$4"
+    local src="$1" out="$2" libs="$3" extra_flags="$4" cc="${5:-gcc}" extra_cflags="${6:-}"
     local cmplog_obj="" cmplog_libs=""
     if [ ! -f "$src" ]; then
         warn "Source not found: $src"
         return 1
     fi
     if [ "$WITH_CMPLOG" -eq 1 ] && [ -f "$CMPLOG_SHIM" ]; then
-        # Compile cmplog shim separately (without -include afl_shim.c
-        # to avoid duplicate symbol definitions from -include hitting
-        # both compilation units).
         local cmplog_obj_path="/tmp/fuzz_cmplog_$$.o"
-        gcc $extra_flags -O2 -g -fPIC -c "$CMPLOG_SHIM" -o "$cmplog_obj_path" 2>/dev/null
+        $cc $extra_flags -O2 -g -fPIC $extra_cflags -c "$CMPLOG_SHIM" -o "$cmplog_obj_path" 2>/dev/null
         if [ -f "$cmplog_obj_path" ]; then
             cmplog_obj="$cmplog_obj_path"
             cmplog_libs="-ldl"
         fi
     fi
     local rc=0
-    gcc $extra_flags -O2 -g -shared -fPIC -include "$SHIM" \
+    $cc $extra_flags -O2 -g $extra_cflags -shared -fPIC -include "$SHIM" \
         -o "$out" "$src" $cmplog_obj $libs $cmplog_libs 2>/dev/null || rc=$?
-    # Clean up temp cmplog object
     [ -n "$cmplog_obj" ] && rm -f "$cmplog_obj"
     if [ $rc -eq 0 ]; then
         ok "$(basename "$out")"
@@ -202,6 +203,105 @@ build_standalone_so_targets() {
         build_so_target "$TARGETS/lz4_read.c" "$TARGETS/lz4_read${out_suffix}.so" "$LZ4_OBJS -Wl,--export-dynamic -lpthread" "$flags $LZ4_INC"
     else
         warn "lz4_read${out_suffix}.so: LZ4 objects not found, skipping (build LZ4 lib first)"
+    fi
+}
+
+# ── Compile vendored libraries with sancov instrumentation ───────
+compile_vendored_libs() {
+    local cc="$1" scov_flag="$2" suffix="$3"
+    echo "Compiling vendored libraries ($cc ${scov_flag:-no-sancov})..."
+
+    # zlib
+    if [ -d "$VENDOR/zlib" ]; then
+        (cd "$VENDOR/zlib" && CC=$cc CFLAGS="-O2 -g -fPIC ${scov_flag}" \
+            ./configure --static 2>/dev/null && make -j$(nproc) 2>/dev/null) && \
+            ok "zlib (vendored)" || warn "zlib (vendored) failed"
+    else
+        warn "vendored zlib not found at $VENDOR/zlib"
+    fi
+
+    # libpng (depends on zlib)
+    if [ -d "$VENDOR/libpng" ] && [ -d "$VENDOR/zlib" ]; then
+        (cd "$VENDOR/libpng" && CC=$cc \
+            CFLAGS="-O2 -g -fPIC ${scov_flag} -I../../zlib" \
+            LDFLAGS="-L../../zlib" \
+            ./configure --with-pkgconfig=no 2>/dev/null && make -j$(nproc) 2>/dev/null) && \
+            ok "libpng (vendored)" || warn "libpng (vendored) failed"
+    else
+        warn "vendored libpng not found or zlib missing"
+    fi
+
+    # libjpeg-turbo
+    if [ -d "$VENDOR/libjpeg-turbo" ]; then
+        (cd "$VENDOR/libjpeg-turbo" && \
+            cmake -DCMAKE_C_COMPILER=$cc \
+                  -DCMAKE_C_FLAGS="-O2 -g -fPIC ${scov_flag}" \
+                  -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+                  -G "Unix Makefiles" . 2>/dev/null && \
+            make -j$(nproc) 2>/dev/null) && \
+            ok "libjpeg-turbo (vendored)" || warn "libjpeg-turbo (vendored) failed"
+    else
+        warn "vendored libjpeg-turbo not found"
+    fi
+}
+
+# ── Build .so targets with vendored libraries ────────────────────
+build_vendored_so_targets() {
+    local suffix="$1" flags="$2" label="$3" cc="${4:-gcc}" extra_cflags="${5:-}"
+    echo "Building vendored .so targets ($label)..."
+    local out_suffix=""
+    [ "$suffix" = "_nosan" ] && out_suffix="_nosan"
+
+    local ZLIB_OBJS=""
+    local ZLIB_INC=""
+    local PNG_OBJS=""
+    local PNG_INC=""
+    local JPEG_OBJS=""
+    local JPEG_INC=""
+
+    if [ -d "$VENDOR/zlib" ]; then
+        ZLIB_OBJS=$(ls "$VENDOR/zlib"/*.o 2>/dev/null | tr '\n' ' ')
+        ZLIB_INC="-I$VENDOR/zlib"
+    fi
+    if [ -d "$VENDOR/libpng" ]; then
+        PNG_OBJS=$(ls "$VENDOR/libpng"/*.o 2>/dev/null | tr '\n' ' ')
+        PNG_INC="-I$VENDOR/libpng -I$VENDOR/libpng/scripts"
+    fi
+    if [ -d "$VENDOR/libjpeg-turbo" ]; then
+        JPEG_OBJS=$(ls "$VENDOR/libjpeg-turbo"/*.o 2>/dev/null | tr '\n' ' ')
+        JPEG_INC="-I$VENDOR/libjpeg-turbo"
+    fi
+
+    # png_read.so — vendored libpng + zlib
+    if [ -n "$PNG_OBJS" ] && [ -n "$ZLIB_OBJS" ]; then
+        build_so_target "$TARGETS/png_read.c" "$TARGETS/png_read${out_suffix}_scov.so" \
+            "$PNG_OBJS $ZLIB_OBJS -lm -lpthread" "$flags" "$cc" "$extra_cflags $PNG_INC $ZLIB_INC"
+    else
+        warn "png_read${out_suffix}_scov.so: vendored objects missing, skipping"
+    fi
+
+    # zlib_read.so — vendored zlib
+    if [ -n "$ZLIB_OBJS" ]; then
+        build_so_target "$TARGETS/zlib_read.c" "$TARGETS/zlib_read${out_suffix}_scov.so" \
+            "$ZLIB_OBJS -lm" "$flags" "$cc" "$extra_cflags $ZLIB_INC"
+    else
+        warn "zlib_read${out_suffix}_scov.so: vendored zlib objects missing, skipping"
+    fi
+
+    # gzip_read.so — vendored zlib
+    if [ -n "$ZLIB_OBJS" ]; then
+        build_so_target "$TARGETS/gzip_read.c" "$TARGETS/gzip_read${out_suffix}_scov.so" \
+            "$ZLIB_OBJS -lm" "$flags" "$cc" "$extra_cflags $ZLIB_INC"
+    else
+        warn "gzip_read${out_suffix}_scov.so: vendored zlib objects missing, skipping"
+    fi
+
+    # jpeg_read.so — vendored libjpeg-turbo
+    if [ -n "$JPEG_OBJS" ]; then
+        build_so_target "$TARGETS/jpeg_read.c" "$TARGETS/jpeg_read${out_suffix}_scov.so" \
+            "$JPEG_OBJS -lm -lpthread" "$flags" "$cc" "$extra_cflags $JPEG_INC"
+    else
+        warn "jpeg_read${out_suffix}_scov.so: vendored libjpeg-turbo objects missing, skipping"
     fi
 }
 
@@ -330,6 +430,7 @@ build_tracecmp_targets() {
 echo "=== Building fuzz targets ==="
 [ "$WITH_CMPLOG" -eq 1 ] && echo "[*] Cmplog: build-time linking enabled for .so targets"
 [ "$WITH_TRACECMP" -eq 1 ] && echo "[*] Trace-cmp: compiler-IR comparison tracing enabled (requires clang)"
+[ "$WITH_CLANG_SCOV" -eq 1 ] && echo "[*] Clang-scov: compiler-inserted edge coverage enabled (requires clang)"
 
 if [ "$HAS_FGREP" -eq 0 ]; then
     warn "fgrep directory not found at $FGREP — skipping fgrep targets"
@@ -343,6 +444,42 @@ case "$OPTS" in
         [ "$HAS_FGREP" -eq 1 ] && build_fgrep_so_targets "_asan" "-fsanitize=address" "ASAN"
         build_simple_so_targets "_asan" "-fsanitize=address" "ASAN"
         build_standalone_so_targets "_asan" "-fsanitize=address" "ASAN"
+        ;;
+    --clang-scov)
+        # Clang + compiler-inserted edge coverage (sancov)
+        local SCOV_CC="clang"
+        if ! command -v clang &>/dev/null; then
+            warn "clang not found — --clang-scov requires clang"
+            break
+        fi
+        local SCOV_FLAGS="-fsanitize-coverage=trace-pc-guard"
+
+        # Compile fgrep objects with clang + sancov
+        [ "$HAS_FGREP" -eq 1 ] && compile_fgrep_objects "_asan" "-fsanitize=address" "$SCOV_CC" "$SCOV_FLAGS"
+        [ "$HAS_FGREP" -eq 1 ] && compile_fgrep_objects "_nosan" "" "$SCOV_CC" "$SCOV_FLAGS"
+
+        # Compile vendored libraries with clang + sancov
+        compile_vendored_libs "$SCOV_CC" "$SCOV_FLAGS" "_asan"
+
+        # Build fgrep targets
+        [ "$HAS_FGREP" -eq 1 ] && build_fgrep_targets "_asan" "-fsanitize=address" "Clang-scov"
+        [ "$HAS_FGREP" -eq 1 ] && build_fgrep_targets "_nosan" "" "Clang-scov"
+
+        # Build simple targets with vendored libraries
+        build_simple_targets "_asan" "-fsanitize=address" "Clang-scov"
+        build_simple_targets "_nosan" "" "Clang-scov"
+
+        # Build .so targets with vendored libraries (sancov-instrumented)
+        build_vendored_so_targets "_asan" "-fsanitize=address" "Clang-scov" "$SCOV_CC" "$SCOV_FLAGS"
+        build_vendored_so_targets "_nosan" "" "Clang-scov" "$SCOV_CC" "$SCOV_FLAGS"
+
+        # Build fgrep .so targets
+        [ "$HAS_FGREP" -eq 1 ] && build_fgrep_so_targets "_asan" "-fsanitize=address" "Clang-scov"
+        [ "$HAS_FGREP" -eq 1 ] && build_fgrep_so_targets "_nosan" "" "Clang-scov"
+
+        # Standalone .so targets (tailslayer)
+        build_standalone_so_targets "_asan" "-fsanitize=address" "Clang-scov"
+        build_standalone_so_targets "_nosan" "" "Clang-scov"
         ;;
     --fast|--nosan)
         [ "$HAS_FGREP" -eq 1 ] && compile_fgrep_objects "_nosan" ""

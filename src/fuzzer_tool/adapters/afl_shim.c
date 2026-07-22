@@ -6,6 +6,8 @@
  *   - __afl_map_edge()    — record an edge: hash(prev, cur) -> bitmap[idx]
  *                           using Morris probabilistic counting (a=30)
  *   - __afl_map_reset()   — zero the bitmap between iterations
+ *   - __sanitizer_cov_trace_pc_guard()      — compiler-inserted edge coverage
+ *   - __sanitizer_cov_trace_pc_guard_init() — compiler-inserted edge coverage
  *
  * Morris counting: instead of incrementing the counter by 1 each time,
  * increment with probability (a/(a+1))^c where c is the current value.
@@ -15,7 +17,10 @@
  *
  * Compile target with:
  *   gcc -O2 -g -shared -fPIC -include afl_shim.c -o target.so target.c -lpng -lz
- * Or include this header and call __afl_map_shm() once at startup.
+ *
+ * For compiler-inserted edge coverage (clang):
+ *   clang -O2 -g -fsanitize-coverage=trace-pc-guard -include afl_shim.c \
+ *       -shared -fPIC -o target.so target.c -lpng -lz
  */
 #include <stdint.h>
 #include <stdio.h>
@@ -89,6 +94,32 @@ static inline void __afl_map_edge(uint32_t cur_loc) {
             __afl_area[idx] = c + 1;
     }
     __afl_prev_loc = cur_loc >> 1;
+}
+
+/* ── Compiler-inserted edge coverage callbacks ────────────────────────
+ * When the target is compiled with -fsanitize-coverage=trace-pc-guard,
+ * Clang inserts calls to __sanitizer_cov_trace_pc_guard at every edge.
+ * We delegate to __afl_map_edge() which handles SHM attachment, edge
+ * hashing, and Morris counting. No new bitmap logic needed.
+ *
+ * Guard values: the compiler assigns each guard a unique nonzero uint32_t
+ * at init time. We use *guard directly as cur_loc in the existing hash
+ * scheme: hash(prev_loc, *guard) & map_mask → bitmap[idx].
+ */
+
+__attribute__((visibility("default")))
+void __sanitizer_cov_trace_pc_guard(uint32_t *guard) {
+    if (!guard || *guard == 0) return;
+    __afl_map_edge(*guard);
+}
+
+/* Called once per module with the range of guard variables.
+ * The compiler sets each guard to a unique nonzero value at init time.
+ * We don't need to do anything — the guard values are already assigned. */
+__attribute__((visibility("default")))
+void __sanitizer_cov_trace_pc_guard_init(uint32_t *start, uint32_t *stop) {
+    (void)start;
+    (void)stop;
 }
 
 __attribute__((visibility("default")))

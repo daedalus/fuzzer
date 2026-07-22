@@ -402,6 +402,10 @@ tools/build_targets.sh --fast
 # Build .so targets with cmplog compiled in (for direct_lite compatibility)
 tools/build_targets.sh --cmplog
 tools/build_targets.sh --asan --cmplog        # ASAN + cmplog
+
+# Build with compiler-inserted edge coverage (requires clang)
+tools/build_targets.sh --clang-scov
+tools/build_targets.sh --asan --clang-scov    # ASAN + compiler-inserted coverage
 ```
 
 The build script compiles every target as both an executable and a `.so` shared library, in ASAN and no-ASAN variants. The no-ASAN `.so` variants (`*_nosan.so`) are suitable for high-throughput in-process fuzzing without sanitizer overhead.
@@ -448,6 +452,35 @@ The trace-cmp shim intercepts:
 - `__sanitizer_cov_trace_cmp{1,2,4,8}` — typed comparison callbacks
 - `__sanitizer_cov_trace_const_cmp{1,2,4,8}` — constant-operand variants
 - `__sanitizer_cov_trace_switch` — switch statement tracing
+
+### Compiler-Inserted Edge Coverage (`--clang-scov`)
+
+The default coverage scheme uses hand-placed `__afl_map_edge()` calls in
+wrapper targets. This only covers the wrapper code — the fuzzer cannot see
+which internal code path executed inside the library being fuzzed.
+
+**`--clang-scov`** solves this by adding `-fsanitize-coverage=trace-pc-guard`
+to every compiled source file. The compiler inserts coverage callbacks at
+every edge automatically, giving full visibility into library internals.
+
+```bash
+# Build with compiler-inserted edge coverage (requires clang)
+tools/build_targets.sh --clang-scov
+
+# Combined with ASAN
+tools/build_targets.sh --asan --clang-scov
+```
+
+This builds two variants of library-wrapping targets (png_read, zlib_read,
+gzip_read, jpeg_read) using vendored library sources compiled with sancov
+instrumentation. The vendored sources live in `vendor/` and are compiled
+as `.o` files with the same flags, then linked statically.
+
+The existing manual `__afl_map_edge()` calls in wrappers remain — they become
+named semantic checkpoints on top of full automatic coverage.
+
+For targets with source already compiled by the build script (fgrep, tailslayer),
+the sancov flag is applied directly to their compilation — no vendoring needed.
 
 ## Troubleshooting
 

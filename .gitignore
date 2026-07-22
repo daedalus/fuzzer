@@ -53,3 +53,6 @@ src/fuzzer_tool/adapters/fuzz_loader
 corpus/
 corpora/
 .mimocode/
+
+# Vendored library sources (built with clang -fsanitize-coverage)
+vendor/

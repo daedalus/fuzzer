@@ -292,20 +292,12 @@ def _next_power_of_2(n: int) -> int:
 
 
 def estimate_map_size(target: str) -> int:
-    """Estimate optimal AFL_MAP_SIZE from branch density and .text size.
+    """Estimate optimal AFL_MAP_SIZE from sancov guard count or branch density.
 
-    Formula:
-        estimated_edges = branch_density (branches/KB) × .text_size (KB)
-        map_size = next_power_of_2(estimated_edges × 8)  # 8x headroom
-
-    Static analysis consistently underestimates actual edge counts by ~5-10x
-    because it doesn't account for:
-    - Indirect branches and function pointers
-    - Compiler-generated switch tables
-    - Dynamic code paths (e.g., format parsers)
-    - Edge aliasing in AFL's hash-based coverage
-
-    Clamped to [4096, 1048576] (AFL's practical range).
+    Priority:
+    1. If sancov counter section exists (Clang -fsanitize-coverage), use
+       guard count directly — this is the exact number of instrumented edges.
+    2. Fall back to branch_density × .text_size estimation.
 
     Args:
         target: Path to ELF binary.
@@ -313,32 +305,26 @@ def estimate_map_size(target: str) -> int:
     Returns:
         Recommended map size (int), defaults to 65536 on failure.
     """
-    DEFAULT = 512
+    DEFAULT = 65536
 
+    # Try sancov guard count first — most accurate for instrumented binaries
+    offsets = parse_sancov_offsets(target)
+    if offsets:
+        start, stop = offsets
+        if stop > start:
+            # Each guard is a uint32_t; guards are 4 bytes apart
+            guard_count = (stop - start) // 4
+            if guard_count > 0:
+                map_size = _next_power_of_2(guard_count)
+                return max(DEFAULT, min(1048576, map_size))
+
+    # Fall back to branch density estimation
     bd = branch_density(target)
     ts = _text_size(target)
     if bd is None or ts is None or ts == 0:
         return DEFAULT
 
-    return 512
-
-    # Each branch creates 2 edges (taken + not-taken), and AFL hashes
-    # (src, dst) pairs into bitmap positions.  Static analysis
-    # underestimates actual edge counts by 5-10x because it misses
-    # indirect branches, switch tables, dynamic dispatch, and
-    # compiler-generated code paths.  Use 8x headroom on top of the
-    # 2x edges-per-branch factor to compensate.
-    #
-    # Formula: branches = bd * (ts / 1024)
-    #           edges ≈ branches * 2
-    #           map_size = next_power_of_2(edges * 8)
     branches = bd * (ts / 1024)
     estimated_edges = branches * 2  # 2 edges per branch
     map_size = _next_power_of_2(int(estimated_edges * 8))
-
-    # Resize is handled dynamically in stats.py via ShmCoverage.resize()
-    # when collision risk exceeds 10%, but resizing clears all cumulative
-    # coverage state because hash positions change.  Start large enough
-    # (256KB minimum) that resize fires rarely and coverage data can
-    # accumulate meaningfully.
     return max(DEFAULT, min(1048576, map_size))

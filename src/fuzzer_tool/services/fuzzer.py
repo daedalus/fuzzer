@@ -144,7 +144,9 @@ def _detect_cmplog(target_path: str) -> bool:
     import subprocess
 
     try:
-        result = subprocess.run(["nm", "-D", target_path], capture_output=True, text=True, timeout=5)
+        result = subprocess.run(
+            ["nm", "-D", target_path], capture_output=True, text=True, timeout=5
+        )
         if result.returncode == 0 and "__cmplog_reset" in result.stdout:
             return True
         result = subprocess.run(["nm", target_path], capture_output=True, text=True, timeout=5)
