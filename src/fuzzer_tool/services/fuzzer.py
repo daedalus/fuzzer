@@ -314,6 +314,7 @@ class Fuzzer:
         multi_targets=None,
         debug=False,
         enable_regex_bomb=False,
+        enable_smt_z3=False,
     ):
         self.target = target
         self.debug = debug
@@ -425,6 +426,19 @@ class Fuzzer:
             else:
                 print("[!] Cmplog: failed to compile shim, disabling")
                 self._cmplog = None
+
+        # SMT solver: z3-based arithmetic constraint solving
+        self._smt_solver = None
+        self._enable_smt_z3 = enable_smt_z3
+        if enable_smt_z3:
+            from fuzzer_tool.core.smt_solver import Z3Solver
+
+            self._smt_solver = Z3Solver()
+            if self._smt_solver._available:
+                print("[*] SMT solver: z3 arithmetic constraint solving enabled")
+            else:
+                print("[!] SMT solver: z3-solver not installed — install with: pip install z3-solver")
+                self._smt_solver = None
 
         if self.file_mode:
             self._tmp_dir = Path(tempfile.mkdtemp(prefix="fuzzer_"))
@@ -848,7 +862,9 @@ class Fuzzer:
                 from fuzzer_tool.adapters.shim_factory import _find_compiler
 
                 _asan_opts_shim_src = (
-                    b'const char *__asan_default_options() {  return "verify_asan_link_order=0";}'
+                    b'const char *__asan_default_options() {'
+                    b'  return "verify_asan_link_order=0";'
+                    b'}'
                 )
                 _fd, _shim_path = _tempfile.mkstemp(suffix=".so", prefix="asan_opts_")
                 os.close(_fd)
@@ -893,9 +909,7 @@ class Fuzzer:
                     if has_cmplog:
                         print("[*] Cmplog: compiled into target .so (direct_lite compatible)")
                     else:
-                        print(
-                            "[*] Trace-cmp: compiled into target .so (direct_lite compatible, preloading shim)"
-                        )
+                        print("[*] Trace-cmp: compiled into target .so (direct_lite compatible, preloading shim)")
                 else:
                     ld_preload = os.environ.get("LD_PRELOAD", "")
                     shim_in_preload = "cmplog_shim" in ld_preload or "tracecmp_shim" in ld_preload
@@ -1385,6 +1399,7 @@ class Fuzzer:
 
         # Collect cmplog tokens after each execution
         cmplog_found = False
+        smt_found = False
         if self._cmplog:
             new_tokens = self._cmplog.collect_tokens()
             cmplog_found = bool(new_tokens)
@@ -1421,28 +1436,74 @@ class Fuzzer:
             # Record redqueen matches: (offset, operand_a, operand_b)
             # for input-to-state matching during mutation.
             # Only scan new pairs (not yet seen) to avoid O(5000) per iteration.
-            if (
-                self._cmplog.pairs
-                and meta is not None
-                and self._redqueen_index < len(self._cmplog.pairs)
-            ):
+            if self._cmplog.pairs and meta is not None and self._redqueen_index < len(self._cmplog.pairs):
                 matches = list(meta.get("redqueen_matches", []))
                 seen = {(m[1], m[2]) for m in matches}  # dedup by (A, B)
                 for op_a, op_b in self._cmplog.pairs[self._redqueen_index :]:
                     if len(op_a) < 2 or (op_a, op_b) in seen:
                         continue
+
+                    # Pass 1: find op_a literally in mutated input (original redqueen)
                     pos = 0
+                    matched = False
                     while pos <= len(mutated) - len(op_a):
                         idx = mutated.find(op_a, pos)
                         if idx == -1:
                             break
                         matches.append((idx, op_a, op_b))
                         seen.add((op_a, op_b))
+                        matched = True
                         pos = idx + 1
                         if len(matches) >= 50:
                             break
-                    if len(matches) >= 50:
-                        break
+                    if matched or len(matches) >= 50:
+                        if len(matches) >= 50:
+                            break
+                        continue
+
+                    # Pass 2: try finding op_b instead (reverse direction)
+                    if len(op_b) >= 2:
+                        pos = 0
+                        while pos <= len(mutated) - len(op_b):
+                            idx = mutated.find(op_b, pos)
+                            if idx == -1:
+                                break
+                            matches.append((idx, op_b, op_a))  # swap: replace op_b with op_a
+                            seen.add((op_b, op_a))
+                            matched = True
+                            pos = idx + 1
+                            if len(matches) >= 50:
+                                break
+                    if matched or len(matches) >= 50:
+                        if len(matches) >= 50:
+                            break
+                        continue
+
+                    # Pass 3: SMT solver for arithmetic constraints
+                    if self._smt_solver is not None and len(op_a) >= 2:
+                        result = self._smt_solver.solve_cmplog_pair(op_a, op_b)
+                        if result is not None:
+                            solved = result["solved_bytes"]
+                            # Try finding either operand in mutated after solving
+                            for candidate, target in [(op_a, solved), (op_b, solved)]:
+                                if len(candidate) < 2:
+                                    continue
+                                pos = 0
+                                while pos <= len(mutated) - len(candidate):
+                                    idx = mutated.find(candidate, pos)
+                                    if idx == -1:
+                                        break
+                                    matches.append((idx, candidate, target))
+                                    seen.add((candidate, target))
+                                    smt_found = True
+                                    pos = idx + 1
+                                    if len(matches) >= 50:
+                                        break
+                                if smt_found or len(matches) >= 50:
+                                    break
+                            if len(matches) >= 50:
+                                break
+
                 self._redqueen_index = len(self._cmplog.pairs)
                 meta["redqueen_matches"] = matches[:50]
                 # Keep legacy field for state compat
@@ -1466,6 +1527,10 @@ class Fuzzer:
         # Track cmplog as its own operator
         if cmplog_found:
             self.op_counts["cmplog"] = self.op_counts.get("cmplog", 0) + 1
+
+        # Track SMT solver as its own operator
+        if smt_found:
+            self.op_counts["smt_solver"] = self.op_counts.get("smt_solver", 0) + 1
 
         is_timeout = returncode == -1 and stderr == "timeout"
         if is_timeout:
@@ -1504,7 +1569,7 @@ class Fuzzer:
             if edge_bitmap:
                 self._prev_edge_bitmap = bytes(edge_bitmap)
 
-            cov_before = self._cov_before_fuzz
+            cov_before = len(new_edges) if new_edges else 0
             cov_after = (
                 len(self._edge_tracker._global_edge_hits)
                 if hasattr(self._edge_tracker, "_global_edge_hits")
@@ -1513,7 +1578,7 @@ class Fuzzer:
             self._format_learner.record_transition(
                 input_bytes=mutated,
                 mutation_op=self._last_ops_used[0] if self._last_ops_used else "unknown",
-                mutation_offset=self._last_mutation_offset,
+                mutation_offset=0,
                 mutation_width=len(mutated),
                 coverage_before=cov_before,
                 coverage_after=cov_after,
@@ -1564,6 +1629,10 @@ class Fuzzer:
                     #  signal source, not a mutation op, so it can overlap).
                     if cmplog_found:
                         self.op_edges["cmplog"] = self.op_edges.get("cmplog", 0.0) + len(new)
+                    if smt_found:
+                        self.op_edges["smt_solver"] = (
+                            self.op_edges.get("smt_solver", 0.0) + len(new)
+                        )
                     if self._stall_recovery_active:
                         print(
                             f"\n[*] RECOVERED: found {len(new)} new edges at exec "
@@ -1654,6 +1723,8 @@ class Fuzzer:
                 self.op_success[op] = self.op_success.get(op, 0) + 1
             if cmplog_found:
                 self.op_success["cmplog"] = self.op_success.get("cmplog", 0) + 1
+            if smt_found:
+                self.op_success["smt_solver"] = self.op_success.get("smt_solver", 0) + 1
 
         if self.mc and self.mc_bandit:
             seen = set()

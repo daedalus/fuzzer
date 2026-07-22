@@ -358,6 +358,7 @@ def cmd_fuzz(args):
         debug=getattr(args, "debug", False),
         enable_regex_bomb=getattr(args, "enable_regex_bomb_mutations", False),
         resize_map_on_stall=getattr(args, "resize_map_on_stall", False),
+        enable_smt_z3=getattr(args, "enable_smt_z3", False),
     )
     fuzzer.run(iterations=args.iterations)
 
@@ -1107,6 +1108,12 @@ def main() -> int:
         "--wfc",
         action="store_true",
         help="Enable Wave Function Collapse structural generation (chunk reordering, pixel generation)",
+    )
+    fuzz_parser.add_argument(
+        "--enable-smt-z3",
+        action="store_true",
+        help="Enable z3-based SMT solving: arithmetic constraint solving on cmplog pairs "
+        "and computed-field repair for WFC output",
     )
     fuzz_parser.add_argument(
         "--ga-pop-size",

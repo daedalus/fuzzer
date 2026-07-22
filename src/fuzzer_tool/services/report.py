@@ -82,6 +82,7 @@ def generate_report(fuzzer, corpus_dir: str, crashes_dir: str) -> str:
     sections.append(_execution_time_analysis(fuzzer))
     sections.append(_distribution_diagnostics(fuzzer))
     sections.append(_mdl_codelength(fuzzer))
+    sections.append(_smt_solver_activity(fuzzer))
     sections.append(_seed_contribution(fuzzer))
     sections.append(_edge_rarity(fuzzer))
     sections.append(_corpus_health(fuzzer))
@@ -331,6 +332,31 @@ def _mdl_codelength(f) -> str:
 
     return "\n".join(lines)
 
+    return "\n".join(lines)
+
+
+def _smt_solver_activity(f) -> str:
+    """SMT solver activity: queries attempted, solved, timed out."""
+    solver = getattr(f, "_smt_solver", None)
+    if solver is None:
+        return ""
+    try:
+        stats = solver.stats
+        if not isinstance(stats, dict) or stats.get("queries_attempted", 0) == 0:
+            return ""
+        attempted = stats.get("queries_attempted", 0)
+        solved = stats.get("queries_solved", 0)
+        timed_out = stats.get("queries_timed_out", 0)
+        solved_pct = solved / attempted * 100 if attempted > 0 else 0.0
+    except (TypeError, AttributeError):
+        return ""
+    lines = [
+        "",
+        "--- SMT Solver Activity ---",
+        f"  Queries attempted: {attempted}",
+        f"  Queries solved:    {solved} ({solved_pct:.1f}%)",
+        f"  Queries timed out: {timed_out}",
+    ]
     return "\n".join(lines)
 
 

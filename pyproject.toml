@@ -23,6 +23,7 @@ classifiers = [
 dependencies = ["numpy>=2.0","ppmd>=0.1.1"]
 
 [project.optional-dependencies]
+smt = ["z3-solver>=4.13"]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",

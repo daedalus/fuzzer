@@ -658,8 +658,9 @@ class OperatorEngine:
 
         if not hasattr(self.f, "_png_mutator"):
             self.f._png_mutator = PngChunkMutator()
-        # Set WFC mode from fuzzer state
+        # Set WFC mode and SMT solver from fuzzer state
         self.f._png_mutator.use_wfc = getattr(self.f, "_wfc_enabled", False)
+        self.f._png_mutator.smt_solver = getattr(self.f, "_smt_solver", None)
         if parse_png_chunks(bytes(buf)):
             mutated = self.f._png_mutator.mutate(bytes(buf), max_len=self.f.max_len)
         else:
@@ -1037,8 +1038,6 @@ class OperatorEngine:
             f._last_ops_used.append(op)
 
             byte_idx = self.select_position(buf, data)
-            if len(f._last_ops_used) == 1:
-                f._last_mutation_offset = byte_idx
             old_len = len(buf)
 
             result = f._op_dispatch[op](buf, byte_idx, data)
