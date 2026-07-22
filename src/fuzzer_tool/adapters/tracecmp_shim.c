@@ -41,14 +41,22 @@ static size_t cmplog_buf_pos = 0;
 static FILE *cmplog_file = NULL;
 
 static void flush_buffer(void) {
-    if (cmplog_buf_pos == 0 || !cmplog_file) return;
-    fwrite(cmplog_buffer, 1, cmplog_buf_pos, cmplog_file);
+    if (cmplog_buf_pos == 0) return;
+    if (cmplog_file) {
+        fwrite(cmplog_buffer, 1, cmplog_buf_pos, cmplog_file);
+    }
     cmplog_buf_pos = 0;
 }
 
 /* Append a CMP line to the buffer. n is the comparison width in bytes (1/2/4/8).
- * a and b are the operands, result is their signed comparison result. */
+ * a and b are the operands, result is their signed comparison result.
+ *
+ * Returns immediately when cmplog_file is NULL (no --cmplog flag) — avoids
+ * accumulating in a buffer that can never be flushed, which previously caused
+ * a global-buffer-overflow (ASAN) across multiple fuzz iterations. */
 static inline void buffer_cmp(uint64_t a, uint64_t b, size_t n) {
+    if (!cmplog_file) return;
+
     /* Worst case: "CMP " + 16 hex + " " + 16 hex + " " + "-9223372036854775808" + " " + "8" + "\n"
      * = ~72 chars. Leave generous margin. */
     if (cmplog_buf_pos + 80 > BUFFER_SIZE) {
