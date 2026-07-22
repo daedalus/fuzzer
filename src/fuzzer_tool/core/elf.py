@@ -445,21 +445,28 @@ def _guess_imm_width(value: int) -> int:
 
 
 def _is_noise_immediate(value: int, size: int) -> bool:
-    """Return True if *value* is likely uninteresting (address, small int, etc.)."""
+    """Return True if *value* is likely uninteresting.
+
+    Filters obvious noise: zero, tiny counters, small negatives.
+    Conservative by design — false negatives (keeping noise) are bounded by
+    the 256-entry cap and do less harm than false positives (discarding
+    legitimate comparison constants like 0xFFFF0000 or 0x400000).
+    """
     if value == 0:
         return True
-    # Treat as unsigned for range checks
     unsigned = value & ((1 << (size * 8)) - 1)
-    # Small positive/negative values are usually loop counters, lengths
+    # Small positive counters/indices
     if 0 < unsigned < 128:
         return True
-    if (1 << (size * 8)) - 128 < unsigned < (1 << (size * 8)):
-        return True  # small negative in two's complement
-    # Values that look like addresses
-    if size == 8 and unsigned > 0x7FFFFFFFFFFF:
+    # Small negative in two's complement (multi-byte only — single-byte
+    # values 128-255 include legit constants like 0x89 PNG, 0xFF JPEG)
+    if size > 1:
+        upper = 1 << (size * 8)
+        if upper - 128 <= unsigned < upper:
+            return True  # -1 through -128
+    # User-space addresses on 64-bit (conservative: page-aligned AND high bit set)
+    if size == 8 and unsigned > 0x7FFFFFFFFFFF and unsigned % 0x1000 == 0:
         return True
-    if unsigned > 0x10000 and unsigned % 0x1000 == 0:
-        return True  # page-aligned = likely address
     return False
 
 
