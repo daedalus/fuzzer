@@ -24,6 +24,30 @@ def _detect_asan(target: str) -> bool:
     return False
 
 
+def _detect_asan_static(target: str) -> bool:
+    """Check if ASAN is statically linked (defined T/t, not U).
+
+    Targets built with --whole-archive libasan.a have __asan_init
+    and related symbols defined in the .so itself, not as unresolved
+    references that need LD_PRELOAD.
+    """
+    for flags in [[], ["-D"]]:
+        try:
+            r = subprocess.run(["nm"] + flags + [target], capture_output=True, timeout=10)
+            if r.returncode == 0:
+                out = r.stdout.decode(errors="replace")
+                for line in out.splitlines():
+                    parts = line.split()
+                    if len(parts) >= 3 and parts[-1] == "__asan_init":
+                        # parts[0] = address, parts[1] = symbol type (T/t = defined, U = undefined)
+                        sym_type = parts[1]
+                        if sym_type in ("T", "t", "D", "d", "B", "b"):
+                            return True
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+    return False
+
+
 def _add_common_args(parser):
     """Add arguments shared by fuzz and subcommands."""
     parser.add_argument("target", help="Path to target binary")
@@ -153,8 +177,10 @@ def cmd_fuzz(args):
 
         # For .so targets loaded via ctypes, ASAN must be first in library list.
         # Set LD_PRELOAD to ensure ASAN loads before Python's libraries.
+        # Skip this if ASAN is statically linked (defined T/t symbol, not U).
         is_so = args.target.lower().endswith((".so", ".dylib", ".dll"))
-        if is_so:
+        asan_static = _detect_asan_static(args.target) if is_so else False
+        if is_so and not asan_static:
             # Find full path to libasan (ctypes.util.find_library may return relative name)
             libasan = "/usr/lib/x86_64-linux-gnu/libasan.so.8"
             if not os.path.exists(libasan):
@@ -168,6 +194,8 @@ def cmd_fuzz(args):
                 else:
                     os.environ["LD_PRELOAD"] = libasan
                 print(f"[*] LD_PRELOAD={libasan} (ASAN must load first for .so targets)")
+        elif asan_static:
+            print("[*] ASAN statically linked — no LD_PRELOAD needed")
 
     # ASAN calls _exit() which kills inprocess-direct mode.
     # Fall back to subprocess mode so stderr is captured.
