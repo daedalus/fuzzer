@@ -2022,6 +2022,19 @@ class Fuzzer:
         print(f"[*] Boot ticks start: {boot_start:.3f}")
         print("[*] Starting fuzzing...\n")
 
+        # Quick raw-target-speed measurement before the main loop
+        try:
+            _probe = b"\x00" * 64
+            _n = min(100, max(10, int(len(self.corpus) * 0.1 + 1)))
+            _t0 = time.perf_counter()
+            for _ in range(_n):
+                self._run_target(_probe)
+            _t1 = time.perf_counter()
+            _raw_eps = _n / (_t1 - _t0) if _t1 > _t0 else 0
+            print(f"[*] Raw target speed: {_raw_eps:,.0f} eps ({_n} probes)")
+        except Exception:
+            pass
+
         i = 0
         try:
             # Run each seed as-is before mutating — catches crashes in the
