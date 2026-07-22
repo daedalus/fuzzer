@@ -503,20 +503,32 @@ build_vendored_tracecmp_targets() {
     for _arg in "$@"; do [ "$_arg" = "--asan" ] && HAS_ASAN=1; done
     if [ "$HAS_ASAN" -eq 1 ] && [ -f "$TARGETS/png_read.c" ] && [ -f "src/fuzzer_tool/adapters/tracecmp_shim.c" ]; then
         local TC_SHIM_OBJ="/tmp/tracecmp_shim_asan_$$.o"
+        # Link ASAN runtime statically via libasan.a to avoid LD_PRELOAD
+        local ASAN_LIB="/usr/lib/gcc/x86_64-linux-gnu/14/libasan.a"
+        if [ ! -f "$ASAN_LIB" ]; then
+            ASAN_LIB=$(gcc -print-file-name=libasan.a 2>/dev/null)
+        fi
         $CC -O2 -g -fsanitize=address -fvisibility=hidden -fPIC -c \
             "src/fuzzer_tool/adapters/tracecmp_shim.c" \
-            -o "$TC_SHIM_OBJ" 2>/dev/null && \
-        $CC -O2 -g \
-            -fsanitize=address \
-            -fsanitize-coverage=trace-cmp,trace-pc-guard \
-            -shared -fPIC \
-            -include "$SHIM" \
-            -o "$TARGETS/png_read_asan_tracecmp.so" \
-            "$TARGETS/png_read.c" "$TC_SHIM_OBJ" \
-            $VENDOR_LIBS $VENDOR_INC 2>/dev/null && \
-        rm -f "$TC_SHIM_OBJ" && \
-        ok "png_read_asan_tracecmp.so (ASAN + tracecmp compiled-in)" || \
-        warn "failed: png_read_asan_tracecmp.so"
+            -o "$TC_SHIM_OBJ" 2>/dev/null
+        if [ -f "$ASAN_LIB" ] && [ -f "$TC_SHIM_OBJ" ]; then
+            $CC -O2 -g \
+                -fsanitize=address \
+                -fsanitize-coverage=trace-cmp,trace-pc-guard \
+                -shared -fPIC \
+                -include "$SHIM" \
+                -o "$TARGETS/png_read_asan_tracecmp.so" \
+                "$TARGETS/png_read.c" "$TC_SHIM_OBJ" \
+                $VENDOR_LIBS $VENDOR_INC \
+                -Wl,--whole-archive "$ASAN_LIB" -Wl,--no-whole-archive \
+                2>/dev/null && \
+            rm -f "$TC_SHIM_OBJ" && \
+            ok "png_read_asan_tracecmp.so (ASAN + tracecmp, no LD_PRELOAD needed)" || \
+            warn "failed: png_read_asan_tracecmp.so"
+        else
+            [ -f "$TC_SHIM_OBJ" ] && rm -f "$TC_SHIM_OBJ"
+            warn "libasan.a not found at $ASAN_LIB — skipping ASAN variant"
+        fi
     fi
 
     # Verify trace-cmp callbacks (non-ASAN targets have U symbols)
@@ -600,77 +612,59 @@ if [ "$HAS_FGREP" -eq 0 ]; then
     warn "fgrep directory not found at $FGREP — skipping fgrep targets"
 fi
 
-case "$OPTS" in
-    --asan)
-        [ "$HAS_FGREP" -eq 1 ] && compile_fgrep_objects "_asan" "-fsanitize=address"
-        [ "$HAS_FGREP" -eq 1 ] && build_fgrep_targets "_asan" "-fsanitize=address" "ASAN"
-        build_simple_targets "_asan" "-fsanitize=address" "ASAN"
-        [ "$HAS_FGREP" -eq 1 ] && build_fgrep_so_targets "_asan" "-fsanitize=address" "ASAN"
-        build_simple_so_targets "_asan" "-fsanitize=address" "ASAN"
-        build_standalone_so_targets "_asan" "-fsanitize=address" "ASAN"
-        ;;
-    --clang-scov)
-        # Clang + compiler-inserted edge coverage (sancov)
-        local SCOV_CC="clang"
-        if ! command -v clang &>/dev/null; then
-            warn "clang not found — --clang-scov requires clang"
-            break
-        fi
-        local SCOV_FLAGS="-fsanitize-coverage=trace-pc-guard"
+# Dispatch by flags — multiple flags can be combined
+HAS_ASAN_ARG=0
+for _a in "$@"; do [ "$_a" = "--asan" ] && HAS_ASAN_ARG=1; done
 
-        # Compile fgrep objects with clang + sancov
+BUILD_ASAN=0; BUILD_NOSAN=0
+case "$OPTS" in
+    --asan) BUILD_ASAN=1 ;;
+    --fast|--nosan) BUILD_NOSAN=1 ;;
+    --clang-scov) BUILD_ASAN=1; BUILD_NOSAN=1 ;;
+    --vendor-tracecmp) [ "$HAS_ASAN_ARG" -eq 1 ] && BUILD_ASAN=1 || BUILD_NOSAN=1 ;;
+    *) BUILD_ASAN=1; BUILD_NOSAN=1 ;;
+esac
+
+if [ "$BUILD_ASAN" -eq 1 ]; then
+    [ "$HAS_FGREP" -eq 1 ] && compile_fgrep_objects "_asan" "-fsanitize=address"
+    [ "$HAS_FGREP" -eq 1 ] && build_fgrep_targets "_asan" "-fsanitize=address" "ASAN"
+    build_simple_targets "_asan" "-fsanitize=address" "ASAN"
+    [ "$HAS_FGREP" -eq 1 ] && build_fgrep_so_targets "_asan" "-fsanitize=address" "ASAN"
+    build_simple_so_targets "_asan" "-fsanitize=address" "ASAN"
+    build_standalone_so_targets "_asan" "-fsanitize=address" "ASAN"
+fi
+if [ "$BUILD_NOSAN" -eq 1 ]; then
+    [ "$HAS_FGREP" -eq 1 ] && compile_fgrep_objects "_nosan" ""
+    [ "$HAS_FGREP" -eq 1 ] && build_fgrep_targets "_nosan" "" "No-ASAN"
+    build_simple_targets "_nosan" "" "No-ASAN"
+    [ "$HAS_FGREP" -eq 1 ] && build_fgrep_so_targets "_nosan" "" "No-ASAN"
+    build_simple_so_targets "_nosan" "" "No-ASAN"
+    build_standalone_so_targets "_nosan" "" "No-ASAN"
+fi
+if [ "$OPTS" = "--clang-scov" ]; then
+    local SCOV_CC="clang"
+    if ! command -v clang &>/dev/null; then
+        warn "clang not found — --clang-scov requires clang"
+    else
+        local SCOV_FLAGS="-fsanitize-coverage=trace-pc-guard"
         [ "$HAS_FGREP" -eq 1 ] && compile_fgrep_objects "_asan" "-fsanitize=address" "$SCOV_CC" "$SCOV_FLAGS"
         [ "$HAS_FGREP" -eq 1 ] && compile_fgrep_objects "_nosan" "" "$SCOV_CC" "$SCOV_FLAGS"
-
-        # Compile vendored libraries with clang + sancov
         compile_vendored_libs "$SCOV_CC" "$SCOV_FLAGS" "_asan"
-
-        # Build fgrep targets
         [ "$HAS_FGREP" -eq 1 ] && build_fgrep_targets "_asan" "-fsanitize=address" "Clang-scov"
         [ "$HAS_FGREP" -eq 1 ] && build_fgrep_targets "_nosan" "" "Clang-scov"
-
-        # Build simple targets with vendored libraries
         build_simple_targets "_asan" "-fsanitize=address" "Clang-scov"
         build_simple_targets "_nosan" "" "Clang-scov"
-
-        # Build .so targets with vendored libraries (sancov-instrumented)
         build_vendored_so_targets "_asan" "-fsanitize=address" "Clang-scov" "$SCOV_CC" "$SCOV_FLAGS"
         build_vendored_so_targets "_nosan" "" "Clang-scov" "$SCOV_CC" "$SCOV_FLAGS"
-
-        # Build fgrep .so targets
         [ "$HAS_FGREP" -eq 1 ] && build_fgrep_so_targets "_asan" "-fsanitize=address" "Clang-scov"
         [ "$HAS_FGREP" -eq 1 ] && build_fgrep_so_targets "_nosan" "" "Clang-scov"
-
-        # Standalone .so targets (tailslayer)
         build_standalone_so_targets "_asan" "-fsanitize=address" "Clang-scov"
         build_standalone_so_targets "_nosan" "" "Clang-scov"
-        ;;
-    --fast|--nosan)
-        [ "$HAS_FGREP" -eq 1 ] && compile_fgrep_objects "_nosan" ""
-        [ "$HAS_FGREP" -eq 1 ] && build_fgrep_targets "_nosan" "" "No-ASAN"
-        build_simple_targets "_nosan" "" "No-ASAN"
-        [ "$HAS_FGREP" -eq 1 ] && build_fgrep_so_targets "_nosan" "" "No-ASAN"
-        build_simple_so_targets "_nosan" "" "No-ASAN"
-        build_standalone_so_targets "_nosan" "" "No-ASAN"
-        ;;
-    --vendor-tracecmp)
-        build_vendored_tracecmp_targets "$@"
-        ;;
-    *)
-        [ "$HAS_FGREP" -eq 1 ] && compile_fgrep_objects "_asan" "-fsanitize=address"
-        [ "$HAS_FGREP" -eq 1 ] && compile_fgrep_objects "_nosan" ""
-        [ "$HAS_FGREP" -eq 1 ] && build_fgrep_targets "_asan" "-fsanitize=address" "ASAN"
-        [ "$HAS_FGREP" -eq 1 ] && build_fgrep_targets "_nosan" "" "No-ASAN"
-        build_simple_targets "_asan" "-fsanitize=address" "ASAN"
-        build_simple_targets "_nosan" "" "No-ASAN"
-        [ "$HAS_FGREP" -eq 1 ] && build_fgrep_so_targets "_asan" "-fsanitize=address" "ASAN"
-        [ "$HAS_FGREP" -eq 1 ] && build_fgrep_so_targets "_nosan" "" "No-ASAN"
-        build_simple_so_targets "_asan" "-fsanitize=address" "ASAN"
-        build_simple_so_targets "_nosan" "" "No-ASAN"
-        build_standalone_so_targets "_asan" "-fsanitize=address" "ASAN"
-        build_standalone_so_targets "_nosan" "" "No-ASAN"
-        ;;
-esac
+    fi
+fi
+if [ "$WITH_VENDOR_TRACECMP" -eq 1 ]; then
+    build_vendored_tracecmp_targets "$@"
+fi
 
 verify_afl
 verify_shm_run
