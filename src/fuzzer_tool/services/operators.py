@@ -1037,6 +1037,8 @@ class OperatorEngine:
             f._last_ops_used.append(op)
 
             byte_idx = self.select_position(buf, data)
+            if len(f._last_ops_used) == 1:
+                f._last_mutation_offset = byte_idx
             old_len = len(buf)
 
             result = f._op_dispatch[op](buf, byte_idx, data)

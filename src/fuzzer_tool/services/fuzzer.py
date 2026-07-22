@@ -638,6 +638,7 @@ class Fuzzer:
         self._frameshift = FrameShift(max_relations=64)
         self._last_ops_used: list[str] = []
         self._last_hamming_distance: int = -1
+        self._last_mutation_offset: int = 0
 
         # Per-byte sensitivity tracker (Lyapunov exponent)
         self._use_sensitivity = sensitivity
@@ -847,9 +848,7 @@ class Fuzzer:
                 from fuzzer_tool.adapters.shim_factory import _find_compiler
 
                 _asan_opts_shim_src = (
-                    b'const char *__asan_default_options() {'
-                    b'  return "verify_asan_link_order=0";'
-                    b'}'
+                    b'const char *__asan_default_options() {  return "verify_asan_link_order=0";}'
                 )
                 _fd, _shim_path = _tempfile.mkstemp(suffix=".so", prefix="asan_opts_")
                 os.close(_fd)
@@ -894,7 +893,9 @@ class Fuzzer:
                     if has_cmplog:
                         print("[*] Cmplog: compiled into target .so (direct_lite compatible)")
                     else:
-                        print("[*] Trace-cmp: compiled into target .so (direct_lite compatible, preloading shim)")
+                        print(
+                            "[*] Trace-cmp: compiled into target .so (direct_lite compatible, preloading shim)"
+                        )
                 else:
                     ld_preload = os.environ.get("LD_PRELOAD", "")
                     shim_in_preload = "cmplog_shim" in ld_preload or "tracecmp_shim" in ld_preload
@@ -1357,6 +1358,11 @@ class Fuzzer:
             meta["fuzz_count"] += 1
 
         t_start = time.monotonic()
+        self._cov_before_fuzz = (
+            len(self._edge_tracker._global_edge_hits)
+            if hasattr(self._edge_tracker, "_global_edge_hits")
+            else 0
+        )
         mutated = self.mutate(data)
         returncode, stderr = self._run_target(mutated)
         t_elapsed = time.monotonic() - t_start
@@ -1415,7 +1421,11 @@ class Fuzzer:
             # Record redqueen matches: (offset, operand_a, operand_b)
             # for input-to-state matching during mutation.
             # Only scan new pairs (not yet seen) to avoid O(5000) per iteration.
-            if self._cmplog.pairs and meta is not None and self._redqueen_index < len(self._cmplog.pairs):
+            if (
+                self._cmplog.pairs
+                and meta is not None
+                and self._redqueen_index < len(self._cmplog.pairs)
+            ):
                 matches = list(meta.get("redqueen_matches", []))
                 seen = {(m[1], m[2]) for m in matches}  # dedup by (A, B)
                 for op_a, op_b in self._cmplog.pairs[self._redqueen_index :]:
@@ -1494,7 +1504,7 @@ class Fuzzer:
             if edge_bitmap:
                 self._prev_edge_bitmap = bytes(edge_bitmap)
 
-            cov_before = len(new_edges) if new_edges else 0
+            cov_before = self._cov_before_fuzz
             cov_after = (
                 len(self._edge_tracker._global_edge_hits)
                 if hasattr(self._edge_tracker, "_global_edge_hits")
@@ -1503,7 +1513,7 @@ class Fuzzer:
             self._format_learner.record_transition(
                 input_bytes=mutated,
                 mutation_op=self._last_ops_used[0] if self._last_ops_used else "unknown",
-                mutation_offset=0,
+                mutation_offset=self._last_mutation_offset,
                 mutation_width=len(mutated),
                 coverage_before=cov_before,
                 coverage_after=cov_after,
