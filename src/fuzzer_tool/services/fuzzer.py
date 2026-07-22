@@ -806,8 +806,21 @@ class Fuzzer:
                     import ctypes.util
 
                     libasan = ctypes.util.find_library("asan") or libasan
-                existing = os.environ.get("LD_PRELOAD", "")
-                if libasan not in existing:
+                # Read original LD_PRELOAD from process-start environment
+                # (/proc/self/environ), not os.environ which may have been
+                # modified by commands.py's ASAN detection before we get here.
+                _original_ld_preload = ""
+                try:
+                    with open("/proc/self/environ", "rb") as _f:
+                        for _entry in _f.read().split(b"\0"):
+                            if _entry.startswith(b"LD_PRELOAD="):
+                                _original_ld_preload = _entry[len(b"LD_PRELOAD=") :].decode()
+                                break
+                except OSError:
+                    _original_ld_preload = os.environ.get("LD_PRELOAD", "")
+                _asan_was_preloaded = libasan in _original_ld_preload
+                if not _asan_was_preloaded:
+                    existing = os.environ.get("LD_PRELOAD", "")
                     os.environ["LD_PRELOAD"] = f"{libasan}:{existing}" if existing else libasan
         # Auto-detect .so targets and use in-process mode
         if not inprocess and self.target.lower().endswith((".so", ".dylib", ".dll")):
@@ -816,12 +829,58 @@ class Fuzzer:
             cov_env_id = self.shm_cov.env_id if self.shm_cov else None
             # Probe the shared object for a fuzz function name
             auto_func = self._probe_so_function(self.target)
-            # ASAN .so targets need LD_PRELOAD for ASAN to load first.
-            # If LD_PRELOAD was set before this process started (external),
-            # direct_lite works because ASAN is already loaded in the process.
-            # Otherwise use persistent loader which inherits LD_PRELOAD.
-            # Non-ASAN targets have no such requirement.
-            use_direct_lite = not target_is_asan or "libasan" in os.environ.get("LD_PRELOAD", "")
+            # Decide whether to use direct_lite (in-process ctypes) mode.
+            # ASAN-instrumented .so targets need the ASAN runtime loaded
+            # before the target. If LD_PRELOAD already contained libasan
+            # at process start (external wrapper), it's already available.
+            # Otherwise, load a tiny shim that exports __asan_default_options
+            # (returning "verify_asan_link_order=0") before libasan.so, so
+            # ASAN skips the post-startup first-load check. Safe for fuzzing:
+            # ASAN only needs target-side bug detection, not Python-side.
+            use_direct_lite = True
+            if target_is_asan and not _asan_was_preloaded:
+                import subprocess as _subprocess
+                import tempfile as _tempfile
+                import ctypes as _ctypes
+                from fuzzer_tool.adapters.shim_factory import _find_compiler
+
+                _asan_opts_shim_src = (
+                    b'const char *__asan_default_options() {'
+                    b'  return "verify_asan_link_order=0";'
+                    b'}'
+                )
+                _fd, _shim_path = _tempfile.mkstemp(suffix=".so", prefix="asan_opts_")
+                os.close(_fd)
+                try:
+                    _compiler = _find_compiler()
+                    # Strip ASAN from compiler subprocess (clang/gcc aren't
+                    # built with ASAN; libasan's LeakSanitizer causes false
+                    # leak reports that make the compiler exit non-zero).
+                    _env = os.environ.copy()
+                    _env.pop("ASAN_OPTIONS", None)
+                    _env.pop("LSAN_OPTIONS", None)
+                    _ld_preload = _env.get("LD_PRELOAD", "")
+                    if _ld_preload:
+                        _parts = [p for p in _ld_preload.split(":") if "libasan" not in p]
+                        _env["LD_PRELOAD"] = ":".join(_parts) if _parts else ""
+                    _r = _subprocess.run(
+                        [_compiler, "-shared", "-fPIC", "-O2", "-o", _shim_path, "-xc", "-"],
+                        input=_asan_opts_shim_src,
+                        capture_output=True,
+                        timeout=30,
+                        env=_env,
+                    )
+                    if _r.returncode != 0:
+                        raise OSError(f"compiler failed: {_r.stderr.decode(errors='replace')}")
+                    _ctypes.CDLL(_shim_path, mode=_ctypes.RTLD_GLOBAL)
+                    _ctypes.CDLL(libasan, mode=_ctypes.RTLD_GLOBAL)
+                    print(f"[*] ASAN preloaded: {libasan}")
+                except OSError as e:
+                    print(f"[!] ASAN preload failed (falling back to persistent): {e}")
+                    use_direct_lite = False
+                finally:
+                    with contextlib.suppress(OSError):
+                        os.unlink(_shim_path)
             # Cmplog: if the .so has cmplog compiled in, direct_lite works
             # because the shim is part of the .so itself. If the shim is
             # externally LD_PRELOAD'd, that also works. Otherwise we need
