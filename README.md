@@ -184,7 +184,7 @@ fuzzer-tool fuzz targets/png_read -c -D dictionaries/png.dict -g dictionaries/pn
 # ASAN fuzzing (auto-detected, catches heap-buffer-overflow, use-after-free, etc.)
 fuzzer-tool fuzz targets/asan_target
 
-# Cmplog comparison tracing test (exercises memcmp/strcmp/strncmp/memchr interception)
+# Cmplog comparison tracing test (memcmp/strcmp/strncmp/memchr/strcasecmp/strncasecmp/memmem/strstr/strcasestr)
 fuzzer-tool fuzz targets/cmplog_exercise --cmplog
 
 # fgrep SIMD/regex/BMH search fuzzing

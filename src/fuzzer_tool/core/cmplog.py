@@ -1,9 +1,10 @@
 """Cmplog collector: parse comparison tracing output and feed into dictionary.
 
-Intercepts memcmp/strcmp/strncmp/memchr via LD_PRELOAD and collects
-operand pairs that differ. These operands are fed into the dictionary
-and mutation engine, enabling the fuzzer to discover magic bytes and
-protocol constants that blind mutation cannot find.
+Intercepts memcmp/strcmp/strncmp/memchr/strcasecmp/strncasecmp/memmem/strstr/
+strcasestr via LD_PRELOAD and collects operand pairs that differ. These
+operands are fed into the dictionary and mutation engine, enabling the fuzzer
+to discover magic bytes, protocol constants, and case-insensitive patterns
+that blind mutation cannot find.
 """
 
 import contextlib
