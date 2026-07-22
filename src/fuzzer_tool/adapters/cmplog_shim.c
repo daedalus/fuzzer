@@ -1,6 +1,6 @@
 /* cmplog_shim.c — Unified LD_PRELOAD shim for all fuzzer instrumentation.
  *
- * Four interception layers, one shared .so:
+ * Three layers, one shared .so:
  *
  * 1. Symbol-based: intercepts libc comparison functions via dlsym(RTLD_NEXT)
  *    (memcmp/strcmp/strncmp/memchr/strcasecmp/strncasecmp/memmem/strstr/
@@ -10,22 +10,16 @@
  *    callbacks (__sanitizer_cov_trace_cmp{1,2,4,8}, trace_const_cmp*,
  *    trace_switch) — catches inlined/folded comparisons.
  *
- * 3. Sanitizer coverage: implements __sanitizer_cov_trace_pc_guard for
- *    Clang -fsanitize-coverage=trace-pc-guard binaries, writing edge hits
- *    to a bitmap file (env _COV_BITMAP_OUT).
- *
- * 4. AFL edge coverage: provides __afl_map_shm/__afl_map_edge/__afl_map_reset
+ * 3. AFL edge coverage: provides __afl_map_shm/__afl_map_edge/__afl_map_reset
  *    for AFL-style SHM bitmap coverage with Morris probabilistic counting.
  *    __sanitizer_cov_trace_pc_guard delegates to __afl_map_edge when SHM
- *    is attached, combining layers 3 and 4 into one callback.
+ *    is attached, providing the same coverage for Clang trace-pc-guard targets.
  *
  * Layers 1+2 write to _CMPLOG_OUT (CMP line format).
- * Layer 3 writes to _COV_BITMAP_OUT (binary bitmap).
- * Layer 4 writes to __AFL_SHM_ID (SHM segment, via __afl_area).
+ * Layer 3 writes to __AFL_SHM_ID (SHM segment, via __afl_area).
  *
  * Usage:
  *   LD_PRELOAD=./cmplog_shim.so _CMPLOG_OUT=/tmp/cmp.log ./target
- *   LD_PRELOAD=./cmplog_shim.so _COV_BITMAP_OUT=/tmp/cov.bin ./target
  *   LD_PRELOAD=./cmplog_shim.so __AFL_SHM_ID=<n> ./target
  *
  * When loaded via LD_PRELOAD, runtime symbols shadow the target's compiled-in
@@ -48,7 +42,7 @@
 static FILE *cmplog_file = NULL;
 
 /* ═══════════════════════════════════════════════════════════════════════
- * Layer 4: AFL edge coverage (SHM bitmap + Morris counting)
+ * Layer 3: AFL edge coverage (SHM bitmap + Morris counting)
  * ═══════════════════════════════════════════════════════════════════════ */
 static uint32_t __afl_map_size = 65536;
 static uint32_t __afl_map_mask = 65535;
@@ -111,19 +105,6 @@ void __afl_map_reset(void) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════
- * Layer 3: Sanitizer coverage bitmap (trace-pc-guard)
- * ═══════════════════════════════════════════════════════════════════════ */
-#define SANCOV_MAP_SIZE 65536
-static uint8_t sancov_bitmap[SANCOV_MAP_SIZE] = {0};
-static char sancov_bitmap_path[256] = {0};
-
-static void write_sancov_bitmap(void) {
-    if (!sancov_bitmap_path[0]) return;
-    FILE *f = fopen(sancov_bitmap_path, "wb");
-    if (f) { fwrite(sancov_bitmap, 1, SANCOV_MAP_SIZE, f); fclose(f); }
-}
-
-/* ═══════════════════════════════════════════════════════════════════════
  * Layer 2: Buffered writer for compiler-IR callbacks (trace-cmp)
  * ═══════════════════════════════════════════════════════════════════════ */
 #define BUFFER_SIZE (256 * 1024)
@@ -173,18 +154,13 @@ static void log_cmp(const void *a, const void *b, size_t n, int result) {
 /* ═══════════════════════════════════════════════════════════════════════
  * Lifecycle
  * ═══════════════════════════════════════════════════════════════════════ */
-static void write_sancov_bitmap(void);
-static void flush_buffer(void);
-
 static void flush_and_close(void) {
     flush_buffer();
-    write_sancov_bitmap();
     if (cmplog_file) { fclose(cmplog_file); cmplog_file = NULL; }
 }
 
 static void crash_handler(int sig) {
     flush_buffer();
-    write_sancov_bitmap();
     if (cmplog_file) fflush(cmplog_file);
     signal(sig, SIG_DFL);
     raise(sig);
@@ -238,9 +214,6 @@ static void __attribute__((constructor)) init_cmplog(void) {
     const char *cmplog_path = getenv("_CMPLOG_OUT");
     if (cmplog_path && cmplog_path[0])
         cmplog_file = fopen(cmplog_path, "a");
-    const char *cov_path = getenv("_COV_BITMAP_OUT");
-    if (cov_path && cov_path[0])
-        strncpy(sancov_bitmap_path, cov_path, sizeof(sancov_bitmap_path) - 1);
     install_crash_handlers();
 }
 
@@ -311,12 +284,11 @@ void __sanitizer_cov_trace_switch(uint64_t val, uint64_t *ref) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════
- * Layer 3+4: Sanitizer coverage + AFL edge coverage (trace-pc-guard)
+ * Layer 3: trace-pc-guard callback (delegates to AFL edge coverage)
  *
  * When the shim is LD_PRELOAD'd, __sanitizer_cov_trace_pc_guard shadows
- * the target's compiled-in copy (from -include afl_shim.c).  This version
- * does BOTH: writes to the AFL SHM (via __afl_map_edge) for coverage
- * feedback, AND writes to the sancov bitmap (for _COV_BITMAP_OUT).
+ * the target's compiled-in copy (from -include afl_shim.c).  We delegate
+ * to __afl_map_edge for edge-pair-hashed coverage in the AFL SHM bitmap.
  *
  * When the shim is NOT loaded, the target's compiled-in fallback handles
  * SHM coverage independently — both paths work.
@@ -324,11 +296,7 @@ void __sanitizer_cov_trace_switch(uint64_t val, uint64_t *ref) {
 __attribute__((visibility("default")))
 void __sanitizer_cov_trace_pc_guard(uint32_t *guard) {
     if (!guard || *guard == 0) return;
-    /* Layer 4: AFL SHM edge coverage */
     __afl_map_edge(*guard);
-    /* Layer 3: sancov bitmap */
-    uint32_t idx = (*guard) % SANCOV_MAP_SIZE;
-    if (sancov_bitmap[idx] < 255) sancov_bitmap[idx]++;
 }
 __attribute__((visibility("default")))
 void __sanitizer_cov_trace_pc_guard_init(uint32_t *start, uint32_t *stop) {
