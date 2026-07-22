@@ -1,14 +1,36 @@
-/* cmplog_shim.c — Unified LD_PRELOAD shim for comparison tracing
- *                   and sanitizer coverage.
+/* cmplog_shim.c — Unified LD_PRELOAD shim for all fuzzer instrumentation.
  *
- * Three interception layers, one shared .so:
+ * Four interception layers, one shared .so:
  *
  * 1. Symbol-based: intercepts libc comparison functions via dlsym(RTLD_NEXT)
- * 2. Compiler-IR-based: Clang -fsanitize-coverage=trace-cmp callbacks
- * 3. Sanitizer coverage: Clang -fsanitize-coverage=trace-pc-guard callback
+ *    (memcmp/strcmp/strncmp/memchr/strcasecmp/strncasecmp/memmem/strstr/
+ *    strcasestr) — catches explicit library calls at the PLT level.
+ *
+ * 2. Compiler-IR-based: implements Clang's -fsanitize-coverage=trace-cmp
+ *    callbacks (__sanitizer_cov_trace_cmp{1,2,4,8}, trace_const_cmp*,
+ *    trace_switch) — catches inlined/folded comparisons.
+ *
+ * 3. Sanitizer coverage: implements __sanitizer_cov_trace_pc_guard for
+ *    Clang -fsanitize-coverage=trace-pc-guard binaries, writing edge hits
+ *    to a bitmap file (env _COV_BITMAP_OUT).
+ *
+ * 4. AFL edge coverage: provides __afl_map_shm/__afl_map_edge/__afl_map_reset
+ *    for AFL-style SHM bitmap coverage with Morris probabilistic counting.
+ *    __sanitizer_cov_trace_pc_guard delegates to __afl_map_edge when SHM
+ *    is attached, combining layers 3 and 4 into one callback.
  *
  * Layers 1+2 write to _CMPLOG_OUT (CMP line format).
  * Layer 3 writes to _COV_BITMAP_OUT (binary bitmap).
+ * Layer 4 writes to __AFL_SHM_ID (SHM segment, via __afl_area).
+ *
+ * Usage:
+ *   LD_PRELOAD=./cmplog_shim.so _CMPLOG_OUT=/tmp/cmp.log ./target
+ *   LD_PRELOAD=./cmplog_shim.so _COV_BITMAP_OUT=/tmp/cov.bin ./target
+ *   LD_PRELOAD=./cmplog_shim.so __AFL_SHM_ID=<n> ./target
+ *
+ * When loaded via LD_PRELOAD, runtime symbols shadow the target's compiled-in
+ * copies (from -include afl_shim.c).  When the shim is not loaded, the target's
+ * own compiled-in fallback works independently.
  */
 #define _GNU_SOURCE
 #include <dlfcn.h>
@@ -17,11 +39,80 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ipc.h>
+#include <sys/shm.h>
 
-/* ── Shared state ────────────────────────────────────────────────────── */
+/* ═══════════════════════════════════════════════════════════════════════
+ * Shared state
+ * ═══════════════════════════════════════════════════════════════════════ */
 static FILE *cmplog_file = NULL;
 
-/* ── Sanitizer coverage bitmap (Layer 3) ──────────────────────────── */
+/* ═══════════════════════════════════════════════════════════════════════
+ * Layer 4: AFL edge coverage (SHM bitmap + Morris counting)
+ * ═══════════════════════════════════════════════════════════════════════ */
+static uint32_t __afl_map_size = 65536;
+static uint32_t __afl_map_mask = 65535;
+static uint8_t *__afl_area = NULL;
+static uint32_t __afl_prev_loc = 0;
+
+#define MORRIS_A 30
+#define MORRIS_BITS 8
+#define MORRIS_MAX_V ((1 << MORRIS_BITS) - 1)
+static uint32_t morris_threshold[MORRIS_MAX_V + 1];
+static uint32_t morris_rng = 0x2545F491;
+
+static inline uint32_t xorshift32(void) {
+    morris_rng ^= morris_rng << 13;
+    morris_rng ^= morris_rng >> 17;
+    morris_rng ^= morris_rng << 5;
+    return morris_rng;
+}
+
+static void morris_init(void) {
+    morris_threshold[0] = UINT32_MAX;
+    for (int i = 1; i <= MORRIS_MAX_V; i++)
+        morris_threshold[i] = (uint64_t)morris_threshold[i - 1] * MORRIS_A / (MORRIS_A + 1);
+}
+
+__attribute__((visibility("default")))
+void __afl_map_shm(void) {
+    char *id = getenv("__AFL_SHM_ID");
+    if (!id) return;
+    int shmid = atoi(id);
+    if (shmid <= 0) return;
+    char *size_str = getenv("AFL_MAP_SIZE");
+    if (size_str) {
+        uint32_t s = atoi(size_str);
+        if (s > 0 && (s & (s - 1)) == 0) {
+            __afl_map_size = s;
+            __afl_map_mask = s - 1;
+        }
+    }
+    void *p = shmat(shmid, NULL, 0);
+    if (p == (void *)-1) return;
+    __afl_area = (uint8_t *)p;
+}
+
+static inline void __afl_map_edge(uint32_t cur_loc) {
+    if (__afl_area) {
+        uint32_t idx = (__afl_prev_loc ^ cur_loc) & __afl_map_mask;
+        uint8_t c = __afl_area[idx];
+        if (c < MORRIS_MAX_V && xorshift32() < morris_threshold[c])
+            __afl_area[idx] = c + 1;
+    }
+    __afl_prev_loc = cur_loc >> 1;
+}
+
+__attribute__((visibility("default")))
+void __afl_map_reset(void) {
+    if (__afl_area)
+        memset(__afl_area, 0, __afl_map_size);
+    __afl_prev_loc = 0;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+ * Layer 3: Sanitizer coverage bitmap (trace-pc-guard)
+ * ═══════════════════════════════════════════════════════════════════════ */
 #define SANCOV_MAP_SIZE 65536
 static uint8_t sancov_bitmap[SANCOV_MAP_SIZE] = {0};
 static char sancov_bitmap_path[256] = {0};
@@ -29,21 +120,19 @@ static char sancov_bitmap_path[256] = {0};
 static void write_sancov_bitmap(void) {
     if (!sancov_bitmap_path[0]) return;
     FILE *f = fopen(sancov_bitmap_path, "wb");
-    if (f) {
-        fwrite(sancov_bitmap, 1, SANCOV_MAP_SIZE, f);
-        fclose(f);
-    }
+    if (f) { fwrite(sancov_bitmap, 1, SANCOV_MAP_SIZE, f); fclose(f); }
 }
 
-/* ── Buffered writer for high-frequency IR callbacks ────────────────── */
+/* ═══════════════════════════════════════════════════════════════════════
+ * Layer 2: Buffered writer for compiler-IR callbacks (trace-cmp)
+ * ═══════════════════════════════════════════════════════════════════════ */
 #define BUFFER_SIZE (256 * 1024)
 static char cmplog_buffer[BUFFER_SIZE];
 static size_t cmplog_buf_pos = 0;
 
 static void flush_buffer(void) {
     if (cmplog_buf_pos == 0) return;
-    if (cmplog_file)
-        fwrite(cmplog_buffer, 1, cmplog_buf_pos, cmplog_file);
+    if (cmplog_file) fwrite(cmplog_buffer, 1, cmplog_buf_pos, cmplog_file);
     cmplog_buf_pos = 0;
 }
 
@@ -68,7 +157,7 @@ static inline void buffer_cmp(uint64_t a, uint64_t b, size_t n) {
     cmplog_buf_pos = (size_t)(p - cmplog_buffer);
 }
 
-/* ── fprintf writer for low-frequency libc interceptors ─────────────── */
+/* ── fprintf writer for low-frequency libc interceptors (Layer 1) ─────── */
 static void log_cmp(const void *a, const void *b, size_t n, int result) {
     if (!cmplog_file || !a || !b || n == 0 || result == 0) return;
     size_t log_n = n > 64 ? 64 : n;
@@ -81,7 +170,12 @@ static void log_cmp(const void *a, const void *b, size_t n, int result) {
     fprintf(cmplog_file, " %d %zu\n", result, n);
 }
 
-/* ── Lifecycle ───────────────────────────────────────────────────────── */
+/* ═══════════════════════════════════════════════════════════════════════
+ * Lifecycle
+ * ═══════════════════════════════════════════════════════════════════════ */
+static void write_sancov_bitmap(void);
+static void flush_buffer(void);
+
 static void flush_and_close(void) {
     flush_buffer();
     write_sancov_bitmap();
@@ -107,7 +201,7 @@ static void install_crash_handlers(void) {
     sigaction(SIGFPE, &sa, NULL);
 }
 
-/* ── libc function pointers ─────────────────────────────────────────── */
+/* ── libc function pointers (Layer 1) ─────────────────────────────────── */
 typedef int (*cmp_fn)(const void *, const void *, size_t);
 typedef int (*str_cmp_fn)(const char *, const char *);
 typedef int (*strn_cmp_fn)(const char *, const char *, size_t);
@@ -139,6 +233,8 @@ static void init_real_funcs(void) {
 
 static void __attribute__((constructor)) init_cmplog(void) {
     init_real_funcs();
+    morris_init();
+    __afl_map_shm();
     const char *cmplog_path = getenv("_CMPLOG_OUT");
     if (cmplog_path && cmplog_path[0])
         cmplog_file = fopen(cmplog_path, "a");
@@ -153,46 +249,36 @@ static void __attribute__((destructor)) fini_cmplog(void) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════
- * Layer 1: libc function interposition
+ * Layer 1: libc function interposition (PLT-level)
  * ═══════════════════════════════════════════════════════════════════════ */
 int memcmp(const void *a, const void *b, size_t n) {
-    int result = real_memcmp(a, b, n);
-    log_cmp(a, b, n, result);
-    return result;
+    int result = real_memcmp(a, b, n); log_cmp(a, b, n, result); return result;
 }
 int strcmp(const char *a, const char *b) {
     int result = real_strcmp(a, b);
     size_t na = strlen(a), nb = strlen(b), n = na < nb ? na : nb;
-    if (n > 0) log_cmp(a, b, n + 1, result);
-    return result;
+    if (n > 0) log_cmp(a, b, n + 1, result); return result;
 }
 int strncmp(const char *a, const char *b, size_t n) {
-    int result = real_strncmp(a, b, n);
-    if (n > 0) log_cmp(a, b, n, result);
-    return result;
+    int result = real_strncmp(a, b, n); if (n > 0) log_cmp(a, b, n, result); return result;
 }
 void *memchr(const void *s, int c, size_t n) {
     void *result = real_memchr(s, c, n);
     unsigned char needle = (unsigned char)c;
-    if (cmplog_file && n > 0)
-        log_cmp(s, &needle, n > 64 ? 64 : n, result ? 0 : -1);
+    if (cmplog_file && n > 0) log_cmp(s, &needle, n > 64 ? 64 : n, result ? 0 : -1);
     return result;
 }
 int strcasecmp(const char *a, const char *b) {
     int result = real_strcasecmp(a, b);
     size_t na = strlen(a), nb = strlen(b), n = na < nb ? na : nb;
-    if (n > 0) log_cmp(a, b, n + 1, result);
-    return result;
+    if (n > 0) log_cmp(a, b, n + 1, result); return result;
 }
 int strncasecmp(const char *a, const char *b, size_t n) {
-    int result = real_strncasecmp(a, b, n);
-    if (n > 0) log_cmp(a, b, n, result);
-    return result;
+    int result = real_strncasecmp(a, b, n); if (n > 0) log_cmp(a, b, n, result); return result;
 }
 void *memmem(const void *h, size_t hl, const void *n, size_t nl) {
     void *result = real_memmem(h, hl, n, nl);
-    if (cmplog_file && n && nl > 0 && nl <= 64) log_cmp(n, n, nl, -1);
-    return result;
+    if (cmplog_file && n && nl > 0 && nl <= 64) log_cmp(n, n, nl, -1); return result;
 }
 char *strstr(const char *h, const char *n) {
     char *result = real_strstr(h, n);
@@ -206,7 +292,7 @@ char *strcasestr(const char *h, const char *n) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════
- * Layer 2: Compiler-IR callbacks (trace-cmp)
+ * Layer 2: Compiler-IR callbacks (Clang -fsanitize-coverage=trace-cmp)
  * ═══════════════════════════════════════════════════════════════════════ */
 #define MAX_SWITCH_CASES 256
 void __sanitizer_cov_trace_cmp1(uint8_t a, uint8_t b) { buffer_cmp(a, b, 1); }
@@ -225,11 +311,22 @@ void __sanitizer_cov_trace_switch(uint64_t val, uint64_t *ref) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════
- * Layer 3: Sanitizer coverage (trace-pc-guard)
+ * Layer 3+4: Sanitizer coverage + AFL edge coverage (trace-pc-guard)
+ *
+ * When the shim is LD_PRELOAD'd, __sanitizer_cov_trace_pc_guard shadows
+ * the target's compiled-in copy (from -include afl_shim.c).  This version
+ * does BOTH: writes to the AFL SHM (via __afl_map_edge) for coverage
+ * feedback, AND writes to the sancov bitmap (for _COV_BITMAP_OUT).
+ *
+ * When the shim is NOT loaded, the target's compiled-in fallback handles
+ * SHM coverage independently — both paths work.
  * ═══════════════════════════════════════════════════════════════════════ */
 __attribute__((visibility("default")))
 void __sanitizer_cov_trace_pc_guard(uint32_t *guard) {
-    if (!guard) return;
+    if (!guard || *guard == 0) return;
+    /* Layer 4: AFL SHM edge coverage */
+    __afl_map_edge(*guard);
+    /* Layer 3: sancov bitmap */
     uint32_t idx = (*guard) % SANCOV_MAP_SIZE;
     if (sancov_bitmap[idx] < 255) sancov_bitmap[idx]++;
 }
