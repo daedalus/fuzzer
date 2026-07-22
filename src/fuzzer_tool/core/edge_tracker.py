@@ -394,6 +394,8 @@ class EdgeTracker:
         self.seed_hit_counts: dict[str, dict[int, int]] = {}
         # Global cumulative edge set (all edges ever seen)
         self.cumulative_edges: set[int] = set()
+        # Total edges ever (preserved across bitmap resize — monotonically increasing)
+        self._cumulative_edges_total: int = 0
         # Aggregate distribution: maintained incrementally, not rebuilt from scratch
         self._aggregate_totals: dict[int, int] = {}
         self._aggregate_total_count: int = 0
@@ -515,7 +517,11 @@ class EdgeTracker:
         When the bitmap resizes, AFL's hash (edge_id = hash(src,dst) % map_size)
         maps the same logical edge to a different position. All position-based
         tracking must be cleared to avoid stale entries.
+
+        The cumulative edge COUNT is preserved in _cumulative_edges_total so
+        the run summary still shows a non-zero "Edges discovered" after resize.
         """
+        self._cumulative_edges_total = max(self._cumulative_edges_total, len(self.cumulative_edges))
         self.cumulative_edges.clear()
         self._global_edge_hits.clear()
         self.seed_edges.clear()
@@ -1300,8 +1306,12 @@ class EdgeTracker:
         return self._minhash.find_similar(seed_key, min_jaccard=min_jaccard)
 
     def get_cumulative_edge_count(self) -> int:
-        """Get total unique edges seen across all seeds."""
-        return len(self.cumulative_edges)
+        """Get total unique edges seen across all seeds.
+
+        Returns the max of the current set and the preserved total,
+        so the count survives bitmap resizes.
+        """
+        return max(len(self.cumulative_edges), self._cumulative_edges_total)
 
     def _rebuild_frequency_spectrum(self):
         """Rebuild frequency spectrum from global edge hits (lazy)."""

@@ -387,6 +387,22 @@ of these four named configurations), use `tools/bench_sweep.sh`. Both scripts
 share common helpers (SHM cleanup, log metric extraction, coverage
 verification) from `tools/lib/bench_common.sh`.
 
+### SMT Solver Evaluation (`--enable-smt-z3`)
+
+The SMT solver (Z3) attempts to solve arithmetic constraints discovered by cmplog, generating inputs that satisfy specific branch conditions rather than relying solely on random mutations.
+
+**30k-iteration comparison, zero corpus, `targets/png_read_tracecmp_asan.so`:**
+
+| Metric | SMT (z3) | No SMT |
+|--------|----------|--------|
+| Avg EPS | 485.4 | 444.3 |
+| Corpus growth | 1→139 entries | 1→126 entries |
+| SHM max edge IDs | 273 | 245 |
+| Stalls | 1 (0.6% recovery) | 4 (16.2% recovery) |
+| SMT solve rate | 10/39 (26%) | N/A |
+
+**Verdict**: From a cold start, SMT provides a modest but real advantage — ~9% higher throughput, ~75% fewer stalls, and slightly higher edge coverage (273 vs 245 max edge IDs). The solver fires on ~26% of cmplog arithmetic constraints when starting from a fresh corpus (higher solve rate on simpler constraints). The effect is amplified over the pre-warmed case, where stale constraints reduce the solve rate to ~6%. At this scale the advantage is incremental, not transformative — the SMT overhead is negligible, so there is no reason to leave it off when cmplog is already enabled.
+
 ## Building Targets
 
 ```bash

@@ -75,7 +75,7 @@ class TestShmCoverage:
             cov.cleanup()
 
     def test_resize_clears_cumulative(self):
-        """Resize clears cumulative state because AFL positions change after resize."""
+        """Resize preserves cumulative edge count (scalar, not position-indexed)."""
         cov = ShmCoverage(size=4096)
         try:
             # Simulate edges and detection
@@ -85,15 +85,16 @@ class TestShmCoverage:
             cov.is_new_coverage()
             assert cov.cumulative_edges == 3
 
-            # Resize clears cumulative (positions change after resize)
+            # Resize preserves cumulative count — positions change but
+            # the scalar count "unique positions ever seen" is invariant.
             cov.resize(8192)
             assert cov.size == 8192
-            assert cov.cumulative_edges == 0
+            assert cov.cumulative_edges == 3  # preserved, not zeroed
         finally:
             cov.cleanup()
 
     def test_resize_clears_after_reset(self):
-        """Resize clears cumulative state even after reset."""
+        """Resize preserves cumulative edge count even after SHM reset."""
         cov = ShmCoverage(size=4096)
         try:
             # Edges detected, then reset zeros SHM
@@ -103,9 +104,9 @@ class TestShmCoverage:
             cov.is_new_coverage()
             cov.reset_edge_map()  # zeros SHM
 
-            # Resize clears cumulative (positions change after resize)
+            # Resize preserves cumulative count
             cov.resize(8192)
-            assert cov.cumulative_edges == 0
+            assert cov.cumulative_edges == 3  # preserved, not zeroed
         finally:
             cov.cleanup()
 
