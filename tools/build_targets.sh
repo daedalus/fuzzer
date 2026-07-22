@@ -3,13 +3,15 @@
 # Compiles both ASAN and no-ASAN variants.
 #
 # Usage:
-#   tools/build_targets.sh                # Build all targets
-#   tools/build_targets.sh --asan         # ASAN only
-#   tools/build_targets.sh --fast         # No-ASAN only
-#   tools/build_targets.sh --cmplog       # Include cmplog in .so targets (build-time linking)
-#   tools/build_targets.sh --asan --cmplog  # ASAN + cmplog in .so targets
-#   tools/build_targets.sh --clang-scov   # Clang + compiler-inserted edge coverage (sancov)
-#   tools/build_targets.sh --tracecmp     # Clang + compiler-IR comparison tracing
+#   tools/build_targets.sh                            # Build all targets
+#   tools/build_targets.sh --asan                     # ASAN only
+#   tools/build_targets.sh --fast                     # No-ASAN only
+#   tools/build_targets.sh --cmplog                   # Include cmplog in .so targets (build-time linking)
+#   tools/build_targets.sh --asan --cmplog            # ASAN + cmplog in .so targets
+#   tools/build_targets.sh --clang-scov               # Clang + compiler-inserted edge coverage (sancov)
+#   tools/build_targets.sh --tracecmp                 # Clang + compiler-IR comparison tracing
+#   tools/build_targets.sh --vendor-tracecmp          # Vendored libpng+zlib + trace-cmp targets
+#   tools/build_targets.sh --vendor-tracecmp --asan   # Same with ASAN
 
 set -e
 
@@ -25,12 +27,14 @@ HAS_FGREP=0
 WITH_CMPLOG=0
 WITH_TRACECMP=0
 WITH_CLANG_SCOV=0
+WITH_VENDOR_TRACECMP=0
 USE_CLANG=0
 
 # Parse flags (can appear anywhere)
 for arg in "$@"; do
     [ "$arg" = "--cmplog" ] && WITH_CMPLOG=1
     [ "$arg" = "--tracecmp" ] && WITH_TRACECMP=1
+    [ "$arg" = "--vendor-tracecmp" ] && WITH_VENDOR_TRACECMP=1
     [ "$arg" = "--clang" ] && USE_CLANG=1
     [ "$arg" = "--clang-scov" ] && WITH_CLANG_SCOV=1
 done
@@ -376,6 +380,165 @@ verify_cmplog() {
     fi
 }
 
+# ── Vendored trace-cmp: rebuild libpng+zlib with trace-cmp, then link targets ─
+VENDOR_ZLIB_DIR="$VENDOR/zlib"
+VENDOR_LIBPNG_DIR="$VENDOR/libpng"
+
+build_vendored_tracecmp_targets() {
+    [ "$WITH_VENDOR_TRACECMP" -eq 0 ] && return 0
+
+    local CC="clang"
+    if ! command -v clang &>/dev/null; then
+        warn "clang not found — --vendor-tracecmp requires clang"
+        return 1
+    fi
+    local TRACE_FLAGS="-fsanitize-coverage=trace-cmp,trace-pc-guard"
+    local ASAN_FLAGS=""
+    for arg in "$@"; do
+        [ "$arg" = "--asan" ] && ASAN_FLAGS="-fsanitize=address"
+    done
+
+    echo "Building vendored trace-cmp targets ($CC)..."
+    local VENDOR_OK=0
+
+    # ── zlib ────────────────────────────────────────────────────────
+    if [ -f "$VENDOR_ZLIB_DIR/configure" ]; then
+        echo "  [1/3] Compiling vendor/zlib with trace-cmp..."
+        (cd "$VENDOR_ZLIB_DIR" && \
+            CC=clang CFLAGS="-O2 -g -fPIC $TRACE_FLAGS" \
+            ./configure --static 2>/dev/null && \
+            make -j$(nproc) -s 2>/dev/null) && \
+            ok "vendor/zlib (trace-cmp)" || warn "vendor/zlib build failed"
+    else
+        warn "vendor/zlib not found — skipping"
+        VENDOR_OK=1
+    fi
+
+    # ── libpng ──────────────────────────────────────────────────────
+    if [ -f "$VENDOR_LIBPNG_DIR/configure" ]; then
+        echo "  [2/3] Compiling vendor/libpng with trace-cmp..."
+        (cd "$VENDOR_LIBPNG_DIR" && \
+            CC=clang CFLAGS="-O2 -g -fPIC $TRACE_FLAGS -I../zlib" \
+            LDFLAGS="-L../zlib" \
+            ./configure --enable-shared=no --quiet 2>/dev/null && \
+            make -j$(nproc) -s 2>/dev/null) && \
+            ok "vendor/libpng (trace-cmp)" || warn "vendor/libpng build failed"
+    else
+        warn "vendor/libpng not found — skipping"
+        VENDOR_OK=1
+    fi
+
+    # Verify vendor .a files exist
+    local ZLIB_A="$VENDOR_ZLIB_DIR/libz.a"
+    local LIBPNG_A="$VENDOR_LIBPNG_DIR/.libs/libpng16.a"
+    if [ ! -f "$ZLIB_A" ] || [ ! -f "$LIBPNG_A" ]; then
+        warn "Vendor .a files missing (zlib: $(test -f "$ZLIB_A" && echo ok || echo missing), libpng: $(test -f "$LIBPNG_A" && echo ok || echo missing))"
+        return 1
+    fi
+
+    # Verify trace-cmp callbacks in vendor objects
+    local ZLIB_TC=$(nm "$ZLIB_A" 2>/dev/null | grep -c 'U.*trace_cmp' || echo 0)
+    local LIBPNG_TC=$(nm "$LIBPNG_A" 2>/dev/null | grep -c 'U.*trace_cmp' || echo 0)
+    echo "  Vendor trace-cmp callbacks: zlib=${ZLIB_TC}, libpng=${LIBPNG_TC}"
+
+    # ── Build .so targets ───────────────────────────────────────────
+    echo "  [3/3] Linking targets against vendored trace-cmp libs..."
+
+    local LIBS="-lm"
+    local VENDOR_LIBS="$LIBPNG_A $ZLIB_A $LIBS"
+    local VENDOR_INC="-I$VENDOR_LIBPNG_DIR -I$VENDOR_ZLIB_DIR"
+    local OUT_SUFFIX="_tracecmp"
+    local ALL_FLAGS="$TRACE_FLAGS $ASAN_FLAGS"
+
+    # png_read
+    if [ -f "$TARGETS/png_read.c" ]; then
+        $CC -O2 -g $ALL_FLAGS -shared -fPIC -include "$SHIM" \
+            -o "$TARGETS/png_read${OUT_SUFFIX}.so" \
+            "$TARGETS/png_read.c" $VENDOR_LIBS $VENDOR_INC 2>/dev/null && \
+            ok "png_read${OUT_SUFFIX}.so" || warn "failed: png_read${OUT_SUFFIX}.so"
+    fi
+
+    # zlib_read
+    if [ -f "$TARGETS/zlib_read.c" ]; then
+        $CC -O2 -g $ALL_FLAGS -shared -fPIC -include "$SHIM" \
+            -o "$TARGETS/zlib_read${OUT_SUFFIX}.so" \
+            "$TARGETS/zlib_read.c" "$ZLIB_A" $LIBS 2>/dev/null && \
+            ok "zlib_read${OUT_SUFFIX}.so" || warn "failed: zlib_read${OUT_SUFFIX}.so"
+    fi
+
+    # gzip_read
+    if [ -f "$TARGETS/gzip_read.c" ]; then
+        $CC -O2 -g $ALL_FLAGS -shared -fPIC -include "$SHIM" \
+            -o "$TARGETS/gzip_read${OUT_SUFFIX}.so" \
+            "$TARGETS/gzip_read.c" "$ZLIB_A" $LIBS 2>/dev/null && \
+            ok "gzip_read${OUT_SUFFIX}.so" || warn "failed: gzip_read${OUT_SUFFIX}.so"
+    fi
+
+    # jpeg_read (needs system libjpeg — no vendored jpeg yet)
+    if [ -f "$TARGETS/jpeg_read.c" ]; then
+        $CC -O2 -g $ALL_FLAGS -shared -fPIC -include "$SHIM" \
+            -o "$TARGETS/jpeg_read${OUT_SUFFIX}.so" \
+            "$TARGETS/jpeg_read.c" -ljpeg $LIBS 2>/dev/null && \
+            ok "jpeg_read${OUT_SUFFIX}.so" || warn "failed: jpeg_read${OUT_SUFFIX}.so"
+    fi
+
+    # Verify trace-cmp symbols are UNDEFINED (U) in output .so files
+    echo "  Verifying trace-cmp callbacks in output targets..."
+    for f in "$TARGETS"/*"${OUT_SUFFIX}.so" "$TARGETS/png_read_asan_tracecmp.so"; do
+        [ -f "$f" ] || continue
+        local tc_count=$(nm "$f" 2>/dev/null | grep -c 'trace_cmp' || echo 0)
+        if [ "$tc_count" -gt 0 ]; then
+            ok "$(basename "$f"): $tc_count trace-cmp callbacks"
+        else
+            warn "$(basename "$f"): no trace-cmp callbacks found"
+        fi
+    done
+
+    # Also build ASAN variant with tracecmp compiled in (two-step:
+    # compile tracecmp_shim.c separately, then link together).
+    # The two-step build uses hidden visibility in tracecmp_shim.c,
+    # preventing ASAN's LD_PRELOAD from overriding the callbacks.
+    # Only builds when --asan is passed.
+    local HAS_ASAN=0
+    for _arg in "$@"; do [ "$_arg" = "--asan" ] && HAS_ASAN=1; done
+    if [ "$HAS_ASAN" -eq 1 ] && [ -f "$TARGETS/png_read.c" ] && [ -f "src/fuzzer_tool/adapters/tracecmp_shim.c" ]; then
+        local TC_SHIM_OBJ="/tmp/tracecmp_shim_asan_$$.o"
+        $CC -O2 -g -fsanitize=address -fvisibility=hidden -fPIC -c \
+            "src/fuzzer_tool/adapters/tracecmp_shim.c" \
+            -o "$TC_SHIM_OBJ" 2>/dev/null && \
+        $CC -O2 -g \
+            -fsanitize=address \
+            -fsanitize-coverage=trace-cmp,trace-pc-guard \
+            -shared -fPIC \
+            -include "$SHIM" \
+            -o "$TARGETS/png_read_asan_tracecmp.so" \
+            "$TARGETS/png_read.c" "$TC_SHIM_OBJ" \
+            $VENDOR_LIBS $VENDOR_INC 2>/dev/null && \
+        rm -f "$TC_SHIM_OBJ" && \
+        ok "png_read_asan_tracecmp.so (ASAN + tracecmp compiled-in)" || \
+        warn "failed: png_read_asan_tracecmp.so"
+    fi
+
+    # Verify trace-cmp callbacks (non-ASAN targets have U symbols)
+    echo "  Verifying trace-cmp callbacks in output targets..."
+    for src in png_read zlib_read gzip_read; do
+        local src_file="$TARGETS/$src.c"
+        local out_file="$TARGETS/${src}${OUT_SUFFIX}"
+        [ -f "$src_file" ] || continue
+        # Pick the right libs per target
+        local tgt_libs="$LIBS"
+        case "$src" in
+            png_read) tgt_libs="$LIBPNG_A $ZLIB_A $LIBS" ;;
+            zlib_read|gzip_read) tgt_libs="$ZLIB_A $LIBS" ;;
+        esac
+        $CC -O2 -g $ALL_FLAGS -include "$SHIM" \
+            -o "$out_file" "$src_file" $tgt_libs $VENDOR_INC 2>/dev/null && \
+            ok "$(basename "$out_file")" || warn "failed: $(basename "$out_file")"
+    done
+
+    echo "  Done — target suffix: ${OUT_SUFFIX}"
+}
+
 # ── Build trace-cmp targets (Clang -fsanitize-coverage=trace-cmp) ─
 build_tracecmp_targets() {
     [ "$WITH_TRACECMP" -eq 0 ] && return 0
@@ -431,6 +594,7 @@ echo "=== Building fuzz targets ==="
 [ "$WITH_CMPLOG" -eq 1 ] && echo "[*] Cmplog: build-time linking enabled for .so targets"
 [ "$WITH_TRACECMP" -eq 1 ] && echo "[*] Trace-cmp: compiler-IR comparison tracing enabled (requires clang)"
 [ "$WITH_CLANG_SCOV" -eq 1 ] && echo "[*] Clang-scov: compiler-inserted edge coverage enabled (requires clang)"
+[ "$WITH_VENDOR_TRACECMP" -eq 1 ] && echo "[*] Vendor-tracecmp: rebuild vendor libs + targets with trace-cmp (requires clang)"
 
 if [ "$HAS_FGREP" -eq 0 ]; then
     warn "fgrep directory not found at $FGREP — skipping fgrep targets"
@@ -488,6 +652,9 @@ case "$OPTS" in
         [ "$HAS_FGREP" -eq 1 ] && build_fgrep_so_targets "_nosan" "" "No-ASAN"
         build_simple_so_targets "_nosan" "" "No-ASAN"
         build_standalone_so_targets "_nosan" "" "No-ASAN"
+        ;;
+    --vendor-tracecmp)
+        build_vendored_tracecmp_targets "$@"
         ;;
     *)
         [ "$HAS_FGREP" -eq 1 ] && compile_fgrep_objects "_asan" "-fsanitize=address"

@@ -403,9 +403,13 @@ tools/build_targets.sh --fast
 tools/build_targets.sh --cmplog
 tools/build_targets.sh --asan --cmplog        # ASAN + cmplog
 
-# Build with compiler-inserted edge coverage (requires clang)
+# Build with compiler-inserted edge coverage and compiler-IR comparison tracing (requires clang)
 tools/build_targets.sh --clang-scov
 tools/build_targets.sh --asan --clang-scov    # ASAN + compiler-inserted coverage
+
+# Build vendored (libpng+zlib) targets with compiler-IR comparison tracing
+tools/build_targets.sh --vendor-tracecmp
+tools/build_targets.sh --vendor-tracecmp --asan   # With ASAN (two-step build)
 ```
 
 The build script compiles every target as both an executable and a `.so` shared library, in ASAN and no-ASAN variants. The no-ASAN `.so` variants (`*_nosan.so`) are suitable for high-throughput in-process fuzzing without sanitizer overhead.
@@ -452,6 +456,61 @@ The trace-cmp shim intercepts:
 - `__sanitizer_cov_trace_cmp{1,2,4,8}` — typed comparison callbacks
 - `__sanitizer_cov_trace_const_cmp{1,2,4,8}` — constant-operand variants
 - `__sanitizer_cov_trace_switch` — switch statement tracing
+
+#### Vendored trace-cmp targets (libpng + zlib)
+
+The `--vendor-tracecmp` flag rebuilds zlib and libpng from `vendor/` with
+`-fsanitize-coverage=trace-cmp,trace-pc-guard`, then links targets against
+the instrumented static libraries:
+
+```bash
+tools/build_targets.sh --vendor-tracecmp            # Non-ASAN .so targets
+tools/build_targets.sh --vendor-tracecmp --asan     # ASAN + tracecmp two-step build
+```
+
+Output goes to `targets/png_read_tracecmp.so`, `targets/zlib_read_tracecmp.so`,
+`targets/gzip_read_tracecmp.so`, and (with `--asan`)
+`targets/png_read_asan_tracecmp.so`. The separate `_tracecmp` suffix avoids
+clobbering regular builds.
+
+#### ASAN + tracecmp two-step build
+
+When a target is compiled with both `-fsanitize=address` and
+`-fsanitize-coverage=trace-cmp`, ASAN's LD_PRELOAD provides its own
+`__sanitizer_cov_trace_cmp*` no-op stubs that would override the tracecmp
+shim's logging implementations. The fix: compile `tracecmp_shim.c` with
+`-fvisibility=hidden` and link it INTO the target `.so` so the callbacks
+resolve locally rather than through the PLT/GOT:
+
+```bash
+# Step 1: compile tracecmp shim with hidden visibility
+clang -O2 -g -fsanitize=address -fvisibility=hidden -fPIC -c \
+    src/fuzzer_tool/adapters/tracecmp_shim.c -o /tmp/tracecmp_shim.o
+
+# Step 2: compile target + link shim together
+clang -O2 -g -fsanitize=address -fsanitize-coverage=trace-cmp,trace-pc-guard \
+    -shared -fPIC -include src/fuzzer_tool/adapters/afl_shim.c \
+    -o targets/my_target_asan.so targets/my_target.c /tmp/tracecmp_shim.o \
+    vendor/libpng/.libs/libpng16.a vendor/zlib/libz.a -lm
+```
+
+The fuzzer auto-detects the compiled-in tracecmp symbols and uses
+`direct_lite` mode with ASAN LD_PRELOAD:
+
+```bash
+LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libasan.so.8 \
+python -m fuzzer_tool fuzz targets/my_target_asan.so -c --cmplog -d corpus
+```
+
+#### Auto-detection
+
+The fuzzer auto-detects tracecmp targets by scanning for
+`__sanitizer_cov_trace_cmp1` in the binary. When found:
+- Direct_lite mode is used (no subprocess overhead)
+- The tracecmp shim is preloaded into the process before the target .so
+- `_CMPLOG_OUT` is set before loading so the constructor opens the log file
+- After each execution, the 256KB internal buffer is flushed to disk and
+  comparison operands are extracted as dictionary tokens
 
 ### Compiler-Inserted Edge Coverage (`--clang-scov`)
 

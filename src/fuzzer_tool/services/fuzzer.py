@@ -140,19 +140,50 @@ def _detect_afl(target_path: str) -> bool:
 
 
 def _detect_cmplog(target_path: str) -> bool:
-    """Check if a binary has cmplog built in (i.e. exports __cmplog_reset)."""
+    """Check if a binary has cmplog or tracecmp built in.
+
+    Recognizes either the symbol-based shim (__cmplog_reset) or the
+    compiler-IR shim (__tracecmp_reset).
+    """
     import subprocess
 
+    cmplog_symbols = ("__cmplog_reset", "__tracecmp_reset")
     try:
-        result = subprocess.run(
-            ["nm", "-D", target_path], capture_output=True, text=True, timeout=5
-        )
-        if result.returncode == 0 and "__cmplog_reset" in result.stdout:
-            return True
-        result = subprocess.run(["nm", target_path], capture_output=True, text=True, timeout=5)
-        return result.returncode == 0 and "__cmplog_reset" in result.stdout
+        for flags in [[], ["-D"]]:
+            result = subprocess.run(
+                ["nm"] + flags + [target_path], capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0:
+                for sym in cmplog_symbols:
+                    if sym in result.stdout:
+                        return True
     except (OSError, subprocess.TimeoutExpired):
-        return False
+        pass
+    return False
+
+
+def _detect_tracecmp_target(target_path: str) -> bool:
+    """Check if a binary was compiled with -fsanitize-coverage=trace-cmp.
+
+    Targets compiled with trace-cmp have undefined (U) references to
+    __sanitizer_cov_trace_cmp{1,2,4,8} that must be resolved at runtime
+    by tracecmp_shim.so or LD_PRELOAD.
+    """
+    import subprocess
+
+    target_syms = ("__sanitizer_cov_trace_cmp1",)
+    try:
+        for flags in [[], ["-D"]]:
+            result = subprocess.run(
+                ["nm"] + flags + [target_path], capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0:
+                for sym in target_syms:
+                    if sym in result.stdout:
+                        return True
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return False
 
 
 def _detect_asan(target_path: str) -> bool:
@@ -783,20 +814,35 @@ class Fuzzer:
             # If LD_PRELOAD was set before this process started (external),
             # direct_lite works because ASAN is already loaded in the process.
             # Otherwise use persistent loader which inherits LD_PRELOAD.
-            use_direct_lite = target_is_asan and "libasan" in os.environ.get("LD_PRELOAD", "")
+            # Non-ASAN targets have no such requirement.
+            use_direct_lite = not target_is_asan or "libasan" in os.environ.get("LD_PRELOAD", "")
             # Cmplog: if the .so has cmplog compiled in, direct_lite works
-            # because the shim is part of the .so itself. Otherwise we need
-            # a process boundary for LD_PRELOAD to take effect.
+            # because the shim is part of the .so itself. If the shim is
+            # externally LD_PRELOAD'd, that also works. Otherwise we need
+            # a process boundary (or preload the shim via ctypes).
             if self._cmplog is not None:
                 has_cmplog = _detect_cmplog(self.target)
-                if not has_cmplog:
-                    use_direct_lite = False
+                has_tracecmp = _detect_tracecmp_target(self.target)
+                if has_cmplog or has_tracecmp:
+                    if has_cmplog:
+                        print("[*] Cmplog: compiled into target .so (direct_lite compatible)")
+                    else:
+                        print("[*] Trace-cmp: compiled into target .so (direct_lite compatible, preloading shim)")
                 else:
-                    print("[*] Cmplog: compiled into target .so (direct_lite compatible)")
+                    ld_preload = os.environ.get("LD_PRELOAD", "")
+                    shim_in_preload = "cmplog_shim" in ld_preload or "tracecmp_shim" in ld_preload
+                    if not shim_in_preload:
+                        use_direct_lite = False
+                    else:
+                        print("[*] Cmplog: externally LD_PRELOAD'd (direct_lite compatible)")
             # Set _CMPLOG_OUT before loading the .so so the cmplog
             # constructor can open the log file at CDLL time.
             if self._cmplog is not None and use_direct_lite:
                 self._cmplog.setup_env_for_run()
+                # Preload shims into current process via ctypes (LD_PRELOAD
+                # doesn't affect ctypes.CDLL, but shim symbols must be
+                # resolvable at target load time when compiled-in).
+                self._cmplog.preload_shims()
             self._inprocess_runner = InProcessRunner(
                 target=self.target,
                 function_name=auto_func,
@@ -1209,18 +1255,31 @@ class Fuzzer:
     def _reset_cmplog(self):
         """Reset cmplog log after reading tokens.
 
-        In direct_lite mode with cmplog compiled into the target .so,
-        the .so keeps the log file open across calls. Call __cmplog_reset
-        via ctypes to reopen (truncate) the file from inside the .so's
+        In direct_lite mode with cmplog or tracecmp compiled into the target .so,
+        the .so keeps the log file open across calls. Call the appropriate reset
+        function via ctypes to reopen (truncate) the file from inside the .so's
         address space, so subsequent writes land at position 0.
+
+        Also flushes the tracecmp shim's internal buffer before collection.
         """
         if self._cmplog is None:
             return
+
+        # Flush tracecmp shim's internal buffer to disk (the shim uses
+        # a 256KB buffer to avoid per-call fprintf overhead). Must be
+        # called before collect_tokens() reads the log file.
+        self._cmplog.flush_shims()
+
+        # Reset the target .so's internal log position (if compiled-in shim)
         runner = self._inprocess_runner
         if runner and runner.direct_lite and runner._lib:
             try:
+                if hasattr(runner._lib, "__tracecmp_flush"):
+                    runner._lib.__tracecmp_flush()
                 if hasattr(runner._lib, "__cmplog_reset"):
                     runner._lib.__cmplog_reset()
+                if hasattr(runner._lib, "__tracecmp_reset"):
+                    runner._lib.__tracecmp_reset()
             except (AttributeError, OSError):
                 pass
 
@@ -1247,6 +1306,9 @@ class Fuzzer:
 
         if self.mc:
             self.mc.execs_since_refit += 1
+
+        # Flush tracecmp buffer before collecting tokens (direct_lite mode)
+        self._reset_cmplog()
 
         # Collect cmplog tokens after each execution
         cmplog_found = False

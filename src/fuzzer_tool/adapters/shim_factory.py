@@ -67,10 +67,22 @@ def _compile_source(source: str, output: str, compiler: str | None = None) -> bo
     os.write(fd, source.encode())
     os.close(fd)
     try:
+        # Strip ASAN/LSAN from the compiler subprocess — clang/gcc are
+        # not built with ASAN and libasan's LeakSanitizer will cause
+        # false-positive leak reports that make the compiler exit non-zero.
+        env = os.environ.copy()
+        env.pop("ASAN_OPTIONS", None)
+        env.pop("LSAN_OPTIONS", None)
+        # Also remove ASAN from LD_PRELOAD so the compiler isn't slowed down
+        ld_preload = env.get("LD_PRELOAD", "")
+        if ld_preload:
+            parts = [p for p in ld_preload.split(":") if "libasan" not in p]
+            env["LD_PRELOAD"] = ":".join(parts) if parts else ""
         result = subprocess.run(
             [compiler, "-shared", "-fPIC", "-O2", "-o", output, src_path],
             capture_output=True,
             timeout=30,
+            env=env,
         )
         return result.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired):

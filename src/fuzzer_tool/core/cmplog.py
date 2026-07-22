@@ -62,10 +62,20 @@ class CmplogCollector:
         else:
             try:
                 compiler = _find_compiler()
+                # Strip ASAN from subprocess env — libasan's LeakSanitizer
+                # causes false-positive leak reports in the compiler itself.
+                _env = os.environ.copy()
+                _env.pop("ASAN_OPTIONS", None)
+                _env.pop("LSAN_OPTIONS", None)
+                _ld_preload = _env.get("LD_PRELOAD", "")
+                if _ld_preload:
+                    _parts = [p for p in _ld_preload.split(":") if "libasan" not in p]
+                    _env["LD_PRELOAD"] = ":".join(_parts) if _parts else ""
                 result = __import__("subprocess").run(
                     [compiler, "-shared", "-fPIC", "-O2", "-ldl", "-o", out_path, shim_src],
                     capture_output=True,
                     timeout=30,
+                    env=_env,
                 )
                 if result.returncode == 0 and os.path.exists(out_path):
                     self._shim_path = out_path
@@ -141,7 +151,8 @@ class CmplogCollector:
         reads _CMPLOG_OUT at constructor time.
 
         Both shims (symbol-based + trace-cmp) are prepended to LD_PRELOAD
-        when available.
+        when available, ahead of any ASAN library so tracecmp symbols take
+        priority over ASAN's built-in coverage stubs.
         """
         if self.log_path is None or not os.path.exists(self.log_path):
             fd, self.log_path = tempfile.mkstemp(suffix=".cmplog", prefix="fuzz_cmplog_")
@@ -159,8 +170,53 @@ class CmplogCollector:
 
         if shims:
             existing = os.environ.get("LD_PRELOAD", "")
+            # Place shims BEFORE any ASAN library so tracecmp symbols
+            # (__sanitizer_cov_trace_cmp*) resolve to the shim, not
+            # ASAN's built-in coverage no-op stubs.
             combined = ":".join(shims)
             os.environ["LD_PRELOAD"] = f"{combined}:{existing}" if existing else combined
+
+    def preload_shims(self) -> bool:
+        """Load cmplog/tracecmp shims into the current process via ctypes.
+
+        Used in direct_lite mode where LD_PRELOAD can't affect ctypes.CDLL
+        (the dynamic linker resolves LD_PRELOAD at process start). This loads
+        the shim .so files with RTLD_GLOBAL so the target .so can resolve
+        undefined symbols (__sanitizer_cov_trace_cmp*, etc.) at CDLL time.
+
+        Stores the loaded shim handles for later flush/reset calls.
+
+        Returns:
+            True if at least one shim was loaded successfully.
+        """
+        import ctypes
+
+        loaded = False
+        self._shim_handles: list[ctypes.CDLL] = []
+        for shim_path in (self._shim_path, self._tracecmp_shim_path):
+            if shim_path and os.path.exists(shim_path):
+                try:
+                    handle = ctypes.CDLL(shim_path, mode=ctypes.RTLD_GLOBAL)
+                    self._shim_handles.append(handle)
+                    loaded = True
+                except OSError:
+                    log.debug("Failed to preload shim: %s", shim_path)
+        return loaded
+
+    def flush_shims(self):
+        """Flush tracecmp buffer to disk.
+
+        Calls __tracecmp_flush on every shim handle that has it.  Uses the
+        stored CDLL handles so it reaches the same shim instance that the
+        target .so resolved to at load time.
+        """
+        for handle in getattr(self, "_shim_handles", []):
+            try:
+                fn = getattr(handle, "__tracecmp_flush", None)
+                if fn is not None:
+                    fn()
+            except (AttributeError, OSError):
+                pass
 
     def reset_log(self):
         """Reset the cmplog log file after a direct_lite execution.

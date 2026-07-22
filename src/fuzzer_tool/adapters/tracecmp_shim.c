@@ -139,6 +139,11 @@ static void __attribute__((destructor)) fini_tracecmp(void) {
  * The _const variants have identical signatures — one operand is a
  * compile-time constant embedded in the instruction, but the callback
  * receives both as normal arguments.
+ *
+ * When compiled into the target .so alongside ASAN, compile this file
+ * with -fvisibility=hidden to prevent ASAN's LD_PRELOAD from overriding
+ * these with its own no-op stubs.  Default visibility is fine when this
+ * is used as a standalone LD_PRELOAD shim.
  */
 
 void __sanitizer_cov_trace_cmp1(uint8_t arg1, uint8_t arg2) {
