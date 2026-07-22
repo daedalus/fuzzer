@@ -415,6 +415,7 @@ class Fuzzer:
 
         # Cmplog: comparison tracing via LD_PRELOAD
         self._cmplog = None
+        self._redqueen_index = 0
         if cmplog:
             from fuzzer_tool.core.cmplog import CmplogCollector
 
@@ -1411,11 +1412,12 @@ class Fuzzer:
                     self._dict_set = set(self.dictionary)
                     self._dict_last_prune = self.exec_count
             # Record redqueen matches: (offset, operand_a, operand_b)
-            # for input-to-state matching during mutation
-            if self._cmplog.pairs and meta is not None:
+            # for input-to-state matching during mutation.
+            # Only scan new pairs (not yet seen) to avoid O(5000) per iteration.
+            if self._cmplog.pairs and meta is not None and self._redqueen_index < len(self._cmplog.pairs):
                 matches = list(meta.get("redqueen_matches", []))
                 seen = {(m[1], m[2]) for m in matches}  # dedup by (A, B)
-                for op_a, op_b in self._cmplog.pairs:
+                for op_a, op_b in self._cmplog.pairs[self._redqueen_index :]:
                     if len(op_a) < 2 or (op_a, op_b) in seen:
                         continue
                     pos = 0
@@ -1430,13 +1432,10 @@ class Fuzzer:
                             break
                     if len(matches) >= 50:
                         break
+                self._redqueen_index = len(self._cmplog.pairs)
                 meta["redqueen_matches"] = matches[:50]
                 # Keep legacy field for state compat
                 meta["redqueen_offsets"] = [m[0] for m in meta["redqueen_matches"]]
-
-            # Reset cmplog log for next execution (truncates the .so's
-            # open file handle when cmplog is compiled into the target).
-            self._reset_cmplog()
 
         if self.exec_count % 100 == 0:
             rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
