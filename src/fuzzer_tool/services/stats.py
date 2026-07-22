@@ -427,6 +427,11 @@ class StatsReporter:
             n_tok = len(f._cmplog.tokens)
             n_prs = len(f._cmplog.pairs)
             cmplog_str = f" | cmplog: {n_tok}t {n_prs}p"
+        smt_str = ""
+        if f._smt_solver is not None and f._smt_solver.queries_attempted > 0:
+            s = f._smt_solver
+            pct = s.queries_solved / max(s.queries_attempted, 1) * 100
+            smt_str = f" | smt: {s.queries_solved}/{s.queries_attempted} ({pct:.0f}%)"
         if f.markov_generate:
             markov_str += "+gen"
         cov_str = ""
@@ -553,7 +558,7 @@ class StatsReporter:
         line = (
             f"[*] execs: {f.exec_count} | corpus: {len(f.corpus)} | "
             f"crashes: {f.crash_count}{sig_str}{timeout_str} | eps: {eps:.0f} | "
-            f"time: {elapsed:.0f}s{rss_str}{ops_str}{dict_str}{markov_str}{cmplog_str}{cov_str}{mc_str}{div_str}{jac_str}{dr_str}{density_str}{repro_str}{brier_str}{crps_str}{ent_str}{simp_str}{rate_str}{fmt_str}"
+            f"time: {elapsed:.0f}s{rss_str}{ops_str}{dict_str}{markov_str}{cmplog_str}{smt_str}{cov_str}{mc_str}{div_str}{jac_str}{dr_str}{density_str}{repro_str}{brier_str}{crps_str}{ent_str}{simp_str}{rate_str}{fmt_str}"
         )
         # Add coverage growth model to stats line
         growth = f._edge_tracker.coverage_growth_model()
