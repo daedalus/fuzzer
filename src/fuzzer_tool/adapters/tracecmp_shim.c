@@ -175,19 +175,22 @@ void __sanitizer_cov_trace_const_cmp8(uint64_t arg1, uint64_t arg2) {
 
 /* ── Switch statement tracing ─────────────────────────────────────────
  * Clang's -fsanitize-coverage=trace-switch passes the switch value and
- * a pointer to a uint64_t array where ref[-1] is the number of cases.
+ * a pointer to a uint64_t array with the layout:
+ *   ref[0] = number of cases
+ *   ref[1] = bit-width of the switch value
+ *   ref[2..2+count-1] = case values
  * We log each case value against the switch value.
  */
 
 void __sanitizer_cov_trace_switch(uint64_t val, uint64_t *ref) {
     if (!ref) return;
 
-    /* ref[-1] holds the case count (Clang convention) */
-    int64_t count = (int64_t)ref[-1];
+    /* Clang convention: ref[0] = case count, ref[1] = bit-width, ref[2+] = values */
+    int64_t count = (int64_t)ref[0];
     if (count <= 0 || count > MAX_SWITCH_CASES) return;
 
     for (int64_t i = 0; i < count; i++) {
-        buffer_cmp(val, ref[i], 8);
+        buffer_cmp(val, ref[2 + i], 8);
     }
 }
 

@@ -137,17 +137,18 @@ class TestTracecmpShimFunctionality:
         try:
             os.environ["_CMPLOG_OUT"] = log_path
             lib = ctypes.CDLL(shim_path)
-            # Build fake switch table: ref[-1] = case_count, ref[0..count-1] = case values
+            # Clang layout: ref[0]=count, ref[1]=bit-width, ref[2..]=case values
             case_count = 4
-            ArrayType = ctypes.c_uint64 * (case_count + 1)
+            ArrayType = ctypes.c_uint64 * (case_count + 2)
             arr = ArrayType()
-            arr[0] = case_count  # ref[-1]
-            arr[1] = 0x00  # ref[0]
-            arr[2] = 0x49  # ref[1]
-            arr[3] = 0x50  # ref[2]
-            arr[4] = 0x53  # ref[3]
+            arr[0] = case_count  # ref[0] = count
+            arr[1] = 64          # ref[1] = bit-width (uint64_t)
+            arr[2] = 0x00        # ref[2] = case value 0
+            arr[3] = 0x49        # ref[3] = case value 1
+            arr[4] = 0x50        # ref[4] = case value 2
+            arr[5] = 0x53        # ref[5] = case value 3
             ref_ptr = ctypes.cast(
-                ctypes.addressof(arr) + ctypes.sizeof(ctypes.c_uint64),
+                ctypes.addressof(arr),
                 ctypes.POINTER(ctypes.c_uint64),
             )
             getattr(lib, "__sanitizer_cov_trace_switch")(0x41, ref_ptr)
