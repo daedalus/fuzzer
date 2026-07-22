@@ -65,6 +65,8 @@ class ShmCoverage:
         self._register_atexit()
         self.total_edges = 0
         self.cumulative_edges = 0
+        # Peak edges ever seen across all bitmap sizes (preserved across resizes)
+        self._peak_cumulative_edges: int = 0
 
     def read_bitmap(self) -> bytes:
         return bytes(self._map)
@@ -91,6 +93,7 @@ class ShmCoverage:
             if not self._seen[idx]:
                 self._seen[idx] = 1
                 self.cumulative_edges += 1
+                self._peak_cumulative_edges = max(self._peak_cumulative_edges, self.cumulative_edges)
             self.total_edges += 1
             return True
         return False
@@ -118,6 +121,7 @@ class ShmCoverage:
                 self._seen_classified[i] = classified[i]
                 self._seen[i] = 1
                 self.cumulative_edges += 1
+                self._peak_cumulative_edges = max(self._peak_cumulative_edges, self.cumulative_edges)
                 has_new = True
 
         # Update snapshot for next comparison
@@ -134,6 +138,7 @@ class ShmCoverage:
                 self._seen_classified[i] = classified[i]
                 self._seen[i] = 1
                 self.cumulative_edges += 1
+                self._peak_cumulative_edges = max(self._peak_cumulative_edges, self.cumulative_edges)
 
     def cleanup(self):
         if self._ptr is not None:
@@ -186,15 +191,18 @@ class ShmCoverage:
         self._map = (ctypes.c_char * new_size).from_address(self._ptr)
         self.env_id = str(self.shm_id)
 
-        # Clear position-indexed state — positions change after resize
+        # Save peak before clearing — the count of unique positions ever seen
+        # is meaningful for the run summary even though position-indexed state
+        # must be reset. Without this, a resize near the run end produces
+        # "Edges discovered: 0" in the summary.
+        self._peak_cumulative_edges = max(self._peak_cumulative_edges, self.cumulative_edges)
+        # Clear position-indexed state — positions change after resize.
         # AFL's hash (edge_id = hash(src,dst) % map_size) maps the same
         # logical edge to different positions in the new bitmap.
-        # NOTE: scalar counters (cumulative_edges, total_edges) are NOT
-        # reset — they track "unique positions ever seen" which is invariant
-        # under position remapping. Resetting them causes the run summary
-        # to show "Edges discovered: 0" when a resize happens near the end.
         self._seen = bytearray(new_size)
         self._seen_classified = bytearray(new_size)
+        self.cumulative_edges = 0
+        self.total_edges = 0
 
         # Reallocate snapshot buffer to match new size — without this,
         # is_new_coverage() does memcmp/memmove of new_size bytes into

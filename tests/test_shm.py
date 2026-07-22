@@ -75,7 +75,7 @@ class TestShmCoverage:
             cov.cleanup()
 
     def test_resize_clears_cumulative(self):
-        """Resize preserves cumulative edge count (scalar, not position-indexed)."""
+        """Resize clears cumulative edge count but preserves peak."""
         cov = ShmCoverage(size=4096)
         try:
             # Simulate edges and detection
@@ -84,17 +84,18 @@ class TestShmCoverage:
                 ctypes.memset(cov._ptr + i, 1, 1)
             cov.is_new_coverage()
             assert cov.cumulative_edges == 3
+            assert cov._peak_cumulative_edges == 3  # updated by init + is_new_coverage
 
-            # Resize preserves cumulative count — positions change but
-            # the scalar count "unique positions ever seen" is invariant.
+            # Resize clears cumulative (positions change) but peak is preserved
             cov.resize(8192)
             assert cov.size == 8192
-            assert cov.cumulative_edges == 3  # preserved, not zeroed
+            assert cov.cumulative_edges == 0  # zeroed (positions remapped)
+            assert cov._peak_cumulative_edges == 3  # preserved for summary
         finally:
             cov.cleanup()
 
     def test_resize_clears_after_reset(self):
-        """Resize preserves cumulative edge count even after SHM reset."""
+        """Resize clears cumulative count (even after SHM reset) but preserves peak."""
         cov = ShmCoverage(size=4096)
         try:
             # Edges detected, then reset zeros SHM
@@ -104,9 +105,10 @@ class TestShmCoverage:
             cov.is_new_coverage()
             cov.reset_edge_map()  # zeros SHM
 
-            # Resize preserves cumulative count
+            # Resize clears cumulative, preserves peak
             cov.resize(8192)
-            assert cov.cumulative_edges == 3  # preserved, not zeroed
+            assert cov.cumulative_edges == 0
+            assert cov._peak_cumulative_edges == 3
         finally:
             cov.cleanup()
 

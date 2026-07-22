@@ -181,7 +181,7 @@ class StatsReporter:
                 f"({f._stall_recovery_execs / max(1, f.exec_count) * 100:.1f}%)"
             )
 
-        shm_edges = f.shm_cov.cumulative_edges if f.shm_cov else 0
+        shm_edges = f.shm_cov._peak_cumulative_edges if f.shm_cov else 0
         et_edges = f._edge_tracker.get_cumulative_edge_count()
         edges = shm_edges if shm_edges else et_edges
         if f.ptrace_cov:
