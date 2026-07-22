@@ -1,18 +1,17 @@
 """Cmplog collector: parse comparison tracing output and feed into dictionary.
 
-Two complementary interception layers, both writing to the same CMP log file:
+A single unified shim (cmplog_shim.c) provides two complementary
+interception layers, both writing to the same CMP log file:
 
-1. Symbol-based (cmplog_shim.c): intercepts libc comparison functions
-   (memcmp/strcmp/strncmp/memchr/strcasecmp/strncasecmp/memmem/strstr/
-   strcasestr) via LD_PRELOAD or build-time linking.
+1. Symbol-based: intercepts libc comparison functions (memcmp/strcmp/strncmp/
+   memchr/strcasecmp/strncasecmp/memmem/strstr/strcasestr) via LD_PRELOAD or
+   build-time linking.
 
-2. Compiler-IR-based (tracecmp_shim.c): intercepts Clang's
-   -fsanitize-coverage=trace-cmp callbacks (__sanitizer_cov_trace_cmp*,
-   __sanitizer_cov_trace_switch) that fire after the compiler has inlined/
-   folded comparisons into integer compares.
+2. Compiler-IR-based: implements Clang's -fsanitize-coverage=trace-cmp
+   callbacks (__sanitizer_cov_trace_cmp*, __sanitizer_cov_trace_switch) that
+   fire after the compiler has inlined/folded comparisons into integer compares.
 
-Both shims coexist — they export different symbols, write to the same
-_CMPLOG_OUT file, and the collector parses all CMP lines transparently.
+Both layers are compiled into a single .so — no need for separate shims.
 """
 
 import contextlib
@@ -42,12 +41,11 @@ class CmplogCollector:
         self.pairs: list[tuple[bytes, bytes]] = []
         self._pair_set: set[tuple[bytes, bytes]] = set()
         self._shim_path: str | None = None
-        self._tracecmp_shim_path: str | None = None
         self._shim_handle = None
 
     def start(self) -> bool:
-        """Compile and prepare the cmplog shim and trace-cmp shim."""
-        from fuzzer_tool.adapters.shim_factory import _find_compiler, build_tracecmp_shim
+        """Compile and prepare the unified cmplog shim."""
+        from fuzzer_tool.adapters.shim_factory import _find_compiler
 
         shim_src = os.path.join(os.path.dirname(__file__), "..", "adapters", "cmplog_shim.c")
         if not os.path.exists(shim_src):
@@ -85,14 +83,6 @@ class CmplogCollector:
             except Exception as e:
                 log.warning("Cmplog shim compilation error: %s", e)
 
-        # Also build the trace-cmp shim (compiler-IR-based comparison tracing)
-        try:
-            self._tracecmp_shim_path = build_tracecmp_shim()
-            if self._tracecmp_shim_path:
-                log.info("Trace-cmp shim compiled: %s", self._tracecmp_shim_path)
-        except Exception as e:
-            log.debug("Trace-cmp shim build skipped: %s", e)
-
         return self._shim_path is not None
 
     def setup_env(self, env: dict[str, str]) -> dict[str, str]:
@@ -112,7 +102,7 @@ class CmplogCollector:
         Returns:
             Modified env with LD_PRELOAD and _CMPLOG_OUT set.
         """
-        if not self._shim_path and not self._tracecmp_shim_path:
+        if not self._shim_path:
             return env
 
         if self.log_path is None or not os.path.exists(self.log_path):
@@ -126,16 +116,10 @@ class CmplogCollector:
         env = dict(env)  # copy
         env["_CMPLOG_OUT"] = self.log_path
 
-        # Prepend both shims to LD_PRELOAD
-        shims = []
+        # Prepend the unified shim to LD_PRELOAD
         if self._shim_path:
-            shims.append(self._shim_path)
-        if self._tracecmp_shim_path:
-            shims.append(self._tracecmp_shim_path)
-        if shims:
             existing = env.get("LD_PRELOAD", "")
-            combined = ":".join(shims)
-            env["LD_PRELOAD"] = f"{combined}:{existing}" if existing else combined
+            env["LD_PRELOAD"] = f"{self._shim_path}:{existing}" if existing else self._shim_path
 
         return env
 
@@ -150,65 +134,52 @@ class CmplogCollector:
         The cmplog shim (whether LD_PRELOAD'd or compiled into the target .so)
         reads _CMPLOG_OUT at constructor time.
 
-        Both shims (symbol-based + trace-cmp) are prepended to LD_PRELOAD
-        when available, ahead of any ASAN library so tracecmp symbols take
-        priority over ASAN's built-in coverage stubs.
+        The unified shim provides both libc interposition and compiler-IR
+        callbacks. Placed before any ASAN library so coverage/tracecmp
+        symbols resolve to the shim, not ASAN's built-in no-op stubs.
         """
         if self.log_path is None or not os.path.exists(self.log_path):
             fd, self.log_path = tempfile.mkstemp(suffix=".cmplog", prefix="fuzz_cmplog_")
             os.close(fd)
         os.environ["_CMPLOG_OUT"] = self.log_path
 
-        # Collect all shim paths to prepend to LD_PRELOAD
-        shims = []
         if self._shim_path and self._shim_path not in os.environ.get("LD_PRELOAD", ""):
-            shims.append(self._shim_path)
-        if self._tracecmp_shim_path and self._tracecmp_shim_path not in os.environ.get(
-            "LD_PRELOAD", ""
-        ):
-            shims.append(self._tracecmp_shim_path)
-
-        if shims:
             existing = os.environ.get("LD_PRELOAD", "")
-            # Place shims BEFORE any ASAN library so tracecmp symbols
-            # (__sanitizer_cov_trace_cmp*) resolve to the shim, not
-            # ASAN's built-in coverage no-op stubs.
-            combined = ":".join(shims)
-            os.environ["LD_PRELOAD"] = f"{combined}:{existing}" if existing else combined
+            os.environ["LD_PRELOAD"] = (
+                f"{self._shim_path}:{existing}" if existing else self._shim_path
+            )
 
     def preload_shims(self) -> bool:
-        """Load cmplog/tracecmp shims into the current process via ctypes.
+        """Load the unified cmplog shim into the current process via ctypes.
 
         Used in direct_lite mode where LD_PRELOAD can't affect ctypes.CDLL
-        (the dynamic linker resolves LD_PRELOAD at process start). This loads
-        the shim .so files with RTLD_GLOBAL so the target .so can resolve
-        undefined symbols (__sanitizer_cov_trace_cmp*, etc.) at CDLL time.
+        (the dynamic linker resolves LD_PRELOAD at process start). Loads the
+        shim .so with RTLD_GLOBAL so the target .so can resolve undefined
+        symbols (__sanitizer_cov_trace_cmp*, etc.) at CDLL time.
 
-        Stores the loaded shim handles for later flush/reset calls.
+        Stores the loaded shim handle for later flush/reset calls.
 
         Returns:
-            True if at least one shim was loaded successfully.
+            True if the shim was loaded successfully.
         """
         import ctypes
 
-        loaded = False
         self._shim_handles: list[ctypes.CDLL] = []
-        for shim_path in (self._shim_path, self._tracecmp_shim_path):
-            if shim_path and os.path.exists(shim_path):
-                try:
-                    handle = ctypes.CDLL(shim_path, mode=ctypes.RTLD_GLOBAL)
-                    self._shim_handles.append(handle)
-                    loaded = True
-                except OSError:
-                    log.debug("Failed to preload shim: %s", shim_path)
-        return loaded
+        if self._shim_path and os.path.exists(self._shim_path):
+            try:
+                handle = ctypes.CDLL(self._shim_path, mode=ctypes.RTLD_GLOBAL)
+                self._shim_handles = [handle]
+                return True
+            except OSError:
+                log.debug("Failed to preload shim: %s", self._shim_path)
+        return False
 
     def flush_shims(self):
-        """Flush tracecmp buffer to disk.
+        """Flush the cmplog buffer to disk.
 
-        Calls __tracecmp_flush on every shim handle that has it.  Uses the
-        stored CDLL handles so it reaches the same shim instance that the
-        target .so resolved to at load time.
+        Calls __tracecmp_flush on the loaded shim handle.
+        The unified shim provides __tracecmp_flush (alias for flush_buffer +
+        fflush) via the same .so as __cmplog_reset.
         """
         for handle in getattr(self, "_shim_handles", []):
             try:

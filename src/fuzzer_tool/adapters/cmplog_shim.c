@@ -1,33 +1,135 @@
-/* cmplog_shim.c — LD_PRELOAD shim for comparison tracing.
-
-Intercepts memcmp, strcmp, strncmp, memchr, strcasecmp, strncasecmp,
-memmem, strstr, and strcasestr, logging operand pairs to a file for
-the fuzzer to consume. This enables the fuzzer to discover magic
-bytes, protocol constants, and case-insensitive patterns that blind
-mutation cannot find.
-
-Intercepted functions:
-  - memcmp / strcmp / strncmp / memchr       — standard comparisons
-  - strcasecmp / strncasecmp                — case-insensitive string comparisons
-  - memmem / strstr / strcasestr            — substring search functions
-
-Protocol: each comparison writes a line to _CMPLOG_OUT:
-  CMP <hex_operand1> <hex_operand2> <cmp_result>\n
-
-Usage:
-  LD_PRELOAD=./cmplog_shim.so _CMPLOG_OUT=/tmp/cmp.log ./target
-*/
-
+/* cmplog_shim.c — Unified LD_PRELOAD shim for comparison tracing.
+ *
+ * Two interception layers, one shared log file:
+ *
+ * 1. Symbol-based: intercepts libc comparison functions via dlsym(RTLD_NEXT)
+ *    (memcmp, strcmp, strncmp, memchr, strcasecmp, strncasecmp, memmem,
+ *    strstr, strcasestr) — catches explicit library calls at the PLT level.
+ *
+ * 2. Compiler-IR-based: implements Clang's -fsanitize-coverage=trace-cmp
+ *    callbacks (__sanitizer_cov_trace_cmp{1,2,4,8}, trace_const_cmp*,
+ *    trace_switch) — catches comparisons the compiler has inlined/folded
+ *    into integer compares that symbol interposition cannot see.
+ *
+ * Both layers write to the same _CMPLOG_OUT file in the same CMP line format.
+ *
+ * Protocol:
+ *   CMP <hex_operand1> <hex_operand2> <cmp_result> [<len>]\n
+ *
+ * Usage:
+ *   LD_PRELOAD=./cmplog_shim.so _CMPLOG_OUT=/tmp/cmp.log ./target
+ */
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+/* ── Shared state ────────────────────────────────────────────────────── */
 static FILE *cmplog_file = NULL;
 
-/* Cached real function pointers — resolved once, not per call */
+/* ── Buffered writer for high-frequency IR callbacks ────────────────── */
+#define BUFFER_SIZE (256 * 1024)  /* 256KB write buffer */
+
+static char cmplog_buffer[BUFFER_SIZE];
+static size_t cmplog_buf_pos = 0;
+
+static void flush_buffer(void) {
+    if (cmplog_buf_pos == 0) return;
+    if (cmplog_file) {
+        fwrite(cmplog_buffer, 1, cmplog_buf_pos, cmplog_file);
+    }
+    cmplog_buf_pos = 0;
+}
+
+/* Append a CMP line to the buffer. n is the comparison width in bytes.
+ * a and b are the operands, result is their signed comparison result.
+ * Returns immediately when cmplog_file is NULL (no --cmplog flag). */
+static inline void buffer_cmp(uint64_t a, uint64_t b, size_t n) {
+    if (!cmplog_file) return;
+
+    if (cmplog_buf_pos + 80 > BUFFER_SIZE) {
+        flush_buffer();
+    }
+
+    static const char hex[] = "0123456789abcdef";
+    char *p = cmplog_buffer + cmplog_buf_pos;
+
+    *p++ = 'C'; *p++ = 'M'; *p++ = 'P'; *p++ = ' ';
+
+    for (size_t i = 0; i < n; i++) {
+        uint8_t byte = (uint8_t)(a >> (i * 8));
+        *p++ = hex[byte >> 4];
+        *p++ = hex[byte & 0xf];
+    }
+
+    *p++ = ' ';
+
+    for (size_t i = 0; i < n; i++) {
+        uint8_t byte = (uint8_t)(b >> (i * 8));
+        *p++ = hex[byte >> 4];
+        *p++ = hex[byte & 0xf];
+    }
+
+    *p++ = ' ';
+
+    int64_t result;
+    if (a < b) result = -1;
+    else if (a > b) result = 1;
+    else result = 0;
+    p += sprintf(p, "%ld %zu\n", (long)result, n);
+
+    cmplog_buf_pos = (size_t)(p - cmplog_buffer);
+}
+
+/* ── fprintf-based writer for low-frequency libc interceptors ───────── */
+static void log_cmp(const void *a, const void *b, size_t n, int result) {
+    if (!cmplog_file || !a || !b || n == 0) return;
+
+    /* Only log comparisons where operands differ (result != 0) */
+    if (result == 0) return;
+
+    size_t log_n = n > 64 ? 64 : n;
+    fprintf(cmplog_file, "CMP ");
+    for (size_t i = 0; i < log_n; i++)
+        fprintf(cmplog_file, "%02x", ((const unsigned char *)a)[i]);
+    fprintf(cmplog_file, " ");
+    for (size_t i = 0; i < log_n; i++)
+        fprintf(cmplog_file, "%02x", ((const unsigned char *)b)[i]);
+    fprintf(cmplog_file, " %d %zu\n", result, n);
+}
+
+/* ── Lifecycle ───────────────────────────────────────────────────────── */
+
+static void flush_and_close(void) {
+    flush_buffer();
+    if (cmplog_file) {
+        fclose(cmplog_file);
+        cmplog_file = NULL;
+    }
+}
+
+static void crash_handler(int sig) {
+    flush_buffer();
+    if (cmplog_file) fflush(cmplog_file);
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+static void install_crash_handlers(void) {
+    struct sigaction sa;
+    sa.sa_handler = crash_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGSEGV, &sa, NULL);
+    sigaction(SIGABRT, &sa, NULL);
+    sigaction(SIGBUS, &sa, NULL);
+    sigaction(SIGFPE, &sa, NULL);
+}
+
+/* ── Symbol-based interception: cached libc function pointers ───────── */
 typedef int (*cmp_fn)(const void *, const void *, size_t);
 typedef int (*str_cmp_fn)(const char *, const char *);
 typedef int (*strn_cmp_fn)(const char *, const char *, size_t);
@@ -63,58 +165,16 @@ static void __attribute__((constructor)) init_cmplog(void) {
     if (path && path[0]) {
         cmplog_file = fopen(path, "a");
     }
-}
-
-static void flush_and_close(void) {
-    if (cmplog_file) {
-        fflush(cmplog_file);
-        fclose(cmplog_file);
-        cmplog_file = NULL;
-    }
+    install_crash_handlers();
 }
 
 static void __attribute__((destructor)) fini_cmplog(void) {
     flush_and_close();
 }
 
-/* Signal handler: flush before dying so we don't lose cmplog data */
-static void crash_handler(int sig) {
-    flush_and_close();
-    /* Re-raise with default handler */
-    signal(sig, SIG_DFL);
-    raise(sig);
-}
-
-static void install_crash_handlers(void) {
-    struct sigaction sa;
-    sa.sa_handler = crash_handler;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
-    sigaction(SIGSEGV, &sa, NULL);
-    sigaction(SIGABRT, &sa, NULL);
-    sigaction(SIGBUS, &sa, NULL);
-    sigaction(SIGFPE, &sa, NULL);
-}
-
-static void log_cmp(const void *a, const void *b, size_t n, int result) {
-    if (!cmplog_file || !a || !b || n == 0 || n == 0) return;
-
-    /* Only log comparisons where operands differ (result != 0) */
-    if (result == 0) return;
-
-    /* Write: CMP <hex_a> <hex_b> <result> */
-    size_t log_n = n > 64 ? 64 : n;
-    fprintf(cmplog_file, "CMP ");
-    for (size_t i = 0; i < log_n; i++)
-        fprintf(cmplog_file, "%02x", ((const unsigned char *)a)[i]);
-    fprintf(cmplog_file, " ");
-    for (size_t i = 0; i < log_n; i++)
-        fprintf(cmplog_file, "%02x", ((const unsigned char *)b)[i]);
-    fprintf(cmplog_file, " %d %zu\n", result, n);
-    /* No per-call fflush — flush on exit/crash via destructor + signal handler */
-}
-
-/* Intercepted functions — use cached real pointers */
+/* ═══════════════════════════════════════════════════════════════════════
+ * Layer 1: libc function interposition (PLT-level)
+ * ═══════════════════════════════════════════════════════════════════════ */
 
 int memcmp(const void *a, const void *b, size_t n) {
     int result = real_memcmp(a, b, n);
@@ -147,11 +207,6 @@ void *memchr(const void *s, int c, size_t n) {
     return result;
 }
 
-/* ── Case-insensitive comparisons ────────────────────────────────
- * Closes the ignore_case=true gap: fgrep's case-insensitive mode
- * calls strcasecmp/strncasecmp instead of strcmp/strncmp.
- */
-
 int strcasecmp(const char *a, const char *b) {
     int result = real_strcasecmp(a, b);
     size_t len_a = strlen(a);
@@ -167,19 +222,10 @@ int strncasecmp(const char *a, const char *b, size_t n) {
     return result;
 }
 
-/* ── Substring search functions ──────────────────────────────────
- * Closes the fallback-path gap: grep-style tools may call memmem,
- * strstr, or strcasestr instead of their own hand-rolled search.
- * For these we always log the needle — it's the compile-time
- * constant pattern the fuzzer needs to discover.
- */
-
 void *memmem(const void *haystack, size_t haystacklen,
              const void *needle, size_t needlelen) {
     void *result = real_memmem(haystack, haystacklen, needle, needlelen);
     if (cmplog_file && needle && needlelen > 0 && needlelen <= 64) {
-        /* Always log the needle — it's the magic pattern the fuzzer needs.
-         * Use -1 unconditionally so log_cmp doesn't skip it on match. */
         log_cmp(needle, needle, needlelen, -1);
     }
     return result;
@@ -203,17 +249,61 @@ char *strcasestr(const char *haystack, const char *needle) {
     return result;
 }
 
-/* ── Public API for log file management ────────────────────────
- * Called by the fuzzer via ctypes when cmplog is compiled into
- * the target .so in direct_lite mode.
- */
+/* ═══════════════════════════════════════════════════════════════════════
+ * Layer 2: Compiler-IR callbacks (Clang -fsanitize-coverage=trace-cmp)
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+#define MAX_SWITCH_CASES 256
+
+void __sanitizer_cov_trace_cmp1(uint8_t arg1, uint8_t arg2) {
+    buffer_cmp(arg1, arg2, 1);
+}
+
+void __sanitizer_cov_trace_cmp2(uint16_t arg1, uint16_t arg2) {
+    buffer_cmp(arg1, arg2, 2);
+}
+
+void __sanitizer_cov_trace_cmp4(uint32_t arg1, uint32_t arg2) {
+    buffer_cmp(arg1, arg2, 4);
+}
+
+void __sanitizer_cov_trace_cmp8(uint64_t arg1, uint64_t arg2) {
+    buffer_cmp(arg1, arg2, 8);
+}
+
+void __sanitizer_cov_trace_const_cmp1(uint8_t arg1, uint8_t arg2) {
+    buffer_cmp(arg1, arg2, 1);
+}
+
+void __sanitizer_cov_trace_const_cmp2(uint16_t arg1, uint16_t arg2) {
+    buffer_cmp(arg1, arg2, 2);
+}
+
+void __sanitizer_cov_trace_const_cmp4(uint32_t arg1, uint32_t arg2) {
+    buffer_cmp(arg1, arg2, 4);
+}
+
+void __sanitizer_cov_trace_const_cmp8(uint64_t arg1, uint64_t arg2) {
+    buffer_cmp(arg1, arg2, 8);
+}
+
+void __sanitizer_cov_trace_switch(uint64_t val, uint64_t *ref) {
+    if (!ref) return;
+    int64_t count = (int64_t)ref[0];
+    if (count <= 0 || count > MAX_SWITCH_CASES) return;
+    for (int64_t i = 0; i < count; i++) {
+        buffer_cmp(val, ref[2 + i], 8);
+    }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+ * Public API for in-process / direct_lite mode
+ * ═══════════════════════════════════════════════════════════════════════ */
 
 __attribute__((visibility("default")))
 void __cmplog_reset(void) {
-    /* Truncate-and-reopen the log file so the fuzzer can read
-     * fresh data after each execution without deleting the file
-     * the .so still has open. */
     if (cmplog_file) {
+        flush_buffer();
         const char *path = getenv("_CMPLOG_OUT");
         if (path && path[0]) {
             fclose(cmplog_file);
@@ -225,4 +315,22 @@ void __cmplog_reset(void) {
 __attribute__((visibility("default")))
 const char *__cmplog_get_path(void) {
     return getenv("_CMPLOG_OUT");
+}
+
+/* Alias for backward compatibility with callers that expect __tracecmp_*
+ * symbols (e.g. preload_shims, flush_shims in cmplog.py). */
+__attribute__((visibility("default")))
+void __tracecmp_flush(void) {
+    flush_buffer();
+    if (cmplog_file) fflush(cmplog_file);
+}
+
+__attribute__((visibility("default")))
+void __tracecmp_reset(void) {
+    __cmplog_reset();
+}
+
+__attribute__((visibility("default")))
+const char *__tracecmp_get_path(void) {
+    return __cmplog_get_path();
 }

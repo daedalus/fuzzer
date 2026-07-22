@@ -26,16 +26,16 @@ HAS_FGREP=0
 [ -d "$FGREP/src" ] && HAS_FGREP=1
 WITH_CMPLOG=0
 WITH_TRACECMP=0
-WITH_CLANG_SCOV=0
 WITH_VENDOR_TRACECMP=0
+WITH_CLANG_SCOV=0
 USE_CLANG=0
 
 # Parse flags (can appear anywhere)
 for arg in "$@"; do
     [ "$arg" = "--cmplog" ] && WITH_CMPLOG=1
-    [ "$arg" = "--tracecmp" ] && WITH_TRACECMP=1
+    # --tracecmp implies --cmplog (the unified shim covers both layers)
+    [ "$arg" = "--tracecmp" ] && WITH_CMPLOG=1 && WITH_TRACECMP=1
     [ "$arg" = "--vendor-tracecmp" ] && WITH_VENDOR_TRACECMP=1
-    [ "$arg" = "--clang" ] && USE_CLANG=1
     [ "$arg" = "--clang-scov" ] && WITH_CLANG_SCOV=1
 done
 
