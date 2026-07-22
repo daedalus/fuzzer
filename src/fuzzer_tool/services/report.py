@@ -72,6 +72,7 @@ def generate_report(fuzzer, corpus_dir: str, crashes_dir: str) -> str:
     sections.append(_good_turing(fuzzer))
     sections.append(_coverage_analysis(fuzzer))
     sections.append(_mutation_effectiveness(fuzzer))
+    sections.append(_mutation_edge_attribution(fuzzer))
     sections.append(_operator_diversity(fuzzer))
     sections.append(_entropy_metrics(fuzzer))
     sections.append(_format_learning(fuzzer))
@@ -223,6 +224,65 @@ def _mutation_effectiveness(f) -> str:
         if total
         else ""
     )
+    return "\n".join(lines)
+
+
+def _mutation_edge_attribution(f) -> str:
+    """Per-operator new-edge attribution report.
+
+    Shows how many new edges each mutation operator discovered (proportional
+    attribution when multiple operators run per iteration). Cmplog is shown
+    separately as cumulative involvement — it overlaps with mutation ops.
+    """
+    edges = f.op_edges
+    if not edges:
+        return ""
+
+    # Filter out cmplog for the proportional table
+    op_edges = {k: v for k, v in edges.items() if k != "cmplog"}
+    if not op_edges:
+        return ""
+
+    total = sum(op_edges.values())
+    counts = f.op_counts
+    successes = f.op_success
+    cmplog_edge_count = edges.get("cmplog", 0)
+
+    lines = [
+        "",
+        "--- Mutation Edge Attribution ---",
+        f"  {'Operation':<22s} {'Edges':>8s} {'%Total':>7s} "
+        f"{'Edges/Use':>10s} {'Edges/Success':>13s}",
+        f"  {'-'*22} {'-'*8} {'-'*7} "
+        f"{'-'*10} {'-'*13}",
+    ]
+
+    for op, edge_val in sorted(op_edges.items(), key=lambda x: -x[1]):
+        count = counts.get(op, 0)
+        succ = successes.get(op, 0)
+        pct = edge_val / total * 100 if total > 0 else 0
+        edges_per_use = edge_val / count if count > 0 else 0
+        edges_per_succ = edge_val / succ if succ > 0 else 0
+        lines.append(
+            f"  {op:<22s} {edge_val:>8.1f} {pct:>6.1f}%  "
+            f"{edges_per_use:>9.2f}  {edges_per_succ:>12.2f}"
+        )
+
+    lines.append(f"  {'TOTAL':<22s} {total:>8.1f} {'':>7s}")
+
+    # Cmplog involvement line (cumulative, overlaps with mutations above)
+    if cmplog_edge_count > 0:
+        cmplog_pct = cmplog_edge_count / (total + cmplog_edge_count) * 100
+        lines.append("")
+        lines.append(
+            f"  Cmplog-involved edges: {cmplog_edge_count:.0f} ({cmplog_pct:.1f}% of "
+            f"total edge discoveries involved cmplog token extraction)"
+        )
+        lines.append(
+            "  (cmplog is a signal source, not a mutation operator — "
+            "its count overlaps with the per-op attribution above)"
+        )
+
     return "\n".join(lines)
 
 

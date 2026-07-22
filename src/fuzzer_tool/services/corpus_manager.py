@@ -89,6 +89,7 @@ class CorpusManager:
             "crash_sigs": f.crash_sigs,
             "op_counts": f.op_counts,
             "op_success": f.op_success,
+            "op_edges": f.op_edges,
             "corpus_size_history": f._corpus_size_history[-500:],
             "seed_meta": {},
             "crash_frames": f.crash_frames,
@@ -139,6 +140,7 @@ class CorpusManager:
         f.crash_frames = state.get("crash_frames", {})
         f.op_counts = state.get("op_counts", {})
         f.op_success = state.get("op_success", {})
+        f.op_edges = state.get("op_edges", {})
         f._corpus_size_history = state.get("corpus_size_history", [])
         saved_meta = state.get("seed_meta", {})
         # Skip corrupted entries: seed keys should be hex hashes (< 256 chars),

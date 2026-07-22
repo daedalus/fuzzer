@@ -472,6 +472,7 @@ class Fuzzer:
         self.last_report: SanitizerReport | None = None
         self.op_counts: dict[str, int] = {}
         self.op_success: dict[str, int] = {}
+        self.op_edges: dict[str, int] = {}
         self._peak_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         self._discovery_history: list[tuple[int, int]] = []  # (exec_count, edges)
         self._crash_rate_history: list[tuple[int, int]] = []  # (exec_count, crash_count)
@@ -1541,6 +1542,18 @@ class Fuzzer:
                 )
                 if new:
                     self._last_new_edge_exec = self.exec_count
+                    # Attribute new edges to the operators that ran this iteration.
+                    # Proportional split: edges ÷ unique ops in _last_ops_used.
+                    unique_ops = list(dict.fromkeys(self._last_ops_used))
+                    if unique_ops:
+                        share = len(new) / len(unique_ops)
+                        for op in unique_ops:
+                            self.op_edges[op] = self.op_edges.get(op, 0.0) + share
+                    # Separate counter for cmplog-involved edge discoveries
+                    # (cumulative with the op attribution above — cmplog is a
+                    #  signal source, not a mutation op, so it can overlap).
+                    if cmplog_found:
+                        self.op_edges["cmplog"] = self.op_edges.get("cmplog", 0.0) + len(new)
                     if self._stall_recovery_active:
                         print(
                             f"\n[*] RECOVERED: found {len(new)} new edges at exec "
