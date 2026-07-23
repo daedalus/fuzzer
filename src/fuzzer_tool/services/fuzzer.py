@@ -1499,8 +1499,8 @@ class Fuzzer:
                 self._redqueen_index = len(self._cmplog.pairs)
 
                 # SMT sampling pass: run solver on random pairs each iteration
-                # (z3 is expensive, so sample at the same adaptive rate as collection)
-                if self._smt_solver is not None and self._cmplog.pairs and _collect_now:
+                # (limited to 5 random pairs — fast, unlike file parsing)
+                if self._smt_solver is not None and self._cmplog.pairs:
                     self._smt_solver.reset_batch()
                     sample = self._cmplog.pairs[:]
                     import random as _rand
