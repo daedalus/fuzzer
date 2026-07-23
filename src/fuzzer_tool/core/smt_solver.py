@@ -332,6 +332,87 @@ class Z3Solver:
                 "width": width, "relation": "sub", "delta": sub_delta,
             }
 
+        # ── AND (bitwise subset) ──
+        # If one operand's bits are wholly contained in the other (common
+        # for flag/bitfield checks), use the superset as the replacement.
+        common = val_a & val_b
+        if common:
+            if common == val_a and common != val_b:
+                # val_a ⊆ val_b → val_b is the superset
+                self.queries_solved += 1
+                self.batch_solved += 1
+                return {
+                    "solved_bytes": val_b.to_bytes(width, "little"),
+                    "width": width, "relation": "and", "delta": common,
+                }
+            if common == val_b and common != val_a:
+                # val_b ⊆ val_a → val_a is the superset
+                self.queries_solved += 1
+                self.batch_solved += 1
+                return {
+                    "solved_bytes": val_a.to_bytes(width, "little"),
+                    "width": width, "relation": "and", "delta": common,
+                }
+
+        # ── SHIFT (<< / >> by small constant) ──
+        for k in range(1, 8):
+            if ((val_a << k) & mask) == val_b:
+                self.queries_solved += 1
+                self.batch_solved += 1
+                return {
+                    "solved_bytes": val_b.to_bytes(width, "little"),
+                    "width": width, "relation": "shl", "delta": k,
+                }
+            if (val_a >> k) == val_b:
+                self.queries_solved += 1
+                self.batch_solved += 1
+                return {
+                    "solved_bytes": val_b.to_bytes(width, "little"),
+                    "width": width, "relation": "shr", "delta": k,
+                }
+            if ((val_b << k) & mask) == val_a:
+                self.queries_solved += 1
+                self.batch_solved += 1
+                return {
+                    "solved_bytes": val_a.to_bytes(width, "little"),
+                    "width": width, "relation": "shl", "delta": k,
+                }
+            if (val_b >> k) == val_a:
+                self.queries_solved += 1
+                self.batch_solved += 1
+                return {
+                    "solved_bytes": val_a.to_bytes(width, "little"),
+                    "width": width, "relation": "shr", "delta": k,
+                }
+
+        # ── MULTIPLY (small constant) ──
+        for k in range(2, 101):
+            if ((val_a * k) & mask) == val_b:
+                self.queries_solved += 1
+                self.batch_solved += 1
+                return {
+                    "solved_bytes": val_b.to_bytes(width, "little"),
+                    "width": width, "relation": "mul", "delta": k,
+                }
+            if ((val_b * k) & mask) == val_a:
+                self.queries_solved += 1
+                self.batch_solved += 1
+                return {
+                    "solved_bytes": val_a.to_bytes(width, "little"),
+                    "width": width, "relation": "mul", "delta": k,
+                }
+
+        # ── OR (last-resort bitwise: catches patterns bypassed by ADD/XOR/SUB) ──
+        combined = val_a | val_b
+        if combined != val_a and combined != val_b and combined < (1 << w):
+            self.queries_solved += 1
+            self.batch_solved += 1
+            delta_or = combined ^ min(val_a, val_b)
+            return {
+                "solved_bytes": combined.to_bytes(width, "little"),
+                "width": width, "relation": "or", "delta": delta_or,
+            }
+
         # ── MOD: heuristic mode (A) ──
         if self.mod_solving_mode in ("heuristic", "trace"):
             mod_result = self._try_mod_heuristic(width, val_a, val_b)
