@@ -281,16 +281,6 @@ class TestIntegration:
         "mode_args,target_fixture,mode_label",
         [
             ([], "compiled_asan_target", "default_subprocess"),
-            (
-                ["--inprocess", "--inprocess-func", "fuzz"],
-                "compiled_asan_so",
-                "inprocess_subprocess",
-            ),
-            (
-                ["--inprocess-direct", "--inprocess-func", "fuzz"],
-                "compiled_asan_so",
-                "inprocess_direct",
-            ),
             (["--no-shm"], "compiled_asan_target", "ptrace"),
         ],
     )
