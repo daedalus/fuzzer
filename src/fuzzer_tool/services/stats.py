@@ -153,34 +153,8 @@ class StatsReporter:
             budget_ms,
         )
 
-    def print_run_summary(self):
-        f = self.f
-        elapsed = time.time() - f.start_time
-        eps = f.exec_count / elapsed if elapsed > 0 else 0
-
-        print(f"\n{'=' * 60}")
-        print("  RUN SUMMARY")
-        print(f"{'=' * 60}")
-        print(f"  Duration:          {elapsed:.0f}s")
-        print(f"  Executions:        {f.exec_count:,}")
-        print(f"  Avg eps:           {eps:.1f}")
-        print(f"  Peak eps:          {f._peak_eps:.1f}")
-
-        added = f._total_corpus_attempts
-        rejected = f._duplicate_reject_count
-        print(f"  Corpus:            {len(f.corpus)} entries")
-        print(f"  Seeds added:       {added}")
-        print(f"  Duplicates rejected: {rejected}")
-        if f._pruned_count > 0:
-            print(f"  Seeds pruned:      {f._pruned_count}")
-
-        if f._stall_recovery_count > 0:
-            print(f"  Recovery entries:  {f._stall_recovery_count}")
-            print(
-                f"  Recovery execs:    {f._stall_recovery_execs:,} "
-                f"({f._stall_recovery_execs / max(1, f.exec_count) * 100:.1f}%)"
-            )
-
+    def _print_summary_coverage(self, f) -> None:
+        """Print coverage-related summary lines."""
         shm_edges = f.shm_cov._peak_cumulative_edges if f.shm_cov else 0
         et_edges = f._edge_tracker.get_cumulative_edge_count()
         edges = shm_edges if shm_edges else et_edges
@@ -204,7 +178,6 @@ class StatsReporter:
             print(f"  Est. remaining:    {gt['estimated_undiscovered']} edges")
             print(f"  Saturation:        {gt['saturation']:.1%} ({gt['confidence']} confidence)")
 
-        # Coverage growth model
         growth = f._edge_tracker.coverage_growth_model()
         if growth["confidence"] > 0.1:
             print(f"  Growth rate:       {growth['current_rate']:.4f} edges/exec")
@@ -212,57 +185,74 @@ class StatsReporter:
             if growth["time_to_plateau"] > 0:
                 print(f"  Plateau in:        ~{growth['time_to_plateau']:,} execs")
 
-        if f.seed_meta:
-            depths = [m.get("lineage_depth", 0) for m in f.seed_meta.values()]
-            if depths:
-                print(f"  Max lineage depth: {max(depths)}")
-                avg_depth = sum(depths) / len(depths)
-                print(f"  Avg lineage depth: {avg_depth:.1f}")
+    def _print_summary_seeds(self, f) -> None:
+        """Print seed-related summary lines."""
+        if not f.seed_meta:
+            return
+        depths = [m.get("lineage_depth", 0) for m in f.seed_meta.values()]
+        if depths:
+            print(f"  Max lineage depth: {max(depths)}")
+            print(f"  Avg lineage depth: {sum(depths) / len(depths):.1f}")
 
-        if f.seed_meta:
-            edges_per_seed = [m.get("coverage_edges", 0) for m in f.seed_meta.values()]
-            productive = sum(1 for e in edges_per_seed if e > 0)
-            stale = sum(
-                1
-                for m in f.seed_meta.values()
-                if m.get("fuzz_count", 0) >= 50 and m.get("coverage_edges", 0) == 0
-            )
-            total_seeds = len(f.seed_meta)
-            print(f"  Productive seeds:  {productive}/{total_seeds} discovered edges")
-            print(f"  Stale seeds:       {stale}/{total_seeds} (50+ fuzzes, 0 edges)")
+        edges_per_seed = [m.get("coverage_edges", 0) for m in f.seed_meta.values()]
+        productive = sum(1 for e in edges_per_seed if e > 0)
+        stale = sum(1 for m in f.seed_meta.values() if m.get("fuzz_count", 0) >= 50 and m.get("coverage_edges", 0) == 0)
+        total_seeds = len(f.seed_meta)
+        print(f"  Productive seeds:  {productive}/{total_seeds} discovered edges")
+        print(f"  Stale seeds:       {stale}/{total_seeds} (50+ fuzzes, 0 edges)")
 
-            # Seed classification
-            classifications = f._edge_tracker.classify_seeds()
-            keystone = sum(1 for c in classifications.values() if c["classification"] == "keystone")
-            parasitic = sum(
-                1 for c in classifications.values() if c["classification"] == "parasitic"
-            )
-            if keystone > 0 or parasitic > 0:
-                print(f"  Keystone seeds:    {keystone} (cover unique edges)")
-                print(f"  Parasitic seeds:   {parasitic} (fully subsumed)")
+        self._print_summary_classification(f)
 
-            # Redundant seeds (dominance tree)
-            redundant = f._edge_tracker.find_redundant_seeds()
-            if redundant:
-                print(f"  Dominated seeds:   {len(redundant)} (removable)")
+    def _print_summary_classification(self, f) -> None:
+        """Print seed classification and redundancy."""
+        classifications = f._edge_tracker.classify_seeds()
+        keystone = sum(1 for c in classifications.values() if c["classification"] == "keystone")
+        parasitic = sum(1 for c in classifications.values() if c["classification"] == "parasitic")
+        if keystone > 0 or parasitic > 0:
+            print(f"  Keystone seeds:    {keystone} (cover unique edges)")
+            print(f"  Parasitic seeds:   {parasitic} (fully subsumed)")
+        redundant = f._edge_tracker.find_redundant_seeds()
+        if redundant:
+            print(f"  Dominated seeds:   {len(redundant)} (removable)")
 
+    def _print_summary_rarity(self, f) -> None:
+        """Print edge rarity summary lines."""
         rarity = f._edge_tracker.edge_rarity_stats()
-        if rarity["total"] > 0:
-            print(
-                f"  Edge rarity:       {rarity['singleton']} singleton / "
-                f"{rarity['cold']} cold / {rarity['warm']} warm / {rarity['hot']} hot"
-            )
-            print(f"  Avg seeds/edge:    {rarity['avg_seeds_per_edge']:.1f}")
+        if rarity["total"] <= 0:
+            return
+        print(f"  Edge rarity:       {rarity['singleton']} singleton / {rarity['cold']} cold / {rarity['warm']} warm / {rarity['hot']} hot")
+        print(f"  Avg seeds/edge:    {rarity['avg_seeds_per_edge']:.1f}")
+        uniqueness = f._edge_tracker.seed_uniqueness()
+        if uniqueness:
+            irreplaceable = sum(1 for v in uniqueness.values() if v > 0)
+            print(f"  Irreplaceable:     {irreplaceable} seeds cover singleton edges")
+        cooccur = f._edge_tracker.edge_cooccurrence(top_k=3)
+        if cooccur:
+            pairs_str = ", ".join(f"e{a}↔e{b}({j:.0%})" for a, b, j in cooccur)
+            print(f"  Edge co-occurrence:{pairs_str}")
 
-            uniqueness = f._edge_tracker.seed_uniqueness()
-            if uniqueness:
-                irreplaceable = sum(1 for v in uniqueness.values() if v > 0)
-                print(f"  Irreplaceable:     {irreplaceable} seeds cover singleton edges")
-
-            cooccur = f._edge_tracker.edge_cooccurrence(top_k=3)
-            if cooccur:
-                pairs_str = ", ".join(f"e{a}↔e{b}({j:.0%})" for a, b, j in cooccur)
-                print(f"  Edge co-occurrence:{pairs_str}")
+    def print_run_summary(self):
+        f = self.f
+        elapsed = time.time() - f.start_time
+        eps = f.exec_count / elapsed if elapsed > 0 else 0
+        print(f"\n{'=' * 60}")
+        print("  RUN SUMMARY")
+        print(f"{'=' * 60}")
+        print(f"  Duration:          {elapsed:.0f}s")
+        print(f"  Executions:        {f.exec_count:,}")
+        print(f"  Avg eps:           {eps:.1f}")
+        print(f"  Peak eps:          {f._peak_eps:.1f}")
+        print(f"  Corpus:            {len(f.corpus)} entries")
+        print(f"  Seeds added:       {f._total_corpus_attempts}")
+        print(f"  Duplicates rejected: {f._duplicate_reject_count}")
+        if f._pruned_count > 0:
+            print(f"  Seeds pruned:      {f._pruned_count}")
+        if f._stall_recovery_count > 0:
+            print(f"  Recovery entries:  {f._stall_recovery_count}")
+            print(f"  Recovery execs:    {f._stall_recovery_execs:,} ({f._stall_recovery_execs / max(1, f.exec_count) * 100:.1f}%)")
+        self._print_summary_coverage(f)
+        self._print_summary_seeds(f)
+        self._print_summary_rarity(f)
 
     def dump_stats(self):
         f = self.f
@@ -415,132 +405,126 @@ class StatsReporter:
     def format_elapsed(self) -> str:
         return _format_elapsed_fn(self.f.start_time)
 
+    def _print_stats_cov_str(self, f) -> str:
+        """Format coverage string."""
+        if f.multi_targets and f._target_shm_covs:
+            parts = [f"{os.path.basename(t)}:{shm.cumulative_edges}" for t, shm in f._target_shm_covs.items()]
+            return " | targets: " + " ".join(parts)
+        if f.shm_cov:
+            shm_edges = f.shm_cov.cumulative_edges
+            gt = f._edge_tracker.good_turing_estimate()
+            max_edges = gt["n"] + gt["estimated_undiscovered"]
+            sat = gt["saturation"] * 100 if max_edges > 0 else 0
+            return f" | shm: {shm_edges} max: {max_edges} sat: {sat:.0f}%"
+        if f.ptrace_cov:
+            s = f" | edges: {f.ptrace_cov.cumulative_edges} hits: {f.ptrace_cov.total_bp_hits}"
+            if f.ptrace_cov.deep_coverage:
+                s += f" bps:{len(f.ptrace_cov.original_bytes)}"
+            return s
+        return ""
+
+    def _print_stats_density_str(self, f) -> str:
+        """Format map density string with optional collision-induced resize."""
+        density = f._edge_tracker.bitmap_density() * 100
+        collision_risk = f._edge_tracker.birthday_collision_risk() * 100
+        s = f" | map: {density:.1f}%"
+        if collision_risk > 10:
+            s += f" (collision: {collision_risk:.0f}%)"
+            if collision_risk > f._max_collision_risk and f.shm_cov:
+                s += self._maybe_resize_bitmap(f, collision_risk)
+        return s
+
+    def _maybe_resize_bitmap(self, f, collision_risk: float) -> str:
+        """Resize bitmap when collision risk exceeds threshold."""
+        current = f.shm_cov.size
+        new_size = min(1048576, current * 2)
+        if new_size <= current:
+            return ""
+        print(f"\n[*] Collision risk {collision_risk:.0f}% — resizing bitmap {current:,} → {new_size:,} bytes")
+        f.shm_cov.resize(new_size)
+        f.map_size = new_size
+        f._edge_tracker.map_size = new_size
+        f._edge_tracker.reset_after_resize()
+        os.environ["__AFL_SHM_ID"] = f.shm_cov.env_id
+        os.environ["AFL_MAP_SIZE"] = str(new_size)
+        if f._inprocess_runner:
+            f._inprocess_runner.update_shm_after_resize(f.shm_cov._ptr, new_size, f.shm_cov.env_id)
+        return f" | map: {f._edge_tracker.bitmap_density() * 100:.1f}% (collision: {collision_risk:.0f}%)"
+
+    def _print_stats_smt_str(self, f) -> str:
+        """Format SMT solver string."""
+        if f._smt_solver is None or f._smt_solver.queries_attempted <= 0:
+            return ""
+        s = f._smt_solver
+        inc_pct = s.batch_solved / max(s.batch_attempted, 1) * 100
+        tot_pct = s.queries_solved / max(s.queries_attempted, 1) * 100
+        return f" | smt: {s.batch_solved}/{s.batch_attempted} ({inc_pct:.0f}%) tot: {s.queries_solved}/{s.queries_attempted} ({tot_pct:.0f}%)"
+
+    def _print_stats_dr_str(self, f) -> str:
+        """Format discovery rate string with CSD detection."""
+        dr = self.discovery_rate()
+        s = f" | rate: {dr:.1f} ed/kexec" if f.exec_count > 100 else ""
+        if f.exec_count > 100:
+            f._csd.observe(dr)
+            detected, csd_reason = f._csd.is_approaching_transition()
+            if detected:
+                s += f" [CSD: {csd_reason}]"
+        return s
+
     def print_stats(self):
         f = self.f
         elapsed = time.time() - f.start_time
         eps = f.exec_count / elapsed if elapsed > 0 else 0
         f._eps = eps
+
         dict_str = f" | dict: {len(f.dictionary)}" if f.dictionary else ""
         markov_str = " | markov: trained" if f.markov_trained else ""
-        cmplog_str = ""
-        if f._cmplog is not None:
-            n_tok = len(f._cmplog.tokens)
-            n_prs = len(f._cmplog.pairs)
-            cmplog_str = f" | cmplog: {n_tok}t {n_prs}p"
-        smt_str = ""
-        if f._smt_solver is not None and f._smt_solver.queries_attempted > 0:
-            s = f._smt_solver
-            inc_pct = s.batch_solved / max(s.batch_attempted, 1) * 100
-            tot_pct = s.queries_solved / max(s.queries_attempted, 1) * 100
-            smt_str = f" | smt: {s.batch_solved}/{s.batch_attempted} ({inc_pct:.0f}%) tot: {s.queries_solved}/{s.queries_attempted} ({tot_pct:.0f}%)"
-        if f.markov_generate:
-            markov_str += "+gen"
-        cov_str = ""
-        if f.multi_targets and f._target_shm_covs:
-            parts = []
-            for t in f._target_shm_covs:
-                shm = f._target_shm_covs[t]
-                name = os.path.basename(t)
-                parts.append(f"{name}:{shm.cumulative_edges}")
-            cov_str = " | targets: " + " ".join(parts)
-        elif f.shm_cov:
-            shm_edges = f.shm_cov.cumulative_edges
-            gt = f._edge_tracker.good_turing_estimate()
-            max_edges = gt["n"] + gt["estimated_undiscovered"]
-            sat = gt["saturation"] * 100 if max_edges > 0 else 0
-            cov_str = f" | shm: {shm_edges} max: {max_edges} sat: {sat:.0f}%"
-        elif f.ptrace_cov:
-            cov_str = (
-                f" | edges: {f.ptrace_cov.cumulative_edges} hits: {f.ptrace_cov.total_bp_hits}"
-            )
-            if f.ptrace_cov.deep_coverage:
-                cov_str += f" bps:{len(f.ptrace_cov.original_bytes)}"
+        markov_str += "+gen" if f.markov_generate else ""
+
+        cmplog_str = f" | cmplog: {len(f._cmplog.tokens)}t {len(f._cmplog.pairs)}p" if f._cmplog is not None else ""
+
+        smt_str = self._print_stats_smt_str(f)
+
+        cov_str = self._print_stats_cov_str(f)
         mc_str = ""
         if f.mc:
-            parts = []
-            if f.mc_bandit:
-                parts.append("bandit")
-            if f.mc_cem:
-                parts.append(f"cem:{len(f.mc.elite_set)}")
+            parts = [p for p, cond in [("bandit", f.mc_bandit), (f"cem:{len(f.mc.elite_set)}", f.mc_cem)] if cond]
             if parts:
                 mc_str = " | mc: " + "+".join(parts)
+
         sig_str = f"({len(f.crash_sigs)}sigs)" if f.crash_sigs else ""
         timeout_pct = f.timeout_count / f.exec_count * 100 if f.exec_count else 0
         timeout_str = f" | timeouts: {f.timeout_count} ({timeout_pct:.1f}%)"
         rss_kb = f._peak_rss
         rss_str = f" | rss: {rss_kb // 1024}MB" if rss_kb >= 1024 else f" | rss: {rss_kb}KB"
+
         ops_str = ""
         if f._last_ops_used:
             recent = list(dict.fromkeys(reversed(f._last_ops_used)))[:3]
             ops_str = " | ops: " + " ".join(recent)
-        div_str = ""
-        if len(f._edge_tracker.seed_hit_counts) >= 2:
-            diversity = f._edge_tracker.compute_corpus_diversity()
-            div_str = f" | div: {diversity:.0f}"
-        jac_str = ""
-        if len(f._edge_tracker.seed_hit_counts) >= 2:
-            avg_jac = f._edge_tracker.compute_average_jaccard()
-            jac_str = f" | jac: {avg_jac:.2f}"
-        dr = self.discovery_rate()
-        dr_str = f" | rate: {dr:.1f} ed/kexec" if f.exec_count > 100 else ""
-        if f.exec_count > 100:
-            f._csd.observe(dr)
-            detected, csd_reason = f._csd.is_approaching_transition()
-            if detected:
-                dr_str += f" [CSD: {csd_reason}]"
-        density = f._edge_tracker.bitmap_density() * 100
-        collision_risk = f._edge_tracker.birthday_collision_risk() * 100
-        density_str = f" | map: {density:.1f}%"
-        if collision_risk > 10:
-            density_str += f" (collision: {collision_risk:.0f}%)"
-            if collision_risk > f._max_collision_risk and f.shm_cov:
-                current = f.shm_cov.size
-                new_size = min(1048576, current * 2)
-                if new_size > current:
-                    print(
-                        f"\n[*] Collision risk {collision_risk:.0f}% — resizing bitmap "
-                        f"{current:,} → {new_size:,} bytes"
-                    )
-                    f.shm_cov.resize(new_size)
-                    f.map_size = new_size
-                    f._edge_tracker.map_size = new_size
-                    f._edge_tracker.reset_after_resize()
-                    # Update env vars BEFORE patching target so __afl_map_shm()
-                    # reads the correct __AFL_SHM_ID and AFL_MAP_SIZE.
-                    os.environ["__AFL_SHM_ID"] = f.shm_cov.env_id
-                    os.environ["AFL_MAP_SIZE"] = str(new_size)
-                    # Update inprocess runner's SHM pointers — the target's
-                    # __afl_area still points to the old (detached) SHM
-                    if f._inprocess_runner:
-                        f._inprocess_runner.update_shm_after_resize(
-                            f.shm_cov._ptr, new_size, f.shm_cov.env_id
-                        )
-                    density_str = f" | map: {f._edge_tracker.bitmap_density() * 100:.1f}% (collision: {collision_risk:.0f}%)"
+
+        div_str = f" | div: {f._edge_tracker.compute_corpus_diversity():.0f}" if len(f._edge_tracker.seed_hit_counts) >= 2 else ""
+        jac_str = f" | jac: {f._edge_tracker.compute_average_jaccard():.2f}" if len(f._edge_tracker.seed_hit_counts) >= 2 else ""
+
+        dr_str = self._print_stats_dr_str(f)
+
+        density_str = self._print_stats_density_str(f)
+
         repro_str = ""
         if f._crash_replays:
             done = [v for v in f._crash_replays.values() if len(v) >= f.replay_n]
             if done:
-                avg_repro = (
-                    sum(sum(1 for r in replays if r >= 0) / len(replays) for replays in done)
-                    / len(done)
-                    * 100
-                )
+                avg_repro = sum(sum(1 for r in replays if r >= 0) / len(replays) for replays in done) / len(done) * 100
                 repro_str = f" | repro: {avg_repro:.0f}%"
-        brier_str = ""
-        if f.mc and f.mc_bandit and f.mc.brier_score() > 0:
-            brier_str = f" | brier: {f.mc.brier_score():.3f}"
-        crps_str = ""
-        if f._exec_time_tracker.count > 20:
-            crps_str = f" | crps: {f._exec_time_tracker.mean_crps():.4f}"
-        # Shannon entropy and Simpson's diversity of edge hit distribution
-        ent_str = ""
-        simp_str = ""
+
+        brier_str = f" | brier: {f.mc.brier_score():.3f}" if f.mc and f.mc_bandit and f.mc.brier_score() > 0 else ""
+        crps_str = f" | crps: {f._exec_time_tracker.mean_crps():.4f}" if f._exec_time_tracker.count > 20 else ""
+
+        ent_str = simp_str = ""
         if f._edge_tracker._global_edge_hits:
-            sh = f._edge_tracker.shannon_entropy_global()
-            simp = f._edge_tracker.simpson_diversity_global()
-            ent_str = f" | ent: {sh:.2f}"
-            simp_str = f" | simp: {simp:.2f}"
-        # Entropy rate of change
+            ent_str = f" | ent: {f._edge_tracker.shannon_entropy_global():.2f}"
+            simp_str = f" | simp: {f._edge_tracker.simpson_diversity_global():.2f}"
+
         rate_str = ""
         if hasattr(f, "_entropy_history") and len(f._entropy_history) >= 2:
             recent = f._entropy_history[-10:]
@@ -548,22 +532,20 @@ class StatsReporter:
                 dt = recent[-1][0] - recent[0][0]
                 if dt > 0:
                     dS = recent[-1][1] - recent[0][1]
-                    entropy_rate = dS / dt
-                    rate_str = f" | dS/dt: {entropy_rate:+.4f}"
-        # Format learner summary
+                    rate_str = f" | dS/dt: {dS / dt:+.4f}"
+
         fmt_str = ""
-        if getattr(f, "_format_learner", None) and f._format_learner.hypotheses:
-            fl = f._format_learner
+        fl = getattr(f, "_format_learner", None)
+        if fl and fl.hypotheses:
             classified = sum(1 for h in fl.hypotheses if h.field_type != "unknown")
             fmt_str = f" | fmt: {classified}/{len(fl.hypotheses)} fields v{fl.format_model_version}"
+
         line = (
             f"[*] execs: {f.exec_count} | corpus: {len(f.corpus)} | "
             f"crashes: {f.crash_count}{sig_str}{timeout_str} | eps: {eps:.0f} | "
             f"time: {elapsed:.0f}s{rss_str}{ops_str}{dict_str}{markov_str}{cmplog_str}{smt_str}{cov_str}{mc_str}{div_str}{jac_str}{dr_str}{density_str}{repro_str}{brier_str}{crps_str}{ent_str}{simp_str}{rate_str}{fmt_str}"
         )
-        # Add coverage growth model to stats line
         growth = f._edge_tracker.coverage_growth_model()
         if growth["confidence"] > 0.1:
-            growth_str = f" | gr: {growth['current_rate']:.3f}e/x proj: {growth['projected_total']} plateau: ~{growth['time_to_plateau']:,}"
-            line += growth_str
+            line += f" | gr: {growth['current_rate']:.3f}e/x proj: {growth['projected_total']} plateau: ~{growth['time_to_plateau']:,}"
         print(line, flush=True)
