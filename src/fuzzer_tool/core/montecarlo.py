@@ -460,6 +460,90 @@ class MonteCarloScheduler:
         except (OSError, json.JSONDecodeError, KeyError):
             return False
 
+    def _stationary_numpy(self, operators: list[str], op_idx: dict[str, int], n: int, max_iter: int, tol: float) -> dict[str, float]:
+        """Numpy path for stationary_distribution."""
+        P = np.zeros((n, n), dtype=np.float64)
+        for prev_op, total in self.transition_total.items():
+            if total <= 0 or prev_op not in op_idx:
+                continue
+            i = op_idx[prev_op]
+            targets = self.transition_counts.get(prev_op, {})
+            for next_op, count in targets.items():
+                if next_op in op_idx:
+                    P[i, op_idx[next_op]] = count / total
+        row_sums = P.sum(axis=1)
+        P[row_sums < 1e-12, :] = 0.0
+        P[row_sums < 1e-12, np.arange(n)] = 1.0
+        pi = np.full(n, 1.0 / n)
+        for _ in range(max_iter):
+            new_pi = pi @ P
+            total = float(new_pi.sum())
+            if total > 0:
+                new_pi /= total
+            diff = float(np.abs(pi - new_pi).sum())
+            pi = new_pi
+            if diff < tol:
+                break
+        return {op: float(pi[op_idx[op]]) for op in operators}
+
+    @staticmethod
+    def _power_iteration_py(v: list[float], p_matrix: list[list[float]], n: int, max_iter: int, tol: float) -> list[float]:
+        """Pure-Python power iteration: v_{k+1} = P^T @ v_k with convergence check."""
+        for _ in range(max_iter):
+            new_v = [0.0] * n
+            for j in range(n):
+                for i in range(n):
+                    new_v[j] += p_matrix[i][j] * v[i]
+            norm = math.sqrt(sum(x * x for x in new_v))
+            if norm < 1e-12:
+                break
+            new_v = [x / norm for x in new_v]
+            diff = math.sqrt(sum((a - b) ** 2 for a, b in zip(v, new_v, strict=False)))
+            v = new_v
+            if diff < tol:
+                break
+        return v
+
+    @staticmethod
+    def _power_iteration_py_transpose(v: list[float], p_matrix: list[list[float]], n: int, max_iter: int, tol: float) -> list[float]:
+        """Pure-Python power iteration: v_{k+1} = v_k @ P with convergence check."""
+        for _ in range(max_iter):
+            new_v = [0.0] * n
+            for j in range(n):
+                for i in range(n):
+                    new_v[j] += v[i] * p_matrix[i][j]
+            total = sum(new_v)
+            if total > 0:
+                new_v = [x / total for x in new_v]
+            diff = sum(abs(a - b) for a, b in zip(v, new_v, strict=False))
+            v = new_v
+            if diff < tol:
+                break
+        return v
+
+    @staticmethod
+    def _build_transition_matrix_py(transition_total, transition_counts, op_idx, n):
+        """Build row-stochastic transition matrix (pure-Python)."""
+        p_matrix: list[list[float]] = [[0.0] * n for _ in range(n)]
+        for prev_op, total in transition_total.items():
+            if total <= 0 or prev_op not in op_idx:
+                continue
+            i = op_idx[prev_op]
+            targets = transition_counts.get(prev_op, {})
+            for next_op, count in targets.items():
+                if next_op in op_idx:
+                    p_matrix[i][op_idx[next_op]] = count / total
+        for i in range(n):
+            if sum(p_matrix[i]) < 1e-12:
+                p_matrix[i][i] = 1.0
+        return p_matrix
+
+    def _stationary_py(self, operators: list[str], op_idx: dict[str, int], n: int, max_iter: int, tol: float) -> dict[str, float]:
+        """Pure-Python fallback for stationary_distribution."""
+        p_matrix = self._build_transition_matrix_py(self.transition_total, self.transition_counts, op_idx, n)
+        pi = self._power_iteration_py_transpose([1.0 / n] * n, p_matrix, n, max_iter, tol)
+        return {op: pi[op_idx[op]] for op in operators}
+
     def stationary_distribution(self, max_iter: int = 200, tol: float = 1e-8) -> dict[str, float]:
         """Compute the stationary distribution π of the transition Markov chain.
 
@@ -489,59 +573,71 @@ class MonteCarloScheduler:
 
         op_idx = {op: i for i, op in enumerate(operators)}
 
-        # Build row-stochastic matrix P
         if _HAS_NUMPY:
-            P = np.zeros((n, n), dtype=np.float64)
-            for prev_op, total in self.transition_total.items():
-                if total <= 0 or prev_op not in op_idx:
-                    continue
-                i = op_idx[prev_op]
-                targets = self.transition_counts.get(prev_op, {})
-                for next_op, count in targets.items():
-                    if next_op in op_idx:
-                        P[i, op_idx[next_op]] = count / total
-            row_sums = P.sum(axis=1)
-            P[row_sums < 1e-12, :] = 0.0
-            P[row_sums < 1e-12, np.arange(n)] = 1.0
-            pi = np.full(n, 1.0 / n)
-            for _ in range(max_iter):
-                new_pi = pi @ P
-                total = float(new_pi.sum())
-                if total > 0:
-                    new_pi /= total
-                diff = float(np.abs(pi - new_pi).sum())
-                pi = new_pi
-                if diff < tol:
-                    break
-            return {op: float(pi[op_idx[op]]) for op in operators}
-        else:
-            # Pure-Python fallback
-            p_matrix: list[list[float]] = [[0.0] * n for _ in range(n)]
-            for prev_op, total in self.transition_total.items():
-                if total <= 0 or prev_op not in op_idx:
-                    continue
-                i = op_idx[prev_op]
-                targets = self.transition_counts.get(prev_op, {})
-                for next_op, count in targets.items():
-                    if next_op in op_idx:
-                        p_matrix[i][op_idx[next_op]] = count / total
-            for i in range(n):
-                if sum(p_matrix[i]) < 1e-12:
-                    p_matrix[i][i] = 1.0
-            pi = [1.0 / n] * n
-            for _ in range(max_iter):
-                new_pi = [0.0] * n
-                for j in range(n):
-                    for i in range(n):
-                        new_pi[j] += pi[i] * p_matrix[i][j]
-                total = sum(new_pi)
-                if total > 0:
-                    new_pi = [x / total for x in new_pi]
-                diff = sum(abs(a - b) for a, b in zip(pi, new_pi, strict=False))
-                pi = new_pi
-                if diff < tol:
-                    break
-            return {op: pi[op_idx[op]] for op in operators}
+            return self._stationary_numpy(operators, op_idx, n, max_iter, tol)
+        return self._stationary_py(operators, op_idx, n, max_iter, tol)
+
+    def _spectral_gap_numpy(self, operators: list[str], op_idx: dict[str, int], n: int, max_iter: int, tol: float) -> float:
+        """Numpy path for spectral_gap."""
+        P = np.zeros((n, n), dtype=np.float64)
+        for prev_op, total in self.transition_total.items():
+            if total <= 0 or prev_op not in op_idx:
+                continue
+            i = op_idx[prev_op]
+            targets = self.transition_counts.get(prev_op, {})
+            for next_op, count in targets.items():
+                if next_op in op_idx:
+                    P[i, op_idx[next_op]] = count / total
+        row_sums = P.sum(axis=1)
+        P[row_sums < 1e-12, :] = 0.0
+        P[row_sums < 1e-12, np.arange(n)] = 1.0
+
+        # Power iteration for dominant eigenvector (left eigenvector = stationary dist)
+        v = np.full(n, 1.0 / math.sqrt(n))
+        for _ in range(max_iter):
+            new_v = P.T @ v
+            norm = np.linalg.norm(new_v)
+            if norm < 1e-12:
+                break
+            new_v /= norm
+            diff = np.linalg.norm(v - new_v)
+            v = new_v
+            if diff < tol:
+                break
+
+        # Deflate: P_deflated = P - v·v^T  (outer product)
+        deflated = P - np.outer(v, v)
+
+        # Power iteration on deflated matrix for λ₂
+        w = np.random.randn(n)
+        w /= np.linalg.norm(w)
+        eigenvalue2 = 0.0
+        for _ in range(max_iter):
+            new_w = deflated.T @ w
+            eigenvalue2 = abs(float(w @ new_w))
+            norm = np.linalg.norm(new_w)
+            if norm < 1e-12:
+                break
+            new_w /= norm
+            diff = np.linalg.norm(w - new_w)
+            w = new_w
+            if diff < tol:
+                break
+
+        return max(0.0, min(1.0, 1.0 - eigenvalue2))
+
+    def _spectral_gap_py(self, operators: list[str], op_idx: dict[str, int], n: int, max_iter: int, tol: float) -> float:
+        """Pure-Python fallback for spectral_gap."""
+        p_matrix = self._build_transition_matrix_py(self.transition_total, self.transition_counts, op_idx, n)
+        v = self._power_iteration_py([1.0 / n] * n, p_matrix, n, max_iter, tol)
+
+        # Deflate: P_deflated = P - v * v^T
+        deflated: list[list[float]] = [
+            [p_matrix[i][j] - v[i] * v[j] for j in range(n)] for i in range(n)
+        ]
+        w = self._power_iteration_py([random.random() for _ in range(n)], deflated, n, max_iter, tol)
+        eigenvalue2 = abs(sum(a * b for a, b in zip(w, [sum(deflated[i][j] * w[i] for i in range(n)) for j in range(n)], strict=False)))
+        return max(0.0, min(1.0, 1.0 - eigenvalue2))
 
     def spectral_gap(self, max_iter: int = 200, tol: float = 1e-8) -> float:
         """Compute the spectral gap of the transition Markov chain.
@@ -570,105 +666,8 @@ class MonteCarloScheduler:
         op_idx = {op: i for i, op in enumerate(operators)}
 
         if _HAS_NUMPY:
-            P = np.zeros((n, n), dtype=np.float64)
-            for prev_op, total in self.transition_total.items():
-                if total <= 0 or prev_op not in op_idx:
-                    continue
-                i = op_idx[prev_op]
-                targets = self.transition_counts.get(prev_op, {})
-                for next_op, count in targets.items():
-                    if next_op in op_idx:
-                        P[i, op_idx[next_op]] = count / total
-            row_sums = P.sum(axis=1)
-            P[row_sums < 1e-12, :] = 0.0
-            P[row_sums < 1e-12, np.arange(n)] = 1.0
-
-            # Power iteration for dominant eigenvector (left eigenvector = stationary dist)
-            v = np.full(n, 1.0 / math.sqrt(n))
-            for _ in range(max_iter):
-                new_v = P.T @ v
-                norm = np.linalg.norm(new_v)
-                if norm < 1e-12:
-                    break
-                new_v /= norm
-                diff = np.linalg.norm(v - new_v)
-                v = new_v
-                if diff < tol:
-                    break
-
-            # Deflate: P_deflated = P - v·v^T  (outer product)
-            deflated = P - np.outer(v, v)
-
-            # Power iteration on deflated matrix for λ₂
-            w = np.random.randn(n)
-            w /= np.linalg.norm(w)
-            eigenvalue2 = 0.0
-            for _ in range(max_iter):
-                new_w = deflated.T @ w
-                eigenvalue2 = abs(float(w @ new_w))
-                norm = np.linalg.norm(new_w)
-                if norm < 1e-12:
-                    break
-                new_w /= norm
-                diff = np.linalg.norm(w - new_w)
-                w = new_w
-                if diff < tol:
-                    break
-        else:
-            # Pure-Python fallback
-            p_matrix: list[list[float]] = [[0.0] * n for _ in range(n)]
-            for prev_op, total in self.transition_total.items():
-                if total <= 0 or prev_op not in op_idx:
-                    continue
-                i = op_idx[prev_op]
-                targets = self.transition_counts.get(prev_op, {})
-                for next_op, count in targets.items():
-                    if next_op in op_idx:
-                        p_matrix[i][op_idx[next_op]] = count / total
-            for i in range(n):
-                if sum(p_matrix[i]) < 1e-12:
-                    p_matrix[i][i] = 1.0
-            # Power iteration for dominant eigenvector
-            v = [1.0 / n] * n
-            for _ in range(max_iter):
-                new_v = [0.0] * n
-                for j in range(n):
-                    for i in range(n):
-                        new_v[j] += p_matrix[i][j] * v[i]
-                norm = math.sqrt(sum(x * x for x in new_v))
-                if norm < 1e-12:
-                    break
-                new_v = [x / norm for x in new_v]
-                diff = math.sqrt(sum((a - b) ** 2 for a, b in zip(v, new_v, strict=False)))
-                v = new_v
-                if diff < tol:
-                    break
-            # Deflate: P_deflated = P - v * v^T
-            deflated: list[list[float]] = [
-                [p_matrix[i][j] - v[i] * v[j] for j in range(n)] for i in range(n)
-            ]
-            # Power iteration on deflated matrix for λ₂
-            w = [random.random() for _ in range(n)]
-            norm = math.sqrt(sum(x * x for x in w))
-            w = [x / norm for x in w]
-            eigenvalue2 = 0.0
-            for _ in range(max_iter):
-                new_w = [0.0] * n
-                for j in range(n):
-                    for i in range(n):
-                        new_w[j] += deflated[i][j] * w[i]
-                dot = sum(a * b for a, b in zip(w, new_w, strict=False))
-                eigenvalue2 = abs(dot)
-                norm = math.sqrt(sum(x * x for x in new_w))
-                if norm < 1e-12:
-                    break
-                new_w = [x / norm for x in new_w]
-                diff = math.sqrt(sum((a - b) ** 2 for a, b in zip(w, new_w, strict=False)))
-                w = new_w
-                if diff < tol:
-                    break
-
-        return max(0.0, min(1.0, 1.0 - eigenvalue2))
+            return self._spectral_gap_numpy(operators, op_idx, n, max_iter, tol)
+        return self._spectral_gap_py(operators, op_idx, n, max_iter, tol)
 
     def should_explore(self, gap_threshold: float = 0.1) -> bool:
         """Check if the fuzzer is stuck in an operator cycle.
@@ -793,6 +792,54 @@ class MonteCarloScheduler:
                     l[i][j] = (a[i][j] - s) / l[j][j] if l[j][j] > 0 else 0.0
         return l
 
+    def _matrix_ucb_quadratic_form(self, mu: list[float] | np.ndarray, inv_cov, n: int) -> float:
+        """Compute quadratic form mu^T @ inv_cov @ mu."""
+        if _HAS_NUMPY:
+            return float(mu @ inv_cov @ mu)
+        base = 0.0
+        for i in range(n):
+            for j in range(n):
+                base += mu[i] * inv_cov[i][j] * mu[j]
+        return base
+
+    def _matrix_ucb_scores(self, ops: list[str], mu, inv_cov, base: float, beta: float, t: int, n: int) -> dict[str, float]:
+        """Compute UCB scores with covariance penalty."""
+        scores: dict[str, float] = {}
+        if _HAS_NUMPY:
+            inv_mu = inv_cov @ mu
+            for i, op in enumerate(ops):
+                penalty = base - 2.0 * float(inv_mu[i])
+                exploration = beta * math.sqrt(max(0.0, math.log(t) + penalty))
+                scores[op] = float(mu[i]) + exploration
+        else:
+            for i, op in enumerate(ops):
+                penalty = 0.0
+                for j in range(n):
+                    penalty += inv_cov[i][j] * mu[j]
+                penalty = base - 2 * penalty
+                exploration = beta * math.sqrt(max(0.0, math.log(t) + penalty))
+                scores[op] = mu[i] + exploration
+        return scores
+
+    def _matrix_ucb_prepare(self, ops: list[str], segment_size: int) -> tuple[int, list | np.ndarray, list[list[float]]] | None:
+        """Prepare means vector and covariance matrix, or None if fallback needed."""
+        if len(ops) < 3:
+            return None
+        means = {}
+        for op in ops:
+            a = self.arm_alpha.get(op, 1.0)
+            b = self.arm_beta.get(op, 1.0)
+            means[op] = a / (a + b)
+        cov = self.operator_covariance(window=2000, segment_size=segment_size)
+        if not cov or not all(op in cov for op in ops):
+            return None
+        n = len(ops)
+        mu: list | np.ndarray = [means[op] for op in ops]
+        if _HAS_NUMPY:
+            mu = np.array(mu, dtype=np.float64)
+        cov_matrix = [[cov[ops[i]].get(ops[j], 0.0) for j in range(n)] for i in range(n)]
+        return (n, mu, cov_matrix)
+
     def matrix_ucb_select(self, ops: list[str], beta: float = 2.0, segment_size: int = 50) -> str:
         """Select operator via matrix-based Upper Confidence Bound.
 
@@ -809,68 +856,25 @@ class MonteCarloScheduler:
         Returns:
             Name of the selected operator.
         """
-        if len(ops) < 3:
+        prepared = self._matrix_ucb_prepare(ops, segment_size)
+        if prepared is None:
             return self._standard_ucb(ops, beta)
-
-        means = {}
-        for op in ops:
-            a = self.arm_alpha.get(op, 1.0)
-            b = self.arm_beta.get(op, 1.0)
-            means[op] = a / (a + b)
-
-        cov = self.operator_covariance(window=2000, segment_size=segment_size)
-        if not cov or not all(op in cov for op in ops):
-            return self._standard_ucb(ops, beta)
-
-        n = len(ops)
-        mu = (
-            np.array([means[ops[i]] for i in range(n)], dtype=np.float64)
-            if _HAS_NUMPY
-            else [means[ops[i]] for i in range(n)]
-        )
-
-        cov_matrix = [[cov[ops[i]].get(ops[j], 0.0) for j in range(n)] for i in range(n)]
+        n, mu, cov_matrix = prepared
 
         chol = self._chol(cov_matrix)
         if chol is None:
             return self._standard_ucb(ops, beta)
 
-        if _HAS_NUMPY:
-            inv_cov = self._solve_cholesky(chol, np.eye(n, dtype=np.float64))
-        else:
-            inv_cov = self._solve_cholesky(
-                chol, [[1.0 if i == j else 0.0 for j in range(n)] for i in range(n)]
-            )
+        identity = np.eye(n, dtype=np.float64) if _HAS_NUMPY else [[1.0 if i == j else 0.0 for j in range(n)] for i in range(n)]
+        inv_cov = self._solve_cholesky(chol, identity)
         if inv_cov is None:
             return self._standard_ucb(ops, beta)
 
-        if _HAS_NUMPY:
-            base = float(mu @ inv_cov @ mu)
-        else:
-            base = 0.0
-            for i in range(n):
-                for j in range(n):
-                    base += mu[i] * inv_cov[i][j] * mu[j]
-
+        base = self._matrix_ucb_quadratic_form(mu, inv_cov, n)
         t = sum(self.arm_alpha.values()) + sum(self.arm_beta.values()) - 2 * len(self.arm_alpha)
         t = max(t, 1)
 
-        scores = {}
-        if _HAS_NUMPY:
-            inv_mu = inv_cov @ mu
-            for i, op in enumerate(ops):
-                penalty = base - 2.0 * float(inv_mu[i])
-                exploration = beta * math.sqrt(max(0.0, math.log(t) + penalty))
-                scores[op] = float(mu[i]) + exploration
-        else:
-            for i, op in enumerate(ops):
-                penalty = 0.0
-                for j in range(n):
-                    penalty += inv_cov[i][j] * mu[j]
-                penalty = base - 2 * penalty
-                exploration = beta * math.sqrt(max(0.0, math.log(t) + penalty))
-                scores[op] = mu[i] + exploration
-
+        scores = self._matrix_ucb_scores(ops, mu, inv_cov, base, beta, t, n)
         return max(ops, key=lambda o: scores[o])
 
     def _standard_ucb(self, ops: list[str], beta: float = 2.0) -> str:
@@ -931,6 +935,61 @@ class MonteCarloScheduler:
                 x[i][col] = (y[i][col] - s) / chol[i][i] if chol[i][i] > 0 else 0.0
         return x
 
+    def _build_segment_rates(self, recent: list, segment_size: int, operators: list[str], op_idx: dict[str, int]) -> list[list[float]]:
+        """Build segment success-rate matrix from recent history."""
+        segments: list[list[float]] = []
+        n_ops = len(operators)
+        for start in range(0, len(recent) - segment_size + 1, segment_size):
+            chunk = recent[start : start + segment_size]
+            rates = [0.0] * n_ops
+            counts = [0] * n_ops
+            for op, success in chunk:
+                if op in op_idx:
+                    i = op_idx[op]
+                    counts[i] += 1
+                    rates[i] += 1.0 if success else 0.0
+            for i in range(n_ops):
+                if counts[i] > 0:
+                    rates[i] /= counts[i]
+            segments.append(rates)
+        return segments
+
+    def _operator_covariance_numpy(self, recent: list, segment_size: int, operators: list[str], op_idx: dict[str, int]) -> dict[str, dict[str, float]]:
+        """Numpy path for operator_covariance."""
+        n_ops = len(operators)
+        segments_list = self._build_segment_rates(recent, segment_size, operators, op_idx)
+        if len(segments_list) < 2:
+            return {}
+        seg_arr = np.array(segments_list, dtype=np.float64)
+        cov_arr = np.cov(seg_arr, rowvar=False)
+        cov_matrix: dict[str, dict[str, float]] = {op: {} for op in operators}
+        for i, op_i in enumerate(operators):
+            for j, op_j in enumerate(operators):
+                cov_matrix[op_i][op_j] = float(cov_arr[i, j])
+        return cov_matrix
+
+    def _operator_covariance_py(self, recent: list, segment_size: int, operators: list[str], op_idx: dict[str, int]) -> dict[str, dict[str, float]]:
+        """Pure-Python fallback for operator_covariance."""
+        n_ops = len(operators)
+        segments = self._build_segment_rates(recent, segment_size, operators, op_idx)
+        if len(segments) < 2:
+            return {}
+        n_seg = len(segments)
+        means = [sum(s[i] for s in segments) / n_seg for i in range(n_ops)]
+        cov_matrix = {op: {} for op in operators}
+        for i, op_i in enumerate(operators):
+            for j, op_j in enumerate(operators):
+                if i == j:
+                    var = sum((s[i] - means[i]) ** 2 for s in segments) / (n_seg - 1)
+                    cov_matrix[op_i][op_j] = var
+                elif i < j:
+                    cov_val = sum((s[i] - means[i]) * (s[j] - means[j]) for s in segments) / (
+                        n_seg - 1
+                    )
+                    cov_matrix[op_i][op_j] = cov_val
+                    cov_matrix[op_j][op_i] = cov_val
+        return cov_matrix
+
     def operator_covariance(
         self, window: int = 500, segment_size: int = 50
     ) -> dict[str, dict[str, float]]:
@@ -958,70 +1017,10 @@ class MonteCarloScheduler:
             return {}
 
         op_idx = {op: i for i, op in enumerate(operators)}
-        n_ops = len(operators)
 
-        # Build segment success-rate matrix
         if _HAS_NUMPY:
-            segments_list: list[list[float]] = []
-            for start in range(0, len(recent) - segment_size + 1, segment_size):
-                chunk = recent[start : start + segment_size]
-                rates = [0.0] * n_ops
-                counts = [0] * n_ops
-                for op, success in chunk:
-                    if op in op_idx:
-                        i = op_idx[op]
-                        counts[i] += 1
-                        rates[i] += 1.0 if success else 0.0
-                for i in range(n_ops):
-                    if counts[i] > 0:
-                        rates[i] /= counts[i]
-                segments_list.append(rates)
-            if len(segments_list) < 2:
-                return {}
-            seg_arr = np.array(segments_list, dtype=np.float64)
-            cov_arr = np.cov(seg_arr, rowvar=False)
-            cov_matrix: dict[str, dict[str, float]] = {op: {} for op in operators}
-            for i, op_i in enumerate(operators):
-                for j, op_j in enumerate(operators):
-                    cov_matrix[op_i][op_j] = float(cov_arr[i, j])
-            return cov_matrix
-        else:
-            segments: list[list[float]] = []
-            for start in range(0, len(recent) - segment_size + 1, segment_size):
-                chunk = recent[start : start + segment_size]
-                rates = [0.0] * n_ops
-                counts = [0] * n_ops
-                for op, success in chunk:
-                    if op in op_idx:
-                        i = op_idx[op]
-                        counts[i] += 1
-                        rates[i] += 1.0 if success else 0.0
-                for i in range(n_ops):
-                    if counts[i] > 0:
-                        rates[i] /= counts[i]
-                segments.append(rates)
-
-            if len(segments) < 2:
-                return {}
-
-            n_seg = len(segments)
-            means = [sum(s[i] for s in segments) / n_seg for i in range(n_ops)]
-
-            cov_matrix = {op: {} for op in operators}
-
-            for i, op_i in enumerate(operators):
-                for j, op_j in enumerate(operators):
-                    if i == j:
-                        var = sum((s[i] - means[i]) ** 2 for s in segments) / (n_seg - 1)
-                        cov_matrix[op_i][op_j] = var
-                    elif i < j:
-                        cov_val = sum((s[i] - means[i]) * (s[j] - means[j]) for s in segments) / (
-                            n_seg - 1
-                        )
-                        cov_matrix[op_i][op_j] = cov_val
-                        cov_matrix[op_j][op_i] = cov_val
-
-            return cov_matrix
+            return self._operator_covariance_numpy(recent, segment_size, operators, op_idx)
+        return self._operator_covariance_py(recent, segment_size, operators, op_idx)
 
 
 class _MOptParticle:
@@ -1420,6 +1419,15 @@ class ShapleyAttribution:
             return {}
         return {op: count / total for op, count in op_counts.items()}
 
+    def _shapley_marginal(self, op: str, prefix_edges: set[int]) -> float:
+        """Compute marginal contribution of one operator given already-covered edges."""
+        marginal = 0.0
+        for edge in self._operator_edges.get(op, set()):
+            if edge not in prefix_edges:
+                attr = self._edge_attribution(edge)
+                marginal += attr.get(op, 0.0)
+        return marginal
+
     def shapley_values(self, operators: list[str] | None = None) -> dict[str, float]:
         """Compute Shapley values using per-edge frequency-weighted attribution.
 
@@ -1448,24 +1456,14 @@ class ShapleyAttribution:
 
             prefix_edges: set[int] = set()
             for op in perm:
-                # Marginal contribution: for each edge this op has credit for
-                # that isn't already covered by the prefix, add its fractional credit
-                marginal = 0.0
-                for edge in self._operator_edges.get(op, set()):
-                    if edge not in prefix_edges:
-                        attr = self._edge_attribution(edge)
-                        marginal += attr.get(op, 0.0)
+                marginal = self._shapley_marginal(op, prefix_edges)
                 shapley[op] += marginal
                 prefix_edges.update(self._operator_edges.get(op, set()))
 
-        # Normalize to [0, 1]
         total = sum(shapley.values())
         if total > 0:
-            shapley = {op: v / total for op, v in shapley.items()}
-        else:
-            shapley = {op: 1.0 / n_ops for op in operators}
-
-        return shapley
+            return {op: v / total for op, v in shapley.items()}
+        return {op: 1.0 / n_ops for op in operators}
 
     def operator_synergy(self, op_a: str, op_b: str) -> float:
         """Compute synergy between two operators.
@@ -1563,6 +1561,75 @@ class ShapleyAttribution:
                     pairs.append((op_a, op_b, sim))
         return sorted(pairs, key=lambda x: x[2], reverse=True)
 
+    def _spectral_embedding_numpy(self, operators: list[str], kernel: dict, k: int) -> dict[str, list[float]]:
+        """Numpy path for spectral_embedding."""
+        n = len(operators)
+        K = np.zeros((n, n), dtype=np.float64)
+        for i, op_i in enumerate(operators):
+            for j, op_j in enumerate(operators):
+                K[i, j] = kernel[op_i].get(op_j, 0.0)
+        degrees = K.sum(axis=1)
+        d_inv_sqrt = np.zeros((n, n), dtype=np.float64)
+        np.fill_diagonal(d_inv_sqrt, 1.0 / np.sqrt(np.maximum(degrees, 1e-12)))
+        L = np.eye(n, dtype=np.float64) - d_inv_sqrt @ K @ d_inv_sqrt
+        eigvals, eigvecs = np.linalg.eigh(L)
+        embedding: dict[str, list[float]] = {}
+        for idx, op in enumerate(operators):
+            embedding[op] = [float(eigvecs[idx, d]) for d in range(k)]
+        return embedding
+
+    @staticmethod
+    def _build_laplacian_py(kernel: dict, operators: list[str], n: int) -> list[list[float]]:
+        """Build normalized Laplacian matrix (pure-Python)."""
+        degrees = [0.0] * n
+        for i in range(n):
+            for j in range(n):
+                degrees[i] += kernel[operators[i]].get(operators[j], 0.0)
+        laplacian: list[list[float]] = [[0.0] * n for _ in range(n)]
+        for i in range(n):
+            for j in range(n):
+                w_ij = kernel[operators[i]].get(operators[j], 0.0)
+                d_i = math.sqrt(degrees[i]) if degrees[i] > 0 else 1.0
+                d_j = math.sqrt(degrees[j]) if degrees[j] > 0 else 1.0
+                laplacian[i][j] = -w_ij / (d_i * d_j)
+            laplacian[i][i] = 1.0
+        return laplacian
+
+    @staticmethod
+    def _inverse_iteration_py(laplacian: list[list[float]], n: int) -> list[float]:
+        """Inverse power iteration for smallest eigenvector (pure-Python)."""
+        w = [random.gauss(0, 1) for _ in range(n)]
+        norm = math.sqrt(sum(x * x for x in w))
+        w = [x / norm for x in w]
+        for _ in range(100):
+            lw = [0.0] * n
+            for i in range(n):
+                for j in range(n):
+                    lw[i] += laplacian[i][j] * w[j]
+            new_w = [w[i] - 0.5 * lw[i] for i in range(n)]
+            norm = math.sqrt(sum(x * x for x in new_w))
+            if norm < 1e-12:
+                break
+            new_w = [x / norm for x in new_w]
+            diff = math.sqrt(sum((a - b) ** 2 for a, b in zip(w, new_w, strict=False)))
+            w = new_w
+            if diff < 1e-8:
+                break
+        return w
+
+    def _spectral_embedding_py(self, operators: list[str], kernel: dict, k: int) -> dict[str, list[float]]:
+        """Pure-Python fallback for spectral_embedding."""
+        n = len(operators)
+        laplacian = self._build_laplacian_py(kernel, operators, n)
+        eigenvectors: list[list[float]] = []
+        for _ in range(k):
+            w = self._inverse_iteration_py(laplacian, n)
+            eigenvectors.append(w)
+            for i in range(n):
+                for j in range(n):
+                    laplacian[i][j] -= w[i] * w[j]
+        return {op: [eigenvectors[d][idx] for d in range(k)] for idx, op in enumerate(operators)}
+
     def spectral_embedding(
         self, operators: list[str] | None = None, k: int = 2
     ) -> dict[str, list[float]]:
@@ -1586,66 +1653,8 @@ class ShapleyAttribution:
         kernel = self.operator_kernel(operators)
 
         if _HAS_NUMPY:
-            # Build kernel matrix as ndarray
-            K = np.zeros((n, n), dtype=np.float64)
-            for i, op_i in enumerate(operators):
-                for j, op_j in enumerate(operators):
-                    K[i, j] = kernel[op_i].get(op_j, 0.0)
-            degrees = K.sum(axis=1)
-            # Normalized Laplacian: L = I - D^{-1/2} @ K @ D^{-1/2}
-            d_inv_sqrt = np.zeros((n, n), dtype=np.float64)
-            np.fill_diagonal(d_inv_sqrt, 1.0 / np.sqrt(np.maximum(degrees, 1e-12)))
-            L = np.eye(n, dtype=np.float64) - d_inv_sqrt @ K @ d_inv_sqrt
-            # Eigen decomposition: smallest k eigenvalues
-            eigvals, eigvecs = np.linalg.eigh(L)
-            # Take k smallest eigenvectors (eigh returns sorted ascending)
-            embedding: dict[str, list[float]] = {}
-            for idx, op in enumerate(operators):
-                embedding[op] = [float(eigvecs[idx, d]) for d in range(k)]
-            return embedding
-        else:
-            # Pure-Python fallback
-            degrees = [0.0] * n
-            for i in range(n):
-                for j in range(n):
-                    degrees[i] += kernel[operators[i]].get(operators[j], 0.0)
-            # Normalized Laplacian: L_norm = I - D^{-1/2} W D^{-1/2}
-            laplacian: list[list[float]] = [[0.0] * n for _ in range(n)]
-            for i in range(n):
-                for j in range(n):
-                    w_ij = kernel[operators[i]].get(operators[j], 0.0)
-                    d_i = math.sqrt(degrees[i]) if degrees[i] > 0 else 1.0
-                    d_j = math.sqrt(degrees[j]) if degrees[j] > 0 else 1.0
-                    laplacian[i][j] = -w_ij / (d_i * d_j)
-                laplacian[i][i] = 1.0
-            # Inverse iteration with deflation for k smallest eigenvectors
-            eigenvectors: list[list[float]] = []
-            for _ in range(k):
-                w = [random.gauss(0, 1) for _ in range(n)]
-                norm = math.sqrt(sum(x * x for x in w))
-                w = [x / norm for x in w]
-                for _ in range(100):
-                    lw = [0.0] * n
-                    for i in range(n):
-                        for j in range(n):
-                            lw[i] += laplacian[i][j] * w[j]
-                    new_w = [w[i] - 0.5 * lw[i] for i in range(n)]
-                    norm = math.sqrt(sum(x * x for x in new_w))
-                    if norm < 1e-12:
-                        break
-                    new_w = [x / norm for x in new_w]
-                    diff = math.sqrt(sum((a - b) ** 2 for a, b in zip(w, new_w, strict=False)))
-                    w = new_w
-                    if diff < 1e-8:
-                        break
-                eigenvectors.append(w)
-                for i in range(n):
-                    for j in range(n):
-                        laplacian[i][j] -= w[i] * w[j]
-            embedding = {}
-            for idx, op in enumerate(operators):
-                embedding[op] = [eigenvectors[d][idx] for d in range(k)]
-            return embedding
+            return self._spectral_embedding_numpy(operators, kernel, k)
+        return self._spectral_embedding_py(operators, kernel, k)
 
     def ranking(self, operators: list[str] | None = None) -> list[tuple[str, float]]:
         """Return operators ranked by Shapley value.
@@ -1774,6 +1783,32 @@ class ReplicatorScheduler:
         if self._execs_in_window >= self.window_size:
             self._replicator_update()
 
+    def _replicator_compute_fitness(self) -> tuple[list[float], list[bool]]:
+        """Compute fitness vector and data-available flags."""
+        fitness = []
+        has_data = []
+        for op in self.operators:
+            count = self._fitness_count.get(op, 0)
+            if count > 0:
+                fitness.append(self._fitness_sum[op] / count)
+                has_data.append(True)
+            else:
+                fitness.append(0.0)
+                has_data.append(False)
+        return fitness, has_data
+
+    def _replicator_normalize_with_floor(self, new_pop: list[float], n: int) -> list[float]:
+        """Normalize to simplex, enforce mutation floor iteratively."""
+        total = sum(new_pop)
+        new_pop = [x / total for x in new_pop] if total > 0 else [1.0 / n] * n
+        for _ in range(3):
+            for i in range(n):
+                new_pop[i] = max(new_pop[i], self.mutation_rate)
+            total = sum(new_pop)
+            if total > 0:
+                new_pop = [x / total for x in new_pop]
+        return new_pop
+
     def _replicator_update(self):
         """Run one replicator dynamics step.
 
@@ -1793,19 +1828,8 @@ class ReplicatorScheduler:
         if n == 0:
             return
 
-        # Compute fitness for each operator, track which have data
-        fitness = []
-        has_data = []
-        for op in self.operators:
-            count = self._fitness_count.get(op, 0)
-            if count > 0:
-                fitness.append(self._fitness_sum[op] / count)
-                has_data.append(True)
-            else:
-                fitness.append(0.0)  # placeholder, will be overridden
-                has_data.append(False)
+        fitness, has_data = self._replicator_compute_fitness()
 
-        # Average fitness: only from operators with actual trials
         if self.population and any(has_data):
             phi = sum(
                 x * f for x, f, hd in zip(self.population, fitness, has_data, strict=False) if hd
@@ -1813,32 +1837,13 @@ class ReplicatorScheduler:
         else:
             phi = 0.0
 
-        # Replicator step: x_i' = x_i * (1 + eta * (f_i - phi))
-        # Zero-count operators get neutral growth (f_i = phi)
         new_pop = []
         for i in range(n):
-            if has_data[i]:
-                growth = 1.0 + self.eta * (fitness[i] - phi)
-            else:
-                growth = 1.0  # neutral: no data, no penalty
+            growth = 1.0 + self.eta * (fitness[i] - phi) if has_data[i] else 1.0
             new_pop.append(max(0.0, self.population[i] * growth))
 
-        # Normalize to simplex
-        total = sum(new_pop)
-        new_pop = [x / total for x in new_pop] if total > 0 else [1.0 / n] * n
-
-        # Enforce mutation floor (exploration guarantee)
-        # Apply floor, then renormalize, then re-apply floor iteratively
-        # to handle the case where normalization pushes values below floor
-        for _ in range(3):
-            for i in range(n):
-                new_pop[i] = max(new_pop[i], self.mutation_rate)
-            total = sum(new_pop)
-            if total > 0:
-                new_pop = [x / total for x in new_pop]
-
-        self.population = new_pop
-        self._history.append(list(new_pop))
+        self.population = self._replicator_normalize_with_floor(new_pop, n)
+        self._history.append(list(self.population))
 
         # Reset window counters
         self._execs_in_window = 0
