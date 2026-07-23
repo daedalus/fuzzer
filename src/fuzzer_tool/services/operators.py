@@ -148,86 +148,90 @@ class OperatorEngine:
     def _op_redqueen_xform(self, buf, byte_idx, _data):
         """RedQueen transforms: solve comparisons via encoding transforms.
 
-        When cmplog data is available, applies XOR, arithmetic, boundary,
-        toupper/tolower, hex, and base64 transforms to crack comparisons.
+        Uses the encoding engine from ``rq_encodings.py`` (ported from Redqueen
+        NDSS 2019) to find and replace comparison operands using a variety of
+        encoding strategies: plain substitution, zero/sign extension, ASCII
+        number representation, C-string termination, split 64-bit words, etc.
+
+        Falls back to single-byte transforms (XOR, arithmetic, boundary) when
+        the encoding engine yields no applicable mutations for the current pair.
         """
+        import random as _rand
+
         f = self.f
-        if not hasattr(f, "_cmplog") or not f._cmplog:
+        if not hasattr(f, "_cmplog") or not f._cmplog or not f._cmplog.pairs:
             return
         if not buf or len(buf) < 2:
             return
-        matches = (
-            getattr(f._last_cmplog_matches, "matches", [])
-            if hasattr(f, "_last_cmplog_matches")
-            else []
-        )
-        if not matches:
-            return
-        offset, va, vb = random.choice(matches)
-        if offset >= len(buf):
-            return
-        transform = random.choice(
-            [
-                "xor",
-                "arithmetic",
-                "boundary",
-                "atoi",
-                "hex",
-                "toupper",
-                "tolower",
-                "hex_pair",
-                "b64_nibble",
-                "double_to_float",
-            ]
-        )
-        if transform == "xor":
-            const = random.randint(1, 255)
-            buf[offset] = (vb ^ const) & 0xFF
-        elif transform == "arithmetic":
-            delta = random.randint(-128, 127)
-            buf[offset] = (vb - delta) & 0xFF
-        elif transform == "boundary":
-            buf[offset] = (vb - 1) & 0xFF
-        elif transform == "atoi":
-            # ASCII digit encoding: write '0'-'9' for the comparison value
-            buf[offset] = ord("0") + (vb % 10)
-        elif transform == "hex":
-            # Hex char encoding
-            hex_chars = b"0123456789abcdef"
-            buf[offset] = hex_chars[vb % 16]
-        elif transform == "toupper":
-            # toupper transform: if target does toupper(input), write uppercase
-            if ord("a") <= buf[offset] <= ord("z"):
-                buf[offset] = buf[offset] - 0x20
-            else:
-                buf[offset] = ord("A") + (vb % 26)
-        elif transform == "tolower":
-            # tolower transform: if target does tolower(input), write lowercase
-            if ord("A") <= buf[offset] <= ord("Z"):
-                buf[offset] = buf[offset] + 0x20
-            else:
-                buf[offset] = ord("a") + (vb % 26)
-        elif transform == "hex_pair":
-            # Two-byte hex encoding: write hex chars for a 2-digit value
-            hex_chars = b"0123456789abcdef"
-            if offset + 1 < len(buf):
-                buf[offset] = hex_chars[(vb >> 4) & 0xF]
-                buf[offset + 1] = hex_chars[vb & 0xF]
-        elif transform == "b64_nibble":
-            # Base64 nibble: write base64 char for the comparison value
-            b64_chars = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-            buf[offset] = b64_chars[vb % 64]
-        elif transform == "double_to_float":
-            # Double-to-float: if target compares double vs float, try the float bits
-            import struct
+        from fuzzer_tool.core.rq_encodings import generate_mutations  # noqa: PLC0415
 
-            try:
-                fval = struct.unpack("<f", struct.pack("<d", float(vb)))[0]
-                ival = struct.unpack("<I", struct.pack("<f", fval))[0]
-                if offset + 4 <= len(buf):
-                    struct.pack_into("<I", buf, offset, ival)
-            except (struct.error, OverflowError):
-                buf[offset] = vb & 0xFF
+        # Sample up to 3 pairs from the cmplog pool, prefering shorter pairs
+        # (they're more likely to be found in the buffer).
+        pairs = [p for p in f._cmplog.pairs if 2 <= len(p[0]) <= len(buf)]
+        if not pairs:
+            return
+        pairs.sort(key=lambda p: len(p[0]))
+        sample = _rand.sample(pairs, min(3, len(pairs)))
+
+        for op_a, op_b in sample:
+            cmp_size = 512 if len(op_a) > 8 or len(op_b) > 8 else max(len(op_a), len(op_b)) * 8
+            cmp_type = "STR" if len(op_a) > 8 else "CMP"
+
+            mutations = generate_mutations(
+                op_a, op_b, cmp_size, cmp_type, bytes(buf), hammer=True
+            )
+            if mutations:
+                offsets, replacements, enc = _rand.choice(mutations)
+                for i, off in enumerate(offsets):
+                    if i < len(replacements):
+                        chunk = replacements[i]
+                        end = off + len(chunk)
+                        if end <= len(buf):
+                            buf[off:end] = chunk
+                return
+
+        # Fallback: single-byte transforms on a random pair
+        if not pairs:
+            return
+        op_a, _ = _rand.choice(pairs)
+        if len(op_a) <= len(buf):
+            pos = 0
+            candidates = []
+            while pos <= len(buf) - len(op_a):
+                idx = bytes(buf).find(op_a, pos)
+                if idx == -1:
+                    break
+                candidates.append(idx)
+                pos = idx + 1
+                if len(candidates) >= 5:
+                    break
+            if candidates:
+                offset = _rand.choice(candidates)
+                vb = int.from_bytes(op_a, "little") & 0xFF
+                transform = _rand.choice(
+                    ["xor", "arithmetic", "boundary", "hex", "toupper", "tolower"]
+                )
+                if transform == "xor":
+                    const = _rand.randint(1, 255)
+                    buf[offset] = (vb ^ const) & 0xFF
+                elif transform == "arithmetic":
+                    delta = _rand.randint(-128, 127)
+                    buf[offset] = (vb - delta) & 0xFF
+                elif transform == "boundary":
+                    buf[offset] = (vb - 1) & 0xFF
+                elif transform == "hex":
+                    hex_chars = b"0123456789abcdef"
+                    buf[offset] = hex_chars[vb % 16]
+                elif transform == "toupper":
+                    if ord("a") <= buf[offset] <= ord("z"):
+                        buf[offset] = buf[offset] - 0x20
+                    else:
+                        buf[offset] = ord("A") + (vb % 26)
+                elif transform == "tolower":
+                    if ord("A") <= buf[offset] <= ord("Z"):
+                        buf[offset] = buf[offset] + 0x20
+                    else:
+                        buf[offset] = ord("a") + (vb % 26)
 
     def _op_colorization(self, buf, _byte_idx, _data):
         """Taint-aware byte randomization preserving character classes.
@@ -936,6 +940,8 @@ class OperatorEngine:
         if f.grammar:
             ops.append("grammar_mutate")
             ops.append("grammar_tree_mutate")
+        if getattr(f, "_cmplog", None) and f._cmplog.pairs:
+            ops.append("redqueen_xform")
         ops.extend(FORMAT_MUTATIONS)
         parent_meta = f.seed_meta.get(data)
         if parent_meta and (
