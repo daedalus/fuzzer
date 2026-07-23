@@ -8,11 +8,14 @@ INTERESTING_8 = [
     -1,
     0,
     1,
+    2,     # Power-of-2 ± 1 (from Radamsa)
+    3,     # Power-of-2 ± 1 (from Radamsa)
     16,  # One-off with common buffer size
     32,  # One-off with common buffer size
     64,  # One-off with common buffer size
     100,  # One-off with common buffer size
     127,  # Overflow signed 8-bit when incremented
+    129,  # Power-of-2 ± 1 (from Radamsa)
 ]
 
 INTERESTING_16 = [
@@ -21,11 +24,13 @@ INTERESTING_16 = [
     128,  # Overflow signed 8-bit
     255,  # Overflow unsigned 8-bit when incremented
     256,  # Overflow unsigned 8-bit
+    257,  # Power-of-2 ± 1 (from Radamsa)
     512,  # One-off with common buffer size
     1000,  # One-off with common buffer size
     1024,  # One-off with common buffer size
     4096,  # One-off with common buffer size
     32767,  # Overflow signed 16-bit when incremented
+    32769,  # Power-of-2 ± 1 (from Radamsa)
 ]
 
 INTERESTING_32 = [
@@ -33,11 +38,14 @@ INTERESTING_32 = [
     -100663046,  # Large negative number (endian-agnostic)
     -32769,  # Overflow signed 16-bit
     32768,  # Overflow signed 16-bit
+    32769,  # Power-of-2 ± 1 (from Radamsa)
     65535,  # Overflow unsigned 16-bit when incremented
     65536,  # Overflow unsigned 16-bit
+    65537,  # Power-of-2 ± 1 (from Radamsa)
     100663045,  # Large positive number (endian-agnostic)
     2139095040,  # Float infinity
     2147483647,  # Overflow signed 32-bit when incremented
+    2147483649,  # Power-of-2 ± 1 (from Radamsa)
 ]
 
 INTERESTING_UNSIGNED_8 = [
@@ -172,6 +180,10 @@ MUTATIONS = [
     "fuse_this",
     "fuse_next",
     "fuse_old",
+    "tree_mutate",
+    "utf8_widen",
+    "utf8_insert",
+    "line_mutate",
     "skipdet_probe",
     "auto_extras",
 ]
@@ -849,3 +861,120 @@ def bit_transpose(data: bytes, width: int) -> bytes:
     result = bytearray(data)
     result[start : start + width] = val.to_bytes(width, "little")
     return bytes(result)
+
+
+# ---------------------------------------------------------------------------
+# Radamsa-style number mutation (ported from radamsa/rad/shared.scm mutate-num)
+# ---------------------------------------------------------------------------
+
+# Interesting boundary numbers generated from powers of 2 ± 1 (Radamsa).
+_RADAMSA_BOUNDARIES: list[int] = []
+for _shift in (1, 7, 8, 15, 16, 31, 32):
+    _x = 1 << _shift
+    _RADAMSA_BOUNDARIES.append(_x - 1)
+    _RADAMSA_BOUNDARIES.append(_x)
+    _RADAMSA_BOUNDARIES.append(_x + 1)
+
+
+def radamsa_mutate_num(val: int) -> int:
+    """Mutate a numeric value using Radamsa's mutate-num strategy.
+
+    Randomly picks one of several transforms: increment, decrement,
+    set to 0/1, replace with an interesting boundary, add/subtract an
+    interesting boundary, or random scaling.
+
+    Ported from radamsa/rad/shared.scm ``mutate-num``.
+    """
+    op = random.randint(0, 9)
+    if op == 0:
+        return val + 1
+    if op == 1:
+        return val - 1
+    if op in (2, 3):
+        return 0 if op == 2 else 1
+    if op in (4, 5, 6):
+        return random.choice(_RADAMSA_BOUNDARIES)
+    if op == 7:
+        return val + random.choice(_RADAMSA_BOUNDARIES)
+    if op == 8:
+        return random.choice(_RADAMSA_BOUNDARIES) - val
+    # op == 9: random scaling
+    n = random.randint(1, 128)
+    n = _log2_ceil(n)
+    return val + n if random.random() < 0.5 else val - n
+
+
+def _log2_ceil(n: int) -> int:
+    """Small helper: return ceil(log2(n)) for small n, clamped to 1+."""
+    if n <= 1:
+        return 1
+    r = 0
+    while (1 << r) < n:
+        r += 1
+    return r
+
+
+# ---------------------------------------------------------------------------
+# Funny Unicode sequences (ported from radamsa/rad/mutations.scm)
+# Each entry is a raw byte sequence representing problematic Unicode.
+# ---------------------------------------------------------------------------
+
+_FUNNY_UNICODE: list[bytes] = [
+    # Override / control characters
+    b"\xe2\x80\xae",  # U+202E Right to Left Override
+    b"\xe2\x80\xad",  # U+202D Left to Right Override
+    b"\xe1\xa0\x8e",  # U+180E Mongolian Vowel Separator
+    b"\xe2\x81\xa0",  # U+2060 Word Joiner
+    # Reserved / non-characters
+    b"\xef\xbb\xbe",  # U+FEFE reserved
+    b"\xef\xbf\xbf",  # U+FFFF not a character
+    b"\xe0\xbf\xad",  # U+0FED unassigned
+    # Illegal surrogates
+    b"\xed\xba\xad",  # U+DEAD illegal low surrogate
+    b"\xed\xaa\xad",  # U+DAAD illegal high surrogate
+    # Private use
+    b"\xef\xa3\xbf",  # U+F8FF private use char (Apple)
+    b"\xef\xbc\x8f",  # U+FF0F full width solidus
+    # Mathematical
+    b"\xf0\x9d\x9f\x96",  # U+1D7D6 MATHEMATICAL BOLD DIGIT EIGHT
+    # IDNA deviant
+    b"\xc3\x9f",  # U+00DF IDNA deviant
+    # NFKC expansion bombs (expand dramatically under normalization)
+    b"\xef\xb7\xba",  # U+FDFD expands by 11x (UTF-8) / 18x (UTF-16) NFKC
+    b"\xce\x90",  # U+0390 expands 3x under NFD
+    b"\xe1\xbe\x82",  # U+1F82 expands 4x under NFD
+    b"\xef\xac\xac",  # U+FB2C expands 3x under NFC
+    b"\xf0\x9d\x85\xa0",  # U+1D160 expands 3x under NFC
+    # Out of range
+    b"\xf4\x8f\xbf\xbe",  # illegal: beyond U+10FFFF
+    # Boundary values
+    b"\xef\xbf\xbf",  # U+FFFF
+    b"\xf0\x90\x80\x80",  # U+10000
+    # BOMs
+    b"\xef\xbb\xbf",  # UTF-8 BOM
+    b"\xfe\xff",  # UTF-16 BE BOM
+    b"\xff\xfe",  # UTF-16 LE BOM
+    # Mixed-endian nulls
+    b"\x00\x00\xff\xff",  # ASCII null BE
+    b"\xff\xff\x00\x00",  # ASCII null LE
+    # Various magic bytes from Radamsa / Wikipedia
+    b"\x2b\x2f\x76\x38",
+    b"\x2b\x2f\x76\x39",
+    b"\x2b\x2f\x76\x2b",
+    b"\x2b\x2f\x76\x2f",
+    b"\xf7\x64\x4c",
+    b"\xdd\x73\x66\x73",
+    b"\x0e\xfe\xff",
+    b"\xfb\xee\x28",
+    b"\xfb\xee\x28\xff",
+    b"\x84\x31\x95\x33",
+    # Whitespace confusables / specials
+    b"\xc2\xa0",  # U+00A0 non-breaking space
+    b"\xe1\x9a\x80",  # U+1680 Ogham space mark
+    b"\xe1\xa0\x8e",  # U+180E Mongolian vowel separator
+    b"\xe2\x80\x80",  # U+2000 en quad
+    b"\xe2\x80\x8b",  # U+200B zero-width space
+    b"\xe2\x80\x8c",  # U+200C zero-width non-joiner
+    b"\xe2\x80\x8d",  # U+200D zero-width joiner
+    b"\xef\xbb\xbf",  # U+FEFF zero-width no-break space (BOM)
+]

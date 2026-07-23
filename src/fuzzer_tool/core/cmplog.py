@@ -25,6 +25,10 @@ log = logging.getLogger(__name__)
 CMPLOG_TOKENS_MAX = 10_000  # max unique operand tokens
 CMPLOG_PAIRS_MAX = 5_000  # max unique operand pairs
 
+# Hash detection thresholds
+_HASH_MIN_BYTES = 8  # minimum operand length to consider as hash-like
+_HASH_MAX_MATCH_BYTES = 2  # max matching byte positions for a hash-like pair
+
 
 class CmplogCollector:
     """Collect and process comparison tracing data from the cmplog shim.
@@ -46,6 +50,16 @@ class CmplogCollector:
         # when a coverage gain was detected. Higher = more valuable.
         self._token_value: dict[bytes, int] = {}
         self._pair_value: dict[tuple[bytes, bytes], int] = {}
+        # Hash candidates: pairs that look like checksums/CRCs and should
+        # be skipped by the I2S encoding engine to avoid wasted execs.
+        self.hash_candidates: set[tuple[bytes, bytes]] = set()
+        # Multi-run comparison history: input_hash -> set of observed pairs.
+        # Used to detect which comparisons are consistently triggered by
+        # which input variants (cross-referencing colored vs uncolored runs).
+        self._run_history: dict[int, set[tuple[bytes, bytes]]] = {}
+        # Occurrence count: how many times each pair has been observed across runs.
+        # Higher counts = more reliable comparison signals.
+        self._pair_occurrence: dict[tuple[bytes, bytes], int] = {}
 
     def start(self) -> bool:
         """Compile and prepare the unified cmplog shim."""
@@ -290,6 +304,12 @@ class CmplogCollector:
                 self._pair_value.pop(p, None)
             self.pairs = list(self._pair_set)
 
+            # Track pair occurrence across runs for multi-run confidence.
+            # Pairs seen in many runs are reliable I2S signals; rarely-seen
+            # pairs may be noise from edge-case execution paths.
+            for pair in new_pairs:
+                self._pair_occurrence[pair] = self._pair_occurrence.get(pair, 0) + 1
+
         if new_tokens:
             log.info(
                 "Cmplog: found %d new tokens, %d new pairs (total: %d tokens, %d pairs)",
@@ -299,7 +319,64 @@ class CmplogCollector:
                 len(self.pairs),
             )
 
+        # Run hash detection on new pairs
+        if new_pairs:
+            n_hash = self.detect_hash_candidates(new_pairs)
+            if n_hash:
+                log.info("Cmplog: flagged %d hash-like pairs (skipped by encoder)", n_hash)
+
         return new_tokens
+
+    def detect_hash_candidates(self, pairs: list[tuple[bytes, bytes]]) -> int:
+        """Identify pairs that look like checksum/CRC comparisons.
+
+        Hash-like comparisons have long operands that share very few byte
+        positions — they can't be cracked by I2S substitution and would
+        waste execution time if fed to the encoding engine.
+
+        Criteria (from Redqueen's ``cmp.py::could_be_hash()``):
+        - Both operands >= ``_HASH_MIN_BYTES`` bytes.
+        - Operands share <= ``_HASH_MAX_MATCH_BYTES`` byte positions
+          (i.e. the values are fundamentally different, not an encoding
+          transform of each other).
+
+        Args:
+            pairs: Newly collected operand pairs to screen.
+
+        Returns:
+            Number of pairs flagged as hash-like.
+        """
+        n = 0
+        for op_a, op_b in pairs:
+            if len(op_a) < _HASH_MIN_BYTES or len(op_b) < _HASH_MIN_BYTES:
+                continue
+            if len(op_a) != len(op_b):
+                continue
+            # Count matching byte positions
+            matches = sum(1 for a, b in zip(op_a, op_b, strict=False) if a == b)
+            if matches <= _HASH_MAX_MATCH_BYTES:
+                self.hash_candidates.add((op_a, op_b))
+                n += 1
+        return n
+
+    def is_hash_candidate(self, op_a: bytes, op_b: bytes) -> bool:
+        """Check if a pair has been flagged as hash-like."""
+        return (op_a, op_b) in self.hash_candidates
+
+    def high_confidence_pairs(self, min_occurrences: int = 2) -> list[tuple[bytes, bytes]]:
+        """Return pairs observed in at least *min_occurrences* runs.
+
+        High-confidence pairs are more likely to be genuine I2S candidates
+        rather than one-off noise from edge-case execution paths.
+        """
+        return [
+            p for p, count in self._pair_occurrence.items()
+            if count >= min_occurrences
+        ]
+
+    def pair_confidence(self, op_a: bytes, op_b: bytes) -> int:
+        """Return how many times a pair has been observed."""
+        return self._pair_occurrence.get((op_a, op_b), 0)
 
     def mark_coverage_gain(self) -> None:
         """Bump value signal for all currently tracked tokens and pairs.

@@ -178,7 +178,9 @@ class OperatorEngine:
             cmp_type = "STR" if len(op_a) > 8 else "CMP"
 
             mutations = generate_mutations(
-                op_a, op_b, cmp_size, cmp_type, bytes(buf), hammer=True
+                op_a, op_b, cmp_size, cmp_type, bytes(buf),
+                hammer=True,
+                is_hash=f._cmplog.is_hash_candidate if hasattr(f._cmplog, 'is_hash_candidate') else None,
             )
             if mutations:
                 offsets, replacements, enc = _rand.choice(mutations)
@@ -322,6 +324,106 @@ class OperatorEngine:
         if len(result) <= getattr(self.f, "max_len", 65536):
             buf[:] = result
 
+    def _op_tree_mutate(self, buf, _byte_idx, _data):
+        """Lightweight delimiter-based tree mutation.
+
+        Uses heuristic delimiter parsing (``tree_mutator.py``, ported from
+        Radamsa ``sed-tree-*``) to parse the input into a tree using
+        ``() {} [] \"\" ''``, then applies one of: delete, duplicate,
+        swap, or stutter a subtree node.  Flattens back to bytes.
+
+        No grammar file is needed — structure is detected from delimiters.
+        """
+        from fuzzer_tool.core.tree_mutator import lightweight_tree_mutate  # noqa: PLC0415
+
+        result = lightweight_tree_mutate(bytes(buf), max_len=self.f.max_len)
+        if result != bytes(buf):
+            buf[:] = result[: len(buf)]
+
+    # ── UTF-8 confusion mutations (from Radamsa) ────────────────────
+
+    def _op_utf8_widen(self, buf, _byte_idx, _data):
+        """Widen 7-bit ASCII bytes into overlong UTF-8 sequences.
+
+        Radamsa ``sed-utf8-widen``: replaces a random ASCII byte with an
+        overlong UTF-8 encoding (2-byte sequence).  Exercises UTF-8
+        length-checking bugs in parsers.
+        """
+        if not buf:
+            return
+        # Find a 7-bit ASCII byte (0x00-0x7F)
+        candidates = [i for i, b in enumerate(buf) if b < 0x80]
+        if not candidates:
+            return
+        idx = random.choice(candidates)
+        b = buf[idx]
+        # Overlong 2-byte encoding: 110xxxxx 10xxxxxx
+        buf[idx : idx + 1] = bytes([0xC0 | (b >> 6), 0x80 | (b & 0x3F)])
+
+    def _op_utf8_insert(self, buf, _byte_idx, _data):
+        """Insert problematic Unicode byte sequences.
+
+        Radamsa ``sed-utf8-insert``: inserts curated byte sequences that
+        have caused security issues: BOMs, right-to-left override,
+        zero-width joiners, illegal surrogates, NFKC expansion bombs, etc.
+        """
+        if not buf or len(buf) >= getattr(self.f, "max_len", 65536):
+            return
+        from fuzzer_tool.core.mutations import _FUNNY_UNICODE  # noqa: PLC0415
+
+        seq = random.choice(_FUNNY_UNICODE)
+        pos = random.randint(0, len(buf))
+        buf[pos:pos] = seq
+
+    # ── Line-level mutations (from Radamsa) ─────────────────────────
+
+    def _op_line_mutate(self, buf, _byte_idx, _data):
+        """Line-level mutation: split on newlines, mutate the line list, rejoin.
+
+        Radamsa ``sed-line-*`` operators: one of:
+        - Delete a random line
+        - Duplicate a random line
+        - Swap two adjacent lines
+        - Permute lines
+        - Repeat a line
+        - Insert a line from elsewhere in the buffer
+        """
+        if not buf or len(buf) < 4:
+            return
+        # Split on newline
+        parts = bytes(buf).split(b"\n")
+        if len(parts) < 2:
+            return
+        mutate = random.choice(["del", "dup", "swap", "perm", "repeat", "clone"])
+        if mutate == "del":
+            idx = random.randint(0, len(parts) - 1)
+            del parts[idx]
+        elif mutate == "dup":
+            idx = random.randint(0, len(parts) - 1)
+            parts.insert(idx + 1, parts[idx])
+        elif mutate == "swap" and len(parts) >= 2:
+            idx = random.randint(0, len(parts) - 2)
+            parts[idx], parts[idx + 1] = parts[idx + 1], parts[idx]
+        elif mutate == "perm" and len(parts) >= 3:
+            # Shuffle a subset of lines
+            start = random.randint(0, len(parts) - 3)
+            end = min(start + random.randint(2, 6), len(parts))
+            segment = parts[start:end]
+            random.shuffle(segment)
+            parts[start:end] = segment
+        elif mutate == "repeat" and len(parts) >= 1:
+            idx = random.randint(0, len(parts) - 1)
+            n = random.randint(1, 32)
+            for _ in range(n):
+                parts.insert(idx, parts[idx])
+        elif mutate == "clone" and len(parts) >= 2:
+            src = random.randint(0, len(parts) - 1)
+            dst = random.randint(0, len(parts) - 1)
+            parts.insert(dst, parts[src])
+        result = b"\n".join(parts)
+        if len(result) <= getattr(self.f, "max_len", 65536) and result != bytes(buf):
+            buf[:] = result
+
     def _op_colorization(self, buf, _byte_idx, _data):
         """Taint-aware byte randomization preserving character classes.
 
@@ -431,7 +533,7 @@ class OperatorEngine:
             use_unsigned = random.random() < 0.5
             vals = INTERESTING_UNSIGNED_16 if use_unsigned else INTERESTING_16
             v = random.choice(vals)
-            fmt = "<H" if use_unsigned else "<h"
+            fmt = "<H" if v > 32767 or v < -32768 else "<h"
             struct.pack_into(fmt, buf, idx, v)
 
     def _op_interesting_32(self, buf, _byte_idx, _data):
@@ -447,7 +549,7 @@ class OperatorEngine:
             use_unsigned = random.random() < 0.5
             vals = INTERESTING_UNSIGNED_32 if use_unsigned else INTERESTING_32
             v = random.choice(vals)
-            fmt = "<I" if use_unsigned else "<i"
+            fmt = "<I" if v > 2147483647 or v < -2147483648 else "<i"
             struct.pack_into(fmt, buf, idx, v)
 
     def _op_arithmetic(self, buf, _byte_idx, _data):
@@ -915,6 +1017,10 @@ class OperatorEngine:
             "fuse_this": self._op_fuse_this,
             "fuse_next": self._op_fuse_next,
             "fuse_old": self._op_fuse_old,
+            "tree_mutate": self._op_tree_mutate,
+            "utf8_widen": self._op_utf8_widen,
+            "utf8_insert": self._op_utf8_insert,
+            "line_mutate": self._op_line_mutate,
             "colorization": self._op_colorization,
             "skipdet_probe": self._op_skipdet_probe,
             "auto_extras": self._op_auto_extras,

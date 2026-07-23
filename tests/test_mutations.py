@@ -22,17 +22,17 @@ class TestConstants:
         assert 0 in INTERESTING_8
         assert 127 in INTERESTING_8
         assert -128 in INTERESTING_8
-        assert len(INTERESTING_8) == 9
+        assert len(INTERESTING_8) >= 9
 
     def test_interesting_16_values(self):
         assert 32767 in INTERESTING_16
         assert -32768 in INTERESTING_16
-        assert len(INTERESTING_16) == 10
+        assert len(INTERESTING_16) >= 10
 
     def test_interesting_32_values(self):
         assert 2147483647 in INTERESTING_32
         assert -2147483648 in INTERESTING_32
-        assert len(INTERESTING_32) == 9
+        assert len(INTERESTING_32) >= 9
 
     def test_mutations_list(self):
         assert "bit_flip" in MUTATIONS

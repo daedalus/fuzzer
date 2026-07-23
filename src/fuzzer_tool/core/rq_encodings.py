@@ -315,6 +315,7 @@ def generate_mutations(
     input_data: bytes,
     *,
     hammer: bool = False,
+    is_hash: callable | None = None,
 ) -> list[tuple[tuple[int, ...], tuple[bytes, ...], Encoder]]:
     """Generate I2S mutations for a single cmplog pair.
 
@@ -336,6 +337,10 @@ def generate_mutations(
     """
     mutations: list[tuple[tuple[int, ...], tuple[bytes, ...], Encoder]] = []
     seen: set[tuple] = set()
+
+    # Skip hash-like comparisons that can't be cracked by I2S substitution
+    if is_hash is not None and is_hash(operand_a, operand_b):
+        return mutations
 
     for enc in BUILTIN_ENCODERS:
         if not enc.is_applicable(cmp_size, cmp_type, operand_a, operand_b):
