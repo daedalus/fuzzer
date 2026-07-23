@@ -233,17 +233,125 @@ class OperatorEngine:
                     else:
                         buf[offset] = ord("a") + (vb % 26)
 
+    # ── Fuse mutations (from Radamsa) ──────────────────────────────
+
+    def _op_fuse_this(self, buf, _byte_idx, _data):
+        """Jump between two similar positions within the same input.
+
+        Radamsa sed-fuse-this: picks two positions in the buffer,
+        finds a short common prefix at each, and swaps the tails.
+        Creates structural hybrids without format awareness.
+        """
+        if len(buf) < 4:
+            return
+        p1 = random.randint(0, len(buf) - 2)
+        p2 = random.randint(0, len(buf) - 2)
+        if p1 == p2:
+            p2 = (p2 + 1) % max(1, len(buf) - 1)
+        max_pre = min(16, len(buf) - max(p1, p2))
+        pre_len = 0
+        for pre_len in range(max_pre):
+            if buf[p1 + pre_len] != buf[p2 + pre_len]:
+                break
+        else:
+            pre_len = max_pre
+        if pre_len < 1:
+            tail1 = bytes(buf[p1:])
+            tail2 = bytes(buf[p2:])
+            combined = bytearray(buf[:p1]) + tail2 + buf[p1:p2] + tail1
+            if len(combined) <= 2 * len(buf) and len(combined) >= len(buf) // 2:
+                buf[:] = combined
+            return
+        a_end = p1 + pre_len
+        b_end = p2 + pre_len
+        tail_a = bytes(buf[a_end:])
+        tail_b = bytes(buf[b_end:])
+        result = bytearray(buf[:a_end]) + tail_b + buf[a_end:b_end] + tail_a
+        if len(result) <= 2 * len(buf):
+            buf[:] = result
+
+    def _op_fuse_next(self, buf, _byte_idx, data):
+        """Fuse current input with another corpus entry.
+
+        Radamsa sed-fuse-next: fuses prefix of the current block
+        with suffix of a random corpus entry at a shared position.
+        """
+        f = self.f
+        corpus = getattr(f, "corpus", [])
+        if not corpus or len(buf) < 3:
+            return
+        other = bytes(random.choice(corpus))
+        if other is data or other == buf:
+            others = [c for c in corpus if c is not data]
+            if not others:
+                return
+            other = bytes(random.choice(others))
+        if len(other) < 3:
+            return
+        split_point = min(len(buf), len(other)) // 2
+        split_point = random.randint(1, max(1, split_point))
+        result = bytearray(buf[:split_point]) + other[split_point:]
+        if len(result) <= f.max_len:
+            buf[:] = result[: f.max_len]
+
+    def _op_fuse_old(self, buf, _byte_idx, _data):
+        """Fuse current input with a remembered block from earlier fuzz runs.
+
+        Radamsa sed-fuse-old: maintains a ring buffer of previously
+        mutated data and fuses fragments from it into the current input.
+        """
+        if len(buf) < 3:
+            return
+        cls = type(self)
+        if not hasattr(cls, "_fuse_memory"):
+            cls._fuse_memory = []
+            cls._fuse_mem_max = 32
+        mem = cls._fuse_memory
+        mem.append(bytes(buf))
+        if len(mem) > cls._fuse_mem_max:
+            mem.pop(0)
+        if len(mem) < 2:
+            return
+        old = random.choice(mem[:-1])
+        if len(old) < 3:
+            return
+        p_cur = random.randint(1, len(buf) - 1)
+        p_old = random.randint(1, len(old) - 1)
+        tail_old = bytes(old[p_old:])
+        result = bytearray(buf[:p_cur]) + tail_old
+        if len(result) <= getattr(self.f, "max_len", 65536):
+            buf[:] = result
+
     def _op_colorization(self, buf, _byte_idx, _data):
         """Taint-aware byte randomization preserving character classes.
 
         AFL++ colorization: replace each byte with a random value from
         the same character class. Identifies comparison-relevant bytes.
-        Optimized: precomputed module-level lookup table, batch index generation.
+
+        When cmplog data is available, uses the ``CmplogColorizer`` to
+        prefer mutating bytes that appear in comparison operands, which
+        increases the chance of cracking comparisons.
         """
         if not buf:
             return
-        n_mutate = max(1, len(buf) // random.randint(2, 10))
         tbl = _COLORIZE_TBL
+        # Try to use cmplog-derived colorization mask for targeted selection
+        f = self.f
+        cmplog_pairs = getattr(f._cmplog, "pairs", None) if hasattr(f, "_cmplog") else None
+        if cmplog_pairs:
+            from fuzzer_tool.core.colorizer import CmplogColorizer  # noqa: PLC0415
+
+            colorizer = CmplogColorizer()
+            mask = colorizer.colorize_from_cmplog(bytes(buf), cmplog_pairs)
+            colorable = [i for i, m in enumerate(mask[: len(buf)]) if m == 0xFF]
+            if colorable:
+                n_mutate = max(1, min(len(colorable), len(buf) // random.randint(2, 10)))
+                indices = random.choices(colorable, k=n_mutate)
+                for idx in indices:
+                    buf[idx] = tbl[buf[idx]]
+                return
+        # Fallback: random selection from entire buffer
+        n_mutate = max(1, len(buf) // random.randint(2, 10))
         indices = [random.randint(0, len(buf) - 1) for _ in range(n_mutate)]
         for idx in indices:
             buf[idx] = tbl[buf[idx]]
@@ -804,6 +912,9 @@ class OperatorEngine:
             "overwrite_copy": self._op_overwrite_copy,
             "overwrite_fixed": self._op_overwrite_fixed,
             "redqueen_xform": self._op_redqueen_xform,
+            "fuse_this": self._op_fuse_this,
+            "fuse_next": self._op_fuse_next,
+            "fuse_old": self._op_fuse_old,
             "colorization": self._op_colorization,
             "skipdet_probe": self._op_skipdet_probe,
             "auto_extras": self._op_auto_extras,

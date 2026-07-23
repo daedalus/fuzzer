@@ -169,6 +169,9 @@ MUTATIONS = [
     "overwrite_copy",
     "overwrite_fixed",
     "redqueen_xform",
+    "fuse_this",
+    "fuse_next",
+    "fuse_old",
     "skipdet_probe",
     "auto_extras",
 ]
