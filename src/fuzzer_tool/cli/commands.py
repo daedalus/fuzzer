@@ -315,6 +315,8 @@ def cmd_fuzz(args):
         grammar=grammar,
         persistent=args.persistent,
         cmplog=args.cmplog,
+        cmplog_max_tokens=getattr(args, "cmplog_max_tokens", 0),
+        cmplog_max_pairs=getattr(args, "cmplog_max_pairs", 0),
         max_corpus=args.max_corpus,
         max_corpus_bytes=getattr(args, "max_corpus_bytes", 0),
         minimize_every_execs=getattr(args, "minimize_every_execs", 0),
@@ -1204,6 +1206,18 @@ def main() -> int:
         "--cmplog",
         action="store_true",
         help="Enable comparison tracing via LD_PRELOAD (memcmp/strcmp/strncmp/memchr interception)",
+    )
+    fuzz_parser.add_argument(
+        "--cmplog-max-tokens",
+        type=int,
+        default=0,
+        help="Max unique cmplog operand tokens (default 10000, 0=default)",
+    )
+    fuzz_parser.add_argument(
+        "--cmplog-max-pairs",
+        type=int,
+        default=0,
+        help="Max unique cmplog operand pairs (default 5000, 0=default)",
     )
     fuzz_parser.add_argument(
         "--max-corpus",

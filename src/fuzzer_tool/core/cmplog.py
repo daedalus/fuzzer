@@ -35,9 +35,13 @@ class CmplogCollector:
 
     After each execution, reads the CMP log file, extracts operand pairs,
     and converts them into dictionary tokens for mutation.
+
+    Args:
+        max_tokens: Cap on unique operand tokens (default CMPLOG_TOKENS_MAX).
+        max_pairs: Cap on unique operand pairs (default CMPLOG_PAIRS_MAX).
     """
 
-    def __init__(self):
+    def __init__(self, max_tokens: int = 0, max_pairs: int = 0):
         self.log_path: str | None = None
         self.tokens: list[bytes] = []
         self._token_set: set[bytes] = set()
@@ -60,6 +64,9 @@ class CmplogCollector:
         # Occurrence count: how many times each pair has been observed across runs.
         # Higher counts = more reliable comparison signals.
         self._pair_occurrence: dict[tuple[bytes, bytes], int] = {}
+        # Overridable caps (0 = use module default)
+        self._max_tokens = max_tokens if max_tokens > 0 else CMPLOG_TOKENS_MAX
+        self._max_pairs = max_pairs if max_pairs > 0 else CMPLOG_PAIRS_MAX
 
     def start(self) -> bool:
         """Compile and prepare the unified cmplog shim."""
@@ -281,8 +288,8 @@ class CmplogCollector:
 
         # Cap token/pair lists to bound memory.
         # Preserves highest-value-density entries instead of simple recency.
-        if len(self.tokens) > CMPLOG_TOKENS_MAX:
-            excess = len(self.tokens) - CMPLOG_TOKENS_MAX
+        if len(self.tokens) > self._max_tokens:
+            excess = len(self.tokens) - self._max_tokens
             scored = [
                 (self._token_value.get(t, 0) / max(len(t), 1), t)
                 for t in self._token_set
@@ -292,8 +299,8 @@ class CmplogCollector:
                 self._token_set.discard(t)
                 self._token_value.pop(t, None)
             self.tokens = list(self._token_set)
-        if len(self.pairs) > CMPLOG_PAIRS_MAX:
-            excess = len(self.pairs) - CMPLOG_PAIRS_MAX
+        if len(self.pairs) > self._max_pairs:
+            excess = len(self.pairs) - self._max_pairs
             scored = [
                 (self._pair_value.get(p, 0) / max(len(p[0]) + len(p[1]), 1), p)
                 for p in self._pair_set

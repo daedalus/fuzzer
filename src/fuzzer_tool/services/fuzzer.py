@@ -273,6 +273,8 @@ class Fuzzer:
         inprocess_direct=False,
         inprocess_func="LLVMFuzzerTestOneInput",
         cmplog=False,
+        cmplog_max_tokens=0,
+        cmplog_max_pairs=0,
         max_corpus=0,
         max_corpus_bytes=0,
         minimize_every_execs=0,
@@ -423,7 +425,7 @@ class Fuzzer:
         if cmplog:
             from fuzzer_tool.core.cmplog import CmplogCollector
 
-            self._cmplog = CmplogCollector()
+            self._cmplog = CmplogCollector(max_tokens=cmplog_max_tokens, max_pairs=cmplog_max_pairs)
             if self._cmplog.start():
                 print("[*] Cmplog: comparison tracing enabled (memcmp/strcmp/strncmp/memchr)")
             else:
