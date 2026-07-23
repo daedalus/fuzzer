@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import random
 
-
 # Minimum parameter floor to avoid degenerate Beta(0, 0)
 MIN_BETA_PARAM = 1e-6
 
@@ -140,6 +139,10 @@ class BayesianSeedQuality:
             for k in list(self._alpha):
                 self._alpha[k] *= self._decay
                 self._beta[k] *= self._decay
+            # Decay pooled counts too, so the population-mean target
+            # stays responsive relative to individual posteriors.
+            self._pooled_successes *= self._decay
+            self._pooled_failures *= self._decay
 
         # Update posterior
         if discovered:

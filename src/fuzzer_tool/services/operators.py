@@ -449,9 +449,25 @@ class OperatorEngine:
         if cmplog_pairs:
             from fuzzer_tool.core.colorizer import CmplogColorizer  # noqa: PLC0415
 
-            colorizer = CmplogColorizer()
-            mask = colorizer.colorize_from_cmplog(bytes(buf), cmplog_pairs)
-            colorable = [i for i, m in enumerate(mask[: len(buf)]) if m == 0xFF]
+            # Cache color mask per (input hash, cmplog pairs id)
+            buf_bytes = bytes(buf)
+            buf_hash = hash(buf_bytes)
+            pairs_id = id(cmplog_pairs)
+            cache = getattr(self, "_colorize_cache", None)
+            if cache is None:
+                self._colorize_cache = {}
+                cache = self._colorize_cache
+            cached = cache.get((buf_hash, pairs_id))
+            if cached is None:
+                colorizer = CmplogColorizer()
+                mask = colorizer.colorize_from_cmplog(buf_bytes, cmplog_pairs)
+                colorable = [i for i, m in enumerate(mask[: len(buf)]) if m == 0xFF]
+                cached = colorable
+                # Bounded cache: evict when > 256 entries
+                if len(cache) > 256:
+                    cache.clear()
+                cache[(buf_hash, pairs_id)] = cached
+            colorable = cached
             if colorable:
                 n_mutate = max(1, min(len(colorable), len(buf) // random.randint(2, 10)))
                 indices = random.choices(colorable, k=n_mutate)
@@ -1258,6 +1274,9 @@ class OperatorEngine:
         f._meta_strategy = None
 
         n_mutations = f.mutations_per_input
+        # Apply seed-level energy multiplier from SeedScorer
+        if hasattr(f, "_last_perf_score") and f._last_perf_score != 100.0:
+            n_mutations = max(1, int(n_mutations * f._last_perf_score / 100.0))
         if f._stall_recovery_active:
             n_mutations = max(n_mutations, 16)
 

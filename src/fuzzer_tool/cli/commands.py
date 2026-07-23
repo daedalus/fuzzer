@@ -1128,11 +1128,11 @@ def main() -> int:
     fuzz_parser.add_argument(
         "--mod-solving",
         choices=["heuristic", "trace", "concolic"],
-        default="heuristic",
+        default="concolic",
         help="Modulo constraint solving mode (requires --enable-smt-z3). "
+        "concolic: full constraint model with z3 solver (default); "
         "heuristic: try common divisors on (remainder, 0) pairs; "
-        "trace: use PC-correlated DIV/IDIV from static analysis; "
-        "concolic: full constraint model with z3 solver",
+        "trace: use PC-correlated DIV/IDIV from static analysis",
     )
     fuzz_parser.add_argument(
         "--ga-pop-size",

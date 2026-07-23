@@ -14,11 +14,11 @@ import random
 
 # Maps opening byte -> closing byte
 _DELIMITERS: dict[int, int] = {
-    40: 41,    # ()
-    91: 93,    # []
+    40: 41,  # ()
+    91: 93,  # []
     123: 125,  # {}
-    34: 34,    # ""
-    39: 39,    # ''
+    34: 34,  # ""
+    39: 39,  # ''
 }
 # Note: <> is deliberately excluded — it's too aggressive in ordinary text
 # and XML/HTML is handled separately by the grammar-based mutations.
@@ -41,6 +41,7 @@ class _Node:
 
     def __init__(self, open_byte: int | None = None):
         self.open: int | None = open_byte  # opening delimiter byte (None for root/raw)
+        self.closed: bool = False  # True only when parser matched a close byte
         self.children: list[_Node | bytes] = []  # child nodes or raw byte chunks
 
     def is_leaf(self) -> bool:
@@ -56,7 +57,7 @@ class _Node:
                 parts.append(child.flatten())
             else:
                 parts.append(child)
-        if self.open is not None:
+        if self.open is not None and self.closed:
             close = _find_delim(self.open)
             if close is not None:
                 parts.append(bytes([close]))
@@ -95,6 +96,7 @@ def partial_parse(data: bytes) -> _Node:
                     # Closing
                     flush()
                     if len(stack) > 1:
+                        stack[-1].closed = True
                         stack.pop()
                 else:
                     # Opening
@@ -112,6 +114,7 @@ def partial_parse(data: bytes) -> _Node:
             # Closing delimiter for non-self-matching (open != close)
             flush()
             if len(stack) > 1:
+                stack[-1].closed = True
                 stack.pop()
         else:
             buf.append(bytes([byte]))
@@ -250,6 +253,7 @@ def _find_parent(root: _Node, target: _Node) -> _Node | None:
 def _clone_node(node: _Node) -> _Node:
     """Deep-copy a node."""
     new = _Node(node.open)
+    new.closed = node.closed
     for child in node.children:
         if isinstance(child, _Node):
             new.children.append(_clone_node(child))

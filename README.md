@@ -21,6 +21,7 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 - **Weighted length distribution**: length_boundary operator weights small lengths (0-16) 10:1 over large ones (512+) — 4096-byte inputs dropped from 4.7% to 0.5% of picks, stabilizing EPS
 - **Corrupted state recovery**: seed_meta entries with keys > 256 chars (tracker JSON loaded as corpus) are skipped on load and save — self-heals bloated state.json on first run (15MB → 6KB)
 - **Grammar-aware mutations**: format-specific structure-aware mutations for PNG (IHDR, IDAT, CRC, filter types, interlace), JPEG (SOF, DHT, DQT, DRI, SOS, scan data), BMP (header fields, pixel data), gzip (header flags, deflate stream, trailer, extra fields), and zlib (CMF/FLG header, deflate stream, Adler-32 trailer)
+- **Tree mutator** (`lightweight_tree_mutate`): Radamsa-style delimiter-based tree mutations (delete, duplicate, swap, stutter) with correct round-trip invariant — unmatched delimiters are preserved, never healed
 - **FrameShift**: automatic length-field tracking — discovers and adjusts length/count fields during insertions/deletions, applied as universal post-processing after every mutation
 - **Dictionary support**: inject protocol tokens from dictionary files
 - **Markov chain**: learn byte-level transition probabilities from corpus, generate statistically similar inputs, persist across runs
@@ -62,6 +63,7 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 - **Report distribution diagnostics**: stddev, skewness, and kurtosis for exec time, discovery rate, per-operator rewards, and seed sizes
 
 ### Scheduling Intelligence
+- **Seed-level energy multiplier** (`SeedScorer`): AFL++ power schedules (FAST/COE/RARE/MMOPT/LIN/QUAD) scale `mutations_per_input` per seed — fast seeds with high coverage get more mutation attempts, heavily-fuzzed seeds get fewer
 - **Jaccard index**: average pairwise edge-set overlap (xxhash-fast) for corpus redundancy monitoring
 - **Subsumption weighting**: MinHash-approximated Jaccard for continuous seed deprioritization
 - **Hitcount diversity (JS divergence)**: seeds with unusual frequency profiles get boosted
@@ -391,7 +393,7 @@ verification) from `tools/lib/bench_common.sh`.
 
 ### SMT Solver Evaluation (`--enable-smt-z3`)
 
-The SMT solver (Z3) attempts to solve arithmetic constraints discovered by cmplog, generating inputs that satisfy specific branch conditions rather than relying solely on random mutations.
+The SMT solver (Z3) attempts to solve arithmetic constraints discovered by cmplog, generating inputs that satisfy specific branch conditions rather than relying solely on random mutations. **Concolic mode is now the default** (`--mod-solving concolic`), providing full constraint modeling with z3 across whole execution traces. Override with `--mod-solving heuristic` or `--mod-solving trace` if needed.
 
 **30k-iteration comparison, zero corpus, `targets/png_read_tracecmp_asan.so`:**
 

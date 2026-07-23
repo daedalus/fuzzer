@@ -40,6 +40,7 @@ from fuzzer_tool.core.mutations import (
     MUTATIONS,
 )
 from fuzzer_tool.core.sanitizer import SanitizerReport
+from fuzzer_tool.core.schedules import SeedScorer
 from fuzzer_tool.core.secretary import DEFAULT_EXPLORATION_FRAC, SecretaryStopping
 from fuzzer_tool.core.seed_quality import BayesianSeedQuality
 from fuzzer_tool.services.corpus_manager import CorpusManager
@@ -320,7 +321,7 @@ class Fuzzer:
         debug=False,
         enable_regex_bomb=False,
         enable_smt_z3=False,
-        mod_solving="heuristic",
+        mod_solving="concolic",
     ):
         self.target = target
         self.debug = debug
@@ -475,7 +476,9 @@ class Fuzzer:
                     else:
                         print("[!] SMT solver: no DIV/IDIV with known divisor in target(s)")
             else:
-                print("[!] SMT solver: z3-solver not installed — install with: pip install z3-solver")
+                print(
+                    "[!] SMT solver: z3-solver not installed — install with: pip install z3-solver"
+                )
                 self._smt_solver = None
 
         if self.file_mode:
@@ -597,6 +600,10 @@ class Fuzzer:
         self._runner = TargetRunner(self)
         self._stats = StatsReporter(self)
         self._corpus_manager = CorpusManager(self)
+
+        # Seed-level energy multiplier: scales mutations_per_input per seed
+        self._seed_scorer = SeedScorer(schedule=schedule_ablation or "base")
+        self._last_perf_score = 100.0  # default multiplier (1x)
 
         self._load_corpus()
         self._init_seed_metadata()
@@ -898,15 +905,14 @@ class Fuzzer:
             # ASAN only needs target-side bug detection, not Python-side.
             use_direct_lite = True
             if target_is_asan and not _asan_was_preloaded:
+                import ctypes as _ctypes
                 import subprocess as _subprocess
                 import tempfile as _tempfile
-                import ctypes as _ctypes
+
                 from fuzzer_tool.adapters.shim_factory import _find_compiler
 
                 _asan_opts_shim_src = (
-                    b'const char *__asan_default_options() {'
-                    b'  return "verify_asan_link_order=0";'
-                    b'}'
+                    b'const char *__asan_default_options() {  return "verify_asan_link_order=0";}'
                 )
                 _fd, _shim_path = _tempfile.mkstemp(suffix=".so", prefix="asan_opts_")
                 os.close(_fd)
@@ -951,7 +957,9 @@ class Fuzzer:
                     if has_cmplog:
                         print("[*] Cmplog: compiled into target .so (direct_lite compatible)")
                     else:
-                        print("[*] Trace-cmp: compiled into target .so (direct_lite compatible, preloading shim)")
+                        print(
+                            "[*] Trace-cmp: compiled into target .so (direct_lite compatible, preloading shim)"
+                        )
                 else:
                     ld_preload = os.environ.get("LD_PRELOAD", "")
                     shim_in_preload = "cmplog_shim" in ld_preload or "tracecmp_shim" in ld_preload
@@ -1492,7 +1500,11 @@ class Fuzzer:
             # Only scan new pairs (not yet seen) to avoid O(5000) per iteration.
             matches = list(meta.get("redqueen_matches", [])) if meta is not None else []
             seen = {(m[1], m[2]) for m in matches}  # dedup by (A, B)
-            if self._cmplog.pairs and meta is not None and self._redqueen_index < len(self._cmplog.pairs):
+            if (
+                self._cmplog.pairs
+                and meta is not None
+                and self._redqueen_index < len(self._cmplog.pairs)
+            ):
                 for op_a, op_b in self._cmplog.pairs[self._redqueen_index :]:
                     if len(op_a) < 2 or (op_a, op_b) in seen:
                         continue
@@ -1587,10 +1599,12 @@ class Fuzzer:
                         if len(matches) >= 50:
                             break
             # Concolic mode: after accumulating trace entries, solve and inject
-            if (self._smt_solver is not None
-                    and self._smt_solver.mod_solving_mode == "concolic"
-                    and self._smt_solver.concolic_trace is not None
-                    and self._smt_solver.concolic_trace.has_entries()):
+            if (
+                self._smt_solver is not None
+                and self._smt_solver.mod_solving_mode == "concolic"
+                and self._smt_solver.concolic_trace is not None
+                and self._smt_solver.concolic_trace.has_entries()
+            ):
                 concolic_result = self._smt_solver.solve_concolic(mutated)
                 if concolic_result is not None and concolic_result != mutated:
                     # Inject the concolic solution as a replacement mutation
@@ -1726,8 +1740,8 @@ class Fuzzer:
                     if cmplog_found:
                         self.op_edges["cmplog"] = self.op_edges.get("cmplog", 0.0) + len(new)
                     if smt_found:
-                        self.op_edges["smt_solver"] = (
-                            self.op_edges.get("smt_solver", 0.0) + len(new)
+                        self.op_edges["smt_solver"] = self.op_edges.get("smt_solver", 0.0) + len(
+                            new
                         )
                     if self._stall_recovery_active:
                         print(
@@ -2319,6 +2333,47 @@ class Fuzzer:
                 if self.multi_targets:
                     self._select_next_target()
                 seed = self._pick_seed()
+                # Compute seed-level energy multiplier for mutation budget
+                meta = self.seed_meta.get(seed)
+                if meta is not None and self._seed_scorer:
+                    avg_exec_us = max(
+                        1,
+                        int(
+                            sum(m.get("total_time", 0) for m in self.seed_meta.values())
+                            / max(1, sum(m.get("fuzz_count", 1) for m in self.seed_meta.values()))
+                            * 1_000_000
+                        ),
+                    )
+                    exec_us = max(
+                        1,
+                        int(
+                            meta.get("total_time", 0)
+                            / max(1, meta.get("fuzz_count", 1))
+                            * 1_000_000
+                        ),
+                    )
+                    bitmap_size = meta.get("coverage_edges", 0)
+                    avg_bitmap_size = max(
+                        1,
+                        int(
+                            sum(m.get("coverage_edges", 0) for m in self.seed_meta.values())
+                            / max(1, len(self.seed_meta))
+                        ),
+                    )
+                    depth = meta.get("lineage_depth", 0)
+                    fuzz_level = meta.get("fuzz_count", 0)
+                    n_fuzz = fuzz_level
+                    self._last_perf_score = self._seed_scorer.score(
+                        exec_us=exec_us,
+                        avg_exec_us=avg_exec_us,
+                        bitmap_size=bitmap_size,
+                        avg_bitmap_size=avg_bitmap_size,
+                        handicap=0,
+                        depth=depth,
+                        fuzz_level=fuzz_level,
+                        n_fuzz=n_fuzz,
+                        total_execs=max(1, self.exec_count),
+                    )
                 self.fuzz_one(seed)
                 i += 1
                 effective_interval = (

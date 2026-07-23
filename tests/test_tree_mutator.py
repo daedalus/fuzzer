@@ -1,8 +1,8 @@
 """Tests for core/tree_mutator.py — Lightweight delimiter-based tree mutator."""
 
 from fuzzer_tool.core.tree_mutator import (
-    _collect_nodes,
     _clone_node,
+    _collect_nodes,
     lightweight_tree_mutate,
     mutate_tree_del,
     mutate_tree_dup,
@@ -47,8 +47,7 @@ class TestPartialParse:
         data = b"((a"
         root = partial_parse(data)
         flat = root.flatten()
-        assert flat.startswith(b"((a")
-        assert flat.count(b"(") == flat.count(b")")
+        assert flat == data
 
     def test_nested_collects_nodes(self):
         data = b"[a [b c] d]"
@@ -145,3 +144,23 @@ class TestTreeMutations:
             clone = _clone_node(nodes[0])
             assert clone.flatten() == nodes[0].flatten()
             assert clone is not nodes[0]
+
+    def test_round_trip_unmatched_delimiters(self):
+        """Round-trip must preserve unmatched delimiters — no phantom close bytes."""
+        cases = [
+            b"(abc",
+            b"((abc",
+            b"abc)",
+            b"[hello",
+            b"{world",
+            b'"open string',
+            b"'single open",
+            b"(a(b",
+            b"[{nest",
+            b"((((",
+            b")])}>",
+            b"a(b)c[d",
+        ]
+        for data in cases:
+            root = partial_parse(data)
+            assert root.flatten() == data, f"Round-trip failed for {data!r}"

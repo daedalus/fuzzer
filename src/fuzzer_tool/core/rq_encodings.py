@@ -28,18 +28,21 @@ def _to_int(val: bytes, signed: bool = False) -> int:
     """Interpret *val* as a little-endian integer.
 
     Handles arbitrary-length operands from cmplog trace data (e.g. a 7-byte
-    memcmp(foo, bar, 7)) by zero-extending to the nearest supported width.
+    memcmp(foo, bar, 7)) by zero-extending (or sign-extending) to the nearest
+    supported width.
     """
     n = len(val)
     if n == 0:
         return 0
     if n <= 1:
         return val[0] - 256 if signed and val[0] >= 128 else val[0]
+    # Determine pad byte: zero-extend by default, sign-extend when signed
+    pad = b"\xff" if signed and (val[-1] & 0x80) else b"\x00"
     if n <= 2:
-        return struct.unpack("<h" if signed else "<H", val.ljust(2, b"\x00"))[0]
+        return struct.unpack("<h" if signed else "<H", val.ljust(2, pad))[0]
     if n <= 4:
-        return struct.unpack("<i" if signed else "<I", val.ljust(4, b"\x00"))[0]
-    return struct.unpack("<q" if signed else "<Q", val[:8].ljust(8, b"\x00"))[0]
+        return struct.unpack("<i" if signed else "<I", val.ljust(4, pad))[0]
+    return struct.unpack("<q" if signed else "<Q", val[:8].ljust(8, pad))[0]
 
 
 def _reverse_if(val: bytes, do_reverse: bool) -> bytes:
@@ -202,7 +205,7 @@ class CStringEncoder(Encoder):
 
     def encode(self, val):
         idx = val.find(b"\x00")
-        return [val[:max(2, idx)]] if idx >= 0 else [val]
+        return [val[: max(2, idx)]] if idx >= 0 else [val]
 
     def name(self):
         return "cstr"
@@ -421,7 +424,7 @@ def _get_encoded_variants(
         if key is None:
             raw_variants = [val]
         else:
-            padded = val.rjust(bytes_len, b'\x00')
+            padded = val.rjust(bytes_len, b"\x00")
             base_val = struct.unpack(">" + key, padded)[0]
             max_val = (1 << (8 * bytes_len)) - 1
             raw_variants = []
@@ -433,7 +436,7 @@ def _get_encoded_variants(
         if key is None:
             raw_variants = [val]
         else:
-            padded = val.rjust(bytes_len, b'\x00')
+            padded = val.rjust(bytes_len, b"\x00")
             base_val = struct.unpack(">" + key, padded)[0]
             max_val = (1 << (8 * bytes_len)) - 1
             max_offset = 64 if hammer else 1
@@ -455,7 +458,4 @@ def _get_encoded_variants(
 
 def encoders_summary() -> list[dict]:
     """Return a human-readable list of all registered encoders."""
-    return [
-        {"name": e.name(), "desc": e.description(), "size": e.size()}
-        for e in BUILTIN_ENCODERS
-    ]
+    return [{"name": e.name(), "desc": e.description(), "size": e.size()} for e in BUILTIN_ENCODERS]
