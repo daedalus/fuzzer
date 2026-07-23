@@ -335,6 +335,7 @@ def cmd_fuzz(args):
         schedule_ablation=getattr(args, "schedule_ablation", None),
         replicator=getattr(args, "replicator", False),
         shapley=getattr(args, "shapley", False),
+        bayesian=getattr(args, "bayesian", False),
         mi_guided=getattr(args, "mi_guided", False),
         renyi_weight=getattr(args, "renyi_weight", False),
         transfer_entropy=getattr(args, "transfer_entropy", False),
@@ -362,6 +363,7 @@ def cmd_fuzz(args):
         enable_regex_bomb=getattr(args, "enable_regex_bomb_mutations", False),
         resize_map_on_stall=getattr(args, "resize_map_on_stall", False),
         enable_smt_z3=getattr(args, "enable_smt_z3", False),
+        mod_solving=getattr(args, "mod_solving", "heuristic"),
     )
     fuzzer.run(iterations=args.iterations)
 
@@ -1056,6 +1058,11 @@ def main() -> int:
         help="Enable Shapley value operator attribution (fair credit distribution)",
     )
     fuzz_parser.add_argument(
+        "--bayesian",
+        action="store_true",
+        help="Enable Bayesian methods: Thompson-sampled seed selection, hierarchical operator priors, Bayesian coverage growth model",
+    )
+    fuzz_parser.add_argument(
         "--mi-guided",
         action="store_true",
         help="Enable mutual information guided mutation (target high-MI byte positions)",
@@ -1117,6 +1124,15 @@ def main() -> int:
         action="store_true",
         help="Enable z3-based SMT solving: arithmetic constraint solving on cmplog pairs "
         "and computed-field repair for WFC output",
+    )
+    fuzz_parser.add_argument(
+        "--mod-solving",
+        choices=["heuristic", "trace", "concolic"],
+        default="heuristic",
+        help="Modulo constraint solving mode (requires --enable-smt-z3). "
+        "heuristic: try common divisors on (remainder, 0) pairs; "
+        "trace: use PC-correlated DIV/IDIV from static analysis; "
+        "concolic: full constraint model with z3 solver",
     )
     fuzz_parser.add_argument(
         "--ga-pop-size",

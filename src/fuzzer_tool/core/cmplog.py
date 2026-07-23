@@ -48,6 +48,8 @@ class CmplogCollector:
         # Operand pairs: (operand_a, operand_b) for input-to-state matching
         self.pairs: list[tuple[bytes, bytes]] = []
         self._pair_set: set[tuple[bytes, bytes]] = set()
+        # PC mapping: pair -> program counter (optional, from trace-mode shim)
+        self._pair_pc: dict[tuple[bytes, bytes], int | None] = {}
         self._shim_path: str | None = None
         self._shim_handle = None
         # Value-density signal: how often each token/pair was present
@@ -264,11 +266,20 @@ class CmplogCollector:
                         operand_b = bytes.fromhex(hex_b)
                         tokens.add(operand_a)
                         tokens.add(operand_b)
+                        # Optional PC field (trace mode) — last field if present
+                        pc = None
+                        if len(parts) >= 5:
+                            try:
+                                pc = int(parts[-1])
+                            except (ValueError, IndexError):
+                                pass
                         # Track pairs for input-to-state matching
                         pair = (operand_a, operand_b)
                         if pair not in self._pair_set:
                             self._pair_set.add(pair)
                             new_pairs.append(pair)
+                            if pc is not None:
+                                self._pair_pc[pair] = pc
                     except ValueError:
                         continue
         except OSError as e:
@@ -384,6 +395,10 @@ class CmplogCollector:
     def pair_confidence(self, op_a: bytes, op_b: bytes) -> int:
         """Return how many times a pair has been observed."""
         return self._pair_occurrence.get((op_a, op_b), 0)
+
+    def pair_pc(self, op_a: bytes, op_b: bytes) -> int | None:
+        """Return the program counter for a pair, if known (trace mode)."""
+        return self._pair_pc.get((op_a, op_b))
 
     def mark_coverage_gain(self) -> None:
         """Bump value signal for all currently tracked tokens and pairs.

@@ -41,6 +41,7 @@ from fuzzer_tool.core.mutations import (
 )
 from fuzzer_tool.core.sanitizer import SanitizerReport
 from fuzzer_tool.core.secretary import DEFAULT_EXPLORATION_FRAC, SecretaryStopping
+from fuzzer_tool.core.seed_quality import BayesianSeedQuality
 from fuzzer_tool.services.corpus_manager import CorpusManager
 from fuzzer_tool.services.operators import OperatorEngine
 from fuzzer_tool.services.ptrace_coverage import (
@@ -290,6 +291,7 @@ class Fuzzer:
         schedule_ablation=None,
         replicator=False,
         shapley=False,
+        bayesian=False,
         mi_guided=False,
         renyi_weight=False,
         transfer_entropy=False,
@@ -318,6 +320,7 @@ class Fuzzer:
         debug=False,
         enable_regex_bomb=False,
         enable_smt_z3=False,
+        mod_solving="heuristic",
     ):
         self.target = target
         self.debug = debug
@@ -432,15 +435,45 @@ class Fuzzer:
                 print("[!] Cmplog: failed to compile shim, disabling")
                 self._cmplog = None
 
-        # SMT solver: z3-based arithmetic constraint solving
+        # SMT solver: arithmetic constraint solving on cmplog pairs
         self._smt_solver = None
         self._enable_smt_z3 = enable_smt_z3
+        self._mod_solving = mod_solving if enable_smt_z3 else "heuristic"
         if enable_smt_z3:
             from fuzzer_tool.core.smt_solver import Z3Solver
 
-            self._smt_solver = Z3Solver()
+            self._smt_solver = Z3Solver(mod_solving_mode=mod_solving)
             if self._smt_solver._available:
-                print("[*] SMT solver: z3 arithmetic constraint solving enabled")
+                print(f"[*] SMT solver: modulo solving mode '{mod_solving}'")
+
+                # Trace mode: pre-compute PC→divisor map from static analysis
+                if mod_solving == "trace":
+                    from fuzzer_tool.core.elf import extract_div_constants
+
+                    targets = multi_targets or [target]
+                    div_map: dict[int, int] = {}
+                    weak_set: set[int] = set()
+                    for t in targets:
+                        try:
+                            d, w = extract_div_constants(t)
+                            div_map.update(d)
+                            weak_set.update(w)
+                        except Exception:
+                            log.debug("Failed to extract DIV constants from %s", t)
+                    if div_map or weak_set:
+                        from fuzzer_tool.core.smt_solver import (
+                            set_pc_divisor_map,
+                            set_weak_mod_set,
+                        )
+
+                        set_pc_divisor_map(div_map)
+                        set_weak_mod_set(weak_set)
+                        print(
+                            f"[*] SMT solver: loaded {len(div_map)} PC→divisor mappings"
+                            f" + {len(weak_set)} weak modulus PCs"
+                        )
+                    else:
+                        print("[!] SMT solver: no DIV/IDIV with known divisor in target(s)")
             else:
                 print("[!] SMT solver: z3-solver not installed — install with: pip install z3-solver")
                 self._smt_solver = None
@@ -526,6 +559,9 @@ class Fuzzer:
         self._last_stats_exec = 0
         self._eps = 0.0
 
+        # Bayesian seed quality estimation
+        self._seed_quality = BayesianSeedQuality()
+
         # Schedule ablation: per-iteration CSV log of signal contributions
         self._ablation_path = Path(schedule_ablation) if schedule_ablation else None
         self._ablation_file = None
@@ -599,6 +635,7 @@ class Fuzzer:
             log.info("Replicator dynamics scheduling enabled (window=200, eta=0.1)")
         self._use_shapley = shapley
         self._shapley = ShapleyAttribution(n_samples=100, window_size=500) if shapley else None
+        self._use_bayesian = bayesian
         self._use_mi = mi_guided
         self._mi = (
             MutualInformationTracker(max_positions=max_len, min_observations=50)
@@ -1499,17 +1536,35 @@ class Fuzzer:
                 self._redqueen_index = len(self._cmplog.pairs)
 
             # SMT sampling pass: runs every iteration regardless of redqueen gate.
-            # Shuffles + samples 5 random pairs; solves arithmetic constraints.
+            # Adaptive sample size based on historical solve rate.
             if self._smt_solver is not None and self._cmplog.pairs:
                 self._smt_solver.reset_batch()
+                # Tune sample budget: if solve rate is sustained >50% we can
+                # invest more; if <10% we're mostly wasting time on that input.
+                _smt_q = self._smt_solver.queries_attempted
+                if _smt_q > 50:
+                    _rate = self._smt_solver.queries_solved / _smt_q
+                    if _rate < 0.1:
+                        _budget = 2
+                    elif _rate > 0.5:
+                        _budget = 10
+                    else:
+                        _budget = 5
+                else:
+                    _budget = 5
                 sample = self._cmplog.pairs[:]
                 import random as _rand
 
                 _rand.shuffle(sample)
-                for op_a, op_b in sample[:5]:
-                    if len(op_a) < 2 or (op_a, op_b) in seen:
+                smt_counter = 0
+                for op_a, op_b in sample:
+                    if smt_counter >= _budget:
+                        break
+                    if (op_a, op_b) in seen:
                         continue
-                    result = self._smt_solver.solve_cmplog_pair(op_a, op_b)
+                    smt_counter += 1
+                    pc = self._cmplog.pair_pc(op_a, op_b)
+                    result = self._smt_solver.solve_cmplog_pair(op_a, op_b, pc=pc)
                     smt_found = False
                     if result is not None:
                         solved = result["solved_bytes"]
@@ -1531,6 +1586,16 @@ class Fuzzer:
                                 break
                         if len(matches) >= 50:
                             break
+            # Concolic mode: after accumulating trace entries, solve and inject
+            if (self._smt_solver is not None
+                    and self._smt_solver.mod_solving_mode == "concolic"
+                    and self._smt_solver.concolic_trace is not None
+                    and self._smt_solver.concolic_trace.has_entries()):
+                concolic_result = self._smt_solver.solve_concolic(mutated)
+                if concolic_result is not None and concolic_result != mutated:
+                    # Inject the concolic solution as a replacement mutation
+                    matches.append((0, mutated, concolic_result))
+                    smt_found = True
             if meta is not None:
                 meta["redqueen_matches"] = matches[:50]
                 # Keep legacy field for state compat

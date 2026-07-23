@@ -40,6 +40,8 @@ class SeedPicker:
             available.append("pareto")
         if f._profile.format_signature:
             available.append("format")
+        if getattr(f, "_use_bayesian", False) and f._seed_quality:
+            available.append("bayesian")
 
         if not available:
             return None
@@ -51,6 +53,7 @@ class SeedPicker:
             "qea": lambda: f.qea.pick_seed() if f.qea else None,
             "pareto": lambda: self._pick_pareto_only() if f.corpus and f.seed_meta else None,
             "format": lambda: self._format_aware_seed(),
+            "bayesian": lambda: self._pick_bayesian_seed() if f.corpus and f._seed_quality else None,
         }
         handler = strategy_map.get(strategy)
         return handler() if handler else None
@@ -71,6 +74,8 @@ class SeedPicker:
             return f.ga.pick_seed()
         if f.markov_generate and f.markov_trained:
             return self._pick_markov_seed()
+        if f.corpus and getattr(f, "_use_bayesian", False) and f._seed_quality:
+            return self._pick_bayesian_seed()
         if f.corpus and f.seed_meta:
             return self.weighted_pick_seed()
         if f.corpus:
@@ -112,6 +117,34 @@ class SeedPicker:
         now = time.time()
         weights = [1.0] * len(f.corpus)
         return self._pick_from_pareto_front(weights, now)
+
+    def _pick_bayesian_seed(self) -> bytes:
+        """Pick seed via Thompson sampling from BayesianSeedQuality posteriors.
+
+        Thompson sampling from the Beta posterior of each registered seed
+        naturally explores seeds with high uncertainty (few observations)
+        while exploiting seeds with proven success rates.
+        """
+        f = self.f
+        if not f.corpus:
+            return self._format_aware_seed()
+        if not f._seed_quality:
+            return random.choice(f.corpus)
+
+        # Build list of registered seed IDs (content hashes)
+        seed_ids = [f._seed_key(s) for s in f.corpus]
+        # Ensure all current corpus seeds are registered (new seeds may not be yet)
+        for sid in seed_ids:
+            if sid not in f._seed_quality._alpha:
+                f._seed_quality.init_seed(sid)
+
+        # Thompson sample: pick the seed with the highest posterior draw
+        chosen_id = f._seed_quality.select_seed(seed_ids)
+        # Map back to the seed bytes
+        for s in f.corpus:
+            if f._seed_key(s) == chosen_id:
+                return s
+        return random.choice(f.corpus)
 
     def _format_aware_seed(self) -> bytes:
         f = self.f

@@ -103,7 +103,6 @@ class PngChunkMutator:
     """
 
     use_wfc: bool = False  # set to True by Fuzzer when --wfc is active
-    smt_solver: object | None = None  # Z3Solver instance (set by Fuzzer when --enable-smt-z3)
 
     def mutate(self, data: bytes, max_len: int = 4096) -> bytes:
         """Apply a random PNG-aware mutation."""
@@ -313,10 +312,6 @@ class PngChunkMutator:
 
         # Final invariant enforcement
         self._ensure_invariants(reordered)
-
-        # SMT fixup: ensure computed fields (length, CRC) are correct
-        if self.smt_solver is not None and hasattr(self.smt_solver, "fix_png_chunks"):
-            self.smt_solver.fix_png_chunks(reordered)
 
         return serialize_png_chunks(reordered)[:max_len]
 

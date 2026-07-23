@@ -405,3 +405,147 @@ class TestMaybeAddConstant:
         _maybe_add_constant(s, b"\x01\x02")
         _maybe_add_constant(s, b"\x01\x02")
         assert len(s) == 1
+
+
+# ═══════════════════════════════════════════════════════════════════
+# extract_div_constants — backward register tracing
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestExtractDivConstants:
+    """Tests for ``extract_div_constants()``.
+
+    These compile a small C file with known DIV patterns, then verify
+    the static analysis recovers the correct divisor constants.
+    """
+
+    @classmethod
+    def setup_class(cls):
+        import subprocess, tempfile, os
+
+        cls._tmpdir = tempfile.mkdtemp(prefix="elf_test_")
+        src = os.path.join(cls._tmpdir, "test_div.c")
+        cls._bin = os.path.join(cls._tmpdir, "test_div")
+        # Write C source with inline asm that explicitly sets ECX to a
+        # constant and then uses DIV with that register — avoids the
+        # -O0 memory-operand issue.
+        _src = (
+            'void f_div10(void) {\n'
+            '    int r;\n'
+            '    asm("mov $10,%%ecx\\n\\t"\n'
+            '        "mov $100,%%eax\\n\\t"\n'
+            '        "xor %%edx,%%edx\\n\\t"\n'
+            '        "div %%ecx\\n\\t"\n'
+            '        "mov %%eax,%0" : "=r"(r) : : "eax","ecx","edx");\n'
+            '}\n'
+            'void f_div7(void) {\n'
+            '    int r;\n'
+            '    asm("mov $7,%%ecx\\n\\t"\n'
+            '        "mov $100,%%eax\\n\\t"\n'
+            '        "xor %%edx,%%edx\\n\\t"\n'
+            '        "div %%ecx\\n\\t"\n'
+            '        "mov %%eax,%0" : "=r"(r) : : "eax","ecx","edx");\n'
+            '}\n'
+            'int f_mod10_check(void) {\n'
+            '    /* div %%ecx puts remainder in %%edx; cmp %%edx,0 checks mod */\n'
+            '    int r;\n'
+            '    asm("mov $10,%%ecx\\n\\t"\n'
+            '        "mov $42,%%eax\\n\\t"\n'
+            '        "xor %%edx,%%edx\\n\\t"\n'
+            '        "div %%ecx\\n\\t"\n'
+            '        "mov %%edx,%0\\n\\t"\n'
+            '        : "=r"(r) : : "eax","ecx","edx");\n'
+            '    /* separate asm for the CMP to prevent reordering */\n'
+            '    asm("cmp $0,%%edx\\n\\t" :: "d"(r) : );\n'
+            '    return r;\n'
+            '}\n'
+            'int main(void) { f_div10(); f_div7(); return f_mod10_check(); }\n'
+        )
+        with open(src, "w") as f:
+            f.write(_src)
+        subprocess.run(
+            ["gcc", "-O0", "-o", cls._bin, src],
+            capture_output=True,
+            timeout=30,
+        )
+
+    @classmethod
+    def teardown_class(cls):
+        import shutil
+
+        shutil.rmtree(cls._tmpdir, ignore_errors=True)
+
+    def test_backward_scan_finds_div10(self):
+        """mov $10, %%ecx before div %%ecx → divisor=10."""
+        from fuzzer_tool.core.elf import extract_div_constants
+
+        d, w = extract_div_constants(self._bin)
+        vals = [v for v in d.values() if v == 10]
+        assert len(vals) >= 1, f"expected divisor=10, got div_map={d} weak={w}"
+
+    def test_backward_scan_finds_div7(self):
+        """mov $7, %%ecx before div %%ecx → divisor=7."""
+        from fuzzer_tool.core.elf import extract_div_constants
+
+        d, w = extract_div_constants(self._bin)
+        vals = [v for v in d.values() if v == 7]
+        assert len(vals) >= 1, f"expected divisor=7, got div_map={d} weak={w}"
+
+    def test_non_elf_returns_empty(self):
+        """Non-ELF file returns empty dict and set."""
+        from fuzzer_tool.core.elf import extract_div_constants
+
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(suffix=".bin") as f:
+            f.write(b"\x00" * 100)
+            f.flush()
+            d, w = extract_div_constants(f.name)
+        assert d == {}
+        assert w == set()
+
+    def test_forward_modulus_cmp_mapped(self):
+        """cmp $0, %%edx after div → CMP PC mapped to same divisor."""
+        from fuzzer_tool.core.elf import extract_div_constants
+
+        d, w = extract_div_constants(self._bin)
+        # At least one entry should have divisor=10 from a CMP (not DIV)
+        vals = [v for v in d.values() if v == 10]
+        # We expect at least 2 entries with divisor=10: the DIV and the CMP
+        assert len(vals) >= 2, (
+            f"expected >=2 entries with divisor=10 "
+            f"(DIV PC + CMP PC), got {len(vals)}: div_map={d} weak={w}"
+        )
+
+    def test_weak_modulus_variable_divisor(self):
+        """div with variable divisor (runtime parameter) → weak_mod_pcs set."""
+        import subprocess, os
+
+        from fuzzer_tool.core.elf import extract_div_constants
+
+        v_src = os.path.join(self._tmpdir, "var_mod.c")
+        v_bin = os.path.join(self._tmpdir, "var_mod")
+        with open(v_src, "w") as f:
+            f.write(
+                'int f(int d) {\n'
+                '    int r;\n'
+                '    asm("mov %1,%%ecx\\n\\t"\n'
+                '        "mov $100,%%eax\\n\\t"\n'
+                '        "xor %%edx,%%edx\\n\\t"\n'
+                '        "div %%ecx\\n\\t"\n'
+                '        "mov %%edx,%0\\n\\t"\n'
+                '        "cmp $0,%%edx\\n\\t"\n'
+                '        : "=r"(r) : "r"(d) : "eax","ecx","edx");\n'
+                '    return r;\n'
+                '}\n'
+                'int main(void) { return f(7); }\n'
+            )
+        subprocess.run(["gcc", "-O0", "-o", v_bin, v_src],
+                       capture_output=True, timeout=30)
+        d, w = extract_div_constants(v_bin)
+        # No constant divisor should be resolvable (d comes from parameter)
+        # The CMP that checks EDX should be in weak_mod_pcs
+        assert len(w) >= 1, (
+            f"expected at least 1 CMP in weak_mod_pcs "
+            f"for variable-divisor DIV, got div_map={d} weak={w}"
+        )

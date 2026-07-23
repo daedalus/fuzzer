@@ -9,6 +9,7 @@ from fuzzer_tool.core.montecarlo import (
     ReplicatorScheduler,
     ShapleyAttribution,
 )
+from fuzzer_tool.core.seed_quality import BayesianSeedQuality
 from fuzzer_tool.core.mutations import (
     DICT_MUTATIONS,
     INTERESTING_8,
@@ -27,6 +28,7 @@ __all__ = [
     "classify_counts",
     "classify_single",
     "new_bits",
+    "BayesianSeedQuality",
     "MarkovChain",
     "MonteCarloScheduler",
     "MOptScheduler",

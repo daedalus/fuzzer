@@ -524,3 +524,260 @@ def estimate_map_size(target: str) -> int:
     estimated_edges = branches * 2  # 2 edges per branch
     map_size = _next_power_of_2(int(estimated_edges * 8))
     return max(DEFAULT, min(1048576, map_size))
+
+
+def _reg_base(md, reg_id: int) -> str | None:
+    """Derive a canonical base name for an x86 register.
+
+    All variants of the same physical register (al/ax/eax/rax, r8b/r8w/r8d/r8)
+    map to the same base ('ax', 'r8', etc.).  Used for alias detection in
+    the backward-scan heuristic.
+    """
+    name = md.reg_name(reg_id)
+    if not name:
+        return None
+    name = name.lower()
+    # Extended registers r8-r15 in various widths
+    if len(name) >= 2 and name[0] == 'r':
+        try:
+            _ = int(name[1])  # is it r8, r9, ... r15?
+            # Strip trailing width suffix: r8b → r8, r8w → r8, r8d → r8
+            if name[-1] in ('b', 'w', 'd') and len(name) >= 3:
+                return name[:-1]
+            return name  # already the base (r8, r9, ..., r15)
+        except ValueError:
+            pass
+    # Strip 'e' or 'r' prefix: eax → ax, rax → ax
+    if name[0] in ('e', 'r') and len(name) > 2:
+        return name[1:]
+    # Low-byte registers: al, bl, cl, dl → ax, bx, cx, dx
+    if len(name) == 2 and name[1] == 'l' and name[0] in 'abcd':
+        return name[0] + 'x'
+    # High-byte registers: ah, bh, ch, dh → ax, bx, cx, dx
+    if len(name) == 2 and name[1] == 'h' and name[0] in 'abcd':
+        return name[0] + 'x'
+    return name
+
+
+def _extract_imm(insn) -> int | None:
+    """If *insn* loads a constant into a register, return the constant.
+
+    Handles ``mov reg, imm``, ``movabs reg, imm``, and simple
+    ``lea reg, [disp]`` (no base/index).
+    """
+    try:
+        from capstone.x86_const import (
+            X86_INS_MOV, X86_INS_MOVABS, X86_INS_LEA,
+            X86_OP_IMM, X86_OP_MEM,
+        )
+    except ImportError:
+        return None
+
+    if insn.id == X86_INS_MOV and len(insn.operands) >= 2:
+        if insn.operands[1].type == X86_OP_IMM:
+            return insn.operands[1].imm
+
+    if insn.id == X86_INS_MOVABS and len(insn.operands) >= 2:
+        if insn.operands[1].type == X86_OP_IMM:
+            return insn.operands[1].imm
+
+    if insn.id == X86_INS_LEA and len(insn.operands) >= 2:
+        mem = insn.operands[1].mem
+        if mem.base == 0 and mem.index == 0 and mem.disp != 0:
+            return mem.disp
+
+    return None
+
+
+def _is_ctrl_flow(insn) -> bool:
+    """Return True if *insn* changes control flow (call, jmp, ret, jcc)."""
+    try:
+        from capstone.x86_const import (
+            X86_GRP_CALL, X86_GRP_JUMP, X86_GRP_RET,
+        )
+    except ImportError:
+        return False
+    for g in insn.groups:
+        if g in (X86_GRP_CALL, X86_GRP_JUMP, X86_GRP_RET):
+            return True
+    return False
+
+
+def extract_div_constants(target: str) -> tuple[dict[int, int], set[int]]:
+    """Find DIV/IDIV instructions and extract divisor and modulus constants.
+
+    Two extraction methods:
+
+    1. **Backward divisor extraction** — determines the divisor for a DIV
+       instruction by scanning backward up to 50 instructions for a ``mov``
+       that loads a constant into the DIV's operand register (handles both
+       immediate and register operands).
+
+    2. **Forward modulus extraction** — after a DIV places the remainder in
+       EDX, subsequent ``cmp edx, …`` instructions are mapped to the same
+       divisor.  This lets trace-mode constraint solving recognise which
+       comparison is checking ``x % N == expected``.
+
+    Returns:
+        ``(div_map, weak_mod_pcs)`` where:
+        - ``div_map`` maps a PC (DIV or CMP address) to a known constant divisor.
+        - ``weak_mod_pcs`` contains CMP addresses that reference the DIV
+          remainder but whose divisor could NOT be determined statically
+          (variable divisor at runtime).  The solver can still try the
+          heuristic common-divisor set for these.
+    """
+    try:
+        from capstone import CS_ARCH_X86, CS_MODE_64, Cs
+        from capstone.x86_const import (
+            X86_INS_DIV, X86_INS_IDIV,
+            X86_INS_MOV, X86_INS_MOVABS, X86_INS_LEA,
+            X86_INS_CMP,
+            X86_OP_IMM, X86_OP_REG, X86_OP_MEM,
+            X86_GRP_CALL, X86_GRP_JUMP, X86_GRP_RET,
+        )
+    except ImportError:
+        return {}, set()
+
+    try:
+        with open(target, "rb") as f:
+            elf = f.read()
+    except OSError:
+        return {}, set()
+
+    if len(elf) < 64 or elf[:4] != b"\x7fELF" or elf[4] != 2 or elf[5] != 1:
+        return {}, set()
+
+    e_shoff = struct.unpack_from("<Q", elf, 40)[0]
+    e_shnum = struct.unpack_from("<H", elf, 60)[0]
+    e_shentsize = struct.unpack_from("<H", elf, 58)[0]
+    e_shstrndx = struct.unpack_from("<H", elf, 62)[0]
+    if e_shnum == 0 or e_shstrndx >= e_shnum:
+        return {}, set()
+
+    shstr_off = e_shoff + e_shstrndx * e_shentsize
+    shstr_offset = struct.unpack_from("<Q", elf, shstr_off + 24)[0]
+
+    text_data = None
+    text_vaddr = 0
+    for i in range(e_shnum):
+        sh = e_shoff + i * e_shentsize
+        if sh + e_shentsize > len(elf):
+            break
+        sh_type = struct.unpack_from("<I", elf, sh + 4)[0]
+        sh_name_idx = struct.unpack_from("<I", elf, sh)[0]
+        name = elf[shstr_offset + sh_name_idx: shstr_offset + sh_name_idx + 32].split(b"\x00")[0]
+        if sh_type == 1 and name == b".text":
+            sh_offset = struct.unpack_from("<Q", elf, sh + 24)[0]
+            sh_size = struct.unpack_from("<Q", elf, sh + 32)[0]
+            text_vaddr = struct.unpack_from("<Q", elf, sh + 16)[0]
+            text_data = elf[sh_offset: sh_offset + sh_size]
+            break
+
+    if not text_data:
+        return {}, set()
+
+    md = Cs(CS_ARCH_X86, CS_MODE_64)
+    md.detail = True
+
+    # Build register alias map once.
+    # Maps each register ID to the set of IDs that share the same physical base.
+    reg_alias: dict[int, set[int]] = {}
+    group_to_ids: dict[str, set[int]] = {}
+    for insn in md.disasm(text_data, text_vaddr):
+        for op in insn.operands:
+            if op.type == X86_OP_REG:
+                base = _reg_base(md, op.reg)
+                if base:
+                    group_to_ids.setdefault(base, set()).add(op.reg)
+        break  # just need one insn to enumerate alias relationships
+    # The first insn may not cover all registers, so enumerate a reasonable range
+    for rid in range(1, 200):
+        name = md.reg_name(rid)
+        if name:
+            base = _reg_base(md, rid)
+            if base:
+                group_to_ids.setdefault(base, set()).add(rid)
+    for base, members in group_to_ids.items():
+        for rid in members:
+            reg_alias[rid] = members
+
+    # ── Forward pass with sliding window ──
+    MAX_BACKWARD = 50
+    recent: list[tuple] = []  # (insn, set_of_written_reg_ids)
+
+    # Family of register IDs that alias with EDX (dl, dx, edx, rdx).
+    # Used to detect CMP instructions that check the DIV remainder.
+    _dx_family: set[int] = set()
+    for rid in range(1, 200):
+        b = _reg_base(md, rid)
+        if b == 'dx':
+            _dx_family.add(rid)
+
+    # Cache of known DIV addresses → divisors
+    div_map: dict[int, int] = {}
+    _known_divs: dict[int, int] = {}
+    # Weak modulus PCs: CMP addresses that check the remainder of a DIV
+    # whose divisor could not be determined statically (variable divisor).
+    weak_mod_pcs: set[int] = set()
+
+    for insn in md.disasm(text_data, text_vaddr):
+        regs_read, regs_write = insn.regs_access()
+        recent.append((insn, set(regs_write)))
+        if len(recent) > MAX_BACKWARD:
+            recent.pop(0)
+
+        # ── DIV/IDIV detection ──
+        if insn.id in (X86_INS_DIV, X86_INS_IDIV):
+            op = insn.operands[0] if insn.operands else None
+            if op is None:
+                continue
+
+            divisor: int | None = None
+
+            # Method 1: immediate operand
+            if op.type == X86_OP_IMM:
+                if 0 < op.imm <= 0xFFFFFFFF:
+                    divisor = op.imm
+
+            # Method 2: register operand with backward scan
+            elif op.type == X86_OP_REG:
+                div_reg = op.reg
+                div_reg_family = reg_alias.get(div_reg, {div_reg})
+                for prev_insn, prev_writes in reversed(recent[:-1]):
+                    if _is_ctrl_flow(prev_insn):
+                        break
+                    if prev_writes & div_reg_family:
+                        candidate = _extract_imm(prev_insn)
+                        if candidate is not None and 0 < candidate <= 0xFFFFFFFF:
+                            divisor = candidate
+                        break
+
+            if divisor is not None:
+                div_map[insn.address] = divisor
+                _known_divs[insn.address] = divisor
+            continue
+
+        # ── Forward modulus extraction ──
+        # A CMP that references the 'dx' register family may be checking
+        # the remainder from a preceding DIV.  If the DIV's divisor is
+        # known it goes into div_map; otherwise into weak_mod_pcs.
+        if (insn.id == X86_INS_CMP and len(insn.operands) >= 2
+                and any(op.type == X86_OP_REG and op.reg in _dx_family
+                        for op in insn.operands)):
+            for prev_insn, _ in reversed(recent[:-1]):
+                if prev_insn.id in (X86_INS_DIV, X86_INS_IDIV):
+                    d = _known_divs.get(prev_insn.address)
+                    if d is not None:
+                        div_map[insn.address] = d
+                    else:
+                        # Variable divisor — tag as weak modulus
+                        weak_mod_pcs.add(insn.address)
+                    break
+
+    if div_map or weak_mod_pcs:
+        import logging as _logging
+        _logging.getLogger(__name__).info(
+            "elf: found %d DIV/IDIV mappings, %d weak modulus PCs",
+            len(div_map), len(weak_mod_pcs),
+        )
+    return div_map, weak_mod_pcs

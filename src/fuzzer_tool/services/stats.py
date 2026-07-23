@@ -185,6 +185,13 @@ class StatsReporter:
             if growth["time_to_plateau"] > 0:
                 print(f"  Plateau in:        ~{growth['time_to_plateau']:,} execs")
 
+        # Bayesian coverage model (richer output when available)
+        bayes = f._edge_tracker.bayesian_coverage_growth_model()
+        if "p_stalled" in bayes and bayes["p_stalled"] is not None:
+            print(f"  Bayesian — P(stalled): {bayes['p_stalled']:.1%} "
+                  f"P(growth): {1 - bayes['p_stalled']:.1%}"
+                  f" {'[STALLED]' if bayes['p_stalled'] > 0.5 else ''}")
+
     def _print_summary_seeds(self, f) -> None:
         """Print seed-related summary lines."""
         if not f.seed_meta:
@@ -196,7 +203,11 @@ class StatsReporter:
 
         edges_per_seed = [m.get("coverage_edges", 0) for m in f.seed_meta.values()]
         productive = sum(1 for e in edges_per_seed if e > 0)
-        stale = sum(1 for m in f.seed_meta.values() if m.get("fuzz_count", 0) >= 50 and m.get("coverage_edges", 0) == 0)
+        stale = sum(
+            1
+            for m in f.seed_meta.values()
+            if m.get("fuzz_count", 0) >= 50 and m.get("coverage_edges", 0) == 0
+        )
         total_seeds = len(f.seed_meta)
         print(f"  Productive seeds:  {productive}/{total_seeds} discovered edges")
         print(f"  Stale seeds:       {stale}/{total_seeds} (50+ fuzzes, 0 edges)")
@@ -220,7 +231,9 @@ class StatsReporter:
         rarity = f._edge_tracker.edge_rarity_stats()
         if rarity["total"] <= 0:
             return
-        print(f"  Edge rarity:       {rarity['singleton']} singleton / {rarity['cold']} cold / {rarity['warm']} warm / {rarity['hot']} hot")
+        print(
+            f"  Edge rarity:       {rarity['singleton']} singleton / {rarity['cold']} cold / {rarity['warm']} warm / {rarity['hot']} hot"
+        )
         print(f"  Avg seeds/edge:    {rarity['avg_seeds_per_edge']:.1f}")
         uniqueness = f._edge_tracker.seed_uniqueness()
         if uniqueness:
@@ -249,7 +262,9 @@ class StatsReporter:
             print(f"  Seeds pruned:      {f._pruned_count}")
         if f._stall_recovery_count > 0:
             print(f"  Recovery entries:  {f._stall_recovery_count}")
-            print(f"  Recovery execs:    {f._stall_recovery_execs:,} ({f._stall_recovery_execs / max(1, f.exec_count) * 100:.1f}%)")
+            print(
+                f"  Recovery execs:    {f._stall_recovery_execs:,} ({f._stall_recovery_execs / max(1, f.exec_count) * 100:.1f}%)"
+            )
         self._print_summary_coverage(f)
         self._print_summary_seeds(f)
         self._print_summary_rarity(f)
@@ -408,7 +423,10 @@ class StatsReporter:
     def _print_stats_cov_str(self, f) -> str:
         """Format coverage string."""
         if f.multi_targets and f._target_shm_covs:
-            parts = [f"{os.path.basename(t)}:{shm.cumulative_edges}" for t, shm in f._target_shm_covs.items()]
+            parts = [
+                f"{os.path.basename(t)}:{shm.cumulative_edges}"
+                for t, shm in f._target_shm_covs.items()
+            ]
             return " | targets: " + " ".join(parts)
         if f.shm_cov:
             shm_edges = f.shm_cov.cumulative_edges
@@ -440,7 +458,9 @@ class StatsReporter:
         new_size = min(1048576, current * 2)
         if new_size <= current:
             return ""
-        print(f"\n[*] Collision risk {collision_risk:.0f}% — resizing bitmap {current:,} → {new_size:,} bytes")
+        print(
+            f"\n[*] Collision risk {collision_risk:.0f}% — resizing bitmap {current:,} → {new_size:,} bytes"
+        )
         f.shm_cov.resize(new_size)
         f.map_size = new_size
         f._edge_tracker.map_size = new_size
@@ -458,7 +478,8 @@ class StatsReporter:
         s = f._smt_solver
         inc_pct = s.batch_solved / max(s.batch_attempted, 1) * 100
         tot_pct = s.queries_solved / max(s.queries_attempted, 1) * 100
-        return f" | smt: {s.batch_solved}/{s.batch_attempted} ({inc_pct:.0f}%) tot: {s.queries_solved}/{s.queries_attempted} ({tot_pct:.0f}%)"
+        cache_str = f" ch:{s.cache_hits}" if s.cache_hits else ""
+        return f" | smt: {s.batch_solved}/{s.batch_attempted} ({inc_pct:.0f}%) tot: {s.queries_solved}/{s.queries_attempted} ({tot_pct:.0f}%){cache_str}"
 
     def _print_stats_dr_str(self, f) -> str:
         """Format discovery rate string with CSD detection."""
@@ -481,14 +502,22 @@ class StatsReporter:
         markov_str = " | markov: trained" if f.markov_trained else ""
         markov_str += "+gen" if f.markov_generate else ""
 
-        cmplog_str = f" | cmplog: {len(f._cmplog.tokens)}t {len(f._cmplog.pairs)}p" if f._cmplog is not None else ""
+        cmplog_str = (
+            f" | cmplog: {len(f._cmplog.tokens)}t {len(f._cmplog.pairs)}p"
+            if f._cmplog is not None
+            else ""
+        )
 
         smt_str = self._print_stats_smt_str(f)
 
         cov_str = self._print_stats_cov_str(f)
         mc_str = ""
         if f.mc:
-            parts = [p for p, cond in [("bandit", f.mc_bandit), (f"cem:{len(f.mc.elite_set)}", f.mc_cem)] if cond]
+            parts = [
+                p
+                for p, cond in [("bandit", f.mc_bandit), (f"cem:{len(f.mc.elite_set)}", f.mc_cem)]
+                if cond
+            ]
             if parts:
                 mc_str = " | mc: " + "+".join(parts)
 
@@ -503,8 +532,16 @@ class StatsReporter:
             recent = list(dict.fromkeys(reversed(f._last_ops_used)))[:3]
             ops_str = " | ops: " + " ".join(recent)
 
-        div_str = f" | div: {f._edge_tracker.compute_corpus_diversity():.0f}" if len(f._edge_tracker.seed_hit_counts) >= 2 else ""
-        jac_str = f" | jac: {f._edge_tracker.compute_average_jaccard():.2f}" if len(f._edge_tracker.seed_hit_counts) >= 2 else ""
+        div_str = (
+            f" | div: {f._edge_tracker.compute_corpus_diversity():.0f}"
+            if len(f._edge_tracker.seed_hit_counts) >= 2
+            else ""
+        )
+        jac_str = (
+            f" | jac: {f._edge_tracker.compute_average_jaccard():.2f}"
+            if len(f._edge_tracker.seed_hit_counts) >= 2
+            else ""
+        )
 
         dr_str = self._print_stats_dr_str(f)
 
@@ -514,11 +551,23 @@ class StatsReporter:
         if f._crash_replays:
             done = [v for v in f._crash_replays.values() if len(v) >= f.replay_n]
             if done:
-                avg_repro = sum(sum(1 for r in replays if r >= 0) / len(replays) for replays in done) / len(done) * 100
+                avg_repro = (
+                    sum(sum(1 for r in replays if r >= 0) / len(replays) for replays in done)
+                    / len(done)
+                    * 100
+                )
                 repro_str = f" | repro: {avg_repro:.0f}%"
 
-        brier_str = f" | brier: {f.mc.brier_score():.3f}" if f.mc and f.mc_bandit and f.mc.brier_score() > 0 else ""
-        crps_str = f" | crps: {f._exec_time_tracker.mean_crps():.4f}" if f._exec_time_tracker.count > 20 else ""
+        brier_str = (
+            f" | brier: {f.mc.brier_score():.3f}"
+            if f.mc and f.mc_bandit and f.mc.brier_score() > 0
+            else ""
+        )
+        crps_str = (
+            f" | crps: {f._exec_time_tracker.mean_crps():.4f}"
+            if f._exec_time_tracker.count > 20
+            else ""
+        )
 
         ent_str = simp_str = ""
         if f._edge_tracker._global_edge_hits:
@@ -548,4 +597,8 @@ class StatsReporter:
         growth = f._edge_tracker.coverage_growth_model()
         if growth["confidence"] > 0.1:
             line += f" | gr: {growth['current_rate']:.3f}e/x proj: {growth['projected_total']} plateau: ~{growth['time_to_plateau']:,}"
+        # Bayesian stall probability when available
+        bayes = f._edge_tracker.bayesian_coverage_growth_model()
+        if bayes.get("p_stalled") is not None and bayes["p_stalled"] > 0.3:
+            line += f" | P(stall): {bayes['p_stalled']:.0%}"
         print(line, flush=True)

@@ -119,7 +119,7 @@ static void flush_buffer(void) {
 
 static inline void buffer_cmp(uint64_t a, uint64_t b, size_t n) {
     if (!cmplog_file) return;
-    if (cmplog_buf_pos + 80 > BUFFER_SIZE) flush_buffer();
+    if (cmplog_buf_pos + 96 > BUFFER_SIZE) flush_buffer();
     static const char hex[] = "0123456789abcdef";
     char *p = cmplog_buffer + cmplog_buf_pos;
     *p++ = 'C'; *p++ = 'M'; *p++ = 'P'; *p++ = ' ';
@@ -134,7 +134,13 @@ static inline void buffer_cmp(uint64_t a, uint64_t b, size_t n) {
     }
     *p++ = ' ';
     int64_t result = (a < b) ? -1 : (a > b) ? 1 : 0;
-    p += sprintf(p, "%ld %zu\n", (long)result, n);
+    p += sprintf(p, "%ld %zu", (long)result, n);
+    // Optional PC field: __builtin_return_address(0) gives the instruction
+    // address after the call to this callback.  The first level of inlining
+    // gives the trace_cmp caller; with LTO this is the comparison site.
+    *p++ = ' ';
+    p += sprintf(p, "%p", __builtin_return_address(0));
+    *p++ = '\n';
     cmplog_buf_pos = (size_t)(p - cmplog_buffer);
 }
 

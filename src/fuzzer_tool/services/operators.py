@@ -178,9 +178,15 @@ class OperatorEngine:
             cmp_type = "STR" if len(op_a) > 8 else "CMP"
 
             mutations = generate_mutations(
-                op_a, op_b, cmp_size, cmp_type, bytes(buf),
+                op_a,
+                op_b,
+                cmp_size,
+                cmp_type,
+                bytes(buf),
                 hammer=True,
-                is_hash=f._cmplog.is_hash_candidate if hasattr(f._cmplog, 'is_hash_candidate') else None,
+                is_hash=f._cmplog.is_hash_candidate
+                if hasattr(f._cmplog, "is_hash_candidate")
+                else None,
             )
             if mutations:
                 offsets, replacements, enc = _rand.choice(mutations)
@@ -872,9 +878,8 @@ class OperatorEngine:
 
         if not hasattr(self.f, "_png_mutator"):
             self.f._png_mutator = PngChunkMutator()
-        # Set WFC mode and SMT solver from fuzzer state
+        # Set WFC mode from fuzzer state
         self.f._png_mutator.use_wfc = getattr(self.f, "_wfc_enabled", False)
-        self.f._png_mutator.smt_solver = getattr(self.f, "_smt_solver", None)
         if parse_png_chunks(bytes(buf)):
             mutated = self.f._png_mutator.mutate(bytes(buf), max_len=self.f.max_len)
         else:
