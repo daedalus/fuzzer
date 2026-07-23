@@ -96,6 +96,13 @@ while True:
                 rc = func(buf, len(data))
             except Exception:
                 rc = -11
+            # Flush cmplog buffer before exiting — os._exit() skips
+            # destructors, so the buffered CMP lines would be lost.
+            if hasattr(lib, '__tracecmp_flush'):
+                try:
+                    lib.__tracecmp_flush()
+                except Exception:
+                    pass
             rc = max(0, min(rc, 125))
             os.write(write_pipe, bytes([rc]))
             os.close(write_pipe)

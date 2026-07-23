@@ -5,8 +5,10 @@
  * fuzzer detects this as a crash (non-zero return) while libpng cleanup
  * happens properly via png_destroy_read_struct.
  *
- * Includes AFL-style edge coverage via afl_shim.c. Compile with:
- *   gcc -O2 -g -shared -fPIC -include src/fuzzer_tool/adapters/afl_shim.c \
+ * Includes AFL-style edge coverage via afl_shim.c and cmplog via cmplog_shim.c. Compile with:
+ *   gcc -O2 -g -shared -fPIC -fsanitize-coverage=trace-cmp \
+ *       -include src/fuzzer_tool/adapters/afl_shim.c \
+ *       src/fuzzer_tool/adapters/cmplog_shim.c -ldl \
  *       -o png_read.so png_read.c -lpng -lz -Wl,--export-dynamic
  */
 #include <png.h>

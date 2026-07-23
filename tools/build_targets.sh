@@ -89,14 +89,34 @@ build_so_target() {
     fi
     if [ "$WITH_CMPLOG" -eq 1 ] && [ -f "$CMPLOG_SHIM" ]; then
         local cmplog_obj_path="/tmp/fuzz_cmplog_$$.o"
-        $cc $extra_flags -O2 -g -fPIC $extra_cflags -c "$CMPLOG_SHIM" -o "$cmplog_obj_path" 2>/dev/null
+        # Compile cmplog shim with clang (NOT gcc) — clang generates correct
+        # __sanitizer_cov_trace_cmp* implementations. Do NOT add -fsanitize-coverage
+        # to the shim — it PROVIDES the callbacks, not calls them.
+        local CMPLOG_CC="clang"
+        command -v clang &>/dev/null || CMPLOG_CC="$cc"
+        $CMPLOG_CC -O2 -g -fPIC -c "$CMPLOG_SHIM" -o "$cmplog_obj_path" 2>/dev/null
         if [ -f "$cmplog_obj_path" ]; then
             cmplog_obj="$cmplog_obj_path"
             cmplog_libs="-ldl"
         fi
     fi
     local rc=0
-    $cc $extra_flags -O2 -g $extra_cflags -shared -fPIC -include "$SHIM" \
+    # Add trace-cmp to target compilation so the compiler generates
+    # __sanitizer_cov_trace_cmp* calls that the linked cmplog_shim implements.
+    # Must use clang — gcc's trace-cmp doesn't generate the callbacks.
+    # -Bsymbolic: prevents ASAN's LD_PRELOAD from overriding the trace-cmp
+    # callbacks with no-ops (ASAN ships weak stubs that shadow our shim).
+    local tracecmp_flag=""
+    local bsymbolic_flag=""
+    local target_cc="$cc"
+    if [ "$WITH_CMPLOG" -eq 1 ]; then
+        tracecmp_flag="-fsanitize-coverage=trace-cmp"
+        bsymbolic_flag="-Wl,-Bsymbolic"
+        if command -v clang &>/dev/null; then
+            target_cc="clang"
+        fi
+    fi
+    $target_cc $extra_flags -O2 -g $extra_cflags $tracecmp_flag -shared -fPIC $bsymbolic_flag -include "$SHIM" \
         -o "$out" "$src" $cmplog_obj $libs $cmplog_libs 2>/dev/null || rc=$?
     [ -n "$cmplog_obj" ] && rm -f "$cmplog_obj"
     if [ $rc -eq 0 ]; then
@@ -184,12 +204,15 @@ build_standalone_so_targets() {
             if [ "$WITH_CMPLOG" -eq 1 ] && [ -f "$CMPLOG_SHIM" ]; then
                 # Compile cmplog shim with gcc (C, not C++) to avoid
                 # C++ const-correctness conflict on memchr signature.
+                # Do NOT add trace-cmp — the shim provides the callbacks.
                 local co="/tmp/fuzz_cmplog_tailslayer$$.o"
                 gcc $flags -O2 -g -fPIC -c "$CMPLOG_SHIM" -o "$co" 2>/dev/null && cmplog_obj="$co" && cmplog_libs="-ldl"
             fi
             # Use g++ for link, but compile the .cpp with -include afl_shim only.
             # cmplog_shim.o is already a compiled C object (no -include needed).
-            $cxx $flags -O2 -g -shared -fPIC -include "$SHIM" $inc \
+            local bsym_flag=""
+            [ "$WITH_CMPLOG" -eq 1 ] && bsym_flag="-Wl,-Bsymbolic"
+            $cxx $flags -O2 -g -shared -fPIC $bsym_flag -include "$SHIM" $inc \
                 -o "$out" "$src" $cmplog_obj $cmplog_libs 2>/dev/null && ok "tailslayer_read${out_suffix}.so" || warn "failed: tailslayer_read${out_suffix}.so"
             [ -n "$cmplog_obj" ] && rm -f "$cmplog_obj"
         fi
@@ -626,6 +649,9 @@ case "$OPTS" in
 esac
 
 if [ "$BUILD_ASAN" -eq 1 ]; then
+    # ASAN .so targets always include cmplog (linked shim, not LD_PRELOAD).
+    # This ensures --cmplog works out of the box without extra flags.
+    WITH_CMPLOG=1
     [ "$HAS_FGREP" -eq 1 ] && compile_fgrep_objects "_asan" "-fsanitize=address"
     [ "$HAS_FGREP" -eq 1 ] && build_fgrep_targets "_asan" "-fsanitize=address" "ASAN"
     # Compile fgrep objects with clang + trace-pc-guard for .so targets

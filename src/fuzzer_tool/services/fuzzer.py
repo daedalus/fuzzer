@@ -967,14 +967,14 @@ class Fuzzer:
                         use_direct_lite = False
                     else:
                         print("[*] Cmplog: externally LD_PRELOAD'd (direct_lite compatible)")
-            # Set _CMPLOG_OUT before loading the .so so the cmplog
-            # constructor can open the log file at CDLL time.
-            if self._cmplog is not None and use_direct_lite:
+            # Set _CMPLOG_OUT in os.environ so the cmplog constructor can
+            # open the log file. Must happen regardless of execution mode:
+            # direct_lite loads the .so in-process, persistent mode loads
+            # it in a subprocess that inherits os.environ.
+            if self._cmplog is not None:
                 self._cmplog.setup_env_for_run()
-                # Preload shims into current process via ctypes (LD_PRELOAD
-                # doesn't affect ctypes.CDLL, but shim symbols must be
-                # resolvable at target load time when compiled-in).
-                self._cmplog.preload_shims()
+                if use_direct_lite:
+                    self._cmplog.preload_shims()
             self._inprocess_runner = InProcessRunner(
                 target=self.target,
                 function_name=auto_func,
@@ -1385,33 +1385,27 @@ class Fuzzer:
         return self._seed_picker.weighted_pick_seed()
 
     def _reset_cmplog(self):
-        """Reset cmplog log after reading tokens.
+        """Flush cmplog buffer to disk before collecting tokens.
 
-        In direct_lite mode with cmplog or tracecmp compiled into the target .so,
-        the .so keeps the log file open across calls. Call the appropriate reset
-        function via ctypes to reopen (truncate) the file from inside the .so's
-        address space, so subsequent writes land at position 0.
+        In direct_lite mode with cmplog compiled into the target .so,
+        the shim buffers CMP lines in a 256KB internal buffer. This flushes
+        that buffer to disk so collect_tokens() can read the data.
 
-        Also flushes the tracecmp shim's internal buffer before collection.
+        Does NOT truncate the file — collect_tokens() handles truncation
+        after reading.
         """
         if self._cmplog is None:
             return
 
-        # Flush tracecmp shim's internal buffer to disk (the shim uses
-        # a 256KB buffer to avoid per-call fprintf overhead). Must be
-        # called before collect_tokens() reads the log file.
+        # Flush tracecmp shim's internal buffer to disk
         self._cmplog.flush_shims()
 
-        # Reset the target .so's internal log position (if compiled-in shim)
+        # Flush the target .so's compiled-in shim buffer
         runner = self._inprocess_runner
         if runner and runner.direct_lite and runner._lib:
             try:
                 if hasattr(runner._lib, "__tracecmp_flush"):
                     runner._lib.__tracecmp_flush()
-                if hasattr(runner._lib, "__cmplog_reset"):
-                    runner._lib.__cmplog_reset()
-                if hasattr(runner._lib, "__tracecmp_reset"):
-                    runner._lib.__tracecmp_reset()
             except (AttributeError, OSError):
                 pass
 
