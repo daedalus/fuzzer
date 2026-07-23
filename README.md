@@ -456,6 +456,14 @@ To verify cmplog is active from the .so itself, check the startup output:
 
 Symbol-based cmplog intercepts libc functions, but GCC -O2 inlines small constant-length `memcmp` into integer compares — no libc call exists to intercept. This is exactly the pattern for format-signature detection (PNG magic, protocol headers, etc.).
 
+**Performance note**: cmplog can produce thousands of comparison pairs per execution
+when the library code is heavily instrumented (e.g., with trace-pc-guard coverage).
+Each execution writes CMP lines to a log file, and the Python `collect_tokens()`
+parses them all (14-23ms for 5000 pairs). To prevent an EPS cliff, the fuzzer
+uses **adaptive periodic collection**: once the pair pool exceeds 2000 entries,
+cmplog data is collected only 1 in 20 iterations, amortizing the parsing cost
+to ~1ms per iteration while still discovering new tokens.
+
 **trace-cmp** solves this by using Clang's `-fsanitize-coverage=trace-cmp` instrumentation, which inserts callbacks at the IR level — after the compiler has already inlined/folded comparisons. This catches every `icmp` that survives optimization.
 
 Both shims coexist: symbol-based (cmplog_shim.c) for explicit libc calls + compiler-based (tracecmp_shim.c) for inlined comparisons. They export different symbols, write to the same `_CMPLOG_OUT` file, and the collector parses both transparently.
@@ -534,9 +542,19 @@ The default coverage scheme uses hand-placed `__afl_map_edge()` calls in
 wrapper targets. This only covers the wrapper code — the fuzzer cannot see
 which internal code path executed inside the library being fuzzed.
 
-**`--clang-scov`** solves this by adding `-fsanitize-coverage=trace-pc-guard`
-to every compiled source file. The compiler inserts coverage callbacks at
-every edge automatically, giving full visibility into library internals.
+**Clang `-fsanitize-coverage=trace-pc-guard`** solves this by having the compiler
+insert `__sanitizer_cov_trace_pc_guard()` at every edge, which the runtime shim
+(`afl_shim.c`) delegates to `__afl_map_edge()` → the AFL SHM bitmap.
+
+**Important**: Clang zero-initializes guard variables by default. The shim's
+`__sanitizer_cov_trace_pc_guard_init` **must** assign each guard a unique non-zero
+value. Without this, `__sanitizer_cov_trace_pc_guard` returns immediately on
+`*guard == 0` and every edge is silently skipped — the most common reason for
+"0 edges discovered" with trace-pc-guard.
+
+The `--clang-scov` flag or the default `.so` build (when clang is available) passes
+`-fsanitize-coverage=trace-pc-guard` to fgrep library compilation. Fgrep `.so`
+targets now get full compiler-inserted edge coverage automatically.
 
 ```bash
 # Build with compiler-inserted edge coverage (requires clang)

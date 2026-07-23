@@ -25,11 +25,21 @@ _UNPACK_KEYS = {1: "B", 2: "H", 4: "L", 8: "Q"}
 
 
 def _to_int(val: bytes, signed: bool = False) -> int:
-    """Interpret *val* as a little-endian integer."""
-    key = _UNPACK_KEYS.get(len(val))
-    if key is None:
-        raise ValueError(f"cannot unpack {len(val)}-byte value")
-    return struct.unpack("<" + (key.lower() if signed else key), val)[0]
+    """Interpret *val* as a little-endian integer.
+
+    Handles arbitrary-length operands from cmplog trace data (e.g. a 7-byte
+    memcmp(foo, bar, 7)) by zero-extending to the nearest supported width.
+    """
+    n = len(val)
+    if n == 0:
+        return 0
+    if n <= 1:
+        return val[0] - 256 if signed and val[0] >= 128 else val[0]
+    if n <= 2:
+        return struct.unpack("<h" if signed else "<H", val.ljust(2, b"\x00"))[0]
+    if n <= 4:
+        return struct.unpack("<i" if signed else "<I", val.ljust(4, b"\x00"))[0]
+    return struct.unpack("<q" if signed else "<Q", val[:8].ljust(8, b"\x00"))[0]
 
 
 def _reverse_if(val: bytes, do_reverse: bool) -> bytes:

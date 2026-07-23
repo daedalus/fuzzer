@@ -628,16 +628,29 @@ esac
 if [ "$BUILD_ASAN" -eq 1 ]; then
     [ "$HAS_FGREP" -eq 1 ] && compile_fgrep_objects "_asan" "-fsanitize=address"
     [ "$HAS_FGREP" -eq 1 ] && build_fgrep_targets "_asan" "-fsanitize=address" "ASAN"
+    # Compile fgrep objects with clang + trace-pc-guard for .so targets
+    # auto-instrumentation via afl_shim.c's __sanitizer_cov_trace_pc_guard
+    if command -v clang &>/dev/null; then
+        [ "$HAS_FGREP" -eq 1 ] && compile_fgrep_objects "_asan_tcg" "-fsanitize=address" "clang" "-fsanitize-coverage=trace-pc-guard"
+    else
+        warn "clang not found — .so targets will lack auto edge coverage (manual __afl_map_edge only)"
+        [ "$HAS_FGREP" -eq 1 ] && compile_fgrep_objects "_asan_tcg" "-fsanitize=address"
+    fi
     build_simple_targets "_asan" "-fsanitize=address" "ASAN"
-    [ "$HAS_FGREP" -eq 1 ] && build_fgrep_so_targets "_asan" "-fsanitize=address" "ASAN"
+    [ "$HAS_FGREP" -eq 1 ] && build_fgrep_so_targets "_asan_tcg" "-fsanitize=address" "ASAN"
     build_simple_so_targets "_asan" "-fsanitize=address" "ASAN"
     build_standalone_so_targets "_asan" "-fsanitize=address" "ASAN"
 fi
 if [ "$BUILD_NOSAN" -eq 1 ]; then
     [ "$HAS_FGREP" -eq 1 ] && compile_fgrep_objects "_nosan" ""
     [ "$HAS_FGREP" -eq 1 ] && build_fgrep_targets "_nosan" "" "No-ASAN"
+    if command -v clang &>/dev/null; then
+        [ "$HAS_FGREP" -eq 1 ] && compile_fgrep_objects "_nosan_tcg" "" "clang" "-fsanitize-coverage=trace-pc-guard"
+    else
+        [ "$HAS_FGREP" -eq 1 ] && compile_fgrep_objects "_nosan_tcg" ""
+    fi
     build_simple_targets "_nosan" "" "No-ASAN"
-    [ "$HAS_FGREP" -eq 1 ] && build_fgrep_so_targets "_nosan" "" "No-ASAN"
+    [ "$HAS_FGREP" -eq 1 ] && build_fgrep_so_targets "_nosan_tcg" "" "No-ASAN"
     build_simple_so_targets "_nosan" "" "No-ASAN"
     build_standalone_so_targets "_nosan" "" "No-ASAN"
 fi

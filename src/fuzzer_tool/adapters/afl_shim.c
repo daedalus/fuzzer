@@ -114,12 +114,15 @@ void __sanitizer_cov_trace_pc_guard(uint32_t *guard) {
 }
 
 /* Called once per module with the range of guard variables.
- * The compiler sets each guard to a unique nonzero value at init time.
- * We don't need to do anything — the guard values are already assigned. */
+ * Clang zero-initializes guards; we must assign each a unique nonzero value
+ * so __sanitizer_cov_trace_pc_guard can use *guard as the edge index.
+ * Without this, *guard is always 0 and every edge is silently skipped. */
 __attribute__((visibility("default")))
 void __sanitizer_cov_trace_pc_guard_init(uint32_t *start, uint32_t *stop) {
-    (void)start;
-    (void)stop;
+    static uint32_t guard_counter;
+    if (start == stop || *start) return;
+    for (uint32_t *g = start; g < stop; g++)
+        *g = ++guard_counter;
 }
 
 __attribute__((visibility("default")))

@@ -419,6 +419,7 @@ class Fuzzer:
         # Cmplog: comparison tracing via LD_PRELOAD
         self._cmplog = None
         self._redqueen_index = 0
+        self._cmplog_skip_counter = 0  # adaptive cmplog collection skip
         if cmplog:
             from fuzzer_tool.core.cmplog import CmplogCollector
 
@@ -1399,11 +1400,23 @@ class Fuzzer:
         # Flush tracecmp buffer before collecting tokens (direct_lite mode)
         self._reset_cmplog()
 
-        # Collect cmplog tokens after each execution
+        # Collect cmplog tokens — periodic sampling once pool is saturated.
+        # collect_tokens() reads + parses the whole cmplog file (~14-23ms
+        # with 5000 pairs); running it every iteration when the pool is
+        # already saturated destroys throughput.  Adaptive: eager while
+        # building the pool, then sample every N iterations.
         cmplog_found = False
         smt_found = False
         if self._cmplog:
-            new_tokens = self._cmplog.collect_tokens()
+            pr_count = len(self._cmplog.pairs)
+            _interval = 1 if pr_count < 500 else (5 if pr_count < 2000 else 20)
+            self._cmplog_skip_counter += 1
+            _collect_now = self._cmplog_skip_counter >= _interval
+            if _collect_now:
+                self._cmplog_skip_counter = 0
+                new_tokens = self._cmplog.collect_tokens()
+            else:
+                new_tokens = []
             cmplog_found = bool(new_tokens)
             if not hasattr(self, "_dict_set"):
                 self._dict_set = set(self.dictionary)
@@ -1486,8 +1499,8 @@ class Fuzzer:
                 self._redqueen_index = len(self._cmplog.pairs)
 
                 # SMT sampling pass: run solver on random pairs each iteration
-                # (not just new pairs — gives fresh solver activity per exec)
-                if self._smt_solver is not None and self._cmplog.pairs:
+                # (z3 is expensive, so sample at the same adaptive rate as collection)
+                if self._smt_solver is not None and self._cmplog.pairs and _collect_now:
                     self._smt_solver.reset_batch()
                     sample = self._cmplog.pairs[:]
                     import random as _rand
