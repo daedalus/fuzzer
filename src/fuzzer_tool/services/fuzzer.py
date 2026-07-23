@@ -1451,11 +1451,9 @@ class Fuzzer:
             # Record redqueen matches: (offset, operand_a, operand_b)
             # for input-to-state matching during mutation.
             # Only scan new pairs (not yet seen) to avoid O(5000) per iteration.
+            matches = list(meta.get("redqueen_matches", [])) if meta is not None else []
+            seen = {(m[1], m[2]) for m in matches}  # dedup by (A, B)
             if self._cmplog.pairs and meta is not None and self._redqueen_index < len(self._cmplog.pairs):
-                matches = list(meta.get("redqueen_matches", []))
-                seen = {(m[1], m[2]) for m in matches}  # dedup by (A, B)
-                if self._smt_solver is not None:
-                    self._smt_solver.reset_batch()
                 for op_a, op_b in self._cmplog.pairs[self._redqueen_index :]:
                     if len(op_a) < 2 or (op_a, op_b) in seen:
                         continue
@@ -1498,38 +1496,40 @@ class Fuzzer:
 
                 self._redqueen_index = len(self._cmplog.pairs)
 
-                # SMT sampling pass: run solver on random pairs each iteration
-                # (limited to 5 random pairs — fast, unlike file parsing)
-                if self._smt_solver is not None and self._cmplog.pairs:
-                    self._smt_solver.reset_batch()
-                    sample = self._cmplog.pairs[:]
-                    import random as _rand
+            # SMT sampling pass: runs every iteration regardless of redqueen gate.
+            # Shuffles + samples 5 random pairs; solves arithmetic constraints.
+            if self._smt_solver is not None and self._cmplog.pairs:
+                self._smt_solver.reset_batch()
+                sample = self._cmplog.pairs[:]
+                import random as _rand
 
-                    _rand.shuffle(sample)
-                    for op_a, op_b in sample[:5]:
-                        if len(op_a) < 2 or (op_a, op_b) in seen:
-                            continue
-                        result = self._smt_solver.solve_cmplog_pair(op_a, op_b)
-                        if result is not None:
-                            solved = result["solved_bytes"]
-                            for candidate, target in [(op_a, solved), (op_b, solved)]:
-                                if len(candidate) < 2:
-                                    continue
-                                pos = 0
-                                while pos <= len(mutated) - len(candidate):
-                                    idx = mutated.find(candidate, pos)
-                                    if idx == -1:
-                                        break
-                                    matches.append((idx, candidate, target))
-                                    seen.add((candidate, target))
-                                    smt_found = True
-                                    pos = idx + 1
-                                    if len(matches) >= 50:
-                                        break
-                                if smt_found or len(matches) >= 50:
+                _rand.shuffle(sample)
+                for op_a, op_b in sample[:5]:
+                    if len(op_a) < 2 or (op_a, op_b) in seen:
+                        continue
+                    result = self._smt_solver.solve_cmplog_pair(op_a, op_b)
+                    smt_found = False
+                    if result is not None:
+                        solved = result["solved_bytes"]
+                        for candidate, target in [(op_a, solved), (op_b, solved)]:
+                            if len(candidate) < 2:
+                                continue
+                            pos = 0
+                            while pos <= len(mutated) - len(candidate):
+                                idx = mutated.find(candidate, pos)
+                                if idx == -1:
                                     break
-                            if len(matches) >= 50:
+                                matches.append((idx, candidate, target))
+                                seen.add((candidate, target))
+                                smt_found = True
+                                pos = idx + 1
+                                if len(matches) >= 50:
+                                    break
+                            if smt_found or len(matches) >= 50:
                                 break
+                        if len(matches) >= 50:
+                            break
+            if meta is not None:
                 meta["redqueen_matches"] = matches[:50]
                 # Keep legacy field for state compat
                 meta["redqueen_offsets"] = [m[0] for m in meta["redqueen_matches"]]
