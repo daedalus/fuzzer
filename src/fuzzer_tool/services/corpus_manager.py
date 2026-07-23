@@ -454,7 +454,10 @@ class CorpusManager:
             if productive > 0:
                 target_size = max(target_size, productive)
 
-        if len(unique) > target_size:
+        if len(unique) > target_size or (
+            f.max_corpus_bytes > 0
+            and sum(len(s) for s in unique) > f.max_corpus_bytes
+        ):
             # Split into mandatory (set-cover essential) and optional.
             mandatory_seeds = [s for s in unique if id(s) in mandatory]
             optional = [s for s in unique if id(s) not in mandatory]
@@ -482,9 +485,28 @@ class CorpusManager:
                 score = edge_score * wasserstein_weight * ppmd_bonus
                 scored.append((score, seed))
             scored.sort(key=lambda x: x[0], reverse=True)
-            budget = target_size - len(mandatory_seeds)
-            keep = min(budget, len(scored))
-            unique = mandatory_seeds + [s for _, s in scored[:keep]]
+            if f.max_corpus_bytes > 0:
+                # Knapsack: sort optional seeds by value/weight density
+                # (value = coverage score, weight = seed byte size).
+                # Greedy density-ordering is a well-known 2-approximation
+                # for 0/1 knapsack.
+                scored.sort(
+                    key=lambda x: x[0] / max(len(x[1]), 1),
+                    reverse=True,
+                )
+                selected = []
+                total_bytes = sum(len(s) for s in mandatory_seeds)
+                for _score, seed in scored:
+                    seed_bytes = len(seed)
+                    if total_bytes + seed_bytes <= f.max_corpus_bytes:
+                        selected.append(seed)
+                        total_bytes += seed_bytes
+                unique = mandatory_seeds + selected
+            else:
+                # Count-budget: keep top-K by score (original behavior)
+                budget = target_size - len(mandatory_seeds)
+                keep = min(budget, len(scored))
+                unique = mandatory_seeds + [s for _, s in scored[:keep]]
             del scored  # free scored list after sorting
 
         removed = len(f.corpus) - len(unique)

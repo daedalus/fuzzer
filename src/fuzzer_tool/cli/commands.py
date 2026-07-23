@@ -316,6 +316,7 @@ def cmd_fuzz(args):
         persistent=args.persistent,
         cmplog=args.cmplog,
         max_corpus=args.max_corpus,
+        max_corpus_bytes=getattr(args, "max_corpus_bytes", 0),
         minimize_every_execs=getattr(args, "minimize_every_execs", 0),
         prune_corpus_max_memory=getattr(args, "prune_corpus_max_memory", 80),
         no_shm=args.no_shm,
@@ -1209,6 +1210,12 @@ def main() -> int:
         type=int,
         default=0,
         help="Auto-minimize corpus when it exceeds N entries (0=unlimited)",
+    )
+    fuzz_parser.add_argument(
+        "--max-corpus-bytes",
+        type=int,
+        default=0,
+        help="Auto-minimize corpus when total seed bytes exceeds N (0=unlimited)",
     )
     fuzz_parser.add_argument(
         "--minimize-every-execs",

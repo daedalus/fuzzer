@@ -274,6 +274,7 @@ class Fuzzer:
         inprocess_func="LLVMFuzzerTestOneInput",
         cmplog=False,
         max_corpus=0,
+        max_corpus_bytes=0,
         minimize_every_execs=0,
         prune_corpus_max_memory=80,
         no_shm=False,
@@ -351,6 +352,7 @@ class Fuzzer:
         self.file_mode = file_mode
         self.target_args = target_args or []
         self.max_corpus = max_corpus
+        self.max_corpus_bytes = max_corpus_bytes
         self.minimize_every_execs = minimize_every_execs
         self.prune_corpus_max_memory = prune_corpus_max_memory
         self._last_memory_prune_exec = 0
@@ -1560,6 +1562,11 @@ class Fuzzer:
             has_new_coverage = (self.ptrace_cov and self.ptrace_cov.is_new_coverage()) or (
                 self.shm_cov and self.shm_cov.is_new_coverage()
             )
+
+        # Mark cmplog tokens/pairs present during a coverage gain as more
+        # valuable — they survive eviction longer.
+        if has_new_coverage and self._cmplog:
+            self._cmplog.mark_coverage_gain()
 
         # Record crash MI: I(byte_position; crash_outcome)
         if self._crash_mi:

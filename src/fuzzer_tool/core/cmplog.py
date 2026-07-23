@@ -42,6 +42,10 @@ class CmplogCollector:
         self._pair_set: set[tuple[bytes, bytes]] = set()
         self._shim_path: str | None = None
         self._shim_handle = None
+        # Value-density signal: how often each token/pair was present
+        # when a coverage gain was detected. Higher = more valuable.
+        self._token_value: dict[bytes, int] = {}
+        self._pair_value: dict[tuple[bytes, bytes], int] = {}
 
     def start(self) -> bool:
         """Compile and prepare the unified cmplog shim."""
@@ -261,15 +265,30 @@ class CmplogCollector:
         self.tokens.extend(new_tokens)
         self.pairs.extend(new_pairs)
 
-        # Cap token/pair lists to bound memory
+        # Cap token/pair lists to bound memory.
+        # Preserves highest-value-density entries instead of simple recency.
         if len(self.tokens) > CMPLOG_TOKENS_MAX:
-            half = CMPLOG_TOKENS_MAX // 2
-            self.tokens = self.tokens[-half:]
-            self._token_set = set(self.tokens)
+            excess = len(self.tokens) - CMPLOG_TOKENS_MAX
+            scored = [
+                (self._token_value.get(t, 0) / max(len(t), 1), t)
+                for t in self._token_set
+            ]
+            scored.sort(key=lambda x: x[0])  # lowest value-density first
+            for _, t in scored[:excess]:
+                self._token_set.discard(t)
+                self._token_value.pop(t, None)
+            self.tokens = list(self._token_set)
         if len(self.pairs) > CMPLOG_PAIRS_MAX:
-            half = CMPLOG_PAIRS_MAX // 2
-            self.pairs = self.pairs[-half:]
-            self._pair_set = set(self.pairs)
+            excess = len(self.pairs) - CMPLOG_PAIRS_MAX
+            scored = [
+                (self._pair_value.get(p, 0) / max(len(p[0]) + len(p[1]), 1), p)
+                for p in self._pair_set
+            ]
+            scored.sort(key=lambda x: x[0])  # lowest value-density first
+            for _, p in scored[:excess]:
+                self._pair_set.discard(p)
+                self._pair_value.pop(p, None)
+            self.pairs = list(self._pair_set)
 
         if new_tokens:
             log.info(
@@ -281,6 +300,19 @@ class CmplogCollector:
             )
 
         return new_tokens
+
+    def mark_coverage_gain(self) -> None:
+        """Bump value signal for all currently tracked tokens and pairs.
+
+        Called by the fuzzer when a coverage gain is detected during a
+        fuzz iteration where cmplog data was used.  Tokens/pairs that
+        are frequently present during gains are preferentially retained
+        during eviction.
+        """
+        for t in self._token_set:
+            self._token_value[t] = self._token_value.get(t, 0) + 1
+        for p in self._pair_set:
+            self._pair_value[p] = self._pair_value.get(p, 0) + 1
 
     def get_tokens(self) -> list[bytes]:
         """Get all collected tokens."""
