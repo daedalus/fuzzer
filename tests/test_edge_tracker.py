@@ -426,3 +426,51 @@ class TestSaveLoad:
         path.write_text("not json {{{")
         et = EdgeTracker()
         assert not et.load(str(path))
+
+
+class TestBayesianGrowthModel:
+    def test_insufficient_data_falls_back(self):
+        et = EdgeTracker()
+        # Only 3 timeline points — below the 5-point threshold
+        et._coverage_timeline = [(0, 0), (100, 10), (200, 15)]
+        result = et.bayesian_coverage_growth_model()
+        assert result["method"] == "fallback_insufficient_data"
+
+    def test_bayesian_model_runs_with_enough_data(self):
+        et = EdgeTracker()
+        # Simulate a coverage growth curve: fast start, slowing down
+        import math as _m
+        timeline = []
+        for i in range(20):
+            exec_count = i * 100
+            edges = int(500 * (1 - _m.exp(-0.1 * i)))
+            timeline.append((exec_count, edges))
+        et._coverage_timeline = timeline
+        result = et.bayesian_coverage_growth_model()
+        # Should use the Levenberg-Marquardt path, not fallback
+        assert result["method"] == "bayesian_laplace"
+        assert result["A_mean"] is not None
+        assert result["k_mean"] is not None
+        assert result["A_mean"] > 0
+        assert result["k_mean"] > 0
+        assert result["sigma_mean"] >= 0
+        assert result["p_stalled"] is not None
+        assert result["p_growth_remaining"] is not None
+        assert 0.0 <= result["p_stalled"] <= 1.0
+        assert 0.0 <= result["p_growth_remaining"] <= 1.0
+
+    def test_bayesian_model_converged_plateau(self):
+        et = EdgeTracker()
+        import math as _m
+        # Simulate fully saturated coverage — rate dropped to near zero
+        timeline = []
+        for i in range(30):
+            exec_count = i * 100
+            edges = min(200, int(200 * (1 - _m.exp(-0.5 * i))))
+            timeline.append((exec_count, edges))
+        et._coverage_timeline = timeline
+        result = et.bayesian_coverage_growth_model()
+        assert result["method"] == "bayesian_laplace"
+        # P(stalled) should be high for a saturated curve
+        assert result["p_stalled"] is not None
+        assert result["p_stalled"] > 0.5

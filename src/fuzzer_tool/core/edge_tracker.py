@@ -40,6 +40,135 @@ log = logging.getLogger(__name__)
 MORRIS_A = 30
 
 
+# ── Pure-Python replacements for scipy ────────────────────────────────
+
+
+def _norm_cdf(x: float, loc: float = 0.0, scale: float = 1.0) -> float:
+    """Normal cumulative distribution function (replaces scipy.stats.norm.cdf).
+
+    Uses the math.erf approximation: Φ(x) = 0.5 * (1 + erf((x - loc) / (scale * √2))).
+    Max error ≈ 1.5e-7, more than sufficient for probability estimates.
+    """
+    if scale <= 0:
+        return 1.0 if x >= loc else 0.0
+    z = (x - loc) / (scale * math.sqrt(2.0))
+    return 0.5 * (1.0 + math.erf(z))
+
+
+class _LevenbergMarquardtResult:
+    """Minimal result container matching scipy.optimize.least_squares interface."""
+
+    __slots__ = ("x", "cost", "jac")
+
+    def __init__(self, x, cost, jac):
+        self.x = x
+        self.cost = cost
+        self.jac = jac
+
+
+def _levenberg_marquardt(
+    residuals,
+    p0,
+    bounds,
+    max_nfev: int = 200,
+    xtol: float = 1e-8,
+    ftol: float = 1e-8,
+):
+    """Levenberg-Marquardt nonlinear least squares with box constraints.
+
+    Replaces scipy.optimize.least_squares for the specific use case in
+    bayesian_coverage_growth_model(). Returns a result with .x, .cost, .jac.
+
+    Args:
+        residuals: Callable(p) -> 1D array of residuals.
+        p0: Initial parameter guess (numpy array).
+        bounds: (lower_bounds, upper_bounds) as two numpy arrays.
+        max_nfev: Maximum function evaluations.
+        xtol: Parameter convergence tolerance.
+        ftol: Cost convergence tolerance.
+    """
+    lo, hi = bounds
+    p = np.array(p0, dtype=np.float64)
+    lo = np.array(lo, dtype=np.float64)
+    hi = np.array(hi, dtype=np.float64)
+
+    # Clamp initial guess
+    p = np.clip(p, lo, hi)
+
+    lam = 1e-3
+    nfev = 0
+
+    def _fd_jacobian(func, p, h=1e-8):
+        """Central-difference Jacobian."""
+        n = len(p)
+        r0 = np.asarray(func(p), dtype=np.float64)
+        m = len(r0)
+        J = np.empty((m, n), dtype=np.float64)
+        for j in range(n):
+            p_hi = p.copy()
+            p_lo = p.copy()
+            p_hi[j] += h
+            p_lo[j] -= h
+            p_hi = np.clip(p_hi, lo, hi)
+            p_lo = np.clip(p_lo, lo, hi)
+            J[:, j] = (np.asarray(func(p_hi), dtype=np.float64) - np.asarray(func(p_lo), dtype=np.float64)) / max(p_hi[j] - p_lo[j], h)
+        return J, r0
+
+    J, r = _fd_jacobian(residuals, p)
+    nfev += 1 + 2 * len(p)
+    cost = float(r @ r)
+
+    for _iter in range(max_nfev - nfev):
+        # Normal equations: (J^T J + λ diag(J^T J)) Δp = -J^T r
+        JtJ = J.T @ J
+        diagJtJ = np.diag(JtJ) + 1e-12
+        A = JtJ + lam * np.diag(diagJtJ)
+        b = -(J.T @ r)
+
+        try:
+            dp = np.linalg.solve(A, b)
+        except np.linalg.LinAlgError:
+            break
+
+        # Step with gain ratio
+        p_new = np.clip(p + dp, lo, hi)
+        r_new = np.asarray(residuals(p_new), dtype=np.float64)
+        nfev += 1
+        cost_new = float(r_new @ r_new)
+
+        actual_loss = cost - cost_new
+        pred_loss = float(dp @ (lam * np.diag(JtJ) * dp - J.T @ r))
+        # Clamp predicted gain to avoid division issues
+        if abs(pred_loss) < 1e-15:
+            gain_ratio = 1.0 if actual_loss >= 0 else 0.0
+        else:
+            gain_ratio = actual_loss / pred_loss
+
+        if gain_ratio > 0:
+            p = p_new
+            r = r_new
+            cost = cost_new
+            lam *= max(1.0 / 3.0, 1.0 - (2.0 * gain_ratio - 1.0) ** 3)
+            lam = max(lam, 1e-15)
+            # Recheck Jacobian periodically
+            if _iter % 5 == 0:
+                J, _ = _fd_jacobian(residuals, p)
+                nfev += 2 * len(p)
+        else:
+            lam *= 2.0
+            lam = min(lam, 1e10)
+
+        # Convergence checks
+        if np.max(np.abs(dp)) < xtol:
+            break
+        if actual_loss > 0 and abs(actual_loss) < ftol * cost:
+            break
+
+    # Final Jacobian for covariance estimation
+    J, _ = _fd_jacobian(residuals, p)
+    return _LevenbergMarquardtResult(x=p, cost=cost, jac=J)
+
+
 def morris_estimate(v: int) -> float:
     """Convert Morris counter value to approximate count.
 
@@ -843,9 +972,7 @@ class EdgeTracker:
             return weights * (y_arr - A * (1.0 - np.exp(-k * t_arr)))
 
         try:
-            from scipy.optimize import least_squares
-
-            fit = least_squares(residuals, p0, bounds=([10.0, 1e-10], [1e8, 1.0]), max_nfev=200)
+            fit = _levenberg_marquardt(residuals, p0, bounds=([10.0, 1e-10], [1e8, 1.0]), max_nfev=200)
             A_hat, k_hat = fit.x
             sigma_hat = np.sqrt(fit.cost / max(1, n_points - 2))
 
@@ -878,8 +1005,7 @@ class EdgeTracker:
                 var_rate = float(grad_rate @ cov @ grad_rate)
                 se_rate = float(np.sqrt(max(var_rate, 0)))
                 if se_rate > 1e-12:
-                    from scipy.stats import norm
-                    p_stalled = norm.cdf(0.001, loc=rate, scale=se_rate)
+                    p_stalled = _norm_cdf(0.001, loc=rate, scale=se_rate)
                 else:
                     p_stalled = 1.0 if rate < 0.001 else 0.0
                 result["p_stalled"] = float(p_stalled)
@@ -887,7 +1013,7 @@ class EdgeTracker:
                 # P(growth remaining): posterior that A > current edges
                 current_edges = int(y_arr[-1])
                 if se_A > 1e-12:
-                    p_growth = 1.0 - norm.cdf(current_edges, loc=A_hat, scale=se_A)
+                    p_growth = 1.0 - _norm_cdf(current_edges, loc=A_hat, scale=se_A)
                 else:
                     p_growth = 1.0 if A_hat > current_edges else 0.0
                 result["p_growth_remaining"] = float(p_growth)
