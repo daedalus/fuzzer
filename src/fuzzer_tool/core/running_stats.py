@@ -4,12 +4,10 @@ Single-pass, O(1) per update computation of mean, variance, skewness,
 and excess kurtosis.  Two variants:
 
   RunningMoments          — unbounded, all history counts equally
-  RunningMoments(window=N) — bounded deque, recent observations dominate
+  RunningMoments(window=N) — bounded window, O(1) per update
 
-The windowed variant is better for series where recent behavior should
-drive decisions (discovery rate, exec time).  The unbounded variant is
-better for series where all observations matter equally (corpus seed
-sizes across a session).
+The windowed variant uses power sums (S1, S2, S3, S4) internally for
+O(1) eviction/insertion instead of O(window) full recomputation.
 
 Reference
 ---------
@@ -41,6 +39,9 @@ class RunningMoments:
         self._m4: float = 0.0
         if window is not None:
             self._buf: collections.deque[float] = collections.deque(maxlen=window)
+            # Power sums for O(1) sliding window updates.
+            # Not initialized until first slide transition (_sums_stale=True).
+            self._sums_stale: bool = True
         else:
             self._buf = collections.deque()  # type: ignore[assignment]
 
@@ -51,9 +52,17 @@ class RunningMoments:
     def update(self, x: float) -> None:
         """Incorporate a new observation."""
         if self._window is not None and self._n >= self._window:
+            # Lazy-initialize power sums on first slide transition.
+            if self._sums_stale:
+                self._s1 = sum(self._buf)
+                self._s2 = sum(v * v for v in self._buf)
+                self._s3 = sum(v ** 3 for v in self._buf)
+                self._s4 = sum(v ** 4 for v in self._buf)
+                self._sums_stale = False
+            x_old = self._buf[0]
             self._buf.popleft()
             self._buf.append(x)
-            self._recompute()
+            self._slide_update(x, x_old)
         else:
             self._n += 1
             self._buf.append(x)
@@ -76,29 +85,39 @@ class RunningMoments:
         self._m3 += term1 * delta_n * (n - 2) - 3 * delta_n * self._m2
         self._m2 += term1
 
-    def _recompute(self) -> None:
-        """Recompute all moments from scratch over the window buffer."""
-        n = len(self._buf)
-        self._n = n
-        if n == 0:
-            self._mean = self._m2 = self._m3 = self._m4 = 0.0
-            return
-        if n == 1:
-            self._mean = self._buf[0]
-            self._m2 = self._m3 = self._m4 = 0.0
-            return
-        mean = sum(self._buf) / n
-        m2 = m3 = m4 = 0.0
-        for v in self._buf:
-            d = v - mean
-            d2 = d * d
-            m2 += d2
-            m3 += d2 * d
-            m4 += d2 * d2
-        self._mean = mean
-        self._m2 = m2
-        self._m3 = m3
-        self._m4 = m4
+    def _slide_update(self, x_new: float, x_old: float) -> None:
+        """O(1) sliding-window update using power sums.
+
+        Maintains S1..S4 as sliding sums via evict-and-insert, then
+        derives central moments from them.  Avoids O(window) full
+        recomputation on every call.
+        """
+        n = self._window
+        # Evict old, insert new in the power sums.
+        self._s1 += x_new - x_old
+        self._s2 += x_new * x_new - x_old * x_old
+        self._s3 += x_new * x_new * x_new - x_old * x_old * x_old
+        self._s4 += (x_new ** 4) - (x_old ** 4)
+
+        self._mean = self._s1 / n
+        # Central moments (population, not sample).
+        # m1 = mean (already computed as self._mean)
+        m1 = self._mean
+        m2 = self._s2 / n - m1 * m1
+        m3 = self._s3 / n - 3 * m1 * self._s2 / n + 2 * m1 * m1 * m1
+        m4 = (
+            self._s4 / n
+            - 4 * m1 * self._s3 / n
+            + 6 * m1 * m1 * self._s2 / n
+            - 3 * m1 * m1 * m1 * m1
+        )
+        # Store raw (sums, not Bessel-corrected) for consistency with
+        # the unbounded variant's internal M* representation.  The
+        # Bessel correction is applied in the variance/skewness/kurtosis
+        # properties.
+        self._m2 = m2 * n
+        self._m3 = m3 * n
+        self._m4 = m4 * n
 
     # ------------------------------------------------------------------
     # Properties
@@ -167,7 +186,7 @@ class RunningMoments:
 
     def save(self) -> dict:
         """Serialize for persistence."""
-        return {
+        data = {
             "n": self._n,
             "mean": self._mean,
             "m2": self._m2,
@@ -176,6 +195,12 @@ class RunningMoments:
             "window": self._window,
             "buf": list(self._buf),
         }
+        if self._window is not None and not self._sums_stale:
+            data["s1"] = self._s1
+            data["s2"] = self._s2
+            data["s3"] = self._s3
+            data["s4"] = self._s4
+        return data
 
     def load(self, data: dict) -> None:
         """Restore from persistence."""
@@ -187,5 +212,14 @@ class RunningMoments:
         self._window = data.get("window")
         if self._window is not None:
             self._buf = collections.deque(data.get("buf", []), maxlen=self._window)
+            # Restore power sums for O(1) sliding window if persisted.
+            if "s1" in data:
+                self._s1 = data["s1"]
+                self._s2 = data["s2"]
+                self._s3 = data["s3"]
+                self._s4 = data["s4"]
+                self._sums_stale = False
+            else:
+                self._sums_stale = True
         else:
             self._buf = collections.deque(data.get("buf", []))

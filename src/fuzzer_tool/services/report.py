@@ -346,7 +346,7 @@ def _smt_solver_activity(f) -> str:
             return ""
         attempted = stats.get("queries_attempted", 0)
         solved = stats.get("queries_solved", 0)
-        timed_out = stats.get("queries_timed_out", 0)
+        timed_out = stats.get("queries_failed", 0)
         solved_pct = solved / attempted * 100 if attempted > 0 else 0.0
     except (TypeError, AttributeError):
         return ""
@@ -355,7 +355,7 @@ def _smt_solver_activity(f) -> str:
         "--- SMT Solver Activity ---",
         f"  Queries attempted: {attempted}",
         f"  Queries solved:    {solved} ({solved_pct:.1f}%)",
-        f"  Queries timed out: {timed_out}",
+        f"  Queries failed:   {timed_out}",
     ]
     return "\n".join(lines)
 

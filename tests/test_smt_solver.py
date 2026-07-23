@@ -29,7 +29,7 @@ class TestZ3SolverInit:
         assert s.timeout_ms == 50
         assert s.queries_attempted == 0
         assert s.queries_solved == 0
-        assert s.queries_timed_out == 0
+        assert s.queries_failed == 0
         assert s._available
 
     def test_init_custom_timeout(self):
@@ -41,7 +41,7 @@ class TestZ3SolverInit:
         st = s.stats
         assert "queries_attempted" in st
         assert "queries_solved" in st
-        assert "queries_timed_out" in st
+        assert "queries_failed" in st
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -252,4 +252,4 @@ class TestEdgeCases:
         st = s.stats
         assert st["queries_attempted"] == 0
         assert st["queries_solved"] == 0
-        assert st["queries_timed_out"] == 0
+        assert st["queries_failed"] == 0

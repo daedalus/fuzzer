@@ -214,3 +214,44 @@ class TestRunningMomentsSaveLoad:
         assert m2._window == 5
         assert m2.count == m.count
         assert abs(m2.mean - m.mean) < 1e-10
+
+    def test_window_o1_matches_batch(self):
+        """O(1) sliding-window update matches full recomputation."""
+        wsize = 20
+        m = RunningMoments(window=wsize)
+        data = [float(i % 7 * 3 + 1) for i in range(100)]
+        for i, x in enumerate(data):
+            m.update(x)
+            if i >= wsize:
+                window = data[i - wsize + 1 : i + 1]
+                assert abs(m.mean - statistics.mean(window)) < 1e-10, (
+                    f"mean mismatch at step {i}: {m.mean} vs {statistics.mean(window)}"
+                )
+                if len(window) >= 2:
+                    var = m.variance
+                    expected_var = statistics.variance(window)
+                    assert abs(var - expected_var) < 1e-8, (
+                        f"variance mismatch at step {i}: {var} vs {expected_var}"
+                    )
+                # Skewness and kurtosis verified via manual computation
+                # since statistics.skewness/kurtosis may not be available.
+                if len(window) >= 3:
+                    n = len(window)
+                    mean_w = statistics.mean(window)
+                    m2_w = sum((v - mean_w) ** 2 for v in window) / n
+                    m3_w = sum((v - mean_w) ** 3 for v in window) / n
+                    if m2_w > 0:
+                        expected_skew = m3_w / (m2_w ** 1.5)
+                        assert abs(m.skewness - expected_skew) < 1e-8, (
+                            f"skewness mismatch at step {i}: {m.skewness} vs {expected_skew}"
+                        )
+                if len(window) >= 4:
+                    n = len(window)
+                    mean_w = statistics.mean(window)
+                    m2_w = sum((v - mean_w) ** 2 for v in window) / n
+                    m4_w = sum((v - mean_w) ** 4 for v in window) / n
+                    if m2_w > 0:
+                        expected_kurt = m4_w / (m2_w * m2_w) - 3.0
+                        assert abs(m.kurtosis - expected_kurt) < 1e-8, (
+                            f"kurtosis mismatch at step {i}: {m.kurtosis} vs {expected_kurt}"
+                        )

@@ -23,10 +23,14 @@ The detector uses three signals:
 When variance + autocorrelation are rising, the detector signals
 "approaching transition."  When skewness also rises, the verdict
 upgrades to "approaching transition, and it looks productive."
+Uses :class:`RunningMoments` (with O(1) sliding-window updates) for
+variance and skewness instead of hand-rolling the same calculations.
 """
 
 import collections
 import logging
+
+from fuzzer_tool.core.running_stats import RunningMoments
 
 log = logging.getLogger(__name__)
 
@@ -55,6 +59,7 @@ class CriticalSlowingDown:
         self.skew_rise_threshold = skew_rise_threshold
         self.min_observations = min_observations
         self._history: collections.deque = collections.deque(maxlen=window_size)
+        self._moments: RunningMoments = RunningMoments(window=window_size)
         self._variance_baseline: float | None = None
         self._autocorr_baseline: float | None = None
         self._skewness_baseline: float | None = None
@@ -66,28 +71,15 @@ class CriticalSlowingDown:
             value: Discovery rate (edges per 1000 execs).
         """
         self._history.append(value)
+        self._moments.update(value)
 
     def _compute_variance(self) -> float:
-        """Compute variance of the current window."""
-        n = len(self._history)
-        if n < 2:
-            return 0.0
-        mean = sum(self._history) / n
-        return sum((x - mean) ** 2 for x in self._history) / (n - 1)
+        """Variance of the current window (via RunningMoments)."""
+        return self._moments.variance
 
     def _compute_skewness(self) -> float:
-        """Compute skewness of the current window."""
-        n = len(self._history)
-        if n < 3:
-            return 0.0
-        data = list(self._history)
-        mean = sum(data) / n
-        m2 = sum((x - mean) ** 2 for x in data) / n
-        if m2 <= 0.0:
-            return 0.0
-        stddev = m2**0.5
-        m3 = sum((x - mean) ** 3 for x in data) / n
-        return m3 / (stddev**3)
+        """Skewness of the current window (via RunningMoments)."""
+        return self._moments.skewness
 
     def _compute_autocorrelation(self) -> float:
         """Compute lag-1 autocorrelation of the current window."""
@@ -164,6 +156,7 @@ class CriticalSlowingDown:
         """Serialize state."""
         return {
             "history": list(self._history),
+            "moments": self._moments.save(),
             "variance_baseline": self._variance_baseline,
             "autocorr_baseline": self._autocorr_baseline,
             "skewness_baseline": self._skewness_baseline,
@@ -178,6 +171,8 @@ class CriticalSlowingDown:
         self._history = collections.deque(
             data.get("history", []), maxlen=data.get("window_size", self.window_size)
         )
+        if "moments" in data:
+            self._moments.load(data["moments"])
         self._variance_baseline = data.get("variance_baseline")
         self._autocorr_baseline = data.get("autocorr_baseline")
         self._skewness_baseline = data.get("skewness_baseline")

@@ -68,7 +68,7 @@ static void morris_init(void) {
         morris_threshold[i] = (uint64_t)morris_threshold[i - 1] * MORRIS_A / (MORRIS_A + 1);
 }
 
-__attribute__((visibility("default")))
+__attribute__((weak, visibility("default")))
 void __afl_map_shm(void) {
     char *id = getenv("__AFL_SHM_ID");
     if (!id) return;
@@ -97,7 +97,7 @@ static inline void __afl_map_edge(uint32_t cur_loc) {
     __afl_prev_loc = cur_loc >> 1;
 }
 
-__attribute__((visibility("default")))
+__attribute__((weak, visibility("default")))
 void __afl_map_reset(void) {
     if (__afl_area)
         memset(__afl_area, 0, __afl_map_size);
@@ -293,12 +293,12 @@ void __sanitizer_cov_trace_switch(uint64_t val, uint64_t *ref) {
  * When the shim is NOT loaded, the target's compiled-in fallback handles
  * SHM coverage independently — both paths work.
  * ═══════════════════════════════════════════════════════════════════════ */
-__attribute__((visibility("default")))
+__attribute__((weak, visibility("default")))
 void __sanitizer_cov_trace_pc_guard(uint32_t *guard) {
     if (!guard || *guard == 0) return;
     __afl_map_edge(*guard);
 }
-__attribute__((visibility("default")))
+__attribute__((weak, visibility("default")))
 void __sanitizer_cov_trace_pc_guard_init(uint32_t *start, uint32_t *stop) {
     (void)start; (void)stop;
 }

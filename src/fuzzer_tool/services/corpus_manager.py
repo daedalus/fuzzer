@@ -421,9 +421,9 @@ class CorpusManager:
         # For large corpora, fall back to edge-count sorting which is O(n log n).
         et = f._edge_tracker
         all_edges = et.cumulative_edges if et and et.cumulative_edges else set()
+        mandatory: set[int] = set()
         if all_edges and et.seed_edges and len(unique) <= 5000:
             covered: set[int] = set()
-            minimal = 0
             seed_edge_map: dict[int, set[int]] = {}
             for seed in unique:
                 sk = self.seed_key(seed)
@@ -444,8 +444,8 @@ class CorpusManager:
                 if best_seed is None:
                     break
                 covered |= seed_edge_map[id(best_seed)]
-                minimal += 1
-            target_size = max(target_size, minimal)
+                mandatory.add(id(best_seed))
+            target_size = max(target_size, len(mandatory))
             del seed_edge_map  # free edge map after set-cover
         elif all_edges or f.corpus:
             productive = sum(
@@ -455,8 +455,11 @@ class CorpusManager:
                 target_size = max(target_size, productive)
 
         if len(unique) > target_size:
+            # Split into mandatory (set-cover essential) and optional.
+            mandatory_seeds = [s for s in unique if id(s) in mandatory]
+            optional = [s for s in unique if id(s) not in mandatory]
             scored = []
-            for seed in unique:
+            for seed in optional:
                 seed_key = self.seed_key(seed)
                 f._edge_tracker.get_seed_edge_count(seed_key)
                 meta = f.seed_meta.get(seed)
@@ -479,43 +482,10 @@ class CorpusManager:
                 score = edge_score * wasserstein_weight * ppmd_bonus
                 scored.append((score, seed))
             scored.sort(key=lambda x: x[0], reverse=True)
-            keep = min(target_size, len(scored))
-            unique = [s for _, s in scored[:keep]]
+            budget = target_size - len(mandatory_seeds)
+            keep = min(budget, len(scored))
+            unique = mandatory_seeds + [s for _, s in scored[:keep]]
             del scored  # free scored list after sorting
-
-            # Verify all edges are still covered after scoring-based pruning.
-            # The scoring step sorts by edge_count*wasserstein*ppmd which can
-            # drop seeds that are the sole cover of rare edges. Re-add any
-            # essential seeds whose edge coverage went missing.
-            if all_edges:
-                covered_after = set()
-                for s in unique:
-                    sk = self.seed_key(s)
-                    e_set = et.seed_edges.get(sk, set()) if et and et.seed_edges else set()
-                    covered_after.update(e_set)
-                missing = all_edges - covered_after
-                if missing:
-                    found = []
-                    for seed in f.corpus:
-                        if seed in unique:
-                            continue
-                        sk = self.seed_key(seed)
-                        e_set = et.seed_edges.get(sk, set()) if et and et.seed_edges else set()
-                        gain = e_set & missing
-                        if gain:
-                            found.append((len(gain), gain, seed))
-                    found.sort(key=lambda x: x[0], reverse=True)
-                    for _, gap, seed in found:
-                        if not missing:
-                            break
-                        if gap & missing:
-                            unique.append(seed)
-                            missing -= gap
-                    if missing:
-                        log.warning(
-                            "Minimization: %d edges lost (no seed covers them in corpus)",
-                            len(missing),
-                        )
 
         removed = len(f.corpus) - len(unique)
         if removed > 0:

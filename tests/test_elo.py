@@ -402,6 +402,40 @@ class TestRewardMoments:
             counts[op] += 1
         assert counts["high_reward"] > counts["low_reward"]
 
+    def test_select_op_ucb_no_scale_mismatch(self):
+        """Regression: Elo fallback (~1500) must not swamp UCB scores (~0-1).
+
+        Operator A has 1 lucky reward sample and high Elo (~1600).
+        Operator B has 50 well-characterized samples (mean=0.1, stddev=0.05).
+        Without the fix, A wins ~97% despite being a poor bet.
+        With the fix, A's raw Elo is never mixed into the UCB softmax so
+        the well-characterized operator is not artificially suppressed.
+        """
+        elo = EloTracker(k_factor=100, min_matches=0)
+        elo.init_arm("A")
+        elo.init_arm("B")
+        # Give A high Elo via matches (so it would dominate if mixed raw)
+        for _ in range(5):
+            elo.record_match("A", "B", score_a=1.0)
+        # B has many reward samples with low mean — well-characterized
+        for _ in range(50):
+            elo.record_reward("B", 0.1)
+        # Single lucky sample for A — should NOT be UCB-ready
+        elo.record_reward("A", 1.0)
+
+        # With low temperature, a scale-mismatch bug would select A nearly
+        # every time.  With the fix, B should have a non-trivial chance.
+        counts = {"A": 0, "B": 0}
+        for _ in range(100):
+            op = elo.select_op_ucb(["A", "B"], exploration_weight=0.5, temperature=10.0)
+            counts[op] += 1
+        # B must get at least 10% — not a tight bound but clearly
+        # separates from the ~97% the bug produced.
+        assert counts["B"] >= 10, (
+            f"B should have >= 10% selection, got {counts['B']}/100. "
+            f"Scale-mismatch bug may have regressed."
+        )
+
     def test_reward_moments_save_load(self):
         elo = EloTracker()
         elo.init_arm("A")

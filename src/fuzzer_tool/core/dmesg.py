@@ -235,9 +235,15 @@ class DmesgParser:
         snap = DmesgSnapshot()
 
         # Try JSON first, fall back to text
-        crashes = self._poll_json(since)
-        if crashes is None:
-            crashes = self._poll_text(since)
+        # TimeoutExpired propagates out of both poll methods so we
+        # can distinguish timeouts from "no crashes found."
+        try:
+            crashes = self._poll_json(since)
+            if crashes is None:
+                crashes = self._poll_text(since)
+        except subprocess.TimeoutExpired:
+            snap.error = "dmesg poll timed out"
+            return snap
 
         # Filter by PID if requested
         if pid is not None and crashes:
@@ -298,7 +304,7 @@ class DmesgParser:
         except (json.JSONDecodeError, ValueError):
             log.debug("dmesg --json produced unparseable output, falling back to text")
             return None
-        except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError):
+        except (FileNotFoundError, PermissionError):
             return None
 
     def _poll_text(self, since: float) -> list[KernelCrash]:
@@ -334,7 +340,7 @@ class DmesgParser:
                 if kc:
                     crashes.append(kc)
             return crashes
-        except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError):
+        except (FileNotFoundError, PermissionError):
             return []
 
     def _parse_timestamp(self, entry: dict) -> float | None:

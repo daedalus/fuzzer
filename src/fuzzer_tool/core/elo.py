@@ -33,6 +33,36 @@ log = logging.getLogger(__name__)
 _UCB_MIN_SAMPLES_BASE = 20
 
 
+def _softmax_select(
+    scored: list[tuple[str, float]], temperature: float
+) -> str:
+    """Weighted random selection via softmax over scored items.
+
+    Args:
+        scored: List of (name, score) tuples.  Scores can be on any scale
+            — the softmax handles relative differences.
+        temperature: Higher = more uniform, lower = more greedy.
+
+    Returns:
+        Selected name.
+    """
+    if not scored:
+        return ""
+    if len(scored) == 1:
+        return scored[0][0]
+    max_s = max(s for _, s in scored)
+    # Clamp to prevent underflow when max_s == min_s (all equal)
+    weights = [math.exp((s - max_s) / max(temperature, 1e-9)) for _, s in scored]
+    total = sum(weights)
+    r = random.random() * total
+    cumulative = 0.0
+    for i, (name, _) in enumerate(scored):
+        cumulative += weights[i]
+        if r <= cumulative:
+            return name
+    return scored[-1][0]
+
+
 class EloTracker:
     """Elo rating tracker for fuzzer operators.
 
@@ -98,6 +128,11 @@ class EloTracker:
     ) -> str:
         """Select operator using UCB-style score: mean + k * stddev.
 
+        Separates operators into "UCB-ready" (enough reward samples) and
+        "Elo-fallback" (too few samples) groups.  Each group is scored on
+        its own scale and the two groups are not mixed in the same softmax —
+        raw Elo ratings (~1500) swamp UCB scores (~0–1) when naively combined.
+
         High-kurtosis operators require more observations before trusting
         the stddev-based bonus (kurtosis stability guard).
 
@@ -116,35 +151,47 @@ class EloTracker:
         if len(operators) == 1:
             return operators[0]
 
-        # Only consider operators with enough reward samples.
-        # Scale the minimum by kurtosis: high kurtosis → need more samples.
-        scored: list[tuple[str, float]] = []
+        # Separate operators into two groups to avoid scale mismatch
+        # between raw Elo (~1500) and UCB scores (~0–1).
+        ucb_ready: list[tuple[str, float]] = []
+        elo_only: list[str] = []
         for op in operators:
             moments = self._reward_moments.get(op)
             if moments is None or moments.count < 3:
-                # Not enough data — fall back to Elo rating
-                scored.append((op, self.ratings.get(op, self.default_rating)))
+                elo_only.append(op)
                 continue
             kurt = moments.kurtosis
             min_samples = _UCB_MIN_SAMPLES_BASE * max(1.0, 1.0 + kurt * 0.1)
             if moments.count < min_samples:
-                # Too few samples for this kurtosis level — use Elo
-                scored.append((op, self.ratings.get(op, self.default_rating)))
+                elo_only.append(op)
                 continue
             score = moments.mean + exploration_weight * moments.stddev
-            scored.append((op, score))
+            ucb_ready.append((op, score))
 
-        # Select via softmax over scores
-        max_s = max(s for _, s in scored)
-        weights = [math.exp((s - max_s) / temperature) for _, s in scored]
-        total = sum(weights)
-        r = random.random() * total
-        cumulative = 0.0
-        for i, (op, _) in enumerate(scored):
-            cumulative += weights[i]
-            if r <= cumulative:
-                return op
-        return scored[-1][0]
+        # Pure UCB selection
+        if ucb_ready and not elo_only:
+            return _softmax_select(ucb_ready, temperature)
+
+        # Pure Elo selection
+        if elo_only and not ucb_ready:
+            scored = [(op, self.ratings.get(op, self.default_rating)) for op in elo_only]
+            return _softmax_select(scored, temperature)
+
+        # Both groups exist — probabilistically pick which group to draw from,
+        # weighted by total sample count in each group.  This keeps both
+        # exploration (via Elo group) and exploitation (via UCB group) active
+        # while avoiding the scale-mismatch bug.
+        total_ucb = sum(
+            self._reward_moments[op].count for op, _ in ucb_ready
+        )
+        total_elo = sum(
+            self._match_count.get(op, 0) for op in elo_only
+        )
+        if random.random() < total_ucb / (total_ucb + total_elo):
+            return _softmax_select(ucb_ready, temperature)
+        else:
+            scored = [(op, self.ratings.get(op, self.default_rating)) for op in elo_only]
+            return _softmax_select(scored, temperature)
 
     def get_reward_moments(self, op: str) -> RunningMoments | None:
         """Get reward statistics for an operator (for diagnostics)."""

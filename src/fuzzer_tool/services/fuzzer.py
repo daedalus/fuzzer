@@ -1579,7 +1579,6 @@ class Fuzzer:
             if edge_bitmap:
                 self._prev_edge_bitmap = bytes(edge_bitmap)
 
-            cov_before = len(new_edges) if new_edges else 0
             cov_after = (
                 len(self._edge_tracker._global_edge_hits)
                 if hasattr(self._edge_tracker, "_global_edge_hits")
@@ -1588,9 +1587,9 @@ class Fuzzer:
             self._format_learner.record_transition(
                 input_bytes=mutated,
                 mutation_op=self._last_ops_used[0] if self._last_ops_used else "unknown",
-                mutation_offset=0,
+                mutation_offset=self._last_mutation_offset,
                 mutation_width=len(mutated),
-                coverage_before=cov_before,
+                coverage_before=self._cov_before_fuzz,
                 coverage_after=cov_after,
                 new_edges=new_edges,
                 lost_edges=lost_edges,

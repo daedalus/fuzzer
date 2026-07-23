@@ -52,7 +52,7 @@ class Z3Solver:
         self.timeout_ms = timeout_ms
         self.queries_attempted = 0
         self.queries_solved = 0
-        self.queries_timed_out = 0
+        self.queries_failed = 0
         self.batch_attempted = 0
         self.batch_solved = 0
         self._available = _z3_available()
@@ -167,7 +167,7 @@ class Z3Solver:
         except Exception:
             pass
 
-        self.queries_timed_out += 1
+        self.queries_failed += 1
         return None
 
     # ── PNG computed-field helpers ─────────────────────────────────────
@@ -205,7 +205,7 @@ class Z3Solver:
         return {
             "queries_attempted": self.queries_attempted,
             "queries_solved": self.queries_solved,
-            "queries_timed_out": self.queries_timed_out,
+            "queries_failed": self.queries_failed,
         }
 
     # ── WFC computed-field fixup ───────────────────────────────────────
