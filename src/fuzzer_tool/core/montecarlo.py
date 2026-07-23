@@ -72,9 +72,15 @@ class MonteCarloScheduler:
         pairwise_blend: float = 0.0,
         arm_decay: float = 0.999,
         decay_interval: int = 100,
+        hierarchical_pooling: float = 0.0,
+        cem_dirichlet_concentration: float = 0.0,
     ):
+        self._hierarchical_pooling = max(0.0, min(1.0, hierarchical_pooling))
+        self._cem_dirichlet_concentration = cem_dirichlet_concentration
         self.arm_alpha: dict[str, float] = {}
         self.arm_beta: dict[str, float] = {}
+        self._pooled_successes = 0.0
+        self._pooled_failures = 0.0
         self.arm_decay = arm_decay
         self.decay_interval = decay_interval
         self.elite_frac = elite_frac
@@ -120,6 +126,20 @@ class MonteCarloScheduler:
             self.arm_alpha[name] = max(prior_alpha, MIN_BETA_PARAM)
             self.arm_beta[name] = max(prior_beta, MIN_BETA_PARAM)
 
+    def _get_effective_params(self, op: str) -> tuple[float, float]:
+        """Get posterior parameters with optional hierarchical shrinkage."""
+        a = self.arm_alpha.get(op, 1.0)
+        b = self.arm_beta.get(op, 1.0)
+        if self._hierarchical_pooling > 0:
+            h = self._hierarchical_pooling
+            pooled_total = self._pooled_successes + self._pooled_failures
+            if pooled_total > 0:
+                pooled_alpha = 1.0 + self._pooled_successes
+                pooled_beta = 1.0 + self._pooled_failures
+                a = (1 - h) * a + h * pooled_alpha
+                b = (1 - h) * b + h * pooled_beta
+        return a, b
+
     def select_op(self, ops: list[str], prev_op: str | None = None) -> str:
         """Select mutation operator via Thompson sampling with pairwise transitions.
 
@@ -138,8 +158,7 @@ class MonteCarloScheduler:
         # Unconditional Thompson sample for each op
         thompson_vals = {}
         for op in ops:
-            a = self.arm_alpha.get(op, 1.0)
-            b = self.arm_beta.get(op, 1.0)
+            a, b = self._get_effective_params(op)
             thompson_vals[op] = random.betavariate(a, b)
 
         # If no pairwise data or blend is zero, use pure Thompson
@@ -192,8 +211,10 @@ class MonteCarloScheduler:
 
         if success:
             self.arm_alpha[name] = self.arm_alpha.get(name, 1.0) + weight
+            self._pooled_successes += weight
         else:
             self.arm_beta[name] = self.arm_beta.get(name, 1.0) + 1
+            self._pooled_failures += 1.0
 
         # Update pairwise transition matrix on success
         if success and self._prev_op is not None and self._prev_op != name:
@@ -304,9 +325,64 @@ class MonteCarloScheduler:
             self.byte_freq[pos] = freq
         self.cem_fitted = True
 
+        # Learn Dirichlet concentration from elite entropy if enabled
+        if self._cem_dirichlet_concentration > 0:
+            self._learn_cem_concentration(elite)
+
         # Compute JS divergence and adapt refit interval
         self.last_js_divergence = self._compute_js()
         self._adapt_interval()
+
+    def _learn_cem_concentration(self, elite: list[bytes]) -> None:
+        """Learn the Dirichlet concentration parameter from the elite set.
+
+        Estimates alpha_0 by matching the expected entropy of the Dirichlet
+        distribution to the empirical entropy of the elite set.
+
+        The Dirichlet(alpha_0, ..., alpha_0) has expected entropy:
+            H(Dir) = ln(Gamma(256*alpha_0)) - 256*ln(Gamma(alpha_0))
+                     - (256*alpha_0 - 1) * (psi(256*alpha_0) - psi(alpha_0))
+
+        We solve for alpha_0 such that the empirical per-position entropy
+        matches this expectation. When data is highly structured (low entropy),
+        alpha_0 increases (stronger prior). When data is uniform (high entropy),
+        alpha_0 stays near 1 (weak prior).
+
+        Stores the learned alpha_0 in self._cem_learned_alpha.
+        """
+        # Compute average empirical entropy across positions
+        total_entropy = 0.0
+        n_positions = 0
+        for pos, freq in self.byte_freq.items():
+            total = sum(freq.values())
+            if total < 2:
+                continue
+            n_positions += 1
+            pos_entropy = 0.0
+            for count in freq.values():
+                p = count / total
+                if p > 0:
+                    pos_entropy -= p * math.log2(p)
+            total_entropy += pos_entropy
+
+        if n_positions == 0:
+            self._cem_learned_alpha = self._cem_dirichlet_concentration
+            return
+
+        avg_entropy = total_entropy / n_positions
+        # Max entropy for 256 categories = log2(256) = 8
+        # Map entropy to alpha in [0.5, 10]:
+        #   High entropy (near 8) → low alpha (near 0.5) → weak prior
+        #   Low entropy (near 0) → high alpha (near 10) → strong prior
+        uniformity = avg_entropy / 8.0  # 0 = fully structured, 1 = uniform
+        alpha = self._cem_dirichlet_concentration * (2.0 - uniformity)
+        self._cem_learned_alpha = max(0.1, alpha)
+
+    def _cem_alpha(self) -> float:
+        """Get the effective Dirichlet concentration parameter for CEM."""
+        if self._cem_dirichlet_concentration <= 0:
+            return 1.0  # Laplace (add-1) smoothing
+        return getattr(self, "_cem_learned_alpha", self._cem_dirichlet_concentration)
 
     def _freq_to_dist(self, freq: dict[int, int]) -> dict[int, float]:
         """Convert a raw frequency dict to a normalized distribution."""
@@ -371,6 +447,13 @@ class MonteCarloScheduler:
     def cem_byte(self, pos: int) -> int:
         """Sample a byte at a given position from the CEM distribution.
 
+        Uses a Dirichlet-Multinomial posterior predictive:
+            P(byte | data) = (alpha_0 + count_byte) / (256 * alpha_0 + total)
+
+        When cem_dirichlet_concentration > 0, alpha_0 is learned from the
+        elite set's entropy. Otherwise falls back to Laplace (add-1) smoothing
+        which is equivalent to Dirichlet(1, ..., 1).
+
         Args:
             pos: Byte position in the input.
 
@@ -380,11 +463,13 @@ class MonteCarloScheduler:
         freq = self.byte_freq.get(pos)
         if not freq:
             return random.randint(0, 255)
-        total = sum(freq.values()) + 256
-        r = random.random() * total
-        cumulative = 0
+        alpha_0 = self._cem_alpha()
+        total = sum(freq.values())
+        denom = total + 256.0 * alpha_0
+        r = random.random() * denom
+        cumulative = 0.0
         for byte_val, count in freq.items():
-            cumulative += count + 1
+            cumulative += count + alpha_0
             if r <= cumulative:
                 return byte_val
         return random.randint(0, 255)
@@ -725,8 +810,7 @@ class MonteCarloScheduler:
 
         scores = {}
         for i, op in enumerate(ops):
-            a = self.arm_alpha.get(op, 1.0)
-            b = self.arm_beta.get(op, 1.0)
+            a, b = self._get_effective_params(op)
             scores[op] = a / (a + b) + noise[i]
 
         return max(ops, key=lambda o: scores[o])
@@ -736,8 +820,7 @@ class MonteCarloScheduler:
         best_op = None
         best_val = -1.0
         for op in ops:
-            a = self.arm_alpha.get(op, 1.0)
-            b = self.arm_beta.get(op, 1.0)
+            a, b = self._get_effective_params(op)
             val = random.betavariate(a, b)
             if val > best_val:
                 best_val = val

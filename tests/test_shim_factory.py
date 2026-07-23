@@ -1,12 +1,11 @@
 """Unit tests for adapters/shim_factory.py — coverage shim builder."""
 
 import os
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from fuzzer_tool.adapters.shim_factory import (
-    BitmapReader,
     ShimResult,
     _cache_key,
     _compile_source,
@@ -312,36 +311,3 @@ class TestBuildShim:
             assert result.bitmap_size == 0
 
 
-class TestBitmapReader:
-    def test_init_no_counters(self, tmp_path):
-        fake_target = tmp_path / "target"
-        fake_target.write_bytes(b"\x7fELF" + b"\x00" * 200)
-        with patch("fuzzer_tool.adapters.shim_factory.parse_sancov_offsets", return_value=None):
-            mock_lib = MagicMock()
-            reader = BitmapReader(str(fake_target), mock_lib)
-            assert reader.bitmap_size == 0
-            assert reader.valid is False
-
-    def test_read_bitmap_when_invalid(self, tmp_path):
-        fake_target = tmp_path / "target"
-        fake_target.write_bytes(b"\x7fELF" + b"\x00" * 200)
-        with patch("fuzzer_tool.adapters.shim_factory.parse_sancov_offsets", return_value=None):
-            mock_lib = MagicMock()
-            reader = BitmapReader(str(fake_target), mock_lib)
-            assert reader.read_bitmap() is None
-
-    def test_reset_bitmap_when_invalid(self, tmp_path):
-        fake_target = tmp_path / "target"
-        fake_target.write_bytes(b"\x7fELF" + b"\x00" * 200)
-        with patch("fuzzer_tool.adapters.shim_factory.parse_sancov_offsets", return_value=None):
-            mock_lib = MagicMock()
-            reader = BitmapReader(str(fake_target), mock_lib)
-            reader.reset_bitmap()  # should not raise
-
-    def test_valid_property(self, tmp_path):
-        fake_target = tmp_path / "target"
-        fake_target.write_bytes(b"\x7fELF" + b"\x00" * 200)
-        with patch("fuzzer_tool.adapters.shim_factory.parse_sancov_offsets", return_value=None):
-            mock_lib = MagicMock()
-            reader = BitmapReader(str(fake_target), mock_lib)
-            assert reader.valid is False

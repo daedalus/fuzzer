@@ -22,7 +22,6 @@ import tempfile
 from collections.abc import Callable
 
 from fuzzer_tool.adapters.shim_factory import (
-    BitmapReader,
     ShimResult,
     build_shim,
     cleanup_shim,
@@ -148,8 +147,6 @@ class InProcessRunner:
         # Shim state
         self._shim: ShimResult | None = None
         self._shim_handle: ctypes.CDLL | None = None
-        self._bitmap_reader: BitmapReader | None = None
-
         # Persistent loader state
         self._persistent = None
 
@@ -226,10 +223,6 @@ class InProcessRunner:
                     ctypes.c_size_t,
                 ]
                 self._func_ptr = fn_ptr  # cache the resolved symbol
-                if cov and self._lib:
-                    self._bitmap_reader = BitmapReader(self.target, self._lib)
-                    if not self._bitmap_reader.valid:
-                        log.warning("BitmapReader: no sancov counters in target")
             except OSError as e:
                 if shim_loaded:
                     log.warning("Direct mode failed (%s), falling back to subprocess", e)
@@ -317,18 +310,7 @@ class InProcessRunner:
     # ------------------------------------------------------------------
 
     def read_bitmap(self) -> bytes | None:
-        """Read the coverage bitmap.
-
-        Checks sancov counters first, then SHM (for AFL shim targets).
-        If sancov counters are all zeros (target uses SHM instead), falls
-        through to read from SHM directly.
-        """
-        # Try sancov counters first
-        if self.direct and self._bitmap_reader and self._bitmap_reader.valid:
-            bm = self._bitmap_reader.read_bitmap()
-            if bm and any(b != 0 for b in bm):
-                return bm
-            # sancov counters empty — target may use SHM instead
+        """Read the coverage bitmap."""
         if self._persistent and self._persistent._last_bitmap is not None:
             return self._persistent._last_bitmap
         if self._forkserver and self._forkserver._last_bitmap is not None:
@@ -360,10 +342,7 @@ class InProcessRunner:
         return None
 
     def reset_bitmap(self):
-        """Reset the coverage bitmap to zero."""
-        if self.direct and self._bitmap_reader and self._bitmap_reader.valid:
-            self._bitmap_reader.reset_bitmap()
-        # Reset SHM for AFL shim targets (use cached pointer)
+        """Reset the coverage bitmap to zero (SHM based)."""
         if self.coverage_env_id:
             try:
                 # Cache SHM attachment for performance

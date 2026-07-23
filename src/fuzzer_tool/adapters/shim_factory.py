@@ -14,12 +14,11 @@ import ctypes
 import hashlib
 import logging
 import os
-import struct
 import subprocess
 import tempfile
 from dataclasses import dataclass
 
-from fuzzer_tool.core.elf import find_load_segment, parse_sancov_offsets
+from fuzzer_tool.core.elf import parse_sancov_offsets
 
 log = logging.getLogger(__name__)
 
@@ -158,133 +157,6 @@ def build_minimal_shim() -> str | None:
     with contextlib.suppress(OSError):
         os.unlink(so_path)
     return None
-
-
-class BitmapReader:
-    """Read the sancov coverage bitmap from a loaded target .so.
-
-    Uses ELF parsing to find the counters section at load time,
-    then reads directly from the target's address space after each call.
-    """
-
-    def __init__(self, target: str, lib_handle: ctypes.CDLL):
-        self.target = target
-        self.lib = lib_handle
-        self._elf_data: bytes | None = None
-        self._counter_offsets: tuple[int, int] | None = None
-        self._base_address: int | None = None
-        self._bitmap_size: int = 0
-        self._snapshot: bytes | None = None
-        self._setup()
-
-    def _setup(self):
-        # Parse ELF to find sancov counter virtual addresses
-        self._counter_offsets = parse_sancov_offsets(self.target)
-        if self._counter_offsets is None:
-            log.warning("No sancov counters found in %s", self.target)
-            return
-
-        # Read ELF data for LOAD segment lookup
-        with open(self.target, "rb") as f:
-            self._elf_data = f.read()
-
-        # Find runtime base address and ELF vaddr of the r-xp LOAD segment.
-        # Both are needed to compute the ELF load bias (runtime - vaddr),
-        # which is then applied to ALL target virtual addresses regardless
-        # of which LOAD segment they live in.
-        target_name = os.path.basename(self.target)
-        self._base_address = None
-        self._rxp_vaddr = None
-        try:
-            with open(f"/proc/{os.getpid()}/maps") as f:
-                for line in f:
-                    if target_name in line and "r-xp" in line:
-                        self._base_address = int(line.split("-")[0], 16)
-                        break
-        except Exception:
-            log.warning("Failed to read /proc/%d/maps for base address", os.getpid(), exc_info=True)
-
-        if self._base_address is not None:
-            # Find the ELF vaddr of the r-xp segment to compute the bias
-            e_phoff = struct.unpack_from("<Q", self._elf_data, 32)[0]
-            e_phentsize = struct.unpack_from("<H", self._elf_data, 54)[0]
-            e_phnum = struct.unpack_from("<H", self._elf_data, 56)[0]
-            for i in range(e_phnum):
-                off = e_phoff + i * e_phentsize
-                p_type = struct.unpack_from("<I", self._elf_data, off)[0]
-                if p_type == 1:  # PT_LOAD
-                    p_vaddr = struct.unpack_from("<Q", self._elf_data, off + 16)[0]
-                    p_flags = struct.unpack_from("<I", self._elf_data, off + 4)[0]
-                    if (p_flags & 0x5) == 0x5:  # PF_R | PF_X = r-x
-                        self._rxp_vaddr = p_vaddr
-                        break
-        if self._base_address is None or self._rxp_vaddr is None:
-            # Fallback: try to find via ctypes symbol address
-            try:
-                first_sym = (ctypes.c_char * 1).in_dll(self.lib, "__start___sancov_cntrs")
-                sym_addr = ctypes.addressof(first_sym)
-                vaddr = self._counter_offsets[0]
-                # Find the LOAD segment containing vaddr
-                seg = find_load_segment(self._elf_data, vaddr)
-                if seg:
-                    # For PIE libraries: first LOAD segment starts at vaddr 0,
-                    # so bias = runtime address of first LOAD = sym_addr - seg_vaddr.
-                    # But for non-zero-base ELFs, use: bias = sym_addr - vaddr.
-                    self._base_address = sym_addr - vaddr
-                    self._rxp_vaddr = 0  # bias is already computed directly
-            except (ValueError, AttributeError):
-                log.warning("Cannot determine base address for %s", self.target)
-                return
-
-        # Compute ELF load bias: runtime_addr - elf_vaddr of the same segment
-        # This is the single offset that translates ANY ELF vaddr to runtime.
-        start_elf, stop_elf = self._counter_offsets
-        if self._rxp_vaddr is not None and self._rxp_vaddr > 0:
-            bias = self._base_address - self._rxp_vaddr
-        else:
-            # Fallback: compute bias from the counters' own segment
-            seg = find_load_segment(self._elf_data, start_elf)
-            if seg:
-                bias = self._base_address - seg[0]
-            else:
-                log.warning("Cannot compute load bias for %s", self.target)
-                return
-
-        self._runtime_start = bias + start_elf
-        self._runtime_stop = bias + stop_elf
-        self._bitmap_size = self._runtime_stop - self._runtime_start
-        log.info(
-            "BitmapReader: counters at 0x%x-0x%x (%d bytes, bias=0x%x)",
-            self._runtime_start,
-            self._runtime_stop,
-            self._bitmap_size,
-            bias,
-        )
-
-    @property
-    def bitmap_size(self) -> int:
-        return self._bitmap_size
-
-    def read_bitmap(self) -> bytes | None:
-        """Read the coverage bitmap delta since last reset."""
-        if not self._bitmap_size or not self._runtime_start:
-            return None
-        try:
-            current = bytes((ctypes.c_uint8 * self._bitmap_size).from_address(self._runtime_start))
-        except (OSError, ValueError):
-            return None
-        if self._snapshot is None:
-            return current
-        # Return delta: bytes where current > snapshot (handles size mismatch)
-        return bytes(max(0, c - s) for c, s in zip(current, self._snapshot, strict=False))
-
-    def reset_bitmap(self):
-        """Reset by snapshotting current state and detecting deltas later."""
-        self._snapshot = self.read_bitmap()
-
-    @property
-    def valid(self) -> bool:
-        return self._bitmap_size > 0
 
 
 def build_shim(target: str, mode: str = "auto") -> ShimResult:

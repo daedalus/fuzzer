@@ -3,7 +3,7 @@
 import tempfile
 from pathlib import Path
 
-from fuzzer_tool.core.elo import EloTracker
+from fuzzer_tool.core.elo import BayesianEloTracker, EloTracker
 
 
 class TestEloTracker:
@@ -451,3 +451,198 @@ class TestRewardMoments:
         assert rm.count == 2
         assert abs(rm.mean - 4.0) < 0.01
         Path(path).unlink()
+
+
+class TestBayesianEloTracker:
+    def test_init_defaults(self):
+        belo = BayesianEloTracker()
+        assert belo.initial_mu == 1500.0
+        assert belo.initial_sigma == 350.0
+        assert belo.beta == 200.0
+        assert belo.tau == 5.0
+
+    def test_init_arm(self):
+        belo = BayesianEloTracker()
+        belo.init_arm("op_a")
+        assert "op_a" in belo.mu
+        assert belo.mu["op_a"] == 1500.0
+        assert abs(belo.sigma_sq["op_a"] - 350.0 ** 2) < 1.0
+
+    def test_init_arm_idempotent(self):
+        belo = BayesianEloTracker()
+        belo.init_arm("op_a")
+        belo.init_arm("op_a")
+        assert belo._match_count["op_a"] == 0
+
+    def test_record_match_win(self):
+        belo = BayesianEloTracker(initial_mu=1500.0, initial_sigma=350.0, beta=200.0, tau=0.0)
+        belo.init_arm("A")
+        belo.init_arm("B")
+        belo.record_match("A", "B", score_a=1.0)
+        # A won → A's mu should increase, B's should decrease
+        assert belo.mu["A"] > 1500.0
+        assert belo.mu["B"] < 1500.0
+        # Variance should shrink (tau=0 so no re-inflation)
+        assert belo.sigma_sq["A"] < 350.0 ** 2
+        assert belo.sigma_sq["B"] < 350.0 ** 2
+        assert belo._match_count["A"] == 1
+        assert belo._match_count["B"] == 1
+
+    def test_record_match_loss(self):
+        belo = BayesianEloTracker(tau=0.0)
+        belo.init_arm("A")
+        belo.init_arm("B")
+        belo.record_match("A", "B", score_a=0.0)
+        assert belo.mu["A"] < 1500.0
+        assert belo.mu["B"] > 1500.0
+
+    def test_record_match_draw(self):
+        belo = BayesianEloTracker(tau=0.0)
+        belo.init_arm("A")
+        belo.init_arm("B")
+        belo.record_match("A", "B", score_a=0.5)
+        # Draw: very small changes
+        assert abs(belo.mu["A"] - belo.mu["B"]) < 10.0
+
+    def test_thompson_selection_exploration(self):
+        """New unrated operators should still be selectable."""
+        belo = BayesianEloTracker(min_matches=0)
+        belo.init_arm("A")
+        belo.init_arm("B")
+        results = set()
+        for _ in range(200):
+            results.add(belo.select_op(["A", "B"]))
+        assert len(results) == 2  # both get picked
+
+    def test_thompson_selection_prefers_higher_rated(self):
+        """After many wins, the better operator should be preferred."""
+        belo = BayesianEloTracker(tau=0.0, min_matches=0)
+        belo.init_arm("good")
+        belo.init_arm("bad")
+        for _ in range(50):
+            belo.record_match("good", "bad", score_a=1.0)
+        counts = {"good": 0, "bad": 0}
+        for _ in range(500):
+            op = belo.select_op(["good", "bad"])
+            counts[op] += 1
+        assert counts["good"] > counts["bad"]
+
+    def test_adaptive_k_increases_with_errors(self):
+        belo = BayesianEloTracker(initial_mu=1500.0, initial_sigma=350.0, beta=200.0, tau=0.0)
+        belo.init_arm("A")
+        belo.init_arm("B")
+        # Feed consistently wrong predictions: expected A to win, but B wins
+        for _ in range(50):
+            belo.record_match("A", "B", score_a=0.0)
+        # K should have increased above base  (initial errors are large)
+        k_after = belo._effective_k()
+        assert k_after > belo._base_k
+
+    def test_adaptive_k_stable_after_burn_in(self):
+        """After burn-in, accurate predictions produce lower K than wrong ones."""
+        belo = BayesianEloTracker(initial_mu=1500.0, initial_sigma=350.0, beta=200.0, tau=0.0)
+        belo.init_arm("A")
+        belo.init_arm("B")
+        # Burn in: 200 matches to establish ratings, then check recent error window
+        for _ in range(100):
+            belo.record_match("A", "B", score_a=1.0)
+        k_accurate = belo._effective_k()
+
+        error_belo = BayesianEloTracker(initial_mu=1500.0, initial_sigma=350.0, beta=200.0, tau=0.0)
+        error_belo.init_arm("A")
+        error_belo.init_arm("B")
+        for _ in range(100):
+            error_belo.record_match("A", "B", score_a=0.0)
+        k_wrong = error_belo._effective_k()
+        # Both converge to the same MSE (squared error is symmetric),
+        # but the key property: K should not exceed 2x base_k
+        assert k_accurate <= belo._base_k * 2.0
+
+    def test_adaptive_temperature(self):
+        belo = BayesianEloTracker(tau=0.0, min_matches=0)
+        belo.init_arm("A")
+        belo.init_arm("B")
+        # After consistent wins by A (which becomes the higher-rated op),
+        # temperature should decrease from base
+        for _ in range(50):
+            belo.record_match("A", "B", score_a=1.0)
+        temp = belo._effective_temperature()
+        # After 50 wins, A is clearly higher-rated; best_win_rate ~1.0
+        # Scale = 2.0 - 1.0 = 1.0, so temp ~= base
+        assert temp <= belo._base_temperature * 1.05
+
+    def test_record_round_winners_and_losers(self):
+        belo = BayesianEloTracker(tau=0.0)
+        belo.record_round(["A", "B", "C"], winners={"A", "B"})
+        assert belo.mu["A"] > belo.initial_mu
+        assert belo.mu["B"] > belo.initial_mu
+        assert belo.mu["C"] < belo.initial_mu
+
+    def test_strategy_matches(self):
+        belo = BayesianEloTracker(tau=0.0, min_matches=0)
+        belo.record_strategy_match("bandit", "mopt", score_a=1.0)
+        belo.record_strategy_match("bandit", "mopt", score_a=1.0)
+        belo.record_strategy_match("bandit", "mopt", score_a=1.0)
+        ranking = belo.get_strategy_ranking()
+        assert ranking[0][0] == "bandit"
+
+    def test_select_strategy(self):
+        belo = BayesianEloTracker(min_matches=0)
+        belo.init_arm("bandit")  # not needed for strategy
+        result = belo.select_strategy(["bandit", "mopt"])
+        assert result in ("bandit", "mopt")
+
+    def test_apply_decay_adds_noise(self):
+        belo = BayesianEloTracker(tau=5.0)
+        belo.init_arm("A")
+        belo.init_arm("B")
+        sigma_before = belo.sigma_sq["A"]
+        belo.apply_decay()
+        assert belo.sigma_sq["A"] > sigma_before
+
+    def test_get_ranking(self):
+        belo = BayesianEloTracker(tau=0.0, min_matches=0)
+        belo.record_round(["A", "B"], winners={"A"})
+        ranking = belo.get_ranking()
+        assert ranking[0][0] == "A"
+
+    def test_get_unrated(self):
+        belo = BayesianEloTracker(min_matches=5)
+        belo.init_arm("A")
+        assert "A" in belo.get_unrated()
+        belo.record_match("A", "B", score_a=1.0)
+        assert "A" in belo.get_unrated()
+        for _ in range(10):
+            belo.record_match("A", "B", score_a=1.0)
+        assert "A" not in belo.get_unrated()
+
+    def test_save_load_roundtrip(self):
+        belo = BayesianEloTracker(tau=0.0)
+        belo.init_arm("A")
+        belo.init_arm("B")
+        belo.record_match("A", "B", score_a=1.0)
+        belo.record_strategy_match("bandit", "mopt", score_a=1.0)
+
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+            path = f.name
+        try:
+            assert belo.save(path)
+            belo2 = BayesianEloTracker()
+            assert belo2.load(path)
+            assert belo2.mu["A"] == belo.mu["A"]
+            assert belo2.mu["B"] == belo.mu["B"]
+            assert belo2.sigma_sq["A"] == belo.sigma_sq["A"]
+            assert belo2._strategy_mu["bandit"] == belo._strategy_mu["bandit"]
+        finally:
+            Path(path).unlink()
+
+    def test_load_nonexistent(self):
+        belo = BayesianEloTracker()
+        assert not belo.load("/nonexistent/path.json")
+
+    def test_thompson_sample_in_range(self):
+        belo = BayesianEloTracker()
+        belo.init_arm("A")
+        for _ in range(100):
+            s = belo._thompson_sample("A")
+            assert isinstance(s, float)

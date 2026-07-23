@@ -790,6 +790,120 @@ class EdgeTracker:
             "confidence": confidence,
         }
 
+    def bayesian_coverage_growth_model(self) -> dict:
+        """Bayesian coverage growth model with posterior uncertainty.
+
+        Fits E(t) = A * (1 - exp(-k * t)) via nonlinear least squares and
+        computes approximate posterior distributions via the Laplace
+        approximation (Hessian-based). Returns:
+        - posterior means and 95% credible intervals for A and k
+        - P(stalled): posterior probability the growth rate has dropped below
+          threshold (1 edge per 1000 execs)
+        - P(growth remaining): posterior probability that asymptote > current
+        - Proper uncertainty quantification vs. the heuristic confidence field
+
+        Falls back to the frequentist model when data is insufficient (< 5
+        timeline points) or the nonlinear fit fails to converge.
+        """
+        result: dict = {
+            "A_mean": None,
+            "A_ci95": None,
+            "k_mean": None,
+            "k_ci95": None,
+            "sigma_mean": None,
+            "p_stalled": None,
+            "p_growth_remaining": None,
+            "current_rate_posterior_mean": None,
+            "method": "bayesian_laplace",
+        }
+
+        n_points = len(self._coverage_timeline)
+        if n_points < 5:
+            fallback = self.coverage_growth_model()
+            result.update(fallback)
+            result["method"] = "fallback_insufficient_data"
+            return result
+
+        execs = [t[0] for t in self._coverage_timeline]
+        edges = [t[1] for t in self._coverage_timeline]
+        t_arr = np.array(execs, dtype=np.float64)
+        y_arr = np.array(edges, dtype=np.float64)
+
+        # Initial guess: A ≈ max(edges) * 1.2, k ≈ ln(2) / (t_mid)
+        A0 = float(max(y_arr)) * 1.2 + 100.0
+        t_mid = float(t_arr[len(t_arr) // 2] - t_arr[0]) if len(t_arr) > 1 else 1.0
+        k0 = max(0.693 / max(t_mid, 1.0), 1e-10)
+        p0 = np.array([A0, k0], dtype=np.float64)
+
+        # Weight: more recent points get slightly higher weight
+        weights = np.linspace(0.5, 1.0, len(t_arr))
+
+        def residuals(p):
+            A, k = p
+            return weights * (y_arr - A * (1.0 - np.exp(-k * t_arr)))
+
+        try:
+            from scipy.optimize import least_squares
+
+            fit = least_squares(residuals, p0, bounds=([10.0, 1e-10], [1e8, 1.0]), max_nfev=200)
+            A_hat, k_hat = fit.x
+            sigma_hat = np.sqrt(fit.cost / max(1, n_points - 2))
+
+            # Laplace approximation: posterior covariance ≈ inv(J^T J) * sigma^2
+            J = fit.jac
+            try:
+                cov = np.linalg.inv(J.T @ J) * sigma_hat**2
+            except np.linalg.LinAlgError:
+                cov = None
+
+            result["A_mean"] = float(A_hat)
+            result["k_mean"] = float(k_hat)
+            result["sigma_mean"] = float(sigma_hat)
+            rate = A_hat * k_hat * np.exp(-k_hat * float(t_arr[-1]))
+            result["current_rate_posterior_mean"] = float(rate)
+
+            if cov is not None:
+                se_A = float(np.sqrt(max(cov[0, 0], 0)))
+                se_k = float(np.sqrt(max(cov[1, 1], 0)))
+                z = 1.96
+                result["A_ci95"] = (float(A_hat - z * se_A), float(A_hat + z * se_A))
+                result["k_ci95"] = (float(k_hat - z * se_k), float(k_hat + z * se_k))
+
+                # P(stalled) via delta method on current rate
+                t_last = float(t_arr[-1])
+                grad_rate = np.array([
+                    k_hat * np.exp(-k_hat * t_last),
+                    A_hat * np.exp(-k_hat * t_last) * (1 - k_hat * t_last),
+                ])
+                var_rate = float(grad_rate @ cov @ grad_rate)
+                se_rate = float(np.sqrt(max(var_rate, 0)))
+                if se_rate > 1e-12:
+                    from scipy.stats import norm
+                    p_stalled = norm.cdf(0.001, loc=rate, scale=se_rate)
+                else:
+                    p_stalled = 1.0 if rate < 0.001 else 0.0
+                result["p_stalled"] = float(p_stalled)
+
+                # P(growth remaining): posterior that A > current edges
+                current_edges = int(y_arr[-1])
+                if se_A > 1e-12:
+                    p_growth = 1.0 - norm.cdf(current_edges, loc=A_hat, scale=se_A)
+                else:
+                    p_growth = 1.0 if A_hat > current_edges else 0.0
+                result["p_growth_remaining"] = float(p_growth)
+            else:
+                result["p_stalled"] = 1.0 if rate < 0.001 else 0.0
+                result["p_growth_remaining"] = 1.0 if A_hat > y_arr[-1] else 0.0
+
+            result["method"] = "bayesian_laplace"
+
+        except Exception:
+            fallback = self.coverage_growth_model()
+            result.update(fallback)
+            result["method"] = "fallback_fit_failed"
+
+        return result
+
     def record_edge_trace(self, seed_key: str, edges: set[tuple[int, int]]):
         """Record the (prev, curr) edge trace for a seed.
 

@@ -401,6 +401,32 @@ class CorpusManager:
                 stale_count += 1
         stale_ratio = stale_count / max(len(unique), 1)
 
+        # Bayesian stale probability: P(stale | fuzz_count, 0_discoveries)
+        # Uses Beta(1 + 0, 1 + fuzz_count) — the posterior probability that
+        # a seed with `fuzz_count` attempts and 0 discoveries has discovery
+        # probability below 0.01.
+        bayesian_stale_ratio = stale_ratio
+        if f._use_bayesian and f._seed_quality:
+            bayesian_stale_count = 0
+            for seed in unique:
+                sk = self.seed_key(seed)
+                meta = f.seed_meta.get(seed)
+                if not meta:
+                    continue
+                fuzz = meta.get("fuzz_count", 0)
+                if fuzz < 5:
+                    continue
+                # P(discovery_prob < 0.01 | 0 discoveries in fuzz_count attempts)
+                # = Beta.cdf(0.01, alpha=1, beta=1+fuzz_count)
+                a, b = 1.0, 1.0 + fuzz
+                # Mean of Beta = a/(a+b). If the posterior mean is below 0.01,
+                # the seed is likely stale.
+                if a / (a + b) < 0.01:
+                    bayesian_stale_count += 1
+            bayesian_stale_ratio = bayesian_stale_count / max(len(unique), 1)
+            # Use whichever stale ratio is higher (more conservative)
+            stale_ratio = max(stale_ratio, bayesian_stale_ratio)
+
         if f.max_corpus > 0:
             target_size = f.max_corpus
         else:
@@ -469,11 +495,28 @@ class CorpusManager:
                 fuzz = meta["fuzz_count"] if meta else 0
                 discovered = meta["coverage_edges"] if meta else 0
 
-                edge_score = discovered * 10
-                if fuzz > 0 and discovered == 0:
-                    edge_score *= max(0.01, 1.0 / (1.0 + fuzz * 0.01))
+                # Bayesian seed score: use the posterior mean from
+                # BayesianSeedQuality when available.
+                if f._use_bayesian and f._seed_quality:
+                    seed_key_in_bq = seed_key in f._seed_quality._alpha
+                    if seed_key_in_bq:
+                        mean = f._seed_quality.posterior_mean(seed_key)
+                        # Scale posterior mean to a useful range for scoring:
+                        # posterior mean ~ [0,1]. Multiply by discovered * 10
+                        # to get a score on a comparable scale to the heuristic.
+                        edge_score = mean * 10.0 + (discovered * 5.0 if discovered > 0 else 0.0)
+                    else:
+                        edge_score = discovered * 10
+                        if fuzz > 0 and discovered == 0:
+                            edge_score *= max(0.01, 1.0 / (1.0 + fuzz * 0.01))
+                        else:
+                            edge_score += 1.0 / max(fuzz, 1)
                 else:
-                    edge_score += 1.0 / max(fuzz, 1)
+                    edge_score = discovered * 10
+                    if fuzz > 0 and discovered == 0:
+                        edge_score *= max(0.01, 1.0 / (1.0 + fuzz * 0.01))
+                    else:
+                        edge_score += 1.0 / max(fuzz, 1)
 
                 wasserstein_weight = f._edge_tracker.compute_wasserstein_weight(seed_key)
 
