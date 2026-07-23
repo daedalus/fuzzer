@@ -101,22 +101,22 @@ build_so_target() {
         fi
     fi
     local rc=0
-    # Add trace-cmp to target compilation so the compiler generates
-    # __sanitizer_cov_trace_cmp* calls that the linked cmplog_shim implements.
-    # Must use clang — gcc's trace-cmp doesn't generate the callbacks.
+    # Do NOT add -fsanitize-coverage=trace-cmp to the target's own code —
+    # the target wrapper (png_read.c etc.) has almost no comparisons; all
+    # the interesting comparisons are in the vendored libraries which are
+    # compiled separately with trace-cmp. Adding it here just adds overhead
+    # for zero benefit.
     # -Bsymbolic: prevents ASAN's LD_PRELOAD from overriding the trace-cmp
     # callbacks with no-ops (ASAN ships weak stubs that shadow our shim).
-    local tracecmp_flag=""
     local bsymbolic_flag=""
     local target_cc="$cc"
     if [ "$WITH_CMPLOG" -eq 1 ]; then
-        tracecmp_flag="-fsanitize-coverage=trace-cmp"
         bsymbolic_flag="-Wl,-Bsymbolic"
         if command -v clang &>/dev/null; then
             target_cc="clang"
         fi
     fi
-    $target_cc $extra_flags -O2 -g $extra_cflags $tracecmp_flag -shared -fPIC $bsymbolic_flag -include "$SHIM" \
+    $target_cc $extra_flags -O2 -g $extra_cflags -shared -fPIC $bsymbolic_flag -include "$SHIM" \
         -o "$out" "$src" $cmplog_obj $libs $cmplog_libs 2>/dev/null || rc=$?
     [ -n "$cmplog_obj" ] && rm -f "$cmplog_obj"
     if [ $rc -eq 0 ]; then
