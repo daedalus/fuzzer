@@ -180,6 +180,33 @@ class TestGenerateMutations:
         # but hammer=True generates more integer variants
         assert len(hammered) >= 0  # at least doesn't crash
 
+    def test_mismatched_operand_lengths(self):
+        """Regression test: cmp_size from longer operand must not cause
+        struct.error when the other operand is shorter."""
+        # op_a is 4 bytes → cmp_size=32, bytes_len=4, key="L"
+        # op_b is 2 bytes → struct.unpack(">L", 2-byte val) would crash
+        data = b"\x01\x02\x03\x04\xff\xff"
+        op_a = b"\x01\x02\x03\x04"
+        op_b = b"\x05\x06"
+        mutations = generate_mutations(op_a, op_b, 32, "CMP", data, hammer=True)
+        assert isinstance(mutations, list)
+
+        # Same with a 1-byte operand_b
+        op_b_1 = b"\x05"
+        mutations2 = generate_mutations(op_a, op_b_1, 32, "CMP", data, hammer=True)
+        assert isinstance(mutations2, list)
+
+        # 8-byte op_a with short op_b (key="Q")
+        data8 = b"\x01\x02\x03\x04\x05\x06\x07\x08\xff"
+        op_a8 = b"\x01\x02\x03\x04\x05\x06\x07\x08"
+        op_b8 = b"\x05"
+        mutations3 = generate_mutations(op_a8, op_b8, 64, "CMP", data8, hammer=True)
+        assert isinstance(mutations3, list)
+
+        # SUB type with mismatched lengths (same struct.unpack path)
+        mutations4 = generate_mutations(op_a, op_b, 32, "SUB", data, hammer=True)
+        assert isinstance(mutations4, list)
+
     def test_hash_skip(self):
         """Hash-like pairs should be skipped when is_hash is provided."""
         mutations = generate_mutations(

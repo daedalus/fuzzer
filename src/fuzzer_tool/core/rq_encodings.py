@@ -421,7 +421,8 @@ def _get_encoded_variants(
         if key is None:
             raw_variants = [val]
         else:
-            base_val = struct.unpack(">" + key, val)[0]
+            padded = val.rjust(bytes_len, b'\x00')
+            base_val = struct.unpack(">" + key, padded)[0]
             max_val = (1 << (8 * bytes_len)) - 1
             raw_variants = []
             for i in range(-16, 16):
@@ -432,7 +433,8 @@ def _get_encoded_variants(
         if key is None:
             raw_variants = [val]
         else:
-            base_val = struct.unpack(">" + key, val)[0]
+            padded = val.rjust(bytes_len, b'\x00')
+            base_val = struct.unpack(">" + key, padded)[0]
             max_val = (1 << (8 * bytes_len)) - 1
             max_offset = 64 if hammer else 1
             raw_variants = [val]
