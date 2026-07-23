@@ -177,12 +177,31 @@ build_simple_so_targets() {
     echo "Building simple .so targets ($label)..."
     local out_suffix=""
     [ "$suffix" = "_nosan" ] && out_suffix="_nosan"
+
+    # When --cmplog is set and vendored trace-cmp libs exist, link against
+    # them instead of system libs. The vendored libs were compiled with
+    # -fsanitize-coverage=trace-cmp,trace-pc-guard so their comparisons
+    # produce callbacks the cmplog shim captures.
+    local PNG_LIBS="-lpng -lz"
+    local ZLIB_LIBS="-lz"
+    local GZIP_LIBS="-lz"
+    if [ "$WITH_CMPLOG" -eq 1 ]; then
+        local VENDOR_ZLIB_A="$VENDOR/zlib/libz.a"
+        local VENDOR_PNG_A="$VENDOR/libpng/.libs/libpng16.a"
+        if [ -f "$VENDOR_ZLIB_A" ] && [ -f "$VENDOR_PNG_A" ]; then
+            PNG_LIBS="$VENDOR_PNG_A $VENDOR_ZLIB_A -lm"
+            ZLIB_LIBS="$VENDOR_ZLIB_A -lm"
+            GZIP_LIBS="$VENDOR_ZLIB_A -lm"
+            echo "  Using vendored trace-cmp libraries"
+        fi
+    fi
+
     build_so_target "$TARGETS/asan_target.c" "$TARGETS/asan_target${out_suffix}.so" "" "$flags"
     build_so_target "$TARGETS/test_target.c" "$TARGETS/test_target${out_suffix}.so" "" "$flags"
     build_so_target "$TARGETS/proto_target.c" "$TARGETS/proto_target${out_suffix}.so" "" "$flags"
-    build_so_target "$TARGETS/png_read.c" "$TARGETS/png_read${out_suffix}.so" "-lpng -lz" "$flags"
-    build_so_target "$TARGETS/zlib_read.c" "$TARGETS/zlib_read${out_suffix}.so" "-lz" "$flags"
-    build_so_target "$TARGETS/gzip_read.c" "$TARGETS/gzip_read${out_suffix}.so" "-lz" "$flags"
+    build_so_target "$TARGETS/png_read.c" "$TARGETS/png_read${out_suffix}.so" "$PNG_LIBS" "$flags"
+    build_so_target "$TARGETS/zlib_read.c" "$TARGETS/zlib_read${out_suffix}.so" "$ZLIB_LIBS" "$flags"
+    build_so_target "$TARGETS/gzip_read.c" "$TARGETS/gzip_read${out_suffix}.so" "$GZIP_LIBS" "$flags"
     build_so_target "$TARGETS/jpeg_read.c" "$TARGETS/jpeg_read${out_suffix}.so" "-ljpeg" "$flags"
     build_so_target "$TARGETS/nop_target.c" "$TARGETS/nop_target${out_suffix}.so" "" "$flags"
 }
@@ -649,9 +668,6 @@ case "$OPTS" in
 esac
 
 if [ "$BUILD_ASAN" -eq 1 ]; then
-    # ASAN .so targets always include cmplog (linked shim, not LD_PRELOAD).
-    # This ensures --cmplog works out of the box without extra flags.
-    WITH_CMPLOG=1
     [ "$HAS_FGREP" -eq 1 ] && compile_fgrep_objects "_asan" "-fsanitize=address"
     [ "$HAS_FGREP" -eq 1 ] && build_fgrep_targets "_asan" "-fsanitize=address" "ASAN"
     # Compile fgrep objects with clang + trace-pc-guard for .so targets
