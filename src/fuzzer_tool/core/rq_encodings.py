@@ -14,6 +14,7 @@ Usage:
 
 import logging
 import struct
+from collections.abc import Callable
 from itertools import product
 
 log = logging.getLogger(__name__)
@@ -297,6 +298,8 @@ MAX_MUTATIONS_PER_PAIR = 256
 
 def find_offsets(data: bytes, pattern: bytes) -> list[int]:
     """Find all occurrences of *pattern* in *data* (including overlaps)."""
+    if not pattern:
+        return []
     offsets = []
     start = 0
     while True:
@@ -315,7 +318,7 @@ def generate_mutations(
     input_data: bytes,
     *,
     hammer: bool = False,
-    is_hash: callable | None = None,
+    is_hash: Callable | None = None,
 ) -> list[tuple[tuple[int, ...], tuple[bytes, ...], Encoder]]:
     """Generate I2S mutations for a single cmplog pair.
 

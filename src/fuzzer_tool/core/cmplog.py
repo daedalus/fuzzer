@@ -304,11 +304,11 @@ class CmplogCollector:
                 self._pair_value.pop(p, None)
             self.pairs = list(self._pair_set)
 
-            # Track pair occurrence across runs for multi-run confidence.
-            # Pairs seen in many runs are reliable I2S signals; rarely-seen
-            # pairs may be noise from edge-case execution paths.
-            for pair in new_pairs:
-                self._pair_occurrence[pair] = self._pair_occurrence.get(pair, 0) + 1
+        # Track pair occurrence across runs for multi-run confidence.
+        # Pairs seen in many runs are reliable I2S signals; rarely-seen
+        # pairs may be noise from edge-case execution paths.
+        for pair in new_pairs:
+            self._pair_occurrence[pair] = self._pair_occurrence.get(pair, 0) + 1
 
         if new_tokens:
             log.info(

@@ -39,6 +39,13 @@ class TestConstants:
         assert "havoc" in MUTATIONS
         assert "splice" in MUTATIONS
         assert "arithmetic" in MUTATIONS
+        assert "fuse_this" in MUTATIONS
+        assert "fuse_next" in MUTATIONS
+        assert "fuse_old" in MUTATIONS
+        assert "tree_mutate" in MUTATIONS
+        assert "utf8_widen" in MUTATIONS
+        assert "utf8_insert" in MUTATIONS
+        assert "line_mutate" in MUTATIONS
         assert len(MUTATIONS) >= 12
 
     def test_dict_mutations_list(self):
@@ -175,3 +182,31 @@ class TestMinimizeBytes:
         data = b"A" * 1000
         result = minimize_bytes(data, lambda x: True, max_stages=1)
         assert len(result) <= len(data)
+
+
+class TestRadamsaMutateNum:
+    def test_returns_integer(self):
+        from fuzzer_tool.core.mutations import radamsa_mutate_num
+        result = radamsa_mutate_num(42)
+        assert isinstance(result, int)
+
+    def test_produces_different_values(self):
+        from fuzzer_tool.core.mutations import radamsa_mutate_num
+        results = {radamsa_mutate_num(100) for _ in range(50)}
+        # Should produce at least some variety
+        assert len(results) > 1
+
+    def test_zero_input(self):
+        from fuzzer_tool.core.mutations import radamsa_mutate_num
+        result = radamsa_mutate_num(0)
+        assert isinstance(result, int)
+
+    def test_negative_input(self):
+        from fuzzer_tool.core.mutations import radamsa_mutate_num
+        result = radamsa_mutate_num(-5)
+        assert isinstance(result, int)
+
+    def test_large_input(self):
+        from fuzzer_tool.core.mutations import radamsa_mutate_num
+        result = radamsa_mutate_num(1_000_000)
+        assert isinstance(result, int)
