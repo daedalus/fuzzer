@@ -112,7 +112,6 @@ subprocess mode with `-c`.
 ## Platform Requirements
 
 - **Linux x86_64** required. The ELF parser assumes 64-bit little-endian.
-  The `BitmapReader` parses LOAD segments and resolves virtual addresses.
 - **clang** required for sanitizer-instrumented targets. GCC does not
   support `-fsanitize-coverage=inline-8bit-counters`.
 - **Python 3.10+** required for `match` syntax and type hints used in
@@ -136,8 +135,8 @@ subprocess mode with `-c`.
    the sanitizer isn't initialized. The fuzzer still runs and finds crashes
    via signal detection.
 
-4. **ELF parsing fragility.** The `BitmapReader` and persistent loader
-   parse ELF symbol tables to find `__start___sancov_cntrs`. This works
+4. **ELF parsing fragility.** The persistent loader parses ELF symbol
+   tables to find `__start___sancov_cntrs`. This works
    for standard clang-built `.so` files but may fail for:
    - Stripped binaries (no `.symtab`)
    - LTO-built binaries (different symbol layout)
@@ -171,7 +170,6 @@ subprocess mode with `-c`.
 │  │  ShimFactory                                  │   │
 │  │  • Inspects target ELF for sancov symbols     │   │
 │  │  • Builds minimal C shim (one-time)           │   │
-│  │  • BitmapReader reads counters from memory    │   │
 │  └──────────────────────────────────────────────┘   │
 │                                                     │
 │  ┌──────────────────────────────────────────────┐   │
