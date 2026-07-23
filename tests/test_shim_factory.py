@@ -1,8 +1,6 @@
 """Unit tests for adapters/shim_factory.py — coverage shim builder."""
 
-import ctypes
 import os
-import tempfile
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -18,8 +16,6 @@ from fuzzer_tool.adapters.shim_factory import (
     build_shim,
     cleanup_shim,
     load_shim,
-    read_bitmap,
-    reset_bitmap,
 )
 
 
@@ -314,49 +310,6 @@ class TestBuildShim:
             mock_build.return_value = "/tmp/shim.so"
             result = build_shim("/fake/target", mode="direct")
             assert result.bitmap_size == 0
-
-
-class TestReadBitmap:
-    def test_none_handle(self):
-        assert read_bitmap(None) is None
-
-    def test_handle_without_cov_get_bitmap(self):
-        mock = MagicMock(spec=[])  # no attributes
-        assert read_bitmap(mock) is None
-
-    def test_handle_with_valid_bitmap(self):
-        buf = (ctypes.c_uint8 * 4)(1, 2, 3, 4)
-        mock = MagicMock()
-        mock.cov_get_bitmap.return_value = ctypes.addressof(buf)
-        mock.cov_get_size.return_value = 4
-        result = read_bitmap(mock)
-        assert result == bytes([1, 2, 3, 4])
-
-    def test_handle_returns_zero_pointer(self):
-        mock = MagicMock()
-        mock.cov_get_bitmap.return_value = 0
-        mock.cov_get_size.return_value = 4
-        assert read_bitmap(mock) is None
-
-    def test_handle_returns_zero_size(self):
-        mock = MagicMock()
-        mock.cov_get_bitmap.return_value = 1234
-        mock.cov_get_size.return_value = 0
-        assert read_bitmap(mock) is None
-
-
-class TestResetBitmap:
-    def test_none_handle(self):
-        reset_bitmap(None)  # should not raise
-
-    def test_calls_cov_reset(self):
-        mock = MagicMock()
-        reset_bitmap(mock)
-        mock.cov_reset.assert_called_once()
-
-    def test_suppresses_attribute_error(self):
-        mock = MagicMock(spec=[])  # no attributes
-        reset_bitmap(mock)  # should not raise
 
 
 class TestBitmapReader:

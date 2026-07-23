@@ -38,7 +38,7 @@ class ShimResult:
     """Result of building a coverage shim."""
 
     shim_path: str | None = None
-    coverage_type: str = "none"  # "sancov_counters", "inline_8bit", "none"
+    coverage_type: str = "none"  # "inline_8bit", "none"
     bitmap_size: int = 0
     needs_preload: bool = False
     compile_error: str | None = None
@@ -348,26 +348,6 @@ def load_shim(shim_path: str, mode: str = "direct") -> ctypes.CDLL | None:
         return ctypes.CDLL(shim_path)
     except OSError:
         return None
-
-
-def read_bitmap(shim_handle: ctypes.CDLL) -> bytes | None:
-    if shim_handle is None:
-        return None
-    try:
-        ptr = shim_handle.cov_get_bitmap()
-        size = shim_handle.cov_get_size()
-        if not ptr or not size:
-            return None
-        return bytes((ctypes.c_uint8 * size).from_address(ptr))
-    except (AttributeError, OSError):
-        return None
-
-
-def reset_bitmap(shim_handle: ctypes.CDLL) -> None:
-    if shim_handle is None:
-        return
-    with contextlib.suppress(AttributeError, OSError):
-        shim_handle.cov_reset()
 
 
 def cleanup_shim(shim_path: str | None) -> None:
