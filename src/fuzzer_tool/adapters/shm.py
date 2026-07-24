@@ -75,6 +75,16 @@ class ShmCoverage:
     def read_bitmap(self) -> bytes:
         return bytes(self._map)
 
+    def get_edge_bitmap_view(self):
+        """Return a zero-copy numpy uint8 view of the raw SHM bitmap.
+
+        Avoids the 1MB ``bytes()`` allocation that ``read_bitmap()`` does.
+        Returns ``None`` when numpy is not available.
+        """
+        if not _HAS_NUMPY:
+            return None
+        return np.frombuffer(self._map, dtype=np.uint8)
+
     def reset_edge_map(self):
         """Reset the coverage bitmap to zero."""
         ctypes.memset(self._ptr, 0, self.size)
@@ -135,18 +145,20 @@ class ShmCoverage:
         mask = (classified != 0) & (seen_cls == 0)
         new_edges = int(np.count_nonzero(mask))
 
+        # Update snapshot for next comparison — zero-copy numpy slice
+        # instead of classified.tobytes() + ctypes.memmove (avoid 1MB allocation).
+        last_map_view = np.frombuffer(self._last_map_ptr, dtype=np.uint8)
+        last_map_view[:] = classified
+
         if new_edges:
             seen_cls[mask] = classified[mask]
             seen_arr = np.frombuffer(self._seen, dtype=np.uint8)
             seen_arr[mask] = 1
             self.cumulative_edges += new_edges
             self._peak_cumulative_edges = max(self._peak_cumulative_edges, self.cumulative_edges)
-            # Update snapshot for next comparison
-            ctypes.memmove(self._last_map_ptr, classified.tobytes(), self.size)
             self.total_edges += 1
             return True
 
-        ctypes.memmove(self._last_map_ptr, classified.tobytes(), self.size)
         return False
 
     def _is_new_coverage_python(self) -> bool:

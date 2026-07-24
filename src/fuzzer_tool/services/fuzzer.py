@@ -1429,15 +1429,9 @@ class Fuzzer:
 
     def _refresh_agg_cache(self) -> None:
         """Recompute running aggregates from seed_meta."""
-        self._cached_total_time = sum(
-            m.get("total_time", 0.0) for m in self.seed_meta.values()
-        )
-        self._cached_total_fuzz = sum(
-            m.get("fuzz_count", 1) for m in self.seed_meta.values()
-        )
-        self._cached_total_edges = sum(
-            m.get("coverage_edges", 0) for m in self.seed_meta.values()
-        )
+        self._cached_total_time = sum(m.get("total_time", 0.0) for m in self.seed_meta.values())
+        self._cached_total_fuzz = sum(m.get("fuzz_count", 1) for m in self.seed_meta.values())
+        self._cached_total_edges = sum(m.get("coverage_edges", 0) for m in self.seed_meta.values())
         self._agg_cache_valid = True
 
     def _invalidate_agg_cache(self, invalidation_site: str = "") -> None:
@@ -1828,36 +1822,49 @@ class Fuzzer:
 
         # Update edge lifetime tracking for every execution
         if self._inprocess_runner or self.ptrace_cov or self.shm_cov:
-            edge_bitmap = self._get_current_edge_bitmap()
-            if edge_bitmap:
-                current_edges = set()
-                for i, val in enumerate(edge_bitmap):
-                    if val and i < self.map_size:
-                        current_edges.add(i)
-                if current_edges:
-                    self._edge_tracker.record_edge_lifetimes(current_edges, self.exec_count)
+            current_edges = set()
+            arr = self._get_edge_bitmap_view()
+            if arr is not None:
+                current_edges = set(np.flatnonzero(arr[: self.map_size]))
+            if not current_edges:
+                edge_bitmap = self._get_current_edge_bitmap()
+                if edge_bitmap:
+                    current_edges = set(
+                        i for i, v in enumerate(edge_bitmap) if v and i < self.map_size
+                    )
+            if current_edges:
+                self._edge_tracker.record_edge_lifetimes(current_edges, self.exec_count)
 
         # Track input-length → edge discovery correlation
         if has_new_coverage and self._length_tracker:
-            edge_bitmap = self._get_current_edge_bitmap()
-            if edge_bitmap:
-                new_edges = set()
-                if _HAS_NUMPY:
-                    arr = np.frombuffer(edge_bitmap, dtype=np.uint8)[: self.map_size]
-                    new_edges = set(np.flatnonzero(arr))
-                else:
-                    for i, byte_val in enumerate(edge_bitmap):
-                        if byte_val and i < self.map_size:
-                            new_edges.add(i)
-                if new_edges:
-                    self._length_tracker.record(len(mutated), new_edges)
+            new_edges = set()
+            arr = self._get_edge_bitmap_view()
+            if arr is not None:
+                new_edges = set(np.flatnonzero(arr[: self.map_size]))
+            if not new_edges:
+                edge_bitmap = self._get_current_edge_bitmap()
+                if edge_bitmap:
+                    if _HAS_NUMPY:
+                        arr = np.frombuffer(edge_bitmap, dtype=np.uint8)[: self.map_size]
+                        new_edges = set(np.flatnonzero(arr))
+                    else:
+                        for i, byte_val in enumerate(edge_bitmap):
+                            if byte_val and i < self.map_size:
+                                new_edges.add(i)
+            if new_edges:
+                self._length_tracker.record(len(mutated), new_edges)
 
         # Compute directed distance for targeted fuzzing
         if self._distance and meta is not None and has_new_coverage:
-            edge_bitmap = self._get_current_edge_bitmap()
-            if edge_bitmap:
-                # Use edge bitmap positions as basic block proxies
-                hit_bbs = {i for i, v in enumerate(edge_bitmap) if v > 0}
+            hit_bbs: set[int] = set()
+            arr = self._get_edge_bitmap_view()
+            if arr is not None:
+                hit_bbs = set(np.flatnonzero(arr[: self.map_size]))
+            if not hit_bbs:
+                edge_bitmap = self._get_current_edge_bitmap()
+                if edge_bitmap:
+                    hit_bbs = {i for i, v in enumerate(edge_bitmap) if v > 0}
+            if hit_bbs:
                 # Record edge trace for distance computation
                 seed_key = self._seed_key(data)
                 edge_pairs = {(i, i) for i in hit_bbs}  # self-loops as BB proxies
@@ -1964,9 +1971,19 @@ class Fuzzer:
                     )
 
         if self._use_shapley and self._shapley:
-            edge_bitmap = self._get_current_edge_bitmap()
-            if edge_bitmap:
-                new_edges = {i for i, v in enumerate(edge_bitmap) if v > 0}
+            new_edges: set[int] = set()
+            arr = self._get_edge_bitmap_view()
+            if arr is not None:
+                new_edges = set(np.flatnonzero(arr[: self.map_size]))
+                edge_available = True
+            else:
+                edge_available = False
+            if not edge_available:
+                edge_bitmap = self._get_current_edge_bitmap()
+                if edge_bitmap:
+                    new_edges = {i for i, v in enumerate(edge_bitmap) if v > 0}
+                    edge_available = True
+            if edge_available:
                 self._shapley.record(set(self._last_ops_used), len(new_edges), new_edges)
 
         if self._use_mi and self._mi:
@@ -2113,6 +2130,15 @@ class Fuzzer:
     def _get_current_edge_bitmap(self):
         return self._stats.get_current_edge_bitmap()
 
+    def _get_edge_bitmap_view(self):
+        """Return a zero-copy numpy view of the active bitmap when possible.
+
+        Handles SHM + multi-target mode. Falls back to None when numpy is
+        not available or no SHM is active. Callers fall through to
+        ``_get_current_edge_bitmap()`` (bytes) when this returns None.
+        """
+        return self._stats.get_edge_bitmap_view()
+
     def _format_elapsed(self):
         return self._stats.format_elapsed()
 
@@ -2229,7 +2255,9 @@ class Fuzzer:
         print(f"[*] Seed: {self.seed}")
         # Target profile summary
         if self._profile.functions:
-            profile_cache = Path(self.target).with_suffix(Path(self.target).suffix + ".profile_cache")
+            profile_cache = Path(self.target).with_suffix(
+                Path(self.target).suffix + ".profile_cache"
+            )
             tag = " [cached]" if profile_cache.exists() and not self.refresh_profile else ""
             print(
                 f"[*] Profile: {len(self._profile.functions)} functions, "
@@ -2400,11 +2428,7 @@ class Fuzzer:
                         self._refresh_agg_cache()
                     avg_exec_us = max(
                         1,
-                        int(
-                            self._cached_total_time
-                            / max(1, self._cached_total_fuzz)
-                            * 1_000_000
-                        ),
+                        int(self._cached_total_time / max(1, self._cached_total_fuzz) * 1_000_000),
                     )
                     exec_us = max(
                         1,
@@ -2417,10 +2441,7 @@ class Fuzzer:
                     bitmap_size = meta.get("coverage_edges", 0)
                     avg_bitmap_size = max(
                         1,
-                        int(
-                            self._cached_total_edges
-                            / max(1, len(self.seed_meta))
-                        ),
+                        int(self._cached_total_edges / max(1, len(self.seed_meta))),
                     )
                     depth = meta.get("lineage_depth", 0)
                     fuzz_level = meta.get("fuzz_count", 0)

@@ -188,9 +188,11 @@ class StatsReporter:
         # Bayesian coverage model (richer output when available)
         bayes = f._edge_tracker.bayesian_coverage_growth_model()
         if "p_stalled" in bayes and bayes["p_stalled"] is not None:
-            print(f"  Bayesian — P(stalled): {bayes['p_stalled']:.1%} "
-                  f"P(growth): {1 - bayes['p_stalled']:.1%}"
-                  f" {'[STALLED]' if bayes['p_stalled'] > 0.5 else ''}")
+            print(
+                f"  Bayesian — P(stalled): {bayes['p_stalled']:.1%} "
+                f"P(growth): {1 - bayes['p_stalled']:.1%}"
+                f" {'[STALLED]' if bayes['p_stalled'] > 0.5 else ''}"
+            )
 
     def _print_summary_seeds(self, f) -> None:
         """Print seed-related summary lines."""
@@ -415,6 +417,25 @@ class StatsReporter:
             return bytes(f.shm_cov._map)
         if f.ptrace_cov:
             return bytes(f.ptrace_cov.edge_map)
+        return None
+
+    def get_edge_bitmap_view(self):
+        """Return a zero-copy numpy view when available, else None.
+
+        Handles multi-target mode by selecting the active target's SHM.
+        Returns None when numpy is not available or no SHM is active.
+        """
+        from fuzzer_tool.core.count_class import _HAS_NUMPY
+
+        if not _HAS_NUMPY:
+            return None
+        f = self.f
+        if f.multi_targets:
+            active_shm = f._target_shm_covs.get(f.target)
+            if active_shm:
+                return active_shm.get_edge_bitmap_view()
+        if f.shm_cov:
+            return f.shm_cov.get_edge_bitmap_view()
         return None
 
     def format_elapsed(self) -> str:
