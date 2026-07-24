@@ -79,9 +79,9 @@ class StatsReporter:
             f._runner.run_target(seed)
             f.exec_count += 1
             exec_count += 1
-            edge_bitmap = self.get_current_edge_bitmap()
-            if edge_bitmap:
-                f._edge_tracker.record_edges(f._seed_key(seed), edge_bitmap)
+            edge_set = self.get_current_edge_set()
+            if edge_set:
+                f._edge_tracker.record_edges(f._seed_key(seed), edge_set)
 
         while exec_count < max_execs:
             seed = random.choice(seeds)
@@ -95,9 +95,9 @@ class StatsReporter:
             f._runner.run_target(mutated)
             f.exec_count += 1
             exec_count += 1
-            edge_bitmap = self.get_current_edge_bitmap()
-            if edge_bitmap:
-                f._edge_tracker.record_edges(f._seed_key(mutated), edge_bitmap)
+            edge_set = self.get_current_edge_set()
+            if edge_set:
+                f._edge_tracker.record_edges(f._seed_key(mutated), edge_set)
             if exec_count % report_interval == 0:
                 edges = len(f._edge_tracker._global_edge_hits)
                 print(
@@ -120,8 +120,7 @@ class StatsReporter:
 
             def _exec_fn(data: bytes) -> int:
                 f._runner.run_target(data)
-                bm = self.get_current_edge_bitmap()
-                return sum(bm) if bm else 0
+                return len(self.get_current_edge_set())
 
             n_rels = f._frameshift.discover_relations(
                 seed0, _exec_fn, max_relations=8, max_execs=200
@@ -408,6 +407,11 @@ class StatsReporter:
         return get_te_weighted_position(self.f._te_byte_edges, input_length)
 
     def get_current_edge_bitmap(self) -> bytes | None:
+        """Return the raw SHM byte buffer.
+
+        For sparse-entry SHM this returns ``shm_bytes`` of raw struct data.
+        Prefer :meth:`get_current_edge_set` when you need edge IDs.
+        """
         f = self.f
         if f.multi_targets:
             active_shm = f._target_shm_covs.get(f.target)
@@ -419,10 +423,29 @@ class StatsReporter:
             return bytes(f.ptrace_cov.edge_map)
         return None
 
+    def get_current_edge_set(self) -> set[int]:
+        """Return the set of currently-active edge IDs.
+
+        Works for both sparse-entry SHM and byte-bitmap ptrace coverage.
+        """
+        f = self.f
+        if f.multi_targets:
+            active_shm = f._target_shm_covs.get(f.target)
+            if active_shm:
+                return active_shm.get_edge_ids()
+        if f.shm_cov:
+            return f.shm_cov.get_edge_ids()
+        if f.ptrace_cov:
+            arr = bytes(f.ptrace_cov.edge_map)
+            return {i for i, v in enumerate(arr) if v}
+        return set()
+
     def get_edge_bitmap_view(self):
         """Return a zero-copy numpy view when available, else None.
 
         Handles multi-target mode by selecting the active target's SHM.
+        For sparse-entry SHM the view is a structured array with
+        ``edge_id`` and ``count`` fields.
         Returns None when numpy is not available or no SHM is active.
         """
         from fuzzer_tool.core.count_class import _HAS_NUMPY

@@ -1328,10 +1328,6 @@ class Fuzzer:
     def _trim_new_coverage(self, data: bytes, parent: bytes):
         return self._corpus_manager.trim_new_coverage(data, parent)
 
-    @staticmethod
-    def _edges_subset_of(candidate: bytes, reference: bytes):
-        return CorpusManager._edges_subset_of(candidate, reference)
-
     def _auto_minimize_corpus(self):
         return self._corpus_manager.auto_minimize_corpus()
 
@@ -1718,17 +1714,13 @@ class Fuzzer:
 
         # Format learner: only record when coverage actually changes
         if self._format_learner and self._last_ops_used and has_new_coverage:
-            edge_bitmap = self._get_current_edge_bitmap()
+            current_edges = self._get_current_edge_set()
             new_edges = set()
             lost_edges = set()
-            if edge_bitmap and hasattr(self, "_prev_edge_bitmap") and self._prev_edge_bitmap:
-                for i in range(min(len(edge_bitmap), len(self._prev_edge_bitmap))):
-                    if edge_bitmap[i] and not self._prev_edge_bitmap[i]:
-                        new_edges.add(i)
-                    elif not edge_bitmap[i] and self._prev_edge_bitmap[i]:
-                        lost_edges.add(i)
-            if edge_bitmap:
-                self._prev_edge_bitmap = bytes(edge_bitmap)
+            if hasattr(self, "_prev_edge_set"):
+                new_edges = current_edges - self._prev_edge_set
+                lost_edges = self._prev_edge_set - current_edges
+            self._prev_edge_set = current_edges
 
             cov_after = (
                 len(self._edge_tracker._global_edge_hits)
@@ -1746,9 +1738,7 @@ class Fuzzer:
                 lost_edges=lost_edges,
             )
         elif self._format_learner:
-            eb = self._get_current_edge_bitmap()
-            if eb:
-                self._prev_edge_bitmap = bytes(eb)
+            self._prev_edge_set = self._get_current_edge_set()
 
         # Write ablation log row: signal data + outcome
         if self._ablation_file and hasattr(self, "_last_pick_signals"):
@@ -1766,14 +1756,20 @@ class Fuzzer:
 
         # Record edges for per-seed tracking
         if has_new_coverage:
-            edge_bitmap = self._get_current_edge_bitmap()
-            if edge_bitmap:
-                seed_key = self._seed_key(data)
+            seed_key = self._seed_key(data)
+            # Prefer sparse edge set with counts (SHM), fall back to byte bitmap (ptrace)
+            if self.shm_cov and not self.ptrace_cov:
+                hit_counts = self.shm_cov.get_edge_counts()
+                hit_edges = set(hit_counts.keys())
+            else:
+                hit_edges = self._get_current_edge_set()
+                hit_counts = None
+            if hit_edges:
                 new = self._edge_tracker.record_edges(
                     seed_key,
-                    edge_bitmap,
+                    hit_edges,
                     target_name=os.path.basename(self.target) if self.multi_targets else "",
-                    morris_mode=self._edge_tracker._morris_mode,
+                    hit_counts=hit_counts,
                 )
                 if new:
                     self._last_new_edge_exec = self.exec_count
@@ -1822,48 +1818,19 @@ class Fuzzer:
 
         # Update edge lifetime tracking for every execution
         if self._inprocess_runner or self.ptrace_cov or self.shm_cov:
-            current_edges = set()
-            arr = self._get_edge_bitmap_view()
-            if arr is not None:
-                current_edges = set(np.flatnonzero(arr[: self.map_size]))
-            if not current_edges:
-                edge_bitmap = self._get_current_edge_bitmap()
-                if edge_bitmap:
-                    current_edges = set(
-                        i for i, v in enumerate(edge_bitmap) if v and i < self.map_size
-                    )
+            current_edges = self._get_current_edge_set()
             if current_edges:
                 self._edge_tracker.record_edge_lifetimes(current_edges, self.exec_count)
 
         # Track input-length → edge discovery correlation
         if has_new_coverage and self._length_tracker:
-            new_edges = set()
-            arr = self._get_edge_bitmap_view()
-            if arr is not None:
-                new_edges = set(np.flatnonzero(arr[: self.map_size]))
-            if not new_edges:
-                edge_bitmap = self._get_current_edge_bitmap()
-                if edge_bitmap:
-                    if _HAS_NUMPY:
-                        arr = np.frombuffer(edge_bitmap, dtype=np.uint8)[: self.map_size]
-                        new_edges = set(np.flatnonzero(arr))
-                    else:
-                        for i, byte_val in enumerate(edge_bitmap):
-                            if byte_val and i < self.map_size:
-                                new_edges.add(i)
+            new_edges = self._get_current_edge_set()
             if new_edges:
                 self._length_tracker.record(len(mutated), new_edges)
 
         # Compute directed distance for targeted fuzzing
         if self._distance and meta is not None and has_new_coverage:
-            hit_bbs: set[int] = set()
-            arr = self._get_edge_bitmap_view()
-            if arr is not None:
-                hit_bbs = set(np.flatnonzero(arr[: self.map_size]))
-            if not hit_bbs:
-                edge_bitmap = self._get_current_edge_bitmap()
-                if edge_bitmap:
-                    hit_bbs = {i for i, v in enumerate(edge_bitmap) if v > 0}
+            hit_bbs = self._get_current_edge_set()
             if hit_bbs:
                 # Record edge trace for distance computation
                 seed_key = self._seed_key(data)
@@ -1971,31 +1938,23 @@ class Fuzzer:
                     )
 
         if self._use_shapley and self._shapley:
-            new_edges: set[int] = set()
-            arr = self._get_edge_bitmap_view()
-            if arr is not None:
-                new_edges = set(np.flatnonzero(arr[: self.map_size]))
-                edge_available = True
-            else:
-                edge_available = False
-            if not edge_available:
-                edge_bitmap = self._get_current_edge_bitmap()
-                if edge_bitmap:
-                    new_edges = {i for i, v in enumerate(edge_bitmap) if v > 0}
-                    edge_available = True
-            if edge_available:
+            new_edges = self._get_current_edge_set()
+            if new_edges:
                 self._shapley.record(set(self._last_ops_used), len(new_edges), new_edges)
+            elif self.exec_count > 0 and self._last_ops_used:
+                # Even with no edges, record a zero to track operator impact
+                self._shapley.record(set(self._last_ops_used), 0, set())
 
         if self._use_mi and self._mi:
-            edge_bitmap = self._get_current_edge_bitmap()
-            if edge_bitmap:
-                self._mi.record(data, edge_bitmap, self.map_size)
+            current_edges = self._get_current_edge_set()
+            if current_edges:
+                self._mi.record(data, current_edges, self.map_size)
 
         if self._use_transfer_entropy and self._te:
-            edge_bitmap = self._get_current_edge_bitmap()
-            if edge_bitmap:
+            current_edges = self._get_current_edge_set()
+            if current_edges:
                 self._te_input_history.append(data[:64] if len(data) > 64 else data)
-                self._te_edge_history.append(edge_bitmap)
+                self._te_edge_history.append(current_edges)
                 if len(self._te_input_history) > self._te_history_max:
                     self._te_input_history = self._te_input_history[-self._te_history_max :]
                     self._te_edge_history = self._te_edge_history[-self._te_history_max :]
@@ -2049,15 +2008,13 @@ class Fuzzer:
             # Analyze byte sensitivity for seeds that found new coverage (optional)
             if has_new_coverage and self.shm_cov and self._use_sensitivity:
                 try:
-                    edge_bitmap = bytes(self.shm_cov._map)[: self.shm_cov.size]
-                    edges = {i for i, v in enumerate(edge_bitmap) if v}
+                    edges = self.shm_cov.get_edge_ids()
                     if edges:
 
                         def _exec_fn(data):
                             rc, _ = self._run_target(data)
                             if self.shm_cov:
-                                bm = bytes(self.shm_cov._map)[: self.shm_cov.size]
-                                return {i for i, v in enumerate(bm) if v}
+                                return self.shm_cov.get_edge_ids()
                             return set()
 
                         self._sensitivity.analyze_seed(mutated, edges, _exec_fn)
@@ -2129,6 +2086,14 @@ class Fuzzer:
 
     def _get_current_edge_bitmap(self):
         return self._stats.get_current_edge_bitmap()
+
+    def _get_current_edge_set(self) -> set[int]:
+        """Return the set of currently-active edge IDs.
+
+        Works for sparse-entry SHM (edge_id from struct entries) and
+        byte-bitmap ptrace coverage (non-zero byte positions).
+        """
+        return self._stats.get_current_edge_set()
 
     def _get_edge_bitmap_view(self):
         """Return a zero-copy numpy view of the active bitmap when possible.

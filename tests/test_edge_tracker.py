@@ -329,29 +329,32 @@ class TestGoodTuring:
         bm[2] = 1
         et.record_edges("s", bytes(bm))
         d = et.bitmap_density()
-        assert abs(d - 3 / 256) < 1e-6
+        # map_size=256 bytes → 32 sparse entries; 3 edges → 3/32
+        assert abs(d - 3 / 32) < 1e-6
 
-    def test_birthday_collision_risk_zero_edges(self):
+    def test_birthday_collision_risk_zero(self):
         et = EdgeTracker(map_size=256)
         assert et.birthday_collision_risk() == 0.0
 
-    def test_birthday_collision_risk_low(self):
+    def test_birthday_collision_risk_sparse(self):
+        # Sparse hash table has no silent collisions → risk is always 0
         et = EdgeTracker(map_size=65536)
         bm = bytearray(65536)
         for i in range(10):
             bm[i] = 1
         et.record_edges("s", bytes(bm))
         risk = et.birthday_collision_risk()
-        assert risk < 0.01
+        assert risk == 0.0
 
-    def test_birthday_collision_risk_high(self):
+    def test_birthday_collision_risk_any(self):
+        # With sparse hash table, collision risk is always 0 (no silent overwrites)
         et = EdgeTracker(map_size=256)
         bm = bytearray(256)
         for i in range(100):
             bm[i % 256] = 1
         et.record_edges("s", bytes(bm))
         risk = et.birthday_collision_risk()
-        assert risk > 0.5
+        assert risk == 0.0
 
     def test_recommended_map_size_adequate(self):
         et = EdgeTracker(map_size=65536)

@@ -53,12 +53,12 @@ class MutualInformationTracker:
         self.position_counts: dict[int, int] = defaultdict(int)
         self.total_observations: int = 0
 
-    def record(self, input_bytes: bytes, edge_bitmap: bytes, map_size: int = 65536) -> None:
+    def record(self, input_bytes: bytes, hit_edges: set[int], map_size: int = 65536) -> None:
         """Record one input-coverage pair.
 
         Args:
             input_bytes: The input that was executed.
-            edge_bitmap: Coverage bitmap (byte > 0 = edge hit).
+            hit_edges: Set of edge IDs that were hit in this execution.
             map_size: Maximum edge index to consider.
         """
         self.total_observations += 1
@@ -70,8 +70,6 @@ class MutualInformationTracker:
                 max_pos = self.max_positions - 1
             if max_pos not in {p for p in self._wp_all_positions}:
                 self._wp_all_positions = None
-        # Find which edges were hit
-        hit_edges = {i for i, v in enumerate(edge_bitmap) if v > 0 and i < map_size}
 
         for pos, byte_val in enumerate(input_bytes):
             if pos >= self.max_positions:

@@ -1,17 +1,26 @@
-"""AFL-style shared memory coverage adapter."""
+"""AFL-style sparse-entry shared memory for coverage tracking.
+
+Allocates a shared memory region treated as an array of 8-byte entries:
+    struct __afl_entry { uint32_t edge_id; uint32_t count; }
+where each non-zero edge_id identifies exactly one edge (no hash collisions).
+
+The MAP_SIZE parameter is the number of hash table entries (power of 2),
+not the number of bytes.  SHM allocation is map_size * 8 bytes.
+"""
 
 import atexit
 import ctypes
 import ctypes.util
+import logging
 import os
+from typing import NamedTuple
 
-from fuzzer_tool.core.count_class import classify_counts, _HAS_NUMPY
+log = logging.getLogger(__name__)
 
-if _HAS_NUMPY:
-    import numpy as np
-    from fuzzer_tool.core.count_class import _NP_CLASSIFY_TABLE
-
-SHM_MAP_SIZE = 65536
+# Default number of hash table entries.
+# SHM default = 8192 entries * 8 bytes = 65536 bytes.
+SHM_MAP_SIZE = 8192          # number of entries
+SIZEOF_ENTRY = 8  # bytes per {edge_id: u32, count: u32}
 
 # shmget constants
 IPC_CREAT = 0o1000
@@ -34,204 +43,226 @@ _libc.shmdt.restype = ctypes.c_int
 _libc.shmctl.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
 _libc.shmctl.restype = ctypes.c_int
 
-# memcmp function for fast comparison
+# memcmp for fast comparison of entry arrays
 _libc.memcmp.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t]
 _libc.memcmp.restype = ctypes.c_int
 
 
+class CoverageEntry(NamedTuple):
+    """A single coverage entry read from SHM."""
+
+    edge_id: int
+    count: int
+
+
+def _entry_struct(size: int) -> type[ctypes.Structure]:
+    """Create a ctypes Structure representing ``size`` entries."""
+    class _AflEntry(ctypes.Structure):
+        _fields_ = [
+            ("edge_id", ctypes.c_uint32),
+            ("count", ctypes.c_uint32),
+        ]
+    return _AflEntry * size
+
+
 class ShmCoverage:
-    """AFL-style shared memory bitmap for coverage tracking.
+    """Sparse-entry SHM for edge coverage tracking.
 
-    Allocates a 64KB shared memory region and provides methods to read
-    and compare the bitmap for new coverage detection.  Pass the
-    ``env_id`` as ``__AFL_SHM_ID`` in the target environment so the
-    instrumented binary writes edge counts directly into the region.
+    Allocates a shared memory segment treated as an array of
+    ``{edge_id, count}`` 8-byte entries.  The target binary writes
+    entries via open-addressing hashing (linear probing).  The fuzzer
+    reads back entries with non-zero edge_id to discover which edges
+    were hit.
 
-    The instrumented binary updates the bitmap in-place via shared
-    memory — ``record_edge`` is a fallback for manual/test use only.
+    ``size`` is the SHM size in bytes (traditional AFL MAP_SIZE).
+    The actual number of hash table entries is ``size // 8``.
     """
 
-    def __init__(self, size: int = SHM_MAP_SIZE):
-        self.size = size
-        self.shm_id = _libc.shmget(0, size, IPC_CREAT | SHM_R | SHM_W)
+    def __init__(self, size: int = SHM_MAP_SIZE * SIZEOF_ENTRY):
+        # size = SHM bytes (compat with AFL_MAP_SIZE convention)
+        # num_entries = size / 8
+        self.shm_bytes = size
+        self.num_entries = size // SIZEOF_ENTRY
+
+        self.shm_id = _libc.shmget(0, self.shm_bytes, IPC_CREAT | SHM_R | SHM_W)
         if self.shm_id < 0:
             raise OSError(f"shmget failed: {os.strerror(ctypes.get_errno())}")
         self._ptr = _libc.shmat(self.shm_id, None, 0)
         if self._ptr == ctypes.c_void_p(-1).value or self._ptr is None:
             _libc.shmctl(self.shm_id, IPC_RMID, None)
             raise OSError(f"shmat failed: {os.strerror(ctypes.get_errno())}")
-        self._map = (ctypes.c_char * size).from_address(self._ptr)
+
+        # Raw byte view for memset/memcmp
+        self._map = (ctypes.c_char * self.shm_bytes).from_address(self._ptr)
+        # Typed struct array view
+        EntryArr = _entry_struct(self.num_entries)
+        self._entries = EntryArr.from_address(self._ptr)
+
         self.env_id = str(self.shm_id)
-        self._seen = bytearray(size)  # cumulative "ever seen" bitmap
-        self._seen_classified = bytearray(size)  # cumulative classified "ever seen"
-        self._last_map_hash = 0  # cached hash for is_new_coverage fast path
-        self._last_map_ptr = ctypes.create_string_buffer(size)  # snapshot for memcmp
-        self._register_atexit()
+
+        # Cumulative "ever seen" set of edge_ids (not positions)
+        self._seen_edge_ids: set[int] = set()
+        # Snapshot for is_new_coverage fast-path (raw byte comparison)
+        self._last_map_snapshot = ctypes.create_string_buffer(self.shm_bytes)
+
         self.total_edges = 0
         self.cumulative_edges = 0
-        # Peak edges ever seen across all bitmap sizes (preserved across resizes)
         self._peak_cumulative_edges: int = 0
+        self._register_atexit()
+
+    # ── Properties (compat shim) ────────────────────────────────────────
+    @property
+    def size(self) -> int:
+        """Return the SHM size in bytes (compat with AFL_MAP_SIZE convention)."""
+        return self.shm_bytes
+
+    # ── Reading ──────────────────────────────────────────────────────────
 
     def read_bitmap(self) -> bytes:
+        """Return the raw SHM byte buffer (all entries as bytes).
+
+        Size = num_entries * 8 bytes.  Callers that need (edge_id, count)
+        pairs should use :meth:`read_entries` instead.
+        """
         return bytes(self._map)
 
-    def get_edge_bitmap_view(self):
-        """Return a zero-copy numpy uint8 view of the raw SHM bitmap.
+    def read_entries(self) -> list[CoverageEntry]:
+        """Parse SHM and return all non-empty (edge_id, count) pairs."""
+        result: list[CoverageEntry] = []
+        for i in range(self.num_entries):
+            eid = self._entries[i].edge_id
+            if eid != 0:
+                result.append(CoverageEntry(eid, self._entries[i].count))
+        return result
 
-        Avoids the 1MB ``bytes()`` allocation that ``read_bitmap()`` does.
-        Returns ``None`` when numpy is not available.
+    def get_edge_ids(self) -> set[int]:
+        """Return set of non-zero edge_ids currently in the hash table."""
+        ids: set[int] = set()
+        for i in range(self.num_entries):
+            eid = self._entries[i].edge_id
+            if eid != 0:
+                ids.add(eid)
+        return ids
+
+    def get_edge_counts(self) -> dict[int, int]:
+        """Return {edge_id: count} for all non-empty entries."""
+        counts: dict[int, int] = {}
+        for i in range(self.num_entries):
+            eid = self._entries[i].edge_id
+            if eid != 0:
+                counts[eid] = self._entries[i].count
+        return counts
+
+    def get_edge_bitmap_view(self):
+        """Return a numpy structured array view of entries.
+
+        Returns None when numpy is not available.
+        Callers can do:
+            arr = shm.get_edge_bitmap_view()
+            if arr is not None:
+                active = arr[arr['edge_id'] != 0]
+                for row in active:  ...
         """
-        if not _HAS_NUMPY:
+        try:
+            import numpy as np
+        except ImportError:
             return None
-        return np.frombuffer(self._map, dtype=np.uint8)
+        return np.frombuffer(
+            self._map,
+            dtype=np.dtype([("edge_id", "<u4"), ("count", "<u4")]),
+            count=self.num_entries,
+        )
+
+    # ── Reset ────────────────────────────────────────────────────────────
 
     def reset_edge_map(self):
-        """Reset the coverage bitmap to zero."""
-        ctypes.memset(self._ptr, 0, self.size)
+        """Zero all entries in the coverage hash table."""
+        ctypes.memset(self._ptr, 0, self.shm_bytes)
 
     def reset(self):
-        """Full reset: zero bitmap, snapshot, and cumulative counters."""
+        """Full reset: zero entries, clear cumulative state."""
         self.reset_edge_map()
-        self._seen_classified = bytearray(self.size)
+        self._seen_edge_ids.clear()
         self.total_edges = 0
 
-    def record_edge(self, edge_id: int) -> bool:
-        """Manually record an edge — fallback for manual/test use.
-
-        With AFL-instrumented binaries the instrumented code writes
-        directly into SHM, so this is not called in normal operation.
-        """
-        idx = edge_id % self.size
-        if self._map[idx] == b"\x00":
-            self._map[idx] = 1
-            if not self._seen[idx]:
-                self._seen[idx] = 1
-                self.cumulative_edges += 1
-                self._peak_cumulative_edges = max(
-                    self._peak_cumulative_edges, self.cumulative_edges
-                )
-            self.total_edges += 1
-            return True
-        return False
+    # ── New-coverage detection ──────────────────────────────────────────
 
     def is_new_coverage(self) -> bool:
-        """Check if current bitmap has any edge not seen before (AFL-style).
+        """Check if the current hash table has any edge not seen before.
 
         Uses a two-tier approach:
-        1. Fast path: raw memcmp (zero allocation, single C call) — catches
-           the common case where the bitmap is unchanged.
-        2. Slow path: classify raw counts into logarithmic buckets, then
-           update cumulative seen maps. This filters count-magnitude noise
-           (e.g. 47 vs 52 both bucket to 32) while still detecting genuinely
-           new edges.
+        1. Fast path: raw memcmp (single C call) — catches unchanged state.
+        2. Slow path: scan entries for unseen edge_ids.
         """
-        # Fast path: raw memcmp — no allocation, single C call
-        if _libc.memcmp(self._map, self._last_map_ptr, self.size) == 0:
+        if _libc.memcmp(self._map, self._last_map_snapshot, self.shm_bytes) == 0:
             return False
 
-        # Slow path: classify and scan for new edges
-        if _HAS_NUMPY:
-            return self._is_new_coverage_numpy()
-        return self._is_new_coverage_python()
-
-    def _is_new_coverage_numpy(self) -> bool:
-        """Numpy-vectorized coverage scan (~400x faster on 131K buffers)."""
-        # Classify: np.take does the entire lookup in C
-        raw = np.frombuffer(self._map, dtype=np.uint8)
-        classified = _NP_CLASSIFY_TABLE[raw]
-
-        # Find new edges: classified != 0 AND not yet seen
-        seen_cls = np.frombuffer(self._seen_classified, dtype=np.uint8)
-        mask = (classified != 0) & (seen_cls == 0)
-        new_edges = int(np.count_nonzero(mask))
-
-        # Update snapshot for next comparison — zero-copy numpy slice
-        # instead of classified.tobytes() + ctypes.memmove (avoid 1MB allocation).
-        last_map_view = np.frombuffer(self._last_map_ptr, dtype=np.uint8)
-        last_map_view[:] = classified
-
-        if new_edges:
-            seen_cls[mask] = classified[mask]
-            seen_arr = np.frombuffer(self._seen, dtype=np.uint8)
-            seen_arr[mask] = 1
-            self.cumulative_edges += new_edges
-            self._peak_cumulative_edges = max(self._peak_cumulative_edges, self.cumulative_edges)
-            self.total_edges += 1
-            return True
-
-        return False
-
-    def _is_new_coverage_python(self) -> bool:
-        """Pure-Python fallback when numpy is not available."""
-        classified = classify_counts(bytes(self._map))
-        has_new = False
-        for i in range(self.size):
-            if classified[i] and not self._seen_classified[i]:
-                self._seen_classified[i] = classified[i]
-                self._seen[i] = 1
+        # Slow path: extract edge_ids not yet in _seen_edge_ids
+        new_found = False
+        for i in range(self.num_entries):
+            eid = self._entries[i].edge_id
+            if eid != 0 and eid not in self._seen_edge_ids:
+                self._seen_edge_ids.add(eid)
                 self.cumulative_edges += 1
-                self._peak_cumulative_edges = max(
-                    self._peak_cumulative_edges, self.cumulative_edges
-                )
-                has_new = True
+                self._peak_cumulative_edges = max(self._peak_cumulative_edges, self.cumulative_edges)
+                new_found = True
 
-        ctypes.memmove(self._last_map_ptr, bytes(classified), self.size)
-        if has_new:
+        # Update snapshot for next comparison
+        ctypes.memmove(self._last_map_snapshot, self._map, self.shm_bytes)
+
+        if new_found:
             self.total_edges += 1
-        return has_new
+        return new_found
 
     def commit_snapshot(self):
-        """Update the cumulative 'seen' bitmap to include all current edges."""
-        if _HAS_NUMPY:
-            raw = np.frombuffer(self._map, dtype=np.uint8)
-            classified = _NP_CLASSIFY_TABLE[raw]
-            seen_cls = np.frombuffer(self._seen_classified, dtype=np.uint8)
-            mask = (classified != 0) & (seen_cls == 0)
-            new_edges = int(np.count_nonzero(mask))
-            if new_edges:
-                seen_cls[mask] = classified[mask]
-                np.frombuffer(self._seen, dtype=np.uint8)[mask] = 1
-                self.cumulative_edges += new_edges
-                self._peak_cumulative_edges = max(
-                    self._peak_cumulative_edges, self.cumulative_edges
-                )
-        else:
-            classified = classify_counts(bytes(self._map))
-            for i in range(self.size):
-                if classified[i] and not self._seen_classified[i]:
-                    self._seen_classified[i] = classified[i]
-                    self._seen[i] = 1
+        """Update the cumulative seen-edge set to include all current entries."""
+        for i in range(self.num_entries):
+            eid = self._entries[i].edge_id
+            if eid != 0 and eid not in self._seen_edge_ids:
+                self._seen_edge_ids.add(eid)
+                self.cumulative_edges += 1
+                self._peak_cumulative_edges = max(self._peak_cumulative_edges, self.cumulative_edges)
+
+    # ── Manual recording (for tests) ─────────────────────────────────────
+
+    def record_edge(self, edge_id: int) -> bool:
+        """Manually record an edge — for tests only.
+
+        Mirrors what the instrumented binary does: hash to slot, linear probe.
+        """
+        pos = edge_id % self.num_entries
+        for i in range(self.num_entries):
+            idx = (pos + i) % self.num_entries
+            eid = self._entries[idx].edge_id
+            if eid == 0:
+                self._entries[idx].edge_id = edge_id
+                self._entries[idx].count = 1
+                if edge_id not in self._seen_edge_ids:
+                    self._seen_edge_ids.add(edge_id)
                     self.cumulative_edges += 1
-                    self._peak_cumulative_edges = max(
-                        self._peak_cumulative_edges, self.cumulative_edges
-                    )
+                    self._peak_cumulative_edges = max(self._peak_cumulative_edges, self.cumulative_edges)
+                self.total_edges += 1
+                return True
+            if eid == edge_id:
+                if self._entries[idx].count < 0xFFFFFFFF:
+                    self._entries[idx].count += 1
+                self.total_edges += 1
+                return True
+        return False  # table full
 
-    def cleanup(self):
-        if self._ptr is not None:
-            _libc.shmdt(self._ptr)
-            self._ptr = None
-        if self.shm_id >= 0:
-            _libc.shmctl(self.shm_id, IPC_RMID, None)
-            self.shm_id = -1
+    # ── Resize ───────────────────────────────────────────────────────────
 
-    def resize(self, new_size: int) -> None:
-        """Resize the shared memory bitmap.
-
-        Allocates a new SHM, copies the old bitmap, detaches the old SHM,
-        and updates internal pointers.  Clears cumulative state because
-        AFL's hash (edge_id = hash(src,dst) % map_size) maps the same
-        logical edge to different bitmap positions after resize —
-        preserving the old bitmap would silently corrupt it with stale,
-        incorrectly-repositioned bits.
+    def resize(self, new_num_entries: int) -> None:
+        """Resize the hash table (allocates new SHM, copies entries).
 
         Args:
-            new_size: New map size in bytes (must be > current size).
+            new_num_entries: New table size (must be > current).
         """
-        if new_size <= self.size:
+        new_bytes = new_num_entries * SIZEOF_ENTRY
+        if new_bytes <= self.shm_bytes:
             return
 
-        # Allocate new SHM
-        new_shm_id = _libc.shmget(0, new_size, IPC_CREAT | SHM_R | SHM_W)
+        new_shm_id = _libc.shmget(0, new_bytes, IPC_CREAT | SHM_R | SHM_W)
         if new_shm_id < 0:
             raise OSError(f"shmget resize failed: {os.strerror(ctypes.get_errno())}")
 
@@ -240,42 +271,40 @@ class ShmCoverage:
             _libc.shmctl(new_shm_id, IPC_RMID, None)
             raise OSError(f"shmat resize failed: {os.strerror(ctypes.get_errno())}")
 
-        # Zero the new region, then copy old bitmap
-        ctypes.memset(new_ptr, 0, new_size)
-        ctypes.memmove(new_ptr, self._ptr, self.size)
+        ctypes.memset(new_ptr, 0, new_bytes)
+        ctypes.memmove(new_ptr, self._ptr, self.shm_bytes)
 
-        # Detach and remove old SHM
+        # Detach old SHM
         old_ptr = self._ptr
         old_shm_id = self.shm_id
         _libc.shmdt(old_ptr)
         _libc.shmctl(old_shm_id, IPC_RMID, None)
 
-        # Update state
         self._ptr = new_ptr
         self.shm_id = new_shm_id
-        self.size = new_size
-        self._map = (ctypes.c_char * new_size).from_address(self._ptr)
+        self.num_entries = new_num_entries
+        self.shm_bytes = new_bytes
+        self._map = (ctypes.c_char * new_bytes).from_address(self._ptr)
+        EntryArr = _entry_struct(new_num_entries)
+        self._entries = EntryArr.from_address(self._ptr)
         self.env_id = str(self.shm_id)
 
-        # Save peak before clearing — the count of unique positions ever seen
-        # is meaningful for the run summary even though position-indexed state
-        # must be reset. Without this, a resize near the run end produces
-        # "Edges discovered: 0" in the summary.
         self._peak_cumulative_edges = max(self._peak_cumulative_edges, self.cumulative_edges)
-        # Clear position-indexed state — positions change after resize.
-        # AFL's hash (edge_id = hash(src,dst) % map_size) maps the same
-        # logical edge to different positions in the new bitmap.
-        self._seen = bytearray(new_size)
-        self._seen_classified = bytearray(new_size)
+        # Clear position-indexed seen set (positions change after resize)
+        self._seen_edge_ids.clear()
         self.cumulative_edges = 0
         self.total_edges = 0
+        self._last_map_snapshot = ctypes.create_string_buffer(new_bytes)
 
-        # Reallocate snapshot buffer to match new size — without this,
-        # is_new_coverage() does memcmp/memmove of new_size bytes into
-        # the old (smaller) buffer, causing heap overflow and
-        # "free(): invalid pointer" crashes.
-        self._last_map_ptr = ctypes.create_string_buffer(new_size)
-        self._last_map_hash = 0
+    # ── Lifecycle ────────────────────────────────────────────────────────
+
+    def cleanup(self):
+        if self._ptr is not None:
+            _libc.shmdt(self._ptr)
+            self._ptr = None
+        if self.shm_id >= 0:
+            _libc.shmctl(self.shm_id, IPC_RMID, None)
+            self.shm_id = -1
 
     def __del__(self):
         self.cleanup()

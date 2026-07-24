@@ -33,7 +33,10 @@ Timeout enforcement:
    to avoid deadlock: parent write() blocks when buffer is full, but
    the child may not have started reading yet. */
 #define MAX_DATA 57344  /* 56KB — safely under 64KB pipe buffer */
-#define MAX_BMP  65536
+/* Max bitmap: sparse entries at 8 bytes each, 64KB = 8192 entries.
+   Each entry is {edge_id: u32, count: u32}.  The Python side allocates
+   SHM as map_size * 8 bytes; 64KB covers 8192 entries comfortably. */
+#define MAX_BMP 65536
 
 #ifndef min
 #define min(a, b) ((a) < (b) ? (a) : (b))

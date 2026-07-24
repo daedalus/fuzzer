@@ -21,6 +21,8 @@ from collections import defaultdict
 
 from fuzzer_tool.core import fast_json as json
 
+from typing import Union
+
 # ── Memory bounds ────────────────────────────────────────────────────
 CORRELATION_MATRIX_MAX = 10_000  # max edge-pair entries in branch correlation
 COVERAGE_TIMELINE_MAX = 1_000  # max snapshots in coverage timeline
@@ -576,15 +578,22 @@ class EdgeTracker:
         self._correlation_total: int = 0
 
     def record_edges(
-        self, seed_key: str, edge_bitmap: bytes, target_name: str = "", morris_mode: bool = False
+        self,
+        seed_key: str,
+        hit_edges: Union[set[int], bytes],
+        target_name: str = "",
+        hit_counts: dict[int, int] | None = None,
+        morris_mode: bool = False,
     ) -> set[int]:
         """Record edges hit by a seed execution.
 
         Args:
             seed_key: Hash of the seed input.
-            edge_bitmap: Raw edge bitmap (bytes where > 0 = edge hit).
+            hit_edges: Set of edge IDs that were hit.
             target_name: Name of the target binary (for multi-target tracking).
-            morris_mode: If True, convert Morris counter values to approximate counts.
+            hit_counts: Optional {edge_id: count} map. When provided (e.g. sparse
+                SHM entries with 32-bit saturating counters) these are used for
+                hit-count diversity scoring. Defaults to count=1 per edge.
 
         Returns:
             Set of NEW edge indices not previously seen.
@@ -596,39 +605,40 @@ class EdgeTracker:
             self.seed_hit_counts[seed_key] = {}
         hc = self.seed_hit_counts[seed_key]
 
-        # Classify hit counts before recording (non-Morris only) —
-        # collapses noise like 47 vs 52 into the same bucket (32-127),
-        # so diversity scoring (JS divergence, Wasserstein) uses
-        # bucketized magnitude rather than raw jittery counts.
-        # Morris mode skips classification because its own
-        # morris_estimate() already handles approximate counting.
-        if not morris_mode:
-            edge_bitmap = classify_counts(edge_bitmap)
+        # Backward compat: bytes input treated as byte bitmap where
+        # non-zero byte positions = edge indices (for ptrace + tests).
+        if isinstance(hit_edges, bytes):
+            bitmap = hit_edges
+            if not morris_mode:
+                bitmap = classify_counts(bitmap)
+            arr = np.frombuffer(bitmap, dtype=np.uint8, count=min(len(bitmap), self.map_size))
+            for i in np.flatnonzero(arr):
+                i = int(i)
+                raw_val = int(arr[i])
+                val = int(round(morris_estimate(raw_val))) if morris_mode else raw_val
+                new_edges.add(i)
+                hc[i] = val
+                self._aggregate_totals[i] = self._aggregate_totals.get(i, 0) + val
+                self._aggregate_total_count += val
+                old_gh = self._global_edge_hits.get(i, 0)
+                self._global_edge_hits[i] = old_gh + val
+                self._spectrum_dirty = True
+                if self._global_edge_hits[i] > self.max_hit_count:
+                    self.max_hit_count = self._global_edge_hits[i]
 
-        # Scan only non-zero bytes via numpy flatnonzero.
-        # For a 256KB bitmap with ~100 active edges this is ~2600x fewer
-        # Python iterations than iterating every byte with enumerate.
-        arr = np.frombuffer(edge_bitmap, dtype=np.uint8, count=min(len(edge_bitmap), self.map_size))
-        for i in np.flatnonzero(arr):
-            i = int(i)
-            raw_val = int(arr[i])
-            if morris_mode:
-                val = int(round(morris_estimate(raw_val)))
-            else:
-                val = raw_val
-            new_edges.add(i)
-            hc[i] = val
-            # Aggregate totals
-            old_agg = self._aggregate_totals.get(i, 0)
-            self._aggregate_totals[i] = old_agg + val
-            self._aggregate_total_count += val
-            # Global edge hits
-            old_gh = self._global_edge_hits.get(i, 0)
-            new_gh = old_gh + val
-            self._global_edge_hits[i] = new_gh
-            self._spectrum_dirty = True
-            if new_gh > self.max_hit_count:
-                self.max_hit_count = new_gh
+        else:
+            # New sparse path: hit_edges is a set of edge IDs
+            for edge_id in hit_edges:
+                val = hit_counts.get(edge_id, 1) if hit_counts else 1
+                new_edges.add(edge_id)
+                hc[edge_id] = val
+                self._aggregate_totals[edge_id] = self._aggregate_totals.get(edge_id, 0) + val
+                self._aggregate_total_count += val
+                old_gh = self._global_edge_hits.get(edge_id, 0)
+                self._global_edge_hits[edge_id] = old_gh + val
+                self._spectrum_dirty = True
+                if self._global_edge_hits[edge_id] > self.max_hit_count:
+                    self.max_hit_count = self._global_edge_hits[edge_id]
 
         new_contributions = new_edges - self.cumulative_edges
         self.cumulative_edges.update(new_edges)
@@ -1663,44 +1673,51 @@ class EdgeTracker:
         }
 
     def bitmap_density(self) -> float:
-        """Fraction of the edge map that has been hit (0.0 to 1.0)."""
-        return len(self._global_edge_hits) / self.map_size if self.map_size else 0.0
+        """Fraction of the hash table entries that have been hit (0.0 to 1.0).
+
+        For the sparse hash table this is the load factor — entries with
+        non-zero edge_id divided by total entries.  High load factor
+        (> 0.7) means longer probe chains.
+        """
+        n_entries = self.map_size // 8 if self.map_size else 8192
+        return len(self._global_edge_hits) / n_entries if n_entries else 0.0
 
     def birthday_collision_risk(self) -> float:
-        """Estimate birthday-paradox collision probability for current edge count.
+        """Collision probability for the current edge count.
 
-        Uses the standard birthday bound: P(collision) ≈ 1 - exp(-n²/(2m))
-        where n = number of distinct edges, m = map_size.
-
-        Returns:
-            Collision probability as a fraction (0.0 to 1.0).
+        With the sparse hash table (open-addressing with unique edge_ids),
+        there are NO silent collisions — two edges always have different
+        edge_ids.  Returns 0.  This method exists for backward compat
+        with the old byte-bitmap approach.
         """
-        n = len(self._global_edge_hits)
-        m = self.map_size
-        if m == 0 or n == 0:
-            return 0.0
-        return max(0.0, min(1.0, 1.0 - math.exp(-(n * n) / (2.0 * m))))
+        return 0.0
 
     def recommended_map_size(self) -> int:
-        """Recommend a larger map_size if collision risk is high.
+        """Recommend a larger map_size if the hash table is too full.
 
-        Based on birthday bound: to keep collision probability < 1%,
-        need map_size >= n² / (2 * ln(0.99)) ≈ n² / 0.02.
+        Based on load factor: if load_factor > 0.7, probe chains get long.
+        Returns a map size in BYTES (AFL_MAP_SIZE convention), or 0.
 
         Returns:
-            Recommended map_size (next power of 2), or 0 if current size is adequate.
+            Recommended map_size (bytes), or 0 if current size is adequate.
         """
         n = len(self._global_edge_hits)
         if n < 100:
             return 0
-        needed = int(n * n / 0.02)
-        recommended = 1
-        while recommended < needed:
-            recommended *= 2
-        recommended = max(4096, min(1048576, recommended))
-        if recommended <= self.map_size:
+        cur_entries = self.map_size // 8 if self.map_size else 8192
+        load_factor = n / cur_entries if cur_entries else 1.0
+        if load_factor < 0.7:
             return 0
-        return recommended
+        # Need ~2x headroom to get load factor below 0.5 after resize
+        needed = int(n * 2)
+        recommended_entries = 1
+        while recommended_entries < needed:
+            recommended_entries *= 2
+        recommended_entries = max(8192, min(1048576, recommended_entries))
+        recommended_bytes = recommended_entries * 8
+        if recommended_bytes <= self.map_size:
+            return 0
+        return recommended_bytes
 
     def get_seed_edge_count(self, seed_key: str) -> int:
         """Get number of edges a specific seed covers."""

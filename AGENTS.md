@@ -113,6 +113,21 @@ Fuzzer state is saved to `{corpus_dir}/state.json` on shutdown. Use `--resume` t
 - `--deep-coverage` — capstone disassembly for basic block discovery
 - Default SHM — for AFL-instrumented targets
 
+### Sparse Entry Coverage
+The AFL shim (`afl_shim.c`) uses an open-addressing hash table of 8-byte entries instead of a fixed byte bitmap:
+
+```
+struct __afl_entry { uint32_t edge_id; uint32_t count; };
+```
+
+- Edge ID = `prev_loc ^ cur_loc` (full 32-bit) — **no silent bucket collisions**
+- Hash: `edge_id % map_size`, linear probing for matching or empty slot
+- `AFL_MAP_SIZE` is in bytes (tradition); shim divides by 8 for entry count
+- Default 64KB SHM → 8192 entries (same memory as old 64KB bitmap)
+- Count is a 32-bit saturating counter (no Morris probability needed)
+- Python API: `ShmCoverage.get_edge_ids()`, `.get_edge_counts()`, `.read_entries()`
+- `EdgeTracker.record_edges()` accepts `set[int]` (sparse) or `bytes` (legacy byte-bitmap)
+
 ### Kernel Crash Verification
 - Historical poll: `dmesg -l err,warn,info --json` (one JSON document: `{"dmesg": [...]}`, not NDJSON)
 - Live streaming: `dmesg -l err,warn,info -w` in **text** format, not `--json` (JSON streaming is bursty and expensive to parse line-by-line; text is reliable for real-time line-by-line reads)

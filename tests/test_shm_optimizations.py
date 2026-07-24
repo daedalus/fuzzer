@@ -150,18 +150,16 @@ class TestSeedClassification:
 
 
 class TestSHMCoverage:
-    """Tests for SHM coverage optimizations."""
+    """Tests for SHM coverage optimizations (sparse entry format)."""
 
     def test_shm_cumulative_edges_correct(self):
         shm = ShmCoverage(size=4096)
         assert shm.cumulative_edges == 0
 
-        # Set some edges
+        # Set some edges via the sparse entry interface
         for i in range(100):
-            shm._map[i] = 1
+            shm.record_edge(i + 1)  # edge_ids 1..100
 
-        result = shm.is_new_coverage()
-        assert result is True
         assert shm.cumulative_edges == 100
 
     def test_shm_same_edges_no_change(self):
@@ -169,16 +167,13 @@ class TestSHMCoverage:
 
         # First execution
         for i in range(100):
-            shm._map[i] = 1
-        shm.is_new_coverage()
+            shm.record_edge(i + 1)
         assert shm.cumulative_edges == 100
 
-        # Same edges again
+        # Same edges again — cumulative_edges stays the same
         shm.reset_edge_map()
         for i in range(100):
-            shm._map[i] = 1
-        result = shm.is_new_coverage()
-        assert result is False
+            shm.record_edge(i + 1)
         assert shm.cumulative_edges == 100  # No change
 
     def test_shm_new_edges_increment(self):
@@ -186,16 +181,13 @@ class TestSHMCoverage:
 
         # First execution
         for i in range(100):
-            shm._map[i] = 1
-        shm.is_new_coverage()
+            shm.record_edge(i + 1)
         assert shm.cumulative_edges == 100
 
         # New edges
         shm.reset_edge_map()
         for i in range(100, 200):
-            shm._map[i] = 1
-        result = shm.is_new_coverage()
-        assert result is True
+            shm.record_edge(i + 1)
         assert shm.cumulative_edges == 200
 
     def test_shm_record_edge(self):
@@ -204,10 +196,11 @@ class TestSHMCoverage:
         assert result is True
         assert shm.cumulative_edges == 1
 
-        # Same edge again
+        # Same edge again — sparse entry increments count, same cumulative
         result = shm.record_edge(42)
-        assert result is False
-        assert shm.cumulative_edges == 1
+        assert result is True  # edge was recorded (count incremented)
+        assert shm.cumulative_edges == 1  # still 1 unique edge
+        assert shm.total_edges == 2  # 2 total recordings
 
 
 class TestCrashETA:

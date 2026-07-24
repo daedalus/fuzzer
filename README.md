@@ -40,7 +40,7 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 ### Coverage & Scoring
 - **AFL count-class bucketization**: `classify_counts()` collapses raw hit counts into 9 logarithmic buckets (0, 1, 2, 3, 4-7, 8-15, 16-31, 32-127, 128+) before coverage comparison — eliminates noise from count-magnitude jitter and provides cleaner signal for JS-divergence/Wasserstein diversity scoring; `new_bits()` provides AFL-style overlap/new-edge detection on classified bitmaps
 - **Morris probabilistic counting (a=30)**: log-scale edge hit counters prevent overflow and provide frequency information for scheduler decisions; estimate formula `a * ((1+1/a)^v - 1)` converts back to approximate counts
-- **AFL SHM bitmap** coverage for instrumented targets (~65-200 eps)
+- **AFL SHM bitmap** coverage for instrumented targets (~65-200 eps). **Sparse 8-byte entry hash table** replaces the traditional fixed-size byte bitmap — each SHM entry stores `{edge_id: uint32_t, count: uint32_t}` with open-addressing linear probing. Edge IDs are full 32-bit `(prev_loc ^ cur_loc)` values, eliminating silent bucket collisions. The hash table load factor replaces birthday-collision as the resize signal. No Morris counting needed (32-bit saturating counters).
 - **Ptrace edge coverage** with deep capstone disassembly for closed-source binaries (~18-20 eps)
 - **In-process execution**: persistent subprocess mode (~65-120 eps) with auto-restart on crash
 - **Length-edge tracking**: correlates input length with coverage edge discovery — biases seed selection and length-changing mutations toward productive lengths

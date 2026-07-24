@@ -333,9 +333,10 @@ class CorpusManager:
             return
 
         if f.shm_cov:
-            current_edges = f.shm_cov.read_bitmap()
+            current_edges = f.shm_cov.get_edge_ids()
         elif f.ptrace_cov:
-            current_edges = bytes(f.ptrace_cov.edge_map)
+            bm = bytes(f.ptrace_cov.edge_map)
+            current_edges = {i for i, v in enumerate(bm) if v}
         else:
             return
 
@@ -345,13 +346,14 @@ class CorpusManager:
             return
 
         if f.shm_cov:
-            trimmed_edges = f.shm_cov.read_bitmap()
+            trimmed_edges = f.shm_cov.get_edge_ids()
         elif f.ptrace_cov:
-            trimmed_edges = bytes(f.ptrace_cov.edge_map)
+            bm = bytes(f.ptrace_cov.edge_map)
+            trimmed_edges = {i for i, v in enumerate(bm) if v}
         else:
             return
 
-        if not self._edges_subset_of(trimmed_edges, current_edges):
+        if not trimmed_edges.issubset(current_edges):
             return
 
         seed_key = self.seed_key(data)
@@ -372,13 +374,6 @@ class CorpusManager:
                 "lineage_depth": f.seed_meta.get(data, {}).get("lineage_depth", 0) + 1,
             }
             log.debug("Trimmed %d -> %d bytes", len(data), len(trimmed))
-
-    @staticmethod
-    def _edges_subset_of(candidate: bytes, reference: bytes) -> bool:
-        for i in range(min(len(candidate), len(reference))):
-            if reference[i] and not candidate[i]:
-                return False
-        return True
 
     def auto_minimize_corpus(self):
         f = self.f
