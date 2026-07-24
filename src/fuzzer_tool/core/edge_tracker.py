@@ -1679,8 +1679,7 @@ class EdgeTracker:
         non-zero edge_id divided by total entries.  High load factor
         (> 0.7) means longer probe chains.
         """
-        n_entries = self.map_size // 8 if self.map_size else 8192
-        return len(self._global_edge_hits) / n_entries if n_entries else 0.0
+        return len(self._global_edge_hits) / self.map_size if self.map_size else 0.0
 
     def birthday_collision_risk(self) -> float:
         """Collision probability for the current edge count.
@@ -1696,28 +1695,26 @@ class EdgeTracker:
         """Recommend a larger map_size if the hash table is too full.
 
         Based on load factor: if load_factor > 0.7, probe chains get long.
-        Returns a map size in BYTES (AFL_MAP_SIZE convention), or 0.
+        Returns a map size in entries (AFL_MAP_SIZE convention), or 0.
 
         Returns:
-            Recommended map_size (bytes), or 0 if current size is adequate.
+            Recommended map_size (entries), or 0 if current size is adequate.
         """
         n = len(self._global_edge_hits)
         if n < 100:
             return 0
-        cur_entries = self.map_size // 8 if self.map_size else 8192
-        load_factor = n / cur_entries if cur_entries else 1.0
+        load_factor = n / self.map_size if self.map_size else 1.0
         if load_factor < 0.7:
             return 0
         # Need ~2x headroom to get load factor below 0.5 after resize
         needed = int(n * 2)
-        recommended_entries = 1
-        while recommended_entries < needed:
-            recommended_entries *= 2
-        recommended_entries = max(8192, min(1048576, recommended_entries))
-        recommended_bytes = recommended_entries * 8
-        if recommended_bytes <= self.map_size:
+        recommended = 1
+        while recommended < needed:
+            recommended *= 2
+        recommended = max(8192, min(131072, recommended))
+        if recommended <= self.map_size:
             return 0
-        return recommended_bytes
+        return recommended
 
     def get_seed_edge_count(self, seed_key: str) -> int:
         """Get number of edges a specific seed covers."""

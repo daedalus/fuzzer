@@ -74,15 +74,14 @@ class ShmCoverage:
     reads back entries with non-zero edge_id to discover which edges
     were hit.
 
-    ``size`` is the SHM size in bytes (traditional AFL MAP_SIZE).
-    The actual number of hash table entries is ``size // 8``.
+    ``size`` is the number of hash table entries (AFL_MAP_SIZE convention).
+    SHM allocation is ``size * 8`` bytes.
     """
 
-    def __init__(self, size: int = SHM_MAP_SIZE * SIZEOF_ENTRY):
-        # size = SHM bytes (compat with AFL_MAP_SIZE convention)
-        # num_entries = size / 8
-        self.shm_bytes = size
-        self.num_entries = size // SIZEOF_ENTRY
+    def __init__(self, size: int = SHM_MAP_SIZE):
+        # size = number of entries (AFL_MAP_SIZE convention)
+        self.num_entries = size
+        self.shm_bytes = size * SIZEOF_ENTRY
 
         self.shm_id = _libc.shmget(0, self.shm_bytes, IPC_CREAT | SHM_R | SHM_W)
         if self.shm_id < 0:
@@ -113,8 +112,8 @@ class ShmCoverage:
     # ── Properties (compat shim) ────────────────────────────────────────
     @property
     def size(self) -> int:
-        """Return the SHM size in bytes (compat with AFL_MAP_SIZE convention)."""
-        return self.shm_bytes
+        """Return the number of hash table entries (AFL_MAP_SIZE convention)."""
+        return self.num_entries
 
     # ── Reading ──────────────────────────────────────────────────────────
 

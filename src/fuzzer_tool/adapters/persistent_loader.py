@@ -43,8 +43,9 @@ def read_shm():
         libc.shmat.restype = ctypes.c_void_p
         ptr = libc.shmat(int(shm_id_str), None, 0)
         if ptr and ptr != -1:
-            map_size = int(os.environ.get("AFL_MAP_SIZE", "65536"))
-            return bytes((ctypes.c_uint8 * map_size).from_address(ptr))
+            map_size = int(os.environ.get("AFL_MAP_SIZE", "8192"))
+            shm_bytes = map_size * 8  # 8 bytes per {edge_id, count} entry
+            return bytes((ctypes.c_uint8 * shm_bytes).from_address(ptr))
     except Exception:
         log.warning("shmat read failed for shm_id=%s", shm_id_str, exc_info=True)
     return b""
@@ -187,7 +188,7 @@ class PersistentLoader:
 
         env = os.environ.copy()
         if "AFL_MAP_SIZE" not in env:
-            env["AFL_MAP_SIZE"] = "65536"
+            env["AFL_MAP_SIZE"] = "8192"
         env["_LOADER_NO_BMP"] = "1"
         env["_CHILD_PID_FILE"] = self._child_pid_file
 

@@ -488,7 +488,9 @@ def _maybe_add_constant(constants: set[bytes], data: bytes):
 
 
 def estimate_map_size(target: str) -> int:
-    """Estimate optimal AFL_MAP_SIZE from sancov guard count or branch density.
+    """Estimate optimal number of hash table entries from sancov guard count
+    or branch density.  Returns the number of entries (AFL_MAP_SIZE convention).
+    Multiply by 8 to get SHM bytes.
 
     Priority:
     1. If sancov counter section exists (Clang -fsanitize-coverage), use
@@ -499,9 +501,9 @@ def estimate_map_size(target: str) -> int:
         target: Path to ELF binary.
 
     Returns:
-        Recommended map size (int), defaults to 65536 on failure.
+        Recommended number of entries (int), defaults to 8192 on failure.
     """
-    DEFAULT = 65536
+    DEFAULT = 8192
 
     # Try sancov guard count first — most accurate for instrumented binaries
     offsets = parse_sancov_offsets(target)
@@ -512,7 +514,7 @@ def estimate_map_size(target: str) -> int:
             guard_count = (stop - start) // 4
             if guard_count > 0:
                 map_size = _next_power_of_2(guard_count)
-                return max(DEFAULT, min(1048576, map_size))
+                return max(DEFAULT, min(131072, map_size))
 
     # Fall back to branch density estimation
     bd = branch_density(target)
@@ -521,9 +523,9 @@ def estimate_map_size(target: str) -> int:
         return DEFAULT
 
     branches = bd * (ts / 1024)
-    estimated_edges = branches * 2  # 2 edges per branch
-    map_size = _next_power_of_2(int(estimated_edges * 8))
-    return max(DEFAULT, min(1048576, map_size))
+    estimated_edges = int(branches * 2)  # 2 edges per branch
+    map_size = _next_power_of_2(max(estimated_edges, DEFAULT))
+    return min(131072, map_size)
 
 
 def _reg_base(md, reg_id: int) -> str | None:

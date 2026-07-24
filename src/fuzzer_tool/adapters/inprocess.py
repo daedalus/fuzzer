@@ -93,7 +93,7 @@ if shm_id_str:
         libc.shmat.restype = ctypes.c_void_p
         ptr = libc.shmat(int(shm_id_str), None, 0)
         if ptr and ptr != -1:
-            map_size = int(os.environ.get("AFL_MAP_SIZE", "65536"))
+            map_size = int(os.environ.get("AFL_MAP_SIZE", "8192"))
             bitmap = (ctypes.c_uint8 * map_size).from_address(ptr)
             out_path = os.environ.get("_COV_BITMAP_OUT")
             if out_path:

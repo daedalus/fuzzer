@@ -329,8 +329,8 @@ class TestGoodTuring:
         bm[2] = 1
         et.record_edges("s", bytes(bm))
         d = et.bitmap_density()
-        # map_size=256 bytes → 32 sparse entries; 3 edges → 3/32
-        assert abs(d - 3 / 32) < 1e-6
+        # 3 edges / 256 entries (map_size is now entries)
+        assert abs(d - 3 / 256) < 1e-6
 
     def test_birthday_collision_risk_zero(self):
         et = EdgeTracker(map_size=256)
@@ -367,7 +367,7 @@ class TestGoodTuring:
     def test_recommended_map_size_needed(self):
         et = EdgeTracker(map_size=4096)
         bm = bytearray(4096)
-        for i in range(500):
+        for i in range(3000):
             bm[i % 4096] = 1
         et.record_edges("s", bytes(bm))
         rec = et.recommended_map_size()

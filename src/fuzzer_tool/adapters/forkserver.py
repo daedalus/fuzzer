@@ -91,7 +91,7 @@ class ForkserverRunner:
 
         env = os.environ.copy()
         if "AFL_MAP_SIZE" not in env:
-            env["AFL_MAP_SIZE"] = "65536"
+            env["AFL_MAP_SIZE"] = "8192"
 
         self._proc = subprocess.Popen(
             [loader_bin],

@@ -166,11 +166,11 @@ class StatsReporter:
             print(f"  ET positions:      {et_edges} (includes stale positions after resize)")
         else:
             print(f"  Edges discovered:  {edges}")
-        print(f"  Map density:       {density:.2f}%")
-        print(f"  Collision risk:    {collision_risk:.2f}% (birthday paradox)")
+        print(f"  Load factor:       {density:.2f}%")
+        print(f"  Collision risk:    {collision_risk:.2f}% (zero for sparse entries)")
         rec = f._edge_tracker.recommended_map_size()
         if rec:
-            print(f"  Recommended map:   {rec:,} bytes (current: {f.map_size:,})")
+            print(f"  Recommended map:   {rec:,} entries (current: {f.map_size:,})")
 
         gt = f._edge_tracker.good_turing_estimate()
         if gt["n"] > 0:

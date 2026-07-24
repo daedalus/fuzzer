@@ -2167,7 +2167,7 @@ class Fuzzer:
             if new_size > self.shm_cov.size:
                 current = self.shm_cov.size
                 print(
-                    f"[*] Resizing SHM bitmap {current:,} → {new_size:,} bytes "
+                    f"[*] Resizing SHM {current:,} → {new_size:,} entries "
                     f"(stall-triggered, n={len(self._edge_tracker._global_edge_hits)})"
                 )
                 self.shm_cov.resize(new_size)

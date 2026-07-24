@@ -69,7 +69,7 @@ def tmin(
         def _run_target(data_bytes: bytes) -> tuple[int, str]:
             env = os.environ.copy()
             if use_coverage:
-                env["AFL_MAP_SIZE"] = "65536"
+                env["AFL_MAP_SIZE"] = "8192"
             if file_mode:
                 rc, stderr, _pid = run_target_file(
                     target, data_bytes, timeout, str(tmp_dir), target_args or [], env=env

@@ -4,9 +4,8 @@
  * Replaces the traditional AFL fixed-size byte bitmap with an open-addressing
  * hash table of 8-byte entries {edge_id, count}.  Each stored edge is uniquely
  * identified by its full 32-bit edge_id (prev_loc ^ cur_loc) so there are no
- * silent bucket collisions.  The map size (AFL_MAP_SIZE, default 8192) is the
- * number of hash table entries, not bytes — SHM allocation is
- *   map_size * sizeof(struct __afl_entry)  bytes.
+ * silent bucket collisions.  AFL_MAP_SIZE is the number of hash table entries
+ * (not bytes).  SHM size = AFL_MAP_SIZE * sizeof(struct __afl_entry).
  *
  * Provides:
  *   - __afl_map_shm()     — attach to SHM segment
@@ -33,9 +32,9 @@ struct __afl_entry {
     uint32_t count;
 };
 
-/* Default number of hash table entries.  AFL_MAP_SIZE is in bytes
- * (traditional AFL semantics).  The shim divides by sizeof(entry)
- * to get the number of hash table slots.  64KB / 8 = 8192 entries.    */
+/* Default number of hash table entries.  AFL_MAP_SIZE directly sets
+ * __afl_map_size (number of entries, not bytes).  Default 8192 entries
+ * = 64KB SHM (8192 × sizeof(struct __afl_entry) = 8192 × 8 = 65536). */
 static uint32_t __afl_map_size  = 8192;
 
 struct __afl_entry *__afl_area   = NULL;
@@ -50,18 +49,14 @@ void __afl_map_shm(void) {
     int shmid = atoi(id);
     if (shmid <= 0) return;
 
-    /* Read map size from environment.
-     * AFL_MAP_SIZE is in bytes (traditional AFL semantics).
-     * The shim divides by sizeof(__afl_entry) to get the number of
-     * hash table slots.  Default 64KB / 8 = 8192 entries.               */
+    /* Read map size from environment.  AFL_MAP_SIZE is the number of
+     * hash table entries (not bytes).  The Python side allocates SHM as
+     * AFL_MAP_SIZE * sizeof(struct __afl_entry) bytes.                  */
     char *size_str = getenv("AFL_MAP_SIZE");
     if (size_str) {
-        uint32_t s_bytes = (uint32_t)atoi(size_str);
-        if (s_bytes >= sizeof(struct __afl_entry)) {
-            uint32_t s = s_bytes / sizeof(struct __afl_entry);
-            if (s > 0)
-                __afl_map_size = s;
-        }
+        uint32_t s = (uint32_t)atoi(size_str);
+        if (s > 0)
+            __afl_map_size = s;
     }
 
     /* SHM was allocated as map_size * sizeof(struct __afl_entry) bytes */
