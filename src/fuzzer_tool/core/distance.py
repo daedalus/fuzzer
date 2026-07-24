@@ -409,49 +409,45 @@ class TargetDistance:
         fs = self._func_starts_np
         fe = self._func_ends_np
         fd = self._func_dists_np
+        n = len(fs)
 
-        # Fast path: check BB cache for cached addresses
-        cached_mask = _np.array([a in self._bb_distances for a in bb_list])
-        uncached = addrs[~cached_mask]
+        # Vectorized nearest-neighbor lookup (checks idx-1, idx, idx+1)
+        idxs = _np.searchsorted(fs, addrs, side="right") - 1
+        idxs = _np.clip(idxs, 0, n - 1)
+        im = _np.clip(idxs - 1, 0, n - 1)
 
-        results = _np.empty(len(addrs), dtype=_np.float64)
-        # Fill cached values
-        if _np.any(cached_mask):
-            for i, a in enumerate(bb_list):
-                if a in self._bb_distances:
-                    results[i] = self._bb_distances[a]
+        # Check containment in candidate functions
+        in0 = (fs[idxs] <= addrs) & (addrs < fe[idxs])
+        inm = (fs[im] <= addrs) & (addrs < fe[im])
+        in_func = in0 | inm
+        results = _np.where(in0, fd[idxs], _np.where(inm, fd[im], 20.0)).astype(
+            _np.float64
+        )
 
-        if len(uncached) > 0:
-            # Vectorized nearest-neighbor lookup
-            idxs = _np.searchsorted(fs, uncached, side="right") - 1
-            idxs = _np.clip(idxs, 0, len(fs) - 1)
-            in_func = (fs[idxs] <= uncached) & (uncached < fe[idxs])
-            uncached_results = _np.where(in_func, fd[idxs], 20.0)
-            not_in = ~in_func
-            if _np.any(not_in):
-                addr_out = uncached[not_in]
-                idx_out = idxs[not_in]
-                d1 = _np.minimum(
-                    _np.abs(addr_out - fs[idx_out]),
-                    _np.abs(addr_out - fe[idx_out]),
-                )
-                next_idx = _np.clip(idx_out + 1, 0, len(fs) - 1)
-                d2 = _np.minimum(
-                    _np.abs(addr_out - fs[next_idx]),
-                    _np.abs(addr_out - fe[next_idx]),
-                )
-                min_d = _np.minimum(d1, d2)
-                uncached_results[not_in] = _np.minimum(min_d / 64.0 + 2.0, 20.0)
+        # For addresses not in any function, find nearest by distance
+        not_in = ~in_func
+        if _np.any(not_in):
+            addr_out = addrs[not_in]
+            i0 = idxs[not_in]
+            imm = im[not_in]
+            ip = _np.clip(i0 + 1, 0, n - 1)
+            d_m = _np.minimum(
+                _np.abs(addr_out - fs[imm]), _np.abs(addr_out - fe[imm])
+            )
+            d_0 = _np.minimum(
+                _np.abs(addr_out - fs[i0]), _np.abs(addr_out - fe[i0])
+            )
+            d_p = _np.minimum(
+                _np.abs(addr_out - fs[ip]), _np.abs(addr_out - fe[ip])
+            )
+            min_d = _np.minimum(_np.minimum(d_m, d_0), d_p)
+            results[not_in] = _np.minimum(min_d / 64.0 + 2.0, 20.0)
 
-            # Write uncached results back and cache
-            j = 0
-            for i, a in enumerate(bb_list):
-                if a not in self._bb_distances:
-                    self._bb_distances[a] = float(uncached_results[j])
-                    results[i] = float(uncached_results[j])
-                    j += 1
+        # Cache results
+        for i, a in enumerate(bb_list):
+            self._bb_distances[a] = float(results[i])
 
-        return float(results.mean()) if len(results) > 0 else 20.0
+        return float(results.mean())
 
     def _seed_distance_python(self, edge_trace: set[tuple[int, int]]) -> float:
         """Pure-Python fallback."""
