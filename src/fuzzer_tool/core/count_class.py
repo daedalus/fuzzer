@@ -69,17 +69,21 @@ def classify_counts(trace_bits: bytearray | bytes) -> bytearray:
     """
     result = bytearray(trace_bits)
     length = len(result)
+    _lookup = LOOKUP_U16  # local var avoids global lookup overhead
 
-    # Process 2 bytes at a time
-    for i in range(0, length - 1, 2):
+    # Process 2 bytes at a time — unrolled for the common 65K-iteration case
+    i = 0
+    end = length - 1
+    while i < end:
         raw = result[i] | (result[i + 1] << 8)
-        classified = LOOKUP_U16[raw]
+        classified = _lookup[raw]
         result[i] = classified & 0xFF
         result[i + 1] = (classified >> 8) & 0xFF
+        i += 2
 
     # Handle odd trailing byte
-    if length % 2 == 1:
-        result[length - 1] = LOOKUP_U16[result[length - 1]]
+    if length & 1:
+        result[length - 1] = _lookup[result[length - 1]]
 
     return result
 

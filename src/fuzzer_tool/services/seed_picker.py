@@ -53,7 +53,9 @@ class SeedPicker:
             "qea": lambda: f.qea.pick_seed() if f.qea else None,
             "pareto": lambda: self._pick_pareto_only() if f.corpus and f.seed_meta else None,
             "format": lambda: self._format_aware_seed(),
-            "bayesian": lambda: self._pick_bayesian_seed() if f.corpus and f._seed_quality else None,
+            "bayesian": lambda: (
+                self._pick_bayesian_seed() if f.corpus and f._seed_quality else None
+            ),
         }
         handler = strategy_map.get(strategy)
         return handler() if handler else None
@@ -215,7 +217,9 @@ class SeedPicker:
         length = random.randint(4, min(64, f.max_len))
         return bytes(random.randint(0, 255) for _ in range(length))
 
-    def _weight_exploit_parts(self, meta: dict, fuzz_count: int, coverage: int, age: float, T: float) -> tuple[float, float]:
+    def _weight_exploit_parts(
+        self, meta: dict, fuzz_count: int, coverage: int, age: float, T: float
+    ) -> tuple[float, float]:
         """Compute base explore/exploit, momentum, burst, and staleness factors. Returns (weight, burst_factor)."""
         explore_part = T * (1.0 / math.sqrt(fuzz_count))
         exploit_part = (1.0 + coverage * 0.5) / (1.0 + age * 0.01)
@@ -228,7 +232,9 @@ class SeedPicker:
         w *= 0.01 if staleness > stale_threshold else 1.0
         return w, burst_factor
 
-    def _weight_secretary_and_cached(self, seed_key: str, w: float, classifications: dict | None, f) -> tuple[float, float, float]:
+    def _weight_secretary_and_cached(
+        self, seed_key: str, w: float, classifications: dict | None, f
+    ) -> tuple[float, float, float]:
         """Apply secretary stopping rule and cached edge weights."""
         if f._secretary and seed_key in f._seed_secretary:
             stop, _reason = f._seed_secretary[seed_key].should_stop()
@@ -287,7 +293,9 @@ class SeedPicker:
                 w *= max(0.3, 1.0 - (overlap / max(len(seed_edges), 1)) * 0.5)
         return w
 
-    def _weight_entropy_and_distance(self, seed: bytes, seed_key: str, meta: dict, w: float, f) -> float:
+    def _weight_entropy_and_distance(
+        self, seed: bytes, seed_key: str, meta: dict, w: float, f
+    ) -> float:
         """Apply Shannon entropy bonus and directed distance weight."""
         seed_sh = f._edge_tracker.shannon_entropy_seed(seed_key)
         if seed_sh > 0 and len(f._edge_tracker.seed_hit_counts) >= 3:
@@ -296,11 +304,17 @@ class SeedPicker:
                 self._mean_entropy_cache_key = -1
             cache_key = len(f._edge_tracker.seed_hit_counts)
             if cache_key != self._mean_entropy_cache_key:
-                entropies = [f._edge_tracker.shannon_entropy_seed(k) for k in f._edge_tracker.seed_hit_counts if f._edge_tracker.shannon_entropy_seed(k) > 0]
+                entropies = [
+                    f._edge_tracker.shannon_entropy_seed(k)
+                    for k in f._edge_tracker.seed_hit_counts
+                    if f._edge_tracker.shannon_entropy_seed(k) > 0
+                ]
                 self._mean_seed_entropy = sum(entropies) / len(entropies) if entropies else 0.0
                 self._mean_entropy_cache_key = cache_key
             if self._mean_seed_entropy > 0:
-                deviation = abs(seed_sh - self._mean_seed_entropy) / max(self._mean_seed_entropy, 0.01)
+                deviation = abs(seed_sh - self._mean_seed_entropy) / max(
+                    self._mean_seed_entropy, 0.01
+                )
                 w *= 1.0 + min(deviation, 1.0) * 0.5
 
         if f._distance:
@@ -318,11 +332,25 @@ class SeedPicker:
             w *= 1.0 + ppmd.compute_seed_novelty(seed) * 0.5
 
         if f._profile.hot_functions and f._profile.functions:
-            hot_density = sum(
-                f._profile.functions[fn].branch_density
-                for fn in f._profile.hot_functions if fn in f._profile.functions
-            ) / max(len(f._profile.hot_functions), 1)
-            all_density = sum(fi.branch_density for fi in f._profile.functions.values()) / max(len(f._profile.functions), 1)
+            # Cache hot/all density — they depend only on the profile, not
+            # the seed. Without caching, these sums (over 691 functions)
+            # are recomputed 1404×27 = 38K times per weight pass.
+            if not hasattr(f, "_hot_density_cache"):
+                f._hot_density_cache = {}
+            cache_key = (id(f._profile.hot_functions), id(f._profile.functions))
+            cached = f._hot_density_cache.get(cache_key)
+            if cached is None:
+                hot_density = sum(
+                    f._profile.functions[fn].branch_density
+                    for fn in f._profile.hot_functions
+                    if fn in f._profile.functions
+                ) / max(len(f._profile.hot_functions), 1)
+                all_density = sum(fi.branch_density for fi in f._profile.functions.values()) / max(
+                    len(f._profile.functions), 1
+                )
+                f._hot_density_cache[cache_key] = (hot_density, all_density)
+            else:
+                hot_density, all_density = cached
             if all_density > 0 and coverage > 0:
                 hotness_ratio = hot_density / all_density
                 w *= 1.0 + (hotness_ratio - 1.0) * min(coverage / 50.0, 1.0)
@@ -375,9 +403,7 @@ class SeedPicker:
             T = f._temperature
             seed_key = f._seed_key(seed)
 
-            w, burst_factor = self._weight_exploit_parts(
-                meta, fuzz_count, coverage, age, T
-            )
+            w, burst_factor = self._weight_exploit_parts(meta, fuzz_count, coverage, age, T)
             w, sub, spa = self._weight_secretary_and_cached(seed_key, w, classifications, f)
             w = self._weight_edge_penalties(seed_key, w, fuzz_count, f)
             w = self._weight_entropy_and_distance(seed, seed_key, meta, w, f)
@@ -518,7 +544,11 @@ class SeedPicker:
         if cache_key != f._weight_cache_key:
             edge_changed = f._weight_cache_key[1] != edge_version
             f._weight_cache_key = cache_key
-            if edge_changed or f._weight_cache is not None and len(f._weight_cache) != corpus_version:
+            if (
+                edge_changed
+                or f._weight_cache is not None
+                and len(f._weight_cache) != corpus_version
+            ):
                 f._weight_cache = None
 
         if f._weight_cache is not None:
