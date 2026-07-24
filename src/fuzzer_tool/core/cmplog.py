@@ -69,6 +69,10 @@ class CmplogCollector:
         # Overridable caps (0 = use module default)
         self._max_tokens = max_tokens if max_tokens > 0 else CMPLOG_TOKENS_MAX
         self._max_pairs = max_pairs if max_pairs > 0 else CMPLOG_PAIRS_MAX
+        # File offset: only read new data since last collection.
+        # Without this, collect_tokens re-reads the entire file (5M+ lines)
+        # on every call, dominating runtime at 60%+ CPU.
+        self._read_offset: int = 0
 
     def start(self) -> bool:
         """Compile and prepare the unified cmplog shim."""
@@ -237,9 +241,15 @@ class CmplogCollector:
                 f.truncate(0)
         except OSError:
             pass
+        self._read_offset = 0
 
     def collect_tokens(self) -> list[bytes]:
-        """Read the cmplog file and extract operand tokens and pairs.
+        """Read new cmplog data and extract operand tokens and pairs.
+
+        Reads from the current file position up to MAX_CMPLOG_LINES_PER_READ
+        lines. The token/pair sets are deduplicated, so once the pool is
+        saturated, additional reads yield diminishing returns. Capping the
+        read prevents 740K+ line scans from dominating CPU (was 60%+).
 
         Returns:
             List of unique byte sequences found in comparison operands.
@@ -251,9 +261,15 @@ class CmplogCollector:
 
         tokens = set()
         new_pairs = []
+        lines_read = 0
+        max_lines = 10_000  # cap per collection to bound CPU cost
         try:
             with open(self.log_path) as f:
+                f.seek(self._read_offset)
                 for line in f:
+                    lines_read += 1
+                    if lines_read > max_lines:
+                        break
                     line = line.strip()
                     if not line.startswith("CMP "):
                         continue
@@ -282,6 +298,7 @@ class CmplogCollector:
                                 self._pair_pc[pair] = pc
                     except ValueError:
                         continue
+                self._read_offset = f.tell()
         except OSError as e:
             log.debug("Failed to read cmplog file: %s", e)
 
@@ -291,6 +308,7 @@ class CmplogCollector:
         with contextlib.suppress(OSError):
             with open(self.log_path, "w") as f:
                 f.truncate(0)
+        self._read_offset = 0
 
         new_tokens = [t for t in tokens if t not in self._token_set]
         self._token_set.update(tokens)
@@ -301,10 +319,7 @@ class CmplogCollector:
         # Preserves highest-value-density entries instead of simple recency.
         if len(self.tokens) > self._max_tokens:
             excess = len(self.tokens) - self._max_tokens
-            scored = [
-                (self._token_value.get(t, 0) / max(len(t), 1), t)
-                for t in self._token_set
-            ]
+            scored = [(self._token_value.get(t, 0) / max(len(t), 1), t) for t in self._token_set]
             scored.sort(key=lambda x: x[0])  # lowest value-density first
             for _, t in scored[:excess]:
                 self._token_set.discard(t)
@@ -387,10 +402,7 @@ class CmplogCollector:
         High-confidence pairs are more likely to be genuine I2S candidates
         rather than one-off noise from edge-case execution paths.
         """
-        return [
-            p for p, count in self._pair_occurrence.items()
-            if count >= min_occurrences
-        ]
+        return [p for p, count in self._pair_occurrence.items() if count >= min_occurrences]
 
     def pair_confidence(self, op_a: bytes, op_b: bytes) -> int:
         """Return how many times a pair has been observed."""
