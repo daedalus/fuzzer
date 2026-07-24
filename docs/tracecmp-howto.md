@@ -23,26 +23,48 @@ dictionary tokens from comparisons in library code, not just your wrapper.
 ## Quick start
 
 ```bash
-# One-shot: rebuild vendor libs and all trace-cmp targets
+# Daily workflow: rebuild vendored libs with ASAN + trace-cmp, then all .so targets
+tools/build_targets.sh --cmplog
+
+# Standalone trace-cmp targets (separate *._tracecmp.so builds, no ASAN):
 tools/build_targets.sh --vendor-tracecmp
 
-# With ASAN:
+# With ASAN on the standalone trace-cmp builds:
 tools/build_targets.sh --vendor-tracecmp --asan
 ```
 
-Output goes to `targets/*_tracecmp.so` and `targets/*_tracecmp` (executables),
-leaving the regular (non-trace-cmp) builds untouched.
+**`--cmplog`** is the primary workflow. It links every .so target against vendored
+libpng+zlib compiled with **both ASAN and trace-cmp**, so comparisons inside
+library code fire `__sanitizer_cov_trace_cmp*` callbacks that the cmplog shim
+logs. Vendor libs must be compiled with these flags first (see "Rebuilding
+vendored libs with ASAN + trace-cmp" below). When the `.a` files exist in
+`vendor/`, the build script auto-detects them and prints:
+```
+Using vendored trace-cmp libraries
+```
+
+**`--vendor-tracecmp`** produces `targets/*_tracecmp.so` and `targets/*_tracecmp`
+(executables), leaving the regular builds untouched. Useful for A/B testing
+trace-cmp vs non-trace-cmp performance.
 
 ## How `--cmplog` builds work
 
 When you pass `--cmplog` to `build_targets.sh`, the build script:
 
-1. **Compiles `cmplog_shim.c` with Clang** (not GCC) into a separate `.o`
-2. **Compiles the target with Clang + `-fsanitize-coverage=trace-cmp`**
-   so the compiler generates `__sanitizer_cov_trace_cmp*` calls
-3. **Links the shim `.o` into the target `.so`** — the shim provides the
-   callback implementations that the target's code calls
-4. **Adds `-Wl,-Bsymbolic`** to prevent ASAN from overriding the callbacks
+1. **Compiles `cmplog_shim.c` with Clang** into a separate `.o`
+2. **Detects vendored `.a` files** (`vendor/zlib/libz.a`,
+   `vendor/libpng/.libs/libpng16.a`) compiled with trace-cmp — these contain
+   `U` references to `__sanitizer_cov_trace_cmp*` from every comparison in
+   library code
+3. **Links the shim `.o` + vendored `.a` files into the target `.so`** —
+   the linker resolves the vendored libs' `U` trace-cmp references to the
+   shim's `T` implementations within the same `.so`
+4. **Adds `-Wl,-Bsymbolic`** so those resolutions stay internal and ASAN's
+   LD_PRELOAD can't override them with no-op stubs
+
+The target wrapper (e.g. `png_read.c`) is **not** compiled with trace-cmp —
+only the vendored libraries are. This keeps the wrapper lightweight while
+capturing all comparisons inside the library code that does the real work.
 
 The shim must NOT be compiled with `-fsanitize-coverage=trace-cmp` — it
 **provides** the callbacks, it must not **call** them.
@@ -222,17 +244,72 @@ the cmplog shim automatically:
 5. `collect_tokens()` reads all `CMP` lines and extracts operand tokens for
    the dictionary and input-to-state matching
 
-## Verifying your build
+## Rebuilding vendored libs with ASAN + trace-cmp
 
-### Static check: are trace-cmp callbacks in the library?
+Vendored libraries must be compiled with `clang`, ASAN, and trace-cmp so their
+comparisons produce callbacks that the cmplog shim can log. The vendor source
+lives in `vendor/zlib` and `vendor/libpng/` (copy from `fuzzer_old/vendor/`
+if missing).
 
 ```bash
-# Count trace-cmp callbacks in the vendor library
+# zlib
+cd vendor/zlib
+make clean 2>/dev/null
+CC=clang CFLAGS="-O2 -g -fPIC -fsanitize=address \
+    -fsanitize-coverage=trace-cmp,trace-pc-guard" \
+    ./configure --static && make -j$(nproc)
+# Expected: ~20 U trace_cmp symbols across all .o files
+
+# libpng (depends on zlib — ./configure finds ../zlib headers)
+cd vendor/libpng
+make clean 2>/dev/null
+CC=clang CFLAGS="-O2 -g -fPIC -fsanitize=address \
+    -fsanitize-coverage=trace-cmp,trace-pc-guard -I../zlib" \
+    LDFLAGS="-L../zlib" \
+    ./configure --enable-shared=no --quiet && make -j$(nproc)
+# Expected: ~36 U trace_cmp symbols across all .o files
+```
+
+After rebuilding, run `build_targets.sh --cmplog`. The build script auto-detects
+the `.a` files and prints "Using vendored trace-cmp libraries".
+
+## Verifying your build
+
+### Build-time diagnostics (automated)
+
+The build script runs these checks after every `--cmplog` build:
+
+```
+Verifying vendored trace-cmp resolution...
+  OK: vendor/zlib: 20 trace-cmp callers (U)
+  OK: vendor/libpng: 36 trace-cmp callers (U)
+  Vendor callers: 56 | .so implems: 84 | .so unresolved: 0
+  OK: 21/21 .so targets: trace-cmp fully resolved
+  OK: 21/21 .so targets: -Bsymbolic present
+```
+
+- **Vendor callers**: `U` (undefined) references to `__sanitizer_cov_trace_cmp*`
+  in the vendor `.a` files — each one is a comparison site in libpng/zlib.
+- **.so implems**: `T` (text/defined) callback implementations from
+  `cmplog_shim.o` linked into each `.so`.
+- **.so unresolved**: any remaining `U` after linking — must be 0.
+
+### Manual static checks
+
+```bash
+# Count trace-cmp callers in vendor libraries
 nm vendor/zlib/libz.a | grep -c 'U.*trace_cmp'
 # Expected: 20 (zlib 1.3.1)
+nm vendor/libpng/.libs/libpng16.a | grep -c 'U.*trace_cmp'
+# Expected: 36 (libpng 1.6.x)
 
-# In the target .so — should show exported (T) symbols
-nm -D targets/png_read.so | grep 'trace_cmp'
+# Check the final .so has no unresolved trace-cmp (only T definitions)
+nm targets/png_read.so | grep 'trace_cmp'
+# Should show: 4 T symbols, 0 U symbols
+
+# Check -Bsymbolic is present
+readelf -d targets/png_read.so | grep SYMBOLIC
+# Should show: 0x0000000000000010 (SYMBOLIC) 0x0
 
 # Check for cmplog lifecycle symbols
 nm -D targets/png_read.so | grep -E 'cmplog_reset|tracecmp_flush'
@@ -240,24 +317,38 @@ nm -D targets/png_read.so | grep -E 'cmplog_reset|tracecmp_flush'
 
 ### Runtime check: are comparisons being logged?
 
-```bash
-# Quick smoke test (no ASAN)
-clang -O2 -g -fsanitize-coverage=trace-cmp,trace-pc-guard -shared -fPIC \
-    -Wl,-Bsymbolic -include src/fuzzer_tool/adapters/afl_shim.c \
-    -o /tmp/test_cmp.so targets/png_read.c /tmp/cmplog_shim.o \
-    vendor/libpng/.libs/libpng16.a vendor/zlib/libz.a -lm -ldl
+Targets built with `--cmplog` are ASAN-instrumented, so loading them via
+`ctypes.CDLL` requires preloading libasan first. Use the
+`verify_asan_link_order=0` shim to bypass ASAN's load-order check:
 
-_CMPLOG_OUT=/tmp/cmp.log python3 -c "
-import ctypes, os
-os.environ['_CMPLOG_OUT'] = '/tmp/cmp.log'
-lib = ctypes.CDLL('/tmp/test_cmp.so')
-fn = lib.fuzz_shm_run; fn.restype = ctypes.c_int
+```bash
+_CMPLOG_OUT=/tmp/cmp.log python3 << 'PYEOF'
+import ctypes, os, subprocess, tempfile
+
+# 1. Compile ASAN link-order bypass shim
+shim_src = b'const char *__asan_default_options() { return "verify_asan_link_order=0"; }'
+fd, shim_path = tempfile.mkstemp(suffix=".so", prefix="asan_opts_")
+os.close(fd)
+subprocess.run(["gcc", "-shared", "-fPIC", "-O2", "-o", shim_path, "-xc", "-"],
+    input=shim_src, capture_output=True, check=True)
+
+# 2. Preload ASAN shim + libasan with RTLD_GLOBAL
+ctypes.CDLL(shim_path, mode=ctypes.RTLD_GLOBAL)
+ctypes.CDLL("libasan.so.8", mode=ctypes.RTLD_GLOBAL)
+os.unlink(shim_path)
+
+# 3. Load the cmplog target and run a minimal PNG
+os.environ["_CMPLOG_OUT"] = "/tmp/cmp.log"
+lib = ctypes.CDLL("targets/png_read.so", mode=ctypes.RTLD_GLOBAL)
+fn = lib.fuzz_shm_run
+fn.restype = ctypes.c_int
 fn.argtypes = [ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t]
-data = b'\x89PNG\r\n\x1a\n' + b'\x00' * 64
+data = b'\x89PNG\r\n\x1a\n' + b'\x00' * 256
 buf = (ctypes.c_uint8 * len(data))(*data)
-fn(buf, len(data)); lib.__tracecmp_flush()
-"
-wc -l /tmp/cmp.log  # Should show >0 CMP lines
+fn(buf, len(data))
+lib.__tracecmp_flush()
+PYEOF
+wc -l /tmp/cmp.log  # Should show >0 CMP lines (~85 for minimal PNG)
 ```
 
 ## Known limitations
@@ -274,6 +365,13 @@ wc -l /tmp/cmp.log  # Should show >0 CMP lines
 - **ASAN + tracecmp requires `-Bsymbolic`**: ASAN's LD_PRELOAD overrides
   trace-cmp callbacks with no-ops. The `-Wl,-Bsymbolic` linker flag forces
   intra-.so resolution, preventing the override.
-- **Vendored libs must be rebuilt with trace-cmp**: system libraries (libpng,
-  zlib) are not compiled with trace-cmp. You must rebuild from source using
-  `--vendor-tracecmp` or manually with `CC=clang CFLAGS="...-fsanitize-coverage=trace-cmp,trace-pc-guard"`.
+- **Vendored libs must be rebuilt with ASAN + trace-cmp**: system libraries (libpng,
+  zlib) are not compiled with either. The `--cmplog` build links against vendored
+  `.a` files but does NOT rebuild them. Rebuild manually (see "Rebuilding vendored
+  libs with ASAN + trace-cmp" above) or the `.so` targets will have zero trace-cmp
+  callers and produce `0t 0p` at runtime.
+- **`--vendor-tracecmp` does NOT add ASAN** to the vendored libs — use
+  `--vendor-tracecmp --asan` if you need ASAN in standalone trace-cmp builds.
+- **nop_target.c** is required for `build_targets.sh` to reach the verification
+  steps (the missing source causes `set -e` to abort). Copy from `fuzzer_old/`
+  if missing.

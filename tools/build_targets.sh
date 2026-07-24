@@ -422,6 +422,72 @@ verify_cmplog() {
     fi
 }
 
+# ── Verify vendored trace-cmp caller/implementation resolution ──
+# Checks that vendored libraries (zlib, libpng) have trace-cmp
+# callers (U __sanitizer_cov_trace_cmp*), and that the final .so
+# has those callers resolved (no U trace_cmp, only T definitions
+# from cmplog_shim.o) with -Bsymbolic preventing ASAN override.
+verify_vendor_tracecmp() {
+    [ "$WITH_CMPLOG" -eq 0 ] && return 0
+    # Only run when vendored .a files exist
+    local ZLIB_A="$VENDOR/zlib/libz.a"
+    local LIBPNG_A="$VENDOR/libpng/.libs/libpng16.a"
+    [ -f "$ZLIB_A" ] || [ -f "$LIBPNG_A" ] || return 0
+
+    echo "Verifying vendored trace-cmp resolution..."
+
+    # ── Vendor static libs: count U trace_cmp callers ──────────────
+    local vendor_zlib_callers=0 vendor_png_callers=0
+    if [ -f "$ZLIB_A" ]; then
+        vendor_zlib_callers=$(nm "$ZLIB_A" 2>/dev/null | grep -c 'U.*trace_cmp' || true)
+        ok "vendor/zlib: $vendor_zlib_callers trace-cmp callers (U)"
+    fi
+    if [ -f "$LIBPNG_A" ]; then
+        vendor_png_callers=$(nm "$LIBPNG_A" 2>/dev/null | grep -c 'U.*trace_cmp' || true)
+        ok "vendor/libpng: $vendor_png_callers trace-cmp callers (U)"
+    fi
+    local total_vendor_callers=$((vendor_zlib_callers + vendor_png_callers))
+
+    # ── Final .so: check resolution + -Bsymbolic ──────────────────
+    local resolved_ok=0 resolved_fail=0 bsymbolic_ok=0 bsymbolic_fail=0
+    local total_implementations=0 total_so_callers=0
+    for f in "$TARGETS"/*.so; do
+        [ -f "$f" ] || continue
+        local impl_count=$(nm "$f" 2>/dev/null | grep -c 'T.*trace_cmp' || true)
+        local undef_count=$(nm "$f" 2>/dev/null | grep -c 'U.*trace_cmp' || true)
+        total_implementations=$((total_implementations + impl_count))
+        total_so_callers=$((total_so_callers + undef_count))
+
+        if [ "$undef_count" -eq 0 ] && [ "$impl_count" -gt 0 ]; then
+            resolved_ok=$((resolved_ok + 1))
+        elif [ "$impl_count" -eq 0 ]; then
+            warn "$(basename "$f"): no trace-cmp implementations (T)"
+            resolved_fail=$((resolved_fail + 1))
+        else
+            warn "$(basename "$f"): $undef_count unresolved trace-cmp callers (U)"
+            resolved_fail=$((resolved_fail + 1))
+        fi
+
+        if readelf -d "$f" 2>/dev/null | grep -q 'SYMBOLIC'; then
+            bsymbolic_ok=$((bsymbolic_ok + 1))
+        else
+            warn "$(basename "$f"): missing -Bsymbolic (ASAN may override trace-cmp)"
+            bsymbolic_fail=$((bsymbolic_fail + 1))
+        fi
+    done
+
+    local total_tested=$((resolved_ok + resolved_fail))
+    if [ "$total_vendor_callers" -gt 0 ]; then
+        echo "  Vendor callers: $total_vendor_callers | .so implems: $total_implementations | .so unresolved: $total_so_callers"
+    fi
+    ok "$resolved_ok/$total_tested .so targets: trace-cmp fully resolved"
+    if [ "$bsymbolic_fail" -eq 0 ]; then
+        ok "$bsymbolic_ok/$total_tested .so targets: -Bsymbolic present"
+    else
+        warn "$bsymbolic_fail .so targets missing -Bsymbolic"
+    fi
+}
+
 # ── Vendored trace-cmp: rebuild libpng+zlib with trace-cmp, then link targets ─
 VENDOR_ZLIB_DIR="$VENDOR/zlib"
 VENDOR_LIBPNG_DIR="$VENDOR/libpng"
@@ -724,5 +790,6 @@ fi
 verify_afl
 verify_shm_run
 verify_cmplog
+verify_vendor_tracecmp
 build_tracecmp_targets
 echo "=== Done ==="

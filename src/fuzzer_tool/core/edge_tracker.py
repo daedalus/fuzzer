@@ -1374,7 +1374,7 @@ class EdgeTracker:
 
         # Vectorized path: broadcasting (n, 1, p) == (1, n, p) → (n, n, p)
         if _HAS_NUMPY and n > 20:
-            sigs = np.array([self._minhash.signatures[k] for k in keys], dtype=np.int64)
+            sigs = np.array([self._minhash.signatures[k] for k in keys], dtype=np.uint64)
             matches = np.sum(sigs[:, None, :] == sigs[None, :, :], axis=2)
             jaccard_matrix = matches / num_perm
             triu = np.triu_indices(n, k=1)
