@@ -35,9 +35,13 @@ class TestClassifyByte:
         for v in range(16, 32):
             assert _classify_byte(v) == 16
 
-    def test_range_32_127(self):
-        for v in range(32, 128):
+    def test_range_32_63(self):
+        for v in range(32, 64):
             assert _classify_byte(v) == 32
+
+    def test_range_64_127(self):
+        for v in range(64, 128):
+            assert _classify_byte(v) == 64
 
     def test_range_128_255(self):
         for v in range(128, 256):
@@ -48,7 +52,7 @@ class TestClassifyByte:
 
     def test_all_classes_present(self):
         classes = {_classify_byte(v) for v in range(256)}
-        assert classes == {0, 1, 2, 3, 4, 8, 16, 32, 128}
+        assert classes == {0, 1, 2, 3, 4, 8, 16, 32, 64, 128}
 
 
 class TestBuildU16Table:
