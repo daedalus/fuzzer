@@ -392,7 +392,7 @@ class TargetDistance:
         return self._seed_distance_python(edge_trace)
 
     def _seed_distance_numpy(self, edge_trace: set[tuple[int, int]]) -> float:
-        """Vectorized seed distance using numpy searchsorted."""
+        """Vectorized seed distance using numpy searchsorted (branch-free)."""
         import numpy as _np
 
         # Collect unique BB addresses
@@ -411,37 +411,27 @@ class TargetDistance:
         fd = self._func_dists_np
         n = len(fs)
 
-        # Vectorized nearest-neighbor lookup (checks idx-1, idx, idx+1)
-        idxs = _np.searchsorted(fs, addrs, side="right") - 1
-        idxs = _np.clip(idxs, 0, n - 1)
+        # Branch-free vectorized lookup: checks idx-1, idx, idx+1
+        idxs = _np.clip(_np.searchsorted(fs, addrs, side="right") - 1, 0, n - 1)
         im = _np.clip(idxs - 1, 0, n - 1)
+        ip = _np.minimum(idxs + 1, n - 1)
 
-        # Check containment in candidate functions
-        in0 = (fs[idxs] <= addrs) & (addrs < fe[idxs])
-        inm = (fs[im] <= addrs) & (addrs < fe[im])
-        in_func = in0 | inm
-        results = _np.where(in0, fd[idxs], _np.where(inm, fd[im], 20.0)).astype(
-            _np.float64
+        s_m, e_m, d_m = fs[im], fe[im], fd[im]
+        s_0, e_0, d_0 = fs[idxs], fe[idxs], fd[idxs]
+        s_p, e_p = fs[ip], fe[ip]
+
+        in_0 = (s_0 <= addrs) & (addrs < e_0)
+        in_m = (s_m <= addrs) & (addrs < e_m)
+        in_func = in_0 | in_m
+
+        d1 = _np.minimum(_np.abs(addrs - s_m), _np.abs(addrs - e_m))
+        d2 = _np.minimum(_np.abs(addrs - s_0), _np.abs(addrs - e_0))
+        d3 = _np.minimum(_np.abs(addrs - s_p), _np.abs(addrs - e_p))
+        fallback = _np.minimum(
+            _np.minimum(_np.minimum(d1, d2), d3) / 64.0 + 2.0, 20.0
         )
 
-        # For addresses not in any function, find nearest by distance
-        not_in = ~in_func
-        if _np.any(not_in):
-            addr_out = addrs[not_in]
-            i0 = idxs[not_in]
-            imm = im[not_in]
-            ip = _np.clip(i0 + 1, 0, n - 1)
-            d_m = _np.minimum(
-                _np.abs(addr_out - fs[imm]), _np.abs(addr_out - fe[imm])
-            )
-            d_0 = _np.minimum(
-                _np.abs(addr_out - fs[i0]), _np.abs(addr_out - fe[i0])
-            )
-            d_p = _np.minimum(
-                _np.abs(addr_out - fs[ip]), _np.abs(addr_out - fe[ip])
-            )
-            min_d = _np.minimum(_np.minimum(d_m, d_0), d_p)
-            results[not_in] = _np.minimum(min_d / 64.0 + 2.0, 20.0)
+        results = _np.where(in_func, _np.where(in_0, d_0, d_m), fallback)
 
         # Cache results
         for i, a in enumerate(bb_list):
