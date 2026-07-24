@@ -361,6 +361,7 @@ def cmd_fuzz(args):
         max_collision_risk=getattr(args, "max_collision_risk", 30),
         debug=getattr(args, "debug", False),
         enable_regex_bomb=getattr(args, "enable_regex_bomb_mutations", False),
+        refresh_profile=getattr(args, "refresh_profile", False),
         resize_map_on_stall=getattr(args, "resize_map_on_stall", False),
         enable_smt_z3=getattr(args, "enable_smt_z3", False),
         mod_solving=getattr(args, "mod_solving", "heuristic"),
@@ -1415,6 +1416,11 @@ def main() -> int:
         "--debug",
         action="store_true",
         help="Enable debug output (SHM attach, coverage tracing, etc.)",
+    )
+    fuzz_parser.add_argument(
+        "--refresh-profile",
+        action="store_true",
+        help="Force re-analysis of target binary (skip cached profile)",
     )
     fuzz_parser.add_argument(
         "--enable-regex-bomb-mutations",

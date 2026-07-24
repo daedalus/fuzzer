@@ -60,26 +60,29 @@ class OperatorEngine:
     # Each handler: (buf, byte_idx, data) -> None (in-place) or bytes (replace buf)
 
     def _op_bit_flip(self, buf, byte_idx, _data):
+        rng = self.f._rand_pool
         if buf:
-            buf[byte_idx] ^= 1 << random.randint(0, 7)
+            buf[byte_idx] ^= 1 << rng.randint(0, 7)
 
     def _op_bit_offset_flip(self, buf, _byte_idx, _data):
+        rng = self.f._rand_pool
         if not buf:
             return
         total_bits = len(buf) * 8
-        bit_offset = random.randint(0, total_bits - 1)
+        bit_offset = rng.randint(0, total_bits - 1)
         byte_idx = bit_offset >> 3
         bit_idx = bit_offset & 7
         buf[byte_idx] ^= 1 << bit_idx
 
     def _op_bit_offset_span(self, buf, _byte_idx, _data):
+        rng = self.f._rand_pool
         if not buf:
             return
         total_bits = len(buf) * 8
         span_width = random.choices(
             [1, 2, 3, 4, 5, 6, 7, 8], weights=[10, 15, 20, 20, 15, 10, 5, 5]
         )[0]
-        start_offset = random.randint(0, max(0, total_bits - span_width))
+        start_offset = rng.randint(0, max(0, total_bits - span_width))
         for i in range(span_width):
             bit_offset = start_offset + i
             if bit_offset >= total_bits:
@@ -90,12 +93,13 @@ class OperatorEngine:
 
     def _op_simd_boundary(self, buf, _byte_idx, _data):
         """Resize buffer to SIMD boundary lengths (AVX2: 32, SSE2: 16)."""
+        rng = self.f._rand_pool
         from fuzzer_tool.core.mutations import SIMD_BOUNDARIES
 
         if not buf:
-            buf.extend(random.randint(0, 255) for _ in range(random.choice(SIMD_BOUNDARIES)))
+            buf.extend(rng.randint(0, 255) for _ in range(rng.choice(SIMD_BOUNDARIES)))
             return
-        target_len = random.choice(SIMD_BOUNDARIES)
+        target_len = rng.choice(SIMD_BOUNDARIES)
         current_len = len(buf)
         if target_len == current_len:
             return
@@ -108,41 +112,45 @@ class OperatorEngine:
 
     def _op_regex_bomb(self, buf, _byte_idx, _data):
         """Replace input with a known regex backtracking bomb pattern."""
+        rng = self.f._rand_pool
         from fuzzer_tool.core.mutations import REGEX_BOMBS
 
-        pattern = random.choice(REGEX_BOMBS).encode()
+        pattern = rng.choice(REGEX_BOMBS).encode()
         if len(buf) < len(pattern):
             buf.extend(b"\x00" * (len(pattern) - len(buf)))
         # Insert bomb at random position
-        pos = random.randint(0, max(0, len(buf) - len(pattern)))
+        pos = rng.randint(0, max(0, len(buf) - len(pattern)))
         buf[pos : pos + len(pattern)] = pattern
 
     def _op_clone_fixed(self, buf, _byte_idx, _data):
         """Insert a block of repeated constant bytes (AFL++ clone_fixed)."""
+        rng = self.f._rand_pool
         if not buf or len(buf) >= self.f.max_len:
             return
-        fill_byte = random.choice([buf[random.randint(0, len(buf) - 1)], 0, 0xFF])
-        block_size = random.randint(1, min(32, self.f.max_len - len(buf)))
-        ins_pos = random.randint(0, len(buf))
+        fill_byte = rng.choice([buf[rng.randint(0, len(buf) - 1)], 0, 0xFF])
+        block_size = rng.randint(1, min(32, self.f.max_len - len(buf)))
+        ins_pos = rng.randint(0, len(buf))
         buf[ins_pos:ins_pos] = bytes([fill_byte] * block_size)
 
     def _op_overwrite_copy(self, buf, _byte_idx, _data):
         """Overwrite a region with bytes from another position (AFL++ overwrite_copy)."""
+        rng = self.f._rand_pool
         if len(buf) < 2:
             return
-        src_len = random.randint(1, min(16, len(buf)))
-        src_pos = random.randint(0, len(buf) - src_len)
-        dst_pos = random.randint(0, max(0, len(buf) - src_len))
+        src_len = rng.randint(1, min(16, len(buf)))
+        src_pos = rng.randint(0, len(buf) - src_len)
+        dst_pos = rng.randint(0, max(0, len(buf) - src_len))
         if src_pos != dst_pos:
             buf[dst_pos : dst_pos + src_len] = buf[src_pos : src_pos + src_len]
 
     def _op_overwrite_fixed(self, buf, _byte_idx, _data):
         """Overwrite a region with repeated constant bytes (AFL++ overwrite_fixed)."""
+        rng = self.f._rand_pool
         if len(buf) < 2:
             return
-        fill_byte = random.choice([buf[random.randint(0, len(buf) - 1)], 0, 0xFF])
-        block_len = random.randint(1, min(16, len(buf)))
-        dst_pos = random.randint(0, len(buf) - block_len)
+        fill_byte = rng.choice([buf[rng.randint(0, len(buf) - 1)], 0, 0xFF])
+        block_len = rng.randint(1, min(16, len(buf)))
+        dst_pos = rng.randint(0, len(buf) - block_len)
         buf[dst_pos : dst_pos + block_len] = bytes([fill_byte] * block_len)
 
     def _op_redqueen_xform(self, buf, byte_idx, _data):
@@ -250,10 +258,11 @@ class OperatorEngine:
         finds a short common prefix at each, and swaps the tails.
         Creates structural hybrids without format awareness.
         """
+        rng = self.f._rand_pool
         if len(buf) < 4:
             return
-        p1 = random.randint(0, len(buf) - 2)
-        p2 = random.randint(0, len(buf) - 2)
+        p1 = rng.randint(0, len(buf) - 2)
+        p2 = rng.randint(0, len(buf) - 2)
         if p1 == p2:
             p2 = (p2 + 1) % max(1, len(buf) - 1)
         max_pre = min(16, len(buf) - max(p1, p2))
@@ -284,20 +293,21 @@ class OperatorEngine:
         Radamsa sed-fuse-next: fuses prefix of the current block
         with suffix of a random corpus entry at a shared position.
         """
+        rng = self.f._rand_pool
         f = self.f
         corpus = getattr(f, "corpus", [])
         if not corpus or len(buf) < 3:
             return
-        other = bytes(random.choice(corpus))
+        other = bytes(rng.choice(corpus))
         if other is data or other == buf:
             others = [c for c in corpus if c is not data]
             if not others:
                 return
-            other = bytes(random.choice(others))
+            other = bytes(rng.choice(others))
         if len(other) < 3:
             return
         split_point = min(len(buf), len(other)) // 2
-        split_point = random.randint(1, max(1, split_point))
+        split_point = rng.randint(1, max(1, split_point))
         result = bytearray(buf[:split_point]) + other[split_point:]
         if len(result) <= f.max_len:
             buf[:] = result[: f.max_len]
@@ -308,23 +318,23 @@ class OperatorEngine:
         Radamsa sed-fuse-old: maintains a ring buffer of previously
         mutated data and fuses fragments from it into the current input.
         """
+        rng = self.f._rand_pool
         if len(buf) < 3:
             return
-        cls = type(self)
-        if not hasattr(cls, "_fuse_memory"):
-            cls._fuse_memory = []
-            cls._fuse_mem_max = 32
-        mem = cls._fuse_memory
+        if not hasattr(self, "_fuse_memory"):
+            self._fuse_memory = []
+            self._fuse_mem_max = 32
+        mem = self._fuse_memory
         mem.append(bytes(buf))
-        if len(mem) > cls._fuse_mem_max:
+        if len(mem) > self._fuse_mem_max:
             mem.pop(0)
         if len(mem) < 2:
             return
-        old = random.choice(mem[:-1])
+        old = rng.choice(mem[:-1])
         if len(old) < 3:
             return
-        p_cur = random.randint(1, len(buf) - 1)
-        p_old = random.randint(1, len(old) - 1)
+        p_cur = rng.randint(1, len(buf) - 1)
+        p_old = rng.randint(1, len(old) - 1)
         tail_old = bytes(old[p_old:])
         result = bytearray(buf[:p_cur]) + tail_old
         if len(result) <= getattr(self.f, "max_len", 65536):
@@ -355,13 +365,14 @@ class OperatorEngine:
         overlong UTF-8 encoding (2-byte sequence).  Exercises UTF-8
         length-checking bugs in parsers.
         """
+        rng = self.f._rand_pool
         if not buf:
             return
         # Find a 7-bit ASCII byte (0x00-0x7F)
         candidates = [i for i, b in enumerate(buf) if b < 0x80]
         if not candidates:
             return
-        idx = random.choice(candidates)
+        idx = rng.choice(candidates)
         b = buf[idx]
         # Overlong 2-byte encoding: 110xxxxx 10xxxxxx
         buf[idx : idx + 1] = bytes([0xC0 | (b >> 6), 0x80 | (b & 0x3F)])
@@ -373,12 +384,13 @@ class OperatorEngine:
         have caused security issues: BOMs, right-to-left override,
         zero-width joiners, illegal surrogates, NFKC expansion bombs, etc.
         """
+        rng = self.f._rand_pool
         if not buf or len(buf) >= getattr(self.f, "max_len", 65536):
             return
         from fuzzer_tool.core.mutations import _FUNNY_UNICODE  # noqa: PLC0415
 
-        seq = random.choice(_FUNNY_UNICODE)
-        pos = random.randint(0, len(buf))
+        seq = rng.choice(_FUNNY_UNICODE)
+        pos = rng.randint(0, len(buf))
         buf[pos:pos] = seq
 
     # ── Line-level mutations (from Radamsa) ─────────────────────────
@@ -394,37 +406,38 @@ class OperatorEngine:
         - Repeat a line
         - Insert a line from elsewhere in the buffer
         """
+        rng = self.f._rand_pool
         if not buf or len(buf) < 4:
             return
         # Split on newline
         parts = bytes(buf).split(b"\n")
         if len(parts) < 2:
             return
-        mutate = random.choice(["del", "dup", "swap", "perm", "repeat", "clone"])
+        mutate = rng.choice(["del", "dup", "swap", "perm", "repeat", "clone"])
         if mutate == "del":
-            idx = random.randint(0, len(parts) - 1)
+            idx = rng.randint(0, len(parts) - 1)
             del parts[idx]
         elif mutate == "dup":
-            idx = random.randint(0, len(parts) - 1)
+            idx = rng.randint(0, len(parts) - 1)
             parts.insert(idx + 1, parts[idx])
         elif mutate == "swap" and len(parts) >= 2:
-            idx = random.randint(0, len(parts) - 2)
+            idx = rng.randint(0, len(parts) - 2)
             parts[idx], parts[idx + 1] = parts[idx + 1], parts[idx]
         elif mutate == "perm" and len(parts) >= 3:
             # Shuffle a subset of lines
-            start = random.randint(0, len(parts) - 3)
-            end = min(start + random.randint(2, 6), len(parts))
+            start = rng.randint(0, len(parts) - 3)
+            end = min(start + rng.randint(2, 6), len(parts))
             segment = parts[start:end]
-            random.shuffle(segment)
+            rng.shuffle(segment)
             parts[start:end] = segment
         elif mutate == "repeat" and len(parts) >= 1:
-            idx = random.randint(0, len(parts) - 1)
-            n = random.randint(1, 32)
+            idx = rng.randint(0, len(parts) - 1)
+            n = rng.randint(1, 32)
             for _ in range(n):
                 parts.insert(idx, parts[idx])
         elif mutate == "clone" and len(parts) >= 2:
-            src = random.randint(0, len(parts) - 1)
-            dst = random.randint(0, len(parts) - 1)
+            src = rng.randint(0, len(parts) - 1)
+            dst = rng.randint(0, len(parts) - 1)
             parts.insert(dst, parts[src])
         result = b"\n".join(parts)
         if len(result) <= getattr(self.f, "max_len", 65536) and result != bytes(buf):
@@ -440,6 +453,7 @@ class OperatorEngine:
         prefer mutating bytes that appear in comparison operands, which
         increases the chance of cracking comparisons.
         """
+        rng = self.f._rand_pool
         if not buf:
             return
         tbl = _COLORIZE_TBL
@@ -469,14 +483,14 @@ class OperatorEngine:
                 cache[(buf_hash, pairs_id)] = cached
             colorable = cached
             if colorable:
-                n_mutate = max(1, min(len(colorable), len(buf) // random.randint(2, 10)))
+                n_mutate = max(1, min(len(colorable), len(buf) // rng.randint(2, 10)))
                 indices = random.choices(colorable, k=n_mutate)
                 for idx in indices:
                     buf[idx] = tbl[buf[idx]]
                 return
         # Fallback: random selection from entire buffer
-        n_mutate = max(1, len(buf) // random.randint(2, 10))
-        indices = [random.randint(0, len(buf) - 1) for _ in range(n_mutate)]
+        n_mutate = max(1, len(buf) // rng.randint(2, 10))
+        indices = [rng.randint(0, len(buf) - 1) for _ in range(n_mutate)]
         for idx in indices:
             buf[idx] = tbl[buf[idx]]
 
@@ -487,12 +501,13 @@ class OperatorEngine:
         If not, those bytes are inert. This operator flips a random block
         to help discover which regions affect execution paths.
         """
+        rng = self.f._rand_pool
         if len(buf) < 8:
             return
         # Pick a random block (10-25% of buffer) and flip all bytes
-        block_size = random.randint(len(buf) // 10, len(buf) // 4)
+        block_size = rng.randint(len(buf) // 10, len(buf) // 4)
         block_size = max(2, min(block_size, len(buf)))
-        start = random.randint(0, len(buf) - block_size)
+        start = rng.randint(0, len(buf) - block_size)
         # Bulk XOR via memoryview (avoids per-byte Python loop)
         mv = memoryview(buf)[start : start + block_size]
         for i in range(block_size):
@@ -506,26 +521,29 @@ class OperatorEngine:
         This operator injects previously collected extras or generates
         new sequences of consecutive interesting bytes.
         """
+        rng = self.f._rand_pool
         if not buf:
             return
         f = self.f
         # Use dictionary tokens as "auto-extras" if available
         if f.dictionary:
-            token = random.choice(f.dictionary)
+            tid = f._dict_scratch[f._dict_scratch_idx] if f._dict_scratch_idx < len(f._dict_scratch) else 0
+            f._dict_scratch_idx += 1
+            token = f.dictionary[tid]
             if isinstance(token, str):
                 token = token.encode()
             if len(token) <= len(buf):
-                pos = random.randint(0, len(buf) - len(token))
+                pos = rng.randint(0, len(buf) - len(token))
                 buf[pos : pos + len(token)] = token
             return
         # Generate a short sequence of consecutive interesting bytes
-        seq_len = random.randint(2, 8)
+        seq_len = rng.randint(2, 8)
         seq = bytes(
-            random.choice([0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0xFF])
+            rng.choice([0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0xFF])
             for _ in range(seq_len)
         )
         if len(buf) >= seq_len:
-            pos = random.randint(0, len(buf) - seq_len)
+            pos = rng.randint(0, len(buf) - seq_len)
             buf[pos : pos + seq_len] = seq
 
     def _op_byte_flip(self, buf, byte_idx, _data):
@@ -533,61 +551,65 @@ class OperatorEngine:
             buf[byte_idx] ^= 0xFF
 
     def _op_interesting_8(self, buf, byte_idx, _data):
+        rng = self.f._rand_pool
         if buf:
-            if self.f._crash_mi and self.f._crash_mi.total_execs >= 50 and random.random() < 0.3:
+            if self.f._crash_mi and self.f._crash_mi.total_execs >= 50 and rng.random() < 0.3:
                 crash_vals = self.f._crash_mi.top_values(byte_idx, k=5)
                 if crash_vals:
-                    buf[byte_idx] = random.choice(crash_vals) & 0xFF
+                    buf[byte_idx] = rng.choice(crash_vals) & 0xFF
                     return
-            vals = INTERESTING_UNSIGNED_8 if random.random() < 0.5 else INTERESTING_8
-            buf[byte_idx] = random.choice(vals) & 0xFF
+            vals = INTERESTING_UNSIGNED_8 if rng.random() < 0.5 else INTERESTING_8
+            buf[byte_idx] = rng.choice(vals) & 0xFF
 
     def _op_interesting_16(self, buf, _byte_idx, _data):
+        rng = self.f._rand_pool
         if len(buf) >= 2:
-            idx = random.randint(0, len(buf) - 2)
-            if self.f._crash_mi and self.f._crash_mi.total_execs >= 50 and random.random() < 0.3:
+            idx = rng.randint(0, len(buf) - 2)
+            if self.f._crash_mi and self.f._crash_mi.total_execs >= 50 and rng.random() < 0.3:
                 crash_vals = self.f._crash_mi.top_values(idx, k=5)
                 if crash_vals:
-                    v = random.choice(crash_vals)
+                    v = rng.choice(crash_vals)
                     fmt = "<H" if v > 32767 or v < -32768 else "<h"
                     struct.pack_into(fmt, buf, idx, v)
                     return
-            use_unsigned = random.random() < 0.5
+            use_unsigned = rng.random() < 0.5
             vals = INTERESTING_UNSIGNED_16 if use_unsigned else INTERESTING_16
-            v = random.choice(vals)
+            v = rng.choice(vals)
             fmt = "<H" if v > 32767 or v < -32768 else "<h"
             struct.pack_into(fmt, buf, idx, v)
 
     def _op_interesting_32(self, buf, _byte_idx, _data):
+        rng = self.f._rand_pool
         if len(buf) >= 4:
-            idx = random.randint(0, len(buf) - 4)
-            if self.f._crash_mi and self.f._crash_mi.total_execs >= 50 and random.random() < 0.3:
+            idx = rng.randint(0, len(buf) - 4)
+            if self.f._crash_mi and self.f._crash_mi.total_execs >= 50 and rng.random() < 0.3:
                 crash_vals = self.f._crash_mi.top_values(idx, k=5)
                 if crash_vals:
-                    v = random.choice(crash_vals)
+                    v = rng.choice(crash_vals)
                     fmt = "<I" if v > 2147483647 or v < -2147483648 else "<i"
                     struct.pack_into(fmt, buf, idx, v)
                     return
-            use_unsigned = random.random() < 0.5
+            use_unsigned = rng.random() < 0.5
             vals = INTERESTING_UNSIGNED_32 if use_unsigned else INTERESTING_32
-            v = random.choice(vals)
+            v = rng.choice(vals)
             fmt = "<I" if v > 2147483647 or v < -2147483648 else "<i"
             struct.pack_into(fmt, buf, idx, v)
 
     def _op_arithmetic(self, buf, _byte_idx, _data):
+        rng = self.f._rand_pool
         from fuzzer_tool.core.mutations import ARITHMETIC_DELTAS
 
-        width = random.choice([1, 2, 4, 8])
+        width = rng.choice([1, 2, 4, 8])
         if len(buf) >= width:
             max_start = len(buf) - width
-            idx = (random.randint(0, max_start) // width) * width
-            delta = random.choice(ARITHMETIC_DELTAS)
-            if random.random() < 0.5:
+            idx = (rng.randint(0, max_start) // width) * width
+            delta = rng.choice(ARITHMETIC_DELTAS)
+            if rng.random() < 0.5:
                 delta = -delta
             if width == 1:
                 buf[idx] = (buf[idx] + delta) & 0xFF
             elif width == 2:
-                le = random.random() < 0.5
+                le = rng.random() < 0.5
                 if le:
                     val = (struct.unpack_from("<H", buf, idx)[0] + delta) & 0xFFFF
                     struct.pack_into("<H", buf, idx, val)
@@ -595,7 +617,7 @@ class OperatorEngine:
                     val = (struct.unpack_from(">H", buf, idx)[0] + delta) & 0xFFFF
                     struct.pack_into(">H", buf, idx, val)
             elif width == 4:
-                le = random.random() < 0.5
+                le = rng.random() < 0.5
                 if le:
                     val = (struct.unpack_from("<I", buf, idx)[0] + delta) & 0xFFFFFFFF
                     struct.pack_into("<I", buf, idx, val)
@@ -603,7 +625,7 @@ class OperatorEngine:
                     val = (struct.unpack_from(">I", buf, idx)[0] + delta) & 0xFFFFFFFF
                     struct.pack_into(">I", buf, idx, val)
             elif width == 8:
-                le = random.random() < 0.5
+                le = rng.random() < 0.5
                 if le:
                     val = (struct.unpack_from("<Q", buf, idx)[0] + delta) & 0xFFFFFFFFFFFFFFFF
                     struct.pack_into("<Q", buf, idx, val)
@@ -612,111 +634,136 @@ class OperatorEngine:
                     struct.pack_into(">Q", buf, idx, val)
 
     def _op_random_bytes(self, buf, _byte_idx, _data):
+        rng = self.f._rand_pool
         if buf:
-            buf[random.randint(0, len(buf) - 1)] = random.randint(0, 255)
+            buf[rng.randint(0, len(buf) - 1)] = rng.randint(0, 255)
 
     def _op_block_insert(self, buf, _byte_idx, _data):
+        rng = self.f._rand_pool
         if len(buf) < self.f.max_len:
-            idx = random.randint(0, len(buf))
-            size = random.randint(1, min(32, self.f.max_len - len(buf)))
-            buf[idx:idx] = bytes(random.randint(0, 255) for _ in range(size))
+            idx = rng.randint(0, len(buf))
+            size = rng.randint(1, min(32, self.f.max_len - len(buf)))
+            buf[idx:idx] = bytes(rng.randint(0, 255) for _ in range(size))
 
     def _op_block_delete(self, buf, _byte_idx, _data):
+        rng = self.f._rand_pool
         if len(buf) > 1:
-            idx = random.randint(0, len(buf) - 1)
+            idx = rng.randint(0, len(buf) - 1)
             max_size = min(32, len(buf) - idx, len(buf) - 1)
             if max_size >= 1:
-                del buf[idx : idx + random.randint(1, max_size)]
+                del buf[idx : idx + rng.randint(1, max_size)]
 
     def _op_block_duplicate(self, buf, _byte_idx, _data):
+        rng = self.f._rand_pool
         if len(buf) < 2 or len(buf) >= self.f.max_len:
             return
-        idx = random.randint(0, len(buf) - 1)
-        size = random.randint(1, min(16, len(buf) - idx))
+        idx = rng.randint(0, len(buf) - 1)
+        size = rng.randint(1, min(16, len(buf) - idx))
         block = buf[idx : idx + size]
-        ins = random.randint(0, len(buf))
+        ins = rng.randint(0, len(buf))
         buf[ins:ins] = block
 
     def _op_dict_insert(self, buf, _byte_idx, _data):
-        if self.f.dictionary:
-            token = random.choice(self.f.dictionary)
-            if len(buf) + len(token) <= self.f.max_len:
-                buf[random.randint(0, len(buf)) : 0] = token
+        rng = self.f._rand_pool
+        f = self.f
+        if f.dictionary and f._dict_scratch_idx < len(f._dict_scratch):
+            token = f.dictionary[f._dict_scratch[f._dict_scratch_idx]]
+            f._dict_scratch_idx += 1
+            if len(buf) + len(token) <= f.max_len:
+                buf[rng.randint(0, len(buf)) : 0] = token
 
     def _op_dict_replace(self, buf, _byte_idx, _data):
-        if self.f.dictionary and buf:
-            token = random.choice(self.f.dictionary)
-            idx = random.randint(0, len(buf) - 1)
+        rng = self.f._rand_pool
+        f = self.f
+        if f.dictionary and buf and f._dict_scratch_idx < len(f._dict_scratch):
+            token = f.dictionary[f._dict_scratch[f._dict_scratch_idx]]
+            f._dict_scratch_idx += 1
+            idx = rng.randint(0, len(buf) - 1)
             end = min(idx + len(token), len(buf))
             buf[idx:end] = token[: end - idx]
 
     def _op_dict_overwrite(self, buf, _byte_idx, _data):
-        if self.f.dictionary:
-            return bytearray(random.choice(self.f.dictionary)[: self.f.max_len])
+        f = self.f
+        if f.dictionary and f._dict_scratch_idx < len(f._dict_scratch):
+            token = f.dictionary[f._dict_scratch[f._dict_scratch_idx]]
+            f._dict_scratch_idx += 1
+            return bytearray(token[: f.max_len])
 
     def _op_dict_prepend(self, buf, _byte_idx, _data):
-        if self.f.dictionary:
-            token = random.choice(self.f.dictionary)
-            if len(buf) + len(token) <= self.f.max_len:
+        f = self.f
+        if f.dictionary and f._dict_scratch_idx < len(f._dict_scratch):
+            token = f.dictionary[f._dict_scratch[f._dict_scratch_idx]]
+            f._dict_scratch_idx += 1
+            if len(buf) + len(token) <= f.max_len:
                 return bytearray(token) + buf
 
     def _op_dict_append(self, buf, _byte_idx, _data):
-        if self.f.dictionary:
-            token = random.choice(self.f.dictionary)
-            if len(buf) + len(token) <= self.f.max_len:
+        f = self.f
+        if f.dictionary and f._dict_scratch_idx < len(f._dict_scratch):
+            token = f.dictionary[f._dict_scratch[f._dict_scratch_idx]]
+            f._dict_scratch_idx += 1
+            if len(buf) + len(token) <= f.max_len:
                 buf.extend(token)
 
     def _op_checksum_repair(self, buf, _byte_idx, _data):
+        rng = self.f._rand_pool
         import zlib
 
         if buf and len(buf) >= 4:
-            pos = random.randint(0, max(0, len(buf) - 4))
+            pos = rng.randint(0, max(0, len(buf) - 4))
             buf[pos : pos + 4] = zlib.crc32(bytes(buf[:pos])).to_bytes(4, "big")
 
     def _op_token_dup(self, buf, _byte_idx, _data):
-        if self.f.dictionary and buf:
-            token = random.choice(self.f.dictionary)
-            if len(buf) + len(token) <= self.f.max_len:
-                buf[random.randint(0, len(buf)) : 0] = token
+        rng = self.f._rand_pool
+        f = self.f
+        if f.dictionary and buf and f._dict_scratch_idx < len(f._dict_scratch):
+            token = f.dictionary[f._dict_scratch[f._dict_scratch_idx]]
+            f._dict_scratch_idx += 1
+            if len(buf) + len(token) <= f.max_len:
+                buf[rng.randint(0, len(buf)) : 0] = token
 
     def _op_markov_bytes(self, buf, _byte_idx, _data):
+        rng = self.f._rand_pool
         if buf:
-            idx = random.randint(0, len(buf) - 1)
+            idx = rng.randint(0, len(buf) - 1)
             ctx = (
                 bytes(buf[max(0, idx - self.f.markov.order) : idx]) if self.f.markov.order else b""
             )
             buf[idx] = self.f.markov.sample_byte(ctx)
 
     def _op_cem_bytes(self, buf, _byte_idx, _data):
+        rng = self.f._rand_pool
         if self.f.mc and self.f.mc.cem_fitted:
             if buf:
-                buf[random.randint(0, len(buf) - 1)] = self.f.mc.cem_byte(
-                    random.randint(0, len(buf) - 1)
+                buf[rng.randint(0, len(buf) - 1)] = self.f.mc.cem_byte(
+                    rng.randint(0, len(buf) - 1)
                 )
             else:
-                return bytearray(self.f.mc.cem_sample(random.randint(1, min(32, self.f.max_len))))
+                return bytearray(self.f.mc.cem_sample(rng.randint(1, min(32, self.f.max_len))))
 
     def _op_splice(self, buf, _byte_idx, data):
+        rng = self.f._rand_pool
         if len(self.f.corpus) >= 2:
-            a = random.choice(self.f.corpus)
-            b = random.choice(self.f.corpus)
+            a = rng.choice(self.f.corpus)
+            b = rng.choice(self.f.corpus)
             if a is not data and b is not data:
                 return bytearray(splice(a, b)[: self.f.max_len])
             others = [c for c in self.f.corpus if c is not data]
             if others:
-                return bytearray(splice(bytes(buf), random.choice(others))[: self.f.max_len])
+                return bytearray(splice(bytes(buf), rng.choice(others))[: self.f.max_len])
 
     def _op_crossover(self, buf, _byte_idx, data):
+        rng = self.f._rand_pool
         from fuzzer_tool.core.mutations import crossover
 
         if len(self.f.corpus) >= 2 and buf:
-            a = random.choice(self.f.corpus)
-            b = random.choice(self.f.corpus)
+            a = rng.choice(self.f.corpus)
+            b = rng.choice(self.f.corpus)
             if a is not data and b is not data:
                 return bytearray(crossover(a, b)[: self.f.max_len])
             others = [c for c in self.f.corpus if c is not data]
             if others:
-                return bytearray(crossover(bytes(buf), random.choice(others))[: self.f.max_len])
+                return bytearray(crossover(bytes(buf), rng.choice(others))[: self.f.max_len])
 
     def _op_type_replace(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import type_replace
@@ -797,39 +844,44 @@ class OperatorEngine:
             return bytearray(bit_transpose(bytes(buf), 8)[: self.f.max_len])
 
     def _op_length_grow(self, buf, _byte_idx, _data):
+        rng = self.f._rand_pool
         if buf and len(buf) < self.f.max_len:
-            size = random.randint(1, min(64, self.f.max_len - len(buf)))
+            size = rng.randint(1, min(64, self.f.max_len - len(buf)))
             if size > 0:
-                buf.extend(random.randint(0, 255) for _ in range(size))
+                buf.extend(rng.randint(0, 255) for _ in range(size))
 
     def _op_length_shrink(self, buf, _byte_idx, _data):
+        rng = self.f._rand_pool
         if len(buf) > 2:
-            del buf[random.randint(1, len(buf) - 1) :]
+            del buf[rng.randint(1, len(buf) - 1) :]
 
     def _op_repeat_clone(self, buf, _byte_idx, _data):
+        rng = self.f._rand_pool
         if buf and len(buf) < self.f.max_len:
-            idx = random.randint(0, len(buf) - 1)
-            size = random.randint(1, min(16, len(buf) - idx))
+            idx = rng.randint(0, len(buf) - 1)
+            size = rng.randint(1, min(16, len(buf) - idx))
             block = buf[idx : idx + size]
             ins = idx + size
             if ins <= len(buf) and len(buf) + len(block) <= self.f.max_len:
                 buf[ins:ins] = block
 
     def _op_truncate(self, buf, _byte_idx, _data):
+        rng = self.f._rand_pool
         if len(buf) > 2:
-            del buf[random.randint(2, len(buf)) :]
+            del buf[rng.randint(2, len(buf)) :]
 
     def _op_length_boundary(self, buf, _byte_idx, _data):
+        rng = self.f._rand_pool
         from fuzzer_tool.core.mutations import LENGTH_BOUNDARIES
 
         if not buf:
-            buf.extend(random.randint(0, 255) for _ in range(random.randint(1, 32)))
+            buf.extend(rng.randint(0, 255) for _ in range(rng.randint(1, 32)))
             return
         # 30% chance: bias toward lengths that historically discovered edges
-        if hasattr(self.f, "_length_tracker") and self.f._length_tracker and random.random() < 0.3:
+        if hasattr(self.f, "_length_tracker") and self.f._length_tracker and rng.random() < 0.3:
             recs = self.f._length_tracker.recommended_lengths(k=5)
             if recs:
-                target_len = random.choice(recs)
+                target_len = rng.choice(recs)
             else:
                 target_len = random.choices(
                     LENGTH_BOUNDARIES,
@@ -851,24 +903,27 @@ class OperatorEngine:
                 buf.extend(bytearray(grow))  # zero-filled, fast
 
     def _op_swap_regions(self, buf, _byte_idx, _data):
+        rng = self.f._rand_pool
         if len(buf) >= 4:
-            i = random.randint(0, len(buf) - 3)
-            j = random.randint(i + 2, len(buf) - 1)
-            size = random.randint(1, min(j - i, 16))
+            i = rng.randint(0, len(buf) - 3)
+            j = rng.randint(i + 2, len(buf) - 1)
+            size = rng.randint(1, min(j - i, 16))
             a, b = buf[i : i + size], buf[j : j + size]
             buf[i : i + size] = b
             buf[j : j + size] = a
 
     def _op_swap_bytes(self, buf, _byte_idx, _data):
+        rng = self.f._rand_pool
         if len(buf) >= 2:
-            i, j = random.sample(range(len(buf)), 2)
+            i, j = rng.sample(len(buf), 2)
             buf[i], buf[j] = buf[j], buf[i]
 
     def _op_endianness_swap(self, buf, _byte_idx, _data):
+        rng = self.f._rand_pool
         if buf:
-            width = random.choice([2, 4, 8])
+            width = rng.choice([2, 4, 8])
             if len(buf) >= width:
-                idx = random.randint(0, len(buf) - width)
+                idx = rng.randint(0, len(buf) - width)
                 val = int.from_bytes(buf[idx : idx + width], "little")
                 buf[idx : idx + width] = val.to_bytes(width, "big")
 
@@ -914,6 +969,7 @@ class OperatorEngine:
         return bytearray(mutated[: self.f.max_len])
 
     def _op_jpeg_crc_fix(self, buf, _byte_idx, _data):
+        rng = self.f._rand_pool
         from fuzzer_tool.core.jpeg_mutations import (
             STANDALONE_MARKERS,
             parse_jpeg_markers,
@@ -929,11 +985,11 @@ class OperatorEngine:
                     if m.marker not in STANDALONE_MARKERS and len(m.data) > 0
                 ]
                 if candidates:
-                    idx = random.choice(candidates)
+                    idx = rng.choice(candidates)
                     marker = markers[idx]
                     data = bytearray(marker.data)
-                    for _ in range(random.randint(1, min(4, len(data)))):
-                        data[random.randint(0, len(data) - 1)] ^= 1 << random.randint(0, 7)
+                    for _ in range(rng.randint(1, min(4, len(data)))):
+                        data[rng.randint(0, len(data) - 1)] ^= 1 << rng.randint(0, 7)
                     marker.data = bytes(data)
                     return bytearray(serialize_jpeg_markers(markers)[: self.f.max_len])
 
@@ -972,6 +1028,7 @@ class OperatorEngine:
         return bytearray(mutated[: self.f.max_len])
 
     def _op_png_crc_fix(self, buf, _byte_idx, _data):
+        rng = self.f._rand_pool
         from fuzzer_tool.core.png_mutations import parse_png_chunks, serialize_png_chunks
 
         if buf:
@@ -979,44 +1036,45 @@ class OperatorEngine:
             if chunks and len(chunks) > 1:
                 candidates = [i for i, c in enumerate(chunks) if c.chunk_type != b"IEND"]
                 if candidates:
-                    idx = random.choice(candidates)
+                    idx = rng.choice(candidates)
                     chunk = chunks[idx]
                     if chunk.data:
                         data = bytearray(chunk.data)
-                        for _ in range(random.randint(1, min(4, len(data)))):
-                            data[random.randint(0, len(data) - 1)] ^= 1 << random.randint(0, 7)
+                        for _ in range(rng.randint(1, min(4, len(data)))):
+                            data[rng.randint(0, len(data) - 1)] ^= 1 << rng.randint(0, 7)
                         chunk.data = bytes(data)
                     else:
                         chunk.data = bytes(
-                            random.randint(0, 255) for _ in range(random.randint(1, 32))
+                            rng.randint(0, 255) for _ in range(rng.randint(1, 32))
                         )
                     return bytearray(serialize_png_chunks(chunks)[: self.f.max_len])
 
     def _op_redqueen(self, buf, _byte_idx, data):
+        rng = self.f._rand_pool
         parent_meta = self.f.seed_meta.get(data)
         if not (buf and parent_meta):
             return
         matches = parent_meta.get("redqueen_matches", [])
         offsets = parent_meta.get("redqueen_offsets", [])
         if matches:
-            for _ in range(random.randint(1, min(4, len(matches)))):
-                off, op_a, op_b = random.choice(matches)
+            for _ in range(rng.randint(1, min(4, len(matches)))):
+                off, op_a, op_b = rng.choice(matches)
                 end = off + len(op_a)
                 if end <= len(buf) and bytes(buf[off:end]) == op_a:
                     for j, b_val in enumerate(op_b):
                         if off + j < len(buf):
                             buf[off + j] = b_val
         elif offsets and self.f._cmplog and self.f._cmplog.tokens:
-            for _ in range(random.randint(1, min(4, len(offsets)))):
-                off = random.choice(offsets)
+            for _ in range(rng.randint(1, min(4, len(offsets)))):
+                off = rng.choice(offsets)
                 if off < len(buf):
-                    token = random.choice(self.f._cmplog.tokens)
+                    token = rng.choice(self.f._cmplog.tokens)
                     for j, b_val in enumerate(token):
                         if off + j < len(buf):
                             buf[off + j] = b_val
         elif offsets:
-            for _ in range(random.randint(1, min(4, len(offsets)))):
-                off = random.choice(offsets)
+            for _ in range(rng.randint(1, min(4, len(offsets)))):
+                off = rng.choice(offsets)
                 if off < len(buf):
                     buf[off] ^= 0xFF
 
@@ -1100,65 +1158,65 @@ class OperatorEngine:
         }
 
     def havoc_mutate(self, buf: bytearray) -> bytearray:
-        for _ in range(random.randint(2, 8)):
+        for _ in range(self.f._rand_pool.randint_list(2, 8, 1)[0]):
             self._apply_single_mutation(buf)
         return buf
 
     def _apply_single_mutation(self, buf: bytearray):
+        rng = self.f._rand_pool
         if not buf:
-            buf.extend(random.randint(0, 255) for _ in range(random.randint(1, 16)))
+            buf.extend(rng.randint(0, 255) for _ in range(rng.randint(1, 16)))
             return
-        op = random.randint(0, 10)
-        if op == 0:
-            idx = random.randint(0, len(buf) - 1)
-            buf[idx] ^= 1 << random.randint(0, 7)
-        elif op == 1:
-            idx = random.randint(0, len(buf) - 1)
-            buf[idx] = random.randint(0, 255)
-        elif op == 2 and len(buf) > 1:
-            i, j = random.sample(range(len(buf)), 2)
+        # Pre-fetch 4 random values in one vectorized call.
+        # Each branch uses 2-4 values from this batch, avoiding N
+        # individual randint/randrange Python calls.
+        r = self.f._rand_pool.randint_list(0, 1 << 30, 4)
+        op = r[0] % 11
+        if op == 0:                                 # bit flip
+            buf[r[1] % len(buf)] ^= 1 << (r[2] % 8)
+        elif op == 1:                               # byte set
+            buf[r[1] % len(buf)] = r[2] % 256
+        elif op == 2 and len(buf) > 1:              # byte swap
+            i = r[1] % len(buf)
+            j = (i + 1 + r[2] % (len(buf) - 1)) % len(buf)
             buf[i], buf[j] = buf[j], buf[i]
-        elif op == 3 and len(buf) < self.f.max_len:
-            idx = random.randint(0, len(buf))
-            buf.insert(idx, random.randint(0, 255))
-        elif op == 4 and len(buf) > 1:
-            idx = random.randint(0, len(buf) - 1)
-            size = random.randint(1, min(len(buf) - 1, len(buf) - idx))
+        elif op == 3 and len(buf) < self.f.max_len:  # insert byte
+            idx = r[1] % (len(buf) + 1)
+            buf.insert(idx, r[2] % 256)
+        elif op == 4 and len(buf) > 1:               # delete block
+            idx = r[1] % len(buf)
+            size = 1 + r[2] % min(len(buf) - 1, len(buf) - idx)
             del buf[idx : idx + size]
-        elif op == 5 and len(buf) >= 4:
+        elif op == 5 and len(buf) >= 4:              # CRC32 repair
             import zlib
-
-            pos = random.randint(0, max(0, len(buf) - 4))
+            pos = r[1] % max(1, len(buf) - 3)
             buf[pos : pos + 4] = zlib.crc32(bytes(buf[:pos])).to_bytes(4, "big")
-        elif op == 6 and len(buf) >= 2:
-            i = random.randint(0, len(buf) - 2)
-            j = random.randint(i + 1, len(buf) - 1)
-            size = random.randint(1, min(j - i, 8))
+        elif op == 6 and len(buf) >= 2:              # swap regions
+            i = r[1] % (len(buf) - 1)
+            j = i + 1 + r[2] % (len(buf) - i - 1)
+            size = 1 + r[3] % min(j - i, 8)
             a = buf[i : i + size]
             b = buf[j : j + size]
             buf[i : i + size] = b
             buf[j : j + size] = a
-        elif op == 7 and buf:
-            width = random.choice([2, 4])
+        elif op == 7 and buf:                        # endianness swap
+            width = 2 if r[1] % 2 == 0 else 4
             if len(buf) >= width:
-                idx = random.randint(0, len(buf) - width)
+                idx = r[2] % (len(buf) - width + 1)
                 val = int.from_bytes(buf[idx : idx + width], "little")
                 buf[idx : idx + width] = val.to_bytes(width, "big")
-        elif op == 8 and buf:
-            # Byte insert
+        elif op == 8 and buf:                        # byte insert
             if len(buf) < self.f.max_len:
-                idx = random.randint(0, len(buf))
-                buf.insert(idx, random.randint(0, 255))
-        elif op == 9 and buf:
-            # Random byte set
-            idx = random.randint(0, len(buf) - 1)
-            buf[idx] = random.randint(0, 255)
-        elif op == 10 and len(buf) >= 2:
-            # Shuffle a short range
-            start = random.randint(0, len(buf) - 2)
-            end = min(start + random.randint(2, 8), len(buf))
+                idx = r[1] % (len(buf) + 1)
+                buf.insert(idx, r[2] % 256)
+        elif op == 9 and buf:                        # random byte
+            idx = r[1] % len(buf)
+            buf[idx] = r[2] % 256
+        elif op == 10 and len(buf) >= 2:             # shuffle range
+            start = r[1] % (len(buf) - 1)
+            end = min(start + 2 + r[2] % 7, len(buf))
             region = buf[start:end]
-            random.shuffle(region)
+            rng.shuffle(region)
             buf[start:end] = region
 
     # ── Operator selection logic ───────────────────────────────────────
@@ -1254,7 +1312,7 @@ class OperatorEngine:
         candidates = [p for p in [sens_pos, te_pos, mi_pos, crash_mi_pos] if p is not None]
         if candidates:
             return random.choice(candidates)
-        return random.randint(0, len(buf) - 1)
+        return random.randrange(len(buf))
 
     # ── Main mutation orchestrator ─────────────────────────────────────
 
@@ -1264,7 +1322,7 @@ class OperatorEngine:
         f = self.f
         buf = bytearray(data)
         if not buf:
-            buf = bytearray(b"\x00" * random.randint(1, 32))
+            buf = bytearray(b"\x00" * f._rand_pool.randint_list(1, 32, 1)[0])
 
         ops = self.build_ops(data)
         f._last_ops_used = []
@@ -1279,6 +1337,21 @@ class OperatorEngine:
             n_mutations = max(1, int(n_mutations * f._last_perf_score / 100.0))
         if f._stall_recovery_active:
             n_mutations = max(n_mutations, 16)
+
+        # Pre-fetch dictionary indices for dict-aware operators in one
+        # vectorized call, replacing N individual random.choice(f.dictionary)
+        # calls across _op_dict_* methods.
+        if f.dictionary:
+            f._dict_scratch = f._rand_pool.randint_list(
+                0, len(f.dictionary) - 1, max(n_mutations * 8, 64)
+            )
+            f._dict_scratch_idx = 0
+
+        # Pre-generate buffer lengths for select_position fallback.
+        # select_position is called once per mutation, and when no
+        # MI/TE/sensitivity is active it falls back to randrange(len(buf)).
+        # Pre-computing positions doesn't work here because len(buf) changes
+        # during mutation, so we handle this per-call below.
 
         for _ in range(n_mutations):
             op = self.select_op(ops)

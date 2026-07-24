@@ -83,6 +83,10 @@ def _make_minimal_fuzzer():
             self_._wfc_enabled = False
             self_._smt_solver = None
             self_.enable_regex_bomb = False
+            from fuzzer_tool.core.rand_pool import RandPool
+            self_._rand_pool = RandPool()
+            self_._dict_scratch = []
+            self_._dict_scratch_idx = 0
 
     return MinimalFuzzer()
 

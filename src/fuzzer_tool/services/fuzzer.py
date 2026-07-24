@@ -322,9 +322,11 @@ class Fuzzer:
         enable_regex_bomb=False,
         enable_smt_z3=False,
         mod_solving="concolic",
+        refresh_profile=False,
     ):
         self.target = target
         self.debug = debug
+        self.refresh_profile = refresh_profile
         # Multi-target support: list of target binaries to fuzz with shared corpus
         self.multi_targets = multi_targets  # None for single-target
         self._active_target_idx = 0  # round-robin index
@@ -372,7 +374,8 @@ class Fuzzer:
         self.enable_regex_bomb = enable_regex_bomb
         self.seed = seed
         random.seed(seed)
-
+        if _HAS_NUMPY:
+            np.random.seed(seed)  # seed numpy for deterministic RandPool
         # GA lifecycle parameters
         self._ga_enabled = ga
         self._ga_pop_size = ga_pop_size
@@ -403,7 +406,7 @@ class Fuzzer:
         # boundaries, input format hints, and call graph structure.
         from fuzzer_tool.core.target_profiler import TargetProfiler
 
-        self._profile = TargetProfiler(target).profile()
+        self._profile = TargetProfiler(target).profile_cached(refresh=self.refresh_profile)
 
         # Auto-populate dictionary from extracted strings and magic bytes
         if self._profile.interesting_strings:
@@ -616,6 +619,9 @@ class Fuzzer:
             self.markov.train_corpus(self.corpus)
         self.markov_trained = self.markov.is_trained()
 
+        # Seed aggregate cache: compute from initial seed_meta
+        self._refresh_agg_cache()
+
         self.mc_bandit = mc_bandit
         self.mc_cem = mc_cem
         self._use_mopt = mopt
@@ -715,6 +721,33 @@ class Fuzzer:
         from fuzzer_tool.core.critical_slowing import CriticalSlowingDown
 
         self._csd = CriticalSlowingDown(window_size=50, rise_threshold=1.5, min_observations=20)
+
+        # ── Running aggregate cache for seed metadata ──────────────────
+        # Avoids O(n·m) recomputation of corpus-wide sums every iteration.
+        # Updated by delta in fuzz_one() and invalidated when the corpus
+        # structure changes (add/remove/replace seeds).
+        self._cached_total_time: float = 0.0
+        self._cached_total_fuzz: int = 0
+        self._cached_total_edges: int = 0
+        self._agg_cache_valid: bool = False
+
+        # ── Seed key cache (xxhash) ─────────────────────────────────────
+        # Maps seed bytes -> hex digest.  Reuses hashes across the ~110
+        # _seed_key() calls per iteration.
+        self._seed_key_cache: dict[bytes, str] = {}
+
+        # ── Vectorized random number pool for mutation hotpath ────────
+        # Generates random values in batches (one numpy C-level call per
+        # batch) instead of per-call Python-level random() invocations.
+        from fuzzer_tool.core.rand_pool import RandPool
+
+        self._rand_pool = RandPool()
+
+        # ── Dictionary scratch buffer (vectorized choice) ─────────────
+        # Refilled in mutate() via one randint_list call; consumed by
+        # dict-aware operators instead of calling random.choice(f.dictionary).
+        self._dict_scratch: list[int] = []
+        self._dict_scratch_idx = 0
 
         # Format structure learner (schema-harness methodology)
         self._format_learner = None
@@ -1056,8 +1089,18 @@ class Fuzzer:
     def _init_seed_metadata(self):
         return self._corpus_manager.init_seed_metadata()
 
-    def _seed_key(self, data: bytes):
-        return self._corpus_manager.seed_key(data)
+    def _seed_key(self, data: bytes) -> str:
+        """Return cached content hash for *data*."""
+        cached = self._seed_key_cache.get(data)
+        if cached is not None:
+            return cached
+        key = self._corpus_manager.seed_key(data)
+        self._seed_key_cache[data] = key
+        return key
+
+    def _invalidate_seed_key_cache(self) -> None:
+        """Clear the seed key cache — call when corpus structure changes."""
+        self._seed_key_cache.clear()
 
     def _save_state(self):
         return self._corpus_manager.save_state()
@@ -1384,6 +1427,23 @@ class Fuzzer:
     def _weighted_pick_seed(self):
         return self._seed_picker.weighted_pick_seed()
 
+    def _refresh_agg_cache(self) -> None:
+        """Recompute running aggregates from seed_meta."""
+        self._cached_total_time = sum(
+            m.get("total_time", 0.0) for m in self.seed_meta.values()
+        )
+        self._cached_total_fuzz = sum(
+            m.get("fuzz_count", 1) for m in self.seed_meta.values()
+        )
+        self._cached_total_edges = sum(
+            m.get("coverage_edges", 0) for m in self.seed_meta.values()
+        )
+        self._agg_cache_valid = True
+
+    def _invalidate_agg_cache(self, invalidation_site: str = "") -> None:
+        """Mark aggregate cache as stale — triggers lazy recompute."""
+        self._agg_cache_valid = False
+
     def _reset_cmplog(self):
         """Flush cmplog buffer to disk before collecting tokens.
 
@@ -1414,6 +1474,7 @@ class Fuzzer:
         meta = self.seed_meta.get(data)
         if meta is not None:
             meta["fuzz_count"] += 1
+            self._cached_total_fuzz += 1
 
         t_start = time.monotonic()
         self._cov_before_fuzz = (
@@ -1431,6 +1492,7 @@ class Fuzzer:
         # Per-seed wall-clock cost
         if meta is not None:
             meta["total_time"] = meta.get("total_time", 0.0) + t_elapsed
+            self._cached_total_time += t_elapsed
 
         # Record execution time for adaptive timeout calibration
         self._exec_time_tracker.record(t_elapsed)
@@ -1745,6 +1807,7 @@ class Fuzzer:
                         self._stall_recovery_active = False
                 if meta is not None and new:
                     meta["coverage_edges"] += len(new)
+                    self._cached_total_edges += len(new)
                     meta["momentum"] = 0.8 * meta["momentum"] + 0.2 * 1.0
                 elif meta is not None:
                     meta["momentum"] = 0.8 * meta["momentum"]
@@ -2166,10 +2229,12 @@ class Fuzzer:
         print(f"[*] Seed: {self.seed}")
         # Target profile summary
         if self._profile.functions:
+            profile_cache = Path(self.target).with_suffix(Path(self.target).suffix + ".profile_cache")
+            tag = " [cached]" if profile_cache.exists() and not self.refresh_profile else ""
             print(
                 f"[*] Profile: {len(self._profile.functions)} functions, "
                 f"{len(self._profile.hot_functions)} hot, "
-                f"format={self._profile.format_signature or 'unknown'}"
+                f"format={self._profile.format_signature or 'unknown'}{tag}"
             )
         if self.grammar:
             print(f"[*] Grammar: {len(self.grammar.rules)} rules")
@@ -2330,11 +2395,14 @@ class Fuzzer:
                 # Compute seed-level energy multiplier for mutation budget
                 meta = self.seed_meta.get(seed)
                 if meta is not None and self._seed_scorer:
+                    # Lazy recompute aggregate cache when corpus changed
+                    if not self._agg_cache_valid:
+                        self._refresh_agg_cache()
                     avg_exec_us = max(
                         1,
                         int(
-                            sum(m.get("total_time", 0) for m in self.seed_meta.values())
-                            / max(1, sum(m.get("fuzz_count", 1) for m in self.seed_meta.values()))
+                            self._cached_total_time
+                            / max(1, self._cached_total_fuzz)
                             * 1_000_000
                         ),
                     )
@@ -2350,7 +2418,7 @@ class Fuzzer:
                     avg_bitmap_size = max(
                         1,
                         int(
-                            sum(m.get("coverage_edges", 0) for m in self.seed_meta.values())
+                            self._cached_total_edges
                             / max(1, len(self.seed_meta))
                         ),
                     )

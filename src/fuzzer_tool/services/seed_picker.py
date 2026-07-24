@@ -62,9 +62,10 @@ class SeedPicker:
 
     def pick_seed(self) -> bytes:
         f = self.f
+        rng = f._rand_pool
         if f._stall_recovery_active and f.corpus:
             f._seed_strategy = "random_stall"
-            return random.choice(f.corpus)
+            return rng.choice(f.corpus)
 
         elo_pick = self._pick_seed_elo()
         if elo_pick is not None:
@@ -81,11 +82,12 @@ class SeedPicker:
         if f.corpus and f.seed_meta:
             return self.weighted_pick_seed()
         if f.corpus:
-            return random.choice(f.corpus)
+            return rng.choice(f.corpus)
         return self._format_aware_seed()
 
     def _pick_markov_seed(self) -> bytes:
         f = self.f
+        rng = f._rand_pool
         from fuzzer_tool.core.edge_tracker import ks_significance_threshold
 
         plateau_threshold = ks_significance_threshold(max(1, f.markov._contexts_seen), alpha=0.05)
@@ -101,21 +103,21 @@ class SeedPicker:
         elif self._last_corpus_pp < 10:
             gen_rate = max(gen_rate * 0.3, 0.01)
 
-        if random.random() < gen_rate:
-            length = random.randint(1, min(256, f.max_len))
+        if rng.random() < gen_rate:
+            length = rng.randint(1, min(256, f.max_len))
             for _ in range(3):
                 candidate = f.markov.generate(length)
                 pp = f.markov.perplexity(candidate)
                 if pp < 512:
                     return candidate
             return candidate
-        length = random.randint(1, min(256, f.max_len))
+        length = rng.randint(1, min(256, f.max_len))
         return f.markov.generate(length)
 
     def _pick_pareto_only(self) -> bytes:
         f = self.f
         if len(f.corpus) < 3 or not f.seed_meta:
-            return random.choice(f.corpus)
+            return f._rand_pool.choice(f.corpus)
         now = time.time()
         weights = [1.0] * len(f.corpus)
         return self._pick_from_pareto_front(weights, now)
@@ -131,7 +133,7 @@ class SeedPicker:
         if not f.corpus:
             return self._format_aware_seed()
         if not f._seed_quality:
-            return random.choice(f.corpus)
+            return f._rand_pool.choice(f.corpus)
 
         # Build list of registered seed IDs (content hashes)
         seed_ids = [f._seed_key(s) for s in f.corpus]
@@ -146,7 +148,7 @@ class SeedPicker:
         for s in f.corpus:
             if f._seed_key(s) == chosen_id:
                 return s
-        return random.choice(f.corpus)
+        return f._rand_pool.choice(f.corpus)
 
     def _format_aware_seed(self) -> bytes:
         f = self.f
@@ -214,8 +216,9 @@ class SeedPicker:
                 + struct.pack("<I", 1)
             )
         # Generic: zero-filled random-length buffer
-        length = random.randint(4, min(64, f.max_len))
-        return bytes(random.randint(0, 255) for _ in range(length))
+        rng = f._rand_pool
+        length = rng.randint(4, min(64, f.max_len))
+        return bytes(rng.randint(0, 255) for _ in range(length))
 
     def _weight_exploit_parts(
         self, meta: dict, fuzz_count: int, coverage: int, age: float, T: float

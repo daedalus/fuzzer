@@ -271,6 +271,8 @@ class CorpusManager:
                     seed_key=seed_key,
                 )
                 f.ga.add_to_population(ind)
+            f._agg_cache_valid = False  # corpus structure changed
+            getattr(f, '_invalidate_seed_key_cache', lambda: None)()
             f.seed_meta[data] = {
                 "fuzz_count": 0,
                 "coverage_edges": 0,
@@ -355,6 +357,8 @@ class CorpusManager:
         seed_key = self.seed_key(data)
         if data in f.seed_meta:
             f.seed_meta.pop(data, None)
+            f._agg_cache_valid = False  # corpus structure changed
+            getattr(f, '_invalidate_seed_key_cache', lambda: None)()
         if data in f.corpus:
             idx = f.corpus.index(data)
             f.corpus[idx] = trimmed
@@ -596,6 +600,8 @@ class CorpusManager:
                 if seed in f.seed_meta:
                     new_meta[seed] = f.seed_meta[seed]
             f.seed_meta = new_meta
+            f._agg_cache_valid = False
+            getattr(f, '_invalidate_seed_key_cache', lambda: None)()
             f._weight_cache = None
             f._cached_weights = {}
             f._last_minimize_exec = f.exec_count
@@ -646,6 +652,8 @@ class CorpusManager:
             f.corpus = [s for s in f.corpus if s not in to_remove]
             for s in to_remove:
                 f.seed_meta.pop(s, None)
+            f._agg_cache_valid = False
+            getattr(f, '_invalidate_seed_key_cache', lambda: None)()
             f._weight_cache = None
             f._cached_weights = {}
             log.info(

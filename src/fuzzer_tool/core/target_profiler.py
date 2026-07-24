@@ -6,10 +6,13 @@ population, mutation weighting, and seed selection.
 """
 
 import collections
+import hashlib
+import json
 import logging
 import re
 import struct
 from dataclasses import dataclass, field
+from pathlib import Path
 
 log = logging.getLogger(__name__)
 
@@ -50,6 +53,27 @@ class FunctionInfo:
     call_depth: int = 0
     branch_density: float = 0.0
 
+    def to_dict(self) -> dict:
+        return {
+            "addr": self.addr,
+            "size": self.size,
+            "name": self.name,
+            "bb_count": self.bb_count,
+            "call_depth": self.call_depth,
+            "branch_density": self.branch_density,
+        }
+
+    @staticmethod
+    def from_dict(d: dict) -> "FunctionInfo":
+        return FunctionInfo(
+            addr=d["addr"],
+            size=d["size"],
+            name=d["name"],
+            bb_count=d.get("bb_count", 0),
+            call_depth=d.get("call_depth", 0),
+            branch_density=d.get("branch_density", 0.0),
+        )
+
 
 @dataclass
 class TargetProfile:
@@ -76,6 +100,86 @@ class TargetProfile:
     # Call graph
     call_graph: dict[str, set[str]] = field(default_factory=dict)
     reverse_calls: dict[str, set[str]] = field(default_factory=dict)
+
+    # ── Serialisation ──────────────────────────────────────────────────
+
+    def to_dict(self) -> dict:
+        return {
+            "rodata_strings": self.rodata_strings,
+            "interesting_strings": self.interesting_strings,
+            "magic_bytes": [b.hex() for b in self.magic_bytes],
+            "extracted_constants": [b.hex() for b in self.extracted_constants],
+            "functions": {k: v.to_dict() for k, v in self.functions.items()},
+            "hot_functions": self.hot_functions,
+            "entry_points": self.entry_points,
+            "input_parsers": self.input_parsers,
+            "boundary_markers": [b.hex() for b in self.boundary_markers],
+            "format_signature": self.format_signature,
+            "call_graph": {k: sorted(v) for k, v in self.call_graph.items()},
+            "reverse_calls": {k: sorted(v) for k, v in self.reverse_calls.items()},
+        }
+
+    @staticmethod
+    def from_dict(d: dict) -> "TargetProfile":
+        p = TargetProfile(
+            rodata_strings=[(int(k), v) for k, v in d.get("rodata_strings", [])],
+            interesting_strings=d.get("interesting_strings", []),
+            magic_bytes=[bytes.fromhex(b) for b in d.get("magic_bytes", [])],
+            extracted_constants=[bytes.fromhex(b) for b in d.get("extracted_constants", [])],
+            functions={k: FunctionInfo.from_dict(v) for k, v in d.get("functions", {}).items()},
+            hot_functions=d.get("hot_functions", []),
+            entry_points=d.get("entry_points", []),
+            input_parsers=d.get("input_parsers", []),
+            boundary_markers=[bytes.fromhex(b) for b in d.get("boundary_markers", [])],
+            format_signature=d.get("format_signature"),
+            call_graph={k: set(v) for k, v in d.get("call_graph", {}).items()},
+            reverse_calls={k: set(v) for k, v in d.get("reverse_calls", {}).items()},
+        )
+        return p
+
+    def save(self, path: str | Path, target_path: str = "") -> None:
+        """Serialize to JSON, embedding the target binary's MD5 hash."""
+        data = self.to_dict()
+        # Embed content hash of the target binary for cache invalidation
+        if target_path:
+            try:
+                data["_target_binary_hash"] = hashlib.md5(
+                    open(target_path, "rb").read()
+                ).hexdigest()
+            except OSError:
+                pass
+        Path(path).write_text(json.dumps(data, separators=(",", ":")))
+
+    @staticmethod
+    def load(path: str | Path, target_path: str = "") -> "TargetProfile | None":
+        """Deserialize from JSON.
+
+        Returns the profile if the cache is valid (target binary hash
+        matches, if present), or None if the stored hash doesn't match
+        the current binary.  Backward-compatible with caches that lack
+        the hash field.
+        """
+        try:
+            d = json.loads(Path(path).read_text())
+        except (OSError, json.JSONDecodeError):
+            return None
+
+        stored_hash = d.get("_target_binary_hash")
+        if stored_hash and target_path:
+            try:
+                current_hash = hashlib.md5(open(target_path, "rb").read()).hexdigest()
+                if stored_hash != current_hash:
+                    log.info(
+                        "Profile cache invalidated: binary hash mismatch "
+                        "(stored=%s, current=%s)",
+                        stored_hash,
+                        current_hash,
+                    )
+                    return None
+            except OSError:
+                return None
+
+        return TargetProfile.from_dict(d)
 
 
 # Functions that indicate input parsing
@@ -169,6 +273,53 @@ class TargetProfiler:
         # 5. Build call graph
         self._build_call_graph(profile)
 
+        return profile
+
+    @staticmethod
+    def _cache_path(target: str) -> Path:
+        """Derive cache file path alongside the target binary."""
+        return Path(target).with_suffix(Path(target).suffix + ".profile_cache")
+
+    def profile_cached(self, refresh: bool = False) -> TargetProfile:
+        """Return a TargetProfile, loading from cache or computing fresh.
+
+        Args:
+            refresh: If True, force re-analysis and overwrite cache.
+
+        Cache invalidation (in order):
+        1. ``--refresh`` flag forces re-analysis.
+        2. Target binary MD5 hash is stored in the cache JSON and compared
+           against the live binary — if the binary changed, the cache is
+           discarded even if mtime looks fresh.
+        3. Mtime fallback: if no hash is embedded (old cache), the cache
+           is valid only when its mtime >= the target binary's mtime.
+
+        Returns an empty profile if the target cannot be read or parsed
+        (same as profile()).
+        """
+        cache_path = self._cache_path(self.target)
+
+        if not refresh and cache_path.exists():
+            profile = TargetProfile.load(cache_path, target_path=self.target)
+            if profile is not None:
+                log.info(
+                    "Profile cache hit: loaded %s (%d functions)",
+                    cache_path,
+                    len(profile.functions),
+                )
+                return profile
+
+            # load() returned None → hash mismatch or corrupt.
+            # Fall through to re-analysis below, but log only once.
+            log.info("Profile cache miss: re-analysing %s", self.target)
+
+        profile = self.profile()
+        if profile.functions:
+            try:
+                profile.save(cache_path, target_path=self.target)
+                log.info("Profile cache saved: %s (%d functions)", cache_path, len(profile.functions))
+            except OSError:
+                log.debug("Failed to save profile cache: %s", cache_path)
         return profile
 
     def _parse_elf_header(self) -> bool:
