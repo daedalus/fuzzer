@@ -384,39 +384,92 @@ class SeedPicker:
 
     def _compute_weights(self, now: float) -> list[float]:
         f = self.f
-        weights = []
-        pareto_scores: list[tuple[float, float, float]] = []
+        corpus = f.corpus
+        n = len(corpus)
+        weights = [1.0] * n
+        pareto_scores: list[tuple[float, float, float]] = [(1.0, 1.0, 1.0)] * n
 
         if not hasattr(f, "_classify_cache") or f.exec_count % 100 == 0:
             f._classify_cache = f._edge_tracker.classify_seeds()
         classifications = f._classify_cache
 
-        for seed in f.corpus:
-            meta = f.seed_meta.get(seed)
-            if meta is None:
-                weights.append(1.0)
-                pareto_scores.append((1.0, 1.0, 1.0))
-                continue
-            fuzz_count = max(meta["fuzz_count"], 1)
-            coverage = meta["coverage_edges"]
-            age = now - meta["added_at"]
-            T = f._temperature
-            seed_key = f._seed_key(seed)
+        T = f._temperature
+        seed_meta = f.seed_meta
 
-            w, burst_factor = self._weight_exploit_parts(meta, fuzz_count, coverage, age, T)
+        # Phase 1: extract metadata into parallel arrays for vectorized math
+        has_meta = [False] * n
+        fuzz_arr = None
+        cov_arr = None
+        age_arr = None
+        mom_arr = None
+
+        try:
+            import numpy as _np
+
+            fuzz_list = []
+            cov_list = []
+            age_list = []
+            mom_list = []
+            meta_indices = []
+
+            for i, seed in enumerate(corpus):
+                meta = seed_meta.get(seed)
+                if meta is None:
+                    continue
+                has_meta[i] = True
+                meta_indices.append(i)
+                fuzz_list.append(max(meta["fuzz_count"], 1))
+                cov_list.append(meta["coverage_edges"])
+                age_list.append(now - meta["added_at"])
+                mom_list.append(meta.get("momentum", 0.0))
+
+            if meta_indices:
+                fuzz_arr = _np.array(fuzz_list, dtype=_np.float64)
+                cov_arr = _np.array(cov_list, dtype=_np.float64)
+                age_arr = _np.array(age_list, dtype=_np.float64)
+                mom_arr = _np.array(mom_list, dtype=_np.float64)
+
+                # Vectorized _weight_exploit_parts
+                explore = T * (1.0 / _np.sqrt(fuzz_arr))
+                exploit = (1.0 + cov_arr * 0.5) / (1.0 + age_arr * 0.01)
+                w_vec = explore * exploit
+                w_vec *= 1.0 + mom_arr * 2.0
+                burst_vec = _np.maximum(1.0, 1.0 + T * 4.0 - (age_arr / 60.0) * T)
+                staleness = fuzz_arr / _np.maximum(cov_arr + 1, 1)
+                stale_mask = staleness > 50.0 * T
+                w_vec[stale_mask] *= 0.01
+
+                # Write back vectorized results
+                for j, idx in enumerate(meta_indices):
+                    weights[idx] = float(w_vec[j])
+                    pareto_scores[idx] = (1.0, float(burst_vec[j]), 1.0)
+        except ImportError:
+            pass
+
+        # Phase 2: apply remaining per-seed weight functions (dict lookups, set ops)
+        for i, seed in enumerate(corpus):
+            if not has_meta[i]:
+                continue
+            meta = seed_meta.get(seed)
+            fuzz_count = max(meta["fuzz_count"], 1)
+            seed_key = f._seed_key(seed)
+            w = weights[i]
+
             w, sub, spa = self._weight_secretary_and_cached(seed_key, w, classifications, f)
             w = self._weight_edge_penalties(seed_key, w, fuzz_count, f)
             w = self._weight_entropy_and_distance(seed, seed_key, meta, w, f)
-            w = self._weight_static_features(seed, coverage, w, f)
+            w = self._weight_static_features(seed, meta["coverage_edges"], w, f)
             w = self._weight_length_and_cross_target(seed, meta, w, f)
 
-            weights.append(max(w, 1e-6))
-            pareto_scores.append((sub, burst_factor, spa))
+            weights[i] = max(w, 1e-6)
+            bf = pareto_scores[i][1]
+            pareto_scores[i] = (sub, bf, spa)
 
         if len(pareto_scores) >= 3:
             front = self._pareto_front(pareto_scores, window=100)
+            front_set = front  # already a set
             for i in range(len(weights)):
-                weights[i] *= 2.0 if i in front else 0.5
+                weights[i] *= 2.0 if i in front_set else 0.5
 
         return weights
 
