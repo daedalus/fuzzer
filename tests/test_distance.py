@@ -24,6 +24,9 @@ class TestTargetDistanceUnit:
         td._text_start = 0
         td._text_end = 0xFFFFFFFF
         td._base_addr = 0
+        td._func_starts_np = None
+        td._func_ends_np = None
+        td._func_dists_np = None
         # Build addr_to_func from functions
         for fname, (start, _end) in td.functions.items():
             td.addr_to_func[start] = fname
