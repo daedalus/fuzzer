@@ -354,13 +354,14 @@ class TargetDistance:
             dists = []
             for fname, (start, end) in self.functions.items():
                 starts.append(start)
-                ends.append(end)
+                # Cap end addresses — ELF parsing can produce garbage values
+                ends.append(min(end, start + 100_000))
                 dists.append(self._distances.get(fname, 10.0))
             order = _np.argsort(starts)
             self._func_starts_np = _np.array(starts, dtype=_np.int64)[order]
             self._func_ends_np = _np.array(ends, dtype=_np.int64)[order]
             self._func_dists_np = _np.array(dists, dtype=_np.float64)[order]
-        except ImportError:
+        except (ImportError, OverflowError):
             pass
 
     def _heuristic_distance(self, addr: int) -> float:
