@@ -195,7 +195,7 @@ def levenshtein_align(a: bytes, b: bytes) -> list[tuple[str, int, bytes]]:
 
     Optimized implementation:
     1. Prefix/suffix trimming — skip common leading/trailing bytes
-    2. Direct Python for small remaining inputs (< 64 bytes)
+    2. Direct Python DP for small remaining inputs (< 64 bytes each)
     3. Numpy-vectorized DP for larger inputs
 
     Args:
@@ -239,7 +239,11 @@ def levenshtein_align(a: bytes, b: bytes) -> list[tuple[str, int, bytes]]:
     b_mid = b[pre : m - post]
     na, nb = len(a_mid), len(b_mid)
 
-    mid_ops = _levenshtein_align_numpy(a_mid, b_mid)
+    # For very small remaining inputs, use direct Python (no numpy overhead)
+    if na < 64 and nb < 64:
+        mid_ops = _levenshtein_align_small(a_mid, b_mid)
+    else:
+        mid_ops = _levenshtein_align_numpy(a_mid, b_mid)
 
     # Reconstruct full script with prefix/suffix offsets
     result: list[tuple[str, int, bytes]] = []
@@ -284,11 +288,13 @@ def _levenshtein_align_small(a: bytes, b: bytes) -> list[tuple[str, int, bytes]]
             i -= 1
             j -= 1
         elif j > 0 and i > 0 and dp[j][i] == dp[j][i - 1] + 1:
-            ops.append(("insert", i, bytes([b[j - 1]])))
-            j -= 1
-        elif i > 0 and j > 0 and dp[j][i] == dp[j - 1][i] + 1:
+            # dp[j][i-1]+1: consume a-char → delete
             ops.append(("delete", i - 1, b""))
             i -= 1
+        elif i > 0 and j > 0 and dp[j][i] == dp[j - 1][i] + 1:
+            # dp[j-1][i]+1: add b-char → insert
+            ops.append(("insert", i, bytes([b[j - 1]])))
+            j -= 1
         elif j > 0:
             # i == 0, must insert
             ops.append(("insert", 0, bytes([b[j - 1]])))

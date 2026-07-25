@@ -544,6 +544,61 @@ class TestLevenshteinAlign:
                 elif op == "replace":
                     assert 0 <= pos < len(a), f"Replace at {pos} for a={len(a)}"
 
+    def test_small_path_correctness(self):
+        """Exercise _levenshtein_align_small directly — regression for insert/delete swap bug."""
+        from fuzzer_tool.core.similarity import _levenshtein_align_small
+
+        import random
+        random.seed(99999)
+        for _ in range(500):
+            a = random.randbytes(random.randint(0, 63))
+            b = random.randbytes(random.randint(0, 63))
+            script = _levenshtein_align_small(a, b)
+            dist = levenshtein_distance(a, b)
+            edits = sum(1 for op, _, _ in script if op != "match")
+            assert edits == dist, f"small path: a={len(a)} b={len(b)} edits={edits} dist={dist}"
+
+    def test_small_path_matches_numpy(self):
+        """_levenshtein_align_small must produce identical results to numpy path."""
+        from fuzzer_tool.core.similarity import _levenshtein_align_small, _levenshtein_align_numpy
+
+        import random
+        random.seed(88888)
+        for _ in range(500):
+            a = random.randbytes(random.randint(0, 63))
+            b = random.randbytes(random.randint(0, 63))
+            small = _levenshtein_align_small(a, b)
+            numpy = _levenshtein_align_numpy(a, b)
+            assert small == numpy, f"small != numpy for a={len(a)} b={len(b)}"
+
+    def test_small_path_insert_delete_labels(self):
+        """Verify insert/delete ops are correctly labeled (regression for swapped labels)."""
+        from fuzzer_tool.core.similarity import _levenshtein_align_small
+
+        # Pure insertion: a="" b="ABC" → 3 inserts
+        script = _levenshtein_align_small(b"", b"ABC")
+        ops = [(op, pos, data) for op, pos, data in script if op != "match"]
+        assert len(ops) == 3
+        assert all(op == "insert" for op, _, _ in ops)
+
+        # Pure deletion: a="ABC" b="" → 3 deletes
+        script = _levenshtein_align_small(b"ABC", b"")
+        ops = [(op, pos, data) for op, pos, data in script if op != "match"]
+        assert len(ops) == 3
+        assert all(op == "delete" for op, _, _ in ops)
+
+        # Mixed: a="ABC" b="AXC" → 1 replace
+        script = _levenshtein_align_small(b"ABC", b"AXC")
+        ops = [(op, pos, data) for op, pos, data in script if op != "match"]
+        assert len(ops) == 1
+        assert ops[0][0] == "replace"
+
+        # Insert + delete: a="AC" b="ABC" → 1 insert
+        script = _levenshtein_align_small(b"AC", b"ABC")
+        ops = [(op, pos, data) for op, pos, data in script if op != "match"]
+        assert len(ops) == 1
+        assert ops[0][0] == "insert"
+
 
 class TestEditScriptSummary:
     def test_identical(self):
