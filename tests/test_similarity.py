@@ -316,6 +316,234 @@ class TestLevenshteinAlign:
         assert all(opname == "delete" for opname, _, _ in ops)
         assert len(ops) == 3
 
+    # ── Prefix/suffix trimming edge cases ───────────────────────────────
+
+    def test_common_prefix_only(self):
+        """Only prefix matches, suffix differs."""
+        script = levenshtein_align(b"ABCDEF", b"ABCXYZ")
+        edits = sum(1 for op, _, _ in script if op != "match")
+        assert edits == 3  # 3 replaces for DEF -> XYZ
+
+    def test_common_suffix_only(self):
+        """Only suffix matches, prefix differs."""
+        script = levenshtein_align(b"XYZDEF", b"ABCDEF")
+        edits = sum(1 for op, _, _ in script if op != "match")
+        assert edits == 3  # 3 replaces for XYZ -> ABC
+
+    def test_common_prefix_and_suffix(self):
+        """Both prefix and suffix match, middle differs."""
+        script = levenshtein_align(b"AXXXD", b"AYYD")
+        edits = sum(1 for op, _, _ in script if op != "match")
+        assert edits == 3  # delete X, replace X->Y, replace X->Y
+
+    def test_single_byte_mismatch_at_start(self):
+        """First byte differs, rest matches (suffix trimming)."""
+        script = levenshtein_align(b"ABC", b"XBC")
+        ops = [(op, pos, data) for op, pos, data in script if op != "match"]
+        assert len(ops) == 1
+        assert ops[0] == ("replace", 0, b"X")
+
+    def test_single_byte_mismatch_at_end(self):
+        """Last byte differs, rest matches (prefix trimming)."""
+        script = levenshtein_align(b"ABC", b"ABX")
+        ops = [(op, pos, data) for op, pos, data in script if op != "match"]
+        assert len(ops) == 1
+        assert ops[0] == ("replace", 2, b"X")
+
+    def test_insertion_at_start(self):
+        """Insert at the very beginning."""
+        script = levenshtein_align(b"BC", b"ABC")
+        ops = [(op, pos, data) for op, pos, data in script if op != "match"]
+        assert len(ops) == 1
+        assert ops[0] == ("insert", 0, b"A")
+
+    def test_insertion_at_end(self):
+        """Insert at the very end."""
+        script = levenshtein_align(b"AB", b"ABC")
+        ops = [(op, pos, data) for op, pos, data in script if op != "match"]
+        assert len(ops) == 1
+        assert ops[0] == ("insert", 2, b"C")
+
+    def test_deletion_at_start(self):
+        """Delete the first byte."""
+        script = levenshtein_align(b"ABC", b"BC")
+        ops = [(op, pos, data) for op, pos, data in script if op != "match"]
+        assert len(ops) == 1
+        assert ops[0] == ("delete", 0, b"")
+
+    def test_deletion_at_end(self):
+        """Delete the last byte."""
+        script = levenshtein_align(b"ABC", b"AB")
+        ops = [(op, pos, data) for op, pos, data in script if op != "match"]
+        assert len(ops) == 1
+        assert ops[0] == ("delete", 2, b"")
+
+    # ── Regression: specific failure patterns from optimization ─────────
+
+    def test_single_byte_a_longer_b(self):
+        """a=1 byte, b=3 bytes — pure insertions after trimming."""
+        script = levenshtein_align(b"A", b"ABC")
+        ops = [(op, pos, data) for op, pos, data in script if op != "match"]
+        assert len(ops) == 2
+        assert all(op == "insert" for op, _, _ in ops)
+
+    def test_single_byte_longer_a(self):
+        """a=3 bytes, b=1 byte — pure deletions after trimming."""
+        script = levenshtein_align(b"ABC", b"A")
+        ops = [(op, pos, data) for op, pos, data in script if op != "match"]
+        assert len(ops) == 2
+        assert all(op == "delete" for op, _, _ in ops)
+
+    def test_asymmetric_lengths_small(self):
+        """a=8, b=41 — was a failure case during optimization."""
+        a = bytes(range(8))
+        b = bytes(range(41))
+        script = levenshtein_align(a, b)
+        dist = levenshtein_distance(a, b)
+        edits = sum(1 for op, _, _ in script if op != "match")
+        assert edits == dist
+
+    def test_asymmetric_lengths_reverse(self):
+        """a=41, b=8 — was a failure case during optimization."""
+        a = bytes(range(41))
+        b = bytes(range(8))
+        script = levenshtein_align(a, b)
+        dist = levenshtein_distance(a, b)
+        edits = sum(1 for op, _, _ in script if op != "match")
+        assert edits == dist
+
+    def test_completely_different_short(self):
+        """Short completely different inputs."""
+        a = b"\x00\x01\x02\x03"
+        b = b"\xff\xfe\xfd\xfc"
+        script = levenshtein_align(a, b)
+        dist = levenshtein_distance(a, b)
+        edits = sum(1 for op, _, _ in script if op != "match")
+        assert edits == dist
+
+    def test_repeated_bytes(self):
+        """Inputs with repeated bytes (common in fuzzing)."""
+        a = b"\xAA" * 100
+        b = b"\xAA" * 50 + b"\xBB" * 50
+        script = levenshtein_align(a, b)
+        dist = levenshtein_distance(a, b)
+        edits = sum(1 for op, _, _ in script if op != "match")
+        assert edits == dist
+
+    def test_binary_data_mixed(self):
+        """Binary data with mixed byte values."""
+        a = bytes(range(256))
+        b = bytes(range(128)) + bytes(range(255, 127, -1))
+        script = levenshtein_align(a, b)
+        dist = levenshtein_distance(a, b)
+        edits = sum(1 for op, _, _ in script if op != "match")
+        assert edits == dist
+
+    def test_long_common_prefix(self):
+        """Long common prefix, short differing tail."""
+        prefix = b"X" * 200
+        a = prefix + b"AAA"
+        b = prefix + b"BBB"
+        script = levenshtein_align(a, b)
+        dist = levenshtein_distance(a, b)
+        edits = sum(1 for op, _, _ in script if op != "match")
+        assert edits == dist
+        # Verify prefix is all matches
+        prefix_ops = script[:200]
+        assert all(op == "match" for op, _, _ in prefix_ops)
+
+    def test_long_common_suffix(self):
+        """Short differing head, long common suffix."""
+        suffix = b"Y" * 200
+        a = b"AAA" + suffix
+        b = b"BBB" + suffix
+        script = levenshtein_align(a, b)
+        dist = levenshtein_distance(a, b)
+        edits = sum(1 for op, _, _ in script if op != "match")
+        assert edits == dist
+        # Verify suffix is all matches
+        suffix_ops = script[-200:]
+        assert all(op == "match" for op, _, _ in suffix_ops)
+
+    def test_large_input_correctness(self):
+        """Verify correctness on larger random inputs."""
+        import random
+        random.seed(12345)
+        for _ in range(100):
+            a = random.randbytes(random.randint(50, 500))
+            b = random.randbytes(random.randint(50, 500))
+            script = levenshtein_align(a, b)
+            dist = levenshtein_distance(a, b)
+            edits = sum(1 for op, _, _ in script if op != "match")
+            assert edits == dist, f"a={len(a)} b={len(b)} edits={edits} dist={dist}"
+
+    def test_reconstruction_large(self):
+        """Verify edit script reconstruction on larger inputs."""
+        import random
+        random.seed(54321)
+        for _ in range(50):
+            a = random.randbytes(random.randint(20, 200))
+            b = random.randbytes(random.randint(20, 200))
+            script = levenshtein_align(a, b)
+            # Reconstruct
+            result = bytearray(a)
+            offset_delta = 0
+            for op, pos, data in script:
+                adjusted = pos + offset_delta
+                if op == "replace":
+                    result[adjusted] = data[0]
+                elif op == "insert":
+                    result[adjusted:adjusted] = data
+                    offset_delta += 1
+                elif op == "delete":
+                    del result[adjusted]
+                    offset_delta -= 1
+            assert bytes(result) == b, f"a={len(a)} b={len(b)}"
+
+    def test_all_edits_are_valid(self):
+        """Every op in the script is a valid operation type."""
+        import random
+        random.seed(99999)
+        valid_ops = {"match", "replace", "insert", "delete"}
+        for _ in range(100):
+            a = random.randbytes(random.randint(0, 300))
+            b = random.randbytes(random.randint(0, 300))
+            script = levenshtein_align(a, b)
+            for op, pos, data in script:
+                assert op in valid_ops, f"Invalid op: {op}"
+                assert isinstance(pos, int)
+                assert isinstance(data, bytes)
+
+    def test_offset_monotonicity(self):
+        """Match and replace offsets are monotonically increasing."""
+        import random
+        random.seed(77777)
+        for _ in range(100):
+            a = random.randbytes(random.randint(10, 200))
+            b = random.randbytes(random.randint(10, 200))
+            script = levenshtein_align(a, b)
+            prev_pos = -1
+            for op, pos, data in script:
+                if op in ("match", "replace"):
+                    assert pos > prev_pos, f"Non-monotonic: {op} at {pos} after {prev_pos}"
+                    prev_pos = pos
+
+    def test_insert_offset_valid(self):
+        """Insert offsets are within valid range [0, len(a)]."""
+        import random
+        random.seed(88888)
+        for _ in range(100):
+            a = random.randbytes(random.randint(0, 200))
+            b = random.randbytes(random.randint(0, 200))
+            script = levenshtein_align(a, b)
+            for op, pos, data in script:
+                if op == "insert":
+                    assert 0 <= pos <= len(a), f"Insert at {pos} for a={len(a)}"
+                elif op == "delete":
+                    assert 0 <= pos < len(a), f"Delete at {pos} for a={len(a)}"
+                elif op == "replace":
+                    assert 0 <= pos < len(a), f"Replace at {pos} for a={len(a)}"
+
 
 class TestEditScriptSummary:
     def test_identical(self):
