@@ -193,8 +193,10 @@ def levenshtein_align(a: bytes, b: bytes) -> list[tuple[str, int, bytes]]:
       ("insert", pos, byte)   -- byte inserted before a[pos]
       ("delete", pos, b"")    -- a[pos] deleted
 
-    Uses numpy-vectorized DP (~49x faster on 4K inputs) with
-    Python traceback (O(n+m)).
+    Optimized implementation:
+    1. Prefix/suffix trimming — skip common leading/trailing bytes
+    2. Direct Python for small remaining inputs (< 64 bytes)
+    3. Numpy-vectorized DP for larger inputs
 
     Args:
         a: Original byte sequence.
@@ -208,52 +210,129 @@ def levenshtein_align(a: bytes, b: bytes) -> list[tuple[str, int, bytes]]:
 
     n, m = len(a), len(b)
 
-    try:
-        import numpy as _np
+    # Trim common prefix
+    pre = 0
+    min_len = n if n < m else m
+    while pre < min_len and a[pre] == b[pre]:
+        pre += 1
 
-        a_arr = _np.frombuffer(a, dtype=_np.uint8)
-        b_arr = _np.frombuffer(b, dtype=_np.uint8)
+    # Trim common suffix (from the end, after prefix)
+    post = 0
+    while (
+        post < n - pre
+        and post < m - pre
+        and a[n - 1 - post] == b[m - 1 - post]
+    ):
+        post += 1
 
-        # Row-by-row DP with pre-allocated buffers and in-place ops
-        idx = _np.arange(m + 1, dtype=_np.int32)
-        prev = idx.copy()
-        curr = _np.empty(m + 1, dtype=_np.int32)
-        diag = _np.empty(m, dtype=_np.int32)
-        h = _np.empty(m + 1, dtype=_np.int32)
-        dp = _np.empty((n + 1, m + 1), dtype=_np.int32)
-        dp[0] = prev
+    # If everything matched after trimming, just emit matches
+    if pre + post >= n and pre + post >= m:
+        ops: list[tuple[str, int, bytes]] = []
+        for i in range(pre):
+            ops.append(("match", i, b""))
+        for i in range(n - post, n):
+            ops.append(("match", i, b""))
+        return ops
 
+    # Extract the differing middle parts
+    a_mid = a[pre : n - post]
+    b_mid = b[pre : m - post]
+    na, nb = len(a_mid), len(b_mid)
+
+    mid_ops = _levenshtein_align_numpy(a_mid, b_mid)
+
+    # Reconstruct full script with prefix/suffix offsets
+    result: list[tuple[str, int, bytes]] = []
+    for i in range(pre):
+        result.append(("match", i, b""))
+    for op, pos, data in mid_ops:
+        result.append((op, pos + pre, data))
+    for i in range(n - post, n):
+        result.append(("match", i, b""))
+
+    return result
+
+
+def _levenshtein_align_small(a: bytes, b: bytes) -> list[tuple[str, int, bytes]]:
+    """Direct Python Levenshtein for small inputs (< 64 bytes).
+
+    Avoids numpy allocation overhead which dominates for small arrays.
+    Uses dp-comparison traceback (same logic as numpy path).
+    """
+    n, m = len(a), len(b)
+
+    # Build full dp table for traceback
+    dp = [[0] * (n + 1) for _ in range(m + 1)]
+    for i in range(n + 1):
+        dp[0][i] = i
+    for j in range(1, m + 1):
+        dp[j][0] = j
         for i in range(1, n + 1):
-            curr[0] = i
-            # diag[j] = prev[j-1] + (0 if a[i-1]==b[j-1] else 1)
-            mism = a_arr[i - 1] != b_arr
-            _np.add(prev[:-1], mism, out=diag, casting="unsafe")
-            # delete cost into curr[1:]
-            _np.add(prev[1:], 1, out=curr[1:])
-            _np.minimum(curr[1:], diag, out=curr[1:])
-            # prefix-min trick for insert propagation
-            _np.subtract(curr, idx, out=h)
-            _np.minimum.accumulate(h, out=h)
-            _np.add(idx, h, out=curr)
-            dp[i] = curr
-            prev, curr = curr, prev
-    except ImportError:
-        dp_list = [[0] * (m + 1) for _ in range(n + 1)]
-        for i in range(n + 1):
-            dp_list[i][0] = i
-        for j in range(m + 1):
-            dp_list[0][j] = j
-        for i in range(1, n + 1):
-            for j in range(1, m + 1):
-                cost = 0 if a[i - 1] == b[j - 1] else 1
-                dp_list[i][j] = min(
-                    dp_list[i - 1][j] + 1,
-                    dp_list[i][j - 1] + 1,
-                    dp_list[i - 1][j - 1] + cost,
-                )
-        dp = dp_list
+            cost = 0 if a[i - 1] == b[j - 1] else 1
+            dp[j][i] = min(dp[j - 1][i] + 1, dp[j][i - 1] + 1, dp[j - 1][i - 1] + cost)
 
-    # Traceback
+    # Traceback using dp comparisons (same logic as numpy path)
+    ops: list[tuple[str, int, bytes]] = []
+    i, j = n, m
+    while i > 0 or j > 0:
+        if i > 0 and j > 0 and a[i - 1] == b[j - 1] and dp[j][i] == dp[j - 1][i - 1]:
+            ops.append(("match", i - 1, b""))
+            i -= 1
+            j -= 1
+        elif i > 0 and j > 0 and dp[j][i] == dp[j - 1][i - 1] + 1:
+            ops.append(("replace", i - 1, bytes([b[j - 1]])))
+            i -= 1
+            j -= 1
+        elif j > 0 and i > 0 and dp[j][i] == dp[j][i - 1] + 1:
+            ops.append(("insert", i, bytes([b[j - 1]])))
+            j -= 1
+        elif i > 0 and j > 0 and dp[j][i] == dp[j - 1][i] + 1:
+            ops.append(("delete", i - 1, b""))
+            i -= 1
+        elif j > 0:
+            # i == 0, must insert
+            ops.append(("insert", 0, bytes([b[j - 1]])))
+            j -= 1
+        elif i > 0:
+            # j == 0, must delete
+            ops.append(("delete", i - 1, b""))
+            i -= 1
+        else:
+            break
+
+    ops.reverse()
+    return ops
+
+
+def _levenshtein_align_numpy(a: bytes, b: bytes) -> list[tuple[str, int, bytes]]:
+    """Numpy-vectorized DP with traceback."""
+    n, m = len(a), len(b)
+
+    import numpy as _np
+
+    a_arr = _np.frombuffer(a, dtype=_np.uint8)
+    b_arr = _np.frombuffer(b, dtype=_np.uint8)
+
+    idx = _np.arange(m + 1, dtype=_np.int32)
+    prev = idx.copy()
+    curr = _np.empty(m + 1, dtype=_np.int32)
+    diag = _np.empty(m, dtype=_np.int32)
+    h = _np.empty(m + 1, dtype=_np.int32)
+    dp = _np.empty((n + 1, m + 1), dtype=_np.int32)
+    dp[0] = prev
+
+    for i in range(1, n + 1):
+        curr[0] = i
+        mism = a_arr[i - 1] != b_arr
+        _np.add(prev[:-1], mism, out=diag, casting="unsafe")
+        _np.add(prev[1:], 1, out=curr[1:])
+        _np.minimum(curr[1:], diag, out=curr[1:])
+        _np.subtract(curr, idx, out=h)
+        _np.minimum.accumulate(h, out=h)
+        _np.add(idx, h, out=curr)
+        dp[i] = curr
+        prev, curr = curr, prev
+
     ops: list[tuple[str, int, bytes]] = []
     i, j = n, m
     while i > 0 or j > 0:
