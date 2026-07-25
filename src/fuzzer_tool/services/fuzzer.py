@@ -313,7 +313,7 @@ class Fuzzer:
         ga_speciation_threshold=0.3,
         calibrate=0,
         stall_threshold=1000,
-        resize_map_on_stall=False,
+        resize_map_on_stall=True,
         map_size=0,
         max_collision_risk=30,
         continue_until_crash=False,

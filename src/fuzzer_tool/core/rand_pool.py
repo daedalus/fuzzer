@@ -124,7 +124,7 @@ class RandPool:
         if n <= 256:
             if self._idx >= _POOL_ENTRIES:
                 self._refill()
-            val = int(self._m256[self._idx])
+            val = int(self._pool[self._idx])
             self._idx += 1
             return seq[val % n]
         return seq[int(np.random.randint(n))]

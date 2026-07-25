@@ -270,7 +270,7 @@ def cmd_fuzz(args):
             secretary=getattr(args, "secretary", False),
             secretary_window=getattr(args, "secretary_window", 500),
             secretary_exploration=getattr(args, "secretary_exploration", 0.368),
-            resize_map_on_stall=getattr(args, "resize_map_on_stall", False),
+            resize_map_on_stall=getattr(args, "resize_map_on_stall", True),
         )
         return 0
 
@@ -1392,11 +1392,12 @@ def main() -> int:
     )
     fuzz_parser.add_argument(
         "--resize-map-on-stall",
-        action="store_true",
-        default=False,
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help="Resize the SHM coverage bitmap when stall recovery triggers, "
         "reducing hash collision risk and potentially exposing new edges. "
-        "Uses birthday-bound (n^2/0.02) to compute the new size.",
+        "Uses birthday-bound (n^2/0.02) to compute the new size. "
+        "(default: enabled; use --no-resize-map-on-stall to disable)",
     )
     fuzz_parser.add_argument(
         "--map-size",

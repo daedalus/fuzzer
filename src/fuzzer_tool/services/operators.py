@@ -164,9 +164,8 @@ class OperatorEngine:
         Falls back to single-byte transforms (XOR, arithmetic, boundary) when
         the encoding engine yields no applicable mutations for the current pair.
         """
-        import random as _rand
-
         f = self.f
+        rng = f._rand_pool
         if not hasattr(f, "_cmplog") or not f._cmplog or not f._cmplog.pairs:
             return
         if not buf or len(buf) < 2:
@@ -179,7 +178,8 @@ class OperatorEngine:
         if not pairs:
             return
         pairs.sort(key=lambda p: len(p[0]))
-        sample = _rand.sample(pairs, min(3, len(pairs)))
+        _sample_idx = rng.sample(len(pairs), min(3, len(pairs)))
+        sample = [pairs[i] for i in _sample_idx]
 
         for op_a, op_b in sample:
             cmp_size = 512 if len(op_a) > 8 or len(op_b) > 8 else max(len(op_a), len(op_b)) * 8
@@ -197,7 +197,7 @@ class OperatorEngine:
                 else None,
             )
             if mutations:
-                offsets, replacements, enc = _rand.choice(mutations)
+                offsets, replacements, enc = rng.choice(mutations)
                 for i, off in enumerate(offsets):
                     if i < len(replacements):
                         chunk = replacements[i]
@@ -209,7 +209,7 @@ class OperatorEngine:
         # Fallback: single-byte transforms on a random pair
         if not pairs:
             return
-        op_a, _ = _rand.choice(pairs)
+        op_a, _ = rng.choice(pairs)
         if len(op_a) <= len(buf):
             pos = 0
             candidates = []
@@ -222,16 +222,16 @@ class OperatorEngine:
                 if len(candidates) >= 5:
                     break
             if candidates:
-                offset = _rand.choice(candidates)
+                offset = rng.choice(candidates)
                 vb = int.from_bytes(op_a, "little") & 0xFF
-                transform = _rand.choice(
+                transform = rng.choice(
                     ["xor", "arithmetic", "boundary", "hex", "toupper", "tolower"]
                 )
                 if transform == "xor":
-                    const = _rand.randint(1, 255)
+                    const = rng.randint(1, 255)
                     buf[offset] = (vb ^ const) & 0xFF
                 elif transform == "arithmetic":
-                    delta = _rand.randint(-128, 127)
+                    delta = rng.randint(-128, 127)
                     buf[offset] = (vb - delta) & 0xFF
                 elif transform == "boundary":
                     buf[offset] = (vb - 1) & 0xFF
@@ -1252,7 +1252,7 @@ class OperatorEngine:
 
         if f._stall_recovery_active:
             f._meta_strategy = "random_stall"
-            return random.choice(ops)
+            return f._rand_pool.choice(ops)
 
         available = []
         if f._use_replicator and f._replicator:
@@ -1292,7 +1292,7 @@ class OperatorEngine:
             f._prev_bandit_op = op
             f._last_mopt_particles.append(None)
         else:
-            op = random.choice(ops)
+            op = f._rand_pool.choice(ops)
             f._last_mopt_particles.append(None)
         return op
 
@@ -1311,8 +1311,8 @@ class OperatorEngine:
             crash_mi_pos = f._crash_mi.weighted_position(len(buf))
         candidates = [p for p in [sens_pos, te_pos, mi_pos, crash_mi_pos] if p is not None]
         if candidates:
-            return random.choice(candidates)
-        return random.randrange(len(buf))
+            return f._rand_pool.choice(candidates)
+        return f._rand_pool.randint(0, len(buf) - 1)
 
     # ── Main mutation orchestrator ─────────────────────────────────────
 
