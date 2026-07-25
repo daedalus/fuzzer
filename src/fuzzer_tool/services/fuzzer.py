@@ -1690,18 +1690,27 @@ class Fuzzer:
 
         is_crash = self._is_crash(returncode, stderr)
         is_interesting = self._is_interesting(returncode, stderr)
-        # Check new coverage (per-target SHM in multi-target mode)
+        # Check new coverage (per-target SHM in multi-target mode).
+        # Use is_new_coverage_with_edges() on SHM to get both the boolean
+        # and the edge set in one buffer scan, avoiding redundant scans.
+        self._current_edges_cache = None  # will be set below if SHM scanned
         if self.multi_targets:
             active_shm = self._target_shm_covs.get(self.target)
-            has_new_coverage = (
-                (self.ptrace_cov and self.ptrace_cov.is_new_coverage())
-                or (active_shm and active_shm.is_new_coverage())
-                or (self.shm_cov and self.shm_cov.is_new_coverage())
-            )
+            if active_shm:
+                has_new, edge_ids = active_shm.is_new_coverage_with_edges()
+                self._current_edges_cache = edge_ids
+                has_new_coverage = has_new
+            else:
+                has_new_coverage = (
+                    (self.ptrace_cov and self.ptrace_cov.is_new_coverage())
+                    or (self.shm_cov and self.shm_cov.is_new_coverage())
+                )
+        elif self.shm_cov:
+            has_new, edge_ids = self.shm_cov.is_new_coverage_with_edges()
+            self._current_edges_cache = edge_ids
+            has_new_coverage = has_new
         else:
-            has_new_coverage = (self.ptrace_cov and self.ptrace_cov.is_new_coverage()) or (
-                self.shm_cov and self.shm_cov.is_new_coverage()
-            )
+            has_new_coverage = self.ptrace_cov and self.ptrace_cov.is_new_coverage()
 
         # Mark cmplog tokens/pairs present during a coverage gain as more
         # valuable — they survive eviction longer.
@@ -1714,7 +1723,11 @@ class Fuzzer:
 
         # Format learner: only record when coverage actually changes
         if self._format_learner and self._last_ops_used and has_new_coverage:
-            current_edges = self._get_current_edge_set()
+            current_edges = (
+                self._current_edges_cache
+                if self._current_edges_cache is not None
+                else self._get_current_edge_set()
+            )
             new_edges = set()
             lost_edges = set()
             if hasattr(self, "_prev_edge_set"):
@@ -1738,7 +1751,11 @@ class Fuzzer:
                 lost_edges=lost_edges,
             )
         elif self._format_learner:
-            self._prev_edge_set = self._get_current_edge_set()
+            self._prev_edge_set = (
+                self._current_edges_cache
+                if self._current_edges_cache is not None
+                else self._get_current_edge_set()
+            )
 
         # Write ablation log row: signal data + outcome
         if self._ablation_file and hasattr(self, "_last_pick_signals"):
@@ -1762,7 +1779,11 @@ class Fuzzer:
                 hit_counts = self.shm_cov.get_edge_counts()
                 hit_edges = set(hit_counts.keys())
             else:
-                hit_edges = self._get_current_edge_set()
+                hit_edges = (
+                    self._current_edges_cache
+                    if self._current_edges_cache is not None
+                    else self._get_current_edge_set()
+                )
                 hit_counts = None
             if hit_edges:
                 new = self._edge_tracker.record_edges(
@@ -1818,19 +1839,31 @@ class Fuzzer:
 
         # Update edge lifetime tracking for every execution
         if self._inprocess_runner or self.ptrace_cov or self.shm_cov:
-            current_edges = self._get_current_edge_set()
+            current_edges = (
+                self._current_edges_cache
+                if self._current_edges_cache is not None
+                else self._get_current_edge_set()
+            )
             if current_edges:
                 self._edge_tracker.record_edge_lifetimes(current_edges, self.exec_count)
 
         # Track input-length → edge discovery correlation
         if has_new_coverage and self._length_tracker:
-            new_edges = self._get_current_edge_set()
+            new_edges = (
+                self._current_edges_cache
+                if self._current_edges_cache is not None
+                else self._get_current_edge_set()
+            )
             if new_edges:
                 self._length_tracker.record(len(mutated), new_edges)
 
         # Compute directed distance for targeted fuzzing
         if self._distance and meta is not None and has_new_coverage:
-            hit_bbs = self._get_current_edge_set()
+            hit_bbs = (
+                self._current_edges_cache
+                if self._current_edges_cache is not None
+                else self._get_current_edge_set()
+            )
             if hit_bbs:
                 # Record edge trace for distance computation
                 seed_key = self._seed_key(data)

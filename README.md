@@ -157,6 +157,7 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 - **Weight caching**: 733x speedup on `_pick_seed` with 200+ seeds
 - **Lazy watchdog**: `Event.wait(timeout)` eliminates busy-poll overhead on fast processes
 - **xxhash dedup**: 13x faster than SHA-256 for corpus operations
+- **SHM hotpath optimization**: numpy vectorized scan + combined `is_new_coverage_with_edges()` + per-iteration edge cache in `fuzz_one` — eliminates redundant Python loops over 8192 SHM entries (was 2.5s/500 iters, now 0.024s); ~2.4x total speedup, ~3.3x more EPS (132→429)
 - **SHM data minimization**: three-tier reduction of SHM bitmap data movement (~170MB/s saved):
   - **Tier 1 — numpy flatnonzero**: replaces Python `for` loop over 1MB bitmap in `record_edge_lifetimes` with `np.flatnonzero()` — saves ~2GB total data movement from Python iteration
   - **Tier 2 — zero-copy numpy views**: replaces `bytes()` allocations with `np.frombuffer()` zero-copy views at 5+ call sites (distance, Shapley, length tracker, edge lifetimes) — saves ~2.2GB total bytes allocation

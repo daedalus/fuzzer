@@ -135,22 +135,32 @@ class ShmCoverage:
         return result
 
     def get_edge_ids(self) -> set[int]:
-        """Return set of non-zero edge_ids currently in the hash table."""
-        ids: set[int] = set()
-        for i in range(self.num_entries):
-            eid = self._entries[i].edge_id
-            if eid != 0:
-                ids.add(eid)
-        return ids
+        """Return set of non-zero edge_ids currently in the hash table.
+
+        Uses numpy for zero-copy vectorized scan — avoids per-entry
+        Python loop overhead.
+        """
+        import numpy as np
+
+        arr = np.frombuffer(
+            self._map, dtype=np.dtype([("edge_id", "<u4"), ("count", "<u4")]),
+            count=self.num_entries,
+        )
+        active = arr[arr["edge_id"] != 0]
+        # .tolist() converts numpy uint32 to plain Python ints
+        return set(active["edge_id"].tolist())
 
     def get_edge_counts(self) -> dict[int, int]:
         """Return {edge_id: count} for all non-empty entries."""
-        counts: dict[int, int] = {}
-        for i in range(self.num_entries):
-            eid = self._entries[i].edge_id
-            if eid != 0:
-                counts[eid] = self._entries[i].count
-        return counts
+        import numpy as np
+
+        arr = np.frombuffer(
+            self._map, dtype=np.dtype([("edge_id", "<u4"), ("count", "<u4")]),
+            count=self.num_entries,
+        )
+        active = arr[arr["edge_id"] != 0]
+        # .tolist() converts numpy uint32 to plain Python ints
+        return dict(zip(active["edge_id"].tolist(), active["count"].tolist()))
 
     def get_edge_bitmap_view(self):
         """Return a numpy structured array view of entries.
@@ -191,16 +201,22 @@ class ShmCoverage:
 
         Uses a two-tier approach:
         1. Fast path: raw memcmp (single C call) — catches unchanged state.
-        2. Slow path: scan entries for unseen edge_ids.
+        2. Slow path: numpy vectorized scan for unseen edge_ids.
         """
         if _libc.memcmp(self._map, self._last_map_snapshot, self.shm_bytes) == 0:
             return False
 
         # Slow path: extract edge_ids not yet in _seen_edge_ids
+        import numpy as np
+
+        arr = np.frombuffer(
+            self._map, dtype=np.dtype([("edge_id", "<u4"), ("count", "<u4")]),
+            count=self.num_entries,
+        )
+        active = arr[arr["edge_id"] != 0]
         new_found = False
-        for i in range(self.num_entries):
-            eid = self._entries[i].edge_id
-            if eid != 0 and eid not in self._seen_edge_ids:
+        for eid in active["edge_id"].tolist():
+            if eid not in self._seen_edge_ids:
                 self._seen_edge_ids.add(eid)
                 self.cumulative_edges += 1
                 self._peak_cumulative_edges = max(self._peak_cumulative_edges, self.cumulative_edges)
@@ -213,11 +229,52 @@ class ShmCoverage:
             self.total_edges += 1
         return new_found
 
+    def is_new_coverage_with_edges(self) -> tuple[bool, set[int]]:
+        """Check for new coverage AND return current edge set in one scan.
+
+        Avoids scanning the SHM buffer twice — callers that need both the
+        boolean and the edge set (e.g. fuzz_one) should use this instead
+        of calling is_new_coverage() + get_edge_ids() separately.
+        """
+        if _libc.memcmp(self._map, self._last_map_snapshot, self.shm_bytes) == 0:
+            return False, set()
+
+        import numpy as np
+
+        arr = np.frombuffer(
+            self._map, dtype=np.dtype([("edge_id", "<u4"), ("count", "<u4")]),
+            count=self.num_entries,
+        )
+        active = arr[arr["edge_id"] != 0]
+        new_found = False
+        # .tolist() converts numpy uint32 → plain Python ints
+        ids = set(active["edge_id"].tolist())
+        for eid in ids:
+            if eid not in self._seen_edge_ids:
+                self._seen_edge_ids.add(eid)
+                self.cumulative_edges += 1
+                self._peak_cumulative_edges = max(
+                    self._peak_cumulative_edges, self.cumulative_edges
+                )
+                new_found = True
+
+        ctypes.memmove(self._last_map_snapshot, self._map, self.shm_bytes)
+
+        if new_found:
+            self.total_edges += 1
+        return new_found, ids
+
     def commit_snapshot(self):
         """Update the cumulative seen-edge set to include all current entries."""
-        for i in range(self.num_entries):
-            eid = self._entries[i].edge_id
-            if eid != 0 and eid not in self._seen_edge_ids:
+        import numpy as np
+
+        arr = np.frombuffer(
+            self._map, dtype=np.dtype([("edge_id", "<u4"), ("count", "<u4")]),
+            count=self.num_entries,
+        )
+        active = arr[arr["edge_id"] != 0]
+        for eid in active["edge_id"].tolist():
+            if eid not in self._seen_edge_ids:
                 self._seen_edge_ids.add(eid)
                 self.cumulative_edges += 1
                 self._peak_cumulative_edges = max(self._peak_cumulative_edges, self.cumulative_edges)
