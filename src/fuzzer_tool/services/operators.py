@@ -759,10 +759,10 @@ class OperatorEngine:
             a = rng.choice(self.f.corpus)
             b = rng.choice(self.f.corpus)
             if a is not data and b is not data:
-                return bytearray(crossover(a, b)[: self.f.max_len])
+                return bytearray(crossover(a, b, rng=rng)[: self.f.max_len])
             others = [c for c in self.f.corpus if c is not data]
             if others:
-                return bytearray(crossover(bytes(buf), rng.choice(others))[: self.f.max_len])
+                return bytearray(crossover(bytes(buf), rng.choice(others), rng=rng)[: self.f.max_len])
 
     def _op_type_replace(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import type_replace
@@ -774,73 +774,73 @@ class OperatorEngine:
         from fuzzer_tool.core.mutations import ascii_num_replace
 
         if buf:
-            return bytearray(ascii_num_replace(bytes(buf))[: self.f.max_len])
+            return bytearray(ascii_num_replace(bytes(buf), rng=self.f._rand_pool)[: self.f.max_len])
 
     def _op_byte_shuffle(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import byte_shuffle
 
         if buf and len(buf) > 1:
-            return bytearray(byte_shuffle(bytes(buf))[: self.f.max_len])
+            return bytearray(byte_shuffle(bytes(buf), rng=self.f._rand_pool)[: self.f.max_len])
 
     def _op_byte_delete(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import byte_delete
 
         if buf and len(buf) > 1:
-            return bytearray(byte_delete(bytes(buf))[: self.f.max_len])
+            return bytearray(byte_delete(bytes(buf), rng=self.f._rand_pool)[: self.f.max_len])
 
     def _op_byte_insert(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import byte_insert
 
         if buf and len(buf) < self.f.max_len:
-            return bytearray(byte_insert(bytes(buf), self.f.max_len)[: self.f.max_len])
+            return bytearray(byte_insert(bytes(buf), self.f.max_len, rng=self.f._rand_pool)[: self.f.max_len])
 
     def _op_insert_ascii_num(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import insert_ascii_num
 
         if buf and len(buf) < self.f.max_len:
-            return bytearray(insert_ascii_num(bytes(buf), self.f.max_len)[: self.f.max_len])
+            return bytearray(insert_ascii_num(bytes(buf), self.f.max_len, rng=self.f._rand_pool)[: self.f.max_len])
 
     def _op_transpose_16(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import transpose_bytes
 
         if len(buf) >= 2:
-            return bytearray(transpose_bytes(bytes(buf), 2)[: self.f.max_len])
+            return bytearray(transpose_bytes(bytes(buf), 2, rng=self.f._rand_pool)[: self.f.max_len])
 
     def _op_transpose_32(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import transpose_bytes
 
         if len(buf) >= 4:
-            return bytearray(transpose_bytes(bytes(buf), 4)[: self.f.max_len])
+            return bytearray(transpose_bytes(bytes(buf), 4, rng=self.f._rand_pool)[: self.f.max_len])
 
     def _op_transpose_64(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import transpose_bytes
 
         if len(buf) >= 8:
-            return bytearray(transpose_bytes(bytes(buf), 8)[: self.f.max_len])
+            return bytearray(transpose_bytes(bytes(buf), 8, rng=self.f._rand_pool)[: self.f.max_len])
 
     def _op_bit_transpose_8(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import bit_transpose
 
         if buf:
-            return bytearray(bit_transpose(bytes(buf), 1)[: self.f.max_len])
+            return bytearray(bit_transpose(bytes(buf), 1, rng=self.f._rand_pool)[: self.f.max_len])
 
     def _op_bit_transpose_16(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import bit_transpose
 
         if len(buf) >= 2:
-            return bytearray(bit_transpose(bytes(buf), 2)[: self.f.max_len])
+            return bytearray(bit_transpose(bytes(buf), 2, rng=self.f._rand_pool)[: self.f.max_len])
 
     def _op_bit_transpose_32(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import bit_transpose
 
         if len(buf) >= 4:
-            return bytearray(bit_transpose(bytes(buf), 4)[: self.f.max_len])
+            return bytearray(bit_transpose(bytes(buf), 4, rng=self.f._rand_pool)[: self.f.max_len])
 
     def _op_bit_transpose_64(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import bit_transpose
 
         if len(buf) >= 8:
-            return bytearray(bit_transpose(bytes(buf), 8)[: self.f.max_len])
+            return bytearray(bit_transpose(bytes(buf), 8, rng=self.f._rand_pool)[: self.f.max_len])
 
     def _op_length_grow(self, buf, _byte_idx, _data):
         rng = self.f._rand_pool
@@ -929,7 +929,7 @@ class OperatorEngine:
     def _op_grammar_mutate(self, buf, _byte_idx, _data):
         if self.f.grammar:
             return bytearray(
-                self.f.grammar.mutate(bytes(buf), max_len=self.f.max_len)[: self.f.max_len]
+                self.f.grammar.mutate(bytes(buf), max_len=self.f.max_len, rng=self.f._rand_pool)[: self.f.max_len]
             )
 
     def _op_grammar_tree_mutate(self, buf, _byte_idx, _data):
@@ -940,7 +940,7 @@ class OperatorEngine:
                 self.f._tree_mutator = TreeMutator(self.f.grammar)
             tree = self.f._tree_mutator.parse(bytes(buf))
             return bytearray(
-                self.f._tree_mutator.mutate_tree(tree, max_len=self.f.max_len)[: self.f.max_len]
+                self.f._tree_mutator.mutate_tree(tree, max_len=self.f.max_len, rng=self.f._rand_pool)[: self.f.max_len]
             )
 
     def _op_png_chunk_mutate(self, buf, _byte_idx, _data):
@@ -950,10 +950,11 @@ class OperatorEngine:
             self.f._png_mutator = PngChunkMutator()
         # Set WFC mode from fuzzer state
         self.f._png_mutator.use_wfc = getattr(self.f, "_wfc_enabled", False)
+        rng = self.f._rand_pool
         if parse_png_chunks(bytes(buf)):
-            mutated = self.f._png_mutator.mutate(bytes(buf), max_len=self.f.max_len)
+            mutated = self.f._png_mutator.mutate(bytes(buf), max_len=self.f.max_len, rng=rng)
         else:
-            mutated = self.f._png_mutator._generate_random_png(self.f.max_len)
+            mutated = self.f._png_mutator._generate_random_png(self.f.max_len, rng=rng)
         return bytearray(mutated[: self.f.max_len])
 
     def _op_jpeg_chunk_mutate(self, buf, _byte_idx, _data):
@@ -961,10 +962,11 @@ class OperatorEngine:
 
         if not hasattr(self.f, "_jpeg_mutator"):
             self.f._jpeg_mutator = JpegMutator()
+        rng = self.f._rand_pool
         if parse_jpeg_markers(bytes(buf)):
-            mutated = self.f._jpeg_mutator.mutate(bytes(buf), max_len=self.f.max_len)
+            mutated = self.f._jpeg_mutator.mutate(bytes(buf), max_len=self.f.max_len, rng=rng)
         else:
-            mutated = self.f._jpeg_mutator._generate_random_jpeg(max_len=self.f.max_len)
+            mutated = self.f._jpeg_mutator._generate_random_jpeg(max_len=self.f.max_len, rng=rng)
         return bytearray(mutated[: self.f.max_len])
 
     def _op_jpeg_crc_fix(self, buf, _byte_idx, _data):
@@ -997,10 +999,11 @@ class OperatorEngine:
 
         if not hasattr(self.f, "_gzip_mutator"):
             self.f._gzip_mutator = GzipMutator()
+        rng = self.f._rand_pool
         if parse_gzip(bytes(buf)):
-            mutated = self.f._gzip_mutator.mutate(bytes(buf), max_len=self.f.max_len)
+            mutated = self.f._gzip_mutator.mutate(bytes(buf), max_len=self.f.max_len, rng=rng)
         else:
-            mutated = self.f._gzip_mutator._generate_random_gzip(max_len=self.f.max_len)
+            mutated = self.f._gzip_mutator._generate_random_gzip(max_len=self.f.max_len, rng=rng)
         return bytearray(mutated[: self.f.max_len])
 
     def _op_bmp_chunk_mutate(self, buf, _byte_idx, _data):
@@ -1009,10 +1012,11 @@ class OperatorEngine:
         if not hasattr(self.f, "_bmp_mutator"):
             self.f._bmp_mutator = BmpMutator()
         self.f._bmp_mutator.use_wfc = getattr(self.f, "_wfc_enabled", False)
+        rng = self.f._rand_pool
         if parse_bmp(bytes(buf)):
-            mutated = self.f._bmp_mutator.mutate(bytes(buf), max_len=self.f.max_len)
+            mutated = self.f._bmp_mutator.mutate(bytes(buf), max_len=self.f.max_len, rng=rng)
         else:
-            mutated = self.f._bmp_mutator._generate_random_bmp(max_len=self.f.max_len)
+            mutated = self.f._bmp_mutator._generate_random_bmp(max_len=self.f.max_len, rng=rng)
         return bytearray(mutated[: self.f.max_len])
 
     def _op_zlib_chunk_mutate(self, buf, _byte_idx, _data):
@@ -1020,10 +1024,11 @@ class OperatorEngine:
 
         if not hasattr(self.f, "_zlib_mutator"):
             self.f._zlib_mutator = ZlibMutator()
+        rng = self.f._rand_pool
         if parse_zlib(bytes(buf)):
-            mutated = self.f._zlib_mutator.mutate(bytes(buf), max_len=self.f.max_len)
+            mutated = self.f._zlib_mutator.mutate(bytes(buf), max_len=self.f.max_len, rng=rng)
         else:
-            mutated = self.f._zlib_mutator._generate_random_zlib(max_len=self.f.max_len)
+            mutated = self.f._zlib_mutator._generate_random_zlib(max_len=self.f.max_len, rng=rng)
         return bytearray(mutated[: self.f.max_len])
 
     def _op_png_crc_fix(self, buf, _byte_idx, _data):

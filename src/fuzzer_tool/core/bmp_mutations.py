@@ -188,11 +188,13 @@ class BmpMutator:
     Dispatches one of 16 mutation operations per call, targeting
     specific BMP structures for maximum code-path diversity.
     """
+    _rng = random
 
     use_wfc: bool = False  # set to True by Fuzzer when --wfc is active
 
-    def mutate(self, data: bytes, max_len: int = 4096) -> bytes:
-        """Apply one structure-aware BMP mutation."""
+    def mutate(self, data: bytes, max_len: int = 4096, rng=None) -> bytes:
+        """
+        self._rng = rng or randomApply one structure-aware BMP mutation."""
         info = parse_bmp(data)
         if info is None:
             return self._generate_random_bmp(max_len)
@@ -423,8 +425,9 @@ class BmpMutator:
             _corrupt_field(info.header, offset, 4)
         return info
 
-    def _generate_random_bmp(self, info_or_max=None, max_len: int = 4096) -> bytes:
-        """Generate a minimal random BMP from scratch.
+    def _generate_random_bmp(self, info_or_max=None, max_len: int = 4096, rng=None) -> bytes:
+        """
+        self._rng = rng or randomGenerate a minimal random BMP from scratch.
 
         Called from dispatch as _generate_random_bmp(info, max_len) or
         standalone as _generate_random_bmp(max_len=N).

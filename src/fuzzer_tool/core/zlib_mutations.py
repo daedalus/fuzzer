@@ -163,9 +163,11 @@ class ZlibMutator:
     Dispatches one of 10 mutation operations per call, targeting
     specific zlib structures for maximum code-path diversity.
     """
+    _rng = random
 
-    def mutate(self, data: bytes, max_len: int = 4096) -> bytes:
-        """Apply one structure-aware zlib mutation."""
+    def mutate(self, data: bytes, max_len: int = 4096, rng=None) -> bytes:
+        """
+        self._rng = rng or randomApply one structure-aware zlib mutation."""
         info = parse_zlib(data)
         if info is None:
             return self._generate_random_zlib(max_len)
@@ -257,8 +259,9 @@ class ZlibMutator:
         info.cinfo = random.randint(0, 7)
         return info
 
-    def _generate_random_zlib(self, info_or_max=None, max_len: int = 4096) -> bytes:
-        """Generate a minimal random zlib stream from scratch."""
+    def _generate_random_zlib(self, info_or_max=None, max_len: int = 4096, rng=None) -> bytes:
+        """
+        self._rng = rng or randomGenerate a minimal random zlib stream from scratch."""
         if isinstance(info_or_max, int):
             max_len = info_or_max
 

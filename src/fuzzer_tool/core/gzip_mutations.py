@@ -188,9 +188,11 @@ class GzipMutator:
     Dispatches one of 12 mutation operations per call, targeting
     specific gzip structures for maximum code-path diversity.
     """
+    _rng = random
 
-    def mutate(self, data: bytes, max_len: int = 4096) -> bytes:
-        """Apply one structure-aware gzip mutation."""
+    def mutate(self, data: bytes, max_len: int = 4096, rng=None) -> bytes:
+        """
+        self._rng = rng or randomApply one structure-aware gzip mutation."""
         info = parse_gzip(data)
         if info is None:
             return self._generate_random_gzip(max_len)
@@ -301,8 +303,9 @@ class GzipMutator:
             info.compressed_data = bytes(data)
         return info
 
-    def _generate_random_gzip(self, info_or_max=None, max_len: int = 4096) -> bytes:
-        """Generate a minimal random gzip from scratch."""
+    def _generate_random_gzip(self, info_or_max=None, max_len: int = 4096, rng=None) -> bytes:
+        """
+        self._rng = rng or randomGenerate a minimal random gzip from scratch."""
         if isinstance(info_or_max, GzipInfo):
             max_len = max_len
         elif isinstance(info_or_max, int):

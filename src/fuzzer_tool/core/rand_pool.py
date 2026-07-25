@@ -198,7 +198,29 @@ class RandPool:
         else:
             np.random.shuffle(seq)
 
-    def sample(self, population: int, k: int) -> list[int]:
+    def sample(self, population, k: int):
+        """Return *k* unique elements from *population*.
+
+        Accepts either an int (range) or a sequence (list/tuple/bytes),
+        matching ``random.sample`` API.
+        """
+        if isinstance(population, (list, tuple, bytes)):
+            n = len(population)
+            if k > n:
+                k = n
+            if k <= 0:
+                return []
+            if k == 1:
+                return [population[self._draw() % n]]
+            if k == 2:
+                a = self._draw() % n
+                b = self._draw() % (n - 1)
+                if b >= a:
+                    b += 1
+                return [population[a], population[b]]
+            indices = list(np.random.choice(n, size=k, replace=False))
+            return [population[i] for i in indices]
+        # Original: population is an int (range size)
         if k > population:
             k = population
         if k <= 0:

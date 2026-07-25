@@ -1,5 +1,10 @@
 """Mutation operators and dictionary handling."""
 
+# Helper: resolve rng parameter to RandPool or stdlib random
+def _get_rng(rng=None):
+    return rng or random
+
+
 import random
 import re
 
@@ -201,7 +206,7 @@ FORMAT_MUTATIONS = [
 ]
 
 
-def splice(a: bytes, b: bytes) -> bytes:
+def splice(a: bytes, b: bytes, rng=None) -> bytes:
     """Cross two inputs at random offsets to produce a structural hybrid.
 
     Takes the prefix of *a* up to a random cut point, then appends the
@@ -217,12 +222,12 @@ def splice(a: bytes, b: bytes) -> bytes:
     """
     if len(a) < 2 or len(b) < 2:
         return a
-    cut_a = random.randint(1, len(a) - 1)
-    cut_b = random.randint(1, len(b) - 1)
+    cut_a = _get_rng(rng).randint(1, len(a) - 1)
+    cut_b = _get_rng(rng).randint(1, len(b) - 1)
     return a[:cut_a] + b[cut_b:]
 
 
-def crossover(a: bytes, b: bytes) -> bytes:
+def crossover(a: bytes, b: bytes, rng=None) -> bytes:
     """Two-point crossover: exchange a middle segment between two inputs.
 
     Picks two random cut points in *a* and replaces the segment between
@@ -238,10 +243,10 @@ def crossover(a: bytes, b: bytes) -> bytes:
     """
     if len(a) < 4 or len(b) < 4:
         return a
-    cut1 = random.randint(1, len(a) - 3)
-    cut2 = random.randint(cut1 + 1, len(a) - 1)
+    cut1 = _get_rng(rng).randint(1, len(a) - 3)
+    cut2 = _get_rng(rng).randint(cut1 + 1, len(a) - 1)
     seg_len = cut2 - cut1
-    b_start = random.randint(0, max(0, len(b) - seg_len))
+    b_start = _get_rng(rng).randint(0, max(0, len(b) - seg_len))
     result = bytearray(a)
     result[cut1:cut2] = b[b_start : b_start + seg_len]
     return bytes(result)
@@ -428,7 +433,7 @@ for _b in range(256):
 _TYPE_REPLACE_TABLE = bytes(_TYPE_REPLACE_TBL)
 
 
-def type_replace_byte(b: int) -> int:
+def type_replace_byte(b: int, rng=None) -> int:
     """Replace a byte with a different value from the same character class.
 
     Preserves the 'type' of the byte: hex digits stay hex, digits stay
@@ -448,9 +453,9 @@ def type_replace_byte(b: int) -> int:
         return _SWAP_MAP[b]
 
     # Character class ranges
-    rng = _in_class(b)
-    if rng:
-        start, end = rng
+    cls = _in_class(b)
+    if cls:
+        start, end = cls
         size = end - start
         if size == 0:
             # Single-member class (like '0' or '1'), flip to the other
@@ -461,7 +466,7 @@ def type_replace_byte(b: int) -> int:
             return b ^ 0x01
         c = b
         while c == b:
-            c = start + random.randint(0, size)
+            c = start + _get_rng(rng).randint(0, size)
         return c
 
     # Default: XOR to flip bits while staying in printable-ish range
@@ -646,7 +651,7 @@ def could_be_interest(old_val: int, new_val: int, blen: int, check_le: bool = Tr
 # ---------------------------------------------------------------------------
 
 
-def ascii_num_replace(data: bytes) -> bytes:
+def ascii_num_replace(data: bytes, rng=None) -> bytes:
     """Replace a random position with an ASCII number string.
 
     Picks a random position and replaces a short segment with a random
@@ -663,10 +668,10 @@ def ascii_num_replace(data: bytes) -> bytes:
         return data
 
     result = bytearray(data)
-    idx = random.randint(0, len(result) - 1)
+    idx = _get_rng(rng).randint(0, len(result) - 1)
 
     # Generate a random number as ASCII digits
-    num = random.randint(0, 99999)
+    num = _get_rng(rng).randint(0, 99999)
     num_str = str(num).encode("ascii")
 
     # Replace at position (truncate if near end)
@@ -676,7 +681,7 @@ def ascii_num_replace(data: bytes) -> bytes:
     return bytes(result)
 
 
-def insert_ascii_num(data: bytes, max_len: int = 65536) -> bytes:
+def insert_ascii_num(data: bytes, max_len: int = 65536, rng=None) -> bytes:
     """Insert an ASCII number string at a random position.
 
     Like ascii_num_replace but inserts rather than overwrites.
@@ -692,14 +697,14 @@ def insert_ascii_num(data: bytes, max_len: int = 65536) -> bytes:
     if len(data) >= max_len:
         return data
 
-    idx = random.randint(0, len(data))
-    num = random.randint(0, 99999)
+    idx = _get_rng(rng).randint(0, len(data))
+    num = _get_rng(rng).randint(0, 99999)
     num_str = str(num).encode("ascii")
     result = data[:idx] + num_str + data[idx:]
     return result[:max_len]
 
 
-def byte_shuffle(data: bytes) -> bytes:
+def byte_shuffle(data: bytes, rng=None) -> bytes:
     """Shuffle a random subset of bytes in the input.
 
     Optimized: shuffle only a random portion instead of the entire buffer.
@@ -714,13 +719,13 @@ def byte_shuffle(data: bytes) -> bytes:
         return data
     result = bytearray(data)
     # Shuffle only a random 20-50% subset
-    n = max(2, len(result) // random.randint(2, 5))
-    start = random.randint(0, max(0, len(result) - n))
-    random.shuffle(result[start : start + n])
+    n = max(2, len(result) // _get_rng(rng).randint(2, 5))
+    start = _get_rng(rng).randint(0, max(0, len(result) - n))
+    _get_rng(rng).shuffle(result[start : start + n])
     return bytes(result)
 
 
-def byte_delete(data: bytes) -> bytes:
+def byte_delete(data: bytes, rng=None) -> bytes:
     """Delete a single random byte from the input.
 
     Args:
@@ -732,11 +737,11 @@ def byte_delete(data: bytes) -> bytes:
     if len(data) <= 1:
         return data
 
-    idx = random.randint(0, len(data) - 1)
+    idx = _get_rng(rng).randint(0, len(data) - 1)
     return data[:idx] + data[idx + 1 :]
 
 
-def byte_insert(data: bytes, max_len: int = 65536) -> bytes:
+def byte_insert(data: bytes, max_len: int = 65536, rng=None) -> bytes:
     """Insert a single random byte at a random position.
 
     Args:
@@ -749,12 +754,12 @@ def byte_insert(data: bytes, max_len: int = 65536) -> bytes:
     if len(data) >= max_len:
         return data
 
-    idx = random.randint(0, len(data))
-    val = random.randint(0, 255)
+    idx = _get_rng(rng).randint(0, len(data))
+    val = _get_rng(rng).randint(0, 255)
     return data[:idx] + bytes([val]) + data[idx:]
 
 
-def splice_diff_located(a: bytes, b: bytes) -> bytes:
+def splice_diff_located(a: bytes, b: bytes, rng=None) -> bytes:
     """Splice two inputs at optimal cut points found via diff locating.
 
     Unlike random splice, this finds the first and last differing bytes
@@ -786,13 +791,13 @@ def splice_diff_located(a: bytes, b: bytes) -> bytes:
 
     if first_diff == -1:
         # Identical up to min_len — just do random splice
-        cut_a = random.randint(1, len(a) - 1)
-        cut_b = random.randint(1, len(b) - 1)
+        cut_a = _get_rng(rng).randint(1, len(a) - 1)
+        cut_b = _get_rng(rng).randint(1, len(b) - 1)
         return a[:cut_a] + b[cut_b:]
 
     # Pick cut points within the diff range
-    cut_a = random.randint(first_diff, last_diff)
-    cut_b = random.randint(first_diff, min(last_diff, len(b) - 1))
+    cut_a = _get_rng(rng).randint(first_diff, last_diff)
+    cut_b = _get_rng(rng).randint(first_diff, min(last_diff, len(b) - 1))
 
     return a[:cut_a] + b[cut_b:]
 
@@ -802,7 +807,7 @@ def splice_diff_located(a: bytes, b: bytes) -> bytes:
 # ---------------------------------------------------------------------------
 
 
-def transpose_bytes(data: bytes, width: int) -> bytes:
+def transpose_bytes(data: bytes, width: int, rng=None) -> bytes:
     """Permute bytes within a randomly-selected aligned block of *width* bytes.
 
     For width=2: swaps the two bytes. For width=4 or 8: applies a random
@@ -818,18 +823,18 @@ def transpose_bytes(data: bytes, width: int) -> bytes:
     if len(data) < width:
         return data
     max_start = len(data) - width
-    start = (random.randint(0, max_start) // width) * width
+    start = (_get_rng(rng).randint(0, max_start) // width) * width
     result = bytearray(data)
     # Shuffle in-place on a memoryview slice
     mv = memoryview(result)[start : start + width]
     lst = list(mv)
-    random.shuffle(lst)
+    _get_rng(rng).shuffle(lst)
     for i, v in enumerate(lst):
         mv[i] = v
     return bytes(result)
 
 
-def bit_transpose(data: bytes, width: int) -> bytes:
+def bit_transpose(data: bytes, width: int, rng=None) -> bytes:
     """Permute bits within a randomly-selected block of *width* bytes.
 
     Optimized: swaps random bit pairs instead of full shuffle.
@@ -845,14 +850,14 @@ def bit_transpose(data: bytes, width: int) -> bytes:
     if len(data) < width:
         return data
     max_start = len(data) - width
-    start = (random.randint(0, max_start) // width) * width
+    start = (_get_rng(rng).randint(0, max_start) // width) * width
     val = int.from_bytes(data[start : start + width], "little")
     total_bits = 8 * width
     # Swap 2-4 random bit pairs instead of full shuffle
-    n_swaps = random.randint(2, min(4, total_bits // 2))
+    n_swaps = _get_rng(rng).randint(2, min(4, total_bits // 2))
     for _ in range(n_swaps):
-        i = random.randint(0, total_bits - 1)
-        j = random.randint(0, total_bits - 1)
+        i = _get_rng(rng).randint(0, total_bits - 1)
+        j = _get_rng(rng).randint(0, total_bits - 1)
         if i != j:
             bi = (val >> i) & 1
             bj = (val >> j) & 1
@@ -876,7 +881,7 @@ for _shift in (1, 7, 8, 15, 16, 31, 32):
     _RADAMSA_BOUNDARIES.append(_x + 1)
 
 
-def radamsa_mutate_num(val: int) -> int:
+def radamsa_mutate_num(val: int, rng=None) -> int:
     """Mutate a numeric value using Radamsa's mutate-num strategy.
 
     Randomly picks one of several transforms: increment, decrement,
@@ -885,7 +890,7 @@ def radamsa_mutate_num(val: int) -> int:
 
     Ported from radamsa/rad/shared.scm ``mutate-num``.
     """
-    op = random.randint(0, 9)
+    op = _get_rng(rng).randint(0, 9)
     if op == 0:
         return val + 1
     if op == 1:
@@ -893,13 +898,13 @@ def radamsa_mutate_num(val: int) -> int:
     if op in (2, 3):
         return 0 if op == 2 else 1
     if op in (4, 5, 6):
-        return random.choice(_RADAMSA_BOUNDARIES)
+        return _get_rng(rng).choice(_RADAMSA_BOUNDARIES)
     if op == 7:
-        return val + random.choice(_RADAMSA_BOUNDARIES)
+        return val + _get_rng(rng).choice(_RADAMSA_BOUNDARIES)
     if op == 8:
-        return random.choice(_RADAMSA_BOUNDARIES) - val
+        return _get_rng(rng).choice(_RADAMSA_BOUNDARIES) - val
     # op == 9: random scaling
-    n = random.randint(1, 128)
+    n = _get_rng(rng).randint(1, 128)
     n = _log2_ceil(n)
     return val + n if random.random() < 0.5 else val - n
 
