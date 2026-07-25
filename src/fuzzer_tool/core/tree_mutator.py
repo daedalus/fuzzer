@@ -8,8 +8,6 @@ Unlike ``grammar.py``, this requires no grammar definition — it heuristically
 detects structure from delimiter usage alone.
 """
 
-import random
-
 # ── Delimiter pairs ───────────────────────────────────────────────────
 
 # Maps opening byte -> closing byte
@@ -23,14 +21,27 @@ _DELIMITERS: dict[int, int] = {
 # Note: <> is deliberately excluded — it's too aggressive in ordinary text
 # and XML/HTML is handled separately by the grammar-based mutations.
 
+# Fast lookup table: byte -> closing byte, or 0xFF if not a delimiter.
+_DELIM_CLOSE = bytes(_DELIMITERS.get(b, 0xFF) for b in range(256))
+
+# Pre-computed single-byte objects: _BYTE_BYTES[byte] = bytes([byte]).
+_BYTE_BYTES = [bytes([b]) for b in range(256)]
+
+# Pre-computed close-byte lookup: _CLOSE_TABLE[open_byte] = close_byte, or 0xFF.
+_CLOSE_TABLE = bytes(_DELIMITERS.get(b, 0xFF) for b in range(256))
+
+# Pre-allocated op tuple — avoids allocation on every call
+_TREE_OPS = ("del", "dup", "swap", "stutter")
+
 
 def _find_delim(byte: int) -> int | None:
     """Return the matching close delimiter for *byte*, or None."""
-    return _DELIMITERS.get(byte)
+    c = _DELIM_CLOSE[byte]
+    return c if c != 0xFF else None
 
 
 def _is_delim(byte: int) -> bool:
-    return byte in _DELIMITERS
+    return _DELIM_CLOSE[byte] != 0xFF
 
 
 # ── Parse tree types ──────────────────────────────────────────────────
@@ -39,10 +50,12 @@ def _is_delim(byte: int) -> bool:
 class _Node:
     """A parsed node: either raw bytes or a delimited tree node."""
 
+    __slots__ = ("open", "closed", "children")
+
     def __init__(self, open_byte: int | None = None):
-        self.open: int | None = open_byte  # opening delimiter byte (None for root/raw)
-        self.closed: bool = False  # True only when parser matched a close byte
-        self.children: list[_Node | bytes] = []  # child nodes or raw byte chunks
+        self.open: int | None = open_byte
+        self.closed: bool = False
+        self.children: list[_Node | bytes] = []
 
     def is_leaf(self) -> bool:
         return not self.children
@@ -51,16 +64,16 @@ class _Node:
         """Flatten the tree back to raw bytes."""
         parts: list[bytes] = []
         if self.open is not None:
-            parts.append(bytes([self.open]))
+            parts.append(_BYTE_BYTES[self.open])
         for child in self.children:
             if isinstance(child, _Node):
                 parts.append(child.flatten())
             else:
                 parts.append(child)
         if self.open is not None and self.closed:
-            close = _find_delim(self.open)
-            if close is not None:
-                parts.append(bytes([close]))
+            close = _CLOSE_TABLE[self.open]
+            if close != 0xFF:
+                parts.append(_BYTE_BYTES[close])
         return b"".join(parts)
 
 
@@ -75,9 +88,9 @@ def partial_parse(data: bytes) -> _Node:
     a valid tree that flattens back to the original bytes.
     """
     root = _Node()
-    stack = [root]  # current node stack
+    stack = [root]
     i = 0
-    buf: list[bytes] = []  # raw byte accumulator
+    buf: list[bytes] = []
 
     def flush():
         if buf:
@@ -86,38 +99,42 @@ def partial_parse(data: bytes) -> _Node:
                 stack[-1].children.append(chunk)
             buf.clear()
 
+    delim_close = _DELIM_CLOSE
+    close_table = _CLOSE_TABLE
+    _append = buf.append
+    _NodeCls = _Node
+
     while i < len(data):
         byte = data[i]
-        close = _find_delim(byte)
-        if close is not None:
+        close = delim_close[byte]
+        if close != 0xFF:
             if byte == close:
-                # Self-matching delimiter ("", ''): alternate open/close
                 if stack and stack[-1].open == byte:
-                    # Closing
                     flush()
                     if len(stack) > 1:
                         stack[-1].closed = True
                         stack.pop()
                 else:
-                    # Opening
                     flush()
-                    node = _Node(byte)
+                    node = _NodeCls(byte)
                     stack[-1].children.append(node)
                     stack.append(node)
             else:
-                # Non-self-matching delimiter: always open
                 flush()
-                node = _Node(byte)
+                node = _NodeCls(byte)
                 stack[-1].children.append(node)
                 stack.append(node)
-        elif stack and stack[-1].open is not None and byte == _find_delim(stack[-1].open):
-            # Closing delimiter for non-self-matching (open != close)
-            flush()
-            if len(stack) > 1:
-                stack[-1].closed = True
-                stack.pop()
+        elif stack:
+            top = stack[-1]
+            if top.open is not None and byte == close_table[top.open]:
+                flush()
+                if len(stack) > 1:
+                    top.closed = True
+                    stack.pop()
+            else:
+                _append(_BYTE_BYTES[byte])
         else:
-            buf.append(bytes([byte]))
+            _append(_BYTE_BYTES[byte])
         i += 1
 
     flush()
@@ -128,12 +145,15 @@ def partial_parse(data: bytes) -> _Node:
 
 
 def _collect_nodes(node: _Node) -> list[_Node]:
-    """Return all delimited nodes in the tree (depth-first)."""
+    """Return all delimited nodes in the tree (depth-first, iterative)."""
     nodes = []
-    for child in node.children:
-        if isinstance(child, _Node):
-            nodes.append(child)
-            nodes.extend(_collect_nodes(child))
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        for child in current.children:
+            if isinstance(child, _Node):
+                nodes.append(child)
+                stack.append(child)
     return nodes
 
 
@@ -151,48 +171,66 @@ def _collect_leaves(node: _Node) -> list[_Node | bytes]:
     return leaves
 
 
-def mutate_tree_del(root: _Node) -> bool:
+def mutate_tree_del(root: _Node, rng=None) -> bool:
     """Delete a random node from the tree."""
     nodes = _collect_nodes(root)
-    if len(nodes) < 1:
+    n = len(nodes)
+    if n < 1:
         return False
-    target = random.choice(nodes)
-    # Find parent and remove
+    idx = rng.randrange(n) if rng is not None else __import__("random").randrange(n)
+    target = nodes[idx]
     _remove_child(root, target)
     return True
 
 
-def mutate_tree_dup(root: _Node) -> bool:
+def mutate_tree_dup(root: _Node, rng=None) -> bool:
     """Duplicate a random node in-place."""
     nodes = _collect_nodes(root)
-    if len(nodes) < 1:
+    n = len(nodes)
+    if n < 1:
         return False
-    target = random.choice(nodes)
-    # Find parent and insert copy after target
+    idx = rng.randrange(n) if rng is not None else __import__("random").randrange(n)
+    target = nodes[idx]
     dup = _clone_node(target)
     _insert_after(root, target, dup)
     return True
 
 
-def mutate_tree_swap(root: _Node) -> bool:
+def mutate_tree_swap(root: _Node, rng=None) -> bool:
     """Swap two random nodes in the tree."""
     nodes = _collect_nodes(root)
-    if len(nodes) < 2:
+    n = len(nodes)
+    if n < 2:
         return False
-    a, b = random.sample(nodes, 2)
-    _swap_nodes(root, a, b)
+    if rng is not None:
+        i = rng.randrange(n)
+        j = rng.randrange(n - 1)
+        if j >= i:
+            j += 1
+    else:
+        import random as _rand
+        i = _rand.randrange(n)
+        j = _rand.randrange(n - 1)
+        if j >= i:
+            j += 1
+    _swap_nodes(root, nodes[i], nodes[j])
     return True
 
 
-def mutate_tree_stutter(root: _Node) -> bool:
+def mutate_tree_stutter(root: _Node, rng=None) -> bool:
     """Repeat a random subtree path multiple times."""
     nodes = _collect_nodes(root)
-    if len(nodes) < 1:
+    n = len(nodes)
+    if n < 1:
         return False
-    target = random.choice(nodes)
-    n_reps = random.randint(2, 64)
+    if rng is not None:
+        target = nodes[rng.randrange(n)]
+        n_reps = rng.randint(2, 64)
+    else:
+        import random as _rand
+        target = nodes[_rand.randrange(n)]
+        n_reps = _rand.randint(2, 64)
     clone = _clone_node(target)
-    # Insert multiple copies
     for _ in range(n_reps):
         _insert_after(root, target, _clone_node(clone))
     return True
@@ -265,12 +303,13 @@ def _clone_node(node: _Node) -> _Node:
 # ── Public API ────────────────────────────────────────────────────────
 
 
-def lightweight_tree_mutate(data: bytes, max_len: int = 65536) -> bytes:
+def lightweight_tree_mutate(data: bytes, max_len: int = 65536, rng=None) -> bytes:
     """Apply a random tree mutation to *data* using Radamsa's heuristic.
 
     Args:
         data: Input bytes.
         max_len: Maximum output length.
+        rng: Optional RandPool instance for fast random numbers.
 
     Returns:
         Mutated bytes, or original input if too short or mutation failed.
@@ -281,22 +320,26 @@ def lightweight_tree_mutate(data: bytes, max_len: int = 65536) -> bytes:
     root = partial_parse(data)
     nodes = _collect_nodes(root)
 
-    # If no delimited nodes found, return data unchanged
-    if len(nodes) < 1:
+    n = len(nodes)
+    if n < 1:
         return data
 
     # Choose a random mutation
-    op = random.choice(["del", "dup", "swap", "stutter"])
+    if rng is not None:
+        op = _TREE_OPS[rng.randrange(4)]
+    else:
+        import random as _rand
+        op = _TREE_OPS[_rand.randrange(4)]
 
     mutated = False
     if op == "del":
-        mutated = mutate_tree_del(root)
+        mutated = mutate_tree_del(root, rng=rng)
     elif op == "dup":
-        mutated = mutate_tree_dup(root)
+        mutated = mutate_tree_dup(root, rng=rng)
     elif op == "swap":
-        mutated = mutate_tree_swap(root)
+        mutated = mutate_tree_swap(root, rng=rng)
     elif op == "stutter":
-        mutated = mutate_tree_stutter(root)
+        mutated = mutate_tree_stutter(root, rng=rng)
 
     if not mutated:
         return data

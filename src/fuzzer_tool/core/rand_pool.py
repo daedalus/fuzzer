@@ -58,6 +58,7 @@ class RandPool:
 
         Equivalent to calling ``randrange(n)`` *count* times but all
         values are sliced from the pool in one C-level operation.
+        Uses numpy vectorized modulo for fast conversion.
         """
         if n <= 0 or count <= 0:
             return []
@@ -65,7 +66,7 @@ class RandPool:
             self._refill()
         raw = self._pool[self._idx:self._idx + count]
         self._idx += count
-        return [int(x % n) for x in raw]
+        return (raw % n).tolist()
 
     def random(self) -> float:
         """Return a random float in [0.0, 1.0).  ``random.random()`` equivalent."""
@@ -82,15 +83,14 @@ class RandPool:
             self._refill()
         raw = self._pool[self._idx:self._idx + count]
         self._idx += count
-        return [int(x) / 4294967296.0 for x in raw]
+        return (raw.astype(np.float64) / 4294967296.0).tolist()
 
     def randint_list(self, a: int, b: int, count: int) -> list[int]:
         """Generate *count* random integers in [a, b] using vectorized numpy.
 
         This is faster than calling ``randint(a, b)`` *count* times because
         all values are sliced from the pool in a single C-level operation.
-        The list comprehension conversion to Python int is also C-level
-        (CPython 3.12+).
+        Uses numpy vectorized modulo + tolist() for fast conversion.
         """
         width = b - a + 1
         if width <= 0 or count <= 0:
@@ -101,8 +101,15 @@ class RandPool:
         # Slice: vectorized C-level read of count values
         raw = self._pool[self._idx:self._idx + count]
         self._idx += count
-        # Convert to Python ints (list comprehension, C-level iteration)
-        return [int(a + (x % width)) for x in raw]
+        # Vectorized modulo + offset, then fast tolist() for Python ints
+        if width == 256:
+            # Fast path: pre-computed % 256 array
+            result = self._m256[self._idx - count:self._idx]
+            if a == 0:
+                return result.tolist()
+            return [a + int(x) for x in result]
+        result = (raw % width) + a
+        return result.tolist()
 
     def randrange(self, n: int) -> int:
         return self._draw() % n if n > 0 else 0

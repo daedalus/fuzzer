@@ -351,7 +351,7 @@ class OperatorEngine:
         """
         from fuzzer_tool.core.tree_mutator import lightweight_tree_mutate  # noqa: PLC0415
 
-        result = lightweight_tree_mutate(bytes(buf), max_len=self.f.max_len)
+        result = lightweight_tree_mutate(bytes(buf), max_len=self.f.max_len, rng=self.f._rand_pool)
         if result != bytes(buf):
             buf[:] = result[: len(buf)]
 
