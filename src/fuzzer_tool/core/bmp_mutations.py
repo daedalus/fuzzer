@@ -130,51 +130,52 @@ def serialize_bmp(info: BmpInfo) -> bytes:
     return bytes(info.header) + info.pixel_data
 
 
-def _corrupt_field(data: bytearray, offset: int, size: int, signed: bool = False) -> None:
+def _corrupt_field(data: bytearray, offset: int, size: int, signed: bool = False, rng=None) -> None:
     """Apply random corruption to a field in the header."""
-    method = random.randint(0, 4)
+    _r = rng or random
+    method = _r.randint(0, 4)
     if size == 2:
         val = struct.unpack("<H", data[offset : offset + 2])[0]
         if method == 0:
-            val ^= 1 << random.randint(0, 15)
+            val ^= 1 << _r.randint(0, 15)
         elif method == 1:
-            val = random.choice([0, 1, 0x7FFF, 0xFFFF])
+            val = _r.choice([0, 1, 0x7FFF, 0xFFFF])
         elif method == 2:
-            val = max(0, val + random.choice([-2, -1, 1, 2, 16, 256]))
+            val = max(0, val + _r.choice([-2, -1, 1, 2, 16, 256]))
         elif method == 3:
-            val = random.randint(0, 0xFFFF)
+            val = _r.randint(0, 0xFFFF)
         else:
-            val = random.randint(0, 16)
+            val = _r.randint(0, 16)
         struct.pack_into("<H", data, offset, val)
     elif size == 4:
         val = struct.unpack("<I", data[offset : offset + 4])[0]
         if signed:
             val = struct.unpack("<i", data[offset : offset + 4])[0]
             if method == 0:
-                val ^= 1 << random.randint(0, 31)
+                val ^= 1 << _r.randint(0, 31)
             elif method == 1:
-                val = random.choice([0, 1, -1, 0x7FFFFFFF, -0x80000000])
+                val = _r.choice([0, 1, -1, 0x7FFFFFFF, -0x80000000])
             elif method == 2:
                 val = max(
-                    -0x80000000, min(0x7FFFFFFF, val + random.choice([-2, -1, 1, 2, 256, 65536]))
+                    -0x80000000, min(0x7FFFFFFF, val + _r.choice([-2, -1, 1, 2, 256, 65536]))
                 )
             elif method == 3:
-                val = random.randint(-0x80000000, 0x7FFFFFFF)
+                val = _r.randint(-0x80000000, 0x7FFFFFFF)
             else:
-                val = random.randint(0, 256)
+                val = _r.randint(0, 256)
             val = max(-0x80000000, min(0x7FFFFFFF, val))
             struct.pack_into("<i", data, offset, val)
         else:
             if method == 0:
-                val ^= 1 << random.randint(0, 31)
+                val ^= 1 << _r.randint(0, 31)
             elif method == 1:
-                val = random.choice([0, 1, 0x7FFFFFFF, 0xFFFFFFFF])
+                val = _r.choice([0, 1, 0x7FFFFFFF, 0xFFFFFFFF])
             elif method == 2:
-                val = max(0, min(0xFFFFFFFF, val + random.choice([-2, -1, 1, 2, 256, 65536])))
+                val = max(0, min(0xFFFFFFFF, val + _r.choice([-2, -1, 1, 2, 256, 65536])))
             elif method == 3:
-                val = random.randint(0, 0xFFFFFFFF)
+                val = _r.randint(0, 0xFFFFFFFF)
             else:
-                val = random.randint(0, 256)
+                val = _r.randint(0, 256)
             val = max(0, min(0xFFFFFFFF, val))
             struct.pack_into("<I", data, offset, val)
 
@@ -193,13 +194,13 @@ class BmpMutator:
     use_wfc: bool = False  # set to True by Fuzzer when --wfc is active
 
     def mutate(self, data: bytes, max_len: int = 4096, rng=None) -> bytes:
-        """
-        self._rng = rng or randomApply one structure-aware BMP mutation."""
+        """Apply one structure-aware BMP mutation."""
+        self._rng = rng or random
         info = parse_bmp(data)
         if info is None:
-            return self._generate_random_bmp(max_len)
+            return self._generate_random_bmp(max_len, rng=self._rng)
 
-        op = random.randint(0, 15)
+        op = (self._rng or random).randint(0, 15)
         mutators = [
             self._mutate_dimensions,
             self._mutate_bit_count,
@@ -226,24 +227,24 @@ class BmpMutator:
     def _mutate_dimensions(self, info: BmpInfo, max_len: int) -> BmpInfo:
         """Corrupt width or height in DIB header."""
         if info.dib_size >= DIB_INFOHEADER and len(info.header) >= 26:
-            field = random.choice(["width", "height"])
+            field = (self._rng or random).choice(["width", "height"])
             if field == "width":
-                _corrupt_field(info.header, 18, 4, signed=True)
+                _corrupt_field(info.header, 18, 4, signed=True, rng=self._rng or random)
             else:
-                _corrupt_field(info.header, 22, 4, signed=True)
+                _corrupt_field(info.header, 22, 4, signed=True, rng=self._rng or random)
         return info
 
     def _mutate_bit_count(self, info: BmpInfo, max_len: int) -> BmpInfo:
         """Corrupt bits-per-pixel field."""
         if info.dib_size >= DIB_INFOHEADER and len(info.header) >= 30:
-            info.header[28] = random.choice([1, 2, 4, 8, 16, 24, 32, 0, 255])
+            info.header[28] = (self._rng or random).choice([1, 2, 4, 8, 16, 24, 32, 0, 255])
             info.header[29] = 0
         return info
 
     def _mutate_compression(self, info: BmpInfo, max_len: int) -> BmpInfo:
         """Corrupt compression mode."""
         if info.dib_size >= DIB_INFOHEADER and len(info.header) >= 34:
-            info.header[30] = random.choice([0, 1, 2, 3, 4, 5, 0xFF])
+            info.header[30] = (self._rng or random).choice([0, 1, 2, 3, 4, 5, 0xFF])
             for i in range(31, 34):
                 info.header[i] = 0
         return info
@@ -251,17 +252,17 @@ class BmpMutator:
     def _mutate_resolution(self, info: BmpInfo, max_len: int) -> BmpInfo:
         """Corrupt pixels-per-meter resolution."""
         if info.dib_size >= DIB_INFOHEADER and len(info.header) >= 46:
-            field = random.choice(["x_ppm", "y_ppm"])
+            field = (self._rng or random).choice(["x_ppm", "y_ppm"])
             offset = 38 if field == "x_ppm" else 42
-            _corrupt_field(info.header, offset, 4, signed=True)
+            _corrupt_field(info.header, offset, 4, signed=True, rng=self._rng or random)
         return info
 
     def _mutate_color_table(self, info: BmpInfo, max_len: int) -> BmpInfo:
         """Corrupt a color table entry."""
         if info.bit_count <= 8 and len(info.color_table) >= 4:
-            idx = random.randint(0, len(info.color_table) - 4)
+            idx = (self._rng or random).randint(0, len(info.color_table) - 4)
             table = bytearray(info.color_table)
-            table[idx : idx + 4] = bytes(random.randint(0, 255) for _ in range(4))
+            table[idx : idx + 4] = bytes((self._rng or random).randint(0, 255) for _ in range(4))
             info.color_table = bytes(table)
         return info
 
@@ -272,9 +273,9 @@ class BmpMutator:
         if self.use_wfc and abs(info.width) >= 2 and abs(info.height) >= 2:
             return self._wfc_pixels(info, max_len)
         pixels = bytearray(info.pixel_data)
-        for _ in range(random.randint(1, min(8, len(pixels)))):
-            idx = random.randint(0, len(pixels) - 1)
-            pixels[idx] ^= 1 << random.randint(0, 7)
+        for _ in range((self._rng or random).randint(1, min(8, len(pixels)))):
+            idx = (self._rng or random).randint(0, len(pixels) - 1)
+            pixels[idx] ^= 1 << (self._rng or random).randint(0, 7)
         info.pixel_data = bytes(pixels)
         return info
 
@@ -319,7 +320,7 @@ class BmpMutator:
         for row_y in range(h):
             wave = WaveGrid(tile_list, adj, width=w, height=1)
             row_result = wave.run(
-                seed=random.randint(0, 2**31),
+                seed=(self._rng or random).randint(0, 2**31),
                 max_restarts=2,
                 ac3_budget=2000,
             )
@@ -344,13 +345,13 @@ class BmpMutator:
     def _corrupt_file_size(self, info: BmpInfo, max_len: int) -> BmpInfo:
         """Corrupt the file size field in the file header."""
         if len(info.header) >= 6:
-            _corrupt_field(info.header, 2, 4)
+            _corrupt_field(info.header, 2, 4, rng=self._rng or random)
         return info
 
     def _corrupt_pixel_offset(self, info: BmpInfo, max_len: int) -> BmpInfo:
         """Corrupt the pixel data offset field."""
         if len(info.header) >= 14:
-            _corrupt_field(info.header, 10, 4)
+            _corrupt_field(info.header, 10, 4, rng=self._rng or random)
         return info
 
     def _swap_color_channels(self, info: BmpInfo, max_len: int) -> BmpInfo:
@@ -366,15 +367,15 @@ class BmpMutator:
         """Corrupt BI_BITFIELDS color masks."""
         if info.dib_size >= DIB_V4HEADER and len(info.header) >= 70:
             mask_offsets = [54, 58, 62, 66]
-            idx = random.choice(mask_offsets)
-            _corrupt_field(info.header, idx, 4)
+            idx = (self._rng or random).choice(mask_offsets)
+            _corrupt_field(info.header, idx, 4, rng=self._rng or random)
         elif info.compression == BI_BITFIELDS and len(info.header) >= 58:
             # Inject bitfields mask after BITMAPINFOHEADER
             mask = struct.pack(
                 "<III",
-                random.choice([0xFF0000, 0x00FF00, 0x0000FF]),
-                random.choice([0xFF00, 0xFF0000, 0xFF]),
-                random.choice([0xFF, 0xFF00, 0xFF0000]),
+                (self._rng or random).choice([0xFF0000, 0x00FF00, 0x0000FF]),
+                (self._rng or random).choice([0xFF00, 0xFF0000, 0xFF]),
+                (self._rng or random).choice([0xFF, 0xFF00, 0xFF0000]),
             )
             header = bytearray(info.header)
             header[30:34] = struct.pack("<I", BI_BITFIELDS)
@@ -400,7 +401,7 @@ class BmpMutator:
 
     def _inject_junk_before_pixels(self, info: BmpInfo, max_len: int) -> BmpInfo:
         """Inject random bytes between headers and pixel data."""
-        junk = bytes(random.randint(0, 255) for _ in range(random.randint(4, 64)))
+        junk = bytes((self._rng or random).randint(0, 255) for _ in range((self._rng or random).randint(4, 64)))
         header = bytearray(info.header)
         insert_pos = min(info.pixel_offset, len(header))
         header[insert_pos:insert_pos] = junk
@@ -413,33 +414,33 @@ class BmpMutator:
     def _mutate_planes(self, info: BmpInfo, max_len: int) -> BmpInfo:
         """Corrupt the planes field (must be 1 in valid BMP)."""
         if info.dib_size >= DIB_INFOHEADER and len(info.header) >= 28:
-            info.header[26] = random.choice([0, 2, 3, 0xFF])
+            info.header[26] = (self._rng or random).choice([0, 2, 3, 0xFF])
             info.header[27] = 0
         return info
 
     def _mutate_colors_used(self, info: BmpInfo, max_len: int) -> BmpInfo:
         """Corrupt colors_used and colors_important fields."""
         if info.dib_size >= DIB_INFOHEADER and len(info.header) >= 54:
-            field = random.choice(["used", "important"])
+            field = (self._rng or random).choice(["used", "important"])
             offset = 46 if field == "used" else 50
-            _corrupt_field(info.header, offset, 4)
+            _corrupt_field(info.header, offset, 4, rng=self._rng or random)
         return info
 
     def _generate_random_bmp(self, info_or_max=None, max_len: int = 4096, rng=None) -> bytes:
-        """
-        self._rng = rng or randomGenerate a minimal random BMP from scratch.
+        """Generate a minimal random BMP from scratch.
 
         Called from dispatch as _generate_random_bmp(info, max_len) or
         standalone as _generate_random_bmp(max_len=N).
         """
+        self._rng = rng or random
         if isinstance(info_or_max, BmpInfo):
             max_len = max_len
         elif isinstance(info_or_max, int):
             max_len = info_or_max
 
-        width = random.randint(1, 64)
-        height = random.randint(1, 64)
-        bit_count = random.choice([1, 4, 8, 24, 32])
+        width = (self._rng or random).randint(1, 64)
+        height = (self._rng or random).randint(1, 64)
+        bit_count = (self._rng or random).choice([1, 4, 8, 24, 32])
 
         # Calculate row stride (padded to 4-byte boundary)
         bits_per_row = width * bit_count
@@ -482,6 +483,6 @@ class BmpMutator:
                 color_table[i * 4 : i * 4 + 4] = bytes([i, i, i, 0])
 
         # Random pixel data
-        pixels = random.randbytes(pixel_size)
+        pixels = (self._rng or random).randbytes(pixel_size)
 
         return bytes(header) + bytes(color_table) + pixels

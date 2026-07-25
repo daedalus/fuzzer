@@ -111,7 +111,7 @@ class PngChunkMutator:
         chunks = parse_png_chunks(data)
         if not chunks:
             # Not valid PNG — generate a minimal one
-            return self._generate_random_png(max_len)
+            return self._generate_random_png(max_len, rng=self._rng)
 
         op = (self._rng or random).randint(0, 23)
         if op == 0:
@@ -141,7 +141,7 @@ class PngChunkMutator:
         elif op == 11:
             return self._mutate_idat_multi(chunks, max_len)
         elif op == 12:
-            return self._generate_random_png(max_len)
+            return self._generate_random_png(max_len, rng=self._rng)
         elif op == 13:
             return self._duplicate_ihdr(chunks, max_len)
         elif op == 14:
@@ -449,8 +449,8 @@ class PngChunkMutator:
         return serialize_png_chunks(chunks)[:max_len]
 
     def _generate_random_png(self, max_len: int, rng=None) -> bytes:
-        self._rng = rng or random
         """Generate a random valid PNG."""
+        self._rng = rng or random
         w = (self._rng or random).randint(1, 64)
         h = (self._rng or random).randint(1, 64)
         ct = (self._rng or random).choice([0, 2, 3, 4, 6])
@@ -462,7 +462,7 @@ class PngChunkMutator:
         raw[0 :: 1 + row_len] = b"\x00" * h  # filter bytes
         for i in range(h):
             start = i * (1 + row_len) + 1
-            raw[start : start + row_len] = random.randbytes(row_len)
+            raw[start : start + row_len] = (self._rng or random).randbytes(row_len)
 
         ihdr_data = struct.pack(">IIBBBBB", w, h, bd, ct, 0, 0, 0)
         ihdr = PngChunk(b"IHDR", ihdr_data)
@@ -660,7 +660,7 @@ class PngChunkMutator:
         """Swap two IDAT chunks to test decompressor ordering tolerance."""
         idats = [i for i, c in enumerate(chunks) if c.chunk_type == b"IDAT"]
         if len(idats) < 2:
-            return self._generate_random_png(max_len)
+            return self._generate_random_png(max_len, rng=self._rng)
         a, b = (self._rng or random).sample(idats, 2)
         chunks[a], chunks[b] = chunks[b], chunks[a]
         return serialize_png_chunks(chunks)[:max_len]

@@ -127,6 +127,18 @@ class RandPool:
             return int(self._m256[pos])
         return a + (int(self._pool[pos]) % width)
 
+    def randbytes(self, n: int) -> bytes:
+        """Generate *n* random bytes. Matches ``random.randbytes`` API."""
+        if n <= 0:
+            return b""
+        result = bytearray(n)
+        for i in range(n):
+            if self._idx >= _POOL_ENTRIES:
+                self._refill()
+            result[i] = int(self._m256[self._idx])
+            self._idx += 1
+        return bytes(result)
+
     def choice(self, seq: list | tuple | bytes) -> object:
         n = len(seq)
         if n == 0:

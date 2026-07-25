@@ -127,33 +127,34 @@ def serialize_zlib(info: ZlibInfo) -> bytes:
     return bytes(buf)
 
 
-def _corrupt_field(data: bytearray, offset: int, size: int) -> None:
+def _corrupt_field(data: bytearray, offset: int, size: int, rng=None) -> None:
     """Apply random corruption to a field."""
+    _r = rng or random
     if size == 1:
-        data[offset] = random.randint(0, 255)
+        data[offset] = _r.randint(0, 255)
     elif size == 2:
         val = struct.unpack(">H", data[offset : offset + 2])[0]
-        method = random.randint(0, 3)
+        method = _r.randint(0, 3)
         if method == 0:
-            val ^= 1 << random.randint(0, 15)
+            val ^= 1 << _r.randint(0, 15)
         elif method == 1:
-            val = random.choice([0, 1, 0x7FFF, 0xFFFF])
+            val = _r.choice([0, 1, 0x7FFF, 0xFFFF])
         elif method == 2:
-            val = max(0, val + random.choice([-2, -1, 1, 2]))
+            val = max(0, val + _r.choice([-2, -1, 1, 2]))
         else:
-            val = random.randint(0, 0xFFFF)
+            val = _r.randint(0, 0xFFFF)
         struct.pack_into(">H", data, offset, val)
     elif size == 4:
         val = struct.unpack(">I", data[offset : offset + 4])[0]
-        method = random.randint(0, 3)
+        method = _r.randint(0, 3)
         if method == 0:
-            val ^= 1 << random.randint(0, 31)
+            val ^= 1 << _r.randint(0, 31)
         elif method == 1:
-            val = random.choice([0, 1, 0x7FFFFFFF, 0xFFFFFFFF])
+            val = _r.choice([0, 1, 0x7FFFFFFF, 0xFFFFFFFF])
         elif method == 2:
-            val = max(0, val + random.choice([-2, -1, 1, 2, 256]))
+            val = max(0, val + _r.choice([-2, -1, 1, 2, 256]))
         else:
-            val = random.randint(0, 0xFFFFFFFF)
+            val = _r.randint(0, 0xFFFFFFFF)
         struct.pack_into(">I", data, offset, val)
 
 
@@ -166,13 +167,13 @@ class ZlibMutator:
     _rng = random
 
     def mutate(self, data: bytes, max_len: int = 4096, rng=None) -> bytes:
-        """
-        self._rng = rng or randomApply one structure-aware zlib mutation."""
+        """Apply one structure-aware zlib mutation."""
+        self._rng = rng or random
         info = parse_zlib(data)
         if info is None:
-            return self._generate_random_zlib(max_len)
+            return self._generate_random_zlib(max_len, rng=self._rng)
 
-        op = random.randint(0, 9)
+        op = (self._rng or random).randint(0, 9)
         mutators = [
             self._mutate_cmf,
             self._mutate_flevel,
@@ -192,32 +193,32 @@ class ZlibMutator:
 
     def _mutate_cmf(self, info: ZlibInfo, max_len: int) -> ZlibInfo:
         """Corrupt the CMF byte (CM and CINFO)."""
-        method = random.randint(0, 3)
+        method = (self._rng or random).randint(0, 3)
         if method == 0:
             # Valid CM=8, corrupt CINFO
-            info.cmf = 8 | (random.randint(0, 15) << 4)
+            info.cmf = 8 | ((self._rng or random).randint(0, 15) << 4)
         elif method == 1:
             # Corrupt CM (not deflate)
-            info.cmf = random.randint(0, 255)
+            info.cmf = (self._rng or random).randint(0, 255)
         elif method == 2:
             # Extreme CINFO (large window)
             info.cmf = 8 | (7 << 4)  # CINFO=7 → 32K window
         else:
-            info.cmf = random.randint(0, 255)
+            info.cmf = (self._rng or random).randint(0, 255)
         return info
 
     def _mutate_flevel(self, info: ZlibInfo, max_len: int) -> ZlibInfo:
         """Corrupt the compression level hint in FLG."""
-        info.flevel = random.randint(0, 3)
+        info.flevel = (self._rng or random).randint(0, 3)
         return info
 
     def _mutate_deflate_stream(self, info: ZlibInfo, max_len: int) -> ZlibInfo:
         """Flip random bytes in the deflate stream."""
         if info.compressed_data:
             data = bytearray(info.compressed_data)
-            for _ in range(random.randint(1, min(8, len(data)))):
-                pos = random.randint(0, len(data) - 1)
-                data[pos] ^= 1 << random.randint(0, 7)
+            for _ in range((self._rng or random).randint(1, min(8, len(data)))):
+                pos = (self._rng or random).randint(0, len(data) - 1)
+                data[pos] ^= 1 << (self._rng or random).randint(0, 7)
             info.compressed_data = bytes(data)
         return info
 
@@ -225,16 +226,16 @@ class ZlibMutator:
         """Replace a chunk of the deflate stream with random data."""
         if info.compressed_data and len(info.compressed_data) > 4:
             data = bytearray(info.compressed_data)
-            chunk_start = random.randint(0, len(data) - 2)
-            chunk_len = random.randint(1, min(16, len(data) - chunk_start))
+            chunk_start = (self._rng or random).randint(0, len(data) - 2)
+            chunk_len = (self._rng or random).randint(1, min(16, len(data) - chunk_start))
             for i in range(chunk_start, chunk_start + chunk_len):
-                data[i] = random.randint(0, 255)
+                data[i] = (self._rng or random).randint(0, 255)
             info.compressed_data = bytes(data)
         return info
 
     def _corrupt_trailer(self, info: ZlibInfo, max_len: int) -> ZlibInfo:
         """Corrupt the Adler-32 trailer."""
-        info.adler32 = random.randint(0, 0xFFFFFFFF)
+        info.adler32 = (self._rng or random).randint(0, 0xFFFFFFFF)
         return info
 
     def _swap_header_nibbles(self, info: ZlibInfo, max_len: int) -> ZlibInfo:
@@ -250,24 +251,24 @@ class ZlibMutator:
 
     def _inject_junk_before_deflate(self, info: ZlibInfo, max_len: int) -> ZlibInfo:
         """Inject random bytes between header and deflate stream."""
-        junk = bytes(random.randint(0, 255) for _ in range(random.randint(1, 32)))
+        junk = bytes((self._rng or random).randint(0, 255) for _ in range((self._rng or random).randint(1, 32)))
         info.compressed_data = junk + info.compressed_data
         return info
 
     def _mutate_window_size(self, info: ZlibInfo, max_len: int) -> ZlibInfo:
         """Change the window size (CINFO field)."""
-        info.cinfo = random.randint(0, 7)
+        info.cinfo = (self._rng or random).randint(0, 7)
         return info
 
     def _generate_random_zlib(self, info_or_max=None, max_len: int = 4096, rng=None) -> bytes:
-        """
-        self._rng = rng or randomGenerate a minimal random zlib stream from scratch."""
+        """Generate a minimal random zlib stream from scratch."""
+        self._rng = rng or random
         if isinstance(info_or_max, int):
             max_len = info_or_max
 
         # Random uncompressed data
-        payload_len = random.randint(1, min(128, max_len - 10))
-        payload = bytes(random.randint(0, 255) for _ in range(payload_len))
+        payload_len = (self._rng or random).randint(1, min(128, max_len - 10))
+        payload = bytes((self._rng or random).randint(0, 255) for _ in range(payload_len))
 
         # Compress with deflate (wbits=15 for zlib format)
         compressor = zlib.compressobj(9, zlib.DEFLATED, zlib.MAX_WBITS)

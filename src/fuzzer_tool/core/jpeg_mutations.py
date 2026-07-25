@@ -207,11 +207,11 @@ class JpegMutator:
     _rng = random
 
     def mutate(self, data: bytes, max_len: int = 4096, rng=None) -> bytes:
-        """
-        self._rng = rng or randomApply one structure-aware JPEG mutation."""
+        """Apply one structure-aware JPEG mutation."""
+        self._rng = rng or random
         markers = parse_jpeg_markers(data)
         if markers is None or len(markers) < 2:
-            return self._generate_random_jpeg(max_len)
+            return self._generate_random_jpeg(max_len, rng=self._rng)
 
         op = (self._rng or random).randint(0, 15)
         mutators = [
@@ -253,12 +253,12 @@ class JpegMutator:
         elif field == 1 and len(data) >= 3:
             # Height (2 bytes big-endian)
             h = struct.unpack(">H", data[1:3])[0]
-            h = _corrupt_value(h, max_val=65535)
+            h = _corrupt_value(h, max_val=65535, rng=self._rng or random)
             struct.pack_into(">H", data, 1, h)
         elif field == 2 and len(data) >= 5:
             # Width (2 bytes big-endian)
             w = struct.unpack(">H", data[3:5])[0]
-            w = _corrupt_value(w, max_val=65535)
+            w = _corrupt_value(w, max_val=65535, rng=self._rng or random)
             struct.pack_into(">H", data, 3, w)
         elif field == 3 and len(data) >= 6:
             # Number of components
@@ -313,7 +313,7 @@ class JpegMutator:
             if len(dri.data) >= 2:
                 data = bytearray(dri.data)
                 val = struct.unpack(">H", data[0:2])[0]
-                val = _corrupt_value(val, max_val=65535)
+                val = _corrupt_value(val, max_val=65535, rng=self._rng or random)
                 struct.pack_into(">H", data, 0, val)
                 dri.data = bytes(data)
         else:
@@ -486,12 +486,12 @@ class JpegMutator:
         return markers
 
     def _generate_random_jpeg(self, markers_or_max=None, max_len: int = 4096, rng=None) -> bytes:
-        """
-        self._rng = rng or randomGenerate a minimal random JPEG from scratch.
+        """Generate a minimal random JPEG from scratch.
 
         Called from dispatch as _generate_random_jpeg(markers, max_len) or
         standalone as _generate_random_jpeg(max_len=N).
         """
+        self._rng = rng or random
         if isinstance(markers_or_max, int):
             max_len = markers_or_max
 
@@ -590,18 +590,19 @@ def _find_marker_index(markers: list[JpegMarker], marker: int) -> int | None:
     return None
 
 
-def _corrupt_value(val: int, max_val: int = 0xFFFF) -> int:
+def _corrupt_value(val: int, max_val: int = 0xFFFF, rng=None) -> int:
     """Apply a random corruption to an integer value."""
-    method = random.randint(0, 4)
+    _r = rng or random
+    method = _r.randint(0, 4)
     if method == 0:  # bit flip
-        bit = random.randint(0, min(15, val.bit_length() or 1))
+        bit = _r.randint(0, min(15, val.bit_length() or 1))
         return val ^ (1 << bit)
     elif method == 1:  # boundary value
-        return random.choice([0, 1, max_val, max_val // 2, max_val - 1])
+        return _r.choice([0, 1, max_val, max_val // 2, max_val - 1])
     elif method == 2:  # add/subtract delta
-        delta = random.choice([-2, -1, 1, 2, 16, 256])
+        delta = _r.choice([-2, -1, 1, 2, 16, 256])
         return max(0, min(max_val, val + delta))
     elif method == 3:  # random replacement
-        return random.randint(0, max_val)
+        return _r.randint(0, max_val)
     else:  # clamp to small value
-        return random.randint(0, 16)
+        return _r.randint(0, 16)
