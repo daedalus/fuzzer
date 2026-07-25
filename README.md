@@ -161,6 +161,7 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 - **Tree mutator optimization**: `__slots__` on `_Node`, pre-computed delimiter lookup tables, inlined `_find_delim` in parse loop, iterative `_collect_nodes`, RandPool passthrough — `partial_parse` 2.2x faster (0.155s→0.070s)
 - **RandPool vectorized batches**: `randint_list`/`randrange_list`/`random_list` use numpy vectorized modulo + `tolist()` instead of Python list comprehensions
 - **RandPool in format mutations**: all format-specific mutation classes (zlib, gzip, jpeg, png, bmp) and grammar mutations now route through RandPool via `rng=None` parameter passthrough — reduces stdlib `random.randint` calls ~17%, total function calls reduced 2.8M per 1k iterations
+- **Seed picker batch entropy**: `_compute_weights` pre-computes all seed entropies and mean entropy in a single pass before the per-seed loop, eliminating O(n²) redundant `shannon_entropy_seed` calls — total function calls reduced 26% (5.5M -> 4.1M per 1k iterations)
 - **SHM data minimization**: three-tier reduction of SHM bitmap data movement (~170MB/s saved):
   - **Tier 1 — numpy flatnonzero**: replaces Python `for` loop over 1MB bitmap in `record_edge_lifetimes` with `np.flatnonzero()` — saves ~2GB total data movement from Python iteration
   - **Tier 2 — zero-copy numpy views**: replaces `bytes()` allocations with `np.frombuffer()` zero-copy views at 5+ call sites (distance, Shapley, length tracker, edge lifetimes) — saves ~2.2GB total bytes allocation
