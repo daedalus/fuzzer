@@ -299,12 +299,14 @@ class SeedPicker:
     def _weight_entropy_and_distance(
         self, seed: bytes, seed_key: str, meta: dict, w: float, f,
         entropy_map: dict | None = None, mean_entropy: float = 0.0,
+        max_d: float = 0.0,
     ) -> float:
         """Apply Shannon entropy bonus and directed distance weight.
 
         Args:
             entropy_map: Pre-computed {seed_key: entropy} dict from _compute_weights.
             mean_entropy: Pre-computed mean entropy across all seeds.
+            max_d: Pre-computed max_distance for normalization.
         """
         # Use pre-computed entropy if available, else compute on the fly
         if entropy_map is not None:
@@ -338,8 +340,9 @@ class SeedPicker:
                 w *= 1.0 + min(deviation, 1.0) * 0.5
 
         if f._distance:
-            seed_dist = meta.get("avg_distance", f._distance.max_distance)
-            max_d = f._distance.max_distance
+            seed_dist = meta.get("avg_distance", max_d if max_d > 0 else f._distance.max_distance)
+            if max_d <= 0:
+                max_d = f._distance.max_distance
             norm_dist = min(seed_dist / max_d, 1.0) if max_d > 0 else 0.5
             alpha = min(f._anneal_progress * 2, 1.0)
             w *= (1.0 - alpha) + alpha * math.exp(-norm_dist * 5.0 * alpha)
@@ -484,6 +487,9 @@ class SeedPicker:
         # Pre-compute mean entropy once
         mean_entropy = entropy_sum / entropy_count if entropy_count > 0 else 0.0
 
+        # Pre-compute max_distance once (avoids repeated property access)
+        max_d = f._distance.max_distance if f._distance else 0.0
+
         # Phase 2: apply remaining per-seed weight functions (dict lookups, set ops)
         for i, seed in enumerate(corpus):
             if not has_meta[i]:
@@ -496,7 +502,7 @@ class SeedPicker:
             w, sub, spa = self._weight_secretary_and_cached(sk, w, classifications, f)
             w = self._weight_edge_penalties(sk, w, fuzz_count, f)
             w = self._weight_entropy_and_distance(
-                seed, sk, meta, w, f, entropy_map, mean_entropy
+                seed, sk, meta, w, f, entropy_map, mean_entropy, max_d
             )
             w = self._weight_static_features(seed, meta["coverage_edges"], w, f)
             w = self._weight_length_and_cross_target(seed, meta, w, f)

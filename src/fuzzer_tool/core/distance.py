@@ -451,10 +451,20 @@ class TargetDistance:
 
     @property
     def max_distance(self) -> float:
-        """Maximum distance value (for normalization)."""
+        """Maximum distance value (for normalization).
+
+        Cached after first computation — _distances is only modified
+        during initialization (BFS), never during fuzzing.
+        """
+        if not hasattr(self, "_cached_max_distance"):
+            self._cached_max_distance = None
+        if self._cached_max_distance is not None:
+            return self._cached_max_distance
         if not self._distances:
-            return 10.0
-        return max(self._distances.values()) + 1.0
+            self._cached_max_distance = 10.0
+        else:
+            self._cached_max_distance = max(self._distances.values()) + 1.0
+        return self._cached_max_distance
 
     def is_target(self, bb_addr: int) -> bool:
         """Check if a basic block address is in a target function."""
