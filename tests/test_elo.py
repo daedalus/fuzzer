@@ -466,7 +466,7 @@ class TestBayesianEloTracker:
         belo.init_arm("op_a")
         assert "op_a" in belo.mu
         assert belo.mu["op_a"] == 1500.0
-        assert abs(belo.sigma_sq["op_a"] - 350.0 ** 2) < 1.0
+        assert abs(belo.sigma_sq["op_a"] - 350.0**2) < 1.0
 
     def test_init_arm_idempotent(self):
         belo = BayesianEloTracker()
@@ -483,8 +483,8 @@ class TestBayesianEloTracker:
         assert belo.mu["A"] > 1500.0
         assert belo.mu["B"] < 1500.0
         # Variance should shrink (tau=0 so no re-inflation)
-        assert belo.sigma_sq["A"] < 350.0 ** 2
-        assert belo.sigma_sq["B"] < 350.0 ** 2
+        assert belo.sigma_sq["A"] < 350.0**2
+        assert belo.sigma_sq["B"] < 350.0**2
         assert belo._match_count["A"] == 1
         assert belo._match_count["B"] == 1
 

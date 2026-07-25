@@ -297,8 +297,14 @@ class SeedPicker:
         return w
 
     def _weight_entropy_and_distance(
-        self, seed: bytes, seed_key: str, meta: dict, w: float, f,
-        entropy_map: dict | None = None, mean_entropy: float = 0.0,
+        self,
+        seed: bytes,
+        seed_key: str,
+        meta: dict,
+        w: float,
+        f,
+        entropy_map: dict | None = None,
+        mean_entropy: float = 0.0,
         max_d: float = 0.0,
     ) -> float:
         """Apply Shannon entropy bonus and directed distance weight.
@@ -329,9 +335,7 @@ class SeedPicker:
                         for k in f._edge_tracker.seed_hit_counts
                         if f._edge_tracker.shannon_entropy_seed(k) > 0
                     ]
-                    self._mean_seed_entropy = (
-                        sum(entropies) / len(entropies) if entropies else 0.0
-                    )
+                    self._mean_seed_entropy = sum(entropies) / len(entropies) if entropies else 0.0
                     self._mean_entropy_cache_key = cache_key
                 effective_mean = self._mean_seed_entropy
 

@@ -11,6 +11,18 @@ from fuzzer_tool.core.mutations import load_dictionary
 from fuzzer_tool.services.fuzzer import Fuzzer
 
 
+def _load_hash_list(path: str | None) -> set[str] | None:
+    """Load a file of hex hashes (one per line) into a set."""
+    if not path:
+        return None
+    try:
+        lines = Path(path).read_text().splitlines()
+        return {line.strip() for line in lines if line.strip() and not line.startswith("#")}
+    except FileNotFoundError:
+        print(f"[!] Warning: hash list file not found: {path}")
+        return None
+
+
 def _detect_asan(target: str) -> bool:
     """Detect if a binary is ASAN-instrumented by checking for __asan_init symbol."""
     for flags in [[], ["-D"]]:
@@ -332,6 +344,9 @@ def cmd_fuzz(args):
         seed=args.seed,
         extra_crash_codes=args.crash_codes,
         replay_n=args.replay_n,
+        crash_blocklist=_load_hash_list(getattr(args, "crash_blocklist", None)),
+        crash_allowlist=_load_hash_list(getattr(args, "crash_allowlist", None)),
+        save_smaller=getattr(args, "save_smaller", False),
         schedule_ablation=getattr(args, "schedule_ablation", None),
         replicator=getattr(args, "replicator", False),
         shapley=getattr(args, "shapley", False),
@@ -1307,6 +1322,23 @@ def main() -> int:
         default=0,
         metavar="N",
         help="Replay each crash N times for reproducibility scoring (default: 0 = off)",
+    )
+    fuzz_parser.add_argument(
+        "--crash-blocklist",
+        default=None,
+        metavar="FILE",
+        help="File with stack hashes (one per line) to skip when saving crashes",
+    )
+    fuzz_parser.add_argument(
+        "--crash-allowlist",
+        default=None,
+        metavar="FILE",
+        help="File with stack hashes that override the blocklist (always save these)",
+    )
+    fuzz_parser.add_argument(
+        "--save-smaller",
+        action="store_true",
+        help="Replace crash triggers with smaller inputs for the same stack hash",
     )
     fuzz_parser.add_argument(
         "--schedule-ablation",

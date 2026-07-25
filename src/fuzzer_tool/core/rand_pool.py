@@ -64,7 +64,7 @@ class RandPool:
             return []
         if self._idx + count > _POOL_ENTRIES:
             self._refill()
-        raw = self._pool[self._idx:self._idx + count]
+        raw = self._pool[self._idx : self._idx + count]
         self._idx += count
         return (raw % n).tolist()
 
@@ -81,7 +81,7 @@ class RandPool:
             return []
         if self._idx + count > _POOL_ENTRIES:
             self._refill()
-        raw = self._pool[self._idx:self._idx + count]
+        raw = self._pool[self._idx : self._idx + count]
         self._idx += count
         return (raw.astype(np.float64) / 4294967296.0).tolist()
 
@@ -99,12 +99,12 @@ class RandPool:
         if self._idx + count > _POOL_ENTRIES:
             self._refill()
         # Slice: vectorized C-level read of count values
-        raw = self._pool[self._idx:self._idx + count]
+        raw = self._pool[self._idx : self._idx + count]
         self._idx += count
         # Vectorized modulo + offset, then fast tolist() for Python ints
         if width == 256:
             # Fast path: pre-computed % 256 array
-            result = self._m256[self._idx - count:self._idx]
+            result = self._m256[self._idx - count : self._idx]
             if a == 0:
                 return result.tolist()
             return [a + int(x) for x in result]
@@ -138,14 +138,14 @@ class RandPool:
         remaining = _POOL_ENTRIES - self._idx
         if n <= remaining:
             # Fast path: all bytes available in current pool
-            result = self._m256[self._idx:self._idx + n].tobytes()
+            result = self._m256[self._idx : self._idx + n].tobytes()
             self._idx += n
             return result
         # Slow path: need to refill — collect chunks
         parts = []
         # Drain current pool
         if remaining > 0:
-            parts.append(self._m256[self._idx:].tobytes())
+            parts.append(self._m256[self._idx :].tobytes())
             n -= remaining
         # Fill full pools directly
         while n >= _POOL_ENTRIES:
@@ -202,9 +202,7 @@ class RandPool:
         r = self.random() * total
         return seq[bisect.bisect_right(cum, r)]
 
-    def weighted_choice_list(
-        self, seq: list | tuple, weights: list[float], k: int
-    ) -> list:
+    def weighted_choice_list(self, seq: list | tuple, weights: list[float], k: int) -> list:
         """Return *k* elements from *seq* chosen proportional to *weights*.
 
         ``random.choices(seq, weights=weights, k=k)`` equivalent.
@@ -336,8 +334,7 @@ class RandPool:
         if count <= 0:
             return []
         return list(
-            np.random.gamma(alpha, scale=1.0 / beta, size=count)
-            if beta > 0 else np.zeros(count)
+            np.random.gamma(alpha, scale=1.0 / beta, size=count) if beta > 0 else np.zeros(count)
         )
 
     def lognormvariate(self, mu: float = 0.0, sigma: float = 1.0) -> float:

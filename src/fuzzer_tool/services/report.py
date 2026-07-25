@@ -254,8 +254,7 @@ def _mutation_edge_attribution(f) -> str:
         "--- Mutation Edge Attribution ---",
         f"  {'Operation':<22s} {'Edges':>8s} {'%Total':>7s} "
         f"{'Edges/Use':>10s} {'Edges/Success':>13s}",
-        f"  {'-'*22} {'-'*8} {'-'*7} "
-        f"{'-'*10} {'-'*13}",
+        f"  {'-' * 22} {'-' * 8} {'-' * 7} {'-' * 10} {'-' * 13}",
     ]
 
     for op, edge_val in sorted(op_edges.items(), key=lambda x: -x[1]):

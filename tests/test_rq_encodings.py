@@ -70,8 +70,10 @@ class TestEncoders:
 
     def test_ascii_encoder_encode(self):
         import struct
+
         a10 = type("", (), {})()  # simple mock
         from fuzzer_tool.core.rq_encodings import AsciiEncoder
+
         enc = AsciiEncoder(10, False)
         val = struct.pack("<I", 42)
         assert enc.encode(val) == [b"42"]
@@ -135,9 +137,7 @@ class TestFindOffsets:
 
 class TestGenerateMutations:
     def test_basic_plain(self):
-        mutations = generate_mutations(
-            b"\xff\xfe", b"\x00\x01", 16, "CMP", b"\xff\xfe\x00\x00"
-        )
+        mutations = generate_mutations(b"\xff\xfe", b"\x00\x01", 16, "CMP", b"\xff\xfe\x00\x00")
         assert len(mutations) > 0
         offsets, replacements, enc = mutations[0]
         assert isinstance(offsets, tuple)
@@ -145,17 +145,13 @@ class TestGenerateMutations:
         assert len(offsets) >= 1
 
     def test_returns_mutations_with_encoder(self):
-        mutations = generate_mutations(
-            b"\x01\x02", b"\x03\x04", 16, "CMP", b"\x01\x02\xff"
-        )
+        mutations = generate_mutations(b"\x01\x02", b"\x03\x04", 16, "CMP", b"\x01\x02\xff")
         assert len(mutations) > 0
         _, _, enc = mutations[0]
         assert hasattr(enc, "name")
 
     def test_no_match_returns_empty(self):
-        mutations = generate_mutations(
-            b"\x01\x02", b"\x03\x04", 16, "CMP", b"\x05\x06"
-        )
+        mutations = generate_mutations(b"\x01\x02", b"\x03\x04", 16, "CMP", b"\x05\x06")
         assert mutations == []
 
     def test_split_encoder_multi_chunk(self):
@@ -210,7 +206,11 @@ class TestGenerateMutations:
     def test_hash_skip(self):
         """Hash-like pairs should be skipped when is_hash is provided."""
         mutations = generate_mutations(
-            b"\x01\x02", b"\x03\x04", 16, "CMP", b"\x01\x02\xff",
+            b"\x01\x02",
+            b"\x03\x04",
+            16,
+            "CMP",
+            b"\x01\x02\xff",
             is_hash=lambda a, b: True,
         )
         assert mutations == []
@@ -219,9 +219,7 @@ class TestGenerateMutations:
         data = b"hello world"
         op_a = b"hello"
         op_b = b"world"
-        mutations = generate_mutations(
-            op_a, op_b, 512, "STR", data, hammer=True
-        )
+        mutations = generate_mutations(op_a, op_b, 512, "STR", data, hammer=True)
         # Should find "hello" in data and suggest various replacements
         found = any(b"hello" in data for _, _, _ in mutations)
         # If encoders match, there should be at least some mutations

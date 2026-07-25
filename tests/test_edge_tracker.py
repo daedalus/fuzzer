@@ -443,6 +443,7 @@ class TestBayesianGrowthModel:
         et = EdgeTracker()
         # Simulate a coverage growth curve: fast start, slowing down
         import math as _m
+
         timeline = []
         for i in range(20):
             exec_count = i * 100
@@ -465,6 +466,7 @@ class TestBayesianGrowthModel:
     def test_bayesian_model_converged_plateau(self):
         et = EdgeTracker()
         import math as _m
+
         # Simulate fully saturated coverage — rate dropped to near zero
         timeline = []
         for i in range(30):

@@ -456,8 +456,8 @@ class TestModuloHeuristic:
         (mask=7 < 65536) before modulo fires.  The test verifies that
         XOR produces the same solved_bytes (0) as modulo would."""
         s = Z3Solver(mod_solving_mode="heuristic")
-        op_a = struct.pack("<I", 7)   # remainder
-        op_b = struct.pack("<I", 0)   # expected
+        op_a = struct.pack("<I", 7)  # remainder
+        op_b = struct.pack("<I", 0)  # expected
         result = s.solve_cmplog_pair(op_a, op_b)
         # XOR fires first, neither is wrong — both would replace with 0
         assert result is not None
@@ -472,7 +472,7 @@ class TestModuloHeuristic:
         # and val_b is 0.  If val_a ^ 0 = val_a < 65536, XOR fires first.
         # Accept either relation as long as solved is 0.
         op_a = struct.pack("<H", 48)  # 48 % 8 == 0, 48 % 16 == 0
-        op_b = struct.pack("<H", 0)   # expected
+        op_b = struct.pack("<H", 0)  # expected
         result = s.solve_cmplog_pair(op_a, op_b)
         assert result is not None
         solved = int.from_bytes(result["solved_bytes"], "little")
@@ -547,8 +547,8 @@ class TestConcolic:
         s = Z3Solver(mod_solving_mode="concolic")
         input_data = bytes([10, 20, 30, 40, 50])
         # input[1:5] = [20, 30, 40, 50] in LE = 841489940
-        op_a = struct.pack("<I", 0)            # some computed value
-        op_b = struct.pack("<I", 841489940)    # = input[1:5] LE
+        op_a = struct.pack("<I", 0)  # some computed value
+        op_b = struct.pack("<I", 841489940)  # = input[1:5] LE
         s.solve_cmplog_pair(op_a, op_b)
         assert s.concolic_trace is not None
         assert s.concolic_trace.has_entries()

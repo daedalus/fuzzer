@@ -526,7 +526,11 @@ class OperatorEngine:
         f = self.f
         # Use dictionary tokens as "auto-extras" if available
         if f.dictionary:
-            tid = f._dict_scratch[f._dict_scratch_idx] if f._dict_scratch_idx < len(f._dict_scratch) else 0
+            tid = (
+                f._dict_scratch[f._dict_scratch_idx]
+                if f._dict_scratch_idx < len(f._dict_scratch)
+                else 0
+            )
             f._dict_scratch_idx += 1
             token = f.dictionary[tid]
             if isinstance(token, str):
@@ -734,9 +738,7 @@ class OperatorEngine:
         rng = self.f._rand_pool
         if self.f.mc and self.f.mc.cem_fitted:
             if buf:
-                buf[rng.randint(0, len(buf) - 1)] = self.f.mc.cem_byte(
-                    rng.randint(0, len(buf) - 1)
-                )
+                buf[rng.randint(0, len(buf) - 1)] = self.f.mc.cem_byte(rng.randint(0, len(buf) - 1))
             else:
                 return bytearray(self.f.mc.cem_sample(rng.randint(1, min(32, self.f.max_len))))
 
@@ -762,7 +764,9 @@ class OperatorEngine:
                 return bytearray(crossover(a, b, rng=rng)[: self.f.max_len])
             others = [c for c in self.f.corpus if c is not data]
             if others:
-                return bytearray(crossover(bytes(buf), rng.choice(others), rng=rng)[: self.f.max_len])
+                return bytearray(
+                    crossover(bytes(buf), rng.choice(others), rng=rng)[: self.f.max_len]
+                )
 
     def _op_type_replace(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import type_replace
@@ -792,31 +796,43 @@ class OperatorEngine:
         from fuzzer_tool.core.mutations import byte_insert
 
         if buf and len(buf) < self.f.max_len:
-            return bytearray(byte_insert(bytes(buf), self.f.max_len, rng=self.f._rand_pool)[: self.f.max_len])
+            return bytearray(
+                byte_insert(bytes(buf), self.f.max_len, rng=self.f._rand_pool)[: self.f.max_len]
+            )
 
     def _op_insert_ascii_num(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import insert_ascii_num
 
         if buf and len(buf) < self.f.max_len:
-            return bytearray(insert_ascii_num(bytes(buf), self.f.max_len, rng=self.f._rand_pool)[: self.f.max_len])
+            return bytearray(
+                insert_ascii_num(bytes(buf), self.f.max_len, rng=self.f._rand_pool)[
+                    : self.f.max_len
+                ]
+            )
 
     def _op_transpose_16(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import transpose_bytes
 
         if len(buf) >= 2:
-            return bytearray(transpose_bytes(bytes(buf), 2, rng=self.f._rand_pool)[: self.f.max_len])
+            return bytearray(
+                transpose_bytes(bytes(buf), 2, rng=self.f._rand_pool)[: self.f.max_len]
+            )
 
     def _op_transpose_32(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import transpose_bytes
 
         if len(buf) >= 4:
-            return bytearray(transpose_bytes(bytes(buf), 4, rng=self.f._rand_pool)[: self.f.max_len])
+            return bytearray(
+                transpose_bytes(bytes(buf), 4, rng=self.f._rand_pool)[: self.f.max_len]
+            )
 
     def _op_transpose_64(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import transpose_bytes
 
         if len(buf) >= 8:
-            return bytearray(transpose_bytes(bytes(buf), 8, rng=self.f._rand_pool)[: self.f.max_len])
+            return bytearray(
+                transpose_bytes(bytes(buf), 8, rng=self.f._rand_pool)[: self.f.max_len]
+            )
 
     def _op_bit_transpose_8(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import bit_transpose
@@ -926,10 +942,24 @@ class OperatorEngine:
                 val = int.from_bytes(buf[idx : idx + width], "little")
                 buf[idx : idx + width] = val.to_bytes(width, "big")
 
+    def _op_tlv_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.tlv_mutate import tlv_mutate
+
+        if buf:
+            return bytearray(tlv_mutate(bytes(buf), rng=self.f._rand_pool)[: self.f.max_len])
+
+    def _op_token_shuffle(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.token_shuffle import token_shuffle
+
+        if buf and len(buf) >= 4:
+            return bytearray(token_shuffle(bytes(buf), rng=self.f._rand_pool)[: self.f.max_len])
+
     def _op_grammar_mutate(self, buf, _byte_idx, _data):
         if self.f.grammar:
             return bytearray(
-                self.f.grammar.mutate(bytes(buf), max_len=self.f.max_len, rng=self.f._rand_pool)[: self.f.max_len]
+                self.f.grammar.mutate(bytes(buf), max_len=self.f.max_len, rng=self.f._rand_pool)[
+                    : self.f.max_len
+                ]
             )
 
     def _op_grammar_tree_mutate(self, buf, _byte_idx, _data):
@@ -940,7 +970,9 @@ class OperatorEngine:
                 self.f._tree_mutator = TreeMutator(self.f.grammar)
             tree = self.f._tree_mutator.parse(bytes(buf))
             return bytearray(
-                self.f._tree_mutator.mutate_tree(tree, max_len=self.f.max_len, rng=self.f._rand_pool)[: self.f.max_len]
+                self.f._tree_mutator.mutate_tree(
+                    tree, max_len=self.f.max_len, rng=self.f._rand_pool
+                )[: self.f.max_len]
             )
 
     def _op_png_chunk_mutate(self, buf, _byte_idx, _data):
@@ -1048,9 +1080,7 @@ class OperatorEngine:
                             data[rng.randint(0, len(data) - 1)] ^= 1 << rng.randint(0, 7)
                         chunk.data = bytes(data)
                     else:
-                        chunk.data = bytes(
-                            rng.randint(0, 255) for _ in range(rng.randint(1, 32))
-                        )
+                        chunk.data = bytes(rng.randint(0, 255) for _ in range(rng.randint(1, 32)))
                     return bytearray(serialize_png_chunks(chunks)[: self.f.max_len])
 
     def _op_redqueen(self, buf, _byte_idx, data):
@@ -1148,6 +1178,8 @@ class OperatorEngine:
             "swap_regions": self._op_swap_regions,
             "swap_bytes": self._op_swap_bytes,
             "endianness_swap": self._op_endianness_swap,
+            "tlv_mutate": self._op_tlv_mutate,
+            "token_shuffle": self._op_token_shuffle,
             "grammar_mutate": self._op_grammar_mutate,
             "grammar_tree_mutate": self._op_grammar_tree_mutate,
             "png_chunk_mutate": self._op_png_chunk_mutate,
@@ -1176,26 +1208,27 @@ class OperatorEngine:
         # individual randint/randrange Python calls.
         r = self.f._rand_pool.randint_list(0, 1 << 30, 4)
         op = r[0] % 11
-        if op == 0:                                 # bit flip
+        if op == 0:  # bit flip
             buf[r[1] % len(buf)] ^= 1 << (r[2] % 8)
-        elif op == 1:                               # byte set
+        elif op == 1:  # byte set
             buf[r[1] % len(buf)] = r[2] % 256
-        elif op == 2 and len(buf) > 1:              # byte swap
+        elif op == 2 and len(buf) > 1:  # byte swap
             i = r[1] % len(buf)
             j = (i + 1 + r[2] % (len(buf) - 1)) % len(buf)
             buf[i], buf[j] = buf[j], buf[i]
         elif op == 3 and len(buf) < self.f.max_len:  # insert byte
             idx = r[1] % (len(buf) + 1)
             buf.insert(idx, r[2] % 256)
-        elif op == 4 and len(buf) > 1:               # delete block
+        elif op == 4 and len(buf) > 1:  # delete block
             idx = r[1] % len(buf)
             size = 1 + r[2] % min(len(buf) - 1, len(buf) - idx)
             del buf[idx : idx + size]
-        elif op == 5 and len(buf) >= 4:              # CRC32 repair
+        elif op == 5 and len(buf) >= 4:  # CRC32 repair
             import zlib
+
             pos = r[1] % max(1, len(buf) - 3)
             buf[pos : pos + 4] = zlib.crc32(bytes(buf[:pos])).to_bytes(4, "big")
-        elif op == 6 and len(buf) >= 2:              # swap regions
+        elif op == 6 and len(buf) >= 2:  # swap regions
             i = r[1] % (len(buf) - 1)
             j = i + 1 + r[2] % (len(buf) - i - 1)
             size = 1 + r[3] % min(j - i, 8)
@@ -1203,20 +1236,20 @@ class OperatorEngine:
             b = buf[j : j + size]
             buf[i : i + size] = b
             buf[j : j + size] = a
-        elif op == 7 and buf:                        # endianness swap
+        elif op == 7 and buf:  # endianness swap
             width = 2 if r[1] % 2 == 0 else 4
             if len(buf) >= width:
                 idx = r[2] % (len(buf) - width + 1)
                 val = int.from_bytes(buf[idx : idx + width], "little")
                 buf[idx : idx + width] = val.to_bytes(width, "big")
-        elif op == 8 and buf:                        # byte insert
+        elif op == 8 and buf:  # byte insert
             if len(buf) < self.f.max_len:
                 idx = r[1] % (len(buf) + 1)
                 buf.insert(idx, r[2] % 256)
-        elif op == 9 and buf:                        # random byte
+        elif op == 9 and buf:  # random byte
             idx = r[1] % len(buf)
             buf[idx] = r[2] % 256
-        elif op == 10 and len(buf) >= 2:             # shuffle range
+        elif op == 10 and len(buf) >= 2:  # shuffle range
             start = r[1] % (len(buf) - 1)
             end = min(start + 2 + r[2] % 7, len(buf))
             region = buf[start:end]

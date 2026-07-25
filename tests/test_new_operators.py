@@ -8,6 +8,7 @@ from fuzzer_tool.services.operators import OperatorEngine
 
 def _make_minimal_fuzzer():
     """Build a minimal fuzzer-like object for operator testing."""
+
     class _MockCorpus:
         _items = [b"AAAA", b"BBBB", b"CCCC", b"DDDD"]
 
@@ -19,6 +20,7 @@ def _make_minimal_fuzzer():
 
     class _MockMarkov:
         order = 2
+
         def sample_byte(self, ctx):
             return 42
 
@@ -34,8 +36,7 @@ def _make_minimal_fuzzer():
         def get_weighted_position(self, data, n):
             return None
 
-    class _MockElo:
-        ...
+    class _MockElo: ...
 
     class _MockFrameshift:
         relations = []
@@ -84,6 +85,7 @@ def _make_minimal_fuzzer():
             self_._smt_solver = None
             self_.enable_regex_bomb = False
             from fuzzer_tool.core.rand_pool import RandPool
+
             self_._rand_pool = RandPool()
             self_._dict_scratch = []
             self_._dict_scratch_idx = 0
@@ -103,10 +105,7 @@ class TestUtf8Widen:
         self.engine._op_utf8_widen(buf, 0, b"")
         assert len(buf) > 5  # got wider
         # Find the widened byte (now a 2-byte sequence)
-        widened = any(
-            buf[i] >= 0xC0 and 0x80 <= buf[i + 1] <= 0xBF
-            for i in range(len(buf) - 1)
-        )
+        widened = any(buf[i] >= 0xC0 and 0x80 <= buf[i + 1] <= 0xBF for i in range(len(buf) - 1))
         assert widened
 
     def test_widens_different_positions(self):
@@ -356,9 +355,16 @@ class TestNewOperatorsRegistered:
     def test_dispatch_contains_all_new_ops(self):
         engine = OperatorEngine(_make_minimal_fuzzer())
         dispatch = engine.build_dispatch()
-        for op in ("tree_mutate", "utf8_widen", "utf8_insert",
-                    "line_mutate", "fuse_this", "fuse_next", "fuse_old",
-                    "redqueen_xform"):
+        for op in (
+            "tree_mutate",
+            "utf8_widen",
+            "utf8_insert",
+            "line_mutate",
+            "fuse_this",
+            "fuse_next",
+            "fuse_old",
+            "redqueen_xform",
+        ):
             assert op in dispatch, f"{op} missing from dispatch table"
 
 

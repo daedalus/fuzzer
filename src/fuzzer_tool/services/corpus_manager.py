@@ -93,6 +93,7 @@ class CorpusManager:
             "corpus_size_history": f._corpus_size_history[-500:],
             "seed_meta": {},
             "crash_frames": f.crash_frames,
+            "crash_min_sizes": f.crash_min_sizes,
         }
         for seed, meta in f.seed_meta.items():
             key = seed.hex()
@@ -138,6 +139,7 @@ class CorpusManager:
         f.timeout_count = state.get("timeout_count", 0)
         f.crash_sigs = state.get("crash_sigs", {})
         f.crash_frames = state.get("crash_frames", {})
+        f.crash_min_sizes = state.get("crash_min_sizes", {})
         f.op_counts = state.get("op_counts", {})
         f.op_success = state.get("op_success", {})
         f.op_edges = state.get("op_edges", {})
@@ -233,6 +235,9 @@ class CorpusManager:
             f.crash_hashes,
             f.crash_sigs,
             metadata=meta,
+            crash_blocklist=f.crash_blocklist if f.crash_blocklist else None,
+            crash_allowlist=f.crash_allowlist if f.crash_allowlist else None,
+            crash_min_sizes=f.crash_min_sizes if f.save_smaller else None,
         )
 
     def save_to_corpus(self, data: bytes, parent: bytes | None = None):
@@ -272,7 +277,7 @@ class CorpusManager:
                 )
                 f.ga.add_to_population(ind)
             f._agg_cache_valid = False  # corpus structure changed
-            getattr(f, '_invalidate_seed_key_cache', lambda: None)()
+            getattr(f, "_invalidate_seed_key_cache", lambda: None)()
             f.seed_meta[data] = {
                 "fuzz_count": 0,
                 "coverage_edges": 0,
@@ -360,7 +365,7 @@ class CorpusManager:
         if data in f.seed_meta:
             f.seed_meta.pop(data, None)
             f._agg_cache_valid = False  # corpus structure changed
-            getattr(f, '_invalidate_seed_key_cache', lambda: None)()
+            getattr(f, "_invalidate_seed_key_cache", lambda: None)()
         if data in f.corpus:
             idx = f.corpus.index(data)
             f.corpus[idx] = trimmed
@@ -480,8 +485,7 @@ class CorpusManager:
                 target_size = max(target_size, productive)
 
         if len(unique) > target_size or (
-            f.max_corpus_bytes > 0
-            and sum(len(s) for s in unique) > f.max_corpus_bytes
+            f.max_corpus_bytes > 0 and sum(len(s) for s in unique) > f.max_corpus_bytes
         ):
             # Split into mandatory (set-cover essential) and optional.
             mandatory_seeds = [s for s in unique if id(s) in mandatory]
@@ -596,7 +600,7 @@ class CorpusManager:
                     new_meta[seed] = f.seed_meta[seed]
             f.seed_meta = new_meta
             f._agg_cache_valid = False
-            getattr(f, '_invalidate_seed_key_cache', lambda: None)()
+            getattr(f, "_invalidate_seed_key_cache", lambda: None)()
             f._weight_cache = None
             f._cached_weights = {}
             f._last_minimize_exec = f.exec_count
@@ -648,7 +652,7 @@ class CorpusManager:
             for s in to_remove:
                 f.seed_meta.pop(s, None)
             f._agg_cache_valid = False
-            getattr(f, '_invalidate_seed_key_cache', lambda: None)()
+            getattr(f, "_invalidate_seed_key_cache", lambda: None)()
             f._weight_cache = None
             f._cached_weights = {}
             log.info(

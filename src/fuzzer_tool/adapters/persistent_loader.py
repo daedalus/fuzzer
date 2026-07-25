@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 log = logging.getLogger(__name__)
 
@@ -175,6 +176,12 @@ class PersistentLoader:
         self._restarting = False
         self._child_pid_file: str | None = None
 
+        # Throughput monitoring
+        self._exec_times: list[float] = []  # rolling window of exec durations
+        self._exec_window_size = 100  # track last N execs
+        self._baseline_eps: float = 0.0  # calibrated execs/sec
+        self._slow_restart_threshold = 0.10  # restart if below 10% of baseline
+
     def start(self) -> bool:
         if self._proc and self._proc.poll() is None:
             return True
@@ -237,6 +244,7 @@ class PersistentLoader:
         if not self._ready or not self._proc:
             return -2, None
 
+        t_start = time.monotonic()
         cmd = f"RUN {len(data)}\n"
         try:
             self._proc.stdin.write(cmd.encode())
@@ -299,6 +307,40 @@ class PersistentLoader:
             bitmap = self._proc.stdout.read(bmp_len)
 
         self._last_bitmap = bitmap
+
+        # Track throughput
+        elapsed = time.monotonic() - t_start
+        self._exec_times.append(elapsed)
+        if len(self._exec_times) > self._exec_window_size:
+            self._exec_times.pop(0)
+
+        # Calibrate baseline on first batch
+        if self._baseline_eps == 0.0 and len(self._exec_times) >= self._exec_window_size:
+            avg = sum(self._exec_times) / len(self._exec_times)
+            if avg > 0:
+                self._baseline_eps = 1.0 / avg
+
+        # Check for sustained slowdown (only after calibration)
+        if self._baseline_eps > 0 and len(self._exec_times) >= self._exec_window_size:
+            recent_avg = sum(self._exec_times[-20:]) / min(20, len(self._exec_times))
+            if recent_avg > 0:
+                current_eps = 1.0 / recent_avg
+                if current_eps < self._baseline_eps * self._slow_restart_threshold:
+                    log.warning(
+                        "Persistent loader throughput dropped: %.1f eps -> %.1f eps (%.0f%% of baseline)",
+                        self._baseline_eps,
+                        current_eps,
+                        100 * current_eps / self._baseline_eps,
+                    )
+                    # Restart the loader
+                    self._ready = False
+                    if not self._restarting:
+                        self._restarting = True
+                        try:
+                            self.start()
+                        finally:
+                            self._restarting = False
+
         return rc, bitmap
 
     def stop(self):

@@ -241,7 +241,7 @@ class TestRunningMomentsSaveLoad:
                     m2_w = sum((v - mean_w) ** 2 for v in window) / n
                     m3_w = sum((v - mean_w) ** 3 for v in window) / n
                     if m2_w > 0:
-                        expected_skew = m3_w / (m2_w ** 1.5)
+                        expected_skew = m3_w / (m2_w**1.5)
                         assert abs(m.skewness - expected_skew) < 1e-8, (
                             f"skewness mismatch at step {i}: {m.skewness} vs {expected_skew}"
                         )

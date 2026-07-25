@@ -19,7 +19,7 @@ log = logging.getLogger(__name__)
 
 # Default number of hash table entries.
 # SHM default = 8192 entries * 8 bytes = 65536 bytes.
-SHM_MAP_SIZE = 8192          # number of entries
+SHM_MAP_SIZE = 8192  # number of entries
 SIZEOF_ENTRY = 8  # bytes per {edge_id: u32, count: u32}
 
 # shmget constants
@@ -57,11 +57,13 @@ class CoverageEntry(NamedTuple):
 
 def _entry_struct(size: int) -> type[ctypes.Structure]:
     """Create a ctypes Structure representing ``size`` entries."""
+
     class _AflEntry(ctypes.Structure):
         _fields_ = [
             ("edge_id", ctypes.c_uint32),
             ("count", ctypes.c_uint32),
         ]
+
     return _AflEntry * size
 
 
@@ -143,7 +145,8 @@ class ShmCoverage:
         import numpy as np
 
         arr = np.frombuffer(
-            self._map, dtype=np.dtype([("edge_id", "<u4"), ("count", "<u4")]),
+            self._map,
+            dtype=np.dtype([("edge_id", "<u4"), ("count", "<u4")]),
             count=self.num_entries,
         )
         active = arr[arr["edge_id"] != 0]
@@ -155,7 +158,8 @@ class ShmCoverage:
         import numpy as np
 
         arr = np.frombuffer(
-            self._map, dtype=np.dtype([("edge_id", "<u4"), ("count", "<u4")]),
+            self._map,
+            dtype=np.dtype([("edge_id", "<u4"), ("count", "<u4")]),
             count=self.num_entries,
         )
         active = arr[arr["edge_id"] != 0]
@@ -210,7 +214,8 @@ class ShmCoverage:
         import numpy as np
 
         arr = np.frombuffer(
-            self._map, dtype=np.dtype([("edge_id", "<u4"), ("count", "<u4")]),
+            self._map,
+            dtype=np.dtype([("edge_id", "<u4"), ("count", "<u4")]),
             count=self.num_entries,
         )
         active = arr[arr["edge_id"] != 0]
@@ -219,7 +224,9 @@ class ShmCoverage:
             if eid not in self._seen_edge_ids:
                 self._seen_edge_ids.add(eid)
                 self.cumulative_edges += 1
-                self._peak_cumulative_edges = max(self._peak_cumulative_edges, self.cumulative_edges)
+                self._peak_cumulative_edges = max(
+                    self._peak_cumulative_edges, self.cumulative_edges
+                )
                 new_found = True
 
         # Update snapshot for next comparison
@@ -242,7 +249,8 @@ class ShmCoverage:
         import numpy as np
 
         arr = np.frombuffer(
-            self._map, dtype=np.dtype([("edge_id", "<u4"), ("count", "<u4")]),
+            self._map,
+            dtype=np.dtype([("edge_id", "<u4"), ("count", "<u4")]),
             count=self.num_entries,
         )
         active = arr[arr["edge_id"] != 0]
@@ -269,7 +277,8 @@ class ShmCoverage:
         import numpy as np
 
         arr = np.frombuffer(
-            self._map, dtype=np.dtype([("edge_id", "<u4"), ("count", "<u4")]),
+            self._map,
+            dtype=np.dtype([("edge_id", "<u4"), ("count", "<u4")]),
             count=self.num_entries,
         )
         active = arr[arr["edge_id"] != 0]
@@ -277,7 +286,9 @@ class ShmCoverage:
             if eid not in self._seen_edge_ids:
                 self._seen_edge_ids.add(eid)
                 self.cumulative_edges += 1
-                self._peak_cumulative_edges = max(self._peak_cumulative_edges, self.cumulative_edges)
+                self._peak_cumulative_edges = max(
+                    self._peak_cumulative_edges, self.cumulative_edges
+                )
 
     # ── Manual recording (for tests) ─────────────────────────────────────
 
@@ -296,7 +307,9 @@ class ShmCoverage:
                 if edge_id not in self._seen_edge_ids:
                     self._seen_edge_ids.add(edge_id)
                     self.cumulative_edges += 1
-                    self._peak_cumulative_edges = max(self._peak_cumulative_edges, self.cumulative_edges)
+                    self._peak_cumulative_edges = max(
+                        self._peak_cumulative_edges, self.cumulative_edges
+                    )
                 self.total_edges += 1
                 return True
             if eid == edge_id:

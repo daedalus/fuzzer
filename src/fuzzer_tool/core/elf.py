@@ -374,8 +374,14 @@ def extract_capstone_constants(target: str) -> list[bytes]:
     # Instructions whose immediate operands are likely comparison constants.
     # MOV is excluded because most immediates it loads are addresses/offsets.
     TARGET_INSNS = {
-        X86_INS_CMP, X86_INS_TEST, X86_INS_AND, X86_INS_OR,
-        X86_INS_XOR, X86_INS_SUB, X86_INS_ADD, X86_INS_CMPXCHG,
+        X86_INS_CMP,
+        X86_INS_TEST,
+        X86_INS_AND,
+        X86_INS_OR,
+        X86_INS_XOR,
+        X86_INS_SUB,
+        X86_INS_ADD,
+        X86_INS_CMPXCHG,
     }
 
     constants: set[bytes] = set()
@@ -540,24 +546,24 @@ def _reg_base(md, reg_id: int) -> str | None:
         return None
     name = name.lower()
     # Extended registers r8-r15 in various widths
-    if len(name) >= 2 and name[0] == 'r':
+    if len(name) >= 2 and name[0] == "r":
         try:
             _ = int(name[1])  # is it r8, r9, ... r15?
             # Strip trailing width suffix: r8b → r8, r8w → r8, r8d → r8
-            if name[-1] in ('b', 'w', 'd') and len(name) >= 3:
+            if name[-1] in ("b", "w", "d") and len(name) >= 3:
                 return name[:-1]
             return name  # already the base (r8, r9, ..., r15)
         except ValueError:
             pass
     # Strip 'e' or 'r' prefix: eax → ax, rax → ax
-    if name[0] in ('e', 'r') and len(name) > 2:
+    if name[0] in ("e", "r") and len(name) > 2:
         return name[1:]
     # Low-byte registers: al, bl, cl, dl → ax, bx, cx, dx
-    if len(name) == 2 and name[1] == 'l' and name[0] in 'abcd':
-        return name[0] + 'x'
+    if len(name) == 2 and name[1] == "l" and name[0] in "abcd":
+        return name[0] + "x"
     # High-byte registers: ah, bh, ch, dh → ax, bx, cx, dx
-    if len(name) == 2 and name[1] == 'h' and name[0] in 'abcd':
-        return name[0] + 'x'
+    if len(name) == 2 and name[1] == "h" and name[0] in "abcd":
+        return name[0] + "x"
     return name
 
 
@@ -569,8 +575,11 @@ def _extract_imm(insn) -> int | None:
     """
     try:
         from capstone.x86_const import (
-            X86_INS_MOV, X86_INS_MOVABS, X86_INS_LEA,
-            X86_OP_IMM, X86_OP_MEM,
+            X86_INS_MOV,
+            X86_INS_MOVABS,
+            X86_INS_LEA,
+            X86_OP_IMM,
+            X86_OP_MEM,
         )
     except ImportError:
         return None
@@ -595,7 +604,9 @@ def _is_ctrl_flow(insn) -> bool:
     """Return True if *insn* changes control flow (call, jmp, ret, jcc)."""
     try:
         from capstone.x86_const import (
-            X86_GRP_CALL, X86_GRP_JUMP, X86_GRP_RET,
+            X86_GRP_CALL,
+            X86_GRP_JUMP,
+            X86_GRP_RET,
         )
     except ImportError:
         return False
@@ -631,11 +642,18 @@ def extract_div_constants(target: str) -> tuple[dict[int, int], set[int]]:
     try:
         from capstone import CS_ARCH_X86, CS_MODE_64, Cs
         from capstone.x86_const import (
-            X86_INS_DIV, X86_INS_IDIV,
-            X86_INS_MOV, X86_INS_MOVABS, X86_INS_LEA,
+            X86_INS_DIV,
+            X86_INS_IDIV,
+            X86_INS_MOV,
+            X86_INS_MOVABS,
+            X86_INS_LEA,
             X86_INS_CMP,
-            X86_OP_IMM, X86_OP_REG, X86_OP_MEM,
-            X86_GRP_CALL, X86_GRP_JUMP, X86_GRP_RET,
+            X86_OP_IMM,
+            X86_OP_REG,
+            X86_OP_MEM,
+            X86_GRP_CALL,
+            X86_GRP_JUMP,
+            X86_GRP_RET,
         )
     except ImportError:
         return {}, set()
@@ -667,12 +685,12 @@ def extract_div_constants(target: str) -> tuple[dict[int, int], set[int]]:
             break
         sh_type = struct.unpack_from("<I", elf, sh + 4)[0]
         sh_name_idx = struct.unpack_from("<I", elf, sh)[0]
-        name = elf[shstr_offset + sh_name_idx: shstr_offset + sh_name_idx + 32].split(b"\x00")[0]
+        name = elf[shstr_offset + sh_name_idx : shstr_offset + sh_name_idx + 32].split(b"\x00")[0]
         if sh_type == 1 and name == b".text":
             sh_offset = struct.unpack_from("<Q", elf, sh + 24)[0]
             sh_size = struct.unpack_from("<Q", elf, sh + 32)[0]
             text_vaddr = struct.unpack_from("<Q", elf, sh + 16)[0]
-            text_data = elf[sh_offset: sh_offset + sh_size]
+            text_data = elf[sh_offset : sh_offset + sh_size]
             break
 
     if not text_data:
@@ -712,7 +730,7 @@ def extract_div_constants(target: str) -> tuple[dict[int, int], set[int]]:
     _dx_family: set[int] = set()
     for rid in range(1, 200):
         b = _reg_base(md, rid)
-        if b == 'dx':
+        if b == "dx":
             _dx_family.add(rid)
 
     # Cache of known DIV addresses → divisors
@@ -763,9 +781,11 @@ def extract_div_constants(target: str) -> tuple[dict[int, int], set[int]]:
         # A CMP that references the 'dx' register family may be checking
         # the remainder from a preceding DIV.  If the DIV's divisor is
         # known it goes into div_map; otherwise into weak_mod_pcs.
-        if (insn.id == X86_INS_CMP and len(insn.operands) >= 2
-                and any(op.type == X86_OP_REG and op.reg in _dx_family
-                        for op in insn.operands)):
+        if (
+            insn.id == X86_INS_CMP
+            and len(insn.operands) >= 2
+            and any(op.type == X86_OP_REG and op.reg in _dx_family for op in insn.operands)
+        ):
             for prev_insn, _ in reversed(recent[:-1]):
                 if prev_insn.id in (X86_INS_DIV, X86_INS_IDIV):
                     d = _known_divs.get(prev_insn.address)
@@ -778,8 +798,10 @@ def extract_div_constants(target: str) -> tuple[dict[int, int], set[int]]:
 
     if div_map or weak_mod_pcs:
         import logging as _logging
+
         _logging.getLogger(__name__).info(
             "elf: found %d DIV/IDIV mappings, %d weak modulus PCs",
-            len(div_map), len(weak_mod_pcs),
+            len(div_map),
+            len(weak_mod_pcs),
         )
     return div_map, weak_mod_pcs

@@ -220,6 +220,7 @@ class TestBuildMinimalShim:
             shim = build_minimal_shim()
             assert shim is None
 
+
 class TestBuildShim:
     def test_no_coverage_returns_none_type(self):
         with patch("fuzzer_tool.adapters.shim_factory._inspect_target") as mock:
@@ -309,5 +310,3 @@ class TestBuildShim:
             mock_build.return_value = "/tmp/shim.so"
             result = build_shim("/fake/target", mode="direct")
             assert result.bitmap_size == 0
-
-

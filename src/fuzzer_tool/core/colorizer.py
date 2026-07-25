@@ -104,9 +104,7 @@ class Colorizer:
 
     def color_mask(self) -> bytes:
         """Return a mask where COLORABLE bytes are 0xFF, others are 0x00."""
-        return bytes(
-            0xFF if v == COLORABLE else 0x00 for v in self.color_info
-        )
+        return bytes(0xFF if v == COLORABLE else 0x00 for v in self.color_info)
 
     def fraction_classified(self) -> float:
         """Return the fraction of bytes that are classified (not UNKNOWN)."""
@@ -199,6 +197,4 @@ class CmplogColorizer:
         """Return a mask where COLORABLE bytes are 0xFF, others are 0x00."""
         if self.color_info is None:
             return b""
-        return bytes(
-            0xFF if v == COLORABLE else 0x00 for v in self.color_info
-        )
+        return bytes(0xFF if v == COLORABLE else 0x00 for v in self.color_info)

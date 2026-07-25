@@ -423,8 +423,8 @@ class TestLevenshteinAlign:
 
     def test_repeated_bytes(self):
         """Inputs with repeated bytes (common in fuzzing)."""
-        a = b"\xAA" * 100
-        b = b"\xAA" * 50 + b"\xBB" * 50
+        a = b"\xaa" * 100
+        b = b"\xaa" * 50 + b"\xbb" * 50
         script = levenshtein_align(a, b)
         dist = levenshtein_distance(a, b)
         edits = sum(1 for op, _, _ in script if op != "match")
@@ -468,6 +468,7 @@ class TestLevenshteinAlign:
     def test_large_input_correctness(self):
         """Verify correctness on larger random inputs."""
         import random
+
         random.seed(12345)
         for _ in range(100):
             a = random.randbytes(random.randint(50, 500))
@@ -480,6 +481,7 @@ class TestLevenshteinAlign:
     def test_reconstruction_large(self):
         """Verify edit script reconstruction on larger inputs."""
         import random
+
         random.seed(54321)
         for _ in range(50):
             a = random.randbytes(random.randint(20, 200))
@@ -503,6 +505,7 @@ class TestLevenshteinAlign:
     def test_all_edits_are_valid(self):
         """Every op in the script is a valid operation type."""
         import random
+
         random.seed(99999)
         valid_ops = {"match", "replace", "insert", "delete"}
         for _ in range(100):
@@ -517,6 +520,7 @@ class TestLevenshteinAlign:
     def test_offset_monotonicity(self):
         """Match and replace offsets are monotonically increasing."""
         import random
+
         random.seed(77777)
         for _ in range(100):
             a = random.randbytes(random.randint(10, 200))
@@ -531,6 +535,7 @@ class TestLevenshteinAlign:
     def test_insert_offset_valid(self):
         """Insert offsets are within valid range [0, len(a)]."""
         import random
+
         random.seed(88888)
         for _ in range(100):
             a = random.randbytes(random.randint(0, 200))
@@ -549,6 +554,7 @@ class TestLevenshteinAlign:
         from fuzzer_tool.core.similarity import _levenshtein_align_small
 
         import random
+
         random.seed(99999)
         for _ in range(500):
             a = random.randbytes(random.randint(0, 63))
@@ -563,6 +569,7 @@ class TestLevenshteinAlign:
         from fuzzer_tool.core.similarity import _levenshtein_align_small, _levenshtein_align_numpy
 
         import random
+
         random.seed(88888)
         for _ in range(500):
             a = random.randbytes(random.randint(0, 63))

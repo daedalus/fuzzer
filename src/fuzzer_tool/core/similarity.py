@@ -218,11 +218,7 @@ def levenshtein_align(a: bytes, b: bytes) -> list[tuple[str, int, bytes]]:
 
     # Trim common suffix (from the end, after prefix)
     post = 0
-    while (
-        post < n - pre
-        and post < m - pre
-        and a[n - 1 - post] == b[m - 1 - post]
-    ):
+    while post < n - pre and post < m - pre and a[n - 1 - post] == b[m - 1 - post]:
         post += 1
 
     # If everything matched after trimming, just emit matches

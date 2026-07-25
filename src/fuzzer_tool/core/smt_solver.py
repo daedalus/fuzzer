@@ -57,14 +57,15 @@ class ConcolicTrace:
     def set_input(self, data: bytes):
         self._input_bytes = data
 
-    def add_entry(self, op_a: bytes, op_b: bytes,
-                  width: int, pc: int | None = None):
-        self.entries.append({
-            "op_a": op_a,
-            "op_b": op_b,
-            "width": width,
-            "pc": pc,
-        })
+    def add_entry(self, op_a: bytes, op_b: bytes, width: int, pc: int | None = None):
+        self.entries.append(
+            {
+                "op_a": op_a,
+                "op_b": op_b,
+                "width": width,
+                "pc": pc,
+            }
+        )
 
     def clear(self):
         self.entries.clear()
@@ -106,9 +107,7 @@ class ConcolicTrace:
                 idx = data.find(candidate)
                 if idx != -1 and len(candidate) == width:
                     for j in range(width):
-                        solver.add(
-                            vars_[idx + j] == z3.BitVecVal(target[j], 8)
-                        )
+                        solver.add(vars_[idx + j] == z3.BitVecVal(target[j], 8))
                         overridden.add(idx + j)
                     break
 
@@ -169,8 +168,7 @@ class Z3Solver:
     be fed into the existing operator pipeline.
     """
 
-    def __init__(self, timeout_ms: int = _SOLVER_TIMEOUT_MS,
-                 mod_solving_mode: str = "heuristic"):
+    def __init__(self, timeout_ms: int = _SOLVER_TIMEOUT_MS, mod_solving_mode: str = "heuristic"):
         self.timeout_ms = timeout_ms
         self.mod_solving_mode = mod_solving_mode
         self.queries_attempted = 0
@@ -193,8 +191,7 @@ class Z3Solver:
 
     # ── Public API ──────────────────────────────────────────────────────
 
-    def solve_cmplog_pair(self, op_a: bytes, op_b: bytes,
-                          pc: int | None = None) -> dict | None:
+    def solve_cmplog_pair(self, op_a: bytes, op_b: bytes, pc: int | None = None) -> dict | None:
         """Interpret a cmplog operand pair as an arithmetic constraint.
 
         In concolic mode, also records the pair in the trace accumulator.
@@ -286,8 +283,9 @@ class Z3Solver:
 
     # ── Core solving ────────────────────────────────────────────────────
 
-    def _solve_arithmetic(self, width: int, val_a: int, val_b: int,
-                          pc: int | None = None) -> dict | None:
+    def _solve_arithmetic(
+        self, width: int, val_a: int, val_b: int, pc: int | None = None
+    ) -> dict | None:
         """Try common arithmetic relations between *val_a* and *val_b*.
 
         Uses direct modular arithmetic for ADD, SUB, XOR, and heuristic
@@ -309,7 +307,9 @@ class Z3Solver:
             self.batch_solved += 1
             return {
                 "solved_bytes": val_b.to_bytes(width, "little"),
-                "width": width, "relation": "add", "delta": delta,
+                "width": width,
+                "relation": "add",
+                "delta": delta,
             }
 
         # ── XOR ──
@@ -319,7 +319,9 @@ class Z3Solver:
             self.batch_solved += 1
             return {
                 "solved_bytes": val_b.to_bytes(width, "little"),
-                "width": width, "relation": "xor", "delta": xmask,
+                "width": width,
+                "relation": "xor",
+                "delta": xmask,
             }
 
         # ── SUB ──
@@ -329,7 +331,9 @@ class Z3Solver:
             self.batch_solved += 1
             return {
                 "solved_bytes": val_a.to_bytes(width, "little"),
-                "width": width, "relation": "sub", "delta": sub_delta,
+                "width": width,
+                "relation": "sub",
+                "delta": sub_delta,
             }
 
         # ── AND (bitwise subset) ──
@@ -343,7 +347,9 @@ class Z3Solver:
                 self.batch_solved += 1
                 return {
                     "solved_bytes": val_b.to_bytes(width, "little"),
-                    "width": width, "relation": "and", "delta": common,
+                    "width": width,
+                    "relation": "and",
+                    "delta": common,
                 }
             if common == val_b and common != val_a:
                 # val_b ⊆ val_a → val_a is the superset
@@ -351,7 +357,9 @@ class Z3Solver:
                 self.batch_solved += 1
                 return {
                     "solved_bytes": val_a.to_bytes(width, "little"),
-                    "width": width, "relation": "and", "delta": common,
+                    "width": width,
+                    "relation": "and",
+                    "delta": common,
                 }
 
         # ── SHIFT (<< / >> by small constant) ──
@@ -361,28 +369,36 @@ class Z3Solver:
                 self.batch_solved += 1
                 return {
                     "solved_bytes": val_b.to_bytes(width, "little"),
-                    "width": width, "relation": "shl", "delta": k,
+                    "width": width,
+                    "relation": "shl",
+                    "delta": k,
                 }
             if (val_a >> k) == val_b:
                 self.queries_solved += 1
                 self.batch_solved += 1
                 return {
                     "solved_bytes": val_b.to_bytes(width, "little"),
-                    "width": width, "relation": "shr", "delta": k,
+                    "width": width,
+                    "relation": "shr",
+                    "delta": k,
                 }
             if ((val_b << k) & mask) == val_a:
                 self.queries_solved += 1
                 self.batch_solved += 1
                 return {
                     "solved_bytes": val_a.to_bytes(width, "little"),
-                    "width": width, "relation": "shl", "delta": k,
+                    "width": width,
+                    "relation": "shl",
+                    "delta": k,
                 }
             if (val_b >> k) == val_a:
                 self.queries_solved += 1
                 self.batch_solved += 1
                 return {
                     "solved_bytes": val_a.to_bytes(width, "little"),
-                    "width": width, "relation": "shr", "delta": k,
+                    "width": width,
+                    "relation": "shr",
+                    "delta": k,
                 }
 
         # ── MULTIPLY (small constant) ──
@@ -392,14 +408,18 @@ class Z3Solver:
                 self.batch_solved += 1
                 return {
                     "solved_bytes": val_b.to_bytes(width, "little"),
-                    "width": width, "relation": "mul", "delta": k,
+                    "width": width,
+                    "relation": "mul",
+                    "delta": k,
                 }
             if ((val_b * k) & mask) == val_a:
                 self.queries_solved += 1
                 self.batch_solved += 1
                 return {
                     "solved_bytes": val_a.to_bytes(width, "little"),
-                    "width": width, "relation": "mul", "delta": k,
+                    "width": width,
+                    "relation": "mul",
+                    "delta": k,
                 }
 
         # ── OR (last-resort bitwise: catches patterns bypassed by ADD/XOR/SUB) ──
@@ -410,7 +430,9 @@ class Z3Solver:
             delta_or = combined ^ min(val_a, val_b)
             return {
                 "solved_bytes": combined.to_bytes(width, "little"),
-                "width": width, "relation": "or", "delta": delta_or,
+                "width": width,
+                "relation": "or",
+                "delta": delta_or,
             }
 
         # ── MOD: heuristic mode (A) ──
@@ -463,12 +485,15 @@ class Z3Solver:
                 self.batch_solved += 1
                 return {
                     "solved_bytes": solved_val,
-                    "width": width, "relation": "mod", "delta": d,
+                    "width": width,
+                    "relation": "mod",
+                    "delta": d,
                 }
         return None
 
-    def _try_mod_with_divisor(self, width: int, val_a: int, val_b: int,
-                              divisor: int) -> dict | None:
+    def _try_mod_with_divisor(
+        self, width: int, val_a: int, val_b: int, divisor: int
+    ) -> dict | None:
         """Modulo solving with a known divisor from static analysis.
 
         The CMP at this PC is known to compare ``x % divisor`` against
@@ -487,7 +512,9 @@ class Z3Solver:
                 self.batch_solved += 1
                 return {
                     "solved_bytes": candidate.to_bytes(width, "little"),
-                    "width": width, "relation": "mod", "delta": divisor,
+                    "width": width,
+                    "relation": "mod",
+                    "delta": divisor,
                 }
         # Fallback: the smallest non-negative solution
         if val_b < (1 << (width * 8)):
@@ -495,7 +522,9 @@ class Z3Solver:
             self.batch_solved += 1
             return {
                 "solved_bytes": val_b.to_bytes(width, "little"),
-                "width": width, "relation": "mod", "delta": divisor,
+                "width": width,
+                "relation": "mod",
+                "delta": divisor,
             }
         return None
 

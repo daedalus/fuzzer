@@ -67,8 +67,13 @@ class TestUnifiedShimCompilation:
                 assert sym in symbols, f"Missing exported symbol: {sym}"
 
             # Public API symbols
-            for sym in ["__cmplog_reset", "__cmplog_get_path", "__tracecmp_flush", "__tracecmp_reset",
-                         "__tracecmp_get_path"]:
+            for sym in [
+                "__cmplog_reset",
+                "__cmplog_get_path",
+                "__tracecmp_flush",
+                "__tracecmp_reset",
+                "__tracecmp_get_path",
+            ]:
                 assert sym in symbols, f"Missing exported symbol: {sym}"
         finally:
             os.unlink(path)
@@ -179,9 +184,9 @@ class TestUnifiedShimCollector:
         c = CmplogCollector()
         log_file = tmp_path / "test.cmplog"
         log_file.write_text(
-            "CMP 48656c6c6f 576f726c64 1 5\n"      # libc: memcmp("Hello","World")
-            "CMP 89 50 -23 1\n"                     # IR: 1-byte cmp
-            "CMP 41424344 45464748 -4 4\n"          # IR: 4-byte cmp
+            "CMP 48656c6c6f 576f726c64 1 5\n"  # libc: memcmp("Hello","World")
+            "CMP 89 50 -23 1\n"  # IR: 1-byte cmp
+            "CMP 41424344 45464748 -4 4\n"  # IR: 4-byte cmp
         )
         c.log_path = str(log_file)
         tokens = c.collect_tokens()

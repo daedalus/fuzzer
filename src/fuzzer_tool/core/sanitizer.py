@@ -51,6 +51,16 @@ SANITIZER_DEALLOC_RE = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 
+# PC extraction: "#N 0xADDR in func"
+_SANITIZER_PC_RE = re.compile(r"#\d+\s+(0x[0-9a-fA-F]+)")
+
+# Single-frame mask to prevent false uniqueness on 1-frame crashes
+_SINGLE_FRAME_MASK = 0xDEAD
+
+# Number of frames to hash
+_NUM_FRAMES_NORMAL = 7
+_NUM_FRAMES_SANITIZER = 14
+
 # Exploitability lookup (base estimates, refined by access_type)
 ASAN_EXPLOITABILITY = {
     # WRITE variants → CRITICAL
@@ -213,3 +223,32 @@ class SanitizerReport:
             True if both sanitizer and error_type are non-empty.
         """
         return bool(self.sanitizer and self.error_type)
+
+    def stack_hash(self) -> str:
+        """Compute a stack hash from the crash's PC addresses.
+
+        Hashes the last 3 hex nibbles (12 bits) of each PC in the top
+        frames, XORed together. Uses 7 frames for normal crashes, 14
+        for sanitizer crashes (since sanitizer frames occupy the top).
+        Single-frame crashes get a mask to prevent false uniqueness.
+
+        Returns:
+            Hex string of the stack hash (16 chars).
+        """
+        pcs = _SANITIZER_PC_RE.findall(self.raw)
+        if not pcs:
+            return ""
+
+        num_frames = _NUM_FRAMES_SANITIZER if self.sanitizer else _NUM_FRAMES_NORMAL
+        h = 0
+        count = 0
+        for pc_str in pcs[:num_frames]:
+            pc = int(pc_str, 16)
+            # Hash last 3 nibbles (12 bits)
+            h ^= pc & 0xFFF
+            count += 1
+
+        if count == 1:
+            h ^= _SINGLE_FRAME_MASK
+
+        return f"{h:016x}"

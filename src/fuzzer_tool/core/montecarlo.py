@@ -545,7 +545,9 @@ class MonteCarloScheduler:
         except (OSError, json.JSONDecodeError, KeyError):
             return False
 
-    def _stationary_numpy(self, operators: list[str], op_idx: dict[str, int], n: int, max_iter: int, tol: float) -> dict[str, float]:
+    def _stationary_numpy(
+        self, operators: list[str], op_idx: dict[str, int], n: int, max_iter: int, tol: float
+    ) -> dict[str, float]:
         """Numpy path for stationary_distribution."""
         P = np.zeros((n, n), dtype=np.float64)
         for prev_op, total in self.transition_total.items():
@@ -572,7 +574,9 @@ class MonteCarloScheduler:
         return {op: float(pi[op_idx[op]]) for op in operators}
 
     @staticmethod
-    def _power_iteration_py(v: list[float], p_matrix: list[list[float]], n: int, max_iter: int, tol: float) -> list[float]:
+    def _power_iteration_py(
+        v: list[float], p_matrix: list[list[float]], n: int, max_iter: int, tol: float
+    ) -> list[float]:
         """Pure-Python power iteration: v_{k+1} = P^T @ v_k with convergence check."""
         for _ in range(max_iter):
             new_v = [0.0] * n
@@ -590,7 +594,9 @@ class MonteCarloScheduler:
         return v
 
     @staticmethod
-    def _power_iteration_py_transpose(v: list[float], p_matrix: list[list[float]], n: int, max_iter: int, tol: float) -> list[float]:
+    def _power_iteration_py_transpose(
+        v: list[float], p_matrix: list[list[float]], n: int, max_iter: int, tol: float
+    ) -> list[float]:
         """Pure-Python power iteration: v_{k+1} = v_k @ P with convergence check."""
         for _ in range(max_iter):
             new_v = [0.0] * n
@@ -623,9 +629,13 @@ class MonteCarloScheduler:
                 p_matrix[i][i] = 1.0
         return p_matrix
 
-    def _stationary_py(self, operators: list[str], op_idx: dict[str, int], n: int, max_iter: int, tol: float) -> dict[str, float]:
+    def _stationary_py(
+        self, operators: list[str], op_idx: dict[str, int], n: int, max_iter: int, tol: float
+    ) -> dict[str, float]:
         """Pure-Python fallback for stationary_distribution."""
-        p_matrix = self._build_transition_matrix_py(self.transition_total, self.transition_counts, op_idx, n)
+        p_matrix = self._build_transition_matrix_py(
+            self.transition_total, self.transition_counts, op_idx, n
+        )
         pi = self._power_iteration_py_transpose([1.0 / n] * n, p_matrix, n, max_iter, tol)
         return {op: pi[op_idx[op]] for op in operators}
 
@@ -662,7 +672,9 @@ class MonteCarloScheduler:
             return self._stationary_numpy(operators, op_idx, n, max_iter, tol)
         return self._stationary_py(operators, op_idx, n, max_iter, tol)
 
-    def _spectral_gap_numpy(self, operators: list[str], op_idx: dict[str, int], n: int, max_iter: int, tol: float) -> float:
+    def _spectral_gap_numpy(
+        self, operators: list[str], op_idx: dict[str, int], n: int, max_iter: int, tol: float
+    ) -> float:
         """Numpy path for spectral_gap."""
         P = np.zeros((n, n), dtype=np.float64)
         for prev_op, total in self.transition_total.items():
@@ -711,17 +723,32 @@ class MonteCarloScheduler:
 
         return max(0.0, min(1.0, 1.0 - eigenvalue2))
 
-    def _spectral_gap_py(self, operators: list[str], op_idx: dict[str, int], n: int, max_iter: int, tol: float) -> float:
+    def _spectral_gap_py(
+        self, operators: list[str], op_idx: dict[str, int], n: int, max_iter: int, tol: float
+    ) -> float:
         """Pure-Python fallback for spectral_gap."""
-        p_matrix = self._build_transition_matrix_py(self.transition_total, self.transition_counts, op_idx, n)
+        p_matrix = self._build_transition_matrix_py(
+            self.transition_total, self.transition_counts, op_idx, n
+        )
         v = self._power_iteration_py([1.0 / n] * n, p_matrix, n, max_iter, tol)
 
         # Deflate: P_deflated = P - v * v^T
         deflated: list[list[float]] = [
             [p_matrix[i][j] - v[i] * v[j] for j in range(n)] for i in range(n)
         ]
-        w = self._power_iteration_py([random.random() for _ in range(n)], deflated, n, max_iter, tol)
-        eigenvalue2 = abs(sum(a * b for a, b in zip(w, [sum(deflated[i][j] * w[i] for i in range(n)) for j in range(n)], strict=False)))
+        w = self._power_iteration_py(
+            [random.random() for _ in range(n)], deflated, n, max_iter, tol
+        )
+        eigenvalue2 = abs(
+            sum(
+                a * b
+                for a, b in zip(
+                    w,
+                    [sum(deflated[i][j] * w[i] for i in range(n)) for j in range(n)],
+                    strict=False,
+                )
+            )
+        )
         return max(0.0, min(1.0, 1.0 - eigenvalue2))
 
     def spectral_gap(self, max_iter: int = 200, tol: float = 1e-8) -> float:
@@ -885,7 +912,9 @@ class MonteCarloScheduler:
                 base += mu[i] * inv_cov[i][j] * mu[j]
         return base
 
-    def _matrix_ucb_scores(self, ops: list[str], mu, inv_cov, base: float, beta: float, t: int, n: int) -> dict[str, float]:
+    def _matrix_ucb_scores(
+        self, ops: list[str], mu, inv_cov, base: float, beta: float, t: int, n: int
+    ) -> dict[str, float]:
         """Compute UCB scores with covariance penalty."""
         scores: dict[str, float] = {}
         if _HAS_NUMPY:
@@ -904,7 +933,9 @@ class MonteCarloScheduler:
                 scores[op] = mu[i] + exploration
         return scores
 
-    def _matrix_ucb_prepare(self, ops: list[str], segment_size: int) -> tuple[int, list | np.ndarray, list[list[float]]] | None:
+    def _matrix_ucb_prepare(
+        self, ops: list[str], segment_size: int
+    ) -> tuple[int, list | np.ndarray, list[list[float]]] | None:
         """Prepare means vector and covariance matrix, or None if fallback needed."""
         if len(ops) < 3:
             return None
@@ -948,7 +979,11 @@ class MonteCarloScheduler:
         if chol is None:
             return self._standard_ucb(ops, beta)
 
-        identity = np.eye(n, dtype=np.float64) if _HAS_NUMPY else [[1.0 if i == j else 0.0 for j in range(n)] for i in range(n)]
+        identity = (
+            np.eye(n, dtype=np.float64)
+            if _HAS_NUMPY
+            else [[1.0 if i == j else 0.0 for j in range(n)] for i in range(n)]
+        )
         inv_cov = self._solve_cholesky(chol, identity)
         if inv_cov is None:
             return self._standard_ucb(ops, beta)
@@ -1018,7 +1053,9 @@ class MonteCarloScheduler:
                 x[i][col] = (y[i][col] - s) / chol[i][i] if chol[i][i] > 0 else 0.0
         return x
 
-    def _build_segment_rates(self, recent: list, segment_size: int, operators: list[str], op_idx: dict[str, int]) -> list[list[float]]:
+    def _build_segment_rates(
+        self, recent: list, segment_size: int, operators: list[str], op_idx: dict[str, int]
+    ) -> list[list[float]]:
         """Build segment success-rate matrix from recent history."""
         segments: list[list[float]] = []
         n_ops = len(operators)
@@ -1037,7 +1074,9 @@ class MonteCarloScheduler:
             segments.append(rates)
         return segments
 
-    def _operator_covariance_numpy(self, recent: list, segment_size: int, operators: list[str], op_idx: dict[str, int]) -> dict[str, dict[str, float]]:
+    def _operator_covariance_numpy(
+        self, recent: list, segment_size: int, operators: list[str], op_idx: dict[str, int]
+    ) -> dict[str, dict[str, float]]:
         """Numpy path for operator_covariance."""
         n_ops = len(operators)
         segments_list = self._build_segment_rates(recent, segment_size, operators, op_idx)
@@ -1051,7 +1090,9 @@ class MonteCarloScheduler:
                 cov_matrix[op_i][op_j] = float(cov_arr[i, j])
         return cov_matrix
 
-    def _operator_covariance_py(self, recent: list, segment_size: int, operators: list[str], op_idx: dict[str, int]) -> dict[str, dict[str, float]]:
+    def _operator_covariance_py(
+        self, recent: list, segment_size: int, operators: list[str], op_idx: dict[str, int]
+    ) -> dict[str, dict[str, float]]:
         """Pure-Python fallback for operator_covariance."""
         n_ops = len(operators)
         segments = self._build_segment_rates(recent, segment_size, operators, op_idx)
@@ -1644,7 +1685,9 @@ class ShapleyAttribution:
                     pairs.append((op_a, op_b, sim))
         return sorted(pairs, key=lambda x: x[2], reverse=True)
 
-    def _spectral_embedding_numpy(self, operators: list[str], kernel: dict, k: int) -> dict[str, list[float]]:
+    def _spectral_embedding_numpy(
+        self, operators: list[str], kernel: dict, k: int
+    ) -> dict[str, list[float]]:
         """Numpy path for spectral_embedding."""
         n = len(operators)
         K = np.zeros((n, n), dtype=np.float64)
@@ -1700,7 +1743,9 @@ class ShapleyAttribution:
                 break
         return w
 
-    def _spectral_embedding_py(self, operators: list[str], kernel: dict, k: int) -> dict[str, list[float]]:
+    def _spectral_embedding_py(
+        self, operators: list[str], kernel: dict, k: int
+    ) -> dict[str, list[float]]:
         """Pure-Python fallback for spectral_embedding."""
         n = len(operators)
         laplacian = self._build_laplacian_py(kernel, operators, n)

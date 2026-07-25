@@ -187,26 +187,31 @@ class TestMinimizeBytes:
 class TestRadamsaMutateNum:
     def test_returns_integer(self):
         from fuzzer_tool.core.mutations import radamsa_mutate_num
+
         result = radamsa_mutate_num(42)
         assert isinstance(result, int)
 
     def test_produces_different_values(self):
         from fuzzer_tool.core.mutations import radamsa_mutate_num
+
         results = {radamsa_mutate_num(100) for _ in range(50)}
         # Should produce at least some variety
         assert len(results) > 1
 
     def test_zero_input(self):
         from fuzzer_tool.core.mutations import radamsa_mutate_num
+
         result = radamsa_mutate_num(0)
         assert isinstance(result, int)
 
     def test_negative_input(self):
         from fuzzer_tool.core.mutations import radamsa_mutate_num
+
         result = radamsa_mutate_num(-5)
         assert isinstance(result, int)
 
     def test_large_input(self):
         from fuzzer_tool.core.mutations import radamsa_mutate_num
+
         result = radamsa_mutate_num(1_000_000)
         assert isinstance(result, int)

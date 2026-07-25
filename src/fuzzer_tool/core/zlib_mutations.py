@@ -164,6 +164,7 @@ class ZlibMutator:
     Dispatches one of 10 mutation operations per call, targeting
     specific zlib structures for maximum code-path diversity.
     """
+
     _rng = random
 
     def mutate(self, data: bytes, max_len: int = 4096, rng=None) -> bytes:
@@ -251,7 +252,10 @@ class ZlibMutator:
 
     def _inject_junk_before_deflate(self, info: ZlibInfo, max_len: int) -> ZlibInfo:
         """Inject random bytes between header and deflate stream."""
-        junk = bytes((self._rng or random).randint(0, 255) for _ in range((self._rng or random).randint(1, 32)))
+        junk = bytes(
+            (self._rng or random).randint(0, 255)
+            for _ in range((self._rng or random).randint(1, 32))
+        )
         info.compressed_data = junk + info.compressed_data
         return info
 

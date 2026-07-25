@@ -33,9 +33,7 @@ log = logging.getLogger(__name__)
 _UCB_MIN_SAMPLES_BASE = 20
 
 
-def _softmax_select(
-    scored: list[tuple[str, float]], temperature: float
-) -> str:
+def _softmax_select(scored: list[tuple[str, float]], temperature: float) -> str:
     """Weighted random selection via softmax over scored items.
 
     Args:
@@ -181,12 +179,8 @@ class EloTracker:
         # weighted by total sample count in each group.  This keeps both
         # exploration (via Elo group) and exploitation (via UCB group) active
         # while avoiding the scale-mismatch bug.
-        total_ucb = sum(
-            self._reward_moments[op].count for op, _ in ucb_ready
-        )
-        total_elo = sum(
-            self._match_count.get(op, 0) for op in elo_only
-        )
+        total_ucb = sum(self._reward_moments[op].count for op, _ in ucb_ready)
+        total_elo = sum(self._match_count.get(op, 0) for op in elo_only)
         if random.random() < total_ucb / (total_ucb + total_elo):
             return _softmax_select(ucb_ready, temperature)
         else:
@@ -591,7 +585,7 @@ class BayesianEloTracker:
         """
         if len(self._prediction_errors) < 10:
             return self._base_k
-        recent = self._prediction_errors[-min(len(self._prediction_errors), self._error_window):]
+        recent = self._prediction_errors[-min(len(self._prediction_errors), self._error_window) :]
         mse = sum(e * e for e in recent) / len(recent)
         # Expected MSE for random predictions with score in [0,1] = 0.25
         # Good predictions approach 0. Scale K from base/2 to base*2
@@ -617,7 +611,7 @@ class BayesianEloTracker:
         """Register an operator with the prior N(initial_mu, initial_sigma^2)."""
         if name not in self.mu:
             self.mu[name] = self.initial_mu
-            self.sigma_sq[name] = self.initial_sigma ** 2
+            self.sigma_sq[name] = self.initial_sigma**2
             self._match_count[name] = 0
 
     def record_match(self, op_a: str, op_b: str, score_a: float, crash: bool = False) -> None:
@@ -648,18 +642,18 @@ class BayesianEloTracker:
         # Track prediction error
         self._prediction_errors.append(score_a - ea)
         if len(self._prediction_errors) > self._error_window * 2:
-            self._prediction_errors = self._prediction_errors[-self._error_window:]
+            self._prediction_errors = self._prediction_errors[-self._error_window :]
 
         # Uncertainty-scaled update
-        var_a = sig_a / (sig_a + self.beta ** 2)
-        var_b = sig_b / (sig_b + self.beta ** 2)
+        var_a = sig_a / (sig_a + self.beta**2)
+        var_b = sig_b / (sig_b + self.beta**2)
 
         self.mu[op_a] = mu_a + var_a * k * (score_a - ea)
         self.mu[op_b] = mu_b + var_b * k * ((1.0 - score_a) - eb)
 
         # Posterior variance shrinks, then adds system noise (tau^2)
-        self.sigma_sq[op_a] = sig_a * (1.0 - var_a) + self.tau ** 2
-        self.sigma_sq[op_b] = sig_b * (1.0 - var_b) + self.tau ** 2
+        self.sigma_sq[op_a] = sig_a * (1.0 - var_a) + self.tau**2
+        self.sigma_sq[op_b] = sig_b * (1.0 - var_b) + self.tau**2
 
         self._match_count[op_a] = self._match_count.get(op_a, 0) + 1
         self._match_count[op_b] = self._match_count.get(op_b, 0) + 1
@@ -714,7 +708,7 @@ class BayesianEloTracker:
     def _thompson_sample(self, name: str) -> float:
         """Draw from the operator's posterior N(mu, sigma)."""
         mu = self.mu.get(name, self.initial_mu)
-        sigma = math.sqrt(self.sigma_sq.get(name, self.initial_sigma ** 2))
+        sigma = math.sqrt(self.sigma_sq.get(name, self.initial_sigma**2))
         return random.gauss(mu, sigma)
 
     def select_op(self, operators: list[str], temperature: float | None = None) -> str:
@@ -757,7 +751,7 @@ class BayesianEloTracker:
         for s in (strategy_a, strategy_b):
             if s not in self._strategy_mu:
                 self._strategy_mu[s] = self.initial_mu
-                self._strategy_sigma_sq[s] = self.initial_sigma ** 2
+                self._strategy_sigma_sq[s] = self.initial_sigma**2
                 self._strategy_match_count[s] = 0
 
         mu_a, mu_b = self._strategy_mu[strategy_a], self._strategy_mu[strategy_b]
@@ -767,14 +761,14 @@ class BayesianEloTracker:
         ea = self._expected_score(mu_a, mu_b)
         eb = self._expected_score(mu_b, mu_a)
 
-        var_a = sig_a / (sig_a + self.beta ** 2)
-        var_b = sig_b / (sig_b + self.beta ** 2)
+        var_a = sig_a / (sig_a + self.beta**2)
+        var_b = sig_b / (sig_b + self.beta**2)
         k = self._effective_k()
 
         self._strategy_mu[strategy_a] = mu_a + var_a * k * (score_a - ea)
         self._strategy_mu[strategy_b] = mu_b + var_b * k * ((1.0 - score_a) - eb)
-        self._strategy_sigma_sq[strategy_a] = sig_a * (1.0 - var_a) + self.tau ** 2
-        self._strategy_sigma_sq[strategy_b] = sig_b * (1.0 - var_b) + self.tau ** 2
+        self._strategy_sigma_sq[strategy_a] = sig_a * (1.0 - var_a) + self.tau**2
+        self._strategy_sigma_sq[strategy_b] = sig_b * (1.0 - var_b) + self.tau**2
         self._strategy_match_count[strategy_a] += 1
         self._strategy_match_count[strategy_b] += 1
 
@@ -789,10 +783,16 @@ class BayesianEloTracker:
         if not rated:
             return strategies[0]
 
-        samples = [(s, random.gauss(
-            self._strategy_mu.get(s, self.initial_mu),
-            math.sqrt(self._strategy_sigma_sq.get(s, self.initial_sigma ** 2)),
-        )) for s in rated]
+        samples = [
+            (
+                s,
+                random.gauss(
+                    self._strategy_mu.get(s, self.initial_mu),
+                    math.sqrt(self._strategy_sigma_sq.get(s, self.initial_sigma**2)),
+                ),
+            )
+            for s in rated
+        ]
         return max(samples, key=lambda x: x[1])[0]
 
     def get_ranking(self, crash: bool = False) -> list[tuple[str, float]]:
@@ -830,9 +830,9 @@ class BayesianEloTracker:
         equivalent of Elo's exponential rating decay.
         """
         for name in self.sigma_sq:
-            self.sigma_sq[name] += self.tau ** 2
+            self.sigma_sq[name] += self.tau**2
         for name in self._strategy_sigma_sq:
-            self._strategy_sigma_sq[name] += self.tau ** 2
+            self._strategy_sigma_sq[name] += self.tau**2
 
     def get_rating(self, name: str) -> float:
         """Return the posterior mean for an operator."""

@@ -204,6 +204,7 @@ class JpegMutator:
     Dispatches one of 16 mutation operations per call, targeting
     specific JPEG structures for maximum code-path diversity.
     """
+
     _rng = random
 
     def mutate(self, data: bytes, max_len: int = 4096, rng=None) -> bytes:
@@ -429,7 +430,10 @@ class JpegMutator:
                 com.data = bytes(data)
         else:
             # Inject a new comment before EOI
-            comment = bytes((self._rng or random).randint(0x20, 0x7E) for _ in range((self._rng or random).randint(4, 32)))
+            comment = bytes(
+                (self._rng or random).randint(0x20, 0x7E)
+                for _ in range((self._rng or random).randint(4, 32))
+            )
             eoi_idx = _find_marker_index(markers, EOI)
             if eoi_idx is not None:
                 markers.insert(eoi_idx, JpegMarker(marker=COM, data=comment))

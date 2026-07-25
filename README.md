@@ -12,7 +12,7 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 ## Features
 
 ### Mutation & Generation
-- **Mutation operators**: bit flip, byte flip, interesting values (8/16/32-bit, signed + unsigned boundary), arithmetic (1/2/4/8-byte, LE/BE), block insert/delete/duplicate, bit-offset flip/span (arbitrary bit positions for DEFLATE/JPEG), havoc mode
+- **Mutation operators**: bit flip, byte flip, interesting values (8/16/32-bit, signed + unsigned boundary), arithmetic (1/2/4/8-byte, LE/BE), block insert/delete/duplicate, bit-offset flip/span (arbitrary bit positions for DEFLATE/JPEG), havoc mode, TLV-aware mutation, token shuffle
 - **Operator performance**: `type_replace` uses a precomputed 256-byte translate table (184x faster), PNG/BMP random generation uses `random.randbytes()` instead of Python loops (16x faster), `colorization` uses a module-level lookup table
 - **Length boundary operator**: systematically tries input lengths at boundary values (0, 1, 2, 3, 4, 5, 7, 8, 15, 16, 31, 32, 63, 64, 127, 128, 255, 256, 512, 1024, 4096) — discovers length-sensitive unsigned integer underflows
 - **Unsigned boundary values**: interesting values include small values (0-5) and unsigned max values (0xFF, 0xFFFF, 0xFFFFFFFF) for triggering unsigned arithmetic underflows
@@ -139,6 +139,9 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 - **Crash exploitability tiers**: ASAN_EXPLOITABILITY classification in reports
 - **Levenshtein crash clustering**: groups crashes with similar stack traces (same root cause, different offsets)
 - **Fuzzy corpus similarity**: Hamming + Levenshtein + 4-gram Jaccard for crash-to-corpus nearest-neighbor search
+- **Crash stack hash**: hashes last 3 nibbles of each PC in top 7 frames (14 with sanitizers) for deduplication; single-frame crashes masked to prevent false uniqueness
+- **Blocklist/allowlist** (`--crash-blocklist`/`--crash-allowlist`): skip known crash stack hashes or override blocklist for specific crashes
+- **Smaller crash replacement** (`--save-smaller`): replace crash triggers with smaller inputs for the same stack hash
 
 ### Observability
 - **Branch density**: per-target static analysis at startup (`cond branches/KB`) with average across targets
@@ -341,7 +344,7 @@ State files:
 Calls target function directly via `ctypes.CDLL`. Catches SIGSEGV/SIGABRT via signal handler. ~2k–34k eps.
 
 ### Persistent subprocess (`--inprocess`)
-Keeps one Python subprocess alive. Fork-per-call with `os.setsid()` for process group isolation. Timeout enforced via outer threaded readline. Auto-restarts on subprocess death. ~65–120 eps.
+Keeps one Python subprocess alive. Fork-per-call with `os.setsid()` for process group isolation. Timeout enforced via outer threaded readline. Auto-restarts on subprocess death. Throughput monitoring detects sustained slowdowns (below 10% of calibrated baseline) and auto-restarts the loader. ~65–120 eps.
 
 ### ASAN support
 Automatically detects ASAN-instrumented targets by checking for `__asan_init` symbols. Falls back from `--inprocess-direct` to subprocess mode when ASAN is detected (ASAN calls `_exit()` which kills in-process targets).

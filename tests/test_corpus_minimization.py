@@ -358,22 +358,43 @@ class TestKnapsackRetention:
         mgr = CorpusManager(f)
 
         # Three seeds of varying sizes
-        small = b"A" * 10    # 10 bytes — lowest coverage score
+        small = b"A" * 10  # 10 bytes — lowest coverage score
         medium = b"B" * 100  # 100 bytes — moderate
         large = b"C" * 1000  # 1000 bytes — highest coverage score
 
         # Set up corpus and seed_meta with coverage scores only
         f.corpus = [small, medium, large]
         f.seed_meta = {
-            small: {"fuzz_count": 1, "coverage_edges": 1, "added_at": 100.0,
-                     "edge_bitmap": bytearray(0), "redqueen_offsets": [], "momentum": 0.0,
-                     "lineage_depth": 0, "hamming_distance": 0},
-            medium: {"fuzz_count": 1, "coverage_edges": 5, "added_at": 200.0,
-                      "edge_bitmap": bytearray(0), "redqueen_offsets": [], "momentum": 0.0,
-                      "lineage_depth": 0, "hamming_distance": 0},
-            large: {"fuzz_count": 1, "coverage_edges": 10, "added_at": 300.0,
-                     "edge_bitmap": bytearray(0), "redqueen_offsets": [], "momentum": 0.0,
-                     "lineage_depth": 0, "hamming_distance": 0},
+            small: {
+                "fuzz_count": 1,
+                "coverage_edges": 1,
+                "added_at": 100.0,
+                "edge_bitmap": bytearray(0),
+                "redqueen_offsets": [],
+                "momentum": 0.0,
+                "lineage_depth": 0,
+                "hamming_distance": 0,
+            },
+            medium: {
+                "fuzz_count": 1,
+                "coverage_edges": 5,
+                "added_at": 200.0,
+                "edge_bitmap": bytearray(0),
+                "redqueen_offsets": [],
+                "momentum": 0.0,
+                "lineage_depth": 0,
+                "hamming_distance": 0,
+            },
+            large: {
+                "fuzz_count": 1,
+                "coverage_edges": 10,
+                "added_at": 300.0,
+                "edge_bitmap": bytearray(0),
+                "redqueen_offsets": [],
+                "momentum": 0.0,
+                "lineage_depth": 0,
+                "hamming_distance": 0,
+            },
         }
         # Give each seed a unique edge so they pass the mandatory set-cover
         for seed in f.corpus:
@@ -383,15 +404,9 @@ class TestKnapsackRetention:
         mgr.auto_minimize_corpus()
 
         # large (1000B) cannot fit in 200B budget; small+medium (110B) can
-        assert large not in f.corpus, (
-            "Large seed should be evicted under byte budget"
-        )
-        assert small in f.corpus, (
-            "Small high-density seed should be retained"
-        )
-        assert medium in f.corpus, (
-            "Medium seed should be retained"
-        )
+        assert large not in f.corpus, "Large seed should be evicted under byte budget"
+        assert small in f.corpus, "Small high-density seed should be retained"
+        assert medium in f.corpus, "Medium seed should be retained"
 
     def test_count_budget_unchanged_when_no_byte_budget(self):
         """Without max_corpus_bytes, count-budget behavior is unchanged."""
@@ -406,15 +421,36 @@ class TestKnapsackRetention:
 
         f.corpus = [small, medium, large]
         f.seed_meta = {
-            small: {"fuzz_count": 1, "coverage_edges": 1, "added_at": 100.0,
-                     "edge_bitmap": bytearray(0), "redqueen_offsets": [], "momentum": 0.0,
-                     "lineage_depth": 0, "hamming_distance": 0},
-            medium: {"fuzz_count": 1, "coverage_edges": 5, "added_at": 200.0,
-                      "edge_bitmap": bytearray(0), "redqueen_offsets": [], "momentum": 0.0,
-                      "lineage_depth": 0, "hamming_distance": 0},
-            large: {"fuzz_count": 1, "coverage_edges": 10, "added_at": 300.0,
-                     "edge_bitmap": bytearray(0), "redqueen_offsets": [], "momentum": 0.0,
-                     "lineage_depth": 0, "hamming_distance": 0},
+            small: {
+                "fuzz_count": 1,
+                "coverage_edges": 1,
+                "added_at": 100.0,
+                "edge_bitmap": bytearray(0),
+                "redqueen_offsets": [],
+                "momentum": 0.0,
+                "lineage_depth": 0,
+                "hamming_distance": 0,
+            },
+            medium: {
+                "fuzz_count": 1,
+                "coverage_edges": 5,
+                "added_at": 200.0,
+                "edge_bitmap": bytearray(0),
+                "redqueen_offsets": [],
+                "momentum": 0.0,
+                "lineage_depth": 0,
+                "hamming_distance": 0,
+            },
+            large: {
+                "fuzz_count": 1,
+                "coverage_edges": 10,
+                "added_at": 300.0,
+                "edge_bitmap": bytearray(0),
+                "redqueen_offsets": [],
+                "momentum": 0.0,
+                "lineage_depth": 0,
+                "hamming_distance": 0,
+            },
         }
         for seed in f.corpus:
             sk = _seed_key(seed)

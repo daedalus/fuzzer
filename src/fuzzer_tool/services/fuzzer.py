@@ -289,6 +289,9 @@ class Fuzzer:
         seed=42,
         extra_crash_codes=None,
         replay_n=0,
+        crash_blocklist=None,
+        crash_allowlist=None,
+        save_smaller=False,
         schedule_ablation=None,
         replicator=False,
         shapley=False,
@@ -543,6 +546,10 @@ class Fuzzer:
         self._replay_budget_ms: float = 0.2  # max 200ms per batch for crash replay
         self._crash_replays: dict[str, list[int]] = {}  # sig -> list of replay return codes
         self.replay_n: int = replay_n  # --replay-N: replay each crash N times
+        self.crash_blocklist: set[str] = crash_blocklist or set()
+        self.crash_allowlist: set[str] = crash_allowlist or set()
+        self.save_smaller: bool = save_smaller
+        self.crash_min_sizes: dict[str, int] = {}  # stack_hash -> min trigger size
 
         # Execution time tracking for adaptive timeout calibration
         from fuzzer_tool.core.execution_time import ExecutionTimeTracker
@@ -1701,9 +1708,8 @@ class Fuzzer:
                 self._current_edges_cache = edge_ids
                 has_new_coverage = has_new
             else:
-                has_new_coverage = (
-                    (self.ptrace_cov and self.ptrace_cov.is_new_coverage())
-                    or (self.shm_cov and self.shm_cov.is_new_coverage())
+                has_new_coverage = (self.ptrace_cov and self.ptrace_cov.is_new_coverage()) or (
+                    self.shm_cov and self.shm_cov.is_new_coverage()
                 )
         elif self.shm_cov:
             has_new, edge_ids = self.shm_cov.is_new_coverage_with_edges()

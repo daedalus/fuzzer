@@ -170,8 +170,7 @@ class TargetProfile:
                 current_hash = hashlib.md5(open(target_path, "rb").read()).hexdigest()
                 if stored_hash != current_hash:
                     log.info(
-                        "Profile cache invalidated: binary hash mismatch "
-                        "(stored=%s, current=%s)",
+                        "Profile cache invalidated: binary hash mismatch (stored=%s, current=%s)",
                         stored_hash,
                         current_hash,
                     )
@@ -317,7 +316,9 @@ class TargetProfiler:
         if profile.functions:
             try:
                 profile.save(cache_path, target_path=self.target)
-                log.info("Profile cache saved: %s (%d functions)", cache_path, len(profile.functions))
+                log.info(
+                    "Profile cache saved: %s (%d functions)", cache_path, len(profile.functions)
+                )
             except OSError:
                 log.debug("Failed to save profile cache: %s", cache_path)
         return profile

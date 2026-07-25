@@ -136,24 +136,21 @@ class TestHashDetection:
 
     def test_detect_long_matching_pair_not_flagged(self):
         c = CmplogCollector()
-        pair = (b"\x01\x02\x03\x04\x05\x06\x07\x08",
-                b"\x01\x02\x03\x04\x05\x06\x07\x08")
+        pair = (b"\x01\x02\x03\x04\x05\x06\x07\x08", b"\x01\x02\x03\x04\x05\x06\x07\x08")
         n = c.detect_hash_candidates([pair])
         assert n == 0  # exact match — not hash-like
 
     def test_detect_hash_like_pair(self):
         c = CmplogCollector()
         # 8 bytes, only 1 matching position — looks like a hash
-        pair = (b"\x01\x02\x03\x04\x05\x06\x07\x08",
-                b"\x01\xff\xfe\xfd\xfc\xfb\xfa\xf9")
+        pair = (b"\x01\x02\x03\x04\x05\x06\x07\x08", b"\x01\xff\xfe\xfd\xfc\xfb\xfa\xf9")
         n = c.detect_hash_candidates([pair])
         assert n == 1
         assert pair in c.hash_candidates
 
     def test_is_hash_candidate(self):
         c = CmplogCollector()
-        pair = (b"\x01\x02\x03\x04\x05\x06\x07\x08",
-                b"\x01\xff\xfe\xfd\xfc\xfb\xfa\xf9")
+        pair = (b"\x01\x02\x03\x04\x05\x06\x07\x08", b"\x01\xff\xfe\xfd\xfc\xfb\xfa\xf9")
         c.detect_hash_candidates([pair])
         assert c.is_hash_candidate(*pair)
         assert not c.is_hash_candidate(b"ab", b"cd")

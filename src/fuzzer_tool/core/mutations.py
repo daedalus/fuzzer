@@ -1,5 +1,6 @@
 """Mutation operators and dictionary handling."""
 
+
 # Helper: resolve rng parameter to RandPool or stdlib random
 def _get_rng(rng=None):
     return rng or random
@@ -13,8 +14,8 @@ INTERESTING_8 = [
     -1,
     0,
     1,
-    2,     # Power-of-2 ± 1 (from Radamsa)
-    3,     # Power-of-2 ± 1 (from Radamsa)
+    2,  # Power-of-2 ± 1 (from Radamsa)
+    3,  # Power-of-2 ± 1 (from Radamsa)
     16,  # One-off with common buffer size
     32,  # One-off with common buffer size
     64,  # One-off with common buffer size
@@ -191,6 +192,8 @@ MUTATIONS = [
     "line_mutate",
     "skipdet_probe",
     "auto_extras",
+    "tlv_mutate",
+    "token_shuffle",
 ]
 
 # Format-aware mutations: structure-aware operators for specific file formats.

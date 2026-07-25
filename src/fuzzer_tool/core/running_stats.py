@@ -56,8 +56,8 @@ class RunningMoments:
             if self._sums_stale:
                 self._s1 = sum(self._buf)
                 self._s2 = sum(v * v for v in self._buf)
-                self._s3 = sum(v ** 3 for v in self._buf)
-                self._s4 = sum(v ** 4 for v in self._buf)
+                self._s3 = sum(v**3 for v in self._buf)
+                self._s4 = sum(v**4 for v in self._buf)
                 self._sums_stale = False
             x_old = self._buf[0]
             self._buf.popleft()
@@ -97,7 +97,7 @@ class RunningMoments:
         self._s1 += x_new - x_old
         self._s2 += x_new * x_new - x_old * x_old
         self._s3 += x_new * x_new * x_new - x_old * x_old * x_old
-        self._s4 += (x_new ** 4) - (x_old ** 4)
+        self._s4 += (x_new**4) - (x_old**4)
 
         self._mean = self._s1 / n
         # Central moments (population, not sample).

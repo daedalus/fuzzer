@@ -209,6 +209,7 @@ def mutate_tree_swap(root: _Node, rng=None) -> bool:
             j += 1
     else:
         import random as _rand
+
         i = _rand.randrange(n)
         j = _rand.randrange(n - 1)
         if j >= i:
@@ -228,6 +229,7 @@ def mutate_tree_stutter(root: _Node, rng=None) -> bool:
         n_reps = rng.randint(2, 64)
     else:
         import random as _rand
+
         target = nodes[_rand.randrange(n)]
         n_reps = _rand.randint(2, 64)
     clone = _clone_node(target)
@@ -329,6 +331,7 @@ def lightweight_tree_mutate(data: bytes, max_len: int = 65536, rng=None) -> byte
         op = _TREE_OPS[rng.randrange(4)]
     else:
         import random as _rand
+
         op = _TREE_OPS[_rand.randrange(4)]
 
     mutated = False

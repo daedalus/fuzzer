@@ -427,9 +427,7 @@ class TargetDistance:
         d1 = _np.minimum(_np.abs(addrs - s_m), _np.abs(addrs - e_m))
         d2 = _np.minimum(_np.abs(addrs - s_0), _np.abs(addrs - e_0))
         d3 = _np.minimum(_np.abs(addrs - s_p), _np.abs(addrs - e_p))
-        fallback = _np.minimum(
-            _np.minimum(_np.minimum(d1, d2), d3) / 64.0 + 2.0, 20.0
-        )
+        fallback = _np.minimum(_np.minimum(_np.minimum(d1, d2), d3) / 64.0 + 2.0, 20.0)
 
         results = _np.where(in_func, _np.where(in_0, d_0, d_m), fallback)
 

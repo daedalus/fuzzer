@@ -156,9 +156,7 @@ def _corrupt_field(data: bytearray, offset: int, size: int, signed: bool = False
             elif method == 1:
                 val = _r.choice([0, 1, -1, 0x7FFFFFFF, -0x80000000])
             elif method == 2:
-                val = max(
-                    -0x80000000, min(0x7FFFFFFF, val + _r.choice([-2, -1, 1, 2, 256, 65536]))
-                )
+                val = max(-0x80000000, min(0x7FFFFFFF, val + _r.choice([-2, -1, 1, 2, 256, 65536])))
             elif method == 3:
                 val = _r.randint(-0x80000000, 0x7FFFFFFF)
             else:
@@ -189,6 +187,7 @@ class BmpMutator:
     Dispatches one of 16 mutation operations per call, targeting
     specific BMP structures for maximum code-path diversity.
     """
+
     _rng = random
 
     use_wfc: bool = False  # set to True by Fuzzer when --wfc is active
@@ -401,7 +400,10 @@ class BmpMutator:
 
     def _inject_junk_before_pixels(self, info: BmpInfo, max_len: int) -> BmpInfo:
         """Inject random bytes between headers and pixel data."""
-        junk = bytes((self._rng or random).randint(0, 255) for _ in range((self._rng or random).randint(4, 64)))
+        junk = bytes(
+            (self._rng or random).randint(0, 255)
+            for _ in range((self._rng or random).randint(4, 64))
+        )
         header = bytearray(info.header)
         insert_pos = min(info.pixel_offset, len(header))
         header[insert_pos:insert_pos] = junk

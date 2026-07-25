@@ -430,36 +430,36 @@ class TestExtractDivConstants:
         # constant and then uses DIV with that register — avoids the
         # -O0 memory-operand issue.
         _src = (
-            'void f_div10(void) {\n'
-            '    int r;\n'
+            "void f_div10(void) {\n"
+            "    int r;\n"
             '    asm("mov $10,%%ecx\\n\\t"\n'
             '        "mov $100,%%eax\\n\\t"\n'
             '        "xor %%edx,%%edx\\n\\t"\n'
             '        "div %%ecx\\n\\t"\n'
             '        "mov %%eax,%0" : "=r"(r) : : "eax","ecx","edx");\n'
-            '}\n'
-            'void f_div7(void) {\n'
-            '    int r;\n'
+            "}\n"
+            "void f_div7(void) {\n"
+            "    int r;\n"
             '    asm("mov $7,%%ecx\\n\\t"\n'
             '        "mov $100,%%eax\\n\\t"\n'
             '        "xor %%edx,%%edx\\n\\t"\n'
             '        "div %%ecx\\n\\t"\n'
             '        "mov %%eax,%0" : "=r"(r) : : "eax","ecx","edx");\n'
-            '}\n'
-            'int f_mod10_check(void) {\n'
-            '    /* div %%ecx puts remainder in %%edx; cmp %%edx,0 checks mod */\n'
-            '    int r;\n'
+            "}\n"
+            "int f_mod10_check(void) {\n"
+            "    /* div %%ecx puts remainder in %%edx; cmp %%edx,0 checks mod */\n"
+            "    int r;\n"
             '    asm("mov $10,%%ecx\\n\\t"\n'
             '        "mov $42,%%eax\\n\\t"\n'
             '        "xor %%edx,%%edx\\n\\t"\n'
             '        "div %%ecx\\n\\t"\n'
             '        "mov %%edx,%0\\n\\t"\n'
             '        : "=r"(r) : : "eax","ecx","edx");\n'
-            '    /* separate asm for the CMP to prevent reordering */\n'
+            "    /* separate asm for the CMP to prevent reordering */\n"
             '    asm("cmp $0,%%edx\\n\\t" :: "d"(r) : );\n'
-            '    return r;\n'
-            '}\n'
-            'int main(void) { f_div10(); f_div7(); return f_mod10_check(); }\n'
+            "    return r;\n"
+            "}\n"
+            "int main(void) { f_div10(); f_div7(); return f_mod10_check(); }\n"
         )
         with open(src, "w") as f:
             f.write(_src)
@@ -527,8 +527,8 @@ class TestExtractDivConstants:
         v_bin = os.path.join(self._tmpdir, "var_mod")
         with open(v_src, "w") as f:
             f.write(
-                'int f(int d) {\n'
-                '    int r;\n'
+                "int f(int d) {\n"
+                "    int r;\n"
                 '    asm("mov %1,%%ecx\\n\\t"\n'
                 '        "mov $100,%%eax\\n\\t"\n'
                 '        "xor %%edx,%%edx\\n\\t"\n'
@@ -536,12 +536,11 @@ class TestExtractDivConstants:
                 '        "mov %%edx,%0\\n\\t"\n'
                 '        "cmp $0,%%edx\\n\\t"\n'
                 '        : "=r"(r) : "r"(d) : "eax","ecx","edx");\n'
-                '    return r;\n'
-                '}\n'
-                'int main(void) { return f(7); }\n'
+                "    return r;\n"
+                "}\n"
+                "int main(void) { return f(7); }\n"
             )
-        subprocess.run(["gcc", "-O0", "-o", v_bin, v_src],
-                       capture_output=True, timeout=30)
+        subprocess.run(["gcc", "-O0", "-o", v_bin, v_src], capture_output=True, timeout=30)
         d, w = extract_div_constants(v_bin)
         # No constant divisor should be resolvable (d comes from parameter)
         # The CMP that checks EDX should be in weak_mod_pcs

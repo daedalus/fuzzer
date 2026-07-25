@@ -354,6 +354,9 @@ def save_crash(
     crash_hashes: set[str],
     crash_sigs: dict[str, int],
     metadata: CrashMetadata | None = None,
+    crash_blocklist: set[str] | None = None,
+    crash_allowlist: set[str] | None = None,
+    crash_min_sizes: dict[str, int] | None = None,
 ) -> bool:
     """Save crash input with enriched triage metadata.
 
@@ -371,10 +374,13 @@ def save_crash(
         crash_hashes: Set of already-seen crash hashes.
         crash_sigs: Dict of signature -> count.
         metadata: Optional pre-built CrashMetadata from the fuzzer.
+        crash_blocklist: Set of stack hashes to skip (known crashes).
+        crash_allowlist: Set of stack hashes that override blocklist.
+        crash_min_sizes: Dict of stack_hash -> minimum trigger size.
 
     Returns:
         Base name of saved files (e.g. "crash_1234567890_abc12345_sig_signal6"),
-        or False if duplicate.
+        or False if duplicate or filtered.
     """
     h = hash_data(data)
     if h in crash_hashes:
@@ -382,6 +388,15 @@ def save_crash(
 
     report = SanitizerReport.parse(stderr)
     sig = report.signature if report and report.is_valid() else f"signal:{abs(returncode)}"
+
+    # Stack hash for blocklist/allowlist filtering
+    stack_h = report.stack_hash() if report else ""
+
+    # Blocklist check: skip crashes with known stack hashes unless allowlisted
+    if crash_blocklist and stack_h and stack_h in crash_blocklist and stack_h not in (crash_allowlist or set()):
+        crash_hashes.add(h)
+        crash_sigs[sig] = crash_sigs.get(sig, 0) + 1
+        return False
 
     # Deduplicate by signature: skip if this crash signature was already seen.
     # Uses Levenshtein similarity for fuzzy matching — crashes at the same
@@ -401,6 +416,37 @@ def save_crash(
 
     crash_hashes.add(h)
     crash_sigs[sig] = 1
+
+    # Smaller crash replacement: if a crash with the same stack hash exists
+    # and the new trigger is smaller, remove the old one.
+    if crash_min_sizes is not None and stack_h:
+        old_min = crash_min_sizes.get(stack_h)
+        if old_min is not None and len(data) >= old_min:
+            # New trigger is not smaller — skip replacement
+            pass
+        elif old_min is not None:
+            # New trigger is smaller — find and remove the old crash files
+            for f in crashes_dir.iterdir():
+                if f.is_file() and f.suffix in (".bin", ".txt", ".sh", ".hex"):
+                    try:
+                        old_data = f.read_bytes() if f.suffix == ".bin" else None
+                        if old_data and hash_data(old_data) != h:
+                            # Check if this old crash has the same stack hash
+                            old_report = SanitizerReport.parse(
+                                (crashes_dir / f"{f.stem}.txt").read_text()
+                                if (crashes_dir / f"{f.stem}.txt").exists()
+                                else ""
+                            )
+                            if old_report and old_report.stack_hash() == stack_h:
+                                # Remove old crash files
+                                for ext in (".bin", ".txt", ".sh", ".hex"):
+                                    old_file = crashes_dir / f"{f.stem}{ext}"
+                                    if old_file.exists():
+                                        old_file.unlink()
+                                break
+                    except Exception:
+                        continue
+        crash_min_sizes[stack_h] = len(data)
 
     # Build CrashMetadata if not provided
     if metadata is None:

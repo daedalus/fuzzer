@@ -336,9 +336,7 @@ class TestInprocessCrashIntegration:
     def test_nosan_standalone_finds_crash(self, compiled_targets):
         """Fuzzer detects crashes in non-ASAN standalone binary."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            result, crash_files = _fuzzer_crash_test(
-                compiled_targets.NOSAN_BIN, b"CRASHS", tmpdir
-            )
+            result, crash_files = _fuzzer_crash_test(compiled_targets.NOSAN_BIN, b"CRASHS", tmpdir)
             assert result.returncode == 0, f"Fuzzer failed: {result.stderr}"
             assert len(crash_files) > 0, (
                 f"No crashes found in non-ASAN standalone. Output:\n{result.stdout}"

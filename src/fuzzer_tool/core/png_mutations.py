@@ -101,6 +101,7 @@ class PngChunkMutator:
     14. Move-after-IEND — test trailer validation
     15. Empty chunk injection — test zero-length handling
     """
+
     _rng = random
 
     use_wfc: bool = False  # set to True by Fuzzer when --wfc is active
@@ -281,7 +282,9 @@ class PngChunkMutator:
             for j in range(len(tiles)):
                 wave.superpositions[-1][j] = j == iend_tid
 
-        result = wave.run(seed=(self._rng or random).randint(0, 2**31), max_restarts=3, ac3_budget=2000)
+        result = wave.run(
+            seed=(self._rng or random).randint(0, 2**31), max_restarts=3, ac3_budget=2000
+        )
 
         if result is None or result[0] is None:
             (self._rng or random).shuffle(chunks)
@@ -441,7 +444,10 @@ class PngChunkMutator:
         # Generate multiple small compressed blocks
         new_chunks = []
         for _ in range((self._rng or random).randint(2, 5)):
-            block = bytes((self._rng or random).randint(0, 255) for _ in range((self._rng or random).randint(8, 64)))
+            block = bytes(
+                (self._rng or random).randint(0, 255)
+                for _ in range((self._rng or random).randint(8, 64))
+            )
             compressed = zlib.compress(block, 6)
             new_chunks.append(PngChunk(b"IDAT", compressed))
 
@@ -509,7 +515,9 @@ class PngChunkMutator:
                 chrm.data = bytes(data)
         else:
             chrm_data = bytes((self._rng or random).randint(0, 255) for _ in range(32))
-            chunks.insert((self._rng or random).randint(1, len(chunks)), PngChunk(b"cHRM", chrm_data))
+            chunks.insert(
+                (self._rng or random).randint(1, len(chunks)), PngChunk(b"cHRM", chrm_data)
+            )
         return serialize_png_chunks(chunks)[:max_len]
 
     def _mutate_sbit(self, chunks: list[PngChunk], max_len: int) -> bytes:
@@ -527,7 +535,9 @@ class PngChunkMutator:
                 ct = ihdr.data[9]
                 channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}.get(ct, 1)
                 sbit_data = bytes((self._rng or random).randint(0, 16) for _ in range(channels))
-                chunks.insert((self._rng or random).randint(1, len(chunks)), PngChunk(b"sBIT", sbit_data))
+                chunks.insert(
+                    (self._rng or random).randint(1, len(chunks)), PngChunk(b"sBIT", sbit_data)
+                )
         return serialize_png_chunks(chunks)[:max_len]
 
     def _mutate_iccp(self, chunks: list[PngChunk], max_len: int) -> bytes:
@@ -542,9 +552,13 @@ class PngChunkMutator:
         else:
             # Minimal ICC profile: profile name + null + compression method + compressed data
             name = b"test\x00"
-            compressed = zlib.compress(bytes((self._rng or random).randint(0, 255) for _ in range(64)), 6)
+            compressed = zlib.compress(
+                bytes((self._rng or random).randint(0, 255) for _ in range(64)), 6
+            )
             iccp_data = name + b"\x00" + compressed
-            chunks.insert((self._rng or random).randint(1, len(chunks)), PngChunk(b"iCCP", iccp_data))
+            chunks.insert(
+                (self._rng or random).randint(1, len(chunks)), PngChunk(b"iCCP", iccp_data)
+            )
         return serialize_png_chunks(chunks)[:max_len]
 
     def _mutate_trns(self, chunks: list[PngChunk], max_len: int) -> bytes:
@@ -563,13 +577,16 @@ class PngChunkMutator:
                 if ct in (0, 2, 3):  # gray, rgb, palette
                     if ct == 3:
                         trns_data = bytes(
-                            (self._rng or random).randint(0, 255) for _ in range((self._rng or random).randint(1, 256))
+                            (self._rng or random).randint(0, 255)
+                            for _ in range((self._rng or random).randint(1, 256))
                         )
                     elif ct == 0:
                         trns_data = struct.pack(">H", (self._rng or random).randint(0, 65535))
                     else:
                         trns_data = bytes((self._rng or random).randint(0, 255) for _ in range(6))
-                    chunks.insert((self._rng or random).randint(1, len(chunks)), PngChunk(b"tRNS", trns_data))
+                    chunks.insert(
+                        (self._rng or random).randint(1, len(chunks)), PngChunk(b"tRNS", trns_data)
+                    )
         return serialize_png_chunks(chunks)[:max_len]
 
     def _mutate_ancillary(self, chunks: list[PngChunk], max_len: int) -> bytes:
@@ -584,14 +601,20 @@ class PngChunkMutator:
                     gama.data = bytes(data)
             else:
                 gama_data = struct.pack(">I", (self._rng or random).randint(0, 0xFFFFFFFF))
-                chunks.insert((self._rng or random).randint(1, len(chunks)), PngChunk(b"gAMA", gama_data))
+                chunks.insert(
+                    (self._rng or random).randint(1, len(chunks)), PngChunk(b"gAMA", gama_data)
+                )
         elif choice == 1:  # pHYs
             phys = self._find_chunk(chunks, b"pHYs")
             if phys:
                 data = bytearray(phys.data)
                 if len(data) >= 9:
                     struct.pack_into(
-                        ">II", data, 0, (self._rng or random).randint(0, 0xFFFFFFFF), (self._rng or random).randint(0, 0xFFFFFFFF)
+                        ">II",
+                        data,
+                        0,
+                        (self._rng or random).randint(0, 0xFFFFFFFF),
+                        (self._rng or random).randint(0, 0xFFFFFFFF),
                     )
                     phys.data = bytes(data)
             else:
@@ -601,7 +624,9 @@ class PngChunkMutator:
                     (self._rng or random).randint(0, 0xFFFFFFFF),
                     (self._rng or random).choice([0, 1]),
                 )
-                chunks.insert((self._rng or random).randint(1, len(chunks)), PngChunk(b"pHYs", phys_data))
+                chunks.insert(
+                    (self._rng or random).randint(1, len(chunks)), PngChunk(b"pHYs", phys_data)
+                )
         else:  # tIME
             tyme = self._find_chunk(chunks, b"tIME")
             if tyme and len(tyme.data) >= 7:
@@ -628,7 +653,9 @@ class PngChunkMutator:
                     (self._rng or random).randint(0, 59),
                     (self._rng or random).randint(0, 59),
                 )
-                chunks.insert((self._rng or random).randint(1, len(chunks)), PngChunk(b"tIME", tyme_data))
+                chunks.insert(
+                    (self._rng or random).randint(1, len(chunks)), PngChunk(b"tIME", tyme_data)
+                )
         return serialize_png_chunks(chunks)[:max_len]
 
     def _micro_idat(self, chunks: list[PngChunk], max_len: int) -> bytes:
