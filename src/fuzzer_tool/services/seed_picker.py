@@ -297,27 +297,44 @@ class SeedPicker:
         return w
 
     def _weight_entropy_and_distance(
-        self, seed: bytes, seed_key: str, meta: dict, w: float, f
+        self, seed: bytes, seed_key: str, meta: dict, w: float, f,
+        entropy_map: dict | None = None, mean_entropy: float = 0.0,
     ) -> float:
-        """Apply Shannon entropy bonus and directed distance weight."""
-        seed_sh = f._edge_tracker.shannon_entropy_seed(seed_key)
+        """Apply Shannon entropy bonus and directed distance weight.
+
+        Args:
+            entropy_map: Pre-computed {seed_key: entropy} dict from _compute_weights.
+            mean_entropy: Pre-computed mean entropy across all seeds.
+        """
+        # Use pre-computed entropy if available, else compute on the fly
+        if entropy_map is not None:
+            seed_sh = entropy_map.get(seed_key, 0.0)
+        else:
+            seed_sh = f._edge_tracker.shannon_entropy_seed(seed_key)
+
         if seed_sh > 0 and len(f._edge_tracker.seed_hit_counts) >= 3:
-            if not hasattr(self, "_mean_seed_entropy"):
-                self._mean_seed_entropy = 0.0
-                self._mean_entropy_cache_key = -1
-            cache_key = len(f._edge_tracker.seed_hit_counts)
-            if cache_key != self._mean_entropy_cache_key:
-                entropies = [
-                    f._edge_tracker.shannon_entropy_seed(k)
-                    for k in f._edge_tracker.seed_hit_counts
-                    if f._edge_tracker.shannon_entropy_seed(k) > 0
-                ]
-                self._mean_seed_entropy = sum(entropies) / len(entropies) if entropies else 0.0
-                self._mean_entropy_cache_key = cache_key
-            if self._mean_seed_entropy > 0:
-                deviation = abs(seed_sh - self._mean_seed_entropy) / max(
-                    self._mean_seed_entropy, 0.01
-                )
+            # Use pre-computed mean if available, else fall back to cached computation
+            if mean_entropy > 0:
+                effective_mean = mean_entropy
+            else:
+                if not hasattr(self, "_mean_seed_entropy"):
+                    self._mean_seed_entropy = 0.0
+                    self._mean_entropy_cache_key = -1
+                cache_key = len(f._edge_tracker.seed_hit_counts)
+                if cache_key != self._mean_entropy_cache_key:
+                    entropies = [
+                        f._edge_tracker.shannon_entropy_seed(k)
+                        for k in f._edge_tracker.seed_hit_counts
+                        if f._edge_tracker.shannon_entropy_seed(k) > 0
+                    ]
+                    self._mean_seed_entropy = (
+                        sum(entropies) / len(entropies) if entropies else 0.0
+                    )
+                    self._mean_entropy_cache_key = cache_key
+                effective_mean = self._mean_seed_entropy
+
+            if effective_mean > 0:
+                deviation = abs(seed_sh - effective_mean) / max(effective_mean, 0.01)
                 w *= 1.0 + min(deviation, 1.0) * 0.5
 
         if f._distance:
@@ -406,6 +423,12 @@ class SeedPicker:
         age_arr = None
         mom_arr = None
 
+        # Pre-compute seed keys and entropy for all seeds in one pass
+        seed_keys = [None] * n
+        entropy_map = {}
+        entropy_sum = 0.0
+        entropy_count = 0
+
         try:
             import numpy as _np
 
@@ -425,6 +448,15 @@ class SeedPicker:
                 cov_list.append(meta["coverage_edges"])
                 age_list.append(now - meta["added_at"])
                 mom_list.append(meta.get("momentum", 0.0))
+
+                # Pre-compute seed key and entropy in same pass
+                sk = f._seed_key(seed)
+                seed_keys[i] = sk
+                ent = f._edge_tracker.shannon_entropy_seed(sk)
+                if ent > 0:
+                    entropy_map[sk] = ent
+                    entropy_sum += ent
+                    entropy_count += 1
 
             if meta_indices:
                 fuzz_arr = _np.array(fuzz_list, dtype=_np.float64)
@@ -449,18 +481,23 @@ class SeedPicker:
         except ImportError:
             pass
 
+        # Pre-compute mean entropy once
+        mean_entropy = entropy_sum / entropy_count if entropy_count > 0 else 0.0
+
         # Phase 2: apply remaining per-seed weight functions (dict lookups, set ops)
         for i, seed in enumerate(corpus):
             if not has_meta[i]:
                 continue
             meta = seed_meta.get(seed)
             fuzz_count = max(meta["fuzz_count"], 1)
-            seed_key = f._seed_key(seed)
+            sk = seed_keys[i] or f._seed_key(seed)
             w = weights[i]
 
-            w, sub, spa = self._weight_secretary_and_cached(seed_key, w, classifications, f)
-            w = self._weight_edge_penalties(seed_key, w, fuzz_count, f)
-            w = self._weight_entropy_and_distance(seed, seed_key, meta, w, f)
+            w, sub, spa = self._weight_secretary_and_cached(sk, w, classifications, f)
+            w = self._weight_edge_penalties(sk, w, fuzz_count, f)
+            w = self._weight_entropy_and_distance(
+                seed, sk, meta, w, f, entropy_map, mean_entropy
+            )
             w = self._weight_static_features(seed, meta["coverage_edges"], w, f)
             w = self._weight_length_and_cross_target(seed, meta, w, f)
 
