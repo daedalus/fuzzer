@@ -467,7 +467,10 @@ class TestCmdEstimateExtended:
         monkeypatch.setattr("fuzzer_tool.cli.commands.Fuzzer", lambda **kwargs: mock_fuzzer)
         monkeypatch.setattr(
             "fuzzer_tool.core.target_profiler.TargetProfiler",
-            lambda *a, **k: MagicMock(profile=lambda: MagicMock(functions={}, rodata_strings=[])),
+            lambda *a, **k: MagicMock(
+                profile=lambda: MagicMock(functions={}, rodata_strings=[]),
+                profile_cached=lambda refresh=False: MagicMock(functions={}, rodata_strings=[]),
+            ),
         )
 
         args = argparse.Namespace(

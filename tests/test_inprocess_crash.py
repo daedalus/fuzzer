@@ -17,8 +17,54 @@ from pathlib import Path
 import pytest
 
 TARGETS_DIR = Path(__file__).parent.parent / "targets"
-NOSAN_SO = TARGETS_DIR / "test_target_nosan.so"
-ASAN_SO = TARGETS_DIR / "asan_target.so"
+
+
+# ---------------------------------------------------------------------------
+# Module-scoped fixture: compile fresh binaries so tests never go stale
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def compiled_targets(tmp_path_factory):
+    """Compile test_target.c and asan_target.c into .so and standalone binaries."""
+    tmpdir = tmp_path_factory.mktemp("binaries")
+
+    def _compile(src, out_name, extra_flags=None):
+        out = tmpdir / out_name
+        cmd = ["gcc", "-shared", "-fPIC", "-o", str(out), str(src)]
+        if extra_flags:
+            cmd[1:1] = extra_flags
+        subprocess.run(cmd, check=True, capture_output=True)
+        return out
+
+    def _compile_standalone(src, out_name, extra_flags=None):
+        out = tmpdir / out_name
+        cmd = ["gcc", "-o", str(out), str(src)]
+        if extra_flags:
+            cmd[1:1] = extra_flags
+        subprocess.run(cmd, check=True, capture_output=True)
+        return out
+
+    nosan_so = _compile(TARGETS_DIR / "test_target.c", "test_target_nosan.so")
+    asan_so = _compile(
+        TARGETS_DIR / "asan_target.c",
+        "asan_target.so",
+        extra_flags=["-fsanitize=address"],
+    )
+    nosan_bin = _compile_standalone(TARGETS_DIR / "test_target.c", "test_target_nosan")
+    asan_bin = _compile_standalone(
+        TARGETS_DIR / "asan_target.c",
+        "asan_target",
+        extra_flags=["-fsanitize=address"],
+    )
+
+    class Targets:
+        NOSAN_SO = nosan_so
+        ASAN_SO = asan_so
+        NOSAN_BIN = nosan_bin
+        ASAN_BIN = asan_bin
+
+    return Targets()
 
 
 # ---------------------------------------------------------------------------
@@ -74,13 +120,13 @@ def _fuzzer_crash_test(target, seed_data, tmpdir, **extra_kwargs):
 class TestDirectLiteCrashHandler:
     """Verify _run_c_direct_lite has signal handlers installed."""
 
-    def test_signal_handlers_installed(self):
+    def test_signal_handlers_installed(self, compiled_targets):
         """_run_c_direct_lite must install SIGSEGV and SIGABRT handlers."""
         import signal
         from fuzzer_tool.adapters.inprocess import InProcessRunner
 
         runner = InProcessRunner(
-            target=str(NOSAN_SO),
+            target=str(compiled_targets.NOSAN_SO),
             function_name="fuzz_shm_run",
             timeout=2.0,
             shm_size=4096,
@@ -94,12 +140,12 @@ class TestDirectLiteCrashHandler:
         rc, stderr = runner.run_one(b"safe")
         assert rc == 0
 
-    def test_direct_lite_safe_input(self):
+    def test_direct_lite_safe_input(self, compiled_targets):
         """_run_c_direct_lite returns normal rc for safe input."""
         from fuzzer_tool.adapters.inprocess import InProcessRunner
 
         runner = InProcessRunner(
-            target=str(NOSAN_SO),
+            target=str(compiled_targets.NOSAN_SO),
             function_name="fuzz_shm_run",
             timeout=2.0,
             shm_size=4096,
@@ -133,18 +179,18 @@ class TestProbeSoFunction:
         )
         assert "nm" in source, "_probe_so_function should use nm -D to scan symbols"
 
-    def test_finds_fuzz_shm_run(self):
+    def test_finds_fuzz_shm_run(self, compiled_targets):
         """_probe_so_function finds fuzz_shm_run in .so targets."""
         from fuzzer_tool.services.fuzzer import Fuzzer
 
-        func = Fuzzer._probe_so_function(str(NOSAN_SO))
+        func = Fuzzer._probe_so_function(str(compiled_targets.NOSAN_SO))
         assert func == "fuzz_shm_run"
 
-    def test_finds_fuzz_fallback(self):
+    def test_finds_fuzz_fallback(self, compiled_targets):
         """_probe_so_function finds fuzz_* fallback in .so targets."""
         from fuzzer_tool.services.fuzzer import Fuzzer
 
-        func = Fuzzer._probe_so_function(str(ASAN_SO))
+        func = Fuzzer._probe_so_function(str(compiled_targets.ASAN_SO))
         assert func.startswith("fuzz_")
 
 
@@ -156,12 +202,12 @@ class TestProbeSoFunction:
 class TestAutoDetectedSoMode:
     """Verify auto-detected .so targets use subprocess loader, not direct_lite."""
 
-    def test_nosan_uses_persistent_loader(self):
+    def test_nosan_uses_persistent_loader(self, compiled_targets):
         """Non-ASAN .so targets should use persistent loader (crash isolation)."""
         from fuzzer_tool.adapters.inprocess import InProcessRunner
 
         runner = InProcessRunner(
-            target=str(NOSAN_SO),
+            target=str(compiled_targets.NOSAN_SO),
             function_name="fuzz_shm_run",
             timeout=2.0,
             shm_size=4096,
@@ -175,12 +221,12 @@ class TestAutoDetectedSoMode:
         assert runner.direct is False
         assert runner._persistent is not None, "Persistent loader should be initialized"
 
-    def test_asan_uses_subprocess_loader(self):
+    def test_asan_uses_subprocess_loader(self, compiled_targets):
         """ASAN .so targets should use subprocess loader."""
         from fuzzer_tool.adapters.inprocess import InProcessRunner
 
         runner = InProcessRunner(
-            target=str(ASAN_SO),
+            target=str(compiled_targets.ASAN_SO),
             function_name="fuzz",
             timeout=2.0,
             shm_size=4096,
@@ -194,12 +240,12 @@ class TestAutoDetectedSoMode:
         # ASAN .so targets use subprocess loader (no persistent loader for ASAN)
         assert runner._loader_path is not None
 
-    def test_nosan_persistent_detects_crash(self):
+    def test_nosan_persistent_detects_crash(self, compiled_targets):
         """Persistent loader detects SIGSEGV crashes in non-ASAN .so targets."""
         from fuzzer_tool.adapters.inprocess import InProcessRunner
 
         runner = InProcessRunner(
-            target=str(NOSAN_SO),
+            target=str(compiled_targets.NOSAN_SO),
             function_name="fuzz_shm_run",
             timeout=2.0,
             shm_size=4096,
@@ -216,12 +262,12 @@ class TestAutoDetectedSoMode:
     @pytest.mark.skip(
         reason="ASAN .so needs LD_PRELOAD set before process start — testing via CLI integration test instead"
     )
-    def test_asan_subprocess_detects_crash(self):
+    def test_asan_subprocess_detects_crash(self, compiled_targets):
         """ASAN .so targets detect crashes via exit code (direct_lite mode)."""
         from fuzzer_tool.adapters.inprocess import InProcessRunner
 
         runner = InProcessRunner(
-            target=str(ASAN_SO),
+            target=str(compiled_targets.ASAN_SO),
             function_name="fuzz",
             timeout=2.0,
             shm_size=4096,
@@ -245,14 +291,14 @@ class TestAutoDetectedSoMode:
 class TestRunTargetFast:
     """Verify run_target_fast redirects stdin and captures stderr."""
 
-    def test_stdin_redirect(self):
+    def test_stdin_redirect(self, compiled_targets):
         """run_target_fast must redirect stdin from temp file."""
-        rc, stderr, pid = run_target_fast(str(TARGETS_DIR / "test_target_nosan"), b"CRASHS")
+        rc, stderr, pid = run_target_fast(str(compiled_targets.NOSAN_BIN), b"CRASHS")
         assert rc != 0, "Target should have crashed on CRASHS input"
 
-    def test_stderr_capture(self):
+    def test_stderr_capture(self, compiled_targets):
         """run_target_fast must capture stderr for ASAN output."""
-        rc, stderr, pid = run_target_fast(str(TARGETS_DIR / "asan_target"), b"BUG!S")
+        rc, stderr, pid = run_target_fast(str(compiled_targets.ASAN_BIN), b"BUG!S")
         assert rc != 0, "ASAN target should have crashed"
         assert "AddressSanitizer" in stderr, f"Expected ASAN report in stderr, got: {stderr[:200]}"
 
@@ -270,28 +316,28 @@ class TestInprocessCrashIntegration:
     """Integration tests: fuzzer finds crashes through inprocess mode."""
 
     @pytest.mark.skip(reason="Fuzzer's dmesg thread interferes with fork-based direct_lite")
-    def test_nosan_so_finds_crash(self):
+    def test_nosan_so_finds_crash(self, compiled_targets):
         """Fuzzer detects crashes in non-ASAN .so targets via inprocess mode."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            result, crash_files = _fuzzer_crash_test(NOSAN_SO, b"CRASHS", tmpdir)
+            result, crash_files = _fuzzer_crash_test(compiled_targets.NOSAN_SO, b"CRASHS", tmpdir)
             assert result.returncode == 0, f"Fuzzer failed: {result.stderr}"
             assert len(crash_files) > 0, (
                 f"No crashes found in non-ASAN .so. Output:\n{result.stdout}"
             )
 
     @pytest.mark.skip(reason="ASAN .so needs LD_PRELOAD set before process start")
-    def test_asan_so_finds_crash(self):
+    def test_asan_so_finds_crash(self, compiled_targets):
         """Fuzzer detects ASAN crashes in ASAN .so targets via inprocess mode."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            result, crash_files = _fuzzer_crash_test(ASAN_SO, b"BUG!S", tmpdir)
+            result, crash_files = _fuzzer_crash_test(compiled_targets.ASAN_SO, b"BUG!S", tmpdir)
             assert result.returncode == 0, f"Fuzzer failed: {result.stderr}"
             assert len(crash_files) > 0, f"No crashes found in ASAN .so. Output:\n{result.stdout}"
 
-    def test_nosan_standalone_finds_crash(self):
+    def test_nosan_standalone_finds_crash(self, compiled_targets):
         """Fuzzer detects crashes in non-ASAN standalone binary."""
         with tempfile.TemporaryDirectory() as tmpdir:
             result, crash_files = _fuzzer_crash_test(
-                TARGETS_DIR / "test_target_nosan", b"CRASHS", tmpdir
+                compiled_targets.NOSAN_BIN, b"CRASHS", tmpdir
             )
             assert result.returncode == 0, f"Fuzzer failed: {result.stderr}"
             assert len(crash_files) > 0, (

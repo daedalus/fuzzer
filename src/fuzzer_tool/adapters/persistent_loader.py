@@ -26,9 +26,10 @@ import ctypes, ctypes.util, os, signal, sys
 
 target = None
 func = None
+lib = None
 
 def load_target(target_path, func_name):
-    global target, func
+    global target, func, lib
     lib = ctypes.CDLL(target_path)
     func = getattr(lib, func_name)
     func.restype = ctypes.c_int

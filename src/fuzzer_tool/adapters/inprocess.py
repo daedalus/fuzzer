@@ -214,7 +214,7 @@ class InProcessRunner:
                                 f"  [debug] After manual __afl_map_shm: __afl_area={afl_area2.value}",
                                 flush=True,
                             )
-                except (OSError, AttributeError):
+                except (OSError, AttributeError, ValueError):
                     pass
                 fn_ptr = getattr(self._lib, self.function_name)
                 fn_ptr.restype = ctypes.c_int
