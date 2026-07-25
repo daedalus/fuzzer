@@ -11,7 +11,6 @@ Extracted from Fuzzer class (~lines 1116-1845). Contains:
 """
 
 import logging
-import random
 import struct
 
 from fuzzer_tool.core.mutations import (
@@ -79,9 +78,9 @@ class OperatorEngine:
         if not buf:
             return
         total_bits = len(buf) * 8
-        span_width = random.choices(
+        span_width = rng.weighted_choice(
             [1, 2, 3, 4, 5, 6, 7, 8], weights=[10, 15, 20, 20, 15, 10, 5, 5]
-        )[0]
+        )
         start_offset = rng.randint(0, max(0, total_bits - span_width))
         for i in range(span_width):
             bit_offset = start_offset + i
@@ -484,7 +483,7 @@ class OperatorEngine:
             colorable = cached
             if colorable:
                 n_mutate = max(1, min(len(colorable), len(buf) // rng.randint(2, 10)))
-                indices = random.choices(colorable, k=n_mutate)
+                indices = rng.choice_list(colorable, n_mutate)
                 for idx in indices:
                     buf[idx] = tbl[buf[idx]]
                 return
@@ -883,15 +882,15 @@ class OperatorEngine:
             if recs:
                 target_len = rng.choice(recs)
             else:
-                target_len = random.choices(
+                target_len = rng.weighted_choice(
                     LENGTH_BOUNDARIES,
                     weights=[10, 10, 10, 10, 10, 10, 10, 10, 8, 8, 8, 8, 6, 6, 4, 4, 3, 3, 2, 2, 1],
-                )[0]
+                )
         else:
-            target_len = random.choices(
+            target_len = rng.weighted_choice(
                 LENGTH_BOUNDARIES,
                 weights=[10, 10, 10, 10, 10, 10, 10, 10, 8, 8, 8, 8, 6, 6, 4, 4, 3, 3, 2, 2, 1],
-            )[0]
+            )
         current_len = len(buf)
         if target_len == current_len:
             return

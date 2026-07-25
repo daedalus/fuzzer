@@ -13,6 +13,9 @@ Modulo bias is acceptable for fuzzing — we are generating test inputs, not
 cryptographic keys.  The pool is not thread-safe.
 """
 
+import bisect
+import itertools
+
 import numpy as np
 
 _POOL_ENTRIES = 4096  # refill every 4K draws
@@ -143,6 +146,37 @@ class RandPool:
         if count <= 0:
             return []
         indices = self.randint_list(0, n - 1, count)
+        return [seq[i] for i in indices]
+
+    def weighted_choice(self, seq: list | tuple, weights: list[float]) -> object:
+        """Return one element from *seq* chosen proportional to *weights*.
+
+        ``random.choices(seq, weights=weights)[0]`` equivalent.
+        """
+        n = len(seq)
+        if n == 0:
+            raise IndexError("cannot choose from empty sequence")
+        cum = list(itertools.accumulate(weights))
+        total = cum[-1]
+        r = self.random() * total
+        return seq[bisect.bisect_right(cum, r)]
+
+    def weighted_choice_list(
+        self, seq: list | tuple, weights: list[float], k: int
+    ) -> list:
+        """Return *k* elements from *seq* chosen proportional to *weights*.
+
+        ``random.choices(seq, weights=weights, k=k)`` equivalent.
+        Vectorized via numpy for the index generation.
+        """
+        n = len(seq)
+        if n == 0:
+            raise IndexError("cannot choose from empty sequence")
+        if k <= 0:
+            return []
+        total = sum(weights)
+        probs = [w / total for w in weights]
+        indices = np.random.choice(n, size=k, replace=True, p=probs)
         return [seq[i] for i in indices]
 
     def shuffle(self, seq: list) -> None:
