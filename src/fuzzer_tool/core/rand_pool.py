@@ -138,7 +138,9 @@ class RandPool:
         remaining = _POOL_ENTRIES - self._idx
         if n <= remaining:
             # Fast path: all bytes available in current pool
-            return self._m256[self._idx:self._idx + n].tobytes()
+            result = self._m256[self._idx:self._idx + n].tobytes()
+            self._idx += n
+            return result
         # Slow path: need to refill — collect chunks
         parts = []
         # Drain current pool
@@ -154,6 +156,9 @@ class RandPool:
         if n > 0:
             self._refill()
             parts.append(self._m256[:n].tobytes())
+            self._idx = n
+        else:
+            self._idx = 0
         return b"".join(parts)
 
     def choice(self, seq: list | tuple | bytes) -> object:
