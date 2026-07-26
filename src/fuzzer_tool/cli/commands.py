@@ -348,6 +348,7 @@ def cmd_fuzz(args):
         crash_allowlist=_load_hash_list(getattr(args, "crash_allowlist", None)),
         save_smaller=getattr(args, "save_smaller", False),
         honggfuzz=getattr(args, "honggfuzz", False),
+        hw_perf=getattr(args, "hw_perf", False),
         schedule_ablation=getattr(args, "schedule_ablation", None),
         replicator=getattr(args, "replicator", False),
         shapley=getattr(args, "shapley", False),
@@ -1345,6 +1346,11 @@ def main() -> int:
         "--honggfuzz",
         action="store_true",
         help="Enable honggfuzz power factors (novelty decay, freshness, fertility, density, entropy penalty, timeout penalty)",
+    )
+    fuzz_parser.add_argument(
+        "--hw-perf",
+        action="store_true",
+        help="Enable hardware performance counters (instructions, branches, branch_misses) via perf_event_open. Requires CAP_PERFMON or root.",
     )
     fuzz_parser.add_argument(
         "--schedule-ablation",

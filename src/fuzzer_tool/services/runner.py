@@ -82,10 +82,16 @@ class TargetRunner:
                     ctypes.memmove(shm._ptr, bitmap, len(bitmap))
             # Note: cmplog log cleanup (truncation / __cmplog_reset) is
             # handled by fuzz_one() after collect_tokens() reads the data.
+            # Read perf counters for inprocess mode
+            if f._perf_counters:
+                f._last_perf_deltas = f._perf_counters.read_and_reset()
             return rc, err
 
         if f._persistent_runner:
-            return f._persistent_runner.run_one(data)
+            rc, err = f._persistent_runner.run_one(data)
+            if f._perf_counters:
+                f._last_perf_deltas = f._perf_counters.read_and_reset()
+            return rc, err
 
         if f.ptrace_cov:
             return self._run_target_ptrace(data)
@@ -99,6 +105,12 @@ class TargetRunner:
         if shm:
             shm.reset_edge_map()
 
+        # Open perf counters on current process with inherit=1 so they
+        # track the child process created by fork+exec.
+        perf_opened = False
+        if f._perf_counters:
+            perf_opened = f._perf_counters.open_for_pid(os.getpid())
+
         env = os.environ.copy()
         if f.use_coverage:
             env["AFL_MAP_SIZE"] = str(f.map_size)
@@ -111,6 +123,8 @@ class TargetRunner:
         if not f.file_mode and not f._cmplog:
             rc, stderr, pid = run_target_fast(f.target, data, env=env)
             f._last_child_pid = pid
+            if f._perf_counters and perf_opened:
+                f._last_perf_deltas = f._perf_counters.read_and_reset()
             return rc, stderr
 
         if f.file_mode:
@@ -123,9 +137,13 @@ class TargetRunner:
                 env=env,
             )
             f._last_child_pid = pid
+            if f._perf_counters and perf_opened:
+                f._last_perf_deltas = f._perf_counters.read_and_reset()
             return rc, stderr
         rc, stderr, pid = run_target_stdin(f.target, data, f.timeout, env=env)
         f._last_child_pid = pid
+        if f._perf_counters and perf_opened:
+            f._last_perf_deltas = f._perf_counters.read_and_reset()
         return rc, stderr
 
     def _ptrace_handle_breakpoint(self, pid: int, libc, cov: PtraceCoverage, regs_buf) -> bool:

@@ -633,6 +633,17 @@ class StatsReporter:
             classified = sum(1 for h in fl.hypotheses if h.field_type != "unknown")
             fmt_str = f" | fmt: {classified}/{len(fl.hypotheses)} fields v{fl.format_model_version}"
 
+        perf_str = ""
+        perf_counters = getattr(f, "_perf_counters", None)
+        if perf_counters and perf_counters._read_count > 0:
+            stats = perf_counters.stats
+            perf_str = (
+                f" | perf: {stats['total_instructions']:,}i "
+                f"{stats['total_branches']:,}b "
+                f"{stats['total_branch_misses']:,}bm "
+                f"ipc:{stats['ipc']:.2f}"
+            )
+
         hf_str = ""
         if getattr(f, "honggfuzz", False):
             total_hf = (

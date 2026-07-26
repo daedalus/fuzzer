@@ -45,6 +45,7 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 - **In-process execution**: persistent subprocess mode (~65-120 eps) with auto-restart on crash
 - **Stack depth tracking**: SHM metadata region tracks max stack depth per iteration via `__sancov_lowest_stack` hook (C shim) or approximation from edge count (Python fallback)
 - **Path hash**: rolling 64-bit hash (`hash = hash * 31 ^ edge_id`) maintained in SHM metadata for collision-resistant path identification and seed diversity scoring
+- **Hardware perf counters** (`--hw-perf`): `perf_event_open(2)` for instruction count, branch count, branch misses via `CAP_PERFMON` — provides execution-depth signals beyond edge coverage
 - **Length-edge tracking**: correlates input length with coverage edge discovery — biases seed selection and length-changing mutations toward productive lengths
 - **Per-target SHM coverage**: multi-target mode tracks coverage independently per target binary
 - **Cross-target seed scoring**: seeds that found edges in the least-covered target get boosted proportionally to the coverage gap

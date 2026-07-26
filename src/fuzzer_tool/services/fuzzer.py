@@ -293,6 +293,7 @@ class Fuzzer:
         crash_allowlist=None,
         save_smaller=False,
         honggfuzz=False,
+        hw_perf=False,
         schedule_ablation=None,
         replicator=False,
         shapley=False,
@@ -557,6 +558,7 @@ class Fuzzer:
         self.crash_allowlist: set[str] = crash_allowlist or set()
         self.save_smaller: bool = save_smaller
         self.honggfuzz: bool = honggfuzz
+        self.hw_perf: bool = hw_perf
         self.crash_min_sizes: dict[str, int] = {}  # stack_hash -> min trigger size
         # Honggfuzz power factor stats (for display)
         self._hf_novelty_boosts: int = 0
@@ -625,6 +627,18 @@ class Fuzzer:
         self._runner = TargetRunner(self)
         self._stats = StatsReporter(self)
         self._corpus_manager = CorpusManager(self)
+
+        # Hardware performance counters (optional, requires CAP_PERFMON)
+        self._perf_counters = None
+        self._last_perf_deltas: dict[str, int] = {}
+        if self.hw_perf:
+            from fuzzer_tool.adapters.perf_event import PerfCounters
+
+            self._perf_counters = PerfCounters()
+            if not self._perf_counters.available:
+                log.warning("Hardware perf counters not available (needs CAP_PERFMON or root)")
+                self._perf_counters = None
+                self.hw_perf = False
 
         # Seed-level energy multiplier: scales mutations_per_input per seed
         self._seed_scorer = SeedScorer(schedule=schedule_ablation or "base")
@@ -2292,6 +2306,13 @@ class Fuzzer:
             print(
                 "[*] Honggfuzz power factors: enabled (novelty, freshness, fertility, density, entropy, timeout)"
             )
+        if self.hw_perf:
+            if self._perf_counters:
+                print(f"[*] HW perf counters: {', '.join(self._perf_counters.counter_names)}")
+            else:
+                print(
+                    "[*] HW perf counters: requested but not available (needs CAP_PERFMON or root)"
+                )
         print(f"[*] Seed: {self.seed}")
         # Target profile summary
         if self._profile.functions:
