@@ -305,3 +305,75 @@ class PerfCounters:
 
     def __del__(self):
         self.close()
+
+
+# ── C shim interface (for subprocess mode) ──────────────────────────────
+
+
+class PerfShim:
+    """C shim interface for perf counters via ctypes.
+
+    Loads the compiled perf_shim.so and provides perf_open/perf_read/perf_close.
+    Useful for subprocess mode where Python can't easily attach perf counters
+    to a child PID that's already running — the C shim can be called from
+    the subprocess adapter.
+
+    Usage:
+        shim = PerfShim()
+        if shim.available:
+            fd = shim.perf_open(child_pid, PERF_COUNT_HW_INSTRUCTIONS)
+            # ... child runs ...
+            val = shim.perf_read(fd)
+            shim.perf_close(fd)
+    """
+
+    def __init__(self, shim_path: str | None = None):
+        self._lib = None
+        self._shim_path = shim_path
+        if shim_path:
+            try:
+                self._lib = ctypes.CDLL(shim_path)
+                self._setup_functions()
+            except (OSError, AttributeError):
+                log.debug("Failed to load perf_shim from %s", shim_path)
+
+    def _setup_functions(self):
+        if not self._lib:
+            return
+        self._lib.perf_open.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
+        self._lib.perf_open.restype = ctypes.c_int
+        self._lib.perf_read.argtypes = [ctypes.c_int]
+        self._lib.perf_read.restype = ctypes.c_uint64
+        self._lib.perf_reset.argtypes = [ctypes.c_int]
+        self._lib.perf_reset.restype = ctypes.c_int
+        self._lib.perf_close.argtypes = [ctypes.c_int]
+        self._lib.perf_close.restype = None
+
+    @property
+    def available(self) -> bool:
+        return self._lib is not None
+
+    def perf_open(
+        self, pid: int, hw_config: int, exclude_kernel: bool = True, inherit: bool = True
+    ) -> int:
+        """Open a perf counter on a PID via C shim."""
+        if not self._lib:
+            return -1
+        return self._lib.perf_open(pid, hw_config, int(exclude_kernel), int(inherit))
+
+    def perf_read(self, fd: int) -> int:
+        """Read counter value via C shim."""
+        if not self._lib or fd < 0:
+            return 0
+        return self._lib.perf_read(fd)
+
+    def perf_reset(self, fd: int) -> int:
+        """Reset counter via C shim."""
+        if not self._lib or fd < 0:
+            return -1
+        return self._lib.perf_reset(fd)
+
+    def perf_close(self, fd: int) -> None:
+        """Close counter via C shim."""
+        if self._lib and fd >= 0:
+            self._lib.perf_close(fd)

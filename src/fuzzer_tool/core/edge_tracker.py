@@ -582,6 +582,10 @@ class EdgeTracker:
         # ── Rare edge tracking ──────────────────────────────────────────
         # Per-edge owner count: how many distinct seeds hit each edge
         self._edge_owner_count: dict[int, int] = {}
+        # ── Hardware perf metrics per seed ──────────────────────────────
+        self.seed_hw_instructions: dict[str, int] = {}
+        self.seed_hw_branches: dict[str, int] = {}
+        self.seed_hw_branch_misses: dict[str, int] = {}
 
     def record_edges(
         self,
@@ -592,6 +596,9 @@ class EdgeTracker:
         morris_mode: bool = False,
         stack_depth: int = 0,
         path_hash: int = 0,
+        hw_instructions: int = 0,
+        hw_branches: int = 0,
+        hw_branch_misses: int = 0,
     ) -> set[int]:
         """Record edges hit by a seed execution.
 
@@ -604,6 +611,9 @@ class EdgeTracker:
                 hit-count diversity scoring. Defaults to count=1 per edge.
             stack_depth: Max stack depth in bytes (from __sancov_lowest_stack).
             path_hash: Rolling 64-bit path hash from edge IDs.
+            hw_instructions: Hardware instruction count delta (from perf_event_open).
+            hw_branches: Hardware branch count delta (from perf_event_open).
+            hw_branch_misses: Hardware branch miss count delta (from perf_event_open).
 
         Returns:
             Set of NEW edge indices not previously seen.
@@ -612,6 +622,12 @@ class EdgeTracker:
             self.seed_stack_depth[seed_key] = stack_depth
         if path_hash != 0:
             self.seed_path_hash[seed_key] = path_hash
+        if hw_instructions > 0:
+            self.seed_hw_instructions[seed_key] = hw_instructions
+        if hw_branches > 0:
+            self.seed_hw_branches[seed_key] = hw_branches
+        if hw_branch_misses > 0:
+            self.seed_hw_branch_misses[seed_key] = hw_branch_misses
         new_edges = set()
         if seed_key not in self.seed_edges:
             self.seed_edges[seed_key] = set()
@@ -1746,6 +1762,18 @@ class EdgeTracker:
         """Get the rolling path hash for a seed."""
         return self.seed_path_hash.get(seed_key, 0)
 
+    def get_seed_hw_instructions(self, seed_key: str) -> int:
+        """Get hardware instruction count for a seed."""
+        return self.seed_hw_instructions.get(seed_key, 0)
+
+    def get_seed_hw_branches(self, seed_key: str) -> int:
+        """Get hardware branch count for a seed."""
+        return self.seed_hw_branches.get(seed_key, 0)
+
+    def get_seed_hw_branch_misses(self, seed_key: str) -> int:
+        """Get hardware branch miss count for a seed."""
+        return self.seed_hw_branch_misses.get(seed_key, 0)
+
     def rare_edge_count(self, seed_key: str, threshold: int = 4) -> int:
         """Count how many edges hit by this seed are 'rare' (seen by <threshold seeds).
 
@@ -2054,6 +2082,9 @@ class EdgeTracker:
             "seed_stack_depth": self.seed_stack_depth,
             "seed_path_hash": self.seed_path_hash,
             "edge_owner_count": {str(e): c for e, c in self._edge_owner_count.items()},
+            "seed_hw_instructions": self.seed_hw_instructions,
+            "seed_hw_branches": self.seed_hw_branches,
+            "seed_hw_branch_misses": self.seed_hw_branch_misses,
         }
         try:
             with open(path, "w") as f:
@@ -2113,6 +2144,9 @@ class EdgeTracker:
         self.seed_stack_depth = data.get("seed_stack_depth", {})
         self.seed_path_hash = data.get("seed_path_hash", {})
         self._edge_owner_count = {int(e): c for e, c in data.get("edge_owner_count", {}).items()}
+        self.seed_hw_instructions = data.get("seed_hw_instructions", {})
+        self.seed_hw_branches = data.get("seed_hw_branches", {})
+        self.seed_hw_branch_misses = data.get("seed_hw_branch_misses", {})
         # Restore MinHash signatures and rebuild LSH index
         self._minhash = MinHashLSH(num_perm=64, num_bands=8)
         self._corpus_sig = None

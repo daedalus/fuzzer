@@ -1843,6 +1843,9 @@ class Fuzzer:
                     hit_counts=hit_counts,
                     stack_depth=stack_depth,
                     path_hash=path_hash,
+                    hw_instructions=self._last_perf_deltas.get("instructions", 0),
+                    hw_branches=self._last_perf_deltas.get("branches", 0),
+                    hw_branch_misses=self._last_perf_deltas.get("branch_misses", 0),
                 )
                 if new:
                     self._last_new_edge_exec = self.exec_count
@@ -2551,6 +2554,8 @@ class Fuzzer:
                             rare_edge_count=rare_edges,
                             timed_out=timed_out,
                             max_cov=max(1, self._edge_tracker.get_cumulative_edge_count()),
+                            hw_instructions=self._last_perf_deltas.get("instructions", 0),
+                            hw_branches=self._last_perf_deltas.get("branches", 0),
                         )
 
                     self._last_perf_score = self._seed_scorer.score(

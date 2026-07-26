@@ -46,6 +46,10 @@ class SeedScorer:
         self.max_mult = max_mult
         self.max_factor = 32.0
         self.power_beta = 1.0
+        # Running averages for hw perf normalization (EMA)
+        self._avg_hw_instructions: float = 0.0
+        self._avg_hw_branches: float = 0.0
+        self._hw_avg_alpha: float = 0.1  # EMA smoothing factor
 
     def score(
         self,
@@ -73,6 +77,8 @@ class SeedScorer:
         timed_out: bool = False,
         input_entropy: float = -1.0,
         max_cov: int = 0,
+        hw_instructions: int = 0,
+        hw_branches: int = 0,
     ) -> float:
         """Compute the energy score for a queue entry.
 
@@ -100,6 +106,8 @@ class SeedScorer:
             timed_out: Whether this seed caused a timeout.
             input_entropy: Shannon entropy of input (0-100, -1 = unknown).
             max_cov: Maximum coverage across all seeds.
+            hw_instructions: Hardware instruction count delta (from perf counters).
+            hw_branches: Hardware branch count delta (from perf counters).
 
         Returns:
             Energy score (1 to max_mult * 100).
@@ -122,6 +130,47 @@ class SeedScorer:
 
         # Depth adjustment
         perf_score *= self._depth_factor(depth)
+
+        # ── Hardware perf factors (apply to ALL schedules) ──────────────
+        if hw_instructions > 0:
+            # Update running average (EMA)
+            if self._avg_hw_instructions == 0:
+                self._avg_hw_instructions = float(hw_instructions)
+            else:
+                self._avg_hw_instructions = (
+                    self._avg_hw_instructions * (1 - self._hw_avg_alpha)
+                    + hw_instructions * self._hw_avg_alpha
+                )
+            # Boost inputs that execute more instructions than average
+            if self._avg_hw_instructions > 0:
+                ratio = hw_instructions / max(1, self._avg_hw_instructions)
+                if ratio > 2.0:
+                    perf_score *= 2.0
+                elif ratio > 1.5:
+                    perf_score *= 1.5
+                elif ratio > 1.0:
+                    perf_score *= 1.2
+                elif ratio < 0.3:
+                    perf_score *= 0.5
+
+        if hw_branches > 0:
+            if self._avg_hw_branches == 0:
+                self._avg_hw_branches = float(hw_branches)
+            else:
+                self._avg_hw_branches = (
+                    self._avg_hw_branches * (1 - self._hw_avg_alpha)
+                    + hw_branches * self._hw_avg_alpha
+                )
+            if self._avg_hw_branches > 0:
+                ratio = hw_branches / max(1, self._avg_hw_branches)
+                if ratio > 2.0:
+                    perf_score *= 1.8
+                elif ratio > 1.5:
+                    perf_score *= 1.4
+                elif ratio > 1.0:
+                    perf_score *= 1.15
+                elif ratio < 0.3:
+                    perf_score *= 0.6
 
         # Schedule-specific frequency adjustment
         if self.schedule == "rare":
