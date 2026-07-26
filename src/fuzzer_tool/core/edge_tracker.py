@@ -576,6 +576,9 @@ class EdgeTracker:
         # Branch correlation matrix: {(edge_a, edge_b): co_occurrence_count}
         self._correlation_matrix: dict[tuple[int, int], int] = {}
         self._correlation_total: int = 0
+        # ── Stack depth + path hash per seed ─────────────────────────────
+        self.seed_stack_depth: dict[str, int] = {}
+        self.seed_path_hash: dict[str, int] = {}
 
     def record_edges(
         self,
@@ -584,6 +587,8 @@ class EdgeTracker:
         target_name: str = "",
         hit_counts: dict[int, int] | None = None,
         morris_mode: bool = False,
+        stack_depth: int = 0,
+        path_hash: int = 0,
     ) -> set[int]:
         """Record edges hit by a seed execution.
 
@@ -594,10 +599,16 @@ class EdgeTracker:
             hit_counts: Optional {edge_id: count} map. When provided (e.g. sparse
                 SHM entries with 32-bit saturating counters) these are used for
                 hit-count diversity scoring. Defaults to count=1 per edge.
+            stack_depth: Max stack depth in bytes (from __sancov_lowest_stack).
+            path_hash: Rolling 64-bit path hash from edge IDs.
 
         Returns:
             Set of NEW edge indices not previously seen.
         """
+        if stack_depth > 0:
+            self.seed_stack_depth[seed_key] = stack_depth
+        if path_hash != 0:
+            self.seed_path_hash[seed_key] = path_hash
         new_edges = set()
         if seed_key not in self.seed_edges:
             self.seed_edges[seed_key] = set()
@@ -1720,6 +1731,14 @@ class EdgeTracker:
         """Get number of edges a specific seed covers."""
         return len(self.seed_edges.get(seed_key, set()))
 
+    def get_seed_stack_depth(self, seed_key: str) -> int:
+        """Get the max stack depth (bytes) for a seed."""
+        return self.seed_stack_depth.get(seed_key, 0)
+
+    def get_seed_path_hash(self, seed_key: str) -> int:
+        """Get the rolling path hash for a seed."""
+        return self.seed_path_hash.get(seed_key, 0)
+
     def edge_rarity_stats(self) -> dict:
         """Compute per-edge rarity statistics.
 
@@ -2005,6 +2024,8 @@ class EdgeTracker:
             "coverage_timeline": self._coverage_timeline,
             "correlation_matrix": {f"{a},{b}": c for (a, b), c in self._correlation_matrix.items()},
             "correlation_total": self._correlation_total,
+            "seed_stack_depth": self.seed_stack_depth,
+            "seed_path_hash": self.seed_path_hash,
         }
         try:
             with open(path, "w") as f:
@@ -2061,6 +2082,8 @@ class EdgeTracker:
             (int(k.split(",")[0]), int(k.split(",")[1])): v for k, v in corr_data.items()
         }
         self._correlation_total = data.get("correlation_total", 0)
+        self.seed_stack_depth = data.get("seed_stack_depth", {})
+        self.seed_path_hash = data.get("seed_path_hash", {})
         # Restore MinHash signatures and rebuild LSH index
         self._minhash = MinHashLSH(num_perm=64, num_bands=8)
         self._corpus_sig = None

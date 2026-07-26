@@ -43,6 +43,8 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 - **AFL SHM bitmap** coverage for instrumented targets (~65-200 eps). **Sparse 8-byte entry hash table** replaces the traditional fixed-size byte bitmap — each SHM entry stores `{edge_id: uint32_t, count: uint32_t}` with open-addressing linear probing. Edge IDs are full 32-bit `(prev_loc ^ cur_loc)` values, eliminating silent bucket collisions. The hash table load factor replaces birthday-collision as the resize signal. No Morris counting needed (32-bit saturating counters). **Auto-resize on stall** is enabled by default (`--resize-map-on-stall` / `--no-resize-map-on-stall`) — when load factor exceeds 0.7, SHM grows to reduce collision risk and expose new edges.
 - **Ptrace edge coverage** with deep capstone disassembly for closed-source binaries (~18-20 eps)
 - **In-process execution**: persistent subprocess mode (~65-120 eps) with auto-restart on crash
+- **Stack depth tracking**: SHM metadata region tracks max stack depth per iteration via `__sancov_lowest_stack` hook (C shim) or approximation from edge count (Python fallback)
+- **Path hash**: rolling 64-bit hash (`hash = hash * 31 ^ edge_id`) maintained in SHM metadata for collision-resistant path identification and seed diversity scoring
 - **Length-edge tracking**: correlates input length with coverage edge discovery — biases seed selection and length-changing mutations toward productive lengths
 - **Per-target SHM coverage**: multi-target mode tracks coverage independently per target binary
 - **Cross-target seed scoring**: seeds that found edges in the least-covered target get boosted proportionally to the coverage gap
@@ -63,7 +65,7 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 - **Report distribution diagnostics**: stddev, skewness, and kurtosis for exec time, discovery rate, per-operator rewards, and seed sizes
 
 ### Scheduling Intelligence
-- **Seed-level energy multiplier** (`SeedScorer`): AFL++ power schedules (FAST/COE/RARE/MMOPT/LIN/QUAD) scale `mutations_per_input` per seed — fast seeds with high coverage get more mutation attempts, heavily-fuzzed seeds get fewer
+- **Seed-level energy multiplier** (`SeedScorer`): AFL++ power schedules (FAST/COE/RARE/MMOPT/LIN/QUAD) scale `mutations_per_input` per seed — fast seeds with high coverage get more mutation attempts, heavily-fuzzed seeds get fewer. Honggfuzz power factors (novelty decay, density, fertility, freshness, CMP progress, entropy penalty, timeout penalty) applied multiplicatively on top of schedule scoring
 - **Jaccard index**: average pairwise edge-set overlap (xxhash-fast) for corpus redundancy monitoring
 - **Subsumption weighting**: MinHash-approximated Jaccard for continuous seed deprioritization
 - **Hitcount diversity (JS divergence)**: seeds with unusual frequency profiles get boosted

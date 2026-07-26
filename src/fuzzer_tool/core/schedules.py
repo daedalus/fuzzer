@@ -11,6 +11,15 @@ Schedules:
 - RARE: tc_ref-based scoring (seeds owning rare edges get boosted)
 - MMOPT: Depth-based boost for recent entries
 - LIN/QUAD: Linear/quadratic falloff with fuzz count
+
+Honggfuzz factors (applied multiplicatively on top of schedule scoring):
+- Novelty decay: new-edge bonus that decays over 10 minutes
+- Density: coverage-per-byte ratio boost
+- Fertility: logarithmic boost for inputs that produced children
+- Freshness: time-based boost (<60s: 4x, <5min: 2x, >60min stale: 0.5x)
+- CMP progress: boost for inputs making comparison progress
+- Entropy penalty: penalize high/very-low entropy inputs
+- Timeout penalty: 1/32 energy for timeout-causing inputs
 """
 
 import math
@@ -52,6 +61,18 @@ class SeedScorer:
         tc_ref: int = 0,
         favored: bool = False,
         max_depth: int = 0,
+        # Honggfuzz power factors (all optional)
+        new_edges: int = 0,
+        time_added: float = 0.0,
+        now: float = 0.0,
+        input_size: int = 0,
+        select_count: int = 0,
+        child_count: int = 0,
+        cmp_progress: int = 0,
+        rare_edge_count: int = 0,
+        timed_out: bool = False,
+        input_entropy: float = -1.0,
+        max_cov: int = 0,
     ) -> float:
         """Compute the energy score for a queue entry.
 
@@ -68,6 +89,17 @@ class SeedScorer:
             tc_ref: Number of bitmap bytes where this seed is the top contender.
             favored: Whether this seed is in the favored set.
             max_depth: Maximum depth in the queue.
+            new_edges: Number of new edges this seed discovered.
+            time_added: Timestamp when seed was added (epoch seconds).
+            now: Current timestamp (epoch seconds).
+            input_size: Size of the seed input in bytes.
+            select_count: How many times this seed has been selected.
+            child_count: Number of children produced by this seed.
+            cmp_progress: CMP solving progress score.
+            rare_edge_count: Number of rare edges hit by this seed.
+            timed_out: Whether this seed caused a timeout.
+            input_entropy: Shannon entropy of input (0-100, -1 = unknown).
+            max_cov: Maximum coverage across all seeds.
 
         Returns:
             Energy score (1 to max_mult * 100).
@@ -121,10 +153,122 @@ class SeedScorer:
                 factor = self.max_factor
             perf_score *= factor / self.power_beta
 
+        # ── Honggfuzz power factors (applied on top of schedule) ────────
+        perf_score *= self._honggfuzz_factors(
+            new_edges=new_edges,
+            time_added=time_added,
+            now=now,
+            bitmap_size=bitmap_size,
+            input_size=input_size,
+            child_count=child_count,
+            cmp_progress=cmp_progress,
+            rare_edge_count=rare_edge_count,
+            select_count=select_count,
+            depth=depth,
+            timed_out=timed_out,
+            input_entropy=input_entropy,
+            bitmap_size_avg=avg_bitmap_size,
+            max_cov=max_cov,
+        )
+
         # Clamp
         perf_score = max(1.0, min(perf_score, self.max_mult * 100.0))
 
         return perf_score
+
+    def _honggfuzz_factors(
+        self,
+        new_edges: int = 0,
+        time_added: float = 0.0,
+        now: float = 0.0,
+        bitmap_size: int = 0,
+        input_size: int = 0,
+        child_count: int = 0,
+        cmp_progress: int = 0,
+        rare_edge_count: int = 0,
+        select_count: int = 0,
+        depth: int = 0,
+        timed_out: bool = False,
+        input_entropy: float = -1.0,
+        bitmap_size_avg: int = 0,
+        max_cov: int = 0,
+    ) -> float:
+        """Compute honggfuzz-style multiplicative energy factors.
+
+        Ported from honggfuzz power.c:power_calculateEnergy.
+        All factors are multiplicative (1.0 = no change).
+
+        Returns:
+            Combined multiplicative factor.
+        """
+        factor = 1.0
+
+        # Novelty decay: new-edge bonus that decays over 10 minutes
+        if new_edges > 0 and now > 0 and time_added > 0:
+            age_mins = (now - time_added) / 60.0
+            decay = 0 if age_mins < 10 else min(int(age_mins / 10), 6)
+            boost = min(new_edges, 8)
+            if boost > decay:
+                factor *= 2.0 ** (boost - decay)
+
+        # Density: coverage-per-byte ratio boost
+        if input_size > 0 and bitmap_size > 0:
+            density = (bitmap_size * 100) / input_size
+            if density > 200:
+                factor *= 2.0
+            elif density > 50:
+                factor *= 1.5
+
+        # Fertility: logarithmic boost for inputs that produced children
+        if child_count > 0:
+            factor *= (8 + min(int(math.log2(child_count + 1)), 8)) / 8.0
+
+        # Freshness: time-based boost
+        if now > 0 and time_added > 0:
+            age_secs = now - time_added
+            if age_secs < 60:
+                factor *= 4.0  # <60s: 4x
+            elif age_secs < 300:
+                factor *= 2.0  # <5min: 2x
+            elif age_secs > 3600 and child_count == 0:
+                factor *= 0.5  # >60min with no children: 0.5x
+
+        # Size penalty: larger inputs get logarithmic penalty
+        if input_size > 1024:
+            log_size = int(math.log2(input_size))
+            if log_size > 10:
+                factor /= 2.0 ** min(log_size - 10, 4)
+
+        # CMP progress boost
+        if cmp_progress > 0:
+            cmp_boost = min(cmp_progress // 8, 4)
+            if cmp_boost > 0:
+                factor *= (4 + cmp_boost) / 4.0
+
+        # Rare edge bonus
+        if rare_edge_count > 0:
+            rare_boost = min(rare_edge_count, 8)
+            factor *= (8 + rare_boost) / 8.0
+
+        # Diminishing returns: inputs selected many times yield less
+        if select_count > 100:
+            penalty = min(int(math.log2(select_count / 100)), 3)
+            factor /= 2.0**penalty
+
+        # Entropy: penalize random blobs and very sparse data
+        if 0 <= input_entropy <= 100:
+            if input_entropy > 93:
+                factor *= 0.5  # High entropy (compressed/random)
+            elif input_entropy < 25:
+                factor *= 0.5  # Very low entropy (zeros)
+            elif input_entropy < 62:
+                factor *= 1.5  # Text/structured data boost
+
+        # Timeout: heavy penalty
+        if timed_out:
+            factor /= 32.0
+
+        return max(0.01, factor)
 
     def _speed_factor(self, exec_us: int, avg_exec_us: int) -> float:
         """Speed-based multiplier: fast seeds get more energy."""

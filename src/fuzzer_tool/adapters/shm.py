@@ -22,6 +22,13 @@ log = logging.getLogger(__name__)
 SHM_MAP_SIZE = 8192  # number of entries
 SIZEOF_ENTRY = 8  # bytes per {edge_id: u32, count: u32}
 
+# Metadata region at the end of SHM (after the edge table).
+# Layout (16 bytes total):
+#   offset 0: uint32 stack_depth   (max stack depth in bytes, from __sancov_lowest_stack)
+#   offset 4: uint32 _pad0
+#   offset 8: uint64 path_hash     (rolling hash: hash = hash * 31 ^ edge_id)
+SHM_METADATA_SIZE = 16  # bytes reserved at end of SHM for metadata
+
 # shmget constants
 IPC_CREAT = 0o1000
 IPC_RMID = 0
@@ -83,7 +90,8 @@ class ShmCoverage:
     def __init__(self, size: int = SHM_MAP_SIZE):
         # size = number of entries (AFL_MAP_SIZE convention)
         self.num_entries = size
-        self.shm_bytes = size * SIZEOF_ENTRY
+        self.table_bytes = size * SIZEOF_ENTRY
+        self.shm_bytes = self.table_bytes + SHM_METADATA_SIZE
 
         self.shm_id = _libc.shmget(0, self.shm_bytes, IPC_CREAT | SHM_R | SHM_W)
         if self.shm_id < 0:
@@ -93,11 +101,14 @@ class ShmCoverage:
             _libc.shmctl(self.shm_id, IPC_RMID, None)
             raise OSError(f"shmat failed: {os.strerror(ctypes.get_errno())}")
 
-        # Raw byte view for memset/memcmp
-        self._map = (ctypes.c_char * self.shm_bytes).from_address(self._ptr)
+        # Raw byte view for the edge table only (for memset/memcmp)
+        self._map = (ctypes.c_char * self.table_bytes).from_address(self._ptr)
         # Typed struct array view
         EntryArr = _entry_struct(self.num_entries)
         self._entries = EntryArr.from_address(self._ptr)
+
+        # Metadata region at the end of SHM
+        self._meta_ptr = self._ptr + self.table_bytes
 
         self.env_id = str(self.shm_id)
 
@@ -189,14 +200,57 @@ class ShmCoverage:
     # ── Reset ────────────────────────────────────────────────────────────
 
     def reset_edge_map(self):
-        """Zero all entries in the coverage hash table."""
-        ctypes.memset(self._ptr, 0, self.shm_bytes)
+        """Zero all entries in the coverage hash table (preserves metadata)."""
+        ctypes.memset(self._ptr, 0, self.table_bytes)
 
     def reset(self):
         """Full reset: zero entries, clear cumulative state."""
         self.reset_edge_map()
         self._seen_edge_ids.clear()
         self.total_edges = 0
+
+    # ── Metadata (stack depth + path hash) ──────────────────────────────
+
+    def read_stack_depth(self) -> int:
+        """Read the stack depth value from the SHM metadata region.
+
+        The C shim writes the max stack depth (in bytes) here when
+        __sancov_lowest_stack is available. Returns 0 when unavailable.
+        """
+        return ctypes.c_uint32.from_address(self._meta_ptr).value
+
+    def read_path_hash(self) -> int:
+        """Read the rolling path hash from the SHM metadata region.
+
+        The C shim maintains: path_hash = path_hash * 31 ^ edge_id
+        Returns the 64-bit hash value.
+        """
+        return ctypes.c_uint64.from_address(self._meta_ptr + 8).value
+
+    def read_metadata(self) -> tuple[int, int]:
+        """Read both stack_depth and path_hash from metadata region.
+
+        Returns:
+            (stack_depth, path_hash) tuple.
+        """
+        return self.read_stack_depth(), self.read_path_hash()
+
+    def compute_path_hash_from_edges(self, edge_ids: set[int]) -> int:
+        """Compute a rolling path hash from edge IDs (Python fallback).
+
+        Uses the same formula as honggfuzz: hash = hash * 31 ^ edge_id
+        for deterministic ordering via sorted edge IDs.
+
+        Args:
+            edge_ids: Set of edge IDs from the current iteration.
+
+        Returns:
+            64-bit path hash.
+        """
+        h = 0
+        for eid in sorted(edge_ids):
+            h = (h * 31) ^ eid
+        return h & 0xFFFFFFFFFFFFFFFF
 
     # ── New-coverage detection ──────────────────────────────────────────
 
@@ -207,7 +261,7 @@ class ShmCoverage:
         1. Fast path: raw memcmp (single C call) — catches unchanged state.
         2. Slow path: numpy vectorized scan for unseen edge_ids.
         """
-        if _libc.memcmp(self._map, self._last_map_snapshot, self.shm_bytes) == 0:
+        if _libc.memcmp(self._map, self._last_map_snapshot, self.table_bytes) == 0:
             return False
 
         # Slow path: extract edge_ids not yet in _seen_edge_ids
@@ -230,7 +284,7 @@ class ShmCoverage:
                 new_found = True
 
         # Update snapshot for next comparison
-        ctypes.memmove(self._last_map_snapshot, self._map, self.shm_bytes)
+        ctypes.memmove(self._last_map_snapshot, self._map, self.table_bytes)
 
         if new_found:
             self.total_edges += 1
@@ -243,7 +297,7 @@ class ShmCoverage:
         boolean and the edge set (e.g. fuzz_one) should use this instead
         of calling is_new_coverage() + get_edge_ids() separately.
         """
-        if _libc.memcmp(self._map, self._last_map_snapshot, self.shm_bytes) == 0:
+        if _libc.memcmp(self._map, self._last_map_snapshot, self.table_bytes) == 0:
             return False, set()
 
         import numpy as np
@@ -266,7 +320,7 @@ class ShmCoverage:
                 )
                 new_found = True
 
-        ctypes.memmove(self._last_map_snapshot, self._map, self.shm_bytes)
+        ctypes.memmove(self._last_map_snapshot, self._map, self.table_bytes)
 
         if new_found:
             self.total_edges += 1
@@ -327,11 +381,12 @@ class ShmCoverage:
         Args:
             new_num_entries: New table size (must be > current).
         """
-        new_bytes = new_num_entries * SIZEOF_ENTRY
-        if new_bytes <= self.shm_bytes:
+        new_table_bytes = new_num_entries * SIZEOF_ENTRY
+        new_total_bytes = new_table_bytes + SHM_METADATA_SIZE
+        if new_table_bytes <= self.table_bytes:
             return
 
-        new_shm_id = _libc.shmget(0, new_bytes, IPC_CREAT | SHM_R | SHM_W)
+        new_shm_id = _libc.shmget(0, new_total_bytes, IPC_CREAT | SHM_R | SHM_W)
         if new_shm_id < 0:
             raise OSError(f"shmget resize failed: {os.strerror(ctypes.get_errno())}")
 
@@ -340,7 +395,7 @@ class ShmCoverage:
             _libc.shmctl(new_shm_id, IPC_RMID, None)
             raise OSError(f"shmat resize failed: {os.strerror(ctypes.get_errno())}")
 
-        ctypes.memset(new_ptr, 0, new_bytes)
+        ctypes.memset(new_ptr, 0, new_total_bytes)
         ctypes.memmove(new_ptr, self._ptr, self.shm_bytes)
 
         # Detach old SHM
@@ -352,10 +407,12 @@ class ShmCoverage:
         self._ptr = new_ptr
         self.shm_id = new_shm_id
         self.num_entries = new_num_entries
-        self.shm_bytes = new_bytes
-        self._map = (ctypes.c_char * new_bytes).from_address(self._ptr)
+        self.table_bytes = new_table_bytes
+        self.shm_bytes = new_total_bytes
+        self._map = (ctypes.c_char * new_table_bytes).from_address(self._ptr)
         EntryArr = _entry_struct(new_num_entries)
         self._entries = EntryArr.from_address(self._ptr)
+        self._meta_ptr = new_ptr + new_table_bytes
         self.env_id = str(self.shm_id)
 
         self._peak_cumulative_edges = max(self._peak_cumulative_edges, self.cumulative_edges)
@@ -363,7 +420,7 @@ class ShmCoverage:
         self._seen_edge_ids.clear()
         self.cumulative_edges = 0
         self.total_edges = 0
-        self._last_map_snapshot = ctypes.create_string_buffer(new_bytes)
+        self._last_map_snapshot = ctypes.create_string_buffer(new_table_bytes)
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 

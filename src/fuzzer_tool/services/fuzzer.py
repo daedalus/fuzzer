@@ -1792,11 +1792,24 @@ class Fuzzer:
                 )
                 hit_counts = None
             if hit_edges:
+                # Read stack depth and path hash from SHM metadata (if available)
+                stack_depth = 0
+                path_hash = 0
+                if self.shm_cov:
+                    stack_depth = self.shm_cov.read_stack_depth()
+                    path_hash = self.shm_cov.read_path_hash()
+                # Fallback: compute path hash from edge IDs in Python
+                if path_hash == 0 and hit_edges and not isinstance(hit_edges, bytes):
+                    path_hash = (
+                        self.shm_cov.compute_path_hash_from_edges(hit_edges) if self.shm_cov else 0
+                    )
                 new = self._edge_tracker.record_edges(
                     seed_key,
                     hit_edges,
                     target_name=os.path.basename(self.target) if self.multi_targets else "",
                     hit_counts=hit_counts,
+                    stack_depth=stack_depth,
+                    path_hash=path_hash,
                 )
                 if new:
                     self._last_new_edge_exec = self.exec_count
