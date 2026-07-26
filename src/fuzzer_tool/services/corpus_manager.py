@@ -111,6 +111,8 @@ class CorpusManager:
                 "added_at": meta["added_at"],
                 "lineage_depth": meta.get("lineage_depth", 0),
                 "hamming_distance": meta.get("hamming_distance", -1),
+                "child_count": meta.get("child_count", 0),
+                "timed_out": meta.get("timed_out", False),
             }
         try:
             f._state_path.write_text(json.dumps(state, separators=(",", ":")))
@@ -160,6 +162,8 @@ class CorpusManager:
                         "added_at": sm.get("added_at", f.seed_meta[seed]["added_at"]),
                         "lineage_depth": sm.get("lineage_depth", 0),
                         "hamming_distance": sm.get("hamming_distance", -1),
+                        "child_count": sm.get("child_count", 0),
+                        "timed_out": sm.get("timed_out", False),
                     }
                 )
                 rm_ser = sm.get("redqueen_matches", [])
@@ -247,6 +251,7 @@ class CorpusManager:
             parent_meta = f.seed_meta.get(parent)
             if parent_meta is not None:
                 parent_depth = parent_meta.get("lineage_depth", 0)
+                parent_meta["child_count"] = parent_meta.get("child_count", 0) + 1
 
         f._total_corpus_attempts += 1
         if save_to_corpus(

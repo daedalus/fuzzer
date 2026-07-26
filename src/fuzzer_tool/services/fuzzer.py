@@ -1694,6 +1694,10 @@ class Fuzzer:
         is_timeout = returncode == -1 and stderr == "timeout"
         if is_timeout:
             self.timeout_count += 1
+            # Mark the parent seed as timeout-causing for power schedule
+            parent_meta = self.seed_meta.get(self._last_parent_seed)
+            if parent_meta is not None:
+                parent_meta["timed_out"] = True
 
         is_crash = self._is_crash(returncode, stderr)
         is_interesting = self._is_interesting(returncode, stderr)
@@ -2463,6 +2467,24 @@ class Fuzzer:
                     depth = meta.get("lineage_depth", 0)
                     fuzz_level = meta.get("fuzz_count", 0)
                     n_fuzz = fuzz_level
+
+                    # Honggfuzz power factors
+                    seed_key = self._seed_key(seed)
+                    new_edges = len(self._edge_tracker.seed_edges.get(seed_key, set()) & self._edge_tracker.cumulative_edges) if seed_key in self._edge_tracker.seed_edges else 0
+                    # Approximate new_edges as edges unique to this seed
+                    if seed_key in self._edge_tracker.seed_edges:
+                        seed_e = self._edge_tracker.seed_edges[seed_key]
+                        others = set()
+                        for sk, se in self._edge_tracker.seed_edges.items():
+                            if sk != seed_key:
+                                others.update(se)
+                        new_edges = len(seed_e - others)
+                    time_added = meta.get("added_at", 0.0)
+                    now = time.time()
+                    child_count = meta.get("child_count", 0)
+                    select_count = fuzz_level
+                    timed_out = meta.get("timed_out", False)
+
                     self._last_perf_score = self._seed_scorer.score(
                         exec_us=exec_us,
                         avg_exec_us=avg_exec_us,
@@ -2473,6 +2495,14 @@ class Fuzzer:
                         fuzz_level=fuzz_level,
                         n_fuzz=n_fuzz,
                         total_execs=max(1, self.exec_count),
+                        new_edges=new_edges,
+                        time_added=time_added,
+                        now=now,
+                        input_size=len(seed),
+                        select_count=select_count,
+                        child_count=child_count,
+                        timed_out=timed_out,
+                        max_cov=max(1, self._edge_tracker.get_cumulative_edge_count()),
                     )
                 self.fuzz_one(seed)
                 i += 1
