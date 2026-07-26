@@ -125,13 +125,12 @@ class PerfCounters:
         self._libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=True)
         self._libc.syscall.restype = ctypes.c_long
         self._libc.syscall.argtypes = [
-            ctypes.c_long,
-            ctypes.c_int,
-            ctypes.c_void_p,
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_ulong,
+            ctypes.c_long,   # syscall number
+            ctypes.c_void_p, # perf_event_attr*
+            ctypes.c_int,    # pid
+            ctypes.c_int,    # cpu
+            ctypes.c_int,    # group_fd
+            ctypes.c_ulong,  # flags
         ]
         self._available = self._check_available()
         self._total_instructions = 0
@@ -140,35 +139,52 @@ class PerfCounters:
         self._read_count = 0
 
     def _check_available(self) -> bool:
-        """Check if perf_event_open is available on this system."""
-        if os.geteuid() == 0:
-            return True
+        """Check if perf_event_open hardware counters are available.
 
-        # Check perf_event_paranoid — -1 or 0 means perf counters are accessible
+        Checks three conditions:
+        1. perf_event_paranoid allows access (-1 or 0)
+        2. CAP_PERFMON or CAP_SYS_ADMIN capability is present (or root)
+        3. Hardware PMU exists in /sys/bus/event_source/devices/
+        """
+        # Check 1: perf_event_paranoid
+        paranoid_ok = False
         try:
             with open("/proc/sys/kernel/perf_event_paranoid") as f:
                 paranoid = int(f.read().strip())
-                if paranoid <= 0:
-                    return True
+                paranoid_ok = paranoid <= 0
         except (OSError, ValueError):
             pass
 
-        # Check for CAP_PERFMON or CAP_SYS_ADMIN capabilities
+        if not paranoid_ok and os.geteuid() != 0:
+            # Check capabilities
+            try:
+                with open("/proc/self/status") as f:
+                    for line in f:
+                        if line.startswith("CapEff:"):
+                            caps = int(line.split()[1], 16)
+                            if caps & (1 << 38) or caps & (1 << 21):
+                                paranoid_ok = True
+                            break
+            except (OSError, ValueError):
+                pass
+
+        if not paranoid_ok and os.geteuid() != 0:
+            return False
+
+        # Check 2: Hardware PMU must exist
         try:
-            with open("/proc/self/status") as f:
-                for line in f:
-                    if line.startswith("CapEff:"):
-                        caps = int(line.split()[1], 16)
-                        # CAP_PERFMON is bit 38
-                        if caps & (1 << 38):
-                            return True
-                        # CAP_SYS_ADMIN is bit 21 (allows perf_event_open)
-                        if caps & (1 << 21):
-                            return True
-                        return False
-        except (OSError, ValueError):
-            pass
-        return False
+            devices = os.listdir("/sys/bus/event_source/devices/")
+            # Only these are real hardware PMUs
+            hw_pmus = {"intel_core_pmu", "armv8_pmuv3", "armv8_pmuv3-pmcr",
+                       "amd_ibs", "amd_ibs_zen4", "hygon_pmu"}
+            for dev in devices:
+                if dev in hw_pmus:
+                    return True
+            # No hardware PMU found
+            log.debug("No hardware PMU found in /sys/bus/event_source/devices/ (found: %s)", devices)
+            return False
+        except OSError:
+            return False
 
     @property
     def available(self) -> bool:
@@ -193,10 +209,9 @@ class PerfCounters:
         for name in self.counter_names:
             perf_type, config, needs_inherit = COUNTER_DEFS[name]
 
-            pe = perf_event_attr()
-            pe.size = ctypes.sizeof(perf_event_attr)
-            pe.type = perf_type
-            pe.config = config
+            # Build perf_event_attr as raw bytes at known offsets
+            # to avoid ctypes bitfield layout issues.
+            import struct as _struct
 
             flags = 0
             flags |= _FLAG_DISABLED
@@ -205,13 +220,19 @@ class PerfCounters:
             flags |= _FLAG_EXCLUDE_HV
             if needs_inherit and self.inherit:
                 flags |= _FLAG_INHERIT
-            # enable_on_exec for non-persistent targets
             flags |= _FLAG_ENABLE_ON_EXEC
+
+            # Use ctypes.Structure for correct layout (varies by kernel version)
+            pe = perf_event_attr()
+            pe.size = ctypes.sizeof(perf_event_attr)
+            pe.type = perf_type
+            pe.config = config
             pe.flags = flags
+            pe = bytes(pe)
 
             fd = self._libc.syscall(
-                __NR_perf_event_open,
-                ctypes.byref(pe),
+                298,  # __NR_perf_event_open (x86_64)
+                (ctypes.c_char * len(pe))(*pe),
                 pid,  # target pid
                 -1,  # cpu (any)
                 -1,  # group_fd (none)
@@ -227,6 +248,16 @@ class PerfCounters:
                 )
                 success = False
                 continue
+
+            # Enable immediately — enable_on_exec only triggers on the
+            # process that calls exec(), but we open on the parent PID.
+            # The child inherits already-enabled counters via inherit=1.
+            import fcntl
+            PERF_IOC_ENABLE = 0x2400
+            try:
+                fcntl.ioctl(fd, PERF_IOC_ENABLE)
+            except OSError:
+                pass
 
             self._fds[name] = fd
             self._last_values[name] = 0
