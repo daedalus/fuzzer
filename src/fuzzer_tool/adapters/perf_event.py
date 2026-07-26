@@ -141,23 +141,34 @@ class PerfCounters:
 
     def _check_available(self) -> bool:
         """Check if perf_event_open is available on this system."""
-        if os.geteuid() != 0:
-            # Check for CAP_PERFMON
-            try:
-                with open("/proc/self/status") as f:
-                    for line in f:
-                        if line.startswith("CapEff:"):
-                            caps = int(line.split()[1], 16)
-                            # CAP_PERFMON is bit 38
-                            if caps & (1 << 38):
-                                return True
-                            # CAP_SYS_ADMIN is bit 21 (allows perf_event_open)
-                            if caps & (1 << 21):
-                                return True
-                            return False
-            except (OSError, ValueError):
-                return False
-        return True
+        if os.geteuid() == 0:
+            return True
+
+        # Check perf_event_paranoid — -1 or 0 means perf counters are accessible
+        try:
+            with open("/proc/sys/kernel/perf_event_paranoid") as f:
+                paranoid = int(f.read().strip())
+                if paranoid <= 0:
+                    return True
+        except (OSError, ValueError):
+            pass
+
+        # Check for CAP_PERFMON or CAP_SYS_ADMIN capabilities
+        try:
+            with open("/proc/self/status") as f:
+                for line in f:
+                    if line.startswith("CapEff:"):
+                        caps = int(line.split()[1], 16)
+                        # CAP_PERFMON is bit 38
+                        if caps & (1 << 38):
+                            return True
+                        # CAP_SYS_ADMIN is bit 21 (allows perf_event_open)
+                        if caps & (1 << 21):
+                            return True
+                        return False
+        except (OSError, ValueError):
+            pass
+        return False
 
     @property
     def available(self) -> bool:
