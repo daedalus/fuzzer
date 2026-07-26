@@ -57,3 +57,4 @@ corpora/
 # Vendored library sources (built with clang -fsanitize-coverage)
 vendor/
 targets/*.profile_cache
+src/fuzzer_tool/adapters/*.so
