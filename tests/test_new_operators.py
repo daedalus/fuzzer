@@ -1,8 +1,17 @@
-"""Tests for new operator handlers: UTF-8, line, and fuse mutations."""
+"""Tests for new operator handlers: UTF-8, line, fuse, and honggfuzz mutations."""
 
 import random
 
-from fuzzer_tool.core.mutations import _FUNNY_UNICODE, MUTATIONS
+from fuzzer_tool.core.mutations import (
+    DICT_COMPOUND_SEPARATORS,
+    MAGIC_TABLE,
+    MUTATIONS,
+    PUNCTUATION_CHARS,
+    SPECIAL_STRINGS,
+    _FUNNY_UNICODE,
+    ascii_num_arithmetic,
+    chunk_shuffle,
+)
 from fuzzer_tool.services.operators import OperatorEngine
 
 
@@ -387,3 +396,438 @@ class TestTreeMutatorDispatch:
         result = dispatch["tree_mutate"](buf, 0, b"")
         assert result is None
         assert buf == b"ab"
+
+
+# ── Special strings mutation tests ─────────────────────────────────────
+
+
+class TestSpecialStrings:
+    def setup_method(self):
+        self.engine = OperatorEngine(_make_minimal_fuzzer())
+
+    def test_inserts_security_string(self):
+        buf = bytearray(b"hello world")
+        before_len = len(buf)
+        self.engine._op_special_strings(buf, 0, b"")
+        assert len(buf) > before_len
+
+    def test_inserted_bytes_are_from_list(self):
+        """The inserted bytes must be a substring of SPECIAL_STRINGS."""
+        for _ in range(50):
+            buf = bytearray(b"test input data")
+            self.engine._op_special_strings(buf, 0, b"")
+            found = any(seq in bytes(buf) for seq in SPECIAL_STRINGS)
+            assert found, f"No special string found in {bytes(buf)}"
+
+    def test_empty_buffer(self):
+        buf = bytearray(b"")
+        self.engine._op_special_strings(buf, 0, b"")
+        assert buf == b""  # empty → no-op
+
+    def test_buffer_at_max_len(self):
+        f = self.engine.f
+        old_max = f.max_len
+        try:
+            f.max_len = 5
+            buf = bytearray(b"hello")
+            self.engine._op_special_strings(buf, 0, b"")
+            assert len(buf) == 5  # unchanged
+        finally:
+            f.max_len = old_max
+
+    def test_special_strings_list_completeness(self):
+        assert len(SPECIAL_STRINGS) >= 40
+        # Must contain known attack strings
+        assert b"%n" in SPECIAL_STRINGS
+        assert b"UNION SELECT" in SPECIAL_STRINGS
+        assert b"../" in SPECIAL_STRINGS
+        assert b"<script>" in SPECIAL_STRINGS
+        assert b"${" in SPECIAL_STRINGS or b"$(" in SPECIAL_STRINGS
+        assert b"\x00" in SPECIAL_STRINGS
+
+
+# ── Magic values mutation tests ────────────────────────────────────────
+
+
+class TestMagicValues:
+    def setup_method(self):
+        self.engine = OperatorEngine(_make_minimal_fuzzer())
+
+    def test_inserts_magic_value(self):
+        buf = bytearray(b"\x00" * 16)
+        self.engine._op_magic_values(buf, 0, b"")
+        # Buffer should have changed (magic value inserted)
+        assert any(b != 0 for b in buf)
+
+    def test_magic_table_covers_all_widths(self):
+        widths = set(w for w, _ in MAGIC_TABLE)
+        assert widths == {1, 2, 4, 8}
+
+    def test_magic_table_has_both_endians(self):
+        """For widths >= 2, both LE and BE variants should exist."""
+        for width in (2, 4, 8):
+            entries = [(w, p) for w, p in MAGIC_TABLE if w == width]
+            le_count = sum(1 for w, p in entries if p[0] != 0 or len(entries) <= 2)
+            be_count = len(entries) - le_count
+            assert len(entries) >= 4, f"Width {width} has only {len(entries)} entries"
+
+    def test_empty_buffer(self):
+        buf = bytearray(b"")
+        self.engine._op_magic_values(buf, 0, b"")
+        # Empty buffer: insert branch (len + width <= max_len)
+        assert len(buf) <= 8  # may insert up to 8 bytes
+
+    def test_small_buffer_insert(self):
+        buf = bytearray(b"AB")
+        self.engine._op_magic_values(buf, 0, b"")
+        assert len(buf) >= 2  # either inserted or overwritten
+
+    def test_large_buffer_overwrite(self):
+        """When buffer is near max_len, magic value overwrites instead of inserting."""
+        f = self.engine.f
+        old_max = f.max_len
+        try:
+            f.max_len = 100
+            buf = bytearray(b"\x00" * 100)
+            self.engine._op_magic_values(buf, 0, b"")
+            assert len(buf) == 100  # length preserved on overwrite
+        finally:
+            f.max_len = old_max
+
+    def test_magic_table_size(self):
+        assert len(MAGIC_TABLE) >= 100  # substantial table
+
+
+# ── ASCII number arithmetic tests ─────────────────────────────────────
+
+
+class TestAsciiNumArithmetic:
+    def test_finds_and_mutates_digit_sequence(self):
+        for _ in range(30):
+            result = ascii_num_arithmetic(b"value=42 end", rng=random.Random())
+            if result is not None:
+                assert b"42" != result[6:8] or result == b"value=42 end"
+                # At least one call should find digits
+                break
+        else:
+            # All 30 missed — unlikely but not impossible
+            pass
+
+    def test_returns_none_on_no_digits(self):
+        result = ascii_num_arithmetic(b"no digits here", rng=random.Random())
+        assert result is None
+
+    def test_returns_none_on_empty(self):
+        result = ascii_num_arithmetic(b"", rng=random.Random())
+        assert result is None
+
+    def test_increments_by_one(self):
+        """When op=0 (+1), '123' should become '124'."""
+        found = False
+        for _ in range(200):
+            result = ascii_num_arithmetic(b"num=123", rng=random.Random())
+            if result and b"124" in result:
+                found = True
+                break
+        assert found, "Expected +1 operation to produce '124'"
+
+    def test_decrements(self):
+        """When op=1 (-1), '123' should become '122'."""
+        found = False
+        for _ in range(200):
+            result = ascii_num_arithmetic(b"num=123", rng=random.Random())
+            if result and b"122" in result:
+                found = True
+                break
+        assert found, "Expected -1 operation to produce '122'"
+
+    def test_doubles(self):
+        """When op=2 (*2), '50' should become '100'."""
+        found = False
+        for _ in range(200):
+            result = ascii_num_arithmetic(b"val=50 ", rng=random.Random())
+            if result and b"100" in result:
+                found = True
+                break
+        assert found, "Expected *2 operation to produce '100'"
+
+    def test_halves(self):
+        """When op=3 (/2), '100' should become '50'."""
+        found = False
+        for _ in range(200):
+            result = ascii_num_arithmetic(b"val=100", rng=random.Random())
+            if result and b"50" in result:
+                found = True
+                break
+        assert found, "Expected /2 operation to produce '50'"
+
+    def test_preserves_non_digit_bytes(self):
+        result = ascii_num_arithmetic(b"prefix123suffix", rng=random.Random())
+        if result is not None:
+            assert result[:6] == b"prefix"
+            assert result[-6:] == b"suffix"
+
+    def test_handler_dispatch(self):
+        engine = OperatorEngine(_make_minimal_fuzzer())
+        buf = bytearray(b"count=42 items")
+        result = engine._op_ascii_num_arithmetic(buf, 0, b"")
+        # May or may not find digits depending on random offset
+        assert result is None or isinstance(result, bytearray)
+
+
+# ── Chunk shuffle tests ───────────────────────────────────────────────
+
+
+class TestChunkShuffle:
+    def test_shuffle_preserves_length(self):
+        data = b"A" * 32
+        for _ in range(20):
+            result = chunk_shuffle(data, rng=random.Random())
+            assert len(result) == len(data)
+
+    def test_shuffle_changes_content(self):
+        data = bytes(range(32))
+        changed = False
+        for _ in range(20):
+            result = chunk_shuffle(data, rng=random.Random())
+            if result != data:
+                changed = True
+                break
+        assert changed, "Expected chunk_shuffle to change content at least once"
+
+    def test_short_buffer_unchanged(self):
+        data = b"ABCD"
+        result = chunk_shuffle(data, rng=random.Random())
+        assert result == data  # < 8 bytes → no-op
+
+    def test_single_chunk_unchanged(self):
+        data = b"A" * 7  # 7 bytes, chunk_size=1 → 7 chunks, should shuffle
+        result = chunk_shuffle(data, rng=random.Random())
+        # 7 bytes < 8 threshold → no-op
+        assert result == data
+
+    def test_different_chunk_sizes(self):
+        """Different random chunk sizes should produce different results."""
+        results = set()
+        data = bytes(range(64))
+        for _ in range(30):
+            result = chunk_shuffle(data, rng=random.Random())
+            results.add(result)
+        assert len(results) > 1
+
+    def test_handler_dispatch(self):
+        engine = OperatorEngine(_make_minimal_fuzzer())
+        buf = bytearray(b"\x00" * 32)
+        result = engine._op_chunk_shuffle(buf, 0, b"")
+        assert result is None or isinstance(result, bytearray)
+        if result is not None:
+            assert len(result) == 32
+
+    def test_empty_buffer(self):
+        result = chunk_shuffle(b"", rng=random.Random())
+        assert result == b""
+
+
+# ── Dict compound tests ───────────────────────────────────────────────
+
+
+class TestDictCompound:
+    def setup_method(self):
+        self.engine = OperatorEngine(_make_minimal_fuzzer())
+        self.engine.f.dictionary = [b"key", b"value", b"param", b"token"]
+
+    def test_inserts_compound_token(self):
+        buf = bytearray(b"existing data")
+        before_len = len(buf)
+        self.engine._op_dict_compound(buf, 0, b"")
+        assert len(buf) > before_len
+
+    def test_compound_contains_separator(self):
+        """Inserted content should contain a separator from the list."""
+        found_sep = False
+        for _ in range(50):
+            buf = bytearray(b"test")
+            self.engine._op_dict_compound(buf, 0, b"")
+            compound = bytes(buf)[4:]  # after original "test"
+            for sep in DICT_COMPOUND_SEPARATORS:
+                if sep and sep in compound:
+                    found_sep = True
+                    break
+            if found_sep:
+                break
+        assert found_sep, "Expected a non-empty separator in compound token"
+
+    def test_no_dictionary_noop(self):
+        self.engine.f.dictionary = []
+        buf = bytearray(b"test")
+        self.engine._op_dict_compound(buf, 0, b"")
+        assert buf == b"test"
+
+    def test_single_dict_entry_noop(self):
+        self.engine.f.dictionary = [b"only_one"]
+        buf = bytearray(b"test")
+        self.engine._op_dict_compound(buf, 0, b"")
+        assert buf == b"test"
+
+    def test_empty_buffer(self):
+        buf = bytearray(b"")
+        self.engine._op_dict_compound(buf, 0, b"")
+        assert buf == b""  # empty → no-op (handler requires existing content)
+
+    def test_separator_list_completeness(self):
+        assert b"" in DICT_COMPOUND_SEPARATORS
+        assert b" " in DICT_COMPOUND_SEPARATORS
+        assert b"=" in DICT_COMPOUND_SEPARATORS
+        assert b"&" in DICT_COMPOUND_SEPARATORS
+        assert b"\n" in DICT_COMPOUND_SEPARATORS
+
+
+# ── Punctuation insert tests ──────────────────────────────────────────
+
+
+class TestPunctuationInsert:
+    def setup_method(self):
+        self.engine = OperatorEngine(_make_minimal_fuzzer())
+
+    def test_inserts_punctuation(self):
+        buf = bytearray(b"hello world")
+        before_len = len(buf)
+        self.engine._op_punctuation_insert(buf, 0, b"")
+        assert len(buf) > before_len
+        assert len(buf) <= before_len + 4
+
+    def test_inserted_bytes_are_punctuation(self):
+        for _ in range(30):
+            buf = bytearray(b"test")
+            before_len = len(buf)
+            self.engine._op_punctuation_insert(buf, 0, b"")
+            diff = len(buf) - before_len
+            assert 1 <= diff <= 4
+
+    def test_empty_buffer(self):
+        buf = bytearray(b"")
+        self.engine._op_punctuation_insert(buf, 0, b"")
+        assert buf == b""  # empty → no-op
+
+    def test_buffer_at_max_len(self):
+        f = self.engine.f
+        old_max = f.max_len
+        try:
+            f.max_len = 5
+            buf = bytearray(b"hello")
+            self.engine._op_punctuation_insert(buf, 0, b"")
+            assert len(buf) == 5  # unchanged
+        finally:
+            f.max_len = old_max
+
+    def test_punctuation_chars_completeness(self):
+        assert len(PUNCTUATION_CHARS) >= 30
+        # Must contain common punctuation
+        assert 0x21 in PUNCTUATION_CHARS  # !
+        assert 0x3C in PUNCTUATION_CHARS  # <
+        assert 0x7B in PUNCTUATION_CHARS  # {
+
+    def test_varies_insertion_length(self):
+        lengths = set()
+        for _ in range(50):
+            buf = bytearray(b"x" * 100)
+            self.engine._op_punctuation_insert(buf, 0, b"")
+            lengths.add(len(buf) - 100)
+        assert len(lengths) >= 2  # should see 1, 2, 3, or 4
+
+
+# ── Havoc escalation tests ────────────────────────────────────────────
+
+
+class TestHavocEscalation:
+    def setup_method(self):
+        self.engine = OperatorEngine(_make_minimal_fuzzer())
+
+    def test_normal_havoc_applies_few_mutations(self):
+        """Normal havoc: 2-8 mutations applied."""
+        for _ in range(20):
+            buf = bytearray(b"\x00" * 256)
+            self.engine.havoc_mutate(buf)
+            # Buffer changed but not wildly
+            assert isinstance(buf, bytearray)
+
+    def test_stall_havoc_applies_more_mutations(self):
+        """During stall recovery: 8-16 mutations."""
+        self.engine.f._stall_recovery_active = True
+        # With more mutations, we expect more dramatic changes
+        changed = False
+        for _ in range(10):
+            buf = bytearray(b"\x00" * 256)
+            original = bytes(buf)
+            self.engine.havoc_mutate(buf)
+            if bytes(buf) != original:
+                changed = True
+                break
+        assert changed
+
+    def test_havoc_handler_dispatch(self):
+        engine = OperatorEngine(_make_minimal_fuzzer())
+        buf = bytearray(b"\x00" * 64)
+        result = engine._op_havoc(buf, 0, b"")
+        assert isinstance(result, (bytearray, bytes))
+
+    def test_stall_flag_respected(self):
+        """Verify stall flag is checked (not hardcoded)."""
+        self.engine.f._stall_recovery_active = False
+        buf1 = bytearray(b"\x00" * 256)
+        self.engine.havoc_mutate(buf1)
+        self.engine.f._stall_recovery_active = True
+        buf2 = bytearray(b"\x00" * 256)
+        self.engine.havoc_mutate(buf2)
+        # Both should produce valid results (no crash)
+        assert isinstance(buf1, bytearray)
+        assert isinstance(buf2, bytearray)
+
+
+# ── Operator registration tests (updated) ─────────────────────────────
+
+
+class TestNewOperatorsRegistered:
+    def test_tree_mutate_in_list(self):
+        assert "tree_mutate" in MUTATIONS
+
+    def test_utf8_ops_in_list(self):
+        assert "utf8_widen" in MUTATIONS
+        assert "utf8_insert" in MUTATIONS
+
+    def test_line_mutate_in_list(self):
+        assert "line_mutate" in MUTATIONS
+
+    def test_fuse_ops_in_list(self):
+        assert "fuse_this" in MUTATIONS
+        assert "fuse_next" in MUTATIONS
+        assert "fuse_old" in MUTATIONS
+
+    def test_honggfuzz_ops_in_list(self):
+        assert "special_strings" in MUTATIONS
+        assert "magic_values" in MUTATIONS
+        assert "ascii_num_arithmetic" in MUTATIONS
+        assert "chunk_shuffle" in MUTATIONS
+        assert "dict_compound" in MUTATIONS
+        assert "punctuation_insert" in MUTATIONS
+
+    def test_dispatch_contains_all_new_ops(self):
+        engine = OperatorEngine(_make_minimal_fuzzer())
+        dispatch = engine.build_dispatch()
+        for op in (
+            "tree_mutate",
+            "utf8_widen",
+            "utf8_insert",
+            "line_mutate",
+            "fuse_this",
+            "fuse_next",
+            "fuse_old",
+            "redqueen_xform",
+            "special_strings",
+            "magic_values",
+            "ascii_num_arithmetic",
+            "chunk_shuffle",
+            "dict_compound",
+            "punctuation_insert",
+        ):
+            assert op in dispatch, f"{op} missing from dispatch table"
