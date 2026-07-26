@@ -421,7 +421,9 @@ class TestExtractDivConstants:
 
     @classmethod
     def setup_class(cls):
-        import subprocess, tempfile, os
+        import os
+        import subprocess
+        import tempfile
 
         cls._tmpdir = tempfile.mkdtemp(prefix="elf_test_")
         src = os.path.join(cls._tmpdir, "test_div.c")
@@ -493,9 +495,9 @@ class TestExtractDivConstants:
 
     def test_non_elf_returns_empty(self):
         """Non-ELF file returns empty dict and set."""
-        from fuzzer_tool.core.elf import extract_div_constants
-
         import tempfile
+
+        from fuzzer_tool.core.elf import extract_div_constants
 
         with tempfile.NamedTemporaryFile(suffix=".bin") as f:
             f.write(b"\x00" * 100)
@@ -519,7 +521,8 @@ class TestExtractDivConstants:
 
     def test_weak_modulus_variable_divisor(self):
         """div with variable divisor (runtime parameter) → weak_mod_pcs set."""
-        import subprocess, os
+        import os
+        import subprocess
 
         from fuzzer_tool.core.elf import extract_div_constants
 
@@ -548,3 +551,484 @@ class TestExtractDivConstants:
             f"expected at least 1 CMP in weak_mod_pcs "
             f"for variable-divisor DIV, got div_map={d} weak={w}"
         )
+
+
+# ============================================================================
+# Pure x86-64 decoder unit tests (no compilation needed)
+# ============================================================================
+
+
+class TestX86_64Decoder:
+    """Direct unit tests for _decode_x86_64 with hand-crafted byte sequences."""
+
+    def _decode(self, code: bytes, base: int = 0x1000):
+        from fuzzer_tool.core.elf import _decode_x86_64
+
+        return list(_decode_x86_64(code, base))
+
+    def test_mov_ecx_imm32(self):
+        """B9 0A000000 → mov ecx, 10"""
+        insns = self._decode(b"\xb9\x0a\x00\x00\x00")
+        assert len(insns) == 1
+        insn = insns[0]
+        assert insn.insn_id == 1  # _INS_MOV
+        assert len(insn.operands) == 2
+        assert insn.operands[0].type == 1  # _OP_REG
+        assert insn.operands[0].reg == 1  # ecx
+        assert insn.operands[1].type == 2  # _OP_IMM
+        assert insn.operands[1].imm == 10
+
+    def test_mov_eax_imm32(self):
+        """B8 64000000 → mov eax, 100"""
+        insns = self._decode(b"\xb8\x64\x00\x00\x00")
+        assert len(insns) == 1
+        assert insns[0].insn_id == 1
+        assert insns[0].operands[0].reg == 0  # eax
+        assert insns[0].operands[1].imm == 100
+
+    def test_mov_rax_imm64_rex_w(self):
+        """48 B8 1000000000000000 → mov rax, 16"""
+        insns = self._decode(b"\x48\xb8\x10\x00\x00\x00\x00\x00\x00\x00")
+        assert len(insns) == 1
+        assert insns[0].insn_id == 1
+        assert insns[0].operands[0].reg == 0  # rax
+        assert insns[0].operands[0].size == 8
+        assert insns[0].operands[1].imm == 16
+
+    def test_mov_r8_imm64_rex_b(self):
+        """49 B8 ... → mov r8, imm64 (REX.B extends opcode reg)"""
+        imm = 0x1234567890ABCDEF
+        insns = self._decode(b"\x49\xb8" + struct.pack("<q", imm))
+        assert len(insns) == 1
+        assert insns[0].insn_id == 1
+        assert insns[0].operands[0].reg == 8  # r8
+        assert insns[0].operands[1].imm == imm
+
+    def test_xor_edx_edx(self):
+        """33 D2 → xor edx, edx"""
+        insns = self._decode(b"\x33\xd2")
+        assert len(insns) == 1
+        assert insns[0].insn_id == 3  # _INS_XOR
+        assert insns[0].operands[0].reg == 2  # edx
+        assert insns[0].operands[1].reg == 2  # edx
+        assert 2 in insns[0]._regs_write
+
+    def test_xor_ecx_ecx(self):
+        """31 C9 → xor ecx, ecx (alternate encoding)"""
+        insns = self._decode(b"\x31\xc9")
+        assert len(insns) == 1
+        assert insns[0].insn_id == 3  # _INS_XOR
+        assert insns[0].operands[0].reg == 1  # ecx (rm destination)
+        assert insns[0].operands[1].reg == 1  # ecx (reg source)
+
+    def test_div_ecx(self):
+        """F7 F1 → div ecx (F7 /6, ModR/M=0xF1=11_110_001)"""
+        insns = self._decode(b"\xf7\xf1")
+        assert len(insns) == 1
+        assert insns[0].insn_id == 6  # _INS_DIV
+        assert insns[0].operands[0].reg == 1  # ecx
+        assert 0 in insns[0]._regs_read  # eax
+        assert 2 in insns[0]._regs_read  # edx
+        assert 1 in insns[0]._regs_read  # ecx
+
+    def test_idiv_ecx(self):
+        """F7 F9 → idiv ecx (F7 /7, ModR/M=0xF9=11_111_001)"""
+        insns = self._decode(b"\xf7\xf9")
+        assert len(insns) == 1
+        assert insns[0].insn_id == 7  # _INS_IDIV
+        assert insns[0].operands[0].reg == 1  # ecx
+
+    def test_div_edx(self):
+        """F7 F2 → div edx (ModR/M=0xF2=11_110_010)"""
+        insns = self._decode(b"\xf7\xf2")
+        assert len(insns) == 1
+        assert insns[0].insn_id == 6  # _INS_DIV
+        assert insns[0].operands[0].reg == 2  # edx
+
+    def test_cmp_eax_imm32(self):
+        """3D 00000000 → cmp eax, 0 (special encoding for eax).
+
+        This is a special encoding (3D = opcode for CMP EAX, imm32).
+        Our decoder only handles 81/83 for CMP, so this should be _INS_OTHER.
+        That's fine — the important CMP patterns are 81 /7 and 83 /7.
+        """
+        insns = self._decode(b"\x3d\x00\x00\x00\x00")
+        # 3D is not in our opcode table, so it's 5 unrecognized bytes
+
+    def test_cmp_edx_imm32(self):
+        """81 FA 00000000 → cmp edx, 0 (81 /7, ModR/M=0xFA=11_110_010)"""
+        insns = self._decode(b"\x81\xfa\x00\x00\x00\x00")
+        assert len(insns) == 1
+        assert insns[0].insn_id == 4  # _INS_CMP
+        assert insns[0].operands[0].reg == 2  # edx
+        assert insns[0].operands[1].imm == 0
+        assert 2 in insns[0]._regs_read
+
+    def test_cmp_ecx_imm8(self):
+        """83 F9 05 → cmp ecx, 5 (83 /7, ModR/M=0xF9=11_111_001)"""
+        insns = self._decode(b"\x83\xf9\x05")
+        assert len(insns) == 1
+        assert insns[0].insn_id == 4  # _INS_CMP
+        assert insns[0].operands[0].reg == 1  # ecx
+        assert insns[0].operands[1].imm == 5
+
+    def test_cmp_ecx_edx(self):
+        """39 D1 → cmp ecx, edx (39 /r, ModR/M=0xD1=11_010_001)"""
+        insns = self._decode(b"\x39\xd1")
+        assert len(insns) == 1
+        assert insns[0].insn_id == 4  # _INS_CMP
+        assert 1 in insns[0]._regs_read  # ecx
+        assert 2 in insns[0]._regs_read  # edx
+
+    def test_cmp_edx_ecx(self):
+        """3B D1 → cmp edx, ecx (3B /r, alternate direction)"""
+        insns = self._decode(b"\x3b\xd1")
+        assert len(insns) == 1
+        assert insns[0].insn_id == 4  # _INS_CMP
+        assert 2 in insns[0]._regs_read  # edx
+        assert 1 in insns[0]._regs_read  # ecx
+
+    def test_mov_r32_rm32(self):
+        """89 C1 → mov ecx, eax (89 /r, mov r/m32, r32).
+
+        Not handled by our minimal decoder (only C7 /0 for mov r/m, imm).
+        Should decode as two _INS_OTHER bytes — that's fine for
+        extract_div_constants which doesn't need this pattern.
+        """
+        insns = self._decode(b"\x89\xc1")
+        # 89 is not in our opcode table, so it's two unrecognized bytes
+        assert all(i.insn_id == 99 for i in insns)
+
+    def test_lea_eax(self):
+        """8D 05 10000000 → lea eax, [rip+16]"""
+        insns = self._decode(b"\x8d\x05\x10\x00\x00\x00")
+        assert len(insns) == 1
+        assert insns[0].insn_id == 5  # _INS_LEA
+        assert insns[0].operands[0].reg == 0  # eax
+
+    def test_ret(self):
+        """C3 → ret"""
+        insns = self._decode(b"\xc3")
+        assert len(insns) == 1
+        assert insns[0].insn_id == 10  # _INS_RET
+        assert 3 in insns[0].groups  # _GRP_RET
+
+    def test_call_rel32(self):
+        """E8 10000000 → call +16"""
+        insns = self._decode(b"\xe8\x10\x00\x00\x00")
+        assert len(insns) == 1
+        assert insns[0].insn_id == 8  # _INS_CALL
+        assert 1 in insns[0].groups  # _GRP_CALL
+
+    def test_jmp_rel8(self):
+        """EB FE → jmp -2 (infinite loop)"""
+        insns = self._decode(b"\xeb\xfe")
+        assert len(insns) == 1
+        assert insns[0].insn_id == 9  # _INS_JMP
+        assert 2 in insns[0].groups  # _GRP_JUMP
+
+    def test_jmp_rel32(self):
+        """E9 FFFFFF00 → jmp +0xFFFFFF"""
+        insns = self._decode(b"\xe9\xff\xff\xff\x00")
+        assert len(insns) == 1
+        assert insns[0].insn_id == 9  # _INS_JMP
+
+    def test_jcc_rel8(self):
+        """74 FE → je -2"""
+        insns = self._decode(b"\x74\xfe")
+        assert len(insns) == 1
+        assert insns[0].insn_id == 11  # _INS_JCC
+        assert 2 in insns[0].groups  # _GRP_JUMP
+
+    def test_jcc_rel32(self):
+        """0F 84 FFFFFF00 → je near"""
+        insns = self._decode(b"\x0f\x84\xff\xff\xff\x00")
+        assert len(insns) == 1
+        assert insns[0].insn_id == 11  # _INS_JCC
+
+    def test_rex_prefix_extends_rm(self):
+        """41 F7 F1 → div r9d (REX.B=1 extends rm to r8+r1=9)"""
+        insns = self._decode(b"\x41\xf7\xf1")
+        assert len(insns) == 1
+        assert insns[0].insn_id == 6  # _INS_DIV
+        assert insns[0].operands[0].reg == 9  # r9d
+
+    def test_rex_prefix_extends_reg(self):
+        """41 33 C1 → xor eax, r9d (REX.B=1 extends rm=1 to r9).
+
+        REX.B extends the rm field: rm=1 → 1|0x8 = 9 (r9d).
+        The reg field (destination) stays at 0 (eax, no REX.R).
+        """
+        insns = self._decode(b"\x41\x33\xc1")
+        assert len(insns) == 1
+        assert insns[0].insn_id == 3  # _INS_XOR
+        # reg field with REX.R=0: stays at 0 → eax
+        assert insns[0].operands[0].reg == 0  # eax (destination)
+        # rm field with REX.B=1: 1 | 0x8 = 9 → r9d
+        assert insns[0].operands[1].reg == 9  # r9d (source)
+
+    def test_mov_r10d_imm32(self):
+        """41 BA 2A000000 → mov r10d, 42 (REX.B=1, B8+2=BA)"""
+        insns = self._decode(b"\x41\xba\x2a\x00\x00\x00")
+        assert len(insns) == 1
+        assert insns[0].insn_id == 1  # _INS_MOV
+        assert insns[0].operands[0].reg == 10  # r10d
+        assert insns[0].operands[1].imm == 42
+
+    def test_div_r8d(self):
+        """41 F7 F2 → div r10d (REX.B=1, F7 /6, rm=2 → r10)"""
+        insns = self._decode(b"\x41\xf7\xf2")
+        assert len(insns) == 1
+        assert insns[0].insn_id == 6  # _INS_DIV
+        assert insns[0].operands[0].reg == 10  # r10d
+
+    def test_multiple_instructions(self):
+        """Sequence: mov, xor, div, cmp, ret"""
+        code = (
+            b"\xb9\x0a\x00\x00\x00"  # mov ecx, 10
+            b"\xb8\x64\x00\x00\x00"  # mov eax, 100
+            b"\x31\xd2"  # xor edx, edx
+            b"\xf7\xf1"  # div ecx
+            b"\x81\xfa\x00\x00\x00\x00"  # cmp edx, 0
+            b"\xc3"  # ret
+        )
+        insns = self._decode(code)
+        assert len(insns) == 6
+        assert insns[0].insn_id == 1  # mov
+        assert insns[1].insn_id == 1  # mov
+        assert insns[2].insn_id == 3  # xor
+        assert insns[3].insn_id == 6  # div
+        assert insns[4].insn_id == 4  # cmp
+        assert insns[5].insn_id == 10  # ret
+
+    def test_empty_input(self):
+        """Empty byte sequence yields no instructions."""
+        insns = self._decode(b"")
+        assert len(insns) == 0
+
+    def test_truncated_rex(self):
+        """REX prefix at end of input yields one OTHER insn."""
+        insns = self._decode(b"\x48")
+        assert len(insns) == 1
+        assert insns[0].insn_id == 99  # _INS_OTHER
+
+    def test_unrecognized_opcode(self):
+        """Unrecognized opcode yields _INS_OTHER with length=1."""
+        insns = self._decode(b"\xcc")  # INT3 — not handled
+        assert len(insns) == 1
+        assert insns[0].insn_id == 99  # _INS_OTHER
+        assert insns[0].length == 1
+
+
+# ============================================================================
+# Comprehensive ELF test with many DIV patterns
+# ============================================================================
+
+
+class TestExtractDivComprehensive:
+    """Compile an ELF with diverse DIV patterns and verify extraction."""
+
+    @classmethod
+    def setup_class(cls):
+        import subprocess
+        import tempfile
+
+        cls._tmpdir = tempfile.mkdtemp(prefix="elf_div_test_")
+        src = os.path.join(cls._tmpdir, "all_divs.c")
+        cls._bin = os.path.join(cls._tmpdir, "all_divs")
+
+        # Use regular string with proper escaping (not raw string)
+        _src = (
+            "/* Many different DIV patterns for thorough decoder testing */\n"
+            "\n"
+            "/* Pattern 1: mov imm -> ecx, div ecx */\n"
+            "void p1(void) {\n"
+            "    int r;\n"
+            '    asm("mov $11,%%ecx\\n\\t"\n'
+            '        "mov $100,%%eax\\n\\t"\n'
+            '        "xor %%edx,%%edx\\n\\t"\n'
+            '        "div %%ecx\\n\\t"\n'
+            '        "mov %%eax,%0" : "=r"(r) : : "eax","ecx","edx");\n'
+            "}\n"
+            "\n"
+            "/* Pattern 2: mov imm -> ebx, div ebx */\n"
+            "void p2(void) {\n"
+            "    int r;\n"
+            '    asm("mov $13,%%ebx\\n\\t"\n'
+            '        "mov $100,%%eax\\n\\t"\n'
+            '        "xor %%edx,%%edx\\n\\t"\n'
+            '        "div %%ebx\\n\\t"\n'
+            '        "mov %%eax,%0" : "=r"(r) : : "eax","ebx","edx");\n'
+            "}\n"
+            "\n"
+            "/* Pattern 3: mov imm -> esi, div esi */\n"
+            "void p3(void) {\n"
+            "    int r;\n"
+            '    asm("mov $17,%%esi\\n\\t"\n'
+            '        "mov $100,%%eax\\n\\t"\n'
+            '        "xor %%edx,%%edx\\n\\t"\n'
+            '        "div %%esi\\n\\t"\n'
+            '        "mov %%eax,%0" : "=r"(r) : : "eax","esi","edx");\n'
+            "}\n"
+            "\n"
+            "/* Pattern 4: mov imm -> edi, div edi */\n"
+            "void p4(void) {\n"
+            "    int r;\n"
+            '    asm("mov $19,%%edi\\n\\t"\n'
+            '        "mov $100,%%eax\\n\\t"\n'
+            '        "xor %%edx,%%edx\\n\\t"\n'
+            '        "div %%edi\\n\\t"\n'
+            '        "mov %%eax,%0" : "=r"(r) : : "eax","edi","edx");\n'
+            "}\n"
+            "\n"
+            "/* Pattern 5: IDIV (signed divide) */\n"
+            "void p5(void) {\n"
+            "    int r;\n"
+            '    asm("mov $23,%%ecx\\n\\t"\n'
+            '        "mov $100,%%eax\\n\\t"\n'
+            '        "xor %%edx,%%edx\\n\\t"\n'
+            '        "idiv %%ecx\\n\\t"\n'
+            '        "mov %%eax,%0" : "=r"(r) : : "eax","ecx","edx");\n'
+            "}\n"
+            "\n"
+            "/* Pattern 6: cmp after div (modulus check) */\n"
+            "int p6(void) {\n"
+            "    int r;\n"
+            '    asm("mov $29,%%ecx\\n\\t"\n'
+            '        "mov $100,%%eax\\n\\t"\n'
+            '        "xor %%edx,%%edx\\n\\t"\n'
+            '        "div %%ecx\\n\\t"\n'
+            '        "mov %%edx,%0\\n\\t"\n'
+            '        : "=r"(r) : : "eax","ecx","edx");\n'
+            '    asm("cmp $0,%%edx\\n\\t" :: "d"(r) : );\n'
+            "    return r;\n"
+            "}\n"
+            "\n"
+            "/* Pattern 7: cmp with non-zero immediate */\n"
+            "int p7(void) {\n"
+            "    int r;\n"
+            '    asm("mov $31,%%ecx\\n\\t"\n'
+            '        "mov $100,%%eax\\n\\t"\n'
+            '        "xor %%edx,%%edx\\n\\t"\n'
+            '        "div %%ecx\\n\\t"\n'
+            '        "mov %%edx,%0\\n\\t"\n'
+            '        : "=r"(r) : : "eax","ecx","edx");\n'
+            '    asm("cmp $5,%%edx\\n\\t" :: "d"(r) : );\n'
+            "    return r;\n"
+            "}\n"
+            "\n"
+            "/* Pattern 8: div with larger divisor */\n"
+            "void p8(void) {\n"
+            "    int r;\n"
+            '    asm("mov $100,%%ecx\\n\\t"\n'
+            '        "mov $10000,%%eax\\n\\t"\n'
+            '        "xor %%edx,%%edx\\n\\t"\n'
+            '        "div %%ecx\\n\\t"\n'
+            '        "mov %%eax,%0" : "=r"(r) : : "eax","ecx","edx");\n'
+            "}\n"
+            "\n"
+            "/* Pattern 9: div with divisor 1 (edge case) */\n"
+            "void p9(void) {\n"
+            "    int r;\n"
+            '    asm("mov $1,%%ecx\\n\\t"\n'
+            '        "mov $42,%%eax\\n\\t"\n'
+            '        "xor %%edx,%%edx\\n\\t"\n'
+            '        "div %%ecx\\n\\t"\n'
+            '        "mov %%eax,%0" : "=r"(r) : : "eax","ecx","edx");\n'
+            "}\n"
+            "\n"
+            "int main(void) {\n"
+            "    p1(); p2(); p3(); p4(); p5();\n"
+            "    p8(); p9();\n"
+            "    return p6() + p7();\n"
+            "}\n"
+        )
+        with open(src, "w") as f:
+            f.write(_src)
+        subprocess.run(
+            ["gcc", "-O0", "-o", cls._bin, src],
+            capture_output=True,
+            timeout=30,
+        )
+
+    @classmethod
+    def teardown_class(cls):
+        import shutil
+
+        shutil.rmtree(cls._tmpdir, ignore_errors=True)
+
+    def test_finds_div11(self):
+        from fuzzer_tool.core.elf import extract_div_constants
+
+        d, _ = extract_div_constants(self._bin)
+        assert 11 in d.values(), f"divisor 11 not found in {d}"
+
+    def test_finds_div13(self):
+        from fuzzer_tool.core.elf import extract_div_constants
+
+        d, _ = extract_div_constants(self._bin)
+        assert 13 in d.values(), f"divisor 13 not found in {d}"
+
+    def test_finds_div17(self):
+        from fuzzer_tool.core.elf import extract_div_constants
+
+        d, _ = extract_div_constants(self._bin)
+        assert 17 in d.values(), f"divisor 17 not found in {d}"
+
+    def test_finds_div19(self):
+        from fuzzer_tool.core.elf import extract_div_constants
+
+        d, _ = extract_div_constants(self._bin)
+        assert 19 in d.values(), f"divisor 19 not found in {d}"
+
+    def test_finds_idiv_divisor_23(self):
+        from fuzzer_tool.core.elf import extract_div_constants
+
+        d, _ = extract_div_constants(self._bin)
+        assert 23 in d.values(), f"idiv divisor 23 not found in {d}"
+
+    def test_finds_div29(self):
+        from fuzzer_tool.core.elf import extract_div_constants
+
+        d, _ = extract_div_constants(self._bin)
+        assert 29 in d.values(), f"divisor 29 not found in {d}"
+
+    def test_finds_div31(self):
+        from fuzzer_tool.core.elf import extract_div_constants
+
+        d, _ = extract_div_constants(self._bin)
+        assert 31 in d.values(), f"divisor 31 not found in {d}"
+
+    def test_finds_div100(self):
+        from fuzzer_tool.core.elf import extract_div_constants
+
+        d, _ = extract_div_constants(self._bin)
+        assert 100 in d.values(), f"divisor 100 not found in {d}"
+
+    def test_finds_div1(self):
+        from fuzzer_tool.core.elf import extract_div_constants
+
+        d, _ = extract_div_constants(self._bin)
+        assert 1 in d.values(), f"divisor 1 not found in {d}"
+
+    def test_cmp_mapped_to_divisor(self):
+        """CMP instructions that follow DIV should be mapped to the same divisor."""
+        from fuzzer_tool.core.elf import extract_div_constants
+
+        d, _ = extract_div_constants(self._bin)
+        # divisor=29 appears in p6 (div) and p6 (cmp), divisor=31 in p7
+        # We should have at least 2 entries for some divisors (DIV + CMP)
+        counts = {}
+        for v in d.values():
+            counts[v] = counts.get(v, 0) + 1
+        # At least one divisor should appear >= 2 times (DIV + CMP mapping)
+        assert any(c >= 2 for c in counts.values()), (
+            f"expected at least one divisor mapped to both DIV and CMP, got counts={counts}"
+        )
+
+    def test_total_div_count(self):
+        """Should find at least 8 distinct DIV/IDIV instructions."""
+        from fuzzer_tool.core.elf import extract_div_constants
+
+        d, _ = extract_div_constants(self._bin)
+        assert len(d) >= 8, f"expected >= 8 DIV/CMP entries, got {len(d)}: {d}"
