@@ -22,7 +22,9 @@ from fuzzer_tool.core.mutations import (
     INTERESTING_UNSIGNED_8,
     INTERESTING_UNSIGNED_16,
     INTERESTING_UNSIGNED_32,
+    MAGIC_TABLE,
     MUTATIONS,
+    SPECIAL_STRINGS,
     splice,
 )
 
@@ -964,6 +966,104 @@ class OperatorEngine:
                 ]
             )
 
+    def _op_special_strings(self, buf, _byte_idx, _data):
+        """Insert a security-sensitive string at a random position.
+
+        Ported from honggfuzz mangle_SpecialStrings: 44 curated strings
+        covering SQL injection, XSS, path traversal, format strings,
+        command injection, JSON edge cases, and control characters.
+        """
+        rng = self.f._rand_pool
+        if not buf or len(buf) >= self.f.max_len:
+            return
+        s = rng.choice(SPECIAL_STRINGS)
+        pos = rng.randint(0, len(buf))
+        buf[pos:pos] = s
+
+    def _op_magic_values(self, buf, _byte_idx, _data):
+        """Insert a magic/boundary value from the honggfuzz table.
+
+        Ported from honggfuzz mangle_Magic: 229 hardcoded boundary values
+        covering 1/2/4/8-byte widths in both LE and BE endianness.
+        """
+        rng = self.f._rand_pool
+        if not buf:
+            return
+        width, packed = rng.choice(MAGIC_TABLE)
+        if len(buf) + width <= self.f.max_len:
+            pos = rng.randint(0, len(buf))
+            buf[pos:pos] = packed
+        elif len(buf) >= width:
+            pos = rng.randint(0, len(buf) - width)
+            buf[pos : pos + width] = packed
+
+    def _op_ascii_num_arithmetic(self, buf, _byte_idx, _data):
+        """Mutate an existing ASCII number in-place using arithmetic.
+
+        Ported from honggfuzz mangle_ASCIINumChange: finds a digit sequence
+        and applies +1, -1, *2, /2, NOT, random replace, +random, or -random.
+        """
+        from fuzzer_tool.core.mutations import ascii_num_arithmetic
+
+        if buf and len(buf) >= 1:
+            result = ascii_num_arithmetic(bytes(buf), rng=self.f._rand_pool)
+            if result is not None:
+                return bytearray(result[: self.f.max_len])
+
+    def _op_chunk_shuffle(self, buf, _byte_idx, _data):
+        """Shuffle fixed-size chunks, preserving chunk boundaries.
+
+        Ported from honggfuzz mangle_ChunkShuffle: divides input into 1-4 byte
+        chunks and swaps random pairs. Important for width-sensitive binary formats.
+        """
+        from fuzzer_tool.core.mutations import chunk_shuffle
+
+        if buf and len(buf) >= 8:
+            return bytearray(chunk_shuffle(bytes(buf), rng=self.f._rand_pool)[: self.f.max_len])
+
+    def _op_dict_compound(self, buf, _byte_idx, _data):
+        """Insert two dictionary tokens concatenated with a random separator.
+
+        Ported from honggfuzz mangle_DictionaryInsert: generates compound
+        tokens like ``key=value`` or ``param1&param2`` by joining two
+        dictionary entries with a random separator.
+        """
+        rng = self.f._rand_pool
+        f = self.f
+        if not f.dictionary or len(f.dictionary) < 2:
+            return
+        if not buf or len(buf) >= f.max_len:
+            return
+        from fuzzer_tool.core.mutations import DICT_COMPOUND_SEPARATORS
+
+        t1 = rng.choice(f.dictionary)
+        t2 = rng.choice(f.dictionary)
+        sep = rng.choice(DICT_COMPOUND_SEPARATORS)
+        if isinstance(t1, str):
+            t1 = t1.encode()
+        if isinstance(t2, str):
+            t2 = t2.encode()
+        compound = t1 + sep + t2
+        if len(buf) + len(compound) <= f.max_len:
+            pos = rng.randint(0, len(buf))
+            buf[pos:pos] = compound
+
+    def _op_punctuation_insert(self, buf, _byte_idx, _data):
+        """Insert 1-4 random punctuation characters at a random position.
+
+        Ported from honggfuzz mangle_Punctuation: useful for breaking
+        escaping and structure in text-based protocols.
+        """
+        rng = self.f._rand_pool
+        from fuzzer_tool.core.mutations import PUNCTUATION_CHARS
+
+        if not buf or len(buf) >= self.f.max_len:
+            return
+        n = rng.randint(1, min(4, self.f.max_len - len(buf)))
+        chars = bytes(rng.choice(PUNCTUATION_CHARS) for _ in range(n))
+        pos = rng.randint(0, len(buf))
+        buf[pos:pos] = chars
+
     def _op_grammar_mutate(self, buf, _byte_idx, _data):
         if self.f.grammar:
             return bytearray(
@@ -1191,6 +1291,12 @@ class OperatorEngine:
             "tlv_mutate": self._op_tlv_mutate,
             "token_shuffle": self._op_token_shuffle,
             "gradient_cmp": self._op_gradient_cmp,
+            "special_strings": self._op_special_strings,
+            "magic_values": self._op_magic_values,
+            "ascii_num_arithmetic": self._op_ascii_num_arithmetic,
+            "chunk_shuffle": self._op_chunk_shuffle,
+            "dict_compound": self._op_dict_compound,
+            "punctuation_insert": self._op_punctuation_insert,
             "grammar_mutate": self._op_grammar_mutate,
             "grammar_tree_mutate": self._op_grammar_tree_mutate,
             "png_chunk_mutate": self._op_png_chunk_mutate,
@@ -1205,7 +1311,17 @@ class OperatorEngine:
         }
 
     def havoc_mutate(self, buf: bytearray) -> bytearray:
-        for _ in range(self.f._rand_pool.randint_list(2, 8, 1)[0]):
+        """Apply 2-8 random mutations (scaled up during stall recovery).
+
+        During normal operation: 2-8 mutations.
+        During stall recovery: 8-16 mutations (honggfuzz-style escalation).
+        """
+        rng = self.f._rand_pool
+        if self.f._stall_recovery_active:
+            n = rng.randint_list(8, 16, 1)[0]
+        else:
+            n = rng.randint_list(2, 8, 1)[0]
+        for _ in range(n):
             self._apply_single_mutation(buf)
         return buf
 

@@ -140,6 +140,351 @@ ARITHMETIC_DELTAS = [1, 2, 4, 8, 16, 32, 64, 128]
 
 ARITH_MAX = 35
 
+# ---------------------------------------------------------------------------
+# Security-sensitive strings (ported from honggfuzz mangle_SpecialStrings)
+# ---------------------------------------------------------------------------
+
+SPECIAL_STRINGS: list[bytes] = [
+    # Format string attacks
+    b"%s",
+    b"%n",
+    b"%x",
+    b"%p",
+    b"%9999999s",
+    b"%08x",
+    # SQL injection
+    b"'",
+    b'"',
+    b"`",
+    b"1=1",
+    b"--",
+    b"/*",
+    b"*/",
+    b" OR ",
+    b" AND ",
+    b"UNION SELECT",
+    # Path traversal
+    b"../",
+    b"..\\",
+    b"../../../../../../../../etc/passwd",
+    b"boot.ini",
+    b"/bin/sh",
+    # XML/HTML injection
+    b"<",
+    b">",
+    b"<script>",
+    b"javascript:",
+    b"CDATA",
+    b"<!--",
+    b"-->",
+    # JSON / edge-case literals
+    b"null",
+    b"true",
+    b"false",
+    b"NaN",
+    b"Infinity",
+    b"undefined",
+    b"{}",
+    b"[]",
+    # Command injection
+    b"|",
+    b";",
+    b"`",
+    b"$(",
+    b"&&",
+    b"||",
+    # Terminators / control characters
+    b"\n",
+    b"\r\n",
+    b"\x00",
+    b"\xff",
+]
+
+# ---------------------------------------------------------------------------
+# Magic / boundary values table (ported from honggfuzz mangle_Magic)
+# Covers 1/2/4/8-byte widths, little-endian and big-endian.
+# ---------------------------------------------------------------------------
+
+# 1-byte magic values
+_MAGIC_8 = [
+    0x00,
+    0x01,
+    0x02,
+    0x03,
+    0x04,
+    0x05,
+    0x06,
+    0x07,
+    0x08,
+    0x09,
+    0x0A,
+    0x0B,
+    0x0C,
+    0x0D,
+    0x0E,
+    0x0F,
+    0x10,
+    0x20,
+    0x40,
+    0x7E,
+    0x7F,
+    0x80,
+    0x81,
+    0xC0,
+    0xFE,
+    0xFF,
+]
+
+# 2-byte magic values (big-endian); LE variants generated automatically
+_MAGIC_16_BE = [
+    0x0001,
+    0x0002,
+    0x0003,
+    0x0004,
+    0x0005,
+    0x0006,
+    0x0007,
+    0x0008,
+    0x0009,
+    0x000A,
+    0x000B,
+    0x000C,
+    0x000D,
+    0x000E,
+    0x000F,
+    0x0010,
+    0x0020,
+    0x0040,
+    0x007E,
+    0x007F,
+    0x0080,
+    0x0081,
+    0x00C0,
+    0x00FE,
+    0x00FF,
+    0x7EFF,
+    0x7F00,
+    0x7FFF,
+    0x8000,
+    0x8001,
+    0xFEFE,
+    0xFFFF,
+]
+
+# 4-byte magic values (big-endian)
+_MAGIC_32_BE = [
+    0x00000001,
+    0x00000010,
+    0x00000080,
+    0x000000FF,
+    0x00007F00,
+    0x00007FFF,
+    0x00008000,
+    0x00008001,
+    0x0000FFFE,
+    0x0000FFFF,
+    0x7FFFFFFE,
+    0x7FFFFFFF,
+    0x80000000,
+    0x80000001,
+    0xFFFFFFFE,
+    0xFFFFFFFF,
+]
+
+# 8-byte magic values (big-endian)
+_MAGIC_64_BE = [
+    0x0000000000000001,
+    0x0000000000000010,
+    0x0000000000000080,
+    0x00000000000000FF,
+    0x000000007FFFFFFF,
+    0x0000000080000000,
+    0x0000000080000001,
+    0x00000000FFFFFFFE,
+    0x00000000FFFFFFFF,
+    0x7FFFFFFFFFFFFFFE,
+    0x7FFFFFFFFFFFFFFF,
+    0x8000000000000000,
+    0x8000000000000001,
+    0xFFFFFFFFFFFFFFFE,
+    0xFFFFFFFFFFFFFFFF,
+]
+
+
+def _build_magic_table() -> list[tuple[int, bytes]]:
+    """Build the full magic values table as (width, packed_bytes) pairs.
+
+    Each entry is packed in both LE and BE for random endianness selection.
+    Returns a flat list suitable for random.choice().
+    """
+    table: list[tuple[int, bytes]] = []
+    for val in _MAGIC_8:
+        table.append((1, bytes([val])))
+    for val in _MAGIC_16_BE:
+        table.append((2, val.to_bytes(2, "little")))
+        table.append((2, val.to_bytes(2, "big")))
+    for val in _MAGIC_32_BE:
+        table.append((4, val.to_bytes(4, "little")))
+        table.append((4, val.to_bytes(4, "big")))
+    for val in _MAGIC_64_BE:
+        table.append((8, val.to_bytes(8, "little")))
+        table.append((8, val.to_bytes(8, "big")))
+    return table
+
+
+MAGIC_TABLE = _build_magic_table()
+
+
+def ascii_num_arithmetic(data: bytes, rng=None) -> bytes | None:
+    """Find an existing ASCII digit sequence and apply arithmetic to it.
+
+    Scans from a random offset for the first digit sequence, parses the
+    integer, applies one of: +1, -1, *2, /2, NOT, random replace,
+    +random, -random.  Returns None if no digit sequence is found.
+
+    Ported from honggfuzz mangle_ASCIINumChange.
+    """
+    if not data:
+        return None
+    r = _get_rng(rng)
+    # Find a random digit sequence
+    start = r.randint(0, len(data) - 1)
+    # Scan forward from start, wrapping around
+    idx = start
+    for _ in range(len(data)):
+        if data[idx : idx + 1].isdigit():
+            # Find end of digit sequence
+            end = idx + 1
+            while end < len(data) and data[end : end + 1].isdigit():
+                end += 1
+            # Parse the number (limit to 20 digits to avoid overflow)
+            seq_len = min(end - idx, 20)
+            end = idx + seq_len
+            old_val = int(data[idx:end])
+            # Apply one of 8 operations
+            op = r.randint(0, 7)
+            if op == 0:  # +1
+                new_val = old_val + 1
+            elif op == 1:  # -1
+                new_val = max(0, old_val - 1)
+            elif op == 2:  # *2
+                new_val = old_val * 2
+            elif op == 3:  # /2
+                new_val = old_val // 2
+            elif op == 4:  # NOT (~val)
+                new_val = ~old_val
+            elif op == 5:  # random replace
+                new_val = r.randint(0, 999999999)
+            elif op == 6:  # +random
+                new_val = old_val + r.randint(1, 256)
+            else:  # -random
+                new_val = max(0, old_val - r.randint(1, 256))
+            new_str = str(new_val).encode("ascii")
+            # Replace with proper inflate/deflate
+            result = bytearray(data)
+            if len(new_str) < seq_len:
+                result[idx : idx + seq_len] = new_str + b"\x00" * (seq_len - len(new_str))
+            elif len(new_str) > seq_len:
+                result[idx:end] = new_str
+            else:
+                result[idx:end] = new_str
+            return bytes(result)
+        idx = (idx + 1) % len(data)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Chunk shuffle (ported from honggfuzz mangle_ChunkShuffle)
+# ---------------------------------------------------------------------------
+
+
+def chunk_shuffle(data: bytes, rng=None) -> bytes:
+    """Shuffle fixed-size chunks, preserving chunk boundaries.
+
+    Divides the input into chunks of 1-4 bytes (chosen randomly), then
+    swaps random chunk pairs.  Useful for binary formats with fixed-width
+    fields where byte-level shuffling would break alignment.
+
+    Ported from honggfuzz mangle_ChunkShuffle.
+    """
+    if len(data) < 8:
+        return data
+    r = _get_rng(rng)
+    chunk_size = r.randint(1, 4)
+    num_chunks = len(data) // chunk_size
+    if num_chunks < 2:
+        return data
+    result = bytearray(data)
+    # Swap random chunk pairs
+    n_swaps = r.randint(1, max(1, num_chunks // 2))
+    for _ in range(n_swaps):
+        i = r.randint(0, num_chunks - 1)
+        j = r.randint(0, num_chunks - 1)
+        if i != j:
+            off_i = i * chunk_size
+            off_j = j * chunk_size
+            tmp = result[off_i : off_i + chunk_size]
+            result[off_i : off_i + chunk_size] = result[off_j : off_j + chunk_size]
+            result[off_j : off_j + chunk_size] = tmp
+    return bytes(result)
+
+
+# Compound dictionary separators (from honggfuzz mangle_DictionaryInsert)
+DICT_COMPOUND_SEPARATORS: list[bytes] = [
+    b"",
+    b" ",
+    b"\t",
+    b"\n",
+    b"\r\n",
+    b",",
+    b";",
+    b":",
+    b"=",
+    b"&",
+    b"|",
+    b"(",
+    b")",
+    b".",
+    b'"',
+    b"'",
+]
+
+# Punctuation characters for punctuation_insert (from honggfuzz mangle_Punctuation)
+PUNCTUATION_CHARS: list[int] = [
+    0x21,
+    0x22,
+    0x23,
+    0x24,
+    0x25,
+    0x26,
+    0x27,
+    0x28,  # ! " # $ % & ' (
+    0x29,
+    0x2A,
+    0x2B,
+    0x2C,
+    0x2D,
+    0x2E,
+    0x2F,  # ) * + , - . /
+    0x3A,
+    0x3B,
+    0x3C,
+    0x3D,
+    0x3E,
+    0x3F,
+    0x40,  # : ; < = > ? @
+    0x5B,
+    0x5C,
+    0x5D,
+    0x5E,
+    0x5F,
+    0x60,  # [ \ ] ^ _ `
+    0x7B,
+    0x7C,
+    0x7D,
+    0x7E,  # { | } ~
+]
+
 MUTATIONS = [
     "bit_flip",
     "byte_flip",
@@ -195,6 +540,12 @@ MUTATIONS = [
     "tlv_mutate",
     "token_shuffle",
     "gradient_cmp",
+    "special_strings",
+    "magic_values",
+    "ascii_num_arithmetic",
+    "chunk_shuffle",
+    "dict_compound",
+    "punctuation_insert",
 ]
 
 # Format-aware mutations: structure-aware operators for specific file formats.

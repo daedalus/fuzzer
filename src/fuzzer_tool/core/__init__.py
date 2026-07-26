@@ -15,7 +15,10 @@ from fuzzer_tool.core.mutations import (
     INTERESTING_8,
     INTERESTING_16,
     INTERESTING_32,
+    MAGIC_TABLE,
     MUTATIONS,
+    SPECIAL_STRINGS,
+    ascii_num_arithmetic,
     load_dictionary,
     parse_dict_line,
 )
@@ -45,6 +48,9 @@ __all__ = [
     "INTERESTING_32",
     "MUTATIONS",
     "DICT_MUTATIONS",
+    "MAGIC_TABLE",
+    "SPECIAL_STRINGS",
+    "ascii_num_arithmetic",
     "parse_dict_line",
     "load_dictionary",
 ]
