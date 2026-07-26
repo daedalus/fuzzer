@@ -143,10 +143,12 @@ void __sanitizer_cov_trace_pc_guard_init(uint32_t *start, uint32_t *stop) {
 }
 
 /* ── LLVM stack depth tracking ────────────────────────────────────────
- * When the target is compiled with -fsanitize=address or similar,
- * LLVM provides __sancov_lowest_stack. We hook it to track the max
- * stack depth per iteration.  If not linked, the no-op default is used. */
+ * When the target is compiled with -fsanitize=address, ASAN provides
+ * __sancov_lowest_stack as a TLS symbol — we must NOT define it or
+ * the linker fails with TLS/non-TLS type mismatch.  Our definition
+ * is used only for non-ASAN builds (standalone, ptrace mode, etc.). */
 
+#if !defined(__SANITIZE_ADDRESS__) && !defined(__SANITIZE_THREAD__)
 __attribute__((visibility("default")))
 void __sancov_lowest_stack(uint32_t addr) {
     /* addr is the stack address of the current instrumentation point.
@@ -155,6 +157,7 @@ void __sancov_lowest_stack(uint32_t addr) {
         __afl_max_stack_depth = addr;
     }
 }
+#endif
 
 /* ── Reset (zero all entries between iterations) ───────────────────────
  * Also writes accumulated metadata (stack_depth, path_hash) to the
