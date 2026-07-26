@@ -3,11 +3,10 @@
 # Compiles both ASAN and no-ASAN variants.
 #
 # Usage:
-#   tools/build_targets.sh                            # Build all targets
-#   tools/build_targets.sh --asan                     # ASAN only
-#   tools/build_targets.sh --fast                     # No-ASAN only
-#   tools/build_targets.sh --cmplog                   # Include cmplog in .so targets (build-time linking)
-#   tools/build_targets.sh --asan --cmplog            # ASAN + cmplog in .so targets
+#   tools/build_targets.sh                            # Build all targets (default: ASAN + cmplog)
+#   tools/build_targets.sh --fast                     # Build no-ASAN only
+#   tools/build_targets.sh --cmplog                   # Include cmplog in .so targets (default: on; explicit for clarity)
+#   tools/build_targets.sh --asan --cmplog            # Same as default
 #   tools/build_targets.sh --clang-scov               # Clang + compiler-inserted edge coverage (sancov)
 #   tools/build_targets.sh --tracecmp                 # Clang + compiler-IR comparison tracing
 #   tools/build_targets.sh --vendor-tracecmp          # Vendored libpng+zlib + trace-cmp targets
@@ -25,7 +24,7 @@ VENDOR="vendor"
 OPTS="${@:---all}"
 HAS_FGREP=0
 [ -d "$FGREP/src" ] && HAS_FGREP=1
-WITH_CMPLOG=0
+WITH_CMPLOG=1  # default: cmplog linked into .so targets
 WITH_TRACECMP=0
 WITH_VENDOR_TRACECMP=0
 WITH_CLANG_SCOV=0
