@@ -15,7 +15,9 @@ def token_shuffle(data: bytes, rng=None) -> bytes:
     """Shuffle two random tokens delimited by common separators.
 
     Finds token boundaries by scanning for delimiter characters, then
-    swaps two random tokens. Handles different-length tokens correctly.
+    swaps two random tokens. Handles different-length tokens correctly
+    by normalizing token spans to exclude delimiters and explicitly
+    re-inserting delimiters after the swap.
 
     Args:
         data: Input bytes to mutate.
@@ -28,7 +30,7 @@ def token_shuffle(data: bytes, rng=None) -> bytes:
     if len(data) < 4:
         return data
 
-    # Find token start positions
+    # Find token start positions (each token starts after a delimiter)
     token_starts = [0]
     for i in range(len(data)):
         if len(token_starts) >= 64:
@@ -48,30 +50,38 @@ def token_shuffle(data: bytes, rng=None) -> bytes:
     start2 = token_starts[idx2]
     end2 = token_starts[idx2 + 1] if idx2 + 1 < len(token_starts) else len(data)
 
-    len1 = end1 - start1
-    len2 = end2 - start2
+    # Extract token content (strip trailing delimiters)
+    content1 = data[start1:end1].rstrip(_DELIMS)
+    content2 = data[start2:end2].rstrip(_DELIMS)
 
-    if len1 == 0 or len2 == 0 or len1 > 256 or len2 > 256:
+    if len(content1) == 0 or len(content2) == 0 or len(content1) > 256 or len(content2) > 256:
         return data
 
-    buf = bytearray(data)
-    tmp1 = bytes(buf[start1:end1])
-    tmp2 = bytes(buf[start2:end2])
+    # Find the delimiter that follows each token's content
+    delim1 = data[start1 + len(content1) : end1][:1] if start1 + len(content1) < end1 else b""
+    delim2 = data[start2 + len(content2) : end2][:1] if start2 + len(content2) < end2 else b""
 
-    if len1 == len2:
-        # Simple swap
-        buf[start1:end1] = tmp2
-        buf[start2:end2] = tmp1
-    else:
-        # Layout: [Prefix][Token1][Middle][Token2][Suffix]
-        # Want:   [Prefix][Token2][Middle][Token1][Suffix]
-        mid_len = start2 - end1
+    # If neither delimiter exists, use a space as fallback
+    if not delim1 and not delim2:
+        delim1 = b" "
 
-        # Move middle block first
-        buf[start1 + len2 : start1 + len2 + mid_len] = buf[end1 : end1 + mid_len]
-        # Write token2 at start1
-        buf[start1 : start1 + len2] = tmp2
-        # Write token1 after middle
-        buf[start1 + len2 + mid_len : start1 + len2 + mid_len + len1] = tmp1
+    # Rebuild: [Prefix][Token2 + delim1][Middle][Token1 + delim2][Suffix]
+    prefix = data[:start1]
+    suffix = data[end2:]
 
-    return bytes(buf)
+    # Middle section: bytes between token1's content end and token2's content start
+    mid_start = start1 + len(content1) + (1 if delim1 else 0)
+    mid_end = start2
+    middle = data[mid_start:mid_end]
+
+    # Build the result
+    parts = [prefix, content2]
+    if delim1:
+        parts.append(delim1)
+    parts.append(middle)
+    parts.append(content1)
+    if delim2:
+        parts.append(delim2)
+    parts.append(suffix)
+
+    return b"".join(parts)

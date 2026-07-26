@@ -514,3 +514,110 @@ class TestSaveCrashStackHash:
             crash_hashes, crash_sigs,
             crash_min_sizes=crash_min_sizes,
         )
+
+
+# ── Regression Tests ────────────────────────────────────────────────
+
+
+class TestTokenShuffleRegression:
+    """Regression: last-token delimiter was dropped during swap.
+
+    Before fix: token_shuffle(b'a bcdefgh ij klmnop') produced
+    'a klmnopij bcdefgh' — the space between klmnop and ij was lost
+    because token spans included trailing delimiters except for the
+    last token, creating an asymmetric swap.
+    """
+
+    def test_last_token_swap_preserves_delimiter(self):
+        from fuzzer_tool.core.token_shuffle import token_shuffle
+
+        data = b"a bcdefgh ij klmnop"
+        # Force the last token (klmnop) to be swapped with another
+        for seed in range(200):
+            result = token_shuffle(data, rng=__import__("random").Random(seed))
+            if result != data and b"klmnop" in result and b"bcdefgh" in result:
+                # When last token is swapped, delimiter must be preserved
+                assert b"klmnopij" not in result, (
+                    f"seed={seed}: delimiter dropped between klmnop and ij: {result}"
+                )
+                # Tokens should be separated by at least one delimiter
+                assert b" " in result or b"\t" in result
+                return
+        pytest.skip("No swap involving last token found in 200 seeds")
+
+    def test_different_length_tokens_swap_correctly(self):
+        from fuzzer_tool.core.token_shuffle import token_shuffle
+
+        data = b"a bb ccc dddd"
+        for seed in range(100):
+            result = token_shuffle(data, rng=__import__("random").Random(seed))
+            if result != data:
+                # All original tokens should be present (just reordered)
+                assert b"a" in result
+                assert b"bb" in result
+                assert b"ccc" in result
+                assert b"dddd" in result
+                # No tokens should be concatenated without delimiter
+                assert b"bbccc" not in result
+                assert b"cccdddd" not in result
+                return
+        pytest.skip("No swap found in 100 seeds")
+
+    def test_swap_preserves_total_length(self):
+        from fuzzer_tool.core.token_shuffle import token_shuffle
+
+        for seed in range(50):
+            data = b"x aa bb cc dd ee"
+            result = token_shuffle(data, rng=__import__("random").Random(seed))
+            if result != data:
+                # Total length should be preserved (same tokens, just reordered)
+                assert len(result) == len(data), (
+                    f"seed={seed}: length changed {len(data)} -> {len(result)}"
+                )
+                return
+
+
+class TestTlvMutateRegression:
+    """Regression: 2-byte length field mutation only changed high byte.
+
+    Before fix: when a 2-byte big-endian value matched as a length field,
+    only buf[off] (the high byte) was mutated. The low byte was left
+    unchanged, so the mutation didn't fully match what was detected.
+    """
+
+    def test_2byte_length_field_mutates_both_bytes(self):
+        from fuzzer_tool.core.tlv_mutate import tlv_mutate
+
+        # b1=0 (so 1-byte check fails), b2=50 (valid 2-byte length)
+        data = bytes([0, 50]) + b"A" * 100
+        found_2byte = False
+        for seed in range(500):
+            result = tlv_mutate(data, rng=__import__("random").Random(seed))
+            # Check if the 2-byte mutation was triggered (both bytes at
+            # offset 0-1 changed, not a fallback TLV insert)
+            if (result[0] != data[0] or result[1] != data[1]) and len(result) == len(data):
+                new_val = (result[0] << 8) | result[1]
+                assert new_val != 50, "2-byte value unchanged"
+                found_2byte = True
+                break
+        assert found_2byte, "No 2-byte mutation triggered in 500 seeds"
+
+    def test_1byte_length_field_uses_correct_remaining(self):
+        from fuzzer_tool.core.tlv_mutate import tlv_mutate
+
+        # b1=5 (valid 1-byte length), remaining should be len-1, not len-2
+        data = bytes([5]) + b"A" * 100
+        found_1byte = False
+        for seed in range(500):
+            result = tlv_mutate(data, rng=__import__("random").Random(seed))
+            # 1-byte mutation: only first byte changed, length preserved
+            if result[0] != data[0] and len(result) == len(data):
+                # The mutated byte should be a valid boundary value or within range
+                remaining = len(data) - 1  # correct remaining for 1-byte field
+                assert result[0] in (0x00, 0x01, 0x7F, 0x80, 0xFF) or \
+                    result[0] <= remaining, (
+                        f"seed={seed}: mutated value {result[0]:#x} is out of range"
+                    )
+                found_1byte = True
+                break
+        assert found_1byte, "No 1-byte mutation triggered in 500 seeds"

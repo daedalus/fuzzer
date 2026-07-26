@@ -21,6 +21,9 @@ def tlv_mutate(data: bytes, rng=None) -> bytes:
     looks like a length field pointing within the remaining data. When a
     candidate is found (1/8 probability), replaces it with a boundary value.
 
+    Supports both 1-byte and 2-byte (big-endian) length field detection.
+    For 2-byte matches, both bytes are mutated to the new length value.
+
     Falls back to inserting a random 4-byte TLV structure if no candidate found.
 
     Args:
@@ -47,22 +50,38 @@ def tlv_mutate(data: bytes, rng=None) -> bytes:
         if off + 1 < len(buf):
             b2 = (buf[off] << 8) | buf[off + 1]
 
-        remaining = len(buf) - off - 1
-        found = (0 < b1 <= remaining) or (b2 > 0 and b2 <= remaining and b2 < len(buf))
+        # 1-byte length: value fits in remaining bytes after this byte
+        remaining1 = len(buf) - off - 1
+        found1 = 0 < b1 <= remaining1
 
-        if found and r.randint(0, 7) == 0:
-            # Mutate the length field with a boundary value
-            mutations = [
-                0x00,  # Zero length
-                0x01,  # Minimal
-                0x7F,  # Max signed byte
-                0x80,  # Min negative as signed
-                0xFF,  # Max byte
-                remaining & 0xFF,  # Exact remaining
-                (remaining + 1) & 0xFF,  # Off by one
-                (remaining * 2) & 0xFF,  # Double
-            ]
-            buf[off] = r.choice(mutations)
+        # 2-byte length: value fits in remaining bytes after both bytes
+        remaining2 = len(buf) - off - 2
+        found2 = b2 > 0 and b2 <= remaining2 and b2 < len(buf)
+
+        if (found1 or found2) and r.randint(0, 7) == 0:
+            if found2 and not found1:
+                # 2-byte length field — mutate both bytes as big-endian
+                new_len = r.choice([
+                    0x0000, 0x0001, 0x007F, 0x0080, 0x00FF,
+                    remaining2 & 0xFFFF,
+                    (remaining2 + 1) & 0xFFFF,
+                    (remaining2 * 2) & 0xFFFF,
+                ])
+                buf[off] = (new_len >> 8) & 0xFF
+                buf[off + 1] = new_len & 0xFF
+            else:
+                # 1-byte length field — mutate single byte
+                mutations = [
+                    0x00,  # Zero length
+                    0x01,  # Minimal
+                    0x7F,  # Max signed byte
+                    0x80,  # Min negative as signed
+                    0xFF,  # Max byte
+                    remaining1 & 0xFF,  # Exact remaining
+                    (remaining1 + 1) & 0xFF,  # Off by one
+                    (remaining1 * 2) & 0xFF,  # Double
+                ]
+                buf[off] = r.choice(mutations)
             return bytes(buf)
 
     return _insert_tlv_fallback(data, r)
