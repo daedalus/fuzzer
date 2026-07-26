@@ -342,7 +342,14 @@ class InProcessRunner:
         return None
 
     def reset_bitmap(self):
-        """Reset the coverage bitmap to zero (SHM based)."""
+        """Reset the coverage bitmap to zero (SHM based).
+
+        Note: this zeros ``self.shm_size`` bytes from the SHM base, which
+        includes the 24-byte front header (stack_depth + pad + path_hash +
+        edge_count).  This is safe because the C shim's ``__afl_map_reset()``
+        rewrites the header after the target executes — only the edge table
+        content matters for the in-flight snapshot.
+        """
         if self.coverage_env_id:
             try:
                 # Cache SHM attachment for performance

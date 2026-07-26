@@ -41,10 +41,11 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 - **AFL count-class bucketization**: `classify_counts()` collapses raw hit counts into 9 logarithmic buckets (0, 1, 2, 3, 4-7, 8-15, 16-31, 32-127, 128+) before coverage comparison — eliminates noise from count-magnitude jitter and provides cleaner signal for JS-divergence/Wasserstein diversity scoring; `new_bits()` provides AFL-style overlap/new-edge detection on classified bitmaps
 - **Morris probabilistic counting (a=30)**: log-scale edge hit counters prevent overflow and provide frequency information for scheduler decisions; estimate formula `a * ((1+1/a)^v - 1)` converts back to approximate counts
 - **AFL SHM bitmap** coverage for instrumented targets (~65-200 eps). **Sparse 8-byte entry hash table** replaces the traditional fixed-size byte bitmap — each SHM entry stores `{edge_id: uint32_t, count: uint32_t}` with open-addressing linear probing. Edge IDs are full 32-bit `(prev_loc ^ cur_loc)` values, eliminating silent bucket collisions. The hash table load factor replaces birthday-collision as the resize signal. No Morris counting needed (32-bit saturating counters). **Auto-resize on stall** is enabled by default (`--resize-map-on-stall` / `--no-resize-map-on-stall`) — when load factor exceeds 0.7, SHM grows to reduce collision risk and expose new edges.
+- **SHM front-header metadata**: the SHM segment begins with a fixed 24-byte header (offset 0–23), followed by the edge table at offset 24. Layout: `stack_depth` (u32 @0), `_pad0` (u32 @4), `path_hash` (u64 @8), `edge_count` (u64 @16). The front header is never moved, even when the edge table is resized — only the table grows, keeping metadata access O(1) and resize-safe. `edge_count` is a monotonic insert-only counter: the C shim increments it on each new-slot insertion (never on count increments of existing edges), providing an O(1) fast-path for coverage-change detection — `is_new_coverage()` reads 8 bytes and compares against the last known value, skipping the full table scan when unchanged.
 - **Ptrace edge coverage** with deep capstone disassembly for closed-source binaries (~18-20 eps)
 - **In-process execution**: persistent subprocess mode (~65-120 eps) with auto-restart on crash
-- **Stack depth tracking**: SHM metadata region tracks max stack depth per iteration via `__sancov_lowest_stack` hook (C shim) or approximation from edge count (Python fallback)
-- **Path hash**: rolling 64-bit hash (`hash = hash * 31 ^ edge_id`) maintained in SHM metadata for collision-resistant path identification and seed diversity scoring
+- **Stack depth tracking**: SHM front-header (offset 0) tracks max stack depth per iteration via `__sancov_lowest_stack` hook (C shim) or approximation from edge count (Python fallback)
+- **Path hash**: rolling 64-bit hash (`hash = hash * 31 ^ edge_id`) maintained in SHM front-header (offset 8) for collision-resistant path identification and seed diversity scoring
 - **Hardware perf counters** (`--hw-perf`): `perf_event_open(2)` for instruction count, branch count, branch misses via `CAP_PERFMON` — provides execution-depth signals beyond edge coverage
 - **Length-edge tracking**: correlates input length with coverage edge discovery — biases seed selection and length-changing mutations toward productive lengths
 - **Per-target SHM coverage**: multi-target mode tracks coverage independently per target binary
@@ -163,7 +164,7 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 - **Weight caching**: 733x speedup on `_pick_seed` with 200+ seeds
 - **Lazy watchdog**: `Event.wait(timeout)` eliminates busy-poll overhead on fast processes
 - **xxhash dedup**: 13x faster than SHA-256 for corpus operations
-- **SHM hotpath optimization**: numpy vectorized scan + combined `is_new_coverage_with_edges()` + per-iteration edge cache in `fuzz_one` — eliminates redundant Python loops over 8192 SHM entries (was 2.5s/500 iters, now 0.024s); ~2.4x total speedup, ~3.3x more EPS (132→429)
+- **SHM hotpath optimization**: edge_count O(1) fast-path (8-byte header read) skips full-table scan when no new edges exist at all — saves the numpy vectorized scan entirely, not just filtering cost. Combined `is_new_coverage_with_edges()` reduces two parallel methods to one. Per-iteration edge cache in `fuzz_one` eliminates redundant Python loops over 8192 SHM entries (was 2.5s/500 iters, now 0.024s); ~2.4x total speedup, ~3.3x more EPS (132→429)
 - **Tree mutator optimization**: `__slots__` on `_Node`, pre-computed delimiter lookup tables, inlined `_find_delim` in parse loop, iterative `_collect_nodes`, RandPool passthrough — `partial_parse` 2.2x faster (0.155s→0.070s)
 - **RandPool vectorized batches**: `randint_list`/`randrange_list`/`random_list` use numpy vectorized modulo + `tolist()` instead of Python list comprehensions
 - **RandPool in format mutations**: all format-specific mutation classes (zlib, gzip, jpeg, png, bmp) and grammar mutations now route through RandPool via `rng=None` parameter passthrough — reduces stdlib `random.randint` calls ~17%, total function calls reduced 2.8M per 1k iterations
@@ -370,7 +371,7 @@ fuzzer-tool minimize ./target -d corpus -c --rate-distortion --target-frac 0.95
 
 ## Test Suite
 
-2250+ tests covering all modules, including 67 regression tests for historical bugfixes (`tests/test_regressions.py`). Run with:
+2376+ tests covering all modules, including 67 regression tests for historical bugfixes (`tests/test_regressions.py`). Run with:
 
 ```bash
 pip install -e ".[dev]"

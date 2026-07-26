@@ -5,8 +5,8 @@
  * hash table of 8-byte entries {edge_id, count}.  Each stored edge is uniquely
  * identified by its full 32-bit edge_id (prev_loc ^ cur_loc) so there are no
  * silent bucket collisions.  AFL_MAP_SIZE is the number of hash table entries
- * (not bytes).  SHM size = AFL_MAP_SIZE * sizeof(struct __afl_entry) + 16
- * (16 bytes metadata: stack_depth + path_hash).
+ * (not bytes).  SHM size = AFL_MAP_SIZE * sizeof(struct __afl_entry) + 24
+ * (24 bytes front header: stack_depth + pad + path_hash + edge_count).
  *
  * Provides:
  *   - __afl_map_shm()     — attach to SHM segment
@@ -16,10 +16,12 @@
  *   - __sanitizer_cov_trace_pc_guard_init() — compiler-inserted edge coverage
  *   - __sancov_lowest_stack()               — LLVM stack depth tracking
  *
- * Metadata layout (16 bytes at end of SHM):
+ * Metadata layout (24 bytes at front of SHM):
  *   offset 0: uint32 stack_depth   (max stack depth in bytes)
  *   offset 4: uint32 _pad
  *   offset 8: uint64 path_hash     (rolling: hash = hash * 31 ^ edge_id)
+ *   offset 16: uint64 edge_count   (monotonic new-slot insertion count)
+ *   offset 24+:  edge table ({edge_id, count} × map_size entries)
  *
  * Compile target with:
  *   gcc -O2 -g -shared -fPIC -include afl_shim.c -o target.so target.c -lpng -lz
@@ -39,24 +41,26 @@ struct __afl_entry {
     uint32_t count;
 };
 
-/* Metadata region at end of SHM */
-#define SHM_METADATA_SIZE 16
+/* Front header size (stack_depth + pad + path_hash + edge_count) */
+#define SHM_HEADER_SIZE 24
 
 /* Default number of hash table entries.  AFL_MAP_SIZE directly sets
- * __afl_map_size (number of entries, not bytes).  Default 8192 entries
- * = 64KB SHM (8192 × sizeof(struct __afl_entry) = 8192 × 8 = 65536). */
+ * __afl_map_size (number of entries, not bytes).  Default 8192 entries:
+ * edge table = 8192 × 8 = 65536 bytes, header = 24 bytes, total = 65560. */
 static uint32_t __afl_map_size  = 8192;
 
 struct __afl_entry *__afl_area   = NULL;
 uint32_t           __afl_prev_loc = 0;
 
-/* Metadata pointers (at end of SHM, after the edge table) */
-static uint32_t *__afl_stack_depth = NULL;  /* offset 0: uint32 */
-static uint64_t *__afl_path_hash   = NULL;  /* offset 8: uint64 */
+/* Metadata pointers (front header, before the edge table) */
+static uint32_t *__afl_stack_depth = NULL;   /* offset 0: uint32 */
+static uint64_t *__afl_path_hash   = NULL;   /* offset 8: uint64 */
+static uint64_t *__afl_edge_count  = NULL;   /* offset 16: uint64 */
 
 /* Per-iteration state */
-static uint64_t  __afl_path_hash_acc = 0;   /* rolling path hash accumulator */
-static uint32_t  __afl_max_stack_depth = 0; /* max stack depth this iteration */
+static uint64_t  __afl_path_hash_acc = 0;       /* rolling path hash accumulator */
+static uint32_t  __afl_max_stack_depth = 0;     /* max stack depth this iteration */
+static uint64_t  __afl_iter_edge_count = 0;     /* new-slot insertions this iteration */
 
 /* ── SHM attachment ──────────────────────────────────────────────────── */
 
@@ -69,7 +73,7 @@ void __afl_map_shm(void) {
 
     /* Read map size from environment.  AFL_MAP_SIZE is the number of
      * hash table entries (not bytes).  The Python side allocates SHM as
-     * AFL_MAP_SIZE * sizeof(struct __afl_entry) + 16 bytes.             */
+     * AFL_MAP_SIZE * sizeof(struct __afl_entry) + SHM_HEADER_SIZE bytes.   */
     char *size_str = getenv("AFL_MAP_SIZE");
     if (size_str) {
         uint32_t s = (uint32_t)atoi(size_str);
@@ -77,15 +81,18 @@ void __afl_map_shm(void) {
             __afl_map_size = s;
     }
 
-    /* SHM was allocated as table_bytes + metadata bytes */
+    /* SHM was allocated as header bytes + table bytes */
     void *p = shmat(shmid, NULL, 0);
     if (p == (void *)-1) return;
-    __afl_area = (struct __afl_entry *)p;
 
-    /* Set up metadata pointers at end of edge table */
+    /* Edge table starts after the front header */
     uint8_t *base = (uint8_t *)p;
-    __afl_stack_depth = (uint32_t *)(base + __afl_map_size * sizeof(struct __afl_entry));
-    __afl_path_hash   = (uint64_t *)(base + __afl_map_size * sizeof(struct __afl_entry) + 8);
+    __afl_area = (struct __afl_entry *)(base + SHM_HEADER_SIZE);
+
+    /* Set up metadata pointers in front header (offsets 0/8/16) */
+    __afl_stack_depth = (uint32_t *)(base + 0);
+    __afl_path_hash   = (uint64_t *)(base + 8);
+    __afl_edge_count  = (uint64_t *)(base + 16);
 }
 
 /* ── Edge recording (open-addressing hash table) ───────────────────────
@@ -110,6 +117,7 @@ static inline void __afl_map_edge(uint32_t cur_loc) {
         if (eid == 0) {                              /* empty slot — claim */
             __afl_area[idx].edge_id = edge_id;
             __afl_area[idx].count   = 1;
+            __afl_iter_edge_count++;                 /* track new-slot insertion */
             break;
         }
         if (eid == edge_id) {                        /* existing edge — bump */
@@ -175,10 +183,14 @@ void __afl_map_reset(void) {
         if (__afl_path_hash) {
             *__afl_path_hash = __afl_path_hash_acc;
         }
+        if (__afl_edge_count) {
+            *__afl_edge_count = __afl_iter_edge_count;
+        }
     }
     __afl_prev_loc = 0;
     __afl_path_hash_acc = 0;
     __afl_max_stack_depth = 0;
+    __afl_iter_edge_count = 0;
 }
 
 /* Auto-attach when loaded */

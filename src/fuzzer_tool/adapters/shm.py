@@ -5,7 +5,7 @@ Allocates a shared memory region treated as an array of 8-byte entries:
 where each non-zero edge_id identifies exactly one edge (no hash collisions).
 
 The MAP_SIZE parameter is the number of hash table entries (power of 2),
-not the number of bytes.  SHM allocation is map_size * 8 bytes.
+not the number of bytes.  SHM layout: 24-byte front header + map_size * 8 bytes.
 """
 
 import atexit
@@ -22,12 +22,13 @@ log = logging.getLogger(__name__)
 SHM_MAP_SIZE = 8192  # number of entries
 SIZEOF_ENTRY = 8  # bytes per {edge_id: u32, count: u32}
 
-# Metadata region at the end of SHM (after the edge table).
-# Layout (16 bytes total):
+# Metadata region in the front header of SHM (before the edge table).
+# Layout (24 bytes total):
 #   offset 0: uint32 stack_depth   (max stack depth in bytes, from __sancov_lowest_stack)
 #   offset 4: uint32 _pad0
 #   offset 8: uint64 path_hash     (rolling hash: hash = hash * 31 ^ edge_id)
-SHM_METADATA_SIZE = 16  # bytes reserved at end of SHM for metadata
+#   offset 16: uint64 edge_count   (monotonic new-slot insertion count)
+SHM_METADATA_SIZE = 24  # bytes reserved at front of SHM for metadata
 
 # shmget constants
 IPC_CREAT = 0o1000
@@ -50,9 +51,6 @@ _libc.shmdt.restype = ctypes.c_int
 _libc.shmctl.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
 _libc.shmctl.restype = ctypes.c_int
 
-# memcmp for fast comparison of entry arrays
-_libc.memcmp.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t]
-_libc.memcmp.restype = ctypes.c_int
 
 
 class CoverageEntry(NamedTuple):
@@ -84,7 +82,7 @@ class ShmCoverage:
     were hit.
 
     ``size`` is the number of hash table entries (AFL_MAP_SIZE convention).
-    SHM allocation is ``size * 8`` bytes.
+    SHM layout: front header (SHM_METADATA_SIZE bytes) + edge table (size * 8 bytes).
     """
 
     def __init__(self, size: int = SHM_MAP_SIZE):
@@ -101,21 +99,22 @@ class ShmCoverage:
             _libc.shmctl(self.shm_id, IPC_RMID, None)
             raise OSError(f"shmat failed: {os.strerror(ctypes.get_errno())}")
 
-        # Raw byte view for the edge table only (for memset/memcmp)
-        self._map = (ctypes.c_char * self.table_bytes).from_address(self._ptr)
-        # Typed struct array view
+        # Raw byte view for the edge table only (starts after front header)
+        self._map = (ctypes.c_char * self.table_bytes).from_address(
+            self._ptr + SHM_METADATA_SIZE
+        )
+        # Typed struct array view (starts after front header)
         EntryArr = _entry_struct(self.num_entries)
-        self._entries = EntryArr.from_address(self._ptr)
+        self._entries = EntryArr.from_address(self._ptr + SHM_METADATA_SIZE)
 
-        # Metadata region at the end of SHM
-        self._meta_ptr = self._ptr + self.table_bytes
+        # Metadata is in the front header at self._ptr (offsets 0/8/16)
 
         self.env_id = str(self.shm_id)
 
         # Cumulative "ever seen" set of edge_ids (not positions)
         self._seen_edge_ids: set[int] = set()
-        # Snapshot for is_new_coverage fast-path (raw byte comparison)
-        self._last_map_snapshot = ctypes.create_string_buffer(self.shm_bytes)
+        # Last seen edge_count for O(1) fast-path in is_new_coverage
+        self._last_edge_count: int = 0
 
         self.total_edges = 0
         self.cumulative_edges = 0
@@ -200,8 +199,8 @@ class ShmCoverage:
     # ── Reset ────────────────────────────────────────────────────────────
 
     def reset_edge_map(self):
-        """Zero all entries in the coverage hash table (preserves metadata)."""
-        ctypes.memset(self._ptr, 0, self.table_bytes)
+        """Zero all entries in the coverage hash table (preserves front header)."""
+        ctypes.memset(self._ptr + SHM_METADATA_SIZE, 0, self.table_bytes)
 
     def reset(self):
         """Full reset: zero entries, clear cumulative state."""
@@ -209,31 +208,40 @@ class ShmCoverage:
         self._seen_edge_ids.clear()
         self.total_edges = 0
 
-    # ── Metadata (stack depth + path hash) ──────────────────────────────
+    # ── Metadata (stack depth + path hash + edge count) ────────────────
 
     def read_stack_depth(self) -> int:
-        """Read the stack depth value from the SHM metadata region.
+        """Read the stack depth value from the SHM front header (offset 0).
 
         The C shim writes the max stack depth (in bytes) here when
         __sancov_lowest_stack is available. Returns 0 when unavailable.
         """
-        return ctypes.c_uint32.from_address(self._meta_ptr).value
+        return ctypes.c_uint32.from_address(self._ptr).value
 
     def read_path_hash(self) -> int:
-        """Read the rolling path hash from the SHM metadata region.
+        """Read the rolling path hash from the SHM front header (offset 8).
 
         The C shim maintains: path_hash = path_hash * 31 ^ edge_id
         Returns the 64-bit hash value.
         """
-        return ctypes.c_uint64.from_address(self._meta_ptr + 8).value
+        return ctypes.c_uint64.from_address(self._ptr + 8).value
 
-    def read_metadata(self) -> tuple[int, int]:
-        """Read both stack_depth and path_hash from metadata region.
+    def read_edge_count(self) -> int:
+        """Read the monotonic edge count from the SHM front header (offset 16).
+
+        The C shim increments this counter on each new-slot insertion.
+        A changed value guarantees at least one new distinct edge was recorded
+        this iteration.  Returns 0 when no edges were recorded.
+        """
+        return ctypes.c_uint64.from_address(self._ptr + 16).value
+
+    def read_metadata(self) -> tuple[int, int, int]:
+        """Read all metadata from the front header.
 
         Returns:
-            (stack_depth, path_hash) tuple.
+            (stack_depth, path_hash, edge_count) tuple.
         """
-        return self.read_stack_depth(), self.read_path_hash()
+        return self.read_stack_depth(), self.read_path_hash(), self.read_edge_count()
 
     def compute_path_hash_from_edges(self, edge_ids: set[int]) -> int:
         """Compute a rolling path hash from edge IDs (Python fallback).
@@ -254,15 +262,17 @@ class ShmCoverage:
 
     # ── New-coverage detection ──────────────────────────────────────────
 
-    def is_new_coverage(self) -> bool:
-        """Check if the current hash table has any edge not seen before.
+    def _check_new_coverage(self) -> tuple[bool, set[int]]:
+        """Check for new coverage and return (has_new, current_edge_ids).
 
-        Uses a two-tier approach:
-        1. Fast path: raw memcmp (single C call) — catches unchanged state.
+        Two-tier approach:
+        1. Fast path: compare edge_count against last seen (O(1) header read)
+           — avoids touching the edge table when nothing changed.
         2. Slow path: numpy vectorized scan for unseen edge_ids.
         """
-        if _libc.memcmp(self._map, self._last_map_snapshot, self.table_bytes) == 0:
-            return False
+        edge_count = self.read_edge_count()
+        if edge_count == self._last_edge_count:
+            return False, set()
 
         # Slow path: extract edge_ids not yet in _seen_edge_ids
         import numpy as np
@@ -273,44 +283,8 @@ class ShmCoverage:
             count=self.num_entries,
         )
         active = arr[arr["edge_id"] != 0]
-        new_found = False
-        for eid in active["edge_id"].tolist():
-            if eid not in self._seen_edge_ids:
-                self._seen_edge_ids.add(eid)
-                self.cumulative_edges += 1
-                self._peak_cumulative_edges = max(
-                    self._peak_cumulative_edges, self.cumulative_edges
-                )
-                new_found = True
-
-        # Update snapshot for next comparison
-        ctypes.memmove(self._last_map_snapshot, self._map, self.table_bytes)
-
-        if new_found:
-            self.total_edges += 1
-        return new_found
-
-    def is_new_coverage_with_edges(self) -> tuple[bool, set[int]]:
-        """Check for new coverage AND return current edge set in one scan.
-
-        Avoids scanning the SHM buffer twice — callers that need both the
-        boolean and the edge set (e.g. fuzz_one) should use this instead
-        of calling is_new_coverage() + get_edge_ids() separately.
-        """
-        if _libc.memcmp(self._map, self._last_map_snapshot, self.table_bytes) == 0:
-            return False, set()
-
-        import numpy as np
-
-        arr = np.frombuffer(
-            self._map,
-            dtype=np.dtype([("edge_id", "<u4"), ("count", "<u4")]),
-            count=self.num_entries,
-        )
-        active = arr[arr["edge_id"] != 0]
-        new_found = False
-        # .tolist() converts numpy uint32 → plain Python ints
         ids = set(active["edge_id"].tolist())
+        new_found = False
         for eid in ids:
             if eid not in self._seen_edge_ids:
                 self._seen_edge_ids.add(eid)
@@ -320,11 +294,30 @@ class ShmCoverage:
                 )
                 new_found = True
 
-        ctypes.memmove(self._last_map_snapshot, self._map, self.table_bytes)
+        self._last_edge_count = edge_count
 
         if new_found:
             self.total_edges += 1
         return new_found, ids
+
+    def is_new_coverage(self) -> bool:
+        """Check if the current hash table has any edge not seen before.
+
+        Uses the edge_count fast-path header field for O(1) common-case
+        detection, falling through to a numpy vectorized scan when the
+        count changed.
+        """
+        new_found, _ = self._check_new_coverage()
+        return new_found
+
+    def is_new_coverage_with_edges(self) -> tuple[bool, set[int]]:
+        """Check for new coverage AND return current edge set in one scan.
+
+        Avoids scanning the SHM buffer twice — callers that need both the
+        boolean and the edge set (e.g. fuzz_one) should use this instead
+        of calling is_new_coverage() + get_edge_ids() separately.
+        """
+        return self._check_new_coverage()
 
     def commit_snapshot(self):
         """Update the cumulative seen-edge set to include all current entries."""
@@ -350,6 +343,8 @@ class ShmCoverage:
         """Manually record an edge — for tests only.
 
         Mirrors what the instrumented binary does: hash to slot, linear probe.
+        Also maintains the edge_count header (offset 16) for fast-path consistency
+        with the C shim's behavior.
         """
         pos = edge_id % self.num_entries
         for i in range(self.num_entries):
@@ -358,6 +353,9 @@ class ShmCoverage:
             if eid == 0:
                 self._entries[idx].edge_id = edge_id
                 self._entries[idx].count = 1
+                # Increment edge_count header to reflect new-slot insertion
+                ec = ctypes.c_uint64.from_address(self._ptr + 16)
+                ec.value = ec.value + 1
                 if edge_id not in self._seen_edge_ids:
                     self._seen_edge_ids.add(edge_id)
                     self.cumulative_edges += 1
@@ -409,18 +407,19 @@ class ShmCoverage:
         self.num_entries = new_num_entries
         self.table_bytes = new_table_bytes
         self.shm_bytes = new_total_bytes
-        self._map = (ctypes.c_char * new_table_bytes).from_address(self._ptr)
+        self._map = (ctypes.c_char * new_table_bytes).from_address(
+            new_ptr + SHM_METADATA_SIZE
+        )
         EntryArr = _entry_struct(new_num_entries)
-        self._entries = EntryArr.from_address(self._ptr)
-        self._meta_ptr = new_ptr + new_table_bytes
+        self._entries = EntryArr.from_address(new_ptr + SHM_METADATA_SIZE)
         self.env_id = str(self.shm_id)
 
         self._peak_cumulative_edges = max(self._peak_cumulative_edges, self.cumulative_edges)
         # Clear position-indexed seen set (positions change after resize)
         self._seen_edge_ids.clear()
+        self._last_edge_count = 0
         self.cumulative_edges = 0
         self.total_edges = 0
-        self._last_map_snapshot = ctypes.create_string_buffer(new_table_bytes)
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 

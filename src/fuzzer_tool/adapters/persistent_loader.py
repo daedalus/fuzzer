@@ -46,8 +46,10 @@ def read_shm():
         ptr = libc.shmat(int(shm_id_str), None, 0)
         if ptr and ptr != -1:
             map_size = int(os.environ.get("AFL_MAP_SIZE", "8192"))
-            shm_bytes = map_size * 8  # 8 bytes per {edge_id, count} entry
-            return bytes((ctypes.c_uint8 * shm_bytes).from_address(ptr))
+            header_size = 24  # SHM front header: stack_depth(4) + _pad0(4) + path_hash(8) + edge_count(8)
+            shm_edge_bytes = map_size * 8  # 8 bytes per {edge_id, count} entry
+            # Skip the front header; ptr is an integer address
+            return bytes((ctypes.c_uint8 * shm_edge_bytes).from_address(ptr + header_size))
     except Exception:
         log.warning("shmat read failed for shm_id=%s", shm_id_str, exc_info=True)
     return b""
