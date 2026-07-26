@@ -810,7 +810,18 @@ class Fuzzer:
             if self._elo_path.exists():
                 self._elo.load(str(self._elo_path))
                 log.info("Elo tracker loaded from %s", self._elo_path)
-            log.info("Elo rating system enabled (k=32, decay=0.99)")
+
+            # Pre-register all strategy names so Elo can arbitrate immediately
+            # (without this, select_strategy requires min_matches before considering a strategy)
+            for s in ("replicator", "bandit", "mopt"):
+                self._elo._strategy_ratings.setdefault(s, self._elo.default_rating)
+                self._elo._strategy_match_count.setdefault(s, 0)
+            for s in ("ga", "qea", "weighted", "pareto", "format", "bayesian"):
+                key = f"seed_{s}"
+                self._elo._strategy_ratings.setdefault(key, self._elo.default_rating)
+                self._elo._strategy_match_count.setdefault(key, 0)
+
+            log.info("Elo rating system enabled (k=16, decay=0.99)")
             self._elo_decay_interval = 100  # apply decay every N iterations
             self._elo_match_window: list[tuple[str, str, float, bool]] = []
 
