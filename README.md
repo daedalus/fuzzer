@@ -370,7 +370,7 @@ fuzzer-tool minimize ./target -d corpus -c --rate-distortion --target-frac 0.95
 
 ## Test Suite
 
-2027+ tests covering all modules. Run with:
+2250+ tests covering all modules, including 67 regression tests for historical bugfixes (`tests/test_regressions.py`). Run with:
 
 ```bash
 pip install -e ".[dev]"
