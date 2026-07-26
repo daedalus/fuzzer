@@ -118,6 +118,8 @@ static inline void __afl_map_edge(uint32_t cur_loc) {
             __afl_area[idx].edge_id = edge_id;
             __afl_area[idx].count   = 1;
             __afl_iter_edge_count++;                 /* track new-slot insertion */
+            if (__afl_edge_count)                    /* write live to SHM header */
+                *__afl_edge_count = __afl_iter_edge_count;
             break;
         }
         if (eid == edge_id) {                        /* existing edge — bump */

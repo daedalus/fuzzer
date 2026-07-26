@@ -1,6 +1,7 @@
 """Tests for SHM coverage adapter (sparse entry format)."""
 
 import ctypes
+from pathlib import Path
 
 from fuzzer_tool.adapters.shm import SHM_MAP_SIZE, SIZEOF_ENTRY, ShmCoverage, SHM_METADATA_SIZE
 
@@ -630,5 +631,171 @@ class TestShmCoverage:
             # edge 10 is in _seen_edge_ids (not new), edge 20 is new
             assert new is True  # edge_id 20 is new
             assert 10 in edges and 20 in edges
+        finally:
+            cov.cleanup()
+
+
+class TestShimEdgeCountEndToEnd:
+    """End-to-end tests verifying the C shim updates edge_count live.
+
+    Regression for: the C shim's __afl_iter_edge_count was never flushed to the
+    SHM header because __afl_map_reset() is never called in the in-process
+    execution path. This caused the edge_count fast-path to always see 0 == 0
+    and skip the coverage scan, producing 'shm: 0 max: 0 sat: 0%' in stats.
+    The fix: __afl_map_edge() writes edge_count live to the SHM header on each
+    new-slot insertion.
+    """
+
+    def test_shim_updates_edge_count_after_target_call(self, tmp_path):
+        """Compile a minimal .so with shim, call it, verify edge_count > 0."""
+        import subprocess
+        import os
+
+        src = tmp_path / "test_edge_count.c"
+        so = tmp_path / "test_edge_count.so"
+
+        src.write_text("""
+#include <stdint.h>
+#include <stddef.h>
+
+/* The shim is -include'd at compile time, so __afl_map_edge() is available.
+   Record a few known edges so the test can check the edge_count header. */
+__attribute__((visibility("default")))
+int fuzz_shm_run(const unsigned char *buf, size_t len) {
+    (void)buf; (void)len;
+    __afl_map_edge(0x1010);
+    __afl_map_edge(0x2020);
+    __afl_map_edge(0x3030);
+    return 0;
+}
+""")
+
+        shim_path = Path(__file__).parents[1] / "src/fuzzer_tool/adapters/afl_shim.c"
+        assert shim_path.exists(), f"shim not found: {shim_path}"
+
+        subprocess.run(
+            ["gcc", "-O2", "-g", "-shared", "-fPIC",
+             "-include", str(shim_path),
+             "-o", str(so), str(src)],
+            check=True, capture_output=True
+        )
+
+        cov = ShmCoverage()
+        try:
+            cov.reset_edge_map()
+            assert cov.read_edge_count() == 0, "edge_count should be 0 after reset"
+
+            # Set env vars before loading .so (constructor maps SHM).
+            # Must set both __AFL_SHM_ID and AFL_MAP_SIZE — if a previous
+            # test changed AFL_MAP_SIZE via SHM resize, the shim's modulo
+            # maps edges past the readable range.
+            old_shm = os.environ.get("__AFL_SHM_ID")
+            old_size = os.environ.get("AFL_MAP_SIZE")
+            os.environ["__AFL_SHM_ID"] = str(cov.shm_id)
+            os.environ["AFL_MAP_SIZE"] = str(cov.num_entries)
+            try:
+                lib = ctypes.CDLL(str(so))
+                func = lib.fuzz_shm_run
+                func.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+                func.restype = ctypes.c_int
+
+                data = b"hello"
+                buf = ctypes.create_string_buffer(data)
+                rc = func(ctypes.cast(buf, ctypes.c_void_p), ctypes.c_size_t(len(data)))
+                assert rc == 0, f"target returned {rc}"
+
+                # The C shim's __afl_map_edge() should have written edge_count live
+                ec = cov.read_edge_count()
+                assert ec > 0, (
+                    f"edge_count == 0 after target run — C shim did NOT write "
+                    f"edge_count live. This means the fast-path will always skip "
+                    f"the coverage scan (shm: 0 bug)."
+                )
+                assert ec >= 3, f"expected >= 3 edges, got {ec}"
+
+                # Coverage detection should work via the fast-path
+                has_new, edge_ids = cov.is_new_coverage_with_edges()
+                assert has_new, "no new coverage detected via fast-path"
+                # Edge IDs are computed as prev_loc ^ cur_loc:
+                #   0x1010 ^ 0          = 0x1010
+                #   0x2020 ^ (0x1010>>1) = 0x2828
+                #   0x3030 ^ (0x2020>>1) = 0x2020
+                expected = {0x1010, 0x2828, 0x2020}
+                assert edge_ids == expected, f"got {edge_ids}, expected {expected}"
+            finally:
+                if old_shm is not None:
+                    os.environ["__AFL_SHM_ID"] = old_shm
+                else:
+                    os.environ.pop("__AFL_SHM_ID", None)
+                if old_size is not None:
+                    os.environ["AFL_MAP_SIZE"] = old_size
+                else:
+                    os.environ.pop("AFL_MAP_SIZE", None)
+        finally:
+            cov.cleanup()
+
+    def test_shim_edge_count_persists_after_reset_edge_map(self, tmp_path):
+        """reset_edge_map() preserves header; edge_count stays for fast-path."""
+        import subprocess
+        import os
+
+        src = tmp_path / "test_edge_count2.c"
+        so = tmp_path / "test_edge_count2.so"
+
+        src.write_text("""
+#include <stdint.h>
+#include <stddef.h>
+__attribute__((visibility("default")))
+int fuzz_shm_run(const unsigned char *buf, size_t len) {
+    (void)buf; (void)len;
+    __afl_map_edge(0xABCD);
+    return 0;
+}
+""")
+
+        shim_path = Path(__file__).parents[1] / "src/fuzzer_tool/adapters/afl_shim.c"
+        subprocess.run(
+            ["gcc", "-O2", "-g", "-shared", "-fPIC",
+             "-include", str(shim_path),
+             "-o", str(so), str(src)],
+            check=True, capture_output=True
+        )
+
+        cov = ShmCoverage()
+        try:
+            cov.reset_edge_map()
+            old_shm = os.environ.get("__AFL_SHM_ID")
+            old_size = os.environ.get("AFL_MAP_SIZE")
+            os.environ["__AFL_SHM_ID"] = str(cov.shm_id)
+            os.environ["AFL_MAP_SIZE"] = str(cov.num_entries)
+            try:
+                lib = ctypes.CDLL(str(so))
+                func = lib.fuzz_shm_run
+                func.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+                func.restype = ctypes.c_int
+
+                data = b"world"
+                buf = ctypes.create_string_buffer(data)
+                func(ctypes.cast(buf, ctypes.c_void_p), ctypes.c_size_t(len(data)))
+
+                ec_before = cov.read_edge_count()
+                assert ec_before > 0, "first run should produce edges"
+
+                # reset_edge_map zeroes only the edge table, preserving header
+                cov.reset_edge_map()
+                ec_after = cov.read_edge_count()
+                assert ec_after == ec_before, (
+                    f"reset_edge_map should preserve edge_count header: "
+                    f"{ec_before} -> {ec_after}"
+                )
+            finally:
+                if old_shm is not None:
+                    os.environ["__AFL_SHM_ID"] = old_shm
+                else:
+                    os.environ.pop("__AFL_SHM_ID", None)
+                if old_size is not None:
+                    os.environ["AFL_MAP_SIZE"] = old_size
+                else:
+                    os.environ.pop("AFL_MAP_SIZE", None)
         finally:
             cov.cleanup()
