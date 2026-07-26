@@ -8,8 +8,505 @@ separate Python process.
 
 import logging
 import struct
+from dataclasses import dataclass, field
 
 log = logging.getLogger(__name__)
+
+
+# ── Minimal pure-Python x86-64 decoder (no capstone dependency) ─────────
+# Handles only the instruction patterns needed by extract_div_constants:
+# DIV/IDIV, MOV r,imm, XOR r,r, CMP r,imm / CMP r,r, LEA, and control flow.
+
+# Instruction type IDs (arbitrary constants, only used internally)
+_INS_MOV = 1
+_INS_MOVABS = 2
+_INS_XOR = 3
+_INS_CMP = 4
+_INS_LEA = 5
+_INS_DIV = 6
+_INS_IDIV = 7
+_INS_CALL = 8
+_INS_JMP = 9
+_INS_RET = 10
+_INS_JCC = 11
+_INS_OTHER = 99
+
+# Operand types
+_OP_REG = 1
+_OP_IMM = 2
+_OP_MEM = 3
+
+# Control-flow groups
+_GRP_CALL = 1
+_GRP_JUMP = 2
+_GRP_RET = 3
+
+# x86-64 register names by 3-bit encoding (extended by REX.B to 4-bit)
+_REG_NAMES = [
+    "rax",
+    "rcx",
+    "rdx",
+    "rbx",
+    "rsp",
+    "rbp",
+    "rsi",
+    "rdi",
+    "r8",
+    "r9",
+    "r10",
+    "r11",
+    "r12",
+    "r13",
+    "r14",
+    "r15",
+]
+
+
+@dataclass
+class _Operand:
+    """Decoded x86-64 operand."""
+
+    type: int  # _OP_REG, _OP_IMM, _OP_MEM
+    reg: int = 0  # register encoding (0-15)
+    imm: int = 0  # immediate value
+    size: int = 4  # operand size in bytes
+    # Memory operand fields
+    base: int = -1
+    index: int = -1
+    scale: int = 1
+    disp: int = 0
+
+
+@dataclass
+class _DisasmInsn:
+    """Decoded x86-64 instruction (capstone-compatible interface)."""
+
+    address: int = 0
+    length: int = 0
+    insn_id: int = _INS_OTHER
+    bytes: bytes = b""
+    operands: list = field(default_factory=list)
+    groups: set = field(default_factory=set)
+    op_str: str = ""
+    _regs_read: set = field(default_factory=set)
+    _regs_write: set = field(default_factory=set)
+
+    def regs_access(self):
+        return self._regs_read, self._regs_write
+
+
+def _reg_base_pure(reg_id: int) -> str | None:
+    """Derive canonical base name for x86 register (no capstone needed).
+
+    All widths of the same register (al/ax/eax/rax) map to the same name.
+    """
+    if 0 <= reg_id < len(_REG_NAMES):
+        return _REG_NAMES[reg_id]
+    return None
+
+
+def _decode_x86_64(text: bytes, base_addr: int):
+    """Minimal x86-64 instruction decoder — yields _DisasmInsn objects.
+
+    Handles only the patterns needed by extract_div_constants.
+    Unrecognized opcodes are yielded as _INS_OTHER with length=1.
+    """
+    pc = 0
+    n = len(text)
+
+    while pc < n:
+        start = pc
+        addr = base_addr + pc
+
+        # ── REX prefix (optional) ──
+        rex = 0
+        rex_w = False
+        rex_r = False
+        rex_b = False
+        if pc < n and 0x40 <= text[pc] <= 0x4F:
+            rex = text[pc]
+            rex_w = bool(rex & 0x08)
+            rex_r = bool(rex & 0x04)
+            rex_b = bool(rex & 0x01)
+            pc += 1
+
+        if pc >= n:
+            yield _DisasmInsn(
+                address=addr, length=1, insn_id=_INS_OTHER, bytes=text[start : start + 1]
+            )
+            return
+
+        opbyte = text[pc]
+        pc += 1
+
+        # ── Helper: decode ModR/M + SIB + displacement ──
+        def _decode_modrm(_rex_r=rex_r, _rex_b=rex_b):
+            """Returns (mod, reg, rm, bytes_consumed, has_sib, sib_byte)."""
+            nonlocal pc
+            if pc >= n:
+                return None
+            mrm = text[pc]
+            pc += 1
+            mod = (mrm >> 6) & 3
+            reg = ((mrm >> 3) & 7) | (0x8 if _rex_r else 0)
+            rm_raw = mrm & 7
+            rm = rm_raw | (0x8 if _rex_b else 0)
+
+            has_sib = False
+            sib_byte = 0
+            # SIB present when mod≠11 and rm_raw==4 (RSP-based)
+            if mod != 3 and rm_raw == 4 and pc < n:
+                sib_byte = text[pc]
+                pc += 1
+                has_sib = True
+
+            # Displacement
+            if mod == 1:
+                if pc < n:
+                    pc += 1  # disp8
+            elif mod == 2:
+                if pc + 4 <= n:
+                    pc += 4  # disp32
+            elif mod == 0:
+                if has_sib:
+                    base_raw = sib_byte & 7
+                    if base_raw == 5 and pc + 4 <= n:  # [disp32 + index*scale]
+                        pc += 4
+                elif rm_raw == 5:  # [disp32]
+                    if pc + 4 <= n:
+                        pc += 4
+
+            return mod, reg, rm, has_sib, sib_byte
+
+        insn = _DisasmInsn(address=addr, bytes=text[start:pc])
+
+        # ── Single-byte opcodes ──
+
+        # MOV r32, imm32  (B8+rd)
+        if 0xB8 <= opbyte <= 0xBF:
+            rd = (opbyte - 0xB8) | (0x8 if rex_b else 0)
+            if rex_w:
+                # MOV r64, imm64
+                if pc + 8 <= n:
+                    imm = struct.unpack_from("<q", text, pc)[0]
+                    pc += 8
+                else:
+                    imm = 0
+                insn.insn_id = _INS_MOV
+                insn.operands = [_Operand(_OP_REG, rd, size=8), _Operand(_OP_IMM, imm=imm, size=8)]
+                insn._regs_write = {rd}
+            else:
+                # MOV r32, imm32
+                if pc + 4 <= n:
+                    imm = struct.unpack_from("<i", text, pc)[0]
+                    pc += 4
+                else:
+                    imm = 0
+                insn.insn_id = _INS_MOV
+                insn.operands = [_Operand(_OP_REG, rd, size=4), _Operand(_OP_IMM, imm=imm, size=4)]
+                insn._regs_write = {rd}
+            insn.length = pc - start
+            insn.bytes = text[start:pc]
+            yield insn
+            continue
+
+        # RET
+        if opbyte in (0xC3, 0xCB):
+            insn.insn_id = _INS_RET
+            insn.groups = {_GRP_RET}
+            insn.length = pc - start
+            yield insn
+            continue
+
+        # JMP rel8
+        if opbyte == 0xEB:
+            if pc < n:
+                off = struct.unpack_from("<b", text, pc)[0]
+                pc += 1
+            else:
+                off = 0
+            insn.insn_id = _INS_JMP
+            insn.groups = {_GRP_JUMP}
+            insn.op_str = f"0x{addr + pc + off:x}"
+            insn.length = pc - start
+            yield insn
+            continue
+
+        # JMP rel32
+        if opbyte == 0xE9:
+            if pc + 4 <= n:
+                off = struct.unpack_from("<i", text, pc)[0]
+                pc += 4
+            else:
+                off = 0
+            insn.insn_id = _INS_JMP
+            insn.groups = {_GRP_JUMP}
+            insn.op_str = f"0x{addr + pc + off:x}"
+            insn.length = pc - start
+            yield insn
+            continue
+
+        # CALL rel32
+        if opbyte == 0xE8:
+            if pc + 4 <= n:
+                off = struct.unpack_from("<i", text, pc)[0]
+                pc += 4
+            else:
+                off = 0
+            insn.insn_id = _INS_CALL
+            insn.groups = {_GRP_CALL}
+            insn.op_str = f"0x{addr + pc + off:x}"
+            insn.length = pc - start
+            yield insn
+            continue
+
+        # Jcc rel8 (70-7F)
+        if 0x70 <= opbyte <= 0x7F:
+            if pc < n:
+                off = struct.unpack_from("<b", text, pc)[0]
+                pc += 1
+            else:
+                off = 0
+            insn.insn_id = _INS_JCC
+            insn.groups = {_GRP_JUMP}
+            insn.op_str = f"0x{addr + pc + off:x}"
+            insn.length = pc - start
+            yield insn
+            continue
+
+        # ── Two-byte opcodes (0x0F prefix) ──
+        if opbyte == 0x0F and pc < n:
+            op2 = text[pc]
+            pc += 1
+
+            # Jcc rel32 (0F 80-8F)
+            if 0x80 <= op2 <= 0x8F:
+                if pc + 4 <= n:
+                    off = struct.unpack_from("<i", text, pc)[0]
+                    pc += 4
+                else:
+                    off = 0
+                insn.insn_id = _INS_JCC
+                insn.groups = {_GRP_JUMP}
+                insn.op_str = f"0x{addr + pc + off:x}"
+                insn.length = pc - start
+                yield insn
+                continue
+
+            # Unknown two-byte opcode — skip
+            insn.insn_id = _INS_OTHER
+            insn.length = pc - start
+            yield insn
+            continue
+
+        # ── Multi-byte opcodes with ModR/M ──
+
+        # F7 — GRP3 (DIV/IDIV/NOT/NEG/MUL/IMUL)
+        if opbyte == 0xF7:
+            result = _decode_modrm()
+            if result is None:
+                insn.insn_id = _INS_OTHER
+                insn.length = pc - start
+                yield insn
+                continue
+            mod, reg_ext, rm, has_sib, sib_byte = result
+            if mod == 3:  # register operand
+                if reg_ext & 7 == 6:  # DIV
+                    insn.insn_id = _INS_DIV
+                    insn.operands = [_Operand(_OP_REG, rm, size=4)]
+                    insn._regs_read = {0, 2, rm}  # EAX, EDX, rm
+                    insn._regs_write = {0, 2}  # EAX, EDX
+                elif reg_ext & 7 == 7:  # IDIV
+                    insn.insn_id = _INS_IDIV
+                    insn.operands = [_Operand(_OP_REG, rm, size=4)]
+                    insn._regs_read = {0, 2, rm}
+                    insn._regs_write = {0, 2}
+                else:
+                    insn.insn_id = _INS_OTHER
+            else:
+                insn.insn_id = _INS_OTHER
+            insn.length = pc - start
+            yield insn
+            continue
+
+        # 81 — GRP1 r/m, imm32
+        if opbyte == 0x81:
+            result = _decode_modrm()
+            if result is None:
+                insn.insn_id = _INS_OTHER
+                insn.length = pc - start
+                yield insn
+                continue
+            mod, reg_ext, rm, has_sib, sib_byte = result
+            # Read imm32
+            if pc + 4 <= n:
+                imm = struct.unpack_from("<i", text, pc)[0]
+                pc += 4
+            else:
+                imm = 0
+            if mod == 3 and (reg_ext & 7) == 7:  # CMP r/m32, imm32
+                insn.insn_id = _INS_CMP
+                insn.operands = [_Operand(_OP_REG, rm, size=4), _Operand(_OP_IMM, imm=imm, size=4)]
+                insn._regs_read = {rm}
+            else:
+                insn.insn_id = _INS_OTHER
+            insn.length = pc - start
+            yield insn
+            continue
+
+        # 83 — GRP1 r/m, imm8 (sign-extended)
+        if opbyte == 0x83:
+            result = _decode_modrm()
+            if result is None:
+                insn.insn_id = _INS_OTHER
+                insn.length = pc - start
+                yield insn
+                continue
+            mod, reg_ext, rm, has_sib, sib_byte = result
+            # Read imm8 (sign-extended to 32-bit)
+            if pc < n:
+                imm = struct.unpack_from("<b", text, pc)[0]
+                pc += 1
+            else:
+                imm = 0
+            if mod == 3 and (reg_ext & 7) == 7:  # CMP r/m32, imm8
+                insn.insn_id = _INS_CMP
+                insn.operands = [_Operand(_OP_REG, rm, size=4), _Operand(_OP_IMM, imm=imm, size=4)]
+                insn._regs_read = {rm}
+            else:
+                insn.insn_id = _INS_OTHER
+            insn.length = pc - start
+            yield insn
+            continue
+
+        # 39 / 3B — CMP r/m, r / CMP r, r/m
+        if opbyte in (0x39, 0x3B):
+            result = _decode_modrm()
+            if result is None:
+                insn.insn_id = _INS_OTHER
+                insn.length = pc - start
+                yield insn
+                continue
+            mod, reg, rm, has_sib, sib_byte = result
+            if mod == 3:  # register-register
+                insn.insn_id = _INS_CMP
+                if opbyte == 0x39:
+                    # CMP r/m32, r32 — reg is source, rm is destination (read)
+                    insn.operands = [_Operand(_OP_REG, rm, size=4), _Operand(_OP_REG, reg, size=4)]
+                else:
+                    # CMP r32, r/m32 — reg is destination (read), rm is source (read)
+                    insn.operands = [_Operand(_OP_REG, reg, size=4), _Operand(_OP_REG, rm, size=4)]
+                insn._regs_read = {reg, rm}
+            else:
+                insn.insn_id = _INS_OTHER
+            insn.length = pc - start
+            yield insn
+            continue
+
+        # 33 / 31 — XOR r, r/m / XOR r/m, r
+        if opbyte in (0x33, 0x31):
+            result = _decode_modrm()
+            if result is None:
+                insn.insn_id = _INS_OTHER
+                insn.length = pc - start
+                yield insn
+                continue
+            mod, reg, rm, has_sib, sib_byte = result
+            if mod == 3:  # register-register
+                insn.insn_id = _INS_XOR
+                if opbyte == 0x33:
+                    # XOR r32, r/m32 — reg is destination (written)
+                    insn.operands = [_Operand(_OP_REG, reg, size=4), _Operand(_OP_REG, rm, size=4)]
+                    insn._regs_read = {reg, rm}
+                    insn._regs_write = {reg}
+                else:
+                    # XOR r/m32, r32 — rm is destination (written)
+                    insn.operands = [_Operand(_OP_REG, rm, size=4), _Operand(_OP_REG, reg, size=4)]
+                    insn._regs_read = {reg, rm}
+                    insn._regs_write = {rm}
+            else:
+                insn.insn_id = _INS_OTHER
+            insn.length = pc - start
+            yield insn
+            continue
+
+        # C7 /0 — MOV r/m32, imm32
+        if opbyte == 0xC7:
+            result = _decode_modrm()
+            if result is None:
+                insn.insn_id = _INS_OTHER
+                insn.length = pc - start
+                yield insn
+                continue
+            mod, reg_ext, rm, has_sib, sib_byte = result
+            if pc + 4 <= n:
+                imm = struct.unpack_from("<i", text, pc)[0]
+                pc += 4
+            else:
+                imm = 0
+            if mod == 3 and (reg_ext & 7) == 0:  # MOV r/m32, imm32
+                insn.insn_id = _INS_MOV
+                insn.operands = [_Operand(_OP_REG, rm, size=4), _Operand(_OP_IMM, imm=imm, size=4)]
+                insn._regs_write = {rm}
+            else:
+                insn.insn_id = _INS_OTHER
+            insn.length = pc - start
+            yield insn
+            continue
+
+        # 8D — LEA r, m
+        if opbyte == 0x8D:
+            result = _decode_modrm()
+            if result is None:
+                insn.insn_id = _INS_OTHER
+                insn.length = pc - start
+                yield insn
+                continue
+            mod, reg, rm, has_sib, sib_byte = result
+            if mod != 3:  # memory operand
+                insn.insn_id = _INS_LEA
+                mem_op = _Operand(_OP_MEM, size=8)
+                mem_op.base = rm if mod != 3 else -1
+                insn.operands = [_Operand(_OP_REG, reg, size=8), mem_op]
+                insn._regs_write = {reg}
+            else:
+                insn.insn_id = _INS_OTHER
+            insn.length = pc - start
+            yield insn
+            continue
+
+        # FF — various (CALL r/m, JMP r/m, etc.)
+        if opbyte == 0xFF:
+            result = _decode_modrm()
+            if result is None:
+                insn.insn_id = _INS_OTHER
+                insn.length = pc - start
+                yield insn
+                continue
+            mod, reg_ext, rm, has_sib, sib_byte = result
+            ext = reg_ext & 7
+            if ext == 2:  # CALL r/m
+                insn.insn_id = _INS_CALL
+                insn.groups = {_GRP_CALL}
+                if mod == 3:
+                    insn.operands = [_Operand(_OP_REG, rm, size=8)]
+                    insn._regs_read = {rm}
+            elif ext == 4:  # JMP r/m
+                insn.insn_id = _INS_JMP
+                insn.groups = {_GRP_JUMP}
+                if mod == 3:
+                    insn.operands = [_Operand(_OP_REG, rm, size=8)]
+                    insn._regs_read = {rm}
+            else:
+                insn.insn_id = _INS_OTHER
+            insn.length = pc - start
+            yield insn
+            continue
+
+        # Unrecognized — skip 1 byte
+        insn.insn_id = _INS_OTHER
+        insn.length = 1
+        yield insn
 
 
 def parse_sancov_offsets(target: str) -> tuple[int, int] | None:
@@ -315,18 +812,14 @@ def extract_capstone_constants(target: str) -> list[bytes]:
     try:
         from capstone import CS_ARCH_X86, CS_MODE_64, Cs
         from capstone.x86_const import (
-            X86_GRP_JUMP,
-            X86_GRP_CALL,
-            X86_GRP_RET,
-            X86_INS_CMP,
-            X86_INS_MOV,
-            X86_INS_TEST,
-            X86_INS_AND,
-            X86_INS_OR,
-            X86_INS_XOR,
-            X86_INS_SUB,
             X86_INS_ADD,
+            X86_INS_AND,
+            X86_INS_CMP,
             X86_INS_CMPXCHG,
+            X86_INS_OR,
+            X86_INS_SUB,
+            X86_INS_TEST,
+            X86_INS_XOR,
             X86_OP_IMM,
         )
     except ImportError:
@@ -471,9 +964,7 @@ def _is_noise_immediate(value: int, size: int) -> bool:
         if upper - 128 <= unsigned < upper:
             return True  # -1 through -128
     # User-space addresses on 64-bit (conservative: page-aligned AND high bit set)
-    if size == 8 and unsigned > 0x7FFFFFFFFFFF and unsigned % 0x1000 == 0:
-        return True
-    return False
+    return size == 8 and unsigned > 0x7FFFFFFFFFFF and unsigned % 0x1000 == 0
 
 
 def _maybe_add_constant(constants: set[bytes], data: bytes):
@@ -572,25 +1063,42 @@ def _extract_imm(insn) -> int | None:
 
     Handles ``mov reg, imm``, ``movabs reg, imm``, and simple
     ``lea reg, [disp]`` (no base/index).
+    Works with both _DisasmInsn (pure decoder) and capstone insn objects.
     """
+    # Pure decoder path
+    if isinstance(insn, _DisasmInsn):
+        if (
+            insn.insn_id == _INS_MOV
+            and len(insn.operands) >= 2
+            and insn.operands[1].type == _OP_IMM
+        ):
+            return insn.operands[1].imm
+        if insn.insn_id == _INS_LEA and len(insn.operands) >= 2:
+            mem = insn.operands[1]
+            if mem.type == _OP_MEM and mem.base < 0 and mem.index < 0 and mem.disp != 0:
+                return mem.disp
+        return None
+
+    # Capstone path
     try:
         from capstone.x86_const import (
+            X86_INS_LEA,
             X86_INS_MOV,
             X86_INS_MOVABS,
-            X86_INS_LEA,
             X86_OP_IMM,
-            X86_OP_MEM,
         )
     except ImportError:
         return None
 
-    if insn.id == X86_INS_MOV and len(insn.operands) >= 2:
-        if insn.operands[1].type == X86_OP_IMM:
-            return insn.operands[1].imm
+    if insn.id == X86_INS_MOV and len(insn.operands) >= 2 and insn.operands[1].type == X86_OP_IMM:
+        return insn.operands[1].imm
 
-    if insn.id == X86_INS_MOVABS and len(insn.operands) >= 2:
-        if insn.operands[1].type == X86_OP_IMM:
-            return insn.operands[1].imm
+    if (
+        insn.id == X86_INS_MOVABS
+        and len(insn.operands) >= 2
+        and insn.operands[1].type == X86_OP_IMM
+    ):
+        return insn.operands[1].imm
 
     if insn.id == X86_INS_LEA and len(insn.operands) >= 2:
         mem = insn.operands[1].mem
@@ -601,7 +1109,15 @@ def _extract_imm(insn) -> int | None:
 
 
 def _is_ctrl_flow(insn) -> bool:
-    """Return True if *insn* changes control flow (call, jmp, ret, jcc)."""
+    """Return True if *insn* changes control flow (call, jmp, ret, jcc).
+
+    Works with both _DisasmInsn (pure decoder) and capstone insn objects.
+    """
+    # Pure decoder path
+    if isinstance(insn, _DisasmInsn):
+        return bool(insn.groups & {_GRP_CALL, _GRP_JUMP, _GRP_RET})
+
+    # Capstone path
     try:
         from capstone.x86_const import (
             X86_GRP_CALL,
@@ -610,10 +1126,7 @@ def _is_ctrl_flow(insn) -> bool:
         )
     except ImportError:
         return False
-    for g in insn.groups:
-        if g in (X86_GRP_CALL, X86_GRP_JUMP, X86_GRP_RET):
-            return True
-    return False
+    return any(g in (X86_GRP_CALL, X86_GRP_JUMP, X86_GRP_RET) for g in insn.groups)
 
 
 def extract_div_constants(target: str) -> tuple[dict[int, int], set[int]]:
@@ -639,25 +1152,6 @@ def extract_div_constants(target: str) -> tuple[dict[int, int], set[int]]:
           (variable divisor at runtime).  The solver can still try the
           heuristic common-divisor set for these.
     """
-    try:
-        from capstone import CS_ARCH_X86, CS_MODE_64, Cs
-        from capstone.x86_const import (
-            X86_INS_DIV,
-            X86_INS_IDIV,
-            X86_INS_MOV,
-            X86_INS_MOVABS,
-            X86_INS_LEA,
-            X86_INS_CMP,
-            X86_OP_IMM,
-            X86_OP_REG,
-            X86_OP_MEM,
-            X86_GRP_CALL,
-            X86_GRP_JUMP,
-            X86_GRP_RET,
-        )
-    except ImportError:
-        return {}, set()
-
     try:
         with open(target, "rb") as f:
             elf = f.read()
@@ -696,58 +1190,45 @@ def extract_div_constants(target: str) -> tuple[dict[int, int], set[int]]:
     if not text_data:
         return {}, set()
 
-    md = Cs(CS_ARCH_X86, CS_MODE_64)
-    md.detail = True
+    # Try pure decoder first (no external dependencies)
+    try:
+        result = _extract_div_pure(text_data, text_vaddr)
+        if result != ({}, set()):
+            return result
+    except Exception:
+        pass
 
-    # Build register alias map once.
-    # Maps each register ID to the set of IDs that share the same physical base.
-    reg_alias: dict[int, set[int]] = {}
-    group_to_ids: dict[str, set[int]] = {}
-    for insn in md.disasm(text_data, text_vaddr):
-        for op in insn.operands:
-            if op.type == X86_OP_REG:
-                base = _reg_base(md, op.reg)
-                if base:
-                    group_to_ids.setdefault(base, set()).add(op.reg)
-        break  # just need one insn to enumerate alias relationships
-    # The first insn may not cover all registers, so enumerate a reasonable range
-    for rid in range(1, 200):
-        name = md.reg_name(rid)
-        if name:
-            base = _reg_base(md, rid)
-            if base:
-                group_to_ids.setdefault(base, set()).add(rid)
-    for base, members in group_to_ids.items():
-        for rid in members:
-            reg_alias[rid] = members
+    # Fall back to capstone if available
+    try:
+        return _extract_div_capstone(text_data, text_vaddr)
+    except Exception:
+        return {}, set()
 
-    # ── Forward pass with sliding window ──
+
+def _extract_div_pure(text_data: bytes, text_vaddr: int) -> tuple[dict[int, int], set[int]]:
+    """extract_div_constants using the pure-Python decoder (no capstone)."""
+    # Register alias map — in our pure encoding, each register ID IS its own alias
+    # (all widths of the same register map to the same ID 0-15)
+    reg_alias: dict[int, set[int]] = {i: {i} for i in range(16)}
+
+    # DX family: register 2 (rdx/edx/dx/dl all map to 2)
+    _dx_family: set[int] = {2}
+
     MAX_BACKWARD = 50
-    recent: list[tuple] = []  # (insn, set_of_written_reg_ids)
+    recent: list[tuple] = []
 
-    # Family of register IDs that alias with EDX (dl, dx, edx, rdx).
-    # Used to detect CMP instructions that check the DIV remainder.
-    _dx_family: set[int] = set()
-    for rid in range(1, 200):
-        b = _reg_base(md, rid)
-        if b == "dx":
-            _dx_family.add(rid)
-
-    # Cache of known DIV addresses → divisors
     div_map: dict[int, int] = {}
     _known_divs: dict[int, int] = {}
-    # Weak modulus PCs: CMP addresses that check the remainder of a DIV
-    # whose divisor could not be determined statically (variable divisor).
     weak_mod_pcs: set[int] = set()
 
-    for insn in md.disasm(text_data, text_vaddr):
+    for insn in _decode_x86_64(text_data, text_vaddr):
         regs_read, regs_write = insn.regs_access()
         recent.append((insn, set(regs_write)))
         if len(recent) > MAX_BACKWARD:
             recent.pop(0)
 
         # ── DIV/IDIV detection ──
-        if insn.id in (X86_INS_DIV, X86_INS_IDIV):
+        if insn.insn_id in (_INS_DIV, _INS_IDIV):
             op = insn.operands[0] if insn.operands else None
             if op is None:
                 continue
@@ -755,12 +1236,12 @@ def extract_div_constants(target: str) -> tuple[dict[int, int], set[int]]:
             divisor: int | None = None
 
             # Method 1: immediate operand
-            if op.type == X86_OP_IMM:
+            if op.type == _OP_IMM:
                 if 0 < op.imm <= 0xFFFFFFFF:
                     divisor = op.imm
 
             # Method 2: register operand with backward scan
-            elif op.type == X86_OP_REG:
+            elif op.type == _OP_REG:
                 div_reg = op.reg
                 div_reg_family = reg_alias.get(div_reg, {div_reg})
                 for prev_insn, prev_writes in reversed(recent[:-1]):
@@ -778,9 +1259,107 @@ def extract_div_constants(target: str) -> tuple[dict[int, int], set[int]]:
             continue
 
         # ── Forward modulus extraction ──
-        # A CMP that references the 'dx' register family may be checking
-        # the remainder from a preceding DIV.  If the DIV's divisor is
-        # known it goes into div_map; otherwise into weak_mod_pcs.
+        if (
+            insn.insn_id == _INS_CMP
+            and len(insn.operands) >= 2
+            and any(op.type == _OP_REG and op.reg in _dx_family for op in insn.operands)
+        ):
+            for prev_insn, _ in reversed(recent[:-1]):
+                if prev_insn.insn_id in (_INS_DIV, _INS_IDIV):
+                    d = _known_divs.get(prev_insn.address)
+                    if d is not None:
+                        div_map[insn.address] = d
+                    else:
+                        weak_mod_pcs.add(insn.address)
+                    break
+
+    if div_map or weak_mod_pcs:
+        log.info(
+            "elf: found %d DIV/IDIV mappings, %d weak modulus PCs (pure decoder)",
+            len(div_map),
+            len(weak_mod_pcs),
+        )
+    return div_map, weak_mod_pcs
+
+
+def _extract_div_capstone(text_data: bytes, text_vaddr: int) -> tuple[dict[int, int], set[int]]:
+    """extract_div_constants using capstone disassembly (fallback)."""
+    from capstone import CS_ARCH_X86, CS_MODE_64, Cs
+    from capstone.x86_const import (
+        X86_INS_CMP,
+        X86_INS_DIV,
+        X86_INS_IDIV,
+        X86_OP_IMM,
+        X86_OP_REG,
+    )
+
+    md = Cs(CS_ARCH_X86, CS_MODE_64)
+    md.detail = True
+
+    # Build register alias map
+    reg_alias: dict[int, set[int]] = {}
+    group_to_ids: dict[str, set[int]] = {}
+    for insn in md.disasm(text_data, text_vaddr):
+        for op in insn.operands:
+            if op.type == X86_OP_REG:
+                base = _reg_base(md, op.reg)
+                if base:
+                    group_to_ids.setdefault(base, set()).add(op.reg)
+        break
+    for rid in range(1, 200):
+        name = md.reg_name(rid)
+        if name:
+            base = _reg_base(md, rid)
+            if base:
+                group_to_ids.setdefault(base, set()).add(rid)
+    for _base, members in group_to_ids.items():
+        for rid in members:
+            reg_alias[rid] = members
+
+    # DX family
+    _dx_family: set[int] = set()
+    for rid in range(1, 200):
+        b = _reg_base(md, rid)
+        if b == "dx":
+            _dx_family.add(rid)
+
+    MAX_BACKWARD = 50
+    recent: list[tuple] = []
+
+    div_map: dict[int, int] = {}
+    _known_divs: dict[int, int] = {}
+    weak_mod_pcs: set[int] = set()
+
+    for insn in md.disasm(text_data, text_vaddr):
+        regs_read, regs_write = insn.regs_access()
+        recent.append((insn, set(regs_write)))
+        if len(recent) > MAX_BACKWARD:
+            recent.pop(0)
+
+        if insn.id in (X86_INS_DIV, X86_INS_IDIV):
+            op = insn.operands[0] if insn.operands else None
+            if op is None:
+                continue
+            divisor: int | None = None
+            if op.type == X86_OP_IMM:
+                if 0 < op.imm <= 0xFFFFFFFF:
+                    divisor = op.imm
+            elif op.type == X86_OP_REG:
+                div_reg = op.reg
+                div_reg_family = reg_alias.get(div_reg, {div_reg})
+                for prev_insn, prev_writes in reversed(recent[:-1]):
+                    if _is_ctrl_flow(prev_insn):
+                        break
+                    if prev_writes & div_reg_family:
+                        candidate = _extract_imm(prev_insn)
+                        if candidate is not None and 0 < candidate <= 0xFFFFFFFF:
+                            divisor = candidate
+                        break
+            if divisor is not None:
+                div_map[insn.address] = divisor
+                _known_divs[insn.address] = divisor
+            continue
+
         if (
             insn.id == X86_INS_CMP
             and len(insn.operands) >= 2
@@ -792,15 +1371,12 @@ def extract_div_constants(target: str) -> tuple[dict[int, int], set[int]]:
                     if d is not None:
                         div_map[insn.address] = d
                     else:
-                        # Variable divisor — tag as weak modulus
                         weak_mod_pcs.add(insn.address)
                     break
 
     if div_map or weak_mod_pcs:
-        import logging as _logging
-
-        _logging.getLogger(__name__).info(
-            "elf: found %d DIV/IDIV mappings, %d weak modulus PCs",
+        log.info(
+            "elf: found %d DIV/IDIV mappings, %d weak modulus PCs (capstone)",
             len(div_map),
             len(weak_mod_pcs),
         )
