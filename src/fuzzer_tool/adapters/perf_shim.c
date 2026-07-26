@@ -33,14 +33,6 @@ static long do_perf_event_open(
                    cpu, group_fd, flags);
 }
 
-/* perf_event_attr flag bits */
-#define FL_DISABLED      (1UL << 0)
-#define FL_INHERIT       (1UL << 1)
-#define FL_EXCLUDE_USER  (1UL << 3)
-#define FL_EXCLUDE_KERNEL (1UL << 4)
-#define FL_EXCLUDE_HV    (1UL << 5)
-#define FL_ENABLE_ON_EXEC (1UL << 11)
-
 /*
  * Open a hardware performance counter.
  *
@@ -58,14 +50,11 @@ int perf_open(int pid, int hw_config, int exclude_kernel, int inherit) {
     pe.size = sizeof(pe);
     pe.type = PERF_TYPE_HARDWARE;
     pe.config = hw_config;
-
-    unsigned long flags = 0;
-    flags |= FL_DISABLED;
-    flags |= FL_ENABLE_ON_EXEC;
-    flags |= FL_EXCLUDE_HV;
-    if (exclude_kernel) flags |= FL_EXCLUDE_KERNEL;
-    if (inherit)         flags |= FL_INHERIT;
-    pe.flags = flags;
+    pe.disabled = 1;
+    pe.enable_on_exec = 1;
+    pe.exclude_hv = 1;
+    if (exclude_kernel) pe.exclude_kernel = 1;
+    if (inherit)         pe.inherit = 1;
 
     int fd = do_perf_event_open(&pe, pid, -1, -1, 0 /* PERF_FLAG_FD_CLOEXEC */);
     return fd;

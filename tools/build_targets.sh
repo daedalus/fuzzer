@@ -19,6 +19,7 @@ FGREP="${FGREP_DIR:-/home/dclavijo/my_code/fgrep}"
 TAILSLAYER="${TAILSLAYER_DIR:-/home/dclavijo/code/tailslayer}"
 SHIM="src/fuzzer_tool/adapters/afl_shim.c"
 CMPLOG_SHIM="src/fuzzer_tool/adapters/cmplog_shim.c"
+PERF_SHIM="src/fuzzer_tool/adapters/perf_shim.c"
 TARGETS="targets"
 VENDOR="vendor"
 OPTS="${@:---all}"
@@ -46,6 +47,23 @@ NC='\033[0m'
 
 ok() { echo -e "  ${GREEN}OK${NC}: $1"; }
 warn() { echo -e "  ${YELLOW}WARN${NC}: $1"; }
+
+# ── Compile perf_shim.so ─────────────────────────────────────────
+compile_perf_shim() {
+    local cc="${1:-gcc}"
+    local out="src/fuzzer_tool/adapters/perf_shim.so"
+    if [ ! -f "$PERF_SHIM" ]; then
+        warn "perf_shim.c not found, skipping"
+        return 1
+    fi
+    local rc=0
+    $cc -O2 -g -shared -fPIC -o "$out" "$PERF_SHIM" 2>/dev/null || rc=$?
+    if [ $rc -eq 0 ]; then
+        ok "perf_shim.so"
+    else
+        warn "failed: perf_shim.so"
+    fi
+}
 
 # ── Compile fgrep library objects ──────────────────────────────────
 compile_fgrep_objects() {
@@ -786,6 +804,10 @@ fi
 if [ "$WITH_VENDOR_TRACECMP" -eq 1 ]; then
     build_vendored_tracecmp_targets "$@"
 fi
+
+# ── Compile perf_shim.so (utility library, not a fuzz target) ────
+echo "Compiling utility libraries..."
+compile_perf_shim
 
 verify_afl
 verify_shm_run
