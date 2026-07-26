@@ -61,6 +61,7 @@ static uint64_t *__afl_edge_count  = NULL;   /* offset 16: uint64 */
 static uint64_t  __afl_path_hash_acc = 0;       /* rolling path hash accumulator */
 static uint32_t  __afl_max_stack_depth = 0;     /* max stack depth this iteration */
 static uint64_t  __afl_iter_edge_count = 0;     /* new-slot insertions this iteration */
+static uint64_t  __afl_total_edge_count = 0;    /* cumulative, never reset across iterations */
 
 /* ── SHM attachment ──────────────────────────────────────────────────── */
 
@@ -117,9 +118,10 @@ static inline void __afl_map_edge(uint32_t cur_loc) {
         if (eid == 0) {                              /* empty slot — claim */
             __afl_area[idx].edge_id = edge_id;
             __afl_area[idx].count   = 1;
-            __afl_iter_edge_count++;                 /* track new-slot insertion */
-            if (__afl_edge_count)                    /* write live to SHM header */
-                *__afl_edge_count = __afl_iter_edge_count;
+            __afl_iter_edge_count++;                 /* track per-iteration new-slot insertion */
+            __afl_total_edge_count++;                /* track cumulative across-reset count */
+            if (__afl_edge_count)                    /* write CUMULATIVE count live to SHM header */
+                *__afl_edge_count = __afl_total_edge_count;
             break;
         }
         if (eid == edge_id) {                        /* existing edge — bump */
@@ -186,7 +188,7 @@ void __afl_map_reset(void) {
             *__afl_path_hash = __afl_path_hash_acc;
         }
         if (__afl_edge_count) {
-            *__afl_edge_count = __afl_iter_edge_count;
+            *__afl_edge_count = __afl_total_edge_count;
         }
     }
     __afl_prev_loc = 0;

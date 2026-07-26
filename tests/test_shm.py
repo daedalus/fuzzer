@@ -674,10 +674,20 @@ int fuzz_shm_run(const unsigned char *buf, size_t len) {
         assert shim_path.exists(), f"shim not found: {shim_path}"
 
         subprocess.run(
-            ["gcc", "-O2", "-g", "-shared", "-fPIC",
-             "-include", str(shim_path),
-             "-o", str(so), str(src)],
-            check=True, capture_output=True
+            [
+                "gcc",
+                "-O2",
+                "-g",
+                "-shared",
+                "-fPIC",
+                "-include",
+                str(shim_path),
+                "-o",
+                str(so),
+                str(src),
+            ],
+            check=True,
+            capture_output=True,
         )
 
         cov = ShmCoverage()
@@ -734,36 +744,96 @@ int fuzz_shm_run(const unsigned char *buf, size_t len) {
         finally:
             cov.cleanup()
 
-    def test_shim_edge_count_persists_after_reset_edge_map(self, tmp_path):
-        """reset_edge_map() preserves header; edge_count stays for fast-path."""
+    def test_regression_edge_count_fast_path_false_positive(self):
+        """Regression: disjoint edge sets with same per-execution count must be
+        detected as new coverage via cumulative edge_count from the C shim.
+
+        Before the fix, the C shim wrote per-execution __afl_iter_edge_count to
+        the header.  When two consecutive executions touched different edges but
+        the same count (e.g. {100,200,300} then {400,500,600}, both count=3),
+        the fast-path comparison ``edge_count == _last_edge_count`` incorrectly
+        returned False -- silently missing real coverage.
+
+        The fix makes the C shim write __afl_total_edge_count (cumulative, never
+        reset) to the header.  This test simulates that cumulative behavior at
+        the Python level to verify the fast-path logic is correct when given
+        proper cumulative values.
+        """
+        cov = ShmCoverage()
+        try:
+            # Execution 1: edges {100, 200, 300}, cumulative edge_count = 3
+            cov._entries[0].edge_id = 100
+            cov._entries[1].edge_id = 200
+            cov._entries[2].edge_id = 300
+            ctypes.c_uint64.from_address(cov._ptr + 16).value = 3
+            assert cov.is_new_coverage(), "first execution should discover new edges"
+            assert cov._last_edge_count == 3
+
+            # Execution 2: disjoint edges {400, 500, 600}
+            # In the real system, reset_bitmap() zeros the entire SHM including
+            # the header.  The C shim then writes the cumulative total.
+            # Cumulative after exec 2: 3 + 3 = 6.
+            ctypes.memset(cov._ptr, 0, cov.shm_bytes)  # simulate reset_bitmap
+            cov._entries[0].edge_id = 400
+            cov._entries[1].edge_id = 500
+            cov._entries[2].edge_id = 600
+            ctypes.c_uint64.from_address(cov._ptr + 16).value = 6  # cumulative: 3 + 3
+
+            # BUG scenario (old behavior): if edge_count stayed at 3 (per-execution),
+            # then 3 == _last_edge_count (3) -> fast-path returns False.
+            # With cumulative fix: edge_count = 6 != 3 -> slow path triggered.
+            assert cov.is_new_coverage(), (
+                "Disjoint edge sets with same cardinality must be detected "
+                "when cumulative edge_count differs from _last_edge_count"
+            )
+        finally:
+            cov.cleanup()
+
+    def test_shim_edge_count_monotonic_across_resets(self, tmp_path):
+        """C shim edge_count is cumulative across reset_bitmap() calls.
+
+        Two executions with disjoint edge sets but equal per-execution edge
+        count must both be detected as new coverage.  Verifies the C shim's
+        __afl_total_edge_count is monotonic and its value survives a full
+        SHM memset (reset_bitmap).
+        """
         import subprocess
         import os
 
-        src = tmp_path / "test_edge_count2.c"
-        so = tmp_path / "test_edge_count2.so"
+        src = tmp_path / "test_monotonic.c"
+        so = tmp_path / "test_monotonic.so"
 
         src.write_text("""
 #include <stdint.h>
 #include <stddef.h>
 __attribute__((visibility("default")))
 int fuzz_shm_run(const unsigned char *buf, size_t len) {
-    (void)buf; (void)len;
-    __afl_map_edge(0xABCD);
+    for (size_t i = 0; i < len; i++)
+        __afl_map_edge((uint32_t)buf[i] * 2654435761u);
     return 0;
 }
 """)
 
         shim_path = Path(__file__).parents[1] / "src/fuzzer_tool/adapters/afl_shim.c"
         subprocess.run(
-            ["gcc", "-O2", "-g", "-shared", "-fPIC",
-             "-include", str(shim_path),
-             "-o", str(so), str(src)],
-            check=True, capture_output=True
+            [
+                "gcc",
+                "-O2",
+                "-g",
+                "-shared",
+                "-fPIC",
+                "-include",
+                str(shim_path),
+                "-o",
+                str(so),
+                str(src),
+            ],
+            check=True,
+            capture_output=True,
         )
 
         cov = ShmCoverage()
         try:
-            cov.reset_edge_map()
             old_shm = os.environ.get("__AFL_SHM_ID")
             old_size = os.environ.get("AFL_MAP_SIZE")
             os.environ["__AFL_SHM_ID"] = str(cov.shm_id)
@@ -774,19 +844,26 @@ int fuzz_shm_run(const unsigned char *buf, size_t len) {
                 func.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
                 func.restype = ctypes.c_int
 
-                data = b"world"
-                buf = ctypes.create_string_buffer(data)
-                func(ctypes.cast(buf, ctypes.c_void_p), ctypes.c_size_t(len(data)))
+                def run(data: bytes):
+                    buf = ctypes.create_string_buffer(data)
+                    func(ctypes.cast(buf, ctypes.c_void_p), ctypes.c_size_t(len(data)))
 
-                ec_before = cov.read_edge_count()
-                assert ec_before > 0, "first run should produce edges"
+                # First execution: 3 disjoint edges
+                run(b"\\x01\\x02\\x03")
+                ec1 = cov.read_edge_count()
+                assert ec1 > 0, "first run should produce edges"
+                assert cov.is_new_coverage(), "first run should have new coverage"
 
-                # reset_edge_map zeroes only the edge table, preserving header
-                cov.reset_edge_map()
-                ec_after = cov.read_edge_count()
-                assert ec_after == ec_before, (
-                    f"reset_edge_map should preserve edge_count header: "
-                    f"{ec_before} -> {ec_after}"
+                # Full SHM reset (as inprocess.py reset_bitmap does)
+                ctypes.memset(cov._ptr, 0, cov.shm_bytes)
+
+                # Second execution: 3 different disjoint edges (same cardinality)
+                run(b"\\x10\\x20\\x30")
+                ec2 = cov.read_edge_count()
+                assert ec2 > ec1, f"edge_count should be monotonic across resets: {ec1} -> {ec2}"
+                assert cov.is_new_coverage(), (
+                    "Second execution with disjoint edges must be detected even "
+                    "though per-execution edge count (3) equals the first"
                 )
             finally:
                 if old_shm is not None:
