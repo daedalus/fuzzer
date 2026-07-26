@@ -64,12 +64,15 @@ class MutualInformationTracker:
         self.total_observations += 1
         self._total_edges = None
         self._invalidate_max_mi_cache()
-        if hasattr(self, "_wp_all_positions") and self._wp_all_positions is not None:
+        # Invalidate weighted_position cache when a new position appears
+        if hasattr(self, "_wp_sorted_pos") and self._wp_sorted_pos is not None:
             max_pos = len(input_bytes) - 1 if input_bytes else 0
             if max_pos >= self.max_positions:
                 max_pos = self.max_positions - 1
-            if max_pos not in {p for p in self._wp_all_positions}:
-                self._wp_all_positions = None
+            import bisect
+            if bisect.bisect_left(self._wp_sorted_pos, max_pos) == len(self._wp_sorted_pos) or \
+               self._wp_sorted_pos[min(bisect.bisect_left(self._wp_sorted_pos, max_pos), len(self._wp_sorted_pos)-1)] != max_pos:
+                self._wp_sorted_pos = None
 
         for pos, byte_val in enumerate(input_bytes):
             if pos >= self.max_positions:
@@ -188,55 +191,60 @@ class MutualInformationTracker:
 
         Uses MI-weighted roulette wheel selection. Returns a position
         in [0, input_length) that is more likely to be information-rich.
-        Precomputes all weights once using max_positions; subsequent calls
-        filter to positions < input_length.
+        Precomputes sorted positions + cumulative weights; uses bisect
+        for O(log n) filtering instead of rebuilding lists each call.
         """
         if not self.position_counts:
             return 0
 
-        if not hasattr(self, "_wp_all_positions"):
-            self._wp_all_positions = None
-            self._wp_all_weights = None
+        if not hasattr(self, "_wp_sorted_pos"):
+            self._wp_sorted_pos = None
+            self._wp_cum_weights = None
+            self._wp_total = 0.0
 
-        if self._wp_all_positions is None:
-            # Precompute weights for ALL observed positions
-            self._wp_all_positions = []
-            self._wp_all_weights = []
+        if self._wp_sorted_pos is None:
+            # Build sorted (position, weight) pairs and cumulative sum
+            pairs = []
             for pos in self.position_counts:
                 if self.position_counts[pos] >= self.min_observations:
-                    self._wp_all_positions.append(pos)
-                    self._wp_all_weights.append(self.mutation_weight(pos, self.max_positions))
+                    pairs.append((pos, self.mutation_weight(pos, self.max_positions)))
+            if not pairs:
+                self._wp_sorted_pos = []
+                self._wp_cum_weights = []
+                self._wp_total = 0.0
+                return 0
+            pairs.sort(key=lambda x: x[0])
+            self._wp_sorted_pos = [p for p, _ in pairs]
+            cum = 0.0
+            cum_list = []
+            for _, w in pairs:
+                cum += w
+                cum_list.append(cum)
+            self._wp_cum_weights = cum_list
+            self._wp_total = cum
 
-        all_pos = self._wp_all_positions
-        all_w = self._wp_all_weights
-        if not all_w:
+        sorted_pos = self._wp_sorted_pos
+        cum_w = self._wp_cum_weights
+        total = self._wp_total
+
+        if not sorted_pos or total <= 0:
             return 0
 
-        # Filter to positions within input_length
+        # Find cutoff index: positions < input_length
+        import bisect
+
         if input_length >= self.max_positions:
-            positions, weights = all_pos, all_w
+            n = len(sorted_pos)
         else:
-            # Filter: keep positions < input_length
-            # Weights are precomputed with max_positions as reference —
-            # this is an approximation; _max_mi is the same regardless
-            positions = []
-            weights = []
-            for i, p in enumerate(all_pos):
-                if p < input_length:
-                    positions.append(p)
-                    weights.append(all_w[i])
+            n = bisect.bisect_left(sorted_pos, input_length)
 
-        if not weights:
+        if n == 0:
             return 0
 
-        total = sum(weights)
-        r = __import__("random").random() * total
-        cumulative = 0.0
-        for pos, w in zip(positions, weights, strict=False):
-            cumulative += w
-            if r <= cumulative:
-                return pos
-        return positions[-1]
+        # Weighted sampling using precomputed cumulative sum
+        r = __import__("random").random() * cum_w[n - 1]
+        idx = bisect.bisect_right(cum_w, r, hi=n)
+        return sorted_pos[min(idx, n - 1)]
 
     def conditional_mi(self, position_a: int, position_b: int) -> float:
         """Compute I(X_a; Y | X_b) — MI of position a given position b is observed.
