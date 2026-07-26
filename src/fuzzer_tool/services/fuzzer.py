@@ -292,6 +292,7 @@ class Fuzzer:
         crash_blocklist=None,
         crash_allowlist=None,
         save_smaller=False,
+        honggfuzz=False,
         schedule_ablation=None,
         replicator=False,
         shapley=False,
@@ -549,7 +550,15 @@ class Fuzzer:
         self.crash_blocklist: set[str] = crash_blocklist or set()
         self.crash_allowlist: set[str] = crash_allowlist or set()
         self.save_smaller: bool = save_smaller
+        self.honggfuzz: bool = honggfuzz
         self.crash_min_sizes: dict[str, int] = {}  # stack_hash -> min trigger size
+        # Honggfuzz power factor stats (for display)
+        self._hf_novelty_boosts: int = 0
+        self._hf_freshness_boosts: int = 0
+        self._hf_fertility_boosts: int = 0
+        self._hf_density_boosts: int = 0
+        self._hf_entropy_penalties: int = 0
+        self._hf_timeout_penalties: int = 0
 
         # Execution time tracking for adaptive timeout calibration
         from fuzzer_tool.core.execution_time import ExecutionTimeTracker
@@ -2273,6 +2282,10 @@ class Fuzzer:
         print(f"[*] Crashes: {self.crashes_dir}")
         print(f"[*] Max input length: {self.max_len}")
         print(f"[*] Timeout: {self.timeout}s")
+        if self.honggfuzz:
+            print(
+                "[*] Honggfuzz power factors: enabled (novelty, freshness, fertility, density, entropy, timeout)"
+            )
         print(f"[*] Seed: {self.seed}")
         # Target profile summary
         if self._profile.functions:
@@ -2468,22 +2481,48 @@ class Fuzzer:
                     fuzz_level = meta.get("fuzz_count", 0)
                     n_fuzz = fuzz_level
 
-                    # Honggfuzz power factors
-                    seed_key = self._seed_key(seed)
-                    new_edges = len(self._edge_tracker.seed_edges.get(seed_key, set()) & self._edge_tracker.cumulative_edges) if seed_key in self._edge_tracker.seed_edges else 0
-                    # Approximate new_edges as edges unique to this seed
-                    if seed_key in self._edge_tracker.seed_edges:
-                        seed_e = self._edge_tracker.seed_edges[seed_key]
-                        others = set()
-                        for sk, se in self._edge_tracker.seed_edges.items():
-                            if sk != seed_key:
-                                others.update(se)
-                        new_edges = len(seed_e - others)
-                    time_added = meta.get("added_at", 0.0)
-                    now = time.time()
-                    child_count = meta.get("child_count", 0)
-                    select_count = fuzz_level
-                    timed_out = meta.get("timed_out", False)
+                    # Honggfuzz power factors (only when --honggfuzz enabled)
+                    hf_kwargs: dict = {}
+                    if self.honggfuzz:
+                        seed_key = self._seed_key(seed)
+                        new_edges = 0
+                        if seed_key in self._edge_tracker.seed_edges:
+                            seed_e = self._edge_tracker.seed_edges[seed_key]
+                            others = set()
+                            for sk, se in self._edge_tracker.seed_edges.items():
+                                if sk != seed_key:
+                                    others.update(se)
+                            new_edges = len(seed_e - others)
+                        time_added = meta.get("added_at", 0.0)
+                        now = time.time()
+                        child_count = meta.get("child_count", 0)
+                        select_count = fuzz_level
+                        timed_out = meta.get("timed_out", False)
+
+                        # Track honggfuzz factor stats
+                        if new_edges > 0 and now - time_added < 600:
+                            self._hf_novelty_boosts += 1
+                        if now - time_added < 60:
+                            self._hf_freshness_boosts += 1
+                        if child_count > 0:
+                            self._hf_fertility_boosts += 1
+                        if bitmap_size > 0 and len(seed) > 0:
+                            density = (bitmap_size * 100) / len(seed)
+                            if density > 50:
+                                self._hf_density_boosts += 1
+                        if timed_out:
+                            self._hf_timeout_penalties += 1
+
+                        hf_kwargs = dict(
+                            new_edges=new_edges,
+                            time_added=time_added,
+                            now=now,
+                            input_size=len(seed),
+                            select_count=select_count,
+                            child_count=child_count,
+                            timed_out=timed_out,
+                            max_cov=max(1, self._edge_tracker.get_cumulative_edge_count()),
+                        )
 
                     self._last_perf_score = self._seed_scorer.score(
                         exec_us=exec_us,
@@ -2495,14 +2534,7 @@ class Fuzzer:
                         fuzz_level=fuzz_level,
                         n_fuzz=n_fuzz,
                         total_execs=max(1, self.exec_count),
-                        new_edges=new_edges,
-                        time_added=time_added,
-                        now=now,
-                        input_size=len(seed),
-                        select_count=select_count,
-                        child_count=child_count,
-                        timed_out=timed_out,
-                        max_cov=max(1, self._edge_tracker.get_cumulative_edge_count()),
+                        **hf_kwargs,
                     )
                 self.fuzz_one(seed)
                 i += 1

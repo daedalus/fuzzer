@@ -633,10 +633,36 @@ class StatsReporter:
             classified = sum(1 for h in fl.hypotheses if h.field_type != "unknown")
             fmt_str = f" | fmt: {classified}/{len(fl.hypotheses)} fields v{fl.format_model_version}"
 
+        hf_str = ""
+        if getattr(f, "honggfuzz", False):
+            total_hf = (
+                f._hf_novelty_boosts
+                + f._hf_freshness_boosts
+                + f._hf_fertility_boosts
+                + f._hf_density_boosts
+                + f._hf_entropy_penalties
+                + f._hf_timeout_penalties
+            )
+            if total_hf > 0:
+                parts = []
+                if f._hf_novelty_boosts:
+                    parts.append(f"nov:{f._hf_novelty_boosts}")
+                if f._hf_freshness_boosts:
+                    parts.append(f"frsh:{f._hf_freshness_boosts}")
+                if f._hf_fertility_boosts:
+                    parts.append(f"frt:{f._hf_fertility_boosts}")
+                if f._hf_density_boosts:
+                    parts.append(f"dns:{f._hf_density_boosts}")
+                if f._hf_entropy_penalties:
+                    parts.append(f"ent:{f._hf_entropy_penalties}")
+                if f._hf_timeout_penalties:
+                    parts.append(f"tmo:{f._hf_timeout_penalties}")
+                hf_str = " | hf: " + " ".join(parts)
+
         line = (
             f"[*] execs: {f.exec_count} | corpus: {len(f.corpus)} | "
             f"crashes: {f.crash_count}{sig_str}{timeout_str} | eps: {eps:.0f} | "
-            f"time: {elapsed:.0f}s{rss_str}{ops_str}{dict_str}{markov_str}{cmplog_str}{smt_str}{cov_str}{mc_str}{div_str}{jac_str}{dr_str}{density_str}{repro_str}{brier_str}{crps_str}{ent_str}{simp_str}{rate_str}{fmt_str}"
+            f"time: {elapsed:.0f}s{rss_str}{ops_str}{dict_str}{markov_str}{cmplog_str}{smt_str}{cov_str}{mc_str}{div_str}{jac_str}{dr_str}{density_str}{repro_str}{brier_str}{crps_str}{ent_str}{simp_str}{rate_str}{fmt_str}{hf_str}"
         )
         growth = f._edge_tracker.coverage_growth_model()
         if growth["confidence"] > 0.1:

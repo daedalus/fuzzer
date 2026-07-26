@@ -347,6 +347,7 @@ def cmd_fuzz(args):
         crash_blocklist=_load_hash_list(getattr(args, "crash_blocklist", None)),
         crash_allowlist=_load_hash_list(getattr(args, "crash_allowlist", None)),
         save_smaller=getattr(args, "save_smaller", False),
+        honggfuzz=getattr(args, "honggfuzz", False),
         schedule_ablation=getattr(args, "schedule_ablation", None),
         replicator=getattr(args, "replicator", False),
         shapley=getattr(args, "shapley", False),
@@ -1339,6 +1340,11 @@ def main() -> int:
         "--save-smaller",
         action="store_true",
         help="Replace crash triggers with smaller inputs for the same stack hash",
+    )
+    fuzz_parser.add_argument(
+        "--honggfuzz",
+        action="store_true",
+        help="Enable honggfuzz power factors (novelty decay, freshness, fertility, density, entropy penalty, timeout penalty)",
     )
     fuzz_parser.add_argument(
         "--schedule-ablation",
