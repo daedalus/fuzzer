@@ -954,6 +954,16 @@ class OperatorEngine:
         if buf and len(buf) >= 4:
             return bytearray(token_shuffle(bytes(buf), rng=self.f._rand_pool)[: self.f.max_len])
 
+    def _op_gradient_cmp(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.gradient_cmp import gradient_cmp
+
+        if buf and self.f._cmplog and self.f._cmplog.pairs:
+            return bytearray(
+                gradient_cmp(bytes(buf), self.f._cmplog.pairs, rng=self.f._rand_pool)[
+                    : self.f.max_len
+                ]
+            )
+
     def _op_grammar_mutate(self, buf, _byte_idx, _data):
         if self.f.grammar:
             return bytearray(
@@ -1180,6 +1190,7 @@ class OperatorEngine:
             "endianness_swap": self._op_endianness_swap,
             "tlv_mutate": self._op_tlv_mutate,
             "token_shuffle": self._op_token_shuffle,
+            "gradient_cmp": self._op_gradient_cmp,
             "grammar_mutate": self._op_grammar_mutate,
             "grammar_tree_mutate": self._op_grammar_tree_mutate,
             "png_chunk_mutate": self._op_png_chunk_mutate,
@@ -1275,6 +1286,10 @@ class OperatorEngine:
             ops.append("grammar_tree_mutate")
         if getattr(f, "_cmplog", None) and f._cmplog.pairs:
             ops.append("redqueen_xform")
+            ops.append("gradient_cmp")
+        # Remove gradient_cmp from base MUTATIONS if cmplog unavailable
+        if not (getattr(f, "_cmplog", None) and f._cmplog.pairs):
+            ops = [op for op in ops if op != "gradient_cmp"]
         ops.extend(FORMAT_MUTATIONS)
         parent_meta = f.seed_meta.get(data)
         if parent_meta and (

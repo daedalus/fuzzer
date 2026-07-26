@@ -579,6 +579,9 @@ class EdgeTracker:
         # ── Stack depth + path hash per seed ─────────────────────────────
         self.seed_stack_depth: dict[str, int] = {}
         self.seed_path_hash: dict[str, int] = {}
+        # ── Rare edge tracking ──────────────────────────────────────────
+        # Per-edge owner count: how many distinct seeds hit each edge
+        self._edge_owner_count: dict[int, int] = {}
 
     def record_edges(
         self,
@@ -654,6 +657,10 @@ class EdgeTracker:
         new_contributions = new_edges - self.cumulative_edges
         self.cumulative_edges.update(new_edges)
         self.seed_edges[seed_key].update(new_edges)
+
+        # Rare edge tracking: count how many distinct seeds hit each edge
+        for edge_id in hit_edges if isinstance(hit_edges, set) else set():
+            self._edge_owner_count[edge_id] = self._edge_owner_count.get(edge_id, 0) + 1
 
         # Per-target tracking
         if target_name:
@@ -1739,6 +1746,26 @@ class EdgeTracker:
         """Get the rolling path hash for a seed."""
         return self.seed_path_hash.get(seed_key, 0)
 
+    def rare_edge_count(self, seed_key: str, threshold: int = 4) -> int:
+        """Count how many edges hit by this seed are 'rare' (seen by <threshold seeds).
+
+        Rare edges are those that few corpus entries hit — inputs that
+        exercise rare edges get an energy boost in the honggfuzz power schedule.
+
+        Args:
+            seed_key: Hash of the seed input.
+            threshold: Edges hit by fewer seeds than this are considered rare.
+
+        Returns:
+            Number of rare edges hit by this seed.
+        """
+        edges = self.seed_edges.get(seed_key, set())
+        count = 0
+        for eid in edges:
+            if self._edge_owner_count.get(eid, 0) < threshold:
+                count += 1
+        return count
+
     def edge_rarity_stats(self) -> dict:
         """Compute per-edge rarity statistics.
 
@@ -2026,6 +2053,7 @@ class EdgeTracker:
             "correlation_total": self._correlation_total,
             "seed_stack_depth": self.seed_stack_depth,
             "seed_path_hash": self.seed_path_hash,
+            "edge_owner_count": {str(e): c for e, c in self._edge_owner_count.items()},
         }
         try:
             with open(path, "w") as f:
@@ -2084,6 +2112,7 @@ class EdgeTracker:
         self._correlation_total = data.get("correlation_total", 0)
         self.seed_stack_depth = data.get("seed_stack_depth", {})
         self.seed_path_hash = data.get("seed_path_hash", {})
+        self._edge_owner_count = {int(e): c for e, c in data.get("edge_owner_count", {}).items()}
         # Restore MinHash signatures and rebuild LSH index
         self._minhash = MinHashLSH(num_perm=64, num_bands=8)
         self._corpus_sig = None

@@ -87,6 +87,9 @@ class TargetProfile:
     # Capstone-based constant extraction from disassembly
     extracted_constants: list[bytes] = field(default_factory=list)
 
+    # Parser token tables (Bison/Yacc yytname, yyTokenName, etc.)
+    parser_tokens: list[bytes] = field(default_factory=list)
+
     # Function analysis
     functions: dict[str, FunctionInfo] = field(default_factory=dict)
     hot_functions: list[str] = field(default_factory=list)
@@ -109,6 +112,7 @@ class TargetProfile:
             "interesting_strings": self.interesting_strings,
             "magic_bytes": [b.hex() for b in self.magic_bytes],
             "extracted_constants": [b.hex() for b in self.extracted_constants],
+            "parser_tokens": [b.hex() for b in self.parser_tokens],
             "functions": {k: v.to_dict() for k, v in self.functions.items()},
             "hot_functions": self.hot_functions,
             "entry_points": self.entry_points,
@@ -126,6 +130,7 @@ class TargetProfile:
             interesting_strings=d.get("interesting_strings", []),
             magic_bytes=[bytes.fromhex(b) for b in d.get("magic_bytes", [])],
             extracted_constants=[bytes.fromhex(b) for b in d.get("extracted_constants", [])],
+            parser_tokens=[bytes.fromhex(b) for b in d.get("parser_tokens", [])],
             functions={k: FunctionInfo.from_dict(v) for k, v in d.get("functions", {}).items()},
             hot_functions=d.get("hot_functions", []),
             entry_points=d.get("entry_points", []),
@@ -256,6 +261,9 @@ class TargetProfiler:
 
         # 1. String extraction
         self._extract_strings(profile)
+
+        # 1b. Parser token table extraction (Bison/Yacc yytname, etc.)
+        self._extract_parser_tokens(profile)
 
         # 2. Capstone compile-time constant extraction (disassembly immediates)
         self._extract_constants(profile)
@@ -493,6 +501,110 @@ class TargetProfiler:
                 if idx >= 0 and sig not in magic:
                     magic.append(sig)
         profile.magic_bytes = magic
+
+    def _extract_parser_tokens(self, profile: TargetProfile):
+        """Extract parser token tables from .rodata (Bison/Yacc yytname, etc.).
+
+        Scans .rodata for arrays of pointers to strings — the typical layout
+        for Bison/Yacc token name tables (yytname, yyTokenName). Each entry
+        is a pointer (4 or 8 bytes) to a null-terminated string in .rodata.
+
+        Also looks for known symbol names in the symbol table.
+        """
+        if ".rodata" not in self._sections:
+            return
+
+        _, rodata_offset, _, rodata_size = self._sections[".rodata"]
+        rodata = self._elf[rodata_offset : rodata_offset + rodata_size]
+
+        tokens: list[bytes] = []
+        seen: set[bytes] = set()
+
+        # Check for known parser token table symbols
+        known_names = {b"yytname", b"yyTokenName", b"yy_check", b"yytranslate"}
+        for sym_name in known_names:
+            # Find the symbol in the symbol table (_symtab is list of (name, addr, size, type))
+            for sym_name_str, st_value, _st_size, _st_type in self._symtab:
+                if sym_name in sym_name_str.encode("utf-8", errors="replace"):
+                    if st_value == 0:
+                        continue
+                    # Find which section contains this address
+                    for _sec_name, (_sec_idx, sec_off, sec_addr, _sec_size) in self._sections.items():
+                        if sec_addr <= st_value < sec_addr + sec_size:
+                            # Read pointer from the section
+                            ptr_offset = st_value - sec_addr + sec_off
+                            if ptr_offset + 8 > len(self._elf):
+                                continue
+                            # Try 8-byte pointers first (64-bit), then 4-byte
+                            for ptr_size in (8, 4):
+                                if ptr_offset + ptr_size > len(self._elf):
+                                    continue
+                                if ptr_size == 8:
+                                    import struct
+
+                                    ptr_val = struct.unpack_from("<Q", self._elf, ptr_offset)[0]
+                                else:
+                                    import struct
+
+                                    ptr_val = struct.unpack_from("<I", self._elf, ptr_offset)[0]
+                                # Check if pointer points into .rodata
+                                if rodata_offset <= ptr_val < rodata_offset + rodata_size:
+                                    str_off = ptr_val - rodata_offset
+                                    # Read null-terminated string
+                                    end = rodata.find(b"\x00", str_off)
+                                    if end < 0:
+                                        end = min(str_off + 64, len(rodata))
+                                    s = rodata[str_off:end]
+                                    if len(s) >= 1 and s not in seen:
+                                        tokens.append(s)
+                                        seen.add(s)
+                            break
+
+        # Heuristic: scan .rodata for pointer arrays to strings
+        # Look for consecutive pointers (4 or 8 bytes each) pointing to
+        # strings within .rodata. A valid token table has 5+ consecutive
+        # valid pointers.
+        import struct
+
+        for ptr_size in (8, 4):
+            fmt = "<Q" if ptr_size == 8 else "<I"
+            stride = ptr_size
+            # Scan with stride alignment
+            for off in range(0, min(len(rodata) - stride * 5, 4096), stride):
+                valid_ptrs = 0
+                table_tokens = []
+                for i in range(32):  # max 32 entries per table
+                    pos = off + i * stride
+                    if pos + ptr_size > len(rodata):
+                        break
+                    ptr_val = struct.unpack_from(fmt, rodata, pos)[0]
+                    # Check if pointer points to a string in .rodata
+                    if rodata_offset <= ptr_val < rodata_offset + rodata_size:
+                        str_off = ptr_val - rodata_offset
+                        end = rodata.find(b"\x00", str_off)
+                        if end < 0:
+                            break
+                        s = rodata[str_off:end]
+                        if len(s) >= 1 and all(32 <= b < 127 for b in s):
+                            valid_ptrs += 1
+                            if s not in seen:
+                                table_tokens.append(s)
+                                seen.add(s)
+                        else:
+                            break
+                    else:
+                        break
+                # Valid table: 5+ consecutive valid pointers to printable strings
+                if valid_ptrs >= 5:
+                    tokens.extend(table_tokens)
+
+        # Deduplicate and cap
+        profile.parser_tokens = list(dict.fromkeys(tokens))[:256]
+        if profile.parser_tokens:
+            log.info(
+                "Extracted %d parser tokens from .rodata",
+                len(profile.parser_tokens),
+            )
 
     def _extract_constants(self, profile: TargetProfile):
         """Extract compile-time constants from disassembly via Capstone.

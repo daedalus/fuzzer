@@ -429,6 +429,12 @@ class Fuzzer:
                 if c not in self.dictionary and len(c) >= 2:
                     self.dictionary.append(c)
 
+        # Auto-populate dictionary from parser token tables (Bison/Yacc)
+        if self._profile.parser_tokens:
+            for t in self._profile.parser_tokens:
+                if t not in self.dictionary:
+                    self.dictionary.append(t)
+
         # Cmplog: comparison tracing via LD_PRELOAD
         self._cmplog = None
         self._redqueen_index = 0
@@ -2498,6 +2504,7 @@ class Fuzzer:
                         child_count = meta.get("child_count", 0)
                         select_count = fuzz_level
                         timed_out = meta.get("timed_out", False)
+                        rare_edges = self._edge_tracker.rare_edge_count(seed_key)
 
                         # Track honggfuzz factor stats
                         if new_edges > 0 and now - time_added < 600:
@@ -2520,6 +2527,7 @@ class Fuzzer:
                             input_size=len(seed),
                             select_count=select_count,
                             child_count=child_count,
+                            rare_edge_count=rare_edges,
                             timed_out=timed_out,
                             max_cov=max(1, self._edge_tracker.get_cumulative_edge_count()),
                         )

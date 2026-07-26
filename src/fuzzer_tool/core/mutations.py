@@ -194,6 +194,7 @@ MUTATIONS = [
     "auto_extras",
     "tlv_mutate",
     "token_shuffle",
+    "gradient_cmp",
 ]
 
 # Format-aware mutations: structure-aware operators for specific file formats.
