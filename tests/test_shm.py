@@ -193,33 +193,34 @@ class TestShmCoverage:
         cov = ShmCoverage()
         try:
             cov.reset_edge_map()
-            # Round 1: edges {1, 2, 3} with edge_count=3
-            cov._entries[0].edge_id = 1
+            # Round 1: edges {300, 100, 200} with edge_count=3
+            # Direct table write + execution-order path_hash (simulates real C shim)
+            cov._entries[0].edge_id = 300
             cov._entries[0].count = 1
-            cov._entries[1].edge_id = 2
+            cov._entries[1].edge_id = 100
             cov._entries[1].count = 1
-            cov._entries[2].edge_id = 3
+            cov._entries[2].edge_id = 200
             cov._entries[2].count = 1
             ctypes.c_uint64.from_address(cov._ptr + 16).value = 3
-            # Set path_hash = hash({1,2,3})
-            ph_abc = cov.compute_path_hash_from_edges({1, 2, 3})
-            ctypes.c_uint64.from_address(cov._ptr + 8).value = ph_abc
-            assert cov.is_new_coverage()  # slow path, discovers {1,2,3}
-            # Fast path: edge_count=3==3, path_hash=ph_abc==ph_abc → no new
+            # Compute path_hash independently: execution order 300 → 100 → 200
+            ph = 0
+            for eid in (300, 100, 200):
+                ph = (ph * 31) ^ eid
+            ctypes.c_uint64.from_address(cov._ptr + 8).value = ph & 0xFFFFFFFFFFFFFFFF
+            assert cov.is_new_coverage()  # slow path, discovers {100, 200, 300}
+            # Fast path — same edge_count AND same path_hash → no new
             assert not cov.is_new_coverage()
 
-            # Round 2: different edges {1, 2, 4}, SAME edge_count=3
-            cov._entries[0].edge_id = 1
-            cov._entries[0].count = 1
-            cov._entries[1].edge_id = 2
-            cov._entries[1].count = 1
-            cov._entries[2].edge_id = 4  # different from round 1
-            cov._entries[2].count = 1
-            ctypes.c_uint64.from_address(cov._ptr + 16).value = 3  # same count!
-            ph_abd = cov.compute_path_hash_from_edges({1, 2, 4})
-            ctypes.c_uint64.from_address(cov._ptr + 8).value = ph_abd
-            # Fast path: edge_count=3==3 BUT path_hash=ph_abd!=ph_abc → slow path
-            assert cov.is_new_coverage(), "must detect new edge 4 via path_hash mismatch"
+            # Round 2: different edges {300, 100, 400}, SAME edge_count=3
+            cov._entries[2].edge_id = 400  # swap 200 → 400
+            ctypes.c_uint64.from_address(cov._ptr + 16).value = 3  # same count
+            # Compute path_hash: execution order 300 → 100 → 400
+            ph = 0
+            for eid in (300, 100, 400):
+                ph = (ph * 31) ^ eid
+            ctypes.c_uint64.from_address(cov._ptr + 8).value = ph & 0xFFFFFFFFFFFFFFFF
+            # Fast path: edge_count=3==3 BUT path_hash differs → slow path
+            assert cov.is_new_coverage(), "must detect new edge 400 via path_hash mismatch"
         finally:
             cov.cleanup()
 
@@ -265,16 +266,25 @@ class TestShmCoverage:
             cov.cleanup()
 
     def test_path_hash_is_non_zero_after_live_write(self):
-        """After recording real edges, path_hash header is non-zero."""
+        """After recording real edges, path_hash header uses execution-order hash."""
         cov = ShmCoverage()
         try:
             cov.reset_edge_map()
-            for i in range(5):
-                cov.record_edge(i + 1)
+            # Non-sorted execution order to verify execution-order accumulation
+            order = (5, 3, 1, 4, 2)
+            for eid in order:
+                cov.record_edge(eid)
             ph = cov.read_path_hash()
-            # With 5 unique edges, path_hash must be non-zero
             assert ph != 0, "path_hash should be non-zero after recording edges"
-            assert ph == cov.compute_path_hash_from_edges({1, 2, 3, 4, 5})
+            # Compute expected hash independently: hash = hash * 31 ^ edge_id
+            expected = 0
+            for eid in order:
+                expected = (expected * 31) ^ eid
+            expected &= 0xFFFFFFFFFFFFFFFF
+            assert ph == expected, "execution-order hash must match independently computed value"
+            # Verify it differs from sorted-order hash (proves order-sensitivity)
+            sorted_hash = cov.compute_path_hash_from_edges(set(order))
+            assert ph != sorted_hash, "execution-order hash must differ from sorted-order hash"
         finally:
             cov.cleanup()
 

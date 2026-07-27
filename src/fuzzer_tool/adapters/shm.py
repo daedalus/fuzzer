@@ -301,7 +301,7 @@ class ShmCoverage:
                 new_found = True
 
         self._last_edge_count = edge_count
-        self._last_path_hash = self.compute_path_hash_from_edges(ids)
+        self._last_path_hash = path_hash
 
         if new_found:
             self.total_edges += 1
