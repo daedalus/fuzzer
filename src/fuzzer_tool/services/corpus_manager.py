@@ -608,6 +608,7 @@ class CorpusManager:
             getattr(f, "_invalidate_seed_key_cache", lambda: None)()
             f._weight_cache = None
             f._cached_weights = {}
+            f._overlap_density_cache = {}
             f._last_minimize_exec = f.exec_count
             f._pruned_count += removed
             log.info(
@@ -660,6 +661,7 @@ class CorpusManager:
             getattr(f, "_invalidate_seed_key_cache", lambda: None)()
             f._weight_cache = None
             f._cached_weights = {}
+            f._overlap_density_cache = {}
             log.info(
                 "Deprioritized %d near-duplicate seeds (Hamming <= 0.05 on edge bitmaps)",
                 len(to_remove),

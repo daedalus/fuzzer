@@ -38,6 +38,10 @@ def _worker_main(
     secretary: bool = False,
     secretary_window: int = 500,
     secretary_exploration: float = 0.368,
+    overlap_density: bool = False,
+    overlap_density_mode: str = "modifier",
+    overlap_min_jaccard: float = 0.25,
+    overlap_density_blend: float = 0.5,
 ):
     """Entry point for each fuzzing worker process."""
     from fuzzer_tool.services.fuzzer import Fuzzer
@@ -78,6 +82,10 @@ def _worker_main(
         secretary=secretary,
         secretary_window=secretary_window,
         secretary_exploration=secretary_exploration,
+        overlap_density=overlap_density,
+        overlap_density_mode=overlap_density_mode,
+        overlap_min_jaccard=overlap_min_jaccard,
+        overlap_density_blend=overlap_density_blend,
     )
 
     print(f"{prefix} Started (target={target})")
@@ -199,6 +207,10 @@ def run_parallel(
     secretary: bool = False,
     secretary_window: int = 500,
     secretary_exploration: float = 0.368,
+    overlap_density: bool = False,
+    overlap_density_mode: str = "modifier",
+    overlap_min_jaccard: float = 0.25,
+    overlap_density_blend: float = 0.5,
 ):
     """Launch N parallel fuzzer workers sharing the same corpus directory.
 
@@ -259,6 +271,10 @@ def run_parallel(
         secretary=secretary,
         secretary_window=secretary_window,
         secretary_exploration=secretary_exploration,
+        overlap_density=overlap_density,
+        overlap_density_mode=overlap_density_mode,
+        overlap_min_jaccard=overlap_min_jaccard,
+        overlap_density_blend=overlap_density_blend,
     )
 
     def _spawn_worker(worker_id: int, rng_seed: int) -> multiprocessing.Process:

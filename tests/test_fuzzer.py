@@ -696,6 +696,39 @@ class TestFuzzerHelpers:
         front = Fuzzer._pareto_front([])
         assert front == set()
 
+    def test_pareto_front_4d(self):
+        """4D Pareto: dim0 dominates, dim1/2/3 matter for tie-breaking."""
+        scores = [
+            (1.0, 2.0, 0.5, 0.1),
+            (2.0, 1.0, 0.5, 0.9),
+            (1.5, 1.5, 0.5, 0.5),
+        ]
+        front = Fuzzer._pareto_front(scores)
+        assert isinstance(front, set)
+        assert len(front) > 0
+
+    def test_pareto_front_4d_all_dominated(self):
+        """One seed dominates all others in all 4 dims → front size 1."""
+        scores = [
+            (3.0, 3.0, 3.0, 3.0),  # dominates everything
+            (1.0, 1.0, 1.0, 1.0),
+            (2.0, 2.0, 2.0, 2.0),
+        ]
+        front = Fuzzer._pareto_front(scores)
+        assert 0 in front
+        assert len(front) == 1
+
+    def test_pareto_front_4d_no_domination(self):
+        """Each seed is best in exactly one dimension → all 4 on front."""
+        scores = [
+            (3.0, 1.0, 1.0, 1.0),
+            (1.0, 3.0, 1.0, 1.0),
+            (1.0, 1.0, 3.0, 1.0),
+            (1.0, 1.0, 1.0, 3.0),
+        ]
+        front = Fuzzer._pareto_front(scores)
+        assert len(front) == 4
+
     def test_check_python_crashes(self):
         from fuzzer_tool.core.dmesg import KernelCrash
 

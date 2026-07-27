@@ -298,6 +298,10 @@ class Fuzzer:
         secretary_window=500,
         secretary_exploration=None,
         elo=False,
+        overlap_density=False,
+        overlap_density_mode="modifier",
+        overlap_min_jaccard=0.25,
+        overlap_density_blend=0.5,
         sensitivity=False,
         ga=False,
         qea=False,
@@ -869,6 +873,13 @@ class Fuzzer:
             if secretary
             else None
         )
+
+        # FMM-clustered pairwise overlap density
+        self._use_overlap_density = overlap_density
+        self._overlap_mode = overlap_density_mode
+        self._overlap_min_jaccard = overlap_min_jaccard
+        self._overlap_density_blend = overlap_density_blend
+        self._overlap_density_cache: dict[str, float] = {}
 
         # Entropy rate tracking: (exec_count, shannon_entropy) samples
         self._entropy_history: list[tuple[int, float]] = []

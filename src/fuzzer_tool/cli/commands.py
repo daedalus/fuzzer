@@ -282,6 +282,10 @@ def cmd_fuzz(args):
             secretary=getattr(args, "secretary", False),
             secretary_window=getattr(args, "secretary_window", 500),
             secretary_exploration=getattr(args, "secretary_exploration", 0.368),
+            overlap_density=getattr(args, "overlap_density", False),
+            overlap_density_mode=getattr(args, "overlap_mode", "modifier"),
+            overlap_min_jaccard=getattr(args, "overlap_min_jaccard", 0.25),
+            overlap_density_blend=getattr(args, "overlap_blend", 0.5),
             resize_map_on_stall=getattr(args, "resize_map_on_stall", True),
         )
         return 0
@@ -361,6 +365,10 @@ def cmd_fuzz(args):
         secretary=getattr(args, "secretary", False),
         secretary_window=getattr(args, "secretary_window", 500),
         secretary_exploration=getattr(args, "secretary_exploration", 0.368),
+        overlap_density=getattr(args, "overlap_density", False),
+        overlap_density_mode=getattr(args, "overlap_mode", "modifier"),
+        overlap_min_jaccard=getattr(args, "overlap_min_jaccard", 0.25),
+        overlap_density_blend=getattr(args, "overlap_blend", 0.5),
         sensitivity=getattr(args, "sensitivity", False),
         ga=getattr(args, "ga", False),
         qea=getattr(args, "qea", False),
@@ -1102,6 +1110,30 @@ def main() -> int:
         "--elo",
         action="store_true",
         help="Enable Elo scheduling: arbitrates between operator strategies (bandit/MOpt/replicator) AND seed strategies (ga/weighted/pareto/format)",
+    )
+    fuzz_parser.add_argument(
+        "--overlap-density",
+        action="store_true",
+        default=False,
+        help="Enable FMM-clustered pairwise overlap density in seed selection (boosts novel seeds, penalises redundant ones)",
+    )
+    fuzz_parser.add_argument(
+        "--overlap-mode",
+        choices=["modifier", "pareto4d"],
+        default="modifier",
+        help="How to integrate overlap density: 'modifier' (weight penalty) or 'pareto4d' (4th Pareto dimension) (default: modifier)",
+    )
+    fuzz_parser.add_argument(
+        "--overlap-min-jaccard",
+        type=float,
+        default=0.25,
+        help="Minimum Jaccard similarity for LSH clustering in overlap density (default: 0.25)",
+    )
+    fuzz_parser.add_argument(
+        "--overlap-blend",
+        type=float,
+        default=0.5,
+        help="Blend factor for overlap density weight modifier, 0-1 (default: 0.5)",
     )
     fuzz_parser.add_argument(
         "--secretary",

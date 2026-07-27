@@ -274,6 +274,69 @@ class TestSeedPicker:
         assert len(front) > 0
 
 
+class TestOverlapDensityWeight:
+    """Tests for overlap-density weight modifier in seed_picker."""
+
+    def test_weight_modifier_penalizes_high_overlap(self):
+        from fuzzer_tool.services.seed_picker import SeedPicker
+
+        class MockFuzzer:
+            corpus = [b"seed1", b"seed2"]
+            seed_meta = {}
+            _use_overlap_density = True
+            _overlap_mode = "modifier"
+            _overlap_density_blend = 0.5
+            _overlap_density_cache = {"sk1": 0.9, "sk2": 0.1}
+            _temperature = 1.0
+            exec_count = 100
+            _cached_weights = {}
+            _classify_cache = {}
+            _recent_seed_edges = []
+            _secretary = None
+            _distance = None
+            _profile = type("Profile", (), {"hot_functions": None, "functions": {}})()
+            _anneal_budget = 0
+            _weight_cache = None
+            _weight_cache_key = (-1, -1)
+
+            def _seed_key(self, data):
+                return {"sk1": "sk1", "sk2": "sk2"}.get(str(data), str(hash(data)))
+
+        f = MockFuzzer()
+        picker = SeedPicker(f)
+
+        # High overlap → penalised (modifier < 1.0)
+        w1 = picker._weight_overlap_density("sk1", 1.0, f)
+        assert w1 < 1.0, f"High-overlap seed should be penalised, got {w1}"
+
+        # Low overlap → boosted (modifier > 1.0)
+        w2 = picker._weight_overlap_density("sk2", 1.0, f)
+        assert w2 > 1.0, f"Low-overlap seed should be boosted, got {w2}"
+
+        # Disabled → no effect
+        f._use_overlap_density = False
+        w3 = picker._weight_overlap_density("sk1", 1.0, f)
+        assert w3 == 1.0, f"Disabled should return w unchanged, got {w3}"
+
+    def test_weight_modifier_missing_seed(self):
+        from fuzzer_tool.services.seed_picker import SeedPicker
+
+        class MockFuzzer:
+            _use_overlap_density = True
+            _overlap_density_blend = 0.5
+            _overlap_density_cache = {"existing": 0.5}
+
+            def _seed_key(self, data):
+                return str(hash(data))
+
+        f = MockFuzzer()
+        picker = SeedPicker(f)
+
+        # Missing seed key → no effect (w unchanged)
+        w = picker._weight_overlap_density("not_in_cache", 1.0, f)
+        assert w == 1.0
+
+
 class TestFastJSON:
     """Tests for fast_json module."""
 

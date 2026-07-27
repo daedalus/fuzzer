@@ -1641,6 +1641,27 @@ class EdgeTracker:
         """
         return self._minhash.find_similar(seed_key, min_jaccard=min_jaccard)
 
+    def compute_overlap_density(
+        self,
+        seed_keys: list[str],
+        min_jaccard: float = 0.25,
+    ) -> tuple[dict[str, float], list[list[int]], dict[int, int]]:
+        """FMM-clustered pairwise overlap density for the given seeds.
+
+        Delegates to :func:`overlap_density.compute_corpus_overlap_density`.
+
+        Args:
+            seed_keys: Seed content hashes (must be in the MinHash index).
+            min_jaccard: Jaccard threshold for LSH clustering (default: 0.25).
+
+        Returns:
+            (densities_dict, clusters, seed_to_cluster) — see the delegated
+            function for details.
+        """
+        from fuzzer_tool.core.overlap_density import compute_corpus_overlap_density
+
+        return compute_corpus_overlap_density(seed_keys, self._minhash, min_jaccard)
+
     def get_cumulative_edge_count(self) -> int:
         """Get total unique edges seen across all seeds.
 

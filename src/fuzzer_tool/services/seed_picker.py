@@ -435,6 +435,26 @@ class SeedPicker:
                         w *= 1.0 + min(gap / max(counts[min_target], 1), 1.0)
         return w
 
+    def _weight_overlap_density(self, seed_key: str, w: float, f) -> float:
+        """Apply overlap-density-based weight modifier.
+
+        Seeds with high pairwise edge-set overlap (similar coverage to many
+        other seeds) are penalised; seeds with low overlap are boosted.
+
+        Uses pre-computed overlap density from the FMM-clustered cache
+        (``_overlap_density_cache``).  A no-op when the feature is disabled.
+        """
+        od = getattr(f, "_overlap_density_cache", None)
+        if od is None or not getattr(f, "_use_overlap_density", False):
+            return w
+        density = od.get(seed_key)
+        if density is None:
+            return w
+        blend = getattr(f, "_overlap_density_blend", 0.5)
+        # Map: density 0 → modifier 1.5 (boost), density 1 → modifier 0.5 (penalty)
+        modifier = 1.0 + blend * (0.5 - density)
+        return w * max(modifier, 0.1)
+
     def _compute_weights(self, now: float) -> list[float]:
         f = self.f
         corpus = f.corpus
@@ -514,6 +534,19 @@ class SeedPicker:
         except ImportError:
             pass
 
+        # Compute FMM-clustered pairwise overlap density if enabled.
+        # This runs before Phase 2 so the per-seed loop can consume it.
+        if getattr(f, "_use_overlap_density", False) and n >= 3:
+            all_keys: list[str] = []
+            for s in corpus:
+                all_keys.append(f._seed_key(s))
+            od_result = f._edge_tracker.compute_overlap_density(
+                all_keys, min_jaccard=getattr(f, "_overlap_min_jaccard", 0.25)
+            )
+            f._overlap_density_cache = od_result[0]
+        else:
+            f._overlap_density_cache = {}
+
         # Pre-compute mean entropy once
         mean_entropy = entropy_sum / entropy_count if entropy_count > 0 else 0.0
 
@@ -536,10 +569,19 @@ class SeedPicker:
             )
             w = self._weight_static_features(seed, meta["coverage_edges"], w, f)
             w = self._weight_length_and_cross_target(seed, meta, w, f)
+            w = self._weight_overlap_density(sk, w, f)
 
             weights[i] = max(w, 1e-6)
             bf = pareto_scores[i][1]
-            pareto_scores[i] = (sub, bf, spa)
+            is_pareto4d = (
+                getattr(f, "_use_overlap_density", False)
+                and getattr(f, "_overlap_mode", "") == "pareto4d"
+            )
+            if is_pareto4d:
+                od = f._overlap_density_cache.get(sk, 0.5)
+                pareto_scores[i] = (sub, bf, spa, od)
+            else:
+                pareto_scores[i] = (sub, bf, spa)
 
         if len(pareto_scores) >= 3:
             front = self._pareto_front(pareto_scores, window=100)
@@ -550,24 +592,51 @@ class SeedPicker:
         return weights
 
     @staticmethod
-    def _pareto_front(scores: list[tuple[float, float, float]], window: int = 100) -> set[int]:
+    def _pareto_front(
+        scores: list[tuple[float, ...]], window: int = 100
+    ) -> set[int]:
         n = len(scores)
         start = max(0, n - window)
-        front: list[int] = list(range(start, n))
+        indices = list(range(start, n))
+        if not indices:
+            return set()
 
-        # Sort by first dimension for efficient domination check
-        front.sort(key=lambda i: (-scores[i][0], -scores[i][1], -scores[i][2]))
+        dims = len(scores[indices[0]]) if scores else 3
 
-        result = []
-        max_b = max_c = float("-inf")
-        for i in front:
-            a, b, c = scores[i]
-            if b > max_b or c > max_c:
-                result.append(i)
-                max_b = max(max_b, b)
-                max_c = max(max_c, c)
+        # 3D and below: O(N) rolling-max sweep (backward compatible path)
+        if dims <= 3:
+            indices.sort(
+                key=lambda i: (-scores[i][0], -scores[i][1], -scores[i][2])
+            )
+            result = []
+            max_b = max_c = float("-inf")
+            for i in indices:
+                _a, b, c = scores[i][0], scores[i][1], scores[i][2]
+                if b > max_b or c > max_c:
+                    result.append(i)
+                    max_b = max(max_b, b)
+                    max_c = max(max_c, c)
+            return set(result)
 
-        return set(result)
+        # 4D+: simple O(N²) dominance — fine for window ≤ 100
+        indices.sort(key=lambda i: (-scores[i][0],))
+        pareto: list[int] = []
+        for i in indices:
+            dominated = False
+            for j in pareto:
+                if all(scores[j][d] >= scores[i][d] for d in range(dims)):
+                    dominated = True
+                    break
+            if not dominated:
+                pareto = [
+                    j
+                    for j in pareto
+                    if not all(
+                        scores[i][d] >= scores[j][d] for d in range(dims)
+                    )
+                ]
+                pareto.append(i)
+        return set(pareto)
 
     def _pick_from_pareto_front(self, weights: list[float], now: float) -> bytes:
         f = self.f
@@ -576,12 +645,16 @@ class SeedPicker:
 
         # Cache Pareto scores - recompute every 100 execs or when corpus changes
         cache_key = len(f.corpus)
+        use_pareto4d = (
+            getattr(f, "_use_overlap_density", False)
+            and getattr(f, "_overlap_mode", "") == "pareto4d"
+        )
         if (
             not hasattr(f, "_pareto_cache")
             or f._pareto_cache_key != cache_key
             or f.exec_count % 100 == 0
         ):
-            pareto_scores: list[tuple[float, float, float]] = []
+            pareto_scores: list[tuple[float, ...]] = []
             for seed in f.corpus:
                 meta = f.seed_meta.get(seed)
                 if meta is None:
@@ -591,7 +664,11 @@ class SeedPicker:
                 sub, div, spa, _cov = f._cached_weights.get(seed_key, (1.0, 1.0, 1.0, 0.5))
                 age = now - meta["added_at"]
                 burst = max(1.0, 1.0 + f._temperature * (5.0 - 1.0) - (age / 60.0) * f._temperature)
-                pareto_scores.append((sub, burst, spa))
+                if use_pareto4d:
+                    od = getattr(f, "_overlap_density_cache", {}).get(seed_key, 0.5)
+                    pareto_scores.append((sub, burst, spa, od))
+                else:
+                    pareto_scores.append((sub, burst, spa))
             f._pareto_cache = pareto_scores
             f._pareto_cache_key = cache_key
             f._pareto_front_cache = self._pareto_front(pareto_scores, window=100)
@@ -645,6 +722,9 @@ class SeedPicker:
             "mdl": f"{mdl_weight:.2f}",
             "final_w": f"{w:.6f}",
         }
+        if getattr(f, "_use_overlap_density", False):
+            od_val = getattr(f, "_overlap_density_cache", {}).get(seed_key, 0.0)
+            f._last_pick_signals["overlap_density"] = f"{od_val:.4f}"
 
     def weighted_pick_seed(self) -> bytes:
         f = self.f
