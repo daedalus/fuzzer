@@ -95,6 +95,10 @@ class TargetProfile:
     hot_functions: list[str] = field(default_factory=list)
     entry_points: list[str] = field(default_factory=list)
 
+    # ELF layout (used by estimate_map_size to avoid redundant decode)
+    text_size: int = 0
+    total_branches: int = 0
+
     # Input format hints
     input_parsers: list[str] = field(default_factory=list)
     boundary_markers: list[bytes] = field(default_factory=list)
@@ -121,6 +125,8 @@ class TargetProfile:
             "format_signature": self.format_signature,
             "call_graph": {k: sorted(v) for k, v in self.call_graph.items()},
             "reverse_calls": {k: sorted(v) for k, v in self.reverse_calls.items()},
+            "text_size": self.text_size,
+            "total_branches": self.total_branches,
         }
 
     @staticmethod
@@ -139,6 +145,8 @@ class TargetProfile:
             format_signature=d.get("format_signature"),
             call_graph={k: set(v) for k, v in d.get("call_graph", {}).items()},
             reverse_calls={k: set(v) for k, v in d.get("reverse_calls", {}).items()},
+            text_size=d.get("text_size", 0),
+            total_branches=d.get("total_branches", 0),
         )
         return p
 
@@ -258,6 +266,10 @@ class TargetProfiler:
 
         self._parse_sections()
         self._parse_symbol_tables()
+
+        # Expose .text section size for estimate_map_size to consume
+        if ".text" in self._sections:
+            profile.text_size = self._sections[".text"][3]
 
         # 1. String extraction
         self._extract_strings(profile)
@@ -681,6 +693,13 @@ class TargetProfiler:
                 bb_count=bb_count,
                 branch_density=branch_density,
             )
+
+        # Accumulate total conditional branches for estimate_map_size
+        profile.total_branches = sum(
+            int(round(fn.branch_density * fn.size / 1024))
+            for fn in profile.functions.values()
+            if fn.branch_density > 0
+        )
 
         # Identify hot functions (highest branch density)
         if profile.functions:

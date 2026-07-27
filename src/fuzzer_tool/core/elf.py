@@ -1331,7 +1331,7 @@ def _maybe_add_constant(constants: set[bytes], data: bytes):
     constants.add(data)
 
 
-def estimate_map_size(target: str) -> int:
+def estimate_map_size(target: str, profile: object | None = None) -> int:
     """Estimate optimal number of hash table entries from sancov guard count
     or branch density.  Returns the number of entries (AFL_MAP_SIZE convention).
     Multiply by 8 to get SHM bytes.
@@ -1339,10 +1339,13 @@ def estimate_map_size(target: str) -> int:
     Priority:
     1. If sancov counter section exists (Clang -fsanitize-coverage), use
        guard count directly — this is the exact number of instrumented edges.
-    2. Fall back to branch_density × .text_size estimation.
+    2. If a TargetProfile with ``text_size`` and ``total_branches`` is
+       provided, use those to avoid a redundant full-text disassembly.
+    3. Fall back to branch_density × .text_size estimation.
 
     Args:
         target: Path to ELF binary.
+        profile: Optional TargetProfile with precomputed static analysis.
 
     Returns:
         Recommended number of entries (int), defaults to 8192 on failure.
@@ -1360,7 +1363,18 @@ def estimate_map_size(target: str) -> int:
                 map_size = _next_power_of_2(guard_count)
                 return max(DEFAULT, min(131072, map_size))
 
-    # Fall back to branch density estimation
+    # Try cached profile data — avoids full-text disassembly
+    if profile is not None:
+        ts = getattr(profile, "text_size", 0)
+        tb = getattr(profile, "total_branches", 0)
+        if isinstance(ts, int) and isinstance(tb, int) and ts > 0 and tb > 0:
+            # total_branches is a direct count from per-function analysis,
+            # equivalent to the JCC count that branch_density() would yield.
+            estimated_edges = int(tb * 2)
+            map_size = _next_power_of_2(max(estimated_edges, DEFAULT))
+            return min(131072, map_size)
+
+    # Fall back to branch density estimation (full-text disassembly)
     bd = branch_density(target)
     ts = _text_size(target)
     if bd is None or ts is None or ts == 0:

@@ -400,19 +400,22 @@ class Fuzzer:
         # WFC structural generation mode
         self._wfc_enabled = wfc
 
-        # Edge bitmap size: use provided value or auto-size from branch density
+        # Static analysis: profile target for string extraction, function
+        # boundaries, input format hints, and call graph structure.
+        # Run this BEFORE estimate_map_size so it can reuse the decoded data.
+        from fuzzer_tool.core.target_profiler import TargetProfiler
+
+        self._profile = TargetProfiler(target).profile_cached(refresh=self.refresh_profile)
+
+        # Edge bitmap size: use provided value or auto-size from branch density.
+        # Pass the profile to skip the redundant full-text disassembly when
+        # the profile already has text_size and total_branches.
         if map_size > 0:
             self.map_size = map_size
         else:
             from fuzzer_tool.core.elf import estimate_map_size
 
-            self.map_size = estimate_map_size(target)
-
-        # Static analysis: profile target for string extraction, function
-        # boundaries, input format hints, and call graph structure.
-        from fuzzer_tool.core.target_profiler import TargetProfiler
-
-        self._profile = TargetProfiler(target).profile_cached(refresh=self.refresh_profile)
+            self.map_size = estimate_map_size(target, profile=self._profile)
 
         # Auto-populate dictionary from extracted strings and magic bytes
         if self._profile.interesting_strings:
