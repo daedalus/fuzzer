@@ -52,7 +52,6 @@ _libc.shmctl.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
 _libc.shmctl.restype = ctypes.c_int
 
 
-
 class CoverageEntry(NamedTuple):
     """A single coverage entry read from SHM."""
 
@@ -100,9 +99,7 @@ class ShmCoverage:
             raise OSError(f"shmat failed: {os.strerror(ctypes.get_errno())}")
 
         # Raw byte view for the edge table only (starts after front header)
-        self._map = (ctypes.c_char * self.table_bytes).from_address(
-            self._ptr + SHM_METADATA_SIZE
-        )
+        self._map = (ctypes.c_char * self.table_bytes).from_address(self._ptr + SHM_METADATA_SIZE)
         # Typed struct array view (starts after front header)
         EntryArr = _entry_struct(self.num_entries)
         self._entries = EntryArr.from_address(self._ptr + SHM_METADATA_SIZE)
@@ -115,6 +112,8 @@ class ShmCoverage:
         self._seen_edge_ids: set[int] = set()
         # Last seen edge_count for O(1) fast-path in is_new_coverage
         self._last_edge_count: int = 0
+        # Last seen path_hash for fast-path — catches same-count but different-edge sets
+        self._last_path_hash: int = 0
 
         self.total_edges = 0
         self.cumulative_edges = 0
@@ -266,12 +265,19 @@ class ShmCoverage:
         """Check for new coverage and return (has_new, current_edge_ids).
 
         Two-tier approach:
-        1. Fast path: compare edge_count against last seen (O(1) header read)
-           — avoids touching the edge table when nothing changed.
+        1. Fast path: compare edge_count AND path_hash against last seen
+           (both O(1) header reads) — avoids touching the edge table when
+           nothing changed.  The path_hash comparison catches the case where
+           the same number of edges fire but the edge SET has changed (e.g.
+           {1,2,3} vs {1,2,4} — both count=3 but hash differs).
         2. Slow path: numpy vectorized scan for unseen edge_ids.
         """
         edge_count = self.read_edge_count()
-        if edge_count == self._last_edge_count:
+        path_hash = self.read_path_hash()
+        # When path_hash is 0 (test mode / unset), fall back to edge_count-only
+        if edge_count == self._last_edge_count and (
+            path_hash == 0 or path_hash == self._last_path_hash
+        ):
             return False, set()
 
         # Slow path: extract edge_ids not yet in _seen_edge_ids
@@ -295,6 +301,7 @@ class ShmCoverage:
                 new_found = True
 
         self._last_edge_count = edge_count
+        self._last_path_hash = self.compute_path_hash_from_edges(ids)
 
         if new_found:
             self.total_edges += 1
@@ -407,9 +414,7 @@ class ShmCoverage:
         self.num_entries = new_num_entries
         self.table_bytes = new_table_bytes
         self.shm_bytes = new_total_bytes
-        self._map = (ctypes.c_char * new_table_bytes).from_address(
-            new_ptr + SHM_METADATA_SIZE
-        )
+        self._map = (ctypes.c_char * new_table_bytes).from_address(new_ptr + SHM_METADATA_SIZE)
         EntryArr = _entry_struct(new_num_entries)
         self._entries = EntryArr.from_address(new_ptr + SHM_METADATA_SIZE)
         self.env_id = str(self.shm_id)

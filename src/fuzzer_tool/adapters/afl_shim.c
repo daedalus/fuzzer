@@ -134,6 +134,8 @@ static inline void __afl_map_edge(uint32_t cur_loc) {
 
     /* Accumulate rolling path hash: hash = hash * 31 ^ edge_id */
     __afl_path_hash_acc = (__afl_path_hash_acc * 31) ^ edge_id;
+    if (__afl_path_hash)
+        *__afl_path_hash = __afl_path_hash_acc;
 
     __afl_prev_loc = cur_loc >> 1;
 }

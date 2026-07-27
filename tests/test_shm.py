@@ -188,6 +188,41 @@ class TestShmCoverage:
         finally:
             cov.cleanup()
 
+    def test_edge_count_fast_path_path_hash_catches_same_count_different_edges(self):
+        """Same edge_count but different edge set → path_hash mismatch catches it."""
+        cov = ShmCoverage()
+        try:
+            cov.reset_edge_map()
+            # Round 1: edges {1, 2, 3} with edge_count=3
+            cov._entries[0].edge_id = 1
+            cov._entries[0].count = 1
+            cov._entries[1].edge_id = 2
+            cov._entries[1].count = 1
+            cov._entries[2].edge_id = 3
+            cov._entries[2].count = 1
+            ctypes.c_uint64.from_address(cov._ptr + 16).value = 3
+            # Set path_hash = hash({1,2,3})
+            ph_abc = cov.compute_path_hash_from_edges({1, 2, 3})
+            ctypes.c_uint64.from_address(cov._ptr + 8).value = ph_abc
+            assert cov.is_new_coverage()  # slow path, discovers {1,2,3}
+            # Fast path: edge_count=3==3, path_hash=ph_abc==ph_abc → no new
+            assert not cov.is_new_coverage()
+
+            # Round 2: different edges {1, 2, 4}, SAME edge_count=3
+            cov._entries[0].edge_id = 1
+            cov._entries[0].count = 1
+            cov._entries[1].edge_id = 2
+            cov._entries[1].count = 1
+            cov._entries[2].edge_id = 4  # different from round 1
+            cov._entries[2].count = 1
+            ctypes.c_uint64.from_address(cov._ptr + 16).value = 3  # same count!
+            ph_abd = cov.compute_path_hash_from_edges({1, 2, 4})
+            ctypes.c_uint64.from_address(cov._ptr + 8).value = ph_abd
+            # Fast path: edge_count=3==3 BUT path_hash=ph_abd!=ph_abc → slow path
+            assert cov.is_new_coverage(), "must detect new edge 4 via path_hash mismatch"
+        finally:
+            cov.cleanup()
+
     def test_read_edge_count_after_multiple_records(self):
         """read_edge_count() returns correct count after several record_edge calls."""
         cov = ShmCoverage()
