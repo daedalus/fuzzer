@@ -151,6 +151,30 @@ class SeedPicker:
                 return s
         return f._rand_pool.choice(f.corpus)
 
+    def _pick_by_similarity(self) -> bytes:
+        """Pick a seed diverse from recently fuzzed ones using byte-level similarity.
+
+        Uses find_nearest_bytes to avoid picking seeds that are similar to
+        recently selected seeds, promoting exploration diversity.
+        """
+        f = self.f
+        if len(f.corpus) < 2:
+            return f._rand_pool.choice(f.corpus) if f.corpus else b""
+        from fuzzer_tool.core.similarity import find_nearest_bytes
+
+        recent = getattr(f, "_recent_seeds", [])
+        if not recent:
+            return f._rand_pool.choice(f.corpus)
+        # Pick the seed least similar to any recently fuzzed seed
+        worst_sim = 1.0
+        worst_idx = 0
+        for idx, seed in enumerate(f.corpus):
+            idx_candidate, sim = find_nearest_bytes(seed, recent)
+            if sim < worst_sim:
+                worst_sim = sim
+                worst_idx = idx
+        return f.corpus[worst_idx]
+
     def _format_aware_seed(self) -> bytes:
         f = self.f
         fmt = getattr(f._profile, "format_signature", None)

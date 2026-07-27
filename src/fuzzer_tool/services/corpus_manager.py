@@ -212,7 +212,7 @@ class CorpusManager:
         meta.target_sha256 = f._target_sha256
 
         if f.corpus:
-            label, sim, diffs = find_nearest_corpus(data, f.corpus)
+            label, sim, diffs, _ = find_nearest_corpus(data, f.corpus)
             meta.nearest_corpus_file = label
             meta.nearest_similarity = sim
             meta.diff_bytes = diffs

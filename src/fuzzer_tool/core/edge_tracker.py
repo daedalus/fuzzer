@@ -1399,6 +1399,32 @@ class EdgeTracker:
 
         return total_dist / len(keys) if keys else 0.0
 
+    def compute_byte_level_diversity(self) -> float:
+        """Compute average pairwise Hamming distance across seed bytes.
+
+        Uses hamming_distance_padded to handle seeds of different lengths.
+        Returns value in [0, 1] where 0 = all seeds identical at byte level.
+        """
+        from fuzzer_tool.core.similarity import hamming_distance_padded
+
+        keys = list(self.seed_hit_counts.keys())
+        if len(keys) < 2:
+            return 0.0
+        n = len(keys)
+        total_dist = 0
+        count = 0
+        for i in range(n):
+            for j in range(i + 1, n):
+                a = self.seed_hit_counts[keys[i]].get("seed_bytes", b"")
+                b = self.seed_hit_counts[keys[j]].get("seed_bytes", b"")
+                if isinstance(a, str):
+                    a = a.encode()
+                if isinstance(b, str):
+                    b = b.encode()
+                total_dist += hamming_distance_padded(a, b)
+                count += 1
+        return total_dist / max(1, count) if count else 0.0
+
     def compute_average_jaccard(self) -> float:
         """Compute average pairwise Jaccard similarity across all seeds.
 

@@ -1366,6 +1366,12 @@ def main() -> int:
         help="AFL++ power schedule: base|fast|coe|rare|mopt|lin|quad",
     )
     fuzz_parser.add_argument(
+        "--differential",
+        default=None,
+        metavar="TARGET_B",
+        help="Differential fuzzing: run each input through a second target and flag divergence",
+    )
+    fuzz_parser.add_argument(
         "-g",
         "--grammar",
         default=None,

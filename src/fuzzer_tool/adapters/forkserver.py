@@ -222,8 +222,5 @@ class ForkserverRunner:
                 os.unlink(self._bitmap_out)
             self._bitmap_out = None
 
-    def stderr_output(self) -> str:
-        return "\n".join(self._stderr_lines[-20:])
-
     def __del__(self):
         self.stop()

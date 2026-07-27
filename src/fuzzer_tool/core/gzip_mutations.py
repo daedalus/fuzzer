@@ -18,7 +18,6 @@ GZIP_MAGIC = b"\x1f\x8b"
 DEFLATE = 8
 
 # Header flag bits
-FTEXT = 1 << 0
 FHCRC = 1 << 1
 FEXTRA = 1 << 2
 FNAME = 1 << 3

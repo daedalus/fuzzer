@@ -546,6 +546,8 @@ MUTATIONS = [
     "chunk_shuffle",
     "dict_compound",
     "punctuation_insert",
+    "splice_diff_located",
+    "radamsa_num",
 ]
 
 # Format-aware mutations: structure-aware operators for specific file formats.

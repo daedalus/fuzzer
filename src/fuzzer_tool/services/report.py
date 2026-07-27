@@ -39,15 +39,6 @@ def _confidence_interval(n, success_count=None):
     return (0.0, 0.0, 0.0, 0.0, 0.0)
 
 
-def _format_ci(mean, ci_1, ci_2, ci_3, fmt=".1f", pct=False):
-    """Format ±1σ, ±2σ, ±3σ as a compact string."""
-    if pct:
-        return (
-            f"{mean * 100:{fmt}}%  ±{ci_1 * 100:{fmt}}% ±{ci_2 * 100:{fmt}}% ±{ci_3 * 100:{fmt}}%"
-        )
-    return f"{mean:{fmt}}  ±{ci_1:{fmt}} ±{ci_2:{fmt}} ±{ci_3:{fmt}}"
-
-
 def _format_ci_inline(mean, ci_1, ci_2, ci_3, fmt=".1f", pct=False):
     """Format as: mean ±1σ: lo-hi  ±2σ: lo-hi  ±3σ: lo-hi"""
     # Convert to float to handle MagicMock objects in tests

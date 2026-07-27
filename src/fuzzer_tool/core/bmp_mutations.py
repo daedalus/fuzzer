@@ -26,7 +26,6 @@ BI_PNG = 5
 # Common DIB header sizes
 DIB_INFOHEADER = 40
 DIB_V4HEADER = 108
-DIB_V5HEADER = 124
 
 
 @dataclass

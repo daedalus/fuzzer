@@ -25,7 +25,12 @@ from fuzzer_tool.core.mutations import (
     MAGIC_TABLE,
     MUTATIONS,
     SPECIAL_STRINGS,
+    could_be_arith,
+    could_be_bitflip,
+    could_be_interest,
+    radamsa_mutate_num,
     splice,
+    splice_diff_located,
 )
 
 log = logging.getLogger(__name__)
@@ -755,6 +760,27 @@ class OperatorEngine:
             if others:
                 return bytearray(splice(bytes(buf), rng.choice(others))[: self.f.max_len])
 
+    def _op_splice_diff_located(self, buf, _byte_idx, data):
+        rng = self.f._rand_pool
+        if len(self.f.corpus) >= 2:
+            a = rng.choice(self.f.corpus)
+            b = rng.choice(self.f.corpus)
+            if a is not data and b is not data:
+                return bytearray(splice_diff_located(a, b, rng=rng)[: self.f.max_len])
+            others = [c for c in self.f.corpus if c is not data]
+            if others:
+                return bytearray(splice_diff_located(bytes(buf), rng.choice(others), rng=rng)[: self.f.max_len])
+
+    def _op_radamsa_num(self, buf, _byte_idx, data):
+        """Radamsa-style number mutation on a random byte."""
+        if not buf:
+            return None
+        rng = self.f._rand_pool
+        pos = rng.randint(0, len(buf) - 1)
+        val = radamsa_mutate_num(buf[pos], rng=rng)
+        buf[pos] = val & 0xFF
+        return buf
+
     def _op_crossover(self, buf, _byte_idx, data):
         rng = self.f._rand_pool
         from fuzzer_tool.core.mutations import crossover
@@ -1223,7 +1249,15 @@ class OperatorEngine:
                     buf[off] ^= 0xFF
 
     def _op_havoc(self, buf, _byte_idx, data):
-        return bytes(self.havoc_mutate(buf))
+        """Havoc mutation with deterministic dedup: retry if fully redundant."""
+        original = bytes(buf)
+        self.havoc_mutate(buf)
+        result = bytes(buf)
+        if len(result) == len(original) and self._is_deterministically_redundant(original, result):
+            # Fully redundant — apply one more random mutation
+            self._apply_single_mutation(buf)
+            result = bytes(buf)
+        return result
 
     # ── Dispatch table: op name → handler method ───────────────────────
     def build_dispatch(self):
@@ -1266,6 +1300,8 @@ class OperatorEngine:
             "markov_bytes": self._op_markov_bytes,
             "cem_bytes": self._op_cem_bytes,
             "splice": self._op_splice,
+            "splice_diff_located": self._op_splice_diff_located,
+            "radamsa_num": self._op_radamsa_num,
             "crossover": self._op_crossover,
             "type_replace": self._op_type_replace,
             "ascii_num": self._op_ascii_num,
@@ -1324,6 +1360,29 @@ class OperatorEngine:
         for _ in range(n):
             self._apply_single_mutation(buf)
         return buf
+
+    @staticmethod
+    def _is_deterministically_redundant(original: bytes, candidate: bytes) -> bool:
+        """Check if all byte diffs are covered by deterministic stages.
+
+        Uses AFL++ duplicate-elimination helpers. If every differing byte
+        could be produced by a bitflip, arithmetic, or interest-value
+        mutation, the candidate is redundant with deterministic stages.
+        """
+        if len(original) != len(candidate):
+            return False
+        for a, b in zip(original, candidate, strict=True):
+            if a == b:
+                continue
+            xor_val = a ^ b
+            if could_be_bitflip(xor_val):
+                continue
+            if could_be_arith(a, b, 1):
+                continue
+            if could_be_interest(a, b, 1):
+                continue
+            return False
+        return True
 
     def _apply_single_mutation(self, buf: bytearray):
         rng = self.f._rand_pool

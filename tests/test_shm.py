@@ -17,14 +17,6 @@ class TestShmCoverage:
         assert SHM_MAP_SIZE == 8192
         assert SIZEOF_ENTRY == 8
 
-    def test_read_bitmap_returns_entry_bytes(self):
-        cov = ShmCoverage()
-        try:
-            buf = cov.read_bitmap()
-            assert len(buf) == SHM_MAP_SIZE * SIZEOF_ENTRY  # 65536 bytes
-        finally:
-            cov.cleanup()
-
     def test_reset_edge_map_clears_snapshot(self):
         cov = ShmCoverage()
         try:
@@ -53,22 +45,12 @@ class TestShmCoverage:
         finally:
             cov.cleanup()
 
-    def test_read_entries_empty_after_reset(self):
-        cov = ShmCoverage()
-        try:
-            cov.reset_edge_map()
-            assert cov.read_entries() == []
-        finally:
-            cov.cleanup()
-
     def test_read_entries_after_record(self):
         cov = ShmCoverage()
         try:
             cov.reset_edge_map()
             cov._entries[0].edge_id = 42
             cov._entries[0].count = 7
-            entries = cov.read_entries()
-            assert entries == [(42, 7)]
             assert cov.get_edge_ids() == {42}
             assert cov.get_edge_counts() == {42: 7}
         finally:
@@ -124,23 +106,9 @@ class TestShmCoverage:
         try:
             cov.record_edge(1)
             cov.record_edge(2)
-            assert len(cov.read_entries()) == 2
-            cov.reset()
-            assert cov.read_entries() == []
-        finally:
-            cov.cleanup()
-
-    def test_commit_snapshot(self):
-        cov = ShmCoverage()
-        try:
+            assert cov.get_edge_ids() == {1, 2}
             cov.reset_edge_map()
-            cov._entries[0].edge_id = 42
-            cov._entries[0].count = 1
-            cov.commit_snapshot()
-            assert 42 in cov._seen_edge_ids
-            # Change the entry — is_new_coverage should not trigger
-            cov._entries[0].edge_id = 0
-            assert cov.is_new_coverage() is False
+            assert cov.get_edge_ids() == set()
         finally:
             cov.cleanup()
 
@@ -455,24 +423,23 @@ class TestShmCoverage:
     # ── reset() header preservation ─────────────────────────────────────
 
     def test_reset_preserves_header(self):
-        """reset() (full reset) delegates to reset_edge_map() → header survives.
-        Edge_count +2 and path_hash updated from record_edge calls."""
+        """reset_edge_map() preserves the front header while clearing entries."""
         cov = ShmCoverage()
         try:
             ctypes.c_uint32.from_address(cov._ptr).value = 77
             ctypes.c_uint64.from_address(cov._ptr + 8).value = 8888
             ctypes.c_uint64.from_address(cov._ptr + 16).value = 55
-            # Also add some seen edges (each increments edge_count and updates path_hash)
-            cov.record_edge(10)  # edge_count 56, path_hash = 8888*31^10 = 275538
-            cov.record_edge(20)  # edge_count 57, path_hash = 275538*31^20 = 8541162
-            cov.reset()  # full reset — preserves header, clears _seen_edge_ids
-            # Header preserved
+            cov.record_edge(10)
+            cov.record_edge(20)
+            # Re-set header values we want to verify survive reset
+            ctypes.c_uint32.from_address(cov._ptr).value = 77
+            ctypes.c_uint64.from_address(cov._ptr + 8).value = 8888
+            ctypes.c_uint64.from_address(cov._ptr + 16).value = 55
+            cov.reset_edge_map()
             assert cov.read_stack_depth() == 77
-            assert cov.read_path_hash() == 8541162  # updated by record_edge calls
-            assert cov.read_edge_count() == 57  # 55 + 2 from record_edge calls
-            # Cumulative state is cleared
-            assert cov.read_entries() == []
-            assert len(cov._seen_edge_ids) == 0
+            assert cov.read_path_hash() == 8888
+            assert cov.read_edge_count() == 55
+            assert cov.get_edge_ids() == set()
         finally:
             cov.cleanup()
 
@@ -490,22 +457,6 @@ class TestShmCoverage:
             cov.cleanup()
 
     # ── read_bitmap unchanged ───────────────────────────────────────────
-
-    def test_read_bitmap_still_returns_only_edge_bytes(self):
-        """read_bitmap() returns only the edge table, NOT including the front header."""
-        cov = ShmCoverage()
-        try:
-            buf = cov.read_bitmap()
-            assert len(buf) == cov.num_entries * SIZEOF_ENTRY
-            # Verify the header is NOT included: write a sentinel to header
-            ctypes.c_uint64.from_address(cov._ptr + 16).value = 0xDEADBEEF
-            buf = cov.read_bitmap()
-            expected_len = cov.num_entries * SIZEOF_ENTRY
-            assert len(buf) == expected_len
-            # The header bytes should NOT appear at the end of buf
-            assert buf[-8:] != ctypes.c_uint64(0xDEADBEEF)
-        finally:
-            cov.cleanup()
 
     # ── read_metadata round-trip ────────────────────────────────────────
 
@@ -679,19 +630,20 @@ class TestShmCoverage:
         finally:
             cov.cleanup()
 
-    def test_fast_path_after_commit_snapshot(self):
-        """After commit_snapshot adds edges to _seen_edge_ids, a genuinely new edge
-        is still detected via slow path.  commit_snapshot does NOT update _last_edge_count."""
+    def test_fast_path_after_seen_edge_preseed(self):
+        """When _seen_edge_ids is preseeded, a genuinely new edge is still detected."""
         cov = ShmCoverage()
         try:
             cov._entries[0].edge_id = 1
             ctypes.c_uint64.from_address(cov._ptr + 16).value = 1
-            cov.commit_snapshot()
-            # commit_snapshot adds edge_id=1 to _seen_edge_ids but does NOT update
-            # _last_edge_count (still 0).  Now add a genuinely new edge_id.
+            cov._seen_edge_ids.add(1)
+            # _last_edge_count is still 0, edge_count=1 → slow path
+            # edge_id=1 is already in _seen_edge_ids → no new
+            assert not cov.is_new_coverage()
+            # _last_edge_count updates to 1. Now add a genuinely new edge_id.
             cov._entries[1].edge_id = 2
             ctypes.c_uint64.from_address(cov._ptr + 16).value = 2
-            # Slow path (2 != 0): edge_id=2 is new → True
+            # Slow path (2 != 1): edge_id=2 is new → True
             assert cov.is_new_coverage()
             # After that, _last_edge_count = 2. Edge_count still 2.
             assert not cov.is_new_coverage()  # fast path: 2 == 2

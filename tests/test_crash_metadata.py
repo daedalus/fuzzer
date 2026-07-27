@@ -154,25 +154,25 @@ class TestFindNearestCorpus:
     def test_identical_input(self):
         data = b"AAAA"
         corpus = [b"AAAA", b"BBBB", b"CCCC"]
-        label, sim, diffs = find_nearest_corpus(data, corpus)
+        label, sim, diffs, _ = find_nearest_corpus(data, corpus)
         assert sim == 1.0
         assert len(diffs) == 0
 
     def test_similar_input(self):
         data = b"AABBCCDD"
         corpus = [b"AABBCCDE", b"XXXXXXXX", b"YYYYYYYY"]
-        label, sim, diffs = find_nearest_corpus(data, corpus)
+        label, sim, diffs, _ = find_nearest_corpus(data, corpus)
         assert sim > 0.3
         assert label.startswith("seed_")
 
     def test_empty_corpus(self):
-        label, sim, diffs = find_nearest_corpus(b"AAAA", [])
+        label, sim, diffs, _ = find_nearest_corpus(b"AAAA", [])
         assert label == ""
         assert sim == 0.0
 
     def test_max_check_limits(self):
         corpus = [bytes([i % 256]) * 4 for i in range(200)]
-        label, sim, diffs = find_nearest_corpus(b"\x00\x00\x00\x00", corpus, max_check=10)
+        label, sim, diffs, _ = find_nearest_corpus(b"\x00\x00\x00\x00", corpus, max_check=10)
         assert label.startswith("seed_")
 
 

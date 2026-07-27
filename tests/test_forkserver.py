@@ -46,18 +46,6 @@ class TestForkserverRunner:
         assert r._ready is False
         assert r._proc is None
 
-    def test_stderr_output_empty(self):
-        r = ForkserverRunner("/fake/target")
-        assert r.stderr_output() == ""
-
-    def test_stderr_output_capped(self):
-        r = ForkserverRunner("/fake/target")
-        r._stderr_lines = [f"line_{i}" for i in range(30)]
-        output = r.stderr_output()
-        lines = output.split("\n")
-        assert len(lines) == 20
-        assert lines[0] == "line_10"
-
     def test_start_with_missing_binary(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
             "fuzzer_tool.adapters.forkserver._FUZZ_LOADER_BIN",

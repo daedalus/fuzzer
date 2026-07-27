@@ -721,40 +721,6 @@ class TreeMutator:
 # PNG format-aware mutations
 # ---------------------------------------------------------------------------
 
-# PNG chunk types that control code paths in libpng
-_IHDR_TYPES = {
-    b"IHDR",
-    b"PLTE",
-    b"tRNS",
-    b"IDAT",
-    b"IEND",
-    b"bKGD",
-    b"cHRM",
-    b"gAMA",
-    b"hIST",
-    b"iCCP",
-    b"sBIT",
-    b"sCAL",
-    b"pHYs",
-    b"sPLT",
-    b"tEXt",
-    b"iTXt",
-    b"zTXt",
-    b"fdAT",
-    b"fcTL",
-}
-
-# Valid IHDR bit depths per color type
-_IHDR_BIT_DEPTHS = {
-    0: [1, 2, 4, 8, 16],  # grayscale
-    2: [8, 16],  # RGB
-    3: [1, 2, 4, 8],  # indexed
-    4: [8, 16],  # grayscale+alpha
-    6: [8, 16],  # RGBA
-}
-
-# Valid color types
-_IHDR_COLOR_TYPES = [0, 2, 3, 4, 6]
 
 
 # Re-export PNG classes/functions from dedicated module for backwards compatibility

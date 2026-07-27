@@ -13,7 +13,6 @@ import ctypes
 import ctypes.util
 import logging
 import os
-from typing import NamedTuple
 
 log = logging.getLogger(__name__)
 
@@ -50,13 +49,6 @@ _libc.shmdt.restype = ctypes.c_int
 
 _libc.shmctl.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
 _libc.shmctl.restype = ctypes.c_int
-
-
-class CoverageEntry(NamedTuple):
-    """A single coverage entry read from SHM."""
-
-    edge_id: int
-    count: int
 
 
 def _entry_struct(size: int) -> type[ctypes.Structure]:
@@ -128,23 +120,6 @@ class ShmCoverage:
 
     # ── Reading ──────────────────────────────────────────────────────────
 
-    def read_bitmap(self) -> bytes:
-        """Return the raw SHM byte buffer (all entries as bytes).
-
-        Size = num_entries * 8 bytes.  Callers that need (edge_id, count)
-        pairs should use :meth:`read_entries` instead.
-        """
-        return bytes(self._map)
-
-    def read_entries(self) -> list[CoverageEntry]:
-        """Parse SHM and return all non-empty (edge_id, count) pairs."""
-        result: list[CoverageEntry] = []
-        for i in range(self.num_entries):
-            eid = self._entries[i].edge_id
-            if eid != 0:
-                result.append(CoverageEntry(eid, self._entries[i].count))
-        return result
-
     def get_edge_ids(self) -> set[int]:
         """Return set of non-zero edge_ids currently in the hash table.
 
@@ -175,37 +150,11 @@ class ShmCoverage:
         # .tolist() converts numpy uint32 to plain Python ints
         return dict(zip(active["edge_id"].tolist(), active["count"].tolist()))
 
-    def get_edge_bitmap_view(self):
-        """Return a numpy structured array view of entries.
-
-        Returns None when numpy is not available.
-        Callers can do:
-            arr = shm.get_edge_bitmap_view()
-            if arr is not None:
-                active = arr[arr['edge_id'] != 0]
-                for row in active:  ...
-        """
-        try:
-            import numpy as np
-        except ImportError:
-            return None
-        return np.frombuffer(
-            self._map,
-            dtype=np.dtype([("edge_id", "<u4"), ("count", "<u4")]),
-            count=self.num_entries,
-        )
-
     # ── Reset ────────────────────────────────────────────────────────────
 
     def reset_edge_map(self):
         """Zero all entries in the coverage hash table (preserves front header)."""
         ctypes.memset(self._ptr + SHM_METADATA_SIZE, 0, self.table_bytes)
-
-    def reset(self):
-        """Full reset: zero entries, clear cumulative state."""
-        self.reset_edge_map()
-        self._seen_edge_ids.clear()
-        self.total_edges = 0
 
     # ── Metadata (stack depth + path hash + edge count) ────────────────
 
@@ -325,24 +274,6 @@ class ShmCoverage:
         of calling is_new_coverage() + get_edge_ids() separately.
         """
         return self._check_new_coverage()
-
-    def commit_snapshot(self):
-        """Update the cumulative seen-edge set to include all current entries."""
-        import numpy as np
-
-        arr = np.frombuffer(
-            self._map,
-            dtype=np.dtype([("edge_id", "<u4"), ("count", "<u4")]),
-            count=self.num_entries,
-        )
-        active = arr[arr["edge_id"] != 0]
-        for eid in active["edge_id"].tolist():
-            if eid not in self._seen_edge_ids:
-                self._seen_edge_ids.add(eid)
-                self.cumulative_edges += 1
-                self._peak_cumulative_edges = max(
-                    self._peak_cumulative_edges, self.cumulative_edges
-                )
 
     # ── Manual recording (for tests) ─────────────────────────────────────
 

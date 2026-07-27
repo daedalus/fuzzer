@@ -320,12 +320,16 @@ class StatsReporter:
                 else {}
             )
             if edge_hits:
-                from fuzzer_tool.core.renyi import RenyiEntropy
+                from fuzzer_tool.core.renyi import CoverageSpectrumAnalyzer, RenyiEntropy
 
                 renyi = RenyiEntropy()
+                spectrum = CoverageSpectrumAnalyzer()
+                analysis = spectrum.analyze(edge_hits)
                 stats["renyi"] = {
                     "uniformity": round(renyi.coverage_uniformity(list(edge_hits.values())), 4),
                     "min_entropy": round(renyi.min_entropy(list(edge_hits.values())), 4),
+                    "dominance_ratio": round(analysis["dominance_ratio"], 4),
+                    "hot_edge_fraction": round(analysis["hot_edge_fraction"], 4),
                     "spectrum": {
                         k: round(v, 4)
                         for k, v in renyi.entropy_spectrum(list(edge_hits.values())).items()
@@ -406,23 +410,6 @@ class StatsReporter:
     def get_te_weighted_position(self, input_length: int) -> int | None:
         return get_te_weighted_position(self.f._te_byte_edges, input_length)
 
-    def get_current_edge_bitmap(self) -> bytes | None:
-        """Return the raw SHM byte buffer.
-
-        For sparse-entry SHM this returns ``shm_bytes`` of raw struct data.
-        Prefer :meth:`get_current_edge_set` when you need edge IDs.
-        """
-        f = self.f
-        if f.multi_targets:
-            active_shm = f._target_shm_covs.get(f.target)
-            if active_shm:
-                return bytes(active_shm._map)
-        if f.shm_cov:
-            return bytes(f.shm_cov._map)
-        if f.ptrace_cov:
-            return bytes(f.ptrace_cov.edge_map)
-        return None
-
     def get_current_edge_set(self) -> set[int]:
         """Return the set of currently-active edge IDs.
 
@@ -439,27 +426,6 @@ class StatsReporter:
             arr = bytes(f.ptrace_cov.edge_map)
             return {i for i, v in enumerate(arr) if v}
         return set()
-
-    def get_edge_bitmap_view(self):
-        """Return a zero-copy numpy view when available, else None.
-
-        Handles multi-target mode by selecting the active target's SHM.
-        For sparse-entry SHM the view is a structured array with
-        ``edge_id`` and ``count`` fields.
-        Returns None when numpy is not available or no SHM is active.
-        """
-        from fuzzer_tool.core.count_class import _HAS_NUMPY
-
-        if not _HAS_NUMPY:
-            return None
-        f = self.f
-        if f.multi_targets:
-            active_shm = f._target_shm_covs.get(f.target)
-            if active_shm:
-                return active_shm.get_edge_bitmap_view()
-        if f.shm_cov:
-            return f.shm_cov.get_edge_bitmap_view()
-        return None
 
     def format_elapsed(self) -> str:
         return _format_elapsed_fn(self.f.start_time)

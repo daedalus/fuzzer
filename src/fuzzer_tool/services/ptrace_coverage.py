@@ -422,16 +422,6 @@ class PtraceCoverage:
             except Exception:
                 log.debug("Failed to install bp at %#x", addr, exc_info=True)
 
-    def remove_breakpoints(self, pid: int):
-        for addr, orig in self.original_bytes.items():
-            try:
-                val = self._read_memory(pid, addr)
-                new_val = (val & ~0xFF) | orig
-                self._write_memory(pid, addr, new_val)
-            except Exception:
-                log.debug("Failed to restore bp at %#x", addr, exc_info=True)
-        self.original_bytes.clear()
-
     def reset_edge_map(self):
         self.prev_location = 0
         self.total_edges = 0

@@ -65,6 +65,7 @@ class SeedScorer:
         tc_ref: int = 0,
         favored: bool = False,
         max_depth: int = 0,
+        mean_log_n_fuzz: float = 0.0,
         # Honggfuzz power factors (all optional)
         new_edges: int = 0,
         time_added: float = 0.0,
@@ -195,8 +196,8 @@ class SeedScorer:
             factor = self._mopt_factor(max_depth, depth)
             perf_score *= factor
         elif self.schedule == "coe":
-            # COE: fall through to FAST behavior for individual scoring
-            # Use coe_skip() for the cut-off check
+            if mean_log_n_fuzz > 0 and self.coe_skip(n_fuzz, mean_log_n_fuzz, favored):
+                return float(self.max_mult * 100)
             factor = self._fast_factor(fuzz_level, n_fuzz, favored)
             if factor > self.max_factor:
                 factor = self.max_factor

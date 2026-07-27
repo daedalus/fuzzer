@@ -40,7 +40,7 @@ from fuzzer_tool.core.mutations import (
     MUTATIONS,
 )
 from fuzzer_tool.core.sanitizer import SanitizerReport
-from fuzzer_tool.core.schedules import SeedScorer
+from fuzzer_tool.core.schedules import SeedScorer, compute_mean_log_n_fuzz
 from fuzzer_tool.core.secretary import DEFAULT_EXPLORATION_FRAC, SecretaryStopping
 from fuzzer_tool.core.seed_quality import BayesianSeedQuality
 from fuzzer_tool.services.corpus_manager import CorpusManager
@@ -88,17 +88,6 @@ def _handle_sigsegv(signum, frame):
 
 
 signal.signal(signal.SIGSEGV, _handle_sigsegv)
-
-
-def _write_and_close(fd: int, data: bytes) -> None:
-    """Write *data* to *fd* then close it — designed to run in a thread."""
-    try:
-        os.write(fd, data)
-    finally:
-        try:
-            os.close(fd)
-        except OSError:
-            log.debug("Failed to close fd %d (already closed?)", fd)
 
 
 def _cleanup_tmp_dir(path: Path) -> None:
@@ -296,6 +285,7 @@ class Fuzzer:
         hw_perf=False,
         schedule_ablation=None,
         schedule="base",
+        differential_target=None,
         replicator=False,
         shapley=False,
         bayesian=False,
@@ -397,6 +387,10 @@ class Fuzzer:
         self._qea_enabled = qea
         self.qea = None  # Initialized in run() when --qea is set
 
+        # Differential fuzzing
+        self._diff_target = differential_target
+        self._diff_tracker = None
+
         # WFC structural generation mode
         self._wfc_enabled = wfc
 
@@ -447,6 +441,10 @@ class Fuzzer:
             self._cmplog = CmplogCollector(max_tokens=cmplog_max_tokens, max_pairs=cmplog_max_pairs)
             if self._cmplog.start():
                 print("[*] Cmplog: comparison tracing enabled (memcmp/strcmp/strncmp/memchr)")
+                from fuzzer_tool.core.rq_encodings import encoders_summary
+
+                encoders = encoders_summary()
+                print(f"[*]   Redqueen encoders: {len(encoders)} ({', '.join(e['name'] for e in encoders)})")
             else:
                 print("[!] Cmplog: failed to compile shim, disabling")
                 self._cmplog = None
@@ -767,6 +765,7 @@ class Fuzzer:
         self._cached_total_time: float = 0.0
         self._cached_total_fuzz: int = 0
         self._cached_total_edges: int = 0
+        self._cached_mean_log_n_fuzz: float = 0.0
         self._agg_cache_valid: bool = False
 
         # ── Seed key cache (xxhash) ─────────────────────────────────────
@@ -1168,6 +1167,19 @@ class Fuzzer:
     def _run_target(self, data: bytes):
         return self._runner.run_target(data)
 
+    def _check_differential(self, data: bytes):
+        """Run data on differential target and track divergence."""
+        if not self._diff_tracker or not self._diff_target:
+            return
+        from fuzzer_tool.services.differential import diff_run
+
+        diverged, desc = diff_run(self.target, self._diff_target, data)
+        rc_b, stderr_b = 0, ""
+        if diverged:
+            pass  # diff_run already logs; stats tracked in _diff_tracker
+        # track drift
+        self._diff_tracker.record(0, "", rc_b, stderr_b)
+
     def _ptrace_handle_breakpoint(self, pid: int, libc, cov: PtraceCoverage, regs_buf):
         return self._runner._ptrace_handle_breakpoint(pid, libc, cov, regs_buf)
 
@@ -1485,11 +1497,9 @@ class Fuzzer:
         self._cached_total_time = sum(m.get("total_time", 0.0) for m in self.seed_meta.values())
         self._cached_total_fuzz = sum(m.get("fuzz_count", 1) for m in self.seed_meta.values())
         self._cached_total_edges = sum(m.get("coverage_edges", 0) for m in self.seed_meta.values())
+        n_fuzz_vals = [m.get("fuzz_count", 0) for m in self.seed_meta.values()]
+        self._cached_mean_log_n_fuzz = compute_mean_log_n_fuzz(n_fuzz_vals)
         self._agg_cache_valid = True
-
-    def _invalidate_agg_cache(self, invalidation_site: str = "") -> None:
-        """Mark aggregate cache as stale — triggers lazy recompute."""
-        self._agg_cache_valid = False
 
     def _reset_cmplog(self):
         """Flush cmplog buffer to disk before collecting tokens.
@@ -2193,9 +2203,6 @@ class Fuzzer:
     def _get_te_weighted_position(self, input_length: int):
         return self._stats.get_te_weighted_position(input_length)
 
-    def _get_current_edge_bitmap(self):
-        return self._stats.get_current_edge_bitmap()
-
     def _get_current_edge_set(self) -> set[int]:
         """Return the set of currently-active edge IDs.
 
@@ -2203,15 +2210,6 @@ class Fuzzer:
         byte-bitmap ptrace coverage (non-zero byte positions).
         """
         return self._stats.get_current_edge_set()
-
-    def _get_edge_bitmap_view(self):
-        """Return a zero-copy numpy view of the active bitmap when possible.
-
-        Handles SHM + multi-target mode. Falls back to None when numpy is
-        not available or no SHM is active. Callers fall through to
-        ``_get_current_edge_bitmap()`` (bytes) when this returns None.
-        """
-        return self._stats.get_edge_bitmap_view()
 
     def _format_elapsed(self):
         return self._stats.format_elapsed()
@@ -2417,6 +2415,8 @@ class Fuzzer:
             # initial corpus and gathers baseline coverage.
             for seed in list(self.corpus):
                 returncode, stderr = self._run_target(seed)
+                if self._diff_tracker:
+                    self._check_differential(seed)
                 # Validate AFL shim on first execution
                 if not getattr(self, "_shim_checked", False):
                     self._shim_checked = True
@@ -2457,6 +2457,13 @@ class Fuzzer:
                     speciation_threshold=self._ga_speciation_threshold,
                 )
                 self.ga.initialize(self.corpus, self._edge_tracker)
+
+            # Initialize differential fuzzing if enabled
+            if self._diff_target:
+                from fuzzer_tool.services.differential import DifferentialTracker
+
+                self._diff_tracker = DifferentialTracker()
+                print(f"[*] Differential: comparing against {self._diff_target}")
                 ga_path = self.corpus_dir / "ga.json"
                 if self.resume and ga_path.exists():
                     self.ga.load(ga_path)
@@ -2589,11 +2596,14 @@ class Fuzzer:
                         fuzz_level=fuzz_level,
                         n_fuzz=n_fuzz,
                         total_execs=max(1, self.exec_count),
+                        mean_log_n_fuzz=self._cached_mean_log_n_fuzz,
                         **hf_kwargs,
                     )
                 else:
                     # Markov-generated or synthetic seed: reset to neutral multiplier
                     self._last_perf_score = 100.0
+                if self._diff_tracker:
+                    self._check_differential(seed)
                 self.fuzz_one(seed)
                 i += 1
                 effective_interval = (

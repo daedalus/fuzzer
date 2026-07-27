@@ -238,7 +238,7 @@ class CrashMetadata:
 
 def find_nearest_corpus(
     crash_data: bytes, corpus: list[bytes], max_check: int = 100
-) -> tuple[str, float, list[int]]:
+) -> tuple[str, float, list[int], str]:
     """Find the corpus entry most similar to the crash input.
 
     Architecture: cheap 4-gram Jaccard scan to find the candidate, then
@@ -249,10 +249,10 @@ def find_nearest_corpus(
     Levenshtein describes what actually changed (exact edit positions).
 
     Returns:
-        Tuple of (nearest_label, similarity, diff_byte_offsets via Levenshtein).
+        Tuple of (nearest_label, similarity, diff_byte_offsets, edit_summary).
     """
     if not corpus:
-        return "", 0.0, []
+        return "", 0.0, [], ""
 
     # Phase 1: cheap Jaccard scan to find nearest candidate
     best_jaccard = 0.0
@@ -291,7 +291,10 @@ def find_nearest_corpus(
     sim = 0.4 * best_jaccard + 0.6 * byte_sim
 
     label = f"seed_{best_idx}"
-    return label, sim, diff[:30]
+    from fuzzer_tool.core.similarity import edit_script_summary
+
+    edit_summary = edit_script_summary(nearest, crash_data)
+    return label, sim, diff[:30], edit_summary
 
 
 def cluster_crashes(
