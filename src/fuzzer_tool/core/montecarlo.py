@@ -18,6 +18,7 @@ import random
 from collections import defaultdict
 from pathlib import Path
 
+from fuzzer_tool.core.allan_variance import DispersionIndex
 from fuzzer_tool.core.edge_tracker import ks_significance_threshold
 
 # ── Memory bounds ────────────────────────────────────────────────────
@@ -105,6 +106,12 @@ class MonteCarloScheduler:
         self._prev_op: str | None = None
         # Blend factor: 0.0 = pure Thompson, 1.0 = pure pairwise
         self.pairwise_blend = pairwise_blend
+
+        # Per-operator dispersion index for non-stationarity detection.
+        # When D > 1.5, the operator's success process is bursty (non-i.i.d.),
+        # meaning the Beta posterior is overconfident — older observations
+        # should decay faster.
+        self._op_dispersion: dict[str, DispersionIndex] = {}
 
     def init_arm(self, name: str, prior_alpha: float = 1.0, prior_beta: float = 1.0) -> None:
         """Register a mutation operator arm with a Beta prior.
@@ -215,6 +222,13 @@ class MonteCarloScheduler:
         else:
             self.arm_beta[name] = self.arm_beta.get(name, 1.0) + 1
             self._pooled_failures += 1.0
+
+        # Per-operator dispersion index tracking (for diagnostics only).
+        # Note: for binary success data D = 1-p <= 1 mathematically, so
+        # D on raw binary is always <= 1. Tracked for diagnostic display.
+        if name not in self._op_dispersion:
+            self._op_dispersion[name] = DispersionIndex(window=200)
+        self._op_dispersion[name].update(float(success))
 
         # Update pairwise transition matrix on success
         if success and self._prev_op is not None and self._prev_op != name:

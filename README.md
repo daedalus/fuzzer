@@ -88,6 +88,7 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 - **Rate-distortion corpus minimization** (`--rate-distortion`): optimal compression of corpus preserving coverage diversity
 - **Transfer entropy** (`--transfer-entropy`): directional causal flow between byte positions and coverage edges
 - **Shannon entropy rate tracking**: global edge-hit distribution entropy sampled periodically; confirms genuine stall (no new edges + flat entropy rate) vs. transient redistribution before activating random-mode recovery
+- **Index of Dispersion** (Fano factor, D = σ²/μ): sliding-window variance-to-mean ratio on the incremental edge-discovery rate — resolves Allan variance's blind spot: a buffer full of zeros (genuine stall, D « 0.3) vs. rare bursts (bursty exploration, D › 1.5). D › 1.5 overrides stall recovery; D « 0.3 confirms it with higher aggression. Also available as a standalone `DispersionIndex` class for any per-operator or per-signal dispersion analysis.
 
 ### Game Theory
 - **Shapley value** (`--shapley`): per-edge frequency-weighted operator attribution — credit distributed proportional to co-occurrence frequency, not naive full credit to all stacked operators

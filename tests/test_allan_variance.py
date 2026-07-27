@@ -1,9 +1,11 @@
-"""Tests for core/allan_variance.py — Allan variance stall detection."""
+"""Tests for core/allan_variance.py — Allan variance stall detection and DispersionIndex."""
 
 import math
 import random
 
-from fuzzer_tool.core.allan_variance import AllanVarianceDetector
+import pytest
+
+from fuzzer_tool.core.allan_variance import AllanVarianceDetector, DispersionIndex
 
 
 def _white_noise(n: int, scale: float = 1.0, seed: int = 42) -> list[float]:
@@ -127,3 +129,120 @@ class TestAllanVarianceDetector:
         data = list(d._buf)
         assert data[0] == 8.0
         assert data[-1] == 15.0
+
+
+class TestAllanVarianceDispersion:
+    """Tests for AllanVarianceDetector.dispersion()."""
+
+    def test_dispersion_constant(self):
+        """Constant signal → variance ≈ 0 → D ≈ 0."""
+        d = AllanVarianceDetector(max_buffer_pow=4, min_samples=4)
+        for _ in range(16):
+            d.update(5.0)
+        d_val = d.dispersion()
+        assert d_val is not None and d_val < 0.01, f"expected ~0, got {d_val}"
+
+    def test_dispersion_poisson_like(self):
+        """Poisson-like signal → D ≈ 1 (variance ≈ mean)."""
+        d = AllanVarianceDetector(max_buffer_pow=6, min_samples=4)
+        rng = random.Random(42)
+        for _ in range(64):
+            d.update(rng.expovariate(1.0))
+        d_val = d.dispersion()
+        assert d_val is not None, "dispersion should not be None"
+        # Exponential has mean=variance → D=1, allow ±0.5 for sample noise
+        assert 0.3 <= d_val <= 1.8, f"expected ≈1.0, got {d_val}"
+
+    def test_dispersion_bursty(self):
+        """Bursty signal (clusters of high values in zeros) → D > 1.5."""
+        d = AllanVarianceDetector(max_buffer_pow=6, min_samples=4)
+        for _ in range(10):
+            for _ in range(3):
+                d.update(0.0)
+            for _ in range(2):
+                d.update(10.0)
+        d_val = d.dispersion()
+        assert d_val is not None and d_val > 1.5, f"expected >1.5, got {d_val}"
+
+    def test_dispersion_zero_signal(self):
+        """All zeros → mean=0 → None (can't compute D)."""
+        d = AllanVarianceDetector(max_buffer_pow=4, min_samples=4)
+        for _ in range(16):
+            d.update(0.0)
+        assert d.dispersion() is None
+
+    def test_dispersion_insufficient_data(self):
+        """Fewer than 2 samples → None."""
+        d = AllanVarianceDetector(max_buffer_pow=4, min_samples=4)
+        d.update(1.0)
+        assert d.dispersion() is None
+
+
+class TestDispersionIndex:
+    """Tests for standalone DispersionIndex class."""
+
+    def test_init(self):
+        di = DispersionIndex(window=100)
+        assert di.count == 0
+        assert di.value is None
+
+    def test_constant_signal(self):
+        """All identical values → variance=0 → D=0."""
+        di = DispersionIndex(window=100)
+        for _ in range(50):
+            di.update(3.0)
+        d_val = di.value
+        assert d_val is not None and d_val < 0.01
+
+    def test_bursty_signal(self):
+        """Bursty pattern (occasional large values in zeros) → D > 1.5."""
+        di = DispersionIndex(window=200)
+        # Most values near zero, occasional bursts of 10.0
+        for _ in range(5):
+            for _ in range(95):
+                di.update(0.1)
+            for _ in range(5):
+                di.update(10.0)
+        d_val = di.value
+        assert d_val is not None and d_val > 1.5, f"expected >1.5, got {d_val}"
+
+    def test_binary_bernoulli(self):
+        """Fair coin flips (Bernoulli p=0.5) → D = 1-p ≈ 0.5."""
+        di = DispersionIndex(window=200)
+        rng = random.Random(42)
+        for _ in range(200):
+            di.update(1.0 if rng.random() < 0.5 else 0.0)
+        d_val = di.value
+        assert d_val is not None and 0.3 <= d_val <= 0.7, f"expected ≈0.5, got {d_val}"
+
+    def test_nearly_constant_signal(self):
+        """Nearly constant signal (tight around mean) → D < 0.3."""
+        di = DispersionIndex(window=200)
+        for _ in range(200):
+            di.update(1.0 + random.uniform(-0.05, 0.05))
+        d_val = di.value
+        assert d_val is not None and d_val < 0.3, f"expected <0.3, got {d_val}"
+
+    def test_insufficient_data(self):
+        """Single observation → None."""
+        di = DispersionIndex(window=100)
+        di.update(1.0)
+        assert di.value is None
+
+    def test_save_load_roundtrip(self):
+        """save() → load() preserves dispersion value."""
+        di1 = DispersionIndex(window=200)
+        rng = random.Random(42)
+        for _ in range(100):
+            di1.update(1.0 if rng.random() < 0.3 else 0.0)
+        saved = di1.save()
+        expected = di1.value
+
+        di2 = DispersionIndex(window=200)
+        di2.load(saved)
+        assert di2.count == di1.count
+        assert (
+            di2.value == pytest.approx(expected, abs=1e-10)
+            if expected is not None
+            else di2.value is None
+        )

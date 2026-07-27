@@ -2273,6 +2273,12 @@ class Fuzzer:
         exploration (skip stall). Flicker noise = correlated discoveries
         approaching saturation (reduce threshold). Random walk = integrated
         signal, likely genuine stall (bypass entropy gate).
+
+        Dispersion index override: complements Allan variance by resolving
+        a blind spot — a buffer dominated by zeros (genuine stall) and a
+        buffer with rare bursts of discoveries (bursty exploration) both
+        produce near-zero Allan deviation, but dispersion index D tells
+        them apart: D › 1.5 = bursty (override stall), D « 0.3 = stall.
         """
         entropy_flat = self._compute_entropy_flat()
         if entropy_flat is False:
@@ -2281,12 +2287,24 @@ class Fuzzer:
         # Consult Allan variance detector for noise-type signal
         noise = self._allan.noise_type()
         allan_slope = self._allan.noise_slope()
+        dispersion = self._allan.dispersion()
 
         reason = "no new edges"
         if entropy_flat:
             reason += " + flat entropy"
         if noise != "unknown":
-            reason += f" + {noise} noise (slope={allan_slope:+.2f})" if allan_slope is not None else f" + {noise} noise"
+            reason += (
+                f" + {noise} noise (slope={allan_slope:+.2f})"
+                if allan_slope is not None
+                else f" + {noise} noise"
+            )
+        if dispersion is not None:
+            reason += f" + D={dispersion:.2f}"
+
+        # Dispersion index override: bursty D › 1.5 means clusters of
+        # discoveries with gaps — NOT a stall even if Allan says stalled.
+        if dispersion is not None and dispersion > 1.5:
+            return False
 
         # Noise-type gating and threshold adjustment
         if noise == "active":
@@ -2304,7 +2322,11 @@ class Fuzzer:
         if noise == "stalled":
             # Near-zero variance confirms genuine stall.
             # Bypass entropy gate and use minimal threshold.
-            effective_threshold = max(self._stall_threshold // 4, 50)
+            # D « 0.3 further confirms stall — use the most aggressive threshold.
+            if dispersion is not None and dispersion < 0.3:
+                effective_threshold = max(self._stall_threshold // 8, 25)
+            else:
+                effective_threshold = max(self._stall_threshold // 4, 50)
 
         # Without any detector signal (Allan unknown + entropy unknown),
         # fall through to original behavior (trigger on no-new-edges alone).

@@ -15,6 +15,12 @@ Key insight from empirical testing of edge-discovery-rate signals:
 The slope measures how the variance changes with averaging time:
   - slope ≈ 0: stationary variance (normal or stalled)
   - slope > 0.1: variance grows with τ (rate decreasing, pre-stall)
+
+This module also provides :class:`DispersionIndex` — a sliding-window
+Index of Dispersion (Fano factor, D = σ²/μ).  D complements the Allan
+variance by resolving a key ambiguity the latter cannot: a buffer full
+of zeros and a buffer with rare bursts both produce low Allan deviation,
+but D discriminates them (bursty → D › 1.5, stalled → D « 0.3).
 """
 
 from __future__ import annotations
@@ -22,10 +28,16 @@ from __future__ import annotations
 import collections
 import math
 
+from fuzzer_tool.core.running_stats import RunningMoments
+
 # Allan deviation thresholds (empirically derived from edge-discovery rate signals)
-_ADEV_ACTIVE_THRESHOLD = 0.5   # adev(2) above this → signal has meaningful variance
-_ADEV_STALL_THRESHOLD = 0.01   # adev(2) below this → signal is effectively constant
+_ADEV_ACTIVE_THRESHOLD = 0.5  # adev(2) above this → signal has meaningful variance
+_ADEV_STALL_THRESHOLD = 0.01  # adev(2) below this → signal is effectively constant
 _FATIGUE_SLOPE_THRESHOLD = 0.1  # slope above this → variance grows with averaging
+
+# Dispersion index thresholds (empirically calibrated for edge-discovery-rate signals)
+_DISPERSION_BURSTY_THRESHOLD = 1.5  # D above this → bursty, not stalled
+_DISPERSION_STALL_THRESHOLD = 0.3  # D below this → confirmed stall
 
 
 class AllanVarianceDetector:
@@ -159,6 +171,31 @@ class AllanVarianceDetector:
         """Whether the buffer has reached its maximum capacity."""
         return len(self._buf) >= self._maxlen
 
+    # ── Dispersion Index ─────────────────────────────────────────────
+
+    def dispersion(self) -> float | None:
+        """Index of Dispersion (Fano factor) of the current buffer.
+
+        D = variance / mean
+
+        Interpretation (calibrated for edge-discovery-rate signals):
+          - D › 1.5: bursty exploration — clusters of new edges with gaps.
+            Overrides stall signal: this is NOT a stall.
+          - 0.3 ≤ D ≤ 1.5: Poisson-like normal exploration.
+          - D « 0.3: near-zero mean or variance → genuine stall.
+
+        Returns None if fewer than 2 observations or mean is effectively zero.
+        """
+        n = len(self._buf)
+        if n < 2:
+            return None
+        data = list(self._buf)
+        mean = sum(data) / n
+        if abs(mean) < 1e-12:
+            return None
+        var = sum((x - mean) ** 2 for x in data) / (n - 1)  # sample variance
+        return var / mean
+
     def reset(self) -> None:
         """Clear all samples."""
         self._buf.clear()
@@ -175,6 +212,51 @@ class AllanVarianceDetector:
         """Restore state from *save()* output."""
         self._maxlen = 2 ** data.get("max_buffer_pow", int(math.log2(self._maxlen)))
         self._min_samples = data.get("min_samples", self._min_samples)
-        self._buf = collections.deque(
-            data.get("samples", []), maxlen=self._maxlen
-        )
+        self._buf = collections.deque(data.get("samples", []), maxlen=self._maxlen)
+
+
+class DispersionIndex:
+    """Sliding-window Index of Dispersion (Fano factor), D = σ²/μ.
+
+    Uses :class:`RunningMoments` for O(1) per-update mean + variance and
+    returns the ratio.  Tracks only the most recent *window* observations.
+
+    Interpretation of D for fuzzing signals:
+      - D › 1.5: overdispersed / bursty (non-stationary process)
+      - 0.3 ≤ D ≤ 1.5: Poisson-like (i.i.d. or stationary)
+      - D « 0.3: underdispersed (near-constant / stalled)
+
+    Args:
+        window: Max number of recent observations to retain.
+    """
+
+    def __init__(self, window: int = 200):
+        self._moments = RunningMoments(window=window)
+
+    def update(self, value: float) -> None:
+        """Record a new observation."""
+        self._moments.update(value)
+
+    @property
+    def value(self) -> float | None:
+        """D = variance / mean, or None if mean ≈ 0 or insufficient data."""
+        if self._moments.count < 2:
+            return None
+        mean = self._moments.mean
+        if abs(mean) < 1e-12:
+            return None
+        return self._moments.variance / mean
+
+    @property
+    def count(self) -> int:
+        """Number of observations incorporated."""
+        return self._moments.count
+
+    def save(self) -> dict:
+        """Serialize state for persistence."""
+        return {"moments": self._moments.save()}
+
+    def load(self, data: dict) -> None:
+        """Restore state from *save()* output."""
+        if "moments" in data:
+            self._moments.load(data["moments"])

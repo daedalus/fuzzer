@@ -1,5 +1,7 @@
 """Tests for MonteCarloScheduler, MOptScheduler, JS divergence, and adaptive refit."""
 
+import random
+
 from fuzzer_tool.core.montecarlo import MonteCarloScheduler, MOptScheduler
 
 
@@ -80,6 +82,30 @@ class TestMonteCarloScheduler:
         for _ in range(10):
             mc.record("A", success=True)
         assert mc.arm_alpha["A"] == 11.0
+
+    def test_operator_dispersion_tracking(self):
+        """Per-operator DispersionIndex tracks binary success correctly."""
+        mc = MonteCarloScheduler(arm_decay=0.9, decay_interval=9999)
+        mc.init_arm("op_a")
+        rng = random.Random(42)
+        for _ in range(200):
+            mc.record("op_a", success=rng.random() < 0.5)
+        assert "op_a" in mc._op_dispersion
+        d_val = mc._op_dispersion["op_a"].value
+        # Bernoulli(0.5) → D = 1-p = 0.5
+        assert d_val is not None and 0.3 <= d_val <= 0.7, f"expected ≈0.5, got {d_val}"
+
+    def test_operator_dispersion_rare_success(self):
+        """Very rare success → D close to 1 (for binary, D = 1-p)."""
+        mc = MonteCarloScheduler(arm_decay=1.0)
+        mc.init_arm("rare")
+        for _ in range(200):
+            mc.record("rare", success=False)
+        # Only 1 success
+        mc.record("rare", success=True)
+        d_val = mc._op_dispersion["rare"].value
+        # D = 1-p where p ≈ 1/201 ≈ 0.005 → D ≈ 0.995
+        assert d_val is not None and d_val > 0.9, f"expected near 1.0, got {d_val}"
 
     def test_add_elite(self):
         mc = MonteCarloScheduler()
