@@ -1527,6 +1527,11 @@ class Fuzzer:
                 pass
 
     def fuzz_one(self, data: bytes) -> bool:
+        # Invalidate Elo K-factor cache at the start of each iteration
+        # so record_strategy_match calls recompute K from the current
+        # prediction errors if record_match hasn't been called yet.
+        if self._use_elo and self._elo:
+            self._elo._eff_k_cache = None
         self._last_parent_seed = data
         meta = self.seed_meta.get(data)
         if meta is not None:

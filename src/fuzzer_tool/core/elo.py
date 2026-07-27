@@ -572,6 +572,12 @@ class BayesianEloTracker:
         self._best_win_rate: list[float] = []
         self._base_temperature = 400.0
 
+        # Per-iteration K-factor cache: _effective_k() is called ~78K times per run
+        # across record_match and record_strategy_match. The K value only changes
+        # when _prediction_errors is updated (inside record_match). Caching across
+        # intra-iteration calls saves redundant list slicing + sum-of-squares.
+        self._eff_k_cache: float | None = None
+
     def _expected_score(self, mu_a: float, mu_b: float) -> float:
         """Expected score for player A given their rating posterior means."""
         return 1.0 / (1.0 + 10.0 ** ((mu_b - mu_a) / 400.0))
@@ -582,15 +588,22 @@ class BayesianEloTracker:
         When predictions are consistently wrong (>2 standard deviations of
         random), K increases up to 2x to react faster. When accurate, K
         decreases toward base_k / 2.
+
+        Cached via _eff_k_cache: invalidated after record_match updates
+        _prediction_errors, and at the start of each fuzz_one iteration.
         """
+        if self._eff_k_cache is not None:
+            return self._eff_k_cache
         if len(self._prediction_errors) < 10:
-            return self._base_k
+            self._eff_k_cache = self._base_k
+            return self._eff_k_cache
         recent = self._prediction_errors[-min(len(self._prediction_errors), self._error_window) :]
         mse = sum(e * e for e in recent) / len(recent)
         # Expected MSE for random predictions with score in [0,1] = 0.25
         # Good predictions approach 0. Scale K from base/2 to base*2
         ratio = min(mse / 0.25, 1.0)
-        return self._base_k * (0.5 + 1.5 * ratio)
+        self._eff_k_cache = self._base_k * (0.5 + 1.5 * ratio)
+        return self._eff_k_cache
 
     def _effective_temperature(self) -> float:
         """Adaptive temperature based on how often the top-rated wins.
@@ -639,8 +652,9 @@ class BayesianEloTracker:
 
         k = self._effective_k()
 
-        # Track prediction error
+        # Track prediction error and invalidate _effective_k cache
         self._prediction_errors.append(score_a - ea)
+        self._eff_k_cache = None
         if len(self._prediction_errors) > self._error_window * 2:
             self._prediction_errors = self._prediction_errors[-self._error_window :]
 

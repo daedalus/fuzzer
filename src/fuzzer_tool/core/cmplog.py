@@ -14,6 +14,7 @@ interception layers, both writing to the same CMP log file:
 Both layers are compiled into a single .so — no need for separate shims.
 """
 
+import binascii
 import contextlib
 import logging
 import os
@@ -278,8 +279,8 @@ class CmplogCollector:
                         continue
                     hex_a, hex_b = parts[0], parts[1]
                     try:
-                        operand_a = bytes.fromhex(hex_a)
-                        operand_b = bytes.fromhex(hex_b)
+                        operand_a = binascii.unhexlify(hex_a)
+                        operand_b = binascii.unhexlify(hex_b)
                         tokens.add(operand_a)
                         tokens.add(operand_b)
                         # Optional PC field (trace mode) — last field if present
