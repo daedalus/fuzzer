@@ -555,7 +555,7 @@ class StatsReporter:
         smt_str = self._print_stats_smt_str(f)
 
         cov_str = self._print_stats_cov_str(f)
-        ph_str = f" | ph: {f.shm_cov.read_path_hash()}" if f.shm_cov else ""
+        ph_str = f" | ph: 0x{f.shm_cov.read_path_hash():x}" if f.shm_cov else ""
         mc_str = ""
         if f.mc:
             parts = [
