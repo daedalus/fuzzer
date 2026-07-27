@@ -145,6 +145,12 @@ int fuzz_fgrep(const unsigned char *buf, size_t size) {
     return 0;
 }
 
+/* Standard in-process entry point for fuzzer-tool .so mode */
+__attribute__((visibility("default")))
+int fuzz_shm_run(const unsigned char *buf, size_t size) {
+    return fuzz_fgrep(buf, size);
+}
+
 #ifdef __AFL_HAVE_MANUAL_CONTROL
 int main(void) {
     __AFL_INIT();

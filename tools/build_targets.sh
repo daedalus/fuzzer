@@ -173,7 +173,8 @@ build_fgrep_so_targets() {
     build_so_target "$TARGETS/fuzz_regex_compile.c" "$TARGETS/fuzz_regex_compile${out_suffix}.so" "$FGREP_INC $FGREP_LIBS" "$flags"
     build_so_target "$TARGETS/fuzz_pattern_match.c" "$TARGETS/fuzz_pattern_match${out_suffix}.so" "$FGREP_INC $FGREP_LIBS" "$flags"
     build_so_target "$TARGETS/fuzz_search_pipeline.c" "$TARGETS/fuzz_search_pipeline${out_suffix}.so" "$FGREP_INC $FGREP_LIBS_FULL" "$flags"
-    # fgrep_read includes fgrep .c files directly and lacks fuzz_shm_run — no .so variant
+    # fgrep_read includes fgrep .c files directly — needs -mavx2 for AVX2 intrinsics
+    build_so_target "$TARGETS/fgrep_read.c" "$TARGETS/fgrep_read${out_suffix}.so" "$FGREP_INC -lpthread" "$flags -mavx2"
 }
 
 # ── Build simple targets ─────────────────────────────────────────
@@ -376,6 +377,7 @@ verify_afl() {
     echo "Verifying AFL symbols..."
     local count=0 fail_count=0
     for f in "$TARGETS"/fuzz_* "$TARGETS"/fgrep_read "$TARGETS"/fgrep_read_nosan \
+             "$TARGETS"/fgrep_read.so "$TARGETS"/fgrep_read_nosan.so \
              "$TARGETS"/asan_target "$TARGETS"/asan_target_nosan "$TARGETS"/asan_target.so "$TARGETS"/asan_target_nosan.so \
              "$TARGETS"/png_read "$TARGETS"/png_read_nosan "$TARGETS"/png_read.so "$TARGETS"/png_read_nosan.so \
              "$TARGETS"/zlib_read "$TARGETS"/zlib_read_nosan "$TARGETS"/zlib_read.so "$TARGETS"/zlib_read_nosan.so \
