@@ -295,6 +295,7 @@ class Fuzzer:
         honggfuzz=False,
         hw_perf=False,
         schedule_ablation=None,
+        schedule="base",
         replicator=False,
         shapley=False,
         bayesian=False,
@@ -641,7 +642,8 @@ class Fuzzer:
                 self.hw_perf = False
 
         # Seed-level energy multiplier: scales mutations_per_input per seed
-        self._seed_scorer = SeedScorer(schedule=schedule_ablation or "base")
+        self._seed_scorer = SeedScorer(schedule=schedule or "base")
+        self._power_schedule = schedule
         self._last_perf_score = 100.0  # default multiplier (1x)
 
         self._load_corpus()
@@ -803,9 +805,15 @@ class Fuzzer:
         self._use_elo = elo
         self._elo = None
         if elo:
-            from fuzzer_tool.core.elo import EloTracker
+            from fuzzer_tool.core.elo import BayesianEloTracker
 
-            self._elo = EloTracker(k_factor=16, decay=0.99, crash_track=True, min_matches=10)
+            self._elo = BayesianEloTracker(
+                initial_mu=1500,
+                initial_sigma=350,
+                beta=200,
+                tau=5.0,
+                min_matches=10,
+            )
             self._elo_path = self.corpus_dir / "elo.json"
             if self._elo_path.exists():
                 self._elo.load(str(self._elo_path))
@@ -814,11 +822,13 @@ class Fuzzer:
             # Pre-register all strategy names so Elo can arbitrate immediately
             # (without this, select_strategy requires min_matches before considering a strategy)
             for s in ("replicator", "bandit", "mopt"):
-                self._elo._strategy_ratings.setdefault(s, self._elo.default_rating)
+                self._elo._strategy_mu.setdefault(s, self._elo.initial_mu)
+                self._elo._strategy_sigma_sq.setdefault(s, self._elo.initial_sigma**2)
                 self._elo._strategy_match_count.setdefault(s, 0)
             for s in ("ga", "qea", "weighted", "pareto", "format", "bayesian"):
                 key = f"seed_{s}"
-                self._elo._strategy_ratings.setdefault(key, self._elo.default_rating)
+                self._elo._strategy_mu.setdefault(key, self._elo.initial_mu)
+                self._elo._strategy_sigma_sq.setdefault(key, self._elo.initial_sigma**2)
                 self._elo._strategy_match_count.setdefault(key, 0)
 
             log.info("Elo rating system enabled (k=16, decay=0.99)")
@@ -2029,7 +2039,7 @@ class Fuzzer:
         # Meta-elo: record seed strategy-level match
         if self._use_elo and self._elo and self._seed_strategy:
             score = surprisal_weight if success else 0.0
-            seed_strategies = ["ga", "weighted", "pareto", "format"]
+            seed_strategies = ["ga", "qea", "weighted", "pareto", "format", "bayesian"]
             for other in seed_strategies:
                 if other != self._seed_strategy:
                     self._elo.record_strategy_match(
@@ -2581,6 +2591,9 @@ class Fuzzer:
                         total_execs=max(1, self.exec_count),
                         **hf_kwargs,
                     )
+                else:
+                    # Markov-generated or synthetic seed: reset to neutral multiplier
+                    self._last_perf_score = 100.0
                 self.fuzz_one(seed)
                 i += 1
                 effective_interval = (
@@ -2704,7 +2717,7 @@ class Fuzzer:
                     )
         # Seed strategy convergence
         if self._use_elo and self._elo:
-            seed_strategies = ["ga", "weighted", "pareto", "format"]
+            seed_strategies = ["ga", "qea", "weighted", "pareto", "format", "bayesian"]
             has_seed_data = any(
                 self._elo._strategy_match_count.get(f"seed_{s}", 0) > 0 for s in seed_strategies
             )
@@ -2714,8 +2727,8 @@ class Fuzzer:
                     key = f"seed_{s}"
                     count = self._elo._strategy_match_count.get(key, 0)
                     if count > 0:
-                        rating = self._elo._strategy_ratings.get(key, self._elo.default_rating)
-                        delta = rating - self._elo.default_rating
+                        rating = self._elo._strategy_mu.get(key, self._elo.initial_mu)
+                        delta = rating - self._elo.initial_mu
                         sign = "+" if delta >= 0 else ""
                         print(f"    {s:<20s}: {rating:>7.0f} ({sign}{delta:.0f}, {count} matches)")
         self._print_run_summary()

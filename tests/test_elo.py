@@ -646,3 +646,40 @@ class TestBayesianEloTracker:
         for _ in range(100):
             s = belo._thompson_sample("A")
             assert isinstance(s, float)
+
+    def test_regression_strategy_match_partial_init(self):
+        """record_strategy_match must not KeyError when a key is in
+        _strategy_mu but missing from _strategy_sigma_sq (the bug: fuzzer
+        pre-registration added keys to mu/match_count but not sigma_sq)."""
+        belo = BayesianEloTracker(min_matches=0)
+        # Simulate fuzzer pre-registration that populated mu but not sigma_sq
+        belo._strategy_mu["seed_weighted"] = belo.initial_mu
+        belo._strategy_match_count["seed_weighted"] = 0
+        # sigma_sq intentionally left empty for this key
+        belo._strategy_mu["seed_ga"] = belo.initial_mu
+        belo._strategy_match_count["seed_ga"] = 0
+        # sigma_sq intentionally left empty for this key too
+        # This call would have crashed KeyError before the fix
+        belo.record_strategy_match("seed_weighted", "seed_ga", score_a=1.0)
+        # After fix, all three dicts must be populated
+        assert "seed_weighted" in belo._strategy_sigma_sq
+        assert "seed_ga" in belo._strategy_sigma_sq
+        assert belo._strategy_mu["seed_weighted"] > belo.initial_mu
+        assert belo._strategy_mu["seed_ga"] < belo.initial_mu
+        assert belo._strategy_match_count["seed_weighted"] >= 1
+
+    def test_regression_strategy_match_seen_opponent(self):
+        """record_strategy_match must also handle when one strategy is new
+        and the other was already fully initialized (e.g. from a prior
+        session load where all three dicts are in sync)."""
+        belo = BayesianEloTracker(min_matches=0)
+        # Fully initialize one strategy (all three dicts)
+        belo._strategy_mu["seed_ga"] = belo.initial_mu
+        belo._strategy_sigma_sq["seed_ga"] = belo.initial_sigma**2
+        belo._strategy_match_count["seed_ga"] = 5
+        # Call with brand-new strategy + the pre-existing one
+        belo.record_strategy_match("seed_weighted", "seed_ga", score_a=0.0)
+        assert "seed_weighted" in belo._strategy_mu
+        assert "seed_weighted" in belo._strategy_sigma_sq
+        assert "seed_weighted" in belo._strategy_match_count
+        assert belo._strategy_mu["seed_weighted"] < belo.initial_mu

@@ -70,8 +70,17 @@ class MutualInformationTracker:
             if max_pos >= self.max_positions:
                 max_pos = self.max_positions - 1
             import bisect
-            if bisect.bisect_left(self._wp_sorted_pos, max_pos) == len(self._wp_sorted_pos) or \
-               self._wp_sorted_pos[min(bisect.bisect_left(self._wp_sorted_pos, max_pos), len(self._wp_sorted_pos)-1)] != max_pos:
+
+            if (
+                bisect.bisect_left(self._wp_sorted_pos, max_pos) == len(self._wp_sorted_pos)
+                or self._wp_sorted_pos[
+                    min(
+                        bisect.bisect_left(self._wp_sorted_pos, max_pos),
+                        len(self._wp_sorted_pos) - 1,
+                    )
+                ]
+                != max_pos
+            ):
                 self._wp_sorted_pos = None
 
         for pos, byte_val in enumerate(input_bytes):

@@ -51,6 +51,7 @@ class SeedPicker:
         strategy_map = {
             "ga": lambda: f.ga.pick_seed() if f.ga else None,
             "qea": lambda: f.qea.pick_seed() if f.qea else None,
+            "weighted": lambda: self.weighted_pick_seed(),
             "pareto": lambda: self._pick_pareto_only() if f.corpus and f.seed_meta else None,
             "format": lambda: self._format_aware_seed(),
             "bayesian": lambda: (

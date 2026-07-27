@@ -350,6 +350,7 @@ def cmd_fuzz(args):
         honggfuzz=getattr(args, "honggfuzz", False),
         hw_perf=getattr(args, "hw_perf", False),
         schedule_ablation=getattr(args, "schedule_ablation", None),
+        schedule=getattr(args, "schedule", "base"),
         replicator=getattr(args, "replicator", False),
         shapley=getattr(args, "shapley", False),
         bayesian=getattr(args, "bayesian", False),
@@ -1357,6 +1358,12 @@ def main() -> int:
         default=None,
         metavar="FILE",
         help="Log per-iteration scheduling signal contributions to CSV for backtesting",
+    )
+    fuzz_parser.add_argument(
+        "--schedule",
+        default="base",
+        choices=("base", "fast", "coe", "rare", "mopt", "lin", "quad"),
+        help="AFL++ power schedule: base|fast|coe|rare|mopt|lin|quad",
     )
     fuzz_parser.add_argument(
         "-g",

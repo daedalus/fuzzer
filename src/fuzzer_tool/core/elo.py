@@ -749,10 +749,9 @@ class BayesianEloTracker:
     def record_strategy_match(self, strategy_a: str, strategy_b: str, score_a: float) -> None:
         """Record a match between two selection strategies."""
         for s in (strategy_a, strategy_b):
-            if s not in self._strategy_mu:
-                self._strategy_mu[s] = self.initial_mu
-                self._strategy_sigma_sq[s] = self.initial_sigma**2
-                self._strategy_match_count[s] = 0
+            self._strategy_mu.setdefault(s, self.initial_mu)
+            self._strategy_sigma_sq.setdefault(s, self.initial_sigma**2)
+            self._strategy_match_count.setdefault(s, 0)
 
         mu_a, mu_b = self._strategy_mu[strategy_a], self._strategy_mu[strategy_b]
         sig_a = self._strategy_sigma_sq[strategy_a]

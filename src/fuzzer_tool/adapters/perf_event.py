@@ -125,11 +125,11 @@ class PerfCounters:
         self._libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=True)
         self._libc.syscall.restype = ctypes.c_long
         self._libc.syscall.argtypes = [
-            ctypes.c_long,   # syscall number
-            ctypes.c_void_p, # perf_event_attr*
-            ctypes.c_int,    # pid
-            ctypes.c_int,    # cpu
-            ctypes.c_int,    # group_fd
+            ctypes.c_long,  # syscall number
+            ctypes.c_void_p,  # perf_event_attr*
+            ctypes.c_int,  # pid
+            ctypes.c_int,  # cpu
+            ctypes.c_int,  # group_fd
             ctypes.c_ulong,  # flags
         ]
         self._available = self._check_available()
@@ -175,13 +175,21 @@ class PerfCounters:
         try:
             devices = os.listdir("/sys/bus/event_source/devices/")
             # Only these are real hardware PMUs
-            hw_pmus = {"intel_core_pmu", "armv8_pmuv3", "armv8_pmuv3-pmcr",
-                       "amd_ibs", "amd_ibs_zen4", "hygon_pmu"}
+            hw_pmus = {
+                "intel_core_pmu",
+                "armv8_pmuv3",
+                "armv8_pmuv3-pmcr",
+                "amd_ibs",
+                "amd_ibs_zen4",
+                "hygon_pmu",
+            }
             for dev in devices:
                 if dev in hw_pmus:
                     return True
             # No hardware PMU found
-            log.debug("No hardware PMU found in /sys/bus/event_source/devices/ (found: %s)", devices)
+            log.debug(
+                "No hardware PMU found in /sys/bus/event_source/devices/ (found: %s)", devices
+            )
             return False
         except OSError:
             return False
@@ -253,6 +261,7 @@ class PerfCounters:
             # process that calls exec(), but we open on the parent PID.
             # The child inherits already-enabled counters via inherit=1.
             import fcntl
+
             PERF_IOC_ENABLE = 0x2400
             try:
                 fcntl.ioctl(fd, PERF_IOC_ENABLE)

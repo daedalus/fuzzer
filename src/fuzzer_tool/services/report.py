@@ -1267,14 +1267,18 @@ def _elo_ratings(f) -> str:
         if len(unrated) > 8:
             lines.append(f"    ... and {len(unrated) - 8} more")
 
-    # Crash-specific Elo if available
-    if f._elo.crash_track and f._elo.crash_ratings:
+    # Crash-specific Elo if available (EloTracker only; BayesianEloTracker
+    # does not maintain separate crash posteriors)
+    if hasattr(f._elo, "crash_track") and f._elo.crash_track:
         crash_ranking = f._elo.get_ranking(crash=True)
-        if crash_ranking and crash_ranking[0][1] != f._elo.default_rating:
+        if crash_ranking and crash_ranking[0][1] != getattr(
+            f._elo, "initial_mu", f._elo.default_rating
+        ):
             lines.append("")
             lines.append("  Crash-specific Elo:")
+            elo_mu = getattr(f._elo, "initial_mu", f._elo.default_rating)
             for i, (op, rating) in enumerate(crash_ranking[:5], 1):
-                delta = rating - f._elo.default_rating
+                delta = rating - elo_mu
                 sign = "+" if delta >= 0 else ""
                 lines.append(f"    {i}. {op:<20s} {rating:>7.0f} ({sign}{delta:.0f})")
 
@@ -1284,8 +1288,9 @@ def _elo_ratings(f) -> str:
         if strategy_ranking:
             lines.append("")
             lines.append("  Meta-scheduler (bandit vs MOpt):")
+            elo_mu = getattr(f._elo, "initial_mu", f._elo.default_rating)
             for s, rating in strategy_ranking:
-                delta = rating - f._elo.default_rating
+                delta = rating - elo_mu
                 sign = "+" if delta >= 0 else ""
                 matches = f._elo._strategy_match_count.get(s, 0)
                 lines.append(f"    {s:<12s} {rating:>7.0f} ({sign}{delta:.0f}, {matches} matches)")

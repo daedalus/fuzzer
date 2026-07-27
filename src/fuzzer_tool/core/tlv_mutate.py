@@ -61,12 +61,18 @@ def tlv_mutate(data: bytes, rng=None) -> bytes:
         if (found1 or found2) and r.randint(0, 7) == 0:
             if found2 and not found1:
                 # 2-byte length field — mutate both bytes as big-endian
-                new_len = r.choice([
-                    0x0000, 0x0001, 0x007F, 0x0080, 0x00FF,
-                    remaining2 & 0xFFFF,
-                    (remaining2 + 1) & 0xFFFF,
-                    (remaining2 * 2) & 0xFFFF,
-                ])
+                new_len = r.choice(
+                    [
+                        0x0000,
+                        0x0001,
+                        0x007F,
+                        0x0080,
+                        0x00FF,
+                        remaining2 & 0xFFFF,
+                        (remaining2 + 1) & 0xFFFF,
+                        (remaining2 * 2) & 0xFFFF,
+                    ]
+                )
                 buf[off] = (new_len >> 8) & 0xFF
                 buf[off + 1] = new_len & 0xFF
             else:

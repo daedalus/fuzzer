@@ -529,7 +529,12 @@ class TargetProfiler:
                     if st_value == 0:
                         continue
                     # Find which section contains this address
-                    for _sec_name, (_sec_idx, sec_off, sec_addr, _sec_size) in self._sections.items():
+                    for _sec_name, (
+                        _sec_idx,
+                        sec_off,
+                        sec_addr,
+                        _sec_size,
+                    ) in self._sections.items():
                         if sec_addr <= st_value < sec_addr + sec_size:
                             # Read pointer from the section
                             ptr_offset = st_value - sec_addr + sec_off

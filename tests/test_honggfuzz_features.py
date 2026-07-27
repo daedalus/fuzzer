@@ -278,14 +278,30 @@ class TestHonggfuzzFactors:
         now = time.time()
         # Fresh seed (<60s old) gets 4x freshness boost
         s_fresh = scorer.score(
-            exec_us=100, avg_exec_us=100, bitmap_size=50, avg_bitmap_size=50,
-            handicap=0, depth=1, fuzz_level=1, n_fuzz=1, total_execs=100,
-            time_added=now - 30, now=now,
+            exec_us=100,
+            avg_exec_us=100,
+            bitmap_size=50,
+            avg_bitmap_size=50,
+            handicap=0,
+            depth=1,
+            fuzz_level=1,
+            n_fuzz=1,
+            total_execs=100,
+            time_added=now - 30,
+            now=now,
         )
         s_old = scorer.score(
-            exec_us=100, avg_exec_us=100, bitmap_size=50, avg_bitmap_size=50,
-            handicap=0, depth=1, fuzz_level=1, n_fuzz=1, total_execs=100,
-            time_added=now - 600, now=now,
+            exec_us=100,
+            avg_exec_us=100,
+            bitmap_size=50,
+            avg_bitmap_size=50,
+            handicap=0,
+            depth=1,
+            fuzz_level=1,
+            n_fuzz=1,
+            total_execs=100,
+            time_added=now - 600,
+            now=now,
         )
         assert s_fresh > s_old
 
@@ -294,12 +310,26 @@ class TestHonggfuzzFactors:
 
         scorer = SeedScorer("base")
         s_normal = scorer.score(
-            exec_us=100, avg_exec_us=100, bitmap_size=50, avg_bitmap_size=50,
-            handicap=0, depth=1, fuzz_level=1, n_fuzz=1, total_execs=100,
+            exec_us=100,
+            avg_exec_us=100,
+            bitmap_size=50,
+            avg_bitmap_size=50,
+            handicap=0,
+            depth=1,
+            fuzz_level=1,
+            n_fuzz=1,
+            total_execs=100,
         )
         s_timeout = scorer.score(
-            exec_us=100, avg_exec_us=100, bitmap_size=50, avg_bitmap_size=50,
-            handicap=0, depth=1, fuzz_level=1, n_fuzz=1, total_execs=100,
+            exec_us=100,
+            avg_exec_us=100,
+            bitmap_size=50,
+            avg_bitmap_size=50,
+            handicap=0,
+            depth=1,
+            fuzz_level=1,
+            n_fuzz=1,
+            total_execs=100,
             timed_out=True,
         )
         assert s_timeout < s_normal * 0.1  # 1/32 penalty
@@ -310,14 +340,28 @@ class TestHonggfuzzFactors:
         scorer = SeedScorer("base")
         # High density: 50 edges in 20 bytes = 250%
         s_dense = scorer.score(
-            exec_us=100, avg_exec_us=100, bitmap_size=50, avg_bitmap_size=50,
-            handicap=0, depth=1, fuzz_level=1, n_fuzz=1, total_execs=100,
+            exec_us=100,
+            avg_exec_us=100,
+            bitmap_size=50,
+            avg_bitmap_size=50,
+            handicap=0,
+            depth=1,
+            fuzz_level=1,
+            n_fuzz=1,
+            total_execs=100,
             input_size=20,
         )
         # Low density: 50 edges in 1000 bytes = 5%
         s_sparse = scorer.score(
-            exec_us=100, avg_exec_us=100, bitmap_size=50, avg_bitmap_size=50,
-            handicap=0, depth=1, fuzz_level=1, n_fuzz=1, total_execs=100,
+            exec_us=100,
+            avg_exec_us=100,
+            bitmap_size=50,
+            avg_bitmap_size=50,
+            handicap=0,
+            depth=1,
+            fuzz_level=1,
+            n_fuzz=1,
+            total_execs=100,
             input_size=1000,
         )
         assert s_dense > s_sparse
@@ -327,13 +371,27 @@ class TestHonggfuzzFactors:
 
         scorer = SeedScorer("base")
         s_child = scorer.score(
-            exec_us=100, avg_exec_us=100, bitmap_size=50, avg_bitmap_size=50,
-            handicap=0, depth=1, fuzz_level=1, n_fuzz=1, total_execs=100,
+            exec_us=100,
+            avg_exec_us=100,
+            bitmap_size=50,
+            avg_bitmap_size=50,
+            handicap=0,
+            depth=1,
+            fuzz_level=1,
+            n_fuzz=1,
+            total_execs=100,
             child_count=3,
         )
         s_no_child = scorer.score(
-            exec_us=100, avg_exec_us=100, bitmap_size=50, avg_bitmap_size=50,
-            handicap=0, depth=1, fuzz_level=1, n_fuzz=1, total_execs=100,
+            exec_us=100,
+            avg_exec_us=100,
+            bitmap_size=50,
+            avg_bitmap_size=50,
+            handicap=0,
+            depth=1,
+            fuzz_level=1,
+            n_fuzz=1,
+            total_execs=100,
             child_count=0,
         )
         assert s_child > s_no_child
@@ -344,20 +402,41 @@ class TestHonggfuzzFactors:
         for schedule in ("base", "fast", "rare", "mopt"):
             scorer = SeedScorer(schedule)
             s_low = scorer.score(
-                exec_us=100, avg_exec_us=100, bitmap_size=50, avg_bitmap_size=50,
-                handicap=0, depth=1, fuzz_level=1, n_fuzz=1, total_execs=100,
+                exec_us=100,
+                avg_exec_us=100,
+                bitmap_size=50,
+                avg_bitmap_size=50,
+                handicap=0,
+                depth=1,
+                fuzz_level=1,
+                n_fuzz=1,
+                total_execs=100,
                 hw_instructions=100,
             )
             # Run a few to build EMA
             for _ in range(20):
                 scorer.score(
-                    exec_us=100, avg_exec_us=100, bitmap_size=50, avg_bitmap_size=50,
-                    handicap=0, depth=1, fuzz_level=1, n_fuzz=1, total_execs=100,
+                    exec_us=100,
+                    avg_exec_us=100,
+                    bitmap_size=50,
+                    avg_bitmap_size=50,
+                    handicap=0,
+                    depth=1,
+                    fuzz_level=1,
+                    n_fuzz=1,
+                    total_execs=100,
                     hw_instructions=1000,
                 )
             s_high = scorer.score(
-                exec_us=100, avg_exec_us=100, bitmap_size=50, avg_bitmap_size=50,
-                handicap=0, depth=1, fuzz_level=1, n_fuzz=1, total_execs=100,
+                exec_us=100,
+                avg_exec_us=100,
+                bitmap_size=50,
+                avg_bitmap_size=50,
+                handicap=0,
+                depth=1,
+                fuzz_level=1,
+                n_fuzz=1,
+                total_execs=100,
                 hw_instructions=1000,
             )
             assert s_high >= s_low, f"hw_perf boost failed for schedule={schedule}"
@@ -412,7 +491,8 @@ class TestEdgeTrackerHwPerf:
 
         tracker = EdgeTracker(map_size=1024)
         tracker.record_edges(
-            "s1", {100, 200},
+            "s1",
+            {100, 200},
             hw_instructions=50000,
             hw_branches=10000,
             hw_branch_misses=500,
@@ -483,35 +563,43 @@ class TestSaveCrashStackHash:
 
         # First save should succeed
         result = save_crash(
-            b"crash_input_1", 1, stderr, tmp_path,
-            crash_hashes, crash_sigs,
+            b"crash_input_1",
+            1,
+            stderr,
+            tmp_path,
+            crash_hashes,
+            crash_sigs,
         )
         assert result is not False
 
     def test_smaller_crash_replacement(self, tmp_path):
         from fuzzer_tool.adapters.filesystem import save_crash
 
-        stderr = (
-            "==1==ERROR: ASAN: x\n"
-            "    #0 0x1111 in func\n"
-            "    #1 0x2222 in func2\n"
-        )
+        stderr = "==1==ERROR: ASAN: x\n    #0 0x1111 in func\n    #1 0x2222 in func2\n"
         crash_hashes = set()
         crash_sigs = {}
         crash_min_sizes = {}
 
         # Save large trigger first
         save_crash(
-            b"A" * 1000, 1, stderr, tmp_path,
-            crash_hashes, crash_sigs,
+            b"A" * 1000,
+            1,
+            stderr,
+            tmp_path,
+            crash_hashes,
+            crash_sigs,
             crash_min_sizes=crash_min_sizes,
         )
 
         # Save smaller trigger for same stack hash
         # (needs different data hash to pass dedup)
         save_crash(
-            b"B" * 10, 1, stderr, tmp_path,
-            crash_hashes, crash_sigs,
+            b"B" * 10,
+            1,
+            stderr,
+            tmp_path,
+            crash_hashes,
+            crash_sigs,
             crash_min_sizes=crash_min_sizes,
         )
 
@@ -614,10 +702,9 @@ class TestTlvMutateRegression:
             if result[0] != data[0] and len(result) == len(data):
                 # The mutated byte should be a valid boundary value or within range
                 remaining = len(data) - 1  # correct remaining for 1-byte field
-                assert result[0] in (0x00, 0x01, 0x7F, 0x80, 0xFF) or \
-                    result[0] <= remaining, (
-                        f"seed={seed}: mutated value {result[0]:#x} is out of range"
-                    )
+                assert result[0] in (0x00, 0x01, 0x7F, 0x80, 0xFF) or result[0] <= remaining, (
+                    f"seed={seed}: mutated value {result[0]:#x} is out of range"
+                )
                 found_1byte = True
                 break
         assert found_1byte, "No 1-byte mutation triggered in 500 seeds"

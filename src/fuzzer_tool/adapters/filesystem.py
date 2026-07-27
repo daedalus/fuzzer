@@ -393,7 +393,12 @@ def save_crash(
     stack_h = report.stack_hash() if report else ""
 
     # Blocklist check: skip crashes with known stack hashes unless allowlisted
-    if crash_blocklist and stack_h and stack_h in crash_blocklist and stack_h not in (crash_allowlist or set()):
+    if (
+        crash_blocklist
+        and stack_h
+        and stack_h in crash_blocklist
+        and stack_h not in (crash_allowlist or set())
+    ):
         crash_hashes.add(h)
         crash_sigs[sig] = crash_sigs.get(sig, 0) + 1
         return False
