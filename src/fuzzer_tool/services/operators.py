@@ -1508,6 +1508,8 @@ class OperatorEngine:
             available.append("bandit")
         if f._use_mopt and f._mopt:
             available.append("mopt")
+        if f.mc and f.mc_cem and f.mc.cem_fitted:
+            available.append("cem")
 
         if f._use_elo and f._elo and len(available) >= 2:
             strategy = f._elo.select_strategy(available)
@@ -1527,6 +1529,11 @@ class OperatorEngine:
         elif strategy == "bandit" and f.mc and f.mc_bandit:
             op = f.mc.select_op(ops, prev_op=f._prev_bandit_op)
             f._prev_bandit_op = op
+            f._last_mopt_particles.append(None)
+        elif strategy == "cem" and f.mc and f.mc_cem:
+            op = f.mc.select_op(ops, prev_op=f._prev_bandit_op) if f.mc_bandit else f._rand_pool.choice(ops)
+            if f.mc_bandit:
+                f._prev_bandit_op = op
             f._last_mopt_particles.append(None)
         elif f._use_replicator and f._replicator:
             op = f._replicator.select_op(ops)

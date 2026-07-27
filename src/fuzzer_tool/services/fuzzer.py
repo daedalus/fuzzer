@@ -820,11 +820,11 @@ class Fuzzer:
 
             # Pre-register all strategy names so Elo can arbitrate immediately
             # (without this, select_strategy requires min_matches before considering a strategy)
-            for s in ("replicator", "bandit", "mopt"):
+            for s in ("replicator", "bandit", "mopt", "cem"):
                 self._elo._strategy_mu.setdefault(s, self._elo.initial_mu)
                 self._elo._strategy_sigma_sq.setdefault(s, self._elo.initial_sigma**2)
                 self._elo._strategy_match_count.setdefault(s, 0)
-            for s in ("ga", "qea", "weighted", "pareto", "format", "bayesian"):
+            for s in ("ga", "qea", "weighted", "pareto", "format", "bayesian", "markov"):
                 key = f"seed_{s}"
                 self._elo._strategy_mu.setdefault(key, self._elo.initial_mu)
                 self._elo._strategy_sigma_sq.setdefault(key, self._elo.initial_sigma**2)
@@ -2047,6 +2047,8 @@ class Fuzzer:
                 all_strategies.append("bandit")
             if self._use_mopt and self._mopt:
                 all_strategies.append("mopt")
+            if self.mc and self.mc_cem and self.mc.cem_fitted:
+                all_strategies.append("cem")
             for other in all_strategies:
                 if other != self._meta_strategy:
                     self._elo.record_strategy_match(self._meta_strategy, other, score)
@@ -2054,7 +2056,7 @@ class Fuzzer:
         # Meta-elo: record seed strategy-level match
         if self._use_elo and self._elo and self._seed_strategy:
             score = surprisal_weight if success else 0.0
-            seed_strategies = ["ga", "qea", "weighted", "pareto", "format", "bayesian"]
+            seed_strategies = ["ga", "qea", "weighted", "pareto", "format", "bayesian", "markov"]
             for other in seed_strategies:
                 if other != self._seed_strategy:
                     self._elo.record_strategy_match(
@@ -2732,7 +2734,7 @@ class Fuzzer:
                     )
         # Seed strategy convergence
         if self._use_elo and self._elo:
-            seed_strategies = ["ga", "qea", "weighted", "pareto", "format", "bayesian"]
+            seed_strategies = ["ga", "qea", "weighted", "pareto", "format", "bayesian", "markov"]
             has_seed_data = any(
                 self._elo._strategy_match_count.get(f"seed_{s}", 0) > 0 for s in seed_strategies
             )

@@ -42,6 +42,8 @@ class SeedPicker:
             available.append("format")
         if getattr(f, "_use_bayesian", False) and f._seed_quality:
             available.append("bayesian")
+        if f.markov_generate and f.markov_trained:
+            available.append("markov")
 
         if not available:
             return None
@@ -57,6 +59,7 @@ class SeedPicker:
             "bayesian": lambda: (
                 self._pick_bayesian_seed() if f.corpus and f._seed_quality else None
             ),
+            "markov": lambda: self._pick_markov_seed() if f.markov_generate and f.markov_trained else None,
         }
         handler = strategy_map.get(strategy)
         return handler() if handler else None
@@ -76,8 +79,6 @@ class SeedPicker:
             return f.qea.pick_seed()
         if f.ga:
             return f.ga.pick_seed()
-        if f.markov_generate and f.markov_trained:
-            return self._pick_markov_seed()
         if f.corpus and getattr(f, "_use_bayesian", False) and f._seed_quality:
             return self._pick_bayesian_seed()
         if f.corpus and f.seed_meta:
