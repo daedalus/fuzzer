@@ -37,6 +37,8 @@
 #include "cpu.c"
 #include "output.c"
 #include "regex_engine.c"
+#include "io.c"
+#include "fileutil.c"
 #include "search.c"
 
 /* AFL edge coverage — provided by afl_shim.c */

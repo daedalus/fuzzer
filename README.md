@@ -617,7 +617,8 @@ The existing manual `__afl_map_edge()` calls in wrappers remain — they become
 named semantic checkpoints on top of full automatic coverage.
 
 For targets with source already compiled by the build script (fgrep, tailslayer),
-the sancov flag is applied directly to their compilation — no vendoring needed.
+the sancov flag is applied directly to their compilation. fgrep is vendored from
+[daedalus/fgrep](https://github.com/daedalus/fgrep) into `vendor/fgrep/`.
 
 ## Troubleshooting
 
