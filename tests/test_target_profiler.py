@@ -98,9 +98,7 @@ class TestTargetProfilerRealBinary:
         assert len(png_profile.call_graph) > 0
 
     def test_extracted_constants_populated(self, png_profile):
-        """Capstone constant extraction from .text disassembly."""
-        if len(png_profile.extracted_constants) == 0:
-            pytest.skip("capstone not available or binary too small")
+        """Constant extraction from .text disassembly."""
         assert len(png_profile.extracted_constants) > 0
         assert len(png_profile.extracted_constants) <= 256
         for c in png_profile.extracted_constants:

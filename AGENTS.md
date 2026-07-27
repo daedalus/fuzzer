@@ -110,7 +110,7 @@ Fuzzer state is saved to `{corpus_dir}/state.json` on shutdown. Use `--resume` t
 
 ### Coverage Modes
 - `--no-shm` — forces ptrace for uninstrumented binaries
-- `--deep-coverage` — capstone disassembly for basic block discovery
+- `--deep-coverage` — x86-64 decoder for basic block discovery
 - Default SHM — for AFL-instrumented targets
 
 ### Sparse Entry Coverage

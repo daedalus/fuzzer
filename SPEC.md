@@ -58,7 +58,7 @@ Options:
 - `-n, --iterations N`: Number of iterations, 0=infinite (default: 0)
 - `-M, --mutations N`: Mutations per input (default: 8)
 - `-c, --coverage`: Enable coverage-guided mode
-- `--deep-coverage`: Enable capstone-based BB discovery
+- `--deep-coverage`: Enable BB discovery via x86-64 decoder
 - `--max-bps N`: Max breakpoints for deep coverage (default: 50000)
 - `-D, --dict FILE`: Dictionary file
 - `-F, --file-mode`: Write input to temp file instead of stdin
@@ -195,7 +195,7 @@ corpus_size, eps, peak_rss_kb, op_counts, op_success, bandit_stats, cem state.
 
 ## Performance & Constraints
 
-- No external dependencies (stdlib only, capstone optional)
+- No external dependencies (stdlib only)
 - O(1) per mutation operation
 - O(n) corpus loading where n = number of corpus files
 - Memory: corpus held in memory, elite set bounded to 200 entries

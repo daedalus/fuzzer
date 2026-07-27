@@ -33,7 +33,7 @@
 ## Coverage
 - [ ] Sanitizer coverage (-fsanitize-coverage) via LD_PRELOAD
 - [ ] Call stack coverage (distinguish f()→g() from h()→g())
-- [ ] Deep coverage with capstone BB discovery (already partially implemented)
+- [ ] Deep coverage with x86-64 decoder BB discovery
 
 ## Mutation
 - [ ] Radamsa-style structural mutations (line/field repetition, truncation)

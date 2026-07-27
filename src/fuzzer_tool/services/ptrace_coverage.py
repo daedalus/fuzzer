@@ -9,14 +9,6 @@ from fuzzer_tool.core.count_class import classify_counts
 
 log = logging.getLogger(__name__)
 
-try:
-    from capstone import CS_ARCH_X86, CS_MODE_64, Cs
-    from capstone.x86_const import X86_GRP_CALL, X86_GRP_INT, X86_GRP_JUMP, X86_GRP_RET
-
-    HAS_CAPSTONE = True
-except ImportError:
-    HAS_CAPSTONE = False
-
 PTRACE_TRACEME = 0
 PTRACE_PEEKDATA = 2
 PTRACE_POKEDATA = 5
@@ -34,7 +26,8 @@ class PtraceCoverage:
 
     Strategy: disassemble the first bytes of each function (from ELF symtab/dynsym),
     place int3 at each basic block entry, record (prev, curr) edges.
-    With --deep-coverage, uses capstone to discover all basic blocks.
+    With --deep-coverage, uses the pure-Python x86-64 decoder to discover
+    all basic blocks.
     """
 
     def __init__(
@@ -55,7 +48,7 @@ class PtraceCoverage:
         self.total_bp_hits = 0
         self._base_address: int | None = None
         self._map_snapshot = classify_counts(bytes(self.edge_map))
-        self.deep_coverage = deep_coverage and HAS_CAPSTONE
+        self.deep_coverage = deep_coverage
         self.max_bps = max_bps
         self._discovered_bbs: set[int] = set()
         self._func_ranges: list[tuple[int, int]] = []
@@ -66,8 +59,6 @@ class PtraceCoverage:
         self._stack_initialized: bool = False  # True after first valid RSP seen
 
         if self.deep_coverage:
-            self._disassembler = Cs(CS_ARCH_X86, CS_MODE_64)
-            self._disassembler.detail = True
             self._parse_elf_segments()
 
         self._collect_basic_blocks()
@@ -143,13 +134,13 @@ class PtraceCoverage:
         if not self.bb_addrs:
             self._parse_symbol_table(data, dynsym_sec, dynstr_sec, text_start, text_end)
 
-        if self.deep_coverage and HAS_CAPSTONE:
+        if self.deep_coverage:
             for func_va, func_size in self._func_ranges:
                 self._collect_function_bbs(func_va, func_size)
 
         # Exclude _start (entry point) — stack not set up yet, re-executing
         # instructions there causes SIGSEGV from push to RSP=0.
-        # Must run after all collection (symbol table + capstone discovery).
+        # Must run after all collection (symbol table + decoder discovery).
         self.bb_addrs = [a for a in set(self.bb_addrs) if a != self._elf_entry]
         self.bb_addrs.sort()
 
@@ -253,19 +244,21 @@ class PtraceCoverage:
         return None
 
     def _collect_function_bbs(self, func_va: int, func_size: int):
-        if not self.deep_coverage or not HAS_CAPSTONE:
+        if not self.deep_coverage:
             return
 
         func_bytes = self._read_func_bytes(func_va, max_len=min(func_size, 2048))
         if not func_bytes:
             return
 
+        from fuzzer_tool.core.elf import _decode_x86_64, _GRP_JUMP, _GRP_CALL, _GRP_RET, _GRP_INT
+
         try:
-            for insn in self._disassembler.disasm(func_bytes, func_va):
-                is_jump = X86_GRP_JUMP in insn.groups
-                is_call = X86_GRP_CALL in insn.groups
-                is_ret = X86_GRP_RET in insn.groups
-                is_int = X86_GRP_INT in insn.groups
+            for insn in _decode_x86_64(func_bytes, func_va):
+                is_jump = _GRP_JUMP in insn.groups
+                is_call = _GRP_CALL in insn.groups
+                is_ret = _GRP_RET in insn.groups
+                is_int = _GRP_INT in insn.groups
 
                 if is_jump:
                     if insn.op_str.startswith("0x"):
@@ -276,12 +269,12 @@ class PtraceCoverage:
                         ):
                             self.bb_addrs.append(target)
                             self._discovered_bbs.add(target)
-                    next_addr = insn.address + insn.size
+                    next_addr = insn.address + insn.length
                     if next_addr not in self._discovered_bbs:
                         self.bb_addrs.append(next_addr)
                         self._discovered_bbs.add(next_addr)
                 elif is_call or is_ret or is_int:
-                    next_addr = insn.address + insn.size
+                    next_addr = insn.address + insn.length
                     if next_addr not in self._discovered_bbs:
                         self.bb_addrs.append(next_addr)
                         self._discovered_bbs.add(next_addr)
@@ -312,27 +305,29 @@ class PtraceCoverage:
         if not func_bytes:
             return 0
 
+        from fuzzer_tool.core.elf import _decode_x86_64, _GRP_JUMP, _GRP_CALL, _GRP_RET, _GRP_INT
+
         count = 0
         try:
-            for insn in self._disassembler.disasm(func_bytes, scan_start):
+            for insn in _decode_x86_64(func_bytes, scan_start):
                 if count >= max_discover or len(self.original_bytes) >= self.max_bps:
                     break
 
-                is_jump = X86_GRP_JUMP in insn.groups
-                is_call = X86_GRP_CALL in insn.groups
-                is_ret = X86_GRP_RET in insn.groups
-                is_int = X86_GRP_INT in insn.groups
+                is_jump = _GRP_JUMP in insn.groups
+                is_call = _GRP_CALL in insn.groups
+                is_ret = _GRP_RET in insn.groups
+                is_int = _GRP_INT in insn.groups
 
                 new_targets = []
                 if is_jump and insn.op_str.startswith("0x"):
                     target = int(insn.op_str, 16)
                     if func_start <= target < func_start + func_size:
                         new_targets.append(target)
-                    next_addr = insn.address + insn.size
+                    next_addr = insn.address + insn.length
                     if func_start <= next_addr < func_start + func_size:
                         new_targets.append(next_addr)
                 elif is_call or is_ret or is_int:
-                    next_addr = insn.address + insn.size
+                    next_addr = insn.address + insn.length
                     if func_start <= next_addr < func_start + func_size:
                         new_targets.append(next_addr)
 

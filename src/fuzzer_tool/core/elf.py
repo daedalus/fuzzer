@@ -1,5 +1,9 @@
 """Shared ELF parsing utilities for sancov counter discovery and analysis.
 
+Includes a pure-Python x86-64 instruction decoder that replaces the
+optional Capstone dependency for all static analysis tasks:
+branch density, constant extraction, DIV detection, and ctrl-flow analysis.
+
 Consolidates the duplicated ELF parsing logic from shim_factory.py
 and fuzzer.py (PtraceCoverage). The embedded _PERSISTENT_LOADER script
 in persistent_loader.py retains its own copy since it runs in a
@@ -13,9 +17,11 @@ from dataclasses import dataclass, field
 log = logging.getLogger(__name__)
 
 
-# ── Minimal pure-Python x86-64 decoder (no capstone dependency) ─────────
-# Handles only the instruction patterns needed by extract_div_constants:
-# DIV/IDIV, MOV r,imm, XOR r,r, CMP r,imm / CMP r,r, LEA, and control flow.
+# ── Pure-Python x86-64 decoder (no external dependencies) ────────────────
+# Handles instruction patterns needed by the fuzzer's static analysis:
+# arithmetic (ADD/SUB/AND/OR/XOR/CMP/TEST), moves (MOV/LEA), division
+# (DIV/IDIV), control flow (CALL/JMP/JCC/RET), and CMPXCHG.
+# Unrecognized opcodes are yielded as _INS_OTHER with length=1.
 
 # Instruction type IDs (arbitrary constants, only used internally)
 _INS_MOV = 1
@@ -29,6 +35,12 @@ _INS_CALL = 8
 _INS_JMP = 9
 _INS_RET = 10
 _INS_JCC = 11
+_INS_TEST = 12
+_INS_AND = 13
+_INS_OR = 14
+_INS_SUB = 15
+_INS_ADD = 16
+_INS_CMPXCHG = 17
 _INS_OTHER = 99
 
 # Operand types
@@ -40,6 +52,7 @@ _OP_MEM = 3
 _GRP_CALL = 1
 _GRP_JUMP = 2
 _GRP_RET = 3
+_GRP_INT = 4
 
 # x86-64 register names by 3-bit encoding (extended by REX.B to 4-bit)
 _REG_NAMES = [
@@ -91,6 +104,11 @@ class _DisasmInsn:
     _regs_read: set = field(default_factory=set)
     _regs_write: set = field(default_factory=set)
 
+    @property
+    def size(self):
+        """Compatibility alias — capstone uses ``.size``, we use ``.length``."""
+        return self.length
+
     def regs_access(self):
         return self._regs_read, self._regs_write
 
@@ -106,10 +124,11 @@ def _reg_base_pure(reg_id: int) -> str | None:
 
 
 def _decode_x86_64(text: bytes, base_addr: int):
-    """Minimal x86-64 instruction decoder — yields _DisasmInsn objects.
+    """Pure-Python x86-64 instruction decoder — yields _DisasmInsn objects.
 
-    Handles only the patterns needed by extract_div_constants.
-    Unrecognized opcodes are yielded as _INS_OTHER with length=1.
+    Handles: MOV, LEA, CMP, TEST, ADD/SUB/AND/OR/XOR, CMPXCHG, DIV/IDIV,
+    CALL/JMP/JCC/RET, INT. Unrecognized opcodes are yielded as _INS_OTHER
+    with length=1.
     """
     pc = 0
     n = len(text)
@@ -231,8 +250,8 @@ def _decode_x86_64(text: bytes, base_addr: int):
                 off = 0
             insn.insn_id = _INS_JMP
             insn.groups = {_GRP_JUMP}
-            insn.op_str = f"0x{addr + pc + off:x}"
             insn.length = pc - start
+            insn.op_str = f"0x{addr + insn.length + off:x}"
             yield insn
             continue
 
@@ -245,8 +264,8 @@ def _decode_x86_64(text: bytes, base_addr: int):
                 off = 0
             insn.insn_id = _INS_JMP
             insn.groups = {_GRP_JUMP}
-            insn.op_str = f"0x{addr + pc + off:x}"
             insn.length = pc - start
+            insn.op_str = f"0x{addr + insn.length + off:x}"
             yield insn
             continue
 
@@ -259,8 +278,8 @@ def _decode_x86_64(text: bytes, base_addr: int):
                 off = 0
             insn.insn_id = _INS_CALL
             insn.groups = {_GRP_CALL}
-            insn.op_str = f"0x{addr + pc + off:x}"
             insn.length = pc - start
+            insn.op_str = f"0x{addr + insn.length + off:x}"
             yield insn
             continue
 
@@ -273,7 +292,91 @@ def _decode_x86_64(text: bytes, base_addr: int):
                 off = 0
             insn.insn_id = _INS_JCC
             insn.groups = {_GRP_JUMP}
-            insn.op_str = f"0x{addr + pc + off:x}"
+            insn.length = pc - start
+            insn.op_str = f"0x{addr + insn.length + off:x}"
+            yield insn
+            continue
+
+        # INT imm8 (0xCD)
+        if opbyte == 0xCD:
+            if pc < n:
+                pc += 1  # consume imm8
+            insn.groups = {_GRP_INT}
+            insn.length = pc - start
+            yield insn
+            continue
+
+        # ── Accumulator-specific immediate forms ──
+        # ADD EAX, imm32 (0x05)
+        if opbyte == 0x05:
+            if pc + 4 <= n:
+                imm = struct.unpack_from("<i", text, pc)[0]
+                pc += 4
+            else:
+                imm = 0
+            insn.insn_id = _INS_ADD
+            insn.operands = [_Operand(_OP_REG, 0, size=4), _Operand(_OP_IMM, imm=imm, size=4)]
+            insn._regs_read = {0}
+            insn._regs_write = {0}
+            insn.length = pc - start
+            yield insn
+            continue
+
+        # OR EAX, imm32 (0x0D)
+        if opbyte == 0x0D:
+            if pc + 4 <= n:
+                imm = struct.unpack_from("<i", text, pc)[0]
+                pc += 4
+            else:
+                imm = 0
+            insn.insn_id = _INS_OR
+            insn.operands = [_Operand(_OP_REG, 0, size=4), _Operand(_OP_IMM, imm=imm, size=4)]
+            insn._regs_read = {0}
+            insn._regs_write = {0}
+            insn.length = pc - start
+            yield insn
+            continue
+
+        # AND EAX, imm32 (0x25)
+        if opbyte == 0x25:
+            if pc + 4 <= n:
+                imm = struct.unpack_from("<i", text, pc)[0]
+                pc += 4
+            else:
+                imm = 0
+            insn.insn_id = _INS_AND
+            insn.operands = [_Operand(_OP_REG, 0, size=4), _Operand(_OP_IMM, imm=imm, size=4)]
+            insn._regs_read = {0}
+            insn._regs_write = {0}
+            insn.length = pc - start
+            yield insn
+            continue
+
+        # SUB EAX, imm32 (0x2D)
+        if opbyte == 0x2D:
+            if pc + 4 <= n:
+                imm = struct.unpack_from("<i", text, pc)[0]
+                pc += 4
+            else:
+                imm = 0
+            insn.insn_id = _INS_SUB
+            insn.operands = [_Operand(_OP_REG, 0, size=4), _Operand(_OP_IMM, imm=imm, size=4)]
+            insn._regs_read = {0}
+            insn._regs_write = {0}
+            insn.length = pc - start
+            yield insn
+            continue
+
+        # TEST EAX, imm32 (0xA9)
+        if opbyte == 0xA9:
+            if pc + 4 <= n:
+                imm = struct.unpack_from("<i", text, pc)[0]
+                pc += 4
+            else:
+                imm = 0
+            insn.insn_id = _INS_TEST
+            insn.operands = [_Operand(_OP_REG, 0, size=4), _Operand(_OP_IMM, imm=imm, size=4)]
+            insn._regs_read = {0}
             insn.length = pc - start
             yield insn
             continue
@@ -292,8 +395,8 @@ def _decode_x86_64(text: bytes, base_addr: int):
                     off = 0
                 insn.insn_id = _INS_JCC
                 insn.groups = {_GRP_JUMP}
-                insn.op_str = f"0x{addr + pc + off:x}"
                 insn.length = pc - start
+                insn.op_str = f"0x{addr + insn.length + off:x}"
                 yield insn
                 continue
 
@@ -305,6 +408,24 @@ def _decode_x86_64(text: bytes, base_addr: int):
                 yield insn
                 continue
 
+            # CMPXCHG r/m32, r32 (0F B1)
+            if op2 == 0xB1:
+                result = _decode_modrm()
+                if result is not None:
+                    mod, reg, rm, has_sib, sib_byte = result
+                    if mod == 3:
+                        insn.insn_id = _INS_CMPXCHG
+                        insn.operands = [
+                            _Operand(_OP_REG, rm, size=4),
+                            _Operand(_OP_REG, reg, size=4),
+                        ]
+                        insn._regs_read = {reg, rm}
+                        insn._regs_write = {rm}
+                    insn.length = pc - start
+                    yield insn
+                    continue
+                # fall through on decode failure
+
             # Unknown two-byte opcode — skip
             insn.insn_id = _INS_OTHER
             insn.length = pc - start
@@ -313,7 +434,7 @@ def _decode_x86_64(text: bytes, base_addr: int):
 
         # ── Multi-byte opcodes with ModR/M ──
 
-        # F7 — GRP3 (DIV/IDIV/NOT/NEG/MUL/IMUL)
+        # F7 — GRP3 (TEST/DIV/IDIV/NOT/NEG/MUL/IMUL)
         if opbyte == 0xF7:
             result = _decode_modrm()
             if result is None:
@@ -322,13 +443,27 @@ def _decode_x86_64(text: bytes, base_addr: int):
                 yield insn
                 continue
             mod, reg_ext, rm, has_sib, sib_byte = result
-            if mod == 3:  # register operand
-                if reg_ext & 7 == 6:  # DIV
+            ext = reg_ext & 7
+            if ext == 0:  # TEST r/m32, imm32
+                if pc + 4 <= n:
+                    imm = struct.unpack_from("<i", text, pc)[0]
+                    pc += 4
+                else:
+                    imm = 0
+                insn.insn_id = _INS_TEST
+                if mod == 3:
+                    insn.operands = [
+                        _Operand(_OP_REG, rm, size=4),
+                        _Operand(_OP_IMM, imm=imm, size=4),
+                    ]
+                insn._regs_read = {rm}
+            elif mod == 3:  # register operand
+                if ext == 6:  # DIV
                     insn.insn_id = _INS_DIV
                     insn.operands = [_Operand(_OP_REG, rm, size=4)]
                     insn._regs_read = {0, 2, rm}  # EAX, EDX, rm
                     insn._regs_write = {0, 2}  # EAX, EDX
-                elif reg_ext & 7 == 7:  # IDIV
+                elif ext == 7:  # IDIV
                     insn.insn_id = _INS_IDIV
                     insn.operands = [_Operand(_OP_REG, rm, size=4)]
                     insn._regs_read = {0, 2, rm}
@@ -356,10 +491,49 @@ def _decode_x86_64(text: bytes, base_addr: int):
                 pc += 4
             else:
                 imm = 0
-            if mod == 3 and (reg_ext & 7) == 7:  # CMP r/m32, imm32
-                insn.insn_id = _INS_CMP
-                insn.operands = [_Operand(_OP_REG, rm, size=4), _Operand(_OP_IMM, imm=imm, size=4)]
-                insn._regs_read = {rm}
+            if mod == 3:  # register operand
+                ext = reg_ext & 7
+                if ext == 0:  # ADD r/m32, imm32
+                    insn.insn_id = _INS_ADD
+                    insn.operands = [
+                        _Operand(_OP_REG, rm, size=4),
+                        _Operand(_OP_IMM, imm=imm, size=4),
+                    ]
+                    insn._regs_read = {rm}
+                    insn._regs_write = {rm}
+                elif ext == 1:  # OR r/m32, imm32
+                    insn.insn_id = _INS_OR
+                    insn.operands = [
+                        _Operand(_OP_REG, rm, size=4),
+                        _Operand(_OP_IMM, imm=imm, size=4),
+                    ]
+                    insn._regs_read = {rm}
+                    insn._regs_write = {rm}
+                elif ext == 4:  # AND r/m32, imm32
+                    insn.insn_id = _INS_AND
+                    insn.operands = [
+                        _Operand(_OP_REG, rm, size=4),
+                        _Operand(_OP_IMM, imm=imm, size=4),
+                    ]
+                    insn._regs_read = {rm}
+                    insn._regs_write = {rm}
+                elif ext == 5:  # SUB r/m32, imm32
+                    insn.insn_id = _INS_SUB
+                    insn.operands = [
+                        _Operand(_OP_REG, rm, size=4),
+                        _Operand(_OP_IMM, imm=imm, size=4),
+                    ]
+                    insn._regs_read = {rm}
+                    insn._regs_write = {rm}
+                elif ext == 7:  # CMP r/m32, imm32
+                    insn.insn_id = _INS_CMP
+                    insn.operands = [
+                        _Operand(_OP_REG, rm, size=4),
+                        _Operand(_OP_IMM, imm=imm, size=4),
+                    ]
+                    insn._regs_read = {rm}
+                else:
+                    insn.insn_id = _INS_OTHER
             else:
                 insn.insn_id = _INS_OTHER
             insn.length = pc - start
@@ -381,10 +555,49 @@ def _decode_x86_64(text: bytes, base_addr: int):
                 pc += 1
             else:
                 imm = 0
-            if mod == 3 and (reg_ext & 7) == 7:  # CMP r/m32, imm8
-                insn.insn_id = _INS_CMP
-                insn.operands = [_Operand(_OP_REG, rm, size=4), _Operand(_OP_IMM, imm=imm, size=4)]
-                insn._regs_read = {rm}
+            if mod == 3:  # register operand
+                ext = reg_ext & 7
+                if ext == 0:  # ADD r/m32, imm8
+                    insn.insn_id = _INS_ADD
+                    insn.operands = [
+                        _Operand(_OP_REG, rm, size=4),
+                        _Operand(_OP_IMM, imm=imm, size=4),
+                    ]
+                    insn._regs_read = {rm}
+                    insn._regs_write = {rm}
+                elif ext == 1:  # OR r/m32, imm8
+                    insn.insn_id = _INS_OR
+                    insn.operands = [
+                        _Operand(_OP_REG, rm, size=4),
+                        _Operand(_OP_IMM, imm=imm, size=4),
+                    ]
+                    insn._regs_read = {rm}
+                    insn._regs_write = {rm}
+                elif ext == 4:  # AND r/m32, imm8
+                    insn.insn_id = _INS_AND
+                    insn.operands = [
+                        _Operand(_OP_REG, rm, size=4),
+                        _Operand(_OP_IMM, imm=imm, size=4),
+                    ]
+                    insn._regs_read = {rm}
+                    insn._regs_write = {rm}
+                elif ext == 5:  # SUB r/m32, imm8
+                    insn.insn_id = _INS_SUB
+                    insn.operands = [
+                        _Operand(_OP_REG, rm, size=4),
+                        _Operand(_OP_IMM, imm=imm, size=4),
+                    ]
+                    insn._regs_read = {rm}
+                    insn._regs_write = {rm}
+                elif ext == 7:  # CMP r/m32, imm8
+                    insn.insn_id = _INS_CMP
+                    insn.operands = [
+                        _Operand(_OP_REG, rm, size=4),
+                        _Operand(_OP_IMM, imm=imm, size=4),
+                    ]
+                    insn._regs_read = {rm}
+                else:
+                    insn.insn_id = _INS_OTHER
             else:
                 insn.insn_id = _INS_OTHER
             insn.length = pc - start
@@ -436,6 +649,127 @@ def _decode_x86_64(text: bytes, base_addr: int):
                     insn.operands = [_Operand(_OP_REG, rm, size=4), _Operand(_OP_REG, reg, size=4)]
                     insn._regs_read = {reg, rm}
                     insn._regs_write = {rm}
+            else:
+                insn.insn_id = _INS_OTHER
+            insn.length = pc - start
+            yield insn
+            continue
+
+        # 01 / 03 — ADD r/m32, r32 / ADD r32, r/m32
+        if opbyte in (0x01, 0x03):
+            result = _decode_modrm()
+            if result is None:
+                insn.insn_id = _INS_OTHER
+                insn.length = pc - start
+                yield insn
+                continue
+            mod, reg, rm, has_sib, sib_byte = result
+            if mod == 3:
+                insn.insn_id = _INS_ADD
+                if opbyte == 0x01:
+                    # ADD r/m32, r32
+                    insn.operands = [_Operand(_OP_REG, rm, size=4), _Operand(_OP_REG, reg, size=4)]
+                    insn._regs_read = {reg, rm}
+                    insn._regs_write = {rm}
+                else:
+                    # ADD r32, r/m32
+                    insn.operands = [_Operand(_OP_REG, reg, size=4), _Operand(_OP_REG, rm, size=4)]
+                    insn._regs_read = {reg, rm}
+                    insn._regs_write = {reg}
+            else:
+                insn.insn_id = _INS_OTHER
+            insn.length = pc - start
+            yield insn
+            continue
+
+        # 09 / 0B — OR r/m32, r32 / OR r32, r/m32
+        if opbyte in (0x09, 0x0B):
+            result = _decode_modrm()
+            if result is None:
+                insn.insn_id = _INS_OTHER
+                insn.length = pc - start
+                yield insn
+                continue
+            mod, reg, rm, has_sib, sib_byte = result
+            if mod == 3:
+                insn.insn_id = _INS_OR
+                if opbyte == 0x09:
+                    insn.operands = [_Operand(_OP_REG, rm, size=4), _Operand(_OP_REG, reg, size=4)]
+                    insn._regs_read = {reg, rm}
+                    insn._regs_write = {rm}
+                else:
+                    insn.operands = [_Operand(_OP_REG, reg, size=4), _Operand(_OP_REG, rm, size=4)]
+                    insn._regs_read = {reg, rm}
+                    insn._regs_write = {reg}
+            else:
+                insn.insn_id = _INS_OTHER
+            insn.length = pc - start
+            yield insn
+            continue
+
+        # 21 / 23 — AND r/m32, r32 / AND r32, r/m32
+        if opbyte in (0x21, 0x23):
+            result = _decode_modrm()
+            if result is None:
+                insn.insn_id = _INS_OTHER
+                insn.length = pc - start
+                yield insn
+                continue
+            mod, reg, rm, has_sib, sib_byte = result
+            if mod == 3:
+                insn.insn_id = _INS_AND
+                if opbyte == 0x21:
+                    insn.operands = [_Operand(_OP_REG, rm, size=4), _Operand(_OP_REG, reg, size=4)]
+                    insn._regs_read = {reg, rm}
+                    insn._regs_write = {rm}
+                else:
+                    insn.operands = [_Operand(_OP_REG, reg, size=4), _Operand(_OP_REG, rm, size=4)]
+                    insn._regs_read = {reg, rm}
+                    insn._regs_write = {reg}
+            else:
+                insn.insn_id = _INS_OTHER
+            insn.length = pc - start
+            yield insn
+            continue
+
+        # 29 / 2B — SUB r/m32, r32 / SUB r32, r/m32
+        if opbyte in (0x29, 0x2B):
+            result = _decode_modrm()
+            if result is None:
+                insn.insn_id = _INS_OTHER
+                insn.length = pc - start
+                yield insn
+                continue
+            mod, reg, rm, has_sib, sib_byte = result
+            if mod == 3:
+                insn.insn_id = _INS_SUB
+                if opbyte == 0x29:
+                    insn.operands = [_Operand(_OP_REG, rm, size=4), _Operand(_OP_REG, reg, size=4)]
+                    insn._regs_read = {reg, rm}
+                    insn._regs_write = {rm}
+                else:
+                    insn.operands = [_Operand(_OP_REG, reg, size=4), _Operand(_OP_REG, rm, size=4)]
+                    insn._regs_read = {reg, rm}
+                    insn._regs_write = {reg}
+            else:
+                insn.insn_id = _INS_OTHER
+            insn.length = pc - start
+            yield insn
+            continue
+
+        # 85 — TEST r/m32, r32 (like AND, but read-only — flags only)
+        if opbyte == 0x85:
+            result = _decode_modrm()
+            if result is None:
+                insn.insn_id = _INS_OTHER
+                insn.length = pc - start
+                yield insn
+                continue
+            mod, reg, rm, has_sib, sib_byte = result
+            if mod == 3:
+                insn.insn_id = _INS_TEST
+                insn.operands = [_Operand(_OP_REG, rm, size=4), _Operand(_OP_REG, reg, size=4)]
+                insn._regs_read = {reg, rm}
             else:
                 insn.insn_id = _INS_OTHER
             insn.length = pc - start
@@ -658,7 +992,7 @@ def branch_density(target: str) -> float | None:
     """Compute branch density (conditional branches per KB) of a binary.
 
     Disassembles the .text section and counts conditional jump instructions
-    (Jcc family). Tries Capstone first, falls back to objdump.
+    (Jcc family) using the pure-Python decoder.
 
     Returns branches per KB of code, or None if analysis fails.
 
@@ -672,20 +1006,6 @@ def branch_density(target: str) -> float | None:
     Returns:
         Branches per KB (float), or None on failure.
     """
-    result = _branch_density_capstone(target)
-    if result is not None:
-        return result
-    return _branch_density_objdump(target)
-
-
-def _branch_density_capstone(target: str) -> float | None:
-    """Branch density via Capstone disassembly (preferred)."""
-    try:
-        from capstone import CS_ARCH_X86, CS_MODE_64, Cs
-        from capstone.x86_const import X86_GRP_JUMP
-    except ImportError:
-        return None
-
     try:
         with open(target, "rb") as f:
             elf = f.read()
@@ -728,17 +1048,15 @@ def _branch_density_capstone(target: str) -> float | None:
         return None
 
     # Disassemble and count conditional branches
-    md = Cs(CS_ARCH_X86, CS_MODE_64)
-    md.detail = True
+    return _branch_density_pure(text_data, text_vaddr)
+
+
+def _branch_density_pure(text_data: bytes, text_vaddr: int) -> float | None:
+    """Branch density via pure-Python decoder."""
     cond_branches = 0
-    for insn in md.disasm(text_data, text_vaddr):
-        if X86_GRP_JUMP in insn.groups:
-            is_long_jcc = (
-                insn.bytes[0] == 0x0F and len(insn.bytes) >= 2 and (insn.bytes[1] & 0xF0) == 0x80
-            )
-            is_short_jcc = insn.bytes[0] in range(0x70, 0x80)
-            if is_long_jcc or is_short_jcc:
-                cond_branches += 1
+    for insn in _decode_x86_64(text_data, text_vaddr):
+        if insn.insn_id == _INS_JCC:
+            cond_branches += 1
 
     return (cond_branches / len(text_data)) * 1024
 
@@ -840,13 +1158,12 @@ def _next_power_of_2(n: int) -> int:
     return n + 1
 
 
-def extract_capstone_constants(target: str) -> list[bytes]:
-    """Extract compile-time constants from disassembly via Capstone.
+def extract_constants_pure(target: str) -> list[bytes]:
+    """Extract compile-time constants from disassembly using pure-Python decoder.
 
     Disassembles .text and collects immediate operands from comparison,
     move, and test instructions (CMP, MOV, TEST, AND, OR, XOR, SUB,
-    ADD with immediate). Also extracts SIMD pattern-match constants
-    from PCMP{E,I}STR{I,M} and PABSB/W/D instructions.
+    ADD with immediate).
 
     These constants are compile-time magic bytes, pattern strings, and
     boundary values that the code compares against — exactly what the
@@ -855,28 +1172,11 @@ def extract_capstone_constants(target: str) -> list[bytes]:
 
       - Inlined memcmp constants folded into integer immediates
         (e.g. ``cmp rax, 0x0A1A0A0D0A474E89`` → "\\x89PNG\\r\\n\\x1a\\n")
-      - SIMD comparison vectors (e.g. PCMPEQB with constant operand)
       - Bitmask / flag values used in test/and/or instructions
 
     Returns:
         List of unique byte values (deduplicated, truncated to 256 entries).
     """
-    try:
-        from capstone import CS_ARCH_X86, CS_MODE_64, Cs
-        from capstone.x86_const import (
-            X86_INS_ADD,
-            X86_INS_AND,
-            X86_INS_CMP,
-            X86_INS_CMPXCHG,
-            X86_INS_OR,
-            X86_INS_SUB,
-            X86_INS_TEST,
-            X86_INS_XOR,
-            X86_OP_IMM,
-        )
-    except ImportError:
-        return []
-
     try:
         with open(target, "rb") as f:
             elf = f.read()
@@ -918,34 +1218,29 @@ def extract_capstone_constants(target: str) -> list[bytes]:
 
     # Instructions whose immediate operands are likely comparison constants.
     # MOV is excluded because most immediates it loads are addresses/offsets.
-    TARGET_INSNS = {
-        X86_INS_CMP,
-        X86_INS_TEST,
-        X86_INS_AND,
-        X86_INS_OR,
-        X86_INS_XOR,
-        X86_INS_SUB,
-        X86_INS_ADD,
-        X86_INS_CMPXCHG,
+    TARGET_IDS = {
+        _INS_CMP,
+        _INS_TEST,
+        _INS_AND,
+        _INS_OR,
+        _INS_XOR,
+        _INS_SUB,
+        _INS_ADD,
+        _INS_CMPXCHG,
     }
 
     constants: set[bytes] = set()
 
-    md = Cs(CS_ARCH_X86, CS_MODE_64)
-    md.detail = True
-
-    for insn in md.disasm(text_data, text_vaddr):
+    for insn in _decode_x86_64(text_data, text_vaddr):
         has_imm = False
         imm_value = 0
         imm_size = 0
 
         for op in insn.operands:
-            if op.type == X86_OP_IMM:
+            if op.type == _OP_IMM:
                 has_imm = True
                 imm_value = op.imm
-                # Determine size from the operand's access size
-                # Capstone provides op.size in bytes for some operands
-                imm_size = getattr(op, "size", 0) or _guess_imm_width(imm_value)
+                imm_size = op.size or _guess_imm_width(imm_value)
                 break
 
         if not has_imm:
@@ -959,7 +1254,7 @@ def extract_capstone_constants(target: str) -> list[bytes]:
         if _is_noise_immediate(imm_value, imm_size):
             continue
 
-        if insn.id in TARGET_INSNS:
+        if insn.insn_id in TARGET_IDS:
             # Pack as little-endian bytes of the operand width
             unsigned = imm_value & ((1 << (imm_size * 8)) - 1)
             packed = unsigned.to_bytes(imm_size, "little")
@@ -978,7 +1273,7 @@ def extract_capstone_constants(target: str) -> list[bytes]:
     # Cap at 256 entries to bound dictionary size
     result = list(constants)[:256]
     if result:
-        log.info("Capstone constants: extracted %d values from %s", len(result), target)
+        log.info("Disassembly constants: extracted %d values from %s", len(result), target)
     return result
 
 
@@ -1077,47 +1372,13 @@ def estimate_map_size(target: str) -> int:
     return min(131072, map_size)
 
 
-def _reg_base(md, reg_id: int) -> str | None:
-    """Derive a canonical base name for an x86 register.
-
-    All variants of the same physical register (al/ax/eax/rax, r8b/r8w/r8d/r8)
-    map to the same base ('ax', 'r8', etc.).  Used for alias detection in
-    the backward-scan heuristic.
-    """
-    name = md.reg_name(reg_id)
-    if not name:
-        return None
-    name = name.lower()
-    # Extended registers r8-r15 in various widths
-    if len(name) >= 2 and name[0] == "r":
-        try:
-            _ = int(name[1])  # is it r8, r9, ... r15?
-            # Strip trailing width suffix: r8b → r8, r8w → r8, r8d → r8
-            if name[-1] in ("b", "w", "d") and len(name) >= 3:
-                return name[:-1]
-            return name  # already the base (r8, r9, ..., r15)
-        except ValueError:
-            pass
-    # Strip 'e' or 'r' prefix: eax → ax, rax → ax
-    if name[0] in ("e", "r") and len(name) > 2:
-        return name[1:]
-    # Low-byte registers: al, bl, cl, dl → ax, bx, cx, dx
-    if len(name) == 2 and name[1] == "l" and name[0] in "abcd":
-        return name[0] + "x"
-    # High-byte registers: ah, bh, ch, dh → ax, bx, cx, dx
-    if len(name) == 2 and name[1] == "h" and name[0] in "abcd":
-        return name[0] + "x"
-    return name
-
-
 def _extract_imm(insn) -> int | None:
     """If *insn* loads a constant into a register, return the constant.
 
     Handles ``mov reg, imm``, ``movabs reg, imm``, and simple
     ``lea reg, [disp]`` (no base/index).
-    Works with both _DisasmInsn (pure decoder) and capstone insn objects.
+    Works with _DisasmInsn from the pure-Python decoder.
     """
-    # Pure decoder path
     if isinstance(insn, _DisasmInsn):
         if (
             insn.insn_id == _INS_MOV
@@ -1131,54 +1392,17 @@ def _extract_imm(insn) -> int | None:
                 return mem.disp
         return None
 
-    # Capstone path
-    try:
-        from capstone.x86_const import (
-            X86_INS_LEA,
-            X86_INS_MOV,
-            X86_INS_MOVABS,
-            X86_OP_IMM,
-        )
-    except ImportError:
-        return None
-
-    if insn.id == X86_INS_MOV and len(insn.operands) >= 2 and insn.operands[1].type == X86_OP_IMM:
-        return insn.operands[1].imm
-
-    if (
-        insn.id == X86_INS_MOVABS
-        and len(insn.operands) >= 2
-        and insn.operands[1].type == X86_OP_IMM
-    ):
-        return insn.operands[1].imm
-
-    if insn.id == X86_INS_LEA and len(insn.operands) >= 2:
-        mem = insn.operands[1].mem
-        if mem.base == 0 and mem.index == 0 and mem.disp != 0:
-            return mem.disp
-
     return None
 
 
 def _is_ctrl_flow(insn) -> bool:
     """Return True if *insn* changes control flow (call, jmp, ret, jcc).
 
-    Works with both _DisasmInsn (pure decoder) and capstone insn objects.
+    Works with _DisasmInsn from the pure-Python decoder.
     """
-    # Pure decoder path
     if isinstance(insn, _DisasmInsn):
         return bool(insn.groups & {_GRP_CALL, _GRP_JUMP, _GRP_RET})
-
-    # Capstone path
-    try:
-        from capstone.x86_const import (
-            X86_GRP_CALL,
-            X86_GRP_JUMP,
-            X86_GRP_RET,
-        )
-    except ImportError:
-        return False
-    return any(g in (X86_GRP_CALL, X86_GRP_JUMP, X86_GRP_RET) for g in insn.groups)
+    return False
 
 
 def extract_div_constants(target: str) -> tuple[dict[int, int], set[int]]:
@@ -1242,17 +1466,8 @@ def extract_div_constants(target: str) -> tuple[dict[int, int], set[int]]:
     if not text_data:
         return {}, set()
 
-    # Try pure decoder first (no external dependencies)
     try:
-        result = _extract_div_pure(text_data, text_vaddr)
-        if result != ({}, set()):
-            return result
-    except Exception:
-        pass
-
-    # Fall back to capstone if available
-    try:
-        return _extract_div_capstone(text_data, text_vaddr)
+        return _extract_div_pure(text_data, text_vaddr)
     except Exception:
         return {}, set()
 
@@ -1345,122 +1560,6 @@ def _extract_div_pure(text_data: bytes, text_vaddr: int) -> tuple[dict[int, int]
     if div_map or weak_mod_pcs:
         log.info(
             "elf: found %d DIV/IDIV mappings, %d weak modulus PCs (pure decoder)",
-            len(div_map),
-            len(weak_mod_pcs),
-        )
-    return div_map, weak_mod_pcs
-
-
-def _extract_div_capstone(text_data: bytes, text_vaddr: int) -> tuple[dict[int, int], set[int]]:
-    """extract_div_constants using capstone disassembly (fallback)."""
-    from capstone import CS_ARCH_X86, CS_MODE_64, Cs
-    from capstone.x86_const import (
-        X86_INS_CMP,
-        X86_INS_DIV,
-        X86_INS_IDIV,
-        X86_INS_MOV,
-        X86_OP_IMM,
-        X86_OP_REG,
-    )
-
-    md = Cs(CS_ARCH_X86, CS_MODE_64)
-    md.detail = True
-
-    # Build register alias map
-    reg_alias: dict[int, set[int]] = {}
-    group_to_ids: dict[str, set[int]] = {}
-    for insn in md.disasm(text_data, text_vaddr):
-        for op in insn.operands:
-            if op.type == X86_OP_REG:
-                base = _reg_base(md, op.reg)
-                if base:
-                    group_to_ids.setdefault(base, set()).add(op.reg)
-        break
-    for rid in range(1, 200):
-        name = md.reg_name(rid)
-        if name:
-            base = _reg_base(md, rid)
-            if base:
-                group_to_ids.setdefault(base, set()).add(rid)
-    for _base, members in group_to_ids.items():
-        for rid in members:
-            reg_alias[rid] = members
-
-    # DX family
-    _dx_family: set[int] = set()
-    for rid in range(1, 200):
-        b = _reg_base(md, rid)
-        if b == "dx":
-            _dx_family.add(rid)
-    # Dynamic remainder register tracking — expands through MOV copies
-    _rem_regs: set[int] = set()
-
-    MAX_BACKWARD = 50
-    recent: list[tuple] = []
-
-    div_map: dict[int, int] = {}
-    _known_divs: dict[int, int] = {}
-    weak_mod_pcs: set[int] = set()
-
-    for insn in md.disasm(text_data, text_vaddr):
-        regs_read, regs_write = insn.regs_access()
-
-        # ── Track remainder register propagation ──
-        for r in regs_write:
-            if r not in _dx_family:
-                _rem_regs.discard(r)
-        if insn.id == X86_INS_MOV and len(insn.operands) >= 2:
-            d, s = insn.operands[0], insn.operands[1]
-            if d.type == X86_OP_REG and s.type == X86_OP_REG and s.reg in _rem_regs:
-                _rem_regs.add(d.reg)
-        if insn.id in (X86_INS_DIV, X86_INS_IDIV):
-            _rem_regs = set(_dx_family)
-
-        recent.append((insn, set(regs_write)))
-        if len(recent) > MAX_BACKWARD:
-            recent.pop(0)
-
-        if insn.id in (X86_INS_DIV, X86_INS_IDIV):
-            op = insn.operands[0] if insn.operands else None
-            if op is None:
-                continue
-            divisor: int | None = None
-            if op.type == X86_OP_IMM:
-                if 0 < op.imm <= 0xFFFFFFFF:
-                    divisor = op.imm
-            elif op.type == X86_OP_REG:
-                div_reg = op.reg
-                div_reg_family = reg_alias.get(div_reg, {div_reg})
-                for prev_insn, prev_writes in reversed(recent[:-1]):
-                    if _is_ctrl_flow(prev_insn):
-                        break
-                    if prev_writes & div_reg_family:
-                        candidate = _extract_imm(prev_insn)
-                        if candidate is not None and 0 < candidate <= 0xFFFFFFFF:
-                            divisor = candidate
-                        break
-            if divisor is not None:
-                div_map[insn.address] = divisor
-                _known_divs[insn.address] = divisor
-            continue
-
-        if (
-            insn.id == X86_INS_CMP
-            and len(insn.operands) >= 2
-            and any(op.type == X86_OP_REG and op.reg in _rem_regs for op in insn.operands)
-        ):
-            for prev_insn, _ in reversed(recent[:-1]):
-                if prev_insn.id in (X86_INS_DIV, X86_INS_IDIV):
-                    d = _known_divs.get(prev_insn.address)
-                    if d is not None:
-                        div_map[insn.address] = d
-                    else:
-                        weak_mod_pcs.add(insn.address)
-                    break
-
-    if div_map or weak_mod_pcs:
-        log.info(
-            "elf: found %d DIV/IDIV mappings, %d weak modulus PCs (capstone)",
             len(div_map),
             len(weak_mod_pcs),
         )

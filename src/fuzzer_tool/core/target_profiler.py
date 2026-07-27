@@ -612,7 +612,7 @@ class TargetProfiler:
             )
 
     def _extract_constants(self, profile: TargetProfile):
-        """Extract compile-time constants from disassembly via Capstone.
+        """Extract compile-time constants from disassembly.
 
         Disassembles .text and extracts immediate operands from comparison
         instructions (CMP, TEST, AND, OR, XOR, SUB, ADD).  These catch
@@ -620,18 +620,18 @@ class TargetProfiler:
         .rodata string scan misses.
         """
         try:
-            from fuzzer_tool.core.elf import extract_capstone_constants
+            from fuzzer_tool.core.elf import extract_constants_pure
 
-            constants = extract_capstone_constants(self.target)
+            constants = extract_constants_pure(self.target)
             if constants:
                 profile.extracted_constants = constants
                 log.info(
-                    "Capstone: extracted %d disassembly constants from %s",
+                    "Extracted %d disassembly constants from %s",
                     len(constants),
                     self.target,
                 )
         except Exception as e:
-            log.debug("Capstone constant extraction failed: %s", e)
+            log.debug("Constant extraction failed: %s", e)
 
     def _analyze_functions(self, profile: TargetProfile):
         """Analyze functions: sizes, branch density, hot functions."""
@@ -645,18 +645,7 @@ class TargetProfiler:
             _, text_offset, text_vaddr, text_size = self._sections[".text"]
             text_data = self._elf[text_offset : text_offset + text_size]
 
-        # Try capstone for branch counting
-        capstone_available = False
-        md = None
-        try:
-            from capstone import CS_ARCH_X86, CS_MODE_64, Cs
-            from capstone.x86_const import X86_GRP_JUMP
-
-            md = Cs(CS_ARCH_X86, CS_MODE_64)
-            md.detail = True
-            capstone_available = True
-        except ImportError:
-            log.debug("capstone not available — deep branch density disabled")
+        from fuzzer_tool.core.elf import _decode_x86_64, _INS_JCC
 
         for name, addr, size, st_type in self._symtab:
             if size == 0:
@@ -666,26 +655,20 @@ class TargetProfiler:
 
             # Count conditional branches in this function's code
             branch_density = 0.0
-            if capstone_available and text_data and text_vaddr > 0:
+            if text_data and text_vaddr > 0:
                 func_start = addr - text_vaddr
                 func_end = func_start + size
                 if 0 <= func_start < len(text_data) and func_end <= len(text_data):
                     func_bytes = text_data[func_start:func_end]
                     cond_branches = 0
                     try:
-                        for insn in md.disasm(func_bytes, addr):
-                            if X86_GRP_JUMP in insn.groups:
-                                is_jcc = (
-                                    insn.bytes[0] == 0x0F
-                                    and len(insn.bytes) >= 2
-                                    and (insn.bytes[1] & 0xF0) == 0x80
-                                ) or insn.bytes[0] in range(0x70, 0x80)
-                                if is_jcc:
-                                    cond_branches += 1
+                        for insn in _decode_x86_64(func_bytes, addr):
+                            if insn.insn_id == _INS_JCC:
+                                cond_branches += 1
                     except Exception:
                         log.debug(
                             "Instruction parse failed at %#x in %s",
-                            insn.address if "insn" in dir() else 0,
+                            addr,
                             name,
                             exc_info=True,
                         )
@@ -858,17 +841,7 @@ class TargetProfiler:
         for name, addr, size, _ in self._symtab:
             addr_to_func[addr] = name
 
-        # Try capstone for call detection
-        try:
-            from capstone import CS_ARCH_X86, CS_MODE_64, Cs
-            from capstone.x86_const import X86_GRP_CALL
-
-            md = Cs(CS_ARCH_X86, CS_MODE_64)
-            md.detail = True
-        except ImportError:
-            # Fallback: scan for E8 (REL32 call) opcode
-            self._build_call_graph_raw(profile, text_data, text_vaddr, addr_to_func)
-            return
+        from fuzzer_tool.core.elf import _decode_x86_64, _GRP_CALL
 
         for name, addr, size, _ in self._symtab:
             func_start = addr - text_vaddr
@@ -878,8 +851,8 @@ class TargetProfiler:
             func_bytes = text_data[func_start:func_end]
 
             try:
-                for insn in md.disasm(func_bytes, addr):
-                    if X86_GRP_CALL in insn.groups and insn.op_str.startswith("0x"):
+                for insn in _decode_x86_64(func_bytes, addr):
+                    if _GRP_CALL in insn.groups and insn.op_str.startswith("0x"):
                         target_addr = int(insn.op_str, 16)
                         if target_addr in addr_to_func:
                             callee = addr_to_func[target_addr]

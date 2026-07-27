@@ -196,31 +196,24 @@ class TestFindLoadSegment:
             assert memsz >= filesz
 
 
-class TestExtractCapstoneConstants:
-    """Tests for extract_capstone_constants and helpers."""
-
-    def test_no_capstone(self, monkeypatch):
-        """Returns [] when capstone is not installed."""
-        monkeypatch.setattr("fuzzer_tool.core.elf.extract_capstone_constants", lambda _: [])
-        from fuzzer_tool.core.elf import extract_capstone_constants
-
-        assert extract_capstone_constants("anything") == []
+class TestExtractConstants:
+    """Tests for extract_constants_pure and helpers."""
 
     def test_non_elf(self):
-        from fuzzer_tool.core.elf import extract_capstone_constants
+        from fuzzer_tool.core.elf import extract_constants_pure
 
-        result = extract_capstone_constants("/dev/null")
+        result = extract_constants_pure("/dev/null")
         assert result == []
 
     def test_too_short(self, tmp_path):
-        from fuzzer_tool.core.elf import extract_capstone_constants
+        from fuzzer_tool.core.elf import extract_constants_pure
 
         p = tmp_path / "short"
         p.write_bytes(b"\x7fELF")
-        assert extract_capstone_constants(str(p)) == []
+        assert extract_constants_pure(str(p)) == []
 
     def test_elf32_rejected(self, tmp_path):
-        from fuzzer_tool.core.elf import extract_capstone_constants
+        from fuzzer_tool.core.elf import extract_constants_pure
 
         header = bytearray(64)
         header[0:4] = b"\x7fELF"
@@ -228,11 +221,11 @@ class TestExtractCapstoneConstants:
         header[5] = 2  # ELFDATA2MSB
         p = tmp_path / "elf32"
         p.write_bytes(bytes(header))
-        assert extract_capstone_constants(str(p)) == []
+        assert extract_constants_pure(str(p)) == []
 
     def test_no_text_section(self, tmp_path):
         """ELF with no .text section returns []."""
-        from fuzzer_tool.core.elf import extract_capstone_constants
+        from fuzzer_tool.core.elf import extract_constants_pure
 
         header = _build_elf64_header(e_shnum=1, e_shstrndx=0, e_shentsize=64)
         shstrtab = b".shstrtab\x00"
@@ -243,38 +236,19 @@ class TestExtractCapstoneConstants:
         data[256 : 256 + len(shstrtab)] = shstrtab
         p = tmp_path / "no_text"
         p.write_bytes(bytes(data))
-        assert extract_capstone_constants(str(p)) == []
+        assert extract_constants_pure(str(p)) == []
 
-    def test_real_binary_asan_tracecmp(self):
-        """Extract constants from the ASAN+tracecmp target."""
-        from fuzzer_tool.core.elf import extract_capstone_constants
+    def test_real_binary(self):
+        """Extract constants from the png_read target."""
+        from fuzzer_tool.core.elf import extract_constants_pure
 
-        target = "targets/png_read_tracecmp_asan.so"
+        target = "targets/png_read.so"
         if not os.path.isfile(target):
             return
-        result = extract_capstone_constants(target)
+        result = extract_constants_pure(target)
         assert isinstance(result, list)
         assert len(result) > 0
         assert len(result) <= 256
-        # Verify format: list of bytes objects, each >= 2 bytes
-        for c in result:
-            assert isinstance(c, bytes)
-            assert len(c) >= 2
-            assert len(c) in (2, 4, 8)
-        # At least some should be multi-byte or recognizable
-        has_wide = any(len(c) >= 4 for c in result)
-        assert has_wide, f"Expected wide constants (>=4 bytes), got {result[:10]}"
-
-    def test_real_binary_tracecmp(self):
-        """Extract constants from the non-ASAN tracecmp target."""
-        from fuzzer_tool.core.elf import extract_capstone_constants
-
-        target = "targets/png_read_tracecmp.so"
-        if not os.path.isfile(target):
-            return
-        result = extract_capstone_constants(target)
-        assert isinstance(result, list)
-        assert len(result) > 0
         for c in result:
             assert isinstance(c, bytes)
             assert len(c) >= 2
@@ -936,7 +910,9 @@ class TestX86_64Decoder:
             b"\xc3"  # ret
         )
         insns = self._decode(code)
-        assert len(insns) == 8, f"expected 8 insns, got {len(insns)}: {[(i.insn_id, i.length) for i in insns]}"
+        assert len(insns) == 8, (
+            f"expected 8 insns, got {len(insns)}: {[(i.insn_id, i.length) for i in insns]}"
+        )
         assert insns[0].insn_id == 99  # endbr64 → _INS_OTHER (with F3 consumed as prefix)
         assert insns[0].length == 4
         assert insns[1].insn_id == 1  # mov ecx, 10

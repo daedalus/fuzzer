@@ -1016,7 +1016,9 @@ def main() -> int:
         "-c", "--coverage", action="store_true", help="Enable coverage-guided mode"
     )
     fuzz_parser.add_argument(
-        "--deep-coverage", action="store_true", help="Enable capstone-based basic block discovery"
+        "--deep-coverage",
+        action="store_true",
+        help="Enable basic block discovery via x86-64 decoder",
     )
     fuzz_parser.add_argument(
         "--max-bps", type=int, default=50000, help="Max breakpoints for deep coverage"

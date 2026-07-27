@@ -42,7 +42,7 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 - **Morris probabilistic counting (a=30)**: log-scale edge hit counters prevent overflow and provide frequency information for scheduler decisions; estimate formula `a * ((1+1/a)^v - 1)` converts back to approximate counts
 - **AFL SHM bitmap** coverage for instrumented targets (~65-200 eps). **Sparse 8-byte entry hash table** replaces the traditional fixed-size byte bitmap — each SHM entry stores `{edge_id: uint32_t, count: uint32_t}` with open-addressing linear probing. Edge IDs are full 32-bit `(prev_loc ^ cur_loc)` values, eliminating silent bucket collisions. The hash table load factor replaces birthday-collision as the resize signal. No Morris counting needed (32-bit saturating counters). **Auto-resize on stall** is enabled by default (`--resize-map-on-stall` / `--no-resize-map-on-stall`) — when load factor exceeds 0.7, SHM grows to reduce collision risk and expose new edges.
 - **SHM front-header metadata**: the SHM segment begins with a fixed 24-byte header (offset 0–23), followed by the edge table at offset 24. Layout: `stack_depth` (u32 @0), `_pad0` (u32 @4), `path_hash` (u64 @8), `edge_count` (u64 @16). The front header is never moved, even when the edge table is resized — only the table grows, keeping metadata access O(1) and resize-safe. `edge_count` is a **cumulative** insert-only counter that survives across executions: the C shim maintains a static `__afl_total_edge_count` that is never reset, and writes it to the SHM header on each new-slot insertion. This provides a correct O(1) fast-path for coverage-change detection — `is_new_coverage()` reads 8 bytes and compares against the last known value; if the count differs, the slow path determines whether any edge_ids are genuinely new. The previous per-execution counter caused false-negatives when consecutive executions touched the same number of distinct edges (fixed).
-- **Ptrace edge coverage** with deep capstone disassembly for closed-source binaries (~18-20 eps)
+- **Ptrace edge coverage** with deep x86-64 decoder disassembly for closed-source binaries (~18-20 eps)
 - **In-process execution**: persistent subprocess mode (~65-120 eps) with auto-restart on crash
 - **Stack depth tracking**: SHM front-header (offset 0) tracks max stack depth per iteration via `__sancov_lowest_stack` hook (C shim) or approximation from edge count (Python fallback)
 - **Path hash**: rolling 64-bit hash (`hash = hash * 31 ^ edge_id`) maintained in SHM front-header (offset 8) for collision-resistant path identification and seed diversity scoring
@@ -383,7 +383,7 @@ State files:
 
 ## ELF Binary Static Analysis
 
-The fuzzer includes a built-in ELF analysis engine for extracting DIV/IDIV constants from compiled binaries using an x86-64 instruction decoder (pure Python with optional Capstone fallback):
+The fuzzer includes a built-in ELF analysis engine for extracting DIV/IDIV constants from compiled binaries using the pure-Python x86-64 instruction decoder:
 
 ### DIV/IDIV Constant Extraction
 
@@ -399,7 +399,7 @@ print('Weak modulus PCs:', w)
 
 - **Backward scan**: traces register writes backward from DIV/IDIV to find `mov $K, %reg` (constant-assignment) that feeds the divisor register
 - **Forward modulus extraction**: detects `cmp $K, %edx` patterns after DIV/IDIV, mapping CMP addresses to the same divisor — even when the remainder is copied through an intermediate register (`mov %edx,%eax; cmp $K,%eax`)
-- **Dual decoder**: pure-Python x86-64 decoder (fast, no dependency) with automatic Capstone fallback when available
+- **Pure-Python decoder**: x86-64 instruction decoder with no external dependencies
 - **CET/IBT aware**: correctly consumes `endbr64` (F3 0F 1E FA) and multi-byte NOP (0F 1F) alignment instructions
 - **Register-to-register MOV**: handles `89 /r` and `8B /r` encodings for remainder propagation tracking
 - **Dynamic remainder tracking**: `_rem_regs` set expands through MOV copies and shrinks on register overwrites, enabling `weak_mod_pcs` detection through the common GCC `mov %edx,%eax; cmp $K,%eax` idiom

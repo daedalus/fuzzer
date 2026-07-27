@@ -21,7 +21,7 @@ def main():
     iterations = sys.argv[3] if len(sys.argv) > 3 else '1500'
 
     # Warm up: run a small number of iterations first so startup costs
-    # (target_profiler, capstone, branch_density) don't pollute the profile.
+    # (target_profiler, elf analysis, branch_density) don't pollute the profile.
     # We measure only the steady-state loop by excluding the warmup execs.
     import subprocess
     import time

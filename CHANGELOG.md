@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Sanitizer output parsing (ASAN, MSAN, TSAN, LSAN, UBSAN)
 - Crash deduplication via signature generation
 - Coverage-guided mode with ptrace breakpoints
-- Deep coverage via capstone disassembly
+- Deep coverage via x86-64 decoder disassembly
 - File-mode execution for file-reading targets
 - CLI with argparse
 - pytest test suite

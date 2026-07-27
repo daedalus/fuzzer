@@ -421,7 +421,7 @@ class Fuzzer:
                 if mb not in self.dictionary:
                     self.dictionary.append(mb)
 
-        # Auto-populate dictionary from capstone-extracted constants
+        # Auto-populate dictionary from disassembly-extracted constants
         if self._profile.extracted_constants:
             for c in self._profile.extracted_constants:
                 if c not in self.dictionary and len(c) >= 2:
@@ -1139,7 +1139,7 @@ class Fuzzer:
         cov = PtraceCoverage(target, deep_coverage=deep_coverage, max_bps=max_bps)
         if cov.bb_addrs:
             self.ptrace_cov = cov
-            mode = "deep (capstone)" if cov.deep_coverage else "function-entry"
+            mode = "deep (pure decoder)" if cov.deep_coverage else "function-entry"
             print(f"[*] Coverage: {len(cov.bb_addrs)} breakpoints ({mode}), map={cov.map_size}")
         else:
             print(
