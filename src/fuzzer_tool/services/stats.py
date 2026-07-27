@@ -611,6 +611,44 @@ class StatsReporter:
                 f"ipc:{stats['ipc']:.2f}"
             )
 
+        qea_str = ""
+        qea = getattr(f, "qea", None)
+        if qea:
+            try:
+                qea_str = (
+                    f" | qea: gen={qea.generation} pop={len(qea.population)}"
+                    f" spc={qea.species_count} fit={qea.best_fitness:.2f}"
+                )
+            except (AttributeError, TypeError):
+                pass
+
+        mi_str = ""
+        mi = getattr(f, "_mi", None)
+        if mi:
+            try:
+                mi_str = (
+                    f" | mi: obs={mi.total_observations}"
+                    f" pos={len(mi.position_counts)}"
+                )
+            except (AttributeError, TypeError):
+                pass
+
+        elo_str = ""
+        if getattr(f, "_use_elo", False) and getattr(f, "_elo", None):
+            try:
+                elo = f._elo
+                meta = getattr(f, "_meta_strategy", "?")
+                seed = getattr(f, "_seed_strategy", "?")
+                ranking = elo.get_strategy_ranking()
+                top = ranking[0][0] if ranking else "?"
+                top_rating = ranking[0][1] if ranking else 0
+                elo_str = (
+                    f" | elo: meta={meta} seed={seed}"
+                    f" top={top}({top_rating:.0f})"
+                )
+            except (AttributeError, TypeError):
+                pass
+
         hf_str = ""
         if getattr(f, "honggfuzz", False):
             total_hf = (
@@ -637,10 +675,130 @@ class StatsReporter:
                     parts.append(f"tmo:{f._hf_timeout_penalties}")
                 hf_str = " | hf: " + " ".join(parts)
 
+        ga_str = ""
+        ga = getattr(f, "ga", None)
+        if ga:
+            try:
+                ga_str = (
+                    f" | ga: gen={ga.generation} pop={len(ga.population)}"
+                    f" spc={ga.species_count} fit={ga.best_fitness:.2f}"
+                )
+            except (AttributeError, TypeError):
+                pass
+
+        sens_str = ""
+        sens = getattr(f, "_sensitivity", None)
+        if sens:
+            try:
+                analyzed = len(getattr(sens, "_analyzed", set()))
+                if analyzed > 0:
+                    sens_str = f" | sens: {analyzed} seeds"
+            except (AttributeError, TypeError):
+                pass
+
+        te_str = ""
+        if getattr(f, "_use_transfer_entropy", False) and getattr(f, "_te", None):
+            try:
+                causal = len(f._te_byte_edges)
+                if causal > 0:
+                    te_str = f" | te: {causal} edges"
+            except (AttributeError, TypeError):
+                pass
+
+        sec_str = ""
+        if getattr(f, "_secretary", False):
+            try:
+                n_total = len(getattr(f, "_seed_secretary", {})) + len(
+                    getattr(f, "_op_secretary", {})
+                )
+                if n_total > 0:
+                    sec_str = f" | sec: {n_total} tracking"
+            except (AttributeError, TypeError):
+                pass
+
+        shap_str = ""
+        if getattr(f, "_use_shapley", False) and getattr(f, "_shapley", None):
+            try:
+                n_ops = len(f._shapley.shapley_values())
+                if n_ops > 0:
+                    shap_str = f" | shap: {n_ops} ops"
+            except (AttributeError, TypeError):
+                pass
+
+        fs_str = ""
+        fs = getattr(f, "_frameshift", None)
+        if fs:
+            try:
+                n_rel = len(fs.relations)
+                if n_rel > 0:
+                    fs_str = f" | fs: {n_rel} rel"
+            except (AttributeError, TypeError):
+                pass
+
+        misc_str = ""
+        try:
+            parts = []
+            if f._pruned_count > 0:
+                parts.append(f"pruned:{f._pruned_count}")
+            if f._total_kernel_crash_count > 0:
+                parts.append(f"kcrash:{f._total_kernel_crash_count}")
+            if f._duplicate_reject_count > 0:
+                parts.append(f"dup:{f._duplicate_reject_count}")
+            if parts:
+                misc_str = " | " + " ".join(parts)
+        except (AttributeError, TypeError):
+            pass
+
+        bayes_str = ""
+        if getattr(f, "_use_bayesian", False) and getattr(f, "_seed_quality", None):
+            try:
+                n_seeds = f._seed_quality.n_seeds
+                n_obs = f._seed_quality.total_observations
+                if n_seeds > 0:
+                    bayes_str = f" | bayes: {n_seeds} seeds {n_obs} obs"
+            except (AttributeError, TypeError):
+                pass
+
+        markov_extra = ""
+        if f.markov_trained:
+            try:
+                if hasattr(f.markov, "chains"):
+                    ctx = sum(c._contexts_seen for c in f.markov.chains.values())
+                    markov_extra = f" ctx:{ctx}"
+                elif hasattr(f.markov, "_contexts_seen"):
+                    markov_extra = f" ctx:{f.markov._contexts_seen}"
+            except (AttributeError, TypeError):
+                pass
+        if markov_extra:
+            markov_str += markov_extra
+
+        rep_str = ""
+        if getattr(f, "_use_replicator", False) and getattr(f, "_replicator", None):
+            try:
+                dom = f._replicator.dominant_operator()
+                dist = f._replicator.population_distribution()
+                if dist:
+                    rep_str = f" | rep: dom={dom} ops={len(dist)}"
+            except (AttributeError, TypeError):
+                pass
+
+        mopt_str = ""
+        if getattr(f, "_use_mopt", False) and getattr(f, "_mopt", None):
+            try:
+                n_particles = len(getattr(f._mopt, "_particles", []))
+                mopt_str = f" | mopt: {n_particles}p"
+            except (AttributeError, TypeError):
+                pass
+
         line = (
             f"[*] execs: {f.exec_count} | corpus: {len(f.corpus)} | "
             f"crashes: {f.crash_count}{sig_str}{timeout_str} | eps: {eps:.0f} | "
-            f"time: {elapsed:.0f}s{rss_str}{ops_str}{dict_str}{markov_str}{cmplog_str}{smt_str}{cov_str}{ph_str}{mc_str}{div_str}{jac_str}{dr_str}{density_str}{repro_str}{brier_str}{crps_str}{ent_str}{simp_str}{rate_str}{fmt_str}{perf_str}{hf_str}"
+            f"time: {elapsed:.0f}s{rss_str}{ops_str}{dict_str}{markov_str}{cmplog_str}"
+            f"{smt_str}{cov_str}{ph_str}{mc_str}{qea_str}{ga_str}{mi_str}{elo_str}"
+            f"{sens_str}{te_str}{sec_str}{shap_str}{fs_str}{rep_str}{mopt_str}"
+            f"{bayes_str}{misc_str}"
+            f"{div_str}{jac_str}{dr_str}{density_str}{repro_str}{brier_str}{crps_str}"
+            f"{ent_str}{simp_str}{rate_str}{fmt_str}{perf_str}{hf_str}"
         )
         growth = f._edge_tracker.coverage_growth_model()
         if growth["confidence"] > 0.1:
