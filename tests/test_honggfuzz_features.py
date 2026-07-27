@@ -9,7 +9,6 @@ import time
 
 import pytest
 
-
 # ── TLV Mutation ────────────────────────────────────────────────────
 
 
@@ -51,9 +50,9 @@ class TestTlvMutate:
         assert mutated
 
     def test_deterministic_with_seed(self):
-        from fuzzer_tool.core.tlv_mutate import tlv_mutate
-
         import random
+
+        from fuzzer_tool.core.tlv_mutate import tlv_mutate
 
         data = b"test data for mutation"
         r1 = tlv_mutate(data, rng=random.Random(42))
@@ -96,9 +95,9 @@ class TestTokenShuffle:
         assert result == b"ab"  # too short
 
     def test_deterministic_with_seed(self):
-        from fuzzer_tool.core.token_shuffle import token_shuffle
-
         import random
+
+        from fuzzer_tool.core.token_shuffle import token_shuffle
 
         data = b"a b c d e f"
         r1 = token_shuffle(data, rng=random.Random(42))
@@ -480,6 +479,78 @@ class TestPerfCounters:
 
         shim = PerfShim()
         assert shim.available is False  # no .so compiled
+
+    # ── Regression tests for PMU detection fix ───────────────────────
+
+    def test_default_exclude_kernel_false(self):
+        """exclude_kernel=False is the default (fix for AMD systems where
+        True zeros out user-space instruction counting)."""
+        from fuzzer_tool.adapters.perf_event import PerfCounters
+
+        pc = PerfCounters()
+        assert pc.exclude_kernel is False
+
+    def test_regression_probe_based_detection(self):
+        """_check_available uses a perf_event_open probe, not a fragile
+        PMU name whitelist. Verify that the probe path is exercised and
+        does not raise on this system regardless of PMU availability."""
+        from fuzzer_tool.adapters.perf_event import PerfCounters
+
+        pc = PerfCounters()
+        # available may be True or False depending on the test runner,
+        # but the probe path must not crash (regression: old whitelist
+        # missed AMD PMUs and returned False on Ryzen systems).
+        assert isinstance(pc.available, bool)
+        assert hasattr(pc, "_available")
+
+    def test_regression_inprocess_counting(self):
+        """open_for_pid(0) on the current process followed by work
+        must return non-zero instruction deltas (regression: counters
+        were never opened for in-process direct/direct_lite mode)."""
+        from fuzzer_tool.adapters.perf_event import PerfCounters
+
+        pc = PerfCounters()
+        if not pc.available:
+            pytest.skip("hardware perf counters not available on this system")
+
+        assert pc.open_for_pid(0), "open_for_pid(0) should succeed"
+        _ = sum(i * i for i in range(200000))  # enough work to register
+        deltas = pc.read_and_reset()
+        pc.close()
+
+        assert deltas.get("instructions", 0) > 0, (
+            f"Expected non-zero instructions after work, got {deltas}"
+        )
+        assert deltas.get("branches", 0) > 0, f"Expected non-zero branches after work, got {deltas}"
+
+    def test_regression_subprocess_counting(self):
+        """open_for_pid(pid) on a forked child must return non-zero
+        instruction deltas (regression: inherit=1 doesn't survive exec,
+        so counters must be opened on the child PID directly)."""
+        import os
+
+        from fuzzer_tool.adapters.perf_event import PerfCounters
+
+        pc = PerfCounters()
+        if not pc.available:
+            pytest.skip("hardware perf counters not available on this system")
+
+        pid = os.fork()
+        if pid == 0:
+            _ = sum(i * i for i in range(500000))
+            os._exit(0)
+
+        assert pc.open_for_pid(pid), "open_for_pid(child_pid) should succeed"
+        _, status = os.waitpid(pid, 0)
+        deltas = pc.read_and_reset()
+        pc.close()
+
+        assert deltas.get("instructions", 0) > 0, (
+            f"Expected non-zero instructions from child pid={pid}, got {deltas}"
+        )
+        assert deltas.get("branches", 0) > 0, (
+            f"Expected non-zero branches from child pid={pid}, got {deltas}"
+        )
 
 
 # ── Edge Tracker HW Perf Metrics ────────────────────────────────────
