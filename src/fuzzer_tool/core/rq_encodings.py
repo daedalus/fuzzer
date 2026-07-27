@@ -21,6 +21,12 @@ log = logging.getLogger(__name__)
 
 # ── Helpers ────────────────────────────────────────────────────────────
 
+# Local bindings for hot-path micro-optimization
+_int_from_bytes = int.from_bytes
+_bytes_ljust = bytes.ljust
+_struct_unpack = struct.unpack
+_struct_pack = struct.pack
+
 _UNPACK_KEYS = {1: "B", 2: "H", 4: "L", 8: "Q"}
 
 
@@ -31,18 +37,9 @@ def _to_int(val: bytes, signed: bool = False) -> int:
     memcmp(foo, bar, 7)) by zero-extending (or sign-extending) to the nearest
     supported width.
     """
-    n = len(val)
-    if n == 0:
+    if not val:
         return 0
-    if n <= 1:
-        return val[0] - 256 if signed and val[0] >= 128 else val[0]
-    # Determine pad byte: zero-extend by default, sign-extend when signed
-    pad = b"\xff" if signed and (val[-1] & 0x80) else b"\x00"
-    if n <= 2:
-        return struct.unpack("<h" if signed else "<H", val.ljust(2, pad))[0]
-    if n <= 4:
-        return struct.unpack("<i" if signed else "<I", val.ljust(4, pad))[0]
-    return struct.unpack("<q" if signed else "<Q", val[:8].ljust(8, pad))[0]
+    return _int_from_bytes(val, "little", signed=signed)
 
 
 def _reverse_if(val: bytes, do_reverse: bool) -> bytes:
@@ -314,9 +311,10 @@ def find_offsets(data: bytes, pattern: bytes) -> list[int]:
     if not pattern:
         return []
     offsets = []
+    _find = data.find
     start = 0
     while True:
-        start = data.find(pattern, start)
+        start = _find(pattern, start)
         if start == -1:
             return offsets
         offsets.append(start)
@@ -351,6 +349,13 @@ def generate_mutations(
         List of ``(offset_tuple, replacement_tuple, encoder)`` tuples.
         Each tuple can be applied to the input data.
     """
+    # Local bindings for hot path
+    _find_offsets = find_offsets
+    _get_encoded = _get_encoded_variants
+    _product = product
+    MAX = MAX_MUTATIONS_PER_PAIR
+
+    # Pre-allocate mutations list — capped at MAX per encoder × encoder count
     mutations: list[tuple[tuple[int, ...], tuple[bytes, ...], Encoder]] = []
     seen: set[tuple] = set()
 
@@ -366,12 +371,13 @@ def generate_mutations(
         pattern_chunks = enc.encode(operand_a)
         if not pattern_chunks:
             continue
+        pattern_key = tuple(pattern_chunks)
 
         # Find offsets for each pattern chunk.
         offset_lists = []
         all_found = True
         for chunk in pattern_chunks:
-            offsets = find_offsets(input_data, chunk)
+            offsets = _find_offsets(input_data, chunk)
             if not offsets:
                 all_found = False
                 break
@@ -381,17 +387,15 @@ def generate_mutations(
             continue
 
         # Generate replacement variants from operand_b THROUGH the same encoder.
-        # This is critical — SplitEncoder must produce 2-chunk tuples for both
-        # pattern AND replacement.
-        repl_variants = _get_encoded_variants(enc, cmp_type, cmp_size, operand_b, hammer)
+        repl_variants = _get_encoded(enc, cmp_type, cmp_size, operand_b, hammer)
 
-        # Generate up to MAX_MUTATIONS_PER_PAIR permutations
+        # Generate up to MAX permutations
         count = 0
-        for offset_combo in product(*offset_lists):
-            if count >= MAX_MUTATIONS_PER_PAIR:
+        for offset_combo in _product(*offset_lists):
+            if count >= MAX:
                 break
             for repl in repl_variants:
-                if tuple(pattern_chunks) != repl:
+                if pattern_key != repl:
                     key = (offset_combo, repl)
                     if key not in seen:
                         seen.add(key)
@@ -410,14 +414,15 @@ def _get_encoded_variants(
     This ensures multi-chunk encoders (like SplitEncoder) produce the same
     number of chunks for both pattern and replacement sides.
     """
-    # Generate raw value variants
+    # Local bindings for hot path
+    _enc_encode = enc.encode
+    pack = _struct_pack
+    keys = _UNPACK_KEYS
+
+    # Generate raw value variants into a pre-allocated list
     raw_variants: list[bytes]
     if cmp_type == "STR":
-        raw_variants = [val]
-        raw_variants.append(val + b"\x00")
-        raw_variants.append(val + b"\n")
-        raw_variants.append(b'"' + val + b'"')
-        raw_variants.append(b"'" + val + b"'")
+        raw_variants = [val, val + b"\x00", val + b"\n", b'"' + val + b'"', b"'" + val + b"'"]
     elif cmp_type == "SUB":
         bytes_len = cmp_size // 8
         key = _UNPACK_KEYS.get(bytes_len)
@@ -425,11 +430,12 @@ def _get_encoded_variants(
             raw_variants = [val]
         else:
             padded = val.rjust(bytes_len, b"\x00")
-            base_val = struct.unpack(">" + key, padded)[0]
+            base_val = _struct_unpack(">" + key, padded)[0]
             max_val = (1 << (8 * bytes_len)) - 1
-            raw_variants = []
-            for i in range(-16, 16):
-                raw_variants.append(struct.pack(">" + key, (base_val + i) % (max_val + 1)))
+            # Pre-allocate array for 32 variants (-16 to 15)
+            raw_variants = [None] * 32  # type: ignore[list-item]
+            for i in range(32):
+                raw_variants[i] = _struct_pack(">" + key, (base_val - 16 + i) % (max_val + 1))  # type: ignore[assignment]
     else:
         bytes_len = cmp_size // 8
         key = _UNPACK_KEYS.get(bytes_len)
@@ -437,19 +443,23 @@ def _get_encoded_variants(
             raw_variants = [val]
         else:
             padded = val.rjust(bytes_len, b"\x00")
-            base_val = struct.unpack(">" + key, padded)[0]
+            base_val = _struct_unpack(">" + key, padded)[0]
             max_val = (1 << (8 * bytes_len)) - 1
             max_offset = 64 if hammer else 1
-            raw_variants = [val]
+            # Pre-allocate for val + 2 per offset
+            n_variants = 1 + 2 * max_offset
+            raw_variants = [None] * n_variants  # type: ignore[list-item]
+            raw_variants[0] = val  # type: ignore[assignment]
             for i in range(1, max_offset + 1):
-                raw_variants.append(struct.pack(">" + key, (base_val + i) % (max_val + 1)))
-                raw_variants.append(struct.pack(">" + key, (base_val - i) % (max_val + 1)))
+                idx = 1 + 2 * (i - 1)
+                raw_variants[idx] = _struct_pack(">" + key, (base_val + i) % (max_val + 1))  # type: ignore[assignment]
+                raw_variants[idx + 1] = _struct_pack(">" + key, (base_val - i) % (max_val + 1))  # type: ignore[assignment]
 
     # Encode each raw variant through the encoder and deduplicate
     seen: set[tuple] = set()
     result: list[tuple[bytes, ...]] = []
     for rv in raw_variants:
-        encoded = tuple(enc.encode(rv))
+        encoded = tuple(_enc_encode(rv))
         if encoded not in seen:
             seen.add(encoded)
             result.append(encoded)
