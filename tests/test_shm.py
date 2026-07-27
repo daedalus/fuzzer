@@ -223,6 +223,61 @@ class TestShmCoverage:
         finally:
             cov.cleanup()
 
+    def test_fast_path_passes_when_path_hash_matches(self):
+        """Same edge_count SAME path_hash → fast path returns False (correct)."""
+        cov = ShmCoverage()
+        try:
+            cov.reset_edge_map()
+            cov._entries[0].edge_id = 10
+            cov._entries[0].count = 1
+            ctypes.c_uint64.from_address(cov._ptr + 16).value = 1
+            ctypes.c_uint64.from_address(cov._ptr + 8).value = 10
+            assert cov.is_new_coverage()  # slow path, discovers {10}
+            # Same edge_count (1) AND same path_hash (10) → fast path
+            assert not cov.is_new_coverage()
+            # Still same → fast path again (regression)
+            assert not cov.is_new_coverage()
+        finally:
+            cov.cleanup()
+
+    def test_fast_path_falls_back_when_path_hash_zero(self):
+        """path_hash==0 in header → fast path uses edge_count-only comparison."""
+        cov = ShmCoverage()
+        try:
+            cov.reset_edge_map()
+            cov._entries[0].edge_id = 10
+            cov._entries[0].count = 1
+            ctypes.c_uint64.from_address(cov._ptr + 16).value = 1
+            # path_hash stays 0 (default zero memory) — fallback to edge_count-only
+            assert cov.is_new_coverage()  # slow path, discovers {10}
+            # Fast path: edge_count=1==1, path_hash=0 (fallback → edge_count only)
+            assert not cov.is_new_coverage()
+            # Change edges but KEEP edge_count=1 and path_hash=0
+            cov._entries[0].edge_id = 20
+            cov._entries[0].count = 1
+            ctypes.c_uint64.from_address(cov._ptr + 16).value = 1
+            ctypes.c_uint64.from_address(cov._ptr + 8).value = 0
+            # Because path_hash=0 → edge_count-only comparison → 1==1 → NO new
+            # (This is the known limitation: path_hash=0 means the shim
+            #  didn't write it, so we can't distinguish same-count diff-edges)
+            assert not cov.is_new_coverage()
+        finally:
+            cov.cleanup()
+
+    def test_path_hash_is_non_zero_after_live_write(self):
+        """After recording real edges, path_hash header is non-zero."""
+        cov = ShmCoverage()
+        try:
+            cov.reset_edge_map()
+            for i in range(5):
+                cov.record_edge(i + 1)
+            ph = cov.read_path_hash()
+            # With 5 unique edges, path_hash must be non-zero
+            assert ph != 0, "path_hash should be non-zero after recording edges"
+            assert ph == cov.compute_path_hash_from_edges({1, 2, 3, 4, 5})
+        finally:
+            cov.cleanup()
+
     def test_read_edge_count_after_multiple_records(self):
         """read_edge_count() returns correct count after several record_edge calls."""
         cov = ShmCoverage()
@@ -391,19 +446,19 @@ class TestShmCoverage:
 
     def test_reset_preserves_header(self):
         """reset() (full reset) delegates to reset_edge_map() → header survives.
-        Edge_count +2 from record_edge calls, so total = 57."""
+        Edge_count +2 and path_hash updated from record_edge calls."""
         cov = ShmCoverage()
         try:
             ctypes.c_uint32.from_address(cov._ptr).value = 77
             ctypes.c_uint64.from_address(cov._ptr + 8).value = 8888
             ctypes.c_uint64.from_address(cov._ptr + 16).value = 55
-            # Also add some seen edges (each increments edge_count by 1)
-            cov.record_edge(10)  # edge_count 56
-            cov.record_edge(20)  # edge_count 57
+            # Also add some seen edges (each increments edge_count and updates path_hash)
+            cov.record_edge(10)  # edge_count 56, path_hash = 8888*31^10 = 275538
+            cov.record_edge(20)  # edge_count 57, path_hash = 275538*31^20 = 8541162
             cov.reset()  # full reset — preserves header, clears _seen_edge_ids
             # Header preserved
             assert cov.read_stack_depth() == 77
-            assert cov.read_path_hash() == 8888
+            assert cov.read_path_hash() == 8541162  # updated by record_edge calls
             assert cov.read_edge_count() == 57  # 55 + 2 from record_edge calls
             # Cumulative state is cleared
             assert cov.read_entries() == []

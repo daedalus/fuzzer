@@ -350,8 +350,8 @@ class ShmCoverage:
         """Manually record an edge — for tests only.
 
         Mirrors what the instrumented binary does: hash to slot, linear probe.
-        Also maintains the edge_count header (offset 16) for fast-path consistency
-        with the C shim's behavior.
+        Also maintains the edge_count and path_hash headers (offsets 16 and 8)
+        for fast-path consistency with the C shim's behavior.
         """
         pos = edge_id % self.num_entries
         for i in range(self.num_entries):
@@ -363,6 +363,9 @@ class ShmCoverage:
                 # Increment edge_count header to reflect new-slot insertion
                 ec = ctypes.c_uint64.from_address(self._ptr + 16)
                 ec.value = ec.value + 1
+                # Update path_hash: hash = hash * 31 ^ edge_id (matches C shim)
+                ph = ctypes.c_uint64.from_address(self._ptr + 8)
+                ph.value = ph.value * 31 ^ edge_id
                 if edge_id not in self._seen_edge_ids:
                     self._seen_edge_ids.add(edge_id)
                     self.cumulative_edges += 1

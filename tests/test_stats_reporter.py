@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from fuzzer_tool.services.stats import StatsReporter
 from fuzzer_tool.services.stats_reporter import (
     discovery_rate,
     format_elapsed,
@@ -166,3 +167,119 @@ class TestRunCrashReplays:
             budget_ms=0,
         )
         assert replays["sig"] == []
+
+
+# ── helper: minimal mock fuzzer for print_stats tests ──────────────────────
+
+
+def _mock_fuzzer(**overrides) -> MagicMock:
+    """Build a MagicMock fuzzer with sensible defaults for print_stats()."""
+    et = MagicMock()
+    et.seed_hit_counts = {"a": 1, "b": 2}
+    et._global_edge_hits = {}
+    et.compute_corpus_diversity.return_value = 0.5
+    et.compute_average_jaccard.return_value = 0.3
+    et.shannon_entropy_global.return_value = 4.2
+    et.simpson_diversity_global.return_value = 0.8
+    et.bitmap_density.return_value = 0.15
+    et.birthday_collision_risk.return_value = 0.02
+    et.coverage_growth_model.return_value = {
+        "confidence": 0.0,
+        "current_rate": 0.0,
+        "projected_total": 0,
+        "time_to_plateau": 0,
+    }
+    et.bayesian_coverage_growth_model.return_value = {"p_stalled": 0.0}
+    et.good_turing_estimate.return_value = {
+        "n": 0,
+        "estimated_undiscovered": 0,
+        "saturation": 0.0,
+        "confidence": 0.0,
+    }
+
+    csd = MagicMock()
+    csd.observe.return_value = None
+    csd.is_approaching_transition.return_value = (False, "")
+
+    defaults = {
+        "start_time": time.time(),
+        "exec_count": 1000,
+        "dictionary": None,
+        "markov_trained": False,
+        "markov_generate": False,
+        "_cmplog": None,
+        "_smt_solver": None,
+        "shm_cov": None,
+        "ptrace_cov": None,
+        "multi_targets": False,
+        "_target_shm_covs": {},
+        "mc": None,
+        "mc_bandit": False,
+        "mc_cem": False,
+        "crash_sigs": {},
+        "timeout_count": 0,
+        "_peak_rss": 0,
+        "_last_ops_used": [],
+        "_edge_tracker": et,
+        "_crash_replays": {},
+        "_csd": csd,
+        "replay_n": 3,
+        "_format_learner": None,
+        "_perf_counters": None,
+        "honggfuzz": False,
+        "_entropy_history": [],
+        "_exec_time_tracker": SimpleNamespace(count=0),
+    }
+    defaults.update(overrides)
+    fuzzer = MagicMock()
+    fuzzer.configure_mock(**defaults)
+    return fuzzer
+
+
+class TestPrintStats:
+    """Tests for StatsReporter.print_stats() — live stats line."""
+
+    def test_shows_path_hash_hex_when_shm_available(self):
+        """print_stats() includes ph: 0x<hex> when shm_cov is present."""
+        shm = MagicMock()
+        shm.read_path_hash.return_value = 0xABCD1234
+        shm.cumulative_edges = 100
+        fuzzer = _mock_fuzzer(shm_cov=shm)
+        reporter = StatsReporter(fuzzer)
+        with patch("builtins.print") as mock_print:
+            reporter.print_stats()
+            line = mock_print.call_args[0][0]
+            assert "ph: 0xabcd1234" in line, f"expected hex path_hash in: {line[:200]}"
+
+    def test_omits_path_hash_without_shm(self):
+        """print_stats() omits ph: when no shm_cov present."""
+        fuzzer = _mock_fuzzer()
+        reporter = StatsReporter(fuzzer)
+        with patch("builtins.print") as mock_print:
+            reporter.print_stats()
+            line = mock_print.call_args[0][0]
+            assert "ph:" not in line, f"unexpected ph: in: {line[:200]}"
+
+    def test_path_hash_shows_zero_hex(self):
+        """When path_hash is 0, shows ph: 0x0."""
+        shm = MagicMock()
+        shm.read_path_hash.return_value = 0
+        shm.cumulative_edges = 100
+        fuzzer = _mock_fuzzer(shm_cov=shm)
+        reporter = StatsReporter(fuzzer)
+        with patch("builtins.print") as mock_print:
+            reporter.print_stats()
+            line = mock_print.call_args[0][0]
+            assert "ph: 0x0" in line, f"expected 0x0 in: {line[:200]}"
+
+    def test_path_hash_shows_large_value(self):
+        """Large path_hash (64-bit) renders as hex correctly."""
+        shm = MagicMock()
+        shm.read_path_hash.return_value = 0xDEADBEEFCAFE
+        shm.cumulative_edges = 100
+        fuzzer = _mock_fuzzer(shm_cov=shm)
+        reporter = StatsReporter(fuzzer)
+        with patch("builtins.print") as mock_print:
+            reporter.print_stats()
+            line = mock_print.call_args[0][0]
+            assert "ph: 0xdeadbeefcafe" in line, f"expected large hex in: {line[:200]}"
