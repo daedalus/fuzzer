@@ -118,6 +118,10 @@ def _decode_x86_64(text: bytes, base_addr: int):
         start = pc
         addr = base_addr + pc
 
+        # ── Legacy prefixes (F3, F2, 66, 67) ──
+        while pc < n and text[pc] in (0xF3, 0xF2, 0x66, 0x67):
+            pc += 1
+
         # ── REX prefix (optional) ──
         rex = 0
         rex_w = False
@@ -289,6 +293,14 @@ def _decode_x86_64(text: bytes, base_addr: int):
                 insn.insn_id = _INS_JCC
                 insn.groups = {_GRP_JUMP}
                 insn.op_str = f"0x{addr + pc + off:x}"
+                insn.length = pc - start
+                yield insn
+                continue
+
+            # NOP / CET (0F 1E, 0F 1F) — always has ModRM
+            if op2 in (0x1E, 0x1F):
+                _decode_modrm()  # consume ModRM + optional SIB+disp
+                insn.insn_id = _INS_OTHER
                 insn.length = pc - start
                 yield insn
                 continue
@@ -497,6 +509,46 @@ def _decode_x86_64(text: bytes, base_addr: int):
                 if mod == 3:
                     insn.operands = [_Operand(_OP_REG, rm, size=8)]
                     insn._regs_read = {rm}
+            else:
+                insn.insn_id = _INS_OTHER
+            insn.length = pc - start
+            yield insn
+            continue
+
+        # 89 — MOV r/m32, r32 (register-to-register copy)
+        if opbyte == 0x89:
+            result = _decode_modrm()
+            if result is None:
+                insn.insn_id = _INS_OTHER
+                insn.length = pc - start
+                yield insn
+                continue
+            mod, reg, rm, has_sib, sib_byte = result
+            if mod == 3:  # MOV rm32, r32
+                insn.insn_id = _INS_MOV
+                insn.operands = [_Operand(_OP_REG, rm, size=4), _Operand(_OP_REG, reg, size=4)]
+                insn._regs_read = {reg}
+                insn._regs_write = {rm}
+            else:
+                insn.insn_id = _INS_OTHER
+            insn.length = pc - start
+            yield insn
+            continue
+
+        # 8B — MOV r32, r/m32 (register-to-register copy)
+        if opbyte == 0x8B:
+            result = _decode_modrm()
+            if result is None:
+                insn.insn_id = _INS_OTHER
+                insn.length = pc - start
+                yield insn
+                continue
+            mod, reg, rm, has_sib, sib_byte = result
+            if mod == 3:  # MOV reg32, rm32
+                insn.insn_id = _INS_MOV
+                insn.operands = [_Operand(_OP_REG, reg, size=4), _Operand(_OP_REG, rm, size=4)]
+                insn._regs_read = {rm}
+                insn._regs_write = {reg}
             else:
                 insn.insn_id = _INS_OTHER
             insn.length = pc - start
@@ -1213,6 +1265,8 @@ def _extract_div_pure(text_data: bytes, text_vaddr: int) -> tuple[dict[int, int]
 
     # DX family: register 2 (rdx/edx/dx/dl all map to 2)
     _dx_family: set[int] = {2}
+    # Dynamic remainder register tracking — expands through MOV copies
+    _rem_regs: set[int] = set()
 
     MAX_BACKWARD = 50
     recent: list[tuple] = []
@@ -1223,6 +1277,21 @@ def _extract_div_pure(text_data: bytes, text_vaddr: int) -> tuple[dict[int, int]
 
     for insn in _decode_x86_64(text_data, text_vaddr):
         regs_read, regs_write = insn.regs_access()
+
+        # ── Track remainder register propagation ──
+        # 1) Remove registers overwritten by this instruction (preserve EDX)
+        for r in regs_write:
+            if r not in _dx_family:
+                _rem_regs.discard(r)
+        # 2) MOV dest, src where src carries the remainder → track dest too
+        if insn.insn_id == _INS_MOV and len(insn.operands) == 2:
+            d, s = insn.operands[0], insn.operands[1]
+            if d.type == _OP_REG and s.type == _OP_REG and s.reg in _rem_regs:
+                _rem_regs.add(d.reg)
+        # 3) DIV/IDIV puts the remainder in EDX
+        if insn.insn_id in (_INS_DIV, _INS_IDIV):
+            _rem_regs = set(_dx_family)
+
         recent.append((insn, set(regs_write)))
         if len(recent) > MAX_BACKWARD:
             recent.pop(0)
@@ -1262,7 +1331,7 @@ def _extract_div_pure(text_data: bytes, text_vaddr: int) -> tuple[dict[int, int]
         if (
             insn.insn_id == _INS_CMP
             and len(insn.operands) >= 2
-            and any(op.type == _OP_REG and op.reg in _dx_family for op in insn.operands)
+            and any(op.type == _OP_REG and op.reg in _rem_regs for op in insn.operands)
         ):
             for prev_insn, _ in reversed(recent[:-1]):
                 if prev_insn.insn_id in (_INS_DIV, _INS_IDIV):
@@ -1289,6 +1358,7 @@ def _extract_div_capstone(text_data: bytes, text_vaddr: int) -> tuple[dict[int, 
         X86_INS_CMP,
         X86_INS_DIV,
         X86_INS_IDIV,
+        X86_INS_MOV,
         X86_OP_IMM,
         X86_OP_REG,
     )
@@ -1322,6 +1392,8 @@ def _extract_div_capstone(text_data: bytes, text_vaddr: int) -> tuple[dict[int, 
         b = _reg_base(md, rid)
         if b == "dx":
             _dx_family.add(rid)
+    # Dynamic remainder register tracking — expands through MOV copies
+    _rem_regs: set[int] = set()
 
     MAX_BACKWARD = 50
     recent: list[tuple] = []
@@ -1332,6 +1404,18 @@ def _extract_div_capstone(text_data: bytes, text_vaddr: int) -> tuple[dict[int, 
 
     for insn in md.disasm(text_data, text_vaddr):
         regs_read, regs_write = insn.regs_access()
+
+        # ── Track remainder register propagation ──
+        for r in regs_write:
+            if r not in _dx_family:
+                _rem_regs.discard(r)
+        if insn.id == X86_INS_MOV and len(insn.operands) >= 2:
+            d, s = insn.operands[0], insn.operands[1]
+            if d.type == X86_OP_REG and s.type == X86_OP_REG and s.reg in _rem_regs:
+                _rem_regs.add(d.reg)
+        if insn.id in (X86_INS_DIV, X86_INS_IDIV):
+            _rem_regs = set(_dx_family)
+
         recent.append((insn, set(regs_write)))
         if len(recent) > MAX_BACKWARD:
             recent.pop(0)
@@ -1363,7 +1447,7 @@ def _extract_div_capstone(text_data: bytes, text_vaddr: int) -> tuple[dict[int, 
         if (
             insn.id == X86_INS_CMP
             and len(insn.operands) >= 2
-            and any(op.type == X86_OP_REG and op.reg in _dx_family for op in insn.operands)
+            and any(op.type == X86_OP_REG and op.reg in _rem_regs for op in insn.operands)
         ):
             for prev_insn, _ in reversed(recent[:-1]):
                 if prev_insn.id in (X86_INS_DIV, X86_INS_IDIV):

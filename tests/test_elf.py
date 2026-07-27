@@ -461,7 +461,20 @@ class TestExtractDivConstants:
             '    asm("cmp $0,%%edx\\n\\t" :: "d"(r) : );\n'
             "    return r;\n"
             "}\n"
-            "int main(void) { f_div10(); f_div7(); return f_mod10_check(); }\n"
+            "int f_mod10_check_copy(void) {\n"
+            "    /* div puts remainder in %%edx; copy to %%eax, cmp %%eax */\n"
+            "    int r;\n"
+            '    asm("mov $10,%%ecx\\n\\t"\n'
+            '        "mov $42,%%eax\\n\\t"\n'
+            '        "xor %%edx,%%edx\\n\\t"\n'
+            '        "div %%ecx\\n\\t"\n'
+            '        "mov %%edx,%%eax\\n\\t"\n'
+            '        "cmp $5,%%eax\\n\\t"\n'
+            '        "mov %%eax,%0"\n'
+            '        : "=r"(r) : : "eax","ecx","edx");\n'
+            "    return r;\n"
+            "}\n"
+            "int main(void) { f_div10(); f_div7(); f_mod10_check_copy(); return f_mod10_check(); }\n"
         )
         with open(src, "w") as f:
             f.write(_src)
@@ -550,6 +563,58 @@ class TestExtractDivConstants:
         assert len(w) >= 1, (
             f"expected at least 1 CMP in weak_mod_pcs "
             f"for variable-divisor DIV, got div_map={d} weak={w}"
+        )
+
+    def test_forward_modulus_reg_copy(self):
+        """mov %%edx,%%eax; cmp $5,%%eax after div → CMP PC mapped."""
+        from fuzzer_tool.core.elf import extract_div_constants
+
+        d, w = extract_div_constants(self._bin)
+        # The function f_mod10_check_copy does:
+        #   div %%ecx  → remainder in EDX
+        #   mov %%edx,%%eax  → copy to EAX
+        #   cmp $5,%%eax     → compare EAX (reg 0)
+        # The forward analysis should map CMP PC → divisor=10
+        vals_10 = [v for v in d.values() if v == 10]
+        # We expect at least 3 entries: DIV(f_div10) + CMP(f_mod10_check)
+        # + CMP(f_mod10_check_copy). The copy CMP adds a 3rd entry via _rem_regs.
+        assert len(vals_10) >= 3, (
+            f"expected >=3 entries with divisor=10 "
+            f"(DIV + direct-CMP + reg-copy-CMP), "
+            f"got {len(vals_10)}: div_map={d} weak={w}"
+        )
+
+    def test_weak_modulus_reg_copy_variable(self):
+        """div with variable divisor, mov %%edx,%%eax; cmp %%eax -> weak_mod."""
+        import os
+        import subprocess
+
+        from fuzzer_tool.core.elf import extract_div_constants
+
+        v_src = os.path.join(self._tmpdir, "var_mod_copy.c")
+        v_bin = os.path.join(self._tmpdir, "var_mod_copy")
+        with open(v_src, "w") as f:
+            f.write(
+                "int f(int d) {\n"
+                "    int r;\n"
+                '    asm("mov %1,%%ecx\\n\\t"\n'
+                '        "mov $100,%%eax\\n\\t"\n'
+                '        "xor %%edx,%%edx\\n\\t"\n'
+                '        "div %%ecx\\n\\t"\n'
+                '        "mov %%edx,%%eax\\n\\t"\n'
+                '        "mov %%eax,%0\\n\\t"\n'
+                '        "cmp $0,%%eax\\n\\t"\n'
+                '        : "=r"(r) : "r"(d) : "eax","ecx","edx");\n'
+                "    return r;\n"
+                "}\n"
+                "int main(void) { return f(7); }\n"
+            )
+        subprocess.run(["gcc", "-O0", "-o", v_bin, v_src], capture_output=True, timeout=30)
+        d, w = extract_div_constants(v_bin)
+        assert len(w) >= 1, (
+            f"expected at least 1 CMP in weak_mod_pcs "
+            f"for variable-divisor DIV with reg-copy, "
+            f"got div_map={d} weak={w}"
         )
 
 
@@ -696,8 +761,9 @@ class TestX86_64Decoder:
         extract_div_constants which doesn't need this pattern.
         """
         insns = self._decode(b"\x89\xc1")
-        # 89 is not in our opcode table, so it's two unrecognized bytes
-        assert all(i.insn_id == 99 for i in insns)
+        # 89 /r with mod=3 is now decoded as MOV reg-to-reg
+        assert len(insns) == 1, f"expected 1 insn, got {len(insns)}"
+        assert insns[0].insn_id == 1  # _INS_MOV
 
     def test_lea_eax(self):
         """8D 05 10000000 → lea eax, [rip+16]"""
@@ -818,6 +884,74 @@ class TestX86_64Decoder:
         assert len(insns) == 1
         assert insns[0].insn_id == 99  # _INS_OTHER
         assert insns[0].length == 1
+
+    def test_endbr64(self):
+        """F3 0F 1E FA → one _INS_OTHER with length=4."""
+        insns = self._decode(b"\xf3\x0f\x1e\xfa")
+        assert len(insns) == 1, f"expected 1 insn, got {len(insns)}"
+        assert insns[0].insn_id == 99  # _INS_OTHER
+        assert insns[0].length == 4
+
+    def test_multibyte_nop(self):
+        """0F 1F 00 → one _INS_OTHER with ModRM consumed (length=3)."""
+        insns = self._decode(b"\x0f\x1f\x00")
+        assert len(insns) == 1, f"expected 1 insn, got {len(insns)}"
+        assert insns[0].insn_id == 99  # _INS_OTHER
+        assert insns[0].length == 3
+
+    def test_mov_r32_rm32_89(self):
+        """89 D0 → mov eax, edx (89 /r, register-to-register MOV)."""
+        insns = self._decode(b"\x89\xd0")
+        assert len(insns) == 1
+        assert insns[0].insn_id == 1  # _INS_MOV
+        assert insns[0].operands[0].type == 1  # _OP_REG
+        assert insns[0].operands[0].reg == 0  # eax (destination, rm field)
+        assert insns[0].operands[1].type == 1  # _OP_REG
+        assert insns[0].operands[1].reg == 2  # edx (source, reg field)
+        assert 2 in insns[0]._regs_read  # edx is read
+        assert 0 in insns[0]._regs_write  # eax is written
+
+    def test_mov_r32_rm32_8b(self):
+        """8B C2 → mov eax, edx (8B /r, register-to-register MOV)."""
+        insns = self._decode(b"\x8b\xc2")
+        assert len(insns) == 1
+        assert insns[0].insn_id == 1  # _INS_MOV
+        assert insns[0].operands[0].type == 1  # _OP_REG
+        assert insns[0].operands[0].reg == 0  # eax (destination, reg field)
+        assert insns[0].operands[1].type == 1  # _OP_REG
+        assert insns[0].operands[1].reg == 2  # edx (source, rm field)
+        assert 2 in insns[0]._regs_read  # edx is read
+        assert 0 in insns[0]._regs_write  # eax is written
+
+    def test_endbr64_with_sequence(self):
+        """endbr64 + mov + xor + div + reg-copy + cmp + ret → all decoded."""
+        code = (
+            b"\xf3\x0f\x1e\xfa"  # endbr64 (4 bytes)
+            b"\xb9\x0a\x00\x00\x00"  # mov ecx, 10
+            b"\xb8\x64\x00\x00\x00"  # mov eax, 100
+            b"\x31\xd2"  # xor edx, edx
+            b"\xf7\xf1"  # div ecx
+            b"\x89\xd0"  # mov eax, edx
+            b"\x83\xf8\x05"  # cmp eax, 5
+            b"\xc3"  # ret
+        )
+        insns = self._decode(code)
+        assert len(insns) == 8, f"expected 8 insns, got {len(insns)}: {[(i.insn_id, i.length) for i in insns]}"
+        assert insns[0].insn_id == 99  # endbr64 → _INS_OTHER (with F3 consumed as prefix)
+        assert insns[0].length == 4
+        assert insns[1].insn_id == 1  # mov ecx, 10
+        assert insns[1].operands[1].imm == 10
+        assert insns[2].insn_id == 1  # mov eax, 100
+        assert insns[2].operands[1].imm == 100
+        assert insns[3].insn_id == 3  # xor edx, edx
+        assert insns[4].insn_id == 6  # div ecx
+        assert insns[5].insn_id == 1  # mov eax, edx
+        assert insns[5].operands[0].reg == 0
+        assert insns[5].operands[1].reg == 2
+        assert insns[6].insn_id == 4  # cmp eax, 5
+        assert insns[6].operands[0].reg == 0
+        assert insns[6].operands[1].imm == 5
+        assert insns[7].insn_id == 10  # ret
 
 
 # ============================================================================

@@ -342,6 +342,29 @@ State files:
 - `markov.json` — persisted Markov chain transitions
 - `mi.json` — mutual information tracker (byte-to-coverage correlations)
 
+## ELF Binary Static Analysis
+
+The fuzzer includes a built-in ELF analysis engine for extracting DIV/IDIV constants from compiled binaries using an x86-64 instruction decoder (pure Python with optional Capstone fallback):
+
+### DIV/IDIV Constant Extraction
+
+```bash
+# Extract constant divisors from a compiled binary
+python -c "
+from fuzzer_tool.core.elf import extract_div_constants
+d, w = extract_div_constants('targets/png_read')
+print('Constant divisors:', d)
+print('Weak modulus PCs:', w)
+"
+```
+
+- **Backward scan**: traces register writes backward from DIV/IDIV to find `mov $K, %reg` (constant-assignment) that feeds the divisor register
+- **Forward modulus extraction**: detects `cmp $K, %edx` patterns after DIV/IDIV, mapping CMP addresses to the same divisor — even when the remainder is copied through an intermediate register (`mov %edx,%eax; cmp $K,%eax`)
+- **Dual decoder**: pure-Python x86-64 decoder (fast, no dependency) with automatic Capstone fallback when available
+- **CET/IBT aware**: correctly consumes `endbr64` (F3 0F 1E FA) and multi-byte NOP (0F 1F) alignment instructions
+- **Register-to-register MOV**: handles `89 /r` and `8B /r` encodings for remainder propagation tracking
+- **Dynamic remainder tracking**: `_rem_regs` set expands through MOV copies and shrinks on register overwrites, enabling `weak_mod_pcs` detection through the common GCC `mov %edx,%eax; cmp $K,%eax` idiom
+
 ## In-Process Execution
 
 ### Direct ctypes (`--inprocess-direct`)
