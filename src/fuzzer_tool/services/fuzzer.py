@@ -61,10 +61,9 @@ _active_dmesg_parser = None  # module-level ref for atexit cleanup
 def _kill_children(sig=None, frame=None):
     global _shutdown
     _shutdown = True
-    for pid in list(_child_pids):
+    for pid in _child_pids():
         with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
             os.killpg(os.getpgid(pid), signal.SIGKILL)
-    _child_pids.clear()
     # Stop dmesg streaming to avoid orphan -w subprocess
     if _active_dmesg_parser is not None:
         _active_dmesg_parser.stop_stream()
@@ -112,6 +111,9 @@ SEED_SECRETARY_MAX = 500  # max per-seed SecretaryStopping entries
 SEEN_HASHES_MAX = 200_000  # max unique seed hashes retained
 ELO_MATCH_WINDOW_MAX = 1_000  # max Elo match history entries
 META_STRATEGY_CHOICES_MAX = 1_000  # max meta-strategy choice history entries
+# ── Allan variance detector ───────────────────────────────────────────
+ALLAN_BUFFER_POW = 8  # 2^8 = 256 samples
+ALLAN_MIN_SAMPLES = 8  # minimum before noise_type() returns a result
 
 
 def _detect_afl(target_path: str) -> bool:
@@ -444,7 +446,9 @@ class Fuzzer:
                 from fuzzer_tool.core.rq_encodings import encoders_summary
 
                 encoders = encoders_summary()
-                print(f"[*]   Redqueen encoders: {len(encoders)} ({', '.join(e['name'] for e in encoders)})")
+                print(
+                    f"[*]   Redqueen encoders: {len(encoders)} ({', '.join(e['name'] for e in encoders)})"
+                )
             else:
                 print("[!] Cmplog: failed to compile shim, disabling")
                 self._cmplog = None
@@ -757,6 +761,14 @@ class Fuzzer:
         from fuzzer_tool.core.critical_slowing import CriticalSlowingDown
 
         self._csd = CriticalSlowingDown(window_size=50, rise_threshold=1.5, min_observations=20)
+
+        # Allan variance detector for stall detection (edge discovery rate)
+        from fuzzer_tool.core.allan_variance import AllanVarianceDetector
+
+        self._allan = AllanVarianceDetector(
+            max_buffer_pow=ALLAN_BUFFER_POW, min_samples=ALLAN_MIN_SAMPLES
+        )
+        self._last_allan_edge_count = 0
 
         # ── Running aggregate cache for seed metadata ──────────────────
         # Avoids O(n·m) recomputation of corpus-wide sums every iteration.
@@ -2255,13 +2267,49 @@ class Fuzzer:
         recovery is skipped this round. If there aren't enough samples yet
         to measure the rate (`entropy_flat is None`), fall back to the
         no-new-edges signal alone.
+
+        Allan variance confirmation: the noise type of the incremental edge
+        discovery rate provides a leading indicator. White noise = normal
+        exploration (skip stall). Flicker noise = correlated discoveries
+        approaching saturation (reduce threshold). Random walk = integrated
+        signal, likely genuine stall (bypass entropy gate).
         """
         entropy_flat = self._compute_entropy_flat()
         if entropy_flat is False:
             return False
+
+        # Consult Allan variance detector for noise-type signal
+        noise = self._allan.noise_type()
+        allan_slope = self._allan.noise_slope()
+
         reason = "no new edges"
         if entropy_flat:
             reason += " + flat entropy"
+        if noise != "unknown":
+            reason += f" + {noise} noise (slope={allan_slope:+.2f})" if allan_slope is not None else f" + {noise} noise"
+
+        # Noise-type gating and threshold adjustment
+        if noise == "active":
+            # Random exploration is normal — don't stall even if entropy is flat
+            return False
+
+        effective_threshold = self._stall_threshold
+        if noise == "fatiguing":
+            # Pre-stall: discovery rate is trending down.
+            # Halve the threshold to catch it earlier.
+            effective_threshold = max(self._stall_threshold // 2, 100)
+            if execs_since_edge < effective_threshold:
+                return False
+
+        if noise == "stalled":
+            # Near-zero variance confirms genuine stall.
+            # Bypass entropy gate and use minimal threshold.
+            effective_threshold = max(self._stall_threshold // 4, 50)
+
+        # Without any detector signal (Allan unknown + entropy unknown),
+        # fall through to original behavior (trigger on no-new-edges alone).
+        if noise not in ("fatiguing", "stalled", "unknown") and entropy_flat is None:
+            return False
 
         # Check coverage growth model for saturation
         growth = self._edge_tracker.coverage_growth_model()
@@ -2621,6 +2669,11 @@ class Fuzzer:
                     if self._edge_tracker._global_edge_hits:
                         sh = self._edge_tracker.shannon_entropy_global()
                         self._record_entropy_sample(sh)
+                    # Feed incremental edge count to Allan variance detector
+                    current_edges = self._edge_tracker.get_cumulative_edge_count()
+                    delta = current_edges - self._last_allan_edge_count
+                    self._allan.update(delta)
+                    self._last_allan_edge_count = current_edges
                     # Record coverage snapshot for temporal analysis
                     self._edge_tracker.record_coverage_snapshot(self.exec_count)
                     self.print_stats()

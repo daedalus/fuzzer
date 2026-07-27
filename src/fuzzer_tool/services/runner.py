@@ -72,6 +72,10 @@ class TargetRunner:
         if f._inprocess_runner:
             if shm:
                 shm.reset_edge_map()
+            # Open perf counters on current process (pid=0, no extra perms needed)
+            # so in-process target calls (direct/direct_lite) are counted.
+            if f._perf_counters:
+                f._perf_counters.open_for_pid(0)
             rc, err = f._inprocess_runner.run_one(data)
             # In direct_lite mode the target writes directly to shm_cov's
             # SHM via __afl_area — no read_bitmap/memmove needed.
@@ -105,12 +109,6 @@ class TargetRunner:
         if shm:
             shm.reset_edge_map()
 
-        # Open perf counters on current process with inherit=1 so they
-        # track the child process created by fork+exec.
-        perf_opened = False
-        if f._perf_counters:
-            perf_opened = f._perf_counters.open_for_pid(os.getpid())
-
         env = os.environ.copy()
         if f.use_coverage:
             env["AFL_MAP_SIZE"] = str(f.map_size)
@@ -121,9 +119,11 @@ class TargetRunner:
 
         # Fast path: posix_spawn + temp file (no threads, no watchdog)
         if not f.file_mode and not f._cmplog:
-            rc, stderr, pid = run_target_fast(f.target, data, env=env)
+            rc, stderr, pid = run_target_fast(
+                f.target, data, env=env, perf_counters=f._perf_counters
+            )
             f._last_child_pid = pid
-            if f._perf_counters and perf_opened:
+            if f._perf_counters:
                 f._last_perf_deltas = f._perf_counters.read_and_reset()
             return rc, stderr
 
@@ -135,16 +135,15 @@ class TargetRunner:
                 str(f._tmp_dir),
                 f.target_args,
                 env=env,
+                perf_counters=f._perf_counters,
             )
             f._last_child_pid = pid
-            if f._perf_counters and perf_opened:
+            if f._perf_counters:
                 f._last_perf_deltas = f._perf_counters.read_and_reset()
             return rc, stderr
-        rc, stderr, pid = run_target_stdin(f.target, data, f.timeout, env=env)
-        f._last_child_pid = pid
-        if f._perf_counters and perf_opened:
-            f._last_perf_deltas = f._perf_counters.read_and_reset()
-        return rc, stderr
+        rc, stderr, pid = run_target_stdin(
+            f.target, data, f.timeout, env=env, perf_counters=f._perf_counters
+        )
 
     def _ptrace_handle_breakpoint(self, pid: int, libc, cov: PtraceCoverage, regs_buf) -> bool:
         if not cov._is_x86_64:

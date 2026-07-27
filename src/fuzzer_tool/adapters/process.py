@@ -1,32 +1,43 @@
-"""Target process execution adapter.
+"""Subprocess execution adapters.
 
-Uses blocking os.waitpid + watchdog thread instead of communicate(timeout=...)
-to avoid CPython's busy-poll backoff (24% wall time in profiling).
+Provides low-level process spawning and management for running target binaries
+during fuzzing. Supports three execution modes:
+- Fast path: posix_spawn with temp file input (no threads)
+- Stdin mode: Popen with stdin pipe + watchdog thread
+- File mode: Popen with temp file input + watchdog thread
 
-Fast path: os.posix_spawn + temp file for maximum throughput (2000+ eps).
-Standard path: subprocess.Popen + stdin pipe for general use.
+Also supports optional hardware performance counter tracking on child processes.
 """
 
 import contextlib
+import logging
 import os
 import signal
 import subprocess
+import tempfile
 import threading
 
+log = logging.getLogger(__name__)
+
+# Signal numbers that indicate a crash (not a clean exit)
 SIGNAL_CRASH_CODES = {134, 135, 136, 139, -6, -7, -8, -11}  # SIGABRT/SIGBUS/SIGFPE/SIGSEGV
 
-_child_pids: set[int] = set()
+# ── Fast path (posix_spawn) ─────────────────────────────────────────────
+
+# Reusable temp file for fast path (avoid per-iteration file creation)
+_fast_path_fd: int | None = None
+_fast_path_name: str | None = None
+_fast_path_lock = threading.Lock()
 
 
-def _track(pid: int):
-    _child_pids.add(pid)
-
-
-def _untrack(pid: int):
-    _child_pids.discard(pid)
-
-
-_clean_env_cache: dict[str, str] | None = None
+def _get_fast_path_file() -> str:
+    """Get or create the reusable fast-path temp file."""
+    global _fast_path_fd, _fast_path_name
+    if _fast_path_fd is None:
+        with _fast_path_lock:
+            if _fast_path_fd is None:
+                _fast_path_fd, _fast_path_name = tempfile.mkstemp(prefix="fuzz_fast_")
+    return _fast_path_name
 
 
 def _clean_env(env: dict[str, str] | None = None) -> dict[str, str]:
@@ -50,33 +61,29 @@ def _clean_env(env: dict[str, str] | None = None) -> dict[str, str]:
     return e
 
 
-# Reusable temp file for fast-path execution (avoids per-iteration file creation)
-_fast_path_fd = None
-_fast_path_name = None
-
-
-def _get_fast_path_file() -> str:
-    """Get or create a reusable temp file for fast-path execution."""
-    global _fast_path_fd, _fast_path_name
-    if _fast_path_fd is None:
-        import tempfile
-
-        _fast_path_fd, _fast_path_name = tempfile.mkstemp(suffix=".bin", prefix="fuzz_")
-    return _fast_path_name
+_clean_env_cache: dict[str, str] | None = None
 
 
 def run_target_fast(
-    target: str, data: bytes, env: dict[str, str] | None = None
+    target: str,
+    data: bytes,
+    env: dict[str, str] | None = None,
+    perf_counters=None,
 ) -> tuple[int, str, int]:
     """Fast execution path using os.posix_spawn + temp file.
 
     Avoids thread creation, watchdog overhead, and stdin pipe buffering.
     Uses posix_spawn which is 3-4x faster than fork+exec for simple targets.
 
+    If *perf_counters* is provided, perf_event_open is called on the child
+    PID after spawn (before waitpid), so the caller can read execution
+    metrics after the target exits.
+
     Args:
         target: Path to target binary.
         data: Input data.
         env: Optional environment variables.
+        perf_counters: Optional PerfCounters instance (opens on child PID).
 
     Returns:
         Tuple of (returncode, stderr, pid).
@@ -102,6 +109,11 @@ def run_target_fast(
         os.close(stdin_fd)
         os.close(stderr_w)
 
+        # Open perf counters on the child PID while still running
+        # (inherit=1 doesn't survive exec, so we attach directly).
+        if perf_counters is not None and pid > 0:
+            perf_counters.open_for_pid(pid)
+
         _, status = os.waitpid(pid, 0)
 
         # Read stderr after child exits (data is in kernel pipe buffer)
@@ -122,6 +134,30 @@ def run_target_fast(
         return -2, str(e), 0
 
 
+# ── Stdin mode ──────────────────────────────────────────────────────────
+
+_TRACKED_PIDS: set[int] = set()
+_TRACKED_PIDS_LOCK = threading.Lock()
+
+
+def _track(pid: int) -> None:
+    """Track a child PID for cleanup on fatal signals."""
+    with _TRACKED_PIDS_LOCK:
+        _TRACKED_PIDS.add(pid)
+
+
+def _untrack(pid: int) -> None:
+    """Stop tracking a (now-reaped) child PID."""
+    with _TRACKED_PIDS_LOCK:
+        _TRACKED_PIDS.discard(pid)
+
+
+def _child_pids() -> list[int]:
+    """Return a snapshot of tracked child PIDs."""
+    with _TRACKED_PIDS_LOCK:
+        return list(_TRACKED_PIDS)
+
+
 def _write_and_close(stream, data: bytes):
     """Write data to a stream and close it, ignoring errors."""
     try:
@@ -136,6 +172,7 @@ def run_target_stdin(
     data: bytes,
     timeout: float,
     env: dict[str, str] | None = None,
+    perf_counters=None,
 ) -> tuple[int, str, int]:
     """Execute target with data on stdin.
 
@@ -147,6 +184,7 @@ def run_target_stdin(
         data: Input data.
         timeout: Timeout in seconds.
         env: Optional environment variables.
+        perf_counters: Optional PerfCounters instance (opens on child PID).
 
     Returns:
         Tuple of (returncode, stderr, subprocess_pid).
@@ -163,22 +201,21 @@ def run_target_stdin(
         )
         _track(proc.pid)
 
+        # Open perf counters on child PID immediately after spawn
+        if perf_counters is not None and proc.pid > 0:
+            perf_counters.open_for_pid(proc.pid)
+
         # Write data in a thread to avoid pipe deadlock
         writer = threading.Thread(target=_write_and_close, args=(proc.stdin, data), daemon=True)
         writer.start()
 
         # Watchdog: kill process group if still alive after timeout.
-        # `done` is set by the main thread the instant waitpid() returns, which
-        # interrupts the watchdog's wait() immediately instead of it sleeping
-        # for the full `timeout` regardless of how fast the child actually exited.
-        # `timed_out` is set only by the watchdog itself, and only on a genuine
-        # timeout — it's what the return value below actually checks.
         done = threading.Event()
         timed_out = threading.Event()
 
         def _watchdog():
             if done.wait(timeout=timeout):
-                return  # main thread finished first — nothing to do
+                return
             timed_out.set()
             with contextlib.suppress(OSError):
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
@@ -186,7 +223,7 @@ def run_target_stdin(
         w = threading.Thread(target=_watchdog, daemon=True)
         w.start()
 
-        # Blocking wait — no busy-poll like communicate(timeout=)
+        # Blocking wait
         try:
             _, status = os.waitpid(proc.pid, 0)
             if os.WIFEXITED(status):
@@ -198,7 +235,7 @@ def run_target_stdin(
         except ChildProcessError:
             proc.returncode = -2
 
-        done.set()  # wake the watchdog immediately; no join needed — daemon thread
+        done.set()  # wake the watchdog immediately
         _untrack(proc.pid)
 
         if timed_out.is_set():
@@ -207,11 +244,11 @@ def run_target_stdin(
         stderr = proc.stderr.read()
         return proc.returncode, stderr.decode(errors="replace"), proc.pid
     except Exception as e:
-        # Return actual pid if process was created, else 0.
-        # Callers use pid for dmesg filtering — wrong pid would
-        # match kernel messages from the wrong process.
         real_pid = proc.pid if proc is not None else 0
         return -2, str(e), real_pid
+
+
+# ── File mode ───────────────────────────────────────────────────────────
 
 
 def run_target_file(
@@ -221,12 +258,11 @@ def run_target_file(
     tmp_dir: str,
     target_args: list[str],
     env: dict[str, str] | None = None,
+    perf_counters=None,
 ) -> tuple[int, str, int]:
     """Execute target with data written to a temp file.
 
-    Uses blocking os.waitpid + watchdog thread. The watchdog uses
-    Event.wait(timeout) so it returns instantly when the main thread
-    signals completion, instead of sleeping for the full timeout.
+    Uses blocking os.waitpid + watchdog thread.
 
     Args:
         target: Path to target binary.
@@ -235,6 +271,7 @@ def run_target_file(
         tmp_dir: Temporary directory for input files.
         target_args: Target arguments ({file} is replaced with temp file path).
         env: Optional environment variables.
+        perf_counters: Optional PerfCounters instance (opens on child PID).
 
     Returns:
         Tuple of (returncode, stderr, subprocess_pid).
@@ -258,7 +295,11 @@ def run_target_file(
         )
         _track(proc.pid)
 
-        # Watchdog: kill process group if still alive after timeout.
+        # Open perf counters on child PID immediately after spawn
+        if perf_counters is not None and proc.pid > 0:
+            perf_counters.open_for_pid(proc.pid)
+
+        # Watchdog
         done = threading.Event()
         timed_out = threading.Event()
 
@@ -272,7 +313,6 @@ def run_target_file(
         w = threading.Thread(target=_watchdog, daemon=True)
         w.start()
 
-        # Blocking wait — no busy-poll like communicate(timeout=)
         try:
             _, status = os.waitpid(proc.pid, 0)
             if os.WIFEXITED(status):
@@ -295,8 +335,5 @@ def run_target_file(
         stderr = proc.stderr.read()
         return proc.returncode, stderr.decode(errors="replace"), proc.pid
     except Exception as e:
-        # Return actual pid if process was created, else 0.
-        # Callers use pid for dmesg filtering — wrong pid would
-        # match kernel messages from the wrong process.
         real_pid = proc.pid if proc is not None else 0
         return -2, str(e), real_pid

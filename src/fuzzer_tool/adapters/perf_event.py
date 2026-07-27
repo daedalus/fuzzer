@@ -26,7 +26,7 @@ import struct
 log = logging.getLogger(__name__)
 
 # perf_event_open syscall number (x86_64)
-__NR_perf_event_open = 298
+NR_PERF_EVENT_OPEN = 298
 
 # perf_type values
 PERF_TYPE_HARDWARE = 0
@@ -112,7 +112,7 @@ class PerfCounters:
     def __init__(
         self,
         counter_names: list[str] | None = None,
-        exclude_kernel: bool = True,
+        exclude_kernel: bool = False,
         inherit: bool = True,
     ):
         if counter_names is None:
@@ -142,9 +142,9 @@ class PerfCounters:
         """Check if perf_event_open hardware counters are available.
 
         Checks three conditions:
-        1. perf_event_paranoid allows access (-1 or 0)
-        2. CAP_PERFMON or CAP_SYS_ADMIN capability is present (or root)
-        3. Hardware PMU exists in /sys/bus/event_source/devices/
+        1. perf_event_paranoid allows access (-1 or 0), or CAP_PERFMON/CAP_SYS_ADMIN is present
+        2. Hardware PMU exists (actual syscall probe with pid=0 — covers all architectures)
+        3. perf_event_open syscall works (not blocked by seccomp, etc.)
         """
         # Check 1: perf_event_paranoid
         paranoid_ok = False
@@ -171,28 +171,34 @@ class PerfCounters:
         if not paranoid_ok and os.geteuid() != 0:
             return False
 
-        # Check 2: Hardware PMU must exist
-        try:
-            devices = os.listdir("/sys/bus/event_source/devices/")
-            # Only these are real hardware PMUs
-            hw_pmus = {
-                "intel_core_pmu",
-                "armv8_pmuv3",
-                "armv8_pmuv3-pmcr",
-                "amd_ibs",
-                "amd_ibs_zen4",
-                "hygon_pmu",
-            }
-            for dev in devices:
-                if dev in hw_pmus:
-                    return True
-            # No hardware PMU found
-            log.debug(
-                "No hardware PMU found in /sys/bus/event_source/devices/ (found: %s)", devices
-            )
+        # Check 2: Actual syscall probe — open PERF_COUNT_HW_INSTRUCTIONS
+        # on the current thread (pid=0, no extra perms needed). This is the
+        # only reliable way to test PMU availability across architectures
+        # (Intel, AMD, ARM, Hygon, etc.) without maintaining a fragile name
+        # whitelist of /sys/bus/event_source/devices/ entries.
+        pe = perf_event_attr()
+        pe.size = ctypes.sizeof(perf_event_attr)
+        pe.type = PERF_TYPE_HARDWARE
+        pe.config = PERF_COUNT_HW_INSTRUCTIONS
+        flags = _FLAG_DISABLED | _FLAG_EXCLUDE_KERNEL | _FLAG_EXCLUDE_HV
+        pe.flags = flags
+        pe_bytes = bytes(pe)
+
+        fd = self._libc.syscall(
+            NR_PERF_EVENT_OPEN,
+            (ctypes.c_char * len(pe_bytes))(*pe_bytes),
+            0,  # pid=0: current thread, no CAP_PERFMON required
+            -1,  # cpu: any
+            -1,  # group_fd: none
+            ctypes.c_ulong(PERF_FLAG_FD_CLOEXEC),
+        )
+        if fd < 0:
+            errno = ctypes.get_errno()
+            log.debug("perf_event_open probe failed: errno=%d (%s)", errno, os.strerror(errno))
             return False
-        except OSError:
-            return False
+
+        os.close(fd)
+        return True
 
     @property
     def available(self) -> bool:
@@ -219,7 +225,6 @@ class PerfCounters:
 
             # Build perf_event_attr as raw bytes at known offsets
             # to avoid ctypes bitfield layout issues.
-            import struct as _struct
 
             flags = 0
             flags |= _FLAG_DISABLED
@@ -239,7 +244,7 @@ class PerfCounters:
             pe = bytes(pe)
 
             fd = self._libc.syscall(
-                298,  # __NR_perf_event_open (x86_64)
+                NR_PERF_EVENT_OPEN,  # __NR_perf_event_open (x86_64)
                 (ctypes.c_char * len(pe))(*pe),
                 pid,  # target pid
                 -1,  # cpu (any)
