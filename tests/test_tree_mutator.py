@@ -1,8 +1,13 @@
 """Tests for core/tree_mutator.py — Lightweight delimiter-based tree mutator."""
 
 from fuzzer_tool.core.tree_mutator import (
+    _Node,
     _clone_node,
+    _collect_leaves,
     _collect_nodes,
+    _find_parent,
+    _insert_after,
+    _remove_child,
     lightweight_tree_mutate,
     mutate_tree_del,
     mutate_tree_dup,
@@ -164,3 +169,50 @@ class TestTreeMutations:
         for data in cases:
             root = partial_parse(data)
             assert root.flatten() == data, f"Round-trip failed for {data!r}"
+
+
+class TestDeepNesting:
+    """Regression: deeply nested trees must not cause RecursionError."""
+
+    DEPTH = 2000
+
+    @staticmethod
+    def _deep_data() -> bytes:
+        return b"(" * TestDeepNesting.DEPTH + b")" * TestDeepNesting.DEPTH
+
+    def test_regression_deep_tree_no_recursion_error(self):
+        data = self._deep_data()
+        root = partial_parse(data)
+        nodes = _collect_nodes(root)
+        assert len(nodes) == self.DEPTH
+
+        # Every recursive function must handle this depth without RecursionError
+        flat = root.flatten()
+        assert flat == data
+
+        target = nodes[self.DEPTH // 2]
+        clone = _clone_node(target)
+        assert clone.flatten() == target.flatten()
+        assert clone is not target
+
+        parent = _find_parent(root, target)
+        assert parent is not None
+
+        leaves = _collect_leaves(root)
+        assert len(leaves) >= 0
+
+        assert _remove_child(root, target)
+        assert _find_parent(root, target) is None
+
+    def test_regression_deep_tree_insert_after(self):
+        """Insert operations also avoid RecursionError on deep trees."""
+        data = self._deep_data()
+        root = partial_parse(data)
+        nodes = _collect_nodes(root)
+        target = nodes[self.DEPTH // 2]
+        new_node = _Node(40)
+        new_node.closed = True
+        assert _insert_after(root, target, new_node)
+        flat = root.flatten()
+        # Should contain the inserted () somewhere
+        assert b"()" in flat

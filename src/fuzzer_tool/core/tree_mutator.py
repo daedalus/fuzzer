@@ -61,19 +61,36 @@ class _Node:
         return not self.children
 
     def flatten(self) -> bytes:
-        """Flatten the tree back to raw bytes."""
+        """Flatten the tree back to raw bytes (iterative stack).
+
+        Stack entries are either:
+          - ``(node, 0)``: enter node (append open delim, push children + close)
+          - ``(node, 1)``: exit node (append close delim)
+          - ``bytes``: raw literal to append verbatim
+        """
         parts: list[bytes] = []
-        if self.open is not None:
-            parts.append(_BYTE_BYTES[self.open])
-        for child in self.children:
-            if isinstance(child, _Node):
-                parts.append(child.flatten())
-            else:
-                parts.append(child)
-        if self.open is not None and self.closed:
-            close = _CLOSE_TABLE[self.open]
-            if close != 0xFF:
-                parts.append(_BYTE_BYTES[close])
+        stack: list[tuple[_Node, int] | bytes] = [(self, 0)]
+        while stack:
+            item = stack.pop()
+            if isinstance(item, bytes):
+                parts.append(item)
+                continue
+            node, state = item
+            if state == 1:
+                if node.open is not None and node.closed:
+                    close = _CLOSE_TABLE[node.open]
+                    if close != 0xFF:
+                        parts.append(_BYTE_BYTES[close])
+                continue
+            # Enter — push close marker, children (reversed), then open delim
+            stack.append((node, 1))
+            for child in reversed(node.children):
+                if isinstance(child, _Node):
+                    stack.append((child, 0))
+                else:
+                    stack.append(child)
+            if node.open is not None:
+                parts.append(_BYTE_BYTES[node.open])
         return b"".join(parts)
 
 
@@ -158,16 +175,19 @@ def _collect_nodes(node: _Node) -> list[_Node]:
 
 
 def _collect_leaves(node: _Node) -> list[_Node | bytes]:
-    """Return all leaf children (either _Node or raw bytes)."""
-    leaves = []
-    for child in node.children:
-        if isinstance(child, _Node):
-            if child.is_leaf():
-                leaves.append(child)
+    """Return all leaf children (iterative depth-first)."""
+    leaves: list[_Node | bytes] = []
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        for child in reversed(current.children):
+            if isinstance(child, _Node):
+                if child.is_leaf():
+                    leaves.append(child)
+                else:
+                    stack.append(child)
             else:
-                leaves.extend(_collect_leaves(child))
-        else:
-            leaves.append(child)
+                leaves.append(child)
     return leaves
 
 
@@ -242,26 +262,30 @@ def mutate_tree_stutter(root: _Node, rng=None) -> bool:
 
 
 def _remove_child(root: _Node, target: _Node) -> bool:
-    """Remove *target* from its parent's children."""
-    for child in root.children:
-        if child is target:
-            root.children.remove(target)
-            return True
-        if isinstance(child, _Node):
-            if _remove_child(child, target):
+    """Remove *target* from its parent's children (iterative)."""
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        for child in current.children:
+            if child is target:
+                current.children.remove(target)
                 return True
+            if isinstance(child, _Node):
+                stack.append(child)
     return False
 
 
 def _insert_after(root: _Node, target: _Node, new_node: _Node) -> bool:
-    """Insert *new_node* after *target* in the tree."""
-    for i, child in enumerate(root.children):
-        if child is target:
-            root.children.insert(i + 1, new_node)
-            return True
-        if isinstance(child, _Node):
-            if _insert_after(child, target, new_node):
+    """Insert *new_node* after *target* in the tree (iterative)."""
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        for i, child in enumerate(current.children):
+            if child is target:
+                current.children.insert(i + 1, new_node)
                 return True
+            if isinstance(child, _Node):
+                stack.append(child)
     return False
 
 
@@ -279,27 +303,38 @@ def _swap_nodes(root: _Node, a: _Node, b: _Node) -> bool:
 
 
 def _find_parent(root: _Node, target: _Node) -> _Node | None:
-    """Find the parent of *target* in the tree."""
-    for child in root.children:
-        if child is target:
-            return root
-        if isinstance(child, _Node):
-            result = _find_parent(child, target)
-            if result is not None:
-                return result
+    """Find the parent of *target* in the tree (iterative)."""
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        for child in current.children:
+            if child is target:
+                return current
+            if isinstance(child, _Node):
+                stack.append(child)
     return None
 
 
 def _clone_node(node: _Node) -> _Node:
-    """Deep-copy a node."""
-    new = _Node(node.open)
-    new.closed = node.closed
-    for child in node.children:
+    """Deep-copy a node (iterative stack)."""
+    new_root = _Node(node.open)
+    new_root.closed = node.closed
+    stack: list[tuple[_Node, _Node, int]] = [(node, new_root, 0)]
+    while stack:
+        orig, new, idx = stack[-1]
+        if idx >= len(orig.children):
+            stack.pop()
+            continue
+        child = orig.children[idx]
+        stack[-1] = (orig, new, idx + 1)
         if isinstance(child, _Node):
-            new.children.append(_clone_node(child))
+            new_child = _Node(child.open)
+            new_child.closed = child.closed
+            new.children.append(new_child)
+            stack.append((child, new_child, 0))
         else:
             new.children.append(child)
-    return new
+    return new_root
 
 
 # ── Public API ────────────────────────────────────────────────────────

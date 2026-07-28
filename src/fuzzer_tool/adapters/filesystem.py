@@ -225,17 +225,11 @@ def load_corpus(
             if mark_irreplaceable:
                 irreplaceable_hashes.add(h)
         for sub in base_dir.iterdir():
-            if not (sub.is_dir() and len(sub.name) == 2 and sub.name.isalnum()):
+            if not sub.is_dir():
                 continue
-            for f in sub.iterdir():
-                if not f.is_file():
-                    continue
-                if f.name.startswith("id_"):
-                    data = f.read_bytes()
-                    h = hash_data(data)
-                    full_files[h] = data
-                    if mark_irreplaceable:
-                        irreplaceable_hashes.add(h)
+            if sub.name == "pruned":
+                continue
+            _load_full_from_dir(sub, mark_irreplaceable=mark_irreplaceable)
 
     # Discover all subdirectories in corpus_dir — load from each except pruned/
     for entry in sorted(corpus_dir.iterdir(), key=lambda p: p.name):
