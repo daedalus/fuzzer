@@ -106,6 +106,7 @@ ENTROPY_FLAT_THRESHOLD = 0.001  # rate below which entropy is "flat"
 
 # ── Memory bounds ────────────────────────────────────────────────────
 CRASH_RATE_HISTORY_MAX = 500  # max entries in _crash_rate_history
+MAX_CRASH_SIGS = 10_000  # max unique crash signatures before pruning old entries
 KERNEL_CRASHES_MAX = 500  # max kernel-verified crashes retained
 SEED_SECRETARY_MAX = 500  # max per-seed SecretaryStopping entries
 SEEN_HASHES_MAX = 200_000  # max unique seed hashes retained
@@ -1417,6 +1418,27 @@ class Fuzzer:
     def save_crash(self, data: bytes, returncode: int, stderr: str):
         return self._corpus_manager.save_crash(data, returncode, stderr)
 
+    def _prune_crash_data(self) -> None:
+        """Trim crash structures when they exceed MAX_CRASH_SIGS.
+
+        Keeps the most frequent crash signatures and evicts all data for
+        the least frequent ones. Leaves crash_hashes intact (small memory
+        footprint, prevents duplicate disk writes).
+        """
+        if len(self.crash_sigs) <= MAX_CRASH_SIGS:
+            return
+        # Keep top 75% of signatures sorted by frequency descending
+        keep_count = max(MAX_CRASH_SIGS * 3 // 4, 1)
+        sorted_sigs = sorted(self.crash_sigs.items(), key=lambda x: -x[1])
+        kept = {sig for sig, _ in sorted_sigs[:keep_count]}
+        evicted = set(self.crash_sigs) - kept
+        self.crash_sigs = dict(sorted_sigs[:keep_count])
+        # Evict associated data for dropped signatures
+        for sig in evicted:
+            self.crash_frames.pop(sig, None)
+            self.crash_min_sizes.pop(sig, None)
+            self._crash_replays.pop(sig, None)
+
     def save_to_corpus(self, data: bytes, parent: bytes | None = None):
         return self._corpus_manager.save_to_corpus(data, parent)
 
@@ -2117,6 +2139,7 @@ class Fuzzer:
         if is_crash:
             self.crash_count += 1
             crash_name = self.save_crash(mutated, returncode, stderr)
+            self._prune_crash_data()
             # Generate GDB/strace trace report if enabled
             if self._tracer and crash_name:
                 report = self._tracer.trace(mutated, returncode)
@@ -2522,6 +2545,7 @@ class Fuzzer:
                 if self._is_crash(returncode, stderr):
                     self.crash_count += 1
                     self.save_crash(seed, returncode, stderr)
+                    self._prune_crash_data()
                     # Kernel crash verification (same as fuzz_one path)
                     self._verify_kernel_crash(getattr(self, "_last_child_pid", None))
             # Baseline exec_count after initial seed replay — used for

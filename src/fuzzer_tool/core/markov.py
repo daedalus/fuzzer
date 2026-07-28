@@ -15,6 +15,12 @@ from fuzzer_tool.core.edge_tracker import ks_significance_threshold
 
 log = logging.getLogger(__name__)
 
+# Safety cap on number of unique context→counter entries per chain.
+# Prevents unbounded memory growth from high-order ensembles or very
+# large corpora. When exceeded, the least-used contexts (lowest total
+# transition count) are evicted.
+MAX_TRANSITIONS = 200_000
+
 
 class MarkovChain:
     """Byte-level Markov chain for fuzz input generation.
@@ -62,6 +68,25 @@ class MarkovChain:
         # Track global byte frequency for fallback generation
         for b in data:
             self._global_freq[b] += 1
+        self._maybe_prune_transitions()
+
+    def _maybe_prune_transitions(self) -> None:
+        """Trim least-used contexts when MAX_TRANSITIONS is exceeded.
+
+        Evicts contexts with the lowest total transition count so the
+        most informative patterns survive. Runs at most once per train()
+        call.
+        """
+        if len(self.transitions) <= MAX_TRANSITIONS:
+            return
+        # Sort contexts by total count ascending, evict bottom 25%
+        target = max(MAX_TRANSITIONS * 3 // 4, 1)
+        sorted_ctx = sorted(
+            self.transitions,
+            key=lambda ctx: sum(self.transitions[ctx].values()),
+        )
+        for ctx in sorted_ctx[: len(self.transitions) - target]:
+            del self.transitions[ctx]
 
     def train_corpus(self, corpus: list[bytes]) -> None:
         """Train on multiple inputs.
