@@ -204,9 +204,6 @@ class Z3Solver:
         Returns a dict with keys ``solved_bytes``, ``width``,
         ``relation``, ``delta``, or *None* when no relation is found.
         """
-        if not self._available:
-            return None
-
         # Concolic mode: accumulate, then solve in batch
         if self.mod_solving_mode == "concolic" and self.concolic_trace is not None:
             for width in (8, 4, 2, 1):

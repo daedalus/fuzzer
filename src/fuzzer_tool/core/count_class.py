@@ -28,16 +28,12 @@ def _classify_byte(val: int) -> int:
     return min(b, 128)
 
 
-try:
-    import numpy as np
+import numpy as np
 
-    _NP_CLASSIFY_TABLE = np.array(
-        [_classify_byte(i) for i in range(256)],
-        dtype=np.uint8,
-    )
-    _HAS_NUMPY = True
-except ImportError:
-    _HAS_NUMPY = False
+_NP_CLASSIFY_TABLE = np.array(
+    [_classify_byte(i) for i in range(256)],
+    dtype=np.uint8,
+)
 
 
 def _build_u16_table() -> list[int]:
@@ -73,7 +69,7 @@ def classify_counts(trace_bits):
     Returns:
         Classified trace bitmap.
     """
-    if _HAS_NUMPY and len(trace_bits) > 0:
+    if len(trace_bits) > 0:
         arr = (
             np.frombuffer(trace_bits, dtype=np.uint8)
             if isinstance(trace_bits, (bytes, bytearray))

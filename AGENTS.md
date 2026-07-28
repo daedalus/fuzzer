@@ -221,6 +221,8 @@ These rules are extracted from ~85 `fix:` commits in project history. Each names
 
 - Always add regression tests. When a bug is found and fixed, write a test that reproduces the exact scenario that caused the bug. Name it `test_regression_<brief_description>` (e.g. `test_regression_empty_list_crash`). This ensures the bug cannot silently return. Regression tests are non-negotiable: every fix ships with a test.
 
+- **Tests that assert equivalence between two computed values must derive at least one side independently of the code under test.** The independent reference can be a hand-computed literal (e.g. `10 * 3` instead of `f(10, 3)`), a result from a different algorithm or library, or a known canonical answer. Never call the same function or implementation on both sides of an assertion — that validates the code against itself and passes even when the implementation is buggy. This rule applies to: `assert f(X) == f(Y)` (same function, different inputs), `assert result.some_field == another_call(...)`, and any test where the "expected" value is itself computed rather than a literal constant.
+
 ### Dispatch table & half-shipped features
 
 - **Every entry in `_build_dispatch()` must have a corresponding module and class.** If an operator name is registered in `MUTATIONS` / `FORMAT_MUTATIONS` and wired into the dispatch table, but the module it imports doesn't exist, the fuzzer crashes with `ModuleNotFoundError` the moment the scheduler picks that operator. This is invisible to unit tests because they never exercise the live dispatch path. The integration smoke test (`test_operator_smoke.py::test_all_ops_fire`) catches this by calling every handler once — it must pass before any release.

@@ -30,14 +30,7 @@ import random
 from dataclasses import dataclass
 from typing import Literal
 
-# numpy optional but recommended for memory efficiency (~15× savings)
-try:
-    import numpy as np
-
-    HAVE_NUMPY = True
-except ImportError:
-    np = None  # type: ignore[assignment]
-    HAVE_NUMPY = False
+import numpy as np
 
 # ── Direction constants ───────────────────────────────────────────────
 
@@ -194,13 +187,12 @@ class WaveGrid:
         # adj_matrix[i, j, d] = compatible(tiles[i], tiles[j], direction[d])
         self._dir_names: list[Direction] = ["left", "right", "up", "down"]
         self._adj_matrix: np.ndarray | None = None
-        if HAVE_NUMPY:
-            mat = np.zeros((self.n_tiles, self.n_tiles, 4), dtype=bool)
-            for i, t_i in enumerate(tiles):
-                for j, t_j in enumerate(tiles):
-                    for d, dname in enumerate(self._dir_names):
-                        mat[i, j, d] = adjacency.compatible(t_i.name, t_j.name, dname)
-            self._adj_matrix = mat
+        mat = np.zeros((self.n_tiles, self.n_tiles, 4), dtype=bool)
+        for i, t_i in enumerate(tiles):
+            for j, t_j in enumerate(tiles):
+                for d, dname in enumerate(self._dir_names):
+                    mat[i, j, d] = adjacency.compatible(t_i.name, t_j.name, dname)
+        self._adj_matrix = mat
 
     # ── Public API ──────────────────────────────────────────────────
 
@@ -362,7 +354,7 @@ class WaveGrid:
         row = self.superpositions[idx]
         removed_any = False
 
-        if HAVE_NUMPY and self._adj_matrix is not None:
+        if self._adj_matrix is not None:
             for nidx in self._neighbors(idx):
                 d = self._dir_names.index(self._direction_to(idx, nidx))
                 nbr_row = self.superpositions[nidx]

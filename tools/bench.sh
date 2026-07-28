@@ -19,6 +19,10 @@
 #
 # For a broad sweep of individual feature/combination effects instead of
 # these five named configurations, use tools/bench_sweep.sh.
+#
+# For differential analysis between any two bench runs (crash signatures,
+# edge overlap, efficiency), use tools/bench_diff.py:
+#   python tools/bench_diff.py -b /tmp/fuzz_bench_baseline.log -t /tmp/fuzz_bench_enhanced.log
 
 set -euo pipefail
 
@@ -146,6 +150,18 @@ p_collision=$(extract "Collision risk:\s+\K[0-9.]+" /tmp/fuzz_bench_enhanced+.lo
 o_collision=$(extract "Collision risk:\s+\K[0-9.]+" /tmp/fuzz_bench_optimal.log)
 q_collision=$(extract "Collision risk:\s+\K[0-9.]+" /tmp/fuzz_bench_qea.log)
 
+# Crash-finding metrics
+b_crashes=$(extract "\K[0-9]+ crashes found" /tmp/fuzz_bench_baseline.log)
+e_crashes=$(extract "\K[0-9]+ crashes found" /tmp/fuzz_bench_enhanced.log)
+p_crashes=$(extract "\K[0-9]+ crashes found" /tmp/fuzz_bench_enhanced+.log)
+o_crashes=$(extract "\K[0-9]+ crashes found" /tmp/fuzz_bench_optimal.log)
+q_crashes=$(extract "\K[0-9]+ crashes found" /tmp/fuzz_bench_qea.log)
+b_unique_sigs=$(extract "\([0-9]+\) unique signatures" /tmp/fuzz_bench_baseline.log | tr -d '() ' | cut -d' ' -f1)
+e_unique_sigs=$(extract "\([0-9]+\) unique signatures" /tmp/fuzz_bench_enhanced.log | tr -d '() ' | cut -d' ' -f1)
+p_unique_sigs=$(extract "\([0-9]+\) unique signatures" /tmp/fuzz_bench_enhanced+.log | tr -d '() ' | cut -d' ' -f1)
+o_unique_sigs=$(extract "\([0-9]+\) unique signatures" /tmp/fuzz_bench_optimal.log | tr -d '() ' | cut -d' ' -f1)
+q_unique_sigs=$(extract "\([0-9]+\) unique signatures" /tmp/fuzz_bench_qea.log | tr -d '() ' | cut -d' ' -f1)
+
 # Extract CI for crash rates (space-delimited for direct display in the table below)
 b_crash_ci=$(extract_ci /tmp/fuzz_bench_baseline.log "Crash rate:" " ")
 e_crash_ci=$(extract_ci /tmp/fuzz_bench_enhanced.log "Crash rate:" " ")
@@ -161,6 +177,8 @@ printf "%-25s %12s %12s %12s %12s %12s\n" "Avg eps" "${b_eps:-?}" "${e_eps:-?}" 
 printf "%-25s %12s %12s %12s %12s %12s\n" "Duration" "${b_dur:-?}" "${e_dur:-?}" "${p_dur:-?}" "${o_dur:-?}" "${q_dur:-?}"
 printf "%-25s %12s %12s %12s %12s %12s\n" "Exec time p50" "${b_time:-?}" "${e_time:-?}" "${p_time:-?}" "${o_time:-?}" "${q_time:-?}"
 printf "%-25s %12s %12s %12s %12s %12s\n" "Collision risk" "${b_collision:-0}%" "${e_collision:-0}%" "${p_collision:-0}%" "${o_collision:-0}%" "${q_collision:-0}%"
+printf "%-25s %12s %12s %12s %12s %12s\n" "Crashes found" "${b_crashes:-?}" "${e_crashes:-?}" "${p_crashes:-?}" "${o_crashes:-?}" "${q_crashes:-?}"
+printf "%-25s %12s %12s %12s %12s %12s\n" "Unique crash sigs" "${b_unique_sigs:-?}" "${e_unique_sigs:-?}" "${p_unique_sigs:-?}" "${o_unique_sigs:-?}" "${q_unique_sigs:-?}"
 
 echo ""
 echo "Crash rate CI (±1σ ±2σ ±3σ):"

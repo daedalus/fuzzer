@@ -33,15 +33,7 @@ from typing import TYPE_CHECKING
 
 from fuzzer_tool.core.mutations import crossover
 
-# numpy is optional but strongly recommended: provides 2× memory savings
-# and 19× speedup via vectorized operations
-try:
-    import numpy as np
-
-    HAVE_NUMPY = True
-except ImportError:
-    np = None  # type: ignore[assignment]
-    HAVE_NUMPY = False
+import numpy as np
 
 if TYPE_CHECKING:
     from fuzzer_tool.core.edge_tracker import EdgeTracker
@@ -133,12 +125,6 @@ class QEAIndividual:
             self.seed_key = hashlib.sha256(self.best_collapsed).hexdigest()[:16]
         # Ensure amplitudes are always ndarray
         if isinstance(self.amplitudes, list):
-            if not HAVE_NUMPY:
-                raise ImportError(
-                    "numpy is required for QEA encoding. "
-                    "Install it with: pip install numpy>=2.0  "
-                    "or pip install fuzzer-tool[qea]"
-                )
             self.amplitudes = np.array(self.amplitudes, dtype=np.float64)
 
     @property
