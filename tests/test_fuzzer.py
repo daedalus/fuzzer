@@ -120,6 +120,68 @@ class TestFuzzerUnit:
             assert meta["fuzz_count"] == 0
             assert meta["coverage_edges"] == 0
 
+    def test_corpus_bust_truncates_long_seeds(self):
+        f = self._make_fuzzer(max_len=10, bust_corpus=True, bust_mean=5, bust_std=1)
+        f.corpus = [b"A" * 50, b"B" * 50]
+        f._bust_corpus_sizes()
+        assert all(len(s) <= 10 for s in f.corpus)
+        assert all(len(s) >= 1 for s in f.corpus)
+
+    def test_corpus_bust_pads_repeat(self):
+        f = self._make_fuzzer(
+            max_len=100, bust_corpus=True, bust_mean=50, bust_std=5, bust_pad="repeat"
+        )
+        f.corpus = [b"ABC", b"XY"]
+        f._bust_corpus_sizes()
+        for s in f.corpus:
+            assert 1 <= len(s) <= 100
+            assert s[:3] == b"ABC" or s[:2] == b"XY"
+
+    def test_corpus_bust_pads_zero(self):
+        f = self._make_fuzzer(
+            max_len=100, bust_corpus=True, bust_mean=50, bust_std=5, bust_pad="zero"
+        )
+        f.corpus = [b"A"]
+        f._bust_corpus_sizes()
+        assert len(f.corpus[0]) >= 1
+        assert f.corpus[0][0] == ord("A")
+        assert all(b == 0 for b in f.corpus[0][1:])
+
+    def test_corpus_bust_pads_random(self):
+        f = self._make_fuzzer(
+            max_len=100, bust_corpus=True, bust_mean=50, bust_std=5, bust_pad="random"
+        )
+        f.corpus = [b"A"]
+        f._bust_corpus_sizes()
+        assert len(f.corpus[0]) >= 1
+        assert f.corpus[0][0] == ord("A")
+
+    def test_corpus_bust_empty_corpus(self):
+        f = self._make_fuzzer(bust_corpus=True)
+        f.corpus = []
+        f._bust_corpus_sizes()
+        assert f.corpus == []
+
+    def test_corpus_bust_disabled(self):
+        f = self._make_fuzzer(bust_corpus=False, max_len=10)
+        original = [b"hello world this is long"]
+        f.corpus = list(original)
+        f._bust_corpus_sizes()
+        assert f.corpus == original
+
+    def test_corpus_bust_respects_max_len(self):
+        f = self._make_fuzzer(max_len=32, bust_corpus=True, bust_mean=100, bust_std=50)
+        f.corpus = [b"A" * 10 for _ in range(50)]
+        f._bust_corpus_sizes()
+        assert all(len(s) <= 32 for s in f.corpus)
+
+    def test_corpus_bust_invalidates_cache(self):
+        f = self._make_fuzzer(bust_corpus=True)
+        f.corpus = [b"AAAA", b"BBBB"]
+        f._seed_key_cache = {b"AAAA": "old", b"BBBB": "old"}
+        f._bust_corpus_sizes()
+        assert len(f._seed_key_cache) == 0
+
     def test_pick_seed_weights_less_fuzzed(self):
         f = self._make_fuzzer()
         f.corpus = [b"AAAA", b"BBBB"]
@@ -749,85 +811,3 @@ class TestFuzzerHelpers:
         f._check_python_crashes()
         assert len(f._kernel_crashes) == 1
         assert f._kernel_crashes[0].crash_type == "python_segfault"
-
-
-class TestCrashDataPruning:
-    """Regression tests for _prune_crash_data bounding crash structures."""
-
-    def _make_fuzzer_with_crashes(self, n_sigs: int):
-        """Create a Fuzzer with n_sigs unique crash signatures."""
-        f = object.__new__(Fuzzer)
-        f.crash_sigs = {f"sig_{i}": (n_sigs - i) for i in range(n_sigs)}
-        f.crash_hashes = {f"hash_{i}" for i in range(n_sigs)}
-        f.crash_frames = {f"sig_{i}": [f"frame_{i}_0", f"frame_{i}_1"] for i in range(n_sigs)}
-        f.crash_min_sizes = {f"stack_{i}": 10 + i for i in range(n_sigs)}
-        f._crash_replays = {f"sig_{i}": [i] for i in range(n_sigs)}
-        return f
-
-    def test_regression_prune_crash_data_caps_sigs(self):
-        """_prune_crash_data reduces crash_sigs to <= MAX_CRASH_SIGS."""
-        from fuzzer_tool.services.fuzzer import MAX_CRASH_SIGS
-
-        n = MAX_CRASH_SIGS * 2
-        f = self._make_fuzzer_with_crashes(n)
-        assert len(f.crash_sigs) == n
-        f._prune_crash_data()
-        assert len(f.crash_sigs) <= MAX_CRASH_SIGS
-        # Should be approximately 75% of MAX_CRASH_SIGS
-        target = MAX_CRASH_SIGS * 3 // 4
-        assert len(f.crash_sigs) >= target
-
-    def test_regression_prune_crash_data_evicts_associated_structures(self):
-        """Evicted sigs are removed from crash_frames, crash_min_sizes, _crash_replays."""
-        from fuzzer_tool.services.fuzzer import MAX_CRASH_SIGS
-
-        n = MAX_CRASH_SIGS * 2
-        f = self._make_fuzzer_with_crashes(n)
-        all_sigs = set(f.crash_sigs)
-        f._prune_crash_data()
-        kept_sigs = set(f.crash_sigs)
-        evicted = all_sigs - kept_sigs
-        # Evicted sigs should not appear in associated structures
-        for sig in evicted:
-            assert sig not in f.crash_frames
-            assert sig not in f._crash_replays
-            # crash_min_sizes keys on stack hash, not sig — verify the
-            # total number of entries doesn't exceed kept_sigs count
-        # All associated dicts should have at most as many entries as crash_sigs
-        assert len(f.crash_frames) <= len(f.crash_sigs)
-        assert len(f._crash_replays) <= len(f.crash_sigs)
-
-    def test_regression_prune_crash_data_below_limit_noop(self):
-        """_prune_crash_data is a no-op when crash_sigs is under MAX_CRASH_SIGS."""
-        from fuzzer_tool.services.fuzzer import MAX_CRASH_SIGS
-
-        n = MAX_CRASH_SIGS // 2
-        f = self._make_fuzzer_with_crashes(n)
-        sigs_before = dict(f.crash_sigs)
-        frames_before = dict(f.crash_frames)
-        f._prune_crash_data()
-        assert f.crash_sigs == sigs_before
-        assert f.crash_frames == frames_before
-
-    def test_regression_prune_crash_data_keeps_most_frequent(self):
-        """The most frequently hit signatures survive pruning."""
-        from fuzzer_tool.services.fuzzer import MAX_CRASH_SIGS
-
-        n = MAX_CRASH_SIGS * 2
-        f = self._make_fuzzer_with_crashes(n)
-        # sig_0 has count n (highest), sig_{n-1} has count 1 (lowest)
-        f._prune_crash_data()
-        # sig_0 should still be present (most frequent)
-        assert "sig_0" in f.crash_sigs
-        # sig_{n-1} should be evicted (least frequent)
-        assert f"sig_{n - 1}" not in f.crash_sigs
-
-    def test_regression_prune_crash_data_preserves_crash_hashes(self):
-        """crash_hashes is left intact after pruning (prevents duplicate disk writes)."""
-        from fuzzer_tool.services.fuzzer import MAX_CRASH_SIGS
-
-        n = MAX_CRASH_SIGS * 2
-        f = self._make_fuzzer_with_crashes(n)
-        hashes_before = set(f.crash_hashes)
-        f._prune_crash_data()
-        assert f.crash_hashes == hashes_before

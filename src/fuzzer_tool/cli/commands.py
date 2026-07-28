@@ -287,15 +287,6 @@ def cmd_fuzz(args):
             overlap_min_jaccard=getattr(args, "overlap_min_jaccard", 0.25),
             overlap_density_blend=getattr(args, "overlap_blend", 0.5),
             resize_map_on_stall=getattr(args, "resize_map_on_stall", True),
-            exp3=getattr(args, "exp3", False),
-            exp3_gamma=getattr(args, "exp3_gamma", 0.1),
-            eps_greedy=getattr(args, "eps_greedy", False),
-            eps_greedy_epsilon0=getattr(args, "eps_greedy_epsilon0", 1.0),
-            eps_greedy_decay=getattr(args, "eps_greedy_decay", 0.9995),
-            hierarchical_bandit=getattr(args, "hierarchical_bandit", False),
-            gp_ucb=getattr(args, "gp_ucb", False),
-            gp_length_scale=getattr(args, "gp_length_scale", 1.0),
-            gp_beta=getattr(args, "gp_beta", 2.0),
         )
         return 0
 
@@ -365,15 +356,6 @@ def cmd_fuzz(args):
         schedule_ablation=getattr(args, "schedule_ablation", None),
         schedule=getattr(args, "schedule", "base"),
         replicator=getattr(args, "replicator", False),
-        exp3=getattr(args, "exp3", False),
-        exp3_gamma=getattr(args, "exp3_gamma", 0.1),
-        eps_greedy=getattr(args, "eps_greedy", False),
-        eps_greedy_epsilon0=getattr(args, "eps_greedy_epsilon0", 1.0),
-        eps_greedy_decay=getattr(args, "eps_greedy_decay", 0.9995),
-        hierarchical_bandit=getattr(args, "hierarchical_bandit", False),
-        gp_ucb=getattr(args, "gp_ucb", False),
-        gp_length_scale=getattr(args, "gp_length_scale", 1.0),
-        gp_beta=getattr(args, "gp_beta", 2.0),
         shapley=getattr(args, "shapley", False),
         bayesian=getattr(args, "bayesian", False),
         mi_guided=getattr(args, "mi_guided", False),
@@ -406,6 +388,10 @@ def cmd_fuzz(args):
         debug=getattr(args, "debug", False),
         enable_regex_bomb=getattr(args, "enable_regex_bomb_mutations", False),
         refresh_profile=getattr(args, "refresh_profile", False),
+        bust_corpus=getattr(args, "corpus_bust", False),
+        bust_mean=getattr(args, "bust_mean", None),
+        bust_std=getattr(args, "bust_std", None),
+        bust_pad=getattr(args, "bust_pad", "repeat"),
         resize_map_on_stall=getattr(args, "resize_map_on_stall", False),
         enable_smt_z3=getattr(args, "enable_smt_z3", False),
         mod_solving=getattr(args, "mod_solving", "heuristic"),
@@ -704,7 +690,7 @@ def cmd_rank(args):
     edge_path = corpus_dir / "edge_tracker.json"
 
     bloom = BloomFilter(capacity=100_000)
-    corpus, seen_hashes, irreplaceable_hashes = load_corpus(corpus_dir, bloom)
+    corpus, seen_hashes = load_corpus(corpus_dir, bloom)
     if not corpus:
         print("[-] Empty corpus", file=sys.stderr)
         return 1
@@ -842,7 +828,7 @@ def cmd_ppmd(args):
 
     bloom = BloomFilter(capacity=100_000)
     bloom.init_fuzzy(max_recent=200)
-    corpus, _, _ = load_corpus(corpus_dir, bloom)
+    corpus, _ = load_corpus(corpus_dir, bloom)
 
     if not corpus:
         print(f"No seeds found in {corpus_dir}")
@@ -1006,105 +992,6 @@ def cmd_estimate(args):
     print(f"  Reasoning: {eta.reasoning}")
 
 
-def cmd_sweep(args):
-    """Linearly scan corpus seeds for missed crashes.
-
-    Loads every seed from the corpus, runs it against the target without
-    mutations, scheduler, coverage tracking, or minification. Discovers
-    seeds that happen to crash the target — inputs added to the corpus
-    during fuzzing that triggered no coverage event but still crash.
-    """
-    _validate_target(args.target)
-
-    corpus_dir = Path(args.corpus)
-    if not corpus_dir.is_dir():
-        print(f"[-] Corpus dir not found: {args.corpus}", file=sys.stderr)
-        return 1
-
-    from fuzzer_tool.adapters.filesystem import hash_data, load_corpus
-
-    seeds, _, _ = load_corpus(corpus_dir, bloom=None, add_default=False)
-    if not seeds:
-        print("[-] No seeds found in corpus")
-        return 0
-
-    crashes_dir = Path(args.crashes) if args.crashes else corpus_dir / "crashes"
-    crashes_dir.mkdir(parents=True, exist_ok=True)
-
-    from fuzzer_tool.adapters.process import (
-        SIGNAL_CRASH_CODES,
-        run_target_file,
-        run_target_stdin,
-    )
-    from fuzzer_tool.core.sanitizer import SanitizerReport
-
-    found = 0
-    total = len(seeds)
-    seeds.sort(key=lambda s: hash_data(s))
-
-    for i, seed in enumerate(seeds):
-        if (i + 1) % 100 == 0 or i == 0:
-            print(f"\r[*] Sweeping seed {i + 1}/{total}...", end="", file=sys.stderr)
-            sys.stderr.flush()
-
-        try:
-            if args.file_mode:
-                tmp_dir = Path("/tmp") / f"sweep_{os.getpid()}"
-                tmp_dir.mkdir(parents=True, exist_ok=True)
-                try:
-                    returncode, stderr, _ = run_target_file(
-                        target=args.target,
-                        data=seed,
-                        timeout=args.timeout,
-                        tmp_dir=str(tmp_dir),
-                        target_args=args.target_args or [],
-                        env=os.environ.copy(),
-                    )
-                finally:
-                    shutil.rmtree(tmp_dir, ignore_errors=True)
-            else:
-                returncode, stderr, _ = run_target_stdin(
-                    target=args.target,
-                    data=seed,
-                    timeout=args.timeout,
-                    env=os.environ.copy(),
-                )
-        except Exception as e:
-            print(f"\n  [!] Error on seed {i + 1}/{total}: {e}", file=sys.stderr)
-            continue
-
-        # Check for crash
-        report = SanitizerReport.parse(stderr)
-        is_crash = bool(report and report.is_valid())
-        if not is_crash:
-            is_crash = abs(returncode) in SIGNAL_CRASH_CODES
-        if not is_crash:
-            is_crash = returncode < 0
-        if not is_crash:
-            is_crash = any(
-                sig in stderr
-                for sig in [
-                    "SIGSEGV",
-                    "SIGABRT",
-                    "Segmentation fault",
-                    "Aborted",
-                ]
-            )
-
-        if is_crash:
-            found += 1
-            h = hash_data(seed)
-            sig = report.signature if report and report.is_valid() else f"signal{abs(returncode)}"
-            crash_name = f"crash_{h[:12]}_{sig}"
-            crash_path = crashes_dir / crash_name
-            if not crash_path.exists():
-                crash_path.write_bytes(seed)
-            print(f"\n  [+] Crash: rc={returncode}, hash={h[:12]} -> {crash_name}")
-
-    print(f"\n[*] Sweep complete: {total} seeds processed, {found} crashes found")
-    return 0
-
-
 def main() -> int:
     sys.stdout.reconfigure(line_buffering=True)
     sys.stderr.reconfigure(line_buffering=True)
@@ -1227,54 +1114,6 @@ def main() -> int:
         "--elo",
         action="store_true",
         help="Enable Elo scheduling: arbitrates between operator strategies (bandit/MOpt/replicator) AND seed strategies (ga/weighted/pareto/format)",
-    )
-    fuzz_parser.add_argument(
-        "--exp3", action="store_true", help="Enable EXP3 adversarial bandit operator scheduling"
-    )
-    fuzz_parser.add_argument(
-        "--exp3-gamma",
-        type=float,
-        default=0.1,
-        help="EXP3 exploration rate in [0,1] (default: 0.1)",
-    )
-    fuzz_parser.add_argument(
-        "--eps-greedy",
-        action="store_true",
-        help="Enable epsilon-greedy operator scheduling with annealing",
-    )
-    fuzz_parser.add_argument(
-        "--eps-greedy-epsilon0",
-        type=float,
-        default=1.0,
-        help="Initial epsilon for epsilon-greedy (default: 1.0)",
-    )
-    fuzz_parser.add_argument(
-        "--eps-greedy-decay",
-        type=float,
-        default=0.9995,
-        help="Epsilon decay rate per pull (default: 0.9995)",
-    )
-    fuzz_parser.add_argument(
-        "--hierarchical-bandit",
-        action="store_true",
-        help="Enable hierarchical bandit operator scheduling (category -> operator)",
-    )
-    fuzz_parser.add_argument(
-        "--gp-ucb",
-        action="store_true",
-        help="Enable GP-UCB operator scheduling with kernel covariance",
-    )
-    fuzz_parser.add_argument(
-        "--gp-length-scale",
-        type=float,
-        default=1.0,
-        help="GP kernel RBF length scale (default: 1.0)",
-    )
-    fuzz_parser.add_argument(
-        "--gp-beta",
-        type=float,
-        default=2.0,
-        help="GP-UCB exploration parameter (default: 2.0)",
     )
     fuzz_parser.add_argument(
         "--overlap-density",
@@ -1464,6 +1303,29 @@ def main() -> int:
         type=int,
         default=0,
         help="Auto-minimize corpus when total seed bytes exceeds N (0=unlimited)",
+    )
+    fuzz_parser.add_argument(
+        "--corpus-bust",
+        action="store_true",
+        help="Resize corpus seed lengths to follow a normal distribution capped at max_len",
+    )
+    fuzz_parser.add_argument(
+        "--bust-mean",
+        type=float,
+        default=None,
+        help="Target mean for normal size distribution (default: max_len/2)",
+    )
+    fuzz_parser.add_argument(
+        "--bust-std",
+        type=float,
+        default=None,
+        help="Target std for normal size distribution (default: max_len/6)",
+    )
+    fuzz_parser.add_argument(
+        "--bust-pad",
+        choices=["repeat", "zero", "random"],
+        default="repeat",
+        help="Padding mode for short seeds: repeat (cycle self), zero (\\x00), random",
     )
     fuzz_parser.add_argument(
         "--minimize-every-execs",
@@ -1847,28 +1709,6 @@ def main() -> int:
         help="Show top N most/least novel seeds (default: 10)",
     )
     ppmd_parser.set_defaults(func=cmd_ppmd)
-
-    # --- sweep ---
-    sweep_parser = subparsers.add_parser("sweep", help="Linearly scan corpus for missed crashes")
-    sweep_parser.add_argument("target", help="Path to target binary")
-    sweep_parser.add_argument("-d", "--corpus", required=True, help="Corpus directory")
-    sweep_parser.add_argument("-o", "--crashes", default=None, help="Crashes output directory")
-    sweep_parser.add_argument(
-        "-t", "--timeout", type=float, default=1, help="Timeout per seed in seconds"
-    )
-    sweep_parser.add_argument(
-        "-F",
-        "--file-mode",
-        action="store_true",
-        help="Write input to temp file instead of stdin",
-    )
-    sweep_parser.add_argument(
-        "-A",
-        "--target-args",
-        nargs=argparse.REMAINDER,
-        help="Target arguments ({file} placeholder)",
-    )
-    sweep_parser.set_defaults(func=cmd_sweep)
 
     args = parser.parse_args()
 

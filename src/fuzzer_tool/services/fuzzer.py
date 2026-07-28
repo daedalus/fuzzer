@@ -33,10 +33,6 @@ from fuzzer_tool.core.montecarlo import (
     MOptScheduler,
     ReplicatorScheduler,
     ShapleyAttribution,
-    Exp3Scheduler,
-    EpsilonGreedyScheduler,
-    HierarchicalBanditScheduler,
-    GPUCBScheduler,
 )
 from fuzzer_tool.core.mutations import (
     DICT_MUTATIONS,
@@ -110,7 +106,6 @@ ENTROPY_FLAT_THRESHOLD = 0.001  # rate below which entropy is "flat"
 
 # ── Memory bounds ────────────────────────────────────────────────────
 CRASH_RATE_HISTORY_MAX = 500  # max entries in _crash_rate_history
-MAX_CRASH_SIGS = 10_000  # max unique crash signatures before pruning old entries
 KERNEL_CRASHES_MAX = 500  # max kernel-verified crashes retained
 SEED_SECRETARY_MAX = 500  # max per-seed SecretaryStopping entries
 SEEN_HASHES_MAX = 200_000  # max unique seed hashes retained
@@ -303,15 +298,6 @@ class Fuzzer:
         secretary_window=500,
         secretary_exploration=None,
         elo=False,
-        exp3=False,
-        exp3_gamma=0.1,
-        eps_greedy=False,
-        eps_greedy_epsilon0=1.0,
-        eps_greedy_decay=0.9995,
-        hierarchical_bandit=False,
-        gp_ucb=False,
-        gp_length_scale=1.0,
-        gp_beta=2.0,
         overlap_density=False,
         overlap_density_mode="modifier",
         overlap_min_jaccard=0.25,
@@ -338,6 +324,10 @@ class Fuzzer:
         enable_regex_bomb=False,
         enable_smt_z3=False,
         mod_solving="concolic",
+        bust_corpus=False,
+        bust_mean=None,
+        bust_std=None,
+        bust_pad="repeat",
         refresh_profile=False,
     ):
         self.target = target
@@ -381,7 +371,6 @@ class Fuzzer:
         self.prune_corpus_max_memory = prune_corpus_max_memory
         self._last_memory_prune_exec = 0
         self._last_bloat_warn_exec = 0
-        self._minimize_pending = False
         self.coverage_report = Path(coverage_report) if coverage_report else None
         self.coverage_log = Path(coverage_log) if coverage_log else None
         if self.coverage_log:
@@ -414,6 +403,12 @@ class Fuzzer:
 
         # WFC structural generation mode
         self._wfc_enabled = wfc
+
+        # Corpus size busting: normal-distribution seed resizing
+        self._bust_corpus = bust_corpus
+        self._bust_mean = bust_mean
+        self._bust_std = bust_std
+        self._bust_pad = bust_pad
 
         # Static analysis: profile target for string extraction, function
         # boundaries, input format hints, and call graph structure.
@@ -554,7 +549,6 @@ class Fuzzer:
 
         self.corpus: list[bytes] = []
         self.seen_hashes: set[str] = set()
-        self.irreplaceable_hashes: set[str] = set()
         self.bloom = BloomFilter(capacity=100_000)
         self.bloom.init_fuzzy(max_recent=200)
         self.crash_hashes: set[str] = set()
@@ -671,7 +665,13 @@ class Fuzzer:
         self._power_schedule = schedule
         self._last_perf_score = 100.0  # default multiplier (1x)
 
+        # Seed key cache: maps seed bytes -> hex digest.  Initialised early
+        # because _bust_corpus_sizes() invalidates it on corpus resizing.
+        self._seed_key_cache: dict[bytes, str] = {}
+
         self._load_corpus()
+        if self._bust_corpus and self.corpus:
+            self._bust_corpus_sizes()
         self._init_seed_metadata()
         # Load persisted Markov state; skip retrain if loaded (avoids
         # double-counting the same corpus transitions across restarts)
@@ -709,39 +709,6 @@ class Fuzzer:
         if replicator:
             self._replicator = ReplicatorScheduler(window_size=200, learning_rate=0.1)
             log.info("Replicator dynamics scheduling enabled (window=200, eta=0.1)")
-        # EXP3 adversarial bandit
-        self._use_exp3 = exp3
-        self._exp3 = None
-        if exp3:
-            self._exp3 = Exp3Scheduler(gamma=exp3_gamma)
-            log.info("EXP3 adversarial bandit enabled (gamma=%.2f)", exp3_gamma)
-        # Epsilon-greedy with annealing
-        self._use_eps_greedy = eps_greedy
-        self._eps_greedy = None
-        if eps_greedy:
-            self._eps_greedy = EpsilonGreedyScheduler(
-                epsilon_0=eps_greedy_epsilon0, decay=eps_greedy_decay
-            )
-            log.info(
-                "Epsilon-greedy enabled (epsilon0=%.2f, decay=%.4f)",
-                eps_greedy_epsilon0,
-                eps_greedy_decay,
-            )
-        # Hierarchical bandit
-        self._use_hierarchical = hierarchical_bandit
-        self._hierarchical = None
-        if hierarchical_bandit:
-            self._hierarchical = HierarchicalBanditScheduler()
-            log.info(
-                "Hierarchical bandit enabled (%d categories)",
-                len(HierarchicalBanditScheduler.CATEGORIES),
-            )
-        # GP-UCB bandit
-        self._use_gp_ucb = gp_ucb
-        self._gp_ucb = None
-        if gp_ucb:
-            self._gp_ucb = GPUCBScheduler(length_scale=gp_length_scale, beta=gp_beta)
-            log.info("GP-UCB enabled (l=%.2f, beta=%.2f)", gp_length_scale, gp_beta)
         self._use_shapley = shapley
         self._shapley = ShapleyAttribution(n_samples=100, window_size=500) if shapley else None
         self._use_bayesian = bayesian
@@ -836,11 +803,6 @@ class Fuzzer:
         self._cached_mean_log_n_fuzz: float = 0.0
         self._agg_cache_valid: bool = False
 
-        # ── Seed key cache (xxhash) ─────────────────────────────────────
-        # Maps seed bytes -> hex digest.  Reuses hashes across the ~110
-        # _seed_key() calls per iteration.
-        self._seed_key_cache: dict[bytes, str] = {}
-
         # ── Vectorized random number pool for mutation hotpath ────────
         # Generates random values in batches (one numpy C-level call per
         # batch) instead of per-call Python-level random() invocations.
@@ -888,7 +850,7 @@ class Fuzzer:
 
             # Pre-register all strategy names so Elo can arbitrate immediately
             # (without this, select_strategy requires min_matches before considering a strategy)
-            for s in ("replicator", "bandit", "mopt", "cem", "exp3", "eps_greedy", "hierarchical", "gp_ucb"):
+            for s in ("replicator", "bandit", "mopt", "cem"):
                 self._elo._strategy_mu.setdefault(s, self._elo.initial_mu)
                 self._elo._strategy_sigma_sq.setdefault(s, self._elo.initial_sigma**2)
                 self._elo._strategy_match_count.setdefault(s, 0)
@@ -1007,14 +969,6 @@ class Fuzzer:
             _register_arms(self._mopt)
         if self._replicator:
             _register_arms(self._replicator)
-        if self._exp3:
-            _register_arms(self._exp3)
-        if self._eps_greedy:
-            _register_arms(self._eps_greedy)
-        if self._hierarchical:
-            _register_arms(self._hierarchical)
-        if self._gp_ucb:
-            _register_arms(self._gp_ucb)
         if self._elo:
             _register_arms(self._elo)
         del _format_priors  # free priors dict after arm registration
@@ -1240,6 +1194,46 @@ class Fuzzer:
     def _invalidate_seed_key_cache(self) -> None:
         """Clear the seed key cache — call when corpus structure changes."""
         self._seed_key_cache.clear()
+
+    def _bust_corpus_sizes(self) -> None:
+        """Resize each corpus seed to a target size drawn from N(bust_mean, bust_std),
+        clamped to [1, max_len]. Target sizes are shuffled to avoid ordering bias
+        (e.g. all small seeds paired with small targets)."""
+        if not self._bust_corpus:
+            return
+        n = len(self.corpus)
+        if n == 0:
+            return
+        mean = self._bust_mean if self._bust_mean is not None else self.max_len / 2.0
+        std = self._bust_std if self._bust_std is not None else self.max_len / 6.0
+        std = max(std, 1.0)
+        target_sizes = [max(1, min(int(random.gauss(mean, std)), self.max_len)) for _ in range(n)]
+        random.shuffle(target_sizes)
+        self.corpus = [self._resize_seed(s, t) for s, t in zip(self.corpus, target_sizes, strict=False)]
+        self._invalidate_seed_key_cache()
+
+    def _resize_seed(self, seed: bytes, target_size: int) -> bytes:
+        """Truncate or pad *seed* to *target_size* bytes.
+
+        Padding modes (controlled by ``self._bust_pad``):
+          * repeat — cycle the existing bytes (AFL-style, default)
+          * zero   — zero-pad
+          * random — fill with random bytes
+        """
+        if len(seed) == target_size:
+            return seed
+        if len(seed) > target_size:
+            return seed[:target_size]
+        need = target_size - len(seed)
+        if self._bust_pad == "zero":
+            return seed + b"\x00" * need
+        if self._bust_pad == "random":
+            return seed + bytes(random.randrange(256) for _ in range(need))
+        # "repeat" (default): AFL-style cyclic padding
+        if len(seed) == 0:
+            return b"\x00" * target_size
+        repeats = (need // len(seed)) + 1
+        return seed + (seed * repeats)[:need]
 
     def _save_state(self):
         return self._corpus_manager.save_state()
@@ -1474,27 +1468,6 @@ class Fuzzer:
     def save_crash(self, data: bytes, returncode: int, stderr: str):
         return self._corpus_manager.save_crash(data, returncode, stderr)
 
-    def _prune_crash_data(self) -> None:
-        """Trim crash structures when they exceed MAX_CRASH_SIGS.
-
-        Keeps the most frequent crash signatures and evicts all data for
-        the least frequent ones. Leaves crash_hashes intact (small memory
-        footprint, prevents duplicate disk writes).
-        """
-        if len(self.crash_sigs) <= MAX_CRASH_SIGS:
-            return
-        # Keep top 75% of signatures sorted by frequency descending
-        keep_count = max(MAX_CRASH_SIGS * 3 // 4, 1)
-        sorted_sigs = sorted(self.crash_sigs.items(), key=lambda x: -x[1])
-        kept = {sig for sig, _ in sorted_sigs[:keep_count]}
-        evicted = set(self.crash_sigs) - kept
-        self.crash_sigs = dict(sorted_sigs[:keep_count])
-        # Evict associated data for dropped signatures
-        for sig in evicted:
-            self.crash_frames.pop(sig, None)
-            self.crash_min_sizes.pop(sig, None)
-            self._crash_replays.pop(sig, None)
-
     def save_to_corpus(self, data: bytes, parent: bytes | None = None):
         return self._corpus_manager.save_to_corpus(data, parent)
 
@@ -1503,17 +1476,6 @@ class Fuzzer:
 
     def _auto_minimize_corpus(self):
         return self._corpus_manager.auto_minimize_corpus()
-
-    def _defer_minimize(self):
-        """Schedule auto_minimize_corpus for the next main-loop iteration.
-        This avoids pruning seeds that were just added but not yet fuzzed."""
-        self._minimize_pending = True
-
-    def _flush_pending_minimize(self):
-        """Run deferred minimize if one is pending."""
-        if self._minimize_pending:
-            self._minimize_pending = False
-            self._auto_minimize_corpus()
 
     def _deprioritize_near_duplicates(self):
         return self._corpus_manager.deprioritize_near_duplicates()
@@ -2140,34 +2102,6 @@ class Fuzzer:
                     self._replicator.record(op, success, weight=surprisal_weight)
                     seen.add(op)
 
-        if self._exp3:
-            seen = set()
-            for op in self._last_ops_used:
-                if op not in seen:
-                    self._exp3.record(op, success, weight=surprisal_weight)
-                    seen.add(op)
-
-        if self._eps_greedy:
-            seen = set()
-            for op in self._last_ops_used:
-                if op not in seen:
-                    self._eps_greedy.record(op, success, weight=surprisal_weight)
-                    seen.add(op)
-
-        if self._hierarchical:
-            seen = set()
-            for op in self._last_ops_used:
-                if op not in seen:
-                    self._hierarchical.record(op, success, weight=surprisal_weight)
-                    seen.add(op)
-
-        if self._gp_ucb:
-            seen = set()
-            for op in self._last_ops_used:
-                if op not in seen:
-                    self._gp_ucb.record(op, success, weight=surprisal_weight)
-                    seen.add(op)
-
         # Elo: record matches between operators that were used
         if self._use_elo and self._elo and len(self._last_ops_used) >= 2:
             unique_ops = list(dict.fromkeys(self._last_ops_used))  # preserve order, dedup
@@ -2192,14 +2126,6 @@ class Fuzzer:
                 all_strategies.append("mopt")
             if self.mc and self.mc_cem and self.mc.cem_fitted:
                 all_strategies.append("cem")
-            if self._exp3:
-                all_strategies.append("exp3")
-            if self._eps_greedy:
-                all_strategies.append("eps_greedy")
-            if self._hierarchical:
-                all_strategies.append("hierarchical")
-            if self._gp_ucb:
-                all_strategies.append("gp_ucb")
             for other in all_strategies:
                 if other != self._meta_strategy:
                     self._elo.record_strategy_match(self._meta_strategy, other, score)
@@ -2242,7 +2168,6 @@ class Fuzzer:
         if is_crash:
             self.crash_count += 1
             crash_name = self.save_crash(mutated, returncode, stderr)
-            self._prune_crash_data()
             # Generate GDB/strace trace report if enabled
             if self._tracer and crash_name:
                 report = self._tracer.trace(mutated, returncode)
@@ -2645,19 +2570,9 @@ class Fuzzer:
                                 "Coverage data will be empty."
                             )
                 self.exec_count += 1
-
-                # Mark seed as having been executed (even though not via
-                # fuzz_one's mutate path).  This ensures loaded seeds don't
-                # all show fuzz_count=0 to auto_minimize_corpus.
-                meta = self.seed_meta.get(seed)
-                if meta is not None:
-                    meta["fuzz_count"] += 1
-                    self._cached_total_fuzz += 1
-
                 if self._is_crash(returncode, stderr):
                     self.crash_count += 1
                     self.save_crash(seed, returncode, stderr)
-                    self._prune_crash_data()
                     # Kernel crash verification (same as fuzz_one path)
                     self._verify_kernel_crash(getattr(self, "_last_child_pid", None))
             # Baseline exec_count after initial seed replay — used for
@@ -2738,10 +2653,6 @@ class Fuzzer:
                 # Cycle through targets in multi-target mode
                 if self.multi_targets:
                     self._select_next_target()
-                # Run any deferred minimization before picking the next seed.
-                # This gives freshly-added seeds one full iteration to be selected.
-                if self._minimize_pending:
-                    self._flush_pending_minimize()
                 seed = self._pick_seed()
                 # Compute seed-level energy multiplier for mutation budget
                 meta = self.seed_meta.get(seed)
@@ -2895,7 +2806,6 @@ class Fuzzer:
             self._length_tracker_path.write_text(
                 json.dumps(self._length_tracker.save(), separators=(",", ":"))
             )
-        self._flush_pending_minimize()
         self._save_state()
         if self.ga:
             ga_path = self.corpus_dir / "ga.json"
