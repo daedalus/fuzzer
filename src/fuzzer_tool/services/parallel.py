@@ -42,6 +42,15 @@ def _worker_main(
     overlap_density_mode: str = "modifier",
     overlap_min_jaccard: float = 0.25,
     overlap_density_blend: float = 0.5,
+    exp3: bool = False,
+    exp3_gamma: float = 0.1,
+    eps_greedy: bool = False,
+    eps_greedy_epsilon0: float = 1.0,
+    eps_greedy_decay: float = 0.9995,
+    hierarchical_bandit: bool = False,
+    gp_ucb: bool = False,
+    gp_length_scale: float = 1.0,
+    gp_beta: float = 2.0,
 ):
     """Entry point for each fuzzing worker process."""
     from fuzzer_tool.services.fuzzer import Fuzzer
@@ -86,6 +95,15 @@ def _worker_main(
         overlap_density_mode=overlap_density_mode,
         overlap_min_jaccard=overlap_min_jaccard,
         overlap_density_blend=overlap_density_blend,
+        exp3=exp3,
+        exp3_gamma=exp3_gamma,
+        eps_greedy=eps_greedy,
+        eps_greedy_epsilon0=eps_greedy_epsilon0,
+        eps_greedy_decay=eps_greedy_decay,
+        hierarchical_bandit=hierarchical_bandit,
+        gp_ucb=gp_ucb,
+        gp_length_scale=gp_length_scale,
+        gp_beta=gp_beta,
     )
 
     print(f"{prefix} Started (target={target})")
@@ -212,6 +230,15 @@ def run_parallel(
     overlap_density_mode: str = "modifier",
     overlap_min_jaccard: float = 0.25,
     overlap_density_blend: float = 0.5,
+    exp3: bool = False,
+    exp3_gamma: float = 0.1,
+    eps_greedy: bool = False,
+    eps_greedy_epsilon0: float = 1.0,
+    eps_greedy_decay: float = 0.9995,
+    hierarchical_bandit: bool = False,
+    gp_ucb: bool = False,
+    gp_length_scale: float = 1.0,
+    gp_beta: float = 2.0,
 ):
     """Launch N parallel fuzzer workers sharing the same corpus directory.
 
@@ -276,6 +303,15 @@ def run_parallel(
         overlap_density_mode=overlap_density_mode,
         overlap_min_jaccard=overlap_min_jaccard,
         overlap_density_blend=overlap_density_blend,
+        exp3=exp3,
+        exp3_gamma=exp3_gamma,
+        eps_greedy=eps_greedy,
+        eps_greedy_epsilon0=eps_greedy_epsilon0,
+        eps_greedy_decay=eps_greedy_decay,
+        hierarchical_bandit=hierarchical_bandit,
+        gp_ucb=gp_ucb,
+        gp_length_scale=gp_length_scale,
+        gp_beta=gp_beta,
     )
 
     def _spawn_worker(worker_id: int, rng_seed: int) -> multiprocessing.Process:

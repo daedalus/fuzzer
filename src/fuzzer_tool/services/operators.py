@@ -1513,6 +1513,14 @@ class OperatorEngine:
             available.append("mopt")
         if f.mc and f.mc_cem and f.mc.cem_fitted:
             available.append("cem")
+        if f._use_exp3 and f._exp3:
+            available.append("exp3")
+        if f._use_eps_greedy and f._eps_greedy:
+            available.append("eps_greedy")
+        if f._use_hierarchical and f._hierarchical:
+            available.append("hierarchical")
+        if f._use_gp_ucb and f._gp_ucb:
+            available.append("gp_ucb")
 
         if f._use_elo and f._elo and len(available) >= 2:
             strategy = f._elo.select_strategy(available)
@@ -1542,6 +1550,18 @@ class OperatorEngine:
             if f.mc_bandit:
                 f._prev_bandit_op = op
             f._last_mopt_particles.append(None)
+        elif strategy == "exp3" and f._exp3:
+            op = f._exp3.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif strategy == "eps_greedy" and f._eps_greedy:
+            op = f._eps_greedy.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif strategy == "hierarchical" and f._hierarchical:
+            op = f._hierarchical.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif strategy == "gp_ucb" and f._gp_ucb:
+            op = f._gp_ucb.select_op(ops)
+            f._last_mopt_particles.append(None)
         elif f._use_replicator and f._replicator:
             op = f._replicator.select_op(ops)
             f._last_mopt_particles.append(None)
@@ -1551,6 +1571,18 @@ class OperatorEngine:
         elif f.mc and f.mc_bandit:
             op = f.mc.select_op(ops, prev_op=f._prev_bandit_op)
             f._prev_bandit_op = op
+            f._last_mopt_particles.append(None)
+        elif f._use_exp3 and f._exp3:
+            op = f._exp3.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif f._use_eps_greedy and f._eps_greedy:
+            op = f._eps_greedy.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif f._use_hierarchical and f._hierarchical:
+            op = f._hierarchical.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif f._use_gp_ucb and f._gp_ucb:
+            op = f._gp_ucb.select_op(ops)
             f._last_mopt_particles.append(None)
         else:
             op = f._rand_pool.choice(ops)

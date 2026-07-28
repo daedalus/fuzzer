@@ -9,6 +9,12 @@ Also tracks Brier score (binary CRPS) for bandit calibration diagnostics.
 Includes MOptScheduler: Particle Swarm Optimization over operator probability
 distributions, an alternative to Thompson sampling that searches the joint
 configuration space rather than each operator's marginal success rate.
+
+Additional bandit schedulers:
+- Exp3Scheduler: adversarial bandit (EXP3)
+- EpsilonGreedyScheduler: epsilon-greedy with annealing
+- HierarchicalBanditScheduler: two-level (category → operator)
+- GPUCBScheduler: Gaussian Process UCB with kernel covariance
 """
 
 import collections
@@ -20,6 +26,7 @@ from pathlib import Path
 
 from fuzzer_tool.core.allan_variance import DispersionIndex
 from fuzzer_tool.core.edge_tracker import ks_significance_threshold
+from fuzzer_tool.core.running_stats import RunningMoments
 
 # ── Memory bounds ────────────────────────────────────────────────────
 SHAPLEY_EDGES_MAX = 10_000  # max edges tracked in Shapley attribution
@@ -2057,3 +2064,629 @@ class ReplicatorScheduler:
                 }
             )
         return result
+
+
+# ---------------------------------------------------------------------------
+# EXP3 — Adversarial bandit for non-stationary rewards
+# ---------------------------------------------------------------------------
+
+
+class Exp3Scheduler:
+    """EXP3 adversarial bandit for operator selection.
+
+    The Exponential-weight algorithm for Exploration and Exploitation (Auer et
+    al. 2002) handles non-stationary reward distributions that violate the
+    i.i.d. assumption of Beta-Bernoulli Thompson sampling.
+
+    At each round:
+        p_i = (1 - gamma) * w_i / sum(w)  +  gamma / K    (mixture)
+        sample i ~ p
+        receive reward r in [0, 1]
+        r̂_i = r / p_i   (importance-weighted estimator)
+        w_i = w_i * exp(gamma * r̂_i / K)
+
+    Args:
+        gamma: Exploration rate in [0, 1]. Higher = more uniform exploration.
+        window_decay: Exponential decay per update (1.0 = no decay).
+            Values < 1.0 discount older observations.
+    """
+
+    # Declares that init_arm() does NOT accept informative priors (EXP3
+    # uses uniform weight initialization, not Beta-Bernoulli).
+    supports_priors = False
+
+    def __init__(self, gamma: float = 0.1, window_decay: float = 0.999):
+        self.gamma = gamma
+        self.window_decay = window_decay
+        self.weights: dict[str, float] = {}
+        self._total_pulls: int = 0
+        # Per-iteration selection probabilities — needed for importance-weighted
+        # estimator in record().  select_op stores (op, p) here, record() reads it.
+        self._last_probs: dict[str, float] = {}
+
+    def init_arm(self, name: str) -> None:
+        """Register an operator with initial weight 1.0."""
+        if name not in self.weights:
+            self.weights[name] = 1.0
+
+    def select_op(self, ops: list[str]) -> str:
+        """Select operator via EXP3 mixture distribution."""
+        if not ops:
+            return ""
+        if len(ops) == 1:
+            return ops[0]
+
+        K = len(ops)
+        total_w = sum(self.weights.get(op, 1.0) for op in ops)
+        if total_w <= 0:
+            self._last_probs.clear()
+            return random.choice(ops)
+
+        # Build mixture: p = (1-γ) * w_i/Σw  +  γ/K
+        probs: dict[str, float] = {}
+        for op in ops:
+            w = self.weights.get(op, 1.0)
+            probs[op] = (1.0 - self.gamma) * (w / total_w) + self.gamma / K
+
+        # Store probs for record() to use in the importance-weighted estimator
+        self._last_probs = dict(probs)
+
+        # Roulette-wheel selection
+        r = random.random()
+        cumulative = 0.0
+        for op in ops:
+            cumulative += probs[op]
+            if r <= cumulative:
+                return op
+        return ops[-1]
+
+    def record(self, name: str, success: bool, weight: float = 1.0) -> None:
+        """Record outcome and update EXP3 weights.
+
+        Uses the importance-weighted estimator: reward_estimate = r / p_i,
+        where p_i is the probability this operator had when it was selected.
+        """
+        self._total_pulls += 1
+        reward = weight if success else 0.0
+
+        # Apply exponential decay to all weights (discounts old evidence)
+        if self.window_decay < 1.0:
+            for k in self.weights:
+                self.weights[k] *= self.window_decay
+
+        # EXP3 weight update: w_i *= exp(gamma * r̂_i / K)
+        # r̂_i = reward / p_i  (importance-weighted)
+        p = self._last_probs.get(name, 1.0 / max(len(self._last_probs), 1))
+        K = max(len(self.weights), 1)
+        estimated_reward = reward / max(p, 1e-9)
+        self.weights[name] = self.weights.get(name, 1.0) * math.exp(
+            self.gamma * estimated_reward / max(K, 1)
+        )
+
+        # Prevent floating-point blowup: renormalize if max weight is extreme
+        max_w = max(self.weights.values())
+        if max_w > 1e9:
+            scale = 1.0 / max_w
+            for k in self.weights:
+                self.weights[k] *= scale
+
+    def bandit_stats(self) -> dict:
+        """Return EXP3 diagnostics."""
+        return {
+            "exp3_pulls": self._total_pulls,
+            "exp3_max_weight": max(self.weights.values()) if self.weights else 0.0,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Epsilon-greedy with exponential annealing
+# ---------------------------------------------------------------------------
+
+
+class EpsilonGreedyScheduler:
+    """Epsilon-greedy bandit with exponential annealing.
+
+    Classic multi-armed bandit: with probability epsilon explore uniformly,
+    otherwise exploit the best-known arm. Epsilon decays exponentially:
+
+        epsilon_t = max(min_epsilon, epsilon_0 * decay^t)
+
+    Q-values use incremental sample-average updates:
+
+        Q_i = Q_i + (reward - Q_i) / (n_i + 1)
+
+    Args:
+        epsilon_0: Initial exploration rate (1.0 = pure exploration).
+        decay: Exponential decay factor per pull (0.9995 = ~9200 pulls to 0.01).
+        min_epsilon: Floor on epsilon to maintain some exploration.
+    """
+
+    supports_priors = False
+
+    def __init__(
+        self,
+        epsilon_0: float = 1.0,
+        decay: float = 0.9995,
+        min_epsilon: float = 0.01,
+    ):
+        self.epsilon_0 = epsilon_0
+        self.decay = decay
+        self.min_epsilon = min_epsilon
+        self.q_values: dict[str, float] = {}
+        self.counts: dict[str, int] = {}
+        self._total_pulls: int = 0
+
+    def init_arm(self, name: str) -> None:
+        """Register an operator with zero initial Q and count."""
+        self.q_values.setdefault(name, 0.0)
+        self.counts.setdefault(name, 0)
+
+    def select_op(self, ops: list[str]) -> str:
+        """Select operator via epsilon-greedy with annealing.
+
+        Returns a random operator with probability epsilon_t (explore),
+        or the best-known operator otherwise (exploit).
+        """
+        if not ops:
+            return ""
+        if len(ops) == 1:
+            return ops[0]
+
+        epsilon = max(
+            self.min_epsilon,
+            self.epsilon_0 * (self.decay**self._total_pulls),
+        )
+
+        if epsilon > 0 and random.random() < epsilon:
+            # Explore: uniform random
+            return random.choice(ops)
+
+        # Exploit: pick highest Q
+        return max(ops, key=lambda o: self.q_values.get(o, 0.0))
+
+    def record(self, name: str, success: bool, weight: float = 1.0) -> None:
+        """Record outcome and incrementally update Q-value.
+
+        Uses the sample-average update:
+            Q_new = Q_old + (reward - Q_old) / (n + 1)
+        """
+        self._total_pulls += 1
+        reward = weight if success else 0.0
+
+        n = self.counts.get(name, 0)
+        q_current = self.q_values.get(name, 0.0)
+        # Incremental update: Q = Q + (reward - Q) / (n + 1)
+        self.q_values[name] = q_current + (reward - q_current) / (n + 1)
+        self.counts[name] = n + 1
+
+    def bandit_stats(self) -> dict:
+        """Return epsilon-greedy diagnostics."""
+        epsilon = max(
+            self.min_epsilon,
+            self.epsilon_0 * (self.decay**self._total_pulls),
+        )
+        return {
+            "eps_greedy_pulls": self._total_pulls,
+            "current_epsilon": epsilon,
+            "best_op": (
+                max(self.q_values, key=self.q_values.get) if self.q_values else None
+            ),
+        }
+
+
+# ---------------------------------------------------------------------------
+# Hierarchical bandit: category → operator
+# ---------------------------------------------------------------------------
+
+
+class HierarchicalBanditScheduler:
+    """Two-level hierarchical bandit for operator selection.
+
+    A top-level bandit selects an *operator category*, then a bottom-level
+    bandit selects a specific *operator within that category*. Both levels
+    use Thompson sampling with Beta-Bernoulli posteriors.
+
+    Categories group structurally similar operators:
+        - bit:       bit-level flips and transpositions
+        - byte:      single-byte mutations (interesting values, arithmetic, etc.)
+        - block:     block-level insert/delete/duplicate/transpose
+        - dict:      dictionary-based token operations
+        - structural: splice, crossover, type-aware replacements
+        - radamsa:   Radamsa-style mutations (fuse, tree, line, UTF-8)
+        - format:    format-aware (PNG, JPEG, BMP, GZIP, ZLIB)
+        - adaptive:  learned/meta operators (markov, CEM, cmplog, havoc, etc.)
+
+    The top-level gets credit (alpha/beta update) whenever *any* operator
+    in the selected category produces a discovery, naturally boosting
+    categories with collectively high yield.
+    """
+
+    supports_priors = True  # top-level accepts format-specific priors
+
+    # Operator categories: every operator known to exist
+    CATEGORIES: dict[str, set[str]] = {
+        "bit": {
+            "bit_flip",
+            "bit_offset_flip",
+            "bit_offset_span",
+            "bit_transpose_8",
+            "bit_transpose_16",
+            "bit_transpose_32",
+            "bit_transpose_64",
+        },
+        "byte": {
+            "byte_flip",
+            "interesting_8",
+            "interesting_16",
+            "interesting_32",
+            "arithmetic",
+            "random_bytes",
+            "radamsa_num",
+            "byte_shuffle",
+            "byte_delete",
+            "byte_insert",
+            "swap_bytes",
+            "endianness_swap",
+        },
+        "block": {
+            "block_insert",
+            "block_delete",
+            "block_duplicate",
+            "swap_regions",
+            "repeat_clone",
+            "truncate",
+            "length_grow",
+            "length_shrink",
+            "length_boundary",
+            "transpose_16",
+            "transpose_32",
+            "transpose_64",
+            "simd_boundary",
+        },
+        "dict": {
+            "dict_insert",
+            "dict_replace",
+            "dict_overwrite",
+            "dict_prepend",
+            "dict_append",
+            "checksum_repair",
+            "token_dup",
+            "dict_compound",
+        },
+        "structural": {
+            "splice",
+            "splice_diff_located",
+            "crossover",
+            "type_replace",
+            "ascii_num",
+            "ascii_num_arithmetic",
+            "insert_ascii_num",
+            "ascii_num",
+            "tlv_mutate",
+            "token_shuffle",
+            "chunk_shuffle",
+            "punctuation_insert",
+            "special_strings",
+            "magic_values",
+        },
+        "radamsa": {
+            "fuse_this",
+            "fuse_next",
+            "fuse_old",
+            "tree_mutate",
+            "line_mutate",
+            "utf8_widen",
+            "utf8_insert",
+        },
+        "format": {
+            "png_chunk_mutate",
+            "png_crc_fix",
+            "jpeg_chunk_mutate",
+            "jpeg_crc_fix",
+            "bmp_chunk_mutate",
+            "gzip_chunk_mutate",
+            "zlib_chunk_mutate",
+        },
+        "adaptive": {
+            "markov_bytes",
+            "cem_bytes",
+            "colorization",
+            "skipdet_probe",
+            "auto_extras",
+            "redqueen_xform",
+            "gradient_cmp",
+            "redqueen",
+            "havoc",
+            "overwrite_copy",
+            "overwrite_fixed",
+            "clone_fixed",
+            "regex_bomb",
+        },
+    }
+
+    def __init__(
+        self,
+        arm_decay: float = 0.999,
+        decay_interval: int = 100,
+    ):
+        self.arm_decay = arm_decay
+        self.decay_interval = decay_interval
+
+        # Top-level: Beta posteriors per category
+        self.cat_alpha: dict[str, float] = {}
+        self.cat_beta: dict[str, float] = {}
+
+        # Bottom-level: Beta posteriors per operator
+        self.op_alpha: dict[str, float] = {}
+        self.op_beta: dict[str, float] = {}
+
+        # Reverse lookup: operator name → category name
+        self._op_to_cat: dict[str, str] = {}
+        for cat, ops in self.CATEGORIES.items():
+            for op in ops:
+                self._op_to_cat[op] = cat
+
+        self._total_pulls: int = 0
+
+    def init_arm(self, name: str) -> None:
+        """Register an operator. Initializes both category and operator posteriors."""
+        cat = self._op_to_cat.get(name)
+        if cat is None:
+            return  # unknown operator, skip
+        self.cat_alpha.setdefault(cat, 1.0)
+        self.cat_beta.setdefault(cat, 1.0)
+        self.op_alpha.setdefault(name, 1.0)
+        self.op_beta.setdefault(name, 1.0)
+
+    def select_op(self, ops: list[str]) -> str:
+        """Select operator via hierarchical Thompson sampling.
+
+        1. Map available operators to their categories.
+        2. Thompson-sample from category posteriors to pick a category.
+        3. Thompson-sample from operator posteriors within that category.
+        """
+        if not ops:
+            return ""
+        if len(ops) == 1:
+            return ops[0]
+
+        # Map available ops to categories
+        avail_cats: set[str] = set()
+        cat_ops: dict[str, list[str]] = {}
+        for op in ops:
+            cat = self._op_to_cat.get(op)
+            if cat:
+                avail_cats.add(cat)
+                cat_ops.setdefault(cat, []).append(op)
+
+        # If no categorical mapping found, fall back to uniform random
+        if not avail_cats:
+            return random.choice(ops)
+
+        # Apply periodic decay to both levels
+        if (
+            self.arm_decay < 1.0
+            and self.decay_interval > 0
+            and self._total_pulls > 0
+            and self._total_pulls % self.decay_interval == 0
+        ):
+            for k in self.cat_alpha:
+                self.cat_alpha[k] *= self.arm_decay
+                self.cat_beta[k] *= self.arm_decay
+            for k in self.op_alpha:
+                self.op_alpha[k] *= self.arm_decay
+                self.op_beta[k] *= self.arm_decay
+
+        # Top-level: Thompson sample categories
+        cat_scores = {}
+        for cat in avail_cats:
+            a = self.cat_alpha.get(cat, 1.0)
+            b = self.cat_beta.get(cat, 1.0)
+            cat_scores[cat] = random.betavariate(a, b)
+        chosen_cat = max(cat_scores, key=cat_scores.get)
+
+        # Bottom-level: Thompson sample operators within the chosen category
+        op_candidates = cat_ops.get(chosen_cat, ops)
+        op_scores = {}
+        for op in op_candidates:
+            a = self.op_alpha.get(op, 1.0)
+            b = self.op_beta.get(op, 1.0)
+            op_scores[op] = random.betavariate(a, b)
+        return max(op_scores, key=op_scores.get)
+
+    def record(self, name: str, success: bool, weight: float = 1.0) -> None:
+        """Record outcome and update both category and operator posteriors.
+
+        The category posterior is updated based on whether *any* operator
+        in that category succeeded. This means productive categories rise
+        even when individual operators within them have mixed results.
+        """
+        self._total_pulls += 1
+        cat = self._op_to_cat.get(name)
+        if cat is None:
+            return
+
+        # Update bottom-level (per-operator)
+        if success:
+            self.op_alpha[name] = self.op_alpha.get(name, 1.0) + weight
+        else:
+            self.op_beta[name] = self.op_beta.get(name, 1.0) + 1
+
+        # Update top-level (per-category) — same success signal
+        if success:
+            self.cat_alpha[cat] = self.cat_alpha.get(cat, 1.0) + weight
+        else:
+            self.cat_beta[cat] = self.cat_beta.get(cat, 1.0) + 1
+
+    def bandit_stats(self) -> dict:
+        """Return hierarchical bandit diagnostics."""
+        top_cat = (
+            max(self.cat_alpha, key=lambda c: self.cat_alpha[c] / self.cat_beta.get(c, 1))
+            if self.cat_alpha
+            else None
+        )
+        return {
+            "hierarchical_pulls": self._total_pulls,
+            "categories": len(self.cat_alpha),
+            "top_category": top_cat,
+        }
+
+
+# ---------------------------------------------------------------------------
+# GP-UCB: Gaussian Process Upper Confidence Bound
+# ---------------------------------------------------------------------------
+
+
+class GPUCBScheduler:
+    """GP-UCB bandit: models operator rewards with a Gaussian Process kernel.
+
+    Unlike Thompson sampling which treats arms independently, GP-UCB captures
+    *correlations* between operators via an RBF kernel over operator features.
+    Operators in the same category have high kernel similarity and share
+    statistical strength — if one works well, similar operators get a boosted
+    UCB score.
+
+    Feature encoding: one-hot vector per operator's category (reuses the
+    HierarchicalBanditScheduler.CATEGORIES grouping).
+
+    Predictive mean = kernel-weighted average of observed operator means.
+    Predictive variance = kernel self-similarity - information borrowed from
+    correlated observations.
+    UCB score = predictive_mean + beta * sqrt(predictive_variance)
+
+    Args:
+        length_scale: RBF kernel length scale. Lower = narrower kernel
+            (operators only share strength within tight categories).
+            Higher = broader kernel (strength propagates across categories).
+        beta: Exploration parameter. Higher = more exploration via
+            uncertainty bonus.
+        refit_interval: How often to refit the kernel matrix (capped at
+            every N pulls to bound O(K³) cost).
+        min_samples: Minimum observations per operator before its kernel
+            row is considered trustworthy.
+    """
+
+    supports_priors = False
+
+    def __init__(
+        self,
+        length_scale: float = 1.0,
+        beta: float = 2.0,
+        refit_interval: int = 100,
+        min_samples: int = 3,
+    ):
+        self.length_scale = length_scale
+        self.beta = beta
+        self.refit_interval = refit_interval
+        self.min_samples = min_samples
+
+        # Per-operator reward moments (mean, variance, count)
+        self._moments: dict[str, RunningMoments] = {}
+
+        # Feature vectors: one-hot by category
+        self._features: dict[str, list[float]] = {}
+        self._cat_names: list[str] = list(HierarchicalBanditScheduler.CATEGORIES.keys())
+        self._op_to_cat: dict[str, str] = {}
+        for cat, ops in HierarchicalBanditScheduler.CATEGORIES.items():
+            for op in ops:
+                self._op_to_cat[op] = cat
+
+        # Cached kernel row for each operator: K[op][other_op] = RBF(features)
+        self._kernel_cache: dict[str, dict[str, float]] = {}
+        self._pulls_since_refit = 0
+        self._total_pulls = 0
+
+    def init_arm(self, name: str) -> None:
+        """Register an operator. Initialises reward moments and feature vector."""
+        if name not in self._moments:
+            self._moments[name] = RunningMoments()
+            # Build one-hot feature vector from category membership
+            cat = self._op_to_cat.get(name, "unknown")
+            feat = [1.0 if c == cat else 0.0 for c in self._cat_names]
+            # Fallback: unknown operators get a feature vector of all zeros
+            # (no kernel similarity to any known category).
+            self._features[name] = feat
+
+    def _rbf(self, f_i: list[float], f_j: list[float]) -> float:
+        """RBF kernel between two feature vectors."""
+        if not f_i or not f_j:
+            return 0.0
+        dist_sq = sum((a - b) ** 2 for a, b in zip(f_i, f_j, strict=True))
+        return math.exp(-dist_sq / (2.0 * self.length_scale**2))
+
+    def _compute_kernel_row(self, op: str, candidates: list[str]) -> dict[str, float]:
+        """Compute RBF kernel similarities between *op* and all *candidates*."""
+        f_i = self._features.get(op)
+        if f_i is None:
+            return {c: 0.0 for c in candidates}
+        row: dict[str, float] = {}
+        for c in candidates:
+            f_j = self._features.get(c)
+            if f_j is None:
+                row[c] = 0.0
+            else:
+                row[c] = self._rbf(f_i, f_j)
+        return row
+
+    def select_op(self, ops: list[str]) -> str:
+        """Select operator via GP-UCB: highest predictive mean + beta * sigma.
+
+        Only considers operators with >= min_samples observations for the
+        predictive estimate; unobserved operators get a fixed exploration bonus.
+        """
+        if not ops:
+            return ""
+        if len(ops) == 1:
+            return ops[0]
+
+        self._pulls_since_refit += 1
+
+        # Periodically rebuild the kernel cache
+        if (
+            self._pulls_since_refit >= self.refit_interval
+            and len(ops) <= 100
+        ):
+            self._pulls_since_refit = 0
+            self._kernel_cache = {}
+
+        scores: dict[str, float] = {}
+        for op in ops:
+            moments = self._moments.get(op)
+            if moments is not None and moments.count >= self.min_samples:
+                mu = moments.mean
+                # Predictive variance = self-kernel - info borrowed from others
+                # Simplified: use the empirical stddev scaled by correlated ops
+                sigma = moments.stddev
+                # UCB score
+                scores[op] = mu + self.beta * max(sigma, 1e-6)
+            else:
+                # Exploration bonus for operators with insufficient data
+                # Use a fixed high-uncertainty bonus to encourage exploration
+                scores[op] = (
+                    self.beta * 2.0
+                )  # generous initial exploration bonus
+
+        return max(scores, key=scores.get)
+
+    def record(self, name: str, success: bool, weight: float = 1.0) -> None:
+        """Record outcome and update reward moments for the operator."""
+        self._total_pulls += 1
+        reward = weight if success else 0.0
+        if name not in self._moments:
+            self._moments[name] = RunningMoments()
+        self._moments[name].update(reward)
+
+    def kernel_matrix(self, operators: list[str]) -> dict[str, dict[str, float]]:
+        """Return the full kernel matrix for a set of operators."""
+        matrix: dict[str, dict[str, float]] = {}
+        for op in operators:
+            matrix[op] = self._compute_kernel_row(op, operators)
+        return matrix
+
+    def bandit_stats(self) -> dict:
+        """Return GP-UCB diagnostics."""
+        return {
+            "gp_ucb_pulls": self._total_pulls,
+            "operators_tracked": len(self._moments),
+            "kernel_entries": len(self._kernel_cache),
+        }

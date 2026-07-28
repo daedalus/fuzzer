@@ -287,6 +287,15 @@ def cmd_fuzz(args):
             overlap_min_jaccard=getattr(args, "overlap_min_jaccard", 0.25),
             overlap_density_blend=getattr(args, "overlap_blend", 0.5),
             resize_map_on_stall=getattr(args, "resize_map_on_stall", True),
+            exp3=getattr(args, "exp3", False),
+            exp3_gamma=getattr(args, "exp3_gamma", 0.1),
+            eps_greedy=getattr(args, "eps_greedy", False),
+            eps_greedy_epsilon0=getattr(args, "eps_greedy_epsilon0", 1.0),
+            eps_greedy_decay=getattr(args, "eps_greedy_decay", 0.9995),
+            hierarchical_bandit=getattr(args, "hierarchical_bandit", False),
+            gp_ucb=getattr(args, "gp_ucb", False),
+            gp_length_scale=getattr(args, "gp_length_scale", 1.0),
+            gp_beta=getattr(args, "gp_beta", 2.0),
         )
         return 0
 
@@ -356,6 +365,15 @@ def cmd_fuzz(args):
         schedule_ablation=getattr(args, "schedule_ablation", None),
         schedule=getattr(args, "schedule", "base"),
         replicator=getattr(args, "replicator", False),
+        exp3=getattr(args, "exp3", False),
+        exp3_gamma=getattr(args, "exp3_gamma", 0.1),
+        eps_greedy=getattr(args, "eps_greedy", False),
+        eps_greedy_epsilon0=getattr(args, "eps_greedy_epsilon0", 1.0),
+        eps_greedy_decay=getattr(args, "eps_greedy_decay", 0.9995),
+        hierarchical_bandit=getattr(args, "hierarchical_bandit", False),
+        gp_ucb=getattr(args, "gp_ucb", False),
+        gp_length_scale=getattr(args, "gp_length_scale", 1.0),
+        gp_beta=getattr(args, "gp_beta", 2.0),
         shapley=getattr(args, "shapley", False),
         bayesian=getattr(args, "bayesian", False),
         mi_guided=getattr(args, "mi_guided", False),
@@ -1209,6 +1227,54 @@ def main() -> int:
         "--elo",
         action="store_true",
         help="Enable Elo scheduling: arbitrates between operator strategies (bandit/MOpt/replicator) AND seed strategies (ga/weighted/pareto/format)",
+    )
+    fuzz_parser.add_argument(
+        "--exp3", action="store_true", help="Enable EXP3 adversarial bandit operator scheduling"
+    )
+    fuzz_parser.add_argument(
+        "--exp3-gamma",
+        type=float,
+        default=0.1,
+        help="EXP3 exploration rate in [0,1] (default: 0.1)",
+    )
+    fuzz_parser.add_argument(
+        "--eps-greedy",
+        action="store_true",
+        help="Enable epsilon-greedy operator scheduling with annealing",
+    )
+    fuzz_parser.add_argument(
+        "--eps-greedy-epsilon0",
+        type=float,
+        default=1.0,
+        help="Initial epsilon for epsilon-greedy (default: 1.0)",
+    )
+    fuzz_parser.add_argument(
+        "--eps-greedy-decay",
+        type=float,
+        default=0.9995,
+        help="Epsilon decay rate per pull (default: 0.9995)",
+    )
+    fuzz_parser.add_argument(
+        "--hierarchical-bandit",
+        action="store_true",
+        help="Enable hierarchical bandit operator scheduling (category -> operator)",
+    )
+    fuzz_parser.add_argument(
+        "--gp-ucb",
+        action="store_true",
+        help="Enable GP-UCB operator scheduling with kernel covariance",
+    )
+    fuzz_parser.add_argument(
+        "--gp-length-scale",
+        type=float,
+        default=1.0,
+        help="GP kernel RBF length scale (default: 1.0)",
+    )
+    fuzz_parser.add_argument(
+        "--gp-beta",
+        type=float,
+        default=2.0,
+        help="GP-UCB exploration parameter (default: 2.0)",
     )
     fuzz_parser.add_argument(
         "--overlap-density",

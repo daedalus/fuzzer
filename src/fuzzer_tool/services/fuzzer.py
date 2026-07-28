@@ -33,6 +33,10 @@ from fuzzer_tool.core.montecarlo import (
     MOptScheduler,
     ReplicatorScheduler,
     ShapleyAttribution,
+    Exp3Scheduler,
+    EpsilonGreedyScheduler,
+    HierarchicalBanditScheduler,
+    GPUCBScheduler,
 )
 from fuzzer_tool.core.mutations import (
     DICT_MUTATIONS,
@@ -299,6 +303,15 @@ class Fuzzer:
         secretary_window=500,
         secretary_exploration=None,
         elo=False,
+        exp3=False,
+        exp3_gamma=0.1,
+        eps_greedy=False,
+        eps_greedy_epsilon0=1.0,
+        eps_greedy_decay=0.9995,
+        hierarchical_bandit=False,
+        gp_ucb=False,
+        gp_length_scale=1.0,
+        gp_beta=2.0,
         overlap_density=False,
         overlap_density_mode="modifier",
         overlap_min_jaccard=0.25,
@@ -696,6 +709,39 @@ class Fuzzer:
         if replicator:
             self._replicator = ReplicatorScheduler(window_size=200, learning_rate=0.1)
             log.info("Replicator dynamics scheduling enabled (window=200, eta=0.1)")
+        # EXP3 adversarial bandit
+        self._use_exp3 = exp3
+        self._exp3 = None
+        if exp3:
+            self._exp3 = Exp3Scheduler(gamma=exp3_gamma)
+            log.info("EXP3 adversarial bandit enabled (gamma=%.2f)", exp3_gamma)
+        # Epsilon-greedy with annealing
+        self._use_eps_greedy = eps_greedy
+        self._eps_greedy = None
+        if eps_greedy:
+            self._eps_greedy = EpsilonGreedyScheduler(
+                epsilon_0=eps_greedy_epsilon0, decay=eps_greedy_decay
+            )
+            log.info(
+                "Epsilon-greedy enabled (epsilon0=%.2f, decay=%.4f)",
+                eps_greedy_epsilon0,
+                eps_greedy_decay,
+            )
+        # Hierarchical bandit
+        self._use_hierarchical = hierarchical_bandit
+        self._hierarchical = None
+        if hierarchical_bandit:
+            self._hierarchical = HierarchicalBanditScheduler()
+            log.info(
+                "Hierarchical bandit enabled (%d categories)",
+                len(HierarchicalBanditScheduler.CATEGORIES),
+            )
+        # GP-UCB bandit
+        self._use_gp_ucb = gp_ucb
+        self._gp_ucb = None
+        if gp_ucb:
+            self._gp_ucb = GPUCBScheduler(length_scale=gp_length_scale, beta=gp_beta)
+            log.info("GP-UCB enabled (l=%.2f, beta=%.2f)", gp_length_scale, gp_beta)
         self._use_shapley = shapley
         self._shapley = ShapleyAttribution(n_samples=100, window_size=500) if shapley else None
         self._use_bayesian = bayesian
@@ -842,7 +888,7 @@ class Fuzzer:
 
             # Pre-register all strategy names so Elo can arbitrate immediately
             # (without this, select_strategy requires min_matches before considering a strategy)
-            for s in ("replicator", "bandit", "mopt", "cem"):
+            for s in ("replicator", "bandit", "mopt", "cem", "exp3", "eps_greedy", "hierarchical", "gp_ucb"):
                 self._elo._strategy_mu.setdefault(s, self._elo.initial_mu)
                 self._elo._strategy_sigma_sq.setdefault(s, self._elo.initial_sigma**2)
                 self._elo._strategy_match_count.setdefault(s, 0)
@@ -961,6 +1007,14 @@ class Fuzzer:
             _register_arms(self._mopt)
         if self._replicator:
             _register_arms(self._replicator)
+        if self._exp3:
+            _register_arms(self._exp3)
+        if self._eps_greedy:
+            _register_arms(self._eps_greedy)
+        if self._hierarchical:
+            _register_arms(self._hierarchical)
+        if self._gp_ucb:
+            _register_arms(self._gp_ucb)
         if self._elo:
             _register_arms(self._elo)
         del _format_priors  # free priors dict after arm registration
@@ -2086,6 +2140,34 @@ class Fuzzer:
                     self._replicator.record(op, success, weight=surprisal_weight)
                     seen.add(op)
 
+        if self._exp3:
+            seen = set()
+            for op in self._last_ops_used:
+                if op not in seen:
+                    self._exp3.record(op, success, weight=surprisal_weight)
+                    seen.add(op)
+
+        if self._eps_greedy:
+            seen = set()
+            for op in self._last_ops_used:
+                if op not in seen:
+                    self._eps_greedy.record(op, success, weight=surprisal_weight)
+                    seen.add(op)
+
+        if self._hierarchical:
+            seen = set()
+            for op in self._last_ops_used:
+                if op not in seen:
+                    self._hierarchical.record(op, success, weight=surprisal_weight)
+                    seen.add(op)
+
+        if self._gp_ucb:
+            seen = set()
+            for op in self._last_ops_used:
+                if op not in seen:
+                    self._gp_ucb.record(op, success, weight=surprisal_weight)
+                    seen.add(op)
+
         # Elo: record matches between operators that were used
         if self._use_elo and self._elo and len(self._last_ops_used) >= 2:
             unique_ops = list(dict.fromkeys(self._last_ops_used))  # preserve order, dedup
@@ -2110,6 +2192,14 @@ class Fuzzer:
                 all_strategies.append("mopt")
             if self.mc and self.mc_cem and self.mc.cem_fitted:
                 all_strategies.append("cem")
+            if self._exp3:
+                all_strategies.append("exp3")
+            if self._eps_greedy:
+                all_strategies.append("eps_greedy")
+            if self._hierarchical:
+                all_strategies.append("hierarchical")
+            if self._gp_ucb:
+                all_strategies.append("gp_ucb")
             for other in all_strategies:
                 if other != self._meta_strategy:
                     self._elo.record_strategy_match(self._meta_strategy, other, score)

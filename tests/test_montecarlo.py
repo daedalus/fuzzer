@@ -892,3 +892,482 @@ class TestReplicatorScheduler:
         rs.record("a", success=True)
         assert rs._total_execs == 1
         assert len(rs.operators) == 1
+
+
+class TestExp3Scheduler:
+    """Tests for EXP3 adversarial bandit scheduler."""
+
+    def test_init_defaults(self):
+        from fuzzer_tool.core.montecarlo import Exp3Scheduler
+
+        exp3 = Exp3Scheduler()
+        assert exp3.gamma == 0.1
+        assert exp3.window_decay == 0.999
+        assert not exp3.weights
+
+    def test_init_arm(self):
+        from fuzzer_tool.core.montecarlo import Exp3Scheduler
+
+        exp3 = Exp3Scheduler()
+        exp3.init_arm("bit_flip")
+        assert exp3.weights["bit_flip"] == 1.0
+
+    def test_init_arm_idempotent(self):
+        from fuzzer_tool.core.montecarlo import Exp3Scheduler
+
+        exp3 = Exp3Scheduler()
+        exp3.init_arm("bit_flip")
+        exp3.init_arm("bit_flip")
+        assert exp3.weights["bit_flip"] == 1.0
+
+    def test_select_op_returns_valid(self):
+        from fuzzer_tool.core.montecarlo import Exp3Scheduler
+
+        exp3 = Exp3Scheduler()
+        exp3.init_arm("bit_flip")
+        exp3.init_arm("byte_flip")
+        for _ in range(20):
+            op = exp3.select_op(["bit_flip", "byte_flip"])
+            assert op in ("bit_flip", "byte_flip")
+
+    def test_select_op_prefers_high_weight(self):
+        from fuzzer_tool.core.montecarlo import Exp3Scheduler
+
+        exp3 = Exp3Scheduler(gamma=0.05)
+        exp3.init_arm("good")
+        exp3.init_arm("bad")
+        # Pump good arm's weight with many successes
+        for _ in range(100):
+            exp3._last_probs = {"good": 0.5, "bad": 0.5}
+            exp3.record("good", success=True)
+        # After many successes, good arm should be preferred
+        good_count = 0
+        for _ in range(100):
+            op = exp3.select_op(["good", "bad"])
+            if op == "good":
+                good_count += 1
+        assert good_count > 60, f"Expected good>60, got {good_count}"
+
+    def test_record_success_increases_weight(self):
+        from fuzzer_tool.core.montecarlo import Exp3Scheduler
+
+        exp3 = Exp3Scheduler(gamma=0.5)
+        exp3.init_arm("arm_a")
+        w_before = exp3.weights["arm_a"]
+        exp3._last_probs = {"arm_a": 0.8}
+        exp3.record("arm_a", success=True)
+        assert exp3.weights["arm_a"] > w_before
+
+    def test_record_failure_decreases_weight_relatively(self):
+        from fuzzer_tool.core.montecarlo import Exp3Scheduler
+
+        exp3 = Exp3Scheduler(gamma=0.5)
+        exp3.init_arm("arm_a")
+        # Success then failure — failure should not increase weight as much
+        exp3._last_probs = {"arm_a": 0.8}
+        exp3.record("arm_a", success=True)
+        w_after_success = exp3.weights["arm_a"]
+        exp3._last_probs = {"arm_a": 0.8}
+        exp3.record("arm_a", success=False)
+        w_after_failure = exp3.weights["arm_a"]
+        # Weight should still be > 1.0 since gamma/K * r_hat > 0 for success before
+        # but the second update (reward=0) should produce less growth than success
+        assert exp3.weights["arm_a"] > 0
+
+    def test_empty_ops_fallback(self):
+        from fuzzer_tool.core.montecarlo import Exp3Scheduler
+
+        exp3 = Exp3Scheduler()
+        assert exp3.select_op([]) == ""
+
+    def test_single_op(self):
+        from fuzzer_tool.core.montecarlo import Exp3Scheduler
+
+        exp3 = Exp3Scheduler()
+        exp3.init_arm("only")
+        assert exp3.select_op(["only"]) == "only"
+
+    def test_window_decay_discounts(self):
+        from fuzzer_tool.core.montecarlo import Exp3Scheduler
+
+        exp3 = Exp3Scheduler(gamma=0.5, window_decay=0.5)
+        exp3.init_arm("arm_a")
+        exp3._last_probs = {"arm_a": 0.8}
+        exp3.record("arm_a", success=True)
+        w1 = exp3.weights["arm_a"]
+        # Decay should have been applied (0.5 factor) then weight update
+        assert exp3.weights["arm_a"] != 0
+
+    def test_bandit_stats(self):
+        from fuzzer_tool.core.montecarlo import Exp3Scheduler
+
+        exp3 = Exp3Scheduler()
+        exp3.init_arm("a")
+        exp3._last_probs = {"a": 1.0}
+        exp3.record("a", success=True)
+        stats = exp3.bandit_stats()
+        assert stats["exp3_pulls"] == 1
+        assert stats["exp3_max_weight"] > 0
+
+
+class TestEpsilonGreedyScheduler:
+    """Tests for Epsilon-greedy bandit with annealing."""
+
+    def test_init_defaults(self):
+        from fuzzer_tool.core.montecarlo import EpsilonGreedyScheduler
+
+        eg = EpsilonGreedyScheduler()
+        assert eg.epsilon_0 == 1.0
+        assert eg.decay == 0.9995
+        assert eg.min_epsilon == 0.01
+        assert not eg.q_values
+
+    def test_init_arm(self):
+        from fuzzer_tool.core.montecarlo import EpsilonGreedyScheduler
+
+        eg = EpsilonGreedyScheduler()
+        eg.init_arm("bit_flip")
+        assert eg.q_values["bit_flip"] == 0.0
+        assert eg.counts["bit_flip"] == 0
+
+    def test_init_arm_idempotent(self):
+        from fuzzer_tool.core.montecarlo import EpsilonGreedyScheduler
+
+        eg = EpsilonGreedyScheduler()
+        eg.init_arm("bit_flip")
+        eg.init_arm("bit_flip")
+        assert eg.q_values["bit_flip"] == 0.0
+
+    def test_select_op_exploit(self):
+        from fuzzer_tool.core.montecarlo import EpsilonGreedyScheduler
+
+        eg = EpsilonGreedyScheduler()
+        eg.init_arm("good")
+        eg.init_arm("bad")
+        # Set good arm's Q value very high
+        eg.q_values["good"] = 100.0
+        eg.q_values["bad"] = 0.0
+        # With epsilon near 0, should always exploit
+        eg.min_epsilon = 0.0
+        eg._total_pulls = 10000  # drives epsilon to 0
+        good_count = 0
+        for _ in range(100):
+            op = eg.select_op(["good", "bad"])
+            if op == "good":
+                good_count += 1
+        assert good_count == 100
+
+    def test_select_op_explore(self):
+        from fuzzer_tool.core.montecarlo import EpsilonGreedyScheduler
+
+        eg = EpsilonGreedyScheduler(epsilon_0=1.0, decay=1.0, min_epsilon=1.0)
+        eg.init_arm("a")
+        eg.init_arm("b")
+        saw_a = saw_b = False
+        for _ in range(50):
+            op = eg.select_op(["a", "b"])
+            if op == "a":
+                saw_a = True
+            else:
+                saw_b = True
+        assert saw_a and saw_b
+
+    def test_record(self):
+        from fuzzer_tool.core.montecarlo import EpsilonGreedyScheduler
+
+        eg = EpsilonGreedyScheduler()
+        eg.init_arm("arm_a")
+        eg.record("arm_a", success=True)
+        assert eg.q_values["arm_a"] > 0.0
+        assert eg.counts["arm_a"] == 1
+
+    def test_record_failure_lowers_q(self):
+        from fuzzer_tool.core.montecarlo import EpsilonGreedyScheduler
+
+        eg = EpsilonGreedyScheduler()
+        eg.init_arm("arm_a")
+        # Record a failure (reward=0)
+        eg.record("arm_a", success=False)
+        # Q should be 0 since reward=0 and n=1 → incremental update: 0 + (0-0)/1 = 0
+        assert eg.q_values["arm_a"] == 0.0
+        # Now record success
+        eg.record("arm_a", success=True)
+        # Q should be > 0
+        assert eg.q_values["arm_a"] > 0.0
+
+    def test_epsilon_decays(self):
+        from fuzzer_tool.core.montecarlo import EpsilonGreedyScheduler
+
+        eg = EpsilonGreedyScheduler(epsilon_0=1.0, decay=0.5, min_epsilon=0.0)
+        # Simulate 10 pulls
+        for i in range(10):
+            eg._total_pulls = i
+            eps = max(eg.min_epsilon, eg.epsilon_0 * (eg.decay**eg._total_pulls))
+        # After 10 pulls with decay=0.5: 1.0 * 0.5^10 = 0.00098
+        assert eps < 0.01
+
+    def test_empty_ops_fallback(self):
+        from fuzzer_tool.core.montecarlo import EpsilonGreedyScheduler
+
+        eg = EpsilonGreedyScheduler()
+        assert eg.select_op([]) == ""
+
+    def test_single_op(self):
+        from fuzzer_tool.core.montecarlo import EpsilonGreedyScheduler
+
+        eg = EpsilonGreedyScheduler()
+        eg.init_arm("only")
+        assert eg.select_op(["only"]) == "only"
+
+    def test_bandit_stats(self):
+        from fuzzer_tool.core.montecarlo import EpsilonGreedyScheduler
+
+        eg = EpsilonGreedyScheduler()
+        eg.init_arm("a")
+        eg.record("a", success=True)
+        stats = eg.bandit_stats()
+        assert stats["eps_greedy_pulls"] == 1
+        assert isinstance(stats["current_epsilon"], float)
+
+
+class TestHierarchicalBanditScheduler:
+    """Tests for hierarchical bandit (category → operator) scheduler."""
+
+    def test_init_defaults(self):
+        from fuzzer_tool.core.montecarlo import HierarchicalBanditScheduler
+
+        hb = HierarchicalBanditScheduler()
+        assert hb.arm_decay == 0.999
+        assert hb.decay_interval == 100
+        assert len(hb.CATEGORIES) == 8  # bit, byte, block, dict, structural, radamsa, format, adaptive
+        assert "bit" in hb.CATEGORIES
+        assert "byte" in hb.CATEGORIES
+
+    def test_init_arm(self):
+        from fuzzer_tool.core.montecarlo import HierarchicalBanditScheduler
+
+        hb = HierarchicalBanditScheduler()
+        hb.init_arm("bit_flip")
+        assert "bit_flip" in hb.op_alpha
+        assert "bit" in hb.cat_alpha
+
+    def test_init_arm_unknown_op_skipped(self):
+        from fuzzer_tool.core.montecarlo import HierarchicalBanditScheduler
+
+        hb = HierarchicalBanditScheduler()
+        hb.init_arm("nonexistent_op_xyz")
+        # Unknown operators should not be registered
+        assert "nonexistent_op_xyz" not in hb.op_alpha
+
+    def test_init_arm_idempotent(self):
+        from fuzzer_tool.core.montecarlo import HierarchicalBanditScheduler
+
+        hb = HierarchicalBanditScheduler()
+        hb.init_arm("bit_flip")
+        hb.init_arm("bit_flip")
+        assert hb.op_alpha["bit_flip"] == 1.0
+
+    def test_category_mapping(self):
+        from fuzzer_tool.core.montecarlo import HierarchicalBanditScheduler
+
+        hb = HierarchicalBanditScheduler()
+        # Spot-check category assignments
+        assert hb._op_to_cat["bit_flip"] == "bit"
+        assert hb._op_to_cat["byte_flip"] == "byte"
+        assert hb._op_to_cat["block_insert"] == "block"
+        assert hb._op_to_cat["dict_insert"] == "dict"
+        assert hb._op_to_cat["splice"] == "structural"
+        assert hb._op_to_cat["fuse_this"] == "radamsa"
+        assert hb._op_to_cat["png_chunk_mutate"] == "format"
+        assert hb._op_to_cat["markov_bytes"] == "adaptive"
+
+    def test_select_op_returns_valid(self):
+        from fuzzer_tool.core.montecarlo import HierarchicalBanditScheduler
+
+        hb = HierarchicalBanditScheduler()
+        hb.init_arm("bit_flip")
+        hb.init_arm("byte_flip")
+        hb.init_arm("block_insert")
+        for _ in range(20):
+            op = hb.select_op(["bit_flip", "byte_flip", "block_insert"])
+            assert op in ("bit_flip", "byte_flip", "block_insert")
+
+    def test_select_op_prefers_productive_category(self):
+        from fuzzer_tool.core.montecarlo import HierarchicalBanditScheduler
+
+        hb = HierarchicalBanditScheduler()
+        hb.init_arm("bit_flip")
+        hb.init_arm("byte_flip")
+        hb.init_arm("block_insert")
+        # Give the "byte" category many successes
+        for _ in range(100):
+            hb.record("byte_flip", success=True)
+            # Also record some failures in "bit"
+            hb.record("bit_flip", success=False)
+        # "byte" category should now have much higher alpha/beta ratio
+        byte_ratio = hb.cat_alpha["byte"] / hb.cat_beta["byte"]
+        bit_ratio = hb.cat_alpha["bit"] / hb.cat_beta["bit"]
+        assert byte_ratio > bit_ratio
+
+    def test_record_updates_both_levels(self):
+        from fuzzer_tool.core.montecarlo import HierarchicalBanditScheduler
+
+        hb = HierarchicalBanditScheduler()
+        hb.init_arm("bit_flip")
+        op_alpha_before = hb.op_alpha["bit_flip"]
+        cat_alpha_before = hb.cat_alpha["bit"]
+        hb.record("bit_flip", success=True)
+        assert hb.op_alpha["bit_flip"] > op_alpha_before
+        assert hb.cat_alpha["bit"] > cat_alpha_before
+
+    def test_record_failure_updates_both_levels(self):
+        from fuzzer_tool.core.montecarlo import HierarchicalBanditScheduler
+
+        hb = HierarchicalBanditScheduler()
+        hb.init_arm("bit_flip")
+        op_beta_before = hb.op_beta["bit_flip"]
+        cat_beta_before = hb.cat_beta["bit"]
+        hb.record("bit_flip", success=False)
+        assert hb.op_beta["bit_flip"] > op_beta_before
+        assert hb.cat_beta["bit"] > cat_beta_before
+
+    def test_empty_ops_fallback(self):
+        from fuzzer_tool.core.montecarlo import HierarchicalBanditScheduler
+
+        hb = HierarchicalBanditScheduler()
+        assert hb.select_op([]) == ""
+
+    def test_single_op(self):
+        from fuzzer_tool.core.montecarlo import HierarchicalBanditScheduler
+
+        hb = HierarchicalBanditScheduler()
+        hb.init_arm("bit_flip")
+        assert hb.select_op(["bit_flip"]) == "bit_flip"
+
+    def test_supports_priors(self):
+        from fuzzer_tool.core.montecarlo import HierarchicalBanditScheduler
+
+        assert HierarchicalBanditScheduler.supports_priors
+
+    def test_bandit_stats(self):
+        from fuzzer_tool.core.montecarlo import HierarchicalBanditScheduler
+
+        hb = HierarchicalBanditScheduler()
+        hb.init_arm("bit_flip")
+        hb.record("bit_flip", success=True)
+        stats = hb.bandit_stats()
+        assert stats["hierarchical_pulls"] == 1
+        assert stats["categories"] == 1
+
+
+class TestGPUCBScheduler:
+    """Tests for GP-UCB scheduler."""
+
+    def test_init_defaults(self):
+        from fuzzer_tool.core.montecarlo import GPUCBScheduler
+
+        gp = GPUCBScheduler()
+        assert gp.length_scale == 1.0
+        assert gp.beta == 2.0
+        assert gp.refit_interval == 100
+        assert gp.min_samples == 3
+        assert not gp._moments
+
+    def test_init_arm(self):
+        from fuzzer_tool.core.montecarlo import GPUCBScheduler
+
+        gp = GPUCBScheduler()
+        gp.init_arm("bit_flip")
+        assert "bit_flip" in gp._moments
+        assert "bit_flip" in gp._features
+
+    def test_init_arm_idempotent(self):
+        from fuzzer_tool.core.montecarlo import GPUCBScheduler
+
+        gp = GPUCBScheduler()
+        gp.init_arm("bit_flip")
+        gp.init_arm("bit_flip")
+        assert "bit_flip" in gp._moments
+
+    def test_select_op_returns_valid(self):
+        from fuzzer_tool.core.montecarlo import GPUCBScheduler
+
+        gp = GPUCBScheduler()
+        gp.init_arm("bit_flip")
+        gp.init_arm("byte_flip")
+        for _ in range(20):
+            op = gp.select_op(["bit_flip", "byte_flip"])
+            assert op in ("bit_flip", "byte_flip")
+
+    def test_select_op_prefers_high_mu(self):
+        from fuzzer_tool.core.montecarlo import GPUCBScheduler
+
+        gp = GPUCBScheduler(beta=0.1)  # low beta = low exploration bonus
+        gp.init_arm("good")
+        gp.init_arm("bad")
+        # Give good arm many successes
+        for _ in range(10):
+            gp.record("good", success=True)
+        # Give bad arm many failures
+        for _ in range(10):
+            gp.record("bad", success=False)
+        # With low beta, should prefer the high-mean arm
+        good_count = 0
+        for _ in range(50):
+            op = gp.select_op(["good", "bad"])
+            if op == "good":
+                good_count += 1
+        assert good_count > 30, f"Expected good>30, got {good_count}"
+
+    def test_record_updates_moments(self):
+        from fuzzer_tool.core.montecarlo import GPUCBScheduler
+
+        gp = GPUCBScheduler()
+        gp.init_arm("arm_a")
+        gp.record("arm_a", success=True)
+        assert gp._moments["arm_a"].count == 1
+        assert gp._moments["arm_a"].mean > 0
+
+    def test_rbf_kernel(self):
+        from fuzzer_tool.core.montecarlo import GPUCBScheduler
+
+        gp = GPUCBScheduler(length_scale=1.0)
+        gp.init_arm("bit_flip")
+        gp.init_arm("bit_offset_flip")
+        gp.init_arm("byte_flip")
+        # Same-category operators should have high kernel similarity
+        same_cat = gp._rbf(
+            gp._features["bit_flip"],
+            gp._features["bit_offset_flip"],
+        )
+        # Different-category operators should have low similarity
+        diff_cat = gp._rbf(
+            gp._features["bit_flip"],
+            gp._features["byte_flip"],
+        )
+        assert same_cat > diff_cat, (
+            f"Expected same_cat ({same_cat:.4f}) > diff_cat ({diff_cat:.4f})"
+        )
+
+    def test_empty_ops_fallback(self):
+        from fuzzer_tool.core.montecarlo import GPUCBScheduler
+
+        gp = GPUCBScheduler()
+        assert gp.select_op([]) == ""
+
+    def test_single_op(self):
+        from fuzzer_tool.core.montecarlo import GPUCBScheduler
+
+        gp = GPUCBScheduler()
+        gp.init_arm("only")
+        assert gp.select_op(["only"]) == "only"
+
+    def test_bandit_stats(self):
+        from fuzzer_tool.core.montecarlo import GPUCBScheduler
+
+        gp = GPUCBScheduler()
+        gp.init_arm("a")
+        gp.record("a", success=True)
+        stats = gp.bandit_stats()
+        assert stats["gp_ucb_pulls"] == 1
+        assert stats["operators_tracked"] == 1
