@@ -1,6 +1,7 @@
 """Tests for Markov chain: core + plateau detection."""
 
 import tempfile
+from unittest.mock import patch
 
 from fuzzer_tool.core.markov import MarkovChain
 
@@ -326,3 +327,61 @@ class TestPlateauDetection:
         result = mc.snapshot_and_check_plateau()
         # Should not be plateau (contexts_seen < snapshot_interval * 2)
         assert not result
+
+
+class TestMarkovPruning:
+    """Regression tests for MarkovChain transition pruning under MAX_TRANSITIONS."""
+
+    def test_regression_max_transitions_prunes_on_exceed(self):
+        """_maybe_prune_transitions evicts least-used contexts when over cap."""
+        mc = MarkovChain(order=2)
+        # Set a low cap so we can exceed it with generated data
+        cap = 1_000
+        with patch("fuzzer_tool.core.markov.MAX_TRANSITIONS", cap):
+            # Generate data with ~2000 unique 2-byte contexts
+            # Each byte pair (i, j) appears with byte k following
+            for i in range(64):
+                for j in range(32):
+                    ctx = bytes([i, j])
+                    mc.transitions[ctx] = __import__("collections").Counter()
+                    for k in range(8):
+                        mc.transitions[ctx][k] = 1 + (i + j + k) % 3
+            assert len(mc.transitions) > cap
+            mc._maybe_prune_transitions()
+            # Should be pruned to 75% of cap = 750 entries
+            assert len(mc.transitions) <= cap
+            assert len(mc.transitions) >= cap * 3 // 4  # target = 750
+
+    def test_regression_max_transitions_does_not_prune_below_cap(self):
+        """_maybe_prune_transitions is a no-op when under the limit."""
+        mc = MarkovChain(order=1)
+        mc.train(b"hello")
+        before = len(mc.transitions)
+        mc._maybe_prune_transitions()
+        assert len(mc.transitions) == before
+
+    def test_regression_max_transitions_keeps_most_used_contexts(self):
+        """Evicted contexts are the least-used ones; the most-used survive."""
+        mc = MarkovChain(order=2)
+        cap = 500
+        with patch("fuzzer_tool.core.markov.MAX_TRANSITIONS", cap):
+            # Create 1000 unique 2-byte contexts; the first 300 get high
+            # counts (100), the remaining 700 get low counts (1)
+            for i in range(1000):
+                ctx = bytes([i >> 8, i & 0xFF])  # unique 2-byte key per i
+                mc.transitions[ctx] = __import__("collections").Counter()
+                count = 100 if i < 300 else 1
+                mc.transitions[ctx][0] = count
+            assert len(mc.transitions) == 1000
+            mc._maybe_prune_transitions()
+            # All high-count (100) contexts should survive
+            assert len(mc.transitions) <= cap
+            assert len(mc.transitions) >= 300  # at least the top 300
+            # Verify every surviving context either had count=100 or was
+            # a low-count entry that happened to be kept (target=375, so
+            # all 300 count=100 + 75 count=1 survive)
+            kept_high = sum(
+                1 for ctx, cnt in mc.transitions.items()
+                if cnt.get(0, 0) >= 100
+            )
+            assert kept_high == 300, f"Expected 300 high-count, got {kept_high}"
