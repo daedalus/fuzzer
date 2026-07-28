@@ -251,6 +251,9 @@ fuzzer-tool fuzz targets/fuzz_regex_compile targets/fuzz_pattern_match targets/f
 # Tailslayer hedged reader fuzzing (in-process .so mode, ~66 eps)
 fuzzer-tool fuzz targets/tailslayer_read.so -c --inprocess
 
+# FFmpeg demux+decode pipeline (vendored FFmpeg 7.1, exercises 300+ format/codec paths)
+fuzzer-tool fuzz targets/ffmpeg_read -c
+
 # Multi-target with glob — skips .c/.h/.py automatically
 fuzzer-tool fuzz 'targets/fuzz_*' -c -d corpus/fgrep
 

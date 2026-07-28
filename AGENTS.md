@@ -98,7 +98,13 @@ targets/
 ├── tailslayer_read.cpp   # Tailslayer hedged reader fuzz target (C++, header-only lib)
 ├── tailslayer_read       # Compiled target
 ├── tailslayer_read.so    # Compiled shared library (in-process mode)
+├── ffmpeg_read.c         # FFmpeg demux+decode fuzz target
+├── ffmpeg_read           # Compiled target
+├── ffmpeg_read.so        # Compiled shared library (in-process mode)
 ```
+
+vendor/
+└── ffmpeg/               # Vendored FFmpeg 7.1.3 (libavformat, libavcodec, libavutil, libswresample)
 
 ## Key Concepts
 

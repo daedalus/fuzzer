@@ -46,6 +46,8 @@ targets/png_read*
 targets/gzip_read*
 targets/jpeg_read*
 targets/zlib_read*
+targets/ffmpeg_read*
+!targets/ffmpeg_read.c
 targets/proto_target*
 targets/fgrep_read
 targets/unrar_read
