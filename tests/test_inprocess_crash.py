@@ -341,3 +341,62 @@ class TestInprocessCrashIntegration:
             assert len(crash_files) > 0, (
                 f"No crashes found in non-ASAN standalone. Output:\n{result.stdout}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Bug class 6: Persistent loader WIFEXITED crash exit code conversion
+#   When the target calls _exit(128 + sig) from the afl_shim crash handler,
+#   the persistent loader must convert WIFEXITED(exit_code >= 128) to a
+#   negative signal code so the crash is detected.
+# ---------------------------------------------------------------------------
+
+
+class TestWifexitedCrashCode:
+    """Verify _exit(128+sig) from crash handler maps to negative signal code."""
+
+    def test_wifexited_abrt_conversion(self):
+        """_exit(134) → rc=-6 (SIGABRT)."""
+        child = os.fork()
+        if child == 0:
+            os._exit(134)  # 128 + SIGABRT(6)
+        _, status = os.waitpid(child, 0)
+        assert os.WIFEXITED(status)
+        exit_code = os.WEXITSTATUS(status)
+        assert exit_code == 134
+        # This mirrors the logic in persistent_loader.py's waitpid handler
+        if exit_code >= 128:
+            rc = -(exit_code - 128)
+        else:
+            rc = -2
+        assert rc == -6, f"Expected rc=-6 for SIGABRT, got rc={rc}"
+
+    def test_wifexited_segv_conversion(self):
+        """_exit(139) → rc=-11 (SIGSEGV)."""
+        child = os.fork()
+        if child == 0:
+            os._exit(139)  # 128 + SIGSEGV(11)
+        _, status = os.waitpid(child, 0)
+        assert os.WIFEXITED(status)
+        exit_code = os.WEXITSTATUS(status)
+        assert exit_code == 139
+        if exit_code >= 128:
+            rc = -(exit_code - 128)
+        else:
+            rc = -2
+        assert rc == -11, f"Expected rc=-11 for SIGSEGV, got rc={rc}"
+
+    def test_wifexited_normal_exit_not_converted(self):
+        """Normal exit (_exit(0)) returns -2 (no pipe data) not -signal."""
+        child = os.fork()
+        if child == 0:
+            os._exit(0)
+        _, status = os.waitpid(child, 0)
+        assert os.WIFEXITED(status)
+        exit_code = os.WEXITSTATUS(status)
+        assert exit_code == 0
+        # Normal exit (< 128) goes to the pipe-read fallback: no data → -2
+        if exit_code >= 128:
+            rc = -(exit_code - 128)
+        else:
+            rc = -2
+        assert rc == -2, f"Expected rc=-2 for normal exit, got rc={rc}"

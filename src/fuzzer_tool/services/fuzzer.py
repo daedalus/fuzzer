@@ -1072,6 +1072,12 @@ class Fuzzer:
                 finally:
                     with contextlib.suppress(OSError):
                         os.unlink(_shim_path)
+            # ASAN-instrumented .so targets MUST use persistent subprocess
+            # mode for crash isolation.  direct_lite runs the target in the
+            # same process — when ASAN calls abort() on a detected bug, the
+            # entire fuzzer dies without recording the crash.
+            if target_is_asan:
+                use_direct_lite = False
             # Cmplog: if the .so has cmplog compiled in, direct_lite works
             # because the shim is part of the .so itself. If the shim is
             # externally LD_PRELOAD'd, that also works. Otherwise we need

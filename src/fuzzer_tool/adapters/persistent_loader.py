@@ -126,6 +126,11 @@ while True:
             # Check if child was killed by signal (SIGSEGV, SIGABRT, etc.)
             if os.WIFSIGNALED(status):
                 rc = -(os.WTERMSIG(status))
+            elif os.WIFEXITED(status) and os.WEXITSTATUS(status) >= 128:
+                # Exit via _exit(128 + sig) from crash handler (afl_shim.c).
+                # Convert to negative signal code for consistency with the
+                # WIFSIGNALED path above.
+                rc = -(os.WEXITSTATUS(status) - 128)
             else:
                 rc_byte = os.read(read_pipe, 1)
                 rc = rc_byte[0] if rc_byte else -2

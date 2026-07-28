@@ -30,6 +30,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
 #include <unistd.h>
 #include <sys/ipc.h>
 #include <sys/shm.h>
@@ -163,13 +164,7 @@ void __sanitizer_cov_trace_pc_guard_init(uint32_t *start, uint32_t *stop) {
  * the linker fails with TLS/non-TLS type mismatch.  Our definition
  * is used only for non-ASAN builds (standalone, ptrace mode, etc.). */
 
-/* Portable check for ASAN/TSAN: GCC defines __SANITIZE_ADDRESS__,
- * clang defines __has_feature(address_sanitizer) but NOT __SANITIZE_ADDRESS__. */
-#ifndef __has_feature
-#define __has_feature(x) 0
-#endif
-#if !defined(__SANITIZE_ADDRESS__) && !defined(__SANITIZE_THREAD__) \
-    && !__has_feature(address_sanitizer) && !__has_feature(thread_sanitizer)
+#if !defined(__SANITIZE_ADDRESS__) && !defined(__SANITIZE_THREAD__)
 __attribute__((visibility("default")))
 void __sancov_lowest_stack(uint32_t addr) {
     /* addr is the stack address of the current instrumentation point.
@@ -206,31 +201,30 @@ void __afl_map_reset(void) {
     __afl_iter_edge_count = 0;
 }
 
+/* ── Crash signal handler ─────────────────────────────────────────────
+ * When the target crashes (SIGSEGV from a real segfault or SIGABRT from
+ * ASAN calling abort()), exit with 128 + signal so the parent process
+ * sees a meaningful exit code instead of being silently killed.  This
+ * is essential for direct_lite in-process mode where Python-level signal
+ * handlers never run during a ctypes call.
+ *
+ * cmplog_shim.c installs its OWN crash handler (flush + re-raise) when
+ * compiled into the same target — its constructor runs after ours, so
+ * its handler takes priority (which is correct: it flushes cmplog before
+ * dying).  Our handler is the fallback for non-cmplog targets.          */
+
+static void __afl_crash_handler(int sig) {
+    _exit(128 + (unsigned int)sig);
+}
+
+static void __afl_install_crash_handlers(void) {
+    signal(SIGSEGV, __afl_crash_handler);
+    signal(SIGABRT, __afl_crash_handler);
+}
+
 /* Auto-attach when loaded */
 __attribute__((constructor))
 static void __afl_auto_init(void) {
     __afl_map_shm();
+    __afl_install_crash_handlers();
 }
-
-/* ── abort() override ─────────────────────────────────────────────────
- * Intercept libc's abort() for fuzzing: instead of killing the process,
- * log and return.  Libraries like FFmpeg call abort() on internal
- * assertion failures (~1000 av_assert0 sites), which would flood the
- * fuzzer with false crashes.  After abort() returns, execution continues;
- * if a real memory safety violation exists, ASAN catches it at the true
- * source.  This override catches ALL abort() sources — macros, direct
- * calls in library .c files, pthread-assert failures, etc.
- *
- * The noreturn warning is suppressed because we intentionally override
- * the behavior for the fuzzing use case. */
-#pragma GCC diagnostic push
-#if defined(__clang__)
-#pragma GCC diagnostic ignored "-Winvalid-noreturn"
-#else
-#pragma GCC diagnostic ignored "-Wreturn-type"
-#endif
-__attribute__((visibility("hidden"))) void abort(void) {
-    static const char msg[] = "[shim] abort() intercepted — continuing\n";
-    write(STDERR_FILENO, msg, sizeof(msg) - 1);
-}
-#pragma GCC diagnostic pop

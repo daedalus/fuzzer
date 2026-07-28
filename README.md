@@ -366,7 +366,7 @@ fuzzer-tool estimate <target> --corpus <dir> [--calibrate N]
 |------|------|-----------|-------|
 | SHM bitmap | `-c` (default) | 65–200 eps | For AFL-instrumented targets |
 | In-process | `--inprocess` | 65–120 eps | Persistent loader with crash recovery |
-| In-process direct | `--inprocess-direct` | 2k–34k eps | No crash isolation |
+| In-process direct | `--inprocess-direct` | 2k–34k eps | No crash isolation; afl_shim crash handler gives _exit(128+sig) exit codes |
 | Ptrace basic | `-c --no-shm` | ~20 eps | Function-entry breakpoints |
 | Ptrace deep | `-c --no-shm --deep-coverage` | ~18 eps | Capstone BB discovery |
 
@@ -418,7 +418,10 @@ Calls target function directly via `ctypes.CDLL`. Catches SIGSEGV/SIGABRT via si
 Keeps one Python subprocess alive. Fork-per-call with `os.setsid()` for process group isolation. Timeout enforced via outer threaded readline. Auto-restarts on subprocess death. Throughput monitoring detects sustained slowdowns (below 10% of calibrated baseline) and auto-restarts the loader. ~65–120 eps.
 
 ### ASAN support
-Automatically detects ASAN-instrumented targets by checking for `__asan_init` symbols. Falls back from `--inprocess-direct` to subprocess mode when ASAN is detected (ASAN calls `_exit()` which kills in-process targets).
+Automatically detects ASAN-instrumented targets by checking for `__asan_init` symbols. Falls back from `--inprocess-direct` to subprocess mode when ASAN is detected (ASAN calls `_exit()` which kills in-process targets). For auto-detected `.so` targets (e.g. `ffmpeg_read.so`), ASAN-instrumented builds always use the persistent subprocess loader — crash isolation via fork, since in-process `direct_lite` mode cannot survive ASAN-triggered `abort()`.
+
+### AFL shim crash handlers (`afl_shim.c`)
+The coverage shim compiled into every fuzz target now installs C-level signal handlers for `SIGSEGV` and `SIGABRT` that call `_exit(128 + sig)`. This ensures the process exits with a meaningful signal-indicating exit code when the target crashes, even when Python-level signal handlers cannot fire (e.g. during a `ctypes` call). The persistent subprocess loader detects these exit codes and converts them to negative signal codes (`-6` for SIGABRT, `-11` for SIGSEGV), enabling proper crash reporting in all execution modes.
 
 ### SHM resize in inprocess mode
 When collision risk exceeds the threshold, the bitmap SHM is resized. In inprocess mode, this patches the target's `__afl_area` pointer to the new SHM segment and invalidates the cached SHM attachment, so coverage writes don't go to freed memory. The target's compiled-in `__afl_map_mask` is not updated (static variable), so the target underutilizes the new bitmap — but writes remain in-bounds.
