@@ -689,6 +689,13 @@ print(_clean_env(os.environ).get('LD_PRELOAD', '(stripped)'))
 
 If this prints `(stripped)`, the environment is clean.
 
+## Findings
+
+Bugs discovered by fuzzing with this tool are documented in `docs/`:
+
+- **[FINDINGS.md](docs/FINDINGS.md)** — Unsigned integer underflow in fgrep AVX2 search (3 bugs, severity MEDIUM)
+- **[FINDINGS-ffmpeg.md](docs/FINDINGS-ffmpeg.md)** — Reachable `av_assert0(0)` in FFmpeg 7.1.3 when `avcodec_send_packet` is called on a subtitle decoder (severity HIGH — denial-of-service via 46-byte crafted input)
+
 ## License
 
 MIT

@@ -225,3 +225,9 @@ Key technical details:
 - Without external `LD_PRELOAD`, fuzzer-tool falls back to persistent loader (fork-per-call)
 - Both bugs were in cold paths (AVX2 SIMD, fixed-string insensitive match) not hit by simple mutations
 - Coverage-guided fuzzing with Markov byte generation reached these paths after ~432-1000 execs
+
+---
+
+## See Also
+
+- **[FINDINGS-ffmpeg.md](FINDINGS-ffmpeg.md)** — Reachable `av_assert0(0)` in FFmpeg 7.1.3 `decode_simple_internal()` when calling `avcodec_send_packet` on a subtitle decoder. Triggered by a 46-byte PGS subtitle input. Severity: HIGH (denial-of-service in release builds).
