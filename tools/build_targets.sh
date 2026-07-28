@@ -192,16 +192,19 @@ build_simple_targets() {
     build_target "$TARGETS/jpeg_read.c" "$TARGETS/jpeg_read${out_suffix}" "-ljpeg" "$flags"
 
     # ffmpeg_read — link against vendored FFmpeg static libs (or system)
-    local FFMPEG_LIBS FFMPEG_INC
-    if [ -f "$VENDOR/ffmpeg/libavformat/libavformat.a" ]; then
-        FFMPEG_LIBS="$VENDOR/ffmpeg/libavformat/libavformat.a $VENDOR/ffmpeg/libavcodec/libavcodec.a $VENDOR/ffmpeg/libavutil/libavutil.a $VENDOR/ffmpeg/libswresample/libswresample.a"
-        FFMPEG_INC="-I$VENDOR/ffmpeg"
-    else
-        FFMPEG_LIBS="-lavformat -lavcodec -lavutil -lswresample"
-        FFMPEG_INC=""
+    # Skip nosan builds when vendored libs have ASAN instrumentation
+    if [ "$suffix" != "_nosan" ] || [ ! -f "$VENDOR/ffmpeg/libavformat/libavformat.a" ]; then
+        local FFMPEG_LIBS FFMPEG_INC
+        if [ -f "$VENDOR/ffmpeg/libavformat/libavformat.a" ]; then
+            FFMPEG_LIBS="$VENDOR/ffmpeg/libavformat/libavformat.a $VENDOR/ffmpeg/libavcodec/libavcodec.a $VENDOR/ffmpeg/libavutil/libavutil.a $VENDOR/ffmpeg/libswresample/libswresample.a"
+            FFMPEG_INC="-I$VENDOR/ffmpeg"
+        else
+            FFMPEG_LIBS="-lavformat -lavcodec -lavutil -lswresample"
+            FFMPEG_INC=""
+        fi
+        build_target "$TARGETS/ffmpeg_read.c" "$TARGETS/ffmpeg_read${out_suffix}" \
+            "$FFMPEG_LIBS -lm -lpthread" "$flags" "clang" "$FFMPEG_INC"
     fi
-    build_target "$TARGETS/ffmpeg_read.c" "$TARGETS/ffmpeg_read${out_suffix}" \
-        "$FFMPEG_LIBS -lm -lpthread" "$flags" "" "$FFMPEG_INC"
 }
 
 # ── Build simple .so targets ────────────────────────────────────
@@ -238,17 +241,19 @@ build_simple_so_targets() {
     build_so_target "$TARGETS/jpeg_read.c" "$TARGETS/jpeg_read${out_suffix}.so" "-ljpeg" "$flags"
     build_so_target "$TARGETS/nop_target.c" "$TARGETS/nop_target${out_suffix}.so" "" "$flags"
 
-    # ffmpeg_read .so
-    local FFMPEG_LIBS FFMPEG_INC
-    if [ -f "$VENDOR/ffmpeg/libavformat/libavformat.a" ]; then
-        FFMPEG_LIBS="$VENDOR/ffmpeg/libavformat/libavformat.a $VENDOR/ffmpeg/libavcodec/libavcodec.a $VENDOR/ffmpeg/libavutil/libavutil.a $VENDOR/ffmpeg/libswresample/libswresample.a"
-        FFMPEG_INC="-I$VENDOR/ffmpeg"
-    else
-        FFMPEG_LIBS="-lavformat -lavcodec -lavutil -lswresample"
-        FFMPEG_INC=""
+    # ffmpeg_read .so — skip nosan when vendored libs have ASAN instrumentation
+    if [ "$suffix" != "_nosan" ] || [ ! -f "$VENDOR/ffmpeg/libavformat/libavformat.a" ]; then
+        local FFMPEG_LIBS FFMPEG_INC
+        if [ -f "$VENDOR/ffmpeg/libavformat/libavformat.a" ]; then
+            FFMPEG_LIBS="$VENDOR/ffmpeg/libavformat/libavformat.a $VENDOR/ffmpeg/libavcodec/libavcodec.a $VENDOR/ffmpeg/libavutil/libavutil.a $VENDOR/ffmpeg/libswresample/libswresample.a"
+            FFMPEG_INC="-I$VENDOR/ffmpeg"
+        else
+            FFMPEG_LIBS="-lavformat -lavcodec -lavutil -lswresample"
+            FFMPEG_INC=""
+        fi
+        build_so_target "$TARGETS/ffmpeg_read.c" "$TARGETS/ffmpeg_read${out_suffix}.so" \
+            "$FFMPEG_LIBS -lm -lpthread" "$flags" "clang" "$FFMPEG_INC"
     fi
-    build_so_target "$TARGETS/ffmpeg_read.c" "$TARGETS/ffmpeg_read${out_suffix}.so" \
-        "$FFMPEG_LIBS -lm -lpthread" "$flags" "" "$FFMPEG_INC"
 }
 
 # ── Build standalone .so targets with external deps ─────────────
@@ -412,7 +417,7 @@ verify_afl() {
              "$TARGETS"/nop_target "$TARGETS"/nop_target_nosan "$TARGETS"/nop_target.so "$TARGETS"/nop_target_nosan.so \
              "$TARGETS"/tailslayer_read "$TARGETS"/tailslayer_read.so \
              "$TARGETS"/lz4_read "$TARGETS"/lz4_read_nosan "$TARGETS"/lz4_read.so "$TARGETS"/lz4_read_nosan.so \
-             "$TARGETS"/ffmpeg_read "$TARGETS"/ffmpeg_read_nosan "$TARGETS"/ffmpeg_read.so "$TARGETS"/ffmpeg_read_nosan.so; do
+             "$TARGETS"/ffmpeg_read "$TARGETS"/ffmpeg_read.so; do
         [ -f "$f" ] || continue
         [[ "$f" == *.c ]] && continue
         local n=$(nm "$f" 2>/dev/null | grep -c __afl || true)

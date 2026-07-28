@@ -63,6 +63,7 @@ echo "[2/4] Configuring FFmpeg..."
 (cd "$FFMPEG_DIR" && \
     CC="$CC" CFLAGS="$CFLAGS" \
     ./configure \
+        --cc="$CC" \
         --enable-static \
         --disable-shared \
         --enable-pic \
@@ -85,6 +86,7 @@ echo "[2/4] Configuring FFmpeg..."
         --disable-debug \
         --disable-x86asm \
         --extra-cflags="$CFLAGS" \
+        --extra-ldflags="$ASAN_FLAGS -fsanitize-coverage=trace-pc-guard" \
     2>&1 | tail -5) || {
     echo "ERROR: configure failed"
     exit 1

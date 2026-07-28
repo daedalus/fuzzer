@@ -62,6 +62,9 @@ int fuzz_ffmpeg(const unsigned char *buf, size_t size) {
     __afl_map_edge(0x1000);
     if (size < 16) { __afl_map_edge(0x1001); return 0; }
 
+    /* Silence FFmpeg's internal logging */
+    av_log_set_level(AV_LOG_QUIET);
+
     /* Initialize I/O state */
     FuzzIOState io_state = { buf, size, 0 };
     __afl_map_edge(0x1002);

@@ -162,7 +162,13 @@ void __sanitizer_cov_trace_pc_guard_init(uint32_t *start, uint32_t *stop) {
  * the linker fails with TLS/non-TLS type mismatch.  Our definition
  * is used only for non-ASAN builds (standalone, ptrace mode, etc.). */
 
-#if !defined(__SANITIZE_ADDRESS__) && !defined(__SANITIZE_THREAD__)
+/* Portable check for ASAN/TSAN: GCC defines __SANITIZE_ADDRESS__,
+ * clang defines __has_feature(address_sanitizer) but NOT __SANITIZE_ADDRESS__. */
+#ifndef __has_feature
+#define __has_feature(x) 0
+#endif
+#if !defined(__SANITIZE_ADDRESS__) && !defined(__SANITIZE_THREAD__) \
+    && !__has_feature(address_sanitizer) && !__has_feature(thread_sanitizer)
 __attribute__((visibility("default")))
 void __sancov_lowest_stack(uint32_t addr) {
     /* addr is the stack address of the current instrumentation point.
