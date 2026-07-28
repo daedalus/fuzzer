@@ -540,6 +540,7 @@ class Fuzzer:
 
         self.corpus: list[bytes] = []
         self.seen_hashes: set[str] = set()
+        self.irreplaceable_hashes: set[str] = set()
         self.bloom = BloomFilter(capacity=100_000)
         self.bloom.init_fuzzy(max_recent=200)
         self.crash_hashes: set[str] = set()

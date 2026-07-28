@@ -198,10 +198,8 @@ build_fgrep_targets() {
 
     local out_suffix=""
     [ "$suffix" = "_nosan" ] && out_suffix="_nosan"
-    build_target "$TARGETS/fuzz_regex_compile.c" "$TARGETS/fuzz_regex_compile${out_suffix}" "$FGREP_INC $FGREP_LIBS" "$flags"
-    build_target "$TARGETS/fuzz_pattern_match.c" "$TARGETS/fuzz_pattern_match${out_suffix}" "$FGREP_INC $FGREP_LIBS" "$flags"
-    build_target "$TARGETS/fuzz_search_pipeline.c" "$TARGETS/fuzz_search_pipeline${out_suffix}" "$FGREP_INC $FGREP_LIBS_FULL" "$flags"
     # fgrep_read includes fgrep .c files directly and needs -mavx2 for AVX2 intrinsics
+    # (Consolidated from fuzz_regex_compile.c, fuzz_pattern_match.c, fuzz_search_pipeline.c)
     build_target "$TARGETS/fgrep_read.c" "$TARGETS/fgrep_read${out_suffix}" "$FGREP_INC -lpthread" "$flags -mavx2"
 }
 
@@ -215,10 +213,8 @@ build_fgrep_so_targets() {
 
     local out_suffix=""
     [ "$suffix" = "_nosan" ] && out_suffix="_nosan"
-    build_so_target "$TARGETS/fuzz_regex_compile.c" "$TARGETS/fuzz_regex_compile${out_suffix}.so" "$FGREP_INC $FGREP_LIBS" "$flags"
-    build_so_target "$TARGETS/fuzz_pattern_match.c" "$TARGETS/fuzz_pattern_match${out_suffix}.so" "$FGREP_INC $FGREP_LIBS" "$flags"
-    build_so_target "$TARGETS/fuzz_search_pipeline.c" "$TARGETS/fuzz_search_pipeline${out_suffix}.so" "$FGREP_INC $FGREP_LIBS_FULL" "$flags"
     # fgrep_read includes fgrep .c files directly — needs -mavx2 for AVX2 intrinsics
+    # (Consolidated from fuzz_regex_compile.c, fuzz_pattern_match.c, fuzz_search_pipeline.c)
     build_so_target "$TARGETS/fgrep_read.c" "$TARGETS/fgrep_read${out_suffix}.so" "$FGREP_INC -lpthread" "$flags -mavx2"
 }
 

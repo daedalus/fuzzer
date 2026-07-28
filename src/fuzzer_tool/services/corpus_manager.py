@@ -32,7 +32,7 @@ import shutil
 import time
 from pathlib import Path
 
-from fuzzer_tool.adapters.filesystem import load_corpus, save_crash, save_to_corpus
+from fuzzer_tool.adapters.filesystem import load_corpus, save_crash, save_irreplaceable, save_to_corpus
 
 log = logging.getLogger(__name__)
 
@@ -48,7 +48,7 @@ class CorpusManager:
 
     def load_corpus(self):
         f = self.f
-        f.corpus, f.seen_hashes = load_corpus(f.corpus_dir, f.bloom)
+        f.corpus, f.seen_hashes, f.irreplaceable_hashes = load_corpus(f.corpus_dir, f.bloom)
 
     def init_seed_metadata(self):
         f = self.f
@@ -403,6 +403,15 @@ class CorpusManager:
                 unique.append(seed)
         del seen  # free intermediate seed-hash set
 
+        # Irreplaceable seeds (loaded from corpus/irreplaceable/) are never pruned.
+        # Separate them from the unique pool before minimization; re-add after.
+        irreplaceable_seeds: list[bytes] = []
+        if f.irreplaceable_hashes:
+            for seed in unique[:]:  # iterate copy, mutate original
+                if hash_data(seed) in f.irreplaceable_hashes:
+                    irreplaceable_seeds.append(seed)
+                    unique.remove(seed)
+
         stale_count = 0
         for seed in unique:
             meta = f.seed_meta.get(seed)
@@ -559,6 +568,28 @@ class CorpusManager:
                 keep = min(budget, len(scored))
                 unique = mandatory_seeds + [s for _, s in scored[:keep]]
             del scored  # free scored list after sorting
+
+        # Save set-cover mandatory seeds to irreplaceable/ so they survive
+        # future pruning cycles. Remove the original from seeds/ to avoid
+        # duplicates on disk.
+        if mandatory and f.corpus_dir:
+            for seed in unique:
+                if id(seed) in mandatory:
+                    h = hash_data(seed)
+                    if h not in f.irreplaceable_hashes:
+                        save_irreplaceable(
+                            seed, f.corpus_dir, f.seen_hashes,
+                            f.irreplaceable_hashes, f.bloom,
+                        )
+                        # Remove the original from seeds/ to avoid duplicate
+                        seeds_sub = f.corpus_dir / "seeds" / h[:2] / f"id_{h}"
+                        if seeds_sub.exists():
+                            seeds_sub.unlink()
+
+        # Re-add irreplaceable seeds that were set aside before minimization.
+        # They are never pruned.
+        if irreplaceable_seeds:
+            unique = unique + irreplaceable_seeds
 
         removed = len(f.corpus) - len(unique)
         if removed > 0:

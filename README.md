@@ -326,6 +326,7 @@ fuzzer-tool rank ./target -d corpus -n 10 --dump top_seeds
 | `fuzz` | Run coverage-guided fuzzing (default) |
 | `rank` | Rank corpus seeds by interestingness (edge coverage, rarity, subsumption) |
 | `minimize` | Minimize corpus by removing redundant inputs |
+| `sweep` | Linear corpus scan — replay every seed without mutations or scheduling (find missed crashes) |
 | `tmin` | Minimize a crash to smallest reproducer |
 | `replay` | Replay a crash input against the target |
 | `verify` | Re-run crashes with ASAN target to confirm memory bugs |
@@ -345,6 +346,22 @@ fuzzer-tool rank <target> -d <corpus> [-n TOP] [--dump PREFIX]
 | `-d DIR` | Corpus directory |
 | `-n N` | Number of top seeds to show (default 10) |
 | `--dump PREFIX` | Dump top seeds to files `PREFIX.0`, `PREFIX.1`, ... |
+
+### Sweep
+
+Linearly replay every seed in the corpus without mutations, scheduling, or minimization — finds crashes the target would have triggered on corpus seeds but that were missed during normal fuzzing.
+
+```bash
+fuzzer-tool sweep <target> -d <corpus> [-c]
+```
+
+| Flag | Description |
+|------|-------------|
+| `-d DIR` | Corpus directory (reads from `seeds/` and `irreplaceable/`) |
+| `-c` | Enable coverage tracking (not used for scheduling, just reporting) |
+| `--timeout MS` | Per-seed timeout in milliseconds (default: same as fuzz mode) |
+
+No mutations, no scheduler, no coverage-guided feedback loop. Each seed is executed once as-is.
 
 ### Estimate Crash ETA
 
@@ -419,6 +436,9 @@ Keeps one Python subprocess alive. Fork-per-call with `os.setsid()` for process 
 ### ASAN support
 Automatically detects ASAN-instrumented targets by checking for `__asan_init` symbols. Falls back from `--inprocess-direct` to subprocess mode when ASAN is detected (ASAN calls `_exit()` which kills in-process targets).
 
+### Abort override
+The AFL shim (`afl_shim.c`) overrides `abort()` with `__attribute__((visibility("hidden")))` so calls from static archives and `.so` libraries (e.g., FFmpeg's `av_assert0`) return instead of crashing the fuzzer. After the override returns, execution resumes normally and ASAN detects the actual violation at the true bug site. Works in both executable and `.so` builds.
+
 ### SHM resize in inprocess mode
 When collision risk exceeds the threshold, the bitmap SHM is resized. In inprocess mode, this patches the target's `__afl_area` pointer to the new SHM segment and invalidates the cached SHM attachment, so coverage writes don't go to freed memory. The target's compiled-in `__afl_map_mask` is not updated (static variable), so the target underutilizes the new bitmap — but writes remain in-bounds.
 
@@ -435,9 +455,15 @@ fuzzer-tool minimize ./target -d corpus -c
 fuzzer-tool minimize ./target -d corpus -c --rate-distortion --target-frac 0.95
 ```
 
+### Irreplaceable Seeds
+
+Seeds placed in `corpus/irreplaceable/` are never pruned by minimization. When the minimizer's set-cover identifies mandatory (keystone) seeds that uniquely cover edges, those seeds are promoted to irreplaceable — copied to `irreplaceable/` and the original in `seeds/` is removed. On subsequent runs they are loaded alongside regular seeds and bypass all pruning logic.
+
+Use `corpus/irreplaceable/` for seeds that must always be in the active set (e.g., known reproducers, structural format seeds).
+
 ## Test Suite
 
-2398+ tests covering all modules, including 67 regression tests for historical bugfixes (`tests/test_regressions.py`). Run with:
+2479+ tests covering all modules, including regression tests for historical bugfixes (`tests/test_regressions.py`) and dedicated tests for abort() override, sweep subcommand, and irreplaceable seeds. Run with:
 
 ```bash
 pip install -e ".[dev]"

@@ -39,6 +39,7 @@ class MockFuzzer:
         self._stop_requested = False
         self._use_bayesian = False
         self._seed_quality = None
+        self.irreplaceable_hashes: set[str] = set()
         # Attributes needed by save_to_corpus
         self.seen_hashes: set[str] = set()
         self.bloom = None

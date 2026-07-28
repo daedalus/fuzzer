@@ -136,7 +136,7 @@ class TestDeltaSaveLoad:
         save_to_corpus(b, tmp_path, seen, parent=a, lineage_depth=0)
         save_to_corpus(c, tmp_path, seen, parent=b, lineage_depth=1)
 
-        corpus, loaded_seen = load_corpus(tmp_path)
+        corpus, loaded_seen, _ = load_corpus(tmp_path)
         assert len(corpus) == 3
         assert a in corpus
         assert b in corpus
@@ -148,7 +148,7 @@ class TestDeltaSaveLoad:
         bloom = BloomFilter(capacity=100)
         save_to_corpus(a, tmp_path, seen, bloom)
 
-        loaded_corpus, loaded_seen = load_corpus(tmp_path, bloom=bloom)
+        loaded_corpus, loaded_seen, _ = load_corpus(tmp_path, bloom=bloom)
         assert len(loaded_corpus) == 1
         assert hash_data(a) in loaded_seen
 
@@ -163,7 +163,7 @@ class TestDeltaSaveLoad:
         deltas_dir.mkdir(parents=True, exist_ok=True)
         (deltas_dir / f"delta_{h}.json").write_text("not valid json {{{")
 
-        corpus, _ = load_corpus(tmp_path)
+        corpus, _, _ = load_corpus(tmp_path)
         assert len(corpus) == 1  # only the full file
 
     def test_legacy_files_still_work(self, tmp_path):
@@ -172,7 +172,7 @@ class TestDeltaSaveLoad:
         seeds_dir.mkdir(parents=True, exist_ok=True)
         (seeds_dir / "f1").write_bytes(b"legacy1")
         (seeds_dir / "f2").write_bytes(b"legacy2")
-        corpus, seen = load_corpus(tmp_path)
+        corpus, seen, _ = load_corpus(tmp_path)
         assert len(corpus) == 2
         assert b"legacy1" in corpus
         assert b"legacy2" in corpus

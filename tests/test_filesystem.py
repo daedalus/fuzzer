@@ -28,7 +28,7 @@ class TestHashData:
 
 class TestLoadCorpus:
     def test_empty_dir(self, tmp_path):
-        corpus, seen = load_corpus(tmp_path)
+        corpus, seen, _ = load_corpus(tmp_path)
         assert corpus == [b"AAAAAAAA"]
         assert seen == set()
 
@@ -37,7 +37,7 @@ class TestLoadCorpus:
         seeds.mkdir()
         (seeds / "id_aaa").write_bytes(b"alpha")
         (seeds / "id_bbb").write_bytes(b"beta")
-        corpus, seen = load_corpus(tmp_path)
+        corpus, seen, _ = load_corpus(tmp_path)
         assert len(corpus) == 2
         assert b"alpha" in corpus
         assert b"beta" in corpus
@@ -49,7 +49,7 @@ class TestLoadCorpus:
         seeds.mkdir()
         (seeds / "f1").write_bytes(b"same")
         (seeds / "f2").write_bytes(b"same")
-        corpus, seen = load_corpus(tmp_path)
+        corpus, seen, _ = load_corpus(tmp_path)
         assert len(corpus) == 1
         assert len(seen) == 1
 
@@ -62,7 +62,7 @@ class TestLoadCorpus:
         assert bloom.query(_h(b"data"))
 
     def test_nonexistent_dir(self, tmp_path):
-        corpus, seen = load_corpus(tmp_path / "nope")
+        corpus, seen, _ = load_corpus(tmp_path / "nope")
         assert corpus == [b"AAAAAAAA"]
         assert seen == set()
 
@@ -71,7 +71,7 @@ class TestLoadCorpus:
         seeds.mkdir()
         (seeds / "subdir").mkdir()
         (seeds / "real").write_bytes(b"real")
-        corpus, seen = load_corpus(tmp_path)
+        corpus, seen, _ = load_corpus(tmp_path)
         assert len(corpus) == 1
         assert b"real" in corpus
 

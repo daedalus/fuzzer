@@ -758,7 +758,7 @@ class TestTrackerJsonNotLoadedAsSeed:
             seed_file = corpus_dir / "id_abc123"
             seed_file.write_bytes(b"real seed data")
             # load_corpus returns (list[bytes], set[str])
-            seeds, _ = load_corpus(corpus_dir)
+            seeds, _, _ = load_corpus(corpus_dir)
             # The json file content should not be in the loaded seeds
             json_content = b'{"edges": []}'
             assert json_content not in seeds, "Tracker JSON file content loaded as corpus seed"

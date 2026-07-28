@@ -229,7 +229,7 @@ static void __afl_auto_init(void) {
 #else
 #pragma GCC diagnostic ignored "-Wreturn-type"
 #endif
-void abort(void) {
+__attribute__((visibility("hidden"))) void abort(void) {
     static const char msg[] = "[shim] abort() intercepted — continuing\n";
     write(STDERR_FILENO, msg, sizeof(msg) - 1);
 }

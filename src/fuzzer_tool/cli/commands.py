@@ -686,7 +686,7 @@ def cmd_rank(args):
     edge_path = corpus_dir / "edge_tracker.json"
 
     bloom = BloomFilter(capacity=100_000)
-    corpus, seen_hashes = load_corpus(corpus_dir, bloom)
+    corpus, seen_hashes, irreplaceable_hashes = load_corpus(corpus_dir, bloom)
     if not corpus:
         print("[-] Empty corpus", file=sys.stderr)
         return 1
@@ -824,7 +824,7 @@ def cmd_ppmd(args):
 
     bloom = BloomFilter(capacity=100_000)
     bloom.init_fuzzy(max_recent=200)
-    corpus, _ = load_corpus(corpus_dir, bloom)
+    corpus, _, _ = load_corpus(corpus_dir, bloom)
 
     if not corpus:
         print(f"No seeds found in {corpus_dir}")
@@ -986,6 +986,111 @@ def cmd_estimate(args):
     print(f"  Range: {eta.low:,} - {eta.high:,} execs")
     print(f"  Confidence: {eta.confidence}")
     print(f"  Reasoning: {eta.reasoning}")
+
+
+def cmd_sweep(args):
+    """Linearly scan corpus seeds for missed crashes.
+
+    Loads every seed from the corpus, runs it against the target without
+    mutations, scheduler, coverage tracking, or minification. Discovers
+    seeds that happen to crash the target — inputs added to the corpus
+    during fuzzing that triggered no coverage event but still crash.
+    """
+    _validate_target(args.target)
+
+    corpus_dir = Path(args.corpus)
+    if not corpus_dir.is_dir():
+        print(f"[-] Corpus dir not found: {args.corpus}", file=sys.stderr)
+        return 1
+
+    from fuzzer_tool.adapters.filesystem import hash_data, load_corpus
+
+    seeds, _, _ = load_corpus(corpus_dir, bloom=None, add_default=False)
+    if not seeds:
+        print("[-] No seeds found in corpus")
+        return 0
+
+    crashes_dir = Path(args.crashes) if args.crashes else corpus_dir / "crashes"
+    crashes_dir.mkdir(parents=True, exist_ok=True)
+
+    from fuzzer_tool.adapters.process import (
+        SIGNAL_CRASH_CODES,
+        run_target_file,
+        run_target_stdin,
+    )
+    from fuzzer_tool.core.sanitizer import SanitizerReport
+
+    found = 0
+    total = len(seeds)
+    seeds.sort(key=lambda s: hash_data(s))
+
+    for i, seed in enumerate(seeds):
+        if (i + 1) % 100 == 0 or i == 0:
+            print(f"\r[*] Sweeping seed {i+1}/{total}...", end="", file=sys.stderr)
+            sys.stderr.flush()
+
+        try:
+            if args.file_mode:
+                tmp_dir = Path("/tmp") / f"sweep_{os.getpid()}"
+                tmp_dir.mkdir(parents=True, exist_ok=True)
+                try:
+                    returncode, stderr, _ = run_target_file(
+                        target=args.target,
+                        data=seed,
+                        timeout=args.timeout,
+                        tmp_dir=str(tmp_dir),
+                        target_args=args.target_args or [],
+                        env=os.environ.copy(),
+                    )
+                finally:
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
+            else:
+                returncode, stderr, _ = run_target_stdin(
+                    target=args.target,
+                    data=seed,
+                    timeout=args.timeout,
+                    env=os.environ.copy(),
+                )
+        except Exception as e:
+            print(f"\n  [!] Error on seed {i+1}/{total}: {e}", file=sys.stderr)
+            continue
+
+        # Check for crash
+        report = SanitizerReport.parse(stderr)
+        is_crash = bool(report and report.is_valid())
+        if not is_crash:
+            is_crash = abs(returncode) in SIGNAL_CRASH_CODES
+        if not is_crash:
+            is_crash = returncode < 0
+        if not is_crash:
+            is_crash = any(
+                sig in stderr
+                for sig in [
+                    "SIGSEGV",
+                    "SIGABRT",
+                    "Segmentation fault",
+                    "Aborted",
+                ]
+            )
+
+        if is_crash:
+            found += 1
+            h = hash_data(seed)
+            sig = (
+                report.signature
+                if report and report.is_valid()
+                else f"signal{abs(returncode)}"
+            )
+            crash_name = f"crash_{h[:12]}_{sig}"
+            crash_path = crashes_dir / crash_name
+            if not crash_path.exists():
+                crash_path.write_bytes(seed)
+            print(
+                f"\n  [+] Crash: rc={returncode}, hash={h[:12]} -> {crash_name}"
+            )
+
+    print(f"\n[*] Sweep complete: {total} seeds processed, {found} crashes found")
+    return 0
 
 
 def main() -> int:
@@ -1682,6 +1787,34 @@ def main() -> int:
         help="Show top N most/least novel seeds (default: 10)",
     )
     ppmd_parser.set_defaults(func=cmd_ppmd)
+
+    # --- sweep ---
+    sweep_parser = subparsers.add_parser(
+        "sweep", help="Linearly scan corpus for missed crashes"
+    )
+    sweep_parser.add_argument("target", help="Path to target binary")
+    sweep_parser.add_argument(
+        "-d", "--corpus", required=True, help="Corpus directory"
+    )
+    sweep_parser.add_argument(
+        "-o", "--crashes", default=None, help="Crashes output directory"
+    )
+    sweep_parser.add_argument(
+        "-t", "--timeout", type=float, default=1, help="Timeout per seed in seconds"
+    )
+    sweep_parser.add_argument(
+        "-F",
+        "--file-mode",
+        action="store_true",
+        help="Write input to temp file instead of stdin",
+    )
+    sweep_parser.add_argument(
+        "-A",
+        "--target-args",
+        nargs=argparse.REMAINDER,
+        help="Target arguments ({file} placeholder)",
+    )
+    sweep_parser.set_defaults(func=cmd_sweep)
 
     args = parser.parse_args()
 

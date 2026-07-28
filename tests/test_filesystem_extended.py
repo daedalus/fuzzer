@@ -73,7 +73,7 @@ class TestLoadCorpusDelta:
         seeds.mkdir()
         (seeds / "a.bin").write_bytes(b"AAAA")
         (seeds / "b.bin").write_bytes(b"BBBB")
-        corpus, seen = load_corpus(tmp_path)
+        corpus, seen, _ = load_corpus(tmp_path)
         assert len(corpus) == 2
         assert b"AAAA" in corpus
         assert b"BBBB" in corpus
@@ -95,7 +95,7 @@ class TestLoadCorpusDelta:
         delta_file = deltas_dir / f"delta_{child_hash}.json"
         delta_file.write_text(json.dumps({"parent": parent_hash, "diff": d}))
 
-        corpus, seen = load_corpus(tmp_path)
+        corpus, seen, _ = load_corpus(tmp_path)
         assert len(corpus) == 2
         assert child in corpus
 
@@ -115,7 +115,7 @@ class TestLoadCorpusDelta:
         delta_file = deltas_dir / f"delta_{child_hash}.json"
         delta_file.write_text(json.dumps({"parent": parent_hash, "diff": d}))
 
-        corpus, seen = load_corpus(tmp_path, bloom=bloom)
+        corpus, seen, _ = load_corpus(tmp_path, bloom=bloom)
         assert len(corpus) == 2
 
     def test_corrupt_delta_skipped(self, tmp_path):
@@ -131,7 +131,7 @@ class TestLoadCorpusDelta:
         delta_file = deltas_dir / f"delta_{child_hash}.json"
         delta_file.write_text("not valid json {{{")
 
-        corpus, seen = load_corpus(tmp_path)
+        corpus, seen, _ = load_corpus(tmp_path)
         assert len(corpus) == 1  # only the parent
 
     def test_missing_parent_skipped(self, tmp_path):
@@ -143,11 +143,11 @@ class TestLoadCorpusDelta:
         delta_file = deltas_dir / "delta_deadbeef00000001.json"
         delta_file.write_text(json.dumps({"parent": "nope", "diff": [[0, 65]]}))
 
-        corpus, seen = load_corpus(tmp_path)
+        corpus, seen, _ = load_corpus(tmp_path)
         assert len(corpus) == 1  # default entry
 
     def test_empty_corpus_gets_default(self, tmp_path):
-        corpus, seen = load_corpus(tmp_path)
+        corpus, seen, _ = load_corpus(tmp_path)
         assert len(corpus) == 1
         assert corpus[0] == b"AAAAAAAA"
 

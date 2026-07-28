@@ -168,39 +168,54 @@ def hash_data_crypto(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()[:16]
 
 
-def load_corpus(corpus_dir: Path, bloom: BloomFilter | None = None) -> tuple[list[bytes], set[str]]:
-    """Load existing corpus from corpus_dir/seeds/.
+def load_corpus(
+    corpus_dir: Path,
+    bloom: BloomFilter | None = None,
+    add_default: bool = True,
+    load_irreplaceable: bool = True,
+) -> tuple[list[bytes], set[str], set[str]]:
+    """Load existing corpus from corpus_dir/seeds/ and corpus_dir/irreplaceable/.
 
     Handles both full files (id_*.*) and delta-encoded files (delta_*.json).
-    Delta files are reconstructed from their parent chain.
+    Delta files are reconstructed from their parent chain. Irreplaceable
+    seeds are loaded from corpus/irreplaceable/ and tracked separately so
+    they can be excluded from corpus pruning.
 
     Args:
         corpus_dir: Path to corpus directory (seeds live in seeds/ subdir).
         bloom: Optional bloom filter to populate for fast dedup.
+        add_default: If True and corpus is empty, add b"AAAAAAAA" as a
+            synthetic default seed. Set False for commands that need to
+            reflect the actual on-disk corpus state (e.g. sweep).
+        load_irreplaceable: If True, also load seeds from corpus/irreplaceable/.
 
     Returns:
-        Tuple of (corpus list, seen hashes set).
+        Tuple of (corpus list, seen hashes set, irreplaceable hashes set).
     """
     corpus: list[bytes] = []
     seen: set[str] = set()
+    irreplaceable_hashes: set[str] = set()
     seeds_dir = corpus_dir / "seeds"
+    irreplaceable_dir = corpus_dir / "irreplaceable"
     deltas_dir = corpus_dir / "deltas"
 
     # First pass: load all full files and build hash lookup for delta reconstruction
     full_files: dict[str, bytes] = {}
     delta_files: list[tuple[str, Path]] = []
 
-    if seeds_dir.exists():
-        # Read from seeds/ directly (legacy flat layout)
-        for f in seeds_dir.iterdir():
+    def _load_from_dir(base_dir: Path, mark_irreplaceable: bool = False) -> None:
+        """Read full files from base_dir and its two-digit subdirectories."""
+        if not base_dir.exists():
+            return
+        for f in base_dir.iterdir():
             if not f.is_file():
                 continue
-            # Full file: id_*, legacy names, etc.
             data = f.read_bytes()
             h = hash_data(data)
             full_files[h] = data
-        # Also read from two-digit subdirectories (new layout)
-        for sub in seeds_dir.iterdir():
+            if mark_irreplaceable:
+                irreplaceable_hashes.add(h)
+        for sub in base_dir.iterdir():
             if sub.is_dir() and len(sub.name) == 2 and sub.name.isalnum():
                 for f in sub.iterdir():
                     if not f.is_file():
@@ -209,6 +224,14 @@ def load_corpus(corpus_dir: Path, bloom: BloomFilter | None = None) -> tuple[lis
                         data = f.read_bytes()
                         h = hash_data(data)
                         full_files[h] = data
+                        if mark_irreplaceable:
+                            irreplaceable_hashes.add(h)
+
+    if seeds_dir.exists():
+        _load_from_dir(seeds_dir)
+
+    if load_irreplaceable and irreplaceable_dir.exists():
+        _load_from_dir(irreplaceable_dir, mark_irreplaceable=True)
 
     if deltas_dir.exists():
         for f in deltas_dir.iterdir():
@@ -262,9 +285,9 @@ def load_corpus(corpus_dir: Path, bloom: BloomFilter | None = None) -> tuple[lis
                     bloom.add(h)
                 corpus.append(resolved[h])
 
-    if not corpus:
+    if not corpus and add_default:
         corpus.append(b"AAAAAAAA")
-    return corpus, seen
+    return corpus, seen, irreplaceable_hashes
 
 
 def save_to_corpus(
@@ -343,6 +366,53 @@ def save_to_corpus(
         sub_dir.mkdir(parents=True, exist_ok=True)
         corpus_file = sub_dir / f"id_{h}"
         corpus_file.write_bytes(data)
+    return True
+
+
+def save_irreplaceable(
+    data: bytes,
+    corpus_dir: Path,
+    seen_hashes: set[str],
+    irreplaceable_hashes: set[str],
+    bloom: BloomFilter | None = None,
+) -> bool:
+    """Save input to corpus/irreplaceable/ and mark as irreplaceable.
+
+    Irreplaceable seeds are never pruned by auto_minimize_corpus().
+    Saved to corpus/irreplaceable/ using the same two-digit hash subdirectory layout.
+
+    Args:
+        data: Input bytes to save.
+        corpus_dir: Path to corpus directory.
+        seen_hashes: Set of already-seen hashes (updated with new hash).
+        irreplaceable_hashes: Set of irreplaceable hashes (updated with new hash).
+        bloom: Optional bloom filter for fast pre-check.
+
+    Returns:
+        True if saved (new), False if duplicate.
+    """
+    h = hash_data(data)
+    if bloom is not None:
+        if not bloom.query(h):
+            bloom.add(h)
+        elif h in seen_hashes:
+            return False
+        else:
+            bloom.add(h)
+    else:
+        if h in seen_hashes:
+            return False
+    seen_hashes.add(h)
+    irreplaceable_hashes.add(h)
+    if len(seen_hashes) > SEEN_HASHES_MAX:
+        seen_hashes.clear()
+
+    irep_dir = corpus_dir / "irreplaceable"
+    irep_dir.mkdir(parents=True, exist_ok=True)
+    sub_dir = irep_dir / h[:2]
+    sub_dir.mkdir(parents=True, exist_ok=True)
+    corpus_file = sub_dir / f"id_{h}"
+    corpus_file.write_bytes(data)
     return True
 
 
