@@ -289,3 +289,68 @@ class TestFMMCohesionGate:
             f"Cohesion gate increased worst-case error "
             f"({max_err_gated:.6f} >= {max_err_ungated:.6f})"
         )
+
+    def test_regression_high_cohesion_gate_does_not_trigger(self):
+        """When far-cluster cohesion is high, the gate must not trigger.
+
+        A far cluster whose members share a large common base plus small
+        per-member query-slices has high cohesion (0.86-0.90), so the
+        cohesion gate (threshold=0.3) never engages.  The centroid
+        approximation overestimates the true pairwise density by ~2.4x
+        because the union of far members has more overlap with the query
+        seed than any individual member.
+
+        Edge layout:
+          s0 (query):   edges 0-99                        → 100 edges
+          far_i:        common_base 1000-1079              → 80 edges (20 overlap s0)
+                        query_slice_i  (i*5..i*5+4)        →  5 edges (overlap s0, disjoint)
+                        private_i      (2000+i*10..+14)    →  5 edges (no overlap)
+                        total per member = 90 edges
+
+        J(far_i, far_j) = 80 / (90+90-80) = 0.80
+        J(far_i, union)  = 90 / (80+8*5+8*5) = 90/160 = 0.562
+        Cohesion ≈ 0.562 > 0.3  → gate does not trigger.
+
+        True J(s0, far_i) = 25 / (100+90-25) = 25/165 ≈ 0.152
+        Approx J(s0, union) = (20+40) / (100+160-60) = 60/200 = 0.300
+        Overestimate factor ≈ 0.300 / 0.152 ≈ 1.97x
+        """
+        seeds: dict[str, set[int]] = {}
+        seeds["s0"] = set(range(100))
+        common_base = set(range(1000, 1080))
+        for i in range(8):
+            query_slice = set(range(i * 5, (i + 1) * 5))
+            private = set(range(2000 + i * 10, 2000 + i * 10 + 5))
+            seeds[f"far_{i}"] = common_base | query_slice | private
+
+        seed_keys = list(seeds.keys())
+        mh = self._register_seeds_to_minhash(seeds, num_bands=16)
+
+        naive = _naive_densities(seed_keys, mh)
+
+        fmm_gated, clusters, _stc = compute_corpus_overlap_density(
+            seed_keys, mh, min_jaccard=0.25, cohesion_threshold=0.3
+        )
+
+        fmm_ungated, _clusters2, _stc2 = compute_corpus_overlap_density(
+            seed_keys, mh, min_jaccard=0.25, cohesion_threshold=0.0
+        )
+
+        for sk in seed_keys:
+            assert abs(fmm_gated[sk] - fmm_ungated[sk]) < 0.05, (
+                f"Cohesion gate appears to have triggered for {sk}: "
+                f"gated={fmm_gated[sk]:.4f}, ungated={fmm_ungated[sk]:.4f}"
+            )
+
+        true_s0 = naive["s0"]
+        approx_s0 = fmm_gated["s0"]
+
+        assert true_s0 > 0.01, (
+            f"Query seed has near-zero true density ({true_s0:.4f}); "
+            f"test construction may not reproduce the overestimate pathology."
+        )
+        overestimate_factor = approx_s0 / true_s0
+        assert overestimate_factor > 1.5, (
+            f"Expected significant overestimate (>1.5x) but got {overestimate_factor:.2f}x. "
+            f"True={true_s0:.4f}, Approx={approx_s0:.4f}"
+        )

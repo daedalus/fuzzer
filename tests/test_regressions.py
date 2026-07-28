@@ -1120,7 +1120,184 @@ class TestCoverageGrowthModelPlateau:
 
 
 # ============================================================================
-# T45: estimate_map_size hardcoded 4096 (commit aaa3d69)
+# T46: power scheduler _last_perf_score not wired into mutate (review finding)
+# ============================================================================
+
+
+class TestPowerSchedulerWiring:
+    """_last_perf_score from SeedScorer must scale mutations_per_input in mutate."""
+
+    def test_last_perf_score_scales_mutations(self):
+        from unittest.mock import MagicMock
+
+        from fuzzer_tool.services.operators import OperatorEngine
+
+        f = MagicMock()
+        f.mutations_per_input = 8
+        f._last_perf_score = 200.0
+        f._rand_pool.randint_list.return_value = [0]
+        f.dictionary = []
+        f._stall_recovery_active = False
+        f.max_len = 65536
+        f._frameshift = MagicMock()
+        f._frameshift.relations = []
+        f._op_dispatch = {"bit_flip": MagicMock(return_value=None)}
+        f._prev_bandit_op = None
+        f._last_ops_used = []
+        f._last_mopt_particles = []
+        f._meta_strategy = None
+        f.seed_meta = {}
+        f.markov_trained = False
+        f.mc = None
+        f.mc_bandit = False
+        f.mc_cem = False
+        f._use_replicator = False
+        f._replicator = None
+        f._use_mopt = False
+        f._mopt = None
+        f.grammar = None
+        f._cmplog = None
+        f.enable_regex_bomb = False
+        f._smt_solver = None
+        f._wfc_enabled = False
+        f._use_transfer_entropy = False
+        f._use_mi = False
+        f._sensitivity = MagicMock()
+        f._mi = MagicMock()
+        f._te = None
+        f._crash_mi = None
+        f._last_hamming_distance = -1
+
+        engine = OperatorEngine(f)
+
+        call_count = [0]
+
+        def counting_select_op(ops):
+            call_count[0] += 1
+            return ops[0]
+
+        engine.select_op = counting_select_op
+
+        engine.mutate(b"AAAA")
+
+        assert call_count[0] == 16, f"Expected 16 mutations (8 * 200/100), got {call_count[0]}"
+
+    def test_default_perf_score_no_scale(self):
+        from unittest.mock import MagicMock
+
+        from fuzzer_tool.services.operators import OperatorEngine
+
+        f = MagicMock()
+        f.mutations_per_input = 8
+        f._last_perf_score = 100.0
+        f._rand_pool.randint_list.return_value = [0]
+        f.dictionary = []
+        f._stall_recovery_active = False
+        f.max_len = 65536
+        f._frameshift = MagicMock()
+        f._frameshift.relations = []
+        f._op_dispatch = {"bit_flip": MagicMock(return_value=None)}
+        f._prev_bandit_op = None
+        f._last_ops_used = []
+        f._last_mopt_particles = []
+        f._meta_strategy = None
+        f.seed_meta = {}
+        f.markov_trained = False
+        f.mc = None
+        f.mc_bandit = False
+        f.mc_cem = False
+        f._use_replicator = False
+        f._replicator = None
+        f._use_mopt = False
+        f._mopt = None
+        f.grammar = None
+        f._cmplog = None
+        f.enable_regex_bomb = False
+        f._smt_solver = None
+        f._wfc_enabled = False
+        f._use_transfer_entropy = False
+        f._use_mi = False
+        f._sensitivity = MagicMock()
+        f._mi = MagicMock()
+        f._te = None
+        f._crash_mi = None
+        f._last_hamming_distance = -1
+
+        engine = OperatorEngine(f)
+
+        call_count = [0]
+
+        def counting_select_op(ops):
+            call_count[0] += 1
+            return ops[0]
+
+        engine.select_op = counting_select_op
+
+        engine.mutate(b"AAAA")
+
+        assert call_count[0] == 8, (
+            f"Expected 8 mutations (default 100.0 score), got {call_count[0]}"
+        )
+
+
+# ============================================================================
+# T47: BayesianEloTracker live dispatch (review finding)
+# ============================================================================
+
+
+class TestBayesianEloTrackerLiveDispatch:
+    """Fuzzer must instantiate BayesianEloTracker when elo=True."""
+
+    def test_elo_true_uses_bayesian_tracker(self):
+        from unittest.mock import patch
+
+        from fuzzer_tool.core.elo import BayesianEloTracker
+        from fuzzer_tool.services.fuzzer import Fuzzer
+
+        with (
+            patch("os.path.isfile", return_value=True),
+            patch("os.access", return_value=True),
+        ):
+            f = Fuzzer(
+                target="/bin/true",
+                corpus_dir="/tmp/fuzz_test_corpus",
+                crashes_dir="/tmp/fuzz_test_crashes",
+                max_len=256,
+                timeout=1,
+                mutations_per_input=2,
+                elo=True,
+            )
+
+        assert isinstance(f._elo, BayesianEloTracker), (
+            f"Expected BayesianEloTracker when elo=True, got {type(f._elo).__name__}"
+        )
+
+    def test_elo_false_has_no_tracker(self):
+        from unittest.mock import patch
+
+        from fuzzer_tool.services.fuzzer import Fuzzer
+
+        with (
+            patch("os.path.isfile", return_value=True),
+            patch("os.access", return_value=True),
+        ):
+            f = Fuzzer(
+                target="/bin/true",
+                corpus_dir="/tmp/fuzz_test_corpus",
+                crashes_dir="/tmp/fuzz_test_crashes",
+                max_len=256,
+                timeout=1,
+                mutations_per_input=2,
+                elo=False,
+            )
+
+        assert f._elo is None, (
+            f"Expected no Elo tracker when elo=False, got {type(f._elo).__name__}"
+        )
+
+
+# ============================================================================
+# T48: estimate_map_size hardcoded 4096 (commit aaa3d69)
 # ============================================================================
 
 
