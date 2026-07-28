@@ -269,8 +269,11 @@ class TestFMMCohesionGate:
 
         # FMM with both gates disabled (unconditional centroid approximation)
         fmm_ungated, _clusters2, _stc2 = compute_corpus_overlap_density(
-            seed_keys, mh, min_jaccard=0.25,
-            cohesion_threshold=0.0, proxy_error_threshold=1.0,
+            seed_keys,
+            mh,
+            min_jaccard=0.25,
+            cohesion_threshold=0.0,
+            proxy_error_threshold=1.0,
         )
         errors_ungated = [abs(naive[sk] - fmm_ungated[sk]) for sk in seed_keys]
         max_err_ungated = max(errors_ungated)
@@ -338,8 +341,11 @@ class TestFMMCohesionGate:
         )
 
         fmm_ungated, _clusters2, _stc2 = compute_corpus_overlap_density(
-            seed_keys, mh, min_jaccard=0.25, cohesion_threshold=0.0,
-            proxy_error_threshold=1.0  # disable Phase 2 to match old behavior
+            seed_keys,
+            mh,
+            min_jaccard=0.25,
+            cohesion_threshold=0.0,
+            proxy_error_threshold=1.0,  # disable Phase 2 to match old behavior
         )
 
         # The query seed must have gated != ungated: Phase 2 triggers for s0
@@ -410,15 +416,20 @@ class TestFMMCohesionGate:
 
         # Strict Phase 2: any overestimate triggers fallback
         fmm_strict, _c, _s = compute_corpus_overlap_density(
-            seed_keys, mh, min_jaccard=0.25,
-            cohesion_threshold=0.3, proxy_error_threshold=0.0,
+            seed_keys,
+            mh,
+            min_jaccard=0.25,
+            cohesion_threshold=0.3,
+            proxy_error_threshold=0.0,
         )
         errors_strict = [abs(naive[sk] - fmm_strict[sk]) for sk in seed_keys]
         max_err_strict = max(errors_strict)
 
         # Loose Phase 2: allows overestimate (default)
         fmm_default, _c2, _s2 = compute_corpus_overlap_density(
-            seed_keys, mh, min_jaccard=0.25,
+            seed_keys,
+            mh,
+            min_jaccard=0.25,
             cohesion_threshold=0.3,
         )
         errors_default = [abs(naive[sk] - fmm_default[sk]) for sk in seed_keys]
@@ -444,12 +455,17 @@ class TestFMMCohesionGate:
 
         # Old behavior: no Phase 2 (simulated via proxy_error_threshold=1.0)
         fmm_phase1_only, _c1, _s1 = compute_corpus_overlap_density(
-            seed_keys, et._minhash, min_jaccard=0.25,
-            cohesion_threshold=0.3, proxy_error_threshold=1.0,
+            seed_keys,
+            et._minhash,
+            min_jaccard=0.25,
+            cohesion_threshold=0.3,
+            proxy_error_threshold=1.0,
         )
         # New behavior: Phase 2 active with default threshold
         fmm_two_phase, _c2, _s2 = compute_corpus_overlap_density(
-            seed_keys, et._minhash, min_jaccard=0.25,
+            seed_keys,
+            et._minhash,
+            min_jaccard=0.25,
             cohesion_threshold=0.3,
         )
 

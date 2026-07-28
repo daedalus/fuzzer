@@ -789,7 +789,9 @@ class OperatorEngine:
                 return bytearray(splice_diff_located(a, b, rng=rng)[: self.f.max_len])
             others = [c for c in self.f.corpus if c is not data]
             if others:
-                return bytearray(splice_diff_located(bytes(buf), rng.choice(others), rng=rng)[: self.f.max_len])
+                return bytearray(
+                    splice_diff_located(bytes(buf), rng.choice(others), rng=rng)[: self.f.max_len]
+                )
 
     def _op_radamsa_num(self, buf, _byte_idx, data):
         """Radamsa-style number mutation on a random byte."""
@@ -1531,7 +1533,11 @@ class OperatorEngine:
             f._prev_bandit_op = op
             f._last_mopt_particles.append(None)
         elif strategy == "cem" and f.mc and f.mc_cem:
-            op = f.mc.select_op(ops, prev_op=f._prev_bandit_op) if f.mc_bandit else f._rand_pool.choice(ops)
+            op = (
+                f.mc.select_op(ops, prev_op=f._prev_bandit_op)
+                if f.mc_bandit
+                else f._rand_pool.choice(ops)
+            )
             if f.mc_bandit:
                 f._prev_bandit_op = op
             f._last_mopt_particles.append(None)

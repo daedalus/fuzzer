@@ -32,7 +32,12 @@ import shutil
 import time
 from pathlib import Path
 
-from fuzzer_tool.adapters.filesystem import load_corpus, save_crash, save_irreplaceable, save_to_corpus
+from fuzzer_tool.adapters.filesystem import (
+    load_corpus,
+    save_crash,
+    save_irreplaceable,
+    save_to_corpus,
+)
 
 log = logging.getLogger(__name__)
 
@@ -285,7 +290,7 @@ class CorpusManager:
             getattr(f, "_invalidate_seed_key_cache", lambda: None)()
             f.seed_meta[data] = {
                 "fuzz_count": 0,
-                "coverage_edges": 0,
+                "coverage_edges": 0,  # will update below from edge tracker
                 "momentum": 0.0,
                 "edge_bitmap": bytearray(0),
                 "redqueen_offsets": [],
@@ -293,6 +298,14 @@ class CorpusManager:
                 "lineage_depth": parent_depth + 1 if parent else 0,
                 "hamming_distance": f._last_hamming_distance,
             }
+            # Propagate actual coverage_edges from EdgeTracker — when called
+            # from fuzz_one, the seed's edges were already recorded by
+            # record_edges before save_to_corpus.  For the parallel-sync path
+            # (no prior fuzz_one), edge_count stays 0, which is correct.
+            seed_key = self.seed_key(data)
+            edge_count = len(f._edge_tracker.seed_edges.get(seed_key, set()))
+            if edge_count > 0:
+                f.seed_meta[data]["coverage_edges"] = edge_count
             f.markov.train(data)
             f.markov_trained = f.markov.is_trained()
             if f.markov.snapshot_and_check_plateau():
@@ -318,7 +331,7 @@ class CorpusManager:
                         "(rising right tail — minimizing)",
                         seed_moments.skewness,
                     )
-                    self.auto_minimize_corpus()
+                    f._defer_minimize()
             if len(f._corpus_size_history) > 1000:
                 f._corpus_size_history = f._corpus_size_history[-500:]
             if f._corpus_secretary:
@@ -327,9 +340,9 @@ class CorpusManager:
                 stop, _reason = f._corpus_secretary.should_stop()
                 if stop:
                     log.info("Corpus secretary stopping: %s", _reason)
-                    self.auto_minimize_corpus()
+                    f._defer_minimize()
             if f.max_corpus > 0 and len(f.corpus) > f.max_corpus:
-                self.auto_minimize_corpus()
+                f._defer_minimize()
             if len(f._corpus_size_history) >= 100:
                 sorted_sizes = sorted(f._corpus_size_history)
                 p90 = sorted_sizes[-len(sorted_sizes) // 10]
@@ -411,6 +424,15 @@ class CorpusManager:
                 if hash_data(seed) in f.irreplaceable_hashes:
                     irreplaceable_seeds.append(seed)
                     unique.remove(seed)
+
+        # Fresh seeds (fuzz_count == 0) have never been picked by the seed picker.
+        # Exclude them from minimization — we don't know their value yet.
+        fresh_seeds: list[bytes] = []
+        for seed in unique[:]:  # iterate copy, mutate original
+            meta = f.seed_meta.get(seed)
+            if meta and meta["fuzz_count"] == 0:
+                fresh_seeds.append(seed)
+                unique.remove(seed)
 
         stale_count = 0
         for seed in unique:
@@ -578,13 +600,21 @@ class CorpusManager:
                     h = hash_data(seed)
                     if h not in f.irreplaceable_hashes:
                         save_irreplaceable(
-                            seed, f.corpus_dir, f.seen_hashes,
-                            f.irreplaceable_hashes, f.bloom,
+                            seed,
+                            f.corpus_dir,
+                            f.seen_hashes,
+                            f.irreplaceable_hashes,
+                            f.bloom,
                         )
                         # Remove the original from seeds/ to avoid duplicate
                         seeds_sub = f.corpus_dir / "seeds" / h[:2] / f"id_{h}"
                         if seeds_sub.exists():
                             seeds_sub.unlink()
+
+        # Re-add fresh seeds that were set aside before minimization.
+        # They haven't been fuzzed yet and need a chance to prove their value.
+        if fresh_seeds:
+            unique = fresh_seeds + unique
 
         # Re-add irreplaceable seeds that were set aside before minimization.
         # They are never pruned.

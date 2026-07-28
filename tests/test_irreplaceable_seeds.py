@@ -162,8 +162,7 @@ class TestIrreplaceableSeeds:
         assert seed_irr in f.corpus, "Irreplaceable seed should survive"
         # At least one non-irreplaceable seed was pruned
         assert len(f.corpus) <= 2, (
-            f"Expected at most 2 seeds (1 irreplaceable + 1 non-irreplaceable), "
-            f"got {len(f.corpus)}"
+            f"Expected at most 2 seeds (1 irreplaceable + 1 non-irreplaceable), got {len(f.corpus)}"
         )
 
     def test_save_irreplaceable_creates_file_and_tracks_hash(self, tmp_path):

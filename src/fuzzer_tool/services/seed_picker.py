@@ -59,7 +59,9 @@ class SeedPicker:
             "bayesian": lambda: (
                 self._pick_bayesian_seed() if f.corpus and f._seed_quality else None
             ),
-            "markov": lambda: self._pick_markov_seed() if f.markov_generate and f.markov_trained else None,
+            "markov": lambda: (
+                self._pick_markov_seed() if f.markov_generate and f.markov_trained else None
+            ),
         }
         handler = strategy_map.get(strategy)
         return handler() if handler else None
@@ -592,9 +594,7 @@ class SeedPicker:
         return weights
 
     @staticmethod
-    def _pareto_front(
-        scores: list[tuple[float, ...]], window: int = 100
-    ) -> set[int]:
+    def _pareto_front(scores: list[tuple[float, ...]], window: int = 100) -> set[int]:
         n = len(scores)
         start = max(0, n - window)
         indices = list(range(start, n))
@@ -605,9 +605,7 @@ class SeedPicker:
 
         # 3D and below: O(N) rolling-max sweep (backward compatible path)
         if dims <= 3:
-            indices.sort(
-                key=lambda i: (-scores[i][0], -scores[i][1], -scores[i][2])
-            )
+            indices.sort(key=lambda i: (-scores[i][0], -scores[i][1], -scores[i][2]))
             result = []
             max_b = max_c = float("-inf")
             for i in indices:
@@ -629,11 +627,7 @@ class SeedPicker:
                     break
             if not dominated:
                 pareto = [
-                    j
-                    for j in pareto
-                    if not all(
-                        scores[i][d] >= scores[j][d] for d in range(dims)
-                    )
+                    j for j in pareto if not all(scores[i][d] >= scores[j][d] for d in range(dims))
                 ]
                 pareto.append(i)
         return set(pareto)

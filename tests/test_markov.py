@@ -380,8 +380,5 @@ class TestMarkovPruning:
             # Verify every surviving context either had count=100 or was
             # a low-count entry that happened to be kept (target=375, so
             # all 300 count=100 + 75 count=1 survive)
-            kept_high = sum(
-                1 for ctx, cnt in mc.transitions.items()
-                if cnt.get(0, 0) >= 100
-            )
+            kept_high = sum(1 for ctx, cnt in mc.transitions.items() if cnt.get(0, 0) >= 100)
             assert kept_high == 300, f"Expected 300 high-count, got {kept_high}"

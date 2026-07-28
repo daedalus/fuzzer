@@ -77,9 +77,7 @@ class TestSweepCommand:
             f"Sweep failed with rc={result.returncode}. "
             f"stdout: {result.stdout}\nstderr: {result.stderr}"
         )
-        assert len(crash_files) >= 1, (
-            f"Expected at least 1 crash file. stdout:\n{result.stdout}"
-        )
+        assert len(crash_files) >= 1, f"Expected at least 1 crash file. stdout:\n{result.stdout}"
         assert "3 seeds" in result.stdout or "3 seeds" in result.stderr or "3" in result.stdout, (
             f"Expected mention of 3 seeds. stdout:\n{result.stdout}"
         )

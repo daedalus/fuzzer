@@ -368,6 +368,7 @@ class Fuzzer:
         self.prune_corpus_max_memory = prune_corpus_max_memory
         self._last_memory_prune_exec = 0
         self._last_bloat_warn_exec = 0
+        self._minimize_pending = False
         self.coverage_report = Path(coverage_report) if coverage_report else None
         self.coverage_log = Path(coverage_log) if coverage_log else None
         if self.coverage_log:
@@ -1448,6 +1449,17 @@ class Fuzzer:
 
     def _auto_minimize_corpus(self):
         return self._corpus_manager.auto_minimize_corpus()
+
+    def _defer_minimize(self):
+        """Schedule auto_minimize_corpus for the next main-loop iteration.
+        This avoids pruning seeds that were just added but not yet fuzzed."""
+        self._minimize_pending = True
+
+    def _flush_pending_minimize(self):
+        """Run deferred minimize if one is pending."""
+        if self._minimize_pending:
+            self._minimize_pending = False
+            self._auto_minimize_corpus()
 
     def _deprioritize_near_duplicates(self):
         return self._corpus_manager.deprioritize_near_duplicates()
@@ -2543,6 +2555,15 @@ class Fuzzer:
                                 "Coverage data will be empty."
                             )
                 self.exec_count += 1
+
+                # Mark seed as having been executed (even though not via
+                # fuzz_one's mutate path).  This ensures loaded seeds don't
+                # all show fuzz_count=0 to auto_minimize_corpus.
+                meta = self.seed_meta.get(seed)
+                if meta is not None:
+                    meta["fuzz_count"] += 1
+                    self._cached_total_fuzz += 1
+
                 if self._is_crash(returncode, stderr):
                     self.crash_count += 1
                     self.save_crash(seed, returncode, stderr)
@@ -2627,6 +2648,10 @@ class Fuzzer:
                 # Cycle through targets in multi-target mode
                 if self.multi_targets:
                     self._select_next_target()
+                # Run any deferred minimization before picking the next seed.
+                # This gives freshly-added seeds one full iteration to be selected.
+                if self._minimize_pending:
+                    self._flush_pending_minimize()
                 seed = self._pick_seed()
                 # Compute seed-level energy multiplier for mutation budget
                 meta = self.seed_meta.get(seed)
@@ -2780,6 +2805,7 @@ class Fuzzer:
             self._length_tracker_path.write_text(
                 json.dumps(self._length_tracker.save(), separators=(",", ":"))
             )
+        self._flush_pending_minimize()
         self._save_state()
         if self.ga:
             ga_path = self.corpus_dir / "ga.json"

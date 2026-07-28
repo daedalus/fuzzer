@@ -17,6 +17,16 @@ def _seed_key(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()[:16]
 
 
+def _cm_seed_key(data: bytes) -> str:
+    """Mirror the CorpusManager.seed_key logic, respecting xxhash availability."""
+    try:
+        import xxhash  # noqa: F401
+
+        return xxhash.xxh64(data).hexdigest()[:16]
+    except ImportError:
+        return hashlib.sha256(data).hexdigest()[:16]
+
+
 class MockFuzzer:
     """Minimal fuzzer mock exposing only what auto_minimize_corpus touches."""
 
@@ -52,6 +62,17 @@ class MockFuzzer:
         _markov.is_trained = lambda: False
         _markov.snapshot_and_check_plateau = lambda: False
         self.markov = _markov
+        self._minimize_pending = False
+
+    def _defer_minimize(self):
+        self._minimize_pending = True
+
+    def _flush_pending_minimize(self):
+        if self._minimize_pending:
+            self._minimize_pending = False
+            # The real Fuzzer delegates to self._corpus_manager.auto_minimize_corpus();
+            # tests call the manager directly, so this is a no-op for the mock.
+            pass
 
 
 class TestCoverageVerification:
@@ -464,3 +485,190 @@ class TestKnapsackRetention:
         assert large in f.corpus, (
             "Large seed with highest score should be retained under count budget"
         )
+
+
+class TestFreshSeedProtection:
+    """Seeds with fuzz_count == 0 must survive minimization (Fix 1)."""
+
+    def test_fresh_seeds_not_pruned(self):
+        """A seed with fuzz_count=0 is excluded from the pruned pool."""
+        f = MockFuzzer(Path(tempfile.mkdtemp()))
+        mgr = CorpusManager(f)
+        et = f._edge_tracker
+        et.cumulative_edges = {1, 2, 3}
+
+        # Two seeds: one "mature" (fuzz_count=5, coverage_edges=3),
+        # one "fresh" (fuzz_count=0, coverage_edges=0).
+        mature = b"mature_seed_" + b"m" * 60
+        fresh = b"fresh_seed_" + b"f" * 60
+
+        f.corpus = [mature, fresh]
+        km = _seed_key(mature)
+        kf = _seed_key(fresh)
+        et.seed_edges[km] = {1, 2, 3}
+        et.seed_edges[kf] = {1}  # fresh seed has edges but were never fuzzed
+
+        f.seed_meta = {
+            mature: {
+                "fuzz_count": 5,
+                "coverage_edges": 3,
+                "added_at": 100.0,
+                "edge_bitmap": bytearray(0),
+                "redqueen_offsets": [],
+                "momentum": 0.0,
+                "lineage_depth": 0,
+                "hamming_distance": 0,
+            },
+            fresh: {
+                "fuzz_count": 0,
+                "coverage_edges": 0,
+                "added_at": 200.0,
+                "edge_bitmap": bytearray(0),
+                "redqueen_offsets": [],
+                "momentum": 0.0,
+                "lineage_depth": 0,
+                "hamming_distance": 0,
+            },
+        }
+
+        # Force target_size = 1 so mature seed alone would fit,
+        # but fresh must survive too.
+        f.max_corpus = 1
+        mgr.auto_minimize_corpus()
+
+        assert fresh in f.corpus, "Fresh seed (fuzz_count=0) was wrongly pruned"
+        assert mature in f.corpus, "Mature seed should also survive"
+
+    def test_fresh_seeds_re_added_after_pruning(self):
+        """Fresh seeds excluded before scoring are re-added after pruning."""
+        f = MockFuzzer(Path(tempfile.mkdtemp()))
+        mgr = CorpusManager(f)
+        et = f._edge_tracker
+        et.cumulative_edges = {1}
+
+        seed_a = b"seed_a_" + b"a" * 60
+        seed_b = b"seed_b_" + b"b" * 60  # fresh
+
+        f.corpus = [seed_a, seed_b]
+        sk_a = _seed_key(seed_a)
+        sk_b = _seed_key(seed_b)
+        et.seed_edges[sk_a] = {1}
+        et.seed_edges[sk_b] = {1}
+
+        f.seed_meta = {
+            seed_a: {
+                "fuzz_count": 50,
+                "coverage_edges": 0,
+                "added_at": 100.0,
+                "edge_bitmap": bytearray(0),
+                "redqueen_offsets": [],
+                "momentum": 0.0,
+                "lineage_depth": 0,
+                "hamming_distance": 0,
+            },
+            seed_b: {
+                "fuzz_count": 0,
+                "coverage_edges": 0,
+                "added_at": 200.0,
+                "edge_bitmap": bytearray(0),
+                "redqueen_offsets": [],
+                "momentum": 0.0,
+                "lineage_depth": 0,
+                "hamming_distance": 0,
+            },
+        }
+
+        # Force target_size = 1, seed_a has stale edges, seed_b is fresh
+        f.max_corpus = 1
+        mgr.auto_minimize_corpus()
+
+        assert seed_b in f.corpus, "Fresh seed must survive minimization"
+        # seed_a may or may not survive based on scoring; the test is that fresh survives.
+        assert len(f.corpus) >= 1
+
+
+class TestSaveToCorpusCoverageEdges:
+    """New seeds get actual coverage_edges from EdgeTracker (Fix 3)."""
+
+    def test_save_to_corpus_propagates_coverage_edges(self):
+        """After edges are recorded in EdgeTracker, save_to_corpus copies them to seed_meta."""
+        from fuzzer_tool.adapters.filesystem import hash_data
+
+        f = MockFuzzer(Path(tempfile.mkdtemp()))
+        mgr = CorpusManager(f)
+        et = f._edge_tracker
+        et.cumulative_edges = {10, 20, 30}
+
+        parent = b"parent_seed_" + b"p" * 60
+        f.corpus.append(parent)
+        f.seed_meta[parent] = {
+            "fuzz_count": 1,
+            "coverage_edges": 3,
+            "added_at": 100.0,
+            "edge_bitmap": bytearray(0),
+            "redqueen_offsets": [],
+            "momentum": 0.0,
+            "lineage_depth": 0,
+            "hamming_distance": 0,
+        }
+
+        # Simulate what fuzz_one does before save_to_corpus:
+        # record the child seed's edges in EdgeTracker.
+        child = b"child_seed_" + b"c" * 60
+        # Use _cm_seed_key to match CorpusManager.seed_key (may use xxhash).
+        child_key = _cm_seed_key(child)
+        et.record_edges(child_key, {10, 20})
+        et.cumulative_edges = {10, 20, 30}
+
+        # Now save to corpus (as fuzz_one would after recording edges).
+        mgr.save_to_corpus(child, parent=parent)
+
+        assert child in f.seed_meta, "Seed must have seed_meta entry"
+        assert f.seed_meta[child]["coverage_edges"] > 0, (
+            f"Expected coverage_edges > 0, got {f.seed_meta[child]['coverage_edges']}"
+        )
+
+    def test_save_to_corpus_zero_edges_when_not_recorded(self):
+        """When called from parallel-sync path (no prior record_edges), coverage_edges stays 0."""
+        f = MockFuzzer(Path(tempfile.mkdtemp()))
+        mgr = CorpusManager(f)
+        f._edge_tracker.cumulative_edges = set()
+
+        seed = b"synced_seed_" + b"s" * 60
+        mgr.save_to_corpus(seed)
+
+        assert seed in f.seed_meta
+        assert f.seed_meta[seed]["coverage_edges"] == 0, (
+            "Seed without prior record_edges should have 0 coverage_edges"
+        )
+
+
+class TestDeferredMinimize:
+    """auto_minimize_corpus is deferred when called from save_to_corpus (Fix 4)."""
+
+    def test_save_to_corpus_sets_pending_flag(self):
+        """save_to_corpus sets _minimize_pending instead of calling minimize directly."""
+        f = MockFuzzer(Path(tempfile.mkdtemp()))
+        mgr = CorpusManager(f)
+        f._edge_tracker.cumulative_edges = set()
+
+        assert not f._minimize_pending, "Flag should start False"
+
+        # Add enough seeds to trigger max_corpus limit
+        f.max_corpus = 1
+        seed1 = b"seed_one_" + b"x" * 60
+        mgr.save_to_corpus(seed1)
+        assert not f._minimize_pending, "Below limit, no minimize needed"
+
+        seed2 = b"seed_two_" + b"y" * 60
+        mgr.save_to_corpus(seed2)
+        assert f._minimize_pending, (
+            "save_to_corpus should set _minimize_pending when corpus exceeds max_corpus"
+        )
+
+    def test_flush_runs_minimize(self):
+        """_flush_pending_minimize clears the flag (real minimize is a no-op in mock)."""
+        f = MockFuzzer(Path(tempfile.mkdtemp()))
+        f._minimize_pending = True
+        f._flush_pending_minimize()
+        assert not f._minimize_pending, "flush must clear the flag"

@@ -94,6 +94,7 @@ def _worker_main(
     last_sync = time.time()
     try:
         while not stop_event.is_set():
+            fuzzer._flush_pending_minimize()  # deferred minimize from save_to_corpus in sync
             if iterations and i >= iterations:
                 break
 

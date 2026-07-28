@@ -722,7 +722,6 @@ class TreeMutator:
 # ---------------------------------------------------------------------------
 
 
-
 # Re-export PNG classes/functions from dedicated module for backwards compatibility
 from fuzzer_tool.core.png_mutations import (
     PngChunk,

@@ -626,10 +626,7 @@ class StatsReporter:
         mi = getattr(f, "_mi", None)
         if mi:
             try:
-                mi_str = (
-                    f" | mi: obs={mi.total_observations}"
-                    f" pos={len(mi.position_counts)}"
-                )
+                mi_str = f" | mi: obs={mi.total_observations} pos={len(mi.position_counts)}"
             except (AttributeError, TypeError):
                 pass
 
@@ -642,10 +639,7 @@ class StatsReporter:
                 ranking = elo.get_strategy_ranking()
                 top = ranking[0][0] if ranking else "?"
                 top_rating = ranking[0][1] if ranking else 0
-                elo_str = (
-                    f" | elo: meta={meta} seed={seed}"
-                    f" top={top}({top_rating:.0f})"
-                )
+                elo_str = f" | elo: meta={meta} seed={seed} top={top}({top_rating:.0f})"
             except (AttributeError, TypeError):
                 pass
 

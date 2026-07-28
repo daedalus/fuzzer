@@ -1026,7 +1026,7 @@ def cmd_sweep(args):
 
     for i, seed in enumerate(seeds):
         if (i + 1) % 100 == 0 or i == 0:
-            print(f"\r[*] Sweeping seed {i+1}/{total}...", end="", file=sys.stderr)
+            print(f"\r[*] Sweeping seed {i + 1}/{total}...", end="", file=sys.stderr)
             sys.stderr.flush()
 
         try:
@@ -1052,7 +1052,7 @@ def cmd_sweep(args):
                     env=os.environ.copy(),
                 )
         except Exception as e:
-            print(f"\n  [!] Error on seed {i+1}/{total}: {e}", file=sys.stderr)
+            print(f"\n  [!] Error on seed {i + 1}/{total}: {e}", file=sys.stderr)
             continue
 
         # Check for crash
@@ -1076,18 +1076,12 @@ def cmd_sweep(args):
         if is_crash:
             found += 1
             h = hash_data(seed)
-            sig = (
-                report.signature
-                if report and report.is_valid()
-                else f"signal{abs(returncode)}"
-            )
+            sig = report.signature if report and report.is_valid() else f"signal{abs(returncode)}"
             crash_name = f"crash_{h[:12]}_{sig}"
             crash_path = crashes_dir / crash_name
             if not crash_path.exists():
                 crash_path.write_bytes(seed)
-            print(
-                f"\n  [+] Crash: rc={returncode}, hash={h[:12]} -> {crash_name}"
-            )
+            print(f"\n  [+] Crash: rc={returncode}, hash={h[:12]} -> {crash_name}")
 
     print(f"\n[*] Sweep complete: {total} seeds processed, {found} crashes found")
     return 0
@@ -1789,16 +1783,10 @@ def main() -> int:
     ppmd_parser.set_defaults(func=cmd_ppmd)
 
     # --- sweep ---
-    sweep_parser = subparsers.add_parser(
-        "sweep", help="Linearly scan corpus for missed crashes"
-    )
+    sweep_parser = subparsers.add_parser("sweep", help="Linearly scan corpus for missed crashes")
     sweep_parser.add_argument("target", help="Path to target binary")
-    sweep_parser.add_argument(
-        "-d", "--corpus", required=True, help="Corpus directory"
-    )
-    sweep_parser.add_argument(
-        "-o", "--crashes", default=None, help="Crashes output directory"
-    )
+    sweep_parser.add_argument("-d", "--corpus", required=True, help="Corpus directory")
+    sweep_parser.add_argument("-o", "--crashes", default=None, help="Crashes output directory")
     sweep_parser.add_argument(
         "-t", "--timeout", type=float, default=1, help="Timeout per seed in seconds"
     )

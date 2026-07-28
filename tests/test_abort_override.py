@@ -84,10 +84,7 @@ class TestAbortOverride:
             timeout=2.0,
         )
 
-        assert rc == 0, (
-            f"Expected rc=0 (abort intercepted), got rc={rc}. "
-            f"stderr: {stderr}"
-        )
+        assert rc == 0, f"Expected rc=0 (abort intercepted), got rc={rc}. stderr: {stderr}"
         assert SHIM_STDERR_MSG in stderr.encode(), (
             f"Expected shim abort message in stderr, got: {stderr!r}"
         )
@@ -103,10 +100,7 @@ class TestAbortOverride:
         )
 
         # SIGABRT = signal 6, encoded as -6
-        assert rc == -6, (
-            f"Expected rc=-6 (SIGABRT), got rc={rc}. "
-            f"stderr: {stderr}"
-        )
+        assert rc == -6, f"Expected rc=-6 (SIGABRT), got rc={rc}. stderr: {stderr}"
         assert SHIM_STDERR_MSG not in stderr.encode(), (
             "Shim abort message should NOT appear without the shim"
         )
@@ -122,10 +116,7 @@ class TestAbortOverride:
             timeout=2.0,
         )
 
-        assert rc == -11, (
-            f"Expected rc=-11 (SIGSEGV), got rc={rc}. "
-            f"stderr: {stderr}"
-        )
+        assert rc == -11, f"Expected rc=-11 (SIGSEGV), got rc={rc}. stderr: {stderr}"
         # CRASHS should NOT trigger the abort message
         assert SHIM_STDERR_MSG not in stderr.encode(), (
             "SIGSEGV should not produce shim abort message"
@@ -162,6 +153,4 @@ class TestAbortOverride:
         )
 
         rc, _ = runner.run_one(b"CRASHA")
-        assert rc == 0, (
-            f"Expected rc=0 (abort intercepted via .so), got rc={rc}"
-        )
+        assert rc == 0, f"Expected rc=0 (abort intercepted via .so), got rc={rc}"
