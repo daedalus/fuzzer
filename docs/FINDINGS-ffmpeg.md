@@ -95,15 +95,46 @@ Three contributing factors:
 2. `avcodec_send_packet()` does not check `avctx->codec_type` before entering the decode loop — it assumes the caller validated the codec type.
 3. `decode_simple_internal()` uses `av_assert0(0)` (release-build assertion) instead of returning an error for unhandled codec types.
 
-### Recommended Fix
+### How to Fix
 
-One of:
+The cleanest fix is approach (1): reject non-VIDEO/non-AUDIO codec types early in `avcodec_send_packet`, so the assertion at line 464 (and the second `av_assert0(0)` at line 804 in `frame_validate`) are unreachable from crafted input.
 
-1. **`avcodec_send_packet`** return `AVERROR(EINVAL)` for `avctx->codec_type` that is not `AVMEDIA_TYPE_VIDEO` or `AVMEDIA_TYPE_AUDIO`.
+**One-line guard in `libavcodec/decode.c`** — add after the existing `avcodec_is_open` / decoder check at line 733-734:
 
-2. **`decode_simple_internal`** handle unexpected codec types gracefully — e.g., fall through to `ret = AVERROR(EAGAIN)` instead of asserting, so the caller receives an error rather than a crash.
+```diff
+ int attribute_align_arg avcodec_send_packet(AVCodecContext *avctx, const AVPacket *avpkt)
+ {
+     AVCodecInternal *avci = avctx->internal;
+     DecodeContext     *dc = decode_ctx(avci);
+     int ret;
 
-3. **`avcodec_open2`** refuse to open decoders whose `codec->type` is not `AVMEDIA_TYPE_VIDEO` or `AVMEDIA_TYPE_AUDIO` when the caller intends to use the `send_packet`/`receive_frame` API (this is harder since `avcodec_open2` doesn't know the caller's intent).
+     if (!avcodec_is_open(avctx) || !av_codec_is_decoder(avctx->codec))
+         return AVERROR(EINVAL);
+
++    /* avcodec_send_packet only supports video and audio decoders;
++     * subtitle/data decoders must use avcodec_decode_subtitle2().           */
++    if (avctx->codec_type != AVMEDIA_TYPE_VIDEO &&
++        avctx->codec_type != AVMEDIA_TYPE_AUDIO)
++        return AVERROR(EINVAL);
++
+     if (dc->draining_started)
+         return AVERROR_EOF;
+```
+
+**Why this fix is correct:**
+
+- Subtitle decoders already have their own API (`avcodec_decode_subtitle2`) — there is no legitimate reason to call `avcodec_send_packet` on them.
+- The guard sits after the `avcodec_is_open` check, so it only fires on fully-initialized decoders, not half-set-up contexts.
+- It prevents ALL assertion sites downstream (`decode_simple_internal` at line 464, `frame_validate` at line 804) from being reachable with subtitle/data codecs.
+- `AVERROR(EINVAL)` is the standard "bad argument / invalid operation" return code in FFmpeg's public API. Callers already handle it.
+
+**Alternative approaches** (not recommended):
+
+| Approach | Pros | Cons |
+|----------|------|------|
+| Fix `decode_simple_internal` to not assert | Fixes one crash site | Misses the second in `frame_validate` (line 804); still dispatches subtitle codecs into a path that expects frame data, risking other UB |
+| Fix `avcodec_open2` to reject subtitle codecs | Prevents the problem at init time | Breaks legitimate subtitle usage via `avcodec_decode_subtitle2`; `avcodec_open2` doesn't know which API the caller will use |
+| Fix neither and document the limitation | Zero code change | Leaves a reachable `av_assert0(0)` in release builds — denial-of-service vector in production |
 
 ### Regression Test
 
@@ -124,3 +155,9 @@ static const unsigned char pgs_crash[] = {
 ### Upstream Status
 
 Not reported upstream at the time of discovery. The bug is present in FFmpeg 7.1.3.
+
+**To report** (per [ffmpeg.org/bugreports.html](https://www.ffmpeg.org/bugreports.html)):
+1. Verify the bug still exists against the **latest development branch** (git HEAD), not just the vendored 7.1.3.
+2. Register at [code.ffmpeg.org](https://code.ffmpeg.org/user/sign_up) and submit an issue at [code.ffmpeg.org/FFmpeg/FFmpeg/issues](https://code.ffmpeg.org/FFmpeg/FFmpeg/issues).
+3. Include: the 46-byte crash input, the gdb backtrace (see above), `ffprobe -show_entries stream=codec_name,codec_type,codec_id`, and the minimal reproducer: `avcodec_open2(subtitle_decoder) → avcodec_send_packet()`.
+4. Upload the crash sample to [streams.videolan.org/upload/](https://streams.videolan.org/upload/) (select FFmpeg project).
