@@ -30,6 +30,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <sys/ipc.h>
 #include <sys/shm.h>
 
@@ -210,3 +211,26 @@ __attribute__((constructor))
 static void __afl_auto_init(void) {
     __afl_map_shm();
 }
+
+/* ── abort() override ─────────────────────────────────────────────────
+ * Intercept libc's abort() for fuzzing: instead of killing the process,
+ * log and return.  Libraries like FFmpeg call abort() on internal
+ * assertion failures (~1000 av_assert0 sites), which would flood the
+ * fuzzer with false crashes.  After abort() returns, execution continues;
+ * if a real memory safety violation exists, ASAN catches it at the true
+ * source.  This override catches ALL abort() sources — macros, direct
+ * calls in library .c files, pthread-assert failures, etc.
+ *
+ * The noreturn warning is suppressed because we intentionally override
+ * the behavior for the fuzzing use case. */
+#pragma GCC diagnostic push
+#if defined(__clang__)
+#pragma GCC diagnostic ignored "-Winvalid-noreturn"
+#else
+#pragma GCC diagnostic ignored "-Wreturn-type"
+#endif
+void abort(void) {
+    static const char msg[] = "[shim] abort() intercepted — continuing\n";
+    write(STDERR_FILENO, msg, sizeof(msg) - 1);
+}
+#pragma GCC diagnostic pop

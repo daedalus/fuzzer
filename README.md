@@ -513,6 +513,15 @@ tools/build_targets.sh --asan --clang-scov    # ASAN + compiler-inserted coverag
 # Build vendored (libpng+zlib) targets with compiler-IR comparison tracing
 tools/build_targets.sh --vendor-tracecmp
 tools/build_targets.sh --vendor-tracecmp --asan   # With ASAN (two-step build)
+
+# Build a single target by name (saves time when iterating on one target)
+tools/build_targets.sh --target ffmpeg_read
+tools/build_targets.sh --target ffmpeg_read,test_target          # comma-separated
+tools/build_targets.sh --target ffmpeg_read --target test_target # repeatable
+tools/build_targets.sh --fast --target test_target               # combined with existing flags
+
+# List all available target names
+tools/build_targets.sh --list-targets
 ```
 
 The build script compiles every target as both an executable and a `.so` shared library, in ASAN and no-ASAN variants. The no-ASAN `.so` variants (`*_nosan.so`) are suitable for high-throughput in-process fuzzing without sanitizer overhead.

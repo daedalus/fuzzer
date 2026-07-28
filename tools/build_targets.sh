@@ -11,6 +11,9 @@
 #   tools/build_targets.sh --tracecmp                 # Clang + compiler-IR comparison tracing
 #   tools/build_targets.sh --vendor-tracecmp          # Vendored libpng+zlib + trace-cmp targets
 #   tools/build_targets.sh --vendor-tracecmp --asan   # Same with ASAN
+#   tools/build_targets.sh --target ffmpeg_read       # Build only matching target(s) (can repeat or comma-sep)
+#   tools/build_targets.sh --target ffmpeg_read,test_target
+#   tools/build_targets.sh --list-targets             # Show all available target basenames
 
 set -e
 
@@ -31,13 +34,53 @@ WITH_CLANG_SCOV=0
 USE_CLANG=0
 
 # Parse flags (can appear anywhere)
-for arg in "$@"; do
-    [ "$arg" = "--cmplog" ] && WITH_CMPLOG=1
-    # --tracecmp implies --cmplog (the unified shim covers both layers)
-    [ "$arg" = "--tracecmp" ] && WITH_CMPLOG=1 && WITH_TRACECMP=1
-    [ "$arg" = "--vendor-tracecmp" ] && WITH_VENDOR_TRACECMP=1
-    [ "$arg" = "--clang-scov" ] && WITH_CLANG_SCOV=1
+TARGET_FILTER=""
+REMAINING_ARGS=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --cmplog) WITH_CMPLOG=1; REMAINING_ARGS+=("$1") ;;
+        # --tracecmp implies --cmplog (the unified shim covers both layers)
+        --tracecmp) WITH_CMPLOG=1; WITH_TRACECMP=1; REMAINING_ARGS+=("$1") ;;
+        --vendor-tracecmp) WITH_VENDOR_TRACECMP=1; REMAINING_ARGS+=("$1") ;;
+        --clang-scov) WITH_CLANG_SCOV=1; REMAINING_ARGS+=("$1") ;;
+        --target|--targets) shift
+            for _t in $(echo "$1" | tr ',' ' '); do
+                TARGET_FILTER="$TARGET_FILTER $_t"
+            done ;;
+        --list-targets) LIST_TARGETS=1 ;;
+        *) REMAINING_ARGS+=("$1") ;;
+    esac
+    shift
 done
+set -- "${REMAINING_ARGS[@]}"
+
+# ── List available targets ─────────────────────────────────────────
+list_targets() {
+    echo "Available targets:"
+    for f in "$TARGETS"/*.c "$TARGETS"/*.cpp; do
+        [ -f "$f" ] || continue
+        local base
+        base=$(basename "$f")
+        base="${base%.*}"
+        echo "  $base"
+    done
+    exit 0
+}
+[ "${LIST_TARGETS:-0}" -eq 1 ] && list_targets
+
+# ── Target filter helper ──────────────────────────────────────────
+# Returns 0 if target should be built (matches filter or no filter set)
+_match_target() {
+    local src="$1"
+    [ -z "$TARGET_FILTER" ] && return 0
+    local base
+    base=$(basename "$src")
+    base="${base%.*}"
+    for _t in $TARGET_FILTER; do
+        [ "$base" = "$_t" ] && return 0
+    done
+    return 1
+}
 
 # Colors
 GREEN='\033[0;32m'
@@ -82,6 +125,7 @@ compile_fgrep_objects() {
 # ── Build a target ────────────────────────────────────────────────
 build_target() {
     local src="$1" out="$2" libs="$3" extra_flags="$4" cc="${5:-gcc}" extra_cflags="${6:-}"
+    _match_target "$src" || return 0
     if [ ! -f "$src" ]; then
         warn "Source not found: $src"
         return 1
@@ -99,6 +143,7 @@ build_target() {
 # ── Build a .so target ───────────────────────────────────────────
 build_so_target() {
     local src="$1" out="$2" libs="$3" extra_flags="$4" cc="${5:-gcc}" extra_cflags="${6:-}"
+    _match_target "$src" || return 0
     local cmplog_obj="" cmplog_libs=""
     if [ ! -f "$src" ]; then
         warn "Source not found: $src"
@@ -263,7 +308,8 @@ build_standalone_so_targets() {
     [ "$suffix" = "_nosan" ] && out_suffix="_nosan"
 
     # tailslayer — C++ target (g++), header-only library
-    if [ -f "$TARGETS/tailslayer_read.cpp" ] && [ -d "$TAILSLAYER/include" ]; then
+    if _match_target "$TARGETS/tailslayer_read.cpp" && \
+       [ -f "$TARGETS/tailslayer_read.cpp" ] && [ -d "$TAILSLAYER/include" ]; then
         local cxx=g++
         if command -v g++ &>/dev/null; then
             local src="$TARGETS/tailslayer_read.cpp"
@@ -295,8 +341,12 @@ build_standalone_so_targets() {
     local LZ4_INC="-I$LZ4_DIR -DXXH_NAMESPACE=LZ4_"
     local all_exist=true
     for obj in $LZ4_OBJS; do [ -f "$obj" ] || all_exist=false; done
-    if $all_exist && [ -f "$TARGETS/lz4_read.c" ]; then
+    if _match_target "$TARGETS/lz4_read.c" && $all_exist && [ -f "$TARGETS/lz4_read.c" ]; then
         build_so_target "$TARGETS/lz4_read.c" "$TARGETS/lz4_read${out_suffix}.so" "$LZ4_OBJS -Wl,--export-dynamic -lpthread" "$flags $LZ4_INC"
+    elif [ -n "$TARGET_FILTER" ]; then
+        :  # filtered target, silently skip
+    elif $all_exist; then
+        warn "lz4_read${out_suffix}.so: LZ4 objects exist but source not found"
     else
         warn "lz4_read${out_suffix}.so: LZ4 objects not found, skipping (build LZ4 lib first)"
     fi
@@ -735,23 +785,27 @@ build_tracecmp_targets() {
     local TRACE_FLAGS="-fsanitize-coverage=trace-cmp,trace-pc-guard"
 
     # tracecmp_target: exercises compiler-inlined comparisons
-    local rc=0
-    $CC -O2 -g $TRACE_FLAGS -include "$SHIM" \
-        -o "$TARGETS/tracecmp_target" "$TARGETS/tracecmp_target.c" 2>/dev/null || rc=$?
-    if [ $rc -eq 0 ]; then
-        ok "tracecmp_target (trace-cmp)"
-    else
-        warn "failed: tracecmp_target (trace-cmp)"
+    if _match_target "$TARGETS/tracecmp_target.c"; then
+        local rc=0
+        $CC -O2 -g $TRACE_FLAGS -include "$SHIM" \
+            -o "$TARGETS/tracecmp_target" "$TARGETS/tracecmp_target.c" 2>/dev/null || rc=$?
+        if [ $rc -eq 0 ]; then
+            ok "tracecmp_target (trace-cmp)"
+        else
+            warn "failed: tracecmp_target (trace-cmp)"
+        fi
     fi
 
     # tracecmp_target.so: same with shared library
-    rc=0
-    $CC -O2 -g $TRACE_FLAGS -shared -fPIC -include "$SHIM" \
-        -o "$TARGETS/tracecmp_target.so" "$TARGETS/tracecmp_target.c" 2>/dev/null || rc=$?
-    if [ $rc -eq 0 ]; then
-        ok "tracecmp_target.so (trace-cmp)"
-    else
-        warn "failed: tracecmp_target.so (trace-cmp)"
+    if _match_target "$TARGETS/tracecmp_target.c"; then
+        rc=0
+        $CC -O2 -g $TRACE_FLAGS -shared -fPIC -include "$SHIM" \
+            -o "$TARGETS/tracecmp_target.so" "$TARGETS/tracecmp_target.c" 2>/dev/null || rc=$?
+        if [ $rc -eq 0 ]; then
+            ok "tracecmp_target.so (trace-cmp)"
+        else
+            warn "failed: tracecmp_target.so (trace-cmp)"
+        fi
     fi
 
     # Verify trace-cmp symbols in built targets
@@ -844,9 +898,13 @@ fi
 echo "Compiling utility libraries..."
 compile_perf_shim
 
-verify_afl
-verify_shm_run
-verify_cmplog
-verify_vendor_tracecmp
+if [ -z "$TARGET_FILTER" ]; then
+    verify_afl
+    verify_shm_run
+    verify_cmplog
+    verify_vendor_tracecmp
+else
+    echo "[*] Target filter active — skipping full verification"
+fi
 build_tracecmp_targets
 echo "=== Done ==="
