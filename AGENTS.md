@@ -237,3 +237,15 @@ These rules are extracted from ~85 `fix:` commits in project history. Each names
 
 - **Never `except Exception: pass` in production code paths.** A broad except that swallows errors hides real failures (disk full, permission denied, EMFILE). At minimum, log at `warning` level. Reserve `log.debug` for genuinely expected/recoverable situations only.
 - **`except ChildProcessError` in waitpid does NOT mean success.** It means the child was already reaped — return `-2` (unknown), not `0` (success), to avoid masking crashes.
+
+### Shared library symbol visiblity (abort() override)
+
+- **Libc function overrides in .so builds need `__attribute__((visibility("hidden")))`.** Without it, the PLT/GOT resolves calls at runtime to libc's version, not the override. `visibility("hidden")` forces direct `call` instructions within the .so, bypassing PLT resolution entirely. This applies to any shim-level override of `abort()`, `malloc`, `free`, etc. when the override is compiled into a `-shared -fPIC` library that gets `ctypes.CDLL`-loaded. Executable builds (non-`.so`) are not affected because the linker resolves from the translation unit first.
+
+### Return-value API changes with many callers
+
+- **When a widely-used function gets a new return value, grep for ALL callers — not just the production ones.** `load_corpus()` is called in 17+ places across 5 test files. Adding a 3rd return element (`irreplaceable_hashes`) silently breaks every `corpus, seen = load_corpus(...)` unpack pattern. The fix is mechanical (add `, _` or `, irr_hash`), but grep must target both `src/` and `tests/` to find them all.
+
+### Mock alignment with production
+
+- **A new attribute on Fuzzer that's read in a shared method (like `auto_minimize_corpus`) must be mirrored in every test mock.** A MockFuzzer that doesn't set `self.irreplaceable_hashes` causes `AttributeError` when the production logic tries to read it — but the error surfaces as a test failure in an unrelated test (the one that exercises the shared method, not the one testing the new feature). When adding a feature that touches shared code paths, audit all mocks for missing attributes before running tests.
