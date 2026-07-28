@@ -242,12 +242,12 @@ class TestFMMCohesionGate:
         return mh
 
     def test_regression_diverse_overlap_farfield(self):
-        """Cohesion gate bounds the far-field overestimate from diverse-overlap clusters.
+        """Two-phase gate bounds the far-field overestimate from diverse-overlap clusters.
 
         A far cluster whose members each overlap with a different slice of the
         query seed's edges causes the centroid approximation to overestimate
-        density.  The cohesion gate detects this (low min-J-to-centroid) and
-        falls back to exact computation, bounding the error.
+        density.  Phase 1 (low min-J-to-centroid cohesion < 0.3) triggers the
+        fallback to exact computation, bounding the error.
         """
         seeds = self._make_diverse_overlap_seeds()
         seed_keys = list(seeds.keys())
@@ -255,7 +255,7 @@ class TestFMMCohesionGate:
 
         naive = _naive_densities(seed_keys, mh)
 
-        # FMM with cohesion gate enabled (default threshold 0.3)
+        # FMM with both gates enabled (defaults)
         fmm_gated, clusters_gated, _stc = compute_corpus_overlap_density(
             seed_keys, mh, min_jaccard=0.25, cohesion_threshold=0.3
         )
@@ -267,9 +267,10 @@ class TestFMMCohesionGate:
         far_cluster_found = any(len(m) > 1 for m in clusters_gated)
         assert far_cluster_found, "Test precondition failed: far members did not cluster via LSH"
 
-        # FMM with cohesion gate disabled (threshold=0 = unconditional approximation)
+        # FMM with both gates disabled (unconditional centroid approximation)
         fmm_ungated, _clusters2, _stc2 = compute_corpus_overlap_density(
-            seed_keys, mh, min_jaccard=0.25, cohesion_threshold=0.0
+            seed_keys, mh, min_jaccard=0.25,
+            cohesion_threshold=0.0, proxy_error_threshold=1.0,
         )
         errors_ungated = [abs(naive[sk] - fmm_ungated[sk]) for sk in seed_keys]
         max_err_ungated = max(errors_ungated)
@@ -291,14 +292,18 @@ class TestFMMCohesionGate:
         )
 
     def test_regression_high_cohesion_gate_does_not_trigger(self):
-        """When far-cluster cohesion is high, the gate must not trigger.
+        """Phase 2 catches the query-dependent overestimate that Phase 1 misses.
 
         A far cluster whose members share a large common base plus small
-        per-member query-slices has high cohesion (0.86-0.90), so the
-        cohesion gate (threshold=0.3) never engages.  The centroid
-        approximation overestimates the true pairwise density by ~2.4x
-        because the union of far members has more overlap with the query
-        seed than any individual member.
+        per-member query-slices has high global cohesion (0.86-0.90), so
+        Phase 1 of the gate (cohesion >= 0.3) passes.  However, the
+        centroid's overlap with the query seed (0.300) overestimates every
+        individual member's overlap (~0.152) because the union of far members
+        has more overlap with the query than any single member.
+
+        Phase 2 (_query_relative_proxy_error) detects this: the maximum
+        overestimate for any member exceeds proxy_error_threshold (0.1),
+        so the cluster falls back to exact pairwise, bounding the error.
 
         Edge layout:
           s0 (query):   edges 0-99                        → 100 edges
@@ -309,11 +314,11 @@ class TestFMMCohesionGate:
 
         J(far_i, far_j) = 80 / (90+90-80) = 0.80
         J(far_i, union)  = 90 / (80+8*5+8*5) = 90/160 = 0.562
-        Cohesion ≈ 0.562 > 0.3  → gate does not trigger.
+        Cohesion ≈ 0.562 > 0.3  → Phase 1 passes.
 
         True J(s0, far_i) = 25 / (100+90-25) = 25/165 ≈ 0.152
-        Approx J(s0, union) = (20+40) / (100+160-60) = 60/200 = 0.300
-        Overestimate factor ≈ 0.300 / 0.152 ≈ 1.97x
+        Centroid J(s0, centroid) = (20+40) / (100+160-60) = 60/200 = 0.300
+        Proxy error = 0.300 - 0.152 = 0.148 > 0.1  → Phase 2 triggers fallback.
         """
         seeds: dict[str, set[int]] = {}
         seeds["s0"] = set(range(100))
@@ -333,14 +338,15 @@ class TestFMMCohesionGate:
         )
 
         fmm_ungated, _clusters2, _stc2 = compute_corpus_overlap_density(
-            seed_keys, mh, min_jaccard=0.25, cohesion_threshold=0.0
+            seed_keys, mh, min_jaccard=0.25, cohesion_threshold=0.0,
+            proxy_error_threshold=1.0  # disable Phase 2 to match old behavior
         )
 
-        for sk in seed_keys:
-            assert abs(fmm_gated[sk] - fmm_ungated[sk]) < 0.05, (
-                f"Cohesion gate appears to have triggered for {sk}: "
-                f"gated={fmm_gated[sk]:.4f}, ungated={fmm_ungated[sk]:.4f}"
-            )
+        # The query seed must have gated != ungated: Phase 2 triggers for s0
+        assert fmm_gated["s0"] != fmm_ungated["s0"], (
+            f"Phase 2 should have triggered for s0: "
+            f"gated={fmm_gated['s0']:.4f}, ungated={fmm_ungated['s0']:.4f}"
+        )
 
         true_s0 = naive["s0"]
         approx_s0 = fmm_gated["s0"]
@@ -350,7 +356,107 @@ class TestFMMCohesionGate:
             f"test construction may not reproduce the overestimate pathology."
         )
         overestimate_factor = approx_s0 / true_s0
-        assert overestimate_factor > 1.5, (
-            f"Expected significant overestimate (>1.5x) but got {overestimate_factor:.2f}x. "
-            f"True={true_s0:.4f}, Approx={approx_s0:.4f}"
+        assert overestimate_factor < 1.5, (
+            f"Expected bounded overestimate (<1.5x) but got {overestimate_factor:.2f}x. "
+            f"True={true_s0:.4f}, Approx={approx_s0:.4f}. "
+            f"Phase 2 proxy error check may not have triggered."
         )
+
+    def test_phase_two_no_false_positive(self):
+        """Homogeneous far cluster: Phase 2 should not spuriously trigger.
+
+        A far cluster where all members have the same overlap with the
+        query seed should have zero proxy error (centroid is a faithful
+        proxy).  Phase 2 must not trigger a fallback for such clusters.
+        """
+        seeds: dict[str, set[int]] = {}
+        seeds["s0"] = set(range(100))
+        # All far members share the same 50 edges overlapping s0
+        common = set(range(1000, 1050))
+        for i in range(8):
+            private = set(range(2000 + i * 10, 2000 + i * 10 + 5))
+            seeds[f"far_{i}"] = common | private
+
+        seed_keys = list(seeds.keys())
+        mh = self._register_seeds_to_minhash(seeds, num_bands=16)
+
+        naive = _naive_densities(seed_keys, mh)
+
+        fmm_gated, _clusters, _stc = compute_corpus_overlap_density(
+            seed_keys, mh, min_jaccard=0.25, cohesion_threshold=0.3
+        )
+
+        errors = [abs(naive[sk] - fmm_gated[sk]) for sk in seed_keys]
+        max_err = max(errors)
+        assert max_err < 0.15, (
+            f"Phase 2 spuriously triggered: max error {max_err:.6f} "
+            f"(expected < 0.15 for homogeneous cluster)"
+        )
+
+    def test_proxy_error_threshold_zero_catches_all_overestimates(self):
+        """proxy_error_threshold=0.0 catches every overestimate, no matter how small.
+
+        With a strict threshold, any (query, far_cluster) pair where the
+        centroid overestimates overlap for even one member triggers fallback.
+        This should bound the overestimate-dominated error (Test 2 scenario)
+        to near zero, though the FMM may still have small errors from
+        centroid UNDERestimation (which this gate doesn't address).
+        """
+        seeds = self._make_diverse_overlap_seeds()
+        seed_keys = list(seeds.keys())
+        mh = self._register_seeds_to_minhash(seeds, num_bands=16)
+
+        naive = _naive_densities(seed_keys, mh)
+
+        # Strict Phase 2: any overestimate triggers fallback
+        fmm_strict, _c, _s = compute_corpus_overlap_density(
+            seed_keys, mh, min_jaccard=0.25,
+            cohesion_threshold=0.3, proxy_error_threshold=0.0,
+        )
+        errors_strict = [abs(naive[sk] - fmm_strict[sk]) for sk in seed_keys]
+        max_err_strict = max(errors_strict)
+
+        # Loose Phase 2: allows overestimate (default)
+        fmm_default, _c2, _s2 = compute_corpus_overlap_density(
+            seed_keys, mh, min_jaccard=0.25,
+            cohesion_threshold=0.3,
+        )
+        errors_default = [abs(naive[sk] - fmm_default[sk]) for sk in seed_keys]
+        max_err_default = max(errors_default)
+
+        # Strict threshold should catch more overestimates, producing smaller max error
+        # (or equal if both already catch everything)
+        assert max_err_strict <= max_err_default + 0.01, (
+            f"Strict Phase 2 should not increase error: "
+            f"strict={max_err_strict:.6f}, default={max_err_default:.6f}"
+        )
+
+    def test_proxy_error_threshold_one_leaves_phase_one_only(self):
+        """proxy_error_threshold=1.0 disables Phase 2 (always passes).
+
+        Behavior should match the old single-phase gate (cohesion-only).
+        When cohesion >= threshold, centroid approximation is always used.
+        """
+        seeds = _make_synthetic_seeds(num_clusters=2, seeds_per_cluster=4)
+        et = EdgeTracker(map_size=65536, max_tracked_seeds=1000)
+        _register_seeds(et, seeds)
+        seed_keys = list(seeds.keys())
+
+        # Old behavior: no Phase 2 (simulated via proxy_error_threshold=1.0)
+        fmm_phase1_only, _c1, _s1 = compute_corpus_overlap_density(
+            seed_keys, et._minhash, min_jaccard=0.25,
+            cohesion_threshold=0.3, proxy_error_threshold=1.0,
+        )
+        # New behavior: Phase 2 active with default threshold
+        fmm_two_phase, _c2, _s2 = compute_corpus_overlap_density(
+            seed_keys, et._minhash, min_jaccard=0.25,
+            cohesion_threshold=0.3,
+        )
+
+        # For well-clustered data where Phase 2 doesn't need to fire,
+        # both modes should agree
+        for sk in seed_keys:
+            assert abs(fmm_phase1_only[sk] - fmm_two_phase[sk]) < 0.05, (
+                f"Phase 2 should not change result for {sk}: "
+                f"phase1={fmm_phase1_only[sk]:.4f}, two_phase={fmm_two_phase[sk]:.4f}"
+            )

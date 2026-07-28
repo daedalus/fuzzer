@@ -158,11 +158,40 @@ def _compute_cluster_cohesion(
     return cohesion
 
 
+def _query_relative_proxy_error(
+    query_sig: list[int],
+    far_members: list[int],
+    seed_keys: list[str],
+    minhash: MinHashLSH,
+    centroid_sig: list[int],
+) -> float:
+    """Max overestimate from using centroid proxy for this (query, far_cluster) pair.
+
+    Returns max(0, J(query, centroid) - J(query, member_i)) across members.
+    A value near 0 means the centroid faithfully represents every member's
+    relationship to this specific query seed.  A positive value means the
+    centroid overestimates overlap for at least one member.
+    """
+    centroid_j = _sig_jaccard(query_sig, centroid_sig)
+    max_dev = 0.0
+    for idx in far_members:
+        member_sig = minhash.signatures.get(seed_keys[idx])
+        if member_sig is None:
+            continue
+        member_j = _sig_jaccard(query_sig, member_sig)
+        if member_j < centroid_j:
+            dev = centroid_j - member_j
+            if dev > max_dev:
+                max_dev = dev
+    return max_dev
+
+
 def compute_corpus_overlap_density(
     seed_keys: list[str],
     minhash: MinHashLSH,
     min_jaccard: float = 0.25,
     cohesion_threshold: float = 0.3,
+    proxy_error_threshold: float = 0.1,
 ) -> tuple[dict[str, float], list[list[int]], dict[int, int]]:
     """Compute pairwise overlap density for all seeds.
 
@@ -187,6 +216,13 @@ def compute_corpus_overlap_density(
             approximation for a far cluster (default 0.3).  Clusters below
             this threshold fall back to exact pairwise computation.
             Set to 0 to disable the gate (unconditional centroid approximation).
+        proxy_error_threshold: Maximum acceptable per-member overestimate
+            from using the centroid as a proxy for this specific query
+            (default 0.1).  If J(query, centroid) exceeds J(query, member_i)
+            by more than this threshold for any member, the cluster falls back
+            to exact pairwise.  This catches cases where a cluster has high
+            internal cohesion but members overlap with the query in disjoint
+            ways.  Set to 1.0 to disable Phase 2 (cohesion-only gating).
 
     Returns:
         (densities_dict, clusters, seed_to_cluster):
@@ -236,12 +272,29 @@ def compute_corpus_overlap_density(
                 continue
 
             if cohesion[ocidx] >= cohesion_threshold:
-                # Centroid approximation (fast path): treat all members as
-                # having the same similarity to the query as the centroid.
-                inter_j = _sig_jaccard(sig_self, centroids[ocidx])
-                total += inter_j * len(members)
-                count += len(members)
+                # Phase 1: global cohesion check passed.
+                # Phase 2: query-relative proxy error check.
+                # A cluster that passes global cohesion may still have members
+                # whose overlap with THIS specific query seed diverges from
+                # the centroid's overlap (e.g. members share a large common
+                # base but overlap the query in disjoint slices).
+                proxy_err = _query_relative_proxy_error(
+                    sig_self, members, seed_keys, minhash, centroids[ocidx]
+                )
+                if proxy_err <= proxy_error_threshold:
+                    # Centroid approximation (fast path): treat all members as
+                    # having the same similarity to the query as the centroid.
+                    inter_j = _sig_jaccard(sig_self, centroids[ocidx])
+                    total += inter_j * len(members)
+                    count += len(members)
+                else:
+                    # Phase 2 failed: query-relative proxy error too large.
+                    # Fall back to exact pairwise to avoid overestimate.
+                    for j in members:
+                        total += minhash.approximate_jaccard(seed_keys[i], seed_keys[j])
+                        count += 1
             else:
+                # Phase 1 failed: global cohesion too low.
                 # Fall back to exact pairwise for low-cohesion clusters
                 # to avoid overestimating overlap when members are diverse.
                 for j in members:
