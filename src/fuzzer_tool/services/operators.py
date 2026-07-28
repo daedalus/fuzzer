@@ -239,8 +239,9 @@ class OperatorEngine:
         if len(op_a) <= len(buf):
             pos = 0
             candidates = []
-            while pos <= len(buf) - len(op_a):
-                idx = bytes(buf).find(op_a, pos)
+            buf_bytes = bytes(buf)
+            while pos <= len(buf_bytes) - len(op_a):
+                idx = buf_bytes.find(op_a, pos)
                 if idx == -1:
                     break
                 candidates.append(idx)
@@ -436,7 +437,7 @@ class OperatorEngine:
         if not buf or len(buf) < 4:
             return
         # Split on newline
-        parts = bytes(buf).split(b"\n")
+        parts = buf.split(b"\n")
         if len(parts) < 2:
             return
         mutate = rng.choice(["del", "dup", "swap", "perm", "repeat", "clone"])
