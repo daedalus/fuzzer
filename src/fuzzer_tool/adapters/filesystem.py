@@ -211,6 +211,8 @@ def load_corpus(
         """Read full files from base_dir and its two-digit subdirectories.
 
         Skips delta_*.json files (handled separately) and pruned/ subdirectories.
+        Normalizes filenames to id_{hash} if they don't already match, so that
+        pruning (which globs for id_*) can find them.
         """
         if not base_dir.exists():
             return
@@ -221,6 +223,15 @@ def load_corpus(
                 continue  # handled as delta, not full file
             data = f.read_bytes()
             h = hash_data(data)
+            # Normalize filename to id_{hash} so pruning can find it.
+            expected = f"id_{h}"
+            if f.name != expected:
+                dest = f.with_name(expected)
+                if not dest.exists():
+                    f.rename(dest)
+                else:
+                    f.unlink()  # duplicate of an already-loaded seed
+                f = dest
             full_files[h] = data
             if mark_irreplaceable:
                 irreplaceable_hashes.add(h)

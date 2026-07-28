@@ -54,6 +54,9 @@ class CorpusManager:
     def load_corpus(self):
         f = self.f
         f.corpus, f.seen_hashes, f.irreplaceable_hashes = load_corpus(f.corpus_dir, f.bloom)
+        # Ensure the irreplaceable/ directory exists so seeds can be
+        # promoted to irreplaceable without a late mkdir.
+        (f.corpus_dir / "irreplaceable").mkdir(parents=True, exist_ok=True)
 
     def init_seed_metadata(self):
         f = self.f
@@ -630,15 +633,12 @@ class CorpusManager:
             from fuzzer_tool.adapters.filesystem import hash_data as _hash
 
             kept_set = {_hash(s) for s in unique}
-            # Prune full seeds — use two-digit hash subdirectories so no
-            # single directory accumulates too many entries.
-            for fh in seeds_dir.iterdir():
+            # Prune full seeds — seeds are stored in two-digit hash
+            # subdirectories (seeds/ab/id_abc...), so walk recursively.
+            for fh in seeds_dir.rglob("id_*"):
                 if not fh.is_file():
                     continue
-                if fh.name.startswith("id_"):
-                    h = fh.name[3:]
-                else:
-                    continue
+                h = fh.name[3:]
                 if h not in kept_set:
                     sub = pruned_dir / h[:2]
                     sub.mkdir(parents=True, exist_ok=True)
