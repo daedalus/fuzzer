@@ -213,13 +213,30 @@ void __afl_map_reset(void) {
  * its handler takes priority (which is correct: it flushes cmplog before
  * dying).  Our handler is the fallback for non-cmplog targets.          */
 
+static struct sigaction __afl_old_segv;
+static struct sigaction __afl_old_abrt;
+
 static void __afl_crash_handler(int sig) {
-    _exit(128 + (unsigned int)sig);
+    /* Restore previous handler (e.g. ASAN's) and re-raise so it can
+     * produce its error report before the process terminates.  For
+     * non-ASAN builds the previous handler is SIG_DFL, so the re-raise
+     * terminates with the same signal-indicating exit code (128+sig)
+     * as the original _exit() approach.                                  */
+    struct sigaction *old;
+    if (sig == SIGSEGV)      old = &__afl_old_segv;
+    else if (sig == SIGABRT) old = &__afl_old_abrt;
+    else                    { _exit(128 + (unsigned int)sig); return; }
+    sigaction(sig, old, NULL);
+    raise(sig);
 }
 
 static void __afl_install_crash_handlers(void) {
-    signal(SIGSEGV, __afl_crash_handler);
-    signal(SIGABRT, __afl_crash_handler);
+    struct sigaction sa;
+    sa.sa_handler = __afl_crash_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGSEGV, &sa, &__afl_old_segv);
+    sigaction(SIGABRT, &sa, &__afl_old_abrt);
 }
 
 /* Auto-attach when loaded */

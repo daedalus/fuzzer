@@ -165,10 +165,23 @@ static void flush_and_close(void) {
     if (cmplog_file) { fclose(cmplog_file); cmplog_file = NULL; }
 }
 
+static struct sigaction old_segv;
+static struct sigaction old_abrt;
+static struct sigaction old_bus;
+static struct sigaction old_fpe;
+
 static void crash_handler(int sig) {
     flush_buffer();
     if (cmplog_file) fflush(cmplog_file);
-    signal(sig, SIG_DFL);
+    struct sigaction *old;
+    switch (sig) {
+    case SIGSEGV: old = &old_segv; break;
+    case SIGABRT: old = &old_abrt; break;
+    case SIGBUS:  old = &old_bus;  break;
+    case SIGFPE:  old = &old_fpe;  break;
+    default:      signal(sig, SIG_DFL); raise(sig); return;
+    }
+    sigaction(sig, old, NULL);
     raise(sig);
 }
 
@@ -177,10 +190,10 @@ static void install_crash_handlers(void) {
     sa.sa_handler = crash_handler;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = 0;
-    sigaction(SIGSEGV, &sa, NULL);
-    sigaction(SIGABRT, &sa, NULL);
-    sigaction(SIGBUS, &sa, NULL);
-    sigaction(SIGFPE, &sa, NULL);
+    sigaction(SIGSEGV, &sa, &old_segv);
+    sigaction(SIGABRT, &sa, &old_abrt);
+    sigaction(SIGBUS,  &sa, &old_bus);
+    sigaction(SIGFPE,  &sa, &old_fpe);
 }
 
 /* ── libc function pointers (Layer 1) ─────────────────────────────────── */
