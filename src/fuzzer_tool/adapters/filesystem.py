@@ -174,7 +174,7 @@ def load_corpus(
     add_default: bool = True,
     load_irreplaceable: bool = True,
 ) -> tuple[list[bytes], set[str], set[str]]:
-    """Load existing corpus from corpus_dir/seeds/ and corpus_dir/irreplaceable/.
+    """Load existing corpus from all subdirectories of corpus_dir (except pruned/).
 
     Handles both full files (id_*.*) and delta-encoded files (delta_*.json).
     Delta files are reconstructed from their parent chain. Irreplaceable
@@ -182,12 +182,14 @@ def load_corpus(
     they can be excluded from corpus pruning.
 
     Args:
-        corpus_dir: Path to corpus directory (seeds live in seeds/ subdir).
+        corpus_dir: Path to corpus directory. All subdirectories except
+            pruned/ are scanned for seeds and delta files.
         bloom: Optional bloom filter to populate for fast dedup.
         add_default: If True and corpus is empty, add b"AAAAAAAA" as a
             synthetic default seed. Set False for commands that need to
             reflect the actual on-disk corpus state (e.g. sweep).
-        load_irreplaceable: If True, also load seeds from corpus/irreplaceable/.
+        load_irreplaceable: If True, seeds from corpus/irreplaceable/ are
+            tracked as irreplaceable and excluded from corpus pruning.
 
     Returns:
         Tuple of (corpus list, seen hashes set, irreplaceable hashes set).
@@ -195,51 +197,64 @@ def load_corpus(
     corpus: list[bytes] = []
     seen: set[str] = set()
     irreplaceable_hashes: set[str] = set()
-    seeds_dir = corpus_dir / "seeds"
-    irreplaceable_dir = corpus_dir / "irreplaceable"
-    deltas_dir = corpus_dir / "deltas"
+
+    if not corpus_dir.exists():
+        if add_default:
+            return [b"AAAAAAAA"], set(), set()
+        return [], set(), set()
 
     # First pass: load all full files and build hash lookup for delta reconstruction
     full_files: dict[str, bytes] = {}
     delta_files: list[tuple[str, Path]] = []
 
-    def _load_from_dir(base_dir: Path, mark_irreplaceable: bool = False) -> None:
-        """Read full files from base_dir and its two-digit subdirectories."""
+    def _load_full_from_dir(base_dir: Path, mark_irreplaceable: bool = False) -> None:
+        """Read full files from base_dir and its two-digit subdirectories.
+
+        Skips delta_*.json files (handled separately) and pruned/ subdirectories.
+        """
         if not base_dir.exists():
             return
         for f in base_dir.iterdir():
             if not f.is_file():
                 continue
+            if f.suffix == ".json" and f.name.startswith("delta_"):
+                continue  # handled as delta, not full file
             data = f.read_bytes()
             h = hash_data(data)
             full_files[h] = data
             if mark_irreplaceable:
                 irreplaceable_hashes.add(h)
         for sub in base_dir.iterdir():
-            if sub.is_dir() and len(sub.name) == 2 and sub.name.isalnum():
-                for f in sub.iterdir():
-                    if not f.is_file():
-                        continue
-                    if f.name.startswith("id_"):
-                        data = f.read_bytes()
-                        h = hash_data(data)
-                        full_files[h] = data
-                        if mark_irreplaceable:
-                            irreplaceable_hashes.add(h)
+            if not (sub.is_dir() and len(sub.name) == 2 and sub.name.isalnum()):
+                continue
+            for f in sub.iterdir():
+                if not f.is_file():
+                    continue
+                if f.name.startswith("id_"):
+                    data = f.read_bytes()
+                    h = hash_data(data)
+                    full_files[h] = data
+                    if mark_irreplaceable:
+                        irreplaceable_hashes.add(h)
 
-    if seeds_dir.exists():
-        _load_from_dir(seeds_dir)
+    # Discover all subdirectories in corpus_dir — load from each except pruned/
+    for entry in sorted(corpus_dir.iterdir(), key=lambda p: p.name):
+        if not entry.is_dir():
+            continue
+        if entry.name == "pruned":
+            continue
 
-    if load_irreplaceable and irreplaceable_dir.exists():
-        _load_from_dir(irreplaceable_dir, mark_irreplaceable=True)
-
-    if deltas_dir.exists():
-        for f in deltas_dir.iterdir():
+        # Collect delta files from this subdirectory
+        for f in entry.iterdir():
             if not f.is_file():
                 continue
             if f.suffix == ".json" and f.name.startswith("delta_"):
-                h = f.name[6:-5]  # strip "delta_" prefix and ".json" suffix
+                h = f.name[6:-5]
                 delta_files.append((h, f))
+
+        # Load full files
+        mark = entry.name == "irreplaceable" and load_irreplaceable
+        _load_full_from_dir(entry, mark_irreplaceable=mark)
 
     # Load full files
     for h, data in full_files.items():
