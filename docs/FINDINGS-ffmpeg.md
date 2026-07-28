@@ -80,11 +80,22 @@ if (avctx->codec->type == AVMEDIA_TYPE_VIDEO) {
    - Subtitle decoders use `FF_CODEC_CB_TYPE_DECODE` (the old-style callback), which routes through `decode_simple_internal`.
    - Inside `decode_simple_internal`, the assertion at line 464 fires because `avctx->codec->type == AVMEDIA_TYPE_SUBTITLE` — not VIDEO or AUDIO.
 
-### Impact
+### ffmpeg CLI Reproducibility
 
-- **`av_assert0(0)` is compiled into release builds** (unlike `av_assert1` which is debug-only). Every FFmpeg-based application that calls `avcodec_send_packet` on a subtitle decoder opened from demuxer probe data will crash.
-- Triggered by a **46-byte input** that any media-processing pipeline could receive (user-uploaded video, network stream, email attachment).
-- Minimum impact: **denial-of-service** against media servers, video editors, thumbnailers, or any service that transcribes/transcodes user-supplied media.
+The ffmpeg CLI (version 7.1.5, tested) does **not** trigger this bug:
+
+1. **Subtitle API difference**: The ffmpeg CLI uses `avcodec_decode_subtitle2()` (the legacy subtitle API) for subtitle streams, not `avcodec_send_packet()`/`avcodec_receive_frame()`. The bug requires calling `avcodec_send_packet` on a subtitle decoder, which the ffmpeg CLI never does.
+
+2. **Input too short**: The 46-byte crash input is too malformed for the PGS demuxer (`.sup` format) to produce a valid packet. Both `ffmpeg` and `ffplay` fail at the demux stage with `"Invalid data found when processing input"` before any decoder is called.
+
+3. **Forcing the decoder fails**: Trying `-c:v hdmv_pgs_subtitle` (force a subtitle codec as a video decoder) is rejected because ffmpeg validates codec type against stream type.
+
+**Scope**: This bug affects **library-level code** — any application that calls `avcodec_open2()` followed by `avcodec_send_packet()` on a subtitle decoder without checking the codec type. Examples:
+- Media frameworks that iterate all streams generically (our fuzz target style)
+- Applications using FFmpeg's modern decode API without type filtering
+- Other fuzzers and testing tools
+
+Applications that use the legacy `avcodec_decode_subtitle2()` API for subtitles are **not** affected.
 
 ### Root Cause Analysis
 
