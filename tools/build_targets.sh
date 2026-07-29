@@ -247,10 +247,10 @@ build_simple_so_targets() {
         fi
         # Vendored FFmpeg (ASAN) only for ASAN builds
         local VENDOR_FFMPEG_A="$VENDOR/ffmpeg/libavformat/libavformat.a"
-        if [ -f "$VENDOR_FFMPEG_A" ] && [[ "$flags" == *-fsanitize=address* ]]; then
+        if [ -f "$VENDOR_FFMPEG_A" ]; then
             FFMPEG_LIBS="$VENDOR/ffmpeg/libavformat/libavformat.a $VENDOR/ffmpeg/libavcodec/libavcodec.a $VENDOR/ffmpeg/libavutil/libavutil.a $VENDOR/ffmpeg/libswresample/libswresample.a -lm -lz -llzma -lbz2 -lpthread -ldl"
             FFMPEG_INC="-I$VENDOR/ffmpeg"
-            echo "  Using vendored FFmpeg trace-cmp libraries"
+            echo "  Using vendored FFmpeg static libraries"
         fi
     fi
 
