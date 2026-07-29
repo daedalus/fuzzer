@@ -208,11 +208,12 @@ void __afl_map_reset(void) {
  * is essential for direct_lite in-process mode where Python-level signal
  * handlers never run during a ctypes call.
  *
- * In non-ASAN builds, the abort() override below intercepts abort() before
+ * In all builds, the abort() override below intercepts abort() before
  * it raises SIGABRT, so the signal handler is a fallback for SIGSEGV and
- * any SIGABRT that bypasses the override (e.g. ASAN's own abort after a
- * real memory error).  The override approach prevents false crash positives
- * from library-internal assertions (FFmpeg av_assert0, etc.).
+ * any SIGABRT that bypasses the override (e.g. from pre-compiled library
+ * code not covered by the preprocessor macro).  The override approach
+ * prevents false crash positives from library-internal assertions
+ * (FFmpeg av_assert0, etc.).
  *
  * cmplog_shim.c installs its OWN crash handler (flush + re-raise) when
  * compiled into the same target — its constructor runs after ours, so
@@ -245,23 +246,25 @@ static void __afl_install_crash_handlers(void) {
     sigaction(SIGABRT, &sa, &__afl_old_abrt);
 }
 
-/* ── abort() override (non-ASAN builds only) ──────────────────────────
+/* ── abort() override (all builds) ───────────────────────────────────
  * Intercept libc's abort() for fuzzing: instead of killing the process,
  * write a marker to stderr and return.  Libraries like FFmpeg call abort()
  * on internal assertion failures (~1600 av_assert0 sites), which would
  * flood the fuzzer with false crashes.  This override catches ALL abort()
  * sources — macros, direct calls in library .c files, etc.
  *
- * In ASAN builds (__SANITIZE_ADDRESS__ defined), this override is excluded
- * so abort() raises SIGABRT, which __afl_crash_handler catches and chains
- * to ASAN's own handler — letting ASAN produce its error report before the
- * process terminates.  Both modes are correct for their respective use case.
+ * In ASAN builds, the __asan_default_options shim (loaded before libasan
+ * by the fuzzer) sets halt_on_error=0:abort_on_error=0, so ASAN-detected
+ * errors write the report to stderr and return normally — abort() is no
+ * longer part of ASAN's own error path.  This makes it safe to override
+ * abort() unconditionally: library-internal assertions (av_assert0) are
+ * caught, while ASAN bugs produce their full report via stderr capture
+ * and the SanitizerReport pipeline.
  *
  * The noreturn warning is suppressed because we intentionally override
  * the behavior for the fuzzing use case.                                  */
 
-#ifndef __SANITIZE_ADDRESS__
-/* Override libc abort() for non-ASAN fuzzing builds.
+/* Override libc abort() for all fuzzing builds.
  *
  * Instead of killing the process, write a marker to stderr and return.
  * Libraries like FFmpeg call abort() on internal assertion failures
@@ -272,18 +275,12 @@ static void __afl_install_crash_handlers(void) {
  * warning that would fire if we defined void abort(void) directly
  * (stdlib.h declares abort() as __noreturn__).  The preprocessor
  * replaces all abort() calls with __afl_shim_abort() before the compiler
- * sees the declaration mismatch.
- *
- * In ASAN builds (__SANITIZE_ADDRESS__ defined), this override is excluded
- * so abort() raises SIGABRT, which __afl_crash_handler catches and chains
- * to ASAN's own handler — letting ASAN produce its error report before the
- * process terminates.  Both modes are correct for their respective use case. */
+ * sees the declaration mismatch.                                           */
 static void __afl_shim_abort(void) {
     static const char msg[] = "[shim] abort() intercepted\n";
     write(STDERR_FILENO, msg, sizeof(msg) - 1);
 }
 #define abort() __afl_shim_abort()
-#endif
 
 /* Auto-attach when loaded */
 __attribute__((constructor))
