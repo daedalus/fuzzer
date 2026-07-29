@@ -13,7 +13,7 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 
 ### Mutation & Generation
 - **Mutation operators**: bit flip, byte flip, interesting values (8/16/32-bit, signed + unsigned boundary), arithmetic (1/2/4/8-byte, LE/BE), block insert/delete/duplicate, bit-offset flip/span (arbitrary bit positions for DEFLATE/JPEG), havoc mode (with stall-recovery escalation), TLV-aware mutation, token shuffle, security-sensitive string injection (44 curated SQL/XSS/traversal/format strings), magic values table (229 boundary values across all widths/endians), in-place ASCII number arithmetic, chunk shuffle (boundary-preserving), block shuffle variable (variable-width blocks via order-statistics spacings), compound dictionary insert, punctuation insertion
-- **Operator performance**: `type_replace` uses a precomputed 256-byte translate table (184x faster), PNG/BMP random generation uses `random.randbytes()` instead of Python loops (16x faster), `colorization` uses a module-level lookup table
+- **Operator performance**: `type_replace` uses a precomputed 256-byte translate table (184x faster), PNG/BMP random generation uses `random.randbytes()` instead of Python loops (16x faster), `colorization` uses a module-level lookup table, RedQueen fallback hoists `bytes(buf)` outside the while loop (saves 4/5 full-buffer copies), `_op_line_mutate` uses `bytearray.split()` instead of `bytes().split()` (avoids redundant buffer copy)
 - **Length boundary operator**: systematically tries input lengths at boundary values (0, 1, 2, 3, 4, 5, 7, 8, 15, 16, 31, 32, 63, 64, 127, 128, 255, 256, 512, 1024, 4096) — discovers length-sensitive unsigned integer underflows
 - **Unsigned boundary values**: interesting values include small values (0-5) and unsigned max values (0xFF, 0xFFFF, 0xFFFFFFFF) for triggering unsigned arithmetic underflows
 - **Crash-MI-guided mutation**: CrashMITracker identifies byte positions and values correlated with crashes, biasing mutation position selection and interesting value selection toward crash-relevant bytes
@@ -68,7 +68,11 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 
 ### Scheduling Intelligence
 - **Seed-level energy multiplier** (`SeedScorer`): AFL++ power schedules (FAST/COE/RARE/MMOPT/LIN/QUAD) scale `mutations_per_input` per seed — fast seeds with high coverage get more mutation attempts, heavily-fuzzed seeds get fewer. Honggfuzz power factors (novelty decay, density, fertility, freshness, CMP progress, entropy penalty, timeout penalty) applied multiplicatively on top of schedule scoring
-- **Elo arbitration** (`--elo`): combined operator + seed scheduling via Bayesian Elo rating system. All available strategies (bandit, mopt, replicator, cem for operators; weighted, pareto, format, ga, qea, bayesian, markov for seeds) run in shadow; Elo Thompson-samples which to trust each iteration. Ratings decayed periodically to model non-stationarity
+- **Elo arbitration** (`--elo`): combined operator + seed scheduling via Bayesian Elo rating system. All available strategies (bandit, mopt, replicator, cem, exp3, eps_greedy, hierarchical, gp_ucb for operators; weighted, pareto, format, ga, qea, bayesian, markov for seeds) run in shadow; Elo Thompson-samples which to trust each iteration. Ratings decayed periodically to model non-stationarity
+- **EXP3 adversarial bandit** (`--exp3`): adversarial bandit algorithm for operator selection in non-stationary reward environments. Uses importance-weighted rewards with exponential weight updates — automatically tracks the best operator even when reward distributions shift over time. Exploration rate `gamma` controls the trade-off (default 0.1, range [0,1]). Window decay discounts old observations to adapt to changing conditions.
+- **Epsilon-greedy with annealing** (`--eps-greedy`): classic exploration/exploitation strategy with exponential epsilon decay. Starts fully exploratory (epsilon=1.0) and anneals toward exploitation at rate `decay` (default 0.9995, min epsilon 0.01). Q-values track per-operator average reward with incremental updates. Serves as the simplest baseline for comparing against more complex bandit algorithms.
+- **Hierarchical bandit** (`--hierarchical-bandit`): two-level Thompson sampling — first picks an operator category (bit/byte/block/dict/structural/radamsa/format/adaptive) via Beta posterior sampling, then selects an operator within the chosen category. Success/failure feedback updates both the category-level and operator-level posteriors, so operators sharing a category compete less destructively. Arm decay gradually discounts old observations.
+- **GP-UCB bandit** (`--gp-ucb`): Gaussian Process Upper Confidence Bound for operator selection using a simplified RBF kernel over one-hot-by-category features. Running-moments track per-operator mean and variance; UCB score = mu + beta * sigma selects operators with high potential. The kernel captures covariance between operators in the same category, allowing information sharing. Unobserved operators get a fixed exploration bonus until `min_samples` (default 3) observations accumulate.
 - **CEM in Elo** (`--mc-cem`): when CEM byte distribution is fitted, "cem" competes alongside bandit/mopt/replicator as an operator scheduling strategy — Elo learns when CEM-generated byte values outperform other selection methods
 - **Markov-gen in Elo** (`--markov-gen`): Markov chain seed generation is now arbitrated alongside weighted/pareto/ga/qea/bayesian — Elo picks the seed strategy that finds the most new coverage
 - **Jaccard index**: average pairwise edge-set overlap (xxhash-fast) for corpus redundancy monitoring
@@ -262,6 +266,9 @@ fuzzer-tool fuzz targets/grep_read.so -c -F --no-shm
 # Tailslayer hedged reader fuzzing (in-process .so mode, ~66 eps)
 fuzzer-tool fuzz targets/tailslayer_read.so -c --inprocess
 
+# FFmpeg demux+decode pipeline (vendored FFmpeg 7.1, exercises 300+ format/codec paths)
+fuzzer-tool fuzz targets/ffmpeg_read -c
+
 # Multi-target with glob — skips .c/.h/.py automatically
 fuzzer-tool fuzz 'targets/fuzz_*' -c -d corpus/fgrep
 
@@ -298,6 +305,15 @@ fuzzer-tool rank ./target -d corpus -n 10 --dump top_seeds
 | `--mc-cem` | Cross-Entropy Method byte distribution |
 | `--mopt` | MOpt PSO operator scheduling (alternative to bandit) |
 | `--replicator` | Replicator dynamics operator scheduling (evolutionary game theory) |
+| `--exp3` | EXP3 adversarial bandit operator scheduling (non-stationary rewards) |
+| `--exp3-gamma FLOAT` | EXP3 exploration rate in [0,1] (default: 0.1) |
+| `--eps-greedy` | Epsilon-greedy operator scheduling with exponential annealing |
+| `--eps-greedy-epsilon0 FLOAT` | Initial epsilon for epsilon-greedy (default: 1.0) |
+| `--eps-greedy-decay FLOAT` | Epsilon decay rate per pull (default: 0.9995) |
+| `--hierarchical-bandit` | Hierarchical bandit operator scheduling (category → operator) |
+| `--gp-ucb` | GP-UCB operator scheduling with RBF kernel covariance |
+| `--gp-length-scale FLOAT` | GP kernel RBF length scale (default: 1.0) |
+| `--gp-beta FLOAT` | GP-UCB exploration parameter (default: 2.0) |
 | `--shapley` | Shapley value operator attribution (fair credit distribution) |
 | `--mi-guided` | Mutual information guided mutation (target high-MI byte positions) |
 | `--renyi-weight` | Rényi entropy weighting in seed selection (boost cold-edge seeds) |
@@ -306,7 +322,7 @@ fuzzer-tool rank ./target -d corpus -n 10 --dump top_seeds
 | `--resume` | Resume from saved state |
 | `--crash-codes N` | Additional exit codes to treat as crashes |
 | `-j N` | Parallel fuzzing with N workers |
-| `--elo` | Elo arbitration between operator strategies (bandit/mopt/replicator/cem) and seed strategies (ga/qea/weighted/pareto/format/bayesian/markov) |
+| `--elo` | Elo arbitration between operator strategies (bandit/mopt/replicator/cem/exp3/eps_greedy/hierarchical/gp_ucb) and seed strategies (ga/qea/weighted/pareto/format/bayesian/markov) |
 | `--sensitivity` | Per-byte sensitivity analysis (Lyapunov exponent) for mutation targeting |
 | `--secretary` | Secretary-problem optimal stopping for seed/operator/corpus scheduling |
 | `--bayesian` | Bayesian methods: Thompson-sampled seed selection, hierarchical operator priors, Bayesian coverage growth model |
@@ -338,6 +354,7 @@ fuzzer-tool rank ./target -d corpus -n 10 --dump top_seeds
 | `fuzz` | Run coverage-guided fuzzing (default) |
 | `rank` | Rank corpus seeds by interestingness (edge coverage, rarity, subsumption) |
 | `minimize` | Minimize corpus by removing redundant inputs |
+| `sweep` | Linear corpus scan — replay every seed without mutations or scheduling (find missed crashes) |
 | `tmin` | Minimize a crash to smallest reproducer |
 | `replay` | Replay a crash input against the target |
 | `verify` | Re-run crashes with ASAN target to confirm memory bugs |
@@ -357,6 +374,22 @@ fuzzer-tool rank <target> -d <corpus> [-n TOP] [--dump PREFIX]
 | `-d DIR` | Corpus directory |
 | `-n N` | Number of top seeds to show (default 10) |
 | `--dump PREFIX` | Dump top seeds to files `PREFIX.0`, `PREFIX.1`, ... |
+
+### Sweep
+
+Linearly replay every seed in the corpus without mutations, scheduling, or minimization — finds crashes the target would have triggered on corpus seeds but that were missed during normal fuzzing.
+
+```bash
+fuzzer-tool sweep <target> -d <corpus> [-c]
+```
+
+| Flag | Description |
+|------|-------------|
+| `-d DIR` | Corpus directory (reads from `seeds/` and `irreplaceable/`) |
+| `-c` | Enable coverage tracking (not used for scheduling, just reporting) |
+| `--timeout MS` | Per-seed timeout in milliseconds (default: same as fuzz mode) |
+
+No mutations, no scheduler, no coverage-guided feedback loop. Each seed is executed once as-is.
 
 ### Estimate Crash ETA
 
@@ -457,9 +490,15 @@ fuzzer-tool minimize ./target -d corpus -c
 fuzzer-tool minimize ./target -d corpus -c --rate-distortion --target-frac 0.95
 ```
 
+### Irreplaceable Seeds
+
+Seeds placed in `corpus/irreplaceable/` are never pruned by minimization. When the minimizer's set-cover identifies mandatory (keystone) seeds that uniquely cover edges, those seeds are promoted to irreplaceable — copied to `irreplaceable/` and the original in `seeds/` is removed. On subsequent runs they are loaded alongside regular seeds and bypass all pruning logic.
+
+Use `corpus/irreplaceable/` for seeds that must always be in the active set (e.g., known reproducers, structural format seeds).
+
 ## Test Suite
 
-2398+ tests covering all modules, including 67 regression tests for historical bugfixes (`tests/test_regressions.py`). Run with:
+2532+ tests covering all modules, including 67 regression tests for historical bugfixes (`tests/test_regressions.py`). Run with:
 
 ```bash
 pip install -e ".[dev]"
@@ -535,6 +574,15 @@ tools/build_targets.sh --asan --clang-scov    # ASAN + compiler-inserted coverag
 # Build vendored (libpng+zlib) targets with compiler-IR comparison tracing
 tools/build_targets.sh --vendor-tracecmp
 tools/build_targets.sh --vendor-tracecmp --asan   # With ASAN (two-step build)
+
+# Build a single target by name (saves time when iterating on one target)
+tools/build_targets.sh --target ffmpeg_read
+tools/build_targets.sh --target ffmpeg_read,test_target          # comma-separated
+tools/build_targets.sh --target ffmpeg_read --target test_target # repeatable
+tools/build_targets.sh --fast --target test_target               # combined with existing flags
+
+# List all available target names
+tools/build_targets.sh --list-targets
 ```
 
 The build script compiles every target as both an executable and a `.so` shared library, in ASAN and no-ASAN variants:

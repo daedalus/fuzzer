@@ -1,6 +1,8 @@
 # AGENTS.md — fuzzer-tool
 
 RULES:
+ALWAYS CHECK WHEN REMOVING CODE THAT IS IN THE SCOPE OF THE REMOVAL, DO NOT REMOVE UNRELATED CODE.
+DO NOT NUKE the REPO.
 Always create TODOs.
 Always update the README.md with the new features added.
 Always git commit and push after finish a task.

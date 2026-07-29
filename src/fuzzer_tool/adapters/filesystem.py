@@ -178,7 +178,7 @@ def load_corpus(
 
     Handles both full files (id_*.*) and delta-encoded files (delta_*.json).
     Delta files are reconstructed from their parent chain. Irreplaceable
-    seeds are loaded from corpus/irreplaceable/ and tracked separately so
+    seeds are loaded from corpus/seeds/irreplaceable/ and tracked separately so
     they can be excluded from corpus pruning.
 
     Args:
@@ -188,7 +188,7 @@ def load_corpus(
         add_default: If True and corpus is empty, add b"AAAAAAAA" as a
             synthetic default seed. Set False for commands that need to
             reflect the actual on-disk corpus state (e.g. sweep).
-        load_irreplaceable: If True, seeds from corpus/irreplaceable/ are
+        load_irreplaceable: If True, seeds from corpus/seeds/irreplaceable/ are
             tracked as irreplaceable and excluded from corpus pruning.
 
     Returns:
@@ -240,7 +240,12 @@ def load_corpus(
                 continue
             if sub.name == "pruned":
                 continue
-            _load_full_from_dir(sub, mark_irreplaceable=mark_irreplaceable)
+            # Propagate mark_irreplaceable: if the subdirectory itself is
+            # named "irreplaceable", mark its contents regardless of the
+            # parent's mark_irreplaceable value. This handles the
+            # corpus/seeds/irreplaceable/ layout.
+            sub_mark = mark_irreplaceable or sub.name == "irreplaceable"
+            _load_full_from_dir(sub, mark_irreplaceable=sub_mark)
 
     # Discover all subdirectories in corpus_dir — load from each except pruned/
     for entry in sorted(corpus_dir.iterdir(), key=lambda p: p.name):
@@ -396,10 +401,10 @@ def save_irreplaceable(
     irreplaceable_hashes: set[str],
     bloom: BloomFilter | None = None,
 ) -> bool:
-    """Save input to corpus/irreplaceable/ and mark as irreplaceable.
+    """Save input to corpus/seeds/irreplaceable/ and mark as irreplaceable.
 
     Irreplaceable seeds are never pruned by auto_minimize_corpus().
-    Saved to corpus/irreplaceable/ using the same two-digit hash subdirectory layout.
+    Saved to corpus/seeds/irreplaceable/ using the same two-digit hash subdirectory layout.
 
     Args:
         data: Input bytes to save.
@@ -427,7 +432,7 @@ def save_irreplaceable(
     if len(seen_hashes) > SEEN_HASHES_MAX:
         seen_hashes.clear()
 
-    irep_dir = corpus_dir / "irreplaceable"
+    irep_dir = corpus_dir / "seeds" / "irreplaceable"
     irep_dir.mkdir(parents=True, exist_ok=True)
     sub_dir = irep_dir / h[:2]
     sub_dir.mkdir(parents=True, exist_ok=True)

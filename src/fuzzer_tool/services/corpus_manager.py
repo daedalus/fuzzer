@@ -54,9 +54,9 @@ class CorpusManager:
     def load_corpus(self):
         f = self.f
         f.corpus, f.seen_hashes, f.irreplaceable_hashes = load_corpus(f.corpus_dir, f.bloom)
-        # Ensure the irreplaceable/ directory exists so seeds can be
+        # Ensure the irreplaceable/ directory exists inside seeds/ so seeds can be
         # promoted to irreplaceable without a late mkdir.
-        (f.corpus_dir / "irreplaceable").mkdir(parents=True, exist_ok=True)
+        (f.corpus_dir / "seeds" / "irreplaceable").mkdir(parents=True, exist_ok=True)
 
     def init_seed_metadata(self):
         f = self.f
@@ -334,7 +334,7 @@ class CorpusManager:
                         "(rising right tail — minimizing)",
                         seed_moments.skewness,
                     )
-                    f._auto_minimize_corpus()
+                    f._defer_minimize()
             if len(f._corpus_size_history) > 1000:
                 f._corpus_size_history = f._corpus_size_history[-500:]
             if f._corpus_secretary:
@@ -343,9 +343,9 @@ class CorpusManager:
                 stop, _reason = f._corpus_secretary.should_stop()
                 if stop:
                     log.info("Corpus secretary stopping: %s", _reason)
-                    f._auto_minimize_corpus()
+                    f._defer_minimize()
             if f.max_corpus > 0 and len(f.corpus) > f.max_corpus:
-                f._auto_minimize_corpus()
+                f._defer_minimize()
             if len(f._corpus_size_history) >= 100:
                 sorted_sizes = sorted(f._corpus_size_history)
                 p90 = sorted_sizes[-len(sorted_sizes) // 10]
@@ -419,7 +419,7 @@ class CorpusManager:
                 unique.append(seed)
         del seen  # free intermediate seed-hash set
 
-        # Irreplaceable seeds (loaded from corpus/irreplaceable/) are never pruned.
+        # Irreplaceable seeds (loaded from corpus/seeds/irreplaceable/) are never pruned.
         # Separate them from the unique pool before minimization; re-add after.
         irreplaceable_seeds: list[bytes] = []
         if f.irreplaceable_hashes:
@@ -642,8 +642,12 @@ class CorpusManager:
             kept_set = {_hash(s) for s in unique}
             # Prune full seeds — seeds are stored in two-digit hash
             # subdirectories (seeds/ab/id_abc...), so walk recursively.
+            # Skip the irreplaceable/ subdirectory — those seeds are never pruned.
             for fh in seeds_dir.rglob("id_*"):
                 if not fh.is_file():
+                    continue
+                # Skip files under seeds/irreplaceable/ (never pruned)
+                if "irreplaceable" in fh.parts:
                     continue
                 h = fh.name[3:]
                 if h not in kept_set:

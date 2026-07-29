@@ -1,4 +1,4 @@
-"""Tests for irreplaceable seeds — seeds in corpus/irreplaceable/ that are never pruned."""
+"""Tests for irreplaceable seeds — seeds in corpus/seeds/irreplaceable/ that are never pruned."""
 
 import hashlib
 import tempfile
@@ -179,13 +179,13 @@ class TestIrreplaceableSeeds:
         assert h in seen
 
         # Verify file exists on disk
-        irr_dir = tmp_path / "irreplaceable"
+        irr_dir = tmp_path / "seeds" / "irreplaceable"
         assert irr_dir.exists()
         files = list(irr_dir.rglob("*"))
         assert any(f.read_bytes() == data for f in files if f.is_file())
 
     def test_load_corpus_loads_irreplaceable_together(self, tmp_path):
-        """load_corpus loads from both seeds/ and irreplaceable/."""
+        """load_corpus loads from both seeds/ and seeds/irreplaceable/."""
         from fuzzer_tool.adapters.filesystem import load_corpus
 
         # Create seeds/ with one file
@@ -193,8 +193,8 @@ class TestIrreplaceableSeeds:
         seeds.mkdir(parents=True)
         (seeds / "id_seed").write_bytes(b"seed_data")
 
-        # Create irreplaceable/ with one file
-        irr = tmp_path / "irreplaceable"
+        # Create seeds/irreplaceable/ with one file
+        irr = tmp_path / "seeds" / "irreplaceable"
         irr.mkdir(parents=True)
         (irr / "id_keystone").write_bytes(b"keystone_data")
 
@@ -207,7 +207,7 @@ class TestIrreplaceableSeeds:
         assert hash_data(b"seed_data") not in irr_hashes
 
     def test_irreplaceable_dir_does_not_exist(self, tmp_path):
-        """load_corpus handles missing irreplaceable/ directory gracefully."""
+        """load_corpus handles missing seeds/irreplaceable/ directory gracefully."""
         from fuzzer_tool.adapters.filesystem import load_corpus
 
         seeds = tmp_path / "seeds"
