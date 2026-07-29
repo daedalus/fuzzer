@@ -1010,6 +1010,79 @@ def cmd_estimate(args):
     print(f"  Reasoning: {eta.reasoning}")
 
 
+def _probe_so_function_sw(target: str) -> str:
+    """Probe a shared object for the best fuzz entry point (sweep)."""
+    import subprocess as _sp
+
+    try:
+        r = _sp.run(["nm", "-D", target], capture_output=True, text=True, timeout=5)
+        syms = r.stdout
+    except OSError:
+        syms = ""
+    if "LLVMFuzzerTestOneInput" in syms:
+        return "LLVMFuzzerTestOneInput"
+    for line in syms.splitlines():
+        parts = line.split()
+        if len(parts) >= 3 and parts[-1].startswith("fuzz_"):
+            return parts[-1]
+    return "LLVMFuzzerTestOneInput"
+
+
+def _run_so_target(so_path: str, data: bytes, timeout: float) -> tuple[int, str, int]:
+    """Execute a .so fuzz target in-process via ctypes with crash detection.
+
+    Loads the shared object, calls the fuzz function, and catches SIGSEGV/
+    SIGABRT via signal handlers so target crashes don't kill the fuzzer.
+    Timeout enforced via SIGALRM + setitimer.
+
+    Returns (returncode, stderr, pid=0).
+    """
+    import ctypes as _ct
+    import signal as _sig
+
+    func_name = _probe_so_function_sw(so_path)
+    try:
+        _lib = _ct.CDLL(so_path)
+    except OSError as e:
+        return -2, f"failed to load .so: {e}", 0
+    _func = getattr(_lib, func_name, None)
+    if _func is None:
+        return -2, f"function {func_name} not found in {so_path}", 0
+    _func.restype = _ct.c_int
+    _func.argtypes = [_ct.POINTER(_ct.c_uint8), _ct.c_size_t]
+
+    crashed = [False]
+    crashed_sig = [0]
+    timed_out = [False]
+
+    def _crash_handler(signum, _frame):
+        crashed[0] = True
+        crashed_sig[0] = signum
+
+    def _alarm_handler(signum, _frame):
+        timed_out[0] = True
+
+    old_segv = _sig.signal(_sig.SIGSEGV, _crash_handler)
+    old_abrt = _sig.signal(_sig.SIGABRT, _crash_handler)
+    old_alarm = _sig.signal(_sig.SIGALRM, _alarm_handler)
+    _sig.setitimer(_sig.ITIMER_REAL, timeout)
+    try:
+        buf = (_ct.c_uint8 * len(data))(*data)
+        rc = _func(buf, len(data))
+        if timed_out[0]:
+            return -1, "timeout", 0
+        return int(rc), "", 0
+    except Exception as e:
+        return -2, str(e), 0
+    finally:
+        _sig.setitimer(_sig.ITIMER_REAL, 0)
+        _sig.signal(_sig.SIGALRM, old_alarm)
+        _sig.signal(_sig.SIGSEGV, old_segv)
+        _sig.signal(_sig.SIGABRT, old_abrt)
+        if crashed[0]:
+            return -(128 + crashed_sig[0]), f"SIG{crashed_sig[0]}", 0
+
+
 def cmd_sweep(args):
     """Linearly scan corpus seeds for missed crashes.
 
@@ -1019,6 +1092,9 @@ def cmd_sweep(args):
     during fuzzing that triggered no coverage event but still crash.
     """
     _validate_target(args.target)
+
+    # Detect .so target and switch to in-process ctypes execution
+    target_is_so = args.target.lower().endswith((".so", ".dylib", ".dll"))
 
     corpus_dir = Path(args.corpus)
     if not corpus_dir.is_dir():
@@ -1057,7 +1133,11 @@ def cmd_sweep(args):
             sys.stderr.flush()
 
         try:
-            if args.file_mode:
+            if target_is_so:
+                returncode, stderr, _ = _run_so_target(
+                    args.target, seed, timeout=args.timeout
+                )
+            elif args.file_mode:
                 tmp_dir = Path("/tmp") / f"sweep_{os.getpid()}"
                 tmp_dir.mkdir(parents=True, exist_ok=True)
                 try:
