@@ -1123,9 +1123,12 @@ def cmd_sweep(args):
     )
     from fuzzer_tool.core.sanitizer import SanitizerReport
 
+    import time as _time
+
     found = 0
     total = len(seeds)
     seeds.sort(key=lambda s: hash_data(s))
+    _sweep_start = _time.monotonic()
 
     for i, seed in enumerate(seeds):
         if (i + 1) % 100 == 0 or i == 0:
@@ -1190,7 +1193,9 @@ def cmd_sweep(args):
                 crash_path.write_bytes(seed)
             print(f"\n  [+] Crash: rc={returncode}, hash={h[:12]} -> {crash_name}")
 
-    print(f"\n[*] Sweep complete: {total} seeds processed, {found} crashes found")
+    _elapsed = _time.monotonic() - _sweep_start
+    _eps = total / _elapsed if _elapsed > 0 else 0
+    print(f"\n[*] Sweep complete: {total} seeds processed, {found} crashes found ({_eps:.0f} seeds/s)")
     return 0
 
 
