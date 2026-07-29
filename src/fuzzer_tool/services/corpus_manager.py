@@ -334,7 +334,7 @@ class CorpusManager:
                         "(rising right tail — minimizing)",
                         seed_moments.skewness,
                     )
-                    f._defer_minimize()
+                    f._auto_minimize_corpus()
             if len(f._corpus_size_history) > 1000:
                 f._corpus_size_history = f._corpus_size_history[-500:]
             if f._corpus_secretary:
@@ -343,9 +343,9 @@ class CorpusManager:
                 stop, _reason = f._corpus_secretary.should_stop()
                 if stop:
                     log.info("Corpus secretary stopping: %s", _reason)
-                    f._defer_minimize()
+                    f._auto_minimize_corpus()
             if f.max_corpus > 0 and len(f.corpus) > f.max_corpus:
-                f._defer_minimize()
+                f._auto_minimize_corpus()
             if len(f._corpus_size_history) >= 100:
                 sorted_sizes = sorted(f._corpus_size_history)
                 p90 = sorted_sizes[-len(sorted_sizes) // 10]
