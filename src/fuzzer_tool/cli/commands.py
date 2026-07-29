@@ -1029,58 +1029,46 @@ def _probe_so_function_sw(target: str) -> str:
 
 
 def _run_so_target(so_path: str, data: bytes, timeout: float) -> tuple[int, str, int]:
-    """Execute a .so fuzz target in-process via ctypes with crash detection.
+    """Execute a .so fuzz target in a subprocess via ctypes.
 
-    Loads the shared object, calls the fuzz function, and catches SIGSEGV/
-    SIGABRT via signal handlers so target crashes don't kill the fuzzer.
-    Timeout enforced via SIGALRM + setitimer.
+    Spawns a Python subprocess that loads the .so, calls the fuzz function,
+    and exits with the return code. The subprocess provides crash isolation
+    — target SIGSEGV/SIGABRT kills only the child, not the fuzzer.
 
-    Returns (returncode, stderr, pid=0).
+    Returns (returncode, stderr, child_pid).
     """
-    import ctypes as _ct
-    import signal as _sig
+    import subprocess as _sp
+    import sys as _sys
 
     func_name = _probe_so_function_sw(so_path)
+
+    _script = (
+        "import ctypes,sys;"
+        "d=sys.stdin.buffer.read();"
+        "lib=ctypes.CDLL(sys.argv[1]);"
+        "fn=getattr(lib,sys.argv[2]);"
+        "fn.restype=ctypes.c_int;"
+        "fn.argtypes=[ctypes.POINTER(ctypes.c_uint8),ctypes.c_size_t];"
+        "buf=(ctypes.c_uint8*len(d))(*d);"
+        "rc=fn(buf,len(buf));"
+        "sys.exit(max(0,min(rc,125)))"
+    )
     try:
-        _lib = _ct.CDLL(so_path)
-    except OSError as e:
-        return -2, f"failed to load .so: {e}", 0
-    _func = getattr(_lib, func_name, None)
-    if _func is None:
-        return -2, f"function {func_name} not found in {so_path}", 0
-    _func.restype = _ct.c_int
-    _func.argtypes = [_ct.POINTER(_ct.c_uint8), _ct.c_size_t]
-
-    crashed = [False]
-    crashed_sig = [0]
-    timed_out = [False]
-
-    def _crash_handler(signum, _frame):
-        crashed[0] = True
-        crashed_sig[0] = signum
-
-    def _alarm_handler(signum, _frame):
-        timed_out[0] = True
-
-    old_segv = _sig.signal(_sig.SIGSEGV, _crash_handler)
-    old_abrt = _sig.signal(_sig.SIGABRT, _crash_handler)
-    old_alarm = _sig.signal(_sig.SIGALRM, _alarm_handler)
-    _sig.setitimer(_sig.ITIMER_REAL, timeout)
-    try:
-        buf = (_ct.c_uint8 * len(data))(*data)
-        rc = _func(buf, len(data))
-        if timed_out[0]:
-            return -1, "timeout", 0
-        return int(rc), "", 0
+        proc = _sp.Popen(
+            [_sys.executable, "-c", _script, so_path, func_name],
+            stdin=_sp.PIPE,
+            stdout=_sp.DEVNULL,
+            stderr=_sp.PIPE,
+        )
+        _stdout, stderr_b = proc.communicate(input=data, timeout=timeout)
+        rc = proc.returncode or 0
+        return rc, stderr_b.decode(errors="replace"), proc.pid
+    except _sp.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        return -1, "timeout", proc.pid
     except Exception as e:
         return -2, str(e), 0
-    finally:
-        _sig.setitimer(_sig.ITIMER_REAL, 0)
-        _sig.signal(_sig.SIGALRM, old_alarm)
-        _sig.signal(_sig.SIGSEGV, old_segv)
-        _sig.signal(_sig.SIGABRT, old_abrt)
-        if crashed[0]:
-            return -(128 + crashed_sig[0]), f"SIG{crashed_sig[0]}", 0
 
 
 def cmd_sweep(args):
