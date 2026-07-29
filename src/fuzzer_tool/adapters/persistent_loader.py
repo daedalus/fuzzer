@@ -10,6 +10,7 @@ Protocol:
   Quit:   "QUIT\n"
 """
 
+import collections
 import contextlib
 import logging
 import os
@@ -183,6 +184,10 @@ class PersistentLoader:
         self._restarting = False
         self._child_pid_file: str | None = None
 
+        # Stderr buffer: drained stderr lines accumulated since last consume
+        self._stderr_lock = threading.Lock()
+        self._stderr_buffer: collections.deque[str] = collections.deque(maxlen=2000)
+
         # Throughput monitoring
         self._exec_times: list[float] = []  # rolling window of exec durations
         self._exec_window_size = 100  # track last N execs
@@ -234,18 +239,31 @@ class PersistentLoader:
         return False
 
     def _drain_stderr(self):
-        """Consume stderr to prevent pipe-buffer deadlock."""
+        """Buffer stderr output from the loader subprocess.
+
+        Lines are stored in a ring buffer for per-call retrieval via
+        consume_stderr(). Also logs first 200 chars of each line at debug
+        level for diagnostics.
+        """
         proc = self._proc
         if proc is None or proc.stderr is None:
             return
         try:
             for line in proc.stderr:
-                # Log first 200 chars to avoid flooding; drop the rest
                 text = line.decode(errors="replace").rstrip()
                 if text:
                     log.debug("loader stderr: %s", text[:200])
+                    with self._stderr_lock:
+                        self._stderr_buffer.append(text + "\n")
         except (ValueError, OSError):
             pass
+
+    def consume_stderr(self) -> str:
+        """Return and clear stderr accumulated since the last call."""
+        with self._stderr_lock:
+            lines = list(self._stderr_buffer)
+            self._stderr_buffer.clear()
+        return "".join(lines)
 
     def run_one(self, data: bytes) -> tuple[int, bytes | None]:
         if not self._ready or not self._proc:

@@ -549,7 +549,8 @@ class InProcessRunner:
         """Persistent subprocess — one process, many calls."""
         rc, bitmap = self._persistent.run_one(data)
         self._persistent._last_bitmap = bitmap
-        return rc, ""
+        stderr = self._persistent.consume_stderr() if self.capture_stderr else ""
+        return rc, stderr
 
     def _run_c_forkserver(self, data: bytes) -> tuple[int, str]:
         """Forkserver via compiled C binary."""

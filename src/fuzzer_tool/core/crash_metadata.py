@@ -60,6 +60,9 @@ class CrashMetadata:
     rbp: int = 0
     instruction_bytes: str = ""
 
+    # Raw stderr from the target (contains ASAN file:line info)
+    raw_stderr: str = ""
+
     # Return code for non-sanitizer crashes
     returncode: int | None = None
 
@@ -180,6 +183,12 @@ class CrashMetadata:
                 lines.append(
                     f"diff_bytes: {len(self.diff_bytes)} bytes differ at offsets [{offsets}]"
                 )
+            lines.append("")
+
+        # Raw stderr (ASAN diagnostics with file:line)
+        if self.raw_stderr:
+            lines.append("=== raw stderr ===")
+            lines.append(self.raw_stderr)
             lines.append("")
 
         # Input hexdump

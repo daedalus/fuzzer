@@ -552,6 +552,10 @@ def save_crash(
     if metadata is None:
         metadata = CrashMetadata()
 
+    # Store raw stderr (contains ASAN file:line diagnostics)
+    if not metadata.raw_stderr:
+        metadata.raw_stderr = stderr
+
     metadata.build_cluster_id(sig)
 
     # Derive error short name for filename

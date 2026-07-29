@@ -1,14 +1,16 @@
 # AGENTS.md — fuzzer-tool
 
 RULES:
-ALWAYS CHECK WHEN REMOVING CODE THAT IS IN THE SCOPE OF THE REMOVAL, DO NOT REMOVE UNRELATED CODE.
-DO NOT NUKE the REPO.
-Always create TODOs.
-Always update docs/DEEP_DIVE.md with new features added (the comprehensive reference). Update README.md only when adding or changing high-level capabilities visible in the quick-start or feature overview.
-Always git commit and push after finish a task.
-All fuzz targets must be compiled with ASAN instrumentation (`-fsanitize=address`).
-All fuzz targets must have AFL edge coverage via `afl_shim.c` (`-include src/fuzzer_tool/adapters/afl_shim.c`). Pre-compile library sources as `.o` files, link with shim included only in the target wrapper.
-Never commit binary files or corpus directories — build targets from source, keep corpus data local.
+- Stop suggesting: `use_direct_lite = False`  for solving ASAN with `direct_lite` mode, debug the root cause instead.
+- ALWAYS USE CLANG instead of gcc
+- ALWAYS CHECK WHEN REMOVING CODE THAT IS IN THE SCOPE OF THE REMOVAL, DO NOT REMOVE UNRELATED CODE.
+- DO NOT NUKE the REPO.
+- Always create TODOs.
+- Always update docs/DEEP_DIVE.md with new features added (the comprehensive reference). Update README.md only when adding or changing high-level capabilities visible in the quick-start or feature overview.
+- Always git commit and push after finish a task.
+- All fuzz targets must be compiled with ASAN instrumentation (`-fsanitize=address`).
+- All fuzz targets must have AFL edge coverage via `afl_shim.c` (`-include src/fuzzer_tool/adapters/afl_shim.c`). Pre-compile library sources as `.o` files, link with shim included only in the target wrapper.
+- Never commit binary files or corpus directories — build targets from source, keep corpus data local.
 
 
 ## Overview

@@ -33,7 +33,7 @@ def _find_libasan() -> str | None:
 
 
 def main() -> None:
-    print("[*] Setup libasan in LD_PRELOAD")
+    print("[*] Setup libasan in LD_PRELOAD", file=sys.stdout)
     libasan = _find_libasan()
     if libasan is None:
         print("[!] libasan not found — ASAN wrapper ineffective", file=sys.stderr)

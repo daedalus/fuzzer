@@ -222,6 +222,28 @@ static int __afl_guard_signals[] = {
     (int)(sizeof(__afl_guard_signals) / sizeof(__afl_guard_signals[0]))
 
 static void __afl_crash_handler(int sig) {
+    /* Invoke the saved old handler for this signal so that ASAN can write
+     * its diagnostic report to stderr before we siglongjmp back to
+     * __afl_guarded_call.  ASAN's handler was saved in __afl_old_handlers
+     * by __afl_install_crash_handlers() during library initialization.
+     *
+     * ASAN options abort_on_error=0 (set by the fuzzer's __asan_default_options
+     * shim or ASAN_OPTIONS env) means ASAN writes the report and returns
+     * without calling abort().  After the report is written, we siglongjmp
+     * back to __afl_guarded_call which returns -sig to the Python runner.
+     *
+     * Without this, ASAN's handler is overridden but never called, so the
+     * ASAN report goes to stderr but is silently lost. */
+    for (int i = 0; i < __afl_NUM_GUARD_SIGNALS; i++) {
+        if (__afl_guard_signals[i] == sig) {
+            struct sigaction *old = &__afl_old_handlers[i];
+            if (old->sa_handler != SIG_DFL && old->sa_handler != SIG_IGN &&
+                old->sa_handler != __afl_crash_handler) {
+                old->sa_handler(sig);
+            }
+            break;
+        }
+    }
     siglongjmp(__afl_jmp_buf, sig);
 }
 
