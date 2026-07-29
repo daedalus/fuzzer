@@ -83,6 +83,28 @@ class TestGALifecycle:
         parent = ga.select_parent()
         assert isinstance(parent, Individual)
 
+    def test_rank_tournament_small_pool(self):
+        """Rank-based tournament with pool of size 1 returns the only element."""
+        ga = GALifecycle(pop_size=5, tournament_size=3)
+        pool = [Individual(data=b"only", fitness=1.0)]
+        result = ga._rank_tournament_select(pool)
+        assert result is pool[0]
+
+    def test_rank_tournament_select_returns_fitter_individual_on_average(self):
+        """_tournament_select should favor high-fitness individuals."""
+        ga = GALifecycle(pop_size=100, tournament_size=3)
+        pool = [Individual(data=b"x_%d" % i, fitness=float(i)) for i in range(100)]
+        # Run many selections and compute average rank (0 = worst, 99 = best)
+        ranks = []
+        for _ in range(2000):
+            selected = ga._tournament_select(pool)
+            ranks.append(int(selected.fitness))
+        avg_rank = sum(ranks) / len(ranks)
+        # Average rank should be above the midpoint (49.5) if selection is biased
+        # toward high fitness.  For k=3, expected mean rank ~ 75.
+        assert avg_rank > 60.0, f"Expected avg_rank > 60, got {avg_rank}"
+        assert avg_rank < 90.0, f"Expected avg_rank < 90, got {avg_rank}"
+
     def test_pick_seed_returns_bytes(self):
         ga = GALifecycle(pop_size=5)
         for i in range(5):

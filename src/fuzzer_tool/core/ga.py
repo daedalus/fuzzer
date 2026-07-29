@@ -325,11 +325,48 @@ class GALifecycle:
                 return self._tournament_select(pool)
         return self._tournament_select(self.population)
 
+    @staticmethod
+    def _ensure_pool_sorted(pool: list[Individual]) -> list[Individual]:
+        """Return pool sorted by fitness descending if not already sorted.
+
+        In _evolve(), the population is sorted before breeding, so this is
+        a no-op for global selection (Timsort detects the existing run in
+        O(N) time).  Intra-species pools are small and rarely pre-sorted so
+        the O(N log N) cost is negligible."""
+        for i in range(len(pool) - 1):
+            if pool[i].fitness < pool[i + 1].fitness:
+                return sorted(pool, key=lambda i: i.fitness, reverse=True)
+        return pool
+
+    def _rank_tournament_select(self, pool: list[Individual]) -> Individual:
+        """Rank-based tournament selection using order-statistics identity.
+
+        Instead of drawing k random individuals and taking the best, compute
+        the rank directly: rank = int(N * (1 - (1-U)^(1/k))) where
+        U ~ Uniform(0,1).  This is mathematically equivalent to k-tournament
+        but requires only one random draw and no fitness comparisons.
+
+        The pool must be sorted by fitness descending for the rank to be valid.
+        """
+        n = len(pool)
+        if n <= 1:
+            return pool[0]
+        k = min(self.tournament_size, n)
+        u = random.random()
+        # Clip u to avoid log(0) or pow issues with tiny values
+        u = max(u, 1e-10)
+        rank = int(n * (1.0 - u ** (1.0 / k)))
+        rank = min(rank, n - 1)
+        return pool[rank]
+
     def _tournament_select(self, pool: list[Individual]) -> Individual:
-        """Tournament selection: pick best of k random individuals."""
-        k = min(self.tournament_size, len(pool))
-        candidates = random.sample(pool, k)
-        return max(candidates, key=lambda i: i.fitness)
+        """Tournament selection: pick best of k random individuals.
+
+        Delegates to _rank_tournament_select after ensuring the pool is
+        sorted.  The two are distributionally identical; the rank-based
+        version avoids k random draws + k comparisons."""
+        sorted_pool = self._ensure_pool_sorted(pool)
+        return self._rank_tournament_select(sorted_pool)
 
     def _evolve(self, edge_tracker: EdgeTracker):
         """Run one generation: evaluate, cull, breed."""
