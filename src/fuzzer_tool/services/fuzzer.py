@@ -1146,8 +1146,9 @@ class Fuzzer:
                 finally:
                     with contextlib.suppress(OSError):
                         os.unlink(_shim_path)
-            # UBSAN detection — set UBSAN_OPTIONS to make errors fatal.
-            # The UBSAN runtime is preloaded by ldpreload_wrapper.py.
+            # UBSAN detection — set UBSAN_OPTIONS so errors abort the
+            # target for crash detection.  The UBSAN runtime was already
+            # preloaded via LD_PRELOAD by ldpreload_wrapper.py.
             target_is_ubsan = _detect_ubsan(self.target)
             if target_is_ubsan:
                 ubsan_opts = os.environ.get("UBSAN_OPTIONS", "")
