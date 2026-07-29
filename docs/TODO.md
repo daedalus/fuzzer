@@ -1,57 +1,38 @@
 # TODO — fuzzer-tool Roadmap
 
-## Done
-- [x] Bloom filter for corpus dedup (128KB for 100K entries)
-- [x] Thompson sampling bandit for mutation selection
-- [x] CEM byte distribution learning
-- [x] Ptrace coverage (function-entry breakpoints)
-- [x] Crash signature dedup (ASAN/MSAN/TSAN/UBSAN)
-- [x] Stats JSON export
-- [x] CEM engagement fix (refit on elite count, not just interval)
-- [x] Sanitizer regex groups closed (ASAN/TSAN)
-- [x] Timeout crash detection fix
-- [x] Ptrace initial SIGTRAP crash detection
-- [x] Consolidated benchmark shell scripts: shared helpers extracted to `tools/lib/bench_common.sh`; merged `tools/bench_sweep2.sh` into `tools/bench_sweep.sh` (deduped identical combos, kept all unique variants)
-- [x] Hybrid abort interception (macro-based, ASAN/non-ASAN conditional)
-- [x] Rank-based tournament selection (order-statistics formula, sorted-pool fast path)
+> **Status note**: This roadmap tracks aspirational and in-progress work. Many original "TODO" items have been implemented since the list was first drafted — those are marked [x] with the resolved‑by feature. Items without [x] are still pending.
 
-## Bugs Fixed
-- [x] `--stats-file` eaten by `-A` (REMAINDER) — user must place `-A` last
-- [x] CEM never engaging — refit now triggers at elite_set >= 10
-- [x] dict_insert/dict_replace 0/0 — was missing `-D` flag, now works
-- [x] `report.py` referenced removed `_use_meta_elo` attribute (AttributeError when `--elo` + `--report` used) — updated to `_use_elo`
-- [x] Benchmark scripts (`tools/bench.sh`, `tools/bench_sweep.sh`, `tools/bench_sweep2.sh`) still passed removed `--meta-elo` CLI flag — removed, docs updated
-
-## Pending Bugs
-- [ ] `_apply_single_mutation` havoc doesn't enforce max_len strictly (allows +1 byte per insert, up to +8 total)
-- [ ] `parse_dict_line` triple-encode chain fragile for bytes > 0x7F
-
-## Performance (Priority Order)
-- [ ] **Forkserver mode** — fork() from pre-initialized copy, 2-5x throughput
-- [ ] **Cmplog/comparison coverage** — intercept memcmp/strcmp for magic-byte discovery
-- [ ] **Corpus distillation on-the-fly** — evict subset-seeds during fuzzing
-- [ ] **Exploitability scoring** — tag crashes by ASAN error type
-
-## Coverage
-- [ ] Sanitizer coverage (-fsanitize-coverage) via LD_PRELOAD
-- [ ] Call stack coverage (distinguish f()→g() from h()→g())
-- [ ] Deep coverage with x86-64 decoder BB discovery
+## Coverage & Instrumentation
+- [ ] **Call stack coverage**: distinguish `f()→g()` from `h()→g()` by encoding caller context into the edge ID, not just `prev_loc ^ cur_loc`. Would improve edge resolution for shared-library targets.
+- [x] **Forkserver mode** — implemented via `ForkserverRunner`, auto-selected for standalone executables. 2-5x throughput improvement over per-call subprocess.
+- [x] **Deep coverage with x86-64 decoder BB discovery** — Capstone-based basic block discovery available via `--deep-coverage`.
+- [x] **Sanitizer coverage** — `-fsanitize-coverage=trace-pc-guard` support via `--clang-scov`, with auto-detection of sancov counters in `.so` targets.
+- [x] **Cmplog/comparison coverage** — symbol-based (cmplog_shim.c, LD_PRELOAD) and compiler-IR (trace-cmp, tracecmp_shim.c) both implemented.
 
 ## Mutation
-- [ ] Radamsa-style structural mutations (line/field repetition, truncation)
-- [ ] Token-level mutations for text protocols (grammar integration)
-- [ ] Havoc stage weighting by per-operator success history
+- [x] **Radamsa-style structural mutations** — tree mutator (`lightweight_tree_mutate`) with delimiter-based delete/duplicate/swap/stutter.
+- [x] **Token-level mutations for text protocols** — grammar integration with grammar-aware mutations.
+- [ ] **Havoc stage weighting by per-operator success history** — current havoc uses uniform operator pool; could weight toward operators with higher historical success rate.
 
 ## Scheduling
-- [ ] Seed energy burst on discovery, decay over time
-- [ ] Collaborative scheduling across parallel workers
+- [x] **Seed energy burst on discovery, decay over time** — AFL++ power schedules (FAST/COE/RARE/MMOPT/LIN/QUAD) via `SeedScorer`, plus Honggfuzz power factors.
+- [ ] **Collaborative scheduling across parallel workers** — parallel workers currently sync corpus but don't coordinate scheduling decisions. Could share exploration/exploitation state.
 
 ## Crash Analysis
-- [ ] Automated crash bucketing (cluster by ASAN report similarity)
-- [ ] Root cause diff (show bytes diff from nearest non-crashing input)
-- [ ] Exploitability scoring (critical/high/medium/low)
+- [x] **Automated crash bucketing** — Levenshtein crash clustering groups crashes by stack-trace similarity.
+- [x] **Exploitability scoring** — `ASAN_EXPLOITABILITY` classification in reports.
+- [ ] **Root cause diff** — show minimal byte diff from nearest non-crashing input to root-cause bytes.
+
+## Performance
+- [x] **Forkserver mode** — see Coverage section above.
+- [x] **Cmplog optimization** — adaptive periodic collection (1 in 20 iterations once pool exceeds 2000 entries).
+- [x] **Corpus distillation on-the-fly** — `--max-corpus` triggers auto-minimization when corpus exceeds threshold.
 
 ## Infrastructure
-- [ ] Dockerfile for reproducible builds
-- [ ] Individual entry points (fuzzer-fuzz, fuzzer-tmin, etc.)
-- [ ] Structured logging (--log-json)
+- [ ] **Dockerfile** for reproducible builds and CI
+- [ ] **Structured logging** (e.g. `--log-json`) for machine-parseable output
+- [ ] **`fuzzer-tool-asan` wrapper** — CLI wrapper that sets `LD_PRELOAD=libasan.so.8` and exec's into the real fuzzer (mentioned in ASAN-LIMITATION.md but not yet generated as a installable entry point)
+
+## Pending Bugs
+- [ ] `_apply_single_mutation` havoc doesn't enforce `max_len` strictly (allows +1 byte per insert, up to +8 total)
+- [ ] `parse_dict_line` triple-encode chain fragile for bytes > 0x7F

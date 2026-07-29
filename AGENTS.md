@@ -4,7 +4,7 @@ RULES:
 ALWAYS CHECK WHEN REMOVING CODE THAT IS IN THE SCOPE OF THE REMOVAL, DO NOT REMOVE UNRELATED CODE.
 DO NOT NUKE the REPO.
 Always create TODOs.
-Always update the README.md with the new features added.
+Always update docs/DEEP_DIVE.md with new features added (the comprehensive reference). Update README.md only when adding or changing high-level capabilities visible in the quick-start or feature overview.
 Always git commit and push after finish a task.
 All fuzz targets must be compiled with ASAN instrumentation (`-fsanitize=address`).
 All fuzz targets must have AFL edge coverage via `afl_shim.c` (`-include src/fuzzer_tool/adapters/afl_shim.c`). Pre-compile library sources as `.o` files, link with shim included only in the target wrapper.
