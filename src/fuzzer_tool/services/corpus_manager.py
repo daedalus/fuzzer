@@ -448,6 +448,13 @@ class CorpusManager:
         # Uses Beta(1 + 0, 1 + fuzz_count) — the posterior probability that
         # a seed with `fuzz_count` attempts and 0 discoveries has discovery
         # probability below 0.01.
+        #
+        # Extreme-value asymptotics (order_statistics.py Part 4):
+        # n * min(U1..Un) → Exp(1) as n → ∞. If a seed's discovery probability
+        # is the minimum of n independent tries, P(discovery < ε) ≈ 1 - exp(-n*ε).
+        # For n = fuzz_count and ε = 0.01, this gives a simpler approximation:
+        #   P(stale) ≈ 1 - exp(-fuzz_count * 0.01)
+        # which matches the Beta CDF asymptotically and avoids the Beta integral.
         bayesian_stale_ratio = stale_ratio
         if f._use_bayesian and f._seed_quality:
             bayesian_stale_count = 0

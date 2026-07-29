@@ -398,6 +398,60 @@ def ascii_num_arithmetic(data: bytes, rng=None) -> bytes | None:
 # ---------------------------------------------------------------------------
 
 
+def block_shuffle_variable(data: bytes, rng=None) -> bytes:
+    """Shuffle variable-width blocks via order-statistics spacings trick.
+
+    Divides the input into k random blocks (2 ≤ k ≤ 5) using cut points
+    generated via the normalized-Exponential spacing trick (see
+    order_statistics.py Part 3). The cut points have the same joint
+    distribution as sorted Uniform(0, len(data)) draws, but without
+    needing a sort. Blocks are then randomly permuted.
+
+    Unlike chunk_shuffle (fixed-width chunks), this operator produces
+    variable-width blocks that can rearrange structural elements at
+    any granularity — useful for formats where field widths vary.
+
+    Args:
+        data: Input bytes.
+
+    Returns:
+        Bytes with variable-width blocks rearranged.
+    """
+    if len(data) < 8:
+        return data
+    r = _get_rng(rng)
+    k = r.randint(2, 5)  # number of blocks
+    n_cuts = k - 1
+
+    # Spacings trick: n_cuts+1 i.i.d. Exponential(1) draws, normalized,
+    # give the same joint law as the gaps between n_cuts sorted
+    # Uniform(0,1) points — i.e. Dirichlet(1,...,1) (Part 3 of
+    # order_statistics.py). Cumulative sums give sorted cut points
+    # without an explicit sort.
+    exps = [r.expovariate(1.0) for _ in range(n_cuts + 1)]
+    s = sum(exps)
+    cum = 0.0
+    cuts: list[int] = []
+    for i in range(n_cuts):
+        cum += exps[i]
+        pos = int(len(data) * cum / s)
+        pos = max(1, min(pos, len(data) - 1))
+        cuts.append(pos)
+    cuts = sorted(set(cuts))  # deduplicate in case of integer collisions
+
+    # Build blocks from cut points
+    blocks: list[bytes] = []
+    prev = 0
+    for c in cuts:
+        blocks.append(data[prev:c])
+        prev = c
+    blocks.append(data[prev:])
+
+    # Shuffle all blocks
+    r.shuffle(blocks)
+    return b"".join(blocks)
+
+
 def chunk_shuffle(data: bytes, rng=None) -> bytes:
     """Shuffle fixed-size chunks, preserving chunk boundaries.
 
@@ -544,6 +598,7 @@ MUTATIONS = [
     "magic_values",
     "ascii_num_arithmetic",
     "chunk_shuffle",
+    "block_shuffle_variable",
     "dict_compound",
     "punctuation_insert",
     "splice_diff_located",

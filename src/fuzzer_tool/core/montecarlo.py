@@ -369,6 +369,16 @@ class MonteCarloScheduler:
         alpha_0 increases (stronger prior). When data is uniform (high entropy),
         alpha_0 stays near 1 (weak prior).
 
+        Order-statistics connection (see order_statistics.py Part 3):
+        The gaps (spacings) between sorted Uniform(0,1) draws are jointly
+        distributed as Dirichlet(1,...,1) — equivalently, normalized i.i.d.
+        Exponential(1) draws. This is the same Dirichlet family that CEM uses
+        for per-byte distributions, but with a different categorical structure
+        (over 256 byte values rather than over gap positions). The concentration
+        alpha_0 in CEM controls how Dirichlet-like the byte distribution is:
+        high alpha_0 → peaked prior (expects structured data), low alpha_0 →
+        weak prior (expects near-uniform data).
+
         Stores the learned alpha_0 in self._cem_learned_alpha.
         """
         # Compute average empirical entropy across positions

@@ -1070,6 +1070,19 @@ class OperatorEngine:
         if buf and len(buf) >= 8:
             return bytearray(chunk_shuffle(bytes(buf), rng=self.f._rand_pool)[: self.f.max_len])
 
+    def _op_block_shuffle_variable(self, buf, _byte_idx, _data):
+        """Shuffle variable-width blocks using order-statistics spacings trick.
+
+        Divides the input into 2-5 random-width blocks using the normalized-
+        Exponential spacing trick (order_statistics.py Part 3). Unlike
+        chunk_shuffle (fixed-width chunks), this produces variable-width
+        blocks that can rearrange structural elements at any granularity.
+        """
+        from fuzzer_tool.core.mutations import block_shuffle_variable
+
+        if buf and len(buf) >= 8:
+            return bytearray(block_shuffle_variable(bytes(buf), rng=self.f._rand_pool)[: self.f.max_len])
+
     def _op_dict_compound(self, buf, _byte_idx, _data):
         """Insert two dictionary tokens concatenated with a random separator.
 
@@ -1354,6 +1367,7 @@ class OperatorEngine:
             "magic_values": self._op_magic_values,
             "ascii_num_arithmetic": self._op_ascii_num_arithmetic,
             "chunk_shuffle": self._op_chunk_shuffle,
+            "block_shuffle_variable": self._op_block_shuffle_variable,
             "dict_compound": self._op_dict_compound,
             "punctuation_insert": self._op_punctuation_insert,
             "grammar_mutate": self._op_grammar_mutate,
