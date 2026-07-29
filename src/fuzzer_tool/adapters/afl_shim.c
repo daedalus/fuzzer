@@ -214,8 +214,12 @@ void __afl_map_reset(void) {
  * the target's own source (FFmpeg av_assert0, etc.).                         */
 
 static sigjmp_buf __afl_jmp_buf;
-static struct sigaction __afl_old_segv;
-static struct sigaction __afl_old_abrt;
+static struct sigaction __afl_old_handlers[8];
+static int __afl_guard_signals[] = {
+    SIGSEGV, SIGABRT, SIGFPE, SIGBUS, SIGILL, SIGPIPE, SIGSYS,
+};
+#define __afl_NUM_GUARD_SIGNALS \
+    (int)(sizeof(__afl_guard_signals) / sizeof(__afl_guard_signals[0]))
 
 static void __afl_crash_handler(int sig) {
     siglongjmp(__afl_jmp_buf, sig);
@@ -226,8 +230,8 @@ static void __afl_install_crash_handlers(void) {
     sa.sa_handler = __afl_crash_handler;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = 0;
-    sigaction(SIGSEGV, &sa, &__afl_old_segv);
-    sigaction(SIGABRT, &sa, &__afl_old_abrt);
+    for (int i = 0; i < __afl_NUM_GUARD_SIGNALS; i++)
+        sigaction(__afl_guard_signals[i], &sa, &__afl_old_handlers[i]);
 }
 
 /* ── Guarded call wrapper ─────────────────────────────────────────────
