@@ -248,6 +248,17 @@ fuzzer-tool fuzz targets/fuzz_search_pipeline
 # Multi-target: fuzz multiple binaries with shared corpus (glob supported)
 fuzzer-tool fuzz targets/fuzz_regex_compile targets/fuzz_pattern_match targets/fuzz_search_pipeline -c -d corpus/fgrep
 
+# GNU Grep exec-based fuzzing — exercises /usr/bin/grep across regex, fixed, PCRE modes
+# Input format: mode byte | pattern length | pattern | text
+# Modes: 0=basic_regex, 1=extended_regex, 2=fixed, 3=PCRE, 4=icase, 5=word, 6=line, 7=invert, 8=combined_flags
+fuzzer-tool fuzz targets/grep_read -c -F --no-shm
+
+# GNU Grep vendoring setup (downloads source + runs configure)
+tools/vendor_grep.sh
+
+# GNU Grep in-process .so mode (with ptrace coverage for the grep child)
+fuzzer-tool fuzz targets/grep_read.so -c -F --no-shm
+
 # Tailslayer hedged reader fuzzing (in-process .so mode, ~66 eps)
 fuzzer-tool fuzz targets/tailslayer_read.so -c --inprocess
 

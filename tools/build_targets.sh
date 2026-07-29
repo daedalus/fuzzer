@@ -11,9 +11,6 @@
 #   tools/build_targets.sh --tracecmp                 # Clang + compiler-IR comparison tracing
 #   tools/build_targets.sh --vendor-tracecmp          # Vendored libpng+zlib + trace-cmp targets
 #   tools/build_targets.sh --vendor-tracecmp --asan   # Same with ASAN
-#   tools/build_targets.sh --target ffmpeg_read       # Build only matching target(s) (can repeat or comma-sep)
-#   tools/build_targets.sh --target ffmpeg_read,test_target
-#   tools/build_targets.sh --list-targets             # Show all available target basenames
 
 set -e
 
@@ -34,53 +31,13 @@ WITH_CLANG_SCOV=0
 USE_CLANG=0
 
 # Parse flags (can appear anywhere)
-TARGET_FILTER=""
-REMAINING_ARGS=()
-while [ $# -gt 0 ]; do
-    case "$1" in
-        --cmplog) WITH_CMPLOG=1; REMAINING_ARGS+=("$1") ;;
-        # --tracecmp implies --cmplog (the unified shim covers both layers)
-        --tracecmp) WITH_CMPLOG=1; WITH_TRACECMP=1; REMAINING_ARGS+=("$1") ;;
-        --vendor-tracecmp) WITH_VENDOR_TRACECMP=1; REMAINING_ARGS+=("$1") ;;
-        --clang-scov) WITH_CLANG_SCOV=1; REMAINING_ARGS+=("$1") ;;
-        --target|--targets) shift
-            for _t in $(echo "$1" | tr ',' ' '); do
-                TARGET_FILTER="$TARGET_FILTER $_t"
-            done ;;
-        --list-targets) LIST_TARGETS=1 ;;
-        *) REMAINING_ARGS+=("$1") ;;
-    esac
-    shift
+for arg in "$@"; do
+    [ "$arg" = "--cmplog" ] && WITH_CMPLOG=1
+    # --tracecmp implies --cmplog (the unified shim covers both layers)
+    [ "$arg" = "--tracecmp" ] && WITH_CMPLOG=1 && WITH_TRACECMP=1
+    [ "$arg" = "--vendor-tracecmp" ] && WITH_VENDOR_TRACECMP=1
+    [ "$arg" = "--clang-scov" ] && WITH_CLANG_SCOV=1
 done
-set -- "${REMAINING_ARGS[@]}"
-
-# ── List available targets ─────────────────────────────────────────
-list_targets() {
-    echo "Available targets:"
-    for f in "$TARGETS"/*.c "$TARGETS"/*.cpp; do
-        [ -f "$f" ] || continue
-        local base
-        base=$(basename "$f")
-        base="${base%.*}"
-        echo "  $base"
-    done
-    exit 0
-}
-[ "${LIST_TARGETS:-0}" -eq 1 ] && list_targets
-
-# ── Target filter helper ──────────────────────────────────────────
-# Returns 0 if target should be built (matches filter or no filter set)
-_match_target() {
-    local src="$1"
-    [ -z "$TARGET_FILTER" ] && return 0
-    local base
-    base=$(basename "$src")
-    base="${base%.*}"
-    for _t in $TARGET_FILTER; do
-        [ "$base" = "$_t" ] && return 0
-    done
-    return 1
-}
 
 # Colors
 GREEN='\033[0;32m'
@@ -125,7 +82,6 @@ compile_fgrep_objects() {
 # ── Build a target ────────────────────────────────────────────────
 build_target() {
     local src="$1" out="$2" libs="$3" extra_flags="$4" cc="${5:-gcc}" extra_cflags="${6:-}"
-    _match_target "$src" || return 0
     if [ ! -f "$src" ]; then
         warn "Source not found: $src"
         return 1
@@ -143,7 +99,6 @@ build_target() {
 # ── Build a .so target ───────────────────────────────────────────
 build_so_target() {
     local src="$1" out="$2" libs="$3" extra_flags="$4" cc="${5:-gcc}" extra_cflags="${6:-}"
-    _match_target "$src" || return 0
     local cmplog_obj="" cmplog_libs=""
     if [ ! -f "$src" ]; then
         warn "Source not found: $src"
@@ -198,8 +153,10 @@ build_fgrep_targets() {
 
     local out_suffix=""
     [ "$suffix" = "_nosan" ] && out_suffix="_nosan"
+    build_target "$TARGETS/fuzz_regex_compile.c" "$TARGETS/fuzz_regex_compile${out_suffix}" "$FGREP_INC $FGREP_LIBS" "$flags"
+    build_target "$TARGETS/fuzz_pattern_match.c" "$TARGETS/fuzz_pattern_match${out_suffix}" "$FGREP_INC $FGREP_LIBS" "$flags"
+    build_target "$TARGETS/fuzz_search_pipeline.c" "$TARGETS/fuzz_search_pipeline${out_suffix}" "$FGREP_INC $FGREP_LIBS_FULL" "$flags"
     # fgrep_read includes fgrep .c files directly and needs -mavx2 for AVX2 intrinsics
-    # (Consolidated from fuzz_regex_compile.c, fuzz_pattern_match.c, fuzz_search_pipeline.c)
     build_target "$TARGETS/fgrep_read.c" "$TARGETS/fgrep_read${out_suffix}" "$FGREP_INC -lpthread" "$flags -mavx2"
 }
 
@@ -213,8 +170,10 @@ build_fgrep_so_targets() {
 
     local out_suffix=""
     [ "$suffix" = "_nosan" ] && out_suffix="_nosan"
+    build_so_target "$TARGETS/fuzz_regex_compile.c" "$TARGETS/fuzz_regex_compile${out_suffix}.so" "$FGREP_INC $FGREP_LIBS" "$flags"
+    build_so_target "$TARGETS/fuzz_pattern_match.c" "$TARGETS/fuzz_pattern_match${out_suffix}.so" "$FGREP_INC $FGREP_LIBS" "$flags"
+    build_so_target "$TARGETS/fuzz_search_pipeline.c" "$TARGETS/fuzz_search_pipeline${out_suffix}.so" "$FGREP_INC $FGREP_LIBS_FULL" "$flags"
     # fgrep_read includes fgrep .c files directly — needs -mavx2 for AVX2 intrinsics
-    # (Consolidated from fuzz_regex_compile.c, fuzz_pattern_match.c, fuzz_search_pipeline.c)
     build_so_target "$TARGETS/fgrep_read.c" "$TARGETS/fgrep_read${out_suffix}.so" "$FGREP_INC -lpthread" "$flags -mavx2"
 }
 
@@ -224,6 +183,15 @@ build_simple_targets() {
     echo "Building simple targets ($label)..."
     local out_suffix=""
     [ "$suffix" = "_nosan" ] && out_suffix="_nosan"
+
+    local FFMPEG_LIBS="-lavformat -lavcodec -lavutil -lswresample -lm"
+    local FFMPEG_INC="-I/usr/include/x86_64-linux-gnu"
+    local VENDOR_FFMPEG_A="$VENDOR/ffmpeg/libavformat/libavformat.a"
+    if [ -f "$VENDOR_FFMPEG_A" ] && [[ "$flags" == *-fsanitize=address* ]]; then
+        FFMPEG_LIBS="$VENDOR/ffmpeg/libavformat/libavformat.a $VENDOR/ffmpeg/libavcodec/libavcodec.a $VENDOR/ffmpeg/libavutil/libavutil.a $VENDOR/ffmpeg/libswresample/libswresample.a -lm -lpthread -ldl"
+        FFMPEG_INC="-I$VENDOR/ffmpeg"
+    fi
+
     build_target "$TARGETS/asan_target.c" "$TARGETS/asan_target${out_suffix}" "" "$flags"
     build_target "$TARGETS/test_target.c" "$TARGETS/test_target${out_suffix}" "" "$flags"
     build_target "$TARGETS/proto_target.c" "$TARGETS/proto_target${out_suffix}" "" "$flags"
@@ -231,21 +199,8 @@ build_simple_targets() {
     build_target "$TARGETS/zlib_read.c" "$TARGETS/zlib_read${out_suffix}" "-lz" "$flags"
     build_target "$TARGETS/gzip_read.c" "$TARGETS/gzip_read${out_suffix}" "-lz" "$flags"
     build_target "$TARGETS/jpeg_read.c" "$TARGETS/jpeg_read${out_suffix}" "-ljpeg" "$flags"
-
-    # ffmpeg_read — link against vendored FFmpeg static libs (or system)
-    # Skip nosan builds when vendored libs have ASAN instrumentation
-    if [ "$suffix" != "_nosan" ] || [ ! -f "$VENDOR/ffmpeg/libavformat/libavformat.a" ]; then
-        local FFMPEG_LIBS FFMPEG_INC
-        if [ -f "$VENDOR/ffmpeg/libavformat/libavformat.a" ]; then
-            FFMPEG_LIBS="$VENDOR/ffmpeg/libavformat/libavformat.a $VENDOR/ffmpeg/libavcodec/libavcodec.a $VENDOR/ffmpeg/libavutil/libavutil.a $VENDOR/ffmpeg/libswresample/libswresample.a"
-            FFMPEG_INC="-I$VENDOR/ffmpeg"
-        else
-            FFMPEG_LIBS="-lavformat -lavcodec -lavutil -lswresample"
-            FFMPEG_INC=""
-        fi
-        build_target "$TARGETS/ffmpeg_read.c" "$TARGETS/ffmpeg_read${out_suffix}" \
-            "$FFMPEG_LIBS -lm -lpthread" "$flags" "clang" "$FFMPEG_INC"
-    fi
+    build_target "$TARGETS/ffmpeg_read.c" "$TARGETS/ffmpeg_read${out_suffix}" "$FFMPEG_LIBS" "$flags" gcc "$FFMPEG_INC"
+    build_target "$TARGETS/grep_read.c" "$TARGETS/grep_read${out_suffix}" "" "$flags"
 }
 
 # ── Build simple .so targets ────────────────────────────────────
@@ -262,6 +217,8 @@ build_simple_so_targets() {
     local PNG_LIBS="-lpng -lz"
     local ZLIB_LIBS="-lz"
     local GZIP_LIBS="-lz"
+    local FFMPEG_LIBS="-lavformat -lavcodec -lavutil -lswresample -lm"
+    local FFMPEG_INC="-I/usr/include/x86_64-linux-gnu"
     if [ "$WITH_CMPLOG" -eq 1 ]; then
         local VENDOR_ZLIB_A="$VENDOR/zlib/libz.a"
         local VENDOR_PNG_A="$VENDOR/libpng/.libs/libpng16.a"
@@ -270,6 +227,13 @@ build_simple_so_targets() {
             ZLIB_LIBS="$VENDOR_ZLIB_A -lm"
             GZIP_LIBS="$VENDOR_ZLIB_A -lm"
             echo "  Using vendored trace-cmp libraries"
+        fi
+        # Vendored FFmpeg (ASAN) only for ASAN builds
+        local VENDOR_FFMPEG_A="$VENDOR/ffmpeg/libavformat/libavformat.a"
+        if [ -f "$VENDOR_FFMPEG_A" ] && [[ "$flags" == *-fsanitize=address* ]]; then
+            FFMPEG_LIBS="$VENDOR/ffmpeg/libavformat/libavformat.a $VENDOR/ffmpeg/libavcodec/libavcodec.a $VENDOR/ffmpeg/libavutil/libavutil.a $VENDOR/ffmpeg/libswresample/libswresample.a -lm -lpthread -ldl"
+            FFMPEG_INC="-I$VENDOR/ffmpeg"
+            echo "  Using vendored FFmpeg trace-cmp libraries"
         fi
     fi
 
@@ -281,20 +245,8 @@ build_simple_so_targets() {
     build_so_target "$TARGETS/gzip_read.c" "$TARGETS/gzip_read${out_suffix}.so" "$GZIP_LIBS" "$flags"
     build_so_target "$TARGETS/jpeg_read.c" "$TARGETS/jpeg_read${out_suffix}.so" "-ljpeg" "$flags"
     build_so_target "$TARGETS/nop_target.c" "$TARGETS/nop_target${out_suffix}.so" "" "$flags"
-
-    # ffmpeg_read .so — skip nosan when vendored libs have ASAN instrumentation
-    if [ "$suffix" != "_nosan" ] || [ ! -f "$VENDOR/ffmpeg/libavformat/libavformat.a" ]; then
-        local FFMPEG_LIBS FFMPEG_INC
-        if [ -f "$VENDOR/ffmpeg/libavformat/libavformat.a" ]; then
-            FFMPEG_LIBS="$VENDOR/ffmpeg/libavformat/libavformat.a $VENDOR/ffmpeg/libavcodec/libavcodec.a $VENDOR/ffmpeg/libavutil/libavutil.a $VENDOR/ffmpeg/libswresample/libswresample.a"
-            FFMPEG_INC="-I$VENDOR/ffmpeg"
-        else
-            FFMPEG_LIBS="-lavformat -lavcodec -lavutil -lswresample"
-            FFMPEG_INC=""
-        fi
-        build_so_target "$TARGETS/ffmpeg_read.c" "$TARGETS/ffmpeg_read${out_suffix}.so" \
-            "$FFMPEG_LIBS -lm -lpthread" "$flags" "clang" "$FFMPEG_INC"
-    fi
+    build_so_target "$TARGETS/ffmpeg_read.c" "$TARGETS/ffmpeg_read${out_suffix}.so" "$FFMPEG_LIBS" "$flags" "$cc" "$FFMPEG_INC"
+    build_so_target "$TARGETS/grep_read.c" "$TARGETS/grep_read${out_suffix}.so" "" "$flags"
 }
 
 # ── Build standalone .so targets with external deps ─────────────
@@ -304,8 +256,7 @@ build_standalone_so_targets() {
     [ "$suffix" = "_nosan" ] && out_suffix="_nosan"
 
     # tailslayer — C++ target (g++), header-only library
-    if _match_target "$TARGETS/tailslayer_read.cpp" && \
-       [ -f "$TARGETS/tailslayer_read.cpp" ] && [ -d "$TAILSLAYER/include" ]; then
+    if [ -f "$TARGETS/tailslayer_read.cpp" ] && [ -d "$TAILSLAYER/include" ]; then
         local cxx=g++
         if command -v g++ &>/dev/null; then
             local src="$TARGETS/tailslayer_read.cpp"
@@ -337,12 +288,8 @@ build_standalone_so_targets() {
     local LZ4_INC="-I$LZ4_DIR -DXXH_NAMESPACE=LZ4_"
     local all_exist=true
     for obj in $LZ4_OBJS; do [ -f "$obj" ] || all_exist=false; done
-    if _match_target "$TARGETS/lz4_read.c" && $all_exist && [ -f "$TARGETS/lz4_read.c" ]; then
+    if $all_exist && [ -f "$TARGETS/lz4_read.c" ]; then
         build_so_target "$TARGETS/lz4_read.c" "$TARGETS/lz4_read${out_suffix}.so" "$LZ4_OBJS -Wl,--export-dynamic -lpthread" "$flags $LZ4_INC"
-    elif [ -n "$TARGET_FILTER" ]; then
-        :  # filtered target, silently skip
-    elif $all_exist; then
-        warn "lz4_read${out_suffix}.so: LZ4 objects exist but source not found"
     else
         warn "lz4_read${out_suffix}.so: LZ4 objects not found, skipping (build LZ4 lib first)"
     fi
@@ -458,12 +405,13 @@ verify_afl() {
              "$TARGETS"/zlib_read "$TARGETS"/zlib_read_nosan "$TARGETS"/zlib_read.so "$TARGETS"/zlib_read_nosan.so \
              "$TARGETS"/gzip_read "$TARGETS"/gzip_read_nosan "$TARGETS"/gzip_read.so "$TARGETS"/gzip_read_nosan.so \
              "$TARGETS"/jpeg_read "$TARGETS"/jpeg_read_nosan "$TARGETS"/jpeg_read.so "$TARGETS"/jpeg_read_nosan.so \
+             "$TARGETS"/ffmpeg_read "$TARGETS"/ffmpeg_read_nosan "$TARGETS"/ffmpeg_read.so "$TARGETS"/ffmpeg_read_nosan.so \
              "$TARGETS"/test_target "$TARGETS"/test_target_nosan "$TARGETS"/test_target.so "$TARGETS"/test_target_nosan.so \
              "$TARGETS"/proto_target "$TARGETS"/proto_target_nosan "$TARGETS"/proto_target.so "$TARGETS"/proto_target_nosan.so \
              "$TARGETS"/nop_target "$TARGETS"/nop_target_nosan "$TARGETS"/nop_target.so "$TARGETS"/nop_target_nosan.so \
              "$TARGETS"/tailslayer_read "$TARGETS"/tailslayer_read.so \
              "$TARGETS"/lz4_read "$TARGETS"/lz4_read_nosan "$TARGETS"/lz4_read.so "$TARGETS"/lz4_read_nosan.so \
-             "$TARGETS"/ffmpeg_read "$TARGETS"/ffmpeg_read.so; do
+             "$TARGETS"/grep_read "$TARGETS"/grep_read_nosan "$TARGETS"/grep_read.so "$TARGETS"/grep_read_nosan.so; do
         [ -f "$f" ] || continue
         [[ "$f" == *.c ]] && continue
         local n=$(nm "$f" 2>/dev/null | grep -c __afl || true)
@@ -781,27 +729,23 @@ build_tracecmp_targets() {
     local TRACE_FLAGS="-fsanitize-coverage=trace-cmp,trace-pc-guard"
 
     # tracecmp_target: exercises compiler-inlined comparisons
-    if _match_target "$TARGETS/tracecmp_target.c"; then
-        local rc=0
-        $CC -O2 -g $TRACE_FLAGS -include "$SHIM" \
-            -o "$TARGETS/tracecmp_target" "$TARGETS/tracecmp_target.c" 2>/dev/null || rc=$?
-        if [ $rc -eq 0 ]; then
-            ok "tracecmp_target (trace-cmp)"
-        else
-            warn "failed: tracecmp_target (trace-cmp)"
-        fi
+    local rc=0
+    $CC -O2 -g $TRACE_FLAGS -include "$SHIM" \
+        -o "$TARGETS/tracecmp_target" "$TARGETS/tracecmp_target.c" 2>/dev/null || rc=$?
+    if [ $rc -eq 0 ]; then
+        ok "tracecmp_target (trace-cmp)"
+    else
+        warn "failed: tracecmp_target (trace-cmp)"
     fi
 
     # tracecmp_target.so: same with shared library
-    if _match_target "$TARGETS/tracecmp_target.c"; then
-        rc=0
-        $CC -O2 -g $TRACE_FLAGS -shared -fPIC -include "$SHIM" \
-            -o "$TARGETS/tracecmp_target.so" "$TARGETS/tracecmp_target.c" 2>/dev/null || rc=$?
-        if [ $rc -eq 0 ]; then
-            ok "tracecmp_target.so (trace-cmp)"
-        else
-            warn "failed: tracecmp_target.so (trace-cmp)"
-        fi
+    rc=0
+    $CC -O2 -g $TRACE_FLAGS -shared -fPIC -include "$SHIM" \
+        -o "$TARGETS/tracecmp_target.so" "$TARGETS/tracecmp_target.c" 2>/dev/null || rc=$?
+    if [ $rc -eq 0 ]; then
+        ok "tracecmp_target.so (trace-cmp)"
+    else
+        warn "failed: tracecmp_target.so (trace-cmp)"
     fi
 
     # Verify trace-cmp symbols in built targets
@@ -894,13 +838,9 @@ fi
 echo "Compiling utility libraries..."
 compile_perf_shim
 
-if [ -z "$TARGET_FILTER" ]; then
-    verify_afl
-    verify_shm_run
-    verify_cmplog
-    verify_vendor_tracecmp
-else
-    echo "[*] Target filter active — skipping full verification"
-fi
+verify_afl
+verify_shm_run
+verify_cmplog
+verify_vendor_tracecmp
 build_tracecmp_targets
 echo "=== Done ==="
