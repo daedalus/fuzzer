@@ -1,7 +1,7 @@
 # ASAN Direct-Lite Limitation
 
 **Date**: 2026-07-29
-**Status**: Layer 2 resolved (non-fatal reporting); Layer 1 root cause not isolated
+**Status**: Layer 1 root cause identified (mid-process shadow offset mismatch); Layer 2 resolved (non-fatal reporting)
 
 ## Executive Summary
 
@@ -44,7 +44,20 @@ For the use-after-free case (the only one that survives compiler optimization), 
 | Compiler optimization removes the crash path | ❌ Only H and S paths are dead-code-eliminated. The U path's shadow check IS present in the compiled assembly. |
 | Wrong ASAN library version | ❌ Same `.so`, same `libasan.so.8` — works from C with LD_PRELOAD, fails from Python ctypes. |
 
-### Remaining Hypotheses (ordered by likelihood)
+### Root Cause Identified (Round 9, 2026-07-29)
+
+**Root cause**: The compiled-in ASAN shadow offset `0x7fff8000` in the target `.so` produces a shadow address that is not within ASAN's mapped shadow region when ASAN is initialized mid-process via ctypes.
+
+The mechanism:
+1. When the target `.so` is compiled with `-fsanitize=address`, the instrumented code at every memory access computes `shadow = (addr >> 3) + 0x7fff8000` (the "low shadow" formula).
+2. When ASAN is loaded at process start (LD_PRELOAD), it maps shadow for the full address space and allocates heap in the range that the low shadow covers.
+3. When ASAN is loaded mid-process (ctypes dlopen), its heap allocator returns addresses at `0x5020000000xx` — well above the `0x1000000000` boundary where the low shadow formula wraps.
+4. The low shadow formula for `0x502000000010`: `shadow = (0x502000000010 >> 3) + 0x7fff8000 = 0xA047FFF8002`. This address is at ~10 TB, far outside the 256MB low shadow region `[0x7fff7000, 0x8fff7000)`.
+5. The `mov 0x7fff8000(%rax),%al` instruction accesses unmapped memory and either faults (SIGSEGV → handled by ASAN as a SEGV, not the UAF) or reads `0x00` from an unbacked page → no detection.
+
+Additionally, when the target `.so` has `DT_NEEDED libc.so.6` (which it always does), `malloc`/`free` PLT entries resolve to libc's versions rather than ASAN's even when libasan is loaded with RTLD_GLOBAL. The direct DT_NEEDED chain takes precedence over the global scope. This means ASAN's allocator is never used, so even if the shadow formula were correct, the shadow would never be poisoned.
+
+### Remaining Hypotheses (all replaced by the confirmed root cause above)
 
 1. **PLT resolution reordering**: When the `.so` is loaded mid-process via `ctypes.CDLL(RTLD_GLOBAL)`, the dynamic linker resolves PLT entries differently than at process start with `LD_PRELOAD`. The target's call to `free()` may resolve to ASAN's `free` (as confirmed by ctypes address comparison), but the shadow check's boundary conditions or a related helper function (e.g., `__asan_stack_malloc` or a thread-local state flag) may resolve to a different version or fail to initialize. The shadow-check code at `0x3f1a` reads `0x7fff8000(%rax)` where `%rax` is computed from the pointer — if a PLT-resolved helper used during that computation resolves to a non-ASAN version, the address calculation could be wrong even though the final shadow read appears correct.
 
@@ -107,6 +120,27 @@ For the use-after-free case (the only one that survives compiler optimization), 
 - Proved: ASAN's allocator IS active and `malloc`/`free` in the `.so` resolve to ASAN's versions
 - `libc.free()` cannot operate on ASAN-managed memory — this is expected and confirms correct interposition
 
+### Round 9 (2026-07-29): Root cause confirmed — mid-process shadow offset mismatch
+
+Built a C-only reproducer (`/tmp/asan_midprocess.c`) that exactly mirrors the ctypes loading sequence:
+1. `dlopen(options_shim.so, RTLD_GLOBAL)` — verify_asan_link_order=0
+2. `dlopen(libasan.so.8, RTLD_GLOBAL)` — load ASAN mid-process
+3. `dlopen(target_clang.so, RTLD_GLOBAL)` — load target
+
+**Result**: `rc=0` — same silent failure as Python ctypes (confirmed the bug is NOT Python-specific).
+
+**Key findings**:
+- With `DT_NEEDED libasan.so.8` in the target `.so`, `malloc` resolves to ASAN (confirmed via address comparison)
+- **BUT**: ASAN's heap returns addresses at `0x5020000000xx` — the low shadow formula `(addr>>3) + 0x7fff8000` gives `0xA047FFF8002`, which is OUTSIDE ASAN's mapped shadow region `[0x7fff7000, 0x8fff7000)` on 48-bit systems
+- The shadow page `0xA047FFF8000` is not mapped because ASAN's mid-process initialization doesn't extend the shadow mapping to cover its own heap addresses
+- The `mov 0x7fff8000(%rax),%al` instruction either reads unmapped memory (SIGSEGV caught by ASAN as a SEGV, not a UAF) or reads `0x00` from an unbacked zero page
+
+**Why LD_PRELOAD works**: At process start, ASAN initializes first (before any heap is used), maps the full shadow, and possibly restricts its heap to the address range that the low shadow covers. The compiled-in shadow offset matches the runtime shadow layout.
+
+**Fix in the fuzzer**: 
+- `fuzzer-tool-asan` entry point: a CLI wrapper that sets `LD_PRELOAD=libasan.so.8` and `ASAN_OPTIONS=halt_on_error=0:detect_leaks=0`, then execve's into the real `fuzzer-tool`. Use this for ASAN targets: `fuzzer-tool-asan fuzz target_asan.so`
+- Automatic fallback: when the fuzzer detects an ASAN `.so` target and LD_PRELOAD was NOT set at process start, it falls back to persistent subprocess mode (where LD_PRELOAD is set in the child environment)
+
 ## Code Paths
 
 ### Working path (process-start LD_PRELOAD):
@@ -127,13 +161,15 @@ exec(fuzzer, LD_PRELOAD=libasan.so.8)
 Python process already running (no LD_PRELOAD)
   → ctypes.CDLL(verify_asan_link_order=0.so, RTLD_GLOBAL)
   → ctypes.CDLL(libasan.so.8, RTLD_GLOBAL)
-  → ASAN constructors run (shadow memory initialized, base = 0x7fff8000)
+  → ASAN constructors run (shadow memory initialized)
+  → Shadow mapping: [0x7fff7000, 0x8fff7000) low shadow only (256MB)
   → ctypes.CDLL(asan_target_asan.so, RTLD_GLOBAL)
-  → PLT entries resolve (malloc→ASAN? confirmed ✓)
-  → Shadow checks read correct values (confirmed ✓)
-  → BUT: conditional branch to __asan_report_load1 is NOT taken
-  → Either the branch condition is wrong, or the instrumentation's
-    internal state disagrees with what we observe in shadow memory
+  → DT_NEEDED libc.so.6 → malloc/free resolve to libc (NOT ASAN)!
+  → Alternatively with DT_NEEDED libasan.so.8 → malloc resolves to ASAN
+  → ASAN malloc returns 0x5020000000xx (high address range)
+  → Shadow check: (addr>>3) + 0x7fff8000 = 0xA047FFF8002 ← UNMAPPED
+  → mov reads unmapped memory → SIGSEGV or reads 0x00 from zero page
+  → ASAN detection NEVER FIRES (the shadow byte is never 0xfd)
 ```
 
 ## Impact
@@ -144,13 +180,16 @@ Python process already running (no LD_PRELOAD)
 |---|---|
 | Throughput (png_read_asan.so) | ~124k eps |
 | Subprocess fallback | Eliminated (this fix) |
-| ASAN bug detection | **Not functional** |
+| ASAN bug detection | **Not functional in direct_lite without LD_PRELOAD** |
 | AFL edge coverage | Working |
 | Crash isolation | None (afl_shim.c `_exit(128+sig)` provides exit-code signal) |
 
 ### Workarounds for ASAN crash detection:
 
-1. **Use a standalone executable target** instead of `.so` — fork+exec with `LD_PRELOAD=libasan.so.8` works correctly
+1. **Use the `fuzzer-tool-asan` wrapper**: `fuzzer-tool-asan fuzz target_asan.so` — sets `LD_PRELOAD=libasan.so.8` and `ASAN_OPTIONS=halt_on_error=0:detect_leaks=0` at process start, then exec's the real fuzzer. This is the **recommended** approach for ASAN targets.
+2. **Use persistent subprocess mode** via automatic fallback (current default for ASAN targets) — the fuzzer detects ASAN and uses subprocess mode with LD_PRELOAD set in the child environment. Slower but works.
+3. **Use a standalone executable target** instead of `.so` — fork+exec with `LD_PRELOAD=libasan.so.8` works correctly
+4. **Run with an external LD_PRELOAD wrapper**: `LD_PRELOAD=libasan.so.8 fuzzer-tool fuzz targets/target_asan.so ...` — ASAN initializes at process start
 2. **Use persistent subprocess mode** (`--inprocess` without `--inprocess-direct`) — fork + `LD_PRELOAD` at process start; ASAN detects bugs in the child
 3. **Run with an external LD_PRELOAD wrapper**: `LD_PRELOAD=libasan.so.8 fuzzer-tool fuzz targets/target_asan.so ...` — ASAN initializes at process start; crash kills the fuzzer but ASAN diagnostics are emitted
 

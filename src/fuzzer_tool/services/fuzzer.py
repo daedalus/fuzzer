@@ -1102,7 +1102,17 @@ class Fuzzer:
             use_direct_lite = True
             # ASAN ctypes preloading was done above (before the branch). If it
             # failed, fall back to persistent mode where LD_PRELOAD handles it.
-            if target_is_asan and not _asan_was_preloaded and not _asan_ctypes_loaded:
+            # Even if ctypes preloading succeeds, ASAN detection does NOT work
+            # in direct_lite mode when loaded mid-process: the compiled-in
+            # shadow offset (0x7fff8000) doesn't match the runtime ASAN shadow
+            # mapping for mid-process-loaded libasan (the ASAN heap is placed
+            # at addresses whose shadow lands outside the mapped shadow region
+            # on 48-bit systems). See docs/ASAN-LIMITATION.md §Layer 1.
+            # Subprocess mode with LD_PRELOAD (set above at line 1027) is the
+            # reliable path: ASAN initializes at process start in the child,
+            # the shadow mapping is correct, and halt_on_error=0 (from the
+            # ctypes-loaded shim) prevents ASAN from aborting the child.
+            if target_is_asan and not _asan_was_preloaded:
                 use_direct_lite = False
             # Cmplog: if the .so has cmplog compiled in, direct_lite works
             # because the shim is part of the .so itself. If the shim is
