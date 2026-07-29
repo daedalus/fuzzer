@@ -117,6 +117,12 @@ build_so_target() {
             cmplog_libs="-ldl"
         fi
     fi
+    # When ASAN is enabled, explicitly link libasan so it's resolved at load time.
+    # clang -shared -fsanitize=address does NOT add NEEDED libasan.so.8 (unlike gcc),
+    # leaving ASAN symbols unresolved and breaking ctypes.CDLL loading.
+    if [[ "$extra_flags" == *-fsanitize=address* ]]; then
+        libs="$libs -lasan"
+    fi
     local rc=0
     # Do NOT add -fsanitize-coverage=trace-cmp to the target's own code —
     # the target wrapper (png_read.c etc.) has almost no comparisons; all

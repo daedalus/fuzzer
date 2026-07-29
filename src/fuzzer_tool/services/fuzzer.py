@@ -1014,22 +1014,12 @@ class Fuzzer:
                 if not _asan_was_preloaded:
                     existing = os.environ.get("LD_PRELOAD", "")
                     os.environ["LD_PRELOAD"] = f"{libasan}:{existing}" if existing else libasan
-        # Auto-detect .so targets and use in-process mode
-        if not inprocess and self.target.lower().endswith((".so", ".dylib", ".dll")):
-            from fuzzer_tool.adapters.inprocess import InProcessRunner
-
-            cov_env_id = self.shm_cov.env_id if self.shm_cov else None
-            # Probe the shared object for a fuzz function name
-            auto_func = self._probe_so_function(self.target)
-            # Decide whether to use direct_lite (in-process ctypes) mode.
-            # ASAN-instrumented .so targets need the ASAN runtime loaded
-            # before the target. If LD_PRELOAD already contained libasan
-            # at process start (external wrapper), it's already available.
-            # Otherwise, load a tiny shim that exports __asan_default_options
-            # (returning "verify_asan_link_order=0") before libasan.so, so
-            # ASAN skips the post-startup first-load check. Safe for fuzzing:
-            # ASAN only needs target-side bug detection, not Python-side.
-            use_direct_lite = True
+            # Preload ASAN runtime via ctypes for in-process loading (both
+            # auto-detect and --inprocess-direct paths). This loads the
+            # verify_asan_link_order=0 shim so ASAN's "does not come first"
+            # check is suppressed, then loads libasan via RTLD_GLOBAL so the
+            # target .so's DT_NEEDED libasan.so.8 is satisfied at dlopen time.
+            _asan_ctypes_loaded = False
             if target_is_asan and not _asan_was_preloaded:
                 import ctypes as _ctypes
                 import subprocess as _subprocess
@@ -1065,18 +1055,32 @@ class Fuzzer:
                         raise OSError(f"compiler failed: {_r.stderr.decode(errors='replace')}")
                     _ctypes.CDLL(_shim_path, mode=_ctypes.RTLD_GLOBAL)
                     _ctypes.CDLL(libasan, mode=_ctypes.RTLD_GLOBAL)
-                    print(f"[*] ASAN preloaded: {libasan}")
+                    _asan_ctypes_loaded = True
+                    print(f"[*] ASAN preloaded for in-process: {libasan}")
                 except OSError as e:
-                    print(f"[!] ASAN preload failed (falling back to persistent): {e}")
-                    use_direct_lite = False
+                    print(f"[!] ASAN ctypes preload failed: {e}")
                 finally:
                     with contextlib.suppress(OSError):
                         os.unlink(_shim_path)
-            # ASAN-instrumented .so targets MUST use persistent subprocess
-            # mode for crash isolation.  direct_lite runs the target in the
-            # same process — when ASAN calls abort() on a detected bug, the
-            # entire fuzzer dies without recording the crash.
-            if target_is_asan:
+        # Auto-detect .so targets and use in-process mode
+        if not inprocess and self.target.lower().endswith((".so", ".dylib", ".dll")):
+            from fuzzer_tool.adapters.inprocess import InProcessRunner
+
+            cov_env_id = self.shm_cov.env_id if self.shm_cov else None
+            # Probe the shared object for a fuzz function name
+            auto_func = self._probe_so_function(self.target)
+            # Decide whether to use direct_lite (in-process ctypes) mode.
+            # ASAN-instrumented .so targets need the ASAN runtime loaded
+            # before the target. If LD_PRELOAD already contained libasan
+            # at process start (external wrapper), it's already available.
+            # Otherwise, load a tiny shim that exports __asan_default_options
+            # (returning "verify_asan_link_order=0") before libasan.so, so
+            # ASAN skips the post-startup first-load check. Safe for fuzzing:
+            # ASAN only needs target-side bug detection, not Python-side.
+            use_direct_lite = True
+            # ASAN ctypes preloading was done above (before the branch). If it
+            # failed, fall back to persistent mode where LD_PRELOAD handles it.
+            if target_is_asan and not _asan_was_preloaded and not _asan_ctypes_loaded:
                 use_direct_lite = False
             # Cmplog: if the .so has cmplog compiled in, direct_lite works
             # because the shim is part of the .so itself. If the shim is
@@ -1128,18 +1132,12 @@ class Fuzzer:
             from fuzzer_tool.adapters.inprocess import InProcessRunner
 
             cov_env_id = self.shm_cov.env_id if self.shm_cov else None
-            # If the user asked for --inprocess-direct on an ASAN target but ASAN
-            # wasn't already preloaded externally, direct ctypes mode would abort
-            # on the first call ("ASan runtime does not come first"). Fall back to
-            # the subprocess loader, which now has LD_PRELOAD set above.
-            direct_ok = inprocess_direct and not (
-                target_is_asan and "libasan" not in os.environ.get("LD_PRELOAD", "")
-            )
-            if inprocess_direct and not direct_ok:
-                print(
-                    "[!] --inprocess-direct requested but target is ASAN-instrumented "
-                    "without externally preloaded ASAN; using subprocess loader instead"
-                )
+            # ASAN ctypes preloading was done above (before the branch). If the
+            # verify_asan_link_order=0 shim was loaded successfully, direct mode
+            # works even for ASAN .so targets. The user explicitly requested
+            # --inprocess-direct, so try direct regardless — ASAN-detected bugs
+            # may abort the process, but that's the user's accepted tradeoff.
+            direct_ok = inprocess_direct
             self._inprocess_runner = InProcessRunner(
                 target=self.target,
                 function_name=inprocess_func,

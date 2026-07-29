@@ -210,12 +210,12 @@ def cmd_fuzz(args):
             print("[*] ASAN statically linked — no LD_PRELOAD needed")
 
     # ASAN calls _exit() which kills inprocess-direct mode.
-    # Fall back to subprocess mode so stderr is captured.
+    # The verify_asan_link_order=0 shim and libasan are preloaded
+    # via ctypes in fuzzer.py to make ASAN .so targets loadable
+    # in direct mode.  ASAN-detected bugs may still abort the
+    # process — the user accepts this tradeoff with --inprocess-direct.
     if target_is_asan and getattr(args, "inprocess_direct", False):
-        print("[*] ASAN + --inprocess-direct: falling back to subprocess mode")
-        args.inprocess_direct = False
-        # Enable inprocess mode so InProcessRunner is created with direct=False
-        args.inprocess = True
+        print("[*] ASAN detected — will preload ASAN runtime for in-process mode")
 
     dictionary = []
     if args.dict:
