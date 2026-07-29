@@ -36,7 +36,7 @@ fuzzer-tool fuzz ./target -c --resume
 ### Mutation Engine
 40+ mutation operators: bit/byte flips, arithmetic (1/2/4/8-byte LE/BE), block insert/delete/duplicate/swap, havoc with stall-recovery escalation, TLV-aware, token shuffle, security-sensitive string injection, punctuation insertion, compound dictionary, and **FrameShift** auto-adjusting length fields.
 
-**Grammar-aware**: format-specific structural mutations for PNG (IHDR/IDAT/CRC/filter/interlace), JPEG (SOF/DHT/DQT/DRI/SOS), BMP (header/pixel), gzip/zlib (CMF/FLG/Adler-32). **Tree mutator**: Radamsa-style delimiter-based mutations (delete, duplicate, swap, stutter) with correct round-trip invariants.
+**Grammar-aware**: format-specific structural mutations for PNG (IHDR/IDAT/CRC/filter/interlace), JPEG (SOF/DHT/DQT/DRI/SOS), BMP (header/pixel), gzip/zlib (CMF/FLG/Adler-32), **PGS** (PCS/WDS/PDS/ODS/END segment mutations), **ISO-BMFF** (box-type/size/container nesting/codec/handler mutations for MP4/MOV), **NAL** (H.264/H.265 NAL unit type/ref_idc/SPS/PPS/slice mutations). **Format lock**: magic-prefix detection with protected-byte-tail-havoc for autoprobe targets. **Tree mutator**: Radamsa-style delimiter-based mutations (delete, duplicate, swap, stutter) with correct round-trip invariants.
 
 ### Coverage & Execution
 - **AFL SHM bitmap** with sparse 8-byte entry hash table — no silent bucket collisions

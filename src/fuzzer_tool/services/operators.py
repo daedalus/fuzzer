@@ -1235,6 +1235,55 @@ class OperatorEngine:
             mutated = self.f._zlib_mutator._generate_random_zlib(max_len=self.f.max_len, rng=rng)
         return bytearray(mutated[: self.f.max_len])
 
+    def _op_format_lock(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.magic_lock import format_lock_havoc
+
+        rng = self.f._rand_pool
+        if buf:
+            result = format_lock_havoc(bytes(buf), self.f.max_len, rng=rng)
+            if result is not None:
+                return bytearray(result[: self.f.max_len])
+
+    def _op_pgs_chunk_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.pgs_mutations import PgsMutator, parse_pgs_segments
+
+        if not hasattr(self.f, "_pgs_mutator"):
+            self.f._pgs_mutator = PgsMutator()
+        rng = self.f._rand_pool
+        if parse_pgs_segments(bytes(buf)):
+            mutated = self.f._pgs_mutator.mutate(bytes(buf), max_len=self.f.max_len, rng=rng)
+        else:
+            mutated = self.f._pgs_mutator._generate_random_pgs(max_len=self.f.max_len, rng=rng)
+        return bytearray(mutated[: self.f.max_len])
+
+    def _op_isobmff_chunk_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.isobmff_mutations import IsobmffMutator, parse_boxes
+
+        if not hasattr(self.f, "_isobmff_mutator"):
+            self.f._isobmff_mutator = IsobmffMutator()
+        rng = self.f._rand_pool
+        if parse_boxes(bytes(buf)):
+            mutated = self.f._isobmff_mutator.mutate(bytes(buf), max_len=self.f.max_len, rng=rng)
+        else:
+            mutated = self.f._isobmff_mutator._generate_random_isobmff(
+                max_len=self.f.max_len, rng=rng
+            )
+        return bytearray(mutated[: self.f.max_len])
+
+    def _op_nal_chunk_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.nal_mutations import NalMutator, parse_nal_units
+
+        if not hasattr(self.f, "_nal_mutator"):
+            self.f._nal_mutator = NalMutator()
+        rng = self.f._rand_pool
+        if parse_nal_units(bytes(buf)):
+            mutated = self.f._nal_mutator.mutate(bytes(buf), max_len=self.f.max_len, rng=rng)
+        else:
+            mutated = self.f._nal_mutator._generate_random_nal_stream(
+                max_len=self.f.max_len, rng=rng
+            )
+        return bytearray(mutated[: self.f.max_len])
+
     def _op_png_crc_fix(self, buf, _byte_idx, _data):
         rng = self.f._rand_pool
         from fuzzer_tool.core.png_mutations import parse_png_chunks, serialize_png_chunks
@@ -1379,6 +1428,10 @@ class OperatorEngine:
             "bmp_chunk_mutate": self._op_bmp_chunk_mutate,
             "zlib_chunk_mutate": self._op_zlib_chunk_mutate,
             "png_crc_fix": self._op_png_crc_fix,
+            "format_lock": self._op_format_lock,
+            "pgs_chunk_mutate": self._op_pgs_chunk_mutate,
+            "isobmff_chunk_mutate": self._op_isobmff_chunk_mutate,
+            "nal_chunk_mutate": self._op_nal_chunk_mutate,
             "redqueen": self._op_redqueen,
             "havoc": self._op_havoc,
         }

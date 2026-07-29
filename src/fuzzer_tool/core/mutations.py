@@ -615,6 +615,10 @@ FORMAT_MUTATIONS = [
     "bmp_chunk_mutate",
     "gzip_chunk_mutate",
     "zlib_chunk_mutate",
+    "format_lock",
+    "pgs_chunk_mutate",
+    "isobmff_chunk_mutate",
+    "nal_chunk_mutate",
 ]
 
 

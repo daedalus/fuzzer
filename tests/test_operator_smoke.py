@@ -85,12 +85,16 @@ class TestOperatorDispatchSmoke:
             "jpeg_chunk_mutate": "fuzzer_tool.core.jpeg_mutations",
             "gzip_chunk_mutate": "fuzzer_tool.core.gzip_mutations",
             "bmp_chunk_mutate": "fuzzer_tool.core.bmp_mutations",
+            "pgs_chunk_mutate": "fuzzer_tool.core.pgs_mutations",
+            "isobmff_chunk_mutate": "fuzzer_tool.core.isobmff_mutations",
+            "nal_chunk_mutate": "fuzzer_tool.core.nal_mutations",
+            "format_lock": "fuzzer_tool.core.magic_lock",
         }
         import importlib
 
         for op, mod_path in module_map.items():
             if op in FORMAT_MUTATIONS:
                 mod = importlib.import_module(mod_path)
-                assert hasattr(mod, "mutate") or any(
+                assert hasattr(mod, "mutate") or hasattr(mod, "format_lock_havoc") or any(
                     name.endswith("Mutator") for name in dir(mod)
-                ), f"Module {mod_path} has no mutator class"
+                ), f"Module {mod_path} has no mutator class or entry function"
