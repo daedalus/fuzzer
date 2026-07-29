@@ -199,6 +199,21 @@ def _detect_asan(target_path: str) -> bool:
     return False
 
 
+def _detect_ubsan(target_path: str) -> bool:
+    """Detect if a binary is UBSAN-instrumented by checking for __ubsan_handle_* symbols."""
+    import subprocess
+
+    for flags in [[], ["-D"]]:
+        try:
+            r = subprocess.run(["nm"] + flags + [target_path], capture_output=True, timeout=10)
+            if r.returncode == 0:
+                if b"__ubsan_handle" in r.stdout:
+                    return True
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+    return False
+
+
 class Fuzzer:
     @staticmethod
     def _probe_so_function(target):
@@ -1131,6 +1146,19 @@ class Fuzzer:
                 finally:
                     with contextlib.suppress(OSError):
                         os.unlink(_shim_path)
+            # UBSAN detection — set UBSAN_OPTIONS to make errors fatal.
+            # The UBSAN runtime is preloaded by ldpreload_wrapper.py.
+            target_is_ubsan = _detect_ubsan(self.target)
+            if target_is_ubsan:
+                ubsan_opts = os.environ.get("UBSAN_OPTIONS", "")
+                opt_parts = [p for p in ubsan_opts.split(":") if p] if ubsan_opts else []
+                seen = {p.split("=")[0] for p in opt_parts}
+                for opt in ("halt_on_error=1", "abort_on_error=1", "print_stacktrace=1"):
+                    key = opt.split("=")[0]
+                    if key not in seen:
+                        opt_parts.append(opt)
+                        seen.add(key)
+                os.environ["UBSAN_OPTIONS"] = ":".join(opt_parts)
         # Auto-detect .so targets and use in-process mode
         if not inprocess and self.target.lower().endswith((".so", ".dylib", ".dll")):
             from fuzzer_tool.adapters.inprocess import InProcessRunner
@@ -1146,7 +1174,7 @@ class Fuzzer:
             # (returning "verify_asan_link_order=0") before libasan.so, so
             # ASAN skips the post-startup first-load check. Safe for fuzzing:
             # ASAN only needs target-side bug detection, not Python-side.
-            use_direct_lite = True
+            use_direct_lite = True # NEVER EVER CHANGE THIS!!!
             # ASAN ctypes preloading was done above (before the branch). If it
             # failed, fall back to persistent mode where LD_PRELOAD handles it.
             # Even if ctypes preloading succeeds, ASAN detection does NOT work
@@ -1199,7 +1227,7 @@ class Fuzzer:
                 coverage_env_id=cov_env_id,
                 cov=bool(cov_env_id),
                 debug=self.debug,
-                capture_stderr=target_is_asan,
+                capture_stderr=target_is_asan or target_is_ubsan,
             )
             if use_direct_lite:
                 mode = "direct_lite"

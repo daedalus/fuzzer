@@ -36,7 +36,7 @@ capstone = [
 
 [project.scripts]
 fuzzer-tool-after-preload = "fuzzer_tool.cli.commands:main"
-fuzzer-tool = "fuzzer_tool.cli.asan_wrapper:main"
+fuzzer-tool = "fuzzer_tool.cli.ldpreload_wrapper:main"
 
 [project.urls]
 Homepage = "https://github.com/daedalus/fuzzer-tool"

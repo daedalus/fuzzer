@@ -2,38 +2,53 @@
 
 import re
 
+ASAN_ERROR_TYPES = (
+    r"heap-buffer-overflow|stack-buffer-overflow|heap-use-after-free"
+    r"|global-buffer-overflow|stack-buffer-underflow|heap-buffer-overflow-"
+    r"|dynamic-stack-buffer-overflow|stack-use-after-return|stack-use-after-scope"
+    r"|allocation-size-too-big|double-free|invalid-malloc-size"
+    r"|attempting-free-on-non-deallocated-memory"
+    r"|negative-size-param|heap-use-after-scope"
+    r"|calloc-overflow|negative-array-size|negative-memset-size"
+    r"|memcpy-param-overlap|strncat-param-overlap"
+    r"|initialization-order-fiasco|odr-violation"
+    r"|alloc-dealloc-mismatch|new-delete-type-mismatch"
+)
+
+UBSAN_ERROR_TYPES = (
+    r"undefined|shift-exponent|signed-integer-overflow"
+    r"|null-pointer-use|integer-divide-by-zero"
+    r"|pointer-overflow|misaligned-pointer-use"
+    r"|function-pointer-mismatch|bool-constant-evaluation"
+    r"|builtin|array-bounds|float-cast-overflow"
+    r"|implicit-signed-integer-truncation|implicit-integer-sign-change"
+    r"|pointer-subtract-overflow|builtin-unreachable"
+    r"|nonnull-attribute-violation|return-nonnull-attribute"
+    r"|vla-bound-not-positive|unsigned-integer-overflow"
+)
+
 SANITIZER_PATTERNS = [
-    (
-        r"AddressSanitizer:\s*(heap-buffer-overflow|stack-buffer-overflow|heap-use-after-free"
-        r"|global-buffer-overflow|stack-buffer-underflow|heap-buffer-overflow-|"
-        r"dynamic-stack-buffer-overflow|stack-use-after-return|stack-use-after-scope"
-        r"|allocation-size-too-big|double-free|invalid-malloc-size"
-        r"|attempting-free-on-non-deallocated-memory|"
-        r"negative-size-param|heap-use-after-scope)",
-        "ASAN",
-    ),
+    (rf"AddressSanitizer:\s*({ASAN_ERROR_TYPES})", "ASAN"),
     (r"MemorySanitizer:\s*(use-of-uninitialized-value)", "MSAN"),
     (r"ThreadSanitizer:\s*(data-race|heap-use-after-race|lock-order-inversion)", "TSAN"),
     (r"LeakSanitizer:\s*(leak)", "LSAN"),
-    (
-        r"UndefinedBehaviorSanitizer:\s*(undefined|shift-exponent|signed-integer-overflow"
-        r"|null-pointer-use|integer-divide-by-zero)",
-        "UBSAN",
-    ),
+    (rf"UndefinedBehaviorSanitizer:\s*({UBSAN_ERROR_TYPES})", "UBSAN"),
 ]
 
-SANITIZER_ERROR_RE = re.compile(
+# Combined regex for the main error line (used by SanitizerReport.parse)
+SANITIZER_ERROR_LINE_RE = re.compile(
     r"(AddressSanitizer|MemorySanitizer|ThreadSanitizer|LeakSanitizer|UndefinedBehaviorSanitizer)"
     r":\s*(\S+)",
     re.IGNORECASE,
 )
+
 SANITIZER_STACK_FRAME_RE = re.compile(r"#\d+\s+0x[0-9a-f]+\s+in\s+(\S+)\s+.*")
 SANITIZER_FAULT_ADDR_RE = re.compile(
     r"(?:Address|Memory)Sanitizer.*(?:on|at) address\s+(0x[0-9a-f]+)",
     re.IGNORECASE,
 )
 
-# New patterns for enriched ASAN output
+# Enriched ASAN output patterns
 SANITIZER_ACCESS_RE = re.compile(
     r"(READ|WRITE|FREE)\s+of\s+size\s+(\d+)",
     re.IGNORECASE,
@@ -61,7 +76,8 @@ _SINGLE_FRAME_MASK = 0xDEAD
 _NUM_FRAMES_NORMAL = 7
 _NUM_FRAMES_SANITIZER = 14
 
-# Exploitability lookup (base estimates, refined by access_type)
+# ── Exploitability ───────────────────────────────────────────────
+
 ASAN_EXPLOITABILITY = {
     # WRITE variants → CRITICAL
     "heap-buffer-overflow": "CRITICAL",
@@ -71,6 +87,13 @@ ASAN_EXPLOITABILITY = {
     "double-free": "CRITICAL",
     "heap-buffer-overflow-": "CRITICAL",
     "dynamic-stack-buffer-overflow": "CRITICAL",
+    "alloc-dealloc-mismatch": "CRITICAL",
+    "new-delete-type-mismatch": "CRITICAL",
+    "calloc-overflow": "CRITICAL",
+    "negative-array-size": "CRITICAL",
+    "negative-memset-size": "CRITICAL",
+    "memcpy-param-overlap": "CRITICAL",
+    "strncat-param-overlap": "CRITICAL",
     # READ variants → MEDIUM-HIGH
     "stack-buffer-underflow": "HIGH",
     "stack-use-after-return": "HIGH",
@@ -80,6 +103,30 @@ ASAN_EXPLOITABILITY = {
     "invalid-malloc-size": "MEDIUM",
     "attempting-free-on-non-deallocated-memory": "MEDIUM",
     "negative-size-param": "MEDIUM",
+    "initialization-order-fiasco": "LOW",
+    "odr-violation": "LOW",
+}
+
+UBSAN_EXPLOITABILITY = {
+    "null-pointer-use": "HIGH",
+    "function-pointer-mismatch": "HIGH",
+    "pointer-overflow": "HIGH",
+    "builtin": "HIGH",
+    "array-bounds": "HIGH",
+    "nonnull-attribute-violation": "HIGH",
+    "return-nonnull-attribute": "HIGH",
+    "signed-integer-overflow": "MEDIUM",
+    "shift-exponent": "MEDIUM",
+    "float-cast-overflow": "MEDIUM",
+    "implicit-signed-integer-truncation": "MEDIUM",
+    "implicit-integer-sign-change": "MEDIUM",
+    "pointer-subtract-overflow": "MEDIUM",
+    "vla-bound-not-positive": "MEDIUM",
+    "misaligned-pointer-use": "LOW",
+    "unsigned-integer-overflow": "LOW",
+    "bool-constant-evaluation": "LOW",
+    "builtin-unreachable": "LOW",
+    "integer-divide-by-zero": "LOW",
 }
 
 # READ access downgrades CRITICAL to HIGH for heap overflow types
@@ -173,17 +220,18 @@ class SanitizerReport:
         if m:
             self.dealloc_frames = SANITIZER_STACK_FRAME_RE.findall(m.group(1))
 
-        # Exploitability — base estimate, then refine by access type
+        # Exploitability
         if self.sanitizer == "AddressSanitizer":
             base = ASAN_EXPLOITABILITY.get(self.error_type, "MEDIUM")
-            # READ access downgrades CRITICAL to HIGH for overflow types
             if self.access_type == "READ" and self.error_type in _ASAN_READ_DOWNGRADE:
                 self.exploitability = "HIGH"
             else:
                 self.exploitability = base
         elif self.sanitizer == "MemorySanitizer" or self.sanitizer == "ThreadSanitizer":
             self.exploitability = "MEDIUM"
-        elif self.sanitizer == "UndefinedBehaviorSanitizer" or self.sanitizer == "LeakSanitizer":
+        elif self.sanitizer == "UndefinedBehaviorSanitizer":
+            self.exploitability = UBSAN_EXPLOITABILITY.get(self.error_type, "MEDIUM")
+        elif self.sanitizer == "LeakSanitizer":
             self.exploitability = "LOW"
 
     def _build_signature(self) -> str:
@@ -202,7 +250,7 @@ class SanitizerReport:
         Returns:
             Parsed report, or None if no sanitizer output found.
         """
-        m = SANITIZER_ERROR_RE.search(stderr)
+        m = SANITIZER_ERROR_LINE_RE.search(stderr)
         if not m:
             return None
         sanitizer = m.group(1)
@@ -217,24 +265,10 @@ class SanitizerReport:
         return cls(sanitizer, error_type, fault_addr, frames, stderr)
 
     def is_valid(self) -> bool:
-        """Check if the report has valid sanitizer and error type.
-
-        Returns:
-            True if both sanitizer and error_type are non-empty.
-        """
         return bool(self.sanitizer and self.error_type)
 
     def stack_hash(self) -> str:
-        """Compute a stack hash from the crash's PC addresses.
-
-        Hashes the last 3 hex nibbles (12 bits) of each PC in the top
-        frames, XORed together. Uses 7 frames for normal crashes, 14
-        for sanitizer crashes (since sanitizer frames occupy the top).
-        Single-frame crashes get a mask to prevent false uniqueness.
-
-        Returns:
-            Hex string of the stack hash (16 chars).
-        """
+        """Compute a stack hash from the crash's PC addresses."""
         pcs = _SANITIZER_PC_RE.findall(self.raw)
         if not pcs:
             return ""
@@ -244,7 +278,6 @@ class SanitizerReport:
         count = 0
         for pc_str in pcs[:num_frames]:
             pc = int(pc_str, 16)
-            # Hash last 3 nibbles (12 bits)
             h ^= pc & 0xFFF
             count += 1
 

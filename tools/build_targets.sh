@@ -225,7 +225,7 @@ build_simple_so_targets() {
     local suffix="$1" flags="$2" label="$3"
     echo "Building simple .so targets ($label)..."
     local out_suffix=""
-    [[ "$suffix" == _asan* ]] && out_suffix="$suffix"
+    [[ "$suffix" == _asan* || "$suffix" == _ubsan* ]] && out_suffix="$suffix"
 
     # When --cmplog is set and vendored trace-cmp libs exist, link against
     # them instead of system libs. The vendored libs were compiled with
@@ -270,7 +270,7 @@ build_simple_so_targets() {
 build_standalone_so_targets() {
     local suffix="$1" flags="$2" label="$3"
     local out_suffix=""
-    [[ "$suffix" == _asan* ]] && out_suffix="$suffix"
+    [[ "$suffix" == _asan* || "$suffix" == _ubsan* ]] && out_suffix="$suffix"
 
     # tailslayer — C++ target (g++), header-only library
     if [ -f "$TARGETS/tailslayer_read.cpp" ] && [ -d "$TAILSLAYER/include" ]; then
@@ -800,8 +800,6 @@ esac
 if [ "$BUILD_ASAN" -eq 1 ]; then
     [ "$HAS_FGREP" -eq 1 ] && compile_fgrep_objects "_asan" "-fsanitize=address"
     [ "$HAS_FGREP" -eq 1 ] && build_fgrep_targets "_asan" "-fsanitize=address" "ASAN"
-    # Compile fgrep objects with clang + trace-pc-guard for .so targets
-    # auto-instrumentation via afl_shim.c's __sanitizer_cov_trace_pc_guard
     if command -v clang &>/dev/null; then
         [ "$HAS_FGREP" -eq 1 ] && compile_fgrep_objects "_asan_tcg" "-fsanitize=address" "clang" "-fsanitize-coverage=trace-pc-guard"
     else
@@ -812,6 +810,12 @@ if [ "$BUILD_ASAN" -eq 1 ]; then
     [ "$HAS_FGREP" -eq 1 ] && build_fgrep_so_targets "_asan_tcg" "-fsanitize=address" "ASAN"
     build_simple_so_targets "_asan" "-fsanitize=address" "ASAN"
     build_standalone_so_targets "_asan" "-fsanitize=address" "ASAN"
+fi
+# UBSAN targets: compiled with -fsanitize=undefined (runtime built in)
+if [ "$BUILD_ASAN" -eq 1 ]; then
+    echo "  Building UBSAN targets..."
+    build_simple_so_targets "_ubsan" "-fsanitize=undefined" "UBSAN" "clang"
+    build_standalone_so_targets "_ubsan" "-fsanitize=undefined" "UBSAN" "clang"
 fi
 if [ "$BUILD_NOSAN" -eq 1 ]; then
     [ "$HAS_FGREP" -eq 1 ] && compile_fgrep_objects "_nosan" ""

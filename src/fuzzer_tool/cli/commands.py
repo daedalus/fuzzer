@@ -36,6 +36,19 @@ def _detect_asan(target: str) -> bool:
     return False
 
 
+def _detect_ubsan(target: str) -> bool:
+    """Detect if a binary is UBSAN-instrumented by checking for __ubsan_handle_* symbols."""
+    for flags in [[], ["-D"]]:
+        try:
+            r = subprocess.run(["nm"] + flags + [target], capture_output=True, timeout=10)
+            if r.returncode == 0:
+                if b"__ubsan_handle" in r.stdout:
+                    return True
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+    return False
+
+
 def _detect_asan_static(target: str) -> bool:
     """Check if ASAN is statically linked (defined T/t, not U).
 
