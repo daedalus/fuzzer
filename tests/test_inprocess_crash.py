@@ -400,3 +400,128 @@ class TestWifexitedCrashCode:
         else:
             rc = -2
         assert rc == -2, f"Expected rc=-2 for normal exit, got rc={rc}"
+
+
+# ---------------------------------------------------------------------------
+# Bug class 7: ASAN halt_on_error=0 + death callback (Layer 2)
+# ---------------------------------------------------------------------------
+
+
+class TestAsanHaltOnError:
+    """Verify halt_on_error=0 prevents abort and keeps ASAN reports in stderr."""
+
+    def test_shim_includes_halt_on_error(self):
+        """__asan_default_options shim must set halt_on_error=0."""
+        import inspect
+        from fuzzer_tool.services.fuzzer import Fuzzer
+
+        source = inspect.getsource(Fuzzer.__init__)
+        assert "halt_on_error=0" in source, (
+            "ASAN shim must set halt_on_error=0 for non-fatal reporting"
+        )
+
+    def test_standalone_halt_on_error(self, compiled_targets):
+        """ASAN standalone binary with halt_on_error=0 keeps ASAN report in stderr."""
+        env = os.environ.copy()
+        env["ASAN_OPTIONS"] = "halt_on_error=0:abort_on_error=0:verify_asan_link_order=0"
+        result = subprocess.run(
+            [str(compiled_targets.ASAN_BIN)],
+            input=b"BUG!U",
+            capture_output=True,
+            timeout=10,
+            env=env,
+        )
+        # halt_on_error=0 via ASAN_OPTIONS env may or may not prevent abort()
+        # depending on the system's ASAN build (some still abort despite the
+        # option). The critical assertion is that the ASAN report IS generated
+        # in stderr — the fuzzer detects crashes from stderr content, not rc.
+        assert b"AddressSanitizer" in result.stderr, (
+            f"ASAN report should be in stderr, got: {result.stderr[:300]}"
+        )
+
+
+class TestAsanStderrCapture:
+    """Verify stderr capture and is_interesting detection for ASAN halt_on_error=0."""
+
+    def test_is_interesting_detects_asan_in_stderr(self):
+        """is_interesting returns True when ASAN report is in stderr with returncode=0."""
+        from fuzzer_tool.services.runner import TargetRunner
+
+        class MockFuzzer:
+            extra_crash_codes: list[int] = []
+
+        runner = TargetRunner(MockFuzzer())  # type: ignore[arg-type]
+        # halt_on_error=0: returncode=0 but stderr has ASAN report
+        assert runner.is_interesting(0, "==1==ERROR: AddressSanitizer: heap-use-after-free\n"), (
+            "is_interesting should detect ASAN in stderr even with rc=0"
+        )
+
+    def test_is_crash_detects_asan_report(self):
+        """is_crash returns True when SanitizerReport.parse finds valid ASAN report."""
+        from fuzzer_tool.services.runner import TargetRunner
+
+        class MockFuzzer:
+            extra_crash_codes: list[int] = []
+            last_report = None
+
+        runner = TargetRunner(MockFuzzer())  # type: ignore[arg-type]
+        stderr = "==1==ERROR: AddressSanitizer: heap-use-after-free on address 0x1234\n"
+        assert runner.is_crash(0, stderr), (
+            "is_crash should detect ASAN crash via SanitizerReport.parse with rc=0"
+        )
+        assert runner.f.last_report is not None, "last_report should be set"
+
+    def test_is_interesting_clean(self):
+        """is_interesting returns False for clean run (returncode=0, no ASAN)."""
+        from fuzzer_tool.services.runner import TargetRunner
+
+        class MockFuzzer:
+            extra_crash_codes: list[int] = []
+
+        runner = TargetRunner(MockFuzzer())  # type: ignore[arg-type]
+        assert not runner.is_interesting(0, "")
+
+
+class TestAsanCaptureStderr:
+    """Verify capture_stderr wires from Fuzzer to InProcessRunner."""
+
+    def test_capture_stderr_wired(self):
+        """Fuzzer passes capture_stderr=True for ASAN targets."""
+        import inspect
+        from fuzzer_tool.services.fuzzer import Fuzzer
+
+        source = inspect.getsource(Fuzzer.__init__)
+        # The auto-detect path should pass capture_stderr=target_is_asan
+        assert "capture_stderr=target_is_asan" in source, (
+            "Fuzzer must wire capture_stderr for ASAN targets"
+        )
+
+    def test_inprocess_runner_capture_stderr_param(self):
+        """InProcessRunner accepts capture_stderr parameter."""
+        from fuzzer_tool.adapters.inprocess import InProcessRunner
+        import inspect
+
+        sig = inspect.signature(InProcessRunner.__init__)
+        assert "capture_stderr" in sig.parameters, (
+            "InProcessRunner must accept capture_stderr parameter"
+        )
+
+    def test_capture_stderr_non_asan_no_overhead(self, compiled_targets):
+        """capture_stderr=False (default) works without stderr redirection."""
+        from fuzzer_tool.adapters.inprocess import InProcessRunner
+
+        runner = InProcessRunner(
+            target=str(compiled_targets.NOSAN_SO),
+            function_name="fuzz_shm_run",
+            timeout=2.0,
+            shm_size=4096,
+            direct_lite=True,
+            coverage_env_id=None,
+            cov=False,
+            debug=False,
+        )
+        assert runner.capture_stderr is False
+
+        rc, stderr = runner.run_one(b"safe input data")
+        assert rc == 0
+        assert stderr == "", f"Stderr should be empty for non-ASAN, got: {stderr}"

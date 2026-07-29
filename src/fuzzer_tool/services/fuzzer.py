@@ -604,6 +604,7 @@ class Fuzzer:
         # Register for atexit cleanup to avoid orphan dmesg -w subprocess
         global _active_dmesg_parser
         _active_dmesg_parser = self._dmesg
+
         self.stats_file = Path(stats_file) if stats_file else None
         self.stats_interval = stats_interval
         self._last_stats_exec = 0
@@ -1039,7 +1040,8 @@ class Fuzzer:
                 from fuzzer_tool.adapters.shim_factory import _find_compiler
 
                 _asan_opts_shim_src = (
-                    b'const char *__asan_default_options() {  return "verify_asan_link_order=0";}'
+                    b"const char *__asan_default_options() {  "
+                    b'return "halt_on_error=0:abort_on_error=0:verify_asan_link_order=0";}'
                 )
                 _fd, _shim_path = _tempfile.mkstemp(suffix=".so", prefix="asan_opts_")
                 os.close(_fd)
@@ -1068,6 +1070,15 @@ class Fuzzer:
                     _ctypes.CDLL(libasan, mode=_ctypes.RTLD_GLOBAL)
                     _asan_ctypes_loaded = True
                     print(f"[*] ASAN preloaded for in-process: {libasan}")
+
+                    # With halt_on_error=0 (set via __asan_default_options shim
+                    # above), ASAN reports bugs to stderr but does not abort().
+                    # The target function returns normally (rc=0) and stderr
+                    # contains the full ASAN report. The existing crash detection
+                    # pipeline (SanitizerReport.parse() in runner.py) detects
+                    # the crash from captured stderr. No death callback is
+                    # needed — ASAN only fires death callbacks in the fatal
+                    # path (halt_on_error=1).
                 except OSError as e:
                     print(f"[!] ASAN ctypes preload failed: {e}")
                 finally:
@@ -1131,6 +1142,7 @@ class Fuzzer:
                 coverage_env_id=cov_env_id,
                 cov=bool(cov_env_id),
                 debug=self.debug,
+                capture_stderr=target_is_asan,
             )
             if use_direct_lite:
                 mode = "direct_lite"
@@ -1224,7 +1236,9 @@ class Fuzzer:
         std = max(std, 1.0)
         target_sizes = [max(1, min(int(random.gauss(mean, std)), self.max_len)) for _ in range(n)]
         random.shuffle(target_sizes)
-        self.corpus = [self._resize_seed(s, t) for s, t in zip(self.corpus, target_sizes, strict=False)]
+        self.corpus = [
+            self._resize_seed(s, t) for s, t in zip(self.corpus, target_sizes, strict=False)
+        ]
         self._invalidate_seed_key_cache()
 
     def _resize_seed(self, seed: bytes, target_size: int) -> bytes:

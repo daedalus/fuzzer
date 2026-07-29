@@ -367,11 +367,13 @@ class TargetRunner:
             return True
         if returncode < 0 and returncode != -1:
             return True
-        if returncode in (-1, 0) and "ASAN" in stderr:
+        if returncode in (-1, 0) and ("ASAN" in stderr or "AddressSanitizer" in stderr):
             return True
         if "Segmentation fault" in stderr:
             return True
-        return "Aborted" in stderr
+        if "Aborted" in stderr:
+            return True
+        return False
 
     def is_crash(self, returncode: int, stderr: str) -> bool:
         f = self.f

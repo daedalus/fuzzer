@@ -1,7 +1,7 @@
 # ASAN Direct-Lite Limitation
 
 **Date**: 2026-07-29
-**Status**: Unresolved — root cause not isolated
+**Status**: Layer 2 resolved (non-fatal reporting); Layer 1 root cause not isolated
 
 ## Executive Summary
 
@@ -196,6 +196,28 @@ gcc -o /tmp/c_test /tmp/c_test.c -ldl
 LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libasan.so.8 /tmp/c_test
 # → ASAN: heap-use-after-free on address ... — works!
 ```
+ 
+## Layer 2 Resolved (2026-07-29): Non-Fatal ASAN Crash Reporting
+
+### What Changed
+
+The fuzzer now survives ASAN detections in-process:
+
+1. **`halt_on_error=0:abort_on_error=0`** is injected via the `__asan_default_options()` shim alongside `verify_asan_link_order=0`. ASAN writes the full diagnostic report to stderr but does not call `abort()` — the function returns normally (rc=0).
+
+2. **Stderr capture** was added to `_run_c_direct_lite` in `inprocess.py`. When `capture_stderr=True` (set for ASAN-instrumented targets), stderr is redirected to a pipe during the call. The captured stderr (containing the ASAN report) is returned alongside the return code.
+
+3. **Crash detection** works through the existing `runner.py` pipeline:
+   - `is_interesting()`: checks `"ASAN" in stderr or "AddressSanitizer" in stderr` for rc=0
+   - `is_crash()`: calls `SanitizerReport.parse(stderr)` matching the `AddressSanitizer:` regex
+
+4. **`__sanitizer_set_death_callback` does NOT fire with `halt_on_error=0`** — ASAN only invokes the death callback in the fatal path (before abort). Detection relies entirely on stderr capture + parsing.
+
+### File Changes
+
+- `src/fuzzer_tool/services/fuzzer.py` — shim options string: added `halt_on_error=0:abort_on_error=0`
+- `src/fuzzer_tool/adapters/inprocess.py` — pipe-based stderr capture in `_run_c_direct_lite`
+- `src/fuzzer_tool/services/runner.py` — `is_interesting()` now also checks `"AddressSanitizer" in stderr`
 
 ## References
 

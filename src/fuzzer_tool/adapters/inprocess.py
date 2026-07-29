@@ -127,6 +127,7 @@ class InProcessRunner:
         coverage_env_id: str | None = None,
         cov: bool = False,
         debug: bool = False,
+        capture_stderr: bool = False,
     ):
         self.target = target
         self.function_name = function_name
@@ -136,6 +137,7 @@ class InProcessRunner:
         self.direct_lite = direct_lite
         self.coverage_env_id = coverage_env_id
         self.debug = debug
+        self.capture_stderr = capture_stderr
 
         self._func: Callable[[bytes], int] | None = None
         self._lib: ctypes.CDLL | None = None
@@ -470,6 +472,10 @@ class InProcessRunner:
         Timeout via SIGALRM + setitimer.
         Note: target crashes (SIGSEGV/SIGABRT) will kill this process.
         Use subprocess loader for targets that need crash detection.
+
+        When self.capture_stderr is True, stderr is redirected to a pipe
+        during the call so ASAN diagnostic output can be captured for
+        crash reporting (halt_on_error=0 mode).
         """
         if self._lib is None or self._func_ptr is None:
             return -2, "runner not initialized"
@@ -478,6 +484,16 @@ class InProcessRunner:
             self._c_buf = (ctypes.c_uint8 * len(data))(*data)
         else:
             ctypes.memmove(self._c_buf, data, len(data))
+
+        # Conditional stderr capture for ASAN diagnostic reporting
+        _captured_stderr = ""
+        _saved_stderr = None
+        _read_fd = None
+        if self.capture_stderr:
+            _saved_stderr = os.dup(2)
+            _read_fd, _write_fd = os.pipe()
+            os.dup2(_write_fd, 2)
+            os.close(_write_fd)
 
         self._timed_out = False
         if not hasattr(self, "_alarm_handler"):
@@ -493,10 +509,23 @@ class InProcessRunner:
             rc = self._func_ptr(self._c_buf, len(data))
         finally:
             signal.setitimer(signal.ITIMER_REAL, 0)
+            if self.capture_stderr and _saved_stderr is not None and _read_fd is not None:
+                # Restore original stderr
+                os.dup2(_saved_stderr, 2)
+                os.close(_saved_stderr)
+                # Read captured stderr (non-blocking to avoid hang if ASAN
+                # closed/replaced its own fd during halt_on_error recovery)
+                os.set_blocking(_read_fd, False)
+                try:
+                    _buf = os.read(_read_fd, 65536)
+                    _captured_stderr = _buf.decode(errors="replace")
+                except OSError:
+                    _captured_stderr = ""
+                os.close(_read_fd)
 
         if self._timed_out:
             return -1, "timeout"
-        return rc, ""
+        return rc, _captured_stderr
 
     def _run_c_persistent(self, data: bytes) -> tuple[int, str]:
         """Persistent subprocess — one process, many calls."""
