@@ -1032,6 +1032,11 @@ def cmd_sweep(args):
         print("[-] No seeds found in corpus")
         return 0
 
+    # Optionally limit the number of seeds to sweep
+    max_seeds = getattr(args, "max_seeds", 0)
+    if max_seeds > 0 and len(seeds) > max_seeds:
+        seeds = seeds[:max_seeds]
+
     crashes_dir = Path(args.crashes) if args.crashes else corpus_dir / "crashes"
     crashes_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1869,6 +1874,9 @@ def main() -> int:
         "--target-args",
         nargs=argparse.REMAINDER,
         help="Target arguments ({file} placeholder)",
+    )
+    sweep_parser.add_argument(
+        "-n", "--max-seeds", type=int, default=0, help="Max seeds to sweep (0=all)"
     )
     sweep_parser.set_defaults(func=cmd_sweep)
 
