@@ -31,6 +31,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
+#include <setjmp.h>
 #include <unistd.h>
 #include <sys/ipc.h>
 #include <sys/shm.h>
@@ -202,39 +203,22 @@ void __afl_map_reset(void) {
 }
 
 /* ── Crash signal handler ─────────────────────────────────────────────
- * When the target crashes (SIGSEGV from a real segfault or SIGABRT from
- * ASAN calling abort()), exit with 128 + signal so the parent process
- * sees a meaningful exit code instead of being silently killed.  This
- * is essential for direct_lite in-process mode where Python-level signal
- * handlers never run during a ctypes call.
+ * Uses sigsetjmp/siglongjmp instead of the traditional restore-and-re-raise
+ * approach because glibc's abort() resets the handler to SIG_DFL after the
+ * first SIGABRT and re-raises — killing the process before the fuzzer can
+ * recover.  siglongjmp escapes the signal handler entirely, jumping back to
+ * __afl_guarded_call which can then report the crash via its return value.
  *
- * In all builds, the abort() override below intercepts abort() before
- * it raises SIGABRT, so the signal handler is a fallback for SIGSEGV and
- * any SIGABRT that bypasses the override (e.g. from pre-compiled library
- * code not covered by the preprocessor macro).  The override approach
- * prevents false crash positives from library-internal assertions
- * (FFmpeg av_assert0, etc.).
- *
- * cmplog_shim.c installs its OWN crash handler (flush + re-raise) when
- * compiled into the same target — its constructor runs after ours, so
- * its handler takes priority (which is correct: it flushes cmplog before
- * dying).  Our handler is the fallback for non-cmplog targets.          */
+ * This is needed for crashes from pre-compiled code (libasan, libc) that
+ * bypasses the abort() preprocessor override below.  The override covers
+ * the target's own source (FFmpeg av_assert0, etc.).                         */
 
+static sigjmp_buf __afl_jmp_buf;
 static struct sigaction __afl_old_segv;
 static struct sigaction __afl_old_abrt;
 
 static void __afl_crash_handler(int sig) {
-    /* Restore previous handler (e.g. ASAN's) and re-raise so it can
-     * produce its error report before the process terminates.  For
-     * non-ASAN builds the previous handler is SIG_DFL, so the re-raise
-     * terminates with the same signal-indicating exit code (128+sig)
-     * as the original _exit() approach.                                  */
-    struct sigaction *old;
-    if (sig == SIGSEGV)      old = &__afl_old_segv;
-    else if (sig == SIGABRT) old = &__afl_old_abrt;
-    else                    { _exit(128 + (unsigned int)sig); return; }
-    sigaction(sig, old, NULL);
-    raise(sig);
+    siglongjmp(__afl_jmp_buf, sig);
 }
 
 static void __afl_install_crash_handlers(void) {
@@ -244,6 +228,28 @@ static void __afl_install_crash_handlers(void) {
     sa.sa_flags = 0;
     sigaction(SIGSEGV, &sa, &__afl_old_segv);
     sigaction(SIGABRT, &sa, &__afl_old_abrt);
+}
+
+/* ── Guarded call wrapper ─────────────────────────────────────────────
+ * InProcessRunner's direct_lite mode calls this instead of calling the
+ * fuzz entry function directly.  __afl_guarded_call sets up a sigsetjmp
+ * buffer, calls the entry function, and returns normally.  If a signal
+ * (SIGSEGV/SIGABRT) fires during the call, __afl_crash_handler does
+ * siglongjmp back here, and we return a negative signal-indicating value.
+ *
+ * Returns the entry function's return value on success, or -sig (negated
+ * signal number, e.g. -6 for SIGABRT, -11 for SIGSEGV) on crash.  This
+ * matches the signal-indicating exit code convention used throughout the
+ * fuzzer (run_target_stdin etc. return -sig on signal).                      */
+
+__attribute__((visibility("default")))
+int __afl_guarded_call(int (*entry)(const uint8_t *, size_t),
+                       const uint8_t *data, size_t size) {
+    int sig;
+    if ((sig = sigsetjmp(__afl_jmp_buf, 1)) == 0)
+        return entry(data, size);
+    /* sig = signal number from __afl_crash_handler's siglongjmp */
+    return -(int)sig;
 }
 
 /* ── abort() override (all builds) ───────────────────────────────────

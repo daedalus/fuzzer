@@ -47,9 +47,20 @@ NC='\033[0m'
 ok() { echo -e "  ${GREEN}OK${NC}: $1"; }
 warn() { echo -e "  ${YELLOW}WARN${NC}: $1"; }
 
+# ── Default compiler: prefer clang, fall back to gcc ────────────────
+_pick_cc() {
+    if command -v clang &>/dev/null; then
+        echo "clang"
+    else
+        warn "clang not found, falling back to gcc"
+        echo "gcc"
+    fi
+}
+DEFAULT_CC="$(_pick_cc)"
+
 # ── Compile perf_shim.so ─────────────────────────────────────────
 compile_perf_shim() {
-    local cc="${1:-gcc}"
+    local cc="${1:-$DEFAULT_CC}"
     local out="src/fuzzer_tool/adapters/perf_shim.so"
     if [ ! -f "$PERF_SHIM" ]; then
         warn "perf_shim.c not found, skipping"
@@ -66,7 +77,7 @@ compile_perf_shim() {
 
 # ── Compile fgrep library objects ──────────────────────────────────
 compile_fgrep_objects() {
-    local suffix="$1" flags="$2" cc="${3:-gcc}" extra_cflags="${4:-}"
+    local suffix="$1" flags="$2" cc="${3:-$DEFAULT_CC}" extra_cflags="${4:-}"
     echo "Compiling fgrep objects${suffix:+ ($suffix)}..."
     for src in regex_engine simd cpu; do
         $cc $flags -fPIC -O2 -g $extra_cflags -I"$FGREP/include" -I"$FGREP/src" \
@@ -81,7 +92,7 @@ compile_fgrep_objects() {
 
 # ── Build a target ────────────────────────────────────────────────
 build_target() {
-    local src="$1" out="$2" libs="$3" extra_flags="$4" cc="${5:-gcc}" extra_cflags="${6:-}"
+    local src="$1" out="$2" libs="$3" extra_flags="$4" cc="${5:-$DEFAULT_CC}" extra_cflags="${6:-}"
     if [ ! -f "$src" ]; then
         warn "Source not found: $src"
         return 1
@@ -98,7 +109,7 @@ build_target() {
 
 # ── Build a .so target ───────────────────────────────────────────
 build_so_target() {
-    local src="$1" out="$2" libs="$3" extra_flags="$4" cc="${5:-gcc}" extra_cflags="${6:-}"
+    local src="$1" out="$2" libs="$3" extra_flags="$4" cc="${5:-$DEFAULT_CC}" extra_cflags="${6:-}"
     local cmplog_obj="" cmplog_libs=""
     if [ ! -f "$src" ]; then
         warn "Source not found: $src"
@@ -205,7 +216,7 @@ build_simple_targets() {
     build_target "$TARGETS/zlib_read.c" "$TARGETS/zlib_read${out_suffix}" "-lz" "$flags"
     build_target "$TARGETS/gzip_read.c" "$TARGETS/gzip_read${out_suffix}" "-lz" "$flags"
     build_target "$TARGETS/jpeg_read.c" "$TARGETS/jpeg_read${out_suffix}" "-ljpeg" "$flags"
-    build_target "$TARGETS/ffmpeg_read.c" "$TARGETS/ffmpeg_read${out_suffix}" "$FFMPEG_LIBS" "$flags" gcc "$FFMPEG_INC"
+    build_target "$TARGETS/ffmpeg_read.c" "$TARGETS/ffmpeg_read${out_suffix}" "$FFMPEG_LIBS" "$flags" "$DEFAULT_CC" "$FFMPEG_INC"
     build_target "$TARGETS/grep_read.c" "$TARGETS/grep_read${out_suffix}" "" "$flags"
 }
 
@@ -342,7 +353,7 @@ compile_vendored_libs() {
 
 # ── Build .so targets with vendored libraries ────────────────────
 build_vendored_so_targets() {
-    local suffix="$1" flags="$2" label="$3" cc="${4:-gcc}" extra_cflags="${5:-}"
+    local suffix="$1" flags="$2" label="$3" cc="${4:-$DEFAULT_CC}" extra_cflags="${5:-}"
     echo "Building vendored .so targets ($label)..."
     local out_suffix=""
     [[ "$suffix" == _asan* ]] && out_suffix="$suffix"

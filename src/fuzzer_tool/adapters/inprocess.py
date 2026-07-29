@@ -506,7 +506,25 @@ class InProcessRunner:
 
         signal.setitimer(signal.ITIMER_REAL, self.timeout)
         try:
-            rc = self._func_ptr(self._c_buf, len(data))
+            # Use __afl_guarded_call if available (compiled into target .so
+            # via afl_shim.c).  It uses sigsetjmp/siglongjmp to survive
+            # abort() in pre-compiled libraries (libasan, etc.) by escaping
+            # the signal handler before glibc re-raises SIGABRT as SIG_DFL.
+            _guarded = getattr(self._lib, "__afl_guarded_call", None)
+            if _guarded is not None:
+                _guarded.restype = ctypes.c_int
+                _guarded.argtypes = [
+                    ctypes.c_void_p,
+                    ctypes.POINTER(ctypes.c_uint8),
+                    ctypes.c_size_t,
+                ]
+                _func_ptr_raw = ctypes.cast(self._func_ptr, ctypes.c_void_p)
+                rc = _guarded(_func_ptr_raw, self._c_buf, len(data))
+                # rc < 0 and rc > -128 means a signal crashed us; siglongjmp'd
+                # back with -sig (e.g. -6 for SIGABRT).  Already in the right
+                # format — matches how run_target_stdin returns signal codes.
+            else:
+                rc = self._func_ptr(self._c_buf, len(data))
         finally:
             signal.setitimer(signal.ITIMER_REAL, 0)
             if self.capture_stderr and _saved_stderr is not None and _read_fd is not None:
