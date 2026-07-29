@@ -288,6 +288,7 @@ class Fuzzer:
         cmplog=False,
         cmplog_max_tokens=0,
         cmplog_max_pairs=0,
+        cmplog_workdir=None,
         asan_target=None,
         ubsan_target=None,
         max_corpus=0,
@@ -489,7 +490,9 @@ class Fuzzer:
         if cmplog:
             from fuzzer_tool.core.cmplog import CmplogCollector
 
-            self._cmplog = CmplogCollector(max_tokens=cmplog_max_tokens, max_pairs=cmplog_max_pairs)
+            self._cmplog = CmplogCollector(
+                max_tokens=cmplog_max_tokens, max_pairs=cmplog_max_pairs, workdir=cmplog_workdir
+            )
             if self._cmplog.start():
                 print("[*] Cmplog: comparison tracing enabled (memcmp/strcmp/strncmp/memchr)")
                 from fuzzer_tool.core.rq_encodings import encoders_summary

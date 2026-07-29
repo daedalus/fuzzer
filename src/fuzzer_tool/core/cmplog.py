@@ -19,8 +19,43 @@ import contextlib
 import logging
 import os
 import tempfile
+import uuid
 
 log = logging.getLogger(__name__)
+
+# ── Disk-backed directory (avoid tmpfs-full failures) ─────────────────
+
+_CMPLOG_DIR: str | None = None
+
+
+def _get_cmplog_dir() -> str:
+    """Return a disk-backed (non-tmpfs) directory for cmplog artifacts.
+
+    Falls back to tempfile.gettempdir() if XDG_CACHE_HOME and HOME
+    are unavailable.
+    """
+    global _CMPLOG_DIR
+    if _CMPLOG_DIR is not None:
+        return _CMPLOG_DIR
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
+    _CMPLOG_DIR = os.path.join(base, "fuzzer_cmplog")
+    os.makedirs(_CMPLOG_DIR, exist_ok=True)
+    return _CMPLOG_DIR
+
+
+def _cleanup_stale_cmplog_files():
+    """Remove stale cmplog log files from previous runs at startup."""
+    d = _get_cmplog_dir()
+    removed = 0
+    for entry in os.scandir(d):
+        if entry.name.endswith(".cmplog") and entry.is_file():
+            try:
+                os.unlink(entry.path)
+                removed += 1
+            except OSError:
+                pass
+    if removed:
+        log.info("Cleaned %d stale cmplog file(s) from %s", removed, d)
 
 # ── Memory bounds ────────────────────────────────────────────────────
 CMPLOG_TOKENS_MAX = 10_000  # max unique operand tokens
@@ -42,7 +77,7 @@ class CmplogCollector:
         max_pairs: Cap on unique operand pairs (default CMPLOG_PAIRS_MAX).
     """
 
-    def __init__(self, max_tokens: int = 0, max_pairs: int = 0):
+    def __init__(self, max_tokens: int = 0, max_pairs: int = 0, workdir: str | None = None):
         self.log_path: str | None = None
         self.tokens: list[bytes] = []
         self._token_set: set[bytes] = set()
@@ -53,6 +88,7 @@ class CmplogCollector:
         self._pair_pc: dict[tuple[bytes, bytes], int | None] = {}
         self._shim_path: str | None = None
         self._shim_handle = None
+        self.workdir: str | None = workdir  # dir for runtime log files
         # Value-density signal: how often each token/pair was present
         # when a coverage gain was detected. Higher = more valuable.
         self._token_value: dict[bytes, int] = {}
@@ -84,8 +120,9 @@ class CmplogCollector:
             log.warning("cmplog_shim.c not found at %s", shim_src)
             return False
 
-        # Cache shim in tempdir — don't recompile if already exists
-        out_path = os.path.join(tempfile.gettempdir(), "fuzz_cmplog_shim.so")
+        # Use disk-backed directory (avoid tmpfs-full failures)
+        cmplog_dir = _get_cmplog_dir()
+        out_path = os.path.join(cmplog_dir, "fuzz_cmplog_shim.so")
         if os.path.exists(out_path):
             self._shim_path = out_path
             log.info("Cmplog shim cached: %s", out_path)
@@ -138,8 +175,10 @@ class CmplogCollector:
             return env
 
         if self.log_path is None or not os.path.exists(self.log_path):
-            fd, self.log_path = tempfile.mkstemp(suffix=".cmplog", prefix="fuzz_cmplog_")
-            os.close(fd)
+            log_dir = self.workdir or _get_cmplog_dir()
+            os.makedirs(log_dir, exist_ok=True)
+            local_id = uuid.uuid4().hex[:12]
+            self.log_path = os.path.join(log_dir, f"fuzz_cmplog_{local_id}.cmplog")
         else:
             # Truncate so the child writes fresh data from position 0
             with contextlib.suppress(OSError):
@@ -171,8 +210,10 @@ class CmplogCollector:
         symbols resolve to the shim, not ASAN's built-in no-op stubs.
         """
         if self.log_path is None or not os.path.exists(self.log_path):
-            fd, self.log_path = tempfile.mkstemp(suffix=".cmplog", prefix="fuzz_cmplog_")
-            os.close(fd)
+            log_dir = self.workdir or _get_cmplog_dir()
+            os.makedirs(log_dir, exist_ok=True)
+            local_id = uuid.uuid4().hex[:12]
+            self.log_path = os.path.join(log_dir, f"fuzz_cmplog_{local_id}.cmplog")
         os.environ["_CMPLOG_OUT"] = self.log_path
 
         if self._shim_path and self._shim_path not in os.environ.get("LD_PRELOAD", ""):

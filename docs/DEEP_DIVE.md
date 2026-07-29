@@ -316,6 +316,7 @@ fuzzer-tool rank ./target -d corpus -n 10 --dump top_seeds
 | `-D FILE` | Load dictionary tokens |
 | `-g GRAMMAR` | Grammar-aware mutations (built-in: png, json, http_request, elf) |
 | `--cmplog` | Comparison tracing via LD_PRELOAD (or compile `cmplog_shim.c` into target .so for direct_lite compatibility) |
+| `--cmplog-workdir` | Directory for cmplog runtime log files (default `/tmp/<target>.cmplog`). Use a disk-backed path when `/tmp` is a small tmpfs to avoid filling it. |
 | `--markov-gen` | Markov-generated seeds (rate adapts to model quality via perplexity) |
 | `--mc-bandit` | Thompson sampling operator selection (Brier score calibration) |
 | `--mc-cem` | Cross-Entropy Method byte distribution |
@@ -625,6 +626,8 @@ gcc -shared -fPIC -O2 \
 ```
 
 The fuzzer auto-detects the built-in cmplog by scanning for the `__cmplog_reset` symbol and keeps using `direct_lite` mode (no fork overhead). The log file is truncated between executions via `__cmplog_reset()`, which the fuzzer calls via ctypes after reading tokens.
+
+Cmplog runtime log files are written to `--cmplog-workdir` (default `/tmp/<target>.cmplog`). Use a disk-backed path when `/tmp` is a small tmpfs to avoid filling it.
 
 To verify cmplog is active from the .so itself, check the startup output:
 ```
