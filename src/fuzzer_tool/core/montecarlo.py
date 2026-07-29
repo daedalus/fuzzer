@@ -2268,9 +2268,7 @@ class EpsilonGreedyScheduler:
         return {
             "eps_greedy_pulls": self._total_pulls,
             "current_epsilon": epsilon,
-            "best_op": (
-                max(self.q_values, key=self.q_values.get) if self.q_values else None
-            ),
+            "best_op": (max(self.q_values, key=self.q_values.get) if self.q_values else None),
         }
 
 
@@ -2642,10 +2640,7 @@ class GPUCBScheduler:
         self._pulls_since_refit += 1
 
         # Periodically rebuild the kernel cache
-        if (
-            self._pulls_since_refit >= self.refit_interval
-            and len(ops) <= 100
-        ):
+        if self._pulls_since_refit >= self.refit_interval and len(ops) <= 100:
             self._pulls_since_refit = 0
             self._kernel_cache = {}
 
@@ -2662,9 +2657,7 @@ class GPUCBScheduler:
             else:
                 # Exploration bonus for operators with insufficient data
                 # Use a fixed high-uncertainty bonus to encourage exploration
-                scores[op] = (
-                    self.beta * 2.0
-                )  # generous initial exploration bonus
+                scores[op] = self.beta * 2.0  # generous initial exploration bonus
 
         return max(scores, key=scores.get)
 
