@@ -169,7 +169,7 @@ build_fgrep_so_targets() {
     local FGREP_LIBS_FULL="$FGREP_LIBS /tmp/output${suffix}.o /tmp/search${suffix}.o /tmp/bmh_simd${suffix}.o /tmp/io${suffix}.o /tmp/fileutil${suffix}.o -lpthread"
 
     local out_suffix=""
-    [ "$suffix" = "_nosan" ] && out_suffix="_nosan"
+    [[ "$suffix" == _asan* ]] && out_suffix="$suffix"
     build_so_target "$TARGETS/fuzz_regex_compile.c" "$TARGETS/fuzz_regex_compile${out_suffix}.so" "$FGREP_INC $FGREP_LIBS" "$flags"
     build_so_target "$TARGETS/fuzz_pattern_match.c" "$TARGETS/fuzz_pattern_match${out_suffix}.so" "$FGREP_INC $FGREP_LIBS" "$flags"
     build_so_target "$TARGETS/fuzz_search_pipeline.c" "$TARGETS/fuzz_search_pipeline${out_suffix}.so" "$FGREP_INC $FGREP_LIBS_FULL" "$flags"
@@ -208,7 +208,7 @@ build_simple_so_targets() {
     local suffix="$1" flags="$2" label="$3"
     echo "Building simple .so targets ($label)..."
     local out_suffix=""
-    [ "$suffix" = "_nosan" ] && out_suffix="_nosan"
+    [[ "$suffix" == _asan* ]] && out_suffix="$suffix"
 
     # When --cmplog is set and vendored trace-cmp libs exist, link against
     # them instead of system libs. The vendored libs were compiled with
@@ -253,7 +253,7 @@ build_simple_so_targets() {
 build_standalone_so_targets() {
     local suffix="$1" flags="$2" label="$3"
     local out_suffix=""
-    [ "$suffix" = "_nosan" ] && out_suffix="_nosan"
+    [[ "$suffix" == _asan* ]] && out_suffix="$suffix"
 
     # tailslayer — C++ target (g++), header-only library
     if [ -f "$TARGETS/tailslayer_read.cpp" ] && [ -d "$TAILSLAYER/include" ]; then
@@ -339,7 +339,7 @@ build_vendored_so_targets() {
     local suffix="$1" flags="$2" label="$3" cc="${4:-gcc}" extra_cflags="${5:-}"
     echo "Building vendored .so targets ($label)..."
     local out_suffix=""
-    [ "$suffix" = "_nosan" ] && out_suffix="_nosan"
+    [[ "$suffix" == _asan* ]] && out_suffix="$suffix"
 
     local ZLIB_OBJS=""
     local ZLIB_INC=""

@@ -533,7 +533,11 @@ tools/build_targets.sh --vendor-tracecmp
 tools/build_targets.sh --vendor-tracecmp --asan   # With ASAN (two-step build)
 ```
 
-The build script compiles every target as both an executable and a `.so` shared library, in ASAN and no-ASAN variants. The no-ASAN `.so` variants (`*_nosan.so`) are suitable for high-throughput in-process fuzzing without sanitizer overhead.
+The build script compiles every target as both an executable and a `.so` shared library, in ASAN and no-ASAN variants:
+
+- `*.so` (base, no suffix) — No-ASAN, directly loadable via `ctypes.CDLL()` for high-throughput in-process fuzzing
+- `*_asan.so` — ASAN-instrumented, requires libasan (falls back to subprocess mode automatically)
+- `*_nosan.so` — Explicit no-ASAN variant (backward-compatible, same as base)
 
 ### Build-time Cmplog for .so Targets
 
