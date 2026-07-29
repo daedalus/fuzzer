@@ -709,6 +709,17 @@ class Fuzzer:
         if replicator:
             self._replicator = ReplicatorScheduler(window_size=200, learning_rate=0.1)
             log.info("Replicator dynamics scheduling enabled (window=200, eta=0.1)")
+        # Legacy operator scheduling flags — kept False/None so
+        # operators.py select_op dispatch doesn't AttributeError.
+        self._use_exp3 = False
+        self._exp3 = None
+        self._use_eps_greedy = False
+        self._eps_greedy = None
+        self._use_hierarchical = False
+        self._hierarchical = None
+        self._use_gp_ucb = False
+        self._gp_ucb = None
+
         self._use_shapley = shapley
         self._shapley = ShapleyAttribution(n_samples=100, window_size=500) if shapley else None
         self._use_bayesian = bayesian
