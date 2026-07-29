@@ -278,6 +278,20 @@ fuzzer-tool fuzz 'targets/fuzz_*' -c -d corpus/fgrep
 fuzzer-tool fuzz targets/fuzz_*_nosan -c -d corpus/fast/
 fuzzer-tool verify targets/fuzz_search_pipeline corpus/fast/crashes/
 
+# Auto sanitizer replay: fuzz no-ASAN target, auto-replay crashes on ASAN/UBSAN variants
+fuzzer-tool fuzz targets/png_read.so -d corpus/ \
+  --inprocess-direct --cmplog \
+  --asan-target targets/png_read_asan.so \
+  --ubsan-target targets/png_read_ubsan.so
+
+When `--asan-target` or `--ubsan-target` is set, the fuzzer schedules every
+no-ASAN crash for replay on the corresponding sanitizer-instrumented target.
+Replays run in a subprocess (fork+exec with LD_PRELOAD) because ASAN detection
+does not work in-process via ctypes/direct_lite (shadow offset mismatch on
+48-bit systems). Reports are saved as JSON alongside the crash file:
+`crashes/<sig>_sanitizer_report.json`. Replays run periodically during the
+fuzz loop (every 500 iterations alongside existing crash reproducibility checks).
+
 # Resume a previous fuzzing session
 fuzzer-tool fuzz ./target -c --resume
 
@@ -346,6 +360,8 @@ fuzzer-tool rank ./target -d corpus -n 10 --dump top_seeds
 | `--bust-std FLOAT` | Target std for normal distribution (default: max_len/6) |
 | `--bust-pad {repeat,zero,random}` | Padding mode for undersized seeds; repeat cycles existing bytes (AFL-style), zero pads with \\0, random appends uniform random bytes |
 | `--replay-n N` | Replay each crash N times for reproducibility scoring |
+| `--asan-target PATH` | Path to ASAN-instrumented .so/executable for auto sanitizer crash replay |
+| `--ubsan-target PATH` | Path to UBSAN-instrumented .so/executable for auto sanitizer crash replay |
 | `--report [FILE]` | Generate explainability report (stdout or file) |
 | `--stats-interval N` | Print live stats and dump stats file every N iterations (default: 1000) |
 

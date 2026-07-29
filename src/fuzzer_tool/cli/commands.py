@@ -309,6 +309,8 @@ def cmd_fuzz(args):
             gp_ucb=getattr(args, "gp_ucb", False),
             gp_length_scale=getattr(args, "gp_length_scale", 1.0),
             gp_beta=getattr(args, "gp_beta", 2.0),
+            asan_target=getattr(args, "asan_target", None),
+            ubsan_target=getattr(args, "ubsan_target", None),
         )
         return 0
 
@@ -370,6 +372,8 @@ def cmd_fuzz(args):
         seed=args.seed,
         extra_crash_codes=args.crash_codes,
         replay_n=args.replay_n,
+        asan_target=getattr(args, "asan_target", None),
+        ubsan_target=getattr(args, "ubsan_target", None),
         crash_blocklist=_load_hash_list(getattr(args, "crash_blocklist", None)),
         crash_allowlist=_load_hash_list(getattr(args, "crash_allowlist", None)),
         save_smaller=getattr(args, "save_smaller", False),
@@ -1642,6 +1646,18 @@ def main() -> int:
         default=0,
         metavar="N",
         help="Replay each crash N times for reproducibility scoring (default: 0 = off)",
+    )
+    fuzz_parser.add_argument(
+        "--asan-target",
+        default=None,
+        metavar="PATH",
+        help="ASAN-instrumented target variant for sanitizer crash replay",
+    )
+    fuzz_parser.add_argument(
+        "--ubsan-target",
+        default=None,
+        metavar="PATH",
+        help="UBSAN-instrumented target variant for sanitizer crash replay",
     )
     fuzz_parser.add_argument(
         "--crash-blocklist",

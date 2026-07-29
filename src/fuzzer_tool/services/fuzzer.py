@@ -288,6 +288,8 @@ class Fuzzer:
         cmplog=False,
         cmplog_max_tokens=0,
         cmplog_max_pairs=0,
+        asan_target=None,
+        ubsan_target=None,
         max_corpus=0,
         max_corpus_bytes=0,
         minimize_every_execs=0,
@@ -605,6 +607,9 @@ class Fuzzer:
         self._replay_budget_ms: float = 0.2  # max 200ms per batch for crash replay
         self._crash_replays: dict[str, list[int]] = {}  # sig -> list of replay return codes
         self.replay_n: int = replay_n  # --replay-N: replay each crash N times
+        self.asan_target: str | None = asan_target  # --asan-target: ASAN-instrumented variant
+        self.ubsan_target: str | None = ubsan_target  # --ubsan-target: UBSAN-instrumented variant
+        self._crash_sanitizer_replays: dict[str, dict] = {}  # sig -> {data, asan, ubsan}
         self.crash_blocklist: set[str] = crash_blocklist or set()
         self.crash_allowlist: set[str] = crash_allowlist or set()
         self.save_smaller: bool = save_smaller
@@ -2366,6 +2371,15 @@ class Fuzzer:
                 sig = self.crash_sigs.get(crash_name, crash_name)
                 if sig not in self._crash_replays:
                     self._crash_replays[sig] = []
+            # Schedule sanitizer replay: re-run crash on ASAN/UBSAN targets
+            if (self.asan_target or self.ubsan_target) and crash_name:
+                sig = self.crash_sigs.get(crash_name, crash_name)
+                if sig not in self._crash_sanitizer_replays:
+                    self._crash_sanitizer_replays[sig] = {
+                        "data": mutated,
+                        "asan": None,
+                        "ubsan": None,
+                    }
             return True
 
         if is_interesting or has_new_coverage:
@@ -2452,6 +2466,118 @@ class Fuzzer:
 
     def _run_crash_replays(self, budget_ms: float = 200):
         return self._stats.run_crash_replays(budget_ms)
+
+    def _run_sanitizer_replays(self, budget_ms: float = 200):
+        """Replay crashes on ASAN/UBSAN targets for sanitizer reports.
+
+        Runs in subprocess mode (fork+exec with LD_PRELOAD) because
+        ASAN detection doesn't work in-process via ctypes/direct_lite.
+        """
+        from fuzzer_tool.adapters.process import run_target_stdin
+        from fuzzer_tool.core.sanitizer import SanitizerReport
+
+        t0 = time.monotonic()
+        pending = [
+            (sig, info)
+            for sig, info in self._crash_sanitizer_replays.items()
+            if info["asan"] is None or info["ubsan"] is None
+        ]
+        for sig, info in pending:
+            if (time.monotonic() - t0) * 1000 > budget_ms:
+                break
+
+            data = info["data"]
+
+            # Replay on ASAN target
+            if self.asan_target and info["asan"] is None:
+                env = os.environ.copy()
+                self._setup_asan_env(env)
+                try:
+                    rc, stderr, _ = run_target_stdin(self.asan_target, data, self.timeout, env=env)
+                    report = SanitizerReport.parse(stderr)
+                    info["asan"] = {
+                        "rc": rc,
+                        "report": report.to_dict() if report and report.is_valid() else None,
+                        "stderr": stderr[:4096],
+                    }
+                except Exception as e:
+                    info["asan"] = {"rc": -2, "error": str(e)}
+
+            # Replay on UBSAN target
+            if self.ubsan_target and info["ubsan"] is None:
+                env = os.environ.copy()
+                self._setup_ubsan_env(env)
+                try:
+                    rc, stderr, _ = run_target_stdin(self.ubsan_target, data, self.timeout, env=env)
+                    report = SanitizerReport.parse(stderr)
+                    info["ubsan"] = {
+                        "rc": rc,
+                        "report": report.to_dict() if report and report.is_valid() else None,
+                        "stderr": stderr[:4096],
+                    }
+                except Exception as e:
+                    info["ubsan"] = {"rc": -2, "error": str(e)}
+
+            # Save reports when both are done (or one is done and the other is absent)
+            if info["asan"] is not None and info["ubsan"] is not None:
+                self._save_sanitizer_reports(sig, info)
+            elif self.asan_target and info["asan"] is not None and not self.ubsan_target:
+                self._save_sanitizer_reports(sig, info)
+            elif self.ubsan_target and info["ubsan"] is not None and not self.asan_target:
+                self._save_sanitizer_reports(sig, info)
+
+    @staticmethod
+    def _setup_asan_env(env: dict) -> None:
+        """Set LD_PRELOAD and ASAN_OPTIONS for an ASAN-instrumented target."""
+        from fuzzer_tool.cli.ldpreload_wrapper import _resolve_asan
+
+        libasan = _resolve_asan()
+        if libasan:
+            ld_preload = env.get("LD_PRELOAD", "")
+            parts = [p for p in ld_preload.split(":") if p] if ld_preload else []
+            parts.insert(0, libasan)
+            env["LD_PRELOAD"] = ":".join(parts)
+        asan_opts = env.get("ASAN_OPTIONS", "")
+        opt_parts = [p for p in asan_opts.split(":") if p] if asan_opts else []
+        seen = {p.split("=")[0] for p in opt_parts}
+        for opt in ("halt_on_error=0", "abort_on_error=0", "detect_leaks=0"):
+            key = opt.split("=")[0]
+            if key not in seen:
+                opt_parts.append(opt)
+                seen.add(key)
+        env["ASAN_OPTIONS"] = ":".join(opt_parts)
+
+    @staticmethod
+    def _setup_ubsan_env(env: dict) -> None:
+        """Set UBSAN_OPTIONS for an UBSAN-instrumented target."""
+        ubsan_opts = env.get("UBSAN_OPTIONS", "")
+        opt_parts = [p for p in ubsan_opts.split(":") if p] if ubsan_opts else []
+        seen = {p.split("=")[0] for p in opt_parts}
+        for opt in ("halt_on_error=1", "abort_on_error=1", "print_stacktrace=1"):
+            key = opt.split("=")[0]
+            if key not in seen:
+                opt_parts.append(opt)
+                seen.add(key)
+        env["UBSAN_OPTIONS"] = ":".join(opt_parts)
+
+    def _save_sanitizer_reports(self, sig: str, info: dict) -> None:
+        """Write ASAN/UBSAN reports as JSON alongside the crash file."""
+        import json as _json
+
+        report_path = self.crashes_dir / f"{sig[:16]}_sanitizer_report.json"
+        try:
+            existing = {}
+            if report_path.exists():
+                existing = _json.loads(report_path.read_text())
+            existing.update(
+                {
+                    "asan_result": info.get("asan"),
+                    "ubsan_result": info.get("ubsan"),
+                }
+            )
+            report_path.write_text(_json.dumps(existing, indent=2))
+        except Exception:
+            log.warning("Failed to save sanitizer report for sig=%s", sig)
 
     def _print_run_summary(self):
         return self._stats.print_run_summary()
@@ -2983,6 +3109,8 @@ class Fuzzer:
                         self._save_state()
                 if i % 500 == 0 and self.replay_n > 0:
                     self._run_crash_replays()
+                if i % 500 == 0 and (self.asan_target or self.ubsan_target):
+                    self._run_sanitizer_replays()
         except (KeyboardInterrupt, SystemExit):
             pass
         except OSError as e:

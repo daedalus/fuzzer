@@ -264,6 +264,21 @@ class SanitizerReport:
         frames = SANITIZER_STACK_FRAME_RE.findall(stderr)
         return cls(sanitizer, error_type, fault_addr, frames, stderr)
 
+    def to_dict(self) -> dict:
+        """Serialize report to a JSON-compatible dict."""
+        return {
+            "sanitizer": self.sanitizer,
+            "error_type": self.error_type,
+            "fault_addr": self.fault_addr,
+            "access_type": self.access_type,
+            "access_size": self.access_size,
+            "frames": self.frames,
+            "signature": self.signature,
+            "exploitability": self.exploitability,
+            "alloc_frames": self.alloc_frames,
+            "dealloc_frames": self.dealloc_frames,
+        }
+
     def is_valid(self) -> bool:
         return bool(self.sanitizer and self.error_type)
 

@@ -51,6 +51,8 @@ def _worker_main(
     gp_ucb: bool = False,
     gp_length_scale: float = 1.0,
     gp_beta: float = 2.0,
+    asan_target: str | None = None,
+    ubsan_target: str | None = None,
 ):
     """Entry point for each fuzzing worker process."""
     from fuzzer_tool.services.fuzzer import Fuzzer
@@ -104,6 +106,8 @@ def _worker_main(
         gp_ucb=gp_ucb,
         gp_length_scale=gp_length_scale,
         gp_beta=gp_beta,
+        asan_target=asan_target,
+        ubsan_target=ubsan_target,
     )
 
     print(f"{prefix} Started (target={target})")
@@ -239,6 +243,8 @@ def run_parallel(
     gp_ucb: bool = False,
     gp_length_scale: float = 1.0,
     gp_beta: float = 2.0,
+    asan_target: str | None = None,
+    ubsan_target: str | None = None,
 ):
     """Launch N parallel fuzzer workers sharing the same corpus directory.
 
@@ -312,6 +318,8 @@ def run_parallel(
         gp_ucb=gp_ucb,
         gp_length_scale=gp_length_scale,
         gp_beta=gp_beta,
+        asan_target=asan_target,
+        ubsan_target=ubsan_target,
     )
 
     def _spawn_worker(worker_id: int, rng_seed: int) -> multiprocessing.Process:
