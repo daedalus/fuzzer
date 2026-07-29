@@ -12,7 +12,8 @@
 - [x] Timeout crash detection fix
 - [x] Ptrace initial SIGTRAP crash detection
 - [x] Consolidated benchmark shell scripts: shared helpers extracted to `tools/lib/bench_common.sh`; merged `tools/bench_sweep2.sh` into `tools/bench_sweep.sh` (deduped identical combos, kept all unique variants)
-- [x] `build_targets.sh` — added `--target NAME` / `--targets NAME,NAME` to build only specific targets (filter applied at `build_target()`/`build_so_target()` level); added `--list-targets` to enumerate available target source files
+- [x] Hybrid abort interception (macro-based, ASAN/non-ASAN conditional)
+- [x] Rank-based tournament selection (order-statistics formula, sorted-pool fast path)
 
 ## Bugs Fixed
 - [x] `--stats-file` eaten by `-A` (REMAINDER) — user must place `-A` last

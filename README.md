@@ -99,7 +99,7 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 ### Genetic Algorithm Lifecycle (`--ga`)
 - **Finite population**: replaces monotonically growing corpus with bounded, evolving population (`--ga-pop-size`)
 - **Unified fitness function**: single score combining novelty (edge coverage), diversity (Wasserstein distance), freshness (recency), and mutation potential
-- **Fitness-proportional parent selection**: tournament selection for crossover parents instead of random corpus picks
+- **Fitness-proportional parent selection**: tournament selection for crossover parents instead of random corpus picks. Uses rank-based order-statistics — `rank = int(N * (1 - (1-U)^(1/k)))` — reducing `k` random draws to 1 call + 1 exponentiation. Pre-sorted pool fast path avoids resorting when the pool is already descending.
 - **Speciation**: MinHash LSH-based species partitioning prevents dominant lineages from monopolizing selection
 - **Generational replacement**: periodic evolution cycles with elitism — top fraction always survives, low-fitness individuals culled
 - **Crash preservation**: crash-triggering seeds get infinite fitness bonus, never culled
@@ -433,6 +433,9 @@ Automatically detects ASAN-instrumented targets by checking for `__asan_init` sy
 
 ### AFL shim crash handlers (`afl_shim.c`)
 The coverage shim compiled into every fuzz target now installs C-level signal handlers for `SIGSEGV` and `SIGABRT` that call `_exit(128 + sig)`. This ensures the process exits with a meaningful signal-indicating exit code when the target crashes, even when Python-level signal handlers cannot fire (e.g. during a `ctypes` call). The persistent subprocess loader detects these exit codes and converts them to negative signal codes (`-6` for SIGABRT, `-11` for SIGSEGV), enabling proper crash reporting in all execution modes.
+
+### Hybrid abort interception
+In non-ASAN builds, `afl_shim.c` intercepts `abort()` calls via a preprocessor macro, redirecting them to a static helper that writes `[shim] abort() intercepted` to stderr and returns (instead of killing the process). This prevents false crash detections from library assertion failures (e.g. FFmpeg's ~1600 `av_assert0` call sites). In ASAN builds (`__SANITIZE_ADDRESS__`), the override is excluded so `abort()` raises `SIGABRT`, which the signal handler chains to ASAN's own handler — letting ASAN produce diagnostic output before termination. The macro approach avoids the GCC "noreturn function does return" warning by never re-declaring `abort()` directly, and works correctly in both standalone binary and `.so` (ctypes/in-process) contexts.
 
 ### SHM resize in inprocess mode
 When collision risk exceeds the threshold, the bitmap SHM is resized. In inprocess mode, this patches the target's `__afl_area` pointer to the new SHM segment and invalidates the cached SHM attachment, so coverage writes don't go to freed memory. The target's compiled-in `__afl_map_mask` is not updated (static variable), so the target underutilizes the new bitmap — but writes remain in-bounds.
