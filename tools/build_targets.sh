@@ -28,6 +28,7 @@ WITH_CMPLOG=1  # default: cmplog linked into .so targets
 WITH_TRACECMP=0
 WITH_VENDOR_TRACECMP=0
 WITH_CLANG_SCOV=0
+WITH_FFMPEG_SANCOV=1  # auto-rebuild vendored FFmpeg with coverage if needed
 USE_CLANG=0
 
 # Parse flags (can appear anywhere)
@@ -37,6 +38,7 @@ for arg in "$@"; do
     [ "$arg" = "--tracecmp" ] && WITH_CMPLOG=1 && WITH_TRACECMP=1
     [ "$arg" = "--vendor-tracecmp" ] && WITH_VENDOR_TRACECMP=1
     [ "$arg" = "--clang-scov" ] && WITH_CLANG_SCOV=1
+    [ "$arg" = "--ffmpeg-sancov" ] && WITH_FFMPEG_SANCOV=1
 done
 
 # Colors
@@ -218,6 +220,62 @@ build_simple_targets() {
     build_target "$TARGETS/jpeg_read.c" "$TARGETS/jpeg_read${out_suffix}" "-ljpeg" "$flags"
     build_target "$TARGETS/ffmpeg_read.c" "$TARGETS/ffmpeg_read${out_suffix}" "$FFMPEG_LIBS" "$flags" "$DEFAULT_CC" "$FFMPEG_INC"
     build_target "$TARGETS/grep_read.c" "$TARGETS/grep_read${out_suffix}" "" "$flags"
+}
+
+# ── Rebuild vendored FFmpeg with sancov coverage ───────────────
+# FFmpeg's configure needs a stub for __sanitizer_cov_trace_pc_guard
+# since those symbols are provided by cmplog_shim.o at final link.
+build_vendored_ffmpeg_sancov() {
+    [ "$WITH_FFMPEG_SANCOV" -eq 0 ] && return 0
+    local FFMPEG_DIR="$VENDOR/ffmpeg"
+    [ -d "$FFMPEG_DIR" ] || return 0
+    # Check if FFmpeg libs already have coverage instrumentation
+    local has_cov=$(nm "$FFMPEG_DIR/libavformat/libavformat.a" 2>/dev/null | grep -c '__sanitizer_cov_trace_pc_guard' || true)
+    [ "$has_cov" -gt 10 ] && return 0  # already instrumented
+
+    echo "Building vendored FFmpeg with sancov coverage..."
+    local cc="clang"
+    if ! command -v clang &>/dev/null; then
+        warn "clang not found — cannot rebuild FFmpeg with coverage"
+        return 1
+    fi
+    # Create sancov stub for configure's link test
+    local stub_dir="/tmp/ffcover_$$"
+    mkdir -p "$stub_dir"
+    cat > "$stub_dir/sancov_stub.c" << 'STUBEOF'
+void __sanitizer_cov_trace_pc_guard_init(void *s, void *e) { (void)s; (void)e; }
+void __sanitizer_cov_trace_pc_guard(void *g) { (void)g; }
+void __sanitizer_cov_trace_cmp1(unsigned char a, unsigned char b) { (void)a; (void)b; }
+void __sanitizer_cov_trace_cmp2(unsigned short a, unsigned short b) { (void)a; (void)b; }
+void __sanitizer_cov_trace_cmp4(unsigned int a, unsigned int b) { (void)a; (void)b; }
+void __sanitizer_cov_trace_cmp8(unsigned long long a, unsigned long long b) { (void)a; (void)b; }
+void __sanitizer_cov_trace_const_cmp1(unsigned char a, unsigned char b) { (void)a; (void)b; }
+void __sanitizer_cov_trace_const_cmp2(unsigned short a, unsigned short b) { (void)a; (void)b; }
+void __sanitizer_cov_trace_const_cmp4(unsigned int a, unsigned int b) { (void)a; (void)b; }
+void __sanitizer_cov_trace_const_cmp8(unsigned long long a, unsigned long long b) { (void)a; (void)b; }
+void __sanitizer_cov_trace_switch(unsigned long long v, unsigned long long *r) { (void)v; (void)r; }
+STUBEOF
+    $cc -c -o "$stub_dir/sancov_stub.o" "$stub_dir/sancov_stub.c" 2>/dev/null
+    ar rcs "$stub_dir/libsancov_stub.a" "$stub_dir/sancov_stub.o" 2>/dev/null
+    local COV_FLAGS="-fsanitize-coverage=trace-pc-guard -fsanitize-coverage=trace-cmp"
+    (cd "$FFMPEG_DIR" && make clean >/dev/null 2>&1 || true)
+    if (cd "$FFMPEG_DIR" && ./configure --cc="$cc" --extra-cflags="$COV_FLAGS" \
+        --extra-ldflags="-L$stub_dir" --extra-libs="-lsancov_stub" \
+        --enable-static --disable-shared --disable-programs --disable-doc \
+        --disable-encoders --disable-muxers --disable-devices --disable-filters \
+        --disable-parsers --disable-bsfs --disable-postproc --disable-avdevice \
+        --disable-pthreads --disable-network --disable-hwaccels --disable-cuvid \
+        --disable-nvenc --disable-vaapi --disable-vdpau --disable-vulkan \
+        >/dev/null 2>&1); then
+        if (cd "$FFMPEG_DIR" && make -j$(nproc) -s >/dev/null 2>&1); then
+            ok "vendored FFmpeg (sancov)"
+        else
+            warn "vendored FFmpeg build failed"
+        fi
+    else
+        warn "vendored FFmpeg configure failed"
+    fi
+    rm -rf "$stub_dir"
 }
 
 # ── Build simple .so targets ────────────────────────────────────
@@ -808,12 +866,14 @@ if [ "$BUILD_ASAN" -eq 1 ]; then
     fi
     build_simple_targets "_asan" "-fsanitize=address" "ASAN"
     [ "$HAS_FGREP" -eq 1 ] && build_fgrep_so_targets "_asan_tcg" "-fsanitize=address" "ASAN"
+    build_vendored_ffmpeg_sancov
     build_simple_so_targets "_asan" "-fsanitize=address" "ASAN"
     build_standalone_so_targets "_asan" "-fsanitize=address" "ASAN"
 fi
 # UBSAN targets: compiled with -fsanitize=undefined (runtime built in)
 if [ "$BUILD_ASAN" -eq 1 ]; then
     echo "  Building UBSAN targets..."
+    build_vendored_ffmpeg_sancov
     build_simple_so_targets "_ubsan" "-fsanitize=undefined" "UBSAN" "clang"
     build_standalone_so_targets "_ubsan" "-fsanitize=undefined" "UBSAN" "clang"
 fi
@@ -827,6 +887,7 @@ if [ "$BUILD_NOSAN" -eq 1 ]; then
     fi
     build_simple_targets "_nosan" "" "No-ASAN"
     [ "$HAS_FGREP" -eq 1 ] && build_fgrep_so_targets "_nosan_tcg" "" "No-ASAN"
+    build_vendored_ffmpeg_sancov
     build_simple_so_targets "_nosan" "" "No-ASAN"
     build_standalone_so_targets "_nosan" "" "No-ASAN"
 fi
