@@ -97,6 +97,17 @@ class TargetRunner:
                 f._last_perf_deltas = f._perf_counters.read_and_reset()
             return rc, err
 
+        if f._network_runner:
+            # No reply is read on this socket — coverage comes from shm,
+            # which we reset here so fuzz_one()'s post-run
+            # is_new_coverage_with_edges() reflects only this iteration.
+            if shm:
+                shm.reset_edge_map()
+            rc, err = f._network_runner.run_one(data)
+            if f._perf_counters:
+                f._last_perf_deltas = f._perf_counters.read_and_reset()
+            return rc, err
+
         if f.ptrace_cov:
             return self._run_target_ptrace(data)
 

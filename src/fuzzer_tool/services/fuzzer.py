@@ -282,6 +282,11 @@ class Fuzzer:
         coverage_log=None,
         grammar=None,
         persistent=False,
+        net_host=None,
+        net_port=None,
+        net_proto="tcp",
+        net_keepalive=False,
+        net_settle_ms=10,
         inprocess=False,
         inprocess_direct=False,
         inprocess_func="LLVMFuzzerTestOneInput",
@@ -410,6 +415,11 @@ class Fuzzer:
             self.coverage_log.parent.mkdir(parents=True, exist_ok=True)
         self.grammar = grammar
         self.persistent = persistent
+        self.net_host = net_host
+        self.net_port = net_port
+        self.net_proto = net_proto
+        self.net_keepalive = net_keepalive
+        self.net_settle_ms = net_settle_ms
         self.enable_regex_bomb = enable_regex_bomb
         self.seed = seed
         random.seed(seed)
@@ -1065,6 +1075,23 @@ class Fuzzer:
             else:
                 print("[!] Persistent mode: failed to start target, falling back to fork")
                 self._persistent_runner = None
+
+        self._network_runner = None
+        if getattr(self, "net_host", None) and getattr(self, "net_port", None):
+            from fuzzer_tool.adapters.network import NetworkRunner
+
+            self._network_runner = NetworkRunner(
+                host=self.net_host,
+                port=self.net_port,
+                proto=getattr(self, "net_proto", "tcp"),
+                keepalive=getattr(self, "net_keepalive", False),
+                settle=getattr(self, "net_settle_ms", 10) / 1000,
+            )
+            print(
+                f"[*] Network mode: fuzzing {self._network_runner.proto}://"
+                f"{self.net_host}:{self.net_port} "
+                f"(keepalive={self._network_runner.keepalive}, no reply read)"
+            )
 
         self._inprocess_runner = None
         # Detect ASAN and set LD_PRELOAD BEFORE probing/loading (ctypes.CDLL) for any
