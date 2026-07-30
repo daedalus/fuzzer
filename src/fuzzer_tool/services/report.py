@@ -1268,7 +1268,7 @@ def _elo_ratings(f) -> str:
     if hasattr(f._elo, "crash_track") and f._elo.crash_track:
         crash_ranking = f._elo.get_ranking(crash=True)
         if crash_ranking and crash_ranking[0][1] != getattr(
-            f._elo, "initial_mu", f._elo.default_rating
+            f._elo, "initial_mu", getattr(f._elo, "default_rating", 1500)
         ):
             lines.append("")
             lines.append("  Crash-specific Elo:")
