@@ -22,6 +22,7 @@ import os
 import random
 import time
 
+from fuzzer_tool.core.kalman import RobustKF
 from fuzzer_tool.services.stats_reporter import (
     discovery_rate as _discovery_rate,
 )
@@ -507,6 +508,20 @@ class StatsReporter:
         elapsed = time.time() - f.start_time
         eps = f.exec_count / elapsed if elapsed > 0 else 0
         f._eps = eps
+
+        # Feed raw EPS into the Kalman filter for denoising.
+        if f._eps_kf is None:
+            f._eps_kf = RobustKF(
+                dim=1,
+                process_noise=max(eps * 0.01, 1.0),
+                measurement_noise=max(eps * 0.5, 10.0),
+                adaptive_r_gain=0.02,
+                huber_threshold=3.0,
+            )
+        f._eps_kf.predict(dt=1.0)
+        f._eps_kf.update(eps)
+        f._eps_filtered = f._eps_kf.estimate
+        f._eps_uncertainty = f._eps_kf.uncertainty
 
         dict_str = f" | dict: {len(f.dictionary)}" if f.dictionary else ""
         markov_str = " | markov: trained" if f.markov_trained else ""

@@ -30,6 +30,8 @@ import os
 import socket
 import time
 
+from fuzzer_tool.core.kalman import KalmanFilter
+
 log = logging.getLogger(__name__)
 
 
@@ -62,6 +64,7 @@ class NetworkRunner:
         settle: float = 0.01,
         connect_timeout: float = 2.0,
         server_pid: int | None = None,
+        settle_kf: KalmanFilter | None = None,
     ):
         self.host = host
         self.port = port
@@ -70,6 +73,7 @@ class NetworkRunner:
         self.settle = settle
         self.connect_timeout = connect_timeout
         self.server_pid = server_pid
+        self.settle_kf = settle_kf
         self._sock: socket.socket | None = None
 
     # ── connection management ────────────────────────────────────────
@@ -145,7 +149,18 @@ class NetworkRunner:
             return (sig_rc, "target exited") if sig_rc != 0 else (-1, f"send failed: {e}")
 
         if self.settle > 0:
-            time.sleep(self.settle)
+            # When a settle KF is attached, use its filtered estimate
+            # (adaptive) instead of the fixed settle time.  This allows
+            # an external loop to feed measured edge-plateau latencies
+            # into the KF, making settle self-tuning over time.
+            s = self.settle
+            if self.settle_kf is not None and self.settle_kf.is_initialized:
+                # Clamp to [min_settle, 10×initial] as a safety bound.
+                s = max(
+                    self.settle * 0.5,
+                    min(self.settle_kf.estimate, self.settle * 10.0),
+                )
+            time.sleep(s)
 
         if not self.keepalive:
             self._close()

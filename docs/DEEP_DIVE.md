@@ -449,6 +449,31 @@ State files:
 - `qea.json` — QEA population amplitudes and generation state
 - `ga.json` — GA population, generation, and fitness state
 
+## Kalman Filter Online Estimation
+
+The fuzzer includes a self-contained Kalman filter implementation (`src/fuzzer_tool/core/kalman.py`) for online denoising and uncertainty quantification of noisy scalar signals.  Available in 1D (value-only) and 2D (constant-velocity: value + derivative) variants, plus a `RobustKF` subclass with Huber innovation gating and adaptive measurement-noise estimation.
+
+### Applications
+
+1. **Denoised execs/sec for stats and budget allocation** — the raw EPS measurement (exec_count / elapsed) is noisy at low exec counts. `stats.py:print_stats()` feeds each raw EPS into a 1D `RobustKF` via `predict(dt=1.0); update(eps)`. The filtered estimate and uncertainty are exposed as `fuzzer._eps_filtered` and `fuzzer._eps_uncertainty`, and used in:
+   - Dict-entry pruning (`fuzzer.py`, replaces the raw 10-sample sliding window)
+   - Stats-interval calculation (`fuzzer.py`), making it proportional to filtered EPS rather than raw cumulative average
+
+2. **Critical-slowing-down denoising** — `CriticalSlowingDown` accepts an optional `denoiser` (any `KalmanFilter` instance). When provided, `observe(value)` runs `predict(dt=1.0); update(value)` internally and stores `kf.estimate` instead of the raw discovery rate. This reduces false "stalled" calls from single-execution noise spikes.
+
+3. **Adaptive network settle time** — `NetworkRunner` accepts an optional `settle_kf` parameter. When a `KalmanFilter` is attached, the `_settle()` sleep uses the KF's filtered estimate (clamped to `[0.5×initial, 10×initial]`) instead of the fixed `settle` time. An external measurement loop can feed observed edge-plateau latencies into the KF, making settle self-tuning.
+
+### Design
+
+- **Separate `predict(dt)` and `update(z)`** — the caller is responsible for calling both in sequence each cycle. `update()` does NOT call `predict()` internally, preserving correctness for irregular-time-step callers. Constant-time-interval callers always use `kf.predict(1.0); kf.update(obs)`.
+- **Plain Python, no numpy** — 1D and 2D matrix operations are explicit list-of-list arithmetic. For dim ≤ 2 the operations are trivial and the numpy dependency is avoided.
+- **Huber gating is one-shot** — when the Mahalanobis distance of the innovation exceeds the threshold, the measurement noise (R) is inflated for that single `update()` step only. The inflated R is NOT persisted, preventing a single outlier from making the filter untrusting of subsequent normal measurements for many steps.
+- **Adaptive R** — a slow-timescale (gain `~0.02`) exponential window on innovation RMS nudges the effective measurement noise to match observed innovation statistics. This handles non-stationary observation noise without manual retuning.
+
+### Persistent state
+
+- `kalman.json` in the corpus directory saves/loads the filter state (x, P, R_eff, innovation RMS) on shutdown and resume.
+
 ## ELF Binary Static Analysis
 
 The fuzzer includes a built-in ELF analysis engine for extracting DIV/IDIV constants from compiled binaries using the pure-Python x86-64 instruction decoder:

@@ -30,6 +30,7 @@ variance and skewness instead of hand-rolling the same calculations.
 import collections
 import logging
 
+from fuzzer_tool.core.kalman import KalmanFilter
 from fuzzer_tool.core.running_stats import RunningMoments
 
 log = logging.getLogger(__name__)
@@ -53,6 +54,7 @@ class CriticalSlowingDown:
         rise_threshold: float = 1.5,
         skew_rise_threshold: float = 1.5,
         min_observations: int = 20,
+        denoiser: KalmanFilter | None = None,
     ):
         self.window_size = window_size
         self.rise_threshold = rise_threshold
@@ -63,13 +65,20 @@ class CriticalSlowingDown:
         self._variance_baseline: float | None = None
         self._autocorr_baseline: float | None = None
         self._skewness_baseline: float | None = None
+        self._denoiser: KalmanFilter | None = denoiser
 
     def observe(self, value: float) -> None:
         """Record a discovery-rate observation.
 
         Args:
-            value: Discovery rate (edges per 1000 execs).
+            value: Discovery rate (edges per 1000 execs).  If a
+                ``denoiser`` KalmanFilter was provided at init, the
+                raw value is filtered before being stored.
         """
+        if self._denoiser is not None:
+            self._denoiser.predict(dt=1.0)
+            self._denoiser.update(value)
+            value = self._denoiser.estimate
         self._history.append(value)
         self._moments.update(value)
 
@@ -151,10 +160,13 @@ class CriticalSlowingDown:
         self._variance_baseline = None
         self._autocorr_baseline = None
         self._skewness_baseline = None
+        self._moments = RunningMoments(window=self.window_size)
+        if self._denoiser is not None:
+            self._denoiser.reset()
 
     def save(self) -> dict:
         """Serialize state."""
-        return {
+        data: dict = {
             "history": list(self._history),
             "moments": self._moments.save(),
             "variance_baseline": self._variance_baseline,
@@ -165,6 +177,9 @@ class CriticalSlowingDown:
             "skew_rise_threshold": self.skew_rise_threshold,
             "min_observations": self.min_observations,
         }
+        if self._denoiser is not None:
+            data["denoiser"] = self._denoiser.save()
+        return data
 
     def load(self, data: dict) -> None:
         """Restore state."""
@@ -180,3 +195,5 @@ class CriticalSlowingDown:
         self.rise_threshold = data.get("rise_threshold", self.rise_threshold)
         self.skew_rise_threshold = data.get("skew_rise_threshold", self.skew_rise_threshold)
         self.min_observations = data.get("min_observations", self.min_observations)
+        if "denoiser" in data and self._denoiser is not None:
+            self._denoiser.load(data["denoiser"])

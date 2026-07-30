@@ -658,6 +658,12 @@ class Fuzzer:
         self.stats_interval = stats_interval
         self._last_stats_exec = 0
         self._eps = 0.0
+        # Kalman filter for denoised EPS tracking.
+        # Uses RobustKF to handle scheduling jitter / GC pauses / bursty
+        # throughput.  The adaptive-R variant learns the actual measurement
+        # noise online.  Filtered estimate replaces the raw sliding-window
+        # in dict pruning, stats-interval calc, etc.
+        self._eps_kf = None  # lazy-initialized after first stats tick
 
         # Bayesian seed quality estimation
         self._seed_quality = BayesianSeedQuality()
@@ -1864,7 +1870,15 @@ class Fuzzer:
                     self._dict_eps_window.pop(0)
 
             if self._dict_eps_window and self.exec_count - self._dict_last_prune >= window:
-                avg_eps = sum(self._dict_eps_window) / len(self._dict_eps_window)
+                # Use Kalman-filtered EPS if available, fall back to window avg.
+                if (
+                    hasattr(self, "_eps_filtered")
+                    and self._eps_filtered is not None
+                    and self._eps_filtered > 0
+                ):
+                    avg_eps = self._eps_filtered
+                else:
+                    avg_eps = sum(self._dict_eps_window) / len(self._dict_eps_window)
                 # Map EPS to cap: 10 eps → 128, 30 eps → 256, 100+ eps → 1024
                 dyn_cap = max(64, min(1024, int(avg_eps * 8)))
                 if len(self.dictionary) > dyn_cap:
@@ -3100,8 +3114,13 @@ class Fuzzer:
                     self._check_differential(seed)
                 self.fuzz_one(seed)
                 i += 1
+                eps_for_interval = (
+                    self._eps_filtered
+                    if hasattr(self, "_eps_filtered") and self._eps_filtered is not None and self._eps_filtered > 0
+                    else self._eps
+                )
                 effective_interval = (
-                    max(1, int(10 * self._eps)) if self._eps > 0 else self.stats_interval
+                    max(1, int(10 * eps_for_interval)) if eps_for_interval > 0 else self.stats_interval
                 )
                 if self.exec_count - self._last_stats_exec >= effective_interval:
                     # Sample Shannon entropy for rate-of-change tracking
