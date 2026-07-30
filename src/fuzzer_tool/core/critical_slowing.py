@@ -74,6 +74,18 @@ class CriticalSlowingDown:
             value: Discovery rate (edges per 1000 execs).  If a
                 ``denoiser`` KalmanFilter was provided at init, the
                 raw value is filtered before being stored.
+
+        .. caution::
+           Kalman smoothing mechanically inflates the lag-1
+           autocorrelation of its output (any IIR smoother does).
+           Since ``_compute_autocorrelation()`` is one of the CSD
+           detector's legs, a denoiser with time-varying smoothing
+           strength (e.g. RobustKF with non-zero adaptive_r_gain)
+           makes the autocorrelation inflation itself non-stationary,
+           which may increase false-positive transition warnings
+           during quiet periods.  If using a denoiser, consider
+           raising ``rise_threshold`` or benchmarking false-positive
+           rates against a known-flat trace.
         """
         if self._denoiser is not None:
             self._denoiser.predict(dt=1.0)

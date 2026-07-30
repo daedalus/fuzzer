@@ -455,7 +455,7 @@ The fuzzer includes a self-contained Kalman filter implementation (`src/fuzzer_t
 
 ### Applications
 
-1. **Denoised execs/sec for stats and budget allocation** — the raw EPS measurement (exec_count / elapsed) is noisy at low exec counts. `stats.py:print_stats()` feeds each raw EPS into a 1D `RobustKF` via `predict(dt=1.0); update(eps)`. The filtered estimate and uncertainty are exposed as `fuzzer._eps_filtered` and `fuzzer._eps_uncertainty`, and used in:
+1. **Denoised execs/sec for stats and budget allocation** — the interval EPS rate (execs since last stats-tick / elapsed since last stats-tick) is a noisy per-interval signal, unlike the monotonic campaign-average. `stats.py:print_stats()` feeds this interval rate into a 2D `RobustKF` (value + derivative) via `predict(dt=interval_elapsed); update(interval_rate)`. The 2D model properly scales process noise by dt/dt²/dt³, important because the stats interval varies across the campaign. The filtered state-tuple and uncertainty are exposed as `fuzzer._eps_filtered` (value) and `fuzzer._eps_uncertainty`, and used in:
    - Dict-entry pruning (`fuzzer.py`, replaces the raw 10-sample sliding window)
    - Stats-interval calculation (`fuzzer.py`), making it proportional to filtered EPS rather than raw cumulative average
 
@@ -469,6 +469,10 @@ The fuzzer includes a self-contained Kalman filter implementation (`src/fuzzer_t
 - **Plain Python, no numpy** — 1D and 2D matrix operations are explicit list-of-list arithmetic. For dim ≤ 2 the operations are trivial and the numpy dependency is avoided.
 - **Huber gating is one-shot** — when the Mahalanobis distance of the innovation exceeds the threshold, the measurement noise (R) is inflated for that single `update()` step only. The inflated R is NOT persisted, preventing a single outlier from making the filter untrusting of subsequent normal measurements for many steps.
 - **Adaptive R** — a slow-timescale (gain `~0.02`) exponential window on innovation RMS nudges the effective measurement noise to match observed innovation statistics. This handles non-stationary observation noise without manual retuning.
+
+### Known caveat: CSD autocorrelation inflation
+
+When a Kalman filter feeds a `CriticalSlowingDown` detector, the filter's smoothing inflates lag-1 autocorrelation in its output — any IIR smoother does this. Since CSD's `_compute_autocorrelation()` is one of the detector's legs, a denoiser with time-varying smoothing strength (non-zero `adaptive_r_gain`) makes the autocorrelation inflation non-stationary, which may increase false-positive transition warnings during quiet periods. If using a denoiser, consider raising `rise_threshold` or benchmarking false-positive rates against a known-flat discovery-rate trace.
 
 ### Persistent state
 

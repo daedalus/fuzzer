@@ -659,11 +659,13 @@ class Fuzzer:
         self._last_stats_exec = 0
         self._eps = 0.0
         # Kalman filter for denoised EPS tracking.
-        # Uses RobustKF to handle scheduling jitter / GC pauses / bursty
+        # Uses 2D RobustKF to handle scheduling jitter / GC pauses / bursty
         # throughput.  The adaptive-R variant learns the actual measurement
-        # noise online.  Filtered estimate replaces the raw sliding-window
-        # in dict pruning, stats-interval calc, etc.
+        # noise online.  Filtered rate replaces the raw sliding-window in
+        # dict pruning, stats-interval calc, etc.
         self._eps_kf = None  # lazy-initialized after first stats tick
+        self._last_eps_count = 0  # exec_count at last EPS KF update
+        self._last_eps_time = 0.0  # monotonic time at last EPS KF update
 
         # Bayesian seed quality estimation
         self._seed_quality = BayesianSeedQuality()

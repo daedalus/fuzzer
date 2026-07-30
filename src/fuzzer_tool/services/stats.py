@@ -509,17 +509,30 @@ class StatsReporter:
         eps = f.exec_count / elapsed if elapsed > 0 else 0
         f._eps = eps
 
-        # Feed raw EPS into the Kalman filter for denoising.
+        # Feed per-interval EPS into the Kalman filter for denoising.
+        # Using a 2D model (value + derivative) so that predict() scales
+        # process noise by dt/dt²/dt³ — important because stats-interval
+        # duration varies across the campaign.
+        interval_count = f.exec_count - f._last_eps_count
+        interval_elapsed = elapsed - f._last_eps_time
+        interval_rate = interval_count / interval_elapsed if interval_elapsed > 0 else 0
+
         if f._eps_kf is None:
             f._eps_kf = RobustKF(
-                dim=1,
-                process_noise=max(eps * 0.01, 1.0),
-                measurement_noise=max(eps * 0.5, 10.0),
+                dim=2,
+                process_noise=max(interval_rate * 0.01, 1.0),
+                measurement_noise=max(interval_rate * 0.5, 10.0),
                 adaptive_r_gain=0.02,
                 huber_threshold=3.0,
             )
-        f._eps_kf.predict(dt=1.0)
-        f._eps_kf.update(eps)
+            # Seed the filter so it doesn't start from an arbitrary
+            # initial state on the first report interval.
+            f._eps_kf.update(interval_rate)
+
+        f._last_eps_count = f.exec_count
+        f._last_eps_time = elapsed
+        f._eps_kf.predict(dt=max(interval_elapsed, 0.5))
+        f._eps_kf.update(interval_rate)
         f._eps_filtered = f._eps_kf.estimate
         f._eps_uncertainty = f._eps_kf.uncertainty
 
