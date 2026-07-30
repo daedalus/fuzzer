@@ -103,7 +103,15 @@ class TargetRunner:
             # is_new_coverage_with_edges() reflects only this iteration.
             if shm:
                 shm.reset_edge_map()
+            t0 = time.monotonic()
             rc, err = f._network_runner.run_one(data)
+            elapsed = time.monotonic() - t0
+            # Feed the elapsed wall-clock time as a proxy for target
+            # processing latency.  The KF's filtered estimate drives
+            # the adaptive settle in NetworkRunner._settle().
+            if f._network_runner.settle_kf is not None:
+                f._network_runner.settle_kf.predict(dt=1.0)
+                f._network_runner.settle_kf.update(elapsed)
             if f._perf_counters:
                 f._last_perf_deltas = f._perf_counters.read_and_reset()
             return rc, err

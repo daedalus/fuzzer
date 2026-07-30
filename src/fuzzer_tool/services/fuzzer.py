@@ -1085,13 +1085,29 @@ class Fuzzer:
         self._network_runner = None
         if getattr(self, "net_host", None) and getattr(self, "net_port", None):
             from fuzzer_tool.adapters.network import NetworkRunner
+            from fuzzer_tool.core.kalman import RobustKF
+
+            # Create a settle KF to adapt the per-iteration settle time.
+            # After each run_one() the runner records wall-clock duration
+            # as an observation; the KF's estimate smooths jitter and
+            # provides a filtered settle time via _settle().
+            initial_settle = getattr(self, "net_settle_ms", 10) / 1000
+            settle_kf = RobustKF(
+                dim=1,
+                process_noise=initial_settle * 0.05,
+                measurement_noise=initial_settle * 0.5,
+                huber_threshold=3.0,
+                adaptive_r_gain=0.02,
+            )
+            settle_kf.update(initial_settle)
 
             self._network_runner = NetworkRunner(
                 host=self.net_host,
                 port=self.net_port,
                 proto=getattr(self, "net_proto", "tcp"),
                 keepalive=getattr(self, "net_keepalive", False),
-                settle=getattr(self, "net_settle_ms", 10) / 1000,
+                settle=initial_settle,
+                settle_kf=settle_kf,
             )
             print(
                 f"[*] Network mode: fuzzing {self._network_runner.proto}://"
