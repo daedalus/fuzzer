@@ -28,7 +28,6 @@ Example (HTTP request):
 import logging
 import random
 import re
-import struct
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -723,12 +722,6 @@ class TreeMutator:
 
 
 # Re-export PNG classes/functions from dedicated module for backwards compatibility
-from fuzzer_tool.core.png_mutations import (
-    PngChunk,
-    parse_png_chunks,
-    serialize_png_chunks,
-)
 
 
 # Re-export PngChunkMutator from dedicated module for backwards compatibility
-from fuzzer_tool.core.png_mutations import PngChunkMutator

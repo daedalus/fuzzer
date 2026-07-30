@@ -1,8 +1,6 @@
 """Unit tests for cli/commands.py — CLI utility functions."""
 
 import argparse
-import os
-import sys
 from pathlib import Path
 
 import pytest

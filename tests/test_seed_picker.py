@@ -11,9 +11,11 @@ from fuzzer_tool.services.seed_picker import SeedPicker
 class TestBoltzmannSelection:
     """Boltzmann seed selection: P(seed) ∝ exp(-E/T) with E = log(fuzz_count + 1)."""
 
-    def _make_fuzzer_mock(self, corpus_size=3, use_boltzmann=True, temperature=1.0,
-                          anneal_budget=100000):
+    def _make_fuzzer_mock(
+        self, corpus_size=3, use_boltzmann=True, temperature=1.0, anneal_budget=100000
+    ):
         """Build a minimal Fuzzer-like object with enough attrs for _pick_boltzmann_seed()."""
+
         class MockFuzzer:
             corpus = [f"seed_{i}".encode() for i in range(corpus_size)]
             seed_meta = {}
@@ -23,12 +25,13 @@ class TestBoltzmannSelection:
             _use_boltzmann = use_boltzmann
             _profile = type("obj", (object,), {"format_signature": None})()
 
-            def _seed_key(self, data): return data.hex()
+            def _seed_key(self, data):
+                return data.hex()
 
         f = MockFuzzer()
         # Set fuzz_count: seed_0=1 (rare), seed_1=10, seed_2=100 (common)
         for i, seed in enumerate(f.corpus):
-            f.seed_meta[seed] = {"fuzz_count": 10 ** i}
+            f.seed_meta[seed] = {"fuzz_count": 10**i}
         return f
 
     def test_boltzmann_weight_rare_preferred(self):
@@ -81,7 +84,7 @@ class TestBoltzmannSelection:
         f = self._make_fuzzer_mock(temperature=1.0, corpus_size=5)
         # Override fuzz_counts across a wider range
         for i, seed in enumerate(f.corpus):
-            f.seed_meta[seed] = {"fuzz_count": 10 ** i}  # 1, 10, 100, 1000, 10000
+            f.seed_meta[seed] = {"fuzz_count": 10**i}  # 1, 10, 100, 1000, 10000
 
         weights = []
         for seed in f.corpus:
@@ -113,11 +116,15 @@ class TestBoltzmannSelection:
         """When _use_elo=True and _use_boltzmann=True, the available list includes 'boltzmann'."""
         f = self._make_fuzzer_mock()
         f._use_elo = True
-        f._elo = type("obj", (object,), {
-            "select_strategy": lambda s, a: a[0],
-            "initial_mu": 1500.0,
-            "initial_sigma": 400.0,
-        })()
+        f._elo = type(
+            "obj",
+            (object,),
+            {
+                "select_strategy": lambda s, a: a[0],
+                "initial_mu": 1500.0,
+                "initial_sigma": 400.0,
+            },
+        )()
         f.markov_generate = False
         f.markov_trained = False
         f._use_bayesian = False
@@ -126,8 +133,14 @@ class TestBoltzmannSelection:
         sp.f = f
 
         # Call _pick_seed_elo to trigger available list construction
-        available = [s for s, cond in [("ga", f.ga if hasattr(f, "ga") else False),
-                                       ("qea", f.qea if hasattr(f, "qea") else False)] if cond]
+        available = [
+            s
+            for s, cond in [
+                ("ga", f.ga if hasattr(f, "ga") else False),
+                ("qea", f.qea if hasattr(f, "qea") else False),
+            ]
+            if cond
+        ]
         available.append("weighted")
         if f.corpus and f.seed_meta:
             available.append("pareto")

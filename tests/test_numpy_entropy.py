@@ -5,13 +5,11 @@ fallbacks, and that the threshold gating works correctly.
 """
 
 import math
-from unittest.mock import patch
 
 from fuzzer_tool.core import edge_tracker as et_mod
 from fuzzer_tool.core import renyi as renyi_mod
 from fuzzer_tool.core.edge_tracker import EdgeTracker, _js_divergence
 from fuzzer_tool.core.renyi import RenyiEntropy
-
 
 # ---------------------------------------------------------------------------
 # Helpers

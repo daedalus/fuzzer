@@ -4,10 +4,10 @@ import random
 
 from fuzzer_tool.core.colorizer import (
     COLORABLE,
-    CmplogColorizer,
-    Colorizer,
     FIXED,
     UNKNOWN,
+    CmplogColorizer,
+    Colorizer,
 )
 
 

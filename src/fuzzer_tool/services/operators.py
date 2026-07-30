@@ -1081,7 +1081,9 @@ class OperatorEngine:
         from fuzzer_tool.core.mutations import block_shuffle_variable
 
         if buf and len(buf) >= 8:
-            return bytearray(block_shuffle_variable(bytes(buf), rng=self.f._rand_pool)[: self.f.max_len])
+            return bytearray(
+                block_shuffle_variable(bytes(buf), rng=self.f._rand_pool)[: self.f.max_len]
+            )
 
     def _op_dict_compound(self, buf, _byte_idx, _data):
         """Insert two dictionary tokens concatenated with a random separator.

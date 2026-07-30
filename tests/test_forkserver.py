@@ -3,8 +3,6 @@
 import os
 import tempfile
 
-import pytest
-
 from fuzzer_tool.adapters.forkserver import ForkserverRunner, _ensure_compiled
 
 

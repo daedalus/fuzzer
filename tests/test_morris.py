@@ -1,11 +1,8 @@
 """Tests for Morris probabilistic counting (a=30)."""
 
-import ctypes
-import math
-
 import pytest
 
-from fuzzer_tool.core.edge_tracker import EdgeTracker, MORRIS_A, morris_estimate
+from fuzzer_tool.core.edge_tracker import MORRIS_A, EdgeTracker, morris_estimate
 
 
 class TestMorrisEstimate:

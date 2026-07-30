@@ -31,9 +31,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from fuzzer_tool.core.mutations import crossover
-
 import numpy as np
+
+from fuzzer_tool.core.mutations import crossover
 
 if TYPE_CHECKING:
     from fuzzer_tool.core.edge_tracker import EdgeTracker

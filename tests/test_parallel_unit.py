@@ -1,10 +1,6 @@
 """Unit tests for services/parallel.py — sync cursor and worker logic."""
 
-from pathlib import Path
-
-import pytest
-
-from fuzzer_tool.services.parallel import _sync_cursors, _sync_corpus_in
+from fuzzer_tool.services.parallel import _sync_corpus_in, _sync_cursors
 
 
 class MockFuzzer:

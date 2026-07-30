@@ -1,12 +1,12 @@
 """Tests for core/tree_mutator.py — Lightweight delimiter-based tree mutator."""
 
 from fuzzer_tool.core.tree_mutator import (
-    _Node,
     _clone_node,
     _collect_leaves,
     _collect_nodes,
     _find_parent,
     _insert_after,
+    _Node,
     _remove_child,
     lightweight_tree_mutate,
     mutate_tree_del,

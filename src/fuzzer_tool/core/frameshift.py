@@ -14,8 +14,7 @@ affect the target's execution behavior.
 
 import logging
 import random
-import struct
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 log = logging.getLogger(__name__)
 

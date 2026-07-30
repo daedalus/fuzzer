@@ -3,7 +3,7 @@
 import ctypes
 from pathlib import Path
 
-from fuzzer_tool.adapters.shm import SHM_MAP_SIZE, SIZEOF_ENTRY, ShmCoverage, SHM_METADATA_SIZE
+from fuzzer_tool.adapters.shm import SHM_MAP_SIZE, SHM_METADATA_SIZE, SIZEOF_ENTRY, ShmCoverage
 
 
 class TestShmCoverage:
@@ -700,8 +700,8 @@ class TestShimEdgeCountEndToEnd:
 
     def test_shim_updates_edge_count_after_target_call(self, tmp_path):
         """Compile a minimal .so with shim, call it, verify edge_count > 0."""
-        import subprocess
         import os
+        import subprocess
 
         src = tmp_path / "test_edge_count.c"
         so = tmp_path / "test_edge_count.so"
@@ -769,9 +769,9 @@ int fuzz_shm_run(const unsigned char *buf, size_t len) {
                 # The C shim's __afl_map_edge() should have written edge_count live
                 ec = cov.read_edge_count()
                 assert ec > 0, (
-                    f"edge_count == 0 after target run — C shim did NOT write "
-                    f"edge_count live. This means the fast-path will always skip "
-                    f"the coverage scan (shm: 0 bug)."
+                    "edge_count == 0 after target run — C shim did NOT write "
+                    "edge_count live. This means the fast-path will always skip "
+                    "the coverage scan (shm: 0 bug)."
                 )
                 assert ec >= 3, f"expected >= 3 edges, got {ec}"
 
@@ -849,8 +849,8 @@ int fuzz_shm_run(const unsigned char *buf, size_t len) {
         __afl_total_edge_count is monotonic and its value survives a full
         SHM memset (reset_bitmap).
         """
-        import subprocess
         import os
+        import subprocess
 
         src = tmp_path / "test_monotonic.c"
         so = tmp_path / "test_monotonic.so"

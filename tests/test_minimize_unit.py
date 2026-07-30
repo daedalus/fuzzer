@@ -1,11 +1,5 @@
 """Unit tests for services/minimize.py — corpus minimization logic."""
 
-import hashlib
-import shutil
-from pathlib import Path
-
-import pytest
-
 from fuzzer_tool.services.minimize import _commit_results, _minimize_by_hash
 
 

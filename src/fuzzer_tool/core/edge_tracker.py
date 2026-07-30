@@ -21,8 +21,6 @@ from collections import defaultdict
 
 from fuzzer_tool.core import fast_json as json
 
-from typing import Union
-
 # ── Memory bounds ────────────────────────────────────────────────────
 CORRELATION_MATRIX_MAX = 10_000  # max edge-pair entries in branch correlation
 COVERAGE_TIMELINE_MAX = 1_000  # max snapshots in coverage timeline
@@ -590,7 +588,7 @@ class EdgeTracker:
     def record_edges(
         self,
         seed_key: str,
-        hit_edges: Union[set[int], bytes],
+        hit_edges: set[int] | bytes,
         target_name: str = "",
         hit_counts: dict[int, int] | None = None,
         morris_mode: bool = False,

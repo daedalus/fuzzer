@@ -30,8 +30,8 @@ from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.markov import MarkovChain, MarkovEnsemble
 from fuzzer_tool.core.mi import MutualInformationTracker
 from fuzzer_tool.core.montecarlo import (
-    Exp3Scheduler,
     EpsilonGreedyScheduler,
+    Exp3Scheduler,
     GPUCBScheduler,
     HierarchicalBanditScheduler,
     MonteCarloScheduler,
@@ -933,11 +933,29 @@ class Fuzzer:
 
             # Pre-register all strategy names so Elo can arbitrate immediately
             # (without this, select_strategy requires min_matches before considering a strategy)
-            for s in ("replicator", "bandit", "mopt", "cem", "exp3", "eps_greedy", "hierarchical", "gp_ucb"):
+            for s in (
+                "replicator",
+                "bandit",
+                "mopt",
+                "cem",
+                "exp3",
+                "eps_greedy",
+                "hierarchical",
+                "gp_ucb",
+            ):
                 self._elo._strategy_mu.setdefault(s, self._elo.initial_mu)
                 self._elo._strategy_sigma_sq.setdefault(s, self._elo.initial_sigma**2)
                 self._elo._strategy_match_count.setdefault(s, 0)
-            for s in ("ga", "qea", "weighted", "pareto", "format", "bayesian", "markov", "boltzmann"):
+            for s in (
+                "ga",
+                "qea",
+                "weighted",
+                "pareto",
+                "format",
+                "bayesian",
+                "markov",
+                "boltzmann",
+            ):
                 key = f"seed_{s}"
                 self._elo._strategy_mu.setdefault(key, self._elo.initial_mu)
                 self._elo._strategy_sigma_sq.setdefault(key, self._elo.initial_sigma**2)
@@ -1225,7 +1243,7 @@ class Fuzzer:
             # (returning "verify_asan_link_order=0") before libasan.so, so
             # ASAN skips the post-startup first-load check. Safe for fuzzing:
             # ASAN only needs target-side bug detection, not Python-side.
-            use_direct_lite = True # NEVER EVER CHANGE THIS!!!
+            use_direct_lite = True  # NEVER EVER CHANGE THIS!!!
             # ASAN ctypes preloading was done above (before the branch). If it
             # failed, fall back to persistent mode where LD_PRELOAD handles it.
             # Even if ctypes preloading succeeds, ASAN detection does NOT work
@@ -2375,7 +2393,16 @@ class Fuzzer:
         # Meta-elo: record seed strategy-level match
         if self._use_elo and self._elo and self._seed_strategy:
             score = surprisal_weight if success else 0.0
-            seed_strategies = ["ga", "qea", "weighted", "pareto", "format", "bayesian", "markov", "boltzmann"]
+            seed_strategies = [
+                "ga",
+                "qea",
+                "weighted",
+                "pareto",
+                "format",
+                "bayesian",
+                "markov",
+                "boltzmann",
+            ]
             for other in seed_strategies:
                 if other != self._seed_strategy:
                     self._elo.record_strategy_match(
@@ -2581,11 +2608,16 @@ class Fuzzer:
                     info["ubsan"] = {"rc": -2, "error": str(e)}
 
             # Save reports when both are done (or one is done and the other is absent)
-            if info["asan"] is not None and info["ubsan"] is not None:
-                self._save_sanitizer_reports(sig, info)
-            elif self.asan_target and info["asan"] is not None and not self.ubsan_target:
-                self._save_sanitizer_reports(sig, info)
-            elif self.ubsan_target and info["ubsan"] is not None and not self.asan_target:
+            if (
+                info["asan"] is not None
+                and info["ubsan"] is not None
+                or self.asan_target
+                and info["asan"] is not None
+                and not self.ubsan_target
+                or self.ubsan_target
+                and info["ubsan"] is not None
+                and not self.asan_target
+            ):
                 self._save_sanitizer_reports(sig, info)
 
     @staticmethod
@@ -3135,11 +3167,15 @@ class Fuzzer:
                 i += 1
                 eps_for_interval = (
                     self._eps_filtered
-                    if hasattr(self, "_eps_filtered") and self._eps_filtered is not None and self._eps_filtered > 0
+                    if hasattr(self, "_eps_filtered")
+                    and self._eps_filtered is not None
+                    and self._eps_filtered > 0
                     else self._eps
                 )
                 effective_interval = (
-                    max(1, int(10 * eps_for_interval)) if eps_for_interval > 0 else self.stats_interval
+                    max(1, int(10 * eps_for_interval))
+                    if eps_for_interval > 0
+                    else self.stats_interval
                 )
                 if self.exec_count - self._last_stats_exec >= effective_interval:
                     # Sample Shannon entropy for rate-of-change tracking
@@ -3251,7 +3287,16 @@ class Fuzzer:
                     )
         # Seed strategy convergence
         if self._use_elo and self._elo:
-            seed_strategies = ["ga", "qea", "weighted", "pareto", "format", "bayesian", "markov", "boltzmann"]
+            seed_strategies = [
+                "ga",
+                "qea",
+                "weighted",
+                "pareto",
+                "format",
+                "bayesian",
+                "markov",
+                "boltzmann",
+            ]
             has_seed_data = any(
                 self._elo._strategy_match_count.get(f"seed_{s}", 0) > 0 for s in seed_strategies
             )

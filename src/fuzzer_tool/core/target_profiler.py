@@ -482,11 +482,11 @@ class TargetProfiler:
         interesting = []
         for offset, s in strings:
             sb = s.encode("ascii", errors="replace")
-            if FORMAT_STRING_RE.search(sb):
-                interesting.append(s)
-            elif ERROR_KEYWORDS.search(sb):
-                interesting.append(s)
-            elif INTERESTING_KEYWORDS.search(sb):
+            if (
+                FORMAT_STRING_RE.search(sb)
+                or ERROR_KEYWORDS.search(sb)
+                or INTERESTING_KEYWORDS.search(sb)
+            ):
                 interesting.append(s)
             elif len(s) >= 8 and not s.startswith(("_", ".")):
                 # Long non-mangled strings are often user-visible
@@ -657,7 +657,7 @@ class TargetProfiler:
             _, text_offset, text_vaddr, text_size = self._sections[".text"]
             text_data = self._elf[text_offset : text_offset + text_size]
 
-        from fuzzer_tool.core.elf import _decode_x86_64, _INS_JCC
+        from fuzzer_tool.core.elf import _INS_JCC, _decode_x86_64
 
         for name, addr, size, st_type in self._symtab:
             if size == 0:
@@ -860,7 +860,7 @@ class TargetProfiler:
         for name, addr, size, _ in self._symtab:
             addr_to_func[addr] = name
 
-        from fuzzer_tool.core.elf import _decode_x86_64, _GRP_CALL
+        from fuzzer_tool.core.elf import _GRP_CALL, _decode_x86_64
 
         for name, addr, size, _ in self._symtab:
             func_start = addr - text_vaddr

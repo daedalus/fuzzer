@@ -137,7 +137,7 @@ Built a C-only reproducer (`/tmp/asan_midprocess.c`) that exactly mirrors the ct
 
 **Why LD_PRELOAD works**: At process start, ASAN initializes first (before any heap is used), maps the full shadow, and possibly restricts its heap to the address range that the low shadow covers. The compiled-in shadow offset matches the runtime shadow layout.
 
-**Fix in the fuzzer**: 
+**Fix in the fuzzer**:
 - `fuzzer-tool-asan` entry point: a CLI wrapper that sets `LD_PRELOAD=libasan.so.8` and `ASAN_OPTIONS=halt_on_error=0:detect_leaks=0`, then execve's into the real `fuzzer-tool`. Use this for ASAN targets: `fuzzer-tool-asan fuzz target_asan.so`
 - Automatic fallback: when the fuzzer detects an ASAN `.so` target and LD_PRELOAD was NOT set at process start, it falls back to persistent subprocess mode (where LD_PRELOAD is set in the child environment)
 
@@ -235,7 +235,7 @@ gcc -o /tmp/c_test /tmp/c_test.c -ldl
 LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libasan.so.8 /tmp/c_test
 # → ASAN: heap-use-after-free on address ... — works!
 ```
- 
+
 ## Layer 2 Resolved (2026-07-29): Non-Fatal ASAN Crash Reporting
 
 ### What Changed

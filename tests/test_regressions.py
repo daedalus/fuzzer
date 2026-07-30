@@ -326,7 +326,6 @@ class TestLSHBucketKeyHash:
     """f9e955c: MinHashLSH must use zlib.crc32, not hash()."""
 
     def test_bucket_key_uses_crc32_not_builtin_hash(self):
-
         from fuzzer_tool.core.edge_tracker import MinHashLSH
 
         source = inspect.getsource(MinHashLSH)
@@ -405,7 +404,6 @@ class TestSilentExceptionLogging:
     """45c9fe9: formerly bare except blocks must now log."""
 
     def test_inprocess_class_methods_log_exceptions(self):
-
         from fuzzer_tool.adapters.inprocess import InProcessRunner
 
         source = inspect.getsource(InProcessRunner)
@@ -416,7 +414,6 @@ class TestSilentExceptionLogging:
         )
 
     def test_shim_factory_no_bare_except_pass(self):
-
         from fuzzer_tool.adapters import shim_factory
 
         source = inspect.getsource(shim_factory)
@@ -773,7 +770,6 @@ class TestPeriodicMinimizationModulus:
     """15e1dfe: minimization fires at correct exec_count intervals."""
 
     def test_minimization_trigger_uses_exec_count(self):
-
         from fuzzer_tool.services.corpus_manager import CorpusManager
 
         # The fix ensures minimization uses exec_count modulus, not a
@@ -792,7 +788,6 @@ class TestBitmapResizeThreshold:
     """7a9d9d8: resize triggers at 40% collision risk, not 50%."""
 
     def test_resize_threshold_is_40_percent(self):
-
         from fuzzer_tool.adapters.shm import ShmCoverage
 
         source = inspect.getsource(ShmCoverage)
@@ -859,7 +854,6 @@ class TestEntropiesCacheHit:
     """031e721: no UnboundLocalError on cache hit for entropies."""
 
     def test_stats_reporter_no_unbound_on_cache_hit(self):
-
         from fuzzer_tool.services.stats import StatsReporter
 
         source = inspect.getsource(StatsReporter)
@@ -980,7 +974,6 @@ class TestTminSignatureDrift:
     """3312dbc: tmin must pin original crash signature."""
 
     def test_tmin_pins_crash_signature(self):
-
         from fuzzer_tool.services.tmin import tmin
 
         source = inspect.getsource(tmin)
@@ -1035,7 +1028,6 @@ class TestPtraceStaleFlags:
     """ce71b83: child_reaped flag prevents redundant waitpid."""
 
     def test_runner_has_child_reaped_tracking(self):
-
         from fuzzer_tool.services.runner import TargetRunner
 
         source = inspect.getsource(TargetRunner)
@@ -1055,7 +1047,6 @@ class TestMktempNotUsed:
     """f3f809a: must use mkstemp/mkdtemp, not mktemp."""
 
     def test_no_mktemp_in_cmplog(self):
-
         from fuzzer_tool.core.cmplog import CmplogCollector
 
         source = inspect.getsource(CmplogCollector)
@@ -1065,7 +1056,6 @@ class TestMktempNotUsed:
         )
 
     def test_no_mktemp_in_fuzzer_services(self):
-
         from fuzzer_tool.services import fuzzer
 
         source = inspect.getsource(fuzzer)
@@ -1250,7 +1240,6 @@ class TestBayesianEloTrackerLiveDispatch:
 
     def test_elo_true_uses_bayesian_tracker(self):
         import tempfile
-
         from unittest.mock import patch
 
         from fuzzer_tool.core.elo import BayesianEloTracker
@@ -1277,7 +1266,6 @@ class TestBayesianEloTrackerLiveDispatch:
 
     def test_elo_false_has_no_tracker(self):
         import tempfile
-
         from unittest.mock import patch
 
         from fuzzer_tool.services.fuzzer import Fuzzer

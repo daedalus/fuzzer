@@ -107,7 +107,12 @@ def main() -> None:
             asan_opts = os.environ.get("ASAN_OPTIONS", "")
             opt_parts = [p for p in asan_opts.split(":") if p] if asan_opts else []
             seen = {p.split("=")[0] for p in opt_parts}
-            for opt in ("halt_on_error=0", "abort_on_error=0", "verify_asan_link_order=0", "detect_leaks=0"):
+            for opt in (
+                "halt_on_error=0",
+                "abort_on_error=0",
+                "verify_asan_link_order=0",
+                "detect_leaks=0",
+            ):
                 key = opt.split("=")[0]
                 if key not in seen:
                     opt_parts.append(opt)

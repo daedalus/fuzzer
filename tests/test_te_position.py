@@ -1,7 +1,5 @@
 """Tests for services/te_position.py — transfer entropy position selection."""
 
-import pytest
-
 from fuzzer_tool.services.te_position import (
     get_te_weighted_position,
     update_te_causal_map,
@@ -57,7 +55,7 @@ class TestUpdateTeCausalMap:
         edges = [bytes([1, 0, 0, 0])] * 10
         update_te_causal_map(te, inputs, edges, 256, byte_edges)
         # Should not have positions > 64
-        assert all(pos <= 64 for pos in byte_edges.keys())
+        assert all(pos <= 64 for pos in byte_edges)
 
     def test_short_inputs_capped(self):
         byte_edges = {}
@@ -66,7 +64,7 @@ class TestUpdateTeCausalMap:
         edges = [bytes([1, 0, 0, 0])] * 10
         update_te_causal_map(te, inputs, edges, 64, byte_edges)
         # max_pos = min(64, 2) = 2
-        assert all(pos < 2 for pos in byte_edges.keys())
+        assert all(pos < 2 for pos in byte_edges)
 
     def test_map_size_capped_at_1024(self):
         byte_edges = {}

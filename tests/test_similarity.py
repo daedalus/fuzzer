@@ -551,9 +551,9 @@ class TestLevenshteinAlign:
 
     def test_small_path_correctness(self):
         """Exercise _levenshtein_align_small directly — regression for insert/delete swap bug."""
-        from fuzzer_tool.core.similarity import _levenshtein_align_small
-
         import random
+
+        from fuzzer_tool.core.similarity import _levenshtein_align_small
 
         random.seed(99999)
         for _ in range(500):
@@ -566,9 +566,9 @@ class TestLevenshteinAlign:
 
     def test_small_path_matches_numpy(self):
         """_levenshtein_align_small must produce identical results to numpy path."""
-        from fuzzer_tool.core.similarity import _levenshtein_align_small, _levenshtein_align_numpy
-
         import random
+
+        from fuzzer_tool.core.similarity import _levenshtein_align_numpy, _levenshtein_align_small
 
         random.seed(88888)
         for _ in range(500):

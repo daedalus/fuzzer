@@ -172,17 +172,20 @@ def main() -> int:
         description="Differential analysis between two fuzzer bench runs."
     )
     parser.add_argument(
-        "--baseline", "-b",
+        "--baseline",
+        "-b",
         required=True,
         help="Baseline bench log file",
     )
     parser.add_argument(
-        "--treatment", "-t",
+        "--treatment",
+        "-t",
         required=True,
         help="Treatment bench log file",
     )
     parser.add_argument(
-        "--verbose", "-v",
+        "--verbose",
+        "-v",
         action="store_true",
         help="Show raw metrics",
     )

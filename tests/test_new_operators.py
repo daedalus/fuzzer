@@ -3,12 +3,12 @@
 import random
 
 from fuzzer_tool.core.mutations import (
+    _FUNNY_UNICODE,
     DICT_COMPOUND_SEPARATORS,
     MAGIC_TABLE,
     MUTATIONS,
     PUNCTUATION_CHARS,
     SPECIAL_STRINGS,
-    _FUNNY_UNICODE,
     ascii_num_arithmetic,
     chunk_shuffle,
 )
@@ -506,7 +506,7 @@ class TestAsciiNumArithmetic:
         for _ in range(30):
             result = ascii_num_arithmetic(b"value=42 end", rng=random.Random())
             if result is not None:
-                assert b"42" != result[6:8] or result == b"value=42 end"
+                assert result[6:8] != b"42" or result == b"value=42 end"
                 # At least one call should find digits
                 break
         else:

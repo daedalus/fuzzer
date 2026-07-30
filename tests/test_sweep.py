@@ -4,7 +4,6 @@ The sweep subcommand loads every seed from the corpus, runs it through the
 target (no mutations/scheduler/coverage), and reports any that crash.
 """
 
-import os
 import subprocess
 import sys
 from pathlib import Path

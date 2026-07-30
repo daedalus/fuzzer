@@ -1,7 +1,8 @@
 """Tests for corpus compression (PPMD novelty scoring)."""
 
 import pytest
-from fuzzer_tool.core.corpus_compression import CorpusCompressor, PPMD_AVAILABLE
+
+from fuzzer_tool.core.corpus_compression import PPMD_AVAILABLE, CorpusCompressor
 
 
 @pytest.mark.skipif(not PPMD_AVAILABLE, reason="pyppmd not installed")

@@ -1,6 +1,5 @@
 """Tests for services/tmin.py — crash minimization."""
 
-import os
 from unittest.mock import patch
 
 from fuzzer_tool.services.tmin import tmin

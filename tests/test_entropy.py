@@ -1,7 +1,7 @@
 """Tests for Shannon entropy, Simpson's diversity, and entropy rate tracking."""
 
 import math
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from fuzzer_tool.core.edge_tracker import EdgeTracker
 

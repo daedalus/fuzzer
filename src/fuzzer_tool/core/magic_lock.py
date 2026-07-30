@@ -73,7 +73,7 @@ def detect_magic_prefix(data: bytes) -> int:
 
     # Check ISOBMFF indirect pattern: [u32 size][ftyp...]
     if len(data) >= 8 and data[4:8] == b"ftyp":
-        if 8 > best:
+        if best < 8:
             best = 8
 
     return best

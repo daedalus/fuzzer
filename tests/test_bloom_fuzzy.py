@@ -1,7 +1,5 @@
 """Tests for core/bloom.py — Bloom filter with fuzzy dedup."""
 
-import pytest
-
 from fuzzer_tool.core.bloom import BloomFilter
 
 

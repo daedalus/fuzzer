@@ -1,6 +1,6 @@
 """Tests for BayesianSeedQuality — Beta-Bernoulli posterior for seed selection."""
 
-from fuzzer_tool.core.seed_quality import BayesianSeedQuality, MIN_BETA_PARAM
+from fuzzer_tool.core.seed_quality import MIN_BETA_PARAM, BayesianSeedQuality
 
 
 class TestBayesianSeedQualityPersistence:

@@ -9,7 +9,7 @@ Coverage-guided binary fuzzer with static target analysis, statistical novelty s
 Honest Caveats:
 - This fuzzer is developed entirely with AI-assistance.
 - Probably the most complex and dense fuzzer from the information theory standpoint but also the slowest. The tradeoff is speed for edge discovery novelty.
-For production and sensitive binaries using AFL family fuzzers is the best course of action. 
+For production and sensitive binaries using AFL family fuzzers is the best course of action.
 
 ## Features
 

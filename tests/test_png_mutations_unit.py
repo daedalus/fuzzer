@@ -1,9 +1,6 @@
 """Tests for core/png_mutations.py — PNG chunk parsing and mutation."""
 
 import struct
-import zlib
-
-import pytest
 
 from fuzzer_tool.core.png_mutations import (
     PngChunk,

@@ -364,7 +364,8 @@ def cmd_fuzz(args):
         cmplog=args.cmplog,
         cmplog_max_tokens=getattr(args, "cmplog_max_tokens", 0),
         cmplog_max_pairs=getattr(args, "cmplog_max_pairs", 0),
-        cmplog_workdir=getattr(args, "cmplog_workdir", None) or f"/tmp/{os.path.basename(args.target)}.cmplog",
+        cmplog_workdir=getattr(args, "cmplog_workdir", None)
+        or f"/tmp/{os.path.basename(args.target)}.cmplog",
         max_corpus=args.max_corpus,
         max_corpus_bytes=getattr(args, "max_corpus_bytes", 0),
         minimize_every_execs=getattr(args, "minimize_every_execs", 0),
@@ -902,8 +903,12 @@ def cmd_ppmd(args):
     print(f"  Min ratio:       {ratios[0]:.4f} (most compressible)")
     print(f"  Max ratio:       {ratios[-1]:.4f} (most novel)")
     print(f"  Total raw:       {sum(sizes):,} bytes")
-    print(f"  Total compressed:{sum(int(s * r) for s, r in zip(sizes, ratios)):,} bytes")
-    print(f"  Corpus ratio:    {sum(int(s * r) for s, r in zip(sizes, ratios)) / sum(sizes):.4f}")
+    print(
+        f"  Total compressed:{sum(int(s * r) for s, r in zip(sizes, ratios, strict=False)):,} bytes"
+    )
+    print(
+        f"  Corpus ratio:    {sum(int(s * r) for s, r in zip(sizes, ratios, strict=False)) / sum(sizes):.4f}"
+    )
 
     # Top N most/least novel
     scored = list(enumerate(ratios))
@@ -1129,14 +1134,14 @@ def cmd_sweep(args):
     crashes_dir = Path(args.crashes) if args.crashes else corpus_dir / "crashes"
     crashes_dir.mkdir(parents=True, exist_ok=True)
 
+    import time as _time
+
     from fuzzer_tool.adapters.process import (
         SIGNAL_CRASH_CODES,
         run_target_file,
         run_target_stdin,
     )
     from fuzzer_tool.core.sanitizer import SanitizerReport
-
-    import time as _time
 
     found = 0
     total = len(seeds)
@@ -1150,9 +1155,7 @@ def cmd_sweep(args):
 
         try:
             if target_is_so:
-                returncode, stderr, _ = _run_so_target(
-                    args.target, seed, timeout=args.timeout
-                )
+                returncode, stderr, _ = _run_so_target(args.target, seed, timeout=args.timeout)
             elif args.file_mode:
                 tmp_dir = Path("/tmp") / f"sweep_{os.getpid()}"
                 tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -1208,7 +1211,9 @@ def cmd_sweep(args):
 
     _elapsed = _time.monotonic() - _sweep_start
     _eps = total / _elapsed if _elapsed > 0 else 0
-    print(f"\n[*] Sweep complete: {total} seeds processed, {found} crashes found ({_eps:.0f} seeds/s)")
+    print(
+        f"\n[*] Sweep complete: {total} seeds processed, {found} crashes found ({_eps:.0f} seeds/s)"
+    )
     return 0
 
 

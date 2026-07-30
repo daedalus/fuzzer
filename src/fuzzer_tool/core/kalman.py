@@ -63,11 +63,7 @@ class KalmanFilter:
         self._r_base = measurement_noise  # measurement noise stddev
 
         # State vector x (len dim)
-        self._x: list[float] = (
-            list(initial_state)
-            if initial_state is not None
-            else [0.0] * dim
-        )
+        self._x: list[float] = list(initial_state) if initial_state is not None else [0.0] * dim
         # Covariance matrix P (dim×dim, flattened row-major)
         init_cov = initial_covariance if initial_covariance is not None else 1.0
         self._p: list[list[float]] = [
@@ -247,8 +243,7 @@ class KalmanFilter:
         self._x = list(state) if state is not None else [0.0] * self._dim
         init_cov = covariance if covariance is not None else 1.0
         self._p = [
-            [init_cov if i == j else 0.0 for j in range(self._dim)]
-            for i in range(self._dim)
+            [init_cov if i == j else 0.0 for j in range(self._dim)] for i in range(self._dim)
         ]
         self._initialized = state is not None
         self._last_innovation = 0.0
@@ -398,14 +393,16 @@ class RobustKF(KalmanFilter):
 
     def save(self) -> dict:
         data = super().save()
-        data.update({
-            "huber_threshold": self._huber_threshold,
-            "adaptive_r_gain": self._adaptive_r_gain,
-            "max_r_inflation": self._max_r_inflation,
-            "r_eff": self._r_eff,
-            "innov_rms": self._innov_rms,
-            "innov_count": self._innov_count,
-        })
+        data.update(
+            {
+                "huber_threshold": self._huber_threshold,
+                "adaptive_r_gain": self._adaptive_r_gain,
+                "max_r_inflation": self._max_r_inflation,
+                "r_eff": self._r_eff,
+                "innov_rms": self._innov_rms,
+                "innov_count": self._innov_count,
+            }
+        )
         return data
 
     def load(self, data: dict) -> None:

@@ -90,10 +90,10 @@ def parse_nal_units(data: bytes) -> list[NalUnit] | None:
 
     # Find first start code
     while pos < len(data):
-        if data[pos:pos+4] == START_CODE_4:
+        if data[pos : pos + 4] == START_CODE_4:
             start_code = START_CODE_4
             break
-        if data[pos:pos+3] == START_CODE_3:
+        if data[pos : pos + 3] == START_CODE_3:
             start_code = START_CODE_3
             break
         pos += 1
@@ -114,10 +114,10 @@ def parse_nal_units(data: bytes) -> list[NalUnit] | None:
         next_pos = pos
 
         while next_pos < len(data):
-            if data[next_pos:next_pos+4] == START_CODE_4:
+            if data[next_pos : next_pos + 4] == START_CODE_4:
                 next_code = START_CODE_4
                 break
-            if data[next_pos:next_pos+3] == START_CODE_3:
+            if data[next_pos : next_pos + 3] == START_CODE_3:
                 next_code = START_CODE_3
                 break
             next_pos += 1
@@ -125,7 +125,9 @@ def parse_nal_units(data: bytes) -> list[NalUnit] | None:
         if next_code is None:
             # No more start codes — last unit runs to end of data
             payload = data[header_start:]
-            units.append(NalUnit(start_code=prev_start_code, header=payload[:1], payload=payload[1:]))
+            units.append(
+                NalUnit(start_code=prev_start_code, header=payload[:1], payload=payload[1:])
+            )
             break
 
         # Unit is from unit_start to next_pos
@@ -205,33 +207,37 @@ class NalMutator:
         """Apply byte corruption to SPS NAL units."""
         for unit in units:
             if unit.unit_type in (H264_NAL_SPS, H265_NAL_SPS_HEVC) and len(unit.payload) > 4:
-                    data = bytearray(unit.payload)
-                    for _ in range(self._rng.randint(1, min(4, len(data)))):
-                        idx = self._rng.randint(0, len(data) - 1)
-                        data[idx] ^= 1 << self._rng.randint(0, 7)
-                    unit.payload = bytes(data)
+                data = bytearray(unit.payload)
+                for _ in range(self._rng.randint(1, min(4, len(data)))):
+                    idx = self._rng.randint(0, len(data) - 1)
+                    data[idx] ^= 1 << self._rng.randint(0, 7)
+                unit.payload = bytes(data)
         return units
 
     def _mutate_pps(self, units: list[NalUnit], max_len: int) -> list[NalUnit]:
         """Apply byte corruption to PPS NAL units."""
         for unit in units:
             if unit.unit_type in (H264_NAL_PPS, H265_NAL_PPS_HEVC) and unit.payload:
-                    data = bytearray(unit.payload)
-                    for _ in range(self._rng.randint(1, min(4, len(data)))):
-                        idx = self._rng.randint(0, len(data) - 1)
-                        data[idx] ^= 1 << self._rng.randint(0, 7)
-                    unit.payload = bytes(data)
+                data = bytearray(unit.payload)
+                for _ in range(self._rng.randint(1, min(4, len(data)))):
+                    idx = self._rng.randint(0, len(data) - 1)
+                    data[idx] ^= 1 << self._rng.randint(0, 7)
+                unit.payload = bytes(data)
         return units
 
     def _mutate_slice(self, units: list[NalUnit], max_len: int) -> list[NalUnit]:
         """Apply byte corruption to slice NAL units."""
         for unit in units:
-            if unit.unit_type in (H264_NAL_NON_IDR, H264_NAL_IDR, H265_NAL_IDR_W_RADL, H265_NAL_IDR_N_LP) and unit.payload:
-                    data = bytearray(unit.payload)
-                    for _ in range(self._rng.randint(1, min(4, len(data)))):
-                        idx = self._rng.randint(0, len(data) - 1)
-                        data[idx] ^= 1 << self._rng.randint(0, 7)
-                    unit.payload = bytes(data)
+            if (
+                unit.unit_type
+                in (H264_NAL_NON_IDR, H264_NAL_IDR, H265_NAL_IDR_W_RADL, H265_NAL_IDR_N_LP)
+                and unit.payload
+            ):
+                data = bytearray(unit.payload)
+                for _ in range(self._rng.randint(1, min(4, len(data)))):
+                    idx = self._rng.randint(0, len(data) - 1)
+                    data[idx] ^= 1 << self._rng.randint(0, 7)
+                unit.payload = bytes(data)
         return units
 
     def _duplicate_nal(self, units: list[NalUnit], max_len: int) -> list[NalUnit]:
@@ -239,14 +245,17 @@ class NalMutator:
         if units:
             idx = self._rng.randint(0, len(units) - 1)
             orig = units[idx]
-            dup = NalUnit(start_code=orig.start_code, header=orig.header[:], payload=orig.payload[:])
+            dup = NalUnit(
+                start_code=orig.start_code, header=orig.header[:], payload=orig.payload[:]
+            )
             units.insert(idx + 1, dup)
         return units
 
     def _delete_nal(self, units: list[NalUnit], max_len: int) -> list[NalUnit]:
         """Delete a non-critical NAL unit (keep SPS/PPS/VPS)."""
         deletable = [
-            i for i, u in enumerate(units)
+            i
+            for i, u in enumerate(units)
             if u.unit_type not in CRITICAL_NAL_TYPES_H264
             and u.unit_type not in CRITICAL_NAL_TYPES_H265
         ]

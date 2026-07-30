@@ -18,4 +18,4 @@ try:
         fp.write(dumps(obj, separators=separators))
 
 except ImportError:
-    from json import loads, load, dumps, dump, JSONDecodeError
+    from json import dumps

@@ -592,7 +592,6 @@ class TestSaveToCorpusCoverageEdges:
 
     def test_save_to_corpus_propagates_coverage_edges(self):
         """After edges are recorded in EdgeTracker, save_to_corpus copies them to seed_meta."""
-        from fuzzer_tool.adapters.filesystem import hash_data
 
         f = MockFuzzer(Path(tempfile.mkdtemp()))
         mgr = CorpusManager(f)

@@ -73,11 +73,18 @@ def make_variants() -> list[tuple[str, bytes]]:
 
     # Color type × bit depth matrix
     for ct_name, ct, bd in [
-        ("gray", 0, 8), ("gray", 0, 16), ("gray", 0, 1),
-        ("rgb", 2, 8), ("rgb", 2, 16),
-        ("palette", 3, 1), ("palette", 3, 2), ("palette", 3, 4), ("palette", 3, 8),
+        ("gray", 0, 8),
+        ("gray", 0, 16),
+        ("gray", 0, 1),
+        ("rgb", 2, 8),
+        ("rgb", 2, 16),
+        ("palette", 3, 1),
+        ("palette", 3, 2),
+        ("palette", 3, 4),
+        ("palette", 3, 8),
         ("gray_alpha", 4, 8),
-        ("rgba", 6, 8), ("rgba", 6, 16),
+        ("rgba", 6, 8),
+        ("rgba", 6, 16),
     ]:
         for w, h in [(1, 1), (8, 8), (64, 64)]:
             name = f"{ct_name}_{bd}bit_{w}x{h}.png"
@@ -101,8 +108,10 @@ def make_variants() -> list[tuple[str, bytes]]:
     # Noise patterns
     rng = random.Random(42)
     for w, h in [(64, 64), (128, 128)]:
+
         def noise(w, y, _rng=rng):
             return bytes(_rng.randint(0, 255) for _ in range(w * 3))
+
         seeds.append((f"noise_{w}x{h}.png", make_png(w, h, 2, 8, pixel_func=noise)))
 
     # Gradient
@@ -111,12 +120,14 @@ def make_variants() -> list[tuple[str, bytes]]:
         for x in range(w):
             buf += bytes([min(255, y), min(255, x * 4), max(0, 255 - x * 4)])
         return bytes(buf)
+
     seeds.append(("gradient_256x256.png", make_png(256, 256, 2, 8, pixel_func=gradient)))
 
     # Stripes
     def stripes(w, y):
         v = 255 if (y // 4) % 2 == 0 else 0
         return bytes([v, 0, 0]) * w
+
     seeds.append(("stripes_128x128.png", make_png(128, 128, 2, 8, pixel_func=stripes)))
 
     return seeds
@@ -144,14 +155,21 @@ def make_zlib_variants() -> list[tuple[str, bytes]]:
                 raw += bytes(rng.randint(0, 255) for _ in range(w * channels))
             # Bind raw data into a closure for the pixel_func
             pixel_data = raw
+
             def _make_pf(pd):
                 def pf(w, y):
                     row_size = w * {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}[ct]
                     start = y * (row_size + 1) + 1  # skip filter byte
-                    return pd[start:start + row_size]
+                    return pd[start : start + row_size]
+
                 return pf
-            seeds.append((f"complex_ct{ct}_bd{bd}_{w}x{h}.png",
-                          make_png(w, h, ct, bd, pixel_func=_make_pf(pixel_data))))
+
+            seeds.append(
+                (
+                    f"complex_ct{ct}_bd{bd}_{w}x{h}.png",
+                    make_png(w, h, ct, bd, pixel_func=_make_pf(pixel_data)),
+                )
+            )
 
     # PNGs with multiple IDAT chunks (split compressed data)
     for w, h in [(16, 16), (32, 32), (64, 64)]:
@@ -172,30 +190,70 @@ def make_zlib_variants() -> list[tuple[str, bytes]]:
         (b"pHYs", struct.pack(">IIb", 3780, 3780, 1)),
         (b"tIME", struct.pack(">HBBBBB", 2024, 1, 1, 0, 0, 0)),
     ]:
-        seeds.append((f"chunk_{chunk_name.decode()}.png",
-                      make_png(8, 8, 2, 8,
-                               pixel_func=lambda w, y: bytes([0x80] * (w * 3)),
-                               extra_chunks=[(chunk_name, chunk_data)])))
+        seeds.append(
+            (
+                f"chunk_{chunk_name.decode()}.png",
+                make_png(
+                    8,
+                    8,
+                    2,
+                    8,
+                    pixel_func=lambda w, y: bytes([0x80] * (w * 3)),
+                    extra_chunks=[(chunk_name, chunk_data)],
+                ),
+            )
+        )
 
     # Minimal valid PNGs for all color_type × bit_depth combos
     for ct, bd in [
-        (0, 1), (0, 2), (0, 4), (0, 8), (0, 16),
-        (2, 8), (2, 16),
-        (3, 1), (3, 2), (3, 4), (3, 8),
+        (0, 1),
+        (0, 2),
+        (0, 4),
+        (0, 8),
+        (0, 16),
+        (2, 8),
+        (2, 16),
+        (3, 1),
+        (3, 2),
+        (3, 4),
+        (3, 8),
         (4, 8),
-        (6, 8), (6, 16),
+        (6, 8),
+        (6, 16),
     ]:
         channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}[ct]
         row_bytes = max(1, (channels * bd + 7) // 8)
         raw = bytes([0]) + bytes([0x80] * row_bytes)
-        seeds.append((f"minimal_ct{ct}_bd{bd}.png", make_png(1, 1, ct, bd,
-                      pixel_func=lambda w, y, _r=raw: _r[1:1 + w * {0:1,2:3,3:1,4:2,6:4}[ct]])))
+        seeds.append(
+            (
+                f"minimal_ct{ct}_bd{bd}.png",
+                make_png(
+                    1,
+                    1,
+                    ct,
+                    bd,
+                    pixel_func=lambda w, y, _r=raw: _r[
+                        1 : 1 + w * {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}[ct]
+                    ],
+                ),
+            )
+        )
 
     # Interlaced PNGs
     for w, h in [(16, 16), (32, 32)]:
-        seeds.append((f"interlace_{w}x{h}.png",
-                      make_png(w, h, 2, 8, interlace=1,
-                               pixel_func=lambda w, y: bytes(rng.randint(0, 255) for _ in range(w * 3)))))
+        seeds.append(
+            (
+                f"interlace_{w}x{h}.png",
+                make_png(
+                    w,
+                    h,
+                    2,
+                    8,
+                    interlace=1,
+                    pixel_func=lambda w, y: bytes(rng.randint(0, 255) for _ in range(w * 3)),
+                ),
+            )
+        )
 
     # Zlib-wrapped raw data (for decompression testing)
     for data_name, raw in [
@@ -222,16 +280,21 @@ def make_zlib_variants() -> list[tuple[str, bytes]]:
         compressed = zlib.compress(raw, 6)
         idat = make_chunk(b"IDAT", compressed)
         iend = make_chunk(b"IEND", b"")
-        seeds.append((f"palette_{palette_size}.png",
-                      sig + ihdr + plte + idat + iend))
+        seeds.append((f"palette_{palette_size}.png", sig + ihdr + plte + idat + iend))
 
     return seeds
 
 
 DOWNLOAD_URLS = [
-    ("google_logo.png", "https://www.google.com/images/branding/googlelogo/2x/googlelogo_color_272x92dp.png"),
+    (
+        "google_logo.png",
+        "https://www.google.com/images/branding/googlelogo/2x/googlelogo_color_272x92dp.png",
+    ),
     ("w3c_logo.png", "https://www.w3.org/TR/png/images/logo-h-rgb-32.png"),
-    ("wikipedia_transparency.png", "https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/PNG_transparency_demonstration_1.png/280px-PNG_transparency_demonstration_1.png"),
+    (
+        "wikipedia_transparency.png",
+        "https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/PNG_transparency_demonstration_1.png/280px-PNG_transparency_demonstration_1.png",
+    ),
 ]
 
 
@@ -252,11 +315,16 @@ def download_pngs(out_dir: str) -> int:
 
 def main():
     parser = argparse.ArgumentParser(description="Generate PNG corpus for fuzzing")
-    parser.add_argument("--out", default="corpus_png", help="Output directory (default: corpus_png)")
+    parser.add_argument(
+        "--out", default="corpus_png", help="Output directory (default: corpus_png)"
+    )
     parser.add_argument("--count", type=int, default=0, help="Max seeds (0=all)")
     parser.add_argument("--download", action="store_true", help="Also download real-world PNGs")
-    parser.add_argument("--zlib-only", action="store_true",
-                        help="Only generate zlib-aware seeds (skip basic variants)")
+    parser.add_argument(
+        "--zlib-only",
+        action="store_true",
+        help="Only generate zlib-aware seeds (skip basic variants)",
+    )
     args = parser.parse_args()
 
     os.makedirs(args.out, exist_ok=True)

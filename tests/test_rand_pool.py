@@ -2,8 +2,7 @@
 
 import pytest
 
-from fuzzer_tool.core.rand_pool import RandPool, _POOL_ENTRIES
-
+from fuzzer_tool.core.rand_pool import _POOL_ENTRIES, RandPool
 
 # ── Pool internals ──────────────────────────────────────────────────────
 

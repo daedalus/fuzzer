@@ -2,9 +2,8 @@
 
 from fuzzer_tool.core.rq_encodings import (
     BUILTIN_ENCODERS,
-    MAX_MUTATIONS_PER_PAIR,
-    CStringEncoder,
     CStrChrEncoder,
+    CStringEncoder,
     MemEncoder,
     PlainEncoder,
     SextEncoder,

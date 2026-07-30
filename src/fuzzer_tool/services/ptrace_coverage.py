@@ -251,7 +251,7 @@ class PtraceCoverage:
         if not func_bytes:
             return
 
-        from fuzzer_tool.core.elf import _decode_x86_64, _GRP_JUMP, _GRP_CALL, _GRP_RET, _GRP_INT
+        from fuzzer_tool.core.elf import _GRP_CALL, _GRP_INT, _GRP_JUMP, _GRP_RET, _decode_x86_64
 
         try:
             for insn in _decode_x86_64(func_bytes, func_va):
@@ -305,7 +305,7 @@ class PtraceCoverage:
         if not func_bytes:
             return 0
 
-        from fuzzer_tool.core.elf import _decode_x86_64, _GRP_JUMP, _GRP_CALL, _GRP_RET, _GRP_INT
+        from fuzzer_tool.core.elf import _GRP_CALL, _GRP_INT, _GRP_JUMP, _GRP_RET, _decode_x86_64
 
         count = 0
         try:

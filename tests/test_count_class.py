@@ -93,7 +93,7 @@ class TestLookupU16:
         assert len(LOOKUP_U16) == 65536
 
     def test_global_table_matches_build(self):
-        assert LOOKUP_U16 == _build_u16_table()
+        assert _build_u16_table() == LOOKUP_U16
 
 
 class TestClassifySingle:

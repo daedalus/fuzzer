@@ -501,9 +501,7 @@ class SeedScorer:
             return 2.0
         return 1.0
 
-    def _go_factor(
-        self, avg_distance: float, max_distance: float, anneal_progress: float
-    ) -> float:
+    def _go_factor(self, avg_distance: float, max_distance: float, anneal_progress: float) -> float:
         """AFLGo-style distance-annealed energy multiplier.
 
         During exploitation phase (anneal_progress > 0), seeds near

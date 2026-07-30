@@ -95,6 +95,8 @@ class TestOperatorDispatchSmoke:
         for op, mod_path in module_map.items():
             if op in FORMAT_MUTATIONS:
                 mod = importlib.import_module(mod_path)
-                assert hasattr(mod, "mutate") or hasattr(mod, "format_lock_havoc") or any(
-                    name.endswith("Mutator") for name in dir(mod)
+                assert (
+                    hasattr(mod, "mutate")
+                    or hasattr(mod, "format_lock_havoc")
+                    or any(name.endswith("Mutator") for name in dir(mod))
                 ), f"Module {mod_path} has no mutator class or entry function"

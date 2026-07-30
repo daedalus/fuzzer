@@ -1,7 +1,5 @@
 """Tests for core/grammar.py — grammar-based mutations."""
 
-import pytest
-
 from fuzzer_tool.core.grammar import Grammar
 
 

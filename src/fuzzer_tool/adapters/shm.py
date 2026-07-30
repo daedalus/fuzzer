@@ -148,7 +148,7 @@ class ShmCoverage:
         )
         active = arr[arr["edge_id"] != 0]
         # .tolist() converts numpy uint32 to plain Python ints
-        return dict(zip(active["edge_id"].tolist(), active["count"].tolist()))
+        return dict(zip(active["edge_id"].tolist(), active["count"].tolist(), strict=False))
 
     # ── Reset ────────────────────────────────────────────────────────────
 

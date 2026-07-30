@@ -8,8 +8,6 @@ import struct
 import sys
 from pathlib import Path
 
-import pytest
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 
@@ -77,8 +75,9 @@ class TestIsobmffMutations:
         assert result[8:] == payload, "Payload must be preserved even when size_orig is smaller"
 
     def test_mutate_box_size_pads_when_larger(self):
-        from fuzzer_tool.core.isobmff_mutations import Box, IsobmffMutator
         import random
+
+        from fuzzer_tool.core.isobmff_mutations import Box, IsobmffMutator
 
         rng = random.Random(42)
         mut = IsobmffMutator()

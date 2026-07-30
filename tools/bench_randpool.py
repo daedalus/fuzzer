@@ -10,12 +10,13 @@ fuzz iterations:
   - 2   sample(n, 2)  per iter   (swap two distinct positions)
   - 2   shuffle(list) per iter   (region shuffle in havoc)
 """
-import time
+
+import os
 import random as std_random
 import sys
-import os
+import time
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from src.fuzzer_tool.core.rand_pool import RandPool
 
 N_ITERS = 2000
@@ -142,18 +143,20 @@ for t in range(trials):
     # Verify correctness (deterministic seed)
     assert r1 == r3, f"standard and compact produced different results: {r1} vs {r3}"
 
+
 def mean(vals):
     return sum(vals) / len(vals)
+
 
 m_std = mean(results_std)
 m_pool = mean(results_pool)
 m_stdc = mean(results_stdc)
 
 print(f"\n  {'Method':<30s} {'Mean':>10s}  {'Speedup':>10s}")
-print(f"  {'-'*30} {'-'*10}  {'-'*10}")
+print(f"  {'-' * 30} {'-' * 10}  {'-' * 10}")
 print(f"  {'Standard randint/randrange/choice':<30s} {m_std:>8.3f}s  {'1.00×':>10s}")
-print(f"  {'Standard (randrange only)':<30s} {m_stdc:>8.3f}s  {m_std/m_stdc:>8.2f}×")
-print(f"  {'RandPool (batched)':<30s} {m_pool:>8.3f}s  {m_std/m_pool:>8.2f}×")
+print(f"  {'Standard (randrange only)':<30s} {m_stdc:>8.3f}s  {m_std / m_stdc:>8.2f}×")
+print(f"  {'RandPool (batched)':<30s} {m_pool:>8.3f}s  {m_std / m_pool:>8.2f}×")
 
 # ── Per-operation throughput ──────────────────────────────────────────
 print(f"\n{'─' * 72}")
@@ -162,6 +165,7 @@ print(f"{'─' * 72}")
 print()
 
 N = 200_000  # 200K calls per benchmark
+
 
 def bench_op(label, std_fn, pool_fn):
     # warmup
@@ -183,26 +187,36 @@ def bench_op(label, std_fn, pool_fn):
 
     ns_std = (std_time / N) * 1e9
     ns_pool = (pool_time / N) * 1e9
-    speedup = std_time / pool_time if pool_time > 0 else float('inf')
+    speedup = std_time / pool_time if pool_time > 0 else float("inf")
 
     print(f"  {label:<30s}  std={ns_std:>6.0f}ns  pool={ns_pool:>6.0f}ns  {speedup:>5.1f}×")
 
+
 buf_512 = list(range(512))
 _pool_inst = RandPool()
-_rand_inst = type('_', (), {'randrange': lambda _, n: std_random.randrange(n)})()
+_rand_inst = type("_", (), {"randrange": lambda _, n: std_random.randrange(n)})()
 _choice_seq = list(range(50))
+
 
 def _std_choice():
     return std_random.choice(_choice_seq)
 
+
 def _pool_choice():
     return _pool_inst.choice(_choice_seq)
 
-bench_op("randrange(512)",       lambda: std_random.randrange(512), lambda: _pool_inst.randrange(512))
-bench_op("randint(0, 255)",      lambda: std_random.randint(0, 255), lambda: _pool_inst.randint(0, 255))
-bench_op("randint(1, 64)",       lambda: std_random.randint(1, 64), lambda: _pool_inst.randint(1, 64))
-bench_op("choice(50 els)",       _std_choice, _pool_choice)
-bench_op("sample(512, 2)",       lambda: std_random.sample(range(512), 2), lambda: _pool_inst.sample(512, 2))
-bench_op("shuffle(20 els)",      lambda: std_random.shuffle(list(range(20))), lambda: _pool_inst.shuffle(list(range(20))))
+
+bench_op("randrange(512)", lambda: std_random.randrange(512), lambda: _pool_inst.randrange(512))
+bench_op("randint(0, 255)", lambda: std_random.randint(0, 255), lambda: _pool_inst.randint(0, 255))
+bench_op("randint(1, 64)", lambda: std_random.randint(1, 64), lambda: _pool_inst.randint(1, 64))
+bench_op("choice(50 els)", _std_choice, _pool_choice)
+bench_op(
+    "sample(512, 2)", lambda: std_random.sample(range(512), 2), lambda: _pool_inst.sample(512, 2)
+)
+bench_op(
+    "shuffle(20 els)",
+    lambda: std_random.shuffle(list(range(20))),
+    lambda: _pool_inst.shuffle(list(range(20))),
+)
 
 print()

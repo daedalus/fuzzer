@@ -1,18 +1,18 @@
 """Tests for core/target_profiler.py — static target analysis."""
 
+import math
 import os
 import struct
 import tempfile
-import math
 
 import pytest
 
 from fuzzer_tool.core.target_profiler import (
-    MAGIC_SIGNATURES,
-    TargetProfiler,
-    TargetProfile,
-    FunctionInfo,
     _FORMAT_OPERATOR_HINTS,
+    MAGIC_SIGNATURES,
+    FunctionInfo,
+    TargetProfile,
+    TargetProfiler,
     format_operator_priors,
 )
 

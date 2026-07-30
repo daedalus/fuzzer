@@ -24,18 +24,57 @@ from dataclasses import dataclass, field
 
 # Box types that contain sub-boxes
 CONTAINER_TYPES = {
-    b"moov", b"trak", b"mdia", b"minf", b"stbl", b"moof", b"traf",
-    b"mvex", b"edts", b"dinf", b"udta", b"meta", b"skip", b"free",
-    b"mdra", b"nmhd", b"smhd", b"vmhd", b"hmhd", b"sthd", b"meco",
-    b"strk", b"ipro", b"sinf", b"schi", b"mfra", b"tfra", b"mfro",
+    b"moov",
+    b"trak",
+    b"mdia",
+    b"minf",
+    b"stbl",
+    b"moof",
+    b"traf",
+    b"mvex",
+    b"edts",
+    b"dinf",
+    b"udta",
+    b"meta",
+    b"skip",
+    b"free",
+    b"mdra",
+    b"nmhd",
+    b"smhd",
+    b"vmhd",
+    b"hmhd",
+    b"sthd",
+    b"meco",
+    b"strk",
+    b"ipro",
+    b"sinf",
+    b"schi",
+    b"mfra",
+    b"tfra",
+    b"mfro",
     b"pdin",
 }
 
 # Box types whose payloads are full boxes (with version/flags prefix)
 FULL_BOX_TYPES = {
-    b"stsd", b"stts", b"stsc", b"stsz", b"stco", b"co64", b"stss",
-    b"ctts", b"hdlr", b"mdhd", b"mvhd", b"tkhd", b"vmhd", b"smhd",
-    b"nmhd", b"dref", b"elst", b"minf",
+    b"stsd",
+    b"stts",
+    b"stsc",
+    b"stsz",
+    b"stco",
+    b"co64",
+    b"stss",
+    b"ctts",
+    b"hdlr",
+    b"mdhd",
+    b"mvhd",
+    b"tkhd",
+    b"vmhd",
+    b"smhd",
+    b"nmhd",
+    b"dref",
+    b"elst",
+    b"minf",
 }
 
 # Stream-type handler fourcc values
@@ -43,10 +82,33 @@ HANDLER_TYPES = [b"vide", b"soun", b"subt", b"meta", b"hint", b"auxv"]
 
 # Codec fourcc values that can be swapped into stsd entries
 STSD_CODECS = [
-    b"avc1", b"mp4a", b"pgss", b"subp", b"tx3g", b"hvc1", b"hev1",
-    b"hev2", b"mp4v", b"s263", b"av01", b"vp09", b"theo", b"vorb",
-    b"Opus", b"FLAC", b"ac-3", b"eac3", b"dtsc", b"dtsh", b"dtse",
-    b"dtsl", b"mlpa", b"lpcm", b"sowt", b"samr", b"sawb",
+    b"avc1",
+    b"mp4a",
+    b"pgss",
+    b"subp",
+    b"tx3g",
+    b"hvc1",
+    b"hev1",
+    b"hev2",
+    b"mp4v",
+    b"s263",
+    b"av01",
+    b"vp09",
+    b"theo",
+    b"vorb",
+    b"Opus",
+    b"FLAC",
+    b"ac-3",
+    b"eac3",
+    b"dtsc",
+    b"dtsh",
+    b"dtse",
+    b"dtsl",
+    b"mlpa",
+    b"lpcm",
+    b"sowt",
+    b"samr",
+    b"sawb",
 ]
 
 
@@ -207,7 +269,9 @@ def _mutate_hdlr_handler_type(box: Box, rng: random.Random) -> None:
     data = bytearray(box.data)
     if len(data) >= 8:
         current = bytes(data[4:8])
-        new_type = rng.choice([t for t in HANDLER_TYPES if t != current] + [b"\xff\xff\xff\xff", b"\x00\x00\x00\x00"])
+        new_type = rng.choice(
+            [t for t in HANDLER_TYPES if t != current] + [b"\xff\xff\xff\xff", b"\x00\x00\x00\x00"]
+        )
         data[4:8] = new_type
         box.data = bytes(data)
 
@@ -223,7 +287,9 @@ def _mutate_stsd_codec(box: Box, rng: random.Random) -> None:
     data = bytearray(box.data)
     if len(data) >= 16:
         current = bytes(data[12:16])
-        new_codec = rng.choice([c for c in STSD_CODECS if c != current] + [b"\xff\xff\xff\xff", b"\x00\x00\x00\x00"])
+        new_codec = rng.choice(
+            [c for c in STSD_CODECS if c != current] + [b"\xff\xff\xff\xff", b"\x00\x00\x00\x00"]
+        )
         data[12:16] = new_codec
         box.data = bytes(data)
 
@@ -268,7 +334,9 @@ class IsobmffMutator:
         """Corrupt the size field of a random box."""
         target = self._rng.choice(boxes)
 
-        target.size_orig = self._rng.choice([0, 1, 8, max_len, 0xFFFFFFFF, self._rng.randint(0, max_len)])
+        target.size_orig = self._rng.choice(
+            [0, 1, 8, max_len, 0xFFFFFFFF, self._rng.randint(0, max_len)]
+        )
         # Recompute/truncate/pad payload from new size.
         # Clamp payload_len to max_len to avoid OOM on extreme size values
         # (e.g. 0xFFFFFFFF which would allocate ~4 GB).
@@ -287,8 +355,14 @@ class IsobmffMutator:
                 data = bytearray(box.data)
                 if len(data) >= 8:
                     # Corrupt major brand (offset 0-3) or a compatible brand
-                    pos = 0 if self._rng.random() < 0.5 else self._rng.randint(8, max(8, len(data) - 4))
-                    data[pos : pos + 4] = self._rng.choice([b"xxxx", b"\xff\xff\xff\xff", b"\x00\x00\x00\x00", b"????"])
+                    pos = (
+                        0
+                        if self._rng.random() < 0.5
+                        else self._rng.randint(8, max(8, len(data) - 4))
+                    )
+                    data[pos : pos + 4] = self._rng.choice(
+                        [b"xxxx", b"\xff\xff\xff\xff", b"\x00\x00\x00\x00", b"????"]
+                    )
                 box.data = bytes(data)
         return boxes
 
@@ -328,7 +402,12 @@ class IsobmffMutator:
         if boxes:
             idx = self._rng.randint(0, len(boxes) - 1)
             orig = boxes[idx]
-            dup = Box(box_type=orig.box_type, size_orig=orig.size_orig, data=orig.data[:], children=list(orig.children))
+            dup = Box(
+                box_type=orig.box_type,
+                size_orig=orig.size_orig,
+                data=orig.data[:],
+                children=list(orig.children),
+            )
             boxes.insert(idx + 1, dup)
         return boxes
 
@@ -352,7 +431,9 @@ class IsobmffMutator:
         ftyp = Box(box_type=b"ftyp", size_orig=8 + len(ftyp_data), data=ftyp_data)
 
         # Minimal moov with one trak → mdia → hdlr
-        hdlr_data = struct.pack(">I", 0) + b"vide" + struct.pack(">III", 0, 0, 0) + b"VideoHandler\x00"
+        hdlr_data = (
+            struct.pack(">I", 0) + b"vide" + struct.pack(">III", 0, 0, 0) + b"VideoHandler\x00"
+        )
         hdlr = Box(box_type=b"hdlr", size_orig=8 + len(hdlr_data), data=hdlr_data)
 
         mdhd_data = struct.pack(">I", 0) + struct.pack(">I", self._rng.randint(0, 0xFFFFFFFF))
@@ -365,7 +446,9 @@ class IsobmffMutator:
 
         trak = Box(box_type=b"trak", size_orig=0, children=[tkhd, mdia])
 
-        mvhd_data = struct.pack(">II", 0, self._rng.randint(0, 0xFFFFFFFF))  # version+flags, timescale
+        mvhd_data = struct.pack(
+            ">II", 0, self._rng.randint(0, 0xFFFFFFFF)
+        )  # version+flags, timescale
         mvhd = Box(box_type=b"mvhd", size_orig=8 + len(mvhd_data), data=mvhd_data)
 
         moov = Box(box_type=b"moov", size_orig=0, children=[mvhd, trak])

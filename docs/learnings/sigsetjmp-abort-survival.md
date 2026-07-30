@@ -2,7 +2,7 @@
 
 ## 2026-07-29: SIGABRT in direct_lite mode cannot be caught by Python signal handlers
 
-**Context:** `src/fuzzer_tool/adapters/afl_shim.c`, inprocess.py  
+**Context:** `src/fuzzer_tool/adapters/afl_shim.c`, inprocess.py
 **Problem:** `fuzzer-tool fuzz targets/ffmpeg_read_asan.so` would die with "Aborted" in direct_lite mode — the in-process ASAN target calls `abort()` and the entire fuzzer process dies.
 
 ### Rejected

@@ -76,7 +76,9 @@ def parse_pgs_segments(data: bytes) -> list[PgsSegment] | None:
 
         payload = data[pos + PGS_HEADER_SIZE : pos + PGS_HEADER_SIZE + seg_size]
 
-        segments.append(PgsSegment(pts=pts, dts=dts, seg_type=seg_type, seg_size=seg_size, payload=payload))
+        segments.append(
+            PgsSegment(pts=pts, dts=dts, seg_type=seg_type, seg_size=seg_size, payload=payload)
+        )
         pos += PGS_HEADER_SIZE + seg_size
 
     return segments if segments else None
@@ -160,7 +162,13 @@ class PgsMutator:
     def _duplicate_segment(self, segments: list[PgsSegment], max_len: int) -> list[PgsSegment]:
         """Clone a random segment and insert it after the original."""
         seg = self._rng.choice(segments)
-        dup = PgsSegment(pts=seg.pts, dts=seg.dts, seg_type=seg.seg_type, seg_size=seg.seg_size, payload=seg.payload)
+        dup = PgsSegment(
+            pts=seg.pts,
+            dts=seg.dts,
+            seg_type=seg.seg_type,
+            seg_size=seg.seg_size,
+            payload=seg.payload,
+        )
         idx = segments.index(seg) + 1
         segments.insert(idx, dup)
         return segments
@@ -187,7 +195,14 @@ class PgsMutator:
         to probe bounds-checking in the demuxer.
         """
         seg = self._rng.choice(segments)
-        extreme_sizes = [0, 1, 0xFFFF, len(seg.payload), len(seg.payload) + 1, max(0, len(seg.payload) - 1)]
+        extreme_sizes = [
+            0,
+            1,
+            0xFFFF,
+            len(seg.payload),
+            len(seg.payload) + 1,
+            max(0, len(seg.payload) - 1),
+        ]
         seg.seg_size = self._rng.choice(extreme_sizes)
         return segments
 
@@ -198,21 +213,44 @@ class PgsMutator:
 
         # Always include PCS, ODS, and END for a minimally valid display set
         pcs_payload = bytes(self._rng.randint(0, 255) for _ in range(self._rng.randint(4, 20)))
-        segments.append(PgsSegment(pts=self._rng.randint(0, 0xFFFFFFFF), dts=0xFFFFFFFF,
-                                   seg_type=SEG_PCS, seg_size=len(pcs_payload), payload=pcs_payload))
+        segments.append(
+            PgsSegment(
+                pts=self._rng.randint(0, 0xFFFFFFFF),
+                dts=0xFFFFFFFF,
+                seg_type=SEG_PCS,
+                seg_size=len(pcs_payload),
+                payload=pcs_payload,
+            )
+        )
 
         # Optionally add WDS, PDS
         extra_types = self._rng.sample([SEG_WDS, SEG_PDS], self._rng.randint(0, 2))
         for st in extra_types:
             pl = bytes(self._rng.randint(0, 255) for _ in range(self._rng.randint(2, 16)))
-            segments.append(PgsSegment(pts=self._rng.randint(0, 0xFFFFFFFF), dts=0xFFFFFFFF,
-                                       seg_type=st, seg_size=len(pl), payload=pl))
+            segments.append(
+                PgsSegment(
+                    pts=self._rng.randint(0, 0xFFFFFFFF),
+                    dts=0xFFFFFFFF,
+                    seg_type=st,
+                    seg_size=len(pl),
+                    payload=pl,
+                )
+            )
 
         ods_payload = bytes(self._rng.randint(0, 255) for _ in range(self._rng.randint(4, 32)))
-        segments.append(PgsSegment(pts=self._rng.randint(0, 0xFFFFFFFF), dts=0xFFFFFFFF,
-                                   seg_type=SEG_ODS, seg_size=len(ods_payload), payload=ods_payload))
+        segments.append(
+            PgsSegment(
+                pts=self._rng.randint(0, 0xFFFFFFFF),
+                dts=0xFFFFFFFF,
+                seg_type=SEG_ODS,
+                seg_size=len(ods_payload),
+                payload=ods_payload,
+            )
+        )
 
-        segments.append(PgsSegment(pts=0, dts=0xFFFFFFFF, seg_type=SEG_END, seg_size=0, payload=b""))
+        segments.append(
+            PgsSegment(pts=0, dts=0xFFFFFFFF, seg_type=SEG_END, seg_size=0, payload=b"")
+        )
 
         result = serialize_pgs_segments(segments)
         return result[:max_len]

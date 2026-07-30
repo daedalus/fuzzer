@@ -17,7 +17,6 @@ import struct
 import zlib
 from dataclasses import dataclass
 
-
 ZLIB_MIN_SIZE = 6  # 2 header + 0 data + 4 trailer
 
 

@@ -1,13 +1,10 @@
 """Tests for the Kalman filter module."""
 
-import math
 import random
-from pathlib import Path
 
 import pytest
 
 from fuzzer_tool.core.kalman import KalmanFilter, RobustKF
-
 
 # ── KalmanFilter: 1D ────────────────────────────────────────────────────
 
@@ -194,8 +191,11 @@ class TestRobustKF:
     def test_adaptive_r_grows_for_noisy_signal(self):
         """Adaptive R (not gating) should increase effective R over time."""
         rkf = RobustKF(
-            dim=1, process_noise=0.01, measurement_noise=0.1,
-            adaptive_r_gain=0.05, huber_threshold=100.0,  # disable gating
+            dim=1,
+            process_noise=0.01,
+            measurement_noise=0.1,
+            adaptive_r_gain=0.05,
+            huber_threshold=100.0,  # disable gating
         )
         r_base = rkf.effective_measurement_noise
         for _ in range(60):
@@ -205,8 +205,11 @@ class TestRobustKF:
     def test_effective_r_stable_without_adaptive_gain(self):
         """Without adaptive gain, effective R stays at base."""
         rkf = RobustKF(
-            dim=1, process_noise=0.01, measurement_noise=0.1,
-            adaptive_r_gain=0.0, huber_threshold=100.0,  # disable gating too
+            dim=1,
+            process_noise=0.01,
+            measurement_noise=0.1,
+            adaptive_r_gain=0.0,
+            huber_threshold=100.0,  # disable gating too
         )
         for _ in range(20):
             rkf.update(random.gauss(0, 2.0))

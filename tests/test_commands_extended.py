@@ -4,16 +4,13 @@ import argparse
 import subprocess
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
 from fuzzer_tool.cli.commands import (
-    _add_common_args,
     _auto_tune_timeout,
     _detect_asan,
-    _get_dirs,
-    _validate_target,
     cmd_estimate,
     cmd_fuzz,
     cmd_import,
@@ -232,9 +229,7 @@ class TestMain:
         target.write_bytes(b"\x7fELF")
         target.chmod(0o755)
         monkeypatch.setitem(sys.modules, "fuzzer_tool.cli.commands.sys", sys)
-        monkeypatch.setattr(
-            sys, "argv", ["fuzzer-tool", "fuzz", str(target), "-n", "100"]
-        )
+        monkeypatch.setattr(sys, "argv", ["fuzzer-tool", "fuzz", str(target), "-n", "100"])
 
         try:
             main()

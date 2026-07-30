@@ -7,7 +7,6 @@ and length-changing mutations toward productive lengths.
 
 from __future__ import annotations
 
-import random
 from collections import defaultdict
 
 # ── Memory bounds ────────────────────────────────────────────────────

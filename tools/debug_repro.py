@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Debug reproducibility: run two Fuzzers with identical seeds in fresh temp dirs."""
-import sys, os, tempfile, subprocess
+
+import subprocess
+import sys
+import tempfile
 
 script = """
 import sys
@@ -21,14 +24,19 @@ for r in [f.mutate(b'AAAA') for _ in range(10)]:
 results = []
 for i in range(2):
     with tempfile.TemporaryDirectory() as td:
-        r = subprocess.run([sys.executable, '-c', script, td], capture_output=True, text=True, cwd='/home/dclavijo/my_code/fuzzer')
+        r = subprocess.run(
+            [sys.executable, "-c", script, td],
+            capture_output=True,
+            text=True,
+            cwd="/home/dclavijo/my_code/fuzzer",
+        )
         hexes = [line.strip() for line in r.stdout.strip().split()]
         results.append(hexes)
-        print(f'Run {i}: {[h[:16] for h in hexes]}')
+        print(f"Run {i}: {[h[:16] for h in hexes]}")
 
 match = results[0] == results[1]
-print(f'\nMatch: {match}')
+print(f"\nMatch: {match}")
 if not match:
-    for i, (a, b) in enumerate(zip(results[0], results[1])):
+    for i, (a, b) in enumerate(zip(results[0], results[1], strict=False)):
         if a != b:
-            print(f'  [{i}] {a[:20]} != {b[:20]}')
+            print(f"  [{i}] {a[:20]} != {b[:20]}")

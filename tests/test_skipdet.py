@@ -1,7 +1,5 @@
 """Tests for core/skipdet.py — skip deterministic stages for low-info seeds."""
 
-import pytest
-
 from fuzzer_tool.core.skipdet import (
     MAX_INF_EXECS,
     MAX_QUICK_EFF_EXECS,

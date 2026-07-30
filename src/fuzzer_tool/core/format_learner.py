@@ -22,10 +22,7 @@ Core loop:
 
 import hashlib
 import logging
-import math
-import random
 from dataclasses import dataclass, field
-from typing import Optional
 
 from fuzzer_tool.core.running_stats import RunningMoments
 
@@ -223,7 +220,7 @@ class FormatLearner:
         deviations.sort()
         return deviations[len(deviations) // 2]
 
-    def backtest(self) -> tuple[bool, Optional[str]]:
+    def backtest(self) -> tuple[bool, str | None]:
         """Replay the ENTIRE Timeline through the current format model."""
         if not self.hypotheses:
             return True, None
@@ -265,7 +262,7 @@ class FormatLearner:
                 return True
         return None
 
-    def suggest_discriminating_mutation(self, candidates: list[str]) -> Optional[tuple[str, int]]:
+    def suggest_discriminating_mutation(self, candidates: list[str]) -> tuple[str, int] | None:
         """Suggest a mutation that would discriminate between hypotheses."""
         if len(self.hypotheses) < 2:
             return None

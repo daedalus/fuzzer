@@ -2369,7 +2369,6 @@ class HierarchicalBanditScheduler:
             "ascii_num",
             "ascii_num_arithmetic",
             "insert_ascii_num",
-            "ascii_num",
             "tlv_mutate",
             "token_shuffle",
             "chunk_shuffle",

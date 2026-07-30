@@ -1,7 +1,7 @@
 """Tests for no-ASAN fuzzing + auto sanitizer crash replay."""
 
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from fuzzer_tool.core.sanitizer import SanitizerReport
 from fuzzer_tool.services.fuzzer import Fuzzer
@@ -123,7 +123,11 @@ class TestSanitizerReplay:
     @patch("fuzzer_tool.adapters.process.run_target_stdin")
     def test_replays_on_asan_target(self, mock_run):
         """Replay dispatches crash data to the ASAN target."""
-        mock_run.return_value = (-6, "AddressSanitizer: heap-buffer-overflow\n#0 0x401000 in foo\n", 12345)
+        mock_run.return_value = (
+            -6,
+            "AddressSanitizer: heap-buffer-overflow\n#0 0x401000 in foo\n",
+            12345,
+        )
 
         fuzzer = self._make_fuzzer(asan_target="/path/to/target_asan.so")
         crash_sig = "ASAN:heap-buffer-overflow@foo"
@@ -148,7 +152,11 @@ class TestSanitizerReplay:
     @patch("fuzzer_tool.adapters.process.run_target_stdin")
     def test_replays_on_ubsan_target(self, mock_run):
         """Replay dispatches crash data to the UBSAN target."""
-        mock_run.return_value = (-6, "UndefinedBehaviorSanitizer: undefined\n#0 0x401000 in bar\n", 12346)
+        mock_run.return_value = (
+            -6,
+            "UndefinedBehaviorSanitizer: undefined\n#0 0x401000 in bar\n",
+            12346,
+        )
 
         fuzzer = self._make_fuzzer(ubsan_target="/path/to/target_ubsan.so")
         crash_sig = "UBSAN:undefined@bar"
@@ -253,8 +261,7 @@ class TestSanitizerReplay:
 
         # At least one should remain pending (tight budget)
         remaining = sum(
-            1 for info in fuzzer._crash_sanitizer_replays.values()
-            if info["asan"] is None
+            1 for info in fuzzer._crash_sanitizer_replays.values() if info["asan"] is None
         )
         assert remaining >= 0  # non-regression assertion
 

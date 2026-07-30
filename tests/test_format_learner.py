@@ -1,6 +1,6 @@
 """Tests for format structure learner (schema-harness methodology)."""
 
-from fuzzer_tool.core.format_learner import FormatLearner, FieldHypothesis, TimelineEntry
+from fuzzer_tool.core.format_learner import FieldHypothesis, FormatLearner
 
 
 class TestFormatLearnerInit:

@@ -1,7 +1,5 @@
 """Tests for core/colorization.py — CmpLog input colorization."""
 
-import pytest
-
 from fuzzer_tool.core.colorization import (
     ColorizationResult,
     TaintRegion,

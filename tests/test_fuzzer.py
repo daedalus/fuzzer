@@ -1,8 +1,9 @@
 """Tests for Fuzzer service (unit tests, no real target execution)."""
 
 import math
+from unittest.mock import patch
+
 import pytest
-from unittest.mock import MagicMock, patch
 
 from fuzzer_tool.adapters.shim_factory import ShimResult
 from fuzzer_tool.core.markov import MarkovChain
@@ -324,7 +325,9 @@ class TestInProcessRunner:
         r = self._make_runner()
         assert r._shim is None
 
-    @pytest.mark.skip(reason="Hangs after persistent loader subprocess — flaky environment interaction")
+    @pytest.mark.skip(
+        reason="Hangs after persistent loader subprocess — flaky environment interaction"
+    )
     def test_shim_built_with_coverage_env_id(self):
         from fuzzer_tool.adapters.inprocess import InProcessRunner
 
@@ -893,8 +896,7 @@ class TestCrashDataPruning:
 class TestMetropolisCorpusAdmission:
     """Metropolis acceptance for non-improving inputs in fuzz_one()."""
 
-    def _make_fuzzer_with_metropolis(self, anneal_budget=100000, temperature=1.0,
-                                     metropolis=True):
+    def _make_fuzzer_with_metropolis(self, anneal_budget=100000, temperature=1.0, metropolis=True):
         """Build a minimal Fuzzer with Metropolis enabled (no real target execution)."""
         import tempfile
 

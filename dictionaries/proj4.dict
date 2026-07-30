@@ -1,4 +1,4 @@
-# Dictionary developed for proj4 standard_fuzzer.cpp 
+# Dictionary developed for proj4 standard_fuzzer.cpp
 
 # valid proj types (lines 1,2), generated from seeds
 # $ grep -hoe 'proj=\w*' -o seeds/* | sort -u
@@ -65,7 +65,7 @@
 "+datum=nzgd49"
 "+datum=potsdam"
 
-# valid ellps types 
+# valid ellps types
 # $ grep -hoe 'elps=\w*' -o seeds/* | sort -u
 "+ellps=GRS67"
 "+ellps=GRS80"

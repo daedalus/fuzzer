@@ -16,10 +16,6 @@ raw size) is informationally novel — it exercises different patterns.
 """
 
 import logging
-import math
-import os
-import tempfile
-from pathlib import Path
 
 log = logging.getLogger(__name__)
 

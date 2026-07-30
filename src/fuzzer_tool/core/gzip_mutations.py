@@ -13,7 +13,6 @@ import struct
 import zlib
 from dataclasses import dataclass
 
-
 GZIP_MAGIC = b"\x1f\x8b"
 DEFLATE = 8
 

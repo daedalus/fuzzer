@@ -780,7 +780,6 @@ def _edge_map_analysis(f) -> str:
 
 def _runtime_performance(f) -> str:
     """Wall-clock time, memory, throughput, and corpus growth."""
-    import resource as _resource
     import time
 
     elapsed = time.time() - f.start_time

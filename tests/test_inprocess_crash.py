@@ -122,7 +122,6 @@ class TestDirectLiteCrashHandler:
 
     def test_signal_handlers_installed(self, compiled_targets):
         """_run_c_direct_lite must install SIGSEGV and SIGABRT handlers."""
-        import signal
         from fuzzer_tool.adapters.inprocess import InProcessRunner
 
         runner = InProcessRunner(
@@ -170,6 +169,7 @@ class TestProbeSoFunction:
     def test_uses_nm_not_ctypes(self):
         """_probe_so_function should use nm -D, not ctypes.CDLL."""
         import inspect
+
         from fuzzer_tool.services.fuzzer import Fuzzer
 
         source = inspect.getsource(Fuzzer._probe_so_function)
@@ -221,7 +221,9 @@ class TestAutoDetectedSoMode:
         assert runner.direct is False
         assert runner._persistent is not None, "Persistent loader should be initialized"
 
-    @pytest.mark.skip(reason="Hangs after persistent loader subprocess — flaky environment interaction")
+    @pytest.mark.skip(
+        reason="Hangs after persistent loader subprocess — flaky environment interaction"
+    )
     def test_asan_uses_subprocess_loader(self, compiled_targets):
         """ASAN .so targets should use subprocess loader."""
         from fuzzer_tool.adapters.inprocess import InProcessRunner
@@ -306,7 +308,6 @@ class TestRunTargetFast:
 
 # Import at module level for TestRunTargetFast
 from fuzzer_tool.adapters.process import run_target_fast
-
 
 # ---------------------------------------------------------------------------
 # Bug class 5: Integration — fuzzer finds crashes through all modes
@@ -414,6 +415,7 @@ class TestAsanHaltOnError:
     def test_shim_includes_halt_on_error(self):
         """__asan_default_options shim must set halt_on_error=0."""
         import inspect
+
         from fuzzer_tool.services.fuzzer import Fuzzer
 
         source = inspect.getsource(Fuzzer.__init__)
@@ -489,6 +491,7 @@ class TestAsanCaptureStderr:
     def test_capture_stderr_wired(self):
         """Fuzzer passes capture_stderr=True for ASAN targets."""
         import inspect
+
         from fuzzer_tool.services.fuzzer import Fuzzer
 
         source = inspect.getsource(Fuzzer.__init__)
@@ -499,8 +502,9 @@ class TestAsanCaptureStderr:
 
     def test_inprocess_runner_capture_stderr_param(self):
         """InProcessRunner accepts capture_stderr parameter."""
-        from fuzzer_tool.adapters.inprocess import InProcessRunner
         import inspect
+
+        from fuzzer_tool.adapters.inprocess import InProcessRunner
 
         sig = inspect.signature(InProcessRunner.__init__)
         assert "capture_stderr" in sig.parameters, (

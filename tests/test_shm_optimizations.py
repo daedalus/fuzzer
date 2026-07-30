@@ -1,12 +1,9 @@
 """Tests for SHM coverage data structures and optimizations."""
 
 import pytest
-import tempfile
-import os
-import random
 
-from fuzzer_tool.core.edge_tracker import EdgeTracker
 from fuzzer_tool.adapters.shm import ShmCoverage
+from fuzzer_tool.core.edge_tracker import EdgeTracker
 
 
 class TestTemporalTracking:
@@ -341,7 +338,7 @@ class TestFastJSON:
     """Tests for fast_json module."""
 
     def test_loads_dumps(self):
-        from fuzzer_tool.core.fast_json import loads, dumps
+        from fuzzer_tool.core.fast_json import dumps, loads
 
         data = {"key": "value", "num": 42, "nested": [1, 2, 3]}
         serialized = dumps(data)
@@ -349,7 +346,7 @@ class TestFastJSON:
         assert deserialized == data
 
     def test_json_decode_error(self):
-        from fuzzer_tool.core.fast_json import loads, JSONDecodeError
+        from fuzzer_tool.core.fast_json import JSONDecodeError, loads
 
         with pytest.raises(JSONDecodeError):
             loads("invalid json")

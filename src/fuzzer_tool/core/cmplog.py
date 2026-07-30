@@ -18,7 +18,6 @@ import binascii
 import contextlib
 import logging
 import os
-import tempfile
 import uuid
 
 log = logging.getLogger(__name__)
@@ -56,6 +55,7 @@ def _cleanup_stale_cmplog_files():
                 pass
     if removed:
         log.info("Cleaned %d stale cmplog file(s) from %s", removed, d)
+
 
 # ── Memory bounds ────────────────────────────────────────────────────
 CMPLOG_TOKENS_MAX = 10_000  # max unique operand tokens

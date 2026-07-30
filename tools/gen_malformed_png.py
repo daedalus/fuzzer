@@ -90,7 +90,8 @@ _ihdr_data = struct.pack(">IIBBBBB", 2, 2, 8, 2, 0, 0, 0)
 cases["bad_crc_ihdr"] = (
     PNG_SIG
     + struct.pack(">I", len(_ihdr_data))
-    + b"IHDR" + _ihdr_data
+    + b"IHDR"
+    + _ihdr_data
     + struct.pack(">I", 0xDEADBEEF)
 )
 
@@ -160,15 +161,10 @@ cases["infinite_idat"] = make_png(ihdr(), chunk(b"IDAT", _inf), chunk(b"IEND", b
 
 # Chunk declares more data than present
 cases["chunk_overread"] = (
-    PNG_SIG
-    + struct.pack(">I", 100)
-    + b"IHDR"
-    + struct.pack(">IIBBBBB", 2, 2, 8, 2, 0, 0, 0)[:4]
+    PNG_SIG + struct.pack(">I", 100) + b"IHDR" + struct.pack(">IIBBBBB", 2, 2, 8, 2, 0, 0, 0)[:4]
 )
 
-cases["chunk_length_mismatch"] = (
-    PNG_SIG + ihdr() + b"IDAT" + struct.pack(">I", 4) + b"\x00" * 200
-)
+cases["chunk_length_mismatch"] = PNG_SIG + ihdr() + b"IDAT" + struct.pack(">I", 4) + b"\x00" * 200
 
 # ══════════════════════════════════════════════════════════════════════
 # Filter bytes
