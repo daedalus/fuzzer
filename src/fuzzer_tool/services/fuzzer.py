@@ -3121,7 +3121,7 @@ class Fuzzer:
                         n_fuzz=n_fuzz,
                         total_execs=max(1, self.exec_count),
                         mean_log_n_fuzz=self._cached_mean_log_n_fuzz,
-                        avg_distance=meta.get("avg_distance", 0.0) if self._distance else 0.0,
+                        avg_distance=meta.get("avg_distance", -1.0) if self._distance else -1.0,
                         max_distance=self._distance.max_distance if self._distance else 0.0,
                         anneal_progress=self._anneal_progress,
                         **hf_kwargs,

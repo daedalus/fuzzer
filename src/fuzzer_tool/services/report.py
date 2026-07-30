@@ -1220,7 +1220,10 @@ def _format_duration(seconds: float) -> str:
 
 def _elo_ratings(f) -> str:
     """Elo operator rankings and comparison with bandit rankings."""
-    if not f._use_elo or not f._elo or not f._elo.ratings:
+    if not f._use_elo or not f._elo:
+        return ""
+    ranking = f._elo.get_ranking()
+    if not ranking:
         return ""
 
     ranking = f._elo.get_ranking()

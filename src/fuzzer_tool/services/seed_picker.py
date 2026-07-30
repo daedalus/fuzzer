@@ -72,6 +72,15 @@ class SeedPicker:
     def pick_seed(self) -> bytes:
         f = self.f
         rng = f._rand_pool
+
+        # Update SA temperature on every call, regardless of which
+        # strategy Elo selects (bug: was inside weighted_pick_seed()
+        # so temperature only cooled when 'weighted' won the bandit).
+        if f._anneal_budget > 0:
+            f._temperature = max(0.1, 1.0 - f.exec_count / f._anneal_budget)
+        else:
+            f._temperature = 1.0
+
         if f._stall_recovery_active and f.corpus:
             f._seed_strategy = "random_stall"
             return rng.choice(f.corpus)
@@ -87,6 +96,8 @@ class SeedPicker:
         if f.corpus and getattr(f, "_use_bayesian", False) and f._seed_quality:
             return self._pick_bayesian_seed()
         if f.corpus and f.seed_meta:
+            if getattr(f, "_use_boltzmann", False):
+                return self._pick_boltzmann_seed()
             return self.weighted_pick_seed()
         if f.corpus:
             return rng.choice(f.corpus)
@@ -760,11 +771,6 @@ class SeedPicker:
     def weighted_pick_seed(self) -> bytes:
         f = self.f
         now = time.time()
-
-        if f._anneal_budget > 0:
-            f._temperature = max(0.1, 1.0 - f.exec_count / f._anneal_budget)
-        else:
-            f._temperature = 1.0
 
         if not hasattr(f, "_recent_seed_edges"):
             f._recent_seed_edges: list[set[int]] = []

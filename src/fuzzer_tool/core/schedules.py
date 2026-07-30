@@ -519,7 +519,11 @@ class SeedScorer:
         """
         if self.schedule != "go" or anneal_progress < 0.01 or max_distance <= 0:
             return 1.0
-        norm_dist = min(avg_distance / max_distance, 1.0) if avg_distance > 0 else 1.0
+        # avg_distance >= 0 is valid (0 = at target = best case).
+        # avg_distance < 0 means no distance data available.
+        if avg_distance < 0:
+            return 1.0
+        norm_dist = min(avg_distance / max_distance, 1.0)
         beta = anneal_progress * 5.0
         bonus = math.exp(beta * (1.0 - norm_dist))
         return min(bonus, 100.0)
