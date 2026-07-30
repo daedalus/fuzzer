@@ -662,7 +662,7 @@ class StatsReporter:
         if getattr(f, "_use_elo", False) and getattr(f, "_elo", None):
             try:
                 elo = f._elo
-                meta = getattr(f, "_meta_strategy", "?")
+                meta = getattr(f, "_meta_strategy", None) or "—"
                 seed = getattr(f, "_seed_strategy", "?")
                 ranking = elo.get_strategy_ranking()
                 top = ranking[0][0] if ranking else "?"
