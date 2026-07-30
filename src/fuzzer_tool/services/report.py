@@ -1002,6 +1002,12 @@ def _format_learning(f) -> str:
             f"  Backtest:        {summary['backtest_passes']} passes, {summary['backtest_fails']} fails"
         )
 
+        # Learned format (magic at offset 0)
+        magic_fields = [f for f in summary["fields"] if f.get("type") == "magic"]
+        if magic_fields:
+            magic = magic_fields[0]
+            lines.append(f"  Learned format:  {magic['width']}-byte identifier at offset 0")
+
         # Backtest verdict
         passes = int(summary["backtest_passes"])
         fails = int(summary["backtest_fails"])
@@ -1017,16 +1023,28 @@ def _format_learning(f) -> str:
             lines.append("")
             lines.append("  Inferred format fields:")
             lines.append(
-                f"    {'Offset':>8s}  {'Width':>5s}  {'Type':>10s}  {'Conf':>5s}  {'Obs':>4s}  Controlled edges"
+                f"    {'Offset':>8s}  {'Width':>5s}  {'Type':>10s}  {'Conf':>5s}  {'Obs':>4s}  {'Edges':>6s}  {'Sensitive ops'}"
             )
             lines.append(
-                f"    {'------':>8s}  {'-----':>5s}  {'----':>10s}  {'----':>5s}  {'---':>4s}  {'---------------'}"
+                f"    {'------':>8s}  {'-----':>5s}  {'----':>10s}  {'----':>5s}  {'---':>4s}  {'-----':>6s}  {'-------------'}"
             )
             for field in summary["fields"]:
+                ops = ", ".join(sorted(field["sensitive_ops"].keys())[:4])
+                if len(field["sensitive_ops"]) > 4:
+                    ops += f" +{len(field['sensitive_ops'])-4}"
                 lines.append(
                     f"    {field['offset']:>8d}  {field['width']:>5d}  {field['type']:>10s}  "
-                    f"{field['confidence']:>5.2f}  {field['observations']:>4d}  {field['controlled_edges']}"
+                    f"{field['confidence']:>5.2f}  {field['observations']:>4d}  {field['controlled_edges']:>6d}  {ops}"
                 )
+
+            # Field type legend
+            lines.append("")
+            lines.append("  Field types:")
+            lines.append("    magic    — file identifier / signature bytes (offset 0)")
+            lines.append("    length   — size/length field (changing it alters coverage patterns)")
+            lines.append("    crc      — checksum / integrity field (broad coverage sensitivity)")
+            lines.append("    data     — payload or content bytes (many observations)")
+            lines.append("    unknown  — structure detected, type not yet classified")
 
         # Discriminating probe suggestion
         try:
