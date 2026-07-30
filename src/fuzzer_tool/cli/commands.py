@@ -323,6 +323,17 @@ def cmd_fuzz(args):
         if not coverage_log_arg:
             coverage_log_arg = str(Path(corpus_dir) / ".plot_graph_coverage_log.csv")
 
+    # --elo all: enable every available meta-scheduler so Elo arbitrates them
+    if getattr(args, "elo", None) == "all":
+        args.mc_bandit = True
+        args.mc_cem = True
+        args.mopt = True
+        args.replicator = True
+        args.exp3 = True
+        args.eps_greedy = True
+        args.hierarchical_bandit = True
+        args.gp_ucb = True
+
     fuzzer = Fuzzer(
         target=args.target,
         multi_targets=args.targets if len(args.targets) > 1 else None,
@@ -1337,8 +1348,13 @@ def main() -> int:
     )
     fuzz_parser.add_argument(
         "--elo",
-        action="store_true",
-        help="Enable Elo scheduling: arbitrates between operator strategies (bandit/MOpt/replicator) AND seed strategies (ga/weighted/pareto/format)",
+        nargs="?",
+        const=True,
+        default=False,
+        metavar="all",
+        help="Enable Elo scheduling: arbitrates between operator and seed strategies. "
+        "Pass 'all' to also enable all available meta-schedulers (bandit, MOpt, "
+        "replicator, EXP3, eps-greedy, hierarchical, GP-UCB).",
     )
     fuzz_parser.add_argument(
         "--exp3", action="store_true", help="Enable EXP3 adversarial bandit operator scheduling"
