@@ -1272,7 +1272,7 @@ def _elo_ratings(f) -> str:
         ):
             lines.append("")
             lines.append("  Crash-specific Elo:")
-            elo_mu = getattr(f._elo, "initial_mu", f._elo.default_rating)
+            elo_mu = getattr(f._elo, "initial_mu", getattr(f._elo, "default_rating", 1500))
             for i, (op, rating) in enumerate(crash_ranking[:5], 1):
                 delta = rating - elo_mu
                 sign = "+" if delta >= 0 else ""
@@ -1284,7 +1284,7 @@ def _elo_ratings(f) -> str:
         if strategy_ranking:
             lines.append("")
             lines.append("  Meta-scheduler (bandit vs MOpt):")
-            elo_mu = getattr(f._elo, "initial_mu", f._elo.default_rating)
+            elo_mu = getattr(f._elo, "initial_mu", getattr(f._elo, "default_rating", 1500))
             for s, rating in strategy_ranking:
                 delta = rating - elo_mu
                 sign = "+" if delta >= 0 else ""
