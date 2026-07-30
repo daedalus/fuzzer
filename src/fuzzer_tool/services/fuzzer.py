@@ -4,6 +4,7 @@ import atexit
 import contextlib
 import json
 import logging
+import math
 import os
 import random
 import resource
@@ -268,6 +269,8 @@ class Fuzzer:
         mopt=False,
         targets=None,
         anneal_budget=0,
+        boltzmann=False,
+        metropolis=False,
         mc_elite_frac=0.1,
         mc_refit_interval=1000,
         mc_decay_interval=100,
@@ -748,6 +751,8 @@ class Fuzzer:
             log.info("MOpt PSO scheduling enabled (5 particles, window=200)")
         self._use_replicator = replicator
         self._seed_strategy = None
+        self._use_boltzmann = boltzmann
+        self._metropolis = metropolis
         self._op_dispatch = self._build_dispatch()
         self._replicator = None
         if replicator:
@@ -932,7 +937,7 @@ class Fuzzer:
                 self._elo._strategy_mu.setdefault(s, self._elo.initial_mu)
                 self._elo._strategy_sigma_sq.setdefault(s, self._elo.initial_sigma**2)
                 self._elo._strategy_match_count.setdefault(s, 0)
-            for s in ("ga", "qea", "weighted", "pareto", "format", "bayesian", "markov"):
+            for s in ("ga", "qea", "weighted", "pareto", "format", "bayesian", "markov", "boltzmann"):
                 key = f"seed_{s}"
                 self._elo._strategy_mu.setdefault(key, self._elo.initial_mu)
                 self._elo._strategy_sigma_sq.setdefault(key, self._elo.initial_sigma**2)
@@ -2363,7 +2368,7 @@ class Fuzzer:
         # Meta-elo: record seed strategy-level match
         if self._use_elo and self._elo and self._seed_strategy:
             score = surprisal_weight if success else 0.0
-            seed_strategies = ["ga", "qea", "weighted", "pareto", "format", "bayesian", "markov"]
+            seed_strategies = ["ga", "qea", "weighted", "pareto", "format", "bayesian", "markov", "boltzmann"]
             for other in seed_strategies:
                 if other != self._seed_strategy:
                     self._elo.record_strategy_match(
@@ -2476,6 +2481,16 @@ class Fuzzer:
                 self._auto_minimize_corpus()
                 self._deprioritize_near_duplicates()
             return True
+
+        # ── Metropolis acceptance for non-improving / non-crashing inputs ──
+        if self._metropolis and self._anneal_budget > 0 and not is_timeout:
+            p_accept = math.exp(-1.0 / max(self._temperature, 0.01))
+            if random.random() < p_accept:
+                self.save_to_corpus(mutated, parent=data)
+                if self.mc and self.mc_cem:
+                    self.mc.add_elite(mutated, 1, temperature=self._temperature)
+                    self.mc.maybe_refit()
+                return True
 
         # Periodic minimization (also for non-interesting iterations)
         if (
@@ -3226,7 +3241,7 @@ class Fuzzer:
                     )
         # Seed strategy convergence
         if self._use_elo and self._elo:
-            seed_strategies = ["ga", "qea", "weighted", "pareto", "format", "bayesian", "markov"]
+            seed_strategies = ["ga", "qea", "weighted", "pareto", "format", "bayesian", "markov", "boltzmann"]
             has_seed_data = any(
                 self._elo._strategy_match_count.get(f"seed_{s}", 0) > 0 for s in seed_strategies
             )

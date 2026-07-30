@@ -16,6 +16,9 @@
 
 ## Scheduling
 - [x] **Seed energy burst on discovery, decay over time** — AFL++ power schedules (FAST/COE/RARE/MMOPT/LIN/QUAD) via `SeedScorer`, plus Honggfuzz power factors.
+- [x] **Boltzmann seed selection** (`--boltzmann`) — thermodynamic seed weighting: `P(seed) ∝ exp(-E/T)` with `E = log(fuzz_count+1)`, reusing the SA temperature for annealing. Collapses most of the seven hand-tuned schedules into one formula with one tunable knob.
+- [x] **Metropolis corpus admission** (`--metropolis`) — probabilistic acceptance of non-improving inputs: `P = exp(-ΔE/T)`. Exploratory junk admitted at high T; strict coverage-only rule at low T.
+- [ ] **Fluctuation theorems for fuzzing** (research-y) — Jarzynski/Crooks relations could estimate the "difficulty" of reaching rare corpus regions from biased/accelerated trajectories. Requires a well-defined work functional over mutation trajectories, which doesn't exist yet. Flagged as speculative, not a sprint task.
 - [ ] **Collaborative scheduling across parallel workers** — parallel workers currently sync corpus but don't coordinate scheduling decisions. Could share exploration/exploitation state.
 
 ## Crash Analysis

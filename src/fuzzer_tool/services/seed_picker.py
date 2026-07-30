@@ -44,6 +44,8 @@ class SeedPicker:
             available.append("bayesian")
         if f.markov_generate and f.markov_trained:
             available.append("markov")
+        if getattr(f, "_use_boltzmann", False):
+            available.append("boltzmann")
 
         if not available:
             return None
@@ -62,6 +64,7 @@ class SeedPicker:
             "markov": lambda: (
                 self._pick_markov_seed() if f.markov_generate and f.markov_trained else None
             ),
+            "boltzmann": lambda: self._pick_boltzmann_seed(),
         }
         handler = strategy_map.get(strategy)
         return handler() if handler else None
@@ -117,6 +120,40 @@ class SeedPicker:
             return candidate
         length = rng.randint(1, min(256, f.max_len))
         return f.markov.generate(length)
+
+    def _pick_boltzmann_seed(self) -> bytes:
+        """Pick seed via Boltzmann distribution over rarity energy.
+
+        P(seed) ∝ exp(-E/T) where E = log(fuzz_count + 1), so
+        weight = (fuzz_count + 1)^(-1/T).  Rare seeds (low fuzz_count)
+        dominate at cold T; all seeds are roughly uniform at hot T.
+        Falls back to random choice if corpus or seed_meta is empty.
+        """
+        f = self.f
+        rng = f._rand_pool
+        if not f.corpus or not f.seed_meta:
+            return self._format_aware_seed()
+        T = max(f._temperature, 0.01)
+        weights = []
+        for seed in f.corpus:
+            meta = f.seed_meta.get(seed)
+            if meta is None:
+                weights.append(1e-6)
+                continue
+            n = max(meta.get("fuzz_count", 1), 1)
+            E = math.log(n + 1)
+            w = math.exp(-E / T)
+            weights.append(max(w, 1e-6))
+        total = sum(weights)
+        if total <= 0:
+            return f._rand_pool.choice(f.corpus)
+        r = rng.random() * total
+        cumulative = 0.0
+        for i, seed in enumerate(f.corpus):
+            cumulative += weights[i]
+            if r <= cumulative:
+                return seed
+        return f.corpus[-1]
 
     def _pick_pareto_only(self) -> bytes:
         f = self.f

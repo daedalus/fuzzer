@@ -344,6 +344,8 @@ def cmd_fuzz(args):
         mopt=getattr(args, "mopt", False),
         targets=getattr(args, "targets", None),
         anneal_budget=getattr(args, "anneal_budget", 0),
+        boltzmann=getattr(args, "boltzmann", False),
+        metropolis=getattr(args, "metropolis", False),
         mc_elite_frac=args.mc_elite_frac,
         mc_refit_interval=args.mc_refit_int,
         mc_decay_interval=getattr(args, "mc_decay_interval", 100),
@@ -1513,6 +1515,20 @@ def main() -> int:
         metavar="N",
         help="Annealing budget in iterations (0=no annealing, default). "
         "Temperature decays linearly from 1.0 to 0.1 over N iterations.",
+    )
+    fuzz_parser.add_argument(
+        "--boltzmann",
+        action="store_true",
+        default=False,
+        help="Boltzmann seed selection: P(seed) ∝ exp(-E/T) with E=log(fuzz_count+1). "
+        "Requires --anneal-budget > 0.",
+    )
+    fuzz_parser.add_argument(
+        "--metropolis",
+        action="store_true",
+        default=False,
+        help="Metropolis corpus admission: accept non-improving inputs with P=exp(-ΔE/T). "
+        "Requires --anneal-budget > 0.",
     )
     fuzz_parser.add_argument(
         "--mc-elite-frac", type=float, default=0.1, help="CEM elite fraction (default: 0.1)"

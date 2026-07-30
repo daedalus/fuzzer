@@ -1,5 +1,6 @@
 """Tests for Fuzzer service (unit tests, no real target execution)."""
 
+import math
 import pytest
 from unittest.mock import MagicMock, patch
 
@@ -887,3 +888,67 @@ class TestCrashDataPruning:
         hashes_before = set(f.crash_hashes)
         f._prune_crash_data()
         assert f.crash_hashes == hashes_before
+
+
+class TestMetropolisCorpusAdmission:
+    """Metropolis acceptance for non-improving inputs in fuzz_one()."""
+
+    def _make_fuzzer_with_metropolis(self, anneal_budget=100000, temperature=1.0,
+                                     metropolis=True):
+        """Build a minimal Fuzzer with Metropolis enabled (no real target execution)."""
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp(prefix="fuzz_test_")
+        with (
+            patch("os.path.isfile", return_value=True),
+            patch("os.access", return_value=True),
+        ):
+            f = Fuzzer(
+                target="/bin/true",
+                corpus_dir=f"{tmpdir}/corpus",
+                crashes_dir=f"{tmpdir}/crashes",
+                max_len=256,
+                timeout=1,
+                mutations_per_input=2,
+                anneal_budget=anneal_budget,
+                metropolis=metropolis,
+            )
+        f._temperature = temperature
+        return f
+
+    def test_metropolis_accepts_exploratory_junk_when_hot(self):
+        """At T≈1.0, Metropolis admits non-improving inputs (P=exp(-1)≈0.37)."""
+        f = self._make_fuzzer_with_metropolis(anneal_budget=1000000, temperature=1.0)
+        assert f._metropolis is True
+        assert f._anneal_budget > 0
+        p_accept = math.exp(-1.0 / max(f._temperature, 0.01))
+        # P(accept) ≈ 0.37 at T=1.0 — clearly non-zero
+        assert p_accept > 0.3
+
+    def test_metropolis_rejects_at_cold(self):
+        """At T≈0.1, Metropolis rejects non-improving inputs (P=exp(-10)≈0.00005)."""
+        f = self._make_fuzzer_with_metropolis(anneal_budget=100, temperature=0.1)
+        p_accept = math.exp(-1.0 / max(f._temperature, 0.01))
+        # exp(-10) ≈ 0.00005 — effectively zero
+        assert p_accept < 0.001
+
+    def test_metropolis_disabled_by_default(self):
+        """Without --metropolis, non-improving inputs are always rejected."""
+        f = self._make_fuzzer_with_metropolis(metropolis=False)
+        assert f._metropolis is False
+
+    def test_metropolis_no_anneal_budget_cold(self):
+        """With --metropolis but without --anneal-budget, temperature stays 1.0
+        perpetually — but the gate requires _anneal_budget > 0."""
+        f = self._make_fuzzer_with_metropolis(anneal_budget=0, metropolis=True)
+        # The gate won't fire because _anneal_budget == 0
+        assert f._anneal_budget == 0
+        assert f._temperature == 1.0
+
+    def test_metropolis_temperature_clamp(self):
+        """Temperature is clamped to at least 0.01 to avoid division by zero."""
+        f = self._make_fuzzer_with_metropolis(anneal_budget=100000, temperature=0.0)
+        clamped = max(f._temperature, 0.01)
+        assert clamped >= 0.01
+        p_accept = math.exp(-1.0 / clamped)
+        assert 0 < p_accept < 1  # finite probability

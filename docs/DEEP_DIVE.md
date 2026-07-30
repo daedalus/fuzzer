@@ -31,6 +31,12 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 - **Surprisal-weighted rewards**: all scheduling mechanisms (bandit, MOpt, Replicator, Elo) weight discovery credit by `1 - bitmap_density` — rare discoveries in sparse coverage regions get more credit than discoveries near already-saturated areas
 - **Perplexity-gated generation**: model quality dynamically scales generation rate (more generation when model is lost, less when well-calibrated); rejects extreme-perplexity outputs as pure noise
 
+### Thermodynamic Scheduling & Corpus Admission
+
+- **Simulated annealing temperature**: `self._temperature` decays linearly from 1.0 to 0.1 over `--anneal-budget` iterations. Originally used only for Monte Carlo CEM elite retention (Metropolis criterion in `add_elite`), now also governs Boltzmann seed selection and Metropolis corpus admission.
+- **Boltzmann seed selection** (`--boltzmann`, requires `--anneal-budget > 0`): replaces the 15-signal weight-soup (`_compute_weights()`) with a single formula — `P(seed) ∝ exp(-E/T)` where `E = log(fuzz_count + 1)`. Rare seeds (low hit counts) get exponentially more weight as T cools. At T=1.0 (hot), all seeds have roughly equal probability. At T=0.1 (cold), rare seeds dominate by factors of ~10^(fuzz_count_ratio). Implemented as a separate Elo-eligible strategy (`_pick_boltzmann_seed()` in `seed_picker.py`) alongside `"weighted"`, `"pareto"`, `"markov"`, etc.
+- **Metropolis corpus admission** (`--metropolis`, requires `--anneal-budget > 0`): swaps the hard `is_new_coverage()` boolean gate for probabilistic acceptance — non-improving inputs are admitted with `P = exp(-ΔE/T)` where `ΔE = 1.0` (unit cost for any non-covering input). At T=1.0: 37% of exploratory junk passes through (may unlock paths later). At T=0.1: effectively 0%, converging to today's strict coverage-only rule. Implemented in `fuzz_one()` (fuzzer.py) after the existing coverage/crash gate.
+
 ### Static Target Analysis
 - **TargetProfiler**: ELF static analysis at startup — extracts string constants, function boundaries, magic bytes, and input format hints
 - **Auto-populated dictionary**: interesting strings (format specifiers, error messages, keywords) and magic bytes extracted from `.rodata`
