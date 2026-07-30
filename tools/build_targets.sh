@@ -270,14 +270,16 @@ STUBEOF
     $cc -c -o "$stub_dir/sancov_stub.o" "$stub_dir/sancov_stub.c" 2>/dev/null
     ar rcs "$stub_dir/libsancov_stub.a" "$stub_dir/sancov_stub.o" 2>/dev/null
     local COV_FLAGS="-fsanitize-coverage=trace-pc-guard -fsanitize-coverage=trace-cmp"
+    local LINK_FLAGS=""
     local EXTRA_LIBS="-lsancov_stub"
     if [ "$asan_suffix" = "_asan" ]; then
         COV_FLAGS="-fsanitize=address $COV_FLAGS"
-        EXTRA_LIBS="-lsancov_stub -lasan"
+        LINK_FLAGS="-fsanitize=address"
+        EXTRA_LIBS="-lsancov_stub"
     fi
     (cd "$FFMPEG_DIR" && make clean >/dev/null 2>&1 || true)
     if (cd "$FFMPEG_DIR" && ./configure --cc="$cc" --extra-cflags="$COV_FLAGS" \
-        --extra-ldflags="-L$stub_dir" --extra-libs="$EXTRA_LIBS" \
+        --extra-ldflags="-L$stub_dir $LINK_FLAGS" --extra-libs="$EXTRA_LIBS" \
         --enable-static --disable-shared --disable-programs --disable-doc \
         --disable-encoders --disable-muxers --disable-devices --disable-filters \
         --disable-parsers --disable-bsfs --disable-postproc --disable-avdevice \
