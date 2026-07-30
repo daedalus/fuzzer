@@ -2,7 +2,7 @@
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/daedalus/fuzzer)
 
-**Information-dense, coverage-guided binary fuzzer** with Markov generation, Monte Carlo optimization, kernel crash verification, grammar-aware mutations, and 40+ scheduling strategies — including Elo arbitration, evolutionary algorithms, and information-theoretic scoring.
+**Information-dense, coverage-guided binary fuzzer** with Markov generation, Monte Carlo optimization, grammar-aware mutations, and 40+ scheduling strategies — including Elo arbitration, evolutionary algorithms, and information-theoretic scoring.
 
 > **Honest caveat**: This is the most complex fuzzer from an information-theory standpoint, and also the slowest raw-throughput. The tradeoff is speed for edge-discovery novelty. For production fuzzing at scale, AFL family fuzzers remain the best choice.
 
@@ -81,7 +81,6 @@ fuzzer-tool fuzz ./target -c --resume
 
 ### Crash Analysis
 - ASAN/MSAN/TSAN/LSAN/UBSAN auto-classification
-- Kernel crash verification via async dmesg streaming (PID-filtered, three-layer detection)
 - Levenshtein crash clustering, stack-hash dedup, exploitability tiers
 - Crash minimization (delta-debugging with signature pinning)
 - Blocklist/allowlist and smaller-crash replacement

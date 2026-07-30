@@ -1249,19 +1249,22 @@ class TestBayesianEloTrackerLiveDispatch:
     """Fuzzer must instantiate BayesianEloTracker when elo=True."""
 
     def test_elo_true_uses_bayesian_tracker(self):
+        import tempfile
+
         from unittest.mock import patch
 
         from fuzzer_tool.core.elo import BayesianEloTracker
         from fuzzer_tool.services.fuzzer import Fuzzer
 
+        tmpdir = tempfile.mkdtemp(prefix="fuzz_test_")
         with (
             patch("os.path.isfile", return_value=True),
             patch("os.access", return_value=True),
         ):
             f = Fuzzer(
                 target="/bin/true",
-                corpus_dir="/tmp/fuzz_test_corpus",
-                crashes_dir="/tmp/fuzz_test_crashes",
+                corpus_dir=f"{tmpdir}/corpus",
+                crashes_dir=f"{tmpdir}/crashes",
                 max_len=256,
                 timeout=1,
                 mutations_per_input=2,
@@ -1273,18 +1276,21 @@ class TestBayesianEloTrackerLiveDispatch:
         )
 
     def test_elo_false_has_no_tracker(self):
+        import tempfile
+
         from unittest.mock import patch
 
         from fuzzer_tool.services.fuzzer import Fuzzer
 
+        tmpdir = tempfile.mkdtemp(prefix="fuzz_test_")
         with (
             patch("os.path.isfile", return_value=True),
             patch("os.access", return_value=True),
         ):
             f = Fuzzer(
                 target="/bin/true",
-                corpus_dir="/tmp/fuzz_test_corpus",
-                crashes_dir="/tmp/fuzz_test_crashes",
+                corpus_dir=f"{tmpdir}/corpus",
+                crashes_dir=f"{tmpdir}/crashes",
                 max_len=256,
                 timeout=1,
                 mutations_per_input=2,

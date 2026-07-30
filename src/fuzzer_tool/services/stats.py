@@ -762,8 +762,6 @@ class StatsReporter:
             parts = []
             if f._pruned_count > 0:
                 parts.append(f"pruned:{f._pruned_count}")
-            if f._total_kernel_crash_count > 0:
-                parts.append(f"kcrash:{f._total_kernel_crash_count}")
             if f._duplicate_reject_count > 0:
                 parts.append(f"dup:{f._duplicate_reject_count}")
             if parts:

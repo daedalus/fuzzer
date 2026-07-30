@@ -15,7 +15,7 @@ RULES:
 
 ## Overview
 
-Coverage-guided binary fuzzer with ASAN/MSAN/TSAN/UBSAN detection, dictionary mutations, Markov chain generation, Monte Carlo optimization, kernel crash verification, and state persistence. CLI tool for fuzzing arbitrary binaries.
+Coverage-guided binary fuzzer with ASAN/MSAN/TSAN/UBSAN detection, dictionary mutations, Markov chain generation, Monte Carlo optimization, and state persistence. CLI tool for fuzzing arbitrary binaries.
 
 ## Commands
 
@@ -54,7 +54,6 @@ src/fuzzer_tool/
 │   ├── ga.py           # Genetic algorithm lifecycle (fitness, speciation, population)
 │   ├── sanitizer.py    # ASAN/MSAN/TSAN output parsing
 │   ├── edge_tracker.py # Per-seed coverage tracking (with save/load)
-│   ├── dmesg.py        # Kernel crash verification via dmesg
 │   ├── cmplog.py       # Comparison tracing via LD_PRELOAD
 │   ├── grammar.py      # Grammar-aware mutations
 │   ├── bloom.py        # Bloom filter for dedup
@@ -138,14 +137,6 @@ struct __afl_entry { uint32_t edge_id; uint32_t count; };
 - Python API: `ShmCoverage.get_edge_ids()`, `.get_edge_counts()`, `.read_entries()`
 - `EdgeTracker.record_edges()` accepts `set[int]` (sparse) or `bytes` (legacy byte-bitmap)
 
-### Kernel Crash Verification
-- Historical poll: `dmesg -l err,warn,info --json` (one JSON document: `{"dmesg": [...]}`, not NDJSON)
-- Live streaming: `dmesg -l err,warn,info -w` in **text** format, not `--json` (JSON streaming is bursty and expensive to parse line-by-line; text is reliable for real-time line-by-line reads)
-- `info` level is required, not just `err,warn` — Linux logs segfaults at priority 6 (INFO)
-- PID-filtered crash attribution (PID is embedded in the `msg` field as `comm[pid]:`, not a separate field)
-- Requires root or CAP_SYSLOG
-- Three-layer detection: async stream → sleep+re-drain → synchronous `_poll_text(since=0)` fallback
-
 ### Markov Persistence
 - Markov chain saved to `markov.json` on exit
 - Loaded on init; skip retrain if loaded to avoid double-counting
@@ -179,12 +170,6 @@ struct __afl_entry { uint32_t edge_id; uint32_t count; };
 
 These rules are extracted from ~85 `fix:` commits in project history. Each names the recurring bug *class*, not just the single instance that surfaced it — recognize the pattern before it reappears in a new file.
 
-### dmesg / kernel crash detection
-
-- **Never assume an external tool's output schema — capture and read real output before writing the parser.** `dmesg --json` is one JSON document (`{"dmesg": [...]}`), not one-object-per-line; the PID lives inside the `msg` string, not a separate field; the default priority filter misses INFO-level segfaults entirely. Bugs like this are silent no-ops — the fallback path swallows the parse failure, so nothing looks broken until checked against real output.
-- **When multiple code paths parse the same data, every path must extract the same fields.** `_poll_text`, `_poll_json`, `_stream_reader`, and `_process_entry` all parse dmesg output — if one path skips PID extraction, crashes parsed through that path have `pid=None` and get silently dropped by PID filtering. Audit every path that calls `_match_crash()` and verify it passes `pid` and `proc_name`.
-- **The initial seed replay loop is a separate crash path from `fuzz_one()`.** `run()` runs each corpus seed as-is before mutating. If this loop detects a crash but skips kernel verification, those crashes are never dmesg-verified. Every crash detection site must include the same verification logic.
-
 ### Signals, processes, and timeouts
 
 - **Check syscall return values under signal-based timeouts — don't assume an interrupted syscall failed cleanly.** A `SIGALRM` handler racing `waitpid`/`os.wait` can leave `status` unset on `EINTR`, which then reads as `WIFEXITED(0)` — a false "success" instead of a timeout. Branch explicitly on the wait call's return value; if interrupted, force-kill and re-reap before deciding the outcome. This recurred independently in both the C loader and the Python persistent runner.
@@ -200,7 +185,7 @@ These rules are extracted from ~85 `fix:` commits in project history. Each names
 - **Kill processes before detaching their shared memory.** Detaching SHM while the target is still writing to it can cause SEGV in the target. Always SIGKILL → waitpid → detach SHM, not the reverse.
 - **Never use `tempfile.mktemp()`.** It's a TOCTOU/symlink race by construction. Use `mkstemp()`/`mkdtemp()`.
 - **Namespace any filesystem path shared across parallel workers by PID.** Compiled shim/loader binaries and other on-disk artifacts written under `-j N` must embed `os.getpid()` (or equivalent), or concurrent workers race to compile/clean up the same file.
-- **Return the actual PID on exception, not 0.** `run_target_stdin`/`run_target_file` callers use the returned PID for dmesg filtering. Returning `pid=0` on exception matches the swapper/idle process, silently discarding real kernel crashes.
+- **Return the actual PID on exception, not 0.** `run_target_stdin`/`run_target_file` callers use the returned PID for crash attribution. Returning `pid=0` on exception matches the swapper/idle process, silently discarding real kernel crashes.
 
 ### Hashing & identity
 
@@ -210,7 +195,7 @@ These rules are extracted from ~85 `fix:` commits in project history. Each names
 
 - **Cache invalidation must key off the actual dependency, not a proxy.** Invalidating on every `exec_count` tick makes the cache useless (recomputes on almost every call — cost 80 eps once). Invalidating on the wrong signal, or never, serves stale data instead. Key strictly off the values the cache depends on (e.g. `corpus_version`, `edge_version`), and check both directions: does it recompute on every real change, and skip recomputing when nothing relevant changed?
 
-### Low-level parsing (ELF, ptrace, dmesg)
+### Low-level parsing (ELF, ptrace)
 
 - **Use exact bitmask equality for "all these bits must be set" checks, never bare truthiness.** `flags & (PF_R | PF_X)` is truthy if *either* bit is set; a read-only RELRO segment (`PF_R` only) then satisfies a check meant to require both, silently selecting the wrong ELF segment. Write `(flags & mask) == mask` when the intent is "all of these bits."
 - **This tool parses attacker-controlled binaries (the fuzz target's own ELF headers) and user-supplied grammar files as part of its own operation.** Bounds-check every offset/count read from a section header, program header, or symbol table before indexing with it. Clamp any grammar-controlled repeat/recursion count to a fixed MAX — an unbounded count is a resource-exhaustion bug in the fuzzer itself, not just in whatever it's fuzzing.

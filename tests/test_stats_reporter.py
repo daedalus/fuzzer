@@ -204,6 +204,8 @@ def _mock_fuzzer(**overrides) -> MagicMock:
     defaults = {
         "start_time": time.time(),
         "exec_count": 1000,
+        "_last_eps_count": 0,
+        "_last_eps_time": 0.0,
         "dictionary": None,
         "markov_trained": False,
         "markov_generate": False,

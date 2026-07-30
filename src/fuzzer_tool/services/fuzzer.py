@@ -59,7 +59,6 @@ from fuzzer_tool.services.stats import StatsReporter
 log = logging.getLogger(__name__)
 
 _shutdown = False
-_active_dmesg_parser = None  # module-level ref for atexit cleanup
 
 
 def _kill_children(sig=None, frame=None):
@@ -68,9 +67,6 @@ def _kill_children(sig=None, frame=None):
     for pid in _child_pids():
         with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
             os.killpg(os.getpgid(pid), signal.SIGKILL)
-    # Stop dmesg streaming to avoid orphan -w subprocess
-    if _active_dmesg_parser is not None:
-        _active_dmesg_parser.stop_stream()
 
 
 atexit.register(_kill_children)
@@ -642,17 +638,7 @@ class Fuzzer:
 
         self._exec_time_tracker = ExecutionTimeTracker()
 
-        # Kernel-level crash verification via dmesg
-        from fuzzer_tool.core.dmesg import DmesgParser
-
-        self._dmesg = DmesgParser()
-        self._kernel_crashes: list = []
-        self._total_kernel_crash_count: int = 0
         self._last_child_pid: int | None = None
-        self._dmesg.start_stream()
-        # Register for atexit cleanup to avoid orphan dmesg -w subprocess
-        global _active_dmesg_parser
-        _active_dmesg_parser = self._dmesg
 
         self.stats_file = Path(stats_file) if stats_file else None
         self.stats_interval = stats_interval
@@ -1436,12 +1422,6 @@ class Fuzzer:
 
     def _run_target_ptrace(self, data: bytes):
         return self._runner._run_target_ptrace(data)
-
-    def _verify_kernel_crash(self, child_pid: int | None):
-        return self._runner.verify_kernel_crash(child_pid)
-
-    def _check_python_crashes(self):
-        return self._runner._check_python_crashes()
 
     def _is_interesting(self, returncode: int, stderr: str):
         return self._runner.is_interesting(returncode, stderr)
@@ -2423,8 +2403,6 @@ class Fuzzer:
             if self._tracer and crash_name:
                 report = self._tracer.trace(mutated, returncode)
                 self._tracer.save_report(report, str(self.crashes_dir), crash_name)
-            # Verify crash at kernel level via dmesg (supplementary to exit code)
-            self._verify_kernel_crash(getattr(self, "_last_child_pid", None))
             if self.mc and self.mc_cem:
                 self.mc.add_elite(mutated, 3, temperature=self._temperature)
                 self.mc.maybe_refit()
@@ -2953,8 +2931,6 @@ class Fuzzer:
                     self.crash_count += 1
                     self.save_crash(seed, returncode, stderr)
                     self._prune_crash_data()
-                    # Kernel crash verification (same as fuzz_one path)
-                    self._verify_kernel_crash(getattr(self, "_last_child_pid", None))
             # Baseline exec_count after initial seed replay — used for
             # periodic minimization modulus so it fires at clean intervals
             # regardless of initial corpus size.
@@ -3212,7 +3188,6 @@ class Fuzzer:
             self._ablation_file.close()
             self._ablation_file = None
             print(f"[*] Schedule ablation log: {self._ablation_path}")
-        self._dmesg.stop_stream()
         self.print_stats()
         print(
             f"\n\n[*] Fuzzing stopped. {self.crash_count} crashes found "
@@ -3223,21 +3198,6 @@ class Fuzzer:
             for sig, count in sorted(self.crash_sigs.items(), key=lambda x: -x[1]):
                 print(f"    {sig} ({count}x)")
             print(f"\n[*] Crash files in: {self.crashes_dir}")
-        if self._kernel_crashes:
-            print(f"\n[*] Kernel-verified crashes: {len(self._kernel_crashes)}")
-            by_type: dict[str, int] = {}
-            for kc in self._kernel_crashes:
-                by_type[kc.crash_type] = by_type.get(kc.crash_type, 0) + 1
-            for ctype, count in sorted(by_type.items(), key=lambda x: -x[1]):
-                print(f"    {ctype}: {count}")
-        elif self._dmesg.is_available():
-            if self.crash_count > 0:
-                print(
-                    "\n[*] dmesg: crashes detected via exit code but not in dmesg "
-                    "(likely rate-limited by kernel)"
-                )
-            else:
-                print("\n[*] dmesg: no kernel crashes detected")
         # Show convergence stats for every active scheduler
         if self.mc and self.mc_bandit:
             print("\n[*] Bandit convergence (Thompson sampling):")
@@ -3292,4 +3252,4 @@ class Fuzzer:
             f"\n[*] Epoch end: {epoch_end:.3f} ({datetime.datetime.fromtimestamp(epoch_end).isoformat()})"
         )
         print(f"[*] Boot ticks end: {boot_end:.3f}")
-        print(f"[*] dmesg window: {boot_start:.3f} - {boot_end:.3f}")
+        print()  # blank line before next epoch or shell prompt

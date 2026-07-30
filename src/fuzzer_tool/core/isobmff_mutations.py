@@ -269,9 +269,11 @@ class IsobmffMutator:
         target = self._rng.choice(boxes)
 
         target.size_orig = self._rng.choice([0, 1, 8, max_len, 0xFFFFFFFF, self._rng.randint(0, max_len)])
-        # Recompute/truncate/pad payload from new size
+        # Recompute/truncate/pad payload from new size.
+        # Clamp payload_len to max_len to avoid OOM on extreme size values
+        # (e.g. 0xFFFFFFFF which would allocate ~4 GB).
         raw = target.data
-        payload_len = max(0, target.size_orig - 8)
+        payload_len = max(0, min(target.size_orig - 8, max_len))
         if payload_len >= len(raw):
             target.data = raw + b"\x00" * (payload_len - len(raw))
         else:

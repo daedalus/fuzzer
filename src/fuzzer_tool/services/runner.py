@@ -4,8 +4,7 @@ Extracted from Fuzzer class (~lines 784-1115). Contains:
 - _run_target() — dispatches to appropriate execution backend
 - _run_target_ptrace() — ptrace-based execution with breakpoint instrumentation
 - _ptrace_handle_breakpoint() — handles SIGTRAP during ptrace execution
-- _verify_kernel_crash() — dmesg-based kernel crash verification
-- _check_python_crashes() — detects Python process crashes in dmesg
+- _check_python_crashes() — detects Python process crashes
 - _is_interesting() — checks if execution result is interesting
 - _is_crash() — checks if execution result is a crash
 """
@@ -332,53 +331,10 @@ class TargetRunner:
                 writer.join(timeout=f.timeout)
 
     def verify_kernel_crash(self, child_pid: int | None) -> bool:
-        f = self.f
-        if not child_pid:
-            return False
-
-        kernel_hits = f._dmesg.drain_stream(pid=child_pid)
-        if not kernel_hits:
-            import time as _time
-
-            _time.sleep(0.05)
-            kernel_hits = f._dmesg.drain_stream(pid=child_pid)
-        if not kernel_hits:
-            text_crashes = f._dmesg._poll_text(since=f._dmesg._last_ts)
-            if text_crashes:
-                kernel_hits = [kc for kc in text_crashes if kc.pid == child_pid]
-
-        if kernel_hits:
-            for kc in kernel_hits:
-                f._kernel_crashes.append(kc)
-                f._total_kernel_crash_count += 1
-                if len(f._kernel_crashes) > 500:
-                    f._kernel_crashes.pop(0)
-                log.info(
-                    "Kernel crash verified: %s at ip=%s (ts=%.3f)",
-                    kc.crash_type,
-                    kc.ip or "?",
-                    kc.timestamp,
-                )
-            return True
-
-        self._check_python_crashes()
         return False
 
     def _check_python_crashes(self):
-        f = self.f
-        all_crashes = f._dmesg._poll_text(since=f._dmesg._last_ts)
-        for kc in all_crashes:
-            if kc.process_name and "python" in kc.process_name.lower():
-                if kc.crash_type == "segfault":
-                    print(
-                        f"\n[*] Python process crash detected: pid={kc.pid}, ip={kc.ip or '?'}, "
-                        f"type={kc.crash_type} (may indicate fuzzer infrastructure issue)"
-                    )
-                    kc.crash_type = "python_segfault"
-                    f._kernel_crashes.append(kc)
-                    f._total_kernel_crash_count += 1
-                    if len(f._kernel_crashes) > 500:
-                        f._kernel_crashes.pop(0)
+        pass
 
     def is_interesting(self, returncode: int, stderr: str) -> bool:
         f = self.f

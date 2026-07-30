@@ -4,7 +4,7 @@
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/daedalus/fuzzer)
 
-Coverage-guided binary fuzzer with static target analysis, statistical novelty scoring, Markov chain generation, Monte Carlo mutations, kernel crash verification, and format-aware grammar mutations.
+Coverage-guided binary fuzzer with static target analysis, statistical novelty scoring, Markov chain generation, Monte Carlo mutations, and format-aware grammar mutations.
 
 Honest Caveats:
 - This fuzzer is developed entirely with AI-assistance.
@@ -65,7 +65,7 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 - **Per-operator reward moments**: UCB-style exploration bonus (`mean + k * stddev`) with kurtosis-scaled stability guard — high-kurtosis operators require more observations before trusting their stddev-based bonus
 - **Format learner z-score gate**: replaces fixed `delta != 0` threshold with z-score-based outlier detection; MAD fallback under high kurtosis for robustness against zero-inflated coverage deltas
 - **Corpus bloat early-warning**: rising right skew in seed file sizes is a leading indicator of bloat that precedes RSS threshold tripping
-- **Bounded memory structures**: all accumulative data structures (correlation matrix, coverage timeline, cmplog tokens/pairs, kernel crashes, Shapley attribution edges, stderr buffer, seed secretary, seen hashes) are capped via module-level constants — RSS plateaus instead of growing linearly with exec count
+- **Bounded memory structures**: all accumulative data structures (correlation matrix, coverage timeline, cmplog tokens/pairs, Shapley attribution edges, stderr buffer, seed secretary, seen hashes) are capped via module-level constants — RSS plateaus instead of growing linearly with exec count
 - **Report distribution diagnostics**: stddev, skewness, and kurtosis for exec time, discovery rate, per-operator rewards, and seed sizes
 
 ### Scheduling Intelligence
@@ -148,7 +148,6 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 
 ### Crash Analysis
 - **Sanitizer detection**: automatic ASAN/MSAN/TSAN/LSAN/UBSAN crash classification
-- **Kernel crash verification**: async dmesg streaming for kernel-level crash detection
 - **Crash minimization**: delta-debugging with signature-matching to prevent drift to unrelated bugs
 - **Corpus minimization**: greedy set-cover over SHM edge bitmaps (`minimize` subcommand)
 - **Crash exploitability tiers**: ASAN_EXPLOITABILITY classification in reports
@@ -170,7 +169,7 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 - **Secretary stats** (`--secretary`): stat line shows `sec: 5 tracking` — secretary-problem instances active
 - **Shapley stats** (`--shapley`): stat line shows `shap: 75 ops` — operators with Shapley attribution data
 - **FrameShift stats**: stat line shows `fs: 3 rel` — active length-field relations auto-discovered
-- **Misc auto-stats**: stat line shows `pruned:2 kcrash:1 dup:5` — corpus auto-prunes, kernel crashes, duplicate rejections
+- **Misc auto-stats**: stat line shows `pruned:2 dup:5` — corpus auto-prunes, duplicate rejections
 - **Bayesian stats** (`--bayesian`): stat line shows `bayes: 695 seeds 5500 obs` — seed quality tracking state
 - **Markov context count**: stat line shows `ctx: 562347` — contexts seen by the Markov chain/ensemble
 - **Replicator dynamics** (`--replicator`): stat line shows `rep: dom=bit_flip ops=78` — dominant operator and active operator count

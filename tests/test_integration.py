@@ -8,58 +8,58 @@ from pathlib import Path
 import pytest
 
 TARGET_SRC = Path(__file__).parent.parent / "targets" / "test_target.c"
-TARGET_BIN = Path(__file__).parent.parent / "targets" / "test_target"
 ASAN_SRC = Path(__file__).parent.parent / "targets" / "asan_target.c"
-ASAN_BIN = Path(__file__).parent.parent / "targets" / "asan_target"
-ASAN_SO = Path(__file__).parent.parent / "targets" / "asan_target.so"
 
 
 @pytest.fixture(scope="module")
-def compiled_target():
-    """Compile test_target.c if not already built."""
-    if not TARGET_BIN.exists() or TARGET_SRC.stat().st_mtime > TARGET_BIN.stat().st_mtime:
-        result = subprocess.run(
-            ["gcc", "-g", "-o", str(TARGET_BIN), str(TARGET_SRC)],
-            capture_output=True,
-            text=True,
-        )
-        assert result.returncode == 0, f"Compilation failed: {result.stderr}"
-    yield str(TARGET_BIN)
+def compiled_target(tmp_path_factory):
+    """Compile test_target.c to an isolated temp directory."""
+    tmpdir = tmp_path_factory.mktemp("integration_binaries")
+    out = tmpdir / "test_target"
+    result = subprocess.run(
+        ["gcc", "-g", "-o", str(out), str(TARGET_SRC)],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, f"Compilation failed: {result.stderr}"
+    yield str(out)
 
 
 @pytest.fixture(scope="module")
-def compiled_asan_target():
-    """Compile asan_target.c with ASAN if not already built."""
-    if not ASAN_BIN.exists() or ASAN_SRC.stat().st_mtime > ASAN_BIN.stat().st_mtime:
-        result = subprocess.run(
-            ["gcc", "-g", "-fsanitize=address", "-o", str(ASAN_BIN), str(ASAN_SRC)],
-            capture_output=True,
-            text=True,
-        )
-        assert result.returncode == 0, f"ASAN compilation failed: {result.stderr}"
-    yield str(ASAN_BIN)
+def compiled_asan_target(tmp_path_factory):
+    """Compile asan_target.c with ASAN to an isolated temp directory."""
+    tmpdir = tmp_path_factory.mktemp("integration_asan")
+    out = tmpdir / "asan_target"
+    result = subprocess.run(
+        ["gcc", "-g", "-fsanitize=address", "-o", str(out), str(ASAN_SRC)],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, f"ASAN compilation failed: {result.stderr}"
+    yield str(out)
 
 
 @pytest.fixture(scope="module")
-def compiled_asan_so():
-    """Compile asan_target.c as shared library with ASAN if not already built."""
-    if not ASAN_SO.exists() or ASAN_SRC.stat().st_mtime > ASAN_SO.stat().st_mtime:
-        result = subprocess.run(
-            [
-                "gcc",
-                "-g",
-                "-fsanitize=address",
-                "-shared",
-                "-fPIC",
-                "-o",
-                str(ASAN_SO),
-                str(ASAN_SRC),
-            ],
-            capture_output=True,
-            text=True,
-        )
-        assert result.returncode == 0, f"ASAN .so compilation failed: {result.stderr}"
-    yield str(ASAN_SO)
+def compiled_asan_so(tmp_path_factory):
+    """Compile asan_target.c as shared library with ASAN to an isolated temp dir."""
+    tmpdir = tmp_path_factory.mktemp("integration_asan_so")
+    out = tmpdir / "asan_target.so"
+    result = subprocess.run(
+        [
+            "gcc",
+            "-g",
+            "-fsanitize=address",
+            "-shared",
+            "-fPIC",
+            "-o",
+            str(out),
+            str(ASAN_SRC),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, f"ASAN .so compilation failed: {result.stderr}"
+    yield str(out)
 
 
 class TestIntegration:

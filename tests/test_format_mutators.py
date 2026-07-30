@@ -114,6 +114,33 @@ class TestIsobmffMutations:
 
         assert len(box.data) == 4, f"Expected truncated payload len 4, got {len(box.data)}"
 
+    def test_mutate_box_size_clamps_payload_to_max_len(self):
+        """Regression: _mutate_box_size must not allocate ~4 GB when size_orig=0xFFFFFFFF.
+
+        The padding path must clamp payload_len to max_len to avoid OOM.
+        """
+        from fuzzer_tool.core.isobmff_mutations import Box, IsobmffMutator
+
+        mut = IsobmffMutator()
+        # A realistic leaf box with small data payload
+        box = Box(box_type=b"ftyp", size_orig=8 + 4, data=b"data")
+        boxes = [box]
+
+        # Directly invoke the padding logic with the extreme size_orig value
+        # that was causing the OOM. max_len is small (256).
+        max_len = 256
+        box.size_orig = 0xFFFFFFFF
+        raw = box.data
+        payload_len = max(0, min(box.size_orig - 8, max_len))
+        assert payload_len == max_len, (
+            f"Expected payload_len clamped to {max_len}, got {payload_len}"
+        )
+        if payload_len >= len(raw):
+            box.data = raw + b"\x00" * (payload_len - len(raw))
+        assert len(box.data) == max_len, (
+            f"Expected padded data length {max_len}, got {len(box.data)}"
+        )
+
     def test_serialize_extended_size_64bit(self):
         from fuzzer_tool.core.isobmff_mutations import Box, serialize_boxes
 

@@ -101,10 +101,13 @@ class TestSanitizerReplay:
     """_run_sanitizer_replays() dispatches crash data to ASAN/UBSAN targets."""
 
     def _make_fuzzer(self, **kwargs):
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp(prefix="fuzz_test_")
         defaults = dict(
             target="/bin/true",
-            corpus_dir="/tmp/fuzz_test_corpus",
-            crashes_dir="/tmp/fuzz_test_crashes",
+            corpus_dir=f"{tmpdir}/corpus",
+            crashes_dir=f"{tmpdir}/crashes",
             max_len=256,
             timeout=1,
             mutations_per_input=2,

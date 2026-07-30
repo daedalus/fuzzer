@@ -10,12 +10,15 @@ class TestEntropyRateTracking:
     """Tests for entropy history and rate-of-change in the fuzzer loop."""
 
     def _make_fuzzer(self, **kwargs):
+        import tempfile
+
         from fuzzer_tool.services.fuzzer import Fuzzer
 
+        tmpdir = tempfile.mkdtemp(prefix="fuzz_test_")
         defaults = dict(
             target="/bin/true",
-            corpus_dir="/tmp/fuzz_entropy_test_corpus",
-            crashes_dir="/tmp/fuzz_entropy_test_crashes",
+            corpus_dir=f"{tmpdir}/corpus",
+            crashes_dir=f"{tmpdir}/crashes",
             max_len=256,
             timeout=1,
             mutations_per_input=2,

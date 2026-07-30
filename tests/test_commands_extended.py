@@ -224,10 +224,17 @@ class TestMain:
             "argv",
             ["fuzzer-tool", "fuzz", "/tmp/target", "-n", "100"],
         )
-        # Need a valid target
-        target = Path("/tmp/target")
+        # Need a valid target — use a temp path that gets cleaned up
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp(prefix="fuzz_test_")
+        target = Path(tmpdir) / "target"
         target.write_bytes(b"\x7fELF")
         target.chmod(0o755)
+        monkeypatch.setitem(sys.modules, "fuzzer_tool.cli.commands.sys", sys)
+        monkeypatch.setattr(
+            sys, "argv", ["fuzzer-tool", "fuzz", str(target), "-n", "100"]
+        )
 
         try:
             main()
