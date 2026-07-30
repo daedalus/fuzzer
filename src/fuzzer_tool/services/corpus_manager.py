@@ -134,6 +134,13 @@ class CorpusManager:
             sens_path.write_text(json.dumps(f._sensitivity.save(), separators=(",", ":")))
         with contextlib.suppress(OSError):
             f._crash_mi_path.write_text(json.dumps(f._crash_mi.save(), separators=(",", ":")))
+        # Persist Bayesian seed quality posteriors
+        if hasattr(f, "_seed_quality"):
+            sq_path = f.corpus_dir / "seed_quality.json"
+            try:
+                sq_path.write_text(json.dumps(f._seed_quality.state_dict(), separators=(",", ":")))
+            except OSError:
+                pass
 
     def load_state(self):
         f = self.f
@@ -188,6 +195,14 @@ class CorpusManager:
             print(
                 f"[*] Resumed: {f.exec_count} execs, {f.crash_count} crashes, {len(f.corpus)} seeds"
             )
+        # Restore Bayesian seed quality posteriors
+        sq_path = f.corpus_dir / "seed_quality.json"
+        if sq_path.exists() and hasattr(f, "_seed_quality"):
+            try:
+                sq_state = json.loads(sq_path.read_text())
+                f._seed_quality.load_state_dict(sq_state)
+            except (OSError, json.JSONDecodeError):
+                pass
         log.info(
             "Fuzzer state loaded: execs=%d, crashes=%d, corpus=%d",
             f.exec_count,

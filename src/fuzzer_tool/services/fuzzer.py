@@ -2063,6 +2063,13 @@ class Fuzzer:
         else:
             has_new_coverage = self.ptrace_cov and self.ptrace_cov.is_new_coverage()
 
+        # Bayesian seed quality feedback: record whether this parent seed
+        # produced new coverage (Thompson sampling posterior update).
+        if self._seed_quality:
+            parent_key = self._seed_key(data)
+            self._seed_quality.init_seed(parent_key)
+            self._seed_quality.record_outcome(parent_key, discovered=bool(has_new_coverage))
+
         # Mark cmplog tokens/pairs present during a coverage gain as more
         # valuable — they survive eviction longer.
         if has_new_coverage and self._cmplog:
@@ -3114,6 +3121,9 @@ class Fuzzer:
                         n_fuzz=n_fuzz,
                         total_execs=max(1, self.exec_count),
                         mean_log_n_fuzz=self._cached_mean_log_n_fuzz,
+                        avg_distance=meta.get("avg_distance", 0.0) if self._distance else 0.0,
+                        max_distance=self._distance.max_distance if self._distance else 0.0,
+                        anneal_progress=self._anneal_progress,
                         **hf_kwargs,
                     )
                 else:

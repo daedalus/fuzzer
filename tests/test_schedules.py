@@ -358,6 +358,67 @@ class TestQuadSchedule:
         assert score > 100.0
 
 
+class TestGoSchedule:
+    """AFLGo-style distance-annealed schedule tests."""
+
+    def test_go_factor_near_target(self):
+        """Seed near the target gets large bonus at full anneal."""
+        sc = SeedScorer("go")
+        bonus = sc._go_factor(
+            avg_distance=0.1, max_distance=10.0, anneal_progress=1.0
+        )
+        # beta=5, norm_dist=0.01 → exp(5*0.99) ≈ 145, capped at 100
+        assert bonus == 100.0
+
+    def test_go_factor_far_target(self):
+        """Seed at max distance gets no bonus regardless of anneal."""
+        sc = SeedScorer("go")
+        bonus = sc._go_factor(
+            avg_distance=10.0, max_distance=10.0, anneal_progress=1.0
+        )
+        # beta=5, norm_dist=1.0 → exp(5*0) = 1.0
+        assert bonus == pytest.approx(1.0)
+
+    def test_go_factor_exploration_phase(self):
+        """No distance bonus during exploration phase (anneal_progress ≈ 0)."""
+        sc = SeedScorer("go")
+        bonus = sc._go_factor(
+            avg_distance=0.1, max_distance=10.0, anneal_progress=0.0
+        )
+        assert bonus == 1.0
+
+    def test_go_factor_no_distance_data(self):
+        """Without distance data, factor is 1.0 regardless."""
+        sc = SeedScorer("go")
+        bonus = sc._go_factor(
+            avg_distance=0.0, max_distance=0.0, anneal_progress=1.0
+        )
+        assert bonus == 1.0
+
+    def test_go_factor_not_go_schedule(self):
+        """_go_factor returns 1.0 when schedule is not 'go'."""
+        sc = SeedScorer("base")
+        bonus = sc._go_factor(
+            avg_distance=0.1, max_distance=10.0, anneal_progress=1.0
+        )
+        assert bonus == 1.0
+
+    def test_go_score_integration(self):
+        """Full score() call with go schedule and distance info."""
+        sc = SeedScorer("go")
+        score = sc.score(
+            exec_us=100, avg_exec_us=100,
+            bitmap_size=50, avg_bitmap_size=50,
+            handicap=0, depth=0,
+            fuzz_level=1, n_fuzz=1,
+            total_execs=100, tc_ref=0,
+            avg_distance=0.5, max_distance=10.0, anneal_progress=1.0,
+        )
+        # norm_dist=0.05, beta=5 → exp(5*0.95) ≈ 117, capped 100
+        # base=100 * speed(1.0) * bitmap(1.0) * handicap(1.0) * depth(1.0) * go(100) = 10000, clamped to 1600
+        assert 100.0 <= score <= 1600.0
+
+
 class TestHandicap:
     def test_handicap_0(self):
         sc = SeedScorer("base")

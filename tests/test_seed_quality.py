@@ -3,6 +3,34 @@
 from fuzzer_tool.core.seed_quality import BayesianSeedQuality, MIN_BETA_PARAM
 
 
+class TestBayesianSeedQualityPersistence:
+    """Tests for state_dict / load_state_dict round-trip."""
+
+    def test_round_trip(self):
+        bsq = BayesianSeedQuality()
+        bsq.init_seed("a")
+        bsq.init_seed("b")
+        bsq.record_outcome("a", discovered=True)
+        bsq.record_outcome("a", discovered=False)
+        bsq.record_outcome("b", discovered=True)
+        state = bsq.state_dict()
+        bsq2 = BayesianSeedQuality()
+        bsq2.load_state_dict(state)
+        assert bsq2._alpha == bsq._alpha
+        assert bsq2._beta == bsq._beta
+        assert bsq2.total_observations == bsq.total_observations
+        assert bsq2.n_seeds == bsq.n_seeds
+
+    def test_feedback_updates_posterior(self):
+        """After record_outcome(discovered=True), posterior mean exceeds prior mean."""
+        bsq = BayesianSeedQuality()
+        bsq.init_seed("test_seed")
+        prior_mean = bsq.posterior_mean("test_seed")  # Beta(1,1) → 0.5
+        bsq.record_outcome("test_seed", discovered=True)
+        post_mean = bsq.posterior_mean("test_seed")  # Beta(2,1) → 0.667
+        assert post_mean > prior_mean
+
+
 class TestBayesianSeedQuality:
     def test_init_defaults(self):
         bsq = BayesianSeedQuality()

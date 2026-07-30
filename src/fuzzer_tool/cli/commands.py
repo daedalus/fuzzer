@@ -1723,7 +1723,7 @@ def main() -> int:
     fuzz_parser.add_argument(
         "--schedule",
         default="base",
-        choices=("base", "fast", "coe", "rare", "mopt", "lin", "quad"),
+        choices=("base", "fast", "coe", "rare", "mopt", "lin", "quad", "go"),
         help="AFL++ power schedule: base|fast|coe|rare|mopt|lin|quad",
     )
     fuzz_parser.add_argument(

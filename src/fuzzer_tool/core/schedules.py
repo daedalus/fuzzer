@@ -37,7 +37,7 @@ class SeedScorer:
         max_mult: Maximum havoc multiplier (default 16).
     """
 
-    SCHEDULES = ("base", "fast", "coe", "rare", "mopt", "lin", "quad")
+    SCHEDULES = ("base", "fast", "coe", "rare", "mopt", "lin", "quad", "go")
 
     def __init__(self, schedule: str = "base", max_mult: int = 16):
         if schedule not in self.SCHEDULES:
@@ -80,6 +80,10 @@ class SeedScorer:
         max_cov: int = 0,
         hw_instructions: int = 0,
         hw_branches: int = 0,
+        # AFLGo directed-distance annealing
+        avg_distance: float = 0.0,
+        max_distance: float = 0.0,
+        anneal_progress: float = 0.0,
     ) -> float:
         """Compute the energy score for a queue entry.
 
@@ -202,6 +206,8 @@ class SeedScorer:
             if factor > self.max_factor:
                 factor = self.max_factor
             perf_score *= factor / self.power_beta
+        elif self.schedule == "go":
+            perf_score *= self._go_factor(avg_distance, max_distance, anneal_progress)
 
         # ── Honggfuzz power factors (applied on top of schedule) ────────
         perf_score *= self._honggfuzz_factors(
@@ -494,6 +500,29 @@ class SeedScorer:
         if max_depth - depth < 5:
             return 2.0
         return 1.0
+
+    def _go_factor(
+        self, avg_distance: float, max_distance: float, anneal_progress: float
+    ) -> float:
+        """AFLGo-style distance-annealed energy multiplier.
+
+        During exploitation phase (anneal_progress > 0), seeds near
+        the target get exponentially more energy.  During exploration
+        phase (anneal_progress ≈ 0), all seeds get uniform energy.
+
+        Formula: energy *= exp(β · (1 - norm_dist))
+        where β = anneal_progress * 5.0  (grows from 0 → 5 as campaign matures)
+        and norm_dist = avg_distance / max_distance (0 = at target, 1 = farthest)
+
+        Returns:
+            Multiplicative factor (1.0 when no distance info, up to 100x cap).
+        """
+        if self.schedule != "go" or anneal_progress < 0.01 or max_distance <= 0:
+            return 1.0
+        norm_dist = min(avg_distance / max_distance, 1.0) if avg_distance > 0 else 1.0
+        beta = anneal_progress * 5.0
+        bonus = math.exp(beta * (1.0 - norm_dist))
+        return min(bonus, 100.0)
 
 
 def compute_mean_log_n_fuzz(n_fuzz_values: list[int]) -> float:
