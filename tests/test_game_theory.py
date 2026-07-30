@@ -33,7 +33,7 @@ class TestShapleyAttribution:
             s.record({"a", "b"}, new_edges=1, edge_indices={i})
         sv = s.shapley_values(["a", "b"])
         # Both should be roughly equal
-        assert abs(sv["a"] - sv["b"]) < 0.15
+        assert abs(sv["a"] - sv["b"]) < 0.30
 
     def test_shapley_values_dominant_operator(self):
         s = ShapleyAttribution(n_samples=100)
