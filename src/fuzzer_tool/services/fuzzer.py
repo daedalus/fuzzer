@@ -360,10 +360,10 @@ class Fuzzer:
         enable_regex_bomb=False,
         enable_smt_z3=False,
         mod_solving="concolic",
-        bust_corpus=False,
-        bust_mean=None,
-        bust_std=None,
-        bust_pad="repeat",
+        corpus_boost=0,
+        boost_mean=None,
+        boost_std=None,
+        boost_pad="repeat",
         refresh_profile=False,
     ):
         self.target = target
@@ -446,11 +446,11 @@ class Fuzzer:
         # WFC structural generation mode
         self._wfc_enabled = wfc
 
-        # Corpus size busting: normal-distribution seed resizing
-        self._bust_corpus = bust_corpus
-        self._bust_mean = bust_mean
-        self._bust_std = bust_std
-        self._bust_pad = bust_pad
+        # Corpus size boost: normal-distribution seed resizing
+        self._corpus_boost = corpus_boost
+        self._boost_mean = boost_mean
+        self._boost_std = boost_std
+        self._boost_pad = boost_pad
 
         # Static analysis: profile target for string extraction, function
         # boundaries, input format hints, and call graph structure.
@@ -713,12 +713,12 @@ class Fuzzer:
         self._last_perf_score = 100.0  # default multiplier (1x)
 
         # Seed key cache: maps seed bytes -> hex digest.  Initialised early
-        # because _bust_corpus_sizes() invalidates it on corpus resizing.
+        # because _boost_corpus_sizes() invalidates it on corpus resizing.
         self._seed_key_cache: dict[bytes, str] = {}
 
         self._load_corpus()
-        if self._bust_corpus and self.corpus:
-            self._bust_corpus_sizes()
+        if self._corpus_boost > 0 and self.corpus:
+            self._boost_corpus_sizes()
         self._init_seed_metadata()
         # Load persisted Markov state; skip retrain if loaded (avoids
         # double-counting the same corpus transitions across restarts)
@@ -1376,19 +1376,21 @@ class Fuzzer:
         """Clear the seed key cache — call when corpus structure changes."""
         self._seed_key_cache.clear()
 
-    def _bust_corpus_sizes(self) -> None:
-        """Resize each corpus seed to a target size drawn from N(bust_mean, bust_std),
-        clamped to [1, max_len]. Target sizes are shuffled to avoid ordering bias
+    def _boost_corpus_sizes(self) -> None:
+        """Resize each corpus seed to a target size drawn from N(boost_mean, boost_std),
+        clamped to [1, corpus_boost]. Target sizes are shuffled to avoid ordering bias
         (e.g. all small seeds paired with small targets)."""
-        if not self._bust_corpus:
+        if not self._corpus_boost:
             return
         n = len(self.corpus)
         if n == 0:
             return
-        mean = self._bust_mean if self._bust_mean is not None else self.max_len / 2.0
-        std = self._bust_std if self._bust_std is not None else self.max_len / 6.0
+        mean = self._boost_mean if self._boost_mean is not None else self._corpus_boost / 2.0
+        std = self._boost_std if self._boost_std is not None else self._corpus_boost / 6.0
         std = max(std, 1.0)
-        target_sizes = [max(1, min(int(random.gauss(mean, std)), self.max_len)) for _ in range(n)]
+        target_sizes = [
+            max(1, min(int(random.gauss(mean, std)), self._corpus_boost)) for _ in range(n)
+        ]
         random.shuffle(target_sizes)
         self.corpus = [
             self._resize_seed(s, t) for s, t in zip(self.corpus, target_sizes, strict=False)
@@ -1398,7 +1400,7 @@ class Fuzzer:
     def _resize_seed(self, seed: bytes, target_size: int) -> bytes:
         """Truncate or pad *seed* to *target_size* bytes.
 
-        Padding modes (controlled by ``self._bust_pad``):
+        Padding modes (controlled by ``self._boost_pad``):
           * repeat — cycle the existing bytes (AFL-style, default)
           * zero   — zero-pad
           * random — fill with random bytes
@@ -1408,9 +1410,9 @@ class Fuzzer:
         if len(seed) > target_size:
             return seed[:target_size]
         need = target_size - len(seed)
-        if self._bust_pad == "zero":
+        if self._boost_pad == "zero":
             return seed + b"\x00" * need
-        if self._bust_pad == "random":
+        if self._boost_pad == "random":
             return seed + bytes(random.randrange(256) for _ in range(need))
         # "repeat" (default): AFL-style cyclic padding
         if len(seed) == 0:

@@ -432,10 +432,10 @@ def cmd_fuzz(args):
         debug=getattr(args, "debug", False),
         enable_regex_bomb=getattr(args, "enable_regex_bomb_mutations", False),
         refresh_profile=getattr(args, "refresh_profile", False),
-        bust_corpus=getattr(args, "corpus_bust", False),
-        bust_mean=getattr(args, "bust_mean", None),
-        bust_std=getattr(args, "bust_std", None),
-        bust_pad=getattr(args, "bust_pad", "repeat"),
+        corpus_boost=getattr(args, "corpus_boost", 0),
+        boost_mean=getattr(args, "boost_mean", None),
+        boost_std=getattr(args, "boost_std", None),
+        boost_pad=getattr(args, "boost_pad", "repeat"),
         resize_map_on_stall=getattr(args, "resize_map_on_stall", False),
         enable_smt_z3=getattr(args, "enable_smt_z3", False),
         mod_solving=getattr(args, "mod_solving", "heuristic"),
@@ -1598,24 +1598,26 @@ def main() -> int:
         help="Auto-minimize corpus when total seed bytes exceeds N (0=unlimited)",
     )
     fuzz_parser.add_argument(
-        "--corpus-bust",
-        action="store_true",
-        help="Resize corpus seed lengths to follow a normal distribution capped at max_len",
+        "--corpus-boost",
+        type=int,
+        default=0,
+        metavar="MAX_LEN",
+        help="Resize corpus seed lengths to follow a normal distribution capped at MAX_LEN",
     )
     fuzz_parser.add_argument(
-        "--bust-mean",
+        "--boost-mean",
         type=float,
         default=None,
-        help="Target mean for normal size distribution (default: max_len/2)",
+        help="Target mean for normal size distribution (default: corpus_boost/2)",
     )
     fuzz_parser.add_argument(
-        "--bust-std",
+        "--boost-std",
         type=float,
         default=None,
-        help="Target std for normal size distribution (default: max_len/6)",
+        help="Target std for normal size distribution (default: corpus_boost/6)",
     )
     fuzz_parser.add_argument(
-        "--bust-pad",
+        "--boost-pad",
         choices=["repeat", "zero", "random"],
         default="repeat",
         help="Padding mode for short seeds: repeat (cycle self), zero (\\x00), random",

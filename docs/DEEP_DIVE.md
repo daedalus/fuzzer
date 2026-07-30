@@ -367,10 +367,10 @@ fuzzer-tool rank ./target -d corpus -n 10 --dump top_seeds
 | `--coverage-log FILE` | Append (timestamp, edge_count) lines for coverage-over-time plots |
 | `--coverage-report FILE` | Dump edge coverage map to JSON on exit |
 | `--max-corpus N` | Auto-minimize corpus at N entries |
-| `--corpus-bust` | Resize corpus seed lengths to truncated normal distribution N(mean, std), capped at `--max-len` |
-| `--bust-mean FLOAT` | Target mean for normal distribution (default: max_len/2) |
-| `--bust-std FLOAT` | Target std for normal distribution (default: max_len/6) |
-| `--bust-pad {repeat,zero,random}` | Padding mode for undersized seeds; repeat cycles existing bytes (AFL-style), zero pads with \\0, random appends uniform random bytes |
+| `--corpus-boost MAX_LEN` | Resize corpus seed lengths to truncated normal distribution N(mean, std), capped at MAX_LEN |
+| `--boost-mean FLOAT` | Target mean for normal distribution (default: corpus_boost/2) |
+| `--boost-std FLOAT` | Target std for normal distribution (default: corpus_boost/6) |
+| `--boost-pad {repeat,zero,random}` | Padding mode for undersized seeds; repeat cycles existing bytes (AFL-style), zero pads with \\0, random appends uniform random bytes |
 | `--replay-n N` | Replay each crash N times for reproducibility scoring |
 | `--asan-target PATH` | Path to ASAN-instrumented .so/executable for auto sanitizer crash replay |
 | `--ubsan-target PATH` | Path to UBSAN-instrumented .so/executable for auto sanitizer crash replay |

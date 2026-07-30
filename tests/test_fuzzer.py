@@ -126,66 +126,66 @@ class TestFuzzerUnit:
             assert meta["fuzz_count"] == 0
             assert meta["coverage_edges"] == 0
 
-    def test_corpus_bust_truncates_long_seeds(self):
-        f = self._make_fuzzer(max_len=10, bust_corpus=True, bust_mean=5, bust_std=1)
+    def test_corpus_boost_truncates_long_seeds(self):
+        f = self._make_fuzzer(max_len=10, corpus_boost=10, boost_mean=5, boost_std=1)
         f.corpus = [b"A" * 50, b"B" * 50]
-        f._bust_corpus_sizes()
+        f._boost_corpus_sizes()
         assert all(len(s) <= 10 for s in f.corpus)
         assert all(len(s) >= 1 for s in f.corpus)
 
-    def test_corpus_bust_pads_repeat(self):
+    def test_corpus_boost_pads_repeat(self):
         f = self._make_fuzzer(
-            max_len=100, bust_corpus=True, bust_mean=50, bust_std=5, bust_pad="repeat"
+            max_len=100, corpus_boost=100, boost_mean=50, boost_std=5, boost_pad="repeat"
         )
         f.corpus = [b"ABC", b"XY"]
-        f._bust_corpus_sizes()
+        f._boost_corpus_sizes()
         for s in f.corpus:
             assert 1 <= len(s) <= 100
             assert s[:3] == b"ABC" or s[:2] == b"XY"
 
-    def test_corpus_bust_pads_zero(self):
+    def test_corpus_boost_pads_zero(self):
         f = self._make_fuzzer(
-            max_len=100, bust_corpus=True, bust_mean=50, bust_std=5, bust_pad="zero"
+            max_len=100, corpus_boost=100, boost_mean=50, boost_std=5, boost_pad="zero"
         )
         f.corpus = [b"A"]
-        f._bust_corpus_sizes()
+        f._boost_corpus_sizes()
         assert len(f.corpus[0]) >= 1
         assert f.corpus[0][0] == ord("A")
         assert all(b == 0 for b in f.corpus[0][1:])
 
-    def test_corpus_bust_pads_random(self):
+    def test_corpus_boost_pads_random(self):
         f = self._make_fuzzer(
-            max_len=100, bust_corpus=True, bust_mean=50, bust_std=5, bust_pad="random"
+            max_len=100, corpus_boost=100, boost_mean=50, boost_std=5, boost_pad="random"
         )
         f.corpus = [b"A"]
-        f._bust_corpus_sizes()
+        f._boost_corpus_sizes()
         assert len(f.corpus[0]) >= 1
         assert f.corpus[0][0] == ord("A")
 
-    def test_corpus_bust_empty_corpus(self):
-        f = self._make_fuzzer(bust_corpus=True)
+    def test_corpus_boost_empty_corpus(self):
+        f = self._make_fuzzer(corpus_boost=100)
         f.corpus = []
-        f._bust_corpus_sizes()
+        f._boost_corpus_sizes()
         assert f.corpus == []
 
-    def test_corpus_bust_disabled(self):
-        f = self._make_fuzzer(bust_corpus=False, max_len=10)
+    def test_corpus_boost_disabled(self):
+        f = self._make_fuzzer(corpus_boost=0, max_len=10)
         original = [b"hello world this is long"]
         f.corpus = list(original)
-        f._bust_corpus_sizes()
+        f._boost_corpus_sizes()
         assert f.corpus == original
 
-    def test_corpus_bust_respects_max_len(self):
-        f = self._make_fuzzer(max_len=32, bust_corpus=True, bust_mean=100, bust_std=50)
+    def test_corpus_boost_respects_max_len(self):
+        f = self._make_fuzzer(max_len=32, corpus_boost=32, boost_mean=100, boost_std=50)
         f.corpus = [b"A" * 10 for _ in range(50)]
-        f._bust_corpus_sizes()
+        f._boost_corpus_sizes()
         assert all(len(s) <= 32 for s in f.corpus)
 
-    def test_corpus_bust_invalidates_cache(self):
-        f = self._make_fuzzer(bust_corpus=True)
+    def test_corpus_boost_invalidates_cache(self):
+        f = self._make_fuzzer(corpus_boost=100)
         f.corpus = [b"AAAA", b"BBBB"]
         f._seed_key_cache = {b"AAAA": "old", b"BBBB": "old"}
-        f._bust_corpus_sizes()
+        f._boost_corpus_sizes()
         assert len(f._seed_key_cache) == 0
 
     def test_pick_seed_weights_less_fuzzed(self):
