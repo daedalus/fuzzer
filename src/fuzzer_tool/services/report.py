@@ -1226,13 +1226,15 @@ def _elo_ratings(f) -> str:
     if not ranking:
         return ""
 
-    ranking = f._elo.get_ranking()
+    # BayesianEloTracker uses beta/tau instead of k_factor/decay
+    k_factor = getattr(f._elo, "k_factor", getattr(f._elo, "beta", "?"))
+    decay = getattr(f._elo, "decay", getattr(f._elo, "tau", "?"))
     unrated = f._elo.get_unrated()
     lines = [
         "",
         "--- Elo Operator Ratings ---",
-        f"  K-factor:        {f._elo.k_factor}",
-        f"  Decay:           {f._elo.decay}",
+        f"  K-factor:        {k_factor}",
+        f"  Decay:           {decay}",
         f"  Min matches:     {f._elo.min_matches}",
         f"  Total matches:   {sum(f._elo._match_count.values()) // 2}",
         f"  Rated:           {len(ranking)} operators",
