@@ -43,7 +43,7 @@ MAGIC_PREFIXES: list[tuple[bytes, str]] = [
     (b"\x00\x00\x00\x18ftyp", "mp4_ftyp_v4_box24"),
     (b"\x00\x00\x00\x0cftyp", "mp4_ftyp_v4_box12"),
     (b"\x00\x00\x00\x10ftyp", "mp4_ftyp_v4_box16"),
-    (b"\x00\x00\x00\ftyp", "mp4_ftyp_v4_box15"),
+    (b"\x00\x00\x00\x0fftyp", "mp4_ftyp_v4_box15"),
     (b"ftyp", "mp4_ftyp_offset4"),
     (b"<\x00\x00\x00", "mp4_broken_ftyp"),
     (b"\x00\x00\x00\x00ftyp", "mp4_ftyp_v4_box0"),

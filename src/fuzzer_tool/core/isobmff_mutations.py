@@ -154,13 +154,21 @@ def _parse_children(data: bytes, start: int, end: int) -> list[Box] | None:
 
 
 def serialize_boxes(boxes: list[Box]) -> bytes:
-    """Serialize boxes back to bytes, recomputing sizes."""
+    """Serialize boxes back to bytes using stored size_orig (may differ from payload).
+
+    Supports extended-size (64-bit) boxes when size_orig exceeds u32 range.
+    """
     buf = bytearray()
     for box in boxes:
         payload = serialize_boxes(box.children) if box.children else bytearray(box.data)
-        total_size = 8 + len(payload)
-        buf.extend(struct.pack(">I", total_size))
-        buf.extend(box.box_type)
+        if box.size_orig > 0xFFFFFFFF:
+            # Extended size (64-bit)
+            buf.extend(b"\x00\x00\x00\x01")
+            buf.extend(struct.pack(">Q", box.size_orig))
+            buf.extend(box.box_type)
+        else:
+            buf.extend(struct.pack(">I", box.size_orig))
+            buf.extend(box.box_type)
         buf.extend(payload)
     return bytes(buf)
 
@@ -261,10 +269,13 @@ class IsobmffMutator:
         target = self._rng.choice(boxes)
 
         target.size_orig = self._rng.choice([0, 1, 8, max_len, 0xFFFFFFFF, self._rng.randint(0, max_len)])
-        # Recompute payload from new size
+        # Recompute/truncate/pad payload from new size
         raw = target.data
         payload_len = max(0, target.size_orig - 8)
-        target.data = raw[:payload_len]
+        if payload_len >= len(raw):
+            target.data = raw + b"\x00" * (payload_len - len(raw))
+        else:
+            target.data = raw[:payload_len]
         return boxes
 
     def _mutate_ftyp(self, boxes: list[Box], max_len: int) -> list[Box]:

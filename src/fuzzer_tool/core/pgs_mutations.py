@@ -83,14 +83,14 @@ def parse_pgs_segments(data: bytes) -> list[PgsSegment] | None:
 
 
 def serialize_pgs_segments(segments: list[PgsSegment]) -> bytes:
-    """Serialize PGS segments back to bytes, recomputing seg_size fields."""
+    """Serialize PGS segments back to bytes using stored seg_size (may differ from payload)."""
     buf = bytearray()
     for seg in segments:
         buf.extend(PG_MAGIC)
         buf.extend(struct.pack("<I", seg.pts))
         buf.extend(struct.pack("<I", seg.dts))
         buf.append(seg.seg_type)
-        buf.extend(struct.pack(">H", len(seg.payload)))
+        buf.extend(struct.pack(">H", seg.seg_size))
         buf.extend(seg.payload)
     return bytes(buf)
 
