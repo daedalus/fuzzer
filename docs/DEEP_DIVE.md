@@ -610,6 +610,22 @@ The build script compiles every target as both an executable and a `.so` shared 
 - `*_asan.so` — ASAN-instrumented, requires libasan (falls back to subprocess mode automatically)
 - `*_nosan.so` — Explicit no-ASAN variant (backward-compatible, same as base)
 
+**Dual vendored FFmpeg builds**: FFmpeg fuzz targets require coverage-instrumented
+vendored static libraries. Since the vendored FFmpeg `.a` files are compiled with
+`-fsanitize-coverage=trace-pc-guard,trace-cmp`, they embed undefined references to
+ASAN runtime symbols when built with `-fsanitize=address`. To prevent false ASAN
+detection in nosan targets, the build script maintains **two separate FFmpeg build
+directories**:
+
+- `vendor/ffmpeg/` — Coverage-only (no ASAN), for `*.so` (nosan) and `*_ubsan.so` targets
+- `vendor/ffmpeg_asan/` — Coverage + ASAN, for `*_asan.so` targets
+
+The build script (`build_vendored_ffmpeg_sancov` in `build_targets.sh`) manages
+both variants. The ASAN variant is a source copy of `vendor/ffmpeg/` reconfigured
+with `-fsanitize=address`. `build_simple_so_targets` selects the correct path based
+on the `$suffix` parameter (`_asan` → `vendor/ffmpeg_asan/`, otherwise
+`vendor/ffmpeg/`).
+
 ### Build-time Cmplog for .so Targets
 
 By default, `--cmplog` uses `LD_PRELOAD` to intercept comparison functions, which requires a process boundary (fork+exec). For `.so` targets in `direct_lite` mode, this doesn't work — no exec occurs.

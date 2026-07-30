@@ -223,17 +223,29 @@ build_simple_targets() {
 }
 
 # ── Rebuild vendored FFmpeg with sancov coverage ───────────────
+# Builds two variants:
+#   suffix=""      →  vendor/ffmpeg/       (coverage only, no ASAN)
+#   suffix="_asan" →  vendor/ffmpeg_asan/   (coverage + ASAN)
 # FFmpeg's configure needs a stub for __sanitizer_cov_trace_pc_guard
 # since those symbols are provided by cmplog_shim.o at final link.
 build_vendored_ffmpeg_sancov() {
+    local asan_suffix="${1:-}"  # "" or "_asan"
     [ "$WITH_FFMPEG_SANCOV" -eq 0 ] && return 0
-    local FFMPEG_DIR="$VENDOR/ffmpeg"
+    local SRC_DIR="$VENDOR/ffmpeg"
+    local FFMPEG_DIR="$VENDOR/ffmpeg${asan_suffix}"
+    [ -d "$SRC_DIR" ] || return 0
+    # For the ASAN variant, copy source from the base if not already separate
+    if [ "$asan_suffix" = "_asan" ] && [ ! -d "$FFMPEG_DIR" ]; then
+        echo "  Copying FFmpeg source to vendor/ffmpeg_asan/..."
+        cp -a "$SRC_DIR" "$FFMPEG_DIR"
+    fi
     [ -d "$FFMPEG_DIR" ] || return 0
-    # Check if FFmpeg libs already have coverage instrumentation
+    # Check if FFmpeg libs already have desired instrumentation
     local has_cov=$(nm "$FFMPEG_DIR/libavformat/libavformat.a" 2>/dev/null | grep -c '__sanitizer_cov_trace_pc_guard' || true)
     [ "$has_cov" -gt 10 ] && return 0  # already instrumented
 
-    echo "Building vendored FFmpeg with sancov coverage..."
+    local label="${asan_suffix:-" (nosan)"}"
+    echo "Building vendored FFmpeg${label} with sancov coverage..."
     local cc="clang"
     if ! command -v clang &>/dev/null; then
         warn "clang not found — cannot rebuild FFmpeg with coverage"
@@ -258,9 +270,14 @@ STUBEOF
     $cc -c -o "$stub_dir/sancov_stub.o" "$stub_dir/sancov_stub.c" 2>/dev/null
     ar rcs "$stub_dir/libsancov_stub.a" "$stub_dir/sancov_stub.o" 2>/dev/null
     local COV_FLAGS="-fsanitize-coverage=trace-pc-guard -fsanitize-coverage=trace-cmp"
+    local EXTRA_LIBS="-lsancov_stub"
+    if [ "$asan_suffix" = "_asan" ]; then
+        COV_FLAGS="-fsanitize=address $COV_FLAGS"
+        EXTRA_LIBS="-lsancov_stub -lasan"
+    fi
     (cd "$FFMPEG_DIR" && make clean >/dev/null 2>&1 || true)
     if (cd "$FFMPEG_DIR" && ./configure --cc="$cc" --extra-cflags="$COV_FLAGS" \
-        --extra-ldflags="-L$stub_dir" --extra-libs="-lsancov_stub" \
+        --extra-ldflags="-L$stub_dir" --extra-libs="$EXTRA_LIBS" \
         --enable-static --disable-shared --disable-programs --disable-doc \
         --disable-encoders --disable-muxers --disable-devices --disable-filters \
         --disable-parsers --disable-bsfs --disable-postproc --disable-avdevice \
@@ -268,12 +285,12 @@ STUBEOF
         --disable-nvenc --disable-vaapi --disable-vdpau --disable-vulkan \
         >/dev/null 2>&1); then
         if (cd "$FFMPEG_DIR" && make -j$(nproc) -s >/dev/null 2>&1); then
-            ok "vendored FFmpeg (sancov)"
+            ok "vendored FFmpeg${label}"
         else
-            warn "vendored FFmpeg build failed"
+            warn "vendored FFmpeg${label} build failed"
         fi
     else
-        warn "vendored FFmpeg configure failed"
+        warn "vendored FFmpeg${label} configure failed"
     fi
     rm -rf "$stub_dir"
 }
@@ -303,12 +320,16 @@ build_simple_so_targets() {
             GZIP_LIBS="$VENDOR_ZLIB_A -lm"
             echo "  Using vendored trace-cmp libraries"
         fi
-        # Vendored FFmpeg (ASAN) only for ASAN builds
-        local VENDOR_FFMPEG_A="$VENDOR/ffmpeg/libavformat/libavformat.a"
+        # Select vendored FFmpeg path based on suffix:
+        #   _asan → vendor/ffmpeg_asan/ (ASAN + coverage)
+        #   _ubsan / _nosan / "" → vendor/ffmpeg/ (coverage only)
+        local ffmpeg_vendor_dir="$VENDOR/ffmpeg"
+        [[ "$suffix" == _asan* ]] && ffmpeg_vendor_dir="$VENDOR/ffmpeg_asan"
+        local VENDOR_FFMPEG_A="$ffmpeg_vendor_dir/libavformat/libavformat.a"
         if [ -f "$VENDOR_FFMPEG_A" ]; then
-            FFMPEG_LIBS="$VENDOR/ffmpeg/libavformat/libavformat.a $VENDOR/ffmpeg/libavcodec/libavcodec.a $VENDOR/ffmpeg/libavutil/libavutil.a $VENDOR/ffmpeg/libswresample/libswresample.a -lm -lz -llzma -lbz2 -lpthread -ldl"
-            FFMPEG_INC="-I$VENDOR/ffmpeg"
-            echo "  Using vendored FFmpeg static libraries"
+            FFMPEG_LIBS="$ffmpeg_vendor_dir/libavformat/libavformat.a $ffmpeg_vendor_dir/libavcodec/libavcodec.a $ffmpeg_vendor_dir/libavutil/libavutil.a $ffmpeg_vendor_dir/libswresample/libswresample.a -lm -lz -llzma -lbz2 -lpthread -ldl"
+            FFMPEG_INC="-I$ffmpeg_vendor_dir"
+            echo "  Using vendored FFmpeg static libraries ($ffmpeg_vendor_dir)"
         fi
     fi
 
@@ -866,14 +887,15 @@ if [ "$BUILD_ASAN" -eq 1 ]; then
     fi
     build_simple_targets "_asan" "-fsanitize=address" "ASAN"
     [ "$HAS_FGREP" -eq 1 ] && build_fgrep_so_targets "_asan_tcg" "-fsanitize=address" "ASAN"
-    build_vendored_ffmpeg_sancov
+    build_vendored_ffmpeg_sancov "_asan"
     build_simple_so_targets "_asan" "-fsanitize=address" "ASAN"
     build_standalone_so_targets "_asan" "-fsanitize=address" "ASAN"
 fi
 # UBSAN targets: compiled with -fsanitize=undefined (runtime built in)
+# Uses nosan (coverage-only) FFmpeg libs — UBSAN doesn't need ASAN instrumentation.
 if [ "$BUILD_ASAN" -eq 1 ]; then
     echo "  Building UBSAN targets..."
-    build_vendored_ffmpeg_sancov
+    build_vendored_ffmpeg_sancov ""
     build_simple_so_targets "_ubsan" "-fsanitize=undefined" "UBSAN" "clang"
     build_standalone_so_targets "_ubsan" "-fsanitize=undefined" "UBSAN" "clang"
 fi
@@ -887,7 +909,7 @@ if [ "$BUILD_NOSAN" -eq 1 ]; then
     fi
     build_simple_targets "_nosan" "" "No-ASAN"
     [ "$HAS_FGREP" -eq 1 ] && build_fgrep_so_targets "_nosan_tcg" "" "No-ASAN"
-    build_vendored_ffmpeg_sancov
+    build_vendored_ffmpeg_sancov ""
     build_simple_so_targets "_nosan" "" "No-ASAN"
     build_standalone_so_targets "_nosan" "" "No-ASAN"
 fi
