@@ -61,6 +61,9 @@ class CriticalSlowingDown:
         self.skew_rise_threshold = skew_rise_threshold
         self.min_observations = min_observations
         self._history: collections.deque = collections.deque(maxlen=window_size)
+        # Raw (unfiltered) values — used by the autocorrelation leg so
+        # that Kalman smoothing does not inflate lag-1 autocorrelation.
+        self._raw_history: collections.deque = collections.deque(maxlen=window_size)
         self._moments: RunningMoments = RunningMoments(window=window_size)
         self._variance_baseline: float | None = None
         self._autocorr_baseline: float | None = None
@@ -73,24 +76,18 @@ class CriticalSlowingDown:
         Args:
             value: Discovery rate (edges per 1000 execs).  If a
                 ``denoiser`` KalmanFilter was provided at init, the
-                raw value is filtered before being stored.
-
-        .. caution::
-           Kalman smoothing mechanically inflates the lag-1
-           autocorrelation of its output (any IIR smoother does).
-           Since ``_compute_autocorrelation()`` is one of the CSD
-           detector's legs, a denoiser with time-varying smoothing
-           strength (e.g. RobustKF with non-zero adaptive_r_gain)
-           makes the autocorrelation inflation itself non-stationary,
-           which may increase false-positive transition warnings
-           during quiet periods.  If using a denoiser, consider
-           raising ``rise_threshold`` or benchmarking false-positive
-           rates against a known-flat trace.
+                raw value is stored separately for autocorrelation
+                while the denoised value is used for moments
+                (variance/skewness).
         """
+        raw_value = value
         if self._denoiser is not None:
             self._denoiser.predict(dt=1.0)
             self._denoiser.update(value)
             value = self._denoiser.estimate
+        # Store raw value for autocorrelation (KF smoothing inflates
+        # lag-1 autocorrelation, so that leg must see the raw signal).
+        self._raw_history.append(raw_value)
         self._history.append(value)
         self._moments.update(value)
 
@@ -103,11 +100,16 @@ class CriticalSlowingDown:
         return self._moments.skewness
 
     def _compute_autocorrelation(self) -> float:
-        """Compute lag-1 autocorrelation of the current window."""
-        n = len(self._history)
+        """Compute lag-1 autocorrelation of the current window.
+
+        Uses ``_raw_history`` (unfiltered values) so that Kalman
+        smoothing does not inflate the autocorrelation estimate,
+        which would produce false-positive transition warnings.
+        """
+        n = len(self._raw_history)
         if n < 3:
             return 0.0
-        data = list(self._history)
+        data = list(self._raw_history)
         mean = sum(data) / n
         var = sum((x - mean) ** 2 for x in data) / n
         if var < 1e-10:
@@ -121,7 +123,7 @@ class CriticalSlowingDown:
         Returns:
             Tuple of (detected, reason_string).
         """
-        n = len(self._history)
+        n = len(self._raw_history)
         if n < self.min_observations:
             return False, f"need {self.min_observations} obs (have {n})"
 
@@ -169,6 +171,7 @@ class CriticalSlowingDown:
     def reset(self) -> None:
         """Reset detector state."""
         self._history.clear()
+        self._raw_history.clear()
         self._variance_baseline = None
         self._autocorr_baseline = None
         self._skewness_baseline = None
@@ -180,6 +183,7 @@ class CriticalSlowingDown:
         """Serialize state."""
         data: dict = {
             "history": list(self._history),
+            "raw_history": list(self._raw_history),
             "moments": self._moments.save(),
             "variance_baseline": self._variance_baseline,
             "autocorr_baseline": self._autocorr_baseline,
@@ -197,6 +201,9 @@ class CriticalSlowingDown:
         """Restore state."""
         self._history = collections.deque(
             data.get("history", []), maxlen=data.get("window_size", self.window_size)
+        )
+        self._raw_history = collections.deque(
+            data.get("raw_history", []), maxlen=data.get("window_size", self.window_size)
         )
         if "moments" in data:
             self._moments.load(data["moments"])

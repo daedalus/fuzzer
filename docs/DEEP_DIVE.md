@@ -470,9 +470,9 @@ The fuzzer includes a self-contained Kalman filter implementation (`src/fuzzer_t
 - **Huber gating is one-shot** — when the Mahalanobis distance of the innovation exceeds the threshold, the measurement noise (R) is inflated for that single `update()` step only. The inflated R is NOT persisted, preventing a single outlier from making the filter untrusting of subsequent normal measurements for many steps.
 - **Adaptive R** — a slow-timescale (gain `~0.02`) exponential window on innovation RMS nudges the effective measurement noise to match observed innovation statistics. This handles non-stationary observation noise without manual retuning.
 
-### Known caveat: CSD autocorrelation inflation
+### CSD autocorrelation protection
 
-When a Kalman filter feeds a `CriticalSlowingDown` detector, the filter's smoothing inflates lag-1 autocorrelation in its output — any IIR smoother does this. Since CSD's `_compute_autocorrelation()` is one of the detector's legs, a denoiser with time-varying smoothing strength (non-zero `adaptive_r_gain`) makes the autocorrelation inflation non-stationary, which may increase false-positive transition warnings during quiet periods. If using a denoiser, consider raising `rise_threshold` or benchmarking false-positive rates against a known-flat discovery-rate trace.
+The autocorrelation leg of `CriticalSlowingDown` is decoupled from the Kalman denoiser: raw (unfiltered) values are stored separately in `_raw_history` and used exclusively for the lag-1 autocorrelation computation. The denoised values in `_history` continue to feed the variance and skewness legs (which benefit from noise reduction without the autocorrelation inflation problem). This prevents the KF's IIR-smoothing from producing false-positive transition warnings on flat traces.
 
 ### Persistent state
 
