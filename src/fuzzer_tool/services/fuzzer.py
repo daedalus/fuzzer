@@ -3007,6 +3007,55 @@ class Fuzzer:
         except Exception as ex:
             log.debug("Chi-squared test failed: %s", ex)
 
+    def _selected_schedulers_str(self) -> str:
+        """One-line summary of the active scheduling stack (startup banner)."""
+        parts = []
+        if getattr(self, "_power_schedule", "base") != "base":
+            parts.append(f"power={self._power_schedule}")
+
+        ops = []
+        if self.mc_bandit:
+            ops.append("bandit")
+        if self.mc_cem:
+            ops.append("cem")
+        if getattr(self, "_use_mopt", False):
+            ops.append("mopt")
+        if getattr(self, "_use_replicator", False):
+            ops.append("replicator")
+        if getattr(self, "_use_exp3", False):
+            ops.append("exp3")
+        if getattr(self, "_eps_greedy", False):
+            ops.append("eps_greedy")
+        if getattr(self, "_hierarchical_bandit", False):
+            ops.append("hierarchical")
+        if getattr(self, "_gp_ucb", False):
+            ops.append("gp_ucb")
+        if getattr(self, "_use_shapley", False):
+            ops.append("shapley")
+        if ops:
+            parts.append("ops=" + "+".join(ops))
+
+        seeds = []
+        if self.ga:
+            seeds.append("ga")
+        if self.qea:
+            seeds.append("qea")
+        if getattr(self, "_use_bayesian", False):
+            seeds.append("bayesian")
+        if getattr(self, "_use_boltzmann", False):
+            seeds.append("boltzmann")
+        if getattr(self, "_distance", None) is not None:
+            seeds.append("aflgo")
+        if seeds:
+            parts.append("seeds=" + "+".join(seeds))
+
+        if getattr(self, "_use_elo", False):
+            parts.append("elo")
+        if self.markov_generate:
+            parts.append("markov-gen")
+
+        return " | ".join(parts) if parts else "base"
+
     def run(self, iterations=0):
         if self.multi_targets:
             print(f"[*] Multi-target: {len(self.multi_targets)} targets, shared corpus")
@@ -3023,6 +3072,13 @@ class Fuzzer:
                 print("[*] AFL instrumentation: detected")
             if _detect_distance(self.target):
                 print("[*] Distance instrumentation: detected")
+                if self._distance is None:
+                    print(
+                        "[*]   Directed mode idle: pass --target-functions "
+                        "(function, address, or file.c:line) to engage the "
+                        "distance channel (dist: stats + aflgo schedule/elo arm)"
+                    )
+        print(f"[*] Selected schedulers: {self._selected_schedulers_str()}")
         # Static branch density: conditional branches per KB of .text
         from fuzzer_tool.core.elf import branch_density
 

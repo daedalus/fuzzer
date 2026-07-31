@@ -354,7 +354,7 @@ def cmd_fuzz(args):
         mc_bandit=args.mc_bandit,
         mc_cem=args.mc_cem,
         mopt=getattr(args, "mopt", False),
-        targets=getattr(args, "directed_targets", None),
+        targets=getattr(args, "target_functions", None),
         anneal_budget=getattr(args, "anneal_budget", 0),
         boltzmann=getattr(args, "boltzmann", False),
         metropolis=getattr(args, "metropolis", False),
@@ -1533,13 +1533,14 @@ def main() -> int:
         help="MinHash Jaccard threshold for species grouping (default: 0.3)",
     )
     fuzz_parser.add_argument(
-        "--targets",
-        dest="directed_targets",
+        "--target-functions",
+        dest="target_functions",
         nargs="+",
         default=None,
         metavar="FUNC",
         help="Target functions for directed fuzzing — names, hex addresses, "
-        "or file.c:line (via DWARF)",
+        "or file.c:line (via DWARF). Note: use --target-functions (not the "
+        "positional 'targets' binary list).",
     )
     fuzz_parser.add_argument(
         "--anneal-budget",
