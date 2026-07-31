@@ -44,6 +44,7 @@ fuzzer-tool fuzz ./target -c --resume
 - **In-process direct** (`--inprocess-direct`): ctypes calls at 2k–34k eps with sigsetjmp crash survival
 - **Multi-target**: fuzz multiple binaries with shared corpus and weighted round-robin
 - **Hardware perf counters** via `perf_event_open`: instruction, branch, branch-miss counts
+- **AFLGo directed fuzzing**: harmonic call-graph + CFG distance to targets (function names, addresses, or `file.c:line` via pure-Python DWARF), with the exact AFLGo power schedule (`--schedule aflgo --t-x N`) and a runtime SHM-tail distance channel on `trace-pc` builds (`build_targets.sh --distance`)
 
 ### Scheduling Intelligence
 | Strategy | Flag | Description |
@@ -57,7 +58,8 @@ fuzzer-tool fuzz ./target -c --resume
 | Epsilon-greedy | `--eps-greedy` | Classic exploration/exploitation with annealing |
 | Hierarchical bandit | `--hierarchical-bandit` | Two-level: category → operator Thompson sampling |
 | GP-UCB | `--gp-ucb` | Gaussian Process UCB with RBF kernel covariance |
-| AFL++ power schedules | `--schedule` | FAST/COE/RARE/MMOPT/LIN/QUAD seed-level energy |
+| AFL++ power schedules | `--schedule` | FAST/COE/RARE/MMOPT/LIN/QUAD/GO/AFLGO seed-level energy |
+| AFLGo directed annealing | `--schedule aflgo` | Exact AFLGo power factor — symmetric 32×/1/32× energy by distance-to-target with time-based cooling (`--t-x`, `--aflgo-cooling`) |
 | Seed strategies | — | Weighted, Pareto, format-aware, GA, QEA, Bayesian, Markov-gen |
 
 ### Information-Theoretic Scoring

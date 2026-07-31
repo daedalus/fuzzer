@@ -28,9 +28,10 @@ def _detect_asan(target: str) -> bool:
     for flags in [[], ["-D"]]:
         try:
             r = subprocess.run(["nm"] + flags + [target], capture_output=True, timeout=10)
-            if r.returncode == 0:
-                if b"__asan_init" in r.stdout or b"__asan_register_globals" in r.stdout:
-                    return True
+            if r.returncode == 0 and (
+                b"__asan_init" in r.stdout or b"__asan_register_globals" in r.stdout
+            ):
+                return True
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
     return False
@@ -41,9 +42,8 @@ def _detect_ubsan(target: str) -> bool:
     for flags in [[], ["-D"]]:
         try:
             r = subprocess.run(["nm"] + flags + [target], capture_output=True, timeout=10)
-            if r.returncode == 0:
-                if b"__ubsan_handle" in r.stdout:
-                    return True
+            if r.returncode == 0 and b"__ubsan_handle" in r.stdout:
+                return True
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
     return False
@@ -402,6 +402,8 @@ def cmd_fuzz(args):
         hw_perf=getattr(args, "hw_perf", False),
         schedule_ablation=getattr(args, "schedule_ablation", None),
         schedule=getattr(args, "schedule", "base"),
+        aflgo_cooling=getattr(args, "aflgo_cooling", "exp"),
+        t_x_minutes=getattr(args, "t_x", 60.0),
         replicator=getattr(args, "replicator", False),
         exp3=getattr(args, "exp3", False),
         exp3_gamma=getattr(args, "exp3_gamma", 0.1),
@@ -786,7 +788,6 @@ def cmd_rank(args):
         meta = seed_meta.get(seed, {})
         fuzz_count = max(meta.get("fuzz_count", 0), 1)
         coverage = meta.get("coverage_edges", 0)
-        age = now - meta.get("added_at", now)
         key = hashlib.sha256(seed).hexdigest()[:16]
 
         # Edge tracker signals (only if this seed is tracked)
@@ -856,12 +857,12 @@ def cmd_rank(args):
     if args.dump:
         out = Path(args.dump)
         with open(out, "w") as f:
-            for i, (s, seed) in enumerate(scored[:n]):
+            for i, (_score, seed) in enumerate(scored[:n]):
                 h = hashlib.sha256(seed).hexdigest()[:16]
                 f.write(seed)
                 print(f"  wrote seed #{i + 1} ({len(seed)} bytes) -> {out}.{i}")
         # Also write each seed to a separate file
-        for i, (s, seed) in enumerate(scored[:n]):
+        for i, (_score, seed) in enumerate(scored[:n]):
             seed_path = out.parent / f"{out.name}.{i}"
             seed_path.write_bytes(seed)
         print(f"[*] Dumped top {n} seeds to {out}.{0}..{n - 1}")
@@ -1755,8 +1756,23 @@ def main() -> int:
     fuzz_parser.add_argument(
         "--schedule",
         default="base",
-        choices=("base", "fast", "coe", "rare", "mopt", "lin", "quad", "go"),
-        help="AFL++ power schedule: base|fast|coe|rare|mopt|lin|quad",
+        choices=("base", "fast", "coe", "rare", "mopt", "lin", "quad", "go", "aflgo"),
+        help="Power schedule: base|fast|coe|rare|mopt|lin|quad|go|aflgo "
+        "(aflgo = exact AFLGo distance annealing, see --t-x)",
+    )
+    fuzz_parser.add_argument(
+        "--aflgo-cooling",
+        default="exp",
+        choices=("exp", "log", "lin", "quad"),
+        help="Cooling schedule for the aflgo power factor (default: exp)",
+    )
+    fuzz_parser.add_argument(
+        "--t-x",
+        type=float,
+        default=60.0,
+        metavar="MINUTES",
+        help="AFLGo time-to-exploitation in minutes; temperature cools to "
+        "1/20 of its start over this window (default: 60)",
     )
     fuzz_parser.add_argument(
         "--differential",

@@ -19,6 +19,12 @@ class TestTargetDistanceUnit:
         td.call_graph = call_graph or {}
         td._distances = distances or {}
         td._bb_distances = {}
+        td._cfgs = {}
+        td._bb_value = {}
+        td._target_bb_ranges = set()
+        td._segments = []
+        td._elf_data = b""
+        td._dwarf = None
         td._loaded = True
         td._entry_addr = 0
         td._text_start = 0
@@ -27,6 +33,9 @@ class TestTargetDistanceUnit:
         td._func_starts_np = None
         td._func_ends_np = None
         td._func_dists_np = None
+        td._bb_starts_np = None
+        td._bb_ends_np = None
+        td._bb_dists_np = None
         # Build addr_to_func from functions
         for fname, (start, _end) in td.functions.items():
             td.addr_to_func[start] = fname
@@ -229,18 +238,18 @@ class TestDistanceAlgorithm:
             target_addrs={0x1000},
             addr_to_func=lambda addr: "T" if addr == 0x1000 else None,
         )
-        # T is target
-        assert td._distances["T"] == 0.0
+        # T is target — harmonic mean over a single target gives 1 + hops
+        assert td._distances["T"] == 1.0
         # A calls T directly
-        assert td._distances["A"] == 1.0
+        assert td._distances["A"] == 2.0
         # main calls A
-        assert td._distances["main"] == 2.0
+        assert td._distances["main"] == 3.0
         # B-F are on dead-end branch (can't reach T) — all get penalty
         for f in ["B", "C", "D", "E", "F"]:
             assert td._distances[f] > 5.0, f"{f} should have penalty distance"
 
     def test_indirect_path_to_target(self):
-        """B -> C -> T should give B distance 2, C distance 1."""
+        """B -> C -> T should give B distance 3, C distance 2."""
         td = self._make_td_with_graph(
             functions={f: None for f in ["main", "A", "B", "C", "T", "D"]},
             call_graph={
@@ -252,15 +261,15 @@ class TestDistanceAlgorithm:
             target_addrs={0x1000},
             addr_to_func=lambda addr: "T" if addr == 0x1000 else None,
         )
-        assert td._distances["T"] == 0.0
-        assert td._distances["A"] == 1.0  # A -> T
-        assert td._distances["C"] == 1.0  # C -> T
-        assert td._distances["B"] == 2.0  # B -> C -> T
-        assert td._distances["main"] == 2.0  # main -> A -> T (or main -> B -> C -> T)
+        assert td._distances["T"] == 1.0
+        assert td._distances["A"] == 2.0  # A -> T
+        assert td._distances["C"] == 2.0  # C -> T
+        assert td._distances["B"] == 3.0  # B -> C -> T
+        assert td._distances["main"] == 3.0  # main -> A -> T (or main -> B -> C -> T)
         assert td._distances["D"] > 5.0  # D can't reach T
 
     def test_multiple_targets(self):
-        """Multiple targets: A->T1, B->T2, both should have distance 1."""
+        """Multiple targets: A->T1, B->T2, both should have distance 2."""
         td = self._make_td_with_graph(
             functions={f: None for f in ["main", "A", "B", "T1", "T2"]},
             call_graph={
@@ -271,11 +280,11 @@ class TestDistanceAlgorithm:
             target_addrs={0x1000, 0x2000},
             addr_to_func=lambda addr: {0x1000: "T1", 0x2000: "T2"}.get(addr),
         )
-        assert td._distances["T1"] == 0.0
-        assert td._distances["T2"] == 0.0
-        assert td._distances["A"] == 1.0
-        assert td._distances["B"] == 1.0
-        assert td._distances["main"] == 2.0
+        assert td._distances["T1"] == 1.0
+        assert td._distances["T2"] == 1.0
+        assert td._distances["A"] == 2.0
+        assert td._distances["B"] == 2.0
+        assert td._distances["main"] == 3.0
 
     def test_no_targets_gives_uniform_distance(self):
         """If no targets found, all functions should get distance 1."""
@@ -289,17 +298,22 @@ class TestDistanceAlgorithm:
         assert td._distances["A"] == 1.0
 
     def test_target_is_zero(self):
-        """Target function itself should always be distance 0."""
+        """The target function gets the minimum distance.
+
+        Under the AFLGo harmonic mean d_cg(T) = |T| / sum 1/(1+0) = 1 —
+        the smallest value in the graph (the legacy reverse-BFS gave 0.0;
+        the harmonic formula is 1-based, see test_multiple_targets_harmonic_mean).
+        """
         td = self._make_td_with_graph(
             functions={"T": None},
             call_graph={},
             target_addrs={0x1000},
             addr_to_func=lambda addr: "T" if addr == 0x1000 else None,
         )
-        assert td._distances["T"] == 0.0
+        assert td._distances["T"] == 1.0
 
     def test_diamond_graph(self):
-        """Diamond: main -> A -> B -> T, main -> C -> B. B should be distance 1."""
+        """Diamond: main -> A -> B -> T, main -> C -> B. B should be distance 2."""
         td = self._make_td_with_graph(
             functions={f: None for f in ["main", "A", "B", "C", "T"]},
             call_graph={
@@ -311,8 +325,23 @@ class TestDistanceAlgorithm:
             target_addrs={0x1000},
             addr_to_func=lambda addr: "T" if addr == 0x1000 else None,
         )
-        assert td._distances["T"] == 0.0
-        assert td._distances["B"] == 1.0  # B -> T
-        assert td._distances["A"] == 2.0  # A -> B -> T
-        assert td._distances["C"] == 2.0  # C -> B -> T
-        assert td._distances["main"] == 3.0  # main -> A -> B -> T
+        assert td._distances["T"] == 1.0
+        assert td._distances["B"] == 2.0  # B -> T
+        assert td._distances["A"] == 3.0  # A -> B -> T
+        assert td._distances["C"] == 3.0  # C -> B -> T
+        assert td._distances["main"] == 4.0  # main -> A -> B -> T
+
+    def test_multiple_targets_harmonic_mean(self):
+        """d_cg = |T| / sum 1/(1+d): a function at distances 1 and 3 from
+        two targets gets 2/(1/2 + 1/4) = 8/3, not the min distance."""
+        td = self._make_td_with_graph(
+            functions={f: None for f in ["f", "T1", "T2"]},
+            call_graph={"f": {"T1", "T2"}, "T2": {"T1"}},
+            target_addrs={0x1000, 0x2000},
+            addr_to_func=lambda addr: {0x1000: "T1", 0x2000: "T2"}.get(addr),
+        )
+        # f → T1: dist 1 → 1/2; f → T2: dist 1 → 1/2 → 2/(1) = 2.0
+        assert td._distances["f"] == pytest.approx(2.0)
+        # T2 → T1: dist 1 → 1/2, T2 → T2: dist 0 → 1 → 2/1.5 = 4/3
+        assert td._distances["T2"] == pytest.approx(4.0 / 3.0)
+        assert td._distances["T1"] == 1.0

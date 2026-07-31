@@ -188,9 +188,10 @@ def _detect_asan(target_path: str) -> bool:
     for flags in [[], ["-D"]]:
         try:
             r = subprocess.run(["nm"] + flags + [target_path], capture_output=True, timeout=10)
-            if r.returncode == 0:
-                if b"__asan_init" in r.stdout or b"__asan_register_globals" in r.stdout:
-                    return True
+            if r.returncode == 0 and (
+                b"__asan_init" in r.stdout or b"__asan_register_globals" in r.stdout
+            ):
+                return True
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
     return False
@@ -203,9 +204,8 @@ def _detect_ubsan(target_path: str) -> bool:
     for flags in [[], ["-D"]]:
         try:
             r = subprocess.run(["nm"] + flags + [target_path], capture_output=True, timeout=10)
-            if r.returncode == 0:
-                if b"__ubsan_handle" in r.stdout:
-                    return True
+            if r.returncode == 0 and b"__ubsan_handle" in r.stdout:
+                return True
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
     return False
@@ -314,6 +314,8 @@ class Fuzzer:
         hw_perf=False,
         schedule_ablation=None,
         schedule="base",
+        aflgo_cooling="exp",
+        t_x_minutes=60.0,
         differential_target=None,
         replicator=False,
         shapley=False,
@@ -709,7 +711,11 @@ class Fuzzer:
                 self.hw_perf = False
 
         # Seed-level energy multiplier: scales mutations_per_input per seed
-        self._seed_scorer = SeedScorer(schedule=schedule or "base")
+        self._seed_scorer = SeedScorer(
+            schedule=schedule or "base",
+            aflgo_cooling=aflgo_cooling,
+            t_x_minutes=t_x_minutes,
+        )
         self._power_schedule = schedule
         self._last_perf_score = 100.0  # default multiplier (1x)
 
@@ -1010,15 +1016,43 @@ class Fuzzer:
         self._distance = None
         self._distance_targets = targets
         self._anneal_progress = 0.0  # 0.0 = pure coverage, 1.0 = pure distance
+        # Running min/max of observed per-seed distances (AFLGo queue
+        # normalization); the no-data sentinel (20.0) is excluded.
+        self._dist_min_observed: float | None = None
+        self._dist_max_observed: float | None = None
         if targets:
             from fuzzer_tool.core.distance import TargetDistance
 
             self._distance = TargetDistance(target, targets)
+            self._dist_table_shm = None
             if self._distance.load():
                 print(
                     f"[*] Directed mode: {len(self._distance.target_addrs)} target(s), "
                     f"{len(self._distance.functions)} functions mapped"
                 )
+                if self._distance._bb_value:
+                    try:
+                        from fuzzer_tool.adapters.shm import DistanceTableShm
+
+                        # Keys are trace-pc call-site addresses relative
+                        # to the object base (__sancov_pcs); the shim
+                        # looks up pc - dladdr_base.
+                        table = self._distance.pc_distance_table()
+                        if not table:
+                            base = self._distance._base_addr or 0
+                            table = {
+                                bb_start - base: dist
+                                for bb_start, dist in self._distance._bb_value.items()
+                            }
+                        self._dist_table_shm = DistanceTableShm(table)
+                        if self._dist_table_shm.shm_id >= 0:
+                            os.environ["__AFL_DIST_SHM_ID"] = self._dist_table_shm.env_id
+                            print(
+                                f"[*] AFLGo distance table: {len(table)} sites "
+                                "uploaded (SHM-tail channel active)"
+                            )
+                    except OSError as e:
+                        log.warning("Distance table upload failed: %s", e)
             else:
                 print(
                     "[!] Directed mode: failed to load target distances, falling back to coverage"
@@ -2258,21 +2292,38 @@ class Fuzzer:
             if new_edges:
                 self._length_tracker.record(len(mutated), new_edges)
 
-        # Compute directed distance for targeted fuzzing
-        if self._distance and meta is not None and has_new_coverage:
-            hit_bbs = (
-                self._current_edges_cache
-                if self._current_edges_cache is not None
-                else self._get_current_edge_set()
-            )
-            if hit_bbs:
-                # Record edge trace for distance computation
-                seed_key = self._seed_key(data)
-                edge_pairs = {(i, i) for i in hit_bbs}  # self-loops as BB proxies
-                self._edge_tracker.record_edge_trace(seed_key, edge_pairs)
-                # Compute average distance
-                avg_dist = self._distance.seed_distance({(i, i) for i in hit_bbs})
-                meta["avg_distance"] = avg_dist
+        # Compute directed distance for targeted fuzzing.  Prefer the
+        # runtime average from the SHM tail (AFLGo channel, exact per-BB
+        # distances accumulated in the target) when the target carries
+        # the distance table; otherwise derive it in Python from the
+        # edge trace.
+        if self._distance and meta is not None:
+            runtime_avg = self._read_runtime_avg_distance()
+            if runtime_avg is not None:
+                meta["avg_distance"] = runtime_avg
+                if self._dist_min_observed is None or runtime_avg < self._dist_min_observed:
+                    self._dist_min_observed = runtime_avg
+                if self._dist_max_observed is None or runtime_avg > self._dist_max_observed:
+                    self._dist_max_observed = runtime_avg
+            elif has_new_coverage:
+                hit_bbs = (
+                    self._current_edges_cache
+                    if self._current_edges_cache is not None
+                    else self._get_current_edge_set()
+                )
+                if hit_bbs:
+                    # Record edge trace for distance computation
+                    seed_key = self._seed_key(data)
+                    edge_pairs = {(i, i) for i in hit_bbs}  # self-loops as BB proxies
+                    self._edge_tracker.record_edge_trace(seed_key, edge_pairs)
+                    # Compute average distance
+                    avg_dist = self._distance.seed_distance({(i, i) for i in hit_bbs})
+                    meta["avg_distance"] = avg_dist
+                    if avg_dist < 20.0:  # exclude the no-valued-blocks sentinel
+                        if self._dist_min_observed is None or avg_dist < self._dist_min_observed:
+                            self._dist_min_observed = avg_dist
+                        if self._dist_max_observed is None or avg_dist > self._dist_max_observed:
+                            self._dist_max_observed = avg_dist
 
         # Update annealing progress for directed mode
         if self._distance and self.exec_count > 0:
@@ -2718,6 +2769,28 @@ class Fuzzer:
         byte-bitmap ptrace coverage (non-zero byte positions).
         """
         return self._stats.get_current_edge_set()
+
+    def _read_runtime_avg_distance(self) -> float | None:
+        """Read the per-execution average distance from the SHM tail.
+
+        Returns the unscaled average when the target reported valued
+        blocks (dist_count > 0), else None (fall back to Python-side
+        distance computation).
+        """
+        shm = (
+            self._target_shm_covs.get(self.target, self.shm_cov)
+            if self.multi_targets
+            else self.shm_cov
+        )
+        if shm is None:
+            return None
+        try:
+            dist_sum, dist_count = shm.read_distance_tail()
+        except (AttributeError, OSError):
+            return None
+        if dist_count <= 0:
+            return None
+        return dist_sum / dist_count / 100.0
 
     def _format_elapsed(self):
         return self._stats.format_elapsed()
@@ -3228,8 +3301,15 @@ class Fuzzer:
                         total_execs=max(1, self.exec_count),
                         mean_log_n_fuzz=self._cached_mean_log_n_fuzz,
                         avg_distance=meta.get("avg_distance", -1.0) if self._distance else -1.0,
-                        max_distance=self._distance.max_distance if self._distance else 0.0,
+                        max_distance=(
+                            self._dist_max_observed
+                            if self._distance and self._dist_max_observed is not None
+                            else (self._distance.max_distance if self._distance else 0.0)
+                        ),
                         anneal_progress=self._anneal_progress,
+                        min_distance=self._dist_min_observed or 0.0,
+                        elapsed_sec=time.time() - self.start_time,
+                        t_x_minutes=self._seed_scorer.t_x_minutes,
                         **hf_kwargs,
                     )
                 else:

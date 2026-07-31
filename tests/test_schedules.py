@@ -416,6 +416,98 @@ class TestGoSchedule:
         assert 100.0 <= score <= 1600.0
 
 
+class TestAflgoSchedule:
+    """Exact AFLGo power-schedule tests (afl-fuzz.c calculate_score).
+
+    Reference formulas (hand-evaluated literals below):
+      T = 1/20^progress (exp), 1/(1+19·progress) (lin),
+          1/(1+19·progress²) (quad),
+          1/(1+2·ln(1+progress·13358.7268297)) (log)
+      p = (1−nd)(1−T) + 0.5T,  factor = 2^(2·log2(32)·(p−0.5))
+    """
+
+    def test_uniform_energy_at_start(self):
+        """T=1 at progress=0 → p=0.5 → factor=1.0 for any distance."""
+        sc = SeedScorer("aflgo")
+        for d, mn, mx in [(0.1, 0.0, 10.0), (9.9, 0.0, 10.0)]:
+            f = sc._aflgo_factor(d, mx, mn, elapsed_sec=0.0, t_x_minutes=60.0, cooling="exp")
+            assert f == pytest.approx(1.0)
+
+    def test_near_target_late_campaign(self):
+        """T≈0, nd=0 → p=1 → factor=2^5=32; nd=1 → factor=2^-5=1/32."""
+        sc = SeedScorer("aflgo")
+        late = 60.0 * 60.0 * 60.0  # 60× the t_x window → T≈0
+        near = sc._aflgo_factor(0.0, 10.0, 0.0, late, 60.0, "exp")
+        far = sc._aflgo_factor(10.0, 10.0, 0.0, late, 60.0, "exp")
+        assert near == pytest.approx(32.0)
+        assert far == pytest.approx(1.0 / 32.0)
+
+    def test_mid_campaign_exact_value(self):
+        """exp cooling at progress=1: T=0.05, nd=0 → factor=2^4.75."""
+        sc = SeedScorer("aflgo")
+        f = sc._aflgo_factor(0.0, 10.0, 0.0, elapsed_sec=3600.0, t_x_minutes=60.0, cooling="exp")
+        assert f == pytest.approx(26.908685288118864)
+
+    def test_symmetric_factor_at_nd_half(self):
+        """nd=0.5 at T=0.05 → p=0.5 → factor=1.0."""
+        sc = SeedScorer("aflgo")
+        f = sc._aflgo_factor(5.0, 10.0, 0.0, elapsed_sec=3600.0, t_x_minutes=60.0, cooling="exp")
+        assert f == pytest.approx(1.0)
+
+    def test_cooling_temperature_variants(self):
+        """All four cooling schedules at progress=0.5 (hand-evaluated)."""
+        sc = SeedScorer("aflgo")
+        assert sc._cooling_temperature(0.5, "exp") == pytest.approx(0.22360679774997896)
+        assert sc._cooling_temperature(0.5, "lin") == pytest.approx(0.09523809523809523)
+        assert sc._cooling_temperature(0.5, "quad") == pytest.approx(0.17391304347826086)
+        assert sc._cooling_temperature(0.5, "log") == pytest.approx(0.05372342171453818)
+        # negative progress is clamped to 0
+        assert sc._cooling_temperature(-1.0, "exp") == pytest.approx(1.0)
+
+    def test_no_distance_data(self):
+        sc = SeedScorer("aflgo")
+        assert sc._aflgo_factor(-1.0, 10.0, 0.0, 3600.0, 60.0, "exp") == 1.0
+        assert sc._aflgo_factor(5.0, 0.0, 0.0, 3600.0, 60.0, "exp") == 1.0
+
+    def test_min_distance_normalization(self):
+        """normalized_d uses (d−min)/(max−min); min==max → nd=0."""
+        sc = SeedScorer("aflgo")
+        late = 60.0 * 60.0 * 60.0
+        # d == min → nd=0 → max boost
+        assert sc._aflgo_factor(5.0, 10.0, 5.0, late, 60.0, "exp") == pytest.approx(32.0)
+        # d == max → nd=1 → 1/32
+        assert sc._aflgo_factor(10.0, 10.0, 5.0, late, 60.0, "exp") == pytest.approx(1.0 / 32.0)
+        # min == max → nd=0 → max boost
+        assert sc._aflgo_factor(7.0, 7.0, 7.0, late, 60.0, "exp") == pytest.approx(32.0)
+
+    def test_aflgo_score_integration(self):
+        """Full score() path with the aflgo schedule applies the factor."""
+        sc = SeedScorer("aflgo")
+        score = sc.score(
+            exec_us=100,
+            avg_exec_us=100,
+            bitmap_size=50,
+            avg_bitmap_size=50,
+            handicap=0,
+            depth=0,
+            fuzz_level=1,
+            n_fuzz=1,
+            total_execs=100,
+            tc_ref=0,
+            avg_distance=0.0,
+            max_distance=10.0,
+            min_distance=0.0,
+            elapsed_sec=3600.0 * 60,
+            t_x_minutes=60.0,
+        )
+        # base 100 · 32 (aflgo) = 3200, clamped to max_mult*100 = 1600
+        assert score == pytest.approx(1600.0)
+
+    def test_unknown_cooling_rejected(self):
+        with pytest.raises(ValueError):
+            SeedScorer("aflgo", aflgo_cooling="cubic")
+
+
 class TestHandicap:
     def test_handicap_0(self):
         sc = SeedScorer("base")

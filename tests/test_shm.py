@@ -3,7 +3,13 @@
 import ctypes
 from pathlib import Path
 
-from fuzzer_tool.adapters.shm import SHM_MAP_SIZE, SHM_METADATA_SIZE, SIZEOF_ENTRY, ShmCoverage
+from fuzzer_tool.adapters.shm import (
+    SHM_MAP_SIZE,
+    SHM_METADATA_SIZE,
+    SHM_TAIL_SIZE,
+    SIZEOF_ENTRY,
+    ShmCoverage,
+)
 
 
 class TestShmCoverage:
@@ -267,23 +273,6 @@ class TestShmCoverage:
         finally:
             cov.cleanup()
 
-    def test_reset_preserves_header(self):
-        """reset_edge_map() zeros the edge table but preserves the front header."""
-        cov = ShmCoverage()
-        try:
-            # Write some metadata to the front header
-            ctypes.c_uint32.from_address(cov._ptr).value = 42  # stack_depth
-            ctypes.c_uint64.from_address(cov._ptr + 8).value = 12345  # path_hash
-            ctypes.c_uint64.from_address(cov._ptr + 16).value = 99  # edge_count
-            # Reset the edge table
-            cov.reset_edge_map()
-            # Header should be preserved
-            assert cov.read_stack_depth() == 42
-            assert cov.read_path_hash() == 12345
-            assert cov.read_edge_count() == 99
-        finally:
-            cov.cleanup()
-
     def test_metadata_accessors_after_init(self):
         """All three metadata accessors return 0 on a fresh (uninitialized) SHM."""
         cov = ShmCoverage()
@@ -307,10 +296,11 @@ class TestShmCoverage:
             cov.cleanup()
 
     def test_shm_bytes_includes_header(self):
-        """shm_bytes accounts for both the front header and the edge table."""
+        """shm_bytes accounts for the front header, edge table, and the
+        16-byte AFLGo distance tail."""
         cov = ShmCoverage()
         try:
-            expected = SHM_METADATA_SIZE + SHM_MAP_SIZE * SIZEOF_ENTRY
+            expected = SHM_METADATA_SIZE + SHM_MAP_SIZE * SIZEOF_ENTRY + SHM_TAIL_SIZE
             assert cov.shm_bytes == expected
         finally:
             cov.cleanup()

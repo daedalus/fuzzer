@@ -39,6 +39,7 @@ for arg in "$@"; do
     [ "$arg" = "--vendor-tracecmp" ] && WITH_VENDOR_TRACECMP=1
     [ "$arg" = "--clang-scov" ] && WITH_CLANG_SCOV=1
     [ "$arg" = "--ffmpeg-sancov" ] && WITH_FFMPEG_SANCOV=1
+    [ "$arg" = "--distance" ] && WITH_DISTANCE=1
 done
 
 # Colors
@@ -633,6 +634,35 @@ verify_vendor_tracecmp() {
     fi
 }
 
+# ── Build AFLGo distance .so targets ──────────────────────────────
+# Compiles the target wrapper with -fsanitize-coverage=trace-pc +
+# -D__AFL_DISTANCE_MODE so the shim accumulates per-block distances
+# into the SHM tail.  NOTE: vendored libraries keep their default
+# trace-pc-guard instrumentation, so distance is measured on the
+# wrapper's own blocks only; rebuild the vendor libs with trace-pc to
+# extend distance into library code.
+build_distance_so_targets() {
+    [ "$WITH_DISTANCE" -eq 0 ] && return 0
+    if ! command -v clang &>/dev/null; then
+        warn "clang not found — --distance requires clang"
+        return 1
+    fi
+    echo "Building distance .so targets (trace-pc + AFLGo channel)..."
+    local DIST_FLAGS="-O2 -g -D__AFL_DISTANCE_MODE -fsanitize-coverage=trace-pc -fsanitize=address"
+    for spec in "png_read:-lpng -lz" "zlib_read:-lz" "gzip_read:-lz" "jpeg_read:-ljpeg" "test_target:" "proto_target:"; do
+        local name="${spec%%:*}"
+        local libs="${spec#*:}"
+        [ -f "$TARGETS/$name.c" ] || continue
+        clang $DIST_FLAGS -shared -fPIC -include "$SHIM" \
+            -o "$TARGETS/${name}_dist.so" "$TARGETS/$name.c" $libs 2>/dev/null
+        if [ -f "$TARGETS/${name}_dist.so" ]; then
+            ok "${name}_dist.so"
+        else
+            warn "failed: ${name}_dist.so"
+        fi
+    done
+}
+
 # ── Vendored trace-cmp: rebuild libpng+zlib with trace-cmp, then link targets ─
 VENDOR_ZLIB_DIR="$VENDOR/zlib"
 VENDOR_LIBPNG_DIR="$VENDOR/libpng"
@@ -860,6 +890,7 @@ echo "=== Building fuzz targets ==="
 [ "$WITH_TRACECMP" -eq 1 ] && echo "[*] Trace-cmp: compiler-IR comparison tracing enabled (requires clang)"
 [ "$WITH_CLANG_SCOV" -eq 1 ] && echo "[*] Clang-scov: compiler-inserted edge coverage enabled (requires clang)"
 [ "$WITH_VENDOR_TRACECMP" -eq 1 ] && echo "[*] Vendor-tracecmp: rebuild vendor libs + targets with trace-cmp (requires clang)"
+[ "$WITH_DISTANCE" -eq 1 ] && echo "[*] Distance: trace-pc + AFLGo SHM-tail distance channel (requires clang)"
 
 if [ "$HAS_FGREP" -eq 0 ]; then
     warn "fgrep directory not found at $FGREP — skipping fgrep targets"
@@ -938,6 +969,9 @@ if [ "$OPTS" = "--clang-scov" ]; then
 fi
 if [ "$WITH_VENDOR_TRACECMP" -eq 1 ]; then
     build_vendored_tracecmp_targets "$@"
+fi
+if [ "$WITH_DISTANCE" -eq 1 ]; then
+    build_distance_so_targets
 fi
 
 # ── Compile perf_shim.so (utility library, not a fuzz target) ────

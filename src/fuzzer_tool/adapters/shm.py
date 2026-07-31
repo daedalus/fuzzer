@@ -29,6 +29,15 @@ SIZEOF_ENTRY = 8  # bytes per {edge_id: u32, count: u32}
 #   offset 16: uint64 edge_count   (monotonic new-slot insertion count)
 SHM_METADATA_SIZE = 24  # bytes reserved at front of SHM for metadata
 
+# AFLGo SHM-tail distance channel: after the edge table, 16 bytes hold
+# the per-execution average distance accumulated by the target:
+#   offset 0: uint64 dist_sum    (sum of block distances × 100)
+#   offset 8: uint64 dist_count  (number of valued blocks hit)
+# The tail is written by the shim in distance builds (__AFL_DISTANCE_MODE)
+# and stays zeroed otherwise, so readers fall back to Python-side
+# distance computation when count == 0.
+SHM_TAIL_SIZE = 16  # bytes reserved at the end of SHM for the distance tail
+
 # shmget constants
 IPC_CREAT = 0o1000
 IPC_RMID = 0
@@ -80,7 +89,7 @@ class ShmCoverage:
         # size = number of entries (AFL_MAP_SIZE convention)
         self.num_entries = size
         self.table_bytes = size * SIZEOF_ENTRY
-        self.shm_bytes = self.table_bytes + SHM_METADATA_SIZE
+        self.shm_bytes = self.table_bytes + SHM_METADATA_SIZE + SHM_TAIL_SIZE
 
         self.shm_id = _libc.shmget(0, self.shm_bytes, IPC_CREAT | SHM_R | SHM_W)
         if self.shm_id < 0:
@@ -97,6 +106,8 @@ class ShmCoverage:
         self._entries = EntryArr.from_address(self._ptr + SHM_METADATA_SIZE)
 
         # Metadata is in the front header at self._ptr (offsets 0/8/16)
+        # Distance tail at self._ptr + SHM_METADATA_SIZE + table_bytes
+        self._tail = self._ptr + SHM_METADATA_SIZE + self.table_bytes
 
         self.env_id = str(self.shm_id)
 
@@ -153,8 +164,26 @@ class ShmCoverage:
     # ── Reset ────────────────────────────────────────────────────────────
 
     def reset_edge_map(self):
-        """Zero all entries in the coverage hash table (preserves front header)."""
+        """Zero all entries in the coverage hash table (preserves front header).
+
+        Also zeroes the distance tail so a stale sum/count from a previous
+        execution can never be misread.
+        """
         ctypes.memset(self._ptr + SHM_METADATA_SIZE, 0, self.table_bytes)
+        ctypes.memset(self._tail, 0, SHM_TAIL_SIZE)
+
+    # ── AFLGo distance tail (per-execution average distance) ────────────
+
+    def read_distance_tail(self) -> tuple[int, int]:
+        """Read (dist_sum, dist_count) written by the shim's distance channel.
+
+        Average distance = dist_sum / dist_count / 100 (distances are
+        stored scaled by 100 as integers).  Returns (0, 0) when the
+        target was not built with the distance table.
+        """
+        dist_sum = ctypes.c_uint64.from_address(self._tail).value
+        dist_count = ctypes.c_uint64.from_address(self._tail + 8).value
+        return dist_sum, dist_count
 
     # ── Metadata (stack depth + path hash + edge count) ────────────────
 
@@ -321,7 +350,7 @@ class ShmCoverage:
             new_num_entries: New table size (must be > current).
         """
         new_table_bytes = new_num_entries * SIZEOF_ENTRY
-        new_total_bytes = new_table_bytes + SHM_METADATA_SIZE
+        new_total_bytes = new_table_bytes + SHM_METADATA_SIZE + SHM_TAIL_SIZE
         if new_table_bytes <= self.table_bytes:
             return
 
@@ -351,6 +380,7 @@ class ShmCoverage:
         self._map = (ctypes.c_char * new_table_bytes).from_address(new_ptr + SHM_METADATA_SIZE)
         EntryArr = _entry_struct(new_num_entries)
         self._entries = EntryArr.from_address(new_ptr + SHM_METADATA_SIZE)
+        self._tail = new_ptr + SHM_METADATA_SIZE + new_table_bytes
         self.env_id = str(self.shm_id)
 
         self._peak_cumulative_edges = max(self._peak_cumulative_edges, self.cumulative_edges)
@@ -375,3 +405,61 @@ class ShmCoverage:
 
     def _register_atexit(self):
         atexit.register(self.cleanup)
+
+
+class DistanceTableShm:
+    """Shared memory holding the PC→distance table for distance builds.
+
+    The shim (afl_shim.c, ``__AFL_DISTANCE_MODE``) attaches this segment
+    via the ``__AFL_DIST_SHM_ID`` env var and probes it from
+    ``__sanitizer_cov_trace_pc()``.  Layout::
+
+        uint32 count
+        struct { uint64 key; uint32 dist; } entries[count]
+
+    *key* is the block start address relative to the object's lowest
+    PT_LOAD vaddr (the shim looks up ``pc - dladdr_base``); *dist* is
+    the AFLGo block distance scaled by 100.  Entries with key == 0 are
+    empty slots.
+    """
+
+    def __init__(self, entries: dict[int, float]):
+        """Create and populate the table SHM.
+
+        Args:
+            entries: {block-start key: distance} — keys already relative
+                to the object base, distances unscaled floats.
+        """
+        scaled = {key: max(0, round(dist * 100)) for key, dist in entries.items() if key != 0}
+        self.num_entries = len(scaled)
+        entry_bytes = 12  # {u64 key, u32 dist}
+        self.shm_bytes = 4 + self.num_entries * entry_bytes
+        if self.num_entries == 0:
+            self.shm_id = -1
+            self._ptr = 0
+            self.env_id = "0"
+            return
+
+        self.shm_id = _libc.shmget(0, self.shm_bytes, IPC_CREAT | SHM_R | SHM_W)
+        if self.shm_id < 0:
+            raise OSError(f"shmget failed: {os.strerror(ctypes.get_errno())}")
+        self._ptr = _libc.shmat(self.shm_id, None, 0)
+        if self._ptr == ctypes.c_void_p(-1).value or self._ptr is None:
+            _libc.shmctl(self.shm_id, IPC_RMID, None)
+            raise OSError(f"shmat failed: {os.strerror(ctypes.get_errno())}")
+        ctypes.memset(self._ptr, 0, self.shm_bytes)
+        ctypes.c_uint32.from_address(self._ptr).value = self.num_entries
+        for i, (key, dist) in enumerate(sorted(scaled.items())):
+            off = self._ptr + 4 + i * entry_bytes
+            ctypes.c_uint64.from_address(off).value = key
+            ctypes.c_uint32.from_address(off + 8).value = dist
+        self.env_id = str(self.shm_id)
+        atexit.register(self.cleanup)
+
+    def cleanup(self):
+        if self._ptr:
+            _libc.shmdt(self._ptr)
+            self._ptr = 0
+        if self.shm_id >= 0:
+            _libc.shmctl(self.shm_id, IPC_RMID, None)
+            self.shm_id = -1

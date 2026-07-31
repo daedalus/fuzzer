@@ -11,6 +11,13 @@ Schedules:
 - RARE: tc_ref-based scoring (seeds owning rare edges get boosted)
 - MMOPT: Depth-based boost for recent entries
 - LIN/QUAD: Linear/quadratic falloff with fuzz count
+- GO: AFLGo-style distance-annealed boost (exp(β·(1−norm_dist)))
+- AFLGO: the exact AFLGo power schedule — symmetric distance factor
+  around 1.0 combined with a time-based cooling temperature T.
+  p = (1−norm_dist)(1−T) + 0.5T; factor = 2^(2·log2(32)·(p−0.5));
+  T follows an exp/log/lin/quad cooling over t_x minutes to
+  exploitation. Near-target seeds get up to 32× energy, far seeds as
+  little as 1/32×.
 
 Honggfuzz factors (applied multiplicatively on top of schedule scoring):
 - Novelty decay: new-edge bonus that decays over 10 minutes
@@ -33,19 +40,34 @@ class SeedScorer:
     been fuzzed relative to others.
 
     Args:
-        schedule: One of 'base', 'fast', 'coe', 'rare', 'mopt', 'lin', 'quad'.
+        schedule: One of 'base', 'fast', 'coe', 'rare', 'mopt', 'lin', 'quad',
+            'go', 'aflgo'.
         max_mult: Maximum havoc multiplier (default 16).
+        aflgo_cooling: Cooling schedule for the 'aflgo' power factor:
+            'exp', 'log', 'lin' or 'quad'.
+        t_x_minutes: Time to exploitation in minutes (AFLGo's -c).
     """
 
-    SCHEDULES = ("base", "fast", "coe", "rare", "mopt", "lin", "quad", "go")
+    SCHEDULES = ("base", "fast", "coe", "rare", "mopt", "lin", "quad", "go", "aflgo")
+    COOLING = ("exp", "log", "lin", "quad")
 
-    def __init__(self, schedule: str = "base", max_mult: int = 16):
+    def __init__(
+        self,
+        schedule: str = "base",
+        max_mult: int = 16,
+        aflgo_cooling: str = "exp",
+        t_x_minutes: float = 60.0,
+    ):
         if schedule not in self.SCHEDULES:
             raise ValueError(f"Unknown schedule: {schedule!r}. Use one of {self.SCHEDULES}")
+        if aflgo_cooling not in self.COOLING:
+            raise ValueError(f"Unknown cooling schedule: {aflgo_cooling!r}")
         self.schedule = schedule
         self.max_mult = max_mult
         self.max_factor = 32.0
         self.power_beta = 1.0
+        self.aflgo_cooling = aflgo_cooling
+        self.t_x_minutes = t_x_minutes
         # Running averages for hw perf normalization (EMA)
         self._avg_hw_instructions: float = 0.0
         self._avg_hw_branches: float = 0.0
@@ -84,6 +106,9 @@ class SeedScorer:
         avg_distance: float = 0.0,
         max_distance: float = 0.0,
         anneal_progress: float = 0.0,
+        min_distance: float = 0.0,
+        elapsed_sec: float = 0.0,
+        t_x_minutes: float = 60.0,
     ) -> float:
         """Compute the energy score for a queue entry.
 
@@ -208,6 +233,15 @@ class SeedScorer:
             perf_score *= factor / self.power_beta
         elif self.schedule == "go":
             perf_score *= self._go_factor(avg_distance, max_distance, anneal_progress)
+        elif self.schedule == "aflgo":
+            perf_score *= self._aflgo_factor(
+                avg_distance,
+                max_distance,
+                min_distance,
+                elapsed_sec,
+                t_x_minutes,
+                self.aflgo_cooling,
+            )
 
         # ── Honggfuzz power factors (applied on top of schedule) ────────
         perf_score *= self._honggfuzz_factors(
@@ -469,10 +503,7 @@ class SeedScorer:
         """
         if n_fuzz <= 0:
             return False
-        log_n = math.log2(n_fuzz)
-        if log_n > mean_log_n_fuzz and not favored:
-            return True
-        return False
+        return bool(math.log2(n_fuzz) > mean_log_n_fuzz and not favored)
 
     def _rare_factor(self, n_fuzz: int, total_execs: int, tc_ref: int) -> float:
         """RARE schedule: boost seeds that own rare edges.
@@ -500,6 +531,60 @@ class SeedScorer:
         if max_depth - depth < 5:
             return 2.0
         return 1.0
+
+    def _aflgo_factor(
+        self,
+        avg_distance: float,
+        max_distance: float,
+        min_distance: float,
+        elapsed_sec: float,
+        t_x_minutes: float,
+        cooling: str,
+    ) -> float:
+        """AFLGo's exact distance-annealed power factor (afl-fuzz.c
+        calculate_score, AFLGO_IMPL block).
+
+        Temperature T follows the chosen cooling schedule over
+        t_x_minutes (AFLGo's ``-c``); progress = elapsed/(t_x*60).
+        normalized_d = (d − min)/(max − min) over the live queue, and
+        p = (1 − normalized_d)(1 − T) + 0.5T.  The factor
+        2^(2·log2(32)·(p−0.5)) is symmetric around 1.0: at the start
+        (T=1) every seed is treated equally; late in the campaign
+        (T≈0) near-target seeds get up to 32× energy and far seeds as
+        little as 1/32×.  avg_distance < 0 means no distance data.
+
+        Returns:
+            Multiplicative factor (1.0 when no distance data).
+        """
+        if avg_distance < 0 or max_distance <= 0 or t_x_minutes <= 0:
+            return 1.0
+        progress = elapsed_sec / (t_x_minutes * 60.0)
+        T = self._cooling_temperature(progress, cooling)
+        if max_distance == min_distance:
+            normalized_d = 0.0
+        else:
+            normalized_d = min(
+                max((avg_distance - min_distance) / (max_distance - min_distance), 0.0), 1.0
+            )
+        p = (1.0 - normalized_d) * (1.0 - T) + 0.5 * T
+        return pow(2.0, 2.0 * math.log2(self.max_factor) * (p - 0.5))
+
+    @staticmethod
+    def _cooling_temperature(progress: float, cooling: str) -> float:
+        """AFLGo's temperature cooling schedules (afl-fuzz.c:4923-4947).
+
+        All four schedules coincide at progress=1 (T=1/20) by
+        construction of the log constant (exp(19/2) − 1).
+        """
+        progress = max(0.0, progress)
+        if cooling == "log":
+            # alpha = 2 and exp(19/2) − 1 = 13358.7268297
+            return 1.0 / (1.0 + 2.0 * math.log(1.0 + progress * 13358.7268297))
+        if cooling == "lin":
+            return 1.0 / (1.0 + 19.0 * progress)
+        if cooling == "quad":
+            return 1.0 / (1.0 + 19.0 * progress * progress)
+        return 1.0 / pow(20.0, progress)  # exp
 
     def _go_factor(self, avg_distance: float, max_distance: float, anneal_progress: float) -> float:
         """AFLGo-style distance-annealed energy multiplier.

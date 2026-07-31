@@ -14,7 +14,10 @@
  *   - __afl_map_reset()   — zero all entries between iterations
  *   - __sanitizer_cov_trace_pc_guard()      — compiler-inserted edge coverage
  *   - __sanitizer_cov_trace_pc_guard_init() — compiler-inserted edge coverage
- *   - __sancov_lowest_stack()               — LLVM stack depth tracking
+ *   - __sanitizer_cov_trace_pc()            — trace-pc distance builds
+ *                                             (__AFL_DISTANCE_MODE)
+ *   (no __sancov_lowest_stack definition — the sanitizer runtimes own
+ *   that symbol as a TLS variable; see the stack-tracking note below)
  *
  * Metadata layout (24 bytes at front of SHM):
  *   offset 0: uint32 stack_depth   (max stack depth in bytes)
@@ -22,10 +25,18 @@
  *   offset 8: uint64 path_hash     (rolling: hash = hash * 31 ^ edge_id)
  *   offset 16: uint64 edge_count   (monotonic new-slot insertion count)
  *   offset 24+:  edge table ({edge_id, count} × map_size entries)
+ *   after table:  distance tail (u64 dist_sum + u64 dist_count) in
+ *                 __AFL_DISTANCE_MODE builds
  *
  * Compile target with:
  *   gcc -O2 -g -shared -fPIC -include afl_shim.c -o target.so target.c -lpng -lz
  */
+#ifdef __AFL_DISTANCE_MODE
+/* dladdr/Dl_info need _GNU_SOURCE before any system header. */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE 1
+#endif
+#endif
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -35,6 +46,11 @@
 #include <unistd.h>
 #include <sys/ipc.h>
 #include <sys/shm.h>
+
+#ifdef __AFL_DISTANCE_MODE
+#include <dlfcn.h>
+static void __afl_map_dist_shm(void);
+#endif
 
 /* ── 8-byte hash table entry ──────────────────────────────────────────
  * edge_id == 0 means empty slot.  count is a simple saturating counter
@@ -97,6 +113,10 @@ void __afl_map_shm(void) {
     __afl_stack_depth = (uint32_t *)(base + 0);
     __afl_path_hash   = (uint64_t *)(base + 8);
     __afl_edge_count  = (uint64_t *)(base + 16);
+
+#ifdef __AFL_DISTANCE_MODE
+    __afl_map_dist_shm();
+#endif
 }
 
 /* ── Edge recording (open-addressing hash table) ───────────────────────
@@ -143,15 +163,20 @@ static inline void __afl_map_edge(uint32_t cur_loc) {
     __afl_prev_loc = cur_loc >> 1;
 }
 
-/* ── Compiler-inserted edge coverage callbacks ──────────────────────── */
+/* ── Compiler-inserted edge coverage callbacks ────────────────────────
+ * Hidden visibility: PIE builds call these via the PLT, so a libasan
+ * LD_PRELOAD (the fuzzer-tool CLI preloads it for ASAN targets) would
+ * interpose its own weak stubs over ours.  Hidden visibility forces
+ * direct call instructions within the target, bypassing PLT resolution
+ * entirely (same pattern as the abort() override below). */
 
-__attribute__((visibility("default")))
+__attribute__((visibility("hidden")))
 void __sanitizer_cov_trace_pc_guard(uint32_t *guard) {
     if (!guard || *guard == 0) return;
     __afl_map_edge(*guard);
 }
 
-__attribute__((visibility("default")))
+__attribute__((visibility("hidden")))
 void __sanitizer_cov_trace_pc_guard_init(uint32_t *start, uint32_t *stop) {
     static uint32_t guard_counter;
     if (start == stop || *start) return;
@@ -159,22 +184,104 @@ void __sanitizer_cov_trace_pc_guard_init(uint32_t *start, uint32_t *stop) {
         *g = ++guard_counter;
 }
 
-/* ── LLVM stack depth tracking ────────────────────────────────────────
- * When the target is compiled with -fsanitize=address, ASAN provides
- * __sancov_lowest_stack as a TLS symbol — we must NOT define it or
- * the linker fails with TLS/non-TLS type mismatch.  Our definition
- * is used only for non-ASAN builds (standalone, ptrace mode, etc.). */
+/* ── AFLGo distance channel (__AFL_DISTANCE_MODE builds only) ─────────
+ *
+ * Distance builds compile the target with -fsanitize-coverage=trace-pc
+ * instead of trace-pc-guard, so __sanitizer_cov_trace_pc() receives the
+ * PC of every instrumented site.  We (1) record the edge (PC-based),
+ * and (2) look up the block's AFLGo distance in a table the fuzzer
+ * uploads to a second SHM segment (__AFL_DIST_SHM_ID), accumulating
+ * sum/count written to the tail of the coverage SHM at reset.
+ *
+ * The distance table keys are block addresses relative to the object's
+ * load base; the runtime key is pc - dladdr_base.  Entries with
+ * key == 0 are empty slots.  Blocks without a table entry do not
+ * contribute to the average (AFLGo semantics).                       */
 
-#if !defined(__SANITIZE_ADDRESS__) && !defined(__SANITIZE_THREAD__) && !defined(__SANITIZE_UNDEFINED__)
-__attribute__((visibility("default")))
-void __sancov_lowest_stack(uint32_t addr) {
-    /* addr is the stack address of the current instrumentation point.
-     * Track the minimum (deepest) stack address seen this iteration. */
-    if (__afl_max_stack_depth == 0 || addr < __afl_max_stack_depth) {
-        __afl_max_stack_depth = addr;
+#ifdef __AFL_DISTANCE_MODE
+
+/* Layout must match DistanceTableShm (Python): 4-byte count header then
+ * 12-byte entries (u64 key, u32 dist).  Packed keeps the C stride at 12
+ * — without it the struct pads to 16 and every entry misreads. */
+struct __afl_dist_entry {
+    uint64_t key;
+    uint32_t dist;
+} __attribute__((packed));
+
+static uint32_t  *__afl_dist_count = NULL;  /* entries + count at segment head */
+static struct __afl_dist_entry *__afl_dist_table = NULL;
+static uint64_t   __afl_base = 0;           /* dladdr-derived object base */
+static uint64_t   __afl_dist_sum = 0;
+static uint64_t   __afl_dist_hits = 0;
+
+static void __afl_map_dist_shm(void) {
+    char *id = getenv("__AFL_DIST_SHM_ID");
+    if (!id) return;
+    int shmid = atoi(id);
+    if (shmid <= 0) return;
+    void *p = shmat(shmid, NULL, 0);
+    if (p == (void *)-1) return;
+    __afl_dist_count = (uint32_t *)p;
+    __afl_dist_table = (struct __afl_dist_entry *)((uint8_t *)p + 4);
+}
+
+/* Hidden visibility: same PLT-interposition rationale as the guard
+ * callbacks — the CLI's libasan LD_PRELOAD must not shadow this. */
+__attribute__((visibility("hidden")))
+void __sanitizer_cov_trace_pc(void) {
+    uintptr_t pc = (uintptr_t)__builtin_return_address(0);
+    if (__afl_base == 0) {
+        Dl_info info;
+        if (dladdr((void *)pc, &info) && info.dli_fbase)
+            __afl_base = (uintptr_t)info.dli_fbase;
+        else
+            __afl_base = 1;  /* dladdr failed — treat the PC as absolute */
+    }
+    uint64_t key = (uint64_t)pc - __afl_base;
+
+    /* Edge coverage: PC-based (prev_loc ^ cur_loc, same sparse table). */
+    __afl_map_edge((uint32_t)(key >> 1));
+
+    if (!__afl_dist_table || !__afl_dist_count) return;
+    uint32_t size = *__afl_dist_count;
+    if (size == 0) return;
+    uint32_t pos = (uint32_t)(key % size);
+    for (uint32_t i = 0; i < size; i++) {
+        uint32_t idx = (pos + i) % size;
+        uint64_t k = __afl_dist_table[idx].key;
+        if (k == 0) break;  /* empty slot — no distance for this block */
+        if (k == key) {
+            __afl_dist_sum += __afl_dist_table[idx].dist;
+            __afl_dist_hits++;
+            break;
+        }
     }
 }
-#endif
+
+#endif /* __AFL_DISTANCE_MODE */
+
+#ifdef __AFL_DISTANCE_MODE
+/* Write the accumulated distance sum/count to the SHM tail (16 bytes
+ * past the edge table; the Python side always allocates them).
+ * count==0 means "no distance data" for the reader. */
+static void __afl_write_distance_tail(void) {
+    if (__afl_area) {
+        uint64_t *dist_sum = (uint64_t *)((uint8_t *)__afl_area +
+                                          __afl_map_size * sizeof(struct __afl_entry));
+        *dist_sum = __afl_dist_sum;
+        *(dist_sum + 1) = __afl_dist_hits;
+    }
+}
+#endif /* __AFL_DISTANCE_MODE */
+
+/* ── LLVM stack depth tracking ────────────────────────────────────────
+ * The sanitizer runtimes (ASAN/TSAN/UBSAN coverage) provide
+ * __sancov_lowest_stack as a TLS variable that they call themselves; we
+ * must NOT define it — under clang the sanitizer runtime is linked for
+ * any sanitizer or sanitize-coverage build, and a function
+ * definition with the same name collides with the runtime's TLS
+ * variable at link time ("TLS definition ... mismatches non-TLS").
+ * Nothing outside the runtimes calls it, so omitting it is safe. */
 
 /* ── Reset (zero all entries between iterations) ───────────────────────
  * Also writes accumulated metadata (stack_depth, path_hash) to the
@@ -195,12 +302,29 @@ void __afl_map_reset(void) {
         if (__afl_edge_count) {
             *__afl_edge_count = __afl_total_edge_count;
         }
+#ifdef __AFL_DISTANCE_MODE
+        __afl_write_distance_tail();
+#endif
     }
     __afl_prev_loc = 0;
     __afl_path_hash_acc = 0;
     __afl_max_stack_depth = 0;
     __afl_iter_edge_count = 0;
+#ifdef __AFL_DISTANCE_MODE
+    __afl_dist_sum = 0;
+    __afl_dist_hits = 0;
+#endif
 }
+
+#ifdef __AFL_DISTANCE_MODE
+/* One-shot subprocess runs never call __afl_map_reset — write the tail
+ * at process exit instead.  (Persistent/in-process loops call reset per
+ * iteration and the destructor only repeats the final values.) */
+__attribute__((destructor))
+static void __afl_write_distance_tail_exit(void) {
+    __afl_write_distance_tail();
+}
+#endif /* __AFL_DISTANCE_MODE */
 
 /* ── Crash signal handler ─────────────────────────────────────────────
  * Uses sigsetjmp/siglongjmp instead of the traditional restore-and-re-raise
