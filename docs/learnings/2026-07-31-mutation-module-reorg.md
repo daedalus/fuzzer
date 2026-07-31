@@ -26,5 +26,8 @@ The naming conflict between `mutations.py` (generic module) and `mutations/` (ne
 - `ruff format` and `ruff check` clean on changed files
 - No stale references to old module paths remain in `src/` or `tests/`
 
+## Follow-up (2026-07-31, same day)
+The original commit was a **copy, not a move** — the 8 flat `core/[format]_mutations.py` files plus `core/mutations.py` stayed in the tree, byte-identical (except a self-referential docstring path in `png_mutations.py`). They were verified as unreferenced duplicates and removed with `git rm` in a follow-up commit. Lesson: when a commit message says "move", `git show --stat` should show deletions of the old paths — if it only shows additions, the old files are still live.
+
 ## Generalizes to
 This pattern (flat format-specific modules → subpackage) applies whenever a codebase accumulates many `*_mutations.py` files in a single directory. The key pitfall is always the naming conflict between a module and a package of the same name — the generic module must be renamed or moved into the package to avoid shadowing.
