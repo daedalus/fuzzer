@@ -5,7 +5,12 @@ import random
 
 import pytest
 
-from fuzzer_tool.core.allan_variance import AllanVarianceDetector, DispersionIndex, chi2_cdf, chi2_sf
+from fuzzer_tool.core.allan_variance import (
+    AllanVarianceDetector,
+    DispersionIndex,
+    chi2_cdf,
+    chi2_sf,
+)
 
 
 def _white_noise(n: int, scale: float = 1.0, seed: int = 42) -> list[float]:

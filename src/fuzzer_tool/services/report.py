@@ -72,6 +72,7 @@ def generate_report(fuzzer, corpus_dir: str, crashes_dir: str) -> str:
     sections.append(_fuzzing_strategy(fuzzer))
     sections.append(_execution_time_analysis(fuzzer))
     sections.append(_distribution_diagnostics(fuzzer))
+    sections.append(_spectral_diagnostics(fuzzer))
     sections.append(_mdl_codelength(fuzzer))
     sections.append(_smt_solver_activity(fuzzer))
     sections.append(_seed_contribution(fuzzer))
@@ -660,6 +661,63 @@ def _distribution_diagnostics(f) -> str:
     return "\n".join(lines)
 
 
+def _spectral_diagnostics(f) -> str:
+    """Spectral (FFT) diagnostics: periodic components in key time series.
+
+    Two scans, both via rfft magnitude spectra:
+    - Exec-time series (one sample per recorded execution) — a genuine
+      periodic component would be unusual and worth flagging.
+    - Discovery-rate series (first-differences of cumulative edges per sync
+      interval) — a peak at a short period suggests corpus-sync artifacts
+      imprinting fake discovery waves, not real coverage breakthroughs.
+    """
+    if not _HAS_NUMPY:
+        return ""
+    from fuzzer_tool.core.periodicity import detect_periodicity
+
+    lines = ["", "--- Spectral Diagnostics ---"]
+    has_data = False
+
+    # Execution-time series (samples = one per recorded execution)
+    try:
+        tracker = f._exec_time_tracker
+        times = list(getattr(tracker, "_times", []) or [])
+        if len(times) >= 50:
+            has_data = True
+            res = detect_periodicity([float(t) for t in times], min_samples=50)
+            if res.significant:
+                lines.append(
+                    f"  Exec time:      PERIODIC — dominant period {res.dominant_period:.1f} "
+                    f"samples (peak/median {res.peak_strength:.1f}x at bin {res.peak_bin})"
+                )
+            else:
+                lines.append("  Exec time:      no significant periodic component")
+    except (TypeError, AttributeError):
+        pass
+
+    # Discovery-rate series: first-differences of cumulative edges per sync interval
+    try:
+        history = f._discovery_history
+        if history and len(history) >= 51:
+            has_data = True
+            deltas = [b - a for (_, a), (_, b) in zip(history[:-1], history[1:], strict=True)]
+            res = detect_periodicity([float(d) for d in deltas], min_samples=50)
+            if res.significant:
+                lines.append(
+                    f"  Discovery rate: PERIODIC — dominant period {res.dominant_period:.1f} "
+                    f"sync intervals (peak/median {res.peak_strength:.1f}x at bin "
+                    f"{res.peak_bin}); possible corpus-sync artifact"
+                )
+            else:
+                lines.append("  Discovery rate: no significant periodic component")
+    except (TypeError, AttributeError):
+        pass
+
+    if not has_data:
+        return ""
+    return "\n".join(lines)
+
+
 def _corpus_health(f) -> str:
     """Corpus health: entropy, lineage depth, duplicate rate."""
     if not f.seed_meta:
@@ -1031,7 +1089,7 @@ def _format_learning(f) -> str:
             for field in summary["fields"]:
                 ops = ", ".join(sorted(field["sensitive_ops"].keys())[:4])
                 if len(field["sensitive_ops"]) > 4:
-                    ops += f" +{len(field['sensitive_ops'])-4}"
+                    ops += f" +{len(field['sensitive_ops']) - 4}"
                 lines.append(
                     f"    {field['offset']:>8d}  {field['width']:>5d}  {field['type']:>10s}  "
                     f"{field['confidence']:>5.2f}  {field['observations']:>4d}  {field['controlled_edges']:>6d}  {ops}"

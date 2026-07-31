@@ -38,6 +38,7 @@ from fuzzer_tool.adapters.filesystem import (
     save_irreplaceable,
     save_to_corpus,
 )
+from fuzzer_tool.core.periodicity import estimate_record_size
 
 log = logging.getLogger(__name__)
 
@@ -72,6 +73,7 @@ class CorpusManager:
                 "edge_bitmap": bytearray(0),
                 "redqueen_offsets": [],
                 "added_at": now,
+                "record_stride": estimate_record_size(seed),
             }
         from fuzzer_tool.core.edge_tracker import EdgeTracker
 
@@ -126,6 +128,7 @@ class CorpusManager:
                 "parent_sites": meta.get("parent_sites", []),
                 "new_edge_count": meta.get("new_edge_count", 0),
                 "coverage_edges_baseline": meta.get("coverage_edges_baseline", 0),
+                "record_stride": meta.get("record_stride", None),
             }
         try:
             f._state_path.write_text(json.dumps(state, separators=(",", ":")))
@@ -187,6 +190,7 @@ class CorpusManager:
                         "parent_sites": sm.get("parent_sites", []),
                         "new_edge_count": sm.get("new_edge_count", 0),
                         "coverage_edges_baseline": sm.get("coverage_edges_baseline", 0),
+                        "record_stride": sm.get("record_stride", None),
                     }
                 )
                 rm_ser = sm.get("redqueen_matches", [])
@@ -324,6 +328,7 @@ class CorpusManager:
                 "added_at": time.time(),
                 "lineage_depth": parent_depth + 1 if parent else 0,
                 "hamming_distance": f._last_hamming_distance,
+                "record_stride": estimate_record_size(data),
             }
             # Lineage edge: parent key + the ops/sites that produced this seed.
             # Only recorded when a real parent exists (interesting/Metropolis

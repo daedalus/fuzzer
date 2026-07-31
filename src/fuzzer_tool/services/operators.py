@@ -1059,16 +1059,24 @@ class OperatorEngine:
             if result is not None:
                 return bytearray(result[: self.f.max_len])
 
-    def _op_chunk_shuffle(self, buf, _byte_idx, _data):
+    def _op_chunk_shuffle(self, buf, _byte_idx, data):
         """Shuffle fixed-size chunks, preserving chunk boundaries.
 
         Ported from honggfuzz mangle_ChunkShuffle: divides input into 1-4 byte
         chunks and swaps random pairs. Important for width-sensitive binary formats.
+        When the parent seed has an inferred record stride, whole stride-sized
+        records are shuffled instead — used with probability 0.5 so the operator
+        does not over-latch on a single inferred stride.
         """
         from fuzzer_tool.core.mutations import chunk_shuffle
 
         if buf and len(buf) >= 8:
-            return bytearray(chunk_shuffle(bytes(buf), rng=self.f._rand_pool)[: self.f.max_len])
+            rng = self.f._rand_pool
+            parent_meta = self.f.seed_meta.get(data)
+            stride = None
+            if parent_meta and rng.random() < 0.5:
+                stride = parent_meta.get("record_stride")
+            return bytearray(chunk_shuffle(bytes(buf), rng=rng, stride=stride)[: self.f.max_len])
 
     def _op_block_shuffle_variable(self, buf, _byte_idx, _data):
         """Shuffle variable-width blocks using order-statistics spacings trick.
@@ -1136,13 +1144,15 @@ class OperatorEngine:
                 ]
             )
 
-    def _op_grammar_tree_mutate(self, buf, _byte_idx, _data):
+    def _op_grammar_tree_mutate(self, buf, _byte_idx, data):
         if self.f.grammar:
             from fuzzer_tool.core.grammar import TreeMutator
 
             if not hasattr(self.f, "_tree_mutator"):
                 self.f._tree_mutator = TreeMutator(self.f.grammar)
-            tree = self.f._tree_mutator.parse(bytes(buf))
+            parent_meta = self.f.seed_meta.get(data)
+            stride = parent_meta.get("record_stride") if parent_meta else None
+            tree = self.f._tree_mutator.parse(bytes(buf), chunk_size=stride)
             return bytearray(
                 self.f._tree_mutator.mutate_tree(
                     tree, max_len=self.f.max_len, rng=self.f._rand_pool
@@ -1212,12 +1222,15 @@ class OperatorEngine:
             mutated = self.f._gzip_mutator._generate_random_gzip(max_len=self.f.max_len, rng=rng)
         return bytearray(mutated[: self.f.max_len])
 
-    def _op_bmp_chunk_mutate(self, buf, _byte_idx, _data):
+    def _op_bmp_chunk_mutate(self, buf, _byte_idx, data):
         from fuzzer_tool.core.mutations.bmp import BmpMutator, parse_bmp
 
         if not hasattr(self.f, "_bmp_mutator"):
             self.f._bmp_mutator = BmpMutator()
         self.f._bmp_mutator.use_wfc = getattr(self.f, "_wfc_enabled", False)
+        parent_meta = self.f.seed_meta.get(data)
+        stride = parent_meta.get("record_stride") if parent_meta else None
+        self.f._bmp_mutator.tile_bytes = stride
         rng = self.f._rand_pool
         if parse_bmp(bytes(buf)):
             mutated = self.f._bmp_mutator.mutate(bytes(buf), max_len=self.f.max_len, rng=rng)

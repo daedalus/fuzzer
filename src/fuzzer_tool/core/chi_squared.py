@@ -190,10 +190,21 @@ def chi_squared_critical_value(dof: int, alpha: float = 0.05) -> float:
     import math
 
     # Approximate normal quantile for alpha (coarse)
-    z_map = {0.995: 2.576, 0.99: 2.326, 0.975: 1.960, 0.95: 1.645,
-             0.90: 1.282, 0.80: 0.842, 0.50: 0.0,
-             0.20: -0.842, 0.10: -1.282, 0.05: -1.645,
-             0.025: -1.960, 0.01: -2.326, 0.005: -2.576}
+    z_map = {
+        0.995: 2.576,
+        0.99: 2.326,
+        0.975: 1.960,
+        0.95: 1.645,
+        0.90: 1.282,
+        0.80: 0.842,
+        0.50: 0.0,
+        0.20: -0.842,
+        0.10: -1.282,
+        0.05: -1.645,
+        0.025: -1.960,
+        0.01: -2.326,
+        0.005: -2.576,
+    }
     # Find the two closest alphas and interpolate z
     sorted_alphas = sorted(z_map.keys())
     z_low, z_high = -2.576, 2.576
@@ -289,8 +300,7 @@ def chi_squared_goodness_of_fit(
         dof = 1
 
     chi2 = sum(
-        (o - e) * (o - e) / e if e > 0 else 0.0
-        for o, e in zip(observed, expected, strict=True)
+        (o - e) * (o - e) / e if e > 0 else 0.0 for o, e in zip(observed, expected, strict=True)
     )
     p = chi_squared_pvalue(chi2, dof)
     return chi2, p, dof
@@ -491,8 +501,7 @@ class ContingencyTable:
         obs, exp = self.observed, self.expected
         res = self.residuals
         return [
-            [res[r][c] / math.sqrt(exp[r][c]) if exp[r][c] > 0 else 0.0
-             for c in range(len(obs[0]))]
+            [res[r][c] / math.sqrt(exp[r][c]) if exp[r][c] > 0 else 0.0 for c in range(len(obs[0]))]
             for r in range(len(obs))
         ]
 

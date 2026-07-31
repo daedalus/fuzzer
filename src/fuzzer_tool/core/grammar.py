@@ -422,13 +422,16 @@ class TreeMutator:
             "array": (b"[", b"]"),
         }
 
-    def parse(self, data: bytes, rule: str | None = None) -> TreeNode:
+    def parse(
+        self, data: bytes, rule: str | None = None, chunk_size: int | None = None
+    ) -> TreeNode:
         """Heuristic parse of input bytes into a tree structure.
 
         Uses grammar rule knowledge to identify structural boundaries.
         For well-known formats (JSON, XML), uses delimiter matching.
         For unknown formats, segments by fixed-size chunks from grammar
-        quantifiers.
+        quantifiers (or ``chunk_size`` when given, e.g. an inferred record
+        stride from ``estimate_record_size``).
         """
         if rule is None:
             rule = next(iter(self.grammar.rules)) if self.grammar.rules else "root"
@@ -442,7 +445,7 @@ class TreeMutator:
             return tree
 
         # Fallback: segment by grammar-inferred chunk sizes
-        return self._parse_chunked(data, rule)
+        return self._parse_chunked(data, rule, chunk_size)
 
     def _parse_structured(self, data: bytes, rule: str) -> TreeNode | None:
         """Parse structured formats using delimiter matching."""
@@ -524,10 +527,11 @@ class TreeMutator:
             pass
         return "value"
 
-    def _parse_chunked(self, data: bytes, rule: str) -> TreeNode:
+    def _parse_chunked(self, data: bytes, rule: str, chunk_size: int | None = None) -> TreeNode:
         """Fallback: segment input into fixed-size chunks based on grammar."""
-        # Infer chunk size from grammar quantifiers
-        chunk_size = self._infer_chunk_size()
+        # Infer chunk size from grammar quantifiers, unless a record stride
+        # (from periodicity detection) was supplied.
+        chunk_size = chunk_size or self._infer_chunk_size()
         if chunk_size <= 0 or len(data) <= chunk_size:
             return TreeNode(rule=rule, data=data)
 

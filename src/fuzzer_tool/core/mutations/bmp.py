@@ -190,6 +190,7 @@ class BmpMutator:
     _rng = random
 
     use_wfc: bool = False  # set to True by Fuzzer when --wfc is active
+    tile_bytes: int | None = None  # WFC tile width from record-stride inference
 
     def mutate(self, data: bytes, max_len: int = 4096, rng=None) -> bytes:
         """Apply one structure-aware BMP mutation."""
@@ -269,7 +270,7 @@ class BmpMutator:
         if not info.pixel_data:
             return info
         if self.use_wfc and abs(info.width) >= 2 and abs(info.height) >= 2:
-            return self._wfc_pixels(info, max_len)
+            return self._wfc_pixels(info, max_len, self.tile_bytes)
         pixels = bytearray(info.pixel_data)
         for _ in range((self._rng or random).randint(1, min(8, len(pixels)))):
             idx = (self._rng or random).randint(0, len(pixels) - 1)
@@ -277,12 +278,17 @@ class BmpMutator:
         info.pixel_data = bytes(pixels)
         return info
 
-    def _wfc_pixels(self, info: BmpInfo, max_len: int) -> BmpInfo:
+    def _wfc_pixels(self, info: BmpInfo, max_len: int, tile_bytes: int | None = None) -> BmpInfo:
         """Generate pixel data using 1D Wave Function Collapse.
 
         Treats each row as a sequence of pixel-sample tiles, uses WFC
         to generate row content with locally-coherent color transitions.
         Falls back to random bytes if WFC fails.
+
+        When ``tile_bytes`` is given (an inferred record stride), tiles are
+        that many bytes wide instead of single pixels — preserving
+        record-aligned structure in the pixel stream. Only used when it
+        divides the row stride evenly.
         """
         if not info.pixel_data:
             return info
@@ -293,30 +299,35 @@ class BmpMutator:
         if w < 2 or h < 2 or len(info.pixel_data) < stride * 2:
             return info
 
+        sample_bytes = tile_bytes if (tile_bytes and stride % tile_bytes == 0) else bpp
+        tiles_per_row = stride // sample_bytes
+        if tiles_per_row < 2:
+            return info
+
         from fuzzer_tool.core.wfc import AdjacencyTable, Tile, WaveGrid
 
-        # Build per-pixel tiles from the first row (used as tile alphabet)
+        # Build tiles from the first row (used as tile alphabet)
         pixels = info.pixel_data
         unique_tiles: dict[bytes, int] = {}
-        for x in range(w):
-            start = x * bpp
-            sample = pixels[start : start + bpp]
+        for x in range(tiles_per_row):
+            start = x * sample_bytes
+            sample = pixels[start : start + sample_bytes]
             unique_tiles[sample] = unique_tiles.get(sample, 0) + 1
 
         tile_list = [Tile(name=t, weight=c) for t, c in unique_tiles.items()]
 
         # Build adjacency from existing pixel data
         adj = AdjacencyTable()
-        for x in range(w - 1):
-            a = pixels[x * bpp : (x + 1) * bpp]
-            b = pixels[(x + 1) * bpp : (x + 2) * bpp]
+        for x in range(tiles_per_row - 1):
+            a = pixels[x * sample_bytes : (x + 1) * sample_bytes]
+            b = pixels[(x + 1) * sample_bytes : (x + 2) * sample_bytes]
             if a in unique_tiles and b in unique_tiles:
                 adj.add_forward(a, b)
 
         # Generate each row via WFC
         new_pixels = bytearray()
         for row_y in range(h):
-            wave = WaveGrid(tile_list, adj, width=w, height=1)
+            wave = WaveGrid(tile_list, adj, width=tiles_per_row, height=1)
             row_result = wave.run(
                 seed=(self._rng or random).randint(0, 2**31),
                 max_restarts=2,
@@ -328,10 +339,10 @@ class BmpMutator:
                     if tile_name is not None:
                         row_data.extend(tile_name)
                     else:
-                        row_data.extend(pixels[row_y * stride : row_y * stride + bpp])
+                        row_data.extend(pixels[row_y * stride : row_y * stride + sample_bytes])
             else:
                 # Fallback: copy original row
-                row_data.extend(pixels[row_y * stride : row_y * stride + bpp])
+                row_data.extend(pixels[row_y * stride : (row_y + 1) * stride])
             # Pad to stride
             while len(row_data) < stride:
                 row_data.append(0)

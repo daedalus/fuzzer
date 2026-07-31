@@ -86,6 +86,18 @@ class FormatLearner:
         self._transitions_since_backtest: int = 0
         self.z_score_threshold = z_score_threshold
         self._delta_moments: RunningMoments = RunningMoments()
+        # Byte-level record stride inferred from the seed's raw bytes
+        # (estimate_record_size) — a structural prior for field classification.
+        self.record_stride: int | None = None
+
+    def set_record_stride(self, stride: int | None):
+        """Set the record-stride structural prior from periodicity detection.
+
+        A stride-aligned hypothesis (width equal to the stride, or starting at
+        a stride boundary) is more likely a real format field — classification
+        boosts its confidence slightly.
+        """
+        self.record_stride = stride
 
     def record_transition(
         self,
@@ -194,6 +206,12 @@ class FormatLearner:
             if h.observations < 3:
                 continue
 
+            # Structural prior: stride-aligned hypotheses are likelier real fields
+            if self.record_stride and (
+                h.width == self.record_stride or h.offset % self.record_stride == 0
+            ):
+                h.confidence = min(1.0, h.confidence + 0.05)
+
             if h.offset == 0 and h.confidence > 0.5:
                 h.field_type = "magic"
                 continue
@@ -301,6 +319,7 @@ class FormatLearner:
             "backtest_passes": self.backtest_passes,
             "backtest_fails": self.backtest_fails,
             "model_version": self.format_model_version,
+            "record_stride": self.record_stride,
             "fields": fields,
         }
 

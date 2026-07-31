@@ -452,19 +452,28 @@ def block_shuffle_variable(data: bytes, rng=None) -> bytes:
     return b"".join(blocks)
 
 
-def chunk_shuffle(data: bytes, rng=None) -> bytes:
+def chunk_shuffle(data: bytes, rng=None, stride: int | None = None) -> bytes:
     """Shuffle fixed-size chunks, preserving chunk boundaries.
 
     Divides the input into chunks of 1-4 bytes (chosen randomly), then
     swaps random chunk pairs.  Useful for binary formats with fixed-width
     fields where byte-level shuffling would break alignment.
 
+    When ``stride`` is given (an inferred record size, e.g. from
+    ``estimate_record_size``), chunks are stride-sized instead — this swaps
+    whole records, which keeps record-internal field alignment intact while
+    reordering records.
+
     Ported from honggfuzz mangle_ChunkShuffle.
     """
     if len(data) < 8:
         return data
     r = _get_rng(rng)
-    chunk_size = r.randint(1, 4)
+    chunk_size = (
+        stride
+        if (stride is not None and stride >= 2 and len(data) // stride >= 2)
+        else r.randint(1, 4)
+    )
     num_chunks = len(data) // chunk_size
     if num_chunks < 2:
         return data

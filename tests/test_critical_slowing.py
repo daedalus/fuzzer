@@ -168,9 +168,7 @@ class TestCoverageHomogeneityDetector:
         assert r["homogeneous"] is True
 
     def test_custom_threshold(self):
-        d = CoverageHomogeneityDetector(
-            num_columns=3, window_size=10, homogeneity_p_threshold=0.05
-        )
+        d = CoverageHomogeneityDetector(num_columns=3, window_size=10, homogeneity_p_threshold=0.05)
         for _ in range(10):
             d.observe([10, 20, 30])
         r = d.is_homogeneous()

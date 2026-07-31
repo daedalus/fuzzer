@@ -2225,6 +2225,10 @@ class Fuzzer:
                 if hasattr(self._edge_tracker, "_global_edge_hits")
                 else 0
             )
+            parent_meta = self.seed_meta.get(self._last_parent_seed)
+            stride = parent_meta.get("record_stride") if parent_meta else None
+            if stride != self._format_learner.record_stride:
+                self._format_learner.set_record_stride(stride)
             self._format_learner.record_transition(
                 input_bytes=mutated,
                 mutation_op=self._last_ops_used[0] if self._last_ops_used else "unknown",

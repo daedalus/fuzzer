@@ -254,6 +254,11 @@ class PngChunkMutator:
         valid ordering, preserves original chunk data in the new order.
         Falls back to random shuffle if WFC fails or no valid ordering
         found. Always preserves IHDR-first and IEND-last.
+
+        TODO(periodicity): record_stride does not apply here — PNG chunk
+        ordering is a type-level semantic constraint (IHDR-first, IEND-last,
+        IDAT adjacency), not a byte-aligned record layout, so there is no
+        record-size prior to thread through WFC.
         """
         if len(chunks) < 3:
             return serialize_png_chunks(chunks)[:max_len]
