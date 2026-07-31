@@ -55,7 +55,6 @@ class TestBoltzmannSelection:
 
     def test_boltzmann_weight_cold_amplifies(self):
         """Ratio of rare/common weights is higher at T=0.1 than at T=1.0."""
-        sp = SeedPicker(type("o", (object,), {"__init__": lambda s: None})())
         f_hot = self._make_fuzzer_mock(temperature=1.0)
         f_cold = self._make_fuzzer_mock(temperature=0.1)
 
@@ -80,7 +79,6 @@ class TestBoltzmannSelection:
 
     def test_boltzmann_weight_hot_near_uniform(self):
         """At T=1.0, the max/min weight ratio across seeds is bounded (< 100:1)."""
-        sp = SeedPicker(type("o", (object,), {"__init__": lambda s: None})())
         f = self._make_fuzzer_mock(temperature=1.0, corpus_size=5)
         # Override fuzz_counts across a wider range
         for i, seed in enumerate(f.corpus):
@@ -148,3 +146,64 @@ class TestBoltzmannSelection:
             available.append("boltzmann")
 
         assert "boltzmann" in available
+
+
+class TestAflgoEloStrategy:
+    """AFLGo distance-pure seed strategy (Elo-arbitrated 'aflgo' arm)."""
+
+    def _make_fuzzer_mock(self, corpus_size=2, distances=None):
+        """Minimal Fuzzer-like object with enough attrs for _pick_aflgo_seed()."""
+
+        class _Distance:
+            max_distance = 10.0
+
+        class MockFuzzer:
+            corpus = [f"seed_{i}".encode() for i in range(corpus_size)]
+            seed_meta = {}
+            _distance = _Distance()
+
+            def _seed_key(self, data):
+                return data.hex()
+
+        f = MockFuzzer()
+        distances = distances or {}
+        for seed in f.corpus:
+            f.seed_meta[seed] = {"avg_distance": distances.get(seed)}
+        return f
+
+    def test_aflgo_pick_prefers_near_target(self):
+        """Near-target seed (avg 0.5) is picked far more often than the far one."""
+        f = self._make_fuzzer_mock(distances={b"seed_0": 0.5, b"seed_1": 9.5})
+        sp = SeedPicker(type("o", (object,), {"__init__": lambda s: None})())
+        sp.f = f
+        random.seed(1234)
+        near = sum(1 for _ in range(100) if sp._pick_aflgo_seed() == b"seed_0")
+        # P(near)/P(far) = exp(-2*0.05)/exp(-2*0.95) ≈ 6; chance floor is 50
+        assert near > 60, f"near-target seed picked only {near}/100"
+
+    def test_aflgo_seed_without_distance_counts_as_far(self):
+        """A seed with no distance data must not beat a near-target seed."""
+        f = self._make_fuzzer_mock(distances={b"seed_0": 0.5, b"seed_1": None})
+        sp = SeedPicker(type("o", (object,), {"__init__": lambda s: None})())
+        sp.f = f
+        random.seed(99)
+        near = sum(1 for _ in range(100) if sp._pick_aflgo_seed() == b"seed_0")
+        assert near > 60
+
+    def test_aflgo_elo_registered(self):
+        """In directed mode, the Elo pool dispatches to the 'aflgo' arm."""
+        f = self._make_fuzzer_mock()
+        f.shm_cov = None
+        f._use_elo = True
+        f._elo = type("o", (object,), {"select_strategy": lambda s, a: "aflgo"})()
+        f.markov_generate = f.markov_trained = False
+        f._use_bayesian = False
+        f._use_boltzmann = False
+        f.ga = f.qea = None
+        f._profile = type("o", (object,), {"format_signature": None})()
+
+        sp = SeedPicker(type("o", (object,), {"__init__": lambda s: None})())
+        sp.f = f
+        picked = sp._pick_seed_elo()
+        assert picked in f.corpus
+        assert sp.f._seed_strategy == "aflgo"

@@ -46,6 +46,8 @@ class SeedPicker:
             available.append("markov")
         if getattr(f, "_use_boltzmann", False):
             available.append("boltzmann")
+        if getattr(f, "_distance", None) is not None:
+            available.append("aflgo")
 
         if not available:
             return None
@@ -65,9 +67,40 @@ class SeedPicker:
                 self._pick_markov_seed() if f.markov_generate and f.markov_trained else None
             ),
             "boltzmann": lambda: self._pick_boltzmann_seed(),
+            "aflgo": lambda: self._pick_aflgo_seed() if f._distance else None,
         }
         handler = strategy_map.get(strategy)
         return handler() if handler else None
+
+    def _pick_aflgo_seed(self) -> bytes | None:
+        """Distance-pure seed picker — the Elo-arbitrated 'aflgo' arm.
+
+        P(seed) ∝ exp(-2 · norm_dist) with norm_dist = avg_distance /
+        max_distance; seeds without distance data count as farthest.
+        This is deliberately more aggressive about near-target seeds
+        than the generic weighted arm (which blends distance with
+        speed/size/entropy), giving Elo a distinct strategy to rate.
+        """
+        f = self.f
+        if not f.corpus or not f._distance:
+            return None
+        max_d = f._distance.max_distance
+        dists = []
+        for seed in f.corpus:
+            meta = f.seed_meta.get(seed, {})
+            seed_dist = meta.get("avg_distance")
+            norm = 1.0 if seed_dist is None or max_d <= 0 else min(seed_dist / max_d, 1.0)
+            dists.append(math.exp(-2.0 * norm))
+        total = sum(dists)
+        if total <= 0:
+            return None
+        r = random.random() * total
+        acc = 0.0
+        for seed, d in zip(f.corpus, dists, strict=False):
+            acc += d
+            if acc >= r:
+                return seed
+        return f.corpus[-1] if f.corpus else None
 
     def pick_seed(self) -> bytes:
         f = self.f

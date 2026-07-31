@@ -134,6 +134,31 @@ def _detect_afl(target_path: str) -> bool:
         return False
 
 
+def _detect_distance(target_path: str) -> bool:
+    """Check if a binary has the AFLGo distance channel compiled in.
+
+    Distance builds define __afl_dist_flush (the shim under
+    __AFL_DISTANCE_MODE) and define __sanitizer_cov_trace_pc (trace-pc
+    instrumentation); the bare trace_pc symbol distinguishes them from
+    plain trace-pc-guard builds, which only carry the *_guard callbacks.
+    """
+    import re
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["nm", target_path],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if "__afl_dist_flush" in result.stdout:
+            return True
+        return bool(re.search(r"^[tT] __sanitizer_cov_trace_pc$", result.stdout, re.MULTILINE))
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
 def _detect_cmplog(target_path: str) -> bool:
     """Check if a binary has cmplog or tracecmp built in.
 
@@ -2988,11 +3013,16 @@ class Fuzzer:
             for i, t in enumerate(self.multi_targets):
                 afl = _detect_afl(t)
                 tag = " [AFL]" if afl else " [no-AFL]"
+                dist = _detect_distance(t)
+                if dist:
+                    tag += " [DIST]"
                 print(f"  [{i}] {t}{tag}")
         else:
             print(f"[*] Target: {self.target}")
             if _detect_afl(self.target):
                 print("[*] AFL instrumentation: detected")
+            if _detect_distance(self.target):
+                print("[*] Distance instrumentation: detected")
         # Static branch density: conditional branches per KB of .text
         from fuzzer_tool.core.elf import branch_density
 
