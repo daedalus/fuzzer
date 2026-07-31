@@ -13,6 +13,7 @@ reaches it must produce dist_count >= 1 and average distance 0.0, while
 an input that never reaches it must produce dist_count == 0.
 """
 
+import ctypes
 import os
 import shutil
 import subprocess
@@ -232,3 +233,62 @@ class TestDirectLiteChannel:
         finally:
             shm.cleanup()
             table_shm.cleanup()
+
+
+class TestDistanceTableLayout:
+    """The Python builder must mirror the shim's open-addressed probe:
+    entries live at ``key % capacity`` with linear probing and the
+    header holds the slot capacity.  A sorted-rank writer (the old
+    layout bug) packs keys at 0..n-1, so the shim's ``k == 0`` break
+    never fires and every trace-pc miss scans the whole table.  Pure
+    Python — no clang needed."""
+
+    ENTRY_BYTES = 12  # {u64 key, u32 dist}
+
+    def _read_slots(self, table_shm):
+        cap = ctypes.c_uint32.from_address(table_shm._ptr).value
+        return [
+            (
+                ctypes.c_uint64.from_address(table_shm._ptr + 4 + i * self.ENTRY_BYTES).value,
+                ctypes.c_uint32.from_address(table_shm._ptr + 4 + i * self.ENTRY_BYTES + 8).value,
+            )
+            for i in range(cap)
+        ]
+
+    def test_header_is_padded_capacity(self):
+        keys = {i * 7 + 3: 1.0 for i in range(3)}
+        t = DistanceTableShm(keys)
+        try:
+            slots = self._read_slots(t)
+            assert len(slots) >= 2 * len(keys)  # slack → empty slots exist
+            assert len(slots) & (len(slots) - 1) == 0  # power of two
+            assert sum(1 for k, _ in slots if k != 0) == len(keys)
+        finally:
+            t.cleanup()
+
+    def test_entries_at_hash_positions_with_probing(self):
+        # Keys spaced so sorted order differs from hash order; the walk
+        # from key % capacity to the stored slot must never cross an
+        # empty slot (the shim's probe would break there and miss).
+        keys = {i * 1000 + 5: float(i) for i in range(50)}
+        t = DistanceTableShm(keys)
+        try:
+            slots = self._read_slots(t)
+            cap = len(slots)
+            assert cap >= 2 * len(keys)
+            assert cap & (cap - 1) == 0  # power of two
+            stored = {k: d for k, d in slots if k != 0}
+            assert len(stored) == len(keys)
+            for key, dist in keys.items():
+                assert stored[key] == max(0, round(dist * 100))
+                idx = next(i for i, (k, _) in enumerate(slots) if k == key)
+                pos = key % cap
+                walked = 0
+                while (pos + walked) % cap != idx:
+                    assert slots[(pos + walked) % cap][0] != 0, (
+                        f"key {key} stored at slot {idx} but slot "
+                        f"{(pos + walked) % cap} is empty — not hash-inserted"
+                    )
+                    walked += 1
+        finally:
+            t.cleanup()

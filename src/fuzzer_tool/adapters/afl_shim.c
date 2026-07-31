@@ -200,9 +200,13 @@ void __sanitizer_cov_trace_pc_guard_init(uint32_t *start, uint32_t *stop) {
 
 #ifdef __AFL_DISTANCE_MODE
 
-/* Layout must match DistanceTableShm (Python): 4-byte count header then
- * 12-byte entries (u64 key, u32 dist).  Packed keeps the C stride at 12
- * — without it the struct pads to 16 and every entry misreads. */
+/* Layout must match DistanceTableShm (Python): 4-byte header = SLOT
+ * capacity (power of two >= 2x entries — the slack guarantees empty
+ * slots so the k == 0 probe break fires on misses instead of scanning
+ * the whole table), then 12-byte entries (u64 key, u32 dist) inserted
+ * at key % capacity with linear probing, exactly like the lookup
+ * below.  Packed keeps the C stride at 12 — without it the struct pads
+ * to 16 and every entry misreads. */
 struct __afl_dist_entry {
     uint64_t key;
     uint32_t dist;

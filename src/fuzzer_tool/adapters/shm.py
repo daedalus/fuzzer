@@ -414,8 +414,14 @@ class DistanceTableShm:
     via the ``__AFL_DIST_SHM_ID`` env var and probes it from
     ``__sanitizer_cov_trace_pc()``.  Layout::
 
-        uint32 count
-        struct { uint64 key; uint32 dist; } entries[count]
+        uint32 capacity
+        struct { uint64 key; uint32 dist; } slots[capacity]
+
+    The header is the *slot capacity*, not the entry count: a power of
+    two >= 2x entries, so empty slots always exist and the shim's linear
+    probe (``key % capacity``, break on key == 0) exits early on misses.
+    Entries are inserted at their hash position with linear probing,
+    mirroring the shim's reader exactly.
 
     *key* is the block start address relative to the object's lowest
     PT_LOAD vaddr (the shim looks up ``pc - dladdr_base``); *dist* is
@@ -433,12 +439,16 @@ class DistanceTableShm:
         scaled = {key: max(0, round(dist * 100)) for key, dist in entries.items() if key != 0}
         self.num_entries = len(scaled)
         entry_bytes = 12  # {u64 key, u32 dist}
-        self.shm_bytes = 4 + self.num_entries * entry_bytes
         if self.num_entries == 0:
             self.shm_id = -1
             self._ptr = 0
             self.env_id = "0"
             return
+
+        self.capacity = 1
+        while self.capacity < 2 * self.num_entries:
+            self.capacity *= 2
+        self.shm_bytes = 4 + self.capacity * entry_bytes
 
         self.shm_id = _libc.shmget(0, self.shm_bytes, IPC_CREAT | SHM_R | SHM_W)
         if self.shm_id < 0:
@@ -448,11 +458,16 @@ class DistanceTableShm:
             _libc.shmctl(self.shm_id, IPC_RMID, None)
             raise OSError(f"shmat failed: {os.strerror(ctypes.get_errno())}")
         ctypes.memset(self._ptr, 0, self.shm_bytes)
-        ctypes.c_uint32.from_address(self._ptr).value = self.num_entries
-        for i, (key, dist) in enumerate(sorted(scaled.items())):
-            off = self._ptr + 4 + i * entry_bytes
-            ctypes.c_uint64.from_address(off).value = key
-            ctypes.c_uint32.from_address(off + 8).value = dist
+        ctypes.c_uint32.from_address(self._ptr).value = self.capacity
+        for key, dist in scaled.items():
+            pos = key % self.capacity
+            while True:
+                off = self._ptr + 4 + pos * entry_bytes
+                if ctypes.c_uint64.from_address(off).value == 0:
+                    ctypes.c_uint64.from_address(off).value = key
+                    ctypes.c_uint32.from_address(off + 8).value = dist
+                    break
+                pos = (pos + 1) % self.capacity
         self.env_id = str(self.shm_id)
         atexit.register(self.cleanup)
 
