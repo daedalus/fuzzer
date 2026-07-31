@@ -20,7 +20,17 @@ This module also provides :class:`DispersionIndex` — a sliding-window
 Index of Dispersion (Fano factor, D = σ²/μ).  D complements the Allan
 variance by resolving a key ambiguity the latter cannot: a buffer full
 of zeros and a buffer with rare bursts both produce low Allan deviation,
-but D discriminates them (bursty → D › 1.5, stalled → D « 0.3).
+but D discriminates them.
+
+Rather than compare D against fixed constants (which are only correctly
+calibrated at one particular sample size), dispersion significance is
+decided with the standard Poisson dispersion test: under the null
+hypothesis that the signal is Poisson-distributed (D = 1, i.i.d.),
+``T = (n-1) * D`` follows a chi-squared distribution with ``n-1`` degrees
+of freedom. This gives a threshold that adapts to how many samples are
+actually available, instead of a single magic number applied regardless
+of window fill level. See :func:`chi2_sf` / :func:`chi2_cdf` and the
+``is_overdispersed`` / ``is_underdispersed`` methods below.
 """
 
 from __future__ import annotations
@@ -35,9 +45,92 @@ _ADEV_ACTIVE_THRESHOLD = 0.5  # adev(2) above this → signal has meaningful var
 _ADEV_STALL_THRESHOLD = 0.01  # adev(2) below this → signal is effectively constant
 _FATIGUE_SLOPE_THRESHOLD = 0.1  # slope above this → variance grows with averaging
 
-# Dispersion index thresholds (empirically calibrated for edge-discovery-rate signals)
-_DISPERSION_BURSTY_THRESHOLD = 1.5  # D above this → bursty, not stalled
-_DISPERSION_STALL_THRESHOLD = 0.3  # D below this → confirmed stall
+# Default significance level for the chi-squared dispersion test.
+_DISPERSION_ALPHA = 0.05
+
+
+# ---------------------------------------------------------------------------
+# Chi-squared distribution (pure Python — project deliberately has no scipy
+# dependency; see core/running_stats.py and the scipy-removal fix in
+# edge_tracker.py for the same rationale).
+#
+# Implementation follows the standard Numerical-Recipes-style split:
+# series expansion for x < a+1, continued fraction for x >= a+1, both
+# built on the regularized incomplete gamma function. Verified against
+# reference chi-squared critical values in tests/test_allan_variance.py.
+# ---------------------------------------------------------------------------
+
+
+def _gammainc_lower_series(a: float, x: float) -> float:
+    """Regularized lower incomplete gamma P(a, x) via series expansion.
+
+    Valid (fast-converging) for x < a + 1.
+    """
+    if x <= 0.0:
+        return 0.0
+    gln = math.lgamma(a)
+    ap = a
+    total = 1.0 / a
+    delta = total
+    for _ in range(500):
+        ap += 1.0
+        delta *= x / ap
+        total += delta
+        if abs(delta) < abs(total) * 1e-15:
+            break
+    return total * math.exp(-x + a * math.log(x) - gln)
+
+
+def _gammainc_upper_cf(a: float, x: float) -> float:
+    """Regularized upper incomplete gamma Q(a, x) via continued fraction.
+
+    Valid (fast-converging) for x >= a + 1. Uses the modified Lentz
+    algorithm for numerical stability.
+    """
+    gln = math.lgamma(a)
+    tiny = 1e-300
+    b = x + 1.0 - a
+    c = 1.0 / tiny
+    d = 1.0 / b
+    h = d
+    for i in range(1, 500):
+        an = -i * (i - a)
+        b += 2.0
+        d = an * d + b
+        if abs(d) < tiny:
+            d = tiny
+        c = b + an / c
+        if abs(c) < tiny:
+            c = tiny
+        d = 1.0 / d
+        delta = d * c
+        h *= delta
+        if abs(delta - 1.0) < 1e-15:
+            break
+    return math.exp(-x + a * math.log(x) - gln) * h
+
+
+def chi2_sf(x: float, k: int) -> float:
+    """Survival function (1 - CDF) of the chi-squared distribution.
+
+    ``x``: test statistic. ``k``: degrees of freedom (must be > 0).
+    Returns the probability of observing a value >= x under the
+    chi-squared(k) distribution — i.e. the one-sided upper-tail p-value.
+    """
+    if k <= 0:
+        raise ValueError("degrees of freedom must be positive")
+    if x <= 0.0:
+        return 1.0
+    a = k / 2.0
+    xh = x / 2.0
+    if xh < a + 1.0:
+        return 1.0 - _gammainc_lower_series(a, xh)
+    return _gammainc_upper_cf(a, xh)
+
+
+def chi2_cdf(x: float, k: int) -> float:
+    """CDF of the chi-squared distribution. See :func:`chi2_sf`."""
+    return 1.0 - chi2_sf(x, k)
 
 
 class AllanVarianceDetector:
@@ -178,11 +271,11 @@ class AllanVarianceDetector:
 
         D = variance / mean
 
-        Interpretation (calibrated for edge-discovery-rate signals):
-          - D › 1.5: bursty exploration — clusters of new edges with gaps.
-            Overrides stall signal: this is NOT a stall.
-          - 0.3 ≤ D ≤ 1.5: Poisson-like normal exploration.
-          - D « 0.3: near-zero mean or variance → genuine stall.
+        This raw ratio is provided for diagnostics/logging. For a decision
+        about whether D is *significantly* bursty or stalled (rather than
+        just noisy at low sample counts), use :meth:`is_overdispersed` /
+        :meth:`is_underdispersed`, which apply a chi-squared significance
+        test instead of a fixed cutoff.
 
         Returns None if fewer than 2 observations or mean is effectively zero.
         """
@@ -195,6 +288,40 @@ class AllanVarianceDetector:
             return None
         var = sum((x - mean) ** 2 for x in data) / (n - 1)  # sample variance
         return var / mean
+
+    def dispersion_pvalue(self) -> float | None:
+        """One-sided upper-tail p-value of the current D under the Poisson
+        dispersion test (chi-squared(n-1) survival function of
+        ``(n-1) * D``).
+
+        A small p-value means D is significantly *higher* than 1 (Poisson) —
+        i.e. overdispersed/bursty. Use ``1 - dispersion_pvalue()`` reasoning
+        via :meth:`is_underdispersed` for the opposite tail. Returns None if
+        :meth:`dispersion` returns None.
+        """
+        n = len(self._buf)
+        d = self.dispersion()
+        if d is None or n < 2:
+            return None
+        t = (n - 1) * d
+        return chi2_sf(t, n - 1)
+
+    def is_overdispersed(self, alpha: float = _DISPERSION_ALPHA) -> bool:
+        """True if D is significantly greater than 1 (bursty) at level
+        *alpha*, via the chi-squared dispersion test. False (not None) if
+        there isn't enough data to tell, so this can be used directly in
+        boolean stall-detection logic without an extra None-check.
+        """
+        p = self.dispersion_pvalue()
+        return p is not None and p < alpha
+
+    def is_underdispersed(self, alpha: float = _DISPERSION_ALPHA) -> bool:
+        """True if D is significantly less than 1 (near-constant / stalled)
+        at level *alpha*, via the chi-squared dispersion test. False (not
+        None) if there isn't enough data to tell.
+        """
+        p = self.dispersion_pvalue()
+        return p is not None and (1.0 - p) < alpha
 
     def reset(self) -> None:
         """Clear all samples."""
@@ -221,10 +348,13 @@ class DispersionIndex:
     Uses :class:`RunningMoments` for O(1) per-update mean + variance and
     returns the ratio.  Tracks only the most recent *window* observations.
 
-    Interpretation of D for fuzzing signals:
-      - D › 1.5: overdispersed / bursty (non-stationary process)
-      - 0.3 ≤ D ≤ 1.5: Poisson-like (i.i.d. or stationary)
-      - D « 0.3: underdispersed (near-constant / stalled)
+    D itself is not compared against fixed constants — a fixed cutoff is
+    only well-calibrated at one particular sample count, and window fill
+    level varies (especially early in a run). Use :meth:`is_overdispersed`
+    / :meth:`is_underdispersed`, which apply the standard Poisson
+    dispersion test (``(n-1)*D ~ chi-squared(n-1)`` under the null
+    hypothesis of a Poisson/stationary process) so the effective threshold
+    adapts to how many samples are actually in the window.
 
     Args:
         window: Max number of recent observations to retain.
@@ -251,6 +381,30 @@ class DispersionIndex:
     def count(self) -> int:
         """Number of observations incorporated."""
         return self._moments.count
+
+    def dispersion_pvalue(self) -> float | None:
+        """One-sided upper-tail p-value of the current D under the Poisson
+        dispersion test. See :meth:`AllanVarianceDetector.dispersion_pvalue`
+        for the underlying test. Returns None if :attr:`value` is None.
+        """
+        n = self._moments.count
+        d = self.value
+        if d is None or n < 2:
+            return None
+        t = (n - 1) * d
+        return chi2_sf(t, n - 1)
+
+    def is_overdispersed(self, alpha: float = _DISPERSION_ALPHA) -> bool:
+        """True if D is significantly greater than 1 (bursty) at level
+        *alpha*. False if there isn't enough data to tell."""
+        p = self.dispersion_pvalue()
+        return p is not None and p < alpha
+
+    def is_underdispersed(self, alpha: float = _DISPERSION_ALPHA) -> bool:
+        """True if D is significantly less than 1 (near-constant) at level
+        *alpha*. False if there isn't enough data to tell."""
+        p = self.dispersion_pvalue()
+        return p is not None and (1.0 - p) < alpha
 
     def save(self) -> dict:
         """Serialize state for persistence."""

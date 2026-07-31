@@ -928,10 +928,10 @@ class Fuzzer:
                 min_matches=10,
             )
 
-        # Chi-squared operator heterogeneity test interval
-        self._chi2_operator_interval = chi2_operator_interval
-        if chi2_operator_interval > 0:
-            print(f"[*] Chi-squared operator test: every {chi2_operator_interval} execs")
+            log.info("Elo rating system enabled (k=16, decay=0.99)")
+            self._elo_decay_interval = 100  # apply decay every N iterations
+            self._elo_decay_counter = 0
+            self._elo_match_window: list[tuple[str, str, float, bool]] = []
             self._elo_path = self.corpus_dir / "elo.json"
             if self._elo_path.exists():
                 self._elo.load(str(self._elo_path))
@@ -967,9 +967,10 @@ class Fuzzer:
                 self._elo._strategy_sigma_sq.setdefault(key, self._elo.initial_sigma**2)
                 self._elo._strategy_match_count.setdefault(key, 0)
 
-            log.info("Elo rating system enabled (k=16, decay=0.99)")
-            self._elo_decay_interval = 100  # apply decay every N iterations
-            self._elo_match_window: list[tuple[str, str, float, bool]] = []
+        # Chi-squared operator heterogeneity test interval
+        self._chi2_operator_interval = chi2_operator_interval
+        if chi2_operator_interval > 0:
+            print(f"[*] Chi-squared operator test: every {chi2_operator_interval} execs")
 
         # Elo arbitrates between all available strategies when enabled
         self._meta_strategy: str | None = None
@@ -2380,7 +2381,7 @@ class Fuzzer:
             if winners:
                 self._elo.record_round(unique_ops, winners, crash=is_crash)
             # Apply periodic decay
-            self._elo_decay_counter = getattr(self, "_elo_decay_counter", 0) + 1
+            self._elo_decay_counter += 1
             if self._elo_decay_counter >= self._elo_decay_interval:
                 self._elo_decay_counter = 0
                 self._elo.apply_decay()
@@ -2789,9 +2790,11 @@ class Fuzzer:
         if dispersion is not None:
             reason += f" + D={dispersion:.2f}"
 
-        # Dispersion index override: bursty D › 1.5 means clusters of
+        # Dispersion index override: a *significantly* overdispersed D
+        # (chi-squared dispersion test, not a fixed cutoff — see
+        # AllanVarianceDetector.is_overdispersed) means clusters of
         # discoveries with gaps — NOT a stall even if Allan says stalled.
-        if dispersion is not None and dispersion > 1.5:
+        if self._allan.is_overdispersed():
             return False
 
         # Noise-type gating and threshold adjustment
@@ -2810,8 +2813,9 @@ class Fuzzer:
         if noise == "stalled":
             # Near-zero variance confirms genuine stall.
             # Bypass entropy gate and use minimal threshold.
-            # D « 0.3 further confirms stall — use the most aggressive threshold.
-            if dispersion is not None and dispersion < 0.3:
+            # Significantly underdispersed D (chi-squared test) further
+            # confirms stall — use the most aggressive threshold.
+            if self._allan.is_underdispersed():
                 effective_threshold = max(self._stall_threshold // 8, 25)
             else:
                 effective_threshold = max(self._stall_threshold // 4, 50)
@@ -2889,13 +2893,18 @@ class Fuzzer:
                 log.info(
                     "χ² op heterogeneity: χ²=%.2f, p=%.4f, V=%.3f, "
                     "%d operators — significant (p<0.05)",
-                    chi2, p, v, len(table),
+                    chi2,
+                    p,
+                    v,
+                    len(table),
                 )
             else:
                 log.debug(
-                    "χ² op heterogeneity: χ²=%.2f, p=%.4f, V=%.3f, "
-                    "%d operators — not significant",
-                    chi2, p, v, len(table),
+                    "χ² op heterogeneity: χ²=%.2f, p=%.4f, V=%.3f, %d operators — not significant",
+                    chi2,
+                    p,
+                    v,
+                    len(table),
                 )
         except Exception as ex:
             log.debug("Chi-squared test failed: %s", ex)

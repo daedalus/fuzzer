@@ -5,7 +5,7 @@ import random
 
 import pytest
 
-from fuzzer_tool.core.allan_variance import AllanVarianceDetector, DispersionIndex
+from fuzzer_tool.core.allan_variance import AllanVarianceDetector, DispersionIndex, chi2_cdf, chi2_sf
 
 
 def _white_noise(n: int, scale: float = 1.0, seed: int = 42) -> list[float]:
@@ -246,3 +246,100 @@ class TestDispersionIndex:
             if expected is not None
             else di2.value is None
         )
+
+
+class TestChi2Distribution:
+    """Validate the pure-Python chi-squared implementation against known
+    reference critical values (standard statistical tables)."""
+
+    @pytest.mark.parametrize(
+        "x,k,expected_alpha",
+        [
+            (18.307, 10, 0.05),
+            (3.841, 1, 0.05),
+            (124.342, 100, 0.05),
+            (9.488, 4, 0.05),
+            (6.635, 1, 0.01),
+            (23.209, 10, 0.01),
+        ],
+    )
+    def test_sf_matches_known_critical_values(self, x, k, expected_alpha):
+        got = chi2_sf(x, k)
+        assert got == pytest.approx(expected_alpha, abs=1e-3)
+
+    def test_cdf_plus_sf_equals_one(self):
+        for x, k in [(0.5, 3), (10.0, 5), (50.0, 20), (200.0, 100)]:
+            assert chi2_cdf(x, k) + chi2_sf(x, k) == pytest.approx(1.0, abs=1e-9)
+
+    def test_sf_at_zero_is_one(self):
+        assert chi2_sf(0.0, 5) == 1.0
+        assert chi2_sf(-1.0, 5) == 1.0
+
+    def test_invalid_dof_raises(self):
+        with pytest.raises(ValueError):
+            chi2_sf(1.0, 0)
+
+
+class TestDispersionSignificance:
+    """Chi-squared Poisson dispersion test: the core behavior this
+    replaces the fixed D>1.5 / D<0.3 thresholds with — the effective
+    threshold should adapt to sample count instead of firing/missing
+    based on a single magic number regardless of how much data backs it.
+    """
+
+    def test_small_sample_does_not_overfire(self):
+        """A handful of samples with D just above the old fixed 1.5
+        threshold should NOT be flagged significant — too little evidence."""
+        di = DispersionIndex(window=200)
+        # D ≈ 1.71 with only 8 samples (see reproduction in review)
+        for v in [1, 1, 1, 1, 1, 5, 5, 1]:
+            di.update(float(v))
+        assert di.value is not None and di.value > 1.5
+        assert di.is_overdispersed() is False
+
+    def test_large_sample_detects_mild_but_real_overdispersion(self):
+        """The same underlying mild-overdispersion process, given enough
+        samples, should be detected even though D itself settles below
+        the old fixed 1.5 threshold."""
+        rng = random.Random(7)
+        di = DispersionIndex(window=300)
+        for _ in range(250):
+            v = 5 if rng.random() < 0.15 else 1
+            di.update(float(v))
+        assert di.value is not None and di.value < 1.5
+        assert di.is_overdispersed() is True
+
+    def test_insufficient_data_returns_false_not_none(self):
+        """is_overdispersed/is_underdispersed must be directly usable in
+        boolean logic without a None-check, unlike value/dispersion_pvalue."""
+        di = DispersionIndex(window=100)
+        di.update(1.0)
+        assert di.is_overdispersed() is False
+        assert di.is_underdispersed() is False
+        assert di.dispersion_pvalue() is None
+
+    def test_underdispersion_significance(self):
+        """A near-constant signal should be flagged underdispersed once
+        enough samples accumulate, matching the old D<<0.3 intuition but
+        via a calibrated test rather than a fixed cutoff."""
+        di = DispersionIndex(window=300)
+        for _ in range(200):
+            di.update(1.0 + random.uniform(-0.01, 0.01))
+        assert di.is_underdispersed() is True
+        assert di.is_overdispersed() is False
+
+    def test_allan_variance_detector_matches_dispersion_index(self):
+        """AllanVarianceDetector's own significance methods (computed
+        directly from its buffer) should agree with DispersionIndex given
+        the same data, since both implement the same test."""
+        rng = random.Random(7)
+        values = [5.0 if rng.random() < 0.15 else 1.0 for _ in range(250)]
+
+        avd = AllanVarianceDetector(max_buffer_pow=10, min_samples=2)
+        di = DispersionIndex(window=300)
+        for v in values:
+            avd.update(v)
+            di.update(v)
+
+        assert avd.is_overdispersed() == di.is_overdispersed()
+        assert avd.dispersion_pvalue() == pytest.approx(di.dispersion_pvalue(), abs=1e-9)

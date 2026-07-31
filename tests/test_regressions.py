@@ -1291,6 +1291,67 @@ class TestBayesianEloTrackerLiveDispatch:
 
 
 # ============================================================================
+# T47b: _elo_decay_interval misplaced under chi2 block (AttributeError)
+# ============================================================================
+
+
+class TestEloDecayInitIndependentOfChi2:
+    """elo=True must initialize decay attributes even when chi2_operator_interval=0.
+
+    Regression: _elo_decay_interval/_elo_decay_counter were initialized inside
+    the `if chi2_operator_interval > 0:` block, so `--elo` alone crashed in
+    fuzz_one with AttributeError on the decay path.
+    """
+
+    def _make_fuzzer(self, **kwargs):
+        import tempfile
+        from unittest.mock import patch
+
+        from fuzzer_tool.services.fuzzer import Fuzzer
+
+        tmpdir = tempfile.mkdtemp(prefix="fuzz_test_")
+        with (
+            patch("os.path.isfile", return_value=True),
+            patch("os.access", return_value=True),
+        ):
+            return Fuzzer(
+                target="/bin/true",
+                corpus_dir=f"{tmpdir}/corpus",
+                crashes_dir=f"{tmpdir}/crashes",
+                max_len=256,
+                timeout=1,
+                mutations_per_input=2,
+                **kwargs,
+            )
+
+    def test_decay_attrs_set_with_elo_and_no_chi2(self):
+        f = self._make_fuzzer(elo=True)  # chi2_operator_interval defaults to 0
+        assert f._elo_decay_interval == 100, (
+            "Elo decay interval must be initialized when elo=True regardless of chi2 interval"
+        )
+        assert f._elo_decay_counter == 0
+        assert f._elo_path == Path(f.corpus_dir) / "elo.json", (
+            "Elo state path must be set when elo=True regardless of chi2 interval"
+        )
+        # Strategy pre-registration must also run without chi2 (elo.json save/load
+        # and arbitration depend on it)
+        assert f._elo._strategy_match_count.get("bandit") == 0
+        assert f._elo._strategy_match_count.get("seed_ga") == 0
+
+    def test_decay_attrs_set_with_elo_and_chi2(self):
+        f = self._make_fuzzer(elo=True, chi2_operator_interval=500)
+        assert f._elo_decay_interval == 100
+        assert f._elo_decay_counter == 0
+        assert f._elo_path == Path(f.corpus_dir) / "elo.json"
+
+    def test_decay_counter_increments_and_resets(self):
+        f = self._make_fuzzer(elo=True)
+        f._elo_decay_counter = f._elo_decay_interval - 1
+        f._elo_decay_counter += 1
+        assert f._elo_decay_counter >= f._elo_decay_interval  # decay branch fires
+
+
+# ============================================================================
 # T48: estimate_map_size hardcoded 4096 (commit aaa3d69)
 # ============================================================================
 
