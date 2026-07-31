@@ -226,6 +226,12 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
   - **Tier 1 — numpy flatnonzero**: replaces Python `for` loop over 1MB bitmap in `record_edge_lifetimes` with `np.flatnonzero()` — saves ~2GB total data movement from Python iteration
   - **Tier 2 — zero-copy numpy views**: replaces `bytes()` allocations with `np.frombuffer()` zero-copy views at 5+ call sites (distance, Shapley, length tracker, edge lifetimes) — saves ~2.2GB total bytes allocation
   - **Tier 3 — inline tobytes/memmove chain**: replaces `classified.tobytes() + ctypes.memmove` in `_is_new_coverage_numpy` with direct numpy array slice assignment — saves ~1MB allocation + 1MB copy per numpy-scan (~2.6GB total)
+- **Operator-selection hot path**: ~60% of `fuzz_one` time was operator *selection* (not application). Three caches cut it in half on the `--elo all` config:
+  - **Thompson draw cache** (`MonteCarloScheduler`): draws are cached per arm keyed on the effective `(alpha, beta)`; `record()`/decay change the key, so stale entries miss naturally. Draws are additionally force-refreshed every 16 selects (`_draw_refresh_interval`) so an arm whose posterior never moves cannot keep a frozen lucky draw and starve the other arms — the unbounded version collapsed exploration (one op dominated, eps 427→47, RSS 1.5GB on dimension-mutating PNG targets). Cuts `gammavariate` 950K→194K and `betavariate` 519K→98K calls per 1k execs
+  - **`RunningMoments.stddev` cache**: GP-UCB read stddev per arm per select (299K reads/run), each recomputing `math.sqrt(variance)`. Now cached, invalidated on `update()`/`load()` — cumtime 0.139s→0.020s
+  - **Elo meta-strategy resolved once per exec**: `select_op` called `elo.select_strategy` on every mutation (~21x/exec), each doing a gauss sample per rated strategy. Now cached in `f._meta_strategy_cached`, reset at the top of `mutate()` and re-validated against the available set — `select_strategy` 23K→2K calls, `gauss` 175K→7.8K calls per 1k execs
+  - Net: `operators.select_op` cumtime 4.30s→1.96s per 1k execs; EPS improved ~1.4-1.9x on the png_read_dist.so workload (259-369 → 486-541) with stable RSS
+- **JPEG length-field clamp**: `JpegMarker.serialize()` truncated segment data to 65533 bytes before packing the 16-bit length field. A corrupt length field that makes the parser absorb a >64KB input as one segment previously crashed the whole fuzzer with `struct.error: 'H' format requires 0 <= number <= 65535`
 
 ## Installation
 

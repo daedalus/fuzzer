@@ -1025,6 +1025,8 @@ class Fuzzer:
 
         # Elo arbitrates between all available strategies when enabled
         self._meta_strategy: str | None = None
+        # Per-exec cache: resolved once in mutate(), reused for all mutations
+        self._meta_strategy_cached: str | None = None
         if self._use_elo:
             log.info("Meta-scheduler enabled: Elo arbitrating bandit vs MOpt")
             self._meta_strategy_choices: list[str] = []

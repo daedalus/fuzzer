@@ -49,6 +49,72 @@ class TestRunningMomentsUnbounded:
             m.update(x)
         assert abs(m.stddev - statistics.stdev(data)) < 1e-10
 
+    def test_regression_stddev_cached_until_update(self, monkeypatch):
+        """stddev must be computed once per observation batch, then cached.
+
+        Regression: GP-UCB read stddev per arm per select (299K reads/run);
+        each read recomputed math.sqrt from the raw moments.
+        """
+        m = RunningMoments()
+        m.update(2.0)
+        m.update(4.0)
+        assert m.stddev == math.sqrt(2.0)  # hand-computed sample stddev
+
+        sqrt_calls = {"n": 0}
+        real_sqrt = math.sqrt
+
+        def counting_sqrt(x):
+            sqrt_calls["n"] += 1
+            return real_sqrt(x)
+
+        monkeypatch.setattr(math, "sqrt", counting_sqrt)
+
+        # Repeated reads must not recompute
+        sd = m.stddev
+        sd = m.stddev
+        sd = m.stddev
+        assert sd is not None  # keep reads observable to the sqrt counter
+        assert sqrt_calls["n"] == 0
+
+        # New observation invalidates the cache -> one recompute
+        m.update(8.0)
+        sd = m.stddev
+        assert sqrt_calls["n"] == 1
+
+    def test_regression_stddev_cache_reset_on_load(self):
+        """load() must reset the cached stddev so restored state is honored."""
+        m = RunningMoments()
+        m.update(2.0)
+        m.update(4.0)
+        _ = m.stddev  # populate cache
+        data = m.save()
+
+        m2 = RunningMoments()
+        m2.load(data)
+        assert m2.stddev == math.sqrt(2.0)  # would be 0.0 if stale cache survived
+
+    def test_regression_windowed_stddev_cache_invalidated(self, monkeypatch):
+        """Windowed mode: stddev cache must invalidate on slide, not linger."""
+        m = RunningMoments(window=2)
+        m.update(2.0)
+        m.update(4.0)
+        assert m.stddev == math.sqrt(2.0)
+
+        sqrt_calls = {"n": 0}
+        real_sqrt = math.sqrt
+
+        def counting_sqrt(x):
+            sqrt_calls["n"] += 1
+            return real_sqrt(x)
+
+        monkeypatch.setattr(math, "sqrt", counting_sqrt)
+
+        # Slide: drop 2.0, add 100.0 -> stddev must change
+        m.update(100.0)
+        expected = statistics.stdev([4.0, 100.0])
+        assert m.stddev == expected
+        assert sqrt_calls["n"] == 1
+
     def test_skewness_positive(self):
         """Right-skewed data should produce positive skewness."""
         # Exponential-like: many small, few large

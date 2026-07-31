@@ -78,6 +78,7 @@ def _make_minimal_fuzzer():
             self_._last_mopt_particles = []
             self_._last_ops_used = []
             self_._meta_strategy = None
+            self_._meta_strategy_cached = None
             self_._stall_recovery_active = False
             self_._frameshift = _MockFrameshift()
             self_.markov = _MockMarkov()
@@ -153,7 +154,7 @@ class TestUtf8Widen:
                 assert 0x80 <= buf[i + 1] <= 0xBF
                 break
         else:
-            assert False, "Expected an overlong UTF-8 sequence in buffer"
+            raise AssertionError("Expected an overlong UTF-8 sequence in buffer")
 
 
 class TestUtf8Insert:
@@ -243,7 +244,6 @@ class TestLineMutate:
         swaps_seen = 0
         for _ in range(200):
             buf = bytearray(b"aaa\nbbb")
-            before = bytes(buf)
             self.engine._op_line_mutate(buf, 0, b"")
             if buf == b"bbb\naaa":
                 swaps_seen += 1
@@ -345,38 +345,6 @@ class TestFuseOld:
 # ── Operator registration tests ────────────────────────────────────────
 
 
-class TestNewOperatorsRegistered:
-    def test_tree_mutate_in_list(self):
-        assert "tree_mutate" in MUTATIONS
-
-    def test_utf8_ops_in_list(self):
-        assert "utf8_widen" in MUTATIONS
-        assert "utf8_insert" in MUTATIONS
-
-    def test_line_mutate_in_list(self):
-        assert "line_mutate" in MUTATIONS
-
-    def test_fuse_ops_in_list(self):
-        assert "fuse_this" in MUTATIONS
-        assert "fuse_next" in MUTATIONS
-        assert "fuse_old" in MUTATIONS
-
-    def test_dispatch_contains_all_new_ops(self):
-        engine = OperatorEngine(_make_minimal_fuzzer())
-        dispatch = engine.build_dispatch()
-        for op in (
-            "tree_mutate",
-            "utf8_widen",
-            "utf8_insert",
-            "line_mutate",
-            "fuse_this",
-            "fuse_next",
-            "fuse_old",
-            "redqueen_xform",
-        ):
-            assert op in dispatch, f"{op} missing from dispatch table"
-
-
 # ── Tree mutation smoke test (dispatch-based) ──────────────────────────
 
 
@@ -467,8 +435,6 @@ class TestMagicValues:
         """For widths >= 2, both LE and BE variants should exist."""
         for width in (2, 4, 8):
             entries = [(w, p) for w, p in MAGIC_TABLE if w == width]
-            le_count = sum(1 for w, p in entries if p[0] != 0 or len(entries) <= 2)
-            be_count = len(entries) - le_count
             assert len(entries) >= 4, f"Width {width} has only {len(entries)} entries"
 
     def test_empty_buffer(self):
@@ -769,7 +735,7 @@ class TestHavocEscalation:
         engine = OperatorEngine(_make_minimal_fuzzer())
         buf = bytearray(b"\x00" * 64)
         result = engine._op_havoc(buf, 0, b"")
-        assert isinstance(result, (bytearray, bytes))
+        assert isinstance(result, bytearray | bytes)
 
     def test_stall_flag_respected(self):
         """Verify stall flag is checked (not hardcoded)."""
@@ -831,3 +797,86 @@ class TestNewOperatorsRegistered:
             "punctuation_insert",
         ):
             assert op in dispatch, f"{op} missing from dispatch table"
+
+
+class TestEloMetaStrategyThrottle:
+    """Elo meta-strategy must be resolved once per exec, not per mutation.
+
+    Regression: operators.select_op called elo.select_strategy on every
+    mutation (~21x/exec), each doing a gauss sample per rated strategy.
+    mutate() resets _meta_strategy_cached at the start of each exec.
+    """
+
+    def _make_elo_fuzzer(self):
+        f = _make_minimal_fuzzer()
+        f._use_elo = True
+        f._use_mopt = True
+        f._use_replicator = False
+        f._replicator = None
+        f.mc_bandit = True
+        f.mc_cem = False
+        f._use_exp3 = False
+        f._use_eps_greedy = False
+        f._use_hierarchical = False
+        f._use_gp_ucb = False
+
+        class _FakeMopt:
+            def select_op(self, ops, prev_op=None):
+                return ops[0]
+
+        class _FakeElo:
+            def select_strategy(self, strategies, temperature=None):
+                return strategies[0]
+
+        f._mopt = _FakeMopt()
+        f.mc = _FakeMopt()
+        f._elo = _FakeElo()
+        return f
+
+    def test_regression_meta_strategy_resolved_once_per_exec(self):
+        f = self._make_elo_fuzzer()
+        engine = OperatorEngine(f)
+        calls = {"n": 0}
+        real_select_strategy = f._elo.select_strategy
+
+        def counting_select_strategy(strategies, temperature=None):
+            calls["n"] += 1
+            return real_select_strategy(strategies, temperature)
+
+        f._elo.select_strategy = counting_select_strategy
+
+        # One exec = one mutate() = n_mutations select_op calls.
+        # The cached strategy must be reused across all of them.
+        f._meta_strategy_cached = None  # what mutate() does at exec start
+        ops = ["bit_flip", "byte_flip", "arithmetic"]
+        for _ in range(8):  # 8 mutations in one exec
+            engine.select_op(ops)
+        assert calls["n"] == 1, f"select_strategy called {calls['n']}x in one exec"
+
+        # Next exec re-resolves
+        f._meta_strategy_cached = None
+        engine.select_op(ops)
+        assert calls["n"] == 2
+
+    def test_regression_meta_strategy_revalidated_on_available_change(self):
+        """If the cached strategy is no longer available, re-resolve."""
+        f = self._make_elo_fuzzer()
+        engine = OperatorEngine(f)
+        calls = {"n": 0}
+        real_select_strategy = f._elo.select_strategy
+
+        def counting_select_strategy(strategies, temperature=None):
+            calls["n"] += 1
+            return real_select_strategy(strategies, temperature)
+
+        f._elo.select_strategy = counting_select_strategy
+
+        f._meta_strategy_cached = None
+        engine.select_op(["bit_flip"])
+        first = calls["n"]
+        assert first >= 1
+
+        # Poison the cache with a strategy that is not in `available`
+        f._meta_strategy_cached = "not_a_strategy"
+        engine.select_op(["bit_flip"])
+        assert calls["n"] == first + 1

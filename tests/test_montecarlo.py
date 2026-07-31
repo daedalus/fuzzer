@@ -52,6 +52,131 @@ class TestMonteCarloScheduler:
         op = mc.select_op(["bit_flip", "byte_flip"])
         assert op in ("bit_flip", "byte_flip")
 
+    def test_regression_thompson_draws_cached_until_posterior_changes(self, monkeypatch):
+        """Thompson draws must be cached per arm while the posterior is unchanged.
+
+        Regression: select_op drew a fresh betavariate for every arm on every
+        call (~83 draws/select), which dominated the hot path. Draws depend
+        only on the effective (alpha, beta); only record()/decay change them.
+        """
+        mc = MonteCarloScheduler(arm_decay=1.0)  # no decay noise in this test
+        mc.init_arm("A")
+        mc.init_arm("B")
+        mc.init_arm("C")
+
+        draws = {"n": 0}
+        real_betavariate = random.betavariate
+
+        def counting_betavariate(a, b):
+            draws["n"] += 1
+            return real_betavariate(a, b)
+
+        monkeypatch.setattr(random, "betavariate", counting_betavariate)
+
+        mc.select_op(["A", "B", "C"])
+        first = draws["n"]
+        assert first == 3  # one draw per arm on first select
+
+        # Posterior unchanged -> draws reused, no new sampling
+        mc.select_op(["A", "B", "C"])
+        assert draws["n"] == first
+
+        # Recording A changes its posterior -> only A is redrawn
+        mc.record("A", success=True)
+        mc.select_op(["A", "B", "C"])
+        assert draws["n"] == first + 1
+
+        # B and C still cached; A redrawn once again after another record
+        mc.record("A", success=False)
+        mc.select_op(["A", "B", "C"])
+        assert draws["n"] == first + 2
+
+    def test_regression_thompson_draws_invalidated_by_decay(self, monkeypatch):
+        """Periodic decay changes all arms' posteriors -> all draws redrawn."""
+        mc = MonteCarloScheduler(arm_decay=0.5, decay_interval=1)
+        mc.init_arm("A")
+        mc.init_arm("B")
+
+        draws = {"n": 0}
+        real_betavariate = random.betavariate
+
+        def counting_betavariate(a, b):
+            draws["n"] += 1
+            return real_betavariate(a, b)
+
+        monkeypatch.setattr(random, "betavariate", counting_betavariate)
+
+        mc.select_op(["A", "B"])
+        first = draws["n"]
+        assert first == 2
+
+        # Decay fires on every record with decay_interval=1 -> both redrawn
+        mc.record("A", success=True)
+        mc.select_op(["A", "B"])
+        assert draws["n"] == first + 2
+
+    def test_regression_thompson_draws_refreshed_after_interval(self, monkeypatch):
+        """Draws must be force-refreshed after _draw_refresh_interval selects.
+
+        Regression: caching draws purely on the posterior key froze a stale
+        lucky draw for arms whose posterior never moved, letting one operator
+        dominate selection and starving the others. The refresh interval
+        bounds how long any draw can stay frozen.
+        """
+        mc = MonteCarloScheduler(arm_decay=1.0)
+        mc._draw_refresh_interval = 4
+        mc.init_arm("A")
+        mc.init_arm("B")
+
+        draws = {"n": 0}
+        real_betavariate = random.betavariate
+
+        def counting_betavariate(a, b):
+            draws["n"] += 1
+            return real_betavariate(a, b)
+
+        monkeypatch.setattr(random, "betavariate", counting_betavariate)
+
+        mc.select_op(["A", "B"])  # select 1: 2 fresh draws
+        mc.select_op(["A", "B"])  # select 2: cached
+        mc.select_op(["A", "B"])  # select 3: cached
+        assert draws["n"] == 2
+
+        mc.select_op(["A", "B"])  # select 4: refresh fires -> 2 redraws
+        assert draws["n"] == 4
+
+        mc.select_op(["A", "B"])  # select 5: cached again
+        assert draws["n"] == 4
+
+    def test_regression_thompson_cache_correctness_preserved(self):
+        """Cached draws must still follow the posterior: after a record, the
+        cached value for that arm must reflect its new (alpha, beta)."""
+        mc = MonteCarloScheduler(arm_decay=1.0)
+        mc.init_arm("A")
+        mc.init_arm("B")
+        mc.select_op(["A", "B"])
+        a, b, draw = mc._thompson_draw_cache["A"]
+        assert (a, b) == (mc.arm_alpha["A"], mc.arm_beta["A"])
+        assert 0.0 < draw < 1.0
+
+        mc.record("A", success=True)
+        mc.select_op(["A", "B"])
+        a2, b2, draw2 = mc._thompson_draw_cache["A"]
+        assert (a2, b2) == (mc.arm_alpha["A"], mc.arm_beta["A"])
+        assert (a2, b2) != (a, b)  # posterior moved
+
+    def test_select_op_pairwise_still_works_with_cache(self):
+        """Pairwise blending must not break when draws are cached."""
+        mc = MonteCarloScheduler(pairwise_blend=0.5, arm_decay=1.0)
+        mc.init_arm("a")
+        mc.init_arm("b")
+        for _ in range(5):
+            mc._prev_op = "a"
+            mc.record("b", success=True)
+        for _ in range(10):
+            op = mc.select_op(["a", "b"], prev_op="a")
+            assert op in ("a", "b")
+
     def test_record_success(self):
         mc = MonteCarloScheduler(arm_decay=1.0)
         mc.init_arm("bit_flip")
@@ -424,7 +549,7 @@ class TestMOptScheduler:
         for p in mopt.particles:
             p.pos = [0.9, 0.1]
         # After PSO update, should be normalized
-        for i in range(5):
+        for _ in range(5):
             mopt.record("a", success=True)
         for p in mopt.particles:
             assert abs(sum(p.pos) - 1.0) < 1e-6
@@ -966,10 +1091,8 @@ class TestExp3Scheduler:
         # Success then failure — failure should not increase weight as much
         exp3._last_probs = {"arm_a": 0.8}
         exp3.record("arm_a", success=True)
-        w_after_success = exp3.weights["arm_a"]
         exp3._last_probs = {"arm_a": 0.8}
         exp3.record("arm_a", success=False)
-        w_after_failure = exp3.weights["arm_a"]
         # Weight should still be > 1.0 since gamma/K * r_hat > 0 for success before
         # but the second update (reward=0) should produce less growth than success
         assert exp3.weights["arm_a"] > 0
@@ -994,7 +1117,6 @@ class TestExp3Scheduler:
         exp3.init_arm("arm_a")
         exp3._last_probs = {"arm_a": 0.8}
         exp3.record("arm_a", success=True)
-        w1 = exp3.weights["arm_a"]
         # Decay should have been applied (0.5 factor) then weight update
         assert exp3.weights["arm_a"] != 0
 

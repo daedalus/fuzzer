@@ -114,6 +114,16 @@ class MonteCarloScheduler:
         # Blend factor: 0.0 = pure Thompson, 1.0 = pure pairwise
         self.pairwise_blend = pairwise_blend
 
+        # Thompson draw cache: op -> (a, b, draw). A cached draw is valid
+        # while the arm's effective posterior params are unchanged; record()
+        # and periodic decay change them, so stale entries are detected by
+        # key mismatch. Draws are additionally force-refreshed every N
+        # selects so an arm whose posterior never moves cannot keep a stale
+        # lucky draw forever and starve the other arms.
+        self._thompson_draw_cache: dict[str, tuple[float, float, float]] = {}
+        self._draw_refresh_interval = 16
+        self._selects_since_refresh = 0
+
         # Per-operator dispersion index for non-stationarity detection.
         # When D > 1.5, the operator's success process is bursty (non-i.i.d.),
         # meaning the Beta posterior is overconfident — older observations
@@ -169,11 +179,25 @@ class MonteCarloScheduler:
         Returns:
             Name of the selected operator.
         """
-        # Unconditional Thompson sample for each op
+        # Unconditional Thompson sample for each op. Draws are cached per
+        # arm and reused while the effective posterior params are unchanged,
+        # so a selection doesn't re-pay 83 betavariate draws when the
+        # posterior is piecewise-constant. Periodically all arms are forced
+        # to redraw to prevent a frozen stale draw from dominating forever.
+        self._selects_since_refresh += 1
+        force_refresh = self._selects_since_refresh >= self._draw_refresh_interval
+        if force_refresh:
+            self._selects_since_refresh = 0
         thompson_vals = {}
         for op in ops:
             a, b = self._get_effective_params(op)
-            thompson_vals[op] = random.betavariate(a, b)
+            cached = self._thompson_draw_cache.get(op)
+            if not force_refresh and cached is not None and cached[0] == a and cached[1] == b:
+                thompson_vals[op] = cached[2]
+            else:
+                draw = random.betavariate(a, b)
+                self._thompson_draw_cache[op] = (a, b, draw)
+                thompson_vals[op] = draw
 
         # If no pairwise data or blend is zero, use pure Thompson
         if self.pairwise_blend <= 0 or prev_op is None or prev_op not in self.transition_total:
@@ -384,7 +408,7 @@ class MonteCarloScheduler:
         # Compute average empirical entropy across positions
         total_entropy = 0.0
         n_positions = 0
-        for pos, freq in self.byte_freq.items():
+        for _, freq in self.byte_freq.items():
             total = sum(freq.values())
             if total < 2:
                 continue
@@ -920,18 +944,18 @@ class MonteCarloScheduler:
         reg = max(diag_min * 0.01, 1e-6)
         for i in range(n):
             a[i][i] += reg
-        l = [[0.0] * n for _ in range(n)]
+        lower = [[0.0] * n for _ in range(n)]
         for i in range(n):
             for j in range(i + 1):
-                s = sum(l[i][k] * l[j][k] for k in range(j))
+                s = sum(lower[i][k] * lower[j][k] for k in range(j))
                 if i == j:
                     val = a[i][i] - s
                     if val <= 0:
                         return None
-                    l[i][j] = math.sqrt(val)
+                    lower[i][j] = math.sqrt(val)
                 else:
-                    l[i][j] = (a[i][j] - s) / l[j][j] if l[j][j] > 0 else 0.0
-        return l
+                    lower[i][j] = (a[i][j] - s) / lower[j][j] if lower[j][j] > 0 else 0.0
+        return lower
 
     def _matrix_ucb_quadratic_form(self, mu: list[float] | np.ndarray, inv_cov, n: int) -> float:
         """Compute quadratic form mu^T @ inv_cov @ mu."""
@@ -1109,7 +1133,6 @@ class MonteCarloScheduler:
         self, recent: list, segment_size: int, operators: list[str], op_idx: dict[str, int]
     ) -> dict[str, dict[str, float]]:
         """Numpy path for operator_covariance."""
-        n_ops = len(operators)
         segments_list = self._build_segment_rates(recent, segment_size, operators, op_idx)
         if len(segments_list) < 2:
             return {}
@@ -1314,7 +1337,7 @@ class MOptScheduler:
         cumulative = 0.0
         selected_particle = valid[0]
         selected_idx = 0
-        for i, (p, f) in enumerate(zip(valid, fitnesses, strict=False)):
+        for _, (p, f) in enumerate(zip(valid, fitnesses, strict=False)):
             cumulative += f
             if r <= cumulative:
                 selected_particle = p

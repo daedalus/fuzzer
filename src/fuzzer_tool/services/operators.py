@@ -1592,7 +1592,14 @@ class OperatorEngine:
             available.append("gp_ucb")
 
         if f._use_elo and f._elo and len(available) >= 2:
-            strategy = f._elo.select_strategy(available)
+            # Resolve the meta-strategy once per exec and reuse it for all
+            # mutations within it. Elo ratings move once per mutation, so
+            # re-sampling the strategy on every select_op call is
+            # over-frequent; mutate() resets _meta_strategy_cached each exec.
+            strategy = f._meta_strategy_cached
+            if strategy is None or strategy not in available:
+                strategy = f._elo.select_strategy(available)
+                f._meta_strategy_cached = strategy
             f._meta_strategy = strategy
         elif f._use_elo and f._elo and available:
             strategy = available[0]
@@ -1693,6 +1700,7 @@ class OperatorEngine:
         if not hasattr(f, "_prev_bandit_op"):
             f._prev_bandit_op = None
         f._meta_strategy = None
+        f._meta_strategy_cached = None  # reset per-exec elo strategy cache
 
         n_mutations = f.mutations_per_input
         # Apply seed-level energy multiplier from SeedScorer

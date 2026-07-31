@@ -37,6 +37,10 @@ class RunningMoments:
         self._m2: float = 0.0
         self._m3: float = 0.0
         self._m4: float = 0.0
+        # Cached stddev; invalidated on every update()/load(). Read-heavy
+        # usage (e.g. GP-UCB select_op reading stddev per arm per select)
+        # recomputed sqrt per access otherwise.
+        self._stddev_cache: float | None = None
         if window is not None:
             self._buf: collections.deque[float] = collections.deque(maxlen=window)
             # Power sums for O(1) sliding window updates.
@@ -51,6 +55,7 @@ class RunningMoments:
 
     def update(self, x: float) -> None:
         """Incorporate a new observation."""
+        self._stddev_cache = None
         if self._window is not None and self._n >= self._window:
             # Lazy-initialize power sums on first slide transition.
             if self._sums_stale:
@@ -138,7 +143,9 @@ class RunningMoments:
     @property
     def stddev(self) -> float:
         """Sample standard deviation."""
-        return math.sqrt(self.variance) if self._n >= 2 else 0.0
+        if self._stddev_cache is None:
+            self._stddev_cache = math.sqrt(self.variance) if self._n >= 2 else 0.0
+        return self._stddev_cache
 
     @property
     def skewness(self) -> float:
@@ -204,6 +211,7 @@ class RunningMoments:
 
     def load(self, data: dict) -> None:
         """Restore from persistence."""
+        self._stddev_cache = None
         self._n = data.get("n", 0)
         self._mean = data.get("mean", 0.0)
         self._m2 = data.get("m2", 0.0)

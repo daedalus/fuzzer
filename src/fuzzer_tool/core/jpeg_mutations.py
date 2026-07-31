@@ -85,8 +85,13 @@ class JpegMarker:
         """Serialize marker to bytes: 0xFF + marker + length + data."""
         if self.marker in STANDALONE_MARKERS:
             return b"\xff" + bytes([self.marker])
-        length = len(self.data) + 2  # length includes the 2 length bytes
-        result = b"\xff" + bytes([self.marker]) + struct.pack(">H", length) + self.data
+        # The length field is 16-bit and includes the 2 length bytes, so a
+        # segment grown past 65533 bytes (e.g. by duplicate_marker) would
+        # overflow struct.pack(">H", length) and crash the fuzzer. Clamp to
+        # the field width before packing.
+        data = self.data[: 0xFFFF - 2]
+        length = len(data) + 2  # length includes the 2 length bytes
+        result = b"\xff" + bytes([self.marker]) + struct.pack(">H", length) + data
         # Append scan data after SOS (not length-prefixed)
         if self.marker == SOS and self._scan_data:
             result += self._scan_data
