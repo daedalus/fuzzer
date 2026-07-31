@@ -215,6 +215,9 @@ def _mock_fuzzer(**overrides) -> MagicMock:
         "ptrace_cov": None,
         "multi_targets": False,
         "_target_shm_covs": {},
+        "_distance": None,
+        "_dist_min_observed": None,
+        "_dist_max_observed": None,
         "mc": None,
         "mc_bandit": False,
         "mc_cem": False,
@@ -245,6 +248,7 @@ class TestPrintStats:
         """print_stats() includes ph: 0x<hex> when shm_cov is present."""
         shm = MagicMock()
         shm.read_path_hash.return_value = 0xABCD1234
+        shm.read_distance_tail.return_value = (0, 0)
         shm.cumulative_edges = 100
         fuzzer = _mock_fuzzer(shm_cov=shm)
         reporter = StatsReporter(fuzzer)
@@ -266,6 +270,7 @@ class TestPrintStats:
         """When path_hash is 0, shows ph: 0x0."""
         shm = MagicMock()
         shm.read_path_hash.return_value = 0
+        shm.read_distance_tail.return_value = (0, 0)
         shm.cumulative_edges = 100
         fuzzer = _mock_fuzzer(shm_cov=shm)
         reporter = StatsReporter(fuzzer)
@@ -278,6 +283,7 @@ class TestPrintStats:
         """Large path_hash (64-bit) renders as hex correctly."""
         shm = MagicMock()
         shm.read_path_hash.return_value = 0xDEADBEEFCAFE
+        shm.read_distance_tail.return_value = (0, 0)
         shm.cumulative_edges = 100
         fuzzer = _mock_fuzzer(shm_cov=shm)
         reporter = StatsReporter(fuzzer)
@@ -285,3 +291,33 @@ class TestPrintStats:
             reporter.print_stats()
             line = mock_print.call_args[0][0]
             assert "ph: 0xdeadbeefcafe" in line, f"expected large hex in: {line[:200]}"
+
+    def test_dist_stats_when_directed(self):
+        """print_stats() includes dist: avg/min/max in directed mode."""
+        shm = MagicMock()
+        shm.read_path_hash.return_value = 0
+        shm.read_distance_tail.return_value = (25000, 100)  # 25000/100/100 = 2.5
+        shm.cumulative_edges = 100
+        fuzzer = _mock_fuzzer(
+            shm_cov=shm,
+            _distance=object(),
+            _dist_min_observed=2.0,
+            _dist_max_observed=9.5,
+        )
+        reporter = StatsReporter(fuzzer)
+        with patch("builtins.print") as mock_print:
+            reporter.print_stats()
+            line = mock_print.call_args[0][0]
+            assert "dist: avg:2.5 min:2.0 max:9.5" in line, f"expected dist stats in: {line[:300]}"
+
+    def test_dist_stats_no_data_when_directed(self):
+        """Directed mode with no distance signal reports dist: no-data."""
+        fuzzer = _mock_fuzzer(
+            shm_cov=None,
+            _distance=object(),
+        )
+        reporter = StatsReporter(fuzzer)
+        with patch("builtins.print") as mock_print:
+            reporter.print_stats()
+            line = mock_print.call_args[0][0]
+            assert "dist: no-data" in line, f"expected dist: no-data in: {line[:300]}"

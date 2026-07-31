@@ -354,7 +354,7 @@ def cmd_fuzz(args):
         mc_bandit=args.mc_bandit,
         mc_cem=args.mc_cem,
         mopt=getattr(args, "mopt", False),
-        targets=getattr(args, "targets", None),
+        targets=getattr(args, "directed_targets", None),
         anneal_budget=getattr(args, "anneal_budget", 0),
         boltzmann=getattr(args, "boltzmann", False),
         metropolis=getattr(args, "metropolis", False),
@@ -1534,10 +1534,12 @@ def main() -> int:
     )
     fuzz_parser.add_argument(
         "--targets",
+        dest="directed_targets",
         nargs="+",
         default=None,
         metavar="FUNC",
-        help="Target functions for directed fuzzing (names or hex addresses)",
+        help="Target functions for directed fuzzing — names, hex addresses, "
+        "or file.c:line (via DWARF)",
     )
     fuzz_parser.add_argument(
         "--anneal-budget",

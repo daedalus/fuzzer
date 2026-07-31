@@ -16,6 +16,7 @@ Extracted from Fuzzer class (~lines 3101-3613, 3435-3508). Contains:
 - _get_current_edge_bitmap() — read current coverage bitmap
 """
 
+import contextlib
 import json
 import logging
 import os
@@ -550,6 +551,34 @@ class StatsReporter:
 
         cov_str = self._print_stats_cov_str(f)
         ph_str = f" | ph: 0x{f.shm_cov.read_path_hash():x}" if f.shm_cov else ""
+
+        # AFLGo directed-distance stats (live tail average + observed
+        # min/max over the run).  Present only in directed mode.
+        dist_str = ""
+        if getattr(f, "_distance", None) is not None:
+            try:
+                dist_parts = []
+                tail_avg = None
+                shm = (
+                    f._target_shm_covs.get(f.target, f.shm_cov)
+                    if getattr(f, "multi_targets", False)
+                    else f.shm_cov
+                )
+                if shm is not None:
+                    d_sum, d_count = shm.read_distance_tail()
+                    if d_count > 0:
+                        tail_avg = d_sum / d_count / 100.0
+                if tail_avg is not None:
+                    dist_parts.append(f"avg:{tail_avg:.1f}")
+                if getattr(f, "_dist_min_observed", None) is not None:
+                    dist_parts.append(f"min:{f._dist_min_observed:.1f}")
+                if getattr(f, "_dist_max_observed", None) is not None:
+                    dist_parts.append(f"max:{f._dist_max_observed:.1f}")
+                if not dist_parts:
+                    dist_parts.append("no-data")
+                dist_str = " | dist: " + " ".join(dist_parts)
+            except (AttributeError, OSError):
+                pass
         mc_str = ""
         if f.mc:
             parts = [
@@ -642,21 +671,17 @@ class StatsReporter:
         qea_str = ""
         qea = getattr(f, "qea", None)
         if qea:
-            try:
+            with contextlib.suppress(AttributeError, TypeError):
                 qea_str = (
                     f" | qea: gen={qea.generation} pop={len(qea.population)}"
                     f" spc={qea.species_count} fit={qea.best_fitness:.2f}"
                 )
-            except (AttributeError, TypeError):
-                pass
 
         mi_str = ""
         mi = getattr(f, "_mi", None)
         if mi:
-            try:
+            with contextlib.suppress(AttributeError, TypeError):
                 mi_str = f" | mi: obs={mi.total_observations} pos={len(mi.position_counts)}"
-            except (AttributeError, TypeError):
-                pass
 
         elo_str = ""
         if getattr(f, "_use_elo", False) and getattr(f, "_elo", None):
@@ -700,13 +725,11 @@ class StatsReporter:
         ga_str = ""
         ga = getattr(f, "ga", None)
         if ga:
-            try:
+            with contextlib.suppress(AttributeError, TypeError):
                 ga_str = (
                     f" | ga: gen={ga.generation} pop={len(ga.population)}"
                     f" spc={ga.species_count} fit={ga.best_fitness:.2f}"
                 )
-            except (AttributeError, TypeError):
-                pass
 
         sens_str = ""
         sens = getattr(f, "_sensitivity", None)
@@ -814,7 +837,7 @@ class StatsReporter:
             f"[*] execs: {f.exec_count} | corpus: {len(f.corpus)} | "
             f"crashes: {f.crash_count}{sig_str}{timeout_str} | eps: {eps:.0f} | "
             f"time: {elapsed:.0f}s{rss_str}{ops_str}{dict_str}{markov_str}{cmplog_str}"
-            f"{smt_str}{cov_str}{ph_str}{mc_str}{qea_str}{ga_str}{mi_str}{elo_str}"
+            f"{smt_str}{cov_str}{ph_str}{dist_str}{mc_str}{qea_str}{ga_str}{mi_str}{elo_str}"
             f"{sens_str}{te_str}{sec_str}{shap_str}{fs_str}{rep_str}{mopt_str}"
             f"{bayes_str}{misc_str}"
             f"{div_str}{jac_str}{dr_str}{density_str}{repro_str}{brier_str}{crps_str}"

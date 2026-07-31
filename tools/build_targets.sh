@@ -11,6 +11,7 @@
 #   tools/build_targets.sh --tracecmp                 # Clang + compiler-IR comparison tracing
 #   tools/build_targets.sh --vendor-tracecmp          # Vendored libpng+zlib + trace-cmp targets
 #   tools/build_targets.sh --vendor-tracecmp --asan   # Same with ASAN
+#   tools/build_targets.sh --distance                 # AFLGo distance .so targets (_dist / _dist_asan)
 
 set -e
 
@@ -556,8 +557,6 @@ verify_cmplog() {
     local fail_count=0
     for f in "$TARGETS"/*.so; do
         [ -f "$f" ] || continue
-        # Distance builds (_dist.so) deliberately skip the cmplog shim.
-        [[ "$f" == *_dist.so ]] && continue
         if nm "$f" 2>/dev/null | grep -q "__cmplog_reset"; then
             ok_count=$((ok_count + 1))
         else
@@ -640,29 +639,49 @@ verify_vendor_tracecmp() {
 # ── Build AFLGo distance .so targets ──────────────────────────────
 # Compiles the target wrapper with -fsanitize-coverage=trace-pc +
 # -D__AFL_DISTANCE_MODE so the shim accumulates per-block distances
-# into the SHM tail.  NOTE: vendored libraries keep their default
-# trace-pc-guard instrumentation, so distance is measured on the
-# wrapper's own blocks only; rebuild the vendor libs with trace-pc to
-# extend distance into library code.
+# into the SHM tail.  The cmplog shim is linked in (like the default
+# .so builds) so `--cmplog` keeps the fuzzer in direct_lite mode
+# instead of falling back to the persistent loader, where the tail is
+# not streamed.  Builds ASAN and no-ASAN variants following the repo's
+# suffix convention (no suffix = no-ASAN, _asan = ASAN).
+# NOTE: vendored libraries keep their default trace-pc-guard
+# instrumentation, so distance is measured on the wrapper's own blocks
+# only; rebuild the vendor libs with trace-pc to extend distance into
+# library code.
 build_distance_so_targets() {
     [ "$WITH_DISTANCE" -eq 0 ] && return 0
     if ! command -v clang &>/dev/null; then
         warn "clang not found — --distance requires clang"
         return 1
     fi
-    echo "Building distance .so targets (trace-pc + AFLGo channel)..."
-    local DIST_FLAGS="-O2 -g -D__AFL_DISTANCE_MODE -fsanitize-coverage=trace-pc -fsanitize=address"
-    for spec in "png_read:-lpng -lz" "zlib_read:-lz" "gzip_read:-lz" "jpeg_read:-ljpeg" "test_target:" "proto_target:"; do
-        local name="${spec%%:*}"
-        local libs="${spec#*:}"
-        [ -f "$TARGETS/$name.c" ] || continue
-        clang $DIST_FLAGS -shared -fPIC -include "$SHIM" \
-            -o "$TARGETS/${name}_dist.so" "$TARGETS/$name.c" $libs 2>/dev/null
-        if [ -f "$TARGETS/${name}_dist.so" ]; then
-            ok "${name}_dist.so"
-        else
-            warn "failed: ${name}_dist.so"
-        fi
+    echo "Building distance .so targets (trace-pc + AFLGo channel + cmplog)..."
+    for variant in "nosan:-O2" "asan:-O2 -fsanitize=address -lasan"; do
+        local label="${variant%%:*}"
+        local extra_flags="${variant#*:}"
+        local out_suffix="_dist"
+        [ "$label" = "asan" ] && out_suffix="_dist_asan"
+        for spec in "png_read:-lpng -lz" "zlib_read:-lz" "gzip_read:-lz" "jpeg_read:-ljpeg" "test_target:" "proto_target:"; do
+            local name="${spec%%:*}"
+            local libs="${spec#*:}"
+            [ -f "$TARGETS/$name.c" ] || continue
+            local cmplog_obj=""
+            local cmplog_libs=""
+            if [ "$WITH_CMPLOG" -eq 1 ] && [ -f "$CMPLOG_SHIM" ]; then
+                local co="/tmp/fuzz_cmplog_dist_$$.o"
+                clang -O2 -g -fPIC -c "$CMPLOG_SHIM" -o "$co" 2>/dev/null
+                [ -f "$co" ] && cmplog_obj="$co" && cmplog_libs="-ldl"
+            fi
+            clang $extra_flags -g -D__AFL_DISTANCE_MODE -fsanitize-coverage=trace-pc \
+                -shared -fPIC -Wl,-Bsymbolic -include "$SHIM" \
+                -o "$TARGETS/${name}${out_suffix}.so" "$TARGETS/$name.c" \
+                $cmplog_obj $libs $cmplog_libs 2>/dev/null
+            [ -n "$cmplog_obj" ] && rm -f "$cmplog_obj"
+            if [ -f "$TARGETS/${name}${out_suffix}.so" ]; then
+                ok "${name}${out_suffix}.so ($label)"
+            else
+                warn "failed: ${name}${out_suffix}.so ($label)"
+            fi
+        done
     done
 }
 
