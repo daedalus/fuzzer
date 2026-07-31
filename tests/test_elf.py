@@ -684,6 +684,69 @@ class TestX86_64Decoder:
         assert insns[0].insn_id == 6  # _INS_DIV
         assert insns[0].operands[0].reg == 2  # edx
 
+    def test_idiv_memory_operand_disp8(self):
+        """F7 7D FC → idiv dword ptr [rbp-4] (F7 /7, mod=01, rm=5, disp8=-4).
+
+        Regression: memory-operand GRP3 DIV/IDIV were previously decoded as
+        _INS_OTHER — only the register-operand form (mod==3) was recognized.
+        """
+        insns = self._decode(b"\xf7\x7d\xfc")
+        assert len(insns) == 1
+        insn = insns[0]
+        assert insn.insn_id == 7  # _INS_IDIV
+        assert insn.operands[0].type == 3  # _OP_MEM
+        assert 0 in insn._regs_read  # eax
+        assert 2 in insn._regs_read  # edx
+        assert 5 not in insn._regs_read  # divisor lives in memory, not rbp
+
+    def test_div_memory_operand_disp32(self):
+        """F7 B5 00010000 → div dword ptr [rbp+0x100] (F7 /6, mod=10, disp32)"""
+        insns = self._decode(b"\xf7\xb5\x00\x01\x00\x00")
+        assert len(insns) == 1
+        insn = insns[0]
+        assert insn.insn_id == 6  # _INS_DIV
+        assert insn.operands[0].type == 3  # _OP_MEM
+        assert 0 in insn._regs_read
+        assert 2 in insn._regs_read
+
+    def test_idiv_memory_operand_sib(self):
+        """F7 3C 24 → idiv dword ptr [rsp] (F7 /7, mod=00, rm=4 → SIB)"""
+        insns = self._decode(b"\xf7\x3c\x24")
+        assert len(insns) == 1
+        insn = insns[0]
+        assert insn.insn_id == 7  # _INS_IDIV
+        assert insn.operands[0].type == 3  # _OP_MEM
+
+    def test_div_byte_register(self):
+        """F6 F1 → div cl (F6 /6, ModR/M=0xF1=11_110_001)"""
+        insns = self._decode(b"\xf6\xf1")
+        assert len(insns) == 1
+        insn = insns[0]
+        assert insn.insn_id == 6  # _INS_DIV
+        assert insn.operands[0].type == 1  # _OP_REG
+        assert insn.operands[0].reg == 1  # cl
+        assert insn.operands[0].size == 1
+        assert 0 in insn._regs_read  # al/ax
+        assert 2 in insn._regs_read  # dx
+
+    def test_idiv_byte_memory(self):
+        """F6 7D FC → idiv byte ptr [rbp-4] (F6 /7, mod=01, disp8)"""
+        insns = self._decode(b"\xf6\x7d\xfc")
+        assert len(insns) == 1
+        insn = insns[0]
+        assert insn.insn_id == 7  # _INS_IDIV
+        assert insn.operands[0].type == 3  # _OP_MEM
+        assert insn.operands[0].size == 1
+
+    def test_f6_test_byte_imm(self):
+        """F6 C1 0A → test cl, 10 (F6 /0, ModR/M=0xC1=11_000_001, imm8)"""
+        insns = self._decode(b"\xf6\xc1\x0a")
+        assert len(insns) == 1
+        insn = insns[0]
+        assert insn.insn_id == 12  # _INS_TEST
+        assert insn.operands[0].reg == 1  # cl
+        assert insn.operands[1].imm == 10
+
     def test_cmp_eax_imm32(self):
         """3D 00000000 → cmp eax, 0 (special encoding for eax).
 

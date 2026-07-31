@@ -457,19 +457,52 @@ def _decode_x86_64(text: bytes, base_addr: int):
                         _Operand(_OP_IMM, imm=imm, size=4),
                     ]
                 insn._regs_read = {rm}
-            elif mod == 3:  # register operand
-                if ext == 6:  # DIV
-                    insn.insn_id = _INS_DIV
+            elif ext in (6, 7):  # DIV (6) / IDIV (7) — register OR memory operand
+                is_idiv = ext == 7
+                insn.insn_id = _INS_IDIV if is_idiv else _INS_DIV
+                if mod == 3:  # register operand
                     insn.operands = [_Operand(_OP_REG, rm, size=4)]
-                    insn._regs_read = {0, 2, rm}  # EAX, EDX, rm
-                    insn._regs_write = {0, 2}  # EAX, EDX
-                elif ext == 7:  # IDIV
-                    insn.insn_id = _INS_IDIV
-                    insn.operands = [_Operand(_OP_REG, rm, size=4)]
-                    insn._regs_read = {0, 2, rm}
-                    insn._regs_write = {0, 2}
-                else:
-                    insn.insn_id = _INS_OTHER
+                    insn._regs_read = {0, 2, rm}  # EAX, EDX, divisor reg
+                else:  # memory operand — divisor not a register
+                    insn.operands = [_Operand(_OP_MEM, size=4)]
+                    insn._regs_read = {0, 2}  # EAX, EDX only
+                insn._regs_write = {0, 2}  # EAX, EDX (quotient, remainder)
+            else:
+                insn.insn_id = _INS_OTHER
+            insn.length = pc - start
+            yield insn
+            continue
+
+        # F6 — GRP3 byte-size (TEST r/m8 / DIV / IDIV / NOT / NEG / MUL / IMUL)
+        if opbyte == 0xF6:
+            result = _decode_modrm()
+            if result is None:
+                insn.insn_id = _INS_OTHER
+                insn.length = pc - start
+                yield insn
+                continue
+            mod, reg_ext, rm, has_sib, sib_byte = result
+            ext = reg_ext & 7
+            if ext == 0:  # TEST r/m8, imm8
+                imm = text[pc] if pc < n else 0
+                pc += 1
+                insn.insn_id = _INS_TEST
+                if mod == 3:
+                    insn.operands = [
+                        _Operand(_OP_REG, rm, size=1),
+                        _Operand(_OP_IMM, imm=imm, size=1),
+                    ]
+                insn._regs_read = {rm}
+            elif ext in (6, 7):  # DIV (6) / IDIV (7) — register OR memory operand
+                is_idiv = ext == 7
+                insn.insn_id = _INS_IDIV if is_idiv else _INS_DIV
+                if mod == 3:  # register operand
+                    insn.operands = [_Operand(_OP_REG, rm, size=1)]
+                    insn._regs_read = {0, 2, rm}  # AL/AX, DX, divisor reg
+                else:  # memory operand — divisor not a register
+                    insn.operands = [_Operand(_OP_MEM, size=1)]
+                    insn._regs_read = {0, 2}  # AL/AX, DX only
+                insn._regs_write = {0, 2}  # quotient/remainder
             else:
                 insn.insn_id = _INS_OTHER
             insn.length = pc - start
