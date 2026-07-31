@@ -63,6 +63,9 @@ class MockFuzzer:
         _markov.snapshot_and_check_plateau = lambda: False
         self.markov = _markov
         self._minimize_pending = False
+        # Lineage tree gating — off by default in mocks; the CorpusManager
+        # reads this in save_to_corpus/trim_new_coverage.
+        self._use_lineage = False
 
     def _defer_minimize(self):
         self._minimize_pending = True

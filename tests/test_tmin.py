@@ -69,3 +69,76 @@ class TestTmin:
         from fuzzer_tool.services.tmin import main
 
         assert callable(main)
+
+
+class TestTminLineageMode:
+    """Lineage replay (Stage 5): rehydrated ancestor becomes the minimize start."""
+
+    def test_lineage_candidate_used_when_smaller(self, tmp_path):
+        crash = tmp_path / "crash.bin"
+        crash_input = b"X" * 100
+        ancestor = b"ROOTSEED"
+        crash.write_bytes(crash_input)
+
+        def fake_run(target, data, timeout, env=None):
+            if data in (crash_input, ancestor):
+                return (-11, "", 1)
+            return (0, "", 1)
+
+        with (
+            patch("fuzzer_tool.adapters.process.run_target_stdin", side_effect=fake_run),
+            patch(
+                "fuzzer_tool.services.tmin._lineage_candidate", return_value=ancestor
+            ) as mock_cand,
+        ):
+            result = tmin(
+                "/bin/true",
+                str(crash),
+                lineage=True,
+                corpus_dir=str(tmp_path),
+            )
+        mock_cand.assert_called_once()
+        # Lineage replay found the 10-byte ancestor; minimization kept it.
+        assert result == ancestor
+
+    def test_lineage_off_ignores_candidate(self, tmp_path):
+        crash = tmp_path / "crash.bin"
+        crash_input = b"X" * 100
+        crash.write_bytes(crash_input)
+
+        def fake_run(target, data, timeout, env=None):
+            if data == crash_input:
+                return (-11, "", 1)
+            return (0, "", 1)
+
+        with (
+            patch("fuzzer_tool.adapters.process.run_target_stdin", side_effect=fake_run),
+            patch(
+                "fuzzer_tool.services.tmin._lineage_candidate", return_value=b"ROOTSEED"
+            ) as mock_cand,
+        ):
+            result = tmin("/bin/true", str(crash))
+        mock_cand.assert_not_called()
+        # No lineage → no candidate → minimize finds nothing smaller → original.
+        assert result == crash_input
+
+    def test_candidate_that_does_not_crash_ignored(self, tmp_path):
+        crash = tmp_path / "crash.bin"
+        crash_input = b"X" * 100
+        crash.write_bytes(crash_input)
+
+        def fake_run(target, data, timeout, env=None):
+            if data == crash_input:
+                return (-11, "", 1)
+            return (0, "", 1)
+
+        with (
+            patch("fuzzer_tool.adapters.process.run_target_stdin", side_effect=fake_run),
+            # Candidate bytes do NOT crash → lineage must fall through.
+            patch(
+                "fuzzer_tool.services.tmin._lineage_candidate",
+                return_value=b"NOCRASHSEED",
+            ),
+        ):
+            result = tmin("/bin/true", str(crash), lineage=True, corpus_dir=str(tmp_path))
+        assert result == crash_input

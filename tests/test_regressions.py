@@ -1366,3 +1366,52 @@ class TestEstimateMapSizeNotHardcoded:
         assert result >= 8192, (
             f"estimate_map_size returned {result}, should be >= 8192 (not hardcoded 4096)"
         )
+
+
+# ============================================================================
+# T49: resume crashes with AttributeError when sensitivity.json exists
+# ============================================================================
+
+
+class TestResumeWithSensitivityJson:
+    """Resume must not crash when the corpus dir holds sensitivity.json.
+
+    Regression: _sensitivity was constructed after _init_seed_metadata, so
+    load_state()'s sensitivity restore hit `AttributeError: 'Fuzzer' object
+    has no attribute '_sensitivity'` on every --resume run that had ever
+    saved state.
+    """
+
+    def _make_fuzzer(self, **kwargs):
+        import tempfile
+        from unittest.mock import patch
+
+        from fuzzer_tool.services.fuzzer import Fuzzer
+
+        tmpdir = tempfile.mkdtemp(prefix="fuzz_test_")
+        corpus_dir = kwargs.pop("corpus_dir", f"{tmpdir}/corpus")
+        crashes_dir = kwargs.pop("crashes_dir", f"{tmpdir}/crashes")
+        with (
+            patch("os.path.isfile", return_value=True),
+            patch("os.access", return_value=True),
+        ):
+            return Fuzzer(
+                target="/bin/true",
+                corpus_dir=corpus_dir,
+                crashes_dir=crashes_dir,
+                max_len=256,
+                timeout=1,
+                mutations_per_input=2,
+                **kwargs,
+            )
+
+    def test_regression_resume_with_sensitivity_json(self):
+        f = self._make_fuzzer()
+        f.save_to_corpus(b"RESUME" * 8)
+        f._corpus_manager.save_state()
+        assert (f.corpus_dir / "sensitivity.json").exists()
+        # This crashed with AttributeError before the fix.
+        f2 = self._make_fuzzer(
+            resume=True, corpus_dir=str(f.corpus_dir), crashes_dir=str(f.crashes_dir)
+        )
+        assert len(f2.seed_meta) >= 1

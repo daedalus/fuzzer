@@ -61,6 +61,7 @@ fuzzer-tool fuzz ./target -c --resume
 | AFL++ power schedules | `--schedule` | FAST/COE/RARE/MMOPT/LIN/QUAD/GO/AFLGO seed-level energy |
 | AFLGo directed annealing | `--schedule aflgo` | Exact AFLGo power factor — symmetric 32×/1/32× energy by distance-to-target with time-based cooling (`--t-x`, `--aflgo-cooling`) |
 | Seed strategies | — | Weighted, Pareto, format-aware, GA, QEA, Bayesian, Markov-gen |
+| **Mutation lineage tree** | `--lineage` | Weighted parent/ops/sites forest per seed: unproductive-branch pruning in auto-minimize, causal crash-path replay in `tmin`, LCA-based diversity scoring |
 
 ### Information-Theoretic Scoring
 - **Mutual information** (`--mi-guided`): I(byte_position; coverage) guides mutation to positions that control code paths

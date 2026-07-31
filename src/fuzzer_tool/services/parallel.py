@@ -54,6 +54,11 @@ def _worker_main(
     asan_target: str | None = None,
     ubsan_target: str | None = None,
     chi2_operator_interval: int = 0,
+    markov_blend: float = 0.0,
+    mc_decay_interval: int = 100,
+    pairwise_blend: float = 0.0,
+    lineage: bool = False,
+    resize_map_on_stall: bool = True,
 ):
     """Entry point for each fuzzing worker process."""
     from fuzzer_tool.services.fuzzer import Fuzzer
@@ -83,10 +88,13 @@ def _worker_main(
         target_args=target_args,
         markov_order=markov_order,
         markov_generate=markov_generate,
+        markov_blend=markov_blend,
         mc_bandit=mc_bandit,
         mc_cem=mc_cem,
         mc_elite_frac=mc_elite_frac,
         mc_refit_interval=mc_refit_interval,
+        mc_decay_interval=mc_decay_interval,
+        pairwise_blend=pairwise_blend,
         stats_file=worker_stats,
         stats_interval=stats_interval,
         coverage_report=coverage_report,
@@ -110,6 +118,8 @@ def _worker_main(
         asan_target=asan_target,
         ubsan_target=ubsan_target,
         chi2_operator_interval=chi2_operator_interval,
+        lineage=lineage,
+        resize_map_on_stall=resize_map_on_stall,
     )
 
     print(f"{prefix} Started (target={target})")
@@ -248,6 +258,11 @@ def run_parallel(
     asan_target: str | None = None,
     ubsan_target: str | None = None,
     chi2_operator_interval: int = 0,
+    markov_blend: float = 0.0,
+    mc_decay_interval: int = 100,
+    pairwise_blend: float = 0.0,
+    lineage: bool = False,
+    resize_map_on_stall: bool = True,
 ):
     """Launch N parallel fuzzer workers sharing the same corpus directory.
 
@@ -294,10 +309,13 @@ def run_parallel(
         target_args=target_args or [],
         markov_order=markov_order,
         markov_generate=markov_generate,
+        markov_blend=markov_blend,
         mc_bandit=mc_bandit,
         mc_cem=mc_cem,
         mc_elite_frac=mc_elite_frac,
         mc_refit_interval=mc_refit_interval,
+        mc_decay_interval=mc_decay_interval,
+        pairwise_blend=pairwise_blend,
         stats_file=stats_file,
         stats_interval=stats_interval,
         coverage_report=coverage_report,
@@ -324,6 +342,8 @@ def run_parallel(
         asan_target=asan_target,
         ubsan_target=ubsan_target,
         chi2_operator_interval=chi2_operator_interval,
+        lineage=lineage,
+        resize_map_on_stall=resize_map_on_stall,
     )
 
     def _spawn_worker(worker_id: int, rng_seed: int) -> multiprocessing.Process:

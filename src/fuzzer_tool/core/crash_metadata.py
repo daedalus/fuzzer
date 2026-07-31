@@ -43,6 +43,7 @@ class CrashMetadata:
     corpus_size: int = 0
     parent_seed_hash: str = ""
     mutation_ops: list[str] = field(default_factory=list)
+    parent_sites: list[int] = field(default_factory=list)
     target: str = ""
     target_sha256: str = ""
     elapsed: str = ""
@@ -141,6 +142,8 @@ class CrashMetadata:
             lines.append(f"parent_seed:   {self.parent_seed_hash}")
         if self.mutation_ops:
             lines.append(f"mutation_ops:  {', '.join(self.mutation_ops)}")
+        if self.parent_sites:
+            lines.append(f"mutation_sites: {', '.join(str(s) for s in self.parent_sites)}")
         lines.append("")
 
         # Stack trace

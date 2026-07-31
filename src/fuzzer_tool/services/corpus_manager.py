@@ -121,6 +121,11 @@ class CorpusManager:
                 "hamming_distance": meta.get("hamming_distance", -1),
                 "child_count": meta.get("child_count", 0),
                 "timed_out": meta.get("timed_out", False),
+                "parent_key": meta.get("parent_key"),
+                "parent_ops": meta.get("parent_ops", []),
+                "parent_sites": meta.get("parent_sites", []),
+                "new_edge_count": meta.get("new_edge_count", 0),
+                "coverage_edges_baseline": meta.get("coverage_edges_baseline", 0),
             }
         try:
             f._state_path.write_text(json.dumps(state, separators=(",", ":")))
@@ -137,10 +142,8 @@ class CorpusManager:
         # Persist Bayesian seed quality posteriors
         if hasattr(f, "_seed_quality"):
             sq_path = f.corpus_dir / "seed_quality.json"
-            try:
+            with contextlib.suppress(OSError):
                 sq_path.write_text(json.dumps(f._seed_quality.state_dict(), separators=(",", ":")))
-            except OSError:
-                pass
 
     def load_state(self):
         f = self.f
@@ -179,6 +182,11 @@ class CorpusManager:
                         "hamming_distance": sm.get("hamming_distance", -1),
                         "child_count": sm.get("child_count", 0),
                         "timed_out": sm.get("timed_out", False),
+                        "parent_key": sm.get("parent_key"),
+                        "parent_ops": sm.get("parent_ops", []),
+                        "parent_sites": sm.get("parent_sites", []),
+                        "new_edge_count": sm.get("new_edge_count", 0),
+                        "coverage_edges_baseline": sm.get("coverage_edges_baseline", 0),
                     }
                 )
                 rm_ser = sm.get("redqueen_matches", [])
@@ -220,6 +228,7 @@ class CorpusManager:
         meta.corpus_size = len(f.corpus)
         meta.target = f.target
         meta.mutation_ops = list(f._last_ops_used)
+        meta.parent_sites = [s for _, s in getattr(f, "_last_ops_with_sites", [])]
         meta.elapsed = f._stats.format_elapsed()
 
         if f.corpus:
@@ -316,6 +325,20 @@ class CorpusManager:
                 "lineage_depth": parent_depth + 1 if parent else 0,
                 "hamming_distance": f._last_hamming_distance,
             }
+            # Lineage edge: parent key + the ops/sites that produced this seed.
+            # Only recorded when a real parent exists (interesting/Metropolis
+            # paths in fuzz_one); parallel-sync inserts are roots. Gated on
+            # the flag so default runs stay byte-identical.
+            if f._use_lineage and parent is not None:
+                f.seed_meta[data].update(
+                    {
+                        "parent_key": self.seed_key(parent),
+                        "parent_ops": list(getattr(f, "_last_ops_used", [])),
+                        "parent_sites": [s for _, s in getattr(f, "_last_ops_with_sites", [])],
+                        "new_edge_count": getattr(f, "_last_new_edge_count", 0),
+                        "coverage_edges_baseline": 0,
+                    }
+                )
             # Propagate actual coverage_edges from EdgeTracker — when called
             # from fuzz_one, the seed's edges were already recorded by
             # record_edges before save_to_corpus.  For the parallel-sync path
@@ -398,6 +421,7 @@ class CorpusManager:
             return
 
         seed_key = self.seed_key(data)
+        orig_meta = f.seed_meta.get(data, {})
         if data in f.seed_meta:
             f.seed_meta.pop(data, None)
             f._agg_cache_valid = False  # corpus structure changed
@@ -412,8 +436,21 @@ class CorpusManager:
                 "edge_bitmap": bytearray(0),
                 "redqueen_offsets": [],
                 "added_at": time.time(),
-                "lineage_depth": f.seed_meta.get(data, {}).get("lineage_depth", 0) + 1,
+                "lineage_depth": orig_meta.get("lineage_depth", 0) + 1,
             }
+            # The trimmed seed inherits the original's lineage edge so the
+            # crash-path chain stays intact across the trim point, with a
+            # synthetic ("trim", cut_point) operation appended.
+            if f._use_lineage:
+                f.seed_meta[trimmed].update(
+                    {
+                        "parent_key": orig_meta.get("parent_key"),
+                        "parent_ops": list(orig_meta.get("parent_ops", [])) + ["trim"],
+                        "parent_sites": list(orig_meta.get("parent_sites", [])) + [len(data) // 2],
+                        "new_edge_count": orig_meta.get("new_edge_count", 0),
+                        "coverage_edges_baseline": orig_meta.get("coverage_edges_baseline", 0),
+                    }
+                )
             log.debug("Trimmed %d -> %d bytes", len(data), len(trimmed))
 
     def auto_minimize_corpus(self):
@@ -645,6 +682,49 @@ class CorpusManager:
         # They are never pruned.
         if irreplaceable_seeds:
             unique = unique + irreplaceable_seeds
+
+        # Lineage branch pruning: a dropped seed whose subtree contributed
+        # < 1.0 structural edge-weight and gained no coverage since the last
+        # minimize is an unproductive branch — drop the whole subtree instead
+        # of just the low-scoring seed. Mandatory/fresh/irreplaceable seeds
+        # are protected (they were explicitly kept above).
+        if f._use_lineage and getattr(f, "_lineage", None) is not None:
+            key_to_seed = {self.seed_key(s): s for s in f.corpus}
+            kept_keys = {self.seed_key(s) for s in unique}
+            protected = {id(s) for s in fresh_seeds + irreplaceable_seeds}
+            if mandatory:
+                protected |= {id(s) for s in unique if id(s) in mandatory}
+
+            def _coverage_fn(k: str) -> tuple[int, int]:
+                seed = key_to_seed.get(k)
+                if seed is None:
+                    return (0, 0)
+                meta = f.seed_meta.get(seed, {})
+                return (
+                    meta.get("coverage_edges", 0),
+                    meta.get("coverage_edges_baseline", 0),
+                )
+
+            subtree_drops: set[str] = set()
+            for seed in f.corpus:
+                sk = self.seed_key(seed)
+                if sk in kept_keys or sk in subtree_drops:
+                    continue
+                if (
+                    f._lineage.recent_credit(sk, _coverage_fn) == 0.0
+                    and f._lineage.subtree_weight(sk) < 1.0
+                ):
+                    for k in f._lineage.subtree_keys(sk):
+                        s = key_to_seed.get(k)
+                        if s is not None and id(s) not in protected and s in unique:
+                            unique.remove(s)
+                        subtree_drops.add(k)
+            # Reset the credit clock: record current coverage per seed so the
+            # next minimize measures the delta gained since this one.
+            for seed in f.corpus:
+                meta = f.seed_meta.get(seed)
+                if meta is not None:
+                    meta["coverage_edges_baseline"] = meta.get("coverage_edges", 0)
 
         removed = len(f.corpus) - len(unique)
         if removed > 0:

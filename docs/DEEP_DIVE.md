@@ -164,6 +164,14 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 - **Auto-minimize**: corpus pruning guided by Wasserstein spatial diversity
 - **Hamming fuzzy dedup**: near-duplicate detection via Hamming distance on equal-length seeds (`--fuzzy-dedup N`)
 
+### Mutation Lineage Tree (`--lineage`)
+- **Weighted parent-pointer forest** keyed by seed hash: every corpus seed records its parent seed key, the mutation operators + byte sites that produced it (edge weight = operator attribution), and its node weight = new coverage edges contributed at insertion
+- **Branch-level pruning**: `auto-minimize` drops an entire unproductive subtree when `recent_credit == 0` (no coverage gained since the last minimize) and `subtree_weight < 1.0` (structural γ-discounted edge weight), instead of pruning just the low-scoring seed; mandatory/fresh/irreplaceable seeds are protected from branch drops
+- **Causal crash-path replay** (`tmin --lineage --corpus-dir DIR`): walks the parent-key chain from the crash sidecar's `parent_seed` through `state.json` seed_meta, rehydrates each ancestor from disk (full seeds, pruned seeds, and delta records via `rehydrate_by_hash`), and uses the smallest rehydrated ancestor that still triggers the pinned crash signature as the delta-debugging start
+- **LCA-based diversity scoring**: `_compute_weights` boosts seeds whose lineage subtree is far from a sampled set of peers (mult = `1.0 + 0.5 * diversity`, diversity = mean LCA distance over a 64-seed sample normalized by tree depth)
+- **Persistence**: lineage fields (`parent_key`, `parent_ops`, `parent_sites`, `new_edge_count`, `coverage_edges_baseline`) round-trip through `state.json`; the tree is rebuilt idempotently from `seed_meta` on resume — never re-derived from runs, so no double-counting
+- **Trim carries lineage**: coverage-guided trimming replaces a seed with the half-length cut inheriting the original's parent edge plus a synthetic `("trim", cut_point)` op, keeping crash chains intact across the trim point
+
 ### Crash Analysis
 - **Sanitizer detection**: automatic ASAN/MSAN/TSAN/LSAN/UBSAN crash classification
 - **Crash minimization**: delta-debugging with signature-matching to prevent drift to unrelated bugs

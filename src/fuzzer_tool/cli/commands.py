@@ -312,6 +312,7 @@ def cmd_fuzz(args):
             asan_target=getattr(args, "asan_target", None),
             ubsan_target=getattr(args, "ubsan_target", None),
             chi2_operator_interval=getattr(args, "chi2_operator_interval", 0),
+            lineage=getattr(args, "lineage", False),
         )
         return 0
 
@@ -420,6 +421,7 @@ def cmd_fuzz(args):
         renyi_weight=getattr(args, "renyi_weight", False),
         transfer_entropy=getattr(args, "transfer_entropy", False),
         elo=getattr(args, "elo", False),
+        lineage=getattr(args, "lineage", False),
         secretary=getattr(args, "secretary", False),
         secretary_window=getattr(args, "secretary_window", 500),
         secretary_exploration=getattr(args, "secretary_exploration", 0.368),
@@ -548,6 +550,8 @@ def cmd_tmin(args):
         use_coverage=args.coverage,
         max_stages=args.max_stages,
         grammar=grammar,
+        lineage=getattr(args, "lineage", False),
+        corpus_dir=getattr(args, "corpus_dir", None),
     )
 
     if minimized is None:
@@ -1360,6 +1364,13 @@ def main() -> int:
         "replicator, EXP3, eps-greedy, hierarchical, GP-UCB).",
     )
     fuzz_parser.add_argument(
+        "--lineage",
+        action="store_true",
+        help="Track a weighted mutation lineage tree (parent/ops/sites/new-edge weight "
+        "per seed): branch-level pruning, causal crash-path replay in tmin, "
+        "LCA-based diversity scoring",
+    )
+    fuzz_parser.add_argument(
         "--exp3", action="store_true", help="Enable EXP3 adversarial bandit operator scheduling"
     )
     fuzz_parser.add_argument(
@@ -1957,6 +1968,17 @@ def main() -> int:
     )
     tmin_parser.add_argument(
         "-O", "--output", default=None, help="Output file for minimized input (default: stdout)"
+    )
+    tmin_parser.add_argument(
+        "--lineage",
+        action="store_true",
+        help="Causal crash-path replay: walk the mutation lineage chain from the "
+        "parent seed and rehydrate pruned intermediates by hash",
+    )
+    tmin_parser.add_argument(
+        "--corpus-dir",
+        default=None,
+        help="Corpus directory for lineage rehydration of pruned intermediates",
     )
     tmin_parser.set_defaults(func=cmd_tmin)
 

@@ -365,6 +365,7 @@ class Fuzzer:
         overlap_density_mode="modifier",
         overlap_min_jaccard=0.25,
         overlap_density_blend=0.5,
+        lineage=False,
         sensitivity=False,
         ga=False,
         qea=False,
@@ -748,10 +749,35 @@ class Fuzzer:
         # because _boost_corpus_sizes() invalidates it on corpus resizing.
         self._seed_key_cache: dict[bytes, str] = {}
 
+        # Per-byte sensitivity tracker (Lyapunov exponent). Constructed
+        # before _init_seed_metadata so load_state (resume) can restore
+        # sensitivity.json — it crashed with AttributeError otherwise.
+        self._use_sensitivity = sensitivity
+        from fuzzer_tool.core.sensitivity import ByteSensitivityTracker
+
+        self._sensitivity = ByteSensitivityTracker(
+            max_seeds=50, max_bytes=max_len, sample_rate=0.02
+        )
+
+        # Weighted mutation lineage tree (parent/ops/sites/new-edge weight
+        # per seed). Initialised early so the post-metadata rebuild can
+        # consume it; rebuilt from persisted seed_meta after metadata init.
+        self._use_lineage = lineage
+        self._lineage = None
+        if lineage:
+            from fuzzer_tool.core.lineage import LineageTree
+
+            self._lineage = LineageTree()
+            log.info("Mutation lineage tree enabled")
+
         self._load_corpus()
         if self._corpus_boost > 0 and self.corpus:
             self._boost_corpus_sizes()
         self._init_seed_metadata()
+        # Rebuild the lineage tree from persisted seed_meta (single source
+        # of truth; never re-derived from runs to avoid double-counting).
+        if self._use_lineage and self._lineage is not None:
+            self._lineage.rebuild_from_meta(self.seed_meta, self._seed_key)
         # Load persisted Markov state; skip retrain if loaded (avoids
         # double-counting the same corpus transitions across restarts)
         loaded = False
@@ -884,16 +910,10 @@ class Fuzzer:
 
         self._frameshift = FrameShift(max_relations=64)
         self._last_ops_used: list[str] = []
+        self._last_ops_with_sites: list[tuple[str, int]] = []
+        self._last_new_edge_count = 0
         self._last_hamming_distance: int = -1
         self._last_mutation_offset: int = 0
-
-        # Per-byte sensitivity tracker (Lyapunov exponent)
-        self._use_sensitivity = sensitivity
-        from fuzzer_tool.core.sensitivity import ByteSensitivityTracker
-
-        self._sensitivity = ByteSensitivityTracker(
-            max_seeds=50, max_bytes=max_len, sample_rate=0.02
-        )
 
         # Critical slowing down detector
         from fuzzer_tool.core.critical_slowing import CriticalSlowingDown
@@ -1748,6 +1768,24 @@ class Fuzzer:
         This avoids pruning seeds that were just added but not yet fuzzed."""
         self._minimize_pending = True
 
+    def _record_lineage_insert(self, child: bytes, parent: bytes | None, corpus_len_before: int):
+        """Insert *child* into the lineage tree when it joined the corpus.
+
+        Gated on the flag; no-op when the seed was rejected as a duplicate
+        (corpus length unchanged) or under qea where seeds bypass f.corpus.
+        Node weight = new coverage edges contributed by this iteration.
+        """
+        if not self._use_lineage or self._lineage is None:
+            return
+        if len(self.corpus) <= corpus_len_before:
+            return
+        ops = [op for op, _ in self._last_ops_with_sites]
+        sites = [s for _, s in self._last_ops_with_sites]
+        parent_key = self._seed_key(parent) if parent is not None else None
+        self._lineage.insert(
+            parent_key, self._seed_key(child), ops, sites, self._last_new_edge_count
+        )
+
     def _flush_pending_minimize(self):
         """Run deferred minimize if one is pending."""
         if self._minimize_pending:
@@ -1887,6 +1925,7 @@ class Fuzzer:
         if self._use_elo and self._elo:
             self._elo._eff_k_cache = None
         self._last_parent_seed = data
+        self._last_new_edge_count = 0  # reset; set when record_edges finds new edges
         meta = self.seed_meta.get(data)
         if meta is not None:
             meta["fuzz_count"] += 1
@@ -2254,6 +2293,7 @@ class Fuzzer:
                 )
                 if new:
                     self._last_new_edge_exec = self.exec_count
+                    self._last_new_edge_count = len(new)
                     # Attribute new edges to the operators that ran this iteration.
                     # Proportional split: edges ÷ unique ops in _last_ops_used.
                     unique_ops = list(dict.fromkeys(self._last_ops_used))
@@ -2558,7 +2598,9 @@ class Fuzzer:
             return True
 
         if is_interesting or has_new_coverage:
+            _corpus_len_before = len(self.corpus)
             self.save_to_corpus(mutated, parent=data)
+            self._record_lineage_insert(mutated, data, _corpus_len_before)
             # GA: add new-coverage individual to population
             if self.ga and has_new_coverage:
                 edge_count = (
@@ -2616,7 +2658,9 @@ class Fuzzer:
         if self._metropolis and self._anneal_budget > 0 and not is_timeout:
             p_accept = math.exp(-1.0 / max(self._temperature, 0.01))
             if random.random() < p_accept:
+                _corpus_len_before = len(self.corpus)
                 self.save_to_corpus(mutated, parent=data)
+                self._record_lineage_insert(mutated, data, _corpus_len_before)
                 if self.mc and self.mc_cem:
                     self.mc.add_elite(mutated, 1, temperature=self._temperature)
                     self.mc.maybe_refit()

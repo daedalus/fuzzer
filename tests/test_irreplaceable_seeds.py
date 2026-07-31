@@ -48,6 +48,8 @@ class MockFuzzer:
         _markov.is_trained = lambda: False
         _markov.snapshot_and_check_plateau = lambda: False
         self.markov = _markov
+        # Lineage gating read by auto_minimize_corpus — off for mocks.
+        self._use_lineage = False
 
 
 class TestIrreplaceableSeeds:

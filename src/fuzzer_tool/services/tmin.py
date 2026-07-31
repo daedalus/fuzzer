@@ -1,12 +1,74 @@
 """Crash minimizer: binary-search for smallest input that still triggers a crash."""
 
+import json
 import os
 import shutil
 import sys
 from pathlib import Path
 
-from fuzzer_tool.adapters.filesystem import hash_data
+from fuzzer_tool.adapters.filesystem import hash_data, rehydrate_by_hash
 from fuzzer_tool.core.mutations import minimize_bytes
+
+
+def _lineage_candidate(
+    crash_path: Path,
+    corpus_dir: str | None,
+    is_crash_fn,
+    original_sig: str,
+) -> bytes | None:
+    """Replay the mutation lineage chain to find a smaller crashing candidate.
+
+    Reads the crash sidecar's ``parent_seed`` hash, walks the parent-key
+    chain recorded in the corpus ``state.json`` seed_meta, rehydrates each
+    ancestor's bytes from disk (full seeds and pruned/delta records), and
+    tests each from the root down against the pinned crash signature.
+
+    Returns the first (root-most, smallest) ancestor that still crashes,
+    or None when the chain cannot be rehydrated or nothing crashes.
+    """
+    if not corpus_dir:
+        return None
+    sidecar = crash_path.with_suffix(".txt")
+    parent_hash = None
+    if sidecar.is_file():
+        for line in sidecar.read_text().splitlines():
+            if line.startswith("parent_seed:"):
+                parent_hash = line.split(":", 1)[1].strip()
+                break
+    if not parent_hash:
+        return None
+
+    state_path = Path(corpus_dir) / "state.json"
+    if not state_path.is_file():
+        return None
+    try:
+        state = json.loads(state_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    seed_meta = state.get("seed_meta", {})
+    if not isinstance(seed_meta, dict):
+        return None
+
+    # Walk parent_key chain leaf-ward, then reverse to root-first.
+    chain: list[tuple[str, list[str], list[int]]] = []
+    cur = parent_hash
+    seen: set[str] = set()
+    while cur and cur not in seen and len(chain) <= 64:
+        seen.add(cur)
+        sm = seed_meta.get(cur)
+        ops = sm.get("parent_ops", []) if isinstance(sm, dict) else []
+        sites = sm.get("parent_sites", []) if isinstance(sm, dict) else []
+        chain.append((cur, ops, sites))
+        cur = sm.get("parent_key") if isinstance(sm, dict) else None
+    chain.reverse()
+
+    for h, _ops, _sites in chain:
+        data = rehydrate_by_hash(h, corpus_dir)
+        if data is None:
+            continue
+        if is_crash_fn(data, original_sig) is not None:
+            return data
+    return None
 
 
 def tmin(
@@ -18,6 +80,8 @@ def tmin(
     use_coverage: bool = False,
     max_stages: int = 128,
     grammar=None,
+    lineage: bool = False,
+    corpus_dir: str | None = None,
 ) -> bytes | None:
     """Minimize a crash input to find the smallest reproducer.
 
@@ -41,6 +105,11 @@ def tmin(
         use_coverage: Enable SHM coverage (passed to env).
         max_stages: Maximum reduction stages.
         grammar: Optional Grammar for tree-level shrinking.
+        lineage: Replay the mutation lineage chain (parent/ops/sites) from
+            the crash's sidecar metadata before falling back to full delta
+            debugging.
+        corpus_dir: Corpus directory to rehydrate pruned intermediate seeds
+            during lineage replay.
 
     Returns:
         Minimized bytes, or None if the crash could not be reproduced.
@@ -125,6 +194,25 @@ def tmin(
             if len(tree_result) < len(data):
                 print(f"[+] Tree shrink: {len(data)} -> {len(tree_result)} bytes")
                 data = tree_result
+
+        # Phase 1.5: Lineage replay — walk the mutation chain from the
+        # parent seed and rehydrate pruned intermediates by hash. A
+        # root-most ancestor that still triggers the pinned crash is a
+        # much smaller starting point for delta debugging.
+        if lineage:
+            candidate = _lineage_candidate(crash_path, corpus_dir, _is_crash, original_sig)
+            # Re-verify at adoption so `data` is always a crashing input here —
+            # the fallback-to-original path below depends on that invariant.
+            if (
+                candidate is not None
+                and len(candidate) < len(data)
+                and _is_crash(candidate, original_sig) is not None
+            ):
+                print(
+                    f"[+] Lineage replay: {len(data)} -> {len(candidate)} bytes "
+                    "(ancestor rehydrated)"
+                )
+                data = candidate
 
         # Phase 2: Byte-level delta debugging
         def _signature_matches(data_bytes: bytes) -> bool:

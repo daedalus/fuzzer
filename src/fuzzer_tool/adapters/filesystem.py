@@ -139,6 +139,40 @@ def apply_delta_v2(parent: bytes, diff: list[list]) -> bytes:
     return bytes(result)
 
 
+def rehydrate_by_hash(h: str, corpus_dir: Path, _depth: int = 0) -> bytes | None:
+    """Reconstruct seed bytes for a 16-hex content hash from disk.
+
+    Checks full seed files (``seeds/``, ``seeds/pruned/``,
+    ``seeds/irreplaceable/``) and delta records (``deltas/``,
+    ``deltas/pruned/``), reconstructing delta chains recursively via
+    ``apply_delta`` / ``apply_delta_v2``. Returns None when the hash is
+    not present anywhere (or the delta chain is unresolvable/cyclic).
+    """
+    if _depth > SNAPSHOT_INTERVAL + 2:
+        return None
+    corpus_dir = Path(corpus_dir)
+    for base in ("seeds", "seeds/pruned", "seeds/irreplaceable"):
+        full = corpus_dir / base / h[:2] / f"id_{h}"
+        if full.is_file():
+            return full.read_bytes()
+    for base in ("deltas", "deltas/pruned"):
+        delta_file = corpus_dir / base / h[:2] / f"delta_{h}.json"
+        if not delta_file.is_file():
+            continue
+        try:
+            rec = json.loads(delta_file.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        parent = rehydrate_by_hash(str(rec.get("parent", "")), corpus_dir, _depth + 1)
+        diff = rec.get("diff")
+        if parent is None or not isinstance(diff, list):
+            continue
+        if rec.get("v") == 2:
+            return apply_delta_v2(parent, diff)
+        return apply_delta(parent, diff)
+    return None
+
+
 def hash_data(data: bytes) -> str:
     """Compute fast hash for deduplication (xxhash, ~20x faster than SHA-256).
 

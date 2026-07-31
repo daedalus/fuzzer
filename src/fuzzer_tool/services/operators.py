@@ -1688,6 +1688,7 @@ class OperatorEngine:
 
         ops = self.build_ops(data)
         f._last_ops_used = []
+        f._last_ops_with_sites = []
         f._last_mopt_particles = []
         if not hasattr(f, "_prev_bandit_op"):
             f._prev_bandit_op = None
@@ -1721,6 +1722,7 @@ class OperatorEngine:
 
             byte_idx = self.select_position(buf, data)
             f._last_mutation_offset = byte_idx
+            f._last_ops_with_sites.append((op, byte_idx))
             old_len = len(buf)
 
             result = f._op_dispatch[op](buf, byte_idx, data)

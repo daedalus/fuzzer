@@ -636,6 +636,28 @@ class SeedPicker:
         # Pre-compute max_distance once (avoids repeated property access)
         max_d = f._distance.max_distance if f._distance else 0.0
 
+        # LCA-based lineage diversity multipliers (Query 3): a seed whose
+        # lineage subtree is far from a sampled set of peers gets a small
+        # weight boost (mult = 1.0 + 0.5 * diversity, diversity in [0, 1]).
+        lineage_div: dict[str, float] = {}
+        if f._use_lineage and getattr(f, "_lineage", None) is not None and n >= 2:
+            tree = f._lineage
+            max_depth = max((node.depth for node in tree.nodes.values()), default=0)
+            if max_depth > 0:
+                all_sk = [f._seed_key(s) for s in corpus]
+                rng = getattr(f, "_rand_pool", None)
+                sample_cap = 64
+                for sk_i in all_sk:
+                    others = [k for k in all_sk if k != sk_i]
+                    if rng is not None and len(others) > sample_cap:
+                        sample = rng.sample(others, sample_cap)
+                    else:
+                        sample = others[:sample_cap]
+                    valid = [d for d in (tree.lca_distance(sk_i, k) for k in sample) if d >= 0]
+                    avg = sum(valid) / len(valid) if valid else 0.0
+                    diversity = min(avg / (2.0 * max_depth), 1.0)
+                    lineage_div[sk_i] = 1.0 + 0.5 * diversity
+
         # Phase 2: apply remaining per-seed weight functions (dict lookups, set ops)
         for i, seed in enumerate(corpus):
             if not has_meta[i]:
@@ -653,6 +675,7 @@ class SeedPicker:
             w = self._weight_static_features(seed, meta["coverage_edges"], w, f)
             w = self._weight_length_and_cross_target(seed, meta, w, f)
             w = self._weight_overlap_density(sk, w, f)
+            w *= lineage_div.get(sk, 1.0)
 
             weights[i] = max(w, 1e-6)
             bf = pareto_scores[i][1]
