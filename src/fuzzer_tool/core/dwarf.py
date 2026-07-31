@@ -303,24 +303,37 @@ def _parse_cu_die(sections: dict[bytes, bytes], info: bytes, cu_off: int):
         abbrev = sections.get(b".debug_abbrev", b"")
         if abbrev_off >= len(abbrev):
             return None
-        # Abbrev table: find the CU DIE's abbrev (first entry at offset).
-        off = abbrev_off
-        code, off = _uleb(abbrev, off)
+        # The DIE in .debug_info begins with its abbrev code (ULEB); the
+        # abbrev table is a hash-ish list in arbitrary order, so scan it
+        # for that code (gcc emits helper DIEs like formal_parameter
+        # before the compile_unit entry; clang usually puts it first).
+        code, die_off = _uleb(info, die_off)
         if code == 0:
             return None
-        tag, off = _uleb(abbrev, off)
-        off += 1  # has-children flag
+        tag = None
         specs = []
+        off = abbrev_off
         while True:
-            name, off = _uleb(abbrev, off)
-            form, off = _uleb(abbrev, off)
-            if name == 0 and form == 0:
+            acode, off = _uleb(abbrev, off)
+            if acode == 0:
                 break
-            specs.append((name, form))
+            atag, off = _uleb(abbrev, off)
+            off += 1  # has-children flag
+            aspecs = []
+            while True:
+                name, off = _uleb(abbrev, off)
+                form, off = _uleb(abbrev, off)
+                if name == 0 and form == 0:
+                    break
+                aspecs.append((name, form))
+                if form == _DW_FORM_implicit_const:
+                    # value embedded in the abbrev table, not the DIE
+                    _v, off = _sleb(abbrev, off)
+            if acode == code:
+                tag, specs = atag, aspecs
+                break
         if tag not in (_DW_TAG_compile_unit, _DW_TAG_skeleton_unit):
             return None
-        # The DIE in .debug_info begins with its abbrev code (ULEB).
-        _abbrev_code, die_off = _uleb(info, die_off)
         stmt_list = None
         comp_dir = None
         name = None

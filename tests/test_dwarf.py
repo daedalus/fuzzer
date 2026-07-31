@@ -111,6 +111,21 @@ def dwarf_variants(tmp_path_factory):
         )
         if r.returncode == 0 and out.exists():
             variants[label] = str(out)
+    # gcc regression: gcc emits DWARF 5 by default and orders its abbrev
+    # table with helper DIEs (formal_parameter) before the compile_unit
+    # entry; the parser must scan for the DIE's abbrev code, not assume
+    # the first table entry is the CU.
+    if shutil.which("gcc"):
+        d = tmp_path_factory.mktemp("gcc")
+        src = d / "dwarf_sanity.c"
+        src.write_text(SRC)
+        out = d / "dwarf_sanity"
+        r = subprocess.run(
+            ["gcc", "-O0", "-g", "-o", str(out), str(src)],
+            capture_output=True,
+        )
+        if r.returncode == 0 and out.exists():
+            variants["gcc_default"] = str(out)
     if not variants:
         pytest.skip("no DWARF variants could be built")
     return variants
