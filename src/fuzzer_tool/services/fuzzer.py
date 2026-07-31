@@ -365,6 +365,7 @@ class Fuzzer:
         boost_std=None,
         boost_pad="repeat",
         refresh_profile=False,
+        chi2_operator_interval=0,
     ):
         self.target = target
         self.debug = debug
@@ -926,6 +927,11 @@ class Fuzzer:
                 tau=5.0,
                 min_matches=10,
             )
+
+        # Chi-squared operator heterogeneity test interval
+        self._chi2_operator_interval = chi2_operator_interval
+        if chi2_operator_interval > 0:
+            print(f"[*] Chi-squared operator test: every {chi2_operator_interval} execs")
             self._elo_path = self.corpus_dir / "elo.json"
             if self._elo_path.exists():
                 self._elo.load(str(self._elo_path))
@@ -2356,6 +2362,17 @@ class Fuzzer:
                     self._gp_ucb.record(op, success, weight=surprisal_weight)
                     seen.add(op)
 
+        # Chi-squared operator heterogeneity test
+        if (
+            self._chi2_operator_interval > 0
+            and self.exec_count > 0
+            and self.exec_count % self._chi2_operator_interval == 0
+        ):
+            try:
+                self._run_chi2_operator_test()
+            except Exception as ex:
+                log.debug("Chi-squared operator test failed: %s", ex)
+
         # Elo: record matches between operators that were used
         if self._use_elo and self._elo and len(self._last_ops_used) >= 2:
             unique_ops = list(dict.fromkeys(self._last_ops_used))  # preserve order, dedup
@@ -2836,6 +2853,52 @@ class Fuzzer:
                         self.shm_cov._ptr, new_size, self.shm_cov.env_id
                     )
         return True
+
+    def _run_chi2_operator_test(self) -> None:
+        """Chi-squared test: do operators have different success rates?
+
+        Builds a 2×K contingency table (operators × success/failure) and
+        tests the null hypothesis that all operators share the same success
+        probability.  Results are logged at ``info`` when significant.
+        """
+        from fuzzer_tool.core.chi_squared import chi_squared_independence, cramers_v
+
+        ops = sorted(set(self.op_counts.keys()) | set(self.op_success.keys()))
+        if len(ops) < 2:
+            return
+
+        table: list[list[float]] = []
+        for op in ops:
+            total = self.op_counts.get(op, 0)
+            success = self.op_success.get(op, 0)
+            if total < 1:
+                continue
+            table.append([float(success), float(total - success)])
+
+        if len(table) < 2:
+            return
+        if not any(row[1] > 0 for row in table):
+            return
+
+        try:
+            chi2, p, dof = chi_squared_independence(table)
+            n = sum(sum(r) for r in table)
+            v = cramers_v(chi2, n, len(table), 2)
+
+            if p < 0.05:
+                log.info(
+                    "χ² op heterogeneity: χ²=%.2f, p=%.4f, V=%.3f, "
+                    "%d operators — significant (p<0.05)",
+                    chi2, p, v, len(table),
+                )
+            else:
+                log.debug(
+                    "χ² op heterogeneity: χ²=%.2f, p=%.4f, V=%.3f, "
+                    "%d operators — not significant",
+                    chi2, p, v, len(table),
+                )
+        except Exception as ex:
+            log.debug("Chi-squared test failed: %s", ex)
 
     def run(self, iterations=0):
         if self.multi_targets:

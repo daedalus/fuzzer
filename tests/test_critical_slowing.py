@@ -1,6 +1,9 @@
-"""Tests for critical slowing down detector."""
+"""Tests for critical slowing down detector and coverage homogeneity detector."""
 
-from fuzzer_tool.core.critical_slowing import CriticalSlowingDown
+from fuzzer_tool.core.critical_slowing import (
+    CoverageHomogeneityDetector,
+    CriticalSlowingDown,
+)
 
 
 class TestCriticalSlowingDown:
@@ -126,3 +129,53 @@ class TestCriticalSlowingDown:
         d.is_approaching_transition()
         d.reset()
         assert d._skewness_baseline is None
+
+
+class TestCoverageHomogeneityDetector:
+    def test_init(self):
+        d = CoverageHomogeneityDetector()
+        assert d.num_columns == 8
+        assert d.window_size == 10
+        assert d.homogeneity_p_threshold == 0.01
+
+    def test_uniform_is_homogeneous(self):
+        d = CoverageHomogeneityDetector(num_columns=4, window_size=5)
+        for _ in range(5):
+            d.observe([50, 50, 50, 50])
+        r = d.is_homogeneous()
+        assert r["homogeneous"] is True
+        assert r["chi2"] == 0.0
+        assert r["p_value"] == 1.0
+
+    def test_skewed_is_heterogeneous(self):
+        d = CoverageHomogeneityDetector(num_columns=4, window_size=5)
+        for _ in range(5):
+            d.observe([5, 5, 200, 200])
+        r = d.is_homogeneous()
+        assert r["homogeneous"] is False
+        assert r["p_value"] < 0.01
+
+    def test_no_data_returns_homogeneous(self):
+        d = CoverageHomogeneityDetector(num_columns=4, window_size=5)
+        r = d.is_homogeneous()
+        assert r["homogeneous"] is True
+        assert r["total_edges"] == 0
+
+    def test_single_active_column_returns_homogeneous(self):
+        d = CoverageHomogeneityDetector(num_columns=4, window_size=5)
+        d.observe([0, 0, 100, 0])
+        r = d.is_homogeneous()
+        assert r["homogeneous"] is True
+
+    def test_custom_threshold(self):
+        d = CoverageHomogeneityDetector(
+            num_columns=3, window_size=10, homogeneity_p_threshold=0.05
+        )
+        for _ in range(10):
+            d.observe([10, 20, 30])
+        r = d.is_homogeneous()
+        # Totals: 100, 200, 300. Expected 200 each.
+        # chi2 = (100-200)^2/200 + 0 + (300-200)^2/200 = 50+0+50 = 100
+        # p ≈ 0 < 0.05 → not homogeneous
+        assert r["homogeneous"] is False
+        assert r["chi2"] == 100.0

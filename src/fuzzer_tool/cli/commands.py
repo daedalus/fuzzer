@@ -311,6 +311,7 @@ def cmd_fuzz(args):
             gp_beta=getattr(args, "gp_beta", 2.0),
             asan_target=getattr(args, "asan_target", None),
             ubsan_target=getattr(args, "ubsan_target", None),
+            chi2_operator_interval=getattr(args, "chi2_operator_interval", 0),
         )
         return 0
 
@@ -450,6 +451,7 @@ def cmd_fuzz(args):
         resize_map_on_stall=getattr(args, "resize_map_on_stall", False),
         enable_smt_z3=getattr(args, "enable_smt_z3", False),
         mod_solving=getattr(args, "mod_solving", "heuristic"),
+        chi2_operator_interval=getattr(args, "chi2_operator_interval", 0),
     )
     fuzzer.run(iterations=args.iterations)
 
@@ -1449,6 +1451,13 @@ def main() -> int:
         "--sensitivity",
         action="store_true",
         help="Enable per-byte sensitivity analysis (Lyapunov exponent) for mutation targeting",
+    )
+    fuzz_parser.add_argument(
+        "--chi2-operator-interval",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Run chi-squared operator heterogeneity test every N iterations (0=disabled, default: 0)",
     )
     fuzz_parser.add_argument(
         "--ga",

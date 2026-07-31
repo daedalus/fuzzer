@@ -1,5 +1,7 @@
-"""Critical slowing down detection for fuzzing discovery rates.
+"""Critical slowing down detection and coverage-column homogeneity analysis.
 
+Critical slowing down
+---------------------
 Complex-systems science has a well-established signature that precedes
 a bifurcation/phase transition: rising variance and rising autocorrelation
 in the system's state just before it shifts regimes (used in climate
@@ -25,6 +27,16 @@ When variance + autocorrelation are rising, the detector signals
 upgrades to "approaching transition, and it looks productive."
 Uses :class:`RunningMoments` (with O(1) sliding-window updates) for
 variance and skewness instead of hand-rolling the same calculations.
+
+Coverage-column homogeneity
+---------------------------
+The :class:`CoverageHomogeneityDetector` tracks per-column edge discovery
+counts and tests whether the spatial distribution of coverage across
+columns is uniform.  Significant departure from uniformity (chi-squared
+goodness-of-fit) indicates spatial clustering — the fuzzer is finding
+edges in only a subset of coverage regions, which may suggest biased
+exploration or that the input format constrains coverage to a narrow
+region of the decision space.
 """
 
 import collections
@@ -216,3 +228,105 @@ class CriticalSlowingDown:
         self.min_observations = data.get("min_observations", self.min_observations)
         if "denoiser" in data and self._denoiser is not None:
             self._denoiser.load(data["denoiser"])
+
+
+class CoverageHomogeneityDetector:
+    """Test whether edge discovery is spatially uniform across coverage columns.
+
+    The AFL edge bitmap is logically divided into columns (contiguous regions).
+    If the fuzzer discovers edges uniformly across columns, coverage is
+    spatially homogeneous.  If some columns dominate, the fuzzer is
+    clustering in specific regions — a signal that exploration may be
+    biased or that the input format constrains coverage.
+
+    The detector accumulates per-column edge totals over a sliding window
+    and runs a chi-squared goodness-of-fit test against the uniform
+    distribution at each ``is_homogeneous()`` call.
+
+    Args:
+        num_columns: Number of coverage columns (default 8).
+        window_size: Observations retained per column (default 10).
+        homogeneity_p_threshold: p-value below which the distribution is
+            considered non-uniform (default 0.01).
+    """
+
+    def __init__(
+        self,
+        num_columns: int = 8,
+        window_size: int = 10,
+        homogeneity_p_threshold: float = 0.01,
+    ):
+        self.num_columns = num_columns
+        self.window_size = window_size
+        self.homogeneity_p_threshold = homogeneity_p_threshold
+        self._column_histories: list[collections.deque] = [
+            collections.deque(maxlen=window_size) for _ in range(num_columns)
+        ]
+
+    def observe(self, column_counts: list[int]) -> None:
+        """Record a per-column edge-count snapshot.
+
+        Args:
+            column_counts: List of ``num_columns`` integers, each giving
+                the number of discovered edges in that column.
+        """
+        for i in range(min(len(column_counts), self.num_columns)):
+            self._column_histories[i].append(column_counts[i])
+
+    def is_homogeneous(self) -> dict:
+        """Run chi-squared goodness-of-fit test against uniform distribution.
+
+        Returns a dict::
+
+            {
+                "homogeneous": bool,
+                "chi2": float,
+                "p_value": float,
+                "dof": int,
+                "cramers_v": float,
+                "total_edges": int,
+            }
+
+        When ``homogeneous`` is False, the null hypothesis of uniform
+        column-wise coverage is rejected (spatial clustering detected).
+        """
+        from fuzzer_tool.core.chi_squared import chi_squared_goodness_of_fit, cramers_v
+
+        # Sum per-column totals over the window
+        col_totals = [sum(col) for col in self._column_histories]
+        total = sum(col_totals)
+        if total < 1:
+            return {
+                "homogeneous": True,
+                "chi2": 0.0,
+                "p_value": 1.0,
+                "dof": 0,
+                "cramers_v": 0.0,
+                "total_edges": 0,
+            }
+
+        # Only count columns with any observed data
+        active_totals = [t for t in col_totals if t > 0]
+        k = len(active_totals)
+        if k < 2:
+            return {
+                "homogeneous": True,
+                "chi2": 0.0,
+                "p_value": 1.0,
+                "dof": 0,
+                "cramers_v": 0.0,
+                "total_edges": total,
+            }
+
+        expected = total / k
+        chi2, p, _dof = chi_squared_goodness_of_fit(active_totals, [expected] * k)
+        v = cramers_v(chi2, total, 1, k)
+
+        return {
+            "homogeneous": p > self.homogeneity_p_threshold,
+            "chi2": chi2,
+            "p_value": p,
+            "dof": k - 1,
+            "cramers_v": v,
+            "total_edges": total,
+        }

@@ -15,6 +15,8 @@
 - [ ] **Havoc stage weighting by per-operator success history** — current havoc uses uniform operator pool; could weight toward operators with higher historical success rate.
 
 ## Scheduling
+- [x] **Chi-squared operator heterogeneity test** (`--chi2-operator-interval`) — periodic diagnostic that tests whether operators have significantly different success rates, driven by contingency-table independence test with Cramér's V effect size. Implemented as an independent chi-squared module (`chi_squared.py`) with four test families (goodness-of-fit, homogeneity, independence, p-value via regularized incomplete gamma).
+- [x] **Coverage-column homogeneity detector** — `CoverageHomogeneityDetector` in `critical_slowing.py` tracks per-column edge discovery and tests spatial uniformity of coverage via chi-squared goodness-of-fit.
 - [x] **Seed energy burst on discovery, decay over time** — AFL++ power schedules (FAST/COE/RARE/MMOPT/LIN/QUAD) via `SeedScorer`, plus Honggfuzz power factors.
 - [x] **Boltzmann seed selection** (`--boltzmann`) — thermodynamic seed weighting: `P(seed) ∝ exp(-E/T)` with `E = log(fuzz_count+1)`, reusing the SA temperature for annealing. Collapses most of the seven hand-tuned schedules into one formula with one tunable knob.
 - [x] **Metropolis corpus admission** (`--metropolis`) — probabilistic acceptance of non-improving inputs: `P = exp(-ΔE/T)`. Exploratory junk admitted at high T; strict coverage-only rule at low T.
