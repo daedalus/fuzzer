@@ -317,6 +317,18 @@ void __afl_map_reset(void) {
 }
 
 #ifdef __AFL_DISTANCE_MODE
+/* In-process (direct_lite) mode has no process boundary between
+ * iterations and nothing calls __afl_map_reset — export a flush that
+ * writes the accumulated tail and zeroes the accumulators WITHOUT
+ * touching the edge table (the fuzzer reads coverage after the run).
+ * The Python runner calls it after each in-process run. */
+__attribute__((visibility("default")))
+void __afl_dist_flush(void) {
+    __afl_write_distance_tail();
+    __afl_dist_sum = 0;
+    __afl_dist_hits = 0;
+}
+
 /* One-shot subprocess runs never call __afl_map_reset — write the tail
  * at process exit instead.  (Persistent/in-process loops call reset per
  * iteration and the destructor only repeats the final values.) */

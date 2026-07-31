@@ -425,6 +425,7 @@ class InProcessRunner:
         old_abrt = signal.signal(signal.SIGABRT, _crash_handler)
         old_alarm = signal.signal(signal.SIGALRM, _alarm_handler)
         signal.setitimer(signal.ITIMER_REAL, self.timeout)
+        result: tuple[int, str] | None = None
         try:
             # Capture stderr for ASAN output
             old_stderr_fd = os.dup(2)
@@ -439,31 +440,30 @@ class InProcessRunner:
             os.dup2(old_stderr_fd, 2)
             os.close(old_stderr_fd)
             os.set_blocking(read_fd, False)
-            try:
+            with contextlib.suppress(OSError):
                 stderr_buf.append(os.read(read_fd, 65536))
-            except OSError:
-                pass
             os.close(read_fd)
 
             if timed_out:
-                return -1, "timeout"
-            return rc, b"".join(stderr_buf).decode(errors="replace")
+                result = (-1, "timeout")
+            else:
+                result = (rc, b"".join(stderr_buf).decode(errors="replace"))
         except Exception as e:
             # Restore stderr on exception
-            try:
+            with contextlib.suppress(Exception):
                 os.dup2(old_stderr_fd, 2)
                 os.close(old_stderr_fd)
-            except Exception:
-                pass
-            return -2, str(e)
+            result = (-2, str(e))
         finally:
             signal.setitimer(signal.ITIMER_REAL, 0)
             signal.signal(signal.SIGALRM, old_alarm)
             signal.signal(signal.SIGSEGV, old_segv)
             signal.signal(signal.SIGABRT, old_abrt)
-            if crashed:
-                # 128 + signal number
-                return 128 + crashed_sig, ""
+            self._flush_distance_tail()
+        if crashed:
+            # 128 + signal number
+            return 128 + crashed_sig, ""
+        return result or (-2, "runner not initialized")
 
     def _run_c_direct_lite(self, data: bytes) -> tuple[int, str]:
         """Lightweight direct ctypes call — minimal overhead.
@@ -543,7 +543,25 @@ class InProcessRunner:
 
         if self._timed_out:
             return -1, "timeout"
+        # In-process mode has no process boundary, so the shim's distance
+        # accumulators never flush on their own — write the SHM tail now.
+        self._flush_distance_tail()
         return rc, _captured_stderr
+
+    def _flush_distance_tail(self) -> None:
+        """Flush the shim's accumulated distance to the SHM tail.
+
+        Calls __afl_dist_flush (distance builds only) which writes
+        dist_sum/dist_count to the SHM tail and zeroes the accumulators,
+        without touching the edge table.  No-op when the target has no
+        distance channel.
+        """
+        try:
+            flush = getattr(self._lib, "__afl_dist_flush", None)
+            if flush is not None:
+                flush()
+        except Exception:
+            log.debug("__afl_dist_flush failed", exc_info=True)
 
     def _run_c_persistent(self, data: bytes) -> tuple[int, str]:
         """Persistent subprocess — one process, many calls."""

@@ -79,6 +79,43 @@ def distance_target(tmp_path_factory):
     return str(out)
 
 
+@pytest.fixture(scope="module")
+def distance_so(tmp_path_factory):
+    """A distance-mode .so with a fuzz_shm_run entry for in-process runs."""
+    if not shutil.which("clang"):
+        pytest.skip("clang not available")
+    d = tmp_path_factory.mktemp("dist_channel_so")
+    src = d / "dist_channel_so.c"
+    so_src = SRC.replace(
+        "int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {",
+        "int fuzz_shm_run(const unsigned char *data, size_t size) {",
+    )
+    # Shared libs need no main; strip it (it references the renamed entry).
+    main_idx = so_src.index("int main(")
+    so_src = so_src[:main_idx]
+    src.write_text(so_src)
+    out = d / "dist_channel.so"
+    r = subprocess.run(
+        [
+            "clang",
+            "-O1",
+            "-g",
+            "-shared",
+            "-fPIC",
+            "-D__AFL_DISTANCE_MODE",
+            "-fsanitize-coverage=trace-pc",
+            "-include",
+            SHIM,
+            "-o",
+            str(out),
+            str(src),
+        ],
+        capture_output=True,
+    )
+    assert r.returncode == 0, r.stderr.decode()
+    return str(out)
+
+
 def _setup_channel(target, target_name):
     """Compute + upload the distance table; return (shm_cov, table_shm)."""
     td = TargetDistance(target, targets=[target_name])
@@ -154,3 +191,44 @@ class TestDistanceChannel:
         assert table
         for pc, dist in table.items():
             assert dist == td._bb_value_of(pc)
+
+
+class TestDirectLiteChannel:
+    """The channel must also work in direct_lite (in-process) mode, where
+    there is no process boundary: the shim's accumulators are flushed to
+    the tail per-iteration by __afl_dist_flush (called by the runner)."""
+
+    def test_direct_lite_flushes_tail(self, distance_so, tmp_path):
+        from fuzzer_tool.adapters.inprocess import InProcessRunner
+
+        shm, table_shm, td = _setup_channel(distance_so, "target_fn")
+        try:
+            runner = InProcessRunner(
+                target=distance_so,
+                function_name="fuzz_shm_run",
+                timeout=5,
+                shm_size=8192,
+                direct_lite=True,
+                coverage_env_id=shm.env_id,
+                cov=True,
+            )
+            # Pre-execution: the tail is zeroed and no distance accumulated.
+            assert shm.read_distance_tail() == (0, 0)
+            rc, err = runner.run_one(b"T\x05")
+            assert rc == 0, err
+            dist_sum, dist_count = shm.read_distance_tail()
+            assert dist_count >= 1
+            avg = dist_sum / dist_count / 100.0
+            assert 0.0 <= avg <= 2.0
+            # A second run must NOT accumulate onto the first (the flush
+            # resets the shim's accumulators between iterations): an input
+            # that never reaches the target leaves the tail at (0,0) — if
+            # run 1's values were still buffered they'd reappear here.
+            rc, err = runner.run_one(b"X\x05")
+            assert rc == 0, err
+            dist_sum2, dist_count2 = shm.read_distance_tail()
+            assert dist_count2 == 0
+            assert dist_sum2 == 0
+        finally:
+            shm.cleanup()
+            table_shm.cleanup()
