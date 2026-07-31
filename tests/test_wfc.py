@@ -13,7 +13,7 @@ Test categories:
 
 import random
 
-from fuzzer_tool.core.png_mutations import (
+from fuzzer_tool.core.mutations.png import (
     PngChunkMutator,
     parse_png_chunks,
     serialize_png_chunks,
@@ -293,7 +293,7 @@ class TestPngWfcReorder:
 
         ihdr_data = struct.pack(">IIBBBBB", 1, 1, 8, 0, 0, 0, 0)
         compressed = zlib.compress(b"\x00\x80", 6)
-        from fuzzer_tool.core.png_mutations import PngChunk
+        from fuzzer_tool.core.mutations.png import PngChunk
 
         chunks = [
             PngChunk(b"IHDR", ihdr_data),
@@ -358,7 +358,7 @@ class TestPngWfcReorder:
         import struct
         import zlib
 
-        from fuzzer_tool.core.png_mutations import PngChunk
+        from fuzzer_tool.core.mutations.png import PngChunk
 
         ihdr_data = struct.pack(">IIBBBBB", 1, 1, 8, 6, 0, 0, 0)
         compressed = zlib.compress(b"\x00\x80\x80\x80\x80", 6)
@@ -386,7 +386,7 @@ class TestPngWfcReorder:
         """Non-PNG input → WFC reorder falls back to returning original."""
         mutator = PngChunkMutator()
         mutator.use_wfc = True
-        from fuzzer_tool.core.png_mutations import PngChunk
+        from fuzzer_tool.core.mutations.png import PngChunk
 
         chunks = [PngChunk(b"x", b"data")]
         result = mutator._wfc_reorder(chunks, max_len=1024)
@@ -402,7 +402,7 @@ class TestPngWfcReorder:
         # Add more chunks so reordering has room to work
         import struct
 
-        from fuzzer_tool.core.png_mutations import PngChunk
+        from fuzzer_tool.core.mutations.png import PngChunk
 
         extra = [
             PngChunk(b"gAMA", struct.pack(">I", 100000)),
@@ -428,7 +428,7 @@ class TestPngWfcReorder:
 class TestBmpWfc:
     def test_wfc_pixels_produces_output(self):
         """WFC pixel generation runs without error."""
-        from fuzzer_tool.core.bmp_mutations import BmpInfo, BmpMutator
+        from fuzzer_tool.core.mutations.bmp import BmpInfo, BmpMutator
 
         # 4x4 24bpp BMP pixel data
         pixels = bytes(random.randint(0, 255) for _ in range(4 * 4 * 3))
@@ -457,7 +457,7 @@ class TestBmpWfc:
 
     def test_wfc_pixels_small(self):
         """Very small image (1×1) → falls through without WFC."""
-        from fuzzer_tool.core.bmp_mutations import BmpInfo, BmpMutator
+        from fuzzer_tool.core.mutations.bmp import BmpInfo, BmpMutator
 
         info = BmpInfo(
             file_size=0,
@@ -483,7 +483,7 @@ class TestBmpWfc:
 
     def test_wfc_pixels_empty(self):
         """Empty pixel data → falls through."""
-        from fuzzer_tool.core.bmp_mutations import BmpInfo, BmpMutator
+        from fuzzer_tool.core.mutations.bmp import BmpInfo, BmpMutator
 
         info = BmpInfo(
             file_size=0,

@@ -1150,7 +1150,7 @@ class OperatorEngine:
             )
 
     def _op_png_chunk_mutate(self, buf, _byte_idx, _data):
-        from fuzzer_tool.core.png_mutations import PngChunkMutator, parse_png_chunks
+        from fuzzer_tool.core.mutations.png import PngChunkMutator, parse_png_chunks
 
         if not hasattr(self.f, "_png_mutator"):
             self.f._png_mutator = PngChunkMutator()
@@ -1164,7 +1164,7 @@ class OperatorEngine:
         return bytearray(mutated[: self.f.max_len])
 
     def _op_jpeg_chunk_mutate(self, buf, _byte_idx, _data):
-        from fuzzer_tool.core.jpeg_mutations import JpegMutator, parse_jpeg_markers
+        from fuzzer_tool.core.mutations.jpeg import JpegMutator, parse_jpeg_markers
 
         if not hasattr(self.f, "_jpeg_mutator"):
             self.f._jpeg_mutator = JpegMutator()
@@ -1177,7 +1177,7 @@ class OperatorEngine:
 
     def _op_jpeg_crc_fix(self, buf, _byte_idx, _data):
         rng = self.f._rand_pool
-        from fuzzer_tool.core.jpeg_mutations import (
+        from fuzzer_tool.core.mutations.jpeg import (
             STANDALONE_MARKERS,
             parse_jpeg_markers,
             serialize_jpeg_markers,
@@ -1201,7 +1201,7 @@ class OperatorEngine:
                     return bytearray(serialize_jpeg_markers(markers)[: self.f.max_len])
 
     def _op_gzip_chunk_mutate(self, buf, _byte_idx, _data):
-        from fuzzer_tool.core.gzip_mutations import GzipMutator, parse_gzip
+        from fuzzer_tool.core.mutations.gzip import GzipMutator, parse_gzip
 
         if not hasattr(self.f, "_gzip_mutator"):
             self.f._gzip_mutator = GzipMutator()
@@ -1213,7 +1213,7 @@ class OperatorEngine:
         return bytearray(mutated[: self.f.max_len])
 
     def _op_bmp_chunk_mutate(self, buf, _byte_idx, _data):
-        from fuzzer_tool.core.bmp_mutations import BmpMutator, parse_bmp
+        from fuzzer_tool.core.mutations.bmp import BmpMutator, parse_bmp
 
         if not hasattr(self.f, "_bmp_mutator"):
             self.f._bmp_mutator = BmpMutator()
@@ -1226,7 +1226,7 @@ class OperatorEngine:
         return bytearray(mutated[: self.f.max_len])
 
     def _op_zlib_chunk_mutate(self, buf, _byte_idx, _data):
-        from fuzzer_tool.core.zlib_mutations import ZlibMutator, parse_zlib
+        from fuzzer_tool.core.mutations.zlib import ZlibMutator, parse_zlib
 
         if not hasattr(self.f, "_zlib_mutator"):
             self.f._zlib_mutator = ZlibMutator()
@@ -1247,7 +1247,7 @@ class OperatorEngine:
                 return bytearray(result[: self.f.max_len])
 
     def _op_pgs_chunk_mutate(self, buf, _byte_idx, _data):
-        from fuzzer_tool.core.pgs_mutations import PgsMutator, parse_pgs_segments
+        from fuzzer_tool.core.mutations.pgs import PgsMutator, parse_pgs_segments
 
         if not hasattr(self.f, "_pgs_mutator"):
             self.f._pgs_mutator = PgsMutator()
@@ -1259,7 +1259,7 @@ class OperatorEngine:
         return bytearray(mutated[: self.f.max_len])
 
     def _op_isobmff_chunk_mutate(self, buf, _byte_idx, _data):
-        from fuzzer_tool.core.isobmff_mutations import IsobmffMutator, parse_boxes
+        from fuzzer_tool.core.mutations.isobmff import IsobmffMutator, parse_boxes
 
         if not hasattr(self.f, "_isobmff_mutator"):
             self.f._isobmff_mutator = IsobmffMutator()
@@ -1273,7 +1273,7 @@ class OperatorEngine:
         return bytearray(mutated[: self.f.max_len])
 
     def _op_nal_chunk_mutate(self, buf, _byte_idx, _data):
-        from fuzzer_tool.core.nal_mutations import NalMutator, parse_nal_units
+        from fuzzer_tool.core.mutations.nal import NalMutator, parse_nal_units
 
         if not hasattr(self.f, "_nal_mutator"):
             self.f._nal_mutator = NalMutator()
@@ -1288,7 +1288,7 @@ class OperatorEngine:
 
     def _op_png_crc_fix(self, buf, _byte_idx, _data):
         rng = self.f._rand_pool
-        from fuzzer_tool.core.png_mutations import parse_png_chunks, serialize_png_chunks
+        from fuzzer_tool.core.mutations.png import parse_png_chunks, serialize_png_chunks
 
         if buf:
             chunks = parse_png_chunks(bytes(buf))

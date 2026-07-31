@@ -81,13 +81,13 @@ class TestOperatorDispatchSmoke:
 
         # Verify the modules behind lazy imports are actually loadable
         module_map = {
-            "png_chunk_mutate": "fuzzer_tool.core.png_mutations",
-            "jpeg_chunk_mutate": "fuzzer_tool.core.jpeg_mutations",
-            "gzip_chunk_mutate": "fuzzer_tool.core.gzip_mutations",
-            "bmp_chunk_mutate": "fuzzer_tool.core.bmp_mutations",
-            "pgs_chunk_mutate": "fuzzer_tool.core.pgs_mutations",
-            "isobmff_chunk_mutate": "fuzzer_tool.core.isobmff_mutations",
-            "nal_chunk_mutate": "fuzzer_tool.core.nal_mutations",
+            "png_chunk_mutate": "fuzzer_tool.core.mutations.png",
+            "jpeg_chunk_mutate": "fuzzer_tool.core.mutations.jpeg",
+            "gzip_chunk_mutate": "fuzzer_tool.core.mutations.gzip",
+            "bmp_chunk_mutate": "fuzzer_tool.core.mutations.bmp",
+            "pgs_chunk_mutate": "fuzzer_tool.core.mutations.pgs",
+            "isobmff_chunk_mutate": "fuzzer_tool.core.mutations.isobmff",
+            "nal_chunk_mutate": "fuzzer_tool.core.mutations.nal",
             "format_lock": "fuzzer_tool.core.magic_lock",
         }
         import importlib

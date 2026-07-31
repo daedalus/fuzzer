@@ -2,7 +2,7 @@
 
 import struct
 
-from fuzzer_tool.core.jpeg_mutations import (
+from fuzzer_tool.core.mutations.jpeg import (
     COM,
     EOI,
     SOI,

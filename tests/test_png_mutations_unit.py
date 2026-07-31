@@ -1,8 +1,8 @@
-"""Tests for core/png_mutations.py — PNG chunk parsing and mutation."""
+"""Tests for core/mutations/png.py — PNG chunk parsing and mutation."""
 
 import struct
 
-from fuzzer_tool.core.png_mutations import (
+from fuzzer_tool.core.mutations.png import (
     PngChunk,
     PngChunkMutator,
     parse_png_chunks,

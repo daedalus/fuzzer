@@ -93,11 +93,11 @@ JPEG_HEADER = (
 @pytest.mark.parametrize(
     "module_name,cls_name,header,method_name",
     [
-        ("fuzzer_tool.core.bmp_mutations", "BmpMutator", BMP_HEADER, "mutate"),
-        ("fuzzer_tool.core.gzip_mutations", "GzipMutator", GZIP_HEADER, "mutate"),
-        ("fuzzer_tool.core.jpeg_mutations", "JpegMutator", JPEG_HEADER, "mutate"),
-        ("fuzzer_tool.core.zlib_mutations", "ZlibMutator", ZLIB_HEADER, "mutate"),
-        ("fuzzer_tool.core.png_mutations", "PngChunkMutator", b"\x89PNG\r\n\x1a\n", "mutate"),
+        ("fuzzer_tool.core.mutations.bmp", "BmpMutator", BMP_HEADER, "mutate"),
+        ("fuzzer_tool.core.mutations.gzip", "GzipMutator", GZIP_HEADER, "mutate"),
+        ("fuzzer_tool.core.mutations.jpeg", "JpegMutator", JPEG_HEADER, "mutate"),
+        ("fuzzer_tool.core.mutations.zlib", "ZlibMutator", ZLIB_HEADER, "mutate"),
+        ("fuzzer_tool.core.mutations.png", "PngChunkMutator", b"\x89PNG\r\n\x1a\n", "mutate"),
     ],
 )
 def test_rng_parameter_is_actually_used(module_name, cls_name, header, method_name):
@@ -127,10 +127,10 @@ def test_rng_parameter_is_actually_used(module_name, cls_name, header, method_na
 @pytest.mark.parametrize(
     "module_name,cls_name,header,method_name",
     [
-        ("fuzzer_tool.core.bmp_mutations", "BmpMutator", BMP_HEADER, "_generate_random_bmp"),
-        ("fuzzer_tool.core.gzip_mutations", "GzipMutator", GZIP_HEADER, "_generate_random_gzip"),
-        ("fuzzer_tool.core.jpeg_mutations", "JpegMutator", JPEG_HEADER, "_generate_random_jpeg"),
-        ("fuzzer_tool.core.zlib_mutations", "ZlibMutator", ZLIB_HEADER, "_generate_random_zlib"),
+        ("fuzzer_tool.core.mutations.bmp", "BmpMutator", BMP_HEADER, "_generate_random_bmp"),
+        ("fuzzer_tool.core.mutations.gzip", "GzipMutator", GZIP_HEADER, "_generate_random_gzip"),
+        ("fuzzer_tool.core.mutations.jpeg", "JpegMutator", JPEG_HEADER, "_generate_random_jpeg"),
+        ("fuzzer_tool.core.mutations.zlib", "ZlibMutator", ZLIB_HEADER, "_generate_random_zlib"),
     ],
 )
 def test_rng_parameter_in_generate_random(module_name, cls_name, header, method_name):

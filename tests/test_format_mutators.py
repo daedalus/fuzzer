@@ -15,7 +15,7 @@ class TestPgsMutations:
     """PGS mutator serialization: seg_size must reach the wire."""
 
     def test_serialize_uses_seg_size_not_payload_len(self):
-        from fuzzer_tool.core.pgs_mutations import PgsSegment, serialize_pgs_segments
+        from fuzzer_tool.core.mutations.pgs import PgsSegment, serialize_pgs_segments
 
         seg = PgsSegment(pts=0, dts=0xFFFFFFFF, seg_type=0x14, seg_size=0, payload=b"AAAA")
         result = serialize_pgs_segments([seg])
@@ -24,7 +24,7 @@ class TestPgsMutations:
         assert written_size == 0, f"Expected seg_size=0, got {written_size}"
 
     def test_serialize_uses_seg_size_large(self):
-        from fuzzer_tool.core.pgs_mutations import PgsSegment, serialize_pgs_segments
+        from fuzzer_tool.core.mutations.pgs import PgsSegment, serialize_pgs_segments
 
         seg = PgsSegment(pts=0, dts=0xFFFFFFFF, seg_type=0x14, seg_size=0xFFFF, payload=b"BB")
         result = serialize_pgs_segments([seg])
@@ -32,7 +32,7 @@ class TestPgsMutations:
         assert written_size == 0xFFFF, f"Expected seg_size=0xFFFF, got {written_size}"
 
     def test_serialize_keeps_payload_untouched(self):
-        from fuzzer_tool.core.pgs_mutations import PgsSegment, serialize_pgs_segments
+        from fuzzer_tool.core.mutations.pgs import PgsSegment, serialize_pgs_segments
 
         payload = b"HELLO"
         seg = PgsSegment(pts=0, dts=0xFFFFFFFF, seg_type=0x80, seg_size=0, payload=payload)
@@ -45,7 +45,7 @@ class TestIsobmffMutations:
     """ISOBMFF mutator serialization: size_orig must reach the wire."""
 
     def test_serialize_uses_size_orig_not_payload_len(self):
-        from fuzzer_tool.core.isobmff_mutations import Box, serialize_boxes
+        from fuzzer_tool.core.mutations.isobmff import Box, serialize_boxes
 
         box = Box(box_type=b"ftyp", size_orig=0xFFFFFFFF, data=b"small")
         result = serialize_boxes([box])
@@ -53,7 +53,7 @@ class TestIsobmffMutations:
         assert written_size == 0xFFFFFFFF, f"Expected size_orig=0xFFFFFFFF, got {written_size}"
 
     def test_serialize_size_orig_zero(self):
-        from fuzzer_tool.core.isobmff_mutations import Box, serialize_boxes
+        from fuzzer_tool.core.mutations.isobmff import Box, serialize_boxes
 
         box = Box(box_type=b"ftyp", size_orig=0, data=b"some data here")
         result = serialize_boxes([box])
@@ -61,7 +61,7 @@ class TestIsobmffMutations:
         assert written_size == 0, f"Expected size_orig=0, got {written_size}"
 
     def test_serialize_size_orig_small_writes_mismatch(self):
-        from fuzzer_tool.core.isobmff_mutations import Box, serialize_boxes
+        from fuzzer_tool.core.mutations.isobmff import Box, serialize_boxes
 
         # size_orig=8 declares 0-byte payload, but data is longer.
         # This mismatch is the fuzzing probe — serialize_boxes must
@@ -77,7 +77,7 @@ class TestIsobmffMutations:
     def test_mutate_box_size_pads_when_larger(self):
         import random
 
-        from fuzzer_tool.core.isobmff_mutations import Box, IsobmffMutator
+        from fuzzer_tool.core.mutations.isobmff import Box, IsobmffMutator
 
         rng = random.Random(42)
         mut = IsobmffMutator()
@@ -96,7 +96,7 @@ class TestIsobmffMutations:
         assert len(box.data) == 12, f"Expected padded payload len 12, got {len(box.data)}"
 
     def test_mutate_box_size_truncates_when_smaller(self):
-        from fuzzer_tool.core.isobmff_mutations import Box, IsobmffMutator
+        from fuzzer_tool.core.mutations.isobmff import Box, IsobmffMutator
 
         mut = IsobmffMutator()
         box = Box(box_type=b"ftyp", size_orig=8 + 100, data=b"x" * 100)
@@ -118,7 +118,7 @@ class TestIsobmffMutations:
 
         The padding path must clamp payload_len to max_len to avoid OOM.
         """
-        from fuzzer_tool.core.isobmff_mutations import Box, IsobmffMutator
+        from fuzzer_tool.core.mutations.isobmff import Box, IsobmffMutator
 
         mut = IsobmffMutator()
         # A realistic leaf box with small data payload
@@ -141,7 +141,7 @@ class TestIsobmffMutations:
         )
 
     def test_serialize_extended_size_64bit(self):
-        from fuzzer_tool.core.isobmff_mutations import Box, serialize_boxes
+        from fuzzer_tool.core.mutations.isobmff import Box, serialize_boxes
 
         # size_orig > 0xFFFFFFFF requires extended-size (64-bit) format
         large = 0x1FFFFFFFF
