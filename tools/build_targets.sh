@@ -28,6 +28,7 @@ WITH_CMPLOG=1  # default: cmplog linked into .so targets
 WITH_TRACECMP=0
 WITH_VENDOR_TRACECMP=0
 WITH_CLANG_SCOV=0
+WITH_DISTANCE=0
 WITH_FFMPEG_SANCOV=1  # auto-rebuild vendored FFmpeg with coverage if needed
 USE_CLANG=0
 
@@ -555,6 +556,8 @@ verify_cmplog() {
     local fail_count=0
     for f in "$TARGETS"/*.so; do
         [ -f "$f" ] || continue
+        # Distance builds (_dist.so) deliberately skip the cmplog shim.
+        [[ "$f" == *_dist.so ]] && continue
         if nm "$f" 2>/dev/null | grep -q "__cmplog_reset"; then
             ok_count=$((ok_count + 1))
         else

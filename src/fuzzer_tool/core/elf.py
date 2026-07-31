@@ -922,9 +922,12 @@ def _decode_x86_64(text: bytes, base_addr: int):
             yield insn
             continue
 
-        # Unrecognized — skip 1 byte
+        # Unrecognized — consume what was actually read (incl. any
+        # prefixes).  Hardcoding 1 here misreports REX/legacy-prefixed
+        # unknowns (e.g. "41 57" push r15) as length 1, which shifts
+        # every subsequent block boundary in CFG analysis.
         insn.insn_id = _INS_OTHER
-        insn.length = 1
+        insn.length = pc - start
         yield insn
 
 
