@@ -11,6 +11,7 @@ Also provides:
 """
 
 import math
+from array import array
 from collections import defaultdict
 
 # Maximum edges tracked per (position, byte_val) pair in the joint
@@ -46,8 +47,8 @@ class MutualInformationTracker:
         )
         # Per-position: byte_value -> count
         self.byte_marginal: dict[int, dict[int, int]] = defaultdict(lambda: defaultdict(int))
-        # Global: edge_index -> count (dense list for O(1) access)
-        self.edge_marginal: list[int] = []
+        # Global: edge_index -> count (dense array for O(1) access)
+        self.edge_marginal: array = array("Q")
         self._edge_marginal_size = 0
         # Total observations per position
         self.position_counts: dict[int, int] = defaultdict(int)
@@ -91,15 +92,15 @@ class MutualInformationTracker:
             # Only update the expensive joint distribution once the position
             # has enough observations to compute MI.
             if self.position_counts[pos] >= self.min_observations:
-                bv_edges = 0
-                for edge in hit_edges:
+                for bv_edges, edge in enumerate(hit_edges):
                     self.joint[pos][byte_val][edge] += 1
                     # Update edge marginal array
                     if edge >= self._edge_marginal_size:
-                        self.edge_marginal.extend([0] * (edge + 1 - self._edge_marginal_size))
+                        self.edge_marginal.extend(
+                            array("Q", [0]) * (edge + 1 - self._edge_marginal_size)
+                        )
                         self._edge_marginal_size = edge + 1
                     self.edge_marginal[edge] += 1
-                    bv_edges += 1
                     if bv_edges >= MAX_EDGES_PER_CELL:
                         break
 
@@ -318,7 +319,7 @@ class MutualInformationTracker:
             "min_observations": self.min_observations,
             "total_observations": self.total_observations,
             "position_counts": dict(self.position_counts),
-            "edge_marginal": self.edge_marginal,
+            "edge_marginal": self.edge_marginal.tolist(),
             "byte_marginal": {
                 str(pos): {str(bv): c for bv, c in counts.items()}
                 for pos, counts in self.byte_marginal.items()
@@ -358,11 +359,11 @@ class MutualInformationTracker:
         if isinstance(em, dict):
             # Old format: {"edge_index": count, ...}
             max_idx = max((int(k) for k in em), default=-1) + 1 if em else 0
-            self.edge_marginal = [0] * max_idx
+            self.edge_marginal = array("Q", [0]) * max_idx
             for k, v in em.items():
                 self.edge_marginal[int(k)] = v
         else:
-            self.edge_marginal = em
+            self.edge_marginal = array("Q", em)
         self._edge_marginal_size = len(self.edge_marginal)
         self.byte_marginal = defaultdict(
             lambda: defaultdict(int),

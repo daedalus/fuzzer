@@ -1,9 +1,11 @@
 """Tests for edge_tracker.py — KS, NCD, Good-Turing, weights, CDF norms."""
 
 import math
+from array import array
 
 from fuzzer_tool.core.edge_tracker import (
     EdgeTracker,
+    MinHashLSH,
     _js_divergence,
     _kolmogorov_pvalue,
     _ks_p_from_cdf_diff,
@@ -479,3 +481,83 @@ class TestBayesianGrowthModel:
         # P(stalled) should be high for a saturated curve
         assert result["p_stalled"] is not None
         assert result["p_stalled"] > 0.5
+
+
+class TestMinHashLSHArraySignatures:
+    """MinHash signatures stored as array('Q') instead of list[int]."""
+
+    def test_signatures_stored_as_array(self):
+        lsh = MinHashLSH(num_perm=64, num_bands=8)
+        edges = frozenset({1, 5, 10, 15, 20, 100, 65535})
+        sig = lsh.compute_signature(edges)
+        assert isinstance(sig, array)
+        assert sig.typecode == "Q"
+        assert len(sig) == lsh.num_perm
+        lsh.add("s", sig)
+        stored = lsh.signatures["s"]
+        assert isinstance(stored, array)
+        assert stored == sig
+
+    def test_add_accepts_plain_list(self):
+        # load() feeds JSON lists into add() — must be normalized to array
+        lsh = MinHashLSH(num_perm=8, num_bands=2)
+        lsh.add("s", [7, 6, 5, 4, 3, 2, 1, 0])
+        assert isinstance(lsh.signatures["s"], array)
+        assert lsh.signatures["s"].tolist() == [7, 6, 5, 4, 3, 2, 1, 0]
+
+    def test_numpy_and_fallback_paths_agree(self):
+        lsh = MinHashLSH(num_perm=32, num_bands=4)
+        edges = frozenset(range(0, 2000, 7))
+        vectorized = lsh.compute_signature(edges)
+        lsh._coeffs_a_np = None
+        lsh._coeffs_b_np = None
+        fallback = lsh.compute_signature(edges)
+        assert vectorized == fallback
+
+    def test_jaccard_matches_independent_count(self):
+        lsh = MinHashLSH(num_perm=64, num_bands=8)
+        edges_a = frozenset(range(0, 500, 2))
+        edges_b = frozenset(range(0, 500, 3))
+        lsh.add("a", lsh.compute_signature(edges_a))
+        lsh.add("b", lsh.compute_signature(edges_b))
+        sig_a = lsh.signatures["a"].tolist()
+        sig_b = lsh.signatures["b"].tolist()
+        matches = sum(1 for x, y in zip(sig_a, sig_b, strict=False) if x == y)
+        assert lsh.approximate_jaccard("a", "b") == matches / lsh.num_perm
+
+    def test_corpus_minhash_matches_naive_elementwise_min(self):
+        lsh = MinHashLSH(num_perm=16, num_bands=4)
+        edge_sets = [
+            frozenset(range(0, 50, 2)),
+            frozenset(range(0, 50, 3)),
+            frozenset(range(0, 50, 5)),
+        ]
+        for i, edges in enumerate(edge_sets):
+            lsh.add(f"k{i}", lsh.compute_signature(edges))
+        union = lsh.corpus_minhash()
+        assert isinstance(union, array)
+        assert union.typecode == "Q"
+        expected = [lsh._mask] * lsh.num_perm
+        for key in lsh.signatures:
+            sig = lsh.signatures[key].tolist()
+            for i in range(lsh.num_perm):
+                expected[i] = min(expected[i], sig[i])
+        assert union.tolist() == expected
+
+    def test_save_load_roundtrip_preserves_signatures(self, tmp_path):
+        et = EdgeTracker(map_size=256)
+        bm = bytearray(256)
+        for i in range(0, 256, 4):
+            bm[i] = i
+        et.record_edges("seed1", bytes(bm))
+        et.record_edges("seed2", bytes(bm[:128]))
+        path = str(tmp_path / "tracker.json")
+        assert et.save(path)
+        et2 = EdgeTracker(map_size=256)
+        assert et2.load(path)
+        assert et2._minhash.signatures.keys() == et._minhash.signatures.keys()
+        for k in et._minhash.signatures:
+            assert et2._minhash.signatures[k].tolist() == et._minhash.signatures[k].tolist()
+        assert et2._minhash.approximate_jaccard(
+            "seed1", "seed2"
+        ) == et._minhash.approximate_jaccard("seed1", "seed2")

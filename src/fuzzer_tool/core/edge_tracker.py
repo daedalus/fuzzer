@@ -17,6 +17,7 @@ import math
 import random
 import struct
 import zlib
+from array import array
 from collections import defaultdict
 
 from fuzzer_tool.core import fast_json as json
@@ -32,8 +33,8 @@ try:
 except ImportError:
     _HAS_NUMPY = False
 
-from fuzzer_tool.core.count_class import classify_counts
-from fuzzer_tool.core.similarity import hamming_distance
+from fuzzer_tool.core.count_class import classify_counts  # noqa: E402
+from fuzzer_tool.core.similarity import hamming_distance  # noqa: E402
 
 log = logging.getLogger(__name__)
 
@@ -373,8 +374,8 @@ class MinHashLSH:
         self.num_perm = num_perm
         self.num_bands = num_bands
         self.band_size = num_perm // num_bands
-        # Per-seed MinHash signatures: seed_key -> list[int] of length num_perm
-        self.signatures: dict[str, list[int]] = {}
+        # Per-seed MinHash signatures: seed_key -> array('Q') of length num_perm
+        self.signatures: dict[str, array] = {}
         # LSH buckets: (band_idx, band_hash) -> set of seed_keys
         self.buckets: dict[tuple[int, int], set[str]] = {}
         # Precomputed hash function coefficients: h(x) = (a*x + b) & mask
@@ -395,7 +396,7 @@ class MinHashLSH:
         except ImportError:
             pass
 
-    def compute_signature(self, edge_set: set[int]) -> list[int]:
+    def compute_signature(self, edge_set: set[int]) -> array:
         """Compute MinHash signature for a set of edge indices.
 
         Uses k independent hash functions of the form h(x) = (a*x + b) & mask,
@@ -408,10 +409,10 @@ class MinHashLSH:
             edges = _np.array(list(edge_set), dtype=_np.uint64)
             # Shape: (num_perm, n_edges) — fully vectorized
             h = self._coeffs_a_np[:, None] * edges[None, :] + self._coeffs_b_np[:, None]
-            return h.min(axis=1).tolist()
+            return array("Q", h.min(axis=1))
 
         # Python fallback
-        sig = [self._mask] * self.num_perm
+        sig = array("Q", [self._mask]) * self.num_perm
         for edge in edge_set:
             for i, (a, b) in enumerate(self._coeffs):
                 h = (a * edge + b) & self._mask
@@ -419,9 +420,9 @@ class MinHashLSH:
                     sig[i] = h
         return sig
 
-    def add(self, seed_key: str, sig: list[int]):
+    def add(self, seed_key: str, sig: list[int] | array):
         """Add a seed's signature to the index."""
-        self.signatures[seed_key] = sig
+        self.signatures[seed_key] = sig if isinstance(sig, array) else array("Q", sig)
         # Insert into LSH buckets
         for band_idx in range(self.num_bands):
             start = band_idx * self.band_size
@@ -491,7 +492,7 @@ class MinHashLSH:
             return candidates
         return {k for k in candidates if self.approximate_jaccard(seed_key, k) >= min_jaccard}
 
-    def corpus_minhash(self, seed_keys: set[str] | None = None) -> list[int]:
+    def corpus_minhash(self, seed_keys: set[str] | None = None) -> array:
         """Compute MinHash of the union of all seeds' edge sets.
 
         The union's MinHash is the element-wise minimum of individual
@@ -500,7 +501,7 @@ class MinHashLSH:
         if seed_keys is None:
             seed_keys = set(self.signatures.keys())
         if not seed_keys:
-            return [self._mask] * self.num_perm
+            return array("Q", [self._mask]) * self.num_perm
         # Start with first seed's signature as baseline
         first = next(iter(seed_keys))
         result = list(self.signatures.get(first, [self._mask] * self.num_perm))
@@ -510,7 +511,7 @@ class MinHashLSH:
                 for i in range(self.num_perm):
                     if sig[i] < result[i]:
                         result[i] = sig[i]
-        return result
+        return array("Q", result)
 
     def approximate_union_jaccard(self, seed_key: str, corpus_sig: list[int]) -> float:
         """Estimate Jaccard(seed, corpus_union) using precomputed corpus signature.
@@ -558,7 +559,7 @@ class EdgeTracker:
         self.max_hit_count: int = 0
         # MinHash/LSH for approximate Jaccard and subsumption
         self._minhash = MinHashLSH(num_perm=64, num_bands=8)
-        self._corpus_sig: list[int] | None = None
+        self._corpus_sig: array | None = None
         # Per-seed edge traces for directed distance: seed_key -> set of (prev, curr) edges
         self.seed_edge_traces: dict[str, set[tuple[int, int]]] = {}
         # Per-target cumulative edge sets: target_name -> set of edge indices
@@ -1990,10 +1991,7 @@ class EdgeTracker:
             edge_count = len(edges)
 
             # Compute subsumption weight
-            if self._corpus_sig:
-                weight = self.compute_subsumption_weight(seed_key)
-            else:
-                weight = 1.0
+            weight = self.compute_subsumption_weight(seed_key) if self._corpus_sig else 1.0
 
             # Classify
             if singleton_count > 0:
@@ -2120,7 +2118,7 @@ class EdgeTracker:
                 k: {str(e): c for e, c in hc.items()} for k, hc in self.seed_hit_counts.items()
             },
             "global_edge_hits": {str(e): c for e, c in self._global_edge_hits.items()},
-            "minhash_sigs": {k: sig for k, sig in self._minhash.signatures.items()},
+            "minhash_sigs": {k: sig.tolist() for k, sig in self._minhash.signatures.items()},
             "aggregate_totals": {str(e): c for e, c in self._aggregate_totals.items()},
             "aggregate_total_count": self._aggregate_total_count,
             "edge_traces": {k: [list(e) for e in v] for k, v in self.seed_edge_traces.items()},

@@ -317,6 +317,67 @@ class TestMutualInformationTracker:
         assert mi2.load(path)
         assert mi2.total_observations == mi.total_observations
         assert mi2.position_counts[0] == mi.position_counts[0]
+        assert mi2.edge_marginal.tolist() == mi.edge_marginal.tolist()
+
+    def test_edge_marginal_is_array_and_counts_match_naive(self):
+        from array import array
+
+        mi = MutualInformationTracker(min_observations=1)
+        records = [
+            (b"\x00\x01", b"\x01\x02"),
+            (b"\x01", b"\x02\x03"),
+            (b"\x00\x00", b"\x03"),
+        ]
+        naive: dict[int, int] = {}
+        for data, edges in records:
+            mi.record(data, edges, map_size=16)
+            # Mirror record(): one increment per (position, byte, edge) triple
+            for pos, _byte_val in enumerate(data):
+                if pos >= mi.max_positions:
+                    break
+                for e in edges:
+                    naive[e] = naive.get(e, 0) + 1
+
+        assert isinstance(mi.edge_marginal, array)
+        assert mi.edge_marginal.typecode == "Q"
+        max_idx = max(naive) + 1 if naive else 0
+        expected = [naive.get(i, 0) for i in range(max_idx)]
+        assert mi.edge_marginal.tolist() == expected
+
+    def test_edge_marginal_grows_densely(self):
+        mi = MutualInformationTracker(min_observations=1)
+        # Edge indices far apart force dense growth up to the max index
+        for i in range(5):
+            mi.record(b"\x00", {i * 1000}, map_size=65536)
+        assert mi._edge_marginal_size == 4001
+        assert mi.edge_marginal[0] == 1
+        assert mi.edge_marginal[4000] == 1
+        assert sum(mi.edge_marginal) == 5
+
+    def test_load_old_dict_format(self, tmp_path):
+        # Old state format stored edge_marginal as {"edge_index": count, ...}
+        import json
+        from array import array
+
+        path = tmp_path / "old_mi.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "max_positions": 4096,
+                    "min_observations": 5,
+                    "total_observations": 3,
+                    "position_counts": {"0": 3},
+                    "edge_marginal": {"2": 5, "10": 3},
+                    "byte_marginal": {"0": {"1": 3}},
+                    "joint": {},
+                }
+            )
+        )
+        mi = MutualInformationTracker(min_observations=5)
+        assert mi.load(str(path))
+        assert isinstance(mi.edge_marginal, array)
+        assert mi.edge_marginal.tolist() == [0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 3]
+        assert mi._edge_marginal_size == 11
 
     def test_load_nonexistent(self):
         mi = MutualInformationTracker()
