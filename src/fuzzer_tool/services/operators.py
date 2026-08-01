@@ -1856,7 +1856,11 @@ class OperatorEngine:
                         f._frameshift.on_insert(byte_idx, new_len - old_len)
                     elif new_len < old_len:
                         f._frameshift.on_delete(byte_idx, old_len - new_len)
-                buf = bytearray(result[: f.max_len])
+                buf = (
+                    result[: f.max_len]
+                    if isinstance(result, bytearray)
+                    else bytearray(result[: f.max_len])
+                )
 
         if f._frameshift.relations:
             f._frameshift.apply_to_buffer(buf)

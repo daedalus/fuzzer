@@ -16,6 +16,22 @@ classify_and_new_bits use vectorized operations for 100-400x speedup
 over the pure-Python loop on 131K buffers.
 """
 
+from array import array
+
+import numpy as np
+
+_NP_CLASSIFY_TABLE = np.array(
+    [
+        _classify_byte(i)
+        if (
+            _classify_byte := lambda val: val if val <= 3 else min(1 << (val.bit_length() - 1), 128)
+        )
+        else 0
+        for i in range(256)
+    ],
+    dtype=np.uint8,
+)
+
 
 def _classify_byte(val: int) -> int:
     """Classify a single hit count value.
@@ -28,23 +44,17 @@ def _classify_byte(val: int) -> int:
     return min(b, 128)
 
 
-import numpy as np
-
-_NP_CLASSIFY_TABLE = np.array(
-    [_classify_byte(i) for i in range(256)],
-    dtype=np.uint8,
-)
-
-
-def _build_u16_table() -> list[int]:
+def _build_u16_table() -> array:
     """Build a 65536-entry lookup table that classifies 2 bytes at once.
 
     For a u16 value v = lo | (hi << 8), the entry is:
         classify(lo) | (classify(hi) << 8)
 
     This lets us classify an entire trace buffer in half the iterations.
+    Uses array('H') (2 bytes per entry) instead of list[int] (~28 bytes
+    per entry) to reduce retained memory from ~2.6 MB to ~128 KB.
     """
-    table = [0] * 65536
+    table = array("H", [0]) * 65536
     for lo in range(256):
         cl = _classify_byte(lo)
         for hi in range(256):
@@ -53,8 +63,18 @@ def _build_u16_table() -> list[int]:
     return table
 
 
-# Precomputed lookup table
-LOOKUP_U16: list[int] = _build_u16_table()
+# Lazily built — only constructed on first access via __getattr__.
+# In normal operation numpy is always available (imported above), so
+# classify_counts() uses the vectorized numpy path and LOOKUP_U16 is
+# never needed.  Building it at import time wasted ~2.6 MB of retained
+# memory for a code path that is effectively dead.
+def __getattr__(name: str):
+    """PEP 562 module-level lazy attribute resolution."""
+    if name == "LOOKUP_U16":
+        table = _build_u16_table()
+        globals()["LOOKUP_U16"] = table
+        return table
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def classify_counts(trace_bits):
@@ -72,26 +92,25 @@ def classify_counts(trace_bits):
     if len(trace_bits) > 0:
         arr = (
             np.frombuffer(trace_bits, dtype=np.uint8)
-            if isinstance(trace_bits, (bytes, bytearray))
+            if isinstance(trace_bits, bytes | bytearray)
             else np.asarray(trace_bits, dtype=np.uint8)
         )
         return bytearray(_NP_CLASSIFY_TABLE[arr])
 
     result = bytearray(trace_bits)
     length = len(result)
-    _lookup = LOOKUP_U16
 
     i = 0
     end = length - 1
     while i < end:
         raw = result[i] | (result[i + 1] << 8)
-        classified = _lookup[raw]
+        classified = LOOKUP_U16[raw]  # noqa: F821 — resolved via module __getattr__
         result[i] = classified & 0xFF
         result[i + 1] = (classified >> 8) & 0xFF
         i += 2
 
     if length & 1:
-        result[length - 1] = _lookup[result[length - 1]]
+        result[length - 1] = LOOKUP_U16[result[length - 1]]  # noqa: F821 — resolved via module __getattr__
 
     return result
 

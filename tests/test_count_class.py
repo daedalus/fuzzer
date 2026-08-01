@@ -95,6 +95,15 @@ class TestLookupU16:
     def test_global_table_matches_build(self):
         assert _build_u16_table() == LOOKUP_U16
 
+    def test_lookup_u16_is_lazy(self):
+        """LOOKUP_U16 must not be built at import time — only on first access."""
+        import fuzzer_tool.core.count_class as mod
+
+        mod.__dict__.pop("LOOKUP_U16", None)
+        table = mod.LOOKUP_U16
+        assert len(table) == 65536
+        assert mod.__dict__["LOOKUP_U16"] is table
+
 
 class TestClassifySingle:
     def test_delegates_to_classify_byte(self):

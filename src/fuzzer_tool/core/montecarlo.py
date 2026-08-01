@@ -354,8 +354,11 @@ class MonteCarloScheduler:
         if not self.elite_set:
             return
 
-        # Snapshot previous distribution for JS comparison
-        self._prev_byte_freq = {pos: dict(freq) for pos, freq in self.byte_freq.items()}
+        # Snapshot previous distribution for JS comparison.
+        # Reference swap is safe: self.byte_freq is reassigned to a new
+        # dict on the next line, and _prev_byte_freq is never mutated
+        # (only iterated in _compute_js), so the old dict is untouched.
+        self._prev_byte_freq = self.byte_freq
 
         n_elite = max(1, int(len(self.elite_set) * self.elite_frac))
         sorted_elite = sorted(self.elite_set, key=lambda x: x[0], reverse=True)

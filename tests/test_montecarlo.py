@@ -301,6 +301,27 @@ class TestMonteCarloScheduler:
         mc.maybe_refit()
         assert mc.cem_fitted
 
+    def test_regression_prev_byte_freq_reference_swap(self):
+        """_prev_byte_freq must snapshot the old byte_freq without being
+        affected by the rebuild — the deep-copy was replaced by a reference
+        swap because byte_freq is reassigned (not mutated) during refit."""
+        mc = MonteCarloScheduler(refit_interval=1)
+        for i in range(15):
+            mc.add_elite(bytes([65, 66, 67]), score=i)
+        mc.maybe_refit()
+        # First refit: _prev_byte_freq snapshots the initial empty dict
+        assert mc._prev_byte_freq == {}
+        # elite_frac=0.1 keeps only the top-1 elite (score 14)
+        rebuilt = {0: {65: 1}, 1: {66: 1}, 2: {67: 1}}
+        assert mc.byte_freq == rebuilt
+        # Second refit: _prev_byte_freq must hold the first rebuilt dict
+        mc.maybe_refit()
+        assert mc._prev_byte_freq == rebuilt
+        # byte_freq was rebuilt again — must be a different dict object
+        assert mc._prev_byte_freq is not mc.byte_freq
+        # JS divergence is computable and finite
+        assert 0.0 <= mc.last_js_divergence <= 1.0
+
     def test_cem_byte(self):
         mc = MonteCarloScheduler()
         mc.byte_freq = {0: {65: 1000, 66: 500}}

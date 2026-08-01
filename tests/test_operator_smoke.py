@@ -45,7 +45,7 @@ class TestOperatorDispatchSmoke:
                 result = handler(buf_copy, 0, sample_data)
                 # Operators either mutate in-place (return None) or return new bytes
                 if result is not None:
-                    assert isinstance(result, (bytearray, bytes)), (
+                    assert isinstance(result, bytearray | bytes), (
                         f"{op_name} returned {type(result).__name__}, expected bytearray/bytes"
                     )
             except Exception as exc:
@@ -56,6 +56,24 @@ class TestOperatorDispatchSmoke:
             for name, exc in failed:
                 msg_lines.append(f"  {name}: {type(exc).__name__}: {exc}")
             pytest.fail("\n".join(msg_lines))
+
+    def test_mutate_returns_valid_bytes_across_ops(self):
+        """mutate() must always return bytes within max_len and never crash,
+        regardless of whether the last applied operator returned a bytearray
+        (format mutators) or bytes (havoc)."""
+        from fuzzer_tool.services.operators import OperatorEngine
+
+        fuzzer = _build_fuzzer()
+        ops = OperatorEngine(fuzzer)
+        sample = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+        outputs = set()
+        for _ in range(100):
+            result = ops.mutate(sample)
+            assert isinstance(result, bytes)
+            assert len(result) <= fuzzer.max_len
+            outputs.add(result)
+        # Mutations must actually produce variation
+        assert len(outputs) > 1
 
     def test_dispatch_covers_mutations_list(self):
         """Every name in MUTATIONS must have a dispatch entry."""
