@@ -16,7 +16,6 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 
-
 # ── helpers ────────────────────────────────────────────────────────────
 
 _LOG_PI = math.log(math.pi)
@@ -55,10 +54,7 @@ def _log_gamma(x: float) -> float:
 
 # Use math.lgamma when available (faster, native), fall back to Lanczos.
 _lgamma: callable
-if hasattr(math, "lgamma"):
-    _lgamma = math.lgamma  # type: ignore[attr-defined]
-else:
-    _lgamma = _log_gamma
+_lgamma = math.lgamma if hasattr(math, "lgamma") else _log_gamma  # type: ignore[attr-defined]
 
 
 # ── incomplete gamma (regularized lower) ───────────────────────────────

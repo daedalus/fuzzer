@@ -1,6 +1,9 @@
 # AGENTS.md — fuzzer-tool
 
 RULES:
+- Before deleting code find where it should be wired first if not found clean up.
+- Never bypass the pre commit hooks with no-verify, fix the warnings then recommit.
+- Always fix impactguard breaking changes.
 - Stop suggesting: `use_direct_lite = False`  for solving ASAN with `direct_lite` mode, debug the root cause instead.
 - ALWAYS USE CLANG instead of gcc
 - ALWAYS CHECK WHEN REMOVING CODE THAT IS IN THE SCOPE OF THE REMOVAL, DO NOT REMOVE UNRELATED CODE.
@@ -25,7 +28,10 @@ Coverage-guided binary fuzzer with ASAN/MSAN/TSAN/UBSAN detection, dictionary mu
 | `ruff format src/ tests/` | Format code |
 | `ruff check src/ tests/` | Lint code |
 | `fuzzer-tool --help` | Show CLI help |
+| `lizard --CCN 15 -w .` | find cyclomatic complexity code violations |
 | `python tools/corpus_png.py --out corpus --download` | Generate PNG corpus |
+| `tools/build_targets.sh` | build targets |
+| `vulture --min-confidence 80 .` | find duplicated code |
 
 ## Development
 

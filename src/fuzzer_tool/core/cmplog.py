@@ -181,9 +181,8 @@ class CmplogCollector:
             self.log_path = os.path.join(log_dir, f"fuzz_cmplog_{local_id}.cmplog")
         else:
             # Truncate so the child writes fresh data from position 0
-            with contextlib.suppress(OSError):
-                with open(self.log_path, "w") as f:
-                    f.truncate(0)
+            with contextlib.suppress(OSError), open(self.log_path, "w") as f:
+                f.truncate(0)
         env = dict(env)  # copy
         env["_CMPLOG_OUT"] = self.log_path
 
@@ -327,10 +326,8 @@ class CmplogCollector:
                         # Optional PC field (trace mode) — last field if present
                         pc = None
                         if len(parts) >= 5:
-                            try:
+                            with contextlib.suppress(ValueError, IndexError):
                                 pc = int(parts[-1])
-                            except (ValueError, IndexError):
-                                pass
                         # Track pairs for input-to-state matching
                         pair = (operand_a, operand_b)
                         if pair not in self._pair_set:
@@ -347,9 +344,8 @@ class CmplogCollector:
         # Clear the log for next round.
         # Truncate (not delete) so the .so's file handle stays valid
         # when cmplog is compiled into the target (direct_lite mode).
-        with contextlib.suppress(OSError):
-            with open(self.log_path, "w") as f:
-                f.truncate(0)
+        with contextlib.suppress(OSError), open(self.log_path, "w") as f:
+            f.truncate(0)
         self._read_offset = 0
 
         new_tokens = [t for t in tokens if t not in self._token_set]

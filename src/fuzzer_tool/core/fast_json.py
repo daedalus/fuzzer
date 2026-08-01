@@ -1,5 +1,7 @@
 """Fast JSON module using orjson when available."""
 
+__all__ = ["JSONDecodeError", "loads", "load", "dumps", "dump"]
+
 try:
     import orjson
 
@@ -18,4 +20,4 @@ try:
         fp.write(dumps(obj, separators=separators))
 
 except ImportError:
-    from json import JSONDecodeError, loads, load, dumps, dump
+    from json import JSONDecodeError, dump, dumps, load, loads

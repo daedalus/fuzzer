@@ -1,7 +1,5 @@
 """Tests for chi_squared.py — χ² tests, p-value, ContingencyTable."""
 
-import math
-
 from fuzzer_tool.core.chi_squared import (
     ContingencyTable,
     chi_squared_critical_value,
