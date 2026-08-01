@@ -10,6 +10,7 @@ import json
 import logging
 import math
 import random
+from array import array
 
 from fuzzer_tool.core.edge_tracker import ks_significance_threshold
 
@@ -301,7 +302,7 @@ class MarkovChain:
         Averages per-context JS across all contexts in either snapshot.
         """
         all_ctx = set(p) | set(q)
-        js_values = []
+        js_values = array("d")
         for ctx in all_ctx:
             p_dist = p.get(ctx, {})
             q_dist = q.get(ctx, {})

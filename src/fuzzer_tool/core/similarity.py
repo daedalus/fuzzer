@@ -9,6 +9,7 @@ Use cases in this fuzzer:
 """
 
 import re
+from array import array
 
 
 def hamming_distance(a: bytes, b: bytes) -> int:
@@ -93,8 +94,8 @@ def levenshtein_distance(a: bytes, b: bytes) -> int:
     if len(a) > len(b):
         a, b = b, a
 
-    prev = list(range(len(a) + 1))
-    curr = [0] * (len(a) + 1)
+    prev = array("i", range(len(a) + 1))
+    curr = array("i", [0]) * (len(a) + 1)
 
     for j in range(1, len(b) + 1):
         curr[0] = j
@@ -454,8 +455,8 @@ def _levenshtein_tokens(a: list[str], b: list[str]) -> int:
     if len(a) > len(b):
         a, b = b, a
 
-    prev = list(range(len(a) + 1))
-    curr = [0] * (len(a) + 1)
+    prev = array("i", range(len(a) + 1))
+    curr = array("i", [0]) * (len(a) + 1)
 
     for j in range(1, len(b) + 1):
         curr[0] = j

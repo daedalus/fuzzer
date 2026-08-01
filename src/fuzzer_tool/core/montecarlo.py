@@ -21,6 +21,7 @@ import collections
 import logging
 import math
 import random
+from array import array
 from collections import defaultdict
 from pathlib import Path
 
@@ -459,7 +460,7 @@ class MonteCarloScheduler:
             return 0.0
 
         all_positions = set(self._prev_byte_freq) | set(self.byte_freq)
-        js_values = []
+        js_values = array("d")
         for pos in all_positions:
             p = self._freq_to_dist(self._prev_byte_freq.get(pos, {}))
             q = self._freq_to_dist(self.byte_freq.get(pos, {}))
