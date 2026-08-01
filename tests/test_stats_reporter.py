@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from fuzzer_tool.core.montecarlo import MOptScheduler
 from fuzzer_tool.services.stats import StatsReporter
 from fuzzer_tool.services.stats_reporter import (
     discovery_rate,
@@ -321,3 +322,20 @@ class TestPrintStats:
             reporter.print_stats()
             line = mock_print.call_args[0][0]
             assert "dist: no-data" in line, f"expected dist: no-data in: {line[:300]}"
+
+    def test_regression_mopt_particle_count(self):
+        """print_stats() reports the real MOpt particle count, not 0p.
+
+        Regression: the status line read the nonexistent ``_particles``
+        attribute, so ``mopt: Np`` always rendered as ``mopt: 0p`` even
+        though the scheduler held ``n_particles`` particles.
+        """
+        mopt = MOptScheduler(n_particles=5, window_size=200)
+        mopt.init_arm("flip1")
+        mopt.init_arm("flip2")
+        fuzzer = _mock_fuzzer(_use_mopt=True, _mopt=mopt)
+        reporter = StatsReporter(fuzzer)
+        with patch("builtins.print") as mock_print:
+            reporter.print_stats()
+            line = mock_print.call_args[0][0]
+        assert "mopt: 5p" in line, f"expected mopt: 5p in: {line[:300]}"

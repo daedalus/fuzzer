@@ -828,7 +828,7 @@ class StatsReporter:
         mopt_str = ""
         if getattr(f, "_use_mopt", False) and getattr(f, "_mopt", None):
             try:
-                n_particles = len(getattr(f._mopt, "_particles", []))
+                n_particles = len(f._mopt.particles)
                 mopt_str = f" | mopt: {n_particles}p"
             except (AttributeError, TypeError):
                 pass
