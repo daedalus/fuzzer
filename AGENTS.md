@@ -1,37 +1,104 @@
 # AGENTS.md — fuzzer-tool
 
-RULES:
-- Before deleting code find where it should be wired first if not found clean up.
-- Never bypass the pre commit hooks with no-verify, fix the warnings then recommit.
-- Always fix impactguard breaking changes.
-- Stop suggesting: `use_direct_lite = False`  for solving ASAN with `direct_lite` mode, debug the root cause instead.
-- ALWAYS USE CLANG instead of gcc
-- ALWAYS CHECK WHEN REMOVING CODE THAT IS IN THE SCOPE OF THE REMOVAL, DO NOT REMOVE UNRELATED CODE.
-- DO NOT NUKE the REPO.
-- Always create TODOs.
-- Always update docs/DEEP_DIVE.md with new features added (the comprehensive reference). Update README.md only when adding or changing high-level capabilities visible in the quick-start or feature overview.
-- Always git commit and push after finish a task.
-- All fuzz targets must be compiled with ASAN instrumentation (`-fsanitize=address`).
-- All fuzz targets must have AFL edge coverage via `afl_shim.c` (`-include src/fuzzer_tool/adapters/afl_shim.c`). Pre-compile library sources as `.o` files, link with shim included only in the target wrapper.
-- Never commit binary files or corpus directories — build targets from source, keep corpus data local.
+Coverage-guided binary fuzzer: ASAN/MSAN/TSAN/UBSAN detection, dictionary mutations,
+Markov chain generation, Monte Carlo optimization, format-aware grammar mutations, and
+state persistence. CLI tool that fuzzes arbitrary binaries (see `fuzzer-tool --help`).
 
+The fuzzer executes attacker-controlled input against instrumented targets and parses
+the targets' own binaries — any bug in this tool's parsing/process code is a bug in the
+fuzzer, not just the target.
 
-## Overview
+## References (read on demand)
 
-Coverage-guided binary fuzzer with ASAN/MSAN/TSAN/UBSAN detection, dictionary mutations, Markov chain generation, Monte Carlo optimization, and state persistence. CLI tool for fuzzing arbitrary binaries.
+| File | Open when |
+|------|-----------|
+| `docs/refs/bug-classes.md` | Touching process/signal handling, timeouts, ptrace, concurrency, resource cleanup, hashing/identity, caching, ELF/low-level parsing, numeric edge cases, state persistence, dispatch tables, error swallowing, .so symbol visibility, widely-used return-value APIs, or test mocks. Also carries the regression-testing rules. |
+| `docs/refs/architecture.md` | Working inside coverage/SHM internals, the AFL shim, `--no-shm`/`--deep-coverage`, the Elo meta-scheduler, or state persistence (`state.json` / `edge_tracker.json` / `markov.json`). |
+
+## Hard Rules
+
+1. Never bypass the pre-commit hooks (`--no-verify`). Fix the warnings, then recommit.
+2. Always fix impactguard breaking changes.
+3. Always use clang, never gcc (build scripts prefer clang automatically).
+4. Stop suggesting `use_direct_lite = False` to work around ASAN in `direct_lite` mode — debug the root cause instead.
+5. Never commit binary files or corpus directories — build targets from source, keep corpus data local.
+6. Before deleting code, find where it should be wired first; if not found, clean up. When removing code, stay strictly within the scope of the removal — do not remove unrelated code.
+7. Do not nuke the repo.
+8. All fuzz targets: compile with ASAN (`-fsanitize=address`) and AFL edge coverage via `afl_shim.c` (`-include src/fuzzer_tool/adapters/afl_shim.c`). Pre-compile library sources as `.o` files; link the shim only into the target wrapper.
+9. Always create TODOs. Always commit and push after finishing a task.
+10. Update `docs/DEEP_DIVE.md` with new features (the comprehensive reference). Update `README.md` only when adding or changing high-level capabilities visible in the quick-start or feature overview.
+
+## Corpus Rules
+
+- **Always improve the corpus, never delete it.** Corpus files represent discovered coverage and crash triggers. Only add new inputs, never remove existing ones. Use `fuzzer-tool minimize` to prune redundancies — removed inputs are moved to `corpus/pruned/`, not deleted.
+- **Do not clean the corpus between runs.** The corpus directory accumulates discovered inputs across sessions. `rm -rf corpus/*` destroys coverage history and forces rediscovery from scratch. Always use `--resume` to continue. When generating a new corpus (e.g. `corpus_png.py`), write to a fresh directory, not an existing one.
+
+## Workflows
+
+### Finish a task
+
+1. Create a TODO tracking the work.
+2. Make surgical changes; every fixed bug ships with a regression test (`test_regression_<brief_description>`).
+3. Run the full suite: `pytest` — must be green.
+4. `ruff format src/ tests/` and `ruff check src/ tests/`.
+5. Update docs per Hard Rule 10.
+6. `git commit` — pre-commit hooks run ruff (with `--fix`), the full pytest suite, and impactguard. Fix any warnings and recommit; never `--no-verify`. Then `git push`.
+
+### Add a new fuzz target
+
+1. Write `targets/<name>_read.c` following the pattern of an existing target (e.g. `targets/png_read.c`): read the input from stdin/file, call the library's parse/decode entry point.
+2. Compile with clang: `-fsanitize=address -include src/fuzzer_tool/adapters/afl_shim.c`; pre-compile library sources as `.o` files and link the shim only into the wrapper.
+3. For in-process mode, also build `<name>_read.so` (`-shared -fPIC`; link `-lasan` explicitly and use `-Wl,-Bsymbolic` when cmplog is on — see `tools/build_targets.sh`, and prefer adding the target there over hand-rolling the flags).
+4. Verify with `nm`: `__afl` symbols present in the executable, `fuzz_shm_run` present in the `.so`; then run `tools/build_targets.sh` and confirm the target appears in the feature matrix.
+5. Add a `dictionaries/` token file if the format has meaningful tokens.
 
 ## Commands
 
 | Command | Description |
 |---------|------------|
 | `pytest` | Run test suite |
-| `ruff format src/ tests/` | Format code |
-| `ruff check src/ tests/` | Lint code |
+| `ruff format src/ tests/` / `ruff check src/ tests/` | Format / lint |
 | `fuzzer-tool --help` | Show CLI help |
-| `lizard --CCN 15 -w .` | find cyclomatic complexity code violations |
+| `tools/build_targets.sh` | Build all fuzz targets (ASAN + cmplog by default; see the script's flag list) |
 | `python tools/corpus_png.py --out corpus --download` | Generate PNG corpus |
-| `tools/build_targets.sh` | build targets |
-| `vulture --min-confidence 80 .` | find duplicated code |
+| `tools/bench.sh` / `tools/bench_sweep.sh` | Config comparison / feature sweep |
+| `lizard --CCN 15 -w .` | Cyclomatic complexity violations |
+| `vulture --min-confidence 80 .` | Find duplicated code |
+
+## Layout
+
+```
+src/fuzzer_tool/
+├── core/         # Domain logic: markov, montecarlo, ga, sanitizer, edge_tracker,
+│                 #   cmplog, grammar, bloom, elf, target_profiler, fast_json,
+│                 #   chi_squared, rand_pool, mutations/<format>.py (structure-aware
+│                 #   per-format mutators: png, jpeg, gif, webp, webm, zip, protobuf, …)
+├── adapters/     # Process execution, filesystem ops, afl_shim.c / cmplog_shim.c / perf_shim.c
+├── services/     # Orchestration: fuzzer.py, operators.py, seed_picker.py, runner.py,
+│                 #   stats.py, corpus_manager.py, parallel.py, report.py
+└── cli/          # CLI entry point (commands.py, __main__.py)
+
+tools/            # build_targets.sh, corpus_png.py, bench.sh, bench_sweep.sh, release.sh
+targets/          # Fuzz target sources (*.c) — compiled binaries are never committed
+dictionaries/     # Format token dicts (png.dict)
+vendor/           # Vendored FFmpeg 7.1.3 (+ zlib/libpng/libjpeg-turbo for trace-cmp builds)
+docs/             # DEEP_DIVE.md (comprehensive reference), TODO.md, refs/ (agent reference files), per-feature docs
+```
+
+## Code Style
+
+- Format: `ruff format`; lint: `ruff check`
+- Docstrings: Google style
+- Type hints: strict mypy
+- Verify claims against code: before acting on behavior, type, or API shape, read the source — don't infer from names.
+
+## Testing
+
+- **Run the full test suite after changes** — `pytest` must pass before a change is complete.
+- **No hardcoded counts in tests.** Use `>=` for minimum bounds, not `==` — operators and features are added frequently and `assert len(X) == N` breaks on every addition.
+- **Regression tests are mandatory** for every fixed bug (`test_regression_<description>`); equivalence assertions must derive one side independently of the code under test (see `docs/refs/bug-classes.md` §Testing).
+- **Hash functions must be consistent.** When matching filenames against content (corpus eviction, dedup), use `hash_data()` from `fuzzer_tool.adapters.filesystem` — not `hashlib.sha256()` directly. `hash_data()` prefers xxhash when installed; hardcoding SHA-256 causes silent data loss.
+- **Cache invalidation on method renames.** When renaming a method with side-effect calls (e.g. `_invalidate_*_cache()`), grep for all call sites — a renamed method silently drops its callers' invalidation hooks.
 
 ## Development
 
@@ -42,205 +109,7 @@ pip install -e ".[test]"
 # Test
 pytest
 
-# Format
+# Format / lint
 ruff format src/ tests/
-
-# Lint
 ruff check src/ tests/
 ```
-
-## Project Structure
-
-```
-src/fuzzer_tool/
-├── core/           # Domain logic
-│   ├── markov.py       # Byte-level Markov chain (with save/load persistence)
-│   ├── montecarlo.py   # Thompson sampling + CEM
-│   ├── mutations.py    # Mutation operators
-│   ├── ga.py           # Genetic algorithm lifecycle (fitness, speciation, population)
-│   ├── sanitizer.py    # ASAN/MSAN/TSAN output parsing
-│   ├── edge_tracker.py # Per-seed coverage tracking (with save/load)
-│   ├── cmplog.py       # Comparison tracing via LD_PRELOAD
-│   ├── grammar.py      # Grammar-aware mutations
-│   ├── bloom.py        # Bloom filter for dedup
-│   ├── crash_metadata.py # Crash enrichment
-│   ├── elf.py          # ELF parsing utilities
-│   └── target_profiler.py # Static analysis for fuzzing guidance
-├── adapters/       # Process execution, filesystem operations
-├── services/       # Fuzzer orchestration
-│   ├── fuzzer.py           # Fuzzer class (orchestration, __init__, fuzz_one, run)
-│   ├── operators.py        # Mutation operator dispatch, selection, and handlers
-│   ├── seed_picker.py      # Seed selection strategies (weighted, Pareto, Markov, format-aware)
-│   ├── runner.py           # Target execution (fork, ptrace, in-process), crash detection
-│   ├── stats.py            # Statistics, reporting, coverage logging, calibration
-│   ├── corpus_manager.py   # Corpus persistence, state, dedup, minimize
-│   ├── parallel.py         # Multi-process fuzzing
-│   └── report.py           # HTML/JSON report generation
-└── cli/            # CLI entry point
-
-tools/
-├── corpus_png.py      # PNG corpus generator for libpng fuzzing
-├── release.sh         # Release automation
-├── bench.sh           # 4-way config comparison (baseline/enhanced/enhanced+/optimal)
-├── bench_sweep.sh      # Exhaustive feature/combination sweep
-└── lib/
-    └── bench_common.sh # Shared helpers for bench.sh and bench_sweep.sh
-
-dictionaries/
-└── png.dict           # PNG format tokens
-
-targets/
-├── png_read.c         # libpng fuzz target
-├── png_read           # Compiled target
-├── jpeg_read.c        # libjpeg fuzz target
-├── jpeg_read          # Compiled target
-├── zlib_read.c        # zlib/gzip/raw-deflate fuzz target
-├── zlib_read          # Compiled target
-├── gzip_read.c        # gzip-specific fuzz target (header parsing, multi-member)
-├── gzip_read          # Compiled target
-├── fgrep_read.c       # fgrep SIMD/regex/BMH search fuzz target
-├── fgrep_read         # Compiled target
-├── asan_target.c      # ASAN crash target
-├── asan_target        # Compiled target
-├── test_target.c      # Minimal crash target
-├── test_target        # Compiled target
-├── tailslayer_read.cpp   # Tailslayer hedged reader fuzz target (C++, header-only lib)
-├── tailslayer_read       # Compiled target
-├── tailslayer_read.so    # Compiled shared library (in-process mode)
-├── ffmpeg_read.c         # FFmpeg demux+decode fuzz target
-├── ffmpeg_read           # Compiled target
-├── ffmpeg_read.so        # Compiled shared library (in-process mode)
-```
-
-vendor/
-└── ffmpeg/               # Vendored FFmpeg 7.1.3 (libavformat, libavcodec, libavutil, libswresample)
-
-## Key Concepts
-
-### State Persistence
-Fuzzer state is saved to `{corpus_dir}/state.json` on shutdown. Use `--resume` to continue:
-- `state.json` — exec counts, crash sigs, op stats, seed metadata
-- `edge_tracker.json` — per-seed edge coverage
-- `markov.json` — Markov chain transitions
-
-### Coverage Modes
-- `--no-shm` — forces ptrace for uninstrumented binaries
-- `--deep-coverage` — x86-64 decoder for basic block discovery
-- Default SHM — for AFL-instrumented targets
-
-### Sparse Entry Coverage
-The AFL shim (`afl_shim.c`) uses an open-addressing hash table of 8-byte entries instead of a fixed byte bitmap:
-
-```
-struct __afl_entry { uint32_t edge_id; uint32_t count; };
-```
-
-- Edge ID = `prev_loc ^ cur_loc` (full 32-bit) — **no silent bucket collisions**
-- Hash: `edge_id % map_size`, linear probing for matching or empty slot
-- `AFL_MAP_SIZE` is in bytes (tradition); shim divides by 8 for entry count
-- Default 64KB SHM → 8192 entries (same memory as old 64KB bitmap)
-- Count is a 32-bit saturating counter (no Morris probability needed)
-- Python API: `ShmCoverage.get_edge_ids()`, `.get_edge_counts()`, `.read_entries()`
-- `EdgeTracker.record_edges()` accepts `set[int]` (sparse) or `bytes` (legacy byte-bitmap)
-
-### Markov Persistence
-- Markov chain saved to `markov.json` on exit
-- Loaded on init; skip retrain if loaded to avoid double-counting
-- Transitions accumulate across sessions
-
-### Meta-Scheduler (Elo Arbitration)
-- `--elo` alone now enables Elo-based arbitration between operator strategies (bandit/MOpt/replicator) and seed strategies (ga/weighted/pareto/format); the separate `--meta-elo` flag was consolidated into `--elo` (see `_use_elo` in `services/fuzzer.py`)
-- Enable `--mc-bandit`/`--mopt`/`--replicator` alongside `--elo` to add those strategies to the arbitration pool
-- All available strategies run in shadow; Elo picks which one to trust each iteration
-- Strategy ratings tracked in `elo.json` under `strategy_ratings` / `strategy_match_count`
-- Probabilistic selection via softmax over Elo gap (temperature=400)
-
-## Code Style
-
-- Format: ruff format
-- Lint: ruff check
-- Docstrings: Google style
-- Type hints: strict mypy
-
-## Rules
-
-- **Always improve the corpus, never delete it.** Corpus files represent discovered coverage and crash triggers. Only add new inputs, never remove existing ones. Use `fuzzer-tool minimize` to prune redundancies — removed inputs are moved to `corpus/pruned/`, not deleted. The active corpus keeps only inputs that produce the most edges.
-- **Do not clean the corpus between runs.** The corpus directory accumulates discovered inputs across sessions. Running `rm -rf corpus/*` destroys coverage history and forces the fuzzer to rediscover everything from scratch. Always use `--resume` to continue. When generating a new corpus (e.g. `corpus_png.py`), write to a fresh directory, not an existing one.
-- **Verify claims against code.** Before acting on behavior, type, or API shape, read the source. Don't infer from names.
-- **Run the full test suite after changes.** `pytest` must pass before considering any change complete.
-- **Hash functions must be consistent.** When matching filenames against content (corpus eviction, dedup), use `hash_data()` from `fuzzer_tool.adapters.filesystem` — not `hashlib.sha256()` directly. `hash_data()` prefers xxhash when installed; hardcoding SHA-256 causes silent data loss.
-- **Cache invalidation on method renames.** When renaming a method that has side-effect calls (e.g. `_invalidate_*_cache()`), grep for all call sites. A renamed method silently drops its callers' invalidation hooks.
-- **No hardcoded counts in tests.** Use `>=` for minimum bounds, not `==`. Operators and features are added frequently; `assert len(X) == N` breaks on every addition.
-
-## Bug Classes
-
-These rules are extracted from ~85 `fix:` commits in project history. Each names the recurring bug *class*, not just the single instance that surfaced it — recognize the pattern before it reappears in a new file.
-
-### Signals, processes, and timeouts
-
-- **Check syscall return values under signal-based timeouts — don't assume an interrupted syscall failed cleanly.** A `SIGALRM` handler racing `waitpid`/`os.wait` can leave `status` unset on `EINTR`, which then reads as `WIFEXITED(0)` — a false "success" instead of a timeout. Branch explicitly on the wait call's return value; if interrupted, force-kill and re-reap before deciding the outcome. This recurred independently in both the C loader and the Python persistent runner.
-- **Put child processes in their own process group before ever using `killpg` on them.** `preexec_fn=os.setsid` (Python) / `setsid()` (C) must run before any code path can `SIGKILL` via `killpg`, or the signal lands on the caller's own group and can kill the fuzzer itself.
-- **A timed-out or killed parent can leave an orphaned grandchild running forever.** If a subprocess itself forks/execs (e.g. a loader dlopen-ing and calling a target function), killing the immediate child on timeout isn't enough — track the grandchild's PID explicitly (e.g. via a PID file) and kill its process group too.
-- **Guard `kill()`/`os.kill()` against `ESRCH` / `ProcessLookupError` races, and don't let a broad `except` swallow the real result.** A process can exit between a status check and a cleanup `kill()`; if the broad exception handler around that pattern also wraps the actual crash-detection logic, a benign race turns "a real crash" into "no crash detected." Catch the specific race exception close to the call that raises it, not several frames up.
-- **`ChildProcessError` in a waitpid path means "already reaped" — not "success."** Returning `rc=0` on `ChildProcessError` silently masks crashes. Return `rc=-2` (unknown) so the crash detection pipeline treats it as suspicious, not clean.
-- **Stale loop flags cause redundant waitpid on already-reaped children.** In ptrace mode, `last_action`/`last_sig` record "we last resumed the child after a breakpoint," but the post-loop code treats them as "the child might still be alive." A target that crashes after hitting even one coverage breakpoint (normal for guided fuzzing) gets its correctly-captured crash discarded by a redundant `waitpid` → `ChildProcessError` → `return 0`. Track explicitly whether the loop already reaped the child (`child_reaped` flag) and skip the redundant wait/kill entirely if so.
-
-### Concurrency & resource cleanup
-
-- **Release threads, fds, and temp resources in `finally` — but don't assume setup succeeded before scheduling cleanup.** A `thread.join()` in `finally` raises `NameError` if `fork()`/thread creation failed before the variable was assigned. Guard the cleanup call, or initialize the variable to `None` first.
-- **Kill processes before detaching their shared memory.** Detaching SHM while the target is still writing to it can cause SEGV in the target. Always SIGKILL → waitpid → detach SHM, not the reverse.
-- **Never use `tempfile.mktemp()`.** It's a TOCTOU/symlink race by construction. Use `mkstemp()`/`mkdtemp()`.
-- **Namespace any filesystem path shared across parallel workers by PID.** Compiled shim/loader binaries and other on-disk artifacts written under `-j N` must embed `os.getpid()` (or equivalent), or concurrent workers race to compile/clean up the same file.
-- **Return the actual PID on exception, not 0.** `run_target_stdin`/`run_target_file` callers use the returned PID for crash attribution. Returning `pid=0` on exception matches the swapper/idle process, silently discarding real kernel crashes.
-
-### Hashing & identity
-
-- **Never use Python's builtin `hash()` for anything persisted or shared across processes.** `hash(bytes)` is randomized per-process via `PYTHONHASHSEED`. Using it for a seed/edge-tracker key orphans every entry on fuzzer restart and produces divergent keys between `-j N` parallel workers. Always go through `hash_data()`/`hashlib`. Grep for `str(hash(` before adding any new keying scheme.
-
-### Caching
-
-- **Cache invalidation must key off the actual dependency, not a proxy.** Invalidating on every `exec_count` tick makes the cache useless (recomputes on almost every call — cost 80 eps once). Invalidating on the wrong signal, or never, serves stale data instead. Key strictly off the values the cache depends on (e.g. `corpus_version`, `edge_version`), and check both directions: does it recompute on every real change, and skip recomputing when nothing relevant changed?
-
-### Low-level parsing (ELF, ptrace)
-
-- **Use exact bitmask equality for "all these bits must be set" checks, never bare truthiness.** `flags & (PF_R | PF_X)` is truthy if *either* bit is set; a read-only RELRO segment (`PF_R` only) then satisfies a check meant to require both, silently selecting the wrong ELF segment. Write `(flags & mask) == mask` when the intent is "all of these bits."
-- **This tool parses attacker-controlled binaries (the fuzz target's own ELF headers) and user-supplied grammar files as part of its own operation.** Bounds-check every offset/count read from a section header, program header, or symbol table before indexing with it. Clamp any grammar-controlled repeat/recursion count to a fixed MAX — an unbounded count is a resource-exhaustion bug in the fuzzer itself, not just in whatever it's fuzzing.
-
-### Numeric & mutation edge cases
-
-- **Clamp any input-derived range before calling `random.randint`/`randrange`.** If bounds come from input length (e.g. `len(raw) // stride - 1`), a small or degenerate input can make `hi < lo`, raising `ValueError` at fuzz time. Guard with `max(0, ...)` or an early return for the degenerate case.
-- **Clamp arithmetic-mutation results to their valid range before packing.** `val * 2` or `val ^ (1 << 31)` can overflow the target field width and crash `struct.pack_into` — clamp to `[lo, hi]` for the field width in use.
-
-### State & double-counting
-
-- **Persisted state must have exactly one source of truth.** If a value can either be reloaded from disk (`markov.json`, `edge_tracker.json`) or freshly re-derived by a normal-startup code path, the reload path must skip re-derivation — otherwise transition counts / edge stats double up silently across restarts.
-- **Reduction and minimization must re-verify the specific property of interest, not just "did something happen."** Crash minimization (`tmin`) that only checks "does it still crash" can drift onto a different bug on a multi-bug target mid-delta-debugging. Pin the original crash signature up front and require every candidate to match it exactly.
-
-### Testing
-
-- **Assert on behavior, not on stale or accidentally-inverted expectations.** Some past bugs shipped *with* a passing test because the assertion checked the wrong direction (e.g. asserting a timeout counts as a crash) or referenced an error string that had since changed. When fixing a bug, re-read the failing test's assertion and confirm it actually encodes the intended behavior, not just "no exception was raised."
-
-- Always add regression tests. When a bug is found and fixed, write a test that reproduces the exact scenario that caused the bug. Name it `test_regression_<brief_description>` (e.g. `test_regression_empty_list_crash`). This ensures the bug cannot silently return. Regression tests are non-negotiable: every fix ships with a test.
-
-- **Tests that assert equivalence between two computed values must derive at least one side independently of the code under test.** The independent reference can be a hand-computed literal (e.g. `10 * 3` instead of `f(10, 3)`), a result from a different algorithm or library, or a known canonical answer. Never call the same function or implementation on both sides of an assertion — that validates the code against itself and passes even when the implementation is buggy. This rule applies to: `assert f(X) == f(Y)` (same function, different inputs), `assert result.some_field == another_call(...)`, and any test where the "expected" value is itself computed rather than a literal constant.
-
-### Dispatch table & half-shipped features
-
-- **Every entry in `_build_dispatch()` must have a corresponding module and class.** If an operator name is registered in `MUTATIONS` / `FORMAT_MUTATIONS` and wired into the dispatch table, but the module it imports doesn't exist, the fuzzer crashes with `ModuleNotFoundError` the moment the scheduler picks that operator. This is invisible to unit tests because they never exercise the live dispatch path. The integration smoke test (`test_operator_smoke.py::test_all_ops_fire`) catches this by calling every handler once — it must pass before any release.
-
-### Silent error swallowing
-
-- **Never `except Exception: pass` in production code paths.** A broad except that swallows errors hides real failures (disk full, permission denied, EMFILE). At minimum, log at `warning` level. Reserve `log.debug` for genuinely expected/recoverable situations only.
-- **`except ChildProcessError` in waitpid does NOT mean success.** It means the child was already reaped — return `-2` (unknown), not `0` (success), to avoid masking crashes.
-
-### Shared library symbol visiblity (abort() override)
-
-- **Libc function overrides in .so builds need `__attribute__((visibility("hidden")))`.** Without it, the PLT/GOT resolves calls at runtime to libc's version, not the override. `visibility("hidden")` forces direct `call` instructions within the .so, bypassing PLT resolution entirely. This applies to any shim-level override of `abort()`, `malloc`, `free`, etc. when the override is compiled into a `-shared -fPIC` library that gets `ctypes.CDLL`-loaded. Executable builds (non-`.so`) are not affected because the linker resolves from the translation unit first.
-
-### Return-value API changes with many callers
-
-- **When a widely-used function gets a new return value, grep for ALL callers — not just the production ones.** `load_corpus()` is called in 17+ places across 5 test files. Adding a 3rd return element (`irreplaceable_hashes`) silently breaks every `corpus, seen = load_corpus(...)` unpack pattern. The fix is mechanical (add `, _` or `, irr_hash`), but grep must target both `src/` and `tests/` to find them all.
-
-### Mock alignment with production
-
-- **A new attribute on Fuzzer that's read in a shared method (like `auto_minimize_corpus`) must be mirrored in every test mock.** A MockFuzzer that doesn't set `self.irreplaceable_hashes` causes `AttributeError` when the production logic tries to read it — but the error surfaces as a test failure in an unrelated test (the one that exercises the shared method, not the one testing the new feature). When adding a feature that touches shared code paths, audit all mocks for missing attributes before running tests.
