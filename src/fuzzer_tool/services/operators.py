@@ -1713,6 +1713,9 @@ class OperatorEngine:
         else:
             strategy = None
 
+        if f._use_elo and f._elo and strategy:
+            f._meta_strategy_used.add(strategy)
+
         if strategy == "replicator" and f._replicator:
             op = f._replicator.select_op(ops)
             f._last_mopt_particles.append(None)

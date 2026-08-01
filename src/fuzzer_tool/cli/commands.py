@@ -325,7 +325,9 @@ def cmd_fuzz(args):
         if not coverage_log_arg:
             coverage_log_arg = str(Path(corpus_dir) / ".plot_graph_coverage_log.csv")
 
-    # --elo all: enable every available meta-scheduler so Elo arbitrates them
+    # --elo all: enable every available meta-scheduler and seed scheduler so Elo
+    # arbitrates them (previously only the operator meta-schedulers were enabled,
+    # leaving the seed strategies listed-but-disabled with phantom matches)
     if getattr(args, "elo", None) == "all":
         args.mc_bandit = True
         args.mc_cem = True
@@ -335,6 +337,21 @@ def cmd_fuzz(args):
         args.eps_greedy = True
         args.hierarchical_bandit = True
         args.gp_ucb = True
+        args.ga = True
+        args.qea = True
+        args.bayesian = True
+        args.boltzmann = True
+        args.markov_gen = True
+        # Mutation-side schedulers/features that are not Elo-arbitrated but are
+        # part of the scheduling stack; flip them on so --elo all is the
+        # everything-on switch (power schedule fast = classic AFL default)
+        args.metropolis = True
+        args.shapley = True
+        args.mi_guided = True
+        args.secretary = True
+        args.wfc = True
+        args.lineage = True
+        args.schedule = "fast"
 
     fuzzer = Fuzzer(
         target=args.target,
@@ -1362,7 +1379,9 @@ def main() -> int:
         metavar="all",
         help="Enable Elo scheduling: arbitrates between operator and seed strategies. "
         "Pass 'all' to also enable all available meta-schedulers (bandit, MOpt, "
-        "replicator, EXP3, eps-greedy, hierarchical, GP-UCB).",
+        "replicator, EXP3, eps-greedy, hierarchical, GP-UCB), seed schedulers "
+        "(GA, QEA, Bayesian, Markov, Boltzmann) and the mutation scheduling stack "
+        "(Metropolis, Shapley, MI-guided, secretary, WFC, lineage, fast power schedule).",
     )
     fuzz_parser.add_argument(
         "--lineage",

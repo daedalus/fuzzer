@@ -79,6 +79,7 @@ def _make_minimal_fuzzer():
             self_._last_ops_used = []
             self_._meta_strategy = None
             self_._meta_strategy_cached = None
+            self_._meta_strategy_used = set()
             self_._stall_recovery_active = False
             self_._frameshift = _MockFrameshift()
             self_.markov = _MockMarkov()

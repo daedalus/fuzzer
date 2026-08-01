@@ -161,6 +161,8 @@ class TestAflgoEloStrategy:
             corpus = [f"seed_{i}".encode() for i in range(corpus_size)]
             seed_meta = {}
             _distance = _Distance()
+            _seed_strategy_pool = []
+            _seed_strategies_used = set()
 
             def _seed_key(self, data):
                 return data.hex()

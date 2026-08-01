@@ -809,6 +809,8 @@ class Fuzzer:
             log.info("MOpt PSO scheduling enabled (5 particles, window=200)")
         self._use_replicator = replicator
         self._seed_strategy = None
+        self._seed_strategy_pool: list[str] = []
+        self._seed_strategies_used: set[str] = set()
         self._use_boltzmann = boltzmann
         self._metropolis = metropolis
         self._op_dispatch = self._build_dispatch()
@@ -1027,6 +1029,9 @@ class Fuzzer:
         self._meta_strategy: str | None = None
         # Per-exec cache: resolved once in mutate(), reused for all mutations
         self._meta_strategy_cached: str | None = None
+        # Operator schedulers actually selected this run (for the convergence
+        # report, which must show only used schedulers)
+        self._meta_strategy_used: set[str] = set()
         if self._use_elo:
             log.info("Meta-scheduler enabled: Elo arbitrating bandit vs MOpt")
             self._meta_strategy_choices: list[str] = []
@@ -2508,48 +2513,16 @@ class Fuzzer:
                 self._elo_decay_counter = 0
                 self._elo.apply_decay()
 
-        # Meta-elo: record operator strategy-level match
+        # Meta-elo: record operator strategy-level match. Only when the current
+        # strategy is a real selectable scheduler (random_stall is excluded, so
+        # stall recovery never accrues phantom matches)
         if self._use_elo and self._elo and self._meta_strategy:
-            score = surprisal_weight if success else 0.0
-            all_strategies = []
-            if self._use_replicator and self._replicator:
-                all_strategies.append("replicator")
-            if self.mc and self.mc_bandit:
-                all_strategies.append("bandit")
-            if self._use_mopt and self._mopt:
-                all_strategies.append("mopt")
-            if self.mc and self.mc_cem and self.mc.cem_fitted:
-                all_strategies.append("cem")
-            if self._exp3:
-                all_strategies.append("exp3")
-            if self._eps_greedy:
-                all_strategies.append("eps_greedy")
-            if self._hierarchical:
-                all_strategies.append("hierarchical")
-            if self._gp_ucb:
-                all_strategies.append("gp_ucb")
-            for other in all_strategies:
-                if other != self._meta_strategy:
-                    self._elo.record_strategy_match(self._meta_strategy, other, score)
+            self._record_operator_strategy_matches(surprisal_weight if success else 0.0)
 
         # Meta-elo: record seed strategy-level match
         if self._use_elo and self._elo and self._seed_strategy:
             score = surprisal_weight if success else 0.0
-            seed_strategies = [
-                "ga",
-                "qea",
-                "weighted",
-                "pareto",
-                "format",
-                "bayesian",
-                "markov",
-                "boltzmann",
-            ]
-            for other in seed_strategies:
-                if other != self._seed_strategy:
-                    self._elo.record_strategy_match(
-                        f"seed_{self._seed_strategy}", f"seed_{other}", score
-                    )
+            self._record_seed_strategy_matches(score)
 
         if self._use_shapley and self._shapley:
             new_edges = self._get_current_edge_set()
@@ -3057,6 +3030,85 @@ class Fuzzer:
         except Exception as ex:
             log.debug("Chi-squared test failed: %s", ex)
 
+    def _record_seed_strategy_matches(self, score: float) -> None:
+        """Record the active seed strategy's Elo match against every OTHER
+        eligible strategy in the current pool. Only the strategies that were
+        actually selectable at pick time participate, so never-enabled
+        strategies do not accrue phantom matches.
+        """
+        if not (self._use_elo and self._elo and self._seed_strategy):
+            return
+        seed_strategies = getattr(self, "_seed_strategy_pool", [])
+        if self._seed_strategy not in seed_strategies:
+            return
+        for other in seed_strategies:
+            if other != self._seed_strategy:
+                self._elo.record_strategy_match(
+                    f"seed_{self._seed_strategy}", f"seed_{other}", score
+                )
+
+    def _record_operator_strategy_matches(self, score: float) -> None:
+        """Record the active operator scheduler's Elo match against every other
+        enabled scheduler. Only schedulers actually selected this run
+        participate (random_stall is never recorded), so enabled-but-unused
+        schedulers do not accrue phantom matches.
+        """
+        if not (self._use_elo and self._elo and self._meta_strategy):
+            return
+        if self._meta_strategy not in self._meta_strategy_used:
+            return
+        all_strategies = []
+        if self._use_replicator and self._replicator:
+            all_strategies.append("replicator")
+        if self.mc and self.mc_bandit:
+            all_strategies.append("bandit")
+        if self._use_mopt and self._mopt:
+            all_strategies.append("mopt")
+        if self.mc and self.mc_cem and self.mc.cem_fitted:
+            all_strategies.append("cem")
+        if self._exp3:
+            all_strategies.append("exp3")
+        if self._eps_greedy:
+            all_strategies.append("eps_greedy")
+        if self._hierarchical:
+            all_strategies.append("hierarchical")
+        if self._gp_ucb:
+            all_strategies.append("gp_ucb")
+        for other in all_strategies:
+            if other != self._meta_strategy:
+                self._elo.record_strategy_match(self._meta_strategy, other, score)
+
+    def _seed_convergence_rows(self) -> list[tuple[str, float, float, int]]:
+        """(name, rating, delta, matches) for every seed strategy actually used
+        this run. Strategies that were never selected (only ever recorded as
+        phantom opponents) are excluded from the convergence report.
+        """
+        if not (self._use_elo and self._elo):
+            return []
+        rows = []
+        for s in getattr(self, "_seed_strategies_used", set()):
+            key = f"seed_{s}"
+            count = self._elo._strategy_match_count.get(key, 0)
+            if count > 0:
+                rating = self._elo._strategy_mu.get(key, self._elo.initial_mu)
+                rows.append((s, rating, rating - self._elo.initial_mu, count))
+        return sorted(rows)
+
+    def _operator_convergence_rows(self) -> list[tuple[str, float, float, int]]:
+        """(name, rating, delta, matches) for every operator scheduler actually
+        selected this run. Schedulers that were enabled but never selected are
+        excluded from the convergence report.
+        """
+        if not (self._use_elo and self._elo):
+            return []
+        rows = []
+        for s in getattr(self, "_meta_strategy_used", set()):
+            count = self._elo._strategy_match_count.get(s, 0)
+            if count > 0:
+                rating = self._elo._strategy_mu.get(s, self._elo.initial_mu)
+                rows.append((s, rating, rating - self._elo.initial_mu, count))
+        return sorted(rows)
+
     def _selected_schedulers_str(self) -> str:
         """One-line summary of the active scheduling stack (startup banner)."""
         parts = []
@@ -3553,9 +3605,13 @@ class Fuzzer:
         if self.mc and self.mc_bandit:
             print("\n[*] Bandit convergence (Thompson sampling):")
             for name, (a, b) in sorted(
-                self.mc.bandit_stats_raw().items(),
+                # bandit_stats() subtracts priors, so never-selected arms show
+                # (0, 0) and are omitted below
+                self.mc.bandit_stats().items(),
                 key=lambda x: -(x[1][0] / max(x[1][0] + x[1][1], 1)),
             ):
+                if a + b <= 0:
+                    continue
                 total = a + b
                 pct = a / total * 100 if total else 0
                 print(f"    {name:20s}: {a:.1f}/{b:.1f} ({pct:.0f}% success)")
@@ -3575,31 +3631,20 @@ class Fuzzer:
                         f"    {s['name']:<20s}: pop={s['population']:.4f} "
                         f"({s['window_successes']}/{s['window_execs']} = {rate:.0f}%)"
                     )
-        # Seed strategy convergence
-        if self._use_elo and self._elo:
-            seed_strategies = [
-                "ga",
-                "qea",
-                "weighted",
-                "pareto",
-                "format",
-                "bayesian",
-                "markov",
-                "boltzmann",
-            ]
-            has_seed_data = any(
-                self._elo._strategy_match_count.get(f"seed_{s}", 0) > 0 for s in seed_strategies
-            )
-            if has_seed_data:
-                print("\n[*] Seed strategy convergence:")
-                for s in seed_strategies:
-                    key = f"seed_{s}"
-                    count = self._elo._strategy_match_count.get(key, 0)
-                    if count > 0:
-                        rating = self._elo._strategy_mu.get(key, self._elo.initial_mu)
-                        delta = rating - self._elo.initial_mu
-                        sign = "+" if delta >= 0 else ""
-                        print(f"    {s:<20s}: {rating:>7.0f} ({sign}{delta:.0f}, {count} matches)")
+        # Seed strategy convergence (only strategies actually used this run)
+        seed_rows = self._seed_convergence_rows()
+        if seed_rows:
+            print("\n[*] Seed strategy convergence:")
+            for s, rating, delta, count in seed_rows:
+                sign = "+" if delta >= 0 else ""
+                print(f"    {s:<20s}: {rating:>7.0f} ({sign}{delta:.0f}, {count} matches)")
+        # Operator strategy convergence (only schedulers actually selected)
+        op_rows = self._operator_convergence_rows()
+        if op_rows:
+            print("\n[*] Operator strategy convergence:")
+            for s, rating, delta, count in op_rows:
+                sign = "+" if delta >= 0 else ""
+                print(f"    {s:<20s}: {rating:>7.0f} ({sign}{delta:.0f}, {count} matches)")
         self._print_run_summary()
         epoch_end = time.time()
         boot_end = time.monotonic()

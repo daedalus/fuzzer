@@ -49,10 +49,16 @@ class SeedPicker:
         if getattr(f, "_distance", None) is not None:
             available.append("aflgo")
 
+        # Expose the eligible pool so the fuzzer records Elo matches only against
+        # strategies that were actually selectable (no phantom opponents) and so
+        # the convergence report can show only what was really arbitrated.
+        f._seed_strategy_pool = list(available)
+
         if not available:
             return None
         strategy = f._elo.select_strategy(available) if len(available) >= 2 else available[0]
         f._seed_strategy = strategy
+        f._seed_strategies_used.add(strategy)
 
         strategy_map = {
             "ga": lambda: f.ga.pick_seed() if f.ga else None,
