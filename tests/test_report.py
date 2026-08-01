@@ -19,6 +19,17 @@ def _make_mock_fuzzer(**overrides):
     f.max_len = 4096
     f.map_size = 65536
     f.timeout = 5.0
+    f.file_mode = True
+    f.target_args = []
+    f.invocation = "fuzzer-tool fuzz --report - targets/png_read_afl.so"
+    f.seed = 42
+    f._power_schedule = "base"
+    f.mutations_per_input = 8
+    f.resume = False
+    f.multi_targets = None
+    f.extra_crash_codes = set()
+    f.asan_target = None
+    f.ubsan_target = None
     f.use_coverage = True
     f._inprocess_runner = MagicMock()
     f._inprocess_runner.direct = False
@@ -28,6 +39,7 @@ def _make_mock_fuzzer(**overrides):
     f._inprocess_runner.shm_size = 65536
     f._inprocess_runner.read_bitmap.return_value = None
     f.crash_sigs = {"sig1": 3, "sig2": 2}
+    f.crash_frames = {"sig1": ["a()", "b()"]}
     f.seed_meta = {b"seed1": {"lineage_depth": 1}, b"seed2": {"lineage_depth": 0}}
     f.op_counts = {"harm": 100, "bit_flip": 50}
     f.op_success = {"harm": 10, "bit_flip": 5}
@@ -460,3 +472,104 @@ class TestReportBranchCoverage:
         from fuzzer_tool.services.report import _human_size
 
         assert _human_size(2 * 1024 * 1024) == "2.0MB"
+
+
+class TestReportExecLine:
+    def test_file_mode_with_placeholder(self):
+        from fuzzer_tool.services.report import _target_exec_line
+
+        f = _make_mock_fuzzer(file_mode=True, target_args=["-f", "{file}"])
+        assert _target_exec_line(f) == "targets/png_read_afl.so -f @@"
+
+    def test_file_mode_no_args(self):
+        from fuzzer_tool.services.report import _target_exec_line
+
+        f = _make_mock_fuzzer(file_mode=True, target_args=[])
+        assert _target_exec_line(f) == "targets/png_read_afl.so @@"
+
+    def test_stdin_mode(self):
+        from fuzzer_tool.services.report import _target_exec_line
+
+        f = _make_mock_fuzzer(file_mode=False, target_args=["-x"])
+        assert _target_exec_line(f) == "targets/png_read_afl.so -x"
+
+    def test_stdin_mode_no_args(self):
+        from fuzzer_tool.services.report import _target_exec_line
+
+        f = _make_mock_fuzzer(file_mode=False, target_args=[])
+        assert _target_exec_line(f) == "targets/png_read_afl.so"
+
+    def test_run_summary_includes_exec_line_and_invocation(self):
+        f = _make_mock_fuzzer()
+        with tempfile.TemporaryDirectory() as td:
+            report = generate_report(f, td, td)
+        assert "Exec line:" in report
+        assert "targets/png_read_afl.so @@" in report
+        assert "Invocation:" in report
+        assert "fuzzer-tool fuzz --report - targets/png_read_afl.so" in report
+        assert "Input mode:" in report
+
+    def test_run_summary_no_invocation_attr(self):
+        f = _make_mock_fuzzer(invocation="")
+        with tempfile.TemporaryDirectory() as td:
+            report = generate_report(f, td, td)
+        assert "Exec line:" in report
+        assert "Invocation:" not in report
+
+
+class TestReportConfiguration:
+    def test_configuration_section_present(self):
+        f = _make_mock_fuzzer()
+        with tempfile.TemporaryDirectory() as td:
+            report = generate_report(f, td, td)
+        assert "--- Configuration ---" in report
+        assert "Seed" in report
+        assert "Schedule" in report
+        assert "Mutations/input" in report
+        assert "Map size" in report
+
+    def test_configuration_marks_none_values(self):
+        """Knobs left at None do not produce rows; False flags still do."""
+        from fuzzer_tool.services.report import _configuration
+
+        f = _make_mock_fuzzer(
+            seed=None,
+            _power_schedule=None,
+            mutations_per_input=None,
+            multi_targets=None,
+            extra_crash_codes=None,
+            asan_target=None,
+            ubsan_target=None,
+            dictionary=None,
+            grammar=None,
+            markov_trained=False,
+        )
+        section = _configuration(f)
+        assert "Seed" not in section
+        assert "Mutations/input" not in section
+        assert "Multi-target" not in section
+        # False flags and scalar knobs are still rendered
+        assert "Resume" in section
+        assert "Map size" in section
+
+
+class TestReportCrashSignatures:
+    def test_crash_signatures_section(self):
+        f = _make_mock_fuzzer()
+        with tempfile.TemporaryDirectory() as td:
+            report = generate_report(f, td, td)
+        assert "--- Crash Signatures ---" in report
+        assert "3x  sig1" in report
+        assert "2x  sig2" in report
+
+    def test_crash_signatures_include_frames(self):
+        f = _make_mock_fuzzer()
+        with tempfile.TemporaryDirectory() as td:
+            report = generate_report(f, td, td)
+        assert "3x  sig1  a() -> b()" in report
+
+    def test_crash_signatures_absent_when_empty(self):
+        f = _make_mock_fuzzer(crash_sigs={})
+        with tempfile.TemporaryDirectory() as td:
+            report = generate_report(f, td, td)
+        assert "--- Crash Signatures ---" not in report

@@ -4,6 +4,11 @@ from html import escape
 from pathlib import Path
 
 
+def _esc(value) -> str:
+    """HTML-escape a report string, tolerating non-str values."""
+    return escape(str(value))
+
+
 def read_coverage_log(path):
     """Read coverage log CSV: elapsed,exec_count,cumulative_edges,corpus_size,crash_count."""
     rows = []
@@ -150,6 +155,13 @@ def generate_html_report(fuzzer, coverage_log_path, output_path):
         rate = success / count if count > 0 else 0
         op_bars.append((op, rate))
 
+    # Operator usage counts (bar chart of raw counts)
+    op_usage_bars = []
+    if op_counts:
+        total_ops = sum(op_counts.values()) or 1
+        for op in sorted(op_counts, key=op_counts.get, reverse=True)[:15]:
+            op_usage_bars.append((op, op_counts[op] / total_ops))
+
     # Build HTML
     charts = []
     if edge_points:
@@ -162,29 +174,65 @@ def generate_html_report(fuzzer, coverage_log_path, output_path):
         charts.append(_svg_line_chart("Crashes", "time (s)", "crashes", crash_points))
     if op_bars:
         charts.append(_svg_bar_chart("Operator Success Rate", op_bars))
+    if op_usage_bars:
+        charts.append(_svg_bar_chart("Operator Usage", op_usage_bars))
 
     exec_count = getattr(fuzzer, "exec_count", 0)
     crash_count = getattr(fuzzer, "crash_count", 0)
     corpus_size = len(getattr(fuzzer, "corpus", []))
 
+    target = getattr(fuzzer, "target", "unknown")
+    target_name = str(target).rsplit("/", 1)[-1]
+
     html = f"""<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>Fuzzer Report</title>
+<html><head><meta charset="utf-8"><title>Fuzzer Report — {_esc(target_name)}</title>
 <style>
 body {{ font-family: system-ui, sans-serif; max-width: 800px; margin: 2em auto; padding: 0 1em; }}
 h1 {{ border-bottom: 2px solid #2563eb; padding-bottom: 0.3em; }}
 .summary {{ background: #f8fafc; padding: 1em; border-radius: 8px; margin: 1em 0; }}
+.details {{ background: #f8fafc; padding: 1em; border-radius: 8px; margin: 1em 0; }}
+.details code {{ display: block; white-space: pre-wrap; word-break: break-all; font-size: 0.9em; }}
 .chart {{ margin: 1.5em 0; }}
 svg {{ border: 1px solid #e2e8f0; border-radius: 4px; }}
 footer {{ color: #888; font-size: 0.85em; margin-top: 2em; }}
 </style></head><body>
-<h1>Fuzzer Report</h1>
+<h1>Fuzzer Report — {_esc(target_name)}</h1>
 <div class="summary">
   <b>Executions:</b> {exec_count:,} &nbsp;|&nbsp;
   <b>Crashes:</b> {crash_count} &nbsp;|&nbsp;
   <b>Corpus:</b> {corpus_size} &nbsp;|&nbsp;
   samples logged: {len(rows)}
 </div>
+<div class="details">
 """
+    exec_line = getattr(fuzzer, "exec_line", None)
+    if exec_line is None:
+        args = list(getattr(fuzzer, "target_args", None) or [])
+        if getattr(fuzzer, "file_mode", False):
+            parts = [str(target)] + ([a.replace("{file}", "@@") for a in args] if args else ["@@"])
+        else:
+            parts = [str(target)] + args
+        exec_line = " ".join(parts)
+    html += f"  <b>Target:</b> {_esc(target)}<br>\n"
+    html += f"  <b>Exec line:</b> <code>{_esc(exec_line)}</code><br>\n"
+    inv = getattr(fuzzer, "invocation", "")
+    if inv:
+        html += f"  <b>Invocation:</b> <code>{_esc(inv)}</code><br>\n"
+    mode = "file" if getattr(fuzzer, "file_mode", False) else "stdin"
+    html += f"  <b>Input mode:</b> {_esc(mode)}<br>\n"
+    cov_mode = (
+        "SHM bitmap"
+        if getattr(fuzzer, "shm_cov", None)
+        else "ptrace"
+        if getattr(fuzzer, "ptrace_cov", None)
+        else "none"
+    )
+    html += f"  <b>Coverage:</b> {_esc(cov_mode)} &nbsp;|&nbsp; "
+    html += f"<b>Max len:</b> {getattr(fuzzer, 'max_len', 0)} &nbsp;|&nbsp; "
+    html += f"<b>Timeout:</b> {getattr(fuzzer, 'timeout', 0)}s<br>\n"
+    cmplog = getattr(fuzzer, "_cmplog", None)
+    html += f"  <b>Cmplog:</b> {'enabled' if cmplog is not None else 'disabled'}<br>\n"
+    html += "</div>\n"
     for chart in charts:
         html += f'<div class="chart">{chart}</div>\n'
 

@@ -39,6 +39,7 @@
 - [ ] **Dockerfile** for reproducible builds and CI
 - [ ] **Structured logging** (e.g. `--log-json`) for machine-parseable output
 - [ ] **`fuzzer-tool-asan` wrapper** — CLI wrapper that sets `LD_PRELOAD=libasan.so.8` and exec's into the real fuzzer (mentioned in ASAN-LIMITATION.md but not yet generated as a installable entry point)
+- [ ] **Persist `invocation` into `state.json`** — `fuzzer.invocation` (sys.argv, captured in `cmd_fuzz` for the report exec lines) is not saved on shutdown; a `--resume` run therefore reports only the resumed command, not the original one. Saving it into `state.json` would let reports on resumed sessions carry the original invocation.
 
 ## Pending Bugs
 - [ ] `_apply_single_mutation` havoc doesn't enforce `max_len` strictly (allows +1 byte per insert, up to +8 total)

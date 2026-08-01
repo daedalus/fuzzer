@@ -59,6 +59,7 @@ def generate_report(fuzzer, corpus_dir: str, crashes_dir: str) -> str:
     sections = []
     sections.append(_header(fuzzer))
     sections.append(_run_summary(fuzzer))
+    sections.append(_configuration(fuzzer))
     sections.append(_runtime_performance(fuzzer))
     sections.append(_good_turing(fuzzer))
     sections.append(_coverage_analysis(fuzzer))
@@ -80,6 +81,7 @@ def generate_report(fuzzer, corpus_dir: str, crashes_dir: str) -> str:
     sections.append(_corpus_health(fuzzer))
     sections.append(_corpus_overview(fuzzer, corpus_dir))
     sections.append(_crash_analysis(fuzzer, crashes_dir))
+    sections.append(_crash_signatures(fuzzer))
     sections.append(_crash_exploitability(fuzzer, crashes_dir))
     sections.append(_crash_reproducibility(fuzzer))
     sections.append(_crash_rate_trend(fuzzer))
@@ -94,6 +96,20 @@ def _header(fuzzer) -> str:
     return line + "\n  FUZZING REPORT: " + target + "\n" + line
 
 
+def _target_exec_line(f) -> str:
+    """Reconstruct the target invocation as the runner builds it.
+
+    File mode: target + args with {file} -> @@ (or a bare @@ appended when
+    target_args is empty, mirroring run_target_file). Stdin mode: target only.
+    """
+    args = list(getattr(f, "target_args", None) or [])
+    if getattr(f, "file_mode", False):
+        parts = [f.target] + [a.replace("{file}", "@@") for a in args] if args else [f.target, "@@"]
+    else:
+        parts = [f.target] + args
+    return " ".join(parts)
+
+
 def _run_summary(f) -> str:
     execs = f.exec_count
     crashes = f.crash_count
@@ -103,15 +119,26 @@ def _run_summary(f) -> str:
         "",
         "--- Run Summary ---",
         f"  Target:          {f.target}",
-        f"  Executions:      {execs:,}",
-        f"  Corpus size:     {corpus_size}",
-        f"  Crashes:         {crashes}",
-        f"  Timeouts:        {timeouts}",
-        f"  Max input len:   {f.max_len}",
-        f"  Timeout:         {f.timeout}s",
-        f"  Coverage mode:   {'SHM bitmap' if f.shm_cov else 'ptrace' if f.ptrace_cov else 'none'}",
-        f"  In-process:      {f._inprocess_runner is not None}",
+        f"  Exec line:       {_target_exec_line(f)}",
     ]
+    inv = getattr(f, "invocation", "")
+    if inv:
+        lines.append(f"  Invocation:      {inv}")
+    lines.append(f"  Input mode:      {'file' if getattr(f, 'file_mode', False) else 'stdin'}")
+    if getattr(f, "target_args", None):
+        lines.append(f"  Target args:     {' '.join(f.target_args)}")
+    lines.extend(
+        [
+            f"  Executions:      {execs:,}",
+            f"  Corpus size:     {corpus_size}",
+            f"  Crashes:         {crashes}",
+            f"  Timeouts:        {timeouts}",
+            f"  Max input len:   {f.max_len}",
+            f"  Timeout:         {f.timeout}s",
+            f"  Coverage mode:   {'SHM bitmap' if f.shm_cov else 'ptrace' if f.ptrace_cov else 'none'}",
+            f"  In-process:      {f._inprocess_runner is not None}",
+        ]
+    )
     if f._cmplog is not None:
         n_tok = len(f._cmplog.tokens)
         n_prs = len(f._cmplog.pairs)
@@ -127,6 +154,66 @@ def _run_summary(f) -> str:
         lines.append(
             f"  Timeout rate:    {_format_ci_inline(timeouts / execs, t1, t2, t3, '.4f', True)}"
         )
+    return "\n".join(lines)
+
+
+def _configuration(f) -> str:
+    """Run configuration knobs — how this fuzzing session was set up."""
+    rows = []
+
+    def row(label, value):
+        if value is not None and value != "" and value != []:
+            rows.append(f"  {label:<22s} {value}")
+
+    row("Seed", getattr(f, "seed", None))
+    row("Schedule", getattr(f, "_power_schedule", getattr(f, "schedule", None)))
+    row("Mutations/input", getattr(f, "mutations_per_input", None))
+    row("Resume", getattr(f, "resume", False))
+    row("Max input len", f.max_len)
+    row("Timeout", f"{f.timeout}s")
+    row("Map size", f"{getattr(f, 'map_size', 0):,} bytes")
+    multi = getattr(f, "multi_targets", None)
+    if multi:
+        row("Multi-target", f"{len(multi)} targets")
+    row("In-process", f._inprocess_runner is not None)
+    if getattr(f, "_inprocess_runner", None) is not None:
+        row("Direct-lite", bool(getattr(f._inprocess_runner, "direct", False)))
+        row("Persistent", getattr(f._inprocess_runner, "_persistent", None) is not None)
+    codes = getattr(f, "extra_crash_codes", None)
+    if codes:
+        row("Extra crash codes", ",".join(str(c) for c in sorted(codes)))
+    row("ASAN target", getattr(f, "asan_target", None))
+    row("UBSAN target", getattr(f, "ubsan_target", None))
+    row(
+        "Cmplog",
+        None
+        if f._cmplog is None
+        else f"enabled ({len(f._cmplog.tokens)}t {len(f._cmplog.pairs)}p)",
+    )
+    row("Dictionary", None if not f.dictionary else f"{len(f.dictionary)} tokens")
+    row("Grammar", None if f.grammar is None else f"{len(f.grammar.rules)} rules")
+    row("Markov", None if not getattr(f, "markov_trained", False) else "trained")
+    if getattr(f, "markov_generate", False):
+        row("Markov gen", "enabled")
+    row("Operators", None if not f.op_counts else f"{len(f.op_counts)} exercised")
+
+    if not rows:
+        return ""
+    return "\n".join([""] + ["--- Configuration ---"] + rows)
+
+
+def _crash_signatures(f) -> str:
+    """Crash signature histogram from f.crash_sigs (SanitizerReport signatures)."""
+    sigs = getattr(f, "crash_sigs", None)
+    if not sigs:
+        return ""
+    frames = getattr(f, "crash_frames", None) or {}
+    lines = ["", "--- Crash Signatures ---"]
+    for sig, count in sorted(sigs.items(), key=lambda x: -x[1]):
+        line = f"  {count:>4d}x  {sig}"
+        if sig in frames and frames[sig]:
+            line += "  " + " -> ".join(str(x) for x in frames[sig][:2])
+        lines.append(line)
     return "\n".join(lines)
 
 

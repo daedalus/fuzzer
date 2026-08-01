@@ -171,3 +171,56 @@ class TestGenerateHtmlReport:
         fuzzer = types.SimpleNamespace()
         generate_html_report(fuzzer, tmp_path / "missing.csv", tmp_path / "out.html")
         assert (tmp_path / "out.html").exists()
+
+    def test_report_includes_exec_line_and_invocation(self, tmp_path):
+        fuzzer = types.SimpleNamespace(
+            op_counts={"bit_flip": 100},
+            op_success={"bit_flip": 10},
+            exec_count=20,
+            crash_count=1,
+            corpus=[b"a"],
+            target="targets/png_read",
+            target_args=["-f", "{file}"],
+            file_mode=True,
+            invocation="fuzzer-tool fuzz targets/png_read -i corpus -o out",
+        )
+        generate_html_report(fuzzer, tmp_path / "missing.csv", tmp_path / "out.html")
+        content = (tmp_path / "out.html").read_text()
+        assert "Fuzzer Report — png_read" in content
+        assert "targets/png_read -f @@" in content
+        assert "fuzzer-tool fuzz targets/png_read -i corpus -o out" in content
+
+    def test_report_includes_file_mode_default_exec_line(self, tmp_path):
+        """File mode with no target_args renders a bare @@ (AFL convention)."""
+        fuzzer = types.SimpleNamespace(
+            op_counts={},
+            op_success={},
+            exec_count=0,
+            crash_count=0,
+            corpus=[],
+            target="targets/png_read",
+            target_args=[],
+            file_mode=True,
+        )
+        generate_html_report(fuzzer, tmp_path / "missing.csv", tmp_path / "out.html")
+        content = (tmp_path / "out.html").read_text()
+        assert "targets/png_read @@" in content
+
+    def test_report_escapes_exec_line_html(self, tmp_path):
+        fuzzer = types.SimpleNamespace(
+            op_counts={},
+            op_success={},
+            exec_count=0,
+            crash_count=0,
+            corpus=[],
+            target="targets/<b>png</b>",
+            target_args=["<script>alert(1)</script>"],
+            file_mode=False,
+            invocation="fuzzer-tool fuzz <targets>",
+        )
+        generate_html_report(fuzzer, tmp_path / "missing.csv", tmp_path / "out.html")
+        content = (tmp_path / "out.html").read_text()
+        assert "<b>png</b>" not in content
+        assert "&lt;b&gt;png&lt;/b&gt;" in content
+        assert "<script>alert(1)</script>" not in content
+        assert "fuzzer-tool fuzz &lt;targets&gt;" in content

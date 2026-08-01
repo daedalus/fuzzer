@@ -209,7 +209,8 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 - **MOpt PSO** (`--mopt`): stat line shows `mopt: 5p` — active particles in PSO swarm
 - **Jaccard index**: corpus redundancy metric (`| jac: 0.XX`)
 - **Diversity score**: Wasserstein spatial diversity (`| div: N`)
-- **`--report` flag**: full explainability report with coverage, mutations, perplexity, corpus health, edge map
+- **`--report` flag**: full explainability report with coverage, mutations, perplexity, corpus health, edge map. The Run Summary opens with the **exec line** (target invocation reconstructed from `target` + `target_args` + `file_mode`, rendering `{file}` as `@@` AFL-style) plus the full **invocation** (`sys.argv` captured in `cmd_fuzz`) and input mode. A **Configuration** section (seed, schedule, mutations/input, resume, max len, timeout, map size, multi-target count, in-process/direct-lite/persistent, extra crash codes, ASAN/UBSAN targets, cmplog, dictionary, grammar, markov, operator count) appears after the Run Summary, and a **Crash Signatures** histogram (from `crash_sigs`, keyed by `SanitizerReport.signature`, top 2 frames appended when tracked) follows Crash Analysis.
+- **`--plot FILE` flag**: self-contained HTML report (`core/plotting.py::generate_html_report`) with inline SVG charts (edges, exec rate, corpus size, crashes, operator success rate, operator usage counts). The summary block shows exec count/crashes/corpus, target, exec line, full fuzzer-tool invocation, input mode, coverage mode, max len, timeout, and cmplog state; all exec-line strings are HTML-escaped. Title carries the target basename (`Fuzzer Report — <target>`).
 - **`--replay-N` flag**: background crash reproducibility scoring
 - **Per-seed cost tracking**: wall-clock time per seed for cost-aware scheduling
 - **Discovery rate**: edges per 1k execs over sliding window

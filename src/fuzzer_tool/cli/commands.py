@@ -457,6 +457,7 @@ def cmd_fuzz(args):
         mod_solving=getattr(args, "mod_solving", "heuristic"),
         chi2_operator_interval=getattr(args, "chi2_operator_interval", 0),
     )
+    fuzzer.invocation = " ".join(sys.argv)
     fuzzer.run(iterations=args.iterations)
 
     if args.report is not None:
