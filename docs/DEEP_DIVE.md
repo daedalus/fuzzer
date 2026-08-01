@@ -679,6 +679,12 @@ The build script compiles every target as both an executable and a `.so` shared 
 - `*_asan.so` — ASAN-instrumented, requires libasan (falls back to subprocess mode automatically)
 - `*_nosan.so` — Explicit no-ASAN variant (backward-compatible, same as base)
 
+Every invocation prints a **build feature matrix** before compiling: an always-on text table
+listing each feature flag (`cmplog`, `tracecmp`, `clang-scov`, `vendor-tracecmp`, `distance`,
+`ffmpeg-sancov`), the sanitizer variant set being built (ASAN/UBSAN/No-ASAN), and whether
+optional target groups (fgrep, tailslayer, lz4) will build or be skipped based on what the
+script found on disk — so the exact effect of the passed flags is visible at a glance.
+
 **Dual vendored FFmpeg builds**: FFmpeg fuzz targets require coverage-instrumented
 vendored static libraries. Since the vendored FFmpeg `.a` files are compiled with
 `-fsanitize-coverage=trace-pc-guard,trace-cmp`, they embed undefined references to

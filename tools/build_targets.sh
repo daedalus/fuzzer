@@ -906,13 +906,49 @@ build_tracecmp_targets() {
     done
 }
 
+# ── Print build feature matrix ──────────────────────────────────
+# Always shows which features and target groups this invocation will build.
+print_feature_matrix() {
+    echo ""
+    echo "Build feature matrix (flags: $OPTS):"
+    printf '  %-20s %-12s %s\n' "Feature" "State" "Notes"
+    printf '  %-20s %-12s %s\n' "-------" "-----" "-----"
+
+    local state
+    state=$([ "$WITH_CMPLOG" -eq 1 ] && echo "ON (default)" || echo "OFF")
+    printf '  %-20s %-12s %s\n' "cmplog" "$state" "comparison tracing linked into .so targets"
+    state=$([ "$WITH_TRACECMP" -eq 1 ] && echo "ON" || echo "OFF")
+    printf '  %-20s %-12s %s\n' "tracecmp" "$state" "compiler-IR comparison tracing (clang)"
+    state=$([ "$WITH_CLANG_SCOV" -eq 1 ] && echo "ON" || echo "OFF")
+    printf '  %-20s %-12s %s\n' "clang-scov" "$state" "compiler-inserted edge coverage (clang)"
+    state=$([ "$WITH_VENDOR_TRACECMP" -eq 1 ] && echo "ON" || echo "OFF")
+    printf '  %-20s %-12s %s\n' "vendor-tracecmp" "$state" "rebuild vendor libs + targets with trace-cmp (clang)"
+    state=$([ "$WITH_DISTANCE" -eq 1 ] && echo "ON" || echo "OFF")
+    printf '  %-20s %-12s %s\n' "distance" "$state" "AFLGo SHM-tail distance .so targets (clang)"
+    state=$([ "$WITH_FFMPEG_SANCOV" -eq 1 ] && echo "ON (default)" || echo "OFF")
+    printf '  %-20s %-12s %s\n' "ffmpeg-sancov" "$state" "auto-rebuild vendored FFmpeg with coverage"
+
+    state=$([ "$BUILD_ASAN" -eq 1 ] && echo "ON" || echo "OFF")
+    printf '  %-20s %-12s %s\n' "ASAN variants" "$state" "executables + .so targets"
+    printf '  %-20s %-12s %s\n' "UBSAN variants" "$state" "built alongside ASAN (.so)"
+    state=$([ "$BUILD_NOSAN" -eq 1 ] && echo "ON" || echo "OFF")
+    printf '  %-20s %-12s %s\n' "No-ASAN variants" "$state" "executables + .so targets"
+
+    state=$([ "$HAS_FGREP" -eq 1 ] && echo "BUILD" || echo "SKIP")
+    printf '  %-20s %-12s %s\n' "fgrep targets" "$state" "$([ "$HAS_FGREP" -eq 1 ] && echo "found at $FGREP" || echo "vendor/fgrep not found")"
+    state=$([ -d "$TAILSLAYER/include" ] && echo "BUILD" || echo "SKIP")
+    printf '  %-20s %-12s %s\n' "tailslayer_read" "$state" "$([ -d "$TAILSLAYER/include" ] && echo "found at $TAILSLAYER" || echo "headers not found at $TAILSLAYER/include")"
+    local lz4_objs_ok=1
+    for obj in /tmp/lz4_asan.o /tmp/lz4_ubsan.o /tmp/lz4_nosan.o; do
+        [ -f "$obj" ] || lz4_objs_ok=0
+    done
+    state=$([ "$lz4_objs_ok" -eq 1 ] && echo "BUILD" || echo "SKIP")
+    printf '  %-20s %-12s %s\n' "lz4_read" "$state" "$([ "$lz4_objs_ok" -eq 1 ] && echo "LZ4 objects present" || echo "LZ4 objects not built (build LZ4 lib first)")"
+    echo ""
+}
+
 # ── Main ──────────────────────────────────────────────────────────
 echo "=== Building fuzz targets ==="
-[ "$WITH_CMPLOG" -eq 1 ] && echo "[*] Cmplog: build-time linking enabled for .so targets"
-[ "$WITH_TRACECMP" -eq 1 ] && echo "[*] Trace-cmp: compiler-IR comparison tracing enabled (requires clang)"
-[ "$WITH_CLANG_SCOV" -eq 1 ] && echo "[*] Clang-scov: compiler-inserted edge coverage enabled (requires clang)"
-[ "$WITH_VENDOR_TRACECMP" -eq 1 ] && echo "[*] Vendor-tracecmp: rebuild vendor libs + targets with trace-cmp (requires clang)"
-[ "$WITH_DISTANCE" -eq 1 ] && echo "[*] Distance: trace-pc + AFLGo SHM-tail distance channel (requires clang)"
 
 if [ "$HAS_FGREP" -eq 0 ]; then
     warn "fgrep directory not found at $FGREP — skipping fgrep targets"
@@ -930,6 +966,8 @@ case "$OPTS" in
     --vendor-tracecmp) [ "$HAS_ASAN_ARG" -eq 1 ] && BUILD_ASAN=1 || BUILD_NOSAN=1 ;;
     *) BUILD_ASAN=1; BUILD_NOSAN=1 ;;
 esac
+
+print_feature_matrix
 
 if [ "$BUILD_ASAN" -eq 1 ]; then
     [ "$HAS_FGREP" -eq 1 ] && compile_fgrep_objects "_asan" "-fsanitize=address"
