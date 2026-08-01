@@ -2,8 +2,8 @@
 
 import math
 
+from fuzzer_tool.core.operator_categories import OPERATOR_CATEGORIES
 from fuzzer_tool.core.running_stats import RunningMoments
-from fuzzer_tool.core.schedulers.hierarchical import HierarchicalBanditScheduler
 
 
 class GPUCBScheduler:
@@ -15,8 +15,8 @@ class GPUCBScheduler:
     statistical strength — if one works well, similar operators get a boosted
     UCB score.
 
-    Feature encoding: one-hot vector per operator's category (reuses the
-    HierarchicalBanditScheduler.CATEGORIES grouping).
+    Feature encoding: one-hot vector per operator's category (uses the
+    shared operator-category grouping from fuzzer_tool.core.operator_categories).
 
     Predictive mean = kernel-weighted average of observed operator means.
     Predictive variance = kernel self-similarity - information borrowed from
@@ -54,9 +54,9 @@ class GPUCBScheduler:
 
         # Feature vectors: one-hot by category
         self._features: dict[str, list[float]] = {}
-        self._cat_names: list[str] = list(HierarchicalBanditScheduler.CATEGORIES.keys())
+        self._cat_names: list[str] = list(OPERATOR_CATEGORIES.keys())
         self._op_to_cat: dict[str, str] = {}
-        for cat, ops in HierarchicalBanditScheduler.CATEGORIES.items():
+        for cat, ops in OPERATOR_CATEGORIES.items():
             for op in ops:
                 self._op_to_cat[op] = cat
 

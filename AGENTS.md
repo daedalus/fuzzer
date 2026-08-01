@@ -70,9 +70,10 @@ fuzzer, not just the target.
 ```
 src/fuzzer_tool/
 ├── core/         # Domain logic: markov, schedulers/, shapley, ga, sanitizer, edge_tracker,
-│                 #   cmplog, grammar, bloom, elf, target_profiler, fast_json,
-│                 #   chi_squared, rand_pool, mutations/<format>.py (structure-aware
-│                 #   per-format mutators: png, jpeg, gif, webp, webm, zip, protobuf, …)
+│                 #   operator_categories (shared operator→category taxonomy), cmplog, grammar,
+│                 #   bloom, elf, target_profiler, fast_json, chi_squared, rand_pool,
+│                 #   mutations/<format>.py (structure-aware per-format mutators: png, jpeg,
+│                 #   gif, webp, webm, zip, protobuf, …)
 ├── adapters/     # Process execution, filesystem ops, afl_shim.c / cmplog_shim.c / perf_shim.c
 ├── services/     # Orchestration: fuzzer.py, operators.py, seed_picker.py, runner.py,
 │                 #   stats.py, corpus_manager.py, parallel.py, report.py
