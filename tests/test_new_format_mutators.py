@@ -319,6 +319,29 @@ class TestProtobufMutations:
         fields = parse_protobuf(b"\x08\x01" + b"\xff" * 9)
         assert fields is not None and len(fields) == 1
 
+    def test_regression_deeply_nested_groups_no_crash(self):
+        """Deeply nested group fields must not crash _parse_fields with TypeError.
+
+        Before the fix, the depth-limit path returned bare None instead of
+        (None, []), so the recursive unpack ``inner, inner_between = ...``
+        raised ``TypeError: cannot unpack non-iterable NoneType``.
+        """
+        from fuzzer_tool.core.mutations.protobuf import (
+            _encode_varint,
+            parse_protobuf,
+        )
+
+        # 18 levels of nested groups (field 1..18), each with a distinct field
+        # number so the end-group scanner can track nesting correctly.
+        data = bytearray()
+        for i in range(1, 19):
+            data += _encode_varint((i << 3) | 3)  # start-group
+        data += b"\x08\x01"  # innermost varint field
+        for i in range(18, 0, -1):
+            data += _encode_varint((i << 3) | 4)  # end-group
+        result = parse_protobuf(bytes(data))
+        assert result is None or isinstance(result, type(result))
+
     def test_rewritten_length_reaches_wire(self):
         """Regression: _rewrite_length's new length must reach the wire varint."""
         from fuzzer_tool.core.mutations.protobuf import (

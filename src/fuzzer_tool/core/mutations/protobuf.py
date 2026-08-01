@@ -87,7 +87,7 @@ def _parse_fields(
     consumed it).
     """
     if depth > 16:
-        return None
+        return None, []
     fields: list[Field] = []
     raw_between: list[bytes] = []
     gap_start = pos

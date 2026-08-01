@@ -42,5 +42,6 @@
 - [ ] **Persist `invocation` into `state.json`** — `fuzzer.invocation` (sys.argv, captured in `cmd_fuzz` for the report exec lines) is not saved on shutdown; a `--resume` run therefore reports only the resumed command, not the original one. Saving it into `state.json` would let reports on resumed sessions carry the original invocation.
 
 ## Pending Bugs
+- [x] `parse_protobuf` crashes on deeply nested group fields (>16 levels) — `_parse_fields` returned bare `None` at the depth limit instead of `(None, [])`, causing `TypeError: cannot unpack non-iterable NoneType`
 - [ ] `_apply_single_mutation` havoc doesn't enforce `max_len` strictly (allows +1 byte per insert, up to +8 total)
 - [ ] `parse_dict_line` triple-encode chain fragile for bytes > 0x7F
