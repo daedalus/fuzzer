@@ -1,7 +1,8 @@
 """Tests for Shapley attribution, replicator dynamics, and MI tracker."""
 
 from fuzzer_tool.core.mi import MutualInformationTracker
-from fuzzer_tool.core.montecarlo import ReplicatorScheduler, ShapleyAttribution
+from fuzzer_tool.core.schedulers import ReplicatorScheduler
+from fuzzer_tool.core.shapley import ShapleyAttribution
 
 
 class TestShapleyAttribution:

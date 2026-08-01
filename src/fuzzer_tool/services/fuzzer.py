@@ -29,7 +29,13 @@ from fuzzer_tool.adapters.shm import ShmCoverage
 from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.markov import MarkovChain, MarkovEnsemble
 from fuzzer_tool.core.mi import MutualInformationTracker
-from fuzzer_tool.core.montecarlo import (
+from fuzzer_tool.core.mutations import (
+    DICT_MUTATIONS,
+    FORMAT_MUTATIONS,
+    MUTATIONS,
+)
+from fuzzer_tool.core.sanitizer import SanitizerReport
+from fuzzer_tool.core.schedulers import (
     EpsilonGreedyScheduler,
     Exp3Scheduler,
     GPUCBScheduler,
@@ -37,17 +43,11 @@ from fuzzer_tool.core.montecarlo import (
     MonteCarloScheduler,
     MOptScheduler,
     ReplicatorScheduler,
-    ShapleyAttribution,
 )
-from fuzzer_tool.core.mutations import (
-    DICT_MUTATIONS,
-    FORMAT_MUTATIONS,
-    MUTATIONS,
-)
-from fuzzer_tool.core.sanitizer import SanitizerReport
 from fuzzer_tool.core.schedules import SeedScorer, compute_mean_log_n_fuzz
 from fuzzer_tool.core.secretary import DEFAULT_EXPLORATION_FRAC, SecretaryStopping
 from fuzzer_tool.core.seed_quality import BayesianSeedQuality
+from fuzzer_tool.core.shapley import ShapleyAttribution
 from fuzzer_tool.services.corpus_manager import CorpusManager
 from fuzzer_tool.services.operators import OperatorEngine
 from fuzzer_tool.services.ptrace_coverage import (

@@ -15,12 +15,6 @@ from fuzzer_tool.core.critical_slowing import (
 )
 from fuzzer_tool.core.markov import MarkovChain
 from fuzzer_tool.core.mi import MutualInformationTracker
-from fuzzer_tool.core.montecarlo import (
-    MonteCarloScheduler,
-    MOptScheduler,
-    ReplicatorScheduler,
-    ShapleyAttribution,
-)
 from fuzzer_tool.core.mutations import (
     DICT_MUTATIONS,
     INTERESTING_8,
@@ -36,7 +30,17 @@ from fuzzer_tool.core.mutations import (
 from fuzzer_tool.core.rate_distortion import RateDistortionCorpus
 from fuzzer_tool.core.renyi import CoverageSpectrumAnalyzer, RenyiEntropy
 from fuzzer_tool.core.sanitizer import SanitizerReport
+from fuzzer_tool.core.schedulers import (
+    EpsilonGreedyScheduler,
+    Exp3Scheduler,
+    GPUCBScheduler,
+    HierarchicalBanditScheduler,
+    MonteCarloScheduler,
+    MOptScheduler,
+    ReplicatorScheduler,
+)
 from fuzzer_tool.core.seed_quality import BayesianSeedQuality
+from fuzzer_tool.core.shapley import ShapleyAttribution
 from fuzzer_tool.core.transfer_entropy import TransferEntropy
 
 __all__ = [
@@ -54,9 +58,13 @@ __all__ = [
     "MonteCarloScheduler",
     "MOptScheduler",
     "ReplicatorScheduler",
+    "EpsilonGreedyScheduler",
+    "Exp3Scheduler",
+    "HierarchicalBanditScheduler",
+    "GPUCBScheduler",
     "ShapleyAttribution",
     "MutualInformationTracker",
-    "RényiEntropy",
+    "RenyiEntropy",
     "CoverageSpectrumAnalyzer",
     "RateDistortionCorpus",
     "TransferEntropy",

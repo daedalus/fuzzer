@@ -7,7 +7,7 @@ enabled-but-unused ones or stall-recovery pseudo-strategies.
 from types import SimpleNamespace
 
 from fuzzer_tool.core.elo import BayesianEloTracker
-from fuzzer_tool.core.montecarlo import MonteCarloScheduler
+from fuzzer_tool.core.schedulers import MonteCarloScheduler
 from fuzzer_tool.services.fuzzer import Fuzzer
 from fuzzer_tool.services.operators import OperatorEngine
 from tests.test_commands_extended import TestCmdFuzzConstruction

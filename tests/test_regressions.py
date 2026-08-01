@@ -532,7 +532,7 @@ class TestBanditStatsNonNegative:
     """6a7fdfa: bandit_stats must be clamped to non-negative."""
 
     def test_bandit_stats_clamped(self):
-        from fuzzer_tool.core.montecarlo import MonteCarloScheduler
+        from fuzzer_tool.core.schedulers import MonteCarloScheduler
 
         mc = MonteCarloScheduler()
         mc.init_arm("op_a")
@@ -600,7 +600,7 @@ class TestReplicatorZeroCountExclusion:
     """00e0038: zero-count operators excluded from fitness."""
 
     def test_replicator_excludes_zero_count(self):
-        from fuzzer_tool.core.montecarlo import ReplicatorScheduler
+        from fuzzer_tool.core.schedulers import ReplicatorScheduler
 
         rs = ReplicatorScheduler()
         # Initialize with some operators

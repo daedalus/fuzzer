@@ -69,7 +69,7 @@ fuzzer, not just the target.
 
 ```
 src/fuzzer_tool/
-├── core/         # Domain logic: markov, montecarlo, ga, sanitizer, edge_tracker,
+├── core/         # Domain logic: markov, schedulers/, shapley, ga, sanitizer, edge_tracker,
 │                 #   cmplog, grammar, bloom, elf, target_profiler, fast_json,
 │                 #   chi_squared, rand_pool, mutations/<format>.py (structure-aware
 │                 #   per-format mutators: png, jpeg, gif, webp, webm, zip, protobuf, …)

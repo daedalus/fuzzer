@@ -7,7 +7,7 @@ import pytest
 
 from fuzzer_tool.adapters.shim_factory import ShimResult
 from fuzzer_tool.core.markov import MarkovChain
-from fuzzer_tool.core.montecarlo import MonteCarloScheduler
+from fuzzer_tool.core.schedulers import MonteCarloScheduler
 from fuzzer_tool.services.fuzzer import Fuzzer
 
 

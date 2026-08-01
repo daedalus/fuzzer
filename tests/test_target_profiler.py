@@ -282,3 +282,39 @@ class TestSymbolFormatDetection:
 
     def test_unknown_symbols_stay_unknown(self):
         assert self._infer(["frobnicate", "main"]) in (None, "text", "unknown")
+
+
+class TestParserTokenExtraction:
+    """Regression: _extract_parser_tokens used undefined `sec_size` (F821)."""
+
+    def _profiler_with_token_table(self):
+        """Build a profiler whose .rodata holds a yytname-style token table.
+
+        Layout mirrors the section tuple (sh_type, sh_offset, sh_addr, sh_size):
+        .rodata at file offset 0x100, vaddr 0x400000, size 0x100; the symbol
+        yytname lives at vaddr 0x400010, and file offset 0x110 holds an 8-byte
+        pointer to a null-terminated string at rodata offset 0x30.
+        """
+        elf = bytearray(0x200)
+        struct.pack_into("<Q", elf, 0x110, 0x130)  # pointer to string at file offset 0x130
+        elf[0x130:0x136] = b"TOKEN\x00"
+        profiler = TargetProfiler("/nonexistent")
+        profiler._elf = bytes(elf)
+        profiler._sections = {".rodata": (3, 0x100, 0x400000, 0x100)}
+        profiler._symtab = [("yytname", 0x400010, 8, 1)]
+        return profiler
+
+    def test_token_table_extraction_no_nameerror(self):
+        profiler = self._profiler_with_token_table()
+        p = TargetProfile()
+        profiler._extract_parser_tokens(p)
+        assert b"TOKEN" in p.parser_tokens
+
+    def test_no_rodata_returns_empty(self):
+        profiler = TargetProfiler("/nonexistent")
+        profiler._elf = b"\x7fELF" + b"\x00" * 128
+        profiler._sections = {}
+        profiler._symtab = []
+        p = TargetProfile()
+        profiler._extract_parser_tokens(p)
+        assert p.parser_tokens == []

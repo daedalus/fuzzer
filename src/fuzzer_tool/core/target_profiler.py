@@ -6,6 +6,7 @@ population, mutation weighting, and seed selection.
 """
 
 import collections
+import contextlib
 import hashlib
 import json
 import logging
@@ -156,12 +157,8 @@ class TargetProfile:
         data = self.to_dict()
         # Embed content hash of the target binary for cache invalidation
         if target_path:
-            try:
-                data["_target_binary_hash"] = hashlib.md5(
-                    open(target_path, "rb").read()
-                ).hexdigest()
-            except OSError:
-                pass
+            with contextlib.suppress(OSError), open(target_path, "rb") as f:
+                data["_target_binary_hash"] = hashlib.md5(f.read()).hexdigest()
         Path(path).write_text(json.dumps(data, separators=(",", ":")))
 
     @staticmethod
@@ -181,7 +178,8 @@ class TargetProfile:
         stored_hash = d.get("_target_binary_hash")
         if stored_hash and target_path:
             try:
-                current_hash = hashlib.md5(open(target_path, "rb").read()).hexdigest()
+                with open(target_path, "rb") as f:
+                    current_hash = hashlib.md5(f.read()).hexdigest()
                 if stored_hash != current_hash:
                     log.info(
                         "Profile cache invalidated: binary hash mismatch (stored=%s, current=%s)",
@@ -350,9 +348,7 @@ class TargetProfiler:
             return False
         if self._elf[:4] != b"\x7fELF":
             return False
-        if self._elf[4] != 2 or self._elf[5] != 1:  # ELF64, little-endian
-            return False
-        return True
+        return self._elf[4] == 2 and self._elf[5] == 1  # ELF64, little-endian
 
     def _parse_sections(self):
         """Parse section headers and build section lookup."""
@@ -481,7 +477,7 @@ class TargetProfiler:
 
         # Filter for interesting strings
         interesting = []
-        for offset, s in strings:
+        for _offset, s in strings:
             sb = s.encode("ascii", errors="replace")
             if (
                 FORMAT_STRING_RE.search(sb)
@@ -504,12 +500,12 @@ class TargetProfiler:
 
         # Detect magic bytes
         magic = []
-        for sig, fmt in MAGIC_SIGNATURES:
+        for sig, _fmt in MAGIC_SIGNATURES:
             if self._elf[: len(sig)] == sig:
                 magic.append(sig)
         # Also scan for magic bytes at common offsets in .rodata
         if ".rodata" in self._sections:
-            for sig, fmt in MAGIC_SIGNATURES:
+            for sig, _fmt in MAGIC_SIGNATURES:
                 idx = rodata.find(sig)
                 if idx >= 0 and sig not in magic:
                     magic.append(sig)
@@ -548,7 +544,7 @@ class TargetProfiler:
                         sec_addr,
                         _sec_size,
                     ) in self._sections.items():
-                        if sec_addr <= st_value < sec_addr + sec_size:
+                        if sec_addr <= st_value < sec_addr + _sec_size:
                             # Read pointer from the section
                             ptr_offset = st_value - sec_addr + sec_off
                             if ptr_offset + 8 > len(self._elf):
@@ -660,7 +656,7 @@ class TargetProfiler:
 
         from fuzzer_tool.core.elf import _INS_JCC, _decode_x86_64
 
-        for name, addr, size, st_type in self._symtab:
+        for name, addr, size, _st_type in self._symtab:
             if size == 0:
                 size = 256  # estimate for symbols without size
 
@@ -883,7 +879,7 @@ class TargetProfiler:
 
         # Build address -> function name map
         addr_to_func: dict[int, str] = {}
-        for name, addr, size, _ in self._symtab:
+        for name, addr, _size, _ in self._symtab:
             addr_to_func[addr] = name
 
         from fuzzer_tool.core.elf import _GRP_CALL, _decode_x86_64
@@ -1042,7 +1038,7 @@ def format_operator_priors(profile: "TargetProfile") -> dict[str, tuple[float, f
     strings, format signature) is prior knowledge about which
     structure-aware mutation operators are likely to be useful *before*
     any executions have happened. This lets the Thompson-sampling bandit
-    (:class:`fuzzer_tool.core.montecarlo.MonteCarloScheduler`) start with a
+    (:class:`fuzzer_tool.core.schedulers.monte_carlo.MonteCarloScheduler`) start with a
     Beta prior biased toward those operators instead of the uninformative
     Beta(1, 1) used for every arm by default.
 

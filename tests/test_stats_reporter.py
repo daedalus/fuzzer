@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from fuzzer_tool.core.montecarlo import MOptScheduler
+from fuzzer_tool.core.schedulers import MOptScheduler
 from fuzzer_tool.services.stats import StatsReporter
 from fuzzer_tool.services.stats_reporter import (
     discovery_rate,
