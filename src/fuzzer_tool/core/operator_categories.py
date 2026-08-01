@@ -1,118 +1,15 @@
 """Shared operator→category taxonomy used by multiple schedulers.
 
-Plain data module (not a scheduler): maps every known mutation operator to
-the category bandit schedulers group operators by (bit, byte, block, dict,
-structural, radamsa, format, adaptive). Schedulers must stay independent of
-each other and may only share neutral dependencies like this one; Elo
-arbitration sits on top in the services layer.
+Plain data module (not a scheduler): the category bandit schedulers group
+operators by (bit, byte, block, dict, structural, radamsa, format, adaptive).
+Schedulers must stay independent of each other and may only share neutral
+dependencies like this one; Elo arbitration sits on top in the services layer.
+
+The taxonomy is derived from the operator dispatcher
+(``fuzzer_tool.core.operator_registry``), the single source of truth for
+operator names and categories — never edit this mapping by hand.
 """
 
-OPERATOR_CATEGORIES: dict[str, set[str]] = {
-    "bit": {
-        "bit_flip",
-        "bit_offset_flip",
-        "bit_offset_span",
-        "bit_transpose_8",
-        "bit_transpose_16",
-        "bit_transpose_32",
-        "bit_transpose_64",
-    },
-    "byte": {
-        "byte_flip",
-        "interesting_8",
-        "interesting_16",
-        "interesting_32",
-        "arithmetic",
-        "random_bytes",
-        "radamsa_num",
-        "byte_shuffle",
-        "byte_delete",
-        "byte_insert",
-        "swap_bytes",
-        "endianness_swap",
-    },
-    "block": {
-        "block_insert",
-        "block_delete",
-        "block_duplicate",
-        "swap_regions",
-        "repeat_clone",
-        "truncate",
-        "length_grow",
-        "length_shrink",
-        "length_boundary",
-        "transpose_16",
-        "transpose_32",
-        "transpose_64",
-        "simd_boundary",
-    },
-    "dict": {
-        "dict_insert",
-        "dict_replace",
-        "dict_overwrite",
-        "dict_prepend",
-        "dict_append",
-        "checksum_repair",
-        "token_dup",
-        "dict_compound",
-    },
-    "structural": {
-        "splice",
-        "splice_diff_located",
-        "crossover",
-        "type_replace",
-        "ascii_num",
-        "ascii_num_arithmetic",
-        "insert_ascii_num",
-        "tlv_mutate",
-        "token_shuffle",
-        "chunk_shuffle",
-        "punctuation_insert",
-        "special_strings",
-        "magic_values",
-    },
-    "radamsa": {
-        "fuse_this",
-        "fuse_next",
-        "fuse_old",
-        "tree_mutate",
-        "line_mutate",
-        "utf8_widen",
-        "utf8_insert",
-    },
-    "format": {
-        "png_chunk_mutate",
-        "png_crc_fix",
-        "jpeg_chunk_mutate",
-        "jpeg_crc_fix",
-        "bmp_chunk_mutate",
-        "gzip_chunk_mutate",
-        "zlib_chunk_mutate",
-        "format_lock",
-        "pgs_chunk_mutate",
-        "isobmff_chunk_mutate",
-        "nal_chunk_mutate",
-        "protobuf_chunk_mutate",
-        "gif_chunk_mutate",
-        "webp_chunk_mutate",
-        "webm_chunk_mutate",
-        "zip_chunk_mutate",
-        "x86_chunk_mutate",
-        "arm_chunk_mutate",
-    },
-    "adaptive": {
-        "markov_bytes",
-        "cem_bytes",
-        "colorization",
-        "skipdet_probe",
-        "auto_extras",
-        "redqueen_xform",
-        "gradient_cmp",
-        "redqueen",
-        "havoc",
-        "overwrite_copy",
-        "overwrite_fixed",
-        "clone_fixed",
-        "regex_bomb",
-    },
-}
+from fuzzer_tool.core.operator_registry import REGISTRY
+
+OPERATOR_CATEGORIES: dict[str, set[str]] = REGISTRY.categories()

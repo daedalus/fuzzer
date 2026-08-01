@@ -2,20 +2,22 @@
 
 Extracted from Fuzzer class (~lines 1116-1845). Contains:
 - All _op_* handler methods
-- _build_dispatch() — maps operator names to handlers
+- build_dispatch() — maps operator names to handlers (via REGISTRY)
 - _havoc_mutate() / _apply_single_mutation() — random compound mutations
-- _build_ops() — builds list of available operators
+- build_ops() — builds list of available operators (via REGISTRY)
 - _select_op() — selects operator via scheduling strategy
 - _select_position() — selects byte position for mutation
 - mutate() — main mutation orchestrator
+
+Operator names, categories, and availability conditions are the single
+source of truth in ``fuzzer_tool.core.operator_registry.REGISTRY``; this
+module only supplies the ``_op_*`` handlers that the registry dispatches to.
 """
 
 import logging
 import struct
 
 from fuzzer_tool.core.mutations import (
-    DICT_MUTATIONS,
-    FORMAT_MUTATIONS,
     INTERESTING_8,
     INTERESTING_16,
     INTERESTING_32,
@@ -23,7 +25,6 @@ from fuzzer_tool.core.mutations import (
     INTERESTING_UNSIGNED_16,
     INTERESTING_UNSIGNED_32,
     MAGIC_TABLE,
-    MUTATIONS,
     SPECIAL_STRINGS,
     could_be_arith,
     could_be_bitflip,
@@ -32,6 +33,7 @@ from fuzzer_tool.core.mutations import (
     splice,
     splice_diff_located,
 )
+from fuzzer_tool.core.operator_registry import REGISTRY
 
 log = logging.getLogger(__name__)
 
@@ -1447,102 +1449,7 @@ class OperatorEngine:
 
     # ── Dispatch table: op name → handler method ───────────────────────
     def build_dispatch(self):
-        return {
-            "bit_flip": self._op_bit_flip,
-            "bit_offset_flip": self._op_bit_offset_flip,
-            "bit_offset_span": self._op_bit_offset_span,
-            "simd_boundary": self._op_simd_boundary,
-            "regex_bomb": self._op_regex_bomb,
-            "clone_fixed": self._op_clone_fixed,
-            "overwrite_copy": self._op_overwrite_copy,
-            "overwrite_fixed": self._op_overwrite_fixed,
-            "redqueen_xform": self._op_redqueen_xform,
-            "fuse_this": self._op_fuse_this,
-            "fuse_next": self._op_fuse_next,
-            "fuse_old": self._op_fuse_old,
-            "tree_mutate": self._op_tree_mutate,
-            "utf8_widen": self._op_utf8_widen,
-            "utf8_insert": self._op_utf8_insert,
-            "line_mutate": self._op_line_mutate,
-            "colorization": self._op_colorization,
-            "skipdet_probe": self._op_skipdet_probe,
-            "auto_extras": self._op_auto_extras,
-            "byte_flip": self._op_byte_flip,
-            "interesting_8": self._op_interesting_8,
-            "interesting_16": self._op_interesting_16,
-            "interesting_32": self._op_interesting_32,
-            "arithmetic": self._op_arithmetic,
-            "random_bytes": self._op_random_bytes,
-            "block_insert": self._op_block_insert,
-            "block_delete": self._op_block_delete,
-            "block_duplicate": self._op_block_duplicate,
-            "dict_insert": self._op_dict_insert,
-            "dict_replace": self._op_dict_replace,
-            "dict_overwrite": self._op_dict_overwrite,
-            "dict_prepend": self._op_dict_prepend,
-            "dict_append": self._op_dict_append,
-            "checksum_repair": self._op_checksum_repair,
-            "token_dup": self._op_token_dup,
-            "markov_bytes": self._op_markov_bytes,
-            "cem_bytes": self._op_cem_bytes,
-            "splice": self._op_splice,
-            "splice_diff_located": self._op_splice_diff_located,
-            "radamsa_num": self._op_radamsa_num,
-            "crossover": self._op_crossover,
-            "type_replace": self._op_type_replace,
-            "ascii_num": self._op_ascii_num,
-            "byte_shuffle": self._op_byte_shuffle,
-            "byte_delete": self._op_byte_delete,
-            "byte_insert": self._op_byte_insert,
-            "insert_ascii_num": self._op_insert_ascii_num,
-            "transpose_16": self._op_transpose_16,
-            "transpose_32": self._op_transpose_32,
-            "transpose_64": self._op_transpose_64,
-            "bit_transpose_8": self._op_bit_transpose_8,
-            "bit_transpose_16": self._op_bit_transpose_16,
-            "bit_transpose_32": self._op_bit_transpose_32,
-            "bit_transpose_64": self._op_bit_transpose_64,
-            "length_grow": self._op_length_grow,
-            "length_shrink": self._op_length_shrink,
-            "repeat_clone": self._op_repeat_clone,
-            "truncate": self._op_truncate,
-            "length_boundary": self._op_length_boundary,
-            "swap_regions": self._op_swap_regions,
-            "swap_bytes": self._op_swap_bytes,
-            "endianness_swap": self._op_endianness_swap,
-            "tlv_mutate": self._op_tlv_mutate,
-            "token_shuffle": self._op_token_shuffle,
-            "gradient_cmp": self._op_gradient_cmp,
-            "special_strings": self._op_special_strings,
-            "magic_values": self._op_magic_values,
-            "ascii_num_arithmetic": self._op_ascii_num_arithmetic,
-            "chunk_shuffle": self._op_chunk_shuffle,
-            "block_shuffle_variable": self._op_block_shuffle_variable,
-            "dict_compound": self._op_dict_compound,
-            "punctuation_insert": self._op_punctuation_insert,
-            "grammar_mutate": self._op_grammar_mutate,
-            "grammar_tree_mutate": self._op_grammar_tree_mutate,
-            "png_chunk_mutate": self._op_png_chunk_mutate,
-            "jpeg_chunk_mutate": self._op_jpeg_chunk_mutate,
-            "jpeg_crc_fix": self._op_jpeg_crc_fix,
-            "gzip_chunk_mutate": self._op_gzip_chunk_mutate,
-            "bmp_chunk_mutate": self._op_bmp_chunk_mutate,
-            "zlib_chunk_mutate": self._op_zlib_chunk_mutate,
-            "png_crc_fix": self._op_png_crc_fix,
-            "format_lock": self._op_format_lock,
-            "pgs_chunk_mutate": self._op_pgs_chunk_mutate,
-            "isobmff_chunk_mutate": self._op_isobmff_chunk_mutate,
-            "nal_chunk_mutate": self._op_nal_chunk_mutate,
-            "protobuf_chunk_mutate": self._op_protobuf_chunk_mutate,
-            "gif_chunk_mutate": self._op_gif_chunk_mutate,
-            "webp_chunk_mutate": self._op_webp_chunk_mutate,
-            "webm_chunk_mutate": self._op_webm_chunk_mutate,
-            "zip_chunk_mutate": self._op_zip_chunk_mutate,
-            "x86_chunk_mutate": self._op_x86_chunk_mutate,
-            "arm_chunk_mutate": self._op_arm_chunk_mutate,
-            "redqueen": self._op_redqueen,
-            "havoc": self._op_havoc,
-        }
+        return REGISTRY.dispatch(self)
 
     def havoc_mutate(self, buf: bytearray) -> bytearray:
         """Apply 2-8 random mutations (scaled up during stall recovery).
@@ -1643,33 +1550,8 @@ class OperatorEngine:
     # ── Operator selection logic ───────────────────────────────────────
 
     def build_ops(self, data: bytes) -> list[str]:
-        """Build the list of available mutation operators from ground truth."""
-        f = self.f
-        ops = list(MUTATIONS)
-        if not getattr(f, "enable_regex_bomb", False):
-            ops = [op for op in ops if op != "regex_bomb"]
-        if f.dictionary:
-            ops.extend(DICT_MUTATIONS)
-        if f.markov_trained:
-            ops.append("markov_bytes")
-        if f.mc and f.mc_cem and f.mc.cem_fitted:
-            ops.append("cem_bytes")
-        if f.grammar:
-            ops.append("grammar_mutate")
-            ops.append("grammar_tree_mutate")
-        if getattr(f, "_cmplog", None) and f._cmplog.pairs:
-            ops.append("redqueen_xform")
-            ops.append("gradient_cmp")
-        # Remove gradient_cmp from base MUTATIONS if cmplog unavailable
-        if not (getattr(f, "_cmplog", None) and f._cmplog.pairs):
-            ops = [op for op in ops if op != "gradient_cmp"]
-        ops.extend(FORMAT_MUTATIONS)
-        parent_meta = f.seed_meta.get(data)
-        if parent_meta and (
-            parent_meta.get("redqueen_matches") or parent_meta.get("redqueen_offsets")
-        ):
-            ops.append("redqueen")
-        return ops
+        """Build the list of available mutation operators from the registry."""
+        return REGISTRY.available(self.f, data)
 
     def select_op(self, ops: list[str]) -> str:
         """Select a mutation operator using the active scheduling strategy."""

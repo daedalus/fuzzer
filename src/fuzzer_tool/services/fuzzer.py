@@ -29,11 +29,7 @@ from fuzzer_tool.adapters.shm import ShmCoverage
 from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.markov import MarkovChain, MarkovEnsemble
 from fuzzer_tool.core.mi import MutualInformationTracker
-from fuzzer_tool.core.mutations import (
-    DICT_MUTATIONS,
-    FORMAT_MUTATIONS,
-    MUTATIONS,
-)
+from fuzzer_tool.core.operator_registry import REGISTRY
 from fuzzer_tool.core.sanitizer import SanitizerReport
 from fuzzer_tool.core.schedulers import (
     EpsilonGreedyScheduler,
@@ -1141,16 +1137,7 @@ class Fuzzer:
                 else:
                     scheduler.init_arm(op)
 
-            for op in MUTATIONS:
-                _init(op)
-            for op in DICT_MUTATIONS:
-                _init(op)
-            _init("markov_bytes")
-            _init("cem_bytes")
-            if self.grammar:
-                _init("grammar_mutate")
-                _init("grammar_tree_mutate")
-            for op in FORMAT_MUTATIONS:
+            for op in REGISTRY.names():
                 _init(op)
 
         from fuzzer_tool.core.target_profiler import format_operator_priors

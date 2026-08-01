@@ -27,6 +27,7 @@ fuzzer, not just the target.
 8. All fuzz targets: compile with ASAN (`-fsanitize=address`) and AFL edge coverage via `afl_shim.c` (`-include src/fuzzer_tool/adapters/afl_shim.c`). Pre-compile library sources as `.o` files; link the shim only into the target wrapper.
 9. Always create TODOs. Always commit and push after finishing a task.
 10. Update `docs/DEEP_DIVE.md` with new features (the comprehensive reference). Update `README.md` only when adding or changing high-level capabilities visible in the quick-start or feature overview.
+11. Op mutators have a single source of truth: `src/fuzzer_tool/core/operator_registry.py`'s `REGISTRY`. Register new operators there only — the dispatch table (`build_dispatch`), the per-input op list (`build_ops`), scheduler arming (`_register_arms`), and `OPERATOR_CATEGORIES` all derive from it. Never add operator names to the legacy `MUTATIONS`/`FORMAT_MUTATIONS`/`DICT_MUTATIONS` lists or hand-edit `OPERATOR_CATEGORIES`; schedulers discover ops through the services layer and never hardcode op lists.
 
 ## Corpus Rules
 
@@ -52,6 +53,19 @@ fuzzer, not just the target.
 4. Verify with `nm`: `__afl` symbols present in the executable, `fuzz_shm_run` present in the `.so`; then run `tools/build_targets.sh` and confirm the target appears in the feature matrix.
 5. Add a `dictionaries/` token file if the format has meaningful tokens.
 
+### Add a new op mutator
+
+1. Register the operator in `src/fuzzer_tool/core/operator_registry.py`: add its name to the
+   category band in `_CATEGORIES` and, if it is gated (dictionary / markov / cem / grammar /
+   cmplog / flag / per-input), an availability predicate in `_AVAILABLE`. Nothing else —
+   `build_dispatch()`, `build_ops()`, `_register_arms()`, and `OPERATOR_CATEGORIES` derive
+   from `REGISTRY`.
+2. Add the `_op_<name>` handler on `OperatorEngine` (`services/operators.py`) — a registration
+   without a handler raises at dispatch-build time.
+3. Add a regression test in `tests/test_regression_operator_registry.py` (category placement,
+   availability gating, dispatch coverage) if the operator is not already covered by the
+   smoke tests.
+
 ## Commands
 
 | Command | Description |
@@ -70,7 +84,8 @@ fuzzer, not just the target.
 ```
 src/fuzzer_tool/
 ├── core/         # Domain logic: markov, schedulers/, shapley, ga, sanitizer, edge_tracker,
-│                 #   operator_categories (shared operator→category taxonomy), cmplog, grammar,
+│                 #   operator_registry (canonical op-mutator registration + dispatcher),
+│                 #   operator_categories (taxonomy derived from the registry), cmplog, grammar,
 │                 #   bloom, elf, target_profiler, fast_json, chi_squared, rand_pool,
 │                 #   mutations/<format>.py (structure-aware per-format mutators: png, jpeg,
 │                 #   gif, webp, webm, zip, protobuf, …)
