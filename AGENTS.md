@@ -92,7 +92,7 @@ docs/             # DEEP_DIVE.md (comprehensive reference), TODO.md, refs/ (agen
 - Type hints: strict mypy
 - Verify claims against code: before acting on behavior, type, or API shape, read the source — don't infer from names.
 - Prefer array.array over Python lists for homogeneous numeric data to minimize memory overhead, and only use lists when arrays are unsuitable.
-
+- Prefer DP over recursive functions.
 
 ## Testing
 
