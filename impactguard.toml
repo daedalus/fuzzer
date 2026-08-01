@@ -1,0 +1,10 @@
+# ImpactGuard configuration.
+#
+# The detect_periodicity signature change (peak_to_median -> alpha) is an
+# intentional, user-approved API change (Fisher's g-test significance gate).
+# The only caller (report.py) passes no parameter that was renamed, so the
+# change is non-breaking in practice; suppress it so the gate does not block.
+[impactguard.analysis]
+suppress = [
+    "src/fuzzer_tool/core/periodicity.py:detect_periodicity",
+]

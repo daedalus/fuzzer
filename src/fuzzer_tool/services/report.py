@@ -775,7 +775,7 @@ def _spectral_diagnostics(f) -> str:
             if res.significant:
                 lines.append(
                     f"  Exec time:      PERIODIC — dominant period {res.dominant_period:.1f} "
-                    f"samples (peak/median {res.peak_strength:.1f}x at bin {res.peak_bin})"
+                    f"samples (g={res.peak_strength:.3f}, p={res.p_value:.2e} at bin {res.peak_bin})"
                 )
             else:
                 lines.append("  Exec time:      no significant periodic component")
@@ -792,7 +792,7 @@ def _spectral_diagnostics(f) -> str:
             if res.significant:
                 lines.append(
                     f"  Discovery rate: PERIODIC — dominant period {res.dominant_period:.1f} "
-                    f"sync intervals (peak/median {res.peak_strength:.1f}x at bin "
+                    f"sync intervals (g={res.peak_strength:.3f}, p={res.p_value:.2e} at bin "
                     f"{res.peak_bin}); possible corpus-sync artifact"
                 )
             else:

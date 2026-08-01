@@ -6,11 +6,13 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from fuzzer_tool.core.execution_time import ExecutionTimeTracker
 from fuzzer_tool.core.format_learner import FieldHypothesis, FormatLearner
 from fuzzer_tool.core.grammar import Grammar, TreeMutator
 from fuzzer_tool.core.mutations.generic import chunk_shuffle
-from fuzzer_tool.core.periodicity import detect_periodicity, estimate_record_size
+from fuzzer_tool.core.periodicity import detect_periodicity, estimate_record_size, fisher_g_pvalue
 from fuzzer_tool.services.fuzzer import Fuzzer
 
 
@@ -147,6 +149,54 @@ class TestDetectPeriodicity:
         res = detect_periodicity(list(tracker._times))
         assert res.significant
         assert 14.0 <= res.dominant_period <= 18.0
+
+    def test_regression_white_noise_false_positive_rate(self):
+        """Pure white noise must be flagged at ~alpha, not at a 97.5% rate.
+
+        Regression: the old fixed peak_to_median=2.0 ratio implicitly picked
+        the best of ~100 non-DC bins, so the max of ~100 exponential-family
+        ordinates under the null exceeded 2x the median by chance (195/200
+        trials flagged). With alpha=0.05 the nominal rate is ~5%; the bound
+        of 10% absorbs binomial noise across 5x200 trials without flaking.
+        """
+        flagged = 0
+        trials = 200
+        for s in range(5):
+            for t in range(trials):
+                rng = random.Random(s * 1000 + t)
+                series = [rng.random() for _ in range(200)]
+                if detect_periodicity(series, min_samples=50).significant:
+                    flagged += 1
+        assert flagged / (5 * trials) <= 0.10
+
+    def test_regression_peak_strength_bounded(self):
+        """A clean signal must yield a finite strength in (0, 1), not 6e15.
+
+        Regression: peak_strength divided by the median of the non-DC bins,
+        which sits near machine-epsilon for very clean signals, blowing up
+        to ~6.29e15. The g statistic divides by the total power instead, so
+        it is bounded in [0, 1] by construction.
+        """
+        series = [math.sin(2 * math.pi * k / 16) for k in range(256)]
+        res = detect_periodicity(series)
+        # A pure on-bin sine puts all power in one bin -> g == 1.0 exactly;
+        # the regression property is bounded/finite, not the old ~6e15 blowup.
+        assert 0.0 < res.peak_strength <= 1.0
+        assert math.isfinite(res.peak_strength)
+        assert res.significant
+        assert res.p_value < 0.05
+
+    def test_regression_fisher_pvalue_reference(self):
+        """Fisher's g p-value matches hand-computed closed-form values.
+
+        P(G > g) = sum_k (-1)^(k-1) C(m,k) (1 - k*g)^(m-1), k <= floor(1/g).
+        """
+        assert fisher_g_pvalue(0.5, 10) == pytest.approx(0.01953125)  # 10 * 0.5^9
+        assert fisher_g_pvalue(0.4, 10) == pytest.approx(0.10075392)
+        assert fisher_g_pvalue(0.3, 10) == pytest.approx(0.39173971)
+        assert fisher_g_pvalue(1.0, 10) == 0.0
+        assert fisher_g_pvalue(1.0, 1) == 1.0
+        assert fisher_g_pvalue(0.02, 200) == 1.0  # p1 > 1.0 -> p ~ 1 (not significant)
 
 
 class TestSeedMetaStridePersistence:

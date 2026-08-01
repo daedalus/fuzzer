@@ -17,12 +17,16 @@ non-redundant half is all that is ever computed):
    lags 16, 24, ...).
 
 2. ``detect_periodicity``: spectral analysis of a real-valued time series.
-   A plain rfft magnitude spectrum (DC excluded) answers "is there a
+   A plain rfft power spectrum (DC excluded) answers "is there a
    dominant non-DC frequency, and what period does it correspond to?" —
    e.g. attributing a periodic overhead in per-execution timings or a
    periodic component in the coverage discovery-rate series to a specific
    cadence, something Allan-variance (noise-type) and dispersion-index
-   (burstiness) diagnostics are not designed to catch.
+   (burstiness) diagnostics are not designed to catch. Significance is
+   gated by Fisher's g-test: the largest periodogram ordinate divided by
+   the total power is scored against its exact closed-form null
+   distribution, so noise is rejected at the nominal alpha rate rather
+   than by a hand-tuned ratio against the median.
 
 No scipy is used anywhere in this project; the windowing (Hanning) and all
 FFT math stay within numpy.
@@ -121,25 +125,83 @@ class SpectralPeriodicity:
     """Result of a spectral scan over a real-valued time series."""
 
     dominant_period: float | None  # series samples per cycle; None if not significant
-    peak_strength: float  # peak bin magnitude / median of non-DC bins
+    peak_strength: float  # Fisher g statistic: peak non-DC ordinate / total non-DC power
     peak_bin: int  # index of the dominant non-DC frequency bin (0 if none)
     period_seconds: float | None  # dominant_period * sample_interval
     n_samples: int
     significant: bool
+    p_value: float = 1.0  # exact upper-tail P(G > g) under the white-noise null
+
+
+def fisher_g_pvalue(g: float, m: int, alpha: float = 0.05) -> float:
+    """Exact upper-tail P(G > g) for Fisher's g over ``m`` iid exponential ordinates.
+
+    For Gaussian white noise the periodogram ordinates of the ``m`` full
+    frequency bins are i.i.d. exponential, so the g statistic (largest
+    ordinate / total power) has the closed-form survival function
+
+    ``P(G > g) = sum_{k=1}^{floor(1/g)} (-1)^(k-1) * C(m, k) * (1 - k*g)^(m-1)``.
+
+    Terms are computed in log space (lgamma for the binomial coefficient,
+    log1p for the power) so large ``m`` cannot overflow; when the first
+    term is below ``alpha`` it is returned directly (an upper bound on the
+    true p-value, so the ``p < alpha`` decision is exact), and when terms
+    start growing the true p-value is ~1 and 1.0 is returned to avoid
+    catastrophic cancellation.
+
+    Args:
+        g: Observed g statistic, in ``(0, 1]``.
+        m: Number of independent ordinates (full non-DC, non-Nyquist bins).
+        alpha: Significance level; only used for the early-return bounds.
+
+    Returns:
+        The exact (or conservatively bounded) p-value in ``[0, 1]``.
+    """
+    if m <= 0 or not 0.0 < g <= 1.0:
+        return 1.0
+    if g >= 1.0:
+        # All spectral power in a single bin (float64 rounding of a clean
+        # integer-period signal); p = 0 unless m == 1, where the formula
+        # gives P(G > 1) = 0^0 = 1 by convention.
+        return 0.0 if m > 1 else 1.0
+    p1 = m * (1 - g) ** (m - 1)
+    if p1 < alpha:
+        return p1
+    if p1 > 1.0:
+        return 1.0
+    s = 0.0
+    for k in range(1, min(m, math.floor(1.0 / g)) + 1):
+        if k * g >= 1.0:
+            term = 0.0
+        else:
+            log_c = math.lgamma(m + 1) - math.lgamma(k + 1) - math.lgamma(m - k + 1)
+            log_t = log_c + (m - 1) * math.log1p(-k * g)
+            term = math.exp(log_t) if log_t > -745.0 else 0.0
+        s += term if k % 2 == 1 else -term
+        if k >= 2 and abs(term) > 1.0:
+            return 1.0
+    return s
 
 
 def detect_periodicity(
     series: Sequence[float],
     sample_interval: float = 1.0,
     min_samples: int = 64,
-    peak_to_median: float = 2.0,
+    alpha: float = 0.05,
 ) -> SpectralPeriodicity:
     """Detect a dominant non-DC periodic component in a real-valued series.
 
-    Takes the rfft magnitude spectrum of the mean-subtracted series and
-    searches for the strongest non-DC bin, scoring it against the median of
-    the remaining bins. The DC (mean) bin is excluded by construction —
-    the question is purely "is there an oscillation at a specific frequency".
+    Takes the rfft power spectrum of the mean-subtracted series and
+    searches for the strongest non-DC bin, scoring it with Fisher's g-test
+    for hidden periodicity: the ratio of the largest periodogram ordinate
+    to the total power, compared against its exact closed-form null
+    distribution. The DC (mean) bin is excluded by construction — the
+    question is purely "is there an oscillation at a specific frequency".
+    The Nyquist bin (n even) is excluded from the peak search because its
+    ordinate has one degree of freedom, not two — a period-2 alternation
+    is therefore not detectable. The ``peak_bin >= 2`` gate rejects a
+    "peak" at the lowest non-DC bin, which is indistinguishable from
+    linear drift.
 
     Args:
         series: Uniformly-sampled observations (per-execution timings,
@@ -147,8 +209,8 @@ def detect_periodicity(
         sample_interval: Seconds between samples, used only to derive
             ``period_seconds``. Defaults to 1.0 (period reported in samples).
         min_samples: Shorter series are reported as not significant.
-        peak_to_median: The dominant bin must exceed the median of the
-            non-DC bins by at least this factor to be significant.
+        alpha: Significance level for the Fisher g-test. With alpha=0.05,
+            pure white noise is flagged at the nominal ~5% rate by design.
 
     Returns:
         A :class:`SpectralPeriodicity` with ``significant`` False for
@@ -159,19 +221,20 @@ def detect_periodicity(
         return SpectralPeriodicity(None, 0.0, 0, None, n, False)
     x = np.asarray(series, dtype=np.float64)
     x = x - x.mean()
-    mag = np.abs(np.fft.rfft(x))
-    bins = mag[1:]
-    if bins.size == 0:
+    power = np.abs(np.fft.rfft(x)) ** 2
+    full = power[1 : (n + 1) // 2]
+    if full.size == 0:
         return SpectralPeriodicity(None, 0.0, 0, None, n, False)
-    peak_bin = int(np.argmax(bins)) + 1
-    peak_mag = float(bins[peak_bin - 1])
-    if peak_mag <= 0.0:
+    peak_bin = int(np.argmax(full)) + 1
+    peak_ord = float(full[peak_bin - 1])
+    if peak_ord <= 0.0:
         return SpectralPeriodicity(None, 0.0, peak_bin, None, n, False)
-    median_mag = float(np.median(bins))
-    peak_strength = peak_mag / median_mag if median_mag > 0.0 else math.inf
-    significant = peak_bin >= 2 and peak_strength >= peak_to_median
+    total_ord = float(power[1:].sum())
+    g = peak_ord / total_ord
+    p_value = fisher_g_pvalue(g, full.size, alpha)
+    significant = p_value < alpha and peak_bin >= 2
     dominant_period = n / peak_bin if significant else None
     period_seconds = dominant_period * sample_interval if dominant_period is not None else None
     return SpectralPeriodicity(
-        dominant_period, peak_strength, peak_bin, period_seconds, n, significant
+        dominant_period, g, peak_bin, period_seconds, n, significant, p_value
     )
