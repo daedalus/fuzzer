@@ -118,8 +118,9 @@ def parse_gif(data: bytes) -> list[GifNode] | None:
     while pos < len(data):
         b = data[pos]
         if b == 0x2C:
-            # Image descriptor: 0x2C + 9 descriptor bytes + min code size
-            if pos + 10 > len(data):
+            # Image descriptor: 0x2C + 9 descriptor bytes + min code size.
+            # data[pos+10] (min code size) requires pos+11 <= len(data).
+            if pos + 11 > len(data):
                 nodes.append(GifNode("raw", data[pos:]))
                 break
             desc = data[pos + 1 : pos + 10]

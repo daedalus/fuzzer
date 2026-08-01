@@ -84,6 +84,19 @@ class TestGifMutations:
         for data in (b"", b"G", b"GIF89a", b"GIF89a" + b"\x00" * 12):
             mut.mutate(data, max_len=4096, rng=_rng())
 
+    def test_regression_truncated_image_descriptor_indexerror(self):
+        """An image marker with only 9 of the 10 trailing bytes must be
+        stashed as raw, not raise IndexError on the min-code-size read."""
+        from fuzzer_tool.core.mutations.gif import parse_gif
+
+        # GIF89a(6) + LSD(7, no GCT) + 0x2C marker + 9 descriptor bytes:
+        # pos+10 == len(data), so data[pos+10] used to go out of range.
+        data = b"GIF89a" + b"\x00" * 7 + b"\x2c" + b"\x00" * 9
+        nodes = parse_gif(data)
+        assert nodes is not None
+        assert nodes[-1].kind == "raw"
+        assert b"".join(n.raw for n in nodes) == data
+
     def test_mutate_respects_max_len(self):
         from fuzzer_tool.core.mutations.gif import GifMutator
 
