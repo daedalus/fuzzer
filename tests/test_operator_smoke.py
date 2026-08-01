@@ -84,10 +84,18 @@ class TestOperatorDispatchSmoke:
             "png_chunk_mutate": "fuzzer_tool.core.mutations.png",
             "jpeg_chunk_mutate": "fuzzer_tool.core.mutations.jpeg",
             "gzip_chunk_mutate": "fuzzer_tool.core.mutations.gzip",
+            "zlib_chunk_mutate": "fuzzer_tool.core.mutations.zlib",
             "bmp_chunk_mutate": "fuzzer_tool.core.mutations.bmp",
             "pgs_chunk_mutate": "fuzzer_tool.core.mutations.pgs",
             "isobmff_chunk_mutate": "fuzzer_tool.core.mutations.isobmff",
             "nal_chunk_mutate": "fuzzer_tool.core.mutations.nal",
+            "protobuf_chunk_mutate": "fuzzer_tool.core.mutations.protobuf",
+            "gif_chunk_mutate": "fuzzer_tool.core.mutations.gif",
+            "webp_chunk_mutate": "fuzzer_tool.core.mutations.webp",
+            "webm_chunk_mutate": "fuzzer_tool.core.mutations.webm",
+            "zip_chunk_mutate": "fuzzer_tool.core.mutations.zip",
+            "x86_chunk_mutate": "fuzzer_tool.core.mutations.x86",
+            "arm_chunk_mutate": "fuzzer_tool.core.mutations.arm",
             "format_lock": "fuzzer_tool.core.magic_lock",
         }
         import importlib

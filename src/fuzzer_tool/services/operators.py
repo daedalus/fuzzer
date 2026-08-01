@@ -1299,6 +1299,92 @@ class OperatorEngine:
             )
         return bytearray(mutated[: self.f.max_len])
 
+    def _op_protobuf_chunk_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.protobuf import ProtobufMutator, parse_protobuf
+
+        if not hasattr(self.f, "_protobuf_mutator"):
+            self.f._protobuf_mutator = ProtobufMutator()
+        rng = self.f._rand_pool
+        if parse_protobuf(bytes(buf)):
+            mutated = self.f._protobuf_mutator.mutate(bytes(buf), max_len=self.f.max_len, rng=rng)
+        else:
+            mutated = self.f._protobuf_mutator._generate_random_protobuf(
+                max_len=self.f.max_len, rng=rng
+            )
+        return bytearray(mutated[: self.f.max_len])
+
+    def _op_gif_chunk_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.gif import GifMutator, parse_gif
+
+        if not hasattr(self.f, "_gif_mutator"):
+            self.f._gif_mutator = GifMutator()
+        rng = self.f._rand_pool
+        if parse_gif(bytes(buf)):
+            mutated = self.f._gif_mutator.mutate(bytes(buf), max_len=self.f.max_len, rng=rng)
+        else:
+            mutated = self.f._gif_mutator._generate_random_gif(max_len=self.f.max_len, rng=rng)
+        return bytearray(mutated[: self.f.max_len])
+
+    def _op_webp_chunk_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.webp import WebpMutator, parse_webp
+
+        if not hasattr(self.f, "_webp_mutator"):
+            self.f._webp_mutator = WebpMutator()
+        rng = self.f._rand_pool
+        if parse_webp(bytes(buf)):
+            mutated = self.f._webp_mutator.mutate(bytes(buf), max_len=self.f.max_len, rng=rng)
+        else:
+            mutated = self.f._webp_mutator._generate_random_webp(max_len=self.f.max_len, rng=rng)
+        return bytearray(mutated[: self.f.max_len])
+
+    def _op_webm_chunk_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.webm import WebmMutator, parse_webm
+
+        if not hasattr(self.f, "_webm_mutator"):
+            self.f._webm_mutator = WebmMutator()
+        rng = self.f._rand_pool
+        if parse_webm(bytes(buf)):
+            mutated = self.f._webm_mutator.mutate(bytes(buf), max_len=self.f.max_len, rng=rng)
+        else:
+            mutated = self.f._webm_mutator._generate_random_webm(max_len=self.f.max_len, rng=rng)
+        return bytearray(mutated[: self.f.max_len])
+
+    def _op_zip_chunk_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.zip import ZipMutator, parse_zip
+
+        if not hasattr(self.f, "_zip_mutator"):
+            self.f._zip_mutator = ZipMutator()
+        rng = self.f._rand_pool
+        if parse_zip(bytes(buf)):
+            mutated = self.f._zip_mutator.mutate(bytes(buf), max_len=self.f.max_len, rng=rng)
+        else:
+            mutated = self.f._zip_mutator._generate_random_zip(max_len=self.f.max_len, rng=rng)
+        return bytearray(mutated[: self.f.max_len])
+
+    def _op_x86_chunk_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.x86 import X86Mutator, _decode_insns
+
+        if not hasattr(self.f, "_x86_mutator"):
+            self.f._x86_mutator = X86Mutator()
+        rng = self.f._rand_pool
+        if _decode_insns(bytes(buf)):
+            mutated = self.f._x86_mutator.mutate(bytes(buf), max_len=self.f.max_len, rng=rng)
+        else:
+            mutated = self.f._x86_mutator._generate_random_x86(max_len=self.f.max_len, rng=rng)
+        return bytearray(mutated[: self.f.max_len])
+
+    def _op_arm_chunk_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.arm import ArmMutator, parse_arm
+
+        if not hasattr(self.f, "_arm_mutator"):
+            self.f._arm_mutator = ArmMutator()
+        rng = self.f._rand_pool
+        if parse_arm(bytes(buf)):
+            mutated = self.f._arm_mutator.mutate(bytes(buf), max_len=self.f.max_len, rng=rng)
+        else:
+            mutated = self.f._arm_mutator._generate_random_arm(max_len=self.f.max_len, rng=rng)
+        return bytearray(mutated[: self.f.max_len])
+
     def _op_png_crc_fix(self, buf, _byte_idx, _data):
         rng = self.f._rand_pool
         from fuzzer_tool.core.mutations.png import parse_png_chunks, serialize_png_chunks
@@ -1447,6 +1533,13 @@ class OperatorEngine:
             "pgs_chunk_mutate": self._op_pgs_chunk_mutate,
             "isobmff_chunk_mutate": self._op_isobmff_chunk_mutate,
             "nal_chunk_mutate": self._op_nal_chunk_mutate,
+            "protobuf_chunk_mutate": self._op_protobuf_chunk_mutate,
+            "gif_chunk_mutate": self._op_gif_chunk_mutate,
+            "webp_chunk_mutate": self._op_webp_chunk_mutate,
+            "webm_chunk_mutate": self._op_webm_chunk_mutate,
+            "zip_chunk_mutate": self._op_zip_chunk_mutate,
+            "x86_chunk_mutate": self._op_x86_chunk_mutate,
+            "arm_chunk_mutate": self._op_arm_chunk_mutate,
             "redqueen": self._op_redqueen,
             "havoc": self._op_havoc,
         }

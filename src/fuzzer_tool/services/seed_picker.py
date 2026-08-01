@@ -294,6 +294,22 @@ class SeedPicker:
             )
         elif fmt == "gif":
             return b"GIF89a" + struct.pack("<HH", 1, 1) + b"\xf7\x00\x00"
+        elif fmt == "webp":
+            from fuzzer_tool.core.mutations.webp import WebpMutator
+
+            return WebpMutator()._generate_random_webp(max_len=256)
+        elif fmt == "webm":
+            from fuzzer_tool.core.mutations.webm import WebmMutator
+
+            return WebmMutator()._generate_random_webm(max_len=256)
+        elif fmt == "zip":
+            from fuzzer_tool.core.mutations.zip import ZipMutator
+
+            return ZipMutator()._generate_random_zip(max_len=256)
+        elif fmt == "protobuf":
+            from fuzzer_tool.core.mutations.protobuf import ProtobufMutator
+
+            return ProtobufMutator()._generate_random_protobuf(max_len=256)
         elif fmt == "bmp":
             return (
                 b"BM"

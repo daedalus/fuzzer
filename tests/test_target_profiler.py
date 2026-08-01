@@ -243,3 +243,42 @@ class TestFormatOperatorPriors:
             assert beta > 0
             assert math.isfinite(alpha)
             assert math.isfinite(beta)
+
+
+class TestSymbolFormatDetection:
+    """Symbol-ladder detection for gif/webp/webm/zip/protobuf targets."""
+
+    def _infer(self, func_names):
+        profiler = TargetProfiler("/nonexistent")
+        profiler._elf = b"\x7fELF"  # non-None so _infer_format proceeds
+        p = TargetProfile()
+        p.functions = {name: FunctionInfo(addr=0x1000, size=0x10, name=name) for name in func_names}
+        profiler._infer_format(p)
+        return p.format_signature
+
+    def test_gif_symbols(self):
+        assert self._infer(["DGifOpenFileName"]) == "gif"
+
+    def test_webp_symbols(self):
+        assert self._infer(["WebPGetInfo"]) == "webp"
+
+    def test_webm_symbols(self):
+        assert self._infer(["mkvparser::Segment::ParseStream"]) == "webm"
+
+    def test_zip_symbols(self):
+        assert self._infer(["unzOpen"]) == "zip"
+
+    def test_protobuf_symbol(self):
+        assert self._infer(["ParseFromArray"]) == "protobuf"
+
+    def test_protobuf_rodata_string(self):
+        # Fallback: rodata containing "protobuf" also tags the format
+        profiler = TargetProfiler("/nonexistent")
+        profiler._elf = b"\x7fELF"
+        p = TargetProfile()
+        p.rodata_strings = [(0x1000, "protobuf wire type mismatch")]
+        profiler._infer_format(p)
+        assert p.format_signature == "protobuf"
+
+    def test_unknown_symbols_stay_unknown(self):
+        assert self._infer(["frobnicate", "main"]) in (None, "text", "unknown")

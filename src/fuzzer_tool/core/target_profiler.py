@@ -27,6 +27,7 @@ MAGIC_SIGNATURES: list[tuple[bytes, str]] = [
     (b"\x1f\x8b", "gzip"),
     (b"GIF87a", "gif"),
     (b"GIF89a", "gif"),
+    (b"\x1aE\xdf\xa3", "webm"),
     (b"\xff\xd8\xff", "jpeg"),
     (b"RIFF", "riff"),
     (b"\x00\x00\x01\x00", "ico"),
@@ -756,6 +757,28 @@ class TargetProfiler:
             profile.format_signature = "archive"
             return
 
+        # Format-specific symbol detection (gif/webp/webm/zip/protobuf).
+        # Substring match: real parser symbols carry suffixes (DGifOpenFileName).
+        gif_tokens = ("dgifopen", "egifopen", "dgifslurp", "egifput")
+        if any(tok in name for name in func_names_lower for tok in gif_tokens):
+            profile.format_signature = "gif"
+            return
+        webp_tokens = ("webpgetinfo", "webpdecode", "webpencode")
+        if any(tok in name for name in func_names_lower for tok in webp_tokens):
+            profile.format_signature = "webp"
+            return
+        webm_tokens = ("mkvparser", "mkvdemux", "webmcreate", "webminfo")
+        if any(tok in name for name in func_names_lower for tok in webm_tokens):
+            profile.format_signature = "webm"
+            return
+        zip_tokens = ("unzopen", "unzopencurrentfile", "zipopen", "mz_zip_reader")
+        if any(tok in name for name in func_names_lower for tok in zip_tokens):
+            profile.format_signature = "zip"
+            return
+        if "parsefromarray" in func_names_lower:
+            profile.format_signature = "protobuf"
+            return
+
         # Heuristic: check string constants for format indicators
         all_strings = " ".join(s for _, s in profile.rodata_strings[:200]).lower()
         if "png" in all_strings and ("chunk" in all_strings or "ihdr" in all_strings):
@@ -766,6 +789,9 @@ class TargetProfiler:
             return
         if "json" in all_strings:
             profile.format_signature = "json"
+            return
+        if "protobuf" in all_strings or "wire_type" in all_strings:
+            profile.format_signature = "protobuf"
             return
 
         # Heuristic: check for magic bytes
@@ -982,7 +1008,13 @@ _FORMAT_OPERATOR_HINTS: dict[str, tuple[str, ...]] = {
     "bz2": ("gzip_chunk_mutate",),
     "xz": ("gzip_chunk_mutate",),
     "zlib": ("zlib_chunk_mutate",),
-    "riff": ("bmp_chunk_mutate",),
+    "riff": ("bmp_chunk_mutate", "webp_chunk_mutate"),
+    "webm": ("webm_chunk_mutate",),
+    "zip": ("zip_chunk_mutate",),
+    "gif": ("gif_chunk_mutate",),
+    "protobuf": ("protobuf_chunk_mutate",),
+    "x86": ("x86_chunk_mutate",),
+    "arm": ("arm_chunk_mutate",),
 }
 
 # Dictionary/token-aware mutation operators (see core.mutations.DICT_MUTATIONS).

@@ -628,6 +628,13 @@ FORMAT_MUTATIONS = [
     "pgs_chunk_mutate",
     "isobmff_chunk_mutate",
     "nal_chunk_mutate",
+    "protobuf_chunk_mutate",
+    "gif_chunk_mutate",
+    "webp_chunk_mutate",
+    "webm_chunk_mutate",
+    "zip_chunk_mutate",
+    "x86_chunk_mutate",
+    "arm_chunk_mutate",
 ]
 
 
