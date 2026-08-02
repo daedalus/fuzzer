@@ -259,28 +259,27 @@ class EloTracker:
                 for w in winners:
                     w_edges = edge_counts.get(w, 0)
                     score = w_edges / max_edges  # proportional
-                    for l in losers:
-                        self.record_match(w, l, score_a=score, crash=crash)
+                    for loser in losers:
+                        self.record_match(w, loser, score_a=score, crash=crash)
             else:
                 for w in winners:
-                    for l in losers:
-                        self.record_match(w, l, score_a=1.0, crash=crash)
+                    for loser in losers:
+                        self.record_match(w, loser, score_a=1.0, crash=crash)
 
-        elif len(operators) >= 2:
+        elif len(operators) >= 2 and hasattr(self, "_prev_operators") and self._prev_operators:
             # All winners or all losers — cross-iteration comparison
-            if hasattr(self, "_prev_operators") and self._prev_operators:
-                prev_ops = self._prev_operators
-                if winners:
-                    # Current round found coverage — blend with previous
-                    blend = 0.7
-                    for w in operators:
-                        for p in prev_ops:
-                            self.record_match(w, p, score_a=blend, crash=crash)
-                else:
-                    # Current round didn't find coverage
-                    for w in prev_ops:
-                        for p in operators:
-                            self.record_match(w, p, score_a=0.7, crash=crash)
+            prev_ops = self._prev_operators
+            if winners:
+                # Current round found coverage — blend with previous
+                blend = 0.7
+                for w in operators:
+                    for p in prev_ops:
+                        self.record_match(w, p, score_a=blend, crash=crash)
+            else:
+                # Current round didn't find coverage
+                for w in prev_ops:
+                    for p in operators:
+                        self.record_match(w, p, score_a=0.7, crash=crash)
 
         self._prev_operators = operators
 
@@ -391,7 +390,7 @@ class EloTracker:
     def select_strategy(self, strategies: list[str], temperature: float = 400.0) -> str:
         """Select a strategy weighted by Elo rating.
 
-        Used by the meta-scheduler to pick bandit vs MOpt probabilistically.
+        Used by the meta-scheduler to pick the strategy probabilistically.
 
         Args:
             strategies: Candidate strategy names.
@@ -697,25 +696,24 @@ class BayesianEloTracker:
                 for w in winners:
                     w_edges = edge_counts.get(w, 0)
                     score = w_edges / max_edges
-                    for l in losers:
-                        self.record_match(w, l, score_a=score, crash=crash)
+                    for loser in losers:
+                        self.record_match(w, loser, score_a=score, crash=crash)
             else:
                 for w in winners:
-                    for l in losers:
-                        self.record_match(w, l, score_a=1.0, crash=crash)
+                    for loser in losers:
+                        self.record_match(w, loser, score_a=1.0, crash=crash)
 
-        elif len(operators) >= 2:
-            if hasattr(self, "_prev_operators") and self._prev_operators:
-                prev_ops = self._prev_operators
-                if winners:
-                    blend = 0.7
-                    for w in operators:
-                        for p in prev_ops:
-                            self.record_match(w, p, score_a=blend, crash=crash)
-                else:
-                    for w in prev_ops:
-                        for p in operators:
-                            self.record_match(w, p, score_a=0.7, crash=crash)
+        elif len(operators) >= 2 and hasattr(self, "_prev_operators") and self._prev_operators:
+            prev_ops = self._prev_operators
+            if winners:
+                blend = 0.7
+                for w in operators:
+                    for p in prev_ops:
+                        self.record_match(w, p, score_a=blend, crash=crash)
+            else:
+                for w in prev_ops:
+                    for p in operators:
+                        self.record_match(w, p, score_a=0.7, crash=crash)
 
         self._prev_operators = operators
 

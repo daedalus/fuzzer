@@ -57,6 +57,29 @@ log = logging.getLogger(__name__)
 
 _shutdown = False
 
+# Strategy names pre-registered with the Elo tracker (single source of truth
+# for the pre-registration loop and the meta-scheduler log line).
+_OPERATOR_STRATEGY_NAMES = (
+    "replicator",
+    "bandit",
+    "mopt",
+    "cem",
+    "exp3",
+    "eps_greedy",
+    "hierarchical",
+    "gp_ucb",
+)
+_SEED_STRATEGY_NAMES = (
+    "ga",
+    "qea",
+    "weighted",
+    "pareto",
+    "format",
+    "bayesian",
+    "markov",
+    "boltzmann",
+)
+
 
 def _kill_children(sig=None, frame=None):
     global _shutdown
@@ -988,29 +1011,11 @@ class Fuzzer:
 
             # Pre-register all strategy names so Elo can arbitrate immediately
             # (without this, select_strategy requires min_matches before considering a strategy)
-            for s in (
-                "replicator",
-                "bandit",
-                "mopt",
-                "cem",
-                "exp3",
-                "eps_greedy",
-                "hierarchical",
-                "gp_ucb",
-            ):
+            for s in _OPERATOR_STRATEGY_NAMES:
                 self._elo._strategy_mu.setdefault(s, self._elo.initial_mu)
                 self._elo._strategy_sigma_sq.setdefault(s, self._elo.initial_sigma**2)
                 self._elo._strategy_match_count.setdefault(s, 0)
-            for s in (
-                "ga",
-                "qea",
-                "weighted",
-                "pareto",
-                "format",
-                "bayesian",
-                "markov",
-                "boltzmann",
-            ):
+            for s in _SEED_STRATEGY_NAMES:
                 key = f"seed_{s}"
                 self._elo._strategy_mu.setdefault(key, self._elo.initial_mu)
                 self._elo._strategy_sigma_sq.setdefault(key, self._elo.initial_sigma**2)
@@ -1029,8 +1034,11 @@ class Fuzzer:
         # report, which must show only used schedulers)
         self._meta_strategy_used: set[str] = set()
         if self._use_elo:
-            log.info("Meta-scheduler enabled: Elo arbitrating bandit vs MOpt")
-            self._meta_strategy_choices: list[str] = []
+            log.info(
+                "Meta-scheduler enabled: Elo arbitrating across %d operator and %d seed strategies",
+                len(_OPERATOR_STRATEGY_NAMES),
+                len(_SEED_STRATEGY_NAMES),
+            )
 
         # Secretary-problem optimal stopping
         self._secretary = secretary

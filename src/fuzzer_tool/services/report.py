@@ -1440,18 +1440,35 @@ def _elo_ratings(f) -> str:
                 sign = "+" if delta >= 0 else ""
                 lines.append(f"    {i}. {op:<20s} {rating:>7.0f} ({sign}{delta:.0f})")
 
-    # Meta-scheduler strategy ranking (bandit vs MOpt)
+    # Meta-scheduler strategy ranking — operator (plain keys) and seed
+    # (seed_* keys) strategies are disjoint keyspaces; show them separately
+    # so they don't look like one group.
     if f._use_elo and f._elo:
         strategy_ranking = f._elo.get_strategy_ranking()
         if strategy_ranking:
-            lines.append("")
-            lines.append("  Meta-scheduler (bandit vs MOpt):")
             elo_mu = getattr(f._elo, "initial_mu", getattr(f._elo, "default_rating", 1500))
-            for s, rating in strategy_ranking:
-                delta = rating - elo_mu
-                sign = "+" if delta >= 0 else ""
-                matches = f._elo._strategy_match_count.get(s, 0)
-                lines.append(f"    {s:<12s} {rating:>7.0f} ({sign}{delta:.0f}, {matches} matches)")
+            op_strategies = [p for p in strategy_ranking if not p[0].startswith("seed_")]
+            seed_strategies = [p for p in strategy_ranking if p[0].startswith("seed_")]
+            if op_strategies:
+                lines.append("")
+                lines.append("  Meta-scheduler operator strategies (Elo):")
+                for s, rating in op_strategies:
+                    delta = rating - elo_mu
+                    sign = "+" if delta >= 0 else ""
+                    matches = f._elo._strategy_match_count.get(s, 0)
+                    lines.append(
+                        f"    {s:<12s} {rating:>7.0f} ({sign}{delta:.0f}, {matches} matches)"
+                    )
+            if seed_strategies:
+                lines.append("")
+                lines.append("  Seed strategies (Elo):")
+                for s, rating in seed_strategies:
+                    delta = rating - elo_mu
+                    sign = "+" if delta >= 0 else ""
+                    matches = f._elo._strategy_match_count.get(s, 0)
+                    lines.append(
+                        f"    {s:<12s} {rating:>7.0f} ({sign}{delta:.0f}, {matches} matches)"
+                    )
 
     # Compare with bandit if available
     if f.mc and f.mc_bandit and f.mc.arm_alpha:

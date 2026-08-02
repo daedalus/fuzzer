@@ -209,3 +209,65 @@ class TestAflgoEloStrategy:
         picked = sp._pick_seed_elo()
         assert picked in f.corpus
         assert sp.f._seed_strategy == "aflgo"
+
+
+class TestSeedEloKeyMismatch:
+    """Regression: seed strategies are rated under seed_<name> keys, but
+    _pick_seed_elo used to select with plain names — so select_strategy
+    never found rated strategies and always returned available[0] (inert
+    seed arbitration; the uniform-1590 convergence artifact)."""
+
+    def _make_seed_elo_fuzzer(self):
+        f = TestAflgoEloStrategy._make_fuzzer_mock(self, corpus_size=2)
+        f._use_elo = True
+        f._rand_pool = random  # _pick_pareto_only falls back to pool.choice
+        f.ga = f.qea = None
+        f._use_bayesian = False
+        f.markov_generate = False
+        f.markov_trained = False
+        f._use_boltzmann = False
+        f._profile = type("o", (object,), {"format_signature": None})()
+        # Both available strategies need seed_meta populated (pareto gate).
+        for seed in f.corpus:
+            f.seed_meta[seed] = {"fuzz_count": 1}
+        return f
+
+    def test_regression_seed_elo_selects_prefixed_keys(self):
+        """_pick_seed_elo must ask Elo for seed_<name>-prefixed keys (the
+        keyspace elo.json actually rates) and strip the prefix downstream."""
+        captured = {}
+
+        class _FakeElo:
+            def select_strategy(self, strategies, temperature=None):
+                captured["strategies"] = list(strategies)
+                return "seed_pareto"
+
+        f = self._make_seed_elo_fuzzer()
+        f._elo = _FakeElo()
+
+        sp = SeedPicker(type("o", (object,), {"__init__": lambda s: None})())
+        sp.f = f
+        sp._pick_seed_elo()
+        assert captured["strategies"], "select_strategy was not called"
+        assert all(s.startswith("seed_") for s in captured["strategies"])
+        assert f._seed_strategy == "pareto"
+
+    def test_regression_seed_elo_rated_strategy_wins(self):
+        """A seed strategy with a real match history must win Thompson
+        sampling over an unrated one (real BayesianEloTracker); plain keys
+        with no recorded matches still hit the strategies[0] fallback,
+        documenting the pre-fix inert behavior."""
+        from fuzzer_tool.core.elo import BayesianEloTracker
+
+        elo = BayesianEloTracker(min_matches=1)
+        for _ in range(500):
+            elo.record_strategy_match("seed_a", "seed_b", 1.0)  # seed_a always wins
+
+        # Dominance must survive Thompson noise: seed_a wins the large
+        # majority of trials (measured win rate ≈ 1.0 at 500 matches).
+        seed_a_wins = sum(
+            1 for _ in range(20) if elo.select_strategy(["seed_a", "seed_b"]) == "seed_a"
+        )
+        assert seed_a_wins >= 18, f"rated seed_a won only {seed_a_wins}/20 trials"
+        # Plain keys have no recorded matches → min_matches gate → [0].
+        assert elo.select_strategy(["a", "b"]) == "a"

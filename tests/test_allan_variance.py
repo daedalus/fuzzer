@@ -11,6 +11,7 @@ from fuzzer_tool.core.allan_variance import (
     chi2_cdf,
     chi2_sf,
 )
+from fuzzer_tool.core.chi_squared import chi_squared_pvalue
 
 
 def _white_noise(n: int, scale: float = 1.0, seed: int = 42) -> list[float]:
@@ -114,7 +115,8 @@ class TestAllanVarianceDetector:
         assert d.n_samples == 0
 
     def test_save_load_roundtrip(self):
-        """save() → load() preserves state."""
+        """save() → load() preserves state, including the dispersion index
+        reconstructed from the restored buffer."""
         d1 = AllanVarianceDetector(max_buffer_pow=6, min_samples=4)
         for v in _white_noise(32, scale=2.0):
             d1.update(v)
@@ -124,6 +126,8 @@ class TestAllanVarianceDetector:
         d2.load(saved)
         assert d2.n_samples == d1.n_samples
         assert d2.noise_type() == d1.noise_type()
+        assert d2.dispersion() == pytest.approx(d1.dispersion(), abs=1e-12)
+        assert d2.dispersion_pvalue() == pytest.approx(d1.dispersion_pvalue(), abs=1e-12)
 
     def test_update_buffer_wraps(self):
         """Buffer correctly evicts oldest when full."""
@@ -284,6 +288,19 @@ class TestChi2Distribution:
         with pytest.raises(ValueError):
             chi2_sf(1.0, 0)
 
+    def test_regression_chi2_sf_matches_canonical_chi_squared_pvalue(self):
+        """chi2_sf must delegate to chi_squared_pvalue (canonical home of
+        the survival function) — regression guard for the dedup that moved
+        the implementation out of this module."""
+        for k in (1, 2, 10, 100):
+            for i in range(0, 101):
+                x = 5 * k * i / 100
+                assert chi2_sf(x, k) == pytest.approx(chi_squared_pvalue(x, k), abs=1e-12), (
+                    f"mismatch at x={x}, k={k}"
+                )
+        with pytest.raises(ValueError):
+            chi2_sf(1.0, 0)
+
 
 class TestDispersionSignificance:
     """Chi-squared Poisson dispersion test: the core behavior this
@@ -334,9 +351,10 @@ class TestDispersionSignificance:
         assert di.is_overdispersed() is False
 
     def test_allan_variance_detector_matches_dispersion_index(self):
-        """AllanVarianceDetector's own significance methods (computed
-        directly from its buffer) should agree with DispersionIndex given
-        the same data, since both implement the same test."""
+        """AllanVarianceDetector's significance methods delegate to
+        DispersionIndex — keep as a behavioral guard that the delegation
+        stays in sync (it is now the same code path, not two independent
+        implementations)."""
         rng = random.Random(7)
         values = [5.0 if rng.random() < 0.15 else 1.0 for _ in range(250)]
 

@@ -5,6 +5,9 @@ regularized incomplete gamma function (the χ² CDF), matching the project's
 approach of self-contained statistical implementations (see ``edge_tracker.py``
 for the equivalent KS test pattern).
 
+This module is the canonical home of the chi-squared survival function
+(:func:`chi_squared_pvalue`); :func:`allan_variance.chi2_sf` delegates here.
+
 Reference
 ---------
 Abramowitz & Stegun, "Handbook of Mathematical Functions", §6.5.
@@ -84,7 +87,7 @@ def _igamma_series(a: float, x: float) -> float:
     log_g = _lgamma(a)
     term = 1.0 / a  # n = 0 term: x^0 / a
     s = term
-    for n in range(1, 200):
+    for n in range(1, 500):
         term *= x / (a + n)
         s += term
         if abs(term) < 1e-15 * abs(s):
@@ -124,7 +127,7 @@ def _igamma_cf(a: float, x: float) -> float:
     C = f
     D = 0.0
 
-    for i in range(1, 200):
+    for i in range(1, 500):
         if i == 1:
             a_i = 1.0
             b_i = x if x != 0.0 else tiny
@@ -148,7 +151,7 @@ def _igamma_cf(a: float, x: float) -> float:
         D = 1.0 / D
         delta = C * D
         f *= delta
-        if abs(delta - 1.0) < 1e-14:
+        if abs(delta - 1.0) < 1e-15:
             break
 
     return factor * f

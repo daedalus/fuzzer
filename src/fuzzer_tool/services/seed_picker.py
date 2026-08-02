@@ -30,7 +30,12 @@ class SeedPicker:
         self.f = fuzzer
 
     def _pick_seed_elo(self) -> bytes | None:
-        """Pick seed via Elo-arbitrated strategy selection. Returns None if fallback needed."""
+        """Pick seed via Elo-arbitrated strategy selection. Returns None if fallback needed.
+
+        Seed strategies are rated under ``seed_<name>`` keys (pre-registered
+        in fuzzer.py, persisted in elo.json); selection must pass the
+        prefixed keys, then strip the prefix for downstream use.
+        """
         f = self.f
         if not f._use_elo or not f._elo:
             return None
@@ -56,7 +61,14 @@ class SeedPicker:
 
         if not available:
             return None
-        strategy = f._elo.select_strategy(available) if len(available) >= 2 else available[0]
+        # Select with the seed_<name>-prefixed keys (the keyspace elo.json
+        # rates); strip the prefix so _seed_strategy/_seed_strategy_pool/
+        # strategy_map/the convergence report stay plain-consistent.
+        if len(available) >= 2:
+            selected = f._elo.select_strategy([f"seed_{s}" for s in available])
+            strategy = selected[5:] if selected.startswith("seed_") else selected
+        else:
+            strategy = available[0]
         f._seed_strategy = strategy
         f._seed_strategies_used.add(strategy)
 

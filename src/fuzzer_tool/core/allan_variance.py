@@ -38,6 +38,7 @@ from __future__ import annotations
 import collections
 import math
 
+from fuzzer_tool.core.chi_squared import chi_squared_pvalue
 from fuzzer_tool.core.running_stats import RunningMoments
 
 # Allan deviation thresholds (empirically derived from edge-discovery rate signals)
@@ -54,60 +55,11 @@ _DISPERSION_ALPHA = 0.05
 # dependency; see core/running_stats.py and the scipy-removal fix in
 # edge_tracker.py for the same rationale).
 #
-# Implementation follows the standard Numerical-Recipes-style split:
-# series expansion for x < a+1, continued fraction for x >= a+1, both
-# built on the regularized incomplete gamma function. Verified against
-# reference chi-squared critical values in tests/test_allan_variance.py.
+# The survival function is canonical in core/chi_squared.py;
+# chi2_sf delegates there, keeping only the k<=0 ValueError contract.
+# Verified against reference chi-squared critical values in
+# tests/test_allan_variance.py.
 # ---------------------------------------------------------------------------
-
-
-def _gammainc_lower_series(a: float, x: float) -> float:
-    """Regularized lower incomplete gamma P(a, x) via series expansion.
-
-    Valid (fast-converging) for x < a + 1.
-    """
-    if x <= 0.0:
-        return 0.0
-    gln = math.lgamma(a)
-    ap = a
-    total = 1.0 / a
-    delta = total
-    for _ in range(500):
-        ap += 1.0
-        delta *= x / ap
-        total += delta
-        if abs(delta) < abs(total) * 1e-15:
-            break
-    return total * math.exp(-x + a * math.log(x) - gln)
-
-
-def _gammainc_upper_cf(a: float, x: float) -> float:
-    """Regularized upper incomplete gamma Q(a, x) via continued fraction.
-
-    Valid (fast-converging) for x >= a + 1. Uses the modified Lentz
-    algorithm for numerical stability.
-    """
-    gln = math.lgamma(a)
-    tiny = 1e-300
-    b = x + 1.0 - a
-    c = 1.0 / tiny
-    d = 1.0 / b
-    h = d
-    for i in range(1, 500):
-        an = -i * (i - a)
-        b += 2.0
-        d = an * d + b
-        if abs(d) < tiny:
-            d = tiny
-        c = b + an / c
-        if abs(c) < tiny:
-            c = tiny
-        d = 1.0 / d
-        delta = d * c
-        h *= delta
-        if abs(delta - 1.0) < 1e-15:
-            break
-    return math.exp(-x + a * math.log(x) - gln) * h
 
 
 def chi2_sf(x: float, k: int) -> float:
@@ -116,16 +68,13 @@ def chi2_sf(x: float, k: int) -> float:
     ``x``: test statistic. ``k``: degrees of freedom (must be > 0).
     Returns the probability of observing a value >= x under the
     chi-squared(k) distribution — i.e. the one-sided upper-tail p-value.
+
+    Delegates to :func:`fuzzer_tool.core.chi_squared.chi_squared_pvalue`,
+    the canonical implementation.
     """
     if k <= 0:
         raise ValueError("degrees of freedom must be positive")
-    if x <= 0.0:
-        return 1.0
-    a = k / 2.0
-    xh = x / 2.0
-    if xh < a + 1.0:
-        return 1.0 - _gammainc_lower_series(a, xh)
-    return _gammainc_upper_cf(a, xh)
+    return chi_squared_pvalue(x, k)
 
 
 def chi2_cdf(x: float, k: int) -> float:
@@ -149,12 +98,16 @@ class AllanVarianceDetector:
         self._maxlen = 2**max_buffer_pow
         self._min_samples = min_samples
         self._buf: collections.deque[float] = collections.deque(maxlen=self._maxlen)
+        # Dispersion index tracks the same sliding window (window=maxlen
+        # keeps its count ≡ len(_buf) = min(total, maxlen)).
+        self._disp = DispersionIndex(window=self._maxlen)
 
     # ── Public API ────────────────────────────────────────────────────
 
     def update(self, value: float) -> None:
         """Record a new observation (incremental edge count)."""
         self._buf.append(value)
+        self._disp.update(value)
 
     def adev(self, tau: int) -> float:
         """Overlapping Allan deviation at averaging time *tau*.
@@ -279,15 +232,7 @@ class AllanVarianceDetector:
 
         Returns None if fewer than 2 observations or mean is effectively zero.
         """
-        n = len(self._buf)
-        if n < 2:
-            return None
-        data = list(self._buf)
-        mean = sum(data) / n
-        if abs(mean) < 1e-12:
-            return None
-        var = sum((x - mean) ** 2 for x in data) / (n - 1)  # sample variance
-        return var / mean
+        return self._disp.value
 
     def dispersion_pvalue(self) -> float | None:
         """One-sided upper-tail p-value of the current D under the Poisson
@@ -299,12 +244,7 @@ class AllanVarianceDetector:
         via :meth:`is_underdispersed` for the opposite tail. Returns None if
         :meth:`dispersion` returns None.
         """
-        n = len(self._buf)
-        d = self.dispersion()
-        if d is None or n < 2:
-            return None
-        t = (n - 1) * d
-        return chi2_sf(t, n - 1)
+        return self._disp.dispersion_pvalue()
 
     def is_overdispersed(self, alpha: float = _DISPERSION_ALPHA) -> bool:
         """True if D is significantly greater than 1 (bursty) at level
@@ -312,20 +252,19 @@ class AllanVarianceDetector:
         there isn't enough data to tell, so this can be used directly in
         boolean stall-detection logic without an extra None-check.
         """
-        p = self.dispersion_pvalue()
-        return p is not None and p < alpha
+        return self._disp.is_overdispersed(alpha)
 
     def is_underdispersed(self, alpha: float = _DISPERSION_ALPHA) -> bool:
         """True if D is significantly less than 1 (near-constant / stalled)
         at level *alpha*, via the chi-squared dispersion test. False (not
         None) if there isn't enough data to tell.
         """
-        p = self.dispersion_pvalue()
-        return p is not None and (1.0 - p) < alpha
+        return self._disp.is_underdispersed(alpha)
 
     def reset(self) -> None:
         """Clear all samples."""
         self._buf.clear()
+        self._disp = DispersionIndex(window=self._maxlen)
 
     def save(self) -> dict:
         """Serialize state for persistence."""
@@ -340,6 +279,11 @@ class AllanVarianceDetector:
         self._maxlen = 2 ** data.get("max_buffer_pow", int(math.log2(self._maxlen)))
         self._min_samples = data.get("min_samples", self._min_samples)
         self._buf = collections.deque(data.get("samples", []), maxlen=self._maxlen)
+        # Rebuild the dispersion index from the restored buffer (mean/var
+        # are order-independent; window=maxlen ⇒ count matches len(_buf)).
+        self._disp = DispersionIndex(window=self._maxlen)
+        for v in self._buf:
+            self._disp.update(v)
 
 
 class DispersionIndex:
