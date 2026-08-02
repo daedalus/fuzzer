@@ -1010,7 +1010,6 @@ _FORMAT_OPERATOR_HINTS: dict[str, tuple[str, ...]] = {
     "gif": ("gif_chunk_mutate",),
     "protobuf": ("protobuf_chunk_mutate",),
     "x86": ("x86_chunk_mutate",),
-    "arm": ("arm_chunk_mutate",),
 }
 
 # Dictionary/token-aware mutation operators (see core.mutations.DICT_MUTATIONS).

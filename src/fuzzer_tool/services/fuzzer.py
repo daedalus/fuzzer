@@ -405,6 +405,8 @@ class Fuzzer:
         multi_targets=None,
         debug=False,
         enable_regex_bomb=False,
+        enable_x86_mutator=False,
+        enable_arm_mutator=False,
         enable_smt_z3=False,
         mod_solving="concolic",
         corpus_boost=0,
@@ -468,6 +470,8 @@ class Fuzzer:
         self.net_keepalive = net_keepalive
         self.net_settle_ms = net_settle_ms
         self.enable_regex_bomb = enable_regex_bomb
+        self.enable_x86_mutator = enable_x86_mutator
+        self.enable_arm_mutator = enable_arm_mutator
         self.seed = seed
         random.seed(seed)
         if _HAS_NUMPY:

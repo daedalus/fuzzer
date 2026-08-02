@@ -464,6 +464,8 @@ def cmd_fuzz(args):
         max_collision_risk=getattr(args, "max_collision_risk", 30),
         debug=getattr(args, "debug", False),
         enable_regex_bomb=getattr(args, "enable_regex_bomb_mutations", False),
+        enable_x86_mutator=getattr(args, "x86_mutate", False),
+        enable_arm_mutator=getattr(args, "arm_mutate", False),
         refresh_profile=getattr(args, "refresh_profile", False),
         corpus_boost=getattr(args, "corpus_boost", 0),
         boost_mean=getattr(args, "boost_mean", None),
@@ -1959,6 +1961,16 @@ def main() -> int:
         "--enable-regex-bomb-mutations",
         action="store_true",
         help="Enable regex backtracking bomb mutations (ReDoS patterns that cause explosive memory usage)",
+    )
+    fuzz_parser.add_argument(
+        "--x86-mutate",
+        action="store_true",
+        help="Enable x86 instruction-stream mutations (decode-and-mutate binary code)",
+    )
+    fuzz_parser.add_argument(
+        "--arm-mutate",
+        action="store_true",
+        help="Enable ARM instruction-stream mutations (decode-and-mutate binary code)",
     )
     fuzz_parser.set_defaults(func=cmd_fuzz)
 

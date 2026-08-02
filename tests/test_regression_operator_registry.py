@@ -62,6 +62,8 @@ class _MockFuzzer:
         self.grammar = None
         self._cmplog = None
         self.enable_regex_bomb = False
+        self.enable_x86_mutator = False
+        self.enable_arm_mutator = False
         self.seed_meta = {}
 
 
@@ -136,7 +138,6 @@ class TestAvailabilityPredicates:
         assert "bit_flip" in avail
         assert "havoc" in avail
         assert "png_chunk_mutate" in avail
-        assert "arm_chunk_mutate" in avail
 
     def test_dict_ops_gated_on_dictionary(self):
         assert not {"dict_insert", "dict_replace", "checksum_repair"} & self._available()
@@ -167,6 +168,14 @@ class TestAvailabilityPredicates:
     def test_regex_bomb_gated_on_flag(self):
         assert "regex_bomb" not in self._available()
         assert "regex_bomb" in self._available(enable_regex_bomb=True)
+
+    def test_x86_mutate_gated_on_flag(self):
+        assert "x86_chunk_mutate" not in self._available()
+        assert "x86_chunk_mutate" in self._available(enable_x86_mutator=True)
+
+    def test_arm_mutate_gated_on_flag(self):
+        assert "arm_chunk_mutate" not in self._available()
+        assert "arm_chunk_mutate" in self._available(enable_arm_mutator=True)
 
     def test_redqueen_gated_on_seed_meta(self):
         assert "redqueen" not in self._available()

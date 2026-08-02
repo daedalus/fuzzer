@@ -178,6 +178,8 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     "redqueen": _redqueen_available,
     # flag-gated base op
     "regex_bomb": lambda f, _d: bool(getattr(f, "enable_regex_bomb", False)),
+    "x86_chunk_mutate": lambda f, _d: bool(getattr(f, "enable_x86_mutator", False)),
+    "arm_chunk_mutate": lambda f, _d: bool(getattr(f, "enable_arm_mutator", False)),
     # dispatch-only, never selectable
     "colorization": _never,
 }
