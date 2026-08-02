@@ -45,6 +45,12 @@ import numpy as np
 DEFAULT_MIN_LEN = 64
 # Upper bound on the searchable period, regardless of buffer size.
 DEFAULT_MAX_LAG = 256
+# Analysis window cap: the lag scan never exceeds DEFAULT_MAX_LAG (256), so a
+# 16-period window over the largest searchable record keeps the FFT cost O(1)
+# for arbitrarily large buffers (a 2.8 MB seed cost ~2.4 s of FFT per call
+# uncapped) while retaining full detection power. Buffers shorter than the
+# cap are analyzed in full — byte-identical to the uncapped path.
+DEFAULT_MAX_WINDOW = 16 * DEFAULT_MAX_LAG
 # Significance constant: the normalized autocorrelation of white noise at a
 # given lag is approximately N(0, 1/n), so a candidate peak must exceed
 # SIGMA_CUTOFF / sqrt(n) — a multiple-comparisons-aware ~4-sigma bound over
@@ -89,6 +95,13 @@ def estimate_record_size(
     Returns:
         The inferred record stride in bytes, or ``None`` when the buffer is
         too short, constant, or has no locally-dominant periodic structure.
+
+    Note:
+        Only the first ``DEFAULT_MAX_WINDOW`` (4096) bytes are analyzed: the
+        lag scan is capped at ``DEFAULT_MAX_LAG`` (256), so the remaining
+        buffer would add FFT cost without adding searchable lags. Buffers of
+        at most 4096 bytes are analyzed in full, byte-identical to the
+        uncapped path.
     """
     if not data or len(data) < min_len:
         return None
@@ -97,11 +110,17 @@ def estimate_record_size(
     if limit < 2:
         return None
 
-    x = np.frombuffer(data, dtype=np.uint8).astype(np.float64)
-    x = (x - x.mean()) * np.hanning(n)
+    # Only the first DEFAULT_MAX_WINDOW bytes are ever analyzed: the lag scan
+    # is capped at DEFAULT_MAX_LAG (>= 16 periods observable in the window),
+    # so the full buffer would only add FFT cost, not searchable lags. The
+    # sigma bound uses the window length too — it calibrates the noise floor
+    # of this specific autocorrelation estimate (ac[k] ~ N(0, 1/w)).
+    w = min(n, DEFAULT_MAX_WINDOW)
+    x = np.frombuffer(data[:w], dtype=np.uint8).astype(np.float64)
+    x = (x - x.mean()) * np.hanning(w)
     power = np.fft.rfft(x)
     power = power * power.conj()
-    ac = np.fft.irfft(power, n=n)
+    ac = np.fft.irfft(power, n=w)
     total = ac[0]
     if total <= 0.0:
         return None
@@ -111,8 +130,8 @@ def estimate_record_size(
     if scanned.size == 0:
         return None
     # Noise-floor gate: a fixed fraction of the lag-0 autocorrelation plus a
-    # multiple-comparisons-aware sigma bound (white-noise ac[k] ~ N(0, 1/n)).
-    threshold = max(min_rel_peak, SIGMA_CUTOFF / math.sqrt(n))
+    # multiple-comparisons-aware sigma bound (white-noise ac[k] ~ N(0, 1/w)).
+    threshold = max(min_rel_peak, SIGMA_CUTOFF / math.sqrt(w))
     floor = peak_to_median * float(np.median(scanned))
     for k in range(1, limit + 1):
         if ac[k] > ac[k - 1] and ac[k] >= ac[k + 1] and ac[k] >= threshold and ac[k] >= floor:

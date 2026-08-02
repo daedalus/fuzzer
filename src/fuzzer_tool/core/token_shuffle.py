@@ -27,15 +27,16 @@ def token_shuffle(data: bytes, rng=None) -> bytes:
         Mutated bytes with two tokens swapped, or original if <2 tokens found.
     """
     r = rng or _random
-    if len(data) < 4:
+    n = len(data)
+    if n < 4:
         return data
 
     # Find token start positions (each token starts after a delimiter)
     token_starts = [0]
-    for i in range(len(data)):
+    for i in range(n):
         if len(token_starts) >= 64:
             break
-        if data[i] in _DELIMS and i + 1 < len(data):
+        if data[i] in _DELIMS and i + 1 < n:
             token_starts.append(i + 1)
 
     if len(token_starts) < 2:

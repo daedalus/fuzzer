@@ -120,8 +120,9 @@ def partial_parse(data: bytes) -> _Node:
     close_table = _CLOSE_TABLE
     _append = buf.append
     _NodeCls = _Node
+    n = len(data)
 
-    while i < len(data):
+    while i < n:
         byte = data[i]
         close = delim_close[byte]
         if close != 0xFF:

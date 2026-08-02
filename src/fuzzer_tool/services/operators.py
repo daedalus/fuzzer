@@ -1661,18 +1661,17 @@ class OperatorEngine:
         f = self.f
         if not buf:
             return 0
-        te_pos = (
-            f._get_te_weighted_position(len(buf)) if f._use_transfer_entropy and f._te else None
-        )
-        mi_pos = f._mi.weighted_position(len(buf)) if f._use_mi and f._mi else None
-        sens_pos = f._sensitivity.get_weighted_position(data, len(buf))
+        buf_len = len(buf)
+        te_pos = f._get_te_weighted_position(buf_len) if f._use_transfer_entropy and f._te else None
+        mi_pos = f._mi.weighted_position(buf_len) if f._use_mi and f._mi else None
+        sens_pos = f._sensitivity.get_weighted_position(data, buf_len)
         crash_mi_pos = None
         if f._crash_mi and f._crash_mi.total_execs >= f._crash_mi.min_observations:
-            crash_mi_pos = f._crash_mi.weighted_position(len(buf))
+            crash_mi_pos = f._crash_mi.weighted_position(buf_len)
         candidates = [p for p in [sens_pos, te_pos, mi_pos, crash_mi_pos] if p is not None]
         if candidates:
             return f._rand_pool.choice(candidates)
-        return f._rand_pool.randint(0, len(buf) - 1)
+        return f._rand_pool.randint(0, buf_len - 1)
 
     # ── Main mutation orchestrator ─────────────────────────────────────
 

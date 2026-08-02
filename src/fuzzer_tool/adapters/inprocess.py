@@ -480,10 +480,11 @@ class InProcessRunner:
         if self._lib is None or self._func_ptr is None:
             return -2, "runner not initialized"
 
-        if not hasattr(self, "_c_buf") or self._c_buf is None or len(self._c_buf) != len(data):
-            self._c_buf = (ctypes.c_uint8 * len(data))(*data)
+        n = len(data)
+        if not hasattr(self, "_c_buf") or self._c_buf is None or len(self._c_buf) != n:
+            self._c_buf = (ctypes.c_uint8 * n)(*data)
         else:
-            ctypes.memmove(self._c_buf, data, len(data))
+            ctypes.memmove(self._c_buf, data, n)
 
         # Conditional stderr capture for ASAN diagnostic reporting
         _captured_stderr = ""
@@ -519,12 +520,12 @@ class InProcessRunner:
                     ctypes.c_size_t,
                 ]
                 _func_ptr_raw = ctypes.cast(self._func_ptr, ctypes.c_void_p)
-                rc = _guarded(_func_ptr_raw, self._c_buf, len(data))
+                rc = _guarded(_func_ptr_raw, self._c_buf, n)
                 # rc < 0 and rc > -128 means a signal crashed us; siglongjmp'd
                 # back with -sig (e.g. -6 for SIGABRT).  Already in the right
                 # format — matches how run_target_stdin returns signal codes.
             else:
-                rc = self._func_ptr(self._c_buf, len(data))
+                rc = self._func_ptr(self._c_buf, n)
         finally:
             signal.setitimer(signal.ITIMER_REAL, 0)
             if self.capture_stderr and _saved_stderr is not None and _read_fd is not None:

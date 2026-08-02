@@ -87,9 +87,10 @@ def parse_nal_units(data: bytes) -> list[NalUnit] | None:
     """
     units: list[NalUnit] = []
     pos = 0
+    n = len(data)
 
     # Find first start code
-    while pos < len(data):
+    while pos < n:
         if data[pos : pos + 4] == START_CODE_4:
             start_code = START_CODE_4
             break
@@ -101,19 +102,19 @@ def parse_nal_units(data: bytes) -> list[NalUnit] | None:
         return None
 
     header_start = pos + len(start_code)
-    if header_start >= len(data):
+    if header_start >= n:
         return None
 
     prev_start_code = start_code
 
     pos = header_start + 1  # +1 for the header byte (minimal unit)
 
-    while pos < len(data):
+    while pos < n:
         # Scan for next start code
         next_code: bytes | None = None
         next_pos = pos
 
-        while next_pos < len(data):
+        while next_pos < n:
             if data[next_pos : next_pos + 4] == START_CODE_4:
                 next_code = START_CODE_4
                 break
@@ -137,7 +138,7 @@ def parse_nal_units(data: bytes) -> list[NalUnit] | None:
         # Advance to next unit
         prev_start_code = next_code
         header_start = next_pos + len(next_code)
-        if header_start >= len(data):
+        if header_start >= n:
             break
         pos = header_start + 1
 

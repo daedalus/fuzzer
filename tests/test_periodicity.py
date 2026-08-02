@@ -79,6 +79,21 @@ class TestEstimateRecordSize:
         buf = _records(3, 300, seed=4, header=200)
         assert estimate_record_size(buf) is None
 
+    def test_large_buffer_windowed_detection(self):
+        # Regression (T2): buffers above the 4096-byte analysis window cap
+        # must still infer the stride from the first window — a 2.8 MB PNG
+        # seed once cost ~2.4 s of FFT per call in estimate_record_size.
+        buf = _records(1250, 8, seed=7)  # 10000 bytes, stride 8
+        assert len(buf) > 4096
+        assert estimate_record_size(buf) == 8
+
+    def test_large_buffer_equals_window_prefix(self):
+        # The windowed path analyzes exactly data[:4096] with the same limit
+        # and sigma bound, so a large buffer must match its prefix exactly.
+        buf = _records(1250, 8, seed=8)
+        assert len(buf) > 4096
+        assert estimate_record_size(buf) == estimate_record_size(buf[:4096]) == 8
+
 
 class TestChunkShuffleStride:
     def test_uses_stride(self):
