@@ -271,3 +271,33 @@ class TestSeedEloKeyMismatch:
         assert seed_a_wins >= 18, f"rated seed_a won only {seed_a_wins}/20 trials"
         # Plain keys have no recorded matches → min_matches gate → [0].
         assert elo.select_strategy(["a", "b"]) == "a"
+
+
+class TestEloParetoCachedWeights:
+    """Regression: the Elo 'pareto' strategy reaches _pick_from_pareto_front
+    directly, but _cached_weights is lazy-initialized only by
+    weighted_pick_seed — before the fix this raised AttributeError."""
+
+    def test_regression_elo_pareto_strategy_initializes_cached_weights(self):
+        f = TestAflgoEloStrategy._make_fuzzer_mock(self, corpus_size=3)
+        assert not hasattr(f, "_cached_weights"), "precondition: cache must be absent"
+        f._use_elo = True
+        f._rand_pool = random
+        f.exec_count = 0
+        f._temperature = 1.0
+        f.ga = f.qea = None
+        f._use_bayesian = False
+        f.markov_generate = False
+        f.markov_trained = False
+        f._use_boltzmann = False
+        f._profile = type("o", (object,), {"format_signature": None})()
+        f._elo = type("o", (object,), {"select_strategy": lambda s, a: "seed_pareto"})()
+        for seed in f.corpus:
+            f.seed_meta[seed] = {"fuzz_count": 1, "added_at": 0.0}
+
+        sp = SeedPicker(type("o", (object,), {"__init__": lambda s: None})())
+        sp.f = f
+        picked = sp._pick_seed_elo()
+        assert picked in f.corpus
+        assert f._seed_strategy == "pareto"
+        assert f._cached_weights == {}

@@ -22,12 +22,6 @@ repos:
 
 - repo: local
   hooks:
-  - id: pytest
-    name: pytest
-    entry: pytest tests/ -x -q
-    language: system
-    pass_filenames: false
-    always_run: true
   - id: impactguard-check
     name: ImpactGuard - Full Pipeline Check
     entry: impactguard-check-staged

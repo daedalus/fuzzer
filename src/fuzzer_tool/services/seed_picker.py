@@ -772,6 +772,10 @@ class SeedPicker:
 
     def _pick_from_pareto_front(self, weights: list[float], now: float) -> bytes:
         f = self.f
+        # _cached_weights is lazy-initialized by weighted_pick_seed; the Elo
+        # 'pareto' strategy reaches this directly, so ensure it exists.
+        if not hasattr(f, "_cached_weights"):
+            f._cached_weights = {}
         if len(f.corpus) < 3 or not f.seed_meta:
             return random.choices(f.corpus, weights=weights, k=1)[0]
 
