@@ -172,9 +172,10 @@ class TestPngHelpers:
         data = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
         crc_bytes = Z3Solver.solve_png_crc(ct, data)
         assert len(crc_bytes) == 4
-        import zlib
 
-        expected = struct.pack(">I", zlib.crc32(ct + data) & 0xFFFFFFFF)
+        from fuzzer_tool.core.crc32 import crc32
+
+        expected = struct.pack(">I", crc32(ct + data) & 0xFFFFFFFF)
         assert crc_bytes == expected
 
     def test_solve_png_chunk_fields(self):
@@ -285,11 +286,6 @@ class TestAndOrShiftMul:
     def test_shift_left_4byte(self):
         """SHL: val_a << 4 == val_b (delta=xmask large to bypass ADD/XOR)."""
         s = Z3Solver()
-        # val_a << 4 = val_b, with val_a's high bits making ADD/XOR large
-        val_a = 0xF0000000
-        val_b = 0x00000000  # 0xF0000000 << 4 wraps to 0
-        # Actually, better: use a non-wrapping shift
-        # val_a = 0x0F000000, val_b = 0xF0000000 (<< 4)
         # delta = 0xF0000000 - 0x0F000000 = 0xE1000000 > 65536 ✓
         # xmask = 0x0F000000 ^ 0xF0000000 = 0xFF000000 > 65536 ✓
         op_a = struct.pack("<I", 0x0F000000)

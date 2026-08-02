@@ -17,6 +17,8 @@ import random
 import struct
 import time
 
+from fuzzer_tool.core.crc32 import crc32
+
 log = logging.getLogger(__name__)
 
 
@@ -281,13 +283,11 @@ class SeedPicker:
         f = self.f
         fmt = getattr(f._profile, "format_signature", None)
         if fmt == "png":
-            import binascii
-
             ihdr_data = b"\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02"
             ihdr_chunk = b"IHDR" + ihdr_data
-            ihdr_crc = struct.pack(">I", binascii.crc32(ihdr_chunk))
+            ihdr_crc = struct.pack(">I", crc32(ihdr_chunk))
             iend_chunk = b"IEND"
-            iend_crc = struct.pack(">I", binascii.crc32(iend_chunk))
+            iend_crc = struct.pack(">I", crc32(iend_chunk))
             return (
                 b"\x89PNG\r\n\x1a\n"
                 + struct.pack(">I", len(ihdr_data))
@@ -355,7 +355,7 @@ class SeedPicker:
                 + b"\x00"
                 + b"\x00"
                 + zlib.compress(b"\x00")
-                + struct.pack("<I", zlib.crc32(b"\x00"))
+                + struct.pack("<I", crc32(b"\x00"))
                 + struct.pack("<I", 1)
             )
         # Generic: zero-filled random-length buffer

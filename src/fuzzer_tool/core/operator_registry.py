@@ -130,6 +130,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "regex_bomb",
         "grammar_mutate",
         "grammar_tree_mutate",
+        "crc_learn",
     },
 }
 
@@ -176,6 +177,10 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     "gradient_cmp": _has_cmplog_pairs,
     # per-input ops
     "redqueen": _redqueen_available,
+    # learned checksum polynomial (gated on recovered polynomial)
+    "crc_learn": lambda f, _d: bool(
+        getattr(f, "checksum_learner", None) and f.checksum_learner.ensure_poly() is not None
+    ),
     # flag-gated base op
     "regex_bomb": lambda f, _d: bool(getattr(f, "enable_regex_bomb", False)),
     "x86_chunk_mutate": lambda f, _d: bool(getattr(f, "enable_x86_mutator", False)),

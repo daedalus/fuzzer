@@ -566,6 +566,16 @@ class Fuzzer:
                 print("[!] Cmplog: failed to compile shim, disabling")
                 self._cmplog = None
 
+        # Checksum learner: recovers unknown linear checksum polynomials
+        # from observed (data, checksum) pairs via Berlekamp-Massey / GCD.
+        self.checksum_learner = None
+        try:
+            from fuzzer_tool.core.checksum_learner import ChecksumLearner
+
+            self.checksum_learner = ChecksumLearner(self)
+        except Exception as exc:
+            log.debug("ChecksumLearner init failed: %s", exc)
+
         # SMT solver: arithmetic constraint solving on cmplog pairs
         self._smt_solver = None
         self._enable_smt_z3 = enable_smt_z3
@@ -1990,6 +2000,17 @@ class Fuzzer:
                 if token and token not in self._dict_set:
                     self.dictionary.append(token)
                     self._dict_set.add(token)
+
+            # Feed checksum learner: format-aware pairs from current input
+            # + cmplog heuristic pairs (gated on _collect_now to avoid
+            # repeated work when the pool is saturated).
+            if self.checksum_learner and _collect_now:
+                fmt_pairs = self.checksum_learner.extract_format_pairs(data)
+                if fmt_pairs:
+                    self.checksum_learner.add_pairs(fmt_pairs)
+                cmp_pairs = self.checksum_learner.extract_cmplog_pairs(data)
+                if cmp_pairs:
+                    self.checksum_learner.add_pairs(cmp_pairs)
 
             # Dynamic cap: scale with recent throughput.
             # High EPS → larger dictionary (more mutations explore more).

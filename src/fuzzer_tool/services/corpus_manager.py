@@ -101,6 +101,9 @@ class CorpusManager:
             "op_success": f.op_success,
             "op_edges": f.op_edges,
             "corpus_size_history": f._corpus_size_history[-500:],
+            "checksum_learner": getattr(f, "checksum_learner", None)
+            and f.checksum_learner.to_dict()
+            or None,
             "seed_meta": {},
             "crash_frames": f.crash_frames,
             "crash_min_sizes": f.crash_min_sizes,
@@ -199,6 +202,12 @@ class CorpusManager:
                         (m[0], bytes.fromhex(m[1]), bytes.fromhex(m[2])) for m in rm_ser
                     ]
         f._edge_tracker.load(str(f._edge_tracker_path))
+        # Restore checksum learner state
+        cl_data = state.get("checksum_learner")
+        if cl_data and hasattr(f, "checksum_learner") and f.checksum_learner is not None:
+            from fuzzer_tool.core.checksum_learner import ChecksumLearner
+
+            f.checksum_learner = ChecksumLearner.from_dict(f, cl_data)
         sens_path = f.corpus_dir / "sensitivity.json"
         if sens_path.exists():
             with contextlib.suppress(OSError, json.JSONDecodeError):

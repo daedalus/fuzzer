@@ -14,6 +14,8 @@ import struct
 import zlib
 from pathlib import Path
 
+from fuzzer_tool.core.crc32 import crc32
+
 OUT = Path("/tmp/malformed_png")
 OUT.mkdir(exist_ok=True)
 
@@ -24,7 +26,7 @@ cases = {}
 def chunk(ctype: bytes, data: bytes) -> bytes:
     """PNG chunk: length(4) + type(4) + data + crc(4)."""
     c = ctype + data
-    return struct.pack(">I", len(data)) + c + struct.pack(">I", zlib.crc32(c) & 0xFFFFFFFF)
+    return struct.pack(">I", len(data)) + c + struct.pack(">I", crc32(c) & 0xFFFFFFFF)
 
 
 def ihdr(w=2, h=2, bd=8, ct=2):

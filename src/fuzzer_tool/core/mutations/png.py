@@ -23,6 +23,8 @@ import random
 import struct
 import zlib
 
+from fuzzer_tool.core.crc32 import crc32
+
 
 class PngChunk:
     """A single PNG chunk: type(4) + data(length) + crc(4)."""
@@ -39,7 +41,7 @@ class PngChunk:
         return length + self.chunk_type + self.data + crc
 
     def _compute_crc(self) -> int:
-        return zlib.crc32(self.chunk_type + self.data) & 0xFFFFFFFF
+        return crc32(self.chunk_type + self.data) & 0xFFFFFFFF
 
 
 def parse_png_chunks(data: bytes) -> list[PngChunk] | None:

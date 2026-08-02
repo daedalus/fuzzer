@@ -13,7 +13,8 @@ from __future__ import annotations
 
 import logging
 import struct
-import zlib
+
+from fuzzer_tool.core.crc32 import crc32
 
 log = logging.getLogger(__name__)
 
@@ -268,8 +269,7 @@ class Z3Solver:
     @staticmethod
     def solve_png_crc(chunk_type: bytes, chunk_data: bytes) -> bytes:
         """4-byte CRC32 for a PNG chunk (covers type + data)."""
-        crc = zlib.crc32(chunk_type + chunk_data) & 0xFFFFFFFF
-        return struct.pack(">I", crc)
+        return struct.pack(">I", crc32(chunk_type + chunk_data) & 0xFFFFFFFF)
 
     def solve_png_chunk_fields(self, chunk_type: bytes, chunk_data: bytes) -> dict:
         """Length prefix + CRC for a PNG chunk."""

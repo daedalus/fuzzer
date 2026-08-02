@@ -23,8 +23,9 @@ from __future__ import annotations
 
 import random
 import struct
-import zlib
 from dataclasses import dataclass
+
+from fuzzer_tool.core.crc32 import crc32
 
 # Interesting compression methods to swap in
 METHOD_VALUES = [0, 8, 9, 12, 14, 93, 0xFFFF]
@@ -294,7 +295,7 @@ class ZipMutator:
                     0,
                     1,
                     0xFFFFFFFF,
-                    zlib.crc32(entry.data) & 0xFFFFFFFF,
+                    crc32(entry.data) & 0xFFFFFFFF,
                     self._rng.randint(0, 0xFFFFFFFF),
                 ]
             )
@@ -407,7 +408,7 @@ class ZipMutator:
 
         name = self._rng.choice([b"a.txt", b"data.bin", b"dir/file"])
         data = self._rng.randbytes(self._rng.randint(0, 64))
-        crc = zlib.crc32(data) & 0xFFFFFFFF
+        crc = crc32(data) & 0xFFFFFFFF
         modtime = self._rng.choice(TIME_VALUES)
         moddate = self._rng.choice(DATE_VALUES)
 

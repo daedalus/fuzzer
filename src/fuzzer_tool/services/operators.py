@@ -17,6 +17,7 @@ module only supplies the ``_op_*`` handlers that the registry dispatches to.
 import logging
 import struct
 
+from fuzzer_tool.core.crc32 import crc32
 from fuzzer_tool.core.mutations import (
     INTERESTING_8,
     INTERESTING_16,
@@ -740,11 +741,90 @@ class OperatorEngine:
 
     def _op_checksum_repair(self, buf, _byte_idx, _data):
         rng = self.f._rand_pool
-        import zlib
 
         if buf and len(buf) >= 4:
             pos = rng.randint(0, max(0, len(buf) - 4))
-            buf[pos : pos + 4] = zlib.crc32(bytes(buf[:pos])).to_bytes(4, "big")
+            buf[pos : pos + 4] = crc32(bytes(buf[:pos])).to_bytes(4, "big")
+
+    def _op_crc_learn(self, buf, _byte_idx, _data):
+        """Patch checksum fields using a polynomial recovered via BM/GCD."""
+        if not buf or len(buf) < 4:
+            return
+        learner = getattr(self.f, "checksum_learner", None)
+        if not learner:
+            return
+        poly = learner.ensure_poly()
+        if poly is None:
+            return
+        rng = self.f._rand_pool
+
+        # Try format-aware patching first
+        patched = self._try_format_crc_patch(buf, learner, rng)
+        if patched:
+            buf[:] = patched
+            return
+
+        # Fallback: patch the last 4 bytes (common checksum placement)
+        checksum = learner.compute_checksum(bytes(buf[:-4]))
+        buf[-4:] = checksum.to_bytes(4, "big")
+
+    # --- helpers for _op_crc_learn ---------------------------------------
+
+    def _try_format_crc_patch(self, buf, learner, rng):
+        """Attempt format-aware CRC patching; return patched bytes or None."""
+        data = bytes(buf)
+        # PNG
+        if data[:8] == b"\x89PNG\r\n\x1a\n":
+            return self._patch_png_crc(data, learner)
+        # ZIP
+        if len(data) >= 30 and data[:4] == b"PK\x03\x04":
+            return self._patch_zip_crc(data, learner, rng)
+        return None
+
+    def _patch_png_crc(self, data, learner):
+        """Recompute all PNG chunk CRCs using the recovered polynomial."""
+        if len(data) < 8 or data[:8] != b"\x89PNG\r\n\x1a\n":
+            return None
+        out = bytearray(data[:8])
+        pos = 8
+        while pos + 12 <= len(data):
+            length = struct.unpack_from(">I", data, pos)[0]
+            chunk_type = data[pos + 4 : pos + 8]
+            chunk_data = data[pos + 8 : pos + 8 + length]
+            crc = learner.compute_checksum(chunk_type + chunk_data)
+            out += struct.pack(">I", length)
+            out += chunk_type
+            out += chunk_data
+            out += struct.pack(">I", crc)
+            pos += 12 + length
+            if chunk_type == b"IEND":
+                break
+        # Append any trailing data
+        if pos < len(data):
+            out += data[pos:]
+        return bytes(out)
+
+    def _patch_zip_crc(self, data, learner, rng):
+        """Recompute CRCs in ZIP local file headers using the recovered polynomial."""
+        out = bytearray()
+        pos = 0
+        while pos + 30 <= len(data):
+            sig = struct.unpack_from("<I", data, pos)[0]
+            if sig != 0x04034B50:
+                out += data[pos:]
+                break
+            fname_len = struct.unpack_from("<H", data, pos + 26)[0]
+            extra_len = struct.unpack_from("<H", data, pos + 28)[0]
+            comp_size = struct.unpack_from("<I", data, pos + 18)[0]
+            # Recompute CRC from filename (heuristic: filename is the data)
+            fname = data[pos + 30 : pos + 30 + fname_len]
+            crc = learner.compute_checksum(fname)
+            header = bytearray(data[pos : pos + 30])
+            struct.pack_into("<I", header, 14, crc & 0xFFFFFFFF)
+            out += header
+            out += data[pos + 30 : pos + 30 + fname_len + extra_len + comp_size]
+            pos += 30 + fname_len + extra_len + comp_size
+        return bytes(out)
 
     def _op_token_dup(self, buf, _byte_idx, _data):
         rng = self.f._rand_pool
@@ -1515,10 +1595,8 @@ class OperatorEngine:
             size = 1 + r[2] % min(len(buf) - 1, len(buf) - idx)
             del buf[idx : idx + size]
         elif op == 5 and len(buf) >= 4:  # CRC32 repair
-            import zlib
-
             pos = r[1] % max(1, len(buf) - 3)
-            buf[pos : pos + 4] = zlib.crc32(bytes(buf[:pos])).to_bytes(4, "big")
+            buf[pos : pos + 4] = crc32(bytes(buf[:pos])).to_bytes(4, "big")
         elif op == 6 and len(buf) >= 2:  # swap regions
             i = r[1] % (len(buf) - 1)
             j = i + 1 + r[2] % (len(buf) - i - 1)

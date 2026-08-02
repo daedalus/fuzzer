@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: B023
 """Generate a diverse PNG corpus for fuzzing libpng.
 
 Creates minimal PNGs with varied properties (dimensions, color types,
@@ -20,10 +21,12 @@ import sys
 import urllib.request
 import zlib
 
+from fuzzer_tool.core.crc32 import crc32
+
 
 def make_chunk(chunk_type: bytes, data: bytes) -> bytes:
     chunk = chunk_type + data
-    crc = struct.pack(">I", zlib.crc32(chunk) & 0xFFFFFFFF)
+    crc = struct.pack(">I", crc32(chunk) & 0xFFFFFFFF)
     return struct.pack(">I", len(data)) + chunk + crc
 
 
@@ -150,15 +153,15 @@ def make_zlib_variants() -> list[tuple[str, bytes]]:
         for ct, bd in [(0, 8), (2, 8), (3, 8), (4, 8), (6, 8)]:
             channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}[ct]
             raw = b""
-            for y in range(h):
+            for _y in range(h):
                 raw += bytes([0])  # filter None
                 raw += bytes(rng.randint(0, 255) for _ in range(w * channels))
             # Bind raw data into a closure for the pixel_func
             pixel_data = raw
 
-            def _make_pf(pd):
+            def _make_pf(pd, _ct=ct):
                 def pf(w, y):
-                    row_size = w * {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}[ct]
+                    row_size = w * {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}[_ct]
                     start = y * (row_size + 1) + 1  # skip filter byte
                     return pd[start : start + row_size]
 
@@ -232,8 +235,8 @@ def make_zlib_variants() -> list[tuple[str, bytes]]:
                     1,
                     ct,
                     bd,
-                    pixel_func=lambda w, y, _r=raw: _r[
-                        1 : 1 + w * {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}[ct]
+                    pixel_func=lambda w, y, _r=raw, _ct=ct: _r[
+                        1 : 1 + w * {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}[_ct]
                     ],
                 ),
             )
@@ -271,7 +274,7 @@ def make_zlib_variants() -> list[tuple[str, bytes]]:
         w, h = 16, 16
         palette = bytes(rng.randint(0, 255) for _ in range(palette_size * 3))
         raw = b""
-        for y in range(h):
+        for _y in range(h):
             raw += bytes([0])
             raw += bytes(rng.randint(0, palette_size - 1) for _ in range(w))
         sig = b"\x89PNG\r\n\x1a\n"

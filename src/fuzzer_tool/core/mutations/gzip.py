@@ -13,6 +13,8 @@ import struct
 import zlib
 from dataclasses import dataclass
 
+from fuzzer_tool.core.crc32 import crc32
+
 GZIP_MAGIC = b"\x1f\x8b"
 DEFLATE = 8
 
@@ -335,7 +337,7 @@ class GzipMutator:
         header[9] = 255  # OS = unknown
 
         # Trailer
-        crc = zlib.crc32(payload) & 0xFFFFFFFF
+        crc = crc32(payload) & 0xFFFFFFFF
         size = len(payload) & 0xFFFFFFFF
 
         return bytes(header) + compressed + struct.pack("<I", crc) + struct.pack("<I", size)

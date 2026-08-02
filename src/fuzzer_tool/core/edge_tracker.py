@@ -21,6 +21,7 @@ from array import array
 from collections import defaultdict
 
 from fuzzer_tool.core import fast_json as json
+from fuzzer_tool.core.crc32 import crc32_ieee
 
 # ── Memory bounds ────────────────────────────────────────────────────
 CORRELATION_MATRIX_MAX = 10_000  # max edge-pair entries in branch correlation
@@ -428,7 +429,7 @@ class MinHashLSH:
             start = band_idx * self.band_size
             end = start + self.band_size
             band_bytes = struct.pack(f"<{end - start}Q", *sig[start:end])
-            band_hash = zlib.crc32(band_bytes)
+            band_hash = crc32_ieee(band_bytes)
             bucket_key = (band_idx, band_hash)
             if bucket_key not in self.buckets:
                 self.buckets[bucket_key] = set()
@@ -443,7 +444,7 @@ class MinHashLSH:
             start = band_idx * self.band_size
             end = start + self.band_size
             band_bytes = struct.pack(f"<{end - start}Q", *sig[start:end])
-            band_hash = zlib.crc32(band_bytes)
+            band_hash = crc32_ieee(band_bytes)
             bucket_key = (band_idx, band_hash)
             bucket = self.buckets.get(bucket_key)
             if bucket:
@@ -480,7 +481,7 @@ class MinHashLSH:
             start = band_idx * self.band_size
             end = start + self.band_size
             band_bytes = struct.pack(f"<{end - start}Q", *sig[start:end])
-            band_hash = zlib.crc32(band_bytes)
+            band_hash = crc32_ieee(band_bytes)
             bucket_key = (band_idx, band_hash)
             bucket = self.buckets.get(bucket_key)
             if bucket:
