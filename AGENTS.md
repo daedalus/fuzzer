@@ -78,6 +78,9 @@ fuzzer, not just the target.
 | `tools/bench.sh` / `tools/bench_sweep.sh` | Config comparison / feature sweep |
 | `lizard --CCN 15 -w .` | Cyclomatic complexity violations |
 | `vulture --min-confidence 80 .` | Find duplicated code |
+| `tools/profile_hotpath.py` | Profile hotpath |
+
+
 
 ## Layout
 
