@@ -212,3 +212,50 @@ class TestSkewnessAndTailRisk:
     def test_tail_risk_is_bool(self):
         t = ExecutionTimeTracker()
         assert isinstance(t.tail_risk, bool)
+
+
+def _legacy_compute_crps(sorted_times, observation):
+    """Verbatim legacy _compute_crps (independent reference for equivalence)."""
+    if not sorted_times:
+        return 0.0
+    n = len(sorted_times)
+    crps = 0.0
+    cdf_diff = 0.0
+    prev = sorted_times[0]
+    for i, val in enumerate(sorted_times):
+        gap = val - prev
+        if gap > 0:
+            crps += cdf_diff * cdf_diff * gap
+        f_val = (i + 1) / n
+        indicator = 1.0 if val >= observation else 0.0
+        cdf_diff = f_val - indicator
+        prev = val
+    max_val = sorted_times[-1]
+    if observation > max_val:
+        crps += 1.0 * (observation - max_val)
+    return crps
+
+
+class TestComputeCrpsVectorized:
+    def test_matches_legacy_algorithm(self):
+        """Vectorized _compute_crps is numerically identical to the legacy walk."""
+        import random
+
+        rng = random.Random(20260803)
+        t = ExecutionTimeTracker(window_size=200)
+        for _ in range(300):
+            n = rng.randint(1, 200)
+            # Duplicates included -> zero gaps exercise the (dead) gap>0 guard.
+            times = sorted(rng.random() * 0.05 for _ in range(n))
+            obs = rng.random() * 0.06
+            t._sorted = list(times)
+            got = t._compute_crps(obs)
+            exp = _legacy_compute_crps(times, obs)
+            assert abs(got - exp) <= 1e-9 * max(1.0, abs(exp)), (got, exp, n, obs)
+
+    def test_edge_cases(self):
+        t = ExecutionTimeTracker()
+        assert t._compute_crps(0.5) == 0.0  # empty
+        t._sorted = [1.0]
+        assert t._compute_crps(0.5) == 0.0  # obs below sole value
+        assert t._compute_crps(2.0) == 1.0  # obs above sole value (tail term)

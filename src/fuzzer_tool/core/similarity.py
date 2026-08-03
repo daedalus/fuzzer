@@ -12,6 +12,22 @@ import re
 from array import array
 
 
+def _hamming_dist(a: bytes, b: bytes) -> int:
+    """Hamming distance over equal-length byte sequences.
+
+    NumPy path above the 64-byte threshold (same dispatch rule as
+    levenshtein_align): zero-copy uint8 views + SIMD count_nonzero. The
+    genexpr is faster for tiny inputs, where numpy's fixed overhead dominates.
+    """
+    if len(a) < 64:
+        return sum(x != y for x, y in zip(a, b, strict=True))
+    import numpy as _np
+
+    return int(
+        _np.count_nonzero(_np.frombuffer(a, dtype=_np.uint8) != _np.frombuffer(b, dtype=_np.uint8))
+    )
+
+
 def hamming_distance(a: bytes, b: bytes) -> int:
     """Hamming distance between two equal-length byte sequences.
 
@@ -30,7 +46,7 @@ def hamming_distance(a: bytes, b: bytes) -> int:
     """
     if len(a) != len(b):
         raise ValueError(f"Hamming distance requires equal lengths: got {len(a)} and {len(b)}")
-    return sum(x != y for x, y in zip(a, b, strict=True))
+    return _hamming_dist(a, b)
 
 
 def hamming_similarity(a: bytes, b: bytes) -> float:
@@ -48,8 +64,7 @@ def hamming_similarity(a: bytes, b: bytes) -> float:
     """
     if len(a) != len(b) or len(a) == 0:
         return 0.0
-    dist = sum(x != y for x, y in zip(a, b, strict=True))
-    return 1.0 - dist / len(a)
+    return 1.0 - _hamming_dist(a, b) / len(a)
 
 
 def hamming_distance_padded(a: bytes, b: bytes) -> int:
@@ -67,7 +82,7 @@ def hamming_distance_padded(a: bytes, b: bytes) -> int:
     max_len = max(len(a), len(b))
     a_padded = a + b"\x00" * (max_len - len(a))
     b_padded = b + b"\x00" * (max_len - len(b))
-    return sum(x != y for x, y in zip(a_padded, b_padded, strict=True))
+    return _hamming_dist(a_padded, b_padded)
 
 
 def levenshtein_distance(a: bytes, b: bytes) -> int:

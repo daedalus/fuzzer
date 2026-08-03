@@ -79,36 +79,24 @@ class ExecutionTimeTracker:
 
         CRPS(F, x) = ∫(F(y) - 𝟙[y ≥ x])² dy
 
-        Uses incremental cdf_diff tracking: walk sorted observation points,
-        maintain signed difference (F(y) - indicator), accumulate cdf_diff² * gap.
-        Same pattern as EdgeTracker._cdf_norms for Wasserstein.
+        Vectorized: for a sorted walk the loop is the prefix recurrence
+        crps = Σᵢ (i/n - 𝟙[vᵢ≥x])² · (vᵢ₊₁ - vᵢ), computed with numpy in one
+        shot. The legacy `gap > 0` guard is dead code — a sorted walk has
+        gap ≥ 0 always, and a zero gap contributes 0 regardless.
         """
         if not self._sorted:
             return 0.0
-        n = len(self._sorted)
-        crps = 0.0
-        cdf_diff = 0.0
-        prev = self._sorted[0]
+        import numpy as _np
 
-        for i, val in enumerate(self._sorted):
-            gap = val - prev
-            if gap > 0:
-                crps += cdf_diff * cdf_diff * gap
-            # CDF at this point: fraction of observations ≤ val
-            f_val = (i + 1) / n
-            # 𝟙[y ≥ x]: 1 when val ≥ observation, 0 when val < observation
-            indicator = 1.0 if val >= observation else 0.0
-            cdf_diff = f_val - indicator
-            prev = val
-
+        arr = _np.asarray(self._sorted, dtype=_np.float64)
+        n = len(arr)
+        cd = _np.arange(1, n + 1) / n - (arr >= observation)
+        crps = float(_np.sum(cd[:-1] * cd[:-1] * _np.diff(arr)))
         # Region from last observation to observation (if obs > max):
         # F(y) = 1 for y ≥ max_val, 𝟙[y ≥ obs] = 0 for max_val ≤ y < obs
-        # → cdf_diff = 1, contribution = 1² × gap
-        max_val = self._sorted[-1]
+        max_val = arr[-1]
         if observation > max_val:
-            gap = observation - max_val
-            crps += 1.0 * gap  # (1 - 0)² * gap
-
+            crps += observation - max_val
         return crps
 
     def suggested_timeout(self, percentile: float = 99.0) -> float:

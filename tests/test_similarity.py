@@ -527,7 +527,7 @@ class TestLevenshteinAlign:
             b = random.randbytes(random.randint(10, 200))
             script = levenshtein_align(a, b)
             prev_pos = -1
-            for op, pos, data in script:
+            for op, pos, _data in script:
                 if op in ("match", "replace"):
                     assert pos > prev_pos, f"Non-monotonic: {op} at {pos} after {prev_pos}"
                     prev_pos = pos
@@ -541,7 +541,7 @@ class TestLevenshteinAlign:
             a = random.randbytes(random.randint(0, 200))
             b = random.randbytes(random.randint(0, 200))
             script = levenshtein_align(a, b)
-            for op, pos, data in script:
+            for op, pos, _data in script:
                 if op == "insert":
                     assert 0 <= pos <= len(a), f"Insert at {pos} for a={len(a)}"
                 elif op == "delete":
@@ -734,3 +734,57 @@ class TestDeltaV2:
         assert diff is not None
         reconstructed = apply_delta_v2(b"", diff)
         assert reconstructed == b"ABC"
+
+
+class TestHammingNumpyPath:
+    """Hamming helpers above the 64-byte numpy dispatch threshold."""
+
+    def test_numpy_path_matches_reference(self):
+        import random
+
+        rng = random.Random(20260803)
+        for _ in range(200):
+            n = rng.randint(64, 4096)
+            a = rng.randbytes(n)
+            b = rng.randbytes(n)
+            # Independent reference: count differing positions in Python.
+            expected = sum(1 for x, y in zip(a, b, strict=True) if x != y)
+            assert hamming_distance(a, b) == expected
+            assert hamming_similarity(a, b) == pytest.approx(1.0 - expected / n)
+
+    def test_numpy_path_threshold_crossing(self):
+        # 63-byte inputs take the genexpr path, 64+ take numpy: both must
+        # agree with the reference for their respective input sizes.
+        a = bytes(range(63)) * 3  # 189 bytes -> numpy path
+        b = bytes(range(1, 64)) * 3
+        full_ref = sum(1 for x, y in zip(a, b, strict=True) if x != y)
+        assert hamming_distance(a, b) == full_ref  # numpy branch
+        short_ref = sum(1 for x, y in zip(a[:63], b[:63], strict=True) if x != y)
+        assert hamming_distance(a[:63], b[:63]) == short_ref  # genexpr branch
+
+    def test_padded_numpy_path(self):
+        import random
+
+        rng = random.Random(7)
+        for _ in range(50):
+            na = rng.randint(64, 512)
+            nb = rng.randint(64, 512)
+            a = rng.randbytes(na)
+            b = rng.randbytes(nb)
+            max_len = max(na, nb)
+            expected = sum(
+                1
+                for x, y in zip(
+                    a + b"\x00" * (max_len - na),
+                    b + b"\x00" * (max_len - nb),
+                    strict=True,
+                )
+                if x != y
+            )
+            assert hamming_distance_padded(a, b) == expected
+
+    def test_identical_and_all_different(self):
+        a = bytes(range(256)) * 4  # 1024 bytes
+        assert hamming_distance(a, a) == 0
+        b = bytes(range(255, -1, -1)) * 4
+        assert hamming_distance(a, b) == 1024
