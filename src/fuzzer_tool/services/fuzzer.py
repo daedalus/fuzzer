@@ -415,10 +415,12 @@ class Fuzzer:
         boost_pad="repeat",
         refresh_profile=False,
         chi2_operator_interval=0,
+        quiet_stats=False,
     ):
         self.target = target
         self.debug = debug
         self.refresh_profile = refresh_profile
+        self.quiet_stats = quiet_stats
         # Multi-target support: list of target binaries to fuzz with shared corpus
         self.multi_targets = multi_targets  # None for single-target
         self._active_target_idx = 0  # round-robin index
@@ -3551,7 +3553,8 @@ class Fuzzer:
                     self._last_allan_edge_count = current_edges
                     # Record coverage snapshot for temporal analysis
                     self._edge_tracker.record_coverage_snapshot(self.exec_count)
-                    self.print_stats()
+                    if not self.quiet_stats:
+                        self.print_stats()
                     self._append_coverage_log()
                     self._record_discovery_snapshot()
                     # Stall detection: no new edges in threshold execs
@@ -3611,7 +3614,8 @@ class Fuzzer:
             self._ablation_file.close()
             self._ablation_file = None
             print(f"[*] Schedule ablation log: {self._ablation_path}")
-        self.print_stats()
+        if not self.quiet_stats:
+            self.print_stats()
         print(
             f"\n\n[*] Fuzzing stopped. {self.crash_count} crashes found "
             f"({len(self.crash_sigs)} unique signatures)."

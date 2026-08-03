@@ -480,6 +480,7 @@ def cmd_fuzz(args):
         enable_smt_z3=getattr(args, "enable_smt_z3", False),
         mod_solving=getattr(args, "mod_solving", "heuristic"),
         chi2_operator_interval=getattr(args, "chi2_operator_interval", 0),
+        quiet_stats=getattr(args, "profile_hotpath", False),
     )
     fuzzer.invocation = " ".join(sys.argv)
     if getattr(args, "profile_hotpath", False):
@@ -508,8 +509,9 @@ def cmd_fuzz(args):
             print("=" * 80)
             stats.sort_stats("ncalls")
             stats.print_stats(30)
-            stats.dump_stats(args.profile_out)
-            print(f"[*] cProfile stats saved to {args.profile_out}")
+            profile_out = getattr(args, "profile_out", "/tmp/fuzzer_hotpath.prof")
+            stats.dump_stats(profile_out)
+            print(f"[*] cProfile stats saved to {profile_out}")
     else:
         fuzzer.run(iterations=args.iterations)
 

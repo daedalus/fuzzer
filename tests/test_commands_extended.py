@@ -424,6 +424,35 @@ class TestCmdFuzzConstruction:
         assert "ignored in parallel mode" in capsys.readouterr().out
         mock_parallel.assert_called_once()
 
+    def test_fuzz_profile_hotpath_quiet_stats(self, monkeypatch, tmp_path):
+        """--profile-hotpath should thread quiet_stats=True into the Fuzzer."""
+        args = self._make_default_args(tmp_path)
+        args.profile_hotpath = True
+        captured = {}
+        mock_fuzzer = MagicMock()
+        monkeypatch.setattr(
+            "fuzzer_tool.cli.commands.Fuzzer",
+            lambda **kwargs: captured.update(kwargs) or mock_fuzzer,
+        )
+
+        result = cmd_fuzz(args)
+        assert result == 0
+        assert captured["quiet_stats"] is True
+
+    def test_fuzz_no_profile_hotpath_quiet_stats_false(self, monkeypatch, tmp_path):
+        """Without --profile-hotpath, quiet_stats defaults to False."""
+        args = self._make_default_args(tmp_path)
+        captured = {}
+        mock_fuzzer = MagicMock()
+        monkeypatch.setattr(
+            "fuzzer_tool.cli.commands.Fuzzer",
+            lambda **kwargs: captured.update(kwargs) or mock_fuzzer,
+        )
+
+        result = cmd_fuzz(args)
+        assert result == 0
+        assert captured["quiet_stats"] is False
+
 
 class TestCmdMinimize:
     def test_minimize_validates_target(self, tmp_path):

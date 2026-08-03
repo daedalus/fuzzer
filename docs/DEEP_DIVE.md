@@ -387,7 +387,7 @@ fuzzer-tool rank ./target -d corpus -n 10 --dump top_seeds
 | `--transfer-entropy` | Transfer entropy causal tracking (byte→edge influence detection) |
 | `--inprocess` | Persistent subprocess mode (auto-restart on crash) |
 | `--resume` | Resume from saved state |
-| `--profile-hotpath` | Profile the fuzz run with cProfile; prints tottime/cumtime/ncalls tables and dumps stats (ignored with `--jobs > 1`) |
+| `--profile-hotpath` | Profile the fuzz run with cProfile; prints tottime/cumtime/ncalls tables and dumps stats (ignored with `--jobs > 1`; suppresses the periodic `[*] execs:` status line for clean output) |
 | `--profile-out PATH` | cProfile dump path for `--profile-hotpath` (default `/tmp/fuzzer_hotpath.prof`) |
 | `--crash-codes N` | Additional exit codes to treat as crashes |
 | `-j N` | Parallel fuzzing with N workers |
