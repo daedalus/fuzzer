@@ -1,5 +1,6 @@
 """Tests for MonteCarloScheduler, MOptScheduler, JS divergence, and adaptive refit."""
 
+import math
 import random
 
 from fuzzer_tool.core.schedulers import MonteCarloScheduler, MOptScheduler
@@ -1169,6 +1170,93 @@ class TestExp3Scheduler:
         stats = exp3.bandit_stats()
         assert stats["exp3_pulls"] == 1
         assert stats["exp3_max_weight"] > 0
+
+    def test_bandit_stats_reports_actual_weight(self):
+        """bandit_stats must report the actual (decay-adjusted) max weight,
+        not the internal relative value."""
+        from fuzzer_tool.core.schedulers import Exp3Scheduler
+
+        exp3 = Exp3Scheduler(gamma=0.5, window_decay=0.5)
+        exp3.init_arm("a")
+        exp3._last_probs = {"a": 0.8}
+        exp3.record("a", success=True)
+        expected = exp3.weights["a"] * exp3._decay_factor
+        assert abs(exp3.bandit_stats()["exp3_max_weight"] - expected) < 1e-12
+
+    @staticmethod
+    def _legacy_record(exp3, name, success, weight=1.0):
+        """Verbatim pre-optimization record(): per-call full-weight decay sweep."""
+        reward = weight if success else 0.0
+        if exp3.window_decay < 1.0:
+            for k in exp3.weights:
+                exp3.weights[k] *= exp3.window_decay
+        p = exp3._last_probs.get(name, 1.0 / max(len(exp3._last_probs), 1))
+        K = max(len(exp3.weights), 1)
+        estimated_reward = reward / max(p, 1e-9)
+        exp3.weights[name] = exp3.weights.get(name, 1.0) * math.exp(
+            exp3.gamma * estimated_reward / max(K, 1)
+        )
+        max_w = max(exp3.weights.values())
+        if max_w > 1e9:
+            scale = 1.0 / max_w
+            for k in exp3.weights:
+                exp3.weights[k] *= scale
+
+    def test_record_weights_match_legacy_decay(self):
+        """Lazy global-decay record() must track the legacy per-call sweep:
+        actual weights (relative * factor) equal the legacy weights."""
+        import random
+
+        from fuzzer_tool.core.schedulers import Exp3Scheduler
+
+        new = Exp3Scheduler(gamma=0.1, window_decay=0.999)
+        old = Exp3Scheduler(gamma=0.1, window_decay=0.999)
+        arms = [f"op_{i}" for i in range(20)]
+        for a in arms:
+            new.init_arm(a)
+            old.init_arm(a)
+        rng = random.Random(7)
+        for t in range(3000):
+            name = arms[t % 20]
+            p = 0.05 + 0.9 * (t % 7) / 7.0
+            new._last_probs = {name: p}
+            old._last_probs = {name: p}
+            ok = rng.random() < 0.2
+            w = 0.5 if t % 3 == 0 else 1.0
+            new.record(name, ok, weight=w)
+            self._legacy_record(old, name, ok, weight=w)
+        for a in arms:
+            actual_new = new.weights[a] * new._decay_factor
+            assert abs(actual_new - old.weights[a]) <= 1e-9 * max(
+                1.0, abs(actual_new), abs(old.weights[a])
+            ), f"arm {a}: {actual_new} vs {old.weights[a]}"
+
+    def test_record_weights_match_legacy_no_decay_renorm(self):
+        """With window_decay=1.0 the math is identical op-for-op, including
+        the blowup renormalization, so weights must match exactly."""
+        import random
+
+        from fuzzer_tool.core.schedulers import Exp3Scheduler
+
+        new = Exp3Scheduler(gamma=0.5, window_decay=1.0)
+        old = Exp3Scheduler(gamma=0.5, window_decay=1.0)
+        arms = [f"op_{i}" for i in range(20)]
+        for a in arms:
+            new.init_arm(a)
+            old.init_arm(a)
+        rng = random.Random(11)
+        for t in range(5000):
+            name = arms[t % 20]
+            p = 0.02 + 0.08 * (t % 3)
+            new._last_probs = {name: p}
+            old._last_probs = {name: p}
+            ok = rng.random() < 0.3
+            new.record(name, ok)
+            self._legacy_record(old, name, ok)
+        for a in arms:
+            assert new.weights[a] * new._decay_factor == old.weights[a], (
+                f"arm {a}: {new.weights[a] * new._decay_factor} vs {old.weights[a]}"
+            )
 
 
 class TestEpsilonGreedyScheduler:

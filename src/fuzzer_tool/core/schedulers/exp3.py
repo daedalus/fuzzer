@@ -31,7 +31,14 @@ class Exp3Scheduler:
     def __init__(self, gamma: float = 0.1, window_decay: float = 0.999):
         self.gamma = gamma
         self.window_decay = window_decay
+        # Per-arm weights RELATIVE to _decay_factor: the actual weight is
+        # weights[i] * _decay_factor. Decay is folded into the single
+        # factor so record() stays O(1) instead of sweeping every arm.
         self.weights: dict[str, float] = {}
+        self._decay_factor: float = 1.0
+        # Largest relative weight — only changes on the recorded arm, so
+        # the blowup check below stays O(1). Non-decreasing until renorm.
+        self._max_relative: float = 1.0
         self._total_pulls: int = 0
         # Per-iteration selection probabilities — needed for importance-weighted
         # estimator in record().  select_op stores (op, p) here, record() reads it.
@@ -41,6 +48,8 @@ class Exp3Scheduler:
         """Register an operator with initial weight 1.0."""
         if name not in self.weights:
             self.weights[name] = 1.0
+            if self._max_relative < 1.0:
+                self._max_relative = 1.0
 
     def select_op(self, ops: list[str]) -> str:
         """Select operator via EXP3 mixture distribution."""
@@ -78,34 +87,40 @@ class Exp3Scheduler:
 
         Uses the importance-weighted estimator: reward_estimate = r / p_i,
         where p_i is the probability this operator had when it was selected.
+
+        Exponential decay is folded into ``_decay_factor`` (one multiply per
+        call) instead of multiplying every arm's weight; per-arm values in
+        ``self.weights`` are relative to it.
         """
         self._total_pulls += 1
         reward = weight if success else 0.0
 
         # Apply exponential decay to all weights (discounts old evidence)
         if self.window_decay < 1.0:
-            for k in self.weights:
-                self.weights[k] *= self.window_decay
+            self._decay_factor *= self.window_decay
 
-        # EXP3 weight update: w_i *= exp(gamma * r̂_i / K)
+        # EXP3 weight update: w_i *= exp(gamma * r̂_i / K)  (relative space)
         # r̂_i = reward / p_i  (importance-weighted)
         p = self._last_probs.get(name, 1.0 / max(len(self._last_probs), 1))
         K = max(len(self.weights), 1)
         estimated_reward = reward / max(p, 1e-9)
-        self.weights[name] = self.weights.get(name, 1.0) * math.exp(
+        relative = self.weights.get(name, 1.0 / self._decay_factor) * math.exp(
             self.gamma * estimated_reward / max(K, 1)
         )
+        self.weights[name] = relative
+        if relative > self._max_relative:
+            self._max_relative = relative
 
         # Prevent floating-point blowup: renormalize if max weight is extreme
-        max_w = max(self.weights.values())
-        if max_w > 1e9:
-            scale = 1.0 / max_w
+        if self._decay_factor * self._max_relative > 1e9:
+            scale = 1.0 / (self._decay_factor * self._max_relative)
             for k in self.weights:
                 self.weights[k] *= scale
+            self._max_relative *= scale
 
     def bandit_stats(self) -> dict:
         """Return EXP3 diagnostics."""
         return {
             "exp3_pulls": self._total_pulls,
-            "exp3_max_weight": max(self.weights.values()) if self.weights else 0.0,
+            "exp3_max_weight": (self._decay_factor * self._max_relative if self.weights else 0.0),
         }
