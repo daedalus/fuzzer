@@ -126,7 +126,7 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 - **Near-duplicate detection**: finds seed pairs with near-identical coverage via Hamming + LSH
 
 ### Information Theory
-- **Mutual information** (`--mi-guided`): I(byte_position; coverage) guides mutation toward positions that actually control code paths
+- **Mutual information** (`--mi-guided`): I(byte_position; coverage) guides mutation toward positions that actually control code paths. The joint distribution is **memory-bounded** (`MAX_JOINT_CELLS`, `MAX_EDGES_PER_CELL`, `MI_MAX_POSITIONS` in `core/mi.py`): record() rejects new cells once the joint-cell budget is exhausted (existing cells keep incrementing) instead of evicting — eviction of least-observed positions thrashed (re-observed -> re-victimized). `mi.json` is loaded only with `--resume`, and `max_positions` is capped independent of `max_len`, so a stale oversized file (`--elo all` on a real corpus previously OOM-killed at 7.5GB / 796MB mi.json; RSS now flat ~229MB) cannot re-trigger the blowup
 - **Rényi entropy** (`--renyi-weight`): generalized entropy spectrum for seed weighting — boosts seeds exercising rare (cold) edges
 - **Rate-distortion corpus minimization** (`--rate-distortion`): optimal compression of corpus preserving coverage diversity
 - **Transfer entropy** (`--transfer-entropy`): directional causal flow between byte positions and coverage edges
@@ -498,7 +498,7 @@ State files:
 - `state.json` — exec counts, crash sigs, op stats, seed metadata, lineage depths
 - `edge_tracker.json` — per-seed edge coverage, cumulative edges, global hit counts, hit counts
 - `markov.json` — persisted Markov chain transitions
-- `mi.json` — mutual information tracker (byte-to-coverage correlations)
+- `mi.json` — mutual information tracker (byte-to-coverage correlations); loaded only with `--resume`
 - `elo.json` — Elo ratings for operator and seed strategies
 - `qea.json` — QEA population amplitudes and generation state
 - `ga.json` — GA population, generation, and fitness state

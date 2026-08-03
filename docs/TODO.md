@@ -36,6 +36,7 @@
 - [x] **Corpus distillation on-the-fly** — `--max-corpus` triggers auto-minimization when corpus exceeds threshold.
 - [x] **CLI hotpath profiling** — `--profile-hotpath` cProfile integration into fuzz mode (tottime/cumtime/ncalls tables + `.prof` dump via `--profile-out`).
 - [x] **array.array for cold bounded histories** — corpus-size history, the four tuple histories (discovery/crash-rate/entropy/coverage-timeline), elo prediction-error lists, redqueen pair-length index converted to `array("Q")`/`array("d")`/`array("I")` (7-9x memory per container, runtime verified neutral). EdgeTracker edge-count maps deliberately left as sparse dicts (array.array loses on scalar RMW + iteration; reads already numpy-vectorized).
+- [x] **Bound the MI tracker's memory** — the joint (position x byte x edge) was unbounded; `--elo all` on a real corpus OOM-killed at 7.5GB/796MB mi.json with EPS collapsing 1500->20. Now: hard cell cap (MAX_JOINT_CELLS) rejecting new cells at budget (no eviction thrash), MI_MAX_POSITIONS cap independent of max_len, and mi.json loaded only with `--resume`. Measured: 7.5GB -> flat 229MB, EPS 11 -> 180+, run completes where it previously OOM'd at ~1.2k execs.
 
 ## Infrastructure
 - [ ] **Dockerfile** for reproducible builds and CI
