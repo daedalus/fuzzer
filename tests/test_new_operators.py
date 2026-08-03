@@ -881,3 +881,50 @@ class TestEloMetaStrategyThrottle:
         f._meta_strategy_cached = "not_a_strategy"
         engine.select_op(["bit_flip"])
         assert calls["n"] == first + 1
+
+
+class TestRedqueenXformPairCache:
+    """The bisect-based candidate filter must match the legacy linear scan."""
+
+    def _make_engine(self, pairs):
+        fuzzer = _make_minimal_fuzzer()
+        fuzzer._cmplog = type("Cmplog", (), {"pairs": pairs, "is_hash_candidate": None})()
+        return OperatorEngine(fuzzer)
+
+    def test_cache_prefix_matches_legacy_filter(self):
+        import bisect
+
+        pairs = [
+            (b"ab", b"cd"),
+            (b"x", b"y"),  # 1 byte — never a candidate
+            (b"abcdefghijklmnop", b"zz"),  # longer than the buffer
+            (b"abc", b"def"),
+            (b"abcd", b"wxyz"),
+        ]
+        engine = self._make_engine(pairs)
+        buf = bytearray(b"abcdef")
+        engine._op_redqueen_xform(buf, 0, b"")
+        # Cache keeps only len(op_a) >= 2 pairs, sorted by length.
+        assert engine._redqueen_sorted_pairs == [
+            (b"ab", b"cd"),
+            (b"abc", b"def"),
+            (b"abcd", b"wxyz"),
+            (b"abcdefghijklmnop", b"zz"),
+        ]
+        assert engine._redqueen_pair_lengths == [2, 3, 4, 16]
+        # Legacy filter for len(buf)=6 keeps exactly lengths <= 6.
+        cutoff = bisect.bisect_right(engine._redqueen_pair_lengths, len(buf))
+        assert engine._redqueen_sorted_pairs[:cutoff] == [
+            (b"ab", b"cd"),
+            (b"abc", b"def"),
+            (b"abcd", b"wxyz"),
+        ]
+
+    def test_cache_rebuilds_on_pool_change(self):
+        engine = self._make_engine([(b"ab", b"cd")])
+        buf = bytearray(b"abcdef")
+        engine._op_redqueen_xform(buf, 0, b"")
+        assert engine._redqueen_pair_lengths == [2]
+        engine.f._cmplog.pairs = [(b"ab", b"cd"), (b"abcde", b"fghij")]
+        engine._op_redqueen_xform(buf, 0, b"")
+        assert engine._redqueen_pair_lengths == [2, 5]

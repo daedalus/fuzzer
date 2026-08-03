@@ -70,7 +70,6 @@ class TestEncoders:
     def test_ascii_encoder_encode(self):
         import struct
 
-        a10 = type("", (), {})()  # simple mock
         from fuzzer_tool.core.rq_encodings import AsciiEncoder
 
         enc = AsciiEncoder(10, False)
@@ -169,7 +168,6 @@ class TestGenerateMutations:
         data = b"\x01\x02\x03\x04"
         op_a = b"\x01\x02\x03\x04"
         op_b = b"\x05\x06\x07\x08"
-        normal = generate_mutations(op_a, op_b, 32, "CMP", data, hammer=False)
         hammered = generate_mutations(op_a, op_b, 32, "CMP", data, hammer=True)
         # Note: may not always be more since it depends on encoder matching,
         # but hammer=True generates more integer variants
@@ -219,7 +217,23 @@ class TestGenerateMutations:
         op_a = b"hello"
         op_b = b"world"
         mutations = generate_mutations(op_a, op_b, 512, "STR", data, hammer=True)
-        # Should find "hello" in data and suggest various replacements
-        found = any(b"hello" in data for _, _, _ in mutations)
         # If encoders match, there should be at least some mutations
         assert len(mutations) >= 0  # just checking it doesn't crash
+
+    def test_encoder_cache_transparent(self):
+        """The input-independent encoder cache must not change results:
+        repeated calls with the same pair/input return identical mutations,
+        and a different input yields the same encoders at different offsets."""
+        op_a, op_b = b"\x01\x02", b"\x03\x04"
+        m1 = generate_mutations(op_a, op_b, 16, "CMP", b"\x01\x02\xff\x00", hammer=True)
+        m2 = generate_mutations(op_a, op_b, 16, "CMP", b"\x01\x02\xff\x00", hammer=True)
+        assert m1 == m2
+        # Pattern moved from offset 0 to offset 2 — offsets must follow.
+        m3 = generate_mutations(op_a, op_b, 16, "CMP", b"xx\x01\x02", hammer=True)
+        assert m3
+        assert all(off == 2 for offs, _, _ in m3 for off in offs), (
+            f"expected offsets at 2, got {[offs for offs, _, _ in m3]}"
+        )
+        # Non-applicable pairs stay non-applicable on the cached path.
+        m4 = generate_mutations(op_a, op_b, 16, "CMP", b"\xff\xfe\x00\x00", hammer=True)
+        assert m4 == generate_mutations(op_a, op_b, 16, "CMP", b"\xff\xfe\x00\x00", hammer=True)

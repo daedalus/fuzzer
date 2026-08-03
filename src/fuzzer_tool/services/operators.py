@@ -14,6 +14,7 @@ source of truth in ``fuzzer_tool.core.operator_registry.REGISTRY``; this
 module only supplies the ``_op_*`` handlers that the registry dispatches to.
 """
 
+import bisect
 import logging
 import struct
 
@@ -68,6 +69,7 @@ class OperatorEngine:
         # Rebuilt only when the pair list grows or is recreated (collect_tokens),
         # avoiding O(N log N) sort on every invocation (~2,500 sorts saved per run).
         self._redqueen_sorted_pairs: list | None = None
+        self._redqueen_pair_lengths: list | None = None
         self._redqueen_sorted_version: int = 0
 
     # ── Operator handlers ──────────────────────────────────────────────
@@ -195,20 +197,19 @@ class OperatorEngine:
         if not self._redqueen_sorted_pairs or _version != self._redqueen_sorted_version:
             _temp = [(len(p[0]), p) for p in cmplog_pairs]
             _temp.sort(key=lambda x: x[0])
-            self._redqueen_sorted_pairs = [p for _, p in _temp]
+            self._redqueen_sorted_pairs = [p for n, p in _temp if n >= 2]
+            self._redqueen_pair_lengths = [n for n, _p in _temp if n >= 2]
             self._redqueen_sorted_version = _version
-        pairs = []
-        for p in self._redqueen_sorted_pairs:
-            plen = len(p[0])
-            if plen < 2:
-                continue
-            if plen > len(buf):
-                break  # remaining pairs are all longer
-            pairs.append(p)
+        # Pairs with 2 <= len(op_a) <= len(buf) form a prefix of the
+        # length-sorted list — find the cutoff with a bisect instead of
+        # rescanning every pair on every invocation.
+        cutoff = bisect.bisect_right(self._redqueen_pair_lengths, len(buf))
+        pairs = self._redqueen_sorted_pairs[:cutoff]
         if not pairs:
             return
         _sample_idx = rng.sample(len(pairs), min(3, len(pairs)))
         sample = [pairs[i] for i in _sample_idx]
+        input_bytes = bytes(buf)
 
         for op_a, op_b in sample:
             cmp_size = 512 if len(op_a) > 8 or len(op_b) > 8 else max(len(op_a), len(op_b)) * 8
@@ -219,7 +220,7 @@ class OperatorEngine:
                 op_b,
                 cmp_size,
                 cmp_type,
-                bytes(buf),
+                input_bytes,
                 hammer=True,
                 is_hash=f._cmplog.is_hash_candidate
                 if hasattr(f._cmplog, "is_hash_candidate")

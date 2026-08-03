@@ -305,6 +305,16 @@ for length in range(0, 4):
 
 MAX_MUTATIONS_PER_PAIR = 256
 
+# Cache of input-independent encoder results for generate_mutations().
+# Key: (cmp_size, cmp_type, operand_a, operand_b, hammer).
+# Value: {encoder: (pattern_chunks, repl_variants | None)} — only the
+# applicable encoders appear, and replacement variants are filled in
+# lazily on the first call that actually finds the pattern in the input.
+# Cleared wholesale when it outgrows the cap so stale cmplog pairs don't
+# accumulate.
+_RQ_MUTATIONS_CACHE_MAX = 20000
+_rq_mutations_cache: dict = {}
+
 
 def find_offsets(data: bytes, pattern: bytes) -> list[int]:
     """Find all occurrences of *pattern* in *data* (including overlaps)."""
@@ -337,6 +347,11 @@ def generate_mutations(
     *operand_a* in *input_data*, then generates replacement variants from
     the encoded form of *operand_b*.
 
+    The encoder applicability checks, encoded pattern chunks, and encoded
+    replacement variants depend only on the pair — not on *input_data* —
+    so they are cached per pair (one lookup per call). Only the offset
+    search and permutation loop run per call.
+
     Args:
         operand_a: The first operand captured from the CMP instruction.
         operand_b: The second operand (the value we want to replace with).
@@ -353,6 +368,7 @@ def generate_mutations(
     _find_offsets = find_offsets
     _get_encoded = _get_encoded_variants
     _product = product
+    _cache = _rq_mutations_cache
     MAX = MAX_MUTATIONS_PER_PAIR
 
     # Pre-allocate mutations list — capped at MAX per encoder × encoder count
@@ -363,15 +379,29 @@ def generate_mutations(
     if is_hash is not None and is_hash(operand_a, operand_b):
         return mutations
 
-    for enc in BUILTIN_ENCODERS:
-        if not enc.is_applicable(cmp_size, cmp_type, operand_a, operand_b):
-            continue
+    pair_key = (cmp_size, cmp_type, operand_a, operand_b, hammer)
+    enc_cache = _cache.get(pair_key)
+    if enc_cache is None:
+        # First touch: evaluate every encoder once. Only the applicable
+        # ones are kept — the common case iterates ~10 encoders instead
+        # of all 39, with no per-encoder dict lookups on later calls.
+        enc_cache = {}
+        for enc in BUILTIN_ENCODERS:
+            if not enc.is_applicable(cmp_size, cmp_type, operand_a, operand_b):
+                continue
+            # Encode operand_a to get the pattern chunks to search for.
+            # Replacement variants are computed lazily on the first hit:
+            # most pairs' patterns never appear in the input, and encoding
+            # up to 129 variants is the most expensive step.
+            pattern_chunks = tuple(enc.encode(operand_a))
+            enc_cache[enc] = (pattern_chunks, None)
+        _cache[pair_key] = enc_cache
+        if len(_cache) > _RQ_MUTATIONS_CACHE_MAX:
+            _cache.clear()
 
-        # Encode operand_a to get the pattern chunks to search for.
-        pattern_chunks = enc.encode(operand_a)
+    for enc, (pattern_chunks, repl_variants) in enc_cache.items():
         if not pattern_chunks:
             continue
-        pattern_key = tuple(pattern_chunks)
 
         # Find offsets for each pattern chunk.
         offset_lists = []
@@ -386,8 +416,13 @@ def generate_mutations(
         if not all_found:
             continue
 
-        # Generate replacement variants from operand_b THROUGH the same encoder.
-        repl_variants = _get_encoded(enc, cmp_type, cmp_size, operand_b, hammer)
+        if repl_variants is None:
+            # Generate replacement variants from operand_b THROUGH the same
+            # encoder, only now that the pattern was actually found.
+            repl_variants = tuple(_get_encoded(enc, cmp_type, cmp_size, operand_b, hammer))
+            enc_cache[enc] = (pattern_chunks, repl_variants)
+
+        pattern_key = pattern_chunks
 
         # Generate up to MAX permutations
         count = 0
@@ -396,9 +431,9 @@ def generate_mutations(
                 break
             for repl in repl_variants:
                 if pattern_key != repl:
-                    key = (offset_combo, repl)
-                    if key not in seen:
-                        seen.add(key)
+                    k = (offset_combo, repl)
+                    if k not in seen:
+                        seen.add(k)
                         mutations.append((offset_combo, repl, enc))
                         count += 1
 
@@ -416,8 +451,6 @@ def _get_encoded_variants(
     """
     # Local bindings for hot path
     _enc_encode = enc.encode
-    pack = _struct_pack
-    keys = _UNPACK_KEYS
 
     # Generate raw value variants into a pre-allocated list
     raw_variants: list[bytes]
