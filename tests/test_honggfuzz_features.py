@@ -147,6 +147,82 @@ class TestGradientCmp:
         result = gradient_cmp(data, cmp_values)
         assert isinstance(result, bytes)
 
+    def test_output_identical_to_legacy_algorithm(self):
+        """The candidate-window implementation must produce byte-identical
+        output to the legacy full-scan algorithm for the same seeded rng."""
+        import random
+
+        from fuzzer_tool.core.gradient_cmp import gradient_cmp
+
+        def legacy(data, cmp_values, rng):
+            r = rng
+            if not data or not cmp_values:
+                return data
+            buf = bytearray(data)
+            for cmp_a, cmp_b in cmp_values:
+                if len(cmp_a) == 0 or len(cmp_a) > 32:
+                    continue
+                for cmp_val in (cmp_a, cmp_b):
+                    if len(cmp_val) == 0:
+                        continue
+                    for off in range(len(buf) - len(cmp_val) + 1):
+                        matches = 0
+                        first_diff = len(cmp_val)
+                        diff_mask = 0
+                        for i in range(len(cmp_val)):
+                            if buf[off + i] == cmp_val[i]:
+                                matches += 1
+                            elif first_diff == len(cmp_val):
+                                first_diff = i
+                                diff_mask = buf[off + i] ^ cmp_val[i]
+                        if 0 < matches < len(cmp_val) and first_diff < len(cmp_val):
+                            target_off = off + first_diff
+                            strategy = r.randint(0, 5)
+                            if strategy == 0:
+                                buf[target_off] = cmp_val[first_diff]
+                            elif strategy == 1:
+                                buf[target_off] ^= diff_mask
+                            elif strategy == 2:
+                                if buf[target_off] < cmp_val[first_diff]:
+                                    buf[target_off] = min(buf[target_off] + 1, 255)
+                                else:
+                                    buf[target_off] = max(buf[target_off] - 1, 0)
+                            elif strategy == 3:
+                                buf[target_off] = (buf[target_off] + cmp_val[first_diff]) // 2
+                            elif strategy == 4:
+                                end = min(off + len(cmp_val), len(buf))
+                                buf[off:end] = cmp_val[: end - off]
+                                return bytes(buf)
+                            else:
+                                buf[target_off] ^= 1 << r.randint(0, 7)
+                            return bytes(buf)
+            if cmp_values:
+                cmp_val = cmp_values[r.randint(0, len(cmp_values) - 1)][0]
+                if 0 < len(cmp_val) <= 32:
+                    pos = r.randint(0, len(buf))
+                    return bytes(buf[:pos]) + cmp_val + bytes(buf[pos:])
+            return bytes(buf)
+
+        rng_old = random.Random(1234)
+        rng_new = random.Random(1234)
+        for trial in range(300):
+            n = random.Random(trial).randint(0, 40)
+            data = bytes(random.Random(trial + 1).randrange(256) for _ in range(n))
+            pairs = []
+            for _ in range(random.Random(trial + 2).randint(0, 8)):
+                a = bytes(
+                    random.Random(trial + 3).randrange(256)
+                    for _ in range(random.Random(trial + 5).randint(1, 40))
+                )
+                b = bytes(
+                    random.Random(trial + 4).randrange(256)
+                    for _ in range(random.Random(trial + 6).randint(1, 40))
+                )
+                pairs.append((a, b))
+            out_old = legacy(data, pairs, rng_old)
+            out_new = gradient_cmp(data, pairs, rng_new)
+            assert out_new == out_old, f"trial {trial}: data={data!r} pairs={pairs!r}"
+
 
 # ── Crash Stack Hash ────────────────────────────────────────────────
 
