@@ -111,6 +111,11 @@ class MonteCarloScheduler:
         self._draw_refresh_interval = 16
         self._selects_since_refresh = 0
 
+        # Monotonic record() counter driving periodic arm decay. Distinct
+        # from len(_op_success_history), which is capped at maxlen=2000 and
+        # would otherwise decay on every call once 2000 % interval == 0.
+        self._record_count = 0
+
         # Per-operator dispersion index for non-stationarity detection.
         # When D > 1.5, the operator's success process is bursty (non-i.i.d.),
         # meaning the Beta posterior is overconfident — older observations
@@ -221,24 +226,28 @@ class MonteCarloScheduler:
             weight: Reward weight (default 1.0). Surprisal-weighted calls
                 pass a value in (0, 1] proportional to discovery rarity.
         """
+        self._record_count += 1
         self._op_success_history.append((name, success))
+
+        arm_alpha = self.arm_alpha
+        arm_beta = self.arm_beta
 
         # Decay periodically to avoid zeroing out alpha/beta
         if (
             self.arm_decay < 1.0
             and self.decay_interval > 0
-            and len(self._op_success_history) % self.decay_interval == 0
+            and self._record_count % self.decay_interval == 0
         ):
-            for k in self.arm_alpha:
-                self.arm_alpha[k] *= self.arm_decay
-            for k in self.arm_beta:
-                self.arm_beta[k] *= self.arm_decay
+            for k in arm_alpha:
+                arm_alpha[k] *= self.arm_decay
+            for k in arm_beta:
+                arm_beta[k] *= self.arm_decay
 
         if success:
-            self.arm_alpha[name] = self.arm_alpha.get(name, 1.0) + weight
+            arm_alpha[name] = arm_alpha.get(name, 1.0) + weight
             self._pooled_successes += weight
         else:
-            self.arm_beta[name] = self.arm_beta.get(name, 1.0) + 1
+            arm_beta[name] = arm_beta.get(name, 1.0) + 1
             self._pooled_failures += 1.0
 
         # Per-operator dispersion index tracking (for diagnostics only).

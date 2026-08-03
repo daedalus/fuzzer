@@ -208,6 +208,24 @@ class TestMonteCarloScheduler:
             mc.record("A", success=True)
         assert mc.arm_alpha["A"] == 11.0
 
+    def test_decay_interval_uses_record_counter_not_deque_length(self):
+        """Decay must fire every decay_interval records even after the success
+        history deque fills (maxlen=2000) — a capped-deque length check would
+        decay on every call once 2000 % interval == 0."""
+        mc = MonteCarloScheduler(arm_decay=0.5, decay_interval=100)
+        mc.init_arm("A")
+        n = 2050
+        for _ in range(n):
+            mc.record("A", success=False)
+        # Independent derivation: each failure adds 1 to beta; every 100th
+        # record decays all arms by 0.5 BEFORE the update is applied.
+        beta = 1.0
+        for k in range(1, n + 1):
+            if k % 100 == 0:
+                beta *= 0.5
+            beta += 1.0
+        assert abs(mc.arm_beta["A"] - beta) < 1e-9
+
     def test_operator_dispersion_tracking(self):
         """Per-operator DispersionIndex tracks binary success correctly."""
         mc = MonteCarloScheduler(arm_decay=0.9, decay_interval=9999)
