@@ -35,6 +35,7 @@
 - [x] **Cmplog optimization** — adaptive periodic collection (1 in 20 iterations once pool exceeds 2000 entries).
 - [x] **Corpus distillation on-the-fly** — `--max-corpus` triggers auto-minimization when corpus exceeds threshold.
 - [x] **CLI hotpath profiling** — `--profile-hotpath` cProfile integration into fuzz mode (tottime/cumtime/ncalls tables + `.prof` dump via `--profile-out`).
+- [x] **array.array for cold bounded histories** — corpus-size history, the four tuple histories (discovery/crash-rate/entropy/coverage-timeline), elo prediction-error lists, redqueen pair-length index converted to `array("Q")`/`array("d")`/`array("I")` (7-9x memory per container, runtime verified neutral). EdgeTracker edge-count maps deliberately left as sparse dicts (array.array loses on scalar RMW + iteration; reads already numpy-vectorized).
 
 ## Infrastructure
 - [ ] **Dockerfile** for reproducible builds and CI
