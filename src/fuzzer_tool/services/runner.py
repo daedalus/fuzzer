@@ -162,6 +162,10 @@ class TargetRunner:
         rc, stderr, pid = run_target_stdin(
             f.target, data, f.timeout, env=env, perf_counters=f._perf_counters
         )
+        f._last_child_pid = pid
+        if f._perf_counters:
+            f._last_perf_deltas = f._perf_counters.read_and_reset()
+        return rc, stderr
 
     def _ptrace_handle_breakpoint(self, pid: int, libc, cov: PtraceCoverage, regs_buf) -> bool:
         if not cov._is_x86_64:
@@ -346,9 +350,7 @@ class TargetRunner:
             return True
         if "Segmentation fault" in stderr:
             return True
-        if "Aborted" in stderr:
-            return True
-        return False
+        return "Aborted" in stderr
 
     def is_crash(self, returncode: int, stderr: str) -> bool:
         f = self.f

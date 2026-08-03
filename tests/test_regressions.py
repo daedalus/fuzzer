@@ -20,6 +20,65 @@ from unittest.mock import MagicMock
 import pytest
 
 
+class TestCmplogStdinMissingReturn:
+    """run_target must return (rc, stderr) on every backend path.
+
+    With --cmplog active and file_mode off, the fast path is skipped and
+    control falls through to run_target_stdin, which used to drop its
+    result — run_target returned None and every caller crashed on unpack.
+    """
+
+    def _make_fuzzer(self, cmplog):
+        f = MagicMock()
+        f._target_shm_covs = {}
+        f.target = "/bin/true"
+        f.multi_targets = None
+        f.shm_cov = None
+        f._cmplog = cmplog
+        f._inprocess_runner = None
+        f._persistent_runner = None
+        f._network_runner = None
+        f.ptrace_cov = None
+        f._forkserver = None
+        f.use_coverage = True
+        f.map_size = 65536
+        f.file_mode = False
+        f.timeout = 1.0
+        f._perf_counters = None
+        f._last_child_pid = None
+        return f
+
+    def test_run_target_returns_tuple_with_cmplog_stdin(self, monkeypatch):
+        """cmplog + stdin must return (rc, stderr) instead of None."""
+        from fuzzer_tool.services.runner import TargetRunner
+
+        f = self._make_fuzzer(cmplog=MagicMock())
+        runner = TargetRunner(f)
+        monkeypatch.setattr(
+            "fuzzer_tool.services.runner.run_target_stdin", lambda *a, **k: (0, "", 4242)
+        )
+
+        rc, stderr = runner.run_target(b"data")
+        assert rc == 0
+        assert stderr == ""
+        assert f._last_child_pid == 4242
+
+    def test_run_target_fast_path_returns_tuple(self, monkeypatch):
+        """Plain stdin (no cmplog) must still return (rc, stderr)."""
+        from fuzzer_tool.services.runner import TargetRunner
+
+        f = self._make_fuzzer(cmplog=None)
+        runner = TargetRunner(f)
+        monkeypatch.setattr(
+            "fuzzer_tool.services.runner.run_target_fast", lambda *a, **k: (0, "", 4242)
+        )
+
+        rc, stderr = runner.run_target(b"data")
+        assert rc == 0
+        assert stderr == ""
+        assert f._last_child_pid == 4242
+
+
 class TestHashConsistency:
     """Ensure hash_data() is used everywhere filenames are matched against content."""
 
