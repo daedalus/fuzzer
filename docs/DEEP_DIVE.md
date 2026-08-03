@@ -73,7 +73,7 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 - **Auto-sized edge bitmap**: `estimate_map_size()` from branch density × .text size replaces hardcoded 65536
 - **Good-Turing estimation**: prospective edge discovery count with saturation confidence
 - **KS significance testing**: replaces fixed JS thresholds with sample-size-aware p-values
-- **CRPS scoring**: proper scoring rule for execution time calibration (fixed indicator direction bug)
+- **CRPS scoring**: proper scoring rule for execution time calibration (fixed indicator direction bug); computed per-execution as a numpy-vectorized prefix recurrence (3.9x, equivalence-tested vs the legacy walk)
 
 ### Distribution Diagnostics
 - **Running statistics** (`core/running_stats.py`): Welford/Pébay online algorithm for O(1) mean, variance, stddev, skewness, and excess kurtosis — unbounded or sliding-window variants
@@ -122,7 +122,7 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 - **Perplexity (MDL codelength)**: structurally novel seeds get 1.0-2.0x weight
 - **NCD similarity**: Normalized Compression Distance between corpus entries
 - **Simulated annealing**: temperature-scaled exploration/exploitation balance
-- **Hamming bitmap distance**: fast byte-level seed-to-seed similarity on edge bitmaps
+- **Hamming bitmap distance**: fast byte-level seed-to-seed similarity on edge bitmaps (numpy `count_nonzero` over zero-copy uint8 views above 64 bytes — ~10-100x for large equal-length inputs; genexpr below, matching `levenshtein_align`'s dispatch)
 - **Near-duplicate detection**: finds seed pairs with near-identical coverage via Hamming + LSH
 
 ### Information Theory
