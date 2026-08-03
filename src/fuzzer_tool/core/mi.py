@@ -20,6 +20,18 @@ from collections import defaultdict
 # bound it to O(positions × MAX_EDGES_PER_CELL).
 MAX_EDGES_PER_CELL = 64
 
+# Maximum total (position, byte_val, edge) cells across the joint.
+# MAX_EDGES_PER_CELL alone is not enough: max_positions positions x 256
+# byte values x MAX_EDGES_PER_CELL edges reaches tens of GB (the observed
+# 796MB mi.json / multi-GB RSS blowup).  When the budget is exceeded the
+# least-observed position is evicted (joint + marginals), bounding memory.
+MAX_JOINT_CELLS = 2_000_000
+
+# Maximum byte positions the tracker will ever track (independent of the
+# fuzzer's max_len, which auto-grows to 65536).  Positions beyond this are
+# skipped in record(); the cap keeps the joint bounded.
+MI_MAX_POSITIONS = 4096
+
 
 class MutualInformationTracker:
     """Track mutual information between byte positions and coverage edges.
@@ -53,6 +65,9 @@ class MutualInformationTracker:
         # Total observations per position
         self.position_counts: dict[int, int] = defaultdict(int)
         self.total_observations: int = 0
+        # Live count of joint (position, byte_val, edge) cells, bounded by
+        # MAX_JOINT_CELLS via least-observed-position eviction.
+        self._joint_cells = 0
 
     def record(self, input_bytes: bytes, hit_edges: set[int], map_size: int = 65536) -> None:
         """Record one input-coverage pair.
@@ -90,10 +105,22 @@ class MutualInformationTracker:
             self.position_counts[pos] += 1
             self.byte_marginal[pos][byte_val] += 1
             # Only update the expensive joint distribution once the position
-            # has enough observations to compute MI.
-            if self.position_counts[pos] >= self.min_observations:
+            # has enough observations to compute MI.  New (position, byte_val,
+            # edge) cells are rejected once MAX_JOINT_CELLS is exhausted so
+            # the joint is hard-bounded; existing cells keep incrementing
+            # (evicting least-observed positions instead would thrash, since
+            # evicted positions are re-observed and immediately re-victimized).
+            if (
+                self.position_counts[pos] >= self.min_observations
+                and self._joint_cells < MAX_JOINT_CELLS
+            ):
                 for bv_edges, edge in enumerate(hit_edges):
-                    self.joint[pos][byte_val][edge] += 1
+                    if self._joint_cells >= MAX_JOINT_CELLS:
+                        break
+                    old = self.joint[pos][byte_val].get(edge, 0)
+                    if old == 0:
+                        self._joint_cells += 1
+                    self.joint[pos][byte_val][edge] = old + 1
                     # Update edge marginal array
                     if edge >= self._edge_marginal_size:
                         self.edge_marginal.extend(
@@ -103,6 +130,27 @@ class MutualInformationTracker:
                     self.edge_marginal[edge] += 1
                     if bv_edges >= MAX_EDGES_PER_CELL:
                         break
+
+    def _evict_least_observed(self) -> None:
+        """Drop the least-observed position with joint cells.
+
+        Used only to trim an oversized state loaded from disk: the joint is
+        hard-capped during recording, so this runs at most once per load.
+        """
+        if not self.joint:
+            return
+        victim = min(self.joint, key=lambda p: self.position_counts.get(p, 0))
+        joint_pos = self.joint.pop(victim)
+        for byte_vals in joint_pos.values():
+            for edge, count in byte_vals.items():
+                self.edge_marginal[edge] -= count
+                self._joint_cells -= 1
+        self.byte_marginal.pop(victim, None)
+        self.position_counts.pop(victim, None)
+        self._total_edges = None
+        self._invalidate_max_mi_cache()
+        if hasattr(self, "_wp_sorted_pos"):
+            self._wp_sorted_pos = None
 
     def mi(self, position: int) -> float:
         """Compute I(X_pos; Y) in bits.
@@ -399,4 +447,11 @@ class MutualInformationTracker:
                     bv = (key >> 8) & 0xFF
                     edge = key & 0xFF
                     self.joint[pos][bv][edge] = v
+        # Recount cells and trim loaded state that exceeds the budget so a
+        # legacy oversized mi.json cannot re-trigger the memory blowup.
+        self._joint_cells = sum(
+            len(edges) for pos_vals in self.joint.values() for edges in pos_vals.values()
+        )
+        while self._joint_cells > MAX_JOINT_CELLS:
+            self._evict_least_observed()
         return True

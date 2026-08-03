@@ -29,7 +29,7 @@ from fuzzer_tool.adapters.process import (
 from fuzzer_tool.adapters.shm import ShmCoverage
 from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.markov import MarkovChain, MarkovEnsemble
-from fuzzer_tool.core.mi import MutualInformationTracker
+from fuzzer_tool.core.mi import MI_MAX_POSITIONS, MutualInformationTracker
 from fuzzer_tool.core.operator_registry import REGISTRY
 from fuzzer_tool.core.sanitizer import SanitizerReport
 from fuzzer_tool.core.schedulers import (
@@ -895,12 +895,18 @@ class Fuzzer:
         self._use_bayesian = bayesian
         self._use_mi = mi_guided
         self._mi = (
-            MutualInformationTracker(max_positions=max_len, min_observations=50)
+            # Cap tracked positions: max_len auto-grows to 65536 and the MI
+            # joint is positions x 256 byte values x MAX_EDGES_PER_CELL cells —
+            # unbounded positions is a multi-GB memory blowup.
+            MutualInformationTracker(
+                max_positions=min(max_len, MI_MAX_POSITIONS), min_observations=50
+            )
             if mi_guided
             else None
         )
-        # Load persisted MI state
-        if self._use_mi and self._mi and self._mi_path.exists():
+        # Load persisted MI state (resume-gated like state.json — an oversized
+        # mi.json otherwise becomes a multi-GB object tree at every startup)
+        if self._use_mi and self._mi and self.resume and self._mi_path.exists():
             self._mi.load(str(self._mi_path))
             log.info("MI tracker loaded from %s", self._mi_path)
 
