@@ -18,6 +18,8 @@ import struct
 import zlib
 
 from fuzzer_tool.core.berlekamp_massey import (
+    _reverse_bits,
+    _reverse_byte,
     berlekamp_massey,
     compute_checksum,
     lfsr_step,
@@ -177,10 +179,111 @@ def test_gcd_recovers_standard_poly():
         assert compute_checksum(data, poly=poly, width=32) == crc
 
 
+def test_reverse_bits_helpers():
+    """_reverse_bits/_reverse_byte are self-inverse and match known values."""
+    assert _reverse_byte(0b10110000) == 0b00001101
+    assert _reverse_byte(0) == 0
+    assert _reverse_byte(0xFF) == 0xFF
+    assert _reverse_bits(0xEDB88320, 32) == 0x04C11DB7  # standard <-> normal CRC-32 forms
+    for x in (0, 1, 0x12345678, 0xFFFFFFFF):
+        assert _reverse_bits(_reverse_bits(x, 32), 32) == x
+
+
 def test_gcd_too_few_pairs():
     """With < 2 pairs, returns None."""
     assert recover_polynomial_gcd([], width=32) is None
     assert recover_polynomial_gcd([(b"x", 1)], width=32) is None
+
+
+def test_gcd_recovers_standard_poly_reflected():
+    """GCD-of-syndromes recovers the standard (real-world) reflected
+    CRC-32 polynomial from independent pairs — the common case that the
+    non-reflected-only path can't handle, since virtually every
+    real-world CRC-32 (zlib, gzip, PNG, ZIP, Ethernet) is reflected.
+    """
+    STANDARD_POLY = 0xEDB88320
+    pairs = []
+    for i in range(64):
+        data = bytes([i, (i * 7) & 0xFF, (i * 13) & 0xFF])
+        crc = compute_checksum(data, poly=STANDARD_POLY, width=32, reflect_in=True)
+        pairs.append((data, crc))
+
+    poly = recover_polynomial_gcd(pairs, width=32, reflected=True)
+    assert poly == STANDARD_POLY
+    for data, crc in pairs:
+        assert compute_checksum(data, poly=poly, width=32, reflect_in=True) == crc
+
+
+def test_gcd_recovers_custom_poly_reflected():
+    """Recovers a genuinely different, non-standard real-world polynomial
+    (CRC-32C / Castagnoli) — proves this isn't coincidentally matching a
+    hardcoded standard-CRC32 fallback somewhere.
+    """
+    CRC32C_POLY = 0x82F63B78
+    pairs = []
+    for i in range(64):
+        data = bytes([i, (i * 3 + 1) & 0xFF])
+        crc = compute_checksum(data, poly=CRC32C_POLY, width=32, reflect_in=True)
+        pairs.append((data, crc))
+
+    poly = recover_polynomial_gcd(pairs, width=32, reflected=True)
+    assert poly == CRC32C_POLY
+    for data, crc in pairs:
+        assert compute_checksum(data, poly=poly, width=32, reflect_in=True) == crc
+
+
+def test_gcd_result_masked_to_width():
+    """The recovered polynomial is masked to `width` bits — the
+    conventional truncated representation (0xEDB88320), not the raw GCD
+    result with an extra explicit leading bit (0x1EDB88320).
+    """
+    pairs = []
+    for i in range(64):
+        data = bytes([i])
+        crc = compute_checksum(data, poly=0x04C11DB7, width=32)
+        pairs.append((data, crc))
+
+    poly = recover_polynomial_gcd(pairs, width=32)
+    assert poly is not None
+    assert poly <= 0xFFFFFFFF, f"result should be masked to 32 bits, got {hex(poly)}"
+
+
+def test_checksum_learner_recovers_reflected_from_independent_pairs():
+    """End-to-end: ChecksumLearner recovers a real-world-style reflected
+    CRC-32 (init=0, final_xor=0 domain — the domain _recover() targets)
+    from independent (data, checksum) pairs sourced from different
+    random buffers, the way a real fuzzing corpus would produce them.
+    This is the scenario the reflected-GCD fix directly addresses.
+    """
+    import random
+
+    from fuzzer_tool.core.checksum_learner import ChecksumLearner
+
+    class _FakeFuzzer:
+        pass
+
+    STANDARD_POLY = 0xEDB88320
+    rng = random.Random(5)
+    learner = ChecksumLearner(_FakeFuzzer(), min_pairs=64)
+
+    pairs = []
+    for _ in range(80):
+        n = rng.randint(4, 40)
+        data = bytes(rng.randint(0, 255) for _ in range(n))
+        crc = compute_checksum(data, poly=STANDARD_POLY, width=32, reflect_in=True)
+        pairs.append((data, crc))
+    learner.add_pairs(pairs)
+
+    poly = learner.ensure_poly()
+    assert poly == STANDARD_POLY
+    assert learner._reflect is True
+
+    # Predict on genuinely unseen data.
+    for _ in range(50):
+        n = rng.randint(4, 40)
+        data = bytes(rng.randint(0, 255) for _ in range(n))
+        true_crc = compute_checksum(data, poly=STANDARD_POLY, width=32, reflect_in=True)
+        assert learner.compute_checksum(data) == true_crc
 
 
 # ---------------------------------------------------------------------------

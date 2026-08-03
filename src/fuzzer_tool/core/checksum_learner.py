@@ -205,6 +205,18 @@ class ChecksumLearner:
             self._set_model(poly)
             return
 
+        # Reflected GCD-of-syndromes: same technique, but for the
+        # reflected (LSB-first) shift convention used by virtually every
+        # real-world CRC-32 — zlib, gzip, PNG, ZIP, Ethernet. This is the
+        # common case in practice, so it's tried before the BM fallback,
+        # which needs sequential register states independent pairs rarely
+        # provide.
+        poly = recover_polynomial_gcd(unique, width=self._poly_width, reflected=True)
+        if poly and poly != 0 and self._verify(poly, unique, reflect=True):
+            self._reflect = True
+            self._set_model(poly)
+            return
+
         # BM fallback: recovers sequential LFSR output streams (reflected
         # domain, reversed-form polynomial).  Requires the checksum values
         # to be one-step-apart register states, which realistic corpora

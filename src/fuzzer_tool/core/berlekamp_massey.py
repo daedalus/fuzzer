@@ -24,6 +24,26 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 # ---------------------------------------------------------------------------
+# Bit-reversal helpers (shared by compute_checksum's reflect_out and by
+# recover_polynomial_gcd's reflected-domain support, below).
+# ---------------------------------------------------------------------------
+
+
+def _reverse_bits(x: int, width: int) -> int:
+    """Reverse the low *width* bits of *x*."""
+    result = 0
+    for _ in range(width):
+        result = (result << 1) | (x & 1)
+        x >>= 1
+    return result
+
+
+def _reverse_byte(b: int) -> int:
+    """Reverse the bits of a single byte (0-255)."""
+    return _reverse_bits(b, 8)
+
+
+# ---------------------------------------------------------------------------
 # Core BM algorithm over GF(2)
 # ---------------------------------------------------------------------------
 
@@ -246,7 +266,7 @@ def compute_checksum(
         result = reg & mask
 
     if reflect_out:
-        result = int("{:0{w}b}".format(result, w=width)[::-1], 2)
+        result = _reverse_bits(result, width)
     return (result ^ final_xor) & mask
 
 
@@ -287,6 +307,7 @@ def recover_polynomial_gcd(
     width: int = 32,
     init: int = 0,
     final_xor: int = 0,
+    reflected: bool = False,
 ) -> int | None:
     """Recover a CRC polynomial from independent ``(data, checksum)`` pairs.
 
@@ -299,19 +320,50 @@ def recover_polynomial_gcd(
     caller should adjust the pairs so the syndrome formula holds, or
     iterate over common ``(init, final_xor)`` combinations.
 
+    This handles the non-reflected (MSB-first) case directly. Virtually
+    every real-world CRC-32 in the wild — zlib, gzip, PNG, ZIP, Ethernet —
+    is *reflected* (LSB-first shifting, reversed-form polynomial like
+    ``0xEDB88320``), which this syndrome formula does not directly apply
+    to. Pass ``reflected=True`` for that case: reflected CRC computation
+    is mathematically equivalent to the non-reflected algorithm run on
+    each input byte with its own bits reversed (byte *order* unchanged),
+    using the bit-reversed (normal-form) polynomial, with the checksum,
+    init, and final_xor also bit-reversed — this transform is applied
+    here, the non-reflected recovery runs on the transformed pairs, and
+    the recovered polynomial is bit-reversed back to reflected form
+    before returning. Verified against ``compute_checksum(reflect_in=True)``
+    in ``tests/test_berlekamp_massey.py``.
+
     Args:
         pairs: ``(data, checksum)`` tuples.  *data* is the bytes that
             went into the checksum; *checksum* is the observed value.
         width: Checksum width in bits.
         init: CRC init value (assumed known; subtracted from the syndrome).
         final_xor: CRC final XOR (assumed known; subtracted).
+        reflected: True if the checksum uses reflected (LSB-first) shifting
+            — the overwhelmingly common case for real-world CRC-32s.
 
     Returns:
-        Generator polynomial (normal form: bit *i* = coefficient of
-        ``x^i``), or ``None`` if fewer than 2 pairs are available.
+        Generator polynomial, masked to *width* bits (reflected form if
+        ``reflected=True``, normal form otherwise), or ``None`` if fewer
+        than 2 pairs are available.
     """
     if len(pairs) < 2:
         return None
+
+    if reflected:
+        transformed = [
+            (bytes(_reverse_byte(b) for b in data), _reverse_bits(crc, width))
+            for data, crc in pairs
+        ]
+        poly = recover_polynomial_gcd(
+            transformed,
+            width=width,
+            init=_reverse_bits(init, width),
+            final_xor=_reverse_bits(final_xor, width),
+            reflected=False,
+        )
+        return _reverse_bits(poly, width) if poly is not None else None
 
     syndromes: list[int] = []
     for data, crc in pairs:
@@ -326,4 +378,10 @@ def recover_polynomial_gcd(
             result = s
         elif s != 0:
             result = poly_gcd(result, s)
-    return result
+    if not result:
+        return None
+    # The generator has degree exactly `width`, so bit `width` is always
+    # set in the raw GCD result. Mask it off to match the conventional
+    # truncated representation (e.g. 0xEDB88320, not 0x1EDB88320) that
+    # compute_checksum() and every CRC reference table use.
+    return result & ((1 << width) - 1)
