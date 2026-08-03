@@ -14,6 +14,8 @@ import math
 from array import array
 from collections import defaultdict
 
+import numpy as np
+
 # Maximum edges tracked per (position, byte_val) pair in the joint
 # distribution.  Without this cap the joint dict grows without bound
 # and record() becomes O(positions × total_edges).  With the cap we
@@ -51,6 +53,10 @@ class MutualInformationTracker:
         self._max_mi_cache: dict[int, float] = {}  # input_length -> max_mi
         self._max_mi_cache_limit = 500  # bound cache size
         self._total_edges: int | None = None  # cached sum(edge_marginal)
+        # Zero-copy ndarray view over edge_marginal for vectorized sums;
+        # rebuilt when the array grows (extend() may realloc) or is reloaded.
+        self._edge_marginal_view = None
+        self._edge_marginal_view_len = -1
 
         # Per-position: byte_value -> edge_index -> count
         # P(X_i = v, Y = e)
@@ -123,6 +129,10 @@ class MutualInformationTracker:
                     self.joint[pos][byte_val][edge] = old + 1
                     # Update edge marginal array
                     if edge >= self._edge_marginal_size:
+                        # Release the view first: array.array refuses to
+                        # resize while a frombuffer view exports its buffer.
+                        self._edge_marginal_view = None
+                        self._edge_marginal_view_len = -1
                         self.edge_marginal.extend(
                             array("Q", [0]) * (edge + 1 - self._edge_marginal_size)
                         )
@@ -152,6 +162,20 @@ class MutualInformationTracker:
         if hasattr(self, "_wp_sorted_pos"):
             self._wp_sorted_pos = None
 
+    def _edge_marginal_sum(self) -> int:
+        """sum(edge_marginal) via a zero-copy numpy view.
+
+        Python-level sum() over an array("Q") boxes every C value; a
+        frombuffer view shares the buffer (no copy) and sums vectorized
+        (~40x faster at 64K entries). Rebuilt when the array grows or after
+        a reload; in-place value mutations (eviction) are visible through
+        the view since it shares memory.
+        """
+        if len(self.edge_marginal) != self._edge_marginal_view_len:
+            self._edge_marginal_view = np.frombuffer(self.edge_marginal, dtype=np.uint64)
+            self._edge_marginal_view_len = len(self.edge_marginal)
+        return int(self._edge_marginal_view.sum())
+
     def mi(self, position: int) -> float:
         """Compute I(X_pos; Y) in bits.
 
@@ -164,7 +188,7 @@ class MutualInformationTracker:
             return 0.0
 
         if self._total_edges is None:
-            self._total_edges = sum(self.edge_marginal)
+            self._total_edges = self._edge_marginal_sum()
         total_edges = self._total_edges
         if total_edges == 0:
             return 0.0
@@ -413,6 +437,9 @@ class MutualInformationTracker:
         else:
             self.edge_marginal = array("Q", em)
         self._edge_marginal_size = len(self.edge_marginal)
+        # The array was reassigned: any cached view points at the old buffer.
+        self._edge_marginal_view = None
+        self._edge_marginal_view_len = -1
         self.byte_marginal = defaultdict(
             lambda: defaultdict(int),
             {

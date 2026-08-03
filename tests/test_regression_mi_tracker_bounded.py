@@ -166,3 +166,37 @@ def test_mi_load_resume_gated(tmp_path):
     ):
         f_yes = make(True)
     assert f_yes._mi.total_observations == 2  # loaded with --resume
+
+
+def test_edge_marginal_sum_matches_reference_and_tracks_growth():
+    """_edge_marginal_sum equals the Python sum (independent reference) and
+    rebuilds its view when edge_marginal grows past the cached length."""
+    t = MutualInformationTracker(max_positions=8, min_observations=1)
+    t.record(b"abcd", {1, 5, 9})  # edges 1,5,9 -> marginal sized 10
+    # Reference: plain Python sum over the array (independent of the numpy view).
+    assert t._edge_marginal_sum() == sum(t.edge_marginal)
+    assert t._edge_marginal_sum() == 12  # 3 edges x 4 positions
+    # Growth: a larger edge extends the array; the cached view must rebuild.
+    t.record(b"abcd", {100, 101, 102})
+    assert len(t.edge_marginal) == 103
+    assert t._edge_marginal_sum() == sum(t.edge_marginal)
+    assert t._edge_marginal_sum() == 24
+    # The view is a zero-copy view over the same buffer.
+    assert t._edge_marginal_view is not None
+    assert t._edge_marginal_view_len == len(t.edge_marginal)
+
+
+def test_edge_marginal_view_rebuilds_after_load(tmp_path):
+    """After load() reassigns edge_marginal, the cached view is rebuilt and
+    the sum matches the reference (no dangling-buffer access)."""
+    t = MutualInformationTracker(max_positions=8, min_observations=1)
+    t.record(b"abcd", {1, 5})
+    _ = t._edge_marginal_sum()  # build the view against the live array
+    path = tmp_path / "mi.json"
+    assert t.save(str(path))
+
+    t2 = MutualInformationTracker(max_positions=8, min_observations=1)
+    assert t2.load(str(path))
+    assert t2._edge_marginal_view is None  # invalidated on load
+    assert t2._edge_marginal_sum() == sum(t2.edge_marginal)
+    assert t2._edge_marginal_sum() == 8  # 2 edges x 4 positions
