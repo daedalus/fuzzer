@@ -2,6 +2,7 @@
 
 import json
 import tempfile
+from array import array
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -44,7 +45,8 @@ def _make_mock_fuzzer(**overrides):
     f.op_counts = {"harm": 100, "bit_flip": 50}
     f.op_success = {"harm": 10, "bit_flip": 5}
     f._corpus_size_history = [100, 200, 300]
-    f._discovery_history = [(100, 10), (200, 15), (300, 18)]
+    f._discovery_execs = array("Q", (100, 200, 300))
+    f._discovery_edges = array("Q", (10, 15, 18))
     f._duplicate_reject_count = 3
     f._total_corpus_attempts = 10
     f._crash_replays = {}
@@ -52,7 +54,8 @@ def _make_mock_fuzzer(**overrides):
     f._peak_rss = 29000
     f._peak_eps = 33.7
     f._pruned_count = 0
-    f._crash_rate_history = [(100, 5), (200, 12), (300, 18)]
+    f._crash_rate_execs = array("Q", (100, 200, 300))
+    f._crash_rate_counts = array("Q", (5, 12, 18))
     f.start_time = 0.0
     f.markov = MagicMock()
     f.markov.is_trained.return_value = True

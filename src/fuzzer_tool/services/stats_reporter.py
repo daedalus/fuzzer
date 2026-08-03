@@ -1,6 +1,7 @@
 """Statistics collection and crash replay for the fuzzer."""
 
 import time
+from array import array
 
 
 def format_elapsed(start_time: float) -> str:
@@ -14,7 +15,7 @@ def record_discovery_snapshot(
     exec_count: int,
     shm_cov,
     ptrace_cov,
-    discovery_history: list[tuple[int, int]],
+    discovery_history: tuple[array, array],
 ) -> None:
     """Record (exec_count, cumulative_edges) for discovery rate calculation."""
     edges = 0
@@ -22,18 +23,22 @@ def record_discovery_snapshot(
         edges = shm_cov.cumulative_edges
     elif ptrace_cov:
         edges = ptrace_cov.cumulative_edges
-    discovery_history.append((exec_count, edges))
-    if len(discovery_history) > 500:
-        del discovery_history[:250]
+    discovery_execs, discovery_edges = discovery_history
+    discovery_execs.append(exec_count)
+    discovery_edges.append(edges)
+    if len(discovery_execs) > 500:
+        del discovery_execs[:250]
+        del discovery_edges[:250]
 
 
-def discovery_rate(discovery_history: list[tuple[int, int]]) -> float:
+def discovery_rate(discovery_history: tuple[array, array]) -> float:
     """Edges discovered per 1000 execs, over a sliding window of last 5 snapshots."""
-    if len(discovery_history) < 2:
+    discovery_execs, discovery_edges = discovery_history
+    if len(discovery_execs) < 2:
         return 0.0
-    window = discovery_history[-5:]
-    first_exec, first_edges = window[0]
-    last_exec, last_edges = window[-1]
+    recent = list(zip(discovery_execs[-5:], discovery_edges[-5:], strict=True))
+    first_exec, first_edges = recent[0]
+    last_exec, last_edges = recent[-1]
     exec_delta = last_exec - first_exec
     edge_delta = last_edges - first_edges
     if exec_delta <= 0:

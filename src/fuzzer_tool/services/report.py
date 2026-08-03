@@ -784,10 +784,10 @@ def _spectral_diagnostics(f) -> str:
 
     # Discovery-rate series: first-differences of cumulative edges per sync interval
     try:
-        history = f._discovery_history
-        if history and len(history) >= 51:
+        edges_series = f._discovery_edges
+        if len(edges_series) >= 51:
             has_data = True
-            deltas = [b - a for (_, a), (_, b) in zip(history[:-1], history[1:], strict=True)]
+            deltas = [b - a for a, b in zip(edges_series[:-1], edges_series[1:], strict=True)]
             res = detect_periodicity([float(d) for d in deltas], min_samples=50)
             if res.significant:
                 lines.append(
@@ -1067,13 +1067,9 @@ def _entropy_metrics(f) -> str:
             pass
 
     # Entropy rate of change
-    if (
-        hasattr(f, "_entropy_history")
-        and isinstance(f._entropy_history, list)
-        and len(f._entropy_history) >= 2
-    ):
+    if hasattr(f, "_entropy_execs") and len(f._entropy_execs) >= 2:
         try:
-            recent = f._entropy_history[-10:]
+            recent = list(zip(f._entropy_execs[-10:], f._entropy_vals[-10:], strict=True))
             if len(recent) >= 2:
                 dt = recent[-1][0] - recent[0][0]
                 if dt > 0:
@@ -1082,7 +1078,7 @@ def _entropy_metrics(f) -> str:
                     label = "rising" if rate > 0.001 else ("falling" if rate < -0.001 else "flat")
                     lines.append(f"  Entropy rate (dS/dt): {rate:+.6f} ({label})")
                     lines.append(
-                        f"  Entropy samples:     {len(f._entropy_history)} (window={recent[-1][0] - recent[0][0]} execs)"
+                        f"  Entropy samples:     {len(f._entropy_execs)} (window={recent[-1][0] - recent[0][0]} execs)"
                     )
         except (TypeError, IndexError):
             pass
@@ -1340,26 +1336,29 @@ def _edge_rarity(f) -> str:
 
 def _crash_rate_trend(f) -> str:
     """Crash rate over time."""
-    if not f._crash_rate_history or len(f._crash_rate_history) < 2:
+    if len(f._crash_rate_execs) < 2:
         return ""
 
     lines = ["", "--- Crash Rate Trend ---"]
 
     # Sample at milestones
-    history = f._crash_rate_history
+    execs = f._crash_rate_execs
+    counts = f._crash_rate_counts
     milestones = [100, 500, 1000, 5000, 10000]
     shown = set()
     for m in milestones:
-        for exec_c, crash_c in history:
+        for i, exec_c in enumerate(execs):
             if exec_c >= m and m not in shown:
+                crash_c = counts[i]
                 rate = crash_c / exec_c * 100 if exec_c > 0 else 0
                 lines.append(f"  iter {m:>5d}: {crash_c:>5d} crashes ({rate:.1f}%)")
                 shown.add(m)
                 break
 
     # Final
-    if history:
-        last_exec, last_crash = history[-1]
+    if execs:
+        last_exec = execs[-1]
+        last_crash = counts[-1]
         rate = last_crash / last_exec * 100 if last_exec > 0 else 0
         if last_exec not in shown:
             lines.append(f"  iter {last_exec:>5d}: {last_crash:>5d} crashes ({rate:.1f}%)")

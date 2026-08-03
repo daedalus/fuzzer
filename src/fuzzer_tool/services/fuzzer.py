@@ -13,6 +13,7 @@ import signal
 import sys
 import tempfile
 import time
+from array import array
 from pathlib import Path
 
 try:
@@ -125,7 +126,7 @@ ENTROPY_WINDOW = 4  # samples for rate-of-change computation
 ENTROPY_FLAT_THRESHOLD = 0.001  # rate below which entropy is "flat"
 
 # ── Memory bounds ────────────────────────────────────────────────────
-CRASH_RATE_HISTORY_MAX = 500  # max entries in _crash_rate_history
+CRASH_RATE_HISTORY_MAX = 500  # max entries in _crash_rate_execs/_crash_rate_counts
 MAX_CRASH_SIGS = 10_000  # max unique crash signatures before pruning old entries
 KERNEL_CRASHES_MAX = 500  # max kernel-verified crashes retained
 SEED_SECRETARY_MAX = 500  # max per-seed SecretaryStopping entries
@@ -672,8 +673,10 @@ class Fuzzer:
         self.op_success: dict[str, int] = {}
         self.op_edges: dict[str, int] = {}
         self._peak_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        self._discovery_history: list[tuple[int, int]] = []  # (exec_count, edges)
-        self._crash_rate_history: list[tuple[int, int]] = []  # (exec_count, crash_count)
+        self._discovery_execs: array = array("Q")  # exec_count per discovery snapshot
+        self._discovery_edges: array = array("Q")  # cumulative edges per snapshot
+        self._crash_rate_execs: array = array("Q")  # exec_count per crash-rate sample
+        self._crash_rate_counts: array = array("Q")  # crash_count per sample
         self._duplicate_reject_count = 0
         self._total_corpus_attempts = 0
         self._pruned_count = 0
@@ -1082,7 +1085,8 @@ class Fuzzer:
         self._overlap_density_cache: dict[str, float] = {}
 
         # Entropy rate tracking: (exec_count, shannon_entropy) samples
-        self._entropy_history: list[tuple[int, float]] = []
+        self._entropy_execs: array = array("Q")  # exec_count per entropy sample
+        self._entropy_vals: array = array("d")  # shannon entropy per sample
 
         # Directed distance for targeted fuzzing
         self._distance = None
@@ -2171,9 +2175,11 @@ class Fuzzer:
             eps = self.exec_count / elapsed if elapsed > 0 else 0
             if eps > self._peak_eps:
                 self._peak_eps = eps
-            self._crash_rate_history.append((self.exec_count, self.crash_count))
-            if len(self._crash_rate_history) > CRASH_RATE_HISTORY_MAX:
-                del self._crash_rate_history[:250]
+            self._crash_rate_execs.append(self.exec_count)
+            self._crash_rate_counts.append(self.crash_count)
+            if len(self._crash_rate_execs) > CRASH_RATE_HISTORY_MAX:
+                del self._crash_rate_execs[:250]
+                del self._crash_rate_counts[:250]
 
         for op in set(self._last_ops_used):
             self.op_counts[op] = self.op_counts.get(op, 0) + 1
@@ -2870,9 +2876,11 @@ class Fuzzer:
 
     def _record_entropy_sample(self, sh):
         """Append a Shannon-entropy sample and trim history to a bounded size."""
-        self._entropy_history.append((self.exec_count, sh))
-        if len(self._entropy_history) > ENTROPY_HISTORY_MAX:
-            self._entropy_history = self._entropy_history[-ENTROPY_HISTORY_TRIM:]
+        self._entropy_execs.append(self.exec_count)
+        self._entropy_vals.append(sh)
+        if len(self._entropy_execs) > ENTROPY_HISTORY_MAX:
+            self._entropy_execs = self._entropy_execs[-ENTROPY_HISTORY_TRIM:]
+            self._entropy_vals = self._entropy_vals[-ENTROPY_HISTORY_TRIM:]
 
     def _compute_entropy_flat(self):
         """Return whether the recent Shannon-entropy rate of change is flat.
@@ -2881,13 +2889,14 @@ class Fuzzer:
         False if it is still changing (redistribution, not stagnation),
         or None if there aren't enough samples yet to measure the rate.
         """
-        if len(self._entropy_history) < ENTROPY_WINDOW:
+        if len(self._entropy_execs) < ENTROPY_WINDOW:
             return None
-        recent = self._entropy_history[-ENTROPY_WINDOW:]
-        dt = recent[-1][0] - recent[0][0]
+        recent_execs = self._entropy_execs[-ENTROPY_WINDOW:]
+        recent_vals = self._entropy_vals[-ENTROPY_WINDOW:]
+        dt = recent_execs[-1] - recent_execs[0]
         if dt <= 0:
             return None
-        dS = abs(recent[-1][1] - recent[0][1])
+        dS = abs(recent_vals[-1] - recent_vals[0])
         entropy_rate = dS / dt
         return entropy_rate < ENTROPY_FLAT_THRESHOLD
 

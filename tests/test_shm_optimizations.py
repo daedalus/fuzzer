@@ -36,9 +36,10 @@ class TestTemporalTracking:
         et.record_coverage_snapshot(200)
         et.record_coverage_snapshot(300)
 
-        assert len(et._coverage_timeline) == 3
-        assert et._coverage_timeline[0] == (100, 0)
-        assert et._coverage_timeline[1] == (200, 0)
+        assert len(et._coverage_execs) == 3
+        assert et._coverage_execs[0] == 100
+        assert et._coverage_edges[0] == 0
+        assert et._coverage_execs[1] == 200
 
     def test_coverage_growth_model(self):
         et = EdgeTracker(map_size=1024)
@@ -46,7 +47,8 @@ class TestTemporalTracking:
         for i in range(10):
             exec_count = (i + 1) * 100
             edges = min(50, int(30 * (1 - 0.7 ** (i + 1))))
-            et._coverage_timeline.append((exec_count, edges))
+            et._coverage_execs.append(exec_count)
+            et._coverage_edges.append(edges)
 
         model = et.coverage_growth_model()
         assert model["confidence"] > 0

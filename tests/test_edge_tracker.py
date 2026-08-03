@@ -437,7 +437,8 @@ class TestBayesianGrowthModel:
     def test_insufficient_data_falls_back(self):
         et = EdgeTracker()
         # Only 3 timeline points — below the 5-point threshold
-        et._coverage_timeline = [(0, 0), (100, 10), (200, 15)]
+        et._coverage_execs = array("Q", (0, 100, 200))
+        et._coverage_edges = array("Q", (0, 10, 15))
         result = et.bayesian_coverage_growth_model()
         assert result["method"] == "fallback_insufficient_data"
 
@@ -446,12 +447,12 @@ class TestBayesianGrowthModel:
         # Simulate a coverage growth curve: fast start, slowing down
         import math as _m
 
-        timeline = []
+        execs, edges = array("Q"), array("Q")
         for i in range(20):
-            exec_count = i * 100
-            edges = int(500 * (1 - _m.exp(-0.1 * i)))
-            timeline.append((exec_count, edges))
-        et._coverage_timeline = timeline
+            execs.append(i * 100)
+            edges.append(int(500 * (1 - _m.exp(-0.1 * i))))
+        et._coverage_execs = execs
+        et._coverage_edges = edges
         result = et.bayesian_coverage_growth_model()
         # Should use the Levenberg-Marquardt path, not fallback
         assert result["method"] == "bayesian_laplace"
@@ -470,12 +471,12 @@ class TestBayesianGrowthModel:
         import math as _m
 
         # Simulate fully saturated coverage — rate dropped to near zero
-        timeline = []
+        execs, edges = array("Q"), array("Q")
         for i in range(30):
-            exec_count = i * 100
-            edges = min(200, int(200 * (1 - _m.exp(-0.5 * i))))
-            timeline.append((exec_count, edges))
-        et._coverage_timeline = timeline
+            execs.append(i * 100)
+            edges.append(min(200, int(200 * (1 - _m.exp(-0.5 * i)))))
+        et._coverage_execs = execs
+        et._coverage_edges = edges
         result = et.bayesian_coverage_growth_model()
         assert result["method"] == "bayesian_laplace"
         # P(stalled) should be high for a saturated curve

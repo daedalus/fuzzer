@@ -3,6 +3,7 @@
 import math
 import random
 import tempfile
+from array import array
 from pathlib import Path
 from unittest.mock import patch
 
@@ -375,7 +376,8 @@ class TestSpectralDiagnostics:
         for k in range(160):
             tracker.record(0.01 + 0.004 * math.sin(2 * math.pi * k / 16) + 0.001 * rng.random())
         f._exec_time_tracker = tracker
-        f._discovery_history = []
+        f._discovery_execs = array("Q")
+        f._discovery_edges = array("Q")
         out = report_mod._spectral_diagnostics(f)
         assert "PERIODIC" in out
         assert "Exec time" in out
@@ -394,7 +396,8 @@ class TestSpectralDiagnostics:
             burst = 8 if i % 10 == 0 else 0
             cumulative = (i + 1) * 2 + burst
             history.append((i, cumulative))
-        f._discovery_history = history
+        f._discovery_execs = array("Q", (e for e, _ in history))
+        f._discovery_edges = array("Q", (c for _, c in history))
         out = report_mod._spectral_diagnostics(f)
         assert "Discovery rate: PERIODIC" in out
         assert "sync artifact" in out
@@ -407,6 +410,7 @@ class TestSpectralDiagnostics:
         for _ in range(160):
             tracker.record(0.01)
         f._exec_time_tracker = tracker
-        f._discovery_history = [(i, i) for i in range(150)]
+        f._discovery_execs = array("Q", (i for i in range(150)))
+        f._discovery_edges = array("Q", (i for i in range(150)))
         out = report_mod._spectral_diagnostics(f)
         assert "no significant periodic component" in out

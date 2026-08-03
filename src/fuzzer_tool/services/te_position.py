@@ -17,7 +17,6 @@ def update_te_causal_map(
     if not te or len(input_history) < 10:
         return
     max_pos = min(64, min(len(b) for b in input_history))
-    capped_map = min(map_size, 1024)
     for pos in range(max_pos):
         source = [b[pos] if pos < len(b) else 0 for b in input_history]
         target = []

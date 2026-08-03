@@ -572,7 +572,8 @@ class EdgeTracker:
         self._edge_first_seen: dict[int, int] = {}
         self._edge_last_seen: dict[int, int] = {}
         # Edge discovery time-series: list of (exec_count, cumulative_edge_count)
-        self._coverage_timeline: list[tuple[int, int]] = []
+        self._coverage_execs: array = array("Q")  # exec_count per coverage snapshot
+        self._coverage_edges: array = array("Q")  # cumulative edges per snapshot
         # Branch correlation matrix: {(edge_a, edge_b): co_occurrence_count}
         self._correlation_matrix: dict[tuple[int, int], int] = {}
         self._correlation_total: int = 0
@@ -771,9 +772,11 @@ class EdgeTracker:
         Args:
             exec_count: Current execution count.
         """
-        self._coverage_timeline.append((exec_count, len(self.cumulative_edges)))
-        if len(self._coverage_timeline) > COVERAGE_TIMELINE_MAX:
-            del self._coverage_timeline[:250]
+        self._coverage_execs.append(exec_count)
+        self._coverage_edges.append(len(self.cumulative_edges))
+        if len(self._coverage_execs) > COVERAGE_TIMELINE_MAX:
+            del self._coverage_execs[:250]
+            del self._coverage_edges[:250]
 
     def update_correlation(self, edge_set: set[int]):
         """Update branch correlation matrix with co-occurring edges.
@@ -871,14 +874,12 @@ class EdgeTracker:
         Returns:
             Average edges discovered per execution.
         """
-        if len(self._coverage_timeline) < 2:
+        if len(self._coverage_execs) < 2:
             return 0.0
-        first_exec, first_edges = self._coverage_timeline[0]
-        last_exec, last_edges = self._coverage_timeline[-1]
-        exec_diff = last_exec - first_exec
+        exec_diff = self._coverage_execs[-1] - self._coverage_execs[0]
         if exec_diff <= 0:
             return 0.0
-        return (last_edges - first_edges) / exec_diff
+        return (self._coverage_edges[-1] - self._coverage_edges[0]) / exec_diff
 
     def edge_age_distribution(self) -> dict[str, int]:
         """Classify edges by age (how recently they were first seen).
@@ -916,7 +917,7 @@ class EdgeTracker:
         Returns:
             Dict with growth model parameters.
         """
-        if len(self._coverage_timeline) < 3:
+        if len(self._coverage_execs) < 3:
             return {
                 "current_rate": 0.0,
                 "projected_total": 0,
@@ -926,8 +927,8 @@ class EdgeTracker:
             }
 
         # Extract time series
-        execs = [t[0] for t in self._coverage_timeline]
-        edges = [t[1] for t in self._coverage_timeline]
+        execs = self._coverage_execs.tolist()
+        edges = self._coverage_edges.tolist()
 
         # Simple exponential saturation model: E(t) = A * (1 - exp(-k*t))
         # Linearize: ln(A - E(t)) = ln(A) - k*t
@@ -1012,15 +1013,15 @@ class EdgeTracker:
             "method": "bayesian_laplace",
         }
 
-        n_points = len(self._coverage_timeline)
+        n_points = len(self._coverage_execs)
         if n_points < 5:
             fallback = self.coverage_growth_model()
             result.update(fallback)
             result["method"] = "fallback_insufficient_data"
             return result
 
-        execs = [t[0] for t in self._coverage_timeline]
-        edges = [t[1] for t in self._coverage_timeline]
+        execs = self._coverage_execs.tolist()
+        edges = self._coverage_edges.tolist()
         t_arr = np.array(execs, dtype=np.float64)
         y_arr = np.array(edges, dtype=np.float64)
 
@@ -2125,7 +2126,9 @@ class EdgeTracker:
             "edge_traces": {k: [list(e) for e in v] for k, v in self.seed_edge_traces.items()},
             "edge_first_seen": {str(e): c for e, c in self._edge_first_seen.items()},
             "edge_last_seen": {str(e): c for e, c in self._edge_last_seen.items()},
-            "coverage_timeline": self._coverage_timeline,
+            "coverage_timeline": [
+                list(p) for p in zip(self._coverage_execs, self._coverage_edges, strict=True)
+            ],
             "correlation_matrix": {f"{a},{b}": c for (a, b), c in self._correlation_matrix.items()},
             "correlation_total": self._correlation_total,
             "seed_stack_depth": self.seed_stack_depth,
@@ -2184,7 +2187,9 @@ class EdgeTracker:
         # Restore temporal tracking
         self._edge_first_seen = {int(e): c for e, c in data.get("edge_first_seen", {}).items()}
         self._edge_last_seen = {int(e): c for e, c in data.get("edge_last_seen", {}).items()}
-        self._coverage_timeline = [tuple(t) for t in data.get("coverage_timeline", [])]
+        tl = data.get("coverage_timeline", [])
+        self._coverage_execs = array("Q", (t[0] for t in tl))
+        self._coverage_edges = array("Q", (t[1] for t in tl))
         corr_data = data.get("correlation_matrix", {})
         self._correlation_matrix = {
             (int(k.split(",")[0]), int(k.split(",")[1])): v for k, v in corr_data.items()

@@ -1,6 +1,7 @@
 """Tests for Fuzzer service (unit tests, no real target execution)."""
 
 import math
+from array import array
 from unittest.mock import patch
 
 import pytest
@@ -758,13 +759,15 @@ class TestFuzzerHelpers:
 
     def test_discovery_rate(self):
         f = self._make_fuzzer()
-        f._discovery_history = [(100, 10), (200, 15), (300, 20)]
+        f._discovery_execs = array("Q", (100, 200, 300))
+        f._discovery_edges = array("Q", (10, 15, 20))
         rate = f.discovery_rate()
         assert rate >= 0
 
     def test_discovery_rate_empty(self):
         f = self._make_fuzzer()
-        f._discovery_history = []
+        f._discovery_execs = array("Q")
+        f._discovery_edges = array("Q")
         rate = f.discovery_rate()
         assert rate == 0.0
 

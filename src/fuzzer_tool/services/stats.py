@@ -59,7 +59,7 @@ class StatsReporter:
             f.exec_count,
             f.shm_cov,
             f.ptrace_cov,
-            f._discovery_history,
+            (f._discovery_execs, f._discovery_edges),
         )
 
     def run_calibration(self, max_execs: int = 1000) -> None:
@@ -140,7 +140,7 @@ class StatsReporter:
         )
 
     def discovery_rate(self) -> float:
-        return _discovery_rate(self.f._discovery_history)
+        return _discovery_rate((self.f._discovery_execs, self.f._discovery_edges))
 
     def run_crash_replays(self, budget_ms: float = 200):
         f = self.f
@@ -643,8 +643,8 @@ class StatsReporter:
             simp_str = f" | simp: {f._edge_tracker.simpson_diversity_global():.2f}"
 
         rate_str = ""
-        if hasattr(f, "_entropy_history") and len(f._entropy_history) >= 2:
-            recent = f._entropy_history[-10:]
+        if hasattr(f, "_entropy_execs") and len(f._entropy_execs) >= 2:
+            recent = list(zip(f._entropy_execs[-10:], f._entropy_vals[-10:], strict=True))
             if len(recent) >= 2:
                 dt = recent[-1][0] - recent[0][0]
                 if dt > 0:

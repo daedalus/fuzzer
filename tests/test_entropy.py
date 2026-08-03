@@ -1,7 +1,10 @@
 """Tests for Shannon entropy, Simpson's diversity, and entropy rate tracking."""
 
 import math
+from array import array
 from unittest.mock import patch
+
+import pytest
 
 from fuzzer_tool.core.edge_tracker import EdgeTracker
 
@@ -33,8 +36,10 @@ class TestEntropyRateTracking:
 
     def test_entropy_history_initialized(self):
         f = self._make_fuzzer()
-        assert hasattr(f, "_entropy_history")
-        assert f._entropy_history == []
+        assert hasattr(f, "_entropy_execs")
+        assert hasattr(f, "_entropy_vals")
+        assert f._entropy_execs.tolist() == []
+        assert f._entropy_vals.tolist() == []
 
     def test_entropy_history_records_samples(self):
         f = self._make_fuzzer()
@@ -44,16 +49,17 @@ class TestEntropyRateTracking:
         f._record_entropy_sample(1.8)
         f.exec_count = 300
         f._record_entropy_sample(2.0)
-        assert len(f._entropy_history) == 3
-        assert f._entropy_history == [(100, 1.5), (200, 1.8), (300, 2.0)]
+        assert f._entropy_execs.tolist() == [100, 200, 300]
+        assert f._entropy_vals.tolist() == pytest.approx([1.5, 1.8, 2.0])
 
     def test_entropy_history_trims_old(self):
         f = self._make_fuzzer()
         for i in range(250):
             f.exec_count = i * 100
             f._record_entropy_sample(1.0 + i * 0.01)
-            assert len(f._entropy_history) <= 200
-        assert f._entropy_history[-1] == (249 * 100, 1.0 + 249 * 0.01)
+            assert len(f._entropy_execs) <= 200
+        assert f._entropy_execs[-1] == 249 * 100
+        assert f._entropy_vals[-1] == pytest.approx(1.0 + 249 * 0.01)
 
     def test_entropy_rate_positive(self):
         # Rising entropy → positive rate
@@ -90,7 +96,8 @@ class TestEntropyRateTracking:
         f.exec_count = 500
         f._last_new_edge_exec = 100  # 400 execs since last edge
 
-        f._entropy_history = [(100, 1.5), (200, 1.5), (300, 1.5), (400, 1.5)]
+        f._entropy_execs = array("Q", (100, 200, 300, 400))
+        f._entropy_vals = array("d", (1.5, 1.5, 1.5, 1.5))
 
         execs_since_edge = f.exec_count - f._last_new_edge_exec
         assert execs_since_edge >= f._stall_threshold
@@ -104,7 +111,8 @@ class TestEntropyRateTracking:
         f = self._make_fuzzer()
         f._stall_recovery_active = False
         f._stall_recovery_count = 0
-        f._entropy_history = [(100, 1.0), (200, 1.5), (300, 2.0), (400, 2.5)]
+        f._entropy_execs = array("Q", (100, 200, 300, 400))
+        f._entropy_vals = array("d", (1.0, 1.5, 2.0, 2.5))
 
         assert f._compute_entropy_flat() is False
         assert f._maybe_trigger_stall_recovery(400) is False
@@ -116,7 +124,8 @@ class TestEntropyRateTracking:
         f = self._make_fuzzer()
         f._stall_recovery_active = False
         f._stall_recovery_count = 0
-        f._entropy_history = [(100, 1.5)]
+        f._entropy_execs = array("Q", (100,))
+        f._entropy_vals = array("d", (1.5,))
 
         assert f._compute_entropy_flat() is None
         assert f._maybe_trigger_stall_recovery(400) is True
