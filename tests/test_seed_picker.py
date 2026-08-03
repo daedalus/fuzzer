@@ -301,3 +301,66 @@ class TestEloParetoCachedWeights:
         assert picked in f.corpus
         assert f._seed_strategy == "pareto"
         assert f._cached_weights == {}
+
+
+class TestComputeWeightsArrayPath:
+    """Regression: _compute_weights' vectorized Phase 1 uses array('d') +
+    zero-copy numpy views (was 4x np.array(list) copies). The weights must
+    reproduce the closed-form Phase-1 formula exactly (Phase-2 modifiers
+    stubbed to identity; 2 seeds skips the Pareto adjustment)."""
+
+    def _make_fuzzer(self):
+        class MockFuzzer:
+            corpus = [b"seed_0", b"seed_1"]
+            seed_meta = {}
+            _temperature = 1.0
+            exec_count = 1
+            _classify_cache = {}
+            _distance = None
+            _use_lineage = False
+            _use_overlap_density = False
+            _rand_pool = None
+            _edge_tracker = type("o", (object,), {"shannon_entropy_seed": lambda s, sk: 0.5})()
+
+            def _seed_key(self, data):
+                return data.hex()
+
+        f = MockFuzzer()
+        now = 1000.0
+        for i, seed in enumerate(f.corpus):
+            f.seed_meta[seed] = {
+                "fuzz_count": i + 1,
+                "coverage_edges": (i + 1) * 10,
+                "added_at": now - 100.0 * (i + 1),
+                "momentum": 0.1 * i,
+            }
+        return f, now
+
+    def test_weights_match_closed_form(self):
+        f, now = self._make_fuzzer()
+        sp = SeedPicker(type("o", (object,), {"__init__": lambda s: None})())
+        sp.f = f
+        # Phase-2 modifiers to identity: we assert the vectorized Phase 1.
+        sp._weight_secretary_and_cached = lambda sk, w, classifications, f: (w, 1.0, 1.0)
+        sp._weight_edge_penalties = lambda sk, w, fuzz_count, f: w
+        sp._weight_entropy_and_distance = lambda seed, sk, meta, w, f, em, me, md: w
+        sp._weight_static_features = lambda seed, cov, w, f: w
+        sp._weight_length_and_cross_target = lambda seed, meta, w, f: w
+        sp._weight_overlap_density = lambda sk, w, f: w
+
+        weights = sp._compute_weights(now)
+        assert len(weights) == 2
+        for i, seed in enumerate(f.corpus):
+            meta = f.seed_meta[seed]
+            fuzz = max(meta["fuzz_count"], 1)
+            cov = meta["coverage_edges"]
+            age = now - meta["added_at"]
+            mom = meta.get("momentum", 0.0)
+            T = f._temperature
+            explore = T * (1.0 / math.sqrt(fuzz))
+            exploit = (1.0 + cov * 0.5) / (1.0 + age * 0.01)
+            w = explore * exploit * (1.0 + mom * 2.0)
+            staleness = fuzz / max(cov + 1, 1)
+            if staleness > 50.0 * T:
+                w *= 0.01
+            assert weights[i] == pytest.approx(max(w, 1e-6))
