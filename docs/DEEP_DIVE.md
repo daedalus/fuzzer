@@ -387,6 +387,8 @@ fuzzer-tool rank ./target -d corpus -n 10 --dump top_seeds
 | `--transfer-entropy` | Transfer entropy causal tracking (byte→edge influence detection) |
 | `--inprocess` | Persistent subprocess mode (auto-restart on crash) |
 | `--resume` | Resume from saved state |
+| `--profile-hotpath` | Profile the fuzz run with cProfile; prints tottime/cumtime/ncalls tables and dumps stats (ignored with `--jobs > 1`) |
+| `--profile-out PATH` | cProfile dump path for `--profile-hotpath` (default `/tmp/fuzzer_hotpath.prof`) |
 | `--crash-codes N` | Additional exit codes to treat as crashes |
 | `-j N` | Parallel fuzzing with N workers |
 | `--elo` | Elo arbitration between operator strategies (bandit/mopt/replicator/cem/exp3/eps_greedy/hierarchical/gp_ucb) and seed strategies (ga/qea/weighted/pareto/format/bayesian/markov); `--elo all` also enables every scheduler plus the mutation-stack features (metropolis/shapley/mi-guided/secretary/wfc/lineage/`--schedule fast`), and the convergence report lists only schedulers actually used |

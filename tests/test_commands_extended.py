@@ -1,6 +1,7 @@
 """Extended unit tests for cli/commands.py — coverage improvement."""
 
 import argparse
+import contextlib
 import subprocess
 import sys
 from pathlib import Path
@@ -231,10 +232,8 @@ class TestMain:
         monkeypatch.setitem(sys.modules, "fuzzer_tool.cli.commands.sys", sys)
         monkeypatch.setattr(sys, "argv", ["fuzzer-tool", "fuzz", str(target), "-n", "100"])
 
-        try:
+        with contextlib.suppress(SystemExit):
             main()
-        except SystemExit:
-            pass
 
         # Cleanup
         target.unlink(missing_ok=True)
@@ -384,6 +383,46 @@ class TestCmdFuzzConstruction:
 
         with pytest.raises(SystemExit):
             cmd_fuzz(args)
+
+    def test_fuzz_profile_hotpath_dumps_stats(self, monkeypatch, tmp_path):
+        """--profile-hotpath should profile fuzzer.run and dump stats."""
+        args = self._make_default_args(tmp_path)
+        args.profile_hotpath = True
+        args.profile_out = str(tmp_path / "hot.prof")
+        mock_fuzzer = MagicMock()
+        monkeypatch.setattr("fuzzer_tool.cli.commands.Fuzzer", lambda **kwargs: mock_fuzzer)
+
+        result = cmd_fuzz(args)
+        assert result == 0
+        mock_fuzzer.run.assert_called_once()
+        dump = tmp_path / "hot.prof"
+        assert dump.exists()
+        assert dump.stat().st_size > 0
+
+    def test_fuzz_profile_hotpath_off_writes_nothing(self, monkeypatch, tmp_path):
+        """Default (no --profile-hotpath) should not write a profile dump."""
+        args = self._make_default_args(tmp_path)
+        args.profile_hotpath = False
+        args.profile_out = str(tmp_path / "hot.prof")
+        mock_fuzzer = MagicMock()
+        monkeypatch.setattr("fuzzer_tool.cli.commands.Fuzzer", lambda **kwargs: mock_fuzzer)
+
+        result = cmd_fuzz(args)
+        assert result == 0
+        assert not (tmp_path / "hot.prof").exists()
+
+    def test_fuzz_profile_hotpath_parallel_warns(self, monkeypatch, tmp_path, capsys):
+        """--profile-hotpath with --jobs > 1 should warn and skip profiling."""
+        args = self._make_default_args(tmp_path)
+        args.profile_hotpath = True
+        args.jobs = 2
+        mock_parallel = MagicMock()
+        monkeypatch.setattr("fuzzer_tool.services.parallel.run_parallel", mock_parallel)
+
+        result = cmd_fuzz(args)
+        assert result == 0
+        assert "ignored in parallel mode" in capsys.readouterr().out
+        mock_parallel.assert_called_once()
 
 
 class TestCmdMinimize:

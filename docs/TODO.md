@@ -34,6 +34,7 @@
 - [x] **Forkserver mode** — see Coverage section above.
 - [x] **Cmplog optimization** — adaptive periodic collection (1 in 20 iterations once pool exceeds 2000 entries).
 - [x] **Corpus distillation on-the-fly** — `--max-corpus` triggers auto-minimization when corpus exceeds threshold.
+- [x] **CLI hotpath profiling** — `--profile-hotpath` cProfile integration into fuzz mode (tottime/cumtime/ncalls tables + `.prof` dump via `--profile-out`).
 
 ## Infrastructure
 - [ ] **Dockerfile** for reproducible builds and CI

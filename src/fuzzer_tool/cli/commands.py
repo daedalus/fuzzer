@@ -261,6 +261,11 @@ def cmd_fuzz(args):
 
     # Parallel mode
     if args.jobs and args.jobs > 1:
+        if getattr(args, "profile_hotpath", False):
+            print(
+                "[*] --profile-hotpath ignored in parallel mode (--jobs > 1); "
+                "profiling applies to single-process fuzz runs"
+            )
         from fuzzer_tool.services.parallel import run_parallel
 
         run_parallel(
@@ -477,7 +482,36 @@ def cmd_fuzz(args):
         chi2_operator_interval=getattr(args, "chi2_operator_interval", 0),
     )
     fuzzer.invocation = " ".join(sys.argv)
-    fuzzer.run(iterations=args.iterations)
+    if getattr(args, "profile_hotpath", False):
+        import cProfile
+        import pstats
+
+        pr = cProfile.Profile()
+        pr.enable()
+        try:
+            fuzzer.run(iterations=args.iterations)
+        finally:
+            pr.disable()
+            stats = pstats.Stats(pr)
+            print("\n" + "=" * 80)
+            print(" TOP 60 BY TOTAL TIME (tottime) — self-time, no children")
+            print("=" * 80)
+            stats.sort_stats("tottime")
+            stats.print_stats(60)
+            print("\n" + "=" * 80)
+            print(" TOP 40 BY CUMULATIVE TIME (cumtime) — self + callee time")
+            print("=" * 80)
+            stats.sort_stats("cumtime")
+            stats.print_stats(40)
+            print("\n" + "=" * 80)
+            print(" TOP 30 BY CALL COUNT (ncalls)")
+            print("=" * 80)
+            stats.sort_stats("ncalls")
+            stats.print_stats(30)
+            stats.dump_stats(args.profile_out)
+            print(f"[*] cProfile stats saved to {args.profile_out}")
+    else:
+        fuzzer.run(iterations=args.iterations)
 
     if args.report is not None:
         from fuzzer_tool.services.report import generate_report
@@ -1956,6 +1990,17 @@ def main() -> int:
         "--refresh-profile",
         action="store_true",
         help="Force re-analysis of target binary (skip cached profile)",
+    )
+    fuzz_parser.add_argument(
+        "--profile-hotpath",
+        action="store_true",
+        help="Profile the fuzz run with cProfile (tottime/cumtime/ncalls tables + .prof dump)",
+    )
+    fuzz_parser.add_argument(
+        "--profile-out",
+        default="/tmp/fuzzer_hotpath.prof",
+        metavar="PATH",
+        help="cProfile dump path for --profile-hotpath (default: /tmp/fuzzer_hotpath.prof)",
     )
     fuzz_parser.add_argument(
         "--enable-regex-bomb-mutations",
