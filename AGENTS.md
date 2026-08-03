@@ -78,7 +78,7 @@ fuzzer, not just the target.
 | `tools/bench.sh` / `tools/bench_sweep.sh` | Config comparison / feature sweep |
 | `lizard --CCN 15 -w .` | Cyclomatic complexity violations |
 | `vulture --min-confidence 80 .` | Find duplicated code |
-| `tools/profile_hotpath.py` | Profile hotpath |
+| `fuzzer-tool fuzz <target> -c -d <corpus> -n <iters> --profile-hotpath [--profile-out PATH]` | cProfile hotpath profile of the fuzz run (tottime/cumtime/ncalls tables; dump defaults to `/tmp/fuzzer_hotpath.prof`) |
 
 
 
