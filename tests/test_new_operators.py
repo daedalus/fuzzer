@@ -911,7 +911,7 @@ class TestRedqueenXformPairCache:
             (b"abcd", b"wxyz"),
             (b"abcdefghijklmnop", b"zz"),
         ]
-        assert engine._redqueen_pair_lengths == [2, 3, 4, 16]
+        assert engine._redqueen_pair_lengths.tolist() == [2, 3, 4, 16]
         # Legacy filter for len(buf)=6 keeps exactly lengths <= 6.
         cutoff = bisect.bisect_right(engine._redqueen_pair_lengths, len(buf))
         assert engine._redqueen_sorted_pairs[:cutoff] == [
@@ -924,7 +924,7 @@ class TestRedqueenXformPairCache:
         engine = self._make_engine([(b"ab", b"cd")])
         buf = bytearray(b"abcdef")
         engine._op_redqueen_xform(buf, 0, b"")
-        assert engine._redqueen_pair_lengths == [2]
+        assert engine._redqueen_pair_lengths.tolist() == [2]
         engine.f._cmplog.pairs = [(b"ab", b"cd"), (b"abcde", b"fghij")]
         engine._op_redqueen_xform(buf, 0, b"")
-        assert engine._redqueen_pair_lengths == [2, 5]
+        assert engine._redqueen_pair_lengths.tolist() == [2, 5]

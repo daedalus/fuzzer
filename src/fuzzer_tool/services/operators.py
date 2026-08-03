@@ -17,6 +17,7 @@ module only supplies the ``_op_*`` handlers that the registry dispatches to.
 import bisect
 import logging
 import struct
+from array import array
 
 from fuzzer_tool.core.crc32 import crc32
 from fuzzer_tool.core.mutations import (
@@ -69,7 +70,7 @@ class OperatorEngine:
         # Rebuilt only when the pair list grows or is recreated (collect_tokens),
         # avoiding O(N log N) sort on every invocation (~2,500 sorts saved per run).
         self._redqueen_sorted_pairs: list | None = None
-        self._redqueen_pair_lengths: list | None = None
+        self._redqueen_pair_lengths: array | None = None
         self._redqueen_sorted_version: int = 0
 
     # ── Operator handlers ──────────────────────────────────────────────
@@ -198,7 +199,7 @@ class OperatorEngine:
             _temp = [(len(p[0]), p) for p in cmplog_pairs]
             _temp.sort(key=lambda x: x[0])
             self._redqueen_sorted_pairs = [p for n, p in _temp if n >= 2]
-            self._redqueen_pair_lengths = [n for n, _p in _temp if n >= 2]
+            self._redqueen_pair_lengths = array("I", (n for n, _p in _temp if n >= 2))
             self._redqueen_sorted_version = _version
         # Pairs with 2 <= len(op_a) <= len(buf) form a prefix of the
         # length-sorted list — find the cutoff with a bisect instead of

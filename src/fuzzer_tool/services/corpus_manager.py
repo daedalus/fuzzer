@@ -17,6 +17,7 @@ Extracted from Fuzzer class (~lines 648-783, 1845-2231). Contains:
 import contextlib
 import hashlib
 import os
+from array import array
 
 from fuzzer_tool.core.running_stats import RunningMoments
 
@@ -79,7 +80,7 @@ class CorpusManager:
 
         morris_mode = os.environ.get("AFL_MORRIS", "1") != "0"
         f._edge_tracker = EdgeTracker(map_size=f.map_size, morris_mode=morris_mode)
-        f._corpus_size_history: list[int] = []
+        f._corpus_size_history: array = array("I")
         f._seed_size_moments = RunningMoments(window=200)
 
         if f.resume:
@@ -100,7 +101,7 @@ class CorpusManager:
             "op_counts": f.op_counts,
             "op_success": f.op_success,
             "op_edges": f.op_edges,
-            "corpus_size_history": f._corpus_size_history[-500:],
+            "corpus_size_history": list(f._corpus_size_history[-500:]),
             "checksum_learner": getattr(f, "checksum_learner", None)
             and f.checksum_learner.to_dict()
             or None,
@@ -169,7 +170,7 @@ class CorpusManager:
         f.op_counts = state.get("op_counts", {})
         f.op_success = state.get("op_success", {})
         f.op_edges = state.get("op_edges", {})
-        f._corpus_size_history = state.get("corpus_size_history", [])
+        f._corpus_size_history = array("I", state.get("corpus_size_history", []))
         saved_meta = state.get("seed_meta", {})
         # Skip corrupted entries: seed keys should be hex hashes (< 256 chars),
         # not full JSON blobs from tracker files loaded as corpus seeds.

@@ -22,6 +22,7 @@ import json
 import logging
 import math
 import random
+from array import array
 
 from fuzzer_tool.core.running_stats import RunningMoments
 
@@ -563,12 +564,12 @@ class BayesianEloTracker:
         self._strategy_match_count: dict[str, int] = {}
 
         # Adaptive K-factor tracking
-        self._prediction_errors: list[float] = []
+        self._prediction_errors: array = array("d")
         self._base_k = 16.0  # base learning rate
         self._error_window = 100  # lookback for error tracking
 
         # Adaptive temperature tracking
-        self._best_win_rate: list[float] = []
+        self._best_win_rate: array = array("d")
         self._base_temperature = 400.0
 
         # Per-iteration K-factor cache: _effective_k() is called ~78K times per run
@@ -863,8 +864,8 @@ class BayesianEloTracker:
             "strategy_mu": self._strategy_mu,
             "strategy_sigma_sq": self._strategy_sigma_sq,
             "strategy_match_count": self._strategy_match_count,
-            "prediction_errors": self._prediction_errors,
-            "best_win_rate": self._best_win_rate,
+            "prediction_errors": list(self._prediction_errors),
+            "best_win_rate": list(self._best_win_rate),
         }
         try:
             with open(path, "w") as f:
@@ -895,7 +896,7 @@ class BayesianEloTracker:
         self._strategy_mu = data.get("strategy_mu", {})
         self._strategy_sigma_sq = data.get("strategy_sigma_sq", {})
         self._strategy_match_count = data.get("strategy_match_count", {})
-        self._prediction_errors = data.get("prediction_errors", [])
-        self._best_win_rate = data.get("best_win_rate", [])
+        self._prediction_errors = array("d", data.get("prediction_errors", []))
+        self._best_win_rate = array("d", data.get("best_win_rate", []))
         log.info("BayesianElo tracker loaded: %s (%d operators)", path, len(self.mu))
         return True
