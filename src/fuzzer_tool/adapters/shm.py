@@ -268,15 +268,13 @@ class ShmCoverage:
         )
         active = arr[arr["edge_id"] != 0]
         ids = set(active["edge_id"].tolist())
+        new = ids - self._seen_edge_ids
+        self._seen_edge_ids.update(new)
         new_found = False
-        for eid in ids:
-            if eid not in self._seen_edge_ids:
-                self._seen_edge_ids.add(eid)
-                self.cumulative_edges += 1
-                self._peak_cumulative_edges = max(
-                    self._peak_cumulative_edges, self.cumulative_edges
-                )
-                new_found = True
+        if new:
+            self.cumulative_edges += len(new)
+            self._peak_cumulative_edges = max(self._peak_cumulative_edges, self.cumulative_edges)
+            new_found = True
 
         self._last_edge_count = edge_count
         self._last_path_hash = path_hash

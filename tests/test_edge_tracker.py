@@ -3,6 +3,8 @@
 import math
 from array import array
 
+import pytest
+
 from fuzzer_tool.core.edge_tracker import (
     EdgeTracker,
     MinHashLSH,
@@ -638,3 +640,35 @@ class TestCorpusMinhashVectorized:
         a = lsh.corpus_minhash(keys)
         b = lsh.corpus_minhash(reversed(sorted(keys)))
         assert a == b
+
+
+class TestFrequencySpectrumAndRarity:
+    """_rebuild_frequency_spectrum / edge_rarity_stats numpy paths match
+    manual counts (they feed the report; no prior direct coverage)."""
+
+    def test_spectrum_matches_manual_count(self):
+        et = EdgeTracker(map_size=64)
+        et._global_edge_hits = {1: 1, 2: 1, 3: 2, 4: 3, 5: 5, 6: 12}
+        et._spectrum_dirty = True
+        et._rebuild_frequency_spectrum()
+        assert et._frequency_spectrum == {1: 2, 2: 1, 3: 1, 5: 1, 12: 1}
+
+    def test_rarity_stats_matches_manual_count(self):
+        et = EdgeTracker(map_size=64)
+        et._global_edge_hits = {1: 1, 2: 1, 3: 2, 4: 3, 5: 5, 6: 12}
+        s = et.edge_rarity_stats()
+        assert s["total"] == 6
+        assert s["singleton"] == 2  # counts == 1: {1, 2}
+        assert s["cold"] == 2  # 2..3: {3, 4}
+        assert s["warm"] == 1  # 4..10: {5}
+        assert s["hot"] == 1  # >10: {6}
+        assert s["avg_seeds_per_edge"] == pytest.approx((1 + 1 + 2 + 3 + 5 + 12) / 6)
+
+    def test_rarity_stats_morris_branch(self):
+        et = EdgeTracker(map_size=64, morris_mode=True)
+        et._global_edge_hits = {1: 1, 2: 1, 3: 2, 4: 5, 5: 20, 6: 21}
+        s = et.edge_rarity_stats()
+        assert s["singleton"] == 2  # <=1: {1, 2}
+        assert s["cold"] == 2  # 2..5: {3, 4}
+        assert s["warm"] == 1  # 6..20: {5}
+        assert s["hot"] == 1  # >20: {6}

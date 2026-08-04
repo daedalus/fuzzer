@@ -67,8 +67,7 @@ class MarkovChain:
             self.transitions[ctx][data[i]] += 1
             self._contexts_seen += 1
         # Track global byte frequency for fallback generation
-        for b in data:
-            self._global_freq[b] += 1
+        self._global_freq.update(data)
         self._maybe_prune_transitions()
 
     def _maybe_prune_transitions(self) -> None:

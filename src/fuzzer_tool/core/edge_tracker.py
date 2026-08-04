@@ -1706,9 +1706,20 @@ class EdgeTracker:
         """Rebuild frequency spectrum from global edge hits (lazy)."""
         if not self._spectrum_dirty:
             return
-        self._frequency_spectrum.clear()
-        for count in self._global_edge_hits.values():
-            self._frequency_spectrum[count] = self._frequency_spectrum.get(count, 0) + 1
+        if _HAS_NUMPY:
+            vals, cnts = np.unique(
+                np.fromiter(
+                    self._global_edge_hits.values(),
+                    np.uint64,
+                    len(self._global_edge_hits),
+                ),
+                return_counts=True,
+            )
+            self._frequency_spectrum = dict(zip(map(int, vals), map(int, cnts), strict=True))
+        else:
+            self._frequency_spectrum.clear()
+            for count in self._global_edge_hits.values():
+                self._frequency_spectrum[count] = self._frequency_spectrum.get(count, 0) + 1
         self._spectrum_dirty = False
 
     def good_turing_estimate(self) -> dict:
@@ -1896,18 +1907,33 @@ class EdgeTracker:
 
         counts = list(self._global_edge_hits.values())
         total = len(counts)
-        if self._morris_mode:
-            # Approximate counts from Morris: thresholds adjusted for log-scale
-            singleton = sum(1 for c in counts if c <= 1)
-            cold = sum(1 for c in counts if 2 <= c <= 5)
-            warm = sum(1 for c in counts if 6 <= c <= 20)
-            hot = sum(1 for c in counts if c > 20)
+        if _HAS_NUMPY:
+            arr = np.fromiter(counts, np.int64)
+            if self._morris_mode:
+                # Approximate counts from Morris: thresholds adjusted for log-scale
+                singleton = int(np.count_nonzero(arr <= 1))
+                cold = int(np.count_nonzero((arr >= 2) & (arr <= 5)))
+                warm = int(np.count_nonzero((arr >= 6) & (arr <= 20)))
+                hot = int(np.count_nonzero(arr > 20))
+            else:
+                singleton = int(np.count_nonzero(arr == 1))
+                cold = int(np.count_nonzero((arr >= 2) & (arr <= 3)))
+                warm = int(np.count_nonzero((arr >= 4) & (arr <= 10)))
+                hot = int(np.count_nonzero(arr > 10))
+            avg = float(arr.sum()) / total if total else 0.0
         else:
-            singleton = sum(1 for c in counts if c == 1)
-            cold = sum(1 for c in counts if 2 <= c <= 3)
-            warm = sum(1 for c in counts if 4 <= c <= 10)
-            hot = sum(1 for c in counts if c > 10)
-        avg = sum(counts) / total if total else 0.0
+            if self._morris_mode:
+                # Approximate counts from Morris: thresholds adjusted for log-scale
+                singleton = sum(1 for c in counts if c <= 1)
+                cold = sum(1 for c in counts if 2 <= c <= 5)
+                warm = sum(1 for c in counts if 6 <= c <= 20)
+                hot = sum(1 for c in counts if c > 20)
+            else:
+                singleton = sum(1 for c in counts if c == 1)
+                cold = sum(1 for c in counts if 2 <= c <= 3)
+                warm = sum(1 for c in counts if 4 <= c <= 10)
+                hot = sum(1 for c in counts if c > 10)
+            avg = sum(counts) / total if total else 0.0
 
         return {
             "total": total,

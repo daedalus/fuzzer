@@ -15,6 +15,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import numpy as np
+
 
 def _read_shm_edges(shm_id: str, size: int = 65536) -> bytearray:
     """Read edge bitmap from AFL SHM segment."""
@@ -166,8 +168,9 @@ def _minimize_with_coverage(
             f"files ({actual_frac:.1%} coverage)"
         )
     else:
-        # Greedy set cover
-        total_coverage = bytearray(edge_map_size)
+        # Greedy set cover (bitmaps as numpy uint8 views: count_new = popcount
+        # of (edges & ~covered) — ~100x faster than a 65K-wide Python scan).
+        total_coverage = np.zeros(edge_map_size, dtype=np.uint8)
         covered_files: list[str] = []
         remaining = list(file_edges.keys())
 
@@ -175,8 +178,8 @@ def _minimize_with_coverage(
             best_file = None
             best_new_edges = 0
             for fpath in remaining:
-                edges = file_edges[fpath]
-                new = sum(1 for j in range(edge_map_size) if edges[j] and not total_coverage[j])
+                edges = np.frombuffer(file_edges[fpath], dtype=np.uint8)
+                new = int(np.count_nonzero(edges & ~total_coverage))
                 if new > best_new_edges:
                     best_new_edges = new
                     best_file = fpath
@@ -185,9 +188,7 @@ def _minimize_with_coverage(
                 break
 
             covered_files.append(best_file)
-            for j in range(edge_map_size):
-                if file_edges[best_file][j]:
-                    total_coverage[j] = 1
+            total_coverage |= np.frombuffer(file_edges[best_file], dtype=np.uint8)
             remaining.remove(best_file)
 
     return _commit_results(corpus_files, covered_files, output_dir, corpus_path)
