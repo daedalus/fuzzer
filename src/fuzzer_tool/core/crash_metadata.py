@@ -135,6 +135,8 @@ class CrashMetadata:
                 lines.append(f"returncode:    {self.returncode}")
             else:
                 lines.append("returncode:    signal (see raw stderr)")
+            if self.error_type:
+                lines.append(f"error_type:    {self.error_type}")
             if self.fault_addr:
                 lines.append(f"fault_addr:    {self.fault_addr}")
         lines.append("")

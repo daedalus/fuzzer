@@ -1428,6 +1428,14 @@ class Fuzzer:
             from fuzzer_tool.adapters.inprocess import InProcessRunner
 
             cov_env_id = self.shm_cov.env_id if self.shm_cov else None
+            # For .so targets, probe for the correct fuzz function name
+            # when the user didn't explicitly specify one.
+            func = inprocess_func
+            if (
+                self.target.lower().endswith((".so", ".dylib", ".dll"))
+                and func == "LLVMFuzzerTestOneInput"
+            ):
+                func = self._probe_so_function(self.target)
             # ASAN ctypes preloading was done above (before the branch). If the
             # verify_asan_link_order=0 shim was loaded successfully, direct mode
             # works even for ASAN .so targets. The user explicitly requested
@@ -1436,7 +1444,7 @@ class Fuzzer:
             direct_ok = inprocess_direct
             self._inprocess_runner = InProcessRunner(
                 target=self.target,
-                function_name=inprocess_func,
+                function_name=func,
                 timeout=self.timeout,
                 shm_size=self.map_size,
                 direct=direct_ok,
@@ -1446,7 +1454,7 @@ class Fuzzer:
             )
             mode = "direct ctypes" if direct_ok else "subprocess loader"
             cov_note = f", SHM cov id={cov_env_id}" if cov_env_id else ""
-            print(f"[*] In-process mode ({mode}{cov_note}): {self.target}::{inprocess_func}")
+            print(f"[*] In-process mode ({mode}{cov_note}): {self.target}::{func}")
             if self._inprocess_runner._persistent:
                 print("[*] Persistent loader: enabled (1 process, many calls)")
 

@@ -8,30 +8,21 @@ Extracted from Fuzzer class (~lines 648-783, 1845-2231). Contains:
 - load_state() — restore fuzzer state
 - save_crash() — save a crash with metadata
 - save_to_corpus() — add a new seed to corpus
-- trim_new_coverage() — minimize inputs hitting new edges
-- edges_subset_of() — check edge coverage containment
-- auto_minimize_corpus() — hash dedup + subsumption pruning
-- deprioritize_near_duplicates() — merge near-identical seeds
+
+Signal name mapping for crash return codes.
 """
 
 import contextlib
 import hashlib
-import os
-from array import array
-
-from fuzzer_tool.core.running_stats import RunningMoments
-
-try:
-    import xxhash
-
-    _use_xxhash = True
-except ImportError:
-    _use_xxhash = False
 import json
 import logging
+import os
 import shutil
 import time
+from array import array
 from pathlib import Path
+
+import xxhash
 
 from fuzzer_tool.adapters.filesystem import (
     load_corpus,
@@ -40,14 +31,50 @@ from fuzzer_tool.adapters.filesystem import (
     save_to_corpus,
 )
 from fuzzer_tool.core.periodicity import estimate_record_size
+from fuzzer_tool.core.running_stats import RunningMoments
 
 log = logging.getLogger(__name__)
+
+_use_xxhash = True
+
+SIGNAL_NAMES = {
+    6: "SIGABRT",
+    7: "SIGBUS",
+    8: "SIGFPE",
+    11: "SIGSEGV",
+    13: "SIGPIPE",
+    14: "SIGALRM",
+    15: "SIGTERM",
+}
+
+
+def _returncode_to_signal(returncode: int) -> tuple[str | None, int | None]:
+    """Map a subprocess return code to (signal_name, signal_number).
+
+    Returns (None, None) for non-signal exit codes.
+    Handles both WIFSIGNALED-style codes (-signum) and
+    exit-with-signal codes (128+signum).
+    """
+    if returncode < 0:
+        signum = -returncode
+        if signum in SIGNAL_NAMES:
+            return SIGNAL_NAMES[signum], signum
+    elif returncode >= 128:
+        signum = returncode - 128
+        if signum in SIGNAL_NAMES:
+            return SIGNAL_NAMES[signum], signum
+    return None, None
 
 
 class CorpusManager:
     """Manages corpus persistence, state, and minimization.
 
     Holds a reference to the Fuzzer instance for accessing shared state.
+
+    - trim_new_coverage() — minimize inputs hitting new edges
+    - edges_subset_of() — check edge coverage containment
+    - auto_minimize_corpus() — hash dedup + subsumption pruning
+    - deprioritize_near_duplicates() — merge near-identical seeds
     """
 
     def __init__(self, fuzzer):
@@ -270,6 +297,13 @@ class CorpusManager:
         fault_addr = getattr(f, "_last_fault_addr", None)
         if fault_addr is not None:
             meta.fault_addr = f"0x{fault_addr:x}"
+
+        # Populate error_type from return code for subprocess/inprocess
+        # mode where ptrace isn't available and sanitizer reports are absent.
+        if not meta.error_type:
+            sig_name, sig_num = _returncode_to_signal(returncode)
+            if sig_name is not None:
+                meta.error_type = sig_name
 
         from fuzzer_tool.core.sanitizer import SanitizerReport
 

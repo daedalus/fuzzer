@@ -68,7 +68,27 @@ fn.restype = ctypes.c_int
 fn.argtypes = [ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t]
 
 buf = (ctypes.c_uint8 * len(data))(*data)
-rc = fn(buf, len(data))
+
+# Use __afl_guarded_call when available — it uses
+# sigsetjmp/siglongjmp to survive signals (SIGSEGV,
+# SIGABRT, etc.) and returns a negative signal number.
+# Without it, Python catches the signal as an exception
+# and the crash code is silently lost.
+_guarded = getattr(lib, '__afl_guarded_call', None)
+if _guarded is not None:
+    _guarded.restype = ctypes.c_int
+    _guarded.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t]
+    _func_ptr_raw = ctypes.cast(fn, ctypes.c_void_p)
+    rc = _guarded(_func_ptr_raw, buf, len(data))
+    # Negative rc indicates a crash (signal number negated).
+    # Exit with 128+signum so the parent recognizes it as a crash.
+    if rc < 0:
+        sys.exit(128 + (-rc))
+else:
+    try:
+        rc = fn(buf, len(data))
+    except Exception:
+        sys.exit(128 + 11)  # SIGSEGV
 
 # Read coverage bitmap from shim
 if shim_path and os.path.exists(shim_path):

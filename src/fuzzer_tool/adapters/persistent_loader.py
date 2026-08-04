@@ -98,10 +98,28 @@ while True:
             # Child: own process group, run target function, write rc
             os.close(read_pipe)
             os.setsid()
-            try:
-                rc = func(buf, len(data))
-            except Exception:
-                rc = -11
+
+            # Use __afl_guarded_call when available — it uses
+            # sigsetjmp/siglongjmp to survive signals (SIGSEGV,
+            # SIGABRT, etc.) and returns a negative signal number.
+            # This avoids the problem where Python catches the signal
+            # as an exception and the crash code is silently lost.
+            _guarded = getattr(lib, '__afl_guarded_call', None)
+            if _guarded is not None:
+                _guarded.restype = ctypes.c_int
+                _guarded.argtypes = [
+                    ctypes.c_void_p,
+                    ctypes.POINTER(ctypes.c_uint8),
+                    ctypes.c_size_t,
+                ]
+                _func_ptr_raw = ctypes.cast(func, ctypes.c_void_p)
+                rc = _guarded(_func_ptr_raw, buf, len(data))
+            else:
+                try:
+                    rc = func(buf, len(data))
+                except Exception:
+                    rc = -11
+
             # Flush cmplog buffer before exiting — os._exit() skips
             # destructors, so the buffered CMP lines would be lost.
             if hasattr(lib, '__tracecmp_flush'):
@@ -109,8 +127,15 @@ while True:
                     lib.__tracecmp_flush()
                 except Exception:
                     pass
-            rc = max(0, min(rc, 125))
-            os.write(write_pipe, bytes([rc]))
+            # Negative rc from __afl_guarded_call indicates a crash
+            # (the signal number negated). Encode as 128+signum so
+            # the parent recognizes it as a crash (139 for SIGSEGV
+            # is in SIGNAL_CRASH_CODES).
+            if rc < 0:
+                os.write(write_pipe, bytes([128 + (-rc)]))
+            else:
+                rc = max(0, min(rc, 125))
+                os.write(write_pipe, bytes([rc]))
             os.close(write_pipe)
             os._exit(0)
 
