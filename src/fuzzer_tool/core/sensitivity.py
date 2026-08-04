@@ -19,6 +19,9 @@ perturbation completely changed the execution trace (high sensitivity);
 
 import logging
 import random
+from array import array
+from bisect import bisect_left
+from itertools import accumulate
 
 log = logging.getLogger(__name__)
 
@@ -45,6 +48,11 @@ class ByteSensitivityTracker:
         self.sample_rate = sample_rate
         self._sensitivity: dict[bytes, list[float]] = {}
         self._analyzed: set[bytes] = set()
+        # Cumulative sums per seed_key (array("d")) for the bisect-based
+        # weighted position — the mi.weighted_position pattern. Invalidated
+        # when a seed's scores change or are evicted.
+        self._cum_cache: dict[bytes, array] = {}
+        self._cum_cache_limit = 500
 
     def analyze_seed(
         self,
@@ -91,11 +99,13 @@ class ByteSensitivityTracker:
         seed_key = bytes(seed[:64])
         self._sensitivity[seed_key] = scores
         self._analyzed.add(seed_key)
+        self._cum_cache.pop(seed_key, None)  # scores changed
 
         if len(self._analyzed) > self.max_seeds:
             oldest = next(iter(self._analyzed))
             self._analyzed.discard(oldest)
             self._sensitivity.pop(oldest, None)
+            self._cum_cache.pop(oldest, None)
 
         return scores
 
@@ -122,6 +132,25 @@ class ByteSensitivityTracker:
             return None
 
         r = random.random() * total
+
+        # Weighted pick via cached cumulative sums + bisect: "first i with
+        # cumulative >= r" == bisect_left. Negative scores (only possible via
+        # the JSON load path) break monotonicity — fall back to the walk.
+        cum = self._cum_cache.get(seed_key)
+        if cum is None:
+            if any(s < 0.0 for s in scores):
+                cum = None
+            else:
+                cum = array("d", accumulate(scores))
+                self._cum_cache[seed_key] = cum
+                if len(self._cum_cache) > self._cum_cache_limit:
+                    keys = list(self._cum_cache)[: len(self._cum_cache) // 2]
+                    for k in keys:
+                        del self._cum_cache[k]
+        if cum is not None:
+            i = bisect_left(cum, r, 0, buf_len)
+            return i if i < buf_len else buf_len - 1
+
         cumulative = 0.0
         for i in range(buf_len):
             cumulative += scores[i]
@@ -149,3 +178,4 @@ class ByteSensitivityTracker:
         self.sample_rate = data.get("sample_rate", self.sample_rate)
         self._sensitivity = {bytes.fromhex(k): v for k, v in data.get("sensitivity", {}).items()}
         self._analyzed = set(self._sensitivity.keys())
+        self._cum_cache.clear()  # rebuilt lazily from loaded scores
