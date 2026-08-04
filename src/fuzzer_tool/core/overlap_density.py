@@ -38,8 +38,9 @@ def _sig_jaccard(sig_a: list[int], sig_b: list[int]) -> float:
     """Jaccard from two raw MinHash signatures (O(k), k = num_perm)."""
     if not sig_a or not sig_b:
         return 0.0
-    matches = sum(1 for a, b in zip(sig_a, sig_b, strict=False) if a == b)
-    return matches / len(sig_a)
+    from fuzzer_tool.core.edge_tracker import _sig_matches
+
+    return _sig_matches(sig_a, sig_b) / len(sig_a)
 
 
 def _build_clusters(

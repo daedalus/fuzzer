@@ -35,6 +35,29 @@ except ImportError:
     _HAS_NUMPY = False
 
 from fuzzer_tool.core.count_class import classify_counts  # noqa: E402
+
+
+def _sig_np(sig):
+    """Zero-copy uint64 view of a MinHash signature (array('Q') or list)."""
+    if isinstance(sig, array) and array("Q").itemsize == 8:
+        return np.frombuffer(sig, dtype=np.uint64)
+    return np.asarray(sig, dtype=np.uint64)
+
+
+def _sig_matches(sig_a, sig_b) -> int:
+    """Count equal positions (zip(strict=False) semantics), vectorized.
+
+    Legacy truncates to the shorter signature; numpy would raise on a
+    mismatch, so truncate explicitly and never raise.
+    """
+    if not _HAS_NUMPY:
+        return sum(1 for a, b in zip(sig_a, sig_b, strict=False) if a == b)
+    a = _sig_np(sig_a)
+    b = _sig_np(sig_b)
+    k = min(len(a), len(b))
+    return int(np.count_nonzero(a[:k] == b[:k]))
+
+
 from fuzzer_tool.core.similarity import hamming_distance  # noqa: E402
 
 log = logging.getLogger(__name__)
@@ -461,8 +484,7 @@ class MinHashLSH:
         sig_b = self.signatures.get(key_b)
         if sig_a is None or sig_b is None:
             return 0.0
-        matches = sum(1 for a, b in zip(sig_a, sig_b, strict=False) if a == b)
-        return matches / self.num_perm
+        return _sig_matches(sig_a, sig_b) / self.num_perm
 
     def find_similar(self, seed_key: str, min_jaccard: float = 0.3) -> set[str]:
         """Find seeds with approximate Jaccard >= min_jaccard via LSH buckets.
@@ -503,7 +525,13 @@ class MinHashLSH:
             seed_keys = set(self.signatures.keys())
         if not seed_keys:
             return array("Q", [self._mask]) * self.num_perm
-        # Start with first seed's signature as baseline
+        if _HAS_NUMPY:
+            present = [self.signatures[k] for k in seed_keys if k in self.signatures]
+            if not present:
+                return array("Q", [self._mask]) * self.num_perm
+            sigs = [_sig_np(s) for s in present]
+            return array("Q", np.minimum.reduce(sigs).tolist())
+        # Legacy elementwise-min loop (no-numpy fallback).
         first = next(iter(seed_keys))
         result = list(self.signatures.get(first, [self._mask] * self.num_perm))
         for key in seed_keys:
@@ -523,8 +551,7 @@ class MinHashLSH:
         sig = self.signatures.get(seed_key)
         if sig is None:
             return 0.0
-        matches = sum(1 for a, b in zip(sig, corpus_sig, strict=False) if a == b)
-        return matches / self.num_perm
+        return _sig_matches(sig, corpus_sig) / self.num_perm
 
 
 class EdgeTracker:
@@ -1394,8 +1421,7 @@ class EdgeTracker:
             sig = self._minhash.signatures.get(key)
             if sig:
                 # Jaccard distance = 1 - Jaccard similarity
-                matches = sum(1 for a, b in zip(sig, corpus_sig, strict=False) if a == b)
-                jaccard = matches / self._minhash.num_perm
+                jaccard = _sig_matches(sig, corpus_sig) / self._minhash.num_perm
                 total_dist += 1.0 - jaccard
 
         return total_dist / len(keys) if keys else 0.0

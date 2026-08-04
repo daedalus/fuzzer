@@ -562,3 +562,79 @@ class TestMinHashLSHArraySignatures:
         assert et2._minhash.approximate_jaccard(
             "seed1", "seed2"
         ) == et._minhash.approximate_jaccard("seed1", "seed2")
+
+
+class TestSigMatchesVectorized:
+    """_sig_matches (numpy count_nonzero) == legacy genexpr, exactly."""
+
+    def test_random_pairs_match_genexpr(self):
+        import operator
+        import random
+
+        from fuzzer_tool.core.edge_tracker import _sig_matches
+
+        rng = random.Random(20260803)
+        for _ in range(500):
+            na = rng.choice([0, 1, 7, 32, 64, 100])
+            nb = rng.choice([0, 1, 7, 32, 64, 100])
+            a = array("Q", (rng.getrandbits(64) for _ in range(na)))
+            b = array("Q", (rng.getrandbits(64) for _ in range(nb)))
+            got = _sig_matches(a, b)
+            # Oracle: genexpr (independent) + operator.eq map over zip-truncated.
+            k = min(na, nb)
+            exp = sum(1 for x, y in zip(a, b, strict=False) if x == y)
+            oracle = sum(map(operator.eq, a[:k], b[:k]))
+            assert got == exp == oracle, (na, nb, got, exp, oracle)
+
+    def test_array_and_list_inputs_agree(self):
+        import random
+
+        from fuzzer_tool.core.edge_tracker import _sig_matches
+
+        rng = random.Random(3)
+        vals_a = [rng.getrandbits(64) for _ in range(32)]
+        vals_b = [rng.getrandbits(64) for _ in range(32)]
+        assert _sig_matches(array("Q", vals_a), array("Q", vals_b)) == _sig_matches(vals_a, vals_b)
+
+    def test_empty_and_mismatch_lengths(self):
+        from fuzzer_tool.core.edge_tracker import _sig_matches
+
+        assert _sig_matches(array("Q"), array("Q")) == 0
+        assert _sig_matches(array("Q", [1, 2]), array("Q")) == 0
+        assert _sig_matches(array("Q", [1, 2]), array("Q", [1])) == 1
+        assert _sig_matches(array("Q", [1, 2]), array("Q", [1, 2, 3])) == 2
+
+
+class TestCorpusMinhashVectorized:
+    """corpus_minhash numpy reduce == legacy elementwise min, order-independent."""
+
+    def test_matches_naive_min_with_first_key_missing(self):
+        import random
+
+        lsh = MinHashLSH(num_perm=16, num_bands=4)
+        rng = random.Random(5)
+        for i in range(5):
+            lsh.add(f"k{i}", array("Q", (rng.getrandbits(64) for _ in range(16))))
+        # seed_keys includes a key with NO signature: legacy baseline uses mask.
+        keys = {"k0", "k1", "missing", "k2", "k3", "k4"}
+        union = lsh.corpus_minhash(keys)
+        expected = [lsh._mask] * lsh.num_perm
+        for key in keys:
+            sig = lsh.signatures.get(key)
+            if sig:
+                for i in range(lsh.num_perm):
+                    expected[i] = min(expected[i], sig[i])
+        assert union.tolist() == expected
+
+    def test_order_independent(self):
+        import random
+
+        lsh = MinHashLSH(num_perm=16, num_bands=4)
+        rng = random.Random(7)
+        for i in range(6):
+            lsh.add(f"k{i}", array("Q", (rng.getrandbits(64) for _ in range(16))))
+        keys = set(lsh.signatures.keys())
+        # Two different iteration orders must produce identical results.
+        a = lsh.corpus_minhash(keys)
+        b = lsh.corpus_minhash(reversed(sorted(keys)))
+        assert a == b
