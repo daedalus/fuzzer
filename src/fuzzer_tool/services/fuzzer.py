@@ -664,6 +664,11 @@ class Fuzzer:
         self.crash_hashes: set[str] = set()
         self.crash_sigs: dict[str, int] = {}
         self.crash_frames: dict[str, list[str]] = {}  # sig -> frames for clustering
+        # Crash-stop state captured by the ptrace runner (fault address from
+        # PTRACE_GETSIGINFO, registers from PTRACE_GETREGS); consumed by
+        # corpus_manager.save_crash for the sidecar + signature.
+        self._last_fault_addr: int | None = None
+        self._last_regs: dict[str, int] = {}
         self.exec_count = 0
         self.crash_count = 0
         self.timeout_count = 0

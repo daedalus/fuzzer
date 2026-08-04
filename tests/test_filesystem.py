@@ -193,3 +193,26 @@ class TestSaveCrash:
         assert "signal:11" in sigs
         assert "signal:6" in sigs
         assert len(sigs) == 2
+
+    def test_fault_addr_splits_signal_signature(self, tmp_path):
+        hashes = set()
+        sigs = {}
+        save_crash(b"a", -11, "SIGSEGV", tmp_path, hashes, sigs, fault_addr=0x0)
+        save_crash(b"b", -11, "SIGSEGV", tmp_path, hashes, sigs, fault_addr=0xDEAD0000)
+        assert "signal:11@0x0" in sigs
+        assert "signal:11@0xdead0000" in sigs
+        assert len(sigs) == 2
+
+    def test_fault_addr_same_address_dedups(self, tmp_path):
+        hashes = set()
+        sigs = {}
+        save_crash(b"a", -11, "SIGSEGV", tmp_path, hashes, sigs, fault_addr=0x0)
+        result = save_crash(b"b", -11, "SIGSEGV", tmp_path, hashes, sigs, fault_addr=0x0)
+        assert result is False
+        assert sigs["signal:11@0x0"] == 2
+
+    def test_no_fault_addr_keeps_legacy_signature(self, tmp_path):
+        hashes = set()
+        sigs = {}
+        save_crash(b"a", -11, "SIGSEGV", tmp_path, hashes, sigs)
+        assert "signal:11" in sigs

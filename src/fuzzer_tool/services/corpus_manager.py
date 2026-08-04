@@ -267,6 +267,9 @@ class CorpusManager:
             meta.rip = f._last_regs.get("rip", 0)
             meta.rsp = f._last_regs.get("rsp", 0)
             meta.rbp = f._last_regs.get("rbp", 0)
+        fault_addr = getattr(f, "_last_fault_addr", None)
+        if fault_addr is not None:
+            meta.fault_addr = f"0x{fault_addr:x}"
 
         from fuzzer_tool.core.sanitizer import SanitizerReport
 
@@ -285,6 +288,7 @@ class CorpusManager:
             f.crash_hashes,
             f.crash_sigs,
             metadata=meta,
+            fault_addr=fault_addr,
             crash_blocklist=f.crash_blocklist if f.crash_blocklist else None,
             crash_allowlist=f.crash_allowlist if f.crash_allowlist else None,
             crash_min_sizes=f.crash_min_sizes if f.save_smaller else None,

@@ -28,12 +28,49 @@ from fuzzer_tool.core.sanitizer import SanitizerReport
 from fuzzer_tool.services.ptrace_coverage import (
     PTRACE_CONT,
     PTRACE_GETREGS,
+    PTRACE_GETSIGINFO,
     PTRACE_SETREGS,
     PTRACE_TRACEME,
     PtraceCoverage,
 )
 
 log = logging.getLogger(__name__)
+
+
+def _get_fault_addr(pid: int, libc) -> int | None:
+    """Return the faulting address (si_addr) for the current ptrace stop.
+
+    Only trusts kernel-reported hardware faults: SIGSEGV/SIGBUS/SIGILL/SIGFPE
+    with si_code > 0 (user-raised signals carry si_code == SI_USER(0) or
+    negative SI_* values and their si_addr is meaningless). For SIGSEGV and
+    SIGBUS si_addr is the faulting memory address (NULL-deref vs wild-pointer
+    classification); for SIGILL/SIGFPE it is the faulting instruction address.
+    """
+    buf = ctypes.create_string_buffer(128)  # sizeof(siginfo_t) == 128 on x86-64
+    if libc.ptrace(PTRACE_GETSIGINFO, pid, None, ctypes.cast(buf, ctypes.c_void_p)) != 0:
+        return None
+    si_signo = struct.unpack_from("<i", buf.raw, 0)[0]
+    si_code = struct.unpack_from("<i", buf.raw, 8)[0]
+    if si_signo not in (signal.SIGSEGV, signal.SIGBUS, signal.SIGILL, signal.SIGFPE):
+        return None
+    if si_code <= 0:
+        return None
+    return struct.unpack_from("<Q", buf.raw, 16)[0]
+
+
+def _capture_crash_state(pid: int, libc, fuzzer) -> None:
+    """Stash fault address + registers from a fatal-signal stop on *fuzzer*."""
+    fault = _get_fault_addr(pid, libc)
+    if fault is not None:
+        fuzzer._last_fault_addr = fault
+    regs_buf = (ctypes.c_char * (27 * 8))()
+    if libc.ptrace(PTRACE_GETREGS, pid, None, regs_buf) == 0:
+        regs = bytes(regs_buf)
+        fuzzer._last_regs = {
+            "rip": struct.unpack_from("<Q", regs, 128)[0],
+            "rbp": struct.unpack_from("<Q", regs, 32)[0],
+            "rsp": struct.unpack_from("<Q", regs, 152)[0],
+        }
 
 
 def _write_and_close(fd: int, data: bytes) -> None:
@@ -184,7 +221,11 @@ class TargetRunner:
         cov._write_memory(pid, bp_addr, (val & ~0xFF) | orig)
         del cov.original_bytes[bp_addr]
 
-        rsp = struct.unpack_from("<Q", bytes(regs_buf), 128 + 48)[0]
+        # x86-64 user_regs_struct offsets: rbp@32, rip@128, rsp@152
+        # (128+48 would be gs_base, which is 0 for the main thread and
+        # previously made this check always-false, skipping every
+        # breakpoint's first instruction).
+        rsp = struct.unpack_from("<Q", bytes(regs_buf), 152)[0]
         if rsp > 0x1000:
             cov._stack_initialized = True
             cov.record_edge(bp_addr)
@@ -201,6 +242,10 @@ class TargetRunner:
         f = self.f
         cov = f.ptrace_cov
         cov.reset_edge_map()
+        # Reset per-run crash state so stale values never leak into later
+        # iterations' metadata (save_crash runs after run_target in fuzz_one).
+        f._last_fault_addr = None
+        f._last_regs = {}
         libc = ctypes.CDLL("libc.so.6", use_errno=True)
         libc.ptrace.argtypes = [
             ctypes.c_long,
@@ -245,6 +290,7 @@ class TargetRunner:
                 pass
             elif os.WIFSTOPPED(status):
                 sig = os.WSTOPSIG(status)
+                _capture_crash_state(pid, libc, f)
                 os.kill(pid, signal.SIGKILL)
                 os.waitpid(pid, 0)
                 return -sig, ""
@@ -267,8 +313,13 @@ class TargetRunner:
             returncode = 0
             child_reaped = False
             while time.time() < deadline:
-                _, status = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
-                if status == 0:
+                waited, status = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
+                # Check the PID, not just status: waitpid returns (0, 0) for
+                # "no event" but (pid, 0) for a clean exit with rc=0 — both
+                # have status == 0. Discarding the pid made every clean exit
+                # look like "no event", then the next poll hit ECHILD and the
+                # run was misreported as -2 ("exec failed").
+                if waited == 0:
                     time.sleep(0.0005)
                     continue
 
@@ -291,16 +342,20 @@ class TargetRunner:
                         else:
                             break
                     else:
+                        # Fatal-signal stop (SIGSEGV/SIGBUS/...): capture the
+                        # faulting address + registers before the tracee is
+                        # reaped, since si_addr is unrecoverable after death.
+                        _capture_crash_state(pid, libc, f)
                         break
 
             if child_reaped:
                 pass
             elif last_action == "cont" and last_sig == signal.SIGTRAP:
-                _, status = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
-                if status != 0 and os.WIFSTOPPED(status):
+                waited, status = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
+                if waited != 0 and os.WIFSTOPPED(status):
                     libc.ptrace(PTRACE_CONT, pid, None, None)
                     _, status = os.waitpid(pid, 0)
-                elif status != 0:
+                elif waited != 0:
                     if os.WIFSIGNALED(status):
                         returncode = -os.WTERMSIG(status)
                     elif os.WIFEXITED(status):

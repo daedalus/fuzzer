@@ -229,6 +229,20 @@ class TestSaveCrashEnriched:
         assert "exec_count:    500" in content
         assert "bit_flip" in content
 
+    def test_fault_addr_in_signal_sidecar(self, tmp_path):
+        from fuzzer_tool.adapters.filesystem import save_crash
+
+        hashes = set()
+        sigs = {}
+        meta = CrashMetadata()
+        meta.returncode = -11
+        meta.fault_addr = "0xdeadbeef"
+        save_crash(b"test", -11, "SIGSEGV", tmp_path, hashes, sigs, metadata=meta)
+        txt_files = [f for f in tmp_path.iterdir() if f.suffix == ".txt"]
+        content = txt_files[0].read_text()
+        assert "returncode:    -11" in content
+        assert "fault_addr:    0xdeadbeef" in content
+
     def test_sanitizer_enriched_sidecar(self, tmp_path):
         from fuzzer_tool.adapters.filesystem import save_crash
 

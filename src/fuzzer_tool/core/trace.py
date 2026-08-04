@@ -66,6 +66,9 @@ class TraceReport:
     # Signal info
     signal: str = ""
     signal_num: int = 0
+    # Instruction pointer at the crash site (where the crashing instruction
+    # lives) — distinct from fault_addr, the memory address it was touching.
+    crash_rip: str = ""
     fault_addr: str = ""
 
     # Error message from target (if any)
@@ -86,6 +89,8 @@ class TraceReport:
         sections.append(f"Target:  {self.target}")
         sections.append(f"Input:   {self.input_size} bytes")
         sections.append(f"Signal:  {self.signal} ({self.signal_num})")
+        if self.crash_rip:
+            sections.append(f"RIP:     {self.crash_rip}")
         if self.fault_addr:
             sections.append(f"Fault:   {self.fault_addr}")
         if self.error_msg:
@@ -198,6 +203,7 @@ class CrashTracer:
             "set pagination off",
             "run",
             "info registers",
+            "print $_siginfo",
             "bt full",
             "thread apply all bt",
             "disassemble $pc",
@@ -235,6 +241,13 @@ class CrashTracer:
                 report.error_msg = m.group(2)
                 break
 
+        # Extract the real faulting address from GDB's $_siginfo. The regex is
+        # anchored to the distinct si_addr token so register names (rax, ...)
+        # can never match.
+        m = re.search(r"si_addr\s*=\s*(0x[0-9a-fA-F]+)", output)
+        if m:
+            report.fault_addr = m.group(1)
+
         # Extract registers
         reg_lines = []
         in_regs = False
@@ -252,7 +265,7 @@ class CrashTracer:
         if reg_lines:
             report.registers = "\n".join(reg_lines)
             if "rip" in report.reg_values:
-                report.fault_addr = hex(report.reg_values["rip"])
+                report.crash_rip = hex(report.reg_values["rip"])
 
         # Extract backtrace frames
         bt_lines = []

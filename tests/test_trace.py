@@ -59,6 +59,7 @@ class TestTraceReport:
         assert r.frames == []
         assert r.registers == ""
         assert r.disassembly == ""
+        assert r.crash_rip == ""
         assert r.fault_addr == ""
         assert r.target == ""
 
@@ -67,9 +68,11 @@ class TestTraceReport:
             backtrace="#0 main",
             frames=[{"frame": 0, "func": "main"}],
             registers="rax=0x0",
-            fault_addr="0x401000",
+            crash_rip="0x401000",
+            fault_addr="0x0",
         )
-        assert r.fault_addr == "0x401000"
+        assert r.crash_rip == "0x401000"
+        assert r.fault_addr == "0x0"
         assert len(r.frames) == 1
 
     def test_format_with_all_sections(self):
@@ -78,6 +81,7 @@ class TestTraceReport:
             input_size=42,
             signal="SIGSEGV",
             signal_num=11,
+            crash_rip="0x401000",
             fault_addr="0x0",
             error_msg="bad address",
             registers="rax 0x1\nrbx 0x2",
@@ -90,6 +94,8 @@ class TestTraceReport:
         )
         text = r.format()
         assert "SIGSEGV" in text
+        assert "RIP:     0x401000" in text
+        assert "Fault:   0x0" in text
         assert "bad address" in text
         assert "rax 0x1" in text
         assert "#0 0x100" in text
@@ -138,6 +144,13 @@ class TestCrashTracer:
             "Program received signal SIGSEGV, Segmentation fault.\n"
             "rax            0x0\t0\n"
             "rip            0x401000\t4198400\n"
+            "$1 = {\n"
+            "  si_signo = 11, \n"
+            "  si_errno = 0, \n"
+            "  si_code = 1 (SEGV_MAPERR), \n"
+            "  _sifields = { _kill = { si_pid = 0, si_uid = 0 }, "
+            "_sigfault = { si_addr = 0xdead0000, si_trapno = 14, si_addr_lsb = 0 } }\n"
+            "}\n"
             "#0  0x0000000000401000 in main (argc=1, argv=0x7fff) at foo.c:10\n"
             "#1  0x0000000000401100 in helper () at bar.c:5\n"
             "#2\n"
@@ -152,6 +165,11 @@ class TestCrashTracer:
         assert report.error_msg == "Segmentation fault."
         assert "rax" in report.registers
         assert report.reg_values.get("rip") == 0x401000
+        # crash_rip comes from the rip register; fault_addr from $_siginfo's
+        # si_addr — the two must stay distinct (regression: a register line
+        # must never populate fault_addr).
+        assert report.crash_rip == "0x401000"
+        assert report.fault_addr == "0xdead0000"
         assert len(report.frames) >= 1
         # Regex captures minimal match before optional groups — func name may be truncated
         assert "401000" in report.frames[0]["addr"]

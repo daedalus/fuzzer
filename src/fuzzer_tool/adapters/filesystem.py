@@ -486,6 +486,7 @@ def save_crash(
     crash_blocklist: set[str] | None = None,
     crash_allowlist: set[str] | None = None,
     crash_min_sizes: dict[str, int] | None = None,
+    fault_addr: int | None = None,
 ) -> bool:
     """Save crash input with enriched triage metadata.
 
@@ -506,6 +507,9 @@ def save_crash(
         crash_blocklist: Set of stack hashes to skip (known crashes).
         crash_allowlist: Set of stack hashes that override blocklist.
         crash_min_sizes: Dict of stack_hash -> minimum trigger size.
+        fault_addr: Optional faulting memory address (si_addr) captured by the
+            ptrace runner; folded into the fallback signal signature so
+            same-signal crashes at different addresses dedup separately.
 
     Returns:
         Base name of saved files (e.g. "crash_1234567890_abc12345_sig_signal6"),
@@ -516,7 +520,14 @@ def save_crash(
         return False
 
     report = SanitizerReport.parse(stderr)
-    sig = report.signature if report and report.is_valid() else f"signal:{abs(returncode)}"
+    if report and report.is_valid():
+        sig = report.signature
+    elif fault_addr is not None:
+        # Distinguish NULL-deref / wild-pointer / stack-overflow crashes that
+        # all share the same signal number but fault at different addresses.
+        sig = f"signal:{abs(returncode)}@{fault_addr:#x}"
+    else:
+        sig = f"signal:{abs(returncode)}"
 
     # Stack hash for blocklist/allowlist filtering
     stack_h = report.stack_hash() if report else ""
@@ -535,13 +546,15 @@ def save_crash(
     # Deduplicate by signature: skip if this crash signature was already seen.
     # Uses Levenshtein similarity for fuzzy matching — crashes at the same
     # function with different instruction offsets or inlined frames are grouped.
-    # Only fuzzy-match sanitizer signatures (contain @); exact-match signal fallbacks.
+    # Only fuzzy-match sanitizer signatures: normalize_frame() strips 0x-addresses
+    # and numbers, which is noise for ASAN sigs but IS the distinguishing signal
+    # for address-bearing fallback sigs like "signal:11@0xdead0000".
     if sig in crash_sigs:
         crash_hashes.add(h)
         crash_sigs[sig] += 1
         return False
 
-    if "@" in sig:
+    if report and report.is_valid() and "@" in sig:
         for existing_sig in crash_sigs:
             if crash_signature_similarity(sig, existing_sig) >= 0.8:
                 crash_hashes.add(h)
