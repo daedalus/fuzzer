@@ -52,4 +52,5 @@
 - [x] Ptrace wait loop conflated "no event" `(0, 0)` with a clean exit `(pid, 0)` (tested `status == 0` instead of the PID) — every rc=0 exit in ptrace mode was misreported as `-2` and its input saved to the corpus
 - [x] Subprocess loader's standalone-exec branch clamped signal-killed executables to exit 0 (`sys.exit(max(0, min(proc.returncode, 125)))` — a SIGSEGV'd target's `-11` became a clean 0, invisible to `is_crash`). Now exits `128+signum` (139/134), which `SIGNAL_CRASH_CODES` recognizes; timeouts exit 137 which is not a crash code.
 - [ ] `_apply_single_mutation` havoc doesn't enforce `max_len` strictly (allows +1 byte per insert, up to +8 total)
+- [ ] `targets/test_target.c` crash paths vanish under `-O2` — clang eliminates the `((void(*)())0)()` NULL-jump (UB) and the shim build intercepts `abort()`, so the synthetic target silently stops crashing in production-style `-O2 -g` builds (only `-O0` builds crash). Harden the target (e.g. a volatile function-pointer call) or accept `-O0` for it.
 - [ ] `parse_dict_line` triple-encode chain fragile for bytes > 0x7F

@@ -54,7 +54,9 @@ buf = (ctypes.c_uint8 * len(data))(*data)
 fn(buf, len(data))
 """
 
-# returncode -> (signal name, number) for the crash signals the fuzzer reports.
+# returncode -> (signal name, number) for the crash signals the fuzzer
+# reports. Both conventions occur: negative -sig (ptrace/persistent
+# WIFSIGNALED paths) and positive 128+sig (guarded-call 128+signum exit).
 _SIGNAL_FROM_RETURNCODE = {
     -6: ("SIGABRT", 6),
     -7: ("SIGBUS", 7),
@@ -62,6 +64,12 @@ _SIGNAL_FROM_RETURNCODE = {
     -11: ("SIGSEGV", 11),
     -4: ("SIGILL", 4),
     -5: ("SIGTRAP", 5),
+    134: ("SIGABRT", 6),
+    135: ("SIGBUS", 7),
+    136: ("SIGFPE", 8),
+    139: ("SIGSEGV", 11),
+    132: ("SIGILL", 4),
+    133: ("SIGTRAP", 5),
 }
 
 

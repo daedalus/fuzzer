@@ -156,6 +156,16 @@ class TestTraceReport:
         # Nothing captured (gdb unavailable / target untraceable) → no section.
         assert TraceReport().sidecar_block() == ""
 
+    def test_signal_map_positive_exit_codes(self):
+        # The .so guarded-call path reports crashes as 128+signum (139 for
+        # SIGSEGV) — the sidecar must label those, not show "(0)".
+        from fuzzer_tool.core.trace import CrashTracer
+
+        tracer = CrashTracer("targets/png_read_afl.so")
+        report = tracer.gdb_replay(b"x", 139)
+        assert report.signal == "SIGSEGV"
+        assert report.signal_num == 11
+
 
 class TestSoProbe:
     def test_shared_object_detection(self):
