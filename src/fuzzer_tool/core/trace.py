@@ -199,6 +199,8 @@ class TraceReport:
             lines.extend(["", "--- Registers ---", self.registers])
         if self.backtrace:
             lines.extend(["", "--- Backtrace ---", self.backtrace])
+        if self.source_context:
+            lines.extend(["", "--- Source ---", self.source_context])
         if self.disassembly:
             lines.extend(["", "--- Disassembly ---", self.disassembly])
         return "\n".join(lines)

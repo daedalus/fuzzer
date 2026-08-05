@@ -138,6 +138,7 @@ class TestTraceReport:
             error_msg="Segmentation fault.",
             registers="rip            0x0",
             backtrace="#0  0x0000000000000000 in ?? ()\n#1  fuzz_test ()",
+            source_context="12\t            ((void(*)())0)();",
             disassembly="Dump of assembler code:\ncall   *%rcx\nEnd of assembler dump.",
         )
         block = r.sidecar_block()
@@ -148,6 +149,7 @@ class TestTraceReport:
         assert "Segmentation fault." in block
         assert "rip            0x0" in block
         assert "fuzz_test" in block
+        assert "((void(*)())0)();" in block
         assert "call   *%rcx" in block
 
     def test_sidecar_block_empty(self):
