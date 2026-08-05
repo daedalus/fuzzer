@@ -23,6 +23,10 @@ class CrashMetadata:
     sanitizer: str = ""
     error_type: str = ""
     fault_addr: str = ""
+
+    # GDB crash replay text (backtrace/registers/fault) embedded in the
+    # sidecar; empty when gdb is unavailable or the target isn't traceable.
+    gdb_replay: str = ""
     frames: list[str] = field(default_factory=list)
     access_size: int | None = None
     access_type: str | None = None  # "READ" / "WRITE" / "FREE"
@@ -180,6 +184,11 @@ class CrashMetadata:
             lines.append(f"  RBP: {self.rbp:#x}")
             if self.instruction_bytes:
                 lines.append(f"  instruction: {self.instruction_bytes}")
+            lines.append("")
+
+        # GDB crash replay (backtrace/registers/fault) — part of the report
+        if self.gdb_replay:
+            lines.append(self.gdb_replay)
             lines.append("")
 
         # Nearest corpus

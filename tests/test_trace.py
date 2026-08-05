@@ -1,9 +1,21 @@
 """Tests for core/trace.py — CrashTracer, TraceReport format, parsing, repro."""
 
 import os
+import shutil
+import subprocess
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from fuzzer_tool.core.trace import TraceReport, _get_exported_functions
+import pytest
+
+from fuzzer_tool.core.trace import (
+    TraceReport,
+    _get_exported_functions,
+    _is_shared_object,
+    _probe_so_function,
+)
+
+TARGETS_DIR = Path(__file__).parent.parent / "targets"
 
 
 class TestGetExportedFunctions:
@@ -117,6 +129,111 @@ class TestTraceReport:
         assert "SIGABRT" in text
         assert "(6)" in text
 
+    def test_sidecar_block(self):
+        r = TraceReport(
+            signal="SIGSEGV",
+            signal_num=11,
+            crash_rip="0x0",
+            fault_addr="0x0",
+            error_msg="Segmentation fault.",
+            registers="rip            0x0",
+            backtrace="#0  0x0000000000000000 in ?? ()\n#1  fuzz_test ()",
+            disassembly="Dump of assembler code:\ncall   *%rcx\nEnd of assembler dump.",
+        )
+        block = r.sidecar_block()
+        assert block.startswith("=== GDB crash replay ===")
+        assert "Signal: SIGSEGV (11)" in block
+        assert "RIP:    0x0" in block
+        assert "Fault:  0x0" in block
+        assert "Segmentation fault." in block
+        assert "rip            0x0" in block
+        assert "fuzz_test" in block
+        assert "call   *%rcx" in block
+
+    def test_sidecar_block_empty(self):
+        # Nothing captured (gdb unavailable / target untraceable) → no section.
+        assert TraceReport().sidecar_block() == ""
+
+
+class TestSoProbe:
+    def test_shared_object_detection(self):
+        assert _is_shared_object("/tmp/tgt.so")
+        assert _is_shared_object("/tmp/tgt.dylib")
+        assert not _is_shared_object("/tmp/tgt")
+        assert not _is_shared_object("/tmp/tgt.py")
+
+    def test_probe_prefers_fuzz_shm_run(self):
+        r = MagicMock(stdout="0000 T fuzz_test\n0000 T fuzz_shm_run\n", returncode=0)
+        with patch("subprocess.run", return_value=r):
+            assert _probe_so_function("x.so") == "fuzz_shm_run"
+
+    def test_probe_falls_back_to_fuzz_prefix(self):
+        r = MagicMock(stdout="0000 T fuzz_png\n0000 T helper\n", returncode=0)
+        with patch("subprocess.run", return_value=r):
+            assert _probe_so_function("x.so") == "fuzz_png"
+
+    def test_probe_none_when_no_fuzz_symbol(self):
+        r = MagicMock(stdout="0000 T helper\n", returncode=0)
+        with patch("subprocess.run", return_value=r):
+            assert _probe_so_function("x.so") is None
+
+
+class TestGdbSoReplay:
+    """Real GDB replay of a crashing .so (skips when gdb/clang unavailable)."""
+
+    def _compile_shared(self, tmp_path) -> Path:
+        # -g: the project's build_targets.sh compiles fuzz targets with debug
+        # info, so the replay must surface DWARF (file:line, source context).
+        so = tmp_path / "tgt.so"
+        subprocess.run(
+            [
+                "clang",
+                "-g",
+                "-shared",
+                "-fPIC",
+                "-o",
+                str(so),
+                str(TARGETS_DIR / "test_target.c"),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        return so
+
+    @pytest.mark.skipif(shutil.which("gdb") is None, reason="gdb not installed")
+    @pytest.mark.skipif(shutil.which("clang") is None, reason="clang not installed")
+    def test_gdb_replay_so_null_deref(self, tmp_path):
+        from fuzzer_tool.core.trace import CrashTracer
+
+        so = self._compile_shared(tmp_path)
+        assert _probe_so_function(str(so)) == "fuzz_shm_run"
+
+        tracer = CrashTracer(str(so), timeout=15)
+        report = tracer.gdb_replay(b"CRASHS", -11)
+
+        assert report.signal == "SIGSEGV"
+        assert report.fault_addr == "0x0"  # NULL-jump: si_addr == 0
+        assert report.crash_rip == "0x0"
+        # DWARF: the backtrace carries function args and file:line.
+        assert "fuzz_test" in report.backtrace
+        assert "test_target.c:12" in report.backtrace  # the ((void(*)())0)() line
+        # DWARF source context: the crashing source line is listed.
+        assert "((void(*)())0)();" in report.source_context
+        block = report.sidecar_block()
+        assert "=== GDB crash replay ===" in block
+        assert "Signal: SIGSEGV (11)" in block
+
+    @pytest.mark.skipif(shutil.which("gdb") is None, reason="gdb not installed")
+    @pytest.mark.skipif(shutil.which("clang") is None, reason="clang not installed")
+    def test_gdb_replay_so_safe_input_no_crash(self, tmp_path):
+        from fuzzer_tool.core.trace import CrashTracer
+
+        so = self._compile_shared(tmp_path)
+        report = CrashTracer(str(so), timeout=15).gdb_replay(b"SAFEXXX00", 0)
+        # No crash → no signal captured, empty sidecar block.
+        assert report.signal == ""
+        assert report.sidecar_block() == ""
+
 
 class TestCrashTracer:
     def test_check_tool_exists(self):
@@ -183,6 +300,25 @@ class TestCrashTracer:
         report = TraceReport()
         tracer._parse_gdb_output("no signal here\n", report)
         assert report.signal == ""
+
+    def test_parse_gdb_source_context_no_leading_space(self):
+        # Regression: gdb `list` output starts lines with the line number
+        # directly (no leading whitespace); the parser used to require it,
+        # silently dropping DWARF source context.
+        from fuzzer_tool.core.trace import CrashTracer
+
+        tracer = CrashTracer("targets/png_read_afl.so")
+        report = TraceReport()
+        gdb_output = (
+            "Program received signal SIGSEGV, Segmentation fault.\n"
+            "#1  0x00007ffff7f9c186 in fuzz_test (len=6) at test_target.c:12\n"
+            "12\t            ((void(*)())0)();\n"
+            "13\t        }\n"
+            "14\t        if (buf[5] == 'A') {\n"
+        )
+        tracer._parse_gdb_output(gdb_output, report)
+        assert "((void(*)())0)();" in report.source_context
+        assert "fuzz_test" in report.backtrace
 
     def test_save_report(self, tmp_path):
         from fuzzer_tool.core.trace import CrashTracer

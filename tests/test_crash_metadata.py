@@ -74,6 +74,20 @@ class TestCrashMetadata:
         result = meta.format_sidecar()
         assert "=== registers ===" not in result
 
+    def test_format_sidecar_gdb_replay(self):
+        meta = CrashMetadata()
+        meta.gdb_replay = "=== GDB crash replay ===\nSignal: SIGSEGV (11)\nFault:  0x0"
+        result = meta.format_sidecar()
+        assert "=== GDB crash replay ===" in result
+        assert "Signal: SIGSEGV (11)" in result
+        assert "Fault:  0x0" in result
+
+    def test_format_sidecar_no_gdb_replay(self):
+        # No gdb / untraceable target → no GDB section in the sidecar.
+        meta = CrashMetadata()
+        result = meta.format_sidecar()
+        assert "GDB crash replay" not in result
+
     def test_format_reproducer(self):
         meta = CrashMetadata()
         meta.error_type = "heap-buffer-overflow"

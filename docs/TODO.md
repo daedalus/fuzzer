@@ -29,6 +29,7 @@
 - [x] **Automated crash bucketing** — Levenshtein crash clustering groups crashes by stack-trace similarity.
 - [x] **Exploitability scoring** — `ASAN_EXPLOITABILITY` classification in reports.
 - [x] **Fault-address extraction (PTRACE_GETSIGINFO)** — the ptrace runner captures `si_addr` + registers at fatal-signal stops; non-sanitizer crash signatures become `signal:N@0xaddr` so same-signal crashes at different addresses dedup separately; `--trace-crashes` reports show both `RIP:` (`crash_rip`) and `Fault:` (GDB `$_siginfo`). Extended to all `.so` crash paths: the persistent loader's grandchild self-traces (`PTRACE_TRACEME` + `WUNTRACED` stop loop, relayed over the RC line), and direct_lite re-runs crashing inputs through the ptrace-attached loader script (`TargetRunner._run_triage_ptrace`) for full triage.
+- [x] **GDB crash replay in the crash report** — every saved crash `.txt` embeds a `=== GDB crash replay ===` section automatically (when gdb is installed): signal, RIP/Fault, registers, backtrace, and DWARF source (`file:line` + the crashing source line). `.so` targets are driven via a ctypes harness calling the probed fuzz entry point (stdin input), so non-ASAN shared-library crashes get a real gdb backtrace in the report.
 - [ ] **Root cause diff** — show minimal byte diff from nearest non-crashing input to root-cause bytes.
 
 ## Performance

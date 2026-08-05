@@ -35,6 +35,26 @@ from fuzzer_tool.core.running_stats import RunningMoments
 
 log = logging.getLogger(__name__)
 
+
+def _gdb_crash_replay(f, data: bytes, returncode: int) -> str:
+    """Best-effort GDB crash replay text for the report sidecar; '' when unavailable.
+
+    Runs the crashing input once under GDB (only when gdb is installed and the
+    target is traceable) so the final crash report carries a real backtrace,
+    registers, and fault address. Cost is ~1s on the rare crashing input.
+    """
+    from fuzzer_tool.core.trace import CrashTracer
+
+    try:
+        tracer = CrashTracer(f.target, timeout=max(5, int(getattr(f, "timeout", 5))))
+        if not tracer._has_gdb:
+            return ""
+        return tracer.gdb_replay(data, returncode).sidecar_block()
+    except Exception:
+        log.debug("GDB crash replay failed", exc_info=True)
+        return ""
+
+
 _use_xxhash = True
 
 SIGNAL_NAMES = {
@@ -313,6 +333,9 @@ class CorpusManager:
             if sig not in f.crash_frames:
                 f.crash_frames[sig] = report.frames
         del report  # free SanitizerReport object
+
+        # Embed the GDB crash replay in the report sidecar (best-effort).
+        meta.gdb_replay = _gdb_crash_replay(f, data, returncode)
 
         return save_crash(
             data,

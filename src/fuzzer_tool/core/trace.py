@@ -10,10 +10,12 @@ Usage:
     tracer.save_report(report, crash_dir, crash_name)
 """
 
+import contextlib
 import logging
 import os
 import re
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass, field
 
@@ -39,6 +41,48 @@ def _get_exported_functions(target: str, max_funcs: int = 20) -> list[str]:
         return funcs[:max_funcs]
     except Exception:
         return []
+
+
+_SO_HARNESS = """\
+import ctypes, sys
+so = ctypes.CDLL(sys.argv[1])
+fn = getattr(so, sys.argv[2])
+fn.restype = ctypes.c_int
+fn.argtypes = [ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t]
+data = sys.stdin.buffer.read()
+buf = (ctypes.c_uint8 * len(data))(*data)
+fn(buf, len(data))
+"""
+
+# returncode -> (signal name, number) for the crash signals the fuzzer reports.
+_SIGNAL_FROM_RETURNCODE = {
+    -6: ("SIGABRT", 6),
+    -7: ("SIGBUS", 7),
+    -8: ("SIGFPE", 8),
+    -11: ("SIGSEGV", 11),
+    -4: ("SIGILL", 4),
+    -5: ("SIGTRAP", 5),
+}
+
+
+def _is_shared_object(target: str) -> bool:
+    return target.lower().endswith((".so", ".dylib", ".dll"))
+
+
+def _probe_so_function(target: str) -> str | None:
+    """Pick the fuzz entry point for a shared-object target.
+
+    Mirrors Fuzzer._probe_so_function's preference: fuzz_shm_run, else the
+    first exported fuzz_* symbol. Returns None when nothing callable is found.
+    """
+    funcs = _get_exported_functions(target, max_funcs=100)
+    for preferred in ("fuzz_shm_run", "fuzz_test"):
+        if preferred in funcs:
+            return preferred
+    for name in funcs:
+        if name.startswith("fuzz"):
+            return name
+    return None
 
 
 @dataclass
@@ -134,6 +178,31 @@ class TraceReport:
         sections.append("=" * 72)
         return "\n".join(sections)
 
+    def sidecar_block(self) -> str:
+        """Compact GDB crash-replay section for embedding in the .txt sidecar.
+
+        Returns "" when GDB captured nothing useful (unavailable, or the
+        target was not traceable), so callers can skip the section entirely.
+        """
+        if not (self.signal or self.registers or self.backtrace):
+            return ""
+        lines = ["=== GDB crash replay ==="]
+        if self.signal:
+            lines.append(f"Signal: {self.signal} ({self.signal_num})")
+        if self.crash_rip:
+            lines.append(f"RIP:    {self.crash_rip}")
+        if self.fault_addr:
+            lines.append(f"Fault:  {self.fault_addr}")
+        if self.error_msg:
+            lines.append(f"Error:  {self.error_msg}")
+        if self.registers:
+            lines.extend(["", "--- Registers ---", self.registers])
+        if self.backtrace:
+            lines.extend(["", "--- Backtrace ---", self.backtrace])
+        if self.disassembly:
+            lines.extend(["", "--- Disassembly ---", self.disassembly])
+        return "\n".join(lines)
+
 
 class CrashTracer:
     """Generate trace reports for crash inputs using GDB/strace.
@@ -167,38 +236,65 @@ class CrashTracer:
         Returns:
             Populated TraceReport.
         """
-        report = TraceReport(target=self.target_path, input_size=len(data))
+        report = self.gdb_replay(data, returncode)
 
-        # Determine signal from returncode
-        signal_map = {
-            -6: ("SIGABRT", 6),
-            -7: ("SIGBUS", 7),
-            -8: ("SIGFPE", 8),
-            -11: ("SIGSEGV", 11),
-            -4: ("SIGILL", 4),
-            -5: ("SIGTRAP", 5),
-        }
-        if returncode in signal_map:
-            report.signal, report.signal_num = signal_map[returncode]
-
-        # Write crash input to temp file
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".bin") as f:
-            f.write(data)
-            tmp_path = f.name
-
-        try:
-            if self._has_gdb:
-                self._run_gdb(tmp_path, report)
-            if self._has_strace:
+        if self._has_strace:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".bin") as f:
+                f.write(data)
+                tmp_path = f.name
+            try:
                 self._run_strace(tmp_path, report)
-            self._build_repro(data, report)
-        finally:
-            os.unlink(tmp_path)
+            finally:
+                os.unlink(tmp_path)
+        self._build_repro(data, report)
 
         return report
 
+    def gdb_replay(self, data: bytes, returncode: int = 0) -> TraceReport:
+        """Run ONLY the GDB crash replay (no strace) for the report sidecar.
+
+        Best-effort: returns an empty report when gdb is unavailable or the
+        target cannot be traced.
+        """
+        report = TraceReport(target=self.target_path, input_size=len(data))
+        if returncode in _SIGNAL_FROM_RETURNCODE:
+            report.signal, report.signal_num = _SIGNAL_FROM_RETURNCODE[returncode]
+
+        if not self._has_gdb:
+            return report
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".bin") as f:
+            f.write(data)
+            input_path = f.name
+        try:
+            self._run_gdb(input_path, report)
+        finally:
+            os.unlink(input_path)
+        return report
+
     def _run_gdb(self, input_path: str, report: TraceReport):
-        """Run GDB in batch mode to extract backtrace, registers, disassembly."""
+        """Run GDB in batch mode to extract backtrace, registers, disassembly.
+
+        Executables run with the crash input as argv[1] (legacy behavior).
+        Shared objects cannot be exec'd, so they are driven through a ctypes
+        harness that loads the library and calls the probed fuzz entry point
+        with the crash input on stdin — mirroring how direct_lite and the
+        loaders execute them.
+        """
+        harness_path = None
+        so_stdin = None
+        if _is_shared_object(self.target_path):
+            func = _probe_so_function(self.target_path)
+            if func is None:
+                log.debug("No fuzz entry point found in %s — skipping GDB", self.target_path)
+                return
+            harness_path = self._write_so_harness()
+            program_args = [sys.executable, harness_path, self.target_path, func]
+            # The harness reads the crash input from stdin; gdb has no `run <`
+            # redirection, so redirect gdb's own stdin — the inferior inherits it.
+            so_stdin = input_path
+        else:
+            program_args = [self.target_path, input_path]
+
         cmds = [
             "set pagination off",
             "run",
@@ -207,6 +303,10 @@ class CrashTracer:
             "bt full",
             "thread apply all bt",
             "disassemble $pc",
+            # DWARF source context: the crashing frame is #0 (often address 0
+            # for a NULL-jump), so select the target's own frame and list.
+            "frame 1",
+            "list",
         ]
         # Also disassemble exported functions from the target binary
         for func in _get_exported_functions(self.target_path):
@@ -216,18 +316,32 @@ class CrashTracer:
         gdb_args = ["gdb", "-batch"]
         for cmd in cmds:
             gdb_args.extend(["-ex", cmd])
-        gdb_args.extend(["--args", self.target_path, input_path])
+        gdb_args.extend(["--args", *program_args])
 
         try:
-            result = subprocess.run(
-                gdb_args,
-                capture_output=True,
-                timeout=self.timeout,
-            )
+            with contextlib.ExitStack() as stack:
+                stdin_file = stack.enter_context(open(so_stdin, "rb")) if so_stdin else None
+                result = subprocess.run(
+                    gdb_args,
+                    capture_output=True,
+                    timeout=self.timeout,
+                    stdin=stdin_file,
+                )
             output = result.stdout.decode(errors="replace")
             self._parse_gdb_output(output, report)
         except (subprocess.TimeoutExpired, FileNotFoundError) as e:
             log.debug("GDB failed: %s", e)
+        finally:
+            if harness_path:
+                with contextlib.suppress(OSError):
+                    os.unlink(harness_path)
+
+    def _write_so_harness(self) -> str:
+        """Write the ctypes harness that drives a .so target under GDB."""
+        fd, path = tempfile.mkstemp(suffix=".py", prefix="fuzz_gdb_harness_")
+        with os.fdopen(fd, "w") as f:
+            f.write(_SO_HARNESS)
+        return path
 
     def _parse_gdb_output(self, output: str, report: TraceReport):
         """Parse GDB batch output into structured report fields."""
@@ -314,7 +428,7 @@ class CrashTracer:
             ):
                 in_source = False
                 continue
-            m = re.match(r"^\s+\d+\s+\S", line)
+            m = re.match(r"^\s*\d+\s+\S", line)
             if m and not re.match(r"^\s+(rax|rbx|rcx|rdx|rsi|rdi|rbp|rsp|r\d+|rip|eflags)\s", line):
                 in_source = True
                 src_lines.append(line.rstrip())
