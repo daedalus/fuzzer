@@ -228,9 +228,9 @@ class TestGdbSoReplay:
         assert report.crash_rip == "0x0"
         # DWARF: the backtrace carries function args and file:line.
         assert "fuzz_test" in report.backtrace
-        assert "test_target.c:12" in report.backtrace  # the ((void(*)())0)() line
+        assert "test_target.c:16" in report.backtrace  # the crash_fn(); NULL-jump line
         # DWARF source context: the crashing source line is listed.
-        assert "((void(*)())0)();" in report.source_context
+        assert "crash_fn();" in report.source_context
         block = report.sidecar_block()
         assert "=== GDB crash replay ===" in block
         assert "Signal: SIGSEGV (11)" in block
