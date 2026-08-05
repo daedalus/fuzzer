@@ -51,6 +51,29 @@ class TestCrashMetadata:
         result = meta.format_sidecar()
         assert "returncode:    -11" in result
 
+    def test_format_sidecar_registers_rendered_when_rip_zero(self):
+        # Regression: a NULL-jump crash has rip == 0 (the faulting address IS
+        # 0) but a meaningful rsp/rbp. The register block used to be gated on
+        # `if self.rip:`, dropping rsp/rbp from the sidecar entirely.
+        meta = CrashMetadata()
+        meta.rip = 0
+        meta.rsp = 0x7FFF1234
+        meta.rbp = 0x7FFF1200
+        result = meta.format_sidecar()
+        assert "=== registers ===" in result
+        assert "RIP: 0x0" in result
+        assert "RSP: 0x7fff1234" in result
+        assert "RBP: 0x7fff1200" in result
+
+    def test_format_sidecar_all_zero_regs_hidden(self):
+        # All-zero registers are meaningless — the block stays hidden.
+        meta = CrashMetadata()
+        meta.rip = 0
+        meta.rsp = 0
+        meta.rbp = 0
+        result = meta.format_sidecar()
+        assert "=== registers ===" not in result
+
     def test_format_reproducer(self):
         meta = CrashMetadata()
         meta.error_type = "heap-buffer-overflow"

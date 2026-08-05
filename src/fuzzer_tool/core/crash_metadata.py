@@ -170,8 +170,10 @@ class CrashMetadata:
                 lines.append(f"  #{i} {frame}")
             lines.append("")
 
-        # Register state
-        if self.rip:
+        # Register state. Gate on ANY register being nonzero (not just RIP):
+        # a NULL-jump crash has rip == 0 (the faulting address IS 0) but a
+        # meaningful rsp/rbp that would otherwise be dropped from the sidecar.
+        if self.rip or self.rsp or self.rbp:
             lines.append("=== registers ===")
             lines.append(f"  RIP: {self.rip:#x}")
             lines.append(f"  RSP: {self.rsp:#x}")
