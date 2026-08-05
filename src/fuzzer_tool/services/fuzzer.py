@@ -50,7 +50,7 @@ from fuzzer_tool.services.operators import OperatorEngine
 from fuzzer_tool.services.ptrace_coverage import (
     PtraceCoverage,
 )
-from fuzzer_tool.services.runner import TargetRunner
+from fuzzer_tool.services.runner import TargetRunner, ptrace_available
 from fuzzer_tool.services.seed_picker import SeedPicker
 from fuzzer_tool.services.stats import StatsReporter
 
@@ -669,6 +669,9 @@ class Fuzzer:
         # corpus_manager.save_crash for the sidecar + signature.
         self._last_fault_addr: int | None = None
         self._last_regs: dict[str, int] = {}
+        # Lazy probe: whether ptrace crash triage (re-running direct_lite
+        # crashes through the ptrace-attached loader) is usable here.
+        self._triage_ok: bool | None = None
         self.exec_count = 0
         self.crash_count = 0
         self.timeout_count = 0
@@ -2598,6 +2601,23 @@ class Fuzzer:
 
         if is_crash:
             self.crash_count += 1
+            # direct_lite crashes carry no fault address (no ptrace, and the
+            # guarded call reports only the signal). Re-run the input once
+            # through the ptrace-attached loader to capture si_addr + regs.
+            if (
+                self._last_fault_addr is None
+                and self._triage_ok is not False
+                and self._inprocess_runner is not None
+                and self._inprocess_runner.direct_lite
+                and str(self.target).lower().endswith((".so", ".dylib", ".dll"))
+            ):
+                if self._triage_ok is None:
+                    self._triage_ok = ptrace_available()
+                if self._triage_ok:
+                    try:
+                        TargetRunner(self)._run_triage_ptrace(mutated)
+                    except Exception as e:
+                        log.debug("crash triage failed: %s", e)
             crash_name = self.save_crash(mutated, returncode, stderr)
             self._prune_crash_data()
             # Generate GDB/strace trace report if enabled

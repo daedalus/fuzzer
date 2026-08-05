@@ -290,7 +290,7 @@ class CorpusManager:
             meta.nearest_similarity = sim
             meta.diff_bytes = diffs
 
-        if f.ptrace_cov and hasattr(f, "_last_regs"):
+        if hasattr(f, "_last_regs") and (f.ptrace_cov or f._last_regs):
             meta.rip = f._last_regs.get("rip", 0)
             meta.rsp = f._last_regs.get("rsp", 0)
             meta.rbp = f._last_regs.get("rbp", 0)

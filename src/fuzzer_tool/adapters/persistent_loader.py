@@ -57,6 +57,45 @@ def read_shm():
 
 NO_BMP = os.environ.get("_LOADER_NO_BMP", "0") == "1"
 
+# --- ptrace fault-address capture (mirrors services/runner.py helpers) ---
+PTRACE_TRACEME = 0
+PTRACE_CONT = 7
+PTRACE_GETREGS = 12
+PTRACE_GETSIGINFO = 0x4202
+
+_ptrace_libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6")
+_ptrace_libc.ptrace.restype = ctypes.c_long
+_ptrace_libc.ptrace.argtypes = [
+    ctypes.c_long, ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p,
+]
+
+
+def _capture_ptrace_state(pid):
+    # Return (fault_addr, regs) for a fatal-signal ptrace stop.
+    # Mirrors services/runner.py:_get_fault_addr/_capture_crash_state - keep the
+    # x86-64 siginfo/regs offsets in sync with that module (si_signo@0, si_code@8,
+    # si_addr@16; rbp@32, rip@128, rsp@152).
+    fault = None
+    si_buf = ctypes.create_string_buffer(128)  # sizeof(siginfo_t) == 128
+    if _ptrace_libc.ptrace(PTRACE_GETSIGINFO, pid, None, ctypes.cast(si_buf, ctypes.c_void_p)) == 0:
+        si_signo = ctypes.c_int.from_buffer(si_buf, 0).value
+        si_code = ctypes.c_int.from_buffer(si_buf, 8).value
+        if (
+            si_signo in (signal.SIGSEGV, signal.SIGBUS, signal.SIGILL, signal.SIGFPE)
+            and si_code > 0
+        ):
+            fault = ctypes.c_uint64.from_buffer(si_buf, 16).value
+    regs = None
+    regs_buf = (ctypes.c_char * (27 * 8))()
+    if _ptrace_libc.ptrace(PTRACE_GETREGS, pid, None, regs_buf) == 0:
+        regs = {
+            "rip": ctypes.c_uint64.from_buffer(regs_buf, 128).value,
+            "rbp": ctypes.c_uint64.from_buffer(regs_buf, 32).value,
+            "rsp": ctypes.c_uint64.from_buffer(regs_buf, 152).value,
+        }
+    return fault, regs
+
+
 # Read init line
 header = sys.stdin.buffer.readline().decode()
 parts = header.strip().split()
@@ -98,6 +137,15 @@ while True:
             # Child: own process group, run target function, write rc
             os.close(read_pipe)
             os.setsid()
+
+            # Best-effort ptrace self-trace so P1 (our direct parent) can read
+            # the fault address + registers at the fatal-signal stop. If ptrace
+            # is blocked (yama), the guarded call still reports the crash via rc
+            # — capture degrades gracefully.
+            try:
+                _ptrace_libc.ptrace(PTRACE_TRACEME, 0, None, None)
+            except Exception:
+                pass
 
             # Use __afl_guarded_call when available — it uses
             # sigsetjmp/siglongjmp to survive signals (SIGSEGV,
@@ -147,8 +195,32 @@ while True:
                     f.write(str(child_pid))
             except OSError:
                 pass
+        fault_addr = None
+        regs = None
         try:
-            _, status = os.waitpid(child_pid, 0)
+            # The child self-traced (PTRACE_TRACEME): a crash surfaces as a
+            # WIFSTOPPED stop BEFORE the signal is delivered. Loop on stops —
+            # capture the fault state, resume with the signal, and let the
+            # final exit (or signal death) fall through below. Without the
+            # loop, a traced crash landed in the else branch and misreported
+            # rc=-2 after the outer timeout.
+            while True:
+                _, status = os.waitpid(child_pid, os.WUNTRACED)
+                if not os.WIFSTOPPED(status):
+                    break
+                sig = os.WSTOPSIG(status)
+                if sig in (
+                    signal.SIGSEGV,
+                    signal.SIGABRT,
+                    signal.SIGBUS,
+                    signal.SIGILL,
+                    signal.SIGFPE,
+                ):
+                    fault_addr, regs = _capture_ptrace_state(child_pid)
+                # Deliver the stop signal: a guarded call (siglongjmp) survives
+                # it, otherwise the default disposition kills the child. SIGKILL
+                # from the outer timeout cannot be intercepted and never stops here.
+                _ptrace_libc.ptrace(PTRACE_CONT, child_pid, None, ctypes.c_void_p(sig))
             # Check if child was killed by signal (SIGSEGV, SIGABRT, etc.)
             if os.WIFSIGNALED(status):
                 rc = -(os.WTERMSIG(status))
@@ -170,13 +242,19 @@ while True:
             except OSError:
                 pass
 
+        # Relay captured fault state (if any) as trailing RC-line tokens:
+        # "RC <rc> <bmp_len> <fault_addr> <rip> <rsp> <rbp>" ('-' when absent).
+        fault_s = "-" if fault_addr is None else f"{fault_addr:#x}"
+        rip_s = "-" if regs is None else f"{regs['rip']:#x}"
+        rsp_s = "-" if regs is None else f"{regs['rsp']:#x}"
+        rbp_s = "-" if regs is None else f"{regs['rbp']:#x}"
         if NO_BMP:
-            resp = f"RC {rc} 0\n".encode()
+            resp = f"RC {rc} 0 {fault_s} {rip_s} {rsp_s} {rbp_s}\n".encode()
             sys.stdout.buffer.write(resp)
             sys.stdout.buffer.flush()
         else:
             bmp = read_shm()
-            resp = f"RC {rc} {len(bmp)}\n".encode()
+            resp = f"RC {rc} {len(bmp)} {fault_s} {rip_s} {rsp_s} {rbp_s}\n".encode()
             sys.stdout.buffer.write(resp)
             if bmp:
                 sys.stdout.buffer.write(bmp)
@@ -208,6 +286,10 @@ class PersistentLoader:
         self._last_bitmap = None
         self._restarting = False
         self._child_pid_file: str | None = None
+
+        # Fault-address/register relay from the last run (None/{} when absent)
+        self._last_fault_addr: int | None = None
+        self._last_regs: dict[str, int] = {}
 
         # Stderr buffer: drained stderr lines accumulated since last consume
         self._stderr_lock = threading.Lock()
@@ -291,6 +373,10 @@ class PersistentLoader:
         return "".join(lines)
 
     def run_one(self, data: bytes) -> tuple[int, bytes | None]:
+        # Reset per-run crash state so a stale value never leaks from an
+        # earlier run into this iteration's metadata.
+        self._last_fault_addr = None
+        self._last_regs = {}
         if not self._ready or not self._proc:
             return -2, None
 
@@ -351,6 +437,18 @@ class PersistentLoader:
 
         rc = int(parts[1])
         bmp_len = int(parts[2])
+
+        # Optional trailing tokens relayed by newer loaders:
+        # <fault_addr> <rip> <rsp> <rbp> ('-' when absent).
+        if len(parts) >= 7:
+
+            def _hex_or_none(v: str) -> int | None:
+                return None if v == "-" else int(v, 16)
+
+            fault, rip, rsp, rbp = (_hex_or_none(p) for p in parts[3:7])
+            self._last_fault_addr = fault
+            if rip is not None or rsp is not None or rbp is not None:
+                self._last_regs = {"rip": rip or 0, "rsp": rsp or 0, "rbp": rbp or 0}
 
         bitmap = None
         if bmp_len > 0:

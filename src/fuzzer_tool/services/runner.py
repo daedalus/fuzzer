@@ -15,6 +15,9 @@ import logging
 import os
 import signal
 import struct
+import subprocess
+import sys
+import tempfile
 import threading
 import time
 
@@ -84,6 +87,39 @@ def _write_and_close(fd: int, data: bytes) -> None:
             log.debug("Failed to close fd %d (already closed?)", fd)
 
 
+def ptrace_available() -> bool:
+    """Return True if PTRACE_TRACEME works in this environment.
+
+    Probes once by forking a child that TRACEMEs itself and exits 42 on
+    failure (yama ptrace_scope can block attach/trace even for children).
+    """
+    libc = ctypes.CDLL("libc.so.6", use_errno=True)
+    libc.ptrace.argtypes = [
+        ctypes.c_long,
+        ctypes.c_long,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+    ]
+    libc.ptrace.restype = ctypes.c_long
+    pid = os.fork()
+    if pid == 0:
+        try:
+            if libc.ptrace(PTRACE_TRACEME, 0, None, None) != 0:
+                os._exit(42)
+            os._exit(0)
+        except BaseException:
+            os._exit(127)
+    try:
+        _, status = os.waitpid(pid, os.WUNTRACED)
+        return not (os.WIFEXITED(status) and os.WEXITSTATUS(status) in (42, 127))
+    except ChildProcessError:
+        return False
+    finally:
+        with contextlib.suppress(ProcessLookupError, ChildProcessError):
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+
+
 class TargetRunner:
     """Manages target execution across multiple backends.
 
@@ -106,6 +142,10 @@ class TargetRunner:
             f._cmplog.setup_env_for_run()
 
         if f._inprocess_runner:
+            # Reset per-run crash state so stale values never leak into later
+            # iterations' metadata (save_crash runs after run_target in fuzz_one).
+            f._last_fault_addr = None
+            f._last_regs = {}
             if shm:
                 shm.reset_edge_map()
             # Open perf counters on current process (pid=0, no extra perms needed)
@@ -113,6 +153,8 @@ class TargetRunner:
             if f._perf_counters:
                 f._perf_counters.open_for_pid(0)
             rc, err = f._inprocess_runner.run_one(data)
+            f._last_fault_addr = f._inprocess_runner._last_fault_addr
+            f._last_regs = f._inprocess_runner._last_regs or {}
             # In direct_lite mode the target writes directly to shm_cov's
             # SHM via __afl_area — no read_bitmap/memmove needed.
             # For other inprocess modes, copy from the runner's bitmap.
@@ -371,6 +413,7 @@ class TargetRunner:
                     returncode = os.WEXITSTATUS(status)
                 elif os.WIFSTOPPED(status):
                     returncode = -os.WSTOPSIG(status)
+                    _capture_crash_state(pid, libc, f)
                     with contextlib.suppress(ProcessLookupError):
                         os.kill(pid, signal.SIGKILL)
                         os.waitpid(pid, 0)
@@ -388,6 +431,101 @@ class TargetRunner:
         finally:
             if writer is not None:
                 writer.join(timeout=f.timeout)
+
+    def _run_triage_ptrace(self, data: bytes) -> tuple[int, str]:
+        """Re-run *data* through a ptrace-attached loader script for crash triage.
+
+        The ptrace runner execs the target binary, which is useless for .so
+        targets — direct_lite crashes happen inside the fuzzer process with no
+        fault info. This spawns the subprocess loader script self-traced
+        (PTRACE_TRACEME), so a fatal signal stops the tracee before delivery
+        and _capture_crash_state() can read si_addr + registers. Best-effort:
+        if ptrace is blocked the script runs untraced and capture is skipped.
+        """
+        f = self.f
+        runner = f._inprocess_runner
+        f._last_fault_addr = None
+        f._last_regs = {}
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        libc.ptrace.argtypes = [
+            ctypes.c_long,
+            ctypes.c_long,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        libc.ptrace.restype = ctypes.c_long
+
+        # direct_lite never creates a loader script — write one on demand.
+        if runner._loader_path is None:
+            from fuzzer_tool.adapters.inprocess import _LOADER_SCRIPT
+
+            fd, path = tempfile.mkstemp(suffix=".py", prefix="fuzz_loader_")
+            with os.fdopen(fd, "w") as fh:
+                fh.write(_LOADER_SCRIPT)
+            runner._loader_path = path
+
+        env = os.environ.copy()
+        env["_PTRACE_TRACEME"] = "1"
+        env["_TIMEOUT"] = str(int(f.timeout))
+        proc = subprocess.Popen(
+            [sys.executable, runner._loader_path, f.target, runner.function_name],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            env=env,
+        )
+        try:
+            proc.stdin.write(data)
+            proc.stdin.close()
+        except (BrokenPipeError, OSError):
+            pass
+
+        pid = proc.pid
+        deadline = time.time() + f.timeout
+        returncode = 0
+        reaped = False
+        try:
+            while time.time() < deadline:
+                waited, status = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
+                if waited == 0:
+                    time.sleep(0.0005)
+                    continue
+                if os.WIFEXITED(status):
+                    returncode = os.WEXITSTATUS(status)
+                    reaped = True
+                    break
+                if os.WIFSIGNALED(status):
+                    returncode = -os.WTERMSIG(status)
+                    reaped = True
+                    break
+                if os.WIFSTOPPED(status):
+                    sig = os.WSTOPSIG(status)
+                    if sig == signal.SIGTRAP:
+                        # No exec happens after TRACEME — defensive only.
+                        libc.ptrace(PTRACE_CONT, pid, None, None)
+                        continue
+                    _capture_crash_state(pid, libc, f)
+                    with contextlib.suppress(ProcessLookupError):
+                        os.kill(pid, signal.SIGKILL)
+                        os.waitpid(pid, 0)
+                    return -sig, ""
+            if not reaped:
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(pid, signal.SIGKILL)
+                    os.waitpid(pid, 0)
+                return -1, "timeout"
+        except ChildProcessError:
+            return -2, ""
+        finally:
+            stderr = b""
+            try:
+                if proc.stderr:
+                    stderr = proc.stderr.read()
+            except OSError:
+                pass
+            with contextlib.suppress(Exception):
+                proc.wait(timeout=1)
+        return returncode, stderr.decode(errors="replace")
 
     def verify_kernel_crash(self, child_pid: int | None) -> bool:
         return False

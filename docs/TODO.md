@@ -28,7 +28,7 @@
 ## Crash Analysis
 - [x] **Automated crash bucketing** — Levenshtein crash clustering groups crashes by stack-trace similarity.
 - [x] **Exploitability scoring** — `ASAN_EXPLOITABILITY` classification in reports.
-- [x] **Fault-address extraction (PTRACE_GETSIGINFO)** — the ptrace runner captures `si_addr` + registers at fatal-signal stops; non-sanitizer crash signatures become `signal:N@0xaddr` so same-signal crashes at different addresses dedup separately; `--trace-crashes` reports show both `RIP:` (`crash_rip`) and `Fault:` (GDB `$_siginfo`).
+- [x] **Fault-address extraction (PTRACE_GETSIGINFO)** — the ptrace runner captures `si_addr` + registers at fatal-signal stops; non-sanitizer crash signatures become `signal:N@0xaddr` so same-signal crashes at different addresses dedup separately; `--trace-crashes` reports show both `RIP:` (`crash_rip`) and `Fault:` (GDB `$_siginfo`). Extended to all `.so` crash paths: the persistent loader's grandchild self-traces (`PTRACE_TRACEME` + `WUNTRACED` stop loop, relayed over the RC line), and direct_lite re-runs crashing inputs through the ptrace-attached loader script (`TargetRunner._run_triage_ptrace`) for full triage.
 - [ ] **Root cause diff** — show minimal byte diff from nearest non-crashing input to root-cause bytes.
 
 ## Performance
@@ -49,5 +49,6 @@
 - [x] `parse_protobuf` crashes on deeply nested group fields (>16 levels) — `_parse_fields` returned bare `None` at the depth limit instead of `(None, [])`, causing `TypeError: cannot unpack non-iterable NoneType`
 - [x] Ptrace breakpoint handler read `rsp` from `user_regs_struct` offset 176 (`gs_base`, 0 for the main thread) instead of 152 — every function-entry breakpoint skipped its first instruction, corrupting the tracee (spurious stack-address SIGSEGVs, zero edge coverage)
 - [x] Ptrace wait loop conflated "no event" `(0, 0)` with a clean exit `(pid, 0)` (tested `status == 0` instead of the PID) — every rc=0 exit in ptrace mode was misreported as `-2` and its input saved to the corpus
+- [x] Subprocess loader's standalone-exec branch clamped signal-killed executables to exit 0 (`sys.exit(max(0, min(proc.returncode, 125)))` — a SIGSEGV'd target's `-11` became a clean 0, invisible to `is_crash`). Now exits `128+signum` (139/134), which `SIGNAL_CRASH_CODES` recognizes; timeouts exit 137 which is not a crash code.
 - [ ] `_apply_single_mutation` havoc doesn't enforce `max_len` strictly (allows +1 byte per insert, up to +8 total)
 - [ ] `parse_dict_line` triple-encode chain fragile for bytes > 0x7F

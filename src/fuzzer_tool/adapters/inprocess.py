@@ -37,6 +37,21 @@ import os
 import subprocess
 import sys
 
+# Best-effort ptrace self-trace for crash triage: when set, the script's
+# parent (the fuzzer) becomes our tracer, so a fatal signal stops us BEFORE
+# delivery and the parent can read si_addr + registers via PTRACE_GETSIGINFO.
+# If ptrace is blocked (yama), we simply run untraced — capture is skipped.
+if os.environ.get("_PTRACE_TRACEME") == "1":
+    _lc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6")
+    _lc.ptrace.restype = ctypes.c_long
+    _lc.ptrace.argtypes = [
+        ctypes.c_long, ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p,
+    ]
+    try:
+        _lc.ptrace(0, 0, None, None)  # PTRACE_TRACEME
+    except Exception:
+        pass
+
 target = sys.argv[1]
 func_name = sys.argv[2]
 data = sys.stdin.buffer.read()
@@ -55,6 +70,11 @@ if os.path.isfile(target) and os.access(target, os.X_OK) \
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait()
+    if proc.returncode < 0:
+        # Killed by a signal (e.g. SIGSEGV → -11): encode as 128+signum so
+        # the parent's is_crash() (SIGNAL_CRASH_CODES) sees the crash instead
+        # of the old clamp silently turning it into a clean exit code 0.
+        sys.exit(128 + (-proc.returncode))
     sys.exit(max(0, min(proc.returncode, 125)))
 
 # Shared library — load via ctypes
@@ -165,6 +185,10 @@ class InProcessRunner:
         self._is_c = False
         self._loader_path: str | None = None
         self._bitmap_out: str | None = None
+
+        # Fault-address/register relay from the last run (None/{} when absent)
+        self._last_fault_addr: int | None = None
+        self._last_regs: dict[str, int] = {}
 
         # Shim state
         self._shim: ShimResult | None = None
@@ -587,6 +611,8 @@ class InProcessRunner:
     def _run_c_persistent(self, data: bytes) -> tuple[int, str]:
         """Persistent subprocess — one process, many calls."""
         rc, bitmap = self._persistent.run_one(data)
+        self._last_fault_addr = self._persistent._last_fault_addr
+        self._last_regs = self._persistent._last_regs
         self._persistent._last_bitmap = bitmap
         stderr = self._persistent.consume_stderr() if self.capture_stderr else ""
         return rc, stderr
