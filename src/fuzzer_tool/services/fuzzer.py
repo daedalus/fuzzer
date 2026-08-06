@@ -753,6 +753,13 @@ class Fuzzer:
         self._last_eps_count = 0  # exec_count at last EPS KF update
         self._last_eps_time = 0.0  # monotonic time at last EPS KF update
 
+        # Rolling avg-eps samples (one per stats tick). The first ticks often
+        # show inflated EPS (bursty warm-up, startup time in the denominator),
+        # so the stats line is held until the window fills and the effective
+        # stats interval is driven by the window mean, not a single reading.
+        self._eps_history: array = array("d")
+        self._eps_history_max = 10  # stabilization window (in stats ticks)
+
         # Bayesian seed quality estimation
         self._seed_quality = BayesianSeedQuality()
 
@@ -2958,6 +2965,36 @@ class Fuzzer:
     def print_stats(self):
         return self._stats.print_stats()
 
+    def _last_avg_eps(self) -> float:
+        """Mean of the last `_eps_history_max` avg-eps samples.
+
+        Returns 0 until the window is full, so callers fall back to a fixed
+        interval instead of chasing the unstable first EPS readings.
+        """
+        if len(self._eps_history) < self._eps_history_max:
+            return 0.0
+        return sum(self._eps_history) / len(self._eps_history)
+
+    def _stats_effective_interval(self) -> int:
+        """Stats-tick spacing in execs.
+
+        The first tick uses ~1 second of work (1x EPS) so the first [*] execs
+        line appears promptly; subsequent ticks space at ~10 seconds of work
+        using 10x the mean of the last 10 avg-eps samples rather than a single
+        raw reading.  Before the window fills, the fixed stats interval is
+        used (the first samples are too unstable to trust).
+        """
+        if not self._eps_history:
+            elapsed = max(time.time() - self.start_time, 1e-9)
+            eps_now = self.exec_count / elapsed
+            if eps_now <= 0:
+                return self.stats_interval
+            return max(1, int(eps_now))
+        last_avg_eps = self._last_avg_eps()
+        if last_avg_eps <= 0:
+            return self.stats_interval
+        return max(1, int(10 * last_avg_eps))
+
     def _record_entropy_sample(self, sh):
         """Append a Shannon-entropy sample and trim history to a bounded size."""
         self._entropy_execs.append(self.exec_count)
@@ -3622,18 +3659,7 @@ class Fuzzer:
                     self._check_differential(seed)
                 self.fuzz_one(seed)
                 i += 1
-                eps_for_interval = (
-                    self._eps_filtered
-                    if hasattr(self, "_eps_filtered")
-                    and self._eps_filtered is not None
-                    and self._eps_filtered > 0
-                    else self._eps
-                )
-                effective_interval = (
-                    max(1, int(10 * eps_for_interval))
-                    if eps_for_interval > 0
-                    else self.stats_interval
-                )
+                effective_interval = self._stats_effective_interval()
                 if self.exec_count - self._last_stats_exec >= effective_interval:
                     # Sample Shannon entropy for rate-of-change tracking
                     if self._edge_tracker._global_edge_hits:

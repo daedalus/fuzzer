@@ -17,26 +17,52 @@ import subprocess
 import sys
 
 
-def _detect_asan(target: str) -> bool:
-    """Check if *target* has unresolved __asan_init (ASAN-instrumented)."""
+def _has_undefined_symbol(target: str, name: bytes) -> bool:
+    """True if *target* imports *name* as a strong undefined symbol.
+
+    `nm -D` type codes: `U` = undefined (strong — the dynamic linker fails to
+    load without a provider); `w` = weak undefined (resolvable-or-NULL, no
+    runtime needed, e.g. `__ubsan_handle_cfi_bad_type`); any other type means
+    the symbol is *defined* in the binary.
+    """
     try:
         r = subprocess.run(["nm", "-D", target], capture_output=True, timeout=10)
-        if r.returncode == 0:
-            return b"__asan_init" in r.stdout
     except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
+        return False
+    if r.returncode != 0:
+        return False
+    for line in r.stdout.splitlines():
+        parts = line.split()
+        if len(parts) < 2 or name not in parts[-1]:
+            continue
+        symtype = parts[0] if len(parts) == 2 else parts[1]
+        if symtype == b"U":
+            return True
     return False
+
+
+def _detect_asan(target: str) -> bool:
+    """Check if *target* has strong undefined __asan_init (ASAN-instrumented).
+
+    Only strong undefined imports count.  Targets that link their own ASAN
+    runtime (defined `__asan_init`, the common `-fsanitize=address` build)
+    must not trigger a preload — LD_PRELOADing a second libasan on top breaks
+    the child's AFL SHM coverage.  The fuzzer falls back to per-child
+    LD_PRELOAD in in-process modes when no preload was set at process start.
+    """
+    return _has_undefined_symbol(target, b"__asan_init")
 
 
 def _detect_ubsan(target: str) -> bool:
-    """Check if *target* has unresolved __ubsan_handle_* (UBSAN-instrumented)."""
-    try:
-        r = subprocess.run(["nm", "-D", target], capture_output=True, timeout=10)
-        if r.returncode == 0:
-            return b"__ubsan_handle" in r.stdout
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
-    return False
+    """Check if *target* has strong undefined __ubsan_handle_* imports.
+
+    Only strong undefined imports count.  Targets that define the handlers
+    (link the runtime, the common clang case) or reference them weakly
+    (e.g. `__ubsan_handle_cfi_bad_type`, resolvable-or-NULL) must not trigger
+    a preload — preloading libasan and the UBSAN standalone together into the
+    fuzzer process trips an ASAN init CHECK and hangs startup.
+    """
+    return _has_undefined_symbol(target, b"__ubsan_handle")
 
 
 def _resolve_asan() -> str | None:

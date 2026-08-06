@@ -515,7 +515,7 @@ The fuzzer includes a self-contained Kalman filter implementation (`src/fuzzer_t
 
 1. **Denoised execs/sec for stats and budget allocation** — the interval EPS rate (execs since last stats-tick / elapsed since last stats-tick) is a noisy per-interval signal, unlike the monotonic campaign-average. `stats.py:print_stats()` feeds this interval rate into a 2D `RobustKF` (value + derivative) via `predict(dt=interval_elapsed); update(interval_rate)`. The 2D model properly scales process noise by dt/dt²/dt³, important because the stats interval varies across the campaign. The filtered state-tuple and uncertainty are exposed as `fuzzer._eps_filtered` (value) and `fuzzer._eps_uncertainty`, and used in:
    - Dict-entry pruning (`fuzzer.py`, replaces the raw 10-sample sliding window)
-   - Stats-interval calculation (`fuzzer.py`), making it proportional to filtered EPS rather than raw cumulative average
+   - Stats-interval calculation (`fuzzer.py`): the first tick prints at ~1 second of work (1x EPS) so the first `[*] execs` line appears promptly; subsequent ticks are spaced at ~10 seconds of work using 10x the mean of the last 10 avg-eps samples (`fuzzer._eps_history`, one per tick, via `_last_avg_eps()`), falling back to the fixed `stats_interval` while the window fills so a single inflated warm-up reading can't stretch the gap between stats lines
 
 2. **Critical-slowing-down denoising** — `CriticalSlowingDown` accepts an optional `denoiser` (any `KalmanFilter` instance). When provided, `observe(value)` runs `predict(dt=1.0); update(value)` internally and stores `kf.estimate` instead of the raw discovery rate. This reduces false "stalled" calls from single-execution noise spikes.
 

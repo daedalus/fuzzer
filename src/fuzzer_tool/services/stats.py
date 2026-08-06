@@ -537,6 +537,13 @@ class StatsReporter:
         f._eps_filtered = f._eps_kf.estimate
         f._eps_uncertainty = f._eps_kf.uncertainty
 
+        # Rolling avg-eps window: one sample per tick, backing the
+        # stabilized interval in _stats_effective_interval() (first tick
+        # prints at 1x, subsequent at 10x the window mean).
+        f._eps_history.append(eps)
+        if len(f._eps_history) > f._eps_history_max:
+            del f._eps_history[: -f._eps_history_max]
+
         dict_str = f" | dict: {len(f.dictionary)}" if f.dictionary else ""
         markov_str = " | markov: trained" if f.markov_trained else ""
         markov_str += "+gen" if f.markov_generate else ""

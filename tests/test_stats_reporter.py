@@ -214,6 +214,10 @@ def _mock_fuzzer(**overrides) -> MagicMock:
         "exec_count": 1000,
         "_last_eps_count": 0,
         "_last_eps_time": 0.0,
+        # print_stats appends one avg-eps sample per tick and trims to the
+        # window; needs a real array + max for the window bookkeeping.
+        "_eps_history": array("d"),
+        "_eps_history_max": 10,
         "dictionary": None,
         "markov_trained": False,
         "markov_generate": False,
