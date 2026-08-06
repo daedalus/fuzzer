@@ -30,7 +30,23 @@ UBSAN_ERROR_TYPES = (
 SANITIZER_PATTERNS = [
     (rf"AddressSanitizer:\s*({ASAN_ERROR_TYPES})", "ASAN"),
     (r"MemorySanitizer:\s*(use-of-uninitialized-value)", "MSAN"),
-    (r"ThreadSanitizer:\s*(data-race|heap-use-after-race|lock-order-inversion)", "TSAN"),
+    (
+        r"ThreadSanitizer:\s*("
+        # TSAN spells these with spaces, not hyphens — matching on
+        # "data-race" never fired and the generic fallback truncated the
+        # error type to just "data".
+        r"data race"
+        r"|heap-use-after-free"
+        r"|lock-order-inversion"
+        r"|thread leak"
+        r"|signal-unsafe call inside of a signal"
+        r"|unlock of an unlocked mutex"
+        r"|double lock of a mutex"
+        r"|destroy of a locked mutex"
+        r"|race on a library object"
+        r")",
+        "TSAN",
+    ),
     (r"LeakSanitizer:\s*(leak)", "LSAN"),
     (rf"UndefinedBehaviorSanitizer:\s*({UBSAN_ERROR_TYPES})", "UBSAN"),
 ]
@@ -255,6 +271,17 @@ class SanitizerReport:
             return None
         sanitizer = m.group(1)
         error_type = m.group(2).strip()
+
+        # The generic line regex captures a single \S+ token, which truncates
+        # the multi-word error types some sanitizers emit (TSAN's "data race",
+        # "thread leak", ...). Prefer a specific pattern when one matches so
+        # the error type — and therefore the crash signature used for dedup —
+        # is the full string.
+        for pattern, _tag in SANITIZER_PATTERNS:
+            spec = re.search(pattern, stderr, re.IGNORECASE)
+            if spec:
+                error_type = spec.group(1).strip()
+                break
 
         fault_addr = ""
         addr_m = SANITIZER_FAULT_ADDR_RE.search(stderr)
