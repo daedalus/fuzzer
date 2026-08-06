@@ -170,18 +170,37 @@ static struct sigaction old_abrt;
 static struct sigaction old_bus;
 static struct sigaction old_fpe;
 
+/* Crash handler: flush the cmplog buffer before the process dies.
+ *
+ * Hardware-generated faults (SIGSEGV/SIGBUS/SIGFPE) must NOT be re-raised
+ * with raise(): raise() produces a *software* signal, and the kernel only
+ * populates siginfo_t.si_addr for hardware faults. A ptrace tracer reading
+ * PTRACE_GETSIGINFO would then see si_addr=0 instead of the real faulting
+ * address, silently defeating fault-address capture and collapsing
+ * NULL-deref vs wild-pointer crashes into one dedup bucket.
+ *
+ * Instead, restore the previous disposition and simply return: the faulting
+ * instruction re-executes, faults again in hardware, and the signal is
+ * delivered with genuine si_addr intact.
+ *
+ * SIGABRT is software-generated (abort()/raise()) — there is no faulting
+ * instruction to re-execute, so returning would resume past the abort().
+ * It keeps the explicit raise(); it carries no meaningful si_addr anyway.  */
 static void crash_handler(int sig) {
     flush_buffer();
     if (cmplog_file) fflush(cmplog_file);
     struct sigaction *old;
+    int hardware_fault = 0;
     switch (sig) {
-    case SIGSEGV: old = &old_segv; break;
+    case SIGSEGV: old = &old_segv; hardware_fault = 1; break;
+    case SIGBUS:  old = &old_bus;  hardware_fault = 1; break;
+    case SIGFPE:  old = &old_fpe;  hardware_fault = 1; break;
     case SIGABRT: old = &old_abrt; break;
-    case SIGBUS:  old = &old_bus;  break;
-    case SIGFPE:  old = &old_fpe;  break;
     default:      signal(sig, SIG_DFL); raise(sig); return;
     }
     sigaction(sig, old, NULL);
+    if (hardware_fault)
+        return;  /* re-execute the faulting instruction; preserves si_addr */
     raise(sig);
 }
 

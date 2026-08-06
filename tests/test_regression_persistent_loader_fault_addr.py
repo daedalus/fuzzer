@@ -118,3 +118,64 @@ class TestPersistentLoaderFaultAddr:
         runner.run_one(b"SAFEXXX00")
         assert runner._last_fault_addr is None
         assert runner._last_regs == {}
+
+
+CMPLOG_SHIM = Path(__file__).parent.parent / "src" / "fuzzer_tool" / "adapters" / "cmplog_shim.c"
+AFL_SHIM = Path(__file__).parent.parent / "src" / "fuzzer_tool" / "adapters" / "afl_shim.c"
+
+
+def _compile_shared_with_cmplog(src: Path, out: Path, tmp_path: Path, cc: str = "gcc"):
+    """Build a .so the way build_targets.sh does by default: AFL shim
+    -include'd and the cmplog shim object linked in."""
+    obj = tmp_path / "cmplog_shim.o"
+    subprocess.run(
+        ["clang", "-O2", "-g", "-fPIC", "-c", str(CMPLOG_SHIM), "-o", str(obj)],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        [
+            cc, "-O2", "-g", "-shared", "-fPIC", "-Wl,-Bsymbolic",
+            "-include", str(AFL_SHIM),
+            "-o", str(out), str(src), str(obj), "-ldl",
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+
+@pytest.mark.skipif(not _ptrace_available(), reason="ptrace not permitted in this environment")
+class TestFaultAddrWithCmplog:
+    """cmplog_shim.c installs its own SIGSEGV handler to flush its comparison
+    log before the process dies. It must NOT re-raise hardware faults with
+    raise(): raise() generates a *software* signal, and the kernel only fills
+    siginfo_t.si_addr for hardware faults — so a ptrace tracer would read
+    si_addr=0 instead of the true faulting address, silently collapsing
+    NULL-deref and wild-pointer crashes into one dedup bucket.
+
+    cmplog is ON by default in build_targets.sh, so this is the configuration
+    real campaigns actually run; the pre-existing tests above build without it
+    and therefore could not catch the regression.
+    """
+
+    @pytest.mark.parametrize("cc", ["gcc", "clang"])
+    def test_segv_fault_addr_survives_cmplog_handler(self, tmp_path, cc):
+        so = tmp_path / f"test_cmplog_{cc}.so"
+        _compile_shared_with_cmplog(TARGETS_DIR / "test_target.c", so, tmp_path, cc=cc)
+        runner = _make_runner(so)
+
+        rc, _ = runner.run_one(b"CRASHS")
+        assert rc != 0
+        # The real bug: this was None when crash_handler re-raised via raise().
+        assert runner._last_fault_addr == 0  # NULL-jump: si_addr == 0
+        assert runner._last_regs.get("rsp", 0) != 0
+
+    @pytest.mark.parametrize("cc", ["gcc", "clang"])
+    def test_safe_input_clean_with_cmplog(self, tmp_path, cc):
+        so = tmp_path / f"test_cmplog_safe_{cc}.so"
+        _compile_shared_with_cmplog(TARGETS_DIR / "test_target.c", so, tmp_path, cc=cc)
+        runner = _make_runner(so)
+
+        rc, _ = runner.run_one(b"SAFEXXX00")
+        assert rc == 0
+        assert runner._last_fault_addr is None
