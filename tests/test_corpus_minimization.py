@@ -350,6 +350,32 @@ class TestQEACorpusInteraction:
         # seed_meta should still be populated
         assert data in f.seed_meta, "QEA-discovered seed missing from seed_meta"
 
+    def test_save_to_corpus_grows_under_qea_with_elo_arbitration(self):
+        """Regression: QEA + Elo arbitration must keep f.corpus growing.
+
+        `--elo all` enables QEA alongside corpus-based seed strategies
+        (weighted/pareto/bayesian/boltzmann) that read f.corpus.  QEA's
+        bypass previously froze the corpus at its initial size (displayed
+        ``corpus: 1`` forever), starving those strategies onto a single
+        seed and stalling the run.  With Elo arbitrating, append applies.
+        """
+        f = MockFuzzer(Path(tempfile.mkdtemp()))
+        f.qea = object()  # truthy — QEA is active
+        f._use_elo = True  # Elo seed arbitration on (e.g. --elo all)
+        mgr = CorpusManager(f)
+
+        initial_corpus = [b"seed_a", b"seed_b"]
+        f.corpus = list(initial_corpus)
+
+        data = b"elo_all_discovered_seed_" + b"y" * 50
+        mgr.save_to_corpus(data)
+
+        assert len(f.corpus) == len(initial_corpus) + 1, (
+            f"Corpus stayed frozen under QEA+Elo: {len(f.corpus)}"
+        )
+        assert f.corpus[-1] == data
+        assert data in f.seed_meta
+
     def test_auto_minimize_skips_under_qea(self):
         """auto_minimize_corpus is a no-op when QEA is active (seed_meta preserved)."""
         f = MockFuzzer(Path(tempfile.mkdtemp()))

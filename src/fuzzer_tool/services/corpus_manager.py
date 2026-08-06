@@ -369,7 +369,14 @@ class CorpusManager:
             parent=parent,
             lineage_depth=parent_depth,
         ):
-            if not f.qea:
+            if (
+                # Under Elo arbitration the corpus-based seed strategies
+                # (weighted/pareto/bayesian/boltzmann) read f.corpus; if QEA's
+                # bypass froze it, those strategies starve on the initial seeds
+                # and the run stalls.  Keep the bypass only for standalone QEA,
+                # where the QEA population is the sole seed source.
+                not f.qea or getattr(f, "_use_elo", False)
+            ):
                 f.corpus.append(data)
             if f.ga:
                 import hashlib as _hashlib
