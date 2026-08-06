@@ -41,6 +41,9 @@ targets/test_target_nosan
 targets/cmplog_exercise
 targets/asan_target
 targets/asan_target_nosan
+# MSAN/TSAN sanitizer variants (--msan / --tsan)
+targets/*_msan
+targets/*_tsan
 targets/fuzz_*
 targets/png_read*
 targets/gzip_read*

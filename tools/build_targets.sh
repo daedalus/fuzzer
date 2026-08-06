@@ -30,6 +30,8 @@ WITH_TRACECMP=0
 WITH_VENDOR_TRACECMP=0
 WITH_CLANG_SCOV=0
 WITH_DISTANCE=0
+WITH_MSAN=0
+WITH_TSAN=0
 WITH_FFMPEG_SANCOV=1  # auto-rebuild vendored FFmpeg with coverage if needed
 USE_CLANG=0
 
@@ -42,6 +44,8 @@ for arg in "$@"; do
     [ "$arg" = "--clang-scov" ] && WITH_CLANG_SCOV=1
     [ "$arg" = "--ffmpeg-sancov" ] && WITH_FFMPEG_SANCOV=1
     [ "$arg" = "--distance" ] && WITH_DISTANCE=1
+    [ "$arg" = "--msan" ] && WITH_MSAN=1
+    [ "$arg" = "--tsan" ] && WITH_TSAN=1
 done
 
 # Colors
@@ -53,11 +57,28 @@ ok() { echo -e "  ${GREEN}OK${NC}: $1"; }
 warn() { echo -e "  ${YELLOW}WARN${NC}: $1"; }
 
 # ── Default compiler: prefer clang, fall back to gcc ────────────────
+#
+# clang is the default because it is the only compiler that can produce
+# full automatic edge coverage here. Measured on targets/png_read.c:
+#
+#   clang -fsanitize-coverage=trace-pc-guard  -> 192 call sites, 127 bitmap slots
+#   gcc   (manual __afl_map_edge only)        ->   0 call sites,  43 bitmap slots
+#
+# gcc's -fsanitize-coverage= accepts only trace-pc and trace-cmp, not the
+# trace-pc-guard variant the AFL shim's edge callbacks are built on. The one
+# gcc-compatible callback the shim implements, __sanitizer_cov_trace_pc(), is
+# compiled only under __AFL_DISTANCE_MODE and depends on the AFLGo distance
+# SHM — without it, gcc builds link but crash at runtime. So gcc targets fall
+# back to the hand-placed __afl_map_edge() calls in the target wrappers, which
+# see the wrapper's own branching but not the library internals underneath.
+#
+# gcc still builds every target correctly and is a fine fallback; it just
+# yields shallower coverage. See README "Feature Compatibility Matrix".
 _pick_cc() {
     if command -v clang &>/dev/null; then
         echo "clang"
     else
-        warn "clang not found, falling back to gcc"
+        warn "clang not found, falling back to gcc (shallower edge coverage — see README)"
         echo "gcc"
     fi
 }
@@ -201,7 +222,7 @@ build_fgrep_so_targets() {
 
 # ── Build simple targets ─────────────────────────────────────────
 build_simple_targets() {
-    local suffix="$1" flags="$2" label="$3"
+    local suffix="$1" flags="$2" label="$3" cc="${4:-$DEFAULT_CC}" extra_cflags="${5:-}"
     echo "Building simple targets ($label)..."
     local out_suffix=""
     [ "$suffix" = "_nosan" ] && out_suffix="_nosan"
@@ -214,15 +235,61 @@ build_simple_targets() {
         FFMPEG_INC="-I$VENDOR/ffmpeg"
     fi
 
-    build_target "$TARGETS/asan_target.c" "$TARGETS/asan_target${out_suffix}" "" "$flags"
-    build_target "$TARGETS/test_target.c" "$TARGETS/test_target${out_suffix}" "" "$flags"
-    build_target "$TARGETS/proto_target.c" "$TARGETS/proto_target${out_suffix}" "" "$flags"
-    build_target "$TARGETS/png_read.c" "$TARGETS/png_read${out_suffix}" "-lpng -lz" "$flags"
-    build_target "$TARGETS/zlib_read.c" "$TARGETS/zlib_read${out_suffix}" "-lz" "$flags"
-    build_target "$TARGETS/gzip_read.c" "$TARGETS/gzip_read${out_suffix}" "-lz" "$flags"
-    build_target "$TARGETS/jpeg_read.c" "$TARGETS/jpeg_read${out_suffix}" "-ljpeg" "$flags"
+    build_target "$TARGETS/asan_target.c" "$TARGETS/asan_target${out_suffix}" "" "$flags" "$cc" "$extra_cflags"
+    build_target "$TARGETS/test_target.c" "$TARGETS/test_target${out_suffix}" "" "$flags" "$cc" "$extra_cflags"
+    build_target "$TARGETS/proto_target.c" "$TARGETS/proto_target${out_suffix}" "" "$flags" "$cc" "$extra_cflags"
+    build_target "$TARGETS/png_read.c" "$TARGETS/png_read${out_suffix}" "-lpng -lz" "$flags" "$cc" "$extra_cflags"
+    build_target "$TARGETS/zlib_read.c" "$TARGETS/zlib_read${out_suffix}" "-lz" "$flags" "$cc" "$extra_cflags"
+    build_target "$TARGETS/gzip_read.c" "$TARGETS/gzip_read${out_suffix}" "-lz" "$flags" "$cc" "$extra_cflags"
+    build_target "$TARGETS/jpeg_read.c" "$TARGETS/jpeg_read${out_suffix}" "-ljpeg" "$flags" "$cc" "$extra_cflags"
     build_target "$TARGETS/ffmpeg_read.c" "$TARGETS/ffmpeg_read${out_suffix}" "$FFMPEG_LIBS" "$flags" "$DEFAULT_CC" "$FFMPEG_INC"
     build_target "$TARGETS/grep_read.c" "$TARGETS/grep_read${out_suffix}" "" "$flags"
+}
+
+# ── MSAN / TSAN standalone executables ─────────────────────────
+# These deliberately build *executables only*, never .so targets:
+#
+#   MSAN reports uninitialized reads across the whole process, so every
+#   piece of linked code must be MSAN-instrumented or it produces
+#   false positives. A .so loaded via ctypes into an uninstrumented
+#   CPython would report on Python's own allocations, making the mode
+#   useless. Run through the subprocess/exec path instead.
+#
+#   TSAN likewise intercepts the whole runtime and does not compose with
+#   being dlopen'd into an already-running interpreter.
+#
+# Both are clang-only (gcc's MSAN support does not exist; its TSAN is
+# weaker) and both are opt-in via --msan / --tsan since they are slower
+# than ASAN and only relevant to specific bug classes:
+#   MSAN -> use-of-uninitialized-value (ASAN cannot see these at all)
+#   TSAN -> data races (relevant for threaded targets)
+#
+# sanitizer.py already parses MemorySanitizer/ThreadSanitizer reports, so
+# no runtime-side work is needed to consume these binaries.
+build_sanitizer_targets() {
+    local suffix="$1" flags="$2" label="$3"
+    if ! command -v clang &>/dev/null; then
+        warn "$label targets need clang — skipping"
+        return 0
+    fi
+    echo "Building simple targets ($label)..."
+    # -fno-omit-frame-pointer keeps stack traces usable in the reports that
+    # sanitizer.py parses; -fPIE/-pie is required by MSAN.
+    local common="$flags -fno-omit-frame-pointer -fPIE -pie"
+    build_target "$TARGETS/asan_target.c" "$TARGETS/asan_target${suffix}" "" "$common" "clang"
+    build_target "$TARGETS/test_target.c" "$TARGETS/test_target${suffix}" "" "$common" "clang"
+    build_target "$TARGETS/proto_target.c" "$TARGETS/proto_target${suffix}" "" "$common" "clang"
+    build_target "$TARGETS/grep_read.c" "$TARGETS/grep_read${suffix}" "" "$common" "clang"
+    # Targets linking uninstrumented system libraries (libpng/libz/libjpeg)
+    # are intentionally omitted for MSAN: without an instrumented build of
+    # those libraries every call into them reports a false uninitialized
+    # read. Build them with --vendor-tracecmp-style vendored sources first
+    # if you need MSAN coverage there.
+    if [ "$label" != "MSAN" ]; then
+        build_target "$TARGETS/png_read.c" "$TARGETS/png_read${suffix}" "-lpng -lz" "$common" "clang"
+        build_target "$TARGETS/zlib_read.c" "$TARGETS/zlib_read${suffix}" "-lz" "$common" "clang"
+        build_target "$TARGETS/gzip_read.c" "$TARGETS/gzip_read${suffix}" "-lz" "$common" "clang"
+    fi
 }
 
 # ── Rebuild vendored FFmpeg with sancov coverage ───────────────
@@ -931,6 +998,10 @@ print_feature_matrix() {
     state=$([ "$BUILD_ASAN" -eq 1 ] && echo "ON" || echo "OFF")
     printf '  %-20s %-12s %s\n' "ASAN variants" "$state" "executables + .so targets"
     printf '  %-20s %-12s %s\n' "UBSAN variants" "$state" "built alongside ASAN (.so)"
+    state=$([ "$WITH_MSAN" -eq 1 ] && echo "ON" || echo "OFF")
+    printf '  %-20s %-12s %s\n' "MSAN variants" "$state" "--msan: uninit-value bugs (exe only, clang)"
+    state=$([ "$WITH_TSAN" -eq 1 ] && echo "ON" || echo "OFF")
+    printf '  %-20s %-12s %s\n' "TSAN variants" "$state" "--tsan: data races (exe only, clang)"
     state=$([ "$BUILD_NOSAN" -eq 1 ] && echo "ON" || echo "OFF")
     printf '  %-20s %-12s %s\n' "No-ASAN variants" "$state" "executables + .so targets"
 
@@ -992,6 +1063,13 @@ if [ "$BUILD_ASAN" -eq 1 ]; then
     build_simple_so_targets "_ubsan" "-fsanitize=undefined" "UBSAN" "clang"
     build_standalone_so_targets "_ubsan" "-fsanitize=undefined" "UBSAN" "clang"
 fi
+# MSAN / TSAN: opt-in, executables only (see build_sanitizer_targets).
+if [ "$WITH_MSAN" -eq 1 ]; then
+    build_sanitizer_targets "_msan" "-fsanitize=memory -fsanitize-memory-track-origins=2" "MSAN"
+fi
+if [ "$WITH_TSAN" -eq 1 ]; then
+    build_sanitizer_targets "_tsan" "-fsanitize=thread" "TSAN"
+fi
 if [ "$BUILD_NOSAN" -eq 1 ]; then
     [ "$HAS_FGREP" -eq 1 ] && compile_fgrep_objects "_nosan" ""
     [ "$HAS_FGREP" -eq 1 ] && build_fgrep_targets "_nosan" "" "No-ASAN"
@@ -1006,19 +1084,19 @@ if [ "$BUILD_NOSAN" -eq 1 ]; then
     build_simple_so_targets "_nosan" "" "No-ASAN"
     build_standalone_so_targets "_nosan" "" "No-ASAN"
 fi
-if [ "$OPTS" = "--clang-scov" ]; then
-    local SCOV_CC="clang"
+if [ "$WITH_CLANG_SCOV" -eq 1 ]; then
+    SCOV_CC="clang"
     if ! command -v clang &>/dev/null; then
         warn "clang not found — --clang-scov requires clang"
     else
-        local SCOV_FLAGS="-fsanitize-coverage=trace-pc-guard"
+        SCOV_FLAGS="-fsanitize-coverage=trace-pc-guard"
         [ "$HAS_FGREP" -eq 1 ] && compile_fgrep_objects "_asan" "-fsanitize=address" "$SCOV_CC" "$SCOV_FLAGS"
         [ "$HAS_FGREP" -eq 1 ] && compile_fgrep_objects "_nosan" "" "$SCOV_CC" "$SCOV_FLAGS"
         compile_vendored_libs "$SCOV_CC" "$SCOV_FLAGS" "_asan"
         [ "$HAS_FGREP" -eq 1 ] && build_fgrep_targets "_asan" "-fsanitize=address" "Clang-scov"
         [ "$HAS_FGREP" -eq 1 ] && build_fgrep_targets "_nosan" "" "Clang-scov"
-        build_simple_targets "_asan" "-fsanitize=address" "Clang-scov"
-        build_simple_targets "_nosan" "" "Clang-scov"
+        build_simple_targets "_asan" "-fsanitize=address" "Clang-scov" "$SCOV_CC" "$SCOV_FLAGS"
+        build_simple_targets "_nosan" "" "Clang-scov" "$SCOV_CC" "$SCOV_FLAGS"
         build_vendored_so_targets "_asan" "-fsanitize=address" "Clang-scov" "$SCOV_CC" "$SCOV_FLAGS"
         build_vendored_so_targets "_nosan" "" "Clang-scov" "$SCOV_CC" "$SCOV_FLAGS"
         [ "$HAS_FGREP" -eq 1 ] && build_fgrep_so_targets "_asan" "-fsanitize=address" "Clang-scov"
