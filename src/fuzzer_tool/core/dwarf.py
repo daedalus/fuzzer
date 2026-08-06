@@ -568,7 +568,12 @@ class DwarfLineResolver:
                     sub = data[p]
                     p += 1
                     if sub == _DW_LNE_end_sequence:
-                        rows.append((_display(file_idx), line_no, address))
+                        # The end_sequence row marks the address one past the
+                        # last instruction of the sequence; per DWARF it does
+                        # not belong to any source line. Emitting it with the
+                        # stale line_no attributed the end-of-function address
+                        # to that function's last line, so a file:line target
+                        # could resolve to an address past the function body.
                         address = 0
                         file_idx = 1
                         line_no = 1
