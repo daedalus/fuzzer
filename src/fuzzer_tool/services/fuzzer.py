@@ -257,6 +257,27 @@ def _detect_ubsan(target_path: str) -> bool:
 
 
 class Fuzzer:
+    def _warn_no_coverage(self) -> None:
+        """Warn that an in-process target is running without coverage.
+
+        Emitted once per run. Without an SHM segment nothing populates the
+        edge bitmap, so every coverage-guided subsystem downstream — seed
+        scheduling, MI/TE/sensitivity position weighting, Elo/bandit operator
+        scheduling, stall detection, corpus admission — runs on a
+        constant-zero signal. The run looks fast and healthy while
+        discovering nothing, so the failure is otherwise entirely silent.
+        """
+        if getattr(self, "_no_cov_warned", False):
+            return
+        self._no_cov_warned = True
+        msg = (
+            "No coverage enabled: running blind. Edge discovery, "
+            "coverage-guided scheduling and corpus growth are all inactive. "
+            "Pass -c/--coverage to enable the AFL SHM bitmap."
+        )
+        log.warning(msg)
+        print(f"[!] WARNING: {msg}")
+
     @staticmethod
     def _probe_so_function(target):
         """Probe a shared object for the best fuzz entry point.
@@ -1355,6 +1376,14 @@ class Fuzzer:
             from fuzzer_tool.adapters.inprocess import InProcessRunner
 
             cov_env_id = self.shm_cov.env_id if self.shm_cov else None
+            if not cov_env_id:
+                # Without an SHM segment nothing populates the edge bitmap, so
+                # every coverage-guided subsystem downstream (seed scheduling,
+                # MI/TE/sensitivity position weighting, Elo/bandit operator
+                # scheduling, stall detection, corpus admission) runs on a
+                # constant-zero signal. That degrades silently — the run looks
+                # healthy and fast while discovering nothing — so say so.
+                self._warn_no_coverage()
             # Probe the shared object for a fuzz function name
             auto_func = self._probe_so_function(self.target)
             # Decide whether to use direct_lite (in-process ctypes) mode.
@@ -1431,6 +1460,14 @@ class Fuzzer:
             from fuzzer_tool.adapters.inprocess import InProcessRunner
 
             cov_env_id = self.shm_cov.env_id if self.shm_cov else None
+            if not cov_env_id:
+                # Without an SHM segment nothing populates the edge bitmap, so
+                # every coverage-guided subsystem downstream (seed scheduling,
+                # MI/TE/sensitivity position weighting, Elo/bandit operator
+                # scheduling, stall detection, corpus admission) runs on a
+                # constant-zero signal. That degrades silently — the run looks
+                # healthy and fast while discovering nothing — so say so.
+                self._warn_no_coverage()
             # For .so targets, probe for the correct fuzz function name
             # when the user didn't explicitly specify one.
             func = inprocess_func
