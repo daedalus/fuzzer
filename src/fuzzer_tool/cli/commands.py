@@ -357,6 +357,7 @@ def cmd_fuzz(args):
         args.secretary = True
         args.wfc = True
         args.lineage = True
+        args.mcts = True
         args.schedule = "fast"
 
     fuzzer = Fuzzer(
@@ -463,6 +464,7 @@ def cmd_fuzz(args):
         ga=getattr(args, "ga", False),
         qea=getattr(args, "qea", False),
         wfc=getattr(args, "wfc", False),
+        mcts=getattr(args, "mcts", False),
         ga_pop_size=getattr(args, "ga_pop_size", 200),
         ga_gen_size=getattr(args, "ga_gen_size", 500),
         ga_elite_frac=getattr(args, "ga_elite_frac", 0.1),
@@ -1560,6 +1562,12 @@ def main() -> int:
         "--qea",
         action="store_true",
         help="Enable quantum-inspired evolutionary algorithm (QEA) encoding mode",
+    )
+    fuzz_parser.add_argument(
+        "--mcts",
+        action="store_true",
+        help="Enable MCTS/UCT seed scheduling over the mutation lineage tree "
+        "(implies --lineage; competes as an Elo-arbitrated seed strategy)",
     )
     fuzz_parser.add_argument(
         "--wfc",

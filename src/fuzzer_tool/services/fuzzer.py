@@ -430,6 +430,7 @@ class Fuzzer:
         overlap_density_blend=0.5,
         lineage=False,
         lineage_backtrack=False,
+        mcts=False,
         sensitivity=False,
         ga=False,
         qea=False,
@@ -889,12 +890,26 @@ class Fuzzer:
         self._use_lineage_backtrack = bool(lineage_backtrack and lineage)
         self._lineage_backtrack_decay = 0.7
         self._lineage_backtrack_min_fuzz = 8
+        # MCTS seed scheduling walks the lineage genealogy, so it is
+        # meaningless without the tree; --mcts implies --lineage.
+        self._use_mcts = bool(mcts)
+        self._mcts = None
+        if self._use_mcts and not lineage:
+            lineage = True
+            log.info("--mcts implies --lineage (MCTS schedules over the lineage tree)")
+
         self._lineage = None
         if lineage:
             from fuzzer_tool.core.lineage import LineageTree
 
             self._lineage = LineageTree()
             log.info("Mutation lineage tree enabled")
+
+        if self._use_mcts and self._lineage is not None:
+            from fuzzer_tool.core.schedulers.mcts import MCTSSeedScheduler
+
+            self._mcts = MCTSSeedScheduler()
+            log.info("MCTS seed scheduling enabled")
 
         self._load_corpus()
         if self._corpus_boost > 0 and self.corpus:
@@ -2333,15 +2348,19 @@ class Fuzzer:
                 self._current_edges_cache = edge_ids
                 has_new_coverage = has_new
             else:
-                has_new_coverage = (self.ptrace_cov and self.ptrace_cov.is_new_coverage()) or (
-                    self.shm_cov and self.shm_cov.is_new_coverage()
+                # bool(): `x and x.f()` yields None (not False) when x is
+                # None, and that None propagates into `success`, which
+                # MonteCarloScheduler.record() feeds to float().
+                has_new_coverage = bool(
+                    (self.ptrace_cov and self.ptrace_cov.is_new_coverage())
+                    or (self.shm_cov and self.shm_cov.is_new_coverage())
                 )
         elif self.shm_cov:
             has_new, edge_ids = self.shm_cov.is_new_coverage_with_edges()
             self._current_edges_cache = edge_ids
             has_new_coverage = has_new
         else:
-            has_new_coverage = self.ptrace_cov and self.ptrace_cov.is_new_coverage()
+            has_new_coverage = bool(self.ptrace_cov and self.ptrace_cov.is_new_coverage())
 
         # Bayesian seed quality feedback: record whether this parent seed
         # produced new coverage (Thompson sampling posterior update).
@@ -2555,7 +2574,7 @@ class Fuzzer:
             anneal_target = max(5000, self.max_len * 10)
             self._anneal_progress = min(1.0, self.exec_count / anneal_target)
 
-        success = is_crash or is_interesting or has_new_coverage
+        success = bool(is_crash or is_interesting or has_new_coverage)
 
         # Surprisal-weighted reward: discoveries in sparse regions of the
         # coverage bitmap carry more information than discoveries near
@@ -3622,6 +3641,16 @@ class Fuzzer:
                     f"mutation_prob={self.qea.mutation_prob}"
                 )
 
+            if self._mcts is not None:
+                mcts_data = self._state_store.get("mcts")
+                if self.resume and mcts_data is not None:
+                    self._mcts.from_dict(mcts_data)
+                    print(
+                        "[*] MCTS: loaded state from state store "
+                        f"(nodes={self._mcts.stats()['tracked_nodes']})"
+                    )
+                print(f"[*] MCTS seed scheduling: exploration={self._mcts.exploration:.3f}")
+
             # Print WFC mode status
             if self._wfc_enabled:
                 print("[*] WFC: enabled — structural chunk reordering and pixel generation active")
@@ -3742,6 +3771,12 @@ class Fuzzer:
                 if self._diff_tracker:
                     self._check_differential(seed)
                 self.fuzz_one(seed)
+                # Backpropagate this iteration's discovery up the MCTS path.
+                # A no-op unless the mcts arm actually selected this seed —
+                # update() ignores an empty path — so it stays correct when
+                # Elo hands the pick to another strategy.
+                if self._mcts is not None:
+                    self._mcts.update(self._last_new_edge_count)
                 i += 1
                 effective_interval = self._stats_effective_interval()
                 if self.exec_count - self._last_stats_exec >= effective_interval:
@@ -3805,6 +3840,13 @@ class Fuzzer:
         if self.qea:
             self._state_store.set("qea", self.qea.to_dict())
             print(f"[*] QEA: saved state (gen={self.qea.generation})")
+        if self._mcts is not None:
+            # Drop stats for seeds minimization removed, so the persisted
+            # state does not grow without bound across resumes.
+            if self._lineage is not None:
+                self._mcts.prune(set(self._lineage.nodes))
+            self._state_store.set("mcts", self._mcts.to_dict())
+            print(f"[*] MCTS: saved state ({self._mcts.stats()['tracked_nodes']} nodes)")
         self._save_state()
         if self._ablation_file:
             self._ablation_file.flush()

@@ -43,6 +43,8 @@ class SeedPicker:
             return None
         available = [s for s, cond in [("ga", f.ga), ("qea", f.qea)] if cond]
         available.append("weighted")
+        if getattr(f, "_mcts", None) is not None and getattr(f, "_lineage", None):
+            available.append("mcts")
         if f.corpus and f.seed_meta:
             available.append("pareto")
         if f._profile.format_signature:
@@ -88,9 +90,35 @@ class SeedPicker:
             ),
             "boltzmann": lambda: self._pick_boltzmann_seed(),
             "aflgo": lambda: self._pick_aflgo_seed() if f._distance else None,
+            "mcts": lambda: self._pick_mcts_seed(),
         }
         handler = strategy_map.get(strategy)
         return handler() if handler else None
+
+    def _pick_mcts_seed(self) -> bytes | None:
+        """MCTS/UCT descent over the lineage tree — the Elo-arbitrated 'mcts' arm.
+
+        Every other strategy scores the corpus as a flat pool. This one walks
+        the parent/child genealogy the lineage tree already maintains and
+        picks a seed by UCT, so budget flows toward *regions* of the tree that
+        are still producing coverage rather than toward individually
+        high-scoring seeds.
+
+        Returns None (caller falls through to another strategy) when the tree
+        offers no live seed — e.g. before the first corpus insert, or when
+        minimization has emptied the reachable subtrees.
+        """
+        f = self.f
+        tree = getattr(f, "_lineage", None)
+        mcts = getattr(f, "_mcts", None)
+        if tree is None or mcts is None or not f.corpus:
+            return None
+
+        key_to_seed = {f._seed_key(s): s for s in f.corpus}
+        selected = mcts.select(tree, set(key_to_seed))
+        if selected is None:
+            return None
+        return key_to_seed.get(selected)
 
     def _pick_aflgo_seed(self) -> bytes | None:
         """Distance-pure seed picker — the Elo-arbitrated 'aflgo' arm.
