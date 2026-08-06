@@ -178,15 +178,22 @@ class QEAIndividual:
 def _bias_amplitudes_from(data: bytes, *, strong_prob: float = 0.9) -> np.ndarray:
     """Create amplitude array biased toward the given byte values.
 
-    For each bit in ``data``, sets α = *strong_prob* if the bit is 0
-    (strong bias toward collapsing to the same 0), α = 1 - strong_prob
-    if the bit is 1 (bias toward matching). This gives a prior that
-    favors the seed data while maintaining some uncertainty.
+    For each bit in ``data``, the amplitude is chosen so the bit collapses
+    back to its own value with probability ``strong_prob**2`` — symmetrically
+    for zero bits and one bits alike.
+
+    Since P(bit=0) = α², a zero bit takes α = *strong_prob* directly, while a
+    one bit needs P(bit=1) = 1 - α² = strong_prob², i.e.
+    α = sqrt(1 - strong_prob²). Complementing the *amplitude* instead
+    (α = 1 - strong_prob) is wrong: at the 0.9 default it yields
+    P(stays 1) = 0.99 against P(stays 0) = 0.81, which biases every collapse
+    toward setting bits and compounds through each breed/re-bias cycle.
 
     Args:
         data: Template byte string to bias toward.
-        strong_prob: Amplitude value for bits matching 0
-            (default 0.9 → P(0) = 0.81, P(1) = 0.19 for zero bits).
+        strong_prob: Amplitude for zero bits; the retention probability for
+            every bit is its square (default 0.9 → P(bit keeps its value)
+            = 0.81 regardless of whether that value is 0 or 1).
 
     Returns:
         ndarray of α values, length = 8 * len(data), dtype=float64.
@@ -194,8 +201,8 @@ def _bias_amplitudes_from(data: bytes, *, strong_prob: float = 0.9) -> np.ndarra
     n_bits = len(data) * 8
     amps = np.full(n_bits, strong_prob, dtype=np.float64)
     bits = np.unpackbits(np.frombuffer(data, dtype=np.uint8))
-    # For each 1-bit, set α = 1 - strong_prob (bias toward 1)
-    amps[bits == 1] = 1.0 - strong_prob
+    # For each 1-bit: P(bit=1) = 1 - α² must equal strong_prob².
+    amps[bits == 1] = math.sqrt(max(0.0, 1.0 - strong_prob * strong_prob))
     return amps
 
 
@@ -464,7 +471,14 @@ class QEALifecycle:
         """
         self.iterations_since_gen += 1
 
-        # Apply rotation gate feedback using the last-selected parent
+        # Apply rotation gate feedback using the last-selected parent, then
+        # clear it. pick_seed() is only called when QEA wins seed
+        # arbitration (one of several strategies), whereas this method runs
+        # on every iteration — so without the clear, one individual absorbs
+        # rotations driven by results from completely unrelated seeds. Since
+        # most iterations find nothing, those spurious rotations are almost
+        # all improved=False and drive its amplitudes onto the clamps,
+        # destroying exactly the uncertainty QEA exists to preserve.
         if self._last_parent is not None and self._last_collapsed:
             rotation_gate(
                 self._last_parent.amplitudes,
@@ -472,25 +486,35 @@ class QEALifecycle:
                 improved=new_coverage,
                 delta=self.rotation_angle,
             )
+            self._last_parent = None
+            self._last_collapsed = b""
 
+        new_ind: QEAIndividual | None = None
         if new_coverage:
             seed_key = hashlib.sha256(data).hexdigest()[:16]
-            ind = QEAIndividual(
+            new_ind = QEAIndividual(
                 amplitudes=_bias_amplitudes_from(data, strong_prob=self.strong_bias),
                 edge_count=edge_count,
                 generation=self.generation,
                 best_collapsed=data,
                 seed_key=seed_key,
             )
-            return ind
+            # Score before returning: add_to_population() admits on fitness,
+            # and an unscored individual carries fitness 0.0, which loses to
+            # every evaluated member of a full population. Leaving this out
+            # silently discards every coverage-finding seed.
+            self._score(new_ind, edge_tracker)
 
-        # Trigger generation boundary
+        # Generation boundary. Checked regardless of new_coverage — returning
+        # early on coverage would mean generations only ever advance during
+        # unproductive stretches, starving evolution exactly when the fuzzer
+        # is doing well.
         if self.iterations_since_gen >= self.generation_size:
             self._evolve(edge_tracker)
             self.generation += 1
             self.iterations_since_gen = 0
 
-        return None
+        return new_ind
 
     def add_to_population(self, ind: QEAIndividual):
         """Add an individual (e.g., new coverage seed) to the population.
@@ -564,6 +588,18 @@ class QEALifecycle:
         return max(candidates, key=lambda i: i.fitness)
 
     # ── Fitness evaluation ──────────────────────────────────────────
+
+    def _score(self, ind: QEAIndividual, edge_tracker: EdgeTracker) -> None:
+        """Score one individual with the same inputs ``_evaluate_all`` uses.
+
+        Factored out so a newly discovered individual is evaluated exactly
+        the way population members are, rather than entering admission with
+        a default fitness of 0.0.
+        """
+        total_edges = len(edge_tracker.cumulative_edges) if edge_tracker.cumulative_edges else 1
+        w = edge_tracker.compute_wasserstein_weight(ind.seed_key)
+        ind.diversity_score = (w - 0.5) / 1.5  # normalize [0.5, 2.0] -> [0, 1]
+        self.fitness_fn.score(ind, total_edges, self.generation)
 
     def _evaluate_all(self, edge_tracker: EdgeTracker):
         """Batch-evaluate diversity scores and compute fitness."""

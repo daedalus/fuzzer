@@ -10,6 +10,7 @@ Test categories:
 7. Integration
 """
 
+import math
 import random
 
 import numpy as np
@@ -284,9 +285,12 @@ class TestBitConversion:
         assert all(a == 0.9 for a in amps)
 
     def test_bias_amplitudes_ff_byte(self):
-        """b'\\xff' → weak α for ones bits (strong_prob for 0, 1-strong_prob for 1)."""
+        """b'\\xff' → α = sqrt(1 - strong_prob²) so P(bit stays 1) == strong_prob²."""
         amps = _bias_amplitudes_from(b"\xff")
-        assert all(a == pytest.approx(0.1) for a in amps)  # 1 - 0.9 = 0.099999...
+        expected = math.sqrt(1 - 0.9**2)
+        assert all(a == pytest.approx(expected) for a in amps)
+        # Retention probability must match the zero-bit case exactly.
+        assert all((1 - a * a) == pytest.approx(0.81) for a in amps)
 
     def test_uniform_amplitudes(self):
         amps = _uniform_amplitudes(16)
@@ -525,16 +529,17 @@ class TestQEALifecycle:
         # pick_seed records the parent
         qea.pick_seed()
         collapsed = qea._last_collapsed
-        original_amps = list(qea._last_parent.amplitudes)
+        parent = qea._last_parent  # held: on_fuzz_result clears the slot
+        original_amps = list(parent.amplitudes)
 
         # Trigger a "new coverage" result — this should rotate toward collapsed
         qea.on_fuzz_result(b"result", new_coverage=True, edge_count=5, edge_tracker=et)
 
         # Amplitudes should have moved toward the collapsed value
         if collapsed == b"\x00":
-            assert qea._last_parent.amplitudes[0] > original_amps[0]
+            assert parent.amplitudes[0] > original_amps[0]
         else:
-            assert qea._last_parent.amplitudes[0] != original_amps[0]
+            assert parent.amplitudes[0] != original_amps[0]
 
     def test_on_fuzz_result_rotation_not_improved(self):
         """No coverage rotates last parent's amplitudes away from collapsed value."""
@@ -544,7 +549,8 @@ class TestQEALifecycle:
 
         qea.pick_seed()
         collapsed = qea._last_collapsed
-        original_amps = list(qea._last_parent.amplitudes)
+        parent = qea._last_parent  # held: on_fuzz_result clears the slot
+        original_amps = list(parent.amplitudes)
 
         # No coverage → rotate away
         qea.on_fuzz_result(b"result", new_coverage=False, edge_count=0, edge_tracker=et)
@@ -552,9 +558,9 @@ class TestQEALifecycle:
         # Amplitudes should have moved away from the collapsed value
         if collapsed == b"\x00":
             # Rotate away from |0⟩ → α decreases
-            assert qea._last_parent.amplitudes[0] < original_amps[0]
+            assert parent.amplitudes[0] < original_amps[0]
         else:
-            assert qea._last_parent.amplitudes[0] != original_amps[0]
+            assert parent.amplitudes[0] != original_amps[0]
 
     def test_save_load_roundtrip(self, tmp_path):
         """Save then load — amplitudes and generation match."""
