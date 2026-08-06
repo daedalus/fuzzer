@@ -286,6 +286,7 @@ class TestCmdFuzzConstruction:
             max_corpus=0,
             minimize_every_execs=0,
             no_shm=False,
+            ptrace=False,
             resume=False,
             trace=False,
             seed=42,
