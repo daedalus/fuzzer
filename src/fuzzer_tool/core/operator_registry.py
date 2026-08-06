@@ -187,8 +187,9 @@ _FORMAT_SNIFFERS: dict[str, Callable[[bytes], bool]] = {
     "zip_chunk_mutate": lambda d: d[:2] == b"PK",
     "isobmff_chunk_mutate": lambda d: d[4:8] == b"ftyp",
     "pgs_chunk_mutate": lambda d: d[:2] == b"PG",
-    "nal_chunk_mutate": lambda d: d[:4] in (b"\x00\x00\x00\x01", b"\x00\x00\x01\x00")
-    or d[:3] == b"\x00\x00\x01",
+    "nal_chunk_mutate": lambda d: (
+        d[:4] in (b"\x00\x00\x00\x01", b"\x00\x00\x01\x00") or d[:3] == b"\x00\x00\x01"
+    ),
 }
 
 # Fraction of selections on which a not-yet-seen format is still offered.

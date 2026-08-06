@@ -73,8 +73,7 @@ def test_clang_scov_uses_parsed_flag_not_exact_arg_match(script_text: str):
     """Regression: gating on `$OPTS = "--clang-scov"` meant the flag only
     worked as the sole argument. It must use the parsed WITH_CLANG_SCOV."""
     assert '"$OPTS" = "--clang-scov"' not in script_text, (
-        "clang-scov gated on exact argument match — breaks when combined "
-        "with any other flag"
+        "clang-scov gated on exact argument match — breaks when combined with any other flag"
     )
     assert re.search(r'\[\s*"\$WITH_CLANG_SCOV"\s*-eq\s*1\s*\]', script_text), (
         "clang-scov block should be gated on the parsed WITH_CLANG_SCOV flag"
@@ -93,7 +92,7 @@ def test_parsed_flags_are_actually_consumed(script_text: str):
     unconsumed = []
     for flag in parsed:
         # Uses beyond: initialization, the parser line, and the matrix display.
-        uses = re.findall(rf'\$(?:\{{)?{flag}(?:\}})?', script_text)
+        uses = re.findall(rf"\$(?:\{{)?{flag}(?:\}})?", script_text)
         gating = re.findall(rf'\[\s*"\$\{{?{flag}}}?"\s*-eq\s*1\s*\]', script_text)
         if not gating and len(uses) < 2:
             unconsumed.append(flag)
@@ -115,7 +114,7 @@ def test_build_simple_targets_accepts_compiler_and_cflags(script_text: str):
 
 def test_clang_scov_passes_flags_to_simple_targets(script_text: str):
     """The call sites must actually forward SCOV_CC/SCOV_FLAGS."""
-    calls = re.findall(r'build_simple_targets [^\n]*Clang-scov[^\n]*', script_text)
+    calls = re.findall(r"build_simple_targets [^\n]*Clang-scov[^\n]*", script_text)
     assert calls, "no Clang-scov build_simple_targets calls found"
     for call in calls:
         assert "$SCOV_CC" in call and "$SCOV_FLAGS" in call, (

@@ -135,9 +135,19 @@ def _compile_shared_with_cmplog(src: Path, out: Path, tmp_path: Path, cc: str = 
     )
     subprocess.run(
         [
-            cc, "-O2", "-g", "-shared", "-fPIC", "-Wl,-Bsymbolic",
-            "-include", str(AFL_SHIM),
-            "-o", str(out), str(src), str(obj), "-ldl",
+            cc,
+            "-O2",
+            "-g",
+            "-shared",
+            "-fPIC",
+            "-Wl,-Bsymbolic",
+            "-include",
+            str(AFL_SHIM),
+            "-o",
+            str(out),
+            str(src),
+            str(obj),
+            "-ldl",
         ],
         check=True,
         capture_output=True,

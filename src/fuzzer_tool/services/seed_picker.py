@@ -753,9 +753,7 @@ class SeedPicker:
         # to seeds to read their coverage meta.
         bt_key_to_seed: dict = {}
         if getattr(f, "_use_lineage_backtrack", False) and getattr(f, "_lineage", None):
-            bt_key_to_seed = {
-                (seed_keys[i] or f._seed_key(s)): s for i, s in enumerate(corpus)
-            }
+            bt_key_to_seed = {(seed_keys[i] or f._seed_key(s)): s for i, s in enumerate(corpus)}
         for i, seed in enumerate(corpus):
             if not has_meta[i]:
                 continue
