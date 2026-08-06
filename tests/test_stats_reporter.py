@@ -212,6 +212,7 @@ def _mock_fuzzer(**overrides) -> MagicMock:
     defaults = {
         "start_time": time.time(),
         "exec_count": 1000,
+        "_resume_baseline_exec": 0,
         "_last_eps_count": 0,
         "_last_eps_time": 0.0,
         # print_stats appends one avg-eps sample per tick and trims to the
@@ -351,3 +352,24 @@ class TestPrintStats:
             reporter.print_stats()
             line = mock_print.call_args[0][0]
         assert "mopt: 5p" in line, f"expected mopt: 5p in: {line[:300]}"
+
+    def test_eps_is_session_local_after_resume(self):
+        """Regression: resumed runs must not divide cumulative exec_count by
+        fresh wall time.
+
+        ``--resume`` loads exec_count from state while start_time is the new
+        process start; the old ``exec_count / elapsed`` showed absurd rates
+        (e.g. 2.3M execs over 1s).  The session baseline subtracts the
+        loaded count, so the displayed eps reflects only this process.
+        """
+        fuzzer = _mock_fuzzer(
+            exec_count=1_000_000,
+            _resume_baseline_exec=999_900,  # 100 execs this session
+            start_time=time.time() - 10.0,  # 10s of fresh wall time
+        )
+        reporter = StatsReporter(fuzzer)
+        with patch("builtins.print") as mock_print:
+            reporter.print_stats()
+            line = mock_print.call_args[0][0]
+        # (1_000_000 - 999_900) / 10 = 10 eps, not 100_000
+        assert "eps: 10" in line, f"expected session-local eps: 10 in: {line[:300]}"

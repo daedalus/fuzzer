@@ -118,6 +118,30 @@ def test_save_load_round_trip():
         assert f._corpus_size_history.tolist() == expected
 
 
+def test_load_state_sets_session_baselines():
+    """load_state anchors EPS baselines to the restored exec_count.
+
+    Regression: resumed runs divided the cumulative exec_count by fresh
+    wall time (e.g. 2.3M execs / 1s of uptime), showing absurd eps.  The
+    loaded count is now recorded as the session baseline and the EPS
+    interval counter so display and the Kalman filter measure only this
+    process.
+    """
+    import json
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        f = _make_fuzzer(tmp, array("I", [1, 2, 3]))
+        (tmp / "state.json").write_text(json.dumps({"exec_count": 2_335_238}))
+        cm = CorpusManager(f)
+        cm.load_state()
+        assert f.exec_count == 2_335_238
+        assert f._resume_baseline_exec == 2_335_238
+        assert f._last_eps_count == 2_335_238
+
+
 def test_sorted_consumer():
     """sorted() over the array returns the plain list the p90 consumer needs."""
     hist = array("I", [30, 10, 20])

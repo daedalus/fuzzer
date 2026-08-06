@@ -209,6 +209,13 @@ class CorpusManager:
             log.debug("Failed to load state: %s", e)
             return
         f.exec_count = state.get("exec_count", 0)
+        # exec_count is cumulative across sessions, but EPS display and the
+        # interval-rate Kalman filter must measure only this process —
+        # otherwise a resumed run reports absurd rates (e.g. 2.3M execs over
+        # 1s of fresh wall time).  Session-local baselines, set before the
+        # seed-replay loop and the first stats tick.
+        f._resume_baseline_exec = f.exec_count
+        f._last_eps_count = f.exec_count
         f.crash_count = state.get("crash_count", 0)
         f.timeout_count = state.get("timeout_count", 0)
         f.crash_sigs = state.get("crash_sigs", {})

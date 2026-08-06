@@ -507,7 +507,8 @@ class StatsReporter:
     def print_stats(self):
         f = self.f
         elapsed = time.time() - f.start_time
-        eps = f.exec_count / elapsed if elapsed > 0 else 0
+        base = getattr(f, "_resume_baseline_exec", 0)
+        eps = (f.exec_count - base) / elapsed if elapsed > 0 else 0
         f._eps = eps
 
         # Feed per-interval EPS into the Kalman filter for denoising.

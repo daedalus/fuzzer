@@ -25,6 +25,7 @@ def _stub_fuzzer(history: array, history_max: int = 10) -> Fuzzer:
     f.stats_interval = 1000
     f.exec_count = 1000
     f.start_time = time() - 1.0  # 1 second of elapsed run time
+    f._resume_baseline_exec = 0  # fresh run, no resumed baseline
     return f
 
 

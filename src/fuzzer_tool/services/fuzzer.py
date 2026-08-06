@@ -752,6 +752,10 @@ class Fuzzer:
         self._eps_kf = None  # lazy-initialized after first stats tick
         self._last_eps_count = 0  # exec_count at last EPS KF update
         self._last_eps_time = 0.0  # monotonic time at last EPS KF update
+        # exec_count at the start of this process (0 for fresh runs, loaded
+        # value for --resume).  EPS display and interval math subtract it so
+        # resumed runs don't divide the cumulative count by fresh wall time.
+        self._resume_baseline_exec = 0
 
         # Rolling avg-eps samples (one per stats tick). The first ticks often
         # show inflated EPS (bursty warm-up, startup time in the denominator),
@@ -2099,7 +2103,7 @@ class Fuzzer:
             window = 500
             if self.exec_count > 0 and self.exec_count % 100 == 0:
                 elapsed = time.time() - self.start_time
-                eps = self.exec_count / elapsed if elapsed > 0 else 0
+                eps = (self.exec_count - self._resume_baseline_exec) / elapsed if elapsed > 0 else 0
                 self._dict_eps_window.append(eps)
                 if len(self._dict_eps_window) > 10:
                     self._dict_eps_window.pop(0)
@@ -2246,7 +2250,7 @@ class Fuzzer:
             if rss > self._peak_rss:
                 self._peak_rss = rss
             elapsed = time.time() - self.start_time
-            eps = self.exec_count / elapsed if elapsed > 0 else 0
+            eps = (self.exec_count - self._resume_baseline_exec) / elapsed if elapsed > 0 else 0
             if eps > self._peak_eps:
                 self._peak_eps = eps
             self._crash_rate_execs.append(self.exec_count)
@@ -2986,7 +2990,7 @@ class Fuzzer:
         """
         if not self._eps_history:
             elapsed = max(time.time() - self.start_time, 1e-9)
-            eps_now = self.exec_count / elapsed
+            eps_now = (self.exec_count - self._resume_baseline_exec) / elapsed
             if eps_now <= 0:
                 return self.stats_interval
             return max(1, int(eps_now))
