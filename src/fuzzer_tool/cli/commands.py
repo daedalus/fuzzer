@@ -318,6 +318,7 @@ def cmd_fuzz(args):
             ubsan_target=getattr(args, "ubsan_target", None),
             chi2_operator_interval=getattr(args, "chi2_operator_interval", 0),
             lineage=getattr(args, "lineage", False),
+            lineage_backtrack=getattr(args, "lineage_backtrack", False),
         )
         return 0
 
@@ -444,6 +445,7 @@ def cmd_fuzz(args):
         transfer_entropy=getattr(args, "transfer_entropy", False),
         elo=getattr(args, "elo", False),
         lineage=getattr(args, "lineage", False),
+            lineage_backtrack=getattr(args, "lineage_backtrack", False),
         secretary=getattr(args, "secretary", False),
         secretary_window=getattr(args, "secretary_window", 500),
         secretary_exploration=getattr(args, "secretary_exploration", 0.368),
@@ -1427,6 +1429,14 @@ def main() -> int:
         help="Track a weighted mutation lineage tree (parent/ops/sites/new-edge weight "
         "per seed): branch-level pruning, causal crash-path replay in tmin, "
         "LCA-based diversity scoring",
+    )
+    fuzz_parser.add_argument(
+        "--lineage-backtrack",
+        action="store_true",
+        help="Widen exploration by backing off exhausted lineage branches: "
+        "seeds whose subtree has gained no edges are penalised by depth, "
+        "shifting selection back toward shallow seeds with unexplored "
+        "siblings (implies --lineage)",
     )
     fuzz_parser.add_argument(
         "--exp3", action="store_true", help="Enable EXP3 adversarial bandit operator scheduling"

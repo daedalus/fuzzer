@@ -572,6 +572,62 @@ class SeedPicker:
         modifier = 1.0 + blend * (0.5 - density)
         return w * max(modifier, 0.1)
 
+    def _weight_lineage_backtrack(
+        self, seed_key: str, w: float, fuzz_count: int, f, key_to_seed: dict
+    ) -> float:
+        """Back off to shallower lineage when a branch stops producing edges.
+
+        Depth-first drift is a known failure mode for coverage-guided
+        fuzzing: each new seed is a child of the last interesting one, so
+        selection walks steadily deeper down one lineage branch. When that
+        branch saturates, continued mutation refines an already-explored
+        region while whole sibling branches go untouched.
+
+        This detects an exhausted branch — a seed whose lineage subtree has
+        gained no coverage since the last credit reset, and which has been
+        fuzzed enough times that the absence is evidence rather than noise —
+        and geometrically penalises it by depth. Weight therefore shifts back
+        toward the root, so the next pick is more likely to come from a
+        shallow seed with unexplored siblings. That is the "backtrack": not
+        an explicit jump, but a bias that makes descending a dead branch
+        progressively less attractive.
+
+        Seeds whose subtree is still producing coverage are untouched, so a
+        productive deep branch keeps its weight.
+
+        No-op unless ``--lineage-backtrack`` is set (requires ``--lineage``).
+        """
+        if not getattr(f, "_use_lineage_backtrack", False):
+            return w
+        tree = getattr(f, "_lineage", None)
+        if tree is None:
+            return w
+        node = tree.nodes.get(seed_key)
+        if node is None or node.depth <= 0:
+            return w
+        # Require enough fuzzing before treating "no new edges" as signal.
+        min_fuzz = getattr(f, "_lineage_backtrack_min_fuzz", 8)
+        if fuzz_count < min_fuzz:
+            return w
+
+        def _coverage_fn(k: str) -> tuple[int, int]:
+            seed = key_to_seed.get(k)
+            meta = f.seed_meta.get(seed, {}) if seed is not None else {}
+            return (
+                meta.get("coverage_edges", 0),
+                meta.get("coverage_edges_baseline", 0),
+            )
+
+        try:
+            credit = tree.recent_credit(seed_key, _coverage_fn)
+        except (AttributeError, KeyError, TypeError):
+            return w
+        if credit > 0.0:
+            return w  # branch still productive — leave it alone
+
+        decay = getattr(f, "_lineage_backtrack_decay", 0.7)
+        return w * max(decay**node.depth, 0.05)
+
     def _compute_weights(self, now: float) -> list[float]:
         f = self.f
         corpus = f.corpus
@@ -693,6 +749,13 @@ class SeedPicker:
                     lineage_div[sk_i] = 1.0 + 0.5 * diversity
 
         # Phase 2: apply remaining per-seed weight functions (dict lookups, set ops)
+        # Built once per pass: lineage backtracking resolves subtree keys back
+        # to seeds to read their coverage meta.
+        bt_key_to_seed: dict = {}
+        if getattr(f, "_use_lineage_backtrack", False) and getattr(f, "_lineage", None):
+            bt_key_to_seed = {
+                (seed_keys[i] or f._seed_key(s)): s for i, s in enumerate(corpus)
+            }
         for i, seed in enumerate(corpus):
             if not has_meta[i]:
                 continue
@@ -710,6 +773,7 @@ class SeedPicker:
             w = self._weight_length_and_cross_target(seed, meta, w, f)
             w = self._weight_overlap_density(sk, w, f)
             w *= lineage_div.get(sk, 1.0)
+            w = self._weight_lineage_backtrack(sk, w, fuzz_count, f, bt_key_to_seed)
 
             weights[i] = max(w, 1e-6)
             bf = pareto_scores[i][1]

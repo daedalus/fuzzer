@@ -407,6 +407,7 @@ class Fuzzer:
         overlap_min_jaccard=0.25,
         overlap_density_blend=0.5,
         lineage=False,
+        lineage_backtrack=False,
         sensitivity=False,
         ga=False,
         qea=False,
@@ -830,6 +831,13 @@ class Fuzzer:
         # per seed). Initialised early so the post-metadata rebuild can
         # consume it; rebuilt from persisted seed_meta after metadata init.
         self._use_lineage = lineage
+        # Backtracking widens exploration: when a lineage branch stops
+        # producing edges, its seeds are penalised geometrically by depth so
+        # weight shifts back toward shallow seeds with unexplored siblings.
+        # Implies --lineage (needs the tree to know what a branch is).
+        self._use_lineage_backtrack = bool(lineage_backtrack and lineage)
+        self._lineage_backtrack_decay = 0.7
+        self._lineage_backtrack_min_fuzz = 8
         self._lineage = None
         if lineage:
             from fuzzer_tool.core.lineage import LineageTree
