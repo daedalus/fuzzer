@@ -116,6 +116,109 @@ Online running statistics (Welford/Pébay) for mean, variance, skewness, excess 
 
 ---
 
+## Feature Compatibility Matrix
+
+Not every feature works in every execution mode — the constraints come from
+where a *process boundary* exists. A mode that loads the target into the
+fuzzer's own address space has no signal-carrying boundary to attach a
+tracer to; a mode that forks per call does.
+
+### Execution modes × features
+
+| Feature | direct (`--inprocess-direct`) | subprocess (`--inprocess`) | SHM / exec (default) | ptrace (`--no-shm`) |
+|---|---|---|---|---|
+| Edge coverage (AFL bitmap) | ✅ | ✅ | ✅ | ✅ (via breakpoints) |
+| Fault address (`si_addr`) | ✅ ¹ | ✅ | ✅ | ✅ |
+| Register capture at crash | ✅ ¹ | ✅ | ✅ | ✅ |
+| cmplog / redqueen | ✅ ² | ✅ | ✅ | ✅ |
+| trace-cmp (compiler IR) | ✅ ² | ✅ | ✅ | ✅ |
+| ASAN targets | ⚠️ ³ | ✅ | ✅ | ✅ |
+| UBSAN targets | ✅ | ✅ | ✅ | ✅ |
+| MSAN targets | ❌ ⁴ | ❌ ⁴ | ✅ | ✅ |
+| TSAN targets | ❌ ⁴ | ❌ ⁴ | ✅ | ✅ |
+| Sanitizer report parsing (stderr) | ✅ | ✅ | ✅ | ✅ |
+| Persistent (no re-exec) | ✅ | ✅ | ❌ | ❌ |
+
+¹ direct mode has no process boundary to attach at, so a crashing input is
+re-run once through a ptrace'd one-shot loader for triage. Costs an extra
+execution only on the rare crashing input, not on the hot path.
+
+² Requires the cmplog/trace-cmp shim to be *compiled into* the target `.so`
+(`build_targets.sh --cmplog` / `--tracecmp`, on by default), or externally
+`LD_PRELOAD`ed. `LD_PRELOAD` alone cannot work for a `.so` opened with
+`ctypes.CDLL` into an already-running process — the fuzzer auto-detects this
+and falls back to the persistent subprocess loader.
+
+³ ASAN `.so` targets need `libasan` preloaded before the interpreter starts;
+without it the fuzzer automatically falls back to the subprocess loader.
+
+⁴ MSAN and TSAN instrument the *whole process*. Loading such a target into
+the uninstrumented CPython host reports on Python's own memory, so these are
+built as standalone executables only (`--msan` / `--tsan`) and run through
+the exec path.
+
+### Sanitizer build variants
+
+| Sanitizer | Flag | Finds | Notes |
+|---|---|---|---|
+| ASAN | (default) | heap/stack overflow, UAF, double-free | executables + `.so` |
+| UBSAN | (with ASAN) | integer overflow, bad shifts, misaligned access | `.so`, clang |
+| MSAN | `--msan` | use-of-uninitialized-value | clang only, executables only; **ASAN cannot detect this class at all**. Targets linking uninstrumented system libs (libpng/libz/libjpeg) are skipped — they would report false positives unless those libraries are rebuilt instrumented. |
+| TSAN | `--tsan` | data races, lock-order inversion, thread leaks | executables only; built with clang (gcc also supports `-fsanitize=thread` if you build manually). Relevant for threaded targets. |
+
+### Compiler support
+
+`clang` is the default compiler, and it matters: **it is the only compiler
+that can produce full automatic edge coverage here.**
+
+| Capability | gcc | clang |
+|---|---|---|
+| Target + `.so` builds | ✅ | ✅ (default) |
+| AFL edge instrumentation shim | ✅ | ✅ |
+| cmplog shim (libc interposition) | ✅ | ✅ (preferred) |
+| Manual `__afl_map_edge()` coverage | ✅ | ✅ |
+| **Automatic edge coverage** (`-fsanitize-coverage=trace-pc-guard`) | ❌ ⁵ | ✅ required |
+| trace-cmp instrumentation | ⚠️ ⁵ | ✅ required |
+| MSAN (`-fsanitize=memory`) | ❌ | ✅ required |
+| TSAN (`-fsanitize=thread`) | ✅ | ✅ (used) |
+| DWARF 4 + DWARF 5 line tables | ✅ | ✅ |
+
+#### ⁵ The gcc edge-coverage limitation
+
+gcc's `-fsanitize-coverage=` accepts only `trace-pc` and `trace-cmp` — not
+the `trace-pc-guard` variant the AFL shim's edge callbacks are built on. The
+one gcc-compatible callback the shim does implement,
+`__sanitizer_cov_trace_pc()`, is compiled only under `__AFL_DISTANCE_MODE`
+and depends on the AFLGo distance SHM; without that segment mapped, gcc
+builds link but crash at runtime. There is currently no working standalone
+`trace-pc` path for gcc.
+
+gcc targets therefore fall back to the hand-placed `__afl_map_edge()` calls
+in the target wrapper sources. Those see the wrapper's own branching, but not
+the branching inside the library being fuzzed. Measured on
+`targets/png_read.c` with an identical seed:
+
+| Build | Instrumented call sites | Bitmap slots populated |
+|---|---|---|
+| gcc — manual `__afl_map_edge` only | 0 automatic | 43 |
+| clang `--clang-scov` (`trace-pc-guard`) | 192 | **127** |
+
+gcc still builds every target correctly and remains a supported fallback; it
+just yields shallower coverage. Everything downstream that consumes the edge
+signal — seed scheduling, MI/TE/sensitivity position weighting, Elo/bandit
+operator scheduling, stall detection — is only as good as that signal.
+
+> **Note:** automatic edge coverage is opt-in via `--clang-scov`. A plain
+> `build_targets.sh` produces manual-instrumentation-only targets on *either*
+> compiler. Pass `--clang-scov` when coverage depth matters — verified on
+> `targets/png_read`: 0 instrumented call sites without it, 194 with.
+
+Regardless of the default, the build script selects `clang` automatically for
+the features that require it (trace-pc-guard, trace-cmp, UBSAN, MSAN, sancov),
+so those work even when `DEFAULT_CC` is gcc.
+
+---
+
 ## Subcommands
 
 | Command | Description |
