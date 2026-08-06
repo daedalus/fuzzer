@@ -97,16 +97,63 @@ class _Node:
 # ── Parser ────────────────────────────────────────────────────────────
 
 
+# Bytes that can affect parse structure: any delimiter open byte, plus any
+# byte that can close one. Every *other* byte unconditionally takes the
+# literal-append path in partial_parse, so runs of them can be sliced in
+# bulk instead of appended one at a time.
+_INTERESTING = sorted(set(_DELIMITERS) | set(_DELIMITERS.values()))
+_INTERESTING_LUT = bytes(1 if b in set(_INTERESTING) else 0 for b in range(256))
+
+try:  # numpy is a hard dependency, but keep the scalar path usable without it
+    import numpy as _np
+
+    _INTERESTING_NP = _np.frombuffer(_INTERESTING_LUT, dtype=_np.uint8)
+except Exception:  # pragma: no cover
+    _np = None
+    _INTERESTING_NP = None
+
+# Below this length the numpy round-trip costs more than it saves.
+_VECTOR_MIN_LEN = 64
+
+
+def _interesting_positions(data: bytes) -> list[int]:
+    """Offsets of bytes that can affect parse structure.
+
+    One vectorized table lookup instead of a per-byte Python branch. Falls
+    back to bytes.find for short inputs, where numpy's fixed overhead
+    dominates, and when numpy is unavailable.
+    """
+    if _np is not None and len(data) >= _VECTOR_MIN_LEN:
+        arr = _np.frombuffer(data, dtype=_np.uint8)
+        return _np.flatnonzero(_INTERESTING_NP[arr]).tolist()
+    out: list[int] = []
+    for b in _INTERESTING:
+        start = 0
+        while True:
+            j = data.find(b, start)
+            if j < 0:
+                break
+            out.append(j)
+            start = j + 1
+    out.sort()
+    return out
+
+
 def partial_parse(data: bytes) -> _Node:
     """Parse *data* into a tree using delimiter matching.
 
     This is a best-effort parse: if delimiters are unmatched, the
-    remaining bytes are appended as a raw tail.  The result is always
-    a valid tree that flattens back to the original bytes.
+    remaining bytes are appended as a raw tail.  The result always
+    flattens back to the original bytes.
+
+    Only 8 byte values can affect the tree structure (the delimiter opens
+    and their closes). Rather than branch on every byte, locate those
+    positions in one vectorized pass and copy the literal runs between
+    them as whole slices — the structural logic below is unchanged and
+    still runs one position at a time.
     """
     root = _Node()
     stack = [root]
-    i = 0
     buf: list[bytes] = []
 
     def flush():
@@ -122,7 +169,12 @@ def partial_parse(data: bytes) -> _Node:
     _NodeCls = _Node
     n = len(data)
 
-    while i < n:
+    prev = 0
+    for i in _interesting_positions(data):
+        if i > prev:
+            _append(data[prev:i])  # literal run, copied in bulk
+        prev = i + 1
+
         byte = data[i]
         close = delim_close[byte]
         if close != 0xFF:
@@ -153,7 +205,9 @@ def partial_parse(data: bytes) -> _Node:
                 _append(_BYTE_BYTES[byte])
         else:
             _append(_BYTE_BYTES[byte])
-        i += 1
+
+    if prev < n:
+        _append(data[prev:])  # trailing literal run
 
     flush()
     return root
