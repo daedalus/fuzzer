@@ -12,6 +12,7 @@ import shutil
 import signal
 import sys
 import tempfile
+import threading
 import time
 from array import array
 from pathlib import Path
@@ -85,6 +86,15 @@ _SEED_STRATEGY_NAMES = (
 def _kill_children(sig=None, frame=None):
     global _shutdown
     _shutdown = True
+    # SIGTERM/SIGINT are catchable: show where the fuzzer was executing
+    # before tearing down children — a live answer to "what is it doing?".
+    if sig is not None:
+        try:
+            import faulthandler
+
+            faulthandler.dump_traceback()
+        except Exception:
+            pass
     for pid in _child_pids():
         with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
             os.killpg(os.getpgid(pid), signal.SIGKILL)
@@ -93,6 +103,17 @@ def _kill_children(sig=None, frame=None):
 atexit.register(_kill_children)
 signal.signal(signal.SIGTERM, _kill_children)
 signal.signal(signal.SIGINT, _kill_children)
+
+# On-demand live trace: `kill -USR1 <fuzzer-pid>` dumps every thread's
+# Python stack to stderr (faulthandler).  SIGKILL (kill -9) is uncatchable
+# in-process — for that, run with --stack-heartbeat, whose periodic
+# main-thread stack file survives the kill.
+try:
+    import faulthandler as _faulthandler
+
+    _faulthandler.register(signal.SIGUSR1)
+except (AttributeError, OSError):
+    pass
 
 
 def _handle_sigsegv(signum, frame):
@@ -345,6 +366,7 @@ class Fuzzer:
         stats_interval=1000,
         coverage_report=None,
         coverage_log=None,
+        stack_heartbeat=None,
         grammar=None,
         persistent=False,
         net_host=None,
@@ -742,6 +764,10 @@ class Fuzzer:
 
         self.stats_file = Path(stats_file) if stats_file else None
         self.stats_interval = stats_interval
+        # Optional stack heartbeat: a daemon thread writes the main-thread
+        # stack to this file every few seconds, so a SIGKILL (uncatchable)
+        # still leaves the last executing location on disk.
+        self._stack_heartbeat_path = Path(stack_heartbeat) if stack_heartbeat else None
         self._last_stats_exec = 0
         self._eps = 0.0
         # Kalman filter for denoised EPS tracking.
@@ -3314,7 +3340,45 @@ class Fuzzer:
 
         return " | ".join(parts) if parts else "base"
 
+    def _start_stack_heartbeat(self, interval: float = 3.0) -> None:
+        """Daemon thread: periodically write the main-thread Python stack.
+
+        SIGKILL cannot be handled in-process, so `kill -9` leaves nothing.
+        This thread writes where the main thread is executing (only when the
+        top frame moves) to a small file, giving the last known location
+        after a hard kill.
+        """
+        if self._stack_heartbeat_path is None:
+            return
+        out = self._stack_heartbeat_path
+        out.parent.mkdir(parents=True, exist_ok=True)
+
+        def _beat() -> None:
+            import traceback
+
+            ident = threading.main_thread().ident
+            last_key: tuple | None = None
+            while True:
+                time.sleep(interval)
+                try:
+                    frame = sys._current_frames().get(ident)
+                    if frame is None:
+                        continue
+                    key = (frame.f_code.co_filename, frame.f_lineno)
+                    if key == last_key:
+                        continue
+                    last_key = key
+                    out.write_text(
+                        "".join(traceback.format_stack(frame)[-8:])
+                        + f"\n# heartbeat ts={time.time():.0f} execs={self.exec_count}\n"
+                    )
+                except Exception:
+                    pass
+
+        threading.Thread(target=_beat, daemon=True, name="stack-heartbeat").start()
+
     def run(self, iterations=0):
+        self._start_stack_heartbeat()
         if self.multi_targets:
             print(f"[*] Multi-target: {len(self.multi_targets)} targets, shared corpus")
             for i, t in enumerate(self.multi_targets):

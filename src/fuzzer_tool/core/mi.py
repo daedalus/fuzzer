@@ -27,7 +27,11 @@ MAX_EDGES_PER_CELL = 64
 # byte values x MAX_EDGES_PER_CELL edges reaches tens of GB (the observed
 # 796MB mi.json / multi-GB RSS blowup).  When the budget is exceeded the
 # least-observed position is evicted (joint + marginals), bounding memory.
-MAX_JOINT_CELLS = 2_000_000
+# Tuned down from 2M (2026-08): the joint is serialized verbatim to mi.json
+# at every shutdown, and 2M nested-dict cells produced a ~100MB file (the
+# other state jsons are KBs).  250k cells keeps both RSS (~30MB) and the
+# on-disk snapshot modest while still covering the informative positions.
+MAX_JOINT_CELLS = 250_000
 
 # Maximum byte positions the tracker will ever track (independent of the
 # fuzzer's max_len, which auto-grows to 65536).  Positions beyond this are

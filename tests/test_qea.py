@@ -579,6 +579,35 @@ class TestQEALifecycle:
         np.testing.assert_array_equal(qea2.population[0].amplitudes, qea.population[0].amplitudes)
         assert qea2.population[0].best_collapsed == qea.population[0].best_collapsed
 
+    def test_save_is_compact(self, tmp_path):
+        """Regression: qea.json must use compact separators + rounded amplitudes.
+
+        The file is rewritten at every shutdown; indent=2 and full f64
+        amplitude precision made it enormous (200 populations x thousands of
+        amplitudes).  Rounding to 6dp changes nothing for QEA probabilities
+        and the round-trip above proves amplitudes survive intact.
+        """
+        qea = QEALifecycle(pop_size=3)
+        qea.population = [
+            QEAIndividual(
+                amplitudes=[0.123456789, 0.5, 0.987654321, 0.0, 1.0, 0.25],
+                fitness=float(i),
+                species_id=i % 2,
+                best_collapsed=b"x_%d" % i,
+            )
+            for i in range(3)
+        ]
+        path = tmp_path / "qea.json"
+        qea.save(path)
+
+        raw = path.read_text()
+        # Compact separators: no whitespace after ':' or ','.
+        assert '": "' not in raw, "qea.json still uses indented separators"
+        assert "\n" not in raw, "qea.json still uses indent=2"
+        # Amplitudes rounded to <= 6 decimal places.
+        assert "0.123457" in raw, "amplitude not rounded to 6dp"
+        assert "0.123456789" not in raw, "full-precision amplitude leaked into qea.json"
+
     def test_load_nonexistent(self, tmp_path):
         """Load from nonexistent path → no-op, no crash."""
         qea = QEALifecycle()

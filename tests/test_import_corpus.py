@@ -72,7 +72,7 @@ class TestImportFromAfl:
         # Pre-populate corpus with existing data
         corpus_dir = tmp_path / "corpus"
         corpus_dir.mkdir()
-        (corpus_dir / "existing").write_bytes(b"hello")
+        (corpus_dir / "id_0000000000000000").write_bytes(b"hello")
 
         afl_dir = tmp_path / "afl_out"
         queue_dir = afl_dir / "queue"
@@ -126,7 +126,7 @@ class TestImportFromLibfuzzer:
         dest = tmp_path / "target"
         imported = import_from_libfuzzer(str(src), str(dest))
         assert imported == 2
-        assert len(list(dest.glob("id_*"))) == 2
+        assert len(list(dest.rglob("id_*"))) == 2
 
     def test_empty_files_skipped(self, tmp_path):
         src = tmp_path / "libfuzzer_corpus"
@@ -155,7 +155,7 @@ class TestImportFromLibfuzzer:
 
         dest = tmp_path / "target"
         dest.mkdir()
-        (dest / "existing").write_bytes(b"data")  # same content
+        (dest / "id_0000000000000000").write_bytes(b"data")  # same content
 
         imported = import_from_libfuzzer(str(src), str(dest))
         assert imported == 0
@@ -187,7 +187,7 @@ class TestImportFromHonggfuzz:
         imported, crashes = import_from_honggfuzz(str(src), str(dest))
         assert imported == 2
         assert crashes == 0  # honggfuzz import doesn't separate crashes
-        assert len(list(dest.glob("id_*"))) == 2
+        assert len(list(dest.rglob("id_*"))) == 2
 
     def test_empty_files_skipped(self, tmp_path):
         src = tmp_path / "findings"

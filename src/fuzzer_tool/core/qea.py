@@ -134,7 +134,10 @@ class QEAIndividual:
 
     def to_dict(self) -> dict:
         return {
-            "amplitudes": self.amplitudes.tolist(),
+            # Round amplitudes (probabilities) to 6dp: full f64 precision has
+            # no signal and roughly triples the on-disk JSON (200 populations x
+            # len(amplitudes) entries, saved every shutdown).
+            "amplitudes": self.amplitudes.round(6).tolist(),
             "fitness": self.fitness,
             "edge_count": self.edge_count,
             "novelty_score": self.novelty_score,
@@ -599,7 +602,9 @@ class QEALifecycle:
             "species_count": self.species_count,
             "population": [ind.to_dict() for ind in self.population],
         }
-        path.write_text(json.dumps(state, indent=2))
+        # Compact separators: indent=2 roughly doubled the file for no
+        # readability benefit (this is machine state, written every shutdown).
+        path.write_text(json.dumps(state, separators=(",", ":")))
 
     def load(self, path: Path):
         """Restore QEA state from disk."""

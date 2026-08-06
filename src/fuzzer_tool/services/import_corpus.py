@@ -13,6 +13,33 @@ from pathlib import Path
 from fuzzer_tool.adapters.filesystem import hash_data
 
 
+def _write_seed(dest_corpus: Path, data: bytes, h: str) -> Path:
+    """Write *data* into the standard `seeds/<h[:2]>/id_<h>` layout.
+
+    Matches the main fuzzer's save_to_corpus layout so imported seeds land
+    in the same place the fuzzer reads/writes (not the corpus root).
+    """
+    sub = dest_corpus / "seeds" / h[:2]
+    sub.mkdir(parents=True, exist_ok=True)
+    dest = sub / f"id_{h}"
+    dest.write_bytes(data)
+    return dest
+
+
+def _existing_hashes(dest_corpus: Path) -> set[str]:
+    """Hash every seed already stored in *dest_corpus* (seeds/ + legacy root)."""
+    seen: set[str] = set()
+    if not dest_corpus.is_dir():
+        return seen
+    for f in dest_corpus.rglob("id_*"):
+        if f.is_file():
+            try:
+                seen.add(hash_data(f.read_bytes()))
+            except OSError:
+                continue
+    return seen
+
+
 def import_from_afl(
     afl_out_dir: str, target_corpus: str, target_crashes: str | None = None
 ) -> tuple[int, int]:
@@ -33,12 +60,7 @@ def import_from_afl(
 
     corpus_out = Path(target_corpus)
     corpus_out.mkdir(parents=True, exist_ok=True)
-    seen_hashes: set[str] = set()
-
-    # Import existing corpus to avoid re-importing
-    for f in corpus_out.iterdir():
-        if f.is_file():
-            seen_hashes.add(hash_data(f.read_bytes()))
+    seen_hashes = _existing_hashes(corpus_out)
 
     seeds_imported = 0
     crashes_imported = 0
@@ -53,8 +75,7 @@ def import_from_afl(
             h = hash_data(data)
             if h not in seen_hashes:
                 seen_hashes.add(h)
-                dest = corpus_out / f"id_{h}"
-                dest.write_bytes(data)
+                _write_seed(corpus_out, data, h)
                 seeds_imported += 1
 
     # Import from crashes/
@@ -96,11 +117,7 @@ def import_from_libfuzzer(corpus_dir: str, target_corpus: str) -> int:
 
     dest = Path(target_corpus)
     dest.mkdir(parents=True, exist_ok=True)
-    seen_hashes: set[str] = set()
-
-    for f in dest.iterdir():
-        if f.is_file():
-            seen_hashes.add(hash_data(f.read_bytes()))
+    seen_hashes = _existing_hashes(dest)
 
     imported = 0
     for f in sorted(src.iterdir()):
@@ -112,7 +129,7 @@ def import_from_libfuzzer(corpus_dir: str, target_corpus: str) -> int:
         h = hash_data(data)
         if h not in seen_hashes:
             seen_hashes.add(h)
-            (dest / f"id_{h}").write_bytes(data)
+            _write_seed(dest, data, h)
             imported += 1
 
     return imported
@@ -138,11 +155,7 @@ def import_from_honggfuzz(
 
     dest = Path(target_corpus)
     dest.mkdir(parents=True, exist_ok=True)
-    seen_hashes: set[str] = set()
-
-    for f in dest.iterdir():
-        if f.is_file():
-            seen_hashes.add(hash_data(f.read_bytes()))
+    seen_hashes = _existing_hashes(dest)
 
     imported = 0
     for f in sorted(src.iterdir()):
@@ -154,7 +167,7 @@ def import_from_honggfuzz(
         h = hash_data(data)
         if h not in seen_hashes:
             seen_hashes.add(h)
-            (dest / f"id_{h}").write_bytes(data)
+            _write_seed(dest, data, h)
             imported += 1
 
     return imported, 0

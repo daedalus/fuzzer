@@ -390,6 +390,11 @@ def cmd_fuzz(args):
         stats_interval=args.stats_interval,
         coverage_report=args.coverage_report,
         coverage_log=coverage_log_arg,
+        stack_heartbeat=(
+            str(Path(corpus_dir) / ".fuzz_stack.txt")
+            if getattr(args, "stack_heartbeat", None) == "__auto__"
+            else getattr(args, "stack_heartbeat", None)
+        ),
         grammar=grammar,
         persistent=args.persistent,
         net_host=getattr(args, "net_host", None),
@@ -445,7 +450,7 @@ def cmd_fuzz(args):
         transfer_entropy=getattr(args, "transfer_entropy", False),
         elo=getattr(args, "elo", False),
         lineage=getattr(args, "lineage", False),
-            lineage_backtrack=getattr(args, "lineage_backtrack", False),
+        lineage_backtrack=getattr(args, "lineage_backtrack", False),
         secretary=getattr(args, "secretary", False),
         secretary_window=getattr(args, "secretary_window", 500),
         secretary_exploration=getattr(args, "secretary_exploration", 0.368),
@@ -1660,6 +1665,20 @@ def main() -> int:
     )
     fuzz_parser.add_argument(
         "--stats-interval", type=int, default=1000, help="Stats dump interval (default: 1000)"
+    )
+    fuzz_parser.add_argument(
+        "--stack-heartbeat",
+        nargs="?",
+        const="__auto__",
+        metavar="FILE",
+        default=None,
+        help=(
+            "Write the main-thread Python stack to FILE every few seconds "
+            "(default: <corpus>/.fuzz_stack.txt). Since SIGKILL (kill -9) is "
+            "uncatchable, the last stack file shows where the fuzzer was "
+            "executing. A live trace is also available any time via "
+            "`kill -USR1 <pid>`, and SIGTERM/SIGINT dump the stack by default."
+        ),
     )
     fuzz_parser.add_argument(
         "--coverage-report",
