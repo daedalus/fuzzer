@@ -1078,7 +1078,7 @@ class OperatorEngine:
                 buf[idx : idx + width] = val.to_bytes(width, "big")
 
     def _op_tlv_mutate(self, buf, _byte_idx, _data):
-        from fuzzer_tool.core.tlv_mutate import tlv_mutate
+        from fuzzer_tool.core.mutations.tlv_mutate import tlv_mutate
 
         if buf:
             return bytearray(tlv_mutate(bytes(buf), rng=self.f._rand_pool)[: self.f.max_len])

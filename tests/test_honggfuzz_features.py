@@ -14,7 +14,7 @@ import pytest
 
 class TestTlvMutate:
     def test_basic_mutation(self):
-        from fuzzer_tool.core.tlv_mutate import tlv_mutate
+        from fuzzer_tool.core.mutations.tlv_mutate import tlv_mutate
 
         data = b"GET /index.html HTTP/1.1\r\nHost: example.com"
         result = tlv_mutate(data)
@@ -22,21 +22,21 @@ class TestTlvMutate:
         assert len(result) >= len(data)  # may insert TLV fallback
 
     def test_small_input_fallback(self):
-        from fuzzer_tool.core.tlv_mutate import tlv_mutate
+        from fuzzer_tool.core.mutations.tlv_mutate import tlv_mutate
 
         result = tlv_mutate(b"ab")
         assert isinstance(result, bytes)
         assert len(result) >= 2  # original + possible TLV insert
 
     def test_empty_input(self):
-        from fuzzer_tool.core.tlv_mutate import tlv_mutate
+        from fuzzer_tool.core.mutations.tlv_mutate import tlv_mutate
 
         result = tlv_mutate(b"")
         assert isinstance(result, bytes)
         assert len(result) == 4  # just the TLV fallback
 
     def test_length_field_detection(self):
-        from fuzzer_tool.core.tlv_mutate import tlv_mutate
+        from fuzzer_tool.core.mutations.tlv_mutate import tlv_mutate
 
         # Input where byte at offset 0 = 5, and there are 5+ bytes remaining
         data = bytes([5]) + b"AAAAABBBBB"
@@ -52,7 +52,7 @@ class TestTlvMutate:
     def test_deterministic_with_seed(self):
         import random
 
-        from fuzzer_tool.core.tlv_mutate import tlv_mutate
+        from fuzzer_tool.core.mutations.tlv_mutate import tlv_mutate
 
         data = b"test data for mutation"
         r1 = tlv_mutate(data, rng=random.Random(42))
@@ -821,7 +821,7 @@ class TestTlvMutateRegression:
     """
 
     def test_2byte_length_field_mutates_both_bytes(self):
-        from fuzzer_tool.core.tlv_mutate import tlv_mutate
+        from fuzzer_tool.core.mutations.tlv_mutate import tlv_mutate
 
         # b1=0 (so 1-byte check fails), b2=50 (valid 2-byte length)
         data = bytes([0, 50]) + b"A" * 100
@@ -838,7 +838,7 @@ class TestTlvMutateRegression:
         assert found_2byte, "No 2-byte mutation triggered in 500 seeds"
 
     def test_1byte_length_field_uses_correct_remaining(self):
-        from fuzzer_tool.core.tlv_mutate import tlv_mutate
+        from fuzzer_tool.core.mutations.tlv_mutate import tlv_mutate
 
         # b1=5 (valid 1-byte length), remaining should be len-1, not len-2
         data = bytes([5]) + b"A" * 100
