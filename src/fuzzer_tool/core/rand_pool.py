@@ -32,22 +32,34 @@ class RandPool:
         pick = pool.choice(seq)            # like random.choice(seq)
     """
 
-    __slots__ = ("_pool", "_idx", "_m256")
+    __slots__ = ("_pool", "_idx", "_m256", "_pool_l", "_m256_l")
 
     def __init__(self) -> None:
         self._pool: np.ndarray = np.empty(_POOL_ENTRIES, dtype=np.uint32)
         self._m256: np.ndarray = np.empty(_POOL_ENTRIES, dtype=np.uint8)  # pre-computed % 256
+        # Python-list mirrors of the pools. numpy is the right representation
+        # for bulk slicing (randbytes/randint_list), but scalar element access
+        # (`int(arr[i])`) is ~2x slower than a plain list because each read
+        # materializes a numpy scalar object. The scalar-draw methods
+        # (randint/randrange/choice/_draw) are by far the hottest callers —
+        # ~1.6M calls in a 15k-exec run — so they read from these lists
+        # instead. The tolist() cost is paid once per refill and amortizes
+        # over _POOL_ENTRIES draws.
+        self._pool_l: list[int] = []
+        self._m256_l: list[int] = []
         self._idx = _POOL_ENTRIES
 
     def _refill(self) -> None:
         self._pool[:] = np.random.randint(0, 2**32, size=_POOL_ENTRIES, dtype=np.uint32)
         np.mod(self._pool, 256, out=self._m256)
+        self._pool_l = self._pool.tolist()
+        self._m256_l = self._m256.tolist()
         self._idx = 0
 
     def _draw(self) -> int:
         if self._idx >= _POOL_ENTRIES:
             self._refill()
-        val = int(self._pool[self._idx])
+        val = self._pool_l[self._idx]
         self._idx += 1
         return val
 
@@ -124,8 +136,8 @@ class RandPool:
         self._idx += 1
         # Fast path: pre-computed % 256 — avoids modulo at draw time
         if width == 256:
-            return int(self._m256[pos])
-        return a + (int(self._pool[pos]) % width)
+            return self._m256_l[pos]
+        return a + (self._pool_l[pos] % width)
 
     def randbytes(self, n: int) -> bytes:
         """Generate *n* random bytes. Matches ``random.randbytes`` API.
@@ -168,7 +180,7 @@ class RandPool:
         if n <= 256:
             if self._idx >= _POOL_ENTRIES:
                 self._refill()
-            val = int(self._pool[self._idx])
+            val = self._pool_l[self._idx]
             self._idx += 1
             return seq[val % n]
         return seq[int(np.random.randint(n))]
@@ -224,7 +236,7 @@ class RandPool:
             for i in range(n - 1, 0, -1):
                 if self._idx >= _POOL_ENTRIES:
                     self._refill()
-                j = int(self._pool[self._idx]) % (i + 1)
+                j = self._pool_l[self._idx] % (i + 1)
                 self._idx += 1
                 seq[i], seq[j] = seq[j], seq[i]
         else:

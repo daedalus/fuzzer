@@ -43,6 +43,8 @@ class ExecutionTimeTracker:
         self._total_observations = 0
         self._crps_sum = 0.0
         self._moments: RunningMoments = RunningMoments(window=window_size)
+        # n -> arange(1, n+1)/n, reused across executions (see _compute_crps)
+        self._crps_ramp_cache: dict = {}
 
     def record(self, elapsed: float) -> float:
         """Record an execution time and return the CRPS score.
@@ -90,7 +92,14 @@ class ExecutionTimeTracker:
 
         arr = _np.asarray(self._sorted, dtype=_np.float64)
         n = len(arr)
-        cd = _np.arange(1, n + 1) / n - (arr >= observation)
+        # i/n is constant for a given n, and n is pinned at window_size for
+        # nearly the whole run — cache it instead of reallocating an arange
+        # on every execution (this runs once per exec, on the hot path).
+        ramp = self._crps_ramp_cache.get(n)
+        if ramp is None:
+            ramp = _np.arange(1, n + 1) / n
+            self._crps_ramp_cache[n] = ramp
+        cd = ramp - (arr >= observation)
         crps = float(_np.sum(cd[:-1] * cd[:-1] * _np.diff(arr)))
         # Region from last observation to observation (if obs > max):
         # F(y) = 1 for y ≥ max_val, 𝟙[y ≥ obs] = 0 for max_val ≤ y < obs
