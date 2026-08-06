@@ -1469,6 +1469,41 @@ class OperatorEngine:
             mutated = self.f._arm_mutator._generate_random_arm(max_len=self.f.max_len, rng=rng)
         return bytearray(mutated[: self.f.max_len])
 
+    def _op_elf_chunk_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.elf import ElfMutator
+
+        if not hasattr(self.f, "_elf_mutator"):
+            self.f._elf_mutator = ElfMutator()
+        rng = self.f._rand_pool
+        mutated = self.f._elf_mutator.mutate(bytes(buf), max_len=self.f.max_len, rng=rng)
+        return bytearray(mutated[: self.f.max_len])
+
+    def _op_recompress_zlib(self, buf, byte_idx, data):
+        """Inflate, mutate the plaintext, re-deflate as a valid zlib stream.
+
+        Falls back to havoc when the input is not an inflatable stream: the
+        registry's bootstrap trickle can offer this operator before any real
+        compressed input has been seen, and emitting the buffer unchanged
+        would waste the execution.
+        """
+        from fuzzer_tool.core.mutations.recompress import recompress_zlib
+
+        rng = self.f._rand_pool
+        out = recompress_zlib(bytes(buf), max_len=self.f.max_len, rng=rng)
+        if out is None:
+            return self._op_havoc(buf, byte_idx, data)
+        return bytearray(out[: self.f.max_len])
+
+    def _op_recompress_gzip(self, buf, byte_idx, data):
+        """Inflate, mutate the plaintext, re-deflate as a valid gzip member."""
+        from fuzzer_tool.core.mutations.recompress import recompress_gzip
+
+        rng = self.f._rand_pool
+        out = recompress_gzip(bytes(buf), max_len=self.f.max_len, rng=rng)
+        if out is None:
+            return self._op_havoc(buf, byte_idx, data)
+        return bytearray(out[: self.f.max_len])
+
     def _op_png_crc_fix(self, buf, _byte_idx, _data):
         rng = self.f._rand_pool
         from fuzzer_tool.core.mutations.png import parse_png_chunks, serialize_png_chunks

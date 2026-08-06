@@ -114,6 +114,9 @@ _CATEGORIES: dict[str, set[str]] = {
         "zip_chunk_mutate",
         "x86_chunk_mutate",
         "arm_chunk_mutate",
+        "elf_chunk_mutate",
+        "recompress_zlib",
+        "recompress_gzip",
     },
     "adaptive": {
         "markov_bytes",
@@ -190,6 +193,18 @@ _FORMAT_SNIFFERS: dict[str, Callable[[bytes], bool]] = {
     "nal_chunk_mutate": lambda d: (
         d[:4] in (b"\x00\x00\x00\x01", b"\x00\x00\x01\x00") or d[:3] == b"\x00\x00\x01"
     ),
+    # ELF: magic + a valid class/endianness byte pair. Cheap enough to run on
+    # every selection; the mutator itself never touches non-ELF input.
+    "elf_chunk_mutate": lambda d: (
+        len(d) >= 64 and d[:4] == b"\x7fELF" and d[4] in (1, 2) and d[5] in (1, 2)
+    ),
+    # Recompression operators reuse the same header checks as the in-place
+    # zlib/gzip mutators, but additionally require enough bytes for a trailer
+    # — there is nothing to round-trip through an empty stream.
+    "recompress_zlib": lambda d: (
+        len(d) >= 6 and (d[0] & 0x0F) == 8 and ((d[0] << 8) | d[1]) % 31 == 0
+    ),
+    "recompress_gzip": lambda d: len(d) >= 18 and d[:3] == b"\x1f\x8b\x08",
 }
 
 # Fraction of selections on which a not-yet-seen format is still offered.
