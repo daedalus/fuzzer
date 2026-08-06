@@ -15,6 +15,7 @@ Adding an operator means one registration here plus a ``_op_<name>`` handler
 on ``OperatorEngine`` — nothing else.
 """
 
+import contextlib
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -153,8 +154,82 @@ def _never(_fuzzer, _data) -> bool:
     return False
 
 
+# ── Format-relevance gating ────────────────────────────────────────────
+#
+# The format operators (png/jpeg/webm/...) parse the input and, when it is
+# NOT that format, fall back to generating a whole random file of that
+# format from scratch. That fallback is a legitimate bootstrap when the
+# target really does parse that format and the corpus has not picked one up
+# yet — but when the target has nothing to do with the format (fuzzing a
+# text parser with the jpeg operator enabled), it burns a large share of the
+# execution budget building random JPEGs that the target rejects instantly.
+#
+# Measured on a non-image target: format operators consumed ~50% of total
+# runtime, and gating them doubled throughput (2213 -> 4469 eps).
+#
+# The gate keeps both cases working:
+#   * once any input has parsed as format F, F is "live" and stays fully
+#     available for the rest of the run (real files must be mutable);
+#   * until then F is still offered, but only on a small fraction of
+#     selections, so bootstrap-from-garbage-corpus still happens — it just
+#     no longer dominates the budget.
+_FORMAT_SNIFFERS: dict[str, Callable[[bytes], bool]] = {
+    "png_chunk_mutate": lambda d: d[:8] == b"\x89PNG\r\n\x1a\n",
+    "png_crc_fix": lambda d: d[:8] == b"\x89PNG\r\n\x1a\n",
+    "jpeg_chunk_mutate": lambda d: d[:2] == b"\xff\xd8",
+    "jpeg_crc_fix": lambda d: d[:2] == b"\xff\xd8",
+    "bmp_chunk_mutate": lambda d: d[:2] == b"BM",
+    "gzip_chunk_mutate": lambda d: d[:2] == b"\x1f\x8b",
+    "zlib_chunk_mutate": lambda d: len(d) > 1 and d[0] == 0x78,
+    "gif_chunk_mutate": lambda d: d[:3] == b"GIF",
+    "webp_chunk_mutate": lambda d: d[:4] == b"RIFF" and d[8:12] == b"WEBP",
+    "webm_chunk_mutate": lambda d: d[:4] == b"\x1a\x45\xdf\xa3",
+    "zip_chunk_mutate": lambda d: d[:2] == b"PK",
+    "isobmff_chunk_mutate": lambda d: d[4:8] == b"ftyp",
+    "pgs_chunk_mutate": lambda d: d[:2] == b"PG",
+    "nal_chunk_mutate": lambda d: d[:4] in (b"\x00\x00\x00\x01", b"\x00\x00\x01\x00")
+    or d[:3] == b"\x00\x00\x01",
+}
+
+# Fraction of selections on which a not-yet-seen format is still offered.
+_FORMAT_BOOTSTRAP_RATE = 0.02
+
+
+def _format_available(name: str) -> Callable[[object, bytes], bool]:
+    sniff = _FORMAT_SNIFFERS[name]
+
+    def _check(fuzzer, data) -> bool:
+        if fuzzer is None:
+            return True
+        live = getattr(fuzzer, "_live_formats", None)
+        if live is None:
+            live = set()
+            with contextlib.suppress(AttributeError):
+                fuzzer._live_formats = live
+        if data and sniff(data):
+            live.add(name)  # real file of this format seen — keep it live
+            return True
+        if name in live:
+            return True
+        # Never seen this format: keep a thin bootstrap trickle so a target
+        # that does parse it can still be reached from a garbage corpus.
+        rng = getattr(fuzzer, "_rand_pool", None)
+        if rng is None:
+            return True
+        try:
+            return float(rng.random()) < _FORMAT_BOOTSTRAP_RATE
+        except (TypeError, ValueError):
+            # Mock/stub fuzzer in tests — stay permissive rather than
+            # silently hiding operators.
+            return True
+
+    return _check
+
+
 # Availability predicates mirror the historic build_ops() conditions.
 _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
+    # format ops — gated on the format being relevant to this target
+    **{n: _format_available(n) for n in _FORMAT_SNIFFERS},
     # dictionary ops — only when a dictionary is loaded
     "dict_insert": lambda f, _d: bool(getattr(f, "dictionary", None)),
     "dict_replace": lambda f, _d: bool(getattr(f, "dictionary", None)),
