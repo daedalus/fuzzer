@@ -1262,6 +1262,7 @@ class OperatorEngine:
 
         if not hasattr(self.f, "_jpeg_mutator"):
             self.f._jpeg_mutator = JpegMutator()
+        self.f._jpeg_mutator.use_wfc = getattr(self.f, "_wfc_enabled", False)
         rng = self.f._rand_pool
         if parse_jpeg_markers(bytes(buf)):
             mutated = self.f._jpeg_mutator.mutate(bytes(buf), max_len=self.f.max_len, rng=rng)

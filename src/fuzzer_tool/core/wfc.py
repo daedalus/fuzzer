@@ -175,6 +175,11 @@ class WaveGrid:
         self.n = width * height
         self.n_tiles = len(tiles)
 
+        # Local RNG. Every stochastic choice in this class draws from here
+        # rather than the ``random`` module, so a seeded run is reproducible
+        # without disturbing any other consumer of the global stream.
+        self._rng = random.Random()
+
         # Precompute tile weights as array for vectorized operations
         self._weights = np.array([t.weight for t in tiles], dtype=np.float64)
 
@@ -182,6 +187,10 @@ class WaveGrid:
         self.superpositions: np.ndarray = np.ones((self.n, self.n_tiles), dtype=bool)
 
         self.contradiction = False
+
+        # Snapshot of the caller-constrained wave, captured at run() entry so
+        # restarts can restore it rather than clearing every constraint.
+        self._initial: np.ndarray | None = None
 
         # Precompute adjacency matrix for vectorized _prune_cell:
         # adj_matrix[i, j, d] = compatible(tiles[i], tiles[j], direction[d])
@@ -206,6 +215,12 @@ class WaveGrid:
 
         Args:
             seed: Random seed for deterministic output. None = unseeded.
+                Seeds this grid's own RNG only. Seeding the ``random``
+                module here instead would reset the process-wide stream
+                that the fuzzer's operators and schedulers draw from,
+                collapsing their entropy to a point determined solely by
+                this value — and WFC is invoked per PNG reorder and per
+                BMP row, so that reset would happen constantly.
             max_restarts: Max restarts on contradiction.
             ac3_budget: Max AC-3 propagation iterations before greedy fallback.
 
@@ -214,13 +229,17 @@ class WaveGrid:
             the cell couldn't be collapsed (budget exhausted).
         """
         if seed is not None:
-            random.seed(seed)
+            self._rng = random.Random(seed)
+
+        # Capture whatever constraints the caller applied before running, so
+        # _reset() can restore them instead of wiping them.
+        self._initial = self.superpositions.copy()
 
         for attempt in range(max_restarts + 1):
             if attempt > 0:
                 self._reset()
                 if seed is not None:
-                    random.seed(seed + attempt * 7919)
+                    self._rng = random.Random(seed + attempt * 7919)
 
             self.contradiction = False
             self._run_loop(ac3_budget)
@@ -262,7 +281,7 @@ class WaveGrid:
                 return None
             if count == 1:
                 continue
-            entropy = self._entropy(row) + random.random() * 1e-9
+            entropy = self._entropy(row) + self._rng.random() * 1e-9
             if entropy < min_entropy:
                 min_entropy = entropy
                 best_idx = i
@@ -291,9 +310,9 @@ class WaveGrid:
         weights = self._weights[possible]
         total = weights.sum()
         if total <= 0:
-            chosen = random.choice(possible)
+            chosen = self._rng.choice(possible)
         else:
-            r = random.random() * total
+            r = self._rng.random() * total
             cumulative = 0.0
             chosen = possible[-1]
             for tid, w in zip(possible.tolist(), weights.tolist(), strict=True):
@@ -426,23 +445,34 @@ class WaveGrid:
             result.append(idx + self.w)
         return result
 
-    @staticmethod
-    def _direction_to(from_idx: int, to_idx: int) -> Direction:
-        """Direction from *from_idx* to *to_idx*."""
-        diff = to_idx - from_idx
-        if diff == -1:
-            return "left"
-        if diff == 1:
-            return "right"
-        if diff < 0:
-            return "up"
-        return "down"
+    def _direction_to(self, from_idx: int, to_idx: int) -> Direction:
+        """Direction from *from_idx* to *to_idx*.
+
+        Vertical steps are ``±self.w`` and horizontal steps are ``±1``. Those
+        coincide when ``w == 1``, so the row index must be compared rather
+        than inferring the axis from the raw difference — otherwise a
+        single-column grid resolves its vertical neighbours as left/right and
+        checks them against horizontal adjacency rules.
+        """
+        if from_idx // self.w != to_idx // self.w:
+            return "down" if to_idx > from_idx else "up"
+        return "right" if to_idx > from_idx else "left"
 
     # ── Reset ───────────────────────────────────────────────────────
 
     def _reset(self):
-        """Reset superposition to all tiles possible."""
-        self.superpositions[:, :] = True
+        """Restore the superposition to its state at the start of ``run()``.
+
+        Callers constrain cells before running — pinning IHDR to the first
+        cell and IEND to the last, for example — by writing directly into
+        ``superpositions``. Resetting to all-True would discard those pins on
+        every restart, so a wave that contradicts once would come back
+        unconstrained and happily place the anchor mid-sequence.
+        """
+        if self._initial is not None:
+            self.superpositions[:, :] = self._initial
+        else:
+            self.superpositions[:, :] = True
         self.contradiction = False
 
     # ── Output ──────────────────────────────────────────────────────
@@ -523,13 +553,20 @@ class ConstraintSet:
 
     @staticmethod
     def jpeg_markers() -> AdjacencyTable:
-        """JPEG marker ordering rules."""
+        """JPEG marker ordering rules.
+
+        Covers the marker set ``parse_jpeg_markers`` actually emits, so every
+        parsed segment has a tile with rules. A marker missing from this table
+        has no adjacency entries at all, and ``compatible()`` is closed-world
+        — it would be pruned from every cell and the wave would contradict.
+        """
         table = AdjacencyTable()
         markers = [
             b"APP0",
             b"APP1",
             b"DHT",
             b"DQT",
+            b"DRI",
             b"SOF0",
             b"SOF2",
             b"COM",

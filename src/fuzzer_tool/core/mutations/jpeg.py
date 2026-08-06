@@ -212,6 +212,8 @@ class JpegMutator:
 
     _rng = random
 
+    use_wfc: bool = False  # set to True by Fuzzer when --wfc is active
+
     def mutate(self, data: bytes, max_len: int = 4096, rng=None) -> bytes:
         """Apply one structure-aware JPEG mutation."""
         self._rng = rng or random
@@ -395,6 +397,96 @@ class JpegMutator:
 
     def _reorder_markers(self, markers: list[JpegMarker], max_len: int) -> list[JpegMarker]:
         """Swap two random markers (tests parser ordering tolerance)."""
+        if self.use_wfc:
+            return self._wfc_reorder_markers(markers, max_len)
+        candidates = [i for i, m in enumerate(markers) if m.marker not in (SOI,)]
+        if len(candidates) < 2:
+            return markers
+        a, b = (self._rng or random).sample(candidates, 2)
+        markers[a], markers[b] = markers[b], markers[a]
+        return markers
+
+    def _wfc_reorder_markers(self, markers: list[JpegMarker], max_len: int) -> list[JpegMarker]:
+        """Reorder markers using 1D Wave Function Collapse.
+
+        Generates an ordering that satisfies JPEG's marker adjacency rules
+        instead of swapping two segments at random, so the result is novel
+        but structurally plausible — which reaches decoder paths past the
+        early structural rejection a random swap usually triggers.
+
+        SOI is pinned first and EOI last. Segment payloads are preserved and
+        reattached in the new order; only the sequence changes. Falls back to
+        the random swap if the wave contradicts or the corpus contains a
+        marker with no rules.
+        """
+        if len(markers) < 3:
+            return markers
+
+        from fuzzer_tool.core.wfc import ConstraintSet, Tile, WaveGrid
+
+        adjacency = ConstraintSet.jpeg_markers()
+        names = [_marker_name(m.marker).encode() for m in markers]
+        type_names = list(dict.fromkeys(names))
+
+        # Closed-world adjacency: an unknown marker would be pruned from
+        # every cell and force a contradiction, so bail to the random swap.
+        if not all(adjacency.has_tile(t) for t in type_names):
+            return self._random_swap_markers(markers)
+
+        tiles = [Tile(name=t) for t in type_names]
+        wave = WaveGrid(tiles, adjacency, width=len(markers), height=1)
+
+        for anchor, cell in ((b"SOI", 0), (b"EOI", -1)):
+            if anchor in type_names:
+                tid = type_names.index(anchor)
+                wave.superpositions[cell][:] = False
+                wave.superpositions[cell][tid] = True
+
+        result = wave.run(
+            seed=(self._rng or random).randint(0, 2**31), max_restarts=3, ac3_budget=2000
+        )
+        if not result or not result[0]:
+            return self._random_swap_markers(markers)
+
+        by_type: dict[bytes, list[JpegMarker]] = {}
+        for name, m in zip(names, markers, strict=True):
+            by_type.setdefault(name, []).append(m)
+
+        reordered: list[JpegMarker] = []
+        for tile_name in result[0]:
+            if tile_name is None:
+                continue
+            pool = by_type.get(tile_name)
+            if pool:
+                reordered.append(pool.pop(0))
+
+        # Append anything WFC did not place, so no segment is silently lost.
+        # WFC generates a valid sequence of tile *types*, not a permutation of
+        # the markers actually present — it may repeat a type and omit another
+        # — so leftovers are normal rather than exceptional.
+        for pool in by_type.values():
+            reordered.extend(pool)
+
+        if not reordered:
+            return markers
+
+        # Re-pin the anchors. The wave honours them, but the leftover pass
+        # above appends to the tail and would otherwise strand a segment
+        # after EOI, which every decoder rejects before reaching the
+        # reordering this operator exists to exercise.
+        self._enforce_anchors(reordered)
+        return reordered
+
+    @staticmethod
+    def _enforce_anchors(markers: list[JpegMarker]) -> None:
+        """Move SOI to the front and EOI to the back, in place."""
+        for marker_byte, target in ((SOI, 0), (EOI, len(markers) - 1)):
+            idx = next((i for i, m in enumerate(markers) if m.marker == marker_byte), None)
+            if idx is not None and idx != target:
+                markers.insert(target, markers.pop(idx))
+
+    def _random_swap_markers(self, markers: list[JpegMarker]) -> list[JpegMarker]:
+        """Swap two non-SOI markers — the pre-WFC reorder behaviour."""
         candidates = [i for i, m in enumerate(markers) if m.marker not in (SOI,)]
         if len(candidates) < 2:
             return markers
