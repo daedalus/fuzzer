@@ -70,6 +70,7 @@ def _make_runner(so: Path) -> InProcessRunner:
         coverage_env_id=None,
         cov=False,
         debug=False,
+        use_ptrace=True,  # capture is opt-in (--ptrace); these tests pin that path
     )
 
 

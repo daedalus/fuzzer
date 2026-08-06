@@ -388,6 +388,7 @@ class Fuzzer:
         minimize_every_execs=0,
         prune_corpus_max_memory=80,
         no_shm=False,
+        use_ptrace=False,
         resume=False,
         trace_crashes=False,
         learn_format=False,
@@ -464,6 +465,13 @@ class Fuzzer:
     ):
         self.target = target
         self.debug = debug
+        # Persistent-loader ptrace self-trace for fault-address/register
+        # capture (PTRACE_TRACEME on every forked call). Off by default —
+        # it adds per-exec overhead and can be blocked by yama ptrace_scope.
+        # Crash triage (_run_triage_ptrace) still fires a one-off re-run on
+        # each crash regardless of this flag; this only controls the
+        # always-on per-iteration trace in the persistent loader.
+        self.use_ptrace = use_ptrace
         self.refresh_profile = refresh_profile
         self.quiet_stats = quiet_stats
         # Multi-target support: list of target binaries to fuzz with shared corpus
@@ -1493,6 +1501,7 @@ class Fuzzer:
                 cov=bool(cov_env_id),
                 debug=self.debug,
                 capture_stderr=target_is_asan or target_is_ubsan,
+                use_ptrace=self.use_ptrace,
             )
             if use_direct_lite:
                 mode = "direct_lite"
@@ -1536,6 +1545,7 @@ class Fuzzer:
                 coverage_env_id=cov_env_id,
                 cov=bool(cov_env_id),
                 debug=self.debug,
+                use_ptrace=self.use_ptrace,
             )
             mode = "direct ctypes" if direct_ok else "subprocess loader"
             cov_note = f", SHM cov id={cov_env_id}" if cov_env_id else ""

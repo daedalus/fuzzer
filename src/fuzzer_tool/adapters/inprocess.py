@@ -168,6 +168,7 @@ class InProcessRunner:
         cov: bool = False,
         debug: bool = False,
         capture_stderr: bool = False,
+        use_ptrace: bool = False,
     ):
         self.target = target
         self.function_name = function_name
@@ -178,6 +179,7 @@ class InProcessRunner:
         self.coverage_env_id = coverage_env_id
         self.debug = debug
         self.capture_stderr = capture_stderr
+        self.use_ptrace = use_ptrace
 
         self._func: Callable[[bytes], int] | None = None
         self._lib: ctypes.CDLL | None = None
@@ -297,6 +299,7 @@ class InProcessRunner:
                     target=self.target,
                     function_name=self.function_name,
                     timeout=self.timeout,
+                    use_ptrace=self.use_ptrace,
                 )
                 if not self._persistent.start():
                     log.warning("Persistent loader failed, falling back to per-call")

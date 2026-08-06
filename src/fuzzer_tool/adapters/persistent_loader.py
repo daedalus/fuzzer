@@ -139,13 +139,16 @@ while True:
             os.setsid()
 
             # Best-effort ptrace self-trace so P1 (our direct parent) can read
-            # the fault address + registers at the fatal-signal stop. If ptrace
-            # is blocked (yama), the guarded call still reports the crash via rc
-            # — capture degrades gracefully.
-            try:
-                _ptrace_libc.ptrace(PTRACE_TRACEME, 0, None, None)
-            except Exception:
-                pass
+            # the fault address + registers at the fatal-signal stop. Opt-in
+            # via --ptrace (_PTRACE_ENABLE=1): adds per-exec overhead and can
+            # be blocked by yama ptrace_scope. If ptrace is blocked or
+            # disabled, the guarded call still reports the crash via rc —
+            # capture just degrades gracefully.
+            if os.environ.get("_PTRACE_ENABLE") == "1":
+                try:
+                    _ptrace_libc.ptrace(PTRACE_TRACEME, 0, None, None)
+                except Exception:
+                    pass
 
             # Use __afl_guarded_call when available — it uses
             # sigsetjmp/siglongjmp to survive signals (SIGSEGV,
@@ -276,11 +279,19 @@ class PersistentLoader:
     """
 
     def __init__(
-        self, target: str, function_name: str = "LLVMFuzzerTestOneInput", timeout: float = 5.0
+        self,
+        target: str,
+        function_name: str = "LLVMFuzzerTestOneInput",
+        timeout: float = 5.0,
+        use_ptrace: bool = False,
     ):
         self.target = target
         self.function_name = function_name
         self.timeout = timeout
+        # Off by default: PTRACE_TRACEME on every forked call adds per-exec
+        # overhead and can be blocked by yama ptrace_scope. Opt in with
+        # --ptrace when fault-address/register capture is worth the cost.
+        self.use_ptrace = use_ptrace
         self._proc = None
         self._ready = False
         self._last_bitmap = None
@@ -318,6 +329,7 @@ class PersistentLoader:
             env["AFL_MAP_SIZE"] = "8192"
         env["_LOADER_NO_BMP"] = "1"
         env["_CHILD_PID_FILE"] = self._child_pid_file
+        env["_PTRACE_ENABLE"] = "1" if self.use_ptrace else "0"
 
         self._proc = subprocess.Popen(
             [sys.executable, self._loader_path],

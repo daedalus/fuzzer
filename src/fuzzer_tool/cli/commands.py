@@ -412,6 +412,7 @@ def cmd_fuzz(args):
         minimize_every_execs=getattr(args, "minimize_every_execs", 0),
         prune_corpus_max_memory=getattr(args, "prune_corpus_max_memory", 80),
         no_shm=args.no_shm,
+        use_ptrace=args.ptrace,
         resume=args.resume,
         trace_crashes=args.trace,
         learn_format=getattr(args, "learn_format", False),
@@ -1345,6 +1346,13 @@ def main() -> int:
         "--no-shm",
         action="store_true",
         help="Skip AFL SHM coverage, use ptrace instead (for uninstrumented binaries)",
+    )
+    fuzz_parser.add_argument(
+        "--ptrace",
+        action="store_true",
+        help="Enable ptrace self-trace in the persistent loader for per-crash "
+        "fault-address/register capture on .so targets (adds per-exec overhead; "
+        "disabled by default)",
     )
     fuzz_parser.add_argument("-D", "--dict", help="Dictionary file")
     fuzz_parser.add_argument(
