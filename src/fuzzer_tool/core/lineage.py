@@ -103,6 +103,11 @@ class LineageTree:
         self.op_table: list[str] = []
         self._op_ids: dict[str, int] = {}
         self._children: dict[str, set[str]] = {}
+        # Root keys, maintained incrementally. Consumers that select over the
+        # forest (the MCTS scheduler descends from the roots on every seed
+        # pick) would otherwise rescan every node per call, which is O(corpus)
+        # on the fuzzer's hot path.
+        self._root_keys: set[str] = set()
         self._inactive_keys: list[str] = []
         self._max_inactive = max_inactive
         self._seq = 0
@@ -158,6 +163,9 @@ class LineageTree:
         self.nodes[child_key] = node
         if parent is not None:
             self._children.setdefault(parent_key, set()).add(child_key)
+        else:
+            # No resolvable parent — a root of its own tree in the forest.
+            self._root_keys.add(child_key)
 
         # Propagate w(child)·γ^dist up to each ancestor; short-circuit
         # when the marginal delta drops below the epsilon floor.
@@ -314,7 +322,21 @@ class LineageTree:
             siblings = self._children.get(node.parent_key)
             if siblings is not None:
                 siblings.discard(key)
+        # Orphaned children become roots; the dropped key stops being one.
+        for child in self._children.get(key, ()):
+            if child in self.nodes:
+                self._root_keys.add(child)
+        self._root_keys.discard(key)
         self._children.pop(key, None)
+
+    def roots(self) -> list[str]:
+        """Keys whose parent is absent from the tree (forest roots).
+
+        Maintained incrementally by ``insert``/``_drop`` rather than derived
+        by scanning ``nodes``, so callers on the fuzzer's per-iteration path
+        do not pay a full-corpus scan per call.
+        """
+        return [k for k in self._root_keys if k in self.nodes]
 
     def subtree_keys(self, key: str) -> list[str]:
         """Keys of all nodes in the subtree rooted at *key* (inclusive)."""
@@ -366,6 +388,7 @@ class LineageTree:
         """
         self.nodes.clear()
         self._children.clear()
+        self._root_keys.clear()
         self._inactive_keys.clear()
         self.op_table = []
         self._op_ids = {}
@@ -402,6 +425,17 @@ class LineageTree:
             self.nodes[node.key] = node
             if parent_key is not None:
                 self._children.setdefault(parent_key, set()).add(node.key)
+
+        # Roots are recomputed in one pass rather than maintained during the
+        # loop above: a node whose parent_key is set but whose parent never
+        # appears in seed_meta is an orphan root, and that is only decidable
+        # once every node has been built. This runs on resume, not per
+        # iteration, so the single scan is not on any hot path.
+        self._root_keys = {
+            key
+            for key, node in self.nodes.items()
+            if node.parent_key is None or node.parent_key not in self.nodes
+        }
 
         # Structural subtree weights via depth-descending accumulation
         # (child.depth = parent.depth + 1 makes this a valid post-order).
