@@ -2,7 +2,6 @@
 
 import atexit
 import contextlib
-import json
 import logging
 import math
 import os
@@ -462,6 +461,7 @@ class Fuzzer:
         refresh_profile=False,
         chi2_operator_interval=0,
         quiet_stats=False,
+        no_save_state=False,
     ):
         self.target = target
         self.debug = debug
@@ -708,6 +708,14 @@ class Fuzzer:
         self.corpus_dir.mkdir(parents=True, exist_ok=True)
         self.crashes_dir.mkdir(parents=True, exist_ok=True)
 
+        # Single-file state store (replaces per-component JSON files).
+        # Loaded eagerly so all components can fetch their section via get().
+        from fuzzer_tool.core.state_store import StateStore
+
+        self._state_store = StateStore(self.corpus_dir, enabled=not no_save_state)
+        if self.resume:
+            self._state_store.load()
+
         self.corpus: list[bytes] = []
         self.seen_hashes: set[str] = set()
         self.irreplaceable_hashes: set[str] = set()
@@ -827,8 +835,6 @@ class Fuzzer:
             self.markov = MarkovChain(order=orders[0])
         self.markov_generate = markov_generate
         self.markov_trained = False
-        self._markov_path = self.corpus_dir / "markov.json"
-        self._mi_path = self.corpus_dir / "mi.json"
 
         # ── Extracted modules ──────────────────────────────────────────
         self._operators = OperatorEngine(self)
@@ -898,11 +904,13 @@ class Fuzzer:
         # of truth; never re-derived from runs to avoid double-counting).
         if self._use_lineage and self._lineage is not None:
             self._lineage.rebuild_from_meta(self.seed_meta, self._seed_key)
-        # Load persisted Markov state; skip retrain if loaded (avoids
-        # double-counting the same corpus transitions across restarts)
-        loaded = False
-        if self._markov_path.exists():
-            loaded = self.markov.load(str(self._markov_path))
+        # Load persisted Markov state from state store; skip retrain if loaded
+        markov_data = self._state_store.get("markov")
+        if markov_data is not None:
+            loaded = True
+            self.markov.from_dict(markov_data)
+        else:
+            loaded = False
         if self.corpus and not loaded:
             self.markov.train_corpus(self.corpus)
         self.markov_trained = self.markov.is_trained()
@@ -986,39 +994,37 @@ class Fuzzer:
             if mi_guided
             else None
         )
-        # Load persisted MI state (resume-gated like state.json — an oversized
+        # Load persisted MI state from state store (resume-gated — an oversized
         # mi.json otherwise becomes a multi-GB object tree at every startup)
-        if self._use_mi and self._mi and self.resume and self._mi_path.exists():
-            self._mi.load(str(self._mi_path))
-            log.info("MI tracker loaded from %s", self._mi_path)
+        if self._use_mi and self._mi and self.resume:
+            mi_data = self._state_store.get("mi")
+            if mi_data is not None:
+                self._mi.from_dict(mi_data)
+                log.info(
+                    "MI tracker loaded from state store (%d positions)", self._mi.max_positions
+                )
 
         # Crash MI tracker: I(byte_position; crash_outcome)
         from fuzzer_tool.core.crash_eta import CrashMITracker
 
         self._crash_mi = CrashMITracker(max_positions=max_len, min_observations=20)
-        self._crash_mi_path = self.corpus_dir / "crash_mi.json"
-        if self._crash_mi_path.exists():
-            try:
-                self._crash_mi.load(json.loads(self._crash_mi_path.read_text()))
-                log.info(
-                    "Crash MI tracker loaded: %d execs, %d crashes",
-                    self._crash_mi.total_execs,
-                    self._crash_mi.total_crashes,
-                )
-            except (OSError, json.JSONDecodeError):
-                pass
+        crash_mi_data = self._state_store.get("crash_mi")
+        if crash_mi_data is not None:
+            self._crash_mi.load(crash_mi_data)
+            log.info(
+                "Crash MI tracker loaded: %d execs, %d crashes",
+                self._crash_mi.total_execs,
+                self._crash_mi.total_crashes,
+            )
 
         # Length-edge tracker: input_length → coverage edges
         from fuzzer_tool.core.length_mi import LengthEdgeTracker
 
         self._length_tracker = LengthEdgeTracker()
-        self._length_tracker_path = self.corpus_dir / "length_tracker.json"
-        if self._length_tracker_path.exists():
-            try:
-                self._length_tracker.load(json.loads(self._length_tracker_path.read_text()))
-                log.info("Length-edge tracker loaded: %d execs", self._length_tracker.total_execs)
-            except (OSError, json.JSONDecodeError):
-                pass
+        lt_data = self._state_store.get("length_tracker")
+        if lt_data is not None:
+            self._length_tracker.load(lt_data)
+            log.info("Length-edge tracker loaded: %d execs", self._length_tracker.total_execs)
 
         self._use_renyi_weight = renyi_weight
         self._use_transfer_entropy = transfer_entropy
@@ -1111,10 +1117,10 @@ class Fuzzer:
             self._elo_decay_interval = 100  # apply decay every N iterations
             self._elo_decay_counter = 0
             self._elo_match_window: list[tuple[str, str, float, bool]] = []
-            self._elo_path = self.corpus_dir / "elo.json"
-            if self._elo_path.exists():
-                self._elo.load(str(self._elo_path))
-                log.info("Elo tracker loaded from %s", self._elo_path)
+            elo_data = self._state_store.get("elo")
+            if elo_data is not None:
+                self._elo.from_dict(elo_data)
+                log.info("Elo tracker loaded from state store (%d operators)", len(self._elo.mu))
 
             # Pre-register all strategy names so Elo can arbitrate immediately
             # (without this, select_strategy requires min_matches before considering a strategy)
@@ -3581,10 +3587,10 @@ class Fuzzer:
 
                 self._diff_tracker = DifferentialTracker()
                 print(f"[*] Differential: comparing against {self._diff_target}")
-                ga_path = self.corpus_dir / "ga.json"
-                if self.resume and ga_path.exists():
-                    self.ga.load(ga_path)
-                    print(f"[*] GA: loaded state from {ga_path} (gen={self.ga.generation})")
+                ga_data = self._state_store.get("ga")
+                if self.resume and ga_data is not None:
+                    self.ga.from_dict(ga_data)
+                    print(f"[*] GA: loaded state from state store (gen={self.ga.generation})")
                 print(
                     f"[*] GA: pop_size={self.ga.pop_size}, "
                     f"gen_size={self.ga.generation_size}, "
@@ -3605,10 +3611,10 @@ class Fuzzer:
                     speciation_threshold=self._ga_speciation_threshold,
                 )
                 self.qea.initialize(self.corpus, self._edge_tracker)
-                qea_path = self.corpus_dir / "qea.json"
-                if self.resume and qea_path.exists():
-                    self.qea.load(qea_path)
-                    print(f"[*] QEA: loaded state from {qea_path} (gen={self.qea.generation})")
+                qea_data = self._state_store.get("qea")
+                if self.resume and qea_data is not None:
+                    self.qea.from_dict(qea_data)
+                    print(f"[*] QEA: loaded state from state store (gen={self.qea.generation})")
                 print(
                     f"[*] QEA: pop_size={self.qea.pop_size}, "
                     f"gen_size={self.qea.generation_size}, "
@@ -3787,25 +3793,19 @@ class Fuzzer:
         self._dump_stats()
         self._dump_coverage_report()
         if self.markov.is_trained():
-            self.markov.save(str(self._markov_path))
+            self._state_store.set("markov", self.markov.to_dict())
         if self._use_mi and self._mi:
-            self._mi.save(str(self._mi_path))
-        with contextlib.suppress(OSError):
-            self._crash_mi_path.write_text(json.dumps(self._crash_mi.save(), separators=(",", ":")))
-        with contextlib.suppress(OSError):
-            self._length_tracker_path.write_text(
-                json.dumps(self._length_tracker.save(), separators=(",", ":"))
-            )
+            self._state_store.set("mi", self._mi.to_dict())
+        self._state_store.set("crash_mi", self._crash_mi.save())
+        self._state_store.set("length_tracker", self._length_tracker.save())
         self._flush_pending_minimize()
-        self._save_state()
         if self.ga:
-            ga_path = self.corpus_dir / "ga.json"
-            self.ga.save(ga_path)
-            print(f"[*] GA: saved state to {ga_path} (gen={self.ga.generation})")
+            self._state_store.set("ga", self.ga.to_dict())
+            print(f"[*] GA: saved state (gen={self.ga.generation})")
         if self.qea:
-            qea_path = self.corpus_dir / "qea.json"
-            self.qea.save(qea_path)
-            print(f"[*] QEA: saved state to {qea_path} (gen={self.qea.generation})")
+            self._state_store.set("qea", self.qea.to_dict())
+            print(f"[*] QEA: saved state (gen={self.qea.generation})")
+        self._save_state()
         if self._ablation_file:
             self._ablation_file.flush()
             self._ablation_file.close()

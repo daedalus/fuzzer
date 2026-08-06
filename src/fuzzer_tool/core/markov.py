@@ -321,8 +321,31 @@ class MarkovChain:
             js_values.append(0.5 * kl(p_dist, m) + 0.5 * kl(q_dist, m))
         return sum(js_values) / len(js_values) if js_values else 0.0
 
+    def to_dict(self) -> dict:
+        """Serialize chain state to a dict (for StateStore pickle)."""
+        return {
+            "order": self.order,
+            "smoothing": self.smoothing,
+            "contexts_seen": self._contexts_seen,
+            "transitions": {ctx.hex(): dict(counts) for ctx, counts in self.transitions.items()},
+            "global_freq": dict(self._global_freq),
+        }
+
+    def from_dict(self, data: dict) -> None:
+        """Restore chain state from a serialized dict."""
+        self.order = data.get("order", self.order)
+        self.smoothing = data.get("smoothing", self.smoothing)
+        self._contexts_seen = data.get("contexts_seen", 0)
+        self.transitions = collections.defaultdict(collections.Counter)
+        for ctx_hex, counts in data.get("transitions", {}).items():
+            ctx = bytes.fromhex(ctx_hex)
+            self.transitions[ctx] = collections.Counter({int(k): v for k, v in counts.items()})
+        self._global_freq = collections.Counter(
+            {int(k): v for k, v in data.get("global_freq", {}).items()}
+        )
+
     def save(self, path: str) -> bool:
-        """Save chain state to a JSON file.
+        """Save chain state to a JSON file (legacy interface).
 
         Args:
             path: File path to write.
@@ -330,16 +353,9 @@ class MarkovChain:
         Returns:
             True on success.
         """
-        data = {
-            "order": self.order,
-            "smoothing": self.smoothing,
-            "contexts_seen": self._contexts_seen,
-            "transitions": {ctx.hex(): dict(counts) for ctx, counts in self.transitions.items()},
-            "global_freq": dict(self._global_freq),
-        }
         try:
             with open(path, "w") as f:
-                json.dump(data, f, separators=(",", ":"))
+                json.dump(self.to_dict(), f, separators=(",", ":"))
             log.info("Markov chain saved: %s (%d contexts)", path, self._contexts_seen)
             return True
         except OSError as e:
@@ -361,17 +377,7 @@ class MarkovChain:
         except (OSError, json.JSONDecodeError) as e:
             log.debug("Failed to load Markov chain: %s", e)
             return False
-
-        self.order = data.get("order", self.order)
-        self.smoothing = data.get("smoothing", self.smoothing)
-        self._contexts_seen = data.get("contexts_seen", 0)
-        self.transitions = collections.defaultdict(collections.Counter)
-        for ctx_hex, counts in data.get("transitions", {}).items():
-            ctx = bytes.fromhex(ctx_hex)
-            self.transitions[ctx] = collections.Counter({int(k): v for k, v in counts.items()})
-        self._global_freq = collections.Counter(
-            {int(k): v for k, v in data.get("global_freq", {}).items()}
-        )
+        self.from_dict(data)
         log.info("Markov chain loaded: %s (%d contexts)", path, self._contexts_seen)
         return True
 
@@ -526,8 +532,8 @@ class MarkovEnsemble:
         )
         return any(results)
 
-    def save(self, path: str) -> bool:
-        """Save all chains to a JSON file."""
+    def to_dict(self) -> dict:
+        """Serialize all chains to a dict (for StateStore pickle)."""
         data = {
             "orders": self.orders,
             "blend": self.blend,
@@ -543,27 +549,13 @@ class MarkovEnsemble:
                 },
                 "global_freq": dict(chain._global_freq),
             }
-        try:
-            with open(path, "w") as f:
-                json.dump(data, f, separators=(",", ":"))
-            log.info("Markov ensemble saved: %s (%d orders)", path, len(self.chains))
-            return True
-        except OSError as e:
-            log.warning("Failed to save Markov ensemble: %s", e)
-            return False
+        return data
 
-    def load(self, path: str) -> bool:
-        """Load ensemble state from a JSON file.
+    def from_dict(self, data: dict) -> None:
+        """Restore ensemble state from a serialized dict.
 
         Handles both legacy single-chain format and ensemble format.
         """
-        try:
-            with open(path) as f:
-                data = json.load(f)
-        except (OSError, json.JSONDecodeError) as e:
-            log.warning("Failed to load Markov ensemble: %s", e)
-            return False
-
         # Detect format: ensemble has "chains" key, legacy has "transitions"
         if "chains" in data:
             # Ensemble format
@@ -599,6 +591,26 @@ class MarkovEnsemble:
             self.order = chain.order
             self.transitions = chain.transitions
 
+    def save(self, path: str) -> bool:
+        """Save all chains to a JSON file (legacy interface)."""
+        try:
+            with open(path, "w") as f:
+                json.dump(self.to_dict(), f, separators=(",", ":"))
+            log.info("Markov ensemble saved: %s (%d orders)", path, len(self.chains))
+            return True
+        except OSError as e:
+            log.warning("Failed to save Markov ensemble: %s", e)
+            return False
+
+    def load(self, path: str) -> bool:
+        """Load ensemble state from a JSON file. Handles legacy format."""
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            log.warning("Failed to load Markov ensemble: %s", e)
+            return False
+        self.from_dict(data)
         total_ctx = sum(c._contexts_seen for c in self.chains.values())
         log.info(
             "Markov ensemble loaded: %s (%d orders, %d total contexts)",

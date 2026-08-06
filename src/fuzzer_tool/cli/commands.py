@@ -489,6 +489,7 @@ def cmd_fuzz(args):
         mod_solving=getattr(args, "mod_solving", "heuristic"),
         chi2_operator_interval=getattr(args, "chi2_operator_interval", 0),
         quiet_stats=getattr(args, "profile_hotpath", False),
+        no_save_state=getattr(args, "no_save_state", False),
     )
     fuzzer.invocation = " ".join(sys.argv)
     if getattr(args, "profile_hotpath", False):
@@ -799,7 +800,6 @@ def cmd_rank(args):
     """Rank corpus seeds by interestingness."""
     _validate_target(args.target)
     import hashlib
-    import json
     import math
     import time
 
@@ -807,14 +807,15 @@ def cmd_rank(args):
     from fuzzer_tool.core.bloom import BloomFilter
     from fuzzer_tool.core.edge_tracker import EdgeTracker
     from fuzzer_tool.core.elf import estimate_map_size
+    from fuzzer_tool.core.state_store import StateStore
 
     corpus_dir = Path(args.corpus)
     if not corpus_dir.is_dir():
         print(f"[-] Corpus not found: {corpus_dir}", file=sys.stderr)
         return 1
 
-    state_path = corpus_dir / "state.json"
-    edge_path = corpus_dir / "edge_tracker.json"
+    store = StateStore(corpus_dir)
+    store.load()
 
     bloom = BloomFilter(capacity=100_000)
     corpus, seen_hashes, irreplaceable_hashes = load_corpus(corpus_dir, bloom)
@@ -824,29 +825,27 @@ def cmd_rank(args):
 
     map_size = estimate_map_size(args.target)
     et = EdgeTracker(map_size=map_size)
-    if edge_path.exists():
-        et.load(str(edge_path))
+    et_data = store.get("edge_tracker")
+    if et_data is not None:
+        et.from_dict(et_data)
 
-    # Load seed metadata from state.json
+    # Load seed metadata from state store
     seed_meta = {}
     now = time.time()
-    if state_path.exists():
-        try:
-            state = json.loads(state_path.read_text())
-            saved = state.get("seed_meta", {})
-            for seed in corpus:
-                key = seed.hex()
-                if key in saved:
-                    sm = saved[key]
-                    seed_meta[seed] = {
-                        "fuzz_count": sm.get("fuzz_count", 0),
-                        "coverage_edges": sm.get("coverage_edges", 0),
-                        "added_at": sm.get("added_at", now),
-                    }
-                else:
-                    seed_meta[seed] = {"fuzz_count": 0, "coverage_edges": 0, "added_at": now}
-        except (OSError, json.JSONDecodeError):
-            pass
+    state = store.get("corpus")
+    if state:
+        saved = state.get("seed_meta", {})
+        for seed in corpus:
+            key = seed.hex()
+            if key in saved:
+                sm = saved[key]
+                seed_meta[seed] = {
+                    "fuzz_count": sm.get("fuzz_count", 0),
+                    "coverage_edges": sm.get("coverage_edges", 0),
+                    "added_at": sm.get("added_at", now),
+                }
+            else:
+                seed_meta[seed] = {"fuzz_count": 0, "coverage_edges": 0, "added_at": now}
 
     if not seed_meta:
         for seed in corpus:
@@ -1773,6 +1772,11 @@ def main() -> int:
         "--resume",
         action="store_true",
         help="Resume from saved fuzzer state (corpus, stats, edge tracker)",
+    )
+    fuzz_parser.add_argument(
+        "--no-save-state",
+        action="store_true",
+        help="Do not persist fuzzer state at exit (no state.pkl.gz written)",
     )
     fuzz_parser.add_argument(
         "--trace",

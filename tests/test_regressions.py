@@ -1389,10 +1389,7 @@ class TestEloDecayInitIndependentOfChi2:
             "Elo decay interval must be initialized when elo=True regardless of chi2 interval"
         )
         assert f._elo_decay_counter == 0
-        assert f._elo_path == Path(f.corpus_dir) / "elo.json", (
-            "Elo state path must be set when elo=True regardless of chi2 interval"
-        )
-        # Strategy pre-registration must also run without chi2 (elo.json save/load
+        # Strategy pre-registration must also run without chi2 (elo save/load
         # and arbitration depend on it)
         assert f._elo._strategy_match_count.get("bandit") == 0
         assert f._elo._strategy_match_count.get("seed_ga") == 0
@@ -1401,7 +1398,6 @@ class TestEloDecayInitIndependentOfChi2:
         f = self._make_fuzzer(elo=True, chi2_operator_interval=500)
         assert f._elo_decay_interval == 100
         assert f._elo_decay_counter == 0
-        assert f._elo_path == Path(f.corpus_dir) / "elo.json"
 
     def test_decay_counter_increments_and_resets(self):
         f = self._make_fuzzer(elo=True)
@@ -1468,8 +1464,7 @@ class TestResumeWithSensitivityJson:
         f = self._make_fuzzer()
         f.save_to_corpus(b"RESUME" * 8)
         f._corpus_manager.save_state()
-        assert (f.corpus_dir / "sensitivity.json").exists()
-        # This crashed with AttributeError before the fix.
+        assert (f.corpus_dir / "state.pkl.gz").exists()
         f2 = self._make_fuzzer(
             resume=True, corpus_dir=str(f.corpus_dir), crashes_dir=str(f.crashes_dir)
         )

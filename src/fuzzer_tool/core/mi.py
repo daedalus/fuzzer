@@ -386,11 +386,9 @@ class MutualInformationTracker:
         mi_b = self.mi(pos_b)
         return joint - mi_a - mi_b
 
-    def save(self, path: str) -> bool:
-        """Save tracker state to JSON."""
-        import json
-
-        data = {
+    def to_dict(self) -> dict:
+        """Serialize tracker state to a dict (for StateStore pickle)."""
+        return {
             "max_positions": self.max_positions,
             "min_observations": self.min_observations,
             "total_observations": self.total_observations,
@@ -408,23 +406,9 @@ class MutualInformationTracker:
                 for pos, byte_vals in self.joint.items()
             },
         }
-        try:
-            with open(path, "w") as f:
-                json.dump(data, f, separators=(",", ":"))
-            return True
-        except OSError:
-            return False
 
-    def load(self, path: str) -> bool:
-        """Load tracker state from JSON."""
-        import json
-
-        try:
-            with open(path) as f:
-                data = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            return False
-
+    def from_dict(self, data: dict) -> None:
+        """Restore tracker state from a serialized dict."""
         self.max_positions = data.get("max_positions", self.max_positions)
         self.min_observations = data.get("min_observations", self.min_observations)
         self.total_observations = data.get("total_observations", 0)
@@ -433,7 +417,6 @@ class MutualInformationTracker:
         )
         em = data.get("edge_marginal", [])
         if isinstance(em, dict):
-            # Old format: {"edge_index": count, ...}
             max_idx = max((int(k) for k in em), default=-1) + 1 if em else 0
             self.edge_marginal = array("Q", [0]) * max_idx
             for k, v in em.items():
@@ -441,7 +424,6 @@ class MutualInformationTracker:
         else:
             self.edge_marginal = array("Q", em)
         self._edge_marginal_size = len(self.edge_marginal)
-        # The array was reassigned: any cached view points at the old buffer.
         self._edge_marginal_view = None
         self._edge_marginal_view_len = -1
         self.byte_marginal = defaultdict(
@@ -455,7 +437,6 @@ class MutualInformationTracker:
         if raw_joint:
             first_val = next(iter(raw_joint.values()))
             if isinstance(first_val, dict):
-                # New format: {pos: {bv: {edge: count}}}
                 self.joint = defaultdict(
                     lambda: defaultdict(lambda: defaultdict(int)),
                     {
@@ -470,7 +451,6 @@ class MutualInformationTracker:
                     },
                 )
             else:
-                # Flat format from previous iteration: {key: count}
                 self.joint = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
                 for k, v in raw_joint.items():
                     key = int(k)
@@ -478,11 +458,31 @@ class MutualInformationTracker:
                     bv = (key >> 8) & 0xFF
                     edge = key & 0xFF
                     self.joint[pos][bv][edge] = v
-        # Recount cells and trim loaded state that exceeds the budget so a
-        # legacy oversized mi.json cannot re-trigger the memory blowup.
         self._joint_cells = sum(
             len(edges) for pos_vals in self.joint.values() for edges in pos_vals.values()
         )
         while self._joint_cells > MAX_JOINT_CELLS:
             self._evict_least_observed()
+
+    def save(self, path: str) -> bool:
+        """Save tracker state to JSON (legacy interface)."""
+        import json
+
+        try:
+            with open(path, "w") as f:
+                json.dump(self.to_dict(), f, separators=(",", ":"))
+            return True
+        except OSError:
+            return False
+
+    def load(self, path: str) -> bool:
+        """Load tracker state from JSON (legacy interface)."""
+        import json
+
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return False
+        self.from_dict(data)
         return True

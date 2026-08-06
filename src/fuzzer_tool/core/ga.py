@@ -469,24 +469,31 @@ class GALifecycle:
         else:
             self.population.append(ind)
 
-    def save(self, path: Path):
-        """Persist GA state to disk."""
-        state = {
+    def to_dict(self) -> dict:
+        """Serialize GA state to a dict (for StateStore pickle)."""
+        return {
             "generation": self.generation,
             "best_fitness": self.best_fitness,
             "avg_fitness": self.avg_fitness,
             "species_count": self.species_count,
             "population": [ind.to_dict() for ind in self.population],
         }
-        path.write_text(json.dumps(state, indent=2))
+
+    def from_dict(self, data: dict) -> None:
+        """Restore GA state from a serialized dict."""
+        self.generation = data.get("generation", 0)
+        self.best_fitness = data.get("best_fitness", 0.0)
+        self.avg_fitness = data.get("avg_fitness", 0.0)
+        self.species_count = data.get("species_count", 0)
+        self.population = [Individual.from_dict(d) for d in data.get("population", [])]
+
+    def save(self, path: Path):
+        """Persist GA state to disk (legacy interface)."""
+        path.write_text(json.dumps(self.to_dict(), indent=2))
 
     def load(self, path: Path):
-        """Restore GA state from disk."""
+        """Restore GA state from disk (legacy interface)."""
         if not path.exists():
             return
         state = json.loads(path.read_text())
-        self.generation = state.get("generation", 0)
-        self.best_fitness = state.get("best_fitness", 0.0)
-        self.avg_fitness = state.get("avg_fitness", 0.0)
-        self.species_count = state.get("species_count", 0)
-        self.population = [Individual.from_dict(d) for d in state.get("population", [])]
+        self.from_dict(state)

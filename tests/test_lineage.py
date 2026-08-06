@@ -432,7 +432,7 @@ class TestLineageRecording:
         assert meta["parent_ops"] == ["bitflip", "havoc"]
         assert meta["parent_sites"] == [3, 7]
         assert meta["new_edge_count"] == 5
-        assert os.path.exists(f.corpus_dir / "state.json")
+        assert os.path.exists(f.corpus_dir / "state.pkl.gz")
 
     def test_state_roundtrip_missing_fields_have_fallbacks(self):
         f = _mk_fuzzer(lineage=True)

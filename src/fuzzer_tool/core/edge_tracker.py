@@ -2161,9 +2161,9 @@ class EdgeTracker:
             redundant.update(dominated_list)
         return sorted(redundant)
 
-    def save(self, path: str) -> bool:
-        """Save tracker state to JSON."""
-        data = {
+    def to_dict(self) -> dict:
+        """Serialize tracker state to a dict (for StateStore pickle)."""
+        return {
             "map_size": self.map_size,
             "morris_mode": self._morris_mode,
             "cumulative_edges": sorted(self.cumulative_edges),
@@ -2190,28 +2190,9 @@ class EdgeTracker:
             "seed_hw_branches": self.seed_hw_branches,
             "seed_hw_branch_misses": self.seed_hw_branch_misses,
         }
-        try:
-            with open(path, "w") as f:
-                json.dump(data, f, separators=(",", ":"))
-            log.info(
-                "Edge tracker saved: %s (%d seeds, %d edges)",
-                path,
-                len(self.seed_edges),
-                len(self.cumulative_edges),
-            )
-            return True
-        except OSError as e:
-            log.warning("Failed to save edge tracker: %s", e)
-            return False
 
-    def load(self, path: str) -> bool:
-        """Load tracker state from JSON."""
-        try:
-            with open(path) as f:
-                data = json.load(f)
-        except (OSError, json.JSONDecodeError) as e:
-            log.debug("Failed to load edge tracker: %s", e)
-            return False
+    def from_dict(self, data: dict) -> None:
+        """Restore tracker state from a serialized dict."""
         self.map_size = data.get("map_size", self.map_size)
         self._morris_mode = data.get("morris_mode", self._morris_mode)
         self.cumulative_edges = set(data.get("cumulative_edges", []))
@@ -2223,20 +2204,16 @@ class EdgeTracker:
         self._global_edge_hits = {int(e): c for e, c in data.get("global_edge_hits", {}).items()}
         self._spectrum_dirty = True
         self._aggregate_cache = None
-        # Restore incremental aggregate totals
         self._aggregate_totals = {int(e): c for e, c in data.get("aggregate_totals", {}).items()}
         self._aggregate_total_count = data.get("aggregate_total_count", 0)
-        # If no saved totals, rebuild from seed_hit_counts (legacy state files)
         if not self._aggregate_totals and self.seed_hit_counts:
             for hc in self.seed_hit_counts.values():
                 for edge, count in hc.items():
                     self._aggregate_totals[edge] = self._aggregate_totals.get(edge, 0) + count
                     self._aggregate_total_count += count
-        # Restore edge traces
         self.seed_edge_traces = {
             k: {(e[0], e[1]) for e in v} for k, v in data.get("edge_traces", {}).items()
         }
-        # Restore temporal tracking
         self._edge_first_seen = {int(e): c for e, c in data.get("edge_first_seen", {}).items()}
         self._edge_last_seen = {int(e): c for e, c in data.get("edge_last_seen", {}).items()}
         tl = data.get("coverage_timeline", [])
@@ -2261,10 +2238,35 @@ class EdgeTracker:
             for k, sig in saved_sigs.items():
                 self._minhash.add(k, sig)
         else:
-            # Rebuild from seed_edges for older state files
             for k, edges in self.seed_edges.items():
                 sig = self._minhash.compute_signature(edges)
                 self._minhash.add(k, sig)
+
+    def save(self, path: str) -> bool:
+        """Save tracker state to JSON (legacy interface)."""
+        try:
+            with open(path, "w") as f:
+                json.dump(self.to_dict(), f, separators=(",", ":"))
+            log.info(
+                "Edge tracker saved: %s (%d seeds, %d edges)",
+                path,
+                len(self.seed_edges),
+                len(self.cumulative_edges),
+            )
+            return True
+        except OSError as e:
+            log.warning("Failed to save edge tracker: %s", e)
+            return False
+
+    def load(self, path: str) -> bool:
+        """Load tracker state from JSON (legacy interface)."""
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            log.debug("Failed to load edge tracker: %s", e)
+            return False
+        self.from_dict(data)
         log.info(
             "Edge tracker loaded: %s (%d seeds, %d edges)",
             path,

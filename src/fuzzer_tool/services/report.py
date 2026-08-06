@@ -252,22 +252,22 @@ def _coverage_analysis(f) -> str:
             addr = bucket * 256
             lines.append(f"    0x{addr:04x}-0x{addr + 255:04x}: {count:3d} edges")
 
-    # Coverage growth timeline from edge tracker
-    et_path = Path(f.corpus_dir) / "edge_tracker.json"
-    if et_path.exists():
-        with open(et_path) as fobj:
-            et = json.load(fobj)
-        cum = et.get("cumulative_edges", [])
-        if cum:
-            # Show coverage at milestones
-            total = len(cum)
-            milestones = [100, 200, 500, 1000, 2000, 5000, 10000]
-            lines.append("  Coverage growth:")
-            shown = set()
-            for m in milestones:
-                if m <= total:
-                    lines.append(f"    iter {m:>5d}: {m} edges")
-                    shown.add(m)
+    # Coverage growth timeline from edge tracker (via StateStore)
+    from fuzzer_tool.core.state_store import StateStore
+
+    store = StateStore(f.corpus_dir)
+    et_data = store.get("edge_tracker")
+    cum = et_data.get("cumulative_edges", []) if et_data else []
+    if cum:
+        # Show coverage at milestones
+        total = len(cum)
+        milestones = [100, 200, 500, 1000, 2000, 5000, 10000]
+        lines.append("  Coverage growth:")
+        shown = set()
+        for m in milestones:
+            if m <= total:
+                lines.append(f"    iter {m:>5d}: {m} edges")
+                shown.add(m)
             if total not in shown:
                 lines.append(f"    iter {total:>5d}: {total} edges (final)")
 

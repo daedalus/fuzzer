@@ -3,15 +3,13 @@
 Deep details of subsystems that only matter when you are working inside them. The
 entry-point AGENTS.md carries only the summary. Open this file when working on:
 coverage/SHM internals, the AFL shim, `--no-shm`/`--deep-coverage` paths, the Elo
-meta-scheduler, or state persistence (`state.json`, `edge_tracker.json`, `markov.json`).
+meta-scheduler, or state persistence (`state.pkl.gz` via `core/state_store.py`).
 
 ## State Persistence
 
-Fuzzer state is saved to `{corpus_dir}/state.json` on shutdown. Use `--resume` to continue:
+Fuzzer state is saved to `{corpus_dir}/state.pkl.gz` on shutdown via `core/state_store.py:StateStore`. Use `--resume` to continue. Pass `--no-save-state` to skip writing the file entirely.
 
-- `state.json` — exec counts, crash sigs, op stats, seed metadata
-- `edge_tracker.json` — per-seed edge coverage
-- `markov.json` — Markov chain transitions
+Sections: `corpus` (exec counts, crash sigs, op stats, seed metadata), `edge_tracker`, `markov`, `mi`, `elo`, `ga`, `qea`, `crash_mi`, `sensitivity`, `length_tracker`, `seed_quality`. Legacy per-component JSON files are auto-migrated on first `--resume` and cleaned up via `cleanup_legacy()`.
 
 Reload paths must skip re-derivation (see "State & double-counting" in docs/refs/bug-classes.md).
 
@@ -40,7 +38,7 @@ struct __afl_entry { uint32_t edge_id; uint32_t count; };
 
 ## Markov Persistence
 
-- Markov chain saved to `markov.json` on exit
+- Markov chain saved to `markov` section in `state.pkl.gz` on exit
 - Loaded on init; skip retrain if loaded to avoid double-counting
 - Transitions accumulate across sessions
 

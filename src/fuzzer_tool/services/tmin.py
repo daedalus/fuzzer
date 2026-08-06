@@ -1,6 +1,5 @@
 """Crash minimizer: binary-search for smallest input that still triggers a crash."""
 
-import json
 import os
 import shutil
 import sys
@@ -8,6 +7,7 @@ from pathlib import Path
 
 from fuzzer_tool.adapters.filesystem import hash_data, rehydrate_by_hash
 from fuzzer_tool.core.mutations import minimize_bytes
+from fuzzer_tool.core.state_store import StateStore
 
 
 def _lineage_candidate(
@@ -19,7 +19,7 @@ def _lineage_candidate(
     """Replay the mutation lineage chain to find a smaller crashing candidate.
 
     Reads the crash sidecar's ``parent_seed`` hash, walks the parent-key
-    chain recorded in the corpus ``state.json`` seed_meta, rehydrates each
+    chain recorded in the corpus state store seed_meta, rehydrates each
     ancestor's bytes from disk (full seeds and pruned/delta records), and
     tests each from the root down against the pinned crash signature.
 
@@ -38,12 +38,9 @@ def _lineage_candidate(
     if not parent_hash:
         return None
 
-    state_path = Path(corpus_dir) / "state.json"
-    if not state_path.is_file():
-        return None
-    try:
-        state = json.loads(state_path.read_text())
-    except (OSError, json.JSONDecodeError):
+    store = StateStore(corpus_dir)
+    state = store.get("corpus")
+    if not state:
         return None
     seed_meta = state.get("seed_meta", {})
     if not isinstance(seed_meta, dict):

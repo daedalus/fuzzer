@@ -13,10 +13,10 @@ on disk, array in memory). Verifies:
 
 from __future__ import annotations
 
-import json
 from array import array
 from types import SimpleNamespace
 
+from fuzzer_tool.core.state_store import StateStore
 from fuzzer_tool.services.corpus_manager import CorpusManager
 
 
@@ -25,6 +25,12 @@ class _StubTracker:
         pass
 
     def load(self, path):
+        pass
+
+    def to_dict(self):
+        return {}
+
+    def from_dict(self, data):
         pass
 
 
@@ -40,13 +46,23 @@ class _StubCrashMi:
     def save(self):
         return {}
 
+    def load(self, data):
+        pass
+
+
+class _StubSeedQuality:
+    def state_dict(self):
+        return {}
+
+    def load_state_dict(self, data):
+        pass
+
 
 def _make_fuzzer(tmp_path, history):
+    store = StateStore(tmp_path)
     return SimpleNamespace(
         corpus_dir=tmp_path,
-        _state_path=tmp_path / "state.json",
-        _edge_tracker_path=tmp_path / "edge_tracker.json",
-        _crash_mi_path=tmp_path / "crash_mi.json",
+        _state_store=store,
         corpus=[],
         seed_meta={},
         map_size=8192,
@@ -70,12 +86,18 @@ def _make_fuzzer(tmp_path, history):
 
 def test_init_builds_array():
     """CorpusManager.init_seed_metadata constructs an array('I'), not a list."""
-    f = SimpleNamespace(corpus_dir=None, corpus=[b"a"], map_size=8192, resume=False)
-    # corpus_dir is used for a mkdir; give it a real temp dir.
     import tempfile
+    from pathlib import Path
 
     with tempfile.TemporaryDirectory() as d:
-        f.corpus_dir = __import__("pathlib").Path(d)
+        tmp = Path(d)
+        f = SimpleNamespace(
+            corpus_dir=tmp,
+            _state_store=StateStore(tmp),
+            corpus=[b"a"],
+            map_size=8192,
+            resume=False,
+        )
         CorpusManager(f).init_seed_metadata()
         assert isinstance(f._corpus_size_history, array)
         assert f._corpus_size_history.typecode == "I"
@@ -93,7 +115,7 @@ def test_trim_keeps_last_500():
 
 
 def test_save_load_round_trip():
-    """save_state writes a plain JSON list; load_state rebuilds an array('I')."""
+    """save_state writes corpus history; load_state rebuilds an array('I')."""
     import tempfile
     from pathlib import Path
 
@@ -104,9 +126,9 @@ def test_save_load_round_trip():
         cm = CorpusManager(f)
         cm.save_state()
 
-        raw = json.loads((tmp / "state.json").read_text())
         expected = sizes[-500:]
-        # On-disk format is a plain list (array is not JSON-serializable).
+        # StateStore pickle keeps the list as-is (last 500 entries).
+        raw = f._state_store.get("corpus")
         assert raw["corpus_size_history"] == expected
         assert isinstance(raw["corpus_size_history"], list)
 
@@ -127,14 +149,13 @@ def test_load_state_sets_session_baselines():
     interval counter so display and the Kalman filter measure only this
     process.
     """
-    import json
     import tempfile
     from pathlib import Path
 
     with tempfile.TemporaryDirectory() as d:
         tmp = Path(d)
         f = _make_fuzzer(tmp, array("I", [1, 2, 3]))
-        (tmp / "state.json").write_text(json.dumps({"exec_count": 2_335_238}))
+        f._state_store.set("corpus", {"exec_count": 2_335_238})
         cm = CorpusManager(f)
         cm.load_state()
         assert f.exec_count == 2_335_238

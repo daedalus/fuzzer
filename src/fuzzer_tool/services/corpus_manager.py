@@ -12,9 +12,7 @@ Extracted from Fuzzer class (~lines 648-783, 1845-2231). Contains:
 Signal name mapping for crash return codes.
 """
 
-import contextlib
 import hashlib
-import json
 import logging
 import os
 import shutil
@@ -109,8 +107,6 @@ class CorpusManager:
 
     def init_seed_metadata(self):
         f = self.f
-        f._state_path = f.corpus_dir / "state.json"
-        f._edge_tracker_path = f.corpus_dir / "edge_tracker.json"
         now = time.time()
         f.seed_meta: dict[bytes, dict] = {}
         for seed in f.corpus:
@@ -158,7 +154,6 @@ class CorpusManager:
         }
         for seed, meta in f.seed_meta.items():
             key = seed.hex()
-            # Skip corrupted/bloated keys (tracker JSON loaded as seed)
             if len(key) >= 256:
                 continue
             rm = meta.get("redqueen_matches", [])
@@ -181,39 +176,23 @@ class CorpusManager:
                 "coverage_edges_baseline": meta.get("coverage_edges_baseline", 0),
                 "record_stride": meta.get("record_stride", None),
             }
-        try:
-            f._state_path.write_text(json.dumps(state, separators=(",", ":")))
-        except OSError as e:
-            log.debug("Failed to save state: %s", e)
-        f._edge_tracker.save(str(f._edge_tracker_path))
+        store = f._state_store
+        store.set("corpus", state)
+        store.set("edge_tracker", f._edge_tracker.to_dict())
         if f._use_elo and f._elo:
-            f._elo.save(str(f._elo_path))
-        sens_path = f.corpus_dir / "sensitivity.json"
-        with contextlib.suppress(OSError):
-            sens_path.write_text(json.dumps(f._sensitivity.save(), separators=(",", ":")))
-        with contextlib.suppress(OSError):
-            f._crash_mi_path.write_text(json.dumps(f._crash_mi.save(), separators=(",", ":")))
-        # Persist Bayesian seed quality posteriors
+            store.set("elo", f._elo.to_dict())
+        store.set("sensitivity", f._sensitivity.save())
+        store.set("crash_mi", f._crash_mi.save())
         if hasattr(f, "_seed_quality"):
-            sq_path = f.corpus_dir / "seed_quality.json"
-            with contextlib.suppress(OSError):
-                sq_path.write_text(json.dumps(f._seed_quality.state_dict(), separators=(",", ":")))
+            store.set("seed_quality", f._seed_quality.state_dict())
+        store.save()
 
     def load_state(self):
         f = self.f
-        if not f._state_path.exists():
-            return
-        try:
-            state = json.loads(f._state_path.read_text())
-        except (OSError, json.JSONDecodeError) as e:
-            log.debug("Failed to load state: %s", e)
+        state = f._state_store.get("corpus")
+        if not state:
             return
         f.exec_count = state.get("exec_count", 0)
-        # exec_count is cumulative across sessions, but EPS display and the
-        # interval-rate Kalman filter must measure only this process —
-        # otherwise a resumed run reports absurd rates (e.g. 2.3M execs over
-        # 1s of fresh wall time).  Session-local baselines, set before the
-        # seed-replay loop and the first stats tick.
         f._resume_baseline_exec = f.exec_count
         f._last_eps_count = f.exec_count
         f.crash_count = state.get("crash_count", 0)
@@ -226,8 +205,6 @@ class CorpusManager:
         f.op_edges = state.get("op_edges", {})
         f._corpus_size_history = array("I", state.get("corpus_size_history", []))
         saved_meta = state.get("seed_meta", {})
-        # Skip corrupted entries: seed keys should be hex hashes (< 256 chars),
-        # not full JSON blobs from tracker files loaded as corpus seeds.
         for seed in f.corpus:
             key = seed.hex()
             if key in saved_meta and len(key) < 256:
@@ -256,29 +233,25 @@ class CorpusManager:
                     f.seed_meta[seed]["redqueen_matches"] = [
                         (m[0], bytes.fromhex(m[1]), bytes.fromhex(m[2])) for m in rm_ser
                     ]
-        f._edge_tracker.load(str(f._edge_tracker_path))
+        et_data = f._state_store.get("edge_tracker")
+        if et_data is not None:
+            f._edge_tracker.from_dict(et_data)
         # Restore checksum learner state
         cl_data = state.get("checksum_learner")
         if cl_data and hasattr(f, "checksum_learner") and f.checksum_learner is not None:
             from fuzzer_tool.core.checksum_learner import ChecksumLearner
 
             f.checksum_learner = ChecksumLearner.from_dict(f, cl_data)
-        sens_path = f.corpus_dir / "sensitivity.json"
-        if sens_path.exists():
-            with contextlib.suppress(OSError, json.JSONDecodeError):
-                f._sensitivity.load(json.loads(sens_path.read_text()))
+        sens_data = f._state_store.get("sensitivity")
+        if sens_data is not None:
+            f._sensitivity.load(sens_data)
         if f.resume:
             print(
                 f"[*] Resumed: {f.exec_count} execs, {f.crash_count} crashes, {len(f.corpus)} seeds"
             )
-        # Restore Bayesian seed quality posteriors
-        sq_path = f.corpus_dir / "seed_quality.json"
-        if sq_path.exists() and hasattr(f, "_seed_quality"):
-            try:
-                sq_state = json.loads(sq_path.read_text())
-                f._seed_quality.load_state_dict(sq_state)
-            except (OSError, json.JSONDecodeError):
-                pass
+        sq_data = f._state_store.get("seed_quality")
+        if sq_data is not None and hasattr(f, "_seed_quality"):
+            f._seed_quality.load_state_dict(sq_data)
         log.info(
             "Fuzzer state loaded: execs=%d, crashes=%d, corpus=%d",
             f.exec_count,

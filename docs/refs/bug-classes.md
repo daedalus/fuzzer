@@ -46,7 +46,7 @@ widely-used return-value APIs, or test mocks.
 
 ## State & double-counting
 
-- **Persisted state must have exactly one source of truth.** If a value can either be reloaded from disk (`markov.json`, `edge_tracker.json`) or freshly re-derived by a normal-startup code path, the reload path must skip re-derivation — otherwise transition counts / edge stats double up silently across restarts.
+- **Persisted state must have exactly one source of truth.** If a value can either be reloaded from disk (`state.pkl.gz` via `StateStore.get("markov")`, `StateStore.get("edge_tracker")`) or freshly re-derived by a normal-startup code path, the reload path must skip re-derivation — otherwise transition counts / edge stats double up silently across restarts.
 - **Reduction and minimization must re-verify the specific property of interest, not just "did something happen."** Crash minimization (`tmin`) that only checks "does it still crash" can drift onto a different bug on a multi-bug target mid-delta-debugging. Pin the original crash signature up front and require every candidate to match it exactly.
 
 ## Testing

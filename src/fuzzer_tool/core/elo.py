@@ -456,12 +456,12 @@ class EloTracker:
         """Get current crash-specific Elo rating."""
         return self.crash_ratings.get(name, self.default_rating)
 
-    def save(self, path: str) -> bool:
-        """Save state to JSON."""
+    def to_dict(self) -> dict:
+        """Serialize state to a dict (for StateStore pickle)."""
         reward_moments_ser = {}
         for op, rm in self._reward_moments.items():
             reward_moments_ser[op] = rm.save()
-        data = {
+        return {
             "k_factor": self.k_factor,
             "default_rating": self.default_rating,
             "decay": self.decay,
@@ -475,24 +475,9 @@ class EloTracker:
             "strategy_match_count": self._strategy_match_count,
             "reward_moments": reward_moments_ser,
         }
-        try:
-            with open(path, "w") as f:
-                json.dump(data, f, separators=(",", ":"))
-            log.info("Elo tracker saved: %s (%d operators)", path, len(self.ratings))
-            return True
-        except OSError as e:
-            log.warning("Failed to save Elo tracker: %s", e)
-            return False
 
-    def load(self, path: str) -> bool:
-        """Load state from JSON."""
-        try:
-            with open(path) as f:
-                data = json.load(f)
-        except (OSError, json.JSONDecodeError) as e:
-            log.debug("Failed to load Elo tracker: %s", e)
-            return False
-
+    def from_dict(self, data: dict) -> None:
+        """Restore state from a serialized dict."""
         self.k_factor = data.get("k_factor", self.k_factor)
         self.default_rating = data.get("default_rating", self.default_rating)
         self.decay = data.get("decay", self.decay)
@@ -509,6 +494,27 @@ class EloTracker:
             rm = RunningMoments()
             rm.load(rm_data)
             self._reward_moments[op] = rm
+
+    def save(self, path: str) -> bool:
+        """Save state to JSON (legacy interface)."""
+        try:
+            with open(path, "w") as f:
+                json.dump(self.to_dict(), f, separators=(",", ":"))
+            log.info("Elo tracker saved: %s (%d operators)", path, len(self.ratings))
+            return True
+        except OSError as e:
+            log.warning("Failed to save Elo tracker: %s", e)
+            return False
+
+    def load(self, path: str) -> bool:
+        """Load state from JSON (legacy interface)."""
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            log.debug("Failed to load Elo tracker: %s", e)
+            return False
+        self.from_dict(data)
         log.info("Elo tracker loaded: %s (%d operators)", path, len(self.ratings))
         return True
 
@@ -850,9 +856,9 @@ class BayesianEloTracker:
         """Return the posterior mean for an operator."""
         return self.mu.get(name, self.initial_mu)
 
-    def save(self, path: str) -> bool:
-        """Save state to JSON."""
-        data = {
+    def to_dict(self) -> dict:
+        """Serialize state to a dict (for StateStore pickle)."""
+        return {
             "initial_mu": self.initial_mu,
             "initial_sigma": self.initial_sigma,
             "beta": self.beta,
@@ -867,24 +873,9 @@ class BayesianEloTracker:
             "prediction_errors": list(self._prediction_errors),
             "best_win_rate": list(self._best_win_rate),
         }
-        try:
-            with open(path, "w") as f:
-                json.dump(data, f, separators=(",", ":"))
-            log.info("BayesianElo tracker saved: %s (%d operators)", path, len(self.mu))
-            return True
-        except OSError as e:
-            log.warning("Failed to save BayesianElo tracker: %s", e)
-            return False
 
-    def load(self, path: str) -> bool:
-        """Load state from JSON."""
-        try:
-            with open(path) as f:
-                data = json.load(f)
-        except (OSError, json.JSONDecodeError) as e:
-            log.debug("Failed to load BayesianElo tracker: %s", e)
-            return False
-
+    def from_dict(self, data: dict) -> None:
+        """Restore state from a serialized dict."""
         self.initial_mu = data.get("initial_mu", self.initial_mu)
         self.initial_sigma = data.get("initial_sigma", self.initial_sigma)
         self.beta = data.get("beta", self.beta)
@@ -898,5 +889,26 @@ class BayesianEloTracker:
         self._strategy_match_count = data.get("strategy_match_count", {})
         self._prediction_errors = array("d", data.get("prediction_errors", []))
         self._best_win_rate = array("d", data.get("best_win_rate", []))
+
+    def save(self, path: str) -> bool:
+        """Save state to JSON (legacy interface)."""
+        try:
+            with open(path, "w") as f:
+                json.dump(self.to_dict(), f, separators=(",", ":"))
+            log.info("BayesianElo tracker saved: %s (%d operators)", path, len(self.mu))
+            return True
+        except OSError as e:
+            log.warning("Failed to save BayesianElo tracker: %s", e)
+            return False
+
+    def load(self, path: str) -> bool:
+        """Load state from JSON (legacy interface)."""
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            log.debug("Failed to load BayesianElo tracker: %s", e)
+            return False
+        self.from_dict(data)
         log.info("BayesianElo tracker loaded: %s (%d operators)", path, len(self.mu))
         return True

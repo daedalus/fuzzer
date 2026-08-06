@@ -593,29 +593,36 @@ class QEALifecycle:
 
     # ── Persistence ─────────────────────────────────────────────────
 
-    def save(self, path: Path):
-        """Persist QEA state to disk."""
-        state = {
+    def to_dict(self) -> dict:
+        """Serialize QEA state to a dict (for StateStore pickle)."""
+        return {
             "generation": self.generation,
             "best_fitness": self.best_fitness,
             "avg_fitness": self.avg_fitness,
             "species_count": self.species_count,
             "population": [ind.to_dict() for ind in self.population],
         }
+
+    def from_dict(self, data: dict) -> None:
+        """Restore QEA state from a serialized dict."""
+        self.generation = data.get("generation", 0)
+        self.best_fitness = data.get("best_fitness", 0.0)
+        self.avg_fitness = data.get("avg_fitness", 0.0)
+        self.species_count = data.get("species_count", 0)
+        self.population = [QEAIndividual.from_dict(d) for d in data.get("population", [])]
+
+    def save(self, path: Path):
+        """Persist QEA state to disk (legacy interface)."""
         # Compact separators: indent=2 roughly doubled the file for no
         # readability benefit (this is machine state, written every shutdown).
-        path.write_text(json.dumps(state, separators=(",", ":")))
+        path.write_text(json.dumps(self.to_dict(), separators=(",", ":")))
 
     def load(self, path: Path):
-        """Restore QEA state from disk."""
+        """Restore QEA state from disk (legacy interface)."""
         if not path.exists():
             return
         state = json.loads(path.read_text())
-        self.generation = state.get("generation", 0)
-        self.best_fitness = state.get("best_fitness", 0.0)
-        self.avg_fitness = state.get("avg_fitness", 0.0)
-        self.species_count = state.get("species_count", 0)
-        self.population = [QEAIndividual.from_dict(d) for d in state.get("population", [])]
+        self.from_dict(state)
 
     # ── Public helpers (compatibility) ──────────────────────────────
 

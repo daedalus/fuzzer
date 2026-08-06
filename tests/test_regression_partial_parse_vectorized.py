@@ -86,7 +86,7 @@ def reference_parse(data: bytes) -> _Node:
     return root
 
 
-ALPHABET = b'abcXY({[")]}\'\x00\xff'
+ALPHABET = b"abcXY({[\")]}'\x00\xff"
 
 
 class TestEquivalence:
@@ -139,7 +139,7 @@ class TestRoundTrip:
 
     def test_plain_bytes_round_trip_exactly(self):
         rng = random.Random(3)
-        plain = bytes(b for b in range(256) if _DELIM_CLOSE[b] == 0xFF and b not in b'")]}\'')
+        plain = bytes(b for b in range(256) if _DELIM_CLOSE[b] == 0xFF and b not in b"\")]}'")
         for size in (1, 63, 64, 65, 512, 4096):
             data = bytes(rng.choice(plain) for _ in range(size))
             assert partial_parse(data).flatten() == data
