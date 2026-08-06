@@ -10,6 +10,8 @@ honest uncertainty quantification.
 import bisect
 import collections
 
+import numpy as _np
+
 from fuzzer_tool.core.running_stats import RunningMoments
 
 # Skewness above this value flags the input family as "tail-risk":
@@ -88,7 +90,6 @@ class ExecutionTimeTracker:
         """
         if not self._sorted:
             return 0.0
-        import numpy as _np
 
         arr = _np.asarray(self._sorted, dtype=_np.float64)
         n = len(arr)
@@ -100,7 +101,9 @@ class ExecutionTimeTracker:
             ramp = _np.arange(1, n + 1) / n
             self._crps_ramp_cache[n] = ramp
         cd = ramp - (arr >= observation)
-        crps = float(_np.sum(cd[:-1] * cd[:-1] * _np.diff(arr)))
+        # np.dot over the elementwise square avoids materializing a third
+        # temp array (np.sum(cd²·diff) does) — this runs once per exec.
+        crps = float(_np.dot(cd[:-1] * cd[:-1], _np.diff(arr)))
         # Region from last observation to observation (if obs > max):
         # F(y) = 1 for y ≥ max_val, 𝟙[y ≥ obs] = 0 for max_val ≤ y < obs
         max_val = arr[-1]

@@ -1744,7 +1744,14 @@ class OperatorEngine:
         buf_len = len(buf)
         te_pos = f._get_te_weighted_position(buf_len) if f._use_transfer_entropy and f._te else None
         mi_pos = f._mi.weighted_position(buf_len) if f._use_mi and f._mi else None
-        sens_pos = f._sensitivity.get_weighted_position(data, buf_len)
+        # Sensitivity is a per-seed score cache: when disabled the tracker is
+        # never populated, so the call would always return None.  Gate it like
+        # MI/TE instead of paying the lookup + branches on every mutation.
+        sens_pos = (
+            f._sensitivity.get_weighted_position(data, buf_len)
+            if f._use_sensitivity and f._sensitivity
+            else None
+        )
         crash_mi_pos = None
         if f._crash_mi and f._crash_mi.total_execs >= f._crash_mi.min_observations:
             crash_mi_pos = f._crash_mi.weighted_position(buf_len)
