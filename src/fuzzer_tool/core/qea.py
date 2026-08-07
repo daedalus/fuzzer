@@ -35,6 +35,28 @@ import numpy as np
 
 from fuzzer_tool.core.mutations import crossover
 
+# Amplitude arrays store 8 float64 values per input byte (unpackbits ->
+# 8 bits/byte, one 8-byte float per bit): a 64x memory amplification with
+# no cap elsewhere in this module. An oversized input reaching QEA (e.g. a
+# mutator bug that grows a seed past the fuzzer's max_len — see
+# operators.py _op_fuse_this) turns directly into a multi-GB allocation:
+# an 186.9 MB seed becomes ~12 GB of float64, and OOMs the fuzzer even
+# though the input itself fit comfortably in memory. QEA's amplitude
+# representation only needs a bounded prefix to drive rotation-gate
+# feedback; cap what it converts rather than trusting every caller
+# upstream to already be bounded.
+QEA_MAX_INPUT_BYTES = 65536  # amplitude array capped at 65536*8*8B = 4 MiB
+
+
+def _qea_cap(data: bytes) -> bytes:
+    """Truncate to the prefix QEA will actually represent as amplitudes.
+
+    Applied consistently everywhere data enters the QEA population so an
+    individual's amplitudes and its best_collapsed bytes never disagree
+    in length (num_bytes == len(amplitudes) // 8 relies on this).
+    """
+    return data[:QEA_MAX_INPUT_BYTES] if len(data) > QEA_MAX_INPUT_BYTES else data
+
 if TYPE_CHECKING:
     from fuzzer_tool.core.edge_tracker import EdgeTracker
     from fuzzer_tool.core.ga import FitnessFunction, Speciation
@@ -409,13 +431,17 @@ class QEALifecycle:
         self._speciation = Speciation(edge_tracker, self.speciation_threshold)
 
         for data in corpus[: self.pop_size]:
+            # seed_key is keyed on the corpus's original hash (edge_tracker
+            # tracks seeds by their real content), so hash before capping —
+            # only the amplitude/best_collapsed representation is bounded.
             seed_key = hashlib.sha256(data).hexdigest()[:16]
             edge_set = edge_tracker.seed_edges.get(seed_key, set())
+            capped = _qea_cap(data)
             ind = QEAIndividual(
-                amplitudes=_bias_amplitudes_from(data, strong_prob=self.strong_bias),
+                amplitudes=_bias_amplitudes_from(capped, strong_prob=self.strong_bias),
                 edge_count=len(edge_set),
                 generation=0,
-                best_collapsed=data,
+                best_collapsed=capped,
                 seed_key=seed_key,
             )
             self.population.append(ind)
@@ -491,12 +517,16 @@ class QEALifecycle:
 
         new_ind: QEAIndividual | None = None
         if new_coverage:
+            # Hash the real data for seed_key (matches edge_tracker's
+            # keying), but cap what actually gets converted to amplitudes —
+            # see QEA_MAX_INPUT_BYTES.
             seed_key = hashlib.sha256(data).hexdigest()[:16]
+            capped = _qea_cap(data)
             new_ind = QEAIndividual(
-                amplitudes=_bias_amplitudes_from(data, strong_prob=self.strong_bias),
+                amplitudes=_bias_amplitudes_from(capped, strong_prob=self.strong_bias),
                 edge_count=edge_count,
                 generation=self.generation,
-                best_collapsed=data,
+                best_collapsed=capped,
                 seed_key=seed_key,
             )
             # Score before returning: add_to_population() admits on fitness,
@@ -562,6 +592,11 @@ class QEALifecycle:
 
             # Use two-point crossover (from mutations module)
             child_bytes = crossover(bytes_a, bytes_b)
+
+            # Parents are already capped (see QEA_MAX_INPUT_BYTES), so
+            # child_bytes can't exceed 2x that — cap anyway rather than
+            # relying on that invariant holding as this code evolves.
+            child_bytes = _qea_cap(child_bytes)
 
             # Create child with amplitudes biased toward the crossed bytes
             child = QEAIndividual(

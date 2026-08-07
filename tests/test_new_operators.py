@@ -286,6 +286,32 @@ class TestFuseThis:
         self.engine._op_fuse_this(buf, 0, b"")
         assert buf == b""
 
+    def test_fuse_this_respects_max_len(self):
+        """Regression: _op_fuse_this mutates buf in place and returns None,
+        which skips mutate()'s post-operator f.max_len clamp entirely (that
+        clamp only runs when the operator returns a value). Each call can
+        grow the buffer to nearly 2x its input size with no cap, so a seed
+        that starts near max_len could silently grow past it — and repeated
+        application over many mutations/generations compounds that into
+        multi-MB inputs from a small seed, with nothing downstream expecting
+        that (e.g. QEA's amplitude arrays scale 64x with input length).
+        """
+        max_len = 32
+        self.engine.f.max_len = max_len
+        # A buffer already at max_len: fuse_this must never grow it further.
+        for _ in range(50):
+            buf = bytearray(b"A" * 20 + b"B" * 12)  # len == max_len == 32
+            self.engine._op_fuse_this(buf, 0, b"")
+            assert len(buf) <= max_len
+
+    def test_fuse_this_never_exceeds_max_len_from_smaller_start(self):
+        max_len = 16
+        self.engine.f.max_len = max_len
+        for _ in range(50):
+            buf = bytearray(b"ABCDEFGHIJKLMNOP"[:12])  # len 12, under max_len
+            self.engine._op_fuse_this(buf, 0, b"")
+            assert len(buf) <= max_len
+
 
 class TestFuseNext:
     def setup_method(self):

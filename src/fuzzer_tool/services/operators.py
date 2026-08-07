@@ -289,8 +289,21 @@ class OperatorEngine:
         Radamsa sed-fuse-this: picks two positions in the buffer,
         finds a short common prefix at each, and swaps the tails.
         Creates structural hybrids without format awareness.
+
+        Mutates ``buf`` in place and returns None, which means it does
+        NOT go through mutate()'s post-operator f.max_len clamp (that
+        clamp only runs in the `result is not None` branch). Each
+        application can grow the buffer to nearly 2x its input size
+        (len(result) = 2*len(buf) - a_end, and a_end >= 0), so repeated
+        selection compounds: a 4KB seed can silently reach multi-MB size
+        over successive mutations/generations with no cap. Downstream
+        consumers that scale allocations with input length (e.g. QEA's
+        amplitude arrays, 8 float64s per byte) turn that into an OOM.
+        Clamp explicitly here rather than relying on the caller.
         """
-        rng = self.f._rand_pool
+        f = self.f
+        rng = f._rand_pool
+        max_len = getattr(f, "max_len", 65536)
         if len(buf) < 4:
             return
         p1 = rng.randint(0, len(buf) - 2)
@@ -308,7 +321,11 @@ class OperatorEngine:
             tail1 = bytes(buf[p1:])
             tail2 = bytes(buf[p2:])
             combined = bytearray(buf[:p1]) + tail2 + buf[p1:p2] + tail1
-            if len(combined) <= 2 * len(buf) and len(combined) >= len(buf) // 2:
+            if (
+                len(combined) <= 2 * len(buf)
+                and len(combined) >= len(buf) // 2
+                and len(combined) <= max_len
+            ):
                 buf[:] = combined
             return
         a_end = p1 + pre_len
@@ -316,7 +333,7 @@ class OperatorEngine:
         tail_a = bytes(buf[a_end:])
         tail_b = bytes(buf[b_end:])
         result = bytearray(buf[:a_end]) + tail_b + buf[a_end:b_end] + tail_a
-        if len(result) <= 2 * len(buf):
+        if len(result) <= 2 * len(buf) and len(result) <= max_len:
             buf[:] = result
 
     def _op_fuse_next(self, buf, _byte_idx, data):
