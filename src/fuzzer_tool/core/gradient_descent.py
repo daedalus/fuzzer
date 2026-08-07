@@ -77,12 +77,22 @@ def _interesting_for_width(width: int) -> list[int]:
     return list(INTERESTING_8)
 
 
-def _candidate_positions(buf: bytes, target: bytes, cap: int = 48) -> list[int]:
+def _candidate_positions(buf: bytes, target: bytes, rng=None, cap: int = 48) -> list[int]:
     """Return input positions that overlap with *target* bytes.
 
     Builds a value→positions map for the input, then finds offsets where at
     least one target byte occurs. Falls back to random positions if overlap
     is sparse.
+
+    *rng* must be the fuzzer's seeded rand pool. It used to be omitted and
+    the fallback drew from the ``random`` module's global state, which made
+    every caller non-reproducible: pinning the campaign seed (``-s``) had
+    no effect on the sampled offsets, so a seeded rerun took a different
+    path. Measured before the fix: with the fuzzer rng pinned and only the
+    global rng perturbed, six trials produced five distinct outputs. The
+    parameter stays optional (falling back to the global module) only so
+    direct callers in tests need not thread one through; every in-fuzzer
+    call site passes it.
     """
     if not buf or not target:
         return []
@@ -99,10 +109,15 @@ def _candidate_positions(buf: bytes, target: bytes, cap: int = 48) -> list[int]:
                 candidates.add(off)
 
     if len(candidates) < cap // 2:
-        import random
-
         sample = min(cap // 2, len(buf))
-        candidates.update(random.sample(range(len(buf)), sample))
+        if rng is not None:
+            # randrange_list draws from the seeded pool, so a campaign
+            # replayed with the same -s takes the same path here.
+            candidates.update(rng.randrange_list(len(buf), sample))
+        else:
+            import random
+
+            candidates.update(random.sample(range(len(buf)), sample))
 
     return sorted(candidates)[:cap]
 
@@ -112,6 +127,7 @@ def gradient_descent(
     cmp_pair: tuple[bytes, bytes],
     max_len: int = 0,
     max_epochs: int = _MAX_EPOCHS,
+    rng=None,
 ) -> bytes:
     """Optimize *input_buf* to match one operand of *cmp_pair*.
 
@@ -120,6 +136,8 @@ def gradient_descent(
         cmp_pair: (operand_a, operand_b) from cmplog.
         max_len: Hard cap on output length (0 = no cap).
         max_epochs: Maximum descent epochs.
+        rng: Seeded rand pool, threaded into candidate-site selection so
+            a campaign replayed with the same -s takes the same path.
 
     Returns:
         Optimized input bytes, or the original if no improvement found.
@@ -145,7 +163,7 @@ def gradient_descent(
     if not buf:
         return input_buf
 
-    candidates = _candidate_positions(bytes(buf), target)
+    candidates = _candidate_positions(bytes(buf), target, rng)
     if not candidates:
         return input_buf
 

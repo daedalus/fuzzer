@@ -98,7 +98,7 @@ def magic_byte_search(
     if len(buf) < len(target):
         return input_buf
 
-    candidates = _candidate_positions(bytes(buf), target)
+    candidates = _candidate_positions(bytes(buf), target, rng)
     # Restrict to sites where the operand actually fits.
     candidates = [p for p in candidates if p + len(target) <= len(buf)]
     if not candidates:
@@ -150,7 +150,7 @@ def climb_hill(
     if len(buf) < len(target):
         return input_buf
 
-    candidates = _candidate_positions(bytes(buf), target)
+    candidates = _candidate_positions(bytes(buf), target, rng)
     candidates = [p for p in candidates if p + len(target) <= len(buf)]
     if not candidates:
         return input_buf

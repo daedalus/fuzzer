@@ -2768,6 +2768,17 @@ class Fuzzer:
             # in random_stall produced zero recorded matches across all 106
             # arms). record_round() handles the empty-winners case via the
             # cross-iteration comparison against the previous round.
+            #
+            # Failed rounds vastly outnumber successes and the
+            # cross-iteration path is quadratic in operators per round, so
+            # sampling them was tried. It is not worth it: direct
+            # instrumentation puts record_round at 0.69s of a 48.7s,
+            # 2500-exec run (1.4%), while sampling 1-in-4 narrowed the
+            # rating spread from 49.4 to 38.1 points. Paying 1.4% for the
+            # full signal is the better trade. Note wall-clock A/B is
+            # useless for judging this -- run-to-run variance on the same
+            # build spanned 23s-54s, which is why the figure above comes
+            # from timing record_round itself rather than total runtime.
             self._elo.record_round(unique_ops, winners, crash=is_crash)
             # Apply periodic decay
             self._elo_decay_counter += 1

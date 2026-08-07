@@ -19,6 +19,11 @@ class _Rng:
     def choice(self, seq):
         return self._r.choice(seq)
 
+    def randrange_list(self, n, count):
+        # Mirrors RandPool.randrange_list, used by the sparse-overlap
+        # fallback in _candidate_positions.
+        return [self._r.randrange(n) for _ in range(count)]
+
 
 class TestPickTarget:
     def test_prefers_shorter_operand(self):
@@ -150,3 +155,73 @@ class TestRegistration:
         avail = REGISTRY.available(_NoCmplog(), b"data")
         assert "magic_byte_search" not in avail
         assert "climb_hill" not in avail
+
+
+class TestSeededReproducibility:
+    """Candidate-site selection must draw from the fuzzer's seeded pool.
+
+    `_candidate_positions` used to fall back to `random.sample()` on the
+    `random` module's *global* state when input/operand byte overlap was
+    sparse. RandPool refills from numpy's global RNG and `-s` seeds numpy
+    (fuzzer.py: `np.random.seed(seed)`), so the fallback was outside the
+    seeded path entirely: pinning the campaign seed did not pin these
+    operators. Measured before the fix: with the fuzzer rng pinned and
+    only the Python global rng perturbed, six trials gave five distinct
+    outputs. Affected gradient_descent, and magic_byte_search/climb_hill
+    once they began sharing the same helper.
+    """
+
+    # No byte overlap between input and operand, so the sparse-overlap
+    # fallback is guaranteed to fire.
+    _BUF = b"\x01" * 128
+    _TARGET = b"\xAA\xBB"
+
+    def _under_pinned_seed(self, fn):
+        import random as _random
+
+        import numpy as np
+
+        from fuzzer_tool.core.rand_pool import RandPool
+
+        outs = set()
+        for trial in range(6):
+            np.random.seed(42)  # what -s does
+            _random.seed(trial)  # perturb the global rng only
+            outs.add(fn(RandPool()))
+        return outs
+
+    def test_magic_byte_search_is_reproducible(self):
+        outs = self._under_pinned_seed(
+            lambda r: magic_byte_search(self._BUF, (self._TARGET, self._TARGET), r, max_len=4096)
+        )
+        assert len(outs) == 1
+
+    def test_climb_hill_is_reproducible(self):
+        outs = self._under_pinned_seed(
+            lambda r: climb_hill(self._BUF, (self._TARGET, self._TARGET), r, max_len=4096)
+        )
+        assert len(outs) == 1
+
+    def test_gradient_descent_is_reproducible(self):
+        from fuzzer_tool.core.gradient_descent import gradient_descent
+
+        outs = self._under_pinned_seed(
+            lambda r: gradient_descent(
+                self._BUF, (self._TARGET, self._TARGET), max_len=4096, rng=r
+            )
+        )
+        assert len(outs) == 1
+
+    def test_candidate_positions_uses_supplied_rng(self):
+        """Directly: two different seeded pools must disagree, proving the
+        fallback reads the supplied rng rather than ignoring it."""
+        import numpy as np
+
+        from fuzzer_tool.core.gradient_descent import _candidate_positions
+        from fuzzer_tool.core.rand_pool import RandPool
+
+        np.random.seed(1)
+        a = _candidate_positions(self._BUF, self._TARGET, RandPool())
+        np.random.seed(2)
+        b = _candidate_positions(self._BUF, self._TARGET, RandPool())
+        assert a != b

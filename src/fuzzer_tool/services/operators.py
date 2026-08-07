@@ -1123,7 +1123,9 @@ class OperatorEngine:
         if not (buf and self.f._cmplog and self.f._cmplog.pairs):
             return
         pair = self.f._rand_pool.choice(self.f._cmplog.pairs)
-        result = gradient_descent(bytes(buf), pair, max_len=self.f.max_len)
+        result = gradient_descent(
+            bytes(buf), pair, max_len=self.f.max_len, rng=self.f._rand_pool
+        )
         if result and result != bytes(buf):
             return bytearray(result[: self.f.max_len])
 
