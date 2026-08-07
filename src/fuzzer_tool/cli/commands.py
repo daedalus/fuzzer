@@ -126,6 +126,14 @@ def _validate_target(target):
 
 def cmd_fuzz(args):
     """Main fuzzing command."""
+    # Applied before anything can spawn a child, so the setting is in force
+    # for the whole run including early teardown.
+    if getattr(args, "no_kill_children", False):
+        from fuzzer_tool.services.fuzzer import set_kill_children_enabled
+
+        set_kill_children_enabled(False)
+        print("[*] Child process groups will NOT be killed on exit")
+
     # Normalize targets: support both old single-target and new multi-target
     import glob as _glob
 
@@ -1574,6 +1582,13 @@ def main() -> int:
         "--wfc",
         action="store_true",
         help="Enable Wave Function Collapse structural generation (chunk reordering, pixel generation)",
+    )
+    fuzz_parser.add_argument(
+        "--no-kill-children",
+        action="store_true",
+        help="Do not SIGKILL child process groups on exit. Use when the fuzzer "
+        "is embedded, supervised, or run under a debugger; target processes may "
+        "then outlive the fuzzer",
     )
     fuzz_parser.add_argument(
         "--path-negation",

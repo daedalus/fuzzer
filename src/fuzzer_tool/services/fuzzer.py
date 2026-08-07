@@ -82,6 +82,35 @@ _SEED_STRATEGY_NAMES = (
 )
 
 
+_kill_children_enabled = os.environ.get("FUZZER_DISABLE_KILL_CHILDREN", "") not in (
+    "1",
+    "true",
+    "yes",
+)
+"""Whether teardown SIGKILLs child process groups.
+
+On by default: a fuzzer that exits leaving target processes behind will
+exhaust the machine over a long campaign. It is switchable because the
+teardown is destructive and not always wanted — when the fuzzer is embedded
+in a larger process, driven by a supervisor that manages its own children,
+or run under a debugger where killing the group would take the debugger with
+it. The environment variable is read at import because the handlers install
+at import; ``set_kill_children_enabled`` changes it afterwards, and the CLI
+``--no-kill-children`` flag routes through that.
+"""
+
+
+def set_kill_children_enabled(enabled: bool) -> None:
+    """Enable or disable the destructive part of teardown.
+
+    Shutdown signalling still happens when disabled — only the SIGKILL of
+    child process groups is suppressed, so the fuzzing loop still stops
+    cleanly.
+    """
+    global _kill_children_enabled
+    _kill_children_enabled = bool(enabled)
+
+
 def _kill_children(sig=None, frame=None):
     global _shutdown
     _shutdown = True
@@ -94,14 +123,42 @@ def _kill_children(sig=None, frame=None):
             faulthandler.dump_traceback()
         except Exception:
             pass
+    if not _kill_children_enabled:
+        return
+    try:
+        own_pgid = os.getpgrp()
+    except OSError:
+        own_pgid = None
     for pid in _child_pids():
         with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
-            os.killpg(os.getpgid(pid), signal.SIGKILL)
+            pgid = os.getpgid(pid)
+            # Children call os.setsid(), so a child's pgid is its own. If it
+            # matches ours the pid was recorded before setsid ran, or the pid
+            # has been reused — killing that group would SIGKILL the fuzzer
+            # and everything sharing its group.
+            if own_pgid is not None and pgid == own_pgid:
+                continue
+            os.killpg(pgid, signal.SIGKILL)
 
 
-atexit.register(_kill_children)
-signal.signal(signal.SIGTERM, _kill_children)
-signal.signal(signal.SIGINT, _kill_children)
+def install_cleanup_handlers() -> bool:
+    """Register teardown on atexit, SIGTERM and SIGINT.
+
+    Returns False if the handlers could not be installed. ``signal.signal``
+    only works on the main thread, so importing this module from a worker
+    thread previously raised at import time; that is now reported rather
+    than fatal.
+    """
+    atexit.register(_kill_children)
+    try:
+        signal.signal(signal.SIGTERM, _kill_children)
+        signal.signal(signal.SIGINT, _kill_children)
+    except (ValueError, OSError):
+        return False
+    return True
+
+
+install_cleanup_handlers()
 
 # On-demand live trace: `kill -USR1 <fuzzer-pid>` dumps every thread's
 # Python stack to stderr (faulthandler).  SIGKILL (kill -9) is uncatchable
