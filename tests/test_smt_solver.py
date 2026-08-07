@@ -11,7 +11,11 @@ Test categories:
 
 import struct
 
-from fuzzer_tool.core.smt_solver import Z3Solver, _z3_available
+from fuzzer_tool.core.smt_solver import (
+    _CONCOLIC_MAX_BYTES,
+    Z3Solver,
+    _z3_available,
+)
 
 # ═══════════════════════════════════════════════════════════════════
 # 1. Init and availability
@@ -573,3 +577,24 @@ class TestConcolic:
         op_b = struct.pack("<I", 50)
         result = s.solve_cmplog_pair(op_a, op_b)
         assert result is None  # per-pair returns None in concolic mode
+
+    def test_regression_conic_skips_oversized_input(self):
+        """A whole-input z3 solve over a multi-MB input is a memory bomb.
+
+        build_ops-style per-byte BitVec models over large inputs transiently
+        allocate >1 GB (measured ~1.3 GB spikes on MB-scale seeds) and can OOM
+        the fuzzer. The solve must be skipped above a size cap — proven by the
+        behavior change: the SAME trace that yields a solution on a small
+        input yields None on an oversized one.
+        """
+        s = Z3Solver(mod_solving_mode="concolic")
+        # op_b == the last 4 bytes of the small input, so it overrides them.
+        small = bytes(range(12))
+        op_a = struct.pack("<I", 0)
+        op_b = small[-4:]
+        s.solve_cmplog_pair(op_a, op_b)
+        assert s.solve_concolic(small) is not None
+
+        big = b"\x00" * (_CONCOLIC_MAX_BYTES + 1)
+        s.solve_cmplog_pair(op_a, op_b)
+        assert s.solve_concolic(big) is None

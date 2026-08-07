@@ -653,7 +653,7 @@ verification) from `tools/lib/bench_common.sh`.
 
 ### SMT Solver Evaluation (`--enable-smt-z3`)
 
-The SMT solver (Z3) attempts to solve arithmetic constraints discovered by cmplog, generating inputs that satisfy specific branch conditions rather than relying solely on random mutations. **Concolic mode is now the default** (`--mod-solving concolic`), providing full constraint modeling with z3 across whole execution traces. Override with `--mod-solving heuristic` or `--mod-solving trace` if needed.
+The SMT solver (Z3) attempts to solve arithmetic constraints discovered by cmplog, generating inputs that satisfy specific branch conditions rather than relying solely on random mutations. **Concolic mode is now the default** (`--mod-solving concolic`), providing full constraint modeling with z3 across whole execution traces. Override with `--mod-solving heuristic` or `--mod-solving trace` if needed. The concolic whole-input solve is capped at `_CONCOLIC_MAX_BYTES` (32 KiB) in `core/smt_solver.py`: it models one z3 `BitVec` per input byte, and over multi-MB seeds that model alone transiently exceeds a GB of memory (measured ~1.3 GB spikes), enough to OOM the fuzzer. Oversized inputs skip the whole-input solve (the per-pair cmplog solving is unaffected).
 
 **30k-iteration comparison, zero corpus, `targets/png_read_tracecmp_asan.so`:**
 

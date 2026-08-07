@@ -10,7 +10,8 @@ PNGs from public sources when network is available.
 Usage:
     python tools/corpus_png.py [--out DIR] [--count N] [--download]
 
-Output is a directory of .png files suitable as fuzzer seed corpus.
+Output is a corpus directory with seeds written to <out>/seeds/ (the layout
+load_corpus reads), suitable as a fuzzer seed corpus.
 """
 
 import argparse
@@ -319,7 +320,9 @@ def download_pngs(out_dir: str) -> int:
 def main():
     parser = argparse.ArgumentParser(description="Generate PNG corpus for fuzzing")
     parser.add_argument(
-        "--out", default="corpus_png", help="Output directory (default: corpus_png)"
+        "--out",
+        default="corpus_png",
+        help="Corpus directory (default: corpus_png); seeds are written to <out>/seeds/",
     )
     parser.add_argument("--count", type=int, default=0, help="Max seeds (0=all)")
     parser.add_argument("--download", action="store_true", help="Also download real-world PNGs")
@@ -331,8 +334,12 @@ def main():
     args = parser.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
+    # Seeds live under <out>/seeds/ — the fuzzer's load_corpus reads seeds
+    # only from the corpus/seeds/ layout, never flat files in the corpus root.
+    seeds_dir = os.path.join(args.out, "seeds")
+    os.makedirs(seeds_dir, exist_ok=True)
 
-    print(f"[*] Generating PNG corpus in {args.out}/")
+    print(f"[*] Generating PNG corpus in {seeds_dir}/")
     seeds = []
     if not args.zlib_only:
         seeds.extend(make_variants())
@@ -342,7 +349,7 @@ def main():
         seeds = seeds[: args.count]
 
     for name, data in seeds:
-        path = os.path.join(args.out, name)
+        path = os.path.join(seeds_dir, name)
         with open(path, "wb") as f:
             f.write(data)
 
@@ -350,11 +357,11 @@ def main():
 
     if args.download:
         print("[*] Downloading real-world PNGs...")
-        dl_count = download_pngs(args.out)
+        dl_count = download_pngs(seeds_dir)
         print(f"[*] Downloaded {dl_count} PNGs")
 
-    total = len(os.listdir(args.out))
-    print(f"[*] Corpus ready: {total} files in {args.out}/")
+    total = len(os.listdir(seeds_dir))
+    print(f"[*] Corpus ready: {total} files in {seeds_dir}/")
 
 
 if __name__ == "__main__":

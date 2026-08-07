@@ -21,6 +21,12 @@ log = logging.getLogger(__name__)
 _SOLVER_TIMEOUT_MS = 50
 _CACHE_MAXSIZE = 1024
 
+# Concolic solving builds one z3 BitVec per input byte; on multi-MB inputs
+# that model alone exceeds a GB of transient memory (measured ~1.3 GB spikes
+# on MB-scale seeds). Above this size the whole-input solve is skipped — the
+# per-byte constraint model is only practical for small focused inputs.
+_CONCOLIC_MAX_BYTES = 1 << 15  # 32768
+
 # Max delta/mask to consider a relation plausible, keyed by operand width (bytes).
 _MAX_DELTA_FOR_WIDTH: dict[int, int] = {1: 256, 2: 65536, 4: 65536, 8: 65536}
 
@@ -95,6 +101,10 @@ class ConcolicTrace:
         import z3
 
         data = self._input_bytes
+        if len(data) > _CONCOLIC_MAX_BYTES:
+            # A per-byte BitVec model over a large input is a memory bomb;
+            # skip (the trace is cleared by the caller afterwards).
+            return None
         z3.set_param("timeout", timeout_ms)
 
         solver = z3.Solver()
