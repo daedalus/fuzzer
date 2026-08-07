@@ -139,6 +139,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "grammar_mutate",
         "grammar_tree_mutate",
         "crc_learn",
+        "gradient_descent",
     },
 }
 
@@ -280,6 +281,7 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     "grammar_tree_mutate": lambda f, _d: bool(getattr(f, "grammar", None)),
     "redqueen_xform": _has_cmplog_pairs,
     "gradient_cmp": _has_cmplog_pairs,
+    "gradient_descent": _has_cmplog_pairs,
     # Needs recorded comparison *outcomes*, not just operand pairs: the
     # shim only emits the result field in trace mode, and without it there
     # is no predicate to negate.

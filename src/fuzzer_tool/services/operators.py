@@ -1116,6 +1116,16 @@ class OperatorEngine:
                 ]
             )
 
+    def _op_gradient_descent(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.gradient_descent import gradient_descent
+
+        if not (buf and self.f._cmplog and self.f._cmplog.pairs):
+            return
+        pair = self.f._rand_pool.choice(self.f._cmplog.pairs)
+        result = gradient_descent(bytes(buf), pair, max_len=self.f.max_len)
+        if result and result != bytes(buf):
+            return bytearray(result[: self.f.max_len])
+
     def _op_special_strings(self, buf, _byte_idx, _data):
         """Insert a security-sensitive string at a random position.
 
