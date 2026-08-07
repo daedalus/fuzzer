@@ -475,11 +475,35 @@ def _seed_contribution(f) -> str:
 
 
 def _corpus_overview(f, corpus_dir) -> str:
+    """Summarize on-disk corpus seed files.
+
+    Must mirror what load_corpus() actually treats as a seed: every file
+    under a subdirectory of corpus_dir (recursively), excluding pruned/
+    and delta_*.json. Previously this did a flat p.iterdir() on
+    corpus_dir itself, which never descends into seeds/ at all -- so it
+    reported 0 real seeds and instead picked up whatever sits directly at
+    the corpus root, namely state.pkl.gz (the unified fuzzer state file,
+    several MB by the end of a run with GA/QEA/Markov/etc. active). That
+    showed up as "1 corpus file, N MB" and was mistaken for an oversized
+    seed -- state.pkl.gz was never loaded as an input by load_corpus, it
+    was just the only thing this scan could see.
+    """
     p = Path(corpus_dir)
     if not p.exists():
         return ""
 
-    entries = [f for f in p.iterdir() if f.is_file() and not f.name.endswith((".json",))]
+    entries: list[Path] = []
+    for sub in p.iterdir():
+        if not sub.is_dir() or sub.name == "pruned":
+            continue
+        for entry in sub.rglob("*"):
+            if not entry.is_file():
+                continue
+            if "pruned" in entry.relative_to(sub).parts:
+                continue  # nested pruned/ (e.g. seeds/pruned/), same as load_corpus
+            if entry.suffix == ".json" and entry.name.startswith("delta_"):
+                continue
+            entries.append(entry)
 
     if not entries:
         return ""

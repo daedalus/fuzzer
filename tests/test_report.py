@@ -299,23 +299,73 @@ class TestReportBranchCoverage:
         assert result == ""
 
     def test_corpus_overview_various_sizes(self):
-        """Lines 248-255: size distribution buckets."""
+        """Lines 248-255: size distribution buckets.
+
+        Files must live under a subdirectory of corpus_dir (mirroring
+        load_corpus()'s actual layout, e.g. seeds/xx/id_*) -- files
+        directly at the corpus root are never real seeds; see
+        test_corpus_overview_excludes_state_pkl below.
+        """
         from fuzzer_tool.services.report import _corpus_overview
 
         f = _make_mock_fuzzer()
         with tempfile.TemporaryDirectory() as td:
-            Path(td, "tiny.bin").write_bytes(b"x" * 50)
-            Path(td, "small.bin").write_bytes(b"x" * 500)
-            Path(td, "medium.bin").write_bytes(b"x" * 5000)
-            Path(td, "large.bin").write_bytes(b"x" * 50000)
-            Path(td, "huge.bin").write_bytes(b"x" * 200000)
-            Path(td, "skip.json").write_text("{}")
+            seeds = Path(td, "seeds")
+            seeds.mkdir()
+            Path(seeds, "tiny.bin").write_bytes(b"x" * 50)
+            Path(seeds, "small.bin").write_bytes(b"x" * 500)
+            Path(seeds, "medium.bin").write_bytes(b"x" * 5000)
+            Path(seeds, "large.bin").write_bytes(b"x" * 50000)
+            Path(seeds, "huge.bin").write_bytes(b"x" * 200000)
+            Path(seeds, "delta_abc.json").write_text("{}")
             result = _corpus_overview(f, td)
         assert "<100B" in result
         assert "100B-1KB" in result
         assert "1KB-10KB" in result
         assert "10KB-100KB" in result
         assert ">100KB" in result
+        assert "Files:           5" in result  # delta_*.json excluded
+
+    def test_corpus_overview_excludes_state_pkl(self):
+        """Regression: state.pkl.gz (the unified fuzzer state file) sits
+        directly at corpus_dir's root -- load_corpus() never reads it
+        (it only walks subdirectories), but the old _corpus_overview did
+        a flat p.iterdir() on corpus_dir itself, so a run with no real
+        seeds loaded yet would report state.pkl.gz as "1 corpus file, N
+        MB" and make a multi-MB internal state dump look like an
+        oversized seed. Real seeds (small, under seeds/) must be counted
+        instead, and the root-level state file excluded entirely.
+        """
+        from fuzzer_tool.services.report import _corpus_overview
+
+        f = _make_mock_fuzzer()
+        with tempfile.TemporaryDirectory() as td:
+            # state.pkl.gz directly at corpus root, several MB -- as
+            # written by core/state_store.py at shutdown.
+            Path(td, "state.pkl.gz").write_bytes(b"\x00" * (5 * 1024 * 1024))
+            seeds = Path(td, "seeds", "b0")
+            seeds.mkdir(parents=True)
+            Path(seeds, "id_b085973aa9d977fe").write_bytes(b"P" * 64000)
+            result = _corpus_overview(f, td)
+
+        assert "Files:           1" in result
+        assert "MB" not in result.split("Total size:")[1].split("\n")[0]
+        assert "62.5KB" in result  # the real seed's actual size, not several MB
+
+    def test_corpus_overview_ignores_pruned_dir(self):
+        """pruned/ is excluded, mirroring load_corpus()."""
+        from fuzzer_tool.services.report import _corpus_overview
+
+        f = _make_mock_fuzzer()
+        with tempfile.TemporaryDirectory() as td:
+            seeds = Path(td, "seeds")
+            seeds.mkdir()
+            Path(seeds, "kept.bin").write_bytes(b"x" * 100)
+            pruned = Path(td, "seeds", "pruned")
+            pruned.mkdir()
+            Path(pruned, "state_junk.bin").write_bytes(b"y" * (2 * 1024 * 1024))
+            result = _corpus_overview(f, td)
+        assert "Files:           1" in result
 
     def test_crash_analysis_with_crashes(self):
         """Lines 268-294: crash analysis with files."""
