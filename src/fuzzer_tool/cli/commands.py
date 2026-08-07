@@ -464,6 +464,7 @@ def cmd_fuzz(args):
         ga=getattr(args, "ga", False),
         qea=getattr(args, "qea", False),
         wfc=getattr(args, "wfc", False),
+        path_negation=getattr(args, "path_negation", False),
         mcts=getattr(args, "mcts", False),
         ga_pop_size=getattr(args, "ga_pop_size", 200),
         ga_gen_size=getattr(args, "ga_gen_size", 500),
@@ -1573,6 +1574,12 @@ def main() -> int:
         "--wfc",
         action="store_true",
         help="Enable Wave Function Collapse structural generation (chunk reordering, pixel generation)",
+    )
+    fuzz_parser.add_argument(
+        "--path-negation",
+        action="store_true",
+        help="Concolic path-condition negation: solve for inputs that take the "
+        "opposite side of a branch the run actually took (requires --cmplog and z3)",
     )
     fuzz_parser.add_argument(
         "--enable-smt-z3",

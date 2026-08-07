@@ -441,3 +441,42 @@ class TestFastPathAndConjunctive:
         assert value is not None
         assert value != 0x41
         assert value >= 0x41
+
+
+class TestPairSideTablesAreBounded:
+    """``_pair_cmp`` and ``_pair_pc`` are keyed by pair but were not evicted
+    when the pair set was capped, so they grew for the life of the run
+    regardless of ``max_pairs`` — 4000 entries against a cap of 50 in
+    testing."""
+
+    def _saturated(self, tmp_path, batches=20, per_batch=200):
+        from fuzzer_tool.core.cmplog import CmplogCollector
+
+        collector = CmplogCollector(max_tokens=100, max_pairs=50, workdir=str(tmp_path))
+        collector.log_path = str(tmp_path / "log.txt")
+        for batch in range(batches):
+            with open(collector.log_path, "w") as fh:
+                for i in range(per_batch):
+                    n = batch * per_batch + i
+                    fh.write(f"CMP {n:08x} {n + 1:08x} -1 4 {1000 + n}\n")
+            collector.collect_tokens()
+        return collector
+
+    def test_outcome_table_respects_max_pairs(self, tmp_path):
+        collector = self._saturated(tmp_path)
+        assert len(collector._pair_cmp) <= collector._max_pairs
+
+    def test_pc_table_respects_max_pairs(self, tmp_path):
+        collector = self._saturated(tmp_path)
+        assert len(collector._pair_pc) <= collector._max_pairs
+
+    def test_surviving_pairs_keep_their_metadata(self, tmp_path):
+        """Eviction must not strip outcomes from pairs that were kept."""
+        collector = self._saturated(tmp_path)
+        for pair in collector._pair_set:
+            assert collector.pair_cmp(*pair) is not None
+            assert collector.pair_pc(*pair) is not None
+
+    def test_branch_records_stay_bounded(self, tmp_path):
+        collector = self._saturated(tmp_path)
+        assert len(collector.branch_records()) <= collector._max_pairs

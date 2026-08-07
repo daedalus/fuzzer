@@ -454,6 +454,7 @@ class Fuzzer:
         enable_x86_mutator=False,
         enable_arm_mutator=False,
         enable_smt_z3=False,
+        path_negation=False,
         mod_solving="concolic",
         corpus_boost=0,
         boost_mean=None,
@@ -635,6 +636,20 @@ class Fuzzer:
         # SMT solver: arithmetic constraint solving on cmplog pairs
         self._smt_solver = None
         self._enable_smt_z3 = enable_smt_z3
+
+        # Path-condition negation. Independent of --enable-smt-z3: that flag
+        # selects the modulo-solving strategy for cmplog pairs, whereas this
+        # solves for inputs that flip a branch outright.
+        self._path_solver = None
+        if path_negation:
+            from fuzzer_tool.core.path_constraints import PathConstraintSolver, _z3
+
+            if _z3() is None:
+                print("[!] Path negation requested but z3 is unavailable — disabled")
+            else:
+                self._path_solver = PathConstraintSolver()
+                print("[*] Path negation: solving for branch-flipping inputs")
+
         self._mod_solving = mod_solving if enable_smt_z3 else "heuristic"
         if enable_smt_z3:
             from fuzzer_tool.core.smt_solver import Z3Solver
@@ -2297,6 +2312,23 @@ class Fuzzer:
                     # Inject the concolic solution as a replacement mutation
                     matches.append((0, mutated, concolic_result))
                     smt_found = True
+
+            # Path negation: solve for an input that takes the opposite side
+            # of a branch this run actually took. Unlike the concolic block
+            # above — which pins every byte to a literal, giving a fully
+            # determined system that reproduces the observed operands — this
+            # leaves the operand window symbolic and asserts the *negated*
+            # predicate, so z3 searches for a value reaching the sibling
+            # branch rather than replaying one already seen.
+            if self._path_solver is not None and self._cmplog is not None:
+                from fuzzer_tool.core.path_constraints import records_from_collector
+
+                records = records_from_collector(self._cmplog)
+                if records:
+                    negated = self._path_solver.solve_first(records, mutated)
+                    if negated is not None and negated != mutated:
+                        matches.append((0, mutated, negated))
+                        smt_found = True
             if meta is not None:
                 meta["redqueen_matches"] = matches[:50]
                 # Keep legacy field for state compat

@@ -386,6 +386,17 @@ class CmplogCollector:
             for _, p in scored[:excess]:
                 self._pair_set.discard(p)
                 self._pair_value.pop(p, None)
+                # Side tables must be evicted with the pair, not just the
+                # pair set: they are keyed by pair and otherwise grow without
+                # bound for the life of the run, regardless of max_pairs.
+                self._pair_cmp.pop(p, None)
+                self._pair_pc.pop(p, None)
+                # _pair_occurrence is deliberately left alone: it is
+                # repopulated below for this batch, and its whole purpose is
+                # to count sightings across runs, so it has to outlive the
+                # pair set. It does grow unbounded — a separate concern from
+                # this eviction, and one that cannot be fixed here without
+                # changing what pair_confidence() means.
             self.pairs = list(self._pair_set)
 
         # Track pair occurrence across runs for multi-run confidence.
