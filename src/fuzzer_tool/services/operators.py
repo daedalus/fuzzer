@@ -1127,6 +1127,30 @@ class OperatorEngine:
         if result and result != bytes(buf):
             return bytearray(result[: self.f.max_len])
 
+    def _op_magic_byte_search(self, buf, _byte_idx, _data):
+        """Plant a cmplog operand verbatim at a candidate site (Angora MB)."""
+        from fuzzer_tool.core.mb_cbh import magic_byte_search
+
+        if not (buf and self.f._cmplog and self.f._cmplog.pairs):
+            return
+        pair = self.f._rand_pool.choice(self.f._cmplog.pairs)
+        result = magic_byte_search(
+            bytes(buf), pair, self.f._rand_pool, max_len=self.f.max_len
+        )
+        if result and result != bytes(buf):
+            return bytearray(result[: self.f.max_len])
+
+    def _op_climb_hill(self, buf, _byte_idx, _data):
+        """Stochastic hill-climb toward a cmplog operand (Angora CBH)."""
+        from fuzzer_tool.core.mb_cbh import climb_hill
+
+        if not (buf and self.f._cmplog and self.f._cmplog.pairs):
+            return
+        pair = self.f._rand_pool.choice(self.f._cmplog.pairs)
+        result = climb_hill(bytes(buf), pair, self.f._rand_pool, max_len=self.f.max_len)
+        if result and result != bytes(buf):
+            return bytearray(result[: self.f.max_len])
+
     def _op_condstmt_solve(self, buf, _byte_idx, _data):
         """Solve one unsolved comparison branch via CondStmt substitution.
 

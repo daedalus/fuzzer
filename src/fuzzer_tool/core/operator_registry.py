@@ -16,8 +16,11 @@ on ``OperatorEngine`` — nothing else.
 """
 
 import contextlib
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
+
+log = logging.getLogger(__name__)
 
 # Category taxonomy, kept here so it lives next to the operators it classifies.
 # Every operator must appear in exactly one category set.
@@ -130,6 +133,8 @@ _CATEGORIES: dict[str, set[str]] = {
         "gradient_cmp",
         "gradient_descent",
         "condstmt_solve",
+        "magic_byte_search",
+        "climb_hill",
         "path_negate",
         "length_offset_goal",
         "redqueen",
@@ -284,6 +289,8 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     "gradient_cmp": _has_cmplog_pairs,
     "gradient_descent": _has_cmplog_pairs,
     "condstmt_solve": _has_cmplog_pairs,
+    "magic_byte_search": _has_cmplog_pairs,
+    "climb_hill": _has_cmplog_pairs,
     # Needs recorded comparison *outcomes*, not just operand pairs: the
     # shim only emits the result field in trace mode, and without it there
     # is no predicate to negate.
@@ -303,14 +310,51 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
 }
 
 
+
+def _mutator_adapter(mutator, engine) -> Callable:
+    """Adapt MutatorBase.mutate() to the `_op_*` handler signature.
+
+    Handlers are called as ``(buf, byte_idx, data)`` and return a
+    bytearray replacement or None. MutatorBase works in bytes and takes
+    the rng explicitly, so the adapter bridges the two and applies the
+    max_len clamp centrally -- implementations must not be trusted to do
+    it themselves, since an operator that silently grows the buffer past
+    max_len is exactly the class of bug that has bitten this codebase
+    before.
+    """
+
+    def _handler(buf, _byte_idx, data):
+        f = engine.f
+        max_len = getattr(f, "max_len", 0)
+        try:
+            result = mutator.mutate(bytes(buf), f._rand_pool, max_len=max_len, fuzzer=f)
+        except Exception:  # noqa: BLE001 - third-party mutator
+            log.warning("mutator %r raised during mutate()", mutator, exc_info=True)
+            return None
+        if not result or result == bytes(buf):
+            return None
+        return bytearray(result[:max_len] if max_len else result)
+
+    _handler.__name__ = f"_op_{mutator.name}"
+    return _handler
+
+
 @dataclass(frozen=True)
 class OperatorSpec:
-    """Static registration metadata for one mutation operator."""
+    """Static registration metadata for one mutation operator.
+
+    ``handler_name`` names a ``_op_<name>`` method on ``OperatorEngine``
+    for the function-based operators (all the built-ins). ``mutator``
+    is set instead for class-based mutators registered through
+    ``register_mutator()``; exactly one of the two applies, and
+    ``dispatch()`` resolves whichever is present.
+    """
 
     name: str
     category: str
     handler_name: str
     available: Callable[[object, bytes], bool] | None = None
+    mutator: object | None = None
 
 
 class OperatorRegistry:
@@ -326,6 +370,46 @@ class OperatorRegistry:
         self._ops[spec.name] = spec
         self._categories_cache = None
 
+    def register_mutator(self, mutator) -> None:
+        """Register a ``MutatorBase`` instance as an operator.
+
+        Lets a self-contained mutator class join the operator table without
+        adding a ``_op_<name>`` method to ``OperatorEngine`` — see
+        ``core/mutator_interface``. Existing function-based operators are
+        unaffected; the two kinds coexist in one table and schedulers
+        cannot tell them apart, which is the point.
+        """
+        name = getattr(mutator, "name", "")
+        if not name:
+            raise ValueError(f"mutator {mutator!r} has no name")
+        if not callable(getattr(mutator, "mutate", None)):
+            raise TypeError(f"mutator {name!r} has no callable mutate()")
+        self.register(
+            OperatorSpec(
+                name=name,
+                category=getattr(mutator, "category", "adaptive"),
+                handler_name="",  # resolved via the mutator, not the engine
+                available=lambda f, d, _m=mutator: _m.is_available(f, d),
+                mutator=mutator,
+            )
+        )
+
+    def mutators(self) -> list[object]:
+        """Every registered ``MutatorBase`` instance (not function ops)."""
+        return [s.mutator for s in self._ops.values() if s.mutator is not None]
+
+    def notify_new_coverage(self, seed: bytes, new_edges: int) -> None:
+        """Fan out a new-coverage event to every registered mutator.
+
+        Exceptions are contained: a misbehaving third-party mutator must
+        not take down the fuzz loop over a feedback hook.
+        """
+        for mutator in self.mutators():
+            try:
+                mutator.on_new_coverage(seed, new_edges)
+            except Exception:  # noqa: BLE001 - third-party hook
+                log.warning("on_new_coverage failed for %r", mutator, exc_info=True)
+
     def names(self) -> list[str]:
         """All registered operator names, in registration order."""
         return list(self._ops)
@@ -333,10 +417,18 @@ class OperatorRegistry:
     def dispatch(self, engine) -> dict[str, Callable]:
         """Map every registered operator name to its handler on *engine*.
 
-        Raises AttributeError if an operator is registered but has no
-        ``_op_<name>`` handler — registering without a handler is a bug.
+        Function-based operators resolve to their ``_op_<name>`` method;
+        raises AttributeError if one is registered without a handler,
+        since that is a bug. Class-based mutators resolve to an adapter
+        that presents the same ``(buf, byte_idx, data)`` signature.
         """
-        return {name: getattr(engine, spec.handler_name) for name, spec in self._ops.items()}
+        table: dict[str, Callable] = {}
+        for name, spec in self._ops.items():
+            if spec.mutator is not None:
+                table[name] = _mutator_adapter(spec.mutator, engine)
+            else:
+                table[name] = getattr(engine, spec.handler_name)
+        return table
 
     def available(self, fuzzer, data: bytes) -> list[str]:
         """Operator names whose availability predicate passes for *fuzzer*.
