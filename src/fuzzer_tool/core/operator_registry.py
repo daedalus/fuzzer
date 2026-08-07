@@ -128,6 +128,8 @@ _CATEGORIES: dict[str, set[str]] = {
         "auto_extras",
         "redqueen_xform",
         "gradient_cmp",
+        "gradient_descent",
+        "condstmt_solve",
         "path_negate",
         "length_offset_goal",
         "redqueen",
@@ -139,7 +141,6 @@ _CATEGORIES: dict[str, set[str]] = {
         "grammar_mutate",
         "grammar_tree_mutate",
         "crc_learn",
-        "gradient_descent",
     },
 }
 
@@ -282,6 +283,7 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     "redqueen_xform": _has_cmplog_pairs,
     "gradient_cmp": _has_cmplog_pairs,
     "gradient_descent": _has_cmplog_pairs,
+    "condstmt_solve": _has_cmplog_pairs,
     # Needs recorded comparison *outcomes*, not just operand pairs: the
     # shim only emits the result field in trace mode, and without it there
     # is no predicate to negate.

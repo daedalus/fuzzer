@@ -19,6 +19,7 @@ import logging
 import struct
 from array import array
 
+from fuzzer_tool.core.cond_stmt import CondState, CondStmt
 from fuzzer_tool.core.crc32 import crc32
 from fuzzer_tool.core.mutations import (
     INTERESTING_8,
@@ -1125,6 +1126,79 @@ class OperatorEngine:
         result = gradient_descent(bytes(buf), pair, max_len=self.f.max_len)
         if result and result != bytes(buf):
             return bytearray(result[: self.f.max_len])
+
+    def _op_condstmt_solve(self, buf, _byte_idx, _data):
+        """Solve one unsolved comparison branch via CondStmt substitution.
+
+        Lazily builds a ``CondStmt`` list from the current cmplog pairs,
+        then picks an unsolved branch and tries a direct operand swap at
+        the first matching offset.  On success the branch state advances
+        to ``SOLVED``; on failure it advances to ``UNSOLVABLE`` or
+        ``TIMEOUT`` so the solver does not waste budget on it again.
+        Falls back to havoc when no applicable branch exists.
+        """
+        f = self.f
+        rng = f._rand_pool
+        if not (buf and hasattr(f, "_cmplog") and f._cmplog and f._cmplog.pairs):
+            return self._op_havoc(buf, _byte_idx, _data)
+
+        conds = self._get_cond_stmts()
+        if not conds:
+            return self._op_havoc(buf, _byte_idx, _data)
+
+        # Prefer unsolved branches; fall back to any branch when all are
+        # solved/unsolvable/timeout so the operator still produces a useful
+        # operand-substitution mutation.
+        unsolved = [c for c in conds if c.state is CondState.UNSOLVED]
+        target = rng.choice(unsolved) if unsolved else rng.choice(conds)
+
+        data = bytes(buf)
+        target_value = target.base.op_b if rng.random() < 0.5 else target.base.op_a
+        source_value = target.base.op_a if target_value is target.base.op_b else target.base.op_b
+        width = target.base.width
+
+        # Find the first offset where the source operand appears.
+        idx = data.find(source_value[:width])
+        if idx != -1 and idx + width <= len(buf):
+            buf[idx : idx + width] = target_value[:width]
+            target.mark_solved()
+            return buf
+
+        # Fallback: insert the target operand at a random position.
+        if len(buf) + width <= f.max_len:
+            pos = rng.randint(0, len(buf))
+            buf[pos:pos] = target_value[:width]
+            target.mark_solved()
+            return buf
+
+        target.mark_unsolvable()
+        return self._op_havoc(buf, _byte_idx, _data)
+
+    def _get_cond_stmts(self) -> list[CondStmt]:
+        """Lazily build and cache the CondStmt list from cmplog pairs."""
+        f = self.f
+        cached = getattr(f, "_cond_stmts", None)
+        if cached is not None:
+            # Invalidate when the pair list changes.
+            pair_id = id(f._cmplog.pairs) if f._cmplog and f._cmplog.pairs else -1
+            if getattr(f, "_cond_stmts_pair_id", None) == pair_id:
+                return cached
+        from fuzzer_tool.core.cond_stmt import (
+            conds_from_cmplog_pairs,
+        )
+
+        pair_meta = (
+            getattr(f._cmplog, "_pair_cmp", {}) if hasattr(f, "_cmplog") and f._cmplog else {}
+        )
+        pair_pc = getattr(f._cmplog, "_pair_pc", {}) if hasattr(f, "_cmplog") and f._cmplog else {}
+        cached = conds_from_cmplog_pairs(
+            f._cmplog.pairs if f._cmplog and f._cmplog.pairs else [],
+            pair_meta=pair_meta,
+            pair_pc=pair_pc,
+        )
+        f._cond_stmts = cached
+        f._cond_stmts_pair_id = id(f._cmplog.pairs) if f._cmplog and f._cmplog.pairs else -1
+        return cached
 
     def _op_special_strings(self, buf, _byte_idx, _data):
         """Insert a security-sensitive string at a random position.

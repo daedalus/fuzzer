@@ -15,9 +15,6 @@ amplitudes, independent of whatever produced the oversized input.
 
 from unittest.mock import MagicMock
 
-import numpy as np
-import pytest
-
 from fuzzer_tool.core.qea import (
     QEA_MAX_INPUT_BYTES,
     QEAIndividual,
@@ -132,6 +129,6 @@ class TestQeaCapDoesNotAffectNormalSeeds:
         qea = QEALifecycle(pop_size=4, generation_size=10**9)
         seeds = [b"PNG seed data " * 20 for _ in range(4)]  # ~280 bytes each
         qea.initialize(seeds, _edge_tracker())
-        for ind, seed in zip(qea.population, seeds):
+        for ind, seed in zip(qea.population, seeds, strict=True):
             assert ind.best_collapsed == seed
             assert len(ind.amplitudes) == len(seed) * 8

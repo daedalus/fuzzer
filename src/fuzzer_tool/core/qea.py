@@ -57,6 +57,7 @@ def _qea_cap(data: bytes) -> bytes:
     """
     return data[:QEA_MAX_INPUT_BYTES] if len(data) > QEA_MAX_INPUT_BYTES else data
 
+
 if TYPE_CHECKING:
     from fuzzer_tool.core.edge_tracker import EdgeTracker
     from fuzzer_tool.core.ga import FitnessFunction, Speciation

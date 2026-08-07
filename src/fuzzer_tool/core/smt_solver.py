@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import struct
 
+from fuzzer_tool.core.cond_stmt import CondStmt
 from fuzzer_tool.core.crc32 import crc32
 
 log = logging.getLogger(__name__)
@@ -80,6 +81,29 @@ class ConcolicTrace:
 
     def has_entries(self) -> bool:
         return len(self.entries) > 0
+
+    def to_cond_stmts(self, base_cmpid: int = 0) -> list[CondStmt]:
+        """Convert accumulated trace entries into CondStmt objects.
+
+        Each entry becomes a ``CondStmt`` with the stored operand bytes,
+        width, and optional PC.  The comparison result is encoded as the
+        ``result`` field so downstream consumers can distinguish ``<``,
+        ``==``, and ``>`` outcomes.
+        """
+        out: list[CondStmt] = []
+        cmpid = base_cmpid
+        for entry in self.entries:
+            c = CondStmt.from_cmplog_pair(
+                cmpid=cmpid,
+                op_a=entry["op_a"],
+                op_b=entry["op_b"],
+                width=entry["width"],
+                result=0,
+                pc=entry.get("pc"),
+            )
+            out.append(c)
+            cmpid += 1
+        return out
 
     def solve(self, timeout_ms: int = _SOLVER_TIMEOUT_MS) -> bytes | None:
         """Build a z3 constraint model from all entries and solve.
