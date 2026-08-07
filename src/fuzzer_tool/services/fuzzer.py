@@ -2761,8 +2761,14 @@ class Fuzzer:
         if self._use_elo and self._elo and len(self._last_ops_used) >= 2:
             unique_ops = list(dict.fromkeys(self._last_ops_used))  # preserve order, dedup
             winners = set(self._last_ops_used) if success else set()
-            if winners:
-                self._elo.record_round(unique_ops, winners, crash=is_crash)
+            # Record unconditionally, including rounds where nothing found
+            # coverage. Guarding on `if winners:` meant Elo only ever saw
+            # successful iterations -- a systematic positive bias, and no
+            # learning at all during a stall (measured: 4000 execs sitting
+            # in random_stall produced zero recorded matches across all 106
+            # arms). record_round() handles the empty-winners case via the
+            # cross-iteration comparison against the previous round.
+            self._elo.record_round(unique_ops, winners, crash=is_crash)
             # Apply periodic decay
             self._elo_decay_counter += 1
             if self._elo_decay_counter >= self._elo_decay_interval:

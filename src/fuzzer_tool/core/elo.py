@@ -252,7 +252,14 @@ class EloTracker:
         """
         losers = [op for op in operators if op not in winners]
 
-        if losers:
+        # `winners` must be non-empty here, not just `losers`. When nothing
+        # found coverage every operator is a loser, so `if losers:` is true,
+        # the winner loops below iterate an empty set, and the function
+        # returns having done nothing -- making the all-losers branch under
+        # the `elif` unreachable. That branch is the only place a failed
+        # round can produce a rating change, so without this guard Elo
+        # learns exclusively from successes and never from failures.
+        if losers and winners:
             # Normal case: winners beat losers
             if edge_counts and len(winners) > 1:
                 # Multiple winners — use proportional scoring among them
@@ -697,7 +704,14 @@ class BayesianEloTracker:
         """Record outcomes for a group of operators (same logic as EloTracker)."""
         losers = [op for op in operators if op not in winners]
 
-        if losers:
+        # `winners` must be non-empty here, not just `losers`. When nothing
+        # found coverage every operator is a loser, so `if losers:` is true,
+        # the winner loops below iterate an empty set, and the function
+        # returns having done nothing -- making the all-losers branch under
+        # the `elif` unreachable. That branch is the only place a failed
+        # round can produce a rating change, so without this guard Elo
+        # learns exclusively from successes and never from failures.
+        if losers and winners:
             if edge_counts and len(winners) > 1:
                 max_edges = max(edge_counts.get(w, 0) for w in winners) or 1
                 for w in winners:
