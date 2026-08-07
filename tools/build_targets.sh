@@ -480,8 +480,9 @@ compile_vendored_libs() {
     # libpng (depends on zlib)
     if [ -d "$VENDOR/libpng" ] && [ -d "$VENDOR/zlib" ]; then
         (cd "$VENDOR/libpng" && CC=$cc \
-            CFLAGS="-O2 -g -fPIC ${scov_flag} -I../../zlib" \
-            LDFLAGS="-L../../zlib" \
+            CPPFLAGS="-I../zlib" \
+            CFLAGS="-O2 -g -fPIC ${scov_flag} -I../zlib" \
+            LDFLAGS="-L../zlib" \
             ./configure --with-pkgconfig=no 2>/dev/null && make -j$(nproc) 2>/dev/null) && \
             ok "libpng (vendored)" || warn "libpng (vendored) failed"
     else
@@ -516,12 +517,21 @@ build_vendored_so_targets() {
     local JPEG_OBJS=""
     local JPEG_INC=""
 
+    # Link against the built static archives (libz.a / libpng16.a), not a
+    # glob of loose *.o files. `make all` in these trees also builds test/
+    # tool binaries (pngtest.c, zlib's test/example.c, minigzip.c, ...)
+    # whose .o files sit in the same directory and each define their own
+    # main() -- glob every *.o and the final link fails with "multiple
+    # definition of main" against the fuzz target wrapper's own main().
+    # The .a archive is exactly the library's object subset with none of
+    # that, including the ones nested under mips/intel/powerpc/ that a
+    # flat top-level glob would miss entirely anyway.
     if [ -d "$VENDOR/zlib" ]; then
-        ZLIB_OBJS=$(ls "$VENDOR/zlib"/*.o 2>/dev/null | tr '\n' ' ')
+        [ -f "$VENDOR/zlib/libz.a" ] && ZLIB_OBJS="$VENDOR/zlib/libz.a"
         ZLIB_INC="-I$VENDOR/zlib"
     fi
     if [ -d "$VENDOR/libpng" ]; then
-        PNG_OBJS=$(ls "$VENDOR/libpng"/*.o 2>/dev/null | tr '\n' ' ')
+        [ -f "$VENDOR/libpng/.libs/libpng16.a" ] && PNG_OBJS="$VENDOR/libpng/.libs/libpng16.a"
         PNG_INC="-I$VENDOR/libpng -I$VENDOR/libpng/scripts"
     fi
     if [ -d "$VENDOR/libjpeg-turbo" ]; then

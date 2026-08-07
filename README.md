@@ -217,6 +217,46 @@ Regardless of the default, the build script selects `clang` automatically for
 the features that require it (trace-pc-guard, trace-cmp, UBSAN, MSAN, sancov),
 so those work even when `DEFAULT_CC` is gcc.
 
+#### Vendored libraries: required for real coverage depth
+
+Compiler flags only instrument code the build actually compiles. A target
+linking a *system* library (`-lpng`, `-lz`, `-ljpeg`) gets zero edges from
+inside that library no matter which compiler or coverage flag is used — the
+library was built by your distro without instrumentation, and the target only
+sees it across a `.so` boundary. What remains instrumented is the thin target
+wrapper: `targets/png_read.c` is 175 lines that open a file, call
+`png_read_png`, and check the error path.
+
+`vendor/` is gitignored, so a fresh clone silently falls back to system libs.
+Nothing fails and the numbers look plausible — the ceiling is just quietly
+much lower. Fetch the sources to fix it:
+
+```bash
+git clone --depth 1 --branch v1.3.1  https://github.com/madler/zlib.git   vendor/zlib
+git clone --depth 1 --branch v1.6.43 https://github.com/pnggroup/libpng.git vendor/libpng
+bash tools/build_targets.sh   # look for: "Using vendored trace-cmp libraries"
+```
+
+No extra flag is needed — `--cmplog` is on by default, and
+`build_simple_so_targets()` links the vendored archives automatically once
+they exist. Measured on `targets/png_read.so`, identical corpus and 45s budget:
+
+| Build | `NEEDED` | png syms defined / undefined | Bitmap | Edges (45 s) |
+|---|---|---|---|---|
+| System libs | `libpng16.so.16`, `libz.so.1` | 2 / 17 | 8 KB | 304 |
+| Vendored | *(none)* | 418 / 0 | 16 KB | **1,444** |
+
+To check which one you have:
+
+```bash
+readelf -d targets/png_read.so | grep NEEDED     # libpng16.so.16 present => system libs
+nm targets/png_read.so | grep -c ' [Tt] png_'    # 2 => system libs, ~418 => vendored
+```
+
+A suspiciously low edge plateau on a large, branchy library is usually this —
+verify the link before tuning schedulers or dictionaries. See
+[`docs/learnings/2026-08-07-uninstrumented-system-libs-coverage.md`](docs/learnings/2026-08-07-uninstrumented-system-libs-coverage.md).
+
 ---
 
 ## Subcommands
