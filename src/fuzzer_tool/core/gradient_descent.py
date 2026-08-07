@@ -27,12 +27,43 @@ _STEPS = (1, -1, 2, -2, 4, -4, 8, -8)
 
 
 def _distance(a: bytes, b: bytes) -> int:
-    """Hamming distance over the min-length prefix plus length delta."""
+    """Hamming distance over the min-length prefix plus length delta.
+
+    Kept for the whole-buffer case (len(a) == len(b)); see
+    ``_window_distance`` for the operand-matching objective. Scoring a
+    large buffer against a short operand with this function is
+    meaningless: it only ever inspects ``a[:len(b)]``, so bytes past the
+    operand width cannot affect the result.
+    """
     n = min(len(a), len(b))
     dist = 0
     for i in range(n):
         dist += (a[i] ^ b[i]).bit_count()
     dist += abs(len(a) - len(b)) * 8
+    return dist
+
+
+def _window_distance(buf: bytes, pos: int, target: bytes) -> int:
+    """Hamming distance between ``buf[pos:pos+len(target)]`` and *target*.
+
+    This is the objective the descent actually optimizes. The operand
+    being matched is a few bytes wide and can sit anywhere in a
+    multi-KB input, so the score has to be local to the position under
+    consideration -- a whole-buffer comparison against a short operand
+    is dominated by a constant length term and is blind to every byte
+    past ``len(target)``, which made the descent unable to modify
+    anything outside the first few bytes of the input.
+
+    Positions where the window would run past the end of the buffer
+    score the full window width (maximally bad) rather than being
+    silently skipped, so they simply never win.
+    """
+    n = len(target)
+    if pos < 0 or pos + n > len(buf):
+        return n * 8
+    dist = 0
+    for i in range(n):
+        dist += (buf[pos + i] ^ target[i]).bit_count()
     return dist
 
 
@@ -118,9 +149,21 @@ def gradient_descent(
     if not candidates:
         return input_buf
 
+    # Anchor the descent at the most promising site: the candidate
+    # position whose window already best matches the target. Scoring is
+    # local to this window (see _window_distance), so the descent can
+    # reach an operand anywhere in the input rather than only the first
+    # `width` bytes.
+    site = min(candidates, key=lambda p: _window_distance(bytes(buf), p, target))
+
     best = bytearray(buf)
-    best_score = _distance(bytes(best), target)
+    best_score = _window_distance(bytes(best), site, target)
     if best_score == 0:
+        return bytes(best)
+
+    # Only the bytes inside the scored window can change the objective.
+    window = [site + i for i in range(width) if site + i < len(best)]
+    if not window:
         return bytes(best)
 
     interesting = _interesting_for_width(width)
@@ -129,15 +172,13 @@ def gradient_descent(
     for _ in range(max_epochs):
         improved = False
 
-        # Gradient pass: try perturbations at each candidate position.
-        for pos in candidates:
-            if pos >= len(best):
-                continue
+        # Gradient pass: try perturbations at each byte of the window.
+        for pos in window:
             orig = best[pos]
             for delta in _STEPS:
                 candidate = bytearray(best)
                 candidate[pos] = max(0, min(255, orig + delta))
-                score = _distance(bytes(candidate), target)
+                score = _window_distance(bytes(candidate), site, target)
                 if score < best_score:
                     best = candidate
                     best_score = score
@@ -153,15 +194,13 @@ def gradient_descent(
                 break
 
             # Repick from interesting values to escape local minima.
-            for pos in candidates:
-                if pos >= len(best):
-                    continue
+            for pos in window:
                 orig = best[pos]
                 for v in interesting:
                     if 0 <= v <= 255 and v != orig:
                         candidate = bytearray(best)
                         candidate[pos] = v
-                        score = _distance(bytes(candidate), target)
+                        score = _window_distance(bytes(candidate), site, target)
                         if score < best_score:
                             best = candidate
                             best_score = score

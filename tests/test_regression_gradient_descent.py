@@ -67,3 +67,52 @@ class TestGradientDescent:
         out = gradient_descent(buf, (b"\x00" * 8, target))
         # Output should differ because random candidates are injected.
         assert out != buf
+
+
+class TestOperandAtNonZeroOffset:
+    """The original objective was blind to everything past the operand width.
+
+    ``_distance(buf, target)`` compared the whole buffer against a short
+    operand: Hamming over ``buf[:len(target)]`` plus a constant length
+    delta. Mutating any byte at or beyond ``len(target)`` therefore left
+    the score unchanged, so no perturbation there was ever accepted --
+    the descent could only ever modify the first few bytes of the input,
+    even though ``_candidate_positions`` correctly identified sites deep
+    in the buffer. Every original test happened to place the operand at
+    offset 0, which masked this completely.
+    """
+
+    def test_solves_operand_deep_in_buffer(self):
+        target = b"\xDE\xAD\xBE\xEF"
+        buf = bytearray(b"A" * 1024)
+        buf[600:604] = b"\xDE\xAD\xBE\xEE"  # one byte short of the target
+        out = gradient_descent(bytes(buf), (target, target), max_len=4096)
+        assert out[600:604] == target
+
+    def test_modifies_bytes_beyond_operand_width(self):
+        """Directly pins the blind spot: the byte that must change sits
+        far past len(target), where the old objective had zero gradient."""
+        target = b"\x11\x22\x33\x44"
+        buf = bytearray(b"\x00" * 512)
+        buf[300:304] = b"\x11\x22\x33\x40"
+        inp = bytes(buf)
+        out = gradient_descent(inp, (target, target), max_len=4096)
+        changed = [i for i in range(len(inp)) if inp[i] != out[i]]
+        assert changed, "descent made no change at all"
+        assert all(i >= len(target) for i in changed)
+
+    def test_picks_best_matching_site_among_several(self):
+        """With several partial matches, the descent should anchor on the
+        closest one rather than an arbitrary or first-found position."""
+        target = b"\xAA\xBB\xCC\xDD"
+        buf = bytearray(b"\x00" * 600)
+        buf[100:104] = b"\xAA\x00\x00\x00"  # 1/4 match
+        buf[400:404] = b"\xAA\xBB\xCC\xD5"  # near-exact
+        out = gradient_descent(bytes(buf), (target, target), max_len=4096)
+        assert out[400:404] == target
+
+    def test_length_is_preserved(self):
+        target = b"\x77\x88"
+        buf = bytes(b"z" * 300)
+        out = gradient_descent(buf, (target, target), max_len=4096)
+        assert len(out) == len(buf)
