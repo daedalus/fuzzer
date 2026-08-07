@@ -39,12 +39,26 @@ _MAX_INFLATE = 1 << 22  # 4 MiB decompressed ceiling
 # 256 KiB keeps the worst case near 1ms instead of ~20ms at the 4 MiB ceiling.
 _MAX_PLAIN_WORK = 1 << 18
 _COMPRESS_LEVEL = 1  # speed over ratio
-_CACHE_MAXSIZE = 256
+
+_CACHE_MAX_BYTES = 8 << 20
+"""Total plaintext held by the inflate cache.
+
+The cache was originally bounded by *entry count* (256), which is not a
+memory bound at all: each entry can hold up to _MAX_INFLATE (4 MiB), so the
+ceiling was 256 x 4 MiB = 1 GB, and a corpus of highly compressible inputs
+reached it — 251 entries holding 1053 MB, RSS 1040 MB against a 47 MB
+baseline. Bounding the bytes is the actual invariant wanted."""
+
+_CACHE_MAX_ENTRY = _MAX_PLAIN_WORK
+"""Largest plaintext worth caching. Only the first _MAX_PLAIN_WORK bytes are
+ever mutated, so caching more buys nothing, and one huge entry would evict
+every useful small one."""
 
 # (wbits, hash(compressed bytes)) -> plaintext, so repeat selections skip the
 # inflate. wbits is part of the key: the same bytes must not be served from a
 # zlib-decoded entry when asked for as gzip (and vice versa).
 _inflate_cache: dict[tuple[int, int], bytes] = {}
+_inflate_cache_bytes = 0
 
 
 def _cache_get(data: bytes, wbits: int) -> bytes | None:
@@ -52,9 +66,35 @@ def _cache_get(data: bytes, wbits: int) -> bytes | None:
 
 
 def _cache_put(data: bytes, wbits: int, plain: bytes) -> None:
-    if len(_inflate_cache) >= _CACHE_MAXSIZE:
-        _inflate_cache.clear()
-    _inflate_cache[(wbits, hash(data))] = plain
+    """Insert under a byte budget, evicting oldest-first.
+
+    Entries above _CACHE_MAX_ENTRY are not cached: they exceed what the
+    operators read, and admitting one would flush the rest of the cache.
+    """
+    global _inflate_cache_bytes
+    if len(plain) > _CACHE_MAX_ENTRY:
+        return
+    key = (wbits, hash(data))
+    existing = _inflate_cache.pop(key, None)
+    if existing is not None:
+        _inflate_cache_bytes -= len(existing)
+    # dicts preserve insertion order, so the first key is the oldest.
+    while _inflate_cache and _inflate_cache_bytes + len(plain) > _CACHE_MAX_BYTES:
+        oldest = next(iter(_inflate_cache))
+        _inflate_cache_bytes -= len(_inflate_cache.pop(oldest))
+    _inflate_cache[key] = plain
+    _inflate_cache_bytes += len(plain)
+
+
+def _cache_reset() -> None:
+    """Drop everything. Exposed for tests and long-run housekeeping."""
+    global _inflate_cache_bytes
+    _inflate_cache.clear()
+    _inflate_cache_bytes = 0
+
+
+def cache_stats() -> dict:
+    return {"entries": len(_inflate_cache), "bytes": _inflate_cache_bytes}
 
 
 def _get_rng(rng=None):

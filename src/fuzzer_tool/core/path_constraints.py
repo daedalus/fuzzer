@@ -70,6 +70,17 @@ def _z3():
     return z3
 
 
+MAX_ATTEMPTED = 50_000
+"""Cap on the remembered-branch set.
+
+Each entry holds the operand bytes, so an unbounded set grows roughly 200
+bytes per distinct branch — ~40 MB per 200k, and a long campaign sees far
+more than that. Once the cap is hit the set is cleared rather than evicted
+piecewise: the frontier is an optimisation to avoid re-solving branches, not
+a correctness requirement, so forgetting costs at worst a few duplicate
+queries."""
+
+
 class BranchRecord:
     """One observed comparison, and which way it went."""
 
@@ -252,6 +263,8 @@ class PathConstraintSolver:
         if offset + width > len(input_data):
             return None
 
+        if len(self._attempted) >= MAX_ATTEMPTED:
+            self._attempted.clear()
         self._attempted.add(rec.key)
         self.queries += 1
 
