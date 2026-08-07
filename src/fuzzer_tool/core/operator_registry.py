@@ -126,6 +126,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "auto_extras",
         "redqueen_xform",
         "gradient_cmp",
+        "path_negate",
         "redqueen",
         "havoc",
         "overwrite_copy",
@@ -141,6 +142,14 @@ _CATEGORIES: dict[str, set[str]] = {
 
 def _has_cmplog_pairs(fuzzer, _data) -> bool:
     return bool(getattr(fuzzer, "_cmplog", None) and fuzzer._cmplog.pairs)
+
+
+def _has_branch_records(fuzzer, _data) -> bool:
+    """Needs recorded outcomes *and* an enabled solver (--path-negation)."""
+    cmplog = getattr(fuzzer, "_cmplog", None)
+    if not (cmplog and getattr(cmplog, "_pair_cmp", None)):
+        return False
+    return getattr(fuzzer, "_path_solver", None) is not None
 
 
 def _redqueen_available(fuzzer, data) -> bool:
@@ -266,6 +275,10 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     "grammar_tree_mutate": lambda f, _d: bool(getattr(f, "grammar", None)),
     "redqueen_xform": _has_cmplog_pairs,
     "gradient_cmp": _has_cmplog_pairs,
+    # Needs recorded comparison *outcomes*, not just operand pairs: the
+    # shim only emits the result field in trace mode, and without it there
+    # is no predicate to negate.
+    "path_negate": _has_branch_records,
     # per-input ops
     "redqueen": _redqueen_available,
     # learned checksum polynomial (gated on recovered polynomial)

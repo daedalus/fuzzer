@@ -1470,6 +1470,39 @@ class OperatorEngine:
             mutated = self.f._arm_mutator._generate_random_arm(max_len=self.f.max_len, rng=rng)
         return bytearray(mutated[: self.f.max_len])
 
+    def _op_path_negate(self, buf, byte_idx, data):
+        """Solve for an input that flips a recorded branch predicate.
+
+        Unlike ``redqueen_xform``, which substitutes an operand that was
+        already observed, this asserts the *negated* comparison over
+        symbolic input bytes and lets z3 search — so it can reach the
+        sibling branch of a comparison the corpus has never satisfied.
+
+        Falls back to havoc when z3 is absent, no branch maps to an input
+        offset, or the constraint is unsatisfiable; returning the buffer
+        unchanged would waste the execution.
+        """
+        from fuzzer_tool.core.path_constraints import records_from_collector
+
+        cmplog = getattr(self.f, "_cmplog", None)
+        solver = getattr(self.f, "_path_solver", None)
+        # _path_solver is None unless --path-negation was passed (or z3 is
+        # missing). Respect that rather than constructing a private solver:
+        # the flag is the single control, and the fuzzer's instance carries
+        # the shared frontier so the two call sites do not re-solve the same
+        # branch independently.
+        if cmplog is None or solver is None:
+            return self._op_havoc(buf, byte_idx, data)
+
+        records = records_from_collector(cmplog)
+        if not records:
+            return self._op_havoc(buf, byte_idx, data)
+
+        solved = solver.solve_first(records, bytes(buf))
+        if solved is None:
+            return self._op_havoc(buf, byte_idx, data)
+        return bytearray(solved[: self.f.max_len])
+
     def _op_elf_chunk_mutate(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations.elf import ElfMutator
 

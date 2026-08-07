@@ -86,6 +86,11 @@ class CmplogCollector:
         self._pair_set: set[tuple[bytes, bytes]] = set()
         # PC mapping: pair -> program counter (optional, from trace-mode shim)
         self._pair_pc: dict[tuple[bytes, bytes], int | None] = {}
+        # (op_a, op_b) -> (result, width). The shim already emits the
+        # comparison outcome (-1 a<b / 0 a==b / 1 a>b) and operand width;
+        # both are needed to negate a branch predicate rather than merely
+        # replay the operands that reached it.
+        self._pair_cmp: dict[tuple[bytes, bytes], tuple[int, int]] = {}
         self._shim_path: str | None = None
         self._shim_handle = None
         self.workdir: str | None = workdir  # dir for runtime log files
@@ -328,6 +333,12 @@ class CmplogCollector:
                         if len(parts) >= 5:
                             with contextlib.suppress(ValueError, IndexError):
                                 pc = int(parts[-1])
+                        # Comparison outcome and operand width, emitted by the
+                        # shim as fields 3 and 4 ("CMP <a> <b> <result> <n> <pc>").
+                        cmp_meta = None
+                        if len(parts) >= 4:
+                            with contextlib.suppress(ValueError, IndexError):
+                                cmp_meta = (int(parts[2]), int(parts[3]))
                         # Track pairs for input-to-state matching
                         pair = (operand_a, operand_b)
                         if pair not in self._pair_set:
@@ -335,6 +346,8 @@ class CmplogCollector:
                             new_pairs.append(pair)
                             if pc is not None:
                                 self._pair_pc[pair] = pc
+                            if cmp_meta is not None:
+                                self._pair_cmp[pair] = cmp_meta
                     except ValueError:
                         continue
                 self._read_offset = f.tell()
@@ -445,6 +458,22 @@ class CmplogCollector:
     def pair_confidence(self, op_a: bytes, op_b: bytes) -> int:
         """Return how many times a pair has been observed."""
         return self._pair_occurrence.get((op_a, op_b), 0)
+
+    def pair_cmp(self, op_a: bytes, op_b: bytes) -> tuple[int, int] | None:
+        """Observed ``(result, width)`` for a pair, or None if unrecorded.
+
+        ``result`` is the shim's comparison outcome: -1 for a<b, 0 for a==b,
+        1 for a>b. Negating it is what turns a recorded comparison into a
+        solvable constraint for reaching the opposite branch.
+        """
+        return self._pair_cmp.get((op_a, op_b))
+
+    def branch_records(self) -> list[tuple[bytes, bytes, int, int, int | None]]:
+        """All pairs with a recorded outcome, as (a, b, result, width, pc)."""
+        out = []
+        for pair, (result, width) in self._pair_cmp.items():
+            out.append((pair[0], pair[1], result, width, self._pair_pc.get(pair)))
+        return out
 
     def pair_pc(self, op_a: bytes, op_b: bytes) -> int | None:
         """Return the program counter for a pair, if known (trace mode)."""
