@@ -1470,6 +1470,33 @@ class OperatorEngine:
             mutated = self.f._arm_mutator._generate_random_arm(max_len=self.f.max_len, rng=rng)
         return bytearray(mutated[: self.f.max_len])
 
+    def _op_field_repair(self, buf, byte_idx, data):
+        """Restore every derived field so they all hold simultaneously.
+
+        The existing fixups repair one field in isolation, so a mutation
+        touching coupled fields (a length inside a checksummed span, say)
+        leaves at least one wrong and the target rejects the input before
+        reaching the parser logic being fuzzed. This repairs them in
+        dependency order.
+
+        Applied after a havoc pass, so the operator both mutates and
+        re-establishes structural validity — repairing an already-valid
+        input would be a no-op execution.
+        """
+        from fuzzer_tool.core.field_constraints import png_fields, repair
+
+        mutated = self._op_havoc(buf, byte_idx, data)
+        if mutated is None:
+            mutated = buf
+        raw = bytes(mutated)
+        fields = png_fields(raw)
+        if not fields:
+            return mutated
+        fixed = repair(fields, raw)
+        if fixed is None:
+            return mutated
+        return bytearray(fixed[: self.f.max_len])
+
     def _op_path_negate(self, buf, byte_idx, data):
         """Solve for an input that flips a recorded branch predicate.
 
