@@ -47,6 +47,9 @@ class ChecksumLearner:
         self._poly: int | None = None  # connection polynomial (model form)
         self._poly_width: int = poly_width
         self._reflect: bool = False  # True when recovered via BM (reflected domain)
+        # Pair count at the last recovery attempt. Recovery only re-runs when
+        # the pair set has grown since — see ensure_poly() for the why.
+        self._pairs_attempted_at = -1
         self._format_extractors: list[Callable[[bytes], list[tuple[bytes, int]]]] = [
             self._extract_png_pairs,
             self._extract_zip_pairs,
@@ -66,8 +69,7 @@ class ChecksumLearner:
         if not pairs:
             return
         self._pairs.extend(pairs)
-        if self._poly is None and self.has_enough_pairs():
-            self._recover()
+        self._maybe_recover()
 
     def extract_format_pairs(self, data: bytes) -> list[tuple[bytes, int]]:
         """Run all format-aware extractors on *data*."""
@@ -78,10 +80,26 @@ class ChecksumLearner:
         return result
 
     def ensure_poly(self) -> int | None:
-        """Return the recovered polynomial, attempting recovery if needed."""
-        if self._poly is None and self.has_enough_pairs():
-            self._recover()
+        """Return the recovered polynomial, attempting recovery if needed.
+
+        Recovery is attempted only when the pair set has grown since the
+        last attempt. ``ensure_poly()`` runs once per fuzz iteration via
+        the ``crc_learn`` availability gate, so re-running the full
+        GCD/BM recovery on every call when it cannot verify (e.g. PNG
+        CRCs with mismatched init/final_xor) collapses throughput —
+        measured ~56 s of a 103 s fuzz profile, eps to single digits.
+        """
+        self._maybe_recover()
         return self._poly
+
+    def _maybe_recover(self) -> None:
+        """Run recovery when unverified and new pairs have arrived."""
+        if (
+            self._poly is None
+            and self.has_enough_pairs()
+            and len(self._pairs) != self._pairs_attempted_at
+        ):
+            self._recover()
 
     @property
     def pair_count(self) -> int:
@@ -192,6 +210,8 @@ class ChecksumLearner:
         """
         if not self._pairs:
             return
+
+        self._pairs_attempted_at = len(self._pairs)
 
         # Deduplicate pairs
         unique = list({(d, c) for d, c in self._pairs})
