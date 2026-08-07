@@ -118,6 +118,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "recompress_zlib",
         "recompress_gzip",
         "field_repair",
+        "tlv_nest_mutate",
     },
     "adaptive": {
         "markov_bytes",
@@ -128,6 +129,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "redqueen_xform",
         "gradient_cmp",
         "path_negate",
+        "length_offset_goal",
         "redqueen",
         "havoc",
         "overwrite_copy",

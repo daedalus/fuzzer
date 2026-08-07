@@ -1470,6 +1470,76 @@ class OperatorEngine:
             mutated = self.f._arm_mutator._generate_random_arm(max_len=self.f.max_len, rng=rng)
         return bytearray(mutated[: self.f.max_len])
 
+    def _op_tlv_nest_mutate(self, buf, byte_idx, data):
+        """Mutate a nested TLV value and fix every enclosing length.
+
+        ``tlv_mutate`` writes boundary constants into candidate length
+        fields, which breaks the frame and stops the parser at the outermost
+        container. This edits a value and re-derives the length of every
+        frame enclosing it, so the input stays well-formed several levels
+        down and the mutated leaf is actually reached.
+        """
+        from fuzzer_tool.core.structural_constraints import (
+            parse_tlv,
+            resize_tlv_value,
+        )
+
+        rng = self.f._rand_pool
+        raw = bytes(buf)
+        for tag_w, len_w, big in ((1, 2, True), (2, 2, True), (1, 4, True), (1, 2, False)):
+            roots = parse_tlv(raw, tag_width=tag_w, length_width=len_w, big_endian=big)
+            if not roots:
+                continue
+            nodes = [n for root in roots for n in root.walk()]
+            if not nodes:
+                continue
+            target = nodes[rng.randint(0, len(nodes) - 1)]
+            old = raw[target.value_start : target.value_end]
+            if target.children and old:
+                # Container: perturb bytes without changing the frame size.
+                payload = bytearray(old)
+                payload[rng.randint(0, len(payload) - 1)] ^= 1 << rng.randint(0, 7)
+                payload = bytes(payload)
+            else:
+                delta = rng.choice((-8, -1, 0, 1, 8, 64))
+                size = max(0, min(len(old) + delta, self.f.max_len // 2))
+                payload = (old + bytes(rng.randint(0, 255) for _ in range(size)))[:size]
+            out = resize_tlv_value(
+                raw, target, payload, tag_width=tag_w, length_width=len_w, big_endian=big
+            )
+            if out:
+                return bytearray(out[: self.f.max_len])
+        return self._op_havoc(buf, byte_idx, data)
+
+    def _op_length_offset_goal(self, buf, byte_idx, data):
+        """Write a solved offset/size pair into a candidate length field.
+
+        The existing TLV and ELF operators write boundary constants and hit
+        the wraparound branch only by luck. These pairs satisfy the arithmetic
+        condition by construction — a sum that wraps while the offset alone
+        still passes a naive bounds check, for instance.
+        """
+        from fuzzer_tool.core.structural_constraints import GOALS, solve_length_offset
+
+        rng = self.f._rand_pool
+        out = bytearray(buf)
+        width = rng.choice((2, 4, 8))
+        if len(out) < width * 2 + 1:
+            return self._op_havoc(buf, byte_idx, data)
+
+        goal = GOALS[rng.randint(0, len(GOALS) - 1)]
+        solved = solve_length_offset(goal, width, len(out), rng=rng)
+        if solved is None:
+            return self._op_havoc(buf, byte_idx, data)
+        offset_value, size_value = solved
+
+        pos = rng.randint(0, len(out) - width * 2)
+        big = rng.randint(0, 1) == 1
+        order = "big" if big else "little"
+        out[pos : pos + width] = offset_value.to_bytes(width, order)
+        out[pos + width : pos + width * 2] = size_value.to_bytes(width, order)
+        return out[: self.f.max_len]
+
     def _op_field_repair(self, buf, byte_idx, data):
         """Restore every derived field so they all hold simultaneously.
 
