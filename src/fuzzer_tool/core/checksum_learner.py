@@ -36,6 +36,37 @@ from fuzzer_tool.core.berlekamp_massey import (
 )
 from fuzzer_tool.core.crc32 import _STANDARD_POLY, crc32, set_active_model
 
+# recover_polynomial_gcd builds one Python int per pair (data bit-shifted
+# by the checksum width) and reduces them pairwise via poly_gcd/_poly_mod,
+# whose cost scales with operand bit-length -- for a PNG IDAT chunk that's
+# several KB of "data" per pair, i.e. tens of thousands of bits, and
+# _recover() runs this GCD reduction over the FULL pair set twice (once
+# non-reflected, once reflected) plus a BM fallback. With no cap here,
+# self._pairs grew for the life of the run (every new chunk/cmplog pair
+# extended it, nothing ever evicted), so cost per recovery attempt grew
+# without bound as the campaign progressed. Measured: a single _recover()
+# call blocked fuzz_one() for 30+ seconds once the pair set reached a few
+# hundred entries -- eps collapsed to single digits.
+CHECKSUM_PAIRS_MAX = 128  # cap the pair set GCD reduction runs over
+
+# _maybe_recover() previously re-ran full recovery whenever pair count
+# changed AT ALL -- during active fuzzing with cmplog/format-extraction
+# on, that's virtually every iteration, making the "only retry when
+# something changed" guard a no-op in practice for an unverifiable pair
+# set (which keeps producing "new" pairs forever without ever verifying).
+# Require a real batch of new evidence before re-attempting.
+RECOVERY_RETRY_BATCH = 32
+
+# recover_polynomial_gcd's syndrome cost scales with data bit-length; a
+# single pair with several KB of data (a PNG IDAT chunk) is expensive on
+# its own regardless of CHECKSUM_PAIRS_MAX. GCD-of-syndromes only needs a
+# couple of independent pairs in principle, so restrict the GCD path to
+# modestly-sized pairs -- real checksums this tool targets (PNG IHDR/
+# tEXt/etc, ZIP filenames, generic 4-byte cmplog operands) are typically
+# well under this. recover_lfsr (checksum values only, no data-length
+# dependency) is unaffected and still sees every pair.
+_GCD_MAX_PAIR_DATA_BYTES = 256
+
 
 class ChecksumLearner:
     """Learns and caches checksum polynomials from observed pairs."""
@@ -48,8 +79,15 @@ class ChecksumLearner:
         self._poly_width: int = poly_width
         self._reflect: bool = False  # True when recovered via BM (reflected domain)
         # Pair count at the last recovery attempt. Recovery only re-runs when
-        # the pair set has grown since — see ensure_poly() for the why.
+        # the pair set has grown by at least RECOVERY_RETRY_BATCH since —
+        # see ensure_poly()/_maybe_recover() for the why.
         self._pairs_attempted_at = -1
+        # Monotonic total across add_pairs() calls, independent of the
+        # CHECKSUM_PAIRS_MAX FIFO eviction in self._pairs -- the retry
+        # gate needs "how much new evidence arrived", which len(self._pairs)
+        # alone can't answer once eviction keeps that length pinned at the
+        # cap.
+        self._total_pairs_seen = 0
         self._format_extractors: list[Callable[[bytes], list[tuple[bytes, int]]]] = [
             self._extract_png_pairs,
             self._extract_zip_pairs,
@@ -65,10 +103,20 @@ class ChecksumLearner:
         return len(self._pairs) >= self.min_pairs
 
     def add_pairs(self, pairs: list[tuple[bytes, int]]) -> None:
-        """Add newly-observed (data, checksum) pairs and trigger recovery."""
+        """Add newly-observed (data, checksum) pairs and trigger recovery.
+
+        Capped at CHECKSUM_PAIRS_MAX (FIFO): recovery's cost scales with
+        the pair count, so an unbounded list means an unverifiable pair
+        set (one that keeps producing "new" pairs without ever
+        satisfying _verify()) makes every subsequent attempt more
+        expensive than the last, for the life of the run.
+        """
         if not pairs:
             return
         self._pairs.extend(pairs)
+        self._total_pairs_seen += len(pairs)
+        if len(self._pairs) > CHECKSUM_PAIRS_MAX:
+            self._pairs = self._pairs[-CHECKSUM_PAIRS_MAX:]
         self._maybe_recover()
 
     def extract_format_pairs(self, data: bytes) -> list[tuple[bytes, int]]:
@@ -82,22 +130,31 @@ class ChecksumLearner:
     def ensure_poly(self) -> int | None:
         """Return the recovered polynomial, attempting recovery if needed.
 
-        Recovery is attempted only when the pair set has grown since the
-        last attempt. ``ensure_poly()`` runs once per fuzz iteration via
-        the ``crc_learn`` availability gate, so re-running the full
-        GCD/BM recovery on every call when it cannot verify (e.g. PNG
-        CRCs with mismatched init/final_xor) collapses throughput —
-        measured ~56 s of a 103 s fuzz profile, eps to single digits.
+        Recovery is attempted only when at least RECOVERY_RETRY_BATCH new
+        pairs have arrived since the last attempt. ``ensure_poly()`` runs
+        once per fuzz iteration via the ``crc_learn`` availability gate,
+        so re-running the full GCD/BM recovery on every call when it
+        cannot verify (e.g. PNG CRCs with mismatched init/final_xor)
+        collapses throughput — measured ~56 s of a 103 s fuzz profile,
+        eps to single digits. A pure "did the count change at all" gate
+        turned out not to help in practice: active fuzzing with cmplog
+        and format extraction on finds a "new" pair almost every
+        iteration, so that gate was true almost every time too. Requiring
+        a real batch of new evidence is what actually bounds retry
+        frequency; CHECKSUM_PAIRS_MAX bounds the cost of each retry.
         """
         self._maybe_recover()
         return self._poly
 
     def _maybe_recover(self) -> None:
-        """Run recovery when unverified and new pairs have arrived."""
+        """Run recovery when unverified and a batch of new pairs arrived."""
         if (
             self._poly is None
             and self.has_enough_pairs()
-            and len(self._pairs) != self._pairs_attempted_at
+            and (
+                self._pairs_attempted_at < 0
+                or self._total_pairs_seen - self._pairs_attempted_at >= RECOVERY_RETRY_BATCH
+            )
         ):
             self._recover()
 
@@ -211,15 +268,26 @@ class ChecksumLearner:
         if not self._pairs:
             return
 
-        self._pairs_attempted_at = len(self._pairs)
+        self._pairs_attempted_at = self._total_pairs_seen
 
         # Deduplicate pairs
         unique = list({(d, c) for d, c in self._pairs})
 
+        # recover_polynomial_gcd's cost scales with data bit-length (each
+        # pair becomes a Python int shifted by the checksum width, reduced
+        # via poly_gcd/_poly_mod). CHECKSUM_PAIRS_MAX bounds pair *count*,
+        # but a single large-data pair (a PNG IDAT chunk can be several KB)
+        # is still expensive on its own, and GCD-of-syndromes doesn't need
+        # every pair -- 2 independent pairs are enough in principle, more
+        # just improves confidence. Cap which pairs feed the GCD path to
+        # ones with a modest data span; recover_lfsr (checksums only, no
+        # data-length dependency) still sees the full set.
+        gcd_pairs = [p for p in unique if len(p[0]) <= _GCD_MAX_PAIR_DATA_BYTES]
+
         # GCD-of-syndromes first: works for independent (data, checksum)
         # pairs (different files/chunks).  Recovers in the non-reflected
         # domain (normal-form polynomial).
-        poly = recover_polynomial_gcd(unique, width=self._poly_width)
+        poly = recover_polynomial_gcd(gcd_pairs, width=self._poly_width)
         if poly and poly != 0 and self._verify(poly, unique, reflect=False):
             self._reflect = False
             self._set_model(poly)
@@ -231,7 +299,7 @@ class ChecksumLearner:
         # common case in practice, so it's tried before the BM fallback,
         # which needs sequential register states independent pairs rarely
         # provide.
-        poly = recover_polynomial_gcd(unique, width=self._poly_width, reflected=True)
+        poly = recover_polynomial_gcd(gcd_pairs, width=self._poly_width, reflected=True)
         if poly and poly != 0 and self._verify(poly, unique, reflect=True):
             self._reflect = True
             self._set_model(poly)
