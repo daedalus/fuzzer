@@ -25,16 +25,36 @@ class BloomFilter:
         bit_idx  = (p & mask) & 7
     """
 
+    #: Width of the single backing digest.  ``k * bits_per_slice`` must not
+    #: exceed this or the tail slices address position 0 for every key.
+    DIGEST_BITS = 256
+
     def __init__(self, capacity: int, error_rate: float = 0.01) -> None:
         n = max(capacity, 1)
+        self.capacity = n
         m_ideal = -n * math.log(error_rate) / (math.log(2) ** 2)
-        self.m = 1 << max(1, int(m_ideal).bit_length())
+        # Smallest power of two >= m_ideal.  ``int(x).bit_length()`` overshoots
+        # by a full doubling whenever m_ideal is already a power of two.
+        self.m = 1 << max(1, (max(int(m_ideal), 1) - 1).bit_length())
         self._mask = self.m - 1
         self._bits_per_slice = self.m.bit_length() - 1
-        self._k = max(1, round(self.m / n * math.log(2)))
+        k_ideal = max(1, round(self.m / n * math.log(2)))
+        # A single SHA-256 supplies only 256 bits.  Past
+        # ``256 // bits_per_slice`` slices the shift register is exhausted and
+        # every further position collapses to 0, so the extra "hashes" are a
+        # constant probe that inflates the realised false-positive rate above
+        # the requested one.  Clamp instead of silently over-promising.
+        self._k_ideal = k_ideal
+        self._k = max(1, min(k_ideal, self.DIGEST_BITS // self._bits_per_slice))
 
         self._byte_len = (self.m + 7) // 8
         self._bits = bytearray(self._byte_len)
+        self.n_added = 0
+
+    @property
+    def digest_limited(self) -> bool:
+        """True when *k* had to be clamped to fit in the 256-bit digest."""
+        return self._k < self._k_ideal
 
     @staticmethod
     def _digest(key: str) -> int:
@@ -59,6 +79,7 @@ class BloomFilter:
             bit_idx = pos & 7
             self._bits[byte_idx] |= 1 << bit_idx
             v >>= self._bits_per_slice
+        self.n_added += 1
 
     def add(self, key: str) -> None:
         self._set(self._digest(key))
@@ -74,6 +95,28 @@ class BloomFilter:
         self._set(value)
         return False
 
+    def update_bytes(self, key: bytes, reset_on_full: bool = False) -> bool:
+        """Check-then-add for a raw ``bytes`` key.  Returns ``True`` if seen.
+
+        Hot-path variant of :meth:`update`: the digest is taken over the raw
+        buffer, skipping the ``.hex()`` round-trip (which doubles the payload
+        and allocates) that :meth:`add_bytes` performs.
+
+        Args:
+            key: Raw bytes to test and insert.
+            reset_on_full: When the filter has absorbed ``capacity`` keys, wipe
+                it before inserting.  Keeps the realised false-positive rate at
+                the configured bound for unbounded streams at the cost of
+                forgetting older keys — a generational filter in one array.
+        """
+        if reset_on_full and self.n_added >= self.capacity:
+            self.clear()
+        value = int.from_bytes(hashlib.sha256(key).digest(), "big")
+        if self._check(value):
+            return True
+        self._set(value)
+        return False
+
     @property
     def load_factor(self) -> float:
         """Fraction of bits set to 1."""
@@ -82,6 +125,7 @@ class BloomFilter:
 
     def clear(self) -> None:
         self._bits = bytearray(self._byte_len)
+        self.n_added = 0
 
     def add_bytes(self, key: bytes, max_hamming: int = 0) -> bool:
         """Add bytes as a key, optionally checking for near-duplicates via Hamming distance.
