@@ -108,6 +108,11 @@ void __afl_map_reset(void) {
  * Layer 2: Buffered writer for compiler-IR callbacks (trace-cmp)
  * ═══════════════════════════════════════════════════════════════════════ */
 #define BUFFER_SIZE (256 * 1024)
+
+/* Longest operand pair written to the cmplog stream, in bytes. log_cmp
+ * truncates to this, so the interceptors must not promise more than it
+ * records -- and memchr sizes a stack buffer from it. */
+#define CMPLOG_MAX_OPERAND 64
 static char cmplog_buffer[BUFFER_SIZE];
 static size_t cmplog_buf_pos = 0;
 
@@ -147,7 +152,7 @@ static inline void buffer_cmp(uint64_t a, uint64_t b, size_t n) {
 /* ── fprintf writer for low-frequency libc interceptors (Layer 1) ─────── */
 static void log_cmp(const void *a, const void *b, size_t n, int result) {
     if (!cmplog_file || !a || !b || n == 0 || result == 0) return;
-    size_t log_n = n > 64 ? 64 : n;
+    size_t log_n = n > CMPLOG_MAX_OPERAND ? CMPLOG_MAX_OPERAND : n;
     fprintf(cmplog_file, "CMP ");
     for (size_t i = 0; i < log_n; i++)
         fprintf(cmplog_file, "%02x", ((const unsigned char *)a)[i]);
@@ -275,9 +280,19 @@ int strncmp(const char *a, const char *b, size_t n) {
 }
 void *memchr(const void *s, int c, size_t n) {
     void *result = real_memchr(s, c, n);
-    unsigned char needle = (unsigned char)c;
-    /* needle is a single stack byte; logging min(n,64) over-reads it. */
-    if (cmplog_file && n > 0) log_cmp(s, &needle, 1, result ? 0 : -1);
+    /* A one-byte pair (s[0] vs c) is memory-safe but a weak anchor: the
+     * input-to-state indexer has a single byte to locate in the input, which
+     * matches everywhere and therefore nowhere useful. Materialise the needle
+     * into a stack buffer instead, so the haystack side keeps a window worth
+     * searching for. Only built when the search failed -- log_cmp discards
+     * result==0 anyway, so on a successful memchr the memset would be pure
+     * cost on what is often a hot loop. */
+    if (cmplog_file && n > 0 && !result) {
+        size_t k = n > CMPLOG_MAX_OPERAND ? CMPLOG_MAX_OPERAND : n;
+        unsigned char needle[CMPLOG_MAX_OPERAND];
+        memset(needle, (unsigned char)c, k);
+        log_cmp(s, needle, k, -1);
+    }
     return result;
 }
 int strcasecmp(const char *a, const char *b) {
@@ -295,23 +310,38 @@ void *memmem(const void *h, size_t hl, const void *n, size_t nl) {
     /* Pass the real outcome: log_cmp drops result==0, which is the filter
      * that keeps already-solved comparisons out of the pool. A hardcoded -1
      * logs a *successful* match as if it were still unsolved. */
-    if (cmplog_file && n && nl > 0 && nl <= 64 && hl >= nl)
-        log_cmp(h, n, nl, result ? 0 : -1);  /* log_cmp null-checks a/b */
+    /* Log min(hl, nl) bytes rather than requiring hl >= nl. Demanding a
+     * full-length haystack dropped the case the pool needs most: an input
+     * shorter than the token it must contain is exactly the state early
+     * fuzzing is in, and it was logging nothing at all there. A needle prefix
+     * is a partial anchor; nothing is none. */
+    if (cmplog_file && n && nl > 0 && nl <= CMPLOG_MAX_OPERAND && hl > 0) {
+        size_t k = hl < nl ? hl : nl;
+        log_cmp(h, n, k, result ? 0 : -1);  /* log_cmp null-checks a/b */
+    }
     return result;
 }
 char *strstr(const char *h, const char *n) {
     char *result = real_strstr(h, n);
-    if (cmplog_file && n) {
+    if (cmplog_file && n && h) {
         size_t nl = strlen(n);
-        if (nl > 0 && nl <= 64 && strnlen(h, nl) >= nl) log_cmp(h, n, nl, result ? 0 : -1);
+        /* min(strnlen(h, nl), nl): see memmem. A haystack shorter than the
+         * needle is the case worth planting into, not the case to skip. */
+        size_t k = strnlen(h, nl);
+        if (k > nl) k = nl;
+        if (k > 0 && nl <= CMPLOG_MAX_OPERAND) log_cmp(h, n, k, result ? 0 : -1);
     }
     return result;
 }
 char *strcasestr(const char *h, const char *n) {
     char *result = real_strcasestr(h, n);
-    if (cmplog_file && n) {
+    if (cmplog_file && n && h) {
         size_t nl = strlen(n);
-        if (nl > 0 && nl <= 64 && strnlen(h, nl) >= nl) log_cmp(h, n, nl, result ? 0 : -1);
+        /* min(strnlen(h, nl), nl): see memmem. A haystack shorter than the
+         * needle is the case worth planting into, not the case to skip. */
+        size_t k = strnlen(h, nl);
+        if (k > nl) k = nl;
+        if (k > 0 && nl <= CMPLOG_MAX_OPERAND) log_cmp(h, n, k, result ? 0 : -1);
     }
     return result;
 }

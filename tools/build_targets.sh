@@ -66,6 +66,10 @@ NOBUILTIN_CMP="-fno-builtin-memcmp -fno-builtin-bcmp -fno-builtin-strcmp"
 NOBUILTIN_CMP="$NOBUILTIN_CMP -fno-builtin-strncmp -fno-builtin-strcasecmp"
 NOBUILTIN_CMP="$NOBUILTIN_CMP -fno-builtin-strncasecmp -fno-builtin-memchr"
 NOBUILTIN_CMP="$NOBUILTIN_CMP -fno-builtin-strstr -fno-builtin-memmem"
+# strcasestr is intercepted by cmplog_shim.c but was missing here, so any
+# target clang chose to fold it in was invisible to the libc layer. This list
+# and the interceptor list in cmplog_shim.c must be kept in step.
+NOBUILTIN_CMP="$NOBUILTIN_CMP -fno-builtin-strcasestr"
 WITH_VENDOR_TRACECMP=0
 WITH_CLANG_SCOV=0
 WITH_DISTANCE=0
