@@ -21,6 +21,8 @@ import struct
 import time
 from array import array
 
+import xxhash
+
 from fuzzer_tool.core.cond_stmt import CondState, CondStmt
 from fuzzer_tool.core.crc32 import crc32
 from fuzzer_tool.core.mutations import (
@@ -2207,6 +2209,14 @@ class OperatorEngine:
         f._last_ops_used = []
         f._last_ops_with_sites = []
         f._last_mopt_particles = []
+        # Operators that actually changed the buffer this round. An operator
+        # can be selected and still be a no-op: its guard fails (swap_bytes on
+        # a 1-byte input), or it needs corpus state it doesn't have (splice
+        # and crossover with a single-seed corpus are no-ops 100% of the time,
+        # measured). Without this set every scheduler credits a no-op operator
+        # exactly as much as the operator that did the work -- see
+        # fuzzer.py::_record_outcome.
+        f._last_ops_effective = set()
         # Per-round wall-clock cost per operator, keyed by op name, summed
         # across repeats within this round. Feeds the cost-aware reward:
         # a 10ms operator and a 2us operator shouldn't be scored on the
@@ -2245,6 +2255,8 @@ class OperatorEngine:
         # Pre-computing positions doesn't work here because len(buf) changes
         # during mutation, so we handle this per-call below.
 
+        track_effect = f._track_op_effect
+
         for _ in range(n_mutations):
             op = self.select_op(ops)
             f._last_ops_used.append(op)
@@ -2254,9 +2266,20 @@ class OperatorEngine:
             f._last_ops_with_sites.append((op, byte_idx))
             old_len = len(buf)
 
+            # Digest over a memoryview: no copy, ~3.4us at 64KiB. Only paid
+            # when a scheduler consumes the signal (_track_op_effect).
+            _h_before = xxhash.xxh3_64_intdigest(memoryview(buf)) if track_effect else 0
+
             _t0 = time.perf_counter()
             result = f._op_dispatch[op](buf, byte_idx, data)
             _dt = time.perf_counter() - _t0
+
+            if track_effect:
+                # None means the handler mutated `buf` in place (the dominant
+                # convention here); anything else replaces the buffer.
+                _after = buf if result is None else result
+                if xxhash.xxh3_64_intdigest(memoryview(_after)) != _h_before:
+                    f._last_ops_effective.add(op)
             f._last_op_costs[op] = f._last_op_costs.get(op, 0.0) + _dt
             # EMA of per-call cost, seeded on first observation so a single
             # early sample doesn't get dragged toward zero.

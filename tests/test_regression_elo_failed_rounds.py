@@ -30,16 +30,17 @@ from fuzzer_tool.core.elo import BayesianEloTracker, EloTracker
 
 
 def _seeded(tracker_cls):
-    """Tracker with two arms and ``_prev_operators`` already populated.
+    """Tracker whose ``_prev_operators`` is a *disjoint* successful round.
 
     The cross-iteration branch needs a previous round to compare against,
-    so a single round is played first -- that first call is legitimately
-    a no-op for ratings and only serves to seed ``_prev_operators``.
+    and only operators unique to one side are compared -- pairing a round
+    against itself is not evidence -- so the seed round uses different
+    arms than the rounds under test.
     """
     t = tracker_cls()
-    for op in ("a", "b"):
+    for op in ("a", "b", "x", "y"):
         t.init_arm(op)
-    t.record_round(["a", "b"], {"a", "b"})
+    t.record_round(["x", "y"], {"x", "y"})
     return t
 
 
@@ -49,7 +50,6 @@ class TestFailedRoundIsRecorded:
         """The core regression: a round where nobody found coverage must
         move ratings. Previously this was a silent no-op."""
         t = _seeded(cls)
-        t.record_round(["a", "b"], {"a", "b"})  # ensure a real prev round
         before = dict(t.ratings) if hasattr(t, "ratings") else dict(t.mu)
 
         t.record_round(["a", "b"], set())  # nobody found coverage
@@ -60,7 +60,6 @@ class TestFailedRoundIsRecorded:
     @pytest.mark.parametrize("cls", [EloTracker, BayesianEloTracker])
     def test_failed_round_accrues_matches(self, cls):
         t = _seeded(cls)
-        t.record_round(["a", "b"], {"a", "b"})
         before = sum(t._match_count.values())
 
         t.record_round(["a", "b"], set())
@@ -91,11 +90,27 @@ class TestSuccessPathUnchanged:
         assert t.ratings["w"] > 1500
         assert t.ratings["l"] < 1500
 
-    def test_all_winners_still_uses_cross_iteration_blend(self):
+    def test_all_winners_against_identical_prev_round_is_a_noop(self):
+        """Comparing a round to a previous round with the same operators is
+        not evidence. This previously changed ratings, but only because
+        record_match(a, a) and the symmetric (a, b) / (b, a) pair failed to
+        cancel exactly under the adaptive k-factor -- an artifact, not signal.
+        """
         t = _seeded(EloTracker)
+        t.record_round(["a", "b"], {"a", "b"})
         before = dict(t.ratings)
         t.record_round(["a", "b"], {"a", "b"})
-        assert t.ratings != before
+        assert t.ratings == before
+
+    def test_all_winners_beat_a_disjoint_failed_prev_round(self):
+        """Cross-iteration comparison fires when the rounds differ."""
+        t = EloTracker()
+        for op in ("a", "b", "c", "d"):
+            t.init_arm(op)
+        t.record_round(["c", "d"], set())  # seed prev: failed round
+        t.record_round(["a", "b"], {"a", "b"})  # all winners
+        assert t.ratings["a"] > 1500
+        assert t.ratings["c"] < 1500
 
     def test_first_round_is_a_noop_without_prev_operators(self):
         """No previous round to compare against: nothing to record yet."""
