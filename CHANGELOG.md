@@ -19,6 +19,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   disk, instead of accumulating in `~/.cache/fuzzer_cmplog/` forever.
 
 ### Changed
+- Comparison constants are now visible on optimized targets. `-fno-builtin-*`
+  (`$NOBUILTIN_CMP`) keeps `memcmp`/`strcmp` at the PLT so the libc layer sees
+  their operands at `-O2`; `-fsanitize-coverage=trace-cmp` cannot recover them
+  at any optimization level, because SanitizerCoverage instruments IR `icmp`
+  and clang's `ExpandMemCmp` runs after it. Measured on
+  `targets/cmplog_exercise.c`: 0/10 constants at `-O2`, 10/10 with the flags.
+- trace-cmp targets link `cmplog_shim.o` instead of relying on `LD_PRELOAD`.
+  `-fsanitize-coverage` links compiler-rt's sancov runtime, whose weak no-op
+  `__sanitizer_cov_trace_*cmp*` stubs win the symbol lookup against a
+  preloaded shim; the callbacks fired 20 times and logged nothing.
+- `WITH_TRACECMP` defaults to on (`--no-tracecmp` opts out) and now covers
+  `cmplog_exercise` as well as `tracecmp_target`, built as `*_tcg`.
 - mypy is ratcheted rather than permanently red: `strict = true` remains the
   target, the 114 modules that cannot yet satisfy it are exempted by name in
   `[[tool.mypy.overrides]]`, and the other 17 are checked strictly. New modules

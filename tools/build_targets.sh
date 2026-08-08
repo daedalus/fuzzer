@@ -33,7 +33,39 @@ OPTS="${@:---all}"
 HAS_FGREP=0
 [ -d "$FGREP/src" ] && HAS_FGREP=1
 WITH_CMPLOG=1  # default: cmplog linked into .so targets
-WITH_TRACECMP=0
+WITH_TRACECMP=1  # default: compiler-IR comparison tracing (needs clang)
+
+# ── Keeping comparison constants visible at -O2 ──────────────────────
+#
+# At -O2 clang folds memcmp/strcmp against compile-time constants into
+# inline integer compares, so nothing reaches the LD_PRELOAD shim.
+# Measured on targets/cmplog_exercise.c, seed "AAAAAAAAAAAAAAAA", counting
+# how many of its 10 magic constants ("CMPl", "OG!", "fuzz", ...) reach the
+# cmplog pair pool:
+#
+#   -O2                                          0/10   (5 operands)
+#   -O2 -fsanitize-coverage=trace-cmp, preloaded 0/10   (5 operands)
+#   -O2 -fsanitize-coverage=trace-cmp, linked    0/10  (12 operands)
+#   -O0                                          9/10  (21 operands)
+#   -O2 $NOBUILTIN_CMP                          10/10  (24 operands)
+#   -O2 $NOBUILTIN_CMP + trace-cmp, linked      10/10  (36 operands)
+#
+# trace-cmp alone does NOT recover them, whatever the optimization level:
+# SanitizerCoverage instruments IR `icmp`, and clang's ExpandMemCmp is a
+# CodeGen pass that runs *after* it. So the compare trace-cmp sees is
+# `memcmp_result == 0` -- it logs the literal pair (0, 1), and only later
+# does the memcmp become `cmpl $0x6C504D43,(%rbx)`. On the -O2 trace-cmp
+# build 11 of 20 logged pairs were that degenerate (0, 1).
+#
+# -fno-builtin-<fn> is what actually works: it keeps the call at the PLT so
+# the shim intercepts it, while leaving every other -O2 optimization on.
+# The two are complementary, not alternatives -- trace-cmp still catches
+# genuine inline integer compares and switch dispatch, which the libc layer
+# cannot see at all. Together they beat -O0 on operand count by 71%.
+NOBUILTIN_CMP="-fno-builtin-memcmp -fno-builtin-bcmp -fno-builtin-strcmp"
+NOBUILTIN_CMP="$NOBUILTIN_CMP -fno-builtin-strncmp -fno-builtin-strcasecmp"
+NOBUILTIN_CMP="$NOBUILTIN_CMP -fno-builtin-strncasecmp -fno-builtin-memchr"
+NOBUILTIN_CMP="$NOBUILTIN_CMP -fno-builtin-strstr -fno-builtin-memmem"
 WITH_VENDOR_TRACECMP=0
 WITH_CLANG_SCOV=0
 WITH_DISTANCE=0
@@ -47,6 +79,7 @@ for arg in "$@"; do
     [ "$arg" = "--cmplog" ] && WITH_CMPLOG=1
     # --tracecmp implies --cmplog (the unified shim covers both layers)
     [ "$arg" = "--tracecmp" ] && WITH_CMPLOG=1 && WITH_TRACECMP=1
+    [ "$arg" = "--no-tracecmp" ] && WITH_TRACECMP=0
     [ "$arg" = "--vendor-tracecmp" ] && WITH_VENDOR_TRACECMP=1
     [ "$arg" = "--clang-scov" ] && WITH_CLANG_SCOV=1
     [ "$arg" = "--ffmpeg-sancov" ] && WITH_FFMPEG_SANCOV=1
@@ -996,30 +1029,75 @@ build_tracecmp_targets() {
     echo "Building trace-cmp targets ($CC)..."
     local TRACE_FLAGS="-fsanitize-coverage=trace-cmp,trace-pc-guard"
 
-    # tracecmp_target: exercises compiler-inlined comparisons
+    # The shim must be LINKED IN, not LD_PRELOADed.
+    #
+    # -fsanitize-coverage pulls in compiler-rt's sancov runtime, which ships
+    # *weak no-op definitions* of __sanitizer_cov_trace_{,const_}cmp{1,2,4,8}.
+    # The executable is searched before LD_PRELOAD libraries in the global
+    # symbol lookup order, so those stubs win and every callback returns
+    # immediately -- the preloaded shim is never reached. Measured: an -O2
+    # trace-cmp build of cmplog_exercise.c logged 4 CMP lines under
+    # LD_PRELOAD (all from memchr, i.e. the libc layer only) and 20 with the
+    # shim linked. A strong definition in the same link beats the weak stub.
+    local cmplog_obj=""
+    if [ -f "$CMPLOG_SHIM" ]; then
+        cmplog_obj="/tmp/fuzz_cmplog_tcg_$$.o"
+        # No -fsanitize-coverage on the shim itself: it PROVIDES the
+        # callbacks, it does not call them.
+        $CC -O2 -g -fPIC -c "$CMPLOG_SHIM" -o "$cmplog_obj" 2>/dev/null || cmplog_obj=""
+    fi
+    [ -z "$cmplog_obj" ] && warn "cmplog shim object unavailable — trace-cmp callbacks will be no-ops"
+
+    # $NOBUILTIN_CMP keeps memcmp/strcmp at the PLT so the libc layer still
+    # sees their operands; trace-cmp cannot recover those (see the note at
+    # the top of this file). The two layers are complementary.
     local rc=0
-    $CC -O2 -g $TRACE_FLAGS -include "$SHIM" \
-        -o "$TARGETS/tracecmp_target" "$TARGETS/tracecmp_target.c" 2>/dev/null || rc=$?
-    if [ $rc -eq 0 ]; then
-        ok "tracecmp_target (trace-cmp)"
-    else
-        warn "failed: tracecmp_target (trace-cmp)"
-    fi
+    local spec src
+    for spec in "tracecmp_target" "cmplog_exercise"; do
+        src="$TARGETS/$spec.c"
+        [ -f "$src" ] || { warn "source not found: $src"; continue; }
 
-    # tracecmp_target.so: same with shared library
-    rc=0
-    $CC -O2 -g $TRACE_FLAGS -shared -fPIC -include "$SHIM" \
-        -o "$TARGETS/tracecmp_target.so" "$TARGETS/tracecmp_target.c" 2>/dev/null || rc=$?
-    if [ $rc -eq 0 ]; then
-        ok "tracecmp_target.so (trace-cmp)"
-    else
-        warn "failed: tracecmp_target.so (trace-cmp)"
-    fi
+        rc=0
+        $CC -O2 -g $TRACE_FLAGS $NOBUILTIN_CMP -include "$SHIM" \
+            -o "$TARGETS/${spec}_tcg" "$src" $cmplog_obj -ldl 2>/dev/null || rc=$?
+        if [ $rc -eq 0 ]; then
+            ok "${spec}_tcg (trace-cmp + no-builtin)"
+        else
+            warn "failed: ${spec}_tcg (trace-cmp)"
+        fi
 
-    # Verify trace-cmp symbols in built targets
-    for f in "$TARGETS/tracecmp_target" "$TARGETS/tracecmp_target.so"; do
-        if [ -f "$f" ] && nm "$f" 2>/dev/null | grep -q "trace_cmp"; then
-            ok "$(basename "$f"): trace-cmp callbacks present"
+        rc=0
+        $CC -O2 -g $TRACE_FLAGS $NOBUILTIN_CMP -shared -fPIC -Wl,-Bsymbolic \
+            -include "$SHIM" \
+            -o "$TARGETS/${spec}_tcg.so" "$src" $cmplog_obj -ldl 2>/dev/null || rc=$?
+        if [ $rc -eq 0 ]; then
+            ok "${spec}_tcg.so (trace-cmp + no-builtin)"
+        else
+            warn "failed: ${spec}_tcg.so (trace-cmp)"
+        fi
+    done
+
+    [ -n "$cmplog_obj" ] && rm -f "$cmplog_obj"
+
+    # Verify the callbacks are DEFINED (T) in the target, not left undefined
+    # for a preload that cannot win the lookup, and not the runtime's weak
+    # no-op stub (W).
+    for f in "$TARGETS/tracecmp_target_tcg" "$TARGETS/cmplog_exercise_tcg"; do
+        [ -f "$f" ] || continue
+        if nm "$f" 2>/dev/null | grep -qE "^[0-9a-f]+ T __sanitizer_cov_trace_const_cmp4$"; then
+            ok "$(basename "$f"): trace-cmp callbacks linked in (strong)"
+        else
+            warn "$(basename "$f"): trace-cmp callbacks are weak no-ops — cmplog will see nothing"
+        fi
+        # $NOBUILTIN_CMP must have kept memcmp a real call. With the shim
+        # linked in, the call binds directly to the shim's own definition
+        # rather than going through the PLT -- so match either form. If it
+        # matches neither, ExpandMemCmp folded the comparison and the
+        # constants are gone.
+        if objdump -d "$f" 2>/dev/null | grep -qE "call.*<memcmp(@plt)?>"; then
+            ok "$(basename "$f"): memcmp still a call (constants reach the pool)"
+        else
+            warn "$(basename "$f"): memcmp folded away — check \$NOBUILTIN_CMP"
         fi
     done
 }
@@ -1035,8 +1113,8 @@ print_feature_matrix() {
     local state
     state=$([ "$WITH_CMPLOG" -eq 1 ] && echo "ON (default)" || echo "OFF")
     printf '  %-20s %-12s %s\n' "cmplog" "$state" "comparison tracing linked into .so targets"
-    state=$([ "$WITH_TRACECMP" -eq 1 ] && echo "ON" || echo "OFF")
-    printf '  %-20s %-12s %s\n' "tracecmp" "$state" "compiler-IR comparison tracing (clang)"
+    state=$([ "$WITH_TRACECMP" -eq 1 ] && echo "ON (default)" || echo "OFF")
+    printf "  %-20s %-12s %s\n" "tracecmp" "$state" "compiler-IR tracing + no-builtin cmp (clang)"
     state=$([ "$WITH_CLANG_SCOV" -eq 1 ] && echo "ON" || echo "OFF")
     printf '  %-20s %-12s %s\n' "clang-scov" "$state" "compiler-inserted edge coverage (clang)"
     state=$([ "$WITH_VENDOR_TRACECMP" -eq 1 ] && echo "ON" || echo "OFF")

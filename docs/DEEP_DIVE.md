@@ -758,7 +758,7 @@ To verify cmplog is active from the .so itself, check the startup output:
 
 ### Compiler-IR Comparison Tracing (trace-cmp)
 
-Symbol-based cmplog intercepts libc functions, but GCC -O2 inlines small constant-length `memcmp` into integer compares — no libc call exists to intercept. This is exactly the pattern for format-signature detection (PNG magic, protocol headers, etc.).
+Symbol-based cmplog intercepts libc functions, but at -O2 both clang and GCC fold small constant-length `memcmp`/`strcmp` into inline integer compares — no libc call exists to intercept. This is exactly the pattern for format-signature detection (PNG magic, protocol headers, etc.).
 
 **Performance note**: cmplog can produce thousands of comparison pairs per execution
 when the library code is heavily instrumented (e.g., with trace-pc-guard coverage).
@@ -768,17 +768,60 @@ uses **adaptive periodic collection**: once the pair pool exceeds 2000 entries,
 cmplog data is collected only 1 in 20 iterations, amortizing the parsing cost
 to ~1ms per iteration while still discovering new tokens.
 
-**trace-cmp** solves this by using Clang's `-fsanitize-coverage=trace-cmp` instrumentation, which inserts callbacks at the IR level — after the compiler has already inlined/folded comparisons. This catches every `icmp` that survives optimization.
+**trace-cmp** uses Clang's `-fsanitize-coverage=trace-cmp` instrumentation to
+insert callbacks at the IR level. It catches every `icmp` in the IR — inline
+integer comparisons, byte checks, switch dispatch — none of which the libc
+layer can see.
 
-Both shims coexist: symbol-based (cmplog_shim.c) for explicit libc calls + compiler-based (tracecmp_shim.c) for inlined comparisons. They export different symbols, write to the same `_CMPLOG_OUT` file, and the collector parses both transparently.
+It does **not** recover folded `memcmp`/`strcmp` constants, at any
+optimization level. SanitizerCoverage instruments IR `icmp`, and clang's
+`ExpandMemCmp` is a CodeGen pass that runs *after* it, so the comparison
+trace-cmp actually sees is `memcmp_result == 0`: it logs the literal pair
+`(0, 1)`, and only later does the memcmp become `cmpl $0x6C504D43,(%rbx)`.
+On an -O2 trace-cmp build of `cmplog_exercise.c`, 11 of 20 logged pairs were
+that degenerate `(0, 1)` — pool noise, not input-to-state evidence.
+
+**`-fno-builtin-<fn>` is what recovers the constants.** It keeps the call at
+the PLT so the libc interceptors see the real operands, while leaving every
+other -O2 optimization in place. `$NOBUILTIN_CMP` in `tools/build_targets.sh`
+carries the flag set. The two layers are complementary, not alternatives.
+
+Constants from `cmplog_exercise.c` reaching the pair pool, seed
+`AAAAAAAAAAAAAAAA` (10 magic constants in the target):
+
+| build | constants | unique operands |
+|---|---|---|
+| `-O2` | 0/10 | 5 |
+| `-O2` + trace-cmp, preloaded shim | 0/10 | 5 |
+| `-O2` + trace-cmp, linked shim | 0/10 | 12 |
+| `-O0` | 9/10 | 21 |
+| `-O2 $NOBUILTIN_CMP` | 10/10 | 24 |
+| `-O2 $NOBUILTIN_CMP` + trace-cmp, linked | **10/10** | **36** |
+
+**The shim must be linked in, not LD_PRELOADed.** `-fsanitize-coverage` links
+compiler-rt's sancov runtime, which ships *weak no-op definitions* of
+`__sanitizer_cov_trace_{,const_}cmp{1,2,4,8}`. The executable is searched
+before LD_PRELOAD libraries in the global symbol lookup order, so those stubs
+win and the preloaded shim is never reached — 20 call sites in the binary, 0
+lines in the log. A strong definition in the same link beats the weak stub;
+`build_tracecmp_targets` compiles `cmplog_shim.c` to an object and links it.
+
+Both layers live in the same shim (`cmplog_shim.c`) and write to the same
+`_CMPLOG_OUT` file; the collector parses both transparently.
 
 ```bash
-# Build targets with trace-cmp (requires clang)
-tools/build_targets.sh --tracecmp --clang
+# trace-cmp is ON by default when clang is available
+tools/build_targets.sh --clang
+tools/build_targets.sh --no-tracecmp        # opt out
 
-# Build with both cmplog and trace-cmp
+# Explicit
 tools/build_targets.sh --asan --cmplog --tracecmp --clang
 ```
+
+Targets built by this path are suffixed `_tcg`
+(`targets/cmplog_exercise_tcg`, `targets/tracecmp_target_tcg`, plus `.so`
+variants). The build verifies after linking that the callbacks are `T`
+(strong) rather than `W` (weak no-op), and that `memcmp` survived as a call.
 
 The trace-cmp shim intercepts:
 - `__sanitizer_cov_trace_cmp{1,2,4,8}` — typed comparison callbacks
