@@ -12,6 +12,12 @@
 #   tools/build_targets.sh --vendor-tracecmp          # Vendored libpng+zlib + trace-cmp targets
 #   tools/build_targets.sh --vendor-tracecmp --asan   # Same with ASAN
 #   tools/build_targets.sh --distance                 # AFLGo distance .so targets (_dist / _dist_asan)
+#
+# Some targets need vendored sources fetched first (all are optional — the
+# build warns and skips when the tree is absent):
+#   tools/vendor_lz4.sh      -> vendor/lz4      (lz4_read / lz4_read.so)
+#   tools/vendor_grep.sh     -> vendor/grep
+#   tools/vendor_ffmpeg.sh   -> vendor/ffmpeg
 
 set -e
 
@@ -22,6 +28,7 @@ CMPLOG_SHIM="src/fuzzer_tool/adapters/cmplog_shim.c"
 PERF_SHIM="src/fuzzer_tool/adapters/perf_shim.c"
 TARGETS="targets"
 VENDOR="vendor"
+LZ4="${LZ4_DIR:-vendor/lz4}"
 OPTS="${@:---all}"
 HAS_FGREP=0
 [ -d "$FGREP/src" ] && HAS_FGREP=1
@@ -114,6 +121,34 @@ compile_fgrep_objects() {
             -c "$FGREP/src/${src}.c" -o "/tmp/${src}${suffix}.o"
     done
     ok "fgrep objects${suffix:+ ($suffix)}"
+}
+
+# ── Compile lz4 library objects ────────────────────────────────────
+# Vendored via tools/vendor_lz4.sh (extracts to vendor/lz4/).
+#
+# Compiled WITHOUT `-include $SHIM`: the shim goes only into the target
+# wrapper (Hard Rule 8). `-include` applies to every .c on a command line,
+# so compiling these alongside lz4_read.c would emit __afl_map_shm /
+# __afl_area / __afl_guarded_call into all five objects and fail the link
+# with multiple-definition errors.
+# -DXXH_NAMESPACE=LZ4_ matches how upstream LZ4 builds its bundled xxhash;
+# without it the xxhash symbols collide if anything else in the link pulls
+# in its own copy.
+compile_lz4_objects() {
+    local suffix="$1" flags="$2" cc="${3:-$DEFAULT_CC}" extra_cflags="${4:-}"
+    [ -d "$LZ4/lib" ] || return 1
+    echo "Compiling lz4 objects${suffix:+ ($suffix)}..."
+    local rc=0
+    for src in lz4 lz4frame lz4hc xxhash; do
+        $cc $flags -fPIC -O2 -g $extra_cflags -DXXH_NAMESPACE=LZ4_ -I"$LZ4/lib" \
+            -c "$LZ4/lib/${src}.c" -o "/tmp/${src}${suffix}.o" 2>/dev/null || rc=$?
+    done
+    if [ $rc -eq 0 ]; then
+        ok "lz4 objects${suffix:+ ($suffix)}"
+    else
+        warn "lz4 objects${suffix:+ ($suffix)} failed"
+        return 1
+    fi
 }
 
 # ── Build a target ────────────────────────────────────────────────
@@ -450,16 +485,22 @@ build_standalone_so_targets() {
         warn "tailslayer_read${out_suffix}.so: tailslayer headers not found at $TAILSLAYER/include, skipping"
     fi
 
-    # lz4_read — needs LZ4 precompiled objects + include path
-    local LZ4_DIR="${LZ4_DIR:-/home/dclavijo/code/lz4/lib}"
+    # lz4_read — vendored LZ4 (tools/vendor_lz4.sh extracts to vendor/lz4).
+    # The library objects are compiled here with the same sanitizer flags as
+    # the wrapper, so ASAN variants instrument the decoder itself rather than
+    # just the wrapper around it. They are built WITHOUT `-include $SHIM`:
+    # that flag applies to every .c on a command line, so compiling the
+    # vendored sources alongside lz4_read.c would emit __afl_map_shm /
+    # __afl_area / __afl_guarded_call into all five objects and fail the
+    # link with multiple-definition errors (Hard Rule 8).
     local LZ4_OBJS="/tmp/lz4$suffix.o /tmp/lz4frame$suffix.o /tmp/lz4hc$suffix.o /tmp/xxhash$suffix.o"
-    local LZ4_INC="-I$LZ4_DIR -DXXH_NAMESPACE=LZ4_"
-    local all_exist=true
-    for obj in $LZ4_OBJS; do [ -f "$obj" ] || all_exist=false; done
-    if $all_exist && [ -f "$TARGETS/lz4_read.c" ]; then
+    local LZ4_INC="-I$LZ4/lib -DXXH_NAMESPACE=LZ4_"
+    if [ ! -f "$TARGETS/lz4_read.c" ]; then
+        :  # target source absent — nothing to build
+    elif compile_lz4_objects "$suffix" "$flags" "$DEFAULT_CC"; then
         build_so_target "$TARGETS/lz4_read.c" "$TARGETS/lz4_read${out_suffix}.so" "$LZ4_OBJS -Wl,--export-dynamic -lpthread" "$flags $LZ4_INC"
     else
-        warn "lz4_read${out_suffix}.so: LZ4 objects not found, skipping (build LZ4 lib first)"
+        warn "lz4_read${out_suffix}.so: vendor/lz4 not found, skipping (run tools/vendor_lz4.sh)"
     fi
 }
 
@@ -1019,12 +1060,8 @@ print_feature_matrix() {
     printf '  %-20s %-12s %s\n' "fgrep targets" "$state" "$([ "$HAS_FGREP" -eq 1 ] && echo "found at $FGREP" || echo "vendor/fgrep not found")"
     state=$([ -d "$TAILSLAYER/include" ] && echo "BUILD" || echo "SKIP")
     printf '  %-20s %-12s %s\n' "tailslayer_read" "$state" "$([ -d "$TAILSLAYER/include" ] && echo "found at $TAILSLAYER" || echo "headers not found at $TAILSLAYER/include")"
-    local lz4_objs_ok=1
-    for obj in /tmp/lz4_asan.o /tmp/lz4_ubsan.o /tmp/lz4_nosan.o; do
-        [ -f "$obj" ] || lz4_objs_ok=0
-    done
-    state=$([ "$lz4_objs_ok" -eq 1 ] && echo "BUILD" || echo "SKIP")
-    printf '  %-20s %-12s %s\n' "lz4_read" "$state" "$([ "$lz4_objs_ok" -eq 1 ] && echo "LZ4 objects present" || echo "LZ4 objects not built (build LZ4 lib first)")"
+    state=$([ -d "$LZ4/lib" ] && echo "BUILD" || echo "SKIP")
+    printf '  %-20s %-12s %s\n' "lz4_read" "$state" "$([ -d "$LZ4/lib" ] && echo "found at $LZ4" || echo "not vendored — run tools/vendor_lz4.sh")"
     echo ""
 }
 

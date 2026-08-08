@@ -17,17 +17,18 @@ fuzzer, not just the target.
 
 ## Hard Rules
 
-1. Never bypass the pre-commit hooks (`--no-verify`). Fix the warnings, then recommit.
-2. Always fix impactguard breaking changes.
-3. Always use clang, never gcc (build scripts prefer clang automatically).
-4. Stop suggesting `use_direct_lite = False` to work around ASAN in `direct_lite` mode — debug the root cause instead.
-5. Never commit binary files or corpus directories — build targets from source, keep corpus data local.
-6. Before deleting code, find where it should be wired first; if not found, clean up. When removing code, stay strictly within the scope of the removal — do not remove unrelated code.
-7. Do not nuke the repo.
-8. All fuzz targets: compile with ASAN (`-fsanitize=address`) and AFL edge coverage via `afl_shim.c` (`-include src/fuzzer_tool/adapters/afl_shim.c`). Pre-compile library sources as `.o` files; link the shim only into the target wrapper.
-9. Always create TODOs. Always commit and push after finishing a task.
-10. Update `docs/DEEP_DIVE.md` with new features (the comprehensive reference). Update `README.md` only when adding or changing high-level capabilities visible in the quick-start or feature overview.
-11. Op mutators have a single source of truth: `src/fuzzer_tool/core/operator_registry.py`'s `REGISTRY`. Register new operators there only — the dispatch table (`build_dispatch`), the per-input op list (`build_ops`), scheduler arming (`_register_arms`), and `OPERATOR_CATEGORIES` all derive from it. Never add operator names to the legacy `MUTATIONS`/`FORMAT_MUTATIONS`/`DICT_MUTATIONS` lists or hand-edit `OPERATOR_CATEGORIES`; schedulers discover ops through the services layer and never hardcode op lists.
+1. **Always follow existing conventions.** Before adding anything — a target, a script, a scheduler, a test fixture — find the closest existing example and match it: directory layout, file naming, function shape, flag names, error handling, comment style. Read the surrounding code first; do not invent a parallel way of doing something the repo already does. Concretely: vendored library sources go in `vendor/<lib>/` (gitignored) fetched by a `tools/vendor_<lib>.sh` script — never committed and never under `targets/`; new fuzz targets are wired into `tools/build_targets.sh` rather than built by hand; new schedulers register in `_OPERATOR_STRATEGY_NAMES` and follow the `select_op`/`record`/`bandit_stats` interface. If a convention appears wrong, fix it in one place for everything rather than working around it locally, and say so.
+2. Never bypass the pre-commit hooks (`--no-verify`). Fix the warnings, then recommit.
+3. Always fix impactguard breaking changes.
+4. Always use clang, never gcc (build scripts prefer clang automatically).
+5. Stop suggesting `use_direct_lite = False` to work around ASAN in `direct_lite` mode — debug the root cause instead.
+6. Never commit binary files or corpus directories — build targets from source, keep corpus data local.
+7. Before deleting code, find where it should be wired first; if not found, clean up. When removing code, stay strictly within the scope of the removal — do not remove unrelated code.
+8. Do not nuke the repo.
+9. All fuzz targets: compile with ASAN (`-fsanitize=address`) and AFL edge coverage via `afl_shim.c` (`-include src/fuzzer_tool/adapters/afl_shim.c`). Pre-compile library sources as `.o` files; link the shim only into the target wrapper.
+10. Always create TODOs. Always commit and push after finishing a task.
+11. Update `docs/DEEP_DIVE.md` with new features (the comprehensive reference). Update `README.md` only when adding or changing high-level capabilities visible in the quick-start or feature overview.
+12. Op mutators have a single source of truth: `src/fuzzer_tool/core/operator_registry.py`'s `REGISTRY`. Register new operators there only — the dispatch table (`build_dispatch`), the per-input op list (`build_ops`), scheduler arming (`_register_arms`), and `OPERATOR_CATEGORIES` all derive from it. Never add operator names to the legacy `MUTATIONS`/`FORMAT_MUTATIONS`/`DICT_MUTATIONS` lists or hand-edit `OPERATOR_CATEGORIES`; schedulers discover ops through the services layer and never hardcode op lists.
 
 ## Corpus Rules
 
@@ -47,8 +48,9 @@ fuzzer, not just the target.
 
 ### Add a new fuzz target
 
-1. Write `targets/<name>_read.c` following the pattern of an existing target (e.g. `targets/png_read.c`): read the input from stdin/file, call the library's parse/decode entry point.
-2. Compile with clang: `-fsanitize=address -include src/fuzzer_tool/adapters/afl_shim.c`; pre-compile library sources as `.o` files and link the shim only into the wrapper.
+0. If the target needs a library that isn't a system package, vendor it first: add `tools/vendor_<lib>.sh` modelled on `tools/vendor_lz4.sh` (download → extract to `vendor/<lib>/` → verify). `vendor/` is gitignored — never commit the sources, and never put them under `targets/`.
+1. Write `targets/<name>_read.c` following the pattern of an existing target (e.g. `targets/png_read.c`): read the input from stdin/file, call the library's parse/decode entry point. Expose `fuzz_shm_run(const unsigned char *, size_t)` for in-process/`direct_lite` mode.
+2. Compile with clang: `-fsanitize=address -include src/fuzzer_tool/adapters/afl_shim.c`; pre-compile library sources as `.o` files and link the shim only into the wrapper. `-include` applies to *every* `.c` on a command line, so passing library sources alongside the wrapper emits `__afl_map_shm`/`__afl_area`/`__afl_guarded_call` into each object and fails the link with multiple-definition errors — compile them in a separate pass (see `compile_lz4_objects` in `tools/build_targets.sh`).
 3. For in-process mode, also build `<name>_read.so` (`-shared -fPIC`; link `-lasan` explicitly and use `-Wl,-Bsymbolic` when cmplog is on — see `tools/build_targets.sh`, and prefer adding the target there over hand-rolling the flags).
 4. Verify with `nm`: `__afl` symbols present in the executable, `fuzz_shm_run` present in the `.so`; then run `tools/build_targets.sh` and confirm the target appears in the feature matrix.
 5. Add a `dictionaries/` token file if the format has meaningful tokens.
@@ -74,6 +76,7 @@ fuzzer, not just the target.
 | `ruff format src/ tests/` / `ruff check src/ tests/` | Format / lint |
 | `fuzzer-tool --help` | Show CLI help |
 | `tools/build_targets.sh` | Build all fuzz targets (ASAN + cmplog by default; see the script's flag list) |
+| `tools/vendor_lz4.sh` / `vendor_grep.sh` / `vendor_ffmpeg.sh` | Fetch vendored library sources into `vendor/` (required before building the matching targets) |
 | `python tools/corpus_png.py --out corpus --download` | Generate PNG corpus |
 | `tools/bench.sh` / `tools/bench_sweep.sh` | Config comparison / feature sweep |
 | `lizard --CCN 15 -w .` | Cyclomatic complexity violations |
@@ -97,10 +100,12 @@ src/fuzzer_tool/
 │                 #   stats.py, corpus_manager.py, parallel.py, report.py
 └── cli/          # CLI entry point (commands.py, __main__.py)
 
-tools/            # build_targets.sh, corpus_png.py, bench.sh, bench_sweep.sh, release.sh
+tools/            # build_targets.sh, vendor_<lib>.sh (ffmpeg/grep/lz4), corpus_png.py,
+                  #   bench.sh, bench_sweep.sh, release.sh
 targets/          # Fuzz target sources (*.c) — compiled binaries are never committed
 dictionaries/     # Format token dicts (png.dict)
-vendor/           # Vendored FFmpeg 7.1.3 (+ zlib/libpng/libjpeg-turbo for trace-cmp builds)
+vendor/           # Vendored library sources — gitignored, fetched by tools/vendor_<lib>.sh.
+                  #   FFmpeg 7.1.3, lz4 (+ zlib/libpng/libjpeg-turbo for trace-cmp builds)
 docs/             # DEEP_DIVE.md (comprehensive reference), TODO.md, refs/ (agent reference files), per-feature docs
 ```
 
