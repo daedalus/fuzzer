@@ -276,7 +276,8 @@ int strncmp(const char *a, const char *b, size_t n) {
 void *memchr(const void *s, int c, size_t n) {
     void *result = real_memchr(s, c, n);
     unsigned char needle = (unsigned char)c;
-    if (cmplog_file && n > 0) log_cmp(s, &needle, n > 64 ? 64 : n, result ? 0 : -1);
+    /* needle is a single stack byte; logging min(n,64) over-reads it. */
+    if (cmplog_file && n > 0) log_cmp(s, &needle, 1, result ? 0 : -1);
     return result;
 }
 int strcasecmp(const char *a, const char *b) {
@@ -289,16 +290,26 @@ int strncasecmp(const char *a, const char *b, size_t n) {
 }
 void *memmem(const void *h, size_t hl, const void *n, size_t nl) {
     void *result = real_memmem(h, hl, n, nl);
-    if (cmplog_file && n && nl > 0 && nl <= 64) log_cmp(n, n, nl, -1); return result;
+    /* input-to-state needs one half from the buffer and one to plant;
+     * log haystack-vs-needle, not needle-vs-itself. hl>=nl bounds the read. */
+    if (cmplog_file && n && nl > 0 && nl <= 64 && hl >= nl)
+        log_cmp(h, n, nl, -1);  /* log_cmp null-checks a/b */
+    return result;
 }
 char *strstr(const char *h, const char *n) {
     char *result = real_strstr(h, n);
-    if (cmplog_file && n) { size_t nl = strlen(n); if (nl > 0 && nl <= 64) log_cmp(n, n, nl, -1); }
+    if (cmplog_file && n) {
+        size_t nl = strlen(n);
+        if (nl > 0 && nl <= 64 && strnlen(h, nl) >= nl) log_cmp(h, n, nl, -1);
+    }
     return result;
 }
 char *strcasestr(const char *h, const char *n) {
     char *result = real_strcasestr(h, n);
-    if (cmplog_file && n) { size_t nl = strlen(n); if (nl > 0 && nl <= 64) log_cmp(n, n, nl, -1); }
+    if (cmplog_file && n) {
+        size_t nl = strlen(n);
+        if (nl > 0 && nl <= 64 && strnlen(h, nl) >= nl) log_cmp(h, n, nl, -1);
+    }
     return result;
 }
 

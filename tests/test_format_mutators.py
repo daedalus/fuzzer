@@ -11,6 +11,29 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 
+class _ScriptedRng:
+    """Drives IsobmffMutator._mutate_box_size deterministically.
+
+    That method makes exactly two rng calls that decide the outcome: the
+    first choice() selects the target box, the second choice() selects the
+    new size_orig (from a list built with one randint() call). We force the
+    sole box on the first choice and a chosen size on the second, so the
+    test exercises the real padding/truncation/clamp logic rather than a
+    copy of it.
+    """
+
+    def __init__(self, forced_size: int):
+        self._forced_size = forced_size
+        self._choice_n = 0
+
+    def choice(self, seq):
+        self._choice_n += 1
+        return seq[0] if self._choice_n == 1 else self._forced_size
+
+    def randint(self, a, b):
+        return 0
+
+
 class TestPgsMutations:
     """PGS mutator serialization: seg_size must reach the wire."""
 
@@ -75,66 +98,54 @@ class TestIsobmffMutations:
         assert result[8:] == payload, "Payload must be preserved even when size_orig is smaller"
 
     def test_mutate_box_size_pads_when_larger(self):
-        import random
-
         from fuzzer_tool.core.mutations.isobmff import Box, IsobmffMutator
 
-        random.Random(42)
-        IsobmffMutator()
+        mut = IsobmffMutator()
+        mut._rng = _ScriptedRng(forced_size=20)  # payload_len = 20 - 8 = 12
         box = Box(box_type=b"ftyp", size_orig=8 + 4, data=b"data")
 
-        # Force a specific size_orig > 8 + len(data) to trigger padding
-        box.size_orig = 20
-        payload_len = max(0, box.size_orig - 8)
-        raw = box.data
-        if payload_len >= len(raw):
-            box.data = raw + b"\x00" * (payload_len - len(raw))
-        else:
-            box.data = raw[:payload_len]
+        result = mut._mutate_box_size([box], max_len=65536)
 
-        assert len(box.data) == 12, f"Expected padded payload len 12, got {len(box.data)}"
+        assert result[0].size_orig == 20
+        assert len(result[0].data) == 12, (
+            f"Expected padded payload len 12, got {len(result[0].data)}"
+        )
+        assert result[0].data == b"data" + b"\x00" * 8, (
+            "Original payload must be preserved then zero-padded"
+        )
 
     def test_mutate_box_size_truncates_when_smaller(self):
         from fuzzer_tool.core.mutations.isobmff import Box, IsobmffMutator
 
-        IsobmffMutator()
+        mut = IsobmffMutator()
+        mut._rng = _ScriptedRng(forced_size=12)  # payload_len = 12 - 8 = 4
         box = Box(box_type=b"ftyp", size_orig=8 + 100, data=b"x" * 100)
 
-        # Force a small size_orig
-        box.size_orig = 12
-        payload_len = max(0, box.size_orig - 8)
-        raw = box.data
-        if payload_len >= len(raw):
-            box.data = raw + b"\x00" * (payload_len - len(raw))
-        else:
-            box.data = raw[:payload_len]
+        result = mut._mutate_box_size([box], max_len=65536)
 
-        assert len(box.data) == 4, f"Expected truncated payload len 4, got {len(box.data)}"
+        assert len(result[0].data) == 4, (
+            f"Expected truncated payload len 4, got {len(result[0].data)}"
+        )
+        assert result[0].data == b"x" * 4
 
     def test_mutate_box_size_clamps_payload_to_max_len(self):
         """Regression: _mutate_box_size must not allocate ~4 GB when size_orig=0xFFFFFFFF.
 
         The padding path must clamp payload_len to max_len to avoid OOM.
+        With the clamp removed, this test attempts a ~4 GB allocation and
+        fails (MemoryError or a length mismatch) instead of silently passing.
         """
         from fuzzer_tool.core.mutations.isobmff import Box, IsobmffMutator
 
-        IsobmffMutator()
-        # A realistic leaf box with small data payload
+        max_len = 256
+        mut = IsobmffMutator()
+        mut._rng = _ScriptedRng(forced_size=0xFFFFFFFF)
         box = Box(box_type=b"ftyp", size_orig=8 + 4, data=b"data")
 
-        # Directly invoke the padding logic with the extreme size_orig value
-        # that was causing the OOM. max_len is small (256).
-        max_len = 256
-        box.size_orig = 0xFFFFFFFF
-        raw = box.data
-        payload_len = max(0, min(box.size_orig - 8, max_len))
-        assert payload_len == max_len, (
-            f"Expected payload_len clamped to {max_len}, got {payload_len}"
-        )
-        if payload_len >= len(raw):
-            box.data = raw + b"\x00" * (payload_len - len(raw))
-        assert len(box.data) == max_len, (
-            f"Expected padded data length {max_len}, got {len(box.data)}"
+        result = mut._mutate_box_size([box], max_len=max_len)
+
+        assert len(result[0].data) == max_len, (
+            f"Expected payload clamped to {max_len}, got {len(result[0].data)}"
         )
 
     def test_serialize_extended_size_64bit(self):

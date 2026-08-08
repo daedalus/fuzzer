@@ -32,8 +32,6 @@ retrying.
 
 from __future__ import annotations
 
-import time
-
 from fuzzer_tool.core.checksum_learner import (
     CHECKSUM_PAIRS_MAX,
     RECOVERY_RETRY_BATCH,
@@ -164,25 +162,43 @@ class TestGcdPairSizeFilter:
 
 
 class TestRecoveryCostBounded:
-    def test_repeated_unverifiable_batches_stay_fast(self):
-        """End-to-end timing sanity: hammering an unverifiable learner
-        with realistic-sized data must not blow up wall-clock time. This
-        is the actual regression -- a single _recover() call on an
-        uncapped pair set of big-data pairs took 30+ seconds live."""
+    def test_repeated_unverifiable_batches_stay_bounded(self, monkeypatch):
+        """End-to-end cost sanity: hammering an unverifiable learner with
+        realistic-sized data must not blow up. The original regression --
+        a single _recover() call on an uncapped pair set of big-data pairs
+        took 30+ seconds live -- had two multiplicative causes: recovery
+        ran on (1) an unbounded pair set (2) nearly every iteration. Cost
+        is bounded iff both factors are bounded, so assert on both counts
+        directly instead of wall-clock seconds (the old `elapsed < 15.0`
+        was coverage-sensitive: ~2x under --cov and failed in CI)."""
         f = _FakeFuzzer()
         learner = ChecksumLearner(f, min_pairs=8, poly_width=32)
 
-        start = time.monotonic()
+        recover_calls = [0]
+        original = ChecksumLearner._recover
+
+        def counting(self):
+            recover_calls[0] += 1
+            return original(self)
+
+        monkeypatch.setattr(ChecksumLearner, "_recover", counting)
+
+        iterations = 300
+        pairs_per_iter = 2
+        max_pairs_seen = 0
         next_i = 0
-        for _ in range(300):  # far more fuzz_one()-equivalent calls than before
+        for _ in range(iterations):  # far more fuzz_one()-equivalent calls than before
             learner.add_pairs([_unverifiable_pair(next_i), _unverifiable_pair(next_i + 1)])
             next_i += 2
             learner.ensure_poly()
-        elapsed = time.monotonic() - start
+            max_pairs_seen = max(max_pairs_seen, len(learner._pairs))
 
-        # Generous ceiling: this used to take tens of seconds for far
-        # fewer iterations once the pair set grew (43 iterations in 45s,
-        # measured against the pre-fix code); bounded pairs + real
-        # batching + the GCD data-size filter should keep 300 iterations
-        # comfortably under this.
-        assert elapsed < 15.0
+        total_new_pairs = iterations * pairs_per_iter
+
+        # Factor 1: recovery re-runs only once per real batch of new
+        # evidence (RECOVERY_RETRY_BATCH), not once per iteration. +2 slack
+        # for the first attempt and rounding.
+        assert recover_calls[0] <= (total_new_pairs // RECOVERY_RETRY_BATCH) + 2
+        # Factor 2: every recovery operates on a capped pair set, so
+        # per-call cost cannot grow with runtime.
+        assert max_pairs_seen <= CHECKSUM_PAIRS_MAX

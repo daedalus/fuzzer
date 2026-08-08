@@ -16,6 +16,7 @@ Both layers are compiled into a single .so — no need for separate shims.
 
 import binascii
 import contextlib
+import hashlib
 import logging
 import os
 import uuid
@@ -127,7 +128,16 @@ class CmplogCollector:
 
         # Use disk-backed directory (avoid tmpfs-full failures)
         cmplog_dir = _get_cmplog_dir()
-        out_path = os.path.join(cmplog_dir, "fuzz_cmplog_shim.so")
+        # Key the cached artifact on the source digest so any edit to
+        # cmplog_shim.c forces a recompile instead of silently loading a
+        # stale .so for the life of the machine.
+        try:
+            with open(shim_src, "rb") as _f:
+                _digest = hashlib.sha256(_f.read()).hexdigest()[:16]
+        except OSError as e:
+            log.warning("Could not read cmplog shim source %s: %s", shim_src, e)
+            return False
+        out_path = os.path.join(cmplog_dir, f"fuzz_cmplog_shim.{_digest}.so")
         if os.path.exists(out_path):
             self._shim_path = out_path
             log.info("Cmplog shim cached: %s", out_path)

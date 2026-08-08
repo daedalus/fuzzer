@@ -423,7 +423,7 @@ def cmd_fuzz(args):
         max_corpus=args.max_corpus,
         max_corpus_bytes=getattr(args, "max_corpus_bytes", 0),
         minimize_every_execs=getattr(args, "minimize_every_execs", 0),
-        prune_corpus_max_memory=getattr(args, "prune_corpus_max_memory", 80),
+        prune_corpus_max_memory=getattr(args, "prune_corpus_on_max_memory", 80),
         no_shm=args.no_shm,
         use_ptrace=args.ptrace,
         resume=args.resume,

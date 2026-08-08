@@ -327,7 +327,26 @@ class TargetRunner:
         writer.start()
 
         try:
-            _, status = os.waitpid(pid, 0)
+            # Bounded wait for the initial ptrace stop. A blocking waitpid()
+            # here can hang forever: os.fork() clones only the calling thread,
+            # so if another thread (e.g. a prior run's _write_and_close writer)
+            # holds the malloc or dynamic-loader lock at fork time, the child
+            # can deadlock before reaching execv and never deliver SIGTRAP.
+            # Poll against a deadline instead and treat expiry as a killed run.
+            # (Deeper fix: posix_spawn / a pre-forked server so we never fork
+            # from a multi-threaded process at all.)
+            initial_deadline = time.time() + f.timeout
+            status = None
+            while True:
+                waited, status = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
+                if waited != 0:
+                    break
+                if time.time() >= initial_deadline:
+                    with contextlib.suppress(ProcessLookupError, ChildProcessError):
+                        os.kill(pid, signal.SIGKILL)
+                        os.waitpid(pid, 0)
+                    return -2, "exec timeout"
+                time.sleep(0.0005)  # same poll interval as the loop below
             if os.WIFSTOPPED(status) and os.WSTOPSIG(status) == signal.SIGTRAP:
                 pass
             elif os.WIFSTOPPED(status):
