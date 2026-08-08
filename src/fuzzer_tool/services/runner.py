@@ -39,6 +39,11 @@ from fuzzer_tool.services.ptrace_coverage import (
 
 log = logging.getLogger(__name__)
 
+# Ceiling on the wait for a freshly forked child's first ptrace stop, in
+# seconds. Independent of the per-exec timeout, which the run loop spends in
+# full; see _run_ptrace_coverage.
+_INITIAL_STOP_TIMEOUT = 1.0
+
 
 def _get_fault_addr(pid: int, libc) -> int | None:
     """Return the faulting address (si_addr) for the current ptrace stop.
@@ -335,7 +340,14 @@ class TargetRunner:
             # Poll against a deadline instead and treat expiry as a killed run.
             # (Deeper fix: posix_spawn / a pre-forked server so we never fork
             # from a multi-threaded process at all.)
-            initial_deadline = time.time() + f.timeout
+            #
+            # Bound this wait *separately* from the run loop below, which
+            # starts its own full f.timeout. Charging f.timeout twice makes
+            # the worst case per exec 2x the configured budget. Reaching the
+            # first ptrace stop is fork+execv only — milliseconds — so a
+            # one-second ceiling closes the hang without costing throughput
+            # on a slow or overloaded box.
+            initial_deadline = time.time() + min(f.timeout, _INITIAL_STOP_TIMEOUT)
             status = None
             while True:
                 waited, status = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)

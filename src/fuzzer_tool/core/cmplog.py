@@ -58,6 +58,51 @@ def _cleanup_stale_cmplog_files():
         log.info("Cleaned %d stale cmplog file(s) from %s", removed, d)
 
 
+# Legacy fixed-name artifact from before the shim cache was keyed on the
+# source digest. Never overwritten once the digest scheme landed, so it
+# lingers forever unless explicitly removed.
+_LEGACY_SHIM_NAME = "fuzz_cmplog_shim.so"
+
+
+def _prune_stale_shims(cmplog_dir: str, keep: str) -> int:
+    """Delete cached shim objects other than *keep*.
+
+    The cached ``.so`` is keyed on ``sha256(source)[:16]``, which correctly
+    forces a recompile on every edit — but nothing reclaimed the superseded
+    digests, so each edit permanently leaked another artifact into the cache
+    directory. Drops the pre-digest fixed-name object as well.
+
+    Args:
+        cmplog_dir: Directory holding the cached shim objects.
+        keep: Basename of the shim to retain (the current digest).
+
+    Returns:
+        Number of artifacts removed.
+    """
+    removed = 0
+    try:
+        entries = list(os.scandir(cmplog_dir))
+    except OSError:
+        return 0
+    for entry in entries:
+        name = entry.name
+        if name == keep or not entry.is_file():
+            continue
+        stale = name == _LEGACY_SHIM_NAME or (
+            name.startswith("fuzz_cmplog_shim.") and name.endswith(".so")
+        )
+        if not stale:
+            continue
+        try:
+            os.unlink(entry.path)
+            removed += 1
+        except OSError:
+            pass
+    if removed:
+        log.info("Pruned %d superseded cmplog shim object(s) from %s", removed, cmplog_dir)
+    return removed
+
+
 # ── Memory bounds ────────────────────────────────────────────────────
 CMPLOG_TOKENS_MAX = 10_000  # max unique operand tokens
 CMPLOG_PAIRS_MAX = 5_000  # max unique operand pairs
@@ -166,6 +211,11 @@ class CmplogCollector:
                     log.warning("Cmplog shim compilation failed: %s", result.stderr.decode()[:200])
             except Exception as e:
                 log.warning("Cmplog shim compilation error: %s", e)
+
+        # Reclaim superseded digests only once the current object exists, so
+        # a failed compile never leaves the cache empty.
+        if self._shim_path:
+            _prune_stale_shims(cmplog_dir, os.path.basename(self._shim_path))
 
         return self._shim_path is not None
 

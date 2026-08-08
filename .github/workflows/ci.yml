@@ -21,14 +21,40 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      # clang builds the cmplog/tracecmp shims and the instrumented fuzz
+      # targets; z3 backs the SMT path-constraint solver. Neither is pulled
+      # by ".[dev]", and conftest.py skips rather than fails without them —
+      # so without this step CI silently never runs ~76 tests.
+      - name: Install toolchain (clang, z3)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+          clang --version
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          pip install -e ".[dev,smt]"
+
+      - name: Verify the toolchain-gated tests are not skipped
+        run: |
+          python - <<'PY'
+          import importlib.util, shutil, sys
+          missing = [n for n, ok in
+                     (("clang", shutil.which("clang")),
+                      ("z3", importlib.util.find_spec("z3")))
+                     if not ok]
+          if missing:
+              sys.exit(f"toolchain missing: {', '.join(missing)} — "
+                       "conftest.py would skip the tests that need them")
+          PY
 
       - name: Lint with ruff
         run: ruff check src/ tests/
 
+      # Ratcheted: see the [[tool.mypy.overrides]] block in pyproject.toml.
+      # Modules leave the exemption list one at a time; this gate keeps the
+      # list from growing.
       - name: Type check with mypy
         run: mypy src/
 

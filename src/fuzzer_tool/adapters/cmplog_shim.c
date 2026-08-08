@@ -292,15 +292,18 @@ void *memmem(const void *h, size_t hl, const void *n, size_t nl) {
     void *result = real_memmem(h, hl, n, nl);
     /* input-to-state needs one half from the buffer and one to plant;
      * log haystack-vs-needle, not needle-vs-itself. hl>=nl bounds the read. */
+    /* Pass the real outcome: log_cmp drops result==0, which is the filter
+     * that keeps already-solved comparisons out of the pool. A hardcoded -1
+     * logs a *successful* match as if it were still unsolved. */
     if (cmplog_file && n && nl > 0 && nl <= 64 && hl >= nl)
-        log_cmp(h, n, nl, -1);  /* log_cmp null-checks a/b */
+        log_cmp(h, n, nl, result ? 0 : -1);  /* log_cmp null-checks a/b */
     return result;
 }
 char *strstr(const char *h, const char *n) {
     char *result = real_strstr(h, n);
     if (cmplog_file && n) {
         size_t nl = strlen(n);
-        if (nl > 0 && nl <= 64 && strnlen(h, nl) >= nl) log_cmp(h, n, nl, -1);
+        if (nl > 0 && nl <= 64 && strnlen(h, nl) >= nl) log_cmp(h, n, nl, result ? 0 : -1);
     }
     return result;
 }
@@ -308,7 +311,7 @@ char *strcasestr(const char *h, const char *n) {
     char *result = real_strcasestr(h, n);
     if (cmplog_file && n) {
         size_t nl = strlen(n);
-        if (nl > 0 && nl <= 64 && strnlen(h, nl) >= nl) log_cmp(h, n, nl, -1);
+        if (nl > 0 && nl <= 64 && strnlen(h, nl) >= nl) log_cmp(h, n, nl, result ? 0 : -1);
     }
     return result;
 }
