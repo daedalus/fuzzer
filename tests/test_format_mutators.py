@@ -79,10 +79,9 @@ class TestIsobmffMutations:
 
         from fuzzer_tool.core.mutations.isobmff import Box, IsobmffMutator
 
-        rng = random.Random(42)
-        mut = IsobmffMutator()
+        random.Random(42)
+        IsobmffMutator()
         box = Box(box_type=b"ftyp", size_orig=8 + 4, data=b"data")
-        boxes = [box]
 
         # Force a specific size_orig > 8 + len(data) to trigger padding
         box.size_orig = 20
@@ -98,9 +97,8 @@ class TestIsobmffMutations:
     def test_mutate_box_size_truncates_when_smaller(self):
         from fuzzer_tool.core.mutations.isobmff import Box, IsobmffMutator
 
-        mut = IsobmffMutator()
+        IsobmffMutator()
         box = Box(box_type=b"ftyp", size_orig=8 + 100, data=b"x" * 100)
-        boxes = [box]
 
         # Force a small size_orig
         box.size_orig = 12
@@ -120,10 +118,9 @@ class TestIsobmffMutations:
         """
         from fuzzer_tool.core.mutations.isobmff import Box, IsobmffMutator
 
-        mut = IsobmffMutator()
+        IsobmffMutator()
         # A realistic leaf box with small data payload
         box = Box(box_type=b"ftyp", size_orig=8 + 4, data=b"data")
-        boxes = [box]
 
         # Directly invoke the padding logic with the extreme size_orig value
         # that was causing the OOM. max_len is small (256).

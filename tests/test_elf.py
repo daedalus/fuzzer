@@ -754,7 +754,7 @@ class TestX86_64Decoder:
         Our decoder only handles 81/83 for CMP, so this should be _INS_OTHER.
         That's fine — the important CMP patterns are 81 /7 and 83 /7.
         """
-        insns = self._decode(b"\x3d\x00\x00\x00\x00")
+        self._decode(b"\x3d\x00\x00\x00\x00")
         # 3D is not in our opcode table, so it's 5 unrecognized bytes
 
     def test_cmp_edx_imm32(self):

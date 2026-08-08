@@ -79,7 +79,7 @@ class MutatorBase(ABC):
                 access). Accept and ignore what you do not use.
         """
 
-    def on_new_coverage(self, seed: bytes, new_edges: int) -> None:
+    def on_new_coverage(self, seed: bytes, new_edges: int) -> None:  # noqa: B027
         """Called when a mutation produced new coverage.
 
         Default is a no-op so simple mutators need not implement it. Note

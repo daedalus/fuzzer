@@ -27,9 +27,9 @@ def _make_minimal_elf(
     # e_phoff, e_shoff, etc. set below
 
     # Build .text content with CALL instructions
-    text_content = bytearray(text_text := b"\x90" * 256)  # NOP sled
+    text_content = bytearray(_text_text := b"\x90" * 256)  # NOP sled
     if calls:
-        for caller, callee_addr in calls:
+        for _caller, callee_addr in calls:
             # Place a REL32 CALL at offset 0 of text_content
             disp = callee_addr - (text_start + 0) - 5
             struct.pack_into("<i", text_content, 0, disp)

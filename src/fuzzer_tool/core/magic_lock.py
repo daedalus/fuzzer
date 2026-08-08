@@ -67,14 +67,12 @@ def detect_magic_prefix(data: bytes) -> int:
 
     best = 0
     for prefix, _name in MAGIC_PREFIXES:
-        if data.startswith(prefix):
-            if len(prefix) > best:
-                best = len(prefix)
+        if data.startswith(prefix) and len(prefix) > best:
+            best = len(prefix)
 
     # Check ISOBMFF indirect pattern: [u32 size][ftyp...]
-    if len(data) >= 8 and data[4:8] == b"ftyp":
-        if best < 8:
-            best = 8
+    if len(data) >= 8 and data[4:8] == b"ftyp" and best < 8:
+        best = 8
 
     return best
 

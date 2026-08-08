@@ -59,7 +59,7 @@ class TestKalmanFilter1D:
         random.seed(42)
         kf = KalmanFilter(dim=1, process_noise=0.1, measurement_noise=0.5)
         true_value = 100.0
-        for i in range(50):
+        for _i in range(50):
             true_value += 0.5  # slow drift
             measurement = true_value + random.gauss(0, 0.5)
             kf.update(measurement)
@@ -72,7 +72,7 @@ class TestKalmanFilter1D:
         random.seed(42)
         kf = KalmanFilter(dim=2, process_noise=0.05, measurement_noise=0.5)
         true_value = 100.0
-        for i in range(50):
+        for _i in range(50):
             true_value += 0.5  # slow drift
             measurement = true_value + random.gauss(0, 0.5)
             kf.predict(1.0)
@@ -166,7 +166,6 @@ class TestRobustKF:
             rkf.update(0.0)  # settle
 
         # The filter is now settled near 0 with small P.
-        r_base_before = rkf.effective_measurement_noise
         rkf.update(1000.0)  # huge outlier
 
         # After the outlier, the effective R should be base (gating

@@ -23,8 +23,6 @@ import ast
 import sys
 from pathlib import Path
 
-import pytest
-
 SRC = Path(__file__).parent.parent / "src" / "fuzzer_tool"
 PYPROJECT = Path(__file__).parent.parent / "pyproject.toml"
 
@@ -37,10 +35,7 @@ _IMPORT_TO_DIST = {
 
 
 def _declared_distributions() -> set[str]:
-    if sys.version_info >= (3, 11):
-        import tomllib
-    else:  # pragma: no cover
-        pytest.skip("tomllib requires Python 3.11+")
+    import tomllib
     data = tomllib.loads(PYPROJECT.read_text())
     project = data.get("project", {})
     names: set[str] = set()

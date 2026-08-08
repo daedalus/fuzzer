@@ -77,9 +77,8 @@ def colorize(
     original_checksum = exec_fn(data)
     exec_count = 1
 
-    # Create backup and changed copies
-    backup = bytearray(data)
-
+    # Build the fully-changed copy; `data` itself is the baseline, so no
+    # separate backup is needed.
     if use_type_aware:
         from fuzzer_tool.core.mutations import type_replace_byte
 

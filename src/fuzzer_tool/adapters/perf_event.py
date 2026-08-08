@@ -17,6 +17,7 @@ Usage:
 Ported from honggfuzz linux/perf.c.
 """
 
+import contextlib
 import ctypes
 import ctypes.util
 import logging
@@ -268,10 +269,8 @@ class PerfCounters:
             import fcntl
 
             PERF_IOC_ENABLE = 0x2400
-            try:
+            with contextlib.suppress(OSError):
                 fcntl.ioctl(fd, PERF_IOC_ENABLE)
-            except OSError:
-                pass
 
             self._fds[name] = fd
             self._last_values[name] = 0
@@ -337,10 +336,8 @@ class PerfCounters:
     def close(self) -> None:
         """Close all perf counter file descriptors."""
         for fd in self._fds.values():
-            try:
+            with contextlib.suppress(OSError):
                 os.close(fd)
-            except OSError:
-                pass
         self._fds.clear()
         self._last_values.clear()
 

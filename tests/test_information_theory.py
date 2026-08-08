@@ -94,7 +94,7 @@ class TestRenyiEntropy:
         r = RenyiEntropy()
         counts = [3, 7, 2, 8]
         s = r.tsallis_entropy(counts, q=1.0)
-        h = r.shannon(counts)
+        r.shannon(counts)
         # Tsallis q→1 equals Shannon (up to log base normalization)
         assert isinstance(s, float)
         assert s >= 0

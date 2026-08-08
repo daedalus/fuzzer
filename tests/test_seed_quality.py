@@ -147,7 +147,7 @@ class TestBayesianSeedQuality:
         bsq = BayesianSeedQuality()
         try:
             bsq.select_seed([])
-            assert False, "Should have raised ValueError"
+            raise AssertionError("Should have raised ValueError")
         except ValueError:
             pass
 
@@ -200,7 +200,7 @@ class TestBayesianSeedQuality:
         bsq.init_seed("A")
         for _ in range(10):
             bsq.record_outcome("A", discovered=True)
-        alpha_before = bsq._alpha["A"]
+        bsq._alpha["A"]
         # Next record triggers decay (total_observations = 11; 11 % 10 == 1)
         # Actually decay fires at interval boundaries — let's do 9 more to hit 20
         for _ in range(9):

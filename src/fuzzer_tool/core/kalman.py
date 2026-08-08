@@ -146,9 +146,10 @@ class KalmanFilter:
 
             # P = F @ P @ F^T + Q
             # Q for 2D: process_noise^2 * [[dt³/3, dt²/2], [dt²/2, dt]]
+            # P is kept symmetric (see the writes below), so p10 == p01 and
+            # only p01 is read here.
             p00 = self._p[0][0]
             p01 = self._p[0][1]
-            p10 = self._p[1][0]
             p11 = self._p[1][1]
 
             q_base = self._q_base

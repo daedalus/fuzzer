@@ -187,8 +187,8 @@ class TestRandint:
         p1 = RandPool()
         p2 = RandPool()
         p1.randint(0, 255)
-        v1 = p1.randint(0, 255)
-        v2 = p2.randint(0, 255)
+        p1.randint(0, 255)
+        p2.randint(0, 255)
         assert p1._idx != p2._idx
 
     def test_single_value(self):

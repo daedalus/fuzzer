@@ -118,8 +118,9 @@ class CrashMITracker:
         if p_crash == 0 or p_no_crash == 0:
             return 0.0
 
+        # Probabilities are normalised by total execs (n), not by the
+        # per-position count, so position_counts is not needed here.
         mi_val = 0.0
-        pos_total = self.position_counts[position]
 
         for byte_val, bc in self.byte_total[position].items():
             p_x = bc / n

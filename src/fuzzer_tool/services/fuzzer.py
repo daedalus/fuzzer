@@ -2782,113 +2782,61 @@ class Fuzzer:
             if smt_found:
                 self.op_success["smt_solver"] = self.op_success.get("smt_solver", 0) + 1
 
+        # Per-operator outcome and reward, computed once. Every scheduler
+        # below scored the same operator identically, so this was seven
+        # copies of the same dedup-and-weight loop.
+        op_rewards = []
+        for op in dict.fromkeys(self._last_ops_used):
+            ok = _op_success(op)
+            op_rewards.append(
+                (op, ok, self._cost_adjusted_weight(op, surprisal_weight if ok else 0.0))
+            )
+
         if self.mc and self.mc_bandit:
-            seen = set()
-            for op in self._last_ops_used:
-                if op not in seen:
-                    op_ok = _op_success(op)
-                    w = self._cost_adjusted_weight(op, surprisal_weight if op_ok else 0.0)
-                    self.mc.record(op, op_ok, weight=w)
-                    self.mc.record_brier(op, op_ok, weight=w)
-                    seen.add(op)
-                    # Secretary-problem: track operator quality for optimal stopping
-                    if self._secretary:
-                        if op not in self._op_secretary:
-                            self._op_secretary[op] = SecretaryStopping(
-                                window_size=self._secretary_window,
-                                exploration_frac=self._secretary_exploration,
-                                min_observations=50,
-                            )
-                        a = self.mc.arm_alpha.get(op, 1.0)
-                        b = self.mc.arm_beta.get(op, 1.0)
-                        rate = a / (a + b)
-                        self._op_secretary[op].observe(rate)
+            for op, ok, w in op_rewards:
+                self.mc.record(op, ok, weight=w)
+                self.mc.record_brier(op, ok, weight=w)
+                # Secretary-problem: track operator quality for optimal stopping
+                if self._secretary:
+                    if op not in self._op_secretary:
+                        self._op_secretary[op] = SecretaryStopping(
+                            window_size=self._secretary_window,
+                            exploration_frac=self._secretary_exploration,
+                            min_observations=50,
+                        )
+                    a = self.mc.arm_alpha.get(op, 1.0)
+                    b = self.mc.arm_beta.get(op, 1.0)
+                    self._op_secretary[op].observe(a / (a + b))
 
         if self._mopt and (not self._use_elo or self._meta_strategy == "mopt"):
+            # MOpt is separate: it needs the particle each operator was drawn
+            # from, so it pairs each op with its first particle rather than
+            # iterating the deduped list.
+            rewards_by_op = {op: (ok, w) for op, ok, w in op_rewards}
             seen = set()
             for op, pid in zip(self._last_ops_used, self._last_mopt_particles, strict=False):
-                if op not in seen:
-                    op_ok = _op_success(op)
-                    self._mopt.record(
-                        op,
-                        op_ok,
-                        particle_id=pid,
-                        weight=self._cost_adjusted_weight(op, surprisal_weight if op_ok else 0.0),
-                    )
+                if op not in seen and op in rewards_by_op:
+                    ok, w = rewards_by_op[op]
+                    self._mopt.record(op, ok, particle_id=pid, weight=w)
                     seen.add(op)
 
-        if self._use_replicator and self._replicator:
-            seen = set()
-            for op in self._last_ops_used:
-                if op not in seen:
-                    op_ok = _op_success(op)
-                    self._replicator.record(
-                        op,
-                        op_ok,
-                        weight=self._cost_adjusted_weight(op, surprisal_weight if op_ok else 0.0),
-                    )
-                    seen.add(op)
-
-        if self._exp3:
-            seen = set()
-            for op in self._last_ops_used:
-                if op not in seen:
-                    op_ok = _op_success(op)
-                    self._exp3.record(
-                        op,
-                        op_ok,
-                        weight=self._cost_adjusted_weight(op, surprisal_weight if op_ok else 0.0),
-                    )
-                    seen.add(op)
-
-        if self._eps_greedy:
-            seen = set()
-            for op in self._last_ops_used:
-                if op not in seen:
-                    op_ok = _op_success(op)
-                    self._eps_greedy.record(
-                        op,
-                        op_ok,
-                        weight=self._cost_adjusted_weight(op, surprisal_weight if op_ok else 0.0),
-                    )
-                    seen.add(op)
-
-        if self._hierarchical:
-            seen = set()
-            for op in self._last_ops_used:
-                if op not in seen:
-                    op_ok = _op_success(op)
-                    self._hierarchical.record(
-                        op,
-                        op_ok,
-                        weight=self._cost_adjusted_weight(op, surprisal_weight if op_ok else 0.0),
-                    )
-                    seen.add(op)
-
-        if self._gp_ucb:
-            seen = set()
-            for op in self._last_ops_used:
-                if op not in seen:
-                    op_ok = _op_success(op)
-                    self._gp_ucb.record(
-                        op,
-                        op_ok,
-                        weight=self._cost_adjusted_weight(op, surprisal_weight if op_ok else 0.0),
-                    )
-                    seen.add(op)
+        # Schedulers sharing the record(op, success, weight=...) signature.
+        for scheduler in (
+            self._replicator if self._use_replicator else None,
+            self._exp3,
+            self._eps_greedy,
+            self._hierarchical,
+            self._gp_ucb,
+        ):
+            if scheduler is None:
+                continue
+            for op, ok, w in op_rewards:
+                scheduler.record(op, ok, weight=w)
 
         if self._contextual:
-            seen = set()
-            for op in self._last_ops_used:
-                if op not in seen:
-                    reward = (
-                        self._cost_adjusted_weight(op, surprisal_weight)
-                        if _op_success(op)
-                        else 0.0
-                    )
-                    x = self._operators._context_vector(op)
-                    self._contextual.record(op, x, reward)
-                    seen.add(op)
+            # LinUCB takes a feature vector rather than a success flag.
+            for op, ok, w in op_rewards:
+                self._contextual.record(op, self._operators._context_vector(op), w if ok else 0.0)
 
         # Chi-squared operator heterogeneity test
         if (

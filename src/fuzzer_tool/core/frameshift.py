@@ -157,7 +157,6 @@ class FrameShift:
 
         # Check if we should update the value
         if rel.anchor <= idx <= rel.insert_point:
-            old_val = rel.val
             rel.val += size
             # Check overflow
             mask = (1 << (rel.size * 8)) - 1
@@ -257,7 +256,7 @@ class FrameShift:
                 candidates.append((pos, 1))
 
         # Try to create relations from candidates
-        for pos, strength in candidates:
+        for pos, _strength in candidates:
             if len(self.relations) >= max_relations:
                 break
 

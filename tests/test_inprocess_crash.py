@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 
+from fuzzer_tool.adapters.process import run_target_fast
+
 TARGETS_DIR = Path(__file__).parent.parent / "targets"
 
 
@@ -306,9 +308,6 @@ class TestRunTargetFast:
         assert "AddressSanitizer" in stderr, f"Expected ASAN report in stderr, got: {stderr[:200]}"
 
 
-# Import at module level for TestRunTargetFast
-from fuzzer_tool.adapters.process import run_target_fast
-
 # ---------------------------------------------------------------------------
 # Bug class 5: Integration — fuzzer finds crashes through all modes
 # ---------------------------------------------------------------------------
@@ -366,10 +365,7 @@ class TestWifexitedCrashCode:
         exit_code = os.WEXITSTATUS(status)
         assert exit_code == 134
         # This mirrors the logic in persistent_loader.py's waitpid handler
-        if exit_code >= 128:
-            rc = -(exit_code - 128)
-        else:
-            rc = -2
+        rc = -(exit_code - 128) if exit_code >= 128 else -2
         assert rc == -6, f"Expected rc=-6 for SIGABRT, got rc={rc}"
 
     def test_wifexited_segv_conversion(self):
@@ -381,10 +377,7 @@ class TestWifexitedCrashCode:
         assert os.WIFEXITED(status)
         exit_code = os.WEXITSTATUS(status)
         assert exit_code == 139
-        if exit_code >= 128:
-            rc = -(exit_code - 128)
-        else:
-            rc = -2
+        rc = -(exit_code - 128) if exit_code >= 128 else -2
         assert rc == -11, f"Expected rc=-11 for SIGSEGV, got rc={rc}"
 
     def test_wifexited_normal_exit_not_converted(self):
@@ -397,10 +390,7 @@ class TestWifexitedCrashCode:
         exit_code = os.WEXITSTATUS(status)
         assert exit_code == 0
         # Normal exit (< 128) goes to the pipe-read fallback: no data → -2
-        if exit_code >= 128:
-            rc = -(exit_code - 128)
-        else:
-            rc = -2
+        rc = -(exit_code - 128) if exit_code >= 128 else -2
         assert rc == -2, f"Expected rc=-2 for normal exit, got rc={rc}"
 
 

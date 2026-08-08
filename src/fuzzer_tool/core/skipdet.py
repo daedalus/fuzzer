@@ -80,10 +80,12 @@ class SkipDetector:
         for i in range(min(len(seed_trace_mini) * 8, self.map_size)):
             byte_idx = i >> 3
             bit_idx = i & 7
-            if byte_idx < len(seed_trace_mini):
-                if (seed_trace_mini[byte_idx] >> bit_idx) & 1:
-                    if not self.virgin_det_bits[i]:
-                        new_det_bits += 1
+            if (
+                byte_idx < len(seed_trace_mini)
+                and (seed_trace_mini[byte_idx] >> bit_idx) & 1
+                and not self.virgin_det_bits[i]
+            ):
+                new_det_bits += 1
 
         # Initialize threshold from first seed
         if not self.undet_bits_threshold:
@@ -95,9 +97,8 @@ class SkipDetector:
             for i in range(min(len(seed_trace_mini) * 8, self.map_size)):
                 byte_idx = i >> 3
                 bit_idx = i & 7
-                if byte_idx < len(seed_trace_mini):
-                    if (seed_trace_mini[byte_idx] >> bit_idx) & 1:
-                        self.virgin_det_bits[i] = 1
+                if byte_idx < len(seed_trace_mini) and (seed_trace_mini[byte_idx] >> bit_idx) & 1:
+                    self.virgin_det_bits[i] = 1
             return True
 
         return False

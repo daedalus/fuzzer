@@ -86,8 +86,8 @@ class RateDistortionCorpus:
             if best_key is None:
                 break
 
-            # Remove the seed
-            removed_edges = remaining_seeds.pop(best_key)
+            # Remove the seed (its edge set is recomputed below, not reused)
+            remaining_seeds.pop(best_key)
 
             # Recompute covered edges from remaining seeds
             remaining_edges = set()

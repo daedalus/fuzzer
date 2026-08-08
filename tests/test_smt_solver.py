@@ -16,6 +16,9 @@ from fuzzer_tool.core.smt_solver import (
     Z3Solver,
     _z3_available,
 )
+from tests.conftest import requires_z3
+
+pytestmark = requires_z3
 
 # ═══════════════════════════════════════════════════════════════════
 # 1. Init and availability

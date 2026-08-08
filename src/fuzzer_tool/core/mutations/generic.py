@@ -1,13 +1,12 @@
 """Mutation operators and dictionary handling."""
 
+import random
+import re
+
 
 # Helper: resolve rng parameter to RandPool or stdlib random
 def _get_rng(rng=None):
     return rng or random
-
-
-import random
-import re
 
 INTERESTING_8 = [
     -128,  # Overflow signed 8-bit when decremented
@@ -958,10 +957,7 @@ def could_be_bitflip(xor_val: int) -> bool:
     if sh & 7:
         return False
 
-    if v in (0xFF, 0xFFFF, 0xFFFFFFFF):
-        return True
-
-    return False
+    return v in (0xFF, 0xFFFF, 0xFFFFFFFF)
 
 
 def could_be_arith(old_val: int, new_val: int, blen: int) -> bool:
@@ -992,9 +988,8 @@ def could_be_arith(old_val: int, new_val: int, blen: int) -> bool:
             diffs += 1
             ov, nv = a, b
 
-    if diffs == 1:
-        if ((ov - nv) & 0xFF) <= ARITH_MAX or ((nv - ov) & 0xFF) <= ARITH_MAX:
-            return True
+    if diffs == 1 and (((ov - nv) & 0xFF) <= ARITH_MAX or ((nv - ov) & 0xFF) <= ARITH_MAX):
+        return True
 
     if blen == 1:
         return False
@@ -1019,13 +1014,12 @@ def could_be_arith(old_val: int, new_val: int, blen: int) -> bool:
             return True
 
     # Check dword adjustments
-    if blen == 4:
-        if ((old_val - new_val) & 0xFFFFFFFF) <= ARITH_MAX or (
-            (new_val - old_val) & 0xFFFFFFFF
-        ) <= ARITH_MAX:
-            return True
-
-    return False
+    if blen != 4:
+        return False
+    return (
+        ((old_val - new_val) & 0xFFFFFFFF) <= ARITH_MAX
+        or ((new_val - old_val) & 0xFFFFFFFF) <= ARITH_MAX
+    )
 
 
 def could_be_interest(old_val: int, new_val: int, blen: int, check_le: bool = True) -> bool:

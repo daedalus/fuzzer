@@ -553,7 +553,7 @@ class TestBayesianEloTracker:
         error_belo.init_arm("B")
         for _ in range(100):
             error_belo.record_match("A", "B", score_a=0.0)
-        k_wrong = error_belo._effective_k()
+        error_belo._effective_k()
         # Both converge to the same MSE (squared error is symmetric),
         # but the key property: K should not exceed 2x base_k
         assert k_accurate <= belo._base_k * 2.0

@@ -18,10 +18,14 @@ from pathlib import Path
 import pytest
 
 from fuzzer_tool.adapters.inprocess import InProcessRunner
+from tests.conftest import requires_clang
 
-pytestmark = pytest.mark.skipif(
-    platform.machine() != "x86_64", reason="siginfo_t layout is x86-64 specific"
-)
+pytestmark = [
+    pytest.mark.skipif(
+        platform.machine() != "x86_64", reason="siginfo_t layout is x86-64 specific"
+    ),
+    requires_clang,
+]
 
 TARGETS_DIR = Path(__file__).parent.parent / "targets"
 

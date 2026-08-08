@@ -358,7 +358,7 @@ class TestTsallisNumpy:
         r = RenyiEntropy()
         counts = [3, 7, 2, 8]
         tsallis = r.tsallis_entropy(counts, q=1.0)
-        shannon = r.shannon(counts)
+        r.shannon(counts)
         assert isinstance(tsallis, float)
         assert tsallis >= 0
 

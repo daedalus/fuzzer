@@ -4,6 +4,7 @@ This catches the docstring bug pattern where self._rng = rng or random was
 accidentally pasted inside a docstring instead of as executable code.
 """
 
+import contextlib
 import random
 
 import pytest
@@ -113,10 +114,10 @@ def test_rng_parameter_is_actually_used(module_name, cls_name, header, method_na
 
     # Call mutate multiple times — at least one should use the mock
     for _ in range(20):
-        try:
+        # Some inputs may fail to parse — that's OK, we only care that the
+        # rng parameter was consulted.
+        with contextlib.suppress(Exception):
             mutate_fn(header, max_len=4096, rng=mock_rng)
-        except Exception:
-            pass  # Some inputs may fail to parse — that's OK
 
     assert mock_rng.call_count > 0, (
         f"{cls_name}.{method_name}(rng=mock_rng) never invoked mock_rng — "
@@ -144,10 +145,8 @@ def test_rng_parameter_in_generate_random(module_name, cls_name, header, method_
     mock_rng = MockRng()
     gen_fn = getattr(mutator, method_name)
 
-    try:
+    with contextlib.suppress(Exception):
         gen_fn(max_len=4096, rng=mock_rng)
-    except Exception:
-        pass
 
     assert mock_rng.call_count > 0, (
         f"{cls_name}.{method_name}(rng=mock_rng) never invoked mock_rng — "

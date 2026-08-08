@@ -69,7 +69,7 @@ class TestHypothesisBuilding:
 
     def test_no_effect_no_hypothesis(self):
         fl = FormatLearner()
-        for i in range(5):
+        for _i in range(5):
             fl.record_transition(
                 input_bytes=b"\x00" * 16,
                 mutation_op="bit_flip",
