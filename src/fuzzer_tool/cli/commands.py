@@ -508,6 +508,7 @@ def cmd_fuzz(args):
         chi2_operator_interval=getattr(args, "chi2_operator_interval", 0),
         quiet_stats=getattr(args, "profile_hotpath", False),
         no_save_state=getattr(args, "no_save_state", False),
+        dedup_execs=not getattr(args, "no_dedup_execs", False),
     )
     fuzzer.invocation = " ".join(sys.argv)
     if getattr(args, "profile_hotpath", False):
@@ -1836,6 +1837,11 @@ def main() -> int:
         "--no-save-state",
         action="store_true",
         help="Do not persist fuzzer state at exit (no state.pkl.gz written)",
+    )
+    fuzz_parser.add_argument(
+        "--no-dedup-execs",
+        action="store_true",
+        help="Do not filter already-executed mutants through the exec bloom filter",
     )
     fuzz_parser.add_argument(
         "--trace",

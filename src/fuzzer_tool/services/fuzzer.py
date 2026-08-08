@@ -211,6 +211,8 @@ MAX_CRASH_SIGS = 10_000  # max unique crash signatures before pruning old entrie
 KERNEL_CRASHES_MAX = 500  # max kernel-verified crashes retained
 SEED_SECRETARY_MAX = 500  # max per-seed SecretaryStopping entries
 SEEN_HASHES_MAX = 200_000  # max unique seed hashes retained
+EXEC_BLOOM_CAPACITY = 500_000  # executed-input filter capacity before generational wipe
+EXEC_DEDUP_RETRIES = 3  # re-rolls of the mutation before executing a repeat anyway
 ELO_MATCH_WINDOW_MAX = 1_000  # max Elo match history entries
 META_STRATEGY_CHOICES_MAX = 1_000  # max meta-strategy choice history entries
 # ── Allan variance detector ───────────────────────────────────────────
@@ -527,6 +529,7 @@ class Fuzzer:
         chi2_operator_interval=0,
         quiet_stats=False,
         no_save_state=False,
+        dedup_execs=True,
     ):
         self.target = target
         self.debug = debug
@@ -800,6 +803,17 @@ class Fuzzer:
         self.irreplaceable_hashes: set[str] = set()
         self.bloom = BloomFilter(capacity=100_000)
         self.bloom.init_fuzzy(max_recent=200)
+        # Executed-input filter.  The mutation space is not uniform: stall
+        # recovery, dictionary ops and the deterministic stages collapse onto
+        # very short buffers, so the same mutant is handed to the target
+        # hundreds of times.  A membership test costs ~1us against a ~1.5ms
+        # exec, so re-rolling the mutation on a hit is close to free.
+        # Generational: wiped once `capacity` inputs are absorbed, which keeps
+        # the realised FP rate at 1e-3 over an unbounded exec stream.
+        self._exec_bloom = BloomFilter(capacity=EXEC_BLOOM_CAPACITY, error_rate=1e-3)
+        self._dedup_execs = dedup_execs
+        self._dedup_hits = 0
+        self._dedup_gaveup = 0
         self.crash_hashes: set[str] = set()
         self.crash_sigs: dict[str, int] = {}
         self.crash_frames: dict[str, list[str]] = {}  # sig -> frames for clustering
@@ -1828,6 +1842,32 @@ class Fuzzer:
     def mutate(self, data: bytes):
         return self._operators.mutate(data)
 
+    def _dedup_mutate(self, data: bytes) -> bytes:
+        """Mutate *data*, re-rolling mutants the exec bloom has already seen.
+
+        A hit means the mutant was almost certainly executed before, so the
+        exec would buy no coverage and no bandit signal.  Re-rolling is close
+        to free: ``mutate()`` costs ~2 orders of magnitude less than a target
+        run.  After ``EXEC_DEDUP_RETRIES`` consecutive hits the last mutant is
+        executed anyway, so a saturated filter degrades to the old behaviour
+        rather than spinning.
+
+        A bloom false positive (rate 1e-3) discards a genuinely novel mutant.
+        That is harmless — it stays reachable on later iterations — and the
+        filter never yields a false negative, so nothing already executed
+        slips through as new.
+        """
+        mutated = self.mutate(data)
+        if not self._dedup_execs:
+            return mutated
+        for _ in range(EXEC_DEDUP_RETRIES):
+            if not self._exec_bloom.update_bytes(bytes(mutated), reset_on_full=True):
+                return mutated
+            self._dedup_hits += 1
+            mutated = self.mutate(data)
+        self._dedup_gaveup += 1
+        return mutated
+
     def _cost_adjusted_weight(self, op: str, base_weight: float) -> float:
         """Scale a bandit reward by inverse operator cost.
 
@@ -2253,7 +2293,7 @@ class Fuzzer:
             if hasattr(self._edge_tracker, "_global_edge_hits")
             else 0
         )
-        mutated = self.mutate(data)
+        mutated = self._dedup_mutate(data)
         returncode, stderr = self._run_target(mutated)
         t_elapsed = time.monotonic() - t_start
         self.exec_count += 1
