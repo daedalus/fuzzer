@@ -846,6 +846,8 @@ class TestEloMetaStrategyThrottle:
         f._use_eps_greedy = False
         f._use_hierarchical = False
         f._use_gp_ucb = False
+        f._use_contextual = False
+        f._contextual = None
 
         class _FakeMopt:
             def select_op(self, ops, prev_op=None):

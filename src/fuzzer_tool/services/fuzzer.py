@@ -31,8 +31,10 @@ from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.markov import MarkovChain, MarkovEnsemble
 from fuzzer_tool.core.mi import MI_MAX_POSITIONS, MutualInformationTracker
 from fuzzer_tool.core.operator_registry import REGISTRY
+from fuzzer_tool.core.running_stats import RunningMoments
 from fuzzer_tool.core.sanitizer import SanitizerReport
 from fuzzer_tool.core.schedulers import (
+    ContextualLinUCBScheduler,
     EpsilonGreedyScheduler,
     Exp3Scheduler,
     GPUCBScheduler,
@@ -69,6 +71,7 @@ _OPERATOR_STRATEGY_NAMES = (
     "eps_greedy",
     "hierarchical",
     "gp_ucb",
+    "contextual",
 )
 _SEED_STRATEGY_NAMES = (
     "ga",
@@ -481,6 +484,9 @@ class Fuzzer:
         gp_ucb=False,
         gp_length_scale=1.0,
         gp_beta=2.0,
+        contextual=False,
+        contextual_alpha=1.0,
+        contextual_lambda=1.0,
         overlap_density=False,
         overlap_density_mode="modifier",
         overlap_min_jaccard=0.25,
@@ -1067,6 +1073,27 @@ class Fuzzer:
             self._gp_ucb = GPUCBScheduler(length_scale=gp_length_scale, beta=gp_beta)
             log.info("GP-UCB enabled (l=%.2f, beta=%.2f)", gp_length_scale, gp_beta)
 
+        self._use_contextual = contextual
+        self._contextual = None
+        if contextual:
+            from fuzzer_tool.services.operators import CONTEXT_DIM
+
+            self._contextual = ContextualLinUCBScheduler(
+                dim=CONTEXT_DIM, alpha=contextual_alpha, lambda_reg=contextual_lambda
+            )
+            log.info(
+                "Contextual LinUCB enabled (dim=%d, alpha=%.2f, lambda=%.2f)",
+                CONTEXT_DIM,
+                contextual_alpha,
+                contextual_lambda,
+            )
+        # Running mean/stddev of corpus seed sizes, updated in
+        # corpus_manager.save_to_corpus(). Feeds the contextual scheduler's
+        # "position in corpus size distribution" feature via a cheap
+        # logistic approximation of the CDF, instead of sorting the whole
+        # corpus on every mutation.
+        self._corpus_size_stats = RunningMoments()
+
         self._use_shapley = shapley
         self._shapley = ShapleyAttribution(n_samples=100, window_size=500) if shapley else None
         self._use_bayesian = bayesian
@@ -1132,6 +1159,13 @@ class Fuzzer:
         self._frameshift = FrameShift(max_relations=64)
         self._last_ops_used: list[str] = []
         self._last_ops_with_sites: list[tuple[str, int]] = []
+        self._last_op_costs: dict[str, float] = {}
+        # EMA of wall-clock seconds per call, per operator. Populated in
+        # OperatorMixin.mutate(). Used to convert bandit rewards from
+        # edges-per-selection to edges-per-unit-time so expensive operators
+        # (gradient_descent, condstmt_solve, path_negate, crc_learn) don't
+        # get rated on the same scale as bit_flip.
+        self._op_time_ema: dict[str, float] = {}
         self._last_new_edge_count = 0
         self._last_hamming_distance: int = -1
         self._last_mutation_offset: int = 0
@@ -1367,6 +1401,8 @@ class Fuzzer:
             _register_arms(self._hierarchical)
         if self._gp_ucb:
             _register_arms(self._gp_ucb)
+        if self._contextual:
+            _register_arms(self._contextual)
         if self._elo:
             _register_arms(self._elo)
         del _format_priors  # free priors dict after arm registration
@@ -1771,6 +1807,37 @@ class Fuzzer:
 
     def mutate(self, data: bytes):
         return self._operators.mutate(data)
+
+    def _cost_adjusted_weight(self, op: str, base_weight: float) -> float:
+        """Scale a bandit reward by inverse operator cost.
+
+        Converts "edges per selection" into an "edges per unit time"
+        proxy: an operator's raw reward is multiplied by
+        median_cost / this_op's_cost, so an operator costing the median
+        amount is unaffected (ratio ~= 1.0), a cheap operator (bit_flip,
+        ~us) gets a bonus, and an expensive operator (gradient_descent,
+        condstmt_solve, path_negate, crc_learn, ~ms-s) gets penalized in
+        proportion to how many cheap mutations could have run in the same
+        wall-clock budget. This is fed to every per-op reward call
+        (mc/mopt/replicator/exp3/eps_greedy/hierarchical/gp_ucb/elo) so
+        the whole tournament sees cost, not just Elo.
+
+        Falls back to the unscaled weight until at least a few operators
+        have timing data, and clamps the ratio so a single outlier can't
+        zero out or blow up the reward scale.
+        """
+        if base_weight <= 0.0 or len(self._op_time_ema) < 2:
+            return base_weight
+        cost = self._op_time_ema.get(op)
+        if cost is None or cost <= 0.0:
+            return base_weight
+        costs = sorted(c for c in self._op_time_ema.values() if c > 0.0)
+        if not costs:
+            return base_weight
+        median_cost = costs[len(costs) // 2]
+        ratio = median_cost / cost
+        ratio = max(0.05, min(ratio, 20.0))
+        return base_weight * ratio
 
     def _build_ops(self, data: bytes):
         return self._operators.build_ops(data)
@@ -2688,8 +2755,9 @@ class Fuzzer:
             seen = set()
             for op in self._last_ops_used:
                 if op not in seen:
-                    self.mc.record(op, success, weight=surprisal_weight)
-                    self.mc.record_brier(op, success, weight=surprisal_weight)
+                    w = self._cost_adjusted_weight(op, surprisal_weight)
+                    self.mc.record(op, success, weight=w)
+                    self.mc.record_brier(op, success, weight=w)
                     seen.add(op)
                     # Secretary-problem: track operator quality for optimal stopping
                     if self._secretary:
@@ -2708,42 +2776,66 @@ class Fuzzer:
             seen = set()
             for op, pid in zip(self._last_ops_used, self._last_mopt_particles, strict=False):
                 if op not in seen:
-                    self._mopt.record(op, success, particle_id=pid, weight=surprisal_weight)
+                    self._mopt.record(
+                        op,
+                        success,
+                        particle_id=pid,
+                        weight=self._cost_adjusted_weight(op, surprisal_weight),
+                    )
                     seen.add(op)
 
         if self._use_replicator and self._replicator:
             seen = set()
             for op in self._last_ops_used:
                 if op not in seen:
-                    self._replicator.record(op, success, weight=surprisal_weight)
+                    self._replicator.record(
+                        op, success, weight=self._cost_adjusted_weight(op, surprisal_weight)
+                    )
                     seen.add(op)
 
         if self._exp3:
             seen = set()
             for op in self._last_ops_used:
                 if op not in seen:
-                    self._exp3.record(op, success, weight=surprisal_weight)
+                    self._exp3.record(
+                        op, success, weight=self._cost_adjusted_weight(op, surprisal_weight)
+                    )
                     seen.add(op)
 
         if self._eps_greedy:
             seen = set()
             for op in self._last_ops_used:
                 if op not in seen:
-                    self._eps_greedy.record(op, success, weight=surprisal_weight)
+                    self._eps_greedy.record(
+                        op, success, weight=self._cost_adjusted_weight(op, surprisal_weight)
+                    )
                     seen.add(op)
 
         if self._hierarchical:
             seen = set()
             for op in self._last_ops_used:
                 if op not in seen:
-                    self._hierarchical.record(op, success, weight=surprisal_weight)
+                    self._hierarchical.record(
+                        op, success, weight=self._cost_adjusted_weight(op, surprisal_weight)
+                    )
                     seen.add(op)
 
         if self._gp_ucb:
             seen = set()
             for op in self._last_ops_used:
                 if op not in seen:
-                    self._gp_ucb.record(op, success, weight=surprisal_weight)
+                    self._gp_ucb.record(
+                        op, success, weight=self._cost_adjusted_weight(op, surprisal_weight)
+                    )
+                    seen.add(op)
+
+        if self._contextual:
+            seen = set()
+            for op in self._last_ops_used:
+                if op not in seen:
+                    reward = self._cost_adjusted_weight(op, surprisal_weight) if success else 0.0
+                    x = self._operators._context_vector(op)
+                    self._contextual.record(op, x, reward)
                     seen.add(op)
 
         # Chi-squared operator heterogeneity test
@@ -2779,7 +2871,19 @@ class Fuzzer:
             # useless for judging this -- run-to-run variance on the same
             # build spanned 23s-54s, which is why the figure above comes
             # from timing record_round itself rather than total runtime.
-            self._elo.record_round(unique_ops, winners, crash=is_crash)
+            # Cost-aware edge_counts: previously always None, so record_round
+            # took the flat score_a=1.0 path for every winner regardless of
+            # how expensive it was to run. Feeding a per-op edges/time proxy
+            # activates record_round's existing proportional-scoring branch
+            # (edges[op] / max_edges among winners) so an expensive winner
+            # that merely tied a cheap winner's edge count scores lower.
+            edge_counts = None
+            if winners and self._last_new_edge_count:
+                raw_share = self._last_new_edge_count / max(len(unique_ops), 1)
+                edge_counts = {
+                    op: self._cost_adjusted_weight(op, raw_share) for op in unique_ops
+                }
+            self._elo.record_round(unique_ops, winners, edge_counts=edge_counts, crash=is_crash)
             # Apply periodic decay
             self._elo_decay_counter += 1
             if self._elo_decay_counter >= self._elo_decay_interval:
@@ -3397,6 +3501,8 @@ class Fuzzer:
             all_strategies.append("hierarchical")
         if self._gp_ucb:
             all_strategies.append("gp_ucb")
+        if self._contextual:
+            all_strategies.append("contextual")
         for other in all_strategies:
             if other != self._meta_strategy:
                 self._elo.record_strategy_match(self._meta_strategy, other, score)
@@ -3455,6 +3561,8 @@ class Fuzzer:
             ops.append("hierarchical")
         if getattr(self, "_gp_ucb", False):
             ops.append("gp_ucb")
+        if getattr(self, "_contextual", False):
+            ops.append("contextual")
         if getattr(self, "_use_shapley", False):
             ops.append("shapley")
         if ops:

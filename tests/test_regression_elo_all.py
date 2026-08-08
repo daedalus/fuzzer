@@ -126,6 +126,7 @@ class TestOperatorEloRecordsUsedOnly:
         f._eps_greedy = False
         f._hierarchical = False
         f._gp_ucb = False
+        f._contextual = None
         return f
 
     def test_records_against_enabled_schedulers_only(self):
@@ -195,6 +196,8 @@ class _FakeFuzzerForSelectOp:
         self._hierarchical = None
         self._use_gp_ucb = False
         self._gp_ucb = None
+        self._use_contextual = False
+        self._contextual = None
         self._use_elo = elo
         self._elo = BayesianEloTracker() if elo else None
         import random

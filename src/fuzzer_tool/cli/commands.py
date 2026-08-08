@@ -322,6 +322,9 @@ def cmd_fuzz(args):
             gp_ucb=getattr(args, "gp_ucb", False),
             gp_length_scale=getattr(args, "gp_length_scale", 1.0),
             gp_beta=getattr(args, "gp_beta", 2.0),
+            contextual=getattr(args, "contextual", False),
+            contextual_alpha=getattr(args, "contextual_alpha", 1.0),
+            contextual_lambda=getattr(args, "contextual_lambda", 1.0),
             asan_target=getattr(args, "asan_target", None),
             ubsan_target=getattr(args, "ubsan_target", None),
             chi2_operator_interval=getattr(args, "chi2_operator_interval", 0),
@@ -351,6 +354,7 @@ def cmd_fuzz(args):
         args.eps_greedy = True
         args.hierarchical_bandit = True
         args.gp_ucb = True
+        args.contextual = True
         args.ga = True
         args.qea = True
         args.bayesian = True
@@ -453,6 +457,9 @@ def cmd_fuzz(args):
         gp_ucb=getattr(args, "gp_ucb", False),
         gp_length_scale=getattr(args, "gp_length_scale", 1.0),
         gp_beta=getattr(args, "gp_beta", 2.0),
+        contextual=getattr(args, "contextual", False),
+        contextual_alpha=getattr(args, "contextual_alpha", 1.0),
+        contextual_lambda=getattr(args, "contextual_lambda", 1.0),
         shapley=getattr(args, "shapley", False),
         bayesian=getattr(args, "bayesian", False),
         mi_guided=getattr(args, "mi_guided", False),
@@ -1508,6 +1515,28 @@ def main() -> int:
         type=float,
         default=2.0,
         help="GP-UCB exploration parameter (default: 2.0)",
+    )
+    fuzz_parser.add_argument(
+        "--contextual",
+        action="store_true",
+        help=(
+            "Enable LinUCB contextual bandit operator scheduling "
+            "(per-arm ridge regression over seed features: size, entropy, "
+            "format, edge coverage, lineage depth, cmplog availability, "
+            "corpus-size percentile, and per-op cost)"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--contextual-alpha",
+        type=float,
+        default=1.0,
+        help="LinUCB exploration weight on the confidence bound (default: 1.0)",
+    )
+    fuzz_parser.add_argument(
+        "--contextual-lambda",
+        type=float,
+        default=1.0,
+        help="LinUCB ridge regularization strength (default: 1.0)",
     )
     fuzz_parser.add_argument(
         "--overlap-density",

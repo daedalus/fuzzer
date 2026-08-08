@@ -24,6 +24,7 @@ _FALLBACK_PRECEDENCE = [
     "eps_greedy",
     "hierarchical",
     "gp_ucb",
+    "contextual",
 ]
 
 
@@ -60,6 +61,17 @@ class _RecordingMopt(_RecordingScheduler):
         return "op_mopt", 7
 
 
+class _RecordingContextual(_RecordingScheduler):
+    """LinUCB's select_op takes a second (context) argument — either a
+    shared vector or a per-arm callable; the chain always passes a
+    callable (OperatorEngine._context_vector)."""
+
+    def select_op(self, ops: list[str], context) -> str:
+        self.calls += 1
+        assert callable(context), "contextual dispatch must pass a per-arm context callable"
+        return "op_contextual"
+
+
 class _FakeFuzzer:
     """Minimal fuzzer stand-in exposing exactly the attrs select_op() reads."""
 
@@ -70,6 +82,7 @@ class _FakeFuzzer:
         "eps_greedy": ("_use_eps_greedy", "_eps_greedy"),
         "hierarchical": ("_use_hierarchical", "_hierarchical"),
         "gp_ucb": ("_use_gp_ucb", "_gp_ucb"),
+        "contextual": ("_use_contextual", "_contextual"),
     }
 
     def __init__(self):
@@ -85,6 +98,7 @@ class _FakeFuzzer:
         self.mc = _FakeMC()
         self.mc_bandit = False
         self.mc_cem = False
+        self._op_time_ema: dict = {}
         for flag, attr in self._SCHEDULER_ATTRS.values():
             setattr(self, flag, False)
             setattr(self, attr, None)
@@ -96,7 +110,12 @@ class _FakeFuzzer:
             self.mc = _FakeMC()
             return self.mc
         fake: _RecordingScheduler
-        fake = _RecordingMopt(name) if name == "mopt" else _RecordingScheduler(name)
+        if name == "mopt":
+            fake = _RecordingMopt(name)
+        elif name == "contextual":
+            fake = _RecordingContextual(name)
+        else:
+            fake = _RecordingScheduler(name)
         flag, attr = self._SCHEDULER_ATTRS[name]
         setattr(self, flag, True)
         setattr(self, attr, fake)
@@ -117,7 +136,7 @@ class _RecordingRandPool:
 
 class TestFallbackPrecedence:
     def test_highest_priority_enabled_wins(self):
-        """All 7 schedulers enabled → only replicator is consulted."""
+        """All 8 schedulers enabled → only replicator is consulted."""
         f = _FakeFuzzer()
         fakes = {name: f.enable(name) for name in _FALLBACK_PRECEDENCE}
         op = OperatorEngine(f).select_op(["bit_flip", "byte_flip"])
@@ -137,12 +156,24 @@ class TestFallbackPrecedence:
             (["eps_greedy"], "eps_greedy"),
             (["hierarchical"], "hierarchical"),
             (["gp_ucb"], "gp_ucb"),
+            (["contextual"], "contextual"),
             # Prefix-off subsets: the first enabled in precedence order wins.
             (["gp_ucb", "exp3"], "exp3"),
+            (["contextual", "gp_ucb"], "gp_ucb"),
+            (["contextual", "exp3"], "exp3"),
             (["hierarchical", "bandit"], "bandit"),
             (["mopt", "replicator", "eps_greedy"], "replicator"),
             (
-                ["gp_ucb", "hierarchical", "eps_greedy", "exp3", "bandit", "mopt", "replicator"],
+                [
+                    "contextual",
+                    "gp_ucb",
+                    "hierarchical",
+                    "eps_greedy",
+                    "exp3",
+                    "bandit",
+                    "mopt",
+                    "replicator",
+                ],
                 "replicator",
             ),
         ],

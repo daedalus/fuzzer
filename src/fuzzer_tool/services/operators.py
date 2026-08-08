@@ -16,7 +16,9 @@ module only supplies the ``_op_*`` handlers that the registry dispatches to.
 
 import bisect
 import logging
+import math
 import struct
+import time
 from array import array
 
 from fuzzer_tool.core.cond_stmt import CondState, CondStmt
@@ -56,6 +58,25 @@ for _b in range(256):
     else:
         _COLORIZE_TBL[_b] = 0x21 + (_b * 31 + 11) % 94
 _COLORIZE_TBL = bytes(_COLORIZE_TBL)
+
+# ── Contextual bandit (LinUCB) feature schema ────────────────────────────
+# Coarse format buckets for the context one-hot. Deliberately coarser than
+# _FORMAT_SNIFFERS in operator_registry.py (which gates ~15 format-specific
+# operators individually) -- the bandit only needs "what kind of structure
+# is this" to condition its ranking, not which exact mutator applies.
+_CONTEXT_FORMAT_CATEGORIES = (
+    "png",
+    "jpeg",
+    "compressed",  # gzip/zlib
+    "image_other",  # gif/bmp/riff family (webp/webm)
+    "archive",  # zip/isobmff
+    "elf",
+    "other",
+)
+# 6 scalar features (log-size, entropy, edge-coverage frac, lineage depth,
+# cmplog-pairs-exist, corpus-size percentile) + format one-hot + 1 per-arm
+# operator-cost feature appended in _context_vector().
+CONTEXT_DIM = 6 + len(_CONTEXT_FORMAT_CATEGORIES) + 1
 
 
 class OperatorEngine:
@@ -1926,6 +1947,117 @@ class OperatorEngine:
         """Build the list of available mutation operators from the registry."""
         return REGISTRY.available(self.f, data)
 
+    @staticmethod
+    def _classify_format(data: bytes) -> str:
+        """Coarse format bucket for the contextual bandit's one-hot feature."""
+        if data[:8] == b"\x89PNG\r\n\x1a\n":
+            return "png"
+        if data[:2] == b"\xff\xd8":
+            return "jpeg"
+        if data[:2] == b"\x1f\x8b" or (len(data) > 1 and data[0] == 0x78):
+            return "compressed"
+        if (
+            data[:2] == b"BM"
+            or data[:3] == b"GIF"
+            or data[:4] == b"RIFF"
+            or data[:4] == b"\x1a\x45\xdf\xa3"
+        ):
+            return "image_other"
+        if data[:2] == b"PK" or data[4:8] == b"ftyp":
+            return "archive"
+        if len(data) >= 64 and data[:4] == b"\x7fELF":
+            return "elf"
+        return "other"
+
+    def _build_shared_context(self, data: bytes) -> list[float]:
+        """Build the seed-level context feature vector for the LinUCB bandit.
+
+        Computed once per mutate() call (the seed doesn't change across the
+        n_mutations loop within one round) and cached on the fuzzer instance
+        as ``f._current_context_shared``; per-op vectors are derived from it
+        cheaply in ``_context_vector()`` rather than rebuilt from scratch.
+
+        Features: log seed size, byte entropy, edge-coverage fraction,
+        lineage depth, whether cmplog pairs exist, position in the corpus
+        size distribution, format one-hot. All normalized to roughly [0, 1]
+        so no single feature dominates the ridge regression.
+        """
+        f = self.f
+        max_len = max(getattr(f, "max_len", 1), 1)
+        log_size = math.log1p(len(data)) / math.log1p(max_len)
+
+        if data:
+            counts = [0] * 256
+            for byte in data:
+                counts[byte] += 1
+            n = len(data)
+            entropy = 0.0
+            for c in counts:
+                if c:
+                    p = c / n
+                    entropy -= p * math.log2(p)
+            entropy_norm = entropy / 8.0
+        else:
+            entropy_norm = 0.0
+
+        meta = f.seed_meta.get(data) if hasattr(f, "seed_meta") else None
+        edge_tracker = getattr(f, "_edge_tracker", None)
+        map_size = getattr(edge_tracker, "map_size", 0) if edge_tracker else 0
+        edge_count = meta.get("coverage_edges", 0) if meta else 0
+        edge_frac = min(edge_count / map_size, 1.0) if map_size else 0.0
+
+        lineage_depth = meta.get("lineage_depth", 0) if meta else 0
+        lineage_norm = min(lineage_depth / 20.0, 1.0)
+
+        cmplog = getattr(f, "_cmplog", None)
+        cmplog_exists = 1.0 if (cmplog and getattr(cmplog, "pairs", None)) else 0.0
+
+        # Corpus-size percentile: logistic approximation of the CDF from
+        # running mean/stddev, updated incrementally in
+        # corpus_manager.save_to_corpus(). Avoids sorting the whole corpus
+        # (which can be tens of thousands of seeds) on every mutation.
+        stats = getattr(f, "_corpus_size_stats", None)
+        if stats is not None and stats.count >= 5 and stats.stddev > 1e-9:
+            z = (len(data) - stats.mean) / stats.stddev
+            pctile = 1.0 / (1.0 + math.exp(-max(-20.0, min(20.0, z))))
+        else:
+            pctile = 0.5
+
+        fmt = self._classify_format(data)
+        fmt_onehot = [1.0 if fmt == cat else 0.0 for cat in _CONTEXT_FORMAT_CATEGORIES]
+
+        return [
+            log_size,
+            entropy_norm,
+            edge_frac,
+            lineage_norm,
+            cmplog_exists,
+            pctile,
+            *fmt_onehot,
+        ]
+
+    def _op_cost_feature(self, op: str) -> float:
+        """Per-arm cost feature: log10(seconds) squashed to roughly [0, 1].
+
+        1us -> ~0.14, 1ms -> ~0.43, 1s -> ~0.86, 10s -> 1.0. Neutral 0.5
+        default when the op hasn't been timed yet (see _op_time_ema, fed by
+        the per-call timing in mutate()). Lets the ridge regression learn
+        seed-dependent cost sensitivity directly, on top of the reward
+        already being cost-adjusted by _cost_adjusted_weight().
+        """
+        f = self.f
+        cost = f._op_time_ema.get(op) if hasattr(f, "_op_time_ema") else None
+        if cost is None or cost <= 0.0:
+            return 0.5
+        log_cost = math.log10(cost + 1e-6)
+        return max(0.0, min(1.0, (log_cost + 6.0) / 7.0))
+
+    def _context_vector(self, op: str) -> list[float]:
+        """Full per-arm context: cached shared seed features + this op's cost."""
+        f = self.f
+        shared = getattr(f, "_current_context_shared", None) or [0.0] * (CONTEXT_DIM - 1)
+        return [*shared, self._op_cost_feature(op)]
+
     def select_op(self, ops: list[str]) -> str:
         """Select a mutation operator using the active scheduling strategy."""
         f = self.f
@@ -1951,6 +2083,8 @@ class OperatorEngine:
             available.append("hierarchical")
         if f._use_gp_ucb and f._gp_ucb:
             available.append("gp_ucb")
+        if f._use_contextual and f._contextual:
+            available.append("contextual")
 
         if f._use_elo and f._elo and len(available) >= 2:
             # Resolve the meta-strategy once per exec and reuse it for all
@@ -2002,6 +2136,9 @@ class OperatorEngine:
         elif strategy == "gp_ucb" and f._gp_ucb:
             op = f._gp_ucb.select_op(ops)
             f._last_mopt_particles.append(None)
+        elif strategy == "contextual" and f._contextual:
+            op = f._contextual.select_op(ops, self._context_vector)
+            f._last_mopt_particles.append(None)
         elif f._use_replicator and f._replicator:
             op = f._replicator.select_op(ops)
             f._last_mopt_particles.append(None)
@@ -2023,6 +2160,9 @@ class OperatorEngine:
             f._last_mopt_particles.append(None)
         elif f._use_gp_ucb and f._gp_ucb:
             op = f._gp_ucb.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif f._use_contextual and f._contextual:
+            op = f._contextual.select_op(ops, self._context_vector)
             f._last_mopt_particles.append(None)
         else:
             op = f._rand_pool.choice(ops)
@@ -2067,6 +2207,17 @@ class OperatorEngine:
         f._last_ops_used = []
         f._last_ops_with_sites = []
         f._last_mopt_particles = []
+        # Per-round wall-clock cost per operator, keyed by op name, summed
+        # across repeats within this round. Feeds the cost-aware reward:
+        # a 10ms operator and a 2us operator shouldn't be scored on the
+        # same win/loss scale (see fuzzer.py::_cost_adjusted_weight).
+        f._last_op_costs = {}
+        # Shared LinUCB context for this round: the seed doesn't change
+        # across the n_mutations loop, so build it once here instead of
+        # once per select_op() call.
+        f._current_context_shared = (
+            self._build_shared_context(data) if f._use_contextual and f._contextual else None
+        )
         if not hasattr(f, "_prev_bandit_op"):
             f._prev_bandit_op = None
         f._meta_strategy = None
@@ -2103,7 +2254,15 @@ class OperatorEngine:
             f._last_ops_with_sites.append((op, byte_idx))
             old_len = len(buf)
 
+            _t0 = time.perf_counter()
             result = f._op_dispatch[op](buf, byte_idx, data)
+            _dt = time.perf_counter() - _t0
+            f._last_op_costs[op] = f._last_op_costs.get(op, 0.0) + _dt
+            # EMA of per-call cost, seeded on first observation so a single
+            # early sample doesn't get dragged toward zero.
+            prev_ema = f._op_time_ema.get(op)
+            f._op_time_ema[op] = _dt if prev_ema is None else (0.9 * prev_ema + 0.1 * _dt)
+
             if result is not None:
                 if op == "havoc":
                     if f._frameshift.relations:

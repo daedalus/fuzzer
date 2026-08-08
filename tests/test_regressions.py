@@ -1204,6 +1204,8 @@ class TestPowerSchedulerWiring:
         f._replicator = None
         f._use_mopt = False
         f._mopt = None
+        f._use_contextual = False
+        f._contextual = None
         f.grammar = None
         f._cmplog = None
         f.enable_regex_bomb = False
@@ -1259,6 +1261,8 @@ class TestPowerSchedulerWiring:
         f._replicator = None
         f._use_mopt = False
         f._mopt = None
+        f._use_contextual = False
+        f._contextual = None
         f.grammar = None
         f._cmplog = None
         f.enable_regex_bomb = False

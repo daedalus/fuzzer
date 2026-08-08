@@ -1,5 +1,6 @@
 """Operator-selection schedulers (bandit algorithms)."""
 
+from fuzzer_tool.core.schedulers.contextual import ContextualLinUCBScheduler
 from fuzzer_tool.core.schedulers.epsilon_greedy import EpsilonGreedyScheduler
 from fuzzer_tool.core.schedulers.exp3 import Exp3Scheduler
 from fuzzer_tool.core.schedulers.gp_ucb import GPUCBScheduler
@@ -18,4 +19,5 @@ __all__ = [
     "HierarchicalBanditScheduler",
     "GPUCBScheduler",
     "MCTSSeedScheduler",
+    "ContextualLinUCBScheduler",
 ]
