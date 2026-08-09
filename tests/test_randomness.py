@@ -17,13 +17,17 @@ from fuzzer_tool.core.randomness import (
     binary_matrix_rank,
     birthday_spacings,
     byte_chisq,
+    corpus_invariants,
     fishers_method,
+    invariant_mask,
     kmer_occupancy,
     ks_uniform,
     kuiper_uniform,
     lagged_autocorrelation,
     monobit,
+    permutation_test,
     profile_buffer,
+    repeat_test,
     runs_test,
     serial_test,
     uniformity_report,
@@ -170,3 +174,102 @@ class TestAggregation:
         assert kuiper_uniform([0.5, 0.5]) == 1.0
         assert birthday_spacings(b"") == 1.0
         assert monobit(b"ab") == 1.0
+
+
+class TestCorpusInvariants:
+    @staticmethod
+    def _png_corpus(k=200):
+        """Fixed magic + IHDR tag, varying dimensions and payload."""
+        rng = np.random.default_rng(5)
+        out = []
+        for _ in range(k):
+            w, h = int(rng.integers(1, 4096)), int(rng.integers(1, 4096))
+            out.append(
+                b"\x89PNG\r\n\x1a\n"
+                + struct.pack(">I", 13)
+                + b"IHDR"
+                + struct.pack(">II", w, h)
+                + bytes([8, int(rng.integers(0, 7)), 0, 0, 0])
+                + os.urandom(64)
+            )
+        return out
+
+    def test_recovers_format_header(self):
+        inv = corpus_invariants(self._png_corpus())
+        assert set(range(16)) <= set(inv.fixed_offsets)
+        header = bytes(self._png_corpus(20)[0][i] for i in range(16))
+        assert header.startswith(b"\x89PNG\r\n\x1a\n")
+
+    def test_finds_sub_byte_fixed_bits(self):
+        """Dimensions below 4096 leave the top nibble of byte 18 locked."""
+        inv = corpus_invariants(self._png_corpus())
+        partial = dict(inv.partial_offsets)
+        assert 18 in partial and partial[18] == 0xF0
+
+    def test_undersampled_fields_look_invariant(self):
+        """Documents the failure mode: the mask cannot tell a constant from an
+        unexercised field, so callers must treat it as a prior."""
+        inv = corpus_invariants(self._png_corpus())
+        # bytes 16-17 are the high half of a 32-bit width that never exceeded 4096
+        assert inv.is_structural(16) and inv.is_structural(17)
+
+    def test_claims_nothing_below_min_samples(self):
+        inv = corpus_invariants(self._png_corpus(4), min_samples=16)
+        assert inv.fixed_offsets == [] and inv.locked_bit_ratio == 0.0
+
+    def test_varied_corpus_locks_nothing(self):
+        inv = corpus_invariants([os.urandom(256) for _ in range(64)])
+        assert inv.locked_bit_ratio < 0.02
+
+    def test_degenerate(self):
+        assert invariant_mask([]) == b""
+        assert corpus_invariants([b"abc"]).mask == bytes(3)
+
+
+class TestSequenceDiagnostics:
+    K = 137
+
+    def test_null_calibration(self):
+        rng = np.random.default_rng(4)
+        for fn in (
+            lambda d: permutation_test(d),
+            lambda d: repeat_test(d, self.K),
+        ):
+            ps = np.array([fn(rng.integers(0, self.K, size=200000)) for _ in range(40)])
+            assert 0.3 < ps.mean() < 0.7
+            assert (ps < 0.01).mean() < 0.1
+
+    def test_permutation_catches_ordering_marginals_miss(self):
+        rng = np.random.default_rng(2)
+        d = np.sort(rng.integers(0, self.K, size=600000).reshape(-1, 5), axis=1).ravel()
+        counts = np.bincount(d, minlength=self.K)
+        exp = d.size / self.K
+        from fuzzer_tool.core.randomness import chisq_sf
+
+        assert chisq_sf(float(np.sum((counts - exp) ** 2) / exp), self.K - 1) > 0.05
+        assert permutation_test(d) < 0.01
+
+    def test_repeat_catches_stickiness_permutation_misses(self):
+        rng = np.random.default_rng(2)
+        d = rng.integers(0, self.K, size=400000)
+        keep = np.flatnonzero(rng.random(d.size) < 0.04)[1:]
+        for i in keep:
+            d[i] = d[i - 1]
+        assert repeat_test(d, self.K) < 0.01
+        assert permutation_test(d) > 0.05  # structurally blind to ties
+
+    def test_rand_pool_is_clean(self):
+        from fuzzer_tool.core.rand_pool import RandPool
+
+        pool = RandPool()
+        d = np.array([pool.randrange(self.K) for _ in range(200000)])
+        assert permutation_test(d) > 0.01
+        assert repeat_test(d, self.K) > 0.01
+
+    def test_guards(self):
+        rng = np.random.default_rng(1)
+        assert permutation_test(rng.integers(0, 137, size=100)) == 1.0
+        assert repeat_test(rng.integers(0, 137, size=10)) == 1.0
+        assert repeat_test(np.zeros(5000, dtype=int)) == 1.0
+        with pytest.raises(ValueError):
+            permutation_test(rng.integers(0, 137, size=600000), k=9)
