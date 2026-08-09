@@ -31,6 +31,7 @@ TARGETS="targets"
 VENDOR="vendor"
 LZ4="${LZ4_DIR:-vendor/lz4}"
 SECP256K1="${SECP256K1_DIR:-vendor/secp256k1}"
+TARGETS_MD5=".target.md5"
 OPTS="${@:---all}"
 HAS_FGREP=0
 [ -d "$FGREP/src" ] && HAS_FGREP=1
@@ -101,6 +102,79 @@ NC='\033[0m'
 
 ok() { echo -e "  ${GREEN}OK${NC}: $1"; }
 warn() { echo -e "  ${YELLOW}WARN${NC}: $1"; }
+
+# ── Target checksum tracking (.target.md5, gitignored) ──────────────
+# Records MD5 of every built binary and verifies them at the end.
+record_target_md5() {
+    local file="$1"
+    [ -f "$file" ] || return 0
+    local md5 rel
+    md5=$(md5sum "$file" | awk '{print $1}')
+    rel="${file#./}"
+    # Remove stale entry for this file if present
+    if [ -f "$TARGETS_MD5" ]; then
+        local old_md5
+        old_md5=$(grep -E "^[0-9a-f]+  ${rel}\$" "$TARGETS_MD5" | awk '{print $1}' | head -n1)
+        if [ -n "$old_md5" ]; then
+            sed -i "\|^[0-9a-f]\+  ${rel}\$|d" "$TARGETS_MD5"
+        fi
+    fi
+    echo "${md5}  ${rel}" >> "$TARGETS_MD5"
+}
+
+verify_target_md5() {
+    [ -f "$TARGETS_MD5" ] || return 0
+    echo "Verifying target checksums..."
+    local baseline="${TARGETS_MD5}.prev"
+    local new_count=0 changed_count=0 unchanged_count=0 removed_count=0
+    local current_md5 rel stored_md5 prev_line
+
+    # Compare current .target.md5 against the baseline from before this build.
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        stored_md5=$(echo "$line" | awk '{print $1}')
+        rel=$(echo "$line" | awk '{print $2}')
+        [ -f "$rel" ] || continue
+        current_md5=$(md5sum "$rel" | awk '{print $1}')
+        if [ -f "$baseline" ] && grep -qE "^[0-9a-f]+  ${rel}\$" "$baseline"; then
+            prev_line=$(grep -E "^[0-9a-f]+  ${rel}\$" "$baseline" | head -n1)
+            prev_md5=$(echo "$prev_line" | awk '{print $1}')
+            if [ "$current_md5" = "$prev_md5" ]; then
+                unchanged_count=$((unchanged_count + 1))
+            else
+                changed_count=$((changed_count + 1))
+                warn "$rel: checksum changed"
+            fi
+        else
+            new_count=$((new_count + 1))
+            ok "$rel: new binary"
+        fi
+    done < "$TARGETS_MD5"
+
+    # Detect targets that were in the baseline but no longer built.
+    if [ -f "$baseline" ]; then
+        while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            rel=$(echo "$line" | awk '{print $2}')
+            if ! grep -qE "^[0-9a-f]+  ${rel}\$" "$TARGETS_MD5" 2>/dev/null; then
+                removed_count=$((removed_count + 1))
+            fi
+        done < "$baseline"
+        rm -f "$baseline"
+    fi
+
+    ok "$unchanged_count targets unchanged"
+    if [ "$new_count" -gt 0 ]; then
+        ok "$new_count new targets"
+    fi
+    if [ "$changed_count" -gt 0 ]; then
+        warn "$changed_count targets changed"
+    fi
+    if [ "$removed_count" -gt 0 ]; then
+        warn "$removed_count targets removed from build"
+    fi
+    echo ""
+}
 
 # ── Default compiler: prefer clang, fall back to gcc ────────────────
 #
@@ -214,8 +288,14 @@ compile_secp256k1_objects() {
         [ -d "$SECP256K1/src/modules/$m" ] && \
             module_flags="$module_flags -DENABLE_MODULE_$(echo "$m" | tr '[:lower:]' '[:upper:]')"
     done
+    # Coverage instrumentation for the library objects: trace-pc-guard inserts
+    # __sanitizer_cov_trace_pc_guard calls into every basic block without
+    # emitting __afl_map_shm / __afl_area (those stay in the wrapper only via
+    # -include $SHIM). This gives real library-level coverage without the
+    # multiple-definition errors that -include $SHIM would cause.
+    local cov_flag="-fsanitize-coverage=trace-pc-guard"
     for src in secp256k1 precomputed_ecmult precomputed_ecmult_gen; do
-        $cc $flags -fPIC -O2 -g $extra_cflags $module_flags \
+        $cc $flags $cov_flag -fPIC -O2 -g $extra_cflags $module_flags \
             -I"$SECP256K1/src" -I"$SECP256K1/include" \
             -c "$SECP256K1/src/${src}.c" -o "/tmp/${src}${suffix}.o" 2>/dev/null || rc=$?
     done
@@ -239,6 +319,7 @@ build_target() {
         -o "$out" "$src" $libs 2>/dev/null || rc=$?
     if [ $rc -eq 0 ]; then
         ok "$(basename "$out")"
+        record_target_md5 "$out"
     else
         warn "failed: $(basename "$out")"
     fi
@@ -292,6 +373,7 @@ build_so_target() {
     [ -n "$cmplog_obj" ] && rm -f "$cmplog_obj"
     if [ $rc -eq 0 ]; then
         ok "$(basename "$out")"
+        record_target_md5 "$out"
     else
         warn "failed: $(basename "$out")"
     fi
@@ -619,16 +701,19 @@ build_standalone_so_targets() {
     # secp256k1_read — vendored libsecp256k1 (tools/vendor_secp256k1.sh
     # extracts to vendor/secp256k1). Same object discipline as lz4_read
     # above: library objects are compiled separately, without -include $SHIM.
+    # _nosan builds a distinct _nosan.so instead of overwriting the base .so.
     local SECP256K1_OBJS="/tmp/secp256k1${suffix}.o /tmp/precomputed_ecmult${suffix}.o /tmp/precomputed_ecmult_gen${suffix}.o"
     local SECP256K1_INC="-I$SECP256K1/src -I$SECP256K1/include"
     if [ ! -f "$TARGETS/secp256k1_read.c" ]; then
         :  # target source absent — nothing to build
-    elif [ "$suffix" = "_nosan" ] && [ -f "$TARGETS/secp256k1_read.so" ]; then
-        # Base .so was already built in the suffix="" call. Build the
-        # explicit _nosan.so variant (same flags, different output name)
-        # instead of redundantly rebuilding the base .so with identical
-        # flags, which would also clobber the ubsan/asan variants.
-        build_so_target "$TARGETS/secp256k1_read.c" "$TARGETS/secp256k1_read_nosan.so" "$SECP256K1_OBJS -Wl,--export-dynamic" "$flags $SECP256K1_INC"
+    elif [ "$suffix" = "_nosan" ]; then
+        # Always compile fresh _nosan objects with coverage, and emit a
+        # distinct _nosan.so so the base .so from the "" pass is preserved.
+        if compile_secp256k1_objects "$suffix" "$flags" "$DEFAULT_CC"; then
+            build_so_target "$TARGETS/secp256k1_read.c" "$TARGETS/secp256k1_read_nosan.so" "$SECP256K1_OBJS -Wl,--export-dynamic" "$flags $SECP256K1_INC"
+        else
+            warn "secp256k1_read_nosan.so: compile failed, skipping"
+        fi
     elif compile_secp256k1_objects "$suffix" "$flags" "$DEFAULT_CC"; then
         build_so_target "$TARGETS/secp256k1_read.c" "$TARGETS/secp256k1_read${out_suffix}.so" "$SECP256K1_OBJS -Wl,--export-dynamic" "$flags $SECP256K1_INC"
     else
@@ -1251,6 +1336,11 @@ print_feature_matrix() {
 # ── Main ──────────────────────────────────────────────────────────
 echo "=== Building fuzz targets ==="
 
+# Save previous checksum baseline so we can detect new/changed targets.
+if [ -f "$TARGETS_MD5" ]; then
+    cp -f "$TARGETS_MD5" "${TARGETS_MD5}.prev"
+fi
+
 if [ "$HAS_FGREP" -eq 0 ]; then
     warn "fgrep directory not found at $FGREP — skipping fgrep targets"
 fi
@@ -1350,5 +1440,6 @@ verify_afl
 verify_shm_run
 verify_cmplog
 verify_vendor_tracecmp
+verify_target_md5
 build_tracecmp_targets
 echo "=== Done ==="

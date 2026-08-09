@@ -66,3 +66,4 @@ targets/*.profile_cache
 src/fuzzer_tool/adapters/*.so
 .runtime_calls.json
 .runtime_calls.json.lock
+.target.md5
