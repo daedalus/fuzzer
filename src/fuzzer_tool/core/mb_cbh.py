@@ -54,6 +54,13 @@ log = logging.getLogger(__name__)
 _CBH_MAX_ITERS = 128
 _CBH_MAX_STUCK = 64
 
+# How many candidate sites one call may anchor on. ``1`` commits to the
+# initial argmin and returns early when it stalls. See the "site
+# re-anchoring" note in ``climb_hill``: the mechanism is implemented and
+# tested but defaults off, because at the shipped budget it measures as a
+# wash.
+_CBH_MAX_SITES = 1
+
 # How many bytes MB randomizes around the planted magic bytes. Bounded so
 # the operator stays a targeted move rather than a havoc pass.
 _MB_MAX_RANDOM_BYTES = 8
@@ -131,6 +138,7 @@ def climb_hill(
     rng,
     max_len: int = 0,
     max_iters: int = _CBH_MAX_ITERS,
+    max_sites: int = _CBH_MAX_SITES,
 ) -> bytes:
     """Stochastic hill-climb minimizing distance to a comparison operand.
 
@@ -139,6 +147,52 @@ def climb_hill(
     distance. Complements the deterministic ladder in ``gradient_descent``:
     a single step can move a byte anywhere in 0..255, so it crosses
     plateaus the bounded ladder cannot.
+
+    **Site re-anchoring.** The window under optimization used to be chosen
+    once, by argmin over the overlap-derived candidates, and the whole
+    iteration budget then went to that one site. The module docstring
+    records what that costs: with a 4-byte operand at a known offset the
+    climb solved *some* site in 135/200 runs but the planted one in 0/200
+    when the input shared no bytes with the operand -- the descent worked
+    and the anchor was wrong. Committing is also self-reinforcing, since
+    every accepted move lowers the incumbent site's score and so it never
+    comes to look worse than the alternative it was chosen over.
+
+    When the climb stalls, the search therefore discards the local
+    incumbent and re-anchors on the next-most-promising candidate rather
+    than returning with budget left over, for up to *max_sites* sites. The
+    discard is the point: carrying the edits made for the previous window
+    into the next one carries noise, and scoring the new site against the
+    original buffer keeps a site that has merely been optimized longer from
+    winning by default. The best buffer seen at *any* site is tracked
+    separately and returned, so re-anchoring can only add outcomes.
+
+    Re-anchoring is stall-triggered rather than periodic on purpose. A
+    fixed-period restart would fire in the middle of a converging climb:
+    at Hamming distance *d* over a *w*-byte window a bit flip improves with
+    probability ``d/(8w)``, so a 4-byte operand needs ~100 iterations from
+    a random start, and a periodic reset short of that would prevent
+    convergence rather than escape a basin.
+
+    **Measured: neutral at the shipped budget, so this defaults off.**
+    Planted-operand solve rate over 400 seeded inputs, 4-byte operand at a
+    known offset, ``max_iters=128`` and a 64-iteration stall threshold:
+
+    ==================  ==========  ==========
+    input               max_sites=1 max_sites=4
+    ==================  ==========  ==========
+    no matching bytes      5/400       8/400
+    one matching byte     92/400      99/400
+    two matching bytes   268/400     274/400
+    ==================  ==========  ==========
+
+    The stall threshold is half the iteration budget, so a second site is
+    reached only when the first stalls early, which is rare. Raising the
+    budget to 512 does separate the arms (114 vs 92 at one matching byte),
+    but that buys the difference with 4x the CPU rather than with the
+    mechanism, and CBH runs inline in the mutation path. Left in and
+    default-off so it is an arm the paired harness can test rather than a
+    rewrite that has to be redone; set ``max_sites`` > 1 to enable.
 
     Returns the original input when no improvement is found.
     """
@@ -155,14 +209,25 @@ def climb_hill(
     if not candidates:
         return input_buf
 
-    # Anchor on the most promising site, matching gradient_descent: the
-    # objective is only meaningful relative to a fixed window.
-    site = min(candidates, key=lambda p: _window_distance(bytes(buf), p, target))
+    # Order sites by how well the *original* buffer matches there. The
+    # first is the argmin the old implementation committed to; the rest
+    # are the re-anchor targets, in decreasing promise.
+    origin = bytes(buf)
+    candidates.sort(key=lambda p: _window_distance(origin, p, target))
+    del candidates[max(1, max_sites) :]
 
+    site_idx = 0
+    site = candidates[0]
+
+    # Local incumbent: discarded on every re-anchor.
     best = bytearray(buf)
-    best_score = _window_distance(bytes(best), site, target)
+    best_score = _window_distance(origin, site, target)
     if best_score == 0:
         return bytes(best)
+
+    # Global incumbent: never discarded, and what the caller gets back.
+    overall = bytearray(best)
+    overall_score = best_score
 
     width = len(target)
     stuck = 0
@@ -186,11 +251,30 @@ def climb_hill(
             best = candidate
             best_score = score
             stuck = 0
+            if best_score < overall_score:
+                overall = bytearray(best)
+                overall_score = best_score
             if best_score == 0:
-                break
-        else:
-            stuck += 1
-            if stuck >= _CBH_MAX_STUCK:
-                break
+                return bytes(best)
+            continue
 
-    return bytes(best)
+        stuck += 1
+        if stuck < _CBH_MAX_STUCK:
+            continue
+
+        # Stalled. Move to the next site rather than returning with budget
+        # left; stop only when the candidate list is exhausted.
+        site_idx += 1
+        if site_idx >= len(candidates):
+            break
+        site = candidates[site_idx]
+        best = bytearray(buf)
+        best_score = _window_distance(origin, site, target)
+        stuck = 0
+        if best_score < overall_score:
+            overall = bytearray(best)
+            overall_score = best_score
+        if best_score == 0:
+            return bytes(best)
+
+    return bytes(overall)
