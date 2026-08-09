@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 # Benchmark baseline vs enhanced vs enhanced+ vs optimal vs qea fuzzer configurations.
 #
+# SCOPE: this is a smoke test, not a comparison. It runs one unseeded
+# campaign per configuration on one target, so the gap between two configs
+# is mostly the gap between two draws of a stochastic process. Use it to
+# check that a config runs and roughly where it lands. To decide whether an
+# arm is actually better, use tools/bench_paired.py, which runs every arm
+# over the same locked (target, seed) matrix and reports McNemar on the
+# paired outcomes.
+#
 # Usage:
 #   tools/bench.sh [target] [iterations] [extra_enhanced_flags]
 #
