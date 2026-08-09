@@ -176,6 +176,54 @@ verify_target_md5() {
     echo ""
 }
 
+# ── Vendored libpng / zlib selection ────────────────────────────────
+# Sets PNG_LIBS, ZLIB_LIBS, GZIP_LIBS, PNG_INC, ZLIB_INC in the caller's
+# scope; callers declare them `local` first.
+#
+# One function rather than a copy per build mode. There were three, and
+# within a day of being written they had already drifted: two omitted -lm
+# on ZLIB_LIBS, two omitted -lpthread on PNG_LIBS, all three left GZIP_LIBS
+# on the system library while handing gzip_read vendored headers, and only
+# one said out loud which library it had picked.
+#
+# The link lines are the superset of what the three used. The extra
+# -lm/-lpthread are no-ops where unneeded (glibc 2.34+ folds libpthread
+# into libc), which is the cheaper error than a missing symbol in one build
+# mode only.
+select_png_zlib_libs() {
+    local vendor_zlib="$VENDOR/zlib/libz.a"
+    local vendor_png="$VENDOR/libpng/.libs/libpng16.a"
+
+    PNG_LIBS="-lpng -lz"
+    ZLIB_LIBS="-lz"
+    GZIP_LIBS="-lz"
+    PNG_INC=""
+    ZLIB_INC=""
+
+    if [ -f "$vendor_zlib" ]; then
+        # gzip_read and zlib_read share ZLIB_INC, so they must share the
+        # library: inflateInit2 bakes the header's ZLIB_VERSION into a
+        # runtime check against whatever libz is linked, and a mismatch is
+        # Z_VERSION_ERROR on every input with no build or runtime error.
+        ZLIB_LIBS="$vendor_zlib -lm"
+        GZIP_LIBS="$vendor_zlib -lm"
+        ZLIB_INC="-I$VENDOR/zlib"
+    fi
+
+    if [ -f "$vendor_png" ] && [ -f "$vendor_zlib" ]; then
+        PNG_LIBS="$vendor_png $vendor_zlib -lm -lpthread"
+        PNG_INC="-I$VENDOR/libpng -I$VENDOR/libpng/scripts"
+    fi
+
+    # Always announce the choice. Whether vendor/ is populated changes what
+    # a benchmark number means, and tools/eval_set.py pins targets/png_read
+    # as a locked cell, so this must not be silent.
+    local png_src="system" zlib_src="system"
+    [ -f "$vendor_png" ] && [ -f "$vendor_zlib" ] && png_src="vendored"
+    [ -f "$vendor_zlib" ] && zlib_src="vendored"
+    echo "  libpng: $png_src, zlib: $zlib_src"
+}
+
 # ── Default compiler: prefer clang, fall back to gcc ────────────────
 #
 # clang is the default because it is the only compiler that can produce
@@ -428,28 +476,8 @@ build_simple_targets() {
         FFMPEG_INC="-I$VENDOR/ffmpeg"
     fi
 
-    local PNG_LIBS="-lpng -lz"
-    local ZLIB_LIBS="-lz"
-    local GZIP_LIBS="-lz"
-    local PNG_INC=""
-    local ZLIB_INC=""
-    local VENDOR_ZLIB_A="$VENDOR/zlib/libz.a"
-    local VENDOR_PNG_A="$VENDOR/libpng/.libs/libpng16.a"
-    if [ -f "$VENDOR_ZLIB_A" ]; then
-        ZLIB_LIBS="$VENDOR_ZLIB_A"
-        # gzip_read must move with zlib_read: both are compiled against
-        # $ZLIB_INC, and inflateInit2 bakes the *header's* ZLIB_VERSION into
-        # a runtime check against the *library* it links. Leaving this on -lz
-        # hands vendored headers to the system libz, and every input then
-        # fails at init with Z_VERSION_ERROR -- the target still builds and
-        # still runs, it just stops decompressing.
-        GZIP_LIBS="$VENDOR_ZLIB_A"
-        ZLIB_INC="-I$VENDOR/zlib"
-    fi
-    if [ -f "$VENDOR_PNG_A" ] && [ -f "$VENDOR_ZLIB_A" ]; then
-        PNG_LIBS="$VENDOR_PNG_A $VENDOR_ZLIB_A -lm"
-        PNG_INC="-I$VENDOR/libpng -I$VENDOR/libpng/scripts"
-    fi
+    local PNG_LIBS ZLIB_LIBS GZIP_LIBS PNG_INC ZLIB_INC
+    select_png_zlib_libs
 
     build_target "$TARGETS/asan_target.c" "$TARGETS/asan_target${out_suffix}" "" "$flags" "$cc" "$extra_cflags"
     build_target "$TARGETS/test_target.c" "$TARGETS/test_target${out_suffix}" "" "$flags" "$cc" "$extra_cflags"
@@ -502,28 +530,8 @@ build_sanitizer_targets() {
     # read. Build them with --vendor-tracecmp-style vendored sources first
     # if you need MSAN coverage there.
     if [ "$label" != "MSAN" ]; then
-        local VENDOR_ZLIB_A="$VENDOR/zlib/libz.a"
-        local VENDOR_PNG_A="$VENDOR/libpng/.libs/libpng16.a"
-        local PNG_LIBS="-lpng -lz"
-        local ZLIB_LIBS="-lz"
-        local GZIP_LIBS="-lz"
-        local PNG_INC=""
-        local ZLIB_INC=""
-        if [ -f "$VENDOR_ZLIB_A" ]; then
-            ZLIB_LIBS="$VENDOR_ZLIB_A"
-            # gzip_read must move with zlib_read: both are compiled against
-            # $ZLIB_INC, and inflateInit2 bakes the *header's* ZLIB_VERSION into
-            # a runtime check against the *library* it links. Leaving this on -lz
-            # hands vendored headers to the system libz, and every input then
-            # fails at init with Z_VERSION_ERROR -- the target still builds and
-            # still runs, it just stops decompressing.
-            GZIP_LIBS="$VENDOR_ZLIB_A"
-            ZLIB_INC="-I$VENDOR/zlib"
-        fi
-        if [ -f "$VENDOR_PNG_A" ] && [ -f "$VENDOR_ZLIB_A" ]; then
-            PNG_LIBS="$VENDOR_PNG_A $VENDOR_ZLIB_A -lm"
-            PNG_INC="-I$VENDOR/libpng -I$VENDOR/libpng/scripts"
-        fi
+        local PNG_LIBS ZLIB_LIBS GZIP_LIBS PNG_INC ZLIB_INC
+        select_png_zlib_libs
         build_target "$TARGETS/png_read.c" "$TARGETS/png_read${suffix}" "$PNG_LIBS" "$common" "clang" "$PNG_INC"
         build_target "$TARGETS/zlib_read.c" "$TARGETS/zlib_read${suffix}" "$ZLIB_LIBS" "$common" "clang" "$ZLIB_INC"
         build_target "$TARGETS/gzip_read.c" "$TARGETS/gzip_read${suffix}" "$GZIP_LIBS" "$common" "clang" "$ZLIB_INC"
@@ -616,31 +624,8 @@ build_simple_so_targets() {
     # are compiled with -fsanitize-coverage=trace-pc-guard and
     # -fno-builtin-* so their comparisons remain visible to cmplog and
     # their edge coverage callbacks resolve against afl_shim.c / ASAN.
-    local PNG_LIBS="-lpng -lz"
-    local ZLIB_LIBS="-lz"
-    local GZIP_LIBS="-lz"
-    local PNG_INC=""
-    local ZLIB_INC=""
-    local VENDOR_ZLIB_A="$VENDOR/zlib/libz.a"
-    local VENDOR_PNG_A="$VENDOR/libpng/.libs/libpng16.a"
-    if [ -f "$VENDOR_ZLIB_A" ]; then
-        ZLIB_LIBS="$VENDOR_ZLIB_A -lm"
-    # gzip_read must move with zlib_read: both are compiled against
-    # $ZLIB_INC, and inflateInit2 bakes the *header's* ZLIB_VERSION into
-    # a runtime check against the *library* it links. Leaving this on -lz
-    # hands vendored headers to the system libz, and every input then
-    # fails at init with Z_VERSION_ERROR -- the target still builds and
-    # still runs, it just stops decompressing.
-    GZIP_LIBS="$VENDOR_ZLIB_A -lm"
-        ZLIB_INC="-I$VENDOR/zlib"
-    fi
-    if [ -f "$VENDOR_PNG_A" ] && [ -f "$VENDOR_ZLIB_A" ]; then
-        PNG_LIBS="$VENDOR_PNG_A $VENDOR_ZLIB_A -lm -lpthread"
-        PNG_INC="-I$VENDOR/libpng -I$VENDOR/libpng/scripts"
-    fi
-    if [ -f "$VENDOR_ZLIB_A" ] || [ -f "$VENDOR_PNG_A" ]; then
-        echo "  Using vendored libpng/zlib static libraries"
-    fi
+    local PNG_LIBS ZLIB_LIBS GZIP_LIBS PNG_INC ZLIB_INC
+    select_png_zlib_libs
 
     local FFMPEG_LIBS="-lavformat -lavcodec -lavutil -lswresample -lm"
     local FFMPEG_INC="-I/usr/include/x86_64-linux-gnu"

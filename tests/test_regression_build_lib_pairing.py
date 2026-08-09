@@ -73,9 +73,12 @@ class TestVendoredBranchesSetEveryConsumer:
     """
 
     def _vendored_zlib_branches(self, script: str) -> list[str]:
+        # Matches the branch by what it tests for -- a vendored libz.a --
+        # not by a specific variable name, so a rename does not silently
+        # turn this suite into a no-op.
         blocks, current = [], None
         for line in script.splitlines():
-            if re.match(r"\s*if \[ -f \"\$VENDOR_ZLIB_A\" \]; then\s*$", line):
+            if re.match(r'\s*if \[ -f "\$\{?\w*[Zz][Ll][Ii][Bb]\w*\}?" \]; then\s*$', line):
                 current = []
                 continue
             if current is not None:
