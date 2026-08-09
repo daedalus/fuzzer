@@ -105,40 +105,69 @@ warn() { echo -e "  ${YELLOW}WARN${NC}: $1"; }
 
 # ── Target checksum tracking (.target.md5, gitignored) ──────────────
 # Records MD5 of every built binary and verifies them at the end.
+# Escape a path for use in a POSIX basic/extended regex. Unescaped dots in
+# a filename ("png_read.so") would otherwise match any character.
+_md5_re() { printf '%s' "$1" | sed 's/[][\\.^$*+?(){}|/]/\\&/g'; }
+
+# Snapshot the previous checksums, then start a fresh record.
+#
+# The truncation is what makes "removed" detectable at all: while the record
+# was only appended to or replaced in place, it stayed a permanent superset
+# of the baseline, so verify_target_md5's removed branch could never fire.
+# Kept as a function rather than inline in Main so the invariant is testable
+# without running a build.
+snapshot_target_md5() {
+    if [ -f "$TARGETS_MD5" ]; then
+        cp -f "$TARGETS_MD5" "${TARGETS_MD5}.prev"
+    fi
+    : > "$TARGETS_MD5"
+}
+
 record_target_md5() {
     local file="$1"
     [ -f "$file" ] || return 0
-    local md5 rel
+    local md5 rel rel_re
     md5=$(md5sum "$file" | awk '{print $1}')
     rel="${file#./}"
-    # Remove stale entry for this file if present
+    rel_re=$(_md5_re "$rel")
+    # Drop any earlier entry for this path, so a target built twice in one
+    # run (different flags, same output name) records its final state.
     if [ -f "$TARGETS_MD5" ]; then
-        local old_md5
-        old_md5=$(grep -E "^[0-9a-f]+  ${rel}\$" "$TARGETS_MD5" | awk '{print $1}' | head -n1)
-        if [ -n "$old_md5" ]; then
-            sed -i "\|^[0-9a-f]\+  ${rel}\$|d" "$TARGETS_MD5"
-        fi
+        sed -i "\|^[0-9a-f]\+  ${rel_re}\$|d" "$TARGETS_MD5"
     fi
     echo "${md5}  ${rel}" >> "$TARGETS_MD5"
 }
 
 verify_target_md5() {
-    [ -f "$TARGETS_MD5" ] || return 0
-    echo "Verifying target checksums..."
     local baseline="${TARGETS_MD5}.prev"
-    local new_count=0 changed_count=0 unchanged_count=0 removed_count=0
-    local current_md5 rel stored_md5 prev_line
+    if [ ! -f "$TARGETS_MD5" ]; then
+        rm -f "$baseline"
+        return 0
+    fi
+    echo "Verifying target checksums..."
+    local new_count=0 changed_count=0 unchanged_count=0
+    local removed_count=0 stale_count=0 kept_count=0
+    local current_md5 rel rel_re stored_md5 prev_md5 line
 
-    # Compare current .target.md5 against the baseline from before this build.
+    # Pass 1: every target built this run, against the previous build.
     while IFS= read -r line; do
         [ -z "$line" ] && continue
         stored_md5=$(echo "$line" | awk '{print $1}')
         rel=$(echo "$line" | awk '{print $2}')
         [ -f "$rel" ] || continue
+        rel_re=$(_md5_re "$rel")
         current_md5=$(md5sum "$rel" | awk '{print $1}')
-        if [ -f "$baseline" ] && grep -qE "^[0-9a-f]+  ${rel}\$" "$baseline"; then
-            prev_line=$(grep -E "^[0-9a-f]+  ${rel}\$" "$baseline" | head -n1)
-            prev_md5=$(echo "$prev_line" | awk '{print $1}')
+
+        # The recorded checksum must still match the file. This is the only
+        # check that is actually a *verification* rather than a diff against
+        # the last build: it catches a binary replaced after it was built.
+        if [ "$current_md5" != "$stored_md5" ]; then
+            stale_count=$((stale_count + 1))
+            warn "$rel: on-disk checksum does not match the recorded one"
+        fi
+
+        if [ -f "$baseline" ] && grep -qE "^[0-9a-f]+  ${rel_re}\$" "$baseline"; then
+            prev_md5=$(grep -E "^[0-9a-f]+  ${rel_re}\$" "$baseline" | head -n1 | awk '{print $1}')
             if [ "$current_md5" = "$prev_md5" ]; then
                 unchanged_count=$((unchanged_count + 1))
             else
@@ -151,29 +180,42 @@ verify_target_md5() {
         fi
     done < "$TARGETS_MD5"
 
-    # Detect targets that were in the baseline but no longer built.
+    # Pass 2: baseline entries this run did not rebuild.
+    #
+    # This is only meaningful because the record is truncated at the start
+    # of a build (see Main). Before that it was append-or-replace and never
+    # cleared, so the record was always a superset of the baseline and the
+    # "removed" branch below could not fire at all.
+    #
+    # Not rebuilt is not the same as gone. A partial build (--asan alone)
+    # legitimately skips most targets, so an entry whose binary still exists
+    # is carried forward rather than dropped; only a vanished binary is
+    # worth a warning.
     if [ -f "$baseline" ]; then
         while IFS= read -r line; do
             [ -z "$line" ] && continue
             rel=$(echo "$line" | awk '{print $2}')
-            if ! grep -qE "^[0-9a-f]+  ${rel}\$" "$TARGETS_MD5" 2>/dev/null; then
+            rel_re=$(_md5_re "$rel")
+            grep -qE "^[0-9a-f]+  ${rel_re}\$" "$TARGETS_MD5" 2>/dev/null && continue
+            if [ -f "$rel" ]; then
+                kept_count=$((kept_count + 1))
+                echo "$line" >> "$TARGETS_MD5"
+            else
                 removed_count=$((removed_count + 1))
+                warn "$rel: was built previously, binary is gone"
             fi
         done < "$baseline"
         rm -f "$baseline"
     fi
 
     ok "$unchanged_count targets unchanged"
-    if [ "$new_count" -gt 0 ]; then
-        ok "$new_count new targets"
-    fi
-    if [ "$changed_count" -gt 0 ]; then
-        warn "$changed_count targets changed"
-    fi
-    if [ "$removed_count" -gt 0 ]; then
-        warn "$removed_count targets removed from build"
-    fi
+    [ "$new_count" -gt 0 ] && ok "$new_count new targets"
+    [ "$kept_count" -gt 0 ] && ok "$kept_count not rebuilt this run (carried forward)"
+    [ "$changed_count" -gt 0 ] && warn "$changed_count targets changed"
+    [ "$removed_count" -gt 0 ] && warn "$removed_count targets removed from build"
+    [ "$stale_count" -gt 0 ] && warn "$stale_count targets modified after build"
     echo ""
+    return 0
 }
 
 # ── Vendored libpng / zlib selection ────────────────────────────────
@@ -1342,10 +1384,7 @@ print_feature_matrix() {
 # ── Main ──────────────────────────────────────────────────────────
 echo "=== Building fuzz targets ==="
 
-# Save previous checksum baseline so we can detect new/changed targets.
-if [ -f "$TARGETS_MD5" ]; then
-    cp -f "$TARGETS_MD5" "${TARGETS_MD5}.prev"
-fi
+snapshot_target_md5
 
 if [ "$HAS_FGREP" -eq 0 ]; then
     warn "fgrep directory not found at $FGREP — skipping fgrep targets"
