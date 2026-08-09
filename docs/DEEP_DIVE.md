@@ -713,7 +713,7 @@ The build script compiles every target as both an executable and a `.so` shared 
 Every invocation prints a **build feature matrix** before compiling: an always-on text table
 listing each feature flag (`cmplog`, `tracecmp`, `clang-scov`, `vendor-tracecmp`, `distance`,
 `ffmpeg-sancov`), the sanitizer variant set being built (ASAN/UBSAN/No-ASAN), and whether
-optional target groups (fgrep, tailslayer, lz4) will build or be skipped based on what the
+optional target groups (fgrep, tailslayer, lz4, secp256k1) will build or be skipped based on what the
 script found on disk — so the exact effect of the passed flags is visible at a glance.
 
 **Dual vendored FFmpeg builds**: FFmpeg fuzz targets require coverage-instrumented
@@ -731,6 +731,33 @@ both variants. The ASAN variant is a source copy of `vendor/ffmpeg/` reconfigure
 with `-fsanitize=address`. `build_simple_so_targets` selects the correct path based
 on the `$suffix` parameter (`_asan` → `vendor/ffmpeg_asan/`, otherwise
 `vendor/ffmpeg/`).
+
+### Vendored libsecp256k1 target (secp256k1_read)
+
+`targets/secp256k1_read.so` wraps the vendored libsecp256k1 v0.8.0
+(`tools/vendor_secp256k1.sh` → `vendor/secp256k1/`), mirroring the lz4_read wiring:
+a `.so`-only target built in `build_standalone_so_targets()` via
+`compile_secp256k1_objects()` (library TUs compiled separately, without the shim,
+then linked with `-Wl,--export-dynamic`). The build enables every module present
+in `src/modules/` (ecdh, recovery, extrakeys, schnorrsig, …) with
+`-DENABLE_MODULE_<UPPER>` per TU — no config.h or `-DSECP256K1_BUILD` needed
+(`src/secp256k1.c` self-defines it).
+
+The input layout is mode-bit flagged (byte 0 arms one or more of the DER/compact
+signature, pubkey+ECDH, BIP-340 Schnorr, and recovery surfaces; byte 1 carries the
+recovery recid; bytes 2.. are the payload, capped at 256). Length-sensitive parsers
+probe truncation points so boundary coverage emerges, and
+`secp256k1_context_static` + fixed well-known keys keep the target allocation-free.
+
+**API discipline (found by fuzzing this target)**: libsecp256k1 *zeroes* its
+opaque objects (`secp256k1_pubkey`, `secp256k1_ecdsa_signature`, …) when a parse
+fails (`memset(pubkey, 0, …)` in `src/secp256k1.c`), and any later use of a zeroed
+object hits the illegal-argument callback, which `aborts` on
+`secp256k1_context_static`. A truncation loop that re-parses into the same object
+clobbers a previously-parsed value with the zeroed result of a failed iteration —
+the wrapper must keep the last *successful* parse in a separate object and never
+touch the loop-scratch object afterwards. Verified: 52 edges / ~79% map saturation
+on a 5k-exec campaign with zero crashes.
 
 ### Build-time Cmplog for .so Targets
 

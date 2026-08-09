@@ -18,6 +18,7 @@
 #   tools/vendor_lz4.sh      -> vendor/lz4      (lz4_read / lz4_read.so)
 #   tools/vendor_grep.sh     -> vendor/grep
 #   tools/vendor_ffmpeg.sh   -> vendor/ffmpeg
+#   tools/vendor_secp256k1.sh -> vendor/secp256k1 (secp256k1_read.so)
 
 set -e
 
@@ -29,6 +30,7 @@ PERF_SHIM="src/fuzzer_tool/adapters/perf_shim.c"
 TARGETS="targets"
 VENDOR="vendor"
 LZ4="${LZ4_DIR:-vendor/lz4}"
+SECP256K1="${SECP256K1_DIR:-vendor/secp256k1}"
 OPTS="${@:---all}"
 HAS_FGREP=0
 [ -d "$FGREP/src" ] && HAS_FGREP=1
@@ -184,6 +186,43 @@ compile_lz4_objects() {
         ok "lz4 objects${suffix:+ ($suffix)}"
     else
         warn "lz4 objects${suffix:+ ($suffix)} failed"
+        return 1
+    fi
+}
+
+# ── Compile secp256k1 library objects ─────────────────────────────
+# Vendored via tools/vendor_secp256k1.sh (extracts to vendor/secp256k1/).
+# libsecp256k1 is a plain source drop: the precomputed ECMULT tables are
+# committed (src/precomputed_ecmult{,_gen}.c) and the wide-mul implementation
+# auto-detects in src/util.h, so no configure step is needed. Modules (ecdh,
+# recovery, extrakeys, schnorrsig, musig, ellswift, silentpayments) are
+# #ifdef-gated header includes inside secp256k1.c — every module whose
+# sources exist in the tree is enabled, giving the target the full API
+# surface.
+# Same shim discipline as the lz4 objects: compiled WITHOUT `-include $SHIM`
+# (Hard Rule 8) — that flag applies to every .c on a command line, so
+# compiling these alongside secp256k1_read.c would emit __afl_map_shm /
+# __afl_area / __afl_guarded_call into all three objects and fail the link
+# with multiple-definition errors.
+compile_secp256k1_objects() {
+    local suffix="$1" flags="$2" cc="${3:-$DEFAULT_CC}" extra_cflags="${4:-}"
+    [ -d "$SECP256K1/src" ] || return 1
+    echo "Compiling secp256k1 objects${suffix:+ ($suffix)}..."
+    local rc=0
+    local module_flags=""
+    for m in ecdh recovery extrakeys schnorrsig musig ellswift silentpayments; do
+        [ -d "$SECP256K1/src/modules/$m" ] && \
+            module_flags="$module_flags -DENABLE_MODULE_$(echo "$m" | tr '[:lower:]' '[:upper:]')"
+    done
+    for src in secp256k1 precomputed_ecmult precomputed_ecmult_gen; do
+        $cc $flags -fPIC -O2 -g $extra_cflags $module_flags \
+            -I"$SECP256K1/src" -I"$SECP256K1/include" \
+            -c "$SECP256K1/src/${src}.c" -o "/tmp/${src}${suffix}.o" 2>/dev/null || rc=$?
+    done
+    if [ $rc -eq 0 ]; then
+        ok "secp256k1 objects${suffix:+ ($suffix)}"
+    else
+        warn "secp256k1 objects${suffix:+ ($suffix)} failed"
         return 1
     fi
 }
@@ -539,6 +578,19 @@ build_standalone_so_targets() {
     else
         warn "lz4_read${out_suffix}.so: vendor/lz4 not found, skipping (run tools/vendor_lz4.sh)"
     fi
+
+    # secp256k1_read — vendored libsecp256k1 (tools/vendor_secp256k1.sh
+    # extracts to vendor/secp256k1). Same object discipline as lz4_read
+    # above: library objects are compiled separately, without -include $SHIM.
+    local SECP256K1_OBJS="/tmp/secp256k1${suffix}.o /tmp/precomputed_ecmult${suffix}.o /tmp/precomputed_ecmult_gen${suffix}.o"
+    local SECP256K1_INC="-I$SECP256K1/src -I$SECP256K1/include"
+    if [ ! -f "$TARGETS/secp256k1_read.c" ]; then
+        :  # target source absent — nothing to build
+    elif compile_secp256k1_objects "$suffix" "$flags" "$DEFAULT_CC"; then
+        build_so_target "$TARGETS/secp256k1_read.c" "$TARGETS/secp256k1_read${out_suffix}.so" "$SECP256K1_OBJS -Wl,--export-dynamic" "$flags $SECP256K1_INC"
+    else
+        warn "secp256k1_read${out_suffix}.so: vendor/secp256k1 not found, skipping (run tools/vendor_secp256k1.sh)"
+    fi
 }
 
 # ── Compile vendored libraries with sancov instrumentation ───────
@@ -667,6 +719,7 @@ verify_afl() {
              "$TARGETS"/nop_target "$TARGETS"/nop_target_nosan "$TARGETS"/nop_target.so "$TARGETS"/nop_target_nosan.so \
              "$TARGETS"/tailslayer_read "$TARGETS"/tailslayer_read.so \
              "$TARGETS"/lz4_read "$TARGETS"/lz4_read_nosan "$TARGETS"/lz4_read.so "$TARGETS"/lz4_read_nosan.so \
+             "$TARGETS"/secp256k1_read.so "$TARGETS"/secp256k1_read_nosan.so \
              "$TARGETS"/grep_read "$TARGETS"/grep_read_nosan "$TARGETS"/grep_read.so "$TARGETS"/grep_read_nosan.so; do
         [ -f "$f" ] || continue
         [[ "$f" == *.c ]] && continue
@@ -1144,6 +1197,8 @@ print_feature_matrix() {
     printf '  %-20s %-12s %s\n' "tailslayer_read" "$state" "$([ -d "$TAILSLAYER/include" ] && echo "found at $TAILSLAYER" || echo "headers not found at $TAILSLAYER/include")"
     state=$([ -d "$LZ4/lib" ] && echo "BUILD" || echo "SKIP")
     printf '  %-20s %-12s %s\n' "lz4_read" "$state" "$([ -d "$LZ4/lib" ] && echo "found at $LZ4" || echo "not vendored — run tools/vendor_lz4.sh")"
+    state=$([ -d "$SECP256K1/src" ] && echo "BUILD" || echo "SKIP")
+    printf '  %-20s %-12s %s\n' "secp256k1_read" "$state" "$([ -d "$SECP256K1/src" ] && echo "found at $SECP256K1" || echo "not vendored — run tools/vendor_secp256k1.sh")"
     echo ""
 }
 
