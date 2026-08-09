@@ -1388,9 +1388,10 @@ class TestHierarchicalBanditScheduler:
         hb = HierarchicalBanditScheduler()
         assert hb.arm_decay == 0.999
         assert hb.decay_interval == 100
-        assert (
-            len(hb.CATEGORIES) == 8
-        )  # bit, byte, block, dict, structural, radamsa, format, adaptive
+        # Minimum bound, not an equality: category bands are added over time
+        # (the "regularity" band arrived with the structured operators) and an
+        # `== N` here breaks on every such addition.
+        assert len(hb.CATEGORIES) >= 8
         assert "bit" in hb.CATEGORIES
         assert "byte" in hb.CATEGORIES
 

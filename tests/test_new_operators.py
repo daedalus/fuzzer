@@ -499,7 +499,13 @@ class TestAsciiNumArithmetic:
         for _ in range(30):
             result = ascii_num_arithmetic(b"value=42 end", rng=random.Random())
             if result is not None:
-                assert result[6:8] != b"42" or result == b"value=42 end"
+                # Compare the whole digit *field*, not a fixed 2-byte slice:
+                # the operator may write a number that is longer than the one
+                # it replaced ("42" -> "4238"), in which case result[6:8] is
+                # still b"42" even though the value did change. Slicing a
+                # fixed window made this assertion fail on ~0.5% of runs.
+                field = result[len(b"value=") : -len(b" end")]
+                assert field != b"42" or result == b"value=42 end"
                 # At least one call should find digits
                 break
         else:
