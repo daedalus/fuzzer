@@ -46,6 +46,9 @@ class BayesianSeedQuality:
         prior_beta: Prior beta (pseudocount of failures). Default 1.0.
         decay: Exponential decay factor applied periodically (< 1.0 for
             non-stationary). 1.0 = no decay (fully stationary). Default 1.0.
+            Decay pulls each posterior toward the prior, so a seed with
+            stale evidence returns to "unknown" rather than to a degenerate
+            Beta(eps, eps).
         decay_interval: Number of observations between decay applications.
             Default 500.
         hierarchical_pooling: Shrinkage strength (0.0 = no pooling, 1.0 = full
@@ -136,13 +139,29 @@ class BayesianSeedQuality:
             and self._decay_interval > 0
             and self._total_observations % self._decay_interval == 0
         ):
+            # Decay toward the *prior*, not toward zero.
+            #
+            # ``alpha *= decay`` shrinks the pseudocounts without bound: at
+            # decay=0.99 and a 500-observation interval, a long campaign
+            # drives every alpha and beta below the Beta(1,1) prior and on
+            # toward 0. Beta(eps, eps) is not an uninformative posterior --
+            # it is a nearly degenerate one, with essentially all its mass
+            # at 0 and 1, so posterior_sample() returns a coin flip and
+            # Thompson selection becomes uniform noise over the corpus.
+            # Forgetting evidence should return a seed to "unknown", which
+            # is the prior, not to "arbitrarily confident in both
+            # directions".
+            pa, pb = self._prior_alpha, self._prior_beta
+            d = self._decay
             for k in list(self._alpha):
-                self._alpha[k] *= self._decay
-                self._beta[k] *= self._decay
-            # Decay pooled counts too, so the population-mean target
-            # stays responsive relative to individual posteriors.
-            self._pooled_successes *= self._decay
-            self._pooled_failures *= self._decay
+                self._alpha[k] = pa + (self._alpha[k] - pa) * d
+                self._beta[k] = pb + (self._beta[k] - pb) * d
+            # Pooled counts have no prior to fall back to and are only ever
+            # used as a ratio, so they decay multiplicatively; this keeps
+            # the population-mean target as responsive as the individual
+            # posteriors it shrinks toward.
+            self._pooled_successes *= d
+            self._pooled_failures *= d
 
         # Update posterior
         if discovered:
