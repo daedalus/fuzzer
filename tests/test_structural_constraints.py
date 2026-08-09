@@ -27,6 +27,11 @@ from fuzzer_tool.core.structural_constraints import (
     verify_goal,
 )
 
+# Z3's default 200ms solver timeout can fire on a loaded CI box and return
+# unknown → None even for these trivially-satisfiable instances, flaking the
+# soundness tests. These solve in ~11ms; 5000ms is headroom, not a cost.
+SOLVE_TIMEOUT_MS = 5000
+
 
 def _nest(payload=b"PAYLOAD"):
     """Four-level nest: 0x01 > 0x02 > 0x03 > 0x10(payload)."""
@@ -112,7 +117,7 @@ class TestCoupledSections:
 
     def test_ordered_non_overlapping_sections(self):
         pytest.importorskip("z3")
-        result = solve_coupled_sections(3, 4, 4096)
+        result = solve_coupled_sections(3, 4, 4096, timeout_ms=SOLVE_TIMEOUT_MS)
         assert result is not None
         assert len(result) == 3
         offsets = [o for o, _ in result]
@@ -122,13 +127,13 @@ class TestCoupledSections:
 
     def test_sizes_are_nonzero(self):
         pytest.importorskip("z3")
-        result = solve_coupled_sections(2, 4, 4096)
+        result = solve_coupled_sections(2, 4, 4096, timeout_ms=SOLVE_TIMEOUT_MS)
         assert result is not None
         assert all(size > 0 for _, size in result)
 
     def test_wrapping_last_section_is_satisfiable(self):
         pytest.importorskip("z3")
-        result = solve_coupled_sections(2, 4, 4096, wrap_index=1)
+        result = solve_coupled_sections(2, 4, 4096, wrap_index=1, timeout_ms=SOLVE_TIMEOUT_MS)
         assert result is not None
         offset, size = result[1]
         assert (offset + size) % (1 << 32) < offset
@@ -287,7 +292,7 @@ class TestNonOverlapSoundness:
     def test_true_arithmetic_not_modular(self):
         pytest.importorskip("z3")
         for _ in range(20):
-            result = solve_coupled_sections(3, 4, 4096)
+            result = solve_coupled_sections(3, 4, 4096, timeout_ms=SOLVE_TIMEOUT_MS)
             assert result is not None
             for (off_a, size_a), (off_b, _) in zip(result, result[1:], strict=False):
                 # Python ints: no wraparound to hide behind.
@@ -295,7 +300,7 @@ class TestNonOverlapSoundness:
 
     def test_sections_do_not_overlap_at_width_8(self):
         pytest.importorskip("z3")
-        result = solve_coupled_sections(2, 8, 4096)
+        result = solve_coupled_sections(2, 8, 4096, timeout_ms=SOLVE_TIMEOUT_MS)
         assert result is not None
         (off_a, size_a), (off_b, _) = result
         assert off_a + size_a <= off_b
