@@ -123,6 +123,26 @@ _CATEGORIES: dict[str, set[str]] = {
         "field_repair",
         "tlv_nest_mutate",
     },
+    # Constructive inverses of the diehard/dieharder statistical tests: each
+    # one builds a buffer whose test statistic sits in a tail the uniform
+    # null essentially never reaches. Kept out of "structural" (which is
+    # about a format's own structure) because these impose a *statistical*
+    # regularity that is format-independent -- see mutations/structured.py.
+    "regularity": {
+        "gcd_worst_case",
+        "monotone_fill",
+        "kmer_saturate",
+        "kmer_starve",
+        "rank_deficient",
+        "perm_lock",
+        "lag_correlate",
+        "spectral_peak",
+        "birthday_collide",
+        "invariant_break",
+        "degenerate_geometry",
+        "float_squeeze",
+        "popcount_lock",
+    },
     "adaptive": {
         "markov_bytes",
         "cem_bytes",
@@ -168,6 +188,17 @@ def _redqueen_available(fuzzer, data) -> bool:
     return bool(
         parent_meta and (parent_meta.get("redqueen_matches") or parent_meta.get("redqueen_offsets"))
     )
+
+
+# corpus_invariants() defaults to this many samples before it will call an
+# offset invariant; below it, every offset looks fixed by coincidence and the
+# operator would scribble over the whole file.
+_INVARIANT_MIN_SAMPLES = 16
+
+
+def _has_corpus_samples(fuzzer, _data) -> bool:
+    corpus = getattr(fuzzer, "corpus", None)
+    return bool(corpus) and len(corpus) >= _INVARIANT_MIN_SAMPLES
 
 
 def _never(_fuzzer, _data) -> bool:
@@ -297,6 +328,8 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     "path_negate": _has_branch_records,
     # per-input ops
     "redqueen": _redqueen_available,
+    # regularity op that measures the corpus rather than the seed
+    "invariant_break": _has_corpus_samples,
     # learned checksum polynomial (gated on recovered polynomial)
     "crc_learn": lambda f, _d: bool(
         getattr(f, "checksum_learner", None) and f.checksum_learner.ensure_poly() is not None
@@ -308,7 +341,6 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     # dispatch-only, never selectable
     "colorization": _never,
 }
-
 
 
 def _mutator_adapter(mutator, engine) -> Callable:

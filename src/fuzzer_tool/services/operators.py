@@ -45,6 +45,17 @@ from fuzzer_tool.core.operator_registry import REGISTRY
 
 log = logging.getLogger(__name__)
 
+# ── invariant_break corpus scan ──────────────────────────────────────────
+# Minimum corpus size before an "every input agrees here" offset is treated
+# as a real invariant rather than a coincidence. Mirrors the availability
+# predicate in operator_registry so a direct dispatch call is guarded too.
+_INVARIANT_MIN_SAMPLES = 16
+# Newest N seeds only. The scan is O(samples x length) and the invariant set
+# converges quickly; scanning a 50k-entry corpus on every recompute would
+# cost far more than the operator can repay.
+_INVARIANT_SAMPLE_CAP = 128
+
+
 # Precomputed colorization lookup table: byte -> different value from same class.
 # Avoids per-call table construction in _op_colorization().
 _COLORIZE_TBL = bytearray(256)
@@ -96,6 +107,11 @@ class OperatorEngine:
         self._redqueen_sorted_pairs: list | None = None
         self._redqueen_pair_lengths: array | None = None
         self._redqueen_sorted_version: int = 0
+        # Cache for _op_invariant_break: CorpusInvariants plus the corpus
+        # size it was measured at, so it is rebuilt on growth and not per
+        # mutation (see corpus_invariants()).
+        self._invariants = None
+        self._invariants_corpus_len: int = -1
 
     # ── Operator handlers ──────────────────────────────────────────────
     # Each handler: (buf, byte_idx, data) -> None (in-place) or bytes (replace buf)
@@ -1146,9 +1162,7 @@ class OperatorEngine:
         if not (buf and self.f._cmplog and self.f._cmplog.pairs):
             return
         pair = self.f._rand_pool.choice(self.f._cmplog.pairs)
-        result = gradient_descent(
-            bytes(buf), pair, max_len=self.f.max_len, rng=self.f._rand_pool
-        )
+        result = gradient_descent(bytes(buf), pair, max_len=self.f.max_len, rng=self.f._rand_pool)
         if result and result != bytes(buf):
             return bytearray(result[: self.f.max_len])
 
@@ -1159,9 +1173,7 @@ class OperatorEngine:
         if not (buf and self.f._cmplog and self.f._cmplog.pairs):
             return
         pair = self.f._rand_pool.choice(self.f._cmplog.pairs)
-        result = magic_byte_search(
-            bytes(buf), pair, self.f._rand_pool, max_len=self.f.max_len
-        )
+        result = magic_byte_search(bytes(buf), pair, self.f._rand_pool, max_len=self.f.max_len)
         if result and result != bytes(buf):
             return bytearray(result[: self.f.max_len])
 
@@ -1833,6 +1845,113 @@ class OperatorEngine:
                 off = rng.choice(offsets)
                 if off < len(buf):
                     buf[off] ^= 0xFF
+
+    # ── Regularity operators (diehard/dieharder inverses) ──────────────
+    # Each one delegates to a length-preserving construction in
+    # core/mutations/structured.py; see that module for what statistic each
+    # inverts and why the resulting shape is interesting to a parser.
+
+    def _regularity(self, fn, buf):
+        """Run a structured.py construction over *buf*.
+
+        The constructions are length-preserving, so the ``max_len`` clamp is
+        a formality here -- it is applied anyway to match every other
+        buffer-returning handler, rather than relying on a property the
+        module happens to have today.
+        """
+        return bytearray(fn(bytes(buf), rng=self.f._rand_pool)[: self.f.max_len])
+
+    def _op_gcd_worst_case(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import fibonacci_pairs
+
+        return self._regularity(fibonacci_pairs, buf)
+
+    def _op_monotone_fill(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import monotone_fill
+
+        return self._regularity(monotone_fill, buf)
+
+    def _op_kmer_saturate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import de_bruijn_fill
+
+        return self._regularity(de_bruijn_fill, buf)
+
+    def _op_kmer_starve(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import kmer_starve
+
+        return self._regularity(kmer_starve, buf)
+
+    def _op_rank_deficient(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import rank_deficient
+
+        return self._regularity(rank_deficient, buf)
+
+    def _op_perm_lock(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import perm_lock
+
+        return self._regularity(perm_lock, buf)
+
+    def _op_lag_correlate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import lag_correlate
+
+        return self._regularity(lag_correlate, buf)
+
+    def _op_spectral_peak(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import spectral_peak
+
+        return self._regularity(spectral_peak, buf)
+
+    def _op_birthday_collide(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import birthday_collide
+
+        return self._regularity(birthday_collide, buf)
+
+    def _op_degenerate_geometry(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import degenerate_geometry
+
+        return self._regularity(degenerate_geometry, buf)
+
+    def _op_float_squeeze(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import float_squeeze
+
+        return self._regularity(float_squeeze, buf)
+
+    def _op_popcount_lock(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import popcount_lock
+
+        return self._regularity(popcount_lock, buf)
+
+    def corpus_invariants(self):
+        """Cached ``CorpusInvariants`` for the current corpus, or None.
+
+        Recomputed only when the corpus grows: the scan is O(samples x
+        length) and the invariant set moves slowly, so recomputing per
+        mutation would dominate the operator's cost. Returns None when the
+        corpus is too small for the measurement to mean anything -- the
+        availability predicate normally prevents that, but a direct
+        dispatch call must not scribble over an entire file on the strength
+        of two samples agreeing by chance.
+        """
+        from fuzzer_tool.core.randomness import corpus_invariants
+
+        corpus = getattr(self.f, "corpus", None)
+        if not corpus or len(corpus) < _INVARIANT_MIN_SAMPLES:
+            return None
+        if self._invariants is None or self._invariants_corpus_len != len(corpus):
+            samples = corpus[-_INVARIANT_SAMPLE_CAP:]
+            self._invariants = corpus_invariants(samples, min_samples=_INVARIANT_MIN_SAMPLES)
+            self._invariants_corpus_len = len(corpus)
+        return self._invariants
+
+    def _op_invariant_break(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import invariant_break
+
+        invariants = self.corpus_invariants()
+        if invariants is None:
+            return None
+        return bytearray(
+            invariant_break(bytes(buf), invariants, rng=self.f._rand_pool)[: self.f.max_len]
+        )
 
     def _op_havoc(self, buf, _byte_idx, data):
         """Havoc mutation with deterministic dedup: retry if fully redundant."""

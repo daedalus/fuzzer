@@ -8,6 +8,8 @@ instances (``colorization`` registered with no op-list entry,
 ``block_shuffle_variable`` categorized nowhere) from returning.
 """
 
+import os
+
 import pytest
 
 from fuzzer_tool.core.mutations import DICT_MUTATIONS, FORMAT_MUTATIONS, MUTATIONS
@@ -17,6 +19,8 @@ from fuzzer_tool.core.operator_registry import (
     OperatorRegistry,
     OperatorSpec,
 )
+from fuzzer_tool.core.rand_pool import RandPool
+from fuzzer_tool.services.operators import OperatorEngine
 
 # Ops that are dispatchable but intentionally live outside the legacy lists:
 # gated by per-run conditions (markov/cem/grammar/cmplog/redqueen) or
@@ -220,3 +224,109 @@ class TestRegistryMechanics:
         registry.categories()
         registry.register(OperatorSpec(name="cache_b", category="bit", handler_name="_op_cache_b"))
         assert "cache_b" in registry.categories()["bit"]
+
+
+class TestRegularityOperators:
+    """The dieharder-inverse band registers and dispatches like any other.
+
+    These operators arrived as a new category rather than as additions to an
+    existing one, which is the case most likely to drift: a band that no
+    availability predicate, no scheduler and no category test knows about
+    would still import cleanly and simply never be selected.
+    """
+
+    REGULARITY_OPS = frozenset(
+        {
+            "birthday_collide",
+            "degenerate_geometry",
+            "float_squeeze",
+            "gcd_worst_case",
+            "invariant_break",
+            "kmer_saturate",
+            "kmer_starve",
+            "lag_correlate",
+            "monotone_fill",
+            "perm_lock",
+            "popcount_lock",
+            "rank_deficient",
+            "spectral_peak",
+        }
+    )
+
+    def test_band_is_registered(self):
+        assert set(REGISTRY.names()) >= self.REGULARITY_OPS
+
+    def test_band_categorized_regularity(self):
+        assert OPERATOR_CATEGORIES["regularity"] == self.REGULARITY_OPS
+
+    def test_every_op_has_a_handler(self):
+        engine = OperatorEngine(_MockFuzzer())
+        dispatch = REGISTRY.dispatch(engine)
+        for name in self.REGULARITY_OPS:
+            assert callable(dispatch[name])
+
+    def test_all_but_invariant_break_are_unconditional(self):
+        """Only the corpus-measuring operator is gated."""
+        fuzzer = _MockFuzzer()
+        available = set(REGISTRY.available(fuzzer, b"seed"))
+        assert self.REGULARITY_OPS - {"invariant_break"} <= available
+
+    def test_invariant_break_gated_on_corpus_size(self):
+        """Below the sample floor, "every input agrees here" is a coincidence.
+
+        Letting the operator run on a two-seed corpus would have it treat
+        nearly every offset as structural and overwrite the whole file.
+        """
+        fuzzer = _MockFuzzer()
+        fuzzer.corpus = []
+        assert "invariant_break" not in REGISTRY.available(fuzzer, b"seed")
+        fuzzer.corpus = [b"x"] * 4
+        assert "invariant_break" not in REGISTRY.available(fuzzer, b"seed")
+        fuzzer.corpus = [b"x"] * 16
+        assert "invariant_break" in REGISTRY.available(fuzzer, b"seed")
+
+    def test_handlers_preserve_length(self):
+        """The band's contract: overwrite in place, never resize.
+
+        Everything downstream (frameshift bookkeeping, the max_len clamp)
+        stays simple only as long as this holds for every operator here.
+        """
+        fuzzer = _MockFuzzer()
+        fuzzer.max_len = 4096
+        fuzzer._rand_pool = RandPool()
+        engine = OperatorEngine(fuzzer)
+        dispatch = REGISTRY.dispatch(engine)
+        for name in sorted(self.REGULARITY_OPS - {"invariant_break"}):
+            for _ in range(10):
+                buf = bytearray(os.urandom(512))
+                result = dispatch[name](buf, 0, bytes(buf))
+                assert result is not None, name
+                assert len(result) == 512, name
+
+    def test_invariant_break_handler_needs_a_corpus(self):
+        """Dispatching it directly with no corpus must be a no-op, not a crash.
+
+        The availability predicate normally prevents this, but dispatch is
+        reachable independently of build_ops (havoc, deterministic replay), so
+        the handler cannot rely on the gate having run.
+        """
+        fuzzer = _MockFuzzer()
+        fuzzer.max_len = 4096
+        fuzzer._rand_pool = RandPool()
+        fuzzer.corpus = []
+        engine = OperatorEngine(fuzzer)
+        buf = bytearray(os.urandom(128))
+        assert engine._op_invariant_break(buf, 0, bytes(buf)) is None
+
+    def test_invariant_cache_rebuilds_only_on_growth(self):
+        """The corpus scan is O(samples x length); it must not run per call."""
+        fuzzer = _MockFuzzer()
+        fuzzer.max_len = 4096
+        fuzzer._rand_pool = RandPool()
+        fuzzer.corpus = [b"\x89MAGIC\x00\x01" + os.urandom(56) for _ in range(32)]
+        engine = OperatorEngine(fuzzer)
+        first = engine.corpus_invariants()
+        assert first is not None
+        assert engine.corpus_invariants() is first
+        fuzzer.corpus.append(b"\x89MAGIC\x00\x01" + os.urandom(56))
+        assert engine.corpus_invariants() is not first
