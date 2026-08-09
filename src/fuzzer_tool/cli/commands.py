@@ -488,6 +488,9 @@ def cmd_fuzz(args):
         ga_mutation_rate=getattr(args, "ga_mutation_rate", 0.3),
         ga_tournament_size=getattr(args, "ga_tournament_size", 3),
         ga_speciation_threshold=getattr(args, "ga_speciation_threshold", 0.3),
+        qea_rotation_angle=getattr(args, "qea_rotation_angle", 0.05),
+        qea_strong_bias=getattr(args, "qea_strong_bias", None),
+        qea_elite_reset=getattr(args, "qea_elite_reset", 0),
         continue_until_crash=getattr(args, "continue_until_crash", False),
         calibrate=getattr(args, "calibrate", 0),
         stall_threshold=getattr(args, "stall", 1000),
@@ -1658,6 +1661,28 @@ def main() -> int:
         type=float,
         default=0.1,
         help="GA elite fraction (default: 0.1)",
+    )
+    fuzz_parser.add_argument(
+        "--qea-rotation-angle",
+        type=float,
+        default=0.05,
+        help="QEA rotation gate magnitude; 0.0 disables amplitude feedback "
+        "entirely (the zero-coupling endpoint) (default: 0.05)",
+    )
+    fuzz_parser.add_argument(
+        "--qea-strong-bias",
+        type=float,
+        default=None,
+        help="QEA amplitude bias toward a parent's committed bytes; 0.5 is "
+        "no bias, i.e. uniform amplitudes (default: ALPHA_STRONG)",
+    )
+    fuzz_parser.add_argument(
+        "--qea-elite-reset",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Breed the full QEA population every N generations instead of "
+        "carrying elites forward; 0 disables (default: 0)",
     )
     fuzz_parser.add_argument(
         "--ga-crossover-rate",

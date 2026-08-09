@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import random
 from dataclasses import dataclass
@@ -34,6 +35,8 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from fuzzer_tool.core.mutations import crossover
+
+log = logging.getLogger(__name__)
 
 # Amplitude arrays store 8 float64 values per input byte (unpackbits ->
 # 8 bits/byte, one 8-byte float per bit): a 64x memory amplification with
@@ -391,6 +394,7 @@ class QEALifecycle:
         strong_bias: float = ALPHA_STRONG,
         tournament_size: int = 3,
         speciation_threshold: float = 0.3,
+        elite_reset_every: int = 0,
         fitness: FitnessFunction | None = None,
     ):
         self.pop_size = pop_size
@@ -402,6 +406,7 @@ class QEALifecycle:
         self.strong_bias = strong_bias
         self.tournament_size = tournament_size
         self.speciation_threshold = speciation_threshold
+        self.elite_reset_every = elite_reset_every
 
         # Lazy import to avoid circular dependency at module level
         from fuzzer_tool.core.ga import FitnessFunction as _FF
@@ -575,10 +580,34 @@ class QEALifecycle:
         # 2. Compute fitness for all
         self._evaluate_all(edge_tracker)
 
-        # 3. Elitism: keep top fraction
-        n_elite = max(1, int(len(self.population) * self.elite_fraction))
+        # 3. Elitism: keep top fraction.
+        #
+        # Elites are carried forward verbatim and are also the individuals
+        # tournament selection most often picks, so an individual that
+        # scored well early can hold a population slot indefinitely and
+        # keep supplying parents long after its region is exhausted. That
+        # is the incumbent-anchoring shape the p-bit lattice study found
+        # was worth breaking: its best arm differed from its worst only in
+        # periodically discarding the retained best, and the discard was
+        # the whole effect.
+        #
+        # Every `elite_reset_every` generations, breed the full population
+        # instead. Nothing is actually lost -- coverage-finding inputs live
+        # in the corpus on disk, not in this population -- so the elites
+        # are a search anchor, not a record.
         self.population.sort(key=lambda i: i.fitness, reverse=True)
-        elites = self.population[:n_elite]
+        reset_gen = (
+            self.elite_reset_every > 0
+            and self.generation > 0
+            and (self.generation + 1) % self.elite_reset_every == 0
+        )
+        if reset_gen:
+            n_elite = 0
+            elites: list[QEAIndividual] = []
+            log.debug("QEA: elite reset at generation %d", self.generation)
+        else:
+            n_elite = max(1, int(len(self.population) * self.elite_fraction))
+            elites = self.population[:n_elite]
 
         # 4. Breed new individuals
         n_breed = self.pop_size - n_elite

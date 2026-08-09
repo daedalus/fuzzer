@@ -507,6 +507,9 @@ class Fuzzer:
         ga_mutation_rate=0.3,
         ga_tournament_size=3,
         ga_speciation_threshold=0.3,
+        qea_rotation_angle=0.05,
+        qea_strong_bias=None,
+        qea_elite_reset=0,
         calibrate=0,
         stall_threshold=1000,
         resize_map_on_stall=True,
@@ -608,6 +611,10 @@ class Fuzzer:
         self._ga_mutation_rate = ga_mutation_rate
         self._ga_tournament_size = ga_tournament_size
         self._ga_speciation_threshold = ga_speciation_threshold
+        # QEA coupling magnitudes, exposed so the zero endpoint is an arm.
+        self._qea_rotation_angle = qea_rotation_angle
+        self._qea_strong_bias = qea_strong_bias
+        self._qea_elite_reset = qea_elite_reset
         self.ga = None  # Initialized in run() when --ga is set
 
         # QEA lifecycle
@@ -3897,12 +3904,19 @@ class Fuzzer:
             if self._qea_enabled:
                 from fuzzer_tool.core.qea import QEALifecycle
 
+                from fuzzer_tool.core.qea import ALPHA_STRONG
+
                 self.qea = QEALifecycle(
                     pop_size=self._ga_pop_size,
                     elite_fraction=self._ga_elite_frac,
                     generation_size=self._ga_gen_size,
                     tournament_size=self._ga_tournament_size,
                     speciation_threshold=self._ga_speciation_threshold,
+                    rotation_angle=self._qea_rotation_angle,
+                    strong_bias=(
+                        ALPHA_STRONG if self._qea_strong_bias is None else self._qea_strong_bias
+                    ),
+                    elite_reset_every=self._qea_elite_reset,
                 )
                 self.qea.initialize(self.corpus, self._edge_tracker)
                 qea_data = self._state_store.get("qea")
