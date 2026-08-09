@@ -76,7 +76,7 @@ fuzzer, not just the target.
 | `ruff format src/ tests/` / `ruff check src/ tests/` | Format / lint |
 | `fuzzer-tool --help` | Show CLI help |
 | `tools/build_targets.sh` | Build all fuzz targets (ASAN + cmplog by default; see the script's flag list) |
-| `tools/vendor_lz4.sh` / `vendor_grep.sh` / `vendor_ffmpeg.sh` | Fetch vendored library sources into `vendor/` (required before building the matching targets) |
+| `tools/vendor_lz4.sh` / `vendor_grep.sh` / `vendor_ffmpeg.sh` / `vendor_secp256k1.sh` | Fetch vendored library sources into `vendor/` (required before building the matching targets) |
 | `python tools/corpus_png.py --out corpus --download` | Generate PNG corpus |
 | `tools/bench.sh` / `tools/bench_sweep.sh` | Config comparison / feature sweep |
 | `lizard --CCN 15 -w .` | Cyclomatic complexity violations |
@@ -100,12 +100,12 @@ src/fuzzer_tool/
 │                 #   stats.py, corpus_manager.py, parallel.py, report.py
 └── cli/          # CLI entry point (commands.py, __main__.py)
 
-tools/            # build_targets.sh, vendor_<lib>.sh (ffmpeg/grep/lz4), corpus_png.py,
+tools/            # build_targets.sh, vendor_<lib>.sh (ffmpeg/grep/lz4/secp256k1), corpus_png.py,
                   #   bench.sh, bench_sweep.sh, release.sh
 targets/          # Fuzz target sources (*.c) — compiled binaries are never committed
 dictionaries/     # Format token dicts (png.dict)
 vendor/           # Vendored library sources — gitignored, fetched by tools/vendor_<lib>.sh.
-                  #   FFmpeg 7.1.3, lz4 (+ zlib/libpng/libjpeg-turbo for trace-cmp builds)
+                  #   FFmpeg 7.1.3, lz4, secp256k1 (+ zlib/libpng/libjpeg-turbo for trace-cmp builds)
 docs/             # DEEP_DIVE.md (comprehensive reference), TODO.md, refs/ (agent reference files), per-feature docs
 ```
 
