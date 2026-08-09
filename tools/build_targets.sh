@@ -437,6 +437,13 @@ build_simple_targets() {
     local VENDOR_PNG_A="$VENDOR/libpng/.libs/libpng16.a"
     if [ -f "$VENDOR_ZLIB_A" ]; then
         ZLIB_LIBS="$VENDOR_ZLIB_A"
+        # gzip_read must move with zlib_read: both are compiled against
+        # $ZLIB_INC, and inflateInit2 bakes the *header's* ZLIB_VERSION into
+        # a runtime check against the *library* it links. Leaving this on -lz
+        # hands vendored headers to the system libz, and every input then
+        # fails at init with Z_VERSION_ERROR -- the target still builds and
+        # still runs, it just stops decompressing.
+        GZIP_LIBS="$VENDOR_ZLIB_A"
         ZLIB_INC="-I$VENDOR/zlib"
     fi
     if [ -f "$VENDOR_PNG_A" ] && [ -f "$VENDOR_ZLIB_A" ]; then
@@ -504,6 +511,13 @@ build_sanitizer_targets() {
         local ZLIB_INC=""
         if [ -f "$VENDOR_ZLIB_A" ]; then
             ZLIB_LIBS="$VENDOR_ZLIB_A"
+            # gzip_read must move with zlib_read: both are compiled against
+            # $ZLIB_INC, and inflateInit2 bakes the *header's* ZLIB_VERSION into
+            # a runtime check against the *library* it links. Leaving this on -lz
+            # hands vendored headers to the system libz, and every input then
+            # fails at init with Z_VERSION_ERROR -- the target still builds and
+            # still runs, it just stops decompressing.
+            GZIP_LIBS="$VENDOR_ZLIB_A"
             ZLIB_INC="-I$VENDOR/zlib"
         fi
         if [ -f "$VENDOR_PNG_A" ] && [ -f "$VENDOR_ZLIB_A" ]; then
@@ -611,6 +625,13 @@ build_simple_so_targets() {
     local VENDOR_PNG_A="$VENDOR/libpng/.libs/libpng16.a"
     if [ -f "$VENDOR_ZLIB_A" ]; then
         ZLIB_LIBS="$VENDOR_ZLIB_A -lm"
+    # gzip_read must move with zlib_read: both are compiled against
+    # $ZLIB_INC, and inflateInit2 bakes the *header's* ZLIB_VERSION into
+    # a runtime check against the *library* it links. Leaving this on -lz
+    # hands vendored headers to the system libz, and every input then
+    # fails at init with Z_VERSION_ERROR -- the target still builds and
+    # still runs, it just stops decompressing.
+    GZIP_LIBS="$VENDOR_ZLIB_A -lm"
         ZLIB_INC="-I$VENDOR/zlib"
     fi
     if [ -f "$VENDOR_PNG_A" ] && [ -f "$VENDOR_ZLIB_A" ]; then
