@@ -44,7 +44,13 @@ from __future__ import annotations
 
 import logging
 
-from fuzzer_tool.core.gradient_descent import _candidate_positions, _window_distance
+from fuzzer_tool.core.gradient_descent import (
+    _candidate_positions,
+    _window_distance,
+)
+from fuzzer_tool.core.gradient_descent import (
+    pick_target as _pick_target,
+)
 
 log = logging.getLogger(__name__)
 
@@ -64,23 +70,6 @@ _CBH_MAX_SITES = 1
 # How many bytes MB randomizes around the planted magic bytes. Bounded so
 # the operator stays a targeted move rather than a havoc pass.
 _MB_MAX_RANDOM_BYTES = 8
-
-
-def _pick_target(cmp_pair: tuple[bytes, bytes]) -> bytes:
-    """Return the operand to match: the shorter one, as in gradient_descent.
-
-    The shorter operand is more likely to be the constant side of the
-    comparison (a magic number or length field) and is the one worth
-    planting.
-    """
-    op_a, op_b = cmp_pair
-    if not op_a and not op_b:
-        return b""
-    if not op_a:
-        return op_b
-    if not op_b:
-        return op_a
-    return op_b if len(op_b) <= len(op_a) else op_a
 
 
 def magic_byte_search(

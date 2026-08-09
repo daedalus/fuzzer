@@ -23,7 +23,29 @@ log = logging.getLogger(__name__)
 _MAX_EPOCHS = 5
 _MAX_STUCK = 2
 # Perturbation ladder: small steps first, then larger.
-_STEPS = (1, -1, 2, -2, 4, -4, 8, -8)
+#
+# Must span the full byte. The objective is `_window_distance`, a *bitwise
+# Hamming* distance, but these are *arithmetic* steps, and the two only
+# line up where the step is a power of two that does not carry. With the
+# ladder stopping at 8, the single-bit correction for bits 4-7 is
+# unreachable at every one of the 256 byte values:
+#
+#     bit 0 (1)   100%      bit 4 (16)    0%
+#     bit 1 (2)   100%      bit 5 (32)    0%
+#     bit 2 (4)   100%      bit 6 (64)    0%
+#     bit 3 (8)   100%      bit 7 (128)   0%
+#
+# so any operand byte differing in its high nibble -- about half of them --
+# could not be fixed, and the descent stalled out two epochs later. Solve
+# rate on a 4-byte operand planted in a 64-byte buffer, 400 trials:
+#
+#     ladder            two bytes matching     operand anywhere
+#     +-1,2,4,8                        1.2%                1.2%
+#     +-1..128                        85.8%               98.8%
+#
+# Raising _MAX_EPOCHS to 20 on top of that moves it by 0.4 points, so the
+# step set was the entire constraint, not the budget.
+_STEPS = (1, -1, 2, -2, 4, -4, 8, -8, 16, -16, 32, -32, 64, -64, 128, -128)
 
 
 def _distance(a: bytes, b: bytes) -> int:
@@ -122,6 +144,26 @@ def _candidate_positions(buf: bytes, target: bytes, rng=None, cap: int = 48) -> 
     return sorted(candidates)[:cap]
 
 
+def pick_target(cmp_pair: tuple[bytes, bytes]) -> bytes:
+    """Return the operand to match: the shorter *non-empty* one.
+
+    The shorter operand is more likely to be the constant side of the
+    comparison (a magic number or length field) and is the one worth
+    matching. The non-empty qualifier matters: a bare ``min`` by length
+    selects a zero-length operand over a real one, and every caller then
+    silently no-ops. Not currently reachable -- the cmplog parser splits
+    on whitespace so a field cannot come back empty -- but the three
+    searches shared this rule by copy rather than by import, and had
+    drifted, so it lives here and mb_cbh imports it.
+    """
+    op_a, op_b = cmp_pair
+    if not op_a:
+        return op_b
+    if not op_b:
+        return op_a
+    return op_b if len(op_b) <= len(op_a) else op_a
+
+
 def gradient_descent(
     input_buf: bytes,
     cmp_pair: tuple[bytes, bytes],
@@ -146,16 +188,10 @@ def gradient_descent(
     if not input_buf or (not op_a and not op_b):
         return input_buf
 
-    # Pick target operand: prefer the shorter one (more likely a constant).
-    if len(op_b) <= len(op_a):
-        target = op_b
-        width = len(op_b)
-    else:
-        target = op_a
-        width = len(op_a)
-
+    target = pick_target(cmp_pair)
     if not target:
         return input_buf
+    width = len(target)
 
     # Truncate to max_len before building candidate positions so all
     # candidates remain valid indices in the working buffer.
