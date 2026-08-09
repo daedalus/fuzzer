@@ -844,12 +844,12 @@ class StatsReporter:
         line = (
             f"[*] execs: {f.exec_count} | corpus: {len(f.corpus)} | "
             f"crashes: {f.crash_count}{sig_str}{timeout_str} | eps: {eps:.0f} | "
-            f"time: {elapsed:.0f}s{rss_str}{ops_str}{dict_str}{markov_str}{cmplog_str}"
+            f"time: {elapsed:.0f}s{rss_str}{dict_str}{markov_str}{cmplog_str}"
             f"{smt_str}{cov_str}{ph_str}{dist_str}{mc_str}{qea_str}{ga_str}{mi_str}{elo_str}"
             f"{sens_str}{te_str}{sec_str}{shap_str}{fs_str}{rep_str}{mopt_str}"
             f"{bayes_str}{misc_str}"
             f"{div_str}{jac_str}{dr_str}{density_str}{repro_str}{brier_str}{crps_str}"
-            f"{ent_str}{simp_str}{rate_str}{fmt_str}{perf_str}{hf_str}"
+            f"{ent_str}{simp_str}{rate_str}{fmt_str}{perf_str}{hf_str}{ops_str}"
         )
         growth = f._edge_tracker.coverage_growth_model()
         if growth["confidence"] > 0.1:
