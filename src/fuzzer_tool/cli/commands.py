@@ -476,6 +476,7 @@ def cmd_fuzz(args):
         overlap_min_jaccard=getattr(args, "overlap_min_jaccard", 0.25),
         overlap_density_blend=getattr(args, "overlap_blend", 0.5),
         sensitivity=getattr(args, "sensitivity", False),
+        region_profile=getattr(args, "region_profile", False),
         ga=getattr(args, "ga", False),
         qea=getattr(args, "qea", False),
         wfc=getattr(args, "wfc", False),
@@ -1587,6 +1588,15 @@ def main() -> int:
         "--sensitivity",
         action="store_true",
         help="Enable per-byte sensitivity analysis (Lyapunov exponent) for mutation targeting",
+    )
+    fuzz_parser.add_argument(
+        "--region-profile",
+        action="store_true",
+        help=(
+            "Enable statistical region profiling for mutation targeting "
+            "(labels seed windows incompressible/tabular/textual/repetitive "
+            "and weights byte selection accordingly)"
+        ),
     )
     fuzz_parser.add_argument(
         "--chi2-operator-interval",

@@ -533,6 +533,10 @@ class Fuzzer:
         quiet_stats=False,
         no_save_state=False,
         dedup_execs=True,
+        # Appended rather than grouped with the other mutation-targeting
+        # flags: this signature is positional, so inserting a parameter
+        # mid-list silently shifts every caller argument after it.
+        region_profile=False,
     ):
         self.target = target
         self.debug = debug
@@ -977,6 +981,15 @@ class Fuzzer:
         self._sensitivity = ByteSensitivityTracker(
             max_seeds=50, max_bytes=max_len, sample_rate=0.02
         )
+
+        # Statistical region profiling (randomness.profile_buffer): labels
+        # each window of a seed incompressible / tabular / textual /
+        # repetitive and weights byte selection accordingly, so mutation
+        # effort moves off compressed payloads and onto offset and length
+        # tables. Off by default -- the profile costs ~1 ms per 4 KiB, which
+        # is only worth paying on structured targets, and it is cached per
+        # seed in OperatorEngine rather than recomputed per mutation.
+        self._use_region_profile = region_profile
 
         # Weighted mutation lineage tree (parent/ops/sites/new-edge weight
         # per seed). Initialised early so the post-metadata rebuild can
@@ -3902,9 +3915,7 @@ class Fuzzer:
 
             # Initialize QEA lifecycle if enabled
             if self._qea_enabled:
-                from fuzzer_tool.core.qea import QEALifecycle
-
-                from fuzzer_tool.core.qea import ALPHA_STRONG
+                from fuzzer_tool.core.qea import ALPHA_STRONG, QEALifecycle
 
                 self.qea = QEALifecycle(
                     pop_size=self._ga_pop_size,

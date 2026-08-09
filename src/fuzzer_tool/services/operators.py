@@ -55,6 +55,16 @@ _INVARIANT_MIN_SAMPLES = 16
 # cost far more than the operator can repay.
 _INVARIANT_SAMPLE_CAP = 128
 
+# ── region-profile position weighting ────────────────────────────────────
+# Distinct seeds to keep profiles for. The corpus is far larger than this,
+# but seed selection is heavily skewed toward a working set, so a small
+# cache with a clear-on-full policy keeps the hit rate high without tracking
+# recency. Cleared wholesale rather than evicted one at a time: the profiles
+# are cheap to rebuild and an LRU would cost more bookkeeping than it saves.
+_REGION_CACHE_MAX = 64
+# profile_buffer() skips windows below 512 bytes, so anything shorter has no
+# profile to weight by.
+_REGION_MIN_LEN = 512
 
 # Precomputed colorization lookup table: byte -> different value from same class.
 # Avoids per-call table construction in _op_colorization().
@@ -112,6 +122,11 @@ class OperatorEngine:
         # mutation (see corpus_invariants()).
         self._invariants = None
         self._invariants_corpus_len: int = -1
+        # Cache for region-profile position weighting, keyed by seed content
+        # hash. profile_buffer() runs a whole statistical battery per 4 KiB
+        # window (~1 ms), so it must be paid once per seed, not once per
+        # mutation -- see region_weights().
+        self._region_cache: dict[int, tuple | None] = {}
 
     # ── Operator handlers ──────────────────────────────────────────────
     # Each handler: (buf, byte_idx, data) -> None (in-place) or bytes (replace buf)
@@ -2290,6 +2305,58 @@ class OperatorEngine:
             f._last_mopt_particles.append(None)
         return op
 
+    def region_weights(self, data: bytes):
+        """Cumulative region weights for *data*, cached by content hash.
+
+        Returns ``(cumulative_weights, bounds, total)`` or None when the seed
+        is too short to profile or every region weighs zero. The profile is
+        what ``randomness.profile_buffer`` recommends in its own docstring:
+        computed once per seed and reused for every mutation round against it.
+        """
+        if len(data) < _REGION_MIN_LEN:
+            return None
+        key = xxhash.xxh3_64_intdigest(data)
+        if key in self._region_cache:
+            return self._region_cache[key]
+
+        from fuzzer_tool.core.randomness import profile_buffer
+
+        entry = None
+        profiles = profile_buffer(data)
+        if profiles:
+            bounds = []
+            cumulative = []
+            total = 0.0
+            for profile in profiles:
+                total += profile.mutation_weight() * profile.length
+                cumulative.append(total)
+                bounds.append((profile.offset, profile.offset + profile.length))
+            if total > 0.0:
+                entry = (cumulative, bounds, total)
+        if len(self._region_cache) >= _REGION_CACHE_MAX:
+            self._region_cache.clear()
+        self._region_cache[key] = entry
+        return entry
+
+    def _region_weighted_position(self, data: bytes, buf_len: int) -> int | None:
+        """Draw a byte offset weighted by each region's mutation_weight().
+
+        Regions are picked proportionally to weight x length, then a uniform
+        offset is taken inside the winner. The bounds come from the *seed*,
+        while the position must land in the *buffer*, which earlier operators
+        in the same round may already have resized -- hence the clamp.
+        """
+        entry = self.region_weights(data)
+        if entry is None:
+            return None
+        cumulative, bounds, total = entry
+        idx = bisect.bisect_left(cumulative, self.f._rand_pool.random() * total)
+        lo, hi = bounds[min(idx, len(bounds) - 1)]
+        hi = min(hi, buf_len)
+        if lo >= hi:
+            return None
+        return self.f._rand_pool.randint(lo, hi - 1)
+
     def select_position(self, buf: bytearray, data: bytes) -> int:
         """Select a byte position for mutation using MI/TE/sensitivity/crash-MI/random."""
         f = self.f
@@ -2309,7 +2376,14 @@ class OperatorEngine:
         crash_mi_pos = None
         if f._crash_mi and f._crash_mi.total_execs >= f._crash_mi.min_observations:
             crash_mi_pos = f._crash_mi.weighted_position(buf_len)
-        candidates = [p for p in [sens_pos, te_pos, mi_pos, crash_mi_pos] if p is not None]
+        region_pos = (
+            self._region_weighted_position(data, buf_len)
+            if getattr(f, "_use_region_profile", False)
+            else None
+        )
+        candidates = [
+            p for p in [sens_pos, te_pos, mi_pos, crash_mi_pos, region_pos] if p is not None
+        ]
         if candidates:
             return f._rand_pool.choice(candidates)
         return f._rand_pool.randint(0, buf_len - 1)
