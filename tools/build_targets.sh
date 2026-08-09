@@ -346,12 +346,28 @@ build_simple_targets() {
         FFMPEG_INC="-I$VENDOR/ffmpeg"
     fi
 
+    local PNG_LIBS="-lpng -lz"
+    local ZLIB_LIBS="-lz"
+    local GZIP_LIBS="-lz"
+    local PNG_INC=""
+    local ZLIB_INC=""
+    local VENDOR_ZLIB_A="$VENDOR/zlib/libz.a"
+    local VENDOR_PNG_A="$VENDOR/libpng/.libs/libpng16.a"
+    if [ -f "$VENDOR_ZLIB_A" ]; then
+        ZLIB_LIBS="$VENDOR_ZLIB_A"
+        ZLIB_INC="-I$VENDOR/zlib"
+    fi
+    if [ -f "$VENDOR_PNG_A" ] && [ -f "$VENDOR_ZLIB_A" ]; then
+        PNG_LIBS="$VENDOR_PNG_A $VENDOR_ZLIB_A -lm"
+        PNG_INC="-I$VENDOR/libpng -I$VENDOR/libpng/scripts"
+    fi
+
     build_target "$TARGETS/asan_target.c" "$TARGETS/asan_target${out_suffix}" "" "$flags" "$cc" "$extra_cflags"
     build_target "$TARGETS/test_target.c" "$TARGETS/test_target${out_suffix}" "" "$flags" "$cc" "$extra_cflags"
     build_target "$TARGETS/proto_target.c" "$TARGETS/proto_target${out_suffix}" "" "$flags" "$cc" "$extra_cflags"
-    build_target "$TARGETS/png_read.c" "$TARGETS/png_read${out_suffix}" "-lpng -lz" "$flags" "$cc" "$extra_cflags"
-    build_target "$TARGETS/zlib_read.c" "$TARGETS/zlib_read${out_suffix}" "-lz" "$flags" "$cc" "$extra_cflags"
-    build_target "$TARGETS/gzip_read.c" "$TARGETS/gzip_read${out_suffix}" "-lz" "$flags" "$cc" "$extra_cflags"
+    build_target "$TARGETS/png_read.c" "$TARGETS/png_read${out_suffix}" "$PNG_LIBS" "$flags" "$cc" "$extra_cflags $PNG_INC"
+    build_target "$TARGETS/zlib_read.c" "$TARGETS/zlib_read${out_suffix}" "$ZLIB_LIBS" "$flags" "$cc" "$extra_cflags $ZLIB_INC"
+    build_target "$TARGETS/gzip_read.c" "$TARGETS/gzip_read${out_suffix}" "$GZIP_LIBS" "$flags" "$cc" "$extra_cflags $ZLIB_INC"
     build_target "$TARGETS/jpeg_read.c" "$TARGETS/jpeg_read${out_suffix}" "-ljpeg" "$flags" "$cc" "$extra_cflags"
     build_target "$TARGETS/ffmpeg_read.c" "$TARGETS/ffmpeg_read${out_suffix}" "$FFMPEG_LIBS" "$flags" "$DEFAULT_CC" "$FFMPEG_INC"
     build_target "$TARGETS/grep_read.c" "$TARGETS/grep_read${out_suffix}" "" "$flags"
@@ -397,9 +413,24 @@ build_sanitizer_targets() {
     # read. Build them with --vendor-tracecmp-style vendored sources first
     # if you need MSAN coverage there.
     if [ "$label" != "MSAN" ]; then
-        build_target "$TARGETS/png_read.c" "$TARGETS/png_read${suffix}" "-lpng -lz" "$common" "clang"
-        build_target "$TARGETS/zlib_read.c" "$TARGETS/zlib_read${suffix}" "-lz" "$common" "clang"
-        build_target "$TARGETS/gzip_read.c" "$TARGETS/gzip_read${suffix}" "-lz" "$common" "clang"
+        local VENDOR_ZLIB_A="$VENDOR/zlib/libz.a"
+        local VENDOR_PNG_A="$VENDOR/libpng/.libs/libpng16.a"
+        local PNG_LIBS="-lpng -lz"
+        local ZLIB_LIBS="-lz"
+        local GZIP_LIBS="-lz"
+        local PNG_INC=""
+        local ZLIB_INC=""
+        if [ -f "$VENDOR_ZLIB_A" ]; then
+            ZLIB_LIBS="$VENDOR_ZLIB_A"
+            ZLIB_INC="-I$VENDOR/zlib"
+        fi
+        if [ -f "$VENDOR_PNG_A" ] && [ -f "$VENDOR_ZLIB_A" ]; then
+            PNG_LIBS="$VENDOR_PNG_A $VENDOR_ZLIB_A -lm"
+            PNG_INC="-I$VENDOR/libpng -I$VENDOR/libpng/scripts"
+        fi
+        build_target "$TARGETS/png_read.c" "$TARGETS/png_read${suffix}" "$PNG_LIBS" "$common" "clang" "$PNG_INC"
+        build_target "$TARGETS/zlib_read.c" "$TARGETS/zlib_read${suffix}" "$ZLIB_LIBS" "$common" "clang" "$ZLIB_INC"
+        build_target "$TARGETS/gzip_read.c" "$TARGETS/gzip_read${suffix}" "$GZIP_LIBS" "$common" "clang" "$ZLIB_INC"
     fi
 }
 
@@ -485,35 +516,41 @@ build_simple_so_targets() {
     local out_suffix=""
     [[ "$suffix" == _asan* || "$suffix" == _ubsan* ]] && out_suffix="$suffix"
 
-    # When --cmplog is set and vendored trace-cmp libs exist, link against
-    # them instead of system libs. The vendored libs were compiled with
-    # -fsanitize-coverage=trace-cmp,trace-pc-guard so their comparisons
-    # produce callbacks the cmplog shim captures.
+    # Prefer vendored static libraries when available. The vendored .a files
+    # are compiled with -fsanitize-coverage=trace-pc-guard and
+    # -fno-builtin-* so their comparisons remain visible to cmplog and
+    # their edge coverage callbacks resolve against afl_shim.c / ASAN.
     local PNG_LIBS="-lpng -lz"
     local ZLIB_LIBS="-lz"
     local GZIP_LIBS="-lz"
+    local PNG_INC=""
+    local ZLIB_INC=""
+    local VENDOR_ZLIB_A="$VENDOR/zlib/libz.a"
+    local VENDOR_PNG_A="$VENDOR/libpng/.libs/libpng16.a"
+    if [ -f "$VENDOR_ZLIB_A" ]; then
+        ZLIB_LIBS="$VENDOR_ZLIB_A -lm"
+        ZLIB_INC="-I$VENDOR/zlib"
+    fi
+    if [ -f "$VENDOR_PNG_A" ] && [ -f "$VENDOR_ZLIB_A" ]; then
+        PNG_LIBS="$VENDOR_PNG_A $VENDOR_ZLIB_A -lm -lpthread"
+        PNG_INC="-I$VENDOR/libpng -I$VENDOR/libpng/scripts"
+    fi
+    if [ -f "$VENDOR_ZLIB_A" ] || [ -f "$VENDOR_PNG_A" ]; then
+        echo "  Using vendored libpng/zlib static libraries"
+    fi
+
     local FFMPEG_LIBS="-lavformat -lavcodec -lavutil -lswresample -lm"
     local FFMPEG_INC="-I/usr/include/x86_64-linux-gnu"
-    if [ "$WITH_CMPLOG" -eq 1 ]; then
-        local VENDOR_ZLIB_A="$VENDOR/zlib/libz.a"
-        local VENDOR_PNG_A="$VENDOR/libpng/.libs/libpng16.a"
-        if [ -f "$VENDOR_ZLIB_A" ] && [ -f "$VENDOR_PNG_A" ]; then
-            PNG_LIBS="$VENDOR_PNG_A $VENDOR_ZLIB_A -lm"
-            ZLIB_LIBS="$VENDOR_ZLIB_A -lm"
-            GZIP_LIBS="$VENDOR_ZLIB_A -lm"
-            echo "  Using vendored trace-cmp libraries"
-        fi
-        # Select vendored FFmpeg path based on suffix:
-        #   _asan → vendor/ffmpeg_asan/ (ASAN + coverage)
-        #   _ubsan / _nosan / "" → vendor/ffmpeg/ (coverage only)
-        local ffmpeg_vendor_dir="$VENDOR/ffmpeg"
-        [[ "$suffix" == _asan* ]] && ffmpeg_vendor_dir="$VENDOR/ffmpeg_asan"
-        local VENDOR_FFMPEG_A="$ffmpeg_vendor_dir/libavformat/libavformat.a"
-        if [ -f "$VENDOR_FFMPEG_A" ]; then
-            FFMPEG_LIBS="$ffmpeg_vendor_dir/libavformat/libavformat.a $ffmpeg_vendor_dir/libavcodec/libavcodec.a $ffmpeg_vendor_dir/libavutil/libavutil.a $ffmpeg_vendor_dir/libswresample/libswresample.a -lm -lz -llzma -lbz2 -lpthread -ldl"
-            FFMPEG_INC="-I$ffmpeg_vendor_dir"
-            echo "  Using vendored FFmpeg static libraries ($ffmpeg_vendor_dir)"
-        fi
+    # Select vendored FFmpeg path based on suffix:
+    #   _asan → vendor/ffmpeg_asan/ (ASAN + coverage)
+    #   _ubsan / _nosan / "" → vendor/ffmpeg/ (coverage only)
+    local ffmpeg_vendor_dir="$VENDOR/ffmpeg"
+    [[ "$suffix" == _asan* ]] && ffmpeg_vendor_dir="$VENDOR/ffmpeg_asan"
+    local VENDOR_FFMPEG_A="$ffmpeg_vendor_dir/libavformat/libavformat.a"
+    if [ -f "$VENDOR_FFMPEG_A" ]; then
+        FFMPEG_LIBS="$ffmpeg_vendor_dir/libavformat/libavformat.a $ffmpeg_vendor_dir/libavcodec/libavcodec.a $ffmpeg_vendor_dir/libavutil/libavutil.a $ffmpeg_vendor_dir/libswresample/libswresample.a -lm -lz -llzma -lbz2 -lpthread -ldl"
+        FFMPEG_INC="-I$ffmpeg_vendor_dir"
+        echo "  Using vendored FFmpeg static libraries ($ffmpeg_vendor_dir)"
     fi
 
     build_so_target "$TARGETS/asan_target.c" "$TARGETS/asan_target${out_suffix}.so" "" "$flags"
@@ -586,6 +623,12 @@ build_standalone_so_targets() {
     local SECP256K1_INC="-I$SECP256K1/src -I$SECP256K1/include"
     if [ ! -f "$TARGETS/secp256k1_read.c" ]; then
         :  # target source absent — nothing to build
+    elif [ "$suffix" = "_nosan" ] && [ -f "$TARGETS/secp256k1_read.so" ]; then
+        # Base .so was already built in the suffix="" call. Build the
+        # explicit _nosan.so variant (same flags, different output name)
+        # instead of redundantly rebuilding the base .so with identical
+        # flags, which would also clobber the ubsan/asan variants.
+        build_so_target "$TARGETS/secp256k1_read.c" "$TARGETS/secp256k1_read_nosan.so" "$SECP256K1_OBJS -Wl,--export-dynamic" "$flags $SECP256K1_INC"
     elif compile_secp256k1_objects "$suffix" "$flags" "$DEFAULT_CC"; then
         build_so_target "$TARGETS/secp256k1_read.c" "$TARGETS/secp256k1_read${out_suffix}.so" "$SECP256K1_OBJS -Wl,--export-dynamic" "$flags $SECP256K1_INC"
     else
@@ -598,9 +641,12 @@ compile_vendored_libs() {
     local cc="$1" scov_flag="$2" suffix="$3"
     echo "Compiling vendored libraries ($cc ${scov_flag:-no-sancov})..."
 
+    # Keep comparison calls visible to cmplog even at -O2.
+    local no_builtin_cmp="$NOBUILTIN_CMP"
+
     # zlib
     if [ -d "$VENDOR/zlib" ]; then
-        (cd "$VENDOR/zlib" && CC=$cc CFLAGS="-O2 -g -fPIC ${scov_flag}" \
+        (cd "$VENDOR/zlib" && CC=$cc CFLAGS="-O2 -g -fPIC ${scov_flag} ${no_builtin_cmp}" \
             ./configure --static 2>/dev/null && make -j$(nproc) 2>/dev/null) && \
             ok "zlib (vendored)" || warn "zlib (vendored) failed"
     else
@@ -611,7 +657,7 @@ compile_vendored_libs() {
     if [ -d "$VENDOR/libpng" ] && [ -d "$VENDOR/zlib" ]; then
         (cd "$VENDOR/libpng" && CC=$cc \
             CPPFLAGS="-I../zlib" \
-            CFLAGS="-O2 -g -fPIC ${scov_flag} -I../zlib" \
+            CFLAGS="-O2 -g -fPIC ${scov_flag} ${no_builtin_cmp} -I../zlib" \
             LDFLAGS="-L../zlib" \
             ./configure --with-pkgconfig=no 2>/dev/null && make -j$(nproc) 2>/dev/null) && \
             ok "libpng (vendored)" || warn "libpng (vendored) failed"
@@ -623,7 +669,7 @@ compile_vendored_libs() {
     if [ -d "$VENDOR/libjpeg-turbo" ]; then
         (cd "$VENDOR/libjpeg-turbo" && \
             cmake -DCMAKE_C_COMPILER=$cc \
-                  -DCMAKE_C_FLAGS="-O2 -g -fPIC ${scov_flag}" \
+                  -DCMAKE_C_FLAGS="-O2 -g -fPIC ${scov_flag} ${no_builtin_cmp}" \
                   -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
                   -G "Unix Makefiles" . 2>/dev/null && \
             make -j$(nproc) 2>/dev/null) && \
