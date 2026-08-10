@@ -19,12 +19,38 @@ import contextlib
 import logging
 import os
 import subprocess
+import sys
 import tempfile
 import threading
 
 log = logging.getLogger(__name__)
 
 _FUZZ_LOADER_BIN = os.path.join(os.path.dirname(__file__), "fuzz_loader")
+
+
+def _close_streams(proc: subprocess.Popen) -> None:
+    """Close the raw fds of *proc*, unblocking any thread stuck reading them.
+
+    The fd is closed first because a drain thread blocked inside
+    ``readline()`` holds the BufferedReader's own lock: calling
+    ``stream.close()`` directly would spin on that lock forever
+    (``_enter_buffered_busy`` at interpreter shutdown), while closing the fd
+    underneath makes the blocked read fail with EBADF and the thread exit on
+    its own.  The wrapper is then closed (so its destructor does not raise
+    over the fd we stole) — except during interpreter finalization, where a
+    frozen daemon thread may never release the lock.
+    """
+    for name in ("stdin", "stdout", "stderr"):
+        stream = getattr(proc, name, None)
+        fileno = getattr(stream, "fileno", None)
+        if fileno is None:
+            continue
+        with contextlib.suppress(OSError, ValueError):
+            os.close(fileno())
+        if not sys.is_finalizing():
+            with contextlib.suppress(Exception):
+                stream.close()
+
 
 # ── Memory bounds ────────────────────────────────────────────────────
 STDERR_LINES_MAX = 100  # max stderr lines retained from child processes
@@ -168,9 +194,11 @@ class ForkserverRunner:
         t.join(timeout=self.timeout)
         if t.is_alive():
             log.warning("Forkserver timed out after %.1fs, restarting", self.timeout)
+            proc = self._proc
             with contextlib.suppress(Exception):
-                self._proc.kill()
-                self._proc.wait()
+                proc.kill()
+                proc.wait()
+            _close_streams(proc)
             self._ready = False
             if not self._restarting:
                 self._restarting = True
@@ -217,6 +245,10 @@ class ForkserverRunner:
                 proc.kill()
             with contextlib.suppress(Exception):
                 proc.wait(timeout=1)
+        # Close the pipes: a child that inherited a copy of the write end
+        # would otherwise keep the stderr-drain thread blocked forever,
+        # leaving the process permanently multi-threaded.
+        _close_streams(proc)
         if self._bitmap_out and os.path.exists(self._bitmap_out):
             with contextlib.suppress(OSError):
                 os.unlink(self._bitmap_out)

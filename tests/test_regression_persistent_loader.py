@@ -105,6 +105,7 @@ class TestPersistentLoaderCrashDetection:
         rc, stderr = runner.run_one(b"CRASHS")
         assert rc != 0, f"Expected crash, got rc={rc}"
         assert rc in SIGNAL_CRASH_CODES or rc >= 128, f"Expected crash code, got rc={rc}"
+        runner.stop()
 
     def test_nosan_persistent_detects_abrt(self, tmp_path):
         """Persistent loader detects SIGABRT in non-ASAN .so via crash code."""
@@ -125,6 +126,7 @@ class TestPersistentLoaderCrashDetection:
         rc, stderr = runner.run_one(b"CRASHA")
         assert rc != 0, f"Expected crash, got rc={rc}"
         assert rc in SIGNAL_CRASH_CODES or rc >= 128, f"Expected crash code, got rc={rc}"
+        runner.stop()
 
     def test_nosan_persistent_safe_input_no_crash(self, tmp_path):
         """Persistent loader returns 0 for safe inputs (no crash)."""
@@ -144,6 +146,7 @@ class TestPersistentLoaderCrashDetection:
 
         rc, stderr = runner.run_one(b"SAFEXXX00")
         assert rc == 0, f"Expected success (rc=0), got rc={rc}"
+        runner.stop()
 
 
 class TestSubprocessLoaderCrashDetection:
@@ -168,6 +171,7 @@ class TestSubprocessLoaderCrashDetection:
         rc, stderr = runner.run_one(b"CRASHS")
         assert rc != 0, f"Expected crash, got rc={rc}"
         assert rc in SIGNAL_CRASH_CODES or rc >= 128, f"Expected crash code, got rc={rc}"
+        runner.stop()
 
     def test_nosan_subprocess_detects_abrt(self, tmp_path):
         """Subprocess loader detects SIGABRT in non-ASAN standalone binary."""
@@ -188,6 +192,7 @@ class TestSubprocessLoaderCrashDetection:
         rc, stderr = runner.run_one(b"CRASHA")
         assert rc != 0, f"Expected crash, got rc={rc}"
         assert rc in SIGNAL_CRASH_CODES or rc >= 128, f"Expected crash code, got rc={rc}"
+        runner.stop()
 
     def test_nosan_subprocess_safe_input_no_crash(self, tmp_path):
         """Subprocess loader returns 0 for safe inputs (no crash)."""
@@ -207,6 +212,7 @@ class TestSubprocessLoaderCrashDetection:
 
         rc, stderr = runner.run_one(b"SAFEXXX00")
         assert rc == 0, f"Expected success (rc=0), got rc={rc}"
+        runner.stop()
 
 
 class TestIntegrationCrashDetection:

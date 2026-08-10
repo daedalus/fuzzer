@@ -23,6 +23,31 @@ import time
 
 log = logging.getLogger(__name__)
 
+
+def _close_streams(proc: subprocess.Popen) -> None:
+    """Close the raw fds of *proc*, unblocking any thread stuck reading them.
+
+    The fd is closed first because a drain thread blocked inside
+    ``readline()`` holds the BufferedReader's own lock: calling
+    ``stream.close()`` directly would spin on that lock forever
+    (``_enter_buffered_busy`` at interpreter shutdown), while closing the fd
+    underneath makes the blocked read fail with EBADF and the thread exit on
+    its own.  The wrapper is then closed (so its destructor does not raise
+    over the fd we stole) — except during interpreter finalization, where a
+    frozen daemon thread may never release the lock.
+    """
+    for name in ("stdin", "stdout", "stderr"):
+        stream = getattr(proc, name, None)
+        fileno = getattr(stream, "fileno", None)
+        if fileno is None:
+            continue
+        with contextlib.suppress(OSError, ValueError):
+            os.close(fileno())
+        if not sys.is_finalizing():
+            with contextlib.suppress(Exception):
+                stream.close()
+
+
 _PERSISTENT_LOADER = r"""#!/usr/bin/env python3
 import ctypes, ctypes.util, os, signal, sys
 
@@ -424,9 +449,11 @@ class PersistentLoader:
             # Kill orphaned grandchild first (it's in its own process group)
             self._kill_orphaned_child()
             # Then kill the loader itself
+            proc = self._proc
             with contextlib.suppress(Exception):
-                self._proc.kill()
-                self._proc.wait()
+                proc.kill()
+                proc.wait()
+            _close_streams(proc)
             self._ready = False
             # Don't retry — hangs are input-deterministic, retrying just
             # costs another full timeout wait for the same hung input.
@@ -522,6 +549,11 @@ class PersistentLoader:
                 proc.kill()
             with contextlib.suppress(Exception):
                 proc.wait(timeout=1)
+        # Close the pipes. A grandchild that inherited a copy of the write
+        # end would otherwise keep the pipe open forever, so the stderr-drain
+        # thread never sees EOF and the process stays permanently
+        # multi-threaded (poisoning every later os.fork()).
+        _close_streams(proc)
         # Clean up PID file
         if self._child_pid_file:
             with contextlib.suppress(OSError):

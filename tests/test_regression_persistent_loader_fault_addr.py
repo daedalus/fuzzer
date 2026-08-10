@@ -90,6 +90,7 @@ class TestPersistentLoaderFaultAddr:
         assert runner._last_fault_addr == 0  # NULL-deref: si_addr == 0
         assert runner._last_regs.get("rsp", 0) != 0  # real stack address captured
         assert runner._last_regs.get("rbp", 0) != 0
+        runner.stop()
 
     def test_nosan_abrt_has_no_fault_addr(self, tmp_path):
         nosan_so = tmp_path / "test_nosan.so"
@@ -101,6 +102,7 @@ class TestPersistentLoaderFaultAddr:
         # SIGABRT is not in the SEGV/BUS/ILL/FPE capture set — address stays None.
         assert runner._last_fault_addr is None
         assert runner._last_regs  # registers are still captured at the stop
+        runner.stop()
 
     def test_safe_input_no_capture(self, tmp_path):
         nosan_so = tmp_path / "test_nosan.so"
@@ -111,6 +113,7 @@ class TestPersistentLoaderFaultAddr:
         assert rc == 0
         assert runner._last_fault_addr is None
         assert runner._last_regs == {}
+        runner.stop()
 
     def test_fault_state_reset_between_runs(self, tmp_path):
         # A crash followed by a safe input must not leak stale fault info.
@@ -123,6 +126,7 @@ class TestPersistentLoaderFaultAddr:
         runner.run_one(b"SAFEXXX00")
         assert runner._last_fault_addr is None
         assert runner._last_regs == {}
+        runner.stop()
 
 
 CMPLOG_SHIM = Path(__file__).parent.parent / "src" / "fuzzer_tool" / "adapters" / "cmplog_shim.c"
@@ -184,6 +188,7 @@ class TestFaultAddrWithCmplog:
         # The real bug: this was None when crash_handler re-raised via raise().
         assert runner._last_fault_addr == 0  # NULL-jump: si_addr == 0
         assert runner._last_regs.get("rsp", 0) != 0
+        runner.stop()
 
     @pytest.mark.parametrize("cc", ["gcc", "clang"])
     def test_safe_input_clean_with_cmplog(self, tmp_path, cc):
@@ -194,3 +199,4 @@ class TestFaultAddrWithCmplog:
         rc, _ = runner.run_one(b"SAFEXXX00")
         assert rc == 0
         assert runner._last_fault_addr is None
+        runner.stop()

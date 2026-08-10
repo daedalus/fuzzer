@@ -222,6 +222,7 @@ class TestAutoDetectedSoMode:
         assert runner.direct_lite is False
         assert runner.direct is False
         assert runner._persistent is not None, "Persistent loader should be initialized"
+        runner.stop()
 
     @pytest.mark.skip(
         reason="Hangs after persistent loader subprocess — flaky environment interaction"
@@ -263,6 +264,7 @@ class TestAutoDetectedSoMode:
         rc, stderr = runner.run_one(b"CRASHS")
         assert rc != 0, "Target should have crashed"
         assert rc == -11, f"Expected SIGSEGV (rc=-11), got rc={rc}"
+        runner.stop()
 
     @pytest.mark.skip(
         reason="ASAN .so needs LD_PRELOAD set before process start — testing via CLI integration test instead"

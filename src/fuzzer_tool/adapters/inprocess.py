@@ -744,3 +744,13 @@ class InProcessRunner:
             with contextlib.suppress(OSError):
                 os.unlink(self._bitmap_out)
             self._bitmap_out = None
+
+    def __del__(self):
+        # Runners are often constructed and left unstopped (tests, one-shot
+        # probes); a lingering loader keeps its stderr-drain thread blocked
+        # forever, so the process stays multi-threaded and every later fork
+        # is a deadlock/heap-corruption hazard. Clean up here as well as in
+        # explicit stop() calls.
+        if hasattr(self, "_persistent"):
+            with contextlib.suppress(Exception):
+                self.stop()
