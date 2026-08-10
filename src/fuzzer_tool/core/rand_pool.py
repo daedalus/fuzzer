@@ -4,9 +4,9 @@ Pre-generates a large batch of random uint32 values in a single vectorized
 numpy call (C-level), then dispenses them via fast array indexing.
 
 Key optimisations over ``random`` module:
-- Pool generation: ``np.random.randint`` fills 4096 entries in one C call.
-- Pre-computed ``% 256``: ``randint(0, 255)`` reads a uint8 array — no modulo.
-- ``shuffle`` / ``sample`` delegate to ``np.random`` C-level functions.
+- Pool generation: ``rng.integers`` fills 4096 entries in one C call.
+- Pre-computed ``% 256``: ``integers(0, 255)`` reads a uint8 array — no modulo.
+- ``shuffle`` / ``sample`` delegate to the Generator's C-level functions.
 - Inlined ``choice`` avoids method call indirection.
 
 Modulo bias is acceptable for fuzzing — we are generating test inputs, not
@@ -32,9 +32,10 @@ class RandPool:
         pick = pool.choice(seq)            # like random.choice(seq)
     """
 
-    __slots__ = ("_pool", "_idx", "_m256", "_pool_l", "_m256_l")
+    __slots__ = ("_pool", "_idx", "_m256", "_pool_l", "_m256_l", "_rng")
 
-    def __init__(self) -> None:
+    def __init__(self, seed=None) -> None:
+        self._rng = np.random.default_rng(seed)
         self._pool: np.ndarray = np.empty(_POOL_ENTRIES, dtype=np.uint32)
         self._m256: np.ndarray = np.empty(_POOL_ENTRIES, dtype=np.uint8)  # pre-computed % 256
         # Python-list mirrors of the pools. numpy is the right representation
@@ -50,7 +51,7 @@ class RandPool:
         self._idx = _POOL_ENTRIES
 
     def _refill(self) -> None:
-        self._pool[:] = np.random.randint(0, 2**32, size=_POOL_ENTRIES, dtype=np.uint32)
+        self._pool[:] = self._rng.integers(0, 2**32, size=_POOL_ENTRIES, dtype=np.uint32)
         np.mod(self._pool, 256, out=self._m256)
         self._pool_l = self._pool.tolist()
         self._m256_l = self._m256.tolist()
@@ -64,6 +65,22 @@ class RandPool:
         return val
 
     # ── Public API ────────────────────────────────────────────────────
+
+    def reseed(self, seed: int | None = None) -> None:
+        """Replace the backing generator and discard the pre-fetched pool.
+
+        Args:
+            seed: New seed for the pool's private ``Generator``.  ``None``
+                seeds from OS entropy.
+
+        Replacing the generator is not enough on its own: the pool still holds
+        up to ``_POOL_ENTRIES`` values already drawn from the *old* stream,
+        so the next ~4096 draws would keep coming from it and the reseed
+        would look like a no-op.  Invalidating ``_idx`` forces a refill from
+        the new stream on the next draw.
+        """
+        self._rng = np.random.default_rng(seed)
+        self._idx = _POOL_ENTRIES
 
     def randrange_list(self, n: int, count: int) -> list[int]:
         """Return *count* random integers in [0, *n*).  Vectorized.
@@ -183,7 +200,7 @@ class RandPool:
             val = self._pool_l[self._idx]
             self._idx += 1
             return seq[val % n]
-        return seq[int(np.random.randint(n))]
+        return seq[int(self._rng.integers(n))]
 
     def choice_list(self, seq: list | tuple | bytes, count: int) -> list:
         """Return *count* elements randomly chosen from *seq* (with replacement).
@@ -227,7 +244,7 @@ class RandPool:
             return []
         total = sum(weights)
         probs = [w / total for w in weights]
-        indices = np.random.choice(n, size=k, replace=True, p=probs)
+        indices = self._rng.choice(n, size=k, replace=True, p=probs)
         return [seq[i] for i in indices]
 
     def shuffle(self, seq: list) -> None:
@@ -240,7 +257,7 @@ class RandPool:
                 self._idx += 1
                 seq[i], seq[j] = seq[j], seq[i]
         else:
-            np.random.shuffle(seq)
+            self._rng.shuffle(seq)
 
     def sample(self, population, k: int):
         """Return *k* unique elements from *population*.
@@ -248,7 +265,7 @@ class RandPool:
         Accepts either an int (range) or a sequence (list/tuple/bytes),
         matching ``random.sample`` API.
         """
-        if isinstance(population, (list, tuple, bytes)):
+        if isinstance(population, list | tuple | bytes):
             n = len(population)
             if k > n:
                 k = n
@@ -262,7 +279,7 @@ class RandPool:
                 if b >= a:
                     b += 1
                 return [population[a], population[b]]
-            indices = list(np.random.choice(n, size=k, replace=False))
+            indices = list(self._rng.choice(n, size=k, replace=False))
             return [population[i] for i in indices]
         # Original: population is an int (range size)
         if k > population:
@@ -275,14 +292,14 @@ class RandPool:
             a = self._draw() % population
             b = self._draw() % (population - 1)
             return [a, b if b < a else b + 1]
-        return list(np.random.choice(population, size=k, replace=False))
+        return list(self._rng.choice(population, size=k, replace=False))
 
     # ── Continuous distributions ──────────────────────────────────────
     # These delegate to numpy's C-level generators (no pool draws).
 
     def gauss(self, mu: float = 0.0, sigma: float = 1.0) -> float:
         """Return a random float from Gaussian(*mu*, *sigma*)."""
-        return float(np.random.normal(mu, sigma))
+        return float(self._rng.normal(mu, sigma))
 
     def gauss_list(self, mu: float, sigma: float, count: int) -> list[float]:
         """Return *count* random floats from Gaussian(*mu*, *sigma*).
@@ -291,7 +308,7 @@ class RandPool:
         """
         if count <= 0:
             return []
-        return list(np.random.normal(mu, sigma, size=count))
+        return list(self._rng.normal(mu, sigma, size=count))
 
     def expovariate(self, lambd: float = 1.0) -> float:
         """Return a random float from Exponential(rate=*lambd*).
@@ -301,7 +318,7 @@ class RandPool:
         """
         if lambd <= 0:
             return float("inf")
-        return float(np.random.exponential(1.0 / lambd))
+        return float(self._rng.exponential(1.0 / lambd))
 
     def expovariate_list(self, lambd: float, count: int) -> list[float]:
         """Return *count* random floats from Exponential(rate=*lambd*).
@@ -312,14 +329,14 @@ class RandPool:
             return []
         if lambd <= 0:
             return [float("inf")] * count
-        return list(np.random.exponential(1.0 / lambd, size=count))
+        return list(self._rng.exponential(1.0 / lambd, size=count))
 
     def betavariate(self, alpha: float, beta: float) -> float:
         """Return a random float from Beta(*alpha*, *beta*).
 
         ``random.betavariate(alpha, beta)`` equivalent.
         """
-        return float(np.random.beta(alpha, beta))
+        return float(self._rng.beta(alpha, beta))
 
     def betavariate_list(self, alpha: float, beta: float, count: int) -> list[float]:
         """Return *count* random floats from Beta(*alpha*, *beta*).
@@ -328,7 +345,7 @@ class RandPool:
         """
         if count <= 0:
             return []
-        return list(np.random.beta(alpha, beta, size=count))
+        return list(self._rng.beta(alpha, beta, size=count))
 
     def gammavariate(self, alpha: float, beta: float = 1.0) -> float:
         """Return a random float from Gamma(*alpha*, *beta*).
@@ -336,7 +353,7 @@ class RandPool:
         ``random.gammavariate(alpha, beta)`` equivalent — *beta* is the
         rate parameter (not scale).
         """
-        return float(np.random.gamma(alpha, scale=1.0 / beta) if beta > 0 else 0.0)
+        return float(self._rng.gamma(alpha, scale=1.0 / beta) if beta > 0 else 0.0)
 
     def gammavariate_list(self, alpha: float, beta: float, count: int) -> list[float]:
         """Return *count* random floats from Gamma(*alpha*, *beta*).
@@ -346,7 +363,7 @@ class RandPool:
         if count <= 0:
             return []
         return list(
-            np.random.gamma(alpha, scale=1.0 / beta, size=count) if beta > 0 else np.zeros(count)
+            self._rng.gamma(alpha, scale=1.0 / beta, size=count) if beta > 0 else np.zeros(count)
         )
 
     def lognormvariate(self, mu: float = 0.0, sigma: float = 1.0) -> float:
@@ -354,7 +371,7 @@ class RandPool:
 
         ``random.lognormvariate(mu, sigma)`` equivalent.
         """
-        return float(np.random.lognormal(mu, sigma))
+        return float(self._rng.lognormal(mu, sigma))
 
     def lognormvariate_list(self, mu: float, sigma: float, count: int) -> list[float]:
         """Return *count* random floats from LogNormal(*mu*, *sigma*).
@@ -363,4 +380,4 @@ class RandPool:
         """
         if count <= 0:
             return []
-        return list(np.random.lognormal(mu, sigma, size=count))
+        return list(self._rng.lognormal(mu, sigma, size=count))

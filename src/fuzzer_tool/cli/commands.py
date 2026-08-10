@@ -507,6 +507,7 @@ def cmd_fuzz(args):
         boost_std=getattr(args, "boost_std", None),
         boost_pad=getattr(args, "boost_pad", "repeat"),
         resize_map_on_stall=getattr(args, "resize_map_on_stall", False),
+        reseed_on_stall=getattr(args, "reseed_on_stall", False),
         enable_smt_z3=getattr(args, "enable_smt_z3", False),
         mod_solving=getattr(args, "mod_solving", "heuristic"),
         chi2_operator_interval=getattr(args, "chi2_operator_interval", 0),
@@ -2109,6 +2110,14 @@ def main() -> int:
         "reducing hash collision risk and potentially exposing new edges. "
         "Uses birthday-bound (n^2/0.02) to compute the new size. "
         "(default: enabled; use --no-resize-map-on-stall to disable)",
+    )
+    fuzz_parser.add_argument(
+        "--reseed-on-stall",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Reseed the RNGs when stall recovery triggers, forcing the "
+        "mutation stream to explore a different region of the input space "
+        "(default: disabled)",
     )
     fuzz_parser.add_argument(
         "--map-size",

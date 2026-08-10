@@ -218,6 +218,16 @@ META_STRATEGY_CHOICES_MAX = 1_000  # max meta-strategy choice history entries
 # ── Allan variance detector ───────────────────────────────────────────
 ALLAN_BUFFER_POW = 8  # 2^8 = 256 samples
 ALLAN_MIN_SAMPLES = 8  # minimum before noise_type() returns a result
+# ── Stall reseeding (--reseed-on-stall) ───────────────────────────────
+# splitmix64 constants: the derived seed must decorrelate from `self.seed`
+# even though it is a small additive offset away from it.  A bare
+# `seed + count` would hand adjacent stalls near-identical Mersenne
+# Twister states.
+SEED_MIX_GAMMA = 0x9E3779B97F4A7C15  # odd, golden-ratio derived
+SEED_MIX_A = 0xBF58476D1CE4E5B9
+SEED_MIX_B = 0x94D049BB133111EB
+SEED_MASK_64 = 0xFFFFFFFFFFFFFFFF
+SEED_MASK_32 = 0xFFFFFFFF  # np.random.seed accepts [0, 2**32)
 
 
 def _detect_afl(target_path: str) -> bool:
@@ -513,6 +523,7 @@ class Fuzzer:
         calibrate=0,
         stall_threshold=1000,
         resize_map_on_stall=True,
+        reseed_on_stall=False,
         map_size=0,
         max_collision_risk=30,
         continue_until_crash=False,
@@ -568,11 +579,14 @@ class Fuzzer:
         self._calibrate = calibrate
         self._stall_threshold = stall_threshold
         self._resize_map_on_stall = resize_map_on_stall
+        self._reseed_on_stall = reseed_on_stall
         self._max_collision_risk = max_collision_risk
         self._last_new_edge_exec = 0
         self._stall_recovery_active = False
         self._stall_recovery_count = 0  # times recovery was activated
         self._stall_recovery_execs = 0  # execs spent in recovery mode
+        self._stall_reseed_count = 0  # times the RNG was reseeded on stall
+        self._last_stall_seed = None  # seed applied by the most recent reseed
         self.extra_crash_codes = set(extra_crash_codes) if extra_crash_codes else set()
         self.max_len = max_len
         # Floor for the adaptive max_len in corpus_manager: that value
@@ -1241,7 +1255,7 @@ class Fuzzer:
         # batch) instead of per-call Python-level random() invocations.
         from fuzzer_tool.core.rand_pool import RandPool
 
-        self._rand_pool = RandPool()
+        self._rand_pool = RandPool(seed=seed)
 
         # ── Dictionary scratch buffer (vectorized choice) ─────────────
         # Refilled in mutate() via one randint_list call; consumed by
@@ -3382,6 +3396,52 @@ class Fuzzer:
         entropy_rate = dS / dt
         return entropy_rate < ENTROPY_FLAT_THRESHOLD
 
+    def _derive_stall_seed(self) -> int:
+        """Return the seed to apply for the current stall reseed.
+
+        When the run was given a seed, the new seed is a pure function of
+        ``(self.seed, self._stall_reseed_count)`` — not of the draw history,
+        which varies with target execution timing — so a seeded run stays
+        reproducible across the reseed. Without a seed there is nothing to
+        be reproducible against, so OS entropy is used.
+
+        Returns:
+            A seed in ``[0, 2**32)``, suitable for ``np.random.seed``.
+        """
+        if self.seed is None:
+            return int.from_bytes(os.urandom(4), "little")
+        x = (self.seed + self._stall_reseed_count * SEED_MIX_GAMMA) & SEED_MASK_64
+        x = ((x ^ (x >> 30)) * SEED_MIX_A) & SEED_MASK_64
+        x = ((x ^ (x >> 27)) * SEED_MIX_B) & SEED_MASK_64
+        x ^= x >> 31
+        return x & SEED_MASK_32
+
+    def _reseed_after_stall(self) -> int:
+        """Reseed every RNG the mutation hotpath draws from.
+
+        A stall means the current mutation trajectory has stopped producing
+        edges. Recovery already widens *what* is mutated; reseeding changes
+        *which* stream those choices come from, so a resumed run does not
+        replay the same exhausted sequence.
+
+        Both generators are reseeded together, matching how ``__init__``
+        seeds them: ``random`` drives the non-hotpath choices and
+        ``np.random`` backs ``RandPool``. ``RandPool.reseed`` also drops the
+        pre-fetched pool, which would otherwise keep dispensing old-stream
+        values for another ``_POOL_ENTRIES`` draws.
+
+        Returns:
+            The seed that was applied.
+        """
+        self._stall_reseed_count += 1
+        new_seed = self._derive_stall_seed()
+        random.seed(new_seed)
+        if _HAS_NUMPY:
+            self._rand_pool.reseed(new_seed)
+        self._last_stall_seed = new_seed
+        print(f"[*] Reseeded RNG → {new_seed} (stall reseed #{self._stall_reseed_count})")
+        return new_seed
+
     def _maybe_trigger_stall_recovery(self, execs_since_edge):
         """Activate stall recovery unless entropy shows active redistribution.
 
@@ -3470,6 +3530,11 @@ class Fuzzer:
             f"{execs_since_edge} execs, switching to random mode"
         )
         self._stall_recovery_active = True
+
+        # Optionally reseed the RNGs so recovery explores a different
+        # mutation stream rather than continuing the exhausted one.
+        if self._reseed_on_stall:
+            self._reseed_after_stall()
 
         # Optionally resize the coverage bitmap to reduce hash collision risk
         if self._resize_map_on_stall and self.shm_cov:

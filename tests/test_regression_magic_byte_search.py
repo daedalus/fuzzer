@@ -5,6 +5,7 @@ from __future__ import annotations
 import random
 
 from fuzzer_tool.core.mb_cbh import _pick_target, climb_hill, magic_byte_search
+from fuzzer_tool.core.rand_pool import RandPool
 
 
 class _Rng:
@@ -40,7 +41,7 @@ class TestPickTarget:
 
 class TestMagicByteSearch:
     def test_plants_operand_somewhere_in_output(self):
-        target = b"\xDE\xAD\xBE\xEF"
+        target = b"\xde\xad\xbe\xef"
         buf = b"\x00" * 256
         out = magic_byte_search(buf, (target, target), _Rng(), max_len=4096)
         assert target in out
@@ -62,7 +63,7 @@ class TestMagicByteSearch:
         """Fallback path: input shares no bytes with the operand, so the
         overlap-derived candidate list is empty and a random offset is
         used instead. The operand must still get planted."""
-        target = b"\xAA\xBB"
+        target = b"\xaa\xbb"
         buf = b"\x01" * 128
         out = magic_byte_search(buf, (target, target), _Rng(), max_len=4096)
         assert target in out
@@ -86,9 +87,9 @@ class TestClimbHill:
     def test_solves_operand_deep_in_buffer(self):
         """The whole point: the operand sits far from offset 0 and one
         byte away from matching. CBH must close that gap."""
-        target = b"\xDE\xAD\xBE\xEF"
+        target = b"\xde\xad\xbe\xef"
         buf = bytearray(b"A" * 1024)
-        buf[600:604] = b"\xDE\xAD\xBE\xEE"
+        buf[600:604] = b"\xde\xad\xbe\xee"
         out = climb_hill(bytes(buf), (target, target), _Rng(), max_len=4096)
         assert out[600:604] == target
 
@@ -99,8 +100,8 @@ class TestClimbHill:
         assert climb_hill(b"hello", (b"", b""), _Rng()) == b"hello"
 
     def test_exact_match_returns_immediately(self):
-        buf = b"prefix\xAA\xBBsuffix"
-        out = climb_hill(buf, (b"\xAA\xBB", b"\xAA\xBB"), _Rng(), max_len=4096)
+        buf = b"prefix\xaa\xbbsuffix"
+        out = climb_hill(buf, (b"\xaa\xbb", b"\xaa\xbb"), _Rng(), max_len=4096)
         assert out == buf
 
     def test_never_worsens_the_objective(self):
@@ -174,20 +175,12 @@ class TestSeededReproducibility:
     # No byte overlap between input and operand, so the sparse-overlap
     # fallback is guaranteed to fire.
     _BUF = b"\x01" * 128
-    _TARGET = b"\xAA\xBB"
+    _TARGET = b"\xaa\xbb"
 
     def _under_pinned_seed(self, fn):
-        import random as _random
-
-        import numpy as np
-
-        from fuzzer_tool.core.rand_pool import RandPool
-
         outs = set()
-        for trial in range(6):
-            np.random.seed(42)  # what -s does
-            _random.seed(trial)  # perturb the global rng only
-            outs.add(fn(RandPool()))
+        for _trial in range(6):
+            outs.add(fn(RandPool(seed=42)))
         return outs
 
     def test_magic_byte_search_is_reproducible(self):
@@ -206,9 +199,7 @@ class TestSeededReproducibility:
         from fuzzer_tool.core.gradient_descent import gradient_descent
 
         outs = self._under_pinned_seed(
-            lambda r: gradient_descent(
-                self._BUF, (self._TARGET, self._TARGET), max_len=4096, rng=r
-            )
+            lambda r: gradient_descent(self._BUF, (self._TARGET, self._TARGET), max_len=4096, rng=r)
         )
         assert len(outs) == 1
 
