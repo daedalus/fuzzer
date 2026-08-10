@@ -621,7 +621,17 @@ class CorpusManager:
                 s_edges = et.seed_edges.get(sk, set())
                 if s_edges:
                     seed_edge_map[id(seed)] = s_edges
-            while covered != all_edges:
+            # Terminate against what these seeds can actually cover, not
+            # against cumulative_edges. EdgeTracker._prune_tracked_seeds drops
+            # entries from seed_edges once past max_tracked_seeds (200) but
+            # never removes their edges from cumulative_edges, so on any run
+            # past 200 seeds all_edges is a strict superset of anything the
+            # loop can reach. `covered != all_edges` was therefore permanently
+            # true: the loop never converged, always ran to best_gain == 0, and
+            # selected every seed holding a unique edge — making `mandatory`,
+            # and the target_size floor derived from it, meaningless.
+            coverable = set().union(*seed_edge_map.values()) if seed_edge_map else set()
+            while covered != coverable:
                 best_seed = None
                 best_gain = 0
                 for seed in unique:
@@ -654,7 +664,6 @@ class CorpusManager:
             scored = []
             for seed in optional:
                 seed_key = self.seed_key(seed)
-                f._edge_tracker.get_seed_edge_count(seed_key)
                 meta = f.seed_meta.get(seed)
                 fuzz = meta["fuzz_count"] if meta else 0
                 discovered = meta["coverage_edges"] if meta else 0
