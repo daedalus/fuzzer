@@ -47,6 +47,12 @@ DIRECTIONS_2D: list[Direction] = ["up", "down", "left", "right"]
 # Default iteration and backtrack budgets
 DEFAULT_AC3_BUDGET = 5000
 DEFAULT_MAX_RESTARTS = 3
+# Hard cap on total _prune_cell calls for one run(). Propagation cost is
+# O(n * n_tiles**2) per observation, so a wide or high-alphabet input can
+# otherwise stall the caller for minutes (~9 s at 512 cells / 128 tiles,
+# minutes at BMP row widths). Exhausting the budget leaves cells
+# uncollapsed instead of hanging; callers map those to a fallback.
+DEFAULT_WORK_BUDGET = 50_000
 
 
 # ── Tile ──────────────────────────────────────────────────────────────
@@ -188,6 +194,12 @@ class WaveGrid:
 
         self.contradiction = False
 
+        # Hard-work budget accounting for one run(). _budget_exhausted is a
+        # soft stop: run() returns whatever is collapsed so far (callers map
+        # multi/zero-entropy cells to a fallback) rather than hanging.
+        self._budget_exhausted = False
+        self._work_used = 0
+
         # Snapshot of the caller-constrained wave, captured at run() entry so
         # restarts can restore it rather than clearing every constraint.
         self._initial: np.ndarray | None = None
@@ -210,6 +222,7 @@ class WaveGrid:
         seed: int | None = None,
         max_restarts: int = DEFAULT_MAX_RESTARTS,
         ac3_budget: int = DEFAULT_AC3_BUDGET,
+        work_budget: int = DEFAULT_WORK_BUDGET,
     ) -> list[list[bytes | None]]:
         """Run WFC collapse loop.
 
@@ -223,6 +236,10 @@ class WaveGrid:
                 BMP row, so that reset would happen constantly.
             max_restarts: Max restarts on contradiction.
             ac3_budget: Max AC-3 propagation iterations before greedy fallback.
+            work_budget: Hard cap on total propagation work for this run.
+                Exhausting it stops the collapse and returns the partial
+                grid (cells left uncollapsed) instead of hanging on a wide
+                or high-alphabet input.
 
         Returns:
             2D grid: ``grid[y][x]`` = tile name at (x, y), or None if
@@ -242,8 +259,9 @@ class WaveGrid:
                     self._rng = random.Random(seed + attempt * 7919)
 
             self.contradiction = False
-            self._run_loop(ac3_budget)
-            if not self.contradiction:
+            self._budget_exhausted = False
+            self._run_loop(ac3_budget, work_budget)
+            if not self.contradiction and not self._budget_exhausted:
                 break
 
         return self._to_grid()
@@ -255,15 +273,25 @@ class WaveGrid:
 
     # ── Internal collapse loop ──────────────────────────────────────
 
-    def _run_loop(self, ac3_budget: int):
-        """Collapse cells one by one until done or contradiction."""
-        while not self.contradiction:
+    def _run_loop(self, ac3_budget: int, work_budget: int = DEFAULT_WORK_BUDGET):
+        """Collapse cells one by one until done, contradiction, or budget out.
+
+        The first propagation sweeps the whole grid so caller-applied pins
+        are enforced; afterwards only the observed cell's neighbours are
+        re-pruned (plus the AC-3 queue cascade). Sweeping the full grid on
+        every observation costs O(n * n_tiles**2) per step — the dominant
+        cost on wide rows, and the reason a BMP-width wave used to stall
+        for minutes.
+        """
+        self._work_used = 0
+        self._propagate(ac3_budget, sources=None, work_budget=work_budget)
+        while not self.contradiction and not self._budget_exhausted:
             idx = self._find_min_entropy()
             if idx is None:
                 break
             self._observe(idx)
-            if not self.contradiction:
-                self._propagate(ac3_budget)
+            if not self.contradiction and not self._budget_exhausted:
+                self._propagate(ac3_budget, sources=self._neighbors(idx), work_budget=work_budget)
 
     def _find_min_entropy(self) -> int | None:
         """Find cell with smallest non-zero entropy.
@@ -324,13 +352,39 @@ class WaveGrid:
         row[:] = False
         row[chosen] = True
 
-    def _propagate(self, budget: int = DEFAULT_AC3_BUDGET):
-        """AC-3 arc-consistency propagation."""
+    def _propagate(
+        self,
+        budget: int = DEFAULT_AC3_BUDGET,
+        sources: list[int] | range | None = None,
+        work_budget: int = DEFAULT_WORK_BUDGET,
+    ):
+        """AC-3 arc-consistency propagation.
+
+        Args:
+            budget: Max queue iterations before greedy fallback.
+            sources: Cells to re-prune. None = full sweep (every cell), used
+                once per collapse attempt to enforce caller-applied pins;
+                later calls prune only the observed cell's neighbours, which
+                is complete for AC-3 (the queue cascade re-checks everything
+                adjacent to a change).
+            work_budget: Hard cap on total ``_prune_cell`` calls across the
+                run. On exhaustion ``_budget_exhausted`` is set: the caller
+                stops collapsing and returns the partial grid instead of
+                stalling on an expensive wave.
+        """
         queue: collections.deque[int] = collections.deque()
         changed_any = False
-        for i in range(self.n):
+        if sources is None:
+            sources = range(self.n)
+        for i in sources:
+            if self._budget_exhausted:
+                return
             if self.superpositions[i].sum() <= 1:
                 continue
+            self._work_used += 1
+            if self._work_used > work_budget:
+                self._budget_exhausted = True
+                return
             result = self._prune_cell(i)
             if result is None:
                 return
@@ -347,8 +401,14 @@ class WaveGrid:
             idx = queue.popleft()
 
             for nidx in self._neighbors(idx):
+                if self._budget_exhausted:
+                    return
                 if self.superpositions[nidx].sum() <= 1:
                     continue
+                self._work_used += 1
+                if self._work_used > work_budget:
+                    self._budget_exhausted = True
+                    return
                 result = self._prune_cell(nidx)
                 if result is None:
                     return

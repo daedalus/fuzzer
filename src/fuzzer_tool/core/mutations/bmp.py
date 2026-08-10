@@ -27,6 +27,13 @@ BI_PNG = 5
 DIB_INFOHEADER = 40
 DIB_V4HEADER = 108
 
+# WFC pixel-generation cost guards: propagation work scales ~n^2 * n_tiles^2
+# per row, so wide rows / large alphabets make one mutation stall for
+# minutes. Above these the pixel mutator falls back to plain byte flips.
+BMP_WFC_MAX_CELLS = 512  # row width in tiles
+BMP_WFC_MAX_TILES = 64  # distinct tile alphabet
+BMP_WFC_MAX_TOTAL = 200_000  # tiles across all rows
+
 
 @dataclass
 class BmpInfo:
@@ -271,6 +278,10 @@ class BmpMutator:
             return info
         if self.use_wfc and abs(info.width) >= 2 and abs(info.height) >= 2:
             return self._wfc_pixels(info, max_len, self.tile_bytes)
+        return self._flip_pixels(info)
+
+    def _flip_pixels(self, info: BmpInfo) -> BmpInfo:
+        """Flip random bytes in pixel data (non-WFC fallback)."""
         pixels = bytearray(info.pixel_data)
         for _ in range((self._rng or random).randint(1, min(8, len(pixels)))):
             idx = (self._rng or random).randint(0, len(pixels) - 1)
@@ -313,6 +324,18 @@ class BmpMutator:
             start = x * sample_bytes
             sample = pixels[start : start + sample_bytes]
             unique_tiles[sample] = unique_tiles.get(sample, 0) + 1
+
+        # Cost guard. WFC propagation work scales ~n^2 * n_tiles^2 per row,
+        # so a wide row or a large alphabet turns a single pixel mutation
+        # into a minutes-long stall (~9 s at 512 cells / 128 tiles). Keep
+        # the structural generator on affordable rows; everything else gets
+        # plain byte flips.
+        if (
+            tiles_per_row > BMP_WFC_MAX_CELLS
+            or len(unique_tiles) > BMP_WFC_MAX_TILES
+            or tiles_per_row * h > BMP_WFC_MAX_TOTAL
+        ):
+            return self._flip_pixels(info)
 
         tile_list = [Tile(name=t, weight=c) for t, c in unique_tiles.items()]
 
