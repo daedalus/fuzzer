@@ -62,11 +62,11 @@ def rp():
 def seeded():
     """Deterministic RandPool for the statistical threshold assertions.
 
-    RandPool refills from the numpy global generator, so seeding numpy before
-    constructing it pins every draw the operators make.
+    RandPool must be seeded directly, not via ``np.random.seed``: its
+    generator is an independent ``default_rng`` instance, so seeding the
+    numpy global state has no effect on the draws the operators make.
     """
-    np.random.seed(SEED)
-    return RandPool()
+    return RandPool(SEED)
 
 
 @pytest.fixture

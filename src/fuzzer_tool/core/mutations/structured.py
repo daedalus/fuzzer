@@ -86,13 +86,17 @@ _STRUCT_FMT = {
 }
 
 
-def _region(data_len: int, rng, min_len: int = 1) -> tuple[int, int]:
+def _region(data_len: int, rng, min_len: int = 1, align: int = 1) -> tuple[int, int]:
     """Pick a random ``(offset, length)`` window to overwrite.
 
     Args:
         data_len: Length of the buffer being mutated.
         rng: RandPool or stdlib random.
         min_len: Smallest window the caller's construction needs.
+        align: Snap the offset down to a multiple of this so the caller's
+            fixed-width words line up with how a reader slices them. Without
+            it an unaligned run reads as ordinary noise at the reader's own
+            stride, silently defeating the construction.
 
     Returns:
         ``(offset, length)`` with ``offset + length <= data_len``, or
@@ -105,6 +109,11 @@ def _region(data_len: int, rng, min_len: int = 1) -> tuple[int, int]:
         return 0, 0
     length = rng.randint(min_len, span)
     offset = rng.randint(0, data_len - length)
+    if align > 1:
+        offset -= offset % align
+        length = min(length, data_len - offset)
+        if length < min_len:
+            return 0, 0
     return offset, length
 
 
@@ -184,7 +193,7 @@ def fibonacci_pairs(data: bytes, rng=None) -> bytes:
     rng = _get_rng(rng)
     width = rng.choice(_WIDTHS_WORD)
     pair_size = width * 2
-    offset, length = _region(len(data), rng, min_len=pair_size)
+    offset, length = _region(len(data), rng, min_len=pair_size, align=width)
     if length < pair_size:
         return data
     big_endian = rng.random() < 0.5
@@ -231,7 +240,7 @@ def monotone_fill(data: bytes, rng=None) -> bytes:
     """
     rng = _get_rng(rng)
     width = rng.choice(_WIDTHS)
-    offset, length = _region(len(data), rng, min_len=width * 2)
+    offset, length = _region(len(data), rng, min_len=width * 2, align=width)
     if length < width * 2:
         return data
     big_endian = rng.random() < 0.5
@@ -295,7 +304,7 @@ _DE_BRUIJN_SHAPES = ((2, 8), (4, 4), (16, 2), (4, 6), (16, 3), (256, 2))
 
 
 def de_bruijn_fill(data: bytes, rng=None) -> bytes:
-    """Overwrite a region with a de Bruijn sequence (k-mer saturation).
+    """Overwrite the buffer with a de Bruijn sequence (k-mer saturation).
 
     OPSO, OQSO, DNA and BITSTREAM all count *missing* k-letter words in an
     overlapping window; a uniform stream leaves a predictable number unseen.
@@ -303,6 +312,11 @@ def de_bruijn_fill(data: bytes, rng=None) -> bytes:
     tail.  For a table-driven lexer or DFA that means every reachable state
     transition of order ``n`` is taken, in the shortest possible number of
     bytes -- maximum branch diversity per byte of input.
+
+    The sequence tiles the *whole* buffer: the missing-k-mer count is a
+    property of the buffer a reader samples, not of one region inside it, so
+    a partial fill lets the surrounding noise dominate the statistic it is
+    supposed to move.
 
     Args:
         data: Input bytes.
@@ -312,16 +326,15 @@ def de_bruijn_fill(data: bytes, rng=None) -> bytes:
         Mutated bytes, the same length as *data*.
     """
     rng = _get_rng(rng)
-    offset, length = _region(len(data), rng, min_len=16)
-    if length < 16:
+    if len(data) < 16:
         return data
-    shapes = [(k, n) for k, n in _DE_BRUIJN_SHAPES if k**n <= length]
+    shapes = [(k, n) for k, n in _DE_BRUIJN_SHAPES if k**n <= len(data)]
     k, n = rng.choice(shapes) if shapes else (2, 4)
     seq = de_bruijn_bytes(k, n)
     # The sequence is cyclic, so tiling keeps every window boundary a
     # legitimate de Bruijn window.
-    reps = -(-length // len(seq))
-    return _splice(data, offset, (seq * reps)[:length])
+    reps = -(-len(data) // len(seq))
+    return (seq * reps)[: len(data)]
 
 
 def kmer_starve(data: bytes, rng=None) -> bytes:
@@ -382,15 +395,7 @@ def rank_deficient(data: bytes, rng=None) -> bytes:
     rng = _get_rng(rng)
     rows, cols, row_bytes = rng.choice(_RANK_SHAPES)
     block_size = rows * row_bytes
-    offset, length = _region(len(data), rng, min_len=block_size)
-    if length < block_size:
-        return data
-    # Snap to a block boundary measured from the start of the buffer. An
-    # unaligned run of rows is still low-rank in isolation, but a reader that
-    # slices matrices at its own natural alignment straddles two of ours and
-    # sees full rank again -- which defeats the entire point of the operator.
-    offset -= offset % block_size
-    length = min(length, len(data) - offset)
+    offset, length = _region(len(data), rng, min_len=block_size, align=block_size)
     if length < block_size:
         return data
 
@@ -459,7 +464,7 @@ def perm_lock(data: bytes, rng=None) -> bytes:
     """
     rng = _get_rng(rng)
     width = rng.choice(_WIDTHS)
-    offset, length = _region(len(data), rng, min_len=width * 4)
+    offset, length = _region(len(data), rng, min_len=width * 4, align=width)
     if length < width * 4:
         return data
     big_endian = rng.random() < 0.5
@@ -609,7 +614,7 @@ def birthday_collide(data: bytes, rng=None) -> bytes:
     """
     rng = _get_rng(rng)
     width = rng.choice(_WIDTHS_WORD)
-    offset, length = _region(len(data), rng, min_len=width * 4)
+    offset, length = _region(len(data), rng, min_len=width * 4, align=width)
     if length < width * 4:
         return data
     big_endian = rng.random() < 0.5
@@ -722,15 +727,7 @@ def degenerate_geometry(data: bytes, rng=None) -> bytes:
     width = rng.choice(_GEOMETRY_WIDTHS)
     dims = rng.choice(_GEOMETRY_DIMS)
     point_size = width * dims
-    offset, length = _region(len(data), rng, min_len=point_size * 2)
-    if length < point_size * 2:
-        return data
-    # Snap to a whole-point boundary from the start of the buffer, for the
-    # same reason rank_deficient snaps to a block: a reader that slices
-    # coordinate tuples at its own natural stride would otherwise straddle
-    # two of ours and see ordinary noise instead of coincident points.
-    offset -= offset % point_size
-    length = min(length, len(data) - offset)
+    offset, length = _region(len(data), rng, min_len=point_size * 2, align=point_size)
     if length < point_size * 2:
         return data
     big_endian = rng.random() < 0.5
@@ -791,7 +788,7 @@ def float_squeeze(data: bytes, rng=None) -> bytes:
     """
     rng = _get_rng(rng)
     width = rng.choice(_FLOAT_WIDTHS)
-    offset, length = _region(len(data), rng, min_len=width)
+    offset, length = _region(len(data), rng, min_len=width, align=width)
     if length < width:
         return data
     big_endian = rng.random() < 0.5
