@@ -5,6 +5,15 @@ the "Corpus bloat warning: seed-size skewness" log line, which is emitted
 just before minimization is scheduled.
 """
 
+import os
+
+import pytest
+
+from fuzzer_tool.core.corpus_compression import (
+    PPMD_CACHE_MAX,
+    PPMD_SAMPLE_BYTES,
+    CorpusCompressor,
+)
 from fuzzer_tool.core.edge_tracker import EdgeTracker
 
 
@@ -67,6 +76,54 @@ class TestSetCoverTerminates:
 
         assert covered == coverable
         assert covered != et.cumulative_edges
+
+
+class TestPpmdRatioCost:
+    """PPMD runs at ~2 MB/s and is called once per seed per pass."""
+
+    @pytest.fixture
+    def cc(self):
+        compressor = CorpusCompressor()
+        if not compressor.enabled:
+            pytest.skip("pyppmd not installed")
+        return compressor
+
+    def test_ratio_is_memoised(self, cc):
+        data = os.urandom(200_000)
+        first = cc.compute_seed_ratio(data)
+        assert cc.compute_seed_ratio(data) == first
+        assert len(cc._seed_ratios) == 1
+
+    def test_identical_prefixes_share_an_entry(self, cc):
+        """Keyed on the sampled prefix, so seeds differing past the cap hit."""
+        prefix = os.urandom(PPMD_SAMPLE_BYTES)
+        cc.compute_seed_ratio(prefix + b"\x00" * 4096)
+        cc.compute_seed_ratio(prefix + b"\xff" * 8192)
+        assert len(cc._seed_ratios) == 1
+
+    def test_cost_is_bounded_by_the_sample_cap(self, cc):
+        """A 4 MB seed must cost no more than a 64 KiB one.
+
+        Compares work done rather than wall clock: the compressed length of
+        a capped run cannot exceed what the cap itself can produce, so an
+        uncapped implementation fails this regardless of machine speed.
+        """
+        big = os.urandom(4 * 1024 * 1024)
+        ratio = cc.compute_seed_ratio(big)
+        # Ratio is computed over the sample, not the whole seed, so it stays
+        # in the normal band for incompressible data instead of collapsing
+        # toward zero as it would if divided by the full 4 MB length.
+        assert 0.5 < ratio < 2.0
+
+    def test_cache_is_bounded(self, cc):
+        for _ in range(PPMD_CACHE_MAX + 10):
+            cc.compute_seed_ratio(os.urandom(512))
+        assert len(cc._seed_ratios) <= PPMD_CACHE_MAX
+
+    def test_disabled_compressor_is_free(self):
+        compressor = CorpusCompressor(enabled=False)
+        assert compressor.compute_seed_ratio(os.urandom(1_000_000)) == 1.0
+        assert compressor._seed_ratios == {}
 
 
 class TestMaxLenIsNotARatchet:
