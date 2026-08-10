@@ -450,7 +450,14 @@ class CorpusManager:
             if len(f._corpus_size_history) >= 100:
                 sorted_sizes = sorted(f._corpus_size_history)
                 p90 = sorted_sizes[-len(sorted_sizes) // 10]
-                f.max_len = max(f.max_len, min(p90 * 2, 65536))
+                # Track the p90 of recent seed sizes in both directions. This
+                # was max(f.max_len, ...), a one-way ratchet: once a handful of
+                # large seeds pushed p90 up, max_len never came back down, so
+                # mutation kept producing larger seeds, which kept p90 up. That
+                # is a positive feedback loop into exactly the bloat the
+                # skewness warning below reports, and minimizing the corpus
+                # could not undo it. The configured max_len is the floor.
+                f.max_len = min(max(p90 * 2, f._max_len_floor), 65536)
         else:
             f._duplicate_reject_count += 1
 

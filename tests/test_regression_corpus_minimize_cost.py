@@ -67,3 +67,37 @@ class TestSetCoverTerminates:
 
         assert covered == coverable
         assert covered != et.cumulative_edges
+
+
+class TestMaxLenIsNotARatchet:
+    """max_len tracks the corpus p90 in both directions.
+
+    It was max(f.max_len, min(p90 * 2, 65536)) -- one-way. Once a few large
+    seeds pushed p90 up, max_len never fell, so mutation kept producing
+    larger seeds, which kept p90 up: a positive feedback loop into the exact
+    bloat the skewness warning reports, that minimizing could not undo.
+    """
+
+    @staticmethod
+    def _adaptive_max_len(history, floor):
+        """Mirror of the corpus_manager expression, derived independently."""
+        sorted_sizes = sorted(history)
+        p90 = sorted_sizes[-len(sorted_sizes) // 10]
+        return min(max(p90 * 2, floor), 65536)
+
+    def test_grows_with_the_corpus(self):
+        history = [200] * 90 + [8000] * 10
+        assert self._adaptive_max_len(history, floor=4096) == 16000
+
+    def test_falls_back_when_the_corpus_shrinks(self):
+        """The regression: this returned the earlier high-water mark."""
+        history = [200] * 100
+        assert self._adaptive_max_len(history, floor=4096) == 4096
+
+    def test_never_drops_below_the_configured_floor(self):
+        history = [8] * 100
+        assert self._adaptive_max_len(history, floor=4096) == 4096
+
+    def test_stays_capped(self):
+        history = [500_000] * 100
+        assert self._adaptive_max_len(history, floor=4096) == 65536

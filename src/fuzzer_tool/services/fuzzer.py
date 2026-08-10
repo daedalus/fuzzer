@@ -575,6 +575,11 @@ class Fuzzer:
         self._stall_recovery_execs = 0  # execs spent in recovery mode
         self.extra_crash_codes = set(extra_crash_codes) if extra_crash_codes else set()
         self.max_len = max_len
+        # Floor for the adaptive max_len in corpus_manager: that value
+        # tracks the corpus size distribution and must be allowed to
+        # fall again when the corpus shrinks, but never below what the
+        # caller asked for.
+        self._max_len_floor = max_len
         self.timeout = timeout
         self.mutations_per_input = mutations_per_input
         self.use_coverage = use_coverage
