@@ -655,6 +655,34 @@ def cmd_tmin(args):
     return 0
 
 
+def cmd_root_cause(args):
+    """Root-cause byte diff subcommand: isolate the minimal edit from a
+    non-crashing baseline that is responsible for the crash."""
+    _validate_target(args.target)
+    from fuzzer_tool.services.root_cause import root_cause
+
+    result = root_cause(
+        target=args.target,
+        crash_file=args.crash_file,
+        corpus_dir=getattr(args, "corpus_dir", None),
+        baseline_file=getattr(args, "baseline", None),
+        timeout=args.timeout,
+        file_mode=args.file_mode,
+        target_args=args.target_args,
+        use_coverage=args.coverage,
+        max_stages=args.max_stages,
+    )
+
+    if result is None:
+        return 1
+
+    if args.output:
+        Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.output).write_text(result["report"])
+        print(f"[+] Report saved to {args.output}")
+    return 0
+
+
 def cmd_minimize(args):
     """Corpus minimization subcommand."""
     _validate_target(args.target)
@@ -2210,6 +2238,44 @@ def main() -> int:
         help="Corpus directory for lineage rehydration of pruned intermediates",
     )
     tmin_parser.set_defaults(func=cmd_tmin)
+
+    # --- root-cause ---
+    rc_parser = subparsers.add_parser(
+        "root-cause",
+        help="Isolate the minimal byte diff from a non-crashing input that causes a crash",
+    )
+    rc_parser.add_argument("target", help="Path to target binary")
+    rc_parser.add_argument("crash_file", help="Path to crashing input file")
+    rc_parser.add_argument("-t", "--timeout", type=float, default=1, help="Timeout in seconds")
+    rc_parser.add_argument(
+        "-F", "--file-mode", action="store_true", help="Write input to temp file instead of stdin"
+    )
+    rc_parser.add_argument(
+        "-A",
+        "--target-args",
+        nargs=argparse.REMAINDER,
+        help="Target arguments ({file} placeholder)",
+    )
+    rc_parser.add_argument("-c", "--coverage", action="store_true", help="Enable SHM coverage")
+    rc_parser.add_argument(
+        "-d",
+        "--corpus-dir",
+        default=None,
+        help="Corpus directory to search for the nearest non-crashing seed",
+    )
+    rc_parser.add_argument(
+        "-b",
+        "--baseline",
+        default=None,
+        help="Explicit non-crashing input to diff against (skips corpus search)",
+    )
+    rc_parser.add_argument(
+        "--max-stages", type=int, default=200, help="Max ddmin stages (default: 200)"
+    )
+    rc_parser.add_argument(
+        "-O", "--output", default=None, help="Save the root-cause report to a file"
+    )
+    rc_parser.set_defaults(func=cmd_root_cause)
 
     # --- minimize ---
     min_parser = subparsers.add_parser(
