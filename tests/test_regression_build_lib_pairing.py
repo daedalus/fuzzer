@@ -96,8 +96,12 @@ class TestVendoredBranchesSetEveryConsumer:
         for i, block in enumerate(self._vendored_zlib_branches(script)):
             if "ZLIB_INC=" not in block:
                 continue
-            assert "ZLIB_LIBS=" in block, f"vendored-zlib branch {i} sets ZLIB_INC but not ZLIB_LIBS"
-            assert "GZIP_LIBS=" in block, f"vendored-zlib branch {i} sets ZLIB_INC but not GZIP_LIBS"
+            assert "ZLIB_LIBS=" in block, (
+                f"vendored-zlib branch {i} sets ZLIB_INC but not ZLIB_LIBS"
+            )
+            assert "GZIP_LIBS=" in block, (
+                f"vendored-zlib branch {i} sets ZLIB_INC but not GZIP_LIBS"
+            )
 
     def test_zlib_and_gzip_get_the_same_library(self, script):
         """The two must resolve to the same archive, not merely both be set."""

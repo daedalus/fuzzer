@@ -63,9 +63,7 @@ class TestPairListIsCapped:
         # Feed far more than the cap, in small batches (as add_pairs is
         # actually called -- a handful of pairs per fuzz_one()).
         for batch_start in range(0, CHECKSUM_PAIRS_MAX * 5, 4):
-            learner.add_pairs(
-                [_unverifiable_pair(i) for i in range(batch_start, batch_start + 4)]
-            )
+            learner.add_pairs([_unverifiable_pair(i) for i in range(batch_start, batch_start + 4)])
         assert len(learner._pairs) <= CHECKSUM_PAIRS_MAX
 
     def test_cap_keeps_the_most_recent_pairs(self):
@@ -144,7 +142,7 @@ class TestGcdPairSizeFilter:
             (bytes([i]), compute_checksum(bytes([i]), poly=custom_poly, width=8))
             for i in range(4, 12)
         ]
-        huge_noise = [(b"\xAB" * 4000, 0xDEAD + i) for i in range(4)]
+        huge_noise = [(b"\xab" * 4000, 0xDEAD + i) for i in range(4)]
 
         try:
             learner.add_pairs(huge_noise + small_good)

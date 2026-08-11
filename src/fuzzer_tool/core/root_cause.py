@@ -53,12 +53,10 @@ def apply_edit_subset(base: bytes, script: list[EditOp], active: set[int]) -> by
             out.append(base[pos])
         elif op == "replace":
             out.append(data[0] if i in active else base[pos])
-        elif op == "insert":
-            if i in active:
-                out.extend(data)
-        elif op == "delete":
-            if i not in active:
-                out.append(base[pos])
+        elif op == "insert" and i in active:
+            out.extend(data)
+        elif op == "delete" and i not in active:
+            out.append(base[pos])
     return bytes(out)
 
 
@@ -174,7 +172,7 @@ def format_root_cause_report(
             )
         elif op == "insert":
             ascii_repr = "".join(_byte_repr(b) for b in data)
-            lines.append(f"  offset 0x{pos:04x}: INSERT {data.hex()} (\"{ascii_repr}\")")
+            lines.append(f'  offset 0x{pos:04x}: INSERT {data.hex()} ("{ascii_repr}")')
         elif op == "delete":
             old = base[pos]
             lines.append(f"  offset 0x{pos:04x}: DELETE {old:#04x} ('{_byte_repr(old)}')")

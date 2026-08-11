@@ -154,9 +154,7 @@ class TestRootCauseService:
 
         # Everything crashes -> baseline is rejected as not-actually-safe
         with patch("fuzzer_tool.adapters.process.run_target_stdin", return_value=(-11, "", 1)):
-            result = root_cause(
-                "/bin/true", str(crash), baseline_file=str(baseline)
-            )
+            result = root_cause("/bin/true", str(crash), baseline_file=str(baseline))
         assert result is None
 
     def test_end_to_end_isolates_causal_byte(self, tmp_path):

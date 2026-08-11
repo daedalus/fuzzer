@@ -36,6 +36,7 @@ _IMPORT_TO_DIST = {
 
 def _declared_distributions() -> set[str]:
     import tomllib
+
     data = tomllib.loads(PYPROJECT.read_text())
     project = data.get("project", {})
     names: set[str] = set()

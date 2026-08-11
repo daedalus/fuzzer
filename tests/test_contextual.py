@@ -92,10 +92,7 @@ class TestContextualLinUCBScheduler:
             return [[d / det, -b / det], [-c / det, a / det]]
 
         def matmul_add_outer(mat, x):
-            return [
-                [mat[i][j] + x[i] * x[j] for j in range(2)]
-                for i in range(2)
-            ]
+            return [[mat[i][j] + x[i] * x[j] for j in range(2)] for i in range(2)]
 
         # A starts at lambda*I = I.
         a_direct = [[1.0, 0.0], [0.0, 1.0]]

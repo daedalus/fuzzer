@@ -70,9 +70,7 @@ class TestSiteReanchoring:
         arms with equal true rates.
         """
         rng = random.Random(3)
-        cases = [
-            _planted_input(rng, rng.randrange(0, 55), rng.randrange(1, 3)) for _ in range(80)
-        ]
+        cases = [_planted_input(rng, rng.randrange(0, 55), rng.randrange(1, 3)) for _ in range(80)]
 
         def solved(max_sites: int) -> int:
             pool = RandPool()

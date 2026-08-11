@@ -355,7 +355,6 @@ class EloTracker(RoundRecorderMixin):
             self.crash_ratings[op_a] = cra + self.k_factor * (score_a - ca)
             self.crash_ratings[op_b] = crb + self.k_factor * ((1.0 - score_a) - cb)
 
-
     def select_op(self, operators: list[str], temperature: float = 400.0) -> str:
         """Select an operator weighted by Elo rating.
 
@@ -758,7 +757,6 @@ class BayesianEloTracker(RoundRecorderMixin):
             self._best_win_rate.append(0.0 if score_a > 0.5 else 1.0)
         if len(self._best_win_rate) > 100:
             self._best_win_rate = self._best_win_rate[-100:]
-
 
     def _thompson_sample(self, name: str) -> float:
         """Draw from the operator's posterior N(mu, sigma)."""

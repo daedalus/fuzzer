@@ -83,9 +83,9 @@ class TestOperandAtNonZeroOffset:
     """
 
     def test_solves_operand_deep_in_buffer(self):
-        target = b"\xDE\xAD\xBE\xEF"
+        target = b"\xde\xad\xbe\xef"
         buf = bytearray(b"A" * 1024)
-        buf[600:604] = b"\xDE\xAD\xBE\xEE"  # one byte short of the target
+        buf[600:604] = b"\xde\xad\xbe\xee"  # one byte short of the target
         out = gradient_descent(bytes(buf), (target, target), max_len=4096)
         assert out[600:604] == target
 
@@ -104,10 +104,10 @@ class TestOperandAtNonZeroOffset:
     def test_picks_best_matching_site_among_several(self):
         """With several partial matches, the descent should anchor on the
         closest one rather than an arbitrary or first-found position."""
-        target = b"\xAA\xBB\xCC\xDD"
+        target = b"\xaa\xbb\xcc\xdd"
         buf = bytearray(b"\x00" * 600)
-        buf[100:104] = b"\xAA\x00\x00\x00"  # 1/4 match
-        buf[400:404] = b"\xAA\xBB\xCC\xD5"  # near-exact
+        buf[100:104] = b"\xaa\x00\x00\x00"  # 1/4 match
+        buf[400:404] = b"\xaa\xbb\xcc\xd5"  # near-exact
         out = gradient_descent(bytes(buf), (target, target), max_len=4096)
         assert out[400:404] == target
 

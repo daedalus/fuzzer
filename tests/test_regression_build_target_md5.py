@@ -21,9 +21,7 @@ import pytest
 
 BUILD_SCRIPT = Path(__file__).resolve().parent.parent / "tools" / "build_targets.sh"
 
-pytestmark = pytest.mark.skipif(
-    not BUILD_SCRIPT.exists(), reason="build_targets.sh not present"
-)
+pytestmark = pytest.mark.skipif(not BUILD_SCRIPT.exists(), reason="build_targets.sh not present")
 
 
 def _extract_functions() -> str:
@@ -70,16 +68,16 @@ def run(tmp_path: Path, script: str) -> str:
 
 class TestChangeDetection:
     def test_first_build_reports_new(self, tmp_path):
-        out = run(tmp_path, 'echo a > png; echo b > jpeg; build png jpeg')
+        out = run(tmp_path, "echo a > png; echo b > jpeg; build png jpeg")
         assert "OK: 2 new targets" in out
 
     def test_identical_rebuild_reports_unchanged(self, tmp_path):
-        out = run(tmp_path, 'echo a > png; build png >/dev/null; build png')
+        out = run(tmp_path, "echo a > png; build png >/dev/null; build png")
         assert "OK: 1 targets unchanged" in out
         assert "checksum changed" not in out
 
     def test_modified_binary_reports_changed(self, tmp_path):
-        out = run(tmp_path, 'echo a > png; build png >/dev/null; echo NEW > png; build png')
+        out = run(tmp_path, "echo a > png; build png >/dev/null; echo NEW > png; build png")
         assert "WARN: png: checksum changed" in out
 
 

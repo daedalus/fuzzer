@@ -231,7 +231,7 @@ def binary_matrix_rank(data: bytes, rows: int = 32, cols: int = 32) -> float:
     if n < 30:
         return 1.0
     b = _bits(data)[: n * bits_per].reshape(n * rows, cols).astype(np.uint64)
-    weights = (np.uint64(1) << np.arange(cols - 1, -1, -1, dtype=np.uint64))
+    weights = np.uint64(1) << np.arange(cols - 1, -1, -1, dtype=np.uint64)
     mats = (b * weights).sum(axis=1).reshape(n, rows)
 
     ranks = _batch_gf2_rank(mats, cols)
@@ -257,7 +257,9 @@ def binary_matrix_rank(data: bytes, rows: int = 32, cols: int = 32) -> float:
 # ── correlation / spacing tests ───────────────────────────────────────
 
 
-def lagged_autocorrelation(data: bytes, lags: tuple[int, ...] = (1, 2, 4, 8, 16, 32)) -> dict[int, float]:
+def lagged_autocorrelation(
+    data: bytes, lags: tuple[int, ...] = (1, 2, 4, 8, 16, 32)
+) -> dict[int, float]:
     """Per-lag byte autocorrelation, as a normal-deviate p-value.
 
     dieharder's rgb_lagged_sums.  For a fuzz input, a strong p at lag L is a
@@ -302,7 +304,7 @@ def birthday_spacings(data: bytes, word_bits: int = 24, n_points: int = 512) -> 
     spacings = np.diff(np.sort(words))
     spacings.sort()
     dup = int(np.count_nonzero(spacings[1:] == spacings[:-1]))
-    lam = (n_points ** 3) / (4.0 * (2.0 ** word_bits))
+    lam = (n_points**3) / (4.0 * (2.0**word_bits))
     # two-sided Poisson tail with a mid-p correction: the duplicate count is
     # a small integer, so the plain tail is heavily discretized and its
     # p-values are not uniform under the null (verified empirically).
@@ -310,8 +312,8 @@ def birthday_spacings(data: bytes, word_bits: int = 24, n_points: int = 512) -> 
     for k in range(dup):
         cdf += term
         term *= lam / (k + 1)
-    pmf = term                  # P(X == dup)
-    lower = cdf + 0.5 * pmf     # mid-p P(X <= dup)
+    pmf = term  # P(X == dup)
+    lower = cdf + 0.5 * pmf  # mid-p P(X <= dup)
     upper = 1.0 - cdf - 0.5 * pmf
     return max(0.0, min(1.0, 2.0 * min(lower, upper)))
 
@@ -339,7 +341,7 @@ def kmer_occupancy(data: bytes, tuple_bits: int | None = None) -> float:
         tuple_bits = int(round(math.log2(max(2.0, n_avail / 2.0))))
         tuple_bits = max(8, min(22, tuple_bits))
     cells = 1 << tuple_bits
-    n = bits.size // tuple_bits          # non-overlapping tuples
+    n = bits.size // tuple_bits  # non-overlapping tuples
     if n < 64:
         return 1.0
     tup = bits[: n * tuple_bits].reshape(n, tuple_bits).astype(np.int64)
@@ -447,8 +449,7 @@ def kuiper_uniform(pvalues: list[float] | np.ndarray) -> float:
     en = math.sqrt(n)
     lam = (en + 0.155 + 0.24 / en) * v
     s = sum(
-        (4.0 * j * j * lam * lam - 1.0) * math.exp(-2.0 * j * j * lam * lam)
-        for j in range(1, 101)
+        (4.0 * j * j * lam * lam - 1.0) * math.exp(-2.0 * j * j * lam * lam) for j in range(1, 101)
     )
     return max(0.0, min(1.0, 2.0 * s))
 
@@ -492,9 +493,9 @@ class RegionProfile:
         """Suggested multiplier on this region's byte-selection probability."""
         return {
             "incompressible": 0.15,  # deflate/encrypted: flips die at the CRC
-            "tabular": 1.6,          # offsets/lengths: arithmetic ops pay off
-            "textual": 1.3,          # dictionary + token ops pay off
-            "repetitive": 0.6,       # padding / run-length filler
+            "tabular": 1.6,  # offsets/lengths: arithmetic ops pay off
+            "textual": 1.3,  # dictionary + token ops pay off
+            "repetitive": 0.6,  # padding / run-length filler
             "mixed": 1.0,
         }.get(self.label, 1.0)
 
@@ -534,7 +535,9 @@ def _classify(pv: dict, window: bytes) -> tuple[str, float]:
     return "mixed", 0.0
 
 
-def profile_buffer(data: bytes, window: int = 4096, stride: int | None = None) -> list[RegionProfile]:
+def profile_buffer(
+    data: bytes, window: int = 4096, stride: int | None = None
+) -> list[RegionProfile]:
     """Slide a battery over the input and label each window.
 
     Cost is roughly 1 ms per 4 KiB window; run it once when a seed is admitted

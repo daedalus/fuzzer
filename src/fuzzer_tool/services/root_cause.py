@@ -76,7 +76,11 @@ def root_cause(
         tmp_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        from fuzzer_tool.adapters.process import SIGNAL_CRASH_CODES, run_target_file, run_target_stdin
+        from fuzzer_tool.adapters.process import (
+            SIGNAL_CRASH_CODES,
+            run_target_file,
+            run_target_stdin,
+        )
         from fuzzer_tool.core.sanitizer import SanitizerReport
 
         def _run_target(data_bytes: bytes) -> tuple[int, str]:
@@ -173,7 +177,10 @@ def root_cause(
             baseline_name, baseline = candidate_name, candidate
 
         if baseline == crash_data:
-            print("[-] Baseline and crash input are byte-identical -- nothing to diff", file=sys.stderr)
+            print(
+                "[-] Baseline and crash input are byte-identical -- nothing to diff",
+                file=sys.stderr,
+            )
             return None
 
         # ── Build and sanity-check the edit script ──────────────────

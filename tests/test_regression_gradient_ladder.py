@@ -23,9 +23,9 @@ class TestLadderCoverage:
         for orig in range(256):
             for bit in range(8):
                 want = orig ^ (1 << bit)
-                assert any(
-                    max(0, min(255, orig + d)) == want for d in _STEPS
-                ), f"no step reaches bit {bit} from {orig:#04x}"
+                assert any(max(0, min(255, orig + d)) == want for d in _STEPS), (
+                    f"no step reaches bit {bit} from {orig:#04x}"
+                )
 
     def test_steps_are_signed_powers_of_two(self):
         assert sorted(abs(s) for s in _STEPS) == sorted([1, 2, 4, 8, 16, 32, 64, 128] * 2)

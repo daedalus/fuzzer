@@ -8,6 +8,7 @@ import re
 def _get_rng(rng=None):
     return rng or random
 
+
 INTERESTING_8 = [
     -128,  # Overflow signed 8-bit when decremented
     -1,
@@ -1016,10 +1017,9 @@ def could_be_arith(old_val: int, new_val: int, blen: int) -> bool:
     # Check dword adjustments
     if blen != 4:
         return False
-    return (
-        ((old_val - new_val) & 0xFFFFFFFF) <= ARITH_MAX
-        or ((new_val - old_val) & 0xFFFFFFFF) <= ARITH_MAX
-    )
+    return ((old_val - new_val) & 0xFFFFFFFF) <= ARITH_MAX or (
+        (new_val - old_val) & 0xFFFFFFFF
+    ) <= ARITH_MAX
 
 
 def could_be_interest(old_val: int, new_val: int, blen: int, check_le: bool = True) -> bool:
