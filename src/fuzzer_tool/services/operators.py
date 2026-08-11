@@ -1688,6 +1688,40 @@ class OperatorEngine:
                 return bytearray(out[: self.f.max_len])
         return self._op_havoc(buf, byte_idx, data)
 
+    def _der_mutate(self, method: str, buf, byte_idx, data):
+        """Shared driver for the BER/DER operators (png-handler pattern)."""
+        from fuzzer_tool.core.mutations.der import DerMutator, parse_der
+
+        if not hasattr(self.f, "_der_mutator"):
+            self.f._der_mutator = DerMutator()
+        rng = self.f._rand_pool
+        raw = bytes(buf)
+        if parse_der(raw) is None:
+            # Not DER yet (bootstrap): grow a random DER-shaped input so the
+            # magic-byte sniffer can latch the format on a garbage corpus.
+            mutated = self.f._der_mutator._generate_random_der(self.f.max_len, rng=rng)
+        else:
+            mutated = getattr(self.f._der_mutator, method)(raw, max_len=self.f.max_len, rng=rng)
+        if mutated is None:
+            return self._op_havoc(buf, byte_idx, data)
+        return bytearray(mutated[: self.f.max_len])
+
+    def _op_der_len_mutate(self, buf, byte_idx, data):
+        """Mutate a BER/DER TLV length field (form flips, shrink/grow, indefinite)."""
+        return self._der_mutate("mutate_length", buf, byte_idx, data)
+
+    def _op_der_tag_mutate(self, buf, byte_idx, data):
+        """Mutate a BER/DER TLV tag byte (class, constructed, number)."""
+        return self._der_mutate("mutate_tag", buf, byte_idx, data)
+
+    def _op_der_tlv_reorder(self, buf, byte_idx, data):
+        """Reorder/duplicate/remove siblings inside a constructed value."""
+        return self._der_mutate("reorder_children", buf, byte_idx, data)
+
+    def _op_der_tlv_insert(self, buf, byte_idx, data):
+        """Insert a fresh or truncated TLV into a constructed value."""
+        return self._der_mutate("insert_tlv", buf, byte_idx, data)
+
     def _op_length_offset_goal(self, buf, byte_idx, data):
         """Write a solved offset/size pair into a candidate length field.
 

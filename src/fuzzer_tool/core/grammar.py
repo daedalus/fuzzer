@@ -80,8 +80,12 @@ class Grammar:
         self.parse(text)
 
     def _parse_alternative(self, alt: str) -> list:
-        """Parse a single alternative into a list of tokens."""
-        tokens = []
+        """Parse a single alternative into a list of tokens.
+
+        Unquoted ``\\xNN`` / ``\\t`` / ``\\r`` / ``\\n`` escapes expand to
+        literal byte tokens (so ``SP = \\x20`` works as the docstring
+        documents); quoted literals keep backslash text verbatim.
+        """
         # Match: "literal", rule_ref, rule_ref{N}, rule_ref{N,M}, rule_ref+, rule_ref*
         pattern = re.compile(
             r'"([^"]*)"'  # quoted literal
@@ -93,25 +97,71 @@ class Grammar:
             r"|(\w+)"  # bare rule_ref
         )
         _MAX_REPEAT = 32
-        for m in pattern.finditer(alt):
-            if m.group(1) is not None:
-                tokens.append(("lit", bytes(m.group(1), "utf-8")))
-            elif m.group(2) is not None:
-                tokens.append(("lit", bytes(m.group(2), "utf-8")))
-            elif m.group(3) is not None:
-                lo, hi = int(m.group(4)), int(m.group(5))
-                clamped_lo = min(lo, _MAX_REPEAT)
-                clamped_hi = min(hi, _MAX_REPEAT)
-                tokens.append(("repeat", m.group(3), clamped_lo, max(clamped_hi, clamped_lo)))
-            elif m.group(6) is not None:
-                n = min(int(m.group(7)), _MAX_REPEAT)
-                tokens.append(("repeat", m.group(6), n, n))
-            elif m.group(8) is not None:
-                tokens.append(("repeat", m.group(8), 1, 8))
-            elif m.group(9) is not None:
-                tokens.append(("repeat", m.group(9), 0, 8))
-            elif m.group(10) is not None:
-                tokens.append(("ref", m.group(10)))
+
+        def match_segment(segment: str) -> list:
+            tokens = []
+            for m in pattern.finditer(segment):
+                if m.group(1) is not None:
+                    tokens.append(("lit", bytes(m.group(1), "utf-8")))
+                elif m.group(2) is not None:
+                    tokens.append(("lit", bytes(m.group(2), "utf-8")))
+                elif m.group(3) is not None:
+                    lo, hi = int(m.group(4)), int(m.group(5))
+                    clamped_lo = min(lo, _MAX_REPEAT)
+                    clamped_hi = min(hi, _MAX_REPEAT)
+                    tokens.append(("repeat", m.group(3), clamped_lo, max(clamped_hi, clamped_lo)))
+                elif m.group(6) is not None:
+                    n = min(int(m.group(7)), _MAX_REPEAT)
+                    tokens.append(("repeat", m.group(6), n, n))
+                elif m.group(8) is not None:
+                    tokens.append(("repeat", m.group(8), 1, 8))
+                elif m.group(9) is not None:
+                    tokens.append(("repeat", m.group(9), 0, 8))
+                elif m.group(10) is not None:
+                    tokens.append(("ref", m.group(10)))
+            return tokens
+
+        # Split the alternative at unquoted escapes; everything else goes
+        # through the tokenizer unchanged.
+        tokens: list = []
+        simple_escapes = {"t": 9, "r": 13, "n": 10}
+        seg_start = 0
+        in_quote: str | None = None
+        i = 0
+        n = len(alt)
+        while i < n:
+            ch = alt[i]
+            if in_quote is not None:
+                if ch == in_quote:
+                    in_quote = None
+                i += 1
+                continue
+            if ch in "\"'":
+                in_quote = ch
+                i += 1
+                continue
+            if ch == "\\" and i + 1 < n:
+                nxt = alt[i + 1]
+                byte = None
+                if nxt == "x" and i + 3 < n:
+                    try:
+                        v = int(alt[i + 2 : i + 4], 16)
+                        if 0 <= v <= 255:
+                            byte = v
+                    except ValueError:
+                        byte = None
+                elif nxt in simple_escapes:
+                    byte = simple_escapes[nxt]
+                if byte is not None:
+                    if seg_start < i:
+                        tokens.extend(match_segment(alt[seg_start:i]))
+                    tokens.append(("lit", bytes((byte,))))
+                    i += 4 if nxt == "x" else 2
+                    seg_start = i
+                    continue
+            i += 1
+        if seg_start < n:
+            tokens.extend(match_segment(alt[seg_start:]))
         return tokens
 
     def generate(self, rule: str = None, max_depth: int = None, max_len: int = 0) -> bytes:

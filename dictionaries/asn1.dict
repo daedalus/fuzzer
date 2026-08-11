@@ -1,0 +1,25 @@
+#
+# AFL dictionary for ASN.1 BER/DER structures
+# -------------------------------------------
+#
+# Universal-class tags and common length-form prefixes. DER-encoded
+# X.509 / EC-key / ECDSA-signature material (e.g. the secp256k1 target)
+# is almost always a SEQUENCE, so the 30 xx prefixes are the highest-value
+# tokens for latching the format; the 81/82 length bytes switch a frame
+# into long form.
+#
+
+der_seq="\x30"
+der_seq_long1="\x30\x81"
+der_seq_long2="\x30\x82"
+der_set="\x31"
+der_integer="\x02"
+der_oid="\x06"
+der_null="\x05\x00"
+der_boolean="\x01\x01\xff"
+der_bitstring="\x03"
+der_octetstring="\x04"
+der_utf8string="\x0c"
+der_context0="\xa0"
+der_indef="\x80"
+der_eoc="\x00\x00"

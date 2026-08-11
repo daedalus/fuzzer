@@ -122,6 +122,10 @@ _CATEGORIES: dict[str, set[str]] = {
         "recompress_gzip",
         "field_repair",
         "tlv_nest_mutate",
+        "der_len_mutate",
+        "der_tag_mutate",
+        "der_tlv_reorder",
+        "der_tlv_insert",
     },
     # Constructive inverses of the diehard/dieharder statistical tests: each
     # one builds a buffer whose test statistic sits in a tail the uniform
@@ -227,6 +231,17 @@ def _never(_fuzzer, _data) -> bool:
 #   * until then F is still offered, but only on a small fraction of
 #     selections, so bootstrap-from-garbage-corpus still happens — it just
 #     no longer dominates the budget.
+def _sniff_der(d: bytes) -> bool:
+    """True when d starts like a BER/DER structure: SEQUENCE/SET tag plus a
+    plausible length byte (short form, indefinite, or long form with <= 4
+    length bytes)."""
+    return (
+        len(d) >= 2
+        and d[0] in (0x30, 0x31)
+        and (d[1] < 0x80 or d[1] in (0x80, 0x81, 0x82, 0x83, 0x84))
+    )
+
+
 _FORMAT_SNIFFERS: dict[str, Callable[[bytes], bool]] = {
     "png_chunk_mutate": lambda d: d[:8] == b"\x89PNG\r\n\x1a\n",
     "png_crc_fix": lambda d: d[:8] == b"\x89PNG\r\n\x1a\n",
@@ -258,6 +273,13 @@ _FORMAT_SNIFFERS: dict[str, Callable[[bytes], bool]] = {
     "recompress_gzip": lambda d: len(d) >= 18 and d[:3] == b"\x1f\x8b\x08",
     # Only formats with modelled derived fields; PNG for now.
     "field_repair": lambda d: len(d) >= 8 and d[:8] == b"\x89PNG\r\n\x1a\n",
+    # BER/DER: a SEQUENCE (0x30) / SET (0x31) leading tag with a plausible
+    # length byte — short form, indefinite (BER), or long form with <= 4
+    # length bytes. Covers X.509 / EC-key / ECDSA-signature material.
+    "der_len_mutate": _sniff_der,
+    "der_tag_mutate": _sniff_der,
+    "der_tlv_reorder": _sniff_der,
+    "der_tlv_insert": _sniff_der,
 }
 
 # Fraction of selections on which a not-yet-seen format is still offered.

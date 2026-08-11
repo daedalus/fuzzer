@@ -1,0 +1,17 @@
+# Simple DER grammar for structure-aware fuzzing
+# Generates structurally valid-ish DER SEQUENCE trees with consistent
+# lengths (len matches the chosen inner combination).
+
+der     = seq
+seq     = \x30 len inner
+inner   = integer oid | integer | oid | integer oid null
+
+len     = \x03 | \x05 | \x08 | \x0a
+
+integer = \x02 \x01 int_val
+int_val = \x01 | \x02 | \x03 | \xff
+
+oid     = \x06 \x03 oid_val
+oid_val = \x2a\x03\x04 | \x2a\x86\x48 | \x2a\x86\x46
+
+null    = \x05\x00

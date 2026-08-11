@@ -70,6 +70,32 @@ class TestGrammarParse:
         # Parser treats backslash escapes as literal characters
         assert g.rules["data"] == [[("lit", b"\\xFF\\x00")]]
 
+    def test_unquoted_hex_escape_expands(self):
+        """Unquoted \\xNN escapes expand to literal bytes (SP = \\x20 works)."""
+        g = Grammar()
+        g.parse(r"data = \x30\x31")
+        assert g.rules["data"] == [[("lit", b"\x30"), ("lit", b"\x31")]]
+        assert g.generate("data") == b"\x30\x31"
+
+    def test_unquoted_simple_escapes_expand(self):
+        g = Grammar()
+        g.parse(r"data = \x41\t\x42\r\n")
+        assert g.rules["data"] == [
+            [("lit", b"A"), ("lit", b"\t"), ("lit", b"B"), ("lit", b"\r"), ("lit", b"\n")]
+        ]
+        assert g.generate("data") == b"A\tB\r\n"
+
+    def test_escapes_do_not_eat_rule_refs(self):
+        g = Grammar()
+        g.parse(r"data = \x30 rule\n")
+        assert g.rules["data"] == [[("lit", b"\x30"), ("ref", "rule"), ("lit", b"\n")]]
+
+    def test_malformed_hex_escape_left_untouched(self):
+        g = Grammar()
+        g.parse(r'data = \xzz "x"')
+        # Malformed \x escape falls through to the tokenizer as a bare ref.
+        assert g.rules["data"] == [[("ref", "xzz"), ("lit", b"x")]]
+
     def test_complex_grammar(self):
         g = Grammar()
         spec = """

@@ -18,6 +18,7 @@ from fuzzer_tool.core.operator_registry import (
     REGISTRY,
     OperatorRegistry,
     OperatorSpec,
+    _sniff_der,
 )
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.services.operators import OperatorEngine
@@ -93,6 +94,10 @@ class TestRegistrySingleSourceOfTruth:
         for op in FORMAT_MUTATIONS:
             assert REGISTRY.category_of(op) == "format", f"{op} not in format band"
 
+    def test_der_ops_categorized_format(self):
+        for op in ("der_len_mutate", "der_tag_mutate", "der_tlv_reorder", "der_tlv_insert"):
+            assert REGISTRY.category_of(op) == "format", f"{op} not in format band"
+
     def test_dict_ops_categorized_dict(self):
         for op in DICT_MUTATIONS:
             assert REGISTRY.category_of(op) == "dict", f"{op} not in dict band"
@@ -142,6 +147,19 @@ class TestAvailabilityPredicates:
         assert "bit_flip" in avail
         assert "havoc" in avail
         assert "png_chunk_mutate" in avail
+
+    def test_der_ops_available(self):
+        avail = self._available()
+        assert {"der_len_mutate", "der_tag_mutate", "der_tlv_reorder", "der_tlv_insert"} <= avail
+
+    def test_der_sniffer_matches_seed_bytes(self):
+        assert _sniff_der(b"\x30\x03\x02\x01\x05")
+        assert _sniff_der(b"\x31\x81\x02")  # SET with long form
+        assert _sniff_der(b"\x30\x80")  # indefinite (BER)
+        assert not _sniff_der(b"\x30")  # too short for a length byte
+        assert not _sniff_der(b"\x02\x01\x05")  # not SEQUENCE/SET
+        assert not _sniff_der(b"PK\x03\x04")
+        assert not _sniff_der(b"\x30\x85\x00\x00\x00\x00")  # 5 length bytes: out of range
 
     def test_dict_ops_gated_on_dictionary(self):
         assert not {"dict_insert", "dict_replace", "checksum_repair"} & self._available()
