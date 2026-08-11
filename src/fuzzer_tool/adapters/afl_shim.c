@@ -81,6 +81,15 @@ static uint32_t __afl_map_size  = 8192;
 struct __afl_entry *__afl_area   = NULL;
 uint32_t           __afl_prev_loc = 0;
 
+/* Set while the SHM map / distance table is being attached. The map/setup
+ * code is itself coverage-instrumented (targets -include this file), so its
+ * entry fires trace_pc → map_edge before the stack contract a caller-context
+ * frame walk expects exists — reading the return address there loads through
+ * a bogus frame and segfaults (observed at -O1). No useful context exists
+ * during setup, so callbacks skip it. Updated by __afl_map_shm, read by
+ * __afl_get_caller_ctx. */
+static volatile int __afl_mapping = 0;
+
 /* Metadata pointers (front header, before the edge table) */
 static uint32_t *__afl_stack_depth = NULL;   /* offset 0: uint32 */
 static uint64_t *__afl_path_hash   = NULL;   /* offset 8: uint64 */
@@ -125,7 +134,9 @@ void __afl_map_shm(void) {
     __afl_edge_count  = (uint64_t *)(base + 16);
 
 #ifdef __AFL_DISTANCE_MODE
+    __afl_mapping = 1;  /* map_dist_shm is instrumented; no ctx during setup */
     __afl_map_dist_shm();
+    __afl_mapping = 0;
 #endif
 }
 
@@ -159,12 +170,11 @@ void __afl_map_shm(void) {
  * invocation, exactly like AFL++'s CTX instrumentation.
  *
  * Caveats (real, not hidden):
- *   - Needs an intact frame-pointer chain. Coverage/ASAN builds already
- *     default to -fno-omit-frame-pointer on the compilers this shim
- *     targets; a target built without it degrades to ctx==0 (falls back
- *     to plain prev_loc^cur_loc) rather than reading garbage — GCC/Clang
- *     document return_address() as returning NULL, not undefined memory,
- *     once the frame chain runs out.
+ *   - **Requires an intact frame-pointer chain. Default clang/gcc builds
+ *     omit frame pointers (-O1/-O2, x86-64), and the walk then loads the
+ *     caller's return address from a slot that does not exist — a SEGV, not
+ *     a graceful ctx==0. This is why __AFL_CTX_SENSITIVE defaults to 0;
+ *     enabling it demands -fno-omit-frame-pointer on every TU.**
  *   - A tail call elides its own frame, so a tail-called function's true
  *     "caller of my caller" becomes invisible and two distinct call
  *     chains can collapse onto the same ctx. That under-disambiguates
@@ -175,12 +185,22 @@ void __afl_map_shm(void) {
  *     compatibility with a pre-context session).                        */
 
 #ifndef __AFL_CTX_SENSITIVE
-#define __AFL_CTX_SENSITIVE 1
+/* Off by default. The caller-context walk (__builtin_return_address(1))
+ * dereferences the caller's return-address slot, which only exists if the
+ * whole chain keeps frame pointers. clang/gcc on x86-64 omit them by
+ * default at -O1/-O2, so enabling this unconditionally segfaults standard
+ * builds (observed in the -O1 distance targets: SEGV in the frame walk on
+ * every startup edge). Opt in per build with
+ * -D__AFL_CTX_SENSITIVE=1 -fno-omit-frame-pointer (on every TU). */
+#define __AFL_CTX_SENSITIVE 0
 #endif
 
 #if __AFL_CTX_SENSITIVE
 __attribute__((visibility("default"), always_inline))
 static inline uint32_t __afl_get_caller_ctx(void) {
+    if (__afl_mapping) return 0;
+    void *fp = __builtin_frame_address(0);
+    if (!fp) return 0;  /* frame-pointer-less build: no walkable chain */
     void *ra = __builtin_return_address(1);
     if (!ra) return 0;
 
@@ -529,6 +549,12 @@ static void __afl_shim_abort(void) {
 /* Auto-attach when loaded */
 __attribute__((constructor))
 static void __afl_auto_init(void) {
+    /* The whole startup window runs on an unusual stack (libc init →
+     * constructor), which the caller-context frame walk cannot survive in
+     * every build (-O1/-O2 omit frame pointers; observed SEGV in
+     * map_shm/install_crash_handlers). suppress ctx until done. */
+    __afl_mapping = 1;
     __afl_map_shm();
     __afl_install_crash_handlers();
+    __afl_mapping = 0;
 }

@@ -783,12 +783,8 @@ int fuzz_shm_run(const unsigned char *buf, size_t len) {
                 #   raw2 = 0x3030 ^ (0x2020>>1) = 0x2020
                 import itertools
 
-                expected_pairwise = sorted(
-                    [0x1010 ^ 0x2828, 0x1010 ^ 0x2020, 0x2828 ^ 0x2020]
-                )
-                got_pairwise = sorted(
-                    a ^ b for a, b in itertools.combinations(sorted(edge_ids), 2)
-                )
+                expected_pairwise = sorted([0x1010 ^ 0x2828, 0x1010 ^ 0x2020, 0x2828 ^ 0x2020])
+                got_pairwise = sorted(a ^ b for a, b in itertools.combinations(sorted(edge_ids), 2))
                 assert got_pairwise == expected_pairwise, (
                     f"pairwise edge_id xors {got_pairwise} != {expected_pairwise} "
                     "— caller_ctx should be constant within one call site, so it "
@@ -874,6 +870,7 @@ int caller_b(void) { volatile int r = shared_edge(); return r; }
                 "gcc",
                 "-O2",
                 "-g",
+                "-D__AFL_CTX_SENSITIVE=1",  # opt-in feature; defaults off (needs frame pointers)
                 "-fno-omit-frame-pointer",  # required for __builtin_return_address(1)
                 "-fno-optimize-sibling-calls",  # keep real frames, no tail-call collapse
                 "-shared",
