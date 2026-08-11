@@ -262,6 +262,38 @@ class TestShmCoverage:
         finally:
             cov.cleanup()
 
+    def test_path_hash_advances_on_count_bump(self):
+        """Like the C shim, path_hash advances on a count bump, not just insert."""
+        cov = ShmCoverage()
+        try:
+            cov.reset_edge_map()
+            cov.record_edge(7)  # insert: hash = 7
+            ph_insert = cov.read_path_hash()
+            assert ph_insert == 7
+            cov.record_edge(7)  # bump: hash = (7*31) ^ 7, edge_count unchanged
+            expected = ((7 * 31) ^ 7) & 0xFFFFFFFFFFFFFFFF
+            assert cov.read_path_hash() == expected
+            assert cov.read_path_hash() != ph_insert
+            assert cov.get_edge_counts()[7] == 2
+        finally:
+            cov.cleanup()
+
+    def test_path_hash_advances_on_full_table_miss(self):
+        """Like the C shim, a full-table miss still advances the path hash."""
+        cov = ShmCoverage(size=4)  # tiny table for fast saturation
+        try:
+            cov.reset_edge_map()
+            for eid in (4, 5, 10, 15):  # one per slot: {0,1,2,3}%4
+                cov.record_edge(eid)
+            cnt = cov.read_edge_count()
+            ph_before = cov.read_path_hash()
+            assert not cov.record_edge(1)  # 1%4=1 — probes all slots, misses
+            assert cov.read_edge_count() == cnt
+            expected = ((ph_before * 31) ^ 1) & 0xFFFFFFFFFFFFFFFF
+            assert cov.read_path_hash() == expected
+        finally:
+            cov.cleanup()
+
     def test_read_edge_count_after_multiple_records(self):
         """read_edge_count() returns correct count after several record_edge calls."""
         cov = ShmCoverage()

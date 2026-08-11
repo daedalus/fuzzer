@@ -309,9 +309,13 @@ class ShmCoverage:
 
         Mirrors what the instrumented binary does: hash to slot, linear probe.
         Also maintains the edge_count and path_hash headers (offsets 16 and 8)
-        for fast-path consistency with the C shim's behavior.
+        for fast-path consistency with the C shim's behavior.  Like the C
+        shim's __afl_map_edge (afl_shim.c), the path_hash advances on every
+        edge fire — new-slot insert, count bump, or full-table miss — not
+        just on new slots.
         """
         pos = edge_id % self.num_entries
+        stored = False
         for i in range(self.num_entries):
             idx = (pos + i) % self.num_entries
             eid = self._entries[idx].edge_id
@@ -321,23 +325,27 @@ class ShmCoverage:
                 # Increment edge_count header to reflect new-slot insertion
                 ec = ctypes.c_uint64.from_address(self._ptr + 16)
                 ec.value = ec.value + 1
-                # Update path_hash: hash = hash * 31 ^ edge_id (matches C shim)
-                ph = ctypes.c_uint64.from_address(self._ptr + 8)
-                ph.value = ph.value * 31 ^ edge_id
                 if edge_id not in self._seen_edge_ids:
                     self._seen_edge_ids.add(edge_id)
                     self.cumulative_edges += 1
                     self._peak_cumulative_edges = max(
                         self._peak_cumulative_edges, self.cumulative_edges
                     )
-                self.total_edges += 1
-                return True
+                stored = True
+                break
             if eid == edge_id:
                 if self._entries[idx].count < 0xFFFFFFFF:
                     self._entries[idx].count += 1
-                self.total_edges += 1
-                return True
-        return False  # table full
+                stored = True
+                break
+        # Update path_hash unconditionally: hash = hash * 31 ^ edge_id
+        # (matches the C shim, which fires on every edge — full-table misses
+        # included).
+        ph = ctypes.c_uint64.from_address(self._ptr + 8)
+        ph.value = ph.value * 31 ^ edge_id
+        if stored:
+            self.total_edges += 1
+        return stored
 
     # ── Resize ───────────────────────────────────────────────────────────
 
