@@ -1111,6 +1111,13 @@ build_vendored_tracecmp_targets() {
         return 1
     fi
     local TRACE_FLAGS="-fsanitize-coverage=trace-cmp,trace-pc-guard"
+    # Caller-context edge hashing, opted in per build. __AFL_CTX_SENSITIVE
+    # only takes effect in TUs that include the shim (the targets), but the
+    # vendored libs are rebuilt with the same define so the whole linked
+    # chain is built under one contract; -fno-omit-frame-pointer is required
+    # because the context walk dereferences the caller's return-address
+    # slot (see afl_shim.c).
+    local CTX_FLAGS="-D__AFL_CTX_SENSITIVE=1 -fno-omit-frame-pointer"
     local ASAN_FLAGS=""
     for arg in "$@"; do
         [ "$arg" = "--asan" ] && ASAN_FLAGS="-fsanitize=address"
@@ -1123,7 +1130,7 @@ build_vendored_tracecmp_targets() {
     if [ -f "$VENDOR_ZLIB_DIR/configure" ]; then
         echo "  [1/3] Compiling vendor/zlib with trace-cmp..."
         (cd "$VENDOR_ZLIB_DIR" && \
-            CC=clang CFLAGS="-O2 -g -fPIC $TRACE_FLAGS" \
+            CC=clang CFLAGS="-O2 -g -fPIC $CTX_FLAGS $TRACE_FLAGS" \
             ./configure --static 2>/dev/null && \
             make -j$(nproc) -s 2>/dev/null) && \
             ok "vendor/zlib (trace-cmp)" || warn "vendor/zlib build failed"
@@ -1136,7 +1143,7 @@ build_vendored_tracecmp_targets() {
     if [ -f "$VENDOR_LIBPNG_DIR/configure" ]; then
         echo "  [2/3] Compiling vendor/libpng with trace-cmp..."
         (cd "$VENDOR_LIBPNG_DIR" && \
-            CC=clang CFLAGS="-O2 -g -fPIC $TRACE_FLAGS -I../zlib" \
+            CC=clang CFLAGS="-O2 -g -fPIC $CTX_FLAGS $TRACE_FLAGS -I../zlib" \
             LDFLAGS="-L../zlib" \
             ./configure --enable-shared=no --quiet 2>/dev/null && \
             make -j$(nproc) -s 2>/dev/null) && \
@@ -1166,7 +1173,7 @@ build_vendored_tracecmp_targets() {
     local VENDOR_LIBS="$LIBPNG_A $ZLIB_A $LIBS"
     local VENDOR_INC="-I$VENDOR_LIBPNG_DIR -I$VENDOR_ZLIB_DIR"
     local OUT_SUFFIX="_tracecmp"
-    local ALL_FLAGS="$TRACE_FLAGS $ASAN_FLAGS"
+    local ALL_FLAGS="$CTX_FLAGS $TRACE_FLAGS $ASAN_FLAGS"
 
     # png_read
     if [ -f "$TARGETS/png_read.c" ]; then
