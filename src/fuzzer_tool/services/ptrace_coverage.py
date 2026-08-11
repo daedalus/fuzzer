@@ -428,7 +428,10 @@ class PtraceCoverage:
         # Absolute addresses cause spurious collisions under PIE/ASLR.
         rel = addr - self._base_address if self._base_address else addr
         bucket = (rel ^ self.prev_location) % self.map_size
-        self.prev_location = rel % self.map_size
+        # Shift the prev like the C shim's __afl_prev_loc = cur_loc >> 1: a
+        # block that re-enters itself consecutively then hashes as
+        # rel ^ (rel >> 1) != 0 instead of collapsing to bucket 0 (rel ^ rel).
+        self.prev_location = rel >> 1
         self.total_bp_hits += 1
         if self.edge_map[bucket] == 0:
             self.edge_map[bucket] = 1
