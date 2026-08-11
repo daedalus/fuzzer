@@ -7,6 +7,8 @@ it reach 796MB mi.json / multi-GB RSS (OOM). Regressions pinned here:
 2. a total joint-cell budget evicts the least-observed position, bounding memory.
 3. loaded state is recounted and trimmed to the budget (no resume-time blowup).
 4. Fuzzer only loads mi.json with --resume (like state.json).
+5. raw 32-bit shim edge hashes are folded into [0, map_size) so a single high
+   hash can't grow the dense edge_marginal array to the hash value (MemoryError).
 """
 
 from __future__ import annotations
@@ -166,6 +168,35 @@ def test_mi_load_resume_gated(tmp_path):
     ):
         f_yes = make(True)
     assert f_yes._mi.total_observations == 2  # loaded with --resume
+
+
+def test_record_folds_high_edge_hashes_into_map_size():
+    """Raw 32-bit shim edge hashes (caller_ctx ^ prev_loc ^ cur_loc) are folded
+    into [0, map_size) instead of growing the dense edge_marginal array up to
+    the hash value — the source of the multi-GB MemoryError on first sighting."""
+    t = MutualInformationTracker(max_positions=8, min_observations=1)
+    map_size = 16384  # power-of-two (AFL convention)
+    edges = {2**31, 2**31 + 7, 4096}
+    t.record(b"\x00\xff", edges, map_size=map_size)
+    # Independent oracle: fold the raw hashes the same way a bitmap does.
+    folded = {e & (map_size - 1) for e in edges}
+    assert len(t.edge_marginal) <= map_size
+    assert t._edge_marginal_size == len(t.edge_marginal)
+    for e in folded:
+        assert t.edge_marginal[e] == 2  # 2 positions observed
+    assert sum(t.edge_marginal) == 2 * len(folded)
+
+
+def test_record_folds_edge_hashes_modulo_for_non_power_of_two_map():
+    """Non-power-of-two maps fold via modulo (an AND-mask would wrap wrongly)."""
+    t = MutualInformationTracker(max_positions=8, min_observations=1)
+    map_size = 10000
+    edges = {2**31, 2**31 + 1}
+    t.record(b"\x00", edges, map_size=map_size)
+    folded = {e % map_size for e in edges}
+    assert len(t.edge_marginal) <= map_size
+    for e in folded:
+        assert t.edge_marginal[e] == 1
 
 
 def test_edge_marginal_sum_matches_reference_and_tracks_growth():

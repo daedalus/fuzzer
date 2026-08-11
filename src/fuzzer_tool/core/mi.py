@@ -90,6 +90,17 @@ class MutualInformationTracker:
         self.total_observations += 1
         self._total_edges = None
         self._invalidate_max_mi_cache()
+        # The C shim emits full 32-bit edge hashes (caller_ctx ^ prev_loc ^
+        # cur_loc) with collisions resolved by SHM linear probing, so edge IDs
+        # are opaque hashes, not dense indices.  edge_marginal is a dense array
+        # indexed by edge ID, so fold IDs into [0, map_size) before counting;
+        # an unmasked high hash would force a multi-GB allocation on its first
+        # sighting.  Power-of-two maps (AFL convention) mask; others modulo.
+        if map_size > 0:
+            if map_size & (map_size - 1) == 0:
+                hit_edges = {e & (map_size - 1) for e in hit_edges}
+            else:
+                hit_edges = {e % map_size for e in hit_edges}
         # Invalidate weighted_position cache when a new position appears
         if hasattr(self, "_wp_sorted_pos") and self._wp_sorted_pos is not None:
             max_pos = len(input_bytes) - 1 if input_bytes else 0
