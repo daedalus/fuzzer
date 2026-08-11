@@ -700,3 +700,83 @@ class TestDeferredMinimize:
         f._minimize_pending = True
         f._flush_pending_minimize()
         assert not f._minimize_pending, "flush must clear the flag"
+
+
+class TestSingletonEdgePreservation:
+    """EdgeTracker._maybe_prune must not drop seeds that own unique edges."""
+
+    def test_prune_preserves_singleton_edge_seed(self):
+        """A seed with a unique edge survives even when over max_tracked_seeds."""
+        f = MockFuzzer(Path(tempfile.mkdtemp()))
+        et = f._edge_tracker
+        et.max_tracked_seeds = 2
+
+        # Three seeds: A and B share edge 1, C has unique edge 2
+        seed_a = b"seed_a_" + b"x" * 60
+        seed_b = b"seed_b_" + b"y" * 60
+        seed_c = b"seed_c_" + b"z" * 60
+
+        ka = _seed_key(seed_a)
+        kb = _seed_key(seed_b)
+        kc = _seed_key(seed_c)
+
+        et.seed_edges[ka] = {1}
+        et.seed_edges[kb] = {1}
+        et.seed_edges[kc] = {2}  # singleton edge
+
+        et._maybe_prune()
+
+        assert kc in et.seed_edges, (
+            f"Singleton-edge seed C (key={kc}) was pruned from seed_edges. "
+            f"Remaining: {list(et.seed_edges.keys())}"
+        )
+
+    def test_prune_drops_redundant_seed(self):
+        """A fully-subsumed seed is the first to be pruned."""
+        f = MockFuzzer(Path(tempfile.mkdtemp()))
+        et = f._edge_tracker
+        et.max_tracked_seeds = 2
+
+        seed_a = b"seed_a_" + b"x" * 60
+        seed_b = b"seed_b_" + b"y" * 60
+        seed_c = b"seed_c_" + b"z" * 60
+
+        ka = _seed_key(seed_a)
+        kb = _seed_key(seed_b)
+        kc = _seed_key(seed_c)
+
+        # A covers {1,2}; B and C both cover {1} (redundant)
+        et.seed_edges[ka] = {1, 2}
+        et.seed_edges[kb] = {1}
+        et.seed_edges[kc] = {1}
+
+        et._maybe_prune()
+
+        # A must survive (covers unique edge 2)
+        assert ka in et.seed_edges
+        # One of B or C is dropped; the other may survive as filler
+        assert len(et.seed_edges) == 2
+
+
+class TestPostMinimizeCoverageVerification:
+    """Post-pruning verification is a no-op when coverage is intact."""
+
+    def test_post_minimize_no_regression_when_covered(self):
+        """When all edges are covered, verification is a no-op."""
+        f = MockFuzzer(Path(tempfile.mkdtemp()))
+        et = f._edge_tracker
+        et.cumulative_edges = {1, 2, 3}
+
+        seed_a = b"seed_a_" + b"x" * 60
+        ka = _seed_key(seed_a)
+        et.seed_edges[ka] = {1, 2, 3}
+
+        f.corpus = [seed_a]
+        f.seed_meta = {seed_a: {"fuzz_count": 1, "coverage_edges": 3, "added_at": 100.0}}
+        f.max_corpus = 1
+
+        mgr = CorpusManager(f)
+        mgr.auto_minimize_corpus()
+
+        assert len(f.corpus) == 1
+        assert seed_a in f.corpus

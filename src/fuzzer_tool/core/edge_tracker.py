@@ -757,17 +757,46 @@ class EdgeTracker:
         self.max_hit_count = 0
 
     def _maybe_prune(self):
-        """Prune oldest seeds when tracked count exceeds max_tracked_seeds.
+        """Prune tracked seeds when count exceeds max_tracked_seeds.
 
-        Keeps the most recent seeds and removes their edge data.
-        This bounds memory usage while preserving recent coverage information.
+        Prefers dropping fully-subsumed seeds whose edges are all covered by
+        other still-tracked seeds.  Only falls back to age-based pruning when
+        every candidate owns at least one edge that no other tracked seed covers.
         """
         if len(self.seed_edges) <= self.max_tracked_seeds:
             return
 
-        # Find excess seeds to prune (oldest first by insertion order)
         excess = len(self.seed_edges) - self.max_tracked_seeds
-        keys_to_prune = list(self.seed_edges.keys())[:excess]
+
+        # Count how many currently-tracked seeds own each edge.
+        edge_owners: dict[int, int] = {}
+        for edges in self.seed_edges.values():
+            for e in edges:
+                edge_owners[e] = edge_owners.get(e, 0) + 1
+
+        # Seeds that own at least one singleton edge among tracked seeds are
+        # protected: pruning them would silently lose that edge from coverage.
+        protected_keys: set[str] = set()
+        for key, edges in self.seed_edges.items():
+            if any(edge_owners.get(e, 0) <= 1 for e in edges):
+                protected_keys.add(key)
+
+        # Phase 1 — subsumption pass: drop oldest non-protected seeds first.
+        keys_to_prune: list[str] = []
+        for key in self.seed_edges:
+            if key not in protected_keys:
+                keys_to_prune.append(key)
+            if len(keys_to_prune) >= excess:
+                break
+
+        # Phase 2 — age fallback: if still over budget, sacrifice the oldest
+        # protected seeds as a last resort.
+        if len(keys_to_prune) < excess:
+            for key in list(self.seed_edges):
+                if key in protected_keys and key not in keys_to_prune:
+                    keys_to_prune.append(key)
+                    if len(keys_to_prune) >= excess:
+                        break
 
         for key in keys_to_prune:
             self.seed_edges.pop(key, None)

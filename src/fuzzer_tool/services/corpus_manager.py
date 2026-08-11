@@ -805,6 +805,46 @@ class CorpusManager:
                 if meta is not None:
                     meta["coverage_edges_baseline"] = meta.get("coverage_edges", 0)
 
+        # Post-pruning coverage verification: recover seeds whose unique edges
+        # were dropped by scoring or lineage pruning.
+        et = f._edge_tracker
+        recovered_count = 0
+        if et and et.cumulative_edges and unique:
+            kept_coverage: set[int] = set()
+            for seed in unique:
+                sk = self.seed_key(seed)
+                kept_coverage.update(et.seed_edges.get(sk, set()))
+            uncovered = et.cumulative_edges - kept_coverage
+            if uncovered:
+                for seed in f.corpus:
+                    if seed in unique:
+                        continue
+                    sk = self.seed_key(seed)
+                    seed_edges = et.seed_edges.get(sk, set())
+                    if seed_edges & uncovered:
+                        unique.append(seed)
+                        mandatory.add(id(seed))
+                        if f.corpus_dir:
+                            h = hash_data(seed)
+                            if h not in f.irreplaceable_hashes:
+                                save_irreplaceable(
+                                    seed,
+                                    f.corpus_dir,
+                                    f.seen_hashes,
+                                    f.irreplaceable_hashes,
+                                    f.bloom,
+                                )
+                                seeds_sub = f.corpus_dir / "seeds" / h[:2] / f"id_{h}"
+                                if seeds_sub.exists():
+                                    seeds_sub.unlink()
+                        recovered_count += 1
+                if recovered_count:
+                    log.warning(
+                        "Recovered %d seeds to cover %d uncovered edges after minimization",
+                        recovered_count,
+                        len(uncovered),
+                    )
+
         removed = len(f.corpus) - len(unique)
         if removed > 0:
             seeds_dir = f.corpus_dir / "seeds"
