@@ -51,6 +51,9 @@ targets/gzip_read*
 targets/jpeg_read*
 targets/zlib_read*
 targets/proto_target*
+targets/ffmpeg_read*
+targets/cmplog_exercise*
+targets/tracecmp_target*
 targets/fgrep_read
 targets/grep_read*
 targets/unrar_read
