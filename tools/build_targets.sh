@@ -404,9 +404,28 @@ build_target() {
         warn "Source not found: $src"
         return 1
     fi
+    local cmplog_obj="" cmplog_libs=""
+    # Vendored libraries (libpng/zlib/ffmpeg) are compiled with comparison
+    # tracing, so their objects reference __sanitizer_cov_trace_const_cmp*;
+    # an executable link needs a provider for those (a .so link tolerates
+    # undefined symbols). Mirror build_so_target. Excluded for MSAN/TSAN:
+    # every linked unit must be sanitizer-instrumented, and this shim is not.
+    if [ "$WITH_CMPLOG" -eq 1 ] && [ -f "$CMPLOG_SHIM" ] \
+        && [[ "$extra_flags" != *-fsanitize=memory* ]] \
+        && [[ "$extra_flags" != *-fsanitize=thread* ]]; then
+        local cmplog_obj_path="/tmp/fuzz_cmplog_$$.o"
+        local CMPLOG_CC="clang"
+        command -v clang &>/dev/null || CMPLOG_CC="$cc"
+        $CMPLOG_CC -O2 -g -fPIC -c "$CMPLOG_SHIM" -o "$cmplog_obj_path" 2>/dev/null
+        if [ -f "$cmplog_obj_path" ]; then
+            cmplog_obj="$cmplog_obj_path"
+            cmplog_libs="-ldl"
+        fi
+    fi
     local rc=0
     $cc $extra_flags -O2 -g $extra_cflags -include "$SHIM" \
-        -o "$out" "$src" $libs 2>/dev/null || rc=$?
+        -o "$out" "$src" $cmplog_obj $libs $cmplog_libs 2>/dev/null || rc=$?
+    [ -n "$cmplog_obj" ] && rm -f "$cmplog_obj"
     if [ $rc -eq 0 ]; then
         ok "$(basename "$out")"
         record_target_md5 "$out"
@@ -513,9 +532,16 @@ build_simple_targets() {
     local FFMPEG_LIBS="-lavformat -lavcodec -lavutil -lswresample -lm"
     local FFMPEG_INC="-I/usr/include/x86_64-linux-gnu"
     local VENDOR_FFMPEG_A="$VENDOR/ffmpeg/libavformat/libavformat.a"
-    if [ -f "$VENDOR_FFMPEG_A" ] && [[ "$flags" == *-fsanitize=address* ]]; then
-        FFMPEG_LIBS="$VENDOR/ffmpeg/libavformat/libavformat.a $VENDOR/ffmpeg/libavcodec/libavcodec.a $VENDOR/ffmpeg/libavutil/libavutil.a $VENDOR/ffmpeg/libswresample/libswresample.a -lm -lz -llzma -lbz2 -lpthread -ldl"
-        FFMPEG_INC="-I$VENDOR/ffmpeg"
+    if [ -f "$VENDOR_FFMPEG_A" ]; then
+        # Prefer the vendored tree (coverage-built; system ffmpeg headers are
+        # not installed on every box), picking the ASAN-instrumented tree for
+        # sanitizer passes.
+        local ffmpeg_root="$VENDOR/ffmpeg"
+        if [[ "$flags" == *-fsanitize=address* ]] && [ -f "$VENDOR/ffmpeg_asan/libavformat/libavformat.a" ]; then
+            ffmpeg_root="$VENDOR/ffmpeg_asan"
+        fi
+        FFMPEG_LIBS="$ffmpeg_root/libavformat/libavformat.a $ffmpeg_root/libavcodec/libavcodec.a $ffmpeg_root/libavutil/libavutil.a $ffmpeg_root/libswresample/libswresample.a -lm -lz -llzma -lbz2 -lpthread -ldl"
+        FFMPEG_INC="-I$ffmpeg_root"
     fi
 
     local PNG_LIBS ZLIB_LIBS GZIP_LIBS PNG_INC ZLIB_INC
