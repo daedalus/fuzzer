@@ -354,34 +354,52 @@ class StatsReporter:
             return
         edge_map = None
         if f.shm_cov:
-            edge_map = f.shm_cov._seen
+            cumulative = f.shm_cov.cumulative_edges
+            edge_map_len = f.shm_cov.size
+            hit_edges = []
         elif f.ptrace_cov:
             edge_map = f.ptrace_cov.edge_map
-        if edge_map is None:
+            cumulative = 0
+            hit_edges = []
+        if edge_map is None and not f.shm_cov:
             print("[!] No coverage data available for report")
             return
 
-        hit_edges = []
-        cumulative = 0
-        for i, val in enumerate(edge_map):
-            if val:
-                hit_edges.append(i)
-                cumulative += 1
+        if f.shm_cov:
+            report = {
+                "map_size": edge_map_len,
+                "cumulative_edges": cumulative,
+                "hit_edges": hit_edges,
+                "coverage_pct": round(cumulative / edge_map_len * 100, 4) if edge_map_len else 0,
+                "exec_count": f.exec_count,
+                "corpus_size": len(f.corpus),
+            }
+            f.coverage_report.parent.mkdir(parents=True, exist_ok=True)
+            f.coverage_report.write_text(json.dumps(report, indent=2))
+            print(
+                f"\n[*] Coverage report: {f.coverage_report} "
+                f"({cumulative}/{edge_map_len} edges, {report['coverage_pct']}%)"
+            )
+        else:
+            for i, val in enumerate(edge_map):
+                if val:
+                    hit_edges.append(i)
+                    cumulative += 1
 
-        report = {
-            "map_size": len(edge_map),
-            "cumulative_edges": cumulative,
-            "hit_edges": hit_edges,
-            "coverage_pct": round(cumulative / len(edge_map) * 100, 4),
-            "exec_count": f.exec_count,
-            "corpus_size": len(f.corpus),
-        }
-        f.coverage_report.parent.mkdir(parents=True, exist_ok=True)
-        f.coverage_report.write_text(json.dumps(report, indent=2))
-        print(
-            f"\n[*] Coverage report: {f.coverage_report} "
-            f"({cumulative}/{len(edge_map)} edges, {report['coverage_pct']}%)"
-        )
+            report = {
+                "map_size": len(edge_map),
+                "cumulative_edges": cumulative,
+                "hit_edges": hit_edges,
+                "coverage_pct": round(cumulative / len(edge_map) * 100, 4),
+                "exec_count": f.exec_count,
+                "corpus_size": len(f.corpus),
+            }
+            f.coverage_report.parent.mkdir(parents=True, exist_ok=True)
+            f.coverage_report.write_text(json.dumps(report, indent=2))
+            print(
+                f"\n[*] Coverage report: {f.coverage_report} "
+                f"({cumulative}/{len(edge_map)} edges, {report['coverage_pct']}%)"
+            )
 
     def append_coverage_log(self):
         f = self.f

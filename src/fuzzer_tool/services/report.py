@@ -221,21 +221,23 @@ def _coverage_analysis(f) -> str:
     if not f.shm_cov:
         return ""
     cov = f.shm_cov
-    seen = getattr(cov, "_seen", bytearray(cov.size))
-    total_seen = sum(1 for b in seen if b)
+    total_seen = cov.cumulative_edges
     density = total_seen / cov.size * 100 if cov.size else 0
 
-    # Cluster analysis: group edges into 256-byte buckets
+    # Cluster analysis: group edges into 256-byte buckets from bitmap.
+    # Skip if the coverage object does not expose the raw bitmap.
     buckets = Counter()
-    if _HAS_NUMPY:
-        seen_arr = np.frombuffer(seen, dtype=np.uint8)
-        bucket_indices = np.flatnonzero(seen_arr) // 256
-        for b in bucket_indices:
-            buckets[b] += 1
-    else:
-        for i in range(cov.size):
-            if seen[i]:
-                buckets[i // 256] += 1
+    seen = getattr(cov, "_seen", None)
+    if seen is not None:
+        if _HAS_NUMPY:
+            seen_arr = np.frombuffer(seen, dtype=np.uint8)
+            bucket_indices = np.flatnonzero(seen_arr) // 256
+            for b in bucket_indices:
+                buckets[b] += 1
+        else:
+            for i in range(cov.size):
+                if seen[i]:
+                    buckets[i // 256] += 1
 
     lines = [
         "",
@@ -912,8 +914,8 @@ def _edge_map_analysis(f) -> str:
     if not f.shm_cov:
         return ""
     cov = f.shm_cov
-    seen = getattr(cov, "_seen", bytearray(cov.size))
-    if not any(seen):
+    seen = getattr(cov, "_seen", None)
+    if not seen or not any(seen):
         return ""
 
     # Find contiguous regions

@@ -626,3 +626,26 @@ class TestReportCrashSignatures:
         with tempfile.TemporaryDirectory() as td:
             report = generate_report(f, td, td)
         assert "--- Crash Signatures ---" not in report
+
+    def test_coverage_analysis_without_seen_attribute(self):
+        """Regression: _coverage_analysis must use cumulative_edges, not _seen."""
+        from fuzzer_tool.services.report import _coverage_analysis
+
+        f = _make_mock_fuzzer()
+        # Simulate a real ShmCoverage object that has cumulative_edges
+        # but no _seen attribute.
+        del f.shm_cov._seen
+        f.shm_cov.cumulative_edges = 3274
+        result = _coverage_analysis(f)
+        assert "Unique edges:    3274" in result
+        assert "Coverage density:" in result
+        assert "0.0000%" not in result
+
+    def test_edge_map_analysis_without_seen_attribute(self):
+        """Regression: _edge_map_analysis must not crash when _seen is absent."""
+        from fuzzer_tool.services.report import _edge_map_analysis
+
+        f = _make_mock_fuzzer()
+        del f.shm_cov._seen
+        result = _edge_map_analysis(f)
+        assert result == ""
