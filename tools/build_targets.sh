@@ -688,6 +688,16 @@ build_simple_so_targets() {
     local out_suffix=""
     [[ "$suffix" == _asan* || "$suffix" == _ubsan* ]] && out_suffix="$suffix"
 
+    # No-ASAN .so targets link the vendored libpng/zlib/ffmpeg archives,
+    # which are rebuilt with call-stack-sensitive edge hashing enabled;
+    # compile the shim-included TU under the same define and the frame
+    # pointers the context walk requires, so the linked chain shares one
+    # contract (see afl_shim.c: __AFL_CTX_SENSITIVE needs
+    # -fno-omit-frame-pointer on every TU that includes the shim).
+    if [ "$suffix" = "_nosan" ]; then
+        flags="$flags -D__AFL_CTX_SENSITIVE=1 -fno-omit-frame-pointer"
+    fi
+
     # Prefer vendored static libraries when available. The vendored .a files
     # are compiled with -fsanitize-coverage=trace-pc-guard and
     # -fno-builtin-* so their comparisons remain visible to cmplog and
