@@ -367,6 +367,87 @@ def kmer_starve(data: bytes, rng=None) -> bytes:
     return _splice(data, offset, block)
 
 
+def _pack_bits_msb(symbols: list[int]) -> bytes:
+    """Pack a sequence of 0/1 symbols one-per-*bit*, MSB-first.
+
+    ``de_bruijn_bytes`` spends a whole byte per symbol and reaches full
+    range only for its largest alphabet (k=256); for k=2 that scheme writes
+    ``0x00``/``0x80`` and leaves the low 7 bits of every byte constant, so
+    only the byte-aligned windows of the resulting stream are actually
+    exhaustive. This packs tight instead, so the guarantee holds at every
+    bit offset. ``len(symbols)`` must be a multiple of 8 for the result to
+    round-trip cleanly; every caller here draws it from ``2**n`` with
+    ``n >= 3``, so that always holds.
+    """
+    n = len(symbols)
+    out = bytearray(n // 8)
+    for i, s in enumerate(symbols):
+        if s:
+            out[i >> 3] |= 0x80 >> (i & 7)
+    return bytes(out)
+
+
+@lru_cache(maxsize=16)
+def de_bruijn_bits(n: int) -> bytes:
+    """Binary de Bruijn sequence B(2, n), packed one symbol per bit.
+
+    Every one of the ``2**n`` possible n-bit windows occurs exactly once as
+    a cyclic substring, at *every* bit offset -- not just the byte-aligned
+    ones ``de_bruijn_bytes`` guarantees. That is the property a bit-level
+    accumulator needs: an Exp-Golomb / CABAC-adjacent H.264 RBSP reader, a
+    protobuf varint's continuation-bit chain, or any hand-rolled packed
+    bitfield struct pulls its next few bits from wherever the previous field
+    left off, which is essentially never byte-aligned after the first field.
+    Packing bit-tight also buys density for free: the same n-bit window
+    space that costs ``2**n`` bytes in ``de_bruijn_bytes`` costs ``2**n``
+    *bits* here, so a buffer 8x smaller reaches the same order of coverage.
+    """
+    n = max(n, 3)  # below 3, 2**n is not byte-aligned once packed
+    return _pack_bits_msb(_de_bruijn_symbols(2, n))
+
+
+# Bit-window widths, smallest period first. All base 2 (this variant only
+# saturates a binary alphabet -- the byte-aligned k=4/16/256 shapes live in
+# de_bruijn_fill instead, since a wide alphabet packed to bit-granularity
+# stops being a *bitfield* saturator and just becomes de_bruijn_bytes again).
+_DE_BRUIJN_BIT_WORDS = (4, 6, 8, 10, 12, 14, 16, 18, 20)
+
+
+def kmer_saturate_bits(data: bytes, rng=None) -> bytes:
+    """Overwrite the buffer with a bit-packed binary de Bruijn sequence.
+
+    The bit-granularity dual of :func:`de_bruijn_fill`: same idea (hit every
+    k-mer in the far tail of the OPSO/OQSO/DNA/BITSTREAM occupancy count),
+    but built so the exhaustive coverage survives arbitrary bit offsets
+    instead of only byte-aligned ones. Byte-aligned saturation drives a
+    byte-at-a-time lexer or DFA into every reachable state; this drives a
+    *bit*-at-a-time accumulator there instead, which is the read pattern
+    bitfield-parsing code actually uses (H.264 RBSP Exp-Golomb fields,
+    protobuf varint continuation bits, packed struct bitfields) and which
+    byte-aligned saturation quietly fails to reach whenever a field's start
+    offset isn't a multiple of 8.
+
+    Args:
+        data: Input bytes.
+        rng: RandPool or stdlib random.
+
+    Returns:
+        Mutated bytes, the same length as *data*.
+    """
+    rng = _get_rng(rng)
+    if len(data) < 16:
+        return data
+    bit_budget = len(data) * 8
+    words = [n for n in _DE_BRUIJN_BIT_WORDS if (1 << n) <= bit_budget]
+    n = rng.choice(words) if words else 4
+    seq = de_bruijn_bits(n)
+    # Cyclic, same as de_bruijn_fill: tiling keeps every window boundary,
+    # including the wrap from the last bit back to the first, a legitimate
+    # de Bruijn window rather than a truncation artifact.
+    reps = -(-len(data) // len(seq))
+    return (seq * reps)[: len(data)]
+
+
 # ── 4. diehard_rank_32x32 / rank_6x8 inverse ───────────────────────────
 
 # (rows, cols, bytes per row) -- 32x32 packs one big-endian u32 per row like

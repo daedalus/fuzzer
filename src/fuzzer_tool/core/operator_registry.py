@@ -132,6 +132,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "gcd_worst_case",
         "monotone_fill",
         "kmer_saturate",
+        "kmer_saturate_bits",
         "kmer_starve",
         "rank_deficient",
         "perm_lock",

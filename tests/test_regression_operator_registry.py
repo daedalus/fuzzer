@@ -243,6 +243,7 @@ class TestRegularityOperators:
             "gcd_worst_case",
             "invariant_break",
             "kmer_saturate",
+            "kmer_saturate_bits",
             "kmer_starve",
             "lag_correlate",
             "monotone_fill",

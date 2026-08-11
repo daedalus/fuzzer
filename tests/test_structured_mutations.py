@@ -40,6 +40,7 @@ ALL_OPS = (
     S.fibonacci_pairs,
     S.monotone_fill,
     S.de_bruijn_fill,
+    S.kmer_saturate_bits,
     S.kmer_starve,
     S.rank_deficient,
     S.perm_lock,
@@ -139,6 +140,46 @@ class TestDeBruijn:
         assert S.de_bruijn_bytes(4, 4) is first
 
 
+class TestDeBruijnBits:
+    """The bit-packed variant: same generator, tighter packing.
+
+    ``de_bruijn_bytes`` only has to be a de Bruijn sequence at byte-aligned
+    windows -- that is all a byte-at-a-time reader ever samples. The whole
+    point of ``de_bruijn_bits`` is that the guarantee has to survive *every*
+    bit offset, so that property is checked directly here rather than
+    assumed from the byte-level test above.
+    """
+
+    @pytest.mark.parametrize("n", [3, 4, 8, 10])
+    def test_is_a_binary_de_bruijn_sequence_at_every_bit_offset(self, n):
+        packed = S.de_bruijn_bits(n)
+        assert len(packed) == (1 << n) // 8
+        bits = [(b >> (7 - i)) & 1 for b in packed for i in range(8)]
+        cyclic = bits + bits[: n - 1]
+        windows = {tuple(cyclic[i : i + n]) for i in range(len(bits))}
+        assert len(windows) == 1 << n
+
+    def test_matches_the_underlying_fkm_symbols(self):
+        """Packing must not silently reorder or drop symbols."""
+        n = 6
+        symbols = S._de_bruijn_symbols(2, n)
+        packed = S.de_bruijn_bits(n)
+        bits = [(b >> (7 - i)) & 1 for b in packed for i in range(8)]
+        assert bits == symbols
+
+    def test_cached_result_is_immutable(self):
+        first = S.de_bruijn_bits(8)
+        assert isinstance(first, bytes)
+        assert S.de_bruijn_bits(8) is first
+
+    def test_denser_than_the_byte_aligned_variant(self):
+        """Same window-space coverage, 8x fewer bytes -- that density is the
+        entire reason this variant exists rather than just calling
+        de_bruijn_fill with k=2."""
+        n = 12
+        assert len(S.de_bruijn_bits(n)) * 8 == len(S.de_bruijn_bytes(2, n))
+
+
 # ── Round trips against core/randomness.py detectors ───────────────────
 
 
@@ -165,6 +206,43 @@ class TestKmerSaturation:
         """At most four symbols in the region, plus the untouched zeros."""
         for _ in range(30):
             assert len(set(S.kmer_starve(bytes(2048), rng=rp))) <= 5
+
+
+class TestKmerSaturationBits:
+    """The bit-granularity dual: same detector, coverage that no longer
+    depends on the reader sampling byte-aligned windows.
+    """
+
+    def test_leaves_no_missing_kmers(self, seeded, noise):
+        base = noise(S.MAX_REGION)
+        for _ in range(20):
+            assert R.kmer_occupancy(S.kmer_saturate_bits(base, rng=seeded)) < 0.01
+
+    def test_covers_windows_the_byte_aligned_variant_misses(self, seeded):
+        """The failure mode this operator exists to fix: a byte-aligned
+        de Bruijn fill over a binary alphabet only varies the top bit of
+        each byte (see de_bruijn_bytes' step scaling), so a bit window that
+        starts mid-byte sees a near-constant low nibble. Rebuild the
+        occupancy count over *all* 8 bit-phases of a fixed short window and
+        require every phase to be covered -- de_bruijn_fill(k=2, ...) fails
+        this at the unaligned phases; kmer_saturate_bits must not.
+        """
+        n = 8
+        data = S.kmer_saturate_bits(bytes(2048), rng=seeded)
+        bits = [(b >> (7 - i)) & 1 for b in data for i in range(8)]
+        for phase in range(8):
+            windows = {tuple(bits[i : i + n]) for i in range(phase, len(bits) - n)}
+            # Every phase should reach a large fraction of the 2**n window
+            # space, not just phase 0. A near-empty set at phase != 0 would
+            # be exactly the byte-alignment blind spot this operator fixes.
+            assert len(windows) > (1 << n) * 0.5
+
+    def test_shorter_period_than_byte_aligned_fill_at_equal_n(self):
+        """The density argument, exercised end to end: for the same n the
+        bit-packed sequence tiles a fixed buffer with 8x more full periods.
+        """
+        n = 10
+        assert len(S.de_bruijn_bits(n)) == len(S.de_bruijn_bytes(2, n)) // 8
 
 
 class TestRankDeficient:

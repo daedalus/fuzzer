@@ -1891,6 +1891,11 @@ class OperatorEngine:
 
         return self._regularity(de_bruijn_fill, buf)
 
+    def _op_kmer_saturate_bits(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import kmer_saturate_bits
+
+        return self._regularity(kmer_saturate_bits, buf)
+
     def _op_kmer_starve(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations.structured import kmer_starve
 
