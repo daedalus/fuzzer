@@ -3,8 +3,10 @@
  *
  * Replaces the traditional AFL fixed-size byte bitmap with an open-addressing
  * hash table of 8-byte entries {edge_id, count}.  Each stored edge is uniquely
- * identified by its full 32-bit edge_id (prev_loc ^ cur_loc) so there are no
- * silent bucket collisions.  AFL_MAP_SIZE is the number of hash table entries
+ * identified by its full 32-bit edge_id (caller_ctx ^ prev_loc ^ cur_loc,
+ * call-stack-sensitive by default — see __afl_get_caller_ctx() below, or
+ * plain prev_loc ^ cur_loc if built with -D__AFL_CTX_SENSITIVE=0) so there
+ * are no silent bucket collisions.  AFL_MAP_SIZE is the number of hash table entries
  * (not bytes).  SHM size = AFL_MAP_SIZE * sizeof(struct __afl_entry) + 24
  * (24 bytes front header: stack_depth + pad + path_hash + edge_count).
  *
@@ -30,6 +32,14 @@
  *
  * Compile target with:
  *   gcc -O2 -g -shared -fPIC -include afl_shim.c -o target.so target.c -lpng -lz
+ *
+ * Call-stack-sensitive edge hashing (default, see __afl_get_caller_ctx()
+ * below) walks one real stack frame via __builtin_return_address(1), so
+ * add -fno-omit-frame-pointer for reliable disambiguation at -O2+ (GCC/Clang
+ * already default to it at -O0/-O1). Without an intact frame pointer this
+ * degrades to ctx==0 — same coverage as before, not corrupted coverage.
+ * Add -D__AFL_CTX_SENSITIVE=0 to opt back into the old plain
+ * prev_loc^cur_loc hash unconditionally.
  */
 #ifdef __AFL_DISTANCE_MODE
 /* dladdr/Dl_info need _GNU_SOURCE before any system header. */
@@ -119,9 +129,88 @@ void __afl_map_shm(void) {
 #endif
 }
 
+/* ── Call-stack-sensitive context ───────────────────────────────────────
+ *
+ * Plain prev_loc^cur_loc coverage is call-site-blind: a shared-library
+ * function (or any statically-shared code path — inlined helper reused
+ * across TUs, common error path, etc.) produces the IDENTICAL edge_id
+ * sequence no matter which caller reached it. Two bugs only reachable
+ * through different callers of the same library function look like one
+ * bug to the fuzzer, and the search never learns that "reach it via
+ * caller A" and "reach it via caller B" are different frontiers worth
+ * exploring separately.
+ *
+ * __afl_get_caller_ctx() recovers a cheap 1-level call-stack context: the
+ * return address of whoever called the function that CONTAINS the
+ * current edge (not the edge's own PC — that's already cur_loc).
+ *
+ * Both call sites that invoke __afl_map_edge() are real (non-inlined)
+ * functions: __sanitizer_cov_trace_pc_guard() and __sanitizer_cov_trace_pc().
+ * __afl_map_edge() itself is always_inline, so it never introduces its
+ * own stack frame — from the CPU's point of view, this code still runs
+ * inside trace_pc_guard/trace_pc's frame regardless of the C-level call
+ * boundary. Frame 0 from that vantage is trace_pc_guard's own return
+ * address, i.e. the instrumented call site within the CURRENT function —
+ * that's redundant with cur_loc, already captured by *guard. Frame 1
+ * walks one further: the return address saved in the CURRENT function's
+ * own frame, i.e. the call site of whoever called the function this edge
+ * lives in. That's the missing signal — which caller reached this shared
+ * code — and it stays constant for every edge hit during that one
+ * invocation, exactly like AFL++'s CTX instrumentation.
+ *
+ * Caveats (real, not hidden):
+ *   - Needs an intact frame-pointer chain. Coverage/ASAN builds already
+ *     default to -fno-omit-frame-pointer on the compilers this shim
+ *     targets; a target built without it degrades to ctx==0 (falls back
+ *     to plain prev_loc^cur_loc) rather than reading garbage — GCC/Clang
+ *     document return_address() as returning NULL, not undefined memory,
+ *     once the frame chain runs out.
+ *   - A tail call elides its own frame, so a tail-called function's true
+ *     "caller of my caller" becomes invisible and two distinct call
+ *     chains can collapse onto the same ctx. That under-disambiguates
+ *     (fewer distinct edges than the ideal) rather than fabricating a
+ *     false edge — the same conservative failure mode AFL++ accepts.
+ *   - Build with `-D__AFL_CTX_SENSITIVE=0` to fall back to the old
+ *     2-term hash exactly (e.g. to keep byte-for-byte corpus/edge_id
+ *     compatibility with a pre-context session).                        */
+
+#ifndef __AFL_CTX_SENSITIVE
+#define __AFL_CTX_SENSITIVE 1
+#endif
+
+#if __AFL_CTX_SENSITIVE
+__attribute__((visibility("default"), always_inline))
+static inline uint32_t __afl_get_caller_ctx(void) {
+    void *ra = __builtin_return_address(1);
+    if (!ra) return 0;
+
+    /* Fold to 32 bits via a hash, not a truncation: return addresses in
+     * the same binary share high bits (load base + text segment), so a
+     * plain cast would collapide distinct call sites into the same low
+     * 32 bits far more than a real 64-bit space would. Fibonacci-hashing
+     * style mix (splitmix64 finalizer) also spreads return addresses
+     * that are only a few bytes apart (adjacent call instructions —
+     * common for PLT stubs / thin wrapper callers) into different
+     * buckets instead of adjacent ones. ASLR/PIE base differences across
+     * runs don't matter here: we only need identical call chains WITHIN
+     * one process/session to hash identically, which they do. */
+    uint64_t p = (uint64_t)(uintptr_t)ra;
+    p ^= p >> 33;
+    p *= 0xff51afd7ed558ccdULL;
+    p ^= p >> 33;
+    p *= 0xc4ceb9fe1a85ec53ULL;
+    p ^= p >> 33;
+    return (uint32_t)p;
+}
+#endif
+
 /* ── Edge recording (open-addressing hash table) ───────────────────────
  *
- * Hash: edge_id = prev_loc ^ cur_loc
+ * Hash: edge_id = caller_ctx ^ prev_loc ^ cur_loc  (__AFL_CTX_SENSITIVE=1)
+ *       edge_id = prev_loc ^ cur_loc               (__AFL_CTX_SENSITIVE=0)
+ * caller_ctx disambiguates identical prev_loc^cur_loc sequences reached
+ * through different call chains (e.g. the same shared-library function
+ * invoked from two different call sites) — see __afl_get_caller_ctx().
  * Probe: linear probing from edge_id % map_size until we find a matching
  *        edge_id or an empty slot (edge_id == 0).                       */
 
@@ -129,7 +218,12 @@ __attribute__((visibility("default"), always_inline))
 static inline void __afl_map_edge(uint32_t cur_loc) {
     if (!__afl_area) return;
 
+#if __AFL_CTX_SENSITIVE
+    uint32_t caller_ctx = __afl_get_caller_ctx();
+    uint32_t edge_id = caller_ctx ^ __afl_prev_loc ^ cur_loc;
+#else
     uint32_t edge_id = __afl_prev_loc ^ cur_loc;
+#endif
     uint32_t pos     = edge_id % __afl_map_size;
 
     /* Linear probe: at most map_size iterations guarantees we either

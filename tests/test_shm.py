@@ -768,12 +768,179 @@ int fuzz_shm_run(const unsigned char *buf, size_t len) {
                 # Coverage detection should work via the fast-path
                 has_new, edge_ids = cov.is_new_coverage_with_edges()
                 assert has_new, "no new coverage detected via fast-path"
-                # Edge IDs are computed as prev_loc ^ cur_loc:
-                #   0x1010 ^ 0          = 0x1010
-                #   0x2020 ^ (0x1010>>1) = 0x2828
-                #   0x3030 ^ (0x2020>>1) = 0x2020
-                expected = {0x1010, 0x2828, 0x2020}
-                assert edge_ids == expected, f"got {edge_ids}, expected {expected}"
+                assert len(edge_ids) == 3, f"expected 3 distinct edges, got {edge_ids}"
+
+                # Edge IDs are call-stack-sensitive by default:
+                #   edge_id = caller_ctx ^ prev_loc ^ cur_loc
+                # All three __afl_map_edge() calls above happen inside the
+                # SAME invocation of fuzz_shm_run(), so caller_ctx is one
+                # unknown-but-constant value C for all three (same caller
+                # frame). C cancels out of any PAIRWISE xor between two
+                # edge_ids, so the pairwise-xor multiset is independent of
+                # C and still pins down the exact prev_loc^cur_loc chain:
+                #   raw0 = 0x1010 ^ 0           = 0x1010
+                #   raw1 = 0x2020 ^ (0x1010>>1) = 0x2828
+                #   raw2 = 0x3030 ^ (0x2020>>1) = 0x2020
+                import itertools
+
+                expected_pairwise = sorted(
+                    [0x1010 ^ 0x2828, 0x1010 ^ 0x2020, 0x2828 ^ 0x2020]
+                )
+                got_pairwise = sorted(
+                    a ^ b for a, b in itertools.combinations(sorted(edge_ids), 2)
+                )
+                assert got_pairwise == expected_pairwise, (
+                    f"pairwise edge_id xors {got_pairwise} != {expected_pairwise} "
+                    "— caller_ctx should be constant within one call site, so it "
+                    "should cancel out of every pairwise xor regardless of its "
+                    "actual (unknown) value"
+                )
+            finally:
+                if old_shm is not None:
+                    os.environ["__AFL_SHM_ID"] = old_shm
+                else:
+                    os.environ.pop("__AFL_SHM_ID", None)
+                if old_size is not None:
+                    os.environ["AFL_MAP_SIZE"] = old_size
+                else:
+                    os.environ.pop("AFL_MAP_SIZE", None)
+        finally:
+            cov.cleanup()
+
+    def test_shim_disambiguates_shared_function_by_caller(self, tmp_path):
+        """Call-stack-sensitive coverage: the SAME internal edge, reached
+        through the SAME prev_loc chain, in a function shared by two
+        different callers, must produce two DIFFERENT edge_ids.
+
+        This is the actual bug being fixed: plain prev_loc^cur_loc coverage
+        is call-site-blind, so a function reused across several callers
+        (the canonical shared-library case) looks identical to the fuzzer
+        regardless of which caller reached it. caller_ctx (derived from
+        __builtin_return_address(1) — the return address saved in the
+        edge's own function frame, i.e. who called it) breaks that tie.
+        """
+        import os
+        import subprocess
+
+        src = tmp_path / "test_ctx_sensitive.c"
+        so = tmp_path / "test_ctx_sensitive.so"
+
+        src.write_text("""
+#include <stdint.h>
+#include <stddef.h>
+
+/* Simulates a shared-library function (shared_edge) reached from two
+   distinct call sites (caller_a, caller_b). noinline is required: if the
+   compiler inlined shared_edge into its caller, there would be no
+   "function this edge lives in" distinct from the caller at all, and the
+   scenario this test targets wouldn't exist in the first place.
+
+   Must go through __sanitizer_cov_trace_pc_guard(), NOT __afl_map_edge()
+   directly, to match the real compiler-instrumented call chain: the
+   compiler always inserts an extra frame (the guard callback) between the
+   edge's own function and __afl_map_edge. __afl_get_caller_ctx()'s frame
+   count (return_address(1)) is calibrated for that chain — calling
+   __afl_map_edge() one frame closer, like the older sibling test above
+   does for its own (frame-count-agnostic, pairwise-xor) purpose, would
+   read the wrong frame here and defeat the disambiguation. */
+static uint32_t shared_guard = 0x1010;
+
+__attribute__((noinline, visibility("default")))
+int shared_edge(void) {
+    __sanitizer_cov_trace_pc_guard(&shared_guard);
+    return 0;
+}
+
+/* `return shared_edge();` would tail-call at -O2 (sibling-call
+   optimization): the compiler reuses caller_a's own incoming return
+   address instead of pushing a new frame, so shared_edge's caller-of-
+   caller would read back as "whoever called caller_a" — identical for
+   caller_a and caller_b, exactly defeating this test. volatile forces a
+   real call + real frame. Belt-and-suspenders with -fno-optimize-sibling-calls
+   below; either alone is documented (if fragile) compiler behavior, so
+   we don't rely on just one. */
+__attribute__((noinline, visibility("default")))
+int caller_a(void) { volatile int r = shared_edge(); return r; }
+
+__attribute__((noinline, visibility("default")))
+int caller_b(void) { volatile int r = shared_edge(); return r; }
+""")
+
+        shim_path = Path(__file__).parents[1] / "src/fuzzer_tool/adapters/afl_shim.c"
+        assert shim_path.exists(), f"shim not found: {shim_path}"
+
+        subprocess.run(
+            [
+                "gcc",
+                "-O2",
+                "-g",
+                "-fno-omit-frame-pointer",  # required for __builtin_return_address(1)
+                "-fno-optimize-sibling-calls",  # keep real frames, no tail-call collapse
+                "-shared",
+                "-fPIC",
+                "-include",
+                str(shim_path),
+                "-o",
+                str(so),
+                str(src),
+            ],
+            check=True,
+            capture_output=True,
+        )
+
+        cov = ShmCoverage()
+        try:
+            cov.reset_edge_map()
+
+            old_shm = os.environ.get("__AFL_SHM_ID")
+            old_size = os.environ.get("AFL_MAP_SIZE")
+            os.environ["__AFL_SHM_ID"] = str(cov.shm_id)
+            os.environ["AFL_MAP_SIZE"] = str(cov.num_entries)
+            try:
+                lib = ctypes.CDLL(str(so))
+                lib.caller_a.restype = ctypes.c_int
+                lib.caller_b.restype = ctypes.c_int
+                lib.caller_a.argtypes = []
+                lib.caller_b.argtypes = []
+                # getattr, not lib.__afl_map_reset — a leading double-underscore
+                # attribute inside a class body gets Python name-mangled to
+                # _TestShimEdgeCountEndToEnd__afl_map_reset, which doesn't exist.
+                reset = getattr(lib, "__afl_map_reset")
+                reset.restype = None
+
+                lib.caller_a()
+                _, edges_a = cov.is_new_coverage_with_edges()
+                assert len(edges_a) == 1, f"expected exactly 1 edge, got {edges_a}"
+
+                # Reset the shared edge table AND __afl_prev_loc (both zeroed
+                # by __afl_map_reset) so caller_b starts from the identical
+                # prev_loc=0 state caller_a did — isolating caller_ctx as the
+                # only possible source of difference between the two runs.
+                reset()
+                cov._seen_edge_ids.clear()
+
+                lib.caller_b()
+                _, edges_b = cov.is_new_coverage_with_edges()
+                assert len(edges_b) == 1, f"expected exactly 1 edge, got {edges_b}"
+
+                assert edges_a != edges_b, (
+                    f"caller_a and caller_b hit the SAME shared function at the "
+                    f"SAME prev_loc but got identical edge_id {edges_a} — "
+                    "caller_ctx is not disambiguating shared call sites"
+                )
+
+                # Same-caller reproducibility: calling caller_a again (after a
+                # reset) must reproduce the SAME edge_id — caller_ctx has to
+                # be a deterministic function of the call chain, not noise.
+                reset()
+                cov._seen_edge_ids.clear()
+                lib.caller_a()
+                _, edges_a2 = cov.is_new_coverage_with_edges()
+                assert edges_a2 == edges_a, (
+                    f"repeated call through the same call site produced a "
+                    f"different edge_id ({edges_a2} vs {edges_a}) — caller_ctx "
+                    "must be deterministic for a fixed call chain"
+                )
             finally:
                 if old_shm is not None:
                     os.environ["__AFL_SHM_ID"] = old_shm
