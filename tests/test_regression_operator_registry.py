@@ -434,3 +434,86 @@ class TestRegularityFormatGating:
             "invariant_break",
         }
         assert untouched <= available
+
+
+class TestFormatAvailableSkipsSniffOnceLive:
+    """_format_available's _check() checks the live set before re-running
+    sniff() -- docs/TODO.md flags REGISTRY.available() re-evaluating
+    data-independent predicates every exec as an open perf lever; this is a
+    first, narrower cut at the ~27 sniffer-gated ops specifically. Once a
+    format is confirmed live (the steady-state case for the rest of a real
+    run once any matching seed has been seen), later calls for that op skip
+    straight to a set lookup instead of re-running sniff() -- a struct.unpack
+    for STL, a chained byte-prefix check for others -- on every exec.
+    """
+
+    def _fuzzer(self):
+        fuzzer = _MockFuzzer()
+        fuzzer._rand_pool = RandPool(seed=1)
+        return fuzzer
+
+    def test_sniff_not_called_once_format_is_live(self):
+        from fuzzer_tool.core import operator_registry as reg_mod
+
+        fuzzer = self._fuzzer()
+        jpeg_seed = b"\xff\xd8\xff\xe0" + b"\x00" * 32
+        # First call: not yet live, sniff() must run and match.
+        assert "spectral_peak" in REGISTRY.available(fuzzer, jpeg_seed)
+        assert "spectral_peak" in fuzzer._live_formats
+
+        calls = []
+        real_sniff = reg_mod._sniff_dct_transform_coded
+
+        def spy(data):
+            calls.append(data)
+            return real_sniff(data)
+
+        reg_mod._FORMAT_SNIFFERS["spectral_peak"] = spy
+        try:
+            # Now live: sniff() must not run at all, regardless of data.
+            assert "spectral_peak" in REGISTRY.available(fuzzer, b"not jpeg at all")
+            assert calls == []
+        finally:
+            reg_mod._FORMAT_SNIFFERS["spectral_peak"] = real_sniff
+
+    def test_behavior_unchanged_from_sniff_first_order(self):
+        """Reordering must not change any outcome, only which branch does
+        the work: not-live+non-matching -> trickle; not-live+matching ->
+        live; live (any data) -> available."""
+        fuzzer = self._fuzzer()
+        jpeg_seed = b"\xff\xd8\xff\xe0" + b"\x00" * 32
+        non_matching = b"plain data, definitely not jpeg"
+
+        # Not yet live + non-matching: thin trickle, not unconditional.
+        # (Fresh fuzzer per trial, varied seeds -- reusing one fuzzer would
+        # advance the same RNG stream repeatedly, which is fine too, but a
+        # fresh instance per trial matches how _MockFuzzer is used elsewhere
+        # in this file.)
+        hits = 0
+        for seed in range(3000):
+            trial_fuzzer = _MockFuzzer()
+            trial_fuzzer._rand_pool = RandPool(seed=seed)
+            if "spectral_peak" in REGISTRY.available(trial_fuzzer, non_matching):
+                hits += 1
+        assert 0.0 < hits / 3000 < 0.10
+
+        # Not yet live + matching: available now, and becomes live.
+        assert "spectral_peak" in REGISTRY.available(fuzzer, jpeg_seed)
+        assert "spectral_peak" in fuzzer._live_formats
+
+        # Live: available regardless of what this round's data looks like.
+        assert "spectral_peak" in REGISTRY.available(fuzzer, non_matching)
+        assert "spectral_peak" in REGISTRY.available(fuzzer, jpeg_seed)
+
+    def test_live_check_precedes_sniff_for_every_gated_format(self):
+        """Same guarantee, exercised across every sniffer-gated op at once,
+        not just spectral_peak."""
+        from fuzzer_tool.core.operator_registry import _FORMAT_SNIFFERS
+
+        for op_name in _FORMAT_SNIFFERS:
+            fuzzer = self._fuzzer()
+            fuzzer._live_formats = {op_name}  # force live without a real seed
+            spec = REGISTRY._ops[op_name]
+            # sniff() would reject this trivially, but live short-circuits
+            # before sniff() is ever consulted.
+            assert spec.available(fuzzer, b"")

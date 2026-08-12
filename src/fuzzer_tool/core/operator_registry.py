@@ -346,10 +346,20 @@ def _format_available(name: str) -> Callable[[object, bytes], bool]:
             live = set()
             with contextlib.suppress(AttributeError):
                 fuzzer._live_formats = live
+        # Check live first: once a format has been confirmed live, every
+        # later call for that op is a plain set lookup instead of re-running
+        # sniff() (a struct.unpack for STL, a chained byte-prefix check for
+        # others) on every exec -- and live is the steady-state case for the
+        # rest of a real fuzzing run once any matching seed has been seen.
+        # Equivalent to the old sniff-first order: sniff() re-matching an
+        # already-live format was always a same-result no-op add() before.
+        # Docs/TODO.md's "REGISTRY.available() re-evaluates data-independent
+        # predicates per exec" lever is about all 51 gated ops broadly; this
+        # is a first, narrower cut at the ~27 sniffer-gated ones specifically.
+        if name in live:
+            return True
         if data and sniff(data):
             live.add(name)  # real file of this format seen — keep it live
-            return True
-        if name in live:
             return True
         # Never seen this format: keep a thin bootstrap trickle so a target
         # that does parse it can still be reached from a garbage corpus.
