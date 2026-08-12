@@ -17,6 +17,7 @@ on ``OperatorEngine`` — nothing else.
 
 import contextlib
 import logging
+import struct
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -242,6 +243,50 @@ def _sniff_der(d: bytes) -> bool:
     )
 
 
+# ── Format gating for the "regularity" (statistical) mutation band ───────
+#
+# Most regularity operators (kmer_saturate, birthday_collide, ...) impose a
+# distributional property that is meaningful for any byte stream, so they
+# stay unconditionally available. A few instead target a structural property
+# that only certain formats have, and burn budget building it into inputs
+# that can't use it -- see docs/TODO.md's "Per-format tuning of the
+# regularity band" item. These three get the same sniffer-gate treatment as
+# the format band above:
+#   * spectral_peak imposes a strong frequency-domain peak, relevant to
+#     DCT/DST-transform-coded data (JPEG stills, and MP4/WebM containers,
+#     which typically carry AVC/HEVC/VP8/VP9 video using the same transform);
+#   * degenerate_geometry constructs near-collinear/near-coplanar point
+#     sets, relevant to vector/mesh geometry formats (SVG, STL);
+#   * rank_deficient constructs a rank-deficient matrix, relevant to
+#     erasure-coded formats -- RAR's recovery-record feature is the only
+#     erasure-coded format this project targets (unrar_read.c).
+def _sniff_dct_transform_coded(d: bytes) -> bool:
+    return (
+        d[:2] == b"\xff\xd8"  # JPEG
+        or d[4:8] == b"ftyp"  # MP4/ISOBMFF
+        or d[:4] == b"\x1a\x45\xdf\xa3"  # WebM/Matroska
+    )
+
+
+def _sniff_mesh_or_vector_geometry(d: bytes) -> bool:
+    if d[:5] == b"<?xml" or d[:4] == b"<svg":  # SVG
+        return True
+    if d[:5] == b"solid":  # ASCII STL
+        return True
+    # Binary STL: 80-byte header, then a uint32 triangle count, then exactly
+    # count * 50 bytes of triangle data -- no magic bytes, so check the
+    # length invariant instead.
+    if len(d) >= 84:
+        (tri_count,) = struct.unpack_from("<I", d, 80)
+        if len(d) == 84 + tri_count * 50:
+            return True
+    return False
+
+
+def _sniff_rar(d: bytes) -> bool:
+    return d[:6] == b"Rar!\x1a\x07"
+
+
 _FORMAT_SNIFFERS: dict[str, Callable[[bytes], bool]] = {
     "png_chunk_mutate": lambda d: d[:8] == b"\x89PNG\r\n\x1a\n",
     "png_crc_fix": lambda d: d[:8] == b"\x89PNG\r\n\x1a\n",
@@ -280,6 +325,10 @@ _FORMAT_SNIFFERS: dict[str, Callable[[bytes], bool]] = {
     "der_tag_mutate": _sniff_der,
     "der_tlv_reorder": _sniff_der,
     "der_tlv_insert": _sniff_der,
+    # regularity band: format-shaped ops (see comment above their sniffers)
+    "spectral_peak": _sniff_dct_transform_coded,
+    "degenerate_geometry": _sniff_mesh_or_vector_geometry,
+    "rank_deficient": _sniff_rar,
 }
 
 # Fraction of selections on which a not-yet-seen format is still offered.

@@ -18,7 +18,10 @@ from fuzzer_tool.core.operator_registry import (
     REGISTRY,
     OperatorRegistry,
     OperatorSpec,
+    _sniff_dct_transform_coded,
     _sniff_der,
+    _sniff_mesh_or_vector_geometry,
+    _sniff_rar,
 )
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.services.operators import OperatorEngine
@@ -285,7 +288,14 @@ class TestRegularityOperators:
             assert callable(dispatch[name])
 
     def test_all_but_invariant_break_are_unconditional(self):
-        """Only the corpus-measuring operator is gated."""
+        """Only the corpus-measuring operator is gated on corpus state.
+
+        spectral_peak/degenerate_geometry/rank_deficient are gated on format
+        relevance (see TestRegularityFormatGating below), but _MockFuzzer has
+        no ``_rand_pool``, and the format gate is permissive when it can't
+        draw a bootstrap-trickle random number -- so they still come back
+        available here.
+        """
         fuzzer = _MockFuzzer()
         available = set(REGISTRY.available(fuzzer, b"seed"))
         assert self.REGULARITY_OPS - {"invariant_break"} <= available
@@ -349,3 +359,80 @@ class TestRegularityOperators:
         assert engine.corpus_invariants() is first
         fuzzer.corpus.append(b"\x89MAGIC\x00\x01" + os.urandom(56))
         assert engine.corpus_invariants() is not first
+
+
+class TestRegularityFormatGating:
+    """spectral_peak/degenerate_geometry/rank_deficient are format-shaped.
+
+    docs/TODO.md flagged these three as burning budget on targets that
+    can't use them: spectral_peak imposes a frequency-domain peak (relevant
+    to DCT/DST-transform-coded formats), degenerate_geometry constructs
+    near-collinear/near-coplanar point sets (relevant to vector/mesh
+    formats), rank_deficient constructs a rank-deficient matrix (relevant to
+    erasure-coded formats). Gated the same way as the format band: live once
+    a real match is seen, a thin bootstrap trickle otherwise.
+    """
+
+    def test_spectral_peak_sniffer_matches_dct_coded_formats(self):
+        assert _sniff_dct_transform_coded(b"\xff\xd8\xff\xe0rest")  # JPEG
+        assert _sniff_dct_transform_coded(b"\x00\x00\x00\x18ftypmp42")  # MP4/ISOBMFF
+        assert _sniff_dct_transform_coded(b"\x1a\x45\xdf\xa3rest")  # WebM/Matroska
+        assert not _sniff_dct_transform_coded(b"\x89PNG\r\n\x1a\n")
+        assert not _sniff_dct_transform_coded(b"plain text")
+
+    def test_degenerate_geometry_sniffer_matches_vector_mesh_formats(self):
+        assert _sniff_mesh_or_vector_geometry(b"<?xml version='1.0'?><svg/>")
+        assert _sniff_mesh_or_vector_geometry(b"<svg xmlns='...'>")
+        assert _sniff_mesh_or_vector_geometry(b"solid mymesh\nfacet normal 0 0 0")
+        binary_stl = b"\x00" * 80 + (2).to_bytes(4, "little") + b"\x00" * 100
+        assert _sniff_mesh_or_vector_geometry(binary_stl)
+        assert not _sniff_mesh_or_vector_geometry(b"\x00" * 80 + (3).to_bytes(4, "little"))
+        assert not _sniff_mesh_or_vector_geometry(b"plain text")
+        assert not _sniff_mesh_or_vector_geometry(b"")
+
+    def test_rank_deficient_sniffer_matches_rar(self):
+        assert _sniff_rar(b"Rar!\x1a\x07\x00")  # RAR4
+        assert _sniff_rar(b"Rar!\x1a\x07\x01\x00")  # RAR5
+        assert not _sniff_rar(b"PK\x03\x04")
+        assert not _sniff_rar(b"Rar!")
+
+    def _fuzzer_with_rand_pool(self):
+        fuzzer = _MockFuzzer()
+        fuzzer._rand_pool = RandPool(seed=1)
+        return fuzzer
+
+    def test_unmatched_data_gets_bootstrap_trickle_not_full_availability(self):
+        """A target with no format match should mostly (but not always) miss.
+
+        This is the actual budget fix: before gating, these three fired on
+        every selection regardless of target; now a non-matching target only
+        gets them on the same thin trickle as the format band.
+        """
+        fuzzer = self._fuzzer_with_rand_pool()
+        hits = sum(
+            1
+            for _ in range(4000)
+            if "spectral_peak" in REGISTRY.available(fuzzer, b"plain data")
+        )
+        rate = hits / 4000
+        assert 0.0 < rate < 0.10  # bootstrap trickle (~2%), not 0% or 100%
+
+    def test_matching_seed_makes_op_available_and_live(self):
+        fuzzer = self._fuzzer_with_rand_pool()
+        jpeg_seed = b"\xff\xd8\xff\xe0" + b"\x00" * 32
+        assert "spectral_peak" in REGISTRY.available(fuzzer, jpeg_seed)
+        assert "spectral_peak" in fuzzer._live_formats
+        # Once live, stays available even on a non-matching seed this round.
+        assert "spectral_peak" in REGISTRY.available(fuzzer, b"plain data")
+
+    def test_other_regularity_ops_unaffected_by_gating(self):
+        """Only the three format-shaped ops are gated; the rest stay as-is."""
+        fuzzer = self._fuzzer_with_rand_pool()
+        available = set(REGISTRY.available(fuzzer, b"plain data"))
+        untouched = TestRegularityOperators.REGULARITY_OPS - {
+            "spectral_peak",
+            "degenerate_geometry",
+            "rank_deficient",
+            "invariant_break",
+        }
+        assert untouched <= available
