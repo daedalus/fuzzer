@@ -25,3 +25,10 @@ requires_z3 = pytest.mark.skipif(
     importlib.util.find_spec("z3") is None,
     reason="z3-solver not installed (optional 'smt' extra)",
 )
+
+
+def pytest_make_parametrize_id(config, val):
+    """Shorten long byte-string parametrize IDs to keep test output readable."""
+    if isinstance(val, bytes) and len(val) > 32:
+        return f"bytes[{len(val)}]"
+    return None
