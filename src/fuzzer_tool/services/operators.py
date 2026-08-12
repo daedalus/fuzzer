@@ -1129,7 +1129,12 @@ class OperatorEngine:
         if len(buf) >= 4:
             i = rng.randint(0, len(buf) - 3)
             j = rng.randint(i + 2, len(buf) - 1)
-            size = rng.randint(1, min(j - i, 16))
+            # size must also respect len(buf) - j, or buf[j : j + size] comes
+            # back shorter than `size` and the slice assignments below change
+            # buf's length instead of swapping two equal-sized regions (this
+            # op mutates in place and returns None, so nothing downstream
+            # re-clamps it to max_len).
+            size = rng.randint(1, min(j - i, 16, len(buf) - j))
             a, b = buf[i : i + size], buf[j : j + size]
             buf[i : i + size] = b
             buf[j : j + size] = a
@@ -2035,6 +2040,14 @@ class OperatorEngine:
             n = rng.randint_list(2, 8, 1)[0]
         for _ in range(n):
             self._apply_single_mutation(buf)
+        # Defense in depth: every _apply_single_mutation branch that can grow
+        # buf is individually bounds-checked against max_len, but a single
+        # missed edge case here has bitten this codebase before (see the
+        # swap-regions out-of-bounds slice above) and havoc runs 2-16 times
+        # per call, so a per-iteration slip compounds. Every other operator
+        # in this module clamps its result to max_len; havoc should too.
+        if len(buf) > self.f.max_len:
+            del buf[self.f.max_len :]
         return buf
 
     @staticmethod
@@ -2091,7 +2104,10 @@ class OperatorEngine:
         elif op == 6 and len(buf) >= 2:  # swap regions
             i = r[1] % (len(buf) - 1)
             j = i + 1 + r[2] % (len(buf) - i - 1)
-            size = 1 + r[3] % min(j - i, 8)
+            # size must also respect len(buf) - j, or buf[j : j + size] comes
+            # back shorter than `size` and the slice assignments below change
+            # buf's length instead of swapping two equal-sized regions.
+            size = 1 + r[3] % min(j - i, 8, len(buf) - j)
             a = buf[i : i + size]
             b = buf[j : j + size]
             buf[i : i + size] = b
@@ -2539,6 +2555,16 @@ class OperatorEngine:
                     if isinstance(result, bytearray)
                     else bytearray(result[: f.max_len])
                 )
+            elif len(buf) > f.max_len:
+                # In-place handlers (result is None, the dominant convention
+                # here) are individually responsible for staying within
+                # max_len, and most do -- but a single missed bounds check
+                # in one of them (see _op_swap_regions) previously slipped
+                # straight through uncaught, since only the result-replaces-
+                # buf branch above was clamped. Enforce the invariant here
+                # too, for every in-place op, not just the ones we've
+                # already found bugs in.
+                del buf[f.max_len :]
 
         if f._frameshift.relations:
             f._frameshift.apply_to_buffer(buf)
