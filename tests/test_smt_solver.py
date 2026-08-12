@@ -447,6 +447,19 @@ class TestEdgeCases:
         s.solve_cmplog_pair(op_a, op_b)  # cached
         assert s.queries_attempted == initial
 
+    def test_concolic_mode_increments_attempted(self):
+        """Concolic per-pair accumulation increments queries_attempted."""
+        s = Z3Solver(mod_solving_mode="concolic")
+        assert s.queries_attempted == 0
+        for i in range(3):
+            op_a = bytes([i, i + 1])
+            op_b = bytes([i + 10, i + 11])
+            s.solve_cmplog_pair(op_a, op_b)
+        assert s.queries_attempted == 3
+        assert s.batch_attempted == 3
+        assert s.queries_solved == 0
+        assert s.queries_failed == 0
+
 
 # ═══════════════════════════════════════════════════════════════════
 # 8. Modulo solving — heuristic mode

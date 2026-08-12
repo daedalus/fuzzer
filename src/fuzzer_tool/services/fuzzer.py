@@ -2537,9 +2537,13 @@ class Fuzzer:
             ):
                 concolic_result = self._smt_solver.solve_concolic(mutated)
                 if concolic_result is not None and concolic_result != mutated:
+                    self._smt_solver.queries_solved += 1
+                    self._smt_solver.batch_solved += 1
                     # Inject the concolic solution as a replacement mutation
                     matches.append((0, mutated, concolic_result))
                     smt_found = True
+                else:
+                    self._smt_solver.queries_failed += 1
 
             # Path negation: solve for an input that takes the opposite side
             # of a branch this run actually took. Unlike the concolic block

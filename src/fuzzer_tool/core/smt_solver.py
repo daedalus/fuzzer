@@ -244,6 +244,8 @@ class Z3Solver:
             for width in (8, 4, 2, 1):
                 if len(op_a) == width and len(op_b) == width:
                     self.concolic_trace.add_entry(op_a, op_b, width, pc)
+                    self.queries_attempted += 1
+                    self.batch_attempted += 1
                     break
             return None  # concolic mode returns None per-pair; batch solve later
 
