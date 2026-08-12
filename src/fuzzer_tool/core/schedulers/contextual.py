@@ -29,6 +29,8 @@ With d ~= 14 and ~106 operators that's a few hundred KB of state total.
 
 import math
 
+import numpy as np
+
 
 class ContextualLinUCBScheduler:
     """LinUCB contextual bandit: one ridge regressor per operator.
@@ -51,8 +53,8 @@ class ContextualLinUCBScheduler:
         self.alpha = alpha
         self.lambda_reg = lambda_reg
 
-        self._A_inv: dict[str, list[list[float]]] = {}
-        self._b: dict[str, list[float]] = {}
+        self._A_inv: dict[str, np.ndarray] = {}
+        self._b: dict[str, np.ndarray] = {}
         self._pulls: dict[str, int] = {}
         self._total_pulls = 0
 
@@ -60,28 +62,24 @@ class ContextualLinUCBScheduler:
         """Register an operator: A_inv <- (1/lambda_reg) I, b <- 0."""
         if name not in self._A_inv:
             inv_lambda = 1.0 / self.lambda_reg
-            self._A_inv[name] = [
-                [inv_lambda if i == j else 0.0 for j in range(self.dim)] for i in range(self.dim)
-            ]
-            self._b[name] = [0.0] * self.dim
+            self._A_inv[name] = np.eye(self.dim) * inv_lambda
+            self._b[name] = np.zeros(self.dim)
             self._pulls[name] = 0
 
-    def _matvec(self, matrix: list[list[float]], vec: list[float]) -> list[float]:
-        return [sum(row[j] * vec[j] for j in range(self.dim)) for row in matrix]
+    def _matvec(self, matrix: np.ndarray, vec: np.ndarray) -> np.ndarray:
+        return matrix @ vec
 
-    def _dot(self, u: list[float], v: list[float]) -> float:
-        return sum(a * b for a, b in zip(u, v, strict=True))
-
-    def score(self, name: str, x: list[float]) -> float:
+    def score(self, name: str, x: list[float] | np.ndarray) -> float:
         """UCB score for one arm given its context vector: theta.x + alpha*sqrt(x^T A^-1 x)."""
         self.init_arm(name)
         a_inv = self._A_inv[name]
         b = self._b[name]
-        ainv_x = self._matvec(a_inv, x)
+        x_arr = np.asarray(x, dtype=float)
+        ainv_x = a_inv @ x_arr
         # theta.x == (A_inv b).x == b.(A_inv x) since A_inv is symmetric --
         # avoids materializing theta separately.
-        mean = self._dot(b, ainv_x)
-        variance = self._dot(x, ainv_x)
+        mean = b @ ainv_x
+        variance = x_arr @ ainv_x
         conf = math.sqrt(variance) if variance > 0.0 else 0.0
         return mean + self.alpha * conf
 
@@ -100,17 +98,23 @@ class ContextualLinUCBScheduler:
         if len(ops) == 1:
             return ops[0]
 
-        best_op = ops[0]
-        best_score = float("-inf")
         for op in ops:
-            x = context(op) if callable(context) else context
-            s = self.score(op, x)
-            if s > best_score:
-                best_score = s
-                best_op = op
-        return best_op
+            self.init_arm(op)
 
-    def record(self, name: str, x: list[float], reward: float) -> None:
+        xs = [context(op) for op in ops] if callable(context) else [context] * len(ops)
+
+        x_arr = np.asarray(xs, dtype=float)
+        A_stack = np.stack([self._A_inv[op] for op in ops])
+        b_stack = np.stack([self._b[op] for op in ops])
+
+        ainv_x = np.einsum("nij,nj->ni", A_stack, x_arr)
+        mean = np.einsum("nd,nd->n", b_stack, ainv_x)
+        variance = np.einsum("nd,nd->n", x_arr, ainv_x)
+        scores = mean + self.alpha * np.sqrt(variance)
+        best_idx = int(np.argmax(scores))
+        return ops[best_idx]
+
+    def record(self, name: str, x: list[float] | np.ndarray, reward: float) -> None:
         """Update arm *name*'s ridge regressor with observed (x, reward).
 
         Uses the Sherman-Morrison identity so no matrix is ever inverted:
@@ -118,23 +122,16 @@ class ContextualLinUCBScheduler:
         """
         self.init_arm(name)
         a_inv = self._A_inv[name]
-        ainv_x = self._matvec(a_inv, x)
-        denom = 1.0 + self._dot(x, ainv_x)
+        x_arr = np.asarray(x, dtype=float)
+        ainv_x = a_inv @ x_arr
+        denom = 1.0 + x_arr @ ainv_x
         if denom <= 0.0:
             # Should not happen (A_inv is PSD), but guard against numerical
             # drift over a long run rather than injecting a NaN into state.
             denom = 1e-9
-        for i in range(self.dim):
-            ai = ainv_x[i]
-            if ai == 0.0:
-                continue
-            row = a_inv[i]
-            for j in range(self.dim):
-                row[j] -= ai * ainv_x[j] / denom
+        a_inv -= np.outer(ainv_x, ainv_x) / denom
 
-        b = self._b[name]
-        for i in range(self.dim):
-            b[i] += reward * x[i]
+        self._b[name] += reward * x_arr
 
         self._pulls[name] = self._pulls.get(name, 0) + 1
         self._total_pulls += 1

@@ -7,6 +7,8 @@ the _op_time_ema-derived cost feature to the shared seed context.
 
 import math
 
+import numpy as np
+
 from fuzzer_tool.core.schedulers.contextual import ContextualLinUCBScheduler
 from fuzzer_tool.services.operators import CONTEXT_DIM, OperatorEngine
 
@@ -16,12 +18,15 @@ class TestContextualLinUCBScheduler:
         sched = ContextualLinUCBScheduler(dim=3, lambda_reg=2.0)
         sched.init_arm("bit_flip")
         inv_lambda = 1.0 / 2.0
-        assert sched._A_inv["bit_flip"] == [
-            [inv_lambda, 0.0, 0.0],
-            [0.0, inv_lambda, 0.0],
-            [0.0, 0.0, inv_lambda],
-        ]
-        assert sched._b["bit_flip"] == [0.0, 0.0, 0.0]
+        assert np.allclose(
+            sched._A_inv["bit_flip"],
+            [
+                [inv_lambda, 0.0, 0.0],
+                [0.0, inv_lambda, 0.0],
+                [0.0, 0.0, inv_lambda],
+            ],
+        )
+        assert np.allclose(sched._b["bit_flip"], [0.0, 0.0, 0.0])
         assert sched._pulls["bit_flip"] == 0
 
     def test_init_arm_idempotent(self):
@@ -114,6 +119,31 @@ class TestContextualLinUCBScheduler:
         assert stats["contextual_pulls"] == 2
         assert stats["operators_tracked"] == 2
         assert stats["dim"] == 3
+
+    def test_select_op_batched_matches_per_arm_score(self):
+        sched = ContextualLinUCBScheduler(dim=4, alpha=0.5, lambda_reg=1.0)
+        ops = ["a", "b", "c"]
+        for op in ops:
+            sched.init_arm(op)
+        # Give arms different histories so scores diverge.
+        for _ in range(10):
+            sched.record("a", [1.0, 0.0, 0.0, 0.0], reward=1.0)
+            sched.record("b", [0.0, 1.0, 0.0, 0.0], reward=0.5)
+            sched.record("c", [0.0, 0.0, 1.0, 0.0], reward=0.0)
+        x = [0.5, 0.5, 0.5, 0.5]
+        expected = max(ops, key=lambda op: sched.score(op, x))
+        assert sched.select_op(ops, x) == expected
+
+    def test_select_op_batched_callable_context_matches_per_arm(self):
+        sched = ContextualLinUCBScheduler(dim=3, alpha=0.0, lambda_reg=1.0)
+        ops = ["x", "y"]
+        contexts = {"x": [1.0, 0.0, 0.0], "y": [0.0, 1.0, 0.0]}
+        for op in ops:
+            sched.init_arm(op)
+        sched.record("x", contexts["x"], reward=1.0)
+        sched.record("y", contexts["y"], reward=0.0)
+        expected = max(ops, key=lambda op: sched.score(op, contexts[op]))
+        assert sched.select_op(ops, lambda op: contexts[op]) == expected
 
 
 def _minimal_fuzzer_stub():
