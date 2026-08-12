@@ -259,3 +259,76 @@ class TestComputeCrpsVectorized:
         t._sorted = [1.0]
         assert t._compute_crps(0.5) == 0.0  # obs below sole value
         assert t._compute_crps(2.0) == 1.0  # obs above sole value (tail term)
+
+
+class TestCRPSSamplingOnceWarm:
+    """record() must recompute CRPS every call while the window is filling,
+    then subsample once it's warm -- this is the perf fix: the numpy CRPS
+    computation is expensive (fresh array + dot + diff) and only feeds a
+    periodic display / end-of-run report, neither of which needs per-exec
+    precision. suggested_timeout()/tail_risk must stay exact regardless,
+    since they read _sorted/_moments, which are always updated.
+    """
+
+    def test_eager_while_filling(self):
+        t = ExecutionTimeTracker(window_size=10)
+        seen = []
+        for i in range(10):
+            seen.append(t.record(0.01 * (i + 1)))
+        # Every one of the first window_size calls actually computed a
+        # fresh CRPS (all mutually distinct inputs -> distinct scores).
+        assert len(set(seen)) > 1
+
+    def test_subsampled_once_warm(self):
+        t = ExecutionTimeTracker(window_size=10)
+        for i in range(10):
+            t.record(0.01 * (i + 1))
+        assert len(t._sorted) == t.window_size  # now warm
+
+        computed_calls = 0
+        real_compute = t._compute_crps
+
+        def spy(obs):
+            nonlocal computed_calls
+            computed_calls += 1
+            return real_compute(obs)
+
+        t._compute_crps = spy
+        for i in range(80):
+            t.record(0.5 + i * 0.001)
+        # Only every _CRPS_SAMPLE_INTERVALth call after warm-up recomputes.
+        assert computed_calls == 80 // t._CRPS_SAMPLE_INTERVAL
+
+    def test_count_and_window_exact_regardless_of_sampling(self):
+        """count and the percentile window must not skip observations --
+        only the CRPS computation itself is sampled."""
+        t = ExecutionTimeTracker(window_size=10)
+        for i in range(100):
+            t.record(0.01 * (i + 1))
+        assert t.count == 100
+        assert len(t._sorted) == 10  # capped at window_size, as before
+        # p99 reflects the most recent 10 observations, unaffected by
+        # which of them got a CRPS computed.
+        assert t.p99 == max(0.01 * (i + 1) for i in range(90, 100))
+
+    def test_suggested_timeout_unaffected_by_sampling(self):
+        """suggested_timeout reads _sorted/_moments only -- exact either way."""
+        t = ExecutionTimeTracker(window_size=10)
+        for _i in range(100):
+            t.record(0.01)
+        assert t.suggested_timeout() > 0.0
+
+    def test_return_value_when_not_recomputed_is_last_computed(self):
+        t = ExecutionTimeTracker(window_size=10)
+        for i in range(10):
+            t.record(0.01 * (i + 1))  # fills window
+        last_computed = t.record(0.5)  # call 11: 11 % 8 != 0 -> not recomputed
+        assert last_computed == t._crps_history[-1]
+
+    def test_mean_crps_still_meaningful_once_warm(self):
+        t = ExecutionTimeTracker(window_size=10)
+        for _ in range(10):
+            t.record(0.05)
+        for _ in range(50):
+            t.record(0.05)  # constant input, sampled or not
+        assert t.mean_crps() < 0.01

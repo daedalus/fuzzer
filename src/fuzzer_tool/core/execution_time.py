@@ -48,22 +48,47 @@ class ExecutionTimeTracker:
         # n -> arange(1, n+1)/n, reused across executions (see _compute_crps)
         self._crps_ramp_cache: dict = {}
 
+    # _compute_crps rebuilds a numpy array from self._sorted and runs a
+    # dot + diff over it every call -- measured at ~2% of total fuzz-loop
+    # wall-clock on a cProfile run against nop_target (called once per
+    # exec, on the hottest path in the process). Its only consumers are
+    # mean_crps()/crps_trend() (a periodic stats-line display) and the
+    # end-of-run report, neither of which needs per-exec precision -- a
+    # moving average over samples is statistically equivalent to one over
+    # every observation, and less autocorrelated besides. suggested_timeout()
+    # and tail_risk don't touch it at all (they read _sorted/_moments,
+    # updated unconditionally below).
+    #
+    # Compute eagerly while the window is still filling (the array is
+    # cheap at low n, and there isn't a settled distribution to subsample
+    # from yet); once it reaches window_size -- and the array is at its
+    # full, most expensive size -- switch to every Nth observation. Same
+    # idiom as collect_tokens()'s pool-saturation sampling in fuzzer.py.
+    _CRPS_SAMPLE_INTERVAL = 8
+
     def record(self, elapsed: float) -> float:
-        """Record an execution time and return the CRPS score.
+        """Record an execution time and return a CRPS score.
 
         The CRPS score measures how well the existing empirical CDF
-        predicted this new observation. Lower = better calibrated.
+        predicted this new observation. Lower = better calibrated. Once
+        the window has filled, the score is recomputed only every
+        ``_CRPS_SAMPLE_INTERVAL``th call (see the class-level comment
+        above); other calls return the most recently computed score.
 
         Args:
             elapsed: Wall-clock seconds for this execution.
 
         Returns:
-            CRPS score for this observation against the running forecast.
+            CRPS score against the running forecast (sampled once warm).
         """
-        crps = self._compute_crps(elapsed)
-        self._crps_history.append(crps)
-        self._crps_sum += crps
         self._total_observations += 1
+        warm = len(self._sorted) >= self.window_size
+        if not warm or self._total_observations % self._CRPS_SAMPLE_INTERVAL == 0:
+            crps = self._compute_crps(elapsed)
+            self._crps_history.append(crps)
+            self._crps_sum += crps
+        else:
+            crps = self._crps_history[-1] if self._crps_history else 0.0
 
         self._times.append(elapsed)
         self._moments.update(elapsed)
