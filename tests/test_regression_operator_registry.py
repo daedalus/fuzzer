@@ -410,9 +410,7 @@ class TestRegularityFormatGating:
         """
         fuzzer = self._fuzzer_with_rand_pool()
         hits = sum(
-            1
-            for _ in range(4000)
-            if "spectral_peak" in REGISTRY.available(fuzzer, b"plain data")
+            1 for _ in range(4000) if "spectral_peak" in REGISTRY.available(fuzzer, b"plain data")
         )
         rate = hits / 4000
         assert 0.0 < rate < 0.10  # bootstrap trickle (~2%), not 0% or 100%
