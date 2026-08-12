@@ -25,6 +25,7 @@ env/
 # Testing
 .pytest_cache/
 .coverage
+*.lprof
 htmlcov/
 .mypy_cache/
 
