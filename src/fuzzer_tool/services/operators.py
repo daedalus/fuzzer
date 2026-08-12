@@ -821,26 +821,45 @@ class OperatorEngine:
             buf[pos : pos + 4] = crc32(bytes(buf[:pos])).to_bytes(4, "big")
 
     def _op_crc_learn(self, buf, _byte_idx, _data):
-        """Patch checksum fields using a polynomial recovered via BM/GCD."""
+        """Patch checksum fields using a recovered checksum model.
+
+        The format-aware patchers stay on the GF(2) polynomial: PNG chunk
+        CRCs and ZIP CRCs are CRC-32 *by specification*, so a recovered
+        integer model (typically the Adler-32 living one layer below, inside
+        the IDAT zlib stream) must never be written into those fields. An
+        integer model drives only the generic trailing-field patch.
+        """
         if not buf or len(buf) < 4:
             return
         learner = getattr(self.f, "checksum_learner", None)
         if not learner:
             return
-        poly = learner.ensure_poly()
-        if poly is None:
-            return
         rng = self.f._rand_pool
 
-        # Try format-aware patching first
-        patched = self._try_format_crc_patch(buf, learner, rng)
-        if patched:
-            buf[:] = patched
+        if learner.ensure_poly() is not None:
+            # Try format-aware patching first
+            patched = self._try_format_crc_patch(buf, learner, rng)
+            if patched:
+                buf[:] = patched
+                return
+
+            # Fallback: patch the last 4 bytes (common checksum placement)
+            checksum = learner.compute_checksum(bytes(buf[:-4]))
+            buf[-4:] = checksum.to_bytes(4, "big")
             return
 
-        # Fallback: patch the last 4 bytes (common checksum placement)
-        checksum = learner.compute_checksum(bytes(buf[:-4]))
-        buf[-4:] = checksum.to_bytes(4, "big")
+        model = learner.ensure_int_model()
+        if model is None:
+            return
+        # Width comes from the model: a Fletcher-16 field is 2 bytes, and
+        # zero-padding it into 4 would clobber two bytes of real data.
+        nbytes = model.nbytes
+        if len(buf) <= nbytes:
+            return
+        checksum = learner.compute_int_checksum(bytes(buf[:-nbytes]))
+        if checksum is None:
+            return
+        buf[-nbytes:] = checksum.to_bytes(nbytes, "big")
 
     # --- helpers for _op_crc_learn ---------------------------------------
 

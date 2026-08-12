@@ -52,6 +52,15 @@
 - [ ] **`fuzzer-tool-asan` wrapper** — CLI wrapper that sets `LD_PRELOAD=libasan.so.8` and exec's into the real fuzzer (mentioned in ASAN-LIMITATION.md but not yet generated as a installable entry point)
 - [ ] **Persist `invocation` into `state.json`** — `fuzzer.invocation` (sys.argv, captured in `cmd_fuzz` for the report exec lines) is not saved on shutdown; a `--resume` run therefore reports only the resumed command, not the original one. Saving it into `state.json` would let reports on resumed sessions carry the original invocation.
 
+## Integer-Modulus Checksum Recovery (follow-ons)
+- [x] Recover Adler-32 / Fletcher / `sum(d[i]*k^i) mod N` checksums (`core/int_checksum.py`, `core/int_checksum_solver.py`) — GCD-of-differences over Z; exact, no extra dependency.
+- [x] Outlier-tolerant modulus recovery (`_consensus_candidates`) — single-chain GCD scored 0/200 with one corrupt pair, consensus scores 199-200/200.
+- [ ] **Weighted-sum multiplier sweep is a fixed candidate list** (`_MULTIPLIER_CANDIDATES`) — a target using an unlisted multiplier is missed entirely. Recovering `k` properly means root-finding mod `N`; Coppersmith's bound (`N^(1/deg)`) is useless at realistic data lengths, so the list is the pragmatic answer for now. Consider deriving candidates from cmplog constants instead of hardcoding.
+- [ ] **`_extract_zlib_adler_pairs` only fires on valid streams** — `decompressobj` raises on an Adler mismatch, so mutated PNGs yield no pair. Pairs therefore come only from corpus seeds and successful recompressions. Reading the trailer without validating would widen the source but needs a raw-deflate path.
+- [ ] **Fletcher-32 word endianness is swept, not detected** — both LE and BE are tried and verification arbitrates. Fine, but it doubles the general-path work for that family.
+- [ ] **No format-aware patcher for integer checksums** — `_op_crc_learn` patches only the generic trailing field when an integer model is active. A real zlib/IDAT Adler patcher belongs in the `recompress_zlib` mutator, not here.
+- [ ] **`field_constraints.py` bounded-integer pre-pass** (handover §1, deprioritized) — z3 is already fast on these small bitwidth systems, so the win is thin. Revisit only if the integer-checksum pattern proves out.
+
 ## Pending Bugs
 - [x] `parse_protobuf` crashes on deeply nested group fields (>16 levels) — `_parse_fields` returned bare `None` at the depth limit instead of `(None, [])`, causing `TypeError: cannot unpack non-iterable NoneType`
 - [x] Ptrace breakpoint handler read `rsp` from `user_regs_struct` offset 176 (`gs_base`, 0 for the main thread) instead of 152 — every function-entry breakpoint skipped its first instruction, corrupting the tracee (spurious stack-address SIGSEGVs, zero edge coverage)

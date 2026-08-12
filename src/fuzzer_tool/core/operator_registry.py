@@ -402,9 +402,11 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     "redqueen": _redqueen_available,
     # regularity op that measures the corpus rather than the seed
     "invariant_break": _has_corpus_samples,
-    # learned checksum polynomial (gated on recovered polynomial)
+    # learned checksum model (gated on a recovered GF(2) polynomial OR a
+    # recovered integer-modulus model -- an Adler/Fletcher target would
+    # otherwise recover a model the operator could never use)
     "crc_learn": lambda f, _d: bool(
-        getattr(f, "checksum_learner", None) and f.checksum_learner.ensure_poly() is not None
+        getattr(f, "checksum_learner", None) and f.checksum_learner.ensure_model()
     ),
     # flag-gated base op
     "regex_bomb": lambda f, _d: bool(getattr(f, "enable_regex_bomb", False)),
