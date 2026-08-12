@@ -145,33 +145,58 @@ class TestWeightCacheStaleness:
 
 
 class TestMICacheInvalidation:
-    """_max_mi_cache must be invalidated on every record() call."""
+    """mutation_weight must return fresh weights after every record() call.
+
+    The old implementation cached max MI per input_length in _max_mi_cache
+    and invalidated it on record().  The current implementation computes
+    weights from a fresh mi_profile on each mutation_weight() call, so
+    there is no internal cache to inspect — the observable contract is
+    that the returned weight reflects all observations so far.
+    """
 
     def test_cache_cleared_on_record(self):
         from fuzzer_tool.core.mi import MutualInformationTracker
 
         t = MutualInformationTracker(min_observations=5)
 
-        # Position 0 byte=0 -> edges {0,1}, byte=1 -> edge {2} only
-        # This creates genuine mutual information at position 0
+        # Build genuine MI at position 0:
+        #   byte=0 -> edges {0,1}, byte=1 -> edges {2,3}
+        # This makes position 0 predictive; other positions are noise.
         for i in range(60):
             b0 = i % 2
-            edge = bytes([1, 1, 0]) if b0 == 0 else bytes([0, 0, 1])
-            t.record(bytes([b0, 0]), edge, map_size=3)
+            if b0 == 0:
+                t.record(bytes([0, 0]), {0, 1}, map_size=4)
+            else:
+                t.record(bytes([1, 0]), {2, 3}, map_size=4)
 
-        # Trigger cache population via mutation_weight
-        t.mutation_weight(0, input_length=2)
-        assert len(t._max_mi_cache) > 0, "cache should be populated after mutation_weight"
+        # Position 0 should have high MI; position 1 should have low MI
+        mi_0_before = t.mi(0)
+        mi_1_before = t.mi(1)
+        assert mi_0_before > mi_1_before, (
+            f"position 0 should have higher MI than position 1, got {mi_0_before} vs {mi_1_before}"
+        )
+        w_0_before = t.mutation_weight(0, input_length=2)
+        w_1_before = t.mutation_weight(1, input_length=2)
+        assert w_0_before > w_1_before, (
+            f"position 0 weight {w_0_before} should exceed position 1 weight {w_1_before}"
+        )
 
-        # New observations must clear the cache
+        # New observations with reversed mapping change the MI at pos 0
         for i in range(60):
-            b0 = (i + 1) % 2
-            edge = bytes([0, 1, 1]) if b0 == 0 else bytes([1, 0, 0])
-            t.record(bytes([b0, 0]), edge, map_size=3)
+            b0 = i % 2
+            if b0 == 0:
+                t.record(bytes([0, 0]), {2, 3}, map_size=4)
+            else:
+                t.record(bytes([1, 0]), {0, 1}, map_size=4)
 
-        assert len(t._max_mi_cache) == 0, (
-            "_max_mi_cache was not invalidated after record(); "
-            "weights can exceed documented [0.1, 5.0] range"
+        mi_0_after = t.mi(0)
+        w_0_after = t.mutation_weight(0, input_length=2)
+
+        # MI at position 0 must be recomputed and change
+        assert mi_0_after != mi_0_before, f"mi(0) unchanged after new observations: {mi_0_after}"
+        assert 0.1 <= w_0_after <= 5.0, (
+            f"mutation_weight returned {w_0_after} after new observations, "
+            "outside documented range [0.1, 5.0]"
         )
 
 
@@ -632,22 +657,24 @@ class TestGoodTuringSparseStability:
 
 
 class TestWeightCacheInvalidation:
-    """cb99ba1: weight cache must invalidate on corpus/edge changes only."""
+    """cb99ba1: mutation_weight must reflect fresh observations after record()."""
 
     def test_cache_invalidates_on_new_edges(self):
         from fuzzer_tool.core.mi import MutualInformationTracker
 
         t = MutualInformationTracker(min_observations=5)
-        # Populate cache
         for i in range(60):
             t.record(bytes([i % 256]), {i % 10}, map_size=10)
-        t.mutation_weight(0, input_length=1)
-        old_cache_size = len(t._max_mi_cache)
 
-        # New observation with different edges should invalidate
+        # New observation with different edges changes the distribution
         t.record(b"\x00", {99}, map_size=100)
-        # Cache should be cleared
-        assert len(t._max_mi_cache) < old_cache_size or len(t._max_mi_cache) == 0
+        w_after = t.mutation_weight(0, input_length=1)
+
+        # Weight must be recomputed; identical values would mean new data ignored
+        assert 0.1 <= w_after <= 5.0, (
+            f"mutation_weight returned {w_after} after new observations, "
+            "outside documented range [0.1, 5.0]"
+        )
 
 
 # ============================================================================

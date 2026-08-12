@@ -54,8 +54,6 @@ class MutualInformationTracker:
     def __init__(self, max_positions: int = 4096, min_observations: int = 50):
         self.max_positions = max_positions
         self.min_observations = min_observations
-        self._max_mi_cache: dict[int, float] = {}  # input_length -> max_mi
-        self._max_mi_cache_limit = 500  # bound cache size
         self._total_edges: int | None = None  # cached sum(edge_marginal)
         # Zero-copy ndarray view over edge_marginal for vectorized sums;
         # rebuilt when the array grows (extend() may realloc) or is reloaded.
@@ -89,7 +87,6 @@ class MutualInformationTracker:
         """
         self.total_observations += 1
         self._total_edges = None
-        self._invalidate_max_mi_cache()
         # The C shim emits full 32-bit edge hashes (caller_ctx ^ prev_loc ^
         # cur_loc) with collisions resolved by SHM linear probing, so edge IDs
         # are opaque hashes, not dense indices.  edge_marginal is a dense array
@@ -173,7 +170,6 @@ class MutualInformationTracker:
         self.byte_marginal.pop(victim, None)
         self.position_counts.pop(victim, None)
         self._total_edges = None
-        self._invalidate_max_mi_cache()
         if hasattr(self, "_wp_sorted_pos"):
             self._wp_sorted_pos = None
 
@@ -249,11 +245,9 @@ class MutualInformationTracker:
         sorted_pos = sorted(profile.items(), key=lambda x: x[1], reverse=True)
         return sorted_pos[:k]
 
-    def _invalidate_max_mi_cache(self):
-        """Invalidate max_mi cache when new observations are recorded."""
-        self._max_mi_cache.clear()
-
-    def mutation_weight(self, position: int, input_length: int) -> float:
+    def mutation_weight(
+        self, position: int, input_length: int, mi_profile: dict[int, float] | None = None
+    ) -> float:
         """Compute a mutation weight for a position based on MI.
 
         Returns a weight in [0.1, 5.0]:
@@ -262,21 +256,22 @@ class MutualInformationTracker:
 
         Normalizes MI to [0, 1] using the maximum observed MI across positions,
         then maps to the weight range.
+
+        Args:
+            position: Byte position to weight.
+            input_length: Only consider positions < input_length.
+            mi_profile: Optional precomputed ``{position: mi}`` mapping.  When
+                supplied the caller avoids redundant ``mi()`` work; when omitted
+                the profile is computed on demand.
         """
-        mi_val = self.mi(position)
+        if mi_profile is None:
+            mi_profile = self.mi_profile(input_length)
+
+        mi_val = mi_profile.get(position, 0.0)
         if mi_val <= 0:
             return 0.1
 
-        # Find max MI across observed positions for normalization (cached per input_length)
-        if input_length not in self._max_mi_cache:
-            candidates = [self.mi(pos) for pos in self.position_counts if pos < input_length]
-            self._max_mi_cache[input_length] = max(candidates) if candidates else 0.0
-            # Bound cache: prune oldest half when exceeding limit
-            if len(self._max_mi_cache) > self._max_mi_cache_limit:
-                keys = list(self._max_mi_cache)[: len(self._max_mi_cache) // 2]
-                for k in keys:
-                    del self._max_mi_cache[k]
-        max_mi = self._max_mi_cache[input_length]
+        max_mi = max(mi_profile.values()) if mi_profile else 0.0
         if max_mi <= 0:
             return 1.0
 
@@ -300,11 +295,16 @@ class MutualInformationTracker:
             self._wp_total = 0.0
 
         if self._wp_sorted_pos is None:
+            # Compute MI profile once instead of calling mi() twice per
+            # position via mutation_weight()'s old max-scan path.
+            mi_profile = self.mi_profile(min(input_length, self.max_positions))
             # Build sorted (position, weight) pairs and cumulative sum
             pairs = []
             for pos in self.position_counts:
-                if self.position_counts[pos] >= self.min_observations:
-                    pairs.append((pos, self.mutation_weight(pos, self.max_positions)))
+                if self.position_counts[pos] >= self.min_observations and pos < input_length:
+                    pairs.append(
+                        (pos, self.mutation_weight(pos, input_length, mi_profile=mi_profile))
+                    )
             if not pairs:
                 self._wp_sorted_pos = []
                 self._wp_cum_weights = []
