@@ -503,13 +503,31 @@ class StatsReporter:
 
     def _print_stats_smt_str(self, f) -> str:
         """Format SMT solver string."""
-        if f._smt_solver is None or f._smt_solver.queries_attempted <= 0:
+        try:
+            solver = object.__getattribute__(f, "_smt_solver")
+        except AttributeError:
             return ""
-        s = f._smt_solver
-        inc_pct = s.batch_solved / max(s.batch_attempted, 1) * 100
-        tot_pct = s.queries_solved / max(s.queries_attempted, 1) * 100
-        cache_str = f" ch:{s.cache_hits}" if s.cache_hits else ""
-        return f" | smt: {s.batch_solved}/{s.batch_attempted} ({inc_pct:.0f}%) tot: {s.queries_solved}/{s.queries_attempted} ({tot_pct:.0f}%){cache_str}"
+        if solver is None:
+            return ""
+        s = solver
+        if not hasattr(s, "queries_attempted"):
+            return " | smt: enabled"
+        try:
+            batch_attempted = int(s.batch_attempted)
+            batch_solved = int(s.batch_solved)
+            queries_attempted = int(s.queries_attempted)
+            queries_solved = int(s.queries_solved)
+            cache_hits = int(s.cache_hits)
+        except (TypeError, ValueError):
+            return " | smt: enabled"
+        inc_pct = batch_solved / max(batch_attempted, 1) * 100
+        tot_pct = queries_solved / max(queries_attempted, 1) * 100
+        cache_str = f" ch:{cache_hits}" if cache_hits else ""
+        return (
+            f" | smt: {batch_solved}/{batch_attempted} ({inc_pct:.0f}%) "
+            f"tot: {queries_solved}/{queries_attempted} ({tot_pct:.0f}%)"
+            f"{cache_str}"
+        )
 
     def _print_stats_dr_str(self, f) -> str:
         """Format discovery rate string with CSD detection."""

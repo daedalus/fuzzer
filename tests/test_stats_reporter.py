@@ -373,3 +373,53 @@ class TestPrintStats:
             line = mock_print.call_args[0][0]
         # (1_000_000 - 999_900) / 10 = 10 eps, not 100_000
         assert "eps: 10" in line, f"expected session-local eps: 10 in: {line[:300]}"
+
+
+class TestPrintStatsSMT:
+    def test_smt_enabled_but_idle(self):
+        solver = MagicMock()
+        solver.queries_attempted = 0
+        solver.batch_attempted = 0
+        solver.batch_solved = 0
+        solver.queries_solved = 0
+        solver.cache_hits = 0
+        fuzzer = _mock_fuzzer(_smt_solver=solver)
+        fuzzer.crash_count = 0
+        fuzzer.timeout_count = 0
+        fuzzer.corpus = []
+        reporter = StatsReporter(fuzzer)
+        with patch("builtins.print") as mock_print:
+            reporter.print_stats()
+            line = mock_print.call_args[0][0]
+        assert "smt: 0/0 (0%)" in line
+        assert "tot: 0/0 (0%)" in line
+
+    def test_smt_disabled_when_none(self):
+        fuzzer = _mock_fuzzer(_smt_solver=None)
+        fuzzer.crash_count = 0
+        fuzzer.timeout_count = 0
+        fuzzer.corpus = []
+        reporter = StatsReporter(fuzzer)
+        with patch("builtins.print") as mock_print:
+            reporter.print_stats()
+            line = mock_print.call_args[0][0]
+        assert "smt:" not in line
+
+    def test_smt_active_with_stats(self):
+        solver = MagicMock()
+        solver.queries_attempted = 10
+        solver.queries_solved = 5
+        solver.batch_attempted = 3
+        solver.batch_solved = 2
+        solver.cache_hits = 1
+        fuzzer = _mock_fuzzer(_smt_solver=solver)
+        fuzzer.crash_count = 0
+        fuzzer.timeout_count = 0
+        fuzzer.corpus = []
+        reporter = StatsReporter(fuzzer)
+        with patch("builtins.print") as mock_print:
+            reporter.print_stats()
+            line = mock_print.call_args[0][0]
+        assert "smt: 2/3 (67%)" in line
+        assert "tot: 5/10 (50%)" in line
+        assert "ch:1" in line

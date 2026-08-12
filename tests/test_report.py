@@ -649,3 +649,62 @@ class TestReportCrashSignatures:
         del f.shm_cov._seen
         result = _edge_map_analysis(f)
         assert result == ""
+
+
+class TestReportSMT:
+    def test_run_summary_includes_smt_line(self):
+        f = _make_mock_fuzzer()
+        with tempfile.TemporaryDirectory() as td:
+            report = generate_report(f, td, td)
+        assert "SMT:" in report
+
+    def test_run_summary_smt_disabled_when_attr_missing(self):
+        f = _make_mock_fuzzer()
+        if "_smt_solver" in f.__dict__:
+            del f.__dict__["_smt_solver"]
+        if "_enable_smt_z3" in f.__dict__:
+            del f.__dict__["_enable_smt_z3"]
+        with tempfile.TemporaryDirectory() as td:
+            report = generate_report(f, td, td)
+        assert "SMT:             disabled" in report
+
+    def test_smt_solver_activity_no_solver_attr(self):
+        from fuzzer_tool.services.report import _smt_solver_activity
+
+        f = _make_mock_fuzzer()
+        if "_smt_solver" in f.__dict__:
+            del f.__dict__["_smt_solver"]
+        result = _smt_solver_activity(f)
+        assert result == ""
+
+    def test_smt_solver_activity_no_stats(self):
+        from fuzzer_tool.services.report import _smt_solver_activity
+
+        f = _make_mock_fuzzer()
+        f._smt_solver = MagicMock()
+        f._smt_solver.stats = {}
+        result = _smt_solver_activity(f)
+        assert "SMT Solver Activity" in result
+        assert "Queries attempted: 0" in result
+        assert "Queries solved:    0" in result
+        assert "Queries failed:   0" in result
+
+    def test_smt_solver_activity_with_queries(self):
+        from fuzzer_tool.services.report import _smt_solver_activity
+
+        f = _make_mock_fuzzer()
+        f._smt_solver = MagicMock()
+        f._smt_solver.stats = {
+            "queries_attempted": 10,
+            "queries_solved": 7,
+            "queries_failed": 2,
+            "timeout": 1,
+            "errors": 0,
+            "max_depth": 5,
+        }
+        result = _smt_solver_activity(f)
+        assert "SMT Solver Activity" in result
+        assert "Queries attempted: 10" in result
+        assert "Queries solved:    7" in result
+        assert "Queries failed:   2" in result
+        assert "enabled (no queries)" not in result

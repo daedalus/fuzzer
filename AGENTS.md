@@ -29,6 +29,7 @@ fuzzer, not just the target.
 10. Always create TODOs. Always commit and push after finishing a task.
 11. Update `docs/DEEP_DIVE.md` with new features (the comprehensive reference). Update `README.md` only when adding or changing high-level capabilities visible in the quick-start or feature overview.
 12. Op mutators have a single source of truth: `src/fuzzer_tool/core/operator_registry.py`'s `REGISTRY`. Register new operators there only — the dispatch table (`build_dispatch`), the per-input op list (`build_ops`), scheduler arming (`_register_arms`), and `OPERATOR_CATEGORIES` all derive from it. Never add operator names to the legacy `MUTATIONS`/`FORMAT_MUTATIONS`/`DICT_MUTATIONS` lists or hand-edit `OPERATOR_CATEGORIES`; schedulers discover ops through the services layer and never hardcode op lists.
+13. Only run the full pytest suite if a file in the codebase was modified.
 
 ## Corpus Rules
 

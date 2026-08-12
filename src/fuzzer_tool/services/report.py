@@ -4,6 +4,7 @@ Produces a structured text report covering coverage, mutation effectiveness,
 seed contribution analysis, and crash triage. Can output to stdout or a file.
 """
 
+import contextlib
 import json
 import math
 import os
@@ -145,6 +146,13 @@ def _run_summary(f) -> str:
         lines.append(f"  Cmplog:          enabled ({n_tok}t {n_prs}p)")
     else:
         lines.append("  Cmplog:          disabled")
+    smt_enabled = False
+    with contextlib.suppress(AttributeError):
+        smt_enabled = (
+            object.__getattribute__(f, "_enable_smt_z3")
+            and object.__getattribute__(f, "_smt_solver") is not None
+        )
+    lines.append(f"  SMT:             {'enabled' if smt_enabled else 'disabled'}")
     if execs > 0:
         _, _, c1, c2, c3 = _confidence_interval(execs, crashes)
         lines.append(
@@ -364,6 +372,20 @@ def _mutation_edge_attribution(f) -> str:
             "its count overlaps with the per-op attribution above)"
         )
 
+    # SMT solver involvement line (cumulative, overlaps with mutations above)
+    smt_edge_count = edges.get("smt_solver", 0)
+    if smt_edge_count > 0:
+        smt_pct = smt_edge_count / (total + smt_edge_count) * 100
+        lines.append("")
+        lines.append(
+            f"  SMT-involved edges: {smt_edge_count:.0f} ({smt_pct:.1f}% of "
+            f"total edge discoveries involved SMT constraint solving)"
+        )
+        lines.append(
+            "  (SMT is a signal source, not a mutation operator — "
+            "its count overlaps with the per-op attribution above)"
+        )
+
     return "\n".join(lines)
 
 
@@ -417,26 +439,32 @@ def _mdl_codelength(f) -> str:
 
 def _smt_solver_activity(f) -> str:
     """SMT solver activity: queries attempted, solved, timed out."""
-    solver = getattr(f, "_smt_solver", None)
+    try:
+        solver = object.__getattribute__(f, "_smt_solver")
+    except AttributeError:
+        return ""
     if solver is None:
         return ""
+    lines = ["", "--- SMT Solver Activity ---"]
     try:
         stats = solver.stats
-        if not isinstance(stats, dict) or stats.get("queries_attempted", 0) == 0:
-            return ""
+        if not isinstance(stats, dict):
+            lines.append("  Solver enabled (stats unavailable)")
+            return "\n".join(lines)
         attempted = stats.get("queries_attempted", 0)
         solved = stats.get("queries_solved", 0)
         timed_out = stats.get("queries_failed", 0)
         solved_pct = solved / attempted * 100 if attempted > 0 else 0.0
     except (TypeError, AttributeError):
-        return ""
-    lines = [
-        "",
-        "--- SMT Solver Activity ---",
-        f"  Queries attempted: {attempted}",
-        f"  Queries solved:    {solved} ({solved_pct:.1f}%)",
-        f"  Queries failed:   {timed_out}",
-    ]
+        lines.append("  Solver enabled")
+        return "\n".join(lines)
+    lines.extend(
+        [
+            f"  Queries attempted: {attempted}",
+            f"  Queries solved:    {solved} ({solved_pct:.1f}%)",
+            f"  Queries failed:   {timed_out}",
+        ]
+    )
     return "\n".join(lines)
 
 
