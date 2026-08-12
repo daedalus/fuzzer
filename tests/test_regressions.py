@@ -1500,3 +1500,30 @@ class TestResumeWithSensitivityJson:
             resume=True, corpus_dir=str(f.corpus_dir), crashes_dir=str(f.crashes_dir)
         )
         assert len(f2.seed_meta) >= 1
+
+
+class TestSmtRequiresCmplog:
+    """--enable-smt-z3 without --cmplog must not leave SMT enabled."""
+
+    def test_smt_disabled_when_cmplog_missing(self):
+        from unittest.mock import patch
+
+        from fuzzer_tool.services.fuzzer import Fuzzer
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with (
+                patch("os.path.isfile", return_value=True),
+                patch("os.access", return_value=True),
+            ):
+                f = Fuzzer(
+                    target="/bin/true",
+                    corpus_dir=f"{tmpdir}/corpus",
+                    crashes_dir=f"{tmpdir}/crashes",
+                    max_len=256,
+                    timeout=1,
+                    mutations_per_input=2,
+                    enable_smt_z3=True,
+                    cmplog=False,
+                )
+            assert f._smt_solver is None
+            assert f._enable_smt_z3 is False

@@ -788,6 +788,11 @@ class Fuzzer:
                 )
                 self._smt_solver = None
 
+        if self._smt_solver is not None and self._cmplog is None:
+            print("[!] SMT solver: --enable-smt-z3 requires --cmplog; disabling SMT path")
+            self._smt_solver = None
+            self._enable_smt_z3 = False
+
         if self.file_mode:
             self._tmp_dir = Path(tempfile.mkdtemp(prefix="fuzzer_"))
             atexit.register(_cleanup_tmp_dir, self._tmp_dir)
