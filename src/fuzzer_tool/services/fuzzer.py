@@ -4041,10 +4041,82 @@ class Fuzzer:
                 result = handler(buf_copy, byte_idx, seed)
                 if result is not None:
                     buf_copy = bytearray(result[: self.max_len])
-                # Run and record outcome
+
                 returncode, stderr = self._run_target(bytes(buf_copy))
                 self.exec_count += 1
-                self._check_coverage(bytes(buf_copy))
+
+                # Coverage update: mirror fuzz_one's inline coverage path so
+                # deterministic-stage execs participate in edge tracking,
+                # lifetime tracking, and seed metadata.
+                self._current_edges_cache = None
+                if self.multi_targets:
+                    active_shm = self._target_shm_covs.get(self.target)
+                    if active_shm:
+                        has_new, edge_ids = active_shm.is_new_coverage_with_edges()
+                        self._current_edges_cache = edge_ids
+                        has_new_coverage = has_new
+                    else:
+                        has_new_coverage = bool(
+                            (self.ptrace_cov and self.ptrace_cov.is_new_coverage())
+                            or (self.shm_cov and self.shm_cov.is_new_coverage())
+                        )
+                elif self.shm_cov:
+                    has_new, edge_ids = self.shm_cov.is_new_coverage_with_edges()
+                    self._current_edges_cache = edge_ids
+                    has_new_coverage = has_new
+                else:
+                    has_new_coverage = bool(self.ptrace_cov and self.ptrace_cov.is_new_coverage())
+
+                if has_new_coverage and self._edge_tracker:
+                    seed_key = self._seed_key(seed)
+                    if self.shm_cov and not self.ptrace_cov:
+                        hit_counts = self.shm_cov.get_edge_counts()
+                        hit_edges = set(hit_counts.keys())
+                    else:
+                        hit_edges = (
+                            self._current_edges_cache
+                            if self._current_edges_cache is not None
+                            else self._get_current_edge_set()
+                        )
+                        hit_counts = None
+                    if hit_edges:
+                        stack_depth = 0
+                        path_hash = 0
+                        if self.shm_cov:
+                            stack_depth = self.shm_cov.read_stack_depth()
+                            path_hash = self.shm_cov.read_path_hash()
+                        if path_hash == 0 and hit_edges and not isinstance(hit_edges, bytes):
+                            path_hash = (
+                                self.shm_cov.compute_path_hash_from_edges(hit_edges)
+                                if self.shm_cov
+                                else 0
+                            )
+                        new = self._edge_tracker.record_edges(
+                            seed_key,
+                            hit_edges,
+                            target_name=os.path.basename(self.target) if self.multi_targets else "",
+                            hit_counts=hit_counts,
+                            stack_depth=stack_depth,
+                            path_hash=path_hash,
+                            hw_instructions=self._last_perf_deltas.get("instructions", 0),
+                            hw_branches=self._last_perf_deltas.get("branches", 0),
+                            hw_branch_misses=self._last_perf_deltas.get("branch_misses", 0),
+                        )
+                        if new:
+                            self._last_new_edge_exec = self.exec_count
+                            self._last_new_edge_count = len(new)
+                            if meta is not None:
+                                meta["coverage_edges"] = meta.get("coverage_edges", 0) + len(new)
+                                self._cached_total_edges += len(new)
+
+                if self._inprocess_runner or self.ptrace_cov or self.shm_cov:
+                    current_edges = (
+                        self._current_edges_cache
+                        if self._current_edges_cache is not None
+                        else self._get_current_edge_set()
+                    )
+                    if current_edges:
+                        self._edge_tracker.record_edge_lifetimes(current_edges, self.exec_count)
 
         # Mark seed as having passed deterministic fuzzing
         meta["seed_passed_det"] = True
@@ -4447,7 +4519,7 @@ class Fuzzer:
                 if self._diff_tracker:
                     self._check_differential(seed)
                 # Run deterministic stage gated by SkipDet
-                if seed_key in self._favored and not meta.get("seed_passed_det", False):
+                if seed_key in self._favored and not (meta or {}).get("seed_passed_det", False):
                     self._run_deterministic_stage(seed)
                 self.fuzz_one(seed)
                 # Backpropagate this iteration's discovery up the MCTS path.
