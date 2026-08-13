@@ -1,5 +1,6 @@
 """Operator-selection schedulers (bandit algorithms)."""
 
+from fuzzer_tool.core.schedulers.cmaes import CMAESScheduler
 from fuzzer_tool.core.schedulers.contextual import ContextualLinUCBScheduler
 from fuzzer_tool.core.schedulers.epsilon_greedy import EpsilonGreedyScheduler
 from fuzzer_tool.core.schedulers.exp3 import Exp3Scheduler
@@ -11,6 +12,7 @@ from fuzzer_tool.core.schedulers.mopt import MOptScheduler
 from fuzzer_tool.core.schedulers.replicator import ReplicatorScheduler
 
 __all__ = [
+    "CMAESScheduler",
     "MonteCarloScheduler",
     "MOptScheduler",
     "ReplicatorScheduler",

@@ -391,6 +391,11 @@ def cmd_fuzz(args):
         mc_bandit=args.mc_bandit,
         mc_cem=args.mc_cem,
         mopt=getattr(args, "mopt", False),
+        cmaes=getattr(args, "cma_es", False),
+        cmaes_pop_size=getattr(args, "cmaes_pop_size", 8),
+        cmaes_generation_size=getattr(args, "cmaes_generation_size", 200),
+        cmaes_step_size=getattr(args, "cmaes_step_size", 0.3),
+        cmaes_elite_frac=getattr(args, "cmaes_elite_frac", 0.5),
         targets=getattr(args, "target_functions", None),
         anneal_budget=getattr(args, "anneal_budget", 0),
         boltzmann=getattr(args, "boltzmann", False),
@@ -1451,6 +1456,39 @@ def main() -> int:
         "--mopt",
         action="store_true",
         help="Enable MOpt PSO operator scheduling (alternative to bandit)",
+    )
+    fuzz_parser.add_argument(
+        "--cma-es",
+        action="store_true",
+        help="Enable CMA-ES operator scheduling (covariance-adapted continuous optimization)",
+    )
+    fuzz_parser.add_argument(
+        "--cmaes-pop-size",
+        type=int,
+        default=8,
+        metavar="N",
+        help="CMA-ES population size (default: 8)",
+    )
+    fuzz_parser.add_argument(
+        "--cmaes-generation-size",
+        type=int,
+        default=200,
+        metavar="N",
+        help="CMA-ES evaluations per generation (default: 200)",
+    )
+    fuzz_parser.add_argument(
+        "--cmaes-step-size",
+        type=float,
+        default=0.3,
+        metavar="SIGMA",
+        help="CMA-ES initial step size sigma (default: 0.3)",
+    )
+    fuzz_parser.add_argument(
+        "--cmaes-elite-frac",
+        type=float,
+        default=0.5,
+        metavar="FRAC",
+        help="CMA-ES elite fraction mu/lambda (default: 0.5)",
     )
     fuzz_parser.add_argument(
         "--replicator",

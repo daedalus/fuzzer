@@ -35,6 +35,7 @@ from fuzzer_tool.core.operator_registry import REGISTRY
 from fuzzer_tool.core.running_stats import RunningMoments
 from fuzzer_tool.core.sanitizer import SanitizerReport
 from fuzzer_tool.core.schedulers import (
+    CMAESScheduler,
     ContextualLinUCBScheduler,
     EpsilonGreedyScheduler,
     Exp3Scheduler,
@@ -73,6 +74,7 @@ _OPERATOR_STRATEGY_NAMES = (
     "hierarchical",
     "gp_ucb",
     "contextual",
+    "cmaes",
 )
 _SEED_STRATEGY_NAMES = (
     "ga",
@@ -426,6 +428,11 @@ class Fuzzer:
         mc_bandit=False,
         mc_cem=False,
         mopt=False,
+        cmaes=False,
+        cmaes_pop_size=8,
+        cmaes_generation_size=200,
+        cmaes_step_size=0.3,
+        cmaes_elite_frac=0.5,
         targets=None,
         anneal_budget=0,
         boltzmann=False,
@@ -1106,6 +1113,21 @@ class Fuzzer:
         if mopt:
             self._mopt = MOptScheduler(n_particles=5, window_size=200)
             log.info("MOpt PSO scheduling enabled (5 particles, window=200)")
+        self._use_cmaes = cmaes
+        self._cmaes = None
+        if cmaes:
+            self._cmaes = CMAESScheduler(
+                pop_size=cmaes_pop_size,
+                generation_size=cmaes_generation_size,
+                step_size=cmaes_step_size,
+                elite_frac=cmaes_elite_frac,
+            )
+            log.info(
+                "CMA-ES scheduling enabled (pop=%d, gen=%d, sigma=%.3f)",
+                cmaes_pop_size,
+                cmaes_generation_size,
+                cmaes_step_size,
+            )
         self._use_replicator = replicator
         self._seed_strategy = None
         self._seed_strategy_pool: list[str] = []
@@ -1495,6 +1517,8 @@ class Fuzzer:
             _register_arms(self.mc, _format_priors)
         if self._mopt:
             _register_arms(self._mopt)
+        if self._cmaes:
+            _register_arms(self._cmaes)
         if self._replicator:
             _register_arms(self._replicator)
         if self._exp3:
@@ -2948,6 +2972,7 @@ class Fuzzer:
             self._eps_greedy,
             self._hierarchical,
             self._gp_ucb,
+            self._cmaes,
         ):
             if scheduler is None:
                 continue
@@ -4070,6 +4095,22 @@ class Fuzzer:
                     f"mutation_prob={self.qea.mutation_prob}"
                 )
 
+            if self._cmaes:
+                cmaes_data = self._state_store.get("cmaes")
+                if self.resume and cmaes_data is not None:
+                    self._cmaes.from_dict(cmaes_data)
+                    print(
+                        f"[*] CMA-ES: loaded state from state store "
+                        f"(gen={self._cmaes.convergence_stats()['generation']})"
+                    )
+                stats = self._cmaes.convergence_stats()
+                print(
+                    f"[*] CMA-ES: pop={self._cmaes.pop_size}, "
+                    f"gen={self._cmaes.generation_size}, "
+                    f"sigma={stats['sigma']:.3f}, "
+                    f"top={stats['top_op']}({stats['top_prob']:.1%})"
+                )
+
             if self._mcts is not None:
                 mcts_data = self._state_store.get("mcts")
                 if self.resume and mcts_data is not None:
@@ -4269,6 +4310,9 @@ class Fuzzer:
         if self.qea:
             self._state_store.set("qea", self.qea.to_dict())
             print(f"[*] QEA: saved state (gen={self.qea.generation})")
+        if self._cmaes:
+            self._state_store.set("cmaes", self._cmaes.to_dict())
+            print(f"[*] CMA-ES: saved state (gen={self._cmaes.generation})")
         if self._mcts is not None:
             # Drop stats for seeds minimization removed, so the persisted
             # state does not grow without bound across resumes.
@@ -4314,6 +4358,14 @@ class Fuzzer:
                     f"    {p['name']:<20s}: fitness={p['fitness']:.4f} "
                     f"top={p['top_op']}({p['top_prob']:.1%})"
                 )
+        if self._cmaes:
+            print("\n[*] CMA-ES convergence:")
+            stats = self._cmaes.convergence_stats()
+            print(
+                f"    generation={stats['generation']} sigma={stats['sigma']:.4f} "
+                f"top={stats['top_op']}({stats['top_prob']:.1%}) "
+                f"discoveries={stats['total_discoveries']}/{stats['total_execs']}"
+            )
         if self._replicator:
             print("\n[*] Replicator convergence:")
             for s in self._replicator.operator_stats():

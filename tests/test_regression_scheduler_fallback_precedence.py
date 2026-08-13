@@ -24,6 +24,7 @@ _FALLBACK_PRECEDENCE = [
     "eps_greedy",
     "hierarchical",
     "gp_ucb",
+    "cmaes",
     "contextual",
 ]
 
@@ -82,6 +83,7 @@ class _FakeFuzzer:
         "eps_greedy": ("_use_eps_greedy", "_eps_greedy"),
         "hierarchical": ("_use_hierarchical", "_hierarchical"),
         "gp_ucb": ("_use_gp_ucb", "_gp_ucb"),
+        "cmaes": ("_use_cmaes", "_cmaes"),
         "contextual": ("_use_contextual", "_contextual"),
     }
 

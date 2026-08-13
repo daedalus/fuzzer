@@ -2487,6 +2487,9 @@ class OperatorEngine:
         elif strategy == "gp_ucb" and f._gp_ucb:
             op = f._gp_ucb.select_op(ops)
             f._last_mopt_particles.append(None)
+        elif strategy == "cmaes" and f._cmaes:
+            op = f._cmaes.select_op(ops)
+            f._last_mopt_particles.append(None)
         elif strategy == "contextual" and f._contextual:
             op = f._contextual.select_op(ops, self._context_vector)
             f._last_mopt_particles.append(None)
@@ -2511,6 +2514,9 @@ class OperatorEngine:
             f._last_mopt_particles.append(None)
         elif f._use_gp_ucb and f._gp_ucb:
             op = f._gp_ucb.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif f._use_cmaes and f._cmaes:
+            op = f._cmaes.select_op(ops)
             f._last_mopt_particles.append(None)
         elif f._use_contextual and f._contextual:
             op = f._contextual.select_op(ops, self._context_vector)
