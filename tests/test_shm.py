@@ -427,6 +427,38 @@ class TestShmCoverage:
         finally:
             cov.cleanup()
 
+    def test_fast_path_returns_current_edges_not_empty_set(self):
+        """Regression: the no-change fast path used to return (False, set()),
+        which callers that cache the returned set (Fuzzer._prev_edge_set,
+        _current_edges_cache) read as "this exec fired zero edges". The next
+        exec's new_edges = current - prev diff then reported the whole edge
+        set as newly discovered instead of just the real delta.
+
+        The fast path must return the edge set from the last slow-path scan
+        instead, so a caller diffing consecutive returns sees no change.
+        """
+        cov = ShmCoverage()
+        try:
+            cov._entries[0].edge_id = 42
+            cov._entries[0].count = 1
+            ctypes.c_uint64.from_address(cov._ptr + 16).value = 1
+            # Slow path: edge_count changed (0 -> 1), scans and records {42}.
+            new, edges = cov.is_new_coverage_with_edges()
+            assert new is True
+            assert edges == {42}
+
+            # No further writes: edge_count and path_hash are unchanged, so
+            # the next call takes the fast path.
+            new2, edges2 = cov.is_new_coverage_with_edges()
+            assert new2 is False
+            assert edges2 == {42}, (
+                "fast path must return the last-known edge set, not an "
+                "empty set — otherwise a diff against this return value "
+                "sees a spurious loss of every edge"
+            )
+        finally:
+            cov.cleanup()
+
     def test_is_new_coverage_with_edges_updates_last_edge_count(self):
         """After slow path, _last_edge_count matches edge_count for next fast-path."""
         cov = ShmCoverage()

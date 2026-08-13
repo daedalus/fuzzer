@@ -49,6 +49,7 @@ from fuzzer_tool.core.schedules import SeedScorer, compute_mean_log_n_fuzz
 from fuzzer_tool.core.secretary import DEFAULT_EXPLORATION_FRAC, SecretaryStopping
 from fuzzer_tool.core.seed_quality import BayesianSeedQuality
 from fuzzer_tool.core.shapley import ShapleyAttribution
+from fuzzer_tool.core.skipdet import SkipDetector
 from fuzzer_tool.services.corpus_manager import CorpusManager
 from fuzzer_tool.services.operators import OperatorEngine
 from fuzzer_tool.services.ptrace_coverage import (
@@ -1097,6 +1098,7 @@ class Fuzzer:
         if self._corpus_boost > 0 and self.corpus:
             self._boost_corpus_sizes()
         self._init_seed_metadata()
+
         # Rebuild the lineage tree from persisted seed_meta (single source
         # of truth; never re-derived from runs to avoid double-counting).
         if self._use_lineage and self._lineage is not None:
@@ -1114,6 +1116,9 @@ class Fuzzer:
 
         # Seed aggregate cache: compute from initial seed_meta
         self._refresh_agg_cache()
+
+        # SkipDet: initialize the skip detector for deterministic stage gating
+        self._skip_detector = SkipDetector(map_size=getattr(self._edge_tracker, "map_size", 65536))
 
         self.mc_bandit = mc_bandit
         self.mc_cem = mc_cem
@@ -3980,6 +3985,87 @@ class Fuzzer:
 
         threading.Thread(target=_beat, daemon=True, name="stack-heartbeat").start()
 
+    def _run_deterministic_stage(self, seed: bytes) -> bool:
+        """Run deterministic mutations on a seed, gated by SkipDet.
+
+        Walks deterministic operators (bit_flip, byte_flip, arithmetic, interesting_8/16/32)
+        systematically across the seed. Uses SkipDetector to decide whether the
+        seed deserves deterministic fuzzing — only favored, not-yet-determinized
+        seeds proceed. After completion, marks the seed as passed_det to skip
+        future deterministic passes.
+
+        Returns True if deterministic stage was run, False if skipped.
+        """
+        if self._skip_detector is None:
+            return False
+
+        meta = self.seed_meta.get(seed, {})
+        seed_passed_det = meta.get("seed_passed_det", False)
+        seed_key = self._seed_key(seed)
+        seed_favored = seed_key in self._favored
+
+        # Get the seed's coverage mini-bitmap for SkipDet analysis
+        trace_mini = self._get_seed_trace_mini(seed_key)
+
+        # Check if this seed should be deterministically fuzzed
+        if not self._skip_detector.should_det_fuzz(
+            seed_trace_mini=trace_mini,
+            seed_favored=seed_favored,
+            seed_passed_det=seed_passed_det,
+            current_time_ms=time.time() * 1000.0,
+        ):
+            return False
+
+        # Seed qualifies for deterministic fuzzing
+        # Apply the deterministic operators systematically
+        det_ops = REGISTRY.available(self, seed)
+        det_op_names = [
+            "bit_flip",
+            "byte_flip",
+            "arithmetic",
+            "interesting_8",
+            "interesting_16",
+            "interesting_32",
+        ]
+
+        # Walk each deterministic operator across all byte positions
+        buf = bytearray(seed)
+        for op_name in det_op_names:
+            if op_name not in det_ops:
+                continue
+            handler = self._op_dispatch.get(op_name)
+            if handler is None:
+                continue
+            for byte_idx in range(len(buf)):
+                buf_copy = bytearray(buf)
+                result = handler(buf_copy, byte_idx, seed)
+                if result is not None:
+                    buf_copy = bytearray(result[: self.max_len])
+                # Run and record outcome
+                returncode, stderr = self._run_target(bytes(buf_copy))
+                self.exec_count += 1
+                self._check_coverage(bytes(buf_copy))
+
+        # Mark seed as having passed deterministic fuzzing
+        meta["seed_passed_det"] = True
+        if seed in self.seed_meta:
+            self.seed_meta[seed]["seed_passed_det"] = True
+
+        return True
+
+    def _get_seed_trace_mini(self, seed_key: str) -> bytearray | None:
+        """Get the compressed coverage bitmap for a seed for SkipDet analysis."""
+        edges = self._edge_tracker.seed_edges.get(seed_key)
+        if edges is None:
+            return None
+        map_size = self._edge_tracker.map_size
+        trace_mini = bytearray((map_size + 7) // 8)
+        for edge_id in edges:
+            idx = edge_id // 8
+            if idx < len(trace_mini):
+                trace_mini[idx] |= 1 << (edge_id % 8)
+        return trace_mini
+
     def run(self, iterations=0):
         self._start_stack_heartbeat()
         if self.multi_targets:
@@ -4360,6 +4446,9 @@ class Fuzzer:
                     self._last_perf_score = 100.0
                 if self._diff_tracker:
                     self._check_differential(seed)
+                # Run deterministic stage gated by SkipDet
+                if seed_key in self._favored and not meta.get("seed_passed_det", False):
+                    self._run_deterministic_stage(seed)
                 self.fuzz_one(seed)
                 # Backpropagate this iteration's discovery up the MCTS path.
                 # A no-op unless the mcts arm actually selected this seed —

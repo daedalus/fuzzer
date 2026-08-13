@@ -15,6 +15,7 @@ import logging
 
 log = logging.getLogger(__name__)
 
+
 # Configurable thresholds (from AFL++ config.h)
 MINIMAL_BLOCK_SIZE = 64
 MAX_INF_EXECS = 16 * 1024

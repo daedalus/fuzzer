@@ -160,6 +160,12 @@ class ShmCoverage:
         self._last_edge_count: int = 0
         # Last seen path_hash for fast-path — catches same-count but different-edge sets
         self._last_path_hash: int = 0
+        # Current edge set as of the last slow-path scan. Returned by the
+        # fast path instead of an empty set() when nothing changed, so
+        # callers that snapshot the return value (e.g. Fuzzer._prev_edge_set)
+        # get a real "same as before" set rather than a value that reads as
+        # "the target fired zero edges this exec".
+        self._last_ids: set[int] = set()
 
         self.total_edges = 0
         self.cumulative_edges = 0
@@ -433,7 +439,12 @@ class ShmCoverage:
         if edge_count == self._last_edge_count and (
             path_hash == 0 or path_hash == self._last_path_hash
         ):
-            return False, set()
+            # Nothing changed since the last scan: return the edge set we
+            # already know is current, not an empty set. An empty set here
+            # used to read as "this exec fired no edges", which corrupted
+            # any caller that diffs consecutive returns (see
+            # Fuzzer._prev_edge_set / format-learner new_edges tracking).
+            return False, self._last_ids
 
         # Slow path: extract edge_ids not yet in _seen_edge_ids
         arr = np.frombuffer(self._map, dtype=_ENTRY_DTYPE, count=self.num_entries)
@@ -456,6 +467,7 @@ class ShmCoverage:
 
         self._last_edge_count = edge_count
         self._last_path_hash = path_hash
+        self._last_ids = ids
 
         if new_found:
             self.total_edges += 1

@@ -119,6 +119,7 @@ class CorpusManager:
                 "redqueen_offsets": [],
                 "added_at": now,
                 "record_stride": estimate_record_size(seed),
+                "seed_passed_det": False,
             }
         from fuzzer_tool.core.edge_tracker import EdgeTracker
 
