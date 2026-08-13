@@ -41,7 +41,13 @@ if [ "$BUILD_FAST" -eq 0 ]; then
     SCOV_FLAGS="-fsanitize-coverage=trace-cmp,trace-pc-guard"
     ASAN_FLAGS="-fsanitize=address"
 fi
-CFLAGS="-O2 -g -fPIC $ASAN_FLAGS $SCOV_FLAGS"
+# -fno-omit-frame-pointer: afl_shim.c's caller-context edge hashing
+# (-D__AFL_CTX_SENSITIVE=1) walks __builtin_return_address(1) into THIS
+# library's frame, so the flag is required here, not only in the TU that
+# includes the shim. Without it the walk silently returns the wrong
+# caller (measured) instead of crashing. See FRAME_POINTER in
+# tools/build_targets.sh.
+CFLAGS="-O2 -g -fPIC -fno-omit-frame-pointer $ASAN_FLAGS $SCOV_FLAGS"
 
 mkdir -p "$VENDOR_DIR"
 

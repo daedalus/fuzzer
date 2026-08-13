@@ -91,7 +91,7 @@ if [ "$BUILD_CHECK" -eq 1 ]; then
     rc=0
     # Core library plus the committed precomputed ECMULT tables.
     for src in secp256k1 precomputed_ecmult precomputed_ecmult_gen; do
-        $cc -O2 -g -fPIC -I"$SECP256K1_DIR/src" -I"$SECP256K1_DIR/include" \
+        $cc -O2 -g -fPIC -fno-omit-frame-pointer -I"$SECP256K1_DIR/src" -I"$SECP256K1_DIR/include" \
             -c "$SECP256K1_DIR/src/${src}.c" -o "$tmpdir/${src}.o" 2>/dev/null || rc=$?
     done
     # Full-module pass: enable every module whose sources exist in this tree.
@@ -101,7 +101,7 @@ if [ "$BUILD_CHECK" -eq 1 ]; then
             module_flags="$module_flags -DENABLE_MODULE_$(echo "$m" | tr '[:lower:]' '[:upper:]')"
     done
     if [ -n "$module_flags" ]; then
-        $cc -O2 -g -fPIC -I"$SECP256K1_DIR/src" -I"$SECP256K1_DIR/include" \
+        $cc -O2 -g -fPIC -fno-omit-frame-pointer -I"$SECP256K1_DIR/src" -I"$SECP256K1_DIR/include" \
             $module_flags -c "$SECP256K1_DIR/src/secp256k1.c" \
             -o "$tmpdir/secp256k1_modules.o" 2>/dev/null || rc=$?
     fi

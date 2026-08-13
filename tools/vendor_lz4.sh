@@ -86,7 +86,7 @@ if [ "$BUILD_CHECK" -eq 1 ]; then
     tmpdir="$(mktemp -d)"
     rc=0
     for src in lz4 lz4frame lz4hc xxhash; do
-        $cc -O2 -g -fPIC -I"$LZ4_DIR/lib" \
+        $cc -O2 -g -fPIC -fno-omit-frame-pointer -I"$LZ4_DIR/lib" \
             -c "$LZ4_DIR/lib/${src}.c" -o "$tmpdir/${src}.o" 2>/dev/null || rc=$?
     done
     rm -rf "$tmpdir"

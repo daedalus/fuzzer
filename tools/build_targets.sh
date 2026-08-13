@@ -73,6 +73,42 @@ NOBUILTIN_CMP="$NOBUILTIN_CMP -fno-builtin-strstr -fno-builtin-memmem"
 # target clang chose to fold it in was invisible to the libc layer. This list
 # and the interceptor list in cmplog_shim.c must be kept in step.
 NOBUILTIN_CMP="$NOBUILTIN_CMP -fno-builtin-strcasestr"
+
+# ── Frame pointers: required by caller-context edge hashing ──────────────
+#
+# afl_shim.c's __afl_get_caller_ctx() (enabled by -D__AFL_CTX_SENSITIVE=1)
+# computes edge_id = hash(__builtin_return_address(1)) ^ prev_loc ^ cur_loc.
+# return_address(1) walks one frame past trace_pc_guard's own frame to reach
+# the call site of whoever called the function the edge lives in -- and that
+# function is in the LIBRARY, not in the shim's translation unit. So the
+# frame-pointer requirement lands on every vendored archive we link, not
+# just on the TU that does `-include afl_shim.c`.
+#
+# Every vendored library here was built at -O2 without this flag while
+# build_simple_so_targets linked them into _nosan targets with CTX enabled.
+# The comment there asserted the archives were "rebuilt under the same
+# contract"; only the --vendor-tracecmp path actually was.
+#
+# The failure mode is not reliably a crash. Measured on the two-TU minimal
+# case (library TU at -O2, shim TU with frame pointers):
+#
+#   library -fno-omit-frame-pointer -> return_address(1) = 0x55555555506d
+#                                      (correct: inside the real caller)
+#   library -fomit-frame-pointer    -> return_address(1) = 0x7ffff7c2a1ca
+#                                      (wrong: a libc address, one frame skipped)
+#
+# Neither run crashed. A silently wrong context is worse than the SEGV in
+# docs/learnings/2026-08-11-rebuild-shim-ctx-segv.md, because it yields
+# stable-but-meaningless edge IDs: distinct call chains collapse together
+# and unrelated ones separate, so coverage counts rise while meaning falls.
+# The SEGV only appears when the bogus rbp happens to be unmapped.
+#
+# Applied unconditionally rather than gated on CTX: the cost is one register
+# at -O2, the archives are shared between CTX and non-CTX targets, and a
+# stale archive built without it is invisible at link time. It also keeps
+# stack traces walkable for the crash reports (see build_c_targets).
+FRAME_POINTER="-fno-omit-frame-pointer"
+
 WITH_VENDOR_TRACECMP=0
 WITH_CLANG_SCOV=0
 WITH_DISTANCE=0
@@ -688,14 +724,21 @@ build_simple_so_targets() {
     local out_suffix=""
     [[ "$suffix" == _asan* || "$suffix" == _ubsan* ]] && out_suffix="$suffix"
 
-    # No-ASAN .so targets link the vendored libpng/zlib/ffmpeg archives,
-    # which are rebuilt with call-stack-sensitive edge hashing enabled;
-    # compile the shim-included TU under the same define and the frame
-    # pointers the context walk requires, so the linked chain shares one
-    # contract (see afl_shim.c: __AFL_CTX_SENSITIVE needs
-    # -fno-omit-frame-pointer on every TU that includes the shim).
+    # No-ASAN .so targets link the vendored libpng/zlib/ffmpeg archives and
+    # enable call-stack-sensitive edge hashing. The context walk reaches into
+    # those archives' frames at runtime, so they must carry frame pointers
+    # too -- see FRAME_POINTER in the header of this file, which is applied
+    # by compile_vendored_libs and by every tools/vendor_*.sh. The
+    # -D__AFL_CTX_SENSITIVE define itself is only needed here, since the
+    # archives never include the shim.
+    #
+    # An earlier version of this comment claimed the archives were "rebuilt
+    # with call-stack-sensitive edge hashing enabled". They were not: only
+    # --vendor-tracecmp passed CTX_FLAGS through, so every other _nosan build
+    # walked frame-pointer-less library frames and got a silently wrong
+    # caller context.
     if [ "$suffix" = "_nosan" ]; then
-        flags="$flags -D__AFL_CTX_SENSITIVE=1 -fno-omit-frame-pointer"
+        flags="$flags -D__AFL_CTX_SENSITIVE=1 $FRAME_POINTER"
     fi
 
     # Prefer vendored static libraries when available. The vendored .a files
@@ -815,7 +858,7 @@ compile_vendored_libs() {
 
     # zlib
     if [ -d "$VENDOR/zlib" ]; then
-        (cd "$VENDOR/zlib" && CC=$cc CFLAGS="-O2 -g -fPIC ${scov_flag} ${no_builtin_cmp}" \
+        (cd "$VENDOR/zlib" && CC=$cc CFLAGS="-O2 -g -fPIC ${scov_flag} ${no_builtin_cmp} ${FRAME_POINTER}" \
             ./configure --static 2>/dev/null && make -j$(nproc) 2>/dev/null) && \
             ok "zlib (vendored)" || warn "zlib (vendored) failed"
     else
@@ -826,7 +869,7 @@ compile_vendored_libs() {
     if [ -d "$VENDOR/libpng" ] && [ -d "$VENDOR/zlib" ]; then
         (cd "$VENDOR/libpng" && CC=$cc \
             CPPFLAGS="-I../zlib" \
-            CFLAGS="-O2 -g -fPIC ${scov_flag} ${no_builtin_cmp} -I../zlib" \
+            CFLAGS="-O2 -g -fPIC ${scov_flag} ${no_builtin_cmp} ${FRAME_POINTER} -I../zlib" \
             LDFLAGS="-L../zlib" \
             ./configure --with-pkgconfig=no 2>/dev/null && make -j$(nproc) 2>/dev/null) && \
             ok "libpng (vendored)" || warn "libpng (vendored) failed"
@@ -838,7 +881,7 @@ compile_vendored_libs() {
     if [ -d "$VENDOR/libjpeg-turbo" ]; then
         (cd "$VENDOR/libjpeg-turbo" && \
             cmake -DCMAKE_C_COMPILER=$cc \
-                  -DCMAKE_C_FLAGS="-O2 -g -fPIC ${scov_flag} ${no_builtin_cmp}" \
+                  -DCMAKE_C_FLAGS="-O2 -g -fPIC ${scov_flag} ${no_builtin_cmp} ${FRAME_POINTER}" \
                   -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
                   -G "Unix Makefiles" . 2>/dev/null && \
             make -j$(nproc) 2>/dev/null) && \
@@ -1127,7 +1170,7 @@ build_vendored_tracecmp_targets() {
     # chain is built under one contract; -fno-omit-frame-pointer is required
     # because the context walk dereferences the caller's return-address
     # slot (see afl_shim.c).
-    local CTX_FLAGS="-D__AFL_CTX_SENSITIVE=1 -fno-omit-frame-pointer"
+    local CTX_FLAGS="-D__AFL_CTX_SENSITIVE=1 $FRAME_POINTER"
     local ASAN_FLAGS=""
     for arg in "$@"; do
         [ "$arg" = "--asan" ] && ASAN_FLAGS="-fsanitize=address"

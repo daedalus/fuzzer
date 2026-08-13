@@ -123,7 +123,13 @@ if [ "$BUILD_CHECK" -eq 1 ]; then
     # -fsanitize-coverage=trace-pc-guard: edge coverage
     # -fno-builtin-*: keep comparison calls at the PLT so cmplog can intercept
     #   them when the cmplog shim is linked (e.g., .so targets).
-    VENDOR_CFLAGS="-O2 -g -fPIC -fsanitize-coverage=trace-pc-guard"
+    # -fno-omit-frame-pointer: afl_shim.c's caller-context edge hashing
+    # (-D__AFL_CTX_SENSITIVE=1) walks __builtin_return_address(1) into THIS
+    # library's frame, so the flag is required here, not only in the TU that
+    # includes the shim. Without it the walk silently returns the wrong
+    # caller (measured) instead of crashing. See FRAME_POINTER in
+    # tools/build_targets.sh.
+    VENDOR_CFLAGS="-O2 -g -fPIC -fno-omit-frame-pointer -fsanitize-coverage=trace-pc-guard"
     VENDOR_CFLAGS="$VENDOR_CFLAGS -fno-builtin-memcmp -fno-builtin-bcmp -fno-builtin-strcmp"
     VENDOR_CFLAGS="$VENDOR_CFLAGS -fno-builtin-strncmp -fno-builtin-strcasecmp"
     VENDOR_CFLAGS="$VENDOR_CFLAGS -fno-builtin-strncasecmp -fno-builtin-memchr -fno-builtin-strstr"
