@@ -29,12 +29,14 @@ reasoning lives in the commit messages, which is where it stays useful.
 | `fix(coverage): keep the SHM resize, drop the state it needlessly destroyed` | Resize wiped every accumulated statistic on a premise true for AFL's bitmap but false here, so the next execution re-reported all known edges as new — defeating the stall detector that had triggered it. Also stopped copying the old table into the new segment at the old modulus. |
 | `fix(coverage): prevent valid edge_id 0 from being treated as an empty slot` | `edge_id == 0` was indistinguishable from an empty slot in the open-addressing table, so valid edges that XORed to zero were silently dropped and the slot reclaimed by later collisions. Forced to 1 with `edge_id |= 1`. |
 | `fix(scheduler): wire favored into FAST/COE and add cull_queue/top_rated` | `favored` was threaded through `SeedScorer` but never computed; FAST/COE ran permanently in unfavored mode and `top_rated`/`cull_queue` minimal-set-cover did not exist. Added `_cull_queue()` to `Fuzzer`, periodic favored recomputation, and passed `favored` at the score call site. |
+| `fix(coverage): make hit counts part of the novelty decision on the SHM path` | `_check_new_coverage` decided interestingness by set membership only, so loop-count-guarded branches were invisible. Added disjoint bucket-bit ladders (`core/count_class.py`) keyed by edge_id in a dense virgin map on the hot SHM path; counts clamped at 255, fast path unchanged. |
 
-Two open items **depend** on that third commit and are carried forward in §2: bounding
-the probe window (now measurable, because drops are counted) and making the per-exec
-reset O(1) (the precondition for maps larger than 262144).
+Two open items **depend** on the sizing commit (the third entry above) and are carried
+forward in §2: bounding the probe window (now measurable, because drops are counted)
+and making the per-exec reset O(1) (the precondition for maps larger than 262144).
 
-Nothing in Tier 2 or Tier 3 has been touched. §1 remains the largest single item.
+Tier 2 (hit-count bucketing, favored wiring) is now complete. Tier 3 (deterministic
+stages, empty-edge-set fast path) is untouched. §1 remains the largest single item.
 
 ---
 
@@ -126,39 +128,11 @@ that was not actually saturating.
 
 ### 4. No hit-count bucketing on the SHM path
 
-**Status: OPEN.**
-
-`ShmCoverage._check_new_coverage` (`adapters/shm.py:242-283`) decides novelty by
-`ids - self._seen_edge_ids`. **Set membership only.** The `count` field is faithfully
-maintained by the C shim, `get_edge_counts()` returns it, and `core/count_class.py`
-is a complete, numpy-vectorized port of AFL's `count_class_lookup16` with
-`classify_counts`, `classify_single`, and `new_bits` — but it is imported only by
-`services/ptrace_coverage.py` (the slow fallback path) and by `edge_tracker.py:671`
-for bitmap similarity. **The primary coverage path never calls it.**
-
-Consequence: an input driving a loop 2 times and one driving it 128 times are the same
-coverage. Bucketed hitcounts are the mechanism by which AFL crosses loop-count-guarded
-branches (`if (n > 16)`, buffer-growth paths, parser backtrack limits). This is the
-largest semantic coverage loss in the codebase, and the implementation is already
-written.
-
-Fix — roughly this, inside `_check_new_coverage`:
-
-```python
-# virgin: dict[int, int]  edge_id -> OR of bucket bits seen so far
-new_found = False
-for eid, cnt in zip(active["edge_id"].tolist(), active["count"].tolist()):
-    bucket = _BUCKET_BIT[classify_single(min(cnt, 255))]
-    prev = self._virgin.get(eid, 0)
-    if bucket & ~prev:
-        self._virgin[eid] = prev | bucket
-        new_found = True
-```
-
-Keep `_seen_edge_ids` for the "new edge" statistic; the bucket mask becomes the
-interestingness test. Note the `count` field is `uint32` here, not AFL's `uint8`, so
-you can either clamp to 255 or extend the class table upward — the latter gives you
-extra buckets AFL doesn't have.
+**Status: FIXED.** `_check_new_coverage` (`adapters/shm.py`) now maintains a dense
+virgin map keyed by `edge_id` with disjoint bucket-bit ladders from
+`core/count_class.py`. Counts are clamped at 255; the fast path is unchanged.
+Loop-count-guarded branches are visible to the scheduler without affecting the
+set-membership "new edge" statistic.
 
 ### 5. `favored` is threaded through the whole scheduler and never computed
 
@@ -247,23 +221,20 @@ on topic), `KalmanFilter`, `CondStmt`, `MutatorBase`, `ConstraintSet` (wfc),
 
 ## Suggested order
 
-1. **§4 — hitcount buckets.** The `count_class.py` implementation is already written
-   and already correct; it is simply not called from the SHM path. Largest semantic
-   coverage gain in the document for the smallest amount of new code.
-2. **§1 — forkserver.** Largest throughput win, largest diff.
-3. **§2 — generation-tagged reset.** Unblocks map sizes above 262144 by making the
+1. **§1 — forkserver.** Largest throughput win, largest diff.
+2. **§2 — generation-tagged reset.** Unblocks map sizes above 262144 by making the
    per-exec clear O(1). Do this before concluding anything about §2's probe cost, and
    note it turns the table-copy behaviour in `resize()` from cosmetic to load-bearing.
-4. **§2 — bounded probe window.** Cheap to evaluate now that drops are counted.
-5. **§6 — deterministic stages + SkipDet.** Real design work.
-6. **§8 — the empty-edge-set fast path.** Small, affects only the format learner.
+3. **§2 — bounded probe window.** Cheap to evaluate now that drops are counted.
+4. **§6 — deterministic stages + SkipDet.** Real design work.
+5. **§8 — the empty-edge-set fast path.** Small, affects only the format learner.
 
 **The already-fixed commits still need an A/B before they become defaults.** Nothing
 here has been measured against a real target. In particular the sizing commit enlarges
 maps, which costs more per-execution memset (§2), so its net effect on edges/second
 could be negative on a target that was not saturating.
 
-Items 1, 2, 4, 5, 6 and 7 are independently testable with `tools/bench_paired.py` against
+Items 1, 2, 3, 4 and 5 are independently testable with `tools/bench_paired.py` against
 a fixed seed and a fixed exec budget.
 
 ## Loose thread
