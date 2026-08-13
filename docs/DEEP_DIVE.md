@@ -403,7 +403,7 @@ fuzzer-tool rank ./target -d corpus -n 10 --dump top_seeds
 | `-D FILE` | Load dictionary tokens |
 | `--no-adaptive-havoc` | Draw havoc's 11 inline sub-mutations uniformly instead of weighting them by measured new-coverage rate (weighting is on by default; use this as the A/B baseline) |
 | `-g GRAMMAR` | Grammar-aware mutations (built-in: png, json, http_request, elf) |
-| `--cmplog` | Comparison tracing via LD_PRELOAD (or compile `cmplog_shim.c` into target .so for direct_lite compatibility) |
+| `--cmplog` | Comparison tracing via LD_PRELOAD (or build the target with `-D__AFL_CMPLOG=1` for direct_lite compatibility) |
 | `--cmplog-workdir` | Directory for cmplog runtime log files (default `/tmp/<target>.cmplog`). Use a disk-backed path when `/tmp` is a small tmpfs to avoid filling it. |
 | `--markov-gen` | Markov-generated seeds (rate adapts to model quality via perplexity) |
 | `--mc-bandit` | Thompson sampling operator selection (Brier score calibration) |
@@ -794,16 +794,26 @@ on a 5k-exec campaign with zero crashes.
 
 By default, `--cmplog` uses `LD_PRELOAD` to intercept comparison functions, which requires a process boundary (fork+exec). For `.so` targets in `direct_lite` mode, this doesn't work — no exec occurs.
 
-**Solution: compile cmplog into your .so at build time.** Link `cmplog_shim.c` (needs `-ldl`) alongside your target:
+**Solution: compile cmplog into your .so at build time.** The comparison
+layer lives in `afl_shim.c` behind `-D__AFL_CMPLOG=1` (needs `-ldl`):
 
 ```bash
 gcc -shared -fPIC -O2 \
+    -D__AFL_CMPLOG=1 \
     -include src/fuzzer_tool/adapters/afl_shim.c \
-    src/fuzzer_tool/adapters/cmplog_shim.c \
     targets/lz4_read.c \
     -o targets/lz4_read.so \
     -llz4 -ldl
 ```
+
+It used to be a separate `cmplog_shim.c` linked in as its own object. That
+file carried a second copy of the edge machinery behind `weak` definitions
+of `__afl_map_shm` and friends — and `weak` only loses to a strong symbol
+at *static* link time. At dynamic link time the first definition in the
+global lookup scope wins regardless of binding, and `LD_PRELOAD` precedes
+dependency `.so`s, so a preloaded `cmplog_shim.so` preempted the target's
+own `__afl_map_shm` and left `__afl_area` NULL — a run recording zero
+edges. One definition of the edge machinery removes that by construction.
 
 The fuzzer auto-detects the built-in cmplog by scanning for the `__cmplog_reset` symbol and keeps using `direct_lite` mode (no fork overhead). The log file is truncated between executions via `__cmplog_reset()`, which the fuzzer calls via ctypes after reading tokens.
 
@@ -862,10 +872,12 @@ compiler-rt's sancov runtime, which ships *weak no-op definitions* of
 before LD_PRELOAD libraries in the global symbol lookup order, so those stubs
 win and the preloaded shim is never reached — 20 call sites in the binary, 0
 lines in the log. A strong definition in the same link beats the weak stub;
-`build_tracecmp_targets` compiles `cmplog_shim.c` to an object and links it.
+`build_tracecmp_targets` passes `-D__AFL_CMPLOG=1` so the definition lands
+in the target's own TU. The callbacks are compiled with hidden visibility,
+which is stronger still: nothing can interpose them afterwards.
 
-Both layers live in the same shim (`cmplog_shim.c`) and write to the same
-`_CMPLOG_OUT` file; the collector parses both transparently.
+Both layers live in `afl_shim.c` and write to the same `_CMPLOG_OUT` file;
+the collector parses both transparently.
 
 ```bash
 # trace-cmp is ON by default when clang is available

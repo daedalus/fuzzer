@@ -11,7 +11,7 @@
 - [ ] **Fast path empty-edge-set bug** — `_check_new_coverage` returns `(False, set())` on unchanged input, but callers cache that as the real edge set, making the next diff report all edges as new.
 - [ ] **Call stack coverage** — distinguish `f()→g()` from `h()→g()` by encoding caller context into the edge ID, not just `prev_loc ^ cur_loc`. Would improve edge resolution for shared-library targets.
 - [ ] **Sanitizer coverage** — `-fsanitize-coverage=trace-pc-guard` support via `--clang-scov`, with auto-detection of sancov counters in `.so` targets.
-- [ ] **Cmplog/comparison coverage** — symbol-based (`cmplog_shim.c`, LD_PRELOAD) and compiler-IR (`trace-cmp`, `tracecmp_shim.c`) both implemented.
+- [ ] **Cmplog/comparison coverage** — symbol-based (libc interposition) and compiler-IR (`trace-cmp`) both implemented, in `afl_shim.c` behind `-D__AFL_CMPLOG=1`.
 
 ## Mutation
 - [ ] **Per-format tuning of the regularity band** — the operators are currently offered unconditionally (except `invariant_break`). Several are format-shaped in practice: `spectral_peak` matters for DCT codecs, `degenerate_geometry` for vector/mesh parsers, `rank_deficient` for erasure coders. A sniffer gate like `_FORMAT_SNIFFERS` would stop them burning budget on targets that cannot use them.

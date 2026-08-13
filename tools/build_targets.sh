@@ -25,7 +25,11 @@ set -e
 FGREP="${FGREP_DIR:-vendor/fgrep}"
 TAILSLAYER="${TAILSLAYER_DIR:-/home/dclavijo/code/tailslayer}"
 SHIM="src/fuzzer_tool/adapters/afl_shim.c"
-CMPLOG_SHIM="src/fuzzer_tool/adapters/cmplog_shim.c"
+# Comparison logging lives in $SHIM behind -D__AFL_CMPLOG=1 (it used to be a
+# separate cmplog_shim.c compiled to its own object and linked in). $CMPLOG_CFLAGS
+# is what turns it on; $CMPLOG_LIBS is the -ldl its dlsym(RTLD_NEXT) layer needs.
+CMPLOG_CFLAGS="-D__AFL_CMPLOG=1"
+CMPLOG_LIBS="-ldl"
 PERF_SHIM="src/fuzzer_tool/adapters/perf_shim.c"
 TARGETS="targets"
 VENDOR="vendor"
@@ -69,9 +73,9 @@ NOBUILTIN_CMP="-fno-builtin-memcmp -fno-builtin-bcmp -fno-builtin-strcmp"
 NOBUILTIN_CMP="$NOBUILTIN_CMP -fno-builtin-strncmp -fno-builtin-strcasecmp"
 NOBUILTIN_CMP="$NOBUILTIN_CMP -fno-builtin-strncasecmp -fno-builtin-memchr"
 NOBUILTIN_CMP="$NOBUILTIN_CMP -fno-builtin-strstr -fno-builtin-memmem"
-# strcasestr is intercepted by cmplog_shim.c but was missing here, so any
+# strcasestr is intercepted by the cmplog layer but was missing here, so any
 # target clang chose to fold it in was invisible to the libc layer. This list
-# and the interceptor list in cmplog_shim.c must be kept in step.
+# and the interceptor list in afl_shim.c must be kept in step.
 NOBUILTIN_CMP="$NOBUILTIN_CMP -fno-builtin-strcasestr"
 
 # ── Frame pointers: required by caller-context edge hashing ──────────────
@@ -440,28 +444,22 @@ build_target() {
         warn "Source not found: $src"
         return 1
     fi
-    local cmplog_obj="" cmplog_libs=""
+    local cmplog_cflags="" cmplog_libs=""
     # Vendored libraries (libpng/zlib/ffmpeg) are compiled with comparison
     # tracing, so their objects reference __sanitizer_cov_trace_const_cmp*;
     # an executable link needs a provider for those (a .so link tolerates
-    # undefined symbols). Mirror build_so_target. Excluded for MSAN/TSAN:
-    # every linked unit must be sanitizer-instrumented, and this shim is not.
-    if [ "$WITH_CMPLOG" -eq 1 ] && [ -f "$CMPLOG_SHIM" ] \
+    # undefined symbols). Mirror build_so_target. Still excluded for
+    # MSAN/TSAN: leaving the previous behaviour alone rather than assuming
+    # the in-TU layer is safe there without measuring it.
+    if [ "$WITH_CMPLOG" -eq 1 ] \
         && [[ "$extra_flags" != *-fsanitize=memory* ]] \
         && [[ "$extra_flags" != *-fsanitize=thread* ]]; then
-        local cmplog_obj_path="/tmp/fuzz_cmplog_$$.o"
-        local CMPLOG_CC="clang"
-        command -v clang &>/dev/null || CMPLOG_CC="$cc"
-        $CMPLOG_CC -O2 -g -fPIC -c "$CMPLOG_SHIM" -o "$cmplog_obj_path" 2>/dev/null
-        if [ -f "$cmplog_obj_path" ]; then
-            cmplog_obj="$cmplog_obj_path"
-            cmplog_libs="-ldl"
-        fi
+        cmplog_cflags="$CMPLOG_CFLAGS"
+        cmplog_libs="$CMPLOG_LIBS"
     fi
     local rc=0
-    $cc $extra_flags -O2 -g $extra_cflags -include "$SHIM" \
-        -o "$out" "$src" $cmplog_obj $libs $cmplog_libs 2>/dev/null || rc=$?
-    [ -n "$cmplog_obj" ] && rm -f "$cmplog_obj"
+    $cc $extra_flags -O2 -g $extra_cflags $cmplog_cflags -include "$SHIM" \
+        -o "$out" "$src" $libs $cmplog_libs 2>/dev/null || rc=$?
     if [ $rc -eq 0 ]; then
         ok "$(basename "$out")"
         record_target_md5 "$out"
@@ -473,23 +471,14 @@ build_target() {
 # ── Build a .so target ───────────────────────────────────────────
 build_so_target() {
     local src="$1" out="$2" libs="$3" extra_flags="$4" cc="${5:-$DEFAULT_CC}" extra_cflags="${6:-}"
-    local cmplog_obj="" cmplog_libs=""
+    local cmplog_cflags="" cmplog_libs=""
     if [ ! -f "$src" ]; then
         warn "Source not found: $src"
         return 1
     fi
-    if [ "$WITH_CMPLOG" -eq 1 ] && [ -f "$CMPLOG_SHIM" ]; then
-        local cmplog_obj_path="/tmp/fuzz_cmplog_$$.o"
-        # Compile cmplog shim with clang (NOT gcc) — clang generates correct
-        # __sanitizer_cov_trace_cmp* implementations. Do NOT add -fsanitize-coverage
-        # to the shim — it PROVIDES the callbacks, not calls them.
-        local CMPLOG_CC="clang"
-        command -v clang &>/dev/null || CMPLOG_CC="$cc"
-        $CMPLOG_CC -O2 -g -fPIC -c "$CMPLOG_SHIM" -o "$cmplog_obj_path" 2>/dev/null
-        if [ -f "$cmplog_obj_path" ]; then
-            cmplog_obj="$cmplog_obj_path"
-            cmplog_libs="-ldl"
-        fi
+    if [ "$WITH_CMPLOG" -eq 1 ]; then
+        cmplog_cflags="$CMPLOG_CFLAGS"
+        cmplog_libs="$CMPLOG_LIBS"
     fi
     # When ASAN is enabled, explicitly link libasan so it's resolved at load time.
     # clang -shared -fsanitize=address does NOT add NEEDED libasan.so.8 (unlike gcc),
@@ -505,6 +494,9 @@ build_so_target() {
     # for zero benefit.
     # -Bsymbolic: prevents ASAN's LD_PRELOAD from overriding the trace-cmp
     # callbacks with no-ops (ASAN ships weak stubs that shadow our shim).
+    # The callbacks are also compiled hidden now, which is the stronger
+    # guarantee; -Bsymbolic is kept because it costs nothing and still
+    # covers the __afl_* symbols.
     local bsymbolic_flag=""
     local target_cc="$cc"
     if [ "$WITH_CMPLOG" -eq 1 ]; then
@@ -513,9 +505,8 @@ build_so_target() {
             target_cc="clang"
         fi
     fi
-    $target_cc $extra_flags -O2 -g $extra_cflags -shared -fPIC $bsymbolic_flag -include "$SHIM" \
-        -o "$out" "$src" $cmplog_obj $libs $cmplog_libs 2>/dev/null || rc=$?
-    [ -n "$cmplog_obj" ] && rm -f "$cmplog_obj"
+    $target_cc $extra_flags -O2 -g $extra_cflags $cmplog_cflags -shared -fPIC $bsymbolic_flag -include "$SHIM" \
+        -o "$out" "$src" $libs $cmplog_libs 2>/dev/null || rc=$?
     if [ $rc -eq 0 ]; then
         ok "$(basename "$out")"
         record_target_md5 "$out"
@@ -787,21 +778,16 @@ build_standalone_so_targets() {
             local src="$TARGETS/tailslayer_read.cpp"
             local out="$TARGETS/tailslayer_read${out_suffix}.so"
             local inc="-I$TAILSLAYER/include"
-            local cmplog_obj="" cmplog_libs=""
-            if [ "$WITH_CMPLOG" -eq 1 ] && [ -f "$CMPLOG_SHIM" ]; then
-                # Compile cmplog shim with gcc (C, not C++) to avoid
-                # C++ const-correctness conflict on memchr signature.
-                # Do NOT add trace-cmp — the shim provides the callbacks.
-                local co="/tmp/fuzz_cmplog_tailslayer$$.o"
-                gcc $flags -O2 -g -fPIC -c "$CMPLOG_SHIM" -o "$co" 2>/dev/null && cmplog_obj="$co" && cmplog_libs="-ldl"
-            fi
-            # Use g++ for link, but compile the .cpp with -include afl_shim only.
-            # cmplog_shim.o is already a compiled C object (no -include needed).
+            local cmplog_cflags="" cmplog_libs=""
+            # This one is a C++ TU. The cmplog layer's memchr/strstr/strcasestr
+            # interceptors use the C signatures; C++ overloads the const-ness,
+            # so keep it off here rather than fight the declaration mismatch.
+            # (It was already effectively separate: the old build compiled the
+            # shim as its own C object precisely to dodge this.)
             local bsym_flag=""
             [ "$WITH_CMPLOG" -eq 1 ] && bsym_flag="-Wl,-Bsymbolic"
             $cxx $flags -O2 -g -shared -fPIC $bsym_flag -include "$SHIM" $inc \
-                -o "$out" "$src" $cmplog_obj $cmplog_libs 2>/dev/null && ok "tailslayer_read${out_suffix}.so" || warn "failed: tailslayer_read${out_suffix}.so"
-            [ -n "$cmplog_obj" ] && rm -f "$cmplog_obj"
+                -o "$out" "$src" $cmplog_cflags $cmplog_libs 2>/dev/null && ok "tailslayer_read${out_suffix}.so" || warn "failed: tailslayer_read${out_suffix}.so"
         fi
     elif [ -f "$TARGETS/tailslayer_read.cpp" ] && [ ! -d "$TAILSLAYER/include" ]; then
         warn "tailslayer_read${out_suffix}.so: tailslayer headers not found at $TAILSLAYER/include, skipping"
@@ -1130,18 +1116,16 @@ build_distance_so_targets() {
             local name="${spec%%:*}"
             local libs="${spec#*:}"
             [ -f "$TARGETS/$name.c" ] || continue
-            local cmplog_obj=""
+            local cmplog_cflags=""
             local cmplog_libs=""
-            if [ "$WITH_CMPLOG" -eq 1 ] && [ -f "$CMPLOG_SHIM" ]; then
-                local co="/tmp/fuzz_cmplog_dist_$$.o"
-                clang -O2 -g -fPIC -c "$CMPLOG_SHIM" -o "$co" 2>/dev/null
-                [ -f "$co" ] && cmplog_obj="$co" && cmplog_libs="-ldl"
+            if [ "$WITH_CMPLOG" -eq 1 ]; then
+                cmplog_cflags="$CMPLOG_CFLAGS"
+                cmplog_libs="$CMPLOG_LIBS"
             fi
             clang $extra_flags -g -D__AFL_DISTANCE_MODE -fsanitize-coverage=trace-pc \
-                -shared -fPIC -Wl,-Bsymbolic -include "$SHIM" \
+                $cmplog_cflags -shared -fPIC -Wl,-Bsymbolic -include "$SHIM" \
                 -o "$TARGETS/${name}${out_suffix}.so" "$TARGETS/$name.c" \
-                $cmplog_obj $libs $cmplog_libs 2>/dev/null
-            [ -n "$cmplog_obj" ] && rm -f "$cmplog_obj"
+                $libs $cmplog_libs 2>/dev/null
             if [ -f "$TARGETS/${name}${out_suffix}.so" ]; then
                 ok "${name}${out_suffix}.so ($label)"
             else
@@ -1351,7 +1335,7 @@ build_tracecmp_targets() {
     echo "Building trace-cmp targets ($CC)..."
     local TRACE_FLAGS="-fsanitize-coverage=trace-cmp,trace-pc-guard"
 
-    # The shim must be LINKED IN, not LD_PRELOADed.
+    # The callbacks must be COMPILED IN, not LD_PRELOADed.
     #
     # -fsanitize-coverage pulls in compiler-rt's sancov runtime, which ships
     # *weak no-op definitions* of __sanitizer_cov_trace_{,const_}cmp{1,2,4,8}.
@@ -1360,15 +1344,9 @@ build_tracecmp_targets() {
     # immediately -- the preloaded shim is never reached. Measured: an -O2
     # trace-cmp build of cmplog_exercise.c logged 4 CMP lines under
     # LD_PRELOAD (all from memchr, i.e. the libc layer only) and 20 with the
-    # shim linked. A strong definition in the same link beats the weak stub.
-    local cmplog_obj=""
-    if [ -f "$CMPLOG_SHIM" ]; then
-        cmplog_obj="/tmp/fuzz_cmplog_tcg_$$.o"
-        # No -fsanitize-coverage on the shim itself: it PROVIDES the
-        # callbacks, it does not call them.
-        $CC -O2 -g -fPIC -c "$CMPLOG_SHIM" -o "$cmplog_obj" 2>/dev/null || cmplog_obj=""
-    fi
-    [ -z "$cmplog_obj" ] && warn "cmplog shim object unavailable — trace-cmp callbacks will be no-ops"
+    # shim linked. A strong definition in the same link beats the weak stub;
+    # -D__AFL_CMPLOG=1 puts one directly in the target's own TU, and marks
+    # the callbacks hidden so nothing can interpose them afterwards.
 
     # $NOBUILTIN_CMP keeps memcmp/strcmp at the PLT so the libc layer still
     # sees their operands; trace-cmp cannot recover those (see the note at
@@ -1380,8 +1358,8 @@ build_tracecmp_targets() {
         [ -f "$src" ] || { warn "source not found: $src"; continue; }
 
         rc=0
-        $CC -O2 -g $TRACE_FLAGS $NOBUILTIN_CMP -include "$SHIM" \
-            -o "$TARGETS/${spec}_tcg" "$src" $cmplog_obj -ldl 2>/dev/null || rc=$?
+        $CC -O2 -g $TRACE_FLAGS $NOBUILTIN_CMP $CMPLOG_CFLAGS -include "$SHIM" \
+            -o "$TARGETS/${spec}_tcg" "$src" $CMPLOG_LIBS 2>/dev/null || rc=$?
         if [ $rc -eq 0 ]; then
             ok "${spec}_tcg (trace-cmp + no-builtin)"
         else
@@ -1389,9 +1367,9 @@ build_tracecmp_targets() {
         fi
 
         rc=0
-        $CC -O2 -g $TRACE_FLAGS $NOBUILTIN_CMP -shared -fPIC -Wl,-Bsymbolic \
+        $CC -O2 -g $TRACE_FLAGS $NOBUILTIN_CMP $CMPLOG_CFLAGS -shared -fPIC -Wl,-Bsymbolic \
             -include "$SHIM" \
-            -o "$TARGETS/${spec}_tcg.so" "$src" $cmplog_obj -ldl 2>/dev/null || rc=$?
+            -o "$TARGETS/${spec}_tcg.so" "$src" $CMPLOG_LIBS 2>/dev/null || rc=$?
         if [ $rc -eq 0 ]; then
             ok "${spec}_tcg.so (trace-cmp + no-builtin)"
         else
@@ -1399,15 +1377,19 @@ build_tracecmp_targets() {
         fi
     done
 
-    [ -n "$cmplog_obj" ] && rm -f "$cmplog_obj"
-
     # Verify the callbacks are DEFINED (T) in the target, not left undefined
     # for a preload that cannot win the lookup, and not the runtime's weak
     # no-op stub (W).
     for f in "$TARGETS/tracecmp_target_tcg" "$TARGETS/cmplog_exercise_tcg"; do
         [ -f "$f" ] || continue
-        if nm "$f" 2>/dev/null | grep -qE "^[0-9a-f]+ T __sanitizer_cov_trace_const_cmp4$"; then
-            ok "$(basename "$f"): trace-cmp callbacks linked in (strong)"
+        # T or t. The callbacks are compiled with hidden visibility now, and
+        # the static linker resolves a fully-linked hidden global to a LOCAL
+        # symbol -- nm prints 't'. That is strictly stronger than the 'T'
+        # this check was written to assert: local means nothing outside the
+        # binary can interpose it. 'W' is still the failure (the sancov
+        # runtime's weak no-op won and cmplog would see nothing).
+        if nm "$f" 2>/dev/null | grep -qE "^[0-9a-f]+ [Tt] __sanitizer_cov_trace_const_cmp4$"; then
+            ok "$(basename "$f"): trace-cmp callbacks compiled in (non-interposable)"
         else
             warn "$(basename "$f"): trace-cmp callbacks are weak no-ops — cmplog will see nothing"
         fi

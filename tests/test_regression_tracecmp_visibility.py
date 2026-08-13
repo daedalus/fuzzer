@@ -25,6 +25,10 @@ Three separate defects made the compiler-IR layer inert, each silent:
    still catches genuine inline integer compares and switch dispatch that
    the libc layer cannot see.
 
+The shim is now compiled into the target with ``-D__AFL_CMPLOG=1`` rather
+than linked as a separate ``cmplog_shim.o``. "Linked in" in the numbers
+below means that gate is on.
+
 Constants from ``cmplog_exercise.c`` reaching the pair pool, seed
 ``AAAAAAAAAAAAAAAA``:
 
@@ -52,7 +56,6 @@ from tests.conftest import requires_clang
 REPO = Path(__file__).parent.parent
 SCRIPT = REPO / "tools" / "build_targets.sh"
 AFL_SHIM = REPO / "src" / "fuzzer_tool" / "adapters" / "afl_shim.c"
-CMPLOG_SHIM = REPO / "src" / "fuzzer_tool" / "adapters" / "cmplog_shim.c"
 EXERCISE = REPO / "targets" / "cmplog_exercise.c"
 
 # Every magic constant cmplog_exercise.c compares against.
@@ -109,8 +112,11 @@ def test_tracecmp_targets_link_the_shim(script_text: str):
     """LD_PRELOAD loses to the runtime's weak no-op stubs."""
     body = script_text[script_text.index("build_tracecmp_targets()") :]
     body = body[: body.index("\n}\n")]
-    assert "$CMPLOG_SHIM" in body and "cmplog_obj" in body, (
-        "the cmplog shim must be linked into trace-cmp targets, not preloaded"
+    assert "$CMPLOG_CFLAGS" in body and "$CMPLOG_LIBS" in body, (
+        "the cmplog layer must be compiled into trace-cmp targets, not preloaded"
+    )
+    assert "cmplog_obj" not in body, (
+        "the separate cmplog object is gone; it now lives in afl_shim.c"
     )
 
 
@@ -125,17 +131,12 @@ def test_cmplog_exercise_gets_a_tracecmp_build(script_text: str):
 
 def _compile(tmpdir, name, flags, link_shim):
     out = os.path.join(tmpdir, name)
-    cmd = ["clang", "-O2", "-g", *flags, "-include", str(AFL_SHIM), "-o", out, str(EXERCISE)]
+    cmd = ["clang", "-O2", "-g", *flags]
     if link_shim:
-        obj = os.path.join(tmpdir, "cmplog_shim.o")
-        if not os.path.exists(obj):
-            r = subprocess.run(
-                ["clang", "-O2", "-g", "-fPIC", "-c", str(CMPLOG_SHIM), "-o", obj],
-                capture_output=True,
-                timeout=120,
-            )
-            assert r.returncode == 0, r.stderr.decode()[:400]
-        cmd += [obj, "-ldl"]
+        cmd += ["-D__AFL_CMPLOG=1"]
+    cmd += ["-include", str(AFL_SHIM), "-o", out, str(EXERCISE)]
+    if link_shim:
+        cmd += ["-ldl"]
     r = subprocess.run(cmd, capture_output=True, timeout=120)
     assert r.returncode == 0, r.stderr.decode()[:400]
     return out
@@ -230,7 +231,17 @@ def test_linked_shim_beats_preloaded_shim():
     with tempfile.TemporaryDirectory() as tmp:
         shim_so = os.path.join(tmp, "shim.so")
         r = subprocess.run(
-            ["clang", "-shared", "-fPIC", "-O2", "-ldl", "-o", shim_so, str(CMPLOG_SHIM)],
+            [
+                "clang",
+                "-shared",
+                "-fPIC",
+                "-O2",
+                "-D__AFL_PRELOAD_ONLY",
+                "-ldl",
+                "-o",
+                shim_so,
+                str(AFL_SHIM),
+            ],
             capture_output=True,
             timeout=120,
         )
@@ -241,7 +252,7 @@ def test_linked_shim_beats_preloaded_shim():
         linked = _pool(tmp, _compile(tmp, "lnk", flags, link_shim=True))
 
         assert len(linked) > len(preloaded), (
-            f"linking the shim gained nothing ({len(linked)} vs "
+            f"compiling the shim in gained nothing ({len(linked)} vs "
             f"{len(preloaded)} operands) -- expected the preloaded build to "
             "lose its trace-cmp callbacks to the runtime's weak stubs"
         )

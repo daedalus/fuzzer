@@ -1,4 +1,4 @@
-"""Tests for the unified cmplog_shim.c — both libc and compiler-IR tracing."""
+"""Tests for the cmplog layer of afl_shim.c — both libc and compiler-IR tracing."""
 
 import ctypes
 import os
@@ -6,19 +6,34 @@ import subprocess
 import tempfile
 
 SHIM_REL = os.path.join(
-    os.path.dirname(__file__), "..", "src", "fuzzer_tool", "adapters", "cmplog_shim.c"
+    os.path.dirname(__file__), "..", "src", "fuzzer_tool", "adapters", "afl_shim.c"
 )
 
 
 def _build_shim() -> str:
-    """Compile the unified cmplog shim into a temp .so."""
-    assert os.path.exists(SHIM_REL), f"cmplog_shim.c not found at {SHIM_REL}"
+    """Compile the LD_PRELOAD comparison-logging shim into a temp .so.
+
+    -D__AFL_PRELOAD_ONLY is what CmplogCollector.start() uses: the libc and
+    trace-cmp layers with default visibility (interposition is the point),
+    and none of the __afl_* edge symbols.
+    """
+    assert os.path.exists(SHIM_REL), f"afl_shim.c not found at {SHIM_REL}"
     fd, out_path = tempfile.mkstemp(suffix=".so", prefix="test_cmplog_")
     os.close(fd)
     result = subprocess.run(
-        ["gcc", "-shared", "-fPIC", "-O2", "-ldl", "-o", out_path, SHIM_REL],
+        [
+            "gcc",
+            "-shared",
+            "-fPIC",
+            "-O2",
+            "-D__AFL_PRELOAD_ONLY",
+            "-ldl",
+            "-o",
+            out_path,
+            SHIM_REL,
+        ],
         capture_output=True,
-        timeout=30,
+        timeout=60,
     )
     assert result.returncode == 0, f"Shim compilation failed: {result.stderr.decode()[:200]}"
     return out_path

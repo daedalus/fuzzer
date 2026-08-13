@@ -1,6 +1,6 @@
 """Regression: the digest-keyed shim cache grew without bound.
 
-Keying the cached ``.so`` on ``sha256(cmplog_shim.c)[:16]`` is what forces a
+Keying the cached ``.so`` on ``sha256(afl_shim.c)[:16]`` is what forces a
 recompile after every edit -- but nothing reclaimed the superseded digests,
 and the pre-digest fixed-name ``fuzz_cmplog_shim.so`` was never removed
 either. Every edit to the shim left another artifact behind in

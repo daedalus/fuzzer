@@ -5,13 +5,14 @@
 Compiler-IR comparison tracing (`-fsanitize-coverage=trace-cmp`) intercepts
 **every comparison in the binary** — including ones that the compiler inlines
 and folds into integer instructions. This catches comparisons that the
-symbol-based `cmplog_shim` (which intercepts `memcmp`/`strcmp`) misses.
+symbol-based libc layer (which intercepts `memcmp`/`strcmp`) misses. Both
+layers live in `src/fuzzer_tool/adapters/afl_shim.c` behind
+`-D__AFL_CMPLOG=1`; they used to be a separate `cmplog_shim.c`.
 
 When you compile a library (like libpng or zlib) with `trace-cmp`, every
 `if`, `switch`, `==`, `!=` inside that library fires a
-`__sanitizer_cov_trace_cmp*` callback. At runtime, the `cmplog_shim`
-provides the logging implementations that write operand pairs to the
-`_CMPLOG_OUT` file. The fuzzer's `CmplogCollector` reads them — producing
+`__sanitizer_cov_trace_cmp*` callback. The shim provides the logging
+implementations that write operand pairs to the `_CMPLOG_OUT` file. The fuzzer's `CmplogCollector` reads them — producing
 dictionary tokens from comparisons in library code, not just your wrapper.
 
 ## Prerequisites
@@ -51,12 +52,13 @@ trace-cmp vs non-trace-cmp performance.
 
 When you pass `--cmplog` to `build_targets.sh`, the build script:
 
-1. **Compiles `cmplog_shim.c` with Clang** into a separate `.o`
+1. **Passes `-D__AFL_CMPLOG=1`** so the callbacks are compiled into the
+   target's own translation unit (there is no separate shim object any more)
 2. **Detects vendored `.a` files** (`vendor/zlib/libz.a`,
    `vendor/libpng/.libs/libpng16.a`) compiled with trace-cmp — these contain
    `U` references to `__sanitizer_cov_trace_cmp*` from every comparison in
    library code
-3. **Links the shim `.o` + vendored `.a` files into the target `.so`** —
+3. **Links the vendored `.a` files into the target `.so`** —
    the linker resolves the vendored libs' `U` trace-cmp references to the
    shim's `T` implementations within the same `.so`
 4. **Adds `-Wl,-Bsymbolic`** so those resolutions stay internal and ASAN's
@@ -109,10 +111,10 @@ and preventing ASAN's LD_PRELOAD from intercepting them.
 
 ```bash
 clang -O2 -g -fsanitize=address -fsanitize-coverage=trace-cmp,trace-pc-guard \
-    -shared -fPIC -Wl,-Bsymbolic \
+    -shared -fPIC -Wl,-Bsymbolic -D__AFL_CMPLOG=1 \
     -include src/fuzzer_tool/adapters/afl_shim.c \
     -o targets/my_target.so targets/my_target.c \
-    /tmp/cmplog_shim.o vendor/libpng/.libs/libpng16.a vendor/zlib/libz.a -lm -ldl
+    vendor/libpng/.libs/libpng16.a vendor/zlib/libz.a -lm -ldl
 ```
 
 `build_targets.sh --asan --cmplog` applies this automatically.
@@ -138,8 +140,9 @@ vendored libpng code → direct call to shim's implementation (binding resolved 
 ```bash
 # Build with -Bsymbolic
 clang -O2 -g -fsanitize=address -fsanitize-coverage=trace-cmp,trace-pc-guard \
-    -shared -fPIC -Wl,-Bsymbolic -include src/fuzzer_tool/adapters/afl_shim.c \
-    -o /tmp/test.so targets/png_read.c /tmp/cmplog_shim.o \
+    -shared -fPIC -Wl,-Bsymbolic -D__AFL_CMPLOG=1 \
+    -include src/fuzzer_tool/adapters/afl_shim.c \
+    -o /tmp/test.so targets/png_read.c \
     vendor/libpng/.libs/libpng16.a vendor/zlib/libz.a -lm -ldl
 
 # Run with ASAN — should produce cmplog output
@@ -157,19 +160,17 @@ wc -l /tmp/cmp.log  # Should show >0 CMP lines
 
 ### Alternative: `-fvisibility=hidden`
 
-If `-Bsymbolic` causes issues with other symbol resolution, an alternative is
-to compile the cmplog shim with hidden visibility so its trace-cmp symbols are
-local to the `.so`:
+This is now belt-and-braces: the trace-cmp callbacks are compiled with
+`visibility("hidden")` in `-D__AFL_CMPLOG=1` builds, so they never appear in
+the dynamic symbol table and ASAN's LD_PRELOAD cannot see or override them
+regardless of `-Bsymbolic`. The lifecycle symbols (`__cmplog_reset`,
+`__tracecmp_flush`) keep explicit `visibility("default")` — the fuzzer calls
+them through `ctypes`, and `_detect_cmplog` greps for `__cmplog_reset`.
 
-```bash
-clang -O2 -g -fsanitize=address -fvisibility=hidden -fPIC -c \
-    src/fuzzer_tool/adapters/cmplog_shim.c -o /tmp/cmplog_shim.o
-```
-
-This prevents the symbols from appearing in the dynamic symbol table, so
-ASAN's LD_PRELOAD can't see or override them. The lifecycle symbols
-(`__cmplog_reset`, `__tracecmp_flush`) need explicit `visibility("default")`
-attributes (already present in the shim).
+The `-D__AFL_PRELOAD_ONLY` build is the exception: interposition is the whole
+point there, so its callbacks stay `default`. That build contains no edge
+machinery at all, which is why it cannot shadow an instrumented target the
+way the old standalone `cmplog_shim.so` could.
 
 ## Why `.so` not executable for in-process mode
 
@@ -180,8 +181,8 @@ and they cannot be overridden by LD_PRELOAD.
 
 When clang builds a **shared library** (`.so`) with the same flags, the
 `__sanitizer_cov_trace_cmp*` symbols are left **undefined (`U`)**. They
-are resolved at load time by the linked `cmplog_shim.o`, which provides the
-strong definitions that actually log.
+are resolved at load time by the definitions `-D__AFL_CMPLOG=1` compiled
+into the same `.so`.
 
 **Always use the `.so` variant** when fuzzing in-process.
 
@@ -221,10 +222,9 @@ Build directly:
 
 ```bash
 clang -O2 -g -fsanitize-coverage=trace-cmp,trace-pc-guard -shared -fPIC \
-    -Wl,-Bsymbolic \
+    -Wl,-Bsymbolic -D__AFL_CMPLOG=1 \
     -include src/fuzzer_tool/adapters/afl_shim.c \
-    -o targets/my_target_tracecmp.so targets/my_target.c \
-    /tmp/cmplog_shim.o
+    -o targets/my_target_tracecmp.so targets/my_target.c -ldl
 ```
 
 Comparisons in your target code will be captured, but comparisons in any
@@ -235,7 +235,9 @@ dynamically linked system libraries will not.
 The fuzzer's `CmplogCollector` (in `src/fuzzer_tool/core/cmplog.py`) handles
 the cmplog shim automatically:
 
-1. On `start()`, it compiles `cmplog_shim.c` into a `.o` and links it
+1. On `start()`, it compiles `afl_shim.c -D__AFL_PRELOAD_ONLY` into a `.so`
+   for `LD_PRELOAD` — needed only for targets that were *not* built with
+   `-D__AFL_CMPLOG=1`
 2. `_CMPLOG_OUT` is set in `os.environ` before the target loads (both
    `direct_lite` and `persistent` modes inherit it)
 3. The `.so` constructor opens `_CMPLOG_OUT` for appending at load time
@@ -290,8 +292,10 @@ Verifying vendored trace-cmp resolution...
 
 - **Vendor callers**: `U` (undefined) references to `__sanitizer_cov_trace_cmp*`
   in the vendor `.a` files — each one is a comparison site in libpng/zlib.
-- **.so implems**: `T` (text/defined) callback implementations from
-  `cmplog_shim.o` linked into each `.so`.
+- **.so implems**: defined callback implementations compiled into each
+  `.so`. Note these are now `t` (local) rather than `T`, because hidden
+  visibility resolves to a local symbol — stronger than `T`, since nothing
+  outside the object can interpose it.
 - **.so unresolved**: any remaining `U` after linking — must be 0.
 
 ### Manual static checks
@@ -357,7 +361,7 @@ wc -l /tmp/cmp.log  # Should show >0 CMP lines (~85 for minimal PNG)
   captures comparisons in the wrapper itself (1 callback). To instrument
   libjpeg, add `vendor/libjpeg-turbo` and compile with trace-cmp.
 - **Double counting**: if the same comparison operand appears from both the
-  symbol-based shim (`cmplog_shim`) and the IR-level tracing, the
+  symbol-based libc layer and the IR-level tracing, the
   `CmplogCollector` deduplicates by token value, so there's no harm.
 - **Performance**: `trace-cmp` adds a callback per comparison instruction,
   which is more overhead than just `trace-pc-guard`. Expect slower execution

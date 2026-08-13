@@ -24,7 +24,7 @@ import tempfile
 from tests.conftest import requires_clang
 
 SHIM_REL = os.path.join(
-    os.path.dirname(__file__), "..", "src", "fuzzer_tool", "adapters", "cmplog_shim.c"
+    os.path.dirname(__file__), "..", "src", "fuzzer_tool", "adapters", "afl_shim.c"
 )
 
 # Distinctive operands so libc's own internal string work cannot be mistaken

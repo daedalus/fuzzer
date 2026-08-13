@@ -1752,6 +1752,12 @@ class Fuzzer:
                             "[*] Trace-cmp: compiled into target .so (direct_lite compatible, preloading shim)"
                         )
                 else:
+                    # Matches the artifact FILENAME, not the source file. The
+                    # preload shim is still cached as
+                    # fuzz_cmplog_shim.<digest>.so; it is built from
+                    # afl_shim.c -D__AFL_PRELOAD_ONLY now that cmplog_shim.c
+                    # is gone. tracecmp_shim is a name from an older split
+                    # that external wrappers may still preload.
                     ld_preload = os.environ.get("LD_PRELOAD", "")
                     shim_in_preload = "cmplog_shim" in ld_preload or "tracecmp_shim" in ld_preload
                     if not shim_in_preload:

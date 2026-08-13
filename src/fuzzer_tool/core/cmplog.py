@@ -1,7 +1,8 @@
 """Cmplog collector: parse comparison tracing output and feed into dictionary.
 
-A single unified shim (cmplog_shim.c) provides two complementary
-interception layers, both writing to the same CMP log file:
+The shim lives in ``adapters/afl_shim.c`` behind ``-D__AFL_CMPLOG=1`` and
+provides two complementary interception layers, both writing to the same
+CMP log file:
 
 1. Symbol-based: intercepts libc comparison functions (memcmp/strcmp/strncmp/
    memchr/strcasecmp/strncasecmp/memmem/strstr/strcasestr) via LD_PRELOAD or
@@ -11,7 +12,15 @@ interception layers, both writing to the same CMP log file:
    callbacks (__sanitizer_cov_trace_cmp*, __sanitizer_cov_trace_switch) that
    fire after the compiler has inlined/folded comparisons into integer compares.
 
-Both layers are compiled into a single .so — no need for separate shims.
+Both layers are compiled directly into the target (``-include afl_shim.c
+-D__AFL_CMPLOG=1``), which is the only arrangement in which they reliably
+fire — see the symbol-resolution note at the top of ``afl_shim.c``.
+
+For targets that were NOT built with the shim there is still an
+LD_PRELOAD fallback, compiled from the same source with
+``-D__AFL_PRELOAD_ONLY``. That build deliberately contains no edge
+machinery at all, so it cannot preempt an instrumented target's
+``__afl_map_shm`` the way the old standalone ``cmplog_shim.so`` could.
 """
 
 import binascii
@@ -60,7 +69,9 @@ def _cleanup_stale_cmplog_files():
 
 # Legacy fixed-name artifact from before the shim cache was keyed on the
 # source digest. Never overwritten once the digest scheme landed, so it
-# lingers forever unless explicitly removed.
+# lingers forever unless explicitly removed. Objects built from the old
+# cmplog_shim.c share the same fuzz_cmplog_shim.<digest>.so naming, so the
+# digest change alone retires them through the existing prune path.
 _LEGACY_SHIM_NAME = "fuzz_cmplog_shim.so"
 
 
@@ -163,18 +174,29 @@ class CmplogCollector:
         self._read_offset: int = 0
 
     def start(self) -> bool:
-        """Compile and prepare the unified cmplog shim."""
+        """Compile the LD_PRELOAD comparison-logging shim.
+
+        Built from afl_shim.c with ``-D__AFL_PRELOAD_ONLY``: the libc and
+        trace-cmp layers only, no ``__afl_map_shm`` / ``__afl_map_reset`` /
+        ``__sanitizer_cov_trace_pc_guard``. Emitting those was what let the
+        old cmplog_shim.so win the global lookup ahead of an instrumented
+        target and leave its ``__afl_area`` NULL.
+
+        Only needed for targets that were not built with the shim compiled
+        in; when it is compiled in, ``_detect_cmplog`` finds ``__cmplog_reset``
+        and no preload happens.
+        """
         from fuzzer_tool.adapters.shim_factory import _find_compiler
 
-        shim_src = os.path.join(os.path.dirname(__file__), "..", "adapters", "cmplog_shim.c")
+        shim_src = os.path.join(os.path.dirname(__file__), "..", "adapters", "afl_shim.c")
         if not os.path.exists(shim_src):
-            log.warning("cmplog_shim.c not found at %s", shim_src)
+            log.warning("afl_shim.c not found at %s", shim_src)
             return False
 
         # Use disk-backed directory (avoid tmpfs-full failures)
         cmplog_dir = _get_cmplog_dir()
         # Key the cached artifact on the source digest so any edit to
-        # cmplog_shim.c forces a recompile instead of silently loading a
+        # afl_shim.c forces a recompile instead of silently loading a
         # stale .so for the life of the machine.
         try:
             with open(shim_src, "rb") as _f:
@@ -199,7 +221,17 @@ class CmplogCollector:
                     _parts = [p for p in _ld_preload.split(":") if "libasan" not in p]
                     _env["LD_PRELOAD"] = ":".join(_parts) if _parts else ""
                 result = __import__("subprocess").run(
-                    [compiler, "-shared", "-fPIC", "-O2", "-ldl", "-o", out_path, shim_src],
+                    [
+                        compiler,
+                        "-shared",
+                        "-fPIC",
+                        "-O2",
+                        "-D__AFL_PRELOAD_ONLY",
+                        "-ldl",
+                        "-o",
+                        out_path,
+                        shim_src,
+                    ],
                     capture_output=True,
                     timeout=30,
                     env=_env,
@@ -388,11 +420,19 @@ class CmplogCollector:
                         operand_b = binascii.unhexlify(hex_b)
                         tokens.add(operand_a)
                         tokens.add(operand_b)
-                        # Optional PC field (trace mode) — last field if present
+                        # Optional PC field (trace mode) — last field if present.
+                        #
+                        # base 0, not base 10. The shim writes it with the %p
+                        # convention ("0x55f65c387346"), which int(s) rejects
+                        # outright -- the ValueError was suppressed, so pc was
+                        # silently None for every record ever written and
+                        # _pair_pc has always been empty. base 0 reads the
+                        # 0x-prefixed form and plain decimal alike, so older
+                        # logs keep parsing.
                         pc = None
                         if len(parts) >= 5:
                             with contextlib.suppress(ValueError, IndexError):
-                                pc = int(parts[-1])
+                                pc = int(parts[-1], 0)
                         # Comparison outcome and operand width, emitted by the
                         # shim as fields 3 and 4 ("CMP <a> <b> <result> <n> <pc>").
                         cmp_meta = None

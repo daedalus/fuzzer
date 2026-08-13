@@ -21,6 +21,48 @@
  *   (no __sancov_lowest_stack definition — the sanitizer runtimes own
  *   that symbol as a TLS variable; see the stack-tracking note below)
  *
+ * With -D__AFL_CMPLOG=1 it additionally provides comparison logging
+ * (formerly cmplog_shim.c), writing CMP records to $_CMPLOG_OUT:
+ *   - libc interposition: memcmp/strcmp/strncmp/memchr/strcasecmp/
+ *     strncasecmp/memmem/strstr/strcasestr
+ *   - Clang -fsanitize-coverage=trace-cmp callbacks
+ *     (__sanitizer_cov_trace_cmp{1,2,4,8}, trace_const_cmp*, trace_switch)
+ *   - __cmplog_reset() / __tracecmp_flush() / __tracecmp_reset()
+ *
+ * ── Why the cmplog layer lives here and not in its own .so ────────────
+ *
+ * It used to be a separate cmplog_shim.c carrying its own copy of the edge
+ * machinery (byte bitmap + Morris counting) behind `weak` definitions of
+ * __afl_map_shm/__afl_map_reset/__sanitizer_cov_trace_pc_guard{,_init}.
+ * `weak` only loses to a strong definition at STATIC link time. At dynamic
+ * link time the first definition in the global lookup scope wins regardless
+ * of binding, and LD_PRELOAD precedes dependency .so's -- so a preloaded
+ * cmplog_shim.so preempted the target's own __afl_map_shm and the target's
+ * __afl_area stayed NULL. Measured on a .so target built without
+ * -Wl,-Bsymbolic: __afl_area = 0x7f4c757d6018 without the preload, (nil)
+ * with it, i.e. the run recorded zero edges. Three further defects came
+ * from the same duplication: the segment was attached twice (its
+ * constructor re-called __afl_map_shm), AFL_MAP_SIZE was read as *bytes*
+ * there and as *entries* here, and its crash handler restored the previous
+ * disposition permanently so the comparison buffer was flushed on the first
+ * crash only.
+ *
+ * One definition of the edge machinery removes all four by construction.
+ * The cmplog layer now reuses this file's intrinsics: __afl_map_shm for
+ * attachment, __afl_crash_handler for the pre-crash flush (every crash, not
+ * just the first), __afl_auto_init for setup, and hidden visibility on the
+ * trace-cmp callbacks so no LD_PRELOAD can interpose them.
+ *
+ * Build modes:
+ *   -D__AFL_CMPLOG=1       edge coverage + comparison logging (needs -ldl)
+ *   (default)              edge coverage only
+ *   -D__AFL_PRELOAD_ONLY   comparison logging only, no edge machinery --
+ *                          the LD_PRELOAD artifact for targets that were
+ *                          never built with this shim. It deliberately
+ *                          defines none of the __afl_* / trace_pc_guard
+ *                          symbols, so it cannot shadow an instrumented
+ *                          target the way cmplog_shim.so could.
+ *
  * Metadata layout (24 bytes at front of SHM):
  *   offset 0: uint32 stack_depth   (max stack depth in bytes)
  *   offset 4: uint32 _pad
@@ -41,12 +83,71 @@
  * Add -D__AFL_CTX_SENSITIVE=0 to opt back into the old plain
  * prev_loc^cur_loc hash unconditionally.
  */
-#ifdef __AFL_DISTANCE_MODE
-/* dladdr/Dl_info need _GNU_SOURCE before any system header. */
+/* Unconditional: dladdr/Dl_info (__AFL_DISTANCE_MODE) and RTLD_NEXT /
+ * memmem / strcasestr (__AFL_CMPLOG) all need it before any system
+ * header, and getting it wrong is a silent implicit-declaration. */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE 1
 #endif
+
+/* ── Build-mode gates ─────────────────────────────────────────────────
+ *
+ * __AFL_EDGE    the coverage machinery (default on)
+ * __AFL_CMPLOG  the comparison-logging layer (default off)
+ *
+ * cmplog is off by default because it is not free: it defines memcmp,
+ * strcmp and friends, so every call in the target routes through an
+ * interposer, and the link acquires -ldl. Turning it on per target keeps
+ * that cost where it buys something, and keeps __cmplog_reset out of the
+ * symbol table of targets that do not have it -- which is what
+ * services/fuzzer.py::_detect_cmplog reads to decide whether the target
+ * can run in direct_lite mode. A shim that always exported the symbol
+ * would make that probe a constant.
+ */
+#ifdef __AFL_PRELOAD_ONLY
+#  undef __AFL_CMPLOG
+#  define __AFL_CMPLOG 1
+#  define __AFL_EDGE 0
+#else
+#  define __AFL_EDGE 1
 #endif
+
+#ifndef __AFL_CMPLOG
+#  define __AFL_CMPLOG 0
+#endif
+
+/* ── Keeping the logger out of its own instrumentation ────────────────
+ *
+ * cmplog_shim.c was a separate translation unit, deliberately compiled
+ * without -fsanitize-coverage ("it PROVIDES the callbacks, it does not
+ * call them"). Merged in via -include it is part of the TARGET's TU and
+ * gets instrumented with everything else.
+ *
+ * SanitizerCoverage skips functions named __sanitizer_cov_*, so the
+ * callbacks themselves are safe -- but the record writer they call is not.
+ * It contains comparisons, those comparisons get trace-cmp callbacks, and
+ * the callback calls the record writer again: unbounded recursion, which
+ * arrives as a stack-overflow SIGSEGV at startup rather than as anything
+ * that looks like a coverage bug. Reproduced on
+ * `gcc -D__AFL_CMPLOG=1 -fsanitize-coverage=trace-cmp` before this guard.
+ *
+ * __AFL_NO_COV suppresses instrumentation per function; the re-entrancy
+ * flag in __afl_cmplog_ints is the backstop for toolchains without the
+ * attribute. Both are cheap, and the failure mode without them is bad
+ * enough to justify belt and braces. */
+#if defined(__clang__)
+#  if defined(__has_attribute) && __has_attribute(no_sanitize)
+#    define __AFL_NO_COV __attribute__((no_sanitize("coverage")))
+#  endif
+#elif defined(__GNUC__)
+#  if defined(__has_attribute) && __has_attribute(no_sanitize_coverage)
+#    define __AFL_NO_COV __attribute__((no_sanitize_coverage))
+#  endif
+#endif
+#ifndef __AFL_NO_COV
+#  define __AFL_NO_COV
+#endif
+
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -57,10 +158,20 @@
 #include <sys/ipc.h>
 #include <sys/shm.h>
 
+#if __AFL_CMPLOG
+#include <dlfcn.h>
+#include <fcntl.h>
+static void __afl_cmplog_flush(void);
+static void __afl_cmplog_init(void);
+static void __afl_cmplog_fini(void);
+#endif
+
 #ifdef __AFL_DISTANCE_MODE
 #include <dlfcn.h>
 static void __afl_map_dist_shm(void);
 #endif
+
+#if __AFL_EDGE
 
 /* ── 8-byte hash table entry ──────────────────────────────────────────
  * edge_id == 0 means empty slot.  count is a simple saturating counter
@@ -581,6 +692,479 @@ static void __afl_write_distance_tail_exit(void) {
 }
 #endif /* __AFL_DISTANCE_MODE */
 
+#endif /* __AFL_EDGE */
+
+/* ══════════════════════════════════════════════════════════════════════
+ * Comparison logging (-D__AFL_CMPLOG=1)
+ *
+ * Two interception layers, one output stream ($_CMPLOG_OUT):
+ *
+ *   Layer 1  libc interposition via dlsym(RTLD_NEXT) — memcmp/strcmp/...
+ *            Catches explicit library calls. Needs -fno-builtin-<fn> on
+ *            the target or -O2 folds the call away before it can be seen
+ *            (see $NOBUILTIN_CMP in tools/build_targets.sh).
+ *   Layer 2  Clang -fsanitize-coverage=trace-cmp callbacks. Catches
+ *            inlined/folded integer compares and switch dispatch, which
+ *            Layer 1 cannot see at all.
+ *
+ * Record format, unchanged from cmplog_shim.c so existing logs still
+ * parse (core/cmplog.py::collect_tokens):
+ *   Layer 1:  CMP <hex a> <hex b> <result> <n>
+ *   Layer 2:  CMP <hex a> <hex b> <result> <n> 0x<pc>
+ * ══════════════════════════════════════════════════════════════════════ */
+#if __AFL_CMPLOG
+
+#define CMPLOG_BUFFER_SIZE (256 * 1024)
+
+/* Longest operand pair written to the cmplog stream, in bytes. The record
+ * writer truncates to this, so the interceptors must not promise more than
+ * it records -- and memchr sizes a stack buffer from it. */
+#define CMPLOG_MAX_OPERAND 64
+
+/* Worst-case record: "CMP " + 2*2*64 hex + 3 separators + result + n + pc
+ * + newline. 320 covers it with room to spare. */
+#define CMPLOG_MAX_RECORD 320
+
+/* Raw fd, not FILE*.
+ *
+ * The pre-crash flush runs inside a signal handler, and fwrite/fprintf are
+ * not async-signal-safe -- cmplog_shim.c called both from its handler. A
+ * raw descriptor plus write(2) is safe there, and drops the stdio lock from
+ * a path that runs on every intercepted comparison. O_APPEND so the
+ * external truncation in CmplogCollector.reset_log() stays coherent. */
+static int    __afl_cmplog_fd  = -1;
+static char   __afl_cmplog_buf[CMPLOG_BUFFER_SIZE];
+static size_t __afl_cmplog_pos = 0;
+
+__AFL_NO_COV static void __afl_cmplog_flush(void) {
+    if (__afl_cmplog_pos == 0 || __afl_cmplog_fd < 0) {
+        __afl_cmplog_pos = 0;
+        return;
+    }
+    size_t off = 0;
+    while (off < __afl_cmplog_pos) {
+        ssize_t w = write(__afl_cmplog_fd, __afl_cmplog_buf + off,
+                          __afl_cmplog_pos - off);
+        if (w <= 0) break;   /* EINTR/ENOSPC: drop the rest, never spin */
+        off += (size_t)w;
+    }
+    __afl_cmplog_pos = 0;
+}
+
+/* ── Async-signal-safe integer formatting ─────────────────────────────
+ * sprintf() was used for the result/width/pc fields. Hand-rolling them
+ * keeps the whole record writer callable from __afl_crash_handler and
+ * removes a printf parse from the hot path. */
+static char *__afl_put_i64(char *p, int64_t v) {
+    if (v < 0) { *p++ = '-'; v = -v; }
+    char tmp[20];
+    int n = 0;
+    do { tmp[n++] = (char)('0' + (v % 10)); v /= 10; } while (v);
+    while (n) *p++ = tmp[--n];
+    return p;
+}
+
+static char *__afl_put_hex64(char *p, uint64_t v) {
+    static const char hex[] = "0123456789abcdef";
+    *p++ = '0'; *p++ = 'x';
+    char tmp[16];
+    int n = 0;
+    do { tmp[n++] = hex[v & 0xf]; v >>= 4; } while (v);
+    while (n) *p++ = tmp[--n];
+    return p;
+}
+
+static char *__afl_put_hexbytes(char *p, const unsigned char *b, size_t n) {
+    static const char hex[] = "0123456789abcdef";
+    for (size_t i = 0; i < n; i++) {
+        *p++ = hex[b[i] >> 4];
+        *p++ = hex[b[i] & 0xf];
+    }
+    return p;
+}
+
+/* ── Layer 1 record: two byte buffers ─────────────────────────────────
+ * result == 0 is dropped: an already-satisfied comparison is exactly the
+ * "looks unsolved but is solved" pollution the pair pool must not carry. */
+__AFL_NO_COV static void __afl_cmplog_bytes(const void *a, const void *b, size_t n, int result) {
+    if (__afl_cmplog_fd < 0 || !a || !b || n == 0 || result == 0) return;
+    size_t k = n > CMPLOG_MAX_OPERAND ? CMPLOG_MAX_OPERAND : n;
+    if (__afl_cmplog_pos + CMPLOG_MAX_RECORD > CMPLOG_BUFFER_SIZE)
+        __afl_cmplog_flush();
+    char *p = __afl_cmplog_buf + __afl_cmplog_pos;
+    *p++ = 'C'; *p++ = 'M'; *p++ = 'P'; *p++ = ' ';
+    p = __afl_put_hexbytes(p, (const unsigned char *)a, k);
+    *p++ = ' ';
+    p = __afl_put_hexbytes(p, (const unsigned char *)b, k);
+    *p++ = ' ';
+    p = __afl_put_i64(p, result);
+    *p++ = ' ';
+    p = __afl_put_i64(p, (int64_t)n);
+    *p++ = '\n';
+    __afl_cmplog_pos = (size_t)(p - __afl_cmplog_buf);
+}
+
+/* ── Layer 2 record: two integers plus the comparison site ────────────
+ * pc is __builtin_return_address(0) from the callback: the instruction
+ * after the call, i.e. the comparison site itself once inlined. */
+static __thread int __afl_cmplog_busy = 0;
+
+__AFL_NO_COV static inline void __afl_cmplog_ints(uint64_t a, uint64_t b, size_t n, void *pc) {
+    if (__afl_cmplog_fd < 0) return;
+    /* Backstop for toolchains where __AFL_NO_COV expands to nothing: an
+     * instrumented record writer re-enters through its own trace-cmp
+     * callbacks and recurses until the stack is gone. Costs one TLS read. */
+    if (__afl_cmplog_busy) return;
+    __afl_cmplog_busy = 1;
+    if (__afl_cmplog_pos + CMPLOG_MAX_RECORD > CMPLOG_BUFFER_SIZE)
+        __afl_cmplog_flush();
+    unsigned char ab[8], bb[8];
+    for (size_t i = 0; i < n; i++) {
+        ab[i] = (unsigned char)(a >> (i * 8));
+        bb[i] = (unsigned char)(b >> (i * 8));
+    }
+    char *p = __afl_cmplog_buf + __afl_cmplog_pos;
+    *p++ = 'C'; *p++ = 'M'; *p++ = 'P'; *p++ = ' ';
+    p = __afl_put_hexbytes(p, ab, n);
+    *p++ = ' ';
+    p = __afl_put_hexbytes(p, bb, n);
+    *p++ = ' ';
+    p = __afl_put_i64(p, (a < b) ? -1 : (a > b) ? 1 : 0);
+    *p++ = ' ';
+    p = __afl_put_i64(p, (int64_t)n);
+    *p++ = ' ';
+    p = __afl_put_hex64(p, (uint64_t)(uintptr_t)pc);
+    *p++ = '\n';
+    __afl_cmplog_pos = (size_t)(p - __afl_cmplog_buf);
+    __afl_cmplog_busy = 0;
+}
+
+/* ── Layer 1: libc interposition ──────────────────────────────────────
+ *
+ * dlsym(RTLD_NEXT) resolution is lazy rather than constructor-only.
+ * cmplog_shim.c resolved everything in its constructor and dereferenced
+ * the pointers unconditionally, which is a NULL call for any comparison
+ * that happens before the constructor runs. As an LD_PRELOAD object it
+ * got to run early enough to mostly get away with it; compiled into the
+ * target it is one constructor among many and the ordering is not ours to
+ * choose. Each interceptor now resolves on first use, and falls back to a
+ * naive implementation if resolution fails or would recurse (dlsym itself
+ * calls into the str/mem functions we are interposing -- without the guard
+ * the first memcmp would re-enter through dlsym forever). */
+
+static __thread int __afl_in_dlsym = 0;
+
+static void *__afl_next_sym(const char *name) {
+    if (__afl_in_dlsym) return NULL;
+    __afl_in_dlsym = 1;
+    void *p = dlsym(RTLD_NEXT, name);
+    __afl_in_dlsym = 0;
+    return p;
+}
+
+typedef int   (*afl_cmp_fn)(const void *, const void *, size_t);
+typedef int   (*afl_str_cmp_fn)(const char *, const char *);
+typedef int   (*afl_strn_cmp_fn)(const char *, const char *, size_t);
+typedef void *(*afl_chr_fn)(const void *, int, size_t);
+typedef void *(*afl_memmem_fn)(const void *, size_t, const void *, size_t);
+typedef char *(*afl_str_str_fn)(const char *, const char *);
+
+static afl_cmp_fn      real_memcmp      = NULL;
+static afl_str_cmp_fn  real_strcmp      = NULL;
+static afl_strn_cmp_fn real_strncmp     = NULL;
+static afl_chr_fn      real_memchr      = NULL;
+static afl_str_cmp_fn  real_strcasecmp  = NULL;
+static afl_strn_cmp_fn real_strncasecmp = NULL;
+static afl_memmem_fn   real_memmem      = NULL;
+static afl_str_str_fn  real_strstr      = NULL;
+static afl_str_str_fn  real_strcasestr  = NULL;
+
+/* Fallbacks. Only reached before the loader can satisfy dlsym, or if the
+ * symbol genuinely is not there. Correctness first, speed irrelevant. */
+__AFL_NO_COV static int   __afl_fb_lower(int c) { return (c >= 'A' && c <= 'Z') ? c + 32 : c; }
+__AFL_NO_COV static size_t __afl_fb_len(const char *s) { const char *p = s; while (*p) p++; return (size_t)(p - s); }
+
+__AFL_NO_COV static int __afl_fb_memcmp(const void *a, const void *b, size_t n) {
+    const unsigned char *x = a, *y = b;
+    for (size_t i = 0; i < n; i++) if (x[i] != y[i]) return x[i] < y[i] ? -1 : 1;
+    return 0;
+}
+__AFL_NO_COV static int __afl_fb_strncmp(const char *a, const char *b, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        unsigned char x = (unsigned char)a[i], y = (unsigned char)b[i];
+        if (x != y) return x < y ? -1 : 1;
+        if (!x) return 0;
+    }
+    return 0;
+}
+__AFL_NO_COV static int __afl_fb_strcmp(const char *a, const char *b) {
+    return __afl_fb_strncmp(a, b, (size_t)-1);
+}
+__AFL_NO_COV static int __afl_fb_strncasecmp(const char *a, const char *b, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        int x = __afl_fb_lower((unsigned char)a[i]), y = __afl_fb_lower((unsigned char)b[i]);
+        if (x != y) return x < y ? -1 : 1;
+        if (!x) return 0;
+    }
+    return 0;
+}
+__AFL_NO_COV static int __afl_fb_strcasecmp(const char *a, const char *b) {
+    return __afl_fb_strncasecmp(a, b, (size_t)-1);
+}
+static void *__afl_fb_memchr(const void *s, int c, size_t n) {
+    const unsigned char *p = s;
+    for (size_t i = 0; i < n; i++) if (p[i] == (unsigned char)c) return (void *)(p + i);
+    return NULL;
+}
+static void *__afl_fb_memmem(const void *h, size_t hl, const void *n, size_t nl) {
+    if (nl == 0) return (void *)h;
+    if (hl < nl) return NULL;
+    const unsigned char *p = h;
+    for (size_t i = 0; i + nl <= hl; i++)
+        if (__afl_fb_memcmp(p + i, n, nl) == 0) return (void *)(p + i);
+    return NULL;
+}
+static char *__afl_fb_strstr(const char *h, const char *n) {
+    return (char *)__afl_fb_memmem(h, __afl_fb_len(h), n, __afl_fb_len(n));
+}
+static char *__afl_fb_strcasestr(const char *h, const char *n) {
+    size_t nl = __afl_fb_len(n), hl = __afl_fb_len(h);
+    if (nl == 0) return (char *)h;
+    if (hl < nl) return NULL;
+    for (size_t i = 0; i + nl <= hl; i++)
+        if (__afl_fb_strncasecmp(h + i, n, nl) == 0) return (char *)(h + i);
+    return NULL;
+}
+
+#define __AFL_RESOLVE(slot, type, name, fallback)                   \
+    do {                                                            \
+        if (!(slot)) {                                              \
+            (slot) = (type)__afl_next_sym(name);                    \
+            if (!(slot)) (slot) = (type)(fallback);                 \
+        }                                                           \
+    } while (0)
+
+__AFL_NO_COV int memcmp(const void *a, const void *b, size_t n) {
+    __AFL_RESOLVE(real_memcmp, afl_cmp_fn, "memcmp", __afl_fb_memcmp);
+    int result = real_memcmp(a, b, n);
+    __afl_cmplog_bytes(a, b, n, result);
+    return result;
+}
+
+__AFL_NO_COV int strcmp(const char *a, const char *b) {
+    __AFL_RESOLVE(real_strcmp, afl_str_cmp_fn, "strcmp", __afl_fb_strcmp);
+    int result = real_strcmp(a, b);
+    size_t na = __afl_fb_len(a), nb = __afl_fb_len(b), n = na < nb ? na : nb;
+    if (n > 0) __afl_cmplog_bytes(a, b, n + 1, result);
+    return result;
+}
+
+__AFL_NO_COV int strncmp(const char *a, const char *b, size_t n) {
+    __AFL_RESOLVE(real_strncmp, afl_strn_cmp_fn, "strncmp", __afl_fb_strncmp);
+    int result = real_strncmp(a, b, n);
+    if (n > 0) __afl_cmplog_bytes(a, b, n, result);
+    return result;
+}
+
+__AFL_NO_COV void *memchr(const void *s, int c, size_t n) {
+    __AFL_RESOLVE(real_memchr, afl_chr_fn, "memchr", __afl_fb_memchr);
+    void *result = real_memchr(s, c, n);
+    /* A one-byte pair (s[0] vs c) is memory-safe but a weak anchor: the
+     * input-to-state indexer has a single byte to locate in the input, which
+     * matches everywhere and therefore nowhere useful. Materialise the needle
+     * into a stack buffer instead, so the haystack side keeps a window worth
+     * searching for. Only built when the search failed -- the record writer
+     * discards result==0 anyway, so on a successful memchr the memset would
+     * be pure cost on what is often a hot loop. */
+    if (__afl_cmplog_fd >= 0 && n > 0 && !result) {
+        size_t k = n > CMPLOG_MAX_OPERAND ? CMPLOG_MAX_OPERAND : n;
+        unsigned char needle[CMPLOG_MAX_OPERAND];
+        for (size_t i = 0; i < k; i++) needle[i] = (unsigned char)c;
+        __afl_cmplog_bytes(s, needle, k, -1);
+    }
+    return result;
+}
+
+__AFL_NO_COV int strcasecmp(const char *a, const char *b) {
+    __AFL_RESOLVE(real_strcasecmp, afl_str_cmp_fn, "strcasecmp", __afl_fb_strcasecmp);
+    int result = real_strcasecmp(a, b);
+    size_t na = __afl_fb_len(a), nb = __afl_fb_len(b), n = na < nb ? na : nb;
+    if (n > 0) __afl_cmplog_bytes(a, b, n + 1, result);
+    return result;
+}
+
+__AFL_NO_COV int strncasecmp(const char *a, const char *b, size_t n) {
+    __AFL_RESOLVE(real_strncasecmp, afl_strn_cmp_fn, "strncasecmp", __afl_fb_strncasecmp);
+    int result = real_strncasecmp(a, b, n);
+    if (n > 0) __afl_cmplog_bytes(a, b, n, result);
+    return result;
+}
+
+/* The NULL checks below are deliberate: these are declared nonnull, but a
+ * fuzz target reaching them with NULL is a bug we want to log around, not
+ * crash inside. GCC warns that a nonnull parameter is compared to NULL. */
+#if defined(__GNUC__) && !defined(__clang__)
+#  pragma GCC diagnostic push
+#  pragma GCC diagnostic ignored "-Wnonnull-compare"
+#endif
+
+__AFL_NO_COV void *memmem(const void *h, size_t hl, const void *n, size_t nl) {
+    __AFL_RESOLVE(real_memmem, afl_memmem_fn, "memmem", __afl_fb_memmem);
+    void *result = real_memmem(h, hl, n, nl);
+    /* input-to-state needs one half from the buffer and one to plant;
+     * log haystack-vs-needle, not needle-vs-itself.
+     *
+     * Pass the real outcome: the record writer drops result==0, which is the
+     * filter that keeps already-solved comparisons out of the pool. A
+     * hardcoded -1 logs a *successful* match as if it were still unsolved.
+     *
+     * Log min(hl, nl) bytes rather than requiring hl >= nl. Demanding a
+     * full-length haystack dropped the case the pool needs most: an input
+     * shorter than the token it must contain is exactly the state early
+     * fuzzing is in, and it was logging nothing at all there. A needle prefix
+     * is a partial anchor; nothing is none. */
+    if (__afl_cmplog_fd >= 0 && n && nl > 0 && nl <= CMPLOG_MAX_OPERAND && hl > 0) {
+        size_t k = hl < nl ? hl : nl;
+        __afl_cmplog_bytes(h, n, k, result ? 0 : -1);
+    }
+    return result;
+}
+
+__AFL_NO_COV char *strstr(const char *h, const char *n) {
+    __AFL_RESOLVE(real_strstr, afl_str_str_fn, "strstr", __afl_fb_strstr);
+    char *result = real_strstr(h, n);
+    if (__afl_cmplog_fd >= 0 && n && h) {
+        size_t nl = __afl_fb_len(n);
+        /* min(strnlen(h, nl), nl): see memmem. A haystack shorter than the
+         * needle is the case worth planting into, not the case to skip. */
+        size_t k = 0;
+        while (k < nl && h[k]) k++;
+        if (k > 0 && nl <= CMPLOG_MAX_OPERAND)
+            __afl_cmplog_bytes(h, n, k, result ? 0 : -1);
+    }
+    return result;
+}
+
+__AFL_NO_COV char *strcasestr(const char *h, const char *n) {
+    __AFL_RESOLVE(real_strcasestr, afl_str_str_fn, "strcasestr", __afl_fb_strcasestr);
+    char *result = real_strcasestr(h, n);
+    if (__afl_cmplog_fd >= 0 && n && h) {
+        size_t nl = __afl_fb_len(n);
+        size_t k = 0;
+        while (k < nl && h[k]) k++;
+        if (k > 0 && nl <= CMPLOG_MAX_OPERAND)
+            __afl_cmplog_bytes(h, n, k, result ? 0 : -1);
+    }
+    return result;
+}
+
+#if defined(__GNUC__) && !defined(__clang__)
+#  pragma GCC diagnostic pop
+#endif
+
+/* ── Layer 2: Clang -fsanitize-coverage=trace-cmp callbacks ───────────
+ *
+ * Hidden visibility, same rationale as the trace_pc_guard callbacks above:
+ * the target calls these directly instead of through the PLT, so no
+ * LD_PRELOAD (libasan's weak stubs, an older cmplog_shim.so) can interpose
+ * them. Under __AFL_PRELOAD_ONLY they must stay exported -- interposition
+ * is the entire point of that build -- so the attribute is conditional. */
+#if __AFL_EDGE
+#  define __AFL_CMP_VIS __AFL_NO_COV __attribute__((visibility("hidden")))
+#else
+#  define __AFL_CMP_VIS __AFL_NO_COV __attribute__((visibility("default")))
+#endif
+
+#define MAX_SWITCH_CASES 256
+
+__AFL_CMP_VIS void __sanitizer_cov_trace_cmp1(uint8_t a, uint8_t b) {
+    __afl_cmplog_ints(a, b, 1, __builtin_return_address(0));
+}
+__AFL_CMP_VIS void __sanitizer_cov_trace_cmp2(uint16_t a, uint16_t b) {
+    __afl_cmplog_ints(a, b, 2, __builtin_return_address(0));
+}
+__AFL_CMP_VIS void __sanitizer_cov_trace_cmp4(uint32_t a, uint32_t b) {
+    __afl_cmplog_ints(a, b, 4, __builtin_return_address(0));
+}
+__AFL_CMP_VIS void __sanitizer_cov_trace_cmp8(uint64_t a, uint64_t b) {
+    __afl_cmplog_ints(a, b, 8, __builtin_return_address(0));
+}
+__AFL_CMP_VIS void __sanitizer_cov_trace_const_cmp1(uint8_t a, uint8_t b) {
+    __afl_cmplog_ints(a, b, 1, __builtin_return_address(0));
+}
+__AFL_CMP_VIS void __sanitizer_cov_trace_const_cmp2(uint16_t a, uint16_t b) {
+    __afl_cmplog_ints(a, b, 2, __builtin_return_address(0));
+}
+__AFL_CMP_VIS void __sanitizer_cov_trace_const_cmp4(uint32_t a, uint32_t b) {
+    __afl_cmplog_ints(a, b, 4, __builtin_return_address(0));
+}
+__AFL_CMP_VIS void __sanitizer_cov_trace_const_cmp8(uint64_t a, uint64_t b) {
+    __afl_cmplog_ints(a, b, 8, __builtin_return_address(0));
+}
+
+/* GCC declares this builtin as void(unsigned long, void *) and warns on the
+ * uint64_t* form cmplog_shim.c used. That never surfaced while the shim was
+ * a standalone TU compiled without -fsanitize-coverage; it does now. Match
+ * the builtin and cast inside. */
+__AFL_CMP_VIS void __sanitizer_cov_trace_switch(uint64_t val, void *cases) {
+    if (!cases) return;
+    uint64_t *ref = (uint64_t *)cases;
+    int64_t count = (int64_t)ref[0];
+    if (count <= 0 || count > MAX_SWITCH_CASES) return;
+    void *pc = __builtin_return_address(0);
+    for (int64_t i = 0; i < count; i++)
+        __afl_cmplog_ints(val, ref[2 + i], 8, pc);
+}
+
+/* ── Lifecycle ────────────────────────────────────────────────────────
+ * Called from __afl_auto_init (edge builds) or the preload-only
+ * constructor below. */
+__AFL_NO_COV static void __afl_cmplog_init(void) {
+    const char *path = getenv("_CMPLOG_OUT");
+    if (!path || !path[0]) return;
+    __afl_cmplog_fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+}
+
+__AFL_NO_COV static void __afl_cmplog_fini(void) {
+    __afl_cmplog_flush();
+    if (__afl_cmplog_fd >= 0) {
+        close(__afl_cmplog_fd);
+        __afl_cmplog_fd = -1;
+    }
+}
+
+/* ── Public API (in-process / direct_lite) ────────────────────────────
+ * __cmplog_reset is also the symbol services/fuzzer.py::_detect_cmplog
+ * greps for to decide whether a target has the layer compiled in, so it
+ * must stay exported and must not exist in non-cmplog builds. */
+__AFL_NO_COV __attribute__((visibility("default")))
+void __cmplog_reset(void) {
+    __afl_cmplog_flush();
+    if (__afl_cmplog_fd >= 0) {
+        if (ftruncate(__afl_cmplog_fd, 0) != 0) { /* best effort */ }
+        lseek(__afl_cmplog_fd, 0, SEEK_SET);
+    }
+}
+
+__AFL_NO_COV __attribute__((visibility("default")))
+const char *__cmplog_get_path(void) { return getenv("_CMPLOG_OUT"); }
+
+__AFL_NO_COV __attribute__((visibility("default")))
+void __tracecmp_flush(void) { __afl_cmplog_flush(); }
+
+__AFL_NO_COV __attribute__((visibility("default")))
+void __tracecmp_reset(void) { __cmplog_reset(); }
+
+__AFL_NO_COV __attribute__((visibility("default")))
+const char *__tracecmp_get_path(void) { return __cmplog_get_path(); }
+
+__attribute__((destructor))
+__AFL_NO_COV static void __afl_cmplog_fini_dtor(void) { __afl_cmplog_fini(); }
+
+#endif /* __AFL_CMPLOG */
+
+#if __AFL_EDGE
+
 /* ── Crash signal handler ─────────────────────────────────────────────
  * Uses sigsetjmp/siglongjmp instead of the traditional restore-and-re-raise
  * approach because glibc's abort() resets the handler to SIG_DFL after the
@@ -601,6 +1185,15 @@ static int __afl_guard_signals[] = {
     (int)(sizeof(__afl_guard_signals) / sizeof(__afl_guard_signals[0]))
 
 static void __afl_crash_handler(int sig) {
+#if __AFL_CMPLOG
+    /* Flush before escaping. cmplog_shim.c installed a second handler for
+     * this and restored the previous disposition from inside it, so the
+     * comparison buffer was flushed on the FIRST crash only -- every later
+     * crash in a persistent/direct_lite loop lost up to 256KB of records.
+     * Folding it in here runs it on every crash, and __afl_cmplog_flush is
+     * write(2)-based precisely so it is legal at this point. */
+    __afl_cmplog_flush();
+#endif
     siglongjmp(__afl_jmp_buf, sig);
 }
 
@@ -680,6 +1273,69 @@ static void __afl_auto_init(void) {
      * map_shm/install_crash_handlers). suppress ctx until done. */
     __afl_mapping = 1;
     __afl_map_shm();
+#if __AFL_CMPLOG
+    /* One constructor, one attachment. cmplog_shim.c had its own, which
+     * re-entered __afl_map_shm and shmat'd the segment a second time --
+     * measured 2 attachments per exec against 1 for the shim alone. */
+    __afl_cmplog_init();
+#endif
     __afl_install_crash_handlers();
     __afl_mapping = 0;
 }
+
+#endif /* __AFL_EDGE */
+
+#if !__AFL_EDGE && __AFL_CMPLOG
+/* ── Preload-only lifecycle ───────────────────────────────────────────
+ *
+ * No edge machinery, so no __afl_guarded_call to escape to: the process
+ * really is dying and the only job is to get the buffer out first.
+ *
+ * Hardware faults (SIGSEGV/SIGBUS/SIGFPE) must NOT be re-raised with
+ * raise(): raise() produces a *software* signal, and the kernel only
+ * populates siginfo_t.si_addr for hardware faults. A ptrace tracer reading
+ * PTRACE_GETSIGINFO would then see si_addr=0 instead of the real faulting
+ * address, silently defeating fault-address capture and collapsing
+ * NULL-deref vs wild-pointer crashes into one dedup bucket. Restore the
+ * previous disposition and return instead: the faulting instruction
+ * re-executes, faults again in hardware, and the signal is delivered with
+ * genuine si_addr intact.
+ *
+ * SIGABRT is software-generated -- there is no faulting instruction to
+ * re-execute, so returning would resume past the abort(). Keep the
+ * explicit raise(); it carries no meaningful si_addr anyway. */
+static struct sigaction __afl_pre_old_segv;
+static struct sigaction __afl_pre_old_abrt;
+static struct sigaction __afl_pre_old_bus;
+static struct sigaction __afl_pre_old_fpe;
+
+__AFL_NO_COV static void __afl_preload_crash_handler(int sig) {
+    __afl_cmplog_flush();
+    struct sigaction *old;
+    int hardware_fault = 0;
+    switch (sig) {
+    case SIGSEGV: old = &__afl_pre_old_segv; hardware_fault = 1; break;
+    case SIGBUS:  old = &__afl_pre_old_bus;  hardware_fault = 1; break;
+    case SIGFPE:  old = &__afl_pre_old_fpe;  hardware_fault = 1; break;
+    case SIGABRT: old = &__afl_pre_old_abrt; break;
+    default:      signal(sig, SIG_DFL); raise(sig); return;
+    }
+    sigaction(sig, old, NULL);
+    if (hardware_fault)
+        return;  /* re-execute the faulting instruction; preserves si_addr */
+    raise(sig);
+}
+
+__attribute__((constructor))
+__AFL_NO_COV static void __afl_preload_init(void) {
+    __afl_cmplog_init();
+    struct sigaction sa;
+    sa.sa_handler = __afl_preload_crash_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGSEGV, &sa, &__afl_pre_old_segv);
+    sigaction(SIGABRT, &sa, &__afl_pre_old_abrt);
+    sigaction(SIGBUS,  &sa, &__afl_pre_old_bus);
+    sigaction(SIGFPE,  &sa, &__afl_pre_old_fpe);
+}
+#endif /* !__AFL_EDGE && __AFL_CMPLOG */
