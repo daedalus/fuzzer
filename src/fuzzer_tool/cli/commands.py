@@ -426,6 +426,7 @@ def cmd_fuzz(args):
         prune_corpus_max_memory=getattr(args, "prune_corpus_on_max_memory", 80),
         no_shm=args.no_shm,
         use_ptrace=args.ptrace,
+        adaptive_havoc=not getattr(args, "no_adaptive_havoc", False),
         resume=args.resume,
         trace_crashes=args.trace,
         learn_format=getattr(args, "learn_format", False),
@@ -1404,6 +1405,12 @@ def main() -> int:
         help="Enable ptrace self-trace in the persistent loader for per-crash "
         "fault-address/register capture on .so targets (adds per-exec overhead; "
         "disabled by default)",
+    )
+    fuzz_parser.add_argument(
+        "--no-adaptive-havoc",
+        action="store_true",
+        help="Draw havoc's 11 inline sub-mutations uniformly instead of weighting "
+        "them by measured new-coverage rate (adaptive weighting is on by default)",
     )
     fuzz_parser.add_argument("-D", "--dict", help="Dictionary file")
     fuzz_parser.add_argument(

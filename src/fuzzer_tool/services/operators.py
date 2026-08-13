@@ -66,6 +66,62 @@ _REGION_CACHE_MAX = 64
 # profile to weight by.
 _REGION_MIN_LEN = 512
 
+# ── havoc sub-mutation weighting ─────────────────────────────────────────
+# _apply_single_mutation() dispatches to one of 11 inline branches. That
+# choice was `r[0] % 11` -- flat odds, no feedback -- while every top-level
+# operator above it is scheduled by a bandit fed real per-operator success
+# rates. Havoc is reachable from every mutation round and applies 2-8
+# sub-mutations per call (8-16 under stall recovery), so a mis-split inside
+# it is a continuous tax rather than an occasional one.
+#
+# These are branches, not dispatchable operators: they stay out of REGISTRY
+# (Hard Rule 12 governs op mutators, which need availability predicates and
+# a handler) and out of the select_op()/record() scheduler interface, whose
+# per-call cost the havoc hot path cannot absorb. The weighting here is
+# deliberately the cheapest thing that consumes the same signal: O(1)
+# integer counts, an O(256) table rebuild every _HAVOC_TABLE_REFRESH draws,
+# and a single list index per draw.
+HAVOC_SUB_OPS = (
+    "bit_flip",
+    "byte_set",
+    "byte_swap",
+    "insert_byte",
+    "delete_block",
+    "crc32_repair",
+    "swap_regions",
+    "endian_swap",
+    "byte_insert",
+    "random_byte",
+    "shuffle_range",
+)
+_HAVOC_N = len(HAVOC_SUB_OPS)
+# Sampling is a precomputed inverse-CDF table: 256 slots, each holding a
+# branch index, indexed by the low byte of the draw. Measured against the
+# alternatives at 2M draws (see tools/bench_havoc_subop.py): uniform
+# `r[0] % 11` 89ns, bisect over an 11-float CDF 313ns, this table 202ns --
+# so the table halves the cost of the feature versus the obvious bisect.
+# 256 slots quantize probabilities to 0.39%, well under the explore floor.
+_HAVOC_TABLE_SLOTS = 256
+# Mutation rounds between table rebuilds. The rebuild is triggered from
+# mutate() and from credit_havoc_subops(), both of which run once per
+# execution -- never from _apply_single_mutation, which runs 2-16 times per
+# havoc selection. Keeping the refresh counter out of the inner loop saves
+# two attribute operations per sub-mutation; the distribution moves on the
+# scale of thousands of executions, so per-round granularity is ample.
+_HAVOC_TABLE_REFRESH = 256
+# Uniform mixing weight (EXP3-style). Guarantees every sub-mutation keeps
+# at least _HAVOC_EXPLORE/_HAVOC_N ~= 1.4% of draws -- 3 of 256 table slots
+# -- so a branch whose guard fails on small inputs (byte_swap,
+# delete_block, shuffle_range) can recover once inputs grow instead of
+# being starved permanently.
+_HAVOC_EXPLORE = 0.15
+# Halve all counts once any branch exceeds this many trials: keeps the
+# ratios responsive to a target whose reachable behaviour shifts mid-run,
+# and bounds float growth over billion-exec campaigns.
+_HAVOC_DECAY_AT = 100_000.0
+# Precomputed 1 << i, avoiding a shift per draw in the credit bitmask.
+_HAVOC_BITS = tuple(1 << i for i in range(_HAVOC_N))
+
 # Precomputed colorization lookup table: byte -> different value from same class.
 # Avoids per-call table construction in _op_colorization().
 _COLORIZE_TBL = bytearray(256)
@@ -127,6 +183,17 @@ class OperatorEngine:
         # window (~1 ms), so it must be paid once per seed, not once per
         # mutation -- see region_weights().
         self._region_cache: dict[int, tuple | None] = {}
+        # Havoc sub-mutation credit. Laplace-smoothed at 1 hit / 2 trials so
+        # every branch starts at a 0.5 ratio -- identical weights, so the
+        # first table is uniform and the adaptive path only diverges from
+        # `r[0] % 11` once there is evidence to diverge on. Plain int lists,
+        # not array("d"): 11 elements make the memory argument moot, and the
+        # measured per-draw cost is 202ns against 494ns for array("d").
+        self._havoc_hits = [1] * _HAVOC_N
+        self._havoc_trials = [2] * _HAVOC_N
+        self._havoc_table = [0] * _HAVOC_TABLE_SLOTS
+        self._havoc_rounds_since_rebuild = 0
+        self._rebuild_havoc_table()
 
     # ── Operator handlers ──────────────────────────────────────────────
     # Each handler: (buf, byte_idx, data) -> None (in-place) or bytes (replace buf)
@@ -2101,7 +2168,15 @@ class OperatorEngine:
         # Each branch uses 2-4 values from this batch, avoiding N
         # individual randint/randrange Python calls.
         r = self.f._rand_pool.randint_list(0, 1 << 30, 4)
-        op = r[0] % 11
+        f = self.f
+        if f._adaptive_havoc:
+            # Same draw (r[0]) as the uniform path, so RNG consumption per
+            # sub-mutation is unchanged and seeded runs stay comparable.
+            op = self._havoc_table[r[0] & 255]
+            self._havoc_trials[op] += 1
+            f._last_havoc_subops |= _HAVOC_BITS[op]
+        else:
+            op = r[0] % _HAVOC_N
         if op == 0:  # bit flip
             buf[r[1] % len(buf)] ^= 1 << (r[2] % 8)
         elif op == 1:  # byte set
@@ -2150,6 +2225,72 @@ class OperatorEngine:
             region = buf[start:end]
             rng.shuffle(region)
             buf[start:end] = region
+
+    def _rebuild_havoc_table(self) -> None:
+        """Rebuild the havoc sub-mutation inverse-CDF table from hit ratios.
+
+        Weights are ``hits / trials`` per branch, normalized and mixed with
+        the uniform distribution at ``_HAVOC_EXPLORE`` so no branch is ever
+        starved to zero. Called every ``_HAVOC_TABLE_REFRESH`` draws, not
+        per update -- see the module comment on the hot path.
+        """
+        self._havoc_rounds_since_rebuild = 0
+        hits = self._havoc_hits
+        trials = self._havoc_trials
+        n = _HAVOC_N
+        if max(trials) > _HAVOC_DECAY_AT:
+            # Halve in place: preserves every ratio, keeps the window moving.
+            # Trials stay >= 1 (the prior is 2), so no ratio divides by zero.
+            for i in range(n):
+                hits[i] = max(1, hits[i] >> 1)
+                trials[i] = max(2, trials[i] >> 1)
+        weights = [hits[i] / trials[i] for i in range(n)]
+        total = sum(weights)  # > 0: Laplace priors keep every weight positive
+        floor = _HAVOC_EXPLORE / n
+        scale = (1.0 - _HAVOC_EXPLORE) / total
+        table = self._havoc_table
+        slots = _HAVOC_TABLE_SLOTS
+        acc = 0.0
+        idx = 0
+        last = n - 1
+        for i in range(n):
+            acc += weights[i] * scale + floor
+            # The floor guarantees each branch >= _HAVOC_EXPLORE/n of the
+            # table (3 of 256 slots), so no branch rounds away to zero.
+            end = slots if i == last else min(slots, int(acc * slots + 0.5))
+            while idx < end:
+                table[idx] = i
+                idx += 1
+
+    def credit_havoc_subops(self, mask: int) -> None:
+        """Record a successful execution against the havoc branches it used.
+
+        ``mask`` is the per-round bitmask accumulated in
+        ``_apply_single_mutation``; bit *i* means ``HAVOC_SUB_OPS[i]`` was
+        applied at least once this round. Called from
+        ``Fuzzer._record_outcome`` because havoc mutates long before the
+        coverage verdict for that input exists.
+
+        Rebuilds the sampling table immediately: new hits are the only thing
+        that can promote a branch, they are rare relative to draws, and this
+        is off the hot path.
+        """
+        hits = self._havoc_hits
+        i = 0
+        while mask:
+            if mask & 1:
+                hits[i] += 1
+            mask >>= 1
+            i += 1
+        self._rebuild_havoc_table()
+
+    def havoc_stats(self) -> list[tuple[str, float, int]]:
+        """Per-branch (name, hit ratio, trials) sorted by ratio, best first."""
+        hits = self._havoc_hits
+        trials = self._havoc_trials
+        rows = [(HAVOC_SUB_OPS[i], hits[i] / trials[i], trials[i]) for i in range(_HAVOC_N)]
+        rows.sort(key=lambda row: row[1], reverse=True)
+        return rows
 
     # ── Operator selection logic ───────────────────────────────────────
 
@@ -2484,6 +2625,19 @@ class OperatorEngine:
         # exactly as much as the operator that did the work -- see
         # fuzzer.py::_record_outcome.
         f._last_ops_effective = set()
+        # Bitmask of havoc sub-mutations applied this round (bit i ->
+        # HAVOC_SUB_OPS[i]). A bitmask rather than a list because
+        # _apply_single_mutation runs 2-16 times per havoc selection and an
+        # OR against an int is the cheapest per-application record available.
+        f._last_havoc_subops = 0
+        # Table refresh lives here rather than in _apply_single_mutation:
+        # once per round instead of 2-16 times, for a distribution that only
+        # changes when trials accumulate or a hit lands (which rebuilds
+        # directly -- see credit_havoc_subops).
+        if f._adaptive_havoc:
+            self._havoc_rounds_since_rebuild += 1
+            if self._havoc_rounds_since_rebuild >= _HAVOC_TABLE_REFRESH:
+                self._rebuild_havoc_table()
         # Per-round wall-clock cost per operator, keyed by op name, summed
         # across repeats within this round. Feeds the cost-aware reward:
         # a 10ms operator and a 2us operator shouldn't be scored on the

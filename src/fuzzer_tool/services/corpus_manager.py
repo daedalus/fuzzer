@@ -30,6 +30,7 @@ from fuzzer_tool.adapters.filesystem import (
 )
 from fuzzer_tool.core.periodicity import estimate_record_size
 from fuzzer_tool.core.running_stats import RunningMoments
+from fuzzer_tool.services.operators import HAVOC_SUB_OPS
 
 log = logging.getLogger(__name__)
 
@@ -144,6 +145,15 @@ class CorpusManager:
             "op_counts": f.op_counts,
             "op_success": f.op_success,
             "op_edges": f.op_edges,
+            # Havoc sub-mutation credit. Kept as plain lists (the state file
+            # is a sanitized pickle, but array("d") would still pin the
+            # branch count into the on-disk format); load_state re-pairs
+            # them with HAVOC_SUB_OPS by name so adding a branch does not
+            # silently shift every count by one slot.
+            "havoc_subop_stats": {
+                name: (f._operators._havoc_hits[i], f._operators._havoc_trials[i])
+                for i, name in enumerate(HAVOC_SUB_OPS)
+            },
             "corpus_size_history": list(f._corpus_size_history[-500:]),
             "checksum_learner": getattr(f, "checksum_learner", None)
             and f.checksum_learner.to_dict()
@@ -203,6 +213,19 @@ class CorpusManager:
         f.op_counts = state.get("op_counts", {})
         f.op_success = state.get("op_success", {})
         f.op_edges = state.get("op_edges", {})
+        havoc_stats = state.get("havoc_subop_stats") or {}
+        for i, name in enumerate(HAVOC_SUB_OPS):
+            saved = havoc_stats.get(name)
+            if not saved:
+                continue
+            hits, trials = saved
+            # Trials must stay >= 1 or the ratio divides by zero; a corrupt
+            # or hand-edited state file should degrade to the prior, not
+            # crash the resume.
+            if trials >= 1.0 and hits >= 0.0:
+                f._operators._havoc_hits[i] = int(hits)
+                f._operators._havoc_trials[i] = int(trials)
+        f._operators._rebuild_havoc_table()
         f._corpus_size_history = array("I", state.get("corpus_size_history", []))
         saved_meta = state.get("seed_meta", {})
         for seed in f.corpus:

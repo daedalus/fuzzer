@@ -18,6 +18,7 @@ from types import SimpleNamespace
 
 from fuzzer_tool.core.state_store import StateStore
 from fuzzer_tool.services.corpus_manager import CorpusManager
+from fuzzer_tool.services.operators import OperatorEngine
 
 
 class _StubTracker:
@@ -80,6 +81,10 @@ def _make_fuzzer(tmp_path, history):
         op_counts={},
         op_success={},
         op_edges={},
+        # save_state/load_state persist havoc sub-mutation credit off the
+        # engine; OperatorEngine.__init__ reads nothing from the fuzzer, so
+        # a real one here keeps the mock honest without a second stub.
+        _operators=OperatorEngine(None),
         _corpus_size_history=history,
     )
 

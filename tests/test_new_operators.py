@@ -77,6 +77,10 @@ def _make_minimal_fuzzer():
             self_._prev_bandit_op = None
             self_._last_mopt_particles = []
             self_._last_ops_used = []
+            # Mirrors Fuzzer.__init__: _apply_single_mutation reads both on
+            # every call, and a mock missing them fails only inside havoc.
+            self_._adaptive_havoc = True
+            self_._last_havoc_subops = 0
             self_._meta_strategy = None
             self_._meta_strategy_cached = None
             self_._meta_strategy_used = set()

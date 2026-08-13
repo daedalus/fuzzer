@@ -460,6 +460,7 @@ class Fuzzer:
         prune_corpus_max_memory=80,
         no_shm=False,
         use_ptrace=False,
+        adaptive_havoc=True,
         resume=False,
         trace_crashes=False,
         learn_format=False,
@@ -558,6 +559,13 @@ class Fuzzer:
         # each crash regardless of this flag; this only controls the
         # always-on per-iteration trace in the persistent loader.
         self.use_ptrace = use_ptrace
+        # Weight havoc's 11 inline sub-mutations by their measured hit rate
+        # instead of drawing them uniformly. On by default: the priors start
+        # uniform, the per-draw cost is a bisect over 11 floats, and the
+        # branch mix is otherwise the one part of the mutation stack that
+        # ignores the feedback every layer above it collects. --no-adaptive-
+        # havoc restores the flat `r[0] % 11` split for A/B runs.
+        self._adaptive_havoc = adaptive_havoc
         self.refresh_profile = refresh_profile
         self.quiet_stats = quiet_stats
         # Multi-target support: list of target binaries to fuzz with shared corpus
@@ -1220,6 +1228,12 @@ class Fuzzer:
         # OperatorEngine.mutate() when _track_op_effect is on; consumed by
         # _record_outcome() to keep no-op operators out of the winner set.
         self._last_ops_effective: set[str] = set()
+        # Bitmask of havoc sub-mutations applied this round, set by
+        # OperatorEngine._apply_single_mutation and consumed by
+        # _record_outcome(). Havoc's inner loop has no visibility into the
+        # coverage verdict at mutation time, so credit is deferred here the
+        # same way it is for top-level operators.
+        self._last_havoc_subops: int = 0
         self._last_ops_with_sites: list[tuple[str, int]] = []
         self._last_op_costs: dict[str, float] = {}
         # EMA of wall-clock seconds per call, per operator. Populated in
@@ -2860,6 +2874,13 @@ class Fuzzer:
             surprisal_weight = max(0.05, 1.0 - density)
         else:
             surprisal_weight = 1.0 if success else 0.0
+
+        if success and self._last_havoc_subops:
+            # Havoc's inner branches, credited on the same signal the outer
+            # bandits use. Trials are counted at application time, so a
+            # branch whose guard fails accrues trials without hits and
+            # decays -- the same treatment no-op operators get above.
+            self._operators.credit_havoc_subops(self._last_havoc_subops)
 
         if success:
             # Same rule as the bandits: no-op operators didn't earn this.
