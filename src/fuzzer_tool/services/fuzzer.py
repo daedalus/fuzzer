@@ -943,6 +943,7 @@ class Fuzzer:
         self._hf_density_boosts: int = 0
         self._hf_entropy_penalties: int = 0
         self._hf_timeout_penalties: int = 0
+        self._favored: set[str] = set()
 
         # Execution time tracking for adaptive timeout calibration
         from fuzzer_tool.core.execution_time import ExecutionTimeTracker
@@ -2425,6 +2426,37 @@ class Fuzzer:
         n_fuzz_vals = [m.get("fuzz_count", 0) for m in self.seed_meta.values()]
         self._cached_mean_log_n_fuzz = compute_mean_log_n_fuzz(n_fuzz_vals)
         self._agg_cache_valid = True
+
+    def _cull_queue(self) -> None:
+        """Compute AFL-style top_rated / favored minimal-set-cover.
+
+        For each edge, pick the cheapest seed that covers it, then greedily
+        build a favored set that covers all edges. Seeds in the favored set
+        receive energy bonuses in FAST/COE schedules.
+        """
+        top_rated: dict[int, tuple[str, float]] = {}
+        for key, edges in self._edge_tracker.seed_edges.items():
+            m = self.seed_meta.get(key) or {}
+            exec_us = max(
+                1.0,
+                m.get("total_time", 0.0) / max(1, m.get("fuzz_count", 1)) * 1_000_000,
+            )
+            input_size = max(1, m.get("input_size", 1))
+            cost = exec_us * input_size
+            for e in edges:
+                cur = top_rated.get(e)
+                if cur is None or cost < cur[1]:
+                    top_rated[e] = (key, cost)
+
+        covered: set[int] = set()
+        favored: set[str] = set()
+        for e in sorted(top_rated, key=lambda e: -self._edge_tracker.rare_edge_count(e)):
+            if e in covered:
+                continue
+            k = top_rated[e][0]
+            favored.add(k)
+            covered |= self._edge_tracker.seed_edges[k]
+        self._favored = favored
 
     def _reset_cmplog(self):
         """Flush cmplog buffer to disk before collecting tokens.
@@ -4251,11 +4283,11 @@ class Fuzzer:
                     depth = meta.get("lineage_depth", 0)
                     fuzz_level = meta.get("fuzz_count", 0)
                     n_fuzz = fuzz_level
+                    seed_key = self._seed_key(seed)
 
                     # Honggfuzz power factors (only when --honggfuzz enabled)
                     hf_kwargs: dict = {}
                     if self.honggfuzz:
-                        seed_key = self._seed_key(seed)
                         new_edges = 0
                         if seed_key in self._edge_tracker.seed_edges:
                             seed_e = self._edge_tracker.seed_edges[seed_key]
@@ -4310,6 +4342,7 @@ class Fuzzer:
                         n_fuzz=n_fuzz,
                         total_execs=max(1, self.exec_count),
                         mean_log_n_fuzz=self._cached_mean_log_n_fuzz,
+                        favored=(seed_key in self._favored),
                         avg_distance=meta.get("avg_distance", -1.0) if self._distance else -1.0,
                         max_distance=(
                             self._dist_max_observed
@@ -4337,6 +4370,9 @@ class Fuzzer:
                 i += 1
                 effective_interval = self._stats_effective_interval()
                 if self.exec_count - self._last_stats_exec >= effective_interval:
+                    # Update favored set / top_rated cull queue every interval
+                    if self._edge_tracker.seed_edges:
+                        self._cull_queue()
                     # Sample Shannon entropy for rate-of-change tracking
                     if self._edge_tracker._global_edge_hits:
                         sh = self._edge_tracker.shannon_entropy_global()

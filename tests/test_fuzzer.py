@@ -957,3 +957,62 @@ class TestMetropolisCorpusAdmission:
         assert clamped >= 0.01
         p_accept = math.exp(-1.0 / clamped)
         assert 0 < p_accept < 1  # finite probability
+
+
+class TestCullQueue:
+    """Regression tests for favored/top_rated cull queue."""
+
+    def test_cull_queue_minimal_set_cover(self):
+        """Favored set should cover all edges with minimal seeds."""
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp(prefix="fuzz_test_")
+        with (
+            patch("os.path.isfile", return_value=True),
+            patch("os.access", return_value=True),
+        ):
+            f = Fuzzer(
+                target="/bin/true",
+                corpus_dir=f"{tmpdir}/corpus",
+                crashes_dir=f"{tmpdir}/crashes",
+                max_len=256,
+                timeout=1,
+                mutations_per_input=2,
+            )
+        # Three seeds, three edges. Seed A covers {1,2}, B covers {2,3}, C covers {3}.
+        # Minimal cover: {A, C} covers all edges; B is redundant.
+        f._edge_tracker.seed_edges = {
+            "seed_a": {1, 2},
+            "seed_b": {2, 3},
+            "seed_c": {3},
+        }
+        f._edge_tracker._global_edge_hits = {1: 10, 2: 10, 3: 10}
+        f.seed_meta = {
+            "seed_a": {"total_time": 1.0, "fuzz_count": 1, "input_size": 100},
+            "seed_b": {"total_time": 0.5, "fuzz_count": 1, "input_size": 100},
+            "seed_c": {"total_time": 0.2, "fuzz_count": 1, "input_size": 100},
+        }
+        f._cull_queue()
+        assert f._favored == {"seed_a", "seed_c"}
+
+    def test_cull_queue_empty_tracker(self):
+        """Empty edge tracker produces empty favored set."""
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp(prefix="fuzz_test_")
+        with (
+            patch("os.path.isfile", return_value=True),
+            patch("os.access", return_value=True),
+        ):
+            f = Fuzzer(
+                target="/bin/true",
+                corpus_dir=f"{tmpdir}/corpus",
+                crashes_dir=f"{tmpdir}/crashes",
+                max_len=256,
+                timeout=1,
+                mutations_per_input=2,
+            )
+        f._edge_tracker.seed_edges = {}
+        f.seed_meta = {}
+        f._cull_queue()
+        assert f._favored == set()

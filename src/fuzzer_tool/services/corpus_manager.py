@@ -410,6 +410,7 @@ class CorpusManager:
                 "lineage_depth": parent_depth + 1 if parent else 0,
                 "hamming_distance": f._last_hamming_distance,
                 "record_stride": estimate_record_size(data),
+                "input_size": len(data),
             }
             # Lineage edge: parent key + the ops/sites that produced this seed.
             # Only recorded when a real parent exists (interesting/Metropolis

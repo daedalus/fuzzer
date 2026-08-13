@@ -28,6 +28,7 @@ reasoning lives in the commit messages, which is where it stays useful.
 | `fix(coverage): size the map for edges, load factor and context width` | Map sized from block count with no edge/block ratio, no load-factor headroom, and no knowledge of context width; plus the shim now counts dropped edges, so saturation is detectable instead of self-masking. |
 | `fix(coverage): keep the SHM resize, drop the state it needlessly destroyed` | Resize wiped every accumulated statistic on a premise true for AFL's bitmap but false here, so the next execution re-reported all known edges as new — defeating the stall detector that had triggered it. Also stopped copying the old table into the new segment at the old modulus. |
 | `fix(coverage): prevent valid edge_id 0 from being treated as an empty slot` | `edge_id == 0` was indistinguishable from an empty slot in the open-addressing table, so valid edges that XORed to zero were silently dropped and the slot reclaimed by later collisions. Forced to 1 with `edge_id |= 1`. |
+| `fix(scheduler): wire favored into FAST/COE and add cull_queue/top_rated` | `favored` was threaded through `SeedScorer` but never computed; FAST/COE ran permanently in unfavored mode and `top_rated`/`cull_queue` minimal-set-cover did not exist. Added `_cull_queue()` to `Fuzzer`, periodic favored recomputation, and passed `favored` at the score call site. |
 
 Two open items **depend** on that third commit and are carried forward in §2: bounding
 the probe window (now measurable, because drops are counted) and making the per-exec
@@ -161,44 +162,10 @@ extra buckets AFL doesn't have.
 
 ### 5. `favored` is threaded through the whole scheduler and never computed
 
-**Status: OPEN.**
-
-`core/schedules.py` takes `favored: bool = False` and uses it in `_fast_factor`
-(lines 447-476), `_coe_factor` (478-491), `coe_skip` (493-506), and `_schedule_factor`
-(415-427). The single call site — `services/fuzzer.py:4145` — **does not pass it**.
-It is always `False`.
-
-So the FAST and COE power schedules run permanently in "unfavored" mode: the
-`factor = 0.8/0.6/0.4 if not favored else 1.0` ladder always takes the penalty branch,
-and `coe_skip` can skip any seed since nothing is protected. More importantly, AFL's
-`top_rated` / `cull_queue` minimal-set-cover — pick, for each edge, the cheapest seed
-that covers it, then greedily favor that cover — **does not exist anywhere** in the
-tree.
-
-This is pure wiring against structures you already have. `EdgeTracker.seed_edges` is
-`dict[seed_key, set[edge_id]]` and `seed_meta` already carries exec time and length:
-
-```python
-def cull_queue(self):
-    top_rated = {}
-    for key, edges in self._edge_tracker.seed_edges.items():
-        m = self.seed_meta.get(key) or {}
-        cost = max(1, m.get("exec_us", 1)) * max(1, m.get("len", 1))
-        for e in edges:
-            cur = top_rated.get(e)
-            if cur is None or cost < cur[1]:
-                top_rated[e] = (key, cost)
-    covered, favored = set(), set()
-    for e in sorted(top_rated, key=lambda e: -self._edge_tracker.rare_edge_count(e)):
-        if e in covered:
-            continue
-        k = top_rated[e][0]
-        favored.add(k)
-        covered |= self._edge_tracker.seed_edges[k]
-    self._favored = favored
-```
-
-Call it every ~1000 execs, pass `favored=(seed_key in self._favored)` at line 4145.
+**Status: FIXED.** `_cull_queue()` now computes the favored set from `EdgeTracker.seed_edges`
+and `seed_meta`, using `exec_us * input_size` as seed cost and greedy rare-edge-priority
+cover to select favorites. It runs periodically in the main fuzz loop, and the score call
+site passes `favored=(seed_key in self._favored)` into `SeedScorer.score()`.
 
 ### 6. `core/skipdet.py` is entirely dead, because there are no deterministic stages
 
@@ -284,20 +251,19 @@ on topic), `KalmanFilter`, `CondStmt`, `MutatorBase`, `ConstraintSet` (wfc),
    and already correct; it is simply not called from the SHM path. Largest semantic
    coverage gain in the document for the smallest amount of new code.
 2. **§1 — forkserver.** Largest throughput win, largest diff.
-3. **§5 — `cull_queue` + `favored`.** ~40 lines against structures that already exist.
-4. **§2 — generation-tagged reset.** Unblocks map sizes above 262144 by making the
+3. **§2 — generation-tagged reset.** Unblocks map sizes above 262144 by making the
    per-exec clear O(1). Do this before concluding anything about §2's probe cost, and
    note it turns the table-copy behaviour in `resize()` from cosmetic to load-bearing.
-5. **§2 — bounded probe window.** Cheap to evaluate now that drops are counted.
-6. **§6 — deterministic stages + SkipDet.** Real design work.
-7. **§8 — the empty-edge-set fast path.** Small, affects only the format learner.
+4. **§2 — bounded probe window.** Cheap to evaluate now that drops are counted.
+5. **§6 — deterministic stages + SkipDet.** Real design work.
+6. **§8 — the empty-edge-set fast path.** Small, affects only the format learner.
 
 **The already-fixed commits still need an A/B before they become defaults.** Nothing
 here has been measured against a real target. In particular the sizing commit enlarges
 maps, which costs more per-execution memset (§2), so its net effect on edges/second
 could be negative on a target that was not saturating.
 
-Items 1, 2, 3, 4, 5, 6 and 7 are independently testable with `tools/bench_paired.py` against
+Items 1, 2, 4, 5, 6 and 7 are independently testable with `tools/bench_paired.py` against
 a fixed seed and a fixed exec budget.
 
 ## Loose thread
