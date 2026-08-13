@@ -268,3 +268,44 @@ class TestRecommendedMapSize:
     def test_never_recommends_a_smaller_map(self):
         t = self._tracker(100, MAP_SIZE_MAX)
         assert t.recommended_map_size(dropped_edges=10**6) == 0
+
+
+class TestEdgeIdZeroRegression:
+    """edge_id == 0 must still be recorded, not treated as an empty slot."""
+
+    _ZERO_DRIVER = """
+    #include <stdlib.h>
+    int main(int argc, char **argv) {
+        /* Guard sequence [2, 1] produces edge_id = (2>>1)^1 = 1^1 = 0
+         * on the second call when CTX is off. */
+        uint32_t g0 = 2;
+        __sanitizer_cov_trace_pc_guard(&g0);
+        uint32_t g1 = 1;
+        __sanitizer_cov_trace_pc_guard(&g1);
+        return 0;
+    }
+    """
+
+    @needs_cc
+    def test_zero_edge_id_is_recorded_not_dropped(self, tmp_path):
+        """A valid edge that hashes to 0 must survive the probe loop."""
+        src = tmp_path / "zero_edge.c"
+        src.write_text(self._ZERO_DRIVER)
+        exe = tmp_path / "zero_edge"
+        r = subprocess.run(
+            ["gcc", "-O1", "-g", "-include", SHIM, "-o", str(exe), str(src)],
+            capture_output=True,
+            text=True,
+        )
+        assert r.returncode == 0, r.stderr
+
+        shm = ShmCoverage(size=1024)
+        try:
+            env = {**os.environ, "__AFL_SHM_ID": shm.env_id, "AFL_MAP_SIZE": "1024"}
+            subprocess.run([str(exe)], env=env, capture_output=True)
+            edges = shm.get_edge_ids()
+            # Without the fix the second edge hashes to 0 and is silently
+            # dropped, so only 1 edge survives. With the fix both survive.
+            assert len(edges) == 2, f"expected 2 edges, got {len(edges)}: {edges}"
+        finally:
+            shm.cleanup()

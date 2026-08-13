@@ -360,6 +360,10 @@ static inline void __afl_map_edge(uint32_t cur_loc) {
 #else
     uint32_t edge_id = __afl_prev_loc ^ cur_loc;
 #endif
+    /* edge_id == 0 means "empty slot" to the probe loop below, so a valid
+     * edge that hashes to 0 would be silently dropped and the slot
+     * reclaimed by the next collision. Force it to 1 instead. */
+    edge_id |= 1;
     uint32_t pos     = edge_id % __afl_map_size;
 
     /* Linear probe: at most map_size iterations guarantees we either
