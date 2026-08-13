@@ -17,6 +17,7 @@ fuzzer, not just the target.
 
 ## Hard Rules
 
+0. Always make surgical changes.
 1. **Always follow existing conventions.** Before adding anything — a target, a script, a scheduler, a test fixture — find the closest existing example and match it: directory layout, file naming, function shape, flag names, error handling, comment style. Read the surrounding code first; do not invent a parallel way of doing something the repo already does. Concretely: vendored library sources go in `vendor/<lib>/` (gitignored) fetched by a `tools/vendor_<lib>.sh` script — never committed and never under `targets/`; new fuzz targets are wired into `tools/build_targets.sh` rather than built by hand; new schedulers register in `_OPERATOR_STRATEGY_NAMES` and follow the `select_op`/`record`/`bandit_stats` interface. If a convention appears wrong, fix it in one place for everything rather than working around it locally, and say so.
 2. Never bypass the pre-commit hooks (`--no-verify`). Fix the warnings, then recommit.
 3. Always fix impactguard breaking changes.
@@ -31,6 +32,10 @@ fuzzer, not just the target.
 12. Op mutators have a single source of truth: `src/fuzzer_tool/core/operator_registry.py`'s `REGISTRY`. Register new operators there only — the dispatch table (`build_dispatch`), the per-input op list (`build_ops`), scheduler arming (`_register_arms`), and `OPERATOR_CATEGORIES` all derive from it. Never add operator names to the legacy `MUTATIONS`/`FORMAT_MUTATIONS`/`DICT_MUTATIONS` lists or hand-edit `OPERATOR_CATEGORIES`; schedulers discover ops through the services layer and never hardcode op lists.
 13. Only run the full pytest suite if a file in the codebase was modified.
 14. Always after developing a new function and verify its correctness try to vectorize it after the fact, keep the fastest version.
+15. Always use the existing pickle machinery, avoid json.
+16. For random always use the prng in `src/fuzzer_tool/core/rand_pool.py`.
+17. Do not create artifacts in the source codebase dir.
+18. Always create corpus on ~/.
 
 ## Corpus Rules
 
