@@ -553,6 +553,9 @@ class Fuzzer:
         quiet_stats=False,
         no_save_state=False,
         dedup_execs=True,
+        fluctuation=False,
+        fluctuation_beta=1.0,
+        fluctuation_window=1000,
         # Appended rather than grouped with the other mutation-targeting
         # flags: this signature is positional, so inserting a parameter
         # mid-list silently shifts every caller argument after it.
@@ -859,6 +862,21 @@ class Fuzzer:
         self._state_store = StateStore(self.corpus_dir, enabled=not no_save_state)
         if self.resume:
             self._state_store.load()
+
+        self._fluctuation = None
+        self._fluctuation_beta = fluctuation_beta
+        self._fluctuation_window = fluctuation_window
+        if fluctuation:
+            from fuzzer_tool.core.fluctuation import WorkFunctional
+
+            self._fluctuation = WorkFunctional(beta=fluctuation_beta, window=fluctuation_window)
+            data = self._state_store.get("fluctuation")
+            if data is not None:
+                self._fluctuation.restore(data)
+                print(
+                    f"[*] Fluctuation tracker loaded (beta={fluctuation_beta}, "
+                    f"samples={sum(len(v) for v in self._fluctuation._states.values())})"
+                )
 
         self.corpus: list[bytes] = []
         self.seen_hashes: set[str] = set()
@@ -1904,6 +1922,65 @@ class Fuzzer:
 
     def _load_state(self):
         return self._corpus_manager.load_state()
+
+    def _op_probability(self, op: str, available: list[str]) -> float:
+        """Return a normalized selection probability for *op*.
+
+        Reads from the active scheduler when possible; falls back to uniform
+        over the available operator list so the work functional is always
+        defined.
+        """
+        if available:
+            if self.mc and self.mc_bandit:
+                stats = self.mc.bandit_stats()
+                if op in stats:
+                    a, b = stats[op]
+                    return max((a + 1.0) / (a + b + 2.0), 1e-12)
+            if (
+                self._mopt
+                and getattr(self, "_meta_strategy", None) == "mopt"
+                and op in getattr(self._mopt, "particles", {})
+            ):
+                return max(1.0 / max(len(available), 1), 1e-12)
+            if (
+                self._use_elo
+                and self._elo
+                and self._meta_strategy
+                in {
+                    *_OPERATOR_STRATEGY_NAMES,
+                    *_SEED_STRATEGY_NAMES,
+                }
+            ):
+                try:
+                    ranking = self._elo.get_strategy_ranking()
+                    top = next((name for name, _ in ranking), None)
+                except Exception:
+                    top = None
+                if top == self._meta_strategy and len(available) > 1:
+                    return max(1.0 / len(available), 1e-12)
+        return max(1.0 / max(len(available), 1), 1e-12)
+
+    def _record_fluctuation_observation(self, outcome: str, hit_edges: set[int]) -> None:
+        """Ingest the current round's operator trajectory into the fluctuation tracker."""
+        f = self._fluctuation
+        if f is None or not self._last_ops_used:
+            return
+        available = (
+            list(self._operators._available)
+            if hasattr(self._operators, "_available")
+            else list(self._last_ops_used)
+        )
+        probs = tuple(self._op_probability(op, available) for op in self._last_ops_used)
+        from fuzzer_tool.core.fluctuation import TrajectoryRecord
+
+        record = TrajectoryRecord(
+            ops=tuple(self._last_ops_used),
+            probs=probs,
+            outcome=outcome,
+            hit_edges=frozenset(hit_edges),
+            new_edges=self._last_new_edge_count,
+        )
+        f.observe(record)
 
     def _run_target(self, data: bytes):
         return self._runner.run_target(data)
@@ -3135,6 +3212,7 @@ class Fuzzer:
                         "asan": None,
                         "ubsan": None,
                     }
+            self._record_fluctuation_observation("crash", self._get_current_edge_set())
             return True
 
         if is_interesting or has_new_coverage:
@@ -3192,6 +3270,7 @@ class Fuzzer:
             ):
                 self._auto_minimize_corpus()
                 self._deprioritize_near_duplicates()
+            self._record_fluctuation_observation("success", self._get_current_edge_set())
             return True
 
         # ── Metropolis acceptance for non-improving / non-crashing inputs ──
@@ -3204,6 +3283,7 @@ class Fuzzer:
                 if self.mc and self.mc_cem:
                     self.mc.add_elite(mutated, 1, temperature=self._temperature)
                     self.mc.maybe_refit()
+                self._record_fluctuation_observation("success", self._get_current_edge_set())
                 return True
 
         # Periodic minimization (also for non-interesting iterations)
@@ -3222,6 +3302,7 @@ class Fuzzer:
         if self.qea:
             self.qea.on_fuzz_result(mutated, False, 0, self._edge_tracker)
 
+        self._record_fluctuation_observation("boring", self._get_current_edge_set())
         return False
 
     def _record_discovery_snapshot(self):
@@ -4320,6 +4401,10 @@ class Fuzzer:
                 self._mcts.prune(set(self._lineage.nodes))
             self._state_store.set("mcts", self._mcts.to_dict())
             print(f"[*] MCTS: saved state ({self._mcts.stats()['tracked_nodes']} nodes)")
+        if self._fluctuation is not None:
+            self._state_store.set("fluctuation", self._fluctuation.snapshot())
+            samples = sum(len(v) for v in self._fluctuation._states.values())
+            print(f"[*] Fluctuation: saved state (samples={samples})")
         self._save_state()
         if self._ablation_file:
             self._ablation_file.flush()

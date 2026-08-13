@@ -886,6 +886,18 @@ class StatsReporter:
             f"{div_str}{jac_str}{dr_str}{density_str}{repro_str}{brier_str}{crps_str}"
             f"{ent_str}{simp_str}{rate_str}{fmt_str}{perf_str}{hf_str}{ops_str}"
         )
+        fluc_str = ""
+        if getattr(f, "_fluctuation", None) is not None:
+            try:
+                stats = f._fluctuation.stats(f._fluctuation._last_state_key)
+                parts = [f"W={stats.get('last_work', 0):.2f}", f"n={stats.get('samples', 0)}"]
+                if stats.get("jarzynski_delta_f") is not None:
+                    parts.append(f"dF={stats['jarzynski_delta_f']:.2f}")
+                fluc_str = " | fluc: " + " ".join(parts)
+            except (AttributeError, TypeError):
+                pass
+        if fluc_str:
+            line += fluc_str
         growth = f._edge_tracker.coverage_growth_model()
         if growth["confidence"] > 0.1:
             line += f" | gr: {growth['current_rate']:.3f}e/x proj: {growth['projected_total']} plateau: ~{growth['time_to_plateau']:,}"

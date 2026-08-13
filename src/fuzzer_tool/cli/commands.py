@@ -483,6 +483,7 @@ def cmd_fuzz(args):
         overlap_density_blend=getattr(args, "overlap_blend", 0.5),
         sensitivity=getattr(args, "sensitivity", False),
         region_profile=getattr(args, "region_profile", False),
+        fluctuation=getattr(args, "fluctuation_theorems", False),
         ga=getattr(args, "ga", False),
         qea=getattr(args, "qea", False),
         wfc=getattr(args, "wfc", False),
@@ -1694,6 +1695,12 @@ def main() -> int:
         action="store_true",
         help="Enable MCTS/UCT seed scheduling over the mutation lineage tree "
         "(implies --lineage; competes as an Elo-arbitrated seed strategy)",
+    )
+    fuzz_parser.add_argument(
+        "--fluctuation-theorems",
+        action="store_true",
+        help="Enable Jarzynski/Crooks fluctuation-theorem diagnostics over mutation "
+        "trajectories (speculative; opt-in diagnostics only by default)",
     )
     fuzz_parser.add_argument(
         "--wfc",

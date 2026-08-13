@@ -17,7 +17,7 @@
 - [ ] **Per-format tuning of the regularity band** — the operators are currently offered unconditionally (except `invariant_break`). Several are format-shaped in practice: `spectral_peak` matters for DCT codecs, `degenerate_geometry` for vector/mesh parsers, `rank_deficient` for erasure coders. A sniffer gate like `_FORMAT_SNIFFERS` would stop them burning budget on targets that cannot use them.
 
 ## Scheduling
-- [ ] **Fluctuation theorems for fuzzing** (research-y) — Jarzynski/Crooks relations could estimate the "difficulty" of reaching rare corpus regions from biased/accelerated trajectories. Requires a well-defined work functional over mutation trajectories, which doesn't exist yet. Flagged as speculative, not a sprint task.
+- [x] **Fluctuation theorems for fuzzing** (IMPLEMENTED 2026-08-13) — Jarzynski/Crooks relations implemented for mutation trajectories. Work functional `w_i = -log(max(p_i, ε))` over operator-selection probabilities; free-energy estimator `ΔF̂` printed via `StatsReporter.print_stats`. Phase 1 is diagnostics-only: estimates are not fed back into scheduling. CLI flag: `--fluctuation-theorems`. See `src/fuzzer_tool/core/fluctuation.py`, `services/fuzzer.py`, `services/stats.py`.
 - [ ] **Collaborative scheduling across parallel workers** — parallel workers currently sync corpus but don't coordinate scheduling decisions. Could share exploration/exploitation state.
 
 ## Crash Analysis
