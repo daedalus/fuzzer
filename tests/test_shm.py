@@ -572,24 +572,48 @@ class TestShmCoverage:
 
     # ── Resize + edge_count ─────────────────────────────────────────────
 
-    def test_resize_preserves_edge_count_header(self):
-        """After resize, the front header (including edge_count) is preserved via memmove."""
+    def test_resize_preserves_header_but_not_the_table(self):
+        """resize() copies the front header only; the table is scratch.
+
+        This test previously asserted the table survived, because resize()
+        used to memmove the whole segment. That was wrong in a way nothing
+        happened to exercise: entries were copied to the positions they held
+        under the OLD modulus, so on the next execution the shim would probe
+        from edge_id % new_size, miss the stale copy, and claim a SECOND slot
+        for an edge already present.
+
+        It was invisible only because every caller resets the table before
+        each run -- ``run_target*`` and ``_run_target_ptrace`` both call
+        ``reset_edge_map()`` first -- so the copied entries were wiped before
+        anything read them. Copying the header alone is correct and cheaper,
+        and stops this from becoming a live duplicate-entry bug if the
+        per-exec memset is ever replaced with generation tagging.
+
+        Accumulated coverage is not lost by this: it lives in
+        ``_seen_edge_ids`` / ``cumulative_edges`` on the Python side, and
+        those are keyed on resize-invariant edge IDs. See
+        tests/test_resize_preserves_state.py.
+        """
         cov = ShmCoverage(size=8)
         try:
-            # Write header metadata
             ctypes.c_uint64.from_address(cov._ptr + 16).value = 123
-            # Add some edges to fill the table
             for i in range(5):
                 cov.record_edge(100 + i)
             old_id = cov.shm_id
+            seen_before = set(cov._seen_edge_ids)
+
             cov.resize(16)
-            # Header preserved
-            assert cov.read_edge_count() == 123 + 5  # original + record_edge increments
-            # New SHM id (old was detached and removed)
+
+            # Header survives: edge_count, path_hash and the diag word.
+            assert cov.read_edge_count() == 123 + 5
             assert cov.shm_id != old_id
-            # All edges survived the rehash
-            for i in range(5):
-                assert (100 + i) in cov.get_edge_ids()
+
+            # Table does not, by design.
+            assert cov.get_edge_ids() == set()
+
+            # The identity that actually matters is untouched.
+            assert cov._seen_edge_ids == seen_before
+            assert seen_before == {100 + i for i in range(5)}
         finally:
             cov.cleanup()
 

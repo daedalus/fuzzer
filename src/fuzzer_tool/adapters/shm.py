@@ -120,6 +120,9 @@ class ShmCoverage:
 
         self.total_edges = 0
         self.cumulative_edges = 0
+        # Vestigial since resize() stopped zeroing cumulative_edges: the
+        # counter is monotonic now, so peak == current. Kept because
+        # stats.py reads it, and because it stays correct either way.
         self._peak_cumulative_edges: int = 0
         self._register_atexit()
 
@@ -420,7 +423,18 @@ class ShmCoverage:
             raise OSError(f"shmat resize failed: {os.strerror(ctypes.get_errno())}")
 
         ctypes.memset(new_ptr, 0, new_total_bytes)
-        ctypes.memmove(new_ptr, self._ptr, self.shm_bytes)
+        # Copy the HEADER only, not the table.
+        #
+        # The old table's entries sit at positions computed under the old
+        # modulus, so carrying them over puts every one of them in the wrong
+        # place: the shim would start probing at edge_id % new_size, miss the
+        # stale copy, and claim a SECOND slot for an edge already present.
+        # That is invisible today purely because reset_edge_map() memsets the
+        # table before every execution — but it becomes a live duplicate-entry
+        # bug the moment that per-exec clear is replaced with generation
+        # tagging. Copying only the header is both correct and cheaper: the
+        # table is scratch, the header (path_hash, edge_count, diag) is not.
+        ctypes.memmove(new_ptr, self._ptr, SHM_METADATA_SIZE)
 
         # Detach old SHM
         old_ptr = self._ptr
@@ -439,12 +453,21 @@ class ShmCoverage:
         self._tail = new_ptr + SHM_METADATA_SIZE + new_table_bytes
         self.env_id = str(self.shm_id)
 
-        self._peak_cumulative_edges = max(self._peak_cumulative_edges, self.cumulative_edges)
-        # Clear position-indexed seen set (positions change after resize)
-        self._seen_edge_ids.clear()
+        # _seen_edge_ids is NOT position-indexed, despite what the comment
+        # here used to say. It is populated from active["edge_id"], and
+        # edge_id = ctx ^ prev_loc ^ cur_loc carries no map_size term — only
+        # the starting probe position edge_id % map_size moves, and no
+        # position is ever persisted. Clearing it made the next execution
+        # report every already-known edge as new, which zeroed the reported
+        # coverage, reset the stall detector that had just triggered this
+        # resize, and saved a burst of inputs for coverage already held.
+        #
+        # _last_edge_count is reset because the header edge_count is a
+        # per-process cumulative that the fast path only compares for
+        # CHANGE; after the header copy above it is still meaningful, but
+        # forcing one full scan on the next execution costs a single exec
+        # and removes any dependence on that being true.
         self._last_edge_count = 0
-        self.cumulative_edges = 0
-        self.total_edges = 0
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 

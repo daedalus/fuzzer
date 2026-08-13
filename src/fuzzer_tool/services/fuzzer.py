@@ -3603,8 +3603,10 @@ class Fuzzer:
                 )
                 self.shm_cov.resize(new_size)
                 self.map_size = new_size
-                self._edge_tracker.map_size = new_size
-                self._edge_tracker.reset_after_resize()
+                # on_resize() sets map_size and clears only what a resize
+                # actually invalidates — nothing, on the SHM path, since
+                # edge IDs do not depend on map_size.
+                self._edge_tracker.on_resize(new_size)
                 # Drops recorded against the old table say nothing about the
                 # new one; clearing keeps the next decision on fresh evidence.
                 self.shm_cov.reset_diag()

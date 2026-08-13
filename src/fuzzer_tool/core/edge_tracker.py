@@ -586,6 +586,23 @@ class EdgeTracker:
         self._aggregate_cache: dict[int, float] | None = None
         # Good-Turing: global cumulative hit count per edge (across all seeds)
         self._global_edge_hits: dict[int, int] = {}
+
+        # Which key space the tracked dicts are in. record_edges() accepts two
+        # kinds of input that produce DIFFERENT and incompatible keys:
+        #
+        #   bytes bitmap -> keys are SLOT INDICES (np.flatnonzero positions).
+        #                   Meaningless after a resize: the same logical edge
+        #                   lands somewhere else. Used by ptrace coverage.
+        #   set of ints  -> keys are EDGE IDs (ctx ^ prev_loc ^ cur_loc).
+        #                   Carry no map_size term at all, so a resize cannot
+        #                   invalidate them. Used by the SHM path.
+        #
+        # on_resize() needs to tell these apart, and nothing else recorded it.
+        # Note both spaces write into the SAME dicts, so a run that mixed
+        # ptrace and SHM coverage would silently collide slot indices with
+        # edge IDs — nothing does today, which is why making this explicit is
+        # worth more than the one branch it enables.
+        self._key_space: str | None = None
         self._spectrum_dirty = True
         self._frequency_spectrum: dict[int, int] = {}
         self.max_hit_count: int = 0
@@ -670,6 +687,7 @@ class EdgeTracker:
         # Backward compat: bytes input treated as byte bitmap where
         # non-zero byte positions = edge indices (for ptrace + tests).
         if isinstance(hit_edges, bytes):
+            self._note_key_space("position")
             bitmap = hit_edges
             if not morris_mode:
                 bitmap = classify_counts(bitmap)
@@ -690,6 +708,7 @@ class EdgeTracker:
 
         else:
             # New sparse path: hit_edges is a set of edge IDs
+            self._note_key_space("edge_id")
             for edge_id in hit_edges:
                 val = hit_counts.get(edge_id, 1) if hit_counts else 1
                 new_edges.add(edge_id)
@@ -738,16 +757,65 @@ class EdgeTracker:
 
         return new_contributions
 
-    def reset_after_resize(self):
-        """Clear all position-based state after bitmap resize.
+    def _note_key_space(self, space: str) -> None:
+        """Record which key space record_edges() is populating."""
+        if self._key_space is None:
+            self._key_space = space
+        elif self._key_space != space:
+            # Both spaces share the same dicts, so mixing them corrupts every
+            # per-edge statistic. Warn rather than raise: the tracker is not
+            # the right place to abort a fuzzing run.
+            log.warning(
+                "EdgeTracker fed %s keys after %s keys — slot indices and edge "
+                "IDs are now mixed in the same tables; per-edge statistics are "
+                "unreliable for the rest of this run",
+                space,
+                self._key_space,
+            )
+            self._key_space = "mixed"
 
-        When the bitmap resizes, AFL's hash (edge_id = hash(src,dst) % map_size)
-        maps the same logical edge to a different position. All position-based
-        tracking must be cleared to avoid stale entries.
+    def on_resize(self, new_map_size: int) -> None:
+        """Adapt tracked state to a resized coverage map.
 
-        The cumulative edge COUNT is preserved in _cumulative_edges_total so
-        the run summary still shows a non-zero "Edges discovered" after resize.
+        Only slot-indexed state is invalidated by a resize. Edge-ID-keyed
+        state is not, and clearing it is destructive:
+
+        The previous implementation wiped everything unconditionally, on the
+        reasoning that "AFL's hash (edge_id = hash(src,dst) % map_size) maps
+        the same logical edge to a different position". That is correct for
+        AFL's classic bitmap, where the INDEX IS the edge identity. It is
+        false for this design: entries carry an explicit 8-byte
+        {edge_id, count} pair, and edge_id = ctx ^ prev_loc ^ cur_loc has no
+        map_size term. Only the starting probe position edge_id % map_size
+        changes, and no position is ever persisted — reset_edge_map() memsets
+        the table before every execution regardless.
+
+        The cost of getting this wrong was not subtle. A stall-triggered
+        resize wiped cumulative_edges, _global_edge_hits, seed_edges,
+        seed_hit_counts, the MinHash signatures and the rarity spectrum, so
+        the next execution reported every already-known edge as new. That
+        reset execs_since_edge — defeating the stall detector that triggered
+        the resize in the first place — produced a burst of spurious
+        "interesting" saves, and corrupted the rarity schedule and the
+        Elo/Shapley operator attribution. It also zeroed the edge count in
+        the UI, which is why _cumulative_edges_total existed at all.
+
+        The one case where the old reasoning holds is a tracker fed byte
+        bitmaps (ptrace coverage), whose keys really are slot indices. Resize
+        only fires on the SHM path today, which only ever passes edge-ID sets,
+        so this branch is currently unreachable — kept so the invariant is
+        enforced rather than assumed.
+
+        Args:
+            new_map_size: Entry count of the resized table.
         """
+        self.map_size = new_map_size
+
+        if self._key_space != "position":
+            # edge_id keys survive a resize unchanged. Nothing to do.
+            return
+
+        log.info("Resize invalidates slot-indexed coverage state; clearing")
         self._cumulative_edges_total = max(self._cumulative_edges_total, len(self.cumulative_edges))
         self.cumulative_edges.clear()
         self._global_edge_hits.clear()
@@ -759,6 +827,10 @@ class EdgeTracker:
         self._aggregate_cache = None
         self._spectrum_dirty = True
         self.max_hit_count = 0
+
+    def reset_after_resize(self):
+        """Deprecated alias for on_resize(); preserves the current map_size."""
+        self.on_resize(self.map_size)
 
     def _maybe_prune(self):
         """Prune tracked seeds when count exceeds max_tracked_seeds.

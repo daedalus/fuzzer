@@ -493,8 +493,7 @@ class StatsReporter:
         )
         f.shm_cov.resize(new_size)
         f.map_size = new_size
-        f._edge_tracker.map_size = new_size
-        f._edge_tracker.reset_after_resize()
+        f._edge_tracker.on_resize(new_size)
         os.environ["__AFL_SHM_ID"] = f.shm_cov.env_id
         os.environ["AFL_MAP_SIZE"] = str(new_size)
         if f._inprocess_runner:
