@@ -14,6 +14,11 @@ O(1) classification for both bytes per table lookup.
 NumPy path: when numpy is available, classify_counts and
 classify_and_new_bits use vectorized operations for 100-400x speedup
 over the pure-Python loop on 131K buffers.
+
+Separately, ``bucket_bit`` / ``bucket_bits`` map a raw count to AFL's
+count_class_lookup8 *bit*, which is what a virgin map needs. See the
+comment above them for why the classify_* representative values cannot
+be reused for that.
 """
 
 from array import array
@@ -121,6 +126,82 @@ def classify_single(val: int) -> int:
     Returns one of: 0, 1, 2, 3, 4, 8, 16, 32, 128.
     """
     return _classify_byte(val)
+
+
+# ── Bucket bits (for virgin maps) ────────────────────────────────────
+#
+# _classify_byte() returns a *representative value* per bucket
+# (0, 1, 2, 3, 4, 8, 16, 32, 64, 128).  Those are not disjoint bits:
+# class 3 is 0b11, which is class 1 OR'd with class 2.  That is harmless
+# when comparing two classified traces byte-for-byte, but it is wrong for
+# a virgin map, which accumulates by OR — an edge seen once and then
+# twice leaves virgin == 0b11, and a later hit count of exactly 3 then
+# reports no new bucket and is silently dropped.
+#
+# AFL's count_class_lookup8 avoids this by giving every bucket its own
+# bit.  BUCKET_BIT_TABLE is that mapping, kept separate so the existing
+# classify_* semantics stay exactly as they are:
+#
+#     count      bit
+#     0          0x00   (empty slot — never sets a bit)
+#     1          0x01
+#     2          0x02
+#     3          0x04
+#     4-7        0x08
+#     8-15       0x10
+#     16-31      0x20
+#     32-127     0x40
+#     128+       0x80
+#
+# The SHM `count` field is uint32, not AFL's uint8, so counts above 255
+# are real values rather than a wrapped counter.  They are clamped into
+# the 128+ bucket to keep this ladder bit-identical to AFL's.  Extending
+# it upward (256+, 1024+, …) would add buckets AFL does not have and
+# would change which inputs are judged interesting, so it belongs in its
+# own patch with its own A/B rather than riding along here.
+
+BUCKET_COUNT = 8  # number of non-empty buckets; bits fit in a uint8
+
+
+def bucket_bit(count: int) -> int:
+    """Map a raw hit count to its bucket bit.
+
+    Returns 0 for count <= 0 (an empty slot occupies no bucket), otherwise
+    exactly one of the eight bits above.
+    """
+    if count <= 0:
+        return 0
+    if count <= 3:
+        return 1 << (count - 1)  # 1, 2, 3 -> 0x01, 0x02, 0x04
+    if count <= 7:
+        return 0x08
+    if count <= 15:
+        return 0x10
+    if count <= 31:
+        return 0x20
+    if count <= 127:
+        return 0x40  # AFL merges 32-63 and 64-127 into one bucket
+    return 0x80
+
+
+BUCKET_BIT_TABLE = np.array([bucket_bit(i) for i in range(256)], dtype=np.uint8)
+
+
+def bucket_bits(counts) -> np.ndarray:
+    """Vectorized ``bucket_bit`` over an array of raw hit counts.
+
+    Args:
+        counts: Array-like of raw counts (uint32 in the SHM edge table).
+
+    Returns:
+        uint8 array of bucket bits, one per input count.  Counts above
+        255 clamp into the 128+ bucket.
+    """
+    arr = np.asarray(counts)
+    if arr.size == 0:
+        return np.zeros(0, dtype=np.uint8)
+    clamped = np.minimum(arr, 255).astype(np.uint8)
+    return BUCKET_BIT_TABLE[clamped]
 
 
 def new_bits(

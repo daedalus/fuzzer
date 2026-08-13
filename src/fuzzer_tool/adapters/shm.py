@@ -14,7 +14,14 @@ import ctypes.util
 import logging
 import os
 
+import numpy as np
+
+from fuzzer_tool.core.count_class import bucket_bits
+
 log = logging.getLogger(__name__)
+
+# Dtype of one edge-table entry, shared by every reader in this module.
+_ENTRY_DTYPE = np.dtype([("edge_id", "<u4"), ("count", "<u4")])
 
 # Default number of hash table entries.
 # SHM default = 8192 entries * 8 bytes = 65536 bytes.
@@ -37,6 +44,33 @@ SHM_METADATA_SIZE = 24  # bytes reserved at front of SHM for metadata
 # and stays zeroed otherwise, so readers fall back to Python-side
 # distance computation when count == 0.
 SHM_TAIL_SIZE = 16  # bytes reserved at the end of SHM for the distance tail
+
+# Upper bound on the edge_id the virgin bucket map indexes directly.
+#
+# The map is keyed by edge_id into a dense uint8 array rather than a dict,
+# because it is consulted on every execution that changes coverage: a
+# fancy-index over the whole active set is one vectorized call, where a
+# dict lookup per active entry is a Python-level loop over (on a
+# saturating target) tens of thousands of entries per exec.  Measured on
+# 200k active edges: 1.8ms direct-indexed against 28.7ms via a sorted-array
+# searchsorted and 108ms via the dict loop.  edges/second is the metric, so
+# the novelty test must not itself be O(active) in the interpreter.
+#
+# Direct indexing is affordable because trace_pc_guard_init hands out small
+# sequential guard values, so edge_id = prev_loc ^ cur_loc lands in a dense
+# range of roughly 2 * guard_count -- and XOR with an __AFL_CTX_BITS-wide
+# context term cannot widen a value past its wider operand, so the default
+# 8-bit context does not change that.  One byte per reachable edge_id is
+# ~512 KiB for a target with 200k live edges, against the 8 bytes per SLOT
+# the edge table itself already costs.
+#
+# The exception is __AFL_CTX_BITS in the 24..32 range, which -- as the
+# shim's own comment says -- scatters ids across the entire u32 space and
+# would ask for up to 4 GiB here.  Ids at or above this bound go to a dict
+# instead.  That path is the interpreter loop this design exists to avoid,
+# but it is only reachable on a configuration whose live id count is
+# already unbounded, and it stays correct there.
+VIRGIN_DENSE_MAX = 1 << 24
 
 # shmget constants
 IPC_CREAT = 0o1000
@@ -113,6 +147,15 @@ class ShmCoverage:
 
         # Cumulative "ever seen" set of edge_ids (not positions)
         self._seen_edge_ids: set[int] = set()
+        # Virgin hit-count bucket map: for each edge_id, the OR of every
+        # bucket bit that edge has ever been observed in.  Indexed by
+        # edge_id directly (see VIRGIN_DENSE_MAX), with a dict for ids
+        # past the dense range.
+        self._virgin: np.ndarray = np.zeros(0, dtype=np.uint8)
+        self._virgin_wide: dict[int, int] = {}
+        # Count of (edge, bucket) pairs observed for the first time — the
+        # coverage that set membership alone cannot see.  Diagnostic only.
+        self.bucket_transitions: int = 0
         # Last seen edge_count for O(1) fast-path in is_new_coverage
         self._last_edge_count: int = 0
         # Last seen path_hash for fast-path — catches same-count but different-edge sets
@@ -140,26 +183,14 @@ class ShmCoverage:
         Uses numpy for zero-copy vectorized scan — avoids per-entry
         Python loop overhead.
         """
-        import numpy as np
-
-        arr = np.frombuffer(
-            self._map,
-            dtype=np.dtype([("edge_id", "<u4"), ("count", "<u4")]),
-            count=self.num_entries,
-        )
+        arr = np.frombuffer(self._map, dtype=_ENTRY_DTYPE, count=self.num_entries)
         active = arr[arr["edge_id"] != 0]
         # .tolist() converts numpy uint32 to plain Python ints
         return set(active["edge_id"].tolist())
 
     def get_edge_counts(self) -> dict[int, int]:
         """Return {edge_id: count} for all non-empty entries."""
-        import numpy as np
-
-        arr = np.frombuffer(
-            self._map,
-            dtype=np.dtype([("edge_id", "<u4"), ("count", "<u4")]),
-            count=self.num_entries,
-        )
+        arr = np.frombuffer(self._map, dtype=_ENTRY_DTYPE, count=self.num_entries)
         active = arr[arr["edge_id"] != 0]
         # .tolist() converts numpy uint32 to plain Python ints
         return dict(zip(active["edge_id"].tolist(), active["count"].tolist(), strict=False))
@@ -290,6 +321,86 @@ class ShmCoverage:
             h = (h * 31) ^ eid
         return h & 0xFFFFFFFFFFFFFFFF
 
+    # ── Hit-count bucketing ─────────────────────────────────────────────
+    #
+    # Set membership answers "was this edge ever hit". It cannot answer
+    # "was this edge ever hit THIS MANY times", and that second question is
+    # the mechanism by which AFL crosses loop-count-guarded branches:
+    # `if (n > 16)`, buffer-growth paths, parser backtrack limits. An input
+    # driving a loop twice and one driving it 128 times produce the same
+    # edge set and, without bucketing, the same verdict.
+    #
+    # The bucket ladder lives in core/count_class.py. Here we keep the
+    # virgin map: edge_id -> OR of every bucket bit seen for that edge.
+
+    def _update_virgin_buckets(self, edge_ids: np.ndarray, counts: np.ndarray) -> bool:
+        """Fold this execution's hit counts into the virgin bucket map.
+
+        Args:
+            edge_ids: uint32 edge ids of the active (non-empty) entries.
+            counts: matching uint32 raw hit counts.
+
+        Returns:
+            True when at least one (edge, bucket) pair was seen for the
+            first time — i.e. this execution found coverage that the
+            edge-id set alone would have called old.
+        """
+        bits = bucket_bits(counts)
+        occupied = bits != 0
+        if not occupied.any():
+            # Every active entry has count 0. The C shim never writes such
+            # an entry (a claimed slot starts at 1), so this is either a
+            # hand-built table in a test or a torn read.
+            return False
+        eids = np.asarray(edge_ids, dtype=np.uint32)[occupied]
+        bits = bits[occupied]
+
+        found = False
+        in_range = eids < VIRGIN_DENSE_MAX
+        if not in_range.all():
+            found = self._update_virgin_overflow(eids[~in_range], bits[~in_range])
+            eids, bits = eids[in_range], bits[in_range]
+            if eids.size == 0:
+                return found
+
+        hi = int(eids.max()) + 1
+        if hi > self._virgin.size:
+            grown = np.zeros(1 << max(10, (hi - 1).bit_length()), dtype=np.uint8)
+            grown[: self._virgin.size] = self._virgin
+            self._virgin = grown
+
+        prev = self._virgin[eids]
+        fresh = bits & ~prev
+        if not fresh.any():
+            return found
+        self.bucket_transitions += int(np.count_nonzero(fresh))
+        # edge_ids are unique within the table — the shim's probe gives each
+        # edge exactly one slot — so this fancy-indexed store has no
+        # duplicate targets and is not order-dependent.
+        self._virgin[eids] = prev | bits
+        return True
+
+    def _update_virgin_overflow(self, eids: np.ndarray, bits: np.ndarray) -> bool:
+        """Virgin update for edge ids past the dense array's range.
+
+        Unreachable under any default build; see VIRGIN_DENSE_MAX.
+        """
+        found = False
+        for eid, bit in zip(eids.tolist(), bits.tolist(), strict=False):
+            prev = self._virgin_wide.get(eid, 0)
+            if bit & ~prev:
+                self._virgin_wide[eid] = prev | bit
+                self.bucket_transitions += 1
+                found = True
+        return found
+
+    def get_virgin_buckets(self) -> dict[int, int]:
+        """Return {edge_id: OR of bucket bits ever seen} — diagnostics/tests."""
+        hit = np.nonzero(self._virgin)[0]
+        buckets = dict(zip(hit.tolist(), self._virgin[hit].tolist(), strict=False))
+        buckets.update(self._virgin_wide)
+        return buckets
+
     # ── New-coverage detection ──────────────────────────────────────────
 
     def _check_new_coverage(self) -> tuple[bool, set[int]]:
@@ -301,7 +412,20 @@ class ShmCoverage:
            nothing changed.  The path_hash comparison catches the case where
            the same number of edges fire but the edge SET has changed (e.g.
            {1,2,3} vs {1,2,4} — both count=3 but hash differs).
-        2. Slow path: numpy vectorized scan for unseen edge_ids.
+        2. Slow path: numpy vectorized scan for unseen edge_ids and for
+           unseen hit-count buckets.
+
+        The fast path stays safe now that hit counts matter, because the
+        shim advances path_hash on *every* edge fire — count bump and
+        full-table miss included, not just new-slot insertion. An
+        unchanged path_hash therefore means the same edges fired the same
+        number of times in the same order, so no bucket can have moved.
+
+        The `path_hash == 0` fallback is the exception: edge_count counts
+        new-slot insertions only and is blind to multiplicity, so a pure
+        count change is invisible there. That branch exists for tables
+        built by hand in tests; a live target that ran at all has a
+        non-zero hash.
         """
         edge_count = self.read_edge_count()
         path_hash = self.read_path_hash()
@@ -312,13 +436,7 @@ class ShmCoverage:
             return False, set()
 
         # Slow path: extract edge_ids not yet in _seen_edge_ids
-        import numpy as np
-
-        arr = np.frombuffer(
-            self._map,
-            dtype=np.dtype([("edge_id", "<u4"), ("count", "<u4")]),
-            count=self.num_entries,
-        )
+        arr = np.frombuffer(self._map, dtype=_ENTRY_DTYPE, count=self.num_entries)
         active = arr[arr["edge_id"] != 0]
         ids = set(active["edge_id"].tolist())
         new = ids - self._seen_edge_ids
@@ -327,6 +445,13 @@ class ShmCoverage:
         if new:
             self.cumulative_edges += len(new)
             self._peak_cumulative_edges = max(self._peak_cumulative_edges, self.cumulative_edges)
+            new_found = True
+
+        # Hit-count bucketing. OR'd with the set-membership result rather
+        # than replacing it: a new edge whose count is 0 occupies no bucket,
+        # which the shim never produces but tests and torn reads do, and
+        # cumulative_edges must stay an edge count either way.
+        if self._update_virgin_buckets(active["edge_id"], active["count"]):
             new_found = True
 
         self._last_edge_count = edge_count
@@ -357,6 +482,13 @@ class ShmCoverage:
 
     # ── Manual recording (for tests) ─────────────────────────────────────
 
+    def _note_bucket(self, edge_id: int, count: int) -> None:
+        """Fold a single {edge_id, count} into the virgin bucket map."""
+        self._update_virgin_buckets(
+            np.array([edge_id], dtype=np.uint32),
+            np.array([count], dtype=np.uint32),
+        )
+
     def record_edge(self, edge_id: int) -> bool:
         """Manually record an edge — for tests only.
 
@@ -366,6 +498,13 @@ class ShmCoverage:
         shim's __afl_map_edge (afl_shim.c), the path_hash advances on every
         edge fire — new-slot insert, count bump, or full-table miss — not
         just on new slots.
+
+        It also folds the resulting count into the virgin bucket map, for
+        the same reason it already updates _seen_edge_ids: this method
+        stands in for both the writer and the reader, so leaving the reader
+        half stale would make a recorded edge report as new coverage on the
+        next scan. Folding per call marks each bucket the count passes
+        through, which is what a sequence of executions would have done.
         """
         pos = edge_id % self.num_entries
         stored = False
@@ -384,11 +523,13 @@ class ShmCoverage:
                     self._peak_cumulative_edges = max(
                         self._peak_cumulative_edges, self.cumulative_edges
                     )
+                self._note_bucket(edge_id, 1)
                 stored = True
                 break
             if eid == edge_id:
                 if self._entries[idx].count < 0xFFFFFFFF:
                     self._entries[idx].count += 1
+                self._note_bucket(edge_id, int(self._entries[idx].count))
                 stored = True
                 break
         # Update path_hash unconditionally: hash = hash * 31 ^ edge_id
@@ -461,6 +602,8 @@ class ShmCoverage:
         # report every already-known edge as new, which zeroed the reported
         # coverage, reset the stall detector that had just triggered this
         # resize, and saved a burst of inputs for coverage already held.
+        # _virgin/_virgin_wide are keyed the same way and survive for
+        # the same reason.
         #
         # _last_edge_count is reset because the header edge_count is a
         # per-process cumulative that the fast path only compares for

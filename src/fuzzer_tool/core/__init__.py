@@ -8,7 +8,13 @@ from fuzzer_tool.core.chi_squared import (
     chi_squared_pvalue,
     cramers_v,
 )
-from fuzzer_tool.core.count_class import classify_counts, classify_single, new_bits
+from fuzzer_tool.core.count_class import (
+    bucket_bit,
+    bucket_bits,
+    classify_counts,
+    classify_single,
+    new_bits,
+)
 from fuzzer_tool.core.critical_slowing import (
     CoverageHomogeneityDetector,
     CriticalSlowingDown,
@@ -50,6 +56,8 @@ __all__ = [
     "chi_squared_independence",
     "chi_squared_pvalue",
     "cramers_v",
+    "bucket_bit",
+    "bucket_bits",
     "classify_counts",
     "classify_single",
     "new_bits",
