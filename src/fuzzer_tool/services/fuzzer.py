@@ -25,6 +25,7 @@ except ImportError:
 
 from fuzzer_tool.adapters.process import (
     _child_pids,
+    disable_aslr,
 )
 from fuzzer_tool.adapters.shm import ShmCoverage
 from fuzzer_tool.core.bloom import BloomFilter
@@ -573,6 +574,19 @@ class Fuzzer:
         self._active_target_idx = 0  # round-robin index
         self._target_shm_covs = {}  # target_path -> ShmCoverage (per-target)
         self._target_profiles = {}  # target_path -> TargetProfile
+        # Pin the address-space layout BEFORE anything spawns, dlopens, or
+        # profiles a target. personality(ADDR_NO_RANDOMIZE) is inherited by
+        # every child through fork and survives execve, so this one call
+        # covers posix_spawn (which has no preexec_fn hook), Popen, the
+        # in-process subprocess loader, and the forkserver.
+        #
+        # Required for correctness, not just reproducibility: afl_shim.c's
+        # caller-context edge hashing derives edge_id from a runtime return
+        # address, and _seen_edge_ids is compared across target processes.
+        # With ASLR on, every exec of a CTX build reports a fresh edge set.
+        # See adapters/process.disable_aslr.
+        self._aslr_disabled = disable_aslr()
+
         # Record boot time at init — before any child processes are spawned.
         # Use -2s tolerance so crashes logged just before this read are included.
         try:

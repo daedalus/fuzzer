@@ -14,6 +14,7 @@ import logging
 import os
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 
@@ -62,6 +63,115 @@ def _clean_env(env: dict[str, str] | None = None) -> dict[str, str]:
 
 
 _clean_env_cache: dict[str, str] | None = None
+
+
+# ── ASLR control ────────────────────────────────────────────────────────
+#
+# Every coverage identity in this fuzzer is compared ACROSS target
+# processes: ShmCoverage._seen_edge_ids lives in the fuzzer parent and
+# persists for the whole session, while the default execution path spawns
+# a fresh process per input.  Anything derived from a runtime address must
+# therefore be stable from one exec to the next.
+#
+# It is not, by default.  afl_shim.c's caller-context edge hashing
+# (-D__AFL_CTX_SENSITIVE=1, enabled by tools/build_targets.sh for the
+# _nosan .so targets and the whole --vendor-tracecmp path) computes
+# edge_id = hash(__builtin_return_address(1)) ^ prev_loc ^ cur_loc.
+# Under PIE + ASLR that hash changes on every exec, so every edge_id in
+# every run looks new: is_new_coverage() never returns False, the edge
+# table saturates immediately, and the corpus fills with inputs saved for
+# coverage that does not exist.
+#
+# personality(ADDR_NO_RANDOMIZE) is inherited across fork AND preserved
+# across execve, so setting it once in the fuzzer parent covers every
+# child regardless of how it is launched -- posix_spawn (which has no
+# preexec_fn hook), Popen, the in-process subprocess loader, and the
+# forkserver alike.
+#
+# This also removes a source of run-to-run variance from every
+# measurement in the tree, including tools/bench_paired.py.
+
+ADDR_NO_RANDOMIZE = 0x0040000
+_PERSONALITY_QUERY = 0xFFFFFFFF  # personality(0xffffffff) reads without setting
+
+_aslr_disabled: bool | None = None
+
+
+def disable_aslr() -> bool:
+    """Disable address-space randomization for this process and its children.
+
+    Idempotent and safe to call on any platform: returns False and logs at
+    debug level when the syscall is unavailable or refused.
+
+    Set FUZZER_KEEP_ASLR=1 to opt out.  The one situation that needs it is
+    an ASAN target on a kernel whose fixed mmap layout collides with ASAN's
+    shadow range ("Shadow memory range interleaves with an existing memory
+    mapping").  If ASAN targets start failing to start immediately after
+    this lands, that is the cause.
+
+    Returns:
+        True if ADDR_NO_RANDOMIZE is set on this process when we return.
+    """
+    global _aslr_disabled
+    if _aslr_disabled is not None:
+        return _aslr_disabled
+
+    if os.environ.get("FUZZER_KEEP_ASLR") == "1":
+        log.info("ASLR left enabled (FUZZER_KEEP_ASLR=1)")
+        _aslr_disabled = False
+        return False
+
+    if not sys.platform.startswith("linux"):
+        log.debug("ASLR not disabled: personality() is Linux-only (%s)", sys.platform)
+        _aslr_disabled = False
+        return False
+
+    try:
+        import ctypes
+        import ctypes.util
+
+        libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=True)
+        libc.personality.argtypes = [ctypes.c_ulong]
+        libc.personality.restype = ctypes.c_int
+
+        current = libc.personality(_PERSONALITY_QUERY)
+        if current < 0:
+            log.debug("ASLR not disabled: personality() query failed")
+            _aslr_disabled = False
+            return False
+        if current & ADDR_NO_RANDOMIZE:
+            _aslr_disabled = True
+            return True
+
+        # Mask off the query bits before OR-ing in our flag: personality()
+        # returns the full persona word, and writing it back verbatim is
+        # what we want plus ADDR_NO_RANDOMIZE.
+        if libc.personality(ctypes.c_ulong(current | ADDR_NO_RANDOMIZE)) < 0:
+            err = ctypes.get_errno()
+            log.debug("ASLR not disabled: personality() set failed (errno %d)", err)
+            _aslr_disabled = False
+            return False
+
+        # Verify rather than trust: seccomp filters and some container
+        # runtimes return success and ignore the write.
+        readback = libc.personality(_PERSONALITY_QUERY)
+        if readback < 0 or not (readback & ADDR_NO_RANDOMIZE):
+            log.debug("ASLR not disabled: personality() write did not take effect")
+            _aslr_disabled = False
+            return False
+    except Exception as e:  # noqa: BLE001 - never let this abort a fuzzing run
+        log.debug("ASLR not disabled: %s", e)
+        _aslr_disabled = False
+        return False
+
+    log.info("ASLR disabled for this process and its children (ADDR_NO_RANDOMIZE)")
+    _aslr_disabled = True
+    return True
+
+
+def aslr_disabled() -> bool | None:
+    """Return the cached result of disable_aslr(), or None if never called."""
+    return _aslr_disabled
 
 
 def run_target_fast(
