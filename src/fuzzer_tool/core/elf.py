@@ -11,6 +11,7 @@ separate Python process.
 """
 
 import logging
+import os
 import struct
 from dataclasses import dataclass, field
 
@@ -931,6 +932,56 @@ def _decode_x86_64(text: bytes, base_addr: int):
         yield insn
 
 
+def _symbol_names(target: str) -> list[str]:
+    """Return every name in the ELF .symtab. Empty list when unreadable.
+
+    Shared by parse_sancov_offsets() and detect_ctx_bits(); both need a
+    symbol-name scan and neither needs anything else from the ELF.
+    """
+    out: list[str] = []
+    with open(target, "rb") as f:
+        elf = f.read()
+    if len(elf) < 64 or elf[:4] != b"\x7fELF":
+        return out
+    if elf[4] != 2 or elf[5] != 1:  # ELF64, little-endian
+        return out
+    e_shoff = struct.unpack_from("<Q", elf, 40)[0]
+    e_shnum = struct.unpack_from("<H", elf, 60)[0]
+    e_shentsize = struct.unpack_from("<H", elf, 58)[0]
+    e_shstrndx = struct.unpack_from("<H", elf, 62)[0]
+    if e_shnum == 0 or e_shstrndx >= e_shnum:
+        return out
+    shstr_off = e_shoff + e_shstrndx * e_shentsize
+    shstr_offset = struct.unpack_from("<Q", elf, shstr_off + 24)[0]
+    symtab_sec = strtab_sec = None
+    for i in range(e_shnum):
+        sh = e_shoff + i * e_shentsize
+        sh_type = struct.unpack_from("<I", elf, sh + 4)[0]
+        sh_name_idx = struct.unpack_from("<I", elf, sh)[0]
+        name = elf[shstr_offset + sh_name_idx : shstr_offset + sh_name_idx + 32].split(b"\x00")[0]
+        if sh_type == 2:
+            symtab_sec = sh
+        elif sh_type == 3 and name == b".strtab":
+            strtab_sec = sh
+    if symtab_sec is None or strtab_sec is None:
+        return out
+    sym_offset = struct.unpack_from("<Q", elf, symtab_sec + 24)[0]
+    sym_size = struct.unpack_from("<Q", elf, symtab_sec + 32)[0]
+    sym_entsize = struct.unpack_from("<Q", elf, symtab_sec + 56)[0]
+    if sym_entsize == 0:
+        return out
+    strtab_offset = struct.unpack_from("<Q", elf, strtab_sec + 24)[0]
+    for i in range(min(sym_size // sym_entsize, 20000)):
+        sym = sym_offset + i * sym_entsize
+        st_name_idx = struct.unpack_from("<I", elf, sym)[0]
+        out.append(
+            elf[strtab_offset + st_name_idx : strtab_offset + st_name_idx + 64]
+            .split(b"\x00")[0]
+            .decode(errors="replace")
+        )
+    return out
+
+
 def parse_sancov_offsets(target: str) -> tuple[int, int] | None:
     """Parse ELF to find __start/__stop___sancov_cntrs virtual addresses.
 
@@ -1367,59 +1418,205 @@ def _maybe_add_constant(constants: set[bytes], data: bytes):
     constants.add(data)
 
 
+# ── Coverage map sizing ─────────────────────────────────────────────────
+
+MAP_SIZE_DEFAULT = 8192
+
+# Distinct edges per instrumented basic block. trace_pc_guard fires once per
+# block, so guard_count counts BLOCKS, while the table is keyed on edges
+# (prev_loc ^ cur_loc). A block with two successors contributes two edges;
+# 2.0 is the usual CFG rule of thumb. Sizing straight from guard_count --
+# which is what this function used to do -- is therefore already a factor of
+# two short before any headroom is added.
+EDGES_PER_BLOCK = 2.0
+
+# Open addressing with linear probing degrades sharply as it fills: measured
+# average probes per insertion at map_size entries were 1.5 at load 0.49,
+# 2.8 at 0.79, 12.1 at 0.95 and 57.2 at 1.00, and every probe is a random
+# access paid on every EDGE EXECUTION, not once per unique edge. Target
+# load 0.5.
+TARGET_LOAD_FACTOR = 0.5
+
+# Upper bound on entries, and the reason for it.
+#
+# ShmCoverage.reset_edge_map() memsets the whole table before every single
+# execution, so table size is a direct per-exec tax. Measured on this
+# machine:
+#
+#     8,192 entries   0.1 MiB     3.8 us
+#    65,536 entries   0.5 MiB    21.3 us
+#   131,072 entries   1.0 MiB    84.6 us
+#   262,144 entries   2.0 MiB    86.9 us
+# 1,048,576 entries   8.0 MiB   352.8 us
+#
+# At a 100 us target execution the 1 MiB clear is already comparable to the
+# run itself. So the old 131072 cap was not arbitrary after all -- it sits
+# near where the reset cost stops being negligible, and simply raising it
+# trades probe cost for memset cost without measuring which one dominates.
+#
+# 262144 is the honest compromise: it doubles the headroom for one large
+# target at ~the same reset cost as 131072 (86.9 us vs 84.6 us, the two
+# straddle a cache-hierarchy step), and stops well short of the cliff.
+#
+# Lifting this properly means removing the memset from the hot path --
+# generation-tagged entries would make reset O(1) and let the cap follow
+# instrumentation size instead of clear bandwidth. Until then, a target that
+# wants more must say so via AFL_MAP_SIZE_MAX and accept the reset cost.
+MAP_SIZE_MAX = 262144
+
+
+def _map_size_max() -> int:
+    """Entry cap, overridable via AFL_MAP_SIZE_MAX for targets that need it."""
+    raw = os.environ.get("AFL_MAP_SIZE_MAX")
+    if not raw:
+        return MAP_SIZE_MAX
+    try:
+        v = int(raw)
+    except ValueError:
+        log.warning("AFL_MAP_SIZE_MAX=%r is not an integer; ignoring", raw)
+        return MAP_SIZE_MAX
+    if v < MAP_SIZE_DEFAULT:
+        log.warning("AFL_MAP_SIZE_MAX=%d below minimum %d; ignoring", v, MAP_SIZE_DEFAULT)
+        return MAP_SIZE_DEFAULT
+    return _next_power_of_2(v)
+
+
+def detect_ctx_bits(target: str) -> int | None:
+    """Read __AFL_CTX_BITS out of a target's symbol table.
+
+    afl_shim.c emits a marker symbol whose NAME carries the value
+    (``__afl_ctx_bits_8``), so this needs only a symbol scan -- no section
+    contents, no running process. That matters because the map has to be
+    sized before the target has ever been executed.
+
+    Returns:
+        The context width, 0 for a context-free build, or None when the
+        marker is absent -- an older shim, or a binary this shim never
+        touched. None is deliberately distinct from 0: it means "unknown",
+        not "context-free".
+    """
+    try:
+        names = _symbol_names(target)
+    except Exception as e:  # noqa: BLE001
+        log.debug("ctx-bits detection failed for %s: %s", target, e)
+        return None
+    best = None
+    for name in names:
+        if name.startswith("__afl_ctx_bits_"):
+            suffix = name[len("__afl_ctx_bits_") :]
+            if suffix.isdigit():
+                # A .so may link several instrumented TUs; they are built
+                # under one contract, but take the widest if they disagree
+                # so the map is sized for the worst case rather than the
+                # first symbol encountered.
+                v = int(suffix)
+                best = v if best is None else max(best, v)
+    return best
+
+
+def ctx_inflation_factor(ctx_bits: int | None) -> float:
+    """How much context-sensitivity multiplies the distinct-edge count.
+
+    The true factor is the target's call-graph fan-in, which no static
+    analysis here can predict -- 2**ctx_bits is only the ceiling, and a real
+    target sits far below it (most edges have exactly one caller). Sizing for
+    the ceiling would demand gigabytes for ctx_bits=8.
+
+    So this returns a deliberately modest estimate and leans on the runtime
+    drop counter (ShmCoverage.read_dropped_edges) to correct it: guessing low
+    and resizing on evidence beats guessing high and paying the reset cost on
+    every execution forever. sqrt of the ceiling, clamped, is a heuristic
+    with no measurement behind it -- it is a starting point that the feedback
+    loop is expected to fix, not a prediction.
+    """
+    if not ctx_bits:
+        return 1.0
+    return min(2.0 ** (ctx_bits / 2.0), 16.0)
+
+
+def _size_from_blocks(block_count: int, ctx_bits: int | None) -> int:
+    """Entries needed for ``block_count`` instrumented blocks."""
+    edges = block_count * EDGES_PER_BLOCK * ctx_inflation_factor(ctx_bits)
+    needed = int(edges / TARGET_LOAD_FACTOR)
+    return max(MAP_SIZE_DEFAULT, min(_map_size_max(), _next_power_of_2(needed)))
+
+
 def estimate_map_size(target: str, profile: object | None = None) -> int:
-    """Estimate optimal number of hash table entries from sancov guard count
-    or branch density.  Returns the number of entries (AFL_MAP_SIZE convention).
-    Multiply by 8 to get SHM bytes.
+    """Size the coverage hash table, in entries (AFL_MAP_SIZE convention).
+
+    Multiply by 8 for SHM bytes.
+
+    Sizing accounts for three things the previous version did not:
+
+    1. **Edges, not blocks.** trace_pc_guard fires per basic BLOCK, but the
+       table is keyed on edges, so guard_count is scaled by EDGES_PER_BLOCK.
+    2. **Load factor.** This is open addressing with linear probing, not
+       AFL's direct-indexed bitmap. Filling it to 1.0 does not merely
+       collide, it makes every edge execution walk the table and then drop
+       the edge. Sized for TARGET_LOAD_FACTOR.
+    3. **Context sensitivity.** A -D__AFL_CTX_SENSITIVE=1 build multiplies
+       distinct edge IDs by call-graph fan-in. detect_ctx_bits() reads the
+       width straight out of the binary, so a CTX target no longer gets
+       silently sized as if it were context-free.
+
+    Together (1) and (2) mean a context-free target now asks for roughly
+    4x guard_count where it previously asked for next_pow2(guard_count) --
+    i.e. it was under-sized by about 4x, before any context inflation.
+
+    The result is capped (see MAP_SIZE_MAX): the table is memset before
+    every execution, so size is a per-exec cost, and past a point a bigger
+    map loses more to clearing than it saves in probes. When the cap binds,
+    the target may still saturate -- that is what the shim's drop counter is
+    for. Check ShmCoverage.read_dropped_edges() rather than assuming the
+    static estimate held.
 
     Priority:
-    1. If sancov counter section exists (Clang -fsanitize-coverage), use
-       guard count directly — this is the exact number of instrumented edges.
-    2. If a TargetProfile with ``text_size`` and ``total_branches`` is
-       provided, use those to avoid a redundant full-text disassembly.
-    3. Fall back to branch_density × .text_size estimation.
+    1. sancov guard count, when the counter section is present (exact).
+    2. TargetProfile.total_branches, avoiding a redundant disassembly.
+    3. branch_density x .text_size estimation.
 
     Args:
         target: Path to ELF binary.
         profile: Optional TargetProfile with precomputed static analysis.
 
     Returns:
-        Recommended number of entries (int), defaults to 8192 on failure.
+        Number of entries; MAP_SIZE_DEFAULT on failure.
     """
-    DEFAULT = 8192
+    ctx_bits = detect_ctx_bits(target)
+    if ctx_bits:
+        log.info(
+            "%s: context-sensitive coverage (__AFL_CTX_BITS=%d), "
+            "sizing map with a %.1fx inflation allowance",
+            target,
+            ctx_bits,
+            ctx_inflation_factor(ctx_bits),
+        )
 
-    # Try sancov guard count first — most accurate for instrumented binaries
+    # 1. sancov guard count — exact block count for instrumented binaries
     offsets = parse_sancov_offsets(target)
     if offsets:
         start, stop = offsets
         if stop > start:
-            # Each guard is a uint32_t; guards are 4 bytes apart
-            guard_count = (stop - start) // 4
+            guard_count = (stop - start) // 4  # guards are uint32_t
             if guard_count > 0:
-                map_size = _next_power_of_2(guard_count)
-                return max(DEFAULT, min(131072, map_size))
+                return _size_from_blocks(guard_count, ctx_bits)
 
-    # Try cached profile data — avoids full-text disassembly
+    # 2. Cached profile data — avoids a full-text disassembly.
+    #    total_branches is a branch count, and _size_from_blocks applies
+    #    EDGES_PER_BLOCK, so pass it through as the block-equivalent.
     if profile is not None:
         ts = getattr(profile, "text_size", 0)
         tb = getattr(profile, "total_branches", 0)
         if isinstance(ts, int) and isinstance(tb, int) and ts > 0 and tb > 0:
-            # total_branches is a direct count from per-function analysis,
-            # equivalent to the JCC count that branch_density() would yield.
-            estimated_edges = int(tb * 2)
-            map_size = _next_power_of_2(max(estimated_edges, DEFAULT))
-            return min(131072, map_size)
+            return _size_from_blocks(tb, ctx_bits)
 
-    # Fall back to branch density estimation (full-text disassembly)
+    # 3. Branch density estimation (full-text disassembly)
     bd = branch_density(target)
     ts = _text_size(target)
     if bd is None or ts is None or ts == 0:
-        return DEFAULT
-
+        return MAP_SIZE_DEFAULT
     branches = bd * (ts / 1024)
-    estimated_edges = int(branches * 2)  # 2 edges per branch
-    map_size = _next_power_of_2(max(estimated_edges, DEFAULT))
-    return min(131072, map_size)
+    return _size_from_blocks(int(branches), ctx_bits)
 
 
 def _extract_imm(insn) -> int | None:

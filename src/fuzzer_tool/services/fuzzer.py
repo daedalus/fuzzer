@@ -3582,17 +3582,32 @@ class Fuzzer:
 
         # Optionally resize the coverage bitmap to reduce hash collision risk
         if self._resize_map_on_stall and self.shm_cov:
-            new_size = self._edge_tracker.recommended_map_size()
+            # Ask the shim how many edges it had to throw away. Without this
+            # the load factor is computed only from edges that survived, so
+            # a saturated table looks under-full and never triggers a resize
+            # — the exact case this recovery path exists for.
+            dropped = self.shm_cov.read_dropped_edges()
+            new_size = self._edge_tracker.recommended_map_size(dropped_edges=dropped)
+            if dropped:
+                pinned = " (counter pinned)" if self.shm_cov.drop_counter_saturated() else ""
+                print(
+                    f"[!] Coverage map saturated: {dropped:,} edges dropped{pinned} — "
+                    f"coverage was lost, not merely delayed"
+                )
             if new_size > self.shm_cov.size:
                 current = self.shm_cov.size
                 print(
                     f"[*] Resizing SHM {current:,} → {new_size:,} entries "
-                    f"(stall-triggered, n={len(self._edge_tracker._global_edge_hits)})"
+                    f"(stall-triggered, n={len(self._edge_tracker._global_edge_hits)}, "
+                    f"dropped={dropped:,})"
                 )
                 self.shm_cov.resize(new_size)
                 self.map_size = new_size
                 self._edge_tracker.map_size = new_size
                 self._edge_tracker.reset_after_resize()
+                # Drops recorded against the old table say nothing about the
+                # new one; clearing keeps the next decision on fresh evidence.
+                self.shm_cov.reset_diag()
                 os.environ["__AFL_SHM_ID"] = self.shm_cov.env_id
                 os.environ["AFL_MAP_SIZE"] = str(new_size)
                 if self._inprocess_runner:

@@ -70,6 +70,80 @@ struct __afl_entry {
     uint32_t count;
 };
 
+#ifndef __AFL_CTX_SENSITIVE
+/* Off by default. The caller-context walk (__builtin_return_address(1))
+ * dereferences the caller's return-address slot, which only exists if the
+ * whole chain keeps frame pointers. clang/gcc on x86-64 omit them by
+ * default at -O1/-O2, so enabling this unconditionally segfaults standard
+ * builds (observed in the -O1 distance targets: SEGV in the frame walk on
+ * every startup edge). Opt in per build with
+ * -D__AFL_CTX_SENSITIVE=1 -fno-omit-frame-pointer (on every TU). */
+#define __AFL_CTX_SENSITIVE 0
+#endif
+
+/* ── Context width ────────────────────────────────────────────────────
+ *
+ * The context term is XOR'd into edge_id, so its width directly bounds how
+ * far context-sensitivity can inflate the number of distinct edge IDs: at
+ * most 2^__AFL_CTX_BITS times the context-free count.
+ *
+ * That bound is the whole point. The guard values assigned by
+ * trace_pc_guard_init are small sequential integers, so a context-free
+ * edge_id = prev_loc ^ cur_loc lands in a dense range of roughly
+ * 2 * guard_count. A full 32-bit context hash scatters those IDs across the
+ * entire u32 space, which does not hurt the modulo but does mean the number
+ * of LIVE distinct IDs is bounded only by the target's real call-graph
+ * fan-in -- a quantity nothing in the build or the sizing path can predict.
+ * The fixed-size open-addressing table then saturates, and a saturated
+ * table silently drops edges (see the probe loop in __afl_map_edge).
+ *
+ * 8 bits is the default because it keeps the worst case within the map
+ * sizes the per-execution reset can afford (see ShmCoverage.reset_edge_map:
+ * the table is memset on every exec, measured at 3.8us for 8K entries and
+ * 84.6us for 128K) while still separating the common case this feature
+ * exists for -- the same library function reached from a handful of
+ * distinct call sites. AFL++'s CTX variants mask for the same reason.
+ *
+ * Raise it with -D__AFL_CTX_BITS=N if a target genuinely has deep fan-in
+ * AND the map has room; check the drop counter (see __afl_diag) rather than
+ * guessing. __AFL_CTX_BITS=0 is equivalent to __AFL_CTX_SENSITIVE=0.
+ */
+#if __AFL_CTX_SENSITIVE
+#  ifndef __AFL_CTX_BITS
+#    define __AFL_CTX_BITS 8
+#  endif
+#else
+#  ifdef __AFL_CTX_BITS
+#    undef __AFL_CTX_BITS
+#  endif
+#  define __AFL_CTX_BITS 0
+#endif
+
+#if __AFL_CTX_BITS < 0 || __AFL_CTX_BITS > 32
+#  error "__AFL_CTX_BITS must be in [0, 32]"
+#endif
+
+#if __AFL_CTX_BITS >= 32
+#  define __AFL_CTX_MASK 0xFFFFFFFFu
+#elif __AFL_CTX_BITS == 0
+#  define __AFL_CTX_MASK 0u
+#else
+#  define __AFL_CTX_MASK ((1u << __AFL_CTX_BITS) - 1u)
+#endif
+
+/* Static advertisement of the context width, so the Python side can size
+ * the coverage map BEFORE the first execution -- at sizing time there is no
+ * running target to ask.  The value is encoded in the symbol NAME rather
+ * than the symbol's contents so a plain symbol-table scan can read it,
+ * reusing the machinery that already detects __cmplog_reset.  See
+ * elf.detect_ctx_bits().  Always emitted, including as __afl_ctx_bits_0 for
+ * context-free builds, so "no symbol" unambiguously means "shim predates
+ * this" rather than "context is off". */
+#define __AFL_CAT2(a, b) a##b
+#define __AFL_CAT(a, b) __AFL_CAT2(a, b)
+__attribute__((visibility("default"), used))
+const uint32_t __AFL_CAT(__afl_ctx_bits_, __AFL_CTX_BITS) = __AFL_CTX_BITS;
+
 /* Front header size (stack_depth + pad + path_hash + edge_count) */
 #define SHM_HEADER_SIZE 24
 
@@ -92,8 +166,43 @@ static volatile int __afl_mapping = 0;
 
 /* Metadata pointers (front header, before the edge table) */
 static uint32_t *__afl_stack_depth = NULL;   /* offset 0: uint32 */
+static uint32_t *__afl_diag        = NULL;   /* offset 4: uint32 (was pad) */
 static uint64_t *__afl_path_hash   = NULL;   /* offset 8: uint64 */
 static uint64_t *__afl_edge_count  = NULL;   /* offset 16: uint64 */
+
+/* ── Diagnostics word (header offset 4, previously an unused pad) ──────
+ *
+ *   bits  0..7   __AFL_CTX_BITS this target was built with
+ *   bits  8..31  saturating count of edges DROPPED because the open-
+ *                addressing probe found no free slot
+ *
+ * The drop counter closes a self-masking failure. When the table fills, the
+ * probe loop in __afl_map_edge runs to completion and returns without
+ * recording anything -- the edge is lost, silently. Every occupancy figure
+ * the Python side computes is derived from edges it actually received, so a
+ * saturated table looks UNDER-occupied from the outside, and
+ * EdgeTracker.recommended_map_size() (which triggers on load factor > 0.7)
+ * can never fire in precisely the situation it was written for.
+ *
+ * Counting the drops at the point of loss is the only place the information
+ * exists. Increments are non-atomic, which is fine: this is a saturation
+ * signal, not an accounting record, and it is only ever compared against
+ * zero or used as a magnitude.
+ *
+ * Deliberately NOT cleared by reset_edge_map(): the header survives the
+ * per-execution table wipe, so the counter accumulates over the run.       */
+#define __AFL_DIAG_CTX_MASK   0xFFu
+#define __AFL_DIAG_DROP_SHIFT 8
+#define __AFL_DIAG_DROP_MAX   0xFFFFFFu
+
+__attribute__((always_inline))
+static inline void __afl_note_drop(void) {
+    if (!__afl_diag) return;
+    uint32_t v = *__afl_diag;
+    uint32_t drops = v >> __AFL_DIAG_DROP_SHIFT;
+    if (drops < __AFL_DIAG_DROP_MAX)
+        *__afl_diag = ((drops + 1) << __AFL_DIAG_DROP_SHIFT) | (v & __AFL_DIAG_CTX_MASK);
+}
 
 /* Per-iteration state */
 static uint64_t  __afl_path_hash_acc = 0;       /* rolling path hash accumulator */
@@ -130,8 +239,15 @@ void __afl_map_shm(void) {
 
     /* Set up metadata pointers in front header (offsets 0/8/16) */
     __afl_stack_depth = (uint32_t *)(base + 0);
+    __afl_diag        = (uint32_t *)(base + 4);
     __afl_path_hash   = (uint64_t *)(base + 8);
     __afl_edge_count  = (uint64_t *)(base + 16);
+
+    /* Publish the context width so the fuzzer can confirm the map was sized
+     * for the binary it is actually running, not the one it inspected.
+     * Preserves any drop count already accumulated in the upper bits. */
+    *__afl_diag = (*__afl_diag & ~(uint32_t)__AFL_DIAG_CTX_MASK)
+                | ((uint32_t)__AFL_CTX_BITS & __AFL_DIAG_CTX_MASK);
 
 #ifdef __AFL_DISTANCE_MODE
     __afl_mapping = 1;  /* map_dist_shm is instrumented; no ctx during setup */
@@ -184,16 +300,11 @@ void __afl_map_shm(void) {
  *     2-term hash exactly (e.g. to keep byte-for-byte corpus/edge_id
  *     compatibility with a pre-context session).                        */
 
-#ifndef __AFL_CTX_SENSITIVE
-/* Off by default. The caller-context walk (__builtin_return_address(1))
- * dereferences the caller's return-address slot, which only exists if the
- * whole chain keeps frame pointers. clang/gcc on x86-64 omit them by
- * default at -O1/-O2, so enabling this unconditionally segfaults standard
- * builds (observed in the -O1 distance targets: SEGV in the frame walk on
- * every startup edge). Opt in per build with
- * -D__AFL_CTX_SENSITIVE=1 -fno-omit-frame-pointer (on every TU). */
-#define __AFL_CTX_SENSITIVE 0
-#endif
+/* __AFL_CTX_SENSITIVE and __AFL_CTX_BITS are configured at the top of this
+ * file, because __afl_map_shm() (above) publishes the context width into
+ * the SHM header and so needs them already defined. The caveats that
+ * govern whether you should turn this on are documented immediately
+ * above. */
 
 #if __AFL_CTX_SENSITIVE
 __attribute__((visibility("default"), always_inline))
@@ -220,7 +331,12 @@ static inline uint32_t __afl_get_caller_ctx(void) {
     p ^= p >> 33;
     p *= 0xc4ceb9fe1a85ec53ULL;
     p ^= p >> 33;
-    return (uint32_t)p;
+    /* Mask AFTER mixing, never before: the splitmix finalizer is what
+     * spreads adjacent call sites apart, so truncating its output keeps
+     * that spreading while bounding the ID inflation. Masking the raw
+     * return address instead would put neighbouring call instructions in
+     * the same bucket, which is exactly what the mixing exists to avoid. */
+    return (uint32_t)p & __AFL_CTX_MASK;
 }
 #endif
 
@@ -267,6 +383,11 @@ static inline void __afl_map_edge(uint32_t cur_loc) {
             break;
         }
         /* else: hash collision, keep probing */
+
+        /* Last iteration and still nowhere to put it: the table is full and
+         * this edge is about to be lost. Count it -- see __afl_diag. */
+        if (i == __afl_map_size - 1)
+            __afl_note_drop();
     }
 
     /* Accumulate rolling path hash: hash = hash * 31 ^ edge_id */

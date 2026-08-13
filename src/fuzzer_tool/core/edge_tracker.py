@@ -35,6 +35,10 @@ except ImportError:
     _HAS_NUMPY = False
 
 from fuzzer_tool.core.count_class import classify_counts  # noqa: E402
+from fuzzer_tool.core.elf import (  # noqa: E402
+    MAP_SIZE_DEFAULT,
+    _map_size_max,
+)
 
 
 def _sig_np(sig):
@@ -1844,27 +1848,52 @@ class EdgeTracker:
         """
         return 0.0
 
-    def recommended_map_size(self) -> int:
+    def recommended_map_size(self, dropped_edges: int = 0) -> int:
         """Recommend a larger map_size if the hash table is too full.
 
-        Based on load factor: if load_factor > 0.7, probe chains get long.
-        Returns a map size in entries (AFL_MAP_SIZE convention), or 0.
+        Args:
+            dropped_edges: Edges the shim had to discard because the probe
+                found no free slot (ShmCoverage.read_dropped_edges()). Any
+                non-zero value is proof of saturation.
 
         Returns:
             Recommended map_size (entries), or 0 if current size is adequate.
+
+        Two independent triggers, because the cheap one is blind in the case
+        that matters most.
+
+        Observed load factor is computed from _global_edge_hits, which only
+        ever contains edges that made it into the table. A table full enough
+        to be DISCARDING edges therefore reports a load factor that stops
+        rising -- it looks healthy precisely when it is worst, so the 0.7
+        threshold alone can never fire on a saturated map. That is why the
+        stall-triggered resize never helped the targets it was written for.
+
+        dropped_edges comes from the shim, counted where the loss actually
+        happens, and needs no threshold: one dropped edge is one edge of
+        coverage the run will never see.
         """
         n = len(self._global_edge_hits)
-        if n < 100:
+        if not self.map_size:
             return 0
-        load_factor = n / self.map_size if self.map_size else 1.0
-        if load_factor < 0.7:
+
+        load_factor = n / self.map_size
+        saturated = dropped_edges > 0
+        if not saturated and (n < 100 or load_factor < 0.7):
             return 0
-        # Need ~2x headroom to get load factor below 0.5 after resize
-        needed = int(n * 2)
+
+        # Under saturation the observed count is a floor, not a measurement:
+        # the true edge count is n + (at least) dropped_edges, and drops are
+        # only counted once the table is already full. Size from the floor
+        # and expect to be called again -- converging upward over a few
+        # resizes beats one speculative jump to the cap.
+        target_edges = n + dropped_edges if saturated else n
+        needed = int(target_edges * 2)  # ~2x headroom -> load factor < 0.5
+
         recommended = 1
         while recommended < needed:
             recommended *= 2
-        recommended = max(8192, min(131072, recommended))
+        recommended = max(MAP_SIZE_DEFAULT, min(_map_size_max(), recommended))
         if recommended <= self.map_size:
             return 0
         return recommended

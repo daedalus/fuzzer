@@ -24,7 +24,7 @@ SIZEOF_ENTRY = 8  # bytes per {edge_id: u32, count: u32}
 # Metadata region in the front header of SHM (before the edge table).
 # Layout (24 bytes total):
 #   offset 0: uint32 stack_depth   (max stack depth in bytes, from __sancov_lowest_stack)
-#   offset 4: uint32 _pad0
+#   offset 4: uint32 diag          (bits 0-7: __AFL_CTX_BITS, bits 8-31: dropped edges)
 #   offset 8: uint64 path_hash     (rolling hash: hash = hash * 31 ^ edge_id)
 #   offset 16: uint64 edge_count   (monotonic new-slot insertion count)
 SHM_METADATA_SIZE = 24  # bytes reserved at front of SHM for metadata
@@ -186,6 +186,56 @@ class ShmCoverage:
         return dist_sum, dist_count
 
     # ── Metadata (stack depth + path hash + edge count) ────────────────
+
+    # ── Diagnostics word (offset 4) ─────────────────────────────────────
+    #
+    # The shim packs two things into what used to be a pad: the context
+    # width the target was compiled with, and a saturating count of edges it
+    # had to throw away because the open-addressing probe found no free slot.
+    #
+    # The drop count is the only honest occupancy signal available. Every
+    # other measure -- len(_seen_edge_ids), EdgeTracker._global_edge_hits,
+    # bitmap_density() -- is computed from edges that made it INTO the table,
+    # so a table so full it is losing edges reads as under-occupied from
+    # here. Reading occupancy alone, the fuzzer concludes the map is fine
+    # exactly when it is at its worst.
+
+    DIAG_CTX_MASK = 0xFF
+    DIAG_DROP_SHIFT = 8
+    DIAG_DROP_MAX = 0xFFFFFF
+
+    def read_diag(self) -> int:
+        """Read the raw diagnostics word from the SHM front header."""
+        return ctypes.c_uint32.from_address(self._ptr + 4).value
+
+    def read_ctx_bits(self) -> int:
+        """Context width (__AFL_CTX_BITS) the running target was built with.
+
+        0 means context-free coverage. Only meaningful after the target has
+        run at least once -- before that the header has never been written.
+        Use elf.detect_ctx_bits() for the pre-run, static answer.
+        """
+        return self.read_diag() & self.DIAG_CTX_MASK
+
+    def read_dropped_edges(self) -> int:
+        """Edges lost to a full table, cumulative over the run.
+
+        Saturates at DIAG_DROP_MAX. Any non-zero value means the map is too
+        small for this target and coverage is being silently discarded.
+        """
+        return self.read_diag() >> self.DIAG_DROP_SHIFT
+
+    def drop_counter_saturated(self) -> bool:
+        """True when the drop count has pinned and is no longer a magnitude."""
+        return self.read_dropped_edges() >= self.DIAG_DROP_MAX
+
+    def reset_diag(self) -> None:
+        """Clear the drop count, preserving the context width.
+
+        Called after a resize so the next saturation decision is made on
+        evidence from the new table rather than the old one.
+        """
+        ctypes.c_uint32.from_address(self._ptr + 4).value = self.read_diag() & self.DIAG_CTX_MASK
 
     def read_stack_depth(self) -> int:
         """Read the stack depth value from the SHM front header (offset 0).
