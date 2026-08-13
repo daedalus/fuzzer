@@ -634,3 +634,11 @@ class TestRandintList:
         p._idx = _POOL_ENTRIES
         p.randint_list(0, 10, 5)
         assert p._idx == 5
+
+    def test_explicit_seed_controls_sequence(self):
+        """RandPool draws from its own default_rng; global numpy seed is ignored."""
+        p1 = RandPool(seed=42)
+        p2 = RandPool(seed=42)
+        p3 = RandPool(seed=99)
+        assert p1.randrange_list(1000, 100) == p2.randrange_list(1000, 100)
+        assert p1.randrange_list(1000, 100) != p3.randrange_list(1000, 100)

@@ -17,7 +17,7 @@ from array import array
 from pathlib import Path
 
 try:
-    import numpy as np
+    import numpy as np  # noqa: F401
 
     _HAS_NUMPY = True
 except ImportError:
@@ -645,8 +645,6 @@ class Fuzzer:
         self.enable_arm_mutator = enable_arm_mutator
         self.seed = seed
         random.seed(seed)
-        if _HAS_NUMPY:
-            np.random.seed(seed)  # seed numpy for deterministic RandPool
         # GA lifecycle parameters
         self._ga_enabled = ga
         self._ga_pop_size = ga_pop_size

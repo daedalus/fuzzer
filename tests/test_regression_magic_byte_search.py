@@ -204,15 +204,10 @@ class TestSeededReproducibility:
         assert len(outs) == 1
 
     def test_candidate_positions_uses_supplied_rng(self):
-        """Directly: two different seeded pools must disagree, proving the
-        fallback reads the supplied rng rather than ignoring it."""
-        import numpy as np
-
+        """Two RandPool instances with different explicit seeds must disagree,
+        proving _candidate_positions draws from the supplied rng."""
         from fuzzer_tool.core.gradient_descent import _candidate_positions
-        from fuzzer_tool.core.rand_pool import RandPool
 
-        np.random.seed(1)
-        a = _candidate_positions(self._BUF, self._TARGET, RandPool())
-        np.random.seed(2)
-        b = _candidate_positions(self._BUF, self._TARGET, RandPool())
+        a = _candidate_positions(self._BUF, self._TARGET, RandPool(seed=1))
+        b = _candidate_positions(self._BUF, self._TARGET, RandPool(seed=2))
         assert a != b
