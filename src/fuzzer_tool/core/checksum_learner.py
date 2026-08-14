@@ -14,7 +14,7 @@ three pair sources:
 3. **Seed-meta / redqueen** — reuses existing ``seed_meta`` entries
    where one operand is a plausible 4-byte checksum.
 
-Recovery covers two disjoint checksum families:
+Recovery covers three disjoint checksum families:
 
 - **GF(2)-affine** (CRC-32/16/8): Berlekamp-Massey (sequential outputs) or
   GCD-of-syndromes (independent pairs), whichever the evidence supports.
@@ -23,6 +23,12 @@ Recovery covers two disjoint checksum families:
   :mod:`fuzzer_tool.core.int_checksum_solver`.  The GF(2) machinery cannot
   represent these at all, so a target gating on one had that field
   permanently rejected and everything downstream of validation unreachable.
+- **GF(2) XOR-bitmask** (XOR-of-selected-bits): Z3-backed incremental
+  recovery in :mod:`fuzzer_tool.core.xor_map_solver`.  Fills the gap for
+  fields whose value is a fixed-but-unknown XOR combination of input bits
+  not expressible as a single LFSR tap polynomial (packed bitmask/flags
+  fields, non-adjacent byte-range XOR checksums).  Tried only after both
+  GF(2) and integer paths fail to verify.
 
 The integer path is attempted only after the GF(2) paths fail to verify;
 the two models are kept separate rather than merged, because they are
@@ -57,6 +63,15 @@ from fuzzer_tool.core.int_checksum import (
     set_active_int_model,
 )
 from fuzzer_tool.core.int_checksum_solver import recover_int_model, verify_model
+from fuzzer_tool.core.xor_map_solver import (
+    XorBitmaskModel,
+    compute_xor_checksum,
+    recover_xor_model,
+    set_active_xor_model,
+    verify_xor_model,
+    xor_model_from_dict,
+    xor_model_to_dict,
+)
 
 # recover_polynomial_gcd builds one Python int per pair (data bit-shifted
 # by the checksum width) and reduces them pairwise via poly_gcd/_poly_mod,
@@ -127,6 +142,9 @@ class ChecksumLearner:
         # alongside _poly rather than merged with it: the two families have
         # incompatible parameter sets and different consumers.
         self._int_model: IntModel | None = None
+        # Recovered XOR-bitmask model, kept alongside _poly and _int_model
+        # for the same reason: a different family with incompatible parameters.
+        self._xor_model: XorBitmaskModel | None = None
         self._format_extractors: list[Callable[[bytes], list[tuple[bytes, int]]]] = [
             self._extract_png_pairs,
             self._extract_zip_pairs,
@@ -200,13 +218,24 @@ class ChecksumLearner:
         return self._int_model
 
     def has_model(self) -> bool:
-        """True when either checksum family has a verified, active model."""
-        return self._poly is not None or self._int_model is not None
+        """True when any checksum family has a verified, active model."""
+        return self._poly is not None or self._int_model is not None or self._xor_model is not None
 
     def ensure_model(self) -> bool:
         """Attempt recovery if needed; True when any model is available."""
         self._maybe_recover()
         return self.has_model()
+
+    def ensure_xor_model(self) -> XorBitmaskModel | None:
+        """Return the recovered XOR-bitmask model, attempting recovery if needed.
+
+        Same retry discipline as :meth:`ensure_poly` and
+        :meth:`ensure_int_model` — the three families share one attempt
+        counter.  The XOR path is tried only after both GF(2) and integer
+        paths have failed to verify.
+        """
+        self._maybe_recover()
+        return self._xor_model
 
     def _maybe_recover(self) -> None:
         """Run recovery when unverified and a batch of new pairs arrived."""
@@ -444,6 +473,17 @@ class ChecksumLearner:
         model = recover_int_model(unique)
         if model is not None and self._verify_int(model, unique):
             self._set_int_model(model)
+            return
+
+        # XOR-bitmask path (XOR-of-selected-bits). Attempted only after both
+        # GF(2) and integer paths fail: the three families are disjoint, so
+        # a verified model from either earlier path is definitive.
+        # Cost-controlled: recover_xor_model caps pair count at _MAX_PAIRS
+        # and field width at 32 bits, matching the small-field discipline
+        # documented in xor_map_solver.py.
+        xor_model = recover_xor_model(unique)
+        if xor_model is not None and self._verify_xor(xor_model, unique):
+            self._set_xor_model(xor_model)
 
     def _verify_int(self, model: IntModel, pairs: list[tuple[bytes, int]]) -> bool:
         """True when *model* reproduces the checksum of >= 2 distinct pairs.
@@ -497,6 +537,15 @@ class ChecksumLearner:
         self._int_model = model
         set_active_int_model(model)
 
+    def _verify_xor(self, model: XorBitmaskModel, pairs: list[tuple[bytes, int]]) -> bool:
+        """True when *model* reproduces the checksum of >= 2 distinct pairs."""
+        return verify_xor_model(model, pairs)
+
+    def _set_xor_model(self, model: XorBitmaskModel) -> None:
+        """Cache the recovered XOR model and activate it module-wide."""
+        self._xor_model = model
+        set_active_xor_model(model)
+
     def compute_int_checksum(self, data: bytes) -> int | None:
         """Compute *data*'s checksum under the recovered integer model.
 
@@ -509,6 +558,15 @@ class ChecksumLearner:
         """
         model = self.ensure_int_model()
         return None if model is None else eval_model(model, data)
+
+    def compute_xor_checksum(self, data: bytes) -> int | None:
+        """Compute the XOR-bitmask checksum of *data*.
+
+        Returns ``None`` when no XOR model has been recovered — there is
+        deliberately no fallback to another family.
+        """
+        model = self.ensure_xor_model()
+        return None if model is None else compute_xor_checksum(data, model)
 
     def compute_checksum(self, data: bytes) -> int:
         """Compute a CRC-style checksum for *data* using the recovered polynomial.
@@ -549,6 +607,7 @@ class ChecksumLearner:
             "reflect": self._reflect,
             "pair_count": self.pair_count,
             "int_model": model_to_dict(self._int_model),
+            "xor_model": xor_model_to_dict(self._xor_model),
         }
 
     @classmethod
@@ -563,6 +622,9 @@ class ChecksumLearner:
             learner._int_model = model_from_dict(data.get("int_model"))
             if learner._int_model is not None:
                 set_active_int_model(learner._int_model)
+            learner._xor_model = xor_model_from_dict(data.get("xor_model"))
+            if learner._xor_model is not None:
+                set_active_xor_model(learner._xor_model)
             if learner._poly and learner._poly != _STANDARD_POLY:
                 # Re-activate the recovered model in the crc32 module.
                 set_active_model(
