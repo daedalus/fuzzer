@@ -30,6 +30,11 @@ non-redundant half is all that is ever computed):
 
 No scipy is used anywhere in this project; the windowing (Hanning) and all
 FFT math stay within numpy.
+
+A second, cheaper mode is available when a prior ``expected_period`` is
+known: harmonic binning and a fine peak histogram.  This is *not* a
+replacement for :func:`detect_periodicity` when no prior exists — the two
+are complementary tools for different situations.
 """
 
 from __future__ import annotations
@@ -37,6 +42,7 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 
@@ -58,6 +64,16 @@ DEFAULT_MAX_WINDOW = 16 * DEFAULT_MAX_LAG
 # record strides (a plain fixed threshold like 0.10 lets 1-in-10 lags through
 # on a 256-byte buffer).
 SIGMA_CUTOFF = 4.0
+
+# Thresholds for the harmonic-binned periodicity classifier.
+HARMONIC_PERIODIC_THRESH: float = 0.30
+HARMONIC_WEAK_THRESH: float = 0.15
+
+# Defaults for harmonic_fraction / locate_peak_period.
+DEFAULT_N_HARMONICS: int = 3
+DEFAULT_HARMONIC_TOLERANCE: float = 0.15
+DEFAULT_PEAK_BINS: int = 200
+DEFAULT_SEARCH_WIDTH: float = 0.5
 
 
 def estimate_record_size(
@@ -257,3 +273,106 @@ def detect_periodicity(
     return SpectralPeriodicity(
         dominant_period, g, peak_bin, period_seconds, n, significant, p_value
     )
+
+
+def harmonic_fraction(
+    intervals: Sequence[float],
+    expected_period: float,
+    n_harmonics: int = DEFAULT_N_HARMONICS,
+    tolerance: float = DEFAULT_HARMONIC_TOLERANCE,
+) -> dict[str, float]:
+    """Bin intervals by proximity to the first ``n_harmonics`` of ``expected_period``.
+
+    For each interval, the nearest harmonic ``h * expected_period`` is
+    considered a candidate if the interval lies within ``±tolerance`` of it.
+    Fractions are computed as the share of intervals assigned to each
+    harmonic, plus a ``"total"`` entry for all intervals that matched any
+    harmonic in range.
+
+    Args:
+        intervals: Observed inter-event intervals in the same units as
+            ``expected_period``.
+        expected_period: Candidate period from domain knowledge.
+        n_harmonics: How many harmonics to test.  Defaults to 3.
+        tolerance: Relative tolerance window around each harmonic
+            (e.g. ``0.15`` accepts anything within 15% of the target).
+
+    Returns:
+        A mapping ``{ "1": fraction, ..., "total": total_fraction }``.
+        Keys are stringified harmonic indices; values are in ``[0, 1]``.
+    """
+    if expected_period <= 0.0 or not intervals:
+        return {str(i): 0.0 for i in range(1, n_harmonics + 1)} | {"total": 0.0}
+    counts: dict[str, int] = {str(i): 0 for i in range(1, n_harmonics + 1)}
+    matched = 0
+    for dt in intervals:
+        best = None
+        best_rel = float("inf")
+        for h in range(1, n_harmonics + 1):
+            target = h * expected_period
+            rel = abs(dt - target) / expected_period
+            if rel < best_rel:
+                best_rel = rel
+                best = h
+        if best is not None and best_rel <= tolerance:
+            counts[str(best)] += 1
+            matched += 1
+    total = matched / len(intervals)
+    return {str(i): counts[str(i)] / len(intervals) for i in range(1, n_harmonics + 1)} | {
+        "total": total
+    }
+
+
+def locate_peak_period(
+    intervals: Sequence[float],
+    expected_period: float,
+    bins: int = DEFAULT_PEAK_BINS,
+    search_width: float = DEFAULT_SEARCH_WIDTH,
+) -> tuple[float, float]:
+    """Find the dominant period near ``expected_period`` via a fine histogram.
+
+    Intervals are histogrammed into ``bins`` equal-width bins spanning
+    ``[expected_period * (1 - search_width), expected_period * (1 + search_width)]``
+    and the bin with the highest count is returned as the peak period.
+
+    Args:
+        intervals: Observed inter-event intervals.
+        expected_period: Center of the search window.
+        bins: Number of histogram bins.  Defaults to 200.
+        search_width: Relative half-width of the search window.  Defaults to
+            0.5, so the window spans 50% below to 50% above the prior.
+
+    Returns:
+        ``(peak_period, deviation_fraction)`` where ``deviation_fraction``
+        is ``abs(peak_period - expected_period) / expected_period``.
+    """
+    if not intervals or expected_period <= 0.0 or bins <= 0:
+        return expected_period, 0.0
+    low = expected_period * (1.0 - search_width)
+    high = expected_period * (1.0 + search_width)
+    if high <= low:
+        return expected_period, 0.0
+    counts, edges = np.histogram(list(intervals), bins=bins, range=(low, high))
+    peak_idx = int(np.argmax(counts))
+    peak_period = float((edges[peak_idx] + edges[peak_idx + 1]) / 2.0)
+    deviation = abs(peak_period - expected_period) / expected_period
+    return peak_period, deviation
+
+
+def classify_periodicity(harmonic_total_fraction: float) -> Literal["periodic", "weak", "none"]:
+    """Classify a harmonic-binned periodicity signal.
+
+    Args:
+        harmonic_total_fraction: Share of intervals that fell on any tested
+            harmonic, as returned by :func:`harmonic_fraction`.
+
+    Returns:
+        ``"periodic"`` when the fraction is at least
+        :data:`HARMONIC_PERIODIC_THRESH`, ``"weak"`` when it is at least
+        :data:`HARMONIC_WEAK_THRESH`, or ``"none"`` otherwise.
+    """
+    if harmonic_total_fraction >= HARMONIC_PERIODIC_THRESH:
+        return "periodic"
+    if harmonic_total_fraction >= HARMONIC_WEAK_THRESH:
+        return "weak"
+    return "none"

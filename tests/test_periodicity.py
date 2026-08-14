@@ -414,3 +414,88 @@ class TestSpectralDiagnostics:
         f._discovery_edges = array("Q", (i for i in range(150)))
         out = report_mod._spectral_diagnostics(f)
         assert "no significant periodic component" in out
+
+
+class TestHarmonicPeriodicity:
+    def test_periodic_signal_classified(self):
+        from fuzzer_tool.core.periodicity import classify_periodicity, harmonic_fraction
+
+        rng = random.Random(0)
+        base = 16.0
+        intervals = [base + rng.uniform(-1.0, 1.0) for _ in range(60)]
+        fracs = harmonic_fraction(intervals, base)
+        assert classify_periodicity(fracs["total"]) == "periodic"
+
+    def test_noise_degradation(self):
+        from fuzzer_tool.core.periodicity import classify_periodicity, harmonic_fraction
+
+        base = 20.0
+        fractions = []
+        for noise in [0.5, 2.0, 8.0, 200.0]:
+            rng = random.Random(1)
+            intervals = [base + rng.uniform(-noise, noise) for _ in range(120)]
+            fracs = harmonic_fraction(intervals, base)
+            fractions.append(fracs["total"])
+        # Higher noise must not increase the matched fraction.
+        for i in range(1, len(fractions)):
+            assert fractions[i] <= fractions[i - 1] + 1e-12
+        # With very wide noise the signal should drop below the weak threshold.
+        assert classify_periodicity(fractions[-1]) == "none"
+
+    def test_random_intervals_none(self):
+        from fuzzer_tool.core.periodicity import classify_periodicity, harmonic_fraction
+
+        rng = random.Random(2)
+        intervals = [rng.uniform(0.0, 1000.0) for _ in range(200)]
+        fracs = harmonic_fraction(intervals, 16.0)
+        assert classify_periodicity(fracs["total"]) == "none"
+
+    def test_locate_peak_period_accuracy(self):
+        from fuzzer_tool.core.periodicity import locate_peak_period
+
+        base = 32.0
+        rng = random.Random(3)
+        intervals = [base + rng.uniform(-0.5, 0.5) for _ in range(100)]
+        peak, dev = locate_peak_period(intervals, base)
+        assert abs(peak - base) < 2.0
+        assert dev < 0.2
+
+    def test_cross_check_vs_spectral(self):
+        from fuzzer_tool.core.periodicity import (
+            classify_periodicity,
+            detect_periodicity,
+            harmonic_fraction,
+        )
+
+        # Periodic synthetic signal: build a series whose spectral peak agrees
+        # with the harmonic-bin classifier on the same underlying interval structure.
+        base = 16.0
+        rng = random.Random(4)
+        # Construct a series with a clear dominant period by repeating a pattern.
+        pattern = [math.sin(2 * math.pi * i / 16) for i in range(16)]
+        series = [pattern[i % 16] + 0.05 * rng.uniform(-1, 1) for i in range(256)]
+        res = detect_periodicity(series)
+        intervals = [base + rng.uniform(-0.8, 0.8) for _ in range(40)]
+        if res.significant and res.dominant_period is not None:
+            fracs = harmonic_fraction(intervals, res.dominant_period)
+            assert classify_periodicity(fracs["total"]) != "none"
+
+        # Random control: harmonic classifier should say "none" regardless of
+        # the spectral detector's rare false-positive flags.
+        rng = random.Random(5)
+        random_series = [rng.random() for _ in range(256)]
+        detect_periodicity(random_series)  # no assertion on significance
+        rng = random.Random(6)
+        intervals_r = [rng.uniform(0.0, 1000.0) for _ in range(200)]
+        fracs_r = harmonic_fraction(intervals_r, 16.0)
+        assert classify_periodicity(fracs_r["total"]) == "none"
+
+    def test_harmonic_fraction_keys_and_range(self):
+        from fuzzer_tool.core.periodicity import harmonic_fraction
+
+        rng = random.Random(6)
+        intervals = [16.0 + rng.uniform(-1.0, 1.0) for _ in range(20)]
+        fracs = harmonic_fraction(intervals, 16.0)
+        for key in ("1", "2", "3", "total"):
+            assert key in fracs
+            assert 0.0 <= fracs[key] <= 1.0

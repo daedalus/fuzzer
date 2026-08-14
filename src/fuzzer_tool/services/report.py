@@ -802,6 +802,20 @@ def _distribution_diagnostics(f) -> str:
     return "\n".join(lines)
 
 
+def _peak_intervals(series: list[float]) -> list[float]:
+    """Return peak-to-peak intervals for strict 1-sample local maxima."""
+    if len(series) < 3:
+        return []
+    intervals: list[float] = []
+    last_peak: float | None = None
+    for i in range(1, len(series) - 1):
+        if series[i] > series[i - 1] and series[i] > series[i + 1]:
+            if last_peak is not None:
+                intervals.append(series[i] - last_peak)
+            last_peak = series[i]
+    return intervals
+
+
 def _spectral_diagnostics(f) -> str:
     """Spectral (FFT) diagnostics: periodic components in key time series.
 
@@ -814,7 +828,11 @@ def _spectral_diagnostics(f) -> str:
     """
     if not _HAS_NUMPY:
         return ""
-    from fuzzer_tool.core.periodicity import detect_periodicity
+    from fuzzer_tool.core.periodicity import (
+        classify_periodicity,
+        detect_periodicity,
+        harmonic_fraction,
+    )
 
     lines = ["", "--- Spectral Diagnostics ---"]
     has_data = False
@@ -831,6 +849,15 @@ def _spectral_diagnostics(f) -> str:
                     f"  Exec time:      PERIODIC — dominant period {res.dominant_period:.1f} "
                     f"samples (g={res.peak_strength:.3f}, p={res.p_value:.2e} at bin {res.peak_bin})"
                 )
+                if res.dominant_period is not None:
+                    intervals = _peak_intervals([float(t) for t in times])
+                    if len(intervals) >= 2:
+                        fracs = harmonic_fraction(intervals, res.dominant_period)
+                        verdict = classify_periodicity(fracs["total"])
+                        lines.append(
+                            f"  Exec time:      Harmonic confirmation — {fracs['total']:.0%} of "
+                            f"peak intervals on harmonics of {res.dominant_period:.1f} ({verdict})"
+                        )
             else:
                 lines.append("  Exec time:      no significant periodic component")
     except (TypeError, AttributeError):
@@ -849,6 +876,15 @@ def _spectral_diagnostics(f) -> str:
                     f"sync intervals (g={res.peak_strength:.3f}, p={res.p_value:.2e} at bin "
                     f"{res.peak_bin}); possible corpus-sync artifact"
                 )
+                if res.dominant_period is not None:
+                    intervals = _peak_intervals([float(d) for d in deltas])
+                    if len(intervals) >= 2:
+                        fracs = harmonic_fraction(intervals, res.dominant_period)
+                        verdict = classify_periodicity(fracs["total"])
+                        lines.append(
+                            f"  Discovery rate: Harmonic confirmation — {fracs['total']:.0%} of "
+                            f"peak intervals on harmonics of {res.dominant_period:.1f} ({verdict})"
+                        )
             else:
                 lines.append("  Discovery rate: no significant periodic component")
     except (TypeError, AttributeError):
