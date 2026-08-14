@@ -362,8 +362,6 @@ class InProcessRunner:
         """Read the coverage bitmap."""
         if self._persistent and self._persistent._last_bitmap is not None:
             return self._persistent._last_bitmap
-        if self._forkserver and self._forkserver._last_bitmap is not None:
-            return self._forkserver._last_bitmap
         if self._bitmap_out and os.path.exists(self._bitmap_out):
             try:
                 with open(self._bitmap_out, "rb") as f:
@@ -621,10 +619,15 @@ class InProcessRunner:
         return rc, stderr
 
     def _run_c_forkserver(self, data: bytes) -> tuple[int, str]:
-        """Forkserver via compiled C binary."""
-        rc, bitmap = self._forkserver.run_one(data)
-        self._forkserver._last_bitmap = bitmap
-        return rc, ""
+        """Forkserver via compiled C binary.
+
+        No bitmap comes back: the exec'd child inherited __AFL_SHM_ID and
+        wrote coverage straight into the SHM segment, which read_bitmap()
+        reads. The child's stderr does come back, so sanitizer reports
+        survive this path.
+        """
+        rc, stderr = self._forkserver.run_one(data)
+        return rc, stderr if self.capture_stderr else ""
 
     def _run_c_subprocess(self, data: bytes) -> tuple[int, str]:
         if self._loader_path is None:

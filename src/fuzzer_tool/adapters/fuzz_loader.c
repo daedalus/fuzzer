@@ -1,21 +1,44 @@
 /* fuzz_loader.c — Minimal C loader for coverage-guided fuzzing.
 
 Compiles once, reuses across all iterations. Loads a target (shared library
-via dlopen or standalone executable via fork+exec), calls
-LLVMFuzzerTestOneInput, and returns the coverage bitmap.
+via dlopen or standalone executable via fork+exec) and reports the child's
+exit status and stderr.
+
+Coverage is NOT carried over this protocol. The loader is started with
+__AFL_SHM_ID / AFL_MAP_SIZE in its environment; every exec'd child inherits
+them and afl_shim.c's constructor attaches to that segment on its own, so
+the target writes edges straight into the parent fuzzer's SHM. The parent
+resets the map before each RUN and reads it after — exactly as it does on
+the direct_lite path. An earlier version round-tripped a bitmap through a
+file, which was disconnected from the SHM the target actually wrote to.
 
 Protocol (stdin/stdout binary):
-  Init:   "INIT <target> <func> <bitmap_out> <timeout>\n"
-          NOTE: target path must not contain whitespace (%s sscanf).
+  Init:   "INIT <target> <func> <input_file> <timeout>\n"
+          NOTE: paths must not contain whitespace (%s sscanf).
   Run:    "RUN <len>\n<data>"
-          len is capped at PIPE_BUF_LIMIT (56KB) to avoid pipe deadlock.
   Quit:   "QUIT\n"
-  Reply:  "RC <rc> <bmp_len>\n<bmp>"
+  Reply:  "RC <rc> <err_len>\n<err>"
+
+<input_file> mirrors run_target_fast()'s temp file: the loader writes each
+input there and execs `<target> <input_file>` with stdin redirected from it,
+so targets that take argv[1] and targets that read stdin both see the data.
+
+Execution modes (executable targets):
+  forkserver — preferred. The target is exec'd ONCE; afl_shim.c's
+               constructor then serves fork requests over fds 198/199, so
+               each input costs a fork() from a fully initialised process
+               rather than a fresh ELF load + linker + libc + ASAN init.
+  fork+exec  — fallback for targets built without a forkserver-capable
+               shim. One exec per input, i.e. no better than posix_spawn.
+
+Return codes: >=0 exit status, -<signum> fatal signal, -1 timeout,
+-2 loader-side failure.
 
 Timeout enforcement:
   .so targets: sigsetjmp/siglongjmp via SIGALRM — no fork overhead.
-  executables: fork+exec with SIGALRM-interrupted waitpid — child is
-               SIGKILL'd if waitpid returns EINTR.
+  executables: fork+exec with SIGALRM — the handler SIGKILLs the child, and
+               the timeout is reported as -1 rather than the -SIGKILL the
+               status would otherwise show (which reads as a crash).
 */
 
 #include <stdio.h>
@@ -28,27 +51,19 @@ Timeout enforcement:
 #include <signal.h>
 #include <setjmp.h>
 #include <fcntl.h>
+#include <errno.h>
 
-/* Pipe buffer on Linux is 65536 (PIPE_BUF). Cap data well below that
-   to avoid deadlock: parent write() blocks when buffer is full, but
-   the child may not have started reading yet. */
-#define MAX_DATA 57344  /* 56KB — safely under 64KB pipe buffer */
-/* Max bitmap: sparse entries at 8 bytes each, 64KB = 8192 entries.
-   Each entry is {edge_id: u32, count: u32}.  The Python side allocates
-   SHM as map_size * 8 bytes; 64KB covers 8192 entries comfortably. */
-#define MAX_BMP 65536
-
-#ifndef min
-#define min(a, b) ((a) < (b) ? (a) : (b))
-#endif
-#ifndef max
-#define max(a, b) ((a) > (b) ? (a) : (b))
-#endif
+/* Inputs arrive over the stdin pipe and are consumed immediately by
+   read_bytes(), so there is no pipe-buffer deadlock and no need for the
+   old 56KB cap. The ceiling only bounds the loader's own allocation; an
+   oversized RUN is still drained in full so the protocol stays in sync. */
+#define MAX_DATA (16 * 1024 * 1024)
+/* Matches the 65536 that run_target_fast() reads back from its stderr pipe. */
+#define MAX_ERR 65536
 
 typedef int (*fuzz_fn)(const uint8_t *, size_t);
 
 static fuzz_fn target_fn = NULL;
-static char bitmap_out[256] = {0};
 static int is_executable = 0;
 
 static sigjmp_buf timeout_jmp;
@@ -68,14 +83,25 @@ static int read_line(char *buf, int maxlen) {
     return i;
 }
 
-/* Read exactly n bytes from stdin */
-static void read_bytes(uint8_t *buf, size_t n) {
+/* Read exactly n bytes from stdin into buf (or discard them if buf is NULL).
+   Discarding still consumes the bytes: leaving them in the pipe would
+   desynchronise every subsequent command. */
+static int read_bytes(uint8_t *buf, size_t n) {
+    uint8_t sink[4096];
     size_t got = 0;
     while (got < n) {
-        ssize_t r = read(0, buf + got, n - got);
-        if (r <= 0) break;
-        got += r;
+        size_t want = n - got;
+        ssize_t r;
+        if (buf) {
+            r = read(0, buf + got, want);
+        } else {
+            r = read(0, sink, want < sizeof(sink) ? want : sizeof(sink));
+        }
+        if (r < 0 && errno == EINTR) continue;
+        if (r <= 0) return 0;
+        got += (size_t)r;
     }
+    return 1;
 }
 
 /* Write exactly n bytes to stdout */
@@ -83,22 +109,15 @@ static void write_bytes(const uint8_t *buf, size_t n) {
     size_t written = 0;
     while (written < n) {
         ssize_t w = write(1, buf + written, n - written);
+        if (w < 0 && errno == EINTR) continue;
         if (w <= 0) break;
         written += w;
     }
 }
 
-/* Read coverage bitmap from file */
-static int read_bitmap_file(uint8_t *buf, int maxlen) {
-    if (bitmap_out[0] == '\0') return 0;
-    FILE *f = fopen(bitmap_out, "rb");
-    if (!f) return 0;
-    int n = fread(buf, 1, maxlen, f);
-    fclose(f);
-    return n;
-}
-
 static char target_path_global[256] = {0};
+static char input_path[256] = {0};
+static int input_fd = -1;
 static int timeout_seconds = 5;
 
 /* SIGALRM handler for direct .so timeout — longjmps back to caller */
@@ -113,75 +132,275 @@ static pid_t exec_child_pid = -1;
 
 static void exec_alarm_handler(int sig) {
     (void)sig;
+    timed_out = 1;
     if (exec_child_pid > 0) {
         kill(exec_child_pid, SIGKILL);
     }
 }
 
-static int run_executable(const uint8_t *data, size_t len, uint8_t *bmp, int *bmp_len) {
-    int pipefd[2];
-    if (pipe(pipefd) < 0) return -2;
+/* Stage *data* into the shared input file, rewound and truncated so the
+   child sees exactly this input. Returns 0 on failure. */
+static int stage_input(const uint8_t *data, size_t len) {
+    if (input_fd < 0) return 0;
+    if (lseek(input_fd, 0, SEEK_SET) < 0) return 0;
+    size_t written = 0;
+    while (written < len) {
+        ssize_t w = write(input_fd, data + written, len - written);
+        if (w < 0 && errno == EINTR) continue;
+        if (w <= 0) return 0;
+        written += (size_t)w;
+    }
+    if (ftruncate(input_fd, (off_t)len) < 0) return 0;
+    return lseek(input_fd, 0, SEEK_SET) == 0;
+}
+
+/* Drain *fd* to EOF, keeping at most maxlen bytes. Reading to EOF before
+   waitpid() matters: a child that writes more than the pipe buffer holds
+   (an ASAN report runs to several KB) would otherwise block on write()
+   while we block on waitpid(), and only the timeout would break the tie. */
+static int drain_stderr(int fd, uint8_t *buf, int maxlen) {
+    uint8_t sink[4096];
+    int got = 0;
+    while (1) {
+        ssize_t r;
+        if (got < maxlen) {
+            r = read(fd, buf + got, (size_t)(maxlen - got));
+        } else {
+            r = read(fd, sink, sizeof(sink));
+        }
+        if (r < 0 && errno == EINTR) continue;  /* SIGALRM — keep draining */
+        if (r <= 0) break;
+        if (got < maxlen) got += (int)r;
+    }
+    return got;
+}
+
+/* ── Forkserver client ────────────────────────────────────────────────
+ *
+ * Mirrors afl_shim.c's __afl_start_forkserver(). The target is exec'd once
+ * with the control pipes on AFL's fd numbers; from then on each input is a
+ * 4-byte request and two 4-byte replies, with the fork happening inside the
+ * already-initialised target.                                              */
+
+#define AFL_FORKSRV_FD 198
+
+static pid_t forksrv_pid = -1;
+static int fsrv_ctl_fd = -1;   /* loader -> target: run one */
+static int fsrv_st_fd = -1;    /* target -> loader: pid, then status */
+static int fsrv_err_fd = -1;   /* target's stderr, held open for the session */
+static int use_forksrv = 0;
+
+/* Read exactly n bytes from a fd; 0 on short read/EOF. */
+static int read_full(int fd, void *buf, size_t n) {
+    size_t got = 0;
+    while (got < n) {
+        ssize_t r = read(fd, (uint8_t *)buf + got, n - got);
+        if (r < 0 && errno == EINTR) {
+            if (timed_out) return 0;
+            continue;
+        }
+        if (r <= 0) return 0;
+        got += (size_t)r;
+    }
+    return 1;
+}
+
+/* Drain whatever the target has written to its stderr pipe since the last
+   call. The pipe outlives every child, so EOF never arrives and the
+   read-to-EOF trick used by the fork+exec path does not apply; the child is
+   already reaped by the time we get here, so everything it wrote is sitting
+   in the buffer and a non-blocking drain is exact. */
+static int drain_stderr_nonblock(uint8_t *buf, int maxlen) {
+    uint8_t sink[4096];
+    int got = 0;
+    while (1) {
+        ssize_t r;
+        if (got < maxlen) {
+            r = read(fsrv_err_fd, buf + got, (size_t)(maxlen - got));
+        } else {
+            r = read(fsrv_err_fd, sink, sizeof(sink));
+        }
+        if (r < 0 && errno == EINTR) continue;
+        if (r <= 0) break;   /* EAGAIN on an empty non-blocking pipe */
+        if (got < maxlen) got += (int)r;
+    }
+    return got;
+}
+
+/* Exec the target once and complete the forkserver handshake.
+   Returns 1 if the target speaks the protocol, 0 to fall back. */
+static int start_forkserver(void) {
+    int ctl[2], st[2], errp[2];
+    if (pipe(ctl) < 0) return 0;
+    if (pipe(st) < 0) { close(ctl[0]); close(ctl[1]); return 0; }
+    if (pipe(errp) < 0) {
+        close(ctl[0]); close(ctl[1]); close(st[0]); close(st[1]);
+        return 0;
+    }
 
     pid_t pid = fork();
-    if (pid < 0) { close(pipefd[0]); close(pipefd[1]); return -2; }
+    if (pid < 0) {
+        close(ctl[0]); close(ctl[1]); close(st[0]); close(st[1]);
+        close(errp[0]); close(errp[1]);
+        return 0;
+    }
 
     if (pid == 0) {
-        close(pipefd[1]);
-        dup2(pipefd[0], STDIN_FILENO);
-        close(pipefd[0]);
+        dup2(ctl[0], AFL_FORKSRV_FD);
+        dup2(st[1], AFL_FORKSRV_FD + 1);
+        close(ctl[0]); close(ctl[1]);
+        close(st[0]); close(st[1]);
+        close(errp[0]);
+        dup2(input_fd, STDIN_FILENO);
+        dup2(errp[1], STDERR_FILENO);
+        close(errp[1]);
         signal(SIGCHLD, SIG_DFL);
         signal(SIGALRM, SIG_DFL);
-        setenv("_COV_BITMAP_OUT", bitmap_out, 1);
-        execl(target_path_global, target_path_global, (char *)NULL);
+        execl(target_path_global, target_path_global, input_path, (char *)NULL);
         _exit(127);
     }
 
-    close(pipefd[0]);
-    size_t written = 0;
-    while (written < len) {
-        ssize_t w = write(pipefd[1], data + written, len - written);
-        if (w <= 0) break;
-        written += w;
-    }
-    close(pipefd[1]);
+    close(ctl[0]); close(st[1]); close(errp[1]);
 
-    /* Set up alarm: handler kills child directly, then waitpid reaps it */
-    exec_child_pid = pid;
+    /* Bound the handshake: a target without the forkserver runs to
+       completion instead of answering, and we must not hang on it. */
     struct sigaction sa;
     sa.sa_handler = exec_alarm_handler;
     sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;  /* NO SA_RESTART — we want waitpid interrupted */
+    sa.sa_flags = 0;
     sigaction(SIGALRM, &sa, NULL);
+    timed_out = 0;
+    exec_child_pid = -1;   /* do not let the handler kill the target here */
+    alarm(timeout_seconds > 0 ? timeout_seconds : 5);
+
+    char hello[4];
+    int ok = read_full(st[0], hello, 4);
+
+    alarm(0);
+    signal(SIGALRM, SIG_DFL);
+
+    if (!ok) {
+        kill(pid, SIGKILL);
+        waitpid(pid, NULL, 0);
+        close(ctl[1]); close(st[0]); close(errp[0]);
+        return 0;
+    }
+
+    forksrv_pid = pid;
+    fsrv_ctl_fd = ctl[1];
+    fsrv_st_fd = st[0];
+    fsrv_err_fd = errp[0];
+    fcntl(fsrv_err_fd, F_SETFL, O_NONBLOCK);
+    return 1;
+}
+
+static int run_forkserver(const uint8_t *data, size_t len, uint8_t *err, int *err_len) {
+    *err_len = 0;
+    if (!stage_input(data, len)) return -2;
+
+    char cmd[4] = {0, 0, 0, 0};
+    if (write(fsrv_ctl_fd, cmd, 4) != 4) return -2;
+
+    pid_t child = -1;
+    if (!read_full(fsrv_st_fd, &child, 4)) return -2;
+
+    struct sigaction sa;
+    sa.sa_handler = exec_alarm_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGALRM, &sa, NULL);
+    timed_out = 0;
+    exec_child_pid = child;   /* handler SIGKILLs this run's child only */
     alarm(timeout_seconds);
 
     int status = 0;
-    int waited = waitpid(pid, &status, 0);
+    int ok = read_full(fsrv_st_fd, &status, 4);
+
+    if (timed_out) {
+        /* The handler killed the child; the forkserver still owes us the
+           status of the corpse, and skipping it would desync the pipe. */
+        if (!ok) ok = read_full(fsrv_st_fd, &status, 4);
+    }
 
     alarm(0);
     signal(SIGALRM, SIG_DFL);
     exec_child_pid = -1;
 
-    int rc = -2;
-    if (waited < 0) {
-        /* waitpid interrupted by SIGALRM — handler already SIGKILL'd child,
-           but status may be uninitialized. Force reap and report timeout. */
-        kill(pid, SIGKILL);
-        waitpid(pid, NULL, 0);
-        rc = -1;
-    } else if (WIFEXITED(status)) {
-        rc = WEXITSTATUS(status);
-    } else if (WIFSIGNALED(status)) {
-        rc = -WTERMSIG(status);
+    *err_len = drain_stderr_nonblock(err, MAX_ERR);
+
+    if (timed_out) return -1;
+    if (!ok) return -2;
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) return -WTERMSIG(status);
+    return -2;
+}
+
+static int run_executable(const uint8_t *data, size_t len, uint8_t *err, int *err_len) {
+    *err_len = 0;
+    if (!stage_input(data, len)) return -2;
+
+    int errfd[2];
+    if (pipe(errfd) < 0) return -2;
+
+    pid_t pid = fork();
+    if (pid < 0) { close(errfd[0]); close(errfd[1]); return -2; }
+
+    if (pid == 0) {
+        close(errfd[0]);
+        dup2(input_fd, STDIN_FILENO);
+        dup2(errfd[1], STDERR_FILENO);
+        close(errfd[1]);
+        signal(SIGCHLD, SIG_DFL);
+        signal(SIGALRM, SIG_DFL);
+        /* argv[1] = input path, stdin = same file: matches run_target_fast so
+           targets keep whichever of the two they already read. */
+        execl(target_path_global, target_path_global, input_path, (char *)NULL);
+        _exit(127);
     }
 
-    *bmp_len = read_bitmap_file(bmp, MAX_BMP);
-    return rc;
+    close(errfd[1]);
+
+    exec_child_pid = pid;
+    timed_out = 0;
+    struct sigaction sa;
+    sa.sa_handler = exec_alarm_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;  /* NO SA_RESTART — we want read()/waitpid() interrupted */
+    sigaction(SIGALRM, &sa, NULL);
+    alarm(timeout_seconds);
+
+    *err_len = drain_stderr(errfd[0], err, MAX_ERR);
+    close(errfd[0]);
+
+    int status = 0;
+    int waited;
+    do {
+        waited = waitpid(pid, &status, 0);
+    } while (waited < 0 && errno == EINTR && !timed_out);
+
+    alarm(0);
+    signal(SIGALRM, SIG_DFL);
+    exec_child_pid = -1;
+
+    if (timed_out) {
+        /* The handler SIGKILL'd the child; reap it and report the timeout as
+           -1. Reporting -SIGKILL instead would land in the crash codes and
+           file every slow input as a fatal signal. */
+        kill(pid, SIGKILL);
+        waitpid(pid, NULL, 0);
+        return -1;
+    }
+    if (waited < 0) return -2;
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) return -WTERMSIG(status);
+    return -2;
 }
 
 int main(void) {
     char line[512];
-    uint8_t data[MAX_DATA];
-    uint8_t bmp[MAX_BMP];
+    uint8_t *data = NULL;
+    size_t data_cap = 0;
+    uint8_t err[MAX_ERR];
 
     /* Disable stdio buffering on stdin — fork() inherits the buffer and
        _exit() in the child discards the copy, losing read-ahead data. */
@@ -190,7 +409,8 @@ int main(void) {
     if (!read_line(line, sizeof(line))) return 1;
     char func_name[256];
     char timeout_str[16] = "5";
-    sscanf(line, "INIT %255s %255s %255s %15s", target_path_global, func_name, bitmap_out, timeout_str);
+    sscanf(line, "INIT %255s %255s %255s %15s", target_path_global, func_name, input_path,
+           timeout_str);
     timeout_seconds = atoi(timeout_str);
     if (timeout_seconds <= 0) timeout_seconds = 5;
 
@@ -208,7 +428,16 @@ int main(void) {
             is_executable = 0;
     }
 
-    if (!is_executable) {
+    if (is_executable) {
+        input_fd = open(input_path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+        if (input_fd < 0) {
+            fprintf(stderr, "open input file failed: %s\n", input_path);
+            return 1;
+        }
+        use_forksrv = start_forkserver();
+        if (!use_forksrv)
+            fprintf(stderr, "forkserver handshake failed, using fork+exec\n");
+    } else {
         void *handle = dlopen(target_path_global, RTLD_NOW);
         if (!handle) {
             fprintf(stderr, "dlopen failed: %s\n", dlerror());
@@ -229,20 +458,50 @@ int main(void) {
         if (strcmp(line, "QUIT") == 0) break;
         if (strncmp(line, "RUN ", 4) != 0) continue;
 
-        int data_len = atoi(line + 4);
-        if (data_len <= 0 || data_len > MAX_DATA) continue;
-        read_bytes(data, data_len);
+        long data_len = atol(line + 4);
+        /* A zero-length input is a legitimate test case, and every RUN must
+           produce exactly one reply regardless: `continue` here left the
+           caller blocking on a reply that never came, and it tore the
+           loader down and restarted it on the join timeout. */
+        if (data_len < 0) {
+            printf("RC -2 0\n");
+            fflush(stdout);
+            continue;
+        }
+        if (data_len > MAX_DATA) {
+            /* Drain the payload anyway, then answer: skipping it silently
+               would leave the body in the pipe and desync every later RUN. */
+            read_bytes(NULL, (size_t)data_len);
+            printf("RC -2 0\n");
+            fflush(stdout);
+            continue;
+        }
+        if (data_len > 0 && (size_t)data_len > data_cap) {
+            uint8_t *grown = realloc(data, (size_t)data_len);
+            if (!grown) {
+                read_bytes(NULL, (size_t)data_len);
+                printf("RC -2 0\n");
+                fflush(stdout);
+                continue;
+            }
+            data = grown;
+            data_cap = (size_t)data_len;
+        }
+        if (data_len > 0 && !read_bytes(data, (size_t)data_len)) break;
 
         int rc = -2;
-        int bmp_len = 0;
+        int err_len = 0;
 
         if (is_executable) {
-            rc = run_executable(data, data_len, bmp, &bmp_len);
+            rc = use_forksrv ? run_forkserver(data, (size_t)data_len, err, &err_len)
+                             : run_executable(data, (size_t)data_len, err, &err_len);
         } else if (target_fn) {
             /* Direct call with sigsetjmp timeout — no fork overhead.
                NOTE: SIGSEGV in the target kills fuzz_loader. For crash
                isolation on .so targets, use the persistent_loader adapter
-               (which forks per-call) or compile with ASAN. */
+               (which forks per-call) or compile with ASAN. The target's
+               stderr is the loader's own stderr here, which the adapter
+               drains separately — nothing to report back inline. */
             struct sigaction sa_new, sa_old;
             sa_new.sa_handler = timeout_handler;
             sigemptyset(&sa_new.sa_mask);
@@ -252,7 +511,7 @@ int main(void) {
             timed_out = 0;
             if (sigsetjmp(timeout_jmp, 1) == 0) {
                 alarm(timeout_seconds);
-                rc = target_fn(data, data_len);
+                rc = target_fn(data, (size_t)data_len);
                 alarm(0);
             } else {
                 /* Longjmp from timeout_handler */
@@ -260,14 +519,25 @@ int main(void) {
             }
 
             sigaction(SIGALRM, &sa_old, NULL);
-
-            bmp_len = read_bitmap_file(bmp, MAX_BMP);
         }
 
-        printf("RC %d %d\n", rc, bmp_len);
+        printf("RC %d %d\n", rc, err_len);
         fflush(stdout);
-        if (bmp_len > 0) write_bytes(bmp, bmp_len);
+        if (err_len > 0) write_bytes(err, (size_t)err_len);
     }
 
+    free(data);
+    if (use_forksrv) {
+        /* Closing the control pipe makes the forkserver's read() return 0
+           and the target exit on its own. */
+        if (fsrv_ctl_fd >= 0) close(fsrv_ctl_fd);
+        if (forksrv_pid > 0) {
+            kill(forksrv_pid, SIGKILL);
+            waitpid(forksrv_pid, NULL, 0);
+        }
+        if (fsrv_st_fd >= 0) close(fsrv_st_fd);
+        if (fsrv_err_fd >= 0) close(fsrv_err_fd);
+    }
+    if (input_fd >= 0) close(input_fd);
     return 0;
 }

@@ -9,9 +9,15 @@ handles target execution with minimal overhead:
 This adapter manages the fuzz_loader process lifecycle and communicates
 via its stdin/stdout binary protocol.
 
+Coverage does not travel over that protocol. The loader is spawned with
+``__AFL_SHM_ID`` / ``AFL_MAP_SIZE`` in its environment, every exec'd child
+inherits them, and ``afl_shim.c``'s constructor attaches to the segment on
+its own — so the target writes edges directly into the fuzzer's SHM. The
+caller resets the map before ``run_one`` and reads it after.
+
 Protocol:
-  Init:   "INIT <target> <func> <bitmap_out> <timeout>\n"  ->  "READY\n"
-  Run:    "RUN <len>\n<data>"                              ->  "RC <rc> <bmp_len>\n<bmp>"
+  Init:   "INIT <target> <func> <input_file> <timeout>\n" ->  "READY\n"
+  Run:    "RUN <len>\n<data>"                             ->  "RC <rc> <err_len>\n<err>"
   Quit:   "QUIT\n"
 """
 
@@ -22,6 +28,8 @@ import subprocess
 import sys
 import tempfile
 import threading
+
+from fuzzer_tool.adapters.process import _clean_env
 
 log = logging.getLogger(__name__)
 
@@ -55,6 +63,11 @@ def _close_streams(proc: subprocess.Popen) -> None:
 # ── Memory bounds ────────────────────────────────────────────────────
 STDERR_LINES_MAX = 100  # max stderr lines retained from child processes
 
+# Seconds allowed on top of the per-exec timeout before the loader process
+# itself is presumed hung. The loader's alarm fires at int(timeout); this
+# covers reaping the child and draining its stderr afterwards.
+_LOADER_GRACE = 1.0
+
 
 def _ensure_compiled() -> str | None:
     """Return path to compiled fuzz_loader, or None if compilation fails."""
@@ -64,17 +77,22 @@ def _ensure_compiled() -> str | None:
     c_source = _FUZZ_LOADER_BIN + ".c"
     if not os.path.isfile(c_source):
         return None
-    try:
-        subprocess.run(
-            ["gcc", "-O2", "-o", _FUZZ_LOADER_BIN, c_source, "-ldl"],
-            check=True,
-            capture_output=True,
-            timeout=10,
-        )
-        return _FUZZ_LOADER_BIN
-    except Exception as e:
-        log.warning("Failed to compile fuzz_loader: %s", e)
-        return None
+    # clang first, gcc only as a fallback — same preference order as
+    # tools/build_targets.sh, so the loader and the targets it runs are
+    # built by the same toolchain wherever clang exists.
+    for cc in ("clang", "gcc"):
+        try:
+            subprocess.run(
+                [cc, "-O2", "-o", _FUZZ_LOADER_BIN, c_source, "-ldl"],
+                check=True,
+                capture_output=True,
+                timeout=30,
+            )
+            return _FUZZ_LOADER_BIN
+        except Exception as e:
+            log.debug("Failed to compile fuzz_loader with %s: %s", cc, e)
+    log.warning("Failed to compile fuzz_loader (tried clang, gcc)")
+    return None
 
 
 class ForkserverRunner:
@@ -91,14 +109,19 @@ class ForkserverRunner:
         target: str,
         function_name: str = "LLVMFuzzerTestOneInput",
         timeout: float = 5.0,
+        env: dict[str, str] | None = None,
     ):
         self.target = target
         self.function_name = function_name
         self.timeout = timeout
+        # Environment overlaid on os.environ when the loader is spawned.
+        # Carries __AFL_SHM_ID / AFL_MAP_SIZE: every exec'd child inherits
+        # them, which is how the target finds the fuzzer's coverage map.
+        self.env_overrides: dict[str, str] = dict(env or {})
         self._proc: subprocess.Popen | None = None
         self._ready = False
-        self._last_bitmap: bytes | None = None
-        self._bitmap_out: str | None = None
+        self._last_stderr: str = ""
+        self._input_file: str | None = None
         self._restarting = False
         self._stderr_lines: list[str] = []
         self._stderr_thread: threading.Thread | None = None
@@ -112,10 +135,14 @@ class ForkserverRunner:
             log.warning("fuzz_loader binary not available")
             return False
 
-        fd, self._bitmap_out = tempfile.mkstemp(suffix=".bmp", prefix="fuzz_fork_")
-        os.close(fd)
+        if self._input_file is None:
+            fd, self._input_file = tempfile.mkstemp(suffix=".cur", prefix="fuzz_fork_")
+            os.close(fd)
 
-        env = os.environ.copy()
+        # Same env treatment run_target_fast() gives its children: merge the
+        # caller's overrides over os.environ, then strip the LD_PRELOAD
+        # entries that break sanitizer targets.
+        env = _clean_env({**os.environ, **self.env_overrides})
         if "AFL_MAP_SIZE" not in env:
             env["AFL_MAP_SIZE"] = "8192"
 
@@ -132,7 +159,7 @@ class ForkserverRunner:
         self._stderr_thread = threading.Thread(target=self._drain_stderr, daemon=True)
         self._stderr_thread.start()
 
-        init = f"INIT {self.target} {self.function_name} {self._bitmap_out} {int(self.timeout)}\n"
+        init = f"INIT {self.target} {self.function_name} {self._input_file} {int(self.timeout)}\n"
         try:
             self._proc.stdin.write(init.encode())
             self._proc.stdin.flush()
@@ -163,9 +190,17 @@ class ForkserverRunner:
         except (ValueError, OSError):
             pass
 
-    def run_one(self, data: bytes) -> tuple[int, bytes | None]:
+    def run_one(self, data: bytes) -> tuple[int, str]:
+        """Run *data* once, returning ``(returncode, stderr)``.
+
+        Coverage is not returned: the target wrote it straight into the SHM
+        segment named by ``__AFL_SHM_ID``, which the caller reads directly.
+        The child's stderr *is* returned, because sanitizer reports are the
+        only crash signal for an ASAN build that exits 1 (see
+        ``ExecutionRunner.is_crash``).
+        """
         if not self._ready or not self._proc:
-            return -2, None
+            return -2, ""
 
         cmd = f"RUN {len(data)}\n"
         try:
@@ -181,7 +216,7 @@ class ForkserverRunner:
                         return self.run_one(data)
                 finally:
                     self._restarting = False
-            return -2, None
+            return -2, ""
 
         # Threaded readline with timeout
         result = [None]
@@ -191,7 +226,11 @@ class ForkserverRunner:
 
         t = threading.Thread(target=_readline, daemon=True)
         t.start()
-        t.join(timeout=self.timeout)
+        # Wait past the loader's own alarm(int(timeout)) before declaring the
+        # loader itself hung: it needs to reap the child and drain its stderr
+        # after firing, and joining at exactly the alarm deadline would tear
+        # down a healthy loader on every timing-out input.
+        t.join(timeout=self.timeout + _LOADER_GRACE)
         if t.is_alive():
             log.warning("Forkserver timed out after %.1fs, restarting", self.timeout)
             proc = self._proc
@@ -207,25 +246,44 @@ class ForkserverRunner:
                         return self.run_one(data)
                 finally:
                     self._restarting = False
-            return -1, None
+            return -1, ""
 
         header = result[0]
         if not header:
-            return -2, None
+            return -2, ""
 
         parts = header.decode().strip().split()
         if len(parts) < 3 or parts[0] != "RC":
-            return -2, None
+            return -2, ""
 
         rc = int(parts[1])
-        bmp_len = int(parts[2])
+        err_len = int(parts[2])
 
-        bitmap = None
-        if bmp_len > 0:
-            bitmap = self._proc.stdout.read(bmp_len)
+        stderr = ""
+        if err_len > 0:
+            raw = self._proc.stdout.read(err_len)
+            if raw:
+                stderr = raw.decode(errors="replace")
 
-        self._last_bitmap = bitmap
-        return rc, bitmap
+        self._last_stderr = stderr
+        return rc, stderr
+
+    def update_shm_after_resize(self, new_env_id: str, new_size: int) -> None:
+        """Restart the loader so its children inherit the resized SHM.
+
+        ``ShmCoverage.resize()`` allocates a *new* segment and removes the
+        old one, so the id baked into the running loader's environment is
+        stale — its children would attach to a removed segment and their
+        coverage would be dropped on the floor. The environment is only read
+        at exec time, so the only way to update it is to respawn.
+        """
+        self.env_overrides["__AFL_SHM_ID"] = new_env_id
+        self.env_overrides["AFL_MAP_SIZE"] = str(new_size)
+        if self._proc is None:
+            return
+        self.stop()
+        if not self.start():
+            log.warning("Forkserver failed to restart after SHM resize")
 
     def stop(self):
         proc = self._proc
@@ -236,7 +294,10 @@ class ForkserverRunner:
         try:
             proc.stdin.write(b"QUIT\n")
             proc.stdin.flush()
-        except (BrokenPipeError, OSError):
+        except (BrokenPipeError, OSError, ValueError):
+            # ValueError: stop() ran already and closed the stream. __del__
+            # calls stop() a second time at GC, which raised "write to closed
+            # file" through the ignored-exception path on every clean exit.
             pass
         try:
             proc.wait(timeout=2)
@@ -249,10 +310,10 @@ class ForkserverRunner:
         # would otherwise keep the stderr-drain thread blocked forever,
         # leaving the process permanently multi-threaded.
         _close_streams(proc)
-        if self._bitmap_out and os.path.exists(self._bitmap_out):
+        if self._input_file and os.path.exists(self._input_file):
             with contextlib.suppress(OSError):
-                os.unlink(self._bitmap_out)
-            self._bitmap_out = None
+                os.unlink(self._input_file)
+            self._input_file = None
 
     def __del__(self):
         self.stop()
