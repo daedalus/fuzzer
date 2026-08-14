@@ -1170,3 +1170,95 @@ int fuzz_shm_run(const unsigned char *buf, size_t len) {
                     os.environ.pop("AFL_MAP_SIZE", None)
         finally:
             cov.cleanup()
+
+    def test_shim_loads_without_hanging_when_fork_fds_inherited(self, tmp_path):
+        """Regression: inherited fds 198/199 must not make ctypes.CDLL() hang.
+
+        The forkserver constructor used to enter its loop solely because
+        write(199, ...) succeeded. If a parent process left a pipe/socket at
+        those fds, the constructor blocked forever waiting for a loader
+        command. The fix gates forkserver activation on __AFL_FORKSRV=1.
+        """
+        import fcntl
+        import os
+        import subprocess
+
+        _FORK_FD_OWNED = False
+
+        # Simulate inherited control-channel fds without a real loader.
+        r, w = os.pipe()
+        os.dup2(r, 198)
+        os.dup2(w, 199)
+        os.close(r)
+        os.close(w)
+        _FORK_FD_OWNED = True
+
+        try:
+            src = tmp_path / "test_inherit.c"
+            so = tmp_path / "test_inherit.so"
+            src.write_text("""
+#include <stdint.h>
+#include <stddef.h>
+__attribute__((visibility("default")))
+int fuzz_shm_run(const unsigned char *buf, size_t len) {
+    (void)buf; (void)len;
+    __afl_map_edge(0x1010);
+    __afl_map_edge(0x2020);
+    __afl_map_edge(0x3030);
+    return 0;
+}
+""")
+            shim_path = Path(__file__).parents[1] / "src/fuzzer_tool/adapters/afl_shim.c"
+            subprocess.run(
+                [
+                    "gcc",
+                    "-O2",
+                    "-g",
+                    "-shared",
+                    "-fPIC",
+                    "-include",
+                    str(shim_path),
+                    "-o",
+                    str(so),
+                    str(src),
+                ],
+                check=True,
+                capture_output=True,
+            )
+
+            cov = ShmCoverage()
+            try:
+                cov.reset_edge_map()
+                old_shm = os.environ.get("__AFL_SHM_ID")
+                old_size = os.environ.get("AFL_MAP_SIZE")
+                os.environ["__AFL_SHM_ID"] = str(cov.shm_id)
+                os.environ["AFL_MAP_SIZE"] = str(cov.num_entries)
+                try:
+                    lib = ctypes.CDLL(str(so))
+                    func = lib.fuzz_shm_run
+                    func.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+                    func.restype = ctypes.c_int
+
+                    buf = ctypes.create_string_buffer(b"hello")
+                    rc = func(ctypes.cast(buf, ctypes.c_void_p), ctypes.c_size_t(5))
+                    assert rc == 0
+                    assert cov.read_edge_count() >= 3
+                finally:
+                    if old_shm is not None:
+                        os.environ["__AFL_SHM_ID"] = old_shm
+                    else:
+                        os.environ.pop("__AFL_SHM_ID", None)
+                    if old_size is not None:
+                        os.environ["AFL_MAP_SIZE"] = old_size
+                    else:
+                        os.environ.pop("AFL_MAP_SIZE", None)
+            finally:
+                cov.cleanup()
+        finally:
+            if _FORK_FD_OWNED:
+                for fd in (198, 199):
+                    try:
+                        fcntl.fcntl(fd, fcntl.F_GETFD)
+                    except OSError:
+                        continue
+                    os.close(fd)

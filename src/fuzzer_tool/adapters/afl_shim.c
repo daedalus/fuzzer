@@ -1299,6 +1299,12 @@ static void __afl_shim_abort(void) {
 static void __afl_start_forkserver(void) {
     char hello[4] = {0, 0, 0, 0};
 
+    /* Opt-in: only enter forkserver mode when the loader explicitly asks
+     * for it.  Without this guard, any ct ypes.CDLL()-loaded .so that happens
+     * to inherit fds 198/199 from its parent would enter the forkserver loop
+     * and hang the loader waiting for a command that never comes. */
+    if (!getenv("__AFL_FORKSRV")) return;
+
     /* No control pipe: not being driven by the loader. */
     if (write(AFL_FORKSRV_FD + 1, hello, 4) != 4) return;
 
