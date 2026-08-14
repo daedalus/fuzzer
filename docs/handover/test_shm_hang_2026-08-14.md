@@ -112,3 +112,47 @@ Reproduce the hang deterministically by adding a small Python wrapper that opens
 - `tests/test_shm.py` — `TestShimEdgeCountEndToEnd::test_shim_updates_edge_count_after_target_call`
 - `src/fuzzer_tool/adapters/afl_shim.c` — `__afl_auto_init`, `__afl_start_forkserver`, `__afl_map_shm`
 - `src/fuzzer_tool/adapters/shm.py` — `ShmCoverage` (Python-side SHM reader)
+
+## Resolution (follow-up, same day)
+
+Option B was taken in `a267ff8`, but only half of it landed: the shim gate went
+in and no loader ever set the variable. The sentence above — "The real
+forkserver loader sets the var" — described intent, not code. `__AFL_FORKSRV`
+appeared in exactly two places in the tree, the gate itself and a docstring.
+
+Consequences, in order of how long they took to notice:
+
+1. `start_forkserver()` in `fuzz_loader.c` could never complete its handshake,
+   so `use_forksrv` was always 0 and every RUN fell back to `run_executable()`.
+   The forkserver work of `d588254` → `fd59970` → `1cdd9ee` was effectively
+   reverted, at the cost of one wasted target execution per INIT to discover
+   the fallback. Nothing failed; it just got slower.
+2. `tests/test_regression_forkserver_shm.py` did not catch this, because all
+   eight of its assertions — SHM coverage, stderr forwarding, timeouts,
+   protocol desync — hold identically under both execution paths. The two
+   modes were externally indistinguishable over the protocol.
+
+The fix sets the variable in the forkserver child of `start_forkserver()`,
+between `fork()` and `execl()`. It deliberately does *not* go into
+`ForkserverRunner.env_overrides`: that would put it in the loader's own
+environment, where the `dlopen()` path for `.so` targets would enter the
+forkserver loop and hang the loader — the identical bug this document is
+about, one level up.
+
+To make the failure observable at all, the loader now reports the resolved
+mode on its READY line (`READY forkserver` / `READY exec` / `READY dlopen`)
+and `ForkserverRunner.exec_mode` carries it. A regression test asserts the
+mode is `forkserver` for a shim-built executable, which is the assertion that
+would have caught this.
+
+### Separately: target stdout desynced the protocol
+
+Found while verifying the above, and independent of it. Children were spawned
+with stdin and stderr redirected but *not* stdout, which is the loader's half
+of the RUN/RC protocol. A target that printed anything had its output parsed
+as an `RC` header; the adapter returned -2 for a run that succeeded, and the
+stream stayed desynced afterwards. Reproduced on both the forkserver and the
+fork+exec paths, and on the handshake probe child as well. Children now get
+stdout on `/dev/null` (not the stderr pipe — `ExecutionRunner.is_crash` scans
+stderr for sanitizer reports, and ordinary chatter there would read as a
+crash).
