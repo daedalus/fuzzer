@@ -246,6 +246,13 @@ static int start_forkserver(void) {
     }
 
     if (pid == 0) {
+        /* Opt in to the shim's forkserver loop.  This is set *here*, in the
+           child, and nowhere else: afl_shim.c gates __afl_start_forkserver()
+           on this variable, and every other place the shim gets loaded must
+           not see it.  Putting it in the loader's own environment would make
+           the dlopen() path below enter the forkserver loop and hang the
+           loader, and would do the same to every run_executable() child. */
+        setenv("__AFL_FORKSRV", "1", 1);
         dup2(ctl[0], AFL_FORKSRV_FD);
         dup2(st[1], AFL_FORKSRV_FD + 1);
         close(ctl[0]); close(ctl[1]);
