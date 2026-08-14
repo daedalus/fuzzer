@@ -498,6 +498,8 @@ class StatsReporter:
         os.environ["AFL_MAP_SIZE"] = str(new_size)
         if f._inprocess_runner:
             f._inprocess_runner.update_shm_after_resize(f.shm_cov._ptr, new_size, f.shm_cov.env_id)
+        if f._forkserver:
+            f._forkserver.update_shm_after_resize(f.shm_cov.env_id, new_size)
         return f" | map: {f._edge_tracker.bitmap_density() * 100:.1f}% (collision: {collision_risk:.0f}%)"
 
     def _print_stats_smt_str(self, f) -> str:

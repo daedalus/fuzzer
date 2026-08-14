@@ -203,10 +203,14 @@ class TargetRunner:
             return self._run_target_ptrace(data)
 
         if f._forkserver and f._forkserver._ready:
-            rc, bitmap = f._forkserver.run_one(data)
-            if bitmap and shm and len(bitmap) <= shm.size:
-                ctypes.memmove(shm._ptr, bitmap, len(bitmap))
-            return rc, ""
+            # No bitmap is copied back: the loader's exec'd child inherited
+            # __AFL_SHM_ID and the shim's constructor attached to *this*
+            # segment, so it wrote its edges here directly. Reset for the
+            # same reason the spawn path below does — is_new_coverage_with_edges()
+            # must see this execution only.
+            if shm:
+                shm.reset_edge_map()
+            return f._forkserver.run_one(data)
 
         if shm:
             shm.reset_edge_map()

@@ -485,6 +485,7 @@ def cmd_fuzz(args):
         region_profile=getattr(args, "region_profile", False),
         fluctuation=getattr(args, "fluctuation_theorems", False),
         deterministic=getattr(args, "deterministic", True),
+        forkserver=getattr(args, "forkserver", True),
         ga=getattr(args, "ga", False),
         qea=getattr(args, "qea", False),
         wfc=getattr(args, "wfc", False),
@@ -1877,6 +1878,18 @@ def main() -> int:
         "--cmplog",
         action="store_true",
         help="Enable comparison tracing via LD_PRELOAD (memcmp/strcmp/strncmp/memchr interception)",
+    )
+    fuzz_parser.add_argument(
+        "--no-forkserver",
+        dest="forkserver",
+        action="store_false",
+        default=True,
+        help=(
+            "Disable the C forkserver on the default execution path, falling back to "
+            "posix_spawn per execution. On by default; the forkserver replaces a full "
+            "ELF load + dynamic linker + libc init per exec with a fork from an "
+            "already-loaded process."
+        ),
     )
     fuzz_parser.add_argument(
         "--no-deterministic",

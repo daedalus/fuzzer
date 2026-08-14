@@ -562,6 +562,7 @@ class Fuzzer:
         # mid-list silently shifts every caller argument after it.
         region_profile=False,
         deterministic=True,
+        forkserver=True,
     ):
         self.target = target
         self.debug = debug
@@ -1849,15 +1850,53 @@ class Fuzzer:
             if self._inprocess_runner._persistent:
                 print("[*] Persistent loader: enabled (1 process, many calls)")
 
-        # Forkserver: use C fuzz_loader for default execution path when available.
-        # Currently disabled: fuzz_loader reads bitmap from file while target
-        # writes to SHM — these are disconnected. Enable when fuzz_loader.c
-        # Forkserver disabled for multi-target mode (requires single binary)
-        # if not self._inprocess_runner and not self._persistent_runner and not self.ptrace_cov:
-        #     from fuzzer_tool.adapters.forkserver import ForkserverRunner
-        #     self._forkserver = ForkserverRunner(target, timeout=self.timeout)
-        #     if self._forkserver.start():
-        #         log.info("Forkserver started for default execution path")
+        if forkserver:
+            self._setup_forkserver()
+
+    def _setup_forkserver(self) -> None:
+        """Start the C fuzz_loader for the default (spawn-per-exec) path.
+
+        Replaces `run_target_fast`'s posix_spawn + ELF load + dynamic linker
+        + libc init per execution with a fork+exec from an already-loaded
+        process. The loader is spawned holding __AFL_SHM_ID / AFL_MAP_SIZE,
+        so its children attach to the fuzzer's own coverage segment through
+        afl_shim.c's constructor — no bitmap is round-tripped.
+
+        Only claims the exact set of runs `run_target_fast` handles today:
+        every other mode either owns the child itself (in-process,
+        persistent, network, ptrace) or needs per-execution setup the
+        loader's environment is fixed against (cmplog truncates its log per
+        run; perf counters must be opened on the child pid we never see;
+        file_mode/target_args build their own argv; multi-target needs more
+        than one binary).
+        """
+        if (
+            self._inprocess_runner
+            or self._persistent_runner
+            or self._network_runner
+            or self.ptrace_cov
+            or self.multi_targets
+            or self.file_mode
+            or self.target_args
+            or self._cmplog
+            or self._perf_counters
+        ):
+            return
+
+        from fuzzer_tool.adapters.forkserver import ForkserverRunner
+
+        env: dict[str, str] = {}
+        if self.use_coverage:
+            env["AFL_MAP_SIZE"] = str(self.map_size)
+        if self.shm_cov:
+            env["__AFL_SHM_ID"] = self.shm_cov.env_id
+
+        runner = ForkserverRunner(self.target, timeout=self.timeout, env=env)
+        if runner.start():
+            self._forkserver = runner
+            print(f"[*] Forkserver: fork+exec from a loaded process ({self.target})")
+        else:
+            log.warning("Forkserver unavailable, falling back to spawn-per-exec")
 
     def _setup_ptrace(self, target, deep_coverage, max_bps, fallback_hint=False):
         cov = PtraceCoverage(target, deep_coverage=deep_coverage, max_bps=max_bps)
@@ -3772,6 +3811,8 @@ class Fuzzer:
                     self._inprocess_runner.update_shm_after_resize(
                         self.shm_cov._ptr, new_size, self.shm_cov.env_id
                     )
+                if self._forkserver:
+                    self._forkserver.update_shm_after_resize(self.shm_cov.env_id, new_size)
         return True
 
     def _run_chi2_operator_test(self) -> None:
