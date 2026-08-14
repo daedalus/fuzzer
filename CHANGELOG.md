@@ -26,6 +26,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   strict subset differing by a constant, input-independent init set.
 
 ### Fixed
+- **Map sizing read the wrong sancov section, so it never once used a real
+  block count.** `estimate_map_size()` lists "sancov guard count (exact)" as
+  its first priority, but the only parser it had — `parse_sancov_offsets()` —
+  matches `__start/__stop___sancov_cntrs`, the *inline-8bit-counters* section.
+  Every target in this tree is built with `-fsanitize-coverage=trace-pc-guard`,
+  which emits `__sancov_guards` instead, so priority 1 matched nothing and every
+  target fell through to branch-density estimation. That estimate ran 4–16x
+  high: `test_target` (91 guards) asked for 131072 entries instead of 8192, a
+  1 MiB table memset before every execution to hold 4 edges. Added
+  `parse_sancov_guard_count()` and wired it ahead of the counters path. Reset
+  cost per exec on the affected targets: 40.8 µs → 4.1 µs, which is noise under
+  fork+exec (0.997x on `test_target`) and ~12% of a 305 µs forkserver exec. The
+  same over-estimate also fed `recommended_map_size()`.
+- `estimate_map_size()` divided the `__sancov_cntrs` length by 4 "because guards
+  are uint32_t". That section is 8-bit counters, one byte per block, so the
+  fallback path under-sized by 4x on any externally built target that did carry
+  it. No target here has the section, so nothing in-tree was affected.
 - **`fuzz_loader.c` was never a forkserver.** It did `fork()` + `execl()` per
   input, so every execution paid the full ELF load + linker + libc + ASAN init
   anyway. `docs/edge-coverage-analysis.md` §1 prescribed deleting its

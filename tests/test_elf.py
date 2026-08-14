@@ -1,9 +1,19 @@
 """Tests for core/elf.py — ELF parsing for sancov counter discovery."""
 
+import glob
 import os
 import struct
 
-from fuzzer_tool.core.elf import find_load_segment, parse_sancov_offsets
+import pytest
+
+from fuzzer_tool.core.elf import (
+    _size_from_blocks,
+    detect_ctx_bits,
+    estimate_map_size,
+    find_load_segment,
+    parse_sancov_guard_count,
+    parse_sancov_offsets,
+)
 
 
 def _build_elf64_header(
@@ -1205,3 +1215,71 @@ class TestExtractDivComprehensive:
 
         d, _ = extract_div_constants(self._bin)
         assert len(d) >= 8, f"expected >= 8 DIV/CMP entries, got {len(d)}: {d}"
+
+
+class TestParseSancovGuardCount:
+    """`__sancov_guards` sizing — the section trace-pc-guard actually emits.
+
+    Regression guard for a dead exact-sizing path: estimate_map_size()
+    documented "sancov guard count (exact)" as priority 1, but the only
+    parser it had read `__sancov_cntrs` (inline-8bit-counters). No target in
+    this tree emits that section, so priority 1 never fired and every target
+    silently fell through to branch-density estimation.
+    """
+
+    @staticmethod
+    def _guard_targets() -> list[str]:
+        """Built targets that carry a `__sancov_guards` section."""
+        out = []
+        for t in sorted(glob.glob("targets/*")):
+            if not os.path.isfile(t):
+                continue
+            with open(t, "rb") as f:
+                blob = f.read()
+            if blob[:4] == b"\x7fELF" and b"__start___sancov_guards" in blob:
+                out.append(t)
+        return out
+
+    def test_non_elf_returns_none(self):
+        assert parse_sancov_guard_count("/dev/null") is None
+
+    def test_missing_section_returns_none(self, tmp_path):
+        p = tmp_path / "plain"
+        p.write_bytes(_build_elf64_header(e_shnum=0))
+        assert parse_sancov_guard_count(str(p)) is None
+
+    def test_cntrs_parser_does_not_answer_for_guards(self):
+        """The old parser is not a substitute — it returns None on these.
+
+        This is the bug in one assertion: parse_sancov_offsets() reads a
+        section trace-pc-guard binaries do not have.
+        """
+        targets = self._guard_targets()
+        if not targets:
+            pytest.skip("no trace-pc-guard targets built")
+        assert all(parse_sancov_offsets(t) is None for t in targets)
+
+    def test_real_instrumented_targets(self):
+        """Every trace-pc-guard target resolves to a positive block count.
+
+        Skipped rather than failed when the matrix has not been built with
+        `tools/build_targets.sh --clang-scov`: coverage instrumentation is
+        opt-in and CI does not always populate targets/.
+        """
+        targets = self._guard_targets()
+        if not targets:
+            pytest.skip("no trace-pc-guard targets built")
+        for t in targets:
+            count = parse_sancov_guard_count(t)
+            assert count is not None, f"{t} has the section but parsed as None"
+            assert count > 0
+
+    def test_guard_count_drives_map_size(self):
+        """A guard-instrumented binary sizes off guards, not branch density."""
+        targets = self._guard_targets()
+        if not targets:
+            pytest.skip("no trace-pc-guard targets built")
+        for t in targets:
+            count = parse_sancov_guard_count(t)
+            assert count is not None
+            assert estimate_map_size(t) == _size_from_blocks(count, detect_ctx_bits(t) or 0)

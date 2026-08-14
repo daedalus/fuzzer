@@ -195,6 +195,58 @@ to attach on a mismatch, or find the bits inside the existing 24 (the top 8 bits
 `count` are the obvious candidate: counts are clamped to 255 for bucketing long before
 they approach 2^24).
 
+**Measured 2026-08-14 on real instrumented targets — and the premise does not hold
+here.** `apt-get install clang` now succeeds in the sandbox, so `tools/build_targets.sh
+--clang-scov` produces a genuine trace-pc-guard matrix for the first time; this document
+was written without one. Exact block counts, and the map each target asks for:
+
+| target | guards | map | edges hit | dropped |
+|--------|-------:|----:|----------:|--------:|
+| gzip_read | 527 | 8,192 | 13 | 0 |
+| tracecmp_target_tcg | 349 | 8,192 | 11 | 0 |
+| png_read | 311 | 8,192 | 43 | 0 |
+| zlib_read | 251 | 8,192 | 21 | 0 |
+| proto_target | 94 | 8,192 | 4 | 0 |
+| test_target | 91 | 8,192 | 4 | 0 |
+
+All 16 instrumented targets size to the **floor**, `MAP_SIZE_DEFAULT` = 8192. The cap
+that the O(1) reset exists to lift is 262144 — roughly 500x above anything in the tree.
+Dropped edges are zero everywhere and the load factor is about 13%, so the probe window
+averages ~1.07 probes and bounding it would buy nothing either. **Both halves of this
+section fix costs that no target in this matrix pays.** At 8192 entries the reset is
+4.1 µs.
+
+Two caveats keep this section open rather than closed:
+
+- The six library-backed targets (ffmpeg, fgrep, secp256k1, lz4, jpeg, unrar) did not
+  build — `vendor/ffmpeg` is an unbuilt source tree here — and those are precisely the
+  ones whose guard counts could reach the cap. The census covers the small end only.
+- Guard counts are per-binary, not per-`edge_id`. A CTX build multiplies distinct ids by
+  call-graph fan-in; every target above is `ctx=0`.
+
+Re-run the census before doing any of this work. `parse_sancov_guard_count()` makes it
+a one-liner per target.
+
+**Sizing was silently estimating, not measuring, until 2026-08-14.**
+`estimate_map_size()` lists "sancov guard count (exact)" as priority 1, but its only
+parser — `parse_sancov_offsets()` — reads `__start/__stop___sancov_cntrs`, the
+*inline-8bit-counters* section. `-fsanitize-coverage=trace-pc-guard` emits
+`__sancov_guards` instead, so priority 1 never matched on any target in this tree and
+every size came from branch-density estimation. That estimate ran 4–16x high:
+
+| target | guards | estimated | exact | reset cost, est → exact |
+|--------|-------:|----------:|------:|------------------------:|
+| test_target | 91 | 131,072 | 8,192 | 40.8 µs → 4.1 µs |
+| gzip_read | 527 | 131,072 | 8,192 | 40.8 µs → 4.1 µs |
+| png_read_nosan | 292 | 32,768 | 8,192 | 11.3 µs → 4.1 µs |
+| proto_target_nosan | 94 | 16,384 | 8,192 | 6.9 µs → 4.1 µs |
+
+Fixed by `parse_sancov_guard_count()`. Note what the defect was doing to this section's
+own argument: the over-estimate is what made the reset look expensive, and the same
+estimate fed `recommended_map_size()`. The 36.7 µs/exec it gives back is invisible under
+fork+exec (measured 0.997x on `test_target`, where an exec costs 7.5 ms) and is worth
+~12% of a 305 µs forkserver exec.
+
 ### 4. No hit-count bucketing on the SHM path
 
 **Status: FIXED.** `_check_new_coverage` (`adapters/shm.py`) now maintains a dense

@@ -982,15 +982,23 @@ def _symbol_names(target: str) -> list[str]:
     return out
 
 
-def parse_sancov_offsets(target: str) -> tuple[int, int] | None:
-    """Parse ELF to find __start/__stop___sancov_cntrs virtual addresses.
+def _sancov_section_bounds(target: str, section: str) -> tuple[int, int] | None:
+    """Virtual addresses of `__start___sancov_<section>` / `__stop___...`.
+
+    `section` is the suffix, without the leading `__sancov_`: "cntrs" for
+    -fsanitize-coverage=inline-8bit-counters, "guards" for trace-pc-guard.
+    They are different sections with different element widths, and a binary
+    may carry either, both, or neither.
 
     Args:
         target: Path to ELF binary (shared library or executable).
+        section: Section-name suffix, e.g. "cntrs" or "guards".
 
     Returns:
         Tuple of (start_addr, stop_addr) if found, None otherwise.
     """
+    start_sym = f"__start___sancov_{section}"
+    stop_sym = f"__stop___sancov_{section}"
     try:
         with open(target, "rb") as f:
             elf = f.read()
@@ -1028,7 +1036,7 @@ def parse_sancov_offsets(target: str) -> tuple[int, int] | None:
         sym_count = sym_size // sym_entsize
         strtab_offset = struct.unpack_from("<Q", elf, strtab_sec + 24)[0]
         start_addr = stop_addr = None
-        for i in range(min(sym_count, 10000)):
+        for i in range(min(sym_count, 20000)):
             sym = sym_offset + i * sym_entsize
             st_value = struct.unpack_from("<Q", elf, sym + 8)[0]
             st_name_idx = struct.unpack_from("<I", elf, sym)[0]
@@ -1037,15 +1045,57 @@ def parse_sancov_offsets(target: str) -> tuple[int, int] | None:
                 .split(b"\x00")[0]
                 .decode(errors="replace")
             )
-            if name == "__start___sancov_cntrs" and st_value > 0:
+            if name == start_sym and st_value > 0:
                 start_addr = st_value
-            elif name == "__stop___sancov_cntrs" and st_value > 0:
+            elif name == stop_sym and st_value > 0:
                 stop_addr = st_value
         if start_addr is not None and stop_addr is not None:
             return (start_addr, stop_addr)
     except Exception as e:
         log.debug("ELF parse failed: %s", e)
     return None
+
+
+def parse_sancov_offsets(target: str) -> tuple[int, int] | None:
+    """Parse ELF to find __start/__stop___sancov_cntrs virtual addresses.
+
+    This is the *8-bit counters* section (-fsanitize-coverage=
+    inline-8bit-counters), one byte per instrumented block, which is what
+    `shim_factory` sizes its direct-mode bitmap from. Targets in this tree
+    are built with trace-pc-guard instead — see parse_sancov_guard_count().
+
+    Args:
+        target: Path to ELF binary (shared library or executable).
+
+    Returns:
+        Tuple of (start_addr, stop_addr) if found, None otherwise.
+    """
+    return _sancov_section_bounds(target, "cntrs")
+
+
+def parse_sancov_guard_count(target: str) -> int | None:
+    """Exact instrumented block count from the `__sancov_guards` section.
+
+    `-fsanitize-coverage=trace-pc-guard` emits one uint32 guard per basic
+    block into `__sancov_guards`, so the block count is the section length
+    over 4. This is the section every target in this tree actually carries;
+    `parse_sancov_offsets` reads `__sancov_cntrs`, which trace-pc-guard
+    builds do not emit at all.
+
+    Args:
+        target: Path to ELF binary (shared library or executable).
+
+    Returns:
+        Block count, or None when the binary is not trace-pc-guard
+        instrumented (or the section is empty).
+    """
+    bounds = _sancov_section_bounds(target, "guards")
+    if bounds is None:
+        return None
+    start, stop = bounds
+    if stop <= start:
+        return None
+    return (stop - start) // 4
 
 
 def find_load_segment(elf_data: bytes, vaddr: int) -> tuple[int, int, int] | None:
@@ -1592,12 +1642,22 @@ def estimate_map_size(target: str, profile: object | None = None) -> int:
             ctx_inflation_factor(ctx_bits),
         )
 
-    # 1. sancov guard count — exact block count for instrumented binaries
+    # 1. sancov guard count — exact block count for instrumented binaries.
+    #    trace-pc-guard (__sancov_guards) first: it is what build_targets.sh
+    #    emits. inline-8bit-counters (__sancov_cntrs) is checked after, for
+    #    externally built targets.
+    guards = parse_sancov_guard_count(target)
+    if guards:
+        return _size_from_blocks(guards, ctx_bits)
+
     offsets = parse_sancov_offsets(target)
     if offsets:
         start, stop = offsets
         if stop > start:
-            guard_count = (stop - start) // 4  # guards are uint32_t
+            # inline-8bit-counters is one *byte* per block. Dividing by 4
+            # here (as if these were uint32 guards) under-sized the map 4x
+            # on any target that did carry this section.
+            guard_count = stop - start
             if guard_count > 0:
                 return _size_from_blocks(guard_count, ctx_bits)
 
