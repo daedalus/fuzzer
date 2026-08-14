@@ -1300,10 +1300,19 @@ static void __afl_start_forkserver(void) {
     char hello[4] = {0, 0, 0, 0};
 
     /* Opt-in: only enter forkserver mode when the loader explicitly asks
-     * for it.  Without this guard, any ct ypes.CDLL()-loaded .so that happens
+     * for it.  Without this guard, any ctypes.CDLL()-loaded .so that happens
      * to inherit fds 198/199 from its parent would enter the forkserver loop
-     * and hang the loader waiting for a command that never comes. */
-    if (!getenv("__AFL_FORKSRV")) return;
+     * and hang the loader waiting for a command that never comes.
+     *
+     * The value is compared against "1" rather than merely tested for
+     * presence, so that __AFL_FORKSRV=0 disables rather than enables --
+     * a bare getenv() != NULL check makes the documented "=1" spelling
+     * incidental and turns every falsy value into an opt-in.
+     *
+     * fuzz_loader.c sets this in the forkserver child only, between fork()
+     * and execl(). */
+    const char *optin = getenv("__AFL_FORKSRV");
+    if (!optin || strcmp(optin, "1") != 0) return;
 
     /* No control pipe: not being driven by the loader. */
     if (write(AFL_FORKSRV_FD + 1, hello, 4) != 4) return;
