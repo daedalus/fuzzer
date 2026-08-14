@@ -42,6 +42,9 @@ fuzzer-tool fuzz ./target -c --resume
 
 ### Coverage & Execution
 - **AFL SHM bitmap** with sparse 8-byte entry hash table — no silent bucket collisions
+- **Forkserver** (default, `--no-forkserver` to opt out): `afl_shim.c` installs an AFL-style
+  forkserver in its constructor, so the target is exec'd once and each input costs a `fork()`
+  from a fully initialised process — 2.77x end to end, 5.27x on a light target
 - **Ptrace edge coverage** + Capstone x86-64 decoder for closed-source binaries
 - **In-process direct** (`--inprocess-direct`): ctypes calls at 2k–34k eps with sigsetjmp crash survival
 - **Multi-target**: fuzz multiple binaries with shared corpus and weighted round-robin
@@ -108,7 +111,8 @@ Online running statistics (Welford/Pébay) for mean, variance, skewness, excess 
 
 | Mode | Flag | Throughput |
 |------|------|-----------|
-| SHM bitmap | `-c` (default) | 65–200 eps |
+| SHM bitmap + forkserver | `-c` (default) | 0.5k–1.4k eps |
+| SHM bitmap, spawn per exec | `-c --no-forkserver` | 65–500 eps |
 | In-process subprocess | `--inprocess` | 65–120 eps |
 | In-process direct | `--inprocess-direct` | 2k–34k eps |
 | Ptrace basic | `-c --no-shm` | ~20 eps |

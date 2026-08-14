@@ -3,7 +3,7 @@
 > **Status note**: This roadmap tracks aspirational and in-progress work. Items without [x] are still pending.
 
 ## Coverage & Instrumentation
-- [ ] **Forkserver on default execution path** — `ForkserverRunner` exists but is commented out in the default subprocess path; every run still pays `posix_spawn` + full ELF load. Re-enable for standalone executables to recover the 2–10× throughput gap.
+- [x] **Forkserver on default execution path** (IMPLEMENTED 2026-08-14) — the win did NOT come from re-enabling `ForkserverRunner`: `fuzz_loader.c` did fork+**exec** per input, so uncommenting it measured 0.99× on an ASAN target. `afl_shim.c` now installs a real AFL-style forkserver in its constructor (`__afl_start_forkserver()`, fds 198/199); the loader drives it and falls back to fork+exec for targets built against an older shim. 5.27× on `test_target`, 1.38× on an ASAN target with heavy static init, 2.77× end to end. Opt out with `--no-forkserver`. Targets must be rebuilt to benefit. See `docs/learnings/2026-08-14-forkserver-that-execs.md`.
 - [ ] **Bounded probe window for `__afl_map_edge`** — linear-probe cost is O(map_size) on saturated tables. Bound to 8–16 slots and count drops via the SHM header so the trade is observable.
 - [ ] **Hit-count bucketing on the SHM path** — `count_class.py` is already implemented but only used by the ptrace fallback. Wire it into `ShmCoverage._check_new_coverage` so loop-count-guarded branches become visible.
 - [ ] **`favored` / `cull_queue` minimal-set-cover** — power schedules always run in unfavored mode because `favored` is never computed. Implement `cull_queue` over `EdgeTracker.seed_edges` and pass `favored` through the scheduler.

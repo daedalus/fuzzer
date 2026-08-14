@@ -7,7 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Forkserver on the default execution path** (`--no-forkserver` to opt out).
+  `afl_shim.c` now installs an AFL-style forkserver at the end of its
+  constructor (`__afl_start_forkserver()`, AFL's protocol on fds 198/199), so
+  the target is exec'd once and each input costs a `fork()` from a process
+  already past its ELF load, dynamic linker, libc init and ASAN init.
+  Measured: 5.27x on `test_target`, 1.38x on an ASAN target with heavy static
+  init, **2.77x end to end through the CLI** (484 -> 1341 eps). The ASAN
+  figure is the one to plan around — forking a process carrying ASAN's shadow
+  mapping is itself expensive, and every target here is built with ASAN.
+  Enabled only for the set `run_target_fast` already handled; in-process,
+  persistent, network, ptrace, cmplog, perf-counter, `file_mode`,
+  `target_args` and multi-target runs are untouched. Targets must be rebuilt
+  to benefit — an older target silently takes the fork+exec fallback.
+  Note coverage from pre-fork init is no longer re-recorded per execution, so
+  edge sets are **not comparable across `--no-forkserver`**; verified to be a
+  strict subset differing by a constant, input-independent init set.
+
 ### Fixed
+- **`fuzz_loader.c` was never a forkserver.** It did `fork()` + `execl()` per
+  input, so every execution paid the full ELF load + linker + libc + ASAN init
+  anyway. `docs/edge-coverage-analysis.md` §1 prescribed deleting its
+  bitmap-file round-trip; that was necessary but measured **0.99x** on an ASAN
+  target on its own. See `docs/learnings/2026-08-14-forkserver-that-execs.md`.
+- Forkserver coverage never reached the fuzzer: the loader read a bitmap from a
+  file while the target wrote to SHM. The child inherits `__AFL_SHM_ID` and the
+  shim's constructor attaches on its own, so the bitmap, the `_COV_BITMAP_OUT`
+  setenv and the caller-side `memmove` are all gone.
+- The forkserver parent recorded its own control flow into the coverage map
+  after the per-exec reset, and advanced `__afl_prev_loc` between forks, so the
+  same input produced different edge ids on its first executions (5, then 6,
+  then a stable 6). `__afl_area` is now detached in the parent, which suppresses
+  recording through the null check already at the top of `__afl_map_edge` — no
+  added hot-path cost, and `prev_loc` is left untouched.
+- The forkserver dropped the child's stderr. ASAN exits 1, so
+  `SanitizerReport.parse(stderr)` is the only crash signal `is_crash()` has
+  there — the path would have been silently blind to every ASAN finding.
+- A zero-length `RUN` produced no reply, blocking the caller until its join
+  timeout and then tearing down and restarting the loader.
+- An oversized `RUN` was skipped without consuming its body, leaving the payload
+  in the pipe to be parsed as the next command.
+- Forkserver timeouts reported the raw wait status (`-SIGKILL`). `-9` is in
+  `SIGNAL_CRASH_CODES`, so every slow input would have been filed as a
+  fatal-signal crash. Now `-1`.
+- `ForkserverRunner.__del__` raised `ValueError: write to closed file` through
+  the ignored-exception path on every clean exit (`stop()` runs twice).
+- The loader piped stdin only, silently moving targets that read `argv[1]` when
+  `argc == 2` (`png_read.c`, `grep_read.c`) onto their 64KB stdin path. It now
+  stages each input into a file and execs `<target> <file>` with stdin
+  redirected from it, mirroring `run_target_fast`.
+- `runner.py`'s forkserver branch never reset the edge map, so
+  `is_new_coverage_with_edges()` would have seen every execution since start
+  accumulated together.
+- `ShmCoverage.resize()` allocates a new segment and removes the old one, but
+  the loader's environment is only read at exec time — its children kept
+  attaching to the removed segment. Both resize sites now respawn the loader.
+- The loader was hardcoded to `gcc`; it now prefers `clang` (hard rule 4).
 - **cmplog/edge shim merge: a preloaded `cmplog_shim.so` could silently zero a
   target's coverage.** `cmplog_shim.c` carried a second copy of the edge
   machinery behind `weak` definitions of `__afl_map_shm` / `__afl_map_reset` /

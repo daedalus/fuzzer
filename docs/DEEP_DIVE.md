@@ -521,11 +521,60 @@ fuzzer-tool estimate <target> --corpus <dir> [--calibrate N]
 
 | Mode | Flag | Throughput | Notes |
 |------|------|-----------|-------|
-| SHM bitmap | `-c` (default) | 65–200 eps | For AFL-instrumented targets |
+| SHM bitmap + forkserver | `-c` (default) | 0.5k–1.4k eps | For AFL-instrumented targets; target exec'd once, fork per input |
+| SHM bitmap, spawn per exec | `-c --no-forkserver` | 65–500 eps | Fallback; full ELF load + linker + libc init every execution |
 | In-process | `--inprocess` | 65–120 eps | Persistent loader with crash recovery |
 | In-process direct | `--inprocess-direct` | 2k–34k eps | No crash isolation; afl_shim crash handler gives _exit(128+sig) exit codes |
 | Ptrace basic | `-c --no-shm` | ~20 eps | Function-entry breakpoints |
 | Ptrace deep | `-c --no-shm --deep-coverage` | ~18 eps | Capstone BB discovery |
+
+### Forkserver (default, `--no-forkserver` to opt out)
+
+`afl_shim.c`'s constructor ends by calling `__afl_start_forkserver()`, which speaks
+AFL's protocol on AFL's fd numbers (198/199): a 4-byte hello, then per request a
+`fork()`, the child's pid, and its wait status. `adapters/fuzz_loader.c` execs the
+target **once** with the control pipes wired up, so each input costs a fork from a
+process already past its ELF load, dynamic linker, libc init, ASAN runtime init and
+constructors — the cost a spawn-per-exec loop pays every time. `ForkserverRunner`
+(`adapters/forkserver.py`) manages the loader over its own stdin/stdout protocol.
+
+Measured against `posix_spawn`: **5.27×** on `test_target`, **1.38×** on an ASAN
+target with heavy static init, **2.77×** end to end through the CLI (484 → 1341 eps).
+The ASAN figure is the one to plan around, since every target here is built with ASAN
+(hard rule 9) and forking a process carrying ASAN's shadow mapping is itself
+expensive.
+
+Coverage does not travel over the protocol. The loader is spawned holding
+`__AFL_SHM_ID` / `AFL_MAP_SIZE`, every exec'd child inherits them, and the shim's
+constructor attaches to the fuzzer's segment on its own — the parent resets the map
+before each run and reads it after, exactly as in `direct_lite` mode. The child's
+**stderr** does travel (`RC <rc> <err_len>\n<err>`), because ASAN exits 1 and
+`SanitizerReport.parse(stderr)` is the only crash signal `is_crash()` has there.
+
+Enabled only for the set `run_target_fast` already handled. In-process, persistent,
+network, ptrace, cmplog, perf-counter, `file_mode`, `target_args` and multi-target
+runs are untouched — each either owns the child itself or needs per-execution setup a
+fixed environment cannot express. A target built against an older shim fails the
+handshake and the loader silently falls back to fork+exec, so **targets must be
+rebuilt** (`tools/build_targets.sh`) to see any of the above.
+
+Two behaviours worth knowing:
+
+- **Recording is suppressed in the server parent** by detaching `__afl_area` (restored
+  in the child). The loop is instrumented like the rest of the target, so left
+  recording it wrote its own edges into the map *after* the per-exec reset and
+  advanced `__afl_prev_loc` between forks — the same input produced 5, then 6, then a
+  stable 6 edges. Suppression goes through the `if (!__afl_area) return;` already at
+  the top of `__afl_map_edge`, so the hot path is unchanged.
+- **Pre-fork init coverage is recorded once**, not per execution. The forkserver edge
+  set is a strict subset of the spawn edge set, differing by a constant,
+  input-independent set of init edges; discrimination and return codes are unchanged.
+  Edge sets are therefore **not comparable across `--no-forkserver`**.
+
+`ShmCoverage.resize()` allocates a new segment, so both resize sites call
+`ForkserverRunner.update_shm_after_resize()`, which respawns the loader — the
+environment is only read at exec time, so its children would otherwise keep attaching
+to the removed segment.
 
 ## State Persistence
 

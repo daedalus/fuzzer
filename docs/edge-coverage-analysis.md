@@ -6,11 +6,17 @@ what gets more edges per wall-clock second?
 **Scope:** open items only. Fixed findings have been removed — see the summary table
 below for what they were and which commit closed each.
 
-**Caveat up front:** no clang in this container, so no sancov target was ever built or
-fuzzed. Everything here is read from source, plus simulation and microbenchmarks run in
-isolation. **No coverage delta has been measured, for the open items or the closed
-ones.** The probe-cost table in §2 is simulated; the memset table is measured but on
-one machine. A/B with `tools/bench_paired.py` before trusting any of it.
+**Caveat up front:** this document was originally written without clang in the
+container, so no sancov target was ever built or fuzzed — everything was read from
+source, plus simulation and microbenchmarks run in isolation. **No coverage delta has
+been measured, for the open items or the closed ones.** The probe-cost table in §2 is
+simulated; the memset table is measured but on one machine. A/B with
+`tools/bench_paired.py` before trusting any of it.
+
+§1 is the exception and the cautionary tale: it is the one item that was measured, and
+measuring it showed the prescribed fix was worth 0.99x. Throughput numbers there are
+real, but come from `test_target` and a synthetic ASAN target in a sandbox, not from a
+vendored target.
 
 Ordered by expected impact.
 
@@ -31,6 +37,7 @@ reasoning lives in the commit messages, which is where it stays useful.
 | `fix(scheduler): wire favored into FAST/COE and add cull_queue/top_rated` | `favored` was threaded through `SeedScorer` but never computed; FAST/COE ran permanently in unfavored mode and `top_rated`/`cull_queue` minimal-set-cover did not exist. Added `_cull_queue()` to `Fuzzer`, periodic favored recomputation, and passed `favored` at the score call site. |
 | `fix(coverage): make hit counts part of the novelty decision on the SHM path` | `_check_new_coverage` decided interestingness by set membership only, so loop-count-guarded branches were invisible. Added disjoint bucket-bit ladders (`core/count_class.py`) keyed by edge_id in a dense virgin map on the hot SHM path; counts clamped at 255, fast path unchanged. |
 | `fix(shm): stop the no-change fast path from reporting a phantom edge loss` | The fast path returned `(False, set())` on every unchanged exec; callers caching that return value read it as "zero edges fired," corrupting the next diff into reporting the whole edge set as new. Added `ShmCoverage._last_ids`, returned by the fast path instead of an empty set. |
+| `feat(shim): add a real AFL-style forkserver` + `fix(forkserver): drive the shim forkserver, drop the bitmap round-trip` + `feat(fuzzer): enable the forkserver on the default execution path` | §1. See that section — the fix this document prescribed (delete the bitmap-file round-trip) was necessary but worth 0.99x on its own, because `fuzz_loader.c` did fork+**exec** per input and still paid the full ELF load + linker + libc + ASAN init every execution. The server had to move into the target. 2.77x end to end through the CLI. |
 | `feat(fuzzer): add SkipDet deterministic stage` + `fix(fuzzer): guard deterministic stage coverage path and meta access` + follow-up merge | First landed as `Fuzzer._run_deterministic_stage()`: a standalone blocking loop, always on, that dispatched `_op_bit_flip` once per byte (one random bit, not a true 1/1 walk) and never called `save_to_corpus` — any interesting mutant it found was discarded. Merged into `OperatorEngine.maybe_deterministic_mutation()`: a real bitflip-1/1 + byte-flip-8/8 + arithmetic + interesting-value generator, drained from inside `mutate()` so discoveries flow through the same `fuzz_one()` → `save_to_corpus` path as every other mutation. Also fixed `trace_mini` indexing (`edge_id // 8`, out-of-bounds-dropped almost every real edge_id) to fold by `edge_id % map_size` instead. Opt-out via `--no-deterministic`. |
 
 Two open items **depend** on the sizing commit (the third entry above) and are carried
@@ -38,8 +45,8 @@ forward in §2: bounding the probe window (now measurable, because drops are cou
 and making the per-exec reset O(1) (the precondition for maps larger than 262144).
 
 Tier 2 (hit-count bucketing, favored wiring) and Tier 3's two open items (deterministic
-stages, empty-edge-set fast path) are now all complete. §1 remains the largest single
-item.
+stages, empty-edge-set fast path) are now all complete, and §1 is closed. §2's
+generation-tagged reset is the largest remaining item.
 
 ---
 
@@ -47,35 +54,59 @@ item.
 
 ### 1. The forkserver is commented out on the default execution path
 
-**Status: OPEN.** Still the largest single item in this document.
+**Status: FIXED**, but *not* by the fix this section originally prescribed. Read the
+correction below before reusing any of the reasoning here.
 
-`services/fuzzer.py:1852-1860`:
+The original diagnosis was that the child inherits `__AFL_SHM_ID` and `afl_shim.c`'s
+constructor already attaches, so the bitmap never needed to travel: delete the
+bitmap-file path in `fuzz_loader.c` and the `ctypes.memmove` in `runner.py`, and the
+forkserver works. That much is true and was necessary — but it bought **nothing**.
+Measured against `posix_spawn` with only that deletion applied:
 
-```python
-# Forkserver: use C fuzz_loader for default execution path when available.
-# Currently disabled: fuzz_loader reads bitmap from file while target
-# writes to SHM — these are disconnected. Enable when fuzz_loader.c
-# Forkserver disabled for multi-target mode (requires single binary)
-# if not self._inprocess_runner and not self._persistent_runner and not self.ptrace_cov:
-#     from fuzzer_tool.adapters.forkserver import ForkserverRunner
-```
+| target | spawn | after the prescribed fix | speedup |
+|--------|-------|--------------------------|---------|
+| `test_target` | 612 exec/s | 648 exec/s | 1.06x |
+| ASAN + heavy static init | 93.8 exec/s | 92.6 exec/s | **0.99x** |
 
-So unless the user passes `--inprocess` or `--persistent`, **every single execution
-is a `posix_spawn` + full ELF load + dynamic linker + libc init + constructor run**
-(`services/runner.py:224`, `run_target_fast`). This is the classic 2–10× (often
-more, on targets with heavy static init) throughput gap versus AFL.
+**`fuzz_loader.c` was never a forkserver.** `run_executable()` did fork **+ exec**
+per input, so every execution still paid the full ELF load, dynamic linker, libc init
+and ASAN init — the exact cost this section set out to remove. The name was the only
+thing forkserver-like about it. The 2–10x figure quoted above assumes AFL's design,
+where the *target* hosts the server and children fork from a process already sitting
+past its own initialisation; nothing in this tree did that. `afl_shim.c` had no
+forkserver at all — no `__AFL_INIT`, no FORKSRV handshake. (The `__AFL_INIT()` /
+`__AFL_LOOP()` calls in `png_read.c` and `grep_read.c` come from real AFL++ builds,
+not from this shim.)
 
-The infrastructure exists: `adapters/forkserver.py`, `adapters/fuzz_loader.c`,
-`ForkserverRunner.run_one`, and the consumer at `runner.py:205-208`.
+The actual fix moves the server into the target: `__afl_start_forkserver()` in the
+shim constructor, speaking AFL's protocol on AFL's fd numbers (198/199), with
+`fuzz_loader.c` driving it and falling back to fork+exec for targets built against an
+older shim.
 
-The stated blocker is solvable and the fix removes code rather than adding it: the
-child inherits `__AFL_SHM_ID` through the environment, and `afl_shim.c`'s
-constructor already attaches to it on its own. So the forkserver child does not need
-to hand a bitmap back at all — drop the bitmap-file path in `fuzz_loader.c`, and drop
-the `ctypes.memmove(shm._ptr, bitmap, ...)` at `runner.py:207`. The parent reads SHM
-directly, exactly as it does in `direct_lite` mode.
+| target | spawn | true forkserver | speedup |
+|--------|-------|-----------------|---------|
+| `test_target` | 623 exec/s | 3281 exec/s | **5.27x** |
+| ASAN + heavy static init | 90.6 exec/s | 125 exec/s | **1.38x** |
+| full CLI, end to end | 484 eps | 1341 eps | **2.77x** |
 
-This is the highest-leverage change in the tree.
+The ASAN target gains least because forking a process carrying ASAN's shadow mapping
+is itself expensive. Worth knowing before extrapolating to the vendored targets —
+this is the one number here most likely to mislead.
+
+**Semantics change, deliberately.** Coverage recorded during pre-fork initialisation
+is no longer re-recorded per execution. Verified that the forkserver edge set is a
+strict *subset* of the spawn edge set for every input, and that the dropped
+difference is identical across all inputs — constant init edges, which carry no
+signal. Input discrimination is unchanged. This matches AFL, but it does mean edge
+sets are not comparable across `--no-forkserver`.
+
+Four defects were fixed on the way, each of which would have bitten on the first run:
+dropped child stderr (ASAN exits 1, so `SanitizerReport.parse(stderr)` is the *only*
+crash signal there is); a zero-length `RUN` that never replied and hung the caller
+until its join timeout; an oversized `RUN` that desynced the pipe; and timeouts
+reported as `-SIGKILL`, which is in `SIGNAL_CRASH_CODES` and would have filed every
+slow input as a crash. The forkserver parent also had to stop recording its own
+control flow — see the learnings note.
 
 ### 2. `__afl_map_edge` is O(map_size) per edge hit
 
@@ -223,10 +254,14 @@ plus `adapters/track_parser.py` (referenced only in a docstring, never imported)
 
 ## Suggested order
 
-1. **§1 — forkserver.** Largest throughput win, largest diff.
-2. **§2 — generation-tagged reset.** Unblocks map sizes above 262144 by making the
-   per-exec clear O(1). Do this before concluding anything about §2's probe cost, and
-   note it turns the table-copy behaviour in `resize()` from cosmetic to load-bearing.
+1. ~~**§1 — forkserver.**~~ Done — see §1, and note that what closed it is not what
+   this document predicted would close it.
+2. **§2 — generation-tagged reset.** Now the largest open item. Unblocks map sizes
+   above 262144 by making the per-exec clear O(1). Do this before concluding anything
+   about §2's probe cost, and note it turns the table-copy behaviour in `resize()`
+   from cosmetic to load-bearing. `resize()` also has a live consumer now
+   (`ForkserverRunner.update_shm_after_resize()`), which respawns the loader so its
+   children inherit the new segment id.
 3. **§2 — bounded probe window.** Cheap to evaluate now that drops are counted.
 
 **The already-fixed commits still need an A/B before they become defaults.** Nothing
