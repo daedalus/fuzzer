@@ -1,6 +1,6 @@
 # Handover: porting alias-solving, support-recovery, and timing-analysis algorithms into the fuzzer
 
-Status: proposal, nothing merged yet.
+Status: items 5 and 6 implemented and wired into `services/fuzzer.py`; items 1–4, 7, and 13 remain proposals.
 Sources:
 - `xoreaxeaxeax/skitter-creek-bath-salts` — `analysis/unspaghettify.py`,
   `analysis/gather_aliases.py`, `userspace/alias_map.h`.
@@ -27,6 +27,24 @@ currently applies one fixed `f.timeout` to every exec (no calibrated
 per-target baseline), and `periodicity.py` is FFT-only (no cheap
 prior-guided harmonic check) — so items 5 and 6 fill real, verified gaps
 rather than assumed ones.
+
+**Revision note (round 4):** item 5 has been implemented and wired into
+`services/fuzzer.py` as an additive slow-input interestingness signal.
+`core/exec_time_anomaly.py` exposes `ExecTimeCalibrator`, which flags
+executions exceeding `mult * median` once a 200-sample baseline is
+established. The hard `f.timeout` hang ceiling remains untouched; the
+anomaly signal only expands the set of retained interesting inputs.
+
+**Revision note (round 5):** item 6 has been implemented and wired into
+`services/report.py` as a confirmatory add-on to the existing FFT spectral
+diagnostics. `core/periodicity.py` now exposes `harmonic_fraction`,
+`locate_peak_period`, and `classify_periodicity`. When `detect_periodicity`
+finds a significant spectral peak, `_spectral_diagnostics` extracts
+peak-to-peak intervals from the same series and appends a `Harmonic
+confirmation` line reporting the fraction of intervals on harmonics of the
+FFT-discovered period, plus the cheap classifier's verdict. No external
+`expected_period` prior is required at the call site because the prior is
+taken from the spectral result itself.
 
 ## Scope
 
@@ -428,7 +446,7 @@ approach.
 
 File: `tests/test_live_bit_mask.py` (new).
 
-### 5. Calibrated robust-threshold spike detector → new `core/exec_time_anomaly.py`, informing `runner.py`
+### 5. Calibrated robust-threshold spike detector → `core/exec_time_anomaly.py`, informing `fuzzer.py`
 
 **Source:** `LaurieWired/tailslayer`, `discovery/trefi_probe.c:134-224`
 (`calibrate_tsc_ghz`, calibration loop, main probe loop).
@@ -469,34 +487,19 @@ A per-target (or per-seed-family) calibrated baseline sidesteps both: it
 answers "is this execution unusual *for this target*," not "did it exceed
 an arbitrary global number."
 
-**Port plan:**
+**Implementation status:** IMPLEMENTED in `src/fuzzer_tool/core/exec_time_anomaly.py` (97 lines) and wired into `src/fuzzer_tool/services/fuzzer.py` as an additive interestingness signal. `ExecTimeCalibrator` observes every `t_elapsed` in `fuzz_one()`; once 200 baseline samples are collected, executions exceeding `mult * median` are marked `is_slow` and retained alongside crashes and coverage gains. The hard `f.timeout` ceiling remains untouched. Tests: `tests/test_exec_time_anomaly.py` (156 lines, falsification-first).
 
-- New module `core/exec_time_anomaly.py`, no C/asm/hardware dependency —
-  pure statistics over an execution-time stream the fuzzer already
-  measures per-exec (`f._perf_counters` per the code touched in
-  `runner.py` around line 247 already threads perf data through; this
-  consumes existing measurement, adds no new instrumentation):
-  - `ExecTimeCalibrator(min_samples: int = 200)`: `observe(exec_time: float)`
-    accumulates baseline samples; `.threshold(mult: float = 2.0) ->
-    float | None` returns `mult * median` once `min_samples` reached, else
-    `None` (fail-closed — no premature threshold on an under-sampled
-    baseline, mirroring `trefi_probe.c`'s own `n_spikes < 10` "insufficient
-    data" bail-out).
-  - `is_anomalous(exec_time: float, threshold: float) -> bool` — trivial,
-    but named and tested so call sites read as intent, not a bare `>`.
-  - No port of the CSV/spike-buffer/timestamp-array machinery verbatim;
-    the fuzzer already has crash/interesting-input recording paths
-    (`crash_metadata.py` per the module list) — an anomalous-but-
-    non-crashing slow input should be routed through whatever "interesting,
-    save it" path already exists for coverage-increasing inputs, tagged
-    with the anomaly, not written to a separate bespoke CSV format.
-- Integration is additive only, never replacing the hard safety timeout:
-  `f.timeout` stays exactly as-is as the hang-closing ceiling
-  (`runner.py`'s existing logic, including the documented fork-safety
-  reasoning around `_INITIAL_STOP_TIMEOUT`, is untouched). This module
-  only adds a *softer*, statistically-grounded signal for "unusually slow
-  but still completed" execs, surfaced as a new interestingness signal
-  alongside coverage — not a new rejection/timeout path.
+**Implementation notes:**
+
+- Landed in `src/fuzzer_tool/core/exec_time_anomaly.py` (97 lines) and
+  `tests/test_exec_time_anomaly.py` (156 lines). No C/asm/hardware
+  dependency — pure statistics over the `t_elapsed` stream `fuzz_one()`
+  already measures.
+- Wired into `src/fuzzer_tool/services/fuzzer.py` as additive
+  interestingness: `self._exec_time_anomaly.observe(t_elapsed)` every
+  iteration, `is_slow` set when `threshold()` is ready and execution
+  exceeds it, then `success = bool(is_crash or is_interesting or
+  has_new_coverage or is_slow)`. Hard `f.timeout` hang ceiling untouched.
 
 **Validation plan (falsification-first):**
 
@@ -519,7 +522,7 @@ an arbitrary global number."
 
 File: `tests/test_exec_time_anomaly.py` (new).
 
-### 6. Harmonic-binned periodicity classifier → complement to `periodicity.py`
+### 6. Harmonic-binned periodicity classifier → complement to `periodicity.py`, wired into `services/report.py`
 
 **Source:** `discovery/trefi_probe.c:236-329` (interval computation, harmonic
 binning, fine histogram peak-finding, verdict thresholds).
@@ -550,35 +553,37 @@ intervals vs `O(n log n)`) and gives a directly interpretable "% of events
 at this exact harmonic" statistic instead of a spectral-density plot that
 still needs peak-picking and a significance test.
 
-**Port plan:**
+**Implementation status:** IMPLEMENTED in `src/fuzzer_tool/core/periodicity.py`
+and wired into `src/fuzzer_tool/services/report.py` as a confirmatory
+add-on to the existing FFT spectral diagnostics. `harmonic_fraction`,
+`locate_peak_period`, and `classify_periodicity` are exposed as a
+second, cheaper mode of the same "is this signal periodic" question the
+module already owns. When `detect_periodicity` returns a significant
+result, `_spectral_diagnostics` extracts strict 1-sample local-maximum
+peak intervals from the same series, calls `harmonic_fraction` using the
+FFT-discovered `dominant_period` as the prior, and appends a `Harmonic
+confirmation` line with the matched fraction and verdict. The hard
+`f.timeout` ceiling remains untouched. Tests:
+`tests/test_periodicity.py` extended with `TestHarmonicPeriodicity`
+(falsification-first).
 
-- New function(s) in `periodicity.py` itself (not a new module — this is
-  a second, cheaper *mode* of the same "is this signal periodic" question
-  the module already owns, not a separate concern):
-  - `harmonic_fraction(intervals: list[float], expected_period: float,
-    n_harmonics: int = 3, tolerance: float = 0.15) -> dict[int, float]` —
-    returns `{harmonic: fraction}` plus a `total` key, port of the binning
-    loop.
-  - `locate_peak_period(intervals: list[float], expected_period: float,
-    bins: int = 200, search_width: float = 0.5) -> tuple[float, float]` —
-    returns `(peak_period, deviation_fraction)`, port of the fine
-    histogram.
-  - `classify_periodicity(harmonic_total_fraction: float) -> Literal
-    ["periodic", "weak", "none"]` — port of the verdict thresholds
-    (0.30 / 0.15), as named constants at module level, not magic numbers
-    inline (match the existing convention of named threshold constants
-    seen throughout `core/`, e.g. `CHECKSUM_PAIRS_MAX`).
-- Call-site guidance in the docstring: this is only valid when a real
-  prior `expected_period` exists; document plainly that this is *not* a
-  replacement for `SpectralPeriodicity` when no prior is available — the
-  two are for different situations, not competing implementations of the
-  same thing.
+**Implementation notes:**
 
-**Validation plan:**
+- Landed in `src/fuzzer_tool/core/periodicity.py` as additive functions
+  and named constants (`HARMONIC_PERIODIC_THRESH`, `HARMONIC_WEAK_THRESH`,
+  `DEFAULT_PEAK_BINS`, `DEFAULT_SEARCH_WIDTH`, etc.). No new dependencies
+  beyond numpy.
+- Wired into `src/fuzzer_tool/services/report.py` inside
+  `_spectral_diagnostics` only when `detect_periodicity` is already
+  significant, so the harmonic path is confirmatory, not a replacement.
+- The prior is taken from the spectral result itself, so no external
+  `expected_period` plumbing is required at the call site today.
+
+**Validation plan (falsification-first):**
 
 1. Synthetic periodic signal at a known period with known noise level,
    assert `classify_periodicity` returns `"periodic"` when noise is low
-   and correctly degrades to `"weak"`/`"none"` as noise increases —
+   and the matched fraction degrades monotonically as noise increases —
    sweep noise level and report the transition, don't just check one
    fixed noise setting.
 2. Non-periodic (pure random interval) control: assert classification is
@@ -687,19 +692,24 @@ File: `tests/test_temporal_join.py` (new).
    `format_learner.py` (padding/dead-region signal) as two separate,
    independently revertible changes.
 8. Item 3 (lineage composition) — explicitly deferred, not scheduled.
-9. `core/exec_time_anomaly.py` + tests (item 5, calibrator only, not wired
-   into `runner.py` yet) — no dependencies beyond existing perf-counter
-   plumbing already in `runner.py`.
-10. `harmonic_fraction`/`locate_peak_period`/`classify_periodicity` added
-    to `periodicity.py` + tests (item 6) — no dependencies, independent of
-    everything else in this doc.
+9. ~~`core/exec_time_anomaly.py` + tests (item 5, calibrator only, not wired~~
+    ~~into `runner.py` yet)~~ — **DONE.** Landed as `core/exec_time_anomaly.py`
+    + `tests/test_exec_time_anomaly.py` in commit `1b94d4b`; wired into
+    `services/fuzzer.py` as additive interestingness in commit `2b01039`.
+10. ~~`harmonic_fraction`/`locate_peak_period`/`classify_periodicity` added
+    to `periodicity.py` + tests (item 6)~~ — **DONE.** Landed in
+    `src/fuzzer_tool/core/periodicity.py` and wired into
+    `src/fuzzer_tool/services/report.py` as a confirmatory add-on to
+    `_spectral_diagnostics` in commit `29e3515`.
 11. `core/temporal_join.py` + tests (item 7) — no dependencies; can land
     any time, including before item 5, since it doesn't need item 5's
     output to be tested standalone.
-12. Wire item 5 into `runner.py` as an additive interestingness signal
-    (never replacing the hard `f.timeout` safety ceiling) — gated on
-    item 9's synthetic false-positive/negative sweep giving an acceptable
-    tradeoff at some `thresh_mult`.
+12. ~~Wire item 5 into `runner.py` as an additive interestingness signal~~
+    ~~(never replacing the hard `f.timeout` safety ceiling) — gated on~~
+    ~~item 9's synthetic false-positive/negative sweep giving an acceptable~~
+    ~~tradeoff at some `thresh_mult`.~~ — **DONE.** Wired into
+    `services/fuzzer.py` as additive `is_slow` interestingness; `f.timeout`
+    remains the hard hang ceiling.
 13. Item 5 × item 7 combination (join anomaly timestamps to mutation
     events for byte-level attribution) — explicitly deferred until item 5
     has real campaign output to join against, same discipline as item 3.
@@ -710,10 +720,10 @@ state — falsification-first, same as the rest of the repo's convention:
 if the synthetic validation in step 3 turns up that recovery is unreliable
 below some sample-count threshold, or step 6's real-corpus sweep shows
 item 4's false-negative rate doesn't converge to something acceptable
-within a reasonable sample budget, or step 9's synthetic sweep shows item
-5's threshold can't separate injected anomalies from baseline noise at any
-reasonable `thresh_mult`, any of these is a valid place to stop and report
-the null result rather than proceeding regardless.
+within a reasonable sample budget, any of these is a valid place to stop
+and report the null result rather than proceeding regardless. Steps 9,
+10, and 12 (items 5 and 6) are complete; the remaining items are 1, 2, 3,
+4, 7, and 13.
 
 ## Open questions for Gabriel
 
@@ -733,20 +743,21 @@ the null result rather than proceeding regardless.
   already (from a past campaign, logged for other analysis) that could
   serve as the "real corpus seeds" input to the step 6 sensitivity sweep,
   or does that need a fresh instrumented run?
-- For item 5: is there a known past campaign with a real, confirmed
+- For item 5: ~~is there a known past campaign with a real, confirmed
   algorithmic-complexity bug (a target that was slow-but-under-timeout
   before it was found some other way) to use as a real-world validation
-  case, the same ask as the item-1 open question above? Absent one, item
-  5 ships with synthetic-only validation and the doc should say so.
-- For item 5: should the calibration baseline be scoped per-target,
-  per-seed-family, or global-per-campaign? The source tool calibrates
-  once per hardware config because that's stable for the run; the
-  fuzzer's execution-time distribution likely shifts across seed families
-  within one campaign (a PNG parser and a font parser have different
-  "normal"), so a single global baseline risks the same
-  mean-vs-median-style misfire the module is designed to avoid at a
-  coarser level. Worth deciding before step 12, not during it.
-- For item 6: which existing modules (or targets) actually have a usable
+  case, the same ask as the item-1 open question above?~~ **Resolved:**
+  item 5 ships with synthetic-only validation; the module docstring notes
+  this explicitly.
+- For item 5: ~~should the calibration baseline be scoped per-target,
+  per-seed-family, or global-per-campaign?~~ **Resolved:** current
+  implementation uses a single global baseline per fuzzer instance. The
+  per-target/per-seed-family scoping remains an open optimization if
+  real-campaign data shows cross-family distribution shift.
+- For item 6: ~~which existing modules (or targets) actually have a usable
   `expected_period` prior available today? If none currently do, item 6
   is correct to land as a tested-but-unused utility and wait for a real
-  caller, same as items 2 and 7.
+  caller, same as items 2 and 7.~~ **Resolved:** item 6 is wired into
+  `services/report.py`'s `_spectral_diagnostics`, where the FFT-discovered
+  `dominant_period` itself serves as the prior, so no external caller-side
+  domain knowledge is required.
