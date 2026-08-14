@@ -1,6 +1,6 @@
 # daedalus/fuzzer — edge coverage analysis
 
-Static analysis of `src/fuzzer_tool` (116k LOC, 341 py files) against the question:
+Static analysis of `src/fuzzer_tool` (120k LOC, 351 py files) against the question:
 what gets more edges per wall-clock second?
 
 **Scope:** open items only. Fixed findings have been removed — see the summary table
@@ -30,13 +30,16 @@ reasoning lives in the commit messages, which is where it stays useful.
 | `fix(coverage): prevent valid edge_id 0 from being treated as an empty slot` | `edge_id == 0` was indistinguishable from an empty slot in the open-addressing table, so valid edges that XORed to zero were silently dropped and the slot reclaimed by later collisions. Forced to 1 with `edge_id |= 1`. |
 | `fix(scheduler): wire favored into FAST/COE and add cull_queue/top_rated` | `favored` was threaded through `SeedScorer` but never computed; FAST/COE ran permanently in unfavored mode and `top_rated`/`cull_queue` minimal-set-cover did not exist. Added `_cull_queue()` to `Fuzzer`, periodic favored recomputation, and passed `favored` at the score call site. |
 | `fix(coverage): make hit counts part of the novelty decision on the SHM path` | `_check_new_coverage` decided interestingness by set membership only, so loop-count-guarded branches were invisible. Added disjoint bucket-bit ladders (`core/count_class.py`) keyed by edge_id in a dense virgin map on the hot SHM path; counts clamped at 255, fast path unchanged. |
+| `fix(shm): stop the no-change fast path from reporting a phantom edge loss` | The fast path returned `(False, set())` on every unchanged exec; callers caching that return value read it as "zero edges fired," corrupting the next diff into reporting the whole edge set as new. Added `ShmCoverage._last_ids`, returned by the fast path instead of an empty set. |
+| `feat(fuzzer): add SkipDet deterministic stage` + `fix(fuzzer): guard deterministic stage coverage path and meta access` + follow-up merge | First landed as `Fuzzer._run_deterministic_stage()`: a standalone blocking loop, always on, that dispatched `_op_bit_flip` once per byte (one random bit, not a true 1/1 walk) and never called `save_to_corpus` — any interesting mutant it found was discarded. Merged into `OperatorEngine.maybe_deterministic_mutation()`: a real bitflip-1/1 + byte-flip-8/8 + arithmetic + interesting-value generator, drained from inside `mutate()` so discoveries flow through the same `fuzz_one()` → `save_to_corpus` path as every other mutation. Also fixed `trace_mini` indexing (`edge_id // 8`, out-of-bounds-dropped almost every real edge_id) to fold by `edge_id % map_size` instead. Opt-out via `--no-deterministic`. |
 
 Two open items **depend** on the sizing commit (the third entry above) and are carried
 forward in §2: bounding the probe window (now measurable, because drops are counted)
 and making the per-exec reset O(1) (the precondition for maps larger than 262144).
 
-Tier 2 (hit-count bucketing, favored wiring) is now complete. Tier 3 (deterministic
-stages, empty-edge-set fast path) is untouched. §1 remains the largest single item.
+Tier 2 (hit-count bucketing, favored wiring) and Tier 3's two open items (deterministic
+stages, empty-edge-set fast path) are now all complete. §1 remains the largest single
+item.
 
 ---
 
@@ -46,19 +49,20 @@ stages, empty-edge-set fast path) is untouched. §1 remains the largest single i
 
 **Status: OPEN.** Still the largest single item in this document.
 
-`services/fuzzer.py:1777-1785`:
+`services/fuzzer.py:1852-1860`:
 
 ```python
 # Forkserver: use C fuzz_loader for default execution path when available.
 # Currently disabled: fuzz_loader reads bitmap from file while target
-# writes to SHM — these are disconnected.
+# writes to SHM — these are disconnected. Enable when fuzz_loader.c
+# Forkserver disabled for multi-target mode (requires single binary)
 # if not self._inprocess_runner and not self._persistent_runner and not self.ptrace_cov:
 #     from fuzzer_tool.adapters.forkserver import ForkserverRunner
 ```
 
 So unless the user passes `--inprocess` or `--persistent`, **every single execution
 is a `posix_spawn` + full ELF load + dynamic linker + libc init + constructor run**
-(`services/runner.py:210-250`, `run_target_fast`). This is the classic 2–10× (often
+(`services/runner.py:224`, `run_target_fast`). This is the classic 2–10× (often
 more, on targets with heavy static init) throughput gap versus AFL.
 
 The infrastructure exists: `adapters/forkserver.py`, `adapters/fuzz_loader.c`,
@@ -143,37 +147,33 @@ site passes `favored=(seed_key in self._favored)` into `SeedScorer.score()`.
 
 ### 6. `core/skipdet.py` is entirely dead, because there are no deterministic stages
 
-**Status: OPEN.**
+**Status: FIXED.** `OperatorEngine.maybe_deterministic_mutation()` (`operators.py`)
+queues a per-seed bitflip 1/1 + byte flip 8/8 + arithmetic + interesting-value schedule
+(`_deterministic_mutation_stream`), gated by `SkipDetector.should_det_fuzz` via a
+synthesized positional bitmap (`core.skipdet.trace_mini_from_edges`, folding
+`edge_id % map_size` since this fuzzer's edge_ids are sparse hashes with no positional
+bitmap to hand `should_det_fuzz` directly). Drains one mutation per `mutate()` call
+rather than a parallel execution loop, so a deterministic-stage discovery goes through
+`fuzz_one()`'s normal `save_to_corpus` path like any other mutation.
 
-`SkipDetector`, `build_skip_eff_map`, `should_skip_deterministic`, and the block-flip
-inference stage — all unreferenced outside the file itself. The only surviving trace
-is `_op_skipdet_probe`, a single one-shot havoc operator.
-
-It is dead for a structural reason. `OperatorEngine.mutate()`
-(`services/operators.py:2608`) is one-shot: draw `n_mutations` operators from a bandit,
-apply each once at a bandit-chosen position. All the AFL deterministic operators exist
-(`_op_bit_flip`, `_op_byte_flip`, `_op_arithmetic`, `_op_interesting_8/16/32`,
-`_op_auto_extras`) but **nothing ever walks them systematically across a seed**.
-
-That is the biggest missing algorithm, not just missing wiring. AFL's bitflip 1/1 pass
-is where the effector map comes from, and the effector map is what makes the arith and
-interesting-value passes cheap enough to be worth running. Without stages you get
-neither. A per-seed deterministic pass, gated by `SkipDetector.should_skip_deterministic`
-so it only runs on favored, not-yet-determinized seeds, plugs both holes at once — and
-it composes with §5, since SkipDet's gate is defined in terms of `seed_favored`.
+A first version of this landed directly in `Fuzzer._run_deterministic_stage()`: always
+on, no opt-out, dispatching `_op_bit_flip` once per byte instead of a true 1/1 walk
+(that handler picks one random bit, so it covered ⅛ of what a real bitflip pass
+covers), indexing its trace bitmap by `edge_id // 8` and dropping anything past the
+first `map_size` bytes (nearly every real edge_id, since they're hashes, not small
+positional integers) — and running its own blocking exec loop that updated
+edge-tracking bookkeeping but never called `save_to_corpus`, so any mutant it found
+interesting was immediately discarded. All four fixed in the merge above. On by
+default, matching the shipped behavior; `--no-deterministic` opts out, since a full
+pass still costs `8*len(seed)` execs per favored seed and hasn't been benchmarked
+against a real target.
 
 ### 8. The fast path returns an empty edge set that callers treat as real
 
-**Status: OPEN.**
-
-`_check_new_coverage` early-returns `(False, set())` when `edge_count` and `path_hash`
-are unchanged. `fuzzer.py:2626` assigns that to `self._current_edges_cache`, and the
-format learner's `elif` branch (`fuzzer.py:2692`) then sets
-`self._prev_edge_set = set()`. The next `new_edges = current - prev` diff therefore
-reports the entire edge set as newly discovered.
-
-Fix: return the previous edge set, or use `None` for "not scanned" and have callers
-distinguish it from "scanned, empty."
+**Status: FIXED.** `ShmCoverage` now tracks `_last_ids`, the edge set from the last
+slow-path scan, and the fast path returns that instead of a fresh `set()` when nothing
+changed. Callers diffing consecutive returns (`Fuzzer._prev_edge_set`,
+`_current_edges_cache`) now see "same as before" instead of a phantom total edge loss.
 
 ---
 
@@ -193,11 +193,11 @@ used only as a cheap change detector in the fast path. Honggfuzz-style unique-pa
 counting is one option; the instability detector above is the better use.
 
 **cmplog defaults off.** Given the i2s/Redqueen work already in the tree and
-`_detect_cmplog()` (`fuzzer.py:274`) which reliably identifies instrumented targets,
+`_detect_cmplog()` (`fuzzer.py:278`) which reliably identifies instrumented targets,
 `--cmplog` should default on whenever detection succeeds. Magic-value and checksum
 branches are where the edge count plateaus on real formats.
 
-**The havoc short-circuit.** `mutate()` at `services/operators.py:2712`:
+**The havoc short-circuit.** `mutate()` at `services/operators.py:2932`:
 
 ```python
 if op == "havoc":
@@ -211,11 +211,13 @@ multiplier is a no-op whenever havoc is drawn early** — and havoc is the most-
 operator. Either make havoc terminal by design and scale its internal stack depth by
 `perf_score` instead, or don't return early.
 
-**Dead classes — wire or delete.** Never instantiated anywhere in `src/`:
-`CoverageHomogeneityDetector` (`core/critical_slowing.py` — a stall predictor, directly
-on topic), `KalmanFilter`, `CondStmt`, `MutatorBase`, `ConstraintSet` (wfc),
-`SanitizerReport` (imported at `fuzzer.py:35`, never constructed), plus
-`adapters/track_parser.py`, `schedulers/epsilon_greedy.py`, `schedulers/monte_carlo.py`.
+**Dead classes — wire or delete.** `MonteCarloScheduler` and `EpsilonGreedyScheduler`
+are now instantiated (`fuzzer.py:1136`, `fuzzer.py:1185`) and `SanitizerReport` is now
+built via `.parse()` on ASAN/UBSAN replay (`fuzzer.py:3399`, `fuzzer.py:3414`) — all
+three drop off this list since the last pass. Still never instantiated anywhere in
+`src/`: `CoverageHomogeneityDetector` (`core/critical_slowing.py` — a stall predictor,
+directly on topic), `KalmanFilter`, `CondStmt`, `MutatorBase`, `ConstraintSet` (wfc),
+plus `adapters/track_parser.py` (referenced only in a docstring, never imported).
 
 ---
 
@@ -226,15 +228,15 @@ on topic), `KalmanFilter`, `CondStmt`, `MutatorBase`, `ConstraintSet` (wfc),
    per-exec clear O(1). Do this before concluding anything about §2's probe cost, and
    note it turns the table-copy behaviour in `resize()` from cosmetic to load-bearing.
 3. **§2 — bounded probe window.** Cheap to evaluate now that drops are counted.
-4. **§6 — deterministic stages + SkipDet.** Real design work.
-5. **§8 — the empty-edge-set fast path.** Small, affects only the format learner.
 
 **The already-fixed commits still need an A/B before they become defaults.** Nothing
 here has been measured against a real target. In particular the sizing commit enlarges
 maps, which costs more per-execution memset (§2), so its net effect on edges/second
-could be negative on a target that was not saturating.
+could be negative on a target that was not saturating. This now includes §6's
+deterministic stage: it's on by default (`--no-deterministic` to opt out) and hasn't
+been benchmarked against a real target either.
 
-Items 1, 2, 3, 4 and 5 are independently testable with `tools/bench_paired.py` against
+Items 1, 2 and 3 are independently testable with `tools/bench_paired.py` against
 a fixed seed and a fixed exec budget.
 
 ## Loose thread
