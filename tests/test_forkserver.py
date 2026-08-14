@@ -30,13 +30,13 @@ class TestForkserverRunner:
         r = ForkserverRunner("/fake/target")
         assert r._ready is False
         assert r._proc is None
-        assert r._last_bitmap is None
+        assert r._last_stderr == ""
 
     def test_run_one_not_ready(self):
         r = ForkserverRunner("/fake/target")
-        rc, bitmap = r.run_one(b"test")
+        rc, stderr = r.run_one(b"test")
         assert rc == -2
-        assert bitmap is None
+        assert stderr == ""
 
     def test_stop_without_start(self):
         r = ForkserverRunner("/fake/target")
@@ -52,23 +52,23 @@ class TestForkserverRunner:
         r = ForkserverRunner("/fake/target")
         assert r.start() is False
 
-    def test_bitmap_out_cleanup_on_stop(self, tmp_path):
+    def test_input_file_cleanup_on_stop(self, tmp_path):
         r = ForkserverRunner("/fake/target")
-        fd, bmp = tempfile.mkstemp(suffix=".bmp")
+        fd, cur = tempfile.mkstemp(suffix=".cur")
         os.close(fd)
-        r._bitmap_out = bmp
+        r._input_file = cur
         r._proc = None  # never started
         r.stop()
-        # stop() only cleans up _bitmap_out when _proc was set (process started)
-        # Since _proc is None, bitmap_out is not cleaned — this is expected
+        # stop() only cleans up _input_file when _proc was set (process started)
+        # Since _proc is None, the input file is not cleaned — this is expected
         # Test that stop() at least doesn't crash
         assert r._ready is False
 
-    def test_bitmap_out_cleanup_with_proc(self, tmp_path):
+    def test_input_file_cleanup_with_proc(self, tmp_path):
         r = ForkserverRunner("/fake/target")
-        fd, bmp = tempfile.mkstemp(suffix=".bmp")
+        fd, cur = tempfile.mkstemp(suffix=".cur")
         os.close(fd)
-        r._bitmap_out = bmp
+        r._input_file = cur
 
         class FakeStdin:
             def write(self, data):
@@ -88,14 +88,14 @@ class TestForkserverRunner:
 
         r._proc = FakeProc()
         r.stop()
-        assert r._bitmap_out is None
-        assert not os.path.exists(bmp)
+        assert r._input_file is None
+        assert not os.path.exists(cur)
 
     def test_restart_flag_prevents_recursive_restart(self):
         r = ForkserverRunner("/fake/target")
         r._restarting = True
         r._ready = False
         r._proc = None
-        rc, bitmap = r.run_one(b"test")
+        rc, stderr = r.run_one(b"test")
         assert rc == -2
-        assert bitmap is None
+        assert stderr == ""
