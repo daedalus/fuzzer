@@ -561,6 +561,7 @@ class Fuzzer:
         # flags: this signature is positional, so inserting a parameter
         # mid-list silently shifts every caller argument after it.
         region_profile=False,
+        deterministic=True,
     ):
         self.target = target
         self.debug = debug
@@ -1117,8 +1118,16 @@ class Fuzzer:
         # Seed aggregate cache: compute from initial seed_meta
         self._refresh_agg_cache()
 
-        # SkipDet: initialize the skip detector for deterministic stage gating
-        self._skip_detector = SkipDetector(map_size=getattr(self._edge_tracker, "map_size", 65536))
+        # SkipDet: initialize the skip detector for deterministic stage
+        # gating. Default on to match already-shipped behavior; opt out
+        # with --no-deterministic if the exec-budget cost (bitflip 1/1
+        # alone is 8*len(seed) execs per favored seed) isn't wanted.
+        self._skip_detector = (
+            SkipDetector(map_size=getattr(self._edge_tracker, "map_size", 65536))
+            if deterministic
+            else None
+        )
+        self._det_execs: int = 0
 
         self.mc_bandit = mc_bandit
         self.mc_cem = mc_cem
@@ -3985,159 +3994,6 @@ class Fuzzer:
 
         threading.Thread(target=_beat, daemon=True, name="stack-heartbeat").start()
 
-    def _run_deterministic_stage(self, seed: bytes) -> bool:
-        """Run deterministic mutations on a seed, gated by SkipDet.
-
-        Walks deterministic operators (bit_flip, byte_flip, arithmetic, interesting_8/16/32)
-        systematically across the seed. Uses SkipDetector to decide whether the
-        seed deserves deterministic fuzzing — only favored, not-yet-determinized
-        seeds proceed. After completion, marks the seed as passed_det to skip
-        future deterministic passes.
-
-        Returns True if deterministic stage was run, False if skipped.
-        """
-        if self._skip_detector is None:
-            return False
-
-        meta = self.seed_meta.get(seed, {})
-        seed_passed_det = meta.get("seed_passed_det", False)
-        seed_key = self._seed_key(seed)
-        seed_favored = seed_key in self._favored
-
-        # Get the seed's coverage mini-bitmap for SkipDet analysis
-        trace_mini = self._get_seed_trace_mini(seed_key)
-
-        # Check if this seed should be deterministically fuzzed
-        if not self._skip_detector.should_det_fuzz(
-            seed_trace_mini=trace_mini,
-            seed_favored=seed_favored,
-            seed_passed_det=seed_passed_det,
-            current_time_ms=time.time() * 1000.0,
-        ):
-            return False
-
-        # Seed qualifies for deterministic fuzzing
-        # Apply the deterministic operators systematically
-        det_ops = REGISTRY.available(self, seed)
-        det_op_names = [
-            "bit_flip",
-            "byte_flip",
-            "arithmetic",
-            "interesting_8",
-            "interesting_16",
-            "interesting_32",
-        ]
-
-        # Walk each deterministic operator across all byte positions
-        buf = bytearray(seed)
-        for op_name in det_op_names:
-            if op_name not in det_ops:
-                continue
-            handler = self._op_dispatch.get(op_name)
-            if handler is None:
-                continue
-            for byte_idx in range(len(buf)):
-                buf_copy = bytearray(buf)
-                result = handler(buf_copy, byte_idx, seed)
-                if result is not None:
-                    buf_copy = bytearray(result[: self.max_len])
-
-                returncode, stderr = self._run_target(bytes(buf_copy))
-                self.exec_count += 1
-
-                # Coverage update: mirror fuzz_one's inline coverage path so
-                # deterministic-stage execs participate in edge tracking,
-                # lifetime tracking, and seed metadata.
-                self._current_edges_cache = None
-                if self.multi_targets:
-                    active_shm = self._target_shm_covs.get(self.target)
-                    if active_shm:
-                        has_new, edge_ids = active_shm.is_new_coverage_with_edges()
-                        self._current_edges_cache = edge_ids
-                        has_new_coverage = has_new
-                    else:
-                        has_new_coverage = bool(
-                            (self.ptrace_cov and self.ptrace_cov.is_new_coverage())
-                            or (self.shm_cov and self.shm_cov.is_new_coverage())
-                        )
-                elif self.shm_cov:
-                    has_new, edge_ids = self.shm_cov.is_new_coverage_with_edges()
-                    self._current_edges_cache = edge_ids
-                    has_new_coverage = has_new
-                else:
-                    has_new_coverage = bool(self.ptrace_cov and self.ptrace_cov.is_new_coverage())
-
-                if has_new_coverage and self._edge_tracker:
-                    seed_key = self._seed_key(seed)
-                    if self.shm_cov and not self.ptrace_cov:
-                        hit_counts = self.shm_cov.get_edge_counts()
-                        hit_edges = set(hit_counts.keys())
-                    else:
-                        hit_edges = (
-                            self._current_edges_cache
-                            if self._current_edges_cache is not None
-                            else self._get_current_edge_set()
-                        )
-                        hit_counts = None
-                    if hit_edges:
-                        stack_depth = 0
-                        path_hash = 0
-                        if self.shm_cov:
-                            stack_depth = self.shm_cov.read_stack_depth()
-                            path_hash = self.shm_cov.read_path_hash()
-                        if path_hash == 0 and hit_edges and not isinstance(hit_edges, bytes):
-                            path_hash = (
-                                self.shm_cov.compute_path_hash_from_edges(hit_edges)
-                                if self.shm_cov
-                                else 0
-                            )
-                        new = self._edge_tracker.record_edges(
-                            seed_key,
-                            hit_edges,
-                            target_name=os.path.basename(self.target) if self.multi_targets else "",
-                            hit_counts=hit_counts,
-                            stack_depth=stack_depth,
-                            path_hash=path_hash,
-                            hw_instructions=self._last_perf_deltas.get("instructions", 0),
-                            hw_branches=self._last_perf_deltas.get("branches", 0),
-                            hw_branch_misses=self._last_perf_deltas.get("branch_misses", 0),
-                        )
-                        if new:
-                            self._last_new_edge_exec = self.exec_count
-                            self._last_new_edge_count = len(new)
-                            if meta is not None:
-                                meta["coverage_edges"] = meta.get("coverage_edges", 0) + len(new)
-                                self._cached_total_edges += len(new)
-
-                if self._inprocess_runner or self.ptrace_cov or self.shm_cov:
-                    current_edges = (
-                        self._current_edges_cache
-                        if self._current_edges_cache is not None
-                        else self._get_current_edge_set()
-                    )
-                    if current_edges:
-                        self._edge_tracker.record_edge_lifetimes(current_edges, self.exec_count)
-
-        # Mark seed as having passed deterministic fuzzing
-        meta["seed_passed_det"] = True
-        if seed in self.seed_meta:
-            self.seed_meta[seed]["seed_passed_det"] = True
-
-        return True
-
-    def _get_seed_trace_mini(self, seed_key: str) -> bytearray | None:
-        """Get the compressed coverage bitmap for a seed for SkipDet analysis."""
-        edges = self._edge_tracker.seed_edges.get(seed_key)
-        if edges is None:
-            return None
-        map_size = self._edge_tracker.map_size
-        trace_mini = bytearray((map_size + 7) // 8)
-        for edge_id in edges:
-            idx = edge_id // 8
-            if idx < len(trace_mini):
-                trace_mini[idx] |= 1 << (edge_id % 8)
-        return trace_mini
-
     def run(self, iterations=0):
         self._start_stack_heartbeat()
         if self.multi_targets:
@@ -4518,9 +4374,11 @@ class Fuzzer:
                     self._last_perf_score = 100.0
                 if self._diff_tracker:
                     self._check_differential(seed)
-                # Run deterministic stage gated by SkipDet
-                if seed_key in self._favored and not (meta or {}).get("seed_passed_det", False):
-                    self._run_deterministic_stage(seed)
+                # Deterministic-stage mutations are now drawn inline by
+                # OperatorEngine.mutate() (see maybe_deterministic_mutation),
+                # so they get the same execution/coverage/corpus-save path
+                # as every other mutation instead of a separate blocking
+                # loop that has to duplicate it.
                 self.fuzz_one(seed)
                 # Backpropagate this iteration's discovery up the MCTS path.
                 # A no-op unless the mcts arm actually selected this seed —

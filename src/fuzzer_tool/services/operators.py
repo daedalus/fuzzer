@@ -42,6 +42,7 @@ from fuzzer_tool.core.mutations import (
     splice_diff_located,
 )
 from fuzzer_tool.core.operator_registry import REGISTRY
+from fuzzer_tool.core.skipdet import MAX_DET_MUTATIONS, trace_mini_from_edges
 
 log = logging.getLogger(__name__)
 
@@ -157,6 +158,101 @@ _CONTEXT_FORMAT_CATEGORIES = (
 # operator-cost feature appended in _context_vector().
 CONTEXT_DIM = 6 + len(_CONTEXT_FORMAT_CATEGORIES) + 1
 
+# ── deterministic stage ───────────────────────────────────────────────────
+# AFL's classic deterministic schedule, walked systematically across a seed
+# rather than sampled at a random position by the bandit. This is the
+# machinery core/skipdet.py names and gates (SkipDetector.should_det_fuzz)
+# but that a first version of this feature only partly drove: it dispatched
+# _op_bit_flip once per byte, and that handler picks a single random bit --
+# so "bitflip 1/1" only ever touched 1/8th of the bits a real AFL
+# deterministic pass covers. The generator below is the actual systematic
+# walk: every bit, then every byte, then every arithmetic delta, then every
+# interesting value, in order.
+
+
+def _deterministic_mutation_stream(data: bytes, max_mutations: int = MAX_DET_MUTATIONS):
+    """Yield mutants from AFL's classic deterministic schedule, in order.
+
+    Walks bitflip 1/1, byte flip 8/8, 8-bit arithmetic, and 8-bit
+    interesting-value substitution across every position in *data* in turn.
+    Each mutant differs from *data* at exactly one position (or one bit),
+    which is what lets a deterministic stage attribute a coverage gain to a
+    specific offset -- unlike havoc, which changes several positions in one
+    round and can only credit the mutation as a whole.
+
+    Deliberately narrower than AFL++'s full schedule (no 2/1, 4/1, 16-bit or
+    32-bit walks): those add coverage at steeply diminishing returns per
+    exec once 1/1 and 8/8 have run. Extending the schedule is a matter of
+    adding more passes below; the gating and queueing around it doesn't
+    change.
+
+    Args:
+        data: The seed to generate a deterministic schedule for. Not
+            mutated -- each yielded mutant is a fresh bytearray.
+        max_mutations: Hard cap on total mutants yielded, so one huge seed
+            can't turn a single deterministic pass into an unbounded stall.
+            Bitflip 1/1 alone costs 8*len(data) mutants; the cap simply
+            truncates the schedule when it's exceeded, same as AFL++'s own
+            time-boxing of deterministic stages on large inputs.
+
+    Yields:
+        bytes mutants, each one mutation away from *data*.
+    """
+    from fuzzer_tool.core.mutations import ARITHMETIC_DELTAS
+
+    length = len(data)
+    if length == 0:
+        return
+
+    n = 0
+
+    # bitflip 1/1: flip every bit in turn.
+    for byte_idx in range(length):
+        orig = data[byte_idx]
+        for bit in range(8):
+            if n >= max_mutations:
+                return
+            mutant = bytearray(data)
+            mutant[byte_idx] = orig ^ (1 << bit)
+            yield bytes(mutant)
+            n += 1
+
+    # byte flip 8/8: XOR every byte with 0xFF in turn.
+    for byte_idx in range(length):
+        if n >= max_mutations:
+            return
+        mutant = bytearray(data)
+        mutant[byte_idx] ^= 0xFF
+        yield bytes(mutant)
+        n += 1
+
+    # arithmetic 8-bit: add/subtract each delta at every byte position.
+    for byte_idx in range(length):
+        orig = data[byte_idx]
+        for delta in ARITHMETIC_DELTAS:
+            if n >= max_mutations:
+                return
+            mutant = bytearray(data)
+            mutant[byte_idx] = (orig + delta) & 0xFF
+            yield bytes(mutant)
+            n += 1
+            if n >= max_mutations:
+                return
+            mutant = bytearray(data)
+            mutant[byte_idx] = (orig - delta) & 0xFF
+            yield bytes(mutant)
+            n += 1
+
+    # interesting values 8-bit: substitute each known-interesting byte.
+    for byte_idx in range(length):
+        for val in INTERESTING_UNSIGNED_8:
+            if n >= max_mutations:
+                return
+            mutant = bytearray(data)
+            mutant[byte_idx] = val & 0xFF
+            yield bytes(mutant)
+            n += 1
+
 
 class OperatorEngine:
     """Manages mutation operator selection and execution.
@@ -194,6 +290,12 @@ class OperatorEngine:
         self._havoc_table = [0] * _HAVOC_TABLE_SLOTS
         self._havoc_rounds_since_rebuild = 0
         self._rebuild_havoc_table()
+        # Deterministic-stage queue, one entry per seed currently mid-stage.
+        # A generator rather than a materialized list: bitflip 1/1 alone is
+        # 8*len(seed) mutations, and most seeds never reach the gate (see
+        # maybe_deterministic_mutation), so building the full schedule
+        # upfront for every seed would waste memory that's never read.
+        self._det_queues: dict = {}
 
     # ── Operator handlers ──────────────────────────────────────────────
     # Each handler: (buf, byte_idx, data) -> None (in-place) or bytes (replace buf)
@@ -2578,6 +2680,94 @@ class OperatorEngine:
             return None
         return self.f._rand_pool.randint(lo, hi - 1)
 
+    # ── Deterministic stage ──────────────────────────────────────────────
+
+    def _next_deterministic_mutation(self, data: bytes, seed_key: str) -> bytes | None:
+        """Pop the next mutant from *seed_key*'s deterministic queue.
+
+        Creates the queue on first call for a given seed_key. Returns None
+        once the schedule is exhausted, at which point the queue entry is
+        dropped -- the caller is expected to mark the seed's metadata
+        ``seed_passed_det`` so should_det_fuzz is not re-consulted for it.
+        """
+        q = self._det_queues.get(seed_key)
+        if q is None:
+            q = _deterministic_mutation_stream(bytes(data))
+            self._det_queues[seed_key] = q
+        try:
+            return next(q)
+        except StopIteration:
+            del self._det_queues[seed_key]
+            return None
+
+    def maybe_deterministic_mutation(self, data: bytes) -> bytes | None:
+        """Return the next deterministic-stage mutant for *data*, or None.
+
+        None means: no deterministic stage is configured (f._skip_detector
+        is None), the seed already passed one, or SkipDetector's
+        undetermined-bit gate said to skip it -- in every case mutate()
+        should fall through to its normal bandit-driven mutation instead.
+
+        Routed through mutate() rather than run as a separate blocking loop:
+        the mutant this returns goes through the exact same
+        execution/coverage/corpus-save path fuzz_one already gives every
+        mutation, so a deterministic-stage discovery gets queued into the
+        corpus like any other -- a standalone loop that runs its own execs
+        and updates edge-tracking bookkeeping without ever calling
+        save_to_corpus would find new coverage and then throw the mutant
+        that found it away.
+
+        The should_det_fuzz gate is consulted exactly once per seed, when
+        its queue is first created, not on every mutation drawn from an
+        already-running queue: should_det_fuzz has side effects (it marks
+        bits as deterministically explored and advances a decay timer), and
+        re-running it every call would both re-decide a question already
+        answered and corrupt those side effects with a seed's own
+        in-progress coverage.
+        """
+        f = self.f
+        skip_detector = getattr(f, "_skip_detector", None)
+        if skip_detector is None:
+            return None
+        # seed_meta is keyed by the raw seed bytes (see corpus_manager.py's
+        # init_seed_metadata / fuzz_one's `self.seed_meta.get(data)`) --
+        # seed_key is a separate hash-string identity used only by
+        # _favored and _edge_tracker.seed_edges. Mixing the two up here
+        # would make meta always None and silently disable this gate.
+        meta = f.seed_meta.get(data)
+        if meta is None or meta.get("seed_passed_det", False):
+            return None
+        seed_key = f._seed_key(data)
+
+        if seed_key in self._det_queues:
+            mutant = self._next_deterministic_mutation(data, seed_key)
+            if mutant is None:
+                meta["seed_passed_det"] = True
+            return mutant
+
+        favored = seed_key in f._favored
+        edge_ids = f._edge_tracker.seed_edges.get(seed_key)
+        trace_mini = (
+            trace_mini_from_edges(edge_ids, skip_detector.map_size) if edge_ids else None
+        )
+        should_run = skip_detector.should_det_fuzz(
+            seed_trace_mini=trace_mini,
+            seed_favored=favored,
+            seed_passed_det=False,
+            current_time_ms=time.monotonic() * 1000.0,
+        )
+        if not should_run:
+            # AFL marks a skipped seed as "done" too -- otherwise the same
+            # not-enough-new-bits seed gets re-evaluated (and re-skipped)
+            # on every single mutate() call for as long as it stays favored.
+            meta["seed_passed_det"] = True
+            return None
+
+        mutant = self._next_deterministic_mutation(data, seed_key)
+        if mutant is None:
+            meta["seed_passed_det"] = True
+        return mutant
+
     def select_position(self, buf: bytearray, data: bytes) -> int:
         """Select a byte position for mutation using MI/TE/sensitivity/crash-MI/random."""
         f = self.f
@@ -2615,6 +2805,31 @@ class OperatorEngine:
         from fuzzer_tool.core.similarity import hamming_distance
 
         f = self.f
+
+        # Deterministic stage: drains before any bandit-driven mutation for
+        # a favored, not-yet-determinized seed (see maybe_deterministic_mutation
+        # for the gating). Bypasses build_ops()/select_op() entirely -- this
+        # is AFL's systematic per-position walk, not a bandit-scored pick,
+        # so it doesn't feed the bandits' win/loss bookkeeping. Leaving
+        # _last_ops_used empty means every scheduler's "if not
+        # self._last_ops_used: return" guard no-ops for this round, same as
+        # if nothing had run -- the deterministic pass simply isn't part of
+        # that tournament.
+        det_mutant = self.maybe_deterministic_mutation(data)
+        if det_mutant is not None:
+            f._last_ops_used = []
+            f._last_ops_with_sites = []
+            f._last_mopt_particles = []
+            f._last_ops_effective = set()
+            f._last_havoc_subops = 0
+            f._last_op_costs = {}
+            f._last_mutation_offset = 0
+            f._last_hamming_distance = (
+                hamming_distance(data, det_mutant) if len(data) == len(det_mutant) else -1
+            )
+            f._det_execs = getattr(f, "_det_execs", 0) + 1
+            return det_mutant
+
         buf = bytearray(data)
         if not buf:
             buf = bytearray(b"\x00" * f._rand_pool.randint_list(1, 32, 1)[0])

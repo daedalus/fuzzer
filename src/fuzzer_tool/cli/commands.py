@@ -484,6 +484,7 @@ def cmd_fuzz(args):
         sensitivity=getattr(args, "sensitivity", False),
         region_profile=getattr(args, "region_profile", False),
         fluctuation=getattr(args, "fluctuation_theorems", False),
+        deterministic=getattr(args, "deterministic", True),
         ga=getattr(args, "ga", False),
         qea=getattr(args, "qea", False),
         wfc=getattr(args, "wfc", False),
@@ -1876,6 +1877,17 @@ def main() -> int:
         "--cmplog",
         action="store_true",
         help="Enable comparison tracing via LD_PRELOAD (memcmp/strcmp/strncmp/memchr interception)",
+    )
+    fuzz_parser.add_argument(
+        "--no-deterministic",
+        dest="deterministic",
+        action="store_false",
+        default=True,
+        help=(
+            "Disable the AFL-style deterministic stage (bitflip/byte-flip/arithmetic/"
+            "interesting-value sweep) for favored seeds before havoc. On by default; "
+            "a full pass costs 8*len(seed) execs per favored seed."
+        ),
     )
     fuzz_parser.add_argument(
         "--cmplog-max-tokens",

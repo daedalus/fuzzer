@@ -22,6 +22,55 @@ MAX_INF_EXECS = 16 * 1024
 MAX_QUICK_EFF_EXECS = 64 * 1024
 THRESHOLD_DEC_TIME_MS = 20 * 60 * 1000  # 20 minutes
 
+# Deterministic-stage execution budget per seed. Mirrors MAX_QUICK_EFF_EXECS:
+# a full bitflip 1/1 pass alone costs 8*len(seed) execs, so this is the
+# ceiling on total mutations _deterministic_mutation_stream will yield for
+# one seed regardless of how much further the stage schedule has left to run.
+MAX_DET_MUTATIONS = MAX_QUICK_EFF_EXECS
+
+
+def trace_mini_from_edges(edge_ids, map_size: int = 65536) -> bytearray:
+    """Build a AFL-style trace_mini bitmap from a sparse edge_id set.
+
+    ``SkipDetector.should_det_fuzz`` expects a positional bitmap (1 bit per
+    coverage-map slot), the shape AFL's own bitmap naturally has. This
+    fuzzer's coverage is a sparse, context-sensitive hash table instead
+    (``edge_id`` values are ``ctx ^ prev_loc ^ cur_loc`` hashes, not indices
+    into a fixed-size byte array), so there is no positional bitmap lying
+    around to hand it.
+
+    Folding each edge_id into ``map_size`` bits by taking it modulo the bit
+    count reproduces the property should_det_fuzz actually depends on --
+    "how much of this seed's coverage falls in slots no seed has
+    deterministically explored before" -- without requiring the shim to
+    maintain a second, byte-indexed coverage representation just for this.
+
+    This deliberately replaces a first-cut version that indexed by
+    ``edge_id // 8`` directly and dropped anything with ``idx >=
+    len(trace_mini)``: since edge_ids are hash values, not small positional
+    integers, that silently discarded nearly every edge for any seed whose
+    coverage wasn't coincidentally under the first few KB of hash space --
+    should_det_fuzz would then see an almost-always-empty bitmap and rarely
+    find undetermined bits worth running a stage over, regardless of real
+    coverage. Folding with modulo means every edge contributes; the only
+    cost is the same bounded hash-collision noise AFL's own fixed-size
+    bitmap already has, not a near-total blind spot.
+
+    Args:
+        edge_ids: Iterable of edge_id hashes covered by this seed.
+        map_size: Number of addressable bit positions -- must match the
+            ``SkipDetector.map_size`` this bitmap will be checked against.
+
+    Returns:
+        A packed bitmap of ``map_size // 8`` bytes (rounded up).
+    """
+    n_bytes = (map_size + 7) // 8
+    mini = bytearray(n_bytes)
+    for edge_id in edge_ids:
+        bit = edge_id % map_size
+        mini[bit >> 3] |= 1 << (bit & 7)
+    return mini
+
 
 class SkipDetector:
     """Decide whether seeds deserve deterministic fuzzing.
