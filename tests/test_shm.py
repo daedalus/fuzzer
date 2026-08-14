@@ -1,6 +1,9 @@
 """Tests for SHM coverage adapter (sparse entry format)."""
 
+import contextlib
 import ctypes
+import os
+import subprocess
 from pathlib import Path
 
 from fuzzer_tool.adapters.shm import (
@@ -1179,19 +1182,26 @@ int fuzz_shm_run(const unsigned char *buf, size_t len) {
         those fds, the constructor blocked forever waiting for a loader
         command. The fix gates forkserver activation on __AFL_FORKSRV=1.
         """
-        import fcntl
-        import os
-        import subprocess
-
-        _FORK_FD_OWNED = False
-
         # Simulate inherited control-channel fds without a real loader.
+        #
+        # 198/199 are process-global, and dup2 silently closes whatever is
+        # already there, so anything the interpreter (or a parallel worker)
+        # happens to hold at those numbers is saved and put back afterwards
+        # rather than simply closed.
+        saved = {}
+        for fd in (198, 199):
+            try:
+                saved[fd] = os.dup(fd)
+            except OSError:
+                saved[fd] = None  # nothing there; restore by closing
+
         r, w = os.pipe()
-        os.dup2(r, 198)
-        os.dup2(w, 199)
-        os.close(r)
-        os.close(w)
-        _FORK_FD_OWNED = True
+        try:
+            os.dup2(r, 198)
+            os.dup2(w, 199)
+        finally:
+            os.close(r)
+            os.close(w)
 
         try:
             src = tmp_path / "test_inherit.c"
@@ -1255,10 +1265,10 @@ int fuzz_shm_run(const unsigned char *buf, size_t len) {
             finally:
                 cov.cleanup()
         finally:
-            if _FORK_FD_OWNED:
-                for fd in (198, 199):
-                    try:
-                        fcntl.fcntl(fd, fcntl.F_GETFD)
-                    except OSError:
-                        continue
-                    os.close(fd)
+            for fd, backup in saved.items():
+                if backup is None:
+                    with contextlib.suppress(OSError):
+                        os.close(fd)
+                else:
+                    os.dup2(backup, fd)
+                    os.close(backup)
