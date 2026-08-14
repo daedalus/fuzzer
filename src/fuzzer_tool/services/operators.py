@@ -2747,9 +2747,7 @@ class OperatorEngine:
 
         favored = seed_key in f._favored
         edge_ids = f._edge_tracker.seed_edges.get(seed_key)
-        trace_mini = (
-            trace_mini_from_edges(edge_ids, skip_detector.map_size) if edge_ids else None
-        )
+        trace_mini = trace_mini_from_edges(edge_ids, skip_detector.map_size) if edge_ids else None
         should_run = skip_detector.should_det_fuzz(
             seed_trace_mini=trace_mini,
             seed_favored=favored,

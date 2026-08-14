@@ -218,11 +218,7 @@ def _fisher_exact(a: int, b: int, c: int, d: int) -> float:
         return 1.0
 
     def prob(x):
-        return (
-            math.comb(a + b, x)
-            * math.comb(c + d, a + c - x)
-            / math.comb(n, a + c)
-        )
+        return math.comb(a + b, x) * math.comb(c + d, a + c - x) / math.comb(n, a + c)
 
     lo = max(0, a + c - (c + d))
     hi = min(a + b, a + c)
@@ -317,7 +313,9 @@ def cmd_analyse(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     r = sub.add_parser("run", help="run arms over the locked matrix")

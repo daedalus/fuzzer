@@ -226,5 +226,7 @@ class TestDeterministicStageWiring:
         fuzzer.fuzz_one(data)
         after = len(fuzzer.corpus)
 
-        assert fuzzer._last_ops_used == [], "first fuzz_one() call should draw a deterministic mutant"
+        assert fuzzer._last_ops_used == [], (
+            "first fuzz_one() call should draw a deterministic mutant"
+        )
         assert after > before, "the deterministic mutant fuzz_one() found interesting must be saved"

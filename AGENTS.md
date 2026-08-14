@@ -36,6 +36,8 @@ fuzzer, not just the target.
 16. For random always use the prng in `src/fuzzer_tool/core/rand_pool.py`.
 17. Do not create artifacts in the source codebase dir.
 18. Always create corpus on ~/.
+19. Always make sure when creating a new functionality that is wired-up where needed.
+20. try except pass is a bad pattern.
 
 ## Corpus Rules
 

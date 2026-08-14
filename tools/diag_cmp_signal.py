@@ -81,7 +81,9 @@ def _planted(rng: random.Random, operand: bytes, buflen: int, n_matching: int) -
 def diag_site(trials: int, buflen: int) -> None:
     print("\n[1] SITE SELECTION -- does argmin over candidates find the planted offset?")
     print(f"    {trials} trials per cell, {buflen}-byte buffers\n")
-    print(f"    {'operand':>8} {'planted':>8} {'accuracy':>9} {'chance':>8} {'lift':>7} {'in cand':>8}")
+    print(
+        f"    {'operand':>8} {'planted':>8} {'accuracy':>9} {'chance':>8} {'lift':>7} {'in cand':>8}"
+    )
     print("    " + "-" * 54)
 
     pool = RandPool()

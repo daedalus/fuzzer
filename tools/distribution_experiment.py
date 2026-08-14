@@ -60,7 +60,7 @@ def _make_head(exponent: float = 1.5):
             return 0
         u = self.f._rand_pool.random()
         # inverse-CDF of a bounded power law
-        return min(n - 1, int(((1 - u) ** (-1.0 / exponent) - 1)))
+        return min(n - 1, int((1 - u) ** (-1.0 / exponent) - 1))
 
     return select
 
@@ -159,19 +159,41 @@ def _run_in_subprocess(target, corpus, func, execs, seed, dist) -> dict:
     shutil.copytree(corpus, trial_corpus)
 
     proc = subprocess.run(
-        [sys.executable, __file__, "--worker",
-         "--target", target, "--corpus", trial_corpus, "--func", func,
-         "--execs", str(execs), "--seed", str(seed), "--dists", dist],
-        capture_output=True, text=True,
+        [
+            sys.executable,
+            __file__,
+            "--worker",
+            "--target",
+            target,
+            "--corpus",
+            trial_corpus,
+            "--func",
+            func,
+            "--execs",
+            str(execs),
+            "--seed",
+            str(seed),
+            "--dists",
+            dist,
+        ],
+        capture_output=True,
+        text=True,
     )
     try:
         for line in proc.stdout.splitlines():
             if line.startswith("RESULT "):
-                return json.loads(line[len("RESULT "):])
+                return json.loads(line[len("RESULT ") :])
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
-    return {"dist": dist, "seed": seed, "edges": 0, "execs": 0,
-            "secs": 0, "corpus": 0, "error": proc.stderr[-300:]}
+    return {
+        "dist": dist,
+        "seed": seed,
+        "edges": 0,
+        "execs": 0,
+        "secs": 0,
+        "corpus": 0,
+        "error": proc.stderr[-300:],
+    }
 
 
 def main() -> int:
@@ -187,19 +209,22 @@ def main() -> int:
     args = ap.parse_args()
 
     if args.worker:
-        r = run_one(args.target, args.corpus, args.func, args.execs,
-                    args.seed, args.dists)
+        r = run_one(args.target, args.corpus, args.func, args.execs, args.seed, args.dists)
         print("RESULT " + json.dumps(r))
         return 0
 
     rows = []
     for dist in args.dists.split(","):
         for trial in range(args.trials):
-            r = _run_in_subprocess(args.target, args.corpus, args.func,
-                                   args.execs, 1000 + trial, dist)
+            r = _run_in_subprocess(
+                args.target, args.corpus, args.func, args.execs, 1000 + trial, dist
+            )
             rows.append(r)
-            print(f"  {dist:8s} seed={r['seed']} edges={r['edges']:4d} "
-                  f"corpus={r['corpus']:3d} {r['secs']}s", flush=True)
+            print(
+                f"  {dist:8s} seed={r['seed']} edges={r['edges']:4d} "
+                f"corpus={r['corpus']:3d} {r['secs']}s",
+                flush=True,
+            )
 
     print("\n=== distribution vs edges discovered ===")
     print(f"{'dist':10s} {'mean':>7s} {'median':>7s} {'min':>5s} {'max':>5s}")
@@ -209,8 +234,10 @@ def main() -> int:
         if not vals:
             continue
         summary[dist] = vals
-        print(f"{dist:10s} {statistics.mean(vals):7.1f} "
-              f"{statistics.median(vals):7.1f} {min(vals):5d} {max(vals):5d}")
+        print(
+            f"{dist:10s} {statistics.mean(vals):7.1f} "
+            f"{statistics.median(vals):7.1f} {min(vals):5d} {max(vals):5d}"
+        )
 
     base = summary.get("uniform")
     if base:

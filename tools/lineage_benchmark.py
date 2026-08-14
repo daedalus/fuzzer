@@ -37,8 +37,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 
-def run_worker(target: str, corpus: str, func: str, execs: int, seed: int,
-               lineage: bool, backtrack: bool = False) -> dict:
+def run_worker(
+    target: str,
+    corpus: str,
+    func: str,
+    execs: int,
+    seed: int,
+    lineage: bool,
+    backtrack: bool = False,
+) -> dict:
     from fuzzer_tool.services.fuzzer import Fuzzer
 
     t0 = time.time()
@@ -83,19 +90,39 @@ def run_isolated(target, corpus, func, execs, seed, lineage, backtrack=False) ->
     shutil.copytree(corpus, trial_corpus)
     try:
         proc = subprocess.run(
-            [sys.executable, __file__, "--worker",
-             "--target", target, "--corpus", trial_corpus, "--func", func,
-             "--execs", str(execs), "--seed", str(seed)]
+            [
+                sys.executable,
+                __file__,
+                "--worker",
+                "--target",
+                target,
+                "--corpus",
+                trial_corpus,
+                "--func",
+                func,
+                "--execs",
+                str(execs),
+                "--seed",
+                str(seed),
+            ]
             + (["--lineage"] if lineage else [])
             + (["--backtrack"] if backtrack else []),
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         for line in proc.stdout.splitlines():
             if line.startswith("RESULT "):
-                return json.loads(line[len("RESULT "):])
-        return {"lineage": lineage, "seed": seed, "edges": 0, "eps": 0,
-                "corpus": 0, "max_depth": 0, "tree_nodes": 0,
-                "error": proc.stderr[-300:]}
+                return json.loads(line[len("RESULT ") :])
+        return {
+            "lineage": lineage,
+            "seed": seed,
+            "edges": 0,
+            "eps": 0,
+            "corpus": 0,
+            "max_depth": 0,
+            "tree_nodes": 0,
+            "error": proc.stderr[-300:],
+        }
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
@@ -120,23 +147,27 @@ def main() -> int:
     args = ap.parse_args()
 
     if args.worker:
-        r = run_worker(args.target, args.corpus, args.func,
-                       args.execs, args.seed, args.lineage, args.backtrack)
+        r = run_worker(
+            args.target, args.corpus, args.func, args.execs, args.seed, args.lineage, args.backtrack
+        )
         print("RESULT " + json.dumps(r))
         return 0
 
-    arms = [("baseline", False, False), ("lineage", True, False),
-            ("backtrack", True, True)]
+    arms = [("baseline", False, False), ("lineage", True, False), ("backtrack", True, True)]
     rows = []
     for label, lineage, backtrack in arms:
         for t in range(args.trials):
-            r = run_isolated(args.target, args.corpus, args.func,
-                             args.execs, 1000 + t, lineage, backtrack)
+            r = run_isolated(
+                args.target, args.corpus, args.func, args.execs, 1000 + t, lineage, backtrack
+            )
             r["arm"] = label
             rows.append(r)
-            print(f"  {label:9s} seed={r['seed']} edges={r['edges']:4d} "
-                  f"eps={r['eps']:7.1f} corpus={r['corpus']:3d} "
-                  f"depth={r['max_depth']} nodes={r['tree_nodes']}", flush=True)
+            print(
+                f"  {label:9s} seed={r['seed']} edges={r['edges']:4d} "
+                f"eps={r['eps']:7.1f} corpus={r['corpus']:3d} "
+                f"depth={r['max_depth']} nodes={r['tree_nodes']}",
+                flush=True,
+            )
 
     print("\n=== arms ===")
     by_arm = {}
