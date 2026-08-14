@@ -4,7 +4,13 @@
 # intentional, user-approved API change (Fisher's g-test significance gate).
 # The only caller (report.py) passes no parameter that was renamed, so the
 # change is non-breaking in practice; suppress it so the gate does not block.
+#
+# The poly_gcd removal from berlekamp_massey.py is an intentional refactor:
+# the function was consolidated into gf2_common.py as the single source of
+# truth for GF(2) polynomial operations, and berlekamp_massey.py now imports
+# it from there instead of defining it locally.
 [impactguard.analysis]
 suppress = [
     "src/fuzzer_tool/core/periodicity.py:detect_periodicity",
+    "src/fuzzer_tool/core/berlekamp_massey.py:poly_gcd",
 ]

@@ -23,6 +23,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from fuzzer_tool.core.gf2_common import poly_gcd
+
 # ---------------------------------------------------------------------------
 # Bit-reversal helpers (shared by compute_checksum's reflect_out and by
 # recover_polynomial_gcd's reflected-domain support, below).
@@ -273,33 +275,6 @@ def compute_checksum(
 # ---------------------------------------------------------------------------
 # Polynomial GCD (for independent-pair recovery)
 # ---------------------------------------------------------------------------
-
-
-def _poly_mod(a: int, b: int) -> int:
-    """Polynomial remainder of *a* divided by *b* over GF(2)."""
-    if b == 0:
-        raise ZeroDivisionError("polynomial division by zero")
-    r = a
-    while r and r.bit_length() - 1 >= b.bit_length() - 1:
-        shift = r.bit_length() - 1 - (b.bit_length() - 1)
-        r ^= b << shift
-    return r
-
-
-def poly_gcd(a: int, b: int) -> int:
-    """GCD of two polynomials over GF(2).
-
-    Polynomials are represented as integers where bit *i* is the
-    coefficient of ``x^i``.  Uses the Euclidean algorithm with
-    polynomial division over GF(2).
-    """
-    if a == 0:
-        return b
-    if b == 0:
-        return a
-    while b:
-        a, b = b, _poly_mod(a, b)
-    return a
 
 
 def recover_polynomial_gcd(

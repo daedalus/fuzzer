@@ -1,18 +1,31 @@
-"""
-GF(2^q) arithmetic built from scratch (carryless / polynomial arithmetic over GF(2),
-elements represented as Python ints where bit k = coefficient of x^k).
+"""Shared GF(2) polynomial arithmetic and finite-field utilities.
 
-Needed by the Cook-Mertz Tree Evaluation procedure: a field of characteristic two,
-large enough that its multiplicative order m = |F|-1 exceeds the degree of the
-multilinear extension being interpolated, plus a *primitive element* omega so that
-{omega^1, ..., omega^m} enumerates F* exactly once (this is what powers the
-"worst-case to arbitrary-case" interpolation identity, eq. (5) in the paper).
+This module is the single source of truth for:
+
+- GF(2) polynomial operations on ``int``-encoded polynomials (bit k =
+  coefficient of ``x^k``).
+- Rabin irreducibility testing and irreducible-polynomial search.
+- The :class:`GF2n` field class, which wraps the polynomial layer into a
+  full ``GF(2^q)`` field with ``add``/``mul``/``pow``/``inv`` methods and a
+  primitive-element search.
+- A generic primitive-root finder used by :class:`GF2n` and any future
+  GF(2^n) consumer.
+
+Callers in this repo
+--------------------
+- :mod:`fuzzer_tool.core.berlekamp_massey` — CRC polynomial recovery via
+  ``poly_gcd``.
+- :mod:`fuzzer_tool.core.cook_mertz` — Cook-Mertz MLE interpolation field
+  layer, which imports :class:`GF2n` from here.
 """
+
+from __future__ import annotations
 
 import random
 
 
 def poly_deg(p: int) -> int:
+    """Degree of a GF(2) polynomial encoded as a Python ``int``."""
     return p.bit_length() - 1 if p else -1
 
 
@@ -28,7 +41,7 @@ def poly_mul(a: int, b: int) -> int:
 
 
 def poly_divmod(a: int, b: int):
-    """Return (quotient, remainder) of GF(2)-polynomial division a / b."""
+    """Return ``(quotient, remainder)`` of GF(2)-polynomial division ``a / b``."""
     if b == 0:
         raise ZeroDivisionError
     db = poly_deg(b)
@@ -42,16 +55,19 @@ def poly_divmod(a: int, b: int):
 
 
 def poly_mod(a: int, b: int) -> int:
+    """Polynomial remainder of ``a`` divided by ``b`` over GF(2)."""
     return poly_divmod(a, b)[1]
 
 
 def poly_gcd(a: int, b: int) -> int:
+    """GCD of two polynomials over GF(2)."""
     while b:
         a, b = b, poly_mod(a, b)
     return a
 
 
 def poly_powmod(base: int, exp: int, mod: int) -> int:
+    """Modular exponentiation ``base**exp mod mod`` over GF(2)."""
     result = 1
     base = poly_mod(base, mod)
     while exp:
@@ -62,8 +78,9 @@ def poly_powmod(base: int, exp: int, mod: int) -> int:
     return result
 
 
-def _prime_factors(n: int):
-    fs = set()
+def _prime_factors(n: int) -> set[int]:
+    """Return the distinct prime factors of ``n`` via trial division."""
+    fs: set[int] = set()
     d = 2
     while d * d <= n:
         while n % d == 0:
@@ -76,27 +93,29 @@ def _prime_factors(n: int):
 
 
 def is_irreducible(poly: int, q: int) -> bool:
-    """Rabin's irreducibility test for a degree-q GF(2) polynomial."""
+    """Rabin's irreducibility test for a degree-``q`` GF(2) polynomial."""
     x = 2  # the polynomial "x"
-    # x^(2^q) mod poly must equal x
-    t = x
+    x_mod = poly_mod(x, poly)
+    # x^(2^q) mod poly must equal x mod poly
+    t = x_mod
     for _ in range(q):
         t = poly_mod(poly_mul(t, t), poly)
-    if t != x:
+    if t != x_mod:
         return False
     # for each prime p | q, gcd(x^(2^(q/p)) - x, poly) must be 1
     for p in _prime_factors(q):
         e = q // p
-        t = x
+        t = x_mod
         for _ in range(e):
             t = poly_mod(poly_mul(t, t), poly)
-        g = poly_gcd(t ^ x, poly)
+        g = poly_gcd(t ^ x_mod, poly)
         if poly_deg(g) > 0:
             return False
     return True
 
 
 def find_irreducible(q: int) -> int:
+    """Return the first irreducible polynomial of degree ``q`` over GF(2)."""
     high = 1 << q
     for const_term in (1,):  # constant term must be 1 (else divisible by x)
         cand = high | const_term
@@ -107,10 +126,31 @@ def find_irreducible(q: int) -> int:
     raise RuntimeError(f"no irreducible polynomial of degree {q} found")
 
 
+def find_primitive_root(order: int, is_primitive, rng) -> int:
+    """Find a primitive root of a finite group by random search.
+
+    Args:
+        order: Size of the multiplicative group (e.g. ``2**q - 1``).
+        is_primitive: Callable ``is_primitive(candidate) -> bool``.
+        rng: Random source with ``randrange(lo, hi)``.  Accepted types:
+            ``random.Random``, :class:`fuzzer_tool.core.rand_pool.RandPool`,
+            or any duck-typed object with the same method.
+
+    Returns:
+        A primitive element in ``[1, order)``.
+    """
+    if order <= 1:
+        return 1
+    while True:
+        a = rng.randrange(1, order)
+        if is_primitive(a):
+            return a
+
+
 class GF2n:
     """The field GF(2^q) = GF(2)[x] / (modulus), modulus an irreducible degree-q poly."""
 
-    def __init__(self, q: int, modulus: int = None, seed: int = 0):
+    def __init__(self, q: int, modulus: int | None = None, seed: int = 0) -> None:
         self.q = q
         self.order = 1 << q  # |F|
         self.m = self.order - 1  # |F*|, exponent of the multiplicative group
@@ -140,30 +180,18 @@ class GF2n:
         if self.m == 1:
             return 1
         factors = _prime_factors(self.m)
-        while True:
-            a = self._rng.randrange(1, self.order)
-            if all(self.pow(a, self.m // p) != 1 for p in factors):
-                return a
 
-    def omega_powers(self):
-        """Return dict i -> omega^i for i = 0..m (so index 1..m enumerates F* once)."""
-        powers = {0: 1}
+        def _is_primitive(a: int) -> bool:
+            return all(self.pow(a, self.m // p) != 1 for p in factors)
+
+        return find_primitive_root(self.m, _is_primitive, self._rng)
+
+    def omega_powers(self) -> dict[int, int]:
+        """Return dict ``i -> omega^i`` for ``i = 0..m``."""
+        powers: dict[int, int] = {0: 1}
         cur = 1
         for i in range(1, self.m + 1):
             cur = self.mul(cur, self.gen)
             powers[i] = cur
         assert powers[self.m] == 1
         return powers
-
-
-def test():
-    # smoke test
-    F = GF2n(8)
-    print("modulus:", bin(F.mod), "order:", F.order, "gen:", F.gen)
-    powers = F.omega_powers()
-    seen = set(powers[i] for i in range(1, F.m + 1))
-    assert len(seen) == F.m == len(set(range(1, F.order))), "generator not primitive!"
-    print("primitive element verified: omega^1..omega^m covers F* exactly once")
-    a = 5
-    assert F.mul(F.inv(a), a) == 1
-    print("inverse check ok")
