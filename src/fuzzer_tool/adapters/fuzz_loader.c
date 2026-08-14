@@ -457,7 +457,13 @@ int main(void) {
         }
     }
 
-    printf("READY\n");
+    /* The mode is reported because it is otherwise externally invisible:
+       forkserver and fork+exec produce byte-identical results over this
+       protocol, so a silently-failing handshake degrades throughput with
+       nothing observable to assert on.  The suffix is optional by protocol
+       -- older callers compare the line against "READY" and still match on
+       the first token. */
+    printf("READY %s\n", is_executable ? (use_forksrv ? "forkserver" : "exec") : "dlopen");
     fflush(stdout);
 
     while (1) {

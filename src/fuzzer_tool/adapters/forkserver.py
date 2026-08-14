@@ -16,7 +16,7 @@ its own — so the target writes edges directly into the fuzzer's SHM. The
 caller resets the map before ``run_one`` and reads it after.
 
 Protocol:
-  Init:   "INIT <target> <func> <input_file> <timeout>\n" ->  "READY\n"
+  Init:   "INIT <target> <func> <input_file> <timeout>\n" ->  "READY <mode>\n"
   Run:    "RUN <len>\n<data>"                             ->  "RC <rc> <err_len>\n<err>"
   Quit:   "QUIT\n"
 """
@@ -120,6 +120,8 @@ class ForkserverRunner:
         self.env_overrides: dict[str, str] = dict(env or {})
         self._proc: subprocess.Popen | None = None
         self._ready = False
+        # Set from the loader's READY line by start(); see start().
+        self.exec_mode: str = ""
         self._last_stderr: str = ""
         self._input_file: str | None = None
         self._restarting = False
@@ -168,9 +170,14 @@ class ForkserverRunner:
             return False
 
         resp = self._proc.stdout.readline()
-        if resp.strip() == b"READY":
+        parts = resp.decode(errors="replace").strip().split()
+        if parts and parts[0] == "READY":
             self._ready = True
-            log.info("Forkserver started: %s", self.target)
+            # "forkserver" | "exec" | "dlopen"; "" from a loader built before
+            # the suffix existed. Only ever informational -- the protocol is
+            # identical in every mode, so nothing branches on it.
+            self.exec_mode = parts[1] if len(parts) > 1 else ""
+            log.info("Forkserver started: %s (mode=%s)", self.target, self.exec_mode or "?")
             return True
 
         log.warning("Forkserver failed to start: %r", resp)

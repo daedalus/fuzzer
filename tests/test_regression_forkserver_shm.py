@@ -224,6 +224,22 @@ def test_regression_oversized_run_does_not_desync_protocol(runner):
     assert rc == 0
 
 
+@requires_clang
+def test_regression_forkserver_is_actually_used(runner):
+    """The shim-built executable must be driven by the forkserver, not fork+exec.
+
+    This is the assertion the suite was missing. Gating
+    ``__afl_start_forkserver()`` on ``__AFL_FORKSRV`` without having any
+    loader set the variable made the handshake fail on every INIT, so
+    ``use_forksrv`` was always 0 and each RUN silently fell back to
+    ``run_executable()`` -- reverting the forkserver work at no visible cost,
+    because every other assertion in this file holds identically under both
+    paths. The mode on the READY line is the only thing that separates them.
+    """
+    r, _ = runner
+    assert r.exec_mode == "forkserver"
+
+
 class TestUpdateShmAfterResize:
     def test_env_overrides_track_the_new_segment(self):
         """resize() allocates a new segment; the loader's env must follow it.
