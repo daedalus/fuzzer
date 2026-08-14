@@ -140,6 +140,25 @@ static void exec_alarm_handler(int sig) {
 
 /* Stage *data* into the shared input file, rewound and truncated so the
    child sees exactly this input. Returns 0 on failure. */
+/* Point the calling process's stdout at /dev/null.  Called in every child
+   between fork() and exec().
+
+   stdout is the loader's half of the RUN/RC protocol.  A target that prints
+   anything at all inherits that fd and its output lands in the reply stream,
+   where the adapter parses the target's own text as an "RC <rc> <err_len>"
+   header, fails to match, and returns -2 for a run that in fact succeeded.
+   The desync is silent and permanent for the rest of the session.
+
+   /dev/null rather than the stderr pipe: ExecutionRunner.is_crash scans
+   stderr for sanitizer reports, and folding stdout in would let ordinary
+   target chatter be read as a crash. */
+static void redirect_stdout_to_null(void) {
+    int devnull = open("/dev/null", O_WRONLY);
+    if (devnull < 0) return;
+    dup2(devnull, STDOUT_FILENO);
+    if (devnull != STDOUT_FILENO) close(devnull);
+}
+
 static int stage_input(const uint8_t *data, size_t len) {
     if (input_fd < 0) return 0;
     if (lseek(input_fd, 0, SEEK_SET) < 0) return 0;
@@ -261,6 +280,7 @@ static int start_forkserver(void) {
         dup2(input_fd, STDIN_FILENO);
         dup2(errp[1], STDERR_FILENO);
         close(errp[1]);
+        redirect_stdout_to_null();
         signal(SIGCHLD, SIG_DFL);
         signal(SIGALRM, SIG_DFL);
         execl(target_path_global, target_path_global, input_path, (char *)NULL);
@@ -357,6 +377,7 @@ static int run_executable(const uint8_t *data, size_t len, uint8_t *err, int *er
         dup2(input_fd, STDIN_FILENO);
         dup2(errfd[1], STDERR_FILENO);
         close(errfd[1]);
+        redirect_stdout_to_null();
         signal(SIGCHLD, SIG_DFL);
         signal(SIGALRM, SIG_DFL);
         /* argv[1] = input path, stdin = same file: matches run_target_fast so

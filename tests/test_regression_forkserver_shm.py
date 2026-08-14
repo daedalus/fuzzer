@@ -232,12 +232,64 @@ def test_regression_forkserver_is_actually_used(runner):
     ``__afl_start_forkserver()`` on ``__AFL_FORKSRV`` without having any
     loader set the variable made the handshake fail on every INIT, so
     ``use_forksrv`` was always 0 and each RUN silently fell back to
-    ``run_executable()`` -- reverting the forkserver work at no visible cost,
+    ``run_executable()`` — reverting the forkserver work at no visible cost,
     because every other assertion in this file holds identically under both
     paths. The mode on the READY line is the only thing that separates them.
     """
     r, _ = runner
     assert r.exec_mode == "forkserver"
+
+
+@requires_clang
+def test_regression_target_stdout_does_not_desync_protocol(tmp_path):
+    """A target that prints must not corrupt the loader's RUN/RC stream.
+
+    stdout is the loader's half of the protocol. Children were spawned with
+    stdin and stderr redirected but not stdout, so the target's own output was
+    parsed as an ``RC <rc> <err_len>`` header: run_one returned -2 for a run
+    that had in fact exited 0, and the stream stayed desynced from then on.
+    """
+    if _ensure_compiled() is None:
+        pytest.skip("fuzz_loader failed to compile")
+
+    src = tmp_path / "chatty.c"
+    src.write_text(
+        """
+#include <stdio.h>
+int main(void) {
+    char b[64];
+    size_t n = fread(b, 1, sizeof b, stdin);
+    printf("RC 99 0\\n");   /* a well-formed but bogus reply header */
+    fflush(stdout);
+    return (int)(n > 1024);
+}
+"""
+    )
+    exe = tmp_path / "chatty"
+    build = subprocess.run(
+        ["clang", "-O0", "-fsanitize-coverage=trace-pc-guard", "-include", SHIM,
+         "-o", str(exe), str(src)],
+        capture_output=True, text=True,
+    )
+    if build.returncode != 0:
+        pytest.skip(f"target failed to build: {build.stderr[:300]}")
+
+    shm = ShmCoverage(size=8192)
+    r = ForkserverRunner(
+        str(exe),
+        timeout=2.0,
+        env={"__AFL_SHM_ID": shm.env_id, "AFL_MAP_SIZE": str(shm.size)},
+    )
+    try:
+        assert r.start(), "loader failed to start"
+        # The handshake probe child also prints; READY itself must survive it.
+        assert r.exec_mode == "forkserver"
+        for _ in range(4):
+            rc, _err = r.run_one(b"aaaa")
+            assert rc == 0, f"target stdout leaked into the reply stream (rc={rc})"
+    finally:
+        r.stop()
+        shm.cleanup()
 
 
 class TestUpdateShmAfterResize:
