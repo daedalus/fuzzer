@@ -70,11 +70,29 @@ _LOADER_GRACE = 1.0
 
 
 def _ensure_compiled() -> str | None:
-    """Return path to compiled fuzz_loader, or None if compilation fails."""
-    if os.path.isfile(_FUZZ_LOADER_BIN) and os.access(_FUZZ_LOADER_BIN, os.X_OK):
-        return _FUZZ_LOADER_BIN
-    # Try to compile
+    """Return path to compiled fuzz_loader, rebuilding it if stale, else None.
+
+    The binary is gitignored, so it survives every checkout, pull and bisect
+    while ``fuzz_loader.c`` around it changes. Returning it on existence alone
+    meant an edit to the source was silently ignored for the life of the
+    working tree: the loader kept speaking whatever protocol it was built with
+    and the only symptom was tests failing against assertions the current
+    source satisfies.
+
+    Rebuild whenever the source is newer than the binary. mtime rather than a
+    content hash because the source is the only input and a stale-by-seconds
+    rebuild costs a fraction of a second.
+    """
     c_source = _FUZZ_LOADER_BIN + ".c"
+    if os.path.isfile(_FUZZ_LOADER_BIN) and os.access(_FUZZ_LOADER_BIN, os.X_OK):
+        try:
+            if os.path.getmtime(_FUZZ_LOADER_BIN) >= os.path.getmtime(c_source):
+                return _FUZZ_LOADER_BIN
+            log.info("fuzz_loader is older than its source, rebuilding")
+        except OSError:
+            # Source gone (installed wheel, stripped tree): the binary we have
+            # is the only one there will be.
+            return _FUZZ_LOADER_BIN
     if not os.path.isfile(c_source):
         return None
     # clang first, gcc only as a fallback — same preference order as

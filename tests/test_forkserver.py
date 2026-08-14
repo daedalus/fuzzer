@@ -16,13 +16,58 @@ class TestEnsureCompiled:
 
     def test_returns_binary_when_already_compiled(self, tmp_path, monkeypatch):
         bin_path = tmp_path / "fuzz_loader"
+        src_path = tmp_path / "fuzz_loader.c"
         bin_path.write_bytes(b"\x7fELF")
         os.chmod(bin_path, 0o755)
+        # Source older than the binary: nothing to rebuild.
+        src_path.write_text("int main(void) { return 0; }\n")
+        os.utime(src_path, (1_000_000, 1_000_000))
+        os.utime(bin_path, (2_000_000, 2_000_000))
         monkeypatch.setattr(
             "fuzzer_tool.adapters.forkserver._FUZZ_LOADER_BIN",
             str(bin_path),
         )
         assert _ensure_compiled() == str(bin_path)
+
+
+    def test_rebuilds_when_source_is_newer(self, tmp_path, monkeypatch):
+        """A binary older than its source must be rebuilt, not handed back.
+
+        The binary is gitignored, so it outlives every checkout and pull while
+        fuzz_loader.c changes underneath it. Returning it on existence alone
+        meant source edits were silently ignored for the life of the working
+        tree -- the loader kept speaking its old protocol, and the only
+        symptom was tests failing against assertions the current source
+        already satisfies.
+        """
+        bin_path = tmp_path / "fuzz_loader"
+        src_path = tmp_path / "fuzz_loader.c"
+        bin_path.write_bytes(b"\x7fELF stale")
+        os.chmod(bin_path, 0o755)
+        src_path.write_text("int main(void) { return 0; }\n")
+        # Binary predates the source.
+        os.utime(bin_path, (1_000_000, 1_000_000))
+        os.utime(src_path, (2_000_000, 2_000_000))
+        monkeypatch.setattr(
+            "fuzzer_tool.adapters.forkserver._FUZZ_LOADER_BIN",
+            str(bin_path),
+        )
+        assert _ensure_compiled() == str(bin_path)
+        assert bin_path.read_bytes() != b"\x7fELF stale", "stale binary was not rebuilt"
+        assert os.path.getmtime(bin_path) >= os.path.getmtime(src_path)
+
+    def test_keeps_binary_when_source_is_absent(self, tmp_path, monkeypatch):
+        """An installed tree may ship the binary with no .c beside it."""
+        bin_path = tmp_path / "fuzz_loader"
+        bin_path.write_bytes(b"\x7fELF")
+        os.chmod(bin_path, 0o755)
+        os.utime(bin_path, (1_000_000, 1_000_000))
+        monkeypatch.setattr(
+            "fuzzer_tool.adapters.forkserver._FUZZ_LOADER_BIN",
+            str(bin_path),
+        )
+        assert _ensure_compiled() == str(bin_path)
+        assert bin_path.read_bytes() == b"\x7fELF"
 
 
 class TestForkserverRunner:
