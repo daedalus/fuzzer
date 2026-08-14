@@ -161,6 +161,40 @@ clears more expensive — and neither has been measured against a real target. T
 sign of commit 3 on edges/second is therefore unknown, and could be negative on a target
 that was not actually saturating.
 
+**Measured 2026-08-14, after the forkserver landed.** The memset table above reproduces
+on this machine (2.6 µs @ 8K, 82.2 µs @ 262K, 350.6 µs @ 1M, 1499.5 µs @ 4M). What the
+forkserver changes is what those numbers *mean*, because the exec they are a fraction of
+got several times cheaper:
+
+| map | share of a 305 µs exec (light target) | share of an 8000 µs exec (ASAN target) |
+|-----|---------------------------------------|----------------------------------------|
+| 8,192 | 0.9% | 0.0% |
+| 262,144 | 27.0% | 1.0% |
+| 1,048,576 | 115.0% | 4.4% |
+
+So the reset is irrelevant at the default map size and only bites in one specific
+combination: a target fast enough for the clear to dominate *and* edgy enough to need a
+map above 262144. A heavy target needs the big map but also has the long exec to absorb
+it. That is narrower than "at a 100 µs execution the 1 MiB clear already rivals the run"
+suggests, and it should inform how much risk this change is worth.
+
+**A cheaper fix was tried and does not work.** Resetting only the occupied slots from
+the Python side (no shim change, no layout change) is **8x slower than the memset**, at
+every occupancy from 8 to 10,000 active entries: finding the occupied slots costs a
+`np.flatnonzero` over the whole table, which is O(map_size) exactly like the memset but
+against a hand-tuned `memset`. Generation tagging really is the only route to O(1).
+
+**One hazard for whoever implements it.** The generation counter needs somewhere to
+live, and the front header is full (24 bytes, all four fields in use; `diag`'s 32 bits
+are split between ctx width and the drop counter). Growing `SHM_HEADER_SIZE` means the
+edge table moves, and `SHM_METADATA_SIZE` in `adapters/shm.py` must move with it — a
+target built against the *old* shim then writes its table at the old offset while the
+fuzzer reads at the new one. That failure is silent and looks like a coverage
+regression, not a version mismatch. Either carry a version marker in `diag` and refuse
+to attach on a mismatch, or find the bits inside the existing 24 (the top 8 bits of
+`count` are the obvious candidate: counts are clamped to 255 for bucketing long before
+they approach 2^24).
+
 ### 4. No hit-count bucketing on the SHM path
 
 **Status: FIXED.** `_check_new_coverage` (`adapters/shm.py`) now maintains a dense
