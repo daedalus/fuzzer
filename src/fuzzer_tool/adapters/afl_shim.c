@@ -157,6 +157,7 @@
 #include <unistd.h>
 #include <sys/ipc.h>
 #include <sys/shm.h>
+#include <sys/wait.h>
 
 #if __AFL_CMPLOG
 #include <dlfcn.h>
@@ -1264,6 +1265,86 @@ static void __afl_shim_abort(void) {
 }
 #define abort() __afl_shim_abort()
 
+/* ── Forkserver ───────────────────────────────────────────────────────
+ *
+ * The point of a forkserver is that the ELF load, the dynamic linker, libc
+ * init and the target's own constructors happen ONCE. Every subsequent
+ * execution is a fork() from a process already sitting at that point, which
+ * is why AFL gets several times the throughput of a spawn-per-input loop.
+ *
+ * fuzz_loader.c used to be called a forkserver while doing fork+exec per
+ * input, which pays the whole tax every time: measured 0.99x against
+ * posix_spawn on an ASAN target with real static init (93.8 vs 92.6
+ * exec/s). The exec is the cost, so the server has to live inside the
+ * target — here — not in the loader.
+ *
+ * Protocol (AFL's, on AFL's fd numbers):
+ *   target -> FORKSRV_FD+1 : 4-byte hello, once, after init
+ *   loader -> FORKSRV_FD   : 4 bytes, "run one"
+ *   target -> FORKSRV_FD+1 : 4-byte child pid
+ *   target -> FORKSRV_FD+1 : 4-byte wait status
+ *
+ * This installs late (default constructor priority), so ASAN's runtime and
+ * anything else registered earlier is already up when we fork. Coverage
+ * written during that pre-fork init is recorded once and then cleared by
+ * the fuzzer's per-exec reset; children never re-record it. That matches
+ * AFL and costs nothing — init edges are constant across inputs, so they
+ * carry no signal.
+ *
+ * Absent the control pipe (any normal run of the binary) this is a single
+ * failed read and the target runs exactly as before.                       */
+
+#define AFL_FORKSRV_FD 198
+
+static void __afl_start_forkserver(void) {
+    char hello[4] = {0, 0, 0, 0};
+
+    /* No control pipe: not being driven by the loader. */
+    if (write(AFL_FORKSRV_FD + 1, hello, 4) != 4) return;
+
+    /* This loop is itself instrumented — it lives in the same translation
+     * unit as the target. Left recording, it would (a) write its own edges
+     * into the map AFTER the fuzzer's per-exec reset, attributing the
+     * server's control flow to whatever input is running, and (b) leave
+     * __afl_prev_loc at a different value each iteration, so the same input
+     * would produce different edge ids on its first executions.
+     * (Both were measured: b'hello' gave 5, then 6, then a stable 6 edges.)
+     *
+     * Detaching __afl_area suppresses recording through the null check that
+     * is already the first line of __afl_map_edge, so the hot path pays
+     * nothing extra, and prev_loc is left untouched because that check
+     * returns before prev_loc is read or written — every child forks from
+     * an identical coverage state. */
+    struct __afl_entry *saved_area = __afl_area;
+    __afl_area = NULL;
+
+    while (1) {
+        char cmd[4];
+        if (read(AFL_FORKSRV_FD, cmd, 4) != 4) _exit(0);
+
+        pid_t child = fork();
+        if (child < 0) _exit(1);
+
+        if (child == 0) {
+            /* Child: restore recording, drop the control pipe, and fall
+             * through into main(). */
+            __afl_area = saved_area;
+            close(AFL_FORKSRV_FD);
+            close(AFL_FORKSRV_FD + 1);
+            return;
+        }
+
+        if (write(AFL_FORKSRV_FD + 1, &child, 4) != 4) _exit(0);
+
+        int status = 0;
+        while (waitpid(child, &status, 0) < 0) {
+            /* EINTR only — a stray signal must not be read as a crash. */
+        }
+
+        if (write(AFL_FORKSRV_FD + 1, &status, 4) != 4) _exit(0);
+    }
+}
+
 /* Auto-attach when loaded */
 __attribute__((constructor))
 static void __afl_auto_init(void) {
@@ -1281,6 +1362,9 @@ static void __afl_auto_init(void) {
 #endif
     __afl_install_crash_handlers();
     __afl_mapping = 0;
+    /* Last: the crash handlers must already be installed in the parent so
+     * every forked child inherits them. */
+    __afl_start_forkserver();
 }
 
 #endif /* __AFL_EDGE */
