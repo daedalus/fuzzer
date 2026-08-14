@@ -953,6 +953,12 @@ class Fuzzer:
 
         self._exec_time_tracker = ExecutionTimeTracker()
 
+        # Calibrated anomaly detection for unusually slow executions.
+        # Additive only: never replaces the hard f.timeout hang ceiling.
+        from fuzzer_tool.core.exec_time_anomaly import ExecTimeCalibrator
+
+        self._exec_time_anomaly = ExecTimeCalibrator()
+
         self._last_child_pid: int | None = None
 
         self.stats_file = Path(stats_file) if stats_file else None
@@ -2570,6 +2576,9 @@ class Fuzzer:
         # Record execution time for adaptive timeout calibration
         self._exec_time_tracker.record(t_elapsed)
 
+        # Feed the anomaly calibrator for slow-but-completed detection.
+        self._exec_time_anomaly.observe(t_elapsed)
+
         if self.mc:
             self.mc.execs_since_refit += 1
 
@@ -2819,6 +2828,11 @@ class Fuzzer:
 
         is_crash = self._is_crash(returncode, stderr)
         is_interesting = self._is_interesting(returncode, stderr)
+        is_slow = False
+        if not is_timeout and not is_crash:
+            thresh = self._exec_time_anomaly.threshold()
+            if thresh is not None and t_elapsed > thresh:
+                is_slow = True
         # Check new coverage (per-target SHM in multi-target mode).
         # Use is_new_coverage_with_edges() on SHM to get both the boolean
         # and the edge set in one buffer scan, avoiding redundant scans.
@@ -3056,7 +3070,7 @@ class Fuzzer:
             anneal_target = max(5000, self.max_len * 10)
             self._anneal_progress = min(1.0, self.exec_count / anneal_target)
 
-        success = bool(is_crash or is_interesting or has_new_coverage)
+        success = bool(is_crash or is_interesting or has_new_coverage or is_slow)
 
         # Per-operator credit. An operator that was selected but left the
         # buffer unchanged cannot have caused this round's outcome, so it
