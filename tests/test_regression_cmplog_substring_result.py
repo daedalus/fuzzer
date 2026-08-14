@@ -74,7 +74,18 @@ def _logged_operands(tmpdir):
     """Run the harness under the shim; return the set of logged operands."""
     with open(SHIM_REL) as fh:
         shim_source = fh.read()
-    shim = _build(tmpdir, shim_source, "shim.so", ["-shared", "-fPIC", "-ldl"])
+    shim = _build(
+        tmpdir,
+        shim_source,
+        "shim.so",
+        # -D__AFL_PRELOAD_ONLY is what CmplogCollector.start() uses, and it is
+        # what selects the cmplog half of the shim at all: without it
+        # __AFL_CMPLOG defaults to 0, every interceptor in this file is
+        # preprocessed away, and the .so preloads cleanly while logging
+        # nothing. The symptom is a missing $_CMPLOG_OUT rather than a wrong
+        # answer, which is why this read as an environment problem.
+        ["-shared", "-fPIC", "-D__AFL_PRELOAD_ONLY", "-ldl"],
+    )
     harness = _build(tmpdir, _HARNESS, "harness", [])
     log_path = os.path.join(tmpdir, "out.cmplog")
 
