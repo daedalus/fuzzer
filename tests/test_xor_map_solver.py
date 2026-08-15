@@ -20,6 +20,18 @@ from fuzzer_tool.core.xor_map_solver import (
     xor_model_from_dict,
     xor_model_to_dict,
 )
+from tests.conftest import requires_z3
+
+# Everything that reaches IncrementalXorMapSolver.solve() needs z3, and is
+# marked @requires_z3 below. Without it solve() returns (None, False) and
+# recover_xor_model() returns None for *every* input: the four positive
+# tests fail, and test_unsat_inconsistent_pairs passes for entirely the
+# wrong reason -- it asserts exactly the (None, False) that a missing solver
+# produces unconditionally. The vacuous pass is the more expensive of the
+# two: it reports the solver as verified on a machine where it never ran.
+#
+# verify_xor_model() and compute_xor_checksum() are pure Python and stay
+# unguarded.
 
 # ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -124,6 +136,7 @@ class TestComputeXorChecksum:
 
 
 class TestIncrementalXorMapSolver:
+    @requires_z3
     def test_recovers_identity_map_from_single_bit_pairs(self):
         """Each output bit j = input bit j; single-bit pairs uniquely force w_j_j=1."""
         solver = IncrementalXorMapSolver(8)
@@ -135,6 +148,7 @@ class TestIncrementalXorMapSolver:
         for j in range(8):
             assert solution[j] == [j]
 
+    @requires_z3
     def test_recovers_2bit_identity_map(self):
         solver = IncrementalXorMapSolver(2)
         # Use single-bit pairs: (1,1) and (2,2) uniquely determine the identity.
@@ -145,6 +159,7 @@ class TestIncrementalXorMapSolver:
         assert solution[0] == [0]
         assert solution[1] == [1]
 
+    @requires_z3
     def test_incremental_add_pair(self):
         solver = IncrementalXorMapSolver(2)
         # (1,1) uniquely forces w_0_0=1, w_1_1=1 via single-bit pairs.
@@ -159,6 +174,7 @@ class TestIncrementalXorMapSolver:
         assert is_sat_second is True
         assert solution_second == [[0], [1]]
 
+    @requires_z3
     def test_unsat_inconsistent_pairs(self):
         solver = IncrementalXorMapSolver(2)
         # Bit 0: pair (0b01,0b01) => w_0_0=1, pair (0b11,0b01) => w_0_0*1+w_0_1*1=0 -> w_0_1=1.
@@ -189,6 +205,7 @@ class TestIncrementalXorMapSolver:
 
 
 class TestRecoverXorModel:
+    @requires_z3
     def test_recovers_parity_model(self):
         # parity[j] = XOR of bits 0..7. Use pairs that exercise all 8 input
         # bits so every weight is uniquely constrained to 1.

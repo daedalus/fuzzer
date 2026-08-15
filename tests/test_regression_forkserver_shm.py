@@ -18,6 +18,7 @@ The shim is compiled with clang here because the edge callbacks are built on
 
 import gc
 import os
+import shutil
 import subprocess
 import time
 import weakref
@@ -80,6 +81,12 @@ int main(int argc, char **argv) {
 
 @pytest.fixture(scope="module")
 def target(tmp_path_factory):
+    # Guard here as well as on the tests: subprocess.run(["clang", ...])
+    # raises FileNotFoundError when clang is absent, and a fixture that
+    # raises is reported as an *error*, not a skip -- which is how two of
+    # these showed up as "collection errors" on a machine without clang.
+    if not shutil.which("clang"):
+        pytest.skip("clang not installed")
     d = tmp_path_factory.mktemp("fsrv")
     src = d / "t.c"
     src.write_text(_TARGET)
@@ -355,6 +362,7 @@ class TestRunnerIsCollectable:
     garbage. A full-suite run peaked at ~185 orphaned processes.
     """
 
+    @requires_clang
     def test_dropped_runner_is_garbage_collected(self, target):
         if _ensure_compiled() is None:
             pytest.skip("fuzz_loader failed to compile")
@@ -384,6 +392,7 @@ class TestRunnerIsCollectable:
         finally:
             shm.cleanup()
 
+    @requires_clang
     def test_drain_thread_holds_no_reference_to_the_runner(self, target):
         """The specific defect, asserted directly rather than by its effect."""
         if _ensure_compiled() is None:

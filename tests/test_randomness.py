@@ -259,12 +259,38 @@ class TestSequenceDiagnostics:
         assert permutation_test(d) > 0.05  # structurally blind to ties
 
     def test_rand_pool_is_clean(self):
+        """RandPool's stream passes both diagnostics on fixed seeds.
+
+        Was `RandPool()` -- OS entropy -- compared against a fixed alpha of
+        0.01. That is a permutation test with no seed: it fails ~1% of runs
+        *by construction*, on a correct pool, and it did (p=0.0096, then
+        6/6 clean on re-run). An intermittent CI failure that is right about
+        nothing costs more than the coverage it buys.
+
+        Seeding makes each p-value a constant decided once, here, rather
+        than a fresh coin flip per CI run. Several seeds instead of one,
+        because a single stream can be clean while the pool is not; the
+        seeds are arbitrary but fixed, so a regression that changes the
+        stream still moves these numbers.
+
+        alpha is 0.001, not 0.01, and that is not padding: 5 seeds x 2
+        diagnostics is 10 hypotheses, so a per-test 0.01 gives a ~10%
+        family-wise false-positive rate -- worse than the single unseeded
+        test it replaces. 0.001 Bonferroni-corrects back to ~1% family-wise.
+        Seed 1 makes the point empirically: its permutation p is 0.0063,
+        a clean stream that a fixed 0.01 rejects. That is the same event
+        that failed CI, reproduced on demand instead of once a hundred runs.
+        """
         from fuzzer_tool.core.rand_pool import RandPool
 
-        pool = RandPool()
-        d = np.array([pool.randrange(self.K) for _ in range(200000)])
-        assert permutation_test(d) > 0.01
-        assert repeat_test(d, self.K) > 0.01
+        alpha = 0.001  # 0.01 family-wise over 10 tests
+        for seed in (0, 1, 2, 3, 4):
+            pool = RandPool(seed=seed)
+            d = np.array([pool.randrange(self.K) for _ in range(200000)])
+            p_perm = permutation_test(d)
+            p_rep = repeat_test(d, self.K)
+            assert p_perm > alpha, f"permutation_test p={p_perm:.5f} at seed={seed}"
+            assert p_rep > alpha, f"repeat_test p={p_rep:.5f} at seed={seed}"
 
     def test_guards(self):
         rng = np.random.default_rng(1)

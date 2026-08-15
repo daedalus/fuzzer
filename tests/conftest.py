@@ -27,6 +27,29 @@ requires_z3 = pytest.mark.skipif(
 )
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _fuzz_loader_built():
+    """Build ``fuzz_loader`` once, before any test runs.
+
+    W3: in a fresh clone the binary does not exist (it is gitignored), and
+    the suite *hangs* rather than fails -- a test that starts a
+    ForkserverRunner blocks on a reply from a loader that was never built,
+    and the join only unblocks after the runner's grace period, per test.
+    Building it up front is a one-off ~0.3s and turns the failure mode from
+    "CI wedged" into "these tests skip".
+
+    Deliberately best-effort: no compiler is a legitimate environment (the
+    tests that need the loader already skip on ``_ensure_compiled() is
+    None``), so a failure here must not abort collection.
+    """
+    try:
+        from fuzzer_tool.adapters.forkserver import _ensure_compiled
+
+        _ensure_compiled()
+    except Exception:  # pragma: no cover - environment-dependent
+        pass
+
+
 def pytest_make_parametrize_id(config, val):
     """Shorten long byte-string parametrize IDs to keep test output readable."""
     if isinstance(val, bytes) and len(val) > 32:

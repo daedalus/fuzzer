@@ -49,6 +49,18 @@ jobs:
                        "conftest.py would skip the tests that need them")
           PY
 
+      # W3: fuzz_loader is gitignored, so a fresh checkout has none. Without
+      # it the suite *hangs* rather than fails -- a ForkserverRunner blocks
+      # waiting for a reply from a loader that does not exist, and each such
+      # test only unblocks after its grace period. conftest.py builds it in a
+      # session fixture, but do it explicitly here too: as a step it either
+      # succeeds or fails the job with a compiler error, instead of being
+      # swallowed by the fixture's best-effort except.
+      - name: Build fuzz_loader
+        run: |
+          python -c "from fuzzer_tool.adapters.forkserver import _ensure_compiled; \
+                     import sys; sys.exit(0 if _ensure_compiled() else 'fuzz_loader failed to build')"
+
       - name: Lint with ruff
         run: ruff check src/ tests/
 
