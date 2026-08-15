@@ -211,6 +211,27 @@ ENTROPY_FLAT_THRESHOLD = 0.001  # rate below which entropy is "flat"
 
 # ── Memory bounds ────────────────────────────────────────────────────
 CRASH_RATE_HISTORY_MAX = 500  # max entries in _crash_rate_execs/_crash_rate_counts
+
+# ── Adaptive timeout (--adaptive-timeout) ────────────────────────────────
+# suggested_timeout() reads the empirical CDF, so it needs a settled one:
+# below this many observations it is tracking the warm-up, not the target.
+ADAPTIVE_TIMEOUT_MIN_SAMPLES = 200
+# Relative change required before a retune is applied. Without a dead band
+# the value chases its own tail -- every retune changes which inputs time
+# out, which changes the distribution the next suggestion is drawn from.
+ADAPTIVE_TIMEOUT_HYSTERESIS = 0.25
+# Minimum execs between retunes, so a drifting target cannot turn this into
+# a per-100-exec handshake with the loader.
+ADAPTIVE_TIMEOUT_COOLDOWN_EXECS = 1_000
+# Absolute floor. Below ~5ms the deadline is measuring scheduler noise; the
+# loader clamps at 1ms independently (an all-zero itimer disarms).
+ADAPTIVE_TIMEOUT_FLOOR = 0.005
+# Ceiling, as a multiple of the timeout the caller asked for. Retuning is
+# allowed to loosen -- a target slower than the default produces false
+# timeouts, which is a correctness problem, not just a throughput one --
+# but not without bound, or one pathological input drags the deadline up
+# and every later hang costs that much wall clock.
+ADAPTIVE_TIMEOUT_MAX_GROWTH = 10.0
 MAX_CRASH_SIGS = 10_000  # max unique crash signatures before pruning old entries
 KERNEL_CRASHES_MAX = 500  # max kernel-verified crashes retained
 SEED_SECRETARY_MAX = 500  # max per-seed SecretaryStopping entries
@@ -470,6 +491,7 @@ class Fuzzer:
         no_shm=False,
         use_ptrace=False,
         adaptive_havoc=True,
+        adaptive_timeout=False,
         resume=False,
         trace_crashes=False,
         learn_format=False,
@@ -630,6 +652,16 @@ class Fuzzer:
         # caller asked for.
         self._max_len_floor = max_len
         self.timeout = timeout
+        # Adaptive timeout: retune self.timeout from the live
+        # ExecutionTimeTracker rather than leaving it fixed at construction.
+        # Opt-in, because suggested_timeout() is derived from one target's
+        # observed distribution and is not a safe global -- the default
+        # stays exactly where the caller put it.
+        self._adaptive_timeout = adaptive_timeout
+        self._timeout_initial = timeout
+        # (exec_count, old, new) per applied retune; reported at the end.
+        self._timeout_retunes: list[tuple[int, float, float]] = []
+        self._last_timeout_retune_exec = 0
         self.mutations_per_input = mutations_per_input
         self.use_coverage = use_coverage
         self.dictionary = dictionary or []
@@ -2524,6 +2556,68 @@ class Fuzzer:
             covered |= self._edge_tracker.seed_edges[k]
         self._favored = favored
 
+    def _maybe_retune_timeout(self) -> None:
+        """Feed ``suggested_timeout()`` back into the live timeout.
+
+        The tracker has always computed this; nothing ever consumed it, so
+        the timeout stayed at whatever it was constructed with and the
+        report printed a suggestion nobody acted on. Two things had to be
+        true before it could be applied: fractional timeouts had to survive
+        the loader handshake (c99bb27), and the forkserver had to be able to
+        accept a new deadline without a re-handshake (the TIMEOUT command).
+
+        The forkserver is updated *first* and the rest only follows if it
+        succeeded. Every other consumer reads ``self.timeout`` per exec, so
+        they cannot disagree with it; the loader is the one that is told
+        once and then believed. Updating ``self.timeout`` on a loader that
+        rejected the change would leave the reported deadline and the
+        enforced deadline different -- which is the entire defect class the
+        E2 timeout work was about, reintroduced from the other end.
+        """
+        if not self._adaptive_timeout:
+            return
+        tracker = self._exec_time_tracker
+        if tracker.count < ADAPTIVE_TIMEOUT_MIN_SAMPLES:
+            return
+        if self.exec_count - self._last_timeout_retune_exec < ADAPTIVE_TIMEOUT_COOLDOWN_EXECS:
+            return
+
+        proposed = tracker.suggested_timeout()
+        ceiling = self._timeout_initial * ADAPTIVE_TIMEOUT_MAX_GROWTH
+        proposed = max(ADAPTIVE_TIMEOUT_FLOOR, min(proposed, ceiling))
+
+        current = self.timeout
+        if current > 0 and abs(proposed - current) / current < ADAPTIVE_TIMEOUT_HYSTERESIS:
+            return
+
+        if self._forkserver is not None and not self._forkserver.set_timeout(proposed):
+            # No 'retune' capability (a stale loader binary), or the loader
+            # did not answer. Either way the deadline it enforces is not
+            # moving, so nothing else may move either. Disable rather than
+            # retry every cooldown: the capability will not appear mid-run.
+            log.warning(
+                "Adaptive timeout: loader would not accept %.3fs; disabling retuning", proposed
+            )
+            self._adaptive_timeout = False
+            return
+
+        applied = self._forkserver.timeout if self._forkserver is not None else proposed
+        for runner in (self._inprocess_runner, self._persistent_runner):
+            if runner is not None:
+                runner.timeout = applied
+
+        self._timeout_retunes.append((self.exec_count, current, applied))
+        self._last_timeout_retune_exec = self.exec_count
+        self.timeout = applied
+        log.info(
+            "Adaptive timeout: %.3fs -> %.3fs at exec %d (p99=%.3fs, n=%d)",
+            current,
+            applied,
+            self.exec_count,
+            tracker.p99,
+            tracker.count,
+        )
+
     def _reset_cmplog(self):
         """Flush cmplog buffer to disk before collecting tokens.
 
@@ -2813,6 +2907,9 @@ class Fuzzer:
             if len(self._crash_rate_execs) > CRASH_RATE_HISTORY_MAX:
                 del self._crash_rate_execs[:250]
                 del self._crash_rate_counts[:250]
+            # Same cadence as the other periodic bookkeeping; the method's
+            # own cooldown and hysteresis decide whether anything happens.
+            self._maybe_retune_timeout()
 
         for op in set(self._last_ops_used):
             self.op_counts[op] = self.op_counts.get(op, 0) + 1

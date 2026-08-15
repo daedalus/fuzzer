@@ -162,6 +162,10 @@ class ForkserverRunner:
         self._ready = False
         # Set from the loader's READY line by start(); see start().
         self.exec_mode: str = ""
+        # Capability tokens trailing the mode on the READY line. Empty for
+        # a loader built before they existed, which is exactly what
+        # set_timeout() needs to know.
+        self.capabilities: frozenset[str] = frozenset()
         self._last_stderr: str = ""
         self._input_file: str | None = None
         self._restarting = False
@@ -244,7 +248,13 @@ class ForkserverRunner:
             # the suffix existed. Only ever informational -- the protocol is
             # identical in every mode, so nothing branches on it.
             self.exec_mode = parts[1] if len(parts) > 1 else ""
-            log.info("Forkserver started: %s (mode=%s)", self.target, self.exec_mode or "?")
+            self.capabilities = frozenset(parts[2:])
+            log.info(
+                "Forkserver started: %s (mode=%s, caps=%s)",
+                self.target,
+                self.exec_mode or "?",
+                ",".join(sorted(self.capabilities)) or "-",
+            )
             return True
 
         log.warning("Forkserver failed to start: %r", resp)
@@ -338,6 +348,67 @@ class ForkserverRunner:
 
         self._last_stderr = stderr
         return rc, stderr
+
+    def set_timeout(self, seconds: float) -> bool:
+        """Retune the loader's per-exec deadline in place.
+
+        Returns True when the loader confirmed the new value.
+
+        The timeout is otherwise baked into the INIT handshake and fixed for
+        the life of the process, which is why ``suggested_timeout()`` was
+        only ever printed and never applied. Retuning by restarting would
+        work but throws away the forkserver and its warmed target on every
+        adjustment.
+
+        Declines rather than guesses when the loader did not advertise
+        ``retune``: an older binary ignores an unrecognised command
+        silently, so sending it anyway would leave the Python side reporting
+        a deadline the loader is not using — the same silent substitution as
+        the int()/atoi() truncation this replaces. The caller can restart to
+        apply the value instead.
+        """
+        if not (seconds > 0):
+            return False
+        if not self._ready or not self._proc:
+            self.timeout = seconds
+            return False
+        if "retune" not in self.capabilities:
+            log.debug("Forkserver: loader has no 'retune' capability; timeout unchanged")
+            return False
+
+        try:
+            self._proc.stdin.write(f"TIMEOUT {seconds:.6f}\n".encode())
+            self._proc.stdin.flush()
+        except (BrokenPipeError, OSError):
+            self._ready = False
+            return False
+
+        # Bounded wait on the ack. The loader answers immediately -- it is
+        # between execs when it reads a command -- so a stall here means the
+        # loader is wedged, and blocking forever on stdout would take the
+        # fuzz loop with it.
+        result: list = [None]
+
+        def _readline():
+            result[0] = self._proc.stdout.readline()
+
+        t = threading.Thread(target=_readline, daemon=True)
+        t.start()
+        t.join(timeout=self.timeout + _LOADER_GRACE)
+        if t.is_alive():
+            log.warning("Forkserver: no reply to TIMEOUT; leaving deadline at %.3fs", self.timeout)
+            return False
+
+        parts = (result[0] or b"").decode(errors="replace").split()
+        if len(parts) >= 2 and parts[0] == "TIMEOUT_OK":
+            # Trust the loader's echo, not the request: it clamps, and the
+            # two sides disagreeing about the deadline is the whole failure
+            # mode being fixed here.
+            self.timeout = float(parts[1])
+            return True
+
+        log.warning("Forkserver: unexpected reply to TIMEOUT: %r", result[0])
+        return False
 
     def update_shm_after_resize(self, new_env_id: str, new_size: int) -> None:
         """Restart the loader so its children inherit the resized SHM.

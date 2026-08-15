@@ -16,8 +16,10 @@ Protocol (stdin/stdout binary):
   Init:   "INIT <target> <func> <input_file> <timeout>\n"
           NOTE: paths must not contain whitespace (%s sscanf).
   Run:    "RUN <len>\n<data>"
+  Retune: "TIMEOUT <seconds>\n"        -> "TIMEOUT_OK <seconds>\n"
   Quit:   "QUIT\n"
   Reply:  "RC <rc> <err_len>\n<err>"
+  Ready:  "READY <mode> [capability ...]\n"   (mode: forkserver|exec|dlopen)
 
 <input_file> mirrors run_target_fast()'s temp file: the loader writes each
 input there and execs `<target> <input_file>` with stdin redirected from it,
@@ -514,12 +516,36 @@ int main(void) {
        nothing observable to assert on.  The suffix is optional by protocol
        -- older callers compare the line against "READY" and still match on
        the first token. */
-    printf("READY %s\n", is_executable ? (use_forksrv ? "forkserver" : "exec") : "dlopen");
+    /* Trailing space-separated capability tokens after the mode. Purely
+       additive: callers that only compare the first token, or only read
+       parts[1], are unaffected, and a caller that wants TIMEOUT can detect
+       support instead of guessing from a binary it did not build. */
+    printf("READY %s retune\n", is_executable ? (use_forksrv ? "forkserver" : "exec") : "dlopen");
     fflush(stdout);
 
     while (1) {
         if (!read_line(line, sizeof(line))) break;
         if (strcmp(line, "QUIT") == 0) break;
+
+        /* TIMEOUT <seconds> -- retune the deadline mid-run.
+           The timeout arrives in INIT and every arm site reads this global,
+           so updating it is the whole of the change. Without this the only
+           way to retune was to tear the loader down and re-handshake, which
+           discards the forkserver and its warmed target.
+           It replies, rather than being fire-and-forget: an unrecognised
+           command hits the `continue` below and is silently ignored, so a
+           caller talking to an older loader would believe it had tightened
+           a deadline that never moved -- the same silent substitution the
+           atoi()/alarm() timeout bug was. The caller only sends this when
+           READY advertised "retune", and then waits for TIMEOUT_OK. */
+        if (strncmp(line, "TIMEOUT ", 8) == 0) {
+            double t = strtod(line + 8, NULL);
+            if (t > 0.0) timeout_seconds = t;
+            printf("TIMEOUT_OK %.6f\n", timeout_seconds);
+            fflush(stdout);
+            continue;
+        }
+
         if (strncmp(line, "RUN ", 4) != 0) continue;
 
         long data_len = atol(line + 4);

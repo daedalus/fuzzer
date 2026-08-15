@@ -432,6 +432,7 @@ def cmd_fuzz(args):
         no_shm=args.no_shm,
         use_ptrace=args.ptrace,
         adaptive_havoc=not getattr(args, "no_adaptive_havoc", False),
+        adaptive_timeout=getattr(args, "adaptive_timeout", False),
         resume=args.resume,
         trace_crashes=args.trace,
         learn_format=getattr(args, "learn_format", False),
@@ -1419,6 +1420,14 @@ def main() -> int:
         action="store_true",
         help="Draw havoc's 11 inline sub-mutations uniformly instead of weighting "
         "them by measured new-coverage rate (adaptive weighting is on by default)",
+    )
+    fuzz_parser.add_argument(
+        "--adaptive-timeout",
+        action="store_true",
+        help="Retune --timeout during the run from the measured execution-time "
+        "distribution (p99 + 1 sd) instead of holding the value fixed. Off by "
+        "default: the suggestion is derived from one target's observed timings "
+        "and is not a safe global",
     )
     fuzz_parser.add_argument("-D", "--dict", help="Dictionary file")
     fuzz_parser.add_argument(

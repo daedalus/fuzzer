@@ -839,6 +839,17 @@ def _execution_time_analysis(f) -> str:
         f"  p50:            {tracker.p50 * 1000:.1f}ms",
         f"  p99:            {tracker.p99 * 1000:.1f}ms",
         f"  Suggested timeout: {tracker.suggested_timeout():.2f}s",
+    ]
+    # Whether that suggestion did anything. It was print-only for its whole
+    # existence, so a reader had no way to tell the two cases apart.
+    retunes = getattr(f, "_timeout_retunes", [])
+    if getattr(f, "_adaptive_timeout", False) or retunes:
+        lines.append(f"  Active timeout: {f.timeout:.3f}s (adaptive, {len(retunes)} retunes)")
+        for at_exec, old, new in retunes[-5:]:
+            lines.append(f"    exec {at_exec:>7,d}: {old:.3f}s -> {new:.3f}s")
+    else:
+        lines.append(f"  Active timeout: {f.timeout:.3f}s (fixed; --adaptive-timeout to retune)")
+    lines += [
         f"  CRPS (mean):    {tracker.mean_crps():.6f}",
         f"  CRPS trend:     {tracker.crps_trend():.6f} (+ = degrading)",
     ]
