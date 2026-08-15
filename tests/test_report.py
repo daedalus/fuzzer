@@ -193,10 +193,23 @@ class TestReportSections:
     def test_disk_footprint(self):
         f = _make_mock_fuzzer()
         with tempfile.TemporaryDirectory() as td:
-            # Create a dummy corpus file
-            Path(td).joinpath("seed.bin").write_bytes(b"hello")
+            # Seeds live under a subdirectory, matching load_corpus()
+            Path(td, "seeds").mkdir()
+            Path(td, "seeds", "seed.bin").write_bytes(b"hello")
             report = generate_report(f, td, td)
         assert "Disk Footprint" in report
+
+    def test_disk_footprint_ignores_state_file(self):
+        """State files at the corpus root are not seeds and must not be counted."""
+        from fuzzer_tool.services.report import _disk_footprint
+
+        with tempfile.TemporaryDirectory() as td:
+            Path(td, "seeds").mkdir()
+            Path(td, "seeds", "seed.bin").write_bytes(b"x" * 40)
+            Path(td, "state.pkl.gz").write_bytes(b"x" * 2_000_000)
+            result = _disk_footprint(td)
+        assert "Corpus files:    1" in result
+        assert "MB" not in result
 
     def test_bandit_calibration_absent_when_no_mc(self):
         f = _make_mock_fuzzer(mc=None)
@@ -233,15 +246,36 @@ class TestReportSections:
 
 class TestReportBranchCoverage:
     def test_coverage_growth_timeline(self):
-        """Lines 97-111: edge_tracker.json with cumulative_edges."""
+        """Growth comes from coverage_timeline: [[exec, edges], ...]."""
         f = _make_mock_fuzzer()
         with tempfile.TemporaryDirectory() as td:
             f.corpus_dir = td
-            # Create edge_tracker.json
-            et = {"cumulative_edges": list(range(100)), "seed_edges": {}}
+            timeline = [[10, 5], [100, 42], [250, 77], [300, 80]]
+            et = {
+                "cumulative_edges": list(range(80)),
+                "coverage_timeline": timeline,
+                "seed_edges": {},
+            }
             Path(td, "edge_tracker.json").write_text(json.dumps(et))
             report = generate_report(f, td, td)
         assert "Coverage growth" in report
+        # Milestone 100 must report the edge count at exec 100, not 100 edges
+        assert "iter    100:     42 edges" in report
+        # Final marker appears exactly once, at the last observed exec count
+        assert report.count("(final)") == 1
+        assert "iter    300:     80 edges (final)" in report
+        # Milestones beyond the run are not invented
+        assert "iter    500" not in report
+
+    def test_coverage_growth_ignores_edge_id_list(self):
+        """Without a timeline there is no growth series to print."""
+        f = _make_mock_fuzzer()
+        with tempfile.TemporaryDirectory() as td:
+            f.corpus_dir = td
+            et = {"cumulative_edges": list(range(3566)), "seed_edges": {}}
+            Path(td, "edge_tracker.json").write_text(json.dumps(et))
+            report = generate_report(f, td, td)
+        assert "Coverage growth" not in report
 
     def test_mutation_effectiveness_empty(self):
         """Line 120: empty op_counts returns empty."""
@@ -413,11 +447,13 @@ class TestReportBranchCoverage:
         from fuzzer_tool.services.report import _disk_footprint
 
         with tempfile.TemporaryDirectory() as td:
-            Path(td, "tiny.bin").write_bytes(b"x" * 50)
-            Path(td, "big.bin").write_bytes(b"x" * 500)
+            Path(td, "seeds").mkdir()
+            Path(td, "seeds", "tiny.bin").write_bytes(b"x" * 50)
+            Path(td, "seeds", "big.bin").write_bytes(b"x" * 500)
             result = _disk_footprint(td)
         assert "Small" in result
         assert "Large" in result
+        assert "1 file " in result  # singular, not "1 files"
 
     def test_bandit_calibration_with_data(self):
         """Lines 363-377: bandit calibration with Brier score."""
@@ -427,7 +463,7 @@ class TestReportBranchCoverage:
         f.mc = MagicMock()
         f.mc_bandit = True
         f.mc.brier_score.return_value = 0.15
-        f.mc.calibration_report.return_value = {"50-60%": (0.55, 0.60)}
+        f.mc.calibration_report.return_value = {"50-60%": (0.55, 0.60, 42)}
         result = _bandit_calibration(f)
         assert "Bandit Calibration" in result
         assert "0.15" in result
@@ -708,3 +744,94 @@ class TestReportSMT:
         assert "Queries solved:    7" in result
         assert "Queries failed:   2" in result
         assert "enabled (no queries)" not in result
+
+
+class TestReportInvariants:
+    """Bounds that the ffmpeg_read_nosan report violated.
+
+    Each of these is cheap enough to run on every report and would have
+    caught the corresponding defect at zero runtime cost.
+    """
+
+    def test_wilson_interval_stays_in_unit_range(self):
+        from fuzzer_tool.services.report import _wilson_interval
+
+        for n, k in ((1305, 0), (1305, 4), (1305, 1305), (10, 5), (1, 0)):
+            for z in (1.0, 2.0, 3.0):
+                lo, hi = _wilson_interval(n, k, z)
+                assert 0.0 <= lo <= hi <= 1.0, (n, k, z, lo, hi)
+
+    def test_zero_successes_still_has_upper_bound(self):
+        """0 crashes in 1305 execs is not certainty of a zero crash rate."""
+        from fuzzer_tool.services.report import _wilson_interval
+
+        lo, hi = _wilson_interval(1305, 0, 3.0)
+        assert lo == 0.0
+        assert hi > 0.0
+        assert hi < 0.02  # rule of three: ~3/n
+
+    def test_proportion_is_labelled_as_percent(self):
+        """4/1305 must not render as the bare number 0.3065."""
+        from fuzzer_tool.services.report import _format_proportion
+
+        out = _format_proportion(1305, 4)
+        assert out.startswith("0.3065%")
+        assert "-" not in out.split("±1σ:")[0]
+
+    def test_format_ci_inline_clamps_lower_bound(self):
+        from fuzzer_tool.services.report import _format_ci_inline
+
+        out = _format_ci_inline(24.4, 9.9, 19.8, 29.7, ".1f", lo_clamp=0.0)
+        # Every lower bound is floored at 0; the hyphen is the range separator,
+        # so check the parsed bounds rather than substring-matching a sign.
+        for band in out.split("±")[1:]:
+            lo = float(band.split(":")[1].split("-")[0])
+            assert lo >= 0.0, band
+        assert "0.0-54.1" in out
+
+    def test_preview_is_printable_and_single_line(self):
+        from fuzzer_tool.services.report import _preview
+
+        out = _preview(b"GIF87a\x00\xff\nmoov\r\x1b[31m")
+        assert "\n" not in out and "\r" not in out
+        assert all(0x20 <= ord(c) < 0x7F for c in out)
+
+    def test_histogram_bars_scale_with_count(self):
+        from fuzzer_tool.services.report import _corpus_overview
+
+        f = _make_mock_fuzzer()
+        with tempfile.TemporaryDirectory() as td:
+            Path(td, "seeds").mkdir()
+            for i in range(30):
+                Path(td, "seeds", f"s{i}").write_bytes(b"x" * 10)
+            for i in range(3):
+                Path(td, "seeds", f"m{i}").write_bytes(b"x" * 500)
+            out = _corpus_overview(f, td)
+        rows = {
+            line.split()[0]: line.count("#") for line in out.splitlines() if "#" in line
+        }
+        assert rows["<100B"] > rows["100B-1KB"], rows
+
+    def test_brier_outcome_is_binary(self):
+        """An unbounded reward weight must not leak into the outcome."""
+        from fuzzer_tool.core.schedulers.monte_carlo import MonteCarloScheduler
+
+        mc = MonteCarloScheduler()
+        mc.init_arm("op")
+        for _ in range(50):
+            mc.record_brier("op", success=True, weight=8.7)
+        assert 0.0 <= mc.brier_score() <= 1.0
+        for _, outcome in mc._brier_predictions:
+            assert outcome in (0.0, 1.0)
+
+    def test_calibration_actual_is_a_frequency(self):
+        from fuzzer_tool.core.schedulers.monte_carlo import MonteCarloScheduler
+
+        mc = MonteCarloScheduler()
+        mc.init_arm("op")
+        for i in range(200):
+            mc.record_brier("op", success=(i % 3 == 0), weight=5.0)
+        for _bin, (pred, actual, n) in mc.calibration_report().items():
+            assert 0.0 <= pred <= 1.0
+            assert 0.0 <= actual <= 1.0
+            assert n >= 5

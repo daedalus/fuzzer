@@ -19,6 +19,18 @@ except ImportError:
     _HAS_NUMPY = False
 
 
+# Shared milestone ladder for every "over time" table in the report. Coverage
+# growth and the crash-rate trend used different ladders (100/200/500/1000/2000
+# vs 100/500/1000/5000), so the two sections could not be read against each
+# other.
+MILESTONES = (100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000, 100000)
+
+# A binary Brier score is bounded by 1.0 (confident and always wrong).
+# 0.25 is the uninformative constant-0.5 predictor, not "random" in the
+# sense of the worst case.
+_BRIER_LEGEND = "(0=perfect, 0.25=uninformative, 1.0=worst)"
+
+
 def _confidence_interval(n, success_count=None):
     """Compute ±1σ, ±2σ, ±3σ confidence intervals.
 
@@ -40,19 +52,69 @@ def _confidence_interval(n, success_count=None):
     return (0.0, 0.0, 0.0, 0.0, 0.0)
 
 
-def _format_ci_inline(mean, ci_1, ci_2, ci_3, fmt=".1f", pct=False):
-    """Format as: mean ±1σ: lo-hi  ±2σ: lo-hi  ±3σ: lo-hi"""
+def _format_ci_inline(mean, ci_1, ci_2, ci_3, fmt=".1f", pct=False, lo_clamp=None):
+    """Format as: mean ±1σ: lo-hi  ±2σ: lo-hi  ±3σ: lo-hi
+
+    lo_clamp: floor applied to every lower bound after scaling. Throughput and
+    counts cannot go negative, but a symmetric Wald band around a small mean
+    happily prints one (the ffmpeg_read_nosan run reported a ±3σ throughput
+    lower bound of -5.5 execs/sec).
+    """
     # Convert to float to handle MagicMock objects in tests
     m = float(mean)
     s1, s2, s3 = float(ci_1), float(ci_2), float(ci_3)
     if pct:
         m, s1, s2, s3 = m * 100, s1 * 100, s2 * 100, s3 * 100
+
+    def lo(half):
+        v = m - half
+        return max(v, lo_clamp) if lo_clamp is not None else v
+
     return (
         f"{m:{fmt}}  "
-        f"±1σ: {m - s1:{fmt}}-{m + s1:{fmt}}  "
-        f"±2σ: {m - s2:{fmt}}-{m + s2:{fmt}}  "
-        f"±3σ: {m - s3:{fmt}}-{m + s3:{fmt}}"
+        f"±1σ: {lo(s1):{fmt}}-{m + s1:{fmt}}  "
+        f"±2σ: {lo(s2):{fmt}}-{m + s2:{fmt}}  "
+        f"±3σ: {lo(s3):{fmt}}-{m + s3:{fmt}}"
     )
+
+
+def _wilson_interval(n: int, k: int, z: float) -> tuple[float, float]:
+    """Wilson score interval for a binomial proportion, clamped to [0, 1].
+
+    The Wald interval that _confidence_interval computes degenerates at the
+    boundaries: at k=0 it returns a zero-width band (the ffmpeg_read_nosan run
+    reported a crash rate of "0.0000-0.0000" at ±3σ from 0 crashes in 1,305
+    executions, claiming certainty it did not have), and near p=0 it produces
+    negative lower bounds. Wilson stays inside [0, 1] and keeps non-zero width
+    at k=0, where its upper bound approximates the rule of three (~3/n).
+    """
+    if n <= 0:
+        return (0.0, 0.0)
+    p = k / n
+    z2 = z * z
+    denom = 1.0 + z2 / n
+    center = (p + z2 / (2 * n)) / denom
+    half = (z / denom) * math.sqrt(p * (1 - p) / n + z2 / (4 * n * n))
+    return (max(0.0, center - half), min(1.0, center + half))
+
+
+def _format_proportion(n: int, k: int, label_pct: bool = True) -> str:
+    """Format a rate with Wilson ±1σ/±2σ/±3σ bands.
+
+    Emitted as a percentage with an explicit '%' so the unit is unambiguous.
+    The previous formatting passed pct=True (scale by 100) together with a
+    '.4f' format and no '%' suffix, so 4 timeouts in 1,305 executions printed
+    as "0.3065" — a value that reads as a fraction but is really a percent,
+    off by exactly 100x from the 0.0031 a reader would compute.
+    """
+    p = (k / n) if n > 0 else 0.0
+    bands = []
+    for z in (1.0, 2.0, 3.0):
+        lo, hi = _wilson_interval(n, k, z)
+        bands.append(f"±{int(z)}σ: {lo * 100:.4f}%-{hi * 100:.4f}%")
+    scale = 100 if label_pct else 1
+    suffix = "%" if label_pct else ""
+    return f"{p * scale:.4f}{suffix}  " + "  ".join(bands)
 
 
 def generate_report(fuzzer, corpus_dir: str, crashes_dir: str) -> str:
@@ -125,7 +187,17 @@ def _run_summary(f) -> str:
     inv = getattr(f, "invocation", "")
     if inv:
         lines.append(f"  Invocation:      {inv}")
-    lines.append(f"  Input mode:      {'file' if getattr(f, 'file_mode', False) else 'stdin'}")
+    # In-process runners hand the buffer to the target function directly (via
+    # shared memory for --inprocess-direct); neither stdin nor an input file is
+    # involved, so reporting "stdin" there described a path the run never took.
+    if getattr(f, "_inprocess_runner", None) is not None:
+        direct = bool(getattr(f._inprocess_runner, "direct", False))
+        input_mode = "in-process (direct/SHM)" if direct else "in-process"
+    elif getattr(f, "file_mode", False):
+        input_mode = "file"
+    else:
+        input_mode = "stdin"
+    lines.append(f"  Input mode:      {input_mode}")
     if getattr(f, "target_args", None):
         lines.append(f"  Target args:     {' '.join(f.target_args)}")
     lines.extend(
@@ -154,14 +226,8 @@ def _run_summary(f) -> str:
         )
     lines.append(f"  SMT:             {'enabled' if smt_enabled else 'disabled'}")
     if execs > 0:
-        _, _, c1, c2, c3 = _confidence_interval(execs, crashes)
-        lines.append(
-            f"  Crash rate:      {_format_ci_inline(crashes / execs, c1, c2, c3, '.4f', True)}"
-        )
-        _, _, t1, t2, t3 = _confidence_interval(execs, timeouts)
-        lines.append(
-            f"  Timeout rate:    {_format_ci_inline(timeouts / execs, t1, t2, t3, '.4f', True)}"
-        )
+        lines.append(f"  Crash rate:      {_format_proportion(execs, crashes)}")
+        lines.append(f"  Timeout rate:    {_format_proportion(execs, timeouts)}")
     return "\n".join(lines)
 
 
@@ -252,7 +318,7 @@ def _coverage_analysis(f) -> str:
         "--- Coverage Analysis ---",
         f"  SHM map size:    {cov.size:,} bytes",
         f"  Unique edges:    {total_seen}",
-        f"  Coverage density:{density:.4f}%",
+        f"  Coverage density: {density:.4f}%",
     ]
 
     if buckets:
@@ -267,19 +333,45 @@ def _coverage_analysis(f) -> str:
 
     store = StateStore(f.corpus_dir)
     et_data = store.get("edge_tracker")
-    cum = et_data.get("cumulative_edges", []) if et_data else []
-    if cum:
-        # Show coverage at milestones
-        total = len(cum)
-        milestones = [100, 200, 500, 1000, 2000, 5000, 10000]
+    # "cumulative_edges" is sorted(self.cumulative_edges) -- the set of edge
+    # IDs, not a growth series. Reading it here meant len() was the edge total
+    # and every row printed the milestone as both the iteration and the edge
+    # count ("iter 100: 100 edges"), with a "final" row claiming iteration 3566
+    # on a 1,305-execution run. The growth series is "coverage_timeline":
+    # [[exec_count, edge_count], ...] recorded by record_coverage_snapshot.
+    timeline = [
+        (int(pt[0]), int(pt[1]))
+        for pt in (et_data.get("coverage_timeline", []) if et_data else [])
+        if len(pt) >= 2
+    ]
+    if timeline:
+        timeline.sort(key=lambda p: p[0])
+        final_exec, final_edges = timeline[-1]
+        rows: list[tuple[int, int]] = []
+        for m in MILESTONES:
+            if m > final_exec:
+                break  # never reached; do not invent a data point for it
+            # Last snapshot at or before the milestone.
+            edges_at = None
+            for exec_c, edge_c in timeline:
+                if exec_c <= m:
+                    edges_at = edge_c
+                else:
+                    break
+            if edges_at is not None:
+                rows.append((m, edges_at))
+        rows.append((final_exec, final_edges))
+
+        # Dedupe on iteration, keeping the last value seen for it, and emit the
+        # final marker exactly once. The old loop appended the final row from
+        # inside the milestone loop, so it repeated once per milestone.
+        seen: dict[int, int] = {}
+        for it, ed in rows:
+            seen[it] = ed
         lines.append("  Coverage growth:")
-        shown = set()
-        for m in milestones:
-            if m <= total:
-                lines.append(f"    iter {m:>5d}: {m} edges")
-                shown.add(m)
-            if total not in shown:
-                lines.append(f"    iter {total:>5d}: {total} edges (final)")
+        for it in sorted(seen):
+            marker = " (final)" if it == final_exec else ""
+            lines.append(f"    iter {it:>6,d}: {seen[it]:>6,d} edges{marker}")
 
     return "\n".join(lines)
 
@@ -351,10 +443,12 @@ def _mutation_edge_attribution(f) -> str:
         succ = successes.get(op, 0)
         pct = edge_val / total * 100 if total > 0 else 0
         edges_per_use = edge_val / count if count > 0 else 0
-        edges_per_succ = edge_val / succ if succ > 0 else 0
+        # With zero successes the ratio is undefined, not zero. Printing 0.00
+        # made operators that were credited with edges (byte_shuffle: 27.1)
+        # look like they produced nothing per success.
+        eps_str = f"{edge_val / succ:>12.2f}" if succ > 0 else f"{'n/a':>12s}"
         lines.append(
-            f"  {op:<22s} {edge_val:>8.1f} {pct:>6.1f}%  "
-            f"{edges_per_use:>9.2f}  {edges_per_succ:>12.2f}"
+            f"  {op:<22s} {edge_val:>8.1f} {pct:>6.1f}%  {edges_per_use:>9.2f}  {eps_str}"
         )
 
     lines.append(f"  {'TOTAL':<22s} {total:>8.1f} {'':>7s}")
@@ -478,8 +572,7 @@ def _seed_contribution(f) -> str:
         ce = meta.get("coverage_edges", 0)
         fc = meta.get("fuzz_count", 0)
         if ce > 0:
-            name = seed.decode(errors="replace") if isinstance(seed, bytes) else str(seed)
-            name = name[:40] + ("..." if len(name) > 40 else "")
+            name = _preview(seed, 40)
             ranked.append((name, ce, fc))
 
     if not ranked:
@@ -504,6 +597,33 @@ def _seed_contribution(f) -> str:
     return "\n".join(lines)
 
 
+def _scan_corpus_files(corpus_dir) -> list[Path]:
+    """Every file load_corpus() would treat as a seed.
+
+    Seeds live under subdirectories of corpus_dir (recursively), excluding
+    pruned/ and delta_*.json. A flat iterdir() on corpus_dir itself never
+    descends into seeds/ and instead picks up state.pkl.gz -- the unified
+    fuzzer state file, several MB by the end of a run -- which is not a seed
+    and was never loaded as an input.
+    """
+    p = Path(corpus_dir)
+    if not p.exists():
+        return []
+    entries: list[Path] = []
+    for sub in p.iterdir():
+        if not sub.is_dir() or sub.name == "pruned":
+            continue
+        for entry in sub.rglob("*"):
+            if not entry.is_file():
+                continue
+            if "pruned" in entry.relative_to(sub).parts:
+                continue  # nested pruned/ (e.g. seeds/pruned/), same as load_corpus
+            if entry.suffix == ".json" and entry.name.startswith("delta_"):
+                continue
+            entries.append(entry)
+    return entries
+
+
 def _corpus_overview(f, corpus_dir) -> str:
     """Summarize on-disk corpus seed files.
 
@@ -518,23 +638,7 @@ def _corpus_overview(f, corpus_dir) -> str:
     seed -- state.pkl.gz was never loaded as an input by load_corpus, it
     was just the only thing this scan could see.
     """
-    p = Path(corpus_dir)
-    if not p.exists():
-        return ""
-
-    entries: list[Path] = []
-    for sub in p.iterdir():
-        if not sub.is_dir() or sub.name == "pruned":
-            continue
-        for entry in sub.rglob("*"):
-            if not entry.is_file():
-                continue
-            if "pruned" in entry.relative_to(sub).parts:
-                continue  # nested pruned/ (e.g. seeds/pruned/), same as load_corpus
-            if entry.suffix == ".json" and entry.name.startswith("delta_"):
-                continue
-            entries.append(entry)
-
+    entries = _scan_corpus_files(corpus_dir)
     if not entries:
         return ""
 
@@ -566,8 +670,12 @@ def _corpus_overview(f, corpus_dir) -> str:
             buckets[">100KB"] += 1
 
     lines.append("  Size distribution:")
+    # Scale to the largest bucket. min(count, 40) clamps every bucket over 40
+    # to a full-width bar, so 123 / 187 / 109 all rendered identically and the
+    # histogram carried no information at all.
+    peak = max(buckets.values()) if buckets else 0
     for bucket, count in buckets.items():
-        bar = "#" * min(count, 40)
+        bar = "#" * round(count / peak * 40) if peak else ""
         lines.append(f"    {bucket:<12s} {count:>4d} {bar}")
 
     return "\n".join(lines)
@@ -649,13 +757,19 @@ def _crash_reproducibility(f) -> str:
 
 
 def _disk_footprint(corpus_dir: str) -> str:
-    p = Path(corpus_dir)
-    if not p.exists():
-        return ""
-    entries = [f for f in p.iterdir() if f.is_file() and not f.name.endswith((".json",))]
+    """On-disk size profile of the seed corpus.
+
+    Uses the same scan as _corpus_overview. This used to do a flat
+    p.iterdir() on corpus_dir, which sees none of the seeds (they live under
+    subdirectories) and instead picks up state.pkl.gz -- so the section
+    reported "6 corpus files, 1.7MB" for a 419-file, 330KB corpus, with the
+    multi-megabyte state file counted as a single oversized seed.
+    """
+    entries = _scan_corpus_files(corpus_dir)
     if not entries:
         return ""
-    total_size = sum(f.stat().st_size for f in entries)
+    sizes = [e.stat().st_size for e in entries]
+    total_size = sum(sizes)
     lines = [
         "",
         "--- Disk Footprint ---",
@@ -663,11 +777,11 @@ def _disk_footprint(corpus_dir: str) -> str:
         f"  Total size:      {_human_size(total_size)}",
     ]
     # Delta vs full analysis: check if any files are very small (< 100 bytes) vs large
-    small = [f for f in entries if f.stat().st_size < 100]
-    large = [f for f in entries if f.stat().st_size >= 100]
+    small = sum(1 for sz in sizes if sz < 100)
+    large = len(sizes) - small
     if small:
-        lines.append(f"  Small (<100B):   {len(small)} files (potential deltas)")
-        lines.append(f"  Large (>=100B):  {len(large)} files")
+        lines.append(f"  Small (<100B):   {small} {_plural(small, 'file')} (potential deltas)")
+        lines.append(f"  Large (>=100B):  {large} {_plural(large, 'file')}")
     return "\n".join(lines)
 
 
@@ -694,17 +808,23 @@ def _bandit_calibration(f) -> str:
         se = (var / n) ** 0.5
         ci1, ci2, ci3 = se, se * 2, se * 3
         lines.append(
-            f"  Brier score:       {_format_ci_inline(mean, ci1, ci2, ci3, '.4f')} "
-            f"(0=perfect, 0.25=random, 0.5=worst)"
+            f"  Brier score:       {_format_ci_inline(mean, ci1, ci2, ci3, '.4f', lo_clamp=0.0)} "
+            f"{_BRIER_LEGEND}"
         )
     else:
-        lines.append(f"  Brier score:       {brier:.4f} (0=perfect, 0.25=random, 0.5=worst)")
+        lines.append(f"  Brier score:       {brier:.4f} {_BRIER_LEGEND}")
     cal = f.mc.calibration_report()
     if cal:
         lines.append("  Calibration by predicted probability bin:")
         lines.append(f"    {'Bin':<12s} {'Predicted':>10s} {'Actual':>10s} {'Samples':>8s}")
-        for bin_label, (pred, actual) in cal.items():
-            lines.append(f"    {bin_label:<12s} {pred:>10.3f} {actual:>10.3f}")
+        for bin_label, entry in cal.items():
+            # calibration_report now returns (predicted, actual, n). Tolerate
+            # the old 2-tuple so a stale pickled scheduler doesn't crash the
+            # report.
+            pred, actual = entry[0], entry[1]
+            n = entry[2] if len(entry) > 2 else None
+            n_str = f"{n:>8d}" if n is not None else f"{'?':>8s}"
+            lines.append(f"    {bin_label:<12s} {pred:>10.3f} {actual:>10.3f} {n_str}")
     return "\n".join(lines)
 
 
@@ -715,7 +835,7 @@ def _execution_time_analysis(f) -> str:
     lines = [
         "",
         "--- Execution Time Analysis ---",
-        f"  Observations:   {tracker.count}",
+        f"  Observations:   {tracker.count} sampled of {f.exec_count:,} executions",
         f"  p50:            {tracker.p50 * 1000:.1f}ms",
         f"  p99:            {tracker.p99 * 1000:.1f}ms",
         f"  Suggested timeout: {tracker.suggested_timeout():.2f}s",
@@ -922,27 +1042,9 @@ def _corpus_health(f) -> str:
         )
 
     # Shannon entropy of corpus byte distribution
-    byte_freq = [0] * 256
-    total_bytes = 0
-    if _HAS_NUMPY:
-        for seed in f.corpus:
-            chunk = np.frombuffer(seed[:4096], dtype=np.uint8)
-            counts = np.bincount(chunk, minlength=256)
-            for i, c in enumerate(counts):
-                byte_freq[i] += c
-            total_bytes += len(chunk)
-    else:
-        for seed in f.corpus:
-            for b in seed[:4096]:  # cap per-seed to avoid huge corpus bias
-                byte_freq[b] += 1
-                total_bytes += 1
-    if total_bytes > 0:
-        entropy = 0.0
-        for count in byte_freq:
-            if count > 0:
-                p = count / total_bytes
-                entropy -= p * __import__("math").log2(p)
-        lines.append(f"  Byte entropy:      {entropy:.2f} bits (max=8.0)")
+    _ent = _corpus_byte_entropy(f.corpus)
+    if _ent is not None:
+        lines.append(f"  Byte entropy:      {_ent:.2f} bits (max=8.0)")
     return "\n".join(lines)
 
 
@@ -1054,18 +1156,22 @@ def _runtime_performance(f) -> str:
     lines.append(f"  Map size:         {f.map_size:,} bytes")
 
     # Corpus growth
-    added = f._total_corpus_attempts
+    attempts = f._total_corpus_attempts
     rejected = f._duplicate_reject_count
     pruned = f._pruned_count
-    lines.append(f"  Seeds added:      {added}")
+    # _total_corpus_attempts counts candidate insertions, not accepted seeds;
+    # labelling it "Seeds added" put it next to a corpus size it could never
+    # reconcile with (188 "added" against a 489-seed corpus).
+    lines.append(f"  Corpus attempts:  {attempts}")
+    lines.append(f"  Seeds accepted:   {max(attempts - rejected, 0)}")
     lines.append(f"  Duplicates:       {rejected} rejected")
     if pruned > 0:
         lines.append(f"  Seeds pruned:     {pruned}")
 
     # Dup rejection rate
-    if f._total_corpus_attempts > 0:
-        dup_rate = rejected / f._total_corpus_attempts * 100
-        lines.append(f"  Dup rejection:    {dup_rate:.1f}%")
+    if attempts > 0:
+        dup_rate = rejected / attempts * 100
+        lines.append(f"  Dup rejection:    {dup_rate:.1f}% of attempts")
 
     # Input size distribution
     if f._corpus_size_history:
@@ -1134,13 +1240,13 @@ def _entropy_metrics(f) -> str:
             n_edges = len(f._edge_tracker._global_edge_hits)
             max_ent = math.log2(n_edges) if n_edges > 1 else 0
             lines.append(f"  Edge entropy:     {ent:.2f} bits (max={max_ent:.2f})")
-            lines.append(f"  Simpson diversity:{simp:.4f} (0=monoculture, 1=uniform)")
+            lines.append(f"  Simpson diversity: {simp:.4f} (0=monoculture, 1=uniform)")
         except (TypeError, ValueError):
             lines.append("  Edge entropy:     n/a")
-            lines.append("  Simpson diversity:n/a")
+            lines.append("  Simpson diversity: n/a")
     else:
         lines.append("  Edge entropy:     n/a (no coverage data)")
-        lines.append("  Simpson diversity:n/a")
+        lines.append("  Simpson diversity: n/a")
 
     # Coverage uniformity via Rényi spectrum
     if f._edge_tracker and f._edge_tracker._global_edge_hits:
@@ -1175,32 +1281,11 @@ def _entropy_metrics(f) -> str:
     else:
         lines.append("  Entropy rate:     n/a (insufficient samples)")
 
-    # Byte entropy of corpus
+    # Byte entropy of corpus (same helper as Corpus Health -- one metric, one value)
     if f.corpus and isinstance(f.corpus, list):
-        try:
-            byte_counts = [0] * 256
-            total_bytes = 0
-            if _HAS_NUMPY:
-                for seed in f.corpus:
-                    chunk = np.frombuffer(seed, dtype=np.uint8)
-                    counts = np.bincount(chunk, minlength=256)
-                    for i, c in enumerate(counts):
-                        byte_counts[i] += c
-                    total_bytes += len(chunk)
-            else:
-                for seed in f.corpus:
-                    for b in seed:
-                        byte_counts[b] += 1
-                        total_bytes += 1
-            if total_bytes > 0:
-                byte_ent = 0.0
-                for c in byte_counts:
-                    if c > 0:
-                        p = c / total_bytes
-                        byte_ent -= p * math.log2(p)
-                lines.append(f"  Corpus byte entropy: {byte_ent:.2f} bits (max=8.0)")
-        except (TypeError, ValueError):
-            pass
+        _ent = _corpus_byte_entropy(f.corpus)
+        if _ent is not None:
+            lines.append(f"  Corpus byte entropy: {_ent:.2f} bits (max=8.0)")
 
     return "\n".join(lines)
 
@@ -1398,15 +1483,19 @@ def _edge_rarity(f) -> str:
     if rarity["total"] == 0:
         return ""
 
+    # Labels are built from the thresholds the stats actually applied. They
+    # used to be hardcoded as 2-5/6-20/>20 while the non-Morris code path
+    # bucketed at 2-3/4-10/>10, so the legend contradicted the numbers.
+    cold_hi, warm_hi = rarity.get("bounds", (3, 10))
     lines = [
         "",
         "--- Edge Rarity ---",
         f"  Total edges:      {rarity['total']}",
-        f"  Singleton (1x):   {rarity['singleton']}",
-        f"  Cold (2-5x):      {rarity['cold']}",
-        f"  Warm (6-20x):     {rarity['warm']}",
-        f"  Hot (>20x):       {rarity['hot']}",
-        f"  Avg seeds/edge:   {rarity['avg_seeds_per_edge']:.1f}",
+        f"  {'Singleton (1 seed):':<18s}{rarity['singleton']}",
+        f"  {f'Cold (2-{cold_hi} seeds):':<18s}{rarity['cold']}",
+        f"  {f'Warm ({cold_hi + 1}-{warm_hi} seeds):':<18s}{rarity['warm']}",
+        f"  {f'Hot (>{warm_hi} seeds):':<18s}{rarity['hot']}",
+        f"  {'Avg seeds/edge:':<18s}{rarity['avg_seeds_per_edge']:.1f}",
     ]
 
     # Seed irreplaceability
@@ -1434,9 +1523,8 @@ def _crash_rate_trend(f) -> str:
     # Sample at milestones
     execs = f._crash_rate_execs
     counts = f._crash_rate_counts
-    milestones = [100, 500, 1000, 5000, 10000]
     shown = set()
-    for m in milestones:
+    for m in MILESTONES:
         for i, exec_c in enumerate(execs):
             if exec_c >= m and m not in shown:
                 crash_c = counts[i]
@@ -1477,15 +1565,26 @@ def _elo_ratings(f) -> str:
     if not ranking:
         return ""
 
-    # BayesianEloTracker uses beta/tau instead of k_factor/decay
-    k_factor = getattr(f._elo, "k_factor", getattr(f._elo, "beta", "?"))
-    decay = getattr(f._elo, "decay", getattr(f._elo, "tau", "?"))
+    # BayesianEloTracker has no k_factor/decay -- it has beta (rating scale)
+    # and tau (per-match system noise), and its learning rate is the adaptive
+    # _effective_k(). Printing beta=200 under the label "K-factor" invited the
+    # reading that a single match could move a rating by 100 points.
     unrated = f._elo.get_unrated()
     lines = [
         "",
         "--- Elo Operator Ratings ---",
-        f"  K-factor:        {k_factor}",
-        f"  Decay:           {decay}",
+    ]
+    if hasattr(f._elo, "k_factor"):
+        lines.append(f"  K-factor:        {f._elo.k_factor}")
+        lines.append(f"  Decay:           {f._elo.decay}")
+    else:
+        eff_k = f._elo._effective_k() if hasattr(f._elo, "_effective_k") else None
+        lines.append(f"  Model:           Bayesian (Gaussian posteriors)")
+        lines.append(f"  Beta (scale):    {getattr(f._elo, 'beta', '?')}")
+        lines.append(f"  Tau (noise):     {getattr(f._elo, 'tau', '?')}")
+        if eff_k is not None:
+            lines.append(f"  Effective K:     {eff_k:.1f} (adaptive)")
+    lines += [
         f"  Min matches:     {f._elo.min_matches}",
         f"  Total matches:   {sum(f._elo._match_count.values()) // 2}",
         f"  Rated:           {len(ranking)} operators",
@@ -1538,26 +1637,34 @@ def _elo_ratings(f) -> str:
             elo_mu = getattr(f._elo, "initial_mu", getattr(f._elo, "default_rating", 1500))
             op_strategies = [p for p in strategy_ranking if not p[0].startswith("seed_")]
             seed_strategies = [p for p in strategy_ranking if p[0].startswith("seed_")]
+
+            def _strategy_block(title, group):
+                # Deltas are measured against the pool mean, not the constant
+                # initial_mu. The Bayesian update scales each side by its own
+                # sigma^2/(sigma^2+beta^2), so a match moves the two players by
+                # different amounts and the pool is not zero-sum: on the
+                # ffmpeg_read_nosan run both strategy pools had drifted about
+                # -65 points in aggregate, which made every strategy look like
+                # a loser against a fixed 1500 baseline. Relative standing
+                # within the pool is the meaningful quantity.
+                pool_mean = sum(r for _, r in group) / len(group)
+                width = max(len(name) for name, _ in group)
+                lines.append("")
+                lines.append(f"  {title}")
+                lines.append(f"    (pool mean {pool_mean:.0f}, initial {elo_mu:.0f})")
+                for name, rating in group:
+                    delta = rating - pool_mean
+                    sign = "+" if delta >= 0 else ""
+                    matches = f._elo._strategy_match_count.get(name, 0)
+                    lines.append(
+                        f"    {name:<{width}s}  {rating:>7.0f} "
+                        f"({sign}{delta:.0f} vs pool, {matches} matches)"
+                    )
+
             if op_strategies:
-                lines.append("")
-                lines.append("  Meta-scheduler operator strategies (Elo):")
-                for s, rating in op_strategies:
-                    delta = rating - elo_mu
-                    sign = "+" if delta >= 0 else ""
-                    matches = f._elo._strategy_match_count.get(s, 0)
-                    lines.append(
-                        f"    {s:<12s} {rating:>7.0f} ({sign}{delta:.0f}, {matches} matches)"
-                    )
+                _strategy_block("Meta-scheduler operator strategies (Elo):", op_strategies)
             if seed_strategies:
-                lines.append("")
-                lines.append("  Seed strategies (Elo):")
-                for s, rating in seed_strategies:
-                    delta = rating - elo_mu
-                    sign = "+" if delta >= 0 else ""
-                    matches = f._elo._strategy_match_count.get(s, 0)
-                    lines.append(
-                        f"    {s:<12s} {rating:>7.0f} ({sign}{delta:.0f}, {matches} matches)"
-                    )
+                _strategy_block("Seed strategies (Elo):", seed_strategies)
 
     # Compare with bandit if available
     if f.mc and f.mc_bandit and f.mc.arm_alpha:
@@ -1570,16 +1677,94 @@ def _elo_ratings(f) -> str:
         if elo_rank and bandit_rank:
             common = set(elo_rank) & set(bandit_rank)
             if common:
-                rank_diffs = [abs(elo_rank[op] - bandit_rank[op]) for op in common]
+                # Re-rank inside the intersection. The raw indices come from
+                # two differently-sized lists (Elo ranks only rated operators,
+                # the bandit ranks every arm), so subtracting them could report
+                # a max difference of 110 across 101 rated operators -- larger
+                # than the 100 that is arithmetically possible.
+                elo_common = sorted(common, key=lambda op: elo_rank[op])
+                bandit_common = sorted(common, key=lambda op: bandit_rank[op])
+                er = {op: i for i, op in enumerate(elo_common)}
+                br = {op: i for i, op in enumerate(bandit_common)}
+                rank_diffs = [abs(er[op] - br[op]) for op in common]
                 avg_diff = sum(rank_diffs) / len(rank_diffs)
                 max_diff = max(rank_diffs)
                 lines.append("")
                 lines.append(
                     f"  Elo vs Bandit:    avg rank diff={avg_diff:.1f}, "
-                    f"max={max_diff} ({len(common)} rated operators)"
+                    f"max={max_diff} (over {len(common)} operators ranked by both)"
                 )
 
     return "\n".join(lines)
+
+
+def _preview(data, width: int = 40) -> str:
+    """Printable, single-line preview of seed bytes.
+
+    Seed identifiers are raw input bytes. decode(errors="replace") emits
+    control characters and embedded newlines straight into the report, which
+    broke the Seed Contribution table across a dozen lines and corrupted the
+    file for any downstream parser. Escape to printable ASCII and hard-truncate.
+    """
+    if isinstance(data, str):
+        data = data.encode("utf-8", errors="replace")
+    if not isinstance(data, (bytes, bytearray)):
+        data = str(data).encode("utf-8", errors="replace")
+    out = []
+    for b in data[:width]:
+        if 0x20 <= b < 0x7F and b != 0x5C:
+            out.append(chr(b))
+        elif b == 0x5C:
+            out.append("\\\\")
+        else:
+            out.append(f"\\x{b:02x}")
+        if len(out) >= width:
+            break
+    text = "".join(out)[:width]
+    return text + ("..." if len(data) > width else "")
+
+
+def _corpus_byte_entropy(corpus, cap: int = 4096) -> float | None:
+    """Shannon entropy of the corpus byte distribution, in bits/byte.
+
+    Single implementation shared by Corpus Health and Entropy & Diversity.
+    These were two separate loops with different per-seed caps (one sliced
+    seed[:4096], the other consumed whole seeds), so the same metric printed
+    two values in the same report -- 6.48 and 6.49 bits.
+    """
+    if not corpus:
+        return None
+    byte_freq = [0] * 256
+    total = 0
+    try:
+        if _HAS_NUMPY:
+            for seed in corpus:
+                chunk = np.frombuffer(bytes(seed[:cap]), dtype=np.uint8)
+                if chunk.size == 0:
+                    continue
+                counts = np.bincount(chunk, minlength=256)
+                for i, c in enumerate(counts):
+                    byte_freq[i] += int(c)
+                total += int(chunk.size)
+        else:
+            for seed in corpus:
+                for b in seed[:cap]:
+                    byte_freq[b] += 1
+                    total += 1
+    except (TypeError, ValueError):
+        return None
+    if total <= 0:
+        return None
+    ent = 0.0
+    for count in byte_freq:
+        if count > 0:
+            pr = count / total
+            ent -= pr * math.log2(pr)
+    return ent
+
+
+def _plural(n: int, word: str) -> str:
+    return word if n == 1 else word + "s"
 
 
 def _human_size(n: int) -> str:
