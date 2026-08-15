@@ -1143,11 +1143,17 @@ def byte_shuffle(data: bytes, rng=None) -> bytes:
     """
     if len(data) <= 1:
         return data
+    r = _get_rng(rng)
     result = bytearray(data)
     # Shuffle only a random 20-50% subset
-    n = max(2, len(result) // _get_rng(rng).randint(2, 5))
-    start = _get_rng(rng).randint(0, max(0, len(result) - n))
-    _get_rng(rng).shuffle(result[start : start + n])
+    n = max(2, len(result) // r.randint(2, 5))
+    start = r.randint(0, max(0, len(result) - n))
+    # bytearray slicing returns a *copy*, so shuffling result[start:start+n]
+    # in place discarded the result and left `result` untouched (no-op).
+    # Shuffle the copy, then assign it back into the buffer.
+    sub = result[start : start + n]
+    r.shuffle(sub)
+    result[start : start + n] = sub
     return bytes(result)
 
 

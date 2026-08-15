@@ -1,7 +1,10 @@
 """Tests for mutations module."""
 
+import random
 import tempfile
 from pathlib import Path
+
+from fuzzer_tool.core.mutations.generic import byte_shuffle
 
 from fuzzer_tool.core.mutations import (
     DICT_MUTATIONS,
@@ -215,3 +218,27 @@ class TestRadamsaMutateNum:
 
         result = radamsa_mutate_num(1_000_000)
         assert isinstance(result, int)
+
+
+class TestByteShuffleRegression:
+    """Regression: byte_shuffle shuffled a throwaway bytearray slice copy and
+    returned the input unchanged (0/200). It must actually permute a subrange
+    while preserving the byte multiset and staying reproducible under a seed."""
+
+    def test_actually_permutes(self):
+        data = bytes(range(64))
+        changed = sum(byte_shuffle(data, random.Random(i)) != data for i in range(200))
+        assert changed >= 190  # identity permutations are rare for a >=12-byte subrange
+
+    def test_preserves_multiset(self):
+        data = bytes(range(64))
+        for i in range(50):
+            assert sorted(byte_shuffle(data, random.Random(i))) == sorted(data)
+
+    def test_deterministic_under_seed(self):
+        data = bytes(range(64))
+        assert byte_shuffle(data, random.Random(7)) == byte_shuffle(data, random.Random(7))
+
+    def test_short_input_is_a_noop(self):
+        assert byte_shuffle(b"", random.Random(1)) == b""
+        assert byte_shuffle(b"x", random.Random(1)) == b"x"

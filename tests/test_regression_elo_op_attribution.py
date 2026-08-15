@@ -11,9 +11,11 @@ operator in a round identically:
    1000/1000 rounds fell through to the cross-iteration fallback.
 
 2. An operator that was selected but left the buffer unchanged was scored
-   as a full winner. On a single-seed corpus ``splice``, ``crossover``,
-   ``byte_shuffle`` and ``redqueen_xform`` change nothing 100% of the time
-   (measured over 2500 execs) yet were credited on every successful round.
+   as a full winner. On a single-seed corpus ``splice``, ``crossover`` and
+   ``redqueen_xform`` change nothing 100% of the time (measured over 2500
+   execs) yet were credited on every successful round. (``byte_shuffle`` was
+   also inert then, but for an unrelated reason -- a slice-copy bug that made
+   it a no-op regardless of corpus size; it now permutes in place.)
 
 3. The cross-iteration fallback ignored the previous round's outcome,
    scoring the earlier round at 0.7 over the later one on every failure.
