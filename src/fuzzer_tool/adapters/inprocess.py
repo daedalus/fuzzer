@@ -66,7 +66,7 @@ if os.path.isfile(target) and os.access(target, os.X_OK) \
         stderr=subprocess.PIPE,
     )
     try:
-        _, stderr = proc.communicate(input=data, timeout=int(os.environ.get('_TIMEOUT', '5')))
+        _, stderr = proc.communicate(input=data, timeout=float(os.environ.get('_TIMEOUT', '5')))
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait()
@@ -634,7 +634,9 @@ class InProcessRunner:
             return -2, "loader not initialized"
         try:
             env = os.environ.copy()
-            env["_TIMEOUT"] = str(int(self.timeout))
+            # Float, not int(): a sub-second timeout truncated to "0" here,
+            # which downstream reads as "unset" and replaces with a default.
+            env["_TIMEOUT"] = f"{self.timeout:.6f}"
 
             if self._shim and self._shim.shim_path:
                 env["_COV_SHM_PATH"] = self._shim.shim_path

@@ -52,6 +52,7 @@ Timeout enforcement:
 #include <setjmp.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <sys/time.h>
 
 /* Inputs arrive over the stdin pipe and are consumed immediately by
    read_bytes(), so there is no pipe-buffer deadlock and no need for the
@@ -118,7 +119,32 @@ static void write_bytes(const uint8_t *buf, size_t n) {
 static char target_path_global[256] = {0};
 static char input_path[256] = {0};
 static int input_fd = -1;
-static int timeout_seconds = 5;
+static double timeout_seconds = 5.0;
+
+/* alarm() takes whole seconds, so it cannot express the sub-second timeouts a
+ * fast in-process target wants (a p99 exec of ~29ms suggests ~0.04s). Every
+ * alarm() site below goes through this instead. Values are clamped to a 1ms
+ * floor: setitimer with an all-zero it_value disarms the timer rather than
+ * firing immediately, which would silently mean "no timeout at all". */
+static void arm_timeout(double seconds) {
+    struct itimerval tv;
+    if (!(seconds > 0.0)) seconds = 5.0;
+    if (seconds < 0.001) seconds = 0.001;
+    tv.it_value.tv_sec = (time_t)seconds;
+    tv.it_value.tv_usec = (suseconds_t)((seconds - (double)(time_t)seconds) * 1e6);
+    tv.it_interval.tv_sec = 0;
+    tv.it_interval.tv_usec = 0;
+    setitimer(ITIMER_REAL, &tv, NULL);
+}
+
+static void disarm_timeout(void) {
+    struct itimerval tv;
+    tv.it_value.tv_sec = 0;
+    tv.it_value.tv_usec = 0;
+    tv.it_interval.tv_sec = 0;
+    tv.it_interval.tv_usec = 0;
+    setitimer(ITIMER_REAL, &tv, NULL);
+}
 
 /* SIGALRM handler for direct .so timeout — longjmps back to caller */
 static void timeout_handler(int sig) {
@@ -298,12 +324,12 @@ static int start_forkserver(void) {
     sigaction(SIGALRM, &sa, NULL);
     timed_out = 0;
     exec_child_pid = -1;   /* do not let the handler kill the target here */
-    alarm(timeout_seconds > 0 ? timeout_seconds : 5);
+    arm_timeout(timeout_seconds);
 
     char hello[4];
     int ok = read_full(st[0], hello, 4);
 
-    alarm(0);
+    disarm_timeout();
     signal(SIGALRM, SIG_DFL);
 
     if (!ok) {
@@ -338,7 +364,7 @@ static int run_forkserver(const uint8_t *data, size_t len, uint8_t *err, int *er
     sigaction(SIGALRM, &sa, NULL);
     timed_out = 0;
     exec_child_pid = child;   /* handler SIGKILLs this run's child only */
-    alarm(timeout_seconds);
+    arm_timeout(timeout_seconds);
 
     int status = 0;
     int ok = read_full(fsrv_st_fd, &status, 4);
@@ -349,7 +375,7 @@ static int run_forkserver(const uint8_t *data, size_t len, uint8_t *err, int *er
         if (!ok) ok = read_full(fsrv_st_fd, &status, 4);
     }
 
-    alarm(0);
+    disarm_timeout();
     signal(SIGALRM, SIG_DFL);
     exec_child_pid = -1;
 
@@ -395,7 +421,7 @@ static int run_executable(const uint8_t *data, size_t len, uint8_t *err, int *er
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = 0;  /* NO SA_RESTART — we want read()/waitpid() interrupted */
     sigaction(SIGALRM, &sa, NULL);
-    alarm(timeout_seconds);
+    arm_timeout(timeout_seconds);
 
     *err_len = drain_stderr(errfd[0], err, MAX_ERR);
     close(errfd[0]);
@@ -406,7 +432,7 @@ static int run_executable(const uint8_t *data, size_t len, uint8_t *err, int *er
         waited = waitpid(pid, &status, 0);
     } while (waited < 0 && errno == EINTR && !timed_out);
 
-    alarm(0);
+    disarm_timeout();
     signal(SIGALRM, SIG_DFL);
     exec_child_pid = -1;
 
@@ -439,8 +465,12 @@ int main(void) {
     char timeout_str[16] = "5";
     sscanf(line, "INIT %255s %255s %255s %15s", target_path_global, func_name, input_path,
            timeout_str);
-    timeout_seconds = atoi(timeout_str);
-    if (timeout_seconds <= 0) timeout_seconds = 5;
+    /* strtod, not atoi: the sender may pass a fractional timeout, and atoi
+     * truncated anything under one second to 0 -- which this fallback then
+     * turned into 5s. A requested 0.04s silently became 5s, 125x larger and
+     * the opposite of what tightening the timeout is for. */
+    timeout_seconds = strtod(timeout_str, NULL);
+    if (!(timeout_seconds > 0.0)) timeout_seconds = 5.0;
 
     /* Detect shared libraries by extension, not execute permission.
        .so/.dylib files often have +x set but must be loaded via dlopen,
@@ -544,9 +574,9 @@ int main(void) {
 
             timed_out = 0;
             if (sigsetjmp(timeout_jmp, 1) == 0) {
-                alarm(timeout_seconds);
+                arm_timeout(timeout_seconds);
                 rc = target_fn(data, (size_t)data_len);
-                alarm(0);
+                disarm_timeout();
             } else {
                 /* Longjmp from timeout_handler */
                 rc = -1;

@@ -83,8 +83,11 @@ def _close_streams(proc: subprocess.Popen) -> None:
 STDERR_LINES_MAX = 100  # max stderr lines retained from child processes
 
 # Seconds allowed on top of the per-exec timeout before the loader process
-# itself is presumed hung. The loader's alarm fires at int(timeout); this
-# covers reaping the child and draining its stderr afterwards.
+# itself is presumed hung. The loader arms an interval timer at the exact
+# (possibly fractional) timeout; this covers reaping the child and draining
+# its stderr afterwards. It stays a flat second rather than scaling with the
+# timeout, because the work it covers is process teardown, whose cost does
+# not shrink just because the target got a tighter deadline.
 _LOADER_GRACE = 1.0
 
 
@@ -219,7 +222,13 @@ class ForkserverRunner:
         )
         self._stderr_thread.start()
 
-        init = f"INIT {self.target} {self.function_name} {self._input_file} {int(self.timeout)}\n"
+        # %.6f, not int(): int(0.04) is 0, and the loader's `<= 0` fallback
+        # then substituted 5s -- so asking for a tighter timeout silently
+        # produced a 125x looser one. The loader parses this with strtod.
+        init = (
+            f"INIT {self.target} {self.function_name} "
+            f"{self._input_file} {self.timeout:.6f}\n"
+        )
         try:
             self._proc.stdin.write(init.encode())
             self._proc.stdin.flush()
@@ -288,7 +297,7 @@ class ForkserverRunner:
 
         t = threading.Thread(target=_readline, daemon=True)
         t.start()
-        # Wait past the loader's own alarm(int(timeout)) before declaring the
+        # Wait past the loader's own timeout before declaring the
         # loader itself hung: it needs to reap the child and drain its stderr
         # after firing, and joining at exactly the alarm deadline would tear
         # down a healthy loader on every timing-out input.
