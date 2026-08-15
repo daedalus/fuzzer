@@ -346,7 +346,7 @@ void __afl_map_shm(void) {
      * ExecutionRunner.is_crash() scans stderr for (SIGSEGV, SIGABRT,
      * SIGFPE, SIGBUS, "Segmentation fault", "Aborted"), so a diagnostic
      * cannot be misread as a crashing input. */
-    if (shmid <= 0) {
+    if (shmid < 0) {
         char msg[128];
         int n = snprintf(msg, sizeof(msg),
                          "__afl_shim: __AFL_SHM_ID=%.32s is not a valid segment id"
@@ -622,7 +622,7 @@ static void __afl_map_dist_shm(void) {
     char *id = getenv("__AFL_DIST_SHM_ID");
     if (!id) return;
     int shmid = atoi(id);
-    if (shmid <= 0) return;
+    if (shmid < 0) return;
     void *p = shmat(shmid, NULL, 0);
     if (p == (void *)-1) return;
     __afl_dist_count = (uint32_t *)p;
