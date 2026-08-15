@@ -266,31 +266,46 @@ class MonteCarloScheduler:
         """Record a prediction-outcome pair for Brier score diagnostics.
 
         The predicted probability is the Beta distribution mean for this arm
-        at the time of selection. The outcome is the reward weight (1.0 for
-        unweighted success, fractional for surprisal-weighted).
+        at the time of selection. The outcome is *binary*: the event being
+        predicted is "did this operator succeed", and the Beta mean is a
+        probability for exactly that event.
+
+        `weight` is accepted for call-site symmetry with record() but is
+        deliberately not used as the outcome. It carries the surprisal- and
+        cost-adjusted reward, which is unbounded above; feeding it in here
+        produced outcomes far outside [0, 1] and a "Brier score" in the tens
+        (35.57 on the ffmpeg_read_nosan run) for a statistic bounded by 1.
+
         Brier score = mean((predicted - actual)²) — lower is better.
         """
         a = self.arm_alpha.get(name, 1.0)
         b = self.arm_beta.get(name, 1.0)
         predicted = a / (a + b)  # Beta mean = expected success probability
-        outcome = weight if success else 0.0
+        outcome = 1.0 if success else 0.0
         self._brier_predictions.append((predicted, outcome))
 
     def brier_score(self) -> float:
         """Mean Brier score over recent predictions.
 
         Returns 0.0 if no data. Lower is better calibrated:
-        - 0.0 = perfect calibration
-        - 0.25 = random baseline
-        - 0.5 = worst possible
+        - 0.0  = perfect calibration
+        - 0.25 = uninformative (constant 0.5 predictor)
+        - 1.0  = worst possible (confident and always wrong)
         """
         if not self._brier_predictions:
             return 0.0
         return sum((p - o) ** 2 for p, o in self._brier_predictions) / len(self._brier_predictions)
 
-    def calibration_report(self) -> dict[str, float]:
+    def calibration_report(self) -> dict[str, tuple[float, float, int]]:
         """Compute per-bin calibration: among predictions in [0,0.1), [0.1,0.2), etc.,
-        what fraction actually succeeded? Returns bins where we have enough data."""
+        what fraction actually succeeded?
+
+        Returns {bin_label: (mean_predicted, observed_frequency, n_samples)} for
+        bins with enough data. n_samples is part of the tuple because a bin's
+        observed frequency is meaningless without knowing how many predictions
+        landed in it — the report previously declared a Samples column and then
+        had nothing to put in it.
+        """
         if not self._brier_predictions:
             return {}
         bins: dict[int, list[tuple[float, float]]] = {}
@@ -303,7 +318,7 @@ class MonteCarloScheduler:
                 continue
             mean_pred = sum(p for p, _ in pairs) / len(pairs)
             mean_actual = sum(o for _, o in pairs) / len(pairs)
-            report[f"{b * 10}-{b * 10 + 10}%"] = (mean_pred, mean_actual)
+            report[f"{b * 10}-{b * 10 + 10}%"] = (mean_pred, mean_actual, len(pairs))
         return report
 
     def add_elite(self, data: bytes, score: int, temperature: float = 1.0) -> None:
