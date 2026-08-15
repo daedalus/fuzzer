@@ -93,9 +93,18 @@ This is the third instance of the same shape in a week, after `__AFL_FORKSRV`
 every scorer, never passed). A code path that cannot report whether it ran will
 eventually not run. The cheap defences, in order of cost:
 
-- Log the tier, not just the result. `estimate_map_size()` now has enough
-  information to say which of the three produced the number.
-- Assert the tier in tests, not just the type. `test_guard_count_drives_map_size`
-  asserts `estimate_map_size(t) == _size_from_blocks(guards, ctx)`, which fails
-  if sizing silently reverts to estimation.
+- Log the tier, not just the result. `estimate_map_size()` now emits the block
+  count, the source, whether that source is exact or estimated, and whether the
+  cap bound, on every call.
+- Return the tier, so it can be asserted rather than grepped.
+  `estimate_map_size_detail()` gives a `MapSizeEstimate(entries, blocks,
+  source, ctx_bits, capped)` with an `.exact` property;
+  `TestEstimateMapSizeProvenance` asserts `source == "sancov_guards"` on the
+  built matrix, which fails if sizing silently reverts to estimation.
 - Never write a test whose assertions are all inside `if result is not None`.
+
+The general form: a fallback chain needs to name the link it stopped at. Every
+tier here returns an `int`, so the type system cannot distinguish 91 blocks read
+out of a section from 3200 blocks inferred from instruction density, and neither
+can any caller. Making provenance part of the return value is what turns a
+silent degradation into a visible one.

@@ -1,15 +1,19 @@
 """Tests for core/elf.py — ELF parsing for sancov counter discovery."""
 
 import glob
+import logging
 import os
 import struct
 
 import pytest
 
 from fuzzer_tool.core.elf import (
+    MAP_SIZE_DEFAULT,
+    _map_size_max,
     _size_from_blocks,
     detect_ctx_bits,
     estimate_map_size,
+    estimate_map_size_detail,
     find_load_segment,
     parse_sancov_guard_count,
     parse_sancov_offsets,
@@ -1283,3 +1287,77 @@ class TestParseSancovGuardCount:
             count = parse_sancov_guard_count(t)
             assert count is not None
             assert estimate_map_size(t) == _size_from_blocks(count, detect_ctx_bits(t) or 0)
+
+
+class TestEstimateMapSizeProvenance:
+    """The tier that produced a map size must be observable.
+
+    A silent fallback from "exact" to "estimated" is what hid the
+    __sancov_cntrs/__sancov_guards mismatch for the whole life of
+    estimate_map_size(): tier 3 always returns a plausible number, so a
+    caller (or a test) checking only the number cannot tell a measurement
+    from a guess.
+    """
+
+    class _Profile:
+        text_size = 40000
+        total_branches = 900
+
+    class _HugeProfile:
+        text_size = 10_000_000
+        total_branches = 5_000_000
+
+    def test_guard_instrumented_target_is_exact(self):
+        targets = TestParseSancovGuardCount._guard_targets()
+        if not targets:
+            pytest.skip("no trace-pc-guard targets built")
+        for t in targets:
+            est = estimate_map_size_detail(t)
+            assert est.source == "sancov_guards"
+            assert est.exact
+            assert est.blocks == parse_sancov_guard_count(t)
+
+    def test_uninstrumented_binary_is_not_exact(self):
+        est = estimate_map_size_detail("/bin/true")
+        assert est.source in ("branch_density", "default")
+        assert not est.exact
+
+    def test_profile_tier_reported(self):
+        est = estimate_map_size_detail("/bin/true", self._Profile())
+        assert est.source == "profile"
+        assert est.blocks == 900
+        assert not est.exact
+
+    def test_default_tier_reported(self, tmp_path):
+        p = tmp_path / "not-an-elf"
+        p.write_bytes(b"nope")
+        est = estimate_map_size_detail(str(p))
+        assert est.source == "default"
+        assert est.blocks == 0
+        assert est.entries == MAP_SIZE_DEFAULT
+
+    def test_cap_is_flagged(self):
+        est = estimate_map_size_detail("/bin/true", self._HugeProfile())
+        assert est.capped
+        assert est.entries == _map_size_max()
+
+    def test_detail_entries_match_the_plain_call(self):
+        targets = TestParseSancovGuardCount._guard_targets()
+        candidates = ["/bin/true", *targets[:3]]
+        for t in candidates:
+            assert estimate_map_size_detail(t).entries == estimate_map_size(t)
+
+    def test_tier_is_logged(self, caplog):
+        """The tier reaches the run log, not just the return value."""
+        targets = TestParseSancovGuardCount._guard_targets()
+        if not targets:
+            pytest.skip("no trace-pc-guard targets built")
+        with caplog.at_level(logging.INFO, logger="fuzzer_tool.core.elf"):
+            estimate_map_size(targets[0])
+        assert "sancov_guards" in caplog.text
+        assert "exact" in caplog.text
+
+    def test_estimate_is_announced_as_an_estimate(self, caplog):
+        with caplog.at_level(logging.INFO, logger="fuzzer_tool.core.elf"):
+            estimate_map_size("/bin/true")
+        assert "ESTIMATED" in caplog.text

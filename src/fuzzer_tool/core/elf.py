@@ -14,6 +14,7 @@ import logging
 import os
 import struct
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
 log = logging.getLogger(__name__)
 
@@ -1591,6 +1592,88 @@ def _size_from_blocks(block_count: int, ctx_bits: int | None) -> int:
     return max(MAP_SIZE_DEFAULT, min(_map_size_max(), _next_power_of_2(needed)))
 
 
+class MapSizeEstimate(NamedTuple):
+    """Where a map size came from, not just what it was.
+
+    `source` is the tier that produced `blocks`:
+
+    - ``"sancov_guards"`` — exact, ``__sancov_guards`` (trace-pc-guard).
+    - ``"sancov_cntrs"``  — exact, ``__sancov_cntrs`` (inline-8bit-counters).
+    - ``"profile"``       — TargetProfile.total_branches.
+    - ``"branch_density"`` — disassembly estimate. Approximate.
+    - ``"default"``       — nothing worked; MAP_SIZE_DEFAULT.
+
+    The first two are measurements and the rest are guesses, and the gap
+    between them is wide: on this tree's targets, branch density ran 4-16x
+    above the true guard count. A caller that cannot tell which it got
+    cannot tell a sized map from a guessed one -- which is exactly how
+    `parse_sancov_offsets` reading the wrong section stayed invisible for
+    the whole life of this function. See
+    docs/learnings/2026-08-14-sancov-guards-vs-cntrs.md.
+    """
+
+    entries: int
+    blocks: int
+    source: str
+    ctx_bits: int
+    capped: bool
+
+    @property
+    def exact(self) -> bool:
+        """True when `blocks` was read out of the binary, not estimated."""
+        return self.source in ("sancov_guards", "sancov_cntrs")
+
+
+def estimate_map_size_detail(target: str, profile: object | None = None) -> MapSizeEstimate:
+    """`estimate_map_size()`, with the provenance of the answer attached.
+
+    Args:
+        target: Path to ELF binary.
+        profile: Optional TargetProfile with precomputed static analysis.
+
+    Returns:
+        MapSizeEstimate. `entries` is what estimate_map_size() returns.
+    """
+    ctx_bits = detect_ctx_bits(target) or 0
+
+    blocks = 0
+    source = "default"
+
+    # 1. sancov, exact block count for instrumented binaries. trace-pc-guard
+    #    (__sancov_guards) first: it is what build_targets.sh emits.
+    #    inline-8bit-counters (__sancov_cntrs) after, for externally built
+    #    targets -- one *byte* per block there, not one uint32.
+    guards = parse_sancov_guard_count(target)
+    if guards:
+        blocks, source = guards, "sancov_guards"
+    else:
+        offsets = parse_sancov_offsets(target)
+        if offsets and offsets[1] > offsets[0]:
+            blocks, source = offsets[1] - offsets[0], "sancov_cntrs"
+
+    # 2. Cached profile data — avoids a full-text disassembly.
+    #    total_branches is a branch count, and _size_from_blocks applies
+    #    EDGES_PER_BLOCK, so pass it through as the block-equivalent.
+    if not blocks and profile is not None:
+        ts = getattr(profile, "text_size", 0)
+        tb = getattr(profile, "total_branches", 0)
+        if isinstance(ts, int) and isinstance(tb, int) and ts > 0 and tb > 0:
+            blocks, source = tb, "profile"
+
+    # 3. Branch density estimation (full-text disassembly)
+    if not blocks:
+        bd = branch_density(target)
+        ts_opt = _text_size(target)
+        if bd is not None and ts_opt:
+            blocks, source = int(bd * (ts_opt / 1024)), "branch_density"
+
+    if not blocks:
+        return MapSizeEstimate(MAP_SIZE_DEFAULT, 0, "default", ctx_bits, False)
+
+    entries = _size_from_blocks(blocks, ctx_bits)
+    return MapSizeEstimate(entries, blocks, source, ctx_bits, entries >= _map_size_max())
+
+
 def estimate_map_size(target: str, profile: object | None = None) -> int:
     """Size the coverage hash table, in entries (AFL_MAP_SIZE convention).
 
@@ -1620,10 +1703,14 @@ def estimate_map_size(target: str, profile: object | None = None) -> int:
     for. Check ShmCoverage.read_dropped_edges() rather than assuming the
     static estimate held.
 
-    Priority:
-    1. sancov guard count, when the counter section is present (exact).
+    Priority, logged at INFO on every call so the tier is visible in a run
+    log rather than inferred from the number:
+
+    1. sancov guard count, when either sancov section is present (exact).
     2. TargetProfile.total_branches, avoiding a redundant disassembly.
     3. branch_density x .text_size estimation.
+
+    Use estimate_map_size_detail() when the caller needs the tier.
 
     Args:
         target: Path to ELF binary.
@@ -1632,51 +1719,43 @@ def estimate_map_size(target: str, profile: object | None = None) -> int:
     Returns:
         Number of entries; MAP_SIZE_DEFAULT on failure.
     """
-    ctx_bits = detect_ctx_bits(target)
-    if ctx_bits:
+    est = estimate_map_size_detail(target, profile)
+
+    if est.ctx_bits:
         log.info(
             "%s: context-sensitive coverage (__AFL_CTX_BITS=%d), "
             "sizing map with a %.1fx inflation allowance",
             target,
-            ctx_bits,
-            ctx_inflation_factor(ctx_bits),
+            est.ctx_bits,
+            ctx_inflation_factor(est.ctx_bits),
         )
 
-    # 1. sancov guard count — exact block count for instrumented binaries.
-    #    trace-pc-guard (__sancov_guards) first: it is what build_targets.sh
-    #    emits. inline-8bit-counters (__sancov_cntrs) is checked after, for
-    #    externally built targets.
-    guards = parse_sancov_guard_count(target)
-    if guards:
-        return _size_from_blocks(guards, ctx_bits)
+    if est.source == "default":
+        log.info(
+            "%s: map sized at %d entries (default -- no sancov section, no "
+            "profile, and .text could not be disassembled)",
+            target,
+            est.entries,
+        )
+    else:
+        log.info(
+            "%s: map sized at %d entries from %d blocks (%s, %s)%s",
+            target,
+            est.entries,
+            est.blocks,
+            est.source,
+            "exact" if est.exact else "ESTIMATED",
+            " -- AT CAP, check read_dropped_edges()" if est.capped else "",
+        )
+    if not est.exact and est.source != "default":
+        log.info(
+            "%s: no sancov section found, so this size is an estimate. Build "
+            "with -fsanitize-coverage=trace-pc-guard (tools/build_targets.sh "
+            "--clang-scov) for an exact count.",
+            target,
+        )
 
-    offsets = parse_sancov_offsets(target)
-    if offsets:
-        start, stop = offsets
-        if stop > start:
-            # inline-8bit-counters is one *byte* per block. Dividing by 4
-            # here (as if these were uint32 guards) under-sized the map 4x
-            # on any target that did carry this section.
-            guard_count = stop - start
-            if guard_count > 0:
-                return _size_from_blocks(guard_count, ctx_bits)
-
-    # 2. Cached profile data — avoids a full-text disassembly.
-    #    total_branches is a branch count, and _size_from_blocks applies
-    #    EDGES_PER_BLOCK, so pass it through as the block-equivalent.
-    if profile is not None:
-        ts = getattr(profile, "text_size", 0)
-        tb = getattr(profile, "total_branches", 0)
-        if isinstance(ts, int) and isinstance(tb, int) and ts > 0 and tb > 0:
-            return _size_from_blocks(tb, ctx_bits)
-
-    # 3. Branch density estimation (full-text disassembly)
-    bd = branch_density(target)
-    ts = _text_size(target)
-    if bd is None or ts is None or ts == 0:
-        return MAP_SIZE_DEFAULT
-    branches = bd * (ts / 1024)
-    return _size_from_blocks(int(branches), ctx_bits)
+    return est.entries
 
 
 def _extract_imm(insn) -> int | None:
