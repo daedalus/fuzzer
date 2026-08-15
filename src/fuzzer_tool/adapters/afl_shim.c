@@ -453,9 +453,27 @@ void __afl_map_shm(void) {
 __attribute__((visibility("default"), always_inline))
 static inline uint32_t __afl_get_caller_ctx(void) {
     if (__afl_mapping) return 0;
-    void *fp = __builtin_frame_address(0);
+    /* Safe two-level unwind.  trace-pc-guard fires at basic-block entry,
+     * including a function's *entry* block before its prologue has linked
+     * the frame pointer.  At that instant the second frame up is not yet
+     * established, so __builtin_return_address(1) — documented as possibly
+     * crashing for any nonzero argument — walks an unlinked pointer and
+     * faults.  Instead we read the saved frame pointer by hand and
+     * bounds-check the single unvalidated hop against the current stack
+     * window, returning 0 (no context for this edge) rather than
+     * dereferencing a wild pointer.  fp[0] is our own saved FP and is
+     * always valid; caller_fp[1] is only read after the range check. */
+    void **fp = (void **)__builtin_frame_address(0);
     if (!fp) return 0;  /* frame-pointer-less build: no walkable chain */
-    void *ra = __builtin_return_address(1);
+    uintptr_t cur = (uintptr_t)fp;
+    void **caller_fp = (void **)fp[0];          /* saved FP of the frame above */
+    uintptr_t cfp = (uintptr_t)caller_fp;
+    /* The stack grows down, so a genuine older frame sits at a higher
+     * address than ours and within a sane single-hop span (4 MiB covers
+     * any realistic frame without risking a wild read).  Anything outside
+     * that window is an unlinked/garbage frame — skip context for it. */
+    if (cfp <= cur || cfp - cur > (4u << 20)) return 0;
+    void *ra = caller_fp[1];                    /* return addr into caller's caller */
     if (!ra) return 0;
 
     /* Fold to 32 bits via a hash, not a truncation: return addresses in
