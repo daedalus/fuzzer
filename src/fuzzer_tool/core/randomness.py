@@ -623,16 +623,34 @@ def invariant_mask(samples: list[bytes] | tuple[bytes, ...], min_samples: int = 
 
     Returns an all-zero mask (claiming nothing) below ``min_samples``, because
     with few samples almost everything looks invariant.
+
+    The mask spans the largest prefix that at least ``min_samples`` entries
+    actually reach, and only those entries contribute. Truncating to the
+    *shortest* entry instead (as this did originally) made the operator inert
+    on any real corpus: fuzzing accumulates trimmed and minimized inputs, so a
+    single short entry -- one byte, or an empty one -- collapsed the mask to
+    nothing no matter how much structure the other thousand entries shared.
+    Measured on a synthetic 40-entry corpus with a shared 16-byte header: 128
+    invariant bits, dropping to 39 / 14 / 2 / 0 as one 8- / 4- / 1- / 0-byte
+    entry was added. That is the whole of ``invariant_break``'s reported 0.0%
+    success rate.
+
+    A short entry is not evidence that a later offset varies -- it has no
+    opinion about an offset it does not contain -- so excluding it from the
+    positions it cannot speak to is also the more correct measurement.
     """
     if len(samples) < max(2, min_samples):
         n = min((len(s) for s in samples), default=0)
         return bytes(n)
-    n = min(len(s) for s in samples)
+    # Largest n for which at least min_samples entries have length >= n.
+    lengths = sorted((len(s) for s in samples), reverse=True)
+    n = lengths[min_samples - 1]
     if n == 0:
         return b""
-    first = np.frombuffer(samples[0][:n], dtype=np.uint8)
+    contributors = [s for s in samples if len(s) >= n]
+    first = np.frombuffer(contributors[0][:n], dtype=np.uint8)
     mask = np.full(n, 0xFF, dtype=np.uint8)
-    for s in samples[1:]:
+    for s in contributors[1:]:
         mask &= ~(first ^ np.frombuffer(s[:n], dtype=np.uint8))
         if not mask.any():
             break
@@ -647,7 +665,7 @@ def corpus_invariants(
     return CorpusInvariants(
         mask=mask,
         n_samples=len(samples),
-        common_length=min((len(s) for s in samples), default=0),
+        common_length=len(mask),
     )
 
 
