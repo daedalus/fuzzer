@@ -954,6 +954,15 @@ class Fuzzer:
         self.last_report: SanitizerReport | None = None
         self.op_counts: dict[str, int] = {}
         self.op_success: dict[str, int] = {}
+        # Selections where the operator could actually have fired -- i.e.
+        # its own format sniffer matched the input it was handed. Equal to
+        # op_counts for every ungated operator; strictly smaller for a
+        # sniffer-gated one on a corpus that does not contain its format.
+        # This, not op_counts, is the honest denominator for a success rate
+        # in that regime -- paired with op_success_applicable below, which
+        # is the numerator over the same selections.
+        self.op_applicable: dict[str, int] = {}
+        self.op_success_applicable: dict[str, int] = {}
         self.op_edges: dict[str, int] = {}
         self._peak_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         self._discovery_execs: array = array("Q")  # exec_count per discovery snapshot
@@ -2911,8 +2920,26 @@ class Fuzzer:
             # own cooldown and hysteresis decide whether anything happens.
             self._maybe_retune_timeout()
 
+        # Selections split by regime. A sniffer-gated operator has two of
+        # them: it mutates a file of its own format, or -- on input that is
+        # not that format -- synthesises a fresh one from scratch
+        # (_op_png_chunk_mutate's parse_png_chunks() else
+        # _generate_random_png() branch, and the same shape in every other
+        # format op). Pooling the two makes the reported rate a function of
+        # how much of the corpus happens to be that format, which is the
+        # distortion the bootstrap trickle and the live-format short
+        # circuit both feed.
+        #
+        # setdefault, so the key exists even at zero: absent has to keep
+        # meaning "unknown" (a state file predating this) rather than
+        # "never", or the report cannot tell them apart and falls back to
+        # the raw count -- printing exactly the inflated rate this removes.
+        applicable_now = getattr(self, "_last_ops_applicable", set())
         for op in set(self._last_ops_used):
             self.op_counts[op] = self.op_counts.get(op, 0) + 1
+            self.op_applicable.setdefault(op, 0)
+            if op in applicable_now:
+                self.op_applicable[op] += 1
 
         # Track cmplog as its own operator
         if cmplog_found:
@@ -3208,6 +3235,17 @@ class Fuzzer:
             # Same rule as the bandits: no-op operators didn't earn this.
             for op in effective if effective is not None else set(self._last_ops_used):
                 self.op_success[op] = self.op_success.get(op, 0) + 1
+                # Numerator for the mutate-regime rate. It has to be
+                # restricted to the same selections as op_applicable or the
+                # two do not divide: a format op that synthesised a file
+                # from scratch and found an edge that way is a success on a
+                # selection op_applicable never counted, which produced
+                # successes against a zero denominator in the first cut of
+                # this change.
+                if op in applicable_now:
+                    self.op_success_applicable[op] = (
+                        self.op_success_applicable.get(op, 0) + 1
+                    )
             if cmplog_found:
                 self.op_success["cmplog"] = self.op_success.get("cmplog", 0) + 1
             if smt_found:

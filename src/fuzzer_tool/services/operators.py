@@ -41,7 +41,7 @@ from fuzzer_tool.core.mutations import (
     splice,
     splice_diff_located,
 )
-from fuzzer_tool.core.operator_registry import REGISTRY
+from fuzzer_tool.core.operator_registry import REGISTRY, format_gate_matches
 from fuzzer_tool.core.skipdet import MAX_DET_MUTATIONS, trace_mini_from_edges
 
 log = logging.getLogger(__name__)
@@ -2819,6 +2819,7 @@ class OperatorEngine:
             f._last_ops_with_sites = []
             f._last_mopt_particles = []
             f._last_ops_effective = set()
+            f._last_ops_applicable = set()
             f._last_havoc_subops = 0
             f._last_op_costs = {}
             f._last_mutation_offset = 0
@@ -2844,6 +2845,14 @@ class OperatorEngine:
         # exactly as much as the operator that did the work -- see
         # fuzzer.py::_record_outcome.
         f._last_ops_effective = set()
+        # Ops that were handed input their own format sniffer matched, i.e.
+        # that ran in their mutate-this-file regime rather than their
+        # synthesise-one-from-scratch fallback. Recorded here rather than
+        # against the round's parent seed because with mutations_per_input
+        # > 1 the operators chain: op N sees whatever op N-1 left behind,
+        # not the seed, and a png op can perfectly well be handed a PNG
+        # that an earlier op in the same round produced.
+        f._last_ops_applicable = set()
         # Bitmask of havoc sub-mutations applied this round (bit i ->
         # HAVOC_SUB_OPS[i]). A bitmask rather than a list because
         # _apply_single_mutation runs 2-16 times per havoc selection and an
@@ -2909,6 +2918,18 @@ class OperatorEngine:
             # Digest over a memoryview: no copy, ~3.4us at 64KiB. Only paid
             # when a scheduler consumes the signal (_track_op_effect).
             _h_before = xxhash.xxh3_64_intdigest(memoryview(buf)) if track_effect else 0
+
+            # Evaluated on the buffer actually handed to the operator, and
+            # before the call, because the operator may replace it. Returns
+            # None for the ~85% of ops that are not sniffer-gated, which is
+            # a dict miss and nothing more.
+            # `is not False`, not a truth test: format_gate_matches returns
+            # None for an operator that is not sniffer-gated, and None is
+            # falsy. Testing truthiness dropped every ungated operator out
+            # of the applicable set, so the ~85% of the table that has only
+            # one regime reported Applic 0 and RateA n/a.
+            if format_gate_matches(op, buf) is not False:
+                f._last_ops_applicable.add(op)
 
             _t0 = time.perf_counter()
             result = f._op_dispatch[op](buf, byte_idx, data)

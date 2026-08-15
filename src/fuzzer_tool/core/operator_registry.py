@@ -376,6 +376,40 @@ def _format_available(name: str) -> Callable[[object, bytes], bool]:
     return _check
 
 
+def format_gate_matches(name: str, data: bytes) -> bool | None:
+    """Did *name*'s own format sniffer match *data*?
+
+    ``None`` for an operator that is not sniffer-gated -- it is applicable
+    to anything, which is a different answer from "no".
+
+    Exists because availability and applicability are not the same thing,
+    and per-operator success rates were quietly dividing by the wrong one.
+    An operator is *offered* on inputs it cannot possibly act on, by two
+    separate mechanisms in ``_format_available``: the bootstrap trickle
+    offers a never-seen format on non-matching input, and -- much larger on
+    a mixed corpus -- once a format has been seen once, ``name in live``
+    short-circuits and the operator is offered on *every* input for the
+    rest of the run, matching or not. One PNG in the corpus makes
+    png_chunk_mutate available on every JPEG thereafter.
+
+    Both are deliberate: the gate is about whether a format is relevant to
+    this target, and the mutators decline on input they cannot parse. But
+    counting those selections in an operator's denominator measures the
+    corpus, not the operator. On a corpus containing none of its format an
+    operator's reported rate is essentially the trickle rate, which says
+    nothing about whether it works.
+    """
+    sniff = _FORMAT_SNIFFERS.get(name)
+    if sniff is None:
+        return None
+    if not data:
+        return False
+    try:
+        return bool(sniff(data))
+    except Exception:  # pragma: no cover - a sniffer must not break accounting
+        return False
+
+
 # Availability predicates mirror the historic build_ops() conditions.
 _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     # format ops — gated on the format being relevant to this target

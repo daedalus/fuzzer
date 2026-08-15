@@ -145,6 +145,12 @@ class CorpusManager:
             "crash_sigs": f.crash_sigs,
             "op_counts": f.op_counts,
             "op_success": f.op_success,
+            # getattr, unlike the counters above it: save_state() is called
+            # with partially-built stand-ins in several tests, and a new
+            # required attribute here turns "this counter is new" into
+            # "state cannot be saved at all".
+            "op_applicable": getattr(f, "op_applicable", {}),
+            "op_success_applicable": getattr(f, "op_success_applicable", {}),
             "op_edges": f.op_edges,
             # Havoc sub-mutation credit. Kept as plain lists (the state file
             # is a sanitized pickle, but array("d") would still pin the
@@ -213,6 +219,13 @@ class CorpusManager:
         f.crash_min_sizes = state.get("crash_min_sizes", {})
         f.op_counts = state.get("op_counts", {})
         f.op_success = state.get("op_success", {})
+        # Absent in states written before applicability was tracked. Left
+        # empty rather than backfilled from op_counts: the report treats
+        # "no entry" as unknown and falls back to the raw count, which is
+        # honest, whereas copying op_counts would assert every historic
+        # selection was applicable.
+        f.op_applicable = state.get("op_applicable", {})
+        f.op_success_applicable = state.get("op_success_applicable", {})
         f.op_edges = state.get("op_edges", {})
         havoc_stats = state.get("havoc_subop_stats") or {}
         for i, name in enumerate(HAVOC_SUB_OPS):

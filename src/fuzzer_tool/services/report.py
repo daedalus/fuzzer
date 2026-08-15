@@ -376,11 +376,44 @@ def _coverage_analysis(f) -> str:
     return "\n".join(lines)
 
 
+def _applicable_counts(f) -> dict:
+    """``f.op_applicable`` when it is really a dict.
+
+    isinstance, not getattr-with-default: report tests drive these
+    functions with MagicMock fuzzers, where every attribute exists and is
+    truthy, so a plain getattr yields a Mock that sails through the `or`
+    and then fails arithmetic several frames later.
+    """
+    applicable = getattr(f, "op_applicable", None)
+    return applicable if isinstance(applicable, dict) else {}
+
+
 def _mutation_effectiveness(f) -> str:
     counts = f.op_counts
     successes = f.op_success
     if not counts:
         return ""
+
+    # A sniffer-gated operator runs in one of two regimes. Handed a file of
+    # its own format it mutates that file; handed anything else it
+    # synthesises a fresh file of its format from scratch. Both can find
+    # edges, so neither set of selections can simply be dropped -- but
+    # pooling them makes the reported rate depend on how much of the corpus
+    # happens to be that format, which is a property of the corpus and not
+    # of the operator. Two mechanisms in _format_available keep feeding the
+    # second regime: the bootstrap trickle offers a never-seen format on
+    # non-matching input, and once a format has been seen even once the
+    # live-format short circuit offers it on *every* input thereafter.
+    #
+    # So both pairs are reported. Count/Success/Rate is the raw picture --
+    # what the budget was spent on and what came back. Applic/SuccA/RateA
+    # is the same question restricted to the mutate-this-file regime.
+    # For an ungated operator the two pairs are identical by construction,
+    # which makes the invariant visible on every line.
+    applicable = _applicable_counts(f)
+    succ_applicable = getattr(f, "op_success_applicable", None)
+    if not isinstance(succ_applicable, dict):
+        succ_applicable = {}
 
     total = sum(counts.values())
     total_success = sum(successes.values())
@@ -388,24 +421,54 @@ def _mutation_effectiveness(f) -> str:
     lines = [
         "",
         "--- Mutation Effectiveness ---",
-        f"  {'Operation':<22s} {'Count':>7s} {'Success':>8s} {'Rate':>7s}  {'±1σ':>7s} {'±2σ':>7s} {'±3σ':>7s}",
-        f"  {'-' * 22} {'-' * 7} {'-' * 8} {'-' * 7}  {'-' * 7} {'-' * 7} {'-' * 7}",
+        f"  {'Operation':<22s} {'Count':>7s} {'Success':>7s} {'Rate':>6s} "
+        f"{'Applic':>7s} {'SuccA':>6s} {'RateA':>6s}  "
+        f"{'±1σ':>7s} {'±2σ':>7s} {'±3σ':>7s}",
+        f"  {'-' * 22} {'-' * 7} {'-' * 7} {'-' * 6} {'-' * 7} {'-' * 6} {'-' * 6}  "
+        f"{'-' * 7} {'-' * 7} {'-' * 7}",
     ]
 
+    split_regimes = False
     for op, count in sorted(counts.items(), key=lambda x: -x[1]):
         succ = successes.get(op, 0)
-        _, se, c1, c2, c3 = _confidence_interval(count, succ)
-        rate = succ / count * 100 if count else 0
+        rate = succ / count * 100 if count else 0.0
+        # Missing means unknown -- a state file written before this was
+        # tracked -- and falls back to the raw pair. Present-and-zero means
+        # the operator genuinely never saw its own format.
+        appl = applicable.get(op, count)
+        # Default 0 when applicability is known for this op (it simply
+        # never succeeded in that regime) and `succ` only when it is not
+        # tracked at all -- defaulting to succ in the known case is how a
+        # zero-denominator row still showed a numerator.
+        succ_a = succ_applicable.get(op, 0 if op in applicable else succ)
+        if appl < count:
+            split_regimes = True
+        # Intervals follow the restricted pair: it is the one making a
+        # claim about the operator rather than about the corpus.
+        _, se, c1, c2, c3 = _confidence_interval(appl, succ_a)
+        # n/a, not 0.0%, when the operator never met its own format:
+        # undefined is not zero, and printing zero is what made a working
+        # operator read as broken -- same reasoning as Edges/Success below.
+        rate_a = f"{'n/a':>6s}" if appl <= 0 else f"{succ_a / appl * 100:>5.1f}%"
         lines.append(
-            f"  {op:<22s} {count:>7d} {succ:>8d} {rate:>6.1f}%  "
+            f"  {op:<22s} {count:>7d} {succ:>7d} {rate:>5.1f}% "
+            f"{appl:>7d} {succ_a:>6d} {rate_a}  "
             f"{c1 * 100:>6.1f}% {c2 * 100:>6.1f}% {c3 * 100:>6.1f}%"
         )
 
     lines.append(
-        f"  {'TOTAL':<22s} {total:>7d} {total_success:>8d} {total_success / total * 100:>6.1f}%"
+        f"  {'TOTAL':<22s} {total:>7d} {total_success:>7d} "
+        f"{total_success / total * 100:>5.1f}%"
         if total
         else ""
     )
+    if split_regimes:
+        lines += [
+            "  Applic/SuccA/RateA restrict to selections where the operator's own",
+            "  format matched the input it was handed -- i.e. it mutated a file of",
+            "  that format rather than synthesising one from scratch. RateA is n/a",
+            "  where that never happened; the raw Rate still covers those runs.",
+        ]
     return "\n".join(lines)
 
 
@@ -426,6 +489,11 @@ def _mutation_edge_attribution(f) -> str:
         return ""
 
     total = sum(op_edges.values())
+    # Raw op_counts, deliberately, not the applicable denominator used for
+    # the rate column above: a format operator handed input of the wrong
+    # format synthesises a file of its own format instead, and edges found
+    # that way are real edges found on that selection. Every use is an
+    # opportunity to find an edge, whichever regime it ran in.
     counts = f.op_counts
     successes = f.op_success
     cmplog_edge_count = edges.get("cmplog", 0)

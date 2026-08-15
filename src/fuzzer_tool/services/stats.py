@@ -290,6 +290,8 @@ class StatsReporter:
             "peak_rss_kb": f._peak_rss,
             "op_counts": dict(f.op_counts),
             "op_success": dict(f.op_success),
+            "op_applicable": dict(getattr(f, "op_applicable", None) or {}),
+            "op_success_applicable": dict(getattr(f, "op_success_applicable", None) or {}),
         }
         if f.mc and f.mc_bandit:
             stats["bandit_stats"] = {
