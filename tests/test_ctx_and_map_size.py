@@ -345,11 +345,44 @@ class TestAttachFailureIsLoud:
         assert b"__afl_shim" not in r.stderr
 
     @needs_cc
-    def test_unparseable_id_is_reported(self, built):
-        env = {**os.environ, "__AFL_SHM_ID": "0", "AFL_MAP_SIZE": "1024"}
+    @pytest.mark.parametrize(
+        "bad_id",
+        [
+            "",  # set but empty
+            "banana",  # no digits at all
+            "12x",  # trailing garbage
+            "99999999999999999999",  # ERANGE
+            "-1",  # negative
+        ],
+        ids=["empty", "non-numeric", "trailing-garbage", "out-of-range", "negative"],
+    )
+    def test_unparseable_id_is_reported(self, built, bad_id):
+        """An id that is not a number must be reported as such.
+
+        Was a single case passing "0" -- which is perfectly parseable, so
+        atoi() accepted it and the shim reported the *shmat* failure that
+        followed instead. The assertion was right about the wording and
+        wrong about the input; only "-1" of these five was ever caught.
+        """
+        env = {**os.environ, "__AFL_SHM_ID": bad_id, "AFL_MAP_SIZE": "1024"}
         r = subprocess.run([built[0], "10"], env=env, capture_output=True)
         assert b"__afl_shim" in r.stderr
         assert b"not a valid segment id" in r.stderr
+
+    @needs_cc
+    def test_zero_id_is_reported_as_an_attach_failure(self, built):
+        """0 parses, so it is a shmat failure and must say so.
+
+        Deliberately not folded into the case above: 0 is a syntactically
+        valid segment id the kernel can genuinely issue, so the shim must
+        try it rather than reject it, and the diagnostic must name the half
+        of the operation that actually failed.
+        """
+        env = {**os.environ, "__AFL_SHM_ID": "0", "AFL_MAP_SIZE": "1024"}
+        r = subprocess.run([built[0], "10"], env=env, capture_output=True)
+        assert b"__afl_shim" in r.stderr
+        assert b"shmat(0) failed" in r.stderr
+        assert b"not a valid segment id" not in r.stderr
 
     @needs_cc
     def test_failed_shmat_is_reported_with_errno(self, built):

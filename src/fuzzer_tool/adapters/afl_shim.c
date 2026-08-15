@@ -153,6 +153,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <limits.h>
 #include <signal.h>
 #include <setjmp.h>
 #include <unistd.h>
@@ -329,7 +330,6 @@ __attribute__((visibility("default")))
 void __afl_map_shm(void) {
     char *id = getenv("__AFL_SHM_ID");
     if (!id) return;   /* not under the fuzzer — silence is correct here */
-    int shmid = atoi(id);
 
     /* Past this point the fuzzer has explicitly asked for coverage, so a
      * failure must not be silent. It used to be: all three early returns
@@ -346,7 +346,29 @@ void __afl_map_shm(void) {
      * ExecutionRunner.is_crash() scans stderr for (SIGSEGV, SIGABRT,
      * SIGFPE, SIGBUS, "Segmentation fault", "Aborted"), so a diagnostic
      * cannot be misread as a crashing input. */
-    if (shmid < 0) {
+
+    /* strtol, not atoi: atoi cannot fail. It returns 0 for "0", for "" and
+     * for "banana" alike, so the only malformed id the old `shmid < 0`
+     * guard could catch was an explicitly negative one. Everything else
+     * fell through to shmat() and came back as an attach failure
+     * ("shmat(0) failed: Invalid argument") rather than as the parse
+     * failure it actually was -- a diagnostic pointing at the wrong half
+     * of the operation. That is what
+     * TestAttachFailureIsLoud::test_unparseable_id_is_reported was seeing:
+     * it passes "0", which atoi happily accepts.
+     *
+     * Reachable outside the test: __AFL_SHM_ID is inherited across exec,
+     * so anything that truncates or clobbers the environment yields a
+     * malformed id, not a negative one.
+     *
+     * 0 itself is *not* rejected here. It is syntactically a valid id, and
+     * the kernel can hand one out (ipc ids start at seq 0), so refusing it
+     * would trade this bug for a rarer one. A bogus 0 still fails loudly,
+     * one line down, at shmat. */
+    errno = 0;
+    char *end = NULL;
+    long parsed = strtol(id, &end, 10);
+    if (end == id || *end != '\0' || errno == ERANGE || parsed < 0 || parsed > INT_MAX) {
         char msg[128];
         int n = snprintf(msg, sizeof(msg),
                          "__afl_shim: __AFL_SHM_ID=%.32s is not a valid segment id"
@@ -354,6 +376,7 @@ void __afl_map_shm(void) {
         if (n > 0) { ssize_t w = write(2, msg, (size_t)n); (void)w; }
         return;
     }
+    int shmid = (int)parsed;
 
     /* Read map size from environment.  AFL_MAP_SIZE is the number of
      * hash table entries (not bytes).  The Python side allocates SHM as

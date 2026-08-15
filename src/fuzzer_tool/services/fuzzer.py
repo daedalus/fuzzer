@@ -821,7 +821,14 @@ class Fuzzer:
                 )
                 self._smt_solver = None
 
-        if self._smt_solver is not None and self._cmplog is None:
+        # Gated on the *request* (enable_smt_z3), not on self._smt_solver.
+        # It used to test `self._smt_solver is not None`, but the z3-missing
+        # branch above has already set that to None -- so on a machine
+        # without z3 this whole block was skipped and _enable_smt_z3 stayed
+        # True, leaving the flag claiming an SMT path that has no solver
+        # *and* no cmplog behind it. The two conditions are independent and
+        # both have to clear the flag.
+        if enable_smt_z3 and self._cmplog is None:
             print("[!] SMT solver: --enable-smt-z3 requires --cmplog; disabling SMT path")
             self._smt_solver = None
             self._enable_smt_z3 = False
