@@ -4,8 +4,6 @@ import random
 import tempfile
 from pathlib import Path
 
-from fuzzer_tool.core.mutations.generic import byte_shuffle
-
 from fuzzer_tool.core.mutations import (
     DICT_MUTATIONS,
     INTERESTING_8,
@@ -18,6 +16,7 @@ from fuzzer_tool.core.mutations import (
     parse_dict_line,
     splice,
 )
+from fuzzer_tool.core.mutations.generic import byte_shuffle
 
 
 class TestConstants:

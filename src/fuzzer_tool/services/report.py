@@ -1579,7 +1579,7 @@ def _elo_ratings(f) -> str:
         lines.append(f"  Decay:           {f._elo.decay}")
     else:
         eff_k = f._elo._effective_k() if hasattr(f._elo, "_effective_k") else None
-        lines.append(f"  Model:           Bayesian (Gaussian posteriors)")
+        lines.append("  Model:           Bayesian (Gaussian posteriors)")
         lines.append(f"  Beta (scale):    {getattr(f._elo, 'beta', '?')}")
         lines.append(f"  Tau (noise):     {getattr(f._elo, 'tau', '?')}")
         if eff_k is not None:
