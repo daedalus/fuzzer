@@ -36,6 +36,25 @@ log = logging.getLogger(__name__)
 _FUZZ_LOADER_BIN = os.path.join(os.path.dirname(__file__), "fuzz_loader")
 
 
+def _drain_stream(stream, sink: list) -> None:
+    """Copy decoded lines from *stream* into *sink* until it closes.
+
+    Module-level, and taking only the stream and the list, so that the
+    stderr-drain thread holds no reference to the ForkserverRunner that
+    started it. See the comment in ForkserverRunner.start(): a bound method
+    here kept every un-stopped runner permanently reachable.
+    """
+    try:
+        for line in stream:
+            text = line.decode(errors="replace").rstrip()
+            if text:
+                sink.append(text)
+                if len(sink) > STDERR_LINES_MAX:
+                    del sink[:50]
+    except (ValueError, OSError):
+        pass
+
+
 def _close_streams(proc: subprocess.Popen) -> None:
     """Close the raw fds of *proc*, unblocking any thread stuck reading them.
 
@@ -174,9 +193,30 @@ class ForkserverRunner:
             env=env,
         )
 
-        # Drain stderr in background
+        # Drain stderr in background.
+        #
+        # The thread must NOT hold a strong reference to `self`. It used to
+        # (target=self._drain_stderr, a bound method), and that reference is
+        # self-sustaining: the thread blocks reading the child's stderr until
+        # the child exits, the child only exits when stop() sends QUIT, and
+        # stop() only runs from __del__, which cannot run while the thread
+        # holds the runner alive. Nothing ever broke the loop, so every
+        # runner that was not explicitly stopped leaked a blocked thread, an
+        # orphaned fuzz_loader, its target child, and a SHM segment pinned in
+        # `dest` state until it detached. Measured before this change: two
+        # test files left 98 live runners, and gc.collect() freed none of
+        # them, because they were not garbage -- they were reachable from the
+        # thread. A full suite run peaked at ~185 orphaned processes.
+        #
+        # A plain list plus the stream is all the thread actually needs. The
+        # list stays shared, so _stderr_lines still fills as before, and the
+        # thread now dies of natural causes when stop() closes the pipe.
         self._stderr_lines = []
-        self._stderr_thread = threading.Thread(target=self._drain_stderr, daemon=True)
+        self._stderr_thread = threading.Thread(
+            target=_drain_stream,
+            args=(self._proc.stderr, self._stderr_lines),
+            daemon=True,
+        )
         self._stderr_thread.start()
 
         init = f"INIT {self.target} {self.function_name} {self._input_file} {int(self.timeout)}\n"
@@ -202,18 +242,15 @@ class ForkserverRunner:
         return False
 
     def _drain_stderr(self):
+        """Kept for callers/tests that invoke it directly.
+
+        Not used as a thread target any more -- see start(); a bound method
+        there pinned the runner and defeated __del__.
+        """
         proc = self._proc
         if proc is None or proc.stderr is None:
             return
-        try:
-            for line in proc.stderr:
-                text = line.decode(errors="replace").rstrip()
-                if text:
-                    self._stderr_lines.append(text)
-                    if len(self._stderr_lines) > STDERR_LINES_MAX:
-                        del self._stderr_lines[:50]
-        except (ValueError, OSError):
-            pass
+        _drain_stream(proc.stderr, self._stderr_lines)
 
     def run_one(self, data: bytes) -> tuple[int, str]:
         """Run *data* once, returning ``(returncode, stderr)``.

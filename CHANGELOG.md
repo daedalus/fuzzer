@@ -35,6 +35,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   strict subset differing by a constant, input-independent init set.
 
 ### Fixed
+- **Every un-stopped `ForkserverRunner` leaked a process, a thread and a SHM
+  segment.** The stderr-drain thread was started as `target=self._drain_stderr`
+  — a bound method, so the thread held the runner. That reference is
+  self-sustaining: the thread blocks reading the child's stderr until the
+  child exits; the child exits when `stop()` sends QUIT; `stop()` runs from
+  `__del__`; and `__del__` cannot run while the thread keeps the runner
+  reachable. Nothing broke the loop. Measured: two test files left **98 live
+  runners with 98 live children**, and `gc.collect()` freed none of them —
+  they were reachable, not garbage. A full-suite run peaked at ~185 orphaned
+  `fuzz_loader`/target processes, each pinning a SHM segment in `dest` state.
+  The thread now targets a module-level `_drain_stream(stream, sink)` and
+  holds no reference to the runner; after the fix the same suite run peaks at
+  0 orphans and 1 segment. This is a production defect, not only a test
+  artifact: any `Fuzzer` not explicitly stopped leaked the same three
+  resources.
 - **A failed SHM attach was silent, on both sides.** All three early returns
   in `__afl_map_shm()` (`__AFL_SHM_ID` absent, unparseable, or `shmat()`
   failing) left `__afl_area` NULL, after which the target ran its full input

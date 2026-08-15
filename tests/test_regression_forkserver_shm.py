@@ -16,14 +16,34 @@ The shim is compiled with clang here because the edge callbacks are built on
 -fsanitize-coverage=trace-pc-guard, which gcc does not implement.
 """
 
+import gc
 import os
 import subprocess
+import time
+import weakref
 
 import pytest
 
 from fuzzer_tool.adapters.forkserver import ForkserverRunner, _ensure_compiled
 from fuzzer_tool.adapters.shm import ShmCoverage
 from tests.conftest import requires_clang
+
+
+def _pid_alive(pid: int) -> bool:
+    """True while *pid* exists. Zombies count as gone: the loader is our
+    grandchild's parent, so a reaped-but-unwaited process is still an exit."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            return f.read().split(")")[-1].split()[0] != "Z"
+    except OSError:
+        return False
+
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SHIM = os.path.join(_ROOT, "src", "fuzzer_tool", "adapters", "afl_shim.c")
@@ -267,9 +287,18 @@ int main(void) {
     )
     exe = tmp_path / "chatty"
     build = subprocess.run(
-        ["clang", "-O0", "-fsanitize-coverage=trace-pc-guard", "-include", SHIM,
-         "-o", str(exe), str(src)],
-        capture_output=True, text=True,
+        [
+            "clang",
+            "-O0",
+            "-fsanitize-coverage=trace-pc-guard",
+            "-include",
+            SHIM,
+            "-o",
+            str(exe),
+            str(src),
+        ],
+        capture_output=True,
+        text=True,
     )
     if build.returncode != 0:
         pytest.skip(f"target failed to build: {build.stderr[:300]}")
@@ -308,3 +337,70 @@ class TestUpdateShmAfterResize:
         r = ForkserverRunner("/fake/target")
         r.update_shm_after_resize("7", 16384)  # must not raise
         assert r._proc is None
+
+
+class TestRunnerIsCollectable:
+    """An un-stopped runner must not pin itself alive forever.
+
+    The stderr-drain thread used to be started with `target=self._drain_stderr`,
+    a bound method, which made the runner reachable from a thread that could
+    only exit once the runner was stopped — and stop() only runs from
+    __del__, which cannot run while the object is reachable. The loop had no
+    exit: every runner that was not explicitly stopped leaked a blocked
+    thread, an orphaned fuzz_loader, its target child, and a SHM segment
+    pinned in `dest` state.
+
+    Measured before the fix: two test files left 98 live runners with 98 live
+    children, and gc.collect() freed none of them — they were reachable, not
+    garbage. A full-suite run peaked at ~185 orphaned processes.
+    """
+
+    def test_dropped_runner_is_garbage_collected(self, target):
+        if _ensure_compiled() is None:
+            pytest.skip("fuzz_loader failed to compile")
+        shm = ShmCoverage(size=8192)
+        try:
+            r = ForkserverRunner(
+                target,
+                timeout=2.0,
+                env={"__AFL_SHM_ID": shm.env_id, "AFL_MAP_SIZE": str(shm.size)},
+            )
+            if not r.start():
+                pytest.skip("forkserver failed to start")
+            child = r._proc.pid
+            ref = weakref.ref(r)
+
+            del r  # no stop(), which is the whole point
+            gc.collect()
+
+            assert ref() is None, "runner still reachable — the drain thread pins it"
+
+            # __del__ -> stop() should have taken the child with it.
+            for _ in range(50):
+                if not _pid_alive(child):
+                    break
+                time.sleep(0.1)
+            assert not _pid_alive(child), f"loader {child} outlived its runner"
+        finally:
+            shm.cleanup()
+
+    def test_drain_thread_holds_no_reference_to_the_runner(self, target):
+        """The specific defect, asserted directly rather than by its effect."""
+        if _ensure_compiled() is None:
+            pytest.skip("fuzz_loader failed to compile")
+        shm = ShmCoverage(size=8192)
+        r = ForkserverRunner(
+            target,
+            timeout=2.0,
+            env={"__AFL_SHM_ID": shm.env_id, "AFL_MAP_SIZE": str(shm.size)},
+        )
+        try:
+            if not r.start():
+                pytest.skip("forkserver failed to start")
+            thread = r._stderr_thread
+            # A bound method target keeps __self__; a plain function does not.
+            assert getattr(thread._target, "__self__", None) is not r
+            assert r not in gc.get_referents(thread)
+        finally:
+            r.stop()
+            shm.cleanup()

@@ -384,6 +384,19 @@ stays silent, because running a shim-built target standalone is legitimate. The 
 avoids every token `ExecutionRunner.is_crash()` scans stderr for, so a diagnostic can
 never be misread as a crashing input; `TestAttachFailureIsLoud` asserts that.
 
+**A likely trigger found, 2026-08-14.** Every `ForkserverRunner` that was not
+explicitly stopped leaked its `fuzz_loader`, that loader's target child, a blocked
+thread, and a SHM segment pinned in `dest` state — because the stderr-drain thread was
+started on a *bound method*, so it held the runner alive, and the runner could only be
+stopped by the `__del__` that the thread was preventing. A full-suite run peaked at ~185
+orphaned processes and 17 pinned segments; after the fix, 0 and 1. A segment in `dest`
+cannot be attached by a new process, and the failing test's child is doing exactly one
+`shmat()`, so this is the most plausible mechanism yet for the intermittent failure.
+
+Not yet proven to *be* the cause: the failing test creates its own fresh segment, which
+should not be `dest`. Reproduction attempts since the fix: 0 failures in ~40 runs, but
+the pre-fix rate was roughly 1 in 25 mixed-file runs, so that is not yet conclusive.
+
 Still open: *why* `shmat()` intermittently fails. The next occurrence will say, which is
 more than any of the four sightings could. Note the segment is created and read
 successfully by the parent in the same test, and `ipcs -m` shows no leak, so segment
