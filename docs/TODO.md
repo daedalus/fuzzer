@@ -42,3 +42,43 @@
 ## Pending Bugs
 - [ ] `_apply_single_mutation` havoc doesn't enforce `max_len` strictly (allows +1 byte per insert, up to +8 total)
 - [ ] `parse_dict_line` triple-encode chain fragile for bytes > 0x7F
+
+## Operator-yield triage (FFmpeg session follow-up)
+
+Closed out the "persistently low-yield operators" item. Two of the five were
+real defects; the rest were measurement artifacts.
+
+- [x] `invariant_break` (0/234, 0.0%) — **real bug, fixed.** `invariant_mask`
+  spanned `min(len(s) for s in samples)`, so the shortest corpus entry set the
+  mask width. Fuzzing accumulates trimmed inputs, so one short (or empty) entry
+  collapsed the mask to nothing. Now spans the largest prefix `min_samples`
+  entries reach, with only those entries contributing.
+- [x] `jpeg_crc_fix` (1.0%), `line_mutate` (2.6%), `tree_mutate` (3.2%) — **not
+  bugs.** Measured on matching input: 99.3% / 98.0% / 97.3% (JSON) and 76.0%
+  (XML) over 300 trials each. Their run-time rates reflect a corpus with no
+  JPEG or text/tree-structured entries, not broken mutators.
+
+### Caveat for any future per-operator rate measurement
+
+`_format_available` offers a never-yet-seen format on non-matching input 2% of
+the time (`_FORMAT_BOOTSTRAP_RATE`), so a sniffer-gated operator's *denominator*
+includes selections where it was never going to fire. On a corpus containing
+none of its format, an operator's reported success rate is essentially the
+trickle rate, and says nothing about correctness. Compare against a corpus that
+actually contains the format before concluding an operator is broken.
+
+This also made the no-op regression sweep seed-dependent: a trickle-offered
+operator that correctly declines to mutate looks like a pure no-op. Fixed by
+giving every sniffer-gated operator a matching sample in the battery; keep it
+that way when adding operators.
+
+## Verified not-a-bug
+
+- `--cmplog` under `--inprocess-direct` (reported as "Cmplog: disabled" in the
+  FFmpeg session). The wiring is correct: `_detect_cmplog` finds the exported
+  `__cmplog_reset`, and the direct_lite path prints "compiled into target .so
+  (direct_lite compatible)" and collects pairs. Reproduced on
+  `targets/cmplog_exercise.c` built with `-D__AFL_CMPLOG=1`: 420 tokens /
+  450 pairs.
+  The session recipe simply never enabled it — `-c` is `--coverage`, and
+  `--cmplog` has no short form. Add `--cmplog` explicitly to the FFmpeg recipe.
