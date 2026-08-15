@@ -263,10 +263,33 @@ def _make_fuzzer(corpus: list[bytes]) -> Fuzzer:
     f._cmplog = pool
 
     # redqueen is gated on per-seed metadata recorded by a live run.
-    f.seed_meta = {
-        bytes(c): {"redqueen_matches": [(0, b"ftyp")], "redqueen_offsets": [0, 4]}
-        for c in corpus
-    }
+    #
+    # Entries are (offset, operand_a, operand_b) -- three fields, matching
+    # what fuzzer.py records. This faked a two-field (0, b"ftyp"), so
+    # _op_redqueen's `off, op_a, op_b = rng.choice(matches)` raised
+    # ValueError on *every* call and the tool reported redqueen at 100%
+    # error / 0% change on every run, flagged as ZERO CHANGE in the
+    # summary. That is a property of this harness, not of the operator --
+    # the exact failure mode the module docstring warns about.
+    #
+    # The offset must also point at a real occurrence of operand_a, or the
+    # operator's `bytes(buf[off:end]) == op_a` guard declines and the
+    # measurement is of the guard rather than the substitution. Located
+    # per corpus entry below; entries with no occurrence get an empty
+    # match list and fall through to the redqueen_offsets path, which is
+    # itself a branch worth exercising.
+    f.seed_meta = {}
+    for c in corpus:
+        body = bytes(c)
+        entry_matches = []
+        for op_a, op_b in ((b"IHDR", b"IDAT"), (b"ftyp", b"moov"), (b"RIFF", b"RIFX")):
+            idx = body.find(op_a)
+            if idx != -1:
+                entry_matches.append((idx, op_a, op_b))
+        f.seed_meta[body] = {
+            "redqueen_matches": entry_matches,
+            "redqueen_offsets": [0, 4],
+        }
 
     return f
 
