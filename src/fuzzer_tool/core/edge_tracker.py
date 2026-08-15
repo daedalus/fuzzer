@@ -723,11 +723,25 @@ class EdgeTracker:
 
         new_contributions = new_edges - self.cumulative_edges
         self.cumulative_edges.update(new_edges)
-        self.seed_edges[seed_key].update(new_edges)
 
-        # Rare edge tracking: count how many distinct seeds hit each edge
-        for edge_id in hit_edges if isinstance(hit_edges, set) else set():
+        # Rare edge tracking: count how many distinct seeds cover each edge.
+        #
+        # This only ran when hit_edges was a set (the sparse edge-ID path). On
+        # the bitmap path -- which is what SHM coverage uses -- the guard
+        # evaluated to an empty set and _edge_owner_count was never populated
+        # at all, so count_rare_edges() returned 0 for every seed and the
+        # honggfuzz rare-edge energy boost was uniformly inert. It also left
+        # edge_rarity_stats() with nothing to read, which is why that function
+        # had been pointed at _global_edge_hits (execution hit volume) instead.
+        #
+        # Counting new_edges minus the seed's already-known edges keeps this
+        # idempotent: re-executing the same seed must not inflate its
+        # ownership share.
+        already_owned = self.seed_edges[seed_key]
+        for edge_id in new_edges - already_owned:
             self._edge_owner_count[edge_id] = self._edge_owner_count.get(edge_id, 0) + 1
+
+        self.seed_edges[seed_key].update(new_edges)
 
         # Per-target tracking
         if target_name:
@@ -2015,17 +2029,30 @@ class EdgeTracker:
         return count
 
     def edge_rarity_stats(self) -> dict:
-        """Compute per-edge rarity statistics.
+        """Compute per-edge rarity statistics, in units of *seeds*.
+
+        Rarity here means "how many corpus seeds reach this edge" -- that is
+        what makes an edge lossy to prune. The counts come from
+        _edge_owner_count, which is incremented once per seed that covers an
+        edge. This previously read _global_edge_hits, which accumulates the
+        bucketed SHM hit *counters* (a single execution can add hundreds for a
+        hot edge), so the buckets described execution volume while claiming to
+        describe seeds and avg_seeds_per_edge could exceed the corpus size --
+        the ffmpeg_read_nosan run reported 2502.4 seeds per edge from a
+        489-seed corpus, which is over five times the arithmetic ceiling.
 
         Returns dict with:
           - total: number of discovered edges
-          - singleton: edges hit by exactly 1 seed (rare — lossy if pruned)
-          - cold: edges hit by 2-3 seeds (fragile coverage)
-          - warm: edges hit by 4-10 seeds
-          - hot: edges hit by >10 seeds (redundant — safe to prune)
-          - avg_seeds_per_edge: average number of seeds hitting each edge
+          - singleton: edges covered by exactly 1 seed (lossy if pruned)
+          - cold: edges covered by 2-3 seeds (fragile coverage)
+          - warm: edges covered by 4-10 seeds
+          - hot: edges covered by >10 seeds (redundant -- safe to prune)
+          - avg_seeds_per_edge: mean number of seeds covering an edge
+          - bounds: (cold_hi, warm_hi) thresholds actually applied, so the
+            report can label the buckets instead of hardcoding them
         """
-        if not self._global_edge_hits:
+        owners = self._edge_owner_count or {}
+        if not owners:
             return {
                 "total": 0,
                 "singleton": 0,
@@ -2033,36 +2060,27 @@ class EdgeTracker:
                 "warm": 0,
                 "hot": 0,
                 "avg_seeds_per_edge": 0.0,
+                "bounds": (3, 10),
             }
 
-        counts = list(self._global_edge_hits.values())
+        counts = list(owners.values())
         total = len(counts)
+        # Owner counts are exact integers regardless of Morris mode -- Morris
+        # approximation applies to hit counters, not to per-seed ownership --
+        # so a single set of thresholds is correct here.
+        cold_hi, warm_hi = 3, 10
         if _HAS_NUMPY:
             arr = np.fromiter(counts, np.int64)
-            if self._morris_mode:
-                # Approximate counts from Morris: thresholds adjusted for log-scale
-                singleton = int(np.count_nonzero(arr <= 1))
-                cold = int(np.count_nonzero((arr >= 2) & (arr <= 5)))
-                warm = int(np.count_nonzero((arr >= 6) & (arr <= 20)))
-                hot = int(np.count_nonzero(arr > 20))
-            else:
-                singleton = int(np.count_nonzero(arr == 1))
-                cold = int(np.count_nonzero((arr >= 2) & (arr <= 3)))
-                warm = int(np.count_nonzero((arr >= 4) & (arr <= 10)))
-                hot = int(np.count_nonzero(arr > 10))
+            singleton = int(np.count_nonzero(arr == 1))
+            cold = int(np.count_nonzero((arr >= 2) & (arr <= cold_hi)))
+            warm = int(np.count_nonzero((arr > cold_hi) & (arr <= warm_hi)))
+            hot = int(np.count_nonzero(arr > warm_hi))
             avg = float(arr.sum()) / total if total else 0.0
         else:
-            if self._morris_mode:
-                # Approximate counts from Morris: thresholds adjusted for log-scale
-                singleton = sum(1 for c in counts if c <= 1)
-                cold = sum(1 for c in counts if 2 <= c <= 5)
-                warm = sum(1 for c in counts if 6 <= c <= 20)
-                hot = sum(1 for c in counts if c > 20)
-            else:
-                singleton = sum(1 for c in counts if c == 1)
-                cold = sum(1 for c in counts if 2 <= c <= 3)
-                warm = sum(1 for c in counts if 4 <= c <= 10)
-                hot = sum(1 for c in counts if c > 10)
+            singleton = sum(1 for c in counts if c == 1)
+            cold = sum(1 for c in counts if 2 <= c <= cold_hi)
+            warm = sum(1 for c in counts if cold_hi < c <= warm_hi)
+            hot = sum(1 for c in counts if c > warm_hi)
             avg = sum(counts) / total if total else 0.0
 
         return {
@@ -2072,6 +2090,7 @@ class EdgeTracker:
             "warm": warm,
             "hot": hot,
             "avg_seeds_per_edge": avg,
+            "bounds": (cold_hi, warm_hi),
         }
 
     def edge_hit_distribution(self) -> dict[int, dict]:

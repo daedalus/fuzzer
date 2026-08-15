@@ -81,7 +81,14 @@ class TestMorrisEdgeTracker:
         assert stats["singleton"] == 50
 
     def test_edge_rarity_stats_legacy(self):
-        """Legacy mode uses standard thresholds."""
+        """Rarity buckets count seeds per edge, not hits per edge.
+
+        Three seeds each covering one distinct edge give three singletons,
+        regardless of how many times each seed hit its edge. This previously
+        asserted 1/1/1 because the buckets were being computed from hit
+        counters (1, 3, 10), which is a different quantity: hit volume says
+        nothing about how lossy an edge is to prune.
+        """
         et = EdgeTracker(map_size=4096, morris_mode=False)
         bm1 = bytearray(4096)
         bm1[10] = 1
@@ -94,9 +101,35 @@ class TestMorrisEdgeTracker:
         et.record_edges("s3", bytes(bm3), morris_mode=False)
 
         stats = et.edge_rarity_stats()
-        assert stats["singleton"] == 1  # edge 10
-        assert stats["cold"] == 1  # edge 20 (count 3)
-        assert stats["warm"] == 1  # edge 30 (count 10)
+        assert stats["total"] == 3
+        assert stats["singleton"] == 3  # one covering seed each
+        assert stats["cold"] == 0
+        assert stats["warm"] == 0
+        assert stats["avg_seeds_per_edge"] == 1.0
+
+    def test_edge_rarity_counts_shared_edges(self):
+        """An edge covered by several seeds moves out of the singleton bucket."""
+        et = EdgeTracker(map_size=4096, morris_mode=False)
+        for i in range(5):
+            bm = bytearray(4096)
+            bm[10] = 1  # shared by all five
+            bm[100 + i] = 1  # unique to this seed
+            et.record_edges(f"s{i}", bytes(bm), morris_mode=False)
+
+        stats = et.edge_rarity_stats()
+        assert stats["total"] == 6
+        assert stats["singleton"] == 5
+        assert stats["warm"] == 1  # edge 10, covered by 5 seeds
+
+    def test_edge_owner_count_is_idempotent(self):
+        """Re-executing a seed must not inflate its ownership share."""
+        et = EdgeTracker(map_size=4096, morris_mode=False)
+        bm = bytearray(4096)
+        bm[10] = 1
+        for _ in range(10):
+            et.record_edges("s1", bytes(bm), morris_mode=False)
+        assert et._edge_owner_count[10] == 1
+        assert et.edge_rarity_stats()["singleton"] == 1
 
     def test_good_turing_morris(self):
         """Good-Turing should produce valid results in Morris mode."""

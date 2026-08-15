@@ -654,21 +654,48 @@ class TestFrequencySpectrumAndRarity:
         assert et._frequency_spectrum == {1: 2, 2: 1, 3: 1, 5: 1, 12: 1}
 
     def test_rarity_stats_matches_manual_count(self):
+        # Rarity is measured in seeds per edge, so it reads _edge_owner_count.
         et = EdgeTracker(map_size=64)
-        et._global_edge_hits = {1: 1, 2: 1, 3: 2, 4: 3, 5: 5, 6: 12}
+        et._edge_owner_count = {1: 1, 2: 1, 3: 2, 4: 3, 5: 5, 6: 12}
         s = et.edge_rarity_stats()
         assert s["total"] == 6
-        assert s["singleton"] == 2  # counts == 1: {1, 2}
-        assert s["cold"] == 2  # 2..3: {3, 4}
-        assert s["warm"] == 1  # 4..10: {5}
-        assert s["hot"] == 1  # >10: {6}
+        assert s["singleton"] == 2  # 1 seed: {1, 2}
+        assert s["cold"] == 2  # 2..3 seeds: {3, 4}
+        assert s["warm"] == 1  # 4..10 seeds: {5}
+        assert s["hot"] == 1  # >10 seeds: {6}
         assert s["avg_seeds_per_edge"] == pytest.approx((1 + 1 + 2 + 3 + 5 + 12) / 6)
 
-    def test_rarity_stats_morris_branch(self):
+    def test_rarity_stats_thresholds_are_morris_independent(self):
+        """Owner counts are exact integers; Morris approximates hit counters
+        only, so the seed thresholds must not shift under morris_mode."""
         et = EdgeTracker(map_size=64, morris_mode=True)
-        et._global_edge_hits = {1: 1, 2: 1, 3: 2, 4: 5, 5: 20, 6: 21}
+        et._edge_owner_count = {1: 1, 2: 1, 3: 2, 4: 3, 5: 5, 6: 12}
         s = et.edge_rarity_stats()
-        assert s["singleton"] == 2  # <=1: {1, 2}
-        assert s["cold"] == 2  # 2..5: {3, 4}
-        assert s["warm"] == 1  # 6..20: {5}
-        assert s["hot"] == 1  # >20: {6}
+        assert s["singleton"] == 2
+        assert s["cold"] == 2
+        assert s["warm"] == 1
+        assert s["hot"] == 1
+        assert s["bounds"] == (3, 10)
+
+    def test_rarity_ignores_hit_volume(self):
+        """A single seed hammering one edge must not make it look 'hot'.
+
+        _global_edge_hits accumulates bucketed SHM counters, so reading it
+        here produced avg_seeds_per_edge values above the corpus size (2502.4
+        against 489 seeds on the ffmpeg_read_nosan run).
+        """
+        et = EdgeTracker(map_size=64)
+        et._edge_owner_count = {1: 1, 2: 1}
+        et._global_edge_hits = {1: 5000, 2: 9000}
+        s = et.edge_rarity_stats()
+        assert s["singleton"] == 2
+        assert s["hot"] == 0
+        assert s["avg_seeds_per_edge"] == pytest.approx(1.0)
+
+    def test_avg_seeds_per_edge_bounded_by_corpus_size(self):
+        et = EdgeTracker(map_size=64)
+        n_seeds = 40
+        for edge in range(10):
+            et._edge_owner_count[edge] = n_seeds
+        s = et.edge_rarity_stats()
+        assert s["avg_seeds_per_edge"] <= n_seeds
