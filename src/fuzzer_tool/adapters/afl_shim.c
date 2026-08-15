@@ -1052,11 +1052,32 @@ __AFL_NO_COV int strncasecmp(const char *a, const char *b, size_t n) {
 
 /* The NULL checks below are deliberate: these are declared nonnull, but a
  * fuzz target reaching them with NULL is a bug we want to log around, not
- * crash inside. GCC warns that a nonnull parameter is compared to NULL. */
-#if defined(__GNUC__) && !defined(__clang__)
-#  pragma GCC diagnostic push
-#  pragma GCC diagnostic ignored "-Wnonnull-compare"
-#endif
+ * crash inside.
+ *
+ * Suppressing -Wnonnull-compare (which is what this block used to do) is
+ * exactly the wrong remedy: it hides the diagnostic while the optimizer still
+ * folds `&& n` to always-true and deletes the branch, so the guard silently
+ * stops existing. Verified on gcc 13.3 -O2: with a plain `&& n` the `test`
+ * against the needle register is absent from the emitted body. Neither
+ * `((uintptr_t)n) != 0` nor -fno-delete-null-pointer-checks restores it --
+ * the fold comes from the __nonnull attribute on glibc's declaration, not
+ * from null-check deletion.
+ *
+ * __afl_launder_ptr() routes the value through an empty asm with a "+r"
+ * constraint, so the optimizer must treat it as an opaque register value with
+ * no inherited nonnull provenance. The compare survives, costs one register
+ * move, and touches no memory (a `volatile` local also works but spills to
+ * the stack, which is not something these interceptors should do per call).
+ *
+ * Because the compared value now comes out of an asm rather than directly
+ * from a nonnull parameter, -Wnonnull-compare no longer fires and the pragma
+ * is unnecessary -- which is the point: the warning is left armed to catch
+ * any future guard that forgets to launder. */
+__attribute__((always_inline))
+static inline const void *__afl_launder_ptr(const void *p) {
+    __asm__("" : "+r"(p));
+    return p;
+}
 
 __AFL_NO_COV void *memmem(const void *h, size_t hl, const void *n, size_t nl) {
     __AFL_RESOLVE(real_memmem, afl_memmem_fn, "memmem", __afl_fb_memmem);
@@ -1073,7 +1094,11 @@ __AFL_NO_COV void *memmem(const void *h, size_t hl, const void *n, size_t nl) {
      * shorter than the token it must contain is exactly the state early
      * fuzzing is in, and it was logging nothing at all there. A needle prefix
      * is a partial anchor; nothing is none. */
-    if (__afl_cmplog_fd >= 0 && n && nl > 0 && nl <= CMPLOG_MAX_OPERAND && hl > 0) {
+    /* h was previously unguarded here even though __afl_cmplog_bytes reads it:
+     * memmem is __nonnull((1,3)), so a NULL haystack is just as reachable from
+     * a buggy target as a NULL needle, and it dereferences one line later. */
+    if (__afl_cmplog_fd >= 0 && __afl_launder_ptr(n) && __afl_launder_ptr(h) &&
+        nl > 0 && nl <= CMPLOG_MAX_OPERAND && hl > 0) {
         size_t k = hl < nl ? hl : nl;
         __afl_cmplog_bytes(h, n, k, result ? 0 : -1);
     }
@@ -1083,7 +1108,7 @@ __AFL_NO_COV void *memmem(const void *h, size_t hl, const void *n, size_t nl) {
 __AFL_NO_COV char *strstr(const char *h, const char *n) {
     __AFL_RESOLVE(real_strstr, afl_str_str_fn, "strstr", __afl_fb_strstr);
     char *result = real_strstr(h, n);
-    if (__afl_cmplog_fd >= 0 && n && h) {
+    if (__afl_cmplog_fd >= 0 && __afl_launder_ptr(n) && __afl_launder_ptr(h)) {
         size_t nl = __afl_fb_len(n);
         /* min(strnlen(h, nl), nl): see memmem. A haystack shorter than the
          * needle is the case worth planting into, not the case to skip. */
@@ -1098,7 +1123,7 @@ __AFL_NO_COV char *strstr(const char *h, const char *n) {
 __AFL_NO_COV char *strcasestr(const char *h, const char *n) {
     __AFL_RESOLVE(real_strcasestr, afl_str_str_fn, "strcasestr", __afl_fb_strcasestr);
     char *result = real_strcasestr(h, n);
-    if (__afl_cmplog_fd >= 0 && n && h) {
+    if (__afl_cmplog_fd >= 0 && __afl_launder_ptr(n) && __afl_launder_ptr(h)) {
         size_t nl = __afl_fb_len(n);
         size_t k = 0;
         while (k < nl && h[k]) k++;
@@ -1107,10 +1132,6 @@ __AFL_NO_COV char *strcasestr(const char *h, const char *n) {
     }
     return result;
 }
-
-#if defined(__GNUC__) && !defined(__clang__)
-#  pragma GCC diagnostic pop
-#endif
 
 /* ── Layer 2: Clang -fsanitize-coverage=trace-cmp callbacks ───────────
  *
