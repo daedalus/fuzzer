@@ -362,6 +362,33 @@ a fixed seed and a fixed exec budget.
 
 ## Loose thread
 
+**Diagnosed 2026-08-14, on the third and fourth sightings.** The instrumented
+assertion caught it on the next full-suite run:
+
+```
+table should be full — rc=0 edge_count=0 diag=0x00000000 dropped=0 occupied=0 stderr=b''
+```
+
+`diag == 0` is the discriminator. `__afl_map_shm()` writes the context width into
+`diag` immediately after a successful `shmat()`, so an all-zero `diag` means the write
+never happened: **the child never attached.** It is not a parent racing the read — the
+parent's read is fine, there is simply nothing there. The child then ran its full loop
+against a NULL `__afl_area` and exited 0 with an empty stderr.
+
+Root cause of the *invisibility*, which is the part that mattered: all three early
+returns in `__afl_map_shm()` were silent. Absent env var, unparseable id, and failed
+`shmat()` were indistinguishable from each other and from success, on both sides of the
+fence. Fixed — a target that was asked for coverage and could not attach now writes one
+line to stderr naming which of the three failed, with `errno`. The absent-env-var case
+stays silent, because running a shim-built target standalone is legitimate. The wording
+avoids every token `ExecutionRunner.is_crash()` scans stderr for, so a diagnostic can
+never be misread as a crashing input; `TestAttachFailureIsLoud` asserts that.
+
+Still open: *why* `shmat()` intermittently fails. The next occurrence will say, which is
+more than any of the four sightings could. Note the segment is created and read
+successfully by the parent in the same test, and `ipcs -m` shows no leak, so segment
+exhaustion (limit 4096) is not the obvious explanation.
+
 Twice in roughly fifty runs, the first `ShmCoverage` constructed in a process read back
 an empty edge table after a child that exited 0 — header `edge_count` not captured at
 the time, so I cannot say whether the child failed to attach or the parent raced the

@@ -144,9 +144,24 @@ class TestDropCounter:
         shm = ShmCoverage(size=1024)
         try:
             env = {**os.environ, "__AFL_SHM_ID": shm.env_id, "AFL_MAP_SIZE": "1024"}
-            subprocess.run([built[0], "4000"], env=env, capture_output=True)
-            assert len(shm.get_edge_ids()) == 1024, "table should be full"
-            assert shm.read_dropped_edges() > 0, "full table must report drops"
+            proc = subprocess.run([built[0], "4000"], env=env, capture_output=True)
+            # Diagnostics, not decoration: this assertion has gone red once,
+            # non-reproducibly, reading back a table the child should have
+            # filled (see "Loose thread" in docs/edge-coverage-analysis.md).
+            # Without the header and the child's status in the message there
+            # is no way to tell a child that failed to attach from a parent
+            # that raced the read, which is exactly what the last sighting
+            # could not distinguish.
+            state = (
+                f"rc={proc.returncode} "
+                f"edge_count={shm.read_edge_count()} "
+                f"diag=0x{shm.read_diag():08x} "
+                f"dropped={shm.read_dropped_edges()} "
+                f"occupied={len(shm.get_edge_ids())} "
+                f"stderr={proc.stderr[-200:]!r}"
+            )
+            assert len(shm.get_edge_ids()) == 1024, f"table should be full — {state}"
+            assert shm.read_dropped_edges() > 0, f"full table must report drops — {state}"
         finally:
             shm.cleanup()
 
@@ -307,5 +322,58 @@ class TestEdgeIdZeroRegression:
             # Without the fix the second edge hashes to 0 and is silently
             # dropped, so only 1 edge survives. With the fix both survive.
             assert len(edges) == 2, f"expected 2 edges, got {len(edges)}: {edges}"
+        finally:
+            shm.cleanup()
+
+
+class TestAttachFailureIsLoud:
+    """A failed attach must say so, not run the target and record nothing.
+
+    All three early returns in `__afl_map_shm()` used to be silent, so a
+    child that could not attach exited 0 with an empty stderr and left an
+    all-zero header — indistinguishable from a parent that raced the read.
+    That ambiguity is the "Loose thread" in docs/edge-coverage-analysis.md,
+    unresolved across three sightings for exactly this reason.
+    """
+
+    @needs_cc
+    def test_silent_when_not_under_the_fuzzer(self, built):
+        """No __AFL_SHM_ID means standalone, which is not an error."""
+        env = {k: v for k, v in os.environ.items() if k != "__AFL_SHM_ID"}
+        r = subprocess.run([built[0], "10"], env=env, capture_output=True)
+        assert r.returncode == 0
+        assert b"__afl_shim" not in r.stderr
+
+    @needs_cc
+    def test_unparseable_id_is_reported(self, built):
+        env = {**os.environ, "__AFL_SHM_ID": "0", "AFL_MAP_SIZE": "1024"}
+        r = subprocess.run([built[0], "10"], env=env, capture_output=True)
+        assert b"__afl_shim" in r.stderr
+        assert b"not a valid segment id" in r.stderr
+
+    @needs_cc
+    def test_failed_shmat_is_reported_with_errno(self, built):
+        """A stale segment id is the realistic form of this failure."""
+        env = {**os.environ, "__AFL_SHM_ID": "999999", "AFL_MAP_SIZE": "1024"}
+        r = subprocess.run([built[0], "10"], env=env, capture_output=True)
+        assert b"shmat(999999) failed" in r.stderr
+
+    @needs_cc
+    def test_diagnostic_cannot_be_read_as_a_crash(self, built):
+        """The message must not trip ExecutionRunner.is_crash()'s stderr scan."""
+        env = {**os.environ, "__AFL_SHM_ID": "999999", "AFL_MAP_SIZE": "1024"}
+        r = subprocess.run([built[0], "10"], env=env, capture_output=True)
+        text = r.stderr.decode(errors="replace")
+        for token in ("SIGSEGV", "SIGABRT", "SIGFPE", "SIGBUS", "Segmentation fault", "Aborted"):
+            assert token not in text
+
+    @needs_cc
+    def test_successful_attach_stays_silent(self, built):
+        shm = ShmCoverage(size=1024)
+        try:
+            env = {**os.environ, "__AFL_SHM_ID": shm.env_id, "AFL_MAP_SIZE": "1024"}
+            r = subprocess.run([built[0], "400"], env=env, capture_output=True)
+            assert b"__afl_shim" not in r.stderr
+            assert len(shm.get_edge_ids()) > 0
         finally:
             shm.cleanup()

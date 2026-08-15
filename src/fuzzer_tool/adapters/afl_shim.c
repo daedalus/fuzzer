@@ -152,6 +152,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <signal.h>
 #include <setjmp.h>
 #include <unistd.h>
@@ -327,9 +328,32 @@ static uint64_t  __afl_total_edge_count = 0;    /* cumulative, never reset acros
 __attribute__((visibility("default")))
 void __afl_map_shm(void) {
     char *id = getenv("__AFL_SHM_ID");
-    if (!id) return;
+    if (!id) return;   /* not under the fuzzer — silence is correct here */
     int shmid = atoi(id);
-    if (shmid <= 0) return;
+
+    /* Past this point the fuzzer has explicitly asked for coverage, so a
+     * failure must not be silent. It used to be: all three early returns
+     * below left __afl_area NULL, the target then ran to completion and
+     * exited 0 having recorded nothing, and the fuzzer read back an
+     * all-zero header indistinguishable from "the child never wrote".
+     * That is the whole of the "Loose thread" in
+     * docs/edge-coverage-analysis.md -- three sightings across ~50 runs,
+     * unresolvable each time because neither side left a trace.
+     *
+     * write(2) rather than fprintf: this runs from a constructor, before
+     * the target's own stdio setup, and may run inside a forkserver child.
+     * The wording deliberately contains none of the tokens
+     * ExecutionRunner.is_crash() scans stderr for (SIGSEGV, SIGABRT,
+     * SIGFPE, SIGBUS, "Segmentation fault", "Aborted"), so a diagnostic
+     * cannot be misread as a crashing input. */
+    if (shmid <= 0) {
+        char msg[128];
+        int n = snprintf(msg, sizeof(msg),
+                         "__afl_shim: __AFL_SHM_ID=%.32s is not a valid segment id"
+                         " -- coverage disabled\n", id);
+        if (n > 0) { ssize_t w = write(2, msg, (size_t)n); (void)w; }
+        return;
+    }
 
     /* Read map size from environment.  AFL_MAP_SIZE is the number of
      * hash table entries (not bytes).  The Python side allocates SHM as
@@ -343,7 +367,14 @@ void __afl_map_shm(void) {
 
     /* SHM was allocated as header bytes + table bytes */
     void *p = shmat(shmid, NULL, 0);
-    if (p == (void *)-1) return;
+    if (p == (void *)-1) {
+        char msg[160];
+        int n = snprintf(msg, sizeof(msg),
+                         "__afl_shim: shmat(%d) failed: %.64s"
+                         " -- coverage disabled\n", shmid, strerror(errno));
+        if (n > 0) { ssize_t w = write(2, msg, (size_t)n); (void)w; }
+        return;
+    }
 
     /* Edge table starts after the front header */
     uint8_t *base = (uint8_t *)p;

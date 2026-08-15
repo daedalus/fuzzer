@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`estimate_map_size()` now reports which tier produced its answer.** Every
+  call logs the block count, the source (`sancov_guards`, `sancov_cntrs`,
+  `profile`, `branch_density`, `default`), whether that source is exact or an
+  estimate, and whether the cap bound. `estimate_map_size_detail()` returns the
+  same as a `MapSizeEstimate` for callers and tests that need to assert the
+  tier rather than the number. A silent fallback from "exact" to "estimated" is
+  what hid the `__sancov_cntrs`/`__sancov_guards` mismatch below for the entire
+  life of the function: tier 3 always returns a plausible number, so nothing
+  downstream could tell a measurement from a guess.
 - **Forkserver on the default execution path** (`--no-forkserver` to opt out).
   `afl_shim.c` now installs an AFL-style forkserver at the end of its
   constructor (`__afl_start_forkserver()`, AFL's protocol on fds 198/199), so
@@ -26,6 +35,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   strict subset differing by a constant, input-independent init set.
 
 ### Fixed
+- **A failed SHM attach was silent, on both sides.** All three early returns
+  in `__afl_map_shm()` (`__AFL_SHM_ID` absent, unparseable, or `shmat()`
+  failing) left `__afl_area` NULL, after which the target ran its full input
+  and exited 0 having recorded nothing, and the fuzzer read back an all-zero
+  header. Success and total failure were indistinguishable. This is the
+  "Loose thread" in `docs/edge-coverage-analysis.md`, unresolved across four
+  sightings for precisely that reason; the instrumented assertion caught the
+  fourth (`rc=0 edge_count=0 diag=0x00000000 dropped=0 occupied=0 stderr=b''`),
+  and `diag == 0` identifies it as a child that never attached rather than a
+  parent that raced the read. A target that was asked for coverage and could
+  not attach now writes one line to stderr naming which return fired, with
+  `errno`. Running standalone (no `__AFL_SHM_ID`) stays silent. The wording
+  contains none of the tokens `ExecutionRunner.is_crash()` scans stderr for,
+  so a diagnostic cannot be misread as a crashing input.
 - **Map sizing read the wrong sancov section, so it never once used a real
   block count.** `estimate_map_size()` lists "sancov guard count (exact)" as
   its first priority, but the only parser it had — `parse_sancov_offsets()` —
