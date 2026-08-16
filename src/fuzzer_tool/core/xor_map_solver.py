@@ -310,6 +310,20 @@ def _extract_fixed_width(pairs: list[tuple[bytes, int]], width: int) -> list[tup
     *width* bits.  The *input* is the first ``ceil(width/8)`` bytes of
     the data field, zero-padded when the data is shorter than the window.
 
+    The window is packed **little-endian** so that bit ``i`` of
+    ``input_int`` -- which is how :class:`IncrementalXorMapSolver` indexes
+    it, via ``(input_bits >> i) & 1`` -- is the same bit that
+    :func:`compute_xor_checksum` reads as ``data[i // 8] >> (i % 8)``.
+
+    This packed big-endian originally, which byte-reverses the window
+    relative to the evaluator. The two conventions coincide for a 1-byte
+    window and diverge for every wider one, so the solver would fit a
+    perfectly good mask set under its own indexing and
+    :func:`verify_xor_model` would then evaluate it under the other and
+    reject it. Every 16- and 32-bit candidate failed that way, making
+    ``recover_xor_model``'s ``(8, 16, 32)`` width ladder effectively
+    ``(8,)`` regardless of the input.
+
     Args:
         pairs: ``(data, checksum)`` observations.
         width: Field width in bits (must be a multiple of 8).
@@ -323,7 +337,7 @@ def _extract_fixed_width(pairs: list[tuple[bytes, int]], width: int) -> list[tup
     result: list[tuple[int, int]] = []
     for data, checksum in pairs:
         window = data[:n_bytes]
-        input_int = int.from_bytes(window.ljust(n_bytes, b"\x00"), "big")
+        input_int = int.from_bytes(window.ljust(n_bytes, b"\x00"), "little")
         output_int = checksum & ((1 << width) - 1)
         result.append((input_int, output_int))
     return result
@@ -341,6 +355,16 @@ def recover_xor_model(
     is capped at *max_pairs* and deduplicated; a candidate is accepted only
     when :func:`verify_xor_model` reproduces at least *min_matches*
     distinct pairs.
+
+    In practice the ladder reaches 16 bits, not 32. Cost per output bit
+    grows with the number of input bits, and at 32x32 the per-bit solve
+    needs roughly 600 ms against :data:`_SOLVER_TIMEOUT_MS`'s 200 ms budget
+    -- measured at ~22 s total to recover a known 32-bit model with the
+    timeout lifted, against ~0.3 s to give up at the default. That is the
+    right trade for a solver on the fuzzing hot path, so the 32-bit rung is
+    left as a deliberate miss rather than widened; a target with a genuine
+    32-bit XOR checksum needs an offline recovery pass, not a bigger
+    in-loop budget.
 
     Args:
         pairs: ``(data, checksum)`` observations.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 import sys
 import threading
 from unittest import mock
@@ -63,7 +64,14 @@ def _make_pairs(
     n_pairs: int = 8,
     n_bytes: int = 4,
 ) -> tuple[list[tuple[bytes, int]], list[tuple[int, int]]]:
-    """Build (data, checksum) pairs from a mask using distinct inputs."""
+    """Build (data, checksum) pairs from a mask using distinct inputs.
+
+    ``int_pairs`` packs the window little-endian to match
+    ``_extract_fixed_width``: bit ``i`` of the integer must be the bit
+    ``_apply_xor_map``/``compute_xor_checksum`` read as
+    ``data[i // 8] >> (i % 8)``, which big-endian packing byte-reverses for
+    any window wider than one byte.
+    """
     data_list: list[bytes] = []
     checksum_list: list[int] = []
     int_pairs: list[tuple[int, int]] = []
@@ -76,7 +84,7 @@ def _make_pairs(
         checksum_list.append(checksum)
         int_pairs.append(
             (
-                int.from_bytes(data[:width_bytes].ljust(width_bytes, b"\x00"), "big"),
+                int.from_bytes(data[:width_bytes].ljust(width_bytes, b"\x00"), "little"),
                 checksum,
             )
         )
@@ -205,6 +213,32 @@ class TestIncrementalXorMapSolver:
 
 
 class TestRecoverXorModel:
+    @requires_z3
+    def test_recovers_sixteen_bit_model(self):
+        """The width ladder must actually reach past 8 bits.
+
+        ``_extract_fixed_width`` packed the input window big-endian while
+        the solver indexes that integer LSB-first and
+        ``compute_xor_checksum`` reads ``data[i // 8] >> (i % 8)``. Those
+        agree only for a 1-byte window, so at 16 and 32 bits the solver fit
+        a mask set under one convention and ``verify_xor_model`` rejected it
+        under the other -- every candidate wider than a byte failed, and
+        ``recover_xor_model``'s ``(8, 16, 32)`` ladder was ``(8,)`` in
+        practice for every input.
+
+        An 8-bit-only test cannot see this: that is exactly the width where
+        the two conventions coincide.
+        """
+        rng = random.Random(11)
+        masks = [sorted(rng.sample(range(16), 3)) for _ in range(16)]
+        bodies = sorted({bytes(rng.randrange(256) for _ in range(2)) for _ in range(150)})
+        pairs = [(b, _apply_xor_map(b, masks, 16)) for b in bodies]
+
+        model = recover_xor_model(pairs, max_pairs=len(pairs))
+        assert model is not None, "no 16-bit model recovered from exactly linear data"
+        assert model.out_bits == 16
+        assert all(compute_xor_checksum(b, model) == c for b, c in pairs)
+
     @requires_z3
     def test_recovers_parity_model(self):
         # parity[j] = XOR of bits 0..7. Use pairs that exercise all 8 input
