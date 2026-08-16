@@ -996,7 +996,18 @@ class OperatorEngine:
         CRCs and ZIP CRCs are CRC-32 *by specification*, so a recovered
         integer model (typically the Adler-32 living one layer below, inside
         the IDAT zlib stream) must never be written into those fields. An
-        integer model drives only the generic trailing-field patch.
+        integer model drives only the generic trailing-field patch, and an
+        XOR-bitmask model likewise -- the three families are disjoint and
+        substituting one for another silently corrupts the field.
+
+        All three must be handled here, because availability gates on
+        ``ChecksumLearner.ensure_model()``, which is true when *any* of the
+        three has a verified model. A family with no branch below is not
+        merely unsupported: the operator is then offered on every selection,
+        returns the buffer untouched, and is still selected, timed and
+        credited by the schedulers -- a pure no-op of exactly the kind
+        ``tests/test_regression_no_op_mutations.py`` exists to catch, and one
+        that guard cannot see because it never builds a learner.
         """
         if not buf or len(buf) < 4:
             return
@@ -1018,14 +1029,28 @@ class OperatorEngine:
             return
 
         model = learner.ensure_int_model()
-        if model is None:
+        if model is not None:
+            # Width comes from the model: a Fletcher-16 field is 2 bytes, and
+            # zero-padding it into 4 would clobber two bytes of real data.
+            nbytes = model.nbytes
+            if len(buf) <= nbytes:
+                return
+            checksum = learner.compute_int_checksum(bytes(buf[:-nbytes]))
+            if checksum is None:
+                return
+            buf[-nbytes:] = checksum.to_bytes(nbytes, "big")
             return
-        # Width comes from the model: a Fletcher-16 field is 2 bytes, and
-        # zero-padding it into 4 would clobber two bytes of real data.
-        nbytes = model.nbytes
-        if len(buf) <= nbytes:
+
+        # XOR-bitmask family (XOR-of-selected-input-bits). Recovered last, and
+        # only once both GF(2) and integer recovery have failed to verify, so
+        # reaching here means it is the only model there is.
+        xmodel = learner.ensure_xor_model()
+        if xmodel is None:
             return
-        checksum = learner.compute_int_checksum(bytes(buf[:-nbytes]))
+        nbytes = xmodel.nbytes
+        if nbytes <= 0 or len(buf) <= nbytes:
+            return
+        checksum = learner.compute_xor_checksum(bytes(buf[:-nbytes]))
         if checksum is None:
             return
         buf[-nbytes:] = checksum.to_bytes(nbytes, "big")

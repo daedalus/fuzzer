@@ -17,6 +17,20 @@ never cascades into another's. Operators gated on runtime scheduling state a
 unit test does not build (dictionary scratch, grammar, cmplog pairs,
 CEM/markov) report themselves unavailable and are skipped, so no
 hand-maintained skip list is needed beyond one structural operator noted below.
+
+Those skips were a blind spot, not a safe default: an operator that is only
+ever *reachable* with runtime state is also only ever *checkable* with it, and
+``crc_learn`` was a pure no-op there for exactly that reason -- its
+availability gate is ``ChecksumLearner.ensure_model()``, true for any of three
+checksum families, while the handler consumed only two of them. A target whose
+checksum recovered as XOR-bitmask offered ``crc_learn`` on every selection and
+got nothing back.
+
+``TestStateGatedOperatorsAreNotNoOps`` below closes that hole: it builds the
+state each gate wants and sweeps the operators that only appear once it exists.
+Its ``test_every_selectable_operator_is_reachable`` is the guard-the-guard --
+adding a new state-gated operator without teaching ``_build_gated_state`` how
+to reach it fails there rather than silently reopening the blind spot.
 """
 
 from __future__ import annotations
@@ -144,6 +158,79 @@ def _battery() -> list[bytes]:
     return inputs
 
 
+def _make_fuzzer() -> Fuzzer:
+    tmp = tempfile.mkdtemp(prefix="noop_sweep_")
+    os.makedirs(f"{tmp}/corpus", exist_ok=True)
+    # /bin/true stands in for a target; the isfile/access patches let the
+    # constructor accept it, and _setup_forkserver is neutralised so no
+    # compiled fuzz_loader is required (this is a pure mutation unit test).
+    with (
+        patch.object(Fuzzer, "_setup_forkserver", lambda self: None),
+        patch("os.path.isfile", return_value=True),
+        patch("os.access", return_value=True),
+    ):
+        f = Fuzzer(
+            target="/bin/true",
+            corpus_dir=f"{tmp}/corpus",
+            crashes_dir=f"{tmp}/crashes",
+            max_len=4096,
+            timeout=1,
+            mutations_per_input=2,
+        )
+    # Dictionary/grammar/cmplog operators need per-seed scheduling state the
+    # mutate loop builds; leave it empty so they report unavailable and are
+    # skipped rather than flagged as false no-ops.
+    f.dictionary = []
+    # Cross-seed operators (splice/crossover) need >1 distinct corpus entry.
+    f.corpus = [
+        bytearray(s)
+        for s in (
+            b"the quick brown fox jumped 12345",
+            b"a second, distinct corpus seed \xff\xfe\x01",
+            b"\x89PNG\r\n\x1a\nIHDR....",
+            b"third seed payload zzzzzzzz",
+        )
+    ]
+    return f
+
+def _sweep(f: Fuzzer) -> tuple[set[str], set[str]]:
+    """Return (available_somewhere, changed_somewhere) operator-name sets.
+
+    Each operator is exercised on its own with the fuzzer RNG reseeded per
+    repetition, so the result is deterministic and independent of operator
+    ordering or of any other operator's RNG use.
+    """
+    table = REGISTRY.dispatch(f._operators)
+    battery = _battery()
+    names = sorted({n for inp in battery for n in REGISTRY.available(f, inp)})
+    available: set[str] = set(names)
+    changed: set[str] = set()
+    for name in names:
+        done = False
+        for rep in range(_REPS):
+            f._rand_pool.reseed(_BASE_SEED + rep)
+            for inp in battery:
+                if name not in set(REGISTRY.available(f, inp)):
+                    continue
+                buf = bytearray(inp)
+                idx = len(buf) // 2
+                try:
+                    ret = table[name](buf, idx, bytes(inp))
+                except Exception:
+                    # An operator raising is a separate concern; a no-op is
+                    # about *silence*, not errors. Skip and let other tests
+                    # cover exceptions.
+                    continue
+                out = ret if isinstance(ret, (bytes, bytearray)) else buf
+                if bytes(out) != inp:
+                    changed.add(name)
+                    done = True
+                    break
+            if done:
+                break
+    return available, changed
+
+
 class TestNoMutationIsAPureNoOp:
     # Structural mutators need a well-formed file body, not just a magic
     # prefix, before they will do anything -- `available` is decided by cheap
@@ -156,81 +243,9 @@ class TestNoMutationIsAPureNoOp:
     # Adding a valid sample to the battery is always the better fix.
     _NEEDS_VALID_FILE_BODY: set[str] = set()
 
-    def _make_fuzzer(self) -> Fuzzer:
-        tmp = tempfile.mkdtemp(prefix="noop_sweep_")
-        os.makedirs(f"{tmp}/corpus", exist_ok=True)
-        # /bin/true stands in for a target; the isfile/access patches let the
-        # constructor accept it, and _setup_forkserver is neutralised so no
-        # compiled fuzz_loader is required (this is a pure mutation unit test).
-        with (
-            patch.object(Fuzzer, "_setup_forkserver", lambda self: None),
-            patch("os.path.isfile", return_value=True),
-            patch("os.access", return_value=True),
-        ):
-            f = Fuzzer(
-                target="/bin/true",
-                corpus_dir=f"{tmp}/corpus",
-                crashes_dir=f"{tmp}/crashes",
-                max_len=4096,
-                timeout=1,
-                mutations_per_input=2,
-            )
-        # Dictionary/grammar/cmplog operators need per-seed scheduling state the
-        # mutate loop builds; leave it empty so they report unavailable and are
-        # skipped rather than flagged as false no-ops.
-        f.dictionary = []
-        # Cross-seed operators (splice/crossover) need >1 distinct corpus entry.
-        f.corpus = [
-            bytearray(s)
-            for s in (
-                b"the quick brown fox jumped 12345",
-                b"a second, distinct corpus seed \xff\xfe\x01",
-                b"\x89PNG\r\n\x1a\nIHDR....",
-                b"third seed payload zzzzzzzz",
-            )
-        ]
-        return f
-
-    def _sweep(self, f: Fuzzer) -> tuple[set[str], set[str]]:
-        """Return (available_somewhere, changed_somewhere) operator-name sets.
-
-        Each operator is exercised on its own with the fuzzer RNG reseeded per
-        repetition, so the result is deterministic and independent of operator
-        ordering or of any other operator's RNG use.
-        """
-        table = REGISTRY.dispatch(f._operators)
-        battery = _battery()
-        names = sorted({n for inp in battery for n in REGISTRY.available(f, inp)})
-        available: set[str] = set(names)
-        changed: set[str] = set()
-        for name in names:
-            done = False
-            for rep in range(_REPS):
-                f._rand_pool.reseed(_BASE_SEED + rep)
-                for inp in battery:
-                    if name not in set(REGISTRY.available(f, inp)):
-                        continue
-                    buf = bytearray(inp)
-                    idx = len(buf) // 2
-                    try:
-                        ret = table[name](buf, idx, bytes(inp))
-                    except Exception:
-                        # An operator raising is a separate concern; a no-op is
-                        # about *silence*, not errors. Skip and let other tests
-                        # cover exceptions.
-                        continue
-                    out = ret if isinstance(ret, (bytes, bytearray)) else buf
-                    if bytes(out) != inp:
-                        changed.add(name)
-                        done = True
-                        break
-                if done:
-                    break
-        return available, changed
-
     def test_every_available_operator_changes_some_input(self):
-        f = self._make_fuzzer()
-        available, changed = self._sweep(f)
+        f = _make_fuzzer()
+        available, changed = _sweep(f)
 
         # Guard the guard: if the registry/dispatch wiring breaks, `available`
         # collapses and the no-op check becomes vacuously true. Require a broad
@@ -249,8 +264,8 @@ class TestNoMutationIsAPureNoOp:
         original = _mutations.byte_shuffle
         _mutations.byte_shuffle = lambda data, rng=None: bytes(data)
         try:
-            f = self._make_fuzzer()
-            available, changed = self._sweep(f)
+            f = _make_fuzzer()
+            available, changed = _sweep(f)
             assert "byte_shuffle" in available
             assert "byte_shuffle" in (available - changed), (
                 "a planted no-op byte_shuffle went undetected — the sweep "
@@ -258,3 +273,239 @@ class TestNoMutationIsAPureNoOp:
             )
         finally:
             _mutations.byte_shuffle = original
+
+
+class TestStateGatedOperatorsAreNotNoOps:
+    """The same no-op sweep, over the operators that need runtime state.
+
+    ``TestNoMutationIsAPureNoOp`` deliberately leaves that state unbuilt so
+    the gated operators report unavailable and are skipped. That kept the
+    sweep clean at the cost of never checking 25 of 124 operators -- and
+    ``crc_learn`` was a pure no-op in that gap. Here the state is built.
+
+    Only ``colorization`` stays out: its predicate is
+    ``operator_registry._never``, so it is dispatchable but never selectable
+    and cannot spend budget. Everything else must be both reachable and
+    non-inert.
+    """
+
+    #: Selectable-by-construction: never returned by ``REGISTRY.available``.
+    _NEVER_SELECTABLE = {"colorization"}
+
+    def _build_gated_state(self, f: Fuzzer) -> set[str]:
+        """Populate the runtime state the gated predicates ask for.
+
+        Returns the names of operators intentionally left unreachable in
+        this environment (currently only the z3-dependent ones when the
+        optional ``smt`` extra is absent).
+        """
+        unreachable: set[str] = set()
+
+        # --- dictionary band (8 operators) -------------------------------
+        # The gate only checks that a dictionary exists, but six of the
+        # eight also consume a per-seed index scratch the mutate loop
+        # refills. Dispatching directly bypasses that refill, so without it
+        # they decline every call and measure as no-ops that are really
+        # harness artifacts.
+        f.dictionary = [b"IHDR", b"IDAT", b"<script>", b"%n", b"\xff\xff", b"AAAA"]
+        f._dict_scratch = f._rand_pool.randint_list(0, len(f.dictionary) - 1, 4096)
+        f._dict_scratch_idx = 0
+
+        # --- flag-gated band ----------------------------------------------
+        f.enable_regex_bomb = True
+        f.enable_x86_mutator = True
+        f.enable_arm_mutator = True
+
+        # --- cmplog band (6 operators + path_negate) -----------------------
+        from fuzzer_tool.core.cmplog import CmplogCollector
+
+        pool = CmplogCollector()
+        pool.pairs = [
+            (b"IHDR", b"IDAT"),
+            (b"\x89PNG", b"\x89png"),
+            (b"ftyp", b"isom"),
+            (b"RIFF", b"WEBP"),
+        ]
+        # Real shape is dict[(a, b)] -> (result, width); a list of tuples
+        # makes branch_records() raise on every call, which measures this
+        # fixture rather than the operator.
+        pool._pair_cmp = {
+            (b"IHDR", b"IDAT"): (-1, 4),
+            (b"ftyp", b"isom"): (1, 4),
+        }
+        pool._pair_pc = {(b"IHDR", b"IDAT"): 0x401000, (b"ftyp", b"isom"): 0x401020}
+        f._cmplog = pool
+
+        # --- redqueen ------------------------------------------------------
+        # Entries are (offset, operand_a, operand_b), and the offset must
+        # point at a real occurrence of operand_a or the operator's own
+        # guard declines.
+        f.seed_meta = {}
+        for inp in _battery():
+            matches = [
+                (inp.find(a), a, b)
+                for a, b in ((b"IHDR", b"IDAT"), (b"RIFF", b"RIFX"), (b"\x7fELF", b"\x7felf"))
+                if inp.find(a) != -1
+            ]
+            f.seed_meta[inp] = {"redqueen_matches": matches, "redqueen_offsets": [0, 4]}
+
+        # --- grammar band --------------------------------------------------
+        from fuzzer_tool.core.grammar import Grammar
+
+        grammar = Grammar()
+        grammar.parse(
+            "start  = header body footer\n"
+            'header = "GET " path " HTTP/1.1\\r\\n"\n'
+            'path   = "/" | "/index.html" | "/a/b/c"\n'
+            'body   = "Host: example.com\\r\\n" | "X-Test: 1\\r\\n"\n'
+            'footer = "\\r\\n"\n'
+        )
+        f.grammar = grammar
+
+        # --- CEM -----------------------------------------------------------
+        from fuzzer_tool.core.schedulers.monte_carlo import MonteCarloScheduler
+
+        mc = MonteCarloScheduler()
+        for i, seed in enumerate([bytes(c) for c in f.corpus] + _battery()[:12]):
+            mc.add_elite(seed, score=100 - i)
+        mc.maybe_refit()
+        f.mc = mc
+        f.mc_cem = True
+        f.markov_trained = True
+
+        # --- invariant_break -----------------------------------------------
+        # corpus_invariants() needs >= 16 samples before it will call an
+        # offset invariant, but size alone is not enough: the mask is
+        # ``&= ~(first ^ current)`` across entries, so a corpus with no shared
+        # structure yields an all-zero mask and the operator has nothing to
+        # break. `_battery()` is deliberately diverse and produces exactly
+        # that (33 samples, zero invariant bytes), which reads as a no-op but
+        # is a property of the corpus. A real fuzzing corpus concentrates on
+        # one format, so add entries that share a header.
+        shared_header = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+        f.corpus = [bytearray(inp) for inp in _battery()]
+        f.corpus += [
+            bytearray(shared_header + bytes((i * 37 + j) & 0xFF for j in range(48)))
+            for i in range(20)
+        ]
+        from fuzzer_tool.core.randomness import corpus_invariants
+
+        assert any(corpus_invariants([bytes(c) for c in f.corpus]).mask), (
+            "fixture corpus has no invariant bits, so invariant_break would "
+            "measure as a no-op for a reason that is not about the operator"
+        )
+
+        # --- checksum learner (crc_learn) ------------------------------------
+        # An XOR-bitmask model with no GF(2) and no integer model is the exact
+        # state that made crc_learn a pure no-op: ensure_model() is true, so
+        # the operator is offered on every selection, while the handler had no
+        # branch for this family and returned the buffer untouched.
+        #
+        # The model is installed directly rather than recovered: recovery goes
+        # through the z3 XOR-map solver, and this must run without the
+        # optional smt extra. Installing it directly is a real reachable
+        # state, and the same one ChecksumLearner.load() restores.
+        from fuzzer_tool.core.checksum_learner import ChecksumLearner
+        from fuzzer_tool.core.xor_map_solver import XorBitmaskModel
+
+        learner = ChecksumLearner(f)
+        learner._set_xor_model(
+            XorBitmaskModel(
+                masks=((1, 2), (6, 7), (3, 5, 7), (1, 3), (3, 6), (0, 2, 3, 5), (0, 2, 3, 4), (0, 7)),
+                out_bits=8,
+            )
+        )
+        assert learner.ensure_poly() is None
+        assert learner.ensure_int_model() is None
+        assert learner.ensure_model(), "fixture failed to reach the XOR-only model state"
+        f.checksum_learner = learner
+
+        # --- path_negate ----------------------------------------------------
+        # Needs recorded outcomes *and* an enabled solver. Without z3 the
+        # fuzzer leaves _path_solver as None and the operator is genuinely
+        # unreachable, so report it rather than flagging a false no-op.
+        f._path_solver = None
+        try:
+            from fuzzer_tool.core.path_constraints import PathConstraintSolver, _z3
+
+            if _z3() is not None:
+                f._path_solver = PathConstraintSolver()
+        except Exception:  # pragma: no cover - environment-dependent
+            pass
+        if f._path_solver is None:
+            unreachable.add("path_negate")
+
+        return unreachable
+
+    def _make_gated_fuzzer(self) -> tuple[Fuzzer, set[str]]:
+        f = _make_fuzzer()
+        return f, self._build_gated_state(f)
+
+    def teardown_method(self):
+        # _set_xor_model also publishes to a module-global active model; leave
+        # it as found so later tests are not reading this fixture's model.
+        from fuzzer_tool.core.xor_map_solver import clear_active_xor_model
+
+        clear_active_xor_model()
+
+    def test_state_gated_operators_change_some_input(self):
+        f, unreachable = self._make_gated_fuzzer()
+        available, changed = _sweep(f)
+
+        # Building the state must actually widen the sweep, or this whole
+        # class is a slower copy of the one above.
+        assert len(available) >= 115, f"only {len(available)} operators exercised"
+
+        noops = available - changed - unreachable
+        assert not noops, (
+            "state-gated operator(s) are available but never changed any "
+            f"input (pure no-ops): {', '.join(sorted(noops))}"
+        )
+
+    def test_every_selectable_operator_is_reachable(self):
+        """No operator may sit outside the sweep without saying why.
+
+        This is the guard against the failure that hid ``crc_learn``: an
+        operator that is never offered is never checked, and a growing set
+        of them makes the no-op sweep quietly narrower over time. A new
+        state-gated operator fails here until ``_build_gated_state`` learns
+        to reach it.
+        """
+        f, unreachable = self._make_gated_fuzzer()
+        available, _ = _sweep(f)
+
+        missing = set(REGISTRY.names()) - available - self._NEVER_SELECTABLE - unreachable
+        assert not missing, (
+            "operator(s) registered but never offered by the sweep, so never "
+            f"checked for being a no-op: {', '.join(sorted(missing))}"
+        )
+
+    def test_crc_learn_is_not_a_no_op_under_an_xor_only_model(self):
+        """Direct regression for the bug this class was added to catch.
+
+        ``ensure_model()`` is true for the XOR-bitmask family, so the gate
+        offers ``crc_learn`` on every selection; before the fix the handler
+        fell through both its branches and returned the buffer untouched.
+        """
+        f, _ = self._make_gated_fuzzer()
+        table = REGISTRY.dispatch(f._operators)
+        battery = _battery()
+
+        offered = changed = 0
+        for rep in range(_REPS):
+            f._rand_pool.reseed(_BASE_SEED + rep)
+            for inp in battery:
+                if "crc_learn" not in set(REGISTRY.available(f, inp)):
+                    continue
+                offered += 1
+                buf = bytearray(inp)
+                ret = table["crc_learn"](buf, len(buf) // 2, bytes(inp))
+                out = ret if isinstance(ret, (bytes, bytearray)) else buf
+                if bytes(out) != inp:
+                    changed += 1
+
+        assert offered, "crc_learn was never offered — the XOR-only fixture is wrong"
+        assert changed, (
+            f"crc_learn offered on {offered} inputs and changed none: it is a "
+            "pure no-op whenever the recovered model is XOR-bitmask"
+        )
