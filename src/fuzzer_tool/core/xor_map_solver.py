@@ -214,6 +214,9 @@ class IncrementalXorMapSolver:
             return None
         import z3
 
+        from fuzzer_tool.core.z3_lifecycle import guard_z3_shutdown
+
+        guard_z3_shutdown()
         return z3
 
     def _build_solvers(self, z3) -> None:

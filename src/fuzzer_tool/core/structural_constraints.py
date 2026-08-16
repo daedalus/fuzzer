@@ -167,6 +167,10 @@ def solve_coupled_sections(
         return None
     try:
         import z3
+
+        from fuzzer_tool.core.z3_lifecycle import guard_z3_shutdown
+
+        guard_z3_shutdown()
     except ImportError:
         return None
 

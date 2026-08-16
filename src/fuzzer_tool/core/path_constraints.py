@@ -67,6 +67,9 @@ def _z3():
         import z3
     except ImportError:
         return None
+    from fuzzer_tool.core.z3_lifecycle import guard_z3_shutdown
+
+    guard_z3_shutdown()
     return z3
 
 

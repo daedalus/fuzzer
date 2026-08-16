@@ -41,10 +41,12 @@ def _z3_available() -> bool:
     """Check if z3-solver is installed without importing at module level."""
     try:
         import z3  # noqa: F401
-
-        return True
     except ImportError:
         return False
+    from fuzzer_tool.core.z3_lifecycle import guard_z3_shutdown
+
+    guard_z3_shutdown()
+    return True
 
 
 # ── Concolic trace accumulator ──────────────────────────────────────────
