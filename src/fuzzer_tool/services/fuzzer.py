@@ -167,31 +167,43 @@ def install_cleanup_handlers() -> bool:
 
 install_cleanup_handlers()
 
-# On-demand live trace: `kill -USR1 <fuzzer-pid>` dumps every thread's
-# Python stack to stderr (faulthandler).  SIGKILL (kill -9) is uncatchable
-# in-process — for that, run with --stack-heartbeat, whose periodic
-# main-thread stack file survives the kill.
+# Native-fault diagnostics. faulthandler installs a *C-level* SIGSEGV/SIGBUS/
+# SIGFPE/SIGABRT handler that dumps every thread's Python stack from signal
+# context and then re-raises with the default action, so the process still
+# dies with the right exit status and a core is still produced.
+#
+# This replaces a Python-level `signal.signal(SIGSEGV, _handle_sigsegv)` that
+# printed a traceback and called sys.exit(1). That could not work and made
+# real crashes harder to diagnose, in three ways:
+#
+#  * Python signal handlers do not run from signal context. The C shim sets a
+#    flag and returns, and the flag is only checked between bytecodes -- but a
+#    segfault is synchronous, so the faulting instruction re-executes
+#    immediately and faults again before any Python runs.
+#  * A fault raised inside a native extension (z3, numpy) or on a non-main
+#    thread never reaches the main interpreter loop at all, so the handler
+#    produced no output whatsoever.
+#  * Owning the signal *suppressed* faulthandler, which does work. An
+#    intermittent suite crash was silent for exactly this reason until
+#    SIGSEGV was handed back -- see
+#    docs/handover/suite_segfault_z3_finalization_2026-08-16.md.
+#
+# Also registers SIGUSR1 for on-demand live traces: `kill -USR1 <fuzzer-pid>`
+# dumps every thread's Python stack to stderr without killing the process.
+# SIGKILL (kill -9) is uncatchable in-process -- for that, run with
+# --stack-heartbeat, whose periodic main-thread stack file survives the kill.
+#
+# adapters/inprocess.py installs its own SIGSEGV handler around in-process
+# target execution and restores it afterwards; that one is scoped to a call
+# where a fault is an expected result rather than a bug, and is unaffected.
 try:
     import faulthandler as _faulthandler
 
+    if not _faulthandler.is_enabled():
+        _faulthandler.enable()
     _faulthandler.register(signal.SIGUSR1)
-except (AttributeError, OSError):
+except (AttributeError, OSError, ValueError):  # pragma: no cover - env-dependent
     pass
-
-
-def _handle_sigsegv(signum, frame):
-    """Handle SIGSEGV in the fuzzer process itself."""
-    import traceback
-
-    print("\n[FATAL] Segmentation fault in fuzzer process!")
-    print(f"Signal: {signum}")
-    if frame:
-        print(f"Frame: {frame}")
-    traceback.print_stack(frame)
-    sys.exit(1)
-
-
-signal.signal(signal.SIGSEGV, _handle_sigsegv)
 
 
 def _cleanup_tmp_dir(path: Path) -> None:
