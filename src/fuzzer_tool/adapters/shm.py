@@ -589,9 +589,15 @@ class ShmCoverage:
         # table is scratch, the header (path_hash, edge_count, diag) is not.
         ctypes.memmove(new_ptr, self._ptr, SHM_METADATA_SIZE)
 
-        # Detach old SHM
+        # Detach old SHM. Drop the views into it first: they are
+        # from_address handles that would otherwise point at freed memory
+        # between the shmdt and the rebind below, and any numpy array still
+        # holding self._map from an earlier call keeps that stale target.
         old_ptr = self._ptr
         old_shm_id = self.shm_id
+        self._map = None
+        self._entries = None
+        self._tail = None
         _libc.shmdt(old_ptr)
         _libc.shmctl(old_shm_id, IPC_RMID, None)
 
@@ -627,6 +633,24 @@ class ShmCoverage:
     # ── Lifecycle ────────────────────────────────────────────────────────
 
     def cleanup(self):
+        """Detach and remove the segment, and drop every view into it.
+
+        ``_map``, ``_entries`` and ``_tail`` are ctypes views created with
+        ``from_address``: they hold a raw address and own nothing, so
+        detaching without clearing them leaves three live handles on freed
+        memory. That is not merely a crash risk -- it is mostly *silent*.
+        The kernel hands back the same address on the next ``shmat`` (six
+        successive attach/detach cycles all returned the same one here), so
+        a stale view reads and writes whichever segment now occupies the
+        address: another ShmCoverage's coverage table. It only segfaults in
+        the window where nothing has re-attached.
+
+        Clearing them turns that into a loud AttributeError/TypeError at the
+        first use, which is what a use-after-free should look like.
+        """
+        self._map = None
+        self._entries = None
+        self._tail = None
         if self._ptr is not None:
             _libc.shmdt(self._ptr)
             self._ptr = None
@@ -675,7 +699,7 @@ class DistanceTableShm:
         entry_bytes = 12  # {u64 key, u32 dist}
         if self.num_entries == 0:
             self.shm_id = -1
-            self._ptr = 0
+            self._ptr = None
             self.env_id = "0"
             return
 
@@ -706,9 +730,16 @@ class DistanceTableShm:
         atexit.register(self.cleanup)
 
     def cleanup(self):
+        """Detach and remove the segment.
+
+        ``_ptr`` is cleared to ``None``, not ``0``: the populate loop above
+        computes ``self._ptr + 4 + pos * entry_bytes``, and a zeroed pointer
+        makes that arithmetic succeed and produce a plausible near-null
+        address to write through. ``None`` raises TypeError instead.
+        """
         if self._ptr:
             _libc.shmdt(self._ptr)
-            self._ptr = 0
+        self._ptr = None
         if self.shm_id >= 0:
             _libc.shmctl(self.shm_id, IPC_RMID, None)
             self.shm_id = -1

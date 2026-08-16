@@ -6,11 +6,14 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from fuzzer_tool.adapters.shm import (
     SHM_MAP_SIZE,
     SHM_METADATA_SIZE,
     SHM_TAIL_SIZE,
     SIZEOF_ENTRY,
+    DistanceTableShm,
     ShmCoverage,
 )
 
@@ -1272,3 +1275,67 @@ int fuzz_shm_run(const unsigned char *buf, size_t len) {
                 else:
                     os.dup2(backup, fd)
                     os.close(backup)
+
+
+class TestCleanupDropsViewsIntoTheDetachedSegment:
+    """cleanup() must not leave handles on memory it just detached.
+
+    ``_map``, ``_entries`` and ``_tail`` are ``from_address`` views: they
+    carry a raw address and own nothing. Detaching without clearing them
+    left three live handles on freed memory, and the failure mode was
+    mostly *silent* rather than fatal -- the kernel hands the same address
+    back to the next ``shmat``, so a stale view reads and writes whichever
+    segment now occupies it. It only segfaults in the window where nothing
+    has re-attached.
+    """
+
+    def test_reads_after_cleanup_raise_instead_of_touching_freed_memory(self):
+        cov = ShmCoverage()
+        assert cov.get_edge_ids() == set()  # works while attached
+        cov.cleanup()
+
+        for name in ("get_edge_ids", "get_edge_counts", "reset_edge_map", "read_distance_tail"):
+            with pytest.raises((AttributeError, TypeError)):
+                getattr(cov, name)()
+
+    def test_views_are_unbound_by_cleanup(self):
+        cov = ShmCoverage()
+        cov.cleanup()
+        assert cov._map is None
+        assert cov._entries is None
+        assert cov._tail is None
+        assert cov._ptr is None
+
+    def test_cleanup_is_idempotent(self):
+        cov = ShmCoverage()
+        cov.cleanup()
+        cov.cleanup()  # atexit runs it again after an explicit call
+        assert cov.shm_id == -1
+
+    def test_shmat_reuses_the_detached_address(self):
+        """Documents *why* a stale view aliases rather than faulting.
+
+        If this ever stops holding, the dangling-view bug would have been
+        loud instead of silent, and the guard above matters less.
+        """
+        addrs = []
+        for _ in range(4):
+            c = ShmCoverage()
+            addrs.append(c._ptr)
+            c.cleanup()
+        assert len(set(addrs)) == 1, f"expected address reuse, got {[hex(a) for a in addrs]}"
+
+
+class TestDistanceTableShmCleanup:
+    def test_cleanup_clears_ptr_to_none_not_zero(self):
+        """``_ptr = 0`` keeps ``self._ptr + 4 + pos * 12`` arithmetically
+        valid, so a stale write lands near null instead of raising."""
+        tbl = DistanceTableShm({0x1000: 1.5, 0x2000: 2.0})
+        tbl.cleanup()
+        assert tbl._ptr is None
+        tbl.cleanup()
+
+    def test_empty_table_uses_the_same_convention(self):
+        tbl = DistanceTableShm({})
+        assert tbl._ptr is None
+        tbl.cleanup()
