@@ -71,15 +71,25 @@ class PersistentRunner:
         stdin_r, stdin_w = os.pipe()
         pid = os.fork()
         if pid == 0:
-            os.setsid()
-            os.dup2(stdin_r, 0)
-            os.close(stdin_r)
-            os.close(stdin_w)
-            devnull = os.open(os.devnull, os.O_WRONLY)
-            os.dup2(devnull, 1)
-            os.dup2(devnull, 2)
-            os.close(devnull)
-            os.execve(self.target, [self.target], env)
+            # Everything here runs in the forked child, which shares the
+            # parent's entire Python stack (pytest included). If execve
+            # raises (e.g. target missing/not executable) without being
+            # caught, the exception unwinds back into that inherited stack
+            # instead of exiting — the child then keeps running as a second,
+            # orphaned copy of the parent process. os._exit() must be
+            # unconditionally reached on any failure here.
+            try:
+                os.setsid()
+                os.dup2(stdin_r, 0)
+                os.close(stdin_r)
+                os.close(stdin_w)
+                devnull = os.open(os.devnull, os.O_WRONLY)
+                os.dup2(devnull, 1)
+                os.dup2(devnull, 2)
+                os.close(devnull)
+                os.execve(self.target, [self.target], env)
+            except BaseException:
+                os._exit(127)
             os._exit(127)
 
         os.close(stdin_r)

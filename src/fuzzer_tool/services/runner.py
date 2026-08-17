@@ -311,24 +311,33 @@ class TargetRunner:
         pid = os.fork()
         f._last_child_pid = pid
         if pid == 0:
-            os.setsid()
-            os.dup2(stdin_r, 0)
-            os.close(stdin_r)
-            os.close(stdin_w)
-            devnull = os.open(os.devnull, os.O_WRONLY)
-            os.dup2(devnull, 1)
-            os.dup2(devnull, 2)
-            os.close(devnull)
-            ld_preload = os.environ.get("LD_PRELOAD", "")
-            if ld_preload:
-                cleaned = [p for p in ld_preload.split(":") if "ksm_preload" not in p]
-                if cleaned:
-                    os.environ["LD_PRELOAD"] = ":".join(cleaned)
-                else:
-                    os.environ.pop("LD_PRELOAD", None)
-            libc.ptrace(PTRACE_TRACEME, 0, None, None)
-            signal.signal(signal.SIGTRAP, signal.SIG_IGN)
-            os.execv(f.target, [f.target])
+            # Everything here runs in the forked child, which shares the
+            # parent's entire Python stack (pytest included). If execv
+            # raises without being caught, the exception unwinds back into
+            # that inherited stack instead of exiting — the child then keeps
+            # running as a second, orphaned copy of the parent process.
+            # os._exit() must be unconditionally reached on any failure here.
+            try:
+                os.setsid()
+                os.dup2(stdin_r, 0)
+                os.close(stdin_r)
+                os.close(stdin_w)
+                devnull = os.open(os.devnull, os.O_WRONLY)
+                os.dup2(devnull, 1)
+                os.dup2(devnull, 2)
+                os.close(devnull)
+                ld_preload = os.environ.get("LD_PRELOAD", "")
+                if ld_preload:
+                    cleaned = [p for p in ld_preload.split(":") if "ksm_preload" not in p]
+                    if cleaned:
+                        os.environ["LD_PRELOAD"] = ":".join(cleaned)
+                    else:
+                        os.environ.pop("LD_PRELOAD", None)
+                libc.ptrace(PTRACE_TRACEME, 0, None, None)
+                signal.signal(signal.SIGTRAP, signal.SIG_IGN)
+                os.execv(f.target, [f.target])
+            except BaseException:
+                os._exit(127)
             os._exit(127)
 
         os.close(stdin_r)

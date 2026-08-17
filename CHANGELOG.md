@@ -150,6 +150,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   strict subset differing by a constant, input-independent init set.
 
 ### Fixed
+- **An unguarded `execve`/`execv` in the fork+exec launch paths (`PersistentRunner.start`,
+  `TargetRunner`'s ptrace launch) let a failed exec turn the child into an
+  orphaned duplicate of the entire parent process.** `fork()` duplicates the
+  whole process, including the interpreter's call stack; the child continued
+  straight into `execve`/`execv` with no `try`/`except` around it. When exec
+  failed (missing/non-executable target), the raised exception unwound back
+  through that *inherited* stack instead of hitting the `os._exit(127)` meant
+  to catch it — which sat unreachable one statement later, after the
+  exec call, not around it. In a pytest run this meant the child kept
+  executing as a second, orphaned copy of the whole test session: it
+  re-entered pytest's own test loop and re-ran every remaining test
+  concurrently with the real parent, producing duplicated test output and,
+  at full-suite scale, hangs from the two copies contending for the same
+  shm ids and temp files. Both launch paths now wrap the setup/exec sequence
+  in the forked child in `try: ... except BaseException: os._exit(127)`,
+  matching the existing convention in `ptrace_available()`. Regression test:
+  `tests/test_regression_persistent_execve_failure_exits.py` runs the
+  offending test in an isolated pytest subprocess and asserts it reports
+  exactly once and completes promptly.
+
 - **Every un-stopped `ForkserverRunner` leaked a process, a thread and a SHM
   segment.** The stderr-drain thread was started as `target=self._drain_stderr`
   — a bound method, so the thread held the runner. That reference is
