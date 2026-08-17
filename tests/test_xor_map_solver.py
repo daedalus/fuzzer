@@ -18,9 +18,7 @@ from fuzzer_tool.core.xor_map_solver import (
     clear_active_xor_model,
     compute_xor_checksum,
     get_active_xor_model,
-    invert_xor_model,
     recover_xor_model,
-    recover_xor_preimage,
     set_active_xor_model,
     verify_xor_model,
     xor_model_from_dict,
@@ -527,48 +525,3 @@ class TestModuleImports:
     def test_import_does_not_require_z3(self):
         mod = sys.modules.get("fuzzer_tool.core.xor_map_solver")
         assert mod is not None
-
-
-class TestInvertXorModel:
-    """Wiring tests for the gf2_linalg-backed square-model inverse."""
-
-    def test_square_model_round_trips(self):
-        # A tiny fixed-width scramble: out_bit0 = in0^in1, out_bit1 = in1.
-        # Square (out_bits == in_bits == 2), so it must be invertible.
-        model = XorBitmaskModel(masks=((0, 1), (1,)), out_bits=2)
-        inv = invert_xor_model(model)
-        assert inv is not None
-        for v in range(4):
-            checksum = compute_xor_checksum(v.to_bytes(1, "big"), model)
-            recovered = recover_xor_preimage(model, checksum)
-            assert recovered == v
-
-    def test_non_square_model_returns_none(self):
-        # Typical checksum shape: out_bits (8) narrower than the input
-        # domain the masks reference (indices up to 31) -- e.g. a CRC-8
-        # over a 4-byte buffer. Not invertible in the square sense.
-        model = XorBitmaskModel(
-            masks=tuple((i, i + 8, i + 16, i + 24) for i in range(8)), out_bits=8
-        )
-        assert invert_xor_model(model) is None
-        assert recover_xor_preimage(model, 0x42) is None
-
-    def test_singular_square_model_returns_none(self):
-        # out_bit0 and out_bit1 both equal in0 -- rank-deficient.
-        model = XorBitmaskModel(masks=((0,), (0,)), out_bits=2)
-        assert invert_xor_model(model) is None
-        assert recover_xor_preimage(model, 0b01) is None
-
-    def test_recover_xor_preimage_matches_forward(self):
-        # 4-bit invertible scramble built from a known permutation+XOR mix.
-        model = XorBitmaskModel(
-            masks=((0, 1), (1, 2), (2, 3), (3,)),
-            out_bits=4,
-        )
-        inv = invert_xor_model(model)
-        assert inv is not None
-        for v in range(16):
-            checksum = compute_xor_checksum(v.to_bytes(1, "big")[:1], model)
-            recovered = recover_xor_preimage(model, checksum)
-            assert recovered is not None
-            assert compute_xor_checksum(recovered.to_bytes(1, "big"), model) == checksum

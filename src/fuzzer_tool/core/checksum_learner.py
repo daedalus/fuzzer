@@ -67,7 +67,6 @@ from fuzzer_tool.core.xor_map_solver import (
     XorBitmaskModel,
     compute_xor_checksum,
     recover_xor_model,
-    recover_xor_preimage,
     set_active_xor_model,
     verify_xor_model,
     xor_model_from_dict,
@@ -574,22 +573,6 @@ class ChecksumLearner:
         """
         model = self.ensure_xor_model()
         return None if model is None else compute_xor_checksum(data, model)
-
-    def recover_xor_preimage(self, target: int) -> int | None:
-        """Recover an input value that checksums to *target* under the
-        recovered XOR model, when that model is square (see
-        :func:`fuzzer_tool.core.xor_map_solver.invert_xor_model`).
-
-        Returns ``None`` when no model has been recovered, the model
-        isn't square (the usual case for a variable-length CRC-style
-        checksum, where the input domain is wider than the output), or
-        the per-query verified-inverse guard rejects the candidate.
-        There is deliberately no fallback: an unverified guess is worse
-        than declining, per the same silent-corruption reasoning as
-        :meth:`compute_xor_checksum`.
-        """
-        model = self.ensure_xor_model()
-        return None if model is None else recover_xor_preimage(model, target)
 
     def compute_checksum(self, data: bytes) -> int:
         """Compute a CRC-style checksum for *data* using the recovered polynomial.
