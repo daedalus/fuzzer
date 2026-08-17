@@ -200,7 +200,7 @@ clang -O1 -fsanitize-coverage=inline-8bit-counters \
   -o fuzz_target fuzz_target.c -lpng -lz
 
 # Fuzz with coverage
-fuzzer-tool fuzz ./fuzz_target --inprocess -c -d corpus/ -D png.dict
+fuzzer-tool fuzz ./fuzz_target --inprocess -d corpus/ -D png.dict
 ```
 
 **Target must implement coverage dump:**

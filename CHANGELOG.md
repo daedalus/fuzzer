@@ -8,6 +8,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **Coverage-guided mode is the default; `--no-coverage` opts out.** `fuzz`
+  required `-c/--coverage`, and forgetting it failed silently: no SHM bitmap
+  was created, so seed scheduling, MI/TE/sensitivity position weighting,
+  Elo/bandit operator scheduling, stall detection and corpus admission all ran
+  on a constant-zero signal while the run reported healthy throughput.
+  Measured, 1500 execs x 2 repeats:
+
+  | target | coverage on | coverage off | cost | corpus on -> off |
+  |---|---|---|---|---|
+  | `targets/test_target` | 158.4 eps | 160.7 eps | 1.4% | 3.0 -> 1.0 |
+  | `targets/png_read` | 128.1 eps | 138.9 eps | 7.8% | 14.5 -> 1.0 |
+  | uninstrumented gcc build | 587.0 eps | 592.4 eps | 0.9% | 1.0 -> 1.0 |
+
+  The corpus column is the decision: without coverage it never grows past its
+  seeds, on any target, so the default mode of a coverage-guided fuzzer was
+  blind mutation. `-c`/`--coverage` are still accepted and are now no-ops, so
+  every existing script, README line and doc example keeps working.
+  `--no-coverage` is a real mode, not a compatibility shim — crash and timeout
+  detection do not need the bitmap.
+
+  Scoped to `fuzz`. `tmin`, `rc` and `minimize` keep `-c` opt-in because it
+  means something different there: in `tmin`/`rc` it only sets `AFL_MAP_SIZE`
+  in the child env, and in `minimize` it selects a different algorithm — so
+  flipping those would silently change what the command *does*, not how fast
+  it runs. The four `use_coverage: bool = False` service signatures are also
+  unchanged; the CLI is the layer that expresses this policy.
+
+  Rejected on measurement: auto-selecting ptrace for uninstrumented targets.
+  73.9 eps against 587 for the SHM path on the same binary — an 8x silent
+  slowdown to buy 2 function-entry edges. It stays behind explicit `--no-shm`.
+
+### Added
+- **Startup warns when the target has no edge instrumentation.** With coverage
+  on by default the common failure is no longer "forgot `-c`" but "target was
+  never built instrumented", and both produce the identical symptom. `run()`
+  previously printed `AFL instrumentation: detected` with no negative branch,
+  so a bare target ran with `[*] Coverage: AFL SHM bitmap` on screen and found
+  nothing. `Fuzzer._warn_uninstrumented()` names the target, the consequence
+  and both ways out (rebuild, or `--no-coverage` on purpose); it fires once per
+  run, per instance, and never when coverage was explicitly disabled. Also
+  wired into the multi-target banner. This generalizes
+  `_warn_no_coverage()`, which covered only in-process `.so` targets.
+- **`afl_instrumentation_status()` replaces the boolean `_detect_afl` for any
+  decision that warns.** It returns `present` / `absent` / `unknown`, because
+  `nm` reports no symbols at all for a stripped binary and a boolean cannot
+  tell "not instrumented" from "symbol table removed" — a stripped,
+  instrumented target is normal, and warning on it is the fastest way to train
+  the warning out of people. `_detect_afl` remains as the boolean face for the
+  three call sites that only decide whether to print `[AFL]`. Rule verified
+  against every target shape in `targets/`: instrumented ELF and `.so` ->
+  present, plain gcc build -> absent, stripped (either kind) and missing file
+  -> unknown.
+
+### Known issues
+- **ptrace coverage reports no ASAN crashes.** Measured on
+  `targets/asan_target.c` (gcc `-fsanitize=address`), same seed and settings:
+  0 crashes at both n=100 and n=400 under `--no-shm`, against 32 for the SHM
+  path and 25 for `--no-coverage`. Pre-existing and unrelated to this change in
+  cause — but it was invisible until now, because `_setup_ptrace` is gated on
+  `use_coverage`: the `ptrace` case of `test_asan_all_modes` passes no `-c`, so
+  `--no-shm` was inert and that parametrization silently duplicated
+  `default_subprocess`. Making coverage the default turned the case honest and
+  it failed immediately. Marked `xfail(strict=True)` so it reports loudly when
+  ptrace crash reporting is fixed; the fix belongs with the ptrace runner, not
+  with a CLI default.
+
+### Removed
+- **`_add_common_args()` in `cli/commands.py`, which had zero production call
+  sites.** AST-checked: only `tests/test_commands.py` called it. It is named
+  "arguments shared by fuzz and subcommands" and declared its own
+  `-c/--coverage`, making it the obvious place to edit when flipping this
+  default — an edit that would have changed nothing reachable by a user while
+  turning `test_commands.py` red, a wrong signal twice over. The live flags are
+  declared per-subparser. `TestGetDirs` now builds its namespace directly,
+  which is what it was actually testing.
+
 - **XOR-checksum recovery solves by GF(2) elimination instead of SAT; the 32-bit
   rung is live.** `xor_map_solver` ran one Z3 `Solver` per output bit, and at a
   32-bit field the per-bit solve blew past `_SOLVER_TIMEOUT_MS` — recorded in

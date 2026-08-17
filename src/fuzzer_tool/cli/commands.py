@@ -73,34 +73,6 @@ def _detect_asan_static(target: str) -> bool:
     return False
 
 
-def _add_common_args(parser):
-    """Add arguments shared by fuzz and subcommands."""
-    parser.add_argument("target", help="Path to target binary")
-    parser.add_argument(
-        "-d",
-        "--corpus",
-        default=None,
-        help="Corpus directory (default: ~/fuzzing/<target>/corpus)",
-    )
-    parser.add_argument(
-        "-o",
-        "--crashes",
-        default=None,
-        help="Crashes directory (default: ~/fuzzing/<target>/crashes)",
-    )
-    parser.add_argument("-t", "--timeout", type=float, default=1, help="Timeout in seconds")
-    parser.add_argument(
-        "-F", "--file-mode", action="store_true", help="Write input to temp file instead of stdin"
-    )
-    parser.add_argument(
-        "-A",
-        "--target-args",
-        nargs="*",
-        help="Target arguments ({file} placeholder)",
-    )
-    parser.add_argument("-c", "--coverage", action="store_true", help="Enable coverage-guided mode")
-
-
 def _get_dirs(args, target):
     """Resolve corpus/crashes directories."""
     if hasattr(args, "targets") and len(args.targets) > 1:
@@ -1395,7 +1367,16 @@ def main() -> int:
     )
     fuzz_parser.add_argument("-M", "--mutations", type=int, default=8, help="Mutations per input")
     fuzz_parser.add_argument(
-        "-c", "--coverage", action="store_true", help="Enable coverage-guided mode"
+        "-c",
+        "--coverage",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Coverage-guided mode: AFL SHM edge bitmap drives corpus admission "
+            "and scheduling (default: on). --no-coverage runs blind — crash "
+            "detection still works, but the corpus will not grow. -c is "
+            "accepted and is now a no-op."
+        ),
     )
     fuzz_parser.add_argument(
         "--deep-coverage",

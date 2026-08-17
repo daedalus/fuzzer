@@ -13,20 +13,23 @@
 ```bash
 pip install -e ".[dev]"
 
-# Basic fuzzing
+# Basic fuzzing — coverage-guided by default
 fuzzer-tool fuzz ./target
 
-# Coverage-guided with dictionary
-fuzzer-tool fuzz -c -D dictionary.txt ./target
+# With a dictionary
+fuzzer-tool fuzz -D dictionary.txt ./target
 
 # In-process mode (fastest for .so targets)
-fuzzer-tool fuzz libfoo.so --inprocess -c
+fuzzer-tool fuzz libfoo.so --inprocess
+
+# Blind mutation, no edge bitmap (crash detection still works)
+fuzzer-tool fuzz ./target --no-coverage
 
 # With Markov generation + Monte Carlo bandit
 fuzzer-tool fuzz --markov --markov-gen --mc-bandit --mc-cem ./target
 
 # Resume a previous session
-fuzzer-tool fuzz ./target -c --resume
+fuzzer-tool fuzz ./target --resume
 ```
 
 ---
@@ -109,14 +112,26 @@ Online running statistics (Welford/Pébay) for mean, variance, skewness, excess 
 
 ## Coverage Modes
 
+Coverage-guided mode is **on by default**. `--no-coverage` turns it off:
+crash and timeout detection still work, but the edge bitmap stays empty, so
+corpus growth and coverage-guided scheduling are inactive. Measured cost of
+having it on, 1500 execs x 2 reps: 1.4% throughput on `targets/test_target`,
+7.8% on `targets/png_read` — against a corpus that otherwise never grows past
+its seeds. `-c`/`--coverage` are still accepted and are now no-ops.
+
+If the target was not built with instrumentation the bitmap cannot fill, and
+the run reports that at startup rather than looking healthy while discovering
+nothing. Build with `tools/build_targets.sh`.
+
 | Mode | Flag | Throughput |
 |------|------|-----------|
-| SHM bitmap + forkserver | `-c` (default) | 0.5k–1.4k eps |
-| SHM bitmap, spawn per exec | `-c --no-forkserver` | 65–500 eps |
+| SHM bitmap + forkserver | *(default)* | 0.5k–1.4k eps |
+| SHM bitmap, spawn per exec | `--no-forkserver` | 65–500 eps |
 | In-process subprocess | `--inprocess` | 65–120 eps |
 | In-process direct | `--inprocess-direct` | 2k–34k eps |
-| Ptrace basic | `-c --no-shm` | ~20 eps |
-| Ptrace deep | `-c --no-shm --deep-coverage` | ~18 eps |
+| Ptrace basic | `--no-shm` | ~20 eps |
+| Ptrace deep | `--no-shm --deep-coverage` | ~18 eps |
+| Blind (no edge bitmap) | `--no-coverage` | as target allows |
 
 ---
 

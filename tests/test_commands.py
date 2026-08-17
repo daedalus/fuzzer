@@ -5,15 +5,26 @@ from pathlib import Path
 
 import pytest
 
-from fuzzer_tool.cli.commands import _add_common_args, _get_dirs, _validate_target
+from fuzzer_tool.cli.commands import _get_dirs, _validate_target
+
+
+def _ns(target, corpus=None, crashes=None):
+    """The two fields _get_dirs reads, built directly.
+
+    These used to be produced by parsing argv through `_add_common_args`,
+    a helper with no production call sites at all — so the tests exercised
+    a parser no user could reach, and its `-c` default was the obvious
+    place to edit when flipping coverage on. Editing it would have changed
+    nothing and turned this file red, which is the wrong signal twice over.
+    Building the namespace directly tests `_get_dirs` and nothing else.
+    """
+    return argparse.Namespace(target=target, corpus=corpus, crashes=crashes)
 
 
 class TestGetDirs:
     def test_defaults_use_target_name(self, monkeypatch, tmp_path):
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        parser = argparse.ArgumentParser()
-        _add_common_args(parser)
-        args = parser.parse_args([str(tmp_path / "my_target")])
+        args = _ns(str(tmp_path / "my_target"))
         corpus, crashes = _get_dirs(args, str(tmp_path / "my_target"))
         assert "my_target" in corpus
         assert "my_target" in crashes
@@ -22,20 +33,16 @@ class TestGetDirs:
 
     def test_custom_corpus_dir(self, monkeypatch, tmp_path):
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        parser = argparse.ArgumentParser()
-        _add_common_args(parser)
         custom = str(tmp_path / "custom_corpus")
-        args = parser.parse_args(["-d", custom, str(tmp_path / "target")])
-        corpus, crashes = _get_dirs(args, str(tmp_path / "target"))
+        args = _ns(str(tmp_path / "target"), corpus=custom)
+        corpus, _crashes = _get_dirs(args, str(tmp_path / "target"))
         assert corpus == custom
 
     def test_custom_crashes_dir(self, monkeypatch, tmp_path):
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        parser = argparse.ArgumentParser()
-        _add_common_args(parser)
         custom = str(tmp_path / "custom_crashes")
-        args = parser.parse_args(["-o", custom, str(tmp_path / "target")])
-        corpus, crashes = _get_dirs(args, str(tmp_path / "target"))
+        args = _ns(str(tmp_path / "target"), crashes=custom)
+        _corpus, crashes = _get_dirs(args, str(tmp_path / "target"))
         assert crashes == custom
 
 
@@ -58,43 +65,3 @@ class TestValidateTarget:
         f.write_bytes(b"\x7fELF")
         f.chmod(0o755)
         _validate_target(str(f))  # should not raise
-
-
-class TestAddCommonArgs:
-    def test_adds_all_args(self):
-        parser = argparse.ArgumentParser()
-        _add_common_args(parser)
-        args = parser.parse_args(
-            [
-                "/target",
-                "-d",
-                "/corpus",
-                "-o",
-                "/crashes",
-                "-t",
-                "10",
-                "-F",
-                "-A",
-                "arg1",
-                "arg2",
-                "-c",
-            ]
-        )
-        assert args.target == "/target"
-        assert args.corpus == "/corpus"
-        assert args.crashes == "/crashes"
-        assert args.timeout == 10.0
-        assert args.file_mode is True
-        assert args.target_args == ["arg1", "arg2"]
-        assert args.coverage is True
-
-    def test_defaults(self):
-        parser = argparse.ArgumentParser()
-        _add_common_args(parser)
-        args = parser.parse_args(["/target"])
-        assert args.corpus is None
-        assert args.crashes is None
-        assert args.timeout == 1
-        assert args.file_mode is False
-        assert args.target_args is None
-        assert args.coverage is False

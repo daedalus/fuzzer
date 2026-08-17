@@ -285,20 +285,68 @@ SEED_MASK_64 = 0xFFFFFFFFFFFFFFFF
 SEED_MASK_32 = 0xFFFFFFFF  # np.random.seed accepts [0, 2**32)
 
 
-def _detect_afl(target_path: str) -> bool:
-    """Check if a binary has AFL edge coverage instrumentation."""
+# Symbols that mean the target can populate an edge bitmap: the shim's own
+# (linked or preloaded) and clang's sancov callbacks.
+_AFL_SYMS = ("__afl_area", "__afl_map_shm", "__sanitizer_cov")
+
+
+def afl_instrumentation_status(target_path: str) -> str:
+    """Classify *target_path*'s edge instrumentation as present/absent/unknown.
+
+    The third state is the point.  ``nm`` reports nothing at all for a
+    stripped binary, so a plain boolean cannot tell "this target has no
+    instrumentation" from "this target's symbol table was removed" — and a
+    stripped, fully-instrumented target is a normal thing to be handed.
+    Treating that as absent would fire the no-instrumentation warning on a
+    run that is working perfectly, which is the fastest way to teach someone
+    to ignore the warning.
+
+    The rule, checked against every target shape in ``targets/``:
+
+    - the static symbol table has entries and one of :data:`_AFL_SYMS` is
+      among them (or among the dynamic ones)     -> ``"present"``
+    - the static symbol table has entries and none match  -> ``"absent"``
+    - the static symbol table is empty, or ``nm`` is unusable -> ``"unknown"``
+
+    The dynamic table alone is not enough to rule instrumentation *out*:
+    ``__afl_area`` lives in the static symtab, so a stripped target keeps
+    thousands of dynamic symbols and none of the ones looked for here.
+
+    Returns:
+        One of ``"present"``, ``"absent"``, ``"unknown"``.
+    """
     import subprocess
 
-    try:
-        result = subprocess.run(
-            ["nm", target_path],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        return "__afl_area" in result.stdout or "__afl_map_shm" in result.stdout
-    except (OSError, subprocess.TimeoutExpired):
-        return False
+    def _nm(*flags: str) -> str | None:
+        try:
+            r = subprocess.run(
+                ["nm", *flags, target_path],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        return r.stdout
+
+    static = _nm()
+    if static is None or not static.strip():
+        # Stripped, or no nm on this box. Cannot distinguish; say so.
+        return "unknown"
+    dynamic = _nm("-D") or ""
+    haystack = static + dynamic
+    return "present" if any(s in haystack for s in _AFL_SYMS) else "absent"
+
+
+def _detect_afl(target_path: str) -> bool:
+    """True when *target_path* has AFL edge coverage instrumentation.
+
+    Kept as the boolean face of :func:`afl_instrumentation_status` for the
+    call sites that only need "should I print [AFL]".  Anything that decides
+    whether to *warn* must use the tri-state instead — see the docstring
+    there for why ``unknown`` must not collapse into ``False``.
+    """
+    return afl_instrumentation_status(target_path) == "present"
 
 
 def _detect_distance(target_path: str) -> bool:
@@ -421,6 +469,56 @@ class Fuzzer:
             "No coverage enabled: running blind. Edge discovery, "
             "coverage-guided scheduling and corpus growth are all inactive. "
             "Pass -c/--coverage to enable the AFL SHM bitmap."
+        )
+        log.warning(msg)
+        print(f"[!] WARNING: {msg}")
+
+    def _report_instrumentation(self) -> None:
+        """Print the target's instrumentation state, and warn if it has none.
+
+        Coverage is on by default, so the common failure is no longer "the
+        user forgot -c" but "the target was never built with instrumentation".
+        Both produce the same symptom — healthy throughput, an empty bitmap,
+        a corpus that never grows — and until this warning existed only the
+        first one was ever reported.
+        """
+        status = afl_instrumentation_status(self.target)
+        if status == "present":
+            print("[*] AFL instrumentation: detected")
+        elif status == "absent":
+            self._warn_uninstrumented([self.target])
+        # "unknown" (stripped binary, or no nm): say nothing rather than
+        # guess. A false alarm here trains people to ignore the real one.
+
+    def _warn_uninstrumented(self, targets: list[str]) -> None:
+        """Warn that coverage is on but the target(s) cannot report edges.
+
+        Not fatal: crash and timeout detection still work, so a blind run
+        against an uninstrumented binary is a legitimate thing to want. It
+        just must not look like a coverage-guided one.
+        """
+        if not self.use_coverage or getattr(self, "_uninstrumented_warned", False):
+            return
+        if getattr(self, "ptrace_cov", None) is not None:
+            # ptrace derives edges from breakpoints on the binary itself and
+            # needs no build-time instrumentation, so the premise of this
+            # warning does not hold. Caught by running --no-shm against an
+            # uninstrumented target: coverage was working (5 breakpoints,
+            # edges accumulating) while this told the user the bitmap would
+            # stay empty and offered --no-coverage as the fix.
+            return
+        if getattr(self, "shm_cov", None) is None:
+            # Not on the SHM path at all (in-process modes); those have their
+            # own warning in _warn_no_coverage.
+            return
+        self._uninstrumented_warned = True
+        which = targets[0] if len(targets) == 1 else f"{len(targets)} targets"
+        msg = (
+            f"No edge instrumentation found in {which}: the coverage bitmap "
+            "will stay empty, so edge discovery, coverage-guided scheduling "
+            "and corpus growth are all inactive. Rebuild with "
+            "tools/build_targets.sh, or pass --no-coverage to run blind on "
+            "purpose (crash detection is unaffected)."
         )
         log.warning(msg)
         print(f"[!] WARNING: {msg}")
@@ -3293,9 +3391,7 @@ class Fuzzer:
                 # successes against a zero denominator in the first cut of
                 # this change.
                 if op in applicable_now:
-                    self.op_success_applicable[op] = (
-                        self.op_success_applicable.get(op, 0) + 1
-                    )
+                    self.op_success_applicable[op] = self.op_success_applicable.get(op, 0) + 1
             if cmplog_found:
                 self.op_success["cmplog"] = self.op_success.get("cmplog", 0) + 1
             if smt_found:
@@ -3796,9 +3892,7 @@ class Fuzzer:
                 # which is coarser (order- and multiplicity-insensitive) but
                 # still separates different paths.
                 edges = self._get_current_edge_set()
-                path_hash = (
-                    self.shm_cov.compute_path_hash_from_edges(edges) if edges else 0
-                )
+                path_hash = self.shm_cov.compute_path_hash_from_edges(edges) if edges else 0
             return path_hash
 
         try:
@@ -4321,17 +4415,21 @@ class Fuzzer:
         self._start_stack_heartbeat()
         if self.multi_targets:
             print(f"[*] Multi-target: {len(self.multi_targets)} targets, shared corpus")
+            uninstrumented = []
             for i, t in enumerate(self.multi_targets):
-                afl = _detect_afl(t)
-                tag = " [AFL]" if afl else " [no-AFL]"
+                status = afl_instrumentation_status(t)
+                tag = {"present": " [AFL]", "absent": " [no-AFL]", "unknown": " [AFL?]"}[status]
+                if status == "absent":
+                    uninstrumented.append(t)
                 dist = _detect_distance(t)
                 if dist:
                     tag += " [DIST]"
                 print(f"  [{i}] {t}{tag}")
+            if uninstrumented:
+                self._warn_uninstrumented(uninstrumented)
         else:
             print(f"[*] Target: {self.target}")
-            if _detect_afl(self.target):
-                print("[*] AFL instrumentation: detected")
+            self._report_instrumentation()
             if _detect_distance(self.target):
                 print("[*] Distance instrumentation: detected")
                 if self._distance is None:

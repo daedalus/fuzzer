@@ -307,7 +307,7 @@ pip install -e ".[dev]"
 fuzzer-tool fuzz ./target
 
 # Coverage-guided with dictionary
-fuzzer-tool fuzz -c -D dictionary.txt ./target
+fuzzer-tool fuzz -D dictionary.txt ./target
 
 # In-process mode (fastest for .so targets)
 fuzzer-tool fuzz libfoo.so --inprocess --inprocess-func target_func -c
@@ -319,7 +319,7 @@ fuzzer-tool fuzz -F -A "{file}" ./target
 fuzzer-tool fuzz --markov --markov-gen --mc-bandit --mc-cem ./target
 
 # Grammar-aware PNG fuzzing
-fuzzer-tool fuzz targets/png_read -c -D dictionaries/png.dict -g dictionaries/png.gram
+fuzzer-tool fuzz targets/png_read -D dictionaries/png.dict -g dictionaries/png.gram
 
 # ASAN fuzzing (auto-detected, catches heap-buffer-overflow, use-after-free, etc.)
 fuzzer-tool fuzz targets/asan_target
@@ -344,30 +344,30 @@ fuzzer-tool fuzz targets/fuzz_pattern_match
 fuzzer-tool fuzz targets/fuzz_search_pipeline
 
 # Multi-target: fuzz multiple binaries with shared corpus (glob supported)
-fuzzer-tool fuzz targets/fuzz_regex_compile targets/fuzz_pattern_match targets/fuzz_search_pipeline -c -d corpus/fgrep
+fuzzer-tool fuzz targets/fuzz_regex_compile targets/fuzz_pattern_match targets/fuzz_search_pipeline -d corpus/fgrep
 
 # GNU Grep exec-based fuzzing — exercises /usr/bin/grep across regex, fixed, PCRE modes
 # Input format: mode byte | pattern length | pattern | text
 # Modes: 0=basic_regex, 1=extended_regex, 2=fixed, 3=PCRE, 4=icase, 5=word, 6=line, 7=invert, 8=combined_flags
-fuzzer-tool fuzz targets/grep_read -c -F --no-shm
+fuzzer-tool fuzz targets/grep_read -F --no-shm
 
 # GNU Grep vendoring setup (downloads source + runs configure)
 tools/vendor_grep.sh
 
 # GNU Grep in-process .so mode (with ptrace coverage for the grep child)
-fuzzer-tool fuzz targets/grep_read.so -c -F --no-shm
+fuzzer-tool fuzz targets/grep_read.so -F --no-shm
 
 # Tailslayer hedged reader fuzzing (in-process .so mode, ~66 eps)
-fuzzer-tool fuzz targets/tailslayer_read.so -c --inprocess
+fuzzer-tool fuzz targets/tailslayer_read.so --inprocess
 
 # FFmpeg demux+decode pipeline (vendored FFmpeg 7.1, exercises 300+ format/codec paths)
 fuzzer-tool fuzz targets/ffmpeg_read -c
 
 # Multi-target with glob — skips .c/.h/.py automatically
-fuzzer-tool fuzz 'targets/fuzz_*' -c -d corpus/fgrep
+fuzzer-tool fuzz 'targets/fuzz_*' -d corpus/fgrep
 
 # Two-pass workflow: fast fuzz without ASAN, then verify crashes with ASAN
-fuzzer-tool fuzz targets/fuzz_*_nosan -c -d corpus/fast/
+fuzzer-tool fuzz targets/fuzz_*_nosan -d corpus/fast/
 fuzzer-tool verify targets/fuzz_search_pipeline corpus/fast/crashes/
 
 # Auto sanitizer replay: fuzz no-ASAN target, auto-replay crashes on ASAN/UBSAN variants
@@ -385,10 +385,10 @@ does not work in-process via ctypes/direct_lite (shadow offset mismatch on
 fuzz loop (every 500 iterations alongside existing crash reproducibility checks).
 
 # Resume a previous fuzzing session
-fuzzer-tool fuzz ./target -c --resume
+fuzzer-tool fuzz ./target --resume
 
 # Full report after run
-fuzzer-tool fuzz ./target -c -n 5000 --report report.txt
+fuzzer-tool fuzz ./target -n 5000 --report report.txt
 
 # Rank corpus seeds by interestingness
 fuzzer-tool rank ./target -d corpus -n 20
@@ -523,14 +523,48 @@ fuzzer-tool estimate <target> --corpus <dir> [--calibrate N]
 
 ## Coverage Modes
 
+Coverage-guided mode is **on by default** (`--no-coverage` to opt out).
+
+It used to require `-c`, and the failure when you forgot was silent: the SHM
+bitmap was never created, every coverage-guided subsystem — seed scheduling,
+MI/TE/sensitivity position weighting, Elo/bandit operator scheduling, stall
+detection, corpus admission — ran on a constant-zero signal, and the run
+reported healthy throughput while discovering nothing. Measured on this tree
+at 1500 execs, 2 repeats:
+
+| target | coverage on | coverage off | cost | corpus on -> off |
+|---|---|---|---|---|
+| `targets/test_target` | 158.4 eps | 160.7 eps | 1.4% | 3.0 -> 1.0 |
+| `targets/png_read` | 128.1 eps | 138.9 eps | 7.8% | 14.5 -> 1.0 |
+| uninstrumented gcc build | 587.0 eps | 592.4 eps | 0.9% | 1.0 -> 1.0 |
+
+The corpus column is the point: without coverage it never grows past its
+seeds, on any target. `-c`/`--coverage` are still accepted and are now no-ops.
+
+`--no-coverage` remains useful — crash and timeout detection do not need the
+bitmap, so blind mutation against an uninstrumented binary is a legitimate
+thing to ask for. It now has to be asked for.
+
+Startup classifies the target as instrumented / not instrumented / unknown
+and warns on the middle case. The third state matters: `nm` reports nothing
+for a stripped binary, so "no instrumentation" and "no symbol table" are not
+distinguishable, and warning on a stripped-but-instrumented target is how a
+warning gets trained out of people.
+
+Auto-selecting ptrace for uninstrumented targets was considered and rejected
+on measurement: 73.9 eps against 587 for the SHM path on the same binary, an
+8x silent slowdown to buy 2 function-entry edges. It stays behind explicit
+`--no-shm`.
+
 | Mode | Flag | Throughput | Notes |
 |------|------|-----------|-------|
-| SHM bitmap + forkserver | `-c` (default) | 0.5k–1.4k eps | For AFL-instrumented targets; target exec'd once, fork per input |
-| SHM bitmap, spawn per exec | `-c --no-forkserver` | 65–500 eps | Fallback; full ELF load + linker + libc init every execution |
+| SHM bitmap + forkserver | *(default)* | 0.5k–1.4k eps | For AFL-instrumented targets; target exec'd once, fork per input |
+| SHM bitmap, spawn per exec | `--no-forkserver` | 65–500 eps | Fallback; full ELF load + linker + libc init every execution |
 | In-process | `--inprocess` | 65–120 eps | Persistent loader with crash recovery |
 | In-process direct | `--inprocess-direct` | 2k–34k eps | No crash isolation; afl_shim crash handler gives _exit(128+sig) exit codes |
-| Ptrace basic | `-c --no-shm` | ~20 eps | Function-entry breakpoints |
-| Ptrace deep | `-c --no-shm --deep-coverage` | ~18 eps | Capstone BB discovery |
+| Ptrace basic | `--no-shm` | ~20 eps | Function-entry breakpoints |
+| Ptrace deep | `--no-shm --deep-coverage` | ~18 eps | Capstone BB discovery |
+| Blind | `--no-coverage` | as target allows | No edge bitmap; crashes and timeouts still detected |
 
 ### Forkserver (default, `--no-forkserver` to opt out)
 
@@ -583,8 +617,8 @@ to the removed segment.
 ## State Persistence
 
 ```bash
-fuzzer-tool fuzz ./target -c -n 10000
-fuzzer-tool fuzz ./target -c --resume -n 10000
+fuzzer-tool fuzz ./target -n 10000
+fuzzer-tool fuzz ./target --resume -n 10000
 ```
 
 State files:
@@ -994,7 +1028,7 @@ The fuzzer auto-detects the compiled-in tracecmp symbols and uses
 
 ```bash
 LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libasan.so.8 \
-python -m fuzzer_tool fuzz targets/my_target_asan.so -c --cmplog -d corpus
+python -m fuzzer_tool fuzz targets/my_target_asan.so --cmplog -d corpus
 ```
 
 #### Auto-detection
