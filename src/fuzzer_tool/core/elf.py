@@ -1037,7 +1037,7 @@ def _sancov_section_bounds(target: str, section: str) -> tuple[int, int] | None:
         sym_count = sym_size // sym_entsize
         strtab_offset = struct.unpack_from("<Q", elf, strtab_sec + 24)[0]
         start_addr = stop_addr = None
-        for i in range(min(sym_count, 20000)):
+        for i in range(sym_count):
             sym = sym_offset + i * sym_entsize
             st_value = struct.unpack_from("<Q", elf, sym + 8)[0]
             st_name_idx = struct.unpack_from("<I", elf, sym)[0]

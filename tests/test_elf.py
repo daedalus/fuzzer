@@ -1288,6 +1288,17 @@ class TestParseSancovGuardCount:
             assert count is not None
             assert estimate_map_size(t) == _size_from_blocks(count, detect_ctx_bits(t) or 0)
 
+    def test_large_symtab_does_not_truncate_guard_symbols(self):
+        """Regression: guard symbols beyond the old 20k symtab scan limit must still be found."""
+        target = "targets/ffmpeg_read"
+        if not os.path.isfile(target):
+            pytest.skip("ffmpeg_read target not built")
+        with open(target, "rb") as f:
+            blob = f.read()
+        if blob[:4] != b"\x7fELF" or b"__start___sancov_guards" not in blob:
+            pytest.skip("ffmpeg_read is not guard-instrumented")
+        assert parse_sancov_guard_count(target) is not None
+
 
 class TestEstimateMapSizeProvenance:
     """The tier that produced a map size must be observable.

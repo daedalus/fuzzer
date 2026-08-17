@@ -151,7 +151,7 @@ class TargetRunner:
             # iterations' metadata (save_crash runs after run_target in fuzz_one).
             f._last_fault_addr = None
             f._last_regs = {}
-            if shm:
+            if shm and not f._inprocess_runner.direct_lite:
                 shm.reset_edge_map()
             # Open perf counters on current process (pid=0, no extra perms needed)
             # so in-process target calls (direct/direct_lite) are counted.
