@@ -65,6 +65,8 @@ from __future__ import annotations
 import threading
 from typing import NamedTuple
 
+from fuzzer_tool.core import gf2_linalg
+
 # Retained for backward compatibility only: recovery no longer uses z3 and
 # no longer has a timeout.  Kept so that callers doing
 # ``IncrementalXorMapSolver(n, timeout_ms=...)`` or reading this constant
@@ -312,6 +314,46 @@ def compute_xor_checksum(data: bytes, xmodel: XorBitmaskModel) -> int:
 
 
 # ── Recovery ────────────────────────────────────────────────────────────
+
+
+def invert_xor_model(model: XorBitmaskModel) -> list[int] | None:
+    """Pseudo-invert a **square** :class:`XorBitmaskModel` via :mod:`gf2_linalg`.
+
+    Only defined when the model is square, i.e. every input-bit index
+    referenced across ``model.masks`` is ``< model.out_bits`` -- a
+    fixed-width field scrambled onto itself (the
+    `skitter-creek-bath-salts` alias-map case), not the general
+    variable-length checksum case where the input domain is wider than
+    the output (e.g. a CRC over an arbitrary-length buffer). Returns
+    ``None`` for either a non-square model or a singular one; callers
+    must handle both the same way, since neither yields an inverse.
+    """
+    n_bits = model.out_bits
+    rows = []
+    for indices in model.masks:
+        if any(i >= n_bits for i in indices):
+            return None  # not square: references bits outside the output width
+        rows.append(gf2_linalg.bitmask_from_indices(indices))
+    return gf2_linalg.invert_bitmask_map(rows, n_bits)
+
+
+def recover_xor_preimage(model: XorBitmaskModel, target: int) -> int | None:
+    """Recover an ``n_bits``-wide input value that checksums to *target*.
+
+    Only meaningful for a square *model* (see :func:`invert_xor_model`);
+    returns ``None`` when the model isn't square, is singular, or when
+    the per-query round-trip guard in
+    :func:`gf2_linalg.verified_apply_inverse` rejects the candidate --
+    the pseudo-inverse can be structurally full-rank while still being
+    wrong for a specific query if *model* was fit from partial evidence.
+    Never trust :func:`invert_xor_model`'s output directly for recovering
+    an actual preimage; always go through this function.
+    """
+    inverse = invert_xor_model(model)
+    if inverse is None:
+        return None
+    forward = [gf2_linalg.bitmask_from_indices(indices) for indices in model.masks]
+    return gf2_linalg.verified_apply_inverse(forward, inverse, target)
 
 
 def _extract_fixed_width(pairs: list[tuple[bytes, int]], width: int) -> list[tuple[int, int]]:
