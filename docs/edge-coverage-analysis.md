@@ -13,6 +13,12 @@ been measured, for the open items or the closed ones.** The probe-cost table in 
 simulated; the memset table is measured but on one machine. A/B with
 `tools/bench_paired.py` before trusting any of it.
 
+That caveat has narrowed but not lifted. `apt-get install clang` succeeds now (needs an
+`apt-get update` first — the pinned lists 404 on `libc6-i386` and `libxml2-dev`), so the
+instrumented matrix can be built and the guard census re-run on demand; §2 records two
+such runs, 2026-08-14 and 2026-08-16. What still has not happened is a *fuzzing* run:
+no edges/second figure in this document comes from an A/B against a real target.
+
 §1 is the exception and the cautionary tale: it is the one item that was measured, and
 measuring it showed the prescribed fix was worth 0.99x. Throughput numbers there are
 real, but come from `test_target` and a synthetic ASAN target in a sandbox, not from a
@@ -38,6 +44,8 @@ reasoning lives in the commit messages, which is where it stays useful.
 | `fix(coverage): make hit counts part of the novelty decision on the SHM path` | `_check_new_coverage` decided interestingness by set membership only, so loop-count-guarded branches were invisible. Added disjoint bucket-bit ladders (`core/count_class.py`) keyed by edge_id in a dense virgin map on the hot SHM path; counts clamped at 255, fast path unchanged. |
 | `fix(shm): stop the no-change fast path from reporting a phantom edge loss` | The fast path returned `(False, set())` on every unchanged exec; callers caching that return value read it as "zero edges fired," corrupting the next diff into reporting the whole edge set as new. Added `ShmCoverage._last_ids`, returned by the fast path instead of an empty set. |
 | `feat(shim): add a real AFL-style forkserver` + `fix(forkserver): drive the shim forkserver, drop the bitmap round-trip` + `feat(fuzzer): enable the forkserver on the default execution path` | §1. See that section — the fix this document prescribed (delete the bitmap-file round-trip) was necessary but worth 0.99x on its own, because `fuzz_loader.c` did fork+**exec** per input and still paid the full ELF load + linker + libc + ASAN init every execution. The server had to move into the target. 2.77x end to end through the CLI. |
+| `crc_learn was a pure no-op whenever the checksum recovered as XOR` | An operator offered on every selection that never mutated anything, plus the state-gated blind spot that hid it — 25 of 124 operators were never swept. Mechanism fixed and guarded; coverage effect unmeasured, so the reasoning stays in Tier 3 rather than being retired here. |
+| `xor_map_solver: the width ladder never got past 8 bits` | `_extract_fixed_width` packed the window big-endian against an LSB-first evaluator, so every 16- and 32-bit XOR checksum candidate failed verification and the `(8, 16, 32)` ladder was `(8,)`. Targets gated on a 16-bit XOR checksum could not get past it. See Tier 3. |
 | `feat(fuzzer): add SkipDet deterministic stage` + `fix(fuzzer): guard deterministic stage coverage path and meta access` + follow-up merge | First landed as `Fuzzer._run_deterministic_stage()`: a standalone blocking loop, always on, that dispatched `_op_bit_flip` once per byte (one random bit, not a true 1/1 walk) and never called `save_to_corpus` — any interesting mutant it found was discarded. Merged into `OperatorEngine.maybe_deterministic_mutation()`: a real bitflip-1/1 + byte-flip-8/8 + arithmetic + interesting-value generator, drained from inside `mutate()` so discoveries flow through the same `fuzz_one()` → `save_to_corpus` path as every other mutation. Also fixed `trace_mini` indexing (`edge_id // 8`, out-of-bounds-dropped almost every real edge_id) to fold by `edge_id % map_size` instead. Opt-out via `--no-deterministic`. |
 
 Two open items **depend** on the sizing commit (the third entry above) and are carried
@@ -227,6 +235,48 @@ Two caveats keep this section open rather than closed:
 Re-run the census before doing any of this work. `parse_sancov_guard_count()` makes it
 a one-liner per target.
 
+**Census re-run 2026-08-16 — same answer, and the caveats above are unchanged.** Full
+`tools/build_targets.sh --clang-scov`, then `parse_sancov_guard_count()` +
+`estimate_map_size_detail()` over everything in `targets/`. 16 binaries carry a
+`__sancov_guards` section; every one of them sizes to the floor:
+
+| target | guards | map | ctx | source |
+|--------|-------:|----:|----:|--------|
+| gzip_read | 532 | 8,192 | 0 | sancov_guards |
+| gzip_read_nosan | 500 | 8,192 | 0 | sancov_guards |
+| tracecmp_target_tcg | 354 | 8,192 | 0 | sancov_guards |
+| png_read | 316 | 8,192 | 0 | sancov_guards |
+| png_read_nosan | 297 | 8,192 | 0 | sancov_guards |
+| zlib_read | 256 | 8,192 | 0 | sancov_guards |
+| zlib_read_nosan | 243 | 8,192 | 0 | sancov_guards |
+| cmplog_exercise_tcg | 155 | 8,192 | 0 | sancov_guards |
+| proto_target | 99 | 8,192 | 0 | sancov_guards |
+| test_target | 96 | 8,192 | 0 | sancov_guards |
+| asan_target | 90 | 8,192 | 0 | sancov_guards |
+
+(`.so` and `_nosan` variants elided where they duplicate a row.) Every size is `exact`
+— `source == "sancov_guards"` for all 16, so `parse_sancov_guard_count()` is doing its
+job and nothing falls back to branch-density estimation any more. Max guard count in
+the tree is **532**, against a cap of 262,144. `reset_edge_map()` at the default map
+re-measures at **2.5 µs/exec** here (2.6 µs on 08-14).
+
+Two things worth adding to the caveat list rather than the finding:
+
+- The six library-backed targets are still absent — `ffmpeg_read`, `fgrep_read`,
+  `jpeg_read`, `lz4_read`, `secp256k1_read` and `unrar_read` all fail to build with no
+  `vendor/` tree present. The census still covers the small end only, and those are
+  still the only candidates for reaching the cap.
+- `grep_read` **builds but is not an instrumented target at all.** It has no
+  `__sancov_guards` section, and `targets/grep_read.c:86` `execlp`s the *system* `grep`
+  binary — so the work being fuzzed happens in an uninstrumented process and the
+  harness reports no edges from it regardless of how it was compiled. It contributes
+  nothing to this census and would contribute nothing to a coverage A/B either. Worth
+  knowing before anyone picks it as a "real target" to benchmark against.
+
+So §2 stays open on the same terms: the costs it proposes to fix are ones no target in
+this tree currently pays, and that has now been confirmed twice, two days apart, on a
+freshly built matrix.
+
 **Sizing was silently estimating, not measuring, until 2026-08-14.**
 `estimate_map_size()` lists "sancov guard count (exact)" as priority 1, but its only
 parser — `parse_sancov_offsets()` — reads `__start/__stop___sancov_cntrs`, the
@@ -296,6 +346,41 @@ changed. Callers diffing consecutive returns (`Fuzzer._prev_edge_set`,
 
 ## Tier 3 — algorithms worth adding
 
+**The checksum gate was closed by two defects, not by a missing algorithm.**
+Tier 3 has said for several revisions that "magic-value and checksum branches are where
+the edge count plateaus on real formats." Two bugs found 2026-08-16 meant that on any
+target whose checksum recovers as an XOR-bitmask, the machinery built to get past that
+plateau did nothing at all. Both are now fixed (`756bced`, `0b91835`), neither has been
+A/B'd, and both are listed here rather than in the fixed table because the *coverage*
+claim is untested — only the mechanism is.
+
+- **`crc_learn` was a pure no-op under an XOR-only model.** Its availability gate is
+  `ChecksumLearner.ensure_model()`, true when any of `_poly`, `_int_model` or
+  `_xor_model` is set, while the handler consumed only the first two. `ensure_model()`
+  is not per-input, so once any model existed the operator was offered on **every**
+  selection and returned the buffer untouched. That is worse than a wasted operator:
+  it takes a selection slot, produces a duplicate the bloom dedup then discards, and
+  still gets timed and credited by the bandit and Elo schedulers — so it dilutes the
+  reward signal for all 123 other operators for the whole run. Measured before the fix:
+  1320 offers across a 33-input battery, 0 mutations.
+- **`recover_xor_model` could never return a 16- or 32-bit model.**
+  `_extract_fixed_width` packed the input window big-endian while the solver indexes
+  that integer LSB-first and `compute_xor_checksum` reads `data[i//8] >> (i%8)`. Those
+  agree at a 1-byte window and byte-reverse each other above it, so the solver fit a
+  valid mask set under one convention and `verify_xor_model` rejected it under the
+  other. The `(8, 16, 32)` width ladder was `(8,)` in practice, for every input. A
+  target with a real 16-bit XOR checksum therefore never got a model, never got past
+  the checksum branch, and the edge count plateaued exactly where Tier 3 predicted.
+  32 bits stays out of reach on cost, not correctness: ~600 ms per output bit against
+  a 200 ms `_SOLVER_TIMEOUT_MS`, ~22 s total with the timeout lifted.
+
+The lesson for this document is narrower than the fixes: **an operator that is gated on
+runtime state is only checkable with that state**, and the no-op sweep skipped 25 of 124
+operators for exactly that reason. `TestStateGatedOperatorsAreNotNoOps` now builds the
+state and sweeps them, with a reachability guard so a new gated operator cannot silently
+re-open the hole. If an operator in this tree is producing no edges, that is the first
+place to look — before any algorithm gets added.
+
 **Unstable-edge calibration.** There is no AFL-style per-seed calibration (run a new
 seed N times, mask edges that don't reproduce). `_run_calibration` is a bootstrap
 warm-up loop, not this. Without it, nondeterministic edges — ASLR-dependent, time-
@@ -342,13 +427,21 @@ plus `adapters/track_parser.py` (referenced only in a docstring, never imported)
 
 1. ~~**§1 — forkserver.**~~ Done — see §1, and note that what closed it is not what
    this document predicted would close it.
-2. **§2 — generation-tagged reset.** Now the largest open item. Unblocks map sizes
+2. **Build a target that actually needs the map.** Two censuses two days apart put every
+   instrumented binary in this tree at 532 guards or fewer, sizing to the 8,192 floor —
+   ~500x under the cap that items 3 and 4 exist to lift. Until `vendor/` builds, or a
+   CTX target multiplies ids by call-graph fan-in, those two items optimise a cost
+   nothing pays and cannot be validated even if implemented. This is now the blocker,
+   not a preliminary.
+3. **§2 — generation-tagged reset.** The largest open *code* item. Unblocks map sizes
    above 262144 by making the per-exec clear O(1). Do this before concluding anything
    about §2's probe cost, and note it turns the table-copy behaviour in `resize()`
    from cosmetic to load-bearing. `resize()` also has a live consumer now
    (`ForkserverRunner.update_shm_after_resize()`), which respawns the loader so its
    children inherit the new segment id.
-3. **§2 — bounded probe window.** Cheap to evaluate now that drops are counted.
+4. **§2 — bounded probe window.** Cheap to evaluate now that drops are counted — but
+   drops are zero everywhere in the current matrix and the load factor is ~13%, so
+   there is nothing to observe until item 2 lands.
 
 **The already-fixed commits still need an A/B before they become defaults.** Nothing
 here has been measured against a real target. In particular the sizing commit enlarges
@@ -357,8 +450,9 @@ could be negative on a target that was not saturating. This now includes §6's
 deterministic stage: it's on by default (`--no-deterministic` to opt out) and hasn't
 been benchmarked against a real target either.
 
-Items 1, 2 and 3 are independently testable with `tools/bench_paired.py` against
-a fixed seed and a fixed exec budget.
+Items 3 and 4 are independently testable with `tools/bench_paired.py` against a fixed
+seed and a fixed exec budget — but only once item 2 supplies a target whose map exceeds
+the floor. Against the current matrix both measure noise.
 
 ## Loose thread
 
@@ -411,3 +505,26 @@ observed on the pre-commit-3 tree either, though the sample there is smaller.
 Recorded rather than dropped: if the drop-counter tests in `tests/test_ctx_and_map_size.py`
 go intermittently red in CI, this is the thread to pull, and the thing to capture is the
 SHM header (`read_edge_count()`, `read_diag()`) alongside the child's exit status.
+
+**A second candidate mechanism, found 2026-08-16.** `ShmCoverage.cleanup()` detached the
+segment and cleared `_ptr`, but left `_map`, `_entries` and `_tail` — all `from_address`
+views, which carry a raw address and own nothing — bound to the detached mapping. The
+kernel hands the *same address* back to the next `shmat`: four successive attach/detach
+cycles all returned it, and a test now pins that. So a stale view from a cleaned-up
+instance does not fault, it reads and writes whichever segment now occupies the address
+— another `ShmCoverage`'s edge table. Fixed in `171c472`; the views are dropped at
+detach so a use-after-free raises instead.
+
+This is a plausible shape for "the first `ShmCoverage` constructed in a process read back
+an empty edge table," since cross-talk between instances is exactly the observable. It is
+**not** established as the cause and should not be written up as one: a trip-wire raising
+on any read after `cleanup()` found **zero hits across a full suite run**, so the suite
+does not currently exercise the path. Treat it as a second hypothesis to test against the
+next sighting, not a resolution of the first.
+
+**Not related to the intermittent full-suite `Segmentation fault`.** That one was chased
+on the assumption it was SHM, and it is not: it is `Z3_del_context` running during
+interpreter finalization, after every test has already passed. Diagnosis, the four
+falsified hypotheses, and the reproduction harness are in
+`docs/handover/suite_segfault_z3_finalization_2026-08-16.md`. Keep the two apart — a
+crash at shutdown and an empty edge table mid-run have no evidence linking them.
