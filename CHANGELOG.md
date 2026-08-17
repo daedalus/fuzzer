@@ -7,7 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **XOR-checksum recovery solves by GF(2) elimination instead of SAT; the 32-bit
+  rung is live.** `xor_map_solver` ran one Z3 `Solver` per output bit, and at a
+  32-bit field the per-bit solve blew past `_SOLVER_TIMEOUT_MS` — recorded in
+  `docs/edge-coverage-analysis.md` as a deliberate miss on cost, with a real
+  32-bit XOR checksum deferred to an offline pass. It was never a cost problem.
+  Every constraint the module builds is `XOR_{i in S} w_i == c`, one linear
+  equation over `F2`, and the coefficient matrix is the same for every output
+  bit — only the right-hand side changes with `j`. One incremental Gauss-Jordan
+  elimination over the augmented matrix, rows as Python ints with all output
+  bits packed into the RHS word, recovers the whole map in `O(pairs * rank)`.
+  Measured on one box, 32x32 over 64 pairs: **151 s** for the SAT path with the
+  timeout lifted (4.7 s/bit), **0.5 ms** for elimination; at the default budget
+  the old path returned `(None, False)` and recovered nothing. Three
+  consequences beyond speed: the full 8/16/32 ladder is now reached on every
+  call; recovery no longer needs the optional `smt` extra, so it works on any
+  install; and a rejection is now a consistency proof rather than an expired
+  timeout — `solve()` has no inconclusive third outcome. `IncrementalXorMapSolver`
+  keeps its public API. `timeout_ms` is still accepted and stored but no longer
+  gates anything, and `_SOLVER_TIMEOUT_MS` survives only for callers reading it.
+
 ### Added
+- **`recover_xor_model` requires a full-rank system before accepting a model**
+  (`require_determined=True`, new `IncrementalXorMapSolver.rank` /
+  `.is_determined`). Reaching the 32-bit rung exposed a defect that cost had been
+  hiding: an underdetermined system reproduces **every pair it was fitted on**,
+  for any assignment of the free variables, so `verify_xor_model` — which checks
+  against those same pairs — cannot reject it. Measured over 100 trials per cell:
+  at 24 pairs, a 32-bit fit to CRC-32 or Adler-32 data was accepted **100/100**
+  times, with 0.4% accuracy on held-out inputs. That is worse than recovering
+  nothing, because every input the fuzzer then "repairs" carries a wrong checksum
+  while the operator looks healthy. Requiring full rank makes acceptance mean "the
+  observations admit exactly one linear map". Over 2100 trials across 8/16/32
+  bits: **0 wrong models**, 100% held-out accuracy on every accepted model, and no
+  true positives lost — the gate converts insufficient-evidence cases from *wrong*
+  to *abstain*. Pass `require_determined=False` for the old behaviour.
+
+  Not verified: neither the 32-bit recovery nor the gate has been A/B'd for edge
+  coverage on a real target. The mechanism is tested; the coverage claim is not.
+
 - **`estimate_map_size()` now reports which tier produced its answer.** Every
   call logs the block count, the source (`sancov_guards`, `sancov_cntrs`,
   `profile`, `branch_density`, `default`), whether that source is exact or an

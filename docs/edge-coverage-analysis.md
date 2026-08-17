@@ -371,8 +371,36 @@ claim is untested — only the mechanism is.
   other. The `(8, 16, 32)` width ladder was `(8,)` in practice, for every input. A
   target with a real 16-bit XOR checksum therefore never got a model, never got past
   the checksum branch, and the edge count plateaued exactly where Tier 3 predicted.
-  32 bits stays out of reach on cost, not correctness: ~600 ms per output bit against
-  a 200 ms `_SOLVER_TIMEOUT_MS`, ~22 s total with the timeout lifted.
+- **32 bits was not out of reach on cost. It was the wrong algorithm.** This document
+  recorded the 32-bit rung as a deliberate miss — ~600 ms per output bit against a
+  200 ms `_SOLVER_TIMEOUT_MS`, ~22 s total with the timeout lifted — and concluded a
+  real 32-bit XOR checksum needed an offline pass. The premise was wrong. Every
+  constraint the module builds is `XOR_{i in S} w_i == c`, a *linear* equation over
+  `F2`, and the coefficient matrix is identical for all output bits: only the
+  right-hand side varies with `j`. Recovery is one Gauss-Jordan elimination over the
+  augmented matrix, rows held as Python ints with all output bits packed into the RHS
+  word, at `O(pairs * rank)`. Z3 was being asked to search a space with a closed-form
+  answer. Re-measured on one box, 32x32 over 64 pairs: **151 s** for the SAT path with
+  the timeout lifted (4.7 s/bit — worse than the ~600 ms this document recorded),
+  **0.5 ms** for elimination. The full 8/16/32 ladder is now reached on every call,
+  the solver no longer needs the optional `smt` extra, and a rejection is a
+  consistency proof rather than an expired timeout.
+
+  Speed then exposed a second defect that cost had been hiding. An underdetermined
+  system reproduces **every pair it was fitted on**, for any assignment of the free
+  variables — so `verify_xor_model`, which checks against those same pairs, cannot
+  reject it. Simply reaching the 32-bit rung would have accepted garbage: measured
+  over 100 trials per cell, at 24 pairs a 32-bit fit to CRC-32 or Adler-32 data was
+  accepted **100/100** times with 0.4% accuracy on held-out inputs. Activating such a
+  model is worse than having none — every input the fuzzer "repairs" then carries a
+  wrong checksum, and the checksum branch stays closed while the operator looks
+  healthy. `recover_xor_model` now requires the system to be full rank before a
+  candidate is offered for verification. Over 2100 trials across 8/16/32 bits the gate
+  produced **0 wrong models** and 100% held-out accuracy on every accepted one; it
+  costs no true positives, converting the cases where the evidence was insufficient
+  from *wrong* into *abstain*. Neither the recovery nor the gate has been A/B'd for
+  coverage on a real target — as with the two fixes above, the mechanism is tested and
+  the coverage claim is not.
 
 The lesson for this document is narrower than the fixes: **an operator that is gated on
 runtime state is only checkable with that state**, and the no-op sweep skipped 25 of 124

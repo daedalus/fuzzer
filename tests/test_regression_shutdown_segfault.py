@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import atexit
 import faulthandler
+import pathlib
+import re
 import signal
 import subprocess
 import sys
@@ -72,9 +74,7 @@ class TestFaultHandlerOwnsSigsegv:
             ctypes.string_at(1)  # dereference a bad address
             """
         )
-        proc = subprocess.run(
-            [sys.executable, "-c", script], capture_output=True, timeout=60
-        )
+        proc = subprocess.run([sys.executable, "-c", script], capture_output=True, timeout=60)
         assert proc.returncode != 0, "the fault did not kill the process"
         assert b"Fatal Python error" in proc.stderr, (
             "a segfault produced no faulthandler traceback; stderr was:\n"
@@ -112,21 +112,55 @@ class TestZ3ShutdownGuard:
         # Leave it disowned: that is the production end state, and re-owning
         # it here would re-arm the crash for the rest of this process.
 
+    def test_every_module_importing_z3_also_arms_the_guard(self):
+        """The invariant, checked structurally rather than spot-checked.
+
+        This assertion used to be made against ``xor_map_solver`` alone, and
+        the docstring already said what was wrong with that: *every* z3 entry
+        point must arm the guard, not just one of them. When xor_map_solver
+        stopped using z3 -- its recovery is GF(2) elimination now -- that
+        spot check would have gone vacuous while still passing, which is the
+        exact failure mode this file exists to prevent.
+
+        Reading the source rather than importing keeps this honest on a box
+        without the optional 'smt' extra, where the arming code cannot run.
+        """
+        core = pathlib.Path(__file__).resolve().parents[1] / "src" / "fuzzer_tool" / "core"
+        offenders = []
+        importers = []
+        for path in sorted(core.glob("*.py")):
+            text = path.read_text()
+            if not re.search(r"^\s*import z3\b", text, re.MULTILINE):
+                continue
+            importers.append(path.name)
+            if "guard_z3_shutdown()" not in text:
+                offenders.append(path.name)
+        assert importers, "no module imports z3; this test has lost its subject"
+        assert not offenders, f"modules import z3 without arming the shutdown guard: {offenders}"
+
     @requires_z3
     def test_solver_use_arms_the_guard(self):
-        """Every z3 entry point must arm the guard, not just one of them."""
-        from fuzzer_tool.core.xor_map_solver import IncrementalXorMapSolver
+        """The same invariant, executed rather than read.
 
-        z3_lifecycle._registered = False
-        try:
-            solver = IncrementalXorMapSolver(8)
-            solver._import_z3()
-            assert z3_lifecycle._registered, (
-                "using the XOR-map solver did not arm the z3 shutdown guard"
-            )
-        finally:
-            z3_lifecycle._registered = True
-            atexit.register(z3_lifecycle._disown_main_context)
+        Covers the two z3 entry points that expose their import as a
+        callable. The others arm inside larger solver functions and are
+        covered by the source-level sweep above.
+        """
+        from fuzzer_tool.core import path_constraints, smt_solver
+
+        for label, entry in (
+            ("smt_solver._z3_available", smt_solver._z3_available),
+            ("path_constraints._z3", path_constraints._z3),
+        ):
+            z3_lifecycle._registered = False
+            try:
+                assert entry() is not None
+                assert z3_lifecycle._registered, (
+                    f"calling {label} did not arm the z3 shutdown guard"
+                )
+            finally:
+                z3_lifecycle._registered = True
+                atexit.register(z3_lifecycle._disown_main_context)
 
     @requires_z3
     def test_del_context_does_not_run_at_finalization(self, tmp_path):
@@ -152,15 +186,21 @@ class TestZ3ShutdownGuard:
             core.Z3_del_context = spy
             z3mod.Z3_del_context = spy
 
-            from fuzzer_tool.core.xor_map_solver import IncrementalXorMapSolver
-            s = IncrementalXorMapSolver(8)
-            s.add_pairs([(1, 1), (2, 2), (4, 4), (8, 8)])
-            s.solve()
+            # A live z3 entry point. This was the XOR-map solver until that
+            # module moved to GF(2) elimination and stopped importing z3 --
+            # at which point this spy would have measured nothing at all and
+            # still reported success.
+            from fuzzer_tool.core.path_constraints import _z3
+            z3 = _z3()
+            assert z3 is not None
+            s = z3.Solver()
+            x = z3.BitVec("x", 32)
+            s.add(x + 7 == 42)
+            assert s.check() == z3.sat
+            s.model()
             """
         )
-        proc = subprocess.run(
-            [sys.executable, "-c", script], capture_output=True, timeout=120
-        )
+        proc = subprocess.run([sys.executable, "-c", script], capture_output=True, timeout=120)
         assert proc.returncode == 0, proc.stderr.decode(errors="replace")
         calls = log.read_text().count("called") if log.exists() else 0
         assert calls == 0, (

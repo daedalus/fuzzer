@@ -478,9 +478,15 @@ class ChecksumLearner:
         # XOR-bitmask path (XOR-of-selected-bits). Attempted only after both
         # GF(2) and integer paths fail: the three families are disjoint, so
         # a verified model from either earlier path is definitive.
-        # Cost-controlled: recover_xor_model caps pair count at _MAX_PAIRS
-        # and field width at 32 bits, matching the small-field discipline
-        # documented in xor_map_solver.py.
+        #
+        # Not cost-gated any more. recover_xor_model solves by elimination
+        # over F2, not SAT, so the full 8/16/32 ladder runs in well under a
+        # millisecond and the 32-bit rung is no longer skipped. What bounds
+        # it now is *evidence*: the recovery abstains unless the pair set
+        # makes the system full rank, which needs at least `width`
+        # independent pairs — so a 32-bit model only appears once ~32+ have
+        # accumulated, and until then this returns None rather than a guess.
+        # CHECKSUM_PAIRS_MAX still caps the pair count fed in.
         xor_model = recover_xor_model(unique)
         if xor_model is not None and self._verify_xor(xor_model, unique):
             self._set_xor_model(xor_model)
