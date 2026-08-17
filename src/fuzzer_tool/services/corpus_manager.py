@@ -653,12 +653,14 @@ class CorpusManager:
             else:
                 target_size = int(len(unique) * (1.0 - stale_ratio))
 
-        # Greedy set-cover is O(n²) — only run on small corpora.
-        # For large corpora, fall back to edge-count sorting which is O(n log n).
+        # Greedy set-cover is O(n²) against the full seed list, so for large
+        # corpora we first reduce the search space to one cheap candidate per
+        # edge.  That bounds the inner loop by edge count rather than seed
+        # count, while still preserving the actual minimal-cover result.
         et = f._edge_tracker
         all_edges = et.cumulative_edges if et and et.cumulative_edges else set()
         mandatory: set[int] = set()
-        if all_edges and et.seed_edges and len(unique) <= 5000:
+        if all_edges and et.seed_edges:
             covered: set[int] = set()
             seed_edge_map: dict[int, set[int]] = {}
             for seed in unique:
@@ -666,33 +668,52 @@ class CorpusManager:
                 s_edges = et.seed_edges.get(sk, set())
                 if s_edges:
                     seed_edge_map[id(seed)] = s_edges
-            # Terminate against what these seeds can actually cover, not
-            # against cumulative_edges. EdgeTracker._prune_tracked_seeds drops
-            # entries from seed_edges once past max_tracked_seeds (200) but
-            # never removes their edges from cumulative_edges, so on any run
-            # past 200 seeds all_edges is a strict superset of anything the
-            # loop can reach. `covered != all_edges` was therefore permanently
-            # true: the loop never converged, always ran to best_gain == 0, and
-            # selected every seed holding a unique edge — making `mandatory`,
-            # and the target_size floor derived from it, meaningless.
-            coverable = set().union(*seed_edge_map.values()) if seed_edge_map else set()
-            while covered != coverable:
-                best_seed = None
-                best_gain = 0
-                for seed in unique:
-                    sid = id(seed)
-                    if sid not in seed_edge_map:
-                        continue
-                    gain = len(seed_edge_map[sid] - covered)
-                    if gain > best_gain:
-                        best_gain = gain
-                        best_seed = seed
-                if best_seed is None:
-                    break
-                covered |= seed_edge_map[id(best_seed)]
-                mandatory.add(id(best_seed))
-            target_size = max(target_size, len(mandatory))
-            del seed_edge_map  # free edge map after set-cover
+            if seed_edge_map:
+                # Terminate against what these seeds can actually cover, not
+                # against cumulative_edges. EdgeTracker._prune_tracked_seeds drops
+                # entries from seed_edges once past max_tracked_seeds (200) but
+                # never removes their edges from cumulative_edges, so on any run
+                # past 200 seeds all_edges is a strict superset of anything the
+                # loop can reach. `covered != all_edges` was therefore permanently
+                # true: the loop never converged, always ran to best_gain == 0, and
+                # selected every seed holding a unique edge — making `mandatory`,
+                # and the target_size floor derived from it, meaningless.
+                coverable = set().union(*seed_edge_map.values()) if seed_edge_map else set()
+                candidate_ids: set[int] = set(seed_edge_map.keys())
+                if len(candidate_ids) > 5000:
+                    edge_to_seeds: dict[int, list[tuple[float, int]]] = {}
+                    for seed in unique:
+                        sid = id(seed)
+                        if sid not in seed_edge_map:
+                            continue
+                        meta = f.seed_meta.get(seed, {})
+                        exec_us = max(
+                            1.0,
+                            meta.get("total_time", 0.0)
+                            / max(1, meta.get("fuzz_count", 1))
+                            * 1_000_000,
+                        )
+                        input_size = max(1, meta.get("input_size", 1))
+                        cost = exec_us * input_size
+                        for edge in seed_edge_map[sid]:
+                            edge_to_seeds.setdefault(edge, []).append((cost, sid))
+                    candidate_ids = {min(candidates)[1] for candidates in edge_to_seeds.values()}
+                while covered != coverable:
+                    best_seed = None
+                    best_gain = 0
+                    for sid in candidate_ids:
+                        if sid not in seed_edge_map:
+                            continue
+                        gain = len(seed_edge_map[sid] - covered)
+                        if gain > best_gain:
+                            best_gain = gain
+                            best_seed = sid
+                    if best_seed is None:
+                        break
+                    covered |= seed_edge_map[best_seed]
+                    mandatory.add(best_seed)
+                target_size = max(target_size, len(mandatory))
+                del seed_edge_map  # free edge map after set-cover
         elif all_edges or f.corpus:
             productive = sum(
                 1 for seed in unique if f.seed_meta.get(seed, {}).get("coverage_edges", 0) > 0

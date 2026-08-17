@@ -6,6 +6,8 @@ just before minimization is scheduled.
 """
 
 import os
+import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -158,3 +160,60 @@ class TestMaxLenIsNotARatchet:
     def test_stays_capped(self):
         history = [500_000] * 100
         assert self._adaptive_max_len(history, floor=4096) == 65536
+
+
+class TestLargeCorpusSetCover:
+    """The minimal-cover minimization must also run for corpora above the old 5k limit."""
+
+    def test_large_corpus_preserves_coverable_edges(self):
+        """auto_minimize_corpus must not drop reachable edges on large corpora.
+
+        Creates 6000 seeds over 100 edges, with a handful of seeds covering
+        unique edges. After minimization, every coverable edge must still be
+        present in the remaining corpus.
+        """
+        from fuzzer_tool.services.corpus_manager import CorpusManager
+        from tests.test_corpus_minimization import MockFuzzer, _cm_seed_key
+
+        f = MockFuzzer(Path(tempfile.mkdtemp()))
+        et = f._edge_tracker
+        edges = list(range(100))
+        et.cumulative_edges = set(edges)
+
+        unique_seeds = []
+        for i in range(6000):
+            data = f"seed_{i:04d}_".encode() + bytes([i % 256]) * 64
+            unique_seeds.append(data)
+
+        seed_edges = {}
+        for idx, seed in enumerate(unique_seeds):
+            sk = _cm_seed_key(seed)
+            if idx < 100:
+                seed_edges[sk] = {idx}
+            elif idx < 1100:
+                seed_edges[sk] = {idx % 100, (idx + 1) % 100}
+            else:
+                seed_edges[sk] = {(idx - 1100) % 100}
+
+        for sk, edge_set in seed_edges.items():
+            et.seed_edges[sk] = edge_set
+            et.seed_hit_counts[sk] = {e: 1 for e in edge_set}
+
+        f.corpus = unique_seeds[:]
+        f.seed_meta = {
+            s: {
+                "fuzz_count": 1,
+                "coverage_edges": len(seed_edges[_cm_seed_key(s)]),
+                "added_at": 100.0 + i,
+            }
+            for i, s in enumerate(f.corpus)
+        }
+
+        mgr = CorpusManager(f)
+        mgr.auto_minimize_corpus()
+
+        covered_after = set()
+        for s in f.corpus:
+            covered_after.update(et.seed_edges.get(_cm_seed_key(s), set()))
+        assert covered_after == et.cumulative_edges
+        assert len(f.corpus) < len(unique_seeds)

@@ -802,6 +802,7 @@ class Fuzzer:
         self.minimize_every_execs = minimize_every_execs
         self.prune_corpus_max_memory = prune_corpus_max_memory
         self._last_memory_prune_exec = 0
+        self._last_corpus_prune_exec = 0
         self._last_bloat_warn_exec = 0
         self._minimize_pending = False
         self.coverage_report = Path(coverage_report) if coverage_report else None
@@ -2611,6 +2612,37 @@ class Fuzzer:
                     f"\n[*] MEMORY PRUNE: {before} → {after} seeds "
                     f"(RSS {rss_kb // 1024}MB / {total_kb // 1024}MB, {used_pct:.1f}%)"
                 )
+
+    def _check_corpus_size_and_prune(self):
+        """Auto-minimize corpus when it far exceeds the edge-derived target size.
+
+        This runs independently of ``--minimize-every-execs`` so a large initial
+        corpus does not stay bloated for the entire campaign. The trigger is
+        throttled to avoid thrashing.
+        """
+        if self.exec_count - self._last_corpus_prune_exec < 1000:
+            return
+        self._last_corpus_prune_exec = self.exec_count
+
+        if len(self.corpus) <= 1:
+            return
+
+        if self.max_corpus > 0:
+            target_size = self.max_corpus
+        else:
+            edges = 0
+            if self.shm_cov:
+                edges = self.shm_cov.cumulative_edges
+            elif self.ptrace_cov:
+                edges = self.ptrace_cov.cumulative_edges
+            target_size = min(max(edges, 50), 5000)
+
+        if len(self.corpus) > max(target_size * 2, 5000):
+            before = len(self.corpus)
+            self._auto_minimize_corpus()
+            after = len(self.corpus)
+            if after < before:
+                print(f"\n[*] CORPUS PRUNE: {before} → {after} seeds (target_size={target_size})")
 
     def _select_next_target(self):
         """Select the next target for multi-target round-robin fuzzing."""
@@ -4838,6 +4870,10 @@ class Fuzzer:
                         self._maybe_trigger_stall_recovery(execs_since_edge)
                     # Memory-based corpus pruning
                     self._check_memory_and_prune()
+                    # Corpus-size-based pruning: minimize when corpus is
+                    # significantly larger than the edge-derived target size,
+                    # even if --minimize-every-execs is not set.
+                    self._check_corpus_size_and_prune()
                     # Periodic GC to return freed memory to OS
                     if i % 500 == 0:
                         import gc
