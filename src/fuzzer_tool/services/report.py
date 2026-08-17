@@ -320,6 +320,9 @@ def _coverage_analysis(f) -> str:
         f"  Unique edges:    {total_seen}",
         f"  Coverage density: {density:.4f}%",
     ]
+    dropped = int(cov.read_dropped_edges())
+    if dropped:
+        lines.append(f"  Dropped edges:   {dropped:,}")
 
     if buckets:
         lines.append(f"  Edge buckets:    {len(buckets)}")
@@ -457,8 +460,7 @@ def _mutation_effectiveness(f) -> str:
         )
 
     lines.append(
-        f"  {'TOTAL':<22s} {total:>7d} {total_success:>7d} "
-        f"{total_success / total * 100:>5.1f}%"
+        f"  {'TOTAL':<22s} {total:>7d} {total_success:>7d} {total_success / total * 100:>5.1f}%"
         if total
         else ""
     )
@@ -515,9 +517,7 @@ def _mutation_edge_attribution(f) -> str:
         # made operators that were credited with edges (byte_shuffle: 27.1)
         # look like they produced nothing per success.
         eps_str = f"{edge_val / succ:>12.2f}" if succ > 0 else f"{'n/a':>12s}"
-        lines.append(
-            f"  {op:<22s} {edge_val:>8.1f} {pct:>6.1f}%  {edges_per_use:>9.2f}  {eps_str}"
-        )
+        lines.append(f"  {op:<22s} {edge_val:>8.1f} {pct:>6.1f}%  {edges_per_use:>9.2f}  {eps_str}")
 
     lines.append(f"  {'TOTAL':<22s} {total:>8.1f} {'':>7s}")
 
@@ -801,6 +801,10 @@ def _good_turing(f) -> str:
         f"  Saturation:          {gt['saturation']:.1%}",
         f"  Confidence:          {gt['confidence']}",
     ]
+    if f.shm_cov:
+        dropped = int(f.shm_cov.read_dropped_edges())
+        if dropped:
+            lines.append(f"  Dropped edges:       {dropped:,}")
     if f.discovery_rate() > 0:
         lines.append(f"  Discovery rate:       {f.discovery_rate():.1f} edges/1k execs")
     return "\n".join(lines)
@@ -1787,7 +1791,7 @@ def _preview(data, width: int = 40) -> str:
     """
     if isinstance(data, str):
         data = data.encode("utf-8", errors="replace")
-    if not isinstance(data, (bytes, bytearray)):
+    if not isinstance(data, bytes | bytearray):
         data = str(data).encode("utf-8", errors="replace")
     out = []
     for b in data[:width]:
