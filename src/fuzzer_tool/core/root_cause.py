@@ -16,13 +16,39 @@ the crashing input, this module:
    remove) reproduces the same crash signature. Edits that are cosmetic
    (padding, unrelated field changes) get dropped even if they happen to
    sit right next to the real cause.
+
+Scrambled-field descrambling (optional)
+----------------------------------------
+Everything above operates on raw file bytes -- the domain the target
+actually reads off disk. If a target unscrambles a fixed-width field with
+a linear (XOR-bitmask) transform before using it (a flags word, a packed
+checksum, any bit-packed obfuscation layer), the isolated root-cause bytes
+in *that* domain are still meaningful to ddmin (they correctly identify
+*which file bytes* are causal) but not directly meaningful to a human: the
+raw scrambled bits don't correspond one-to-one to the logical field values
+a human reasons about. :func:`invert_scrambled_field` optionally maps an
+isolated field's raw value back through a previously-recovered
+:class:`~fuzzer_tool.core.xor_map_solver.XorBitmaskModel`'s inverse (via
+:mod:`fuzzer_tool.core.gf2_common`'s bitmask-vector layer), so
+:func:`format_root_cause_report` can report the original-domain field
+value alongside the raw one when a caller supplies a model for that field.
+This only applies to a *square* model (``out_bits == in_bits``, i.e. a
+fixed-width field scrambled onto itself) -- the general variable-length
+CRC-style checksum a target might also recover has no meaningful inverse
+and isn't in scope here.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
 
+from fuzzer_tool.core.gf2_common import (
+    bitmask_from_indices,
+    invert_bitmask_map,
+    verified_apply_inverse,
+)
 from fuzzer_tool.core.similarity import levenshtein_align
+from fuzzer_tool.core.xor_map_solver import XorBitmaskModel
 
 # ("match", pos, b"") | ("replace", pos, byte) | ("insert", pos, byte) | ("delete", pos, b"")
 EditOp = tuple[str, int, bytes]
@@ -137,13 +163,95 @@ def _byte_repr(b: int) -> str:
     return chr(b) if 32 <= b < 127 else f"\\x{b:02x}"
 
 
+def invert_scrambled_field(model: XorBitmaskModel, value: int) -> int | None:
+    """Recover the original-domain value of a scrambled field.
+
+    Only defined for a **square** *model* (``out_bits == in_bits``): every
+    input-bit index referenced across ``model.masks`` must be
+    ``< model.out_bits``, i.e. the field is scrambled onto itself rather
+    than being a variable-length checksum over a wider input (the general
+    CRC-style case, where "inverting" isn't meaningful). Returns ``None``
+    for a non-square model, a singular one, or when the per-query
+    round-trip guard in :func:`fuzzer_tool.core.gf2_common.verified_apply_inverse`
+    rejects the candidate -- a model recovered from partial evidence can be
+    structurally full-rank while still being wrong for a specific value, so
+    the raw pseudo-inverse is never trusted blind.
+    """
+    n_bits = model.out_bits
+    forward = []
+    for indices in model.masks:
+        if any(i >= n_bits for i in indices):
+            return None  # not square: references bits outside the output width
+        forward.append(bitmask_from_indices(indices))
+    inverse = invert_bitmask_map(forward, n_bits)
+    if inverse is None:
+        return None
+    return verified_apply_inverse(forward, inverse, value)
+
+
+def field_value(data: bytes, offset: int, nbytes: int) -> int:
+    """Read an ``nbytes``-wide field at *offset* as an integer.
+
+    Little-endian, matching :func:`fuzzer_tool.core.xor_map_solver.compute_xor_checksum`'s
+    bit convention (input bit ``i`` is byte ``i // 8`` bit ``i % 8``,
+    LSB-first per byte) -- so a field read this way lines up with the bit
+    indices an :class:`XorBitmaskModel` recovered over that field expects.
+    """
+    return int.from_bytes(data[offset : offset + nbytes], "little")
+
+
+def describe_scrambled_field(
+    base: bytes,
+    minimal_bytes: bytes,
+    offset: int,
+    model: XorBitmaskModel,
+) -> str | None:
+    """Report a root-cause field's value in both the raw (scrambled) and
+    recovered original domain, for a field at *offset* covered by *model*.
+
+    Compares the baseline's field value against the ddmin-minimized
+    candidate's field value at the same offset -- the raw scrambled diff
+    ddmin already isolated, plus (when invertible) what that diff means in
+    the field's original, pre-scramble domain. Returns ``None`` -- rather
+    than a guessed or partial answer -- if the field isn't covered by
+    *minimal_bytes*, or if either value fails to invert (see
+    :func:`invert_scrambled_field`).
+    """
+    nbytes = model.out_bits // 8
+    if offset + nbytes > len(base) or offset + nbytes > len(minimal_bytes):
+        return None
+    base_raw = field_value(base, offset, nbytes)
+    minimal_raw = field_value(minimal_bytes, offset, nbytes)
+    base_orig = invert_scrambled_field(model, base_raw)
+    minimal_orig = invert_scrambled_field(model, minimal_raw)
+    if base_orig is None or minimal_orig is None:
+        return None
+    lines = [
+        f"  scrambled field @ 0x{offset:04x} ({nbytes} bytes, {model.out_bits}-bit model):",
+        f"    raw:      {base_raw:#0{2 + nbytes * 2}x} -> {minimal_raw:#0{2 + nbytes * 2}x}",
+        f"    original: {base_orig:#0{2 + nbytes * 2}x} -> {minimal_orig:#0{2 + nbytes * 2}x}",
+    ]
+    return "\n".join(lines)
+
+
 def format_root_cause_report(
     base: bytes,
     crash: bytes,
     script: list[EditOp],
     minimal_indices: list[int],
+    scrambled_field: tuple[int, XorBitmaskModel] | None = None,
+    minimal_bytes: bytes | None = None,
 ) -> str:
-    """Human-readable report of the isolated root-cause edits."""
+    """Human-readable report of the isolated root-cause edits.
+
+    *scrambled_field*, if given, is ``(offset, model)`` for a field
+    previously recovered by :mod:`fuzzer_tool.core.xor_map_solver`; when
+    present (and *minimal_bytes* -- the ddmin-reconstructed candidate --
+    is also given), the report appends the field's descrambled diff via
+    :func:`describe_scrambled_field`, silently omitted if it doesn't apply
+    (model not square, field outside the diffed range, etc.) rather than
+    guessing.
+    """
     total = len(edit_indices(script))
     lines = [
         "=== root-cause byte diff ===",
@@ -176,4 +284,12 @@ def format_root_cause_report(
         elif op == "delete":
             old = base[pos]
             lines.append(f"  offset 0x{pos:04x}: DELETE {old:#04x} ('{_byte_repr(old)}')")
+
+    if scrambled_field is not None and minimal_bytes is not None:
+        offset, model = scrambled_field
+        field_desc = describe_scrambled_field(base, minimal_bytes, offset, model)
+        if field_desc is not None:
+            lines.append("")
+            lines.append(field_desc)
+
     return "\n".join(lines)
