@@ -38,6 +38,8 @@ fuzzer, not just the target.
 18. Always create corpus on ~/.
 19. Always make sure when creating a new functionality that is wired-up where needed.
 20. try except pass is a bad pattern.
+21. Always excersice higiene: every test must clean up their mess.
+22. If you solved the halting problem you are allowed to run tests that the user is saying they are hanging otherwise read the code to see what it does.
 
 ## Corpus Rules
 
