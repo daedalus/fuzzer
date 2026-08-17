@@ -6,6 +6,7 @@ the operand window symbolic and let z3 *search* for a value satisfying the
 negated predicate.
 """
 
+import logging
 import random
 
 import pytest
@@ -19,6 +20,8 @@ from fuzzer_tool.core.path_constraints import (
 )
 
 z3 = pytest.importorskip("z3")
+
+logging.basicConfig(level=logging.DEBUG, format="%(name)s: %(message)s")
 
 
 def _rec(op_a_val, op_b_val, result, width=4, pc=0x1000):
@@ -267,7 +270,7 @@ class TestCmplogCapturesOutcome:
 
         a, b = bytes.fromhex("01020304"), bytes.fromhex("05060708")
         assert collector.pair_cmp(a, b) == (-1, 4)
-        assert collector.pair_pc(a, b) == 4919
+        assert collector.pair_pc(a, b) == 0x4919
 
     def test_lines_without_outcome_are_still_parsed(self):
         """Layer-1 libc interceptors emit no PC field."""

@@ -1,5 +1,6 @@
 """Tests for the plotting module — SVG chart generation and HTML report."""
 
+import logging
 import types
 
 from fuzzer_tool.core.plotting import (
@@ -11,12 +12,17 @@ from fuzzer_tool.core.plotting import (
     read_coverage_log,
 )
 
+logging.basicConfig(level=logging.DEBUG, format="%(name)s: %(message)s")
+log = logging.getLogger(__name__)
+
 
 class TestReadCoverageLog:
     def test_missing_file_returns_empty(self, tmp_path):
+        log.debug("TEST start %s", "test_missing_file_returns_empty")
         assert read_coverage_log(tmp_path / "nope.csv") == []
 
     def test_parses_valid_rows(self, tmp_path):
+        log.debug("TEST start %s", "test_parses_valid_rows")
         p = tmp_path / "cov.csv"
         p.write_text("1.0,10,5,2,0\n2.0,20,8,3,1\n")
         rows = read_coverage_log(p)
@@ -31,6 +37,7 @@ class TestReadCoverageLog:
         assert rows[1]["crash_count"] == 1
 
     def test_skips_malformed_rows(self, tmp_path):
+        log.debug("TEST start %s", "test_skips_malformed_rows")
         p = tmp_path / "cov.csv"
         p.write_text("1.0,10,5,2,0\nnot,a,valid,row\n3.0,30,9,4,1\n")
         rows = read_coverage_log(p)
@@ -39,6 +46,7 @@ class TestReadCoverageLog:
         assert rows[-1]["exec_count"] == 30
 
     def test_skips_rows_with_wrong_column_count(self, tmp_path):
+        log.debug("TEST start %s", "test_skips_rows_with_wrong_column_count")
         p = tmp_path / "cov.csv"
         p.write_text("1.0,10,5,2,0\n1.0,10,5\n")
         rows = read_coverage_log(p)
@@ -47,9 +55,11 @@ class TestReadCoverageLog:
 
 class TestDeriveExecRate:
     def test_empty_input(self):
+        log.debug("TEST start %s", "test_empty_input")
         assert _derive_exec_rate([]) == []
 
     def test_single_row_produces_no_points(self):
+        log.debug("TEST start %s", "test_single_row_produces_no_points")
         rows = [{"elapsed": 1.0, "exec_count": 10}]
         assert _derive_exec_rate(rows) == []
 
@@ -123,16 +133,19 @@ class TestSvgBarChart:
         assert "10.0%" in svg
 
     def test_zero_value_bar_does_not_crash(self):
+        log.debug("TEST start %s", "test_zero_value_bar_does_not_crash")
         svg = _svg_bar_chart("Ops", [("dead_op", 0.0)])
         assert "<svg" in svg
 
     def test_escapes_label(self):
+        log.debug("TEST start %s", "test_escapes_label")
         svg = _svg_bar_chart("Ops", [("<b>x</b>", 0.5)])
         assert "<b>x</b>" not in svg
 
 
 class TestGenerateHtmlReport:
     def test_writes_report_with_no_log(self, tmp_path):
+        log.debug("TEST start %s", "test_writes_report_with_no_log")
         fuzzer = types.SimpleNamespace(
             op_counts={}, op_success={}, exec_count=0, crash_count=0, corpus=[]
         )
@@ -143,8 +156,9 @@ class TestGenerateHtmlReport:
         assert out == str(tmp_path / "report.html")
 
     def test_writes_report_with_data(self, tmp_path):
-        log = tmp_path / "cov.csv"
-        log.write_text("1.0,10,5,2,0\n2.0,20,9,3,1\n")
+        log.debug("TEST start %s", "test_writes_report_with_data")
+        cov = tmp_path / "cov.csv"
+        cov.write_text("1.0,10,5,2,0\n2.0,20,9,3,1\n")
         fuzzer = types.SimpleNamespace(
             op_counts={"bit_flip": 100, "havoc": 50},
             op_success={"bit_flip": 10, "havoc": 0},
@@ -152,12 +166,13 @@ class TestGenerateHtmlReport:
             crash_count=1,
             corpus=[b"a", b"b", b"c"],
         )
-        generate_html_report(fuzzer, log, tmp_path / "out.html")
+        generate_html_report(fuzzer, cov, tmp_path / "out.html")
         content = (tmp_path / "out.html").read_text()
         assert "bit_flip" in content
         assert "samples logged: 2" in content
 
     def test_creates_parent_directories(self, tmp_path):
+        log.debug("TEST start %s", "test_creates_parent_directories")
         fuzzer = types.SimpleNamespace(
             op_counts={}, op_success={}, exec_count=0, crash_count=0, corpus=[]
         )
@@ -166,6 +181,7 @@ class TestGenerateHtmlReport:
         assert nested.exists()
 
     def test_handles_missing_fuzzer_attrs_gracefully(self, tmp_path):
+        log.debug("TEST start %s", "test_handles_missing_fuzzer_attrs_gracefully")
         # A bare object with none of the expected attributes should not crash;
         # getattr defaults should cover it.
         fuzzer = types.SimpleNamespace()
@@ -173,6 +189,7 @@ class TestGenerateHtmlReport:
         assert (tmp_path / "out.html").exists()
 
     def test_report_includes_exec_line_and_invocation(self, tmp_path):
+        log.debug("TEST start %s", "test_report_includes_exec_line_and_invocation")
         fuzzer = types.SimpleNamespace(
             op_counts={"bit_flip": 100},
             op_success={"bit_flip": 10},
@@ -191,6 +208,7 @@ class TestGenerateHtmlReport:
         assert "fuzzer-tool fuzz targets/png_read -i corpus -o out" in content
 
     def test_report_includes_file_mode_default_exec_line(self, tmp_path):
+        log.debug("TEST start %s", "test_report_includes_file_mode_default_exec_line")
         """File mode with no target_args renders a bare @@ (AFL convention)."""
         fuzzer = types.SimpleNamespace(
             op_counts={},
@@ -207,6 +225,7 @@ class TestGenerateHtmlReport:
         assert "targets/png_read @@" in content
 
     def test_report_escapes_exec_line_html(self, tmp_path):
+        log.debug("TEST start %s", "test_report_escapes_exec_line_html")
         fuzzer = types.SimpleNamespace(
             op_counts={},
             op_success={},

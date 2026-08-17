@@ -1,7 +1,10 @@
 """SVG chart generation and self-contained HTML report for fuzzer runs."""
 
+import logging
 from html import escape
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 
 def _esc(value) -> str:
@@ -14,6 +17,7 @@ def read_coverage_log(path):
     rows = []
     p = Path(path)
     if not p.exists():
+        log.debug("read_coverage_log: file missing %s", path)
         return rows
     with p.open() as f:
         for line in f:
@@ -32,17 +36,20 @@ def read_coverage_log(path):
                 )
             except (ValueError, IndexError):
                 continue
+    log.debug("read_coverage_log: parsed %d rows from %s", len(rows), path)
     return rows
 
 
 def _derive_exec_rate(rows):
     """Compute (elapsed, execs/sec) between consecutive rows."""
+    log.debug("_derive_exec_rate: input rows=%d", len(rows))
     points = []
     for i in range(1, len(rows)):
         dt = rows[i]["elapsed"] - rows[i - 1]["elapsed"]
         de = rows[i]["exec_count"] - rows[i - 1]["exec_count"]
         if dt > 0 and de >= 0:
             points.append((rows[i]["elapsed"], de / dt))
+    log.debug("_derive_exec_rate: produced %d points", len(points))
     return points
 
 
@@ -55,6 +62,7 @@ def _scale(value, in_lo, in_hi, out_lo, out_hi):
 
 def _svg_line_chart(title, x_label, y_label, points, width=700, height=200):
     """Render an inline SVG line chart. points = [(x, y), ...]."""
+    log.debug("_svg_line_chart: title=%r points=%d", title, len(points))
     pad_l, pad_r, pad_t, pad_b = 60, 20, 30, 40
     iw = width - pad_l - pad_r
     ih = height - pad_t - pad_b
@@ -97,6 +105,7 @@ def _svg_line_chart(title, x_label, y_label, points, width=700, height=200):
 
 def _svg_bar_chart(title, bars, width=700, height=200):
     """Render an inline SVG horizontal bar chart. bars = [(label, value), ...]."""
+    log.debug("_svg_bar_chart: title=%r bars=%d", title, len(bars))
     pad_l, pad_r, pad_t, pad_b = 120, 60, 30, 20
     iw = width - pad_l - pad_r
     ih = height - pad_t - pad_b
@@ -135,6 +144,7 @@ def _svg_bar_chart(title, bars, width=700, height=200):
 
 def generate_html_report(fuzzer, coverage_log_path, output_path):
     """Generate a self-contained HTML report with SVG charts."""
+    log.debug("generate_html_report: start path=%s output=%s", coverage_log_path, output_path)
     rows = read_coverage_log(coverage_log_path)
 
     # Exec rate
@@ -241,4 +251,5 @@ footer {{ color: #888; font-size: 0.85em; margin-top: 2em; }}
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(html)
+    log.debug("generate_html_report: wrote %s (%d bytes)", out, len(html))
     return str(out)

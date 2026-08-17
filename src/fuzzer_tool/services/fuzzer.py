@@ -1506,9 +1506,21 @@ class Fuzzer:
         self._last_mutation_offset: int = 0
 
         # Critical slowing down detector
-        from fuzzer_tool.core.critical_slowing import CriticalSlowingDown
+        from fuzzer_tool.core.critical_slowing import (
+            CoverageHomogeneityDetector,
+            CriticalSlowingDown,
+        )
 
         self._csd = CriticalSlowingDown(window_size=50, rise_threshold=1.5, min_observations=20)
+
+        # Coverage-column homogeneity detector — spatial clustering check
+        num_cols = max(1, self.map_size // 8192)
+        self._homogeneity = CoverageHomogeneityDetector(
+            num_columns=num_cols,
+            window_size=10,
+            homogeneity_p_threshold=0.01,
+        )
+        self._homogeneity_col_cumulative: list[int] = [0] * num_cols
 
         # Allan variance detector for stall detection (edge discovery rate)
         from fuzzer_tool.core.allan_variance import AllanVarianceDetector
@@ -4854,6 +4866,34 @@ class Fuzzer:
                     delta = current_edges - self._last_allan_edge_count
                     self._allan.update(delta)
                     self._last_allan_edge_count = current_edges
+                    # Feed per-column edge counts to CoverageHomogeneityDetector
+                    if self.shm_cov and hasattr(self, "_homogeneity"):
+                        log.debug("homogeneity: shm_cov present, observing col counts")
+                        hit_counts = self.shm_cov.get_edge_counts()
+                        n_cols = self._homogeneity.num_columns
+                        col_totals_this_tick = [0] * n_cols
+                        for edge_id, _count in hit_counts.items():
+                            col_totals_this_tick[edge_id % n_cols] += 1
+                        col_deltas = [
+                            col_totals_this_tick[i] - self._homogeneity_col_cumulative[i]
+                            for i in range(n_cols)
+                        ]
+                        self._homogeneity_col_cumulative = col_totals_this_tick
+                        log.debug("homogeneity: col_deltas=%s", col_deltas)
+                        self._homogeneity.observe(col_deltas)
+                        try:
+                            result = self._homogeneity.is_homogeneous()
+                            log.debug("homogeneity: result=%s", result)
+                            if not result["homogeneous"] and result["total_edges"] > 0:
+                                log.info(
+                                    "Coverage clustered: χ²=%.2f, p=%.4f, V=%.3f, edges=%d",
+                                    result["chi2"],
+                                    result["p_value"],
+                                    result["cramers_v"],
+                                    result["total_edges"],
+                                )
+                        except Exception as ex:
+                            log.debug("Coverage homogeneity check failed: %s", ex)
                     # Record coverage snapshot for temporal analysis
                     self._edge_tracker.record_coverage_snapshot(self.exec_count)
                     if not self.quiet_stats:

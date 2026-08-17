@@ -147,13 +147,13 @@ def conds_from_cmplog_text(lines: Iterable[str]) -> list[CondStmt]:
         if not line.startswith("CMP "):
             continue
         parts = line[4:].split()
-        if len(parts) < 4:
+        if len(parts) < 2:
             continue
         try:
             op_a = bytes.fromhex(parts[0])
             op_b = bytes.fromhex(parts[1])
-            result = int(parts[2])
-            width = int(parts[3])
+            result = int(parts[2]) if len(parts) > 2 else None
+            width = int(parts[3]) if len(parts) > 3 else None
             pc = int(parts[4], 16) if len(parts) > 4 else None
         except (ValueError, IndexError):
             continue
@@ -166,4 +166,5 @@ def conds_from_cmplog_text(lines: Iterable[str]) -> list[CondStmt]:
         seen.add(k)
         out.append(c)
         cmpid += 1
+    log.debug("conds_from_cmplog_text: parsed %d CondStmt from input lines", len(out))
     return out

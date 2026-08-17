@@ -3,8 +3,8 @@
 Static analysis of `src/fuzzer_tool` (120k LOC, 351 py files) against the question:
 what gets more edges per wall-clock second?
 
-**Scope:** open items only. Fixed findings have been removed — see the summary table
-below for what they were and which commit closed each.
+**Scope:** pending items only. Completed work is documented in commit messages
+and the historical record in `docs/handover/`.
 
 **Caveat up front:** this document was originally written without clang in the
 container, so no sancov target was ever built or fuzzed — everything was read from
@@ -13,113 +13,19 @@ been measured, for the open items or the closed ones.** The probe-cost table in 
 simulated; the memset table is measured but on one machine. A/B with
 `tools/bench_paired.py` before trusting any of it.
 
-That caveat has narrowed but not lifted. `apt-get install clang` succeeds now (needs an
-`apt-get update` first — the pinned lists 404 on `libc6-i386` and `libxml2-dev`), so the
-instrumented matrix can be built and the guard census re-run on demand; §2 records two
-such runs, 2026-08-14 and 2026-08-16. What still has not happened is a *fuzzing* run:
-no edges/second figure in this document comes from an A/B against a real target.
-
-§1 is the exception and the cautionary tale: it is the one item that was measured, and
-measuring it showed the prescribed fix was worth 0.99x. Throughput numbers there are
-real, but come from `test_target` and a synthetic ASAN target in a sandbox, not from a
-vendored target.
+`apt-get install clang` now succeeds, so the instrumented matrix can be built and the
+guard census re-run on demand; §2 records two such runs, 2026-08-14 and 2026-08-16.
+What still has not happened is a *fuzzing* run: no edges/second figure in this document
+comes from an A/B against a real target.
 
 Ordered by expected impact.
 
 ---
 
-## Already fixed — not covered below
+## §2 — `__afl_map_edge` is O(map_size) per edge hit
 
-These are closed and their sections have been removed from this document. The full
-reasoning lives in the commit messages, which is where it stays useful.
-
-| commit | what it closed |
-|--------|----------------|
-| `fix(shm): disable ASLR so context-sensitive edge_ids survive across execs` | Context-sensitive `edge_id`s derive from runtime return addresses, but `_seen_edge_ids` outlives the target process. Under ASLR every exec of a CTX build reported a fresh edge set. |
-| `fix(build): build vendored libs with frame pointers for the CTX walk` | Vendored zlib/libpng/libjpeg/ffmpeg/lz4/secp256k1 were built without `-fno-omit-frame-pointer` while being linked into CTX-enabled `_nosan` targets, so the context walk silently read the wrong caller. |
-| `fix(coverage): size the map for edges, load factor and context width` | Map sized from block count with no edge/block ratio, no load-factor headroom, and no knowledge of context width; plus the shim now counts dropped edges, so saturation is detectable instead of self-masking. |
-| `fix(coverage): keep the SHM resize, drop the state it needlessly destroyed` | Resize wiped every accumulated statistic on a premise true for AFL's bitmap but false here, so the next execution re-reported all known edges as new — defeating the stall detector that had triggered it. Also stopped copying the old table into the new segment at the old modulus. |
-| `fix(coverage): prevent valid edge_id 0 from being treated as an empty slot` | `edge_id == 0` was indistinguishable from an empty slot in the open-addressing table, so valid edges that XORed to zero were silently dropped and the slot reclaimed by later collisions. Forced to 1 with `edge_id |= 1`. |
-| `fix(scheduler): wire favored into FAST/COE and add cull_queue/top_rated` | `favored` was threaded through `SeedScorer` but never computed; FAST/COE ran permanently in unfavored mode and `top_rated`/`cull_queue` minimal-set-cover did not exist. Added `_cull_queue()` to `Fuzzer`, periodic favored recomputation, and passed `favored` at the score call site. |
-| `fix(coverage): make hit counts part of the novelty decision on the SHM path` | `_check_new_coverage` decided interestingness by set membership only, so loop-count-guarded branches were invisible. Added disjoint bucket-bit ladders (`core/count_class.py`) keyed by edge_id in a dense virgin map on the hot SHM path; counts clamped at 255, fast path unchanged. |
-| `fix(shm): stop the no-change fast path from reporting a phantom edge loss` | The fast path returned `(False, set())` on every unchanged exec; callers caching that return value read it as "zero edges fired," corrupting the next diff into reporting the whole edge set as new. Added `ShmCoverage._last_ids`, returned by the fast path instead of an empty set. |
-| `feat(shim): add a real AFL-style forkserver` + `fix(forkserver): drive the shim forkserver, drop the bitmap round-trip` + `feat(fuzzer): enable the forkserver on the default execution path` | §1. See that section — the fix this document prescribed (delete the bitmap-file round-trip) was necessary but worth 0.99x on its own, because `fuzz_loader.c` did fork+**exec** per input and still paid the full ELF load + linker + libc + ASAN init every execution. The server had to move into the target. 2.77x end to end through the CLI. |
-| `crc_learn was a pure no-op whenever the checksum recovered as XOR` | An operator offered on every selection that never mutated anything, plus the state-gated blind spot that hid it — 25 of 124 operators were never swept. Mechanism fixed and guarded; coverage effect unmeasured, so the reasoning stays in Tier 3 rather than being retired here. |
-| `xor_map_solver: the width ladder never got past 8 bits` | `_extract_fixed_width` packed the window big-endian against an LSB-first evaluator, so every 16- and 32-bit XOR checksum candidate failed verification and the `(8, 16, 32)` ladder was `(8,)`. Targets gated on a 16-bit XOR checksum could not get past it. See Tier 3. |
-| `feat(fuzzer): add SkipDet deterministic stage` + `fix(fuzzer): guard deterministic stage coverage path and meta access` + follow-up merge | First landed as `Fuzzer._run_deterministic_stage()`: a standalone blocking loop, always on, that dispatched `_op_bit_flip` once per byte (one random bit, not a true 1/1 walk) and never called `save_to_corpus` — any interesting mutant it found was discarded. Merged into `OperatorEngine.maybe_deterministic_mutation()`: a real bitflip-1/1 + byte-flip-8/8 + arithmetic + interesting-value generator, drained from inside `mutate()` so discoveries flow through the same `fuzz_one()` → `save_to_corpus` path as every other mutation. Also fixed `trace_mini` indexing (`edge_id // 8`, out-of-bounds-dropped almost every real edge_id) to fold by `edge_id % map_size` instead. Opt-out via `--no-deterministic`. |
-
-Two open items **depend** on the sizing commit (the third entry above) and are carried
-forward in §2: bounding the probe window (now measurable, because drops are counted)
-and making the per-exec reset O(1) (the precondition for maps larger than 262144).
-
-Tier 2 (hit-count bucketing, favored wiring) and Tier 3's two open items (deterministic
-stages, empty-edge-set fast path) are now all complete, and §1 is closed. §2's
-generation-tagged reset is the largest remaining item.
-
----
-
-## Tier 1 — throughput (edges/sec is the metric, not edges/exec)
-
-### 1. The forkserver is commented out on the default execution path
-
-**Status: FIXED**, but *not* by the fix this section originally prescribed. Read the
-correction below before reusing any of the reasoning here.
-
-The original diagnosis was that the child inherits `__AFL_SHM_ID` and `afl_shim.c`'s
-constructor already attaches, so the bitmap never needed to travel: delete the
-bitmap-file path in `fuzz_loader.c` and the `ctypes.memmove` in `runner.py`, and the
-forkserver works. That much is true and was necessary — but it bought **nothing**.
-Measured against `posix_spawn` with only that deletion applied:
-
-| target | spawn | after the prescribed fix | speedup |
-|--------|-------|--------------------------|---------|
-| `test_target` | 612 exec/s | 648 exec/s | 1.06x |
-| ASAN + heavy static init | 93.8 exec/s | 92.6 exec/s | **0.99x** |
-
-**`fuzz_loader.c` was never a forkserver.** `run_executable()` did fork **+ exec**
-per input, so every execution still paid the full ELF load, dynamic linker, libc init
-and ASAN init — the exact cost this section set out to remove. The name was the only
-thing forkserver-like about it. The 2–10x figure quoted above assumes AFL's design,
-where the *target* hosts the server and children fork from a process already sitting
-past its own initialisation; nothing in this tree did that. `afl_shim.c` had no
-forkserver at all — no `__AFL_INIT`, no FORKSRV handshake. (The `__AFL_INIT()` /
-`__AFL_LOOP()` calls in `png_read.c` and `grep_read.c` come from real AFL++ builds,
-not from this shim.)
-
-The actual fix moves the server into the target: `__afl_start_forkserver()` in the
-shim constructor, speaking AFL's protocol on AFL's fd numbers (198/199), with
-`fuzz_loader.c` driving it and falling back to fork+exec for targets built against an
-older shim.
-
-| target | spawn | true forkserver | speedup |
-|--------|-------|-----------------|---------|
-| `test_target` | 623 exec/s | 3281 exec/s | **5.27x** |
-| ASAN + heavy static init | 90.6 exec/s | 125 exec/s | **1.38x** |
-| full CLI, end to end | 484 eps | 1341 eps | **2.77x** |
-
-The ASAN target gains least because forking a process carrying ASAN's shadow mapping
-is itself expensive. Worth knowing before extrapolating to the vendored targets —
-this is the one number here most likely to mislead.
-
-**Semantics change, deliberately.** Coverage recorded during pre-fork initialisation
-is no longer re-recorded per execution. Verified that the forkserver edge set is a
-strict *subset* of the spawn edge set for every input, and that the dropped
-difference is identical across all inputs — constant init edges, which carry no
-signal. Input discrimination is unchanged. This matches AFL, but it does mean edge
-sets are not comparable across `--no-forkserver`.
-
-Four defects were fixed on the way, each of which would have bitten on the first run:
-dropped child stderr (ASAN exits 1, so `SanitizerReport.parse(stderr)` is the *only*
-crash signal there is); a zero-length `RUN` that never replied and hung the caller
-until its join timeout; an oversized `RUN` that desynced the pipe; and timeouts
-reported as `-SIGKILL`, which is in `SIGNAL_CRASH_CODES` and would have filed every
-slow input as a crash. The forkserver parent also had to stop recording its own
-control flow — see the learnings note.
-
-### 2. `__afl_map_edge` is O(map_size) per edge hit
-
-**Status: PARTLY OPEN.** Sizing and saturation detection are fixed (commit 3). The
-probe cost on the hot path is not.
+**Status: PARTLY OPEN.** Sizing and saturation detection are fixed. The probe cost
+on the hot path and the per-exec reset cost are not.
 
 `adapters/afl_shim.c` linear-probes an open-addressing table on **every edge
 execution**, not just every unique edge. A loop body that runs 10k times pays the probe
@@ -147,7 +53,7 @@ Two ways out, neither taken yet:
 
 **Prerequisite for either: make the per-execution reset O(1).**
 `ShmCoverage.reset_edge_map()` memsets the whole table before every execution, so table
-size is a direct per-exec tax, which is why commit 3 could only raise the cap to 262144:
+size is a direct per-exec tax, which is why the map cap was set to 262144:
 
 | entries | table | memset per exec |
 |---------|-------|-----------------|
@@ -166,8 +72,8 @@ wants its own patch and its own benchmark.
 
 Note the two costs pull in opposite directions — a bigger map makes probes cheaper and
 clears more expensive — and neither has been measured against a real target. The net
-sign of commit 3 on edges/second is therefore unknown, and could be negative on a target
-that was not actually saturating.
+sign on edges/second is therefore unknown, and could be negative on a target that was
+not actually saturating.
 
 **Measured 2026-08-14, after the forkserver landed.** The memset table above reproduces
 on this machine (2.6 µs @ 8K, 82.2 µs @ 262K, 350.6 µs @ 1M, 1499.5 µs @ 4M). What the
@@ -204,9 +110,8 @@ to attach on a mismatch, or find the bits inside the existing 24 (the top 8 bits
 they approach 2^24).
 
 **Measured 2026-08-14 on real instrumented targets — and the premise does not hold
-here.** `apt-get install clang` now succeeds in the sandbox, so `tools/build_targets.sh
---clang-scov` produces a genuine trace-pc-guard matrix for the first time; this document
-was written without one. Exact block counts, and the map each target asks for:
+here.** `tools/build_targets.sh --clang-scov` produces a genuine trace-pc-guard matrix.
+Exact block counts, and the map each target asks for:
 
 | target | guards | map | edges hit | dropped |
 |--------|-------:|----:|----------:|--------:|
@@ -277,137 +182,9 @@ So §2 stays open on the same terms: the costs it proposes to fix are ones no ta
 this tree currently pays, and that has now been confirmed twice, two days apart, on a
 freshly built matrix.
 
-**Sizing was silently estimating, not measuring, until 2026-08-14.**
-`estimate_map_size()` lists "sancov guard count (exact)" as priority 1, but its only
-parser — `parse_sancov_offsets()` — reads `__start/__stop___sancov_cntrs`, the
-*inline-8bit-counters* section. `-fsanitize-coverage=trace-pc-guard` emits
-`__sancov_guards` instead, so priority 1 never matched on any target in this tree and
-every size came from branch-density estimation. That estimate ran 4–16x high:
-
-| target | guards | estimated | exact | reset cost, est → exact |
-|--------|-------:|----------:|------:|------------------------:|
-| test_target | 91 | 131,072 | 8,192 | 40.8 µs → 4.1 µs |
-| gzip_read | 527 | 131,072 | 8,192 | 40.8 µs → 4.1 µs |
-| png_read_nosan | 292 | 32,768 | 8,192 | 11.3 µs → 4.1 µs |
-| proto_target_nosan | 94 | 16,384 | 8,192 | 6.9 µs → 4.1 µs |
-
-Fixed by `parse_sancov_guard_count()`. Note what the defect was doing to this section's
-own argument: the over-estimate is what made the reset look expensive, and the same
-estimate fed `recommended_map_size()`. The 36.7 µs/exec it gives back is invisible under
-fork+exec (measured 0.997x on `test_target`, where an exec costs 7.5 ms) and is worth
-~12% of a 305 µs forkserver exec.
-
-### 4. No hit-count bucketing on the SHM path
-
-**Status: FIXED.** `_check_new_coverage` (`adapters/shm.py`) now maintains a dense
-virgin map keyed by `edge_id` with disjoint bucket-bit ladders from
-`core/count_class.py`. Counts are clamped at 255; the fast path is unchanged.
-Loop-count-guarded branches are visible to the scheduler without affecting the
-set-membership "new edge" statistic.
-
-### 5. `favored` is threaded through the whole scheduler and never computed
-
-**Status: FIXED.** `_cull_queue()` now computes the favored set from `EdgeTracker.seed_edges`
-and `seed_meta`, using `exec_us * input_size` as seed cost and greedy rare-edge-priority
-cover to select favorites. It runs periodically in the main fuzz loop, and the score call
-site passes `favored=(seed_key in self._favored)` into `SeedScorer.score()`.
-
-### 6. `core/skipdet.py` is entirely dead, because there are no deterministic stages
-
-**Status: FIXED.** `OperatorEngine.maybe_deterministic_mutation()` (`operators.py`)
-queues a per-seed bitflip 1/1 + byte flip 8/8 + arithmetic + interesting-value schedule
-(`_deterministic_mutation_stream`), gated by `SkipDetector.should_det_fuzz` via a
-synthesized positional bitmap (`core.skipdet.trace_mini_from_edges`, folding
-`edge_id % map_size` since this fuzzer's edge_ids are sparse hashes with no positional
-bitmap to hand `should_det_fuzz` directly). Drains one mutation per `mutate()` call
-rather than a parallel execution loop, so a deterministic-stage discovery goes through
-`fuzz_one()`'s normal `save_to_corpus` path like any other mutation.
-
-A first version of this landed directly in `Fuzzer._run_deterministic_stage()`: always
-on, no opt-out, dispatching `_op_bit_flip` once per byte instead of a true 1/1 walk
-(that handler picks one random bit, so it covered ⅛ of what a real bitflip pass
-covers), indexing its trace bitmap by `edge_id // 8` and dropping anything past the
-first `map_size` bytes (nearly every real edge_id, since they're hashes, not small
-positional integers) — and running its own blocking exec loop that updated
-edge-tracking bookkeeping but never called `save_to_corpus`, so any mutant it found
-interesting was immediately discarded. All four fixed in the merge above. On by
-default, matching the shipped behavior; `--no-deterministic` opts out, since a full
-pass still costs `8*len(seed)` execs per favored seed and hasn't been benchmarked
-against a real target.
-
-### 8. The fast path returns an empty edge set that callers treat as real
-
-**Status: FIXED.** `ShmCoverage` now tracks `_last_ids`, the edge set from the last
-slow-path scan, and the fast path returns that instead of a fresh `set()` when nothing
-changed. Callers diffing consecutive returns (`Fuzzer._prev_edge_set`,
-`_current_edges_cache`) now see "same as before" instead of a phantom total edge loss.
-
 ---
 
-## Tier 3 — algorithms worth adding
-
-**The checksum gate was closed by two defects, not by a missing algorithm.**
-Tier 3 has said for several revisions that "magic-value and checksum branches are where
-the edge count plateaus on real formats." Two bugs found 2026-08-16 meant that on any
-target whose checksum recovers as an XOR-bitmask, the machinery built to get past that
-plateau did nothing at all. Both are now fixed (`756bced`, `0b91835`), neither has been
-A/B'd, and both are listed here rather than in the fixed table because the *coverage*
-claim is untested — only the mechanism is.
-
-- **`crc_learn` was a pure no-op under an XOR-only model.** Its availability gate is
-  `ChecksumLearner.ensure_model()`, true when any of `_poly`, `_int_model` or
-  `_xor_model` is set, while the handler consumed only the first two. `ensure_model()`
-  is not per-input, so once any model existed the operator was offered on **every**
-  selection and returned the buffer untouched. That is worse than a wasted operator:
-  it takes a selection slot, produces a duplicate the bloom dedup then discards, and
-  still gets timed and credited by the bandit and Elo schedulers — so it dilutes the
-  reward signal for all 123 other operators for the whole run. Measured before the fix:
-  1320 offers across a 33-input battery, 0 mutations.
-- **`recover_xor_model` could never return a 16- or 32-bit model.**
-  `_extract_fixed_width` packed the input window big-endian while the solver indexes
-  that integer LSB-first and `compute_xor_checksum` reads `data[i//8] >> (i%8)`. Those
-  agree at a 1-byte window and byte-reverse each other above it, so the solver fit a
-  valid mask set under one convention and `verify_xor_model` rejected it under the
-  other. The `(8, 16, 32)` width ladder was `(8,)` in practice, for every input. A
-  target with a real 16-bit XOR checksum therefore never got a model, never got past
-  the checksum branch, and the edge count plateaued exactly where Tier 3 predicted.
-- **32 bits was not out of reach on cost. It was the wrong algorithm.** This document
-  recorded the 32-bit rung as a deliberate miss — ~600 ms per output bit against a
-  200 ms `_SOLVER_TIMEOUT_MS`, ~22 s total with the timeout lifted — and concluded a
-  real 32-bit XOR checksum needed an offline pass. The premise was wrong. Every
-  constraint the module builds is `XOR_{i in S} w_i == c`, a *linear* equation over
-  `F2`, and the coefficient matrix is identical for all output bits: only the
-  right-hand side varies with `j`. Recovery is one Gauss-Jordan elimination over the
-  augmented matrix, rows held as Python ints with all output bits packed into the RHS
-  word, at `O(pairs * rank)`. Z3 was being asked to search a space with a closed-form
-  answer. Re-measured on one box, 32x32 over 64 pairs: **151 s** for the SAT path with
-  the timeout lifted (4.7 s/bit — worse than the ~600 ms this document recorded),
-  **0.5 ms** for elimination. The full 8/16/32 ladder is now reached on every call,
-  the solver no longer needs the optional `smt` extra, and a rejection is a
-  consistency proof rather than an expired timeout.
-
-  Speed then exposed a second defect that cost had been hiding. An underdetermined
-  system reproduces **every pair it was fitted on**, for any assignment of the free
-  variables — so `verify_xor_model`, which checks against those same pairs, cannot
-  reject it. Simply reaching the 32-bit rung would have accepted garbage: measured
-  over 100 trials per cell, at 24 pairs a 32-bit fit to CRC-32 or Adler-32 data was
-  accepted **100/100** times with 0.4% accuracy on held-out inputs. Activating such a
-  model is worse than having none — every input the fuzzer "repairs" then carries a
-  wrong checksum, and the checksum branch stays closed while the operator looks
-  healthy. `recover_xor_model` now requires the system to be full rank before a
-  candidate is offered for verification. Over 2100 trials across 8/16/32 bits the gate
-  produced **0 wrong models** and 100% held-out accuracy on every accepted one; it
-  costs no true positives, converting the cases where the evidence was insufficient
-  from *wrong* into *abstain*. Neither the recovery nor the gate has been A/B'd for
-  coverage on a real target — as with the two fixes above, the mechanism is tested and
-  the coverage claim is not.
-
-The lesson for this document is narrower than the fixes: **an operator that is gated on
-runtime state is only checkable with that state**, and the no-op sweep skipped 25 of 124
-operators for exactly that reason. `TestStateGatedOperatorsAreNotNoOps` now builds the
-state and sweeps them, with a reachability guard so a new gated operator cannot silently
-re-open the hole. If an operator in this tree is producing no edges, that is the first
-place to look — before any algorithm gets added.
+## Suggested but not implemented
 
 **Unstable-edge calibration.** There is no AFL-style per-seed calibration (run a new
 seed N times, mask edges that don't reproduce). `_run_calibration` is a bootstrap
@@ -423,11 +200,11 @@ used only as a cheap change detector in the fast path. Honggfuzz-style unique-pa
 counting is one option; the instability detector above is the better use.
 
 **cmplog defaults off.** Given the i2s/Redqueen work already in the tree and
-`_detect_cmplog()` (`fuzzer.py:278`) which reliably identifies instrumented targets,
+`_detect_cmplog()` (`fuzzer.py:377`) which reliably identifies instrumented targets,
 `--cmplog` should default on whenever detection succeeds. Magic-value and checksum
 branches are where the edge count plateaus on real formats.
 
-**The havoc short-circuit.** `mutate()` at `services/operators.py:2932`:
+**The havoc short-circuit.** `mutate()` at `services/operators.py:2827`:
 
 ```python
 if op == "havoc":
@@ -441,88 +218,31 @@ multiplier is a no-op whenever havoc is drawn early** — and havoc is the most-
 operator. Either make havoc terminal by design and scale its internal stack depth by
 `perf_score` instead, or don't return early.
 
-**Dead classes — wire or delete.** `MonteCarloScheduler` and `EpsilonGreedyScheduler`
-are now instantiated (`fuzzer.py:1136`, `fuzzer.py:1185`) and `SanitizerReport` is now
-built via `.parse()` on ASAN/UBSAN replay (`fuzzer.py:3399`, `fuzzer.py:3414`) — all
-three drop off this list since the last pass. Still never instantiated anywhere in
-`src/`: `CoverageHomogeneityDetector` (`core/critical_slowing.py` — a stall predictor,
-directly on topic), `KalmanFilter`, `CondStmt`, `MutatorBase`, `ConstraintSet` (wfc),
-plus `adapters/track_parser.py` (referenced only in a docstring, never imported).
+---
+
+## Dead classes — wire or delete
+
+`MonteCarloScheduler` and `EpsilonGreedyScheduler` are now instantiated
+(`fuzzer.py:1327`, `fuzzer.py:1376`) and `SanitizerReport` is now built via `.parse()`
+on ASAN/UBSAN replay (`fuzzer.py:3772`, `fuzzer.py:3787`) — all three drop off this
+list. Still never instantiated anywhere in `src/`:
+`CoverageHomogeneityDetector` (`core/critical_slowing.py` — a stall predictor,
+directly on topic), plus `adapters/track_parser.py` (not imported anywhere in `src/`,
+only in tests).
 
 ---
 
-## Suggested order
+## Open loose threads
 
-1. ~~**§1 — forkserver.**~~ Done — see §1, and note that what closed it is not what
-   this document predicted would close it.
-2. **Build a target that actually needs the map.** Two censuses two days apart put every
-   instrumented binary in this tree at 532 guards or fewer, sizing to the 8,192 floor —
-   ~500x under the cap that items 3 and 4 exist to lift. Until `vendor/` builds, or a
-   CTX target multiplies ids by call-graph fan-in, those two items optimise a cost
-   nothing pays and cannot be validated even if implemented. This is now the blocker,
-   not a preliminary.
-3. **§2 — generation-tagged reset.** The largest open *code* item. Unblocks map sizes
-   above 262144 by making the per-exec clear O(1). Do this before concluding anything
-   about §2's probe cost, and note it turns the table-copy behaviour in `resize()`
-   from cosmetic to load-bearing. `resize()` also has a live consumer now
-   (`ForkserverRunner.update_shm_after_resize()`), which respawns the loader so its
-   children inherit the new segment id.
-4. **§2 — bounded probe window.** Cheap to evaluate now that drops are counted — but
-   drops are zero everywhere in the current matrix and the load factor is ~13%, so
-   there is nothing to observe until item 2 lands.
-
-**The already-fixed commits still need an A/B before they become defaults.** Nothing
-here has been measured against a real target. In particular the sizing commit enlarges
-maps, which costs more per-execution memset (§2), so its net effect on edges/second
-could be negative on a target that was not saturating. This now includes §6's
-deterministic stage: it's on by default (`--no-deterministic` to opt out) and hasn't
-been benchmarked against a real target either.
-
-Items 3 and 4 are independently testable with `tools/bench_paired.py` against a fixed
-seed and a fixed exec budget — but only once item 2 supplies a target whose map exceeds
-the floor. Against the current matrix both measure noise.
-
-## Loose thread
-
-**Diagnosed 2026-08-14, on the third and fourth sightings.** The instrumented
-assertion caught it on the next full-suite run:
-
-```
-table should be full — rc=0 edge_count=0 diag=0x00000000 dropped=0 occupied=0 stderr=b''
-```
-
-`diag == 0` is the discriminator. `__afl_map_shm()` writes the context width into
-`diag` immediately after a successful `shmat()`, so an all-zero `diag` means the write
-never happened: **the child never attached.** It is not a parent racing the read — the
-parent's read is fine, there is simply nothing there. The child then ran its full loop
-against a NULL `__afl_area` and exited 0 with an empty stderr.
-
-Root cause of the *invisibility*, which is the part that mattered: all three early
-returns in `__afl_map_shm()` were silent. Absent env var, unparseable id, and failed
-`shmat()` were indistinguishable from each other and from success, on both sides of the
-fence. Fixed — a target that was asked for coverage and could not attach now writes one
-line to stderr naming which of the three failed, with `errno`. The absent-env-var case
-stays silent, because running a shim-built target standalone is legitimate. The wording
-avoids every token `ExecutionRunner.is_crash()` scans stderr for, so a diagnostic can
-never be misread as a crashing input; `TestAttachFailureIsLoud` asserts that.
-
-**A likely trigger found, 2026-08-14.** Every `ForkserverRunner` that was not
-explicitly stopped leaked its `fuzz_loader`, that loader's target child, a blocked
-thread, and a SHM segment pinned in `dest` state — because the stderr-drain thread was
-started on a *bound method*, so it held the runner alive, and the runner could only be
-stopped by the `__del__` that the thread was preventing. A full-suite run peaked at ~185
-orphaned processes and 17 pinned segments; after the fix, 0 and 1. A segment in `dest`
-cannot be attached by a new process, and the failing test's child is doing exactly one
-`shmat()`, so this is the most plausible mechanism yet for the intermittent failure.
-
-Not yet proven to *be* the cause: the failing test creates its own fresh segment, which
-should not be `dest`. Reproduction attempts since the fix: 0 failures in ~40 runs, but
-the pre-fix rate was roughly 1 in 25 mixed-file runs, so that is not yet conclusive.
-
-Still open: *why* `shmat()` intermittently fails. The next occurrence will say, which is
-more than any of the four sightings could. Note the segment is created and read
-successfully by the parent in the same test, and `ipcs -m` shows no leak, so segment
-exhaustion (limit 4096) is not the obvious explanation.
+**Intermittent `shmat()` failure.** Root cause still unknown. The stale-view hypothesis
+(`ShmCoverage.cleanup()` leaving `from_address` views bound to a detached mapping) is
+fixed but not established as the cause; zero hits in full suite since. Reproduction
+attempts: 0 failures in ~40 runs, but the pre-fix rate was roughly 1 in 25 mixed-file
+runs, so that is not yet conclusive. Still open: *why* `shmat()` intermittently fails.
+The next occurrence will say, which is more than any of the four sightings could. Note
+the segment is created and read successfully by the parent in the same test, and
+`ipcs -m` shows no leak, so segment exhaustion (limit 4096) is not the obvious
+explanation.
 
 Twice in roughly fifty runs, the first `ShmCoverage` constructed in a process read back
 an empty edge table after a child that exited 0 — header `edge_count` not captured at
@@ -534,25 +254,32 @@ Recorded rather than dropped: if the drop-counter tests in `tests/test_ctx_and_m
 go intermittently red in CI, this is the thread to pull, and the thing to capture is the
 SHM header (`read_edge_count()`, `read_diag()`) alongside the child's exit status.
 
-**A second candidate mechanism, found 2026-08-16.** `ShmCoverage.cleanup()` detached the
-segment and cleared `_ptr`, but left `_map`, `_entries` and `_tail` — all `from_address`
-views, which carry a raw address and own nothing — bound to the detached mapping. The
-kernel hands the *same address* back to the next `shmat`: four successive attach/detach
-cycles all returned it, and a test now pins that. So a stale view from a cleaned-up
-instance does not fault, it reads and writes whichever segment now occupies the address
-— another `ShmCoverage`'s edge table. Fixed in `171c472`; the views are dropped at
-detach so a use-after-free raises instead.
-
-This is a plausible shape for "the first `ShmCoverage` constructed in a process read back
-an empty edge table," since cross-talk between instances is exactly the observable. It is
-**not** established as the cause and should not be written up as one: a trip-wire raising
-on any read after `cleanup()` found **zero hits across a full suite run**, so the suite
-does not currently exercise the path. Treat it as a second hypothesis to test against the
-next sighting, not a resolution of the first.
-
 **Not related to the intermittent full-suite `Segmentation fault`.** That one was chased
 on the assumption it was SHM, and it is not: it is `Z3_del_context` running during
 interpreter finalization, after every test has already passed. Diagnosis, the four
 falsified hypotheses, and the reproduction harness are in
 `docs/handover/suite_segfault_z3_finalization_2026-08-16.md`. Keep the two apart — a
 crash at shutdown and an empty edge table mid-run have no evidence linking them.
+
+---
+
+## Suggested order
+
+1. **Build a target that actually needs the map.** Two censuses two days apart put every
+   instrumented binary in this tree at 532 guards or fewer, sizing to the 8,192 floor —
+   ~500x under the cap that items 2 and 3 exist to lift. Until `vendor/` builds, or a
+   CTX target multiplies ids by call-graph fan-in, those two items optimise a cost
+   nothing pays and cannot be validated even if implemented. This is the blocker.
+2. **§2 — generation-tagged reset.** The largest open *code* item. Unblocks map sizes
+   above 262144 by making the per-exec clear O(1). Do this before concluding anything
+   about §2's probe cost, and note it turns the table-copy behaviour in `resize()`
+   from cosmetic to load-bearing. `resize()` also has a live consumer now
+   (`ForkserverRunner.update_shm_after_resize()`), which respawns the loader so its
+   children inherit the new segment id.
+3. **§2 — bounded probe window.** Cheap to evaluate now that drops are counted — but
+   drops are zero everywhere in the current matrix and the load factor is ~13%, so
+   there is nothing to observe until item 1 lands.
+
+Items 2 and 3 are independently testable with `tools/bench_paired.py` against a fixed
+seed and a fixed exec budget — but only once item 1 supplies a target whose map exceeds
+the floor. Against the current matrix both measure noise.

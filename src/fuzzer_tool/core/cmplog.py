@@ -23,12 +23,13 @@ machinery at all, so it cannot preempt an instrumented target's
 ``__afl_map_shm`` the way the old standalone ``cmplog_shim.so`` could.
 """
 
-import binascii
 import contextlib
 import hashlib
 import logging
 import os
 import uuid
+
+from fuzzer_tool.adapters.track_parser import conds_from_cmplog_text
 
 log = logging.getLogger(__name__)
 
@@ -395,6 +396,7 @@ class CmplogCollector:
             for input-to-state redqueen matching.
         """
         if not self.log_path or not os.path.exists(self.log_path):
+            log.debug("collect_tokens: log missing or empty path=%s", self.log_path)
             return []
 
         tokens = set()
@@ -404,55 +406,29 @@ class CmplogCollector:
         try:
             with open(self.log_path) as f:
                 f.seek(self._read_offset)
+                new_lines = []
                 for line in f:
                     lines_read += 1
                     if lines_read > max_lines:
                         break
-                    line = line.strip()
-                    if not line.startswith("CMP "):
-                        continue
-                    parts = line[4:].split()
-                    if len(parts) < 2:
-                        continue
-                    hex_a, hex_b = parts[0], parts[1]
-                    try:
-                        operand_a = binascii.unhexlify(hex_a)
-                        operand_b = binascii.unhexlify(hex_b)
-                        tokens.add(operand_a)
-                        tokens.add(operand_b)
-                        # Optional PC field (trace mode) — last field if present.
-                        #
-                        # base 0, not base 10. The shim writes it with the %p
-                        # convention ("0x55f65c387346"), which int(s) rejects
-                        # outright -- the ValueError was suppressed, so pc was
-                        # silently None for every record ever written and
-                        # _pair_pc has always been empty. base 0 reads the
-                        # 0x-prefixed form and plain decimal alike, so older
-                        # logs keep parsing.
-                        pc = None
-                        if len(parts) >= 5:
-                            with contextlib.suppress(ValueError, IndexError):
-                                pc = int(parts[-1], 0)
-                        # Comparison outcome and operand width, emitted by the
-                        # shim as fields 3 and 4 ("CMP <a> <b> <result> <n> <pc>").
-                        cmp_meta = None
-                        if len(parts) >= 4:
-                            with contextlib.suppress(ValueError, IndexError):
-                                cmp_meta = (int(parts[2]), int(parts[3]))
-                        # Track pairs for input-to-state matching
-                        pair = (operand_a, operand_b)
-                        if pair not in self._pair_set:
-                            self._pair_set.add(pair)
-                            new_pairs.append(pair)
-                            if pc is not None:
-                                self._pair_pc[pair] = pc
-                            if cmp_meta is not None:
-                                self._pair_cmp[pair] = cmp_meta
-                    except ValueError:
-                        continue
+                    new_lines.append(line)
                 self._read_offset = f.tell()
         except OSError as e:
             log.debug("Failed to read cmplog file: %s", e)
+            new_lines = []
+
+        log.debug("collect_tokens: read %d new lines from %s", len(new_lines), self.log_path)
+        for c in conds_from_cmplog_text(new_lines):
+            pair = (c.base.op_a, c.base.op_b)
+            if pair not in self._pair_set:
+                self._pair_set.add(pair)
+                new_pairs.append(pair)
+                if c.base.pc is not None:
+                    self._pair_pc[pair] = c.base.pc
+                if c.base.result is not None and c.base.width is not None:
+                    self._pair_cmp[pair] = (c.base.result, c.base.width)
+            tokens.add(c.base.op_a)
+            tokens.add(c.base.op_b)
 
         # Clear the log for next round.
         # Truncate (not delete) so the .so's file handle stays valid
