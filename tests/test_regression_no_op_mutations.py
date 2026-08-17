@@ -283,14 +283,16 @@ class TestStateGatedOperatorsAreNotNoOps:
     sweep clean at the cost of never checking 25 of 124 operators -- and
     ``crc_learn`` was a pure no-op in that gap. Here the state is built.
 
-    Only ``colorization`` stays out: its predicate is
-    ``operator_registry._never``, so it is dispatchable but never selectable
-    and cannot spend budget. Everything else must be both reachable and
-    non-inert.
+    Every registered operator must now be both reachable and non-inert.
+    ``colorization`` used to be the one exception, gated on
+    ``operator_registry._never``; it is gated on cmplog pairs instead, so the
+    exception list is empty and the reachability test covers all 124.
     """
 
-    #: Selectable-by-construction: never returned by ``REGISTRY.available``.
-    _NEVER_SELECTABLE = {"colorization"}
+    #: Never returned by ``REGISTRY.available``. Empty now that colorization
+    #: is gated on cmplog pairs rather than on ``_never``; kept as the seam
+    #: for any future operator that is dispatchable but not selectable.
+    _NEVER_SELECTABLE: set[str] = set()
 
     def _build_gated_state(self, f: Fuzzer) -> set[str]:
         """Populate the runtime state the gated predicates ask for.

@@ -9,6 +9,7 @@ instances (``colorization`` registered with no op-list entry,
 """
 
 import os
+import types
 
 import pytest
 
@@ -28,7 +29,7 @@ from fuzzer_tool.services.operators import OperatorEngine
 
 # Ops that are dispatchable but intentionally live outside the legacy lists:
 # gated by per-run conditions (markov/cem/grammar/cmplog/redqueen) or
-# dispatch-only and never selectable (colorization).
+# dispatch-only or gated on cmplog pairs (colorization).
 _CONDITIONAL_OPS = {
     "markov_bytes",
     "cem_bytes",
@@ -210,8 +211,17 @@ class TestAvailabilityPredicates:
         fuzzer.seed_meta = {b"seed": {"redqueen_offsets": [1]}}
         assert "redqueen" in REGISTRY.available(fuzzer, b"seed")
 
-    def test_colorization_never_selectable(self):
+    def test_colorization_gated_on_cmplog_pairs(self):
+        """Was `_never`, on the stated grounds of "historic build_ops
+        behavior". That behaviour was an accident -- colorization was in the
+        dispatch table and in no op list, so nothing could draw it -- and the
+        refactor preserved it. It is gated on the cmplog signal it needs now:
+        without pairs the handler picks offsets at random, which havoc
+        already does better."""
         assert "colorization" not in self._available()
+        fuzzer = _MockFuzzer()
+        fuzzer._cmplog = types.SimpleNamespace(pairs=[(b"IHDR", b"IDAT")])
+        assert "colorization" in REGISTRY.available(fuzzer, b"seed")
 
     def test_build_ops_wired_to_registry(self):
         from fuzzer_tool.services.operators import OperatorEngine

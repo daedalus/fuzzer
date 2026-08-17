@@ -206,6 +206,24 @@ except (AttributeError, OSError, ValueError):  # pragma: no cover - env-dependen
     pass
 
 
+def _in_taint(taints, offset: int, length: int) -> bool:
+    """True when ``[offset, offset+length)`` lies wholly inside one taint.
+
+    A taint region is a byte range colorization proved the target does not
+    read: every byte in it was replaced without moving the execution path.
+    An operand occurring entirely inside one is therefore a coincidence of
+    the byte values, not a value the comparison consumed -- which is the
+    false-positive class colorization exists to remove.
+
+    Partial overlap counts as *not* tainted: if any byte of the occurrence
+    is path-relevant, the match is worth keeping.
+    """
+    if not taints:
+        return False
+    end = offset + length - 1
+    return any(region.start <= offset and end <= region.end for region in taints)
+
+
 def _cleanup_tmp_dir(path: Path) -> None:
     """Remove temp directory on exit."""
 
@@ -574,6 +592,8 @@ class Fuzzer:
         multi_targets=None,
         debug=False,
         enable_regex_bomb=False,
+        colorize=False,
+        colorize_max_execs=512,
         enable_x86_mutator=False,
         enable_arm_mutator=False,
         enable_smt_z3=False,
@@ -698,6 +718,12 @@ class Fuzzer:
         self.net_keepalive = net_keepalive
         self.net_settle_ms = net_settle_ms
         self.enable_regex_bomb = enable_regex_bomb
+        # Colorization (--colorize): off by default. Costs executions and
+        # buys redqueen precision, so it needs a per-target A/B first.
+        self.colorize = colorize
+        self.colorize_max_execs = colorize_max_execs
+        self._colorize_taint_cache: dict[int, object] = {}
+        self._colorize_execs = 0
         self.enable_x86_mutator = enable_x86_mutator
         self.enable_arm_mutator = enable_arm_mutator
         self.seed = seed
@@ -2779,6 +2805,11 @@ class Fuzzer:
             # Only scan new pairs (not yet seen) to avoid O(5000) per iteration.
             matches = list(meta.get("redqueen_matches", [])) if meta is not None else []
             seen = {(m[1], m[2]) for m in matches}  # dedup by (A, B)
+            # Colorization taints for this seed, if the pass is enabled. Bytes
+            # inside a taint can be replaced without changing the execution
+            # path, so an operand found there is coincidence, not
+            # input-to-state. See _colorize_seed().
+            taints = self._colorize_seed(mutated)
             if (
                 self._cmplog.pairs
                 and meta is not None
@@ -2795,6 +2826,13 @@ class Fuzzer:
                         idx = mutated.find(op_a, pos)
                         if idx == -1:
                             break
+                        if _in_taint(taints, idx, len(op_a)):
+                            # Every byte of this occurrence can be replaced
+                            # without changing the path, so the target never
+                            # read it: a coincidental match, not the operand
+                            # the comparison actually consumed.
+                            pos = idx + 1
+                            continue
                         matches.append((idx, op_a, op_b))
                         seen.add((op_a, op_b))
                         matched = True
@@ -3710,6 +3748,82 @@ class Fuzzer:
 
     def _get_te_weighted_position(self, input_length: int):
         return self._stats.get_te_weighted_position(input_length)
+
+    def _colorize_seed(self, data: bytes):
+        """Colorization taints for ``data``, or ``None`` when disabled.
+
+        AFL++/Redqueen colorization replaces every byte it can while holding
+        the execution path fixed. What survives is the set of bytes the
+        target actually reads, and what gets replaced is a *taint region* --
+        provably path-irrelevant.
+
+        The redqueen match loop needs this because it accepts every literal
+        occurrence of a comparison operand as an input-to-state candidate,
+        filtered only by ``len(op_a) >= 2``. A two-byte operand hits a 4 KiB
+        input roughly sixteen times by chance, each coincidence becomes an
+        entry in a list capped at 50, and the operator then substitutes at a
+        random one. Colorization is what tells the two apart.
+
+        Off by default (``--colorize``). It costs real executions -- up to
+        ``2 * len(data)``, bounded here to keep a large seed from stalling
+        the loop -- and buys precision, not throughput, so the trade needs
+        measuring per target before it becomes a default. Results are cached
+        per seed; a seed is colorized at most once.
+
+        Returns None when disabled, unavailable, or the budget was spent
+        without a usable answer. Callers treat None as "no filtering",
+        which is the pre-existing behaviour.
+        """
+        if not getattr(self, "colorize", False):
+            return None
+        if not data or self.shm_cov is None:
+            return None
+
+        cache = self._colorize_taint_cache
+        key = hash(data)
+        if key in cache:
+            return cache[key]
+
+        def exec_fn(candidate: bytes) -> int:
+            """Path checksum for one execution. 0 means 'unknown'."""
+            try:
+                self._runner.run_target(candidate)
+            except Exception:
+                return 0
+            path_hash = self.shm_cov.read_path_hash()
+            if path_hash == 0:
+                # Shim without the rolling hash: fall back to the edge set,
+                # which is coarser (order- and multiplicity-insensitive) but
+                # still separates different paths.
+                edges = self._get_current_edge_set()
+                path_hash = (
+                    self.shm_cov.compute_path_hash_from_edges(edges) if edges else 0
+                )
+            return path_hash
+
+        try:
+            from fuzzer_tool.core.colorization import colorize
+
+            result = colorize(
+                bytes(data),
+                exec_fn,
+                use_type_aware=True,
+                max_execs=min(2 * len(data), self.colorize_max_execs),
+            )
+        except Exception:
+            log.debug("colorization failed for a seed; continuing unfiltered", exc_info=True)
+            cache[key] = None
+            return None
+
+        self.exec_count += result.exec_count
+        self._colorize_execs += result.exec_count
+        taints = result.taints or None
+
+        # Bounded cache: colorization is per-seed and the corpus grows.
+        if len(cache) > 512:
+            cache.clear()
+        cache[key] = taints
+        return taints
 
     def _get_current_edge_set(self) -> set[int]:
         """Return the set of currently-active edge IDs.

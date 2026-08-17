@@ -207,12 +207,6 @@ def _has_corpus_samples(fuzzer, _data) -> bool:
     return bool(corpus) and len(corpus) >= _INVARIANT_MIN_SAMPLES
 
 
-def _never(_fuzzer, _data) -> bool:
-    # colorization is dispatchable but never selectable (keeps historic
-    # build_ops behavior where it is not returned by available ops).
-    return False
-
-
 # ── Format-relevance gating ────────────────────────────────────────────
 #
 # The format operators (png/jpeg/webm/...) parse the input and, when it is
@@ -457,7 +451,23 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     "x86_chunk_mutate": lambda f, _d: bool(getattr(f, "enable_x86_mutator", False)),
     "arm_chunk_mutate": lambda f, _d: bool(getattr(f, "enable_arm_mutator", False)),
     # dispatch-only, never selectable
-    "colorization": _never,
+    # colorization: gated on cmplog pairs. The handler is a byte randomizer
+    # that prefers offsets appearing in comparison operands (CmplogColorizer),
+    # and without pairs it degrades to picking offsets at random -- weaker
+    # than havoc, which already covers that. Gating it on the signal it needs
+    # is what makes it worth a selection slot.
+    #
+    # It was `_never` before, which the comment justified only as "keeps
+    # historic build_ops behavior". That behaviour was an accident, not a
+    # decision: colorization sat in the dispatch table and in no op list, so
+    # nothing could ever draw it, and the registry refactor preserved the
+    # accident faithfully enough to pin it with a test.
+    #
+    # Note this operator is not colorization in the AFL++ sense -- it does not
+    # hold the execution path fixed, because a mutation operator has no way to
+    # execute anything. The real pass is core/colorization.py, driven by
+    # Fuzzer._colorize_seed() under --colorize.
+    "colorization": lambda f, _d: bool(getattr(getattr(f, "_cmplog", None), "pairs", None)),
 }
 
 
