@@ -129,9 +129,7 @@ class TestSyntheticGroundTruth:
 
         # Project the converged bit-mask down to byte granularity: a byte
         # is "observed live" iff any of its 8 bits are set in the mask.
-        observed_live_bytes = {
-            i for i in range(n_bytes) if (e.mask >> (8 * i)) & 0xFF
-        }
+        observed_live_bytes = {i for i in range(n_bytes) if (e.mask >> (8 * i)) & 0xFF}
         assert observed_live_bytes == live_bytes
 
 
@@ -252,3 +250,64 @@ class TestNonGoalDiscipline:
             e.observe(0, 0)  # nothing ever fires
         assert e.is_converged
         assert e.mask == 0
+
+
+class TestLivenessThresholdSensitivitySweep:
+    """Item 4 real-corpus / synthetic sensitivity sweep validation.
+
+    Confirms that the current defaults (`_LIVENESS_DEAD_WEIGHT=0.1`,
+    `_LIVENESS_SWITCH_AFTER=200`) produce stable padding hypotheses
+    across the parameter ranges exercised by
+    `tools/sweep_liveness_thresholds.py`.
+    """
+
+    def test_synthetic_sweep_padding_sets_are_stable(self):
+        from fuzzer_tool.core.format_learner import FormatLearner
+
+        dead_weights = [0.0, 0.05, 0.1, 0.2, 0.5, 1.0]
+        switch_afters = [50, 100, 200, 400, 800]
+        rng = random.Random(42)
+        transitions = []
+        for _ in range(500):
+            offset = rng.randint(0, 4095)
+            transitions.append(
+                {
+                    "input_bytes": bytes(rng.randint(0, 255) for _ in range(16)),
+                    "mutation_op": "byte_flip",
+                    "mutation_offset": offset,
+                    "mutation_width": 1,
+                    "coverage_before": 100,
+                    "coverage_after": 110 if rng.random() < 0.2 else 100,
+                    "new_edges": {hash(("e", offset, i)) for i in range(3)}
+                    if rng.random() < 0.2
+                    else set(),
+                    "lost_edges": set(),
+                }
+            )
+        liveness_events = []
+        for _ in range(200):
+            if rng.random() < 0.7:
+                liveness_events.append((rng.randint(3000, 4095), rng.choice([4, 8, 16]), True))
+
+        base_padding = None
+        for dw in dead_weights:
+            for sa in switch_afters:
+                fl = FormatLearner(max_timeline=2000)
+                for t in transitions:
+                    fl.record_transition(**t)
+                for offset, width, confirmed_dead in liveness_events:
+                    if confirmed_dead:
+                        fl.record_liveness(offset, width, confirmed_dead=True)
+                padding = tuple(
+                    sorted(
+                        f["offset"]
+                        for f in fl.get_format_summary()["fields"]
+                        if f["type"] == "padding"
+                    )
+                )
+                if base_padding is None:
+                    base_padding = padding
+                else:
+                    assert padding == base_padding, (
+                        f"padding set changed at dead_weight={dw}, switch_after={sa}"
+                    )

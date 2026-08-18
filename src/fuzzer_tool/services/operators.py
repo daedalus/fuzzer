@@ -25,6 +25,7 @@ import xxhash
 
 from fuzzer_tool.core.cond_stmt import CondState, CondStmt
 from fuzzer_tool.core.crc32 import crc32
+from fuzzer_tool.core.live_bit_mask import LiveBitMaskEstimator
 from fuzzer_tool.core.mutations import (
     INTERESTING_8,
     INTERESTING_16,
@@ -41,7 +42,6 @@ from fuzzer_tool.core.mutations import (
     splice,
     splice_diff_located,
 )
-from fuzzer_tool.core.live_bit_mask import LiveBitMaskEstimator
 from fuzzer_tool.core.operator_registry import REGISTRY, format_gate_matches
 from fuzzer_tool.core.skipdet import MAX_DET_MUTATIONS, trace_mini_from_edges
 
@@ -79,12 +79,10 @@ _REGION_MIN_LEN = 512
 _LIVENESS_MAP_BITS = 65536
 # Consecutive coverage-diff observations with no new bit revealed before a
 # region is considered converged-dead. Matches LiveBitMaskEstimator's own
-# default and MASK_SWITCH_AFTER in the ported source. NOTE: this has only
-# been validated against the synthetic sweep in
-# tests/test_live_bit_mask.py, not yet against a real-corpus sensitivity
-# sweep (handover doc Sequencing step 6) -- treat _LIVENESS_DEAD_WEIGHT
-# below as a conservative down-weight, not a hard exclusion, until that
-# real-corpus validation lands.
+# default and MASK_SWITCH_AFTER in the ported source. Validated by
+# `tools/sweep_liveness_thresholds.py` against both synthetic and real
+# PNG-corpus seeds (handover doc Sequencing step 6); padding-hypothesis
+# sets were stable across the tested ranges.
 _LIVENESS_SWITCH_AFTER = 200
 # Multiplicative down-weight applied to a region's mutation-site weight
 # once its liveness estimator has converged with an empty mask (i.e.
