@@ -3153,14 +3153,38 @@ class OperatorEngine:
 
             if result is not None:
                 if op == "havoc":
+                    # Havoc's internal sub-mutations (2-16 per call, see
+                    # havoc_mutate) can each touch a different position, so
+                    # its frameshift bookkeeping is a full resync
+                    # (apply_to_buffer) rather than the single
+                    # on_insert/on_delete pair the other branch below uses
+                    # for a single-site op.
+                    #
+                    # This used to `return result` here immediately,
+                    # discarding whatever was left of n_mutations for this
+                    # round. Since n_mutations is scaled by
+                    # _last_perf_score (the seed-energy multiplier from
+                    # SeedScorer), a highly-scored seed that earned extra
+                    # mutation budget got none of the extra whenever havoc
+                    # was drawn early in the loop -- which is often, since
+                    # havoc is the most-drawn operator. Falling through to
+                    # the shared loop tail instead (same as every other
+                    # operator) makes the energy multiplier actually do
+                    # something on havoc rounds; the existing loop-end
+                    # hamming-distance computation after the for-loop
+                    # already covers the havoc-selected case correctly, so
+                    # nothing here needs to duplicate it.
+                    buf = result if isinstance(result, bytearray) else bytearray(result)
+                    if len(buf) > f.max_len:
+                        # _op_havoc's redundant-mutation retry path calls
+                        # _apply_single_mutation directly, bypassing
+                        # havoc_mutate's own end-of-call clamp -- so this
+                        # can't be assumed already true the way it is for
+                        # havoc_mutate's normal return.
+                        del buf[f.max_len :]
                     if f._frameshift.relations:
-                        buf = bytearray(result[: f.max_len])
                         f._frameshift.apply_to_buffer(buf)
-                        result = bytes(buf)
-                    f._last_hamming_distance = (
-                        hamming_distance(data, result) if len(data) == len(result) else -1
-                    )
-                    return result
+                    continue
                 new_len = min(len(result), f.max_len)
                 if f._frameshift.relations:
                     if new_len > old_len:
