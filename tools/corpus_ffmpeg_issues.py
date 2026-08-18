@@ -20,6 +20,7 @@ as a fuzzer seed corpus for targets/ffmpeg_read.c.
 import argparse
 import contextlib
 import hashlib
+import http
 import json
 import os
 import pickle
@@ -233,6 +234,14 @@ def download_file(url: str, dest_path: str, retries: int = 4, backoff_base: floa
             sleep = backoff_base * (2**attempt)
             print(
                 f"  [warn] download network error for {url}: {e}, retrying in {sleep:.1f}s",
+                file=sys.stderr,
+            )
+            time.sleep(sleep)
+        except http.client.IncompleteRead as e:
+            last_error = e
+            sleep = backoff_base * (2**attempt)
+            print(
+                f"  [warn] download truncated for {url}: {e}, retrying in {sleep:.1f}s",
                 file=sys.stderr,
             )
             time.sleep(sleep)
