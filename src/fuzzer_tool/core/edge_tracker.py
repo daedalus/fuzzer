@@ -16,6 +16,7 @@ import logging
 import math
 import random
 import struct
+import time
 import zlib
 from array import array
 from collections import defaultdict
@@ -622,6 +623,7 @@ class EdgeTracker:
         # Edge discovery time-series: list of (exec_count, cumulative_edge_count)
         self._coverage_execs: array = array("Q")  # exec_count per coverage snapshot
         self._coverage_edges: array = array("Q")  # cumulative edges per snapshot
+        self._coverage_timestamps: array = array("d")  # wall-clock timestamp per snapshot
         # Branch correlation matrix: {(edge_a, edge_b): co_occurrence_count}
         self._correlation_matrix: dict[tuple[int, int], int] = {}
         self._correlation_total: int = 0
@@ -920,6 +922,7 @@ class EdgeTracker:
         """
         self._coverage_execs.append(exec_count)
         self._coverage_edges.append(len(self.cumulative_edges))
+        self._coverage_timestamps.append(time.time())
         if len(self._coverage_execs) > COVERAGE_TIMELINE_MAX:
             del self._coverage_execs[:250]
             del self._coverage_edges[:250]

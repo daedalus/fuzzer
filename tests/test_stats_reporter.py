@@ -37,52 +37,57 @@ class TestFormatElapsed:
 
 class TestRecordDiscoverySnapshot:
     def test_with_shm_cov(self):
-        execs, edges = array("Q"), array("Q")
+        execs, edges, ts = array("Q"), array("Q"), array("d")
         shm = SimpleNamespace(cumulative_edges=100)
-        record_discovery_snapshot(500, shm, None, (execs, edges))
+        record_discovery_snapshot(500, shm, None, (execs, edges, ts))
         assert execs.tolist() == [500]
         assert edges.tolist() == [100]
 
     def test_with_ptrace_cov(self):
-        execs, edges = array("Q"), array("Q")
+        execs, edges, ts = array("Q"), array("Q"), array("d")
         ptrace = SimpleNamespace(cumulative_edges=50)
-        record_discovery_snapshot(300, None, ptrace, (execs, edges))
+        record_discovery_snapshot(300, None, ptrace, (execs, edges, ts))
         assert execs.tolist() == [300]
         assert edges.tolist() == [50]
 
     def test_shm_takes_priority(self):
-        execs, edges = array("Q"), array("Q")
+        execs, edges, ts = array("Q"), array("Q"), array("d")
         shm = SimpleNamespace(cumulative_edges=100)
         ptrace = SimpleNamespace(cumulative_edges=50)
-        record_discovery_snapshot(500, shm, ptrace, (execs, edges))
+        record_discovery_snapshot(500, shm, ptrace, (execs, edges, ts))
         assert execs.tolist() == [500]
         assert edges.tolist() == [100]
 
     def test_both_none(self):
-        execs, edges = array("Q"), array("Q")
-        record_discovery_snapshot(500, None, None, (execs, edges))
+        execs, edges, ts = array("Q"), array("Q"), array("d")
+        record_discovery_snapshot(500, None, None, (execs, edges, ts))
         assert execs.tolist() == [500]
         assert edges.tolist() == [0]
 
     def test_trims_old_entries(self):
         execs = array("Q", (i for i in range(600)))
         edges = array("Q", (i * 10 for i in range(600)))
-        record_discovery_snapshot(700, SimpleNamespace(cumulative_edges=7000), None, (execs, edges))
+        ts = array("d", (float(i) for i in range(600)))
+        record_discovery_snapshot(
+            700, SimpleNamespace(cumulative_edges=7000), None, (execs, edges, ts)
+        )
         assert len(execs) == 351  # 600 + 1 - 250 trimmed
         assert len(edges) == 351
 
 
 def _pairs(*samples):
-    """Build a paired (execs, edges) tuple of arrays from (exec, edge) samples."""
+    """Build a (execs, edges, timestamps) tuple of arrays from (exec, edge) samples."""
+    now = time.time()
     return (
         array("Q", (e for e, _ in samples)),
         array("Q", (c for _, c in samples)),
+        array("d", (now + i for i in range(len(samples)))),
     )
 
 
 class TestDiscoveryRate:
     def test_empty_history(self):
-        assert discovery_rate((array("Q"), array("Q"))) == 0.0
+        assert discovery_rate((array("Q"), array("Q"), array("d"))) == 0.0
 
     def test_single_entry(self):
         assert discovery_rate(_pairs((100, 10))) == 0.0

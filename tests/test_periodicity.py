@@ -378,6 +378,7 @@ class TestSpectralDiagnostics:
         f._exec_time_tracker = tracker
         f._discovery_execs = array("Q")
         f._discovery_edges = array("Q")
+        f._discovery_timestamps = array("d")
         out = report_mod._spectral_diagnostics(f)
         assert "PERIODIC" in out
         assert "Exec time" in out
@@ -398,6 +399,7 @@ class TestSpectralDiagnostics:
             history.append((i, cumulative))
         f._discovery_execs = array("Q", (e for e, _ in history))
         f._discovery_edges = array("Q", (c for _, c in history))
+        f._discovery_timestamps = array("d", (float(i) for i in range(len(history))))
         out = report_mod._spectral_diagnostics(f)
         assert "Discovery rate: PERIODIC" in out
         assert "sync artifact" in out
@@ -412,6 +414,7 @@ class TestSpectralDiagnostics:
         f._exec_time_tracker = tracker
         f._discovery_execs = array("Q", (i for i in range(150)))
         f._discovery_edges = array("Q", (i for i in range(150)))
+        f._discovery_timestamps = array("d", (float(i) for i in range(150)))
         out = report_mod._spectral_diagnostics(f)
         assert "no significant periodic component" in out
 

@@ -15,25 +15,26 @@ def record_discovery_snapshot(
     exec_count: int,
     shm_cov,
     ptrace_cov,
-    discovery_history: tuple[array, array],
+    discovery_history: tuple[array, array, array],
 ) -> None:
-    """Record (exec_count, cumulative_edges) for discovery rate calculation."""
+    """Record (exec_count, cumulative_edges, timestamp) for discovery rate calculation."""
     edges = 0
     if shm_cov:
         edges = shm_cov.cumulative_edges
     elif ptrace_cov:
         edges = ptrace_cov.cumulative_edges
-    discovery_execs, discovery_edges = discovery_history
+    discovery_execs, discovery_edges, discovery_timestamps = discovery_history
     discovery_execs.append(exec_count)
     discovery_edges.append(edges)
+    discovery_timestamps.append(time.time())
     if len(discovery_execs) > 500:
         del discovery_execs[:250]
         del discovery_edges[:250]
 
 
-def discovery_rate(discovery_history: tuple[array, array]) -> float:
+def discovery_rate(discovery_history: tuple[array, array, array]) -> float:
     """Edges discovered per 1000 execs, over a sliding window of last 5 snapshots."""
-    discovery_execs, discovery_edges = discovery_history
+    discovery_execs, discovery_edges, _ = discovery_history
     if len(discovery_execs) < 2:
         return 0.0
     recent = list(zip(discovery_execs[-5:], discovery_edges[-5:], strict=True))

@@ -77,5 +77,6 @@ def test_discovery_rate_reference():
     """discovery_rate over the paired arrays equals the tuple-list closed form."""
     execs = array("Q", (0, 100, 200, 300, 400))
     edges = array("Q", (0, 10, 20, 30, 40))
+    ts = array("d", (float(i) for i in range(5)))
     # Reference: (40 - 0) / (400 - 0) * 1000 = 100 edges per 1000 execs
-    assert discovery_rate((execs, edges)) == pytest.approx(100.0)
+    assert discovery_rate((execs, edges, ts)) == pytest.approx(100.0)

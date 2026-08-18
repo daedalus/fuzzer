@@ -59,7 +59,7 @@ class StatsReporter:
             f.exec_count,
             f.shm_cov,
             f.ptrace_cov,
-            (f._discovery_execs, f._discovery_edges),
+            (f._discovery_execs, f._discovery_edges, f._discovery_timestamps),
         )
 
     def run_calibration(self, max_execs: int = 1000) -> None:
@@ -140,7 +140,9 @@ class StatsReporter:
         )
 
     def discovery_rate(self) -> float:
-        return _discovery_rate((self.f._discovery_execs, self.f._discovery_edges))
+        return _discovery_rate(
+            (self.f._discovery_execs, self.f._discovery_edges, self.f._discovery_timestamps)
+        )
 
     def run_crash_replays(self, budget_ms: float = 200):
         f = self.f

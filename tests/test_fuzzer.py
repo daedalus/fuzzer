@@ -761,6 +761,7 @@ class TestFuzzerHelpers:
         f = self._make_fuzzer()
         f._discovery_execs = array("Q", (100, 200, 300))
         f._discovery_edges = array("Q", (10, 15, 20))
+        f._discovery_timestamps = array("d", (1000.0, 2000.0, 3000.0))
         rate = f.discovery_rate()
         assert rate >= 0
 
@@ -768,6 +769,7 @@ class TestFuzzerHelpers:
         f = self._make_fuzzer()
         f._discovery_execs = array("Q")
         f._discovery_edges = array("Q")
+        f._discovery_timestamps = array("d")
         rate = f.discovery_rate()
         assert rate == 0.0
 

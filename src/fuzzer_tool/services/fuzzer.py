@@ -1104,6 +1104,7 @@ class Fuzzer:
         self._peak_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         self._discovery_execs: array = array("Q")  # exec_count per discovery snapshot
         self._discovery_edges: array = array("Q")  # cumulative edges per snapshot
+        self._discovery_timestamps: array = array("d")  # wall-clock timestamp per snapshot
         self._crash_rate_execs: array = array("Q")  # exec_count per crash-rate sample
         self._crash_rate_counts: array = array("Q")  # crash_count per sample
         self._duplicate_reject_count = 0

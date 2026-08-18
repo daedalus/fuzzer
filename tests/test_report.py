@@ -47,6 +47,7 @@ def _make_mock_fuzzer(**overrides):
     f._corpus_size_history = [100, 200, 300]
     f._discovery_execs = array("Q", (100, 200, 300))
     f._discovery_edges = array("Q", (10, 15, 18))
+    f._discovery_timestamps = array("d", (1000.0, 2000.0, 3000.0))
     f._duplicate_reject_count = 3
     f._total_corpus_attempts = 10
     f._crash_replays = {}
@@ -807,9 +808,7 @@ class TestReportInvariants:
             for i in range(3):
                 Path(td, "seeds", f"m{i}").write_bytes(b"x" * 500)
             out = _corpus_overview(f, td)
-        rows = {
-            line.split()[0]: line.count("#") for line in out.splitlines() if "#" in line
-        }
+        rows = {line.split()[0]: line.count("#") for line in out.splitlines() if "#" in line}
         assert rows["<100B"] > rows["100B-1KB"], rows
 
     def test_brier_outcome_is_binary(self):
@@ -835,3 +834,33 @@ class TestReportInvariants:
             assert 0.0 <= pred <= 1.0
             assert 0.0 <= actual <= 1.0
             assert n >= 5
+
+
+class TestTemporalCorrelationReport:
+    def test_aligned_streams_produce_correlation_section(self):
+        from fuzzer_tool.services import report as report_mod
+
+        f = _make_mock_fuzzer()
+        f._edge_tracker._coverage_execs = array("Q", (100, 200, 300))
+        f._edge_tracker._coverage_edges = array("Q", (10, 20, 30))
+        f._edge_tracker._coverage_timestamps = array("d", (1.0, 2.0, 3.0))
+        f._discovery_execs = array("Q", (100, 200, 300))
+        f._discovery_edges = array("Q", (10, 20, 30))
+        f._discovery_timestamps = array("d", (1.0, 2.0, 3.0))
+
+        out = report_mod._temporal_correlation(f)
+        assert "Temporal correlation" in out
+        assert "sync points" in out
+
+    def test_missing_timestamps_returns_empty(self):
+        from fuzzer_tool.services import report as report_mod
+
+        f = _make_mock_fuzzer()
+        f._edge_tracker._coverage_execs = array("Q", (100, 200))
+        f._edge_tracker._coverage_edges = array("Q", (10, 20))
+        f._edge_tracker._coverage_timestamps = array("d")
+        f._discovery_execs = array("Q", (100, 200))
+        f._discovery_edges = array("Q", (10, 20))
+        f._discovery_timestamps = array("d")
+
+        assert report_mod._temporal_correlation(f) == ""

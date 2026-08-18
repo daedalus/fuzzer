@@ -40,6 +40,7 @@ class TestTemporalTracking:
         assert et._coverage_execs[0] == 100
         assert et._coverage_edges[0] == 0
         assert et._coverage_execs[1] == 200
+        assert len(et._coverage_timestamps) == 3
 
     def test_coverage_growth_model(self):
         et = EdgeTracker(map_size=1024)

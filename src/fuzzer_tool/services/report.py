@@ -11,6 +11,8 @@ import os
 from collections import Counter
 from pathlib import Path
 
+from fuzzer_tool.core.temporal_join import join_streams
+
 try:
     import numpy as np
 
@@ -137,6 +139,7 @@ def generate_report(fuzzer, corpus_dir: str, crashes_dir: str) -> str:
     sections.append(_execution_time_analysis(fuzzer))
     sections.append(_distribution_diagnostics(fuzzer))
     sections.append(_spectral_diagnostics(fuzzer))
+    sections.append(_temporal_correlation(fuzzer))
     sections.append(_mdl_codelength(fuzzer))
     sections.append(_smt_solver_activity(fuzzer))
     sections.append(_seed_contribution(fuzzer))
@@ -1096,6 +1099,51 @@ def _spectral_diagnostics(f) -> str:
     if not has_data:
         return ""
     return "\n".join(lines)
+
+
+def _temporal_correlation(f) -> str:
+    """Correlate coverage and discovery snapshots via temporal join."""
+    try:
+        et = f._edge_tracker
+        cov_ts = getattr(et, "_coverage_timestamps", None)
+        cov_execs = getattr(et, "_coverage_execs", None)
+        cov_edges = getattr(et, "_coverage_edges", None)
+        disc_ts = getattr(f, "_discovery_timestamps", None)
+        disc_execs = getattr(f, "_discovery_execs", None)
+        disc_edges = getattr(f, "_discovery_edges", None)
+        if not (cov_ts and disc_ts):
+            return ""
+        if len(cov_ts) < 2 or len(disc_ts) < 2:
+            return ""
+        coverage_stream = [
+            (float(cov_ts[i]), (int(cov_execs[i]), int(cov_edges[i]))) for i in range(len(cov_ts))
+        ]
+        discovery_stream = [
+            (float(disc_ts[i]), (int(disc_execs[i]), int(disc_edges[i])))
+            for i in range(len(disc_ts))
+        ]
+        joined = join_streams([coverage_stream, discovery_stream], max_gap=5.0)
+        if not joined:
+            return ""
+        deltas = []
+        for cov, disc in joined:
+            cov_exec, cov_edge = cov
+            disc_exec, disc_edge = disc
+            edge_delta = cov_edge - disc_edge
+            exec_delta = cov_exec - disc_exec
+            if exec_delta > 0:
+                deltas.append(edge_delta / exec_delta * 1000)
+            elif exec_delta == 0:
+                deltas.append(0.0)
+        if not deltas:
+            return ""
+        avg_rate = sum(deltas) / len(deltas)
+        return (
+            "\n  Temporal correlation: coverage-vs-discovery aligned at "
+            f"{len(joined)} sync points (avg edge-rate delta={avg_rate:.2f} ed/kexec)"
+        )
+    except (TypeError, AttributeError, ValueError):
+        return ""
 
 
 def _corpus_health(f) -> str:
