@@ -51,6 +51,7 @@ class TestShmCoverage:
             cov.reset_edge_map()
             assert not cov.is_new_coverage()
             cov._entries[0].edge_id = 1
+            cov._entries[0].count = (cov.read_generation() << 24) | 1
             # Update edge_count header to reflect the new edge (as C shim would)
             ctypes.c_uint64.from_address(cov._ptr + 16).value = 1
             assert cov.is_new_coverage()
@@ -62,7 +63,7 @@ class TestShmCoverage:
         try:
             cov.reset_edge_map()
             cov._entries[0].edge_id = 42
-            cov._entries[0].count = 7
+            cov._entries[0].count = (cov.read_generation() << 24) | 7
             assert cov.get_edge_ids() == {42}
             assert cov.get_edge_counts() == {42: 7}
         finally:
@@ -74,7 +75,7 @@ class TestShmCoverage:
             cov.reset_edge_map()
             assert cov.get_edge_counts() == {}
             cov._entries[0].edge_id = 10
-            cov._entries[0].count = 3
+            cov._entries[0].count = (cov.read_generation() << 24) | 3
             assert cov.get_edge_counts() == {10: 3}
         finally:
             cov.cleanup()
@@ -84,7 +85,7 @@ class TestShmCoverage:
         try:
             cov.reset_edge_map()
             cov._entries[0].edge_id = 100
-            cov._entries[0].count = 1
+            cov._entries[0].count = (cov.read_generation() << 24) | 1
             # Update edge_count header (as C shim would on new-slot insertion)
             ctypes.c_uint64.from_address(cov._ptr + 16).value = 1
             assert cov.is_new_coverage()  # first time seeing edge_id=100
@@ -145,7 +146,7 @@ class TestShmCoverage:
             assert not cov.is_new_coverage()
             # Simulate C shim: write edge to table + increment edge_count header
             cov._entries[0].edge_id = 42
-            cov._entries[0].count = 1
+            cov._entries[0].count = (cov.read_generation() << 24) | 1
             ctypes.c_uint64.from_address(cov._ptr + 16).value = 1
             assert cov.read_edge_count() == 1
             assert cov.is_new_coverage()
@@ -158,7 +159,7 @@ class TestShmCoverage:
         try:
             # Simulate C shim writing an edge
             cov._entries[0].edge_id = 42
-            cov._entries[0].count = 1
+            cov._entries[0].count = (cov.read_generation() << 24) | 1
             ctypes.c_uint64.from_address(cov._ptr + 16).value = 1
             assert cov.is_new_coverage()  # first discovery; _last_edge_count = 1
             cov.reset_edge_map()
@@ -176,11 +177,11 @@ class TestShmCoverage:
             # Round 1: edges {300, 100, 200} with edge_count=3
             # Direct table write + execution-order path_hash (simulates real C shim)
             cov._entries[0].edge_id = 300
-            cov._entries[0].count = 1
+            cov._entries[0].count = (cov.read_generation() << 24) | 1
             cov._entries[1].edge_id = 100
-            cov._entries[1].count = 1
+            cov._entries[1].count = (cov.read_generation() << 24) | 1
             cov._entries[2].edge_id = 200
-            cov._entries[2].count = 1
+            cov._entries[2].count = (cov.read_generation() << 24) | 1
             ctypes.c_uint64.from_address(cov._ptr + 16).value = 3
             # Compute path_hash independently: execution order 300 → 100 → 200
             ph = 0
@@ -193,6 +194,7 @@ class TestShmCoverage:
 
             # Round 2: different edges {300, 100, 400}, SAME edge_count=3
             cov._entries[2].edge_id = 400  # swap 200 → 400
+            cov._entries[2].count = (cov.read_generation() << 24) | 1
             ctypes.c_uint64.from_address(cov._ptr + 16).value = 3  # same count
             # Compute path_hash: execution order 300 → 100 → 400
             ph = 0
@@ -210,7 +212,7 @@ class TestShmCoverage:
         try:
             cov.reset_edge_map()
             cov._entries[0].edge_id = 10
-            cov._entries[0].count = 1
+            cov._entries[0].count = (cov.read_generation() << 24) | 1
             ctypes.c_uint64.from_address(cov._ptr + 16).value = 1
             ctypes.c_uint64.from_address(cov._ptr + 8).value = 10
             assert cov.is_new_coverage()  # slow path, discovers {10}
@@ -227,7 +229,7 @@ class TestShmCoverage:
         try:
             cov.reset_edge_map()
             cov._entries[0].edge_id = 10
-            cov._entries[0].count = 1
+            cov._entries[0].count = (cov.read_generation() << 24) | 1
             ctypes.c_uint64.from_address(cov._ptr + 16).value = 1
             # path_hash stays 0 (default zero memory) — fallback to edge_count-only
             assert cov.is_new_coverage()  # slow path, discovers {10}
@@ -235,7 +237,7 @@ class TestShmCoverage:
             assert not cov.is_new_coverage()
             # Change edges but KEEP edge_count=1 and path_hash=0
             cov._entries[0].edge_id = 20
-            cov._entries[0].count = 1
+            cov._entries[0].count = (cov.read_generation() << 24) | 1
             ctypes.c_uint64.from_address(cov._ptr + 16).value = 1
             ctypes.c_uint64.from_address(cov._ptr + 8).value = 0
             # Because path_hash=0 → edge_count-only comparison → 1==1 → NO new
@@ -414,7 +416,7 @@ class TestShmCoverage:
         cov = ShmCoverage()
         try:
             cov._entries[0].edge_id = 99
-            cov._entries[0].count = 1
+            cov._entries[0].count = (cov.read_generation() << 24) | 1
             ctypes.c_uint64.from_address(cov._ptr + 16).value = 1
             new, edges = cov.is_new_coverage_with_edges()
             assert new is True
@@ -446,7 +448,7 @@ class TestShmCoverage:
         cov = ShmCoverage()
         try:
             cov._entries[0].edge_id = 42
-            cov._entries[0].count = 1
+            cov._entries[0].count = (cov.read_generation() << 24) | 1
             ctypes.c_uint64.from_address(cov._ptr + 16).value = 1
             # Slow path: edge_count changed (0 -> 1), scans and records {42}.
             new, edges = cov.is_new_coverage_with_edges()
@@ -489,16 +491,21 @@ class TestShmCoverage:
             ctypes.c_uint32.from_address(cov._ptr).value = 77
             ctypes.c_uint64.from_address(cov._ptr + 8).value = 8888
             ctypes.c_uint64.from_address(cov._ptr + 16).value = 55
+            ctypes.c_uint32.from_address(cov._ptr + 4).value = (1000 << 8) | (0 << 24) | 3
             cov.record_edge(10)
             cov.record_edge(20)
             # Re-set header values we want to verify survive reset
             ctypes.c_uint32.from_address(cov._ptr).value = 77
             ctypes.c_uint64.from_address(cov._ptr + 8).value = 8888
             ctypes.c_uint64.from_address(cov._ptr + 16).value = 55
+            ctypes.c_uint32.from_address(cov._ptr + 4).value = (1000 << 8) | (0 << 24) | 3
             cov.reset_edge_map()
             assert cov.read_stack_depth() == 77
             assert cov.read_path_hash() == 8888
             assert cov.read_edge_count() == 55
+            assert cov.read_ctx_bits() == 3
+            assert cov.read_dropped_edges() == 1000
+            assert cov.read_generation() == 1
             assert cov.get_edge_ids() == set()
         finally:
             cov.cleanup()
@@ -509,10 +516,14 @@ class TestShmCoverage:
         try:
             ctypes.c_uint32.from_address(cov._ptr).value = 1
             ctypes.c_uint64.from_address(cov._ptr + 16).value = 2
+            ctypes.c_uint32.from_address(cov._ptr + 4).value = (500 << 8) | (0 << 24) | 5
             cov.reset_edge_map()
             cov.reset_edge_map()
             assert cov.read_stack_depth() == 1
             assert cov.read_edge_count() == 2
+            assert cov.read_ctx_bits() == 5
+            assert cov.read_dropped_edges() == 500
+            assert cov.read_generation() == 2
         finally:
             cov.cleanup()
 
@@ -762,6 +773,7 @@ class TestShmCoverage:
             cov.record_edge(10)  # Python API — edge_count += 1, _seen_edge_ids += {10}
             # Direct write of a different edge + manual edge_count bump
             cov._entries[1].edge_id = 20
+            cov._entries[1].count = (cov.read_generation() << 24) | 1
             ctypes.c_uint64.from_address(cov._ptr + 16).value = 2
             new, edges = cov.is_new_coverage_with_edges()
             # edge 10 is in _seen_edge_ids (not new), edge 20 is new

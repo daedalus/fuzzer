@@ -1490,9 +1490,12 @@ TARGET_LOAD_FACTOR = 0.5
 
 # Upper bound on entries, and the reason for it.
 #
-# ShmCoverage.reset_edge_map() memsets the whole table before every single
-# execution, so table size is a direct per-exec tax. Measured on this
-# machine:
+# ShmCoverage.reset_edge_map() bumps a generation counter instead of
+# memsetting the whole table, so table size no longer carries a per-exec
+# clear tax. The old measurements below are kept for historical context;
+# the cap is now driven by probe cost and memory, not reset overhead.
+#
+# Measured on this machine (old memset-based reset):
 #
 #     8,192 entries   0.1 MiB     3.8 us
 #    65,536 entries   0.5 MiB    21.3 us
@@ -1500,7 +1503,7 @@ TARGET_LOAD_FACTOR = 0.5
 #   262,144 entries   2.0 MiB    86.9 us
 # 1,048,576 entries   8.0 MiB   352.8 us
 #
-# At a 100 us target execution the 1 MiB clear is already comparable to the
+# At a 100 us target execution the 1 MiB clear was already comparable to the
 # run itself. So the old 131072 cap was not arbitrary after all -- it sits
 # near where the reset cost stops being negligible, and simply raising it
 # trades probe cost for memset cost without measuring which one dominates.

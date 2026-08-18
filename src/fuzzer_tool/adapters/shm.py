@@ -187,29 +187,44 @@ class ShmCoverage:
         """Return set of non-zero edge_ids currently in the hash table.
 
         Uses numpy for zero-copy vectorized scan — avoids per-entry
-        Python loop overhead.
+        Python loop overhead. Filters by generation so stale entries from
+        previous resets are ignored.
         """
         arr = np.frombuffer(self._map, dtype=_ENTRY_DTYPE, count=self.num_entries)
-        active = arr[arr["edge_id"] != 0]
+        gen = (arr["count"] >> 24) & 0xFF
+        current_gen = self.read_generation()
+        active = arr[(arr["edge_id"] != 0) & (gen == current_gen)]
         # .tolist() converts numpy uint32 to plain Python ints
         return set(active["edge_id"].tolist())
 
     def get_edge_counts(self) -> dict[int, int]:
-        """Return {edge_id: count} for all non-empty entries."""
+        """Return {edge_id: count} for all non-empty entries.
+
+        Filters by generation so stale entries from previous resets are
+        ignored. Strips the generation byte from the returned counts.
+        """
         arr = np.frombuffer(self._map, dtype=_ENTRY_DTYPE, count=self.num_entries)
-        active = arr[arr["edge_id"] != 0]
+        gen = (arr["count"] >> 24) & 0xFF
+        current_gen = self.read_generation()
+        active = arr[(arr["edge_id"] != 0) & (gen == current_gen)]
+        counts = active["count"] & 0xFFFFFF
         # .tolist() converts numpy uint32 to plain Python ints
-        return dict(zip(active["edge_id"].tolist(), active["count"].tolist(), strict=False))
+        return dict(zip(active["edge_id"].tolist(), counts.tolist(), strict=False))
 
     # ── Reset ────────────────────────────────────────────────────────────
 
     def reset_edge_map(self):
-        """Zero all entries in the coverage hash table (preserves front header).
+        """Bump the generation counter in the SHM diag field.
 
+        Replaces the old per-execution memset with an O(1) generation bump.
+        Stale entries are filtered by the slow path on the next read.
         Also zeroes the distance tail so a stale sum/count from a previous
         execution can never be misread.
         """
-        ctypes.memset(self._ptr + SHM_METADATA_SIZE, 0, self.table_bytes)
+        gen = self.read_generation()
+        new_gen = (gen + 1) & 0xFF
+        diag = ctypes.c_uint32.from_address(self._ptr + 4)
+        diag.value = (diag.value & 0x00FFFFFF) | (new_gen << self.DIAG_GEN_SHIFT)
         ctypes.memset(self._tail, 0, SHM_TAIL_SIZE)
 
     # ── AFLGo distance tail (per-execution average distance) ────────────
@@ -240,9 +255,11 @@ class ShmCoverage:
     # here. Reading occupancy alone, the fuzzer concludes the map is fine
     # exactly when it is at its worst.
 
+    DIAG_GEN_SHIFT = 24
+    DIAG_GEN_MASK = 0xFF
     DIAG_CTX_MASK = 0xFF
     DIAG_DROP_SHIFT = 8
-    DIAG_DROP_MAX = 0xFFFFFF
+    DIAG_DROP_MAX = 0xFFFF
 
     def read_diag(self) -> int:
         """Read the raw diagnostics word from the SHM front header."""
@@ -263,19 +280,42 @@ class ShmCoverage:
         Saturates at DIAG_DROP_MAX. Any non-zero value means the map is too
         small for this target and coverage is being silently discarded.
         """
-        return self.read_diag() >> self.DIAG_DROP_SHIFT
+        return (self.read_diag() >> self.DIAG_DROP_SHIFT) & 0xFFFF
+
+    def read_generation(self) -> int:
+        """Generation counter from the SHM diag field (bits 24-31).
+
+        Incremented by reset_edge_map() to make stale entries identifiable
+        without memsetting the whole table.
+        """
+        return (self.read_diag() >> self.DIAG_GEN_SHIFT) & self.DIAG_GEN_MASK
 
     def drop_counter_saturated(self) -> bool:
         """True when the drop count has pinned and is no longer a magnitude."""
         return self.read_dropped_edges() >= self.DIAG_DROP_MAX
 
+    def _note_drop(self) -> None:
+        """Increment the drop counter in the SHM diag field.
+
+        Mirrors the C shim's __afl_note_drop(). Saturates at DIAG_DROP_MAX.
+        Preserves ctx and generation bits.
+        """
+        v = ctypes.c_uint32.from_address(self._ptr + 4).value
+        drops = (v >> self.DIAG_DROP_SHIFT) & 0xFFFF
+        if drops < self.DIAG_DROP_MAX:
+            ctypes.c_uint32.from_address(self._ptr + 4).value = (
+                ((drops + 1) << self.DIAG_DROP_SHIFT)
+                | (v & self.DIAG_CTX_MASK)
+                | (v & (0xFF << self.DIAG_GEN_SHIFT))
+            )
+
     def reset_diag(self) -> None:
-        """Clear the drop count, preserving the context width.
+        """Clear the drop count, preserving the context width and generation.
 
         Called after a resize so the next saturation decision is made on
         evidence from the new table rather than the old one.
         """
-        ctypes.c_uint32.from_address(self._ptr + 4).value = self.read_diag() & self.DIAG_CTX_MASK
+        ctypes.c_uint32.from_address(self._ptr + 4).value = self.read_diag() & 0xFF0000FF
 
     def read_stack_depth(self) -> int:
         """Read the stack depth value from the SHM front header (offset 0).
@@ -448,7 +488,9 @@ class ShmCoverage:
 
         # Slow path: extract edge_ids not yet in _seen_edge_ids
         arr = np.frombuffer(self._map, dtype=_ENTRY_DTYPE, count=self.num_entries)
-        active = arr[arr["edge_id"] != 0]
+        gen = (arr["count"] >> 24) & 0xFF
+        current_gen = self.read_generation()
+        active = arr[(arr["edge_id"] != 0) & (gen == current_gen)]
         ids = set(active["edge_id"].tolist())
         new = ids - self._seen_edge_ids
         self._seen_edge_ids.update(new)
@@ -462,7 +504,7 @@ class ShmCoverage:
         # than replacing it: a new edge whose count is 0 occupies no bucket,
         # which the shim never produces but tests and torn reads do, and
         # cumulative_edges must stay an edge count either way.
-        if self._update_virgin_buckets(active["edge_id"], active["count"]):
+        if self._update_virgin_buckets(active["edge_id"], active["count"] & 0xFFFFFF):
             new_found = True
 
         self._last_edge_count = edge_count
@@ -525,7 +567,8 @@ class ShmCoverage:
             eid = self._entries[idx].edge_id
             if eid == 0:
                 self._entries[idx].edge_id = edge_id
-                self._entries[idx].count = 1
+                gen = self.read_generation()
+                self._entries[idx].count = ((gen & 0xFF) << 24) | 1
                 # Increment edge_count header to reflect new-slot insertion
                 ec = ctypes.c_uint64.from_address(self._ptr + 16)
                 ec.value = ec.value + 1
@@ -539,9 +582,12 @@ class ShmCoverage:
                 stored = True
                 break
             if eid == edge_id:
-                if self._entries[idx].count < 0xFFFFFFFF:
-                    self._entries[idx].count += 1
-                self._note_bucket(edge_id, int(self._entries[idx].count))
+                current_count = self._entries[idx].count & 0x00FFFFFF
+                if current_count < 0x00FFFFFF:
+                    self._entries[idx].count = (self._entries[idx].count & 0xFF000000) | (
+                        current_count + 1
+                    )
+                self._note_bucket(edge_id, int(self._entries[idx].count & 0x00FFFFFF))
                 stored = True
                 break
         # Update path_hash unconditionally: hash = hash * 31 ^ edge_id

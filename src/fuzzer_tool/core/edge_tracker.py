@@ -803,8 +803,9 @@ class EdgeTracker:
         false for this design: entries carry an explicit 8-byte
         {edge_id, count} pair, and edge_id = ctx ^ prev_loc ^ cur_loc has no
         map_size term. Only the starting probe position edge_id % map_size
-        changes, and no position is ever persisted — reset_edge_map() memsets
-        the table before every execution regardless.
+        changes, and no position is ever persisted. reset_edge_map() now
+        bumps a generation counter instead of memsetting the table, and stale
+        entries are filtered by the slow path on the next read.
 
         The cost of getting this wrong was not subtle. A stall-triggered
         resize wiped cumulative_edges, _global_edge_hits, seed_edges,

@@ -44,7 +44,8 @@ def write_entry(cov: ShmCoverage, edge_id: int, count: int) -> None:
     if cov._entries[idx].edge_id == 0:
         cov._entries[idx].edge_id = edge_id
         ctypes.c_uint64.from_address(cov._ptr + 16).value += 1
-    cov._entries[idx].count = count
+    gen = cov.read_generation()
+    cov._entries[idx].count = ((gen & 0xFF) << 24) | (count & 0xFFFFFF)
 
 
 def run_exec(cov: ShmCoverage, hits: dict[int, int]) -> bool:
@@ -172,7 +173,8 @@ class TestCountZeroEntries:
         """The shim never writes count 0 into a claimed slot, but tests and
         torn reads do — such an entry must not consume a bucket."""
         cov.reset_edge_map()
-        cov._entries[0].edge_id = 7  # count stays 0
+        cov._entries[0].edge_id = 7
+        cov._entries[0].count = cov.read_generation() << 24  # count stays 0, current gen
         ctypes.c_uint64.from_address(cov._ptr + 16).value = 1
         assert cov.is_new_coverage() is True  # new edge_id
         assert cov.get_virgin_buckets() == {}
@@ -180,6 +182,7 @@ class TestCountZeroEntries:
     def test_new_edge_with_zero_count_still_counts_as_an_edge(self, cov):
         cov.reset_edge_map()
         cov._entries[0].edge_id = 7
+        cov._entries[0].count = cov.read_generation() << 24
         ctypes.c_uint64.from_address(cov._ptr + 16).value = 1
         cov.is_new_coverage()
         assert 7 in cov._seen_edge_ids

@@ -307,15 +307,17 @@ static uint64_t *__afl_edge_count  = NULL;   /* offset 16: uint64 */
  * per-execution table wipe, so the counter accumulates over the run.       */
 #define __AFL_DIAG_CTX_MASK   0xFFu
 #define __AFL_DIAG_DROP_SHIFT 8
-#define __AFL_DIAG_DROP_MAX   0xFFFFFFu
+#define __AFL_DIAG_DROP_MAX   0xFFFFu
+#define __AFL_DIAG_GEN_SHIFT  24
+#define __AFL_DIAG_GEN_MASK   0xFFu
 
 __attribute__((always_inline))
 static inline void __afl_note_drop(void) {
     if (!__afl_diag) return;
     uint32_t v = *__afl_diag;
-    uint32_t drops = v >> __AFL_DIAG_DROP_SHIFT;
+    uint32_t drops = (v >> __AFL_DIAG_DROP_SHIFT) & 0xFFFF;
     if (drops < __AFL_DIAG_DROP_MAX)
-        *__afl_diag = ((drops + 1) << __AFL_DIAG_DROP_SHIFT) | (v & __AFL_DIAG_CTX_MASK);
+        *__afl_diag = ((drops + 1) << __AFL_DIAG_DROP_SHIFT) | (v & __AFL_DIAG_CTX_MASK) | (v & (0xFFu << __AFL_DIAG_GEN_SHIFT));
 }
 
 /* Per-iteration state */
@@ -323,6 +325,7 @@ static uint64_t  __afl_path_hash_acc = 0;       /* rolling path hash accumulator
 static uint32_t  __afl_max_stack_depth = 0;     /* max stack depth this iteration */
 static uint64_t  __afl_iter_edge_count = 0;     /* new-slot insertions this iteration */
 static uint64_t  __afl_total_edge_count = 0;    /* cumulative, never reset across iterations */
+static uint8_t   __afl_generation = 0;          /* generation counter for tag-based reset */
 
 /* ── SHM attachment ──────────────────────────────────────────────────── */
 
@@ -412,7 +415,7 @@ void __afl_map_shm(void) {
     /* Publish the context width so the fuzzer can confirm the map was sized
      * for the binary it is actually running, not the one it inspected.
      * Preserves any drop count already accumulated in the upper bits. */
-    *__afl_diag = (*__afl_diag & ~(uint32_t)__AFL_DIAG_CTX_MASK)
+    *__afl_diag = (*__afl_diag & ~(uint32_t)(__AFL_DIAG_CTX_MASK | (0xFFu << __AFL_DIAG_GEN_SHIFT)))
                 | ((uint32_t)__AFL_CTX_BITS & __AFL_DIAG_CTX_MASK);
 
 #ifdef __AFL_DISTANCE_MODE
@@ -538,6 +541,10 @@ __attribute__((visibility("default"), always_inline))
 static inline void __afl_map_edge(uint32_t cur_loc) {
     if (!__afl_area) return;
 
+    uint32_t gen = __afl_generation;
+    if (__afl_diag)
+        gen = (*__afl_diag >> __AFL_DIAG_GEN_SHIFT) & 0xFF;
+
 #if __AFL_CTX_SENSITIVE
     uint32_t caller_ctx = __afl_get_caller_ctx();
     uint32_t edge_id = caller_ctx ^ __afl_prev_loc ^ cur_loc;
@@ -558,7 +565,7 @@ static inline void __afl_map_edge(uint32_t cur_loc) {
 
         if (eid == 0) {                              /* empty slot — claim */
             __afl_area[idx].edge_id = edge_id;
-            __afl_area[idx].count   = 1;
+            __afl_area[idx].count   = (gen << 24) | 1;
             __afl_iter_edge_count++;                 /* track per-iteration new-slot insertion */
             __afl_total_edge_count++;                /* track cumulative across-reset count */
             if (__afl_edge_count)                    /* write CUMULATIVE count live to SHM header */
@@ -566,16 +573,35 @@ static inline void __afl_map_edge(uint32_t cur_loc) {
             break;
         }
         if (eid == edge_id) {                        /* existing edge — bump */
-            if (__afl_area[idx].count < UINT32_MAX)
-                __afl_area[idx].count++;
-            break;
+            if ((__afl_area[idx].count >> 24) == gen) {
+                if ((__afl_area[idx].count & 0x00FFFFFFu) < 0x00FFFFFFu)
+                    __afl_area[idx].count++;
+                break;
+            }
+            /* stale entry with matching edge_id — reclaim */
         }
-        /* else: hash collision, keep probing */
+        /* else: hash collision or stale entry, keep probing */
 
-        /* Last iteration and still nowhere to put it: the table is full and
-         * this edge is about to be lost. Count it -- see __afl_diag. */
-        if (i == __afl_map_size - 1)
-            __afl_note_drop();
+        /* Last iteration and still nowhere to put it: the table is full or
+         * every colliding slot is stale. Count a drop only if every slot
+         * in the table is occupied by a live entry. */
+        if (i == __afl_map_size - 1) {
+            uint8_t all_live = 1;
+            for (uint32_t j = 0; j < __afl_map_size; j++) {
+                uint32_t jdx = (pos + j) % __afl_map_size;
+                uint32_t jeid = __afl_area[jdx].edge_id;
+                if (jeid == 0) {
+                    all_live = 0;
+                    break;
+                }
+                if ((__afl_area[jdx].count >> 24) != gen) {
+                    all_live = 0;
+                    break;
+                }
+            }
+            if (all_live)
+                __afl_note_drop();
+        }
     }
 
     /* Accumulate rolling path hash: hash = hash * 31 ^ edge_id */
@@ -717,7 +743,11 @@ static void __afl_write_distance_tail(void) {
 __attribute__((visibility("default")))
 void __afl_map_reset(void) {
     if (__afl_area) {
-        memset(__afl_area, 0, __afl_map_size * sizeof(struct __afl_entry));
+        __afl_generation = (__afl_generation + 1) & 0xFF;
+        if (__afl_diag) {
+            *__afl_diag = (*__afl_diag & 0x00FFFFFFu)
+                        | (__afl_generation << __AFL_DIAG_GEN_SHIFT);
+        }
 
         /* Write metadata before resetting accumulators */
         if (__afl_stack_depth) {
