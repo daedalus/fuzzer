@@ -37,7 +37,7 @@ class FieldHypothesis:
 
     offset: int
     width: int
-    field_type: str  # "magic", "length", "crc", "flags", "data", "unknown"
+    field_type: str  # "magic", "length", "crc", "flags", "data", "padding", "unknown"
     confidence: float = 0.0
     observations: int = 0
     # Which mutations at this offset reliably change coverage
@@ -199,6 +199,59 @@ class FormatLearner:
             self.field_map[offset] = h
 
         self._classify_fields()
+
+    def record_liveness(self, offset: int, width: int, confirmed_dead: bool) -> None:
+        """Corroborating evidence from item 4's `LiveBitMaskEstimator`
+        (`core/live_bit_mask.py`, per
+        `docs/handover_skittercreek_tailslayer_port.md`).
+
+        A byte range whose liveness estimator has *converged* with an
+        empty mask -- i.e. many consecutive mutations touching it never
+        once moved coverage -- is a cheap signal that the range is
+        padding, alignment filler, or an unparsed/ignored region. This is
+        corroborating evidence only, not a replacement for the
+        coverage-delta-driven classification `_update_hypotheses` already
+        does:
+
+        - If a hypothesis already exists for this offset, it was created
+          because a mutation there *did* show a coverage effect
+          (hypotheses are only created `elif has_effect` in
+          `_update_hypotheses`). A later confirmed-dead verdict for the
+          same range therefore *contradicts* that hypothesis rather than
+          confirming it -- treated here as a small confidence penalty,
+          not silently overwritten, since the two signals disagreeing is
+          itself useful information (e.g. the field was live early in the
+          run and stopped mattering, or the two evidence sources are
+          looking at genuinely different byte spans that happen to
+          overlap).
+        - If no hypothesis exists yet, coverage-delta evidence alone
+          cannot distinguish "genuinely dead" from "hasn't been tried
+          enough yet" -- exactly the gap `LiveBitMaskEstimator.is_converged`
+          is designed to close (see that module's docstring). Only then is
+          a new, low-confidence `field_type="padding"` hypothesis created.
+
+        `confirmed_dead=False` is a no-op: this method only ever reports
+        positive convergence, never "still unresolved" (that's simply not
+        calling it).
+        """
+        if not confirmed_dead:
+            return
+
+        for h in self.hypotheses:
+            if h.offset <= offset < h.offset + h.width:
+                if h.field_type != "padding":
+                    h.confidence = max(0.0, h.confidence - 0.05)
+                return
+
+        h = FieldHypothesis(
+            offset=offset,
+            width=max(width, 1),
+            field_type="padding",
+            confidence=0.2,
+            observations=0,
+        )
+        self.hypotheses.append(h)
+        self.field_map[offset] = h
 
     def _classify_fields(self):
         """Classify hypotheses into field types based on evidence patterns."""

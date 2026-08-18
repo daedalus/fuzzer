@@ -1,6 +1,12 @@
 # Handover: porting alias-solving, support-recovery, and timing-analysis algorithms into the fuzzer
 
-Status: items 5 and 6 implemented and wired into `services/fuzzer.py`; items 1–4, 7, and 13 remain proposals.
+Status: items 5 and 6 implemented and wired into `services/fuzzer.py`;
+items 1 and 2 implemented and wired (item 1 into `checksum_learner.py`,
+item 2 into `root_cause.py`); item 4 implemented and wired (round 7 —
+`services/operators.py` region down-weighting and
+`core/format_learner.py` padding corroboration, both still gated on the
+real-corpus sensitivity sweep noted below); items 3, 7, and 13 remain
+proposals.
 Sources:
 - `xoreaxeaxeax/skitter-creek-bath-salts` — `analysis/unspaghettify.py`,
   `analysis/gather_aliases.py`, `userspace/alias_map.h`.
@@ -45,6 +51,84 @@ confirmation` line reporting the fraction of intervals on harmonics of the
 FFT-discovered period, plus the cheap classifier's verdict. No external
 `expected_period` prior is required at the call site because the prior is
 taken from the spectral result itself.
+
+**Revision note (round 6):** item 4 (`LiveBitMaskEstimator`) has been
+implemented in `core/live_bit_mask.py`, ported from `MaskState`/
+`observe_hit` with the stricter consecutive-no-growth `is_converged`
+condition described in the port plan below (a fresh growth event
+un-converges it, unlike the source's one-way `switched_to_dynamic`
+flag). `tests/test_live_bit_mask.py` covers all three validation-plan
+items: a synthetic ground-truth test asserting the converged mask's
+byte-level projection exactly matches a known-live byte set; a
+`switch_after` sensitivity sweep reporting false-negative rate on a
+rare-but-live bit as a curve (10 / 50 / 200 consecutive no-growth
+samples measured at 0.80 / 0.36 / 0.01 false-negative rate against a
+2%-per-sample rare bit over 300 trials, confirming the default of 200
+is load-bearing and not cosmetic); and an explicit non-goal check that
+`.mask` never gets conflated with per-mutation trigger rate and that a
+pre-convergence zero is exposed as unresolved (`is_converged is False`)
+rather than a dead verdict. It is a leaf utility only — same landing
+discipline as items 1 and 2 before their own wiring PRs — not yet wired
+into `schedules.py` or `format_learner.py`; that's Sequencing steps 6–7
+below, gated on the real-corpus sensitivity sweep this synthetic one
+stands in for.
+
+**Revision note (round 7):** item 4 has been wired into both intended
+consumers.
+
+- `services/operators.py`: `OperatorEngine` gained a `_region_liveness`
+  cache (parallel to the existing `_region_cache`, evicted together so a
+  liveness list can never outlive the region bounds/cumulative arrays it
+  indexes into), one `LiveBitMaskEstimator` per profiled region.
+  `record_coverage_diff(data, offset, baseline_edges, mutant_edges)`
+  folds a mutation's coverage-edge symmetric difference into whichever
+  region `offset` falls in — `edge_id % map_size` bins into a bounded
+  bitmask, and `observe(0, diff_bits)` is called rather than
+  materializing two full-width bitmasks (exact, not an approximation:
+  `observe` only ever uses `baseline ^ mutant`). `_region_weighted_position`
+  now applies a `_LIVENESS_DEAD_WEIGHT = 0.1` multiplicative down-weight —
+  deliberately not a hard exclusion — to any region whose estimator has
+  *converged* with an empty mask, with a fast path that skips rebuilding
+  the draw weights entirely when nothing has converged dead yet.
+- `services/fuzzer.py`: after each exec, diffs `_current_edges_cache`
+  against the parent seed's known edges
+  (`edge_tracker.seed_edges[seed_key]`) and feeds the offset the
+  round's mutation touched (`_last_mutation_offset`) into
+  `record_coverage_diff`. This call is deliberately *not* gated on the
+  existing `has_new_coverage` check — that flag means "globally novel
+  edge" and fires rarely, whereas convergence needs the much more common
+  "no new edges from this mutation" samples to ever accumulate.
+- `core/format_learner.py`: new `FormatLearner.record_liveness(offset,
+  width, confirmed_dead)`. `record_coverage_diff` returns the region's
+  `(offset, width)` exactly once — on the sample that transitions it into
+  converged-dead — which `fuzzer.py` forwards here.
+  `record_liveness` treats this as corroborating evidence only: if a
+  hypothesis already covers that offset (which only happens if a mutation
+  there previously showed a real coverage effect, per
+  `_update_hypotheses`'s `elif has_effect` gate), a confirmed-dead
+  verdict *contradicts* rather than confirms it, and is recorded as a
+  small confidence penalty without overwriting the existing
+  `field_type`. Only when no hypothesis exists yet does it create a new,
+  low-confidence (`0.2`) `field_type="padding"` hypothesis — filling
+  exactly the gap plain coverage-delta evidence can't: "genuinely dead"
+  vs. "hasn't been tried enough yet."
+- Tests: `tests/test_region_liveness.py` (18 cases — diff folding, the
+  per-region down-weight, the fast path, cache-eviction parity, and the
+  edge-triggered return-value contract) and a new `TestRecordLiveness`
+  class in `tests/test_format_learner.py` (6 cases, including the
+  non-overwrite-but-penalize behavior against a real
+  `record_transition`-created hypothesis). Full suite: 4590 passed, 177
+  skipped, 1 xfailed, 0 new failures (one pre-existing test,
+  `test_mb_cbh_reanchor.py::test_reanchoring_does_not_lose_solvable_cases`,
+  is flaky independent of this change — it constructs `RandPool(seed=None)`,
+  which draws fresh OS entropy per run; reproduced the same flake on a
+  clean checkout with no code changes).
+- Both consumers remain gated on the open real-corpus sensitivity sweep
+  (Sequencing step 6): the down-weight factor and padding-hypothesis
+  confidence were deliberately chosen conservative (`0.1x`, not `0x`;
+  `0.2` confidence, not higher) specifically so a wrong threshold from
+  the synthetic-only validation degrades gracefully rather than
+  silently misdirecting the fuzzer or the format model.
 
 ## Scope
 
@@ -674,9 +758,11 @@ File: `tests/test_temporal_join.py` (new).
 
 1. `core/gf2_linalg.py` + tests (item 2) — no dependencies, smallest, do
    first, unblocks nothing but itself.
-2. `core/live_bit_mask.py` + tests (item 4) — no dependencies, no solver,
-   cheap; do alongside item 2 since both are leaf utilities with no
-   integration risk yet.
+2. ~~`core/live_bit_mask.py` + tests (item 4) — no dependencies, no~~
+   ~~solver, cheap; do alongside item 2 since both are leaf utilities~~
+   ~~with no integration risk yet.~~ — **DONE.** Landed as
+   `core/live_bit_mask.py` + `tests/test_live_bit_mask.py`; wired in
+   round 7 (see steps 6–7 below).
 3. `core/xor_map_solver.py` + tests (item 1, solver only, not wired in) —
    depends on nothing but z3 (already optional dep).
 4. Cost-bound test for the solver in isolation (synthetic benchmark, not
@@ -684,13 +770,25 @@ File: `tests/test_temporal_join.py` (new).
 5. Wire item 1 into `checksum_learner.py` as a third model family, gated
    behind the existing two failing first. Add/extend
    `test_regression_checksum_cost_bound.py` to cover the new path.
-6. Run item 4's convergence-threshold sensitivity sweep (validation step 2
-   above) on real corpus seeds, not just synthetic ones, before wiring its
-   output into `schedules.py`'s weighting — a real coverage bitmap may have
-   noisier/rarer-triggering bits than the synthetic test covers.
-7. Wire item 4 into `schedules.py` (byte down-weighting) and
-   `format_learner.py` (padding/dead-region signal) as two separate,
-   independently revertible changes.
+6. ~~Run item 4's convergence-threshold sensitivity sweep (validation step 2~~
+   ~~above) on real corpus seeds, not just synthetic ones, before wiring its~~
+   ~~output into `schedules.py`'s weighting — a real coverage bitmap may have~~
+   ~~noisier/rarer-triggering bits than the synthetic test covers.~~ —
+   **STILL OPEN**, not done in round 7. The round-7 wiring shipped
+   ahead of this step, on explicit request, with the conservative
+   `_LIVENESS_DEAD_WEIGHT = 0.1` and low-confidence `"padding"` verdict
+   chosen specifically to bound the risk of skipping this validation
+   first. This real-corpus sweep is still the right next step before
+   trusting the down-weight/padding signal at full strength.
+7. ~~Wire item 4 into `schedules.py` (byte down-weighting) and~~
+   ~~`format_learner.py` (padding/dead-region signal) as two separate,~~
+   ~~independently revertible changes.~~ — **DONE** (round 7). Landed as
+   `OperatorEngine.record_coverage_diff`/`_region_liveness_factor` in
+   `services/operators.py` (region-level, not byte-level — see round-7
+   note for why) and `FormatLearner.record_liveness` in
+   `core/format_learner.py`, bridged through `services/fuzzer.py`'s exec
+   loop. Tests: `tests/test_region_liveness.py`,
+   `TestRecordLiveness` in `tests/test_format_learner.py`.
 8. Item 3 (lineage composition) — explicitly deferred, not scheduled.
 9. ~~`core/exec_time_anomaly.py` + tests (item 5, calibrator only, not wired~~
     ~~into `runner.py` yet)~~ — **DONE.** Landed as `core/exec_time_anomaly.py`
@@ -721,9 +819,13 @@ if the synthetic validation in step 3 turns up that recovery is unreliable
 below some sample-count threshold, or step 6's real-corpus sweep shows
 item 4's false-negative rate doesn't converge to something acceptable
 within a reasonable sample budget, any of these is a valid place to stop
-and report the null result rather than proceeding regardless. Steps 9,
-10, and 12 (items 5 and 6) are complete; the remaining items are 1, 2, 3,
-4, 7, and 13.
+and report the null result rather than proceeding regardless. Steps 2, 7,
+9, 10, and 12 (item 4's utility + wiring, and items 5 and 6's leaf
+utilities) are complete, alongside items 1 and 2's own wiring; the
+remaining open work is item 3 (deferred), item 4's step 6 (the
+real-corpus sensitivity sweep — wiring shipped ahead of it in round 7,
+see that note for the risk-bounding rationale), item 7, and item 13
+(deferred).
 
 ## Open questions for Gabriel
 

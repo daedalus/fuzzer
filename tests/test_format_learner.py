@@ -433,3 +433,73 @@ class TestZScoreHasEffect:
                 lost_edges=set(),
             )
         assert fl._delta_moments.count >= 10
+
+
+class TestRecordLiveness:
+    """Item 4 wiring: LiveBitMaskEstimator convergence as corroborating
+    padding evidence, per handover doc item 4's format_learner.py note."""
+
+    def test_not_confirmed_dead_is_a_noop(self):
+        fl = FormatLearner()
+        fl.record_liveness(offset=10, width=4, confirmed_dead=False)
+        assert fl.hypotheses == []
+
+    def test_confirmed_dead_creates_padding_hypothesis(self):
+        fl = FormatLearner()
+        fl.record_liveness(offset=10, width=4, confirmed_dead=True)
+        assert len(fl.hypotheses) == 1
+        h = fl.hypotheses[0]
+        assert h.offset == 10
+        assert h.width == 4
+        assert h.field_type == "padding"
+        assert h.observations == 0
+
+    def test_padding_hypothesis_is_low_confidence(self):
+        """Corroborating evidence, not proof -- must not rival a
+        multi-observation coverage-delta hypothesis in confidence."""
+        fl = FormatLearner()
+        fl.record_liveness(offset=0, width=4, confirmed_dead=True)
+        assert fl.hypotheses[0].confidence < 0.5
+
+    def test_existing_hypothesis_is_not_overwritten(self):
+        """A hypothesis that already has real coverage-delta evidence
+        (created via record_transition's has_effect path) must not be
+        silently replaced by a padding verdict -- the two signals
+        disagreeing is itself informative, not a reason to discard the
+        one with actual observations."""
+        fl = FormatLearner()
+        fl.record_transition(
+            input_bytes=b"\x00" * 16,
+            mutation_op="bit_flip",
+            mutation_offset=4,
+            mutation_width=1,
+            coverage_before=10,
+            coverage_after=20,
+            new_edges={1, 2, 3},
+            lost_edges=set(),
+        )
+        assert len(fl.hypotheses) == 1
+        original_type = fl.hypotheses[0].field_type
+        original_confidence = fl.hypotheses[0].confidence
+
+        fl.record_liveness(offset=4, width=1, confirmed_dead=True)
+
+        assert len(fl.hypotheses) == 1  # no new hypothesis created
+        assert fl.hypotheses[0].field_type == original_type  # not overwritten
+        assert fl.hypotheses[0].confidence < original_confidence  # penalized
+
+    def test_existing_padding_hypothesis_is_not_re_penalized(self):
+        """Repeated confirmed-dead reports for a range already classified
+        padding should not keep chipping at its confidence -- the penalty
+        branch only fires for a *disagreeing* field_type."""
+        fl = FormatLearner()
+        fl.record_liveness(offset=10, width=4, confirmed_dead=True)
+        confidence_after_first = fl.hypotheses[0].confidence
+        fl.record_liveness(offset=10, width=4, confirmed_dead=True)
+        assert fl.hypotheses[0].confidence == confidence_after_first
+
+    def test_padding_field_type_counts_as_classified(self):
+        fl = FormatLearner()
+        fl.record_liveness(offset=0, width=8, confirmed_dead=True)
+        summary = fl.get_format_summary()
+        assert summary["classified"] == 1

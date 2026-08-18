@@ -41,6 +41,7 @@ from fuzzer_tool.core.mutations import (
     splice,
     splice_diff_located,
 )
+from fuzzer_tool.core.live_bit_mask import LiveBitMaskEstimator
 from fuzzer_tool.core.operator_registry import REGISTRY, format_gate_matches
 from fuzzer_tool.core.skipdet import MAX_DET_MUTATIONS, trace_mini_from_edges
 
@@ -66,6 +67,32 @@ _REGION_CACHE_MAX = 64
 # profile_buffer() skips windows below 512 bytes, so anything shorter has no
 # profile to weight by.
 _REGION_MIN_LEN = 512
+
+# ── region liveness (item 4, handover_skittercreek_tailslayer_port.md) ───
+# Coverage-bit width the per-region LiveBitMaskEstimator folds edge ids
+# into (edge_id % _LIVENESS_MAP_BITS). This is deliberately independent of
+# the live SHM map_size: it only needs to be wide enough that two distinct
+# edges rarely alias into the same bit within one region's observation
+# window, not wide enough to be collision-free -- the estimator is already
+# a one-sided, monotone-growing signal, so an occasional alias only costs
+# a slightly-too-eager "not dead yet", never a false dead verdict.
+_LIVENESS_MAP_BITS = 65536
+# Consecutive coverage-diff observations with no new bit revealed before a
+# region is considered converged-dead. Matches LiveBitMaskEstimator's own
+# default and MASK_SWITCH_AFTER in the ported source. NOTE: this has only
+# been validated against the synthetic sweep in
+# tests/test_live_bit_mask.py, not yet against a real-corpus sensitivity
+# sweep (handover doc Sequencing step 6) -- treat _LIVENESS_DEAD_WEIGHT
+# below as a conservative down-weight, not a hard exclusion, until that
+# real-corpus validation lands.
+_LIVENESS_SWITCH_AFTER = 200
+# Multiplicative down-weight applied to a region's mutation-site weight
+# once its liveness estimator has converged with an empty mask (i.e.
+# "never once moved coverage across >= _LIVENESS_SWITCH_AFTER consecutive
+# mutations touching it"). Deliberately not 0.0: convergence is strong
+# evidence, not proof, and a hard-zero would make a misclassified region
+# permanently unreachable by this weighting path.
+_LIVENESS_DEAD_WEIGHT = 0.1
 
 # ── havoc sub-mutation weighting ─────────────────────────────────────────
 # _apply_single_mutation() dispatches to one of 11 inline branches. That
@@ -279,6 +306,16 @@ class OperatorEngine:
         # window (~1 ms), so it must be paid once per seed, not once per
         # mutation -- see region_weights().
         self._region_cache: dict[int, tuple | None] = {}
+        # Per-region liveness estimators, keyed by the same seed content
+        # hash as _region_cache, one LiveBitMaskEstimator per region index
+        # (parallel array to the bounds/cumulative lists in that cache
+        # entry). Lazily populated by record_coverage_diff() as mutation
+        # exec results come in -- most seeds never get an entry here if
+        # the caller never reports a diff for them. Same clear-on-full
+        # policy and cap as _region_cache; the two caches are evicted
+        # together in region_weights() so they never disagree about which
+        # seeds are tracked.
+        self._region_liveness: dict[int, list[LiveBitMaskEstimator | None]] = {}
         # Havoc sub-mutation credit. Laplace-smoothed at 1 hit / 2 trials so
         # every branch starts at a 0.5 ratio -- identical weights, so the
         # first table is uniform and the adaptive path only diverges from
@@ -2683,22 +2720,166 @@ class OperatorEngine:
                 entry = (cumulative, bounds, total)
         if len(self._region_cache) >= _REGION_CACHE_MAX:
             self._region_cache.clear()
+            # Evicted together: a liveness list surviving past its region
+            # bounds/cumulative arrays would silently misattribute the next
+            # seed's diffs to a stale region layout.
+            self._region_liveness.clear()
         self._region_cache[key] = entry
         return entry
 
-    def _region_weighted_position(self, data: bytes, buf_len: int) -> int | None:
-        """Draw a byte offset weighted by each region's mutation_weight().
+    def record_coverage_diff(
+        self,
+        data: bytes,
+        offset: int,
+        baseline_edges: set,
+        mutant_edges: set,
+        map_size: int = _LIVENESS_MAP_BITS,
+    ) -> tuple[int, int] | None:
+        """Fold one mutation's coverage-edge diff into the region liveness
+        estimator for whichever region *offset* falls in.
 
-        Regions are picked proportionally to weight x length, then a uniform
+        Item 4 (`core/live_bit_mask.py`) wiring, per
+        `docs/handover_skittercreek_tailslayer_port.md`: `baseline_edges`
+        is the parent seed's known edge set (e.g.
+        `edge_tracker.seed_edges[seed_key]`), `mutant_edges` is the edge
+        set from executing the mutant derived from it, and `offset` is the
+        byte position the mutation touched (`f._last_mutation_offset`).
+
+        The symmetric difference of the two edge sets is folded into a
+        `map_size`-bit mask via `edge_id % map_size` and handed to
+        `LiveBitMaskEstimator.observe(0, diff_bits)` -- passing 0 as the
+        baseline is exact, not an approximation: `observe` only ever uses
+        `baseline ^ mutant`, so `0 ^ diff_bits == diff_bits`, and this
+        avoids materializing two full-width bitmasks per call when only
+        their difference is needed. Cost is O(|symmetric difference|), not
+        O(map_size) or O(|edges|) -- the point of this module.
+
+        Returns the region's `(offset, width)` bounds iff this call is the
+        one that pushed the region's estimator from not-converged to
+        converged-with-an-empty-mask -- i.e. the edge-triggered moment a
+        caller (see `fuzzer.py`'s exec loop) should forward to
+        `FormatLearner.record_liveness()` as padding-corroborating
+        evidence. Returns `None` on every other call, including "already
+        was converged-dead" (report the transition once, not every
+        subsequent no-growth sample) and "converged but mask is nonzero"
+        (that's a confirmed-*live* verdict, not dead).
+
+        A no-op (returns `None`) if *data* is too short to have a region
+        profile (nothing to attribute the diff to) or the offset falls
+        outside every known region (can happen if a later operator in the
+        same round resized the buffer past the profiled seed's length).
+
+        NOTE (validation status): the convergence threshold this feeds
+        (`_LIVENESS_SWITCH_AFTER`) is checked only against the synthetic
+        sweep in `tests/test_live_bit_mask.py`. Per the handover doc's
+        Sequencing step 6, a real-corpus sweep is still open; the
+        conservative `_LIVENESS_DEAD_WEIGHT` down-weight (not a hard
+        exclusion) is deliberately chosen to bound the damage if that
+        sweep finds the synthetic threshold doesn't transfer.
+        """
+        entry = self.region_weights(data)
+        if entry is None:
+            return None
+        _cumulative, bounds, _total = entry
+
+        region_idx = None
+        for i, (lo, hi) in enumerate(bounds):
+            if lo <= offset < hi:
+                region_idx = i
+                break
+        if region_idx is None:
+            return None
+
+        key = xxhash.xxh3_64_intdigest(data)
+        estimators = self._region_liveness.setdefault(key, [None] * len(bounds))
+
+        diff_edges = baseline_edges ^ mutant_edges
+        if not diff_edges:
+            diff_bits = 0
+        else:
+            diff_bits = 0
+            for edge_id in diff_edges:
+                diff_bits |= 1 << (edge_id % map_size)
+
+        est = estimators[region_idx]
+        if est is None:
+            est = LiveBitMaskEstimator(n_bits=map_size, switch_after=_LIVENESS_SWITCH_AFTER)
+            estimators[region_idx] = est
+        was_converged_dead = est.is_converged and est.mask == 0
+        est.observe(0, diff_bits)
+        now_converged_dead = est.is_converged and est.mask == 0
+        if now_converged_dead and not was_converged_dead:
+            lo, hi = bounds[region_idx]
+            return (lo, hi - lo)
+        return None
+
+    def _region_liveness_factor(self, data: bytes, region_idx: int) -> float:
+        """Down-weight factor for region *region_idx* of *data*.
+
+        Returns `_LIVENESS_DEAD_WEIGHT` iff that region's estimator has
+        converged with an empty mask (confirmed-dead, per the module's
+        own fail-closed discipline: convergence is required, not just an
+        empty mask so far -- see `LiveBitMaskEstimator`'s docstring on why
+        a not-yet-converged empty mask is unresolved, not a negative
+        claim). Returns 1.0 (no-op) in every other case, including "no
+        estimator recorded for this region yet" -- absence of an
+        estimator is not evidence of anything.
+        """
+        key = xxhash.xxh3_64_intdigest(data)
+        estimators = self._region_liveness.get(key)
+        if not estimators or region_idx >= len(estimators):
+            return 1.0
+        est = estimators[region_idx]
+        if est is None:
+            return 1.0
+        if est.is_converged and est.mask == 0:
+            return _LIVENESS_DEAD_WEIGHT
+        return 1.0
+
+    def _region_weighted_position(self, data: bytes, buf_len: int) -> int | None:
+        """Draw a byte offset weighted by each region's mutation_weight(),
+        further down-weighted by observed coverage liveness (item 4).
+
+        Regions are picked proportionally to
+        `mutation_weight() * length * liveness_factor`, then a uniform
         offset is taken inside the winner. The bounds come from the *seed*,
         while the position must land in the *buffer*, which earlier operators
         in the same round may already have resized -- hence the clamp.
+
+        The static `mutation_weight() * length` term is cached in
+        region_weights() since it depends only on seed content. Liveness is
+        dynamic -- it strengthens as record_coverage_diff() accumulates more
+        mutation outcomes for this seed -- so it's re-applied fresh on every
+        draw rather than baked into that cache; this is cheap (one pass over
+        a handful of regions, not the profile_buffer() battery the cache
+        actually saves the cost of).
         """
         entry = self.region_weights(data)
         if entry is None:
             return None
         cumulative, bounds, total = entry
-        idx = bisect.bisect_left(cumulative, self.f._rand_pool.random() * total)
+        estimators = self._region_liveness.get(xxhash.xxh3_64_intdigest(data))
+        if not estimators or not any(
+            e is not None and e.is_converged and e.mask == 0 for e in estimators
+        ):
+            # Fast path: no region has confirmed-dead liveness data yet,
+            # so the cached cumulative/total (mutation_weight-only) is
+            # already correct -- skip rebuilding it.
+            idx = bisect.bisect_left(cumulative, self.f._rand_pool.random() * total)
+        else:
+            adjusted_cumulative = []
+            adjusted_total = 0.0
+            prev = 0.0
+            for i, c in enumerate(cumulative):
+                region_weight = c - prev
+                prev = c
+                adjusted_total += region_weight * self._region_liveness_factor(data, i)
+                adjusted_cumulative.append(adjusted_total)
+            if adjusted_total <= 0.0:
+                return None
+            idx = bisect.bisect_left(
+                adjusted_cumulative, self.f._rand_pool.random() * adjusted_total
+            )
         lo, hi = bounds[min(idx, len(bounds) - 1)]
         hi = min(hi, buf_len)
         if lo >= hi:

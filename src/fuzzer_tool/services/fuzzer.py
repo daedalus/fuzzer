@@ -3181,6 +3181,37 @@ class Fuzzer:
         else:
             has_new_coverage = bool(self.ptrace_cov and self.ptrace_cov.is_new_coverage())
 
+        # Region liveness (item 4, handover_skittercreek_tailslayer_port.md):
+        # fold this exec's coverage diff into the per-region
+        # LiveBitMaskEstimator for whichever byte the mutation touched.
+        # Deliberately unconditional on has_new_coverage above -- that flag
+        # only means "globally new edge", which is rare; the liveness
+        # estimator needs the far more common "no new edges, but still an
+        # observation" samples to ever reach convergence at all. Cheap and
+        # skipped outright when there's no edge data or no known parent
+        # baseline to diff against.
+        _liveness_parent = getattr(self, "_last_parent_seed", None)
+        _liveness_offset = getattr(self, "_last_mutation_offset", None)
+        if (
+            self._current_edges_cache is not None
+            and _liveness_parent is not None
+            and _liveness_offset is not None
+        ):
+            parent_key = self._seed_key(_liveness_parent)
+            baseline_edges = self._edge_tracker.seed_edges.get(parent_key)
+            if baseline_edges:
+                newly_dead = self._operators.record_coverage_diff(
+                    _liveness_parent,
+                    _liveness_offset,
+                    baseline_edges,
+                    self._current_edges_cache,
+                )
+                if newly_dead is not None and self._format_learner:
+                    region_offset, region_width = newly_dead
+                    self._format_learner.record_liveness(
+                        region_offset, region_width, confirmed_dead=True
+                    )
+
         # Bayesian seed quality feedback: record whether this parent seed
         # produced new coverage (Thompson sampling posterior update).
         if self._seed_quality:
