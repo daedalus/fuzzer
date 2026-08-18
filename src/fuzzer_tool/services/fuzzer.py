@@ -718,6 +718,7 @@ class Fuzzer:
         seed_skip_size=0,
         seed_truncate_size=0,
         seed_slide_size=0,
+        seed_slide_max_seeds=0,
     ):
         self.target = target
         self.debug = debug
@@ -866,6 +867,7 @@ class Fuzzer:
         self._seed_skip_size = seed_skip_size
         self._seed_truncate_size = seed_truncate_size
         self._seed_slide_size = seed_slide_size
+        self._seed_slide_max_seeds = seed_slide_max_seeds
 
         # Static analysis: profile target for string extraction, function
         # boundaries, input format hints, and call graph structure.
@@ -2190,11 +2192,15 @@ class Fuzzer:
                 if len(seed) <= win:
                     transformed.append(seed)
                 else:
-                    transformed.extend(seed[i : i + win] for i in range(len(seed) - win + 1))
+                    mv = memoryview(seed)
+                    transformed.extend(bytes(mv[i : i + win]) for i in range(len(seed) - win + 1))
             else:
                 if self._seed_truncate_size and len(seed) > self._seed_truncate_size:
                     seed = seed[: self._seed_truncate_size]
                 transformed.append(seed)
+
+        if self._seed_slide_size and self._seed_slide_max_seeds:
+            transformed = transformed[: self._seed_slide_max_seeds]
 
         self.corpus = transformed
         self._invalidate_seed_key_cache()

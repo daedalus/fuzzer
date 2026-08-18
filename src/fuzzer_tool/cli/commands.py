@@ -493,6 +493,7 @@ def cmd_fuzz(args):
         seed_skip_size=getattr(args, "seed_skip_size", 0),
         seed_truncate_size=getattr(args, "seed_truncate_size", 0),
         seed_slide_size=getattr(args, "seed_slide_size", 0),
+        seed_slide_max_seeds=getattr(args, "seed_slide_max_seeds", 0),
         resize_map_on_stall=getattr(args, "resize_map_on_stall", False),
         reseed_on_stall=getattr(args, "reseed_on_stall", False),
         enable_smt_z3=getattr(args, "enable_smt_z3", False),
@@ -1969,6 +1970,12 @@ def main() -> int:
         type=int,
         default=0,
         help="Slide a window of this size over each seed, replacing the corpus with windows (0=disabled)",
+    )
+    fuzz_parser.add_argument(
+        "--seed-slide-max-seeds",
+        type=int,
+        default=0,
+        help="Cap the total number of seeds after sliding (0=unlimited)",
     )
     fuzz_parser.add_argument(
         "--minimize-every-execs",
