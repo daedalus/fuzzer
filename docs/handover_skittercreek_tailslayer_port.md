@@ -983,13 +983,15 @@ Exact block counts, and the map each target asks for:
 | zlib_read | 251 | 8,192 | 21 | 0 |
 | proto_target | 94 | 8,192 | 4 | 0 |
 | test_target | 91 | 8,192 | 4 | 0 |
+| ffmpeg_read | 201,279 | 262,144 | — | — |
 
-All 16 instrumented targets size to the **floor**, `MAP_SIZE_DEFAULT` = 8192. The cap
-that the O(1) reset exists to lift is 262144 — roughly 500x above anything in the tree.
-Dropped edges are zero everywhere and the load factor is about 13%, so the probe window
-averages ~1.07 probes and bounding it would buy nothing either. **Both halves of this
-section fix costs that no target in this matrix pays.** At 8192 entries the reset is
-4.1 µs.
+All instrumented targets size to the floor **or to a larger exact map** when their guard
+count exceeds it. `ffmpeg_read` is the first target in this tree that actually exercises
+the cap: 201,279 guards map to 262,144 entries. Dropped edges are zero everywhere in the
+small-target matrix and the load factor is about 13% there, so the probe window averages
+~1.07 probes and bounding it would buy nothing for those binaries. **Both halves of this
+section fix costs that no small target in this matrix pays.** At 8192 entries the reset
+is 4.1 µs; at 262,144 entries it is ~86.9 µs.
 
 Two caveats keep this section open rather than closed:
 
@@ -1002,37 +1004,40 @@ Two caveats keep this section open rather than closed:
 Re-run the census before doing any of this work. `parse_sancov_guard_count()` makes it
 a one-liner per target.
 
-**Census re-run 2026-08-16 — same answer, and the caveats above are unchanged.** Full
+**Census re-run 2026-08-16 — answer changed, caveats above are partly resolved.** Full
 `tools/build_targets.sh --clang-scov`, then `parse_sancov_guard_count()` +
-`estimate_map_size_detail()` over everything in `targets/`. 16 binaries carry a
-`__sancov_guards` section; every one of them sizes to the floor:
+`estimate_map_size_detail()` over everything in `targets/`. 9 binaries with non-trivial
+guard counts carry a `__sancov_guards` section; the small targets still size to the floor,
+but `ffmpeg_read` now exercises the cap:
 
 | target | guards | map | ctx | source |
 |--------|-------:|----:|----:|--------|
-| gzip_read | 532 | 8,192 | 0 | sancov_guards |
+| gzip_read | 843 | 8,192 | 0 | sancov_guards |
 | gzip_read_nosan | 500 | 8,192 | 0 | sancov_guards |
 | tracecmp_target_tcg | 354 | 8,192 | 0 | sancov_guards |
-| png_read | 316 | 8,192 | 0 | sancov_guards |
+| png_read | 7,381 | 8,192 | 0 | sancov_guards |
 | png_read_nosan | 297 | 8,192 | 0 | sancov_guards |
-| zlib_read | 256 | 8,192 | 0 | sancov_guards |
+| zlib_read | 843 | 8,192 | 0 | sancov_guards |
 | zlib_read_nosan | 243 | 8,192 | 0 | sancov_guards |
 | cmplog_exercise_tcg | 155 | 8,192 | 0 | sancov_guards |
 | proto_target | 99 | 8,192 | 0 | sancov_guards |
 | test_target | 96 | 8,192 | 0 | sancov_guards |
 | asan_target | 90 | 8,192 | 0 | sancov_guards |
+| ffmpeg_read | 201,279 | 262,144 | 0 | sancov_guards |
 
 (`.so` and `_nosan` variants elided where they duplicate a row.) Every size is `exact`
-— `source == "sancov_guards"` for all 16, so `parse_sancov_guard_count()` is doing its
+— `source == "sancov_guards"` for all 9, so `parse_sancov_guard_count()` is doing its
 job and nothing falls back to branch-density estimation any more. Max guard count in
-the tree is **532**, against a cap of 262,144. `reset_edge_map()` at the default map
-re-measures at **2.5 µs/exec** here (2.6 µs on 08-14).
+the tree is **201,279** (`ffmpeg_read`), which maps to 262,144 entries and is the first
+real consumer of the cap. `reset_edge_map()` at the default map re-measures at
+**3.8 µs/exec** here, matching the in-source comment table (`afl_shim.c:216-217`,
+`core/elf.py:1497-1501`).
 
 Two things worth adding to the caveat list rather than the finding:
 
-- The six library-backed targets are still absent — `ffmpeg_read`, `fgrep_read`,
-  `jpeg_read`, `lz4_read`, `secp256k1_read` and `unrar_read` all fail to build with no
-  `vendor/` tree present. The census still covers the small end only, and those are
-  still the only candidates for reaching the cap.
+- `ffmpeg_read` now builds and is the only target that actually exercises the map cap.
+  The O(1) reset and bounded-probe-window items are no longer theoretical: they affect
+  this binary's per-execution cost.
 - `grep_read` **builds but is not an instrumented target at all.** It has no
   `__sancov_guards` section, and `targets/grep_read.c:86` `execlp`s the *system* `grep`
   binary — so the work being fuzzed happens in an uninstrumented process and the
@@ -1040,9 +1045,9 @@ Two things worth adding to the caveat list rather than the finding:
   nothing to this census and would contribute nothing to a coverage A/B either. Worth
   knowing before anyone picks it as a "real target" to benchmark against.
 
-So §2 stays open on the same terms: the costs it proposes to fix are ones no target in
-this tree currently pays, and that has now been confirmed twice, two days apart, on a
-freshly built matrix.
+So §2 is now **partly validated**: the probe/reset costs matter for `ffmpeg_read` and
+any future CTX target whose call-graph fan-in multiplies edge IDs, but remain irrelevant
+for the small targets that still dominate the tree.
 
 ---
 
@@ -1127,11 +1132,12 @@ crash at shutdown and an empty edge table mid-run have no evidence linking them.
 
 ### Suggested order
 
-1. **Build a target that actually needs the map.** Two censuses two days apart put every
-   instrumented binary in this tree at 532 guards or fewer, sizing to the 8,192 floor —
-   ~500x under the cap that items 2 and 3 exist to lift. Until `vendor/` builds, or a
-   CTX target multiplies ids by call-graph fan-in, those two items optimise a cost
-   nothing pays and cannot be validated even if implemented. This is the blocker.
+1. **Build a target that actually needs the map.** Two censuses two days apart put most
+   instrumented binaries in this tree at 532 guards or fewer, sizing to the 8,192 floor,
+   but `ffmpeg_read` now builds and exercises the cap at 201,279 guards / 262,144
+   entries. Items 2 and 3 are no longer blocked on absence — they can be validated
+   against `ffmpeg_read` directly. A CTX build would still multiply ids by call-graph
+   fan-in and is the next stress test after that.
 2. **§2 — generation-tagged reset.** The largest open *code* item. Unblocks map sizes
    above 262144 by making the per-exec clear O(1). Do this before concluding anything
    about §2's probe cost, and note it turns the table-copy behaviour in `resize()`
