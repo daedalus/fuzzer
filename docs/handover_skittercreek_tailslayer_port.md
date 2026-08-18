@@ -1,11 +1,12 @@
 # Handover: porting alias-solving, support-recovery, and timing-analysis algorithms into the fuzzer
 
-Status: items 5 and 6 implemented and wired into `services/fuzzer.py`;
-items 1 and 2 implemented and wired (item 1 into `checksum_learner.py`,
-item 2 into `root_cause.py`); item 4 implemented and wired (round 7 —
-`services/operators.py` region down-weighting and
+Status: items 5 and 6 implemented and wired into `services/fuzzer.py`
+and `services/report.py`; items 1 and 2 implemented and wired (item 1 into
+`checksum_learner.py`, item 2 into `root_cause.py`); item 4 implemented and
+wired (round 7 — `services/operators.py` region down-weighting and
 `core/format_learner.py` padding corroboration, both still gated on the
-real-corpus sensitivity sweep noted below); items 3, 7, and 13 remain
+real-corpus sensitivity sweep noted below); item 7 implemented and wired into
+`services/report.py` as `_temporal_correlation`; items 3 and 13 remain
 proposals.
 Sources:
 - `xoreaxeaxeax/skitter-creek-bath-salts` — `analysis/unspaghettify.py`,
@@ -728,12 +729,7 @@ runs on multiple worker threads/processes.
     laggard-advance decision), which is the right tradeoff for the
     100k+-sample real-time use case it was built for, but should be
     documented as a known limitation, not silently assumed lossless.
-- No integration into item 5 in this PR — land as a standalone, tested
-  leaf utility first, same "don't wire speculative plumbing ahead of a
-  real producer" discipline as item 2's `gf2_linalg.py`. The item-5 ×
-  item-7 combination (join anomaly timestamps to mutation events) is a
-  concrete follow-up once item 5 actually exists and produces timestamped
-  output worth joining against.
+- **Implementation status:** IMPLEMENTED in `src/fuzzer_tool/core/temporal_join.py` (89 lines) and wired into `src/fuzzer_tool/services/report.py` as `_temporal_correlation`. `join_streams()` aligns coverage-snapshot and discovery-snapshot streams via wall-clock timestamps and reports the average edge-rate delta across aligned sync points. Tests: `tests/test_temporal_join.py` (11 cases) and `tests/test_report.py::TestTemporalCorrelationReport` (2 cases).
 
 **Validation plan:**
 
@@ -799,9 +795,10 @@ File: `tests/test_temporal_join.py` (new).
     `src/fuzzer_tool/core/periodicity.py` and wired into
     `src/fuzzer_tool/services/report.py` as a confirmatory add-on to
     `_spectral_diagnostics` in commit `29e3515`.
-11. `core/temporal_join.py` + tests (item 7) — no dependencies; can land
-    any time, including before item 5, since it doesn't need item 5's
-    output to be tested standalone.
+11. ~~`core/temporal_join.py` + tests (item 7)~~ — **DONE.** Landed as
+    `core/temporal_join.py` + `tests/test_temporal_join.py`; wired into
+    `src/fuzzer_tool/services/report.py` as `_temporal_correlation` in
+    commit `a5040c4`.
 12. ~~Wire item 5 into `runner.py` as an additive interestingness signal~~
     ~~(never replacing the hard `f.timeout` safety ceiling) — gated on~~
     ~~item 9's synthetic false-positive/negative sweep giving an acceptable~~
@@ -820,12 +817,11 @@ below some sample-count threshold, or step 6's real-corpus sweep shows
 item 4's false-negative rate doesn't converge to something acceptable
 within a reasonable sample budget, any of these is a valid place to stop
 and report the null result rather than proceeding regardless. Steps 2, 7,
-9, 10, and 12 (item 4's utility + wiring, and items 5 and 6's leaf
-utilities) are complete, alongside items 1 and 2's own wiring; the
+9, 10, 11, and 12 (item 4's utility + wiring, and items 5, 6, and 7's
+leaf utilities) are complete, alongside items 1 and 2's own wiring; the
 remaining open work is item 3 (deferred), item 4's step 6 (the
 real-corpus sensitivity sweep — wiring shipped ahead of it in round 7,
-see that note for the risk-bounding rationale), item 7, and item 13
-(deferred).
+see that note for the risk-bounding rationale), and item 13 (deferred).
 
 ## Open questions for Gabriel
 
