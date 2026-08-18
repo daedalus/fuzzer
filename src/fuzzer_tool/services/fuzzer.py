@@ -2174,8 +2174,13 @@ class Fuzzer:
 
         original = list(self.corpus)
         transformed: list[bytes] = []
+        # None means "uncapped" (0, or slide disabled) — every `cap is not
+        # None` check below is then simply skipped.
+        cap = self._seed_slide_max_seeds if self._seed_slide_size and self._seed_slide_max_seeds else None
 
         for seed in original:
+            if cap is not None and len(transformed) >= cap:
+                break
             if self._seed_skip_size and len(seed) > self._seed_skip_size:
                 continue
             if self._seed_slide_size:
@@ -2183,15 +2188,17 @@ class Fuzzer:
                 if len(seed) <= win:
                     transformed.append(seed)
                 else:
-                    mv = memoryview(seed)
-                    transformed.extend(bytes(mv[i : i + win]) for i in range(len(seed) - win + 1))
+                    # bytes slicing is already a single C-level memcpy, so
+                    # there is nothing for memoryview to save here — it just
+                    # adds an extra allocation on the way to the same bytes.
+                    for i in range(len(seed) - win + 1):
+                        if cap is not None and len(transformed) >= cap:
+                            break
+                        transformed.append(seed[i : i + win])
             else:
                 if self._seed_truncate_size and len(seed) > self._seed_truncate_size:
                     seed = seed[: self._seed_truncate_size]
                 transformed.append(seed)
-
-        if self._seed_slide_size and self._seed_slide_max_seeds:
-            transformed = transformed[: self._seed_slide_max_seeds]
 
         self.corpus = transformed
 

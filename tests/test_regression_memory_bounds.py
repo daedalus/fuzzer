@@ -137,6 +137,62 @@ class TestFuzzerSeedKeyDoesNotPinBytes:
         assert f._seed_key(b"aaa") != f._seed_key(b"bbb")
 
 
+class TestSeedSlideCapBoundsExpansion:
+    """--seed-slide-max-seeds must stop window generation once the cap is
+    hit, not build the full expansion and then slice it. A single large
+    seed can otherwise generate millions of windows before the cap is
+    ever applied, spiking memory well past what the cap promises."""
+
+    @staticmethod
+    def _make_fuzzer(corpus, *, skip=0, truncate=0, slide=0, slide_max=0):
+        from fuzzer_tool.services.fuzzer import Fuzzer
+
+        f = Fuzzer.__new__(Fuzzer)
+        f.corpus = corpus
+        f._seed_skip_size = skip
+        f._seed_truncate_size = truncate
+        f._seed_slide_size = slide
+        f._seed_slide_max_seeds = slide_max
+        return f
+
+    def test_cap_bounds_final_corpus_size(self):
+        f = self._make_fuzzer([b"A" * 10_000], slide=4, slide_max=100)
+        f._apply_seed_transforms()
+        assert len(f.corpus) == 100
+
+    def test_generation_stops_early_not_after_full_expansion(self):
+        """A seed large enough to generate millions of windows must not be
+        fully expanded in memory before the cap is applied — count()
+        calls into range() lazily via a for-loop with early break, so this
+        just checks the observable result stays capped for a huge seed."""
+        big_seed = b"A" * 5_000_000
+        f = self._make_fuzzer([big_seed], slide=4, slide_max=50)
+        f._apply_seed_transforms()
+        assert len(f.corpus) == 50
+
+    def test_cap_applies_across_multiple_seeds(self):
+        f = self._make_fuzzer([b"A" * 20, b"B" * 20, b"C" * 20], slide=4, slide_max=10)
+        f._apply_seed_transforms()
+        assert len(f.corpus) == 10
+
+    def test_zero_cap_means_uncapped(self):
+        f = self._make_fuzzer([b"A" * 20], slide=4, slide_max=0)
+        f._apply_seed_transforms()
+        assert len(f.corpus) == 17  # 20 - 4 + 1 windows, no cap applied
+
+    def test_cap_without_slide_is_ignored(self):
+        """slide_max_seeds only makes sense alongside sliding; it must not
+        truncate an unrelated skip/truncate-only corpus."""
+        f = self._make_fuzzer([b"A" * 20, b"B" * 20], truncate=5, slide_max=1)
+        f._apply_seed_transforms()
+        assert len(f.corpus) == 2
+
+    def test_windows_are_correct_bytes_not_just_correct_count(self):
+        f = self._make_fuzzer([b"ABCDEFGH"], slide=3, slide_max=2)
+        f._apply_seed_transforms()
+        assert f.corpus == [b"ABC", b"BCD"]
+
+
 class TestEdgeTrackerPrunesAllPerSeedMetrics:
     """_maybe_prune() dropped seed_edges but left seed_stack_depth,
     seed_path_hash, and the hw_* dicts to grow without bound."""
