@@ -131,6 +131,43 @@ consumers.
   the synthetic-only validation degrades gracefully rather than
   silently misdirecting the fuzzer or the format model.
 
+**Revision note (round 9):** verified against the current tree (`c7989ad`,
+995 commits) rather than assumed from prior rounds' notes.
+
+- Both open loose threads from `docs/handover/` are now **fixed**, not just
+  diagnosed. The z3 finalization segfault has a real fix in
+  `core/z3_lifecycle.py` (commit `a537614`): `guard_z3_shutdown()` registers
+  an `atexit` hook that clears `owner` on z3's singleton context before
+  interpreter teardown reorders module globals, so `Z3_del_context` becomes
+  a no-op instead of a native fault. The SIGSEGV-handler-suppressing-
+  faulthandler problem noted alongside it is also fixed — `fuzzer.py` now
+  installs `faulthandler` (C-level, thread-safe) instead of the old
+  Python-level `signal.signal(SIGSEGV, ...)` that couldn't run from signal
+  context and silently ate faulthandler's own dump.
+- The SHM/forkserver hang (`docs/handover/test_shm_hang_2026-08-14.md`,
+  unreproduced at the time) is fixed in commit `a267ff8`: the shim
+  constructor no longer enters the forkserver loop just because
+  `write(AFL_FORKSRV_FD+1, ...)` succeeded — inherited fds at 198/199 from
+  a parent process could satisfy that write and hang any bare
+  `ctypes.CDLL()` load forever. Forkserver activation now requires an
+  explicit `__AFL_FORKSRV=1` opt-in, set only by the real loader. A
+  regression test simulating inherited fds 198/199 landed alongside it.
+- Item 3 (lineage composition) and item 13 (item 5×7 combination) remain
+  exactly as before: `compose_xor_maps` has no caller in `lineage.py`, and
+  no offset-attribution join of anomaly timestamps to mutation events exists
+  in `report.py`. Both still correctly deferred, not silently dropped.
+- Sequencing step 6 (item 4's real-corpus sensitivity sweep) is still open
+  — `_LIVENESS_DEAD_WEIGHT` is still `0.1` in `services/operators.py`, no
+  sweep script or result exists anywhere in the tree. Still the right next
+  step before trusting the down-weight/padding signal at full strength.
+- The havoc short-circuit flagged under "Suggested but not implemented"
+  is **still present and unfixed**, now at `services/operators.py:3155`
+  (`if op == "havoc": ... return result`) — line number shifted from the
+  `:2827` cited earlier as the file has grown, but the bug itself, and the
+  reasoning about `n_mutations`/`_last_perf_score` being a no-op whenever
+  havoc is drawn early, are unchanged. Worth prioritizing: havoc is still
+  the most-drawn operator.
+
 **Revision note (round 8):** generation-tagged SHM edge-map reset is
 implemented and shipped in commit `1eb7979`. `__afl_map_reset()` no longer
 `memset`s the table; it bumps an 8-bit generation counter stored in `diag`
@@ -1122,6 +1159,14 @@ only in tests).
 ---
 
 ### Open loose threads
+
+**Update (round 9): the two threads below this note are resolved.** The
+`Segmentation fault` at z3 finalization has a real fix (`core/z3_lifecycle.py`,
+commit `a537614`) rather than only a diagnosis, and the SHM/forkserver hang
+has a real fix (commit `a267ff8`, gating forkserver activation on
+`__AFL_FORKSRV=1`) rather than only a failed-reproduction writeup. The
+`shmat()` intermittent-failure thread immediately below is the one item in
+this section still genuinely open — no fix or further sighting since round 7.
 
 **Intermittent `shmat()` failure.** Root cause still unknown. The stale-view hypothesis
 (`ShmCoverage.cleanup()` leaving `from_address` views bound to a detached mapping) is
