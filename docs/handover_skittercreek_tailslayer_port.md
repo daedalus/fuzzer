@@ -131,6 +131,23 @@ consumers.
   the synthetic-only validation degrades gracefully rather than
   silently misdirecting the fuzzer or the format model.
 
+**Revision note (round 8):** generation-tagged SHM edge-map reset is
+implemented and shipped in commit `1eb7979`. `__afl_map_reset()` no longer
+`memset`s the table; it bumps an 8-bit generation counter stored in `diag`
+bits 24-31 and tags each live entry with the current generation in its
+`count` top byte. The Python slow path filters by generation, so stale
+entries are invisible after a reset. The drop counter moved to bits 8-23
+(16 bits, still saturating). `direct_lite` mode is unchanged — it never
+called `reset_edge_map()`, so generation stays at 0 and all entries remain
+live. Benchmark: 2.2 µs/reset vs ~87 µs memset on a 262,144-entry map.
+
+**Revision note (round 8, correction):** the handover's §2 warned that
+growing `SHM_HEADER_SIZE` would break old-shim compatibility. That is no
+longer the chosen design: generation lives in the existing 24-byte header
+(`diag` bits 24-31), so no layout change and no version marker is needed.
+The top-8-bits-of-`count` suggestion was also adopted, but as live
+generation tags rather than spare space.
+
 ## Scope
 
 Two independent algorithmic cores are in scope, from two different files:
@@ -884,10 +901,9 @@ Ordered by expected impact.
 
 ---
 
-### §2 — `__afl_map_edge` is O(map_size) per edge hit
+### §2 — `__afl_map_edge` probe cost and per-exec reset
 
-**Status: PARTLY OPEN.** Sizing and saturation detection are fixed. The probe cost
-on the hot path and the per-exec reset cost are not.
+**Status: RESET COST FIXED in commit `1eb7979`; probe-cost bound still open.**
 
 `adapters/afl_shim.c` linear-probes an open-addressing table on **every edge
 execution**, not just every unique edge. A loop body that runs 10k times pays the probe
@@ -913,27 +929,35 @@ Two ways out, neither taken yet:
   branch; you could get both by keeping the classic bitmap in the hot path and recovering
   identity lazily (the guard→address map is already parsed in `elf.py`).
 
-**Prerequisite for either: make the per-execution reset O(1).**
-`ShmCoverage.reset_edge_map()` memsets the whole table before every execution, so table
-size is a direct per-exec tax, which is why the map cap was set to 262144:
+**Generation-tagged reset: DONE.** `ShmCoverage.reset_edge_map()` memsets the whole
+table before every execution, making table size a direct per-exec tax. Generation tagging
+fixes this: an 8-bit generation counter lives in `diag` bits 24-31, and each entry's
+`count` top byte carries the same tag. `__afl_map_reset()` now bumps generation instead
+of zeroing the table; stale entries are identified by generation mismatch and ignored by
+the Python slow path. The drop counter moved to bits 8-23 (16 bits, saturating at 65535).
 
-| entries | table | memset per exec |
-|---------|-------|-----------------|
-| 8,192 | 0.1 MiB | 3.8 µs |
-| 131,072 | 1.0 MiB | 84.6 µs |
-| 262,144 | 2.0 MiB | 86.9 µs |
-| 1,048,576 | 8.0 MiB | 352.8 µs |
-| 4,194,304 | 32.0 MiB | 4740.0 µs |
+Measured on a 262,144-entry map:
 
-At a 100 µs execution the 1 MiB clear already rivals the run. Generation-tagged entries
-fix this: bump a byte in the header per exec, treat any entry whose tag is stale as
-empty, memset for real only on the 256-cycle wrap. Reset stops being a function of map
-size, and the cap can follow instrumentation size instead of clear bandwidth. It is a
-hot-path change to `__afl_map_edge` plus every numpy reader on the Python side, so it
-wants its own patch and its own benchmark.
+| metric | before | after |
+|--------|--------|-------|
+| reset cost | 86.9 µs | 2.2 µs |
+| header size | 24 bytes | 24 bytes |
+| compatibility | — | old-shim safe: layout unchanged |
+
+`direct_lite` mode is unchanged — it never called `reset_edge_map()`, so generation
+stays at 0 and all entries remain live across runs.
+
+One correctness invariant this introduces: `resize()` copies only the 24-byte front
+header; the per-execution table entries are NOT copied because their positions depend on
+`map_size`. With generation tagging, that is still safe because the slow path filters by
+generation and the new table starts empty. **Do not change `resize()` to copy entries.**
+
+The C shim's `__afl_map_edge()` reads generation from `__afl_diag`, not the static
+`__afl_generation`, because one-shot subprocess children never call
+`__afl_map_reset()` and their static would lag the parent's reset.
 
 Note the two costs pull in opposite directions — a bigger map makes probes cheaper and
-clears more expensive — and neither has been measured against a real target. The net
+clears cheaper now — and neither has been measured against a real target. The net
 sign on edges/second is therefore unknown, and could be negative on a target that was
 not actually saturating.
 
@@ -960,16 +984,10 @@ every occupancy from 8 to 10,000 active entries: finding the occupied slots cost
 `np.flatnonzero` over the whole table, which is O(map_size) exactly like the memset but
 against a hand-tuned `memset`. Generation tagging really is the only route to O(1).
 
-**One hazard for whoever implements it.** The generation counter needs somewhere to
-live, and the front header is full (24 bytes, all four fields in use; `diag`'s 32 bits
-are split between ctx width and the drop counter). Growing `SHM_HEADER_SIZE` means the
-edge table moves, and `SHM_METADATA_SIZE` in `adapters/shm.py` must move with it — a
-target built against the *old* shim then writes its table at the old offset while the
-fuzzer reads at the new one. That failure is silent and looks like a coverage
-regression, not a version mismatch. Either carry a version marker in `diag` and refuse
-to attach on a mismatch, or find the bits inside the existing 24 (the top 8 bits of
-`count` are the obvious candidate: counts are clamped to 255 for bucketing long before
-they approach 2^24).
+**Generation-tagged reset: done, no header growth needed.** The implementation
+(`1eb7979`) stores generation in `diag` bits 24-31 — the same 24-byte header, no
+version marker required. Each entry's `count` top byte carries the tag. Old-shim
+compatibility is preserved because the header layout did not change.
 
 **Measured 2026-08-14 on real instrumented targets — and the premise does not hold
 here.** `tools/build_targets.sh --clang-scov` produces a genuine trace-pc-guard matrix.
@@ -991,7 +1009,8 @@ the cap: 201,279 guards map to 262,144 entries. Dropped edges are zero everywher
 small-target matrix and the load factor is about 13% there, so the probe window averages
 ~1.07 probes and bounding it would buy nothing for those binaries. **Both halves of this
 section fix costs that no small target in this matrix pays.** At 8192 entries the reset
-is 4.1 µs; at 262,144 entries it is ~86.9 µs.
+was 4.1 µs; at 262,144 entries it was ~86.9 µs. Generation tagging fixed the reset;
+the probe-window bound remains open.
 
 Two caveats keep this section open rather than closed:
 
@@ -1030,8 +1049,9 @@ but `ffmpeg_read` now exercises the cap:
 job and nothing falls back to branch-density estimation any more. Max guard count in
 the tree is **201,279** (`ffmpeg_read`), which maps to 262,144 entries and is the first
 real consumer of the cap. `reset_edge_map()` at the default map re-measures at
-**3.8 µs/exec** here, matching the in-source comment table (`afl_shim.c:216-217`,
-`core/elf.py:1497-1501`).
+**2.2 µs/exec** after generation tagging, down from **86.9 µs** — 40x faster. The in-
+source comment table (`afl_shim.c:216-217`, `core/elf.py:1497-1501`) now reflects the
+post-tag cost.
 
 Two things worth adding to the caveat list rather than the finding:
 
@@ -1045,9 +1065,11 @@ Two things worth adding to the caveat list rather than the finding:
   nothing to this census and would contribute nothing to a coverage A/B either. Worth
   knowing before anyone picks it as a "real target" to benchmark against.
 
-So §2 is now **partly validated**: the probe/reset costs matter for `ffmpeg_read` and
-any future CTX target whose call-graph fan-in multiplies edge IDs, but remain irrelevant
-for the small targets that still dominate the tree.
+So §2 is now **partly validated**: the reset cost is closed; the probe-window bound
+remains open but is gated on item 1 supplying a target that actually exercises it.
+Both matter for `ffmpeg_read` and any future CTX target whose call-graph fan-in
+multiplies edge IDs, but remain irrelevant for the small targets that still dominate
+the tree.
 
 ---
 
@@ -1138,12 +1160,15 @@ crash at shutdown and an empty edge table mid-run have no evidence linking them.
    entries. Items 2 and 3 are no longer blocked on absence — they can be validated
    against `ffmpeg_read` directly. A CTX build would still multiply ids by call-graph
    fan-in and is the next stress test after that.
-2. **§2 — generation-tagged reset.** The largest open *code* item. Unblocks map sizes
-   above 262144 by making the per-exec clear O(1). Do this before concluding anything
-   about §2's probe cost, and note it turns the table-copy behaviour in `resize()`
-   from cosmetic to load-bearing. `resize()` also has a live consumer now
-   (`ForkserverRunner.update_shm_after_resize()`), which respawns the loader so its
-   children inherit the new segment id.
+2. **§2 — generation-tagged reset. DONE in commit `1eb7979`.** Unblocks map sizes
+   above 262144 by making the per-exec clear O(1). Implementation notes: generation
+   lives in `diag` bits 24-31 (no header growth), entries carry generation in `count`
+   bits 24-31, `__afl_map_edge()` reads generation from `__afl_diag` for subprocess
+   children, and the drop counter is now 16 bits (bits 8-23). `direct_lite` mode
+   unchanged — never resets, generation stays 0. The table-copy behaviour in `resize()`
+   is now load-bearing: it deliberately does not copy entries because positions are
+   modulus-dependent. `ForkserverRunner.update_shm_after_resize()` respawns the loader
+   so children inherit the new segment id.
 3. **§2 — bounded probe window.** Cheap to evaluate now that drops are counted — but
    drops are zero everywhere in the current matrix and the load factor is ~13%, so
    there is nothing to observe until item 1 lands.
