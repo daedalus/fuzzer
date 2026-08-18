@@ -25,6 +25,13 @@ Three separate defects made the compiler-IR layer inert, each silent:
    still catches genuine inline integer compares and switch dispatch that
    the libc layer cannot see.
 
+4. **The build verifier only looked for global ``T`` symbols.** After the
+   cmplog merge, ``afl_shim.c`` emits trace-cmp callbacks with hidden
+   visibility under ``__AFL_CMP_VIS``, so ``nm`` shows ``t`` local symbols.
+   The verifier's grep pattern missed them and reported false "no trace-cmp
+   implementations" warnings even though cmplog was fully functional at
+   runtime.
+
 The shim is now compiled into the target with ``-D__AFL_CMPLOG=1`` rather
 than linked as a separate ``cmplog_shim.o``. "Linked in" in the numbers
 below means that gate is on.
@@ -273,3 +280,49 @@ def test_nobuiltin_keeps_memcmp_a_real_call():
 
         assert not calls_memcmp(folded), "-O2 unexpectedly kept the memcmp call"
         assert calls_memcmp(kept), "-fno-builtin-memcmp did not keep the call"
+
+
+@requires_clang
+def test_hidden_tracecmp_symbols_are_recognized_by_verifier():
+    """The build verifier must accept hidden trace-cmp callbacks.
+
+    afl_shim.c emits ``__sanitizer_cov_trace_cmp*`` with hidden visibility
+    under ``__AFL_CMP_VIS``, so ``nm`` shows ``t`` local symbols instead
+    of ``T`` globals.  The verifier grep pattern must match both.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "tgt.c"
+        src.write_text(
+            """
+#include <stdint.h>
+#include <stddef.h>
+int LLVMFuzzerTestOneInput(const uint8_t *d, size_t n) { return n > 0 && d[0] == 'A'; }
+"""
+        )
+        out = Path(tmp) / "tgt.so"
+        cmd = [
+            "clang",
+            "-O2",
+            "-g",
+            "-D__AFL_CMPLOG=1",
+            *NOBUILTIN,
+            "-fsanitize-coverage=trace-pc-guard",
+            "-shared",
+            "-fPIC",
+            "-Wl,-Bsymbolic",
+            "-include",
+            str(AFL_SHIM),
+            "-o",
+            str(out),
+            str(src),
+            "-ldl",
+        ]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        assert r.returncode == 0, r.stderr.decode()[:600]
+
+        nm_out = subprocess.run(["nm", str(out)], capture_output=True, text=True, timeout=60).stdout
+        assert "__sanitizer_cov_trace_cmp4" in nm_out, "trace-cmp callback missing"
+        assert re.search(r"[Tt] __sanitizer_cov_trace_cmp4\b", nm_out), (
+            "trace-cmp callback not found as T or t — verifier grep may be wrong"
+        )
+        assert "T __cmplog_reset" in nm_out, "cmplog reset should remain globally visible"

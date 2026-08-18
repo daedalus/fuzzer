@@ -1053,7 +1053,7 @@ verify_vendor_tracecmp() {
     local total_implementations=0 total_so_callers=0
     for f in "$TARGETS"/*.so; do
         [ -f "$f" ] || continue
-        local impl_count=$(nm "$f" 2>/dev/null | grep -c 'T.*trace_cmp' || true)
+        local impl_count=$(nm "$f" 2>/dev/null | grep -cE '[Tt].*trace_cmp' || true)
         local undef_count=$(nm "$f" 2>/dev/null | grep -c 'U.*trace_cmp' || true)
         total_implementations=$((total_implementations + impl_count))
         total_so_callers=$((total_so_callers + undef_count))
