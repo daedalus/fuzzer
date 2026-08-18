@@ -111,3 +111,61 @@ class TestAttemptedSetIsBounded:
         solver = PathConstraintSolver()
         solver.negate(rec, data)
         assert solver.frontier([rec], data) == []
+
+
+class TestFuzzerSeedKeyDoesNotPinBytes:
+    """_seed_key_cache stored the full bytes object as a dict key, so every
+    unique mutation was pinned in memory until the next minimization. During
+    long stalls this grew RSS by GBs."""
+
+    def test_seed_key_does_not_cache_full_bytes(self):
+        from fuzzer_tool.services.fuzzer import Fuzzer
+
+        f = Fuzzer.__new__(Fuzzer)
+        f._corpus_manager = type("CM", (), {"seed_key": lambda s, d: "k"})()
+        data = b"ABCDEFGH"
+        key = f._seed_key(data)
+        assert key == "k"
+        assert not hasattr(f, "_seed_key_cache")
+
+    def test_seed_key_deterministic(self):
+        from fuzzer_tool.services.fuzzer import Fuzzer
+
+        f = Fuzzer.__new__(Fuzzer)
+        f._corpus_manager = type("CM", (), {"seed_key": lambda s, d: d[:4].hex()})()
+        assert f._seed_key(b"test") == f._seed_key(b"test")
+        assert f._seed_key(b"aaa") != f._seed_key(b"bbb")
+
+
+class TestEdgeTrackerPrunesAllPerSeedMetrics:
+    """_maybe_prune() dropped seed_edges but left seed_stack_depth,
+    seed_path_hash, and the hw_* dicts to grow without bound."""
+
+    def test_prune_removes_per_seed_metric_dicts(self):
+        from fuzzer_tool.core.edge_tracker import EdgeTracker
+
+        et = EdgeTracker(map_size=65536, max_tracked_seeds=2)
+        for i in range(5):
+            et.record_edges(
+                seed_key=f"seed_{i}",
+                hit_edges={i},
+                stack_depth=100 + i,
+                path_hash=0x1000 + i,
+                hw_instructions=1000 + i,
+                hw_branches=100 + i,
+                hw_branch_misses=10 + i,
+            )
+        assert len(et.seed_edges) == 2
+        # Only the newest 2 seeds should remain in the per-seed metric dicts
+        assert len(et.seed_stack_depth) == 2
+        assert len(et.seed_path_hash) == 2
+        assert len(et.seed_hw_instructions) == 2
+        assert len(et.seed_hw_branches) == 2
+        assert len(et.seed_hw_branch_misses) == 2
+        # The pruned seeds' entries must be gone
+        for i in range(3):
+            assert f"seed_{i}" not in et.seed_stack_depth
+            assert f"seed_{i}" not in et.seed_path_hash
+            assert f"seed_{i}" not in et.seed_hw_instructions
+            assert f"seed_{i}" not in et.seed_hw_branches
+            assert f"seed_{i}" not in et.seed_hw_branch_misses

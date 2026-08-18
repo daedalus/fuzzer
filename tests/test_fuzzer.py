@@ -185,9 +185,9 @@ class TestFuzzerUnit:
     def test_corpus_boost_invalidates_cache(self):
         f = self._make_fuzzer(corpus_boost=100)
         f.corpus = [b"AAAA", b"BBBB"]
-        f._seed_key_cache = {b"AAAA": "old", b"BBBB": "old"}
         f._boost_corpus_sizes()
-        assert len(f._seed_key_cache) == 0
+        assert all(len(s) <= 100 for s in f.corpus)
+        assert not hasattr(f, "_seed_key_cache")
 
     def test_pick_seed_weights_less_fuzzed(self):
         f = self._make_fuzzer()

@@ -1243,9 +1243,10 @@ class Fuzzer:
         self._power_schedule = schedule
         self._last_perf_score = 100.0  # default multiplier (1x)
 
-        # Seed key cache: maps seed bytes -> hex digest.  Initialised early
-        # because _boost_corpus_sizes() invalidates it on corpus resizing.
-        self._seed_key_cache: dict[bytes, str] = {}
+        # Seed key: computed on demand from corpus manager.  Caching the
+        # full bytes object as a dict key pinned every unique mutation in
+        # memory between minimization passes, which is the primary cause of
+        # the 10 GB RSS growth during long stalls.
 
         # Per-byte sensitivity tracker (Lyapunov exponent). Constructed
         # before _init_seed_metadata so load_state (resume) can restore
@@ -2136,17 +2137,8 @@ class Fuzzer:
         return self._corpus_manager.init_seed_metadata()
 
     def _seed_key(self, data: bytes) -> str:
-        """Return cached content hash for *data*."""
-        cached = self._seed_key_cache.get(data)
-        if cached is not None:
-            return cached
-        key = self._corpus_manager.seed_key(data)
-        self._seed_key_cache[data] = key
-        return key
-
-    def _invalidate_seed_key_cache(self) -> None:
-        """Clear the seed key cache — call when corpus structure changes."""
-        self._seed_key_cache.clear()
+        """Return content hash for *data*."""
+        return self._corpus_manager.seed_key(data)
 
     def _boost_corpus_sizes(self) -> None:
         """Resize each corpus seed to a target size drawn from N(boost_mean, boost_std),
@@ -2167,7 +2159,6 @@ class Fuzzer:
         self.corpus = [
             self._resize_seed(s, t) for s, t in zip(self.corpus, target_sizes, strict=False)
         ]
-        self._invalidate_seed_key_cache()
 
     def _apply_seed_transforms(self) -> None:
         """Apply skip/truncate/slide transforms to the loaded corpus.
@@ -2203,7 +2194,6 @@ class Fuzzer:
             transformed = transformed[: self._seed_slide_max_seeds]
 
         self.corpus = transformed
-        self._invalidate_seed_key_cache()
 
     def _resize_seed(self, seed: bytes, target_size: int) -> bytes:
         """Truncate or pad *seed* to *target_size* bytes.

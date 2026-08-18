@@ -896,6 +896,11 @@ class EdgeTracker:
             self.seed_hit_counts.pop(key, None)
             self.seed_edge_traces.pop(key, None)
             self.seed_target_edges.pop(key, None)
+            self.seed_stack_depth.pop(key, None)
+            self.seed_path_hash.pop(key, None)
+            self.seed_hw_instructions.pop(key, None)
+            self.seed_hw_branches.pop(key, None)
+            self.seed_hw_branch_misses.pop(key, None)
             self._minhash.remove(key)
 
         self._aggregate_cache = None
