@@ -715,6 +715,9 @@ class Fuzzer:
         region_profile=False,
         deterministic=True,
         forkserver=True,
+        seed_skip_size=0,
+        seed_truncate_size=0,
+        seed_slide_size=0,
     ):
         self.target = target
         self.debug = debug
@@ -858,6 +861,11 @@ class Fuzzer:
         self._boost_mean = boost_mean
         self._boost_std = boost_std
         self._boost_pad = boost_pad
+
+        # Seed preprocessing: skip/truncate/slide
+        self._seed_skip_size = seed_skip_size
+        self._seed_truncate_size = seed_truncate_size
+        self._seed_slide_size = seed_slide_size
 
         # Static analysis: profile target for string extraction, function
         # boundaries, input format hints, and call graph structure.
@@ -1289,6 +1297,7 @@ class Fuzzer:
             log.info("MCTS seed scheduling enabled")
 
         self._load_corpus()
+        self._apply_seed_transforms()
         if self._corpus_boost > 0 and self.corpus:
             self._boost_corpus_sizes()
         self._init_seed_metadata()
@@ -2156,6 +2165,38 @@ class Fuzzer:
         self.corpus = [
             self._resize_seed(s, t) for s, t in zip(self.corpus, target_sizes, strict=False)
         ]
+        self._invalidate_seed_key_cache()
+
+    def _apply_seed_transforms(self) -> None:
+        """Apply skip/truncate/slide transforms to the loaded corpus.
+
+        If any transform flag is set, seeds are not used as-is. The order is:
+        skip -> truncate -> slide. Sliding replaces each seed with a set of
+        fixed-size windows.
+        """
+        if not self.corpus:
+            return
+        if not (self._seed_skip_size or self._seed_truncate_size or self._seed_slide_size):
+            return
+
+        original = list(self.corpus)
+        transformed: list[bytes] = []
+
+        for seed in original:
+            if self._seed_skip_size and len(seed) > self._seed_skip_size:
+                continue
+            if self._seed_slide_size:
+                win = max(1, self._seed_slide_size)
+                if len(seed) <= win:
+                    transformed.append(seed)
+                else:
+                    transformed.extend(seed[i : i + win] for i in range(len(seed) - win + 1))
+            else:
+                if self._seed_truncate_size and len(seed) > self._seed_truncate_size:
+                    seed = seed[: self._seed_truncate_size]
+                transformed.append(seed)
+
+        self.corpus = transformed
         self._invalidate_seed_key_cache()
 
     def _resize_seed(self, seed: bytes, target_size: int) -> bytes:

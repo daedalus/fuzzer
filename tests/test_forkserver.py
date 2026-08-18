@@ -29,7 +29,6 @@ class TestEnsureCompiled:
         )
         assert _ensure_compiled() == str(bin_path)
 
-
     def test_rebuilds_when_source_is_newer(self, tmp_path, monkeypatch):
         """A binary older than its source must be rebuilt, not handed back.
 

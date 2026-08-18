@@ -116,9 +116,7 @@ class TestApplicabilityAccounting:
             self._count(["png_chunk_mutate"], data, counts, applicable)
             if format_gate_matches("png_chunk_mutate", data):
                 successes["png_chunk_mutate"] = successes.get("png_chunk_mutate", 0) + 1
-                succ_applicable["png_chunk_mutate"] = (
-                    succ_applicable.get("png_chunk_mutate", 0) + 1
-                )
+                succ_applicable["png_chunk_mutate"] = succ_applicable.get("png_chunk_mutate", 0) + 1
 
         pooled = successes["png_chunk_mutate"] / counts["png_chunk_mutate"]
         restricted = succ_applicable["png_chunk_mutate"] / applicable["png_chunk_mutate"]
@@ -133,14 +131,12 @@ class TestApplicabilityAccounting:
         """
         counts, applicable = {}, {}
         successes, succ_applicable = {}, {}
-        for data in ([PLAIN] * 20):
+        for data in [PLAIN] * 20:
             self._count(["png_chunk_mutate"], data, counts, applicable)
             # Synthesis regime: the op fires and may well succeed.
             successes["png_chunk_mutate"] = successes.get("png_chunk_mutate", 0) + 1
             if format_gate_matches("png_chunk_mutate", data):
-                succ_applicable["png_chunk_mutate"] = (
-                    succ_applicable.get("png_chunk_mutate", 0) + 1
-                )
+                succ_applicable["png_chunk_mutate"] = succ_applicable.get("png_chunk_mutate", 0) + 1
 
         assert counts["png_chunk_mutate"] == 20
         assert successes["png_chunk_mutate"] == 20
@@ -207,7 +203,18 @@ class TestReportUsesApplicable:
 
         out = _mutation_effectiveness(_F())
         row = next(ln for ln in out.splitlines() if "bit_flip" in ln)
-        assert row.split() == ["bit_flip", "100", "5", "5.0%", "100", "5", "5.0%", "2.2%", "4.4%", "6.5%"]
+        assert row.split() == [
+            "bit_flip",
+            "100",
+            "5",
+            "5.0%",
+            "100",
+            "5",
+            "5.0%",
+            "2.2%",
+            "4.4%",
+            "6.5%",
+        ]
 
     def test_note_only_appears_when_the_regimes_split(self):
         from fuzzer_tool.services.report import _mutation_effectiveness

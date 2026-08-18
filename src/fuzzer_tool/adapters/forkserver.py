@@ -229,10 +229,7 @@ class ForkserverRunner:
         # %.6f, not int(): int(0.04) is 0, and the loader's `<= 0` fallback
         # then substituted 5s -- so asking for a tighter timeout silently
         # produced a 125x looser one. The loader parses this with strtod.
-        init = (
-            f"INIT {self.target} {self.function_name} "
-            f"{self._input_file} {self.timeout:.6f}\n"
-        )
+        init = f"INIT {self.target} {self.function_name} {self._input_file} {self.timeout:.6f}\n"
         try:
             self._proc.stdin.write(init.encode())
             self._proc.stdin.flush()

@@ -490,6 +490,9 @@ def cmd_fuzz(args):
         boost_mean=getattr(args, "boost_mean", None),
         boost_std=getattr(args, "boost_std", None),
         boost_pad=getattr(args, "boost_pad", "repeat"),
+        seed_skip_size=getattr(args, "seed_skip_size", 0),
+        seed_truncate_size=getattr(args, "seed_truncate_size", 0),
+        seed_slide_size=getattr(args, "seed_slide_size", 0),
         resize_map_on_stall=getattr(args, "resize_map_on_stall", False),
         reseed_on_stall=getattr(args, "reseed_on_stall", False),
         enable_smt_z3=getattr(args, "enable_smt_z3", False),
@@ -1948,6 +1951,24 @@ def main() -> int:
         choices=["repeat", "zero", "random"],
         default="repeat",
         help="Padding mode for short seeds: repeat (cycle self), zero (\\x00), random",
+    )
+    fuzz_parser.add_argument(
+        "--seed-skip-size",
+        type=int,
+        default=0,
+        help="Skip seeds larger than this size (0=disabled)",
+    )
+    fuzz_parser.add_argument(
+        "--seed-truncate-size",
+        type=int,
+        default=0,
+        help="Truncate seeds to this size (0=disabled)",
+    )
+    fuzz_parser.add_argument(
+        "--seed-slide-size",
+        type=int,
+        default=0,
+        help="Slide a window of this size over each seed, replacing the corpus with windows (0=disabled)",
     )
     fuzz_parser.add_argument(
         "--minimize-every-execs",

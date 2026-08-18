@@ -80,9 +80,10 @@ class TestColorizeSeparatesRealOperandsFromCoincidence:
 
         result = colorize(data, exec_fn, use_type_aware=False)
         assert result.taints
-        assert _in_taint(result.taints, 0, len(data)) or sum(
-            r.end - r.start + 1 for r in result.taints
-        ) >= len(data) // 2
+        assert (
+            _in_taint(result.taints, 0, len(data))
+            or sum(r.end - r.start + 1 for r in result.taints) >= len(data) // 2
+        )
 
 
 class TestColorizationOperatorIsSelectable:

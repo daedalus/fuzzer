@@ -82,9 +82,7 @@ def _minimal_elf64() -> bytes:
         "<IIQQQQQQ", 1, 5, 0, 0x400000, 0x400000, 0x100, 0x100, 0x1000
     )  # PT_LOAD, R+X
     sh_null = bytes(shentsize)
-    sh_strtab = struct.pack(
-        "<IIQQQQIIQQ", 1, 3, 0, 0, shoff + shentsize * shnum, 0x11, 0, 0, 1, 0
-    )
+    sh_strtab = struct.pack("<IIQQQQIIQQ", 1, 3, 0, 0, shoff + shentsize * shnum, 0x11, 0, 0, 1, 0)
     return ehdr + phdr + sh_null + sh_strtab + b"\x00.shstrtab\x00" + bytes(16)
 
 
@@ -130,9 +128,7 @@ def _battery() -> list[bytes]:
     available and get exercised."""
     rng = random.Random(999)
     inputs = [
-        bytes(rng.randrange(256) for _ in range(n))
-        for n in (8, 32, 128, 512)
-        for _ in range(4)
+        bytes(rng.randrange(256) for _ in range(n)) for n in (8, 32, 128, 512) for _ in range(4)
     ]
     inputs += [
         b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + bytes(30),
@@ -193,6 +189,7 @@ def _make_fuzzer() -> Fuzzer:
     ]
     return f
 
+
 def _sweep(f: Fuzzer) -> tuple[set[str], set[str]]:
     """Return (available_somewhere, changed_somewhere) operator-name sets.
 
@@ -221,7 +218,7 @@ def _sweep(f: Fuzzer) -> tuple[set[str], set[str]]:
                     # about *silence*, not errors. Skip and let other tests
                     # cover exceptions.
                     continue
-                out = ret if isinstance(ret, (bytes, bytearray)) else buf
+                out = ret if isinstance(ret, bytes | bytearray) else buf
                 if bytes(out) != inp:
                     changed.add(name)
                     done = True
@@ -413,7 +410,16 @@ class TestStateGatedOperatorsAreNotNoOps:
         learner = ChecksumLearner(f)
         learner._set_xor_model(
             XorBitmaskModel(
-                masks=((1, 2), (6, 7), (3, 5, 7), (1, 3), (3, 6), (0, 2, 3, 5), (0, 2, 3, 4), (0, 7)),
+                masks=(
+                    (1, 2),
+                    (6, 7),
+                    (3, 5, 7),
+                    (1, 3),
+                    (3, 6),
+                    (0, 2, 3, 5),
+                    (0, 2, 3, 4),
+                    (0, 7),
+                ),
                 out_bits=8,
             )
         )
@@ -502,7 +508,7 @@ class TestStateGatedOperatorsAreNotNoOps:
                 offered += 1
                 buf = bytearray(inp)
                 ret = table["crc_learn"](buf, len(buf) // 2, bytes(inp))
-                out = ret if isinstance(ret, (bytes, bytearray)) else buf
+                out = ret if isinstance(ret, bytes | bytearray) else buf
                 if bytes(out) != inp:
                     changed += 1
 
