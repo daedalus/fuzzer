@@ -3205,8 +3205,16 @@ class OperatorEngine:
             p for p in [sens_pos, te_pos, mi_pos, crash_mi_pos, region_pos] if p is not None
         ]
         if candidates:
-            return f._rand_pool.choice(candidates)
-        return f._rand_pool.randint(0, buf_len - 1)
+            byte_idx = f._rand_pool.choice(candidates)
+        else:
+            byte_idx = f._rand_pool.randint(0, buf_len - 1)
+        if getattr(f, "debug", False):
+            print(
+                f"[select_position] buf_len={buf_len} sens={sens_pos} te={te_pos} "
+                f"mi={mi_pos} crash_mi={crash_mi_pos} region={region_pos} "
+                f"candidates={candidates} fallback={not candidates} byte_idx={byte_idx}"
+            )
+        return byte_idx
 
     # ── Main mutation orchestrator ─────────────────────────────────────
 

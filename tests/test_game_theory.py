@@ -289,6 +289,10 @@ class TestMutualInformationTracker:
         pos = mi.weighted_position(2)
         assert 0 <= pos < 2
 
+    def test_weighted_position_returns_none_when_no_data(self):
+        mi = MutualInformationTracker(min_observations=5)
+        assert mi.weighted_position(10) is None
+
     def test_conditional_mi(self):
         mi = MutualInformationTracker(min_observations=5)
         for _ in range(20):

@@ -160,18 +160,18 @@ class CrashMITracker:
         sorted_mi = sorted(mi_vals.items(), key=lambda x: x[1], reverse=True)
         return sorted_mi[:k]
 
-    def weighted_position(self, input_length: int) -> int:
+    def weighted_position(self, input_length: int) -> int | None:
         """Sample a byte position weighted by crash MI."""
         if not self._cache_valid:
             self.all_mi()
         if not self._cached_positions:
-            return 0
+            return None
         # Binary search for cutoff index
         import bisect
 
         idx = bisect.bisect_left(self._cached_positions, input_length)
         if idx == 0:
-            return 0
+            return None
         # Sample using precomputed weights (first idx elements)
         r = random.random() * self._cached_total
         cumulative = 0.0

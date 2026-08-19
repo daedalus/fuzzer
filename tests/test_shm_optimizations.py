@@ -243,6 +243,13 @@ class TestCrashETA:
         pos = tracker.weighted_position(100)
         assert 0 <= pos < 100
 
+    def test_weighted_position_returns_none_when_no_data(self):
+        from fuzzer_tool.core.crash_eta import CrashMITracker
+
+        tracker = CrashMITracker()
+        # Empty tracker should return None, not 0
+        assert tracker.weighted_position(100) is None
+
 
 class TestSeedPicker:
     """Tests for seed_picker optimizations."""

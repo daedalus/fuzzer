@@ -278,7 +278,7 @@ class MutualInformationTracker:
         normalized = mi_val / max_mi
         return 0.1 + 4.9 * normalized
 
-    def weighted_position(self, input_length: int) -> int:
+    def weighted_position(self, input_length: int) -> int | None:
         """Sample a byte position weighted by MI.
 
         Uses MI-weighted roulette wheel selection. Returns a position
@@ -287,7 +287,7 @@ class MutualInformationTracker:
         for O(log n) filtering instead of rebuilding lists each call.
         """
         if not self.position_counts:
-            return 0
+            return None
 
         if not hasattr(self, "_wp_sorted_pos"):
             self._wp_sorted_pos = None
@@ -309,7 +309,7 @@ class MutualInformationTracker:
                 self._wp_sorted_pos = []
                 self._wp_cum_weights = []
                 self._wp_total = 0.0
-                return 0
+                return None
             pairs.sort(key=lambda x: x[0])
             self._wp_sorted_pos = [p for p, _ in pairs]
             cum = 0.0
@@ -325,7 +325,7 @@ class MutualInformationTracker:
         total = self._wp_total
 
         if not sorted_pos or total <= 0:
-            return 0
+            return None
 
         # Find cutoff index: positions < input_length
         import bisect
@@ -336,7 +336,7 @@ class MutualInformationTracker:
             n = bisect.bisect_left(sorted_pos, input_length)
 
         if n == 0:
-            return 0
+            return None
 
         # Weighted sampling using precomputed cumulative sum
         r = __import__("random").random() * cum_w[n - 1]
