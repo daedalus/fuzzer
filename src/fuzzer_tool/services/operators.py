@@ -1417,6 +1417,29 @@ class OperatorEngine:
                 val = int.from_bytes(buf[idx : idx + width], "little")
                 buf[idx : idx + width] = val.to_bytes(width, "big")
 
+    def _op_insert_repeated_bytes(self, buf, _byte_idx, _data):
+        rng = self.f._rand_pool
+        if not buf or len(buf) >= self.f.max_len:
+            return
+        fill_byte = rng.randint(0, 255)
+        block_size = rng.randint(1, min(32, self.f.max_len - len(buf)))
+        ins_pos = rng.randint(0, len(buf))
+        buf[ins_pos:ins_pos] = bytes([fill_byte] * block_size)
+
+    def _op_sort_bytes(self, buf, _byte_idx, _data):
+        if buf and len(buf) > 1:
+            start = self.f._rand_pool.randint(0, len(buf) - 1)
+            end = min(start + self.f._rand_pool.randint(2, len(buf) - start + 1), len(buf))
+            buf[start:end] = sorted(buf[start:end])
+
+    def _op_leb128_encode(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations import leb128_encode
+
+        if buf:
+            result = leb128_encode(bytes(buf), rng=self.f._rand_pool, max_len=self.f.max_len)
+            if result != bytes(buf):
+                return bytearray(result[: self.f.max_len])
+
     def _op_tlv_mutate(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations.tlv_mutate import tlv_mutate
 

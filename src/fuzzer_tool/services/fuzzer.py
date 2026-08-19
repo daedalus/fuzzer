@@ -2176,7 +2176,11 @@ class Fuzzer:
         transformed: list[bytes] = []
         # None means "uncapped" (0, or slide disabled) — every `cap is not
         # None` check below is then simply skipped.
-        cap = self._seed_slide_max_seeds if self._seed_slide_size and self._seed_slide_max_seeds else None
+        cap = (
+            self._seed_slide_max_seeds
+            if self._seed_slide_size and self._seed_slide_max_seeds
+            else None
+        )
 
         for seed in original:
             if cap is not None and len(transformed) >= cap:

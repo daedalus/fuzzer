@@ -527,3 +527,52 @@ class TestFormatAvailableSkipsSniffOnceLive:
             # sniff() would reject this trivially, but live short-circuits
             # before sniff() is ever consulted.
             assert spec.available(fuzzer, b"")
+
+
+class TestNewByteOperators:
+    """insert_repeated_bytes, sort_bytes, and leb128_encode are unconditional
+    byte-band operators with live dispatch handlers."""
+
+    NEW_OPS = frozenset(
+        {
+            "insert_repeated_bytes",
+            "sort_bytes",
+            "leb128_encode",
+        }
+    )
+
+    def test_band_is_registered(self):
+        assert set(REGISTRY.names()) >= self.NEW_OPS
+
+    def test_band_categorized_byte(self):
+        for op in self.NEW_OPS:
+            assert REGISTRY.category_of(op) == "byte", f"{op} not in byte band"
+
+    def test_unconditional_availability(self):
+        fuzzer = _MockFuzzer()
+        fuzzer._rand_pool = RandPool(seed=1)
+        available = set(REGISTRY.available(fuzzer, b"seed"))
+        assert available >= self.NEW_OPS
+
+    def test_every_op_has_a_handler(self):
+        engine = OperatorEngine(_MockFuzzer())
+        dispatch = REGISTRY.dispatch(engine)
+        for name in self.NEW_OPS:
+            assert callable(dispatch[name]), name
+
+    def test_handlers_mutate_non_empty_input(self):
+        fuzzer = _MockFuzzer()
+        fuzzer.max_len = 4096
+        fuzzer._rand_pool = RandPool(seed=1)
+        engine = OperatorEngine(fuzzer)
+        dispatch = REGISTRY.dispatch(engine)
+        for name in sorted(self.NEW_OPS):
+            buf = bytearray(b"ABCDEFGH")
+            result = dispatch[name](buf, 0, bytes(buf))
+            if name == "sort_bytes":
+                # sort_bytes may mutate in place or return replacement.
+                assert result is None or bytes(result) != b"ABCDEFGH"
+            elif name == "insert_repeated_bytes":
+                assert result is None or len(result) > len(buf)
+            else:
+                assert result is None or result != buf

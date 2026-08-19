@@ -48,6 +48,9 @@ _CATEGORIES: dict[str, set[str]] = {
         "byte_insert",
         "swap_bytes",
         "endianness_swap",
+        "insert_repeated_bytes",
+        "sort_bytes",
+        "leb128_encode",
     },
     "block": {
         "block_insert",

@@ -1415,3 +1415,74 @@ _FUNNY_UNICODE: list[bytes] = [
     b"\xe2\x80\x8d",  # U+200D zero-width joiner
     b"\xef\xbb\xbf",  # U+FEFF zero-width no-break space (BOM)
 ]
+
+
+# ---------------------------------------------------------------------------
+# LEB128 helpers
+# ---------------------------------------------------------------------------
+
+
+def encode_uleb128(value: int) -> bytes:
+    """Encode an unsigned integer as ULEB128.
+
+    Args:
+        value: Non-negative integer to encode.
+
+    Returns:
+        ULEB128 byte sequence.
+    """
+    if value < 0:
+        raise ValueError("ULEB128 encodes unsigned values only")
+    out = bytearray()
+    while value > 0x7F:
+        out.append((value & 0x7F) | 0x80)
+        value >>= 7
+    out.append(value & 0x7F)
+    return bytes(out)
+
+
+def leb128_encode(data: bytes, rng=None, max_len: int = 65536) -> bytes:
+    """Mutate an input by rewriting or inserting a ULEB128-encoded integer.
+
+    Prefers mutating an existing candidate integer in-place: scans for a
+    1-5 byte little-endian unsigned integer and rewrites it as ULEB128.
+    Falls back to inserting a random small LEB128 value when no candidate
+    is found. Returns the input unchanged on empty data or when the
+    mutated result would exceed ``max_len``.
+
+    Args:
+        data: Input bytes.
+        rng: Optional random source.
+        max_len: Maximum output length.
+
+    Returns:
+        Mutated bytes, or the original bytes if no mutation was applied.
+    """
+    if not data:
+        return data
+    r = _get_rng(rng)
+    result = bytearray(data)
+
+    # Candidate widths in bytes, smallest first.
+    widths = [1, 2, 3, 4, 5]
+    for width in widths:
+        if len(result) < width:
+            continue
+        idx = r.randint(0, len(result) - width)
+        value = int.from_bytes(result[idx : idx + width], "little")
+        encoded = encode_uleb128(value)
+        if not encoded:
+            continue
+        new_len = width - 1 + len(encoded)
+        if len(result) - new_len + 1 > max_len:
+            continue
+        result[idx : idx + width - 1] = encoded + b"\x00" * (width - 1 - len(encoded))
+        return bytes(result[:max_len])
+
+    # Fallback: insert a random small LEB128 at a random position.
+    value = r.randint(0, 255)
+    encoded = encode_uleb128(value)
+    if len(result) + len(encoded) > max_len:
+        return data
+    pos = r.randint(0, len(result))
+    return result[:pos] + encoded + result[pos:max_len]
