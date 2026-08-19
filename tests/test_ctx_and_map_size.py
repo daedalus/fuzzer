@@ -5,6 +5,27 @@ __sanitizer_cov_trace_pc_guard directly. That avoids needing clang: gcc has
 no -fsanitize-coverage=trace-pc-guard, but the shim's edge table, context
 masking, and drop counter are all exercised by calling the callback by hand,
 which is the code path under test anyway.
+
+If the drop-counter tests below go intermittently red in CI, do not just
+re-run them: this is the one place the open intermittent ``shmat()`` failure
+is expected to surface (see the "Open loose threads" section of
+docs/handover_skittercreek_tailslayer_port.md). Twice in roughly fifty runs,
+the first ``ShmCoverage`` constructed in a process read back an empty edge
+table after a child that exited 0, and the SHM header was not captured at
+the time -- so it is still unknown whether the child failed to attach or the
+parent raced the read. That single missing measurement is why the thread is
+still open after two rounds.
+
+What to capture on the failing run, before doing anything else:
+
+    cov.read_edge_count()     # header, not the table scan
+    cov.read_diag()           # generation + drop counter
+    proc.returncode           # child exit status
+    cov.shm_id                # and `ipcs -m` output alongside it
+
+Those four together distinguish the two hypotheses. Note the segment is
+created and read successfully by the parent in the same test, and ``ipcs -m``
+has shown no leak, so segment exhaustion (limit 4096) is already ruled out.
 """
 
 import os

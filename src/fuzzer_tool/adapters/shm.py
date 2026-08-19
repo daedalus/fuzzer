@@ -147,6 +147,11 @@ class ShmCoverage:
 
         # Cumulative "ever seen" set of edge_ids (not positions)
         self._seen_edge_ids: set[int] = set()
+        # Subset of _seen_edge_ids suppressed deliberately (unstable edges
+        # found by seed stability calibration) rather than because they were
+        # genuinely observed. Kept separately so reporting can tell the two
+        # apart; _seen_edge_ids alone cannot.
+        self._masked_edge_ids: set[int] = set()
         # Virgin hit-count bucket map: for each edge_id, the OR of every
         # bucket bit that edge has ever been observed in.  Indexed by
         # edge_id directly (see VIRGIN_DENSE_MAX), with a dict for ids
@@ -196,6 +201,53 @@ class ShmCoverage:
         active = arr[(arr["edge_id"] != 0) & (gen == current_gen)]
         # .tolist() converts numpy uint32 to plain Python ints
         return set(active["edge_id"].tolist())
+
+    def mask_edges(self, edge_ids) -> int:
+        """Suppress *edge_ids* from ever counting as new coverage again.
+
+        Used by seed stability calibration: an edge that fires on some runs
+        of an identical input and not others is nondeterministic (ASLR-,
+        time-, or uninitialized-memory-dependent), and left alone it is an
+        endless supply of "new" coverage that permanently absorbs mutation
+        energy.
+
+        Implemented by folding the ids into the already-seen set rather than
+        by a separate exclusion list checked on every scan, so the hot path
+        cost is unchanged. Returns the number of ids this call newly masked.
+
+        Masks the edge's hit-count buckets too, not just its id. Novelty has
+        two sources -- an unseen edge id and an unseen (edge, count-bucket)
+        pair -- and suppressing only the first leaves the edge free to
+        re-register as new coverage every time its trip count crosses a
+        bucket boundary, which for a nondeterministic edge is exactly what
+        keeps happening. All eight buckets are marked: the edge is unstable,
+        so no count of it is trustworthy evidence.
+        """
+        ids = {int(e) for e in edge_ids}
+        newly = ids - self._seen_edge_ids
+        self._seen_edge_ids.update(ids)
+        self._masked_edge_ids.update(ids)
+
+        # Mark every bucket for each masked edge as already visited.
+        # bucket_bits() yields a one-hot bit per count class, so 0xFF is
+        # "every class seen".
+        for eid in ids:
+            if eid < self._virgin.size:
+                self._virgin[eid] = 0xFF
+            elif eid < VIRGIN_DENSE_MAX:
+                hi = eid + 1
+                grown = np.zeros(hi, dtype=np.uint8)
+                grown[: self._virgin.size] = self._virgin
+                self._virgin = grown
+                self._virgin[eid] = 0xFF
+            else:
+                self._virgin_wide[eid] = 0xFF
+        return len(newly)
+
+    @property
+    def masked_edges(self) -> set[int]:
+        """Edge ids suppressed by :meth:`mask_edges`, for reporting."""
+        return set(self._masked_edge_ids)
 
     def get_edge_counts(self) -> dict[int, int]:
         """Return {edge_id: count} for all non-empty entries.

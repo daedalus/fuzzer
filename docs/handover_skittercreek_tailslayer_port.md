@@ -11,37 +11,30 @@ Sources, for the two items still unported:
 - `LaurieWired/tailslayer` — `discovery/trefi_probe.c`,
   `discovery/benchmark/benchmark.cpp`, `discovery/benchmark/stats.cpp`.
 
-**Status:** items 1, 2, 4, 5, 6 and 7 are implemented, wired, and tested.
-Items 3 and 13 are deferred by design, not dropped — reasons preserved below.
-Item 4 is functionally complete but its validation gate (step 6) has not
-closed after four real campaigns, and the honest close-out for that is a
-decision, not more work. Item 1 has one outstanding regression test.
+**Status (round 14):** items 1, 2, 4, 5, 6 and 7 are implemented, wired, and
+tested. Open items A, C, D, E and F from the round-13 cleanup are now done;
+G (the intermittent `shmat()` failure) and B (item 4's validation gate) are
+the only ones left, plus items 3 and 13, which stay deferred by design.
+
+Round 14 also found and fixed a **critical pre-existing bug**: the edge table
+saturated after a few hundred executions and coverage guidance silently
+stopped, on the default execution path. See C2. It was found by trying to
+quantify the probe-window tradeoff in C, not by looking for it — the
+load-factor figure that item made its case from turned out to be the
+symptom.
 
 ---
 
 ## Open work
 
-### A. Item 1 — cost-bound regression test inside `checksum_learner.py`
+### A. Item 1 — cost-bound regression test — **DONE**
 
-The only outstanding piece of item 1. The XOR model family is wired
-(`XorBitmaskModel`, `ensure_xor_model`, `_verify_xor`), gated behind the
-GF(2) and integer paths failing to verify and sharing their attempt counter
-via `_maybe_recover`/`RECOVERY_RETRY_BATCH`. What never landed is the test:
-`tests/test_regression_checksum_cost_bound.py` has no coverage of the XOR
-path — its only `xor` mention is a comment about `final_xor` in CRCs.
-
-`tests/test_xor_map_solver.py` asserts `elapsed < 1.0` for 32-bit recovery,
-which bounds the solver standalone. That is not the same assertion: it says
-nothing about cost inside `fuzz_one()`'s hot path, which is where this
-module's documented 30+ second incident happened.
-
-Lower urgency than when first written. Recovery is now Gauss-Jordan
-elimination over F2, not a SAT search — polynomial, terminating, bounded by
-`_MAX_PAIRS = 128` and `_MAX_FIELD_BITS = 32`, and measured at 0.5 ms on a
-32×32 system with 64 pairs. So this is a regression guard against a future
-change reintroducing search, not a fix for a live hazard. Write it as a
-wall-clock assertion as pair count grows to `CHECKSUM_PAIRS_MAX`, matching
-the existing pattern in that file.
+`tests/test_regression_checksum_cost_bound.py::TestXorPathCostBounded`.
+Two assertions: an absolute ceiling at the pair cap, and cap-invariance
+(cost at `CHECKSUM_PAIRS_MAX` is the same whether the learner has seen that
+many pairs or eight times that many) — the latter being the shape of the
+original incident, which was unbounded growth rather than one slow call.
+Measured 7 ms at the cap; verified to catch an injected 1.2 s regression.
 
 ### B. Item 4 — the false-negative dead-region case (Sequencing step 6)
 
@@ -86,72 +79,118 @@ close step 6 rather than spending a fifth round on it.
 
 Raw data and per-round writeups: `docs/sweeps/`.
 
-### C. §2 — bounded probe window for `__afl_map_edge`
+### C. §2 — bounded probe window — **DONE, and it uncovered a worse bug**
 
-`adapters/afl_shim.c` linear-probes an open-addressing table on **every edge
-execution**, not just every unique edge. A loop body that runs 10k times pays
-the probe cost 10k times. The probe loop still runs to at most `map_size`
-iterations (`afl_shim.c:560`). Simulated average probes per insertion,
-uniform random ids:
+`__AFL_PROBE_MAX` (default 64) bounds both lookup and insertion in
+`__afl_map_edge`; exhaustion routes through `__afl_note_drop()`, observable
+via `read_dropped_edges()`. `ShmCoverage.PROBE_MAX` mirrors it, with a test
+asserting the two constants cannot drift — `record_edge()` is a Python
+mirror of the same loop, and an unbounded mirror would place edges the shim
+could never find.
 
-| load | avg probes |
-|------|-----------|
-| 0.49 | 1.5 |
-| 0.79 | 2.8 |
-| 0.95 | 12.1 |
-| 1.00 | 57.2 |
-| saturated | `map_size` |
+64 rather than 16. Simulated drop rate against `ffmpeg_read`'s shape
+(201,279 edges in 262,144 slots, load 0.77): window 8 → 4.43%, 16 → 1.60%,
+32 → 0.40%, 64 → 0.04%. A dropped edge is *permanently* invisible, not
+delayed, so 16 would have cost ~3,200 edges on the only target that
+exercises the cap. Every other instrumented target sits at ~13% load and
+drops nothing at any of these windows. Also removed the O(map_size)
+`all_live` second scan, which was the real worst-case cost in that loop.
 
-Two ways out, neither taken:
+**The load-factor premise was wrong, and finding out why turned up a
+critical bug.** See below.
 
-- **Bound the probe window** to 8–16 slots, then give up. Converts a
-  `map_size`-iteration worst case into a constant, trading a drop rate for a
-  bounded cost. Cheap to evaluate rather than speculative: the shim counts
-  dropped edges into the SHM header, so the trade is directly observable via
-  `ShmCoverage.read_dropped_edges()`.
-- **Stop open-addressing on the hot path.** AFL's `mem[(prev^cur) & mask]++`
-  is one load, one add, one store. You keep exact edge IDs today at the cost
-  of a hash probe on every branch; you could get both by keeping the classic
-  bitmap in the hot path and recovering identity lazily (the guard→address
-  map is already parsed in `elf.py`).
+### C2. Edge table saturation / coverage blackout — **FOUND AND FIXED**
 
-The per-exec reset half of §2 is **done** (generation tagging, `1eb7979`,
-86.9 µs → 2.2 µs on a 262,144-entry map). Only the probe bound is open.
+`__afl_map_edge`'s probe loop had a branch for "stale entry with matching
+edge_id — reclaim". The comment said reclaim; the code fell through and kept
+probing. So every execution inserted a *fresh duplicate* of every edge that
+fired, in a new slot, and never freed the stale copy. Occupancy grew by
+(edges per execution) per execution, regardless of how few distinct edges
+the target had.
 
-This was previously blocked on having a target that exceeds the 8,192 floor.
-That blocker is gone — see the census below — but note the load factor at the
-small end is ~13%, averaging ~1.07 probes, so bounding the window buys
-nothing for those binaries and measures noise against them.
+Measured against the real shim (C harness compiled with `-include
+afl_shim.c`, driven against a live `ShmCoverage`), 8192-entry map, 43
+distinct edges — `png_read`'s shape:
 
-### D. Unstable-edge calibration (suggested, not implemented)
+| execs | slots occupied | edges visible to the fuzzer |
+|---|---:|---:|
+| 1 | 43 | 43 |
+| 100 | 4,343 | 43 |
+| 190 | ~8,000 | 43 |
+| **200** | **8,192 (saturated)** | **0** |
+| 300 | 8,192 | 43 — but 256-execution-old data aliasing |
 
-The highest-leverage item in this group. There is no AFL-style per-seed
-calibration: run a new seed N times, mask edges that don't reproduce.
-`_run_calibration` (`fuzzer.py:3828`) is a bootstrap warm-up loop, not this.
-Without it, nondeterministic edges — ASLR-, time-, or
-uninitialized-memory-dependent — read as an endless supply of new coverage
-and permanently absorb energy.
+Once saturated, no slot can be claimed, so the current execution writes
+nothing and `get_edge_ids()` — which filters by generation — returns empty.
+Coverage guidance silently stops mid-campaign. It did not even register as a
+drop: `__afl_note_drop()` was gated on every slot being *live*, and a
+saturated table is full of *stale* entries, so `read_dropped_edges()` stayed
+at 0 throughout. Past 256 executions the 8-bit generation wraps, so a
+saturated table reports a 256-exec-old execution's edges as current.
 
-Nearly free from machinery already present: run each new seed 3× and compare
-`read_path_hash()` (`shm.py:328`, already called at `fuzzer.py:3354` and
-`:4013`). Divergence means unstable; fall back to per-edge set-diff to find
-which ones.
+Affects every mode that resets between runs — in-process (non-`direct_lite`),
+forkserver, and fork+exec — i.e. everything except `direct_lite`. **The
+forkserver is the default path.** Introduced by the generation-tagging work
+(`1eb7979`) that this document previously recorded as a clean win, which is
+worth noting: the benchmark that justified it measured reset cost in
+isolation and would not have caught this.
 
-### E. `--cmplog` defaults off
+Fixed by reclaiming a stale same-edge entry in place. Occupancy now converges
+to the union of distinct edges ever seen, bounded by the target's guard
+count. Regression test: `tests/test_regression_shm_stale_reclaim.py` (6
+cases, drives the real C shim; 5 of 6 fail against the pre-fix shim).
 
-Still `action="store_true"` at `cli/commands.py:1874`. Given the i2s/Redqueen
-work already in the tree and `_detect_cmplog()` (`fuzzer.py:377`), which
-reliably identifies instrumented targets, it should default on whenever
-detection succeeds. Magic-value and checksum branches are where the edge
-count plateaus on real formats. `--no-forkserver` in the same parser is the
-opt-out pattern to copy.
+This also explains why the load-factor reasoning in the original §2 was
+wrong: load was never ~13% during a campaign, it was heading to 100% within
+a couple hundred executions. Bolting a 16-slot window onto a saturating
+table would have dropped nearly everything.
 
-### F. Path hash as a second coverage dimension
+### D. Unstable-edge calibration — **DONE, opt-in**
 
-The shim maintains an order- and multiplicity-sensitive rolling path hash and
-`read_path_hash()` exposes it, but it is used only as a cheap change detector.
-Honggfuzz-style unique-path counting is one option; the instability detector
-in (D) is the better use of the same primitive.
+`Fuzzer._calibrate_seed_stability(data, n_runs)` re-runs an accepted seed
+and masks edges that do not reproduce, via the new
+`ShmCoverage.mask_edges()`. Called from `CorpusManager.save_to_corpus()`
+after the seed is committed, so calibration never rejects a seed — it only
+ever masks edges. CLI: `--calibrate-stability N`, default 0 (off).
+
+Two design points worth keeping:
+
+- **Path-hash divergence is a screen, not the verdict.** The hash is order-
+  and multiplicity-sensitive, so it moves whenever the same edges fire in a
+  different order or a different number of times. Masking on hash divergence
+  alone would suppress edges that are perfectly deterministic about *which*
+  code runs. Identical hashes across all runs short-circuits to "stable";
+  divergence falls through to the per-edge set-diff, which decides.
+- **Masking covers hit-count buckets, not just edge ids.** Novelty has two
+  sources — an unseen edge id and an unseen (edge, count-bucket) pair — and
+  suppressing only the first leaves an unstable edge free to re-register
+  every time its trip count crosses a bucket boundary, which for a
+  nondeterministic edge is exactly what keeps happening. All eight buckets
+  are marked.
+
+**Opt-in, not default**, because it costs `n_runs` extra executions per
+accepted seed and no A/B against a real target has been run. That is the
+standing rule in this tree, not timidity — see "no coverage delta has ever
+been measured" below. Turning it on by default is a reasonable follow-up
+*after* someone measures it.
+
+### E. `--cmplog` defaults off — **DONE**
+
+Now `argparse.BooleanOptionalAction` with `default=None`: `None` = auto
+(enable when `_detect_cmplog()` succeeds), `--cmplog` = force on,
+`--no-cmplog` = force off. Resolved in the constructor, before
+`CmplogCollector` is built — the pre-existing detection call at the
+direct_lite decision runs only when `self._cmplog` is already non-None, so
+it could refine *how* cmplog runs but never *whether* it runs. Detection is
+skipped entirely when the flag is explicit, keeping two `nm` subprocesses
+off the startup path for users who already decided.
+
+### F. Path hash as a second coverage dimension — **CLOSED as superseded**
+
+The instability detector in (D) is the better use of the same primitive, and
+it now exists. A separate Honggfuzz-style unique-path counter is not
+proposed; reopen only if someone actually wants path-count deduplication as
+a distinct signal.
 
 ### G. Intermittent `shmat()` failure — open thread, no fix
 
@@ -212,7 +251,12 @@ campaign output to join against; same discipline as item 3.
 Carried forward from removed sections because open work depends on them.
 
 **No coverage delta has ever been measured.** Not for any item in this
-document, open or closed. The probe-cost table in (C) is simulated; the
+document, open or closed — including the C2 fix, whose effect on edges/second
+is unknown even though its effect on correctness is not. What C2 establishes
+is that any pre-fix coverage measurement over more than a few hundred
+executions was measuring a table that had already gone dark, so historical
+edges/second figures on the reset paths should be treated as unreliable
+rather than as a baseline to compare against. The probe-cost table in (C) is simulated; the
 reset-cost figures are measured but on one machine. No edges/second number
 anywhere here comes from an A/B against a real target. `tools/bench_paired.py`
 against a fixed seed and a fixed exec budget before trusting any of it.

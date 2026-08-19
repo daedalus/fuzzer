@@ -392,6 +392,7 @@ def cmd_fuzz(args):
         net_proto=getattr(args, "net_proto", "tcp"),
         net_keepalive=getattr(args, "net_keepalive", False),
         net_settle_ms=getattr(args, "net_settle_ms", 10),
+        calibrate_stability=getattr(args, "calibrate_stability", 0),
         cmplog=args.cmplog,
         cmplog_max_tokens=getattr(args, "cmplog_max_tokens", 0),
         cmplog_max_pairs=getattr(args, "cmplog_max_pairs", 0),
@@ -1876,6 +1877,18 @@ def main() -> int:
     # real formats, and _detect_cmplog() identifies instrumented targets
     # reliably, so making the user remember the flag cost coverage for no
     # reason. --no-cmplog is the opt-out, matching --no-forkserver.
+    fuzz_parser.add_argument(
+        "--calibrate-stability",
+        type=int,
+        default=0,
+        metavar="N",
+        help=(
+            "Re-run each newly accepted seed N times and mask edges that do "
+            "not reproduce (nondeterministic: ASLR, time, uninitialized "
+            "memory). 0 disables. 3 is the usual value. Costs N extra "
+            "executions per accepted seed."
+        ),
+    )
     fuzz_parser.add_argument(
         "--cmplog",
         action=argparse.BooleanOptionalAction,

@@ -606,6 +606,7 @@ class Fuzzer:
         inprocess=False,
         inprocess_direct=False,
         inprocess_func="LLVMFuzzerTestOneInput",
+        calibrate_stability=0,
         cmplog=None,  # None = auto-detect, True = force on, False = force off
         cmplog_max_tokens=0,
         cmplog_max_pairs=0,
@@ -918,6 +919,11 @@ class Fuzzer:
         # further down, because that site only runs when self._cmplog is
         # already non-None -- i.e. it could refine how cmplog runs, never
         # whether it runs at all.
+        # Seed stability calibration (handover item D). n_runs per accepted
+        # seed; 0 disables. Opt-in: see _calibrate_seed_stability.
+        self._calibrate_stability = int(calibrate_stability or 0)
+        self._unstable_edges: set[int] = set()
+        self._stability_calibrations = 0
         self._cmplog_auto = cmplog is None
         if cmplog is None:
             cmplog = _detect_cmplog(self.target)
@@ -3840,6 +3846,83 @@ class Fuzzer:
     def _run_calibration(self, max_execs: int = 1000):
         return self._stats.run_calibration(max_execs)
 
+    def _calibrate_seed_stability(self, data: bytes, n_runs: int = 3) -> set[int]:
+        """Re-run *data* and mask edges that don't reproduce.
+
+        AFL-style per-seed stability calibration. An identical input run
+        several times should produce an identical edge set; any edge that
+        appears in some runs and not others is nondeterministic — ASLR-,
+        time-, thread-, or uninitialized-memory-dependent. Left alone those
+        edges read as an endless supply of new coverage and permanently
+        absorb mutation energy, because every re-execution "discovers" them
+        again.
+
+        Returns the set of unstable edge ids found (already masked). Empty
+        set means the seed was stable, calibration was disabled, or there
+        was no SHM coverage to read.
+
+        Deliberately *not* using ``read_path_hash()`` alone as the verdict.
+        The hash is order- and multiplicity-sensitive, so it diverges when
+        the same edges fire in a different order or a different number of
+        times — which is the common case for a loop whose trip count depends
+        on nothing but scheduling, and which is not what we want to mask.
+        The hash is used only as a cheap screen: identical hashes across all
+        runs means definitely stable, skip the set comparison entirely.
+        Divergence sends us to the per-edge set-diff, which is what actually
+        decides.
+
+        Cost is ``n_runs`` extra executions per accepted seed. That is a
+        real throughput tax on a corpus that accepts often, which is why
+        this is opt-in via ``--calibrate-stability`` rather than on by
+        default: no A/B against a real target has been run, and the repo's
+        standing rule is that an unmeasured throughput change does not
+        become the default.
+        """
+        shm = self.shm_cov
+        if shm is None or n_runs < 2:
+            return set()
+
+        edge_sets: list[set[int]] = []
+        hashes: set[int] = set()
+        for _ in range(n_runs):
+            try:
+                self._run_target(data)
+            except Exception:
+                # A seed that will not re-run tells us nothing about
+                # stability; leave it unmasked rather than guessing.
+                return set()
+            edge_sets.append(shm.get_edge_ids())
+            hashes.add(shm.read_path_hash())
+
+        if not edge_sets:
+            return set()
+
+        # Cheap screen: one distinct hash across every run means the same
+        # edges fired the same number of times in the same order.
+        if len(hashes) == 1:
+            self._stability_calibrations += 1
+            return set()
+
+        stable = set.intersection(*edge_sets)
+        seen = set.union(*edge_sets)
+        unstable = seen - stable
+
+        self._stability_calibrations += 1
+        if not unstable:
+            # Hashes diverged but the edge *sets* agree: ordering or trip
+            # counts moved, not which code ran. Not an unstable-edge case.
+            return set()
+
+        newly = shm.mask_edges(unstable)
+        self._unstable_edges |= unstable
+        if newly:
+            log.info(
+                "Stability calibration: %d unstable edge(s) masked (%d total) after %d runs",
+                newly,
+                len(self._unstable_edges),
+                n_runs,
+            )
+        return unstable
 
     def discovery_rate(self):
         return self._stats.discovery_rate()

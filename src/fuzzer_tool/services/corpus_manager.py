@@ -446,6 +446,13 @@ class CorpusManager:
             edge_count = len(f._edge_tracker.seed_edges.get(seed_key, set()))
             if edge_count > 0:
                 f.seed_meta[data]["coverage_edges"] = edge_count
+            # Seed stability calibration (handover item D). Here rather than
+            # in fuzz_one so the n_runs re-execution cost is a one-time
+            # per-accepted-seed tax instead of a per-iteration one. Runs
+            # after the seed is committed, so a seed is never rejected on
+            # stability grounds -- unstable edges get masked, the seed stays.
+            if getattr(f, "_calibrate_stability", 0):
+                f._calibrate_seed_stability(data, n_runs=f._calibrate_stability)
             f.markov.train(data)
             f.markov_trained = f.markov.is_trained()
             if f.markov.snapshot_and_check_plateau():
