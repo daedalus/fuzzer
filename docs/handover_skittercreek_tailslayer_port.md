@@ -161,12 +161,20 @@ consumers.
   sweep script or result exists anywhere in the tree. Still the right next
   step before trusting the down-weight/padding signal at full strength.
 - The havoc short-circuit flagged under "Suggested but not implemented"
-  is **still present and unfixed**, now at `services/operators.py:3155`
-  (`if op == "havoc": ... return result`) — line number shifted from the
-  `:2827` cited earlier as the file has grown, but the bug itself, and the
-  reasoning about `n_mutations`/`_last_perf_score` being a no-op whenever
-  havoc is drawn early, are unchanged. Worth prioritizing: havoc is still
-  the most-drawn operator.
+  is now **fixed**. `mutate()` used to `return result` the instant havoc
+  was selected, discarding the rest of that round's `n_mutations`
+  budget — the exact energy-multiplier no-op the original note
+  described. Fixed by falling through to the shared loop tail
+  (`continue`) instead of returning, matching every other operator;
+  havoc's full-resync frameshift handling is preserved rather than
+  the single on_insert/on_delete other ops use, since havoc's 2-16
+  internal sub-mutations can each touch a different position. Also
+  added a defensive max_len clamp before that resync, since
+  `_op_havoc`'s redundant-mutation retry path bypasses
+  `havoc_mutate`'s own end-of-call clamp. Regression test:
+  `tests/test_regression_havoc_short_circuit.py` (2 of 3 cases
+  verified to fail against the pre-fix code). Full suite: 4619 passed,
+  178 skipped, 1 xfailed, 0 failures.
 
 **Revision note (round 8):** generation-tagged SHM edge-map reset is
 implemented and shipped in commit `1eb7979`. `__afl_map_reset()` no longer
@@ -1130,7 +1138,8 @@ counting is one option; the instability detector above is the better use.
 `--cmplog` should default on whenever detection succeeds. Magic-value and checksum
 branches are where the edge count plateaus on real formats.
 
-**The havoc short-circuit.** `mutate()` at `services/operators.py:2827`:
+**The havoc short-circuit — FIXED (round 9).** `mutate()` at
+`services/operators.py:3155` (line moved since this was written) used to:
 
 ```python
 if op == "havoc":
@@ -1138,11 +1147,15 @@ if op == "havoc":
     return result
 ```
 
-Drawing `havoc` discards the remaining `n_mutations - 1` iterations. Since
-`n_mutations` is scaled by `_last_perf_score`, this means **the entire seed energy
-multiplier is a no-op whenever havoc is drawn early** — and havoc is the most-drawn
-operator. Either make havoc terminal by design and scale its internal stack depth by
-`perf_score` instead, or don't return early.
+Drawing `havoc` discarded the remaining `n_mutations - 1` iterations. Since
+`n_mutations` is scaled by `_last_perf_score`, this meant **the entire seed energy
+multiplier was a no-op whenever havoc was drawn early** — and havoc is the most-drawn
+operator. Fixed by falling through to the shared loop tail (`continue`) instead of
+returning, same as every other operator; the option not taken was making havoc
+terminal by design and scaling its internal stack depth by `perf_score` instead — that
+would have meant reworking `havoc_mutate`'s own iteration count, more invasive for the
+same fix. See the round-9 note near the top of this document and
+`tests/test_regression_havoc_short_circuit.py`.
 
 ---
 
