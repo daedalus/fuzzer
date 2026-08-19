@@ -1870,10 +1870,22 @@ def main() -> int:
     fuzz_parser.add_argument(
         "--auto-timeout", action="store_true", help="Auto-tune timeout by probing target at startup"
     )
+    # Tri-state: None = auto (enable when the target is detected as
+    # cmplog/tracecmp-instrumented), True = force on, False = force off.
+    # Magic-value and checksum branches are where edge discovery plateaus on
+    # real formats, and _detect_cmplog() identifies instrumented targets
+    # reliably, so making the user remember the flag cost coverage for no
+    # reason. --no-cmplog is the opt-out, matching --no-forkserver.
     fuzz_parser.add_argument(
         "--cmplog",
-        action="store_true",
-        help="Enable comparison tracing via LD_PRELOAD (memcmp/strcmp/strncmp/memchr interception)",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Comparison tracing via LD_PRELOAD "
+            "(memcmp/strcmp/strncmp/memchr interception). "
+            "Default: on when the target is detected as instrumented; "
+            "--no-cmplog forces it off."
+        ),
     )
     fuzz_parser.add_argument(
         "--no-forkserver",

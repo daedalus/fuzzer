@@ -606,7 +606,7 @@ class Fuzzer:
         inprocess=False,
         inprocess_direct=False,
         inprocess_func="LLVMFuzzerTestOneInput",
-        cmplog=False,
+        cmplog=None,  # None = auto-detect, True = force on, False = force off
         cmplog_max_tokens=0,
         cmplog_max_pairs=0,
         cmplog_workdir=None,
@@ -913,6 +913,18 @@ class Fuzzer:
         self._cmplog = None
         self._redqueen_index = 0
         self._cmplog_skip_counter = 0  # adaptive cmplog collection skip
+        # Tri-state: None = auto-detect, True = forced on, False = forced off.
+        # Auto-detect resolves here rather than at the direct_lite decision
+        # further down, because that site only runs when self._cmplog is
+        # already non-None -- i.e. it could refine how cmplog runs, never
+        # whether it runs at all.
+        self._cmplog_auto = cmplog is None
+        if cmplog is None:
+            cmplog = _detect_cmplog(self.target)
+            if cmplog:
+                print(
+                    "[*] Cmplog: target is instrumented, enabling automatically (--no-cmplog to disable)"
+                )
         if cmplog:
             from fuzzer_tool.core.cmplog import CmplogCollector
 
@@ -3827,6 +3839,7 @@ class Fuzzer:
 
     def _run_calibration(self, max_execs: int = 1000):
         return self._stats.run_calibration(max_execs)
+
 
     def discovery_rate(self):
         return self._stats.discovery_rate()
