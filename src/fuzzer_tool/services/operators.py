@@ -35,11 +35,14 @@ from fuzzer_tool.core.mutations import (
     INTERESTING_UNSIGNED_32,
     MAGIC_TABLE,
     SPECIAL_STRINGS,
+    ascii_num_replace,
+    choose_len,
     could_be_arith,
     could_be_bitflip,
     could_be_interest,
     radamsa_mutate_num,
     splice,
+    splice_common_prefix,
     splice_diff_located,
 )
 from fuzzer_tool.core.operator_registry import REGISTRY, format_gate_matches
@@ -969,26 +972,31 @@ class OperatorEngine:
         rng = self.f._rand_pool
         if len(buf) < self.f.max_len:
             idx = rng.randint(0, len(buf))
-            size = rng.randint(1, min(32, self.f.max_len - len(buf)))
-            buf[idx:idx] = bytes(rng.randint(0, 255) for _ in range(size))
+            max_size = min(64, self.f.max_len - len(buf))
+            if max_size >= 1:
+                size = choose_len(max_size, rng=rng)
+                buf[idx:idx] = bytes(rng.randint(0, 255) for _ in range(size))
 
     def _op_block_delete(self, buf, _byte_idx, _data):
         rng = self.f._rand_pool
         if len(buf) > 1:
             idx = rng.randint(0, len(buf) - 1)
-            max_size = min(32, len(buf) - idx, len(buf) - 1)
+            max_size = min(64, len(buf) - idx, len(buf) - 1)
             if max_size >= 1:
-                del buf[idx : idx + rng.randint(1, max_size)]
+                size = choose_len(max_size, rng=rng)
+                del buf[idx : idx + size]
 
     def _op_block_duplicate(self, buf, _byte_idx, _data):
         rng = self.f._rand_pool
         if len(buf) < 2 or len(buf) >= self.f.max_len:
             return
         idx = rng.randint(0, len(buf) - 1)
-        size = rng.randint(1, min(16, len(buf) - idx))
-        block = buf[idx : idx + size]
-        ins = rng.randint(0, len(buf))
-        buf[ins:ins] = block
+        max_size = min(64, len(buf) - idx)
+        if max_size >= 1:
+            size = choose_len(max_size, rng=rng)
+            block = buf[idx : idx + size]
+            ins = rng.randint(0, len(buf))
+            buf[ins:ins] = block
 
     def _op_dict_insert(self, buf, _byte_idx, _data):
         rng = self.f._rand_pool
@@ -1031,6 +1039,46 @@ class OperatorEngine:
             f._dict_scratch_idx += 1
             if len(buf) + len(token) <= f.max_len:
                 buf.extend(token)
+
+    def _op_corpus_literal_insert(self, buf, _byte_idx, _data):
+        """Insert or overwrite with a literal learned from the corpus.
+
+        Ported from go-fuzz cases 18/19: extracts integer and string
+        literals from prior corpus inputs, then either inserts one at a
+        random position or overwrites a random range with one.
+        """
+        if not buf:
+            return None
+        f = self.f
+        if (
+            not hasattr(f, "_corpus_literals")
+            or f._corpus_literals is None
+            or getattr(f, "_corpus_literals_len", 0) != len(f.corpus)
+        ):
+            from fuzzer_tool.core.mutations import extract_corpus_literals
+
+            f._corpus_literals = extract_corpus_literals(list(f.corpus))
+            f._corpus_literals_len = len(f.corpus)
+        int_lits, str_lits = f._corpus_literals
+        if not int_lits and not str_lits:
+            return None
+        rng = f._rand_pool
+        if rng.random() < 0.5 and int_lits:
+            lit = rng.choice(int_lits)
+        elif str_lits:
+            lit = rng.choice(str_lits)
+        else:
+            lit = rng.choice(int_lits)
+        if len(lit) >= len(buf):
+            return None
+        if rng.random() < 0.5:
+            pos = rng.randint(0, len(buf) - len(lit))
+            buf[pos : pos + len(lit)] = lit
+        else:
+            pos = rng.randint(0, len(buf))
+            buf[pos:pos] = lit
+            if len(buf) > f.max_len:
+                del buf[f.max_len :]
 
     def _op_checksum_repair(self, buf, _byte_idx, _data):
         rng = self.f._rand_pool
@@ -1212,6 +1260,24 @@ class OperatorEngine:
                 return bytearray(
                     splice_diff_located(bytes(buf), rng.choice(others), rng=rng)[: self.f.max_len]
                 )
+
+    def _op_splice_common_prefix(self, buf, _byte_idx, data):
+        """Splice donor into base, aligned by common prefix/suffix.
+
+        Ported from go-fuzz case 16.  Finds common prefix/suffix between
+        two inputs and only splices the differing middle, skipping when
+        the differing region is < 4 bytes.
+        """
+        rng = self.f._rand_pool
+        if len(self.f.corpus) < 2:
+            return None
+        base = bytes(buf) if buf else b""
+        others = [c for c in self.f.corpus if c is not data]
+        if not others:
+            return None
+        donor = rng.choice(others)
+        result = splice_common_prefix(base, donor, rng=rng)
+        return bytearray(result[: self.f.max_len])
 
     def _op_radamsa_num(self, buf, _byte_idx, data):
         """Radamsa-style number mutation on a random byte."""
@@ -1611,6 +1677,18 @@ class OperatorEngine:
             if result is not None:
                 return bytearray(result[: self.f.max_len])
 
+    def _op_ascii_num_replace(self, buf, _byte_idx, _data):
+        """Replace a whole multi-digit ASCII number with a random value.
+
+        Ported from go-fuzz case 15: finds runs of digits (optionally
+        prefixed with '-') of length >= 2 and replaces the whole token
+        with a random value drawn from small ints, big ints, big-int
+        squares, or negative big ints.
+        """
+        if buf and len(buf) >= 2:
+            result = ascii_num_replace(bytes(buf), rng=self.f._rand_pool)
+            return bytearray(result[: self.f.max_len])
+
     def _op_chunk_shuffle(self, buf, _byte_idx, data):
         """Shuffle fixed-size chunks, preserving chunk boundaries.
 
@@ -1710,6 +1788,37 @@ class OperatorEngine:
                     tree, max_len=self.f.max_len, rng=self.f._rand_pool
                 )[: self.f.max_len]
             )
+
+    def _op_versifier_generate(self, buf, _byte_idx, _data):
+        """Generate text-like input by learning structure from the corpus.
+
+        Ported from go-fuzz versifier: tokenizes corpus inputs into
+        whitespace/alphanum/numeric/control/bracket/kv/list/line nodes,
+        then generates structurally similar text from the learned grammar.
+        """
+        if not buf or not hasattr(self.f, "corpus") or not self.f.corpus:
+            return None
+        f = self.f
+        rng = f._rand_pool
+        verse = getattr(f, "_versifier_verse", None)
+        if verse is None or getattr(f, "_versifier_corpus_len", 0) != len(f.corpus):
+            from fuzzer_tool.core.mutations import _build_verse
+
+            corpus = f.corpus
+            verse = None
+            for raw in reversed(corpus):
+                candidate = _build_verse(raw, rng)
+                if candidate is not None:
+                    verse = candidate
+                    break
+            f._versifier_verse = verse
+            f._versifier_corpus_len = len(corpus)
+        if verse is None:
+            return None
+        result = verse.Rhyme()
+        if not result:
+            return None
+        return bytearray(result[: f.max_len])
 
     def _op_png_chunk_mutate(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations.png import PngChunkMutator, parse_png_chunks

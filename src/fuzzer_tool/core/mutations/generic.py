@@ -141,6 +141,104 @@ ARITHMETIC_DELTAS = [1, 2, 4, 8, 16, 32, 64, 128]
 ARITH_MAX = 35
 
 # ---------------------------------------------------------------------------
+# Length selection and corpus-literal helpers (ported from go-fuzz)
+# ---------------------------------------------------------------------------
+
+
+def choose_len(n: int, rng=None) -> int:
+    """Choose a range length, preferring short ranges.
+
+    Mirrors go-fuzz's chooseLen: 90% chance of 1-8, 9% of 1-32, 1% any.
+    """
+    rng = _get_rng(rng)
+    x = rng.randint(0, 99)
+    if x < 90:
+        return rng.randint(1, min(8, n))
+    if x < 99:
+        return rng.randint(1, min(32, n))
+    return rng.randint(1, n)
+
+
+def extract_corpus_literals(corpus: list[bytes]) -> tuple[list[bytes], list[bytes]]:
+    """Extract integer and string literals from the corpus.
+
+    Returns (int_lits, str_lits) where int_lits are digit sequences of
+    length >= 2 (optionally with leading '-') and str_lits are printable
+    ASCII runs of length >= 3 that are not pure digits.
+    """
+    int_lits: list[bytes] = []
+    str_lits: list[bytes] = []
+    seen_int = set()
+    seen_str = set()
+    for raw in corpus:
+        i = 0
+        while i < len(raw):
+            # Integer literal: optional '-', then >=2 digits.
+            if (
+                raw[i] == 45
+                and i + 2 < len(raw)
+                and all(0x30 <= b <= 0x39 for b in raw[i + 1 : i + 3])
+            ):
+                j = i + 1
+                while j < len(raw) and 0x30 <= raw[j] <= 0x39:
+                    j += 1
+                lit = raw[i:j]
+                if lit not in seen_int:
+                    seen_int.add(lit)
+                    int_lits.append(lit)
+                i = j
+                continue
+            # Digit run of >=2.
+            if 0x30 <= raw[i] <= 0x39:
+                j = i + 1
+                while j < len(raw) and 0x30 <= raw[j] <= 0x39:
+                    j += 1
+                if j - i >= 2:
+                    lit = raw[i:j]
+                    if lit not in seen_int:
+                        seen_int.add(lit)
+                        int_lits.append(lit)
+                i = j
+                continue
+            # String literal: printable ASCII run >=3, not pure digits.
+            if 0x20 <= raw[i] <= 0x7E:
+                j = i + 1
+                while j < len(raw) and 0x20 <= raw[j] <= 0x7E:
+                    j += 1
+                lit = raw[i:j]
+                if j - i >= 3 and lit not in seen_str and not all(0x30 <= b <= 0x39 for b in lit):
+                    seen_str.add(lit)
+                    str_lits.append(lit)
+                i = j
+                continue
+            i += 1
+    return int_lits, str_lits
+
+
+def splice_common_prefix(a: bytes, b: bytes, rng=None) -> bytes:
+    """Splice a donor into a base, aligned by common prefix/suffix.
+
+    Ported from go-fuzz case 16.  Falls back to returning *a* when the
+    differing middle is too small (< 4 bytes).
+    """
+    if len(a) < 4 or len(b) < 4:
+        return a
+    rng = _get_rng(rng)
+    idx0 = 0
+    while idx0 < len(a) and idx0 < len(b) and a[idx0] == b[idx0]:
+        idx0 += 1
+    idx1 = 0
+    while idx1 < len(a) and idx1 < len(b) and a[len(a) - idx1 - 1] == b[len(b) - idx1 - 1]:
+        idx1 += 1
+    diff = min(len(a) - idx0 - idx1, len(b) - idx0 - idx1)
+    if diff < 4:
+        return a
+    cut = idx0 + rng.randint(0, diff - 2) + 1
+    n = rng.randint(0, min(diff - (cut - idx0), len(b) - idx0))
+    return a[:cut] + b[idx0 : idx0 + n] + a[cut + n :]
+
+
+# ---------------------------------------------------------------------------
 # Security-sensitive strings (ported from honggfuzz mangle_SpecialStrings)
 # ---------------------------------------------------------------------------
 
@@ -1078,33 +1176,60 @@ def could_be_interest(old_val: int, new_val: int, blen: int, check_le: bool = Tr
 
 
 def ascii_num_replace(data: bytes, rng=None) -> bytes:
-    """Replace a random position with an ASCII number string.
+    """Replace a whole multi-digit ASCII number with a random numeric value.
 
-    Picks a random position and replaces a short segment with a random
-    ASCII decimal number (0-99999). Useful for fuzzing numeric fields
-    in text-based formats.
-
-    Args:
-        data: Input bytes.
-
-    Returns:
-        Mutated bytes with an ASCII number inserted.
+    Ported from go-fuzz case 15.  Finds runs of digits (optionally prefixed
+    with '-') of length >= 2 and replaces the whole token with a random
+    value chosen from: small int [0, 999], big int, big-int squared, or
+    negative big int.  If the original token was negative, the replacement
+    is also mostly negative.
     """
-    if not data:
+    if len(data) < 2:
+        return data
+    rng = _get_rng(rng)
+
+    # Collect candidate number spans.
+    numbers: list[tuple[int, int]] = []
+    start = -1
+    for i, v in enumerate(data):
+        digit = 0x30 <= v <= 0x39
+        if digit:
+            if start == -1:
+                start = i
+        else:
+            if start != -1 and i - start > 1:
+                numbers.append((start, i))
+            start = -1
+    if start != -1 and len(data) - start > 1:
+        numbers.append((start, len(data)))
+
+    if not numbers:
         return data
 
-    result = bytearray(data)
-    idx = _get_rng(rng).randint(0, len(result) - 1)
+    r = rng.choice(numbers)
+    neg = data[r[0]] == 45
+    raw = data[r[0] + 1 : r[1]] if neg else data[r[0] : r[1]]
 
-    # Generate a random number as ASCII digits
-    num = _get_rng(rng).randint(0, 99999)
-    num_str = str(num).encode("ascii")
+    # Only replace when the span is all digits (no embedded '-' mid-token).
+    if any(not (0x30 <= b <= 0x39) for b in raw):
+        return data
 
-    # Replace at position (truncate if near end)
-    end = min(idx + len(num_str), len(result))
-    result[idx:end] = num_str[: end - idx]
+    strategy = rng.randint(0, 3)
+    if strategy == 0:
+        v = rng.randint(0, 999)
+    elif strategy == 1:
+        v = rng.randint(0, (1 << 30) - 1)
+    elif strategy == 2:
+        v = rng.randint(0, (1 << 30) - 1) ** 2
+    else:
+        v = -rng.randint(0, (1 << 30) - 1)
 
-    return bytes(result)
+    if neg:
+        v = -v
+    repl = str(v).encode("ascii")
+    prefix = data[: r[0]]
+    suffix = data[r[1] :]
+    return prefix + repl + suffix
 
 
 def insert_ascii_num(data: bytes, max_len: int = 65536, rng=None) -> bytes:
@@ -1486,3 +1611,495 @@ def leb128_encode(data: bytes, rng=None, max_len: int = 65536) -> bytes:
         return data
     pos = r.randint(0, len(result))
     return result[:pos] + encoded + result[pos:max_len]
+
+
+# ---------------------------------------------------------------------------
+# Versifier: text-structure learner/generator (ported from go-fuzz)
+# ---------------------------------------------------------------------------
+
+
+class _VerseNode:
+    def Visit(self, f):
+        pass
+
+    def Generate(self, v, buf):
+        pass
+
+
+class _WsNode(_VerseNode):
+    def __init__(self, samples):
+        self._samples = list(set(samples))
+
+    def Generate(self, v, buf):
+        if v._rand.random() != 0 and self._samples:
+            buf += v._rand.choice(self._samples)
+        else:
+            for _ in range(v._rand.randint(0, 3)):
+                buf += v._rand.choice([b" ", b"\t"])
+
+
+class _AlphaNumNode(_VerseNode):
+    def __init__(self, samples):
+        self._samples = list(set(samples))
+
+    def Generate(self, v, buf):
+        if v._rand.random() != 0 and self._samples:
+            buf += v._rand.choice(self._samples)
+        else:
+            length = [v._rand.randint(0, 3), v._rand.randint(0, 19), v._rand.randint(0, 99)][
+                v._rand.randint(0, 2)
+            ]
+            for _ in range(length):
+                kind = v._rand.randint(0, 3)
+                if kind == 0:
+                    buf += b"_"
+                elif kind == 1:
+                    buf += bytes([0x30 + v._rand.randint(0, 9)])
+                elif kind == 2:
+                    buf += bytes([0x61 + v._rand.randint(0, 25)])
+                else:
+                    buf += bytes([0x41 + v._rand.randint(0, 25)])
+
+
+class _NumNode(_VerseNode):
+    def __init__(self, samples, hex=False):
+        self._samples = list(set(samples))
+        self._hex = hex
+
+    def Generate(self, v, buf):
+        if v._rand.random() == 0 and self._samples:
+            buf += v._rand.choice(self._samples)
+            return
+        base = [8, 10, 16][v._rand.randint(0, 2)]
+        length = [v._rand.randint(0, 3), v._rand.randint(0, 15), v._rand.randint(0, 39)][
+            v._rand.randint(0, 2)
+        ]
+        num = bytearray()
+        for _ in range(length):
+            if base == 8:
+                num += bytes([0x30 + v._rand.randint(0, 7)])
+            elif base == 10:
+                num += bytes([0x30 + v._rand.randint(0, 9)])
+            else:
+                kind = v._rand.randint(0, 2)
+                if kind == 0:
+                    num += bytes([0x30 + v._rand.randint(0, 9)])
+                elif kind == 1:
+                    num += bytes([0x61 + v._rand.randint(0, 5)])
+                else:
+                    num += bytes([0x41 + v._rand.randint(0, 5)])
+        if base == 8:
+            buf += b"0" + num
+        elif base == 16:
+            buf += b"0x" + num
+        if v._rand.random() == 0:
+            buf += b"-"
+
+
+class _ControlNode(_VerseNode):
+    def __init__(self, ch):
+        self._ch = bytes([ch])
+
+    def Generate(self, v, buf):
+        if v._rand.randint(0, 9) != 0:
+            buf += self._ch
+        else:
+            for _ in range(10):
+                b = v._rand.randint(0, 127)
+                if 0x30 <= b <= 0x39 or 0x61 <= b <= 0x7A or 0x41 <= b <= 0x5A:
+                    continue
+                buf += bytes([b])
+                break
+
+
+_BRACKETS = {
+    ord("<"): ord(">"),
+    ord("["): ord("]"),
+    ord("("): ord(")"),
+    ord("{"): ord("}"),
+    ord("'"): ord("'"),
+    ord('"'): ord('"'),
+    ord("`"): ord("`"),
+}
+
+
+class _BracketNode(_VerseNode):
+    def __init__(self, open_ch, close_ch, inner):
+        self._open = bytes([open_ch])
+        self._close = bytes([close_ch])
+        self._inner = inner
+
+    def Generate(self, v, buf):
+        if v._rand.randint(0, 9) != 0:
+            buf += self._open
+            self._inner.Generate(v, buf)
+            buf += self._close
+        else:
+            brk = [b"<", b"[", b"(", b"{", b"'", b'"', b"`"]
+            open_b = v._rand.choice(brk)
+            close_b = bytes([_BRACKETS[open_b[0]]])
+            if v._rand.randint(0, 4) == 0:
+                close_b = bytes([_BRACKETS[v._rand.choice(brk)[0]]])
+            buf += open_b
+            self._inner.Generate(v, buf)
+            buf += close_b
+
+
+class _KeyValNode(_VerseNode):
+    def __init__(self, key, value):
+        self._key = key
+        self._value = value
+
+    def Generate(self, v, buf):
+        self._key.Generate(v, buf)
+        buf += bytes([0x3A if v._rand.random() < 0.5 else 0x3D])
+        self._value.Generate(v, buf)
+
+
+class _ListNode(_VerseNode):
+    def __init__(self, delim, blocks):
+        self._delim = bytes([delim])
+        self._blocks = blocks
+
+    def Generate(self, v, buf):
+        blocks = list(self._blocks)
+        if v._rand.randint(0, 4) == 0:
+            blocks = []
+            while v._rand.randint(0, 2) != 0:
+                blocks.append(v._rand.choice(self._blocks))
+        for i, b in enumerate(blocks):
+            if i != 0:
+                buf += self._delim
+            b.Generate(v, buf)
+
+
+class _LineNode(_VerseNode):
+    def __init__(self, crlf, inner):
+        self._crlf = crlf
+        self._inner = inner
+
+    def Generate(self, v, buf):
+        self._inner.Generate(v, buf)
+        if self._crlf:
+            buf += b"\r\n"
+        else:
+            buf += b"\n"
+
+
+class _BlockNode(_VerseNode):
+    def __init__(self, nodes):
+        self._nodes = nodes
+
+    def Generate(self, v, buf):
+        nodes = list(self._nodes)
+        if v._rand.randint(0, 9) == 0:
+            while len(nodes) > 0 and v._rand.randint(0, 1) == 0:
+                idx = v._rand.randint(0, len(nodes) - 1)
+                nodes = nodes[:idx] + nodes[idx + 1 :]
+        if v._rand.randint(0, 9) == 0:
+            while len(nodes) > 0 and v._rand.randint(0, 1) == 0:
+                idx = v._rand.randint(0, len(nodes) - 1)
+                nodes = nodes[:idx] + [None] + nodes[idx:]
+        if v._rand.randint(0, 9) == 0:
+            while len(nodes) > 0 and v._rand.randint(0, 1) == 0:
+                idx1 = v._rand.randint(0, len(nodes) - 1)
+                idx2 = v._rand.randint(0, len(nodes) - 1)
+                nodes[idx1], nodes[idx2] = nodes[idx2], nodes[idx1]
+        for n in nodes:
+            if n is None:
+                continue
+            if v._rand.randint(0, 19) == 0:
+                continue
+            n.Generate(v, buf)
+
+
+class Verse:
+    def __init__(self, rng):
+        self._blocks = []
+        self._all_nodes = []
+        self._rand = rng
+
+    def add_block(self, block):
+        self._blocks.append(block)
+
+    def Rhyme(self):
+        buf = bytearray()
+        if not self._blocks:
+            return buf
+        block = self._blocks[self._rand.randint(0, len(self._blocks) - 1)]
+        block.Generate(self, buf)
+        return bytes(buf)
+
+
+def _is_hex(s):
+    if not s:
+        return False
+    for c in s:
+        if 0x30 <= c <= 0x39 or 0x61 <= c <= 0x66 or 0x41 <= c <= 0x46:
+            continue
+        return False
+    return True
+
+
+def _is_dec(s):
+    if not s:
+        return False
+    for c in s:
+        if 0x30 <= c <= 0x39:
+            continue
+        return False
+    return True
+
+
+def _build_verse(data, rng):
+    printable = sum(1 for b in data if 0x20 <= b < 0x7F)
+    if printable < len(data) * 9 // 10:
+        return None
+    v = Verse(rng)
+    nodes = _tokenize(data)
+    nodes = _structure(nodes)
+    v.add_block(_BlockNode(nodes))
+    return v
+
+
+def _tokenize(data):
+    nodes = []
+    i = 0
+    state = 0  # 0=control, 1=ws, 2=alpha, 3=num
+    start = 0
+    while i < len(data):
+        b = data[i]
+        is_alpha = (0x61 <= b <= 0x7A) or (0x41 <= b <= 0x5A) or b == 0x5F
+        is_digit = 0x30 <= b <= 0x39
+        is_ws = b in (0x20, 0x09)
+        if is_alpha:
+            if state == 0:
+                start = i
+                state = 2
+            elif state == 1:
+                nodes.append(_WsNode([data[start:i]]))
+                start = i
+                state = 2
+            elif state == 3:
+                state = 2
+        elif is_digit:
+            if state == 0:
+                start = i
+                state = 3
+            elif state == 1:
+                nodes.append(_WsNode([data[start:i]]))
+                start = i
+                state = 3
+            elif state == 2:
+                pass
+        elif is_ws:
+            if state == 0:
+                start = i
+                state = 1
+            elif state == 2:
+                nodes.append(_AlphaNumNode([data[start:i]]))
+                start = i
+                state = 1
+            elif state == 3:
+                nodes.append(_NumNode([data[start:i]], hex=False))
+                start = i
+                state = 1
+        else:
+            if state == 1:
+                nodes.append(_WsNode([data[start:i]]))
+            elif state == 2:
+                nodes.append(_AlphaNumNode([data[start:i]]))
+            elif state == 3:
+                nodes.append(_NumNode([data[start:i]], hex=False))
+            state = 0
+            nodes.append(_ControlNode(b))
+        i += 1
+    if state == 2:
+        nodes.append(_AlphaNumNode([data[start:]]))
+    elif state == 3:
+        nodes.append(_NumNode([data[start:]], hex=False))
+    return nodes
+
+
+def _structure(nodes):
+    nodes = _extract_numbers(nodes)
+    nodes = _structure_brackets(nodes)
+    nodes = _structure_keyvalue(nodes)
+    nodes = _structure_lists(nodes)
+    nodes = _structure_lines(nodes)
+    return nodes
+
+
+def _extract_numbers(nodes):
+    changed = True
+    while changed:
+        changed = False
+        i = 0
+        while i < len(nodes):
+            n = nodes[i]
+            if isinstance(n, _AlphaNumNode) and len(n._samples) == 1:
+                v = n._samples[0]
+                if len(v) >= 3 and v[0:2] == b"0x" and _is_hex(v[2:]):
+                    nodes[i] = _NumNode([v], hex=True)
+                    changed = True
+                    i += 1
+                    continue
+                e = v.find(b"e")
+                if e != -1 and _is_dec(v[:e]) and _is_dec(v[e + 1 :]):
+                    nodes[i] = _NumNode([v], hex=False)
+                    changed = True
+                    i += 1
+                    continue
+            if (
+                isinstance(n, _ControlNode)
+                and n._ch == 45
+                and i + 1 < len(nodes)
+                and isinstance(nodes[i + 1], _NumNode)
+            ):
+                num = nodes[i + 1]
+                prev = nodes[i - 1] if i > 0 else None
+                if (
+                    not isinstance(prev, _AlphaNumNode)
+                    or len(prev._samples[0]) <= 1
+                    or prev._samples[0][-1:] != b"e"
+                ):
+                    num._samples = [b"-" + num._samples[0]]
+                    nodes = nodes[:i] + nodes[i + 1 :]
+                    changed = True
+                    i += 1
+                    continue
+            i += 1
+    return nodes
+
+
+def _structure_brackets(nodes):
+    stk = []
+    i = 0
+    while i < len(nodes):
+        n = nodes[i]
+        if isinstance(n, _ControlNode) and n._ch in _BRACKETS:
+            stk.append((n._ch, _BRACKETS[n._ch], i))
+        elif isinstance(n, _ControlNode):
+            close = n._ch
+            for si in range(len(stk) - 1, -1, -1):
+                if stk[si][1] == close:
+                    open_ch, _, pos = stk[si]
+                    inner = _BlockNode(nodes[pos + 1 : i])
+                    nodes[pos] = _BracketNode(open_ch, stk[si][1], inner)
+                    nodes = nodes[: pos + 1] + nodes[i + 1 :]
+                    i = pos
+                    stk = stk[:si]
+                    break
+        i += 1
+    return nodes
+
+
+def _structure_keyvalue(nodes):
+    delims = {0x3A, 0x3D}
+    for n in nodes:
+        if isinstance(n, _BracketNode):
+            n._inner = _BlockNode(_structure_keyvalue(n._inner._nodes))
+    i = 0
+    while i < len(nodes):
+        n = nodes[i]
+        if (
+            isinstance(n, _ControlNode)
+            and n._ch in delims
+            and i > 0
+            and i < len(nodes) - 1
+            and isinstance(nodes[i - 1], _AlphaNumNode)
+            and isinstance(nodes[i + 1], _AlphaNumNode)
+        ):
+            nodes[i] = _KeyValNode(nodes[i - 1], nodes[i + 1])
+            nodes = nodes[: i - 1] + nodes[i:]
+            i += 1
+            continue
+        i += 1
+    return nodes
+
+
+def _structure_lists(nodes):
+    delims = {0x2C, 0x3B}
+    for n in nodes:
+        if isinstance(n, _BracketNode):
+            n._inner = _BlockNode(_structure_lists(n._inner._nodes))
+    i = len(nodes) - 1
+    while i >= 0:
+        n = nodes[i]
+        if isinstance(n, _ControlNode) and n._ch in delims:
+            left = i - 1
+            right = i + 1
+            left_tokens = set()
+            right_tokens = set()
+            while True:
+                left_done = left < 0
+                right_done = right >= len(nodes)
+                if left_done and right_done:
+                    break
+                if not left_done:
+                    ctrl = nodes[left]
+                    if isinstance(ctrl, _ControlNode):
+                        if ctrl._ch == n._ch:
+                            left_done = True
+                        else:
+                            left_tokens.add(ctrl._ch)
+                    if isinstance(ctrl, _BracketNode):
+                        left_tokens.add(ctrl._open[0])
+                        left_tokens.add(ctrl._close[0])
+                if not right_done:
+                    ctrl = nodes[right]
+                    if isinstance(ctrl, _ControlNode):
+                        if ctrl._ch == n._ch:
+                            right_done = True
+                        else:
+                            right_tokens.add(ctrl._ch)
+                    if isinstance(ctrl, _BracketNode):
+                        right_tokens.add(ctrl._open[0])
+                        right_tokens.add(ctrl._close[0])
+                if left_tokens == right_tokens:
+                    break
+                left -= 1
+                right += 1
+            # Simple list: collect elements between matching delimiters
+            blocks = []
+            j = left + 1
+            while j < right:
+                k = j
+                while k < right and not (
+                    isinstance(nodes[k], _ControlNode) and nodes[k]._ch == n._ch
+                ):
+                    k += 1
+                blocks.append(_BlockNode(nodes[j:k]))
+                j = k + 1
+            if len(blocks) >= 2:
+                nodes = nodes[: left + 1] + [_ListNode(n._ch, blocks)] + nodes[right:]
+                i = left + 1
+                continue
+        i -= 1
+    return nodes
+
+
+def _structure_lines(nodes):
+    res = []
+    i = 0
+    while i < len(nodes):
+        if isinstance(nodes[i], _BracketNode):
+            nodes[i]._inner = _BlockNode(_structure_lines(nodes[i]._inner._nodes))
+            i += 1
+            continue
+        if isinstance(nodes[i], _ControlNode) and nodes[i]._ch == ord("\n"):
+            crlf = (
+                i > 0 and isinstance(nodes[i - 1], _ControlNode) and nodes[i - 1]._ch == ord("\r")
+            )
+            if crlf:
+                res.append(_LineNode(True, _BlockNode(nodes[: i - 1])))
+                nodes = nodes[i + 1 :]
+            else:
+                res.append(_LineNode(False, _BlockNode(nodes[:i])))
+                nodes = nodes[i + 1 :]
+            i = 0
+            continue
+        i += 1
+    if nodes:
+        res.extend(nodes)
+    return res

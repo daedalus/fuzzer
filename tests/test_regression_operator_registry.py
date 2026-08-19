@@ -74,6 +74,7 @@ class _MockFuzzer:
         self.enable_x86_mutator = False
         self.enable_arm_mutator = False
         self.seed_meta = {}
+        self.corpus = []
 
 
 class _CmplogWithPairs:
@@ -576,3 +577,112 @@ class TestNewByteOperators:
                 assert result is None or len(result) > len(buf)
             else:
                 assert result is None or result != buf
+
+
+class TestGoFuzzPorts:
+    """Regression tests for mutations ported from ~/code/go-fuzz."""
+
+    NEW_OPS = frozenset(
+        {
+            "ascii_num_replace",
+            "splice_common_prefix",
+            "corpus_literal_insert",
+            "versifier_generate",
+        }
+    )
+
+    def test_band_is_registered(self):
+        assert set(REGISTRY.names()) >= self.NEW_OPS
+
+    def test_band_categorized_structural(self):
+        for op in self.NEW_OPS:
+            assert REGISTRY.category_of(op) == "structural", f"{op} not in structural band"
+
+    def test_unconditional_availability(self):
+        fuzzer = _MockFuzzer()
+        fuzzer._rand_pool = RandPool(seed=1)
+        available = set(REGISTRY.available(fuzzer, b"seed"))
+        assert available >= self.NEW_OPS
+
+    def test_every_op_has_a_handler(self):
+        engine = OperatorEngine(_MockFuzzer())
+        dispatch = REGISTRY.dispatch(engine)
+        for name in self.NEW_OPS:
+            assert callable(dispatch[name]), name
+
+    def test_handlers_preserve_length(self):
+        fuzzer = _MockFuzzer()
+        fuzzer.max_len = 4096
+        fuzzer._rand_pool = RandPool(seed=1)
+        engine = OperatorEngine(fuzzer)
+        dispatch = REGISTRY.dispatch(engine)
+        for name in sorted(self.NEW_OPS):
+            for _ in range(10):
+                buf = bytearray(os.urandom(512))
+                result = dispatch[name](buf, 0, bytes(buf))
+                assert result is None or len(result) == 512, name
+
+    def test_ascii_num_replace_substitutes_digits(self):
+        from fuzzer_tool.core.mutations import ascii_num_replace
+
+        result = ascii_num_replace(b"err=12345;ok", rng=RandPool(seed=1))
+        # The number token must be replaced with another digit string.
+        assert b"err=" in result
+        assert b";ok" in result
+        # The digits between = and ; must differ from the original.
+        import re
+
+        m = re.search(rb"err=(\d+);ok", result)
+        assert m is not None, result
+        assert m.group(1) != b"12345"
+
+    def test_choose_len_prefers_short(self):
+        from fuzzer_tool.core.mutations import choose_len
+
+        rng = RandPool(seed=1)
+        lengths = [choose_len(64, rng=rng) for _ in range(1000)]
+        short = sum(1 for length in lengths if length <= 8)
+        medium = sum(1 for length in lengths if 8 < length <= 32)
+        assert short >= 800, f"expected >= 800 short, got {short}"
+        assert medium >= 50, f"expected >= 50 medium, got {medium}"
+
+    def test_splice_common_prefix_skips_small_diff(self):
+        from fuzzer_tool.core.mutations import splice_common_prefix
+
+        a = b"AAAAAA"
+        b = b"AAAAAB"
+        result = splice_common_prefix(a, b, rng=RandPool(seed=1))
+        assert result == a
+
+    def test_extract_corpus_literals(self):
+        from fuzzer_tool.core.mutations import extract_corpus_literals
+
+        int_lits, str_lits = extract_corpus_literals([b"count=1000;name=foo"])
+        assert b"1000" in int_lits
+        assert any(b"foo" in s for s in str_lits)
+
+    def test_versifier_skips_binary(self):
+        from fuzzer_tool.core.mutations.generic import _build_verse
+
+        data = bytes(range(256))
+        assert _build_verse(data, RandPool(seed=1)) is None
+
+    def test_versifier_builds_from_text(self):
+        from fuzzer_tool.core.mutations.generic import _build_verse
+
+        verse = _build_verse(b"a=1\nb=2\n", RandPool(seed=1))
+        assert verse is not None
+        out = verse.Rhyme()
+        assert isinstance(out, bytes)
+
+    def test_splice_common_prefix_middle_aligned(self):
+        from fuzzer_tool.core.mutations import splice_common_prefix
+
+        a = b"prefix_" + b"A" * 64 + b"_suffix"
+        b = b"prefix_" + b"B" * 64 + b"_suffix"
+        rng = RandPool(seed=1)
+        results = [splice_common_prefix(a, b, rng=rng) for _ in range(50)]
+        assert any(r != a for r in results), "expected at least one non-trivial splice"
+        for r in results:
+            assert r.startswith(b"prefix_")
+            assert r.endswith(b"_suffix")

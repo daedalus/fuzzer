@@ -233,7 +233,7 @@ def download_file(url: str, dest_path: str, retries: int = 4, backoff_base: floa
                 file=sys.stderr,
             )
             time.sleep(sleep)
-        except urllib.error.URLError as e:
+        except (urllib.error.URLError, TimeoutError) as e:
             last_error = e
             sleep = backoff_base * (2**attempt)
             print(
