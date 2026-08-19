@@ -70,6 +70,17 @@ its intended consumers (`schedules.py` byte down-weighting,
 separate, later step, gated on a real-corpus convergence-threshold
 sensitivity sweep per the handover doc's Sequencing section, not done
 here.
+
+
+Validation status: a genuinely coverage-dead region now exists to test
+against. Four real campaigns (zlib, png twice, jpeg) produced none, for
+structural reasons -- compressed data has no padding, and any CRC-covered
+format rules out coverage-dead bytes outright. `tools/gen_synthetic_target.py`
+supplies one by construction (0/60 dead-region mutations move coverage,
+60/60 live-region ones do; see
+docs/sweeps/synthetic_target_ground_truth_2026-08-19.md). The false-negative
+rate has NOT yet been measured against it -- that run is the remaining work,
+and until it happens `_LIVENESS_DEAD_WEIGHT` stays a conservative guess.
 """
 
 from __future__ import annotations

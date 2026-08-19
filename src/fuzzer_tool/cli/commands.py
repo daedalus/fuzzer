@@ -1885,8 +1885,12 @@ def main() -> int:
         help=(
             "Re-run each newly accepted seed N times and mask edges that do "
             "not reproduce (nondeterministic: ASLR, time, uninitialized "
-            "memory). 0 disables. 3 is the usual value. Costs N extra "
-            "executions per accepted seed."
+            "memory). 0 disables. Use 8: measured against a target with "
+            "known-unstable edges, N=3 recovers the full unstable set only "
+            "35%% of the time and misses it entirely 6%% of the time, while "
+            "N=8 recovers it 87%% of the time. See "
+            "docs/sweeps/synthetic_target_ground_truth_2026-08-19.md. "
+            "Costs N extra executions per accepted seed."
         ),
     )
     fuzz_parser.add_argument(

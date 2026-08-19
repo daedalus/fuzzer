@@ -36,48 +36,37 @@ many pairs or eight times that many) — the latter being the shape of the
 original incident, which was unbounded growth rather than one slow call.
 Measured 7 ms at the cap; verified to catch an injected 1.2 s regression.
 
-### B. Item 4 — the false-negative dead-region case (Sequencing step 6)
+### B. Item 4 — false-negative dead-region case — **UNBLOCKED, one run left**
 
-`LiveBitMaskEstimator` is implemented and wired into both consumers
-(`OperatorEngine.record_coverage_diff` region down-weighting,
-`FormatLearner.record_liveness` padding corroboration), with
-`_LIVENESS_SWITCH_AFTER = 200` and `_LIVENESS_DEAD_WEIGHT = 0.1`. Both
-consumers remain gated on a real-corpus sensitivity sweep that has now run
-four times and still has not exercised the failure mode it exists to catch.
+`LiveBitMaskEstimator` is implemented and wired into both consumers, with
+`_LIVENESS_SWITCH_AFTER = 200` and `_LIVENESS_DEAD_WEIGHT = 0.1`. Step 6 was
+stuck for four rounds not on the estimator but on the target matrix: zlib,
+png (twice) and jpeg all produced zero genuinely-dead regions, so the
+false-negative rate had nothing to be measured against. Two of those misses
+are structural rather than accidental — compressed data has no padding, and
+any CRC-covered format rules out coverage-dead bytes outright, since
+mutating any byte moves the CRC-check edge regardless of semantic relevance.
 
-| round | target | samples | result |
-|---|---|---|---|
-| 9 | `zlib_read` | 3,192 | threshold-stable, no dead region — compressed data has no padding |
-| 10 | `png_read` | 16,063 | threshold-stable, no dead region — every chunk is CRC-guarded |
-| 11 | `jpeg_read` | — | threshold-stable, no dead region — all samples attributed to region 0; 3.0% diff yield |
+**That blocker is gone.** `tools/gen_synthetic_target.py` produces a target
+with a byte region that is read but provably never reaches a branch, and no
+checksum anywhere. Measured on the deterministic variant: live prefix 60/60
+mutations move coverage, dead region **0/60**, identical-input reruns 0/20
+differ. Ground truth by construction, asserted in
+`tests/test_synthetic_target.py` so it cannot silently rot.
 
-Threshold stability now holds on three real targets: the same final live
-mask at every `switch_after` ∈ {50, 100, 200, 400, 800}. Zero false-dead
-verdicts across all four campaigns. But also **zero true-dead regions**, so
-the false-negative rate — the actual thing step 6 exists to measure — is
-still unmeasured, and `_LIVENESS_DEAD_WEIGHT = 0.1` remains a conservative
-guess rather than a calibrated value.
+**Remaining work is one sweep**, not a decision any more: run
+`tools/sweep_liveness_thresholds.py` against the synthetic target and
+calibrate `_LIVENESS_DEAD_WEIGHT` and `_LIVENESS_SWITCH_AFTER` against a
+known-dead region. Until that runs, both stay conservative guesses and the
+comments at `services/operators.py` and `core/live_bit_mask.py` say so.
 
-**The three failures are not the same failure.** Each target missed for a
-different structural reason, and two of them are categorical rather than
-sampling accidents: any CRC-covered format structurally rules out
-coverage-dead bytes, because mutating *any* byte flips the CRC-check edge
-regardless of semantic relevance. JPEG's miss was different again —
-attribution, not structure: despite seeds up to 66 KB with injected
-`APPn`/`COM` payloads, every usable sample landed in region 0, so the
-per-region behaviour was never exercised at all.
+One caveat to carry into that sweep: use `--unstable 0`. On the unstable
+variant, dead-region mutations appear to move coverage 40/60 of the time
+purely from ASLR-gated edges — nondeterminism destroys the liveness signal
+outright, which is worth knowing before running this against any real target
+that has not been stability-calibrated first.
 
-**So this is a decision, not a task.** Target selection should start from
-"which formats in the matrix have neither a whole-file nor a per-chunk
-checksum" rather than from another round of corpus engineering. Round 11's
-own alternative — force mutations into `APPn` trailer tails rather than
-uniform random offsets — would fix JPEG's attribution problem specifically.
-If neither yields a target with genuinely unchecked bytes, the honest
-close-out is to record the false-negative rate as **unmeasurable against the
-current target matrix**, keep the conservative weight on that basis, and
-close step 6 rather than spending a fifth round on it.
-
-Raw data and per-round writeups: `docs/sweeps/`.
+See `docs/sweeps/synthetic_target_ground_truth_2026-08-19.md`.
 
 ### C. §2 — bounded probe window — **DONE, and it uncovered a worse bug**
 
@@ -88,13 +77,20 @@ asserting the two constants cannot drift — `record_edge()` is a Python
 mirror of the same loop, and an unbounded mirror would place edges the shim
 could never find.
 
-64 rather than 16. Simulated drop rate against `ffmpeg_read`'s shape
-(201,279 edges in 262,144 slots, load 0.77): window 8 → 4.43%, 16 → 1.60%,
-32 → 0.40%, 64 → 0.04%. A dropped edge is *permanently* invisible, not
-delayed, so 16 would have cost ~3,200 edges on the only target that
-exercises the cap. Every other instrumented target sits at ~13% load and
-drops nothing at any of these windows. Also removed the O(map_size)
-`all_live` second scan, which was the real worst-case cost in that loop.
+64 rather than 16. Now **measured** against the real shim rather than
+simulated (201,279 distinct random edge ids into a 262,144-entry map —
+`ffmpeg_read`'s shape, load 0.77): window 8 loses 4.39% of edges, 16 loses
+1.55%, 32 loses 0.38%, 64 loses 0.04%. Close to the simulation that
+motivated the choice, so 64 stands. A dropped edge is *permanently*
+invisible, not delayed. Also removed the O(map_size) `all_live` second scan.
+
+**The cost side did not survive measurement.** ns/edge is flat from window 8
+to 1024 — the hot path at this load is dominated by cache misses over a 2 MB
+table, not probe count, and lookups terminate at the matching entry
+regardless of the bound. The bound is retained because it converts an
+unbounded worst case into a constant, but §2's premise that probe cost was
+worth attacking is not supported by measurement, and there is no speed to be
+gained by lowering the window.
 
 **The load-factor premise was wrong, and finding out why turned up a
 critical bug.** See below.
@@ -167,6 +163,15 @@ Two design points worth keeping:
   every time its trip count crosses a bucket boundary, which for a
   nondeterministic edge is exactly what keeps happening. All eight buckets
   are marked.
+
+**Use N=8, not 3.** Measured against the synthetic target's ASLR-gated
+variant, where ground truth is 3 unstable edges: N=3 recovers the full set
+only 35% of the time and misses it entirely 6% of the time; N=8 recovers it
+87% of the time. Found the hard way — a live 3-run calibration returned zero
+unstable edges on an input that demonstrably varies. The failure is silent
+and asymmetric: a missed unstable edge keeps absorbing energy for the rest
+of the campaign. The handover's original "run each new seed 3×" suggestion
+was folklore.
 
 **Opt-in, not default**, because it costs `n_runs` extra executions per
 accepted seed and no A/B against a real target has been run. That is the
@@ -261,9 +266,17 @@ reset-cost figures are measured but on one machine. No edges/second number
 anywhere here comes from an A/B against a real target. `tools/bench_paired.py`
 against a fixed seed and a fixed exec budget before trusting any of it.
 
-**Target matrix (census 2026-08-16, `--clang-scov`).** All 9 non-trivial
-binaries carry a `__sancov_guards` section, so sizing is exact and nothing
-falls back to branch-density estimation:
+**Target matrix (census 2026-08-16, `--clang-scov`), plus one synthetic.**
+`tools/gen_synthetic_target.py` generates a target with a controllable guard
+count (`--blocks`), a provably coverage-dead byte region, no checksum, and
+optional ASLR-gated unstable blocks. It is generated rather than committed
+(20,000 blocks is 1.2 MB of C) and built by
+`tests/test_synthetic_target.py`, which also asserts its ground-truth
+properties still hold. Use it for anything needing a known answer; use the
+real targets below for anything needing realism.
+
+All 9 non-trivial real binaries carry a `__sancov_guards` section, so sizing
+is exact and nothing falls back to branch-density estimation:
 
 | target | guards | map |
 |--------|-------:|----:|
@@ -277,8 +290,9 @@ falls back to branch-density estimation:
 | cmplog_exercise_tcg | 155 | 8,192 |
 | proto_target | 99 | 8,192 |
 
-`ffmpeg_read` is the only target that exercises the map cap, and therefore the
-only one against which (C) can be validated. Everything else sizes to the
+`ffmpeg_read` is the only *real* target that exercises the map cap; the
+synthetic target above reaches any load on demand, which is how (C) was
+finally measured rather than simulated. Everything else sizes to the
 floor at ~13% load. A CTX build would multiply distinct ids by call-graph
 fan-in and is the next stress test after that; every target above is `ctx=0`.
 Re-run with `parse_sancov_guard_count()` before doing this work.
@@ -311,10 +325,13 @@ sizing.
   checksum/flags field, to use as a *real* validation case for item 1? Absent
   one, it ships with synthetic validation only and says so in the module
   docstring.
-- For item 4 / (B) above: does a target exist in this tree with neither a
-  whole-file nor a per-chunk checksum? This is now the deciding question for
-  whether step 6 can ever close, and it is cheaper to answer than to run
-  another sweep.
+- ~~For item 4 / (B): does a target exist in this tree with neither a
+  whole-file nor a per-chunk checksum?~~ **Answered: no real one, so one was
+  built.** See (B) and `tools/gen_synthetic_target.py`. The follow-on
+  question is whether calibrating `_LIVENESS_DEAD_WEIGHT` against a
+  synthetic dead region is worth acting on, given no real format in the
+  matrix has such a region — the calibration is sound, but its
+  generalisation to real targets is an assumption worth stating out loud.
 
 ---
 
