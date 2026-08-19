@@ -56,6 +56,13 @@ def _unverifiable_pair(i: int) -> tuple[bytes, int]:
     return (_BIG_DATA, i)
 
 
+# Small-data twin of _unverifiable_pair. The XOR path caps the field it
+# looks at to 32 bits regardless of data size, so multi-KB data buys the
+# XOR family nothing while making the GF(2) GCD path dominate any timing.
+def _small_unverifiable_pair(i: int) -> tuple[bytes, int]:
+    return (b"\x37\x11\x9a\x04", i)
+
+
 class TestPairListIsCapped:
     def test_pairs_never_exceed_the_cap(self):
         f = _FakeFuzzer()
@@ -200,3 +207,84 @@ class TestRecoveryCostBounded:
         # Factor 2: every recovery operates on a capped pair set, so
         # per-call cost cannot grow with runtime.
         assert max_pairs_seen <= CHECKSUM_PAIRS_MAX
+
+
+class TestXorPathCostBounded:
+    """The XOR-bitmask family is the third and last recovery path, so it is
+    the one that runs on *every* retry for a pair set nothing can explain --
+    GF(2) and integer both fail first, then the XOR solver runs, then the
+    whole thing repeats on the next batch. That makes it the worst case for
+    hot-path cost, and it is reached only through ``_recover``, so the two
+    existing guards (CHECKSUM_PAIRS_MAX, RECOVERY_RETRY_BATCH) are what
+    bound it.
+
+    ``tests/test_xor_map_solver.py`` already bounds the solver standalone.
+    This is the different assertion the handover asked for: cost as the
+    learner sees it, at the cap, through the same ``add_pairs`` ->
+    ``ensure_xor_model`` sequence ``fuzz_one`` drives.
+
+    Recovery is elimination over F2 (O(pairs * rank) word XORs), not the
+    per-output-bit SAT search it started as, so this is a regression guard
+    against a future change reintroducing search -- not a live hazard. The
+    1.0s ceiling is deliberately ~3 orders of magnitude above the measured
+    cost for that reason: it should catch an algorithmic regression without
+    going red on a loaded CI box.
+    """
+
+    def test_xor_path_stays_bounded_at_the_pair_cap(self):
+        import time
+
+        f = _FakeFuzzer()
+        learner = ChecksumLearner(f, min_pairs=8, poly_width=32)
+
+        # Fill to the cap with pairs no model in any of the three families
+        # can explain, so every retry runs all three paths to exhaustion.
+        for batch_start in range(0, CHECKSUM_PAIRS_MAX * 2, 4):
+            learner.add_pairs([_unverifiable_pair(batch_start + k) for k in range(4)])
+        assert len(learner._pairs) == CHECKSUM_PAIRS_MAX
+
+        # Force the retry gate open so the timed call actually recovers
+        # rather than returning the cached miss.
+        learner._pairs_attempted_at = -1
+
+        start = time.perf_counter()
+        model = learner.ensure_xor_model()
+        elapsed = time.perf_counter() - start
+
+        # Fail closed: an unexplainable pair set must not yield a model.
+        assert model is None
+        assert elapsed < 1.0, f"XOR recovery at the pair cap took {elapsed:.3f}s"
+
+    def test_cost_at_the_cap_is_invariant_to_pairs_seen(self):
+        """Cost per recovery must not scale with how long the run has gone.
+
+        The original incident was not a single slow call -- it was a call
+        whose cost grew without bound as the pair pool grew. The cap is what
+        makes it flat, so the property to assert is that recovery cost at
+        the cap is the same whether the learner has seen CHECKSUM_PAIRS_MAX
+        pairs or many times that. Comparing a below-cap call against an
+        at-cap call would instead measure the (bounded, expected) linear
+        growth up to the cap, which is not the bug.
+
+        Uses small pairs rather than the 4KB ``_BIG_DATA`` ones: with
+        multi-KB data the GF(2) GCD path dominates the measurement and the
+        XOR family's contribution disappears into the noise.
+        """
+        import time
+
+        def timed_recovery_at_cap(total_pairs: int) -> float:
+            f = _FakeFuzzer()
+            learner = ChecksumLearner(f, min_pairs=8, poly_width=32)
+            for i in range(0, total_pairs, 4):
+                learner.add_pairs([_small_unverifiable_pair(i + k) for k in range(4)])
+            assert len(learner._pairs) == CHECKSUM_PAIRS_MAX
+            learner._pairs_attempted_at = -1
+            start = time.perf_counter()
+            learner.ensure_xor_model()
+            return time.perf_counter() - start
+
+        # min() over repeats: scheduler noise only ever inflates a sample.
+        at_cap = min(timed_recovery_at_cap(CHECKSUM_PAIRS_MAX) for _ in range(3))
+        long_run = min(timed_recovery_at_cap(CHECKSUM_PAIRS_MAX * 8) for _ in range(3))
+
+        assert long_run < at_cap * 4 + 0.05, f"at_cap={at_cap:.4f}s long_run={long_run:.4f}s"
