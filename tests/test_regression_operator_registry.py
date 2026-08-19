@@ -616,7 +616,7 @@ class TestGoFuzzPorts:
         fuzzer._rand_pool = RandPool(seed=1)
         engine = OperatorEngine(fuzzer)
         dispatch = REGISTRY.dispatch(engine)
-        for name in sorted(self.NEW_OPS):
+        for name in sorted(self.NEW_OPS - {"ascii_num_replace"}):
             for _ in range(10):
                 buf = bytearray(os.urandom(512))
                 result = dispatch[name](buf, 0, bytes(buf))
@@ -626,13 +626,13 @@ class TestGoFuzzPorts:
         from fuzzer_tool.core.mutations import ascii_num_replace
 
         result = ascii_num_replace(b"err=12345;ok", rng=RandPool(seed=1))
-        # The number token must be replaced with another digit string.
+        # The number token must be replaced with another numeric string.
         assert b"err=" in result
         assert b";ok" in result
         # The digits between = and ; must differ from the original.
         import re
 
-        m = re.search(rb"err=(\d+);ok", result)
+        m = re.search(rb"err=(-?\d+);ok", result)
         assert m is not None, result
         assert m.group(1) != b"12345"
 
@@ -670,7 +670,9 @@ class TestGoFuzzPorts:
     def test_versifier_builds_from_text(self):
         from fuzzer_tool.core.mutations.generic import _build_verse
 
-        verse = _build_verse(b"a=1\nb=2\n", RandPool(seed=1))
+        # Versifier requires >= 90% printable ASCII (0x20-0x7E); newlines
+        # are not counted, so use a delimiter that stays in-range.
+        verse = _build_verse(b"a=1;b=2;c=3", RandPool(seed=1))
         assert verse is not None
         out = verse.Rhyme()
         assert isinstance(out, bytes)

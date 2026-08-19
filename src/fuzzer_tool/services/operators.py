@@ -1802,7 +1802,7 @@ class OperatorEngine:
         rng = f._rand_pool
         verse = getattr(f, "_versifier_verse", None)
         if verse is None or getattr(f, "_versifier_corpus_len", 0) != len(f.corpus):
-            from fuzzer_tool.core.mutations import _build_verse
+            from fuzzer_tool.core.mutations.generic import _build_verse
 
             corpus = f.corpus
             verse = None

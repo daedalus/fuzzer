@@ -173,6 +173,18 @@ def extract_corpus_literals(corpus: list[bytes]) -> tuple[list[bytes], list[byte
     for raw in corpus:
         i = 0
         while i < len(raw):
+            # Digit runs take priority over everything else.
+            if 0x30 <= raw[i] <= 0x39:
+                j = i + 1
+                while j < len(raw) and 0x30 <= raw[j] <= 0x39:
+                    j += 1
+                if j - i >= 2:
+                    lit = raw[i:j]
+                    if lit not in seen_int:
+                        seen_int.add(lit)
+                        int_lits.append(lit)
+                i = j
+                continue
             # Integer literal: optional '-', then >=2 digits.
             if (
                 raw[i] == 45
@@ -188,27 +200,40 @@ def extract_corpus_literals(corpus: list[bytes]) -> tuple[list[bytes], list[byte
                     int_lits.append(lit)
                 i = j
                 continue
-            # Digit run of >=2.
-            if 0x30 <= raw[i] <= 0x39:
+            # Alpha run: letters and underscore, length >= 3.
+            if (0x61 <= raw[i] <= 0x7A) or (0x41 <= raw[i] <= 0x5A) or raw[i] == 0x5F:
                 j = i + 1
-                while j < len(raw) and 0x30 <= raw[j] <= 0x39:
+                while j < len(raw) and (
+                    (0x61 <= raw[j] <= 0x7A) or (0x41 <= raw[j] <= 0x5A) or raw[j] == 0x5F
+                ):
                     j += 1
-                if j - i >= 2:
+                if j - i >= 3:
                     lit = raw[i:j]
-                    if lit not in seen_int:
-                        seen_int.add(lit)
-                        int_lits.append(lit)
+                    if lit not in seen_str:
+                        seen_str.add(lit)
+                        str_lits.append(lit)
                 i = j
                 continue
-            # String literal: printable ASCII run >=3, not pure digits.
-            if 0x20 <= raw[i] <= 0x7E:
+            # Symbol run: printable non-alphanum, length >= 3.
+            if 0x20 <= raw[i] <= 0x7E and not (
+                (0x30 <= raw[i] <= 0x39) or (0x61 <= raw[i] <= 0x7A) or (0x41 <= raw[i] <= 0x5A)
+            ):
                 j = i + 1
-                while j < len(raw) and 0x20 <= raw[j] <= 0x7E:
+                while (
+                    j < len(raw)
+                    and 0x20 <= raw[j] <= 0x7E
+                    and not (
+                        (0x30 <= raw[j] <= 0x39)
+                        or (0x61 <= raw[j] <= 0x7A)
+                        or (0x41 <= raw[j] <= 0x5A)
+                    )
+                ):
                     j += 1
-                lit = raw[i:j]
-                if j - i >= 3 and lit not in seen_str and not all(0x30 <= b <= 0x39 for b in lit):
-                    seen_str.add(lit)
-                    str_lits.append(lit)
+                if j - i >= 3:
+                    lit = raw[i:j]
+                    if lit not in seen_str:
+                        seen_str.add(lit)
+                        str_lits.append(lit)
                 i = j
                 continue
             i += 1
