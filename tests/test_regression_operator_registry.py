@@ -688,3 +688,98 @@ class TestGoFuzzPorts:
         for r in results:
             assert r.startswith(b"prefix_")
             assert r.endswith(b"_suffix")
+
+
+class TestGoFuzzPorts2:
+    """Regression tests for the remaining go-fuzz ports: digit_replace and
+    insert_range_from_other."""
+
+    NEW_OPS = frozenset({"digit_replace", "insert_range_from_other"})
+
+    def test_band_is_registered(self):
+        assert set(REGISTRY.names()) >= self.NEW_OPS
+
+    def test_band_categorized_structural(self):
+        for op in self.NEW_OPS:
+            assert REGISTRY.category_of(op) == "structural", f"{op} not in structural band"
+
+    def test_unconditional_availability(self):
+        fuzzer = _MockFuzzer()
+        fuzzer._rand_pool = RandPool(seed=1)
+        available = set(REGISTRY.available(fuzzer, b"seed"))
+        assert available >= self.NEW_OPS
+
+    def test_every_op_has_a_handler(self):
+        engine = OperatorEngine(_MockFuzzer())
+        dispatch = REGISTRY.dispatch(engine)
+        for name in self.NEW_OPS:
+            assert callable(dispatch[name]), name
+
+    def test_handlers_preserve_length(self):
+        fuzzer = _MockFuzzer()
+        fuzzer.max_len = 4096
+        fuzzer._rand_pool = RandPool(seed=1)
+        engine = OperatorEngine(fuzzer)
+        dispatch = REGISTRY.dispatch(engine)
+        # digit_replace preserves length; insert_range_from_other does not.
+        for _ in range(10):
+            buf = bytearray(os.urandom(512))
+            result = dispatch["digit_replace"](buf, 0, bytes(buf))
+            assert result is None or len(result) == 512
+
+    def test_digit_replace_changes_one_digit(self):
+        data = b"err=12345;ok"
+        fuzzer = _MockFuzzer()
+        fuzzer.max_len = 4096
+        fuzzer._rand_pool = RandPool(seed=1)
+        engine = OperatorEngine(fuzzer)
+        dispatch = REGISTRY.dispatch(engine)
+        buf = bytearray(data)
+        result = dispatch["digit_replace"](buf, 0, data)
+        assert result is None
+        assert len(buf) == len(data)
+        diffs = [i for i, (a, b) in enumerate(zip(data, buf, strict=True)) if a != b]
+        assert len(diffs) == 1, f"expected exactly one digit changed, got {diffs}"
+        assert 0x30 <= buf[diffs[0]] <= 0x39
+
+    def test_digit_replace_skips_non_digit(self):
+        fuzzer = _MockFuzzer()
+        fuzzer.max_len = 4096
+        fuzzer._rand_pool = RandPool(seed=1)
+        engine = OperatorEngine(fuzzer)
+        dispatch = REGISTRY.dispatch(engine)
+        buf = bytearray(b"abc")
+        result = dispatch["digit_replace"](buf, 0, b"abc")
+        assert result is None
+        assert bytes(buf) == b"abc"
+
+    def test_insert_range_from_other_skips_small_inputs(self):
+        fuzzer = _MockFuzzer()
+        fuzzer.max_len = 4096
+        fuzzer.corpus = [b"AAAA"]
+        fuzzer._rand_pool = RandPool(seed=1)
+        engine = OperatorEngine(fuzzer)
+        dispatch = REGISTRY.dispatch(engine)
+        # Buffer too small.
+        buf = bytearray(b"abc")
+        result = dispatch["insert_range_from_other"](buf, 0, b"abc")
+        assert result is None
+        # Corpus too small.
+        fuzzer.corpus = [b"AAAA"]
+        buf = bytearray(b"AAAA")
+        result = dispatch["insert_range_from_other"](buf, 0, b"AAAA")
+        assert result is None
+
+    def test_insert_range_from_other_inserts_range(self):
+        fuzzer = _MockFuzzer()
+        fuzzer.max_len = 4096
+        fuzzer.corpus = [b"prefix_" + b"A" * 64 + b"_suffix", b"prefix_" + b"B" * 64 + b"_suffix"]
+        fuzzer._rand_pool = RandPool(seed=1)
+        engine = OperatorEngine(fuzzer)
+        dispatch = REGISTRY.dispatch(engine)
+        buf = bytearray(b"AAAA")
+        dispatch["insert_range_from_other"](buf, 0, b"AAAA")
+        # Result should be longer than the original buffer.
+        assert len(buf) > 4
+        # The inserted bytes must come from one of the corpus entries.
+        assert any(b"B" in buf or b"A" * 64 in buf for _ in [0])

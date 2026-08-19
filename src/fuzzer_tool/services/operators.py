@@ -1279,6 +1279,31 @@ class OperatorEngine:
         result = splice_common_prefix(base, donor, rng=rng)
         return bytearray(result[: self.f.max_len])
 
+    def _op_insert_range_from_other(self, buf, _byte_idx, data):
+        """Insert a sub-range from another corpus entry into the current buffer.
+
+        Ported from go-fuzz case 17.  Picks a random corpus input, extracts a
+        short range from it, and splices it into a random position in the
+        current buffer.
+        """
+        rng = self.f._rand_pool
+        if len(buf) < 4 or len(self.f.corpus) < 2:
+            return None
+        others = [c for c in self.f.corpus if c is not data]
+        if not others:
+            return None
+        donor = rng.choice(others)
+        if len(donor) < 4:
+            return None
+        pos0 = rng.randint(0, len(buf))
+        pos1 = rng.randint(0, len(donor) - 2)
+        max_n = min(len(donor) - pos1 - 2, self.f.max_len - len(buf))
+        if max_n < 2:
+            return None
+        n = choose_len(max_n, rng=rng) + 2
+        buf[pos0:pos0] = donor[pos1 : pos1 + n]
+        return None
+
     def _op_radamsa_num(self, buf, _byte_idx, data):
         """Radamsa-style number mutation on a random byte."""
         if not buf:
@@ -1315,6 +1340,23 @@ class OperatorEngine:
 
         if buf:
             return bytearray(ascii_num_replace(bytes(buf), rng=self.f._rand_pool)[: self.f.max_len])
+
+    def _op_digit_replace(self, buf, _byte_idx, _data):
+        """Replace a single ASCII digit with another random digit.
+
+        Ported from go-fuzz case 14.
+        """
+        rng = self.f._rand_pool
+        digits = [i for i, b in enumerate(buf) if 0x30 <= b <= 0x39]
+        if not digits:
+            return None
+        pos = rng.choice(digits)
+        was = buf[pos]
+        now = was
+        while now == was:
+            now = rng.randint(0, 9) + 0x30
+        buf[pos] = now
+        return None
 
     def _op_byte_shuffle(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import byte_shuffle

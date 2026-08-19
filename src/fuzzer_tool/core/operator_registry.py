@@ -88,6 +88,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "ascii_num_arithmetic",
         "insert_ascii_num",
         "ascii_num_replace",
+        "digit_replace",
         "tlv_mutate",
         "token_shuffle",
         "chunk_shuffle",
@@ -96,6 +97,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "magic_values",
         "splice_common_prefix",
         "corpus_literal_insert",
+        "insert_range_from_other",
         "versifier_generate",
     },
     "radamsa": {
