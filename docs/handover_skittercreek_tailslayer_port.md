@@ -198,6 +198,90 @@ longer the chosen design: generation lives in the existing 24-byte header
 The top-8-bits-of-`count` suggestion was also adopted, but as live
 generation tags rather than spare space.
 
+**Revision note (round 12):** audit pass against the current tree
+(`6f7f911`, 1010 commits) rather than a re-read of this document. Round 9's
+verification was against `c7989ad` at 995 commits, so everything below is
+drift accumulated since then, plus two divergences that predate it and were
+never written down here.
+
+Items 4, 5, 6 and 7 verify clean against the tree, wiring included —
+`ExecTimeCalibrator.observe` at `fuzzer.py:2919` folding `is_slow` into
+`success` at `:3476`, `harmonic_fraction`/`classify_periodicity` called from
+`_spectral_diagnostics` at `report.py:1061`, `join_streams` behind
+`_temporal_correlation` at `:1104`, and item 4's two-sided wiring
+(`record_coverage_diff` at `fuzzer.py:3252` → `record_liveness` at
+`format_learner.py:203`) with `_LIVENESS_SWITCH_AFTER = 200` and
+`_LIVENESS_DEAD_WEIGHT = 0.1` unchanged. Every round-9 claim also holds:
+`guard_z3_shutdown()` is called from all four solver construction sites plus
+`smt_solver.py`, the Python-level `signal.signal(SIGSEGV, ...)` is gone in
+favour of `faulthandler`, the `__AFL_FORKSRV` gate is at `afl_shim.c:1437`
+with `fuzz_loader.c:302` setting it in the forkserver child, and the havoc
+branch genuinely `continue`s with the max_len clamp and full frameshift
+resync. Items 3 and 13 remain honestly deferred: `compose_bitmask_maps` has
+zero callers, and `_temporal_correlation` joins coverage/discovery snapshot
+streams, not anomaly timestamps to mutation events.
+
+Five things had drifted.
+
+1. **Item 2 landed in `core/gf2_common.py`, not `core/gf2_linalg.py`.** The
+   rename was deliberate (`899b59c`), not an accident: both are
+   dependency-free GF(2) utility layers — polynomial ring vs. bitmask vector
+   space — and they now share one file under a "Bitmask-vector layer" section
+   marker, with a docstring noting the two are distinct math objects that
+   don't call into each other. All four planned functions exist under their
+   planned names and `tests/test_gf2_linalg.py`'s classes moved into
+   `tests/test_gf2_common.py` under the same marker. Only this document was
+   never updated. Item 2's port plan and Sequencing step 1 have been
+   corrected below.
+2. **Item 1 contains no z3.** The largest divergence, and it inverts the
+   port plan's central design claim. `43a119e` found the module was solving
+   a linear system with a SAT solver: every constraint has the form
+   `XOR_{i in S} w_i == c`, one linear equation over F2, and the coefficient
+   matrix is *identical for every output bit* — only the right-hand side
+   varies. The whole map therefore comes out of a single incremental
+   Gauss-Jordan elimination over the augmented matrix `[A | B]`, rows held
+   as Python ints with all output bits packed into the RHS word, at
+   `O(pairs * rank)` word XORs. Measured on the same box and pair set
+   (32×32, 64 pairs): 150,939 ms for the SAT path with the timeout lifted,
+   0.5 ms for elimination. So the port plan's per-bit `z3.Solver`, its
+   `_z3_available()` gating, its 50 ms per-bit timeout, and the "z3 retains
+   learned clauses across `check()`" amortization rationale all describe
+   code that no longer exists. `_SOLVER_TIMEOUT_MS = 200` survives as a
+   backward-compatibility no-op and gates nothing.
+3. **Item 1 grew a full-rank determinacy gate this document never
+   described.** It is the actual answer to item 1's own validation-plan
+   point 2. An underdetermined system reproduces every pair it was fitted
+   on, for any assignment of the free variables, so `verify_xor_model`
+   cannot reject one — meaning the speed win in (2) would have started
+   accepting garbage the moment the 32-bit rung became reachable.
+   `recover_xor_model` now requires full rank before a candidate is offered
+   to verification at all. Worth recording because it is the load-bearing
+   correctness property of the module, and reading this document alone would
+   not tell you it exists.
+4. **Sequencing step 5's cost-bound test appears genuinely undone.** Step 5
+   calls for extending `test_regression_checksum_cost_bound.py` to cover the
+   new path; that file's only `xor` mention is a comment about `final_xor`
+   in CRCs. The wall-clock bound that does exist is inside
+   `tests/test_xor_map_solver.py` (`elapsed < 1.0` for 32-bit recovery),
+   which satisfies step 4 — the solver in isolation — but not step 5, which
+   was specifically about the path once it is inside `checksum_learner.py`.
+   Given this module's documented history of an unbounded recovery loop
+   blocking `fuzz_one()` for 30+ seconds, that is the remaining gap worth
+   closing. Note the risk is much smaller than when step 5 was written:
+   recovery is now polynomial elimination bounded by `_MAX_PAIRS = 128` and
+   `_MAX_FIELD_BITS = 32`, not a SAT search, so this is a regression guard
+   rather than an active hazard.
+5. **This document was one round stale.** Round 11's `jpeg_read` sweep
+   (`6f7f911`) was committed but never written up here, so step 6 still read
+   "Next: `jpeg_read` is the best remaining candidate" for a run that had
+   already happened and returned a null result on the dead-region case. Step
+   6 now carries the round-11 outcome.
+
+Two housekeeping fixes also applied: Sequencing steps 1, 3 and 4 were left
+un-struck despite the header prose declaring items 1 and 2 implemented and
+wired, and the item-1 open question about `_z3_available()` silently
+no-opping is moot under (2) and has been marked resolved.
+
 ## Scope
 
 Two independent algorithmic cores are in scope, from two different files:
@@ -270,6 +354,42 @@ added once at construction. Each `add_alias()` call appends only the new
 pair's constraints to all `BITS` solvers. Z3 retains learned clauses across
 `check()` calls on the same `Solver` object, so solve cost amortizes across
 the run instead of restarting from scratch per batch.
+
+**Implementation status (corrected round 12):** IMPLEMENTED in
+`src/fuzzer_tool/core/xor_map_solver.py` (510 lines) and wired into
+`core/checksum_learner.py` as a third model family (`XorBitmaskModel`,
+`ensure_xor_model`, `_verify_xor`), gated behind the GF(2) and integer paths
+failing to verify, sharing one attempt counter with them via
+`_maybe_recover`/`RECOVERY_RETRY_BATCH`. **It does not use z3.** The port
+plan below describes a per-output-bit `z3.Solver` design that was built and
+then replaced in `43a119e` with incremental Gauss-Jordan elimination over
+F2 — 150,939 ms → 0.5 ms on a 32×32 system with 64 pairs, because the
+coefficient matrix is shared across output bits and the answer is
+closed-form. Read the port plan below as historical intent, not as a
+description of the module. Concretely, what differs:
+
+- No `_z3_available()` gate and no `smt` extra requirement — recovery is
+  pure Python and runs on any install. `test_solver_does_not_import_z3`
+  blocks z3 at import in a subprocess and asserts a model still comes back.
+- No solver timeout. Elimination is polynomial and terminates, so
+  `_SOLVER_TIMEOUT_MS = 200` is retained only so callers passing
+  `timeout_ms=` keep working; it gates nothing. Cost control is instead
+  `_MAX_PAIRS = 128` (mirroring `CHECKSUM_PAIRS_MAX`) and
+  `_MAX_FIELD_BITS = 32`.
+- `solve()` has no inconclusive third outcome. `(None, False)` is now a
+  *proof* that no linear map explains the observations rather than an
+  expired budget, which is what lets `recover_xor_model` climb the 8/16/32
+  width ladder knowing the narrower rung was refuted rather than merely
+  unfinished.
+- **Full-rank determinacy gate**, not in the plan below and load-bearing.
+  An underdetermined system reproduces every pair it was fitted on for any
+  assignment of the free variables, so `verify_xor_model` cannot reject one;
+  reaching the 32-bit rung would have started accepting garbage. See
+  `IncrementalXorMapSolver.rank` and `require_determined`. This is the
+  mechanism that satisfies validation-plan point 2 below.
+- The fixed-point witness guard from the C-source review *did* land as
+  specified — `verify_xor_model` rejects candidate-pair combinations where
+  the candidate predicts the same output for both inputs.
 
 **Why it's relevant:** `checksum_learner.py`'s GF(2) path
 (`recover_polynomial_gcd` / `recover_lfsr` in `berlekamp_massey.py`) assumes
@@ -380,7 +500,23 @@ address rather than reporting a misleading pass.
 File: `tests/test_xor_map_solver.py` (new), following the structure of
 `tests/test_int_checksum_solver.py`.
 
-### 2. `invert_xor_map` (GF(2) Gaussian elimination) → `core/gf2_linalg.py`, used by `root_cause.py`
+### 2. `invert_xor_map` (GF(2) Gaussian elimination) → `core/gf2_common.py`, used by `root_cause.py`
+
+**Implementation status (corrected round 12):** IMPLEMENTED and wired.
+Landed initially as a standalone `core/gf2_linalg.py` per the plan below,
+then merged into `core/gf2_common.py` in `899b59c` under a "Bitmask-vector
+layer" section marker — both files were dependency-free GF(2) utility
+layers (polynomial ring vs. bitmask vector space) and now share one file,
+with a docstring noting the two are distinct math objects that do not call
+into each other. All four planned functions exist under their planned names
+(`apply_bitmask_map`, `invert_bitmask_map`, `verified_apply_inverse`,
+`compose_bitmask_maps`). Tests merged the same way:
+`tests/test_gf2_linalg.py`'s classes moved into `tests/test_gf2_common.py`
+(454 lines) under the same marker. Wiring into `root_cause.py` landed
+separately in `def6d97` as the plan required, and calls
+`verified_apply_inverse` — not raw `invert_bitmask_map` output applied
+blind — at `root_cause.py:186-189`. **Every `gf2_linalg` path named below
+is stale; read it as `gf2_common`.**
 
 **Source:** `analysis/unspaghettify.py:263-297` (`invert_xor_map`,
 `inverse_transform`, `forward_transform`); refined against
@@ -468,7 +604,8 @@ transformed bits.
    error" and "this specific value is actually recoverable" — the
    distinction the plain singular-map test in (2) doesn't exercise.
 
-File: `tests/test_gf2_linalg.py` (new).
+File: ~~`tests/test_gf2_linalg.py` (new)~~ — landed as the bitmask-vector
+section of `tests/test_gf2_common.py` (`899b59c`).
 
 ### 3. `compose_xor_maps` applied to `lineage.py` mutation chains — exploratory, not committed
 
@@ -534,7 +671,8 @@ approach.
 **Port plan:**
 
 - New module `core/live_bit_mask.py`, no external dependencies (pure
-  bitmask arithmetic, same footing as `core/gf2_linalg.py`):
+  bitmask arithmetic, same footing as `core/gf2_common.py`'s
+  bitmask-vector layer):
   - `LiveBitMaskEstimator(n_bits: int, switch_after: int = 200)` — port of
     `MaskState`, renamed for domain: `observe(baseline: int, mutant: int)`
     replaces `observe_hit(target, alias, run_log)`; drop the `run_log`
@@ -819,20 +957,40 @@ File: `tests/test_temporal_join.py` (new).
 
 ## Sequencing
 
-1. `core/gf2_linalg.py` + tests (item 2) — no dependencies, smallest, do
-   first, unblocks nothing but itself.
+1. ~~`core/gf2_linalg.py` + tests (item 2) — no dependencies, smallest, do~~
+   ~~first, unblocks nothing but itself.~~ — **DONE.** Landed as
+   `core/gf2_common.py`'s bitmask-vector layer + `tests/test_gf2_common.py`
+   (merged from a standalone `gf2_linalg.py` in `899b59c`); wired into
+   `root_cause.py` separately in `def6d97`.
 2. ~~`core/live_bit_mask.py` + tests (item 4) — no dependencies, no~~
    ~~solver, cheap; do alongside item 2 since both are leaf utilities~~
    ~~with no integration risk yet.~~ — **DONE.** Landed as
    `core/live_bit_mask.py` + `tests/test_live_bit_mask.py`; wired in
    round 7 (see steps 6–7 below).
-3. `core/xor_map_solver.py` + tests (item 1, solver only, not wired in) —
-   depends on nothing but z3 (already optional dep).
-4. Cost-bound test for the solver in isolation (synthetic benchmark, not
-   yet inside `checksum_learner.py`'s hot path).
-5. Wire item 1 into `checksum_learner.py` as a third model family, gated
-   behind the existing two failing first. Add/extend
-   `test_regression_checksum_cost_bound.py` to cover the new path.
+3. ~~`core/xor_map_solver.py` + tests (item 1, solver only, not wired in) —~~
+   ~~depends on nothing but z3 (already optional dep).~~ — **DONE**, but not
+   as described: the module depends on nothing at all. z3 was removed in
+   `43a119e` in favour of Gauss-Jordan elimination over F2. See item 1's
+   corrected implementation-status block.
+4. ~~Cost-bound test for the solver in isolation (synthetic benchmark, not~~
+   ~~yet inside `checksum_learner.py`'s hot path).~~ — **DONE.**
+   `tests/test_xor_map_solver.py` asserts `elapsed < 1.0` for 32-bit
+   recovery. Far more headroom than that in practice — elimination measures
+   0.5 ms on a 32×32 system with 64 pairs.
+5. **PARTIALLY DONE.** The wiring landed: item 1 is a third model family in
+   `checksum_learner.py` (`XorBitmaskModel`, `ensure_xor_model`,
+   `_verify_xor`), gated behind the GF(2) and integer paths failing to
+   verify and sharing their attempt counter via
+   `_maybe_recover`/`RECOVERY_RETRY_BATCH`. **The test half did not.**
+   `test_regression_checksum_cost_bound.py` has no coverage of the XOR
+   path — its only `xor` mention is a comment about `final_xor` in CRCs.
+   Step 4's bound covers the solver standalone, which is not the same
+   assertion: it says nothing about cost inside `fuzz_one()`'s hot path,
+   which is where this module's 30+ second incident happened. Closing this
+   is the remaining open work on item 1. Lower urgency than when written —
+   recovery is now polynomial elimination bounded by `_MAX_PAIRS = 128` and
+   `_MAX_FIELD_BITS = 32`, so the test is a regression guard against a
+   future change reintroducing search, not a fix for a live hazard.
 6. ~~Run item 4's convergence-threshold sensitivity sweep (validation step 2~~
    ~~above) on real corpus seeds, not just synthetic ones, before wiring its~~
    ~~output into `schedules.py`'s weighting — a real coverage bitmap may have~~
@@ -861,13 +1019,47 @@ File: `tests/test_temporal_join.py` (new).
    the fix's synthetic-diagnostic claim. See
    `docs/sweeps/item4_png_real_corpus_sweep_2026-08-19.md` for the round-
    10 writeup and `docs/sweeps/item4_png_real_corpus_samples.tsv` for the
-   raw data. Next: `jpeg_read` is the best remaining candidate — no
-   whole-file checksum, and `APPn` segment bytes beyond what libjpeg
-   parses for metadata should be genuinely unchecked. `_LIVENESS_DEAD_
-   WEIGHT = 0.1` is unchanged, still the right conservative choice: three
-   real campaigns (zlib, and now PNG twice — pre- and post-fix) have
-   produced zero false-dead verdicts, but also zero true-dead cases to
-   check the false-negative rate against.
+   raw data. **Round 11 ran the `jpeg_read` campaign that this paragraph
+   proposed as "next" (commit `6f7f911`), and it did not close the gap
+   either.** Standalone JPEG sweep tools, a Pillow-generated real corpus,
+   sparse TSV sampling instrumented into `record_coverage_diff`, and a
+   replay through `LiveBitMaskEstimator` at `switch_after` ∈
+   {50,100,200,400,800}: the estimator converged to a stable 78-bit live
+   mask at `switch_after=50`, on region 0 only, and produced no
+   converged-dead verdict. Two limiters, both worth knowing before picking
+   a fourth target. **Single-region attribution:** despite seeds up to 66 KB
+   with injected `APPn`/`COM` payloads, every usable sample attributed to
+   region 0, so the per-region behaviour the sweep exists to test was never
+   exercised. **Low diff yield:** only 3.0% of mutation attempts produced a
+   nonzero coverage diff, because most single-byte flips in `APPn`/`COM`
+   payloads are absorbed by libjpeg's error recovery or length-field
+   parsing — consistent with those bytes being semantically dead, but it
+   also means too few observations to converge at the higher `switch_after`
+   values. The run does confirm threshold stability on a third real target
+   and documents the SHM init ordering in-process coverage collection
+   needs. See `docs/sweeps/item4_jpeg_real_corpus_sweep_2026-08-19.md`.
+   `_LIVENESS_DEAD_WEIGHT = 0.1` is unchanged, still the right conservative
+   choice: four real campaigns (zlib, PNG twice — pre- and post-fix — and
+   now JPEG) have produced zero false-dead verdicts, but also zero true-dead
+   cases to check the false-negative rate against.
+
+   **Read together, the three targets say something the individual writeups
+   do not.** Each failed to produce a dead region for a *different*
+   structural reason — zlib because compressed data has no padding, PNG
+   because every chunk is CRC-guarded so any flip moves the CRC-check edge,
+   JPEG because the plausibly-dead bytes never landed in a profiled region.
+   The first two are not sampling accidents: any CRC-covered format
+   structurally rules out coverage-dead bytes. So the search for a fourth
+   target should start from "which formats in the matrix have neither a
+   whole-file nor a per-chunk checksum" rather than from another round of
+   corpus engineering. Round 11's own recommendation — force mutations into
+   `APPn` trailer tails rather than uniform random offsets, or move to a
+   richer target — remains the choice to make, and after three targets the
+   second looks better. It is also worth asking plainly whether such a
+   target exists in this tree at all; if it does not, the honest close-out
+   is to record the false-negative rate as unmeasurable against the current
+   matrix and keep the conservative `0.1` weight on that basis, rather than
+   spending a round 12 on it.
 7. ~~Wire item 4 into `schedules.py` (byte down-weighting) and~~
    ~~`format_learner.py` (padding/dead-region signal) as two separate,~~
    ~~independently revertible changes.~~ — **DONE** (round 7). Landed as
@@ -925,9 +1117,14 @@ case specifically still needs a padded-structure target), and item 13
   bitmask-style checksum/flags field to use as a *real* (not just
   synthetic) validation case for item 1? Absent one, ship with synthetic
   validation only and say so plainly in the module docstring.
-- `_z3_available()` gating means item 1 silently no-ops on installs without
+- ~~`_z3_available()` gating means item 1 silently no-ops on installs without
   the `smt` extra — confirm that's the desired behavior (matches
-  `smt_solver.py`'s existing precedent) rather than a hard dependency bump.
+  `smt_solver.py`'s existing precedent) rather than a hard dependency bump.~~
+  **Resolved (round 12): moot.** Item 1 has no z3 dependency to gate.
+  `43a119e` replaced the SAT approach with Gauss-Jordan elimination over F2,
+  so recovery is pure Python and runs on every install regardless of the
+  `smt` extra. `test_solver_does_not_import_z3` enforces this by blocking z3
+  at import in a subprocess and asserting a model still comes back.
 - For item 4: does `schedules.py` already have a per-byte weighting hook
   clean enough to attach a new signal to, or does adding one require
   touching the allocator's existing structure? Worth a quick look before
