@@ -837,19 +837,37 @@ File: `tests/test_temporal_join.py` (new).
    ~~above) on real corpus seeds, not just synthetic ones, before wiring its~~
    ~~output into `schedules.py`'s weighting — a real coverage bitmap may have~~
    ~~noisier/rarer-triggering bits than the synthetic test covers.~~ —
-   **PARTIALLY DONE (round 9).** A real campaign against `zlib_read`
-   (3,192 real `(region, diff_bits)` samples, not synthetic) showed the
-   mask converging to the same 9-bit live set across `switch_after` ∈
-   {50,100,200,400,800}, and never producing a false-dead verdict at any
-   threshold — but the target never presented the estimator with a
-   genuinely dead region to get wrong (compressed data has no padding),
-   so the specific failure mode step 6 exists to catch is still
-   untested. See `docs/sweeps/item4_real_corpus_sweep_2026-08-19.md` for
-   the full writeup and `docs/sweeps/item4_zlib_real_corpus_samples.tsv`
-   for the raw data. Next: repeat against a target with real structural
-   padding (e.g. `png_read`'s chunk fields) to actually stress the
-   false-negative case. `_LIVENESS_DEAD_WEIGHT = 0.1` is unchanged,
-   still the right conservative choice pending that.
+   **PARTIALLY DONE (round 9, extended round 10).** Round 9: a real
+   campaign against `zlib_read` (3,192 real `(region, diff_bits)` samples)
+   showed the mask converging to the same 9-bit live set across
+   `switch_after` ∈ {50,100,200,400,800}, never a false-dead verdict —
+   but compressed data has no padding, so the false-negative case was
+   still untested. Round 10 repeated the same methodology against
+   `png_read` (16,063 real samples across 3 regions, one specifically
+   engineered with large embedded `tEXt` payloads to get a plausible
+   coverage-irrelevant region) expecting PNG's chunk structure to finally
+   provide one — it didn't: every PNG chunk is CRC-guarded, so mutating
+   *any* byte flips the CRC-check edge regardless of semantic relevance,
+   which structurally rules out coverage-dead bytes in any CRC-covered
+   format. Same threshold-stability result held (same final mask at every
+   `switch_after`, all three regions). Round 10 also independently found,
+   then confirmed already-fixed upstream (`66bf760`), a real bug this
+   sweep's own methodology exposed: `CrashMITracker`/`MutualInformation
+   Tracker.weighted_position()` returned `0` instead of `None` on empty
+   state, which `select_position()` treated as a live candidate — pinning
+   `_last_mutation_offset` to 0 for ~97% of mutation rounds and biasing
+   every `record_coverage_diff` call toward region 0. Post-fix, real
+   `png_read` data confirms the offset==0 rate dropped to ~5.7%, matching
+   the fix's synthetic-diagnostic claim. See
+   `docs/sweeps/item4_png_real_corpus_sweep_2026-08-19.md` for the round-
+   10 writeup and `docs/sweeps/item4_png_real_corpus_samples.tsv` for the
+   raw data. Next: `jpeg_read` is the best remaining candidate — no
+   whole-file checksum, and `APPn` segment bytes beyond what libjpeg
+   parses for metadata should be genuinely unchecked. `_LIVENESS_DEAD_
+   WEIGHT = 0.1` is unchanged, still the right conservative choice: three
+   real campaigns (zlib, and now PNG twice — pre- and post-fix) have
+   produced zero false-dead verdicts, but also zero true-dead cases to
+   check the false-negative rate against.
 7. ~~Wire item 4 into `schedules.py` (byte down-weighting) and~~
    ~~`format_learner.py` (padding/dead-region signal) as two separate,~~
    ~~independently revertible changes.~~ — **DONE** (round 7). Landed as
