@@ -17,6 +17,7 @@ module only supplies the ``_op_*`` handlers that the registry dispatches to.
 import bisect
 import logging
 import math
+import os
 import struct
 import time
 from array import array
@@ -2982,6 +2983,7 @@ class OperatorEngine:
         mutant_edges: set,
         map_size: int = _LIVENESS_MAP_BITS,
     ) -> tuple[int, int] | None:
+        entry = self.region_weights(data)
         """Fold one mutation's coverage-edge diff into the region liveness
         estimator for whichever region *offset* falls in.
 
@@ -3047,6 +3049,23 @@ class OperatorEngine:
             diff_bits = 0
             for edge_id in diff_edges:
                 diff_bits |= 1 << (edge_id % map_size)
+
+        # Temporary env-gated instrumentation for the item 4 real-corpus
+        # sensitivity sweep. Logs every (region, diff_bits) observation the
+        # production estimator consumes, using the same sparse TSV format as
+        # the round-9/10 sweep data. Zero-cost when FUZZER_LIVENESS_LOG is unset.
+        _liveness_log = os.getenv("FUZZER_LIVENESS_LOG")
+        if _liveness_log and region_idx is not None:
+            if diff_bits == 0:
+                _line = f"{region_idx}\t\n"
+            else:
+                _bits = sorted({e % map_size for e in diff_edges})
+                _line = f"{region_idx}\t{','.join(map(str, _bits))}\n"
+            try:
+                with open(_liveness_log, "a") as _lf:
+                    _lf.write(_line)
+            except OSError:
+                pass
 
         est = estimators[region_idx]
         if est is None:
