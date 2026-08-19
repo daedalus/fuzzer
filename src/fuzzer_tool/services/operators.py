@@ -92,17 +92,35 @@ _REGION_MIN_LEN = 512
 _LIVENESS_MAP_BITS = 65536
 # Consecutive coverage-diff observations with no new bit revealed before a
 # region is considered converged-dead. Matches LiveBitMaskEstimator's own
-# default and MASK_SWITCH_AFTER in the ported source. Validated by
-# `tools/sweep_liveness_thresholds.py` against both synthetic and real
-# PNG-corpus seeds (handover doc Sequencing step 6); padding-hypothesis
-# sets were stable across the tested ranges.
+# default and MASK_SWITCH_AFTER in the ported source.
+#
+# Threshold stability is established: four real campaigns
+# (`zlib_read`, `png_read` pre- and post-fix, `jpeg_read`; see
+# docs/sweeps/) converged to the same live mask at every
+# `switch_after` in {50, 100, 200, 400, 800}, with zero false-dead
+# verdicts.
+#
+# The FALSE-NEGATIVE rate is NOT established, and on the current target
+# matrix it is not measurable. All four campaigns produced zero
+# genuinely-dead regions to test against, for reasons that are
+# structural rather than sampling accidents: compressed data has no
+# padding, and any CRC-covered format rules out coverage-dead bytes
+# outright, since mutating any byte flips the CRC-check edge regardless
+# of semantic relevance. So this value and _LIVENESS_DEAD_WEIGHT below
+# are conservative guesses that have never been calibrated against a
+# true-dead region. Measuring them needs a target with neither a
+# whole-file nor a per-chunk checksum; if one is added to the matrix,
+# rerun the sweep before treating either number as tuned.
+# See handover_skittercreek_tailslayer_port.md, Sequencing step 6.
 _LIVENESS_SWITCH_AFTER = 200
 # Multiplicative down-weight applied to a region's mutation-site weight
 # once its liveness estimator has converged with an empty mask (i.e.
 # "never once moved coverage across >= _LIVENESS_SWITCH_AFTER consecutive
 # mutations touching it"). Deliberately not 0.0: convergence is strong
 # evidence, not proof, and a hard-zero would make a misclassified region
-# permanently unreachable by this weighting path.
+# permanently unreachable by this weighting path. See the false-negative
+# caveat on _LIVENESS_SWITCH_AFTER above: with the true-dead rate
+# unmeasured, "not 0.0" is what keeps a wrong verdict recoverable.
 _LIVENESS_DEAD_WEIGHT = 0.1
 
 # ── havoc sub-mutation weighting ─────────────────────────────────────────
