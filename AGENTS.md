@@ -40,6 +40,7 @@ fuzzer, not just the target.
 20. try except pass is a bad pattern.
 21. Always excersice higiene: every test must clean up their mess.
 22. If you solved the halting problem you are allowed to run tests that the user is saying they are hanging otherwise read the code to see what it does.
+23. For every new functionality always add one falsification test and one adversarial test.
 
 ## Corpus Rules
 
@@ -145,7 +146,7 @@ docs/             # DEEP_DIVE.md (comprehensive reference), TODO.md, refs/ (agen
 pip install -e ".[test]"
 
 # Test
-pytest
+pytest --timeout=15 --timeout-method=signal
 
 # Format / lint
 ruff format src/ tests/
