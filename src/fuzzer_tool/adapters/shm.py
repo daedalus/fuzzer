@@ -257,6 +257,11 @@ class ShmCoverage:
 
     DIAG_GEN_SHIFT = 24
     DIAG_GEN_MASK = 0xFF
+    # Must equal __AFL_PROBE_MAX in adapters/afl_shim.c. The C shim bounds
+    # both lookup and insertion to this many slots; record_edge() below is a
+    # mirror of that loop, so an unbounded mirror would place edges the shim
+    # could never find (and vice versa).
+    PROBE_MAX = 64
     DIAG_CTX_MASK = 0xFF
     DIAG_DROP_SHIFT = 8
     DIAG_DROP_MAX = 0xFFFF
@@ -562,7 +567,8 @@ class ShmCoverage:
         """
         pos = edge_id % self.num_entries
         stored = False
-        for i in range(self.num_entries):
+        window = min(self.PROBE_MAX, self.num_entries)
+        for i in range(window):
             idx = (pos + i) % self.num_entries
             eid = self._entries[idx].edge_id
             if eid == 0:

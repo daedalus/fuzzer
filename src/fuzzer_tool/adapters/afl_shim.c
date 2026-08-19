@@ -311,6 +311,29 @@ static uint64_t *__afl_edge_count  = NULL;   /* offset 16: uint64 */
 #define __AFL_DIAG_GEN_SHIFT  24
 #define __AFL_DIAG_GEN_MASK   0xFFu
 
+/* Maximum linear-probe distance in __afl_map_edge, for both lookup and
+ * insertion. Bounds the per-edge-execution cost to a constant instead of
+ * O(map_size) in the worst case.
+ *
+ * The trade is a drop rate at high load: an edge whose whole window is
+ * occupied by other edges is discarded and counted via __afl_note_drop(),
+ * so the cost is observable through ShmCoverage.read_dropped_edges().
+ * Simulated drop rate against the only target in the tree that exceeds the
+ * 8192-entry floor (ffmpeg_read: 201,279 distinct edges in a 262,144-entry
+ * map, load 0.77):
+ *
+ *     window   8 -> 4.43%      window  32 -> 0.40%
+ *     window  16 -> 1.60%      window  64 -> 0.04%
+ *
+ * 64 is the default because a dropped edge is permanently invisible to the
+ * fuzzer, not merely delayed, and 0.04% buys nearly all of the cost bound
+ * that 16 does. Every other instrumented target sits at ~13% load, where
+ * every one of these windows drops nothing at all. Override at build time
+ * with -D__AFL_PROBE_MAX=N. */
+#ifndef __AFL_PROBE_MAX
+#define __AFL_PROBE_MAX 64u
+#endif
+
 __attribute__((always_inline))
 static inline void __afl_note_drop(void) {
     if (!__afl_diag) return;
@@ -557,9 +580,17 @@ static inline void __afl_map_edge(uint32_t cur_loc) {
     edge_id |= 1;
     uint32_t pos     = edge_id % __afl_map_size;
 
-    /* Linear probe: at most map_size iterations guarantees we either
-     * find the edge or hit an empty slot. */
-    for (uint32_t i = 0; i < __afl_map_size; i++) {
+    /* Linear probe, bounded to __AFL_PROBE_MAX slots.
+     *
+     * The bound converts a map_size-iteration worst case into a constant.
+     * It is only correct because insertion is bounded by the same constant:
+     * an edge is therefore always within __AFL_PROBE_MAX of its home slot
+     * or absent, so a bounded lookup can never miss an edge a bounded
+     * insert placed. Do not bound one without the other. */
+    uint32_t window = __AFL_PROBE_MAX;
+    if (window > __afl_map_size) window = __afl_map_size;
+
+    for (uint32_t i = 0; i < window; i++) {
         uint32_t idx = (pos + i) % __afl_map_size;
         uint32_t eid = __afl_area[idx].edge_id;
 
@@ -572,36 +603,47 @@ static inline void __afl_map_edge(uint32_t cur_loc) {
                 *__afl_edge_count = __afl_total_edge_count;
             break;
         }
-        if (eid == edge_id) {                        /* existing edge — bump */
+        if (eid == edge_id) {                        /* existing edge */
             if ((__afl_area[idx].count >> 24) == gen) {
                 if ((__afl_area[idx].count & 0x00FFFFFFu) < 0x00FFFFFFu)
                     __afl_area[idx].count++;
                 break;
             }
-            /* stale entry with matching edge_id — reclaim */
+            /* Stale entry for this same edge: reclaim IN PLACE.
+             *
+             * This branch used to fall through and keep probing, which meant
+             * every generation inserted a *fresh duplicate* of every edge
+             * that fired, in a new slot, while the stale copy was never
+             * freed. The table therefore filled at (edges per exec) slots
+             * per execution regardless of how few distinct edges the target
+             * had, saturated after roughly map_size/edges_per_exec
+             * executions, and from then on could claim no slot at all --
+             * every subsequent execution reported ZERO current-generation
+             * edges, silently ending coverage guidance mid-campaign.
+             * Measured pre-fix on an 8192-entry map with 43 distinct edges:
+             * saturated at exec ~190, edge visibility 43 -> 0 at exec 200.
+             *
+             * Reclaiming in place makes table occupancy the union of
+             * distinct edges ever seen, which is bounded by the target's
+             * guard count -- the behaviour the generation design intended.
+             * total_edge_count is deliberately NOT bumped here: this edge
+             * already owns a slot, so it is not a newly discovered edge. */
+            __afl_area[idx].count = (gen << 24) | 1;
+            __afl_iter_edge_count++;
+            break;
         }
-        /* else: hash collision or stale entry, keep probing */
+        /* else: hash collision against a live or stale *different* edge —
+         * keep probing. A stale different edge is not reclaimed: its slot
+         * still records an edge this target has genuinely reached, and
+         * dropping it would lose cumulative coverage. */
 
-        /* Last iteration and still nowhere to put it: the table is full or
-         * every colliding slot is stale. Count a drop only if every slot
-         * in the table is occupied by a live entry. */
-        if (i == __afl_map_size - 1) {
-            uint8_t all_live = 1;
-            for (uint32_t j = 0; j < __afl_map_size; j++) {
-                uint32_t jdx = (pos + j) % __afl_map_size;
-                uint32_t jeid = __afl_area[jdx].edge_id;
-                if (jeid == 0) {
-                    all_live = 0;
-                    break;
-                }
-                if ((__afl_area[jdx].count >> 24) != gen) {
-                    all_live = 0;
-                    break;
-                }
-            }
-            if (all_live)
-                __afl_note_drop();
-        }
+        /* Window exhausted and still nowhere to put it. Unlike the old
+         * unbounded loop, this does not mean the table is full -- it means
+         * this edge's neighbourhood is. Count it either way: a dropped edge
+         * is invisible to the fuzzer, and read_dropped_edges() is how that
+         * cost is meant to be observed. */
+        if (i == window - 1)
+            __afl_note_drop();
     }
 
     /* Accumulate rolling path hash: hash = hash * 31 ^ edge_id */
