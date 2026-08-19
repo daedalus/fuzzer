@@ -11,7 +11,7 @@ data keyed by a hash of the issue query, so repeated runs skip issues that
 have already been fetched.
 
 Usage:
-    python tools/corpus_ffmpeg_issues.py [--out DIR] [--max-issues N] [--token TOKEN] [--skip-size BYTES] [--skip-size BYTES]
+    python tools/corpus_ffmpeg_issues.py [--out DIR] [--max-issues N] [--token TOKEN] [--skip-size BYTES] [--filetype EXT1,EXT2]
 
 Output is written to <out>/seeds/ (the layout load_corpus reads), suitable
 as a fuzzer seed corpus for targets/ffmpeg_read.c.
@@ -105,16 +105,20 @@ MEDIA_EXTENSIONS = {
 }
 
 
-def is_media_url(url: str) -> bool:
+def is_media_url(url: str, allowed_extensions: set[str] | None = None) -> bool:
     """Return True if the URL looks like a downloadable media/test seed."""
+    if allowed_extensions is None:
+        allowed_extensions = MEDIA_EXTENSIONS
     path = url.split("?", 1)[0].lower()
-    return any(path.endswith(ext) for ext in MEDIA_EXTENSIONS)
+    return any(path.endswith(ext) for ext in allowed_extensions)
 
 
-def is_media_attachment(name: str) -> bool:
+def is_media_attachment(name: str, allowed_extensions: set[str] | None = None) -> bool:
     """Return True if the attachment filename looks like a useful seed."""
+    if allowed_extensions is None:
+        allowed_extensions = MEDIA_EXTENSIONS
     base = (name or "").lower()
-    return any(base.endswith(ext) for ext in MEDIA_EXTENSIONS)
+    return any(base.endswith(ext) for ext in allowed_extensions)
 
 
 def sanitize_filename(name: str) -> str:
@@ -270,8 +274,11 @@ def collect_seeds_from_issue(
     out_dir: str,
     issue_cache: dict,
     skip_size: int = 0,
+    allowed_extensions: set[str] | None = None,
 ) -> int:
     """Scan one issue for downloadable media seeds. Returns count saved."""
+    if allowed_extensions is None:
+        allowed_extensions = MEDIA_EXTENSIONS
     saved = 0
     number = issue["number"]
     body = issue.get("body", "") or ""
@@ -295,7 +302,7 @@ def collect_seeds_from_issue(
         if url in seen_urls:
             return
         seen_urls.add(url)
-        if not force_by_name and not is_media_url(url):
+        if not force_by_name and not is_media_url(url, allowed_extensions):
             return
         if skip_size > 0:
             length = get_content_length(url)
@@ -308,7 +315,7 @@ def collect_seeds_from_issue(
             fname = sanitize_filename(url.rsplit("/", 1)[-1])
         if not fname:
             fname = sanitize_filename(fname_hint)
-        if not force_by_name and not fname.lower().endswith(tuple(MEDIA_EXTENSIONS)):
+        if not force_by_name and not fname.lower().endswith(tuple(allowed_extensions)):
             fname += ".bin"
         dest = os.path.join(out_dir, fname)
         if os.path.exists(dest):
@@ -322,7 +329,7 @@ def collect_seeds_from_issue(
 
     # Inline attachments uploaded to the issue itself.
     for asset in issue.get("assets") or []:
-        if is_media_attachment(asset.get("name", "")):
+        if is_media_attachment(asset.get("name", ""), allowed_extensions):
             _try_download(
                 asset.get("browser_download_url", ""),
                 asset.get("name", "asset"),
@@ -359,6 +366,11 @@ def main() -> int:
         help="Skip downloads larger than this many bytes (0=no limit)",
     )
     parser.add_argument(
+        "--filetype",
+        default=None,
+        help="Comma-separated file extensions to include (e.g. mp4,mkv,png). Default: all supported media types.",
+    )
+    parser.add_argument(
         "--base-url",
         default="https://code.ffmpeg.org",
         help="Forgejo instance base URL",
@@ -374,6 +386,16 @@ def main() -> int:
         help="Repository name",
     )
     args = parser.parse_args()
+
+    allowed_extensions: set[str] | None = None
+    if args.filetype:
+        allowed_extensions = {
+            f".{ext.strip().lower()}"
+            if not ext.strip().lower().startswith(".")
+            else ext.strip().lower()
+            for ext in args.filetype.split(",")
+            if ext.strip()
+        }
 
     seeds_dir = os.path.join(args.out, "seeds")
     os.makedirs(seeds_dir, exist_ok=True)
@@ -407,6 +429,7 @@ def main() -> int:
                     seeds_dir,
                     issue_cache,
                     args.skip_size,
+                    allowed_extensions,
                 )
                 total_saved += saved
 
