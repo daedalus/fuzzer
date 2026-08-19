@@ -156,10 +156,15 @@ consumers.
   exactly as before: `compose_xor_maps` has no caller in `lineage.py`, and
   no offset-attribution join of anomaly timestamps to mutation events exists
   in `report.py`. Both still correctly deferred, not silently dropped.
-- Sequencing step 6 (item 4's real-corpus sensitivity sweep) is still open
-  — `_LIVENESS_DEAD_WEIGHT` is still `0.1` in `services/operators.py`, no
-  sweep script or result exists anywhere in the tree. Still the right next
-  step before trusting the down-weight/padding signal at full strength.
+- Sequencing step 6 (item 4's real-corpus sensitivity sweep) is
+  **partially done (round 9)**: a real campaign against `zlib_read`
+  (3,192 real samples) showed threshold-stable behavior across
+  `switch_after` ∈ {50..800} and no false-dead verdicts, but the target
+  never presented a genuinely dead region, so the actual failure mode
+  step 6 exists to catch remains untested. `_LIVENESS_DEAD_WEIGHT` is
+  still `0.1`. See `docs/sweeps/item4_real_corpus_sweep_2026-08-19.md`.
+  Next: repeat against a target with real padding fields (e.g.
+  `png_read`).
 - The havoc short-circuit flagged under "Suggested but not implemented"
   is now **fixed**. `mutate()` used to `return result` the instant havoc
   was selected, discarding the rest of that round's `n_mutations`
@@ -832,12 +837,19 @@ File: `tests/test_temporal_join.py` (new).
    ~~above) on real corpus seeds, not just synthetic ones, before wiring its~~
    ~~output into `schedules.py`'s weighting — a real coverage bitmap may have~~
    ~~noisier/rarer-triggering bits than the synthetic test covers.~~ —
-   **STILL OPEN**, not done in round 7. The round-7 wiring shipped
-   ahead of this step, on explicit request, with the conservative
-   `_LIVENESS_DEAD_WEIGHT = 0.1` and low-confidence `"padding"` verdict
-   chosen specifically to bound the risk of skipping this validation
-   first. This real-corpus sweep is still the right next step before
-   trusting the down-weight/padding signal at full strength.
+   **PARTIALLY DONE (round 9).** A real campaign against `zlib_read`
+   (3,192 real `(region, diff_bits)` samples, not synthetic) showed the
+   mask converging to the same 9-bit live set across `switch_after` ∈
+   {50,100,200,400,800}, and never producing a false-dead verdict at any
+   threshold — but the target never presented the estimator with a
+   genuinely dead region to get wrong (compressed data has no padding),
+   so the specific failure mode step 6 exists to catch is still
+   untested. See `docs/sweeps/item4_real_corpus_sweep_2026-08-19.md` for
+   the full writeup and `docs/sweeps/item4_zlib_real_corpus_samples.tsv`
+   for the raw data. Next: repeat against a target with real structural
+   padding (e.g. `png_read`'s chunk fields) to actually stress the
+   false-negative case. `_LIVENESS_DEAD_WEIGHT = 0.1` is unchanged,
+   still the right conservative choice pending that.
 7. ~~Wire item 4 into `schedules.py` (byte down-weighting) and~~
    ~~`format_learner.py` (padding/dead-region signal) as two separate,~~
    ~~independently revertible changes.~~ — **DONE** (round 7). Landed as
@@ -882,8 +894,11 @@ and report the null result rather than proceeding regardless. Steps 2, 7,
 9, 10, 11, and 12 (item 4's utility + wiring, and items 5, 6, and 7's
 leaf utilities) are complete, alongside items 1 and 2's own wiring; the
 remaining open work is item 3 (deferred), item 4's step 6 (the
-real-corpus sensitivity sweep — wiring shipped ahead of it in round 7,
-see that note for the risk-bounding rationale), and item 13 (deferred).
+real-corpus sensitivity sweep — partially run in round 9 against
+`zlib_read`, see the Sequencing list above and
+`docs/sweeps/item4_real_corpus_sweep_2026-08-19.md`; the false-negative
+case specifically still needs a padded-structure target), and item 13
+(deferred).
 
 ## Open questions for Gabriel
 
