@@ -57,6 +57,15 @@ _INVARIANT_MIN_SAMPLES = 16
 # cost far more than the operator can repay.
 _INVARIANT_SAMPLE_CAP = 128
 
+# ── elite_fuse corpus scan ────────────────────────────────────────────────
+# Need at least two seeds to pick two distinct parents from.
+_ELITE_FUSE_MIN_CORPUS = 2
+# Size of the "most coverage" pool that parents are drawn from. Keeping this
+# small (rather than always taking the single top-2) means the op doesn't
+# degenerate into repeatedly fusing the same pair once one seed pulls far
+# ahead on edge count -- there is still randomness in which two elites meet.
+_ELITE_FUSE_POOL_SIZE = 8
+
 # ── region-profile position weighting ────────────────────────────────────
 # Distinct seeds to keep profiles for. The corpus is far larger than this,
 # but seed selection is heavily skewed toward a working set, so a small
@@ -299,6 +308,12 @@ class OperatorEngine:
         # mutation (see corpus_invariants()).
         self._invariants = None
         self._invariants_corpus_len: int = -1
+        # Cache for _op_elite_fuse: the top-N corpus seeds by coverage_edges,
+        # plus the corpus size it was ranked at. Rebuilt on growth only, same
+        # rationale as _invariants -- ranking the whole corpus by seed_meta
+        # lookup on every mutation would cost more than the operator repays.
+        self._elite_pool: list[bytes] | None = None
+        self._elite_pool_corpus_len: int = -1
         # Cache for region-profile position weighting, keyed by seed content
         # hash. profile_buffer() runs a whole statistical battery per 4 KiB
         # window (~1 ms), so it must be paid once per seed, not once per
@@ -2259,6 +2274,66 @@ class OperatorEngine:
         return bytearray(
             invariant_break(bytes(buf), invariants, rng=self.f._rand_pool)[: self.f.max_len]
         )
+
+    def elite_seeds(self):
+        """Cached top-``_ELITE_FUSE_POOL_SIZE`` corpus seeds by coverage_edges.
+
+        Recomputed only when the corpus grows, mirroring corpus_invariants():
+        ranking is O(corpus) via seed_meta lookups, so paying that per
+        mutation instead of per growth would dominate the operator's cost on
+        large corpora. Falls back to an all-tied ranking (stable, corpus
+        order preserved) when seed_meta has no entry for a seed or is
+        missing/empty entirely, rather than refusing to run -- coverage
+        metadata not being populated yet (e.g. very early in a run, or a
+        corpus seeded directly rather than through save_to_corpus) shouldn't
+        make this operator unavailable, only unable to discriminate.
+        """
+        import heapq  # noqa: PLC0415
+
+        corpus = getattr(self.f, "corpus", None)
+        if not corpus or len(corpus) < _ELITE_FUSE_MIN_CORPUS:
+            return []
+        seed_meta = getattr(self.f, "seed_meta", None) or {}
+        if self._elite_pool is None or self._elite_pool_corpus_len != len(corpus):
+            pool_size = min(_ELITE_FUSE_POOL_SIZE, len(corpus))
+            # seed_meta is keyed by bytes (see Fuzzer._seed_key/save_to_corpus);
+            # corpus entries are bytes in production but bytearray in some
+            # test harnesses, so normalize before the dict lookup -- a plain
+            # bytearray key would raise (unhashable) rather than just miss.
+            self._elite_pool = heapq.nlargest(
+                pool_size,
+                corpus,
+                key=lambda s: seed_meta.get(bytes(s), {}).get("coverage_edges", 0),
+            )
+            self._elite_pool_corpus_len = len(corpus)
+        return self._elite_pool
+
+    def _op_elite_fuse(self, buf, _byte_idx, data):
+        """Fuse the two highest-coverage corpus seeds into a hybrid third seed.
+
+        Unlike splice/splice_diff_located, which draw both parents uniformly
+        at random from the whole corpus, this ranks seeds by
+        seed_meta['coverage_edges'] and draws both parents from the top of
+        that ranking. The bet: two inputs that already exercise a lot of
+        distinct edges are more likely to combine into something that trips
+        a *third* combination of edges than pairing an elite seed with a
+        mediocre one, or splicing at random.
+
+        Reuses splice_diff_located's diff-located cut points rather than a
+        blind random cut, since fusing at a point the two parents actually
+        differ produces a more structurally coherent hybrid than an
+        arbitrary offset -- particularly relevant here since the two
+        highest-coverage seeds are also the likeliest to share a lot of
+        common structure (e.g. shared headers).
+        """
+        rng = self.f._rand_pool
+        pool = self.elite_seeds()
+        if len(pool) < 2:
+            return None
+        a, b = rng.sample(pool, 2)
+        if a == b:
+            return None
+        return bytearray(splice_diff_located(bytes(a), bytes(b), rng=rng)[: self.f.max_len])
 
     def _op_havoc(self, buf, _byte_idx, data):
         """Havoc mutation with deterministic dedup: retry if fully redundant."""
