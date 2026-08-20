@@ -171,6 +171,13 @@ def extract_corpus_literals(corpus: list[bytes]) -> tuple[list[bytes], list[byte
     seen_int = set()
     seen_str = set()
     for raw in corpus:
+        # Coerce to bytes. The annotation says list[bytes], but the live
+        # corpus holds bytearray -- Fuzzer.corpus is bytearray from startup
+        # onward -- and slicing a bytearray yields a bytearray, which is
+        # unhashable. The `lit not in seen_int` membership test below then
+        # raises TypeError on the very first literal found, so this function
+        # never returned anything on a real corpus.
+        raw = bytes(raw)
         i = 0
         while i < len(raw):
             # Digit runs take priority over everything else.
@@ -1877,6 +1884,10 @@ def _is_dec(s):
 
 
 def _build_verse(data, rng):
+    # Same bytearray hazard as extract_corpus_literals: _tokenize slices
+    # `data`, and downstream those slices land in sets and dict keys, which
+    # raises TypeError for bytearray. Callers pass corpus entries directly.
+    data = bytes(data)
     printable = sum(1 for b in data if 0x20 <= b < 0x7F)
     if printable < len(data) * 9 // 10:
         return None

@@ -193,6 +193,10 @@ def _make_fuzzer() -> Fuzzer:
 def _sweep(f: Fuzzer) -> tuple[set[str], set[str]]:
     """Return (available_somewhere, changed_somewhere) operator-name sets.
 
+    Exceptions raised by operators are collected on ``_sweep.last_raised``
+    rather than discarded, so a "no-op" that is really a crash can be told
+    apart from one that is really silence.
+
     Each operator is exercised on its own with the fuzzer RNG reseeded per
     repetition, so the result is deterministic and independent of operator
     ordering or of any other operator's RNG use.
@@ -202,6 +206,7 @@ def _sweep(f: Fuzzer) -> tuple[set[str], set[str]]:
     names = sorted({n for inp in battery for n in REGISTRY.available(f, inp)})
     available: set[str] = set(names)
     changed: set[str] = set()
+    raised: dict[str, list[BaseException]] = {}
     for name in names:
         done = False
         for rep in range(_REPS):
@@ -213,10 +218,19 @@ def _sweep(f: Fuzzer) -> tuple[set[str], set[str]]:
                 idx = len(buf) // 2
                 try:
                     ret = table[name](buf, idx, bytes(inp))
-                except Exception:
-                    # An operator raising is a separate concern; a no-op is
-                    # about *silence*, not errors. Skip and let other tests
-                    # cover exceptions.
+                except Exception as exc:
+                    # An operator raising is a separate concern from a no-op,
+                    # so it is still skipped here -- but it is recorded, and
+                    # test_no_operator_raises_on_every_input below turns
+                    # "raises on everything" into its own failure.
+                    #
+                    # Swallowing silently is what hid the bytearray
+                    # TypeError in extract_corpus_literals and _build_verse:
+                    # both operators raised on every single input and were
+                    # reported as pure no-ops, which sent two rounds of
+                    # investigation looking for a missing state gate that
+                    # did not exist.
+                    raised.setdefault(name, []).append(exc)
                     continue
                 out = ret if isinstance(ret, bytes | bytearray) else buf
                 if bytes(out) != inp:
@@ -225,6 +239,7 @@ def _sweep(f: Fuzzer) -> tuple[set[str], set[str]]:
                     break
             if done:
                 break
+    _sweep.last_raised = raised  # type: ignore[attr-defined]
     return available, changed
 
 
@@ -455,6 +470,35 @@ class TestStateGatedOperatorsAreNotNoOps:
         from fuzzer_tool.core.xor_map_solver import clear_active_xor_model
 
         clear_active_xor_model()
+
+    def test_no_operator_raises_on_every_single_input(self):
+        """An operator that throws on every input is broken, not silent.
+
+        This is the test that should have caught the bytearray TypeError in
+        `extract_corpus_literals` and `_build_verse`. Both raised on every
+        input in the battery; the no-op sweep swallowed the exception and
+        reported them as operators that never changed anything, which is a
+        true statement about a completely wrong cause.
+
+        Raising on *some* inputs is fine and expected -- plenty of operators
+        assume structure a random battery entry will not have. Raising on
+        *all* of them means the operator cannot work at all.
+        """
+        f, unreachable = self._make_gated_fuzzer()
+        available, changed = _sweep(f)
+        raised = getattr(_sweep, "last_raised", {})
+
+        always_raised = {
+            name: excs
+            for name, excs in raised.items()
+            if name in available and name not in changed and name not in unreachable
+        }
+        assert not always_raised, (
+            "operator(s) raised on every input they were offered: "
+            + "; ".join(
+                f"{n} -> {type(e[0]).__name__}: {e[0]}" for n, e in sorted(always_raised.items())
+            )
+        )
 
     def test_state_gated_operators_change_some_input(self):
         f, unreachable = self._make_gated_fuzzer()
