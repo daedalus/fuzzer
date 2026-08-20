@@ -94,13 +94,29 @@ class ShapleyAttribution:
             return {}
         return {op: count / total for op, count in op_counts.items()}
 
+    def _op_credit(self, edge: int, op: str) -> float:
+        """Credit assigned to *op* for *edge* -- one entry of _edge_attribution.
+
+        _shapley_marginal only ever reads a single operator's share, so
+        building the full attribution dict per edge allocated a dict (and its
+        comprehension) for every edge of every operator on the hot path. This
+        computes the one value directly.
+        """
+        op_counts = self._edge_op_count.get(edge)
+        if not op_counts:
+            return 0.0
+        count = op_counts.get(op)
+        if not count:
+            return 0.0
+        total = sum(op_counts.values())
+        return count / total if total else 0.0
+
     def _shapley_marginal(self, op: str, prefix_edges: set[int]) -> float:
         """Compute marginal contribution of one operator given already-covered edges."""
         marginal = 0.0
         for edge in self._operator_edges.get(op, set()):
             if edge not in prefix_edges:
-                attr = self._edge_attribution(edge)
-                marginal += attr.get(op, 0.0)
+                marginal += self._op_credit(edge, op)
         return marginal
 
     def shapley_values(self, operators: list[str] | None = None) -> dict[str, float]:
