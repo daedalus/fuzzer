@@ -253,6 +253,13 @@ def load_corpus(
         for f in base_dir.iterdir():
             if not f.is_file():
                 continue
+            if f.is_symlink():
+                continue
+            try:
+                if f.resolve().parent != base_dir.resolve():
+                    continue
+            except OSError:
+                continue
             if f.suffix == ".json" and f.name.startswith("delta_"):
                 continue  # handled as delta, not full file
             data = f.read_bytes()
@@ -281,24 +288,22 @@ def load_corpus(
             sub_mark = mark_irreplaceable or sub.name == "irreplaceable"
             _load_full_from_dir(sub, mark_irreplaceable=sub_mark)
 
-    # Discover all subdirectories in corpus_dir — load from each except pruned/
-    for entry in sorted(corpus_dir.iterdir(), key=lambda p: p.name):
-        if not entry.is_dir():
-            continue
-        if entry.name == "pruned":
-            continue
-
-        # Collect delta files from this subdirectory
-        for f in entry.iterdir():
-            if not f.is_file():
-                continue
-            if f.suffix == ".json" and f.name.startswith("delta_"):
+    def _collect_deltas_from_dir(base_dir: Path) -> None:
+        """Recursively collect delta_*.json files from base_dir."""
+        if not base_dir.is_dir():
+            return
+        for f in base_dir.iterdir():
+            if f.is_file() and f.suffix == ".json" and f.name.startswith("delta_"):
                 h = f.name[6:-5]
                 delta_files.append((h, f))
+            elif f.is_dir() and f.name != "pruned":
+                _collect_deltas_from_dir(f)
 
-        # Load full files
-        mark = entry.name == "irreplaceable" and load_irreplaceable
-        _load_full_from_dir(entry, mark_irreplaceable=mark)
+    # Discover all subdirectories in corpus_dir — load from each except pruned/
+    seeds_dir = corpus_dir / "seeds"
+    if seeds_dir.is_dir():
+        _load_full_from_dir(seeds_dir, mark_irreplaceable=False)
+        _collect_deltas_from_dir(seeds_dir)
 
     # Load full files
     for h, data in full_files.items():
