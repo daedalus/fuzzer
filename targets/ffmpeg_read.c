@@ -23,6 +23,7 @@
 #include <libavformat/avformat.h>
 #include <libavutil/avutil.h>
 #include <libavutil/mem.h>
+#include <malloc.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -55,6 +56,48 @@ static int fuzz_read_packet(void *opaque, unsigned char *buf, int buf_size) {
     return buf_size;
 }
 
+/* ── Persistent decoder pool ─────────────────────────────────────── */
+
+#define FUZZ_MAX_DECODERS 128
+
+typedef struct {
+    AVCodecContext *ctx;
+    int              codec_id;
+    int              inited;
+} DecoderSlot;
+
+static AVPacket   *g_pkt     = NULL;
+static AVFrame    *g_frame   = NULL;
+static int         g_network_inited = 0;
+static DecoderSlot g_decs[FUZZ_MAX_DECODERS];
+
+static void fuzz_cleanup_decoders(void) {
+    for (int i = 0; i < FUZZ_MAX_DECODERS; i++) {
+        if (g_decs[i].ctx) {
+            avcodec_free_context(&g_decs[i].ctx);
+            g_decs[i].ctx      = NULL;
+            g_decs[i].codec_id = 0;
+            g_decs[i].inited   = 0;
+        }
+    }
+}
+
+static int fuzz_ensure_initialized(void) {
+    if (!g_pkt) {
+        g_pkt = av_packet_alloc();
+        if (!g_pkt) return 0;
+    }
+    if (!g_frame) {
+        g_frame = av_frame_alloc();
+        if (!g_frame) return 0;
+    }
+    if (!g_network_inited) {
+        avformat_network_init();
+        g_network_inited = 1;
+    }
+    return 1;
+}
+
 /* ── Core fuzz function ──────────────────────────────────────────── */
 
 __attribute__((visibility("default")))
@@ -65,34 +108,48 @@ int fuzz_ffmpeg(const unsigned char *buf, size_t size) {
     /* Silence FFmpeg's internal logging */
     av_log_set_level(AV_LOG_QUIET);
 
+    if (!fuzz_ensure_initialized()) {
+        __afl_map_edge(0x1003);
+        return 0;
+    }
+
+    /* Tear down any previous input; decoders are freed below after
+     * we know the new stream layout so cleanup stays O(nb_streams). */
+    av_packet_unref(g_pkt);
+    fuzz_cleanup_decoders();
+
     /* Initialize I/O state */
     FuzzIOState io_state = { buf, size, 0 };
     __afl_map_edge(0x1002);
 
-    /* Allocate format context */
-    AVFormatContext *fmt_ctx = avformat_alloc_context();
-    if (!fmt_ctx) { __afl_map_edge(0x1003); return 0; }
-    __afl_map_edge(0x1004);
-
-    /* Create AVIOContext for reading from memory */
+    /* Allocate format context + AVIOContext for this execution. */
     unsigned char *io_buffer = av_malloc(FFMPEG_IO_BUF_SIZE);
-    if (!io_buffer) { avformat_free_context(fmt_ctx); return 0; }
+    if (!io_buffer) { __afl_map_edge(0x1003); return 0; }
+
+    AVFormatContext *fmt_ctx = avformat_alloc_context();
+    if (!fmt_ctx) {
+        av_free(io_buffer);
+        __afl_map_edge(0x1003);
+        return 0;
+    }
 
     AVIOContext *avio_ctx = avio_alloc_context(
-        io_buffer, FFMPEG_IO_BUF_SIZE, 0, &io_state, fuzz_read_packet, NULL, NULL);
+        io_buffer, FFMPEG_IO_BUF_SIZE, 0,
+        &io_state, fuzz_read_packet, NULL, NULL);
     if (!avio_ctx) {
-        av_free(io_buffer);
         avformat_free_context(fmt_ctx);
+        av_free(io_buffer);
+        __afl_map_edge(0x1003);
         return 0;
     }
     fmt_ctx->pb = avio_ctx;
-    __afl_map_edge(0x1005);
+    __afl_map_edge(0x1004);
 
     /* Open input — probes all registered demuxers */
     int ret = avformat_open_input(&fmt_ctx, NULL, NULL, NULL);
     if (ret < 0) {
         __afl_map_edge(0x1006);
-        avio_context_free(&avio_ctx);
+        avformat_free_context(fmt_ctx);
         return 0;
     }
     __afl_map_edge(0x1010);
@@ -108,72 +165,66 @@ int fuzz_ffmpeg(const unsigned char *buf, size_t size) {
 
     /* Iterate packets and decode each stream */
     unsigned nb_streams = fmt_ctx->nb_streams;
-    if (nb_streams > 128) nb_streams = 128;  /* bound to prevent OOM */
-
-    AVPacket *pkt = av_packet_alloc();
-    AVFrame *frame = av_frame_alloc();
-    if (!pkt || !frame) {
-        av_packet_free(&pkt);
-        av_frame_free(&frame);
-        avformat_close_input(&fmt_ctx);
-        return 0;
-    }
+    if (nb_streams > FUZZ_MAX_DECODERS) nb_streams = FUZZ_MAX_DECODERS;
 
     unsigned total_packets = 0;
-    unsigned total_frames = 0;
+    unsigned total_frames  = 0;
 
-    /* Per-stream decoder contexts */
-    AVCodecContext *dec_ctxs[128];
-    memset(dec_ctxs, 0, sizeof(dec_ctxs));
-
+    /* Per-stream decoder contexts — reuse existing open decoders when
+     * the codec ID matches the new stream, otherwise reset. */
     for (unsigned i = 0; i < nb_streams; i++) {
         const AVCodecParameters *par = fmt_ctx->streams[i]->codecpar;
         const AVCodec *codec = avcodec_find_decoder(par->codec_id);
-        if (!codec) { dec_ctxs[i] = NULL; continue; }
+        if (!codec) { continue; }
 
-        AVCodecContext *dec_ctx = avcodec_alloc_context3(codec);
-        if (!dec_ctx) { dec_ctxs[i] = NULL; continue; }
-
-        avcodec_parameters_to_context(dec_ctx, par);
-        ret = avcodec_open2(dec_ctx, codec, NULL);
-        if (ret < 0) {
-            avcodec_free_context(&dec_ctx);
-            dec_ctxs[i] = NULL;
-            continue;
+        DecoderSlot *slot = &g_decs[i];
+        if (!slot->inited || slot->codec_id != par->codec_id) {
+            if (slot->ctx) avcodec_free_context(&slot->ctx);
+            slot->ctx = avcodec_alloc_context3(codec);
+            if (!slot->ctx) continue;
+            avcodec_parameters_to_context(slot->ctx, par);
+            ret = avcodec_open2(slot->ctx, codec, NULL);
+            if (ret < 0) {
+                avcodec_free_context(&slot->ctx);
+                slot->ctx      = NULL;
+                slot->codec_id = 0;
+                slot->inited   = 0;
+                continue;
+            }
+            slot->codec_id = par->codec_id;
+            slot->inited   = 1;
+        } else {
+            avcodec_parameters_to_context(slot->ctx, par);
         }
-        dec_ctxs[i] = dec_ctx;
         __afl_map_edge(0x1100 + (i & 0xFF));
     }
 
     /* Read and decode frames */
-    while (av_read_frame(fmt_ctx, pkt) >= 0) {
+    while (av_read_frame(fmt_ctx, g_pkt) >= 0) {
         total_packets++;
-        __afl_map_edge(0x1200 + (pkt->stream_index & 0x1F));
+        __afl_map_edge(0x1200 + (g_pkt->stream_index & 0x1F));
 
-        int si = pkt->stream_index;
-        if (si >= 0 && si < (int)nb_streams && dec_ctxs[si]) {
-            ret = avcodec_send_packet(dec_ctxs[si], pkt);
+        int si = g_pkt->stream_index;
+        if (si >= 0 && (int)si < (int)nb_streams && g_decs[si].inited && g_decs[si].ctx) {
+            ret = avcodec_send_packet(g_decs[si].ctx, g_pkt);
             if (ret >= 0) {
-                while (avcodec_receive_frame(dec_ctxs[si], frame) >= 0) {
+                while (avcodec_receive_frame(g_decs[si].ctx, g_frame) >= 0) {
                     total_frames++;
                     __afl_map_edge(0x1400 + (si & 0xFF));
                 }
             }
         }
 
-        av_packet_unref(pkt);
+        av_packet_unref(g_pkt);
 
         /* Guard against pathological inputs */
         if (total_packets > 10000 || total_frames > 5000) break;
     }
 
-    /* Cleanup */
-    for (unsigned i = 0; i < nb_streams; i++) {
-        if (dec_ctxs[i]) avcodec_free_context(&dec_ctxs[i]);
-    }
-    av_frame_free(&frame);
-    av_packet_free(&pkt);
-    avformat_close_input(&fmt_ctx);  /* frees avio_ctx + io_buffer */
+    avformat_close_input(&fmt_ctx);
+
+    /* Ask glibc to release free top arena pages back to the kernel. */
+    malloc_trim(0);
 
     __afl_map_edge(0x1500);
     return 0;

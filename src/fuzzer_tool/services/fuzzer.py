@@ -2960,6 +2960,19 @@ class Fuzzer:
             else:
                 new_tokens = []
             cmplog_found = bool(new_tokens)
+            # In direct_lite mode the compiled-in shim keeps the cmplog file
+            # open with O_APPEND. collect_tokens() truncates the file
+            # externally, but the shim's internal file offset is not reset by
+            # that truncation. Call __cmplog_reset() so the next execution
+            # writes at offset 0 instead of a stale position, which would
+            # create a sparse file and inflate RSS.
+            runner = self._inprocess_runner
+            if runner and runner.direct_lite and runner._lib:
+                try:
+                    if hasattr(runner._lib, "__cmplog_reset"):
+                        runner._lib.__cmplog_reset()
+                except (AttributeError, OSError):
+                    pass
             if not hasattr(self, "_dict_set"):
                 self._dict_set = set(self.dictionary)
                 self._dict_eps_window: list[float] = []
