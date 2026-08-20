@@ -277,13 +277,10 @@ class ShmCoverage:
         Filters by generation so stale entries from previous resets are
         ignored. Strips the generation byte from the returned counts.
         """
-        arr = np.frombuffer(self._map, dtype=_ENTRY_DTYPE, count=self.num_entries)
-        gen = (arr["count"] >> 24) & 0xFF
-        current_gen = self.read_generation()
-        active = arr[(arr["edge_id"] != 0) & (gen == current_gen)]
-        counts = active["count"] & 0xFFFFFF
+        active_ids, active_counts = self._active_columns()
+        counts = active_counts & 0xFFFFFF
         # .tolist() converts numpy uint32 to plain Python ints
-        return dict(zip(active["edge_id"].tolist(), counts.tolist(), strict=False))
+        return dict(zip(active_ids.tolist(), counts.tolist(), strict=False))
 
     # ── Reset ────────────────────────────────────────────────────────────
 
