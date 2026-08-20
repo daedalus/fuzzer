@@ -118,6 +118,7 @@ def _prune_stale_shims(cmplog_dir: str, keep: str) -> int:
 # ── Memory bounds ────────────────────────────────────────────────────
 CMPLOG_TOKENS_MAX = 10_000  # max unique operand tokens
 CMPLOG_PAIRS_MAX = 5_000  # max unique operand pairs
+CMPLOG_FILE_MAX_BYTES = 100 * 1024 * 1024  # max cmplog file size before rotation
 
 # Hash detection thresholds
 _HASH_MIN_BYTES = 8  # minimum operand length to consider as hash-like
@@ -372,15 +373,82 @@ class CmplogCollector:
         the file externally (works when the .so closes/reopens on each
         constructor, e.g. LD_PRELOAD in subprocess mode — harmless no-op
         for the per-call temp-file path).
+
+        If the file exceeds CMPLOG_FILE_MAX_BYTES, rotates to a fresh
+        log file instead of truncating, and updates _CMPLOG_OUT so the
+        shim writes to the new file going forward.
         """
         if not self.log_path:
             return
+
+        try:
+            size = os.path.getsize(self.log_path)
+        except OSError:
+            size = 0
+
+        if size > CMPLOG_FILE_MAX_BYTES:
+            self._rotate_cmplog()
+            return
+
         try:
             with open(self.log_path, "w") as f:
                 f.truncate(0)
         except OSError:
             pass
         self._read_offset = 0
+
+    def _rotate_cmplog(self):
+        """Rotate the cmplog log file when it exceeds the size cap.
+
+        Closes the shim's open file descriptor (if the shim exposes
+        __cmplog_close), creates a fresh log file, and updates
+        _CMPLOG_OUT so subsequent writes go to the new file.
+
+        The shim lazily reopens _CMPLOG_OUT on the next write after the
+        fd is closed, so rotation is safe even when cmplog is compiled
+        into the target .so and the fd is kept open across executions.
+        """
+        if not self.log_path:
+            return
+
+        log_dir = self.workdir or _get_cmplog_dir()
+        os.makedirs(log_dir, exist_ok=True)
+
+        try:
+            handles = getattr(self, "_shim_handles", [])
+            for handle in handles:
+                try:
+                    reset = getattr(handle, "__cmplog_reset", None)
+                    if reset is not None:
+                        reset()
+                except (AttributeError, OSError):
+                    pass
+                try:
+                    close = getattr(handle, "__cmplog_close", None)
+                    if close is not None:
+                        close()
+                except (AttributeError, OSError):
+                    pass
+        except Exception:
+            pass
+
+        local_id = uuid.uuid4().hex[:12]
+        new_path = os.path.join(log_dir, f"fuzz_cmplog_{local_id}.cmplog")
+        try:
+            with open(new_path, "wb"):
+                pass
+        except OSError:
+            return
+
+        self.log_path = new_path
+        self._read_offset = 0
+        os.environ["_CMPLOG_OUT"] = new_path
+
+        log.info(
+            "Cmplog: rotated log to %s (previous exceeded %d bytes)",
+            new_path,
+            CMPLOG_FILE_MAX_BYTES,
+        )
 
     def collect_tokens(self) -> list[bytes]:
         """Read new cmplog data and extract operand tokens and pairs.
@@ -398,6 +466,12 @@ class CmplogCollector:
         if not self.log_path or not os.path.exists(self.log_path):
             log.debug("collect_tokens: log missing or empty path=%s", self.log_path)
             return []
+
+        try:
+            if os.path.getsize(self.log_path) > CMPLOG_FILE_MAX_BYTES:
+                self._rotate_cmplog()
+        except OSError:
+            pass
 
         tokens = set()
         new_pairs = []

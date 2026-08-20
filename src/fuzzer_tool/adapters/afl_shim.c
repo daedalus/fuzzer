@@ -910,9 +910,21 @@ static char   __afl_cmplog_buf[CMPLOG_BUFFER_SIZE];
 static size_t __afl_cmplog_pos = 0;
 
 __AFL_NO_COV static void __afl_cmplog_flush(void) {
-    if (__afl_cmplog_pos == 0 || __afl_cmplog_fd < 0) {
-        __afl_cmplog_pos = 0;
+    if (__afl_cmplog_pos == 0) {
         return;
+    }
+    /* Lazy reopen: if Python rotated the log and closed the fd, reopen
+     * from the current _CMPLOG_OUT so the next write doesn't silently
+     * drop cmplog records. */
+    if (__afl_cmplog_fd < 0) {
+        const char *path = getenv("_CMPLOG_OUT");
+        if (path && path[0]) {
+            __afl_cmplog_fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        }
+        if (__afl_cmplog_fd < 0) {
+            __afl_cmplog_pos = 0;
+            return;
+        }
     }
     size_t off = 0;
     while (off < __afl_cmplog_pos) {
@@ -1337,6 +1349,15 @@ void __cmplog_reset(void) {
     if (__afl_cmplog_fd >= 0) {
         if (ftruncate(__afl_cmplog_fd, 0) != 0) { /* best effort */ }
         lseek(__afl_cmplog_fd, 0, SEEK_SET);
+    }
+}
+
+__AFL_NO_COV __attribute__((visibility("default")))
+void __cmplog_close(void) {
+    __afl_cmplog_flush();
+    if (__afl_cmplog_fd >= 0) {
+        close(__afl_cmplog_fd);
+        __afl_cmplog_fd = -1;
     }
 }
 
