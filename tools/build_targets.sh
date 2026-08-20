@@ -22,6 +22,11 @@
 
 set -e
 
+if [ -z "${TMPDIR:-}" ]; then
+    mkdir -p /home/dclavijo/tmp
+    export TMPDIR=/home/dclavijo/tmp
+fi
+
 FGREP="${FGREP_DIR:-vendor/fgrep}"
 TAILSLAYER="${TAILSLAYER_DIR:-/home/dclavijo/code/tailslayer}"
 SHIM="src/fuzzer_tool/adapters/afl_shim.c"
@@ -437,6 +442,17 @@ compile_secp256k1_objects() {
     fi
 }
 
+# ── Compile fuzzgoat library object ────────────────────────────────
+# Fuzzgoat is vendored as source. To avoid multiple-definition errors with
+# the AFL shim (which is injected via `-include $SHIM` into the wrapper TU
+# only), compile fuzzgoat.c separately without the shim and link the object.
+compile_fuzzgoat_object() {
+    local flags="$1" cc="${2:-$DEFAULT_CC}" extra_cflags="${3:-}"
+    [ -f "$VENDOR/fuzzgoat/fuzzgoat.c" ] || return 1
+    $cc $flags -O2 -g $extra_cflags -I"$VENDOR/fuzzgoat" \
+        -c "$VENDOR/fuzzgoat/fuzzgoat.c" -o /tmp/fuzzgoat.o 2>/dev/null
+}
+
 # ── Build a target ────────────────────────────────────────────────
 build_target() {
     local src="$1" out="$2" libs="$3" extra_flags="$4" cc="${5:-$DEFAULT_CC}" extra_cflags="${6:-}"
@@ -583,6 +599,8 @@ build_simple_targets() {
     build_target "$TARGETS/jpeg_read.c" "$TARGETS/jpeg_read${out_suffix}" "-ljpeg" "$flags" "$cc" "$extra_cflags"
     build_target "$TARGETS/ffmpeg_read.c" "$TARGETS/ffmpeg_read${out_suffix}" "$FFMPEG_LIBS" "$flags" "$DEFAULT_CC" "$FFMPEG_INC"
     build_target "$TARGETS/grep_read.c" "$TARGETS/grep_read${out_suffix}" "" "$flags"
+    compile_fuzzgoat_object "$flags" "$cc" "$extra_cflags"
+    build_target "$TARGETS/fuzzgoat_read.c" "$TARGETS/fuzzgoat_read${out_suffix}" "/tmp/fuzzgoat.o -lm" "$flags" "$cc" "-I$VENDOR/fuzzgoat"
 }
 
 # ── MSAN / TSAN standalone executables ─────────────────────────
@@ -619,6 +637,8 @@ build_sanitizer_targets() {
     build_target "$TARGETS/test_target.c" "$TARGETS/test_target${suffix}" "" "$common" "clang"
     build_target "$TARGETS/proto_target.c" "$TARGETS/proto_target${suffix}" "" "$common" "clang"
     build_target "$TARGETS/grep_read.c" "$TARGETS/grep_read${suffix}" "" "$common" "clang"
+    compile_fuzzgoat_object "$common" "clang" "-I$VENDOR/fuzzgoat"
+    build_target "$TARGETS/fuzzgoat_read.c" "$TARGETS/fuzzgoat_read${suffix}" "/tmp/fuzzgoat.o -lm" "$common" "clang" "-I$VENDOR/fuzzgoat"
     # Targets linking uninstrumented system libraries (libpng/libz/libjpeg)
     # are intentionally omitted for MSAN: without an instrumented build of
     # those libraries every call into them reports a false uninitialized
@@ -763,6 +783,8 @@ build_simple_so_targets() {
     build_so_target "$TARGETS/nop_target.c" "$TARGETS/nop_target${out_suffix}.so" "" "$flags"
     build_so_target "$TARGETS/ffmpeg_read.c" "$TARGETS/ffmpeg_read${out_suffix}.so" "$FFMPEG_LIBS" "$flags" "$cc" "$FFMPEG_INC"
     build_so_target "$TARGETS/grep_read.c" "$TARGETS/grep_read${out_suffix}.so" "" "$flags"
+    compile_fuzzgoat_object "$flags" "$cc" "-I$VENDOR/fuzzgoat"
+    build_so_target "$TARGETS/fuzzgoat_read.c" "$TARGETS/fuzzgoat_read${out_suffix}.so" "/tmp/fuzzgoat.o -lm" "$flags" "$cc" "-I$VENDOR/fuzzgoat"
 }
 
 # ── Build standalone .so targets with external deps ─────────────
@@ -964,7 +986,8 @@ verify_afl() {
              "$TARGETS"/tailslayer_read "$TARGETS"/tailslayer_read.so \
              "$TARGETS"/lz4_read "$TARGETS"/lz4_read_nosan "$TARGETS"/lz4_read.so "$TARGETS"/lz4_read_nosan.so \
              "$TARGETS"/secp256k1_read.so "$TARGETS"/secp256k1_read_nosan.so \
-             "$TARGETS"/grep_read "$TARGETS"/grep_read_nosan "$TARGETS"/grep_read.so "$TARGETS"/grep_read_nosan.so; do
+             "$TARGETS"/grep_read "$TARGETS"/grep_read_nosan "$TARGETS"/grep_read.so "$TARGETS"/grep_read_nosan.so \
+             "$TARGETS"/fuzzgoat_read "$TARGETS"/fuzzgoat_read_nosan "$TARGETS"/fuzzgoat_read.so "$TARGETS"/fuzzgoat_read_nosan.so; do
         [ -f "$f" ] || continue
         [[ "$f" == *.c ]] && continue
         local n=$(nm "$f" 2>/dev/null | grep -c __afl || true)
