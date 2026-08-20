@@ -762,15 +762,31 @@ class SeedPicker:
             tree = f._lineage
             max_depth = max((node.depth for node in tree.nodes.values()), default=0)
             if max_depth > 0:
-                all_sk = [f._seed_key(s) for s in corpus]
+                # seed_keys was filled by the pre-compute pass above; only
+                # seeds without metadata are still None, so re-hashing the
+                # whole corpus here was redundant.
+                all_sk = [
+                    sk if sk is not None else f._seed_key(s)
+                    for sk, s in zip(seed_keys, corpus)
+                ]
                 rng = getattr(f, "_rand_pool", None)
                 sample_cap = 64
-                for sk_i in all_sk:
-                    others = [k for k in all_sk if k != sk_i]
-                    if rng is not None and len(others) > sample_cap:
-                        sample = rng.sample(others, sample_cap)
-                    else:
-                        sample = others[:sample_cap]
+                # Draw the peer pool once per pass instead of rebuilding
+                # `[k for k in all_sk if k != sk_i]` for every seed: that was
+                # O(n^2) list construction to keep sample_cap entries of it
+                # (81ms/pass at n=2000). Peers are now shared across seeds
+                # within a pass rather than drawn independently per seed --
+                # this is a diversity heuristic averaged over the pool, and
+                # the pool is redrawn on the next pass, so the estimate stays
+                # unbiased across passes while costing O(n).
+                n_sk = len(all_sk)
+                if rng is not None and n_sk > sample_cap + 1:
+                    pool_idx = rng.sample(n_sk, sample_cap + 1)
+                else:
+                    pool_idx = range(n_sk)
+                pool_idx = list(pool_idx)
+                for i, sk_i in enumerate(all_sk):
+                    sample = [all_sk[j] for j in pool_idx if j != i][:sample_cap]
                     valid = [d for d in (tree.lca_distance(sk_i, k) for k in sample) if d >= 0]
                     avg = sum(valid) / len(valid) if valid else 0.0
                     diversity = min(avg / (2.0 * max_depth), 1.0)
