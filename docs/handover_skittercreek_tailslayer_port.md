@@ -141,6 +141,35 @@ wrong: load was never ~13% during a campaign, it was heading to 100% within
 a couple hundred executions. Bolting a 16-slot window onto a saturating
 table would have dropped nearly everything.
 
+### C3. Generation-tag aliasing (ghost edges) — **FOUND AND FIXED**
+
+Found while auditing C2's fix rather than during it, and it is a separate
+bug: reclaiming stale entries in place does not help, because the tag space
+is too small rather than the reclaim logic being wrong.
+
+Generation tags are 8 bits, so they repeat every 256 resets. An entry keeps
+the tag of the last execution in which its edge fired, so an edge that fires
+once and then goes quiet is read as live again exactly 256 executions later
+— credited to an execution that never reached that code. Measured: fire edge
+A once, then run N executions that never fire it; A reappears in the live
+set at N = 256 and 512, and is absent at 255, 257 and 511. That on/off
+signature is what distinguishes aliasing from a leak.
+
+Fixed by wiping the table when the counter wraps to 0, bounding staleness to
+one 256-execution cycle. Cost is one memset per 256 resets — ~86.9 µs
+amortised to ~0.34 µs per execution, against the 2.2 µs the generation
+scheme saves on every other execution, so the win that motivated generation
+tagging is kept and only the aliasing is paid for.
+
+**The process failure is worth more than the bug.** C2's original test suite
+declared the wrap safe, and it was wrong: every test fired the same edges on
+every execution, so entries were always refreshed with the current tag and
+the aliasing case was never constructed. The test passed for a reason
+unrelated to the property it claimed to check. `tests/
+test_regression_shm_stale_reclaim.py` now has both halves, with the
+steady-state one explicitly labelled as the easy half that is misleading
+alone.
+
 ### D. Unstable-edge calibration — **DONE, opt-in**
 
 `Fuzzer._calibrate_seed_stability(data, n_runs)` re-runs an accepted seed

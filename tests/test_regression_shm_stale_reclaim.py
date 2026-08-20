@@ -71,7 +71,18 @@ _HARNESS = textwrap.dedent(
     int main(int argc, char **argv) {
         int n_exec = argc > 1 ? atoi(argv[1]) : 1;
         int n_edge = argc > 2 ? atoi(argv[2]) : 43;
+        int oneshot = argc > 3 ? atoi(argv[3]) : 0;
+        /* oneshot mode: fire a distinctive edge ONCE up front, then never
+           again. Exercises generation-tag aliasing, which the steady-state
+           mode below cannot: there every edge fires every execution and so
+           is always refreshed with the current tag. */
+        if (oneshot) __afl_map_edge(0xAAAAu);
         for (int e = 0; e < n_exec; e++) {
+            if (oneshot) {
+                __afl_map_reset();
+                __afl_map_edge(0x1111u);
+                continue;
+            }
             for (int k = 0; k < n_edge; k++)
                 __afl_map_edge((unsigned)(k * 7919));
             if (e < n_exec - 1) __afl_map_reset();
@@ -113,13 +124,15 @@ def harness(tmp_path_factory):
     return str(exe)
 
 
-def _run(harness: str, cov: ShmCoverage, n_exec: int, n_edge: int = 43) -> None:
+def _run(harness: str, cov: ShmCoverage, n_exec: int, n_edge: int = 43, oneshot: int = 0) -> None:
     env = dict(
         os.environ,
         __AFL_SHM_ID=str(cov.shm_id),
         AFL_MAP_SIZE=str(cov.num_entries),
     )
-    subprocess.run([harness, str(n_exec), str(n_edge)], env=env, capture_output=True)
+    subprocess.run(
+        [harness, str(n_exec), str(n_edge), str(oneshot)], env=env, capture_output=True
+    )
 
 
 def _occupied(cov: ShmCoverage) -> int:
@@ -161,10 +174,13 @@ class TestStaleEntriesAreReclaimed:
                 cov.cleanup()
             assert visible == 43, f"{n_exec} execs: {visible} edges visible, expected 43"
 
-    def test_generation_wrap_does_not_resurrect_old_entries(self, harness):
-        """The generation counter is 8-bit, so exec N and exec N+256 share a
-        tag. That is only safe because an entry is reclaimed in place rather
-        than leaving a 256-execution-old duplicate behind to alias."""
+    def test_generation_wrap_with_edges_that_keep_firing(self, harness):
+        """Steady state across a generation wrap: edges that fire every
+        execution are refreshed with the current tag, so they stay correct.
+
+        NOTE this is the *easy* half and on its own it is misleading -- an
+        earlier version of this file had only this case and reported the
+        wrap as safe. See the one-shot test below for why."""
         cov = ShmCoverage()
         try:
             _run(harness, cov, 260)
@@ -172,6 +188,31 @@ class TestStaleEntriesAreReclaimed:
             assert _occupied(cov) == 43
         finally:
             cov.cleanup()
+
+    @pytest.mark.parametrize("n_exec", [1, 100, 255, 256, 257, 511, 512, 513, 1024])
+    def test_a_quiet_edge_does_not_come_back_as_a_ghost(self, harness, n_exec):
+        """Generation tags are 8 bits, so they repeat every 256 resets. An
+        entry keeps the tag of the last execution in which its edge fired,
+        so an edge that fires once and then goes quiet reads as live again
+        exactly 256 executions later -- credited to an execution that never
+        reached that code.
+
+        Reclaiming in place does not help: the tag space is too small, not
+        the reclaim logic. Fixed by wiping the table when the counter wraps
+        to 0, which bounds staleness to one cycle and cannot alias.
+
+        Measured pre-fix: ghost at n_exec = 256 and 512, absent at 255, 257
+        and 511 -- the signature of an aliasing bug rather than a leak."""
+        cov = ShmCoverage()
+        try:
+            _run(harness, cov, n_exec, oneshot=1)
+            visible = cov.get_edge_ids()
+        finally:
+            cov.cleanup()
+        assert visible == {0x1111}, (
+            f"after {n_exec} execs the live set is {sorted(visible)}; "
+            f"0xAAAA fired once at the start and must not reappear"
+        )
 
     def test_repeat_fires_bump_the_count_not_the_slot_count(self, harness):
         """A second execution of the same edge must bump its counter and
