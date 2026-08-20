@@ -28,6 +28,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 /* AFL edge coverage — provided by afl_shim.c */
@@ -56,7 +57,7 @@ static int fuzz_read_packet(void *opaque, unsigned char *buf, int buf_size) {
     return buf_size;
 }
 
-/* ── Persistent decoder pool ─────────────────────────────────────── */
+/* ── Persistent decoder pool ──────────────────────────────────────── */
 
 #define FUZZ_MAX_DECODERS 128
 
@@ -66,10 +67,10 @@ typedef struct {
     int              inited;
 } DecoderSlot;
 
-static AVPacket   *g_pkt     = NULL;
-static AVFrame    *g_frame   = NULL;
-static int         g_network_inited = 0;
-static DecoderSlot g_decs[FUZZ_MAX_DECODERS];
+static AVPacket    *g_pkt          = NULL;
+static AVFrame     *g_frame        = NULL;
+static int          g_network_inited = 0;
+static DecoderSlot  g_decs[FUZZ_MAX_DECODERS];
 
 static void fuzz_cleanup_decoders(void) {
     for (int i = 0; i < FUZZ_MAX_DECODERS; i++) {
@@ -98,6 +99,95 @@ static int fuzz_ensure_initialized(void) {
     return 1;
 }
 
+/* Open an input from an in-memory buffer. Each call gets its own
+ * AVIOContext buffer because ffmpeg's probe path may free the buffer
+ * during avformat_open_input. */
+static AVFormatContext *fuzz_open_input(const unsigned char *buf, size_t size) {
+    FuzzIOState io_state = { buf, size, 0 };
+
+    unsigned char *io_buffer = av_malloc(FFMPEG_IO_BUF_SIZE);
+    if (!io_buffer) return NULL;
+
+    AVIOContext *avio_ctx = avio_alloc_context(
+        io_buffer, FFMPEG_IO_BUF_SIZE, 0,
+        &io_state, fuzz_read_packet, NULL, NULL);
+    if (!avio_ctx) {
+        av_free(io_buffer);
+        return NULL;
+    }
+
+    AVFormatContext *fmt_ctx = avformat_alloc_context();
+    if (!fmt_ctx) {
+        avio_context_free(&avio_ctx);
+        return NULL;
+    }
+    fmt_ctx->pb = avio_ctx;
+
+    if (avformat_open_input(&fmt_ctx, NULL, NULL, NULL) < 0) {
+        avformat_close_input(&fmt_ctx);
+        return NULL;
+    }
+
+    /* avformat_open_input may have replaced our pb and/or freed io_buffer
+     * through ffio_rewind_with_probe_data. Our original wrapper struct is
+     * no longer needed; free it. */
+    av_free(avio_ctx);
+    return fmt_ctx;
+}
+
+/* ── Per-iteration phase timers ──────────────────────────────────── */
+
+typedef struct {
+    struct timespec t_open;
+    struct timespec t_stream_info;
+    struct timespec t_decode;
+    struct timespec t_cleanup;
+} FuzzPhaseTimers;
+
+static inline void fuzz_ts_now(struct timespec *ts) {
+    clock_gettime(CLOCK_MONOTONIC, ts);
+}
+
+static inline long long fuzz_ts_ns(const struct timespec *start,
+                                    const struct timespec *end) {
+    return (end->tv_sec - start->tv_sec) * 1000000000LL +
+           (end->tv_nsec - start->tv_nsec);
+}
+
+static FuzzPhaseTimers fuzz_phase_timers;
+static int fuzz_phase_stats_initialized = 0;
+static int fuzz_phase_profile_enabled = 0;
+
+static void fuzz_init_phase_stats(void) {
+    if (fuzz_phase_stats_initialized) return;
+    fuzz_phase_stats_initialized = 1;
+    fuzz_phase_profile_enabled = getenv("FFMPEG_PROFILE") != NULL;
+}
+
+#define FUZZ_PHASE_START(ts) fuzz_ts_now(&(ts))
+#define FUZZ_PHASE_END(ts, accum) \
+    do { \
+        struct timespec _end; \
+        fuzz_ts_now(&_end); \
+        (accum) += fuzz_ts_ns(&(ts), &_end); \
+    } while (0)
+
+/* Forward declarations for functions defined after their callers. */
+void fuzz_write_profile(void);
+void fuzz_print_phase_stats(void);
+
+/* Global stats accumulated across all calls. */
+static struct {
+    int calls;
+    long long t_open_ns;
+    long long t_stream_info_ns;
+    long long t_decode_ns;
+    long long t_cleanup_ns;
+    int avio_alloc;
+    int decoder_opens;
+    int decoder_reuses;
+} fuzz_phase_stats;
+
 /* ── Core fuzz function ──────────────────────────────────────────── */
 
 __attribute__((visibility("default")))
@@ -107,6 +197,8 @@ int fuzz_ffmpeg(const unsigned char *buf, size_t size) {
 
     /* Silence FFmpeg's internal logging */
     av_log_set_level(AV_LOG_QUIET);
+
+    fuzz_init_phase_stats();
 
     if (!fuzz_ensure_initialized()) {
         __afl_map_edge(0x1003);
@@ -118,47 +210,30 @@ int fuzz_ffmpeg(const unsigned char *buf, size_t size) {
     av_packet_unref(g_pkt);
     fuzz_cleanup_decoders();
 
-    /* Initialize I/O state */
-    FuzzIOState io_state = { buf, size, 0 };
+    /* Open input using the reusable probe buffer. */
+    struct timespec t_open_start, t_info_start, t_decode_start, t_cleanup_start;
+    FUZZ_PHASE_START(t_open_start);
     __afl_map_edge(0x1002);
 
-    /* Allocate format context + AVIOContext for this execution. */
-    unsigned char *io_buffer = av_malloc(FFMPEG_IO_BUF_SIZE);
-    if (!io_buffer) { __afl_map_edge(0x1003); return 0; }
-
-    AVFormatContext *fmt_ctx = avformat_alloc_context();
+    AVFormatContext *fmt_ctx = fuzz_open_input(buf, size);
     if (!fmt_ctx) {
-        av_free(io_buffer);
-        __afl_map_edge(0x1003);
-        return 0;
-    }
-
-    AVIOContext *avio_ctx = avio_alloc_context(
-        io_buffer, FFMPEG_IO_BUF_SIZE, 0,
-        &io_state, fuzz_read_packet, NULL, NULL);
-    if (!avio_ctx) {
-        avformat_free_context(fmt_ctx);
-        av_free(io_buffer);
-        __afl_map_edge(0x1003);
-        return 0;
-    }
-    fmt_ctx->pb = avio_ctx;
-    __afl_map_edge(0x1004);
-
-    /* Open input — probes all registered demuxers */
-    int ret = avformat_open_input(&fmt_ctx, NULL, NULL, NULL);
-    if (ret < 0) {
         __afl_map_edge(0x1006);
-        avformat_free_context(fmt_ctx);
+        FUZZ_PHASE_END(t_open_start, fuzz_phase_stats.t_open_ns);
+        fuzz_phase_stats.calls++;
         return 0;
     }
+    FUZZ_PHASE_END(t_open_start, fuzz_phase_stats.t_open_ns);
+    fuzz_phase_stats.avio_alloc++;
     __afl_map_edge(0x1010);
 
     /* Find stream info — runs codec probing for each stream */
-    ret = avformat_find_stream_info(fmt_ctx, NULL);
+    FUZZ_PHASE_START(t_info_start);
+    int ret = avformat_find_stream_info(fmt_ctx, NULL);
+    FUZZ_PHASE_END(t_info_start, fuzz_phase_stats.t_stream_info_ns);
     if (ret < 0) {
         __afl_map_edge(0x1011);
         avformat_close_input(&fmt_ctx);
+        fuzz_phase_stats.calls++;
         return 0;
     }
     __afl_map_edge(0x1020);
@@ -193,13 +268,16 @@ int fuzz_ffmpeg(const unsigned char *buf, size_t size) {
             }
             slot->codec_id = par->codec_id;
             slot->inited   = 1;
+            fuzz_phase_stats.decoder_opens++;
         } else {
             avcodec_parameters_to_context(slot->ctx, par);
+            fuzz_phase_stats.decoder_reuses++;
         }
         __afl_map_edge(0x1100 + (i & 0xFF));
     }
 
     /* Read and decode frames */
+    FUZZ_PHASE_START(t_decode_start);
     while (av_read_frame(fmt_ctx, g_pkt) >= 0) {
         total_packets++;
         __afl_map_edge(0x1200 + (g_pkt->stream_index & 0x1F));
@@ -220,12 +298,16 @@ int fuzz_ffmpeg(const unsigned char *buf, size_t size) {
         /* Guard against pathological inputs */
         if (total_packets > 10000 || total_frames > 5000) break;
     }
+    FUZZ_PHASE_END(t_decode_start, fuzz_phase_stats.t_decode_ns);
 
+    FUZZ_PHASE_START(t_cleanup_start);
     avformat_close_input(&fmt_ctx);
 
     /* Ask glibc to release free top arena pages back to the kernel. */
     malloc_trim(0);
+    FUZZ_PHASE_END(t_cleanup_start, fuzz_phase_stats.t_cleanup_ns);
 
+    fuzz_phase_stats.calls++;
     __afl_map_edge(0x1500);
     return 0;
 }
@@ -238,6 +320,7 @@ int main(void) {
         int len = __AFL_FUZZ_TEST_CASE_LEN;
         fuzz_ffmpeg(buf, len);
     }
+    fuzz_print_phase_stats();
     return 0;
 }
 #else
@@ -254,6 +337,7 @@ int main(int argc, char **argv) {
             int rc = fuzz_ffmpeg(buf, size);
             free(buf);
             fclose(f);
+            fuzz_print_phase_stats();
             return rc;
         }
         fclose(f);
@@ -271,4 +355,70 @@ int main(int argc, char **argv) {
 __attribute__((visibility("default")))
 int fuzz_shm_run(const unsigned char *buf, size_t size) {
     return fuzz_ffmpeg(buf, size);
+}
+
+/* Write accumulated phase stats to a CSV for post-run analysis. */
+__attribute__((visibility("default")))
+void fuzz_write_profile(void) {
+    const char *path = getenv("FFMPEG_PROFILE_OUT");
+    if (!path || !path[0]) return;
+
+    static int atexit_registered = 0;
+    if (!atexit_registered) {
+        atexit_registered = 1;
+        atexit(fuzz_write_profile);
+    }
+    /* The atexit handler will flush on normal exit. Also flush now so the
+     * wrapper can read intermediate data if it checks before exit. */
+    {
+        FILE *f = fopen(path, "w");
+        if (!f) return;
+        fprintf(f, "phase,calls_ns,total_ns,avg_ns\n");
+        if (fuzz_phase_stats.calls > 0) {
+            fprintf(f, "open_input,%d,%lld,%lld\n",
+                    fuzz_phase_stats.avio_alloc,
+                    fuzz_phase_stats.t_open_ns,
+                    fuzz_phase_stats.t_open_ns / fuzz_phase_stats.calls);
+            fprintf(f, "stream_info,%d,%lld,%lld\n",
+                    fuzz_phase_stats.calls,
+                    fuzz_phase_stats.t_stream_info_ns,
+                    fuzz_phase_stats.t_stream_info_ns / fuzz_phase_stats.calls);
+            fprintf(f, "decode,%d,%lld,%lld\n",
+                    fuzz_phase_stats.calls,
+                    fuzz_phase_stats.t_decode_ns,
+                    fuzz_phase_stats.t_decode_ns / fuzz_phase_stats.calls);
+            fprintf(f, "cleanup,%d,%lld,%lld\n",
+                    fuzz_phase_stats.calls,
+                    fuzz_phase_stats.t_cleanup_ns,
+                    fuzz_phase_stats.t_cleanup_ns / fuzz_phase_stats.calls);
+        }
+        fprintf(f, "allocations,%d,%d,%d\n",
+                fuzz_phase_stats.avio_alloc,
+                fuzz_phase_stats.decoder_opens,
+                fuzz_phase_stats.decoder_reuses);
+        fclose(f);
+    }
+}
+
+__attribute__((visibility("default")))
+void fuzz_print_phase_stats(void) {
+    printf("[fuzz_ffmpeg phases] calls=%d\n", fuzz_phase_stats.calls);
+    if (fuzz_phase_stats.calls > 0) {
+        printf("  open_input_av: %.1f ms total, %.2f ms/call\n",
+               fuzz_phase_stats.t_open_ns / 1e6,
+               fuzz_phase_stats.t_open_ns / (double)fuzz_phase_stats.calls / 1e6);
+        printf("  stream_info:   %.1f ms total, %.2f ms/call\n",
+               fuzz_phase_stats.t_stream_info_ns / 1e6,
+               fuzz_phase_stats.t_stream_info_ns / (double)fuzz_phase_stats.calls / 1e6);
+        printf("  decode:        %.1f ms total, %.2f ms/call\n",
+               fuzz_phase_stats.t_decode_ns / 1e6,
+               fuzz_phase_stats.t_decode_ns / (double)fuzz_phase_stats.calls / 1e6);
+        printf("  cleanup:       %.1f ms total, %.2f ms/call\n",
+               fuzz_phase_stats.t_cleanup_ns / 1e6,
+               fuzz_phase_stats.t_cleanup_ns / (double)fuzz_phase_stats.calls / 1e6);
+    }
+    printf("  avio_alloc: %d, decoder_opens: %d, decoder_reuses: %d\n",
+           fuzz_phase_stats.avio_alloc,
+           fuzz_phase_stats.decoder_opens,
+           fuzz_phase_stats.decoder_reuses);
 }
