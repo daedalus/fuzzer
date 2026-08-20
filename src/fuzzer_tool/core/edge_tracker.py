@@ -435,10 +435,23 @@ class MinHashLSH:
         if self._coeffs_a_np is not None and len(edge_set) > 0:
             import numpy as _np
 
-            edges = _np.array(list(edge_set), dtype=_np.uint64)
-            # Shape: (num_perm, n_edges) — fully vectorized
-            h = self._coeffs_a_np[:, None] * edges[None, :] + self._coeffs_b_np[:, None]
-            return array("Q", h.min(axis=1))
+            edges = _np.fromiter(edge_set, dtype=_np.uint64, count=len(edge_set))
+            # Materializing the whole (num_perm, n_edges) product costs
+            # num_perm*n*8 bytes twice over (product, then sum) -- 4.2MB per
+            # call at n=4000, and it was among the largest allocation sites in
+            # a profiled run. The row-min is independent per permutation, so
+            # the same result comes from a band of rows at a time at a
+            # fraction of the footprint.
+            out = _np.empty(self.num_perm, dtype=_np.uint64)
+            band = 8
+            for lo in range(0, self.num_perm, band):
+                hi = lo + band
+                blk = (
+                    self._coeffs_a_np[lo:hi, None] * edges[None, :]
+                    + self._coeffs_b_np[lo:hi, None]
+                )
+                out[lo:hi] = blk.min(axis=1)
+            return array("Q", out)
 
         # Python fallback
         sig = array("Q", [self._mask]) * self.num_perm
