@@ -188,6 +188,33 @@ class ShmCoverage:
 
     # ── Reading ──────────────────────────────────────────────────────────
 
+    def _active_columns(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return the edge_id column for entries live in the current generation.
+
+        Masking the *struct* array (as this used to) makes numpy gather whole
+        8-byte entries and then slice the column back out, so every scan copied
+        the count field too. Selecting the column first means the boolean take
+        moves only the 4-byte ids -- and the count column is read as a strided
+        view rather than materialized.
+        """
+        arr = np.frombuffer(self._map, dtype=_ENTRY_DTYPE, count=self.num_entries)
+        eid = arr["edge_id"]
+        cnt = arr["count"]
+        mask = (eid != 0) & (((cnt >> 24) & 0xFF) == self.read_generation())
+        return eid[mask], cnt[mask]
+
+    def _active_edge_ids(self) -> np.ndarray:
+        """Live edge_id column only (callers that don't need hit counts).
+
+        Deliberately not `_active_columns()[0]`: that materializes the count
+        column too and throws it away, which costs the same bytes the struct
+        gather did. Only get_edge_ids' 4-byte ids are taken here.
+        """
+        arr = np.frombuffer(self._map, dtype=_ENTRY_DTYPE, count=self.num_entries)
+        eid = arr["edge_id"]
+        cnt = arr["count"]
+        return eid[(eid != 0) & (((cnt >> 24) & 0xFF) == self.read_generation())]
+
     def get_edge_ids(self) -> set[int]:
         """Return set of non-zero edge_ids currently in the hash table.
 
@@ -195,12 +222,7 @@ class ShmCoverage:
         Python loop overhead. Filters by generation so stale entries from
         previous resets are ignored.
         """
-        arr = np.frombuffer(self._map, dtype=_ENTRY_DTYPE, count=self.num_entries)
-        gen = (arr["count"] >> 24) & 0xFF
-        current_gen = self.read_generation()
-        active = arr[(arr["edge_id"] != 0) & (gen == current_gen)]
-        # .tolist() converts numpy uint32 to plain Python ints
-        return set(active["edge_id"].tolist())
+        return set(self._active_edge_ids().tolist())
 
     def mask_edges(self, edge_ids) -> int:
         """Suppress *edge_ids* from ever counting as new coverage again.
@@ -544,11 +566,8 @@ class ShmCoverage:
             return False, self._last_ids
 
         # Slow path: extract edge_ids not yet in _seen_edge_ids
-        arr = np.frombuffer(self._map, dtype=_ENTRY_DTYPE, count=self.num_entries)
-        gen = (arr["count"] >> 24) & 0xFF
-        current_gen = self.read_generation()
-        active = arr[(arr["edge_id"] != 0) & (gen == current_gen)]
-        ids = set(active["edge_id"].tolist())
+        active_ids, active_counts = self._active_columns()
+        ids = set(active_ids.tolist())
         new = ids - self._seen_edge_ids
         self._seen_edge_ids.update(new)
         new_found = False
@@ -561,7 +580,7 @@ class ShmCoverage:
         # than replacing it: a new edge whose count is 0 occupies no bucket,
         # which the shim never produces but tests and torn reads do, and
         # cumulative_edges must stay an edge count either way.
-        if self._update_virgin_buckets(active["edge_id"], active["count"] & 0xFFFFFF):
+        if self._update_virgin_buckets(active_ids, active_counts & 0xFFFFFF):
             new_found = True
 
         self._last_edge_count = edge_count
