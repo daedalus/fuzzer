@@ -11,9 +11,6 @@ not available here.
 
 import os
 
-import pytest
-
-from fuzzer_tool.core.live_bit_mask import LiveBitMaskEstimator
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.services.operators import (
     _LIVENESS_DEAD_WEIGHT,
