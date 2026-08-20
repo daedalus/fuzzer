@@ -139,6 +139,17 @@ def apply_delta_v2(parent: bytes, diff: list[list]) -> bytes:
     return bytes(result)
 
 
+# ── Canonical corpus layout ──────────────────────────────────────────
+# save_to_corpus() writes full snapshots under seeds/<hh>/ and delta records
+# under deltas/ — deltas is a *sibling* of seeds, not a child of it. Pruned
+# entries are retained on disk for rehydration but are deliberately not loaded
+# back into the live corpus.
+_CORPUS_FULL_ROOTS = ("seeds",)  # recursively scanned; pruned/ skipped inside
+_CORPUS_DELTA_ROOTS = ("deltas", "seeds")  # seeds/ kept for legacy layouts
+_REHYDRATE_FULL_ROOTS = ("seeds", "seeds/pruned", "seeds/irreplaceable")
+_REHYDRATE_DELTA_ROOTS = ("deltas", "deltas/pruned")
+
+
 def rehydrate_by_hash(h: str, corpus_dir: Path, _depth: int = 0) -> bytes | None:
     """Reconstruct seed bytes for a 16-hex content hash from disk.
 
@@ -151,11 +162,11 @@ def rehydrate_by_hash(h: str, corpus_dir: Path, _depth: int = 0) -> bytes | None
     if _depth > SNAPSHOT_INTERVAL + 2:
         return None
     corpus_dir = Path(corpus_dir)
-    for base in ("seeds", "seeds/pruned", "seeds/irreplaceable"):
+    for base in _REHYDRATE_FULL_ROOTS:
         full = corpus_dir / base / h[:2] / f"id_{h}"
         if full.is_file():
             return full.read_bytes()
-    for base in ("deltas", "deltas/pruned"):
+    for base in _REHYDRATE_DELTA_ROOTS:
         delta_file = corpus_dir / base / h[:2] / f"delta_{h}.json"
         if not delta_file.is_file():
             continue
@@ -299,11 +310,22 @@ def load_corpus(
             elif f.is_dir() and f.name != "pruned":
                 _collect_deltas_from_dir(f)
 
-    # Discover all subdirectories in corpus_dir — load from each except pruned/
-    seeds_dir = corpus_dir / "seeds"
-    if seeds_dir.is_dir():
-        _load_full_from_dir(seeds_dir, mark_irreplaceable=False)
-        _collect_deltas_from_dir(seeds_dir)
+    # Scan the canonical corpus layout only. Anything else under corpus_dir
+    # (cmplog workdirs, scratch files) is not corpus data and must not be
+    # loaded as seeds. rehydrate_by_hash() is the authority on where entries
+    # live; if a root is added there it must be added here too, or a hash
+    # that rehydrates individually will be missing from a bulk load.
+    for rel in _CORPUS_FULL_ROOTS:
+        base = corpus_dir / rel
+        if base.is_dir():
+            _load_full_from_dir(base, mark_irreplaceable=False)
+
+    # Deltas live in corpus/deltas/, a *sibling* of seeds/ (see save_to_corpus),
+    # so scanning seeds/ alone silently drops every delta-encoded entry.
+    for rel in _CORPUS_DELTA_ROOTS:
+        base = corpus_dir / rel
+        if base.is_dir():
+            _collect_deltas_from_dir(base)
 
     # Load full files
     for h, data in full_files.items():

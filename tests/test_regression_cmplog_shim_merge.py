@@ -422,6 +422,14 @@ def test_direct_lite_collects_cmplog_from_compiled_in_shim(tmp_path):
         "direct_lite_cmplog",
         _TARGET_SO,
         cmplog=True,
+        # Without this the TU carries the logger but nothing calls it: the
+        # target's only comparison is `d[0] == 'A'`, which reaches the logger
+        # solely through __sanitizer_cov_trace_const_cmp1, and that callback
+        # is emitted only under trace-cmp. The libc interception layer can't
+        # cover for it either -- _TARGET_SO makes no memcmp/strcmp call. The
+        # log file is then created but stays empty, which looks exactly like
+        # a linked-but-silent shim.
+        extra=["-fsanitize-coverage=trace-cmp"],
         shared=True,
     )
     log = tmp_path / "direct_lite_cmplog.cmplog"
@@ -448,8 +456,9 @@ def test_direct_lite_collects_cmplog_from_compiled_in_shim(tmp_path):
     runner.run_one(b"A" * 16)
     with contextlib.suppress(AttributeError, OSError):
         runner._lib.__tracecmp_flush()
-    with contextlib.suppress(AttributeError, OSError):
-        runner._lib.__cmplog_reset()
+    # NB: __cmplog_reset() ftruncates the log to 0, so it must not run until
+    # the records have been read back. Calling it here (as this test first
+    # did) wipes the flush and makes a working shim look silent.
 
     assert collector.log_path is not None
     if not log.exists():
@@ -462,3 +471,12 @@ def test_direct_lite_collects_cmplog_from_compiled_in_shim(tmp_path):
         "compiled-in cmplog produced no tokens in direct_lite mode — "
         "the shim may be linked but not actually tracing comparisons"
     )
+    # The target's only comparison is against 'A', so that byte must appear.
+    # Without this the assert above passes on incidental libc-side records
+    # even when the target's own trace-cmp layer is dead.
+    assert b"A" in tokens, f"target's own operand missing from {tokens[:8]}"
+
+    # Now safe to reset, and it should leave the log empty.
+    with contextlib.suppress(AttributeError, OSError):
+        runner._lib.__cmplog_reset()
+    assert Path(collector.log_path).stat().st_size == 0

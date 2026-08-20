@@ -70,9 +70,25 @@ typedef struct {
 
 static AVPacket    *g_pkt          = NULL;
 static AVFrame     *g_frame        = NULL;
+/* Lives for the whole run, not just fuzz_open_input(): avio_alloc_context
+ * stores this pointer as the AVIOContext's `opaque` and fuzz_read_packet
+ * dereferences it on every read issued by avformat_find_stream_info() and
+ * av_read_frame(), both of which run *after* fuzz_open_input() returns.
+ * Freed by fuzz_release_io_state() once the format context is closed. */
+static FuzzIOState *g_io_state     = NULL;
 static int          fuzz_network_inited = 0;
 static int          fuzz_reset_counter = 0;
 static DecoderSlot  g_decs[FUZZ_MAX_DECODERS];
+
+/* Release the run-scoped AVIO opaque. Safe to call more than once, and safe
+ * to call before the first open. Must not run until the AVFormatContext that
+ * reads through it has been closed. */
+static void fuzz_release_io_state(void) {
+    if (g_io_state) {
+        av_free(g_io_state);
+        g_io_state = NULL;
+    }
+}
 
 static void fuzz_cleanup_decoders(void) {
     for (int i = 0; i < FUZZ_MAX_DECODERS; i++) {
@@ -105,28 +121,32 @@ static int fuzz_ensure_initialized(void) {
  * AVIOContext buffer because ffmpeg's probe path may free the buffer
  * during avformat_open_input. */
 static AVFormatContext *fuzz_open_input(const unsigned char *buf, size_t size) {
+    /* Reclaim the previous run's state before overwriting the slot. */
+    fuzz_release_io_state();
+
     FuzzIOState *io_state = av_malloc(sizeof(*io_state));
     if (!io_state) return NULL;
     io_state->data = buf;
     io_state->size = size;
     io_state->offset = 0;
+    g_io_state = io_state;
 
     unsigned char *io_buffer = av_malloc(FFMPEG_IO_BUF_SIZE);
-    if (!io_buffer) { av_free(io_state); return NULL; }
+    if (!io_buffer) { fuzz_release_io_state(); return NULL; }
 
     AVIOContext *avio_ctx = avio_alloc_context(
         io_buffer, FFMPEG_IO_BUF_SIZE, 0,
         io_state, fuzz_read_packet, NULL, NULL);
     if (!avio_ctx) {
         av_free(io_buffer);
-        av_free(io_state);
+        fuzz_release_io_state();
         return NULL;
     }
 
     AVFormatContext *fmt_ctx = avformat_alloc_context();
     if (!fmt_ctx) {
         avio_context_free(&avio_ctx);
-        av_free(io_state);
+        fuzz_release_io_state();
         return NULL;
     }
     fmt_ctx->max_analyze_duration = 300000; /* 300 ms probe cap */
@@ -135,13 +155,22 @@ static AVFormatContext *fuzz_open_input(const unsigned char *buf, size_t size) {
 
     if (avformat_open_input(&fmt_ctx, NULL, NULL, NULL) < 0) {
         avformat_close_input(&fmt_ctx);
+        /* Nothing reads through the opaque any more — safe to reclaim here. */
+        fuzz_release_io_state();
         return NULL;
     }
 
+    /* Only free the wrapper struct we allocated, and only when ffmpeg has
+     * swapped in its own pb (ffio_rewind_with_probe_data) so ours is
+     * genuinely unreferenced. av_free rather than avio_context_free: the
+     * probe path may already have released io_buffer, and a double free is
+     * worse than leaking one 256 KB buffer on that rare branch. */
     if (fmt_ctx->pb != avio_ctx) {
         av_free(avio_ctx);
     }
-    av_free(io_state);
+    /* g_io_state stays live: fmt_ctx still reads through it in
+     * avformat_find_stream_info() and av_read_frame(). The caller releases
+     * it after avformat_close_input(). */
     return fmt_ctx;
 }
 
@@ -309,6 +338,7 @@ int fuzz_ffmpeg(const unsigned char *buf, size_t size) {
     if (ret < 0) {
         __afl_map_edge(0x1011);
         avformat_close_input(&fmt_ctx);
+        fuzz_release_io_state();
         fuzz_phase_stats.calls++;
         fuzz_cancel_watchdog();
         return 0;
@@ -385,6 +415,7 @@ int fuzz_ffmpeg(const unsigned char *buf, size_t size) {
 
     FUZZ_PHASE_START(t_cleanup_start);
     avformat_close_input(&fmt_ctx);
+    fuzz_release_io_state();
 
     /* Ask glibc to release free top arena pages back to the kernel. */
     malloc_trim(0);
