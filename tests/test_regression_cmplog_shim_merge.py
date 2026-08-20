@@ -403,3 +403,62 @@ def test_pc_field_parses(tmp_path, shm):
     assert collector._pair_pc, (
         "no pair carried a pc — the collector still cannot parse the field the shim writes"
     )
+
+
+# ── 8. direct_lite must collect cmplog from a compiled-in shim ──────────
+
+
+@needs_cc
+def test_direct_lite_collects_cmplog_from_compiled_in_shim(tmp_path):
+    """Regression: cmplog symbols can be present while producing no traces.
+
+    A target built with the shim compiled in can still report `cmplog: 0t 0p`
+    if no comparisons actually reach the logger. Pin the end-to-end path:
+    compile a small instrumented .so, run it through InProcessRunner in
+    direct_lite mode, and require at least one CMP record.
+    """
+    target = _cc_shim(
+        tmp_path,
+        "direct_lite_cmplog",
+        _TARGET_SO,
+        cmplog=True,
+        shared=True,
+    )
+    log = tmp_path / "direct_lite_cmplog.cmplog"
+    assert not log.exists(), "fresh cmplog log must not exist before the run"
+
+    from fuzzer_tool.adapters.inprocess import InProcessRunner
+    from fuzzer_tool.core.cmplog import CmplogCollector
+
+    collector = CmplogCollector(workdir=str(tmp_path))
+    assert collector.start() is True, "cmplog shim compilation failed"
+    collector.setup_env_for_run()
+
+    runner = InProcessRunner(
+        target=str(target),
+        function_name="LLVMFuzzerTestOneInput",
+        timeout=1.0,
+        direct_lite=True,
+        coverage_env_id=None,
+        cov=False,
+        debug=False,
+        capture_stderr=False,
+        use_ptrace=False,
+    )
+    runner.run_one(b"A" * 16)
+    with contextlib.suppress(AttributeError, OSError):
+        runner._lib.__tracecmp_flush()
+    with contextlib.suppress(AttributeError, OSError):
+        runner._lib.__cmplog_reset()
+
+    assert collector.log_path is not None
+    if not log.exists():
+        log = Path(collector.log_path)
+    assert log.exists(), f"cmplog log missing after direct_lite run: {collector.log_path}"
+
+    collector.log_path = str(log)
+    tokens = collector.collect_tokens()
+    assert tokens, (
+        "compiled-in cmplog produced no tokens in direct_lite mode — "
+        "the shim may be linked but not actually tracing comparisons"
+    )

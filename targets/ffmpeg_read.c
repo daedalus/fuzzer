@@ -30,6 +30,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <pthread.h>
 
 /* AFL edge coverage — provided by afl_shim.c */
 extern void __afl_map_edge(unsigned int cur_loc);
@@ -69,7 +70,8 @@ typedef struct {
 
 static AVPacket    *g_pkt          = NULL;
 static AVFrame     *g_frame        = NULL;
-static int          g_network_inited = 0;
+static int          fuzz_network_inited = 0;
+static int          fuzz_reset_counter = 0;
 static DecoderSlot  g_decs[FUZZ_MAX_DECODERS];
 
 static void fuzz_cleanup_decoders(void) {
@@ -92,9 +94,9 @@ static int fuzz_ensure_initialized(void) {
         g_frame = av_frame_alloc();
         if (!g_frame) return 0;
     }
-    if (!g_network_inited) {
+    if (!fuzz_network_inited) {
         avformat_network_init();
-        g_network_inited = 1;
+        fuzz_network_inited = 1;
     }
     return 1;
 }
@@ -103,24 +105,32 @@ static int fuzz_ensure_initialized(void) {
  * AVIOContext buffer because ffmpeg's probe path may free the buffer
  * during avformat_open_input. */
 static AVFormatContext *fuzz_open_input(const unsigned char *buf, size_t size) {
-    FuzzIOState io_state = { buf, size, 0 };
+    FuzzIOState *io_state = av_malloc(sizeof(*io_state));
+    if (!io_state) return NULL;
+    io_state->data = buf;
+    io_state->size = size;
+    io_state->offset = 0;
 
     unsigned char *io_buffer = av_malloc(FFMPEG_IO_BUF_SIZE);
-    if (!io_buffer) return NULL;
+    if (!io_buffer) { av_free(io_state); return NULL; }
 
     AVIOContext *avio_ctx = avio_alloc_context(
         io_buffer, FFMPEG_IO_BUF_SIZE, 0,
-        &io_state, fuzz_read_packet, NULL, NULL);
+        io_state, fuzz_read_packet, NULL, NULL);
     if (!avio_ctx) {
         av_free(io_buffer);
+        av_free(io_state);
         return NULL;
     }
 
     AVFormatContext *fmt_ctx = avformat_alloc_context();
     if (!fmt_ctx) {
         avio_context_free(&avio_ctx);
+        av_free(io_state);
         return NULL;
     }
+    fmt_ctx->max_analyze_duration = 300000; /* 300 ms probe cap */
+    fmt_ctx->probesize = 1 * 1024 * 1024;  /* 1 MB probe window */
     fmt_ctx->pb = avio_ctx;
 
     if (avformat_open_input(&fmt_ctx, NULL, NULL, NULL) < 0) {
@@ -128,10 +138,10 @@ static AVFormatContext *fuzz_open_input(const unsigned char *buf, size_t size) {
         return NULL;
     }
 
-    /* avformat_open_input may have replaced our pb and/or freed io_buffer
-     * through ffio_rewind_with_probe_data. Our original wrapper struct is
-     * no longer needed; free it. */
-    av_free(avio_ctx);
+    if (fmt_ctx->pb != avio_ctx) {
+        av_free(avio_ctx);
+    }
+    av_free(io_state);
     return fmt_ctx;
 }
 
@@ -158,6 +168,61 @@ static FuzzPhaseTimers fuzz_phase_timers;
 static int fuzz_phase_stats_initialized = 0;
 static int fuzz_phase_profile_enabled = 0;
 
+static void fuzz_report_phase(const char *phase, long long ns) {
+    fprintf(stderr, "[ffmpeg phase] %s %.2f ms\n", phase, ns / 1e6);
+    fflush(stderr);
+}
+
+static pthread_t g_watchdog_tid;
+static int g_watchdog_armed = 0;
+
+static void *fuzz_watchdog_thread(void *arg) {
+    long timeout_ms = (long)arg;
+    usleep(timeout_ms * 1000);
+    if (g_watchdog_armed) {
+        fprintf(stderr, "[ffmpeg watchdog] timeout after %ld ms, exiting\n", timeout_ms);
+        fflush(stderr);
+        _exit(124);
+    }
+    return NULL;
+}
+
+static void fuzz_start_watchdog(long timeout_ms) {
+    if (g_watchdog_armed) return;
+    g_watchdog_armed = 1;
+    if (pthread_create(&g_watchdog_tid, NULL, fuzz_watchdog_thread, (void *)timeout_ms) != 0) {
+        g_watchdog_armed = 0;
+    }
+}
+
+static void fuzz_cancel_watchdog(void) {
+    if (!g_watchdog_armed) return;
+    g_watchdog_armed = 0;
+    pthread_cancel(g_watchdog_tid);
+    pthread_join(g_watchdog_tid, NULL);
+}
+
+static int fuzz_with_watchdog(long timeout_ms, int (*fn)(void *), void *arg) {
+    pthread_t tid;
+    int armed = 0;
+    if (pthread_create(&tid, NULL, fuzz_watchdog_thread, (void *)timeout_ms) == 0) {
+        armed = 1;
+        g_watchdog_armed = 1;
+    }
+    int rc = fn(arg);
+    if (armed) {
+        g_watchdog_armed = 0;
+        pthread_cancel(tid);
+        pthread_join(tid, NULL);
+    }
+    return rc;
+}
+
+static int fuzz_run_find_stream_info(void *arg) {
+    AVFormatContext **p = (AVFormatContext **)arg;
+    return avformat_find_stream_info(p[0], NULL);
+}
+
 static void fuzz_init_phase_stats(void) {
     if (fuzz_phase_stats_initialized) return;
     fuzz_phase_stats_initialized = 1;
@@ -175,6 +240,7 @@ static void fuzz_init_phase_stats(void) {
 /* Forward declarations for functions defined after their callers. */
 void fuzz_write_profile(void);
 void fuzz_print_phase_stats(void);
+static int fuzz_run_find_stream_info(void *arg);
 
 /* Global stats accumulated across all calls. */
 static struct {
@@ -200,8 +266,10 @@ int fuzz_ffmpeg(const unsigned char *buf, size_t size) {
 
     fuzz_init_phase_stats();
 
+    fuzz_start_watchdog(900);
     if (!fuzz_ensure_initialized()) {
         __afl_map_edge(0x1003);
+        fuzz_cancel_watchdog();
         return 0;
     }
 
@@ -219,21 +287,30 @@ int fuzz_ffmpeg(const unsigned char *buf, size_t size) {
     if (!fmt_ctx) {
         __afl_map_edge(0x1006);
         FUZZ_PHASE_END(t_open_start, fuzz_phase_stats.t_open_ns);
+        fuzz_report_phase("open", fuzz_phase_stats.t_open_ns);
         fuzz_phase_stats.calls++;
+        fuzz_cancel_watchdog();
         return 0;
     }
     FUZZ_PHASE_END(t_open_start, fuzz_phase_stats.t_open_ns);
+    fuzz_report_phase("open", fuzz_phase_stats.t_open_ns);
     fuzz_phase_stats.avio_alloc++;
     __afl_map_edge(0x1010);
 
     /* Find stream info — runs codec probing for each stream */
     FUZZ_PHASE_START(t_info_start);
-    int ret = avformat_find_stream_info(fmt_ctx, NULL);
+    fprintf(stderr, "[ffmpeg debug] before avformat_find_stream_info\n");
+    fflush(stderr);
+    int ret = fuzz_with_watchdog(150, fuzz_run_find_stream_info, &fmt_ctx);
+    fprintf(stderr, "[ffmpeg debug] after avformat_find_stream_info ret=%d\n", ret);
+    fflush(stderr);
     FUZZ_PHASE_END(t_info_start, fuzz_phase_stats.t_stream_info_ns);
+    fuzz_report_phase("stream_info", fuzz_phase_stats.t_stream_info_ns);
     if (ret < 0) {
         __afl_map_edge(0x1011);
         avformat_close_input(&fmt_ctx);
         fuzz_phase_stats.calls++;
+        fuzz_cancel_watchdog();
         return 0;
     }
     __afl_map_edge(0x1020);
@@ -295,10 +372,16 @@ int fuzz_ffmpeg(const unsigned char *buf, size_t size) {
 
         av_packet_unref(g_pkt);
 
+        if ((total_packets & 1023) == 0) {
+            fprintf(stderr, "[ffmpeg decode] packets=%u frames=%u\n", total_packets, total_frames);
+            fflush(stderr);
+        }
+
         /* Guard against pathological inputs */
-        if (total_packets > 10000 || total_frames > 5000) break;
+        if (total_packets > 500 || total_frames > 500) break;
     }
     FUZZ_PHASE_END(t_decode_start, fuzz_phase_stats.t_decode_ns);
+    fuzz_report_phase("decode", fuzz_phase_stats.t_decode_ns);
 
     FUZZ_PHASE_START(t_cleanup_start);
     avformat_close_input(&fmt_ctx);
@@ -306,9 +389,22 @@ int fuzz_ffmpeg(const unsigned char *buf, size_t size) {
     /* Ask glibc to release free top arena pages back to the kernel. */
     malloc_trim(0);
     FUZZ_PHASE_END(t_cleanup_start, fuzz_phase_stats.t_cleanup_ns);
+    fuzz_report_phase("cleanup", fuzz_phase_stats.t_cleanup_ns);
 
     fuzz_phase_stats.calls++;
     __afl_map_edge(0x1500);
+    fuzz_cancel_watchdog();
+
+    if (++fuzz_reset_counter >= 1000) {
+        fuzz_reset_counter = 0;
+        if (fuzz_network_inited) {
+            avformat_network_deinit();
+            fuzz_network_inited = 0;
+        }
+        fprintf(stderr, "[ffmpeg reset] global state cleared after %d calls\n", fuzz_phase_stats.calls);
+        fflush(stderr);
+    }
+
     return 0;
 }
 
