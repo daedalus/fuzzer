@@ -105,6 +105,10 @@ class CorpusManager:
         # Ensure the irreplaceable/ directory exists inside seeds/ so seeds can be
         # promoted to irreplaceable without a late mkdir.
         (f.corpus_dir / "seeds" / "irreplaceable").mkdir(parents=True, exist_ok=True)
+        # Same for crashing/: inputs observed to crash the target are stored
+        # here and marked irreplaceable, so the dir must exist before the
+        # first crash.
+        (f.corpus_dir / "seeds" / "crashing").mkdir(parents=True, exist_ok=True)
 
     def init_seed_metadata(self):
         f = self.f
@@ -298,8 +302,18 @@ class CorpusManager:
 
     def save_crash(self, data: bytes, returncode: int, stderr: str) -> str | None:
         f = self.f
-        from fuzzer_tool.adapters.filesystem import hash_data
+        from fuzzer_tool.adapters.filesystem import (
+            hash_data,
+            save_crashing_seed,
+        )
         from fuzzer_tool.core.crash_metadata import CrashMetadata, find_nearest_corpus
+
+        # Preserve the crashing input as corpus material before anything else:
+        # stored under seeds/crashing/ and marked irreplaceable so no pruning
+        # path can drop it. Runs for every crash exec; the writer dedups to a
+        # stat() for repeats of the same input.
+        if f.corpus_dir:
+            save_crashing_seed(data, f.corpus_dir, f.seen_hashes, f.irreplaceable_hashes, f.bloom)
 
         meta = CrashMetadata()
         meta.exec_count = f.exec_count
@@ -506,6 +520,13 @@ class CorpusManager:
 
     def trim_new_coverage(self, data: bytes, parent: bytes) -> None:
         f = self.f
+        from fuzzer_tool.adapters.filesystem import hash_data
+
+        # Crashing/irreplaceable seeds are never trimmed: their exact bytes
+        # reproduce the crash, and a halved input may not.
+        if hash_data(data) in f.irreplaceable_hashes:
+            return
+
         if len(data) <= 16:
             return
 

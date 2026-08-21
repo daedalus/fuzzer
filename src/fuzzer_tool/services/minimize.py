@@ -55,6 +55,8 @@ def _discover_corpus_files(corpus_path: Path) -> list[Path]:
 
     pruned/ is excluded at every level: those entries were already removed
     from the live corpus, and re-minimizing would resurrect them.
+    crashing/ and irreplaceable/ are excluded too: their contents are marked
+    never-prune and must not be treated as minimization candidates.
     """
 
     def _usable(f: Path) -> bool:
@@ -63,6 +65,8 @@ def _discover_corpus_files(corpus_path: Path) -> list[Path]:
             and not f.is_symlink()
             and f.suffix not in _SKIP_SUFFIXES
             and "pruned" not in f.parts
+            and "crashing" not in f.parts
+            and "irreplaceable" not in f.parts
         )
 
     seeds = corpus_path / "seeds"

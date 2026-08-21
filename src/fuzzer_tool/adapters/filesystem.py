@@ -152,7 +152,7 @@ def apply_delta_v2(parent: bytes, diff: list[list]) -> bytes:
 # now accepts both spellings -- see _delta_candidates.
 _CORPUS_FULL_ROOTS = ("seeds",)  # recursively scanned; pruned/ skipped inside
 _CORPUS_DELTA_ROOTS = ("deltas", "seeds")  # seeds/ kept for legacy layouts
-_REHYDRATE_FULL_ROOTS = ("seeds", "seeds/pruned", "seeds/irreplaceable")
+_REHYDRATE_FULL_ROOTS = ("seeds", "seeds/pruned", "seeds/irreplaceable", "seeds/crashing")
 _REHYDRATE_DELTA_ROOTS = ("deltas", "deltas/pruned")
 
 
@@ -330,9 +330,12 @@ def load_corpus(
             if sub.name == "pruned":
                 continue
             # Propagate mark_irreplaceable: if the subdirectory itself is
-            # named "irreplaceable", mark its contents regardless of the
-            # parent's mark_irreplaceable value. This handles the
-            # corpus/seeds/irreplaceable/ layout.
+            # named "irreplaceable" or "crashing", mark its contents
+            # regardless of the parent's mark_irreplaceable value. This
+            # handles the corpus/seeds/irreplaceable/ and corpus/seeds/crashing/
+            # layouts. Crashing seeds are inputs observed to crash the target;
+            # like irreplaceable seeds they are excluded from every pruning
+            # path.
             #
             # Gated on load_irreplaceable: this auto-detection used to fire
             # unconditionally, so callers passing load_irreplaceable=False
@@ -340,7 +343,7 @@ def load_corpus(
             # silently a no-op on those entries. The seeds are still loaded
             # either way -- the flag only decides whether they are tracked.
             sub_mark = mark_irreplaceable or (
-                load_irreplaceable and sub.name == "irreplaceable"
+                load_irreplaceable and sub.name in ("irreplaceable", "crashing")
             )
             _load_full_from_dir(sub, mark_irreplaceable=sub_mark)
 
@@ -545,6 +548,62 @@ def save_irreplaceable(
     corpus_file = sub_dir / f"id_{h}"
     corpus_file.write_bytes(data)
     return True
+
+
+def save_crashing_seed(
+    data: bytes,
+    corpus_dir: Path,
+    seen_hashes: set[str],
+    irreplaceable_hashes: set[str],
+    bloom: BloomFilter | None = None,
+) -> bool:
+    """Save an input observed to crash the target under seeds/crashing/.
+
+    Crashing inputs are corpus material: they are stored in
+    ``corpus/seeds/crashing/`` and marked irreplaceable so no pruning path
+    (auto_minimize_corpus, trim_new_coverage, minimize) can remove them.
+
+    Unlike save_irreplaceable, a duplicate does NOT skip the write: if the
+    input already lives in the corpus elsewhere it is still copied here and
+    marked, so the on-disk invariant "every crashing input has a protected
+    copy under seeds/crashing/" holds regardless of dedup state. The write is
+    skipped only when both the hash is marked and the file already exists, so
+    repeated crashes on the same input cost one stat() each.
+
+    Args:
+        data: Input bytes that crashed the target.
+        corpus_dir: Path to corpus directory.
+        seen_hashes: Set of already-seen hashes (updated with new hash).
+        irreplaceable_hashes: Set of irreplaceable hashes (updated with hash).
+        bloom: Optional bloom filter for fast pre-check.
+
+    Returns:
+        True if this input was new to seen_hashes, False if already known.
+    """
+    h = hash_data(data)
+    dest_dir = corpus_dir / "seeds" / "crashing" / h[:2]
+    dest = dest_dir / f"id_{h}"
+    if h in irreplaceable_hashes and dest.is_file():
+        return False
+
+    is_new = True
+    if bloom is not None:
+        if not bloom.query(h):
+            bloom.add(h)
+        elif h in seen_hashes:
+            is_new = False
+        else:
+            bloom.add(h)
+    elif h in seen_hashes:
+        is_new = False
+    seen_hashes.add(h)
+    irreplaceable_hashes.add(h)
+    if len(seen_hashes) > SEEN_HASHES_MAX:
+        seen_hashes.clear()
+
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(data)
+    return is_new
 
 
 def save_crash(

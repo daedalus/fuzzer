@@ -735,6 +735,10 @@ Seeds placed in `corpus/irreplaceable/` are never pruned by minimization. When t
 
 Use `corpus/irreplaceable/` for seeds that must always be in the active set (e.g., known reproducers, structural format seeds).
 
+### Crashing Seeds
+
+Every input observed to crash the target is automatically persisted to `corpus/seeds/crashing/` (same `<hh>/id_<hash>` layout) and marked irreplaceable, so it is loaded on subsequent runs and bypasses all pruning logic: `auto_minimize_corpus` sets it aside before minimization, `trim_new_coverage` refuses to halve it, and the standalone `minimize` command excludes the directory from its candidates. If a crashing input was already a regular corpus seed elsewhere, a protected copy is still written under `crashing/` — the invariant is that every crashing input has exactly one prune-proof copy on disk.
+
 ## Test Suite
 
 2532+ tests covering all modules, including 67 regression tests for historical bugfixes (`tests/test_regressions.py`). Run with:
