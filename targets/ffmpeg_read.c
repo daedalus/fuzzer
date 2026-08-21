@@ -450,6 +450,21 @@ int fuzz_ffmpeg(const unsigned char *buf, size_t size) {
      * the codec ID matches the new stream, otherwise reset. */
     for (unsigned i = 0; i < nb_streams; i++) {
         const AVCodecParameters *par = fmt_ctx->streams[i]->codecpar;
+        /* Only audio and video. avcodec_send_packet/avcodec_receive_frame is
+         * the frame-based API for those two types; subtitle decoders must go
+         * through avcodec_decode_subtitle2, and data/attachment streams have
+         * no decoder contract at all.
+         *
+         * Feeding a subtitle decoder a packet anyway reaches
+         * decode_simple_internal, which returns 0 without filling
+         * frame->buf[0], and libavcodec's `if (!ret) av_assert0(frame->buf[0])`
+         * aborts. That surfaced as a reproducible SIGABRT "crash" from an
+         * 82-byte input probed as hdmv_pgs_subtitle -- a false positive
+         * manufactured by the harness, not a finding in the library. */
+        if (par->codec_type != AVMEDIA_TYPE_VIDEO &&
+            par->codec_type != AVMEDIA_TYPE_AUDIO) {
+            continue;
+        }
         const AVCodec *codec = avcodec_find_decoder(par->codec_id);
         if (!codec) { continue; }
 
