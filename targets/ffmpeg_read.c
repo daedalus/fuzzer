@@ -155,10 +155,14 @@ static AVFormatContext *fuzz_open_input(const unsigned char *buf, size_t size) {
         fuzz_release_io_state();
         return NULL;
     }
+    /* Take ownership here, not on the success path. Every exit below runs
+     * through fuzz_release_io_state(), so claiming it now is what makes the
+     * *failure* paths release it too -- and under a fuzzer avformat_open_input
+     * failing is the common case, not the rare one. */
+    g_avio_ctx = avio_ctx;
 
     AVFormatContext *fmt_ctx = avformat_alloc_context();
     if (!fmt_ctx) {
-        avio_context_free(&avio_ctx);
         fuzz_release_io_state();
         return NULL;
     }
@@ -175,19 +179,17 @@ static AVFormatContext *fuzz_open_input(const unsigned char *buf, size_t size) {
 
     if (fmt_ctx->pb != avio_ctx) {
         /* ffmpeg swapped in its own pb (ffio_rewind_with_probe_data) and owns
-         * whatever it built; ours is unreferenced. Free only the struct -- the
-         * probe path may already have taken or released io_buffer, and a
-         * double free is worse than leaking on this rare branch. */
+         * whatever it built; ours is unreferenced. Disown before freeing so
+         * fuzz_release_io_state() cannot double-free it, and free only the
+         * struct -- the probe path may already have taken or released
+         * io_buffer, so a double free is worse than leaking on this branch. */
+        g_avio_ctx = NULL;
         av_free(avio_ctx);
-    } else {
-        /* The common case, and the one that used to leak every execution:
-         * AVFMT_FLAG_CUSTOM_IO means avformat_close_input leaves pb alone, so
-         * the context and its 256 KB buffer are ours to release -- but only
-         * after the format context is closed, since it reads through them.
-         * Measured 262,424 bytes per execution before this: ~262 MB per 1k
-         * execs, which is what the campaign RSS growth was. */
-        g_avio_ctx = avio_ctx;
     }
+    /* Otherwise g_avio_ctx still holds it: AVFMT_FLAG_CUSTOM_IO means
+     * avformat_close_input leaves pb alone, so the context and its 256 KB
+     * buffer are ours to release -- but only after the format context is
+     * closed, since it reads through them. */
     /* g_io_state stays live: fmt_ctx still reads through it in
      * avformat_find_stream_info() and av_read_frame(). The caller releases
      * it after avformat_close_input(). */
