@@ -581,7 +581,9 @@ class TargetRunner:
         f = self.f
         if returncode in SIGNAL_CRASH_CODES or returncode in f.extra_crash_codes:
             return True
-        if returncode < 0 and returncode != -1:
+        # -1 (timeout) and -2 (infrastructure failure) are adapter sentinels,
+        # never target behavior; every other negative code is a fatal signal.
+        if returncode < 0 and returncode not in (-1, -2):
             return True
         if returncode in (-1, 0) and ("ASAN" in stderr or "AddressSanitizer" in stderr):
             return True

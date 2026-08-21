@@ -769,6 +769,8 @@ class TreeMutator:
             if not improved:
                 break
 
+        return best
+
 
 # ---------------------------------------------------------------------------
 # PNG format-aware mutations

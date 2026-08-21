@@ -153,7 +153,7 @@ class RandPool:
         self._idx += 1
         # Fast path: pre-computed % 256 — avoids modulo at draw time
         if width == 256:
-            return self._m256_l[pos]
+            return a + self._m256_l[pos]
         return a + (self._pool_l[pos] % width)
 
     def randbytes(self, n: int) -> bytes:

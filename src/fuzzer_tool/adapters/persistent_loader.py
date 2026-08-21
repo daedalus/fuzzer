@@ -6,8 +6,12 @@ overhead on every iteration.
 
 Protocol:
   Init:   "INIT <target> <func>\n"  ->  "READY\n"
-  Run:    "RUN <len>\n<data>"       ->  "RC <rc> <bmp_len>\n<bmp>"
+  Run:    "RUN <len>\n<data>"       ->  "RC <rc> <bmp_len> <fault> <rip> <rsp> <rbp>"
   Quit:   "QUIT\n"
+
+Coverage never travels this pipe: instrumented targets write SHM directly
+(via __AFL_SHM_ID) and the caller reads the segment itself, so bmp_len is
+always 0. The field is kept so older readers keep parsing.
 """
 
 import collections
@@ -61,26 +65,6 @@ def load_target(target_path, func_name):
     func = getattr(lib, func_name)
     func.restype = ctypes.c_int
     func.argtypes = [ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t]
-
-def read_shm():
-    shm_id_str = os.environ.get("__AFL_SHM_ID")
-    if not shm_id_str:
-        return b""
-    try:
-        libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6")
-        libc.shmat.restype = ctypes.c_void_p
-        ptr = libc.shmat(int(shm_id_str), None, 0)
-        if ptr and ptr != -1:
-            map_size = int(os.environ.get("AFL_MAP_SIZE", "8192"))
-            header_size = 24  # SHM front header: stack_depth(4) + _pad0(4) + path_hash(8) + edge_count(8)
-            shm_edge_bytes = map_size * 8  # 8 bytes per {edge_id, count} entry
-            # Skip the front header; ptr is an integer address
-            return bytes((ctypes.c_uint8 * shm_edge_bytes).from_address(ptr + header_size))
-    except Exception:
-        log.warning("shmat read failed for shm_id=%s", shm_id_str, exc_info=True)
-    return b""
-
-NO_BMP = os.environ.get("_LOADER_NO_BMP", "0") == "1"
 
 # --- ptrace fault-address capture (mirrors services/runner.py helpers) ---
 PTRACE_TRACEME = 0
@@ -276,17 +260,9 @@ while True:
         rip_s = "-" if regs is None else f"{regs['rip']:#x}"
         rsp_s = "-" if regs is None else f"{regs['rsp']:#x}"
         rbp_s = "-" if regs is None else f"{regs['rbp']:#x}"
-        if NO_BMP:
-            resp = f"RC {rc} 0 {fault_s} {rip_s} {rsp_s} {rbp_s}\n".encode()
-            sys.stdout.buffer.write(resp)
-            sys.stdout.buffer.flush()
-        else:
-            bmp = read_shm()
-            resp = f"RC {rc} {len(bmp)} {fault_s} {rip_s} {rsp_s} {rbp_s}\n".encode()
-            sys.stdout.buffer.write(resp)
-            if bmp:
-                sys.stdout.buffer.write(bmp)
-            sys.stdout.buffer.flush()
+        resp = f"RC {rc} 0 {fault_s} {rip_s} {rsp_s} {rbp_s}\n".encode()
+        sys.stdout.buffer.write(resp)
+        sys.stdout.buffer.flush()
 """
 
 
@@ -352,7 +328,6 @@ class PersistentLoader:
         env = os.environ.copy()
         if "AFL_MAP_SIZE" not in env:
             env["AFL_MAP_SIZE"] = "8192"
-        env["_LOADER_NO_BMP"] = "1"
         env["_CHILD_PID_FILE"] = self._child_pid_file
         env["_PTRACE_ENABLE"] = "1" if self.use_ptrace else "0"
 
@@ -519,14 +494,14 @@ class PersistentLoader:
                         current_eps,
                         100 * current_eps / self._baseline_eps,
                     )
-                    # Restart the loader
-                    self._ready = False
-                    if not self._restarting:
-                        self._restarting = True
-                        try:
-                            self.start()
-                        finally:
-                            self._restarting = False
+                    # Restart the loader. stop() first: start() early-returns
+                    # True while the old process is still alive, so calling it
+                    # without stopping would leave _ready False and wedge
+                    # every later run_one at -2 forever.
+                    self.stop()
+                    self._exec_times.clear()
+                    self._baseline_eps = 0.0
+                    self.start()
 
         return rc, bitmap
 

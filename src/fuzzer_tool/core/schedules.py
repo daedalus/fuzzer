@@ -226,7 +226,10 @@ class SeedScorer:
             perf_score *= factor
         elif self.schedule == "coe":
             if mean_log_n_fuzz > 0 and self.coe_skip(n_fuzz, mean_log_n_fuzz, favored):
-                return float(self.max_mult * 100)
+                # COE skip: floor energy (documented domain is 1..max_mult*100).
+                # Returning the max here would give skipped seeds the most
+                # mutations of any seed — the exact inverse of the schedule.
+                return 1.0
             factor = self._fast_factor(fuzz_level, n_fuzz, favored)
             if factor > self.max_factor:
                 factor = self.max_factor

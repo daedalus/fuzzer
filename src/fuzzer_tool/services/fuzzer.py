@@ -3221,7 +3221,10 @@ class Fuzzer:
         if smt_found:
             self.op_counts["smt_solver"] = self.op_counts.get("smt_solver", 0) + 1
 
-        is_timeout = returncode == -1 and stderr == "timeout"
+        # -1 is the cross-backend timeout sentinel. stderr is not part of the
+        # contract: forkserver reports loader hangs as (-1, "") after its
+        # restart retry, so keying on the stderr text missed every one.
+        is_timeout = returncode == -1
         if is_timeout:
             self.timeout_count += 1
             # Mark the parent seed as timeout-causing for power schedule
