@@ -1,0 +1,506 @@
+# Merged bug report — fuzzer-tool (2026-08-21)
+
+Consolidation of two independent read-only audits of the whole tree
+(`src/fuzzer_tool/`, ~71k lines Python + ~2.5k lines C) plus dynamic testing.
+Findings found by both audits are marked **[corroborated]**; findings confirmed
+by execution or line-trace during the merge are marked **[verified]**.
+
+Method: audit 1 — five parallel subsystem reviews (main loop, mutation engine,
+adapters/coverage, scheduler math, parsing/services) guided by
+`docs/refs/bug-classes.md`, cross-checked against callers. Audit 2 — six parallel
+reviews (main loop, mutations, adapters + C shims, coverage/scheduling math,
+binary-analysis algorithms, CLI/services). Merge pass — every CRITICAL and all
+disputed/unique high-impact claims re-verified line-by-line before inclusion;
+dynamic evidence from full-suite pytest runs, an env-mutation probe plugin, and
+py-spy stack dumps of a hung run.
+
+Cleared by both audits (checked, no bug): Elo update algebra, Kalman/Welford
+algebra, NIST test battery, PNG/ZIP/GZIP round-trips, splice bounds, tmin loop
+termination, fast_json (thin orjson wrapper), checksum_learner, registry↔handler
+completeness (134/134), builtin `hash()` in persisted keys.
+
+---
+
+## TEST-SUITE EVIDENCE (dynamic)
+
+**E1. Plain `pytest` can hang forever — no timeout configured.**
+`tests/test_structural_constraints.py:295` wedged >9 min inside `solver.add()`
+(`core/structural_constraints.py:186`); Z3's `timeout` parameter bounds only
+`check()`, not assertion processing. SIGTERM could not kill it (stuck in native
+code); SIGKILL required. `pyproject.toml` has no pytest-timeout setting.
+**[verified]**
+
+**E2. Production code leaks `os.environ`; three tests fail as a result.**
+Probe-attributed leaks: `LD_PRELOAD=<cmplog shim>.so` + `_CMPLOG_OUT`
+(written with no restore at `core/cmplog.py:315-321`) and
+`__AFL_SHM_ID` / `__AFL_DIST_SHM_ID` / `AFL_MAP_SIZE` (`fuzzer.py:4417`,
+`stats.py:501`, `inprocess.py:237`). Consequences, all reproduced:
+- `test_asan_finds_heap_buffer_overflow` and
+  `test_asan_all_modes[default_subprocess]`: 101 execs at eps 337, **0 crashes**
+  (`shm: 0`, `map: 0.0%`) — every exec inherits the cmplog shim preload, which
+  conflicts with the ASAN runtime. Passes in isolation. **[verified]**
+- `test_process.py::TestCleanEnv::test_no_preload` fails via an aggravating
+  production bug: `adapters/process.py:50` uses `dict(env or os.environ)` — an
+  explicitly *empty* env dict is falsy, so callers asking for a scrubbed
+  environment silently get the full parent env. **[verified]**
+
+**E3. Fork-in-multithreaded-process hazard.** `persistent.py:72`,
+`runner.py:311`, inprocess loader call `os.fork()` while threads exist
+(CPython DeprecationWarning; deadlock risk). Also breaks
+`test_regression_persistent_execve_failure_exits` deterministically: the warning
+summary reprints the inner test name, so its `count(...) == 1` assertion sees 2.
+**[verified]**
+
+---
+
+## CRITICAL
+
+1. **`adapters/persistent.py:61`** [corroborated, verified] — `libc.shmat()`
+   without `restype=c_void_p`. Default ctypes restype truncates the 64-bit
+   address to 32 bits; `memmove` through the truncated pointer segfaults or
+   silently corrupts memory on first use of `PersistentRunner`.
+
+2. **`cli/commands.py:297-304` + `services/parallel.py:216`** [verified] —
+   `cmd_fuzz` passes `contextual*`/`lineage_backtrack` kwargs that
+   `run_parallel()` does not accept. Every `--jobs > 1` CLI run dies with
+   `TypeError` before spawning a worker; parallel fuzzing is unreachable from
+   the CLI.
+
+3. **`adapters/process.py:227` via `services/runner.py:228`** [corroborated] —
+   default spawn-fallback path (`run_target_fast`) enforces **no timeout**
+   (`os.waitpid(pid, 0)`), returns `pid=0` on exception (crash attribution lost,
+   child leaked), and drains stderr only after reaping (64 KiB pipe deadlock).
+   One infinite-looping or chatty target hangs the campaign forever. Every other
+   backend honors `f.timeout`.
+
+4. **`services/minimize.py:27,140`** [corroborated, verified] — second/third
+   missing-restype `shmat`: truncated pointer fed to `string_at` → segfault or
+   garbage bitmaps driving greedy set-cover cmin. Reference-correct site:
+   `adapters/shm.py:88`.
+
+5. **`services/minimize.py:126-146`** [verified] — SHM failure or uninstrumented
+   target yields all-zero bitmaps; zero-bitmap files contribute no edges, so set
+   cover moves them to `pruned/`. Against an uninstrumented target the **entire
+   corpus** is pruned. Combined with #4, `minimize -c` is broken end-to-end on
+   x86-64.
+
+## HIGH
+
+6. **`services/runner.py:395-464`** [corroborated, verified] — ptrace-mode
+   timeouts are never reported as timeouts. On deadline expiry `status` holds the
+   last consumed event: with ≥1 breakpoint handled, the post-loop
+   `waitpid(WNOHANG)` returns `(0,0)`, stale SIGTRAP status yields `rc=-5`
+   ("crash signal 5"); with none, the else-branch SIGKILLs and the SIGKILL death
+   status yields `rc=-9`. `is_timeout` (`rc==-1`) can never fire; slow inputs
+   flood `crashes/` and poison signature dedup. Additionally the post-deadline
+   blocking `waitpid(pid, 0)` after blind `PTRACE_CONT` can hang forever and
+   swallows fatal signals delivered at that point.
+
+7. **`core/rand_pool.py:146-157`** [verified empirically] — `randint(a,b)`
+   silently drops offset `a` when `b-a+1 == 256` (fast path returns
+   `self._m256_l[pos]` without `a + ...`). Verified: `randint(-128,127)` → zero
+   negative draws in 5000. Live call site: `operators.py:562`.
+
+8. **`core/grammar.py:726-790`** [corroborated, verified] —
+   `TreeMutator.hierarchical_shrink` has no `return best`; always returns None →
+   `TypeError` in `tmin.py:191`. Grammar-mode crash minimization fails 100%.
+
+9. **`core/schedules.py:227-229`** [verified] — COE power schedule inverted:
+   seeds that should be *skipped* (`coe_skip() == True`) receive max energy
+   (`max_mult * 100`). Exactly backwards.
+
+10. **`cli/commands.py` env/global state** [verified] — see E2/E3: import-time
+    signal handlers + child-killing atexit (`fuzzer.py:159-168`), unrestored
+    `os.environ` writes across cmplog/fuzzer/stats/inprocess, fork-in-threaded
+    process. Breaks test isolation, library reuse, and reproducibility
+    simultaneously.
+
+11. **`services/fuzzer.py:1080-1086 et al.`** [verified] — persisted component
+    state restored on *non-resume* runs: `StateStore.get()` lazy-loads
+    `state.pkl.gz` even without `--resume`, so a second "fresh" run inherits the
+    previous campaign's Markov model (skips retraining), Elo ratings, crash-MI
+    counters — poisoning A/B schedule comparisons. Related: GA restore nested
+    inside the differential block (`fuzzer.py:4840-4855`) →
+    `--differential-target` without `--ga` crashes at startup;
+    `--ga --resume` silently restarts GA.
+
+12. **`services/fuzzer.py:3369` (also :3795, :5061)** — multi-target mode reads
+    per-run edges from `self.shm_cov` instead of the per-target segment in
+    `_target_shm_covs`; seed edges/momentum/stall detection run on empty data.
+
+13. **`adapters/inprocess.py:443-494`** [corroborated, verified] —
+    `_run_c_direct` cannot survive real faults: returning Python SIGSEGV handler
+    re-executes the faulting instruction (infinite fault loop); `timed_out` flag
+    checked only after the blocking ctypes call returns, so a looping native
+    target can never be stopped. First wild-pointer input under
+    `--inprocess-direct` freezes the fuzzer permanently.
+
+14. **`adapters/persistent_loader.py:511-529`** [verified] — slowdown watchdog
+    "restart" is a no-op: sets `_ready=False` then calls `start()`, which
+    early-returns because the old loader is alive-but-slow. All subsequent
+    `run_one` return `-2` forever, silently.
+
+15. **`services/parallel.py:199-213`** [corroborated, verified] — `-j N` corpus
+    sync has two defects: (a) it filters top-level *files*, but seeds live under
+    `seeds/<hh>/id_*` — zero seeds ever transfer, and the only top-level file,
+    `state.pkl.gz`, is imported as a garbage seed by every sibling worker;
+    (b) even once fixed, its index cursor over a `sorted()` listing of
+    hash-named files permanently skips any insertion sorting before the cursor.
+    Worker corpus sharing has never worked.
+
+16. **`core/transfer_entropy.py:84-105`** [verified empirically] — plug-in TE
+    estimator reports ~2.6 bits for *independent* uniform byte streams (n=1500);
+    no bias correction for context cardinality. `byte_to_edge_flow` /
+    `causal_chains` produce spurious causal edges on essentially any input.
+
+17. **`core/crash_eta.py:66-135`** — `CrashMITracker` records only crashing
+    inputs, so `byte_total == joint_crash` always; "MI" degenerates to position
+    frequency × log₂(1/p_crash). Crash ETA and mutation targeting driven by noise.
+
+18. **`core/schedulers/monte_carlo.py:195-263`** [corroborated] — pairwise
+    transition tracking can never bootstrap: `record()` needs `_prev_op`, which
+    only `select_op()` sets inside the branch requiring non-empty transitions.
+    Blending/stationary/spectral_gap dead on fresh runs.
+
+19. **`adapters/shm.py:313` + `adapters/afl_shim.c:810-815`** — generation tag
+    wraps at 256 execs; the anti-wrap table wipe exists in C
+    (`__afl_map_reset`) but has **zero callers**, so ghost edges from 256 execs
+    ago re-enter the live set every wrap.
+
+20. **`adapters/inprocess.py:513-595` + `runner.py:154`** — `direct_lite`
+    (hardcoded-on default) never resets SHM between iterations → every exec
+    reports the cumulative union of all prior coverage; per-exec attribution and
+    stability calibration meaningless. Compounded by `inprocess.py:391-414`
+    memsetting entry-*count* as bytes (wipes header + ⅛ of table, forcing
+    generation to 0 so stale entries look current).
+
+21. **`services/fuzzer.py:3224`** [verified] — `is_timeout = rc==-1 and
+    stderr=="timeout"` matches only some backends: forkserver (the default)
+    returns `(-1,"")`, the C loader reports `RC -1 <n>` with target stderr.
+    Default-run hangs are never counted; honggfuzz timeout penalty inert; under
+    `--metropolis` hung inputs eligible for corpus admission.
+
+22. **`services/fuzzer.py:3751,3756` + `stats_reporter.py:66-85`** [verified] —
+    crash-replay keys use `crash_sigs.get(crash_name, crash_name)` (signature
+    map fed filenames); fallback `stem.startswith(sig[:12])` matches any crash
+    within a ~2.7h window → reproducibility scores computed from the wrong
+    crash's input.
+
+23. **`core/elf.py:1159-1837` (4 sites)** [verified] — unguarded
+    `struct.unpack_from` on attacker-controlled `e_shoff`/section offsets in
+    `branch_density`/`_text_size`/`extract_constants_pure`/
+    `extract_div_constants` → malformed target ELF crashes the fuzzer at startup
+    (violates repo's own bounds-check rule).
+
+24. **`core/grammar.py:167-221`** [verified] — per-token repeats clamped but not
+    their product: chained `{32}` rules expand fully before `max_len`
+    truncation → crafted grammar file OOMs/hangs the fuzzer itself.
+
+25. **`stats_reporter.py:30-32` + `edge_tracker.py:943-947` +
+    `report.py:1115-1144`** [corroborated] — snapshot trims shrink exec/edge
+    arrays but never timestamps → arrays desync, temporal join pairs wrong
+    indices, and past snapshot caps an uncaught `IndexError` aborts report
+    generation.
+
+26. **`services/tmin.py:41-59` + `corpus_manager.py:173 vs 434`** [verified] —
+    lineage walk looks up xxhash-prefix keys in a content-hex-keyed dict → chain
+    walk never passes the immediate parent; advertised root-shrink never happens.
+
+27. **`services/corpus_manager.py:507-566`** [corroborated] — trim replaces seeds
+    in memory only: original file later pruned from disk while trimmed bytes are
+    never written → seed lost entirely on resume; `seen_hashes` still holds the
+    old hash so regenerated originals are rejected as dupes.
+
+28. **`mutations/x86.py:146-148,187,253`** [verified empirically] — decoder
+    treats accumulator-immediate ALU ops (no ModRM) and far call/jmp (6-byte
+    operand, reads 4) as ModRM/4-byte forms → all later instruction boundaries
+    corrupt; imm/disp rewrites smash neighboring real instructions.
+
+29. **`mutations/generic.py:1628-1637`** [corroborated, verified empirically] —
+    ULEB128 rewrite path doubly broken: width loop always exits at width=1, so
+    the "rewrite" degrades to insert-before-original (value duplicated, e.g.
+    `\xff\xff` → `\xff\xff\x01\xff`); when wider widths do engage, the slice
+    covers `width-1` bytes of a `width`-byte field (stale top byte retained) and
+    the max_len guard compares the wrong expression.
+
+30. **`qea.py:267,361` + `monte_carlo.py:778,895`** [verified] — global numpy
+    RNG never seeded anywhere in `src/` → `--seed` reproducibility broken
+    whenever QEA is active; stall-reseed docstring falsely claims `np.random`
+    backs RandPool.
+
+31. **`services/differential.py:78`** [verified] — stderr divergence appends a
+    reason but never sets `diverged=True`; documented contract says stderr must
+    match. (Supersedes an earlier audit note that cleared this file.)
+
+32. **`services/report.py:763,770`** [verified] — crash counting iterates all
+    files in `crashes_dir`; `.txt/.sh/.hex` sidecars + sanitizer JSONs inflate
+    "Total crashes" ~4-5×.
+
+33. **`adapters/filesystem.py:608-627`** — a blocklisted crash poisons its coarse
+    signature in dedup state; a different later crash sharing only the top-frame
+    signature is silently discarded without being saved.
+
+34. **`adapters/afl_shim.c:1394-1444,1592`** — permanent crash handlers installed
+    in the fuzzer's own process incl. SIGPIPE (which CPython deliberately
+    ignores) and unconditional `siglongjmp` through a possibly-stale
+    `sigjmp_buf` → UB on ordinary EPIPE/faults outside guarded calls.
+
+35. **`adapters/fuzz_loader.c:595-611`** — timeout longjmps out of the target
+    mid-execution (locks/state possibly held) yet keeps serving RUNs from the
+    poisoned process; AFL++ respawns workers here.
+
+36. **`adapters/persistent.py:136-161`** [corroborated] — protocol never sends
+    SIGCONT per its own docstring; after the first `run_one` the target stays
+    SIGSTOPped, every later iteration times out and SIGKILLs it — persistent
+    mode is single-shot.
+
+37. **`adapters/persistent_loader.py:80`** [corroborated] — embedded loader error
+    handler references undefined `log` → NameError kills the whole loader on any
+    SHM attach failure; parent sees EOF and reports `-2` thereafter.
+
+38. **`adapters/persistent_loader.py:369`** [verified] — stderr drain thread
+    targets a bound method → self-sustaining reference cycle; every abandoned
+    runner leaks process+thread (exact leak `forkserver.py:204-227` already
+    fixed and documents).
+
+## MEDIUM
+
+39. **`fuzzer.py:776,5093`** [verified] — `_last_new_edge_exec` not restored on
+    `--resume` → every resume immediately false-triggers stall recovery.
+
+40. **`runner.py:584`** [verified] — `is_interesting` treats rc `-2`
+    (infrastructure/exec-failure sentinel) as discovery → junk corpus entries
+    with phantom coverage credit (`is_crash` correctly excludes it).
+
+41. **`core/kalman.py:370-388`** [verified] — RobustKF computes adaptive `_r_eff`
+    but never feeds it into filtering; advertised self-tuning measurement noise
+    is inert.
+
+42. **`markov.py:479-485`** [verified] — ensemble never truncates context for
+    order-0 chains → trained unigram unreachable; ~22% of picks degenerate to
+    most-common byte.
+
+43. **`monte_carlo.py:360-364`** [corroborated] — once `elite_set ≥ 10`, the
+    refit-interval gate short-circuits; CEM refits (O(elite×len) rebuild + JS)
+    on *every* interesting event; adaptive interval is dead code.
+
+44. **`core/mutations/zlib.py:105-111,210-264`** — `serialize_zlib`'s final
+    `% 31` destroys FLEVEL/FDICT bits it claims to preserve (FDICT streams
+    round-trip invalid; DICTID dropped then re-emitted as zeros);
+    `_mutate_flevel`/`_mutate_window_size` are silent no-ops (serializer never
+    reads those attrs) — counted mutations that mutate nothing.
+
+45. **`core/tree_mutator.py:347-357`** — `_swap_nodes` on ancestor/descendant
+    pairs creates a cycle and silently drops content (verified: `(a(b)c)` →
+    `(b)`, 300/300).
+
+46. **`core/frameshift.py:102-112,272-280`** — discovered relations seeded with
+    `val=0`, then unconditionally `apply_to_buffer` zeroes real field contents
+    on every mutant after calibration; `on_delete` discards `_rel_on_remove`'s
+    invalid flag (unlike `on_insert`), so disabled relations keep patching stale
+    offsets; resizing ops never notify frameshift at all.
+
+47. **`edge_tracker.py:1336-1390`** — JS-divergence vs aggregate omits KL(Q‖M)
+    terms and Wasserstein walks only seed-edge positions — both diversity
+    metrics systematically biased low, contradicting their docstrings and the
+    correct sibling implementation.
+
+48. **`berlekamp_massey.py:347,358-362`** — GCD-of-syndromes masked to `width`
+    bits: when syndromes share a cofactor (~50% of text-like inputs, measured
+    98/200) a meaningless fragment is returned instead of the generator;
+    syndrome XOR also applies `init` unshifted (wrong for nonzero CRC preload).
+
+49. **`inprocess.py:128-143`** — legacy loader treats `AFL_MAP_SIZE` (entries)
+    as bytes starting at the header → coverage record header-contaminated and
+    ~8× short.
+
+50. **`perf_event.py:87,326-334`** — `1 << 11` is `inherit_stat`, not
+    `enable_on_exec` (bit 12; masked today by explicit ioctl fallback);
+    `reset_counters` issues `ioctl(fd, 0)` instead of `PERF_EVENT_IOC_RESET`
+    (0x2403) → EINVAL suppressed, counters never reset in hardware, next delta
+    inflated by full accumulation.
+
+51. **`forkserver.py:195-258` + `persistent_loader.py:359-383`** [verified] —
+    startup `stdout.readline()` handshake has no timeout (hung dlopen hangs the
+    fuzzer); failed INIT returns False without killing/reaping the loader →
+    orphaned process holding SHM. `forkserver.py:108` additionally builds
+    `fuzz_loader` at a fixed shared path, not PID-namespaced → `-j N`
+    ETXTBSY/races (shim_factory does this correctly).
+
+52. **Grandchild leakage on teardown** [corroborated] —
+    `persistent.py:182-192` setsid's its child but only ever `kill()`s (never
+    `killpg`) so forked targets survive cleanup; `forkserver.py:195-201,441-447`
+    spawns without setsid and kills only the loader, orphaning the exec'd hung
+    target; `afl_shim.c:1554` + `fuzz_loader.c:161-167` timeout kills only the
+    direct child.
+
+53. **`services/report.py:1192-1196`** — exploitability section reads an
+    `"exploitability"` JSON key nothing writes (real tier lives in unread .txt
+    sidecars) — always UNKNOWN.
+
+54. **`core/sanitizer.py:30-52,269-284`** [verified] — common ASAN layouts
+    "attempting double-free"/"attempting free…" classify error_type as
+    `"attempting"` → misgraded exploitability buckets and mislabeled signatures.
+
+55. **`core/dwarf.py:422-437,493,595,617`** — one malformed CU (`line_range ==
+    0` → ZeroDivisionError) aborts the entire CU loop under a broad except,
+    silently disabling DWARF resolution for all later valid CUs. (One audit
+    cleared DWARF generally; this specific path was line-verified by the other.)
+
+56. **`seed_picker.py:206,391,840-861,886-926`** [verified] — `randint(4,
+    min(64, max_len))` raises ValueError with `--max-len < 4` and empty corpus;
+    3-D Pareto sweep excludes genuinely non-dominated seeds (running maxima from
+    different items); Pareto sampling uses global `random` (breaks seeded
+    reproducibility); front cache keyed on `len(corpus)` goes stale after
+    in-place trim.
+
+57. **`import_corpus.py:196-213`** [corroborated] — format auto-detect is dead
+    code (`args.format == "afl" or …` always true on default); libFuzzer corpora
+    import 0 seeds with a success message.
+
+58. **`generic.py:1498` + `grammar.py:204,218`** [verified] — radamsa_num draws
+    from module-global `random` despite injected RNG plumbing (~1/10 of draws
+    break `-s` reproducibility); same leak in grammar versifier paths.
+
+59. **`fuzzer.py:2667-2680`** [verified] — memory prune keyed off peak RSS
+    (`ru_maxrss`, monotonic) labeled as current RSS → pruner arms forever after
+    one spike; warning prints stale numbers as current usage.
+
+60. **`fuzzer.py:2318-2329`** [verified] — `_check_differential` discards
+    computed results and records hardcoded zeros; drift stats meaningless
+    whenever `--differential-target` is used.
+
+61. **`fuzzer.py:4785-5122`** [verified] — main loop catches only
+    `(KeyboardInterrupt, SystemExit, OSError)`; any other exception skips all
+    end-of-run persistence (`_dump_stats`, every `_state_store.set`, both
+    `_save_state`) and leaks the ablation fd — hours of campaign state lost.
+
+62. **`fuzzer.py:2593-2612 vs :3756-3762`** [verified] — `_prune_crash_data`
+    evicts `_crash_replays` but not `_crash_sanitizer_replays` (pins full input
+    bytes indefinitely).
+
+63. **`fuzzer.py:4347-4363`** [verified] — Allan-noise-adaptive stall thresholds
+    unreachable (caller gates on the unreduced threshold first); advertised
+    early-warning inert.
+
+64. **`elo.py:685-698`** [verified] — BayesianElo adaptive temperature never
+    called; win-rate bookkeeping costs cycles for nothing.
+
+65. **`inprocess.py:544-551`** [verified] — direct_lite installs process-global
+    SIGALRM handler once, never restores (stop()/__del__ don't); second runner
+    captures the first's handler as its "old" one; later `signal.alarm` users
+    silently deliver into the stale handler.
+
+66. **`filesystem.py:463-466`** [verified] — wholesale `seen_hashes.clear()` at
+    the 200k cap resets in-memory dedup and per-seed statistics (fuzz_count=0)
+    every 200k unique seeds.
+
+67. **`minimize.py:75-77` + `root_cause.py:25-38`** [verified] — corpus scan
+    ignores the standard `seeds/<hh>/` layout; replays/offers `state.pkl.gz` as
+    the only "seed".
+
+68. **`state_store.py:190-194` + `stats.py:349-406`** — temp-file+rename without
+    fsync (power loss can persist empty/truncated `state.pkl.gz`); stats and
+    coverage JSON written non-atomically (partial write on kill corrupts file).
+
+69. **`distance.py:55,337-346,416`** — call graph built by scanning raw `0xE8`
+    bytes → phantom CALL edges distort AFLGo distances (accurate decoder exists
+    in-tree); penalty distance for unreachable functions derived from `visited`
+    left over from the last target's BFS (unstable across runs).
+
+70. **`chi_squared.py:55`** [verified] — Lanczos `_log_gamma` fallback adds
+    spurious `+ln 2^3.5` (dead code today; garbage p-values if `lgamma` absent).
+
+71. **`edge_tracker.py:781`** [verified] — `record_edge_lifetimes` fed two
+    different time axes (cumulative-edge count vs exec_count) → lifetime stats
+    mix units, overstated by orders of magnitude.
+
+## LOW
+
+72. `corpus_manager.py:174,247` [verified] — resume metadata skipped for seeds
+    ≥128 bytes (`len(hex) >= 256`); most real seeds reset `fuzz_count=0`.
+73. `rand_pool.py:173-191` [verified] — `randbytes(n)` replays consumed pool
+    when n ≡ 0 mod pool size; batch methods silently cap at 4096 items
+    (`rand_pool.py:94-141`, latent).
+74. `jpeg.py:669` [verified] — unclamped `randint(1, negative)` for small
+    max_len; currently masked by RandPool's silent lo-return on empty ranges
+    (itself a masking hazard: converts class-#1 crashes into silent degradation).
+75. `generic.py:1723-1728` [corroborated] — versifier never emits decimal digits
+    (no else for base 10).
+76. `generic.py:1242` [verified] — ascii_num_replace negative-token handling
+    unreachable (spans contain digits only).
+77. `generic.py:2033-2054` — `_structure_keyvalue` duplicates the value node
+    (`k:v` → `k:vv`).
+78. `operators.py:1480-1483` + `zip.py:402` — truncate ops can draw a
+    delete-nothing bound yet still count as applied/timed.
+79. `webm.py:380-384` — timecode-scale payload encoded with EBML size-vint
+    framing; intended values never reach the wire.
+80. `isobmff.py:442-454` — bootstrap writes nested containers with declared size
+    0 ("to EOF"), illegal for non-top-level boxes.
+81. `bmp.py:150` (+ gzip/zlib siblings) — size==2 arithmetic path lacks the upper
+    clamp its size==4 siblings have (`struct.error` waiting for the next size-2
+    field; latent).
+82. `operator_registry.py:413` — sniffer exceptions swallowed unlogged.
+83. `count_class.py:41-49` — extra "64" bucket vs AFL's merged [32-127] class;
+    63→64 registers as novel where AFL wouldn't.
+84. `shapley.py:174-176` — `operator_synergy` formula ≤0 by construction.
+85. `gf2_common.py:192` [verified] — `e %= self.m if a != 0 else e` parses as
+    `e %= (…)`; `pow(0, e>0)` returns 1.
+86. `te_position.py:48` [verified] — returns `max(byte_edges.keys())` (highest
+    offset); TE weights never consulted despite docstring and dedicated tests
+    that only check bounds.
+87. `periodicity.py:152-153` — latent IndexError when caller passes `max_lag` >
+    analyzed window.
+88. `qea.py:609-617` — empty population at generation boundary raises ValueError
+    (empty-corpus start + 500 execs kills the loop).
+89. `monte_carlo.py:265-285,536-544` — Brier logs post-update prediction
+    (systematically optimistic); `cem_byte` residual mass spills into uniform-
+    over-all-256 instead of unobserved-only (TV ≈ 0.04 from true predictive).
+90. `randomness.py:338-358` — kmer_occupancy operates at λ≈0.14, not designed
+    λ≈2 (statistic far from discriminative regime).
+91. `fuzzer.py:4111` — builtin `hash(data)` as colorization taint-cache key
+    (in-memory only, but the banned pattern).
+92. `report.py:1197` — broad `except Exception: continue` hides permission/disk
+    errors in exploitability scan.
+93. `persistent_loader.py:572-575` + `inprocess.py:707-716` + `sigguard.c:30-41`
+    — killpg on possibly-recycled PID from stale pidfile; resize fallback leaves
+    diag pointers at unmapped old SHM; sigguard lacks SA_ONSTACK/reentrancy
+    safety (currently unused).
+94. `fuzzer.py:3793-3806` — `except Exception: pass` around sensitivity analysis
+    (production path, zero diagnostics).
+
+---
+
+## Cross-cutting patterns worth regression tests
+
+- **ctypes hygiene**: every libc function returning a pointer needs explicit
+  `restype` (offenders: persistent.py, minimize.py ×2; shm.py is
+  reference-correct). `enable_on_exec` is attr bit 12.
+- **Timeout invariant**: a wait ending without definitive status must yield -1
+  (timeout), never a stale-status-derived "crash" nor an eternal freeze. Three
+  backends violate it today (ptrace post-loop, run_target_fast, direct modes);
+  flags checked after blocking ctypes calls enforce nothing.
+- **Global-state writes need restore**: `os.environ`, signal handlers, numpy
+  global RNG. One mechanism fixes test isolation, library reuse, and `-s`
+  reproducibility simultaneously.
+- **`AFL_MAP_SIZE` is entries, not bytes** — violated in three places;
+  persistent_loader.py is the reference implementation.
+- **Generation-tag reset protocol**: Python `reset_edge_map` is the only writer;
+  C-side `__afl_map_reset` (incl. essential wrap-at-256 wipe) has zero callers.
+- **Index cursors over sorted listings of hash-named files** reorder on
+  insertion and permanently skip files. Key on filename instead.
+- **Parallel time-series arrays must be trimmed in lockstep** — two consumers
+  already assume equal lengths.
+- **Memory/disk divergence in corpus mutations** (trim, near-dup removal) breaks
+  resume and dedup; persistence belongs inside the mutating function.
+- **CLI↔service signature drift**: adding a Fuzzer kwarg doesn't add it to
+  `run_parallel` (#2); the parallel call site needs its own audit.
+- **Fixed classes recur in sibling files**: restype (fixed in shm.py, broken in
+  persistent.py + minimize.py), bound-method thread leak (fixed in
+  forkserver.py, repeated in persistent_loader.py), non-PID-namespaced build
+  paths. A "check the neighbor file" pass catches these cheaply.
+- **Advertised-but-unwired adaptivity**: six mechanisms compute values nothing
+  consumes (refit pacing, pairwise transitions, RobustKF R, Elo temperature,
+  Allan thresholds, TE weighting in te_position).
+- **Destructive fallback chains**: read-failure → zeroed data → prune/delete
+  turns infrastructure hiccups into corpus loss (minimize, trim_new_coverage).
