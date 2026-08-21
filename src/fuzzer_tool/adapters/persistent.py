@@ -22,10 +22,12 @@ import signal
 import struct
 import time
 
+from fuzzer_tool.adapters import libc_shm
+
 log = logging.getLogger(__name__)
 
-IPC_RMID = 0
-IPC_PRIVATE = 0
+IPC_RMID = libc_shm.IPC_RMID
+IPC_PRIVATE = libc_shm.IPC_PRIVATE
 
 
 class PersistentRunner:
@@ -46,21 +48,23 @@ class PersistentRunner:
         self.shm_id: int | None = None
         self.shm_ptr: int = 0
         self._started = False
-        self._libc = ctypes.CDLL("libc.so.6", use_errno=True)
 
     def start(self) -> bool:
         if self._started:
             return True
 
         # Use IPC_PRIVATE to avoid key collisions between parallel workers
-        self.shm_id = self._libc.shmget(IPC_PRIVATE, self.map_size, 0o600)
-        if self.shm_id < 0:
+        self.shm_id = libc_shm.shmget(self.map_size, key=IPC_PRIVATE)
+        if self.shm_id is None:
             log.warning("shmget failed with errno %d", ctypes.get_errno())
             return False
 
-        ptr = self._libc.shmat(self.shm_id, None, 0)
-        if ptr == -1:
-            log.warning("shmat failed")
+        # libc_shm.shmat returns None on failure -- do not compare against -1
+        # here: under the required restype=c_void_p the (void *) -1 sentinel
+        # arrives as 0xffffffffffffffff, which never equals -1.
+        ptr = libc_shm.shmat(self.shm_id)
+        if ptr is None:
+            log.warning("shmat failed with errno %d", ctypes.get_errno())
             self._cleanup_shm()
             return False
         self.shm_ptr = ptr
@@ -194,10 +198,10 @@ class PersistentRunner:
 
     def _cleanup_shm(self):
         if self.shm_ptr:
-            self._libc.shmdt(self.shm_ptr)
+            libc_shm.shmdt(self.shm_ptr)
             self.shm_ptr = 0
         if self.shm_id is not None:
-            self._libc.shmctl(self.shm_id, IPC_RMID, None)
+            libc_shm.shmctl_rmid(self.shm_id)
             self.shm_id = None
 
     def __enter__(self):

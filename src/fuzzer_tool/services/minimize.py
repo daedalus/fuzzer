@@ -17,18 +17,23 @@ from pathlib import Path
 
 import numpy as np
 
+from fuzzer_tool.adapters import libc_shm
+
 
 def _read_shm_edges(shm_id: str, size: int = 65536) -> bytearray:
-    """Read edge bitmap from AFL SHM segment."""
-    import ctypes
+    """Read edge bitmap from AFL SHM segment.
 
-    libc = ctypes.CDLL("libc.so.6", use_errno=True)
-    shmid = int(shm_id)
-    ptr = libc.shmat(shmid, None, 0)
-    if ptr == -1:
+    Returns an all-zero bitmap if the segment cannot be attached.  Callers must
+    treat an all-zero result as "no coverage information", not as "this input
+    covers nothing" -- see ``_minimize_with_coverage``.
+    """
+    ptr = libc_shm.shmat(int(shm_id))
+    if ptr is None:
         return bytearray(size)
-    data = ctypes.string_at(ptr, size)
-    libc.shmdt(ptr)
+    try:
+        data = ctypes.string_at(ptr, size)
+    finally:
+        libc_shm.shmdt(ptr)
     return bytearray(data)
 
 
@@ -124,9 +129,8 @@ def _minimize_with_coverage(
         env["AFL_MAP_SIZE"] = str(edge_map_size)
 
         # Create a unique SHM segment for this run
-        libc = ctypes.CDLL("libc.so.6", use_errno=True)
-        shmid = libc.shmget(0, edge_map_size, 0o600 | 0o2000)  # IPC_PRIVATE
-        if shmid < 0:
+        shmid = libc_shm.shmget(edge_map_size)
+        if shmid is None:
             file_edges[str(fpath)] = bytearray(edge_map_size)
             continue
         env["__AFL_SHM_ID"] = str(shmid)
@@ -136,14 +140,18 @@ def _minimize_with_coverage(
         else:
             run_target_stdin(target, data, timeout, env=env)
 
-        # Read the edge bitmap from SHM
-        ptr = libc.shmat(shmid, None, 0)
-        if ptr != -1:
-            file_edges[str(fpath)] = bytearray(ctypes.string_at(ptr, edge_map_size))
-            libc.shmdt(ptr)
+        # Read the edge bitmap from SHM.  shmat() is bound with
+        # restype=c_void_p; attaching with the default c_int restype truncated
+        # this address to 32 bits and string_at() then read an unmapped page.
+        ptr = libc_shm.shmat(shmid)
+        if ptr is not None:
+            try:
+                file_edges[str(fpath)] = bytearray(ctypes.string_at(ptr, edge_map_size))
+            finally:
+                libc_shm.shmdt(ptr)
         else:
             file_edges[str(fpath)] = bytearray(edge_map_size)
-        libc.shmctl(shmid, 0, None)  # IPC_RMID
+        libc_shm.shmctl_rmid(shmid)
 
         if (i + 1) % 10 == 0 or (i + 1) == len(corpus_files):
             print(f"\r[*] Replayed {i + 1}/{len(corpus_files)}...", end="", flush=True)

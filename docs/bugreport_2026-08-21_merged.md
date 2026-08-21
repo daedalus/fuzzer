@@ -55,10 +55,12 @@ summary reprints the inner test name, so its `count(...) == 1` assertion sees 2.
 
 ## CRITICAL
 
-1. **`adapters/persistent.py:61`** [corroborated, verified] — `libc.shmat()`
-   without `restype=c_void_p`. Default ctypes restype truncates the 64-bit
-   address to 32 bits; `memmove` through the truncated pointer segfaults or
-   silently corrupts memory on first use of `PersistentRunner`.
+1. **`adapters/persistent.py:61`** [corroborated, verified] — **FIXED
+   2026-08-21.** `libc.shmat()` without `restype=c_void_p`. Default ctypes
+   restype truncates the 64-bit address to 32 bits; `memmove` through the
+   truncated pointer segfaults or silently corrupts memory on first use of
+   `PersistentRunner`. Now routed through `adapters/libc_shm.py`; regression
+   test `tests/test_regression_shmat_restype.py`.
 
 2. **`cli/commands.py:297-304` + `services/parallel.py:216`** [verified] —
    `cmd_fuzz` passes `contextual*`/`lineage_backtrack` kwargs that
@@ -73,10 +75,12 @@ summary reprints the inner test name, so its `count(...) == 1` assertion sees 2.
    One infinite-looping or chatty target hangs the campaign forever. Every other
    backend honors `f.timeout`.
 
-4. **`services/minimize.py:27,140`** [corroborated, verified] — second/third
-   missing-restype `shmat`: truncated pointer fed to `string_at` → segfault or
-   garbage bitmaps driving greedy set-cover cmin. Reference-correct site:
-   `adapters/shm.py:88`.
+4. **`services/minimize.py:27,140`** [corroborated, verified] — **FIXED
+   2026-08-21.** Second/third missing-restype `shmat`: truncated pointer fed to
+   `string_at` → segfault or garbage bitmaps driving greedy set-cover cmin.
+   Reference-correct site: `adapters/shm.py:88`. Both sites now use
+   `adapters/libc_shm.py`. Note #5 is independent and still open, so
+   `minimize -c` against an uninstrumented target still prunes the corpus.
 
 5. **`services/minimize.py:126-146`** [verified] — SHM failure or uninstrumented
    target yields all-zero bitmaps; zero-bitmap files contribute no edges, so set
@@ -475,7 +479,12 @@ summary reprints the inner test name, so its `count(...) == 1` assertion sees 2.
 
 - **ctypes hygiene**: every libc function returning a pointer needs explicit
   `restype` (offenders: persistent.py, minimize.py ×2; shm.py is
-  reference-correct). `enable_on_exec` is attr bit 12.
+  reference-correct). `enable_on_exec` is attr bit 12. *Addressed for the SysV
+  SHM calls: `adapters/libc_shm.py` is now the single binding site and
+  `tests/test_regression_shmat_restype.py` scans the package for re-binders.
+  Sibling hazard, unfixed: the `(void *) -1` failure sentinel does NOT compare
+  equal to `-1` once `restype=c_void_p` is declared, so adding the restype
+  without rewriting the `== -1` guard silences the failure path.*
 - **Timeout invariant**: a wait ending without definitive status must yield -1
   (timeout), never a stale-status-derived "crash" nor an eternal freeze. Three
   backends violate it today (ptrace post-loop, run_target_fast, direct modes);
