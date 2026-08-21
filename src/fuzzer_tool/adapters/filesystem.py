@@ -144,10 +144,31 @@ def apply_delta_v2(parent: bytes, diff: list[list]) -> bytes:
 # under deltas/ — deltas is a *sibling* of seeds, not a child of it. Pruned
 # entries are retained on disk for rehydration but are deliberately not loaded
 # back into the live corpus.
+#
+# Full seeds are two-digit-sharded on both the write and read side. Delta
+# records are NOT: save_to_corpus writes them flat as deltas/delta_<h>.json,
+# while this module's reader historically looked only under deltas/<hh>/.
+# Nothing round-tripped, so every delta was unrecoverable by hash. The reader
+# now accepts both spellings -- see _delta_candidates.
 _CORPUS_FULL_ROOTS = ("seeds",)  # recursively scanned; pruned/ skipped inside
 _CORPUS_DELTA_ROOTS = ("deltas", "seeds")  # seeds/ kept for legacy layouts
 _REHYDRATE_FULL_ROOTS = ("seeds", "seeds/pruned", "seeds/irreplaceable")
 _REHYDRATE_DELTA_ROOTS = ("deltas", "deltas/pruned")
+
+
+def _delta_candidates(corpus_dir: Path, h: str):
+    """Yield every on-disk spelling a delta record for *h* may take.
+
+    Flat first, because that is what save_to_corpus actually writes and so is
+    the overwhelmingly common case; the sharded form is checked second for
+    corpora written by a version that sharded deltas. Accepting both is
+    deliberate: it needs no migration and keeps old and new corpora readable
+    by the same code. If the layout is ever normalized, delete the loser here
+    and in save_to_corpus together.
+    """
+    for base in _REHYDRATE_DELTA_ROOTS:
+        yield corpus_dir / base / f"delta_{h}.json"
+        yield corpus_dir / base / h[:2] / f"delta_{h}.json"
 
 
 def rehydrate_by_hash(h: str, corpus_dir: Path, _depth: int = 0) -> bytes | None:
@@ -158,6 +179,9 @@ def rehydrate_by_hash(h: str, corpus_dir: Path, _depth: int = 0) -> bytes | None
     ``deltas/pruned/``), reconstructing delta chains recursively via
     ``apply_delta`` / ``apply_delta_v2``. Returns None when the hash is
     not present anywhere (or the delta chain is unresolvable/cyclic).
+
+    Delta records are accepted both flat (``deltas/delta_<h>.json``, what
+    save_to_corpus writes) and sharded (``deltas/<hh>/delta_<h>.json``).
     """
     if _depth > SNAPSHOT_INTERVAL + 2:
         return None
@@ -166,8 +190,7 @@ def rehydrate_by_hash(h: str, corpus_dir: Path, _depth: int = 0) -> bytes | None
         full = corpus_dir / base / h[:2] / f"id_{h}"
         if full.is_file():
             return full.read_bytes()
-    for base in _REHYDRATE_DELTA_ROOTS:
-        delta_file = corpus_dir / base / h[:2] / f"delta_{h}.json"
+    for delta_file in _delta_candidates(corpus_dir, h):
         if not delta_file.is_file():
             continue
         try:

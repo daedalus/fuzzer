@@ -196,6 +196,23 @@ class ShmCoverage:
         the count field too. Selecting the column first means the boolean take
         moves only the 4-byte ids -- and the count column is read as a strided
         view rather than materialized.
+
+        Torn reads: the mask is computed from one pass over the live mapping,
+        but ``eid[mask]`` and ``cnt[mask]`` are two separate gathers, so the
+        two columns can come from slightly different instants while the target
+        is still writing. The old single ``arr[mask]`` gather sampled both
+        fields together and so had a narrower window.
+
+        This is accepted rather than fixed. The consumers tolerate it: an
+        id/count pair that is torn yields a count for an edge that is real
+        (edge_id is written before count by the shim, and a zero edge_id is
+        masked out either way), which at worst mis-buckets one hit count for
+        one execution -- and _update_virgin_buckets is already written to
+        survive a new edge whose count reads as 0, exactly this case. Closing
+        the window entirely means either taking the struct gather back (undoes
+        the 1.59x and 26% peak-memory win this method exists for) or
+        double-buffering the map, which is a much larger change. Revisit if
+        coverage ever proves irreproducible across identical runs.
         """
         arr = np.frombuffer(self._map, dtype=_ENTRY_DTYPE, count=self.num_entries)
         eid = arr["edge_id"]
