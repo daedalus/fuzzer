@@ -30,7 +30,6 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
-#include <pthread.h>
 
 /* AFL edge coverage — provided by afl_shim.c */
 extern void __afl_map_edge(unsigned int cur_loc);
@@ -197,52 +196,148 @@ static FuzzPhaseTimers fuzz_phase_timers;
 static int fuzz_phase_stats_initialized = 0;
 static int fuzz_phase_profile_enabled = 0;
 
+/* All diagnostic output is behind this. It used to be unconditional: six
+ * stderr lines and 226 bytes per execution, each fflush'd, in the same loop
+ * the Python side was optimizing at microsecond scale. */
+#define FUZZ_LOG(...)                                   \
+    do {                                                \
+        if (fuzz_phase_profile_enabled) {               \
+            fprintf(stderr, __VA_ARGS__);               \
+            fflush(stderr);                             \
+        }                                               \
+    } while (0)
+
 static void fuzz_report_phase(const char *phase, long long ns) {
-    fprintf(stderr, "[ffmpeg phase] %s %.2f ms\n", phase, ns / 1e6);
-    fflush(stderr);
+    FUZZ_LOG("[ffmpeg phase] %s %.2f ms\n", phase, ns / 1e6);
 }
 
-static pthread_t g_watchdog_tid;
-static int g_watchdog_armed = 0;
+/* ── Watchdog ─────────────────────────────────────────────────────────
+ * One process-wide POSIX timer, armed and disarmed per phase, replacing a
+ * pthread_create/cancel/join per phase (two phases per execution, so six
+ * thread-lifecycle operations plus two stack mmaps on every input).
+ *
+ * SIGRTMIN rather than SIGALRM, and timer_create rather than setitimer,
+ * because InProcessRunner enforces *its own* timeout with SIGALRM +
+ * ITIMER_REAL (inprocess.py:465-472, 545-553). There is one ITIMER_REAL and
+ * one SIGALRM disposition per process: arming either here would silently
+ * cancel the fuzzer's timeout and replace its handler. POSIX per-process
+ * timers are independent of both.
+ *
+ * Disabled entirely when something else in the process is already managing
+ * timeouts -- see fuzz_watchdog_init. That is the in-process case, where
+ * _exit(124) would kill the fuzzer itself rather than the test case.        */
 
-static void *fuzz_watchdog_thread(void *arg) {
-    long timeout_ms = (long)arg;
-    usleep(timeout_ms * 1000);
-    if (g_watchdog_armed) {
-        fprintf(stderr, "[ffmpeg watchdog] timeout after %ld ms, exiting\n", timeout_ms);
-        fflush(stderr);
-        _exit(124);
+#define FUZZ_WATCHDOG_SIG (SIGRTMIN + 3)
+
+static timer_t g_watchdog_timer;
+static _Atomic int g_watchdog_enabled = 0;  /* read from the signal handler */
+static int g_watchdog_ready = 0;
+static long long g_outer_deadline_ns = 0;
+static long g_watchdog_budget_ms = 900;  /* per-execution outer budget */
+
+static long long fuzz_now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}
+
+/* Async-signal-safe: write(2) and _exit(2) only. The old handler called
+ * fprintf/fflush from signal context, which is not. */
+static void fuzz_watchdog_fire(int sig) {
+    (void)sig;
+    static const char msg[] = "[ffmpeg watchdog] timeout, exiting\n";
+    ssize_t r = write(STDERR_FILENO, msg, sizeof(msg) - 1);
+    (void)r;
+    _exit(124);
+}
+
+static void fuzz_watchdog_init(void) {
+    /* FFMPEG_WATCHDOG_MS sets the per-execution budget; 0 disables entirely.
+     * Also the hook the tests use to make the watchdog observable. */
+    const char *env = getenv("FFMPEG_WATCHDOG_MS");
+    if (env && env[0]) {
+        long v = strtol(env, NULL, 10);
+        if (v <= 0) return;
+        g_watchdog_budget_ms = v;
     }
-    return NULL;
+
+    /* Stand down if the host process already installed a SIGALRM handler.
+     * That is InProcessRunner, which times the target out itself and can
+     * recover; killing the process from here would take the whole campaign
+     * down over a single slow input. A forkserver/subprocess child has no
+     * such handler and does need the watchdog, since nothing inside it can
+     * escape a hung demuxer. */
+    struct sigaction cur;
+    if (sigaction(SIGALRM, NULL, &cur) == 0 &&
+        cur.sa_handler != SIG_DFL && cur.sa_handler != SIG_IGN) {
+        return;
+    }
+
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = fuzz_watchdog_fire;
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(FUZZ_WATCHDOG_SIG, &sa, NULL) != 0) return;
+
+    struct sigevent sev;
+    memset(&sev, 0, sizeof sev);
+    sev.sigev_notify = SIGEV_SIGNAL;
+    sev.sigev_signo = FUZZ_WATCHDOG_SIG;
+    if (timer_create(CLOCK_MONOTONIC, &sev, &g_watchdog_timer) != 0) return;
+
+    g_watchdog_ready = 1;
+    g_watchdog_enabled = 1;
 }
 
+/* Two syscalls per execution (arm + disarm) in place of the thread churn. */
+static void fuzz_watchdog_arm_ns(long long ns) {
+    if (!g_watchdog_ready || !g_watchdog_enabled) return;
+    if (ns < 1000LL) ns = 1000LL;  /* 1 us floor: an all-zero it_value disarms */
+    struct itimerspec its;
+    memset(&its, 0, sizeof its);
+    its.it_value.tv_sec = ns / 1000000000LL;
+    its.it_value.tv_nsec = ns % 1000000000LL;
+    timer_settime(g_watchdog_timer, 0, &its, NULL);
+}
+
+static void fuzz_watchdog_disarm(void) {
+    if (!g_watchdog_ready) return;
+    struct itimerspec its;
+    memset(&its, 0, sizeof its);
+    timer_settime(g_watchdog_timer, 0, &its, NULL);
+}
+
+/* Open the outer budget for one execution. */
 static void fuzz_start_watchdog(long timeout_ms) {
-    if (g_watchdog_armed) return;
-    g_watchdog_armed = 1;
-    if (pthread_create(&g_watchdog_tid, NULL, fuzz_watchdog_thread, (void *)timeout_ms) != 0) {
-        g_watchdog_armed = 0;
-    }
+    g_outer_deadline_ns = fuzz_now_ns() + timeout_ms * 1000000LL;
+    fuzz_watchdog_arm_ns(timeout_ms * 1000000LL);
 }
 
 static void fuzz_cancel_watchdog(void) {
-    if (!g_watchdog_armed) return;
-    g_watchdog_armed = 0;
-    pthread_cancel(g_watchdog_tid);
-    pthread_join(g_watchdog_tid, NULL);
+    g_outer_deadline_ns = 0;
+    fuzz_watchdog_disarm();
 }
 
+/* Run *fn* under a tighter inner budget, then restore whatever remains of
+ * the outer one. The previous version ran a second concurrent thread for
+ * this; a single timer cannot hold two deadlines, so the outer deadline is
+ * tracked as a timestamp and re-armed against the clock afterwards. Net
+ * semantics are unchanged: the inner phase is bounded by *timeout_ms* and
+ * the execution as a whole by the outer budget measured from its start. */
 static int fuzz_with_watchdog(long timeout_ms, int (*fn)(void *), void *arg) {
-    pthread_t tid;
-    int armed = 0;
-    if (pthread_create(&tid, NULL, fuzz_watchdog_thread, (void *)timeout_ms) == 0) {
-        armed = 1;
-        g_watchdog_armed = 1;
-    }
+    long long inner_ns = timeout_ms * 1000000LL;
+    long long remaining = g_outer_deadline_ns ? g_outer_deadline_ns - fuzz_now_ns() : 0;
+    if (remaining > 0 && remaining < inner_ns) inner_ns = remaining;
+
+    fuzz_watchdog_arm_ns(inner_ns);
     int rc = fn(arg);
-    if (armed) {
-        g_watchdog_armed = 0;
-        pthread_cancel(tid);
-        pthread_join(tid, NULL);
+
+    if (g_outer_deadline_ns) {
+        long long left = g_outer_deadline_ns - fuzz_now_ns();
+        if (left <= 0) left = 1000LL;
+        fuzz_watchdog_arm_ns(left);
+    } else {
+        fuzz_watchdog_disarm();
     }
     return rc;
 }
@@ -256,6 +351,7 @@ static void fuzz_init_phase_stats(void) {
     if (fuzz_phase_stats_initialized) return;
     fuzz_phase_stats_initialized = 1;
     fuzz_phase_profile_enabled = getenv("FFMPEG_PROFILE") != NULL;
+    fuzz_watchdog_init();
 }
 
 #define FUZZ_PHASE_START(ts) fuzz_ts_now(&(ts))
@@ -295,7 +391,7 @@ int fuzz_ffmpeg(const unsigned char *buf, size_t size) {
 
     fuzz_init_phase_stats();
 
-    fuzz_start_watchdog(900);
+    fuzz_start_watchdog(g_watchdog_budget_ms);
     if (!fuzz_ensure_initialized()) {
         __afl_map_edge(0x1003);
         fuzz_cancel_watchdog();
@@ -328,11 +424,9 @@ int fuzz_ffmpeg(const unsigned char *buf, size_t size) {
 
     /* Find stream info — runs codec probing for each stream */
     FUZZ_PHASE_START(t_info_start);
-    fprintf(stderr, "[ffmpeg debug] before avformat_find_stream_info\n");
-    fflush(stderr);
+    FUZZ_LOG("[ffmpeg debug] before avformat_find_stream_info\n");
     int ret = fuzz_with_watchdog(150, fuzz_run_find_stream_info, &fmt_ctx);
-    fprintf(stderr, "[ffmpeg debug] after avformat_find_stream_info ret=%d\n", ret);
-    fflush(stderr);
+    FUZZ_LOG("[ffmpeg debug] after avformat_find_stream_info ret=%d\n", ret);
     FUZZ_PHASE_END(t_info_start, fuzz_phase_stats.t_stream_info_ns);
     fuzz_report_phase("stream_info", fuzz_phase_stats.t_stream_info_ns);
     if (ret < 0) {
@@ -403,8 +497,7 @@ int fuzz_ffmpeg(const unsigned char *buf, size_t size) {
         av_packet_unref(g_pkt);
 
         if ((total_packets & 1023) == 0) {
-            fprintf(stderr, "[ffmpeg decode] packets=%u frames=%u\n", total_packets, total_frames);
-            fflush(stderr);
+            FUZZ_LOG("[ffmpeg decode] packets=%u frames=%u\n", total_packets, total_frames);
         }
 
         /* Guard against pathological inputs */
@@ -432,8 +525,7 @@ int fuzz_ffmpeg(const unsigned char *buf, size_t size) {
             avformat_network_deinit();
             fuzz_network_inited = 0;
         }
-        fprintf(stderr, "[ffmpeg reset] global state cleared after %d calls\n", fuzz_phase_stats.calls);
-        fflush(stderr);
+        FUZZ_LOG("[ffmpeg reset] global state cleared after %d calls\n", fuzz_phase_stats.calls);
     }
 
     return 0;
