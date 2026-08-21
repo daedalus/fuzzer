@@ -64,6 +64,7 @@ static int fuzz_read_packet(void *opaque, unsigned char *buf, int buf_size) {
 typedef struct {
     AVCodecContext *ctx;
     int              codec_id;
+    int              codec_type;   /* AVMediaType: picks the decode API */
     int              inited;
 } DecoderSlot;
 
@@ -179,10 +180,12 @@ static AVFormatContext *fuzz_open_input(const unsigned char *buf, size_t size) {
          * double free is worse than leaking on this rare branch. */
         av_free(avio_ctx);
     } else {
-        /* The common case, and the one that leaked every execution:
+        /* The common case, and the one that used to leak every execution:
          * AVFMT_FLAG_CUSTOM_IO means avformat_close_input leaves pb alone, so
          * the context and its 256 KB buffer are ours to release -- but only
-         * after the format context is closed, since it reads through them. */
+         * after the format context is closed, since it reads through them.
+         * Measured 262,424 bytes per execution before this: ~262 MB per 1k
+         * execs, which is what the campaign RSS growth was. */
         g_avio_ctx = avio_ctx;
     }
     /* g_io_state stays live: fmt_ctx still reads through it in
@@ -468,19 +471,22 @@ int fuzz_ffmpeg(const unsigned char *buf, size_t size) {
      * the codec ID matches the new stream, otherwise reset. */
     for (unsigned i = 0; i < nb_streams; i++) {
         const AVCodecParameters *par = fmt_ctx->streams[i]->codecpar;
-        /* Only audio and video. avcodec_send_packet/avcodec_receive_frame is
-         * the frame-based API for those two types; subtitle decoders must go
-         * through avcodec_decode_subtitle2, and data/attachment streams have
-         * no decoder contract at all.
+        /* Audio, video and subtitles are all decoded -- but not through the
+         * same API, which is the whole point of tracking codec_type below.
          *
-         * Feeding a subtitle decoder a packet anyway reaches
-         * decode_simple_internal, which returns 0 without filling
+         * avcodec_send_packet/avcodec_receive_frame is the frame-based API
+         * for audio and video only. A subtitle decoder driven through it
+         * reaches decode_simple_internal, which returns 0 without filling
          * frame->buf[0], and libavcodec's `if (!ret) av_assert0(frame->buf[0])`
-         * aborts. That surfaced as a reproducible SIGABRT "crash" from an
-         * 82-byte input probed as hdmv_pgs_subtitle -- a false positive
-         * manufactured by the harness, not a finding in the library. */
+         * aborts -- a SIGABRT manufactured by the harness rather than a
+         * finding in the library. Subtitles go through
+         * avcodec_decode_subtitle2 in the packet loop instead.
+         *
+         * Data and attachment streams have no decoder contract at all and
+         * stay excluded. */
         if (par->codec_type != AVMEDIA_TYPE_VIDEO &&
-            par->codec_type != AVMEDIA_TYPE_AUDIO) {
+            par->codec_type != AVMEDIA_TYPE_AUDIO &&
+            par->codec_type != AVMEDIA_TYPE_SUBTITLE) {
             continue;
         }
         const AVCodec *codec = avcodec_find_decoder(par->codec_id);
@@ -500,11 +506,13 @@ int fuzz_ffmpeg(const unsigned char *buf, size_t size) {
                 slot->inited   = 0;
                 continue;
             }
-            slot->codec_id = par->codec_id;
-            slot->inited   = 1;
+            slot->codec_id   = par->codec_id;
+            slot->codec_type = par->codec_type;
+            slot->inited     = 1;
             fuzz_phase_stats.decoder_opens++;
         } else {
             avcodec_parameters_to_context(slot->ctx, par);
+            slot->codec_type = par->codec_type;
             fuzz_phase_stats.decoder_reuses++;
         }
         __afl_map_edge(0x1100 + (i & 0xFF));
@@ -518,11 +526,38 @@ int fuzz_ffmpeg(const unsigned char *buf, size_t size) {
 
         int si = g_pkt->stream_index;
         if (si >= 0 && (int)si < (int)nb_streams && g_decs[si].inited && g_decs[si].ctx) {
-            ret = avcodec_send_packet(g_decs[si].ctx, g_pkt);
-            if (ret >= 0) {
-                while (avcodec_receive_frame(g_decs[si].ctx, g_frame) >= 0) {
+            if (g_decs[si].codec_type == AVMEDIA_TYPE_SUBTITLE) {
+                /* Subtitles use the packet-in/AVSubtitle-out API. Driving
+                 * them through send_packet/receive_frame trips
+                 * av_assert0(frame->buf[0]) inside decode_simple_internal. */
+                AVSubtitle sub;
+                memset(&sub, 0, sizeof(sub));
+                int got_sub = 0;
+                ret = avcodec_decode_subtitle2(g_decs[si].ctx, &sub, &got_sub, g_pkt);
+                if (ret >= 0 && got_sub) {
                     total_frames++;
-                    __afl_map_edge(0x1400 + (si & 0xFF));
+                    __afl_map_edge(0x1600 + (si & 0xFF));
+                    /* Touch the decoded rects so a corrupt region descriptor
+                     * is actually observed rather than just allocated. */
+                    for (unsigned r = 0; r < sub.num_rects; r++) {
+                        const AVSubtitleRect *rect = sub.rects[r];
+                        if (!rect) continue;
+                        __afl_map_edge(0x1700 + (rect->type & 0x0F));
+                        if (rect->w > 0 && rect->h > 0) __afl_map_edge(0x1710);
+                        if (rect->nb_colors > 0)        __afl_map_edge(0x1711);
+                    }
+                }
+                /* avcodec_decode_subtitle2 allocates rects on success; the
+                 * struct is zeroed above so this is safe on failure too.
+                 * Omitting it leaks every decoded subtitle, per execution. */
+                avsubtitle_free(&sub);
+            } else {
+                ret = avcodec_send_packet(g_decs[si].ctx, g_pkt);
+                if (ret >= 0) {
+                    while (avcodec_receive_frame(g_decs[si].ctx, g_frame) >= 0) {
+                        total_frames++;
+                        __afl_map_edge(0x1400 + (si & 0xFF));
+                    }
                 }
             }
         }
