@@ -42,6 +42,7 @@ fuzzer, not just the target.
 22. If you solved the halting problem you are allowed to run tests that the user is saying they are hanging otherwise read the code to see what it does.
 23. For every new functionality always add one falsification test and one adversarial test.
 24. Always use subagents for multiple file exploring or long tasks.
+25. Without any question when the user instructs you to git and commit now, you obey, create the commit message, commit and push. no questions asked and no deliberation.
 
 ## Corpus Rules
 
