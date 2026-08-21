@@ -374,9 +374,9 @@ class CmplogCollector:
         constructor, e.g. LD_PRELOAD in subprocess mode — harmless no-op
         for the per-call temp-file path).
 
-        If the file exceeds CMPLOG_FILE_MAX_BYTES, rotates to a fresh
-        log file instead of truncating, and updates _CMPLOG_OUT so the
-        shim writes to the new file going forward.
+        If the file exceeds CMPLOG_FILE_MAX_BYTES, hard-resets it via
+        _rotate_cmplog, which truncates in place rather than truncating
+        through the normal path below. The log path never changes.
         """
         if not self.log_path:
             return
@@ -398,55 +398,62 @@ class CmplogCollector:
         self._read_offset = 0
 
     def _rotate_cmplog(self):
-        """Rotate the cmplog log file when it exceeds the size cap.
+        """Hard-reset the cmplog file when it exceeds the size cap.
 
-        Closes the shim's open file descriptor (if the shim exposes
-        __cmplog_close), creates a fresh log file, and updates
-        _CMPLOG_OUT so subsequent writes go to the new file.
+        Truncates **in place**, keeping the same path. An earlier version
+        created a fresh file and repointed _CMPLOG_OUT at it, which was wrong
+        in two ways:
 
-        The shim lazily reopens _CMPLOG_OUT on the next write after the
-        fd is closed, so rotation is safe even when cmplog is compiled
-        into the target .so and the fd is kept open across executions.
+        1. The superseded file was never unlinked, so disk growth stayed
+           unbounded -- an unbounded *number* of 100 MB files rather than one
+           unbounded file. With the workdir under corpus_dir (93ce70b) they
+           piled up inside the corpus.
+        2. ``os.environ`` reaches a ctypes-loaded shim (setitem calls putenv)
+           and any subprocess spawned afterwards, but *not* a target already
+           exec'd with the old environment. A forkserver child would call
+           getenv("_CMPLOG_OUT") on its lazy reopen, get the stale path, and
+           carry on filling the very file rotation meant to retire -- while
+           the collector read a new file that stayed empty.
+
+        Keeping the path fixed removes both problems: nothing accumulates and
+        there is no new value to propagate. The records are transient (already
+        consumed by collect_tokens), so there is nothing worth preserving.
+
+        Truncation is safe against a live writer because the shim opens with
+        O_APPEND, so its next write lands at the new end-of-file rather than
+        at a stale offset -- no sparse re-growth.
         """
         if not self.log_path:
             return
 
-        log_dir = self.workdir or _get_cmplog_dir()
-        os.makedirs(log_dir, exist_ok=True)
-
-        try:
-            handles = getattr(self, "_shim_handles", [])
-            for handle in handles:
-                try:
-                    reset = getattr(handle, "__cmplog_reset", None)
-                    if reset is not None:
-                        reset()
-                except (AttributeError, OSError):
-                    pass
-                try:
-                    close = getattr(handle, "__cmplog_close", None)
-                    if close is not None:
-                        close()
-                except (AttributeError, OSError):
-                    pass
-        except Exception:
-            pass
-
-        local_id = uuid.uuid4().hex[:12]
-        new_path = os.path.join(log_dir, f"fuzz_cmplog_{local_id}.cmplog")
-        try:
-            with open(new_path, "wb"):
+        # Preferred: let the shim truncate through its own fd, which also
+        # resets its internal offset. Covers the compiled-in case where the
+        # fd stays open across executions.
+        reset_ok = False
+        for handle in getattr(self, "_shim_handles", []):
+            try:
+                reset = getattr(handle, "__cmplog_reset", None)
+                if reset is not None:
+                    reset()
+                    reset_ok = True
+            except (AttributeError, OSError):
                 pass
+
+        # Fallback (and belt-and-braces after the shim reset): truncate
+        # externally. Correct for LD_PRELOAD/subprocess shims, which reopen
+        # per exec, and a harmless no-op when the shim already zeroed it.
+        try:
+            with open(self.log_path, "r+b") as f:
+                f.truncate(0)
         except OSError:
-            return
+            if not reset_ok:
+                log.warning("Cmplog: could not truncate oversized log %s", self.log_path)
+                return
 
-        self.log_path = new_path
         self._read_offset = 0
-        os.environ["_CMPLOG_OUT"] = new_path
-
         log.info(
-            "Cmplog: rotated log to %s (previous exceeded %d bytes)",
-            new_path,
+            "Cmplog: truncated %s after exceeding %d bytes",
+            self.log_path,
             CMPLOG_FILE_MAX_BYTES,
         )
 

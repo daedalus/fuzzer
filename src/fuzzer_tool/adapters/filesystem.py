@@ -219,22 +219,30 @@ def load_corpus(
     add_default: bool = True,
     load_irreplaceable: bool = True,
 ) -> tuple[list[bytes], set[str], set[str]]:
-    """Load existing corpus from all subdirectories of corpus_dir (except pruned/).
+    """Load an existing corpus from the canonical layout under corpus_dir.
 
     Handles both full files (id_*.*) and delta-encoded files (delta_*.json).
     Delta files are reconstructed from their parent chain. Irreplaceable
     seeds are loaded from corpus/seeds/irreplaceable/ and tracked separately so
     they can be excluded from corpus pruning.
 
+    Only the roots in _CORPUS_FULL_ROOTS / _CORPUS_DELTA_ROOTS are scanned --
+    not every subdirectory of corpus_dir, which would sweep up sibling state
+    such as a cmplog workdir. pruned/ is skipped at every level: those entries
+    stay on disk for rehydrate_by_hash() but are deliberately kept out of the
+    live corpus.
+
     Args:
-        corpus_dir: Path to corpus directory. All subdirectories except
-            pruned/ are scanned for seeds and delta files.
+        corpus_dir: Path to corpus directory. seeds/ is scanned recursively
+            for full files, and both deltas/ and seeds/ for delta records.
         bloom: Optional bloom filter to populate for fast dedup.
         add_default: If True and corpus is empty, add b"AAAAAAAA" as a
             synthetic default seed. Set False for commands that need to
             reflect the actual on-disk corpus state (e.g. sweep).
-        load_irreplaceable: If True, seeds from corpus/seeds/irreplaceable/ are
-            tracked as irreplaceable and excluded from corpus pruning.
+        load_irreplaceable: If True, seeds under corpus/seeds/irreplaceable/
+            are tracked in the returned irreplaceable set and so excluded
+            from corpus pruning. If False they are still loaded as ordinary
+            corpus entries -- the flag controls tracking, not loading.
 
     Returns:
         Tuple of (corpus list, seen hashes set, irreplaceable hashes set).
@@ -261,13 +269,19 @@ def load_corpus(
         """
         if not base_dir.exists():
             return
+        # Invariant across the loop; resolving it per entry cost a second path
+        # resolution on every corpus file at load time.
+        base_real = base_dir.resolve()
         for f in base_dir.iterdir():
             if not f.is_file():
                 continue
+            # is_symlink catches a symlinked file; the resolve comparison also
+            # catches a file reached through a symlinked *parent*. Both are
+            # needed -- neither subsumes the other.
             if f.is_symlink():
                 continue
             try:
-                if f.resolve().parent != base_dir.resolve():
+                if f.resolve().parent != base_real:
                     continue
             except OSError:
                 continue
@@ -296,7 +310,15 @@ def load_corpus(
             # named "irreplaceable", mark its contents regardless of the
             # parent's mark_irreplaceable value. This handles the
             # corpus/seeds/irreplaceable/ layout.
-            sub_mark = mark_irreplaceable or sub.name == "irreplaceable"
+            #
+            # Gated on load_irreplaceable: this auto-detection used to fire
+            # unconditionally, so callers passing load_irreplaceable=False
+            # still got a populated irreplaceable set and their pruning was
+            # silently a no-op on those entries. The seeds are still loaded
+            # either way -- the flag only decides whether they are tracked.
+            sub_mark = mark_irreplaceable or (
+                load_irreplaceable and sub.name == "irreplaceable"
+            )
             _load_full_from_dir(sub, mark_irreplaceable=sub_mark)
 
     def _collect_deltas_from_dir(base_dir: Path) -> None:

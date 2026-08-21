@@ -194,3 +194,69 @@ class TestMultiRunCollection:
         assert c.pair_confidence(b"AB", b"CD") == 0
         c._pair_occurrence[(b"AB", b"CD")] = 5
         assert c.pair_confidence(b"AB", b"CD") == 5
+
+
+class TestCmplogSizeCap:
+    """The size cap must bound disk *and* leave the log path alone.
+
+    The first implementation created a fresh file per rotation and repointed
+    _CMPLOG_OUT at it. That left the superseded file on disk (unbounded growth
+    across rotations, inside corpus_dir once the workdir moved there) and could
+    not reach a target already exec'd with the old environment — a forkserver
+    child kept filling the retired file while the collector read an empty one.
+    """
+
+    def _oversized(self, tmp_path, name="run.cmplog"):
+        from fuzzer_tool.core.cmplog import CMPLOG_FILE_MAX_BYTES, CmplogCollector
+
+        log_file = tmp_path / name
+        with open(log_file, "wb") as f:
+            f.truncate(CMPLOG_FILE_MAX_BYTES + 1)
+        c = CmplogCollector(workdir=str(tmp_path))
+        c.log_path = str(log_file)
+        return c, log_file
+
+    def test_oversized_log_is_truncated_in_place(self, tmp_path):
+        c, log_file = self._oversized(tmp_path)
+        c.reset_log()
+        assert c.log_path == str(log_file), "log path must not change on hard reset"
+        assert log_file.stat().st_size == 0
+        assert c._read_offset == 0
+
+    def test_hard_reset_creates_no_additional_files(self, tmp_path):
+        c, log_file = self._oversized(tmp_path)
+        before = {p.name for p in tmp_path.iterdir()}
+        c.reset_log()
+        assert {p.name for p in tmp_path.iterdir()} == before, (
+            "rotation must not leave a superseded file behind"
+        )
+
+    def test_hard_reset_does_not_repoint_cmplog_out(self, tmp_path):
+        import os
+
+        c, log_file = self._oversized(tmp_path)
+        os.environ["_CMPLOG_OUT"] = str(log_file)
+        try:
+            c.reset_log()
+            # An exec'd child's environ is fixed at exec time, so a changed
+            # value here would be invisible to it and desync writer from reader.
+            assert os.environ["_CMPLOG_OUT"] == str(log_file)
+        finally:
+            os.environ.pop("_CMPLOG_OUT", None)
+
+    def test_under_cap_still_truncates_normally(self, tmp_path):
+        from fuzzer_tool.core.cmplog import CmplogCollector
+
+        log_file = tmp_path / "small.cmplog"
+        log_file.write_text("CMP 4142 4344\n")
+        c = CmplogCollector(workdir=str(tmp_path))
+        c.log_path = str(log_file)
+        c.reset_log()
+        assert log_file.stat().st_size == 0
+        assert c.log_path == str(log_file)
+
+    def test_collect_tokens_caps_an_oversized_log(self, tmp_path):
+        c, log_file = self._oversized(tmp_path)
+        c.collect_tokens()
+        assert log_file.stat().st_size == 0
+        assert c.log_path == str(log_file)
