@@ -58,6 +58,10 @@ def _worker_main(
     mc_decay_interval: int = 100,
     pairwise_blend: float = 0.0,
     lineage: bool = False,
+    lineage_backtrack: bool = False,
+    contextual: bool = False,
+    contextual_alpha: float = 1.0,
+    contextual_lambda: float = 1.0,
     resize_map_on_stall: bool = True,
 ):
     """Entry point for each fuzzing worker process."""
@@ -119,6 +123,10 @@ def _worker_main(
         ubsan_target=ubsan_target,
         chi2_operator_interval=chi2_operator_interval,
         lineage=lineage,
+        lineage_backtrack=lineage_backtrack,
+        contextual=contextual,
+        contextual_alpha=contextual_alpha,
+        contextual_lambda=contextual_lambda,
         resize_map_on_stall=resize_map_on_stall,
     )
 
@@ -262,6 +270,10 @@ def run_parallel(
     mc_decay_interval: int = 100,
     pairwise_blend: float = 0.0,
     lineage: bool = False,
+    lineage_backtrack: bool = False,
+    contextual: bool = False,
+    contextual_alpha: float = 1.0,
+    contextual_lambda: float = 1.0,
     resize_map_on_stall: bool = True,
 ):
     """Launch N parallel fuzzer workers sharing the same corpus directory.
@@ -343,6 +355,10 @@ def run_parallel(
         ubsan_target=ubsan_target,
         chi2_operator_interval=chi2_operator_interval,
         lineage=lineage,
+        lineage_backtrack=lineage_backtrack,
+        contextual=contextual,
+        contextual_alpha=contextual_alpha,
+        contextual_lambda=contextual_lambda,
         resize_map_on_stall=resize_map_on_stall,
     )
 
