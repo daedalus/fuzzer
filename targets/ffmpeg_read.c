@@ -47,6 +47,16 @@ typedef struct {
     size_t offset;
 } FuzzIOState;
 
+/* Read every byte of a demuxer-produced buffer so a bogus length is observed
+ * rather than merely trusted. volatile + the returned sum stop the optimizer
+ * from eliding the loop; the result is deliberately unused by callers. */
+static unsigned fuzz_touch(const unsigned char *p, int n) {
+    unsigned sum = 0;
+    if (!p || n <= 0) return 0;
+    for (int i = 0; i < n; i++) sum += ((const volatile unsigned char *)p)[i];
+    return sum;
+}
+
 static int fuzz_read_packet(void *opaque, unsigned char *buf, int buf_size) {
     FuzzIOState *st = (FuzzIOState *)opaque;
     int avail = (int)(st->size - st->offset);
@@ -157,8 +167,8 @@ static AVFormatContext *fuzz_open_input(const unsigned char *buf, size_t size) {
     }
     /* Take ownership here, not on the success path. Every exit below runs
      * through fuzz_release_io_state(), so claiming it now is what makes the
-     * *failure* paths release it too -- and under a fuzzer avformat_open_input
-     * failing is the common case, not the rare one. */
+     * *failure* paths release it too -- and open_input failing is the common
+     * case under a fuzzer, not the rare one. */
     g_avio_ctx = avio_ctx;
 
     AVFormatContext *fmt_ctx = avformat_alloc_context();
@@ -489,6 +499,19 @@ int fuzz_ffmpeg(const unsigned char *buf, size_t size) {
         if (par->codec_type != AVMEDIA_TYPE_VIDEO &&
             par->codec_type != AVMEDIA_TYPE_AUDIO &&
             par->codec_type != AVMEDIA_TYPE_SUBTITLE) {
+            /* Data and attachment streams have no decoder, but the demuxer
+             * still parsed something for them and that output was previously
+             * discarded untouched. Observe it so a bad length or a truncated
+             * payload is actually read rather than merely allocated.
+             *
+             * Attachments (embedded fonts, cover art in Matroska) carry their
+             * whole payload in extradata, so nothing in the packet loop would
+             * ever reach it. */
+            __afl_map_edge(0x1800 + (par->codec_type & 0x0F));
+            if (par->extradata && par->extradata_size > 0) {
+                __afl_map_edge(0x1810);
+                fuzz_touch(par->extradata, par->extradata_size);
+            }
             continue;
         }
         const AVCodec *codec = avcodec_find_decoder(par->codec_id);
@@ -561,6 +584,19 @@ int fuzz_ffmpeg(const unsigned char *buf, size_t size) {
                         __afl_map_edge(0x1400 + (si & 0xFF));
                     }
                 }
+            }
+        } else if (si >= 0 && (int)si < (int)nb_streams) {
+            /* A packet on a stream with no decoder -- data, attachment, or a
+             * codec we could not open. The demuxer still produced it, so read
+             * the payload and its side data instead of dropping the packet
+             * unexamined. This is demuxer output, which is exactly the layer
+             * this target exists to exercise. */
+            __afl_map_edge(0x1820);
+            fuzz_touch(g_pkt->data, g_pkt->size);
+            for (int sd = 0; sd < g_pkt->side_data_elems; sd++) {
+                __afl_map_edge(0x1830 + (g_pkt->side_data[sd].type & 0x1F));
+                fuzz_touch(g_pkt->side_data[sd].data,
+                           (int)g_pkt->side_data[sd].size);
             }
         }
 
