@@ -75,6 +75,11 @@ static AVFrame     *g_frame        = NULL;
  * av_read_frame(), both of which run *after* fuzz_open_input() returns.
  * Freed by fuzz_release_io_state() once the format context is closed. */
 static FuzzIOState *g_io_state     = NULL;
+/* Our AVIOContext, when ffmpeg kept it as fmt_ctx->pb. Setting pb before
+ * avformat_open_input makes ffmpeg set AVFMT_FLAG_CUSTOM_IO, which means
+ * avformat_close_input will NOT free it -- we own it and must. Released by
+ * fuzz_release_io_state() after the format context is closed. */
+static AVIOContext *g_avio_ctx     = NULL;
 static int          fuzz_network_inited = 0;
 static int          fuzz_reset_counter = 0;
 static DecoderSlot  g_decs[FUZZ_MAX_DECODERS];
@@ -83,6 +88,14 @@ static DecoderSlot  g_decs[FUZZ_MAX_DECODERS];
  * to call before the first open. Must not run until the AVFormatContext that
  * reads through it has been closed. */
 static void fuzz_release_io_state(void) {
+    if (g_avio_ctx) {
+        /* avio_context_free frees the context but NOT its buffer, so the
+         * buffer goes first. Read it from the context rather than caching the
+         * original pointer: ffmpeg may have reallocated it during probing. */
+        av_freep(&g_avio_ctx->buffer);
+        avio_context_free(&g_avio_ctx);
+        g_avio_ctx = NULL;
+    }
     if (g_io_state) {
         av_free(g_io_state);
         g_io_state = NULL;
@@ -159,13 +172,18 @@ static AVFormatContext *fuzz_open_input(const unsigned char *buf, size_t size) {
         return NULL;
     }
 
-    /* Only free the wrapper struct we allocated, and only when ffmpeg has
-     * swapped in its own pb (ffio_rewind_with_probe_data) so ours is
-     * genuinely unreferenced. av_free rather than avio_context_free: the
-     * probe path may already have released io_buffer, and a double free is
-     * worse than leaking one 256 KB buffer on that rare branch. */
     if (fmt_ctx->pb != avio_ctx) {
+        /* ffmpeg swapped in its own pb (ffio_rewind_with_probe_data) and owns
+         * whatever it built; ours is unreferenced. Free only the struct -- the
+         * probe path may already have taken or released io_buffer, and a
+         * double free is worse than leaking on this rare branch. */
         av_free(avio_ctx);
+    } else {
+        /* The common case, and the one that leaked every execution:
+         * AVFMT_FLAG_CUSTOM_IO means avformat_close_input leaves pb alone, so
+         * the context and its 256 KB buffer are ours to release -- but only
+         * after the format context is closed, since it reads through them. */
+        g_avio_ctx = avio_ctx;
     }
     /* g_io_state stays live: fmt_ctx still reads through it in
      * avformat_find_stream_info() and av_read_frame(). The caller releases
