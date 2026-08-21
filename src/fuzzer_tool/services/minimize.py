@@ -37,6 +37,39 @@ def _read_shm_edges(shm_id: str, size: int = 65536) -> bytearray:
     return bytearray(data)
 
 
+_SKIP_SUFFIXES = (".txt", ".log", ".json")
+
+
+def _discover_corpus_files(corpus_path: Path) -> list[Path]:
+    """Find corpus files under either the sharded or a flat layout.
+
+    save_to_corpus writes seeds/<hh>/id_<hash>, but this module used a flat
+    iterdir() on the directory it was handed. Pointed at a real corpus it
+    therefore found nothing, printed "Corpus is empty" and exited 0 -- so the
+    coverage path below was unreachable in normal use, which is what kept the
+    all-zero-bitmap corpus wipe hidden.
+
+    Accepts both spellings so a directory of loose files still works:
+      - <dir>/seeds/**   canonical, what the fuzzer writes
+      - <dir>/**         the dir is itself a seeds root, or flat
+
+    pruned/ is excluded at every level: those entries were already removed
+    from the live corpus, and re-minimizing would resurrect them.
+    """
+
+    def _usable(f: Path) -> bool:
+        return (
+            f.is_file()
+            and not f.is_symlink()
+            and f.suffix not in _SKIP_SUFFIXES
+            and "pruned" not in f.parts
+        )
+
+    seeds = corpus_path / "seeds"
+    root = seeds if seeds.is_dir() else corpus_path
+    return sorted(f for f in root.rglob("*") if _usable(f))
+
+
 def minimize_corpus(
     target: str,
     corpus_dir: str,
@@ -77,9 +110,7 @@ def minimize_corpus(
         print(f"[-] Corpus directory not found: {corpus_dir}", file=sys.stderr)
         return 0, 0
 
-    corpus_files = sorted(
-        f for f in corpus_path.iterdir() if f.is_file() and f.suffix not in (".txt", ".log")
-    )
+    corpus_files = _discover_corpus_files(corpus_path)
     if not corpus_files:
         print("[-] Corpus is empty", file=sys.stderr)
         return 0, 0
@@ -159,6 +190,29 @@ def _minimize_with_coverage(
     print()
 
     shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    # Refuse to prune on a total coverage blackout. Both set-cover and
+    # rate-distortion select files by the edges they contribute, so an
+    # all-zero bitmap set means nothing contributes anything and *every* file
+    # looks redundant -- the corpus is wiped rather than minimized.
+    #
+    # A blackout means the measurement failed, not that the seeds are
+    # worthless: an uninstrumented target, a failed shmat, or a segment the
+    # child never wrote. _read_shm_bitmap's docstring already says callers must
+    # read all-zero as "no coverage information" rather than "covers nothing";
+    # this is that check. Deleting a corpus on a broken measurement is the
+    # worst available outcome, so bail out and name the likely cause.
+    if not any(any(bm) for bm in file_edges.values()):
+        print(
+            "[-] No edges recorded for any corpus file -- refusing to prune.\n"
+            "    Every file would look redundant and the whole corpus would be "
+            "deleted.\n"
+            "    Usually this means the target is not instrumented (rebuild with "
+            "tools/build_targets.sh),\n"
+            "    or the target never wrote the SHM segment.",
+            file=sys.stderr,
+        )
+        return len(corpus_files), 0
 
     # Convert to sets for rate-distortion module
     seed_edges = {}
