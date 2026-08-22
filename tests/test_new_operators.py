@@ -14,9 +14,36 @@ from fuzzer_tool.core.mutations import (
 )
 from fuzzer_tool.services.operators import OperatorEngine
 
+# ── Seed discipline (docs/tigerbeetle_four_fuzzers_port.md, P0-1) ─────
+#
+# The dual-run pattern: run every randomised assertion twice, once under a
+# fixed seed and once under the session seed from ``--fuzz-seed``. The fixed
+# leg makes a regression reproduce with no flag; the session leg accumulates
+# new coverage across runs and is recoverable from the header pytest prints
+# before collection.
 
-def _make_minimal_fuzzer():
-    """Build a minimal fuzzer-like object for operator testing."""
+_FIXED_SEED = 0x5EED
+
+
+def _SEEDS(random_seed: int) -> tuple[int, int]:
+    return (_FIXED_SEED, random_seed)
+
+
+def _at(seed: int) -> str:
+    """Failure suffix naming the seed, so the report is self-contained."""
+    if seed == _FIXED_SEED:
+        return f"(fixed seed 0x{seed:x})"
+    return f"(session seed leg; reproduce the run with --fuzz-seed from the header, derived 0x{seed:x})"
+
+
+def _make_minimal_fuzzer(seed=None):
+    """Build a minimal fuzzer-like object for operator testing.
+
+    ``seed`` is threaded into the ``RandPool`` the operator handlers draw
+    from. Left unseeded (the default, for tests that only assert type or
+    length invariants) the pool is OS-seeded; tests that assert anything
+    probabilistic must pass a seed so a failure is reproducible.
+    """
 
     class _MockCorpus:
         _items = [b"AAAA", b"BBBB", b"CCCC", b"DDDD"]
@@ -101,7 +128,7 @@ def _make_minimal_fuzzer():
             self_.enable_regex_bomb = False
             from fuzzer_tool.core.rand_pool import RandPool
 
-            self_._rand_pool = RandPool()
+            self_._rand_pool = RandPool(seed)
             self_._dict_scratch = []
             self_._dict_scratch_idx = 0
 
@@ -452,11 +479,25 @@ class TestMagicValues:
     def setup_method(self):
         self.engine = OperatorEngine(_make_minimal_fuzzer())
 
-    def test_inserts_magic_value(self):
-        buf = bytearray(b"\x00" * 16)
-        self.engine._op_magic_values(buf, 0, b"")
-        # Buffer should have changed (magic value inserted)
-        assert any(b != 0 for b in buf)
+    def test_inserts_magic_value(self, random_seed):
+        # Was: `assert any(b != 0 for b in buf)` on an unseeded pool. That is
+        # wrong, not merely flaky. MAGIC_TABLE holds exactly one all-zero
+        # entry -- (1, b"\x00") of 152 -- so on 0.66% of runs the operator
+        # correctly inserted b"\x00" into a zero buffer and the assertion
+        # called it a failure. Unseeded, the failure was also unreproducible:
+        # a ~1-in-152 red build with nothing to re-run. Found by sweeping this
+        # file over 60 session seeds while landing P0-1.
+        #
+        # The invariant the test actually wants is "the operator did
+        # something", and insertion is observable in the length even when the
+        # inserted bytes are zero.
+        for seed in _SEEDS(random_seed):
+            engine = OperatorEngine(_make_minimal_fuzzer(seed))
+            before = bytes(b"\x00" * 16)
+            buf = bytearray(before)
+            engine._op_magic_values(buf, 0, b"")
+            assert bytes(buf) != before, _at(seed)
+            assert len(buf) > len(before), _at(seed)  # insert branch: max_len is 65536
 
     def test_magic_table_covers_all_widths(self):
         widths = set(w for w, _ in MAGIC_TABLE)
@@ -499,76 +540,89 @@ class TestMagicValues:
 
 
 class TestAsciiNumArithmetic:
-    def test_finds_and_mutates_digit_sequence(self):
-        for _ in range(30):
-            result = ascii_num_arithmetic(b"value=42 end", rng=random.Random())
-            if result is not None:
-                # Compare the whole digit *field*, not a fixed 2-byte slice:
-                # the operator may write a number that is longer than the one
-                # it replaced ("42" -> "4238"), in which case result[6:8] is
-                # still b"42" even though the value did change. Slicing a
-                # fixed window made this assertion fail on ~0.5% of runs.
-                field = result[len(b"value=") : -len(b" end")]
-                assert field != b"42" or result == b"value=42 end"
-                # At least one call should find digits
-                break
-        else:
-            # All 30 missed — unlikely but not impossible
-            pass
+    # Every test below drives the operator through an *explicitly seeded* RNG.
+    # They previously used bare ``random.Random()``: random, so a failure was
+    # real, but unrecoverable, so a failure was also unactionable. The loops
+    # share a single ``Random`` instance rather than constructing one per
+    # iteration, because the point of the loop is to draw a *different* op each
+    # time -- reseeding inside the loop would freeze all iterations onto one
+    # draw and silently turn a 200-attempt search into a 1-attempt one.
+    #
+    # ``_SEEDS`` is the dual-run pattern: a fixed seed pins the statistical
+    # assertion so a regression reproduces with no flag at all, and the session
+    # seed makes repeated CI runs explore new points. Reported failures name
+    # the seed that produced them.
 
-    def test_returns_none_on_no_digits(self):
-        result = ascii_num_arithmetic(b"no digits here", rng=random.Random())
-        assert result is None
+    def test_finds_and_mutates_digit_sequence(self, random_seed):
+        for seed in _SEEDS(random_seed):
+            rng = random.Random(seed)
+            for _ in range(30):
+                result = ascii_num_arithmetic(b"value=42 end", rng=rng)
+                if result is not None:
+                    # Compare the whole digit *field*, not a fixed 2-byte slice:
+                    # the operator may write a number that is longer than the one
+                    # it replaced ("42" -> "4238"), in which case result[6:8] is
+                    # still b"42" even though the value did change. Slicing a
+                    # fixed window made this assertion fail on ~0.5% of runs.
+                    field = result[len(b"value=") : -len(b" end")]
+                    assert field != b"42" or result == b"value=42 end", _at(seed)
+                    # At least one call should find digits
+                    break
+            else:
+                # All 30 missed — unlikely but not impossible
+                pass
 
-    def test_returns_none_on_empty(self):
-        result = ascii_num_arithmetic(b"", rng=random.Random())
-        assert result is None
+    def test_returns_none_on_no_digits(self, random_seed):
+        for seed in _SEEDS(random_seed):
+            result = ascii_num_arithmetic(b"no digits here", rng=random.Random(seed))
+            assert result is None, _at(seed)
 
-    def test_increments_by_one(self):
+    def test_returns_none_on_empty(self, random_seed):
+        for seed in _SEEDS(random_seed):
+            result = ascii_num_arithmetic(b"", rng=random.Random(seed))
+            assert result is None, _at(seed)
+
+    def test_increments_by_one(self, random_seed):
         """When op=0 (+1), '123' should become '124'."""
-        found = False
-        for _ in range(200):
-            result = ascii_num_arithmetic(b"num=123", rng=random.Random())
-            if result and b"124" in result:
-                found = True
-                break
-        assert found, "Expected +1 operation to produce '124'"
+        self._assert_op_reachable(random_seed, b"num=123", b"124", "+1")
 
-    def test_decrements(self):
+    def test_decrements(self, random_seed):
         """When op=1 (-1), '123' should become '122'."""
-        found = False
-        for _ in range(200):
-            result = ascii_num_arithmetic(b"num=123", rng=random.Random())
-            if result and b"122" in result:
-                found = True
-                break
-        assert found, "Expected -1 operation to produce '122'"
+        self._assert_op_reachable(random_seed, b"num=123", b"122", "-1")
 
-    def test_doubles(self):
+    def test_doubles(self, random_seed):
         """When op=2 (*2), '50' should become '100'."""
-        found = False
-        for _ in range(200):
-            result = ascii_num_arithmetic(b"val=50 ", rng=random.Random())
-            if result and b"100" in result:
-                found = True
-                break
-        assert found, "Expected *2 operation to produce '100'"
+        self._assert_op_reachable(random_seed, b"val=50 ", b"100", "*2")
 
-    def test_halves(self):
+    def test_halves(self, random_seed):
         """When op=3 (/2), '100' should become '50'."""
-        found = False
-        for _ in range(200):
-            result = ascii_num_arithmetic(b"val=100", rng=random.Random())
-            if result and b"50" in result:
-                found = True
-                break
-        assert found, "Expected /2 operation to produce '50'"
+        self._assert_op_reachable(random_seed, b"val=100", b"50", "/2")
 
-    def test_preserves_non_digit_bytes(self):
-        result = ascii_num_arithmetic(b"prefix123suffix", rng=random.Random())
-        if result is not None:
-            assert result[:6] == b"prefix"
-            assert result[-6:] == b"suffix"
+    @staticmethod
+    def _assert_op_reachable(random_seed, data: bytes, expect: bytes, label: str):
+        """Assert a specific arithmetic op is reached within 200 draws.
+
+        The operator picks uniformly from 8 ops, so P(miss in 200 draws) is
+        (7/8)**200 ~ 2e-12 per seed. That is the margin the fixed-attempt count
+        is buying; it is not luck.
+        """
+        for seed in _SEEDS(random_seed):
+            rng = random.Random(seed)
+            for _ in range(200):
+                result = ascii_num_arithmetic(data, rng=rng)
+                if result and expect in result:
+                    break
+            else:
+                raise AssertionError(
+                    f"Expected {label} operation to produce {expect!r} {_at(seed)}"
+                )
+
+    def test_preserves_non_digit_bytes(self, random_seed):
+        for seed in _SEEDS(random_seed):
+            result = ascii_num_arithmetic(b"prefix123suffix", rng=random.Random(seed))
+            if result is not None:
+                assert result[:6] == b"prefix", _at(seed)
+                assert result[-6:] == b"suffix", _at(seed)
 
     def test_handler_dispatch(self):
         engine = OperatorEngine(_make_minimal_fuzzer())
@@ -582,41 +636,46 @@ class TestAsciiNumArithmetic:
 
 
 class TestChunkShuffle:
-    def test_shuffle_preserves_length(self):
+    def test_shuffle_preserves_length(self, random_seed):
         data = b"A" * 32
-        for _ in range(20):
-            result = chunk_shuffle(data, rng=random.Random())
-            assert len(result) == len(data)
+        for seed in _SEEDS(random_seed):
+            rng = random.Random(seed)
+            for _ in range(20):
+                result = chunk_shuffle(data, rng=rng)
+                assert len(result) == len(data), _at(seed)
 
-    def test_shuffle_changes_content(self):
+    def test_shuffle_changes_content(self, random_seed):
         data = bytes(range(32))
-        changed = False
-        for _ in range(20):
-            result = chunk_shuffle(data, rng=random.Random())
-            if result != data:
-                changed = True
-                break
-        assert changed, "Expected chunk_shuffle to change content at least once"
+        for seed in _SEEDS(random_seed):
+            rng = random.Random(seed)
+            for _ in range(20):
+                if chunk_shuffle(data, rng=rng) != data:
+                    break
+            else:
+                raise AssertionError(
+                    f"Expected chunk_shuffle to change content at least once {_at(seed)}"
+                )
 
-    def test_short_buffer_unchanged(self):
+    def test_short_buffer_unchanged(self, random_seed):
         data = b"ABCD"
-        result = chunk_shuffle(data, rng=random.Random())
-        assert result == data  # < 8 bytes → no-op
+        for seed in _SEEDS(random_seed):
+            result = chunk_shuffle(data, rng=random.Random(seed))
+            assert result == data, _at(seed)  # < 8 bytes → no-op
 
-    def test_single_chunk_unchanged(self):
+    def test_single_chunk_unchanged(self, random_seed):
         data = b"A" * 7  # 7 bytes, chunk_size=1 → 7 chunks, should shuffle
-        result = chunk_shuffle(data, rng=random.Random())
-        # 7 bytes < 8 threshold → no-op
-        assert result == data
+        for seed in _SEEDS(random_seed):
+            result = chunk_shuffle(data, rng=random.Random(seed))
+            # 7 bytes < 8 threshold → no-op
+            assert result == data, _at(seed)
 
-    def test_different_chunk_sizes(self):
+    def test_different_chunk_sizes(self, random_seed):
         """Different random chunk sizes should produce different results."""
-        results = set()
         data = bytes(range(64))
-        for _ in range(30):
-            result = chunk_shuffle(data, rng=random.Random())
-            results.add(result)
-        assert len(results) > 1
+        for seed in _SEEDS(random_seed):
+            rng = random.Random(seed)
+            results = {chunk_shuffle(data, rng=rng) for _ in range(30)}
+            assert len(results) > 1, _at(seed)
 
     def test_handler_dispatch(self):
         engine = OperatorEngine(_make_minimal_fuzzer())
@@ -626,9 +685,10 @@ class TestChunkShuffle:
         if result is not None:
             assert len(result) == 32
 
-    def test_empty_buffer(self):
-        result = chunk_shuffle(b"", rng=random.Random())
-        assert result == b""
+    def test_empty_buffer(self, random_seed):
+        for seed in _SEEDS(random_seed):
+            result = chunk_shuffle(b"", rng=random.Random(seed))
+            assert result == b"", _at(seed)
 
 
 # ── Dict compound tests ───────────────────────────────────────────────
