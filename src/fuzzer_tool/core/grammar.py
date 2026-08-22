@@ -32,6 +32,62 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
+_SIMPLE_ESCAPES = {"t": 9, "r": 13, "n": 10, "0": 0}
+
+
+def decode_quoted_literal(text: str) -> bytes:
+    """Decode escapes inside a quoted grammar literal.
+
+    Recognises ``\\xNN``, ``\\\\``, ``\\"``, ``\\'`` and ``\\t`` / ``\\r`` /
+    ``\\n`` / ``\\0``; anything else keeps its backslash, so a literal that
+    was never meant as an escape survives unchanged.
+
+    Quoted literals previously kept their backslash text VERBATIM, which
+    made a binary literal inexpressible in quotes -- ``"\\xFF\\xD8"`` was
+    eight ASCII characters, not the two-byte JPEG SOI marker. That is not a
+    corner case: all 35 rules of the shipped ``dictionaries/jpeg.gram``
+    are quoted marker definitions, so the whole grammar generated the
+    literal text ``\\xFF\\xD8`` and could never produce a JPEG.
+
+    Single pass rather than a regex sweep, for the same reason the
+    dictionary parser needs one: the escapes are not independent, and a
+    sweep for ``\\x[0-9a-f]{2}`` matches inside an escaped backslash, so
+    ``\\\\x41`` would decode as backslash + ``A`` instead of backslash +
+    ``x41``.
+    """
+    out = bytearray()
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i] != "\\":
+            j = text.find("\\", i)
+            if j == -1:
+                j = n
+            out.extend(text[i:j].encode("utf-8"))
+            i = j
+            continue
+        if i + 1 >= n:  # trailing lone backslash
+            out.append(0x5C)
+            break
+        nxt = text[i + 1]
+        if nxt == "x" and i + 3 < n:
+            try:
+                out.append(int(text[i + 2 : i + 4], 16))
+                i += 4
+                continue
+            except ValueError:
+                pass
+        if nxt in _SIMPLE_ESCAPES:
+            out.append(_SIMPLE_ESCAPES[nxt])
+            i += 2
+        elif nxt in ("\\", '"', "'"):
+            out.append(ord(nxt))
+            i += 2
+        else:
+            out.append(0x5C)
+            i += 1
+    return bytes(out)
+
 
 class Grammar:
     """Simple grammar-based generator and mutator.
@@ -82,9 +138,16 @@ class Grammar:
     def _parse_alternative(self, alt: str) -> list:
         """Parse a single alternative into a list of tokens.
 
-        Unquoted ``\\xNN`` / ``\\t`` / ``\\r`` / ``\\n`` escapes expand to
-        literal byte tokens (so ``SP = \\x20`` works as the docstring
-        documents); quoted literals keep backslash text verbatim.
+        Both quoted and unquoted ``\\xNN`` / ``\\t`` / ``\\r`` / ``\\n``
+        escapes expand to literal byte tokens, so ``SP = \\x20`` and
+        ``SOI = "\\xFF\\xD8"`` both work. Quoted literals used to keep
+        their backslash text verbatim; see ``decode_quoted_literal``.
+
+        A BARE word is a rule reference, per normal grammar syntax -- it is
+        not a literal. Literal ASCII inside a binary rule must therefore be
+        quoted: ``signature = \\x89 "PNG" \\r\\n\\x1a\\n``, not
+        ``\\x89PNG\\r\\n\\x1a\\n``, which asks for a nonterminal named PNG.
+        An undefined reference expands to ``b"?"`` and now logs a warning.
         """
         # Match: "literal", rule_ref, rule_ref{N}, rule_ref{N,M}, rule_ref+, rule_ref*
         pattern = re.compile(
@@ -102,9 +165,9 @@ class Grammar:
             tokens = []
             for m in pattern.finditer(segment):
                 if m.group(1) is not None:
-                    tokens.append(("lit", bytes(m.group(1), "utf-8")))
+                    tokens.append(("lit", decode_quoted_literal(m.group(1))))
                 elif m.group(2) is not None:
-                    tokens.append(("lit", bytes(m.group(2), "utf-8")))
+                    tokens.append(("lit", decode_quoted_literal(m.group(2))))
                 elif m.group(3) is not None:
                     lo, hi = int(m.group(4)), int(m.group(5))
                     clamped_lo = min(lo, _MAX_REPEAT)
@@ -197,7 +260,17 @@ class Grammar:
                     "Grammar recursion depth exhausted at rule '%s' — possible cyclic grammar", name
                 )
             else:
-                log.debug("Grammar unknown rule: %s (depth=%d)", name, depth)
+                # Warning, not debug: the b"?" below is silently substituted
+                # into generated output, so an undefined reference corrupts
+                # every generation without any other symptom. png.gram
+                # shipped with five (IHDR, IDAT, IEND, PLTE, PNG) and
+                # rar.gram with two, unnoticed.
+                log.warning(
+                    "Grammar unknown rule '%s' — expanding to b'?' and corrupting "
+                    "the generated output. Bare words are rule references; quote "
+                    "literal text.",
+                    name,
+                )
             return b"?"
 
         alts = self.rules[name]

@@ -67,8 +67,13 @@ class TestGrammarParse:
     def test_hex_escape(self):
         g = Grammar()
         g.parse(r'data = "\xFF\x00"')
-        # Parser treats backslash escapes as literal characters
-        assert g.rules["data"] == [[("lit", b"\\xFF\\x00")]]
+        # Quoted literals decode escapes. This test previously asserted the
+        # opposite (b"\\xFF\\x00", eight ASCII characters) with the comment
+        # "Parser treats backslash escapes as literal characters" -- it was
+        # written to match observed behaviour rather than intent, and so
+        # locked in the defect that made the whole of jpeg.gram unusable.
+        assert g.rules["data"] == [[("lit", b"\xff\x00")]]
+        assert g.generate("data") == b"\xff\x00"
 
     def test_unquoted_hex_escape_expands(self):
         """Unquoted \\xNN escapes expand to literal bytes (SP = \\x20 works)."""

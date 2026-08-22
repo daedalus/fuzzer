@@ -3,8 +3,12 @@
 # Generates structurally plausible RAR headers and compressed streams
 
 rar         = rar5_signature header_chain
-rar4_signature = Rar!\x1a\x07\x00
-rar5_signature = Rar!\x1a\x07\x01
+# header_chain was referenced by the start rule (and by
+# main_archive_data) but never defined, so every generation expanded it
+# to b'?'. One or more header blocks is what the reference means.
+header_chain = header+
+rar4_signature = "Rar!" \x1a\x07\x00
+rar5_signature = "Rar!" \x1a\x07\x01
 
 # RAR5 header block
 header      = header_crc header_type header_flags header_size header_data
@@ -50,7 +54,7 @@ block_data     = \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x0
 
 # RAR4 format (legacy)
 rar4_header    = rar4_sig rar4_type rar4_flags rar4_size rar4_data
-rar4_sig       = Rar!\x1a\x07\x00
+rar4_sig       = "Rar!" \x1a\x07\x00
 rar4_type      = \x72 | \x73 | \x74 | \x75 | \x76 | \x77 | \x78
 rar4_flags     = \x00\x00
 rar4_size      = \x00\x00\x00\x00
