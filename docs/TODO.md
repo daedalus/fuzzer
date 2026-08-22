@@ -58,8 +58,8 @@
 - [x] **`_apply_single_mutation` havoc `max_len` enforcement** (FIXED 2026-08-12, `aa94dd7`) — both insert paths in `services/operators.py:_apply_single_mutation` are guarded by `len(buf) < self.f.max_len`, so no sequence of sub-mutations can overshoot. Regression test `tests/test_regression_havoc_max_len.py` (4 tests, passing), which covers the boundary case of buffers starting *at* `max_len`.
 
 ## Infrastructure
-- [ ] **Dockerfile** for reproducible builds and CI
-- [ ] **Structured logging** (e.g. `--log-json`) for machine-parseable output
+- [x] **Dockerfile** for reproducible builds and CI (2026-08-22) — `Dockerfile` + `.dockerignore`, ubuntu:24.04 to match the CI runner. Installs `.[dev,smt]` (z3 is not pulled by `dev`, and omitting it is the silent-skip case), builds `fuzz_loader` at image-build time (gitignored, and without it the suite HANGS rather than fails), and fails the build if clang/nm/z3 are absent. **Never actually built — docker was unavailable in the authoring environment. Build it once before relying on it.**
+- [x] **Structured logging** (IMPLEMENTED 2026-08-22) — `--log-json FILE` (`-` for stderr) writes one JSON object per stats interval: execs, raw and Kalman-filtered eps, corpus, crashes, distinct sigs, timeouts, peak RSS, dict size, plus edges/dropped_edges and cmplog counts when those are active. Built from fuzzer attributes, not by scraping the human stats line (~30 conditional fragments). Append mode, so `--resume` extends the series; emit failures are swallowed so telemetry cannot abort a run. `tests/test_log_json.py` (8 tests).
 - [x] **`fuzzer-tool-asan` wrapper** (OBSOLETE — do not build this, verified 2026-08-22) — superseded by something better. `cli/ldpreload_wrapper` is already the `fuzzer-tool` entry point itself (`pyproject.toml:40`), and it DETECTS the needed runtime from the target's undefined symbols (`__asan_init` / `__ubsan_handle_*` via `nm -D`) rather than requiring the user to pick a wrapper. A separate `-asan` entry point would be a manual, ASAN-only regression on what already ships.
 - [x] **Persist `invocation` into `state.json`** (FIXED 2026-08-22) — `save_state` persists it and `load_state` restores it onto `original_invocation`, a SEPARATE attribute: `cmd_fuzz` assigns `f.invocation = argv` after the Fuzzer is constructed, i.e. after `load_state` has already run, so restoring onto `invocation` is clobbered a moment later. `save_state` prefers `original_invocation` when present, so the first command survives a chain of resumes. Report and HTML plot print `Started as:` only when it differs from the current command. `cmd_fuzz` now uses `shlex.join` rather than `" ".join`, so an argument containing a space survives being pasted back into a shell. Regression test `tests/test_regression_invocation_persisted.py` (6 tests).
 
@@ -69,6 +69,24 @@
 - [ ] **Fletcher-32 word endianness is swept, not detected** — both LE and BE are tried and verification arbitrates. Fine, but it doubles the general-path work for that family.
 - [ ] **No format-aware patcher for integer checksums** — `_op_crc_learn` patches only the generic trailing field when an integer model is active. A real zlib/IDAT Adler patcher belongs in the `recompress_zlib` mutator, not here.
 - [ ] **`field_constraints.py` bounded-integer pre-pass** (handover §1, deprioritized) — z3 is already fast on these small bitwidth systems, so the win is thin. Revisit only if the integer-checksum pattern proves out.
+
+## Grammar (`.gram`) — fixed 2026-08-22
+
+- [x] **Quoted literals did not decode escapes** — `"\xFF\xD8"` was eight ASCII characters, not the JPEG SOI marker. All 35 rules of `jpeg.gram` are quoted marker definitions, so the entire grammar emitted literal `\xFF` text and could never generate a JPEG. Found by auditing the parser class that `parse_dict_line` belonged to. **A test asserted the buggy value** (`test_hex_escape`, commented "Parser treats backslash escapes as literal characters") — written by observing output rather than intent, so it held the defect in place.
+- [x] **Undefined rule references expanded to `b"?"` at DEBUG level** — invisible. Bare words are rule references, so `signature = \x89PNG\r\n\x1a\n` asked for a nonterminal named `PNG`; `png.gram` shipped five (PNG, IHDR, IDAT, IEND, PLTE), putting ~8 stray `?` bytes in every generation and no valid chunk name in any. `rar.gram` had two, one of which (`header_chain`) was referenced by the START rule and never defined at all. Now logs at WARNING; the grammars quote their literals and `header_chain = header+` is defined.
+
+### Test-quality note
+
+A sweep found **573 of ~4,956 tests (11.6%) whose every assertion is
+value-free** — `is not None`, `isinstance`, `len(...) > 0`. That is what let
+the dictionary and grammar bugs through: output was well-typed and
+semantically wrong. An invariant audit over all 134 operators (18,090
+invocations across nine input formats, checking type / max_len / exceptions)
+found **zero** violations, so the operators themselves are sound; the risk
+concentrates in PARSERS, where a wrong byte is still a valid byte. The
+`test_hex_escape` case is the worse variant: an assertion strong enough to
+pass review that pins the defect. Prefer asserting values, and derive the
+expected value from the spec, not from a run.
 
 ## Pending Bugs
 - [x] `parse_dict_line` — **the enclosing-quote contract WAS broken. Fixed 2026-08-22.** The earlier spot-check was right that high-byte decoding is fine; the deferred half of the check is where the bug was. The AFL format encloses the token in double quotes, and the quotes were kept as content, so `"IDAT"` produced `b'"IDAT"'` and matched nothing in the target. **12,169 of the 18,311 tokens in `dictionaries/` (66.5%) were affected**, including every PNG/GIF/ZIP magic. Three further defects fell out of the same rewrite:
