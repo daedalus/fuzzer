@@ -172,6 +172,14 @@ class CorpusManager:
             "seed_meta": {},
             "crash_frames": f.crash_frames,
             "crash_min_sizes": f.crash_min_sizes,
+            # The command that STARTED this session, not the one running now.
+            # cmd_fuzz assigns f.invocation = current argv after the Fuzzer is
+            # built (and therefore after load_state has run), so a resumed run
+            # holds the --resume command in f.invocation and the original in
+            # f.original_invocation. Preferring the latter keeps the first
+            # command across a chain of resumes; falling back to the former
+            # covers the first save, when no original has been restored yet.
+            "invocation": getattr(f, "original_invocation", "") or getattr(f, "invocation", ""),
         }
         for seed, meta in f.seed_meta.items():
             key = seed.hex()
@@ -231,6 +239,12 @@ class CorpusManager:
         f.op_applicable = state.get("op_applicable", {})
         f.op_success_applicable = state.get("op_success_applicable", {})
         f.op_edges = state.get("op_edges", {})
+        # Restored onto a DIFFERENT attribute than f.invocation, which
+        # cmd_fuzz overwrites with the current argv immediately after the
+        # Fuzzer is constructed. Writing f.invocation here would be clobbered
+        # a moment later and the original lost again. Absent in states written
+        # before this was persisted, hence the "" default.
+        f.original_invocation = state.get("invocation", "")
         havoc_stats = state.get("havoc_subop_stats") or {}
         for i, name in enumerate(HAVOC_SUB_OPS):
             saved = havoc_stats.get(name)

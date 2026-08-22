@@ -190,6 +190,11 @@ def _run_summary(f) -> str:
     inv = getattr(f, "invocation", "")
     if inv:
         lines.append(f"  Invocation:      {inv}")
+    # Only interesting when it differs: on a fresh run the two are equal, and
+    # printing the same string twice reads as a bug in the report.
+    orig = getattr(f, "original_invocation", "")
+    if orig and orig != inv:
+        lines.append(f"  Started as:      {orig}")
     # In-process runners hand the buffer to the target function directly (via
     # shared memory for --inprocess-direct); neither stdin nor an input file is
     # involved, so reporting "stdin" there described a path the run never took.

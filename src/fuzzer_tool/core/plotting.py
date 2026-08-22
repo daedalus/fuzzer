@@ -228,6 +228,9 @@ footer {{ color: #888; font-size: 0.85em; margin-top: 2em; }}
     inv = getattr(fuzzer, "invocation", "")
     if inv:
         html += f"  <b>Invocation:</b> <code>{_esc(inv)}</code><br>\n"
+    orig = getattr(fuzzer, "original_invocation", "")
+    if orig and orig != inv:
+        html += f"  <b>Started as:</b> <code>{_esc(orig)}</code><br>\n"
     mode = "file" if getattr(fuzzer, "file_mode", False) else "stdin"
     html += f"  <b>Input mode:</b> {_esc(mode)}<br>\n"
     cov_mode = (

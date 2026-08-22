@@ -2,6 +2,7 @@
 
 import argparse
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -504,7 +505,11 @@ def cmd_fuzz(args):
         no_save_state=getattr(args, "no_save_state", False),
         dedup_execs=not getattr(args, "no_dedup_execs", False),
     )
-    fuzzer.invocation = " ".join(sys.argv)
+    # shlex.join, not " ".join: this string is now persisted into state.json
+    # and printed as the command that reproduces the run, so an argument
+    # containing a space or a quote (a --target-args value, a corpus path)
+    # has to survive being copy-pasted back into a shell.
+    fuzzer.invocation = shlex.join(sys.argv)
     if getattr(args, "profile_hotpath", False):
         import cProfile
         import pstats
