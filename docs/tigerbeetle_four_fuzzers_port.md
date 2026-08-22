@@ -11,7 +11,7 @@ operators, 10 schedulers.
 | P0-1 seed discipline | **partly done** — plugin landed; all 14 bare `Random()` migrated and guarded by `tests/test_seed_discipline.py`. The ~250 hardcoded seed literals have *not* been migrated, deliberately: see the note in that commit. |
 | P0-2 distribution assertions | **pattern established** in `tests/test_scheduler_convergence.py::TestHarnessCoverage`, not yet applied to the operator registry or cmplog. |
 | P1-3 scheduler convergence | **done.** See `docs/learnings/2026-08-21-scheduler-convergence.md`. Found five defects; four fixed. Section below is preserved as written, before any of it was known. |
-| P1-4 minimal interface | not started |
+| P1-4 minimal interface | **prerequisite done** — `MutationContext` replaces the `Fuzzer` in `core/mutator_interface.py`'s `mutate()` and `is_available()`, closing the `**ctx` leak while that interface still had no implementors. The `operators.py` extraction itself (365 `self.f` attribute reads, 29 distinct, 249 of them `max_len`/`_rand_pool`) is not started. |
 | P1-5 exhaustive enumeration | **started** — applied to `core/count_class.py`, the one fully enumerable subsystem. `tests/test_count_class_exhaustive.py`. Not yet pointed at the byte-level operators via an `ExhaustivePool`. |
 | P2-6 negative space | **pattern established** in the same file — position-invariance of `new_bits`, which is what found the word-loop/tail disagreement. See `docs/learnings/2026-08-22-count-class-exhaustive.md`. |
 | P2-7 swarm harness | not started |

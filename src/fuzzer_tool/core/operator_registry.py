@@ -21,6 +21,8 @@ import struct
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from fuzzer_tool.core.mutator_interface import MutationContext
+
 log = logging.getLogger(__name__)
 
 # Category taxonomy, kept here so it lives next to the operators it classifies.
@@ -491,13 +493,21 @@ def _mutator_adapter(mutator, engine) -> Callable:
     it themselves, since an operator that silently grows the buffer past
     max_len is exactly the class of bug that has bitten this codebase
     before.
+
+    The adapter is also the only place that sees the ``Fuzzer``: it
+    projects it onto a ``MutationContext`` so a third-party mutator gets a
+    declared four-field surface rather than the whole instance. Rebuilt
+    per call rather than cached on the closure, because ``max_len`` moves
+    under adaptive length capping and a stale cap would silently defeat
+    the clamp below.
     """
 
     def _handler(buf, _byte_idx, data):
         f = engine.f
-        max_len = getattr(f, "max_len", 0)
+        context = MutationContext.from_fuzzer(f)
+        max_len = context.max_len
         try:
-            result = mutator.mutate(bytes(buf), f._rand_pool, max_len=max_len, fuzzer=f)
+            result = mutator.mutate(bytes(buf), f._rand_pool, max_len=max_len, context=context)
         except Exception:  # noqa: BLE001 - third-party mutator
             log.warning("mutator %r raised during mutate()", mutator, exc_info=True)
             return None
@@ -559,7 +569,11 @@ class OperatorRegistry:
                 name=name,
                 category=getattr(mutator, "category", "adaptive"),
                 handler_name="",  # resolved via the mutator, not the engine
-                available=lambda f, d, _m=mutator: _m.is_available(f, d),
+                # The predicate is handed the same narrow context as
+                # mutate(), not the fuzzer -- see core/mutator_interface.
+                available=lambda f, d, _m=mutator: _m.is_available(
+                    MutationContext.from_fuzzer(f), d
+                ),
                 mutator=mutator,
             )
         )
