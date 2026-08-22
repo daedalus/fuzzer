@@ -1,0 +1,16 @@
+.git
+.github
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.ruff_cache
+.mypy_cache
+*.egg-info
+build/
+dist/
+# Compiled targets and loaders: rebuilt inside the image against its own
+# toolchain. Copying host artifacts in would defeat the point of pinning it.
+targets/*.so
+targets/*.o
+tools/lib/
