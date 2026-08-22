@@ -63,8 +63,15 @@ class TestSchedulersIndependent:
 
     def test_gp_ucb_uses_shared_categories(self):
         scheduler = GPUCBScheduler()
-        assert scheduler._cat_names == list(OPERATOR_CATEGORIES.keys())
+        # Sorted, not dict order: OPERATOR_CATEGORIES maps to sets, so
+        # unsorted iteration made an operator's assigned category depend on
+        # PYTHONHASHSEED wherever it appears in more than one. The scheduler
+        # still draws from exactly the shared taxonomy, which is what this
+        # test exists to check.
+        assert scheduler._cat_names == sorted(OPERATOR_CATEGORIES)
         assert len(scheduler._cat_names) >= 1
-        assert scheduler._op_to_cat == {
-            op: cat for cat, ops in OPERATOR_CATEGORIES.items() for op in ops
+        assert set(scheduler._op_to_cat) == {
+            op for ops in OPERATOR_CATEGORIES.values() for op in ops
         }
+        for op, cat in scheduler._op_to_cat.items():
+            assert op in OPERATOR_CATEGORIES[cat]

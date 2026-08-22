@@ -5,8 +5,12 @@ space rather than each operator's marginal success rate.
 """
 
 import collections
-import math
 import random
+from collections import defaultdict
+
+#: Fractional jitter applied to initial particle positions. Enough to give
+#: PSO a gradient; small enough that no operator starts strongly favoured.
+_INIT_SPREAD = 0.5
 
 
 class _MOptParticle:
@@ -23,10 +27,25 @@ class _MOptParticle:
         "execs_in_window",
     )
 
-    def __init__(self, name: str, n_ops: int):
+    def __init__(self, name: str, n_ops: int, spread: float = _INIT_SPREAD):
         self.name = name
-        # Uniform initial distribution
-        self.pos = [1.0 / n_ops] * n_ops
+        # Randomized initial distribution, jittered around uniform.
+        #
+        # Every particle used to start at exactly 1/n with zero velocity.
+        # That makes PSO a no-op by construction: pbest and gbest both equal
+        # the particle's own position, so the cognitive term
+        # c1*r1*(pbest - pos) and the social term c2*r2*(gbest - pos) are
+        # both identically zero, velocity stays zero forever, and no particle
+        # ever moves. Measured after 6000 executions: all five particles bit-
+        # identical, every velocity component exactly 0.0. A swarm needs
+        # positional diversity to generate a gradient; that is what makes it
+        # a swarm.
+        if n_ops > 0:
+            raw = [1.0 + spread * (random.random() * 2.0 - 1.0) for _ in range(n_ops)]
+            total = sum(raw)
+            self.pos = [x / total for x in raw]
+        else:
+            self.pos = []
         self.vel = [0.0] * n_ops
         self.pbest_pos = list(self.pos)
         self.pbest_fitness = -1.0
@@ -53,6 +72,13 @@ class MOptScheduler:
         c1: Cognitive coefficient (pull toward personal best).
         c2: Social coefficient (pull toward global best).
         max_vel: Maximum velocity magnitude.
+        min_prob_frac: Exploration floor, as a fraction of the uniform
+            probability ``1/n``. Total floored mass is ``min_prob_frac``
+            regardless of how many operators are registered.
+        gbest_decay: Per-window decay of the global-best *fitness* record.
+            Without it the swarm's attractor is whatever position ever
+            scored highest, so an operator that saturates its region of the
+            coverage map keeps pulling the swarm toward itself forever.
     """
 
     def __init__(
@@ -62,14 +88,20 @@ class MOptScheduler:
         w: float = 0.7,
         c1: float = 1.5,
         c2: float = 1.5,
+        c3: float = 1.5,
         max_vel: float = 0.2,
+        min_prob_frac: float = 0.1,
+        gbest_decay: float = 0.95,
     ):
         self.n_particles = n_particles
         self.window_size = window_size
         self.w = w
         self.c1 = c1
         self.c2 = c2
+        self.c3 = c3
         self.max_vel = max_vel
+        self.min_prob_frac = min_prob_frac
+        self.gbest_decay = gbest_decay
 
         self.operators: list[str] = []
         self.op_index: dict[str, int] = {}
@@ -79,6 +111,16 @@ class MOptScheduler:
 
         self._total_execs = 0
         self._total_discoveries = 0
+        # Per-operator window counters. The swarm previously had no
+        # per-operator signal at all: fitness was measured per *particle*, so
+        # with five particles that start near-identical the fitness spread is
+        # sampling noise on ~40 draws and PSO is searching a 12-dimensional
+        # simplex blind. MOpt (Lyu et al., USENIX Sec '19) steers the swarm by
+        # each operator's measured efficiency; that vector is reconstructed
+        # here and used as a third attractor alongside pbest and gbest.
+        self._op_execs: dict[str, int] = defaultdict(int)
+        self._op_disc: dict[str, float] = defaultdict(float)
+        self._efficiency_pos: list[float] = []
 
     def init_arm(self, name: str) -> None:
         """Register a mutation operator. Rebuilds particles if operators changed."""
@@ -100,8 +142,30 @@ class MOptScheduler:
             name = f"p{i}"
             if name in old_particles:
                 old = old_particles[name]
-                # Extend old distribution with small probability for new ops
-                new_pos = list(old.pos) + [0.01] * (n - len(old.pos))
+                # Extend with the *uniform* share for newly registered ops,
+                # preserving relative weights among the ones already known.
+                #
+                # This used to hand each new operator a flat 0.01. Because
+                # init_arm() registers operators one at a time and rebuilds on
+                # every call, the first operator registered kept compounding:
+                # after twelve registrations it held ~0.90 of the mass and the
+                # twelfth held ~0.008, before a single execution had run. The
+                # swarm then "converged" on whatever was registered first
+                # regardless of its reward. The old softmax projection masked
+                # this by crushing every distribution back toward uniform.
+                n_old = len(old.pos)
+                n_new = n - n_old
+                keep = n_old / n if n > 0 else 1.0
+                old_total = sum(old.pos) or 1.0
+                # New entries are jittered, not set to a flat 1/n. init_arm()
+                # registers operators one at a time and rebuilds every time, so
+                # a flat share here reconstructs the exactly-uniform vector on
+                # every call and destroys the randomized initialization above —
+                # re-freezing the swarm no matter how it was seeded.
+                new_pos = [x / old_total * keep for x in old.pos] + [
+                    (1.0 / n) * (1.0 + _INIT_SPREAD * (random.random() * 2.0 - 1.0))
+                    for _ in range(n_new)
+                ]
                 total = sum(new_pos)
                 new_pos = [p / total for p in new_pos]
                 p = _MOptParticle(name, n)
@@ -139,7 +203,13 @@ class MOptScheduler:
         valid = [p for p in self.particles if any(p.pos)]
         if not valid:
             valid = self.particles
-        fitnesses = [max(p.fitness, 0.001) for p in valid]
+        # Floor relative to the best particle rather than at an absolute
+        # 0.001. An absolute floor is not a floor once any particle exceeds
+        # ~0.1 fitness: the leader takes >99% of executions and the rest never
+        # collect enough samples to challenge it.
+        best_f = max((p.fitness for p in valid), default=0.0)
+        floor = max(0.1 * best_f, 0.001)
+        fitnesses = [max(p.fitness, floor) for p in valid]
         total_f = sum(fitnesses)
         r = random.random() * total_f
         cumulative = 0.0
@@ -200,6 +270,8 @@ class MOptScheduler:
         # This is the core fix: each particle's fitness reflects only the
         # outcomes of operators IT chose, enabling PSO to differentiate.
         reward = weight if success else 0.0
+        self._op_execs[name] += 1
+        self._op_disc[name] += reward
         if particle_id is not None and 0 <= particle_id < len(self.particles):
             p = self.particles[particle_id]
             p.execs_in_window += 1
@@ -215,36 +287,75 @@ class MOptScheduler:
             self._pso_update()
 
     def _update_fitness(self, particle: _MOptParticle):
-        """Compute particle fitness from its discovery window."""
+        """Compute particle fitness from its discovery window.
+
+        A particle that received no executions this window keeps its previous
+        fitness rather than being reset to zero. Zeroing it was self-
+        reinforcing: fitness-proportional particle selection starves the
+        low-fitness particles, starvation empties their windows, empty windows
+        zero their fitness, and the swarm collapses to whichever particle first
+        got a lucky window. Measured: three of five particles pinned at exactly
+        0.0 for the whole campaign.
+        """
         if not particle.discoveries or particle.execs_in_window == 0:
-            particle.fitness = 0.0
             return
         # Fitness = discovery rate in the window, smoothed
         disc = sum(particle.discoveries)
         total = max(particle.execs_in_window, 1)
         particle.fitness = disc / total
 
+    def _efficiency_distribution(self, n: int) -> list[float]:
+        """Normalize this window's per-operator discovery rates to the simplex.
+
+        Operators with no executions this window are held at the uniform share
+        rather than zero, so a temporarily unsampled operator is treated as
+        unknown rather than as known-bad.
+        """
+        uniform = 1.0 / n
+        raw = []
+        for op in self.operators:
+            execs = self._op_execs.get(op, 0)
+            raw.append(self._op_disc.get(op, 0.0) / execs if execs else uniform)
+        total = sum(raw)
+        if total <= 0.0:
+            return [uniform] * n
+        self._efficiency_pos = [x / total for x in raw]
+        return self._efficiency_pos
+
     def _pso_update(self):
         """Run one PSO iteration: update velocities and positions."""
-        # Find global best
-        for p in self.particles:
-            self._update_fitness(p)
-            if p.fitness > self.global_best_fitness:
-                self.global_best_fitness = p.fitness
-                self.global_best_pos = list(p.pos)
-
         n = len(self.operators)
         if n == 0:
             return
 
+        # Personal and global bests must be recorded *before* the velocity
+        # step, against the position that actually earned the fitness. The
+        # pbest update used to run at the bottom of the loop below, which
+        # paired the old fitness with the already-moved position and taught
+        # each particle to steer toward a point it had never evaluated.
+        self.global_best_fitness *= self.gbest_decay
         for p in self.particles:
-            # Update velocity: v = w*v + c1*r1*(pbest - pos) + c2*r2*(gbest - pos)
+            self._update_fitness(p)
+            if p.fitness > p.pbest_fitness:
+                p.pbest_fitness = p.fitness
+                p.pbest_pos = list(p.pos)
+            if p.fitness > self.global_best_fitness:
+                self.global_best_fitness = p.fitness
+                self.global_best_pos = list(p.pos)
+
+        eff = self._efficiency_distribution(n)
+
+        for p in self.particles:
+            # v = w*v + c1*r1*(pbest - pos) + c2*r2*(gbest - pos)
+            #         + c3*r3*(efficiency - pos)
             for i in range(n):
                 r1 = random.random()
                 r2 = random.random()
+                r3 = random.random()
                 cognitive = self.c1 * r1 * (p.pbest_pos[i] - p.pos[i])
                 social = self.c2 * r2 * (self.global_best_pos[i] - p.pos[i])
-                p.vel[i] = self.w * p.vel[i] + cognitive + social
+                measured = self.c3 * r3 * (eff[i] - p.pos[i])
+                p.vel[i] = self.w * p.vel[i] + cognitive + social + measured
                 # Clamp velocity
                 p.vel[i] = max(-self.max_vel, min(self.max_vel, p.vel[i]))
 
@@ -252,40 +363,52 @@ class MOptScheduler:
             for i in range(n):
                 p.pos[i] += p.vel[i]
 
-            # Project back to simplex (softmax normalization)
+            # Project back onto the probability simplex
             self._normalize_to_simplex(p)
-
-            # Update personal best
-            if p.fitness > p.pbest_fitness:
-                p.pbest_fitness = p.fitness
-                p.pbest_pos = list(p.pos)
 
             # Decay window for next iteration
             p.execs_in_window = 0
             p.discoveries.clear()
 
+        self._op_execs.clear()
+        self._op_disc.clear()
+
     def _normalize_to_simplex(self, particle: _MOptParticle):
-        """Project velocity-pushed position onto the probability simplex.
+        """Project the velocity-pushed position back onto the probability simplex.
 
-        Uses softmax: p_i = exp(x_i) / sum(exp(x_j)).
-        This ensures all probabilities are positive and sum to 1.
+        Clips negatives and divides by the sum, then applies an exploration
+        floor.
+
+        This used to softmax instead, which made the scheduler incapable of
+        converging: positions are *already* a probability distribution, so
+        every entry lies in [0, 1] and softmax compresses the whole vector to
+        within ``exp(max - min) <= e`` of uniform. With ``max_vel`` clamping
+        how far a step can move an entry, no particle could ever concentrate —
+        the scheduler measured as statistically indistinguishable from
+        ``random.choice`` (tail share 0.080 against a 0.083 uniform baseline,
+        linear regret). Softmax is the right projection for *unconstrained
+        logits*, which is what ``CMAESScheduler`` keeps; it is the wrong one
+        for a vector that is already normalized.
+
+        The floor is a fraction of uniform rather than an absolute constant.
+        A fixed 0.01 floor is harmless at the 12 operators a unit test uses,
+        but the live registry has 135: ``0.01 * 135 = 1.35`` exceeds the whole
+        simplex, so flooring-then-renormalizing returned exactly the uniform
+        distribution and silently disabled PSO in production.
         """
-        # Subtract max for numerical stability
-        max_val = max(particle.pos) if particle.pos else 0.0
-        exps = [math.exp(x - max_val) for x in particle.pos]
-        total = sum(exps)
-        if total > 0:
-            particle.pos = [e / total for e in exps]
-        else:
-            n = len(particle.pos)
-            particle.pos = [1.0 / n] * n
+        n = len(particle.pos)
+        if n == 0:
+            return
 
-        # Ensure minimum probability floor (exploration)
-        floor = 0.01
-        for i in range(len(particle.pos)):
-            particle.pos[i] = max(particle.pos[i], floor)
-        total = sum(particle.pos)
-        particle.pos = [p / total for p in particle.pos]
+        clipped = [x if x > 0.0 else 0.0 for x in particle.pos]
+        total = sum(clipped)
+        particle.pos = [x / total for x in clipped] if total > 0.0 else [1.0 / n] * n
+
+        floor = self.min_prob_frac / n
+        if floor > 0.0:
+            particle.pos = [max(x, floor) for x in particle.pos]
+            total = sum(particle.pos)
+            particle.pos = [x / total for x in particle.pos]
 
     def particle_stats(self) -> list[dict]:
         """Get stats for each particle (for diagnostics/logging)."""

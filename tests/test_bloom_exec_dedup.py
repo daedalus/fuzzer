@@ -1,6 +1,6 @@
 """Tests for the digest-budget clamp, power-of-two sizing, and bytes fast path."""
 
-import os
+import random
 
 from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.services.fuzzer import EXEC_DEDUP_RETRIES, Fuzzer
@@ -91,12 +91,18 @@ class TestUpdateBytes:
 
     def test_reset_on_full_wipes_at_capacity(self):
         bf = BloomFilter(capacity=64, error_rate=1e-3)
-        keys = [os.urandom(8) for _ in range(64)]
+        # Seeded, not os.urandom: at error_rate=1e-3 a false positive on one
+        # of the 64 inserts leaves n_added at 63, which happened on 66 of
+        # 20000 measured runs (0.33%) and could not be reproduced from any
+        # seed. The filter's false-positive rate is tested separately; this
+        # test is about reset-on-full.
+        _rng = random.Random(20260821)
+        keys = [_rng.randbytes(8) for _ in range(64)]
         for k in keys:
             bf.update_bytes(k, reset_on_full=True)
         assert bf.n_added == 64
         # The next insert crosses capacity and starts a fresh generation.
-        bf.update_bytes(os.urandom(8), reset_on_full=True)
+        bf.update_bytes(_rng.randbytes(8), reset_on_full=True)
         assert bf.n_added == 1
         assert bf.load_factor < 0.05
 

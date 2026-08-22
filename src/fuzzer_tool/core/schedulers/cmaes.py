@@ -43,18 +43,34 @@ log = logging.getLogger(__name__)
 _NU_MAX = 2.0  # cap on effective μ_eff/λ to keep weights well-behaved
 
 
-def _softmax(logits: list[float], floor: float = 0.005) -> list[float]:
-    """Stable softmax with a minimum exploration floor per arm."""
+def _softmax(logits: list[float], floor_frac: float = 0.06) -> list[float]:
+    """Stable softmax mixed with a uniform floor.
+
+    The floor is a fraction of uniform (``floor_frac / n``), not an absolute
+    per-arm constant. An absolute floor gets both ends wrong: at the 12 arms a
+    unit test uses, 0.005 still lets one arm reach ~0.94 and the rest fall to
+    5e-3, which is enough for the population to stop distinguishing
+    candidates; at the 135 operators the live registry holds, ``135 * 0.005 =
+    0.675`` and the floor dominates the distribution it was meant to
+    perturb.
+
+    Keeping every arm at a guaranteed share is also what stops CMA-ES from
+    latching. Once the mean concentrates hard enough that every candidate in
+    the population samples the same operator, all their rewards coincide, the
+    rank-mu ordering is noise, and the run can sit on a wrong arm forever --
+    measured as bimodal outcomes (0.947 on good seeds, 0.004 on bad ones) that
+    got *worse* between 100k and 300k rounds.
+    """
     if not logits:
         return []
+    n = len(logits)
     m = max(logits)
     exps = [math.exp(x - m) for x in logits]
     total = sum(exps)
     if total <= 0:
-        n = len(logits)
         return [1.0 / n] * n
     probs = [e / total for e in exps]
-    # Enforce floor and renormalise
+    floor = floor_frac / n
     floored = [max(p, floor) for p in probs]
     total = sum(floored)
     return [p / total for p in floored]
@@ -95,6 +111,12 @@ class CMAESScheduler:
         max_ops_before_diag_fallback: If the number of registered arms
             exceeds this threshold the covariance update is skipped and
             a diagonal C is kept, bounding memory at O(n).
+        sigma_min: Lower clamp on the step size.
+        sigma_max: Upper clamp on the step size. Bounds the CSA feedback
+            loop so one bad generation cannot leave the region where a
+            softmax over logits is meaningful.
+        logit_clip: Symmetric bound on the mean vector, applied after
+            recentring. exp(12) already saturates any realistic softmax.
     """
 
     supports_priors = False
@@ -110,6 +132,9 @@ class CMAESScheduler:
         learning_rate_sigma: float = 0.3,
         cov_diag_min: float = 1e-6,
         max_ops_before_diag_fallback: int = 64,
+        sigma_min: float = 1e-3,
+        sigma_max: float = 3.0,
+        logit_clip: float = 12.0,
         rng: RandPool | None = None,
     ):
         self.pop_size = max(2, int(pop_size))
@@ -121,6 +146,13 @@ class CMAESScheduler:
         self.learning_rate_sigma = float(learning_rate_sigma)
         self.cov_diag_min = float(cov_diag_min)
         self.max_ops_before_diag_fallback = int(max_ops_before_diag_fallback)
+        self.sigma_min = float(sigma_min)
+        self.sigma_max = float(sigma_max)
+        self.logit_clip = float(logit_clip)
+        # Observations per candidate. generation_size is documented as
+        # evaluations per generation, so splitting it across the population is
+        # what makes the two parameters consistent.
+        self.evals_per_candidate = max(1, self.generation_size // self.pop_size)
         self._rng = rng if rng is not None else RandPool()
 
         self.operators: list[str] = []
@@ -195,9 +227,18 @@ class CMAESScheduler:
 
         if not self._candidates or self._next_candidate_idx >= len(self._candidates):
             self._new_generation()
+        if not self._candidates:
+            return ops[0]
 
+        # The candidate is advanced by record(), not here. It used to advance
+        # on every selection, which gave each candidate exactly one Bernoulli
+        # observation: the rank-mu update was then sorting eight candidates by
+        # a single coin flip each, which is noise, and CMA-ES was fitting a
+        # covariance to it. Worse, a fresh population was drawn every
+        # pop_size selections while the update only ran every generation_size
+        # records, so 24 of every 25 populations were sampled and discarded
+        # unevaluated.
         candidate = self._candidates[self._next_candidate_idx]
-        self._next_candidate_idx += 1
         op = _sample_operator(candidate["probs"], ops, self._rng)
         candidate["selected_op"] = op
         return op
@@ -228,6 +269,8 @@ class CMAESScheduler:
         if candidate is not None and candidate.get("selected_op") == name:
             candidate["reward"] += weight if success else 0.0
             candidate["count"] += 1
+            if candidate["count"] >= self.evals_per_candidate:
+                self._next_candidate_idx += 1
 
         self._eval_count += 1
         if self._eval_count >= self.generation_size:
@@ -258,8 +301,12 @@ class CMAESScheduler:
         self._next_candidate_idx = 0
         if self._mean is None or self._C is None:
             return
-        # Cholesky factorisation of σ²C; fall back to σI on failure
-        scale = self._sigma * math.sqrt(n)
+        # Cholesky factorisation of σ²C; fall back to σI on failure.
+        # Deliberately σ, not σ·sqrt(n): CSA assumes the mutation vectors
+        # y = (x - mean)/σ have norm ~sqrt(n), which L@z already gives. The
+        # extra sqrt(n) inflated them to ~n, pinning ||p_sigma||²/n far above
+        # 1 and driving the step-size update exponentially upward.
+        scale = self._sigma
         try:
             L = np.linalg.cholesky(self._C)
         except np.linalg.LinAlgError:
@@ -280,8 +327,8 @@ class CMAESScheduler:
             )
 
     def _current_candidate(self) -> dict[str, Any] | None:
-        """Return the candidate that produced the most recent op, if any."""
-        idx = self._next_candidate_idx - 1
+        """Return the candidate currently being evaluated, if any."""
+        idx = self._next_candidate_idx
         if 0 <= idx < len(self._candidates):
             return self._candidates[idx]
         return None
@@ -298,7 +345,7 @@ class CMAESScheduler:
         # Sort candidates by reward descending
         candidates = sorted(
             [c for c in self._candidates if c["count"] > 0],
-            key=lambda c: c["reward"],
+            key=lambda c: c["reward"] / max(c["count"], 1),
             reverse=True,
         )
         if not candidates:
@@ -308,30 +355,45 @@ class CMAESScheduler:
         # μ elites, clamped
         mu = max(1, min(len(candidates), int(self.pop_size * self.elite_frac)))
         elites = candidates[:mu]
-        mu_eff = max(1.0, sum(1.0 for _ in elites) ** 2 / max(1.0, sum(1.0 for _ in elites)))
-        # Clamp effective selection intensity
-        if mu_eff < 1.0:
-            mu_eff = 1.0
 
         # Rank-μ weights: positive, sum to 1
-        weights = [math.log(mu_eff + 0.5) - math.log(i + 1) for i in range(mu)]
+        weights = [math.log(mu + 0.5) - math.log(i + 1) for i in range(mu)]
         weights_sum = sum(weights)
         if weights_sum <= 0:
             weights = [1.0 / mu] * mu
             weights_sum = 1.0
         weights = [w / weights_sum for w in weights]
 
-        # Mean update
+        # Variance-effective selection mass, (Σw)² / Σw². The previous
+        # expression was mu**2 / mu, i.e. just mu: it counted the elites
+        # instead of using the weights, so it ignored the rank weighting it
+        # was supposed to summarize and overstated mu_eff by ~40% at the
+        # default population.
+        mu_eff = max(1.0, 1.0 / sum(w * w for w in weights))
+
+        # Mean update. delta is the weighted mean displacement from the
+        # *current* mean, i.e. sigma * <y>_w, so it already carries a factor
+        # of sigma. Multiplying by sigma again applied a step of
+        # sigma**2 * <y>_w: a 3x overshoot at the clamped step size, which
+        # walked the mean straight into the logit clip every generation.
+        mean_old = self._mean.copy()
         delta = np.zeros(n, dtype=float)
         for w, c in zip(weights, elites, strict=False):
-            delta += w * (np.array(c["logits"], dtype=float) - self._mean)
-        step = self.learning_rate_mean * self._sigma
-        self._mean += step * delta
+            delta += w * (np.array(c["logits"], dtype=float) - mean_old)
+        self._mean = mean_old + self.learning_rate_mean * delta
 
-        # Evolution path for covariance
+        # Evolution path for covariance. Both this and the rank-mu term below
+        # take y = (x - mean)/sigma, not the raw displacement. Using the raw
+        # displacement multiplied C by an extra sigma**2 (0.09 at the default
+        # step size) on every generation, so C decayed geometrically into the
+        # cov_diag_min floor. A collapsed C makes every sampled candidate
+        # identical, which removes the variation the rank-mu update ranks and
+        # drags sigma down with it -- the same runaway as the original sigma
+        # blowup, in the opposite direction.
+        y_w = delta / (self._sigma + 1e-12)
         self._pc = (1.0 - self.learning_rate_cov) * self._pc + math.sqrt(
             self.learning_rate_cov * (2.0 - self.learning_rate_cov) * mu_eff
-        ) * (self._sigma * delta)
+        ) * y_w
 
         # Covariance update (diagonal fallback for large n)
         use_diag = n > self.max_ops_before_diag_fallback
@@ -343,33 +405,69 @@ class CMAESScheduler:
             )
         else:
             rank_mu = np.zeros((n, n), dtype=float)
+            # mean_old, not the already-stepped mean: the candidates were
+            # sampled around the old mean, so measuring their spread from the
+            # new one folds the mean step into the covariance and inflates it
+            # generation after generation (measured C diagonal: 5.6e4).
+            inv_sigma = 1.0 / (self._sigma + 1e-12)
             for w, c in zip(weights, elites, strict=False):
-                y = np.array(c["logits"], dtype=float) - self._mean
+                y = (np.array(c["logits"], dtype=float) - mean_old) * inv_sigma
                 rank_mu += w * np.outer(y, y)
             self._C = (1.0 - self.learning_rate_cov) * self._C + self.learning_rate_cov * rank_mu
             # Ensure symmetric positive definite-ish
             self._C = (self._C + self._C.T) / 2.0
             self._C[np.diag_indices(n)] = np.maximum(self._C[np.diag_indices(n)], self.cov_diag_min)
 
-        # CSA step-size update
-        hsigma = 0.0
-        if (
-            np.linalg.norm(self._ps)
-            / math.sqrt(1.0 - (1.0 - self.learning_rate_sigma) ** (2 * (self._eval_count or 1)))
-            < (1.4 + 2.0 / (n + 1)) * n**0.5
-        ):
-            hsigma = 1.0
+        # CSA step-size update.
+        #
+        # Three bugs lived here, which together drove sigma from 0.3 to ~72
+        # and the mean vector to ~1e14, at which point _softmax is a hard
+        # one-hot on whichever logit happens to be largest and the scheduler
+        # commits permanently to an arbitrary operator (measured tail share
+        # 0.005 against a 0.083 uniform baseline -- worse than random).
+        #
+        # 1. The hsigma damping heuristic read self._eval_count, which is
+        #    zeroed at the top of this same function. It therefore evaluated
+        #    (1 - c_s) ** 2 on every generation instead of decaying with the
+        #    generation counter, so hsigma was effectively always 1 and the
+        #    heuristic never damped anything. Use _generation.
+        # 2. _new_generation sampled candidates at scale sigma*sqrt(n), so the
+        #    mutation vectors y = (x - mean)/sigma had norm ~n where CSA
+        #    assumes ~sqrt(n). ||p_sigma||**2/n therefore sat far above 1 on
+        #    every generation and the exponential drove sigma up without
+        #    bound. Fixed at the sampling site; the division by sigma here is
+        #    correct and stays -- delta is sigma * <y>_w, so delta/sigma is
+        #    exactly the <y>_w that CSA wants.
+        # 3. Nothing bounded sigma on either side. Even with 1 and 2 fixed, a
+        #    run of unlucky generations should not be able to leave the region
+        #    where a softmax over logits is meaningful, in either direction:
+        #    sigma -> 0 collapses every candidate onto the same distribution,
+        #    which removes the variation the rank-mu update ranks.
+        self._generation += 1
+        damping = math.sqrt(
+            1.0 - (1.0 - self.learning_rate_sigma) ** (2 * max(self._generation, 1))
+        )
+        hsigma = (
+            1.0
+            if np.linalg.norm(self._ps) / max(damping, 1e-12) < (1.4 + 2.0 / (n + 1)) * n**0.5
+            else 0.0
+        )
         self._ps = (1.0 - self.learning_rate_sigma) * self._ps + math.sqrt(
             self.learning_rate_sigma * (2.0 - self.learning_rate_sigma) * mu_eff
-        ) * (delta / (self._sigma + 1e-12))
+        ) * y_w
         self._sigma *= math.exp(
             (self.learning_rate_sigma / (1.0 - self.learning_rate_sigma))
             * (np.linalg.norm(self._ps) ** 2 / n - 1.0)
             * hsigma
         )
-        self._sigma = max(self._sigma, 1e-12)
+        self._sigma = min(max(self._sigma, self.sigma_min), self.sigma_max)
 
-        self._generation += 1
+        # Softmax is shift-invariant, so recentring the mean costs nothing and
+        # keeps the logits in a range where exp() is meaningful. Without it
+        # the mean random-walks away from zero indefinitely.
+        self._mean -= float(np.mean(self._mean))
+        np.clip(self._mean, -self.logit_clip, self.logit_clip, out=self._mean)
+
         self._new_generation()
 
     # ------------------------------------------------------------------

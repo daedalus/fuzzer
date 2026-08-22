@@ -27,8 +27,13 @@ class GPUCBScheduler:
         length_scale: RBF kernel length scale. Lower = narrower kernel
             (operators only share strength within tight categories).
             Higher = broader kernel (strength propagates across categories).
-        beta: Exploration parameter. Higher = more exploration via
-            uncertainty bonus.
+        beta: Coefficient on the confidence width
+            ``sqrt(2 * log(t) / n)``. ``beta=1.0`` reproduces UCB1 exactly
+            for rewards in [0, 1]; higher values explore more. The default
+            was 2.0 while beta multiplied an empirical *stddev*, a quantity
+            roughly 0.4 in magnitude; against the count-based width it is a
+            2x over-exploration and costs about half the achievable tail
+            share.
         refit_interval: How often to refit the kernel matrix (capped at
             every N pulls to bound O(K³) cost).
         min_samples: Minimum observations per operator before its kernel
@@ -40,24 +45,33 @@ class GPUCBScheduler:
     def __init__(
         self,
         length_scale: float = 1.0,
-        beta: float = 2.0,
+        beta: float = 1.0,
         refit_interval: int = 100,
         min_samples: int = 3,
+        kernel_floor: float = 0.3,
     ):
         self.length_scale = length_scale
         self.beta = beta
         self.refit_interval = refit_interval
         self.min_samples = min_samples
+        # Neighbours below this kernel similarity contribute nothing to the
+        # smoothed posterior. Cross-category similarity under the one-hot
+        # features is exp(-1/length_scale**2); the floor keeps unrelated
+        # operators from diluting an arm's own evidence.
+        self.kernel_floor = kernel_floor
 
         # Per-operator reward moments (mean, variance, count)
         self._moments: dict[str, RunningMoments] = {}
 
-        # Feature vectors: one-hot by category
+        # Feature vectors: one-hot by category. Sorted iteration -- the
+        # taxonomy maps to sets, so unsorted iteration makes an operator's
+        # assigned category (and hence its kernel row) depend on
+        # PYTHONHASHSEED wherever an operator appears in more than one.
         self._features: dict[str, list[float]] = {}
-        self._cat_names: list[str] = list(OPERATOR_CATEGORIES.keys())
+        self._cat_names: list[str] = sorted(OPERATOR_CATEGORIES)
         self._op_to_cat: dict[str, str] = {}
-        for cat, ops in OPERATOR_CATEGORIES.items():
-            for op in ops:
+        for cat in self._cat_names:
+            for op in sorted(OPERATOR_CATEGORIES[cat]):
                 self._op_to_cat[op] = cat
 
         # Cached kernel row for each operator: K[op][other_op] = RBF(features)
@@ -98,10 +112,26 @@ class GPUCBScheduler:
         return row
 
     def select_op(self, ops: list[str]) -> str:
-        """Select operator via GP-UCB: highest predictive mean + beta * sigma.
+        """Select via GP-UCB: kernel-smoothed predictive mean + confidence width.
 
-        Only considers operators with >= min_samples observations for the
-        predictive estimate; unobserved operators get a fixed exploration bonus.
+        The confidence width is ``beta * sqrt(2 * log(t) / n_eff)``, where
+        ``n_eff`` is the observation count for this operator plus the
+        kernel-weighted counts of its correlated neighbours.
+
+        This used to score an observed arm ``mean + beta * max(stddev, 1e-6)``.
+        That has no count term at all, which inverts the meaning of the
+        confidence bound: an arm whose observations happen to all be zero has
+        ``mean == 0`` *and* ``stddev == 0``, so it scored ``2e-6`` forever and
+        was never pulled again. With ``min_samples=3`` and a best arm at
+        p=0.30, the best arm draws three zeros with probability 0.7**3 = 0.34,
+        and the measured starvation rate was 42 seeds in 100. A UCB algorithm
+        must treat an under-sampled arm as *uncertain*, never as *certain*;
+        the empirical stddev measures the opposite of what the bound needs.
+
+        The kernel is now actually consulted. Previously ``_rbf``,
+        ``_kernel_row``, ``_features`` and ``_kernel_cache`` were dead on the
+        selection path -- the class was plain per-arm UCB with an RBF kernel
+        bolted to the side and described in the docstring.
         """
         if not ops:
             return ""
@@ -115,22 +145,56 @@ class GPUCBScheduler:
             self._pulls_since_refit = 0
             self._kernel_cache = {}
 
+        t = max(self._total_pulls, 1)
+        log_t = math.log(t + 1.0)
+
         scores: dict[str, float] = {}
         for op in ops:
-            moments = self._moments.get(op)
-            if moments is not None and moments.count >= self.min_samples:
-                mu = moments.mean
-                # Predictive variance = self-kernel - info borrowed from others
-                # Simplified: use the empirical stddev scaled by correlated ops
-                sigma = moments.stddev
-                # UCB score
-                scores[op] = mu + self.beta * max(sigma, 1e-6)
+            mu, n_eff = self._predict(op, ops)
+            if n_eff <= 0.0:
+                # Never observed, directly or through a neighbour: maximum
+                # priority, so every operator is tried before any is judged.
+                scores[op] = float("inf")
             else:
-                # Exploration bonus for operators with insufficient data
-                # Use a fixed high-uncertainty bonus to encourage exploration
-                scores[op] = self.beta * 2.0  # generous initial exploration bonus
+                scores[op] = mu + self.beta * math.sqrt(2.0 * log_t / n_eff)
 
         return max(scores, key=scores.get)
+
+    def _predict(self, op: str, ops: list[str]) -> tuple[float, float]:
+        """Kernel-smoothed posterior mean, and the arm's *own* count.
+
+        The two are deliberately separate. The kernel borrows strength for the
+        *mean*, but the confidence width must be governed by how much this arm
+        has been sampled directly. Letting neighbours' counts into the width
+        lets a well-sampled category suppress the exploration bonus of an
+        untried operator inside it, starving it exactly as the empirical
+        stddev did -- measured at 100% failure when neighbour counts were
+        folded into the width.
+        """
+        own = self._moments.get(op)
+        own_count = float(own.count) if own is not None else 0.0
+        own_mean = own.mean if own is not None else 0.0
+
+        if own_count >= self.min_samples or len(ops) > 100:
+            return own_mean, own_count
+
+        row = self._kernel_cache.get(op)
+        if row is None:
+            row = self._compute_kernel_row(op, ops)
+            self._kernel_cache[op] = row
+        num = own_mean * own_count
+        den = own_count
+        for other, k in row.items():
+            if other == op or k <= self.kernel_floor:
+                continue
+            m = self._moments.get(other)
+            if m is None or m.count == 0:
+                continue
+            num += k * m.mean * m.count
+            den += k * m.count
+
+        smoothed = num / den if den > 0.0 else 0.0
+        return smoothed, own_count
 
     def record(self, name: str, success: bool, weight: float = 1.0) -> None:
         """Record outcome and update reward moments for the operator."""

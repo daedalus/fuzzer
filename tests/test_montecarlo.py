@@ -1520,7 +1520,10 @@ class TestGPUCBScheduler:
 
         gp = GPUCBScheduler()
         assert gp.length_scale == 1.0
-        assert gp.beta == 2.0
+        # beta is the coefficient on sqrt(2*log(t)/n); 1.0 is UCB1 for
+        # rewards in [0, 1]. It was 2.0 when beta multiplied an empirical
+        # stddev instead, a quantity of a different magnitude.
+        assert gp.beta == 1.0
         assert gp.refit_interval == 100
         assert gp.min_samples == 3
         assert not gp._moments

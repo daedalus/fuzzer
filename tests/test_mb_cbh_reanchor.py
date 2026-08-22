@@ -73,7 +73,11 @@ class TestSiteReanchoring:
         cases = [_planted_input(rng, rng.randrange(0, 55), rng.randrange(1, 3)) for _ in range(80)]
 
         def solved(max_sites: int) -> int:
-            pool = RandPool()
+            # Seeded: RandPool() draws from OS entropy, which made this
+            # assertion fail on 1.0% of runs with no way to reproduce it from
+            # any seed. The tolerance band is calibrated to binomial noise
+            # across the 80 cases, not to noise in the mutation stream too.
+            pool = RandPool(20260821)
             return sum(
                 _best_window(climb_hill(c, (TARGET, b""), pool, max_sites=max_sites), TARGET) == 0
                 for c in cases

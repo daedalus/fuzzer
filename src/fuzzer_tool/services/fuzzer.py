@@ -1373,6 +1373,13 @@ class Fuzzer:
         self._cmaes = None
         if cmaes:
             self._cmaes = CMAESScheduler(
+                # Without an explicit rng, CMAESScheduler falls back to
+                # RandPool(), which seeds from OS entropy -- so --seed did not
+                # determine CMA-ES behaviour and a crash found under CMA-ES
+                # scheduling could not be replayed. Every other scheduler
+                # draws from the module-level `random` and is covered by the
+                # global seeding done at startup.
+                rng=self._rand_pool,
                 pop_size=cmaes_pop_size,
                 generation_size=cmaes_generation_size,
                 step_size=cmaes_step_size,

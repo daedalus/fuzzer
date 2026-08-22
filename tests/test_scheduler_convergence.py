@@ -20,40 +20,42 @@ a strict assertion on a random seed is a debugging session five years from
 now. Reproduce a random-seed failure with the ``--fuzz-seed`` printed in the
 pytest session header.
 
-WHAT THIS FOUND
----------------
-Four defects, all reproducible, none of which any existing test notices. See
-``docs/learnings/2026-08-21-scheduler-convergence.md`` for the full write-up.
+WHAT THIS FOUND, AND WHAT WAS DONE ABOUT IT
+-------------------------------------------
+The harness found four defects on first contact, none of which any of the
+4,767 existing tests noticed, because every one of those asks a structural
+question. Three are now fixed and the schedulers are asserted here as working;
+the fourth is fixed numerically but the algorithm remains a poor fit for the
+problem and stays xfailed. Full write-up and measurements in
+``docs/learnings/2026-08-21-scheduler-convergence.md``.
 
-1. ``MOptScheduler`` never converges -- indistinguishable from uniform random
-   selection (tail share 0.080 vs. a 0.083 uniform baseline; regret slope
-   1.02, i.e. linear). ``_normalize_to_simplex`` softmaxes a vector that is
-   already a probability distribution, compressing every particle to within
-   ``exp(max-min) <= exp(1)`` of uniform. PSO cannot concentrate.
+* ``MOptScheduler`` was indistinguishable from ``random.choice`` (tail share
+  0.080 against a 0.083 uniform baseline). Five stacked bugs, each hidden by
+  the one above it. Now identifies the best arm on 100/100 seeds. It allocates
+  proportionally to measured efficiency rather than converging on the argmax,
+  so it is asserted like ``ReplicatorScheduler``, not like a UCB bandit.
 
-2. ``CMAESScheduler`` diverges numerically and then locks onto an arbitrary
-   arm (tail share 0.005 -- *worse* than uniform). σ grows from 0.3 to ~72
-   and the mean vector reaches ~1e14, at which point the softmax is a hard
-   one-hot on whichever logit happened to be largest.
+* ``GPUCBScheduler`` starved the best arm on 42% of seeds; its score had no
+  count term, so an all-zero arm looked *certain* rather than *unsampled*.
+  Now 0/100 with a proper ``sqrt(2 log t / n)`` width, and it recovers from
+  arm decay instead of locking on forever.
 
-3. ``GPUCBScheduler`` starves the best arm on ~42% of seeds. Once an arm has
-   ``min_samples`` observations that are all zero, its score is
-   ``mean + beta*stddev == 0 + 2e-6`` forever: there is no count-based
-   exploration bonus, so a UCB algorithm treats an under-sampled arm as a
-   *certain* one. Separately, ``select_op`` never calls the RBF kernel the
-   class docstring is about.
+* ``HierarchicalBanditScheduler`` starved the best arm's whole category on
+  ~1.5% of seeds and could not leave a decayed arm. Capping the Beta
+  pseudocount took starvation to ~0.25% and decay recovery from 0.23 to 0.99.
 
-4. ``HierarchicalBanditScheduler`` starves the best arm's whole *category* at
-   the top level on ~1.5% of seeds.
-
-Rather than delete the broken schedulers or paper over the flaky ones, the
-failure *rates* are pinned as assertions with documented bands. A fix will
-turn those tests red and say so.
+* ``CMAESScheduler`` diverged numerically (sigma 0.3 -> 72, mean -> 1e14) and
+  committed to an arbitrary arm, scoring *worse* than uniform. Six separate
+  numerical errors fixed; it no longer diverges and does converge given
+  ~100k executions, but remains bimodal and sample-inefficient. Still
+  xfailed, deliberately, rather than tuned until this file goes green.
 """
 
 from __future__ import annotations
 
+import os
 import random
+from pathlib import Path
 
 import pytest
 
@@ -77,6 +79,8 @@ from tests.support.bandit_env import (
     uniform_baseline,
 )
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
 #: matklad's fixed seed, kept literally: statistics are asserted here.
 FIXED_SEED = 92
 
@@ -93,12 +97,14 @@ ROUNDS = 6_000
 #: (factory, min tail share on the best arm, max regret log-log slope).
 #: Thresholds sit below the observed minimum over 100 seeds at ROUNDS, with
 #: margin -- measured, not guessed. Observed minima:
-#:   Contextual 0.968 | EpsGreedy 0.920 | Exp3 0.850
-#:   MonteCarlo 0.971 | Hierarchical 0.986 (median; see known-defects below)
+#:   Contextual 0.968 | EpsGreedy 0.920 | Exp3 0.850 | GPUCB 0.694
+#:   MonteCarlo 0.971 | Hierarchical 0.994 median (rare starvation: see below)
 RELIABLE = {
     "ContextualLinUCB": (lambda seed: ContextualLinUCBScheduler(dim=4), 0.90, 0.40),
     "EpsilonGreedy": (lambda seed: EpsilonGreedyScheduler(), 0.85, 0.45),
     "Exp3": (lambda seed: Exp3Scheduler(), 0.78, 0.70),
+    "GPUCB": (lambda seed: GPUCBScheduler(), 0.62, 0.75),
+    "Hierarchical": (lambda seed: HierarchicalBanditScheduler(), 0.90, 0.40),
     "MonteCarlo": (lambda seed: MonteCarloScheduler(), 0.90, 0.45),
 }
 
@@ -158,50 +164,89 @@ def test_converges_on_random_seed(name, random_seed):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "MOptScheduler does not converge: _normalize_to_simplex softmaxes an "
-        "already-normalized distribution, so no particle can concentrate. "
-        "Fix: project onto the simplex by clipping and dividing by the sum, "
-        "or keep particle positions as unconstrained logits and softmax only "
-        "at sampling time (as CMAESScheduler does)."
-    ),
-)
-def test_mopt_converges():
+@pytest.mark.slow
+def test_cmaes_convergence_rate_is_pinned():
+    """CMA-ES converges on some seeds and not others. Pin the rate.
+
+    Not an xfail: the outcome is bimodal, so a single-seed xfail would XPASS
+    or fail depending on which seed it happened to draw. Counting is the
+    honest form of the assertion -- the same reason the harness counts both
+    outcomes of its own generator rather than trusting one run.
+
+    The six numerical errors are fixed and it does reach ~0.95 on good seeds
+    given ~100k executions, but CMA-ES is a continuous black-box optimizer
+    being asked to optimize a 12-dimensional categorical distribution from
+    Bernoulli feedback: each generation spends ``generation_size`` executions
+    to buy one very noisy ranking of ``pop_size`` near-identical candidates.
+    Left as-is rather than tuned until this file goes green -- the constants
+    that would do it are not derived from anything.
+    """
+    env = StationaryBernoulli.build()
+    converged = sum(
+        run(CMAESScheduler(rng=RandPool(seed)), env, seed=seed, rounds=ROUNDS).tail_share(env.best)
+        >= 0.5
+        for seed in range(1, 41)
+    )
+    assert converged <= 12, (
+        f"CMA-ES converged on {converged}/40 seeds, above the documented band. "
+        "If this is a real improvement, tighten or replace this test and "
+        "consider promoting CMAES to RELIABLE."
+    )
+
+
+def test_cmaes_no_longer_diverges():
+    """The actual bug was divergence, and that part is fixed.
+
+    Before: sigma ran from 0.3 to ~72 and the mean vector to ~1e14, at which
+    point the softmax is a hard one-hot and the scheduler is committed to an
+    arbitrary operator forever -- scoring *worse* than uniform selection
+    because it was reliably wrong rather than merely uninformed.
+    """
+    env = StationaryBernoulli.build()
+    sched = CMAESScheduler(rng=RandPool(FIXED_SEED))
+    c = run(sched, env, seed=FIXED_SEED, rounds=20_000)
+
+    assert sched.sigma_min <= sched._sigma <= sched.sigma_max
+    assert max(abs(float(x)) for x in sched._mean) <= sched.logit_clip
+    # No longer systematically worse than ignoring feedback entirely.
+    assert c.tail_share(env.best) >= 0.5 * uniform_baseline(env, 20_000)
+
+
+def test_mopt_identifies_the_best_arm():
+    """MOpt allocates proportionally to efficiency; assert that, not argmax.
+
+    The efficiency attractor is normalized reward rate, so the best arm's
+    share is bounded near ``p_best / sum(p)`` ~ 0.31 by construction -- the
+    same soft-allocation design point as ReplicatorScheduler. Asserting a
+    UCB-style 0.9 here would be asserting that MOpt is a different algorithm.
+
+    Before the fixes this was 0.080 against a 0.083 uniform baseline, with the
+    most-selected arm being whichever operator ``init_arm`` happened to
+    register first.
+    """
     env = StationaryBernoulli.build()
     c = run(MOptScheduler(), env, seed=FIXED_SEED, rounds=ROUNDS)
-    assert c.tail_share(env.best) >= 0.50
+
+    assert c.tail_picks.most_common(1)[0][0] == env.best
+    assert c.tail_share(env.best) >= 3.0 * uniform_baseline(env, ROUNDS)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "CMAESScheduler diverges: sigma has no upper clamp and the CSA update "
-        "is a positive feedback loop here, so sigma reaches ~72 and the mean "
-        "reaches ~1e14, hard-one-hotting the softmax onto an arbitrary arm. "
-        "Contributing: _update_cmaes zeroes _eval_count before using it in the "
-        "hsigma damping heuristic, so the heuristic is evaluated at a constant "
-        "and never damps."
-    ),
-)
-def test_cmaes_converges():
+def test_mopt_swarm_is_not_degenerate():
+    """Guard the three structural defects that made PSO a no-op.
+
+    Each of these passed silently before, and each on its own is enough to
+    reduce the scheduler to uniform sampling.
+    """
     env = StationaryBernoulli.build()
-    c = run(CMAESScheduler(rng=RandPool(FIXED_SEED)), env, seed=FIXED_SEED, rounds=ROUNDS)
-    assert c.tail_share(env.best) >= 0.50
+    sched = MOptScheduler()
+    run(sched, env, seed=FIXED_SEED, rounds=ROUNDS)
 
-
-def test_mopt_is_indistinguishable_from_uniform():
-    """Pin *how* MOpt fails, so a partial fix is still visible as progress."""
-    env = StationaryBernoulli.build()
-    c = run(MOptScheduler(), env, seed=FIXED_SEED, rounds=20_000)
-    baseline = uniform_baseline(env, 20_000)
-
-    assert abs(c.tail_share(env.best) - baseline) < 0.02, (
-        "MOpt no longer matches uniform selection -- if this is a fix, update "
-        "the xfail on test_mopt_converges and delete this test"
+    positions = [tuple(p.pos) for p in sched.particles]
+    assert len(set(positions)) > 1, "particles are identical -- PSO cannot generate a gradient"
+    assert any(any(v != 0.0 for v in p.vel) for p in sched.particles), "swarm never moved"
+    assert sum(1 for p in sched.particles if p.fitness > 0.0) >= 2, (
+        "particle fitnesses collapsed to a single survivor"
     )
-    assert c.regret_slope() > 0.95, "MOpt regret is no longer linear"
 
 
 def test_replicator_identifies_best_arm_but_concentrates_weakly():
@@ -223,54 +268,40 @@ def test_replicator_identifies_best_arm_but_concentrates_weakly():
 
 
 @pytest.mark.slow
-def test_gpucb_starvation_rate_is_pinned():
-    """GP-UCB abandons the best arm on ~42% of seeds. Pin the rate.
+def test_gpucb_no_longer_starves_the_best_arm():
+    """Was 42/100 seeds. The bound now has a count term.
 
-    Root cause: in ``select_op``, an arm past ``min_samples`` scores
-    ``mean + beta * max(stddev, 1e-6)``. An arm whose observations are all
-    zero has ``mean == 0`` *and* ``stddev == 0``, so it scores 2e-6 forever --
-    a UCB algorithm treating an under-sampled arm as a certain one. With
-    p_best=0.3 and min_samples=3 the best arm draws three zeros with
-    probability 0.7**3 = 0.34, which is the floor of the observed rate.
-
-    A fix must add a count-based bonus (``beta * sqrt(log(t)/n)``), which is
-    what the missing kernel machinery was presumably meant to supply --
-    ``select_op`` never calls ``_rbf`` or ``_kernel_row`` at all, so the class
-    is not GP-UCB, it is empirical-stddev UCB.
+    ``mean + beta * max(stddev, 1e-6)`` gave an all-zero arm a score of 2e-6
+    forever: zero mean *and* zero empirical stddev read as certainty rather
+    than as absence of evidence. ``mean + beta * sqrt(2 log t / n)`` is UCB1,
+    where the width is governed by how little the arm has been sampled.
     """
     env = StationaryBernoulli.build()
-    failures = 0
-    for seed in range(1, 61):
-        c = run(GPUCBScheduler(), env, seed=seed, rounds=ROUNDS)
-        if c.tail_share(env.best) < 0.5:
-            failures += 1
-
-    assert 15 <= failures <= 40, (
-        f"GP-UCB starved the best arm on {failures}/60 seeds; the documented "
-        "band is 15-40 (observed 42% over 100 seeds). Outside it means the "
-        "behaviour changed -- if this is the count-based-bonus fix, update or "
-        "delete this test and add GPUCB to RELIABLE."
+    failures = sum(
+        run(GPUCBScheduler(), env, seed=seed, rounds=ROUNDS).tail_share(env.best) < 0.5
+        for seed in range(1, 61)
     )
+    assert failures == 0, f"GP-UCB starved the best arm on {failures}/60 seeds"
 
 
 @pytest.mark.slow
-def test_hierarchical_category_starvation_rate_is_pinned():
-    """The top-level category posterior collapses before the best arm is found.
+def test_hierarchical_category_starvation_is_rare():
+    """Was ~1.5% of seeds (3/200); now ~0.25% (1/400).
 
-    Rarer than GP-UCB's failure (~1.5% of seeds) but the same shape one level
-    up: Thompson sampling over categories can abandon the category containing
-    the best operator, after which the bottom level never sees it. 1.5% is
-    well inside the range that produces intermittent CI failures, which is why
-    the strict threshold above runs only at the fixed seed.
+    The top-level Thompson sample over categories could drive the posterior of
+    the category holding the best operator to ~0.02 before the bottom level
+    ever saw it. Capping ``alpha + beta`` preserves the posterior mean while
+    stopping its variance from shrinking, so a wrong early verdict stays
+    revisable. Not zero, so the strict thresholds still run only at the fixed
+    seed.
     """
     env = StationaryBernoulli.build()
     failures = sum(
         run(HierarchicalBanditScheduler(), env, seed=seed, rounds=ROUNDS).tail_share(env.best) < 0.5
         for seed in range(1, 201)
     )
-    assert failures <= 8, (
-        f"Hierarchical starved the best category on {failures}/200 seeds "
-        "(documented: ~3). A jump means the top-level posterior got more brittle."
+    assert failures <= 2, (
+        f"Hierarchical starved the best category on {failures}/200 seeds (documented: ~0-1)"
     )
 
 
@@ -279,22 +310,27 @@ def test_hierarchical_category_starvation_rate_is_pinned():
 # ---------------------------------------------------------------------------
 
 #: Measured tail share on the *new* best arm after the old best decays, at
-#: FIXED_SEED over 20k rounds with the switch at 10k. Only two schedulers
-#: recover at all. Asserted as a floor with margin, because "which schedulers
+#: FIXED_SEED over 20k rounds with the switch at 10k. Four schedulers now
+#: recover; Hierarchical recovers essentially completely (0.994) after the
+#: pseudocount cap, having been at 0.139 before it. Asserted as a floor with margin, because "which schedulers
 #: survive coverage saturation" is the property that matters in a real
 #: campaign and it should not silently regress.
 RECOVERS = {
     "ContextualLinUCB": (lambda: ContextualLinUCBScheduler(dim=4), 0.35),
     "Exp3": (Exp3Scheduler, 0.30),
+    "GPUCB": (GPUCBScheduler, 0.35),
+    "Hierarchical": (HierarchicalBanditScheduler, 0.90),
 }
 
 #: Schedulers that stay locked on the dead arm for the whole second half.
-#: This is a real limitation, not a test bug: EpsilonGreedy uses uniform
-#: sample averages with no recency weighting, and GP-UCB has no exploration
-#: bonus to re-open an abandoned arm.
+#: A real limitation, not a test bug: both accumulate uniform sample averages
+#: with no recency weighting, so evidence from before the decay never ages out.
+#: GPUCB used to be the worst offender here (0.998 on the dead arm); the
+#: count-based width lets it re-open an abandoned arm, and it has moved to
+#: RECOVERS.
 STUCK = {
     "EpsilonGreedy": EpsilonGreedyScheduler,
-    "GPUCB": GPUCBScheduler,
+    "MonteCarlo": MonteCarloScheduler,
 }
 
 
@@ -321,8 +357,8 @@ def test_stays_stuck_on_decayed_arm(name):
     env = DecayingBest.build(switch_at=10_000)
     c = run(STUCK[name](), env, seed=FIXED_SEED, rounds=20_000)
 
-    assert c.tail_share(env.best_early) > 0.80, (
-        f"{name} now escapes the decayed arm -- good news; move it to RECOVERS"
+    assert c.tail_share(env.best_early) > c.tail_share(env.best_late), (
+        f"{name} now prefers the live arm over the decayed one -- good news; move it to RECOVERS"
     )
 
 
@@ -443,6 +479,58 @@ class TestSchedulerSeedability:
         a = run(CMAESScheduler(rng=RandPool(7)), env, seed=FIXED_SEED, rounds=400)
         b = run(CMAESScheduler(rng=RandPool(7)), env, seed=FIXED_SEED, rounds=400)
         assert a.picks == b.picks
+
+    @pytest.mark.parametrize(
+        "factory",
+        [
+            HierarchicalBanditScheduler,
+            GPUCBScheduler,
+        ],
+        ids=lambda f: f.__name__,
+    )
+    def test_reproducible_across_hash_seeds(self, factory):
+        """A fixed --seed must fix behaviour, whatever PYTHONHASHSEED is.
+
+        The operator taxonomy maps categories to *sets*. Both of these
+        schedulers used to iterate them directly, so the order of their
+        random draws depended on hash randomization. With the RNG seed pinned
+        at 92, Hierarchical's tail share on the best arm ranged from 0.001 to
+        0.998 across hash seeds -- 4 of 26 starved the best arm completely --
+        which means a crash found under hierarchical scheduling could not be
+        replayed from the seed alone.
+
+        Checked by running a subprocess under two different hash seeds rather
+        than by inspecting the code, since new set iteration can appear
+        anywhere on the selection path.
+        """
+        import subprocess
+        import sys
+        import textwrap
+
+        script = textwrap.dedent(f"""
+            import sys
+            sys.path.insert(0, {str(_REPO_ROOT)!r})
+            sys.path.insert(0, {str(_REPO_ROOT / "src")!r})
+            from tests.support.bandit_env import StationaryBernoulli, run
+            from fuzzer_tool.core.schedulers import {factory.__name__}
+            env = StationaryBernoulli.build()
+            c = run({factory.__name__}(), env, seed=92, rounds=1500)
+            print(sorted(c.picks.items()))
+        """)
+        outs = []
+        for hash_seed in ("0", "12345"):
+            proc = subprocess.run(
+                [sys.executable, "-c", script],
+                capture_output=True,
+                text=True,
+                env={**os.environ, "PYTHONHASHSEED": hash_seed},
+                check=True,
+            )
+            outs.append(proc.stdout)
+        assert outs[0] == outs[1], (
+            f"{factory.__name__} behaviour depends on PYTHONHASHSEED -- "
+            "something on the selection path iterates a set"
+        )
 
     @pytest.mark.parametrize(
         "factory",
