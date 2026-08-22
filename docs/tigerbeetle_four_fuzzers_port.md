@@ -8,19 +8,24 @@ operators, 10 schedulers.
 
 | item | state |
 |---|---|
-| P0-1 seed discipline | **partly done** — `--fuzz-seed` option and `random_seed` fixture landed in `tests/conftest.py`. The ~250 hardcoded seed literals across the suite have *not* been migrated. |
+| P0-1 seed discipline | **partly done** — plugin landed; all 14 bare `Random()` migrated and guarded by `tests/test_seed_discipline.py`. The ~250 hardcoded seed literals have *not* been migrated, deliberately: see the note in that commit. |
 | P0-2 distribution assertions | **pattern established** in `tests/test_scheduler_convergence.py::TestHarnessCoverage`, not yet applied to the operator registry or cmplog. |
 | P1-3 scheduler convergence | **done.** See `docs/learnings/2026-08-21-scheduler-convergence.md`. Found five defects; four fixed. Section below is preserved as written, before any of it was known. |
 | P1-4 minimal interface | not started |
-| P1-5 exhaustive enumeration | not started |
-| P2-6 negative space | not started |
+| P1-5 exhaustive enumeration | **started** — applied to `core/count_class.py`, the one fully enumerable subsystem. `tests/test_count_class_exhaustive.py`. Not yet pointed at the byte-level operators via an `ExhaustivePool`. |
+| P2-6 negative space | **pattern established** in the same file — position-invariance of `new_bits`, which is what found the word-loop/tail disagreement. See `docs/learnings/2026-08-22-count-class-exhaustive.md`. |
 | P2-7 swarm harness | not started |
 | P2-8 `--performance` mode | not started |
 | `parallel.py` measure-don't-model | not started |
 
-Two of the flakes this document predicted have since been confirmed and fixed
-(`test_bloom_exec_dedup` at 0.33%, `test_mb_cbh_reanchor` at 1.0%), both
-unseeded RNGs in tests asserting statistical properties.
+Three of the flakes this document predicted have since been confirmed and fixed
+(`test_bloom_exec_dedup` at 0.33%, `test_mb_cbh_reanchor` at 1.0%,
+`test_inserts_magic_value` at 0.658%), all unseeded RNGs in tests asserting
+statistical properties.
+
+The enumeration items have so far found one live defect (`new_bits` returning a
+different answer for the same byte pair depending on its offset in the buffer)
+and three docstring claims contradicted by the code.
 
 ## The framing that matters
 

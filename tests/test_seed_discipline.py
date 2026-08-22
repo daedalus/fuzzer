@@ -111,7 +111,9 @@ def test_random_seed_fixture_is_derived_not_shared(random_seed, pytestconfig):
     assert random_seed != pytestconfig.fuzz_seed, "fixture handed out the session seed raw"
 
 
-@pytest.mark.parametrize(("raw", "expected"), [("0x5eed", 0x5EED), ("24301", 24301), ("0o777", 511)])
+@pytest.mark.parametrize(
+    ("raw", "expected"), [("0x5eed", 0x5EED), ("24301", 24301), ("0o777", 511)]
+)
 def test_fuzz_seed_option_round_trips(raw, expected):
     """``--fuzz-seed`` must accept the 0x notation the header prints.
 
@@ -119,6 +121,7 @@ def test_fuzz_seed_option_round_trips(raw, expected):
     decimal, copy-pasting the reproduce line out of a CI log would either
     error or -- worse -- silently reproduce a different seed.
     """
+
     class _Config:
         def getoption(self, _name):
             return raw

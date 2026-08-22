@@ -1,7 +1,14 @@
 """Logarithmic count classification for edge hit counts.
 
 Ports AFL's count_class_lookup16 table that bucketizes raw 0-255 hit counts
-into 8 logarithmic classes: 0, 1, 2, 3, 4-7, 8-15, 16-31, 32-127, 128+.
+into 10 logarithmic classes: 0, 1, 2, 3, 4-7, 8-15, 16-31, 32-63, 64-127,
+128+.
+
+Note that this is one class finer than the *bucket bit* ladder further
+down, which merges 32-63 with 64-127 to stay bit-identical to AFL's
+count_class_lookup8. The two are supposed to differ; the docstring here
+previously claimed the coarser ladder for both, which is why the
+enumeration in tests/test_count_class_exhaustive.py pins each separately.
 
 This normalizes edge frequencies before comparison, preventing the fuzzer
 from distinguishing between "hit 50 times" and "hit 100 times" when both
@@ -11,9 +18,11 @@ The u16 lookup table classifies TWO bytes at once: it maps
 (count_lo | count_hi << 8) to (class_lo | class_hi << 8), giving
 O(1) classification for both bytes per table lookup.
 
-NumPy path: when numpy is available, classify_counts and
-classify_and_new_bits use vectorized operations for 100-400x speedup
-over the pure-Python loop on 131K buffers.
+NumPy path: classify_counts and new_bits are vectorized. numpy is an
+unconditional import here, so the u16-table loop in classify_counts is
+reachable only for an empty buffer and LOOKUP_U16 is never built in
+normal operation -- it is kept, and tested, as the reference the table
+packing is checked against.
 
 Separately, ``bucket_bit`` / ``bucket_bits`` map a raw count to AFL's
 count_class_lookup8 *bit*, which is what a virgin map needs. See the
@@ -123,7 +132,11 @@ def classify_counts(trace_bits):
 def classify_single(val: int) -> int:
     """Classify a single hit count value.
 
-    Returns one of: 0, 1, 2, 3, 4, 8, 16, 32, 128.
+    Returns one of: 0, 1, 2, 3, 4, 8, 16, 32, 64, 128 -- ten values, not
+    the nine this docstring used to list. 64 is reachable (any count in
+    64..127 classifies to it); omitting it made the class ladder read as
+    if it matched the eight-bucket ``bucket_bit`` ladder, which it does
+    not.
     """
     return _classify_byte(val)
 
@@ -204,54 +217,54 @@ def bucket_bits(counts) -> np.ndarray:
     return BUCKET_BIT_TABLE[clamped]
 
 
+def _as_u8(buf, length: int) -> np.ndarray:
+    """View the first ``length`` bytes of a buffer as uint8 without copying."""
+    if isinstance(buf, bytes | bytearray | memoryview):
+        return np.frombuffer(memoryview(buf)[:length], dtype=np.uint8)
+    return np.asarray(buf, dtype=np.uint8)[:length]
+
+
 def new_bits(
     trace: bytes | bytearray,
     virgin: bytes | bytearray,
 ) -> int:
-    """Check if a classified trace has new coverage vs a virgin map.
+    """Check whether a bucketed trace contributes coverage a virgin map lacks.
 
-    Implements AFL's has_new_bits semantics:
-    - For each byte, if trace[i] & virgin[i] is nonzero: overlap (potential new info)
-    - If trace[i] & ~virgin[i] is nonzero: trace has bits virgin doesn't (new edge)
-    - If trace[i] is nonzero and virgin[i] is 0: entirely new edge
+    Both arguments hold *bucket bits* as produced by ``bucket_bit`` /
+    ``bucket_bits``: one disjoint bit per bucket, 0 for an untouched slot.
+    The virgin map accumulates by OR, so ``trace & ~virgin`` is exactly the
+    set of bucket bits this run contributed.
+
+    AFL's ``has_new_bits``, in this module's non-inverted representation:
 
     Returns:
-        0 = no new bits
-        1 = overlap — trace has bits where virgin also has bits (count changed)
-        2 = new edge — trace has bits where virgin is 0
+        0 = nothing new; every bit in the trace is already in the map
+        1 = a known edge landed in a bucket the map had not recorded
+        2 = an edge the map had never seen at all (its slot was 0)
+
+    Note that 1 is *not* "the two maps overlap". An input replayed against a
+    map that already contains it returns 0. Prior to the P2-6 exhaustive
+    sweep this returned 1 for any overlap, so a byte-identical rerun
+    reported new coverage; see tests/test_count_class_exhaustive.py.
     """
     length = min(len(trace), len(virgin))
     if length == 0:
         return 0
 
-    has_overlap = False
+    t = _as_u8(trace, length)
+    v = _as_u8(virgin, length)
 
-    # Process 8 bytes at a time for efficiency
-    i = 0
-    while i + 7 < length:
-        t = int.from_bytes(trace[i : i + 8], "little")
-        v = int.from_bytes(virgin[i : i + 8], "little")
+    # Bits present in the trace and absent from the map. Vectorised over the
+    # whole buffer rather than word-at-a-time: the previous hand-rolled
+    # 8-byte loop and its byte-wise tail implemented two *different*
+    # contracts, so the answer depended on where a byte sat relative to an
+    # 8-byte boundary.
+    contributed = t & ~v
+    if not contributed.any():
+        return 0
 
-        # New edge: trace has bits where virgin is 0
-        if t & ~v:
-            return 2
-
-        # Overlap: trace has bits where virgin also has bits
-        if t & v:
-            has_overlap = True
-
-        i += 8
-
-    # Handle remaining bytes
-    while i < length:
-        t = trace[i]
-        v = virgin[i]
-
-        if t and not v:
-            return 2
-        if t and v:
-            has_overlap = True
-
-        i += 1
-
-    return 1 if has_overlap else 0
+    # A slot the map has never touched. Where v == 0, contributed == t, so
+    # this is the subset of the above with an empty virgin slot.
+    if np.any(v == 0):
+        return 2 if np.any((v == 0) & (t != 0)) else 1
+    return 1
