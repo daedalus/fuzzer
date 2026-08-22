@@ -23,7 +23,15 @@ completeness (134/134), builtin `hash()` in persisted keys.
 
 ## TEST-SUITE EVIDENCE (dynamic)
 
-**E1. Plain `pytest` can hang forever — no timeout configured.**
+**E1. Plain `pytest` can hang forever — no timeout configured.** **FIXED 2026-08-22.**
+`tests/conftest.py` sets a 300s default via `pytest_configure`, and
+`pytest-timeout` is now a declared `dev` dependency. The method is `signal`, not
+`thread`: the thread method arms a `threading.Timer` per test, which makes the
+pytest process multi-threaded for the whole session and so makes every fork in
+E3 riskier. The Z3 modules — the ones that actually block in native code, where
+SIGALRM never lands — opt into `thread` individually via
+`pytest_collection_modifyitems`. Set programmatically rather than in `addopts`
+so a dev env without the plugin still runs.
 `tests/test_structural_constraints.py:295` wedged >9 min inside `solver.add()`
 (`core/structural_constraints.py:186`); Z3's `timeout` parameter bounds only
 `check()`, not assertion processing. SIGTERM could not kill it (stuck in native
@@ -31,6 +39,17 @@ code); SIGKILL required. `pyproject.toml` has no pytest-timeout setting.
 **[verified]**
 
 **E2. Production code leaks `os.environ`; three tests fail as a result.**
+**FIXED 2026-08-22**, both halves. `CmplogCollector.restore_env()` undoes
+`setup_env_for_run()`'s `_CMPLOG_OUT`/`LD_PRELOAD` mutations from a snapshot
+taken before the *first* mutation (re-snapshotting would capture our own
+preload and make restore a no-op); wired into `stop()` and the end of
+`Fuzzer.run()`. `adapters/process.py:50` now distinguishes `None` (inherit)
+from `{}` (empty), so a caller asking for a scrubbed env gets one. An autouse
+`_env_isolation` fixture in `tests/conftest.py` restores the five leaked keys
+after every test, with `--env-leak-strict` to name the leaking test instead of
+quietly repairing it. Regression test `tests/test_regression_env_leak.py`.
+The `adapters/inprocess.py` / `stats.py` SHM-id writers are unchanged: still
+global, now contained at the test boundary rather than at the source.
 Probe-attributed leaks: `LD_PRELOAD=<cmplog shim>.so` + `_CMPLOG_OUT`
 (written with no restore at `core/cmplog.py:315-321`) and
 `__AFL_SHM_ID` / `__AFL_DIST_SHM_ID` / `AFL_MAP_SIZE` (`fuzzer.py:4417`,
@@ -62,14 +81,22 @@ summary reprints the inner test name, so its `count(...) == 1` assertion sees 2.
    `PersistentRunner`. Now routed through `adapters/libc_shm.py`; regression
    test `tests/test_regression_shmat_restype.py`.
 
-2. **`cli/commands.py:297-304` + `services/parallel.py:216`** [verified] —
-   `cmd_fuzz` passes `contextual*`/`lineage_backtrack` kwargs that
+2. **`cli/commands.py:297-304` + `services/parallel.py:216`** [verified] — **FIXED
+   2026-08-21** (`6f7a866`). `cmd_fuzz` passes `contextual*`/`lineage_backtrack` kwargs that
    `run_parallel()` does not accept. Every `--jobs > 1` CLI run dies with
    `TypeError` before spawning a worker; parallel fuzzing is unreachable from
    the CLI.
 
-3. **`adapters/process.py:227` via `services/runner.py:228`** [corroborated] —
-   default spawn-fallback path (`run_target_fast`) enforces **no timeout**
+3. **`adapters/process.py:227` via `services/runner.py:228`** [corroborated] — **FIXED
+   2026-08-22.** All three halves: `run_target_fast` now takes `timeout` (forwarded
+   from `f.timeout` by `runner.py`), drains stderr concurrently via `poll()` instead
+   of after the reap, spawns into its own process group so the kill reaches
+   grandchildren, and returns the real pid on exception after killing and reaping the
+   child. Thread-free by design — a watchdog thread would re-open the multi-threaded
+   fork hazard (E3). Measured: no throughput cost (980 vs 989 eps, overlapping
+   ranges). Regression test `tests/test_regression_fast_path_timeout.py`.
+   Original text follows.
+   Default spawn-fallback path (`run_target_fast`) enforces **no timeout**
    (`os.waitpid(pid, 0)`), returns `pid=0` on exception (crash attribution lost,
    child leaked), and drains stderr only after reaping (64 KiB pipe deadlock).
    One infinite-looping or chatty target hangs the campaign forever. Every other
@@ -82,7 +109,7 @@ summary reprints the inner test name, so its `count(...) == 1` assertion sees 2.
    `adapters/libc_shm.py`. Note #5 is independent and still open, so
    `minimize -c` against an uninstrumented target still prunes the corpus.
 
-5. **`services/minimize.py:126-146`** [verified] — SHM failure or uninstrumented
+5. **`services/minimize.py:126-146`** [verified] — **FIXED 2026-08-21** (`c6fa0ce`): minimize now discovers sharded corpora and refuses to prune on an all-zero bitmap. Original text follows. — SHM failure or uninstrumented
    target yields all-zero bitmaps; zero-bitmap files contribute no edges, so set
    cover moves them to `pruned/`. Against an uninstrumented target the **entire
    corpus** is pruned. Combined with #4, `minimize -c` is broken end-to-end on
@@ -100,16 +127,16 @@ summary reprints the inner test name, so its `count(...) == 1` assertion sees 2.
    blocking `waitpid(pid, 0)` after blind `PTRACE_CONT` can hang forever and
    swallows fatal signals delivered at that point.
 
-7. **`core/rand_pool.py:146-157`** [verified empirically] — `randint(a,b)`
+7. **`core/rand_pool.py:146-157`** [verified empirically] — **FIXED 2026-08-21** (`3712812`): `randint` width-256 fast path adds the offset `a` back. Original text follows. — `randint(a,b)`
    silently drops offset `a` when `b-a+1 == 256` (fast path returns
    `self._m256_l[pos]` without `a + ...`). Verified: `randint(-128,127)` → zero
    negative draws in 5000. Live call site: `operators.py:562`.
 
-8. **`core/grammar.py:726-790`** [corroborated, verified] —
+8. **`core/grammar.py:726-790`** [corroborated, verified] — **FIXED 2026-08-21** (`3712812`): `hierarchical_shrink` returns `best` instead of None. Original text follows. —
    `TreeMutator.hierarchical_shrink` has no `return best`; always returns None →
    `TypeError` in `tmin.py:191`. Grammar-mode crash minimization fails 100%.
 
-9. **`core/schedules.py:227-229`** [verified] — COE power schedule inverted:
+9. **`core/schedules.py:227-229`** [verified] — **FIXED 2026-08-21** (`3712812`): COE skip returns floor energy, not `max_mult*100`. Original text follows. — COE power schedule inverted:
    seeds that should be *skipped* (`coe_skip() == True`) receive max energy
    (`max_mult * 100`). Exactly backwards.
 
@@ -139,7 +166,7 @@ summary reprints the inner test name, so its `count(...) == 1` assertion sees 2.
     target can never be stopped. First wild-pointer input under
     `--inprocess-direct` freezes the fuzzer permanently.
 
-14. **`adapters/persistent_loader.py:511-529`** [verified] — slowdown watchdog
+14. **`adapters/persistent_loader.py:511-529`** [verified] — **FIXED 2026-08-21** (`3712812`): throughput watchdog stops the old process before `start()`. Original text follows. — slowdown watchdog
     "restart" is a no-op: sets `_ready=False` then calls `start()`, which
     early-returns because the old loader is alive-but-slow. All subsequent
     `run_one` return `-2` forever, silently.
@@ -178,7 +205,7 @@ summary reprints the inner test name, so its `count(...) == 1` assertion sees 2.
     memsetting entry-*count* as bytes (wipes header + ⅛ of table, forcing
     generation to 0 so stale entries look current).
 
-21. **`services/fuzzer.py:3224`** [verified] — `is_timeout = rc==-1 and
+21. **`services/fuzzer.py:3224`** [verified] — **FIXED 2026-08-21** (`3712812`): `rc == -1` is treated as a timeout regardless of stderr text. Original text follows. — `is_timeout = rc==-1 and
     stderr=="timeout"` matches only some backends: forkserver (the default)
     returns `(-1,"")`, the C loader reports `RC -1 <n>` with target stderr.
     Default-run hangs are never counted; honggfuzz timeout penalty inert; under
@@ -272,7 +299,7 @@ summary reprints the inner test name, so its `count(...) == 1` assertion sees 2.
 39. **`fuzzer.py:776,5093`** [verified] — `_last_new_edge_exec` not restored on
     `--resume` → every resume immediately false-triggers stall recovery.
 
-40. **`runner.py:584`** [verified] — `is_interesting` treats rc `-2`
+40. **`runner.py:584`** [verified] — **FIXED 2026-08-21** (`3712812`): `is_interesting` excludes rc `-2` as infrastructure, like `-1`. Original text follows. — `is_interesting` treats rc `-2`
     (infrastructure/exec-failure sentinel) as discovery → junk corpus entries
     with phantom coverage credit (`is_crash` correctly excludes it).
 

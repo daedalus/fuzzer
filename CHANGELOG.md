@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`run_target_fast` had no timeout, deadlocked on chatty targets, and leaked
+  the child it failed on.** Bug report 2026-08-21 CRITICAL #3. This is the
+  *default* spawn-fallback path — `run_target` picks it whenever the run is
+  neither `file_mode` nor cmplog — and it was the only backend not honouring
+  `f.timeout`. Three defects, each independently fatal:
+
+  | defect | old behaviour | measured |
+  |---|---|---|
+  | `os.waitpid(pid, 0)`, no deadline | one looping input hangs the campaign | SIGKILLed at 15s, never returned |
+  | stderr read after the reap | >64 KiB fills the pipe; child blocks in `write()`, parent in `waitpid()` | SIGKILLed at 15s, never returned |
+  | `except: return -2, str(e), 0` | crash attribution lost, child never reaped | — |
+
+  After: the looper returns `rc=-1` at the deadline, and the 400 KiB-stderr
+  target returns `rc=3` with 65536 B captured in 0.77s.
+
+  The bound is enforced by `poll()` on the stderr pipe, which doubles as the
+  liveness wait — one syscall per wakeup and **no threads**. A watchdog thread
+  (as `run_target_stdin`/`run_target_file` use) would have been the obvious
+  match, but this path exists specifically to create no threads, and this
+  process forks elsewhere; see E3 and the note in `tests/conftest.py`. The
+  child is also spawned into its own process group (`setpgroup=0`, the
+  posix_spawn equivalent of the siblings' `preexec_fn=os.setsid`) so a timeout
+  kill reaches grandchildren.
+
+  No throughput cost: 980.3 eps vs 989.2 eps median over 5 interleaved repeats
+  of 400 execs, ranges fully overlapping. `timeout=None` keeps the old
+  unbounded behaviour for callers that pass nothing; `runner.py` forwards
+  `f.timeout`, pinned by a wiring test.
+
+  `_TRACKED_PIDS` and friends moved out of the "Stdin mode" section, since all
+  three modes now track their children.
+
+- **cmplog left its shim on the process-global `LD_PRELOAD` forever.** Bug
+  report 2026-08-21 E2. `setup_env_for_run()` is called before *every*
+  execution and set `_CMPLOG_OUT` and `LD_PRELOAD` with no way to undo them.
+  The shim conflicts with the ASAN runtime, so any later subprocess exec ran at
+  full speed and found **zero crashes** — a quiet wrong answer, not an error.
+  `restore_env()` reverts both from a snapshot taken before the *first*
+  mutation; re-snapshotting per call would capture our own preload and make
+  restore a no-op, which is the original defect wearing the fix's clothes.
+  Wired into `stop()` (previously dead code) and the end of `Fuzzer.run()`.
+
+- **`_clean_env({})` returned the full parent environment.** Bug report
+  2026-08-21 E2. `dict(env or os.environ)` is falsy for an empty dict, so a
+  caller asking for a scrubbed environment silently got the opposite. `None`
+  now means "inherit", any dict means "use exactly this".
+
+- **A bare `pytest` could hang forever.** Bug report 2026-08-21 E1. 300s
+  default per test, applied in `pytest_configure` rather than `addopts` so a
+  dev env without `pytest-timeout` still runs. The method is `signal`, not
+  `thread`: the thread method arms a `threading.Timer` per test and makes the
+  pytest process multi-threaded for the entire session, which makes every fork
+  in the suite riskier (E3, and `docs/handover/test_shm_hang_2026-08-14.md`).
+  Measured — under `thread`, CPython emits its multi-threaded-fork
+  DeprecationWarning on a test that is otherwise silent. The Z3 modules, which
+  block inside native code where SIGALRM is never delivered, opt into `thread`
+  individually via `pytest_collection_modifyitems`.
+
+  Also added: an autouse `_env_isolation` fixture restoring the five
+  `os.environ` keys production code mutates, with `--env-leak-strict` to fail
+  and name the leaking test rather than quietly repairing it. This is what
+  fixes the two ASAN tests that passed in isolation and failed in a full run.
+
 ### Changed
 - **Coverage-guided mode is the default; `--no-coverage` opts out.** `fuzz`
   required `-c/--coverage`, and forgetting it failed silently: no SHM bitmap
