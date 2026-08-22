@@ -12,16 +12,103 @@ Also supports optional hardware performance counter tracking on child processes.
 import contextlib
 import logging
 import os
+import select
 import signal
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 log = logging.getLogger(__name__)
 
 # Signal numbers that indicate a crash (not a clean exit)
 SIGNAL_CRASH_CODES = {134, 135, 136, 139, -6, -7, -8, -11}  # SIGABRT/SIGBUS/SIGFPE/SIGSEGV
+
+# ── Shared child-process machinery ──────────────────────────────────────
+#
+# Used by all three execution modes. This lived under "Stdin mode" while only
+# the Popen paths tracked their children; the fast path now does too, and a
+# leaked pid from any mode is the same bug.
+
+_TRACKED_PIDS: set[int] = set()
+_TRACKED_PIDS_LOCK = threading.Lock()
+
+# Cap on retained stderr, matching what this path used to read in one call.
+# Bytes past the cap are still read and discarded -- the read is what keeps
+# the child from blocking, so stopping early would reintroduce the deadlock.
+_STDERR_CAP = 65536
+
+
+def _track(pid: int) -> None:
+    """Track a child PID for cleanup on fatal signals."""
+    with _TRACKED_PIDS_LOCK:
+        _TRACKED_PIDS.add(pid)
+
+
+def _untrack(pid: int) -> None:
+    """Stop tracking a (now-reaped) child PID."""
+    with _TRACKED_PIDS_LOCK:
+        _TRACKED_PIDS.discard(pid)
+
+
+def _child_pids() -> list[int]:
+    """Return a snapshot of tracked child PIDs."""
+    with _TRACKED_PIDS_LOCK:
+        return list(_TRACKED_PIDS)
+
+
+def _kill_process_group(pid: int) -> None:
+    """SIGKILL the child's process group, falling back to the child alone.
+
+    killpg reaches anything the target spawned. It fails if the child already
+    exited or never got its own group, which is not an error worth raising
+    from a cleanup path.
+    """
+    with contextlib.suppress(OSError, ProcessLookupError):
+        os.killpg(os.getpgid(pid), signal.SIGKILL)
+        return
+    with contextlib.suppress(OSError, ProcessLookupError):
+        os.kill(pid, signal.SIGKILL)
+
+
+def _drain_until_eof(fd: int, timeout: float | None) -> tuple[bytes, bool]:
+    """Read *fd* until EOF or *timeout*, returning (data, timed_out).
+
+    EOF means every writer closed the pipe, which for a spawned child means
+    it exited. Polling the pipe is therefore both the stderr drain and the
+    liveness wait, in one syscall per wakeup and no threads.
+
+    Returns the bytes captured so far when the deadline expires; a timed-out
+    target's partial stderr is still worth having for triage.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    poller = select.poll()
+    poller.register(fd, select.POLLIN)
+    deadline = None if timeout is None else time.monotonic() + timeout
+
+    while True:
+        if deadline is None:
+            ready = poller.poll()
+        else:
+            remaining_ms = (deadline - time.monotonic()) * 1000.0
+            if remaining_ms <= 0:
+                return b"".join(chunks), True
+            ready = poller.poll(remaining_ms)
+        if not ready:
+            return b"".join(chunks), True
+        try:
+            chunk = os.read(fd, 65536)
+        except OSError:
+            break
+        if not chunk:
+            break  # EOF: the child closed its stderr, i.e. exited
+        if total < _STDERR_CAP:
+            chunks.append(chunk[: _STDERR_CAP - total])
+            total += len(chunk)
+    return b"".join(chunks), False
+
 
 # ── Fast path (posix_spawn) ─────────────────────────────────────────────
 
@@ -43,11 +130,18 @@ def _get_fast_path_file() -> str:
 
 def _clean_env(env: dict[str, str] | None = None) -> dict[str, str]:
     """Copy env and strip LD_PRELOAD entries that conflict with sanitizers.
-    Caches the result for repeated calls with the same env."""
+    Caches the result for repeated calls with the same env.
+
+    ``None`` means "inherit the parent environment"; any dict -- *including an
+    empty one* -- means "use exactly this". The two were conflated by
+    ``env or os.environ``, which is falsy for ``{}``, so a caller asking for a
+    scrubbed environment silently got the full parent env, LD_PRELOAD and all.
+    That is the opposite of what this function exists to do.
+    """
     global _clean_env_cache
     if env is None and _clean_env_cache is not None:
         return _clean_env_cache
-    e = dict(env or os.environ)
+    e = dict(os.environ if env is None else env)
     ld = e.get("LD_PRELOAD", "")
     if ld:
         import re
@@ -179,6 +273,7 @@ def run_target_fast(
     data: bytes,
     env: dict[str, str] | None = None,
     perf_counters=None,
+    timeout: float | None = None,
 ) -> tuple[int, str, int]:
     """Fast execution path using os.posix_spawn + temp file.
 
@@ -189,16 +284,39 @@ def run_target_fast(
     PID after spawn (before waitpid), so the caller can read execution
     metrics after the target exits.
 
+    *timeout* bounds the run. ``None`` means unbounded, which is only
+    appropriate for a caller that already knows the target terminates --
+    every fuzzing caller must pass one. The bound is enforced by polling the
+    stderr pipe rather than by a watchdog thread, because the whole point of
+    this path is that it creates no threads, and because this process forks
+    elsewhere (see tests/conftest.py on the multi-threaded-fork hazard).
+
+    Draining stderr concurrently is not an optimisation either. The pipe holds
+    64 KiB; a target that writes more blocks in ``write()`` while the parent
+    blocks in ``waitpid()``, and neither ever wakes. Reading only after the
+    reap -- as this did -- deadlocks on any sufficiently chatty target.
+
+    Residual case, stated rather than papered over: a target that closes fd 2
+    and *then* loops forever produces EOF without exiting, and the reap below
+    blocks. Polling the reap instead would put a sleep on the hot path for
+    every execution to cover a target that deliberately closes its own stderr.
+    The common hang -- a target that loops without exiting -- never reaches
+    EOF and is caught by the poll deadline.
+
     Args:
         target: Path to target binary.
         data: Input data.
         env: Optional environment variables.
         perf_counters: Optional PerfCounters instance (opens on child PID).
+        timeout: Seconds before the child is killed, or None for unbounded.
 
     Returns:
-        Tuple of (returncode, stderr, pid).
+        Tuple of (returncode, stderr, pid). rc is -1 on timeout and -2 on
+        infrastructure failure, matching run_target_stdin/run_target_file.
     """
     fname = _get_fast_path_file()
+    pid = 0
+    stderr_r = -1
     try:
         # Write data to temp file (reuse fd to avoid open/close overhead)
         os.lseek(_fast_path_fd, 0, os.SEEK_SET)
@@ -215,23 +333,27 @@ def run_target_fast(
             (os.POSIX_SPAWN_DUP2, stdin_fd, 0),
             (os.POSIX_SPAWN_DUP2, stderr_w, 2),
         )
-        pid = os.posix_spawn(target, [target, fname], e, file_actions=file_actions)
+        # Own process group, so a timeout kill reaches anything the target
+        # spawned. The sibling paths get this from preexec_fn=os.setsid.
+        pid = os.posix_spawn(target, [target, fname], e, file_actions=file_actions, setpgroup=0)
         os.close(stdin_fd)
         os.close(stderr_w)
+        _track(pid)
 
         # Open perf counters on the child PID while still running
         # (inherit=1 doesn't survive exec, so we attach directly).
         if perf_counters is not None and pid > 0:
             perf_counters.open_for_pid(pid)
 
-        _, status = os.waitpid(pid, 0)
+        stderr_data, timed_out = _drain_until_eof(stderr_r, timeout)
+        if timed_out:
+            _kill_process_group(pid)
 
-        # Read stderr after child exits (data is in kernel pipe buffer)
-        try:
-            stderr_data = os.read(stderr_r, 65536)
-        except OSError:
-            stderr_data = b""
-        os.close(stderr_r)
+        _, status = os.waitpid(pid, 0)
+        _untrack(pid)
+
+        if timed_out:
+            return -1, "timeout", pid
 
         if os.WIFEXITED(status):
             rc = os.WEXITSTATUS(status)
@@ -241,31 +363,22 @@ def run_target_fast(
             rc = -2
         return rc, stderr_data.decode(errors="replace"), pid
     except Exception as e:
-        return -2, str(e), 0
+        # A spawned child must never outlive the call that failed, and the
+        # caller needs the real pid: returning 0 lost crash attribution and
+        # leaked the process.
+        if pid > 0:
+            _kill_process_group(pid)
+            with contextlib.suppress(ChildProcessError, OSError):
+                os.waitpid(pid, 0)
+            _untrack(pid)
+        return -2, str(e), pid
+    finally:
+        if stderr_r >= 0:
+            with contextlib.suppress(OSError):
+                os.close(stderr_r)
 
 
 # ── Stdin mode ──────────────────────────────────────────────────────────
-
-_TRACKED_PIDS: set[int] = set()
-_TRACKED_PIDS_LOCK = threading.Lock()
-
-
-def _track(pid: int) -> None:
-    """Track a child PID for cleanup on fatal signals."""
-    with _TRACKED_PIDS_LOCK:
-        _TRACKED_PIDS.add(pid)
-
-
-def _untrack(pid: int) -> None:
-    """Stop tracking a (now-reaped) child PID."""
-    with _TRACKED_PIDS_LOCK:
-        _TRACKED_PIDS.discard(pid)
-
-
-def _child_pids() -> list[int]:
-    """Return a snapshot of tracked child PIDs."""
-    with _TRACKED_PIDS_LOCK:
-        return list(_TRACKED_PIDS)
 
 
 def _write_and_close(stream, data: bytes):

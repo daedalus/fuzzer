@@ -226,7 +226,7 @@ class TargetRunner:
         # Fast path: posix_spawn + temp file (no threads, no watchdog)
         if not f.file_mode and not f._cmplog:
             rc, stderr, pid = run_target_fast(
-                f.target, data, env=env, perf_counters=f._perf_counters
+                f.target, data, env=env, perf_counters=f._perf_counters, timeout=f.timeout
             )
             f._last_child_pid = pid
             if f._perf_counters:
