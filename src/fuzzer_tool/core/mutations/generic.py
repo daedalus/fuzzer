@@ -1,7 +1,6 @@
 """Mutation operators and dictionary handling."""
 
 import random
-import re
 
 
 # Helper: resolve rng parameter to RandPool or stdlib random
@@ -825,35 +824,99 @@ DICT_MUTATIONS = [
 ]
 
 
-_HEX_ESCAPE_RE = re.compile(r"\\x([0-9a-fA-F]{2})")
+def _decode_dict_escapes(token: str) -> bytes:
+    """Decode AFL dictionary escapes in *token* (quotes already stripped).
+
+    Single left-to-right pass rather than a regex sweep, because the escapes
+    are not independent: ``\\\\x41`` is an escaped backslash followed by the
+    literal text ``x41``, but a regex scanning for ``\\x[0-9a-f]{2}`` matches
+    at offset 1 and yields a backslash followed by ``A``. Consuming ``\\\\``
+    as one unit before looking for ``\\x`` is the only way to get that right.
+
+    Recognised: ``\\xNN`` (hex byte), ``\\\\`` (backslash), ``\\"`` (quote).
+    An unrecognised escape keeps its backslash literally, as AFL does --
+    dictionaries in the wild carry things like ``\\1a`` that are not escapes
+    at all, and dropping the backslash would silently alter the token.
+    """
+    out = bytearray()
+    i = 0
+    n = len(token)
+    while i < n:
+        if token[i] != "\\":
+            # Copy the whole run up to the next backslash in one encode().
+            j = token.find("\\", i)
+            if j == -1:
+                j = n
+            out.extend(token[i:j].encode("utf-8"))
+            i = j
+            continue
+        if i + 1 >= n:  # trailing lone backslash
+            out.append(0x5C)
+            break
+        nxt = token[i + 1]
+        if nxt == "x" and i + 3 < n and _IS_HEX(token[i + 2]) and _IS_HEX(token[i + 3]):
+            out.append(int(token[i + 2 : i + 4], 16))
+            i += 4
+        elif nxt == "\\":
+            out.append(0x5C)
+            i += 2
+        elif nxt == '"':
+            out.append(0x22)
+            i += 2
+        else:
+            out.append(0x5C)
+            i += 1
+    return bytes(out)
+
+
+def _IS_HEX(c: str) -> bool:
+    return c in "0123456789abcdefABCDEF"
 
 
 def parse_dict_line(line: str) -> bytes | None:
     """Parse a single dictionary line.
 
-    Handles ``NAME=value`` format and ``\\x??`` hex escapes (like AFL).
-    Literal backslash-x followed by exactly two hex digits is decoded;
-    everything else is encoded as raw UTF-8.
+    Handles the AFL dictionary format: an optional ``name`` (or ``name@level``)
+    followed by ``=``, then the token itself enclosed in double quotes, with
+    ``\\xNN`` / ``\\\\`` / ``\\"`` escapes inside it. A bare quoted token with
+    no ``name=`` prefix is equally valid and is what most of the dictionaries
+    under ``dictionaries/`` actually use.
+
+    The enclosing quotes are DELIMITERS, not content. They were previously
+    kept, so every token from a standard AFL dictionary carried a spurious
+    0x22 on each end -- ``"IDAT"`` rather than ``IDAT`` -- and therefore
+    matched nothing in the target. That affected 12,169 of the 18,311 tokens
+    in the shipped dictionaries (66.5%). No test caught it because the
+    existing ones only asserted the result was non-None `bytes`, never what
+    the bytes were; the tests added alongside this fix assert values.
+
+    The token is located by its quotes rather than by splitting on the first
+    ``=``, which mangled any token containing one: ``"a=b"`` split into
+    ``"a`` and ``b"`` and returned the latter.
+
+    A line with NO quotes is taken to be a bare token in its entirety, and is
+    NOT split on ``=``. AFL only ever puts an unquoted ``=`` between a name
+    and its quoted value, so a line without quotes cannot be a name/value
+    pair -- and the two shipped dictionaries that use the bare form
+    (``ruby.dict``, ``rar.dict``, 5,770 lines between them) confirm it: every
+    one is a token, 296 of which contain an ``=``. Splitting them turned
+    ``!=`` into an empty token and ``==`` into ``=``.
 
     Args:
         line: Raw line from dictionary file.
 
     Returns:
-        Parsed token bytes, or None if line is empty/comment.
+        Parsed token bytes, or None if the line is empty, a comment, or
+        carries no token (``NAME=""``) -- a zero-length token cannot
+        contribute to a mutation, so it is dropped rather than stored.
     """
     line = line.strip()
     if not line or line.startswith("#"):
         return None
-    parts = line.split("=", 1)
-    token = parts[-1] if len(parts) == 2 else line
-    result = bytearray()
-    last = 0
-    for m in _HEX_ESCAPE_RE.finditer(token):
-        result.extend(token[last : m.start()].encode("utf-8"))
-        result.append(int(m.group(1), 16))
-        last = m.end()
-    result.extend(token[last:].encode("utf-8"))
-    return bytes(result)
+    start = line.find('"')
+    end = line.rfind('"')
+    token = line[start + 1 : end] if (start != -1 and end > start) else line
+    return _decode_dict_escapes(token) or None
 
 
 def load_dictionary(path: str) -> list[bytes]:
