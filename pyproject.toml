@@ -27,6 +27,7 @@ smt = ["z3-solver>=4.13"]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
+    "pytest-timeout>=2.3",
     "ruff>=0.4.0",
     "mypy>=1.8",
 ]

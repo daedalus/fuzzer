@@ -29,6 +29,51 @@ requires_z3 = pytest.mark.skipif(
 )
 
 
+# ---------------------------------------------------------------------------
+# Environment isolation
+# ---------------------------------------------------------------------------
+#
+# Production code mutates os.environ process-globally and does not always put
+# it back: CmplogCollector.setup_env_for_run() sets LD_PRELOAD and
+# _CMPLOG_OUT, and the SHM paths set __AFL_SHM_ID / __AFL_DIST_SHM_ID /
+# AFL_MAP_SIZE. Inside one pytest process those leak *forward into unrelated
+# tests*, and the failure is silent rather than loud: an ASAN test whose
+# subprocess inherits a leaked cmplog preload runs to completion at full speed
+# and reports zero crashes, because the shim resolves the coverage symbols
+# ASAN wanted. It passes in isolation and fails in a full run, which reads as
+# flakiness rather than as contamination.
+#
+# Restoring after every test is the cheap half. Reporting *which* test leaked
+# is the half that stops it coming back -- otherwise the next leak is found
+# the same way this one was, by bisecting a suite.
+
+_ENV_OWNED = ("LD_PRELOAD", "_CMPLOG_OUT", "__AFL_SHM_ID", "__AFL_DIST_SHM_ID", "AFL_MAP_SIZE")
+
+
+@pytest.fixture(autouse=True)
+def _env_isolation(request):
+    """Restore the keys production code is known to mutate, after every test.
+
+    Not a full os.environ snapshot: a test that deliberately exports something
+    for a subprocess it spawns is doing normal work, and reverting everything
+    would fight it. This reverts only the five keys whose leakage has actually
+    caused misdiagnosed failures.
+
+    Set ``-p no:cacheprovider`` aside; to see leaks instead of silently fixing
+    them, run with ``--env-leak-strict``.
+    """
+    before = {k: os.environ.get(k) for k in _ENV_OWNED}
+    yield
+    leaked = [k for k in _ENV_OWNED if os.environ.get(k) != before[k]]
+    for k in leaked:
+        if before[k] is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = before[k]
+    if leaked and request.config.getoption("--env-leak-strict"):
+        pytest.fail(f"test leaked os.environ keys: {', '.join(sorted(leaked))}", pytrace=False)
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _fuzz_loader_built():
     """Build ``fuzz_loader`` once, before any test runs.
@@ -79,11 +124,64 @@ def pytest_addoption(parser):
         help="Session seed for randomised tests (int, 0x-prefixed accepted). "
         "Default: random per session, printed in the header.",
     )
+    parser.addoption(
+        "--env-leak-strict",
+        action="store_true",
+        default=False,
+        help="Fail any test that leaves LD_PRELOAD/_CMPLOG_OUT/__AFL_SHM_ID/"
+        "__AFL_DIST_SHM_ID/AFL_MAP_SIZE changed, instead of quietly restoring them.",
+    )
 
 
 def pytest_configure(config):
     raw = config.getoption("--fuzz-seed")
     config.fuzz_seed = int(raw, 0) if raw is not None else int.from_bytes(os.urandom(8), "little")
+
+    # Default per-test timeout. A bare `pytest` could previously wedge forever:
+    # tests/test_structural_constraints.py once sat >9 min inside Z3's
+    # solver.add(), which SIGTERM could not interrupt because it was stuck in
+    # native code -- only SIGKILL worked.
+    #
+    # The method is "signal", not "thread", and that is a deliberate trade.
+    # "thread" is the only method that survives a native hang, but it arms a
+    # threading.Timer for every test, which makes the pytest process
+    # multi-threaded for the whole session. This suite forks constantly
+    # (persistent.py, runner.py's ptrace launch, the inprocess loader), and
+    # fork-from-a-multi-threaded-process is a real deadlock hazard, not a
+    # style warning -- see docs/handover/test_shm_hang_2026-08-14.md. Measured:
+    # arming the thread method makes CPython emit its multi-threaded-fork
+    # DeprecationWarning on a test that is otherwise silent. Bounding the suite
+    # is not worth making every fork in it riskier.
+    #
+    # "signal" costs no thread and bounds every hang that reaches a bytecode
+    # boundary. The native-code cases opt into "thread" per module, below.
+    #
+    # Applied here rather than in addopts so that a dev environment without
+    # pytest-timeout installed still runs the suite instead of dying on an
+    # unrecognised argument. An explicit flag on the command line wins.
+    pm = getattr(config, "pluginmanager", None)
+    if pm is not None and pm.hasplugin("timeout"):
+        if not config.getoption("timeout", None):
+            config.option.timeout = 300
+        if not config.getoption("timeout_method", None):
+            config.option.timeout_method = "signal"
+
+
+# Modules that can block inside a long native call, where SIGALRM is never
+# delivered because the C code never returns to the interpreter. These opt
+# into the thread method individually, so the rest of the suite keeps a
+# single-threaded process to fork from. Z3 is the known case: its `timeout`
+# parameter bounds check(), not assertion processing.
+_NATIVE_HANG_MODULES = ("test_structural_constraints", "test_field_constraints")
+
+
+def pytest_collection_modifyitems(config, items):
+    pm = getattr(config, "pluginmanager", None)
+    if pm is None or not pm.hasplugin("timeout"):
+        return
+    for item in items:
+        if any(mod in item.nodeid for mod in _NATIVE_HANG_MODULES):
+            item.add_marker(pytest.mark.timeout(method="thread"))
 
 
 def pytest_report_header(config):
