@@ -5244,3 +5244,10 @@ class Fuzzer:
         )
         print(f"[*] Boot ticks end: {boot_end:.3f}")
         print()  # blank line before next epoch or shell prompt
+        # Hand os.environ back the way we found it. setup_env_for_run() puts
+        # the cmplog shim on the process-global LD_PRELOAD, and that shim
+        # conflicts with the ASAN runtime, so anything exec'd after this run
+        # -- the next epoch in a multi-target session, a replay, a caller
+        # embedding Fuzzer -- would silently find no crashes.
+        if self._cmplog is not None:
+            self._cmplog.restore_env()

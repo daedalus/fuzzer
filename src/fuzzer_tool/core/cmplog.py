@@ -152,6 +152,9 @@ class CmplogCollector:
         self._pair_cmp: dict[tuple[bytes, bytes], tuple[int, int]] = {}
         self._shim_path: str | None = None
         self._shim_handle = None
+        # Pre-mutation values of the os.environ keys setup_env_for_run owns,
+        # captured once so restore_env() can put them back. None = never set up.
+        self._env_saved: dict[str, str | None] | None = None
         self.workdir: str | None = workdir  # dir for runtime log files
         # Value-density signal: how often each token/pair was present
         # when a coverage gain was detected. Higher = more valuable.
@@ -306,12 +309,25 @@ class CmplogCollector:
         The unified shim provides both libc interposition and compiler-IR
         callbacks. Placed before any ASAN library so coverage/tracecmp
         symbols resolve to the shim, not ASAN's built-in no-op stubs.
+
+        The prior values are recorded on first call so ``restore_env()`` can
+        put them back. Process-global LD_PRELOAD outlives the run that wanted
+        it, and the shim conflicts with the ASAN runtime -- an unrestored
+        preload turns every later subprocess exec into a run that finds
+        nothing, with no error anywhere. See ``restore_env``.
         """
         if self.log_path is None or not os.path.exists(self.log_path):
             log_dir = self.workdir or _get_cmplog_dir()
             os.makedirs(log_dir, exist_ok=True)
             local_id = uuid.uuid4().hex[:12]
             self.log_path = os.path.join(log_dir, f"fuzz_cmplog_{local_id}.cmplog")
+
+        # Snapshot once, before the first mutation. Re-snapshotting on a later
+        # call would capture our own LD_PRELOAD and make restore a no-op --
+        # and this is called before *every* execution, not once per run.
+        if self._env_saved is None:
+            self._env_saved = {k: os.environ.get(k) for k in ("_CMPLOG_OUT", "LD_PRELOAD")}
+
         os.environ["_CMPLOG_OUT"] = self.log_path
 
         if self._shim_path and self._shim_path not in os.environ.get("LD_PRELOAD", ""):
@@ -319,6 +335,27 @@ class CmplogCollector:
             os.environ["LD_PRELOAD"] = (
                 f"{self._shim_path}:{existing}" if existing else self._shim_path
             )
+
+    def restore_env(self) -> None:
+        """Undo ``setup_env_for_run``'s mutations of ``os.environ``.
+
+        Restores ``_CMPLOG_OUT`` and ``LD_PRELOAD`` to whatever they were
+        before the first ``setup_env_for_run`` call, deleting keys that were
+        absent rather than leaving an empty string behind (the linker treats
+        ``LD_PRELOAD=""`` and an unset LD_PRELOAD alike, but a bare
+        ``os.environ`` comparison does not, and that is what test guards and
+        ``_clean_env`` callers see).
+
+        Idempotent, and a no-op if setup was never called.
+        """
+        if self._env_saved is None:
+            return
+        for key, prior in self._env_saved.items():
+            if prior is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = prior
+        self._env_saved = None
 
     def preload_shims(self) -> bool:
         """Load the unified cmplog shim into the current process via ctypes.
@@ -665,7 +702,11 @@ class CmplogCollector:
         return self.tokens
 
     def stop(self):
-        """Clean up log file only (shim is cached in tempdir for reuse)."""
+        """Release run-scoped resources: the log file and the env mutations.
+
+        The shim itself is cached in tempdir for reuse and is not removed.
+        """
+        self.restore_env()
         if self.log_path and os.path.exists(self.log_path):
             with contextlib.suppress(OSError):
                 os.unlink(self.log_path)
