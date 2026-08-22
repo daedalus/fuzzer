@@ -2,6 +2,22 @@
 
 > **Status note**: This roadmap tracks aspirational and in-progress work. Items without [x] are still pending.
 
+> **Audit 2026-08-22 (second pass).** The reconciliation below was run in the
+> morning; this second pass, run the same day, found SEVEN MORE entries that
+> were marked pending but already implemented: the bounded probe window,
+> deterministic stages + SkipDet, call stack coverage, sanitizer coverage,
+> per-format tuning of the regularity band, root cause diff, and the
+> `fuzzer-tool-asan` wrapper (which is not merely done but obsolete — the
+> shipping entry point is strictly better than what the entry asked for).
+>
+> That is twelve stale entries in one day, and the bounded probe window was
+> the top open item under *Coverage & Instrumentation* — the first thing a
+> planning pass would pick up. The pattern is now established well enough to
+> state plainly: **an unchecked `[ ]` in this file is not evidence of anything.**
+> Verify against the code, and when closing an item, close it in the same
+> commit as the implementation. Nine entries remain open; each was checked
+> against the code on 2026-08-22 and is genuinely unimplemented.
+
 > **Audit 2026-08-22.** Five entries were marked pending but had already been
 > implemented, some for over a week. All five were verified against the code,
 > not against commit messages: `favored`/`cull_queue` (called at `fuzzer.py:5058`),
@@ -19,24 +35,24 @@
 
 ## Coverage & Instrumentation
 - [x] **Forkserver on default execution path** (IMPLEMENTED 2026-08-14) — the win did NOT come from re-enabling `ForkserverRunner`: `fuzz_loader.c` did fork+**exec** per input, so uncommenting it measured 0.99× on an ASAN target. `afl_shim.c` now installs a real AFL-style forkserver in its constructor (`__afl_start_forkserver()`, fds 198/199); the loader drives it and falls back to fork+exec for targets built against an older shim. 5.27× on `test_target`, 1.38× on an ASAN target with heavy static init, 2.77× end to end. Opt out with `--no-forkserver`. Targets must be rebuilt to benefit. See `docs/learnings/2026-08-14-forkserver-that-execs.md`.
-- [ ] **Bounded probe window for `__afl_map_edge`** — linear-probe cost is O(map_size) on saturated tables. Bound to 8–16 slots and count drops via the SHM header so the trade is observable.
+- [x] **Bounded probe window for `__afl_map_edge`** (IMPLEMENTED, verified 2026-08-22) — `__AFL_PROBE_MAX` (`afl_shim.c:333`, default 64) bounds the linear probe on BOTH lookup and insertion; bounding one without the other would let a bounded lookup miss an edge a bounded insert had placed. Drops are counted via `__afl_note_drop()` into the diag word and surfaced by `ShmCoverage.read_dropped_edges()` (four consumers: `report.py:326`, `:808`, `stats.py:605`, `fuzzer.py:4403`). The window is 64 rather than the 8–16 this entry proposed because a dropped edge is permanently invisible, not merely delayed: on `ffmpeg_read` (load 0.77) window 16 drops 1.60% and window 64 drops 0.04%. Every other instrumented target sits near 13% load, where all of these windows drop nothing.
 - [x] **Hit-count bucketing on the SHM path** (IMPLEMENTED, verified 2026-08-22) — `shm.py` imports `bucket_bits` from `core/count_class.py` and folds it in through `_update_virgin_buckets`, called from the live coverage path (`shm.py:597`, `:631`). OR'd with the set-membership result rather than replacing it, so a new edge with count 0 still counts as an edge.
 - [x] **`favored` / `cull_queue` minimal-set-cover** (IMPLEMENTED, verified 2026-08-22) — `Fuzzer._cull_queue()` (`fuzzer.py:2791`) computes the AFL-style top_rated/favored set; called every stats interval when `seed_edges` is populated (`:5058`) and passed through as `favored=(seed_key in self._favored)` (`:5023`). Power schedules are no longer permanently unfavored.
-- [ ] **Deterministic stages + SkipDet** — the effector map is dead because no code walks the deterministic operators systematically across a seed. Add a per-seed deterministic pass gated by `SkipDetector`.
+- [x] **Deterministic stages + SkipDet** (IMPLEMENTED, verified 2026-08-22) — `SkipDetector` is imported at `fuzzer.py:52` and constructed at `:1348`; `_deterministic_mutation_stream` walks the operators at `operators.py:229`, gated through `SkipDetector.should_det_fuzz` at `:3248`. Covered by `tests/test_skipdet.py` (31 tests).
 - [x] **Fast path empty-edge-set bug** (FIXED, verified 2026-08-22) — the fast path returns `self._last_ids`, the edge set as of the last slow-path scan, rather than an empty `set()`. Callers that snapshot the return value (e.g. `Fuzzer._prev_edge_set`) now get a real "same as before" set instead of one that reads as "the target fired zero edges". See the comment at `shm.py:168-172`.
-- [ ] **Call stack coverage** — distinguish `f()→g()` from `h()→g()` by encoding caller context into the edge ID, not just `prev_loc ^ cur_loc`. Would improve edge resolution for shared-library targets.
-- [ ] **Sanitizer coverage** — `-fsanitize-coverage=trace-pc-guard` support via `--clang-scov`, with auto-detection of sancov counters in `.so` targets.
+- [x] **Call stack coverage** (IMPLEMENTED, verified 2026-08-22) — `-D__AFL_CTX_SENSITIVE=1` folds `__afl_get_caller_ctx()` into the edge ID (`afl_shim.c:571`), masked to `__AFL_CTX_BITS` (default 8) so context cannot inflate the live ID count without bound. The width is advertised in the symbol NAME (`__afl_ctx_bits_N`) so `elf.detect_ctx_bits()` can size the map before the first execution. Enabled by `tools/build_targets.sh`; check `read_dropped_edges()` rather than guessing when raising the width.
+- [x] **Sanitizer coverage** (IMPLEMENTED, verified 2026-08-22) — `tools/build_targets.sh --clang-scov` (parsed into `WITH_CLANG_SCOV`, `:136`) builds with `-fsanitize-coverage=trace-pc-guard`; `elf.parse_sancov_guard_count()` and `parse_sancov_offsets()` auto-detect the guard/counter sections for exact map sizing, and the sizing path tells the user to rebuild with the flag when it has to estimate instead (`elf.py:1754`). Regression-tested in `tests/test_regression_build_flags.py`.
 - [x] **Cmplog/comparison coverage** (IMPLEMENTED) — symbol-based (libc interposition) and compiler-IR (`trace-cmp`) both live in `afl_shim.c` behind `-D__AFL_CMPLOG=1`; `__sanitizer_cov_trace_cmp{1,2,4,8}` present at `afl_shim.c:1286-1295`. The entry's own text already said "both implemented" — only the checkbox was stale.
 
 ## Mutation
-- [ ] **Per-format tuning of the regularity band** — the operators are currently offered unconditionally (except `invariant_break`). Several are format-shaped in practice: `spectral_peak` matters for DCT codecs, `degenerate_geometry` for vector/mesh parsers, `rank_deficient` for erasure coders. A sniffer gate like `_FORMAT_SNIFFERS` would stop them burning budget on targets that cannot use them.
+- [x] **Per-format tuning of the regularity band** (IMPLEMENTED, verified 2026-08-22) — all three named operators are gated in `_FORMAT_SNIFFERS` (`operator_registry.py:335-337`): `spectral_peak` on `_sniff_dct_transform_coded`, `degenerate_geometry` on `_sniff_mesh_or_vector_geometry`, `rank_deficient` on `_sniff_rar`. `invariant_break` is gated separately on `_has_corpus_samples` (`:454`). Note the `_FORMAT_BOOTSTRAP_RATE` caveat below before reading anything into their measured yield.
 
 ## Scheduling
 - [x] **Fluctuation theorems for fuzzing** (IMPLEMENTED 2026-08-13) — Jarzynski/Crooks relations implemented for mutation trajectories. Work functional `w_i = -log(max(p_i, ε))` over operator-selection probabilities; free-energy estimator `ΔF̂` printed via `StatsReporter.print_stats`. Phase 1 is diagnostics-only: estimates are not fed back into scheduling. CLI flag: `--fluctuation-theorems`. See `src/fuzzer_tool/core/fluctuation.py`, `services/fuzzer.py`, `services/stats.py`.
 - [ ] **Collaborative scheduling across parallel workers** — parallel workers currently sync corpus but don't coordinate scheduling decisions. Could share exploration/exploitation state.
 
 ## Crash Analysis
-- [ ] **Root cause diff** — show minimal byte diff from nearest non-crashing input to root-cause bytes.
+- [x] **Root cause diff** (IMPLEMENTED, verified 2026-08-22) — `core/root_cause.py` plus the `services/root_cause.py` CLI wrapper, exposed as the `root-cause` subcommand; `format_root_cause_report()` renders the diff, and the flaky-target guard refuses to report when the crash does not reproduce reliably (`services/root_cause.py:207`).
 
 ## Performance
 - [x] **`_apply_single_mutation` havoc `max_len` enforcement** (FIXED 2026-08-12, `aa94dd7`) — both insert paths in `services/operators.py:_apply_single_mutation` are guarded by `len(buf) < self.f.max_len`, so no sequence of sub-mutations can overshoot. Regression test `tests/test_regression_havoc_max_len.py` (4 tests, passing), which covers the boundary case of buffers starting *at* `max_len`.
@@ -44,8 +60,8 @@
 ## Infrastructure
 - [ ] **Dockerfile** for reproducible builds and CI
 - [ ] **Structured logging** (e.g. `--log-json`) for machine-parseable output
-- [ ] **`fuzzer-tool-asan` wrapper** — CLI wrapper that sets `LD_PRELOAD=libasan.so.8` and exec's into the real fuzzer (mentioned in ASAN-LIMITATION.md but not yet generated as a installable entry point)
-- [ ] **Persist `invocation` into `state.json`** — `fuzzer.invocation` (`sys.argv`, captured in `cmd_fuzz` for the report exec lines) is not saved on shutdown; a `--resume` run therefore reports only the resumed command, not the original one. Saving it into `state.json` would let reports on resumed sessions carry the original invocation.
+- [x] **`fuzzer-tool-asan` wrapper** (OBSOLETE — do not build this, verified 2026-08-22) — superseded by something better. `cli/ldpreload_wrapper` is already the `fuzzer-tool` entry point itself (`pyproject.toml:40`), and it DETECTS the needed runtime from the target's undefined symbols (`__asan_init` / `__ubsan_handle_*` via `nm -D`) rather than requiring the user to pick a wrapper. A separate `-asan` entry point would be a manual, ASAN-only regression on what already ships.
+- [x] **Persist `invocation` into `state.json`** (FIXED 2026-08-22) — `save_state` persists it and `load_state` restores it onto `original_invocation`, a SEPARATE attribute: `cmd_fuzz` assigns `f.invocation = argv` after the Fuzzer is constructed, i.e. after `load_state` has already run, so restoring onto `invocation` is clobbered a moment later. `save_state` prefers `original_invocation` when present, so the first command survives a chain of resumes. Report and HTML plot print `Started as:` only when it differs from the current command. `cmd_fuzz` now uses `shlex.join` rather than `" ".join`, so an argument containing a space survives being pasted back into a shell. Regression test `tests/test_regression_invocation_persisted.py` (6 tests).
 
 ## Integer-Modulus Checksum Recovery (follow-ons)
 - [ ] **Weighted-sum multiplier sweep is a fixed candidate list** (`_MULTIPLIER_CANDIDATES`) — a target using an unlisted multiplier is missed entirely. Recovering `k` properly means root-finding mod `N`; Coppersmith's bound (`N^(1/deg)`) is useless at realistic data lengths, so the list is the pragmatic answer for now. Consider deriving candidates from cmplog constants instead of hardcoding.
@@ -55,7 +71,12 @@
 - [ ] **`field_constraints.py` bounded-integer pre-pass** (handover §1, deprioritized) — z3 is already fast on these small bitwidth systems, so the win is thin. Revisit only if the integer-checksum pattern proves out.
 
 ## Pending Bugs
-- [ ] `parse_dict_line` triple-encode chain fragile for bytes > 0x7F — **possibly stale.** Spot-checked 2026-08-22: high-byte decoding is correct (`\xff`, `\x80\x9f\xfe` and UTF-8 `é` all round-trip to the right bytes) and the implementation encodes raw UTF-8 rather than chaining encodes. Not closed, because the enclosing-quote contract was not checked against the caller. Re-verify before spending time on it.
+- [x] `parse_dict_line` — **the enclosing-quote contract WAS broken. Fixed 2026-08-22.** The earlier spot-check was right that high-byte decoding is fine; the deferred half of the check is where the bug was. The AFL format encloses the token in double quotes, and the quotes were kept as content, so `"IDAT"` produced `b'"IDAT"'` and matched nothing in the target. **12,169 of the 18,311 tokens in `dictionaries/` (66.5%) were affected**, including every PNG/GIF/ZIP magic. Three further defects fell out of the same rewrite:
+  - splitting on the first `=` mangled any token containing one (`"a=b"` → `b'b"'`), and destroyed the bare unquoted token lists in `ruby.dict` and `rar.dict` (5,770 lines, of which 296 contain an `=`: `!=` → `b''`, `==` → `b'='`). An unquoted line is now taken whole — AFL only puts an unquoted `=` between a name and its *quoted* value, so a line with no quotes cannot be a name/value pair.
+  - the `\xNN` regex sweep matched inside an escaped backslash, so `\\x41` decoded as backslash + `A` instead of backslash + `x41`. Replaced by a single left-to-right scan, since the escapes are not independent.
+  - `\\` and `\"` were not decoded at all.
+
+  This survived because the existing tests asserted only that the result was non-None `bytes`, never what the bytes were. `tests/test_regression_dict_quotes.py` (23 tests) asserts values, and checks the shipped dictionaries directly.
 
 ## Operator-yield triage (FFmpeg session follow-up)
 
