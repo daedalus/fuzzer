@@ -767,7 +767,13 @@ class SeedPicker:
                 # whole corpus here was redundant.
                 all_sk = [
                     sk if sk is not None else f._seed_key(s)
-                    for sk, s in zip(seed_keys, corpus)
+                    # strict=True: seed_keys is built as [None] * len(corpus)
+                    # at the top of this pass, so the lengths are structurally
+                    # equal and a mismatch means the pre-compute pass has been
+                    # broken. Silently truncating to the shorter of the two
+                    # would drop seeds from the diversity pool without a
+                    # symptom.
+                    for sk, s in zip(seed_keys, corpus, strict=True)
                 ]
                 rng = getattr(f, "_rand_pool", None)
                 sample_cap = 64
