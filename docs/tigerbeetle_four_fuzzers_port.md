@@ -29,10 +29,16 @@ the buffer, and `_op_regex_bomb` / `_op_utf8_widen` growing past `max_len` on
 paths random testing never reached — plus three docstring claims contradicted
 by the code.
 
-A finding that changes the shape of the remaining work: 21 operators are
+A finding that changes the shape of the remaining work: **20** operators are
 unenumerable *only* because a coin flip is written `rng.random() < 0.5` rather
 than `rng.randint(0, 1)`. Converting them is mechanical, does not change the
 distribution, and would roughly double the enumerable set.
+
+Recount 2026-08-22: 20 coin-flip sites remain (of 31 `rng.random()` uses in
+`core/`), across `arm.py`, `der.py`, `webm.py`, `isobmff.py`, `protobuf.py`,
+`gif.py`, `webp.py`, `structured.py`, `wfc.py` and `schedulers/cmaes.py`. The
+original count of 21 predates the `_op_regex_bomb` / `_op_utf8_widen` fixes.
+This is a **P1-5 follow-up, not unfinished P1-5** — P1-5 itself is done.
 
 ## The framing that matters
 

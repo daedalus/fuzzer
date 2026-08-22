@@ -2,16 +2,31 @@
 
 > **Status note**: This roadmap tracks aspirational and in-progress work. Items without [x] are still pending.
 
+> **Audit 2026-08-22.** Five entries were marked pending but had already been
+> implemented, some for over a week. All five were verified against the code,
+> not against commit messages: `favored`/`cull_queue` (called at `fuzzer.py:5058`),
+> hit-count bucketing on the SHM path (`shm.py:597`), the fast-path
+> empty-edge-set bug (`shm.py:168-172`), cmplog comparison coverage
+> (`afl_shim.c:1286-1295`), and havoc `max_len` enforcement (`aa94dd7`,
+> 2026-08-12, with a passing regression test). The havoc entry was also
+> duplicated between *Performance* and *Pending Bugs*; the duplicate is gone.
+>
+> This mattered: `favored`/`cull_queue` was recommended as a top-priority open
+> item in a planning pass earlier the same day, on the strength of this file
+> alone. **Check the code before picking work off this list.** The same drift
+> had already been found in `docs/bugreport_2026-08-21_merged.md`, where eight
+> closed findings still read as open.
+
 ## Coverage & Instrumentation
 - [x] **Forkserver on default execution path** (IMPLEMENTED 2026-08-14) — the win did NOT come from re-enabling `ForkserverRunner`: `fuzz_loader.c` did fork+**exec** per input, so uncommenting it measured 0.99× on an ASAN target. `afl_shim.c` now installs a real AFL-style forkserver in its constructor (`__afl_start_forkserver()`, fds 198/199); the loader drives it and falls back to fork+exec for targets built against an older shim. 5.27× on `test_target`, 1.38× on an ASAN target with heavy static init, 2.77× end to end. Opt out with `--no-forkserver`. Targets must be rebuilt to benefit. See `docs/learnings/2026-08-14-forkserver-that-execs.md`.
 - [ ] **Bounded probe window for `__afl_map_edge`** — linear-probe cost is O(map_size) on saturated tables. Bound to 8–16 slots and count drops via the SHM header so the trade is observable.
-- [ ] **Hit-count bucketing on the SHM path** — `count_class.py` is already implemented but only used by the ptrace fallback. Wire it into `ShmCoverage._check_new_coverage` so loop-count-guarded branches become visible.
-- [ ] **`favored` / `cull_queue` minimal-set-cover** — power schedules always run in unfavored mode because `favored` is never computed. Implement `cull_queue` over `EdgeTracker.seed_edges` and pass `favored` through the scheduler.
+- [x] **Hit-count bucketing on the SHM path** (IMPLEMENTED, verified 2026-08-22) — `shm.py` imports `bucket_bits` from `core/count_class.py` and folds it in through `_update_virgin_buckets`, called from the live coverage path (`shm.py:597`, `:631`). OR'd with the set-membership result rather than replacing it, so a new edge with count 0 still counts as an edge.
+- [x] **`favored` / `cull_queue` minimal-set-cover** (IMPLEMENTED, verified 2026-08-22) — `Fuzzer._cull_queue()` (`fuzzer.py:2791`) computes the AFL-style top_rated/favored set; called every stats interval when `seed_edges` is populated (`:5058`) and passed through as `favored=(seed_key in self._favored)` (`:5023`). Power schedules are no longer permanently unfavored.
 - [ ] **Deterministic stages + SkipDet** — the effector map is dead because no code walks the deterministic operators systematically across a seed. Add a per-seed deterministic pass gated by `SkipDetector`.
-- [ ] **Fast path empty-edge-set bug** — `_check_new_coverage` returns `(False, set())` on unchanged input, but callers cache that as the real edge set, making the next diff report all edges as new.
+- [x] **Fast path empty-edge-set bug** (FIXED, verified 2026-08-22) — the fast path returns `self._last_ids`, the edge set as of the last slow-path scan, rather than an empty `set()`. Callers that snapshot the return value (e.g. `Fuzzer._prev_edge_set`) now get a real "same as before" set instead of one that reads as "the target fired zero edges". See the comment at `shm.py:168-172`.
 - [ ] **Call stack coverage** — distinguish `f()→g()` from `h()→g()` by encoding caller context into the edge ID, not just `prev_loc ^ cur_loc`. Would improve edge resolution for shared-library targets.
 - [ ] **Sanitizer coverage** — `-fsanitize-coverage=trace-pc-guard` support via `--clang-scov`, with auto-detection of sancov counters in `.so` targets.
-- [ ] **Cmplog/comparison coverage** — symbol-based (libc interposition) and compiler-IR (`trace-cmp`) both implemented, in `afl_shim.c` behind `-D__AFL_CMPLOG=1`.
+- [x] **Cmplog/comparison coverage** (IMPLEMENTED) — symbol-based (libc interposition) and compiler-IR (`trace-cmp`) both live in `afl_shim.c` behind `-D__AFL_CMPLOG=1`; `__sanitizer_cov_trace_cmp{1,2,4,8}` present at `afl_shim.c:1286-1295`. The entry's own text already said "both implemented" — only the checkbox was stale.
 
 ## Mutation
 - [ ] **Per-format tuning of the regularity band** — the operators are currently offered unconditionally (except `invariant_break`). Several are format-shaped in practice: `spectral_peak` matters for DCT codecs, `degenerate_geometry` for vector/mesh parsers, `rank_deficient` for erasure coders. A sniffer gate like `_FORMAT_SNIFFERS` would stop them burning budget on targets that cannot use them.
@@ -24,7 +39,7 @@
 - [ ] **Root cause diff** — show minimal byte diff from nearest non-crashing input to root-cause bytes.
 
 ## Performance
-- [ ] **`_apply_single_mutation` havoc `max_len` enforcement** — havoc doesn't enforce `max_len` strictly (allows +1 byte per insert, up to +8 total).
+- [x] **`_apply_single_mutation` havoc `max_len` enforcement** (FIXED 2026-08-12, `aa94dd7`) — both insert paths in `services/operators.py:_apply_single_mutation` are guarded by `len(buf) < self.f.max_len`, so no sequence of sub-mutations can overshoot. Regression test `tests/test_regression_havoc_max_len.py` (4 tests, passing), which covers the boundary case of buffers starting *at* `max_len`.
 
 ## Infrastructure
 - [ ] **Dockerfile** for reproducible builds and CI
@@ -40,8 +55,7 @@
 - [ ] **`field_constraints.py` bounded-integer pre-pass** (handover §1, deprioritized) — z3 is already fast on these small bitwidth systems, so the win is thin. Revisit only if the integer-checksum pattern proves out.
 
 ## Pending Bugs
-- [ ] `_apply_single_mutation` havoc doesn't enforce `max_len` strictly (allows +1 byte per insert, up to +8 total)
-- [ ] `parse_dict_line` triple-encode chain fragile for bytes > 0x7F
+- [ ] `parse_dict_line` triple-encode chain fragile for bytes > 0x7F — **possibly stale.** Spot-checked 2026-08-22: high-byte decoding is correct (`\xff`, `\x80\x9f\xfe` and UTF-8 `é` all round-trip to the right bytes) and the implementation encodes raw UTF-8 rather than chaining encodes. Not closed, because the enclosing-quote contract was not checked against the caller. Re-verify before spending time on it.
 
 ## Operator-yield triage (FFmpeg session follow-up)
 
