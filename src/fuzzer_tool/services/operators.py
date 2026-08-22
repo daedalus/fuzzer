@@ -424,11 +424,27 @@ class OperatorEngine:
                 buf.extend(bytearray(grow))  # zero-filled, fast
 
     def _op_regex_bomb(self, buf, _byte_idx, _data):
-        """Replace input with a known regex backtracking bomb pattern."""
+        """Replace input with a known regex backtracking bomb pattern.
+
+        Mutates in place and returns None, so it never reaches mutate()'s
+        post-operator f.max_len clamp. The old code extended the buffer to
+        the pattern length unconditionally, which meant a max_len below the
+        longest bomb (13 bytes) was simply ignored -- and the extension is
+        a floor, not a cap, so a run configured for tiny inputs got
+        13-byte ones instead.
+
+        Patterns that do not fit are filtered out rather than truncated: a
+        truncated backtracking bomb is not a bomb, and silently emitting
+        one would make this operator look like it fired when it had not.
+        """
         rng = self.f._rand_pool
         from fuzzer_tool.core.mutations import REGEX_BOMBS
 
-        pattern = rng.choice(REGEX_BOMBS).encode()
+        max_len = self.f.max_len
+        usable = [p for p in REGEX_BOMBS if not max_len or len(p.encode()) <= max_len]
+        if not usable:
+            return
+        pattern = rng.choice(usable).encode()
         if len(buf) < len(pattern):
             buf.extend(b"\x00" * (len(pattern) - len(buf)))
         # Insert bomb at random position
@@ -709,9 +725,22 @@ class OperatorEngine:
         Radamsa ``sed-utf8-widen``: replaces a random ASCII byte with an
         overlong UTF-8 encoding (2-byte sequence).  Exercises UTF-8
         length-checking bugs in parsers.
+
+        Grows the buffer by exactly one byte, in place, returning None --
+        so like ``_op_fuse_this`` it never reaches mutate()'s post-operator
+        f.max_len clamp, which only runs in the ``result is not None``
+        branch. One byte per application looks harmless and is not: the
+        operator can be selected repeatedly across generations, and there
+        is no other cap on this path. The guard below follows the
+        convention ``_op_clone_fixed`` already uses -- decline rather than
+        truncate, since truncating would corrupt the two-byte sequence
+        this operator exists to produce.
         """
         rng = self.f._rand_pool
         if not buf:
+            return
+        max_len = self.f.max_len
+        if max_len and len(buf) + 1 > max_len:
             return
         # Find a 7-bit ASCII byte (0x00-0x7F)
         candidates = [i for i, b in enumerate(buf) if b < 0x80]

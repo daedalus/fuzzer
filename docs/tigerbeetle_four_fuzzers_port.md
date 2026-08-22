@@ -12,7 +12,7 @@ operators, 10 schedulers.
 | P0-2 distribution assertions | **pattern established** in `tests/test_scheduler_convergence.py::TestHarnessCoverage`, not yet applied to the operator registry or cmplog. |
 | P1-3 scheduler convergence | **done.** See `docs/learnings/2026-08-21-scheduler-convergence.md`. Found five defects; four fixed. Section below is preserved as written, before any of it was known. |
 | P1-4 minimal interface | **prerequisite done** — `MutationContext` replaces the `Fuzzer` in `core/mutator_interface.py`'s `mutate()` and `is_available()`, closing the `**ctx` leak while that interface still had no implementors. The `operators.py` extraction itself (365 `self.f` attribute reads, 29 distinct, 249 of them `max_len`/`_rand_pool`) is not started. |
-| P1-5 exhaustive enumeration | **started** — applied to `core/count_class.py`, the one fully enumerable subsystem. `tests/test_count_class_exhaustive.py`. Not yet pointed at the byte-level operators via an `ExhaustivePool`. |
+| P1-5 exhaustive enumeration | **done.** `core/exhaustive_pool.py` implements the `Gen` odometer behind the `RandPool` method names; 70 of 134 operators are fully enumerable through it. Found two `max_len` escapes. See `docs/learnings/2026-08-22-exhaustive-pool-p1-5.md`. Also applied to `core/count_class.py` (`tests/test_count_class_exhaustive.py`). |
 | P2-6 negative space | **pattern established** in the same file — position-invariance of `new_bits`, which is what found the word-loop/tail disagreement. See `docs/learnings/2026-08-22-count-class-exhaustive.md`. |
 | P2-7 swarm harness | not started |
 | P2-8 `--performance` mode | not started |
@@ -23,9 +23,16 @@ Three of the flakes this document predicted have since been confirmed and fixed
 `test_inserts_magic_value` at 0.658%), all unseeded RNGs in tests asserting
 statistical properties.
 
-The enumeration items have so far found one live defect (`new_bits` returning a
-different answer for the same byte pair depending on its offset in the buffer)
-and three docstring claims contradicted by the code.
+The enumeration items have so far found three live defects — `new_bits`
+returning a different answer for the same byte pair depending on its offset in
+the buffer, and `_op_regex_bomb` / `_op_utf8_widen` growing past `max_len` on
+paths random testing never reached — plus three docstring claims contradicted
+by the code.
+
+A finding that changes the shape of the remaining work: 21 operators are
+unenumerable *only* because a coin flip is written `rng.random() < 0.5` rather
+than `rng.randint(0, 1)`. Converting them is mechanical, does not change the
+distribution, and would roughly double the enumerable set.
 
 ## The framing that matters
 

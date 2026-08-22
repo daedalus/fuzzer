@@ -14,6 +14,8 @@ from fuzzer_tool.core.mutations import (
 )
 from fuzzer_tool.services.operators import OperatorEngine
 
+from .support.operator_env import make_minimal_fuzzer
+
 # ── Seed discipline (docs/tigerbeetle_four_fuzzers_port.md, P0-1) ─────
 #
 # The dual-run pattern: run every randomised assertion twice, once under a
@@ -37,102 +39,13 @@ def _at(seed: int) -> str:
 
 
 def _make_minimal_fuzzer(seed=None):
-    """Build a minimal fuzzer-like object for operator testing.
+    """Thin alias; the mock itself lives in ``tests/support/operator_env.py``.
 
-    ``seed`` is threaded into the ``RandPool`` the operator handlers draw
-    from. Left unseeded (the default, for tests that only assert type or
-    length invariants) the pool is OS-seeded; tests that assert anything
-    probabilistic must pass a seed so a failure is reproducible.
+    Moved there when the exhaustive-enumeration harness (P1-5) needed the
+    same 95-line mock. Kept as a local name so the ~40 call sites below do
+    not all have to change in the same commit.
     """
-
-    class _MockCorpus:
-        _items = [b"AAAA", b"BBBB", b"CCCC", b"DDDD"]
-
-        def __getitem__(self, idx):
-            return self._items[idx]
-
-        def __len__(self):
-            return len(self._items)
-
-    class _MockMarkov:
-        order = 2
-
-        def sample_byte(self, ctx):
-            return 42
-
-    class _MockMC:
-        cem_fitted = False
-        mc_bandit = False
-
-    class _MockMI:
-        def weighted_position(self, n):
-            return None
-
-    class _MockSensitivity:
-        def get_weighted_position(self, data, n):
-            return None
-
-    class _MockElo: ...
-
-    class _MockFrameshift:
-        relations = []
-
-    class _MockSeedMeta(dict):
-        def get(self, key, default=None):
-            return default
-
-    class _MockCmplog:
-        def __init__(self):
-            self.pairs = []
-            self.tokens = []
-
-    class MinimalFuzzer:
-        def __init__(self_):  # noqa: N805
-            self_._cmplog = None
-            self_._crash_mi = None
-            self_._mi = _MockMI()
-            self_._te = None
-            self_._use_transfer_entropy = False
-            self_._use_mi = False
-            self_._sensitivity = _MockSensitivity()
-            self_._elo = None
-            self_._use_elo = False
-            self_._replicator = None
-            self_._use_replicator = False
-            self_._mopt = None
-            self_._use_mopt = False
-            self_._prev_bandit_op = None
-            self_._last_mopt_particles = []
-            self_._last_ops_used = []
-            # Mirrors Fuzzer.__init__: _apply_single_mutation reads both on
-            # every call, and a mock missing them fails only inside havoc.
-            self_._adaptive_havoc = True
-            self_._last_havoc_subops = 0
-            self_._meta_strategy = None
-            self_._meta_strategy_cached = None
-            self_._meta_strategy_used = set()
-            self_._stall_recovery_active = False
-            self_._frameshift = _MockFrameshift()
-            self_.markov = _MockMarkov()
-            self_.markov_trained = False
-            self_.mc = _MockMC()
-            self_.mc_cem = False
-            self_.grammar = None
-            self_.dictionary = []
-            self_.corpus = _MockCorpus()
-            self_.max_len = 65536
-            self_.seed_meta = _MockSeedMeta()
-            self_.mutations_per_input = 1
-            self_._wfc_enabled = False
-            self_._smt_solver = None
-            self_.enable_regex_bomb = False
-            from fuzzer_tool.core.rand_pool import RandPool
-
-            self_._rand_pool = RandPool(seed)
-            self_._dict_scratch = []
-            self_._dict_scratch_idx = 0
-
-    return MinimalFuzzer()
+    return make_minimal_fuzzer(seed)
 
 
 # ── UTF-8 mutation tests ──────────────────────────────────────────────
