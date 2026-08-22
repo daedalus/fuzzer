@@ -917,3 +917,46 @@ class StatsReporter:
         if bayes.get("p_stalled") is not None and bayes["p_stalled"] > 0.3:
             line += f" | P(stall): {bayes['p_stalled']:.0%}"
         print(line, flush=True)
+        self._emit_json_stats(elapsed, eps)
+
+    def _emit_json_stats(self, elapsed: float, eps: float) -> None:
+        """Write one JSON object per stats tick, if --log-json is on.
+
+        Deliberately built from the fuzzer's own attributes rather than by
+        parsing ``line``: the human line is assembled from ~30 conditional
+        fragments whose presence depends on which strategies are enabled,
+        so scraping it is exactly the fragility this flag exists to remove.
+
+        Written to its own stream, never stdout-mixed with the human line,
+        so a consumer can read the file as strict JSON Lines. Any failure
+        here is swallowed -- telemetry must not be able to kill a campaign
+        that is otherwise making progress.
+        """
+        fh = getattr(self.f, "_log_json_fh", None)
+        if fh is None:
+            return
+        f = self.f
+        try:
+            rec = {
+                "ts": time.time(),
+                "elapsed": round(elapsed, 3),
+                "execs": f.exec_count,
+                "eps": round(eps, 2),
+                "eps_filtered": round(getattr(f, "_eps_filtered", 0.0) or 0.0, 2),
+                "corpus": len(f.corpus),
+                "crashes": f.crash_count,
+                "crash_sigs": len(f.crash_sigs or {}),
+                "timeouts": f.timeout_count,
+                "peak_rss_kb": getattr(f, "_peak_rss", 0),
+                "dict_tokens": len(f.dictionary) if f.dictionary else 0,
+            }
+            if f.shm_cov is not None:
+                rec["edges"] = int(getattr(f.shm_cov, "cumulative_edges", 0))
+                rec["dropped_edges"] = int(f.shm_cov.read_dropped_edges())
+            if f._cmplog is not None:
+                rec["cmplog_tokens"] = len(f._cmplog.tokens)
+                rec["cmplog_pairs"] = len(f._cmplog.pairs)
+            fh.write(json.dumps(rec, separators=(",", ":")) + "\n")
+            fh.flush()
+        except Exception:  # pragma: no cover - telemetry must never abort a run
+            log.debug("failed to emit JSON stats record", exc_info=True)

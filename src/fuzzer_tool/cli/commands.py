@@ -97,6 +97,47 @@ def _validate_target(target):
         sys.exit(1)
 
 
+def _run_fuzzer(fuzzer, args):
+    """Run the campaign, optionally under cProfile.
+
+    Extracted from cmd_fuzz so the --log-json handle can be closed in a
+    single finally, rather than duplicating cleanup down both the profiled
+    and unprofiled arms.
+    """
+    if not getattr(args, "profile_hotpath", False):
+        fuzzer.run(iterations=args.iterations)
+        return
+
+    import cProfile
+    import pstats
+
+    pr = cProfile.Profile()
+    pr.enable()
+    try:
+        fuzzer.run(iterations=args.iterations)
+    finally:
+        pr.disable()
+        stats = pstats.Stats(pr)
+        print("\n" + "=" * 80)
+        print(" TOP 60 BY TOTAL TIME (tottime) — self-time, no children")
+        print("=" * 80)
+        stats.sort_stats("tottime")
+        stats.print_stats(60)
+        print("\n" + "=" * 80)
+        print(" TOP 40 BY CUMULATIVE TIME (cumtime) — self + callee time")
+        print("=" * 80)
+        stats.sort_stats("cumtime")
+        stats.print_stats(40)
+        print("\n" + "=" * 80)
+        print(" TOP 30 BY CALL COUNT (ncalls)")
+        print("=" * 80)
+        stats.sort_stats("ncalls")
+        stats.print_stats(30)
+        profile_out = getattr(args, "profile_out", "/tmp/fuzzer_hotpath.prof")
+        stats.dump_stats(profile_out)
+        print(f"[*] cProfile stats saved to {profile_out}")
+
+
 def cmd_fuzz(args):
     """Main fuzzing command."""
     # Applied before anything can spawn a child, so the setting is in force
@@ -510,37 +551,30 @@ def cmd_fuzz(args):
     # containing a space or a quote (a --target-args value, a corpus path)
     # has to survive being copy-pasted back into a shell.
     fuzzer.invocation = shlex.join(sys.argv)
-    if getattr(args, "profile_hotpath", False):
-        import cProfile
-        import pstats
 
-        pr = cProfile.Profile()
-        pr.enable()
-        try:
-            fuzzer.run(iterations=args.iterations)
-        finally:
-            pr.disable()
-            stats = pstats.Stats(pr)
-            print("\n" + "=" * 80)
-            print(" TOP 60 BY TOTAL TIME (tottime) — self-time, no children")
-            print("=" * 80)
-            stats.sort_stats("tottime")
-            stats.print_stats(60)
-            print("\n" + "=" * 80)
-            print(" TOP 40 BY CUMULATIVE TIME (cumtime) — self + callee time")
-            print("=" * 80)
-            stats.sort_stats("cumtime")
-            stats.print_stats(40)
-            print("\n" + "=" * 80)
-            print(" TOP 30 BY CALL COUNT (ncalls)")
-            print("=" * 80)
-            stats.sort_stats("ncalls")
-            stats.print_stats(30)
-            profile_out = getattr(args, "profile_out", "/tmp/fuzzer_hotpath.prof")
-            stats.dump_stats(profile_out)
-            print(f"[*] cProfile stats saved to {profile_out}")
-    else:
-        fuzzer.run(iterations=args.iterations)
+    # --log-json: opened here rather than inside the Fuzzer so the handle's
+    # lifetime is bounded by the try/finally below. "-" means stderr, which
+    # keeps the stream separate from the human stats line on stdout so a
+    # consumer can read either one cleanly.
+    log_json_path = getattr(args, "log_json", None)
+    if log_json_path == "-":
+        fuzzer._log_json_fh = sys.stderr
+    elif log_json_path:
+        Path(log_json_path).parent.mkdir(parents=True, exist_ok=True)
+        # Line-buffered append: a campaign is usually killed rather than
+        # exited, so records must already be on disk when that happens, and
+        # a --resume run should extend the series rather than truncate it.
+        # noqa SIM115: the handle deliberately outlives this statement; it
+        # is owned by the try/finally below, which is the context manager.
+        fuzzer._log_json_fh = open(log_json_path, "a", buffering=1)  # noqa: SIM115
+
+    try:
+        _run_fuzzer(fuzzer, args)
+    finally:
+        fh = getattr(fuzzer, "_log_json_fh", None)
+        if fh is not None and fh is not sys.stderr:
+            fh.close()
+        fuzzer._log_json_fh = None
 
     if args.report is not None:
         from fuzzer_tool.services.report import generate_report
@@ -2027,6 +2061,13 @@ def main() -> int:
         "--resume",
         action="store_true",
         help="Resume from saved fuzzer state (corpus, stats, edge tracker)",
+    )
+    fuzz_parser.add_argument(
+        "--log-json",
+        metavar="FILE",
+        default=None,
+        help="Write one JSON object per stats interval to FILE ('-' for stderr) "
+        "for machine-parseable output. Appends, so --resume extends the series.",
     )
     fuzz_parser.add_argument(
         "--no-save-state",
