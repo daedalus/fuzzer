@@ -738,6 +738,7 @@ class Fuzzer:
         seed_truncate_size=0,
         seed_slide_size=0,
         seed_slide_max_seeds=0,
+        perf_novelty=True,
     ):
         self.target = target
         self.debug = debug
@@ -1132,6 +1133,10 @@ class Fuzzer:
         self._dedup_execs = dedup_execs
         self._dedup_hits = 0
         self._dedup_gaveup = 0
+        # Performance novelty (per-edge max hit count). Separate from the
+        # coverage signal on purpose -- see ShmCoverage._update_max_counts.
+        self._perf_novelty = perf_novelty
+        self._perf_novelty_hits = 0
         self.crash_hashes: set[str] = set()
         self.crash_sigs: dict[str, int] = {}
         self.crash_frames: dict[str, list[str]] = {}  # sig -> frames for clustering
@@ -3309,12 +3314,17 @@ class Fuzzer:
         # Use is_new_coverage_with_edges() on SHM to get both the boolean
         # and the edge set in one buffer scan, avoiding redundant scans.
         self._current_edges_cache = None  # will be set below if SHM scanned
+        # Set from whichever ShmCoverage was actually scanned this iteration.
+        # Only the sparse SHM path maintains per-edge maxima; the ptrace
+        # bitmap has no counts to take a maximum of, so it stays 0 there.
+        scanned_shm = None
         if self.multi_targets:
             active_shm = self._target_shm_covs.get(self.target)
             if active_shm:
                 has_new, edge_ids = active_shm.is_new_coverage_with_edges()
                 self._current_edges_cache = edge_ids
                 has_new_coverage = has_new
+                scanned_shm = active_shm
             else:
                 # bool(): `x and x.f()` yields None (not False) when x is
                 # None, and that None propagates into `success`, which
@@ -3327,8 +3337,23 @@ class Fuzzer:
             has_new, edge_ids = self.shm_cov.is_new_coverage_with_edges()
             self._current_edges_cache = edge_ids
             has_new_coverage = has_new
+            scanned_shm = self.shm_cov
         else:
             has_new_coverage = bool(self.ptrace_cov and self.ptrace_cov.is_new_coverage())
+
+        # Performance novelty: an edge whose trip count grew substantially
+        # past anything seen before. The hit-count buckets saturate (129 and
+        # 10^6 are the same bucket), so this is the only signal that stays
+        # live once a loop is merely being spun harder -- which is the
+        # algorithmic-complexity bug class the timing channel is actually
+        # good for. Suppressed on timeout and crash: a partial execution's
+        # counts are truncated, not extreme.
+        new_max_edges = 0
+        if self._perf_novelty and scanned_shm is not None and not is_timeout and not is_crash:
+            new_max_edges = scanned_shm.new_max_edges
+        is_new_max = new_max_edges > 0
+        if is_new_max:
+            self._perf_novelty_hits += 1
 
         # Region liveness (item 4, handover_skittercreek_tailslayer_port.md):
         # fold this exec's coverage diff into the per-region
@@ -3573,7 +3598,7 @@ class Fuzzer:
             anneal_target = max(5000, self.max_len * 10)
             self._anneal_progress = min(1.0, self.exec_count / anneal_target)
 
-        success = bool(is_crash or is_interesting or has_new_coverage or is_slow)
+        success = bool(is_crash or is_interesting or has_new_coverage or is_slow or is_new_max)
 
         # Per-operator credit. An operator that was selected but left the
         # buffer unchanged cannot have caused this round's outcome, so it
@@ -3832,7 +3857,13 @@ class Fuzzer:
             self._record_fluctuation_observation("crash", self._get_current_edge_set())
             return True
 
-        if is_interesting or has_new_coverage:
+        # is_new_max admits too. Without admission the signal cannot compound:
+        # amplifying a loop is incremental, and the input that first doubled a
+        # trip count is the only useful parent for the one that doubles it
+        # again. Bounded by the growth factor -- an edge can report at most
+        # log_1.5(2^24) < 40 times over a whole run -- so this cannot run away
+        # the way PerfFuzz's strict `>` would on a counted loop.
+        if is_interesting or has_new_coverage or is_new_max:
             _corpus_len_before = len(self.corpus)
             self.save_to_corpus(mutated, parent=data)
             self._record_lineage_insert(mutated, data, _corpus_len_before)

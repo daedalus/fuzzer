@@ -72,6 +72,11 @@ SHM_TAIL_SIZE = 16  # bytes reserved at the end of SHM for the distance tail
 # already unbounded, and it stays correct there.
 VIRGIN_DENSE_MAX = 1 << 24
 
+# Multiplicative growth an edge's hit count must show over its previous
+# maximum before the execution is reported as performance novelty. See
+# ShmCoverage._update_max_counts for why this is not strict `>`.
+MAX_COUNT_GROWTH_FACTOR = 1.5
+
 # shmget constants
 IPC_CREAT = 0o1000
 IPC_RMID = 0
@@ -161,6 +166,18 @@ class ShmCoverage:
         # Count of (edge, bucket) pairs observed for the first time — the
         # coverage that set membership alone cannot see.  Diagnostic only.
         self.bucket_transitions: int = 0
+        # Per-edge maximum hit count ever observed (PerfFuzz's signal).
+        # Buckets saturate: bucket_bits() puts 129 and 10^6 in the same
+        # class, so the virgin map goes quiet exactly where loop trip counts
+        # become interesting. This keeps the raw maximum, which is unbounded
+        # and monotone in work done. Same keying and same dense/overflow
+        # split as _virgin.
+        self._max_counts: np.ndarray = np.zeros(0, dtype=np.uint32)
+        self._max_counts_wide: dict[int, int] = {}
+        # Cumulative count of edges that set a new maximum, and the number
+        # from the most recent scan (consumed by Fuzzer.fuzz_one).
+        self.max_count_transitions: int = 0
+        self._last_max_gain: int = 0
         # Last seen edge_count for O(1) fast-path in is_new_coverage
         self._last_edge_count: int = 0
         # Last seen path_hash for fast-path — catches same-count but different-edge sets
@@ -281,6 +298,21 @@ class ShmCoverage:
                 self._virgin[eid] = 0xFF
             else:
                 self._virgin_wide[eid] = 0xFF
+
+        # Saturate the maxima too, for the reason the buckets are marked: an
+        # edge whose trip count varies run-to-run on identical input is an
+        # endless supply of "new maximum", and would absorb mutation energy
+        # through the performance-novelty path even with its buckets closed.
+        # 0xFFFFFF is the shim's count ceiling, so nothing can exceed it.
+        for eid in ids:
+            if eid >= VIRGIN_DENSE_MAX:
+                self._max_counts_wide[eid] = 0xFFFFFF
+                continue
+            if eid >= self._max_counts.size:
+                grown = np.zeros(1 << max(10, eid.bit_length()), dtype=np.uint32)
+                grown[: self._max_counts.size] = self._max_counts
+                self._max_counts = grown
+            self._max_counts[eid] = 0xFFFFFF
         return len(newly)
 
     @property
@@ -533,6 +565,95 @@ class ShmCoverage:
                 found = True
         return found
 
+    def _update_max_counts(self, edge_ids: np.ndarray, counts: np.ndarray) -> int:
+        """Fold this execution's hit counts into the per-edge maxima.
+
+        Args:
+            edge_ids: uint32 edge ids of the active (non-empty) entries.
+            counts: matching raw hit counts, generation bits already masked.
+
+        Returns:
+            Number of edges whose maximum grew by at least
+            :data:`MAX_COUNT_GROWTH_FACTOR`.
+
+        An edge seen for the first time (previous max 0) is deliberately not
+        reported: that input is already new coverage by set membership, and
+        counting it here would double-credit it.  Requiring multiplicative
+        rather than strictly-greater growth bounds the number of times a
+        single edge can report — ``log_1.5(2^24) < 40`` over an entire run —
+        which matters because each report admits an input to the corpus.
+        Strict ``>`` (PerfFuzz's rule) admits on every ``+1``, which on a
+        counted loop is one admission per iteration.
+        """
+        eids = np.asarray(edge_ids, dtype=np.uint32)
+        cnts = np.asarray(counts, dtype=np.uint32)
+        if eids.size == 0:
+            return 0
+
+        gained = 0
+        in_range = eids < VIRGIN_DENSE_MAX
+        if not in_range.all():
+            gained = self._update_max_overflow(eids[~in_range], cnts[~in_range])
+            eids, cnts = eids[in_range], cnts[in_range]
+            if eids.size == 0:
+                return gained
+
+        hi = int(eids.max()) + 1
+        if hi > self._max_counts.size:
+            grown = np.zeros(1 << max(10, (hi - 1).bit_length()), dtype=np.uint32)
+            grown[: self._max_counts.size] = self._max_counts
+            self._max_counts = grown
+
+        prev = self._max_counts[eids]
+        # float64 throughout: prev * 1.5 overflows uint32 near the 24-bit
+        # count ceiling and wraps to a small number, which would report every
+        # saturated edge as a gain forever.
+        fresh = (prev > 0) & (
+            cnts.astype(np.float64) >= prev.astype(np.float64) * MAX_COUNT_GROWTH_FACTOR
+        )
+        # The maximum itself advances on any increase, gain or not — otherwise
+        # a slow climb below the growth factor never moves the baseline and
+        # the edge reports again the moment it clears 1.5x of a stale value.
+        grew = cnts > prev
+        if grew.any():
+            self._max_counts[eids[grew]] = cnts[grew]
+        if fresh.any():
+            n = int(np.count_nonzero(fresh))
+            self.max_count_transitions += n
+            gained += n
+        return gained
+
+    def _update_max_overflow(self, eids: np.ndarray, counts: np.ndarray) -> int:
+        """Per-edge maxima for ids past the dense array's range.
+
+        Unreachable under any default build; see VIRGIN_DENSE_MAX.
+        """
+        gained = 0
+        for eid, cnt in zip(eids.tolist(), counts.tolist(), strict=False):
+            prev = self._max_counts_wide.get(eid, 0)
+            if cnt > prev:
+                self._max_counts_wide[eid] = cnt
+                if prev > 0 and cnt >= prev * MAX_COUNT_GROWTH_FACTOR:
+                    self.max_count_transitions += 1
+                    gained += 1
+        return gained
+
+    @property
+    def new_max_edges(self) -> int:
+        """Edges that set a new maximum hit count on the last scan.
+
+        Zero after a fast-path scan: an unchanged path_hash means every edge
+        fired the same number of times, so no maximum can have moved.
+        """
+        return self._last_max_gain
+
+    def get_max_counts(self) -> dict[int, int]:
+        """Return {edge_id: highest hit count ever observed} — diagnostics/tests."""
+        hit = np.nonzero(self._max_counts)[0]
+        maxima = dict(zip(hit.tolist(), self._max_counts[hit].tolist(), strict=False))
+        maxima.update(self._max_counts_wide)
+        return maxima
+
     def get_virgin_buckets(self) -> dict[int, int]:
         """Return {edge_id: OR of bucket bits ever seen} — diagnostics/tests."""
         hit = np.nonzero(self._virgin)[0]
@@ -568,6 +689,7 @@ class ShmCoverage:
         """
         edge_count = self.read_edge_count()
         path_hash = self.read_path_hash()
+        self._last_max_gain = 0
         # When path_hash is 0 (test mode / unset), fall back to edge_count-only
         if edge_count == self._last_edge_count and (
             path_hash == 0 or path_hash == self._last_path_hash
@@ -594,8 +716,18 @@ class ShmCoverage:
         # than replacing it: a new edge whose count is 0 occupies no bucket,
         # which the shim never produces but tests and torn reads do, and
         # cumulative_edges must stay an edge count either way.
-        if self._update_virgin_buckets(active_ids, active_counts & 0xFFFFFF):
+        raw_counts = active_counts & 0xFFFFFF
+        if self._update_virgin_buckets(active_ids, raw_counts):
             new_found = True
+
+        # Deliberately NOT OR'd into new_found. has_new_coverage gates corpus
+        # admission, record_edges, cmplog token collection, the format
+        # learner, the GA and the distance metric, all of which read it as
+        # "this input reached somewhere new". An input that merely spun an
+        # existing loop harder reached nowhere new, and folding it in here
+        # would corrupt every one of those consumers. Fuzzer.fuzz_one reads
+        # new_max_edges separately and admits on its own terms.
+        self._last_max_gain = self._update_max_counts(active_ids, raw_counts)
 
         self._last_edge_count = edge_count
         self._last_path_hash = path_hash

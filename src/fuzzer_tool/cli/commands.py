@@ -545,6 +545,7 @@ def cmd_fuzz(args):
         quiet_stats=getattr(args, "profile_hotpath", False),
         no_save_state=getattr(args, "no_save_state", False),
         dedup_execs=not getattr(args, "no_dedup_execs", False),
+        perf_novelty=not getattr(args, "no_perf_novelty", False),
     )
     # shlex.join, not " ".join: this string is now persisted into state.json
     # and printed as the command that reproduces the run, so an argument
@@ -2078,6 +2079,14 @@ def main() -> int:
         "--no-dedup-execs",
         action="store_true",
         help="Do not filter already-executed mutants through the exec bloom filter",
+    )
+    fuzz_parser.add_argument(
+        "--no-perf-novelty",
+        action="store_true",
+        help=(
+            "Do not treat a substantially increased per-edge hit count as novelty "
+            "(disables PerfFuzz-style algorithmic-complexity discovery)"
+        ),
     )
     fuzz_parser.add_argument(
         "--trace",
