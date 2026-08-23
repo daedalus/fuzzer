@@ -810,6 +810,10 @@ class Fuzzer:
         self._last_corpus_prune_exec = 0
         self._last_bloat_warn_exec = 0
         self._minimize_pending = False
+        # Set by run()'s broad handler when the loop dies on an unexpected
+        # exception. State is still persisted; this only marks the run as
+        # incomplete so the summary does not read like a clean stop.
+        self._aborted_by_error = False
         self.coverage_report = Path(coverage_report) if coverage_report else None
         self.coverage_log = Path(coverage_log) if coverage_log else None
         if self.coverage_log:
@@ -5130,6 +5134,19 @@ class Fuzzer:
             pass
         except OSError as e:
             log.warning("Fuzzing interrupted by OS error: %s", e)
+        except Exception:
+            # Everything below this try is end-of-run persistence: _dump_stats,
+            # every _state_store.set, both _save_state, and the ablation fd
+            # close. None of it is in a `finally`, so before this handler any
+            # exception the loop did not name — a ValueError out of a scheduler,
+            # a KeyError out of a mutator — propagated straight past all of it
+            # and discarded the whole campaign: Markov model, Elo ratings,
+            # crash-MI counters, GA/QEA/CMA-ES/MCTS generations. Hours of work
+            # for a bug in one mutation. Catch broadly so the state lands, and
+            # log the traceback so the underlying defect stays loud rather than
+            # being swallowed (Hard Rule 20).
+            log.exception("Fuzzing aborted by unexpected error — persisting state before exit")
+            self._aborted_by_error = True
 
         # Final coverage snapshot for temporal analysis
         self._edge_tracker.record_coverage_snapshot(self.exec_count)
@@ -5170,10 +5187,13 @@ class Fuzzer:
             print(f"[*] Schedule ablation log: {self._ablation_path}")
         if not self.quiet_stats:
             self.print_stats()
+        stop_word = "aborted by an unexpected error" if self._aborted_by_error else "stopped"
         print(
-            f"\n\n[*] Fuzzing stopped. {self.crash_count} crashes found "
+            f"\n\n[*] Fuzzing {stop_word}. {self.crash_count} crashes found "
             f"({len(self.crash_sigs)} unique signatures)."
         )
+        if self._aborted_by_error:
+            print("[!] State was persisted; see the log for the traceback.")
         if self.crash_sigs:
             print("[*] Crash signatures:")
             for sig, count in sorted(self.crash_sigs.items(), key=lambda x: -x[1]):
