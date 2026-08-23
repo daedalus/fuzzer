@@ -836,6 +836,15 @@ class Fuzzer:
         self.enable_arm_mutator = enable_arm_mutator
         self.seed = seed
         random.seed(seed)
+        # RandPool holds its OWN np.random.default_rng(seed) Generator, which
+        # shares no state with the legacy global np.random.* functions. Nothing
+        # in src/ seeded that global, so every np.random draw outside RandPool
+        # — qea.py:267,361,364 (observe/mutate amplitudes) and
+        # schedulers/monte_carlo.py:778,895 (spectral probe vectors) — ran off
+        # OS entropy and made --seed non-reproducible whenever QEA or the
+        # Monte-Carlo scheduler was active. Seed it here, next to random.seed,
+        # so the three streams start together.
+        self._seed_global_numpy(seed)
         # GA lifecycle parameters
         self._ga_enabled = ga
         self._ga_pop_size = ga_pop_size
@@ -4258,6 +4267,22 @@ class Fuzzer:
         entropy_rate = dS / dt
         return entropy_rate < ENTROPY_FLAT_THRESHOLD
 
+    @staticmethod
+    def _seed_global_numpy(seed: int | None) -> None:
+        """Seed the legacy global ``np.random`` state.
+
+        Separate from ``RandPool``, which owns an independent
+        ``default_rng`` Generator. ``np.random.seed`` accepts only
+        ``[0, 2**32)``, so a wider seed is folded rather than raising;
+        ``None`` reseeds from OS entropy, matching ``random.seed(None)``.
+
+        Args:
+            seed: The run seed, or None for an unseeded run.
+        """
+        if not _HAS_NUMPY:
+            return
+        np.random.seed(None if seed is None else seed & SEED_MASK_32)
+
     def _derive_stall_seed(self) -> int:
         """Return the seed to apply for the current stall reseed.
 
@@ -4286,11 +4311,15 @@ class Fuzzer:
         *which* stream those choices come from, so a resumed run does not
         replay the same exhausted sequence.
 
-        Both generators are reseeded together, matching how ``__init__``
-        seeds them: ``random`` drives the non-hotpath choices and
-        ``np.random`` backs ``RandPool``. ``RandPool.reseed`` also drops the
-        pre-fetched pool, which would otherwise keep dispensing old-stream
-        values for another ``_POOL_ENTRIES`` draws.
+        All three streams are reseeded together, matching how ``__init__``
+        seeds them: ``random`` drives the non-hotpath choices, ``RandPool``
+        owns its own ``default_rng`` Generator and backs the mutation
+        hotpath, and the global ``np.random`` state backs QEA and the
+        Monte-Carlo scheduler. ``RandPool`` is NOT backed by global
+        ``np.random`` — an earlier version of this docstring said it was,
+        which is why the global went unseeded. ``RandPool.reseed`` also drops
+        the pre-fetched pool, which would otherwise keep dispensing
+        old-stream values for another ``_POOL_ENTRIES`` draws.
 
         Returns:
             The seed that was applied.
@@ -4298,6 +4327,7 @@ class Fuzzer:
         self._stall_reseed_count += 1
         new_seed = self._derive_stall_seed()
         random.seed(new_seed)
+        self._seed_global_numpy(new_seed)
         if _HAS_NUMPY:
             self._rand_pool.reseed(new_seed)
         self._last_stall_seed = new_seed
