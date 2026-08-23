@@ -22,7 +22,6 @@ from collections import defaultdict
 # ── helpers ────────────────────────────────────────────────────────────
 
 _LOG_PI = math.log(math.pi)
-_LOG_2 = math.log(2.0)
 
 
 def _log_gamma(x: float) -> float:
@@ -52,7 +51,14 @@ def _log_gamma(x: float) -> float:
     for i in range(1, 9):
         y += coeffs[i] / (x + i)
     t = x + 7.5
-    return 0.5 * _LOG_2 * 7.0 + 0.9189385332046727 + (x + 0.5) * math.log(t) - t + math.log(y)
+    # The Lanczos form (g=7, n=9) is
+    #   log(sqrt(2*pi)) + (x+0.5)*log(t) - t + log(y)
+    # and 0.9189385332046727 IS log(sqrt(2*pi)). A leading `0.5 * _LOG_2 * 7.0`
+    # term — log(2**3.5) — was added on top of it, inflating every result by a
+    # constant 2.426. Dead on CPython, where math.lgamma always exists and is
+    # preferred below, but this is the fallback that would silently produce
+    # garbage p-values on a build without it.
+    return 0.9189385332046727 + (x + 0.5) * math.log(t) - t + math.log(y)
 
 
 # Use math.lgamma when available (faster, native), fall back to Lanczos.
