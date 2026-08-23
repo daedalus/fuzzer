@@ -166,7 +166,9 @@ class TestAdversarial:
         f = _make_fuzzer(tmp_root)
         with (
             patch.object(
-                f, "_run_target", side_effect=_raise_on(_Boom("deep in havoc"), after_seed_pass=True)
+                f,
+                "_run_target",
+                side_effect=_raise_on(_Boom("deep in havoc"), after_seed_pass=True),
             ),
             patch.object(f, "_save_state", wraps=f._save_state) as save,
         ):
