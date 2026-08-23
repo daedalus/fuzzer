@@ -122,17 +122,34 @@ class TestReadBitmap:
             assert r.read_bitmap() is None
             assert r._shm_ptr is None
 
-    def test_real_segment_round_trips(self, segment):
-        """Positive control: a good attach still yields the segment contents."""
+    def test_real_segment_round_trips(self, table_segment):
+        """Positive control: a good attach still yields the table contents.
+
+        Uses ``table_segment`` rather than ``segment``: this asserts what a
+        successful attach RETURNS, so it has to agree with the layout the
+        shim writes -- 24-byte front header, then ``entries * 8`` bytes of
+        table.  It previously wrote a payload at the segment base and
+        asserted it came back from offset 0, which was the base-offset read
+        ``read_bitmap()`` was doing rather than the layout it should have
+        been reading.  The sibling reset test below already used the correct
+        fixture, because ``reset_bitmap()`` was fixed first; this half caught
+        up later.
+
+        The old ``segment`` fixture is also too small to hold the table it
+        implied: ``shm_size`` entries is ``shm_size * 8`` bytes, so a correct
+        read of a ``MAP_SIZE``-BYTE segment runs 8x off the end.
+        """
+        segment, entries = table_segment
         addr = libc_shm.shmat(segment)
         assert addr is not None
         payload = bytes(range(256)) * 4
-        ctypes.memmove(addr, payload, len(payload))
+        ctypes.memmove(addr + SHM_METADATA_SIZE, payload, len(payload))
         libc_shm.shmdt(addr)
 
-        r = _runner(coverage_env_id=str(segment))
+        r = _runner(coverage_env_id=str(segment), shm_size=entries)
         bitmap = r.read_bitmap()
         assert bitmap is not None
+        assert len(bitmap) == entries * SIZEOF_ENTRY
         assert bytes(bitmap[: len(payload)]) == payload
         libc_shm.shmdt(r._shm_ptr)
 
