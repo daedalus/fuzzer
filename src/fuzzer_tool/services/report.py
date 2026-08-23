@@ -32,6 +32,11 @@ MILESTONES = (100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000, 100000)
 # sense of the worst case.
 _BRIER_LEGEND = "(0=perfect, 0.25=uninformative, 1.0=worst)"
 
+# Extension save_crash() gives the crash INPUT; `.txt`/`.sh`/`.hex` alongside it
+# are human-readable sidecars, not crashes. Keep in sync with
+# adapters/filesystem.py:save_crash.
+CRASH_INPUT_SUFFIX = ".bin"
+
 
 def _confidence_interval(n, success_count=None):
     """Compute ±1σ, ±2σ, ±3σ confidence intervals.
@@ -765,7 +770,12 @@ def _crash_analysis(f, crashes_dir) -> str:
     if not p.exists():
         return ""
 
-    crashes = [f for f in p.iterdir() if f.is_file()]
+    # save_crash() writes ONE input (`<base>.bin`) plus up to three sidecars
+    # (`.txt` report, `.sh` repro script, `.hex` dump) per crash, so counting
+    # every file in the directory reported ~4x the real crash count, and fed
+    # the size histogram and the sample list with sidecar text as if it were
+    # crash input. Count inputs only.
+    crashes = [f for f in p.iterdir() if f.is_file() and f.suffix == CRASH_INPUT_SUFFIX]
     if not crashes:
         return ""
 
