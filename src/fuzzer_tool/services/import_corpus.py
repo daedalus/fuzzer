@@ -173,6 +173,34 @@ def import_from_honggfuzz(
     return imported, 0
 
 
+def _detect_source_format(source: Path) -> str:
+    """Infer the corpus format from a source directory's layout.
+
+    Checked most-specific first, since an AFL output directory can also
+    contain plain files at the top level and would otherwise look like a
+    libFuzzer corpus.
+
+    Args:
+        source: Directory to inspect.
+
+    Returns:
+        One of ``"afl"``, ``"libfuzzer"``, ``"honggfuzz"``. Falls back to
+        ``"afl"`` when the layout matches nothing, preserving the historical
+        default.
+    """
+    if (source / "cases_honggfuzz").exists() or any(source.glob("SIG*.fuzz")):
+        return "honggfuzz"
+    # AFL writes queue/ (and usually crashes/ + hangs/ or a fuzzer_stats file).
+    if (source / "queue").is_dir() or (source / "fuzzer_stats").is_file():
+        return "afl"
+    # A libFuzzer corpus is a flat directory of inputs with none of the above.
+    if source.is_dir() and not any(
+        (source / d).exists() for d in ("queue", "crashes", "findings", "hangs")
+    ):
+        return "libfuzzer"
+    return "afl"
+
+
 def main():
     """CLI entry point for fuzzer-tool import."""
     import argparse
@@ -188,26 +216,28 @@ def main():
     parser.add_argument(
         "--format",
         choices=["afl", "libfuzzer", "honggfuzz"],
-        default="afl",
-        help="Source format (default: auto-detect AFL)",
+        default=None,
+        help="Source format (default: auto-detect from directory layout)",
     )
     args = parser.parse_args()
 
-    if args.format == "afl" or (
-        args.format == "afl" and (Path(args.source_dir) / "queue").exists()
-    ):
-        seeds, crashes = import_from_afl(args.source_dir, args.corpus, args.crashes)
-        print(f"[+] Imported {seeds} seeds, {crashes} crashes from AFL output")
-    elif args.format == "libfuzzer" or (
-        Path(args.source_dir).is_dir()
-        and not any((Path(args.source_dir) / d).exists() for d in ["queue", "crashes", "findings"])
-    ):
+    # `args.format == "afl" or (args.format == "afl" and ...)` was a tautology:
+    # the second disjunct can only be true when the first already is, and "afl"
+    # is the DEFAULT. So every invocation without an explicit --format took the
+    # AFL branch, and a libFuzzer corpus imported 0 seeds while printing a
+    # success line. Auto-detect only when the user did not choose a format,
+    # which argparse cannot distinguish from an explicit --format afl unless the
+    # default is None.
+    fmt = args.format
+    if fmt is None:
+        fmt = _detect_source_format(Path(args.source_dir))
+
+    if fmt == "libfuzzer":
         imported = import_from_libfuzzer(args.source_dir, args.corpus)
         print(f"[+] Imported {imported} seeds from libFuzzer corpus")
-    elif args.format == "honggfuzz" or (Path(args.source_dir) / "cases_honggfuzz").exists():
+    elif fmt == "honggfuzz":
         imported, _ = import_from_honggfuzz(args.source_dir, args.corpus, args.crashes)
         print(f"[+] Imported {imported} seeds from honggfuzz")
     else:
-        # Default to AFL
         seeds, crashes = import_from_afl(args.source_dir, args.corpus, args.crashes)
-        print(f"[+] Imported {seeds} seeds, {crashes} crashes")
+        print(f"[+] Imported {seeds} seeds, {crashes} crashes from AFL output")
