@@ -717,6 +717,7 @@ MUTATIONS = [
     "bit_rotate",
     "bit_shift",
     "span_invert",
+    "bit_repack",
     "simd_boundary",
     "regex_bomb",
     "clone_fixed",
@@ -1577,11 +1578,15 @@ def bit_rotate(data: bytes, rng=None) -> bytes:
     # Sub-byte amounts are the distinctive capability here. A rotation by a
     # multiple of 8 is a cyclic *byte* shift, which swap_bytes and
     # endianness_swap already reach, so only take the full range sometimes.
-    if total_bits == 8 or r.random() < 0.75:
+    #
+    # randint rather than random() < 0.75: the exhaustive pool intercepts
+    # discrete draws but classifies a continuous one as un-enumerable, which
+    # put this operator outside test_no_operator_exceeds_max_len's reach.
+    if total_bits == 8 or r.randint(0, 3) < 3:
         amount = r.randint(1, 7)
     else:
         amount = r.randint(1, total_bits - 1)
-    left = r.random() < 0.5
+    left = r.randint(0, 1) == 1
     max_start = len(data) - width
     result = bytearray(data)
     for _ in range(_DEGENERATE_RETRIES):
@@ -1678,6 +1683,138 @@ def span_invert(data: bytes, rng=None) -> bytes:
     if last > first + 1:
         result[first + 1 : last] = result[first + 1 : last].translate(_INVERT_TABLE)
     return bytes(result)
+
+
+# Element widths for bit_repack, weighted toward the ones real formats use:
+# 1/2/4/8/16 are PNG's sample depths and BMP's sub-byte bpp modes, 10/12 are
+# the common camera-RAW and TIFF extended depths. 3/5/6 are included thinly
+# because packed RGB modes (RGB565, RGB332) use them and they are the widths
+# most likely to expose an off-by-one in a parser's bit accumulator.
+_REPACK_WIDTHS = (1, 1, 2, 2, 3, 4, 4, 4, 5, 6, 8, 8, 8, 10, 12, 16)
+
+# Span sizes in bytes. Capped at 64 so the per-element Python loop stays
+# cheap: a 64-byte span at 1-bit elements is already 512 iterations.
+_REPACK_SPANS = (2, 4, 4, 8, 8, 16, 16, 32, 64)
+
+
+def _repack_bits(span: bytes, src_w: int, dst_w: int, msb_first: bool, scale: bool) -> bytes:
+    """Re-emit *span*'s ``src_w``-bit elements as ``dst_w``-bit elements.
+
+    Split out from bit_repack so the bit-order and padding semantics can be
+    tested directly with fixed parameters. bit_repack itself only samples the
+    parameters; everything that can be wrong about the packing is in here.
+
+    Any sub-element tail (``len(span) * 8 % src_w`` bits) is carried through
+    verbatim -- dropping it would make the operator lossy in a way that has
+    nothing to do with the repack.
+    """
+    span_bits = len(span) * 8
+    n_el = span_bits // src_w
+    rem_bits = span_bits - n_el * src_w
+    out_bits = n_el * dst_w + rem_bits
+    out_len = (out_bits + 7) // 8
+    order = "big" if msb_first else "little"
+    src_mask = (1 << src_w) - 1
+    dst_mask = (1 << dst_w) - 1
+    val = int.from_bytes(span, order)
+
+    out = 0
+    for i in range(n_el):
+        shift = span_bits - (i + 1) * src_w if msb_first else i * src_w
+        v = (val >> shift) & src_mask
+        w = (v * dst_mask // src_mask) if scale else (v & dst_mask)
+        if msb_first:
+            out = (out << dst_w) | w
+        else:
+            out |= w << (i * dst_w)
+
+    if rem_bits:
+        tail_mask = (1 << rem_bits) - 1
+        if msb_first:
+            out = (out << rem_bits) | (val & tail_mask)
+        else:
+            out |= ((val >> (n_el * src_w)) & tail_mask) << (n_el * dst_w)
+
+    if msb_first:
+        # Left-align so the stream starts at the top bit of the first byte,
+        # where an MSB-first reader expects it. Without this the whole stream
+        # sits right-aligned and every element reads shifted. The
+        # little-endian case needs no padding: the spare high bits are
+        # already past the end of the stream.
+        out <<= out_len * 8 - out_bits
+
+    return out.to_bytes(out_len, order)
+
+
+def bit_repack(data: bytes, rng=None, max_len: int = 65536) -> bytes:
+    """Reinterpret a span as k-bit elements and re-emit them at j-bit.
+
+    Every other operator in the bit band transforms a *fixed* window: flip,
+    rotate, shift and transpose all leave the element boundary grid where they
+    found it. This moves the grid itself, which is the mutation that matters
+    for any format carrying sub-byte packed samples -- PNG bit depths 1/2/4,
+    BMP's 1/4bpp modes, GIF's LZW code stream, camera-RAW 10/12-bit.
+
+    The source and destination widths are always different: the identity
+    width pair is unsampleable rather than checked for afterwards, since a
+    repack at the same width is work that looks like work from the outside --
+    the failure mode that hid in byte_shuffle until f4835f6. That is a
+    narrower guarantee than "the output always differs": a uniform span
+    repacks to a uniform span, and when the width change happens to round to
+    the same byte length the result coincides with the input. Measured at ~2%
+    on an all-zero buffer, 0% on structured input.
+
+    Bit order within the packed stream is drawn per call: PNG, BMP and TIFF
+    pack samples MSB-first, while many bit-reader implementations and RAW
+    variants pack LSB-first, and a parser is usually only correct for one.
+
+    Values map across widths either by masking (truncate, or zero-extend when
+    widening) or by proportional scaling (``v * dst_max // src_max``, which is
+    what a real bit-depth conversion does). Masking is more likely to land on
+    a boundary value; scaling is more likely to survive a validity check.
+
+    Args:
+        data: Input bytes.
+        rng: Optional RNG; defaults to the module-level `random`.
+        max_len: Maximum output length. Repacking changes length by roughly
+            ``dst_w / src_w``, so this is a real constraint rather than a
+            formality: 4-bit to 16-bit quadruples the span.
+
+    Returns:
+        Bytes with one span repacked, or the input unchanged when no sampled
+        span fit inside *max_len*.
+    """
+    if len(data) < 2:
+        return data
+    r = _get_rng(rng)
+    src_w = r.choice(_REPACK_WIDTHS)
+    # Draw the destination from the widths that are not the source, so the
+    # identity case cannot be sampled at all.
+    dst_w = r.choice(tuple(w for w in _REPACK_WIDTHS if w != src_w))
+    msb_first = r.randint(0, 1) == 1
+    scale = r.randint(0, 1) == 1
+
+    # Widening blows the span up by dst_w/src_w, so a span that fits at 8->10
+    # will not fit at 1->16. Sample a few rather than declining on the first
+    # miss, which would make the operator quietly rarer on tight max_len.
+    for _ in range(_DEGENERATE_RETRIES):
+        span_len = min(r.choice(_REPACK_SPANS), len(data))
+        span_bits = span_len * 8
+        n_el = span_bits // src_w
+        if n_el == 0:
+            continue
+        rem_bits = span_bits - n_el * src_w
+        out_bits = n_el * dst_w + rem_bits
+        out_len = (out_bits + 7) // 8
+        if len(data) - span_len + out_len <= max_len:
+            break
+    else:
+        return data
+
+    start = r.randint(0, len(data) - span_len)
+    repacked = _repack_bits(data[start : start + span_len], src_w, dst_w, msb_first, scale)
+    result = data[:start] + repacked + data[start + span_len :]
+    return bytes(result[:max_len])
 
 
 # ---------------------------------------------------------------------------

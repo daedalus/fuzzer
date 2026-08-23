@@ -39,6 +39,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "bit_rotate",
         "bit_shift",
         "span_invert",
+        "bit_repack",
     },
     "byte": {
         "byte_flip",
@@ -296,6 +297,27 @@ def _sniff_rar(d: bytes) -> bool:
     return d[:6] == b"Rar!\x1a\x07"
 
 
+# ── Format gating for bit_repack ────────────────────────────────────────
+#
+# bit_repack is in the bit band, not the format band, but it gets the same
+# sniffer treatment for the reason the format comment above gives: it is
+# mechanically applicable to any byte stream and *meaningful* only where the
+# target parses sub-byte packed samples. Left ungated it would score ~100%
+# change% in tools/measure_operators.py -- a repack almost always changes
+# bytes -- while producing input a non-packed parser rejects immediately.
+# That is the inverse of the byte_shuffle failure: high change%, no value,
+# and it is invisible to the no-op sweep. The measured cost of getting this
+# wrong is in the format comment above: ungated format ops took ~50% of
+# runtime on a target that could not use them.
+def _sniff_bit_packed_samples(d: bytes) -> bool:
+    return (
+        d[:8] == b"\x89PNG\r\n\x1a\n"  # sample depths 1/2/4/8/16
+        or d[:2] == b"BM"  # BMP: 1/4/8/16/24/32 bpp, sub-byte modes packed
+        or d[:6] in (b"GIF87a", b"GIF89a")  # LZW code stream is bit-packed
+        or d[:4] in (b"II*\x00", b"MM\x00*")  # TIFF: 1/2/4/8/10/12/14/16-bit
+    )
+
+
 _FORMAT_SNIFFERS: dict[str, Callable[[bytes], bool]] = {
     "png_chunk_mutate": lambda d: d[:8] == b"\x89PNG\r\n\x1a\n",
     "png_crc_fix": lambda d: d[:8] == b"\x89PNG\r\n\x1a\n",
@@ -338,6 +360,8 @@ _FORMAT_SNIFFERS: dict[str, Callable[[bytes], bool]] = {
     "spectral_peak": _sniff_dct_transform_coded,
     "degenerate_geometry": _sniff_mesh_or_vector_geometry,
     "rank_deficient": _sniff_rar,
+    # bit band: format-shaped op (see comment above its sniffer)
+    "bit_repack": _sniff_bit_packed_samples,
 }
 
 # Fraction of selections on which a not-yet-seen format is still offered.

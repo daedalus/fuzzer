@@ -1505,6 +1505,19 @@ class OperatorEngine:
         if buf:
             return bytearray(span_invert(bytes(buf), rng=self.f._rand_pool)[: self.f.max_len])
 
+    def _op_bit_repack(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations import bit_repack
+
+        # Takes max_len rather than relying on the trailing clamp: repacking
+        # changes length by ~dst_w/src_w, and truncating a repacked stream
+        # mid-element would silently turn this into a truncator.
+        if len(buf) >= 2:
+            return bytearray(
+                bit_repack(bytes(buf), rng=self.f._rand_pool, max_len=self.f.max_len)[
+                    : self.f.max_len
+                ]
+            )
+
     def _op_length_grow(self, buf, _byte_idx, _data):
         rng = self.f._rand_pool
         if buf and len(buf) < self.f.max_len:

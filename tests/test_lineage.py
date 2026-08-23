@@ -531,11 +531,22 @@ class TestLineageInsertWiring:
         seed = f.corpus[0]
         before = len(f._lineage)
         with (
+            # The subject here is lineage wiring, not mutation. Left to the
+            # real operator draw this test depended on the two ops that
+            # happen to come up being non-degenerate for a single-seed corpus
+            # holding one uniform 8-byte buffer -- splice has no donor and
+            # format_lock declines on non-format input, and a pair like that
+            # returns the seed unchanged, so the child keys to the parent and
+            # no node is inserted. That made the test fail whenever the
+            # operator table changed shape, which is a property of the table
+            # rather than of the code under test.
+            patch.object(f, "_dedup_mutate", return_value=b"BBBBBBBB"),
             patch.object(f, "_run_target", return_value=(0, "")),
             patch.object(f, "_is_interesting", return_value=True),
             patch.object(f, "_is_crash", return_value=False),
         ):
             assert f.fuzz_one(seed) is True
+        assert f.corpus[-1] != seed, "precondition: the child must differ from its parent"
         assert len(f._lineage) == before + 1
         # The mutated child descends from the seed with this iteration's ops.
         child_key = f._seed_key(f.corpus[-1])
