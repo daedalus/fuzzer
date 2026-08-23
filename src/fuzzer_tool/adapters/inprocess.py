@@ -21,12 +21,14 @@ import sys
 import tempfile
 from collections.abc import Callable
 
+from fuzzer_tool.adapters import libc_shm
 from fuzzer_tool.adapters.shim_factory import (
     ShimResult,
     build_shim,
     cleanup_shim,
     load_shim,
 )
+from fuzzer_tool.adapters.shm import SHM_METADATA_SIZE, SIZEOF_ENTRY
 
 log = logging.getLogger(__name__)
 
@@ -130,9 +132,18 @@ shm_id_str = os.environ.get("__AFL_SHM_ID")
 if shm_id_str:
     try:
         libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6")
+        libc.shmat.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
         libc.shmat.restype = ctypes.c_void_p
         ptr = libc.shmat(int(shm_id_str), None, 0)
-        if ptr and ptr != -1:
+        # shmat() reports failure with (void *) -1.  Read back through a
+        # c_void_p restype that arrives as the all-ones pointer-width value,
+        # not as Python minus one, so a guard written against minus one never
+        # fires and the failed attach sails into from_address().  Compare
+        # against the real sentinel instead.
+        # (Spelled out rather than imported: this script runs standalone in
+        # the child, without fuzzer_tool on sys.path.)
+        _shmat_failed = (1 << (ctypes.sizeof(ctypes.c_void_p) * 8)) - 1
+        if ptr and ptr != _shmat_failed:
             map_size = int(os.environ.get("AFL_MAP_SIZE", "8192"))
             bitmap = (ctypes.c_uint8 * map_size).from_address(ptr)
             out_path = os.environ.get("_COV_BITMAP_OUT")
@@ -187,6 +198,9 @@ class InProcessRunner:
         self._is_c = False
         self._loader_path: str | None = None
         self._bitmap_out: str | None = None
+        # Cached SHM attach address, or None when not attached.  Never holds
+        # the shmat() failure sentinel -- see read_bitmap().
+        self._shm_ptr: int | None = None
 
         # Fault-address/register relay from the last run (None/{} when absent)
         self._last_fault_addr: int | None = None
@@ -373,14 +387,13 @@ class InProcessRunner:
         # Read from SHM (AFL shim targets write here)
         if self.coverage_env_id:
             try:
-                # Cache SHM attachment for performance
-                if not hasattr(self, "_shm_ptr") or self._shm_ptr is None:
-                    import ctypes.util as _ct_util
-
-                    libc = ctypes.CDLL(_ct_util.find_library("c") or "libc.so.6")
-                    libc.shmat.restype = ctypes.c_void_p
-                    self._shm_ptr = libc.shmat(int(self.coverage_env_id), None, 0)
-                if self._shm_ptr and self._shm_ptr != -1:
+                # Cache SHM attachment for performance.  libc_shm.shmat()
+                # returns None on failure rather than the (void *) -1
+                # sentinel, so only a real address is ever memoised: a failed
+                # attach leaves _shm_ptr None and the next call retries.
+                if self._shm_ptr is None:
+                    self._shm_ptr = libc_shm.shmat(int(self.coverage_env_id))
+                if self._shm_ptr:
                     return (ctypes.c_uint8 * self.shm_size).from_address(self._shm_ptr)
             except Exception:
                 log.warning(
@@ -389,25 +402,58 @@ class InProcessRunner:
         return None
 
     def reset_bitmap(self):
-        """Reset the coverage bitmap to zero (SHM based).
+        """Zero the edge table, leaving the front header intact.
 
-        Note: this zeros ``self.shm_size`` bytes from the SHM base, which
-        includes the 24-byte front header (stack_depth + pad + path_hash +
-        edge_count).  This is safe because the C shim's ``__afl_map_reset()``
-        rewrites the header after the target executes — only the edge table
-        content matters for the in-flight snapshot.
+        This used to ``memset(base, 0, shm_size)``, justified in a comment by
+        "the C shim's ``__afl_map_reset()`` rewrites the header after the
+        target executes".  It does not: ``__afl_map_reset()`` is defined in
+        ``afl_shim.c`` but has ZERO callers, as the shim's own comment at
+        ``afl_shim.c:848`` says.  Nothing rewrote the header, so the memset
+        destroyed all three fields packed into the diag word at offset 4,
+        every execution:
+
+        * **generation** (bits 24-31).  ``__afl_map_edge`` reads the tag
+          straight out of the diag word (``afl_shim.c:567``) and stamps it
+          into ``count``; the reader filters entries by it.  Zeroing it
+          pinned the generation at 0 on both sides, so entries left over
+          from earlier executions were tagged identically to live ones and
+          read as current coverage.  That is the generation protocol's whole
+          purpose, defeated.
+        * **dropped-edge count** (bits 8-23) — per ``adapters/shm.py``, the
+          only honest occupancy signal there is.  Pinned at 0, a saturated
+          map reads as healthy.
+        * **ctx width** (bits 0-7), written once at attach
+          (``afl_shim.c:441``) so the map can be sized for ctx-sensitive
+          builds.
+
+        Two writers of the same header is the defect; ``reset_edge_map()`` is
+        the only one that should touch it.  The length was wrong as well:
+        ``shm_size`` is the entry COUNT (``AFL_MAP_SIZE`` convention), so the
+        old call zeroed ``shm_size`` bytes of a ``24 + shm_size * 8`` byte
+        segment -- one eighth of the table.
+
+        Note for whoever picks this up next: on the ``services/runner.py``
+        path this reset is redundant, because ``reset_edge_map()`` already
+        bumped the generation immediately before ``run_one()``. Removing the
+        call from ``_run_c_direct`` would save a full-table memset per
+        execution, but that wants measuring on a built target rather than
+        arguing about. Tracked in docs/TODO.md.
         """
         if self.coverage_env_id:
             try:
-                # Cache SHM attachment for performance
-                if not hasattr(self, "_shm_ptr") or self._shm_ptr is None:
-                    import ctypes.util as _ct_util
-
-                    libc = ctypes.CDLL(_ct_util.find_library("c") or "libc.so.6")
-                    libc.shmat.restype = ctypes.c_void_p
-                    self._shm_ptr = libc.shmat(int(self.coverage_env_id), None, 0)
-                if self._shm_ptr and self._shm_ptr != -1:
-                    ctypes.memset(self._shm_ptr, 0, self.shm_size)
+                # See read_bitmap: only a successful attach is cached.  This
+                # guard matters more here than there -- the old sentinel check
+                # let a failed attach reach memset(), i.e. a WRITE through
+                # 0xffffffffffffffff, which segfaults the fuzzer itself and is
+                # not catchable by the `except Exception` below.
+                if self._shm_ptr is None:
+                    self._shm_ptr = libc_shm.shmat(int(self.coverage_env_id))
+                if self._shm_ptr:
+                    ctypes.memset(
+                        self._shm_ptr + SHM_METADATA_SIZE,
+                        0,
+                        self.shm_size * SIZEOF_ENTRY,
+                    )
             except Exception:
                 log.warning(
                     "shmat reset failed for coverage_env_id=%s", self.coverage_env_id, exc_info=True

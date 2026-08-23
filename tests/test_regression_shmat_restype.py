@@ -154,6 +154,44 @@ class TestCallSites:
 
 _SHMAT_CALL = re.compile(r"\.shmat\s*\(")
 _RESTYPE_SET = re.compile(r"shmat\.restype\s*=")
+#: The half-fix: restype declared, guard left comparing the address to -1.
+_MINUS_ONE_GUARD = re.compile(r"ptr\s*(?:==|!=)\s*-\s*1\b")
+
+
+def _strip_comments(text: str) -> str:
+    """Drop trailing comments so prose about the defect is not mistaken for it."""
+    return "\n".join(line.split("#", 1)[0] for line in text.splitlines())
+
+
+def test_no_module_guards_an_attach_address_against_minus_one():
+    """The other half: a declared restype makes ``ptr != -1`` dead code.
+
+    ``adapters/inprocess.py`` sat in exactly this state -- all three of its
+    attach sites set ``restype = c_void_p`` (so they passed the scan below)
+    and then checked ``if ptr and ptr != -1``, which a failed attach passes.
+    ``reset_bitmap()`` then wrote through the sentinel and segfaulted the
+    fuzzer.  ``adapters/shm.py`` is the correct form to copy: it compares
+    against ``ctypes.c_void_p(-1).value``, not against ``-1``.
+    """
+    offenders = []
+    for path in sorted(SRC.rglob("*.py")):
+        # Exempt as in the scan below: this module documents the sentinel in
+        # its docstring, and its own behaviour is asserted by TestBindings.
+        if path.name == "libc_shm.py":
+            continue
+        text = path.read_text(encoding="utf-8")
+        if not _SHMAT_CALL.search(text):
+            continue
+        if _MINUS_ONE_GUARD.search(_strip_comments(text)):
+            offenders.append(str(path.relative_to(SRC)))
+
+    assert not offenders, (
+        "attach address compared to -1 in: "
+        + ", ".join(offenders)
+        + " -- under restype=c_void_p a failed shmat() returns the all-ones "
+        "pointer value, which is truthy and != -1; use libc_shm.shmat(), "
+        "which returns None"
+    )
 
 
 def test_no_module_calls_shmat_without_a_declared_restype():

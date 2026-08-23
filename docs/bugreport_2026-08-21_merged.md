@@ -594,9 +594,20 @@ Two observations worth carrying forward:
   reference-correct). `enable_on_exec` is attr bit 12. *Addressed for the SysV
   SHM calls: `adapters/libc_shm.py` is now the single binding site and
   `tests/test_regression_shmat_restype.py` scans the package for re-binders.
-  Sibling hazard, unfixed: the `(void *) -1` failure sentinel does NOT compare
-  equal to `-1` once `restype=c_void_p` is declared, so adding the restype
-  without rewriting the `== -1` guard silences the failure path.*
+  Sibling hazard, **fixed 2026-08-23**: the `(void *) -1` failure sentinel does
+  NOT compare equal to `-1` once `restype=c_void_p` is declared, so adding the
+  restype without rewriting the `== -1` guard silences the failure path.
+  `adapters/inprocess.py` was in exactly that half-fixed state at all three of
+  its attach sites — restype declared (so it passed the scan), guard left as
+  `if ptr and ptr != -1` (so it admitted every failure). `reset_bitmap()`
+  therefore called `memset()` through `0xffffffffffffffff`, which SIGSEGVs the
+  fuzzer and is not catchable by the enclosing `except Exception`; the sentinel
+  was then cached, pinning the runner to the dead pointer. All three now route
+  through `libc_shm`, which returns None. The scan was extended to reject
+  `ptr == -1` / `ptr != -1` in any module that calls `shmat` — a scan that
+  checks only for the declared restype certifies the visible half of the fix
+  and is what let this sit. See
+  `docs/learnings/2026-08-23-shmat-sentinel-and-header-clobber.md`.*
 - **Timeout invariant**: a wait ending without definitive status must yield -1
   (timeout), never a stale-status-derived "crash" nor an eternal freeze. Three
   backends violate it today (ptrace post-loop, run_target_fast, direct modes);
@@ -608,6 +619,16 @@ Two observations worth carrying forward:
   persistent_loader.py is the reference implementation.
 - **Generation-tag reset protocol**: Python `reset_edge_map` is the only writer;
   C-side `__afl_map_reset` (incl. essential wrap-at-256 wipe) has zero callers.
+  *Partly wrong, corrected 2026-08-23: `reset_edge_map` was NOT the only writer.
+  `InProcessRunner.reset_bitmap()` memset the segment base, wiping the whole
+  diag word at offset 4 — generation, dropped-edge counter and ctx width —
+  every execution, immediately after `reset_edge_map()` had bumped the
+  generation. Both sides then sat at generation 0, so entries left over from
+  earlier executions read as live coverage. Its comment justified the memset
+  with "the C shim's `__afl_map_reset()` rewrites the header after the target
+  executes", citing the very function this entry records as having no callers.
+  Now zeroes the edge table only. The wrap-at-256 half of this entry stands:
+  `__afl_map_reset` still has zero callers.*
 - **Index cursors over sorted listings of hash-named files** reorder on
   insertion and permanently skip files. Key on filename instead.
 - **Parallel time-series arrays must be trimmed in lockstep** — two consumers
