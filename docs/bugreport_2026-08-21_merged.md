@@ -254,16 +254,41 @@ summary reprints the inner test name, so its `count(...) == 1` assertion sees 2.
     covers `width-1` bytes of a `width`-byte field (stale top byte retained) and
     the max_len guard compares the wrong expression.
 
-30. **`qea.py:267,361` + `monte_carlo.py:778,895`** [verified] — global numpy
+30. **`qea.py:267,361` + `monte_carlo.py:778,895`** [verified] — **FIXED
+    2026-08-22.** `Fuzzer._seed_global_numpy()` seeds the legacy global
+    `np.random` state from `__init__` (next to `random.seed`) and from
+    `_reseed_after_stall`, folding wider seeds into `[0, 2**32)`. The
+    stall-reseed docstring's claim that `np.random` backs `RandPool` was false
+    and is corrected — `RandPool` owns an independent `default_rng`, which is
+    precisely why the global went unseeded. Regression test
+    `tests/test_regression_numpy_global_seed.py` (10 tests) asserts draw-sequence
+    reproducibility, not that a seeding call was made. Original text follows. — global numpy
     RNG never seeded anywhere in `src/` → `--seed` reproducibility broken
     whenever QEA is active; stall-reseed docstring falsely claims `np.random`
     backs RandPool.
 
-31. **`services/differential.py:78`** [verified] — stderr divergence appends a
+31. **`services/differential.py:78`** [verified] — **FIXED 2026-08-22.** The
+    branch now sets `diverged = True`, but only when neither side produced a
+    valid sanitizer report: when both crashed with the SAME `error_type` the
+    branches above have already adjudicated them as matching, and their stderr
+    still differs every run by allocation addresses, pids and thread ids —
+    flagging on that would report a divergence for every identical crash pair.
+    `tests/test_differential.py::test_different_stderr` ASSERTED THE BUG
+    (`assert not diverged  # stderr differs but not diverged`, written from
+    observed output rather than the documented contract) and is corrected in the
+    same commit — same shape as the `test_hex_escape` case in docs/TODO.md.
+    Regression test `tests/test_regression_stderr_divergence.py` (11 tests).
+    Original text follows. — stderr divergence appends a
     reason but never sets `diverged=True`; documented contract says stderr must
     match. (Supersedes an earlier audit note that cleared this file.)
 
-32. **`services/report.py:763,770`** [verified] — crash counting iterates all
+32. **`services/report.py:763,770`** [verified] — **FIXED 2026-08-22.**
+    `_crash_analysis` filters on `CRASH_INPUT_SUFFIX` (`.bin`), the extension
+    `save_crash` gives the input; `.txt`/`.sh`/`.hex` are sidecars. This also
+    repaired the size histogram and the sample list, which were being fed
+    sidecar TEXT as though it were crash input — the count was the visible
+    symptom, not the whole defect. Regression tests in
+    `tests/test_regression_crash_count_and_rss.py`. Original text follows. — crash counting iterates all
     files in `crashes_dir`; `.txt/.sh/.hex` sidecars + sanitizer JSONs inflate
     "Total crashes" ~4-5×.
 
@@ -285,7 +310,12 @@ summary reprints the inner test name, so its `count(...) == 1` assertion sees 2.
     SIGSTOPped, every later iteration times out and SIGKILLs it — persistent
     mode is single-shot.
 
-37. **`adapters/persistent_loader.py:80`** [corroborated] — embedded loader error
+37. **`adapters/persistent_loader.py:80`** [corroborated] — **STALE ENTRY, NOT A
+    BUG as of 2026-08-22.** Verified against the code, not against commit
+    messages: the embedded loader source spans lines 55-266 and contains no
+    `log` reference at all; all five `log.` call sites (354, 357, 374, 423, 491)
+    are in the OUTER module, where `log = logging.getLogger(__name__)` is
+    defined at line 28. Nothing to fix. Original text follows. — embedded loader error
     handler references undefined `log` → NameError kills the whole loader on any
     SHM attach failure; parent sees EOF and reports `-2` thereafter.
 
@@ -385,7 +415,14 @@ summary reprints the inner test name, so its `count(...) == 1` assertion sees 2.
     reproducibility); front cache keyed on `len(corpus)` goes stale after
     in-place trim.
 
-57. **`import_corpus.py:196-213`** [corroborated] — format auto-detect is dead
+57. **`import_corpus.py:196-213`** [corroborated] — **FIXED 2026-08-22.**
+    `--format` now defaults to None so argparse can distinguish "unspecified"
+    from an explicit `--format afl`, and detection moved into
+    `_detect_source_format()`, checked most-specific-first (honggfuzz markers,
+    then AFL `queue/`/`fuzzer_stats`, then flat = libFuzzer) because an AFL
+    output tree also has top-level files and would otherwise look like a
+    libFuzzer corpus. Regression tests in
+    `tests/test_regression_crash_count_and_rss.py`. Original text follows. — format auto-detect is dead
     code (`args.format == "afl" or …` always true on default); libFuzzer corpora
     import 0 seeds with a success message.
 
@@ -393,7 +430,13 @@ summary reprints the inner test name, so its `count(...) == 1` assertion sees 2.
     from module-global `random` despite injected RNG plumbing (~1/10 of draws
     break `-s` reproducibility); same leak in grammar versifier paths.
 
-59. **`fuzzer.py:2667-2680`** [verified] — memory prune keyed off peak RSS
+59. **`fuzzer.py:2667-2680`** [verified] — **FIXED 2026-08-22.** New module-level
+    `_current_rss_kb()` reads resident pages from `/proc/self/statm` and converts
+    via `SC_PAGE_SIZE`, returning None (check skipped) when /proc is unreadable
+    or unparseable. The docstring claiming `getrusage` reports current RSS is
+    corrected. Regression tests in `tests/test_regression_crash_count_and_rss.py`
+    include a falsification that allocates and frees 200 MiB and asserts the
+    reading drops back BELOW `ru_maxrss`. Original text follows. — memory prune keyed off peak RSS
     (`ru_maxrss`, monotonic) labeled as current RSS → pruner arms forever after
     one spike; warning prints stale numbers as current usage.
 
@@ -401,7 +444,15 @@ summary reprints the inner test name, so its `count(...) == 1` assertion sees 2.
     computed results and records hardcoded zeros; drift stats meaningless
     whenever `--differential-target` is used.
 
-61. **`fuzzer.py:4785-5122`** [verified] — main loop catches only
+61. **`fuzzer.py:4785-5122`** [verified] — **FIXED 2026-08-22.** `run()` now
+    also catches `Exception`, logs the traceback via `log.exception` (loud, not
+    swallowed — Hard Rule 20) and sets `_aborted_by_error`, so every
+    `_state_store.set`, both `_save_state` calls and the ablation fd close below
+    the try are reached. The end-of-run summary says "aborted by an unexpected
+    error" rather than "stopped" so an aborted run is not mistaken for a clean
+    one. `BaseException` deliberately still propagates. Regression test
+    `tests/test_regression_end_of_run_persistence.py` (10 tests). Original text
+    follows. — main loop catches only
     `(KeyboardInterrupt, SystemExit, OSError)`; any other exception skips all
     end-of-run persistence (`_dump_stats`, every `_state_store.set`, both
     `_save_state`) and leaks the ablation fd — hours of campaign state lost.
@@ -439,7 +490,14 @@ summary reprints the inner test name, so its `count(...) == 1` assertion sees 2.
     in-tree); penalty distance for unreachable functions derived from `visited`
     left over from the last target's BFS (unstable across runs).
 
-70. **`chi_squared.py:55`** [verified] — Lanczos `_log_gamma` fallback adds
+70. **`chi_squared.py:55`** [verified] — **FIXED 2026-08-22.** The spurious
+    `0.5 * _LOG_2 * 7.0` term is gone; `_log_gamma` now agrees with
+    `math.lgamma` to ~1e-15 (it was off by a constant 2.426). `_LOG_2` became
+    unused and was removed with it. Still dead on CPython, so the regression
+    test `tests/test_regression_log_gamma_constant.py` (20 tests) calls
+    `_log_gamma` directly and derives expectations from closed-form identities
+    (Gamma(n)=(n-1)!, Gamma(1/2)=sqrt(pi), Euler reflection) rather than from a
+    recorded run. Original text follows. — Lanczos `_log_gamma` fallback adds
     spurious `+ln 2^3.5` (dead code today; garbage p-values if `lgamma` absent).
 
 71. **`edge_tracker.py:781`** [verified] — `record_edge_lifetimes` fed two
@@ -501,6 +559,33 @@ summary reprints the inner test name, so its `count(...) == 1` assertion sees 2.
     (production path, zero diagnostics).
 
 ---
+
+## Audit 2026-08-22 (high-ROI pass)
+
+Seven findings fixed in this series (30, 31, 32, 57, 59, 61, 70) and one
+(37) found to be a stale entry that was never a bug. Each was verified
+against the source before being touched, per the standing warning in
+docs/TODO.md that an open-looking entry is not evidence of anything — a
+warning that earned its keep again here: 37 read as open and was already
+correct.
+
+Two observations worth carrying forward:
+
+- **The count was not the bug.** Findings 32 and 59 were both filed on a
+  wrong NUMBER (crash totals ~4x high; pruner arming forever). In both cases
+  the number was the visible edge of a wrong SOURCE — sidecar text feeding a
+  size histogram, a monotonic high-water mark feeding a threshold check.
+  Fixing only the reported symptom would have left both half-broken.
+
+- **A test asserted the defect, again.** `test_different_stderr` pinned
+  finding 31 in place with `assert not diverged  # stderr differs but not
+  diverged`, contradicting the module's own docstring. That is the second
+  instance of this pattern in this tree after `test_hex_escape`. Both were
+  written by recording what the code returned. The value-free-assertion sweep
+  recorded in docs/TODO.md (573 of ~4,956 tests) measures a related but
+  distinct hazard: these two assertions were specific and strong, and wrong.
+  Worth a separate sweep for tests whose comments explain away a surprising
+  expected value.
 
 ## Cross-cutting patterns worth regression tests
 
