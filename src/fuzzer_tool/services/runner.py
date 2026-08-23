@@ -81,6 +81,27 @@ def _capture_crash_state(pid: int, libc, fuzzer) -> None:
         }
 
 
+def _ptrace_report_timeout(pid: int) -> tuple[int, str]:
+    """Kill and reap a tracee that outlived its deadline; report it as a timeout.
+
+    Returns the ``(-1, "timeout")`` pair the rest of the tool treats as "hung".
+    That sentinel is the contract: ``Fuzzer`` tests ``rc == -1`` to set
+    ``is_timeout``, which in turn keeps the input out of ``crashes/``, out of
+    signature dedup, and (under ``--metropolis``) out of the corpus.  The
+    stderr text is supplied for the backends that match on it, but no caller
+    should need it -- rc alone decides.
+
+    The tracee is SIGKILLed rather than detached: it is stopped under ptrace
+    with an unknown amount of work left, and PTRACE_DETACH would resume it as
+    an orphan competing for the same CPU as the next execution.
+    """
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.kill(pid, signal.SIGKILL)
+    with contextlib.suppress(ChildProcessError):
+        os.waitpid(pid, 0)
+    return -1, "timeout"
+
+
 def _write_and_close(fd: int, data: bytes) -> None:
     """Write *data* to *fd* then close it — designed to run in a thread."""
     try:
@@ -398,7 +419,20 @@ class TargetRunner:
             last_sig = 0
             returncode = 0
             child_reaped = False
-            while time.time() < deadline:
+            # Deadline expiry is tracked explicitly rather than inferred
+            # after the fact. `status` holds the LAST CONSUMED event, which
+            # on expiry is whatever stop the tracee was last seen in -- so
+            # the post-loop reconstruction below read a timeout as a crash:
+            # with >=1 breakpoint handled, the stale SIGTRAP stop yielded
+            # rc -5 ("crash signal 5"); with none, the SIGKILL path yielded
+            # rc -9. `is_timeout` tests rc == -1, so it could never fire in
+            # ptrace mode, and every slow input landed in crashes/ and took
+            # a slot in signature dedup.
+            timed_out = False
+            while True:
+                if time.time() >= deadline:
+                    timed_out = True
+                    break
                 waited, status = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
                 # Check the PID, not just status: waitpid returns (0, 0) for
                 # "no event" but (pid, 0) for a clean exit with rc=0 — both
@@ -434,13 +468,31 @@ class TargetRunner:
                         _capture_crash_state(pid, libc, f)
                         break
 
+            if timed_out:
+                return _ptrace_report_timeout(pid)
+
             if child_reaped:
                 pass
             elif last_action == "cont" and last_sig == signal.SIGTRAP:
                 waited, status = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
                 if waited != 0 and os.WIFSTOPPED(status):
                     libc.ptrace(PTRACE_CONT, pid, None, None)
-                    _, status = os.waitpid(pid, 0)
+                    # Bounded, not blocking. The tracee was just resumed with
+                    # a blind PTRACE_CONT after its breakpoint handler failed;
+                    # it may never stop again. `os.waitpid(pid, 0)` here hung
+                    # the fuzzer indefinitely on such a target, past a
+                    # deadline that had already been checked -- and swallowed
+                    # any fatal signal delivered while it blocked.
+                    resumed = False
+                    while time.time() < deadline:
+                        waited, st = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
+                        if waited != 0:
+                            status = st
+                            resumed = True
+                            break
+                        time.sleep(0.0005)
+                    if not resumed:
+                        return _ptrace_report_timeout(pid)
                 elif waited != 0:
                     if os.WIFSIGNALED(status):
                         returncode = -os.WTERMSIG(status)
