@@ -36,6 +36,9 @@ _CATEGORIES: dict[str, set[str]] = {
         "bit_transpose_16",
         "bit_transpose_32",
         "bit_transpose_64",
+        "bit_rotate",
+        "bit_shift",
+        "span_invert",
     },
     "byte": {
         "byte_flip",

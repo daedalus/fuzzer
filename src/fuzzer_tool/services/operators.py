@@ -1484,6 +1484,27 @@ class OperatorEngine:
         if len(buf) >= 8:
             return bytearray(bit_transpose(bytes(buf), 8, rng=self.f._rand_pool)[: self.f.max_len])
 
+    # These three pick their own word width from what the buffer can hold, so
+    # unlike the bit_transpose family they need no per-width length guard --
+    # a 1-byte buffer is a legitimate 8-bit window.
+    def _op_bit_rotate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations import bit_rotate
+
+        if buf:
+            return bytearray(bit_rotate(bytes(buf), rng=self.f._rand_pool)[: self.f.max_len])
+
+    def _op_bit_shift(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations import bit_shift
+
+        if buf:
+            return bytearray(bit_shift(bytes(buf), rng=self.f._rand_pool)[: self.f.max_len])
+
+    def _op_span_invert(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations import span_invert
+
+        if buf:
+            return bytearray(span_invert(bytes(buf), rng=self.f._rand_pool)[: self.f.max_len])
+
     def _op_length_grow(self, buf, _byte_idx, _data):
         rng = self.f._rand_pool
         if buf and len(buf) < self.f.max_len:

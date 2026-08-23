@@ -714,6 +714,9 @@ MUTATIONS = [
     "bit_transpose_64",
     "bit_offset_flip",
     "bit_offset_span",
+    "bit_rotate",
+    "bit_shift",
+    "span_invert",
     "simd_boundary",
     "regex_bomb",
     "clone_fixed",
@@ -1517,6 +1520,163 @@ def bit_transpose(data: bytes, width: int, rng=None) -> bytes:
                 val ^= (1 << i) | (1 << j)
     result = bytearray(data)
     result[start : start + width] = val.to_bytes(width, "little")
+    return bytes(result)
+
+
+# ---------------------------------------------------------------------------
+# Rotation / shift / inversion
+#
+# bit_transpose permutes bits inside a word and byte_flip inverts exactly one
+# byte, so before these three the operator table could toggle bits and reorder
+# them but could not *translate* them: nothing moved a packed bitfield off its
+# alignment, nothing dropped bits off the end of a word, and nothing inverted a
+# run that was not byte-aligned.
+#
+# All three take their word window little-endian, matching bit_transpose above
+# and the LSB-first bit numbering that _op_bit_offset_flip uses (bit offset i
+# is byte i >> 3, bit i & 7), so a bit offset means the same thing everywhere
+# in this codebase.
+#
+# Note these use only randint/random/choice: this module's default RNG is the
+# stdlib `random` module (see _get_rng), which has no weighted_choice, so
+# non-uniform draws are spelled as repeated entries in a candidate tuple.
+# ---------------------------------------------------------------------------
+
+# bytes.translate runs in C, so span_invert's bulk middle section costs one
+# pass rather than a Python-level XOR per byte.
+_INVERT_TABLE = bytes(b ^ 0xFF for b in range(256))
+
+# Retry budget for the two operators whose output can coincide with their
+# input on degenerate windows (all-0x00, all-0xFF). Retrying a few starts
+# costs microseconds and stops the operator from spending a scheduler
+# selection slot on a guaranteed no-op -- the failure mode that hid in
+# byte_shuffle until f4835f6.
+_DEGENERATE_RETRIES = 4
+
+
+def bit_rotate(data: bytes, rng=None) -> bytes:
+    """Cyclically rotate the bits of one word-sized window.
+
+    Preserves popcount but shifts every field boundary inside the window,
+    which is what breaks packed bitfield decoders and header flag parsing.
+
+    Args:
+        data: Input bytes.
+        rng: Optional RNG; defaults to the module-level `random`.
+
+    Returns:
+        Bytes with one window rotated, or the input unchanged if every
+        sampled window was rotation-invariant.
+    """
+    if not data:
+        return data
+    r = _get_rng(rng)
+    width = r.choice(tuple(w for w in (1, 1, 1, 2, 2, 4, 4, 8) if w <= len(data)))
+    total_bits = 8 * width
+    mask = (1 << total_bits) - 1
+    # Sub-byte amounts are the distinctive capability here. A rotation by a
+    # multiple of 8 is a cyclic *byte* shift, which swap_bytes and
+    # endianness_swap already reach, so only take the full range sometimes.
+    if total_bits == 8 or r.random() < 0.75:
+        amount = r.randint(1, 7)
+    else:
+        amount = r.randint(1, total_bits - 1)
+    left = r.random() < 0.5
+    max_start = len(data) - width
+    result = bytearray(data)
+    for _ in range(_DEGENERATE_RETRIES):
+        start = r.randint(0, max_start)
+        val = int.from_bytes(data[start : start + width], "little")
+        if left:
+            out = ((val << amount) | (val >> (total_bits - amount))) & mask
+        else:
+            out = ((val >> amount) | (val << (total_bits - amount))) & mask
+        if out != val:
+            result[start : start + width] = out.to_bytes(width, "little")
+            break
+    return bytes(result)
+
+
+def bit_shift(data: bytes, rng=None) -> bytes:
+    """Shift one word-sized window left or right, logically or arithmetically.
+
+    Unlike bit_rotate this is lossy: bits fall off the end and the vacated
+    positions are zero-filled (or sign-filled, for the arithmetic right
+    shift). Good at length and index fields that get scaled before use.
+
+    Args:
+        data: Input bytes.
+        rng: Optional RNG; defaults to the module-level `random`.
+
+    Returns:
+        Bytes with one window shifted, or the input unchanged if every
+        sampled window was shift-invariant.
+    """
+    if not data:
+        return data
+    r = _get_rng(rng)
+    width = r.choice(tuple(w for w in (1, 1, 1, 2, 2, 4, 4, 8) if w <= len(data)))
+    total_bits = 8 * width
+    mask = (1 << total_bits) - 1
+    # Small shifts keep most of the original value in play; a large shift just
+    # zeroes the field, which random_bytes already covers.
+    amount = min(r.choice((1, 1, 1, 2, 2, 3, 4, 5, 6, 7, 8, 12)), total_bits - 1)
+    kind = r.choice(("shl", "shr", "sar"))
+    max_start = len(data) - width
+    result = bytearray(data)
+    for _ in range(_DEGENERATE_RETRIES):
+        start = r.randint(0, max_start)
+        val = int.from_bytes(data[start : start + width], "little")
+        if kind == "shl":
+            out = (val << amount) & mask
+        elif kind == "shr":
+            out = val >> amount
+        else:
+            out = val >> amount
+            if val >> (total_bits - 1):  # sign-propagate
+                out |= (mask << (total_bits - amount)) & mask
+        if out != val:
+            result[start : start + width] = out.to_bytes(width, "little")
+            break
+    return bytes(result)
+
+
+def span_invert(data: bytes, rng=None) -> bytes:
+    """Invert a contiguous run of bits, which need not be byte-aligned.
+
+    Generalises byte_flip, which can only invert a whole byte at a
+    byte-aligned index. The span length is drawn from sub-byte runs up to the
+    whole buffer, so this reaches both single-flag inversion inside a packed
+    header and a full ``~buffer``.
+
+    Args:
+        data: Input bytes.
+        rng: Optional RNG; defaults to the module-level `random`.
+
+    Returns:
+        Bytes with one bit run inverted. Always differs from the input --
+        the XOR mask is non-zero by construction.
+    """
+    if not data:
+        return data
+    r = _get_rng(rng)
+    total_bits = 8 * len(data)
+    span = min(
+        r.choice((1, 2, 3, 4, 8, 8, 16, 16, 32, 32, 64, 128, 256, total_bits)),
+        total_bits,
+    )
+    start = r.randint(0, total_bits - span)
+    end = start + span - 1
+    first, last = start >> 3, end >> 3
+    result = bytearray(data)
+    if first == last:
+        lo, hi = start & 7, end & 7
+        result[first] ^= ((1 << (hi - lo + 1)) - 1) << lo
+        return bytes(result)
+    result[first] ^= (0xFF << (start & 7)) & 0xFF
+    result[last] ^= (1 << ((end & 7) + 1)) - 1
+    if last > first + 1:
+        result[first + 1 : last] = result[first + 1 : last].translate(_INVERT_TABLE)
     return bytes(result)
 
 
