@@ -102,6 +102,55 @@ throughput change on the hot path of the fastest execution mode, so it wants
 measuring on a built target rather than arguing about — recorded in
 `docs/TODO.md` instead of guessed at here.
 
+## Measured, once clang was available
+
+Installing clang and building instrumented targets turned this from argument
+into measurement, and corrected part of the argument.
+
+**The header clobber is real and total.** Driving `png_read.so` through
+`InProcessRunner` the way `services/runner.py` does, four executions in
+sequence:
+
+| | generation at read | diag word |
+|---|---|---|
+| pre-fix | 0, 0, 0, 0 | `0x0` every time |
+| fixed | 1, 2, 3, 4 | `0x1000008` .. `0x4000008` |
+
+The `008` in the low byte is the ctx width the shim wrote once at attach. It
+survives now; before, every execution destroyed it along with the generation
+and the drop counter.
+
+**The coverage leak it enables is real but needs a big target, which is not
+what I claimed.** The prediction was that stale entries would read as live
+coverage. Running the sequence longest-input-first, expecting the live set to
+stop shrinking, produced identical numbers before and after the fix --
+`[40, 41, 12, 12]` both ways. The reason is worth writing down: entry index IS
+the edge id, assigned sequentially per module by
+`__sanitizer_cov_trace_pc_guard_init`. `png_read.so` has roughly 4,600 guards,
+and the old memset reached index 8,189, so every edge the target can produce
+fell inside the region that got zeroed anyway. The bug was masked by the
+target being small.
+
+Planting one entry at index 20,000 -- what a target with more than 8,189 edges
+leaves behind after an earlier execution -- shows the mechanism cleanly:
+
+```
+                      pre-fix   fixed
+generation at read          0       1
+stale edge reported      True   False
+```
+
+So the severity is conditional on edge count, not universal. Any target with
+more than `(map_size - 24) / 8` live edges carries coverage forward from
+previous executions. At the default 65,536-entry map that threshold is 8,189
+edges -- comfortably reached by ffmpeg or a vendored grep, not by the small
+targets in `targets/`. The drop counter and ctx width, by contrast, were
+destroyed unconditionally on every single execution regardless of target size.
+
+Worth being precise about which half of a prediction the evidence supports.
+The mechanism was right; the blast radius was overstated, and only building
+the thing showed which.
+
 ## The pattern worth carrying forward
 
 Both bugs are the same shape as the two already recorded in this tree

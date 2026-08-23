@@ -22,6 +22,19 @@
 
 set -e
 
+# `set -e` plus a long list of optional, best-effort build steps is a silent
+# failure waiting to happen: any command returning non-zero kills the script
+# mid-run, the last thing printed is whatever succeeded before it, and piping
+# the run through `tee`/`tail` discards the exit code entirely.  That is
+# exactly how `compile_fuzzgoat_object`'s `return 1` on an absent optional
+# vendor tree came to abort every build on a machine without vendor/fuzzgoat
+# -- after grep_read and before ALL of the .so targets, perf_shim and the
+# entire verify pass, with a green OK as the final line.  Report aborts loudly
+# and locate them.  `set -E` propagates the trap into functions and subshells.
+set -E
+trap 'rc=$?; printf "\n\033[0;31mFAIL\033[0m: build aborted (exit %d) at %s:%d\n       command: %s\n" \
+      "$rc" "${BASH_SOURCE[0]}" "$LINENO" "$BASH_COMMAND" >&2' ERR
+
 if [ -z "${TMPDIR:-}" ]; then
     mkdir -p /home/dclavijo/tmp
     export TMPDIR=/home/dclavijo/tmp
@@ -44,6 +57,8 @@ TARGETS_MD5=".target.md5"
 OPTS="${@:---all}"
 HAS_FGREP=0
 [ -d "$FGREP/src" ] && HAS_FGREP=1
+HAS_FUZZGOAT=0
+[ -f "$VENDOR/fuzzgoat/fuzzgoat.c" ] && HAS_FUZZGOAT=1
 WITH_CMPLOG=1  # default: cmplog linked into .so targets
 WITH_TRACECMP=1  # default: compiler-IR comparison tracing (needs clang)
 
@@ -448,7 +463,10 @@ compile_secp256k1_objects() {
 # only), compile fuzzgoat.c separately without the shim and link the object.
 compile_fuzzgoat_object() {
     local flags="$1" cc="${2:-$DEFAULT_CC}" extra_cflags="${3:-}"
-    [ -f "$VENDOR/fuzzgoat/fuzzgoat.c" ] || return 1
+    # return 0, not 1: every other optional-vendor guard in this script
+    # does the same, and under `set -e` a non-zero return from here aborts
+    # the whole build.  Callers gate on $HAS_FUZZGOAT.
+    [ -f "$VENDOR/fuzzgoat/fuzzgoat.c" ] || return 0
     $cc $flags -O2 -g $extra_cflags -I"$VENDOR/fuzzgoat" \
         -c "$VENDOR/fuzzgoat/fuzzgoat.c" -o /tmp/fuzzgoat.o 2>/dev/null
 }
@@ -599,8 +617,10 @@ build_simple_targets() {
     build_target "$TARGETS/jpeg_read.c" "$TARGETS/jpeg_read${out_suffix}" "-ljpeg" "$flags" "$cc" "$extra_cflags"
     build_target "$TARGETS/ffmpeg_read.c" "$TARGETS/ffmpeg_read${out_suffix}" "$FFMPEG_LIBS" "$flags" "$DEFAULT_CC" "$FFMPEG_INC"
     build_target "$TARGETS/grep_read.c" "$TARGETS/grep_read${out_suffix}" "" "$flags"
-    compile_fuzzgoat_object "$flags" "$cc" "$extra_cflags"
-    build_target "$TARGETS/fuzzgoat_read.c" "$TARGETS/fuzzgoat_read${out_suffix}" "/tmp/fuzzgoat.o -lm" "$flags" "$cc" "-I$VENDOR/fuzzgoat"
+    if [ "$HAS_FUZZGOAT" -eq 1 ]; then
+        compile_fuzzgoat_object "$flags" "$cc" "$extra_cflags"
+        build_target "$TARGETS/fuzzgoat_read.c" "$TARGETS/fuzzgoat_read${out_suffix}" "/tmp/fuzzgoat.o -lm" "$flags" "$cc" "-I$VENDOR/fuzzgoat"
+    fi
 }
 
 # ── MSAN / TSAN standalone executables ─────────────────────────
@@ -637,8 +657,10 @@ build_sanitizer_targets() {
     build_target "$TARGETS/test_target.c" "$TARGETS/test_target${suffix}" "" "$common" "clang"
     build_target "$TARGETS/proto_target.c" "$TARGETS/proto_target${suffix}" "" "$common" "clang"
     build_target "$TARGETS/grep_read.c" "$TARGETS/grep_read${suffix}" "" "$common" "clang"
-    compile_fuzzgoat_object "$common" "clang" "-I$VENDOR/fuzzgoat"
-    build_target "$TARGETS/fuzzgoat_read.c" "$TARGETS/fuzzgoat_read${suffix}" "/tmp/fuzzgoat.o -lm" "$common" "clang" "-I$VENDOR/fuzzgoat"
+    if [ "$HAS_FUZZGOAT" -eq 1 ]; then
+        compile_fuzzgoat_object "$common" "clang" "-I$VENDOR/fuzzgoat"
+        build_target "$TARGETS/fuzzgoat_read.c" "$TARGETS/fuzzgoat_read${suffix}" "/tmp/fuzzgoat.o -lm" "$common" "clang" "-I$VENDOR/fuzzgoat"
+    fi
     # Targets linking uninstrumented system libraries (libpng/libz/libjpeg)
     # are intentionally omitted for MSAN: without an instrumented build of
     # those libraries every call into them reports a false uninitialized
@@ -730,7 +752,7 @@ STUBEOF
 
 # ── Build simple .so targets ────────────────────────────────────
 build_simple_so_targets() {
-    local suffix="$1" flags="$2" label="$3"
+    local suffix="$1" flags="$2" label="$3" cc="${4:-$DEFAULT_CC}" extra_cflags="${5:-}"
     echo "Building simple .so targets ($label)..."
     local out_suffix=""
     [[ "$suffix" == _asan* || "$suffix" == _ubsan* ]] && out_suffix="$suffix"
@@ -773,23 +795,25 @@ build_simple_so_targets() {
         echo "  Using vendored FFmpeg static libraries ($ffmpeg_vendor_dir)"
     fi
 
-    build_so_target "$TARGETS/asan_target.c" "$TARGETS/asan_target${out_suffix}.so" "" "$flags"
-    build_so_target "$TARGETS/test_target.c" "$TARGETS/test_target${out_suffix}.so" "" "$flags"
-    build_so_target "$TARGETS/proto_target.c" "$TARGETS/proto_target${out_suffix}.so" "" "$flags"
-    build_so_target "$TARGETS/png_read.c" "$TARGETS/png_read${out_suffix}.so" "$PNG_LIBS" "$flags"
-    build_so_target "$TARGETS/zlib_read.c" "$TARGETS/zlib_read${out_suffix}.so" "$ZLIB_LIBS" "$flags"
-    build_so_target "$TARGETS/gzip_read.c" "$TARGETS/gzip_read${out_suffix}.so" "$GZIP_LIBS" "$flags"
-    build_so_target "$TARGETS/jpeg_read.c" "$TARGETS/jpeg_read${out_suffix}.so" "-ljpeg" "$flags"
-    build_so_target "$TARGETS/nop_target.c" "$TARGETS/nop_target${out_suffix}.so" "" "$flags"
-    build_so_target "$TARGETS/ffmpeg_read.c" "$TARGETS/ffmpeg_read${out_suffix}.so" "$FFMPEG_LIBS" "$flags" "$cc" "$FFMPEG_INC"
-    build_so_target "$TARGETS/grep_read.c" "$TARGETS/grep_read${out_suffix}.so" "" "$flags"
-    compile_fuzzgoat_object "$flags" "$cc" "-I$VENDOR/fuzzgoat"
-    build_so_target "$TARGETS/fuzzgoat_read.c" "$TARGETS/fuzzgoat_read${out_suffix}.so" "/tmp/fuzzgoat.o -lm" "$flags" "$cc" "-I$VENDOR/fuzzgoat"
+    build_so_target "$TARGETS/asan_target.c" "$TARGETS/asan_target${out_suffix}.so" "" "$flags" "$cc" "$extra_cflags"
+    build_so_target "$TARGETS/test_target.c" "$TARGETS/test_target${out_suffix}.so" "" "$flags" "$cc" "$extra_cflags"
+    build_so_target "$TARGETS/proto_target.c" "$TARGETS/proto_target${out_suffix}.so" "" "$flags" "$cc" "$extra_cflags"
+    build_so_target "$TARGETS/png_read.c" "$TARGETS/png_read${out_suffix}.so" "$PNG_LIBS" "$flags" "$cc" "$extra_cflags $PNG_INC"
+    build_so_target "$TARGETS/zlib_read.c" "$TARGETS/zlib_read${out_suffix}.so" "$ZLIB_LIBS" "$flags" "$cc" "$extra_cflags $ZLIB_INC"
+    build_so_target "$TARGETS/gzip_read.c" "$TARGETS/gzip_read${out_suffix}.so" "$GZIP_LIBS" "$flags" "$cc" "$extra_cflags $ZLIB_INC"
+    build_so_target "$TARGETS/jpeg_read.c" "$TARGETS/jpeg_read${out_suffix}.so" "-ljpeg" "$flags" "$cc" "$extra_cflags"
+    build_so_target "$TARGETS/nop_target.c" "$TARGETS/nop_target${out_suffix}.so" "" "$flags" "$cc" "$extra_cflags"
+    build_so_target "$TARGETS/ffmpeg_read.c" "$TARGETS/ffmpeg_read${out_suffix}.so" "$FFMPEG_LIBS" "$flags" "$cc" "$extra_cflags $FFMPEG_INC"
+    build_so_target "$TARGETS/grep_read.c" "$TARGETS/grep_read${out_suffix}.so" "" "$flags" "$cc" "$extra_cflags"
+    if [ "$HAS_FUZZGOAT" -eq 1 ]; then
+        compile_fuzzgoat_object "$flags" "$cc" "-I$VENDOR/fuzzgoat"
+        build_so_target "$TARGETS/fuzzgoat_read.c" "$TARGETS/fuzzgoat_read${out_suffix}.so" "/tmp/fuzzgoat.o -lm" "$flags" "$cc" "-I$VENDOR/fuzzgoat"
+    fi
 }
 
 # ── Build standalone .so targets with external deps ─────────────
 build_standalone_so_targets() {
-    local suffix="$1" flags="$2" label="$3"
+    local suffix="$1" flags="$2" label="$3" cc="${4:-$DEFAULT_CC}" extra_cflags="${5:-}"
     local out_suffix=""
     [[ "$suffix" == _asan* || "$suffix" == _ubsan* ]] && out_suffix="$suffix"
 
@@ -1021,6 +1045,41 @@ verify_shm_run() {
     ok "$ok_count .so targets with fuzz_shm_run"
     if [ "$fail_count" -gt 0 ]; then
         warn "$fail_count .so targets missing fuzz_shm_run"
+    fi
+}
+
+# ── Verify compiler-inserted edge coverage in .so targets ──────
+#
+# verify_afl only checks that the shim's __afl_* symbols are present, and they
+# always are: the shim is -include'd into every target. It says nothing about
+# whether the compiler inserted any CALLS to them. A .so carrying the shim but
+# built without -fsanitize-coverage records zero edges, and the fuzzer prints
+# "AFL instrumentation: detected" and then `shm: 0` for the whole campaign.
+# Check the thing that actually produces edges.
+verify_sancov() {
+    [ "$WITH_CLANG_SCOV" -eq 0 ] && return 0
+    echo "Verifying sancov instrumentation in .so targets..."
+    local ok_count=0
+    local fail_count=0
+    for f in "$TARGETS"/*.so; do
+        [ -f "$f" ] || continue
+        nm "$f" 2>/dev/null | grep -q "fuzz_shm_run" || continue
+        # Look for the __sancov_guards SECTION, not for __sanitizer_cov_*
+        # symbols. The symbols are the shim's own callback definitions and are
+        # present either way -- measured: an uninstrumented .so and an
+        # instrumented one both report 12 of them to nm. Only the guard
+        # section is emitted by -fsanitize-coverage=trace-pc-guard, and it is
+        # the array the instrumented call sites index into.
+        if readelf -S "$f" 2>/dev/null | grep -q "__sancov_guards"; then
+            ok_count=$((ok_count + 1))
+        else
+            warn "$(basename "$f"): no __sancov_guards — in-process modes record ZERO edges"
+            fail_count=$((fail_count + 1))
+        fi
+    done
+    ok "$ok_count .so targets with compiler-inserted edge coverage"
+    if [ "$fail_count" -gt 0 ]; then
+        warn "$fail_count .so targets carry fuzz_shm_run but no edge instrumentation"
     fi
 }
 
@@ -1467,6 +1526,8 @@ print_feature_matrix() {
     printf '  %-20s %-12s %s\n' "tailslayer_read" "$state" "$([ -d "$TAILSLAYER/include" ] && echo "found at $TAILSLAYER" || echo "headers not found at $TAILSLAYER/include")"
     state=$([ -d "$LZ4/lib" ] && echo "BUILD" || echo "SKIP")
     printf '  %-20s %-12s %s\n' "lz4_read" "$state" "$([ -d "$LZ4/lib" ] && echo "found at $LZ4" || echo "not vendored — run tools/vendor_lz4.sh")"
+    state=$([ "$HAS_FUZZGOAT" -eq 1 ] && echo "BUILD" || echo "SKIP")
+    printf '  %-20s %-12s %s\n' "fuzzgoat_read" "$state" "$([ "$HAS_FUZZGOAT" -eq 1 ] && echo "found at $VENDOR/fuzzgoat" || echo "not vendored — run tools/vendor_fuzzgoat.sh")"
     state=$([ -d "$SECP256K1/src" ] && echo "BUILD" || echo "SKIP")
     printf '  %-20s %-12s %s\n' "secp256k1_read" "$state" "$([ -d "$SECP256K1/src" ] && echo "found at $SECP256K1" || echo "not vendored — run tools/vendor_secp256k1.sh")"
     echo ""
@@ -1553,12 +1614,35 @@ if [ "$WITH_CLANG_SCOV" -eq 1 ]; then
         [ "$HAS_FGREP" -eq 1 ] && build_fgrep_targets "_nosan" "" "Clang-scov"
         build_simple_targets "_asan" "-fsanitize=address" "Clang-scov" "$SCOV_CC" "$SCOV_FLAGS"
         build_simple_targets "_nosan" "" "Clang-scov" "$SCOV_CC" "$SCOV_FLAGS"
+        # The .so targets need this pass just as much as the executables do,
+        # and used to be left out of it entirely: build_simple_so_targets was
+        # never called here, and build_standalone_so_targets took no
+        # cc/extra_cflags to pass $SCOV_FLAGS through. Everything carrying
+        # fuzz_shm_run -- i.e. everything the in-process and direct_lite modes
+        # run -- therefore kept whatever the uninstrumented no-ASAN pass had
+        # produced. `nm -D targets/test_target.so | grep -c sanitizer_cov`
+        # returned 0, so every in-process campaign reported `shm: 0` and
+        # `Edges discovered: 0` while still calling itself coverage-guided.
+        # verify_sancov below now says so out loud.
+        build_simple_so_targets "_asan" "-fsanitize=address" "Clang-scov" "$SCOV_CC" "$SCOV_FLAGS"
+        build_simple_so_targets "_nosan" "" "Clang-scov" "$SCOV_CC" "$SCOV_FLAGS"
         build_vendored_so_targets "_asan" "-fsanitize=address" "Clang-scov" "$SCOV_CC" "$SCOV_FLAGS"
         build_vendored_so_targets "_nosan" "" "Clang-scov" "$SCOV_CC" "$SCOV_FLAGS"
         [ "$HAS_FGREP" -eq 1 ] && build_fgrep_so_targets "_asan" "-fsanitize=address" "Clang-scov"
         [ "$HAS_FGREP" -eq 1 ] && build_fgrep_so_targets "_nosan" "" "Clang-scov"
-        build_standalone_so_targets "_asan" "-fsanitize=address" "Clang-scov"
-        build_standalone_so_targets "_nosan" "" "Clang-scov"
+        build_standalone_so_targets "_asan" "-fsanitize=address" "Clang-scov" "$SCOV_CC" "$SCOV_FLAGS"
+        build_standalone_so_targets "_nosan" "" "Clang-scov" "$SCOV_CC" "$SCOV_FLAGS"
+        # UBSAN .so targets are built in their own pass above and were the
+        # last variant left uninstrumented -- verify_sancov flagged all nine
+        # of them. They carry fuzz_shm_run like every other .so, so without
+        # this they record zero edges in-process exactly as the _asan and
+        # _nosan ones did. Gated on BUILD_ASAN to match the pass that creates
+        # them; without that guard this would build UBSAN targets that the
+        # rest of the run never asked for.
+        if [ "$BUILD_ASAN" -eq 1 ]; then
+            build_simple_so_targets "_ubsan" "-fsanitize=undefined" "Clang-scov" "$SCOV_CC" "$SCOV_FLAGS"
+            build_standalone_so_targets "_ubsan" "-fsanitize=undefined" "Clang-scov" "$SCOV_CC" "$SCOV_FLAGS"
+        fi
     fi
 fi
 if [ "$WITH_VENDOR_TRACECMP" -eq 1 ]; then
@@ -1574,6 +1658,7 @@ compile_perf_shim
 
 verify_afl
 verify_shm_run
+verify_sancov
 verify_cmplog
 verify_vendor_tracecmp
 verify_target_md5
