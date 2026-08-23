@@ -373,7 +373,32 @@ class InProcessRunner:
     # ------------------------------------------------------------------
 
     def read_bitmap(self) -> bytes | None:
-        """Read the coverage bitmap."""
+        """Read the coverage edge table out of the SHM segment.
+
+        Returns the TABLE, not the segment: ``SHM_METADATA_SIZE`` bytes of
+        header sit in front of it, and the table is ``shm_size *
+        SIZEOF_ENTRY`` bytes long because ``shm_size`` is the entry COUNT
+        (``AFL_MAP_SIZE`` convention), not a byte length.
+
+        Both were wrong here: the read started at the segment base, so the
+        first 24 bytes returned were the header (path_hash, edge_count,
+        diag) rather than entries, and it ran for ``shm_size`` BYTES, one
+        eighth of the table.  Harmless up to now for exactly one reason --
+        ``coverage_env_id`` is set from ``shm_cov.env_id``, so this attaches
+        to the same segment the fuzzer owns and the caller's memmove is a
+        self-copy.  It becomes a misaligned 24-byte shift of live coverage
+        the moment those two segments differ, which is why the length and
+        the caller's bounds check in ``services/runner.py`` are corrected in
+        the same change: half of this is worse than none.
+
+        The other two sources below are both dead on the shipping loader.
+        ``fuzz_loader.c`` does not carry coverage over its protocol (its own
+        header says so), so ``_last_bitmap`` is never populated; and nothing
+        in the C writes ``_COV_BITMAP_OUT``, so ``_bitmap_out`` never exists.
+        They are left in place as the fallback they were written to be, but
+        neither has a format contract with the entry table above -- wire one
+        up and it needs converting, not memmoving.
+        """
         if self._persistent and self._persistent._last_bitmap is not None:
             return self._persistent._last_bitmap
         if self._bitmap_out and os.path.exists(self._bitmap_out):
@@ -394,7 +419,9 @@ class InProcessRunner:
                 if self._shm_ptr is None:
                     self._shm_ptr = libc_shm.shmat(int(self.coverage_env_id))
                 if self._shm_ptr:
-                    return (ctypes.c_uint8 * self.shm_size).from_address(self._shm_ptr)
+                    return (ctypes.c_uint8 * (self.shm_size * SIZEOF_ENTRY)).from_address(
+                        self._shm_ptr + SHM_METADATA_SIZE
+                    )
             except Exception:
                 log.warning(
                     "shmat read failed for coverage_env_id=%s", self.coverage_env_id, exc_info=True

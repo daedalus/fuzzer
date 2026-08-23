@@ -27,6 +27,7 @@ from fuzzer_tool.adapters.process import (
     run_target_file,
     run_target_stdin,
 )
+from fuzzer_tool.adapters.shm import SHM_METADATA_SIZE
 from fuzzer_tool.core.sanitizer import SanitizerReport
 from fuzzer_tool.services.ptrace_coverage import (
     PTRACE_CONT,
@@ -186,8 +187,15 @@ class TargetRunner:
             # For other inprocess modes, copy from the runner's bitmap.
             if shm and not f._inprocess_runner.direct_lite:
                 bitmap = f._inprocess_runner.read_bitmap()
-                if bitmap and len(bitmap) <= shm.size:
-                    ctypes.memmove(shm._ptr, bitmap, len(bitmap))
+                # read_bitmap() returns the edge TABLE, so it is bounded by
+                # table_bytes and lands at the table offset. The old check
+                # compared a byte length against shm.size, which is an entry
+                # COUNT (8x smaller), and copied to shm._ptr -- over the
+                # 24-byte header. Both were invisible only because this is
+                # currently a self-copy: coverage_env_id comes from
+                # shm_cov.env_id, so source and destination are one segment.
+                if bitmap and len(bitmap) <= shm.table_bytes:
+                    ctypes.memmove(shm._ptr + SHM_METADATA_SIZE, bitmap, len(bitmap))
             # Note: cmplog log cleanup (truncation / __cmplog_reset) is
             # handled by fuzz_one() after collect_tokens() reads the data.
             # Read perf counters for inprocess mode
