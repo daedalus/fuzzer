@@ -340,11 +340,44 @@ class ShmCoverage:
         Stale entries are filtered by the slow path on the next read.
         Also zeroes the distance tail so a stale sum/count from a previous
         execution can never be misread.
+
+        Wipes the whole table on generation wrap.  The tag is 8 bits, so it
+        repeats every 256 resets, and an entry keeps the tag of the last
+        execution in which its edge fired.  An edge that fired once and then
+        went quiet therefore reads as live again exactly 256 resets later --
+        a ghost edge, credited to an execution that never reached that code.
+        Measured before this wipe existed here: plant one edge, then reset
+        repeatedly, and it reappears in ``get_edge_ids()`` at N = 256, 512,
+        768 ...  Every consumer of the live set is downstream of that:
+        ``has_new_coverage`` gates corpus admission, and the bandit
+        schedulers are rewarded on edges discovered.
+
+        ``afl_shim.c:786`` (``__afl_map_reset``) already contained exactly
+        this wipe, with the same reasoning -- but that function has never had
+        a caller, so the wipe sat on a dead path while the live reset is this
+        one.  Fixing it here rather than by calling into C keeps a single
+        writer of the header, which is the invariant the shmat/header-clobber
+        fix established.
+
+        Cost is one ``table_bytes`` memset per 256 resets: ~86.9us amortised
+        over 256 executions at the default 65,536-entry map, ~0.34us each,
+        against the ~2.2us the generation scheme saves on every execution.
+        The win that motivated generation tagging is kept; only the aliasing
+        is paid for.
+
+        The wipe happens when the counter returns to 0, which is the one
+        point covering every entry written under any prior tag.  It is safe
+        against the read fast path: entry re-insertion bumps the header's
+        cumulative ``edge_count`` (``afl_shim.c:601``), so the next scan sees
+        a changed count and takes the slow path rather than trusting
+        ``_last_ids``.
         """
         gen = self.read_generation()
         new_gen = (gen + 1) & 0xFF
         diag = ctypes.c_uint32.from_address(self._ptr + 4)
         diag.value = (diag.value & 0x00FFFFFF) | (new_gen << self.DIAG_GEN_SHIFT)
+        if new_gen == 0:
+            ctypes.memset(self._ptr + SHM_METADATA_SIZE, 0, self.table_bytes)
         ctypes.memset(self._tail, 0, SHM_TAIL_SIZE)
 
     # ── AFLGo distance tail (per-execution average distance) ────────────
@@ -851,10 +884,10 @@ class ShmCoverage:
         # modulus, so carrying them over puts every one of them in the wrong
         # place: the shim would start probing at edge_id % new_size, miss the
         # stale copy, and claim a SECOND slot for an edge already present.
-        # That is invisible today purely because reset_edge_map() memsets the
-        # table before every execution — but it becomes a live duplicate-entry
-        # bug the moment that per-exec clear is replaced with generation
-        # tagging. Copying only the header is both correct and cheaper: the
+        # That WAS invisible while reset_edge_map() memset the table before
+        # every execution; it stopped being invisible when the per-exec clear
+        # became generation tagging, which now wipes only on wrap. Copying
+        # only the header is both correct and cheaper: the
         # table is scratch, the header (path_hash, edge_count, diag) is not.
         ctypes.memmove(new_ptr, self._ptr, SHM_METADATA_SIZE)
 
