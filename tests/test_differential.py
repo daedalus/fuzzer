@@ -23,9 +23,18 @@ class TestDiffRun:
 
     @patch("fuzzer_tool.services.differential.run_target_stdin")
     def test_different_stderr(self, mock_run):
+        # This test previously asserted `not diverged` with the comment
+        # "stderr differs but not diverged" -- written by observing what
+        # diff_run returned rather than what this module says it should
+        # return. The module docstring states the per-input contract as an
+        # exact match on returncode, sanitizer report AND stderr, so a pure
+        # stderr mismatch IS a divergence; the code appended the reason and
+        # left the boolean False. Same shape as the `test_hex_escape` case
+        # recorded in docs/TODO.md: an assertion strong enough to pass review
+        # that pins the defect in place.
         mock_run.side_effect = [(0, "error A"), (0, "error B")]
         diverged, desc = diff_run("target_a", "target_b", b"test")
-        assert not diverged  # stderr differs but not diverged
+        assert diverged
         assert "different stderr" in desc
 
     @patch("fuzzer_tool.services.differential.run_target_stdin")

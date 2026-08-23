@@ -75,7 +75,21 @@ def diff_run(
             diverged = True
             reasons.append(f"different errors: {report_a.error_type} vs {report_b.error_type}")
 
-    if stderr_a != stderr_b and not diverged and (stderr_a or stderr_b):
+    # The module contract is an exact match on returncode, sanitizer report AND
+    # stderr, but this branch only ever appended a reason — `diverged` stayed
+    # False, so a pure stderr divergence was described and then reported as a
+    # match. Flag it.
+    #
+    # Restricted to the case where neither side produced a valid sanitizer
+    # report: when both crashed with the SAME error_type the branches above have
+    # already adjudicated them as matching, and their stderr still differs in
+    # every run by allocation addresses, pids and thread ids. Flagging on that
+    # would report a divergence for every identical crash pair.
+    both_reported = bool(report_a and report_a.is_valid()) and bool(
+        report_b and report_b.is_valid()
+    )
+    if stderr_a != stderr_b and not diverged and not both_reported and (stderr_a or stderr_b):
+        diverged = True
         reasons.append("different stderr output")
 
     description = "; ".join(reasons) if reasons else "identical"
