@@ -117,7 +117,14 @@ summary reprints the inner test name, so its `count(...) == 1` assertion sees 2.
 
 ## HIGH
 
-6. **`services/runner.py:395-464`** [corroborated, verified] — ptrace-mode
+6. **`services/runner.py:395-464`** [corroborated, verified] — **FIXED
+   2026-08-23** (`7ba1054`): deadline expiry is now an explicit `timed_out`
+   flag rather than a return code reconstructed from the last consumed
+   wait status, and returns the `(-1, "timeout")` pair `is_timeout` tests
+   for (`fuzzer.py:3298`). The blind-`PTRACE_CONT` wait is a bounded poll
+   against the same deadline instead of a blocking `waitpid(pid, 0)`.
+   `tests/test_regression_ptrace_timeout.py` (6 tests). Original text
+   follows. — ptrace-mode
    timeouts are never reported as timeouts. On deadline expiry `status` holds the
    last consumed event: with ≥1 breakpoint handled, the post-loop
    `waitpid(WNOHANG)` returns `(0,0)`, stale SIGTRAP status yields `rc=-5`
@@ -193,7 +200,16 @@ summary reprints the inner test name, so its `count(...) == 1` assertion sees 2.
     only `select_op()` sets inside the branch requiring non-empty transitions.
     Blending/stationary/spectral_gap dead on fresh runs.
 
-19. **`adapters/shm.py:313` + `adapters/afl_shim.c:810-815`** — generation tag
+19. **`adapters/shm.py:313` + `adapters/afl_shim.c:810-815`** — **FIXED
+    2026-08-23** (`189e387`): `ShmCoverage.reset_edge_map()` wipes the edge
+    table when the tag returns to 0. The wipe already existed in
+    `__afl_map_reset()` with the same reasoning, but that function still
+    has no callers, so it sat on a dead path while the live reset is the
+    Python one; fixing it there also keeps a single writer of the header.
+    Reproduced first (edge read as live again at exactly N = 256, 512),
+    and `tests/test_regression_generation_wrap.py` (5 tests) asserts the
+    aliasing period rather than "no ghosts eventually". Original text
+    follows. — generation tag
     wraps at 256 execs; the anti-wrap table wipe exists in C
     (`__afl_map_reset`) but has **zero callers**, so ghost edges from 256 execs
     ago re-enter the live set every wrap.
