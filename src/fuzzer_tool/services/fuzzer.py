@@ -2958,13 +2958,33 @@ class Fuzzer:
             meta["fuzz_count"] += 1
             self._cached_total_fuzz += 1
 
-        t_start = time.monotonic()
         self._cov_before_fuzz = (
             len(self._edge_tracker._global_edge_hits)
             if hasattr(self._edge_tracker, "_global_edge_hits")
             else 0
         )
+        # The timing window covers _run_target only. It used to open before
+        # _dedup_mutate, which folded Python-side mutation cost into every
+        # consumer of t_elapsed, and those consumers all want target time:
+        #
+        #   * _exec_time_anomaly -> is_slow -> `success` (see below), which
+        #     is credited to the operators that ran this iteration. Ops whose
+        #     own cost is milliseconds-to-seconds (gradient_descent,
+        #     condstmt_solve, path_negate, crc_learn -- see
+        #     _cost_adjusted_weight) pushed t_elapsed over the anomaly
+        #     threshold by running at all, were credited for it, and were
+        #     therefore selected more often. The contaminant was correlated
+        #     with the arm being rewarded, so it compounded.
+        #   * meta["total_time"] -> exec_us -> Schedule._speed_factor and the
+        #     _cull_queue favored-set cost, making the favored set partly a
+        #     function of which operators happened to produce each seed.
+        #   * _exec_time_tracker -> suggested_timeout(), inflated by mutation.
+        #
+        # _dedup_mutate also calls mutate() up to EXEC_DEDUP_RETRIES + 1
+        # times, so the contamination carried a multiplier driven by bloom
+        # saturation rather than by anything the target did.
         mutated = self._dedup_mutate(data)
+        t_start = time.monotonic()
         returncode, stderr = self._run_target(mutated)
         t_elapsed = time.monotonic() - t_start
         self.exec_count += 1
