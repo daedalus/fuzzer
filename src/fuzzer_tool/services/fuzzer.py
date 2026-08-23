@@ -285,6 +285,24 @@ SEED_MASK_64 = 0xFFFFFFFFFFFFFFFF
 SEED_MASK_32 = 0xFFFFFFFF  # np.random.seed accepts [0, 2**32)
 
 
+def _current_rss_kb() -> int | None:
+    """Return the process's *current* resident set size in KiB.
+
+    ``/proc/self/statm`` field 2 is resident pages right now. Deliberately not
+    ``getrusage().ru_maxrss``, which is the monotonic high-water mark: a
+    threshold check against a peak can only ever latch on.
+
+    Returns:
+        Current RSS in KiB, or None if /proc is unavailable or unparseable.
+    """
+    try:
+        with open("/proc/self/statm") as fh:
+            resident_pages = int(fh.read().split()[1])
+    except (OSError, ValueError, IndexError):
+        return None
+    return resident_pages * (os.sysconf("SC_PAGE_SIZE") // 1024)
+
+
 # Symbols that mean the target can populate an edge bitmap: the shim's own
 # (linked or preloaded) and clang's sancov callbacks.
 _AFL_SYMS = ("__afl_area", "__afl_map_shm", "__sanitizer_cov")
@@ -2675,8 +2693,14 @@ class Fuzzer:
     def _check_memory_and_prune(self):
         """Check RSS against total RAM and prune corpus if threshold exceeded.
 
-        Uses /proc/meminfo for total RAM and getrusage for current RSS.
+        Uses /proc/meminfo for total RAM and /proc/self/statm for current RSS.
         Only triggers once per 1000 execs to avoid constant polling overhead.
+
+        NOT ``getrusage(RUSAGE_SELF).ru_maxrss``, which this used to read: that
+        is the high-water mark and never decreases, so a single transient spike
+        past the threshold armed the pruner permanently and every later check
+        re-pruned an already-small corpus while printing the stale peak as if it
+        were current usage.
         """
         if self.prune_corpus_max_memory <= 0:
             return
@@ -2685,7 +2709,9 @@ class Fuzzer:
         self._last_memory_prune_exec = self.exec_count
 
         try:
-            rss_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            rss_kb = _current_rss_kb()
+            if rss_kb is None:
+                return
             with open("/proc/meminfo") as f:
                 for line in f:
                     if line.startswith("MemTotal:"):
