@@ -153,7 +153,20 @@ summary reprints the inner test name, so its `count(...) == 1` assertion sees 2.
     process. Breaks test isolation, library reuse, and reproducibility
     simultaneously.
 
-11. **`services/fuzzer.py:1080-1086 et al.`** [verified] — persisted component
+11. **`services/fuzzer.py:1080-1086 et al.`** [verified] — **FIXED 2026-08-23.**
+    Both halves. `StateStore.start_empty()` marks the store loaded-and-empty so
+    `get()` cannot lazy-load; `Fuzzer.__init__` calls it on the non-resume
+    branch. Gating `load()` on `self.resume` had only DEFERRED the read to the
+    first `get()`, not prevented it — the lazy load in `get()` is wanted by the
+    standalone readers (`report.py`, `tmin.py`, `cli/commands.py`), so the opt-out
+    belongs at the fuzzing call site rather than in `get()`. The legacy-JSON
+    migration path was the same hazard by another route and is closed with it.
+    The GA restore and its banner moved out of the `if self._diff_target:` block
+    into `if self._ga_enabled:`, next to `ga.initialize()`, mirroring the QEA
+    block directly below. `tests/test_regression_fresh_run_state.py` (9 tests);
+    the GA half is asserted against `run()`'s AST, since which block a statement
+    sits in is exactly what was wrong and constructing a Fuzzer needs a built
+    target. Original text follows. — persisted component
     state restored on *non-resume* runs: `StateStore.get()` lazy-loads
     `state.pkl.gz` even without `--resume`, so a second "fresh" run inherits the
     previous campaign's Markov model (skips retraining), Elo ratings, crash-MI
@@ -178,7 +191,24 @@ summary reprints the inner test name, so its `count(...) == 1` assertion sees 2.
     early-returns because the old loader is alive-but-slow. All subsequent
     `run_one` return `-2` forever, silently.
 
-15. **`services/parallel.py:199-213`** [corroborated, verified] — `-j N` corpus
+15. **`services/parallel.py:199-213`** [corroborated, verified] — **FIXED
+    2026-08-23.** Both halves, plus two more found while fixing. `_sync_corpus_in`
+    now walks `<worker>/seeds/**/id_*` instead of listing the worker directory
+    non-recursively, and the index cursor is replaced by a per-sibling set of
+    consumed FILENAMES — seed names are content hashes, so their sort order is
+    unrelated to creation order and any insertion before the cursor was skipped
+    permanently. Because the filename IS the hash, a seed already held is now
+    skipped without being read. Also: `pruned/` is excluded, matching
+    `load_corpus` (re-importing a sibling's pruned entries would undo its
+    minimization); a worker no longer syncs from its own directory; and a
+    name/content hash mismatch is treated as a torn read from a sibling's
+    non-atomic write and retried next round rather than imported. Deltas are
+    deliberately not transferred — a delta names a parent hash the importing
+    worker may not hold. **Every test in `tests/test_parallel.py` and
+    `tests/test_parallel_unit.py` wrote seeds flat at the worker-dir top level,
+    a layout `save_to_corpus` has never produced**, so 14 passing tests
+    certified a transfer path that moved zero seeds; both files were rewritten
+    onto the shipping writer. Original text follows. — `-j N` corpus
     sync has two defects: (a) it filters top-level *files*, but seeds live under
     `seeds/<hh>/id_*` — zero seeds ever transfer, and the only top-level file,
     `state.pkl.gz`, is imported as a garbage seed by every sibling worker;
@@ -195,7 +225,25 @@ summary reprints the inner test name, so its `count(...) == 1` assertion sees 2.
     inputs, so `byte_total == joint_crash` always; "MI" degenerates to position
     frequency × log₂(1/p_crash). Crash ETA and mutation targeting driven by noise.
 
-18. **`core/schedulers/monte_carlo.py:195-263`** [corroborated] — pairwise
+18. **`core/schedulers/monte_carlo.py:195-263`** [corroborated] — **FIXED
+    2026-08-23.** `_prev_op` is now advanced by `record()` alone, at the end,
+    unconditionally. Two defects in one: the sole assignment sat in `select_op`
+    *after* the early return taken whenever the matrix is empty, so it could
+    never run; and it assigned the operator being SELECTED, so had it run,
+    `record()` for that same operator would have hit the `_prev_op != name`
+    guard. Measured on a harness where the reward exists only on a specific
+    transition (`b` pays only after `a`), 8 seeds x 3000 steps:
+    `pairwise_blend=0.6` scores 83.0 mean vs 64.2 for pure Thompson — before the
+    fix the two configurations were bit-identical, since the blend branch was
+    unreachable. Note the residual limitation, not a defect: only successful
+    transitions are counted and the unconditional arm posterior still punishes
+    a setup move that never pays off on its own, so a required predecessor stays
+    under-selected. `tests/test_regression_pairwise_bootstrap.py` (6 tests).
+    **All nine pairwise tests in `tests/test_montecarlo.py` assign `mc._prev_op`
+    by hand before calling `record()`**, pre-loading exactly the internal state
+    the production path cannot reach; they are left in place as unit tests of
+    `record()`, with the new file driving the public interface only. Original
+    text follows. — pairwise
     transition tracking can never bootstrap: `record()` needs `_prev_op`, which
     only `select_op()` sets inside the branch requiring non-empty transitions.
     Blending/stationary/spectral_gap dead on fresh runs.
@@ -602,6 +650,36 @@ Two observations worth carrying forward:
   distinct hazard: these two assertions were specific and strong, and wrong.
   Worth a separate sweep for tests whose comments explain away a surprising
   expected value.
+
+## Audit 2026-08-23 (parallel / scheduling / state pass)
+
+Three HIGH findings closed: 11, 15, 18. Each was reproduced through the
+production call path before being touched, and each new regression file was
+run against the pre-fix source to confirm it fails there.
+
+The theme is one pattern, now seen five times in this tree:
+
+- **A test that pre-loads unreachable internal state.** Finding 18's nine
+  existing tests set `mc._prev_op = "a"` and then asserted `record()` counted
+  the transition. `record()` was correct. Nothing could ever set `_prev_op`,
+  so the feature was dead and the tests were green. Finding 15's fourteen
+  tests wrote seeds flat at the worker-dir top level — a directory shape
+  `save_to_corpus` has never produced — and asserted the sync function found
+  them. This is the same failure as `test_hex_escape` and
+  `test_different_stderr`, one level up: not "assert the value the code
+  returns" but "assert against the arrangement the code expects". Both
+  survived the value-free-assertion sweep recorded in docs/TODO.md, because
+  both assert real values. **A unit test that constructs its own fixture is
+  only as good as that fixture's fidelity to what the system produces.**
+  Where a writer exists, tests should call it rather than hand-rolling the
+  layout — that alone would have caught finding 15.
+
+- **A gate that reads as authoritative and is not.** Finding 11's
+  `if self.resume: self._state_store.load()` looks like it decides whether
+  state is read. It decides only *when*, because `get()` lazy-loads. A guard
+  that omits an action does not prevent that action if something downstream
+  performs it on demand. Worth a sweep for other `if flag: do_x()` sites whose
+  callee has a lazy or self-healing path.
 
 ## Cross-cutting patterns worth regression tests
 
