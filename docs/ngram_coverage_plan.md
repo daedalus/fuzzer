@@ -107,7 +107,7 @@ XOR becomes commutative and loses direction information.
 ## Reset Path (`afl_shim.c:848–853`)
 
 ```c
-/* __afl_guarded_reset, currently at afl_shim.c:850 */
+/* __afl_map_reset, currently at afl_shim.c:850 */
 #if __AFL_NGRAM_K > 1
     memset(__afl_prev_locs, 0, sizeof(__afl_prev_locs));
     __afl_prev_idx = 0;
@@ -118,9 +118,16 @@ XOR becomes commutative and loses direction information.
 
 Must zero all k−1 slots and reset the index. Missing a slot contaminates
 the first edge of the next iteration — the exact aliasing bug the
-generation scheme was designed to prevent.  The fork-server pre-fork
-init (comment at `afl_shim.c:1552–1559`) applies equally: the ring must
-be all-zero before the child forks.
+generation scheme was designed to prevent.
+
+The fork-server pre-fork path (comment at `afl_shim.c:1552–1559`) needs
+no change here. It doesn't zero `__afl_prev_loc` before forking — it
+deliberately leaves it untouched: `__afl_area` is set `NULL`, so
+`__afl_map_edge`'s null-check returns before `__afl_prev_loc` (or the
+ring, once added) is ever read or written, and every child forks from
+identical coverage state by construction. Since the ring is a
+zero-initialized static array that this loop never writes to, it stays
+zero across all fork iterations with no extra code required.
 
 ---
 
@@ -175,6 +182,13 @@ self.prev_locations.appendleft(rel >> 1)
 Note: the ptrace path has no `caller_ctx` and never will; this is an
 acknowledged coverage-mode gap (`ptrace_coverage.py:430` comment).
 
+`reset_edge_map` (`ptrace_coverage.py:421`) currently only zeros
+`self.prev_location`. It must also clear the new `prev_locations` deque
+(e.g. `self.prev_locations.clear()` then re-pad with zeros, or
+reassign a fresh `deque(maxlen=k-1)`), or the ring carries stale
+entries across iterations — the same aliasing bug the C-side reset
+is designed to prevent.
+
 ### `fuzzer.py` — ASLR note
 
 `fuzzer.py:773–775` explains why `_seen_edge_ids` comparisons require ASLR
@@ -189,9 +203,9 @@ when built via SanitizerCoverage; the ASLR concern is unchanged.
 | Concern | Impact | Mitigation |
 |---|---|---|
 | **Corpus portability** | edge_ids change when k changes; existing `_seen_edge_ids`, `EdgeTracker`, `state.json` are incompatible | Add `ngram_k` to `state.json`; refuse resume if k mismatches |
-| **`__afl_prev_loc` ABI** | Symbol is non-static (`afl_shim.c:283`), scanned by `fuzzer.py:308` | Keep symbol at k=2 default; the ring is introduced only at k > 2, emitting a new symbol `__afl_ngram_k_N` |
+| **`__afl_prev_loc` ABI** | Symbol is non-static (`afl_shim.c:283`). Note: `fuzzer.py:308` is `_AFL_SYMS`, an unrelated instrumentation-detection tuple — nothing in the Python codebase currently scans for `__afl_prev_loc` itself, so this row needs re-verification before relying on it | Keep symbol at k=2 default; the ring is introduced only at k > 2, emitting a new symbol `__afl_ngram_k_N` |
 | **cmplog/perf shims** | Both use `-include afl_shim.c`; new statics duplicate into each TU | No change — `static` globals are already per-TU; ring follows the same pattern |
-| **`direct_lite` mode** | `.so` and fuzzer share address space; ring lives in `.so` BSS | Reset path updated → no new concern |
+| **`direct_lite` mode** | `.so` and fuzzer share address space; ring lives in `.so` BSS | Reset path updated (`__afl_map_reset`) → no new concern |
 | **Map-size pressure** | k=3 can triple cardinality, pushing load above 0.9 | `ngram_inflation_factor` + `recommended_map_size` (`edge_tracker.py`) must account for k |
 | **`AFL_MAP_SIZE` env** | Python sets this from `MapSizeEstimate` (`runner.py:249`) | `_size_from_blocks` correction (above) is the fix; without it the map saturates silently |
 
@@ -204,15 +218,19 @@ when built via SanitizerCoverage; the ASLR concern is unchanged.
 | `src/fuzzer_tool/adapters/afl_shim.c:283` | `uint32_t __afl_prev_loc` → ring + index (k > 2) |
 | `src/fuzzer_tool/adapters/afl_shim.c:272` | Add `__afl_ngram_k_N` symbol advertisement |
 | `src/fuzzer_tool/adapters/afl_shim.c:578–668` | n-gram FNV hash in `__afl_map_edge` |
-| `src/fuzzer_tool/adapters/afl_shim.c:848–853` | Zero ring in reset path |
-| `src/fuzzer_tool/adapters/afl_shim.c:1552` | Fork-server init: zero ring before fork |
+| `src/fuzzer_tool/adapters/afl_shim.c:848–853` | Zero ring in `__afl_map_reset` |
 | `src/fuzzer_tool/core/elf.py:1587` | Add `detect_ngram_k`, `ngram_inflation_factor` |
 | `src/fuzzer_tool/core/elf.py:1640` | `_size_from_blocks`: apply `ngram_inflation_factor` |
 | `src/fuzzer_tool/core/elf.py:1670` | `MapSizeEstimate`: add `ngram_k` field |
 | `src/fuzzer_tool/adapters/shm.py` | None (layout unchanged) |
+| `src/fuzzer_tool/services/ptrace_coverage.py:421` | `reset_edge_map`: clear `prev_locations` deque alongside `prev_location` |
 | `src/fuzzer_tool/services/ptrace_coverage.py:430` | Ring-based prev_location simulation |
 | `src/fuzzer_tool/core/edge_tracker.py` | `recommended_map_size` — account for k |
 | `state.json` / resume logic | Record and validate `ngram_k` on resume |
+
+No change needed at the fork-server init (`afl_shim.c:1552`): see the
+Reset Path section above — the ring is never written there, so it
+carries no explicit zeroing step of its own.
 
 ---
 
