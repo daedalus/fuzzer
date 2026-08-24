@@ -37,7 +37,6 @@ def _read_shm_edges(shm_id: str, size: int = 65536) -> bytearray:
     return bytearray(data)
 
 
-_SKIP_SUFFIXES = (".txt", ".log", ".json")
 
 
 def _discover_corpus_files(corpus_path: Path) -> list[Path]:
@@ -57,21 +56,19 @@ def _discover_corpus_files(corpus_path: Path) -> list[Path]:
     from the live corpus, and re-minimizing would resurrect them.
     crashing/ and irreplaceable/ are excluded too: their contents are marked
     never-prune and must not be treated as minimization candidates.
+
+    The layout itself lives in adapters.filesystem.discover_seed_files, which
+    is also what root_cause and the parallel worker sync use; the exclusions
+    below are this module's, the walk is not.
     """
+    from fuzzer_tool.adapters.filesystem import discover_seed_files
 
-    def _usable(f: Path) -> bool:
-        return (
-            f.is_file()
-            and not f.is_symlink()
-            and f.suffix not in _SKIP_SUFFIXES
-            and "pruned" not in f.parts
-            and "crashing" not in f.parts
-            and "irreplaceable" not in f.parts
-        )
-
-    seeds = corpus_path / "seeds"
-    root = seeds if seeds.is_dir() else corpus_path
-    return sorted(f for f in root.rglob("*") if _usable(f))
+    return discover_seed_files(
+        corpus_path,
+        include_pruned=False,
+        include_crashing=False,
+        include_irreplaceable=False,
+    )
 
 
 def minimize_corpus(

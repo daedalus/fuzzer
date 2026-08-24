@@ -541,9 +541,30 @@ summary reprints the inner test name, so its `count(...) == 1` assertion sees 2.
     the 200k cap resets in-memory dedup and per-seed statistics (fuzz_count=0)
     every 200k unique seeds.
 
-67. **`minimize.py:75-77` + `root_cause.py:25-38`** [verified] — corpus scan
+67. **`minimize.py:75-77` + `root_cause.py:25-38`** [verified] — **FIXED
+    2026-08-23.** Both halves, but they were fixed nine days apart and that is
+    the point of this entry. `minimize.py` was corrected as fallout from
+    findings 4/5; `root_cause.py` was named in the same line of the same
+    finding and sat untouched, so `root-cause --corpus-dir <real corpus>`
+    listed the directory non-recursively, found no seeds under
+    `seeds/<hh>/id_*`, and fell back to the only top-level regular files a live
+    corpus holds. It then printed `state.pkl.gz` as the "nearest corpus seed"
+    and diffed the crash against gzip bytes — a complete, confident,
+    meaningless root-cause report. Original text follows. — corpus scan
     ignores the standard `seeds/<hh>/` layout; replays/offers `state.pkl.gz` as
     the only "seed".
+
+    The walk now lives once, in `adapters/filesystem.discover_seed_files()`,
+    which is where the layout constants already were; `minimize` and
+    `root_cause` pass their own exclusions to it. The exclusions genuinely
+    differ and must not be collapsed: `minimize` drops `irreplaceable/`
+    because those entries are never-prune and so are not prune candidates,
+    while `root_cause` keeps them because they are ordinary seeds and make
+    perfectly good baselines. Both drop `crashing/`, for different reasons.
+    `tests/test_regression_seed_discovery_layout.py` (14 tests) asserts on
+    the returned BYTES; four of them fail against the pre-fix source, and a
+    test asserting only `len(seeds) > 0` passes against it, which is how this
+    survived.
 
 68. **`state_store.py:190-194` + `stats.py:349-406`** — temp-file+rename without
     fsync (power loss can persist empty/truncated `state.pkl.gz`); stats and
@@ -725,6 +746,19 @@ The theme is one pattern, now seen five times in this tree:
   `__afl_map_reset` still has zero callers.*
 - **Index cursors over sorted listings of hash-named files** reorder on
   insertion and permanently skip files. Key on filename instead.
+- **Flat listing of a sharded corpus directory** — `save_to_corpus` writes
+  `seeds/<hh>/id_<hash>`, and the only top-level regular file a live corpus
+  holds is `state.pkl.gz`. A consumer that lists the directory therefore does
+  not merely find nothing: it finds the state file and uses it as a seed. Four
+  modules had this — `minimize` (empty corpus, exit 0), the parallel worker
+  sync (gzip bytes imported into every sibling), `root_cause` (state file
+  reported as the nearest seed), and `report` (fixed earlier). *Closed
+  2026-08-23 by moving the walk into
+  `adapters/filesystem.discover_seed_files()`, the module that already owned
+  the layout constants. Each consumer passes its own subtree exclusions; the
+  exclusions differ legitimately and were the reason the earlier fixes were
+  copied rather than shared.* Every instance was certified by a passing test
+  that asserted only shape, never bytes.
 - **Parallel time-series arrays must be trimmed in lockstep** — two consumers
   already assume equal lengths.
 - **Memory/disk divergence in corpus mutations** (trim, near-dup removal) breaks

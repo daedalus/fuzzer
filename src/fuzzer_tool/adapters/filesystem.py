@@ -155,6 +155,75 @@ _CORPUS_DELTA_ROOTS = ("deltas", "seeds")  # seeds/ kept for legacy layouts
 _REHYDRATE_FULL_ROOTS = ("seeds", "seeds/pruned", "seeds/irreplaceable", "seeds/crashing")
 _REHYDRATE_DELTA_ROOTS = ("deltas", "deltas/pruned")
 
+# Subtrees under seeds/ that carry a meaning beyond "a corpus entry", and so
+# are opted into rather than scanned by default.
+_SEED_SUBTREES = ("pruned", "crashing", "irreplaceable")
+
+# Sidecars that share the corpus directory with seeds. Any consumer that
+# lists the directory instead of walking seeds/ picks these up INSTEAD of
+# the seeds -- state.pkl.gz is the only top-level regular file a live corpus
+# dir holds, so a flat scan yields exactly the wrong thing and yields it
+# silently. That defect has now been found in three separate modules
+# (minimize, parallel's worker sync, root_cause); discover_seed_files is the
+# single place the layout is encoded, so a fourth consumer cannot reinvent it.
+_SEED_SKIP_SUFFIXES = (".txt", ".log", ".json", ".gz", ".tmp")
+
+
+def discover_seed_files(
+    corpus_dir: str | Path,
+    include_pruned: bool = False,
+    include_crashing: bool = False,
+    include_irreplaceable: bool = True,
+) -> list[Path]:
+    """List full seed files under the canonical sharded layout.
+
+    ``save_to_corpus`` writes ``seeds/<hh>/id_<hash>``. A caller that lists
+    *corpus_dir* itself sees no seeds at all and picks up the sidecar files
+    instead; accepting a directory that is ITSELF a seeds root keeps a
+    directory of loose files working, which is what ``--corpus-dir`` pointed
+    at a scratch folder means.
+
+    Delta records are deliberately not returned: a delta names a parent hash
+    and is not self-contained. Use :func:`rehydrate_by_hash` for those.
+
+    Args:
+        corpus_dir: Corpus directory, or a bare directory of seed files.
+        include_pruned: Include ``seeds/pruned/``. Off by default — those
+            entries were deliberately dropped from the live corpus.
+        include_crashing: Include ``seeds/crashing/``. Off by default —
+            these are known to crash the target.
+        include_irreplaceable: Include ``seeds/irreplaceable/``. On by
+            default: they are ordinary corpus entries that are merely
+            exempt from pruning.
+
+    Returns:
+        Sorted list of seed file paths.
+    """
+    corpus_path = Path(corpus_dir)
+    if not corpus_path.is_dir():
+        return []
+
+    excluded = set(_SEED_SUBTREES)
+    if include_pruned:
+        excluded.discard("pruned")
+    if include_crashing:
+        excluded.discard("crashing")
+    if include_irreplaceable:
+        excluded.discard("irreplaceable")
+
+    seeds = corpus_path / "seeds"
+    root = seeds if seeds.is_dir() else corpus_path
+
+    def _usable(f: Path) -> bool:
+        return (
+            f.is_file()
+            and not f.is_symlink()
+            and f.suffix not in _SEED_SKIP_SUFFIXES
+            and not (excluded & set(f.parts))
+        )
+
+    return sorted(f for f in root.rglob("*") if _usable(f))
+
 
 def _delta_candidates(corpus_dir: Path, h: str):
     """Yield every on-disk spelling a delta record for *h* may take.

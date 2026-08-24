@@ -23,14 +23,25 @@ from fuzzer_tool.core.root_cause import (
 
 
 def _load_corpus(corpus_dir: str) -> list[tuple[str, bytes]]:
-    """Read every regular file in *corpus_dir* as a candidate baseline seed."""
+    """Read candidate baseline seeds from *corpus_dir*.
+
+    This used a flat ``iterdir()``, so pointed at a real corpus it found no
+    seeds — they live under ``seeds/<hh>/id_<hash>`` — and returned the
+    sidecars instead. ``state.pkl.gz`` was then reported as the "nearest
+    corpus seed" and the crash was diffed against gzip bytes, producing a
+    root-cause report with no relationship to the target. Same defect as the
+    one already fixed in ``minimize.py`` and in the parallel worker sync;
+    ``discover_seed_files`` is now the one place the layout is written down.
+
+    ``crashing/`` is excluded: a baseline must be non-crashing, and offering
+    a known-crashing seed only to reject it at the reproduce check below
+    wastes a target execution per candidate. ``irreplaceable/`` is kept —
+    those are ordinary seeds that are merely exempt from pruning.
+    """
+    from fuzzer_tool.adapters.filesystem import discover_seed_files
+
     seeds: list[tuple[str, bytes]] = []
-    corpus_path = Path(corpus_dir)
-    if not corpus_path.is_dir():
-        return seeds
-    for p in sorted(corpus_path.iterdir()):
-        if not p.is_file():
-            continue
+    for p in discover_seed_files(corpus_dir, include_crashing=False):
         try:
             seeds.append((p.name, p.read_bytes()))
         except OSError:
