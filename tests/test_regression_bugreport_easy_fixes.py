@@ -62,21 +62,37 @@ class TestVersifierDecimalDigits:
     silently dropped."""
 
     def test_base_10_emits_digits(self):
-        import random as _random
+        """Drive the RNG deterministically so base == 10 is selected with a
+        known length and known digits, then assert buf equals exactly those
+        digits (not empty, not octal/hex-prefixed)."""
+
+        class _FakeRand:
+            def __init__(self, randints, randoms):
+                self._randints = iter(randints)
+                self._randoms = iter(randoms)
+
+            def random(self):
+                return next(self._randoms)
+
+            def randint(self, _a, _b):
+                return next(self._randints)
 
         class _V:
-            _rand = _random.Random(0)
+            pass
+
+        # Call order in _NumNode.Generate: random() [skip sample branch],
+        # randint(0,2)->1 [base=10], randint(0,3), randint(0,15),
+        # randint(0,39) [candidate lengths], randint(0,2)->0 [pick the
+        # randint(0,3) candidate as length=2], then two digit draws, then a
+        # final random() [skip trailing '-'].
+        v = _V()
+        v._rand = _FakeRand(randints=[1, 2, 0, 0, 0, 5, 3], randoms=[1, 1])
 
         node = _NumNode(samples=[])
-        seen_decimal = False
-        for _ in range(200):
-            buf = bytearray()
-            node.Generate(_V(), buf)
-            # base==10 output has no "0" or "0x" prefix and is non-empty digits.
-            if buf and not buf.startswith(b"0") and not buf.startswith(b"0x") and buf.strip(b"-"):
-                seen_decimal = True
-                break
-        assert seen_decimal, "base==10 draws never produced output"
+        buf = bytearray()
+        node.Generate(v, buf)
+
+        assert bytes(buf) == b"53"
 
 
 class TestPersistentSigcont:
