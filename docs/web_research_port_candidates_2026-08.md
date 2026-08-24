@@ -24,6 +24,12 @@ it is now wired into `services/report.py::_crash_signatures`. #4–7 remain: #4/
 require `afl_shim.c` changes (excluded from this pass); #6/#7 are `L` effort
 needing new feedback plumbing, not yet started.
 
+**2026-08-24 (later)**: #8 (Subtree-population crossover) landed. `TreeMutator`
+already documented a "subtree splice" op that was never implemented; added
+`SubtreePopulation` (bounded reservoir per rule name) and `_tree_splice`,
+wired into `mutate_tree` and incrementally populated from the corpus in
+`services/operators.py::_op_grammar_tree_mutate`.
+
 ### Tier 1 — quick wins
 
 | # | Candidate | Source | Mechanism | Lands in | Effort |
@@ -40,7 +46,7 @@ needing new feedback plumbing, not yet started.
 
 | # | Candidate | Source | Mechanism | Lands in | Effort |
 |---|---|---|---|---|---|
-| 8 | Subtree-population crossover | GRIIN (ASE '23); Grammarinator×AFL++ (2026) | Global subtree population for grammar-aware tree crossover — measured as the biggest single win of that integration | upgrade of `tree_mutator.py` | L–M |
+| 8 | Subtree-population crossover (✅ landed 2026-08-24) | GRIIN (ASE '23); Grammarinator×AFL++ (2026) | Global subtree population for grammar-aware tree crossover — measured as the biggest single win of that integration | `core/grammar.py::SubtreePopulation`/`TreeMutator._tree_splice`, wired in `services/operators.py::_op_grammar_tree_mutate` | L–M |
 | 9 | FormatFuzzer decision seeds | FormatFuzzer (USENIX Sec '21, `uds-se/FormatFuzzer`) | Compiles community 010 Editor binary templates (170+ formats incl. MP4/PNG/AVI/ZIP) into parser+generator pairs; byte fuzzer mutates choice bits while output stays valid | template-driven generator family generalizing the hand-written mutators | M |
 | 10 | Grammar-aware reduction | Perses (ICSE '18); ProbDD/WDD (ICSE '25) | Reduce along grammar/token trees (~2% of ddmin output size); ddmin-to-fixpoint alone shrinks ~68% further | `tmin.py` | L–M |
 | 11 | Reaching-probability directed mode | SelectFuzz (IEEE S&P '23) | Block fitness = averaged successor reaching probability instead of graph distance; instrument only target-relevant blocks (<2% of reachable BBs) so irrelevant coverage never pollutes feedback | `distance.py` math + one LLVM pass | L–M |
