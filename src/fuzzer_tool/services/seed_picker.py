@@ -388,7 +388,7 @@ class SeedPicker:
             )
         # Generic: zero-filled random-length buffer
         rng = f._rand_pool
-        length = rng.randint(4, min(64, f.max_len))
+        length = rng.randint(min(4, f.max_len), min(64, f.max_len))
         return bytes(rng.randint(0, 255) for _ in range(length))
 
     def _weight_exploit_parts(

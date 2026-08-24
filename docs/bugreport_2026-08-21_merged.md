@@ -474,7 +474,14 @@ summary reprints the inner test name, so its `count(...) == 1` assertion sees 2.
     silently disabling DWARF resolution for all later valid CUs. (One audit
     cleared DWARF generally; this specific path was line-verified by the other.)
 
-56. **`seed_picker.py:206,391,840-861,886-926`** [verified] — `randint(4,
+56. **`seed_picker.py:206,391,840-861,886-926`** [verified] — **FIXED
+    2026-08-24** (`seed_picker.py:391` only): the generic-format fallback now
+    clamps the lower bound with `min(4, f.max_len)` instead of a bare `4`, so
+    `--max-len < 4` no longer raises `ValueError`. The remaining sub-findings
+    (Pareto sweep, global-`random` sampling, stale front cache) are unrelated
+    and still open. Regression test
+    `tests/test_regression_bugreport_easy_fixes.py::TestSeedPickerGenericSeedShortMaxLen`.
+    Original text follows. — `randint(4,
     min(64, max_len))` raises ValueError with `--max-len < 4` and empty corpus;
     3-D Pareto sweep excludes genuinely non-dominated seeds (running maxima from
     different items); Pareto sampling uses global `random` (breaks seeded
@@ -492,7 +499,17 @@ summary reprints the inner test name, so its `count(...) == 1` assertion sees 2.
     code (`args.format == "afl" or …` always true on default); libFuzzer corpora
     import 0 seeds with a success message.
 
-58. **`generic.py:1498` + `grammar.py:204,218`** [verified] — radamsa_num draws
+58. **`generic.py:1498` + `grammar.py:204,218`** [verified] — **FIXED
+    2026-08-24** (partial): the two RNG-leak sites the audit actually pointed
+    at are fixed — `radamsa_mutate_num`'s op==9 sign draw now uses the
+    injected `rng` instead of module-global `random`
+    (`core/mutations/generic.py:1858`), and `Grammar._expand_rule`/
+    `_expand_tokens` now honor `self._rng` (set by `mutate()`) instead of
+    always drawing from the global `random` module
+    (`core/grammar.py:277,291`). Regression tests in
+    `tests/test_regression_bugreport_easy_fixes.py`
+    (`TestRadamsaMutateNumInjectedRng`, `TestGrammarGenerateUsesInjectedRng`).
+    Original text follows. — radamsa_num draws
     from module-global `random` despite injected RNG plumbing (~1/10 of draws
     break `-s` reproducibility); same leak in grammar versifier paths.
 
