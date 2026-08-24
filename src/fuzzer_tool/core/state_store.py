@@ -166,6 +166,21 @@ class StateStore:
             )
         return migrated
 
+    def start_empty(self) -> None:
+        """Begin with no state, and do not lazy-load the file in ``get()``.
+
+        ``get()`` lazy-loads when the store has not been loaded yet, which is
+        what standalone readers (report, tmin, the CLI) want. A fuzzing run
+        started WITHOUT ``--resume`` wants the opposite: skipping ``load()``
+        there did not prevent the read, it only deferred it to the first
+        ``get()``, so a second "fresh" campaign in an existing corpus
+        directory silently inherited the previous one's Markov model, Elo
+        ratings and crash-MI counters. Saving still works — this marks the
+        store loaded-and-empty rather than disabling it.
+        """
+        self._data = {}
+        self._loaded = True
+
     def get(self, section: str, default: Any = None) -> Any:
         if not self._loaded:
             self.load()

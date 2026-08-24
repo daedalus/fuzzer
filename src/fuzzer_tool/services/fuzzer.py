@@ -1101,6 +1101,10 @@ class Fuzzer:
         self._state_store = StateStore(self.corpus_dir, enabled=not no_save_state)
         if self.resume:
             self._state_store.load()
+        else:
+            # Not merely "don't load": get() lazy-loads on first access, so
+            # skipping load() here deferred the read instead of preventing it.
+            self._state_store.start_empty()
 
         self._fluctuation = None
         self._fluctuation_beta = fluctuation_beta
@@ -4956,13 +4960,11 @@ class Fuzzer:
                     speciation_threshold=self._ga_speciation_threshold,
                 )
                 self.ga.initialize(self.corpus, self._edge_tracker)
-
-            # Initialize differential fuzzing if enabled
-            if self._diff_target:
-                from fuzzer_tool.services.differential import DifferentialTracker
-
-                self._diff_tracker = DifferentialTracker()
-                print(f"[*] Differential: comparing against {self._diff_target}")
+                # Restore and announce here, not inside the differential
+                # block below: nesting it there meant `--ga --resume` without
+                # a differential target silently restarted GA at generation 0,
+                # while `--differential-target` without `--ga` reached the
+                # banner with self.ga still None and died on .pop_size.
                 ga_data = self._state_store.get("ga")
                 if self.resume and ga_data is not None:
                     self.ga.from_dict(ga_data)
@@ -4974,6 +4976,13 @@ class Fuzzer:
                     f"crossover={self.ga.crossover_rate:.0%}, "
                     f"mutation={self.ga.mutation_rate:.0%}"
                 )
+
+            # Initialize differential fuzzing if enabled
+            if self._diff_target:
+                from fuzzer_tool.services.differential import DifferentialTracker
+
+                self._diff_tracker = DifferentialTracker()
+                print(f"[*] Differential: comparing against {self._diff_target}")
 
             # Initialize QEA lifecycle if enabled
             if self._qea_enabled:
