@@ -369,7 +369,9 @@ summary reprints the inner test name, so its `count(...) == 1` assertion sees 2.
     mid-execution (locks/state possibly held) yet keeps serving RUNs from the
     poisoned process; AFL++ respawns workers here.
 
-36. **`adapters/persistent.py:136-161`** [corroborated] — protocol never sends
+36. **`adapters/persistent.py:136-161`** [corroborated] — **FIXED 2026-08-24.**
+    `run_one` now sends `SIGCONT` right after reading the return code from the
+    `SIGSTOP` branch. Original text follows. — protocol never sends
     SIGCONT per its own docstring; after the first `run_one` the target stays
     SIGSTOPped, every later iteration times out and SIGKILLs it — persistent
     mode is single-shot.
@@ -596,10 +598,14 @@ summary reprints the inner test name, so its `count(...) == 1` assertion sees 2.
 73. `rand_pool.py:173-191` [verified] — `randbytes(n)` replays consumed pool
     when n ≡ 0 mod pool size; batch methods silently cap at 4096 items
     (`rand_pool.py:94-141`, latent).
-74. `jpeg.py:669` [verified] — unclamped `randint(1, negative)` for small
+74. `jpeg.py:669` [verified] — **FIXED 2026-08-24.** `scan_len`'s upper bound is
+    now clamped with `max(1, ...)`, so a small `max_len` no longer collapses
+    the `randint` range below 1. Original text follows. — unclamped `randint(1, negative)` for small
     max_len; currently masked by RandPool's silent lo-return on empty ranges
     (itself a masking hazard: converts class-#1 crashes into silent degradation).
-75. `generic.py:1723-1728` [corroborated] — versifier never emits decimal digits
+75. `generic.py:1723-1728` [corroborated] — **FIXED 2026-08-24.** `_NumNode.Generate`
+    now appends the generated digits to `buf` in the `base == 10` case too.
+    Original text follows. — versifier never emits decimal digits
     (no else for base 10).
 76. `generic.py:1242` [verified] — ascii_num_replace negative-token handling
     unreachable (spans contain digits only).
@@ -618,9 +624,14 @@ summary reprints the inner test name, so its `count(...) == 1` assertion sees 2.
 83. `count_class.py:41-49` — extra "64" bucket vs AFL's merged [32-127] class;
     63→64 registers as novel where AFL wouldn't.
 84. `shapley.py:174-176` — `operator_synergy` formula ≤0 by construction.
-85. `gf2_common.py:192` [verified] — `e %= self.m if a != 0 else e` parses as
+85. `gf2_common.py:192` [verified] — **FIXED 2026-08-24.** Parenthesized as
+    `e = e % self.m if a != 0 else e`, so `e` is left untouched when `a == 0`
+    instead of being reduced modulo itself. Original text follows. — `e %= self.m if a != 0 else e` parses as
     `e %= (…)`; `pow(0, e>0)` returns 1.
-86. `te_position.py:48` [verified] — returns `max(byte_edges.keys())` (highest
+86. `te_position.py:48` [verified] — **FIXED 2026-08-24.**
+    `get_te_weighted_position` now selects the position with the highest
+    total edge-hit weight (`max(byte_edges, key=...)`) instead of the
+    numerically highest byte offset. Original text follows. — returns `max(byte_edges.keys())` (highest
     offset); TE weights never consulted despite docstring and dedicated tests
     that only check bounds.
 87. `periodicity.py:152-153` — latent IndexError when caller passes `max_lag` >
