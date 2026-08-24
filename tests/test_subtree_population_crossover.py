@@ -107,8 +107,8 @@ class TestTreeSplice:
                 break
         assert found_donor_bytes, "splice never grafted in bytes from the donor tree"
 
-    def test_mutate_tree_op4_is_splice(self):
-        """The op-4 branch in mutate_tree must route to _tree_splice, not
+    def test_mutate_tree_op3_is_splice(self):
+        """The op-3 branch in mutate_tree must route to _tree_splice, not
         silently stay a no-op (regression for the missing implementation)."""
         grammar = _json_grammar()
         tm = TreeMutator(grammar)
@@ -118,7 +118,7 @@ class TestTreeSplice:
         pop.add(donor_tree, rng=random.Random(3))
 
         class _FixedOpRng:
-            """Forces mutate_tree's op selection to pick splice (op index 4)."""
+            """Forces mutate_tree's op selection to pick splice (op index 3)."""
 
             def randint(self, a, b):
                 if b == 5:  # the op-selection roll in mutate_tree

@@ -733,7 +733,6 @@ class TreeMutator:
         rng=None,
         population: SubtreePopulation | None = None,
     ) -> bytes:
-        self._rng = rng or random
         """Apply a random tree-level mutation and serialize back to bytes.
 
         Operations:
@@ -753,6 +752,7 @@ class TreeMutator:
                 Callers should keep one long-lived ``SubtreePopulation``
                 per fuzzer run and feed it every parsed corpus tree.
         """
+        self._rng = rng or random
         if tree.is_leaf:
             return self._mutate_leaf(tree, max_len)
 
