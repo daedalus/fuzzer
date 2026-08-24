@@ -66,8 +66,9 @@ fuzzer-tool fuzz ./target --resume
 | Epsilon-greedy | `--eps-greedy` | Classic exploration/exploitation with annealing |
 | Hierarchical bandit | `--hierarchical-bandit` | Two-level: category → operator Thompson sampling |
 | GP-UCB | `--gp-ucb` | Gaussian Process UCB with RBF kernel covariance |
-| AFL++ power schedules | `--schedule` | FAST/COE/RARE/MMOPT/LIN/QUAD/GO/AFLGO seed-level energy |
+| AFL++ power schedules | `--schedule` | FAST/COE/RARE/MMOPT/LIN/QUAD/GO/AFLGO/ENTROPIC seed-level energy |
 | AFLGo directed annealing | `--schedule aflgo` | Exact AFLGo power factor — symmetric 32×/1/32× energy by distance-to-target with time-based cooling (`--t-x`, `--aflgo-cooling`) |
+| Entropic power schedule | `--schedule entropic` | libFuzzer `-entropic`: energy ∝ log(1 + rare-feature count) from already-tracked rare-edge ownership |
 | Seed strategies | — | Weighted, Pareto, format-aware, GA, QEA, Bayesian, Markov-gen |
 | **Mutation lineage tree** | `--lineage` | Weighted parent/ops/sites forest per seed: unproductive-branch pruning in auto-minimize, causal crash-path replay in `tmin`, LCA-based diversity scoring |
 
@@ -291,7 +292,7 @@ verify the link before tuning schedulers or dictionaries. See
 | `replay` | Replay a crash input |
 | `verify` | Confirm crashes with ASAN target |
 | `estimate` | Crash ETA via Good-Turing + calibration |
-| `import` | Import corpus from AFL/libFuzzer/honggfuzz |
+| `import` | Import corpus from AFL/libFuzzer/honggfuzz (`--autotokens FILE` also tokenizes the corpus into an AFL-format dictionary) |
 
 ---
 
