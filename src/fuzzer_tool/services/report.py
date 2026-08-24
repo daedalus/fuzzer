@@ -290,7 +290,15 @@ def _configuration(f) -> str:
 
 
 def _crash_signatures(f) -> str:
-    """Crash signature histogram from f.crash_sigs (SanitizerReport signatures)."""
+    """Crash signature histogram from f.crash_sigs (SanitizerReport signatures).
+
+    Also groups signatures into stack-similarity clusters (Levenshtein
+    distance over normalized frame sequences, via
+    :func:`fuzzer_tool.core.crash_metadata.cluster_crashes`) so distinct
+    signatures caused by the same underlying bug -- differing only in
+    inlined frames or instruction offsets -- are reported as one root
+    cause instead of inflating the apparent bug count.
+    """
     sigs = getattr(f, "crash_sigs", None)
     if not sigs:
         return ""
@@ -301,6 +309,25 @@ def _crash_signatures(f) -> str:
         if sig in frames and frames[sig]:
             line += "  " + " -> ".join(str(x) for x in frames[sig][:2])
         lines.append(line)
+
+    if len(sigs) > 1:
+        from fuzzer_tool.core.crash_metadata import cluster_crashes
+
+        sig_list = list(sigs.keys())
+        frame_lists = [frames.get(s, []) for s in sig_list]
+        clusters = cluster_crashes(sig_list, frame_lists=frame_lists)
+        multi = [c for c in clusters if len(c) > 1]
+        if multi:
+            lines.append("")
+            lines.append(
+                f"  Clustered by stack similarity: {len(sigs)} signature(s) -> "
+                f"{len(clusters)} likely distinct bug(s)"
+            )
+            for cluster in sorted(multi, key=len, reverse=True):
+                total = sum(sigs[sig_list[i]] for i in cluster)
+                members = ", ".join(sig_list[i] for i in cluster)
+                lines.append(f"    [{total:>4d}x] {members}")
+
     return "\n".join(lines)
 
 

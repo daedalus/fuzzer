@@ -631,9 +631,11 @@ def _auto_tune_timeout(target, file_mode=False, target_args=None, runs=10):
 def cmd_import(args):
     """Import corpus from AFL/libFuzzer/honggfuzz."""
     from fuzzer_tool.services.import_corpus import (
+        build_autotoken_dictionary,
         import_from_afl,
         import_from_honggfuzz,
         import_from_libfuzzer,
+        write_dictionary,
     )
 
     if args.format == "afl":
@@ -645,6 +647,11 @@ def cmd_import(args):
     elif args.format == "honggfuzz":
         imported, _ = import_from_honggfuzz(args.source_dir, args.corpus, args.crashes)
         print(f"[+] Imported {imported} seeds from honggfuzz")
+
+    if getattr(args, "autotokens", None):
+        tokens = build_autotoken_dictionary(args.corpus)
+        write_dictionary(tokens, args.autotokens)
+        print(f"[+] Wrote {len(tokens)} autotokens to {args.autotokens}")
     return 0
 
 
@@ -2186,9 +2193,10 @@ def main() -> int:
     fuzz_parser.add_argument(
         "--schedule",
         default="base",
-        choices=("base", "fast", "coe", "rare", "mopt", "lin", "quad", "go", "aflgo"),
-        help="Power schedule: base|fast|coe|rare|mopt|lin|quad|go|aflgo "
-        "(aflgo = exact AFLGo distance annealing, see --t-x)",
+        choices=("base", "fast", "coe", "rare", "mopt", "lin", "quad", "go", "aflgo", "entropic"),
+        help="Power schedule: base|fast|coe|rare|mopt|lin|quad|go|aflgo|entropic "
+        "(aflgo = exact AFLGo distance annealing, see --t-x; "
+        "entropic = libFuzzer -entropic, log-scaled rare-feature energy)",
     )
     fuzz_parser.add_argument(
         "--aflgo-cooling",
@@ -2557,6 +2565,13 @@ def main() -> int:
         choices=["afl", "libfuzzer", "honggfuzz"],
         default="afl",
         help="Source format (default: afl)",
+    )
+    import_parser.add_argument(
+        "--autotokens",
+        default=None,
+        metavar="FILE",
+        help="Also tokenize the destination corpus into a whole-token "
+        "AFL-format dictionary written to FILE",
     )
     import_parser.set_defaults(func=cmd_import)
 

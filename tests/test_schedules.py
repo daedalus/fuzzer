@@ -280,6 +280,60 @@ class TestRareSchedule:
         assert score >= 1.0
 
 
+class TestEntropicSchedule:
+    def test_entropic_neutral_with_no_rare_features(self):
+        sc = SeedScorer("entropic")
+        assert sc._entropic_factor(rare_edge_count=0, tc_ref=0) == 1.0
+
+    def test_entropic_scales_log_with_rare_features(self):
+        sc = SeedScorer("entropic")
+        low = sc._entropic_factor(rare_edge_count=1, tc_ref=0)
+        high = sc._entropic_factor(rare_edge_count=63, tc_ref=0)
+        assert low == pytest.approx(1.0 + math.log2(2))
+        assert high == pytest.approx(1.0 + math.log2(64))
+        assert high > low
+
+    def test_entropic_uses_larger_of_rare_edge_count_and_tc_ref(self):
+        sc = SeedScorer("entropic")
+        assert sc._entropic_factor(rare_edge_count=3, tc_ref=15) == pytest.approx(
+            1.0 + math.log2(16)
+        )
+
+    def test_entropic_score_integration(self):
+        sc = SeedScorer("entropic")
+        baseline = sc.score(
+            exec_us=100,
+            avg_exec_us=100,
+            bitmap_size=50,
+            avg_bitmap_size=50,
+            handicap=0,
+            depth=0,
+            fuzz_level=0,
+            n_fuzz=0,
+            total_execs=0,
+            tc_ref=0,
+            favored=False,
+            max_depth=0,
+            rare_edge_count=0,
+        )
+        boosted = sc.score(
+            exec_us=100,
+            avg_exec_us=100,
+            bitmap_size=50,
+            avg_bitmap_size=50,
+            handicap=0,
+            depth=0,
+            fuzz_level=0,
+            n_fuzz=0,
+            total_execs=0,
+            tc_ref=0,
+            favored=False,
+            max_depth=0,
+            rare_edge_count=30,
+        )
+        assert boosted > baseline
+
+
 class TestMoptSchedule:
     def test_mopt_recent_entry_boost(self):
         sc = SeedScorer("mopt")
