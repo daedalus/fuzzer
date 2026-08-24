@@ -142,7 +142,7 @@ def _worker_main(
 
             now = time.time()
             if now - last_sync >= sync_interval:
-                _sync_corpus_in(Path(corpus_dir), fuzzer)
+                _sync_corpus_in(Path(corpus_dir), fuzzer, self_dir=worker_corpus)
                 last_sync = now
 
             seed_data = fuzzer._pick_seed()
@@ -183,42 +183,95 @@ def _worker_main(
     )
 
 
-_sync_cursors: dict[str, int] = {}
+# Per-sibling set of seed FILENAMES already offered to this worker.
+#
+# This was an integer cursor into a `sorted()` listing. Seed filenames are
+# `id_<hash>`, so their sort order is effectively random with respect to
+# creation order: a seed written later can sort before the cursor, and every
+# such seed was skipped permanently. Keying on the name has no such failure
+# mode, and the name is exactly what identifies the entry.
+_sync_seen: dict[str, set[str]] = {}
+
+# Bound the bookkeeping. Reached only on a corpus far larger than anything
+# these workers hold in memory; dropping the set costs a re-offer, which
+# `seen_hashes` and `save_to_corpus` both dedup.
+_SYNC_SEEN_MAX = 200_000
 
 
-def _sync_corpus_in(parent_dir: Path, fuzzer, max_new: int = 50):
+def _sync_corpus_in(parent_dir: Path, fuzzer, max_new: int = 50, self_dir: Path | None = None):
     """Pull new corpus entries from sibling worker dirs.
 
-    Tracks a per-sibling file-count cursor so each sync only processes
-    files added since the last round, avoiding O(total_corpus) re-scans.
+    Seeds live at ``<worker>/seeds/<hh>/id_<hash>`` (plus the
+    ``irreplaceable/`` and ``crashing/`` subtrees), written there by
+    ``adapters.filesystem.save_to_corpus``. This used to list the worker
+    directory NON-recursively and take the files, so it transferred zero
+    seeds and imported the one top-level file that does exist —
+    ``state.pkl.gz`` — as a garbage seed into every sibling.
+
+    ``pruned/`` is excluded to match ``load_corpus``: those entries were
+    deliberately dropped by the sibling, and re-importing them would undo
+    its minimization. Delta records under ``deltas/`` are also skipped —
+    a delta names a parent hash this worker may not hold, so it is not
+    self-contained enough to transfer.
+
+    Args:
+        parent_dir: The shared corpus directory holding the ``.wN`` dirs.
+        fuzzer: The importing worker's Fuzzer.
+        max_new: Cap on seeds imported per call.
+        self_dir: This worker's own corpus dir, skipped if given.
     """
     from fuzzer_tool.adapters.filesystem import hash_data
 
-    global _sync_cursors
-
     added = 0
+    own = Path(self_dir).name if self_dir is not None else None
+
     for sibling_dir in sorted(parent_dir.iterdir()):
-        if not sibling_dir.is_dir() or not sibling_dir.name.startswith(".w"):
-            continue
         if added >= max_new:
             break
+        if not sibling_dir.is_dir() or not sibling_dir.name.startswith(".w"):
+            continue
+        if own is not None and sibling_dir.name == own:
+            continue
+
+        seeds_root = sibling_dir / "seeds"
+        if not seeds_root.is_dir():
+            continue
+
         key = str(sibling_dir)
-        cursor = _sync_cursors.get(key, 0)
-        entries = sorted(
-            e for e in sibling_dir.iterdir() if e.is_file() and e.suffix not in (".txt", ".log")
-        )
-        new_entries = entries[cursor:]
-        consumed = 0
-        for entry in new_entries:
+        seen_names = _sync_seen.setdefault(key, set())
+        if len(seen_names) > _SYNC_SEEN_MAX:
+            seen_names.clear()
+
+        for entry in sorted(seeds_root.rglob("id_*")):
             if added >= max_new:
                 break
-            data = entry.read_bytes()
-            h = hash_data(data)
-            if h not in fuzzer.seen_hashes:
-                fuzzer.save_to_corpus(data)
-                added += 1
-            consumed += 1
-        _sync_cursors[key] = cursor + consumed
+            if "pruned" in entry.parts or not entry.is_file():
+                continue
+            name = entry.name
+            if name in seen_names:
+                continue
+
+            # The filename IS the content hash, so a seed this worker
+            # already holds can be skipped without reading it.
+            name_hash = name[3:]
+            if name_hash in fuzzer.seen_hashes:
+                seen_names.add(name)
+                continue
+
+            try:
+                data = entry.read_bytes()
+            except OSError:
+                continue
+
+            # A sibling's write is not atomic, so a truncated read is
+            # possible. Verify against the name before importing, and leave
+            # the entry unmarked so the next round retries it.
+            if hash_data(data) != name_hash:
+                continue
+
+            seen_names.add(name)
+            fuzzer.save_to_corpus(data)
+            added += 1
 
 
 def run_parallel(
