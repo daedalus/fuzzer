@@ -99,6 +99,7 @@ class Grammar:
     def __init__(self):
         self.rules: dict[str, list[list]] = {}
         self.max_depth = 10
+        self._rng = None
 
     def parse(self, spec: str):
         """Parse a grammar specification string.
@@ -274,7 +275,7 @@ class Grammar:
             return b"?"
 
         alts = self.rules[name]
-        alt = random.choice(alts)
+        alt = (self._rng or random).choice(alts)
         return self._expand_tokens(alt, depth)
 
     def _expand_tokens(self, tokens: list, depth: int) -> bytes:
@@ -288,7 +289,7 @@ class Grammar:
                 result += self._expand_rule(token[1], depth - 1)
             elif kind == "repeat":
                 _, name, lo, hi = token
-                count = random.randint(lo, hi)
+                count = (self._rng or random).randint(lo, hi)
                 for _ in range(count):
                     result += self._expand_rule(name, depth - 1)
         return result

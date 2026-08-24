@@ -1855,7 +1855,7 @@ def radamsa_mutate_num(val: int, rng=None) -> int:
     # op == 9: random scaling
     n = _get_rng(rng).randint(1, 128)
     n = _log2_ceil(n)
-    return val + n if random.random() < 0.5 else val - n
+    return val + n if _get_rng(rng).random() < 0.5 else val - n
 
 
 def _log2_ceil(n: int) -> int:
