@@ -1057,6 +1057,55 @@ def _sancov_section_bounds(target: str, section: str) -> tuple[int, int] | None:
     return None
 
 
+def build_id(target: str) -> bytes | None:
+    """NT_GNU_BUILD_ID note contents, or None when absent/unparseable.
+
+    Walks PT_NOTE segments for a note with name "GNU" and type 3
+    (ELF_NOTE_GNU_BUILD_ID); the descriptor is 16-20 bytes (md5/sha1
+    style) on every mainstream toolchain. Used by core/cfg_cache.py as
+    the binary-identity component of its cache key.
+    """
+    try:
+        with open(target, "rb") as f:
+            elf = f.read()
+        if len(elf) < 64 or elf[:4] != b"\x7fELF":
+            return None
+        if elf[4] != 2 or elf[5] != 1:  # ELF64, little-endian
+            return None
+        e_phoff = struct.unpack_from("<Q", elf, 32)[0]
+        e_phentsize = struct.unpack_from("<H", elf, 54)[0]
+        e_phnum = struct.unpack_from("<H", elf, 56)[0]
+        if e_phentsize < 56 or e_phoff + e_phnum * e_phentsize > len(elf):
+            return None
+        for i in range(e_phnum):
+            ph = e_phoff + i * e_phentsize
+            p_type = struct.unpack_from("<I", elf, ph)[0]
+            if p_type != 4:  # PT_NOTE
+                continue
+            p_offset = struct.unpack_from("<Q", elf, ph + 8)[0]
+            p_filesz = struct.unpack_from("<Q", elf, ph + 32)[0]
+            note_end = min(p_offset + p_filesz, len(elf))
+            pos = p_offset
+            # Note triplets are 4-aligned: namesz, descsz, type, name,
+            # desc. Malformed lengths must not loop forever — bound each
+            # step to leave at least the 12-byte header.
+            while pos + 12 <= note_end:
+                namesz = struct.unpack_from("<I", elf, pos)[0]
+                descsz = struct.unpack_from("<I", elf, pos + 4)[0]
+                ntype = struct.unpack_from("<I", elf, pos + 8)[0]
+                name_off = pos + 12
+                desc_off = name_off + (namesz + 3) & ~3
+                next_pos = desc_off + (descsz + 3) & ~3
+                if namesz == 0 or descsz <= 0 or desc_off + descsz > note_end or next_pos <= pos:
+                    break
+                if ntype == 3 and elf[name_off : name_off + namesz] == b"GNU\x00":
+                    return bytes(elf[desc_off : desc_off + descsz])
+                pos = next_pos
+    except OSError as e:
+        log.debug("build_id read failed: %s", e)
+    return None
+
+
 def parse_sancov_offsets(target: str) -> tuple[int, int] | None:
     """Parse ELF to find __start/__stop___sancov_cntrs virtual addresses.
 

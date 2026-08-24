@@ -41,11 +41,14 @@ coverage" to "minimize distance."
 """
 
 import logging
+import multiprocessing
 import re
 import struct
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
-from fuzzer_tool.core.cfg import build_function_cfg
+from fuzzer_tool.core import cfg_cache
+from fuzzer_tool.core.cfg import FunctionCFG, build_function_cfg
 
 log = logging.getLogger(__name__)
 
@@ -65,6 +68,69 @@ _NO_VALUE_DISTANCE = 20.0
 _FILE_LINE_RE = re.compile(r"^(.*):(\d+)$")
 
 
+def _resolve_callee_with(
+    addr: int, functions: dict[str, tuple[int, int]], addr_to_func: dict[int, str]
+) -> str | None:
+    """Map a call target address to a function name (PLT-aware).
+
+    Module-level so the parallel decode worker can use it without a
+    TargetDistance instance; the method below delegates to this.
+    """
+    # PLT stubs are named ".plt.<real>" or "plt.<real>" in the symtab.
+    plt_name = addr_to_func.get(addr)
+    if plt_name and (plt_name.startswith(".plt") or plt_name.startswith("plt.")):
+        real_name = plt_name.replace(".plt.", "").replace("plt.", "")
+        if real_name and real_name in functions:
+            return real_name
+    best_name = None
+    best_start = -1
+    for fname, (start, end) in functions.items():
+        if start <= addr < end and start > best_start:
+            best_name = fname
+            best_start = start
+    return best_name
+
+
+def _decode_cfg_worker(task: tuple):
+    """Decode one function's CFG from its own file handle.
+
+    Task tuples stay small (name, offsets); the binary path and symbol
+    tables ship once per worker via _decode_worker_init, so executor.map
+    does not re-pickle the symtab-derived dicts for every function.
+    Returns the FunctionCFG, or None for unbuildable/empty functions —
+    failures must not cross the process boundary as exceptions.
+    """
+    name, file_off, nbytes, start_vaddr = task
+    path, functions, addr_to_func = _WORKER_CTX
+    try:
+        with open(path, "rb") as f:
+            f.seek(file_off)
+            code = f.read(nbytes)
+        if len(code) != nbytes:
+            return None
+        cfg = build_function_cfg(
+            name,
+            code,
+            start_vaddr,
+            lambda a: _resolve_callee_with(a, functions, addr_to_func),
+        )
+        return cfg if cfg.blocks else None
+    except Exception:
+        log.debug("CFG build failed for %s", name, exc_info=True)
+        return None
+
+
+# Set by _decode_worker_init in each pool worker; never used in the parent.
+_WORKER_CTX: tuple = ()
+
+
+def _decode_worker_init(
+    path: str, functions: dict[str, tuple[int, int]], addr_to_func: dict[int, str]
+):
+    global _WORKER_CTX
+    _WORKER_CTX = (path, functions, addr_to_func)
+
+
 class TargetDistance:
     """Compute call-graph and CFG distances from basic blocks to targets.
 
@@ -74,10 +140,16 @@ class TargetDistance:
             ``file.c:line`` specifications.
     """
 
-    def __init__(self, target: str, targets: list[str] | None = None):
+    def __init__(
+        self,
+        target: str,
+        targets: list[str] | None = None,
+        use_cfg_cache: bool = True,
+    ):
         self.target = target
         self.target_names: list[str] = targets or []
         self.target_addrs: set[int] = set()
+        self._use_cfg_cache = use_cfg_cache
 
         # Function table: name -> (start_addr, end_addr)
         self.functions: dict[str, tuple[int, int]] = {}
@@ -297,13 +369,7 @@ class TargetDistance:
 
     def _resolve_callee_name(self, addr: int) -> str | None:
         """Map a call target address to a function name (PLT-aware)."""
-        # PLT stubs are named ".plt.<real>" or "plt.<real>" in the symtab.
-        plt_name = self.addr_to_func.get(addr)
-        if plt_name and (plt_name.startswith(".plt") or plt_name.startswith("plt.")):
-            real_name = plt_name.replace(".plt.", "").replace("plt.", "")
-            if real_name and real_name in self.functions:
-                return real_name
-        return self._addr_to_function(addr)
+        return _resolve_callee_with(addr, self.functions, self.addr_to_func)
 
     def _file_offset(self, vaddr: int) -> int | None:
         """Translate a virtual address to its file offset (or None)."""
@@ -433,6 +499,11 @@ class TargetDistance:
         The harmonic CFG distance only needs CFGs of functions that
         contain target blocks; everything else uses the function-level
         CG distance (bounding the load-time disassembly cost).
+
+        Decoded CFGs go through core/cfg_cache.py: hits skip the decode,
+        misses are decoded (parallel above the pool thresholds) and then
+        stored, accumulate-merged per function so a later run with
+        different --target-functions still hits.
         """
         target_funcs = set()
         for taddr in self.target_addrs:
@@ -440,19 +511,62 @@ class TargetDistance:
             if tfname:
                 target_funcs.add(tfname)
 
-        for name in target_funcs:
+        ident = None
+        cached: dict = {}
+        if self._use_cfg_cache and cfg_cache.env_enabled():
+            ident = cfg_cache.identity(self.target)
+            if ident is not None:
+                cached = cfg_cache.load(ident) or {}
+        wanted = sorted(target_funcs)
+        for name in wanted:
+            hit = cached.get(name)
+            if hit is not None and name not in self._cfgs:
+                self._cfgs[name] = hit
+
+        specs: list[tuple[int, str, int, int]] = []
+        total_bytes = 0
+        for name in wanted:
+            if name in self._cfgs:
+                continue
             start, end = self.functions.get(name, (0, 0))
             if end <= start or end - start > _MAX_CFG_FUNC_SIZE:
                 continue
-            code = self._code_slice(start, end)
-            if code is None or len(code) != end - start:
+            off = self._file_offset(start)
+            if off is None:
                 continue
-            try:
-                cfg = build_function_cfg(name, code, start, self._resolve_callee_name)
-                if cfg.blocks:
-                    self._cfgs[name] = cfg
-            except Exception:
-                log.debug("CFG build failed for %s", name, exc_info=True)
+            specs.append((off, name, start, end))
+            total_bytes += end - start
+
+        decoded: list[FunctionCFG] = []
+        if specs and cfg_cache.should_parallelize(total_bytes, len(specs)):
+            tasks = [(name, off, end - start, start) for off, name, start, end in specs]
+            with ProcessPoolExecutor(
+                max_workers=cfg_cache.MAX_WORKERS,
+                mp_context=multiprocessing.get_context("fork"),
+                initializer=_decode_worker_init,
+                initargs=(self.target, self.functions, self.addr_to_func),
+            ) as ex:
+                for (_, _name, _, _), cfg in zip(
+                    specs, ex.map(_decode_cfg_worker, tasks), strict=True
+                ):
+                    if cfg is not None:
+                        decoded.append(cfg)
+        else:
+            for _off, name, start, end in specs:
+                code = self._code_slice(start, end)
+                if code is None or len(code) != end - start:
+                    continue
+                try:
+                    cfg = build_function_cfg(name, code, start, self._resolve_callee_name)
+                    if cfg.blocks:
+                        decoded.append(cfg)
+                except Exception:
+                    log.debug("CFG build failed for %s", name, exc_info=True)
+
+        new_cfgs = {cfg.name: cfg for cfg in decoded}
+        self._cfgs.update(new_cfgs)
+        if ident is not None and new_cfgs:
+            cfg_cache.store(ident, new_cfgs)
 
     def _compute_bb_values(self):
         """Compute AFLGo BB-level distances for the target functions.

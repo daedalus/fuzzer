@@ -411,6 +411,7 @@ def cmd_fuzz(args):
         cmaes_step_size=getattr(args, "cmaes_step_size", 0.3),
         cmaes_elite_frac=getattr(args, "cmaes_elite_frac", 0.5),
         targets=getattr(args, "target_functions", None),
+        use_cfg_cache=not getattr(args, "no_cfg_cache", False),
         anneal_budget=getattr(args, "anneal_budget", 0),
         boltzmann=getattr(args, "boltzmann", False),
         metropolis=getattr(args, "metropolis", False),
@@ -1435,6 +1436,12 @@ def main() -> int:
         "--no-shm",
         action="store_true",
         help="Skip AFL SHM coverage, use ptrace instead (for uninstrumented binaries)",
+    )
+    fuzz_parser.add_argument(
+        "--no-cfg-cache",
+        action="store_true",
+        help="Disable the on-disk CFG decode cache (~/.cache/fuzzer_cfgcache); "
+        "directed-mode distance setup always decodes fresh",
     )
     fuzz_parser.add_argument(
         "--ptrace",

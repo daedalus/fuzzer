@@ -638,6 +638,7 @@ class Fuzzer:
         no_shm=False,
         use_ptrace=False,
         adaptive_havoc=True,
+        use_cfg_cache=True,
         adaptive_timeout=False,
         resume=False,
         trace_crashes=False,
@@ -1755,7 +1756,7 @@ class Fuzzer:
         if targets:
             from fuzzer_tool.core.distance import TargetDistance
 
-            self._distance = TargetDistance(target, targets)
+            self._distance = TargetDistance(target, targets, use_cfg_cache=use_cfg_cache)
             self._dist_table_shm = None
             if self._distance.load():
                 print(
@@ -4769,6 +4770,67 @@ class Fuzzer:
 
         threading.Thread(target=_beat, daemon=True, name="stack-heartbeat").start()
 
+    def _calibrate_seed_baselines(self) -> None:
+        """Execute every corpus seed verbatim once, before the fuzz loop.
+
+        fuzz_one() runs ONLY mutated input: _dedup_mutate() transforms even
+        seed iterations, so the pristine bytes a corpus file contains are
+        never executed. The tracker's edge universe is therefore built
+        exclusively from mutants that happen to stay format-valid — for
+        structured targets that is a tiny sliver of what the seeds really
+        reach (observed on png_read.so: 11 valid PNGs produced shm=6 edges
+        after 150 execs, while one direct execution of a single seed
+        records ~330; the campaign then plateaus immediately and Good-
+        Turing reads the starved universe as 100% saturated).
+
+        This pass gives every seed one unmutated execution through the
+        normal pipeline (_run_target + is_new_coverage_with_edges +
+        record_edges), so scheduling, corpus admission, GT estimation and
+        cmplog token collection all start from the coverage the seeds
+        genuinely carry. Crashes/timeouts during calibration are counted,
+        not fatal — a hostile corpus must not kill startup.
+        """
+        if not self.use_coverage or not self.shm_cov or self.multi_targets:
+            return
+        if not self.corpus:
+            return
+        baseline_edges = 0
+        t0 = time.monotonic()
+        for seed in list(self.corpus):
+            returncode, stderr = self._run_target(seed)
+            if self._is_crash(returncode, stderr):
+                self.crash_count += 1
+                continue
+            if returncode == -1:  # timeout sentinel
+                self.timeout_count += 1
+                continue
+            has_new, edge_ids = self.shm_cov.is_new_coverage_with_edges()
+            if not edge_ids:
+                continue
+            hit_counts = self.shm_cov.get_edge_counts()
+            stack_depth = self.shm_cov.read_stack_depth()
+            path_hash = self.shm_cov.read_path_hash()
+            if path_hash == 0:
+                path_hash = self.shm_cov.compute_path_hash_from_edges(edge_ids)
+            new = self._edge_tracker.record_edges(
+                self._seed_key(seed),
+                edge_ids,
+                target_name=os.path.basename(self.target),
+                hit_counts=hit_counts,
+                stack_depth=stack_depth,
+                path_hash=path_hash,
+                hw_instructions=self._last_perf_deltas.get("instructions", 0),
+                hw_branches=self._last_perf_deltas.get("branches", 0),
+                hw_branch_misses=self._last_perf_deltas.get("branch_misses", 0),
+            )
+            baseline_edges += len(new)
+        if baseline_edges or len(self.corpus):
+            print(
+                f"[*] Seed calibration: {len(self.corpus)} seeds -> "
+                f"{baseline_edges} baseline edges "
+                f"({time.monotonic() - t0:.2f}s)"
+            )
+
     def run(self, iterations=0):
         self._start_stack_heartbeat()
         if self.multi_targets:
@@ -4816,7 +4878,7 @@ class Fuzzer:
             bd = branch_density(self.target)
             if bd is not None:
                 print(f"[*] Branch density: {bd:.1f} cond branches/KB")
-        print(f"[*] Edge bitmap: {self.map_size:,} bytes (auto-sized)")
+        print(f"[*] Edge bitmap: {self.map_size:,} entries (auto-sized)")
         print(f"[*] Corpus: {self.corpus_dir} ({len(self.corpus)} seeds)")
         print(f"[*] Crashes: {self.crashes_dir}")
         print(f"[*] Max input length: {self.max_len}")
@@ -5041,6 +5103,8 @@ class Fuzzer:
             # Print WFC mode status
             if self._wfc_enabled:
                 print("[*] WFC: enabled — structural chunk reordering and pixel generation active")
+
+            self._calibrate_seed_baselines()
 
             while not _shutdown:
                 if iterations and i >= iterations:
