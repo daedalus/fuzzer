@@ -45,5 +45,5 @@ def get_te_weighted_position(
     """
     if not byte_edges:
         return None
-    best_pos = max(byte_edges.keys())
+    best_pos = max(byte_edges, key=lambda pos: sum(byte_edges[pos].values()))
     return best_pos if best_pos < input_length else None

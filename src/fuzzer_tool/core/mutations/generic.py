@@ -2084,6 +2084,8 @@ class _NumNode(_VerseNode):
             buf += b"0" + num
         elif base == 16:
             buf += b"0x" + num
+        else:
+            buf += num
         if v._rand.random() == 0:
             buf += b"-"
 

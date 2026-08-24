@@ -189,7 +189,7 @@ class GF2n:
         return poly_mod(poly_mul(a, b), self.mod)
 
     def pow(self, a: int, e: int) -> int:
-        e %= self.m if a != 0 else e
+        e = e % self.m if a != 0 else e
         return poly_powmod(a, e, self.mod)
 
     def inv(self, a: int) -> int:

@@ -159,6 +159,7 @@ class PersistentRunner:
                         ctypes.POINTER(ctypes.c_int),
                     )
                     returncode = rc_ptr.contents.value
+                    os.kill(self.pid, signal.SIGCONT)
                     return returncode, ""
                 else:
                     self._started = False
