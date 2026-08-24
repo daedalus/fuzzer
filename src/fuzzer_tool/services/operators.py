@@ -1900,17 +1900,35 @@ class OperatorEngine:
 
     def _op_grammar_tree_mutate(self, buf, _byte_idx, data):
         if self.f.grammar:
-            from fuzzer_tool.core.grammar import TreeMutator
+            from fuzzer_tool.core.grammar import SubtreePopulation, TreeMutator
 
-            if not hasattr(self.f, "_tree_mutator"):
-                self.f._tree_mutator = TreeMutator(self.f.grammar)
-            parent_meta = self.f.seed_meta.get(data)
+            f = self.f
+            rng = f._rand_pool
+            if not hasattr(f, "_tree_mutator"):
+                f._tree_mutator = TreeMutator(f.grammar)
+                f._subtree_population = SubtreePopulation()
+                f._subtree_pop_next_idx = 0
+            parent_meta = f.seed_meta.get(data)
             stride = parent_meta.get("record_stride") if parent_meta else None
-            tree = self.f._tree_mutator.parse(bytes(buf), chunk_size=stride)
+            tree = f._tree_mutator.parse(bytes(buf), chunk_size=stride)
+
+            # Incrementally harvest newly-added corpus entries into the
+            # shared subtree population (subtree-population crossover, see
+            # docs/web_research_port_candidates_2026-08.md #8) instead of
+            # reparsing the whole corpus on every call.
+            corpus = getattr(f, "corpus", None) or []
+            next_idx = f._subtree_pop_next_idx
+            if next_idx > len(corpus):
+                next_idx = 0  # corpus was replaced/shrunk — restart harvesting
+            for seed in corpus[next_idx:]:
+                donor_tree = f._tree_mutator.parse(bytes(seed))
+                f._subtree_population.add(donor_tree, rng=rng)
+            f._subtree_pop_next_idx = len(corpus)
+
             return bytearray(
-                self.f._tree_mutator.mutate_tree(
-                    tree, max_len=self.f.max_len, rng=self.f._rand_pool
-                )[: self.f.max_len]
+                f._tree_mutator.mutate_tree(
+                    tree, max_len=f.max_len, rng=rng, population=f._subtree_population
+                )[: f.max_len]
             )
 
     def _op_versifier_generate(self, buf, _byte_idx, _data):

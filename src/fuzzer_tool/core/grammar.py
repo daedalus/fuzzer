@@ -529,6 +529,53 @@ class TreeNode:
         return f"Node({self.rule!r}, children={len(self.children)})"
 
 
+class SubtreePopulation:
+    """Global pool of subtrees harvested across many corpus entries.
+
+    Port of the "subtree-population crossover" idea (GRIIN, ASE '23;
+    Grammarinator x AFL++, 2026): grammar-aware crossover is far more
+    productive when the replacement subtree can come from *any* corpus
+    entry that shares the target's rule, not only a freshly generated
+    subtree or a clone from within the same tree. This class keeps a
+    bounded, per-rule reservoir of interior nodes so ``TreeMutator``
+    can splice in subtrees seen elsewhere in the corpus.
+
+    Reservoir sampling (Algorithm R) bounds memory to ``max_per_rule``
+    nodes per rule regardless of corpus size, while still giving every
+    harvested node an equal chance of ending up in the pool.
+    """
+
+    def __init__(self, max_per_rule: int = 64):
+        self.max_per_rule = max_per_rule
+        self._pools: dict[str, list[TreeNode]] = {}
+        self._seen: dict[str, int] = {}
+
+    def add(self, tree: TreeNode, rng=None) -> None:
+        """Harvest every interior node of *tree* into the population."""
+        rand = rng or random
+        for node in tree.collect_interior():
+            pool = self._pools.setdefault(node.rule, [])
+            seen = self._seen.get(node.rule, 0)
+            self._seen[node.rule] = seen + 1
+            if len(pool) < self.max_per_rule:
+                pool.append(node)
+                continue
+            j = rand.randint(0, seen)
+            if j < self.max_per_rule:
+                pool[j] = node
+
+    def sample(self, rule: str, rng=None) -> "TreeNode | None":
+        """Return a random subtree previously harvested for *rule*, or None."""
+        pool = self._pools.get(rule)
+        if not pool:
+            return None
+        rand = rng or random
+        return pool[rand.randint(0, len(pool) - 1)]
+
+    def __len__(self) -> int:
+        return sum(len(pool) for pool in self._pools.values())
+
+
 class TreeMutator:
     """Parse inputs against a grammar into trees and mutate at the tree level.
 
@@ -679,7 +726,13 @@ class TreeMutator:
     # Tree-level mutations
     # ------------------------------------------------------------------
 
-    def mutate_tree(self, tree: TreeNode, max_len: int = 4096, rng=None) -> bytes:
+    def mutate_tree(
+        self,
+        tree: TreeNode,
+        max_len: int = 4096,
+        rng=None,
+        population: SubtreePopulation | None = None,
+    ) -> bytes:
         self._rng = rng or random
         """Apply a random tree-level mutation and serialize back to bytes.
 
@@ -689,14 +742,21 @@ class TreeMutator:
         2. Subtree delete: remove a node (replace with empty)
         3. Subtree duplicate: clone a node and insert the copy nearby
         4. Subtree splice: replace a node with a subtree from another
-           corpus entry's tree
+           corpus entry's tree (see ``SubtreePopulation``); falls back to
+           subtree swap when no *population* is supplied or no donor of a
+           matching rule has been harvested yet
         5. Rule substitution: replace a node with a different alternative
            from the same grammar rule
+
+        Args:
+            population: Optional cross-corpus subtree pool for op 4.
+                Callers should keep one long-lived ``SubtreePopulation``
+                per fuzzer run and feed it every parsed corpus tree.
         """
         if tree.is_leaf:
             return self._mutate_leaf(tree, max_len)
 
-        op = (self._rng or random).randint(0, 4)
+        op = (self._rng or random).randint(0, 5)
         if op == 0:
             return self._tree_swap(tree, max_len)
         elif op == 1:
@@ -704,6 +764,8 @@ class TreeMutator:
         elif op == 2:
             return self._tree_duplicate(tree, max_len)
         elif op == 3:
+            return self._tree_splice(tree, max_len, population)
+        elif op == 4:
             return self._tree_rule_sub(tree, max_len)
         else:
             return self._mutate_leaf(tree, max_len)
@@ -746,6 +808,40 @@ class TreeMutator:
         # Insert after the original
         parent.children.insert(idx + 1, clone)
         return tree.serialize()[:max_len]
+
+    def _tree_splice(
+        self, tree: TreeNode, max_len: int, population: SubtreePopulation | None
+    ) -> bytes:
+        """Replace a random interior node with a same-rule subtree donated
+        by a different corpus entry (subtree-population crossover).
+
+        Falls back to ``_tree_swap`` (freshly-generated subtree) when no
+        population was supplied or it hasn't harvested a matching rule yet
+        — that keeps this op always productive instead of a silent no-op.
+        """
+        if population is None or not len(population):
+            return self._tree_swap(tree, max_len)
+        targets = tree.collect_interior()
+        if not targets:
+            return tree.serialize()[:max_len]
+        rng = self._rng or random
+        # Try a bounded number of random targets rather than shuffling the
+        # whole list — RandPool doesn't implement shuffle, and one match is
+        # all a single mutation needs.
+        tries = min(len(targets), 8)
+        for _ in range(tries):
+            target = targets[rng.randint(0, len(targets) - 1)]
+            donor = population.sample(target.rule, rng=rng)
+            if donor is None or donor is target:
+                continue
+            if target is tree:
+                # Root itself is the splice point: it has no parent to
+                # rewrite in place, so the donor subtree simply becomes the
+                # whole output.
+                return self._clone_tree(donor).serialize()[:max_len]
+            self._replace_in_tree(tree, target, self._clone_tree(donor))
+            return tree.serialize()[:max_len]
+        return self._tree_swap(tree, max_len)
 
     def _tree_rule_sub(self, tree: TreeNode, max_len: int) -> bytes:
         """Replace a node with a different alternative from the same rule."""
