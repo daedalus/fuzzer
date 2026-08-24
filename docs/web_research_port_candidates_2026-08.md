@@ -18,13 +18,19 @@ Effort estimates are guesses until a per-item audit happens against live code.
 
 ## Status
 
+**2026-08-24**: Items #1, #2, #3 landed (see `docs/TODO.md` Scheduling section). #3
+(`cluster_crashes`) already existed in `core/crash_metadata.py` but was dead code —
+it is now wired into `services/report.py::_crash_signatures`. #4–7 remain: #4/#5
+require `afl_shim.c` changes (excluded from this pass); #6/#7 are `L` effort
+needing new feedback plumbing, not yet started.
+
 ### Tier 1 — quick wins
 
 | # | Candidate | Source | Mechanism | Lands in | Effort |
 |---|---|---|---|---|---|
-| 1 | autotokens | AFL++ | Tokenize ASCII corpus into whole-token dictionary entries; no grammar needed | dictionary builder / `import_corpus.py` | Trivial |
-| 2 | Entropic power schedule | libFuzzer `-entropic` | Energy ∝ log(rare-feature count), updated from feature-frequency histograms we already collect | `SeedScorer` (`schedules.py`) | Trivial |
-| 3 | Stack-hash crash clustering | ClusterFuzz; CASR/LibCASR (embeddable Python API, maintained 2024–25) | Exact-match then LCS-distance stack similarity + hierarchical clustering over ASAN replay output | `report.py`/`root_cause.py` post-processing | Trivial–L |
+| 1 | autotokens (✅ landed 2026-08-24) | AFL++ | Tokenize ASCII corpus into whole-token dictionary entries; no grammar needed | `import_corpus.py::build_autotoken_dictionary`/`extract_tokens`, `import --autotokens` | Trivial |
+| 2 | Entropic power schedule (✅ landed 2026-08-24) | libFuzzer `-entropic` | Energy ∝ log(rare-feature count), updated from feature-frequency histograms we already collect | `SeedScorer._entropic_factor` (`schedules.py`), `--schedule entropic` | Trivial |
+| 3 | Stack-hash crash clustering (✅ landed 2026-08-24) | ClusterFuzz; CASR/LibCASR (embeddable Python API, maintained 2024–25) | Exact-match then LCS-distance stack similarity + hierarchical clustering over ASAN replay output | `report.py::_crash_signatures` now calls the pre-existing `core/crash_metadata.py::cluster_crashes` | Trivial–L |
 | 4 | trace-div / trace-gep | clang `-fsanitize-coverage=trace-div,trace-gep` | Callbacks carry every non-constant divisor/GEP index — dynamic operand feedback complementing static DIV extraction | cmplog-style handlers in `afl_shim.c` plumbing | L |
 | 5 | N-gram edge coverage | AFL++ (`AFL_NGRAM_ENV`, RAID'19) | Hash last-N executed edges into the map key; separates deep parser states that collide under lone-edge hashing | map-update arithmetic in `afl_shim.c` (CTX already default-on; n-gram is the missing sibling) | L |
 | 6 | Zest validity channel | Zest/JQF (ISSTA'19) | Input *validity* (parser acceptance rate) as second fitness channel alongside coverage; saves valid-and-new inputs to steer past syntax checks into semantic stages | outcome recording in `runner.py`/`fuzzer.py` + scheduler feature | L |

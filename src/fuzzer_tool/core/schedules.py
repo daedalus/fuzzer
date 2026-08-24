@@ -18,6 +18,12 @@ Schedules:
   T follows an exp/log/lin/quad cooling over t_x minutes to
   exploitation. Near-target seeds get up to 32× energy, far seeds as
   little as 1/32×.
+- ENTROPIC: libFuzzer's `-entropic` schedule — energy scales with
+  log2(1 + rare-feature count), using the rare-edge-ownership counts
+  (tc_ref, rare_edge_count) already collected for RARE/honggfuzz
+  scoring. Seeds touching more rare/undersampled features get
+  proportionally more mutation budget; seeds with no rare features get
+  the schedule-neutral 1.0x factor.
 
 Honggfuzz factors (applied multiplicatively on top of schedule scoring):
 - Novelty decay: new-edge bonus that decays over 10 minutes
@@ -41,14 +47,14 @@ class SeedScorer:
 
     Args:
         schedule: One of 'base', 'fast', 'coe', 'rare', 'mopt', 'lin', 'quad',
-            'go', 'aflgo'.
+            'go', 'aflgo', 'entropic'.
         max_mult: Maximum havoc multiplier (default 16).
         aflgo_cooling: Cooling schedule for the 'aflgo' power factor:
             'exp', 'log', 'lin' or 'quad'.
         t_x_minutes: Time to exploitation in minutes (AFLGo's -c).
     """
 
-    SCHEDULES = ("base", "fast", "coe", "rare", "mopt", "lin", "quad", "go", "aflgo")
+    SCHEDULES = ("base", "fast", "coe", "rare", "mopt", "lin", "quad", "go", "aflgo", "entropic")
     COOLING = ("exp", "log", "lin", "quad")
 
     def __init__(
@@ -245,6 +251,8 @@ class SeedScorer:
                 t_x_minutes,
                 self.aflgo_cooling,
             )
+        elif self.schedule == "entropic":
+            perf_score *= self._entropic_factor(rare_edge_count, tc_ref)
 
         # ── Honggfuzz power factors (applied on top of schedule) ────────
         perf_score *= self._honggfuzz_factors(
@@ -528,6 +536,24 @@ class SeedScorer:
         Returns the value to ADD to the base score (tc_ref * 10).
         """
         return tc_ref * 10.0
+
+    def _entropic_factor(self, rare_edge_count: int, tc_ref: int) -> float:
+        """ENTROPIC schedule: energy scales with log(rare-feature count).
+
+        libFuzzer's entropic schedule weighs an input by the Shannon
+        entropy of its feature-frequency distribution -- inputs that hit
+        rarer features earn more energy. We approximate this with the
+        rare-feature-ownership counts already tracked for RARE/honggfuzz
+        scoring (``tc_ref``: bitmap bytes this seed is the top contender
+        for; ``rare_edge_count``: rare edges hit), taking whichever signal
+        is available and largest. log2 rather than linear scaling (as
+        RARE's additive tc_ref bonus uses) keeps a single very-rare seed
+        from dominating the queue the way linear scaling would.
+        """
+        rare = max(rare_edge_count, tc_ref)
+        if rare <= 0:
+            return 1.0
+        return 1.0 + math.log2(1 + rare)
 
     def _mopt_factor(self, max_depth: int, depth: int) -> float:
         """MMOPT: boost recent entries (close to max_depth)."""

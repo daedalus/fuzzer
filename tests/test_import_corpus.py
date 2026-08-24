@@ -1,9 +1,13 @@
 """Tests for services/import_corpus.py — AFL/libFuzzer/honggfuzz import."""
 
 from fuzzer_tool.services.import_corpus import (
+    _TOKEN_CHARS,
+    build_autotoken_dictionary,
+    extract_tokens,
     import_from_afl,
     import_from_honggfuzz,
     import_from_libfuzzer,
+    write_dictionary,
 )
 
 
@@ -208,3 +212,70 @@ class TestImportFromHonggfuzz:
         dest = tmp_path / "target"
         imported, _ = import_from_honggfuzz(str(src), str(dest))
         assert imported == 1
+
+
+class TestExtractTokens:
+    def test_extracts_bounded_runs(self):
+        tokens = extract_tokens(b'\x89PNG header="IHDR" 12 more text here', min_len=3, max_len=32)
+        assert b"header" in tokens
+        assert b"IHDR" in tokens
+        assert b"PNG" in tokens
+
+    def test_respects_min_len(self):
+        tokens = extract_tokens(b"ab abc a", min_len=3)
+        assert b"ab" not in tokens
+        assert b"a" not in tokens
+        assert b"abc" in tokens
+
+    def test_respects_max_len(self):
+        long_run = b"x" * 40
+        tokens = extract_tokens(long_run, min_len=3, max_len=32)
+        assert long_run not in tokens
+        assert tokens == set()
+
+    def test_token_at_end_of_data(self):
+        tokens = extract_tokens(b"  trailing_token", min_len=3, max_len=32)
+        assert b"trailing_token" in tokens
+
+    def test_no_tokens_in_binary_noise(self):
+        noise = bytes([b for b in range(256) if b not in _TOKEN_CHARS])
+        tokens = extract_tokens(noise, min_len=3, max_len=32)
+        assert tokens == set()
+
+
+class TestBuildAutotokenDictionary:
+    def test_ranks_by_seed_frequency(self, tmp_path):
+        corpus = tmp_path / "corpus"
+        for i, content in enumerate([b"common shared", b"common only", b"unique_one xyz"]):
+            sub = corpus / "seeds" / "00"
+            sub.mkdir(parents=True, exist_ok=True)
+            (sub / f"id_{i:04x}").write_bytes(content)
+
+        tokens = build_autotoken_dictionary(str(corpus), min_len=3, max_tokens=10)
+        assert b"common" in tokens
+        # "common" appears in 2 seeds, "shared"/"only"/"unique_one"/"xyz" in 1 each.
+        assert tokens[0] == b"common"
+
+    def test_max_tokens_cap(self, tmp_path):
+        corpus = tmp_path / "corpus" / "seeds" / "00"
+        corpus.mkdir(parents=True)
+        words = " ".join(f"token{i:03d}" for i in range(50))
+        (corpus / "id_0001").write_bytes(words.encode())
+
+        tokens = build_autotoken_dictionary(str(tmp_path / "corpus"), min_len=3, max_tokens=5)
+        assert len(tokens) == 5
+
+    def test_empty_corpus(self, tmp_path):
+        assert build_autotoken_dictionary(str(tmp_path / "nope")) == []
+
+
+class TestWriteDictionary:
+    def test_round_trips_through_load_dictionary(self, tmp_path):
+        from fuzzer_tool.core.mutations.generic import load_dictionary
+
+        tokens = [b"IHDR", b'has"quote', b"has\\backslash", bytes([0x01, 0x02])]
+        out = tmp_path / "auto.dict"
+        write_dictionary(tokens, str(out))
+
+        loaded = load_dictionary(str(out))
+        assert loaded == tokens

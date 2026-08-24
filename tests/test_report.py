@@ -664,6 +664,25 @@ class TestReportCrashSignatures:
             report = generate_report(f, td, td)
         assert "--- Crash Signatures ---" not in report
 
+    def test_crash_signatures_clustered_by_stack_similarity(self):
+        f = _make_mock_fuzzer(
+            crash_sigs={"ASAN:heap-buffer-overflow@parse@main:100": 3, "sig2": 2},
+            crash_frames={
+                "ASAN:heap-buffer-overflow@parse@main:100": ["parse()", "main()"],
+                "sig2": ["parse()", "main()"],
+            },
+        )
+        with tempfile.TemporaryDirectory() as td:
+            report = generate_report(f, td, td)
+        assert "Clustered by stack similarity" in report
+        assert "1 likely distinct bug(s)" in report
+
+    def test_crash_signatures_not_clustered_when_dissimilar(self):
+        f = _make_mock_fuzzer()
+        with tempfile.TemporaryDirectory() as td:
+            report = generate_report(f, td, td)
+        assert "Clustered by stack similarity" not in report
+
     def test_coverage_analysis_without_seen_attribute(self):
         """Regression: _coverage_analysis must use cumulative_edges, not _seen."""
         from fuzzer_tool.services.report import _coverage_analysis
