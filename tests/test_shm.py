@@ -976,7 +976,7 @@ int caller_b(void) { volatile int r = shared_edge(); return r; }
                 "gcc",
                 "-O2",
                 "-g",
-                "-D__AFL_CTX_SENSITIVE=1",  # opt-in feature; defaults off (needs frame pointers)
+                "-D__AFL_CTX_SENSITIVE=1",  # default-on; pinned here for determinism
                 "-fno-omit-frame-pointer",  # required for __builtin_return_address(1)
                 "-fno-optimize-sibling-calls",  # keep real frames, no tail-call collapse
                 "-shared",

@@ -115,7 +115,18 @@ def harness(tmp_path_factory):
     src.write_text(_HARNESS)
     exe = d / "harness"
     proc = subprocess.run(
-        [cc, "-O2", "-g", f"-include{SHIM}", "-o", str(exe), str(src)],
+        [
+            cc,
+            "-O2",
+            "-g",
+            # The harness asserts literal edge IDs (e.g. {0x1111}); ctx
+            # hashing is default-on and would XOR a caller term into them.
+            "-D__AFL_CTX_SENSITIVE=0",
+            f"-include{SHIM}",
+            "-o",
+            str(exe),
+            str(src),
+        ],
         capture_output=True,
         text=True,
     )
@@ -130,9 +141,7 @@ def _run(harness: str, cov: ShmCoverage, n_exec: int, n_edge: int = 43, oneshot:
         __AFL_SHM_ID=str(cov.shm_id),
         AFL_MAP_SIZE=str(cov.num_entries),
     )
-    subprocess.run(
-        [harness, str(n_exec), str(n_edge), str(oneshot)], env=env, capture_output=True
-    )
+    subprocess.run([harness, str(n_exec), str(n_edge), str(oneshot)], env=env, capture_output=True)
 
 
 def _occupied(cov: ShmCoverage) -> int:

@@ -28,7 +28,15 @@ table of 8-byte entries instead of a fixed byte bitmap:
 struct __afl_entry { uint32_t edge_id; uint32_t count; };
 ```
 
-- Edge ID = `prev_loc ^ cur_loc` (full 32-bit) — **no silent bucket collisions**
+- Edge ID = `caller_ctx ^ prev_loc ^ cur_loc` (full 32-bit) — **no silent bucket
+  collisions**. `caller_ctx` is the call-stack-sensitive term, default-on in the
+  shim (`__AFL_CTX_SENSITIVE=1`; `-D__AFL_CTX_SENSITIVE=0` restores plain
+  `prev_loc ^ cur_loc`), masked to `__AFL_CTX_BITS` (default 8) and advertised
+  via the `__afl_ctx_bits_N` symbol for map sizing. Every shim build carries
+  `-fno-omit-frame-pointer` (applied centrally by `tools/build_targets.sh`)
+  because the context walk reads the caller's saved frame pointer.
+- The AFLGo distance channel is also default-on (`__AFL_DISTANCE_MODE=1`;
+  `=0` opts out) — inert until directed mode uploads a distance table.
 - Hash: `edge_id % map_size`, linear probing for matching or empty slot
 - `AFL_MAP_SIZE` is in bytes (tradition); shim divides by 8 for entry count
 - Default 64KB SHM → 8192 entries (same memory as old 64KB bitmap)

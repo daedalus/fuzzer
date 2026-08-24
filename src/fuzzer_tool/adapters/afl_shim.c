@@ -63,6 +63,11 @@
  *                          symbols, so it cannot shadow an instrumented
  *                          target the way cmplog_shim.so could.
  *
+ * Default-on channels (both opt-out with =0):
+ *   __AFL_CTX_SENSITIVE=1  call-stack-sensitive edge hashing
+ *   __AFL_DISTANCE_MODE=1  AFLGo SHM-tail distance channel (inert until
+ *                          the fuzzer uploads a table via __AFL_DIST_SHM_ID)
+ *
  * Metadata layout (24 bytes at front of SHM):
  *   offset 0: uint32 stack_depth   (max stack depth in bytes)
  *   offset 4: uint32 _pad
@@ -76,12 +81,12 @@
  *   gcc -O2 -g -shared -fPIC -include afl_shim.c -o target.so target.c -lpng -lz
  *
  * Call-stack-sensitive edge hashing (default, see __afl_get_caller_ctx()
- * below) walks one real stack frame via __builtin_return_address(1), so
- * add -fno-omit-frame-pointer for reliable disambiguation at -O2+ (GCC/Clang
- * already default to it at -O0/-O1). Without an intact frame pointer this
- * degrades to ctx==0 — same coverage as before, not corrupted coverage.
- * Add -D__AFL_CTX_SENSITIVE=0 to opt back into the old plain
- * prev_loc^cur_loc hash unconditionally.
+ * below) walks one real stack frame via the saved frame pointer, so
+ * build every shim TU with -fno-omit-frame-pointer for reliable
+ * disambiguation at -O2+ (GCC/Clang already keep it at -O0/-O1). Without
+ * an intact frame pointer the bounds-checked walk yields junk-or-zero
+ * context — degraded signal, never a crash. Add -D__AFL_CTX_SENSITIVE=0
+ * to opt back into the old plain prev_loc^cur_loc hash unconditionally.
  */
 /* Unconditional: dladdr/Dl_info (__AFL_DISTANCE_MODE) and RTLD_NEXT /
  * memmem / strcasestr (__AFL_CMPLOG) all need it before any system
@@ -169,7 +174,15 @@ static void __afl_cmplog_init(void);
 static void __afl_cmplog_fini(void);
 #endif
 
-#ifdef __AFL_DISTANCE_MODE
+#ifndef __AFL_DISTANCE_MODE
+/* AFLGo distance channel defaults ON; -D__AFL_DISTANCE_MODE=0 opts out.
+ * The channel is inert unless the fuzzer uploads a distance table via
+ * __AFL_DIST_SHM_ID (directed mode) — without one, sum/count stay 0 and
+ * every reader degrades to the no-data path. */
+#define __AFL_DISTANCE_MODE 1
+#endif
+
+#if __AFL_DISTANCE_MODE
 #include <dlfcn.h>
 static void __afl_map_dist_shm(void);
 #endif
@@ -185,14 +198,14 @@ struct __afl_entry {
 };
 
 #ifndef __AFL_CTX_SENSITIVE
-/* Off by default. The caller-context walk (__builtin_return_address(1))
- * dereferences the caller's return-address slot, which only exists if the
- * whole chain keeps frame pointers. clang/gcc on x86-64 omit them by
- * default at -O1/-O2, so enabling this unconditionally segfaults standard
- * builds (observed in the -O1 distance targets: SEGV in the frame walk on
- * every startup edge). Opt in per build with
- * -D__AFL_CTX_SENSITIVE=1 -fno-omit-frame-pointer (on every TU). */
-#define __AFL_CTX_SENSITIVE 0
+/* On by default: call-stack context separates identical edges reached via
+ * different callers. The walk below is hardened (bounds-checked single hop,
+ * constructor-window guard), so frame-pointer-less builds degrade to noisy
+ * or zero context rather than crash -- but meaningful disambiguation needs
+ * -fno-omit-frame-pointer on every TU including this one (clang/gcc omit
+ * them at -O1/-O2). Pass -D__AFL_CTX_SENSITIVE=0 to fall back to the old
+ * plain prev_loc^cur_loc hash exactly. */
+#define __AFL_CTX_SENSITIVE 1
 #endif
 
 /* ── Context width ────────────────────────────────────────────────────
@@ -441,7 +454,7 @@ void __afl_map_shm(void) {
     *__afl_diag = (*__afl_diag & ~(uint32_t)(__AFL_DIAG_CTX_MASK | (0xFFu << __AFL_DIAG_GEN_SHIFT)))
                 | ((uint32_t)__AFL_CTX_BITS & __AFL_DIAG_CTX_MASK);
 
-#ifdef __AFL_DISTANCE_MODE
+#if __AFL_DISTANCE_MODE
     __afl_mapping = 1;  /* map_dist_shm is instrumented; no ctx during setup */
     __afl_map_dist_shm();
     __afl_mapping = 0;
@@ -478,11 +491,12 @@ void __afl_map_shm(void) {
  * invocation, exactly like AFL++'s CTX instrumentation.
  *
  * Caveats (real, not hidden):
- *   - **Requires an intact frame-pointer chain. Default clang/gcc builds
- *     omit frame pointers (-O1/-O2, x86-64), and the walk then loads the
- *     caller's return address from a slot that does not exist — a SEGV, not
- *     a graceful ctx==0. This is why __AFL_CTX_SENSITIVE defaults to 0;
- *     enabling it demands -fno-omit-frame-pointer on every TU.**
+ *   - **Wants an intact frame-pointer chain. Default clang/gcc builds
+ *     omit frame pointers (-O1/-O2, x86-64); the walk below is hardened
+ *     (bounds-checked single hop) so such builds do not SEGV, but the
+ *     context is then junk-or-zero rather than a real caller. Meaningful
+ *     disambiguation demands -fno-omit-frame-pointer on every TU —
+ *     tools/build_targets.sh applies it to every shim build.**
  *   - A tail call elides its own frame, so a tail-called function's true
  *     "caller of my caller" becomes invisible and two distinct call
  *     chains can collapse onto the same ctx. That under-disambiguates
@@ -689,7 +703,7 @@ void __sanitizer_cov_trace_pc_guard_init(uint32_t *start, uint32_t *stop) {
  * key == 0 are empty slots.  Blocks without a table entry do not
  * contribute to the average (AFLGo semantics).                       */
 
-#ifdef __AFL_DISTANCE_MODE
+#if __AFL_DISTANCE_MODE
 
 /* Layout must match DistanceTableShm (Python): 4-byte header = SLOT
  * capacity (power of two >= 2x entries — the slack guarantees empty
@@ -755,7 +769,7 @@ void __sanitizer_cov_trace_pc(void) {
 
 #endif /* __AFL_DISTANCE_MODE */
 
-#ifdef __AFL_DISTANCE_MODE
+#if __AFL_DISTANCE_MODE
 /* Write the accumulated distance sum/count to the SHM tail (16 bytes
  * past the edge table; the Python side always allocates them).
  * count==0 means "no distance data" for the reader. */
@@ -829,7 +843,7 @@ void __afl_map_reset(void) {
         if (__afl_edge_count) {
             *__afl_edge_count = __afl_total_edge_count;
         }
-#ifdef __AFL_DISTANCE_MODE
+#if __AFL_DISTANCE_MODE
         __afl_write_distance_tail();
 #endif
     }
@@ -837,13 +851,13 @@ void __afl_map_reset(void) {
     __afl_path_hash_acc = 0;
     __afl_max_stack_depth = 0;
     __afl_iter_edge_count = 0;
-#ifdef __AFL_DISTANCE_MODE
+#if __AFL_DISTANCE_MODE
     __afl_dist_sum = 0;
     __afl_dist_hits = 0;
 #endif
 }
 
-#ifdef __AFL_DISTANCE_MODE
+#if __AFL_DISTANCE_MODE
 /* In-process (direct_lite) mode has no process boundary between
  * iterations and nothing calls __afl_map_reset — export a flush that
  * writes the accumulated tail and zeroes the accumulators WITHOUT

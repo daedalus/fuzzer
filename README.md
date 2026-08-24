@@ -207,10 +207,11 @@ that can produce full automatic edge coverage here.**
 gcc's `-fsanitize-coverage=` accepts only `trace-pc` and `trace-cmp` — not
 the `trace-pc-guard` variant the AFL shim's edge callbacks are built on. The
 one gcc-compatible callback the shim does implement,
-`__sanitizer_cov_trace_pc()`, is compiled only under `__AFL_DISTANCE_MODE`
-and depends on the AFLGo distance SHM; without that segment mapped, gcc
-builds link but crash at runtime. There is currently no working standalone
-`trace-pc` path for gcc.
+`__sanitizer_cov_trace_pc()`, is compiled into every shim build
+(`__AFL_DISTANCE_MODE` defaults to 1; `-D__AFL_DISTANCE_MODE=0` drops it).
+It depends on the AFLGo distance SHM but degrades gracefully without one:
+an unmapped segment leaves the lookup table NULL and the callback returns
+early. There is currently no measured standalone `trace-pc` path for gcc.
 
 gcc targets therefore fall back to the hand-placed `__afl_map_edge()` calls
 in the target wrapper sources. Those see the wrapper's own branching, but not

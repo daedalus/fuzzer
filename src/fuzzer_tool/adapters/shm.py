@@ -40,9 +40,10 @@ SHM_METADATA_SIZE = 24  # bytes reserved at front of SHM for metadata
 # the per-execution average distance accumulated by the target:
 #   offset 0: uint64 dist_sum    (sum of block distances × 100)
 #   offset 8: uint64 dist_count  (number of valued blocks hit)
-# The tail is written by the shim in distance builds (__AFL_DISTANCE_MODE)
-# and stays zeroed otherwise, so readers fall back to Python-side
-# distance computation when count == 0.
+# The tail is written by the shim whenever __AFL_DISTANCE_MODE is on
+# (default 1 in afl_shim.c) and stays zeroed until directed mode uploads
+# a distance table, so readers fall back to Python-side distance
+# computation when count == 0.
 SHM_TAIL_SIZE = 16  # bytes reserved at the end of SHM for the distance tail
 
 # Upper bound on the edge_id the virgin bucket map indexes directly.

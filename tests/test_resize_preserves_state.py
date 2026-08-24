@@ -58,7 +58,9 @@ def drivers(tmp_path_factory):
     src.write_text(_DRIVER)
     out = {}
     for bits, flags in {
-        0: [],
+        # Explicit opt-out: ctx hashing defaults ON in the shim; this arm
+        # is the context-free control.
+        0: ["-D__AFL_CTX_SENSITIVE=0"],
         8: ["-D__AFL_CTX_SENSITIVE=1", "-fno-omit-frame-pointer"],
     }.items():
         exe = d / f"drv_{bits}"

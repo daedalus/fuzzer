@@ -168,9 +168,8 @@ _clean_env_cache: dict[str, str] | None = None
 # therefore be stable from one exec to the next.
 #
 # It is not, by default.  afl_shim.c's caller-context edge hashing
-# (-D__AFL_CTX_SENSITIVE=1, enabled by tools/build_targets.sh for the
-# _nosan .so targets and the whole --vendor-tracecmp path) computes
-# edge_id = hash(__builtin_return_address(1)) ^ prev_loc ^ cur_loc.
+# (default-on via __AFL_CTX_SENSITIVE=1 in every shim build) computes
+# edge_id = hash(return address of the caller) ^ prev_loc ^ cur_loc.
 # Under PIE + ASLR that hash changes on every exec, so every edge_id in
 # every run looks new: is_new_coverage() never returns False, the edge
 # table saturates immediately, and the corpus fills with inputs saved for

@@ -100,7 +100,7 @@ NOBUILTIN_CMP="$NOBUILTIN_CMP -fno-builtin-strcasestr"
 
 # ── Frame pointers: required by caller-context edge hashing ──────────────
 #
-# afl_shim.c's __afl_get_caller_ctx() (enabled by -D__AFL_CTX_SENSITIVE=1)
+# afl_shim.c's __afl_get_caller_ctx() (default-on via __AFL_CTX_SENSITIVE=1)
 # computes edge_id = hash(__builtin_return_address(1)) ^ prev_loc ^ cur_loc.
 # return_address(1) walks one frame past trace_pc_guard's own frame to reach
 # the call site of whoever called the function the edge lives in -- and that
@@ -492,7 +492,8 @@ build_target() {
         cmplog_libs="$CMPLOG_LIBS"
     fi
     local rc=0
-    $cc $extra_flags -O2 -g $extra_cflags $cmplog_cflags -include "$SHIM" \
+    # FRAME_POINTER: ctx hashing is default-on in afl_shim.c; see the header.
+    $cc $extra_flags -O2 -g $FRAME_POINTER $extra_cflags $cmplog_cflags -include "$SHIM" \
         -o "$out" "$src" $libs $cmplog_libs 2>/dev/null || rc=$?
     if [ $rc -eq 0 ]; then
         ok "$(basename "$out")"
@@ -539,7 +540,8 @@ build_so_target() {
             target_cc="clang"
         fi
     fi
-    $target_cc $extra_flags -O2 -g $extra_cflags $cmplog_cflags -shared -fPIC $bsymbolic_flag -include "$SHIM" \
+    # FRAME_POINTER: ctx hashing is default-on in afl_shim.c; see the header.
+    $target_cc $extra_flags -O2 -g $FRAME_POINTER $extra_cflags $cmplog_cflags -shared -fPIC $bsymbolic_flag -include "$SHIM" \
         -o "$out" "$src" $libs $cmplog_libs 2>/dev/null || rc=$?
     if [ $rc -eq 0 ]; then
         ok "$(basename "$out")"
@@ -550,18 +552,15 @@ build_so_target() {
 }
 
 # ── Build fgrep targets ──────────────────────────────────────────
+# The former fuzz_regex_compile / fuzz_pattern_match / fuzz_search_pipeline
+# wrappers were consolidated into fgrep_read.c modes 4/5/6 (071a67f).
 build_fgrep_targets() {
     local suffix="$1" flags="$2" label="$3"
     echo "Building fgrep targets ($label)..."
     local FGREP_INC="-I$FGREP/include -I$FGREP/src"
-    local FGREP_LIBS="/tmp/regex_engine${suffix}.o /tmp/simd${suffix}.o /tmp/cpu${suffix}.o"
-    local FGREP_LIBS_FULL="$FGREP_LIBS /tmp/output${suffix}.o /tmp/search${suffix}.o /tmp/bmh_simd${suffix}.o /tmp/io${suffix}.o /tmp/fileutil${suffix}.o -lpthread"
 
     local out_suffix=""
     [ "$suffix" = "_nosan" ] && out_suffix="_nosan"
-    build_target "$TARGETS/fuzz_regex_compile.c" "$TARGETS/fuzz_regex_compile${out_suffix}" "$FGREP_INC $FGREP_LIBS" "$flags"
-    build_target "$TARGETS/fuzz_pattern_match.c" "$TARGETS/fuzz_pattern_match${out_suffix}" "$FGREP_INC $FGREP_LIBS" "$flags"
-    build_target "$TARGETS/fuzz_search_pipeline.c" "$TARGETS/fuzz_search_pipeline${out_suffix}" "$FGREP_INC $FGREP_LIBS_FULL" "$flags"
     # fgrep_read includes fgrep .c files directly and needs -mavx2 for AVX2 intrinsics
     build_target "$TARGETS/fgrep_read.c" "$TARGETS/fgrep_read${out_suffix}" "$FGREP_INC -lpthread" "$flags -mavx2"
 }
@@ -571,14 +570,9 @@ build_fgrep_so_targets() {
     local suffix="$1" flags="$2" label="$3"
     echo "Building fgrep .so targets ($label)..."
     local FGREP_INC="-I$FGREP/include -I$FGREP/src"
-    local FGREP_LIBS="/tmp/regex_engine${suffix}.o /tmp/simd${suffix}.o /tmp/cpu${suffix}.o"
-    local FGREP_LIBS_FULL="$FGREP_LIBS /tmp/output${suffix}.o /tmp/search${suffix}.o /tmp/bmh_simd${suffix}.o /tmp/io${suffix}.o /tmp/fileutil${suffix}.o -lpthread"
 
     local out_suffix=""
     [[ "$suffix" == _asan* ]] && out_suffix="$suffix"
-    build_so_target "$TARGETS/fuzz_regex_compile.c" "$TARGETS/fuzz_regex_compile${out_suffix}.so" "$FGREP_INC $FGREP_LIBS" "$flags"
-    build_so_target "$TARGETS/fuzz_pattern_match.c" "$TARGETS/fuzz_pattern_match${out_suffix}.so" "$FGREP_INC $FGREP_LIBS" "$flags"
-    build_so_target "$TARGETS/fuzz_search_pipeline.c" "$TARGETS/fuzz_search_pipeline${out_suffix}.so" "$FGREP_INC $FGREP_LIBS_FULL" "$flags"
     # fgrep_read includes fgrep .c files directly — needs -mavx2 for AVX2 intrinsics
     build_so_target "$TARGETS/fgrep_read.c" "$TARGETS/fgrep_read${out_suffix}.so" "$FGREP_INC -lpthread" "$flags -mavx2"
 }
@@ -761,18 +755,13 @@ build_simple_so_targets() {
     # enable call-stack-sensitive edge hashing. The context walk reaches into
     # those archives' frames at runtime, so they must carry frame pointers
     # too -- see FRAME_POINTER in the header of this file, which is applied
-    # by compile_vendored_libs and by every tools/vendor_*.sh. The
-    # -D__AFL_CTX_SENSITIVE define itself is only needed here, since the
-    # archives never include the shim.
+    # by compile_vendored_libs and by every tools/vendor_*.sh.
     #
-    # An earlier version of this comment claimed the archives were "rebuilt
-    # with call-stack-sensitive edge hashing enabled". They were not: only
-    # --vendor-tracecmp passed CTX_FLAGS through, so every other _nosan build
-    # walked frame-pointer-less library frames and got a silently wrong
-    # caller context.
-    if [ "$suffix" = "_nosan" ]; then
-        flags="$flags -D__AFL_CTX_SENSITIVE=1 $FRAME_POINTER"
-    fi
+    # The shim's ctx hashing and distance channel are default-on since the
+    # afl_shim.c flip; the only thing the build must add is FRAME_POINTER on
+    # every shim TU (build_so_target/build_target add it centrally), so the
+    # context walk sees real callers instead of junk-or-zero frames.
+    flags="$flags $FRAME_POINTER"
 
     # Prefer vendored static libraries when available. The vendored .a files
     # are compiled with -fsanitize-coverage=trace-pc-guard and
@@ -832,7 +821,7 @@ build_standalone_so_targets() {
             # shim as its own C object precisely to dodge this.)
             local bsym_flag=""
             [ "$WITH_CMPLOG" -eq 1 ] && bsym_flag="-Wl,-Bsymbolic"
-            $cxx $flags -O2 -g -shared -fPIC $bsym_flag -include "$SHIM" $inc \
+            $cxx $flags -O2 -g $FRAME_POINTER -shared -fPIC $bsym_flag -include "$SHIM" $inc \
                 -o "$out" "$src" $cmplog_cflags $cmplog_libs 2>/dev/null && ok "tailslayer_read${out_suffix}.so" || warn "failed: tailslayer_read${out_suffix}.so"
         fi
     elif [ -f "$TARGETS/tailslayer_read.cpp" ] && [ ! -d "$TAILSLAYER/include" ]; then
@@ -1204,7 +1193,7 @@ build_distance_so_targets() {
                 cmplog_cflags="$CMPLOG_CFLAGS"
                 cmplog_libs="$CMPLOG_LIBS"
             fi
-            clang $extra_flags -g -D__AFL_DISTANCE_MODE -fsanitize-coverage=trace-pc \
+            clang $extra_flags -g $FRAME_POINTER -D__AFL_DISTANCE_MODE -fsanitize-coverage=trace-pc \
                 $cmplog_cflags -shared -fPIC -Wl,-Bsymbolic -include "$SHIM" \
                 -o "$TARGETS/${name}${out_suffix}.so" "$TARGETS/$name.c" \
                 $libs $cmplog_libs 2>/dev/null
@@ -1230,13 +1219,12 @@ build_vendored_tracecmp_targets() {
         return 1
     fi
     local TRACE_FLAGS="-fsanitize-coverage=trace-cmp,trace-pc-guard"
-    # Caller-context edge hashing, opted in per build. __AFL_CTX_SENSITIVE
-    # only takes effect in TUs that include the shim (the targets), but the
-    # vendored libs are rebuilt with the same define so the whole linked
-    # chain is built under one contract; -fno-omit-frame-pointer is required
-    # because the context walk dereferences the caller's return-address
-    # slot (see afl_shim.c).
-    local CTX_FLAGS="-D__AFL_CTX_SENSITIVE=1 $FRAME_POINTER"
+    # Caller-context edge hashing is default-on inside afl_shim.c, which only
+    # the target TUs include; the libs here never see the define. What the
+    # whole linked chain DOES need is frame pointers: the context walk
+    # dereferences the caller's saved-frame-pointer slot at runtime (see
+    # afl_shim.c), so every TU under these targets carries FRAME_POINTER.
+    local CTX_FLAGS="$FRAME_POINTER"
     local ASAN_FLAGS=""
     for arg in "$@"; do
         [ "$arg" = "--asan" ] && ASAN_FLAGS="-fsanitize=address"
@@ -1356,7 +1344,7 @@ build_vendored_tracecmp_targets() {
             "src/fuzzer_tool/adapters/tracecmp_shim.c" \
             -o "$TC_SHIM_OBJ" 2>/dev/null
         if [ -f "$ASAN_LIB" ] && [ -f "$TC_SHIM_OBJ" ]; then
-            $CC -O2 -g \
+            $CC -O2 -g $FRAME_POINTER \
                 -fsanitize=address \
                 -fsanitize-coverage=trace-cmp,trace-pc-guard \
                 -shared -fPIC \
@@ -1440,7 +1428,7 @@ build_tracecmp_targets() {
         [ -f "$src" ] || { warn "source not found: $src"; continue; }
 
         rc=0
-        $CC -O2 -g $TRACE_FLAGS $NOBUILTIN_CMP $CMPLOG_CFLAGS -include "$SHIM" \
+        $CC -O2 -g $FRAME_POINTER $TRACE_FLAGS $NOBUILTIN_CMP $CMPLOG_CFLAGS -include "$SHIM" \
             -o "$TARGETS/${spec}_tcg" "$src" $CMPLOG_LIBS 2>/dev/null || rc=$?
         if [ $rc -eq 0 ]; then
             ok "${spec}_tcg (trace-cmp + no-builtin)"
@@ -1449,7 +1437,7 @@ build_tracecmp_targets() {
         fi
 
         rc=0
-        $CC -O2 -g $TRACE_FLAGS $NOBUILTIN_CMP $CMPLOG_CFLAGS -shared -fPIC -Wl,-Bsymbolic \
+        $CC -O2 -g $FRAME_POINTER $TRACE_FLAGS $NOBUILTIN_CMP $CMPLOG_CFLAGS -shared -fPIC -Wl,-Bsymbolic \
             -include "$SHIM" \
             -o "$TARGETS/${spec}_tcg.so" "$src" $CMPLOG_LIBS 2>/dev/null || rc=$?
         if [ $rc -eq 0 ]; then

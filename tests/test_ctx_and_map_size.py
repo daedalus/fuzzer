@@ -75,7 +75,10 @@ def built(tmp_path_factory):
     src.write_text(_DRIVER)
     out = {}
     configs = {
-        0: [],
+        # Explicit opt-out: the shim defaults ctx hashing ON, so the
+        # context-free control arm must say so rather than rely on a
+        # default that no longer exists.
+        0: ["-D__AFL_CTX_SENSITIVE=0"],
         8: ["-D__AFL_CTX_SENSITIVE=1", "-fno-omit-frame-pointer"],
         4: ["-D__AFL_CTX_SENSITIVE=1", "-D__AFL_CTX_BITS=4", "-fno-omit-frame-pointer"],
     }
@@ -142,6 +145,27 @@ class TestShimBuildMatrix:
         )
         assert r.returncode != 0
         assert "__AFL_CTX_BITS must be in [0, 32]" in r.stderr
+
+    @needs_cc
+    def test_default_compile_enables_ctx_and_distance(self, tmp_path):
+        """No defines at all must produce ctx hashing (8 bits) AND the
+        AFLGo distance channel. Both are default-on in afl_shim.c; this
+        pins the defaults so a silent revert cannot ship unnoticed."""
+        src = tmp_path / "d.c"
+        src.write_text(_DRIVER)
+        exe = tmp_path / "d_default"
+        r = subprocess.run(
+            ["gcc", "-O1", "-g", "-include", SHIM, "-o", str(exe), str(src)],
+            capture_output=True,
+            text=True,
+        )
+        assert r.returncode == 0, r.stderr
+        assert detect_ctx_bits(str(exe)) == 8
+        # Static symtab, matching services/fuzzer.py::_detect_distance's
+        # probe: PIE executables do not re-export defined globals into
+        # .dynsym the way shared objects do.
+        syms = subprocess.run(["nm", str(exe)], capture_output=True, text=True).stdout
+        assert "__afl_dist_flush" in syms
 
 
 class TestStaticDetection:
@@ -329,7 +353,20 @@ class TestEdgeIdZeroRegression:
         src.write_text(self._ZERO_DRIVER)
         exe = tmp_path / "zero_edge"
         r = subprocess.run(
-            ["gcc", "-O1", "-g", "-include", SHIM, "-o", str(exe), str(src)],
+            [
+                "gcc",
+                "-O1",
+                "-g",
+                # The zero-edge construction above is context-free
+                # arithmetic; ctx hashing (default-on) would XOR a caller
+                # term into it and un-zero the ID.
+                "-D__AFL_CTX_SENSITIVE=0",
+                "-include",
+                SHIM,
+                "-o",
+                str(exe),
+                str(src),
+            ],
             capture_output=True,
             text=True,
         )

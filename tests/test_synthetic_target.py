@@ -70,20 +70,27 @@ def _build(tmp_path, blocks=400, fanout=32, unstable=0):
     src = tmp_path / f"synth_{blocks}_{unstable}.c"
     r = subprocess.run(
         [
-            sys.executable, GEN,
-            "--blocks", str(blocks),
-            "--fanout", str(fanout),
-            "--unstable", str(unstable),
-            "-o", str(src),
+            sys.executable,
+            GEN,
+            "--blocks",
+            str(blocks),
+            "--fanout",
+            str(fanout),
+            "--unstable",
+            str(unstable),
+            "-o",
+            str(src),
         ],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     assert r.returncode == 0, r.stderr
 
     obj = tmp_path / f"synth_{blocks}_{unstable}.o"
     r = subprocess.run(
         ["gcc", "-O1", "-DSYNTH_MANUAL_GUARDS", "-c", str(src), "-o", str(obj)],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     assert r.returncode == 0, r.stderr[-800:]
 
@@ -91,8 +98,21 @@ def _build(tmp_path, blocks=400, fanout=32, unstable=0):
     drv.write_text(_DRIVER)
     exe = tmp_path / f"drive_{blocks}_{unstable}"
     r = subprocess.run(
-        ["gcc", "-O1", f"-include{SHIM}", "-o", str(exe), str(drv), str(obj)],
-        capture_output=True, text=True,
+        [
+            "gcc",
+            "-O1",
+            # The exact dead/live-region count assertions assume one edge
+            # per synthetic guard; ctx hashing (default-on) would add
+            # caller-derived splits.
+            "-D__AFL_CTX_SENSITIVE=0",
+            f"-include{SHIM}",
+            "-o",
+            str(exe),
+            str(drv),
+            str(obj),
+        ],
+        capture_output=True,
+        text=True,
     )
     assert r.returncode == 0, r.stderr[-800:]
     return str(exe)
@@ -142,9 +162,7 @@ class TestDeterministicVariant:
         exe = _build(tp, unstable=0)
         rnd = random.Random(11)
         baseline = _run(exe, base, tp)
-        changed = sum(
-            1 for _ in range(40) if _run(exe, _flip(rnd, base, DEAD), tp) != baseline
-        )
+        changed = sum(1 for _ in range(40) if _run(exe, _flip(rnd, base, DEAD), tp) != baseline)
         assert changed == 0, f"{changed}/40 dead-region mutations moved coverage"
 
     def test_live_region_mutations_do_change_coverage(self, tmp_path_factory, base):
@@ -154,9 +172,7 @@ class TestDeterministicVariant:
         exe = _build(tp, unstable=0)
         rnd = random.Random(11)
         baseline = _run(exe, base, tp)
-        changed = sum(
-            1 for _ in range(40) if _run(exe, _flip(rnd, base, LIVE), tp) != baseline
-        )
+        changed = sum(1 for _ in range(40) if _run(exe, _flip(rnd, base, LIVE), tp) != baseline)
         assert changed >= 30, f"only {changed}/40 live-region mutations moved coverage"
 
     def test_no_checksum_over_the_input(self, tmp_path_factory, base):
@@ -212,7 +228,9 @@ class TestUnstableVariant:
                     aslr = fh.read().strip()
             except OSError:
                 pass
-            pytest.skip(f"no ASLR variance observed in {len(runs)} runs (randomize_va_space={aslr})")
+            pytest.skip(
+                f"no ASLR variance observed in {len(runs)} runs (randomize_va_space={aslr})"
+            )
         assert unstable
 
     def test_instability_is_confined_to_the_designated_blocks(self, tmp_path_factory, base):
