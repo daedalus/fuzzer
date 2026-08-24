@@ -33,7 +33,7 @@ Energy integration (their AFL variant) is trivial: seed energy = its centrality.
 | Caller→callee merge | `core/distance.py` `_build_call_graph`, `_resolve_callee_name` (PLT-aware), `_addr_to_function` | **Done** |
 | CFG scope | `distance.py:430 _build_cfgs` — *target functions only* | **Needs widening** |
 | Node identity at runtime | `distance.py:544 pc_distance_table()` recovers the exact PCs the shim observes by scanning REL32 calls to `__sanitizer_cov_trace_pc` | **This is the bridge** |
-| Fuzzer→shim keyed table | `adapters/shm.py:970 DistanceTableShm` + `__AFL_DIST_SHM_ID`, open-addressed probe mirrored byte-exactly in C | **Reusable verbatim** |
+| Fuzzer→shim keyed table | `adapters/shm.py:971 DistanceTableShm` + `__AFL_DIST_SHM_ID`, open-addressed probe mirrored byte-exactly in C | **Reusable verbatim** |
 | Per-seed coverage | `edge_tracker.seed_edges: dict[str, set[int]]`, persisted | Exists, but **wrong granularity** (see §3) |
 | Scheduler arm registry | `seed_picker.py:34 _pick_seed_elo` — `available` list + `strategy_map` | **Drop-in slot** |
 | Energy assignment | `core/schedules.py SeedScorer` | **Drop-in slot** |
@@ -48,15 +48,18 @@ limitation (§D).
 
 ## 3. The blocker: node identity
 
-`seed_edges` cannot be used. `__afl_map_edge` (`afl_shim.c:573`) computes
+`seed_edges` cannot be used. `__afl_map_edge` (`afl_shim.c:587`) computes
 
 ```
 edge_id = caller_ctx ^ __afl_prev_loc ^ cur_loc
 ```
 
-and in trace-pc mode `cur_loc = (pc − base) >> 1` (`afl_shim.c:737`). XOR is not
+and in trace-pc mode `cur_loc = (pc − base) >> 1` (`afl_shim.c:751`). XOR is not
 invertible — you cannot recover *which basic blocks* a seed visited from the
-stored edge IDs. K-Scheduler is node-based, so this is load-bearing.
+stored edge IDs. K-Scheduler is node-based, so this is load-bearing. Since the
+2026-08-24 defaults flip (`285ce79`) this holds in **every** shim build:
+caller-context hashing is no longer opt-in, so there is no ctx-free build whose
+edge IDs could be inverted offline either.
 
 **Option A — new SHM node-visit bitmap (recommended).**
 Trace-pc mode already probes a fuzzer-uploaded table keyed on `pc − base`.
@@ -68,26 +71,31 @@ runs. Read and clear it in `__afl_map_reset` next to the distance tail.
 
 Cost: ~40 lines of C, one `NodeBitmapShm` class, one read per iteration. **Zero
 new runtime hashing** — the lookup is already on the hot path. It composes with
-distance mode instead of competing with it.
+distance mode instead of competing with it. Post-flip this machinery is
+exercised in every build (`__AFL_DISTANCE_MODE` defaults to 1), so
+`NodeBitmapShm` can clone `DistanceTableShm` and its test coverage
+(`tests/test_shm_distance_channel.py`) rather than bootstrap a new channel.
+Note the flip only spreads the shim *code*; the callback still fires solely in
+trace-pc-instrumented builds, so W2 still requires trace-pc targets.
 
 *Trap:* the distance tail has a separate `atexit` writer
-(`afl_shim.c:863 __afl_write_distance_tail_exit`) because one-shot subprocess
+(`afl_shim.c:877 __afl_write_distance_tail_exit`) because one-shot subprocess
 runs never call `__afl_map_reset`. The node bitmap needs the identical treatment
 or you silently lose the last iteration on every non-forkserver run.
 
 **Option B — guard IDs.** `__sanitizer_cov_trace_pc_guard_init`
-(`afl_shim.c:671`) assigns sequential IDs from a link-order counter. Recovering
+(`afl_shim.c:684`) assigns sequential IDs from a link-order counter. Recovering
 the static mapping means replaying section order, and it breaks on every relink.
 Not worth it.
 
 **Option C — offline re-execution** of each seed under a PC-tracing mode. Correct
 but O(corpus) re-execs per recompute; destroys the paper's <1% overhead claim.
 
-**Build-scope caveat:** `tools/build_targets.sh:1181-1183` — the trace-pc
-distance path instruments only the wrapper `.so`; vendored libraries keep
-trace-pc-guard. A first K-Scheduler campaign therefore sees a *partial* CFG.
-Rebuilding vendor libs with trace-pc is a prerequisite for a fair evaluation, not
-a nice-to-have.
+**Build-scope caveat:** `tools/build_targets.sh` `build_distance_so_targets()`
+(:1174) — the trace-pc distance path instruments only the wrapper `.so`;
+vendored libraries keep trace-pc-guard. A first K-Scheduler campaign therefore
+sees a *partial* CFG. Rebuilding vendor libs with trace-pc is a prerequisite for
+a fair evaluation, not a nice-to-have.
 
 ---
 
@@ -165,9 +173,10 @@ precisely what makes W4 safe.
 
 1. **Decode cost dominates.** See W1. Everything downstream is cheap.
 2. **Context-sensitive coverage.** `__AFL_CTX_SENSITIVE` qualifies *edges* by
-   caller context; K-Scheduler's nodes are context-free. Not a correctness
-   problem, but `V` will saturate noticeably faster than the edge map, which
-   shrinks the horizon earlier than the paper's numbers assume.
+   caller context; K-Scheduler's nodes are context-free. Default-on since
+   `285ce79`, so this applies to every campaign, not just ctx-enabled builds.
+   Not a correctness problem, but `V` will saturate noticeably faster than the
+   edge map, which shrinks the horizon earlier than the paper's numbers assume.
 3. **The headline gain is small.** vs AFL-based schedulers: 4.21% arithmetic
    mean, **1.91% median**, at 24h over 10 runs (their Table V). That is inside
    the noise band of any single-run comparison. Validate the *math* in
