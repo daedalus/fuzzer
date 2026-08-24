@@ -210,9 +210,14 @@ class MonteCarloScheduler:
         for op in ops:
             blended[op] = w * pair_scores[op] + (1 - w) * thompson_vals[op]
 
-        best_op = max(ops, key=lambda o: blended[o])
-        self._prev_op = best_op
-        return best_op
+        # NOTE: `self._prev_op` is deliberately NOT written here. It is the
+        # *previously recorded* operator and is advanced by record(), which is
+        # the only place that can pair a predecessor with a known outcome.
+        # Writing it here set it to the operator being selected, so by the time
+        # record() ran for that same operator the `_prev_op != name` guard
+        # rejected the pair — and because this line sits after the pure-Thompson
+        # early return, it never executed until transitions already existed.
+        return max(ops, key=lambda o: blended[o])
 
     def record(self, name: str, success: bool, weight: float = 1.0) -> None:
         """Record outcome for a mutation operator arm.
@@ -257,10 +262,16 @@ class MonteCarloScheduler:
             self._op_dispersion[name] = DispersionIndex(window=200)
         self._op_dispersion[name].update(float(success))
 
-        # Update pairwise transition matrix on success
+        # Update pairwise transition matrix on success. `_prev_op` is the
+        # operator recorded immediately before this one; record() is called in
+        # selection order, so consecutive recorded operators are the observed
+        # chain. Advancing it unconditionally at the end is what lets the
+        # matrix bootstrap: it must not depend on a branch that itself
+        # requires a populated matrix.
         if success and self._prev_op is not None and self._prev_op != name:
             self.transition_counts[self._prev_op][name] += 1
             self.transition_total[self._prev_op] += 1
+        self._prev_op = name
 
     def record_brier(self, name: str, success: bool, weight: float = 1.0) -> None:
         """Record a prediction-outcome pair for Brier score diagnostics.
