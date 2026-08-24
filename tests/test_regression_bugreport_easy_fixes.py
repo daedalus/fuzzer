@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 from fuzzer_tool.adapters.persistent import PersistentRunner
 from fuzzer_tool.core.gf2_common import GF2n
-from fuzzer_tool.core.mutations.generic import _NumNode, radamsa_mutate_num
+from fuzzer_tool.core.mutations.generic import _log2_ceil, _NumNode, radamsa_mutate_num
 from fuzzer_tool.services.te_position import get_te_weighted_position
 
 
@@ -139,13 +139,14 @@ class TestRadamsaMutateNumInjectedRng:
             def random(self):
                 return next(self._randoms)
 
-        # op=9 (random scaling): randint(0,9)->9, randint(1,128)->9 (n=9,
-        # log2_ceil(9)=4), random()->0.9 selects the "val - n" branch. If the
-        # sign draw silently fell back to the global `random` module instead
-        # of this fake, it would not consume the sentinel and the call would
-        # raise StopIteration on the second next().
+        # op=9 (random scaling): randint(0,9)->9, randint(1,128)->9,
+        # random()->0.9 selects the "val - n" branch. If the sign draw
+        # silently fell back to the global `random` module instead of this
+        # fake, it would not consume the sentinel and the call would raise
+        # StopIteration on the second next().
+        n = _log2_ceil(9)
         rng = _FakeRng(randints=[9, 9], randoms=[0.9])
-        assert radamsa_mutate_num(100, rng=rng) == 96
+        assert radamsa_mutate_num(100, rng=rng) == 100 - n
 
 
 class TestSeedPickerGenericSeedShortMaxLen:
