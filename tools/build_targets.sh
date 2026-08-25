@@ -12,6 +12,7 @@
 #   tools/build_targets.sh --vendor-tracecmp          # Vendored libpng+zlib + trace-cmp targets
 #   tools/build_targets.sh --vendor-tracecmp --asan   # Same with ASAN
 #   tools/build_targets.sh --distance                 # AFLGo distance .so targets (_dist / _dist_asan)
+#   tools/build_targets.sh --ngram                    # png_read k=2/k=3 n-gram flavors (_ng2 / _ng3)
 #
 # Some targets need vendored sources fetched first (all are optional — the
 # build warns and skips when the tree is absent):
@@ -136,6 +137,7 @@ FRAME_POINTER="-fno-omit-frame-pointer"
 WITH_VENDOR_TRACECMP=0
 WITH_CLANG_SCOV=0
 WITH_DISTANCE=0
+WITH_NGRAM=0
 WITH_MSAN=0
 WITH_TSAN=0
 WITH_FFMPEG_SANCOV=1  # auto-rebuild vendored FFmpeg with coverage if needed
@@ -151,6 +153,7 @@ for arg in "$@"; do
     [ "$arg" = "--clang-scov" ] && WITH_CLANG_SCOV=1
     [ "$arg" = "--ffmpeg-sancov" ] && WITH_FFMPEG_SANCOV=1
     [ "$arg" = "--distance" ] && WITH_DISTANCE=1
+    [ "$arg" = "--ngram" ] && WITH_NGRAM=1
     [ "$arg" = "--msan" ] && WITH_MSAN=1
     [ "$arg" = "--tsan" ] && WITH_TSAN=1
 done
@@ -1206,6 +1209,72 @@ build_distance_so_targets() {
     done
 }
 
+# ── Build png_read n-gram flavors (_ng2 / _ng3) ───────────────────
+# trace-pc wrapper + -D__AFL_NGRAM_K={2,3} + the AFLGo channel. Linked
+# against vendored libpng+zlib REBUILT with trace-pc so library blocks
+# emit __sanitizer_cov_trace_pc too — the K-Scheduler node table must
+# cover library code or the horizon graph sees only the wrapper
+# (docs/kscheduler_centrality_port.md §3 build-scope caveat).
+# NOTE: rebuilds vendor/<lib> in place, clobbering artifacts of earlier
+# vendor passes — same last-wins behaviour as --vendor-tracecmp. Run
+# this pass last if you need both flavors' libs.
+build_ngram_so_targets() {
+    [ "$WITH_NGRAM" -eq 0 ] && return 0
+    if ! command -v clang &>/dev/null; then
+        warn "clang not found — --ngram requires clang"
+        return 1
+    fi
+    echo "Building n-gram .so flavors (trace-pc + __AFL_NGRAM_K + AFLGo channel)..."
+
+    local NG_VENDOR_LIBS="-lpng -lz -lm"
+    local NG_VENDOR_INC=""
+    if [ -f "$VENDOR_LIBPNG_DIR/configure" ] && [ -f "$VENDOR_ZLIB_DIR/configure" ]; then
+        echo "  Rebuilding vendored libpng+zlib with trace-pc..."
+        (cd "$VENDOR_ZLIB_DIR" && \
+            make -s clean >/dev/null 2>&1; \
+            CC=clang CFLAGS="-O2 -g -fPIC $FRAME_POINTER -fsanitize-coverage=trace-pc" \
+            ./configure --static 2>/dev/null && \
+            make -j$(nproc) -s 2>/dev/null) && \
+            ok "vendor/zlib (trace-pc)" || warn "vendor/zlib build failed"
+        (cd "$VENDOR_LIBPNG_DIR" && \
+            make -s clean >/dev/null 2>&1; \
+            CC=clang CFLAGS="-O2 -g -fPIC $FRAME_POINTER -fsanitize-coverage=trace-pc -I../zlib" \
+            LDFLAGS="-L../zlib" \
+            ./configure --enable-shared=no --quiet 2>/dev/null && \
+            make -j$(nproc) -s 2>/dev/null) && \
+            ok "vendor/libpng (trace-pc)" || warn "vendor/libpng build failed"
+        local PNG_A="$VENDOR_LIBPNG_DIR/.libs/libpng16.a"
+        local Z_A="$VENDOR_ZLIB_DIR/libz.a"
+        if [ -f "$PNG_A" ] && [ -f "$Z_A" ]; then
+            NG_VENDOR_LIBS="$PNG_A $Z_A -lm"
+            NG_VENDOR_INC="-I$VENDOR_LIBPNG_DIR -I$VENDOR_ZLIB_DIR"
+        else
+            warn "vendor .a missing after rebuild — system libpng/zlib fallback gives wrapper-only node coverage"
+        fi
+    else
+        warn "vendor sources missing (run tools/vendor_libpng.sh) — system libpng/zlib fallback gives wrapper-only node coverage"
+    fi
+
+    for k in 2 3; do
+        local cmplog_cflags=""
+        local cmplog_libs=""
+        if [ "$WITH_CMPLOG" -eq 1 ]; then
+            cmplog_cflags="$CMPLOG_CFLAGS"
+            cmplog_libs="$CMPLOG_LIBS"
+        fi
+        clang -O2 -g $FRAME_POINTER -D__AFL_DISTANCE_MODE -D__AFL_NGRAM_K=$k \
+            -fsanitize-coverage=trace-pc $cmplog_cflags \
+            -shared -fPIC -Wl,-Bsymbolic -include "$SHIM" \
+            -o "$TARGETS/png_read_ng${k}.so" "$TARGETS/png_read.c" \
+            $NG_VENDOR_LIBS $NG_VENDOR_INC $cmplog_libs 2>/dev/null
+        if [ -f "$TARGETS/png_read_ng${k}.so" ]; then
+            ok "png_read_ng${k}.so"
+        else
+            warn "failed: png_read_ng${k}.so"
+        fi
+    done
+}
+
 # ── Vendored trace-cmp: rebuild libpng+zlib with trace-cmp, then link targets ─
 VENDOR_ZLIB_DIR="$VENDOR/zlib"
 VENDOR_LIBPNG_DIR="$VENDOR/libpng"
@@ -1540,6 +1609,7 @@ case "$OPTS" in
     --fast|--nosan) BUILD_NOSAN=1 ;;
     --clang-scov) BUILD_ASAN=1; BUILD_NOSAN=1 ;;
     --vendor-tracecmp) [ "$HAS_ASAN_ARG" -eq 1 ] && BUILD_ASAN=1 || BUILD_NOSAN=1 ;;
+    --ngram) BUILD_NOSAN=1 ;;
     *) BUILD_ASAN=1; BUILD_NOSAN=1 ;;
 esac
 
@@ -1638,6 +1708,9 @@ if [ "$WITH_VENDOR_TRACECMP" -eq 1 ]; then
 fi
 if [ "$WITH_DISTANCE" -eq 1 ]; then
     build_distance_so_targets
+fi
+if [ "$WITH_NGRAM" -eq 1 ]; then
+    build_ngram_so_targets
 fi
 
 # ── Compile perf_shim.so (utility library, not a fuzz target) ────
