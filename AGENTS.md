@@ -57,6 +57,7 @@ fuzzer, not just the target.
 36. Strictly adhere to the layered boundary hierarchy: each layer may only communicate with its immediate neighbor directly below it. Never "punch holes" through layers (e.g., controllers or UI components must never directly call database queries, raw hardware drivers, or low-level network clients; always route through the intermediate service/abstraction layer).
 37. If the prompt indicates that a bug is being fixed, don't write the fix right away. First write the test. Observe it failing. Then write the fix. And observe the test passing.
 38. When implementing a new feature don't write it right away. First write the test. Observe it failing. Then write the feature. And observe the test passing (Test driven development).
+39. No retry-until-random-hit loops in tests (`for _ in range(N): if cond: break/found=True`). This tests luck, not behavior — it can pass while the code is broken and fails unreproducibly when it doesn't. Inject a scripted/fake RNG that deterministically drives the exact call sequence and assert the exact output. See `docs/refs/bug-classes.md` §Testing.
 
 
 ## Corpus Rules
