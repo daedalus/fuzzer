@@ -666,8 +666,10 @@ class JpegMutator:
 
         # Random scan data (entropy-coded segment)
         # Avoid 0xFF bytes — the parser interprets them as marker starts
-        scan_len = (self._rng or random).randint(1, max(1, min(256, max_len - len(buf) - 2)))
-        buf.extend(bytes((self._rng or random).randint(0, 0xFE) for _ in range(scan_len)))
+        room = max_len - len(buf) - 2
+        if room > 0:
+            scan_len = (self._rng or random).randint(1, min(256, room))
+            buf.extend(bytes((self._rng or random).randint(0, 0xFE) for _ in range(scan_len)))
 
         # EOI
         buf.extend(b"\xff\xd9")

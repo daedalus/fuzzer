@@ -71,6 +71,25 @@ class TestJpegMarkerSerialize:
             out = m.mutate(corrupt, max_len=65536)
             assert isinstance(out, bytes)
 
+    def test_regression_generate_random_jpeg_zero_room_scan_data(self):
+        """_generate_random_jpeg must not force a scan-data write when there's no room.
+
+        Regression: scan_len = randint(1, max(1, min(256, room))) avoided the
+        ValueError from a non-positive randint upper bound, but when room
+        (max_len - len(buf) - 2) was <= 0 it still forced scan_len=1 and wrote
+        a byte with no space, relying on the trailing buf[:max_len] slice to
+        silently truncate it away. Now the scan-data segment is skipped
+        entirely when there's no room, rather than writing past budget.
+        Sweeps tight max_len values (including 0) via the public mutate()
+        entry point, routed through invalid/empty input so it falls through
+        to _generate_random_jpeg.
+        """
+        m = JpegMutator()
+        for max_len in range(0, 80):
+            out = m.mutate(b"", max_len=max_len)
+            assert isinstance(out, bytes)
+            assert len(out) <= max_len
+
     def test_duplicate_marker_still_valid(self):
         """duplicate_marker truncates clones to 64 bytes; round-trip must work."""
         m = JpegMutator()
