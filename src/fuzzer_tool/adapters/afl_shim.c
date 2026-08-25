@@ -271,6 +271,29 @@ struct __afl_entry {
 __attribute__((visibility("default"), used))
 const uint32_t __AFL_CAT(__afl_ctx_bits_, __AFL_CTX_BITS) = __AFL_CTX_BITS;
 
+/* ── n-gram history depth ─────────────────────────────────────────────
+ *
+ * k = blocks encoded into one edge id: the current block plus its k−1
+ * predecessors. k=2 IS the historical behaviour and stays byte-identical:
+ * same layout, same exported __afl_prev_loc, same XOR edge ids, so existing
+ * corpora and resume state remain valid (docs/ngram_coverage_plan.md,
+ * Compatibility Concerns). Only k>2 introduces the ring buffer and the
+ * FNV-1a mix, which deliberately changes every edge id.
+ */
+#ifndef __AFL_NGRAM_K
+#define __AFL_NGRAM_K 2
+#endif
+
+#if __AFL_NGRAM_K < 2
+#error "__AFL_NGRAM_K must be >= 2"
+#endif
+#if __AFL_NGRAM_K > 4096
+#error "__AFL_NGRAM_K too large (ring BSS / index sanity)"
+#endif
+
+__attribute__((visibility("default"), used))
+const uint32_t __AFL_CAT(__afl_ngram_k_, __AFL_NGRAM_K) = __AFL_NGRAM_K;
+
 /* Front header size (stack_depth + pad + path_hash + edge_count) */
 #define SHM_HEADER_SIZE 24
 
@@ -280,7 +303,15 @@ const uint32_t __AFL_CAT(__afl_ctx_bits_, __AFL_CTX_BITS) = __AFL_CTX_BITS;
 static uint32_t __afl_map_size  = 8192;
 
 struct __afl_entry *__afl_area   = NULL;
+#if __AFL_NGRAM_K == 2
 uint32_t           __afl_prev_loc = 0;
+#else
+/* k−1 predecessor slots, FIFO via __afl_prev_idx (next-overwrite target =
+ * oldest entry). The index is uint32_t on purpose: an 8-bit counter wraps
+ * at 256 and mis-addresses rings once k−1 > 255. */
+static uint32_t __afl_prev_locs[__AFL_NGRAM_K - 1];
+static uint32_t __afl_prev_idx  = 0;
+#endif
 
 /* Set while the SHM map / distance table is being attached. The map/setup
  * code is itself coverage-instrumented (targets -include this file), so its
@@ -582,11 +613,29 @@ static inline void __afl_map_edge(uint32_t cur_loc) {
     if (__afl_diag)
         gen = (*__afl_diag >> __AFL_DIAG_GEN_SHIFT) & 0xFF;
 
+#if __AFL_NGRAM_K > 2
+    /* FNV-1a over the k−1 ring slots (oldest→newest from __afl_prev_idx)
+     * then cur_loc. Order-sensitive and cheap (2 ops/slot); XOR chains go
+     * commutative and lose path direction once k>2. */
+    uint32_t h = 2166136261u;
+    for (uint32_t i = 0; i < (uint32_t)(__AFL_NGRAM_K - 1); i++) {
+        h ^= __afl_prev_locs[(__afl_prev_idx + i) % (__AFL_NGRAM_K - 1)];
+        h *= 16777619u;
+    }
+    h ^= cur_loc;
+    h *= 16777619u;
+# if __AFL_CTX_SENSITIVE
+    uint32_t edge_id = __afl_get_caller_ctx() ^ h;
+# else
+    uint32_t edge_id = h;
+# endif
+#else
 #if __AFL_CTX_SENSITIVE
     uint32_t caller_ctx = __afl_get_caller_ctx();
     uint32_t edge_id = caller_ctx ^ __afl_prev_loc ^ cur_loc;
 #else
     uint32_t edge_id = __afl_prev_loc ^ cur_loc;
+#endif
 #endif
     /* edge_id == 0 means "empty slot" to the probe loop below, so a valid
      * edge that hashes to 0 would be silently dropped and the slot
@@ -665,7 +714,12 @@ static inline void __afl_map_edge(uint32_t cur_loc) {
     if (__afl_path_hash)
         *__afl_path_hash = __afl_path_hash_acc;
 
+#if __AFL_NGRAM_K > 2
+    __afl_prev_locs[__afl_prev_idx] = cur_loc >> 1;
+    __afl_prev_idx = (__afl_prev_idx + 1) % (__AFL_NGRAM_K - 1);
+#else
     __afl_prev_loc = cur_loc >> 1;
+#endif
 }
 
 /* ── Compiler-inserted edge coverage callbacks ────────────────────────
@@ -847,7 +901,12 @@ void __afl_map_reset(void) {
         __afl_write_distance_tail();
 #endif
     }
+#if __AFL_NGRAM_K > 2
+    memset(__afl_prev_locs, 0, sizeof(__afl_prev_locs));
+    __afl_prev_idx = 0;
+#else
     __afl_prev_loc = 0;
+#endif
     __afl_path_hash_acc = 0;
     __afl_max_stack_depth = 0;
     __afl_iter_edge_count = 0;
