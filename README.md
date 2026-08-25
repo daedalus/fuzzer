@@ -53,6 +53,7 @@ fuzzer-tool fuzz ./target --resume
 - **Multi-target**: fuzz multiple binaries with shared corpus and weighted round-robin
 - **Hardware perf counters** via `perf_event_open`: instruction, branch, branch-miss counts
 - **AFLGo directed fuzzing**: harmonic call-graph + CFG distance to targets (function names, addresses, or `file.c:line` via pure-Python DWARF), with the exact AFLGo power schedule (`--schedule aflgo --t-x N`) and a runtime SHM-tail distance channel on `trace-pc` builds (`build_targets.sh --distance`)
+- **n-gram edge coverage** (`build_targets.sh --ngram`): k=2 keeps byte-identical legacy edge ids; k=3+ hashes a predecessor ring with FNV-1a for path-sensitive feedback — `png_read_ng2.so` / `png_read_ng3.so` ship with trace-pc vendored libpng/zlib and feed the K-Scheduler node channel
 
 ### Scheduling Intelligence
 | Strategy | Flag | Description |
@@ -69,6 +70,7 @@ fuzzer-tool fuzz ./target --resume
 | AFL++ power schedules | `--schedule` | FAST/COE/RARE/MMOPT/LIN/QUAD/GO/AFLGO/ENTROPIC seed-level energy |
 | AFLGo directed annealing | `--schedule aflgo` | Exact AFLGo power factor — symmetric 32×/1/32× energy by distance-to-target with time-based cooling (`--t-x`, `--aflgo-cooling`) |
 | Entropic power schedule | `--schedule entropic` | libFuzzer `-entropic`: energy ∝ log(1 + rare-feature count) from already-tracked rare-edge ownership |
+| **K-Scheduler Katz centrality** | auto | On trace-pc targets: whole-program ICFG → horizon graph (contracted visited deletion, DAG) → out-degree Katz with β from node-hit counts; Elo-rated `katz` seed arm plus a clamped `--schedule katz` energy |
 | Seed strategies | — | Weighted, Pareto, format-aware, GA, QEA, Bayesian, Markov-gen |
 | **Mutation lineage tree** | `--lineage` | Weighted parent/ops/sites forest per seed: unproductive-branch pruning in auto-minimize, causal crash-path replay in `tmin`, LCA-based diversity scoring |
 

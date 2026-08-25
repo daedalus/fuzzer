@@ -1,5 +1,12 @@
 # n-gram Edge Coverage — Implementation Plan
 
+> **Status: implemented** (k=2 compat branch, ring+FNV for k>2, marker
+> symbol, Python detection/sizing, ptrace twin, `--ngram` build flavors).
+> One refinement vs. the text below: the K-Scheduler node bitmap is
+> *eagerly* written by the shim, so it needs no `atexit`/destructor tail
+> writer — Python's read-and-clear after each execution replaces that
+> (see `kscheduler_centrality_port.md` §3).
+
 > Research basis: analysis of `src/fuzzer_tool/adapters/afl_shim.c` (1668 lines),
 > `src/fuzzer_tool/adapters/shm.py`, `src/fuzzer_tool/core/elf.py`,
 > `src/fuzzer_tool/services/ptrace_coverage.py`, and

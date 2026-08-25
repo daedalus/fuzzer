@@ -1,5 +1,13 @@
 # Porting K-Scheduler into `daedalus/fuzzer`
 
+> **Status: implemented** (W1–W5). Deviations from the text below:
+> the node bitmap writes eagerly during execution, so W2 needs **no**
+> destructor/atexit writer — Python read-and-clear per exec suffices;
+> the `_ng2`/`_ng3` png_read flavors rebuild vendored libpng+zlib with
+> trace-pc, resolving §3's build-scope caveat for the evaluation targets;
+> Katz recomputes lazily on new coverage gated by a 50-exec interval
+> (Algorithm 2's timer), not on a wall clock.
+
 **Paper:** She, Shah, Jana — *Effective Seed Scheduling for Fuzzing with Graph
 Centrality Analysis*, IEEE S&P 2022 (arXiv:2203.12064).
 **Repo state audited:** `d5058c0` (live source, not docs).
