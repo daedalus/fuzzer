@@ -18,6 +18,8 @@ from fuzzer_tool.core.mutations import (
 )
 from fuzzer_tool.core.mutations.generic import byte_shuffle
 
+from .support.scripted_rng import ScriptedRng
+
 
 class TestConstants:
     def test_interesting_8_values(self):
@@ -102,15 +104,15 @@ class TestSplice:
         assert len(result) >= 2
 
     def test_result_prefix_from_a_suffix_from_b(self):
-        a = b"AAAA"
-        b = b"BBBB"
-        found_valid = False
-        for _ in range(200):
-            result = splice(a, b)
-            if result.startswith(b"A") and result.endswith(b"B"):
-                found_valid = True
-                break
-        assert found_valid
+        # Call order in splice: randint(1, len(a)-1)->cut_a, then
+        # randint(1, len(b)-1)->cut_b. Scripting cut_a=1 / cut_b=len(b)-1
+        # pins the extreme splice: one byte of `a`, all but one of `b`.
+        a, b = b"AAAA", b"BBBB"
+        cut_a, cut_b = 1, len(b) - 1
+
+        result = splice(a, b, rng=ScriptedRng(randints=[cut_a, cut_b]))
+
+        assert result == a[:cut_a] + b[cut_b:]
 
     def test_short_a_returns_a(self):
         assert splice(b"A", b"BBBB") == b"A"

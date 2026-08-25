@@ -35,6 +35,27 @@ def _drive(sched, tree, eligible, n, reward_for):
     return counts
 
 
+def _prime_b0_descent(sched):
+    """Seed UCT stats so the FIRST select() descends root -> a0 -> b0.
+
+    select() draws no randomness (self._rng is never read); ordering is
+    argmax over children, and LineageTree stores children as str sets whose
+    iteration order varies per process under hash randomization. Every
+    decision below is therefore made STRICT, so the descent no longer
+    depends on set order:
+
+    - root: uct(a0)=1.0 beats uct(a1..a3)=0.5 (explore term is 0 at
+      parent_visits=1), and self_uct(root)=0.5 < uct(a0), so the walk
+      descends instead of stopping;
+    - a0: uct(b0)~1.83 beats uct(b1/b2)~1.68, and self_uct(a0)~1.08 loses,
+      so it descends past a0;
+    - b0 is a leaf, so select() hands back b0 with its full ancestry.
+    """
+    sched.visits.update({"a0": 2.0, "b0": 2.0})
+    sched.values.update({"a0": 2.0, "b0": 2.0})  # mean 1.0 vs prior 0.5 elsewhere
+    sched.self_visits.update({"a0": 2.0})  # extra self visits sink the stop score
+
+
 class TestSquash:
     def test_zero_and_negative_map_to_zero(self):
         assert _squash(0) == 0.0
@@ -118,34 +139,35 @@ class TestCreditAssignment:
     def test_ancestors_are_credited(self):
         """A discovery deep in the tree must lift its whole chain."""
         sched = MCTSSeedScheduler(rng=random.Random(1))
+        _prime_b0_descent(sched)
         tree, eligible = _tree(), _all_keys()
-        for _ in range(200):
-            key = sched.select(tree, eligible)
-            path = list(sched._last_path)
-            sched.update(10.0)
-            if key == "b0":
-                assert path == ["root", "a0", "b0"], "path must be the full ancestry"
-                break
-        else:
-            pytest.fail("b0 was never selected")
-        for key in path:
-            assert sched.visits[key] > 1.0
+
+        assert sched.select(tree, eligible) == "b0"
+        assert sched._last_path == ["root", "a0", "b0"]
+
+        sched.update(10.0)
+
+        # One update adds exactly one visit to every node on the credited
+        # path; values accumulate the squashed reward on top of their
+        # pre-update state (prior 0.5 for untracked root, 2.0 primed mean).
+        reward = _squash(10.0)
+        assert sched.visits == {"root": 2.0, "a0": 3.0, "b0": 3.0}
+        assert sched.values["root"] == pytest.approx(0.5 + reward)
+        assert sched.values["a0"] == pytest.approx(2.0 + reward)
+        assert sched.values["b0"] == pytest.approx(2.0 + reward)
 
     def test_self_credit_goes_only_to_the_selected_seed(self):
         """Self stats decide whether to stop at a node, so they must not be
         polluted by outcomes from its descendants."""
         sched = MCTSSeedScheduler(rng=random.Random(1))
+        _prime_b0_descent(sched)
         tree, eligible = _tree(), _all_keys()
-        for _ in range(200):
-            if sched.select(tree, eligible) == "b0":
-                break
-            sched.update(10.0)
-        else:
-            pytest.fail("b0 was never selected")
 
-        # Snapshot the ancestors before crediting the b0 selection. They may
-        # already carry self credit from having been fuzzed themselves
-        # earlier; what matters is that *this* selection adds none.
+        assert sched.select(tree, eligible) == "b0"
+
+        # Snapshot before crediting the b0 selection. Ancestors may already
+        # carry self credit (a0 is primed); what matters is that *this*
+        # selection adds none.
         before = dict(sched.self_visits)
         agg_before = dict(sched.visits)
         sched.update(10.0)

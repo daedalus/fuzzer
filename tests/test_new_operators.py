@@ -15,6 +15,7 @@ from fuzzer_tool.core.mutations import (
 from fuzzer_tool.services.operators import OperatorEngine
 
 from .support.operator_env import make_minimal_fuzzer
+from .support.scripted_rng import ScriptedRng
 
 # ── Seed discipline (docs/tigerbeetle_four_fuzzers_port.md, P0-1) ─────
 #
@@ -158,14 +159,19 @@ class TestLineMutate:
             assert isinstance(buf, bytearray)
 
     def test_line_dup_lengthens(self):
-        found_longer = False
-        for _ in range(50):
-            buf = bytearray(b"a\nb\nc\nd\ne\nf")
-            self.engine._op_line_mutate(buf, 0, b"")
-            if len(buf) > 11:  # original is 11 bytes
-                found_longer = True
-                break
-        assert found_longer, "Expected at least one dup/repeat mutation to lengthen"
+        # Call order in _op_line_mutate: choice([del, dup, swap, perm,
+        # repeat, clone])->1 ("dup"), then randint(0, len(parts)-1)->0
+        # (duplicate line 0 immediately after itself).
+        self.engine.f._rand_pool = ScriptedRng(choice_idxs=[1], randints=[0])
+        data = b"a\nb\nc\nd\ne\nf"
+        lines = data.split(b"\n")
+        lines.insert(1, lines[0])  # exactly what dup@0 must produce
+
+        buf = bytearray(data)
+        self.engine._op_line_mutate(buf, 0, b"")
+
+        assert bytes(buf) == b"\n".join(lines)
+        assert len(buf) > len(data)  # the property the 50x loop chased
 
     def test_different_mutations_produce_different_results(self):
         results = set()
@@ -186,15 +192,17 @@ class TestLineMutate:
         assert buf == b""
 
     def test_swap_adjacent(self):
-        swaps_seen = 0
-        for _ in range(200):
-            buf = bytearray(b"aaa\nbbb")
-            self.engine._op_line_mutate(buf, 0, b"")
-            if buf == b"bbb\naaa":
-                swaps_seen += 1
-                if swaps_seen >= 3:
-                    break
-        assert swaps_seen >= 1, "Expected at least one adjacent swap"
+        # Call order: choice([del, dup, swap, perm, repeat, clone])->2
+        # ("swap"), then randint(0, len(parts)-2)->0; two-line buffers admit
+        # only index 0.
+        self.engine.f._rand_pool = ScriptedRng(choice_idxs=[2], randints=[0])
+        lines = b"aaa\nbbb".split(b"\n")
+
+        buf = bytearray(b"aaa\nbbb")
+        self.engine._op_line_mutate(buf, 0, b"")
+
+        lines[0], lines[1] = lines[1], lines[0]
+        assert bytes(buf) == b"\n".join(lines) == b"bbb\naaa"
 
 
 # ── Fuse mutation tests ────────────────────────────────────────────────
@@ -495,40 +503,41 @@ class TestAsciiNumArithmetic:
             result = ascii_num_arithmetic(b"", rng=random.Random(seed))
             assert result is None, _at(seed)
 
+    @staticmethod
+    def _run_scripted(data: bytes, op: int) -> bytes | None:
+        """One ascii_num_arithmetic call driven by a scripted RNG.
+
+        Draw order: randint(0, len(data)-1) picks the scan start (the digit
+        scan wraps, so 0 reaches any digit run), then randint(0, 7) picks
+        the op; ops 0-4 stop there. Any extra or missing draw raises
+        StopIteration on the scripted iterators.
+        """
+        return ascii_num_arithmetic(data, rng=ScriptedRng(randints=[0, op]))
+
     def test_increments_by_one(self, random_seed):
         """When op=0 (+1), '123' should become '124'."""
-        self._assert_op_reachable(random_seed, b"num=123", b"124", "+1")
+        prefix, digits = b"num=", b"123"
+        result = self._run_scripted(prefix + digits, op=0)
+        assert result == prefix + str(int(digits) + 1).encode(), _at(random_seed)
 
     def test_decrements(self, random_seed):
         """When op=1 (-1), '123' should become '122'."""
-        self._assert_op_reachable(random_seed, b"num=123", b"122", "-1")
+        prefix, digits = b"num=", b"123"
+        result = self._run_scripted(prefix + digits, op=1)
+        assert result == prefix + str(int(digits) - 1).encode(), _at(random_seed)
 
     def test_doubles(self, random_seed):
-        """When op=2 (*2), '50' should become '100'."""
-        self._assert_op_reachable(random_seed, b"val=50 ", b"100", "*2")
+        """When op=2 (*2), '50' inflates past its 2-byte field."""
+        prefix, digits, suffix = b"val=", b"50", b" "
+        result = self._run_scripted(prefix + digits + suffix, op=2)
+        assert result == prefix + str(int(digits) * 2).encode() + suffix, _at(random_seed)
 
     def test_halves(self, random_seed):
-        """When op=3 (/2), '100' should become '50'."""
-        self._assert_op_reachable(random_seed, b"val=100", b"50", "/2")
-
-    @staticmethod
-    def _assert_op_reachable(random_seed, data: bytes, expect: bytes, label: str):
-        """Assert a specific arithmetic op is reached within 200 draws.
-
-        The operator picks uniformly from 8 ops, so P(miss in 200 draws) is
-        (7/8)**200 ~ 2e-12 per seed. That is the margin the fixed-attempt count
-        is buying; it is not luck.
-        """
-        for seed in _SEEDS(random_seed):
-            rng = random.Random(seed)
-            for _ in range(200):
-                result = ascii_num_arithmetic(data, rng=rng)
-                if result and expect in result:
-                    break
-            else:
-                raise AssertionError(
-                    f"Expected {label} operation to produce {expect!r} {_at(seed)}"
-                )
+        """When op=3 (/2), '100' deflates to '50', zero-padded to field width."""
+        prefix, digits = b"val=", b"100"
+        shrunk = str(int(digits) // 2).encode()
+        result = self._run_scripted(prefix + digits, op=3)
+        assert result == prefix + shrunk + b"\x00" * (len(digits) - len(shrunk)), _at(random_seed)
 
     def test_preserves_non_digit_bytes(self, random_seed):
         for seed in _SEEDS(random_seed):
@@ -559,15 +568,16 @@ class TestChunkShuffle:
 
     def test_shuffle_changes_content(self, random_seed):
         data = bytes(range(32))
-        for seed in _SEEDS(random_seed):
-            rng = random.Random(seed)
-            for _ in range(20):
-                if chunk_shuffle(data, rng=rng) != data:
-                    break
-            else:
-                raise AssertionError(
-                    f"Expected chunk_shuffle to change content at least once {_at(seed)}"
-                )
+        # Draw order in chunk_shuffle: randint(1, 4)->chunk_size, then
+        # randint(1, num_chunks//2)->n_swaps, then per swap the (i, j)
+        # pair. Scripted: chunk_size=1 over 32 chunks, one swap 0 <-> 1.
+        chunks = [data[k : k + 1] for k in range(len(data))]
+
+        result = chunk_shuffle(data, rng=ScriptedRng(randints=[1, 1, 0, 1]))
+
+        chunks[0], chunks[1] = chunks[1], chunks[0]  # the one scripted swap
+        assert result == b"".join(chunks), _at(random_seed)
+        assert result != data
 
     def test_short_buffer_unchanged(self, random_seed):
         data = b"ABCD"
@@ -619,19 +629,23 @@ class TestDictCompound:
         assert len(buf) > before_len
 
     def test_compound_contains_separator(self):
-        """Inserted content should contain a separator from the list."""
-        found_sep = False
-        for _ in range(50):
-            buf = bytearray(b"test")
-            self.engine._op_dict_compound(buf, 0, b"")
-            compound = bytes(buf)[4:]  # after original "test"
-            for sep in DICT_COMPOUND_SEPARATORS:
-                if sep and sep in compound:
-                    found_sep = True
-                    break
-            if found_sep:
-                break
-        assert found_sep, "Expected a non-empty separator in compound token"
+        """The compound token is t1 + separator + t2, inserted verbatim."""
+        # Draw order in _op_dict_compound: choice(dictionary)->t1,
+        # choice(dictionary)->t2, choice(DICT_COMPOUND_SEPARATORS)->sep,
+        # then randint(0, len(buf))->insert position. Separator index 5 is
+        # b",": index 0 is b"", which a non-empty-separator assertion could
+        # never observe.
+        self.engine.f._rand_pool = ScriptedRng(choice_idxs=[0, 1, 5], randints=[0])
+        orig = b"test"
+        t1 = self.engine.f.dictionary[0]
+        t2 = self.engine.f.dictionary[1]
+        sep = DICT_COMPOUND_SEPARATORS[5]
+
+        buf = bytearray(orig)
+        self.engine._op_dict_compound(buf, 0, b"")
+
+        assert bytes(buf) == t1 + sep + t2 + orig  # inserted at scripted pos 0
+        assert sep in bytes(buf)
 
     def test_no_dictionary_noop(self):
         self.engine.f.dictionary = []
@@ -728,18 +742,30 @@ class TestHavocEscalation:
             assert isinstance(buf, bytearray)
 
     def test_stall_havoc_applies_more_mutations(self):
-        """During stall recovery: 8-16 mutations."""
-        self.engine.f._stall_recovery_active = True
-        # With more mutations, we expect more dramatic changes
-        changed = False
-        for _ in range(10):
-            buf = bytearray(b"\x00" * 256)
-            original = bytes(buf)
-            self.engine.havoc_mutate(buf)
-            if bytes(buf) != original:
-                changed = True
-                break
-        assert changed
+        """Havoc applies exactly the scripted sub-mutation count.
+
+        The contract is the COUNT (2-8 normal, 8-16 stalled), so only the
+        count draws are scripted (randint_list(..., 1)); batch sub-mutation
+        draws are pinned to zeros. A counting wrapper turns "loop until
+        something changed" into an exact per-call assertion; scripting all
+        16x4 sub-draws individually would couple the test to the private
+        havoc table.
+        """
+        for stall, count in ((False, 2), (True, 16)):
+            engine = OperatorEngine(make_minimal_fuzzer(pool=ScriptedRng(counts=[count])))
+            engine.f._stall_recovery_active = stall
+            applied = {"n": 0}
+            real_apply = engine._apply_single_mutation
+
+            def counting_apply(buf, _real=real_apply, _applied=applied):
+                _applied["n"] += 1
+                _real(buf)
+
+            engine._apply_single_mutation = counting_apply
+
+            engine.havoc_mutate(bytearray(b"\x00" * 256))
+
+            assert applied["n"] == count
 
     def test_havoc_handler_dispatch(self):
         engine = OperatorEngine(_make_minimal_fuzzer())

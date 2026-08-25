@@ -38,16 +38,24 @@ class TestTlvMutate:
     def test_length_field_detection(self):
         from fuzzer_tool.core.mutations.tlv_mutate import tlv_mutate
 
-        # Input where byte at offset 0 = 5, and there are 5+ bytes remaining
+        from .support.scripted_rng import ScriptedRng
+
+        # Offset 0 is a valid 1-byte length field: b1=5 <= remaining=10,
+        # so the very first scan offset is a candidate.
         data = bytes([5]) + b"AAAAABBBBB"
-        # Multiple runs should eventually mutate the length field
-        mutated = False
-        for _ in range(100):
-            result = tlv_mutate(data)
-            if result != data:
-                mutated = True
-                break
-        assert mutated
+        remaining = len(data) - 1
+
+        # Call order in tlv_mutate: randint(0, 7)->0 opens the gate on the
+        # first candidate, then choice(mutations)->index 5 picks the
+        # "exact remaining" boundary value. An extra, missing, or
+        # global-random draw exhausts the script (StopIteration) or fails
+        # the equality below.
+        rng = ScriptedRng(randints=[0], choice_idxs=[5])
+
+        result = tlv_mutate(data, rng=rng)
+
+        assert result == bytes([remaining & 0xFF]) + data[1:]
+        assert len(result) == len(data)  # in-place rewrite, not TLV fallback
 
     def test_deterministic_with_seed(self):
         import random
