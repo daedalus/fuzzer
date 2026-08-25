@@ -976,7 +976,7 @@ class DistanceTableShm:
     ``__sanitizer_cov_trace_pc()``.  Layout::
 
         uint32 capacity
-        struct { uint64 key; uint32 dist; } slots[capacity]
+        struct { uint64 key; uint32 dist; uint32 node_idx; } slots[capacity]
 
     The header is the *slot capacity*, not the entry count: a power of
     two >= 2x entries, so empty slots always exist and the shim's linear
@@ -986,20 +986,24 @@ class DistanceTableShm:
 
     *key* is the block start address relative to the object's lowest
     PT_LOAD vaddr (the shim looks up ``pc - dladdr_base``); *dist* is
-    the AFLGo block distance scaled by 100.  Entries with key == 0 are
-    empty slots.
+    the AFLGo block distance scaled by 100.  *node_idx* feeds the
+    K-Scheduler node bitmap (``NodeBitmapShm``); entries without a
+    mapping carry ``NODE_IDX_NONE``, which the shim's bounds check
+    rejects.  Entries with key == 0 are empty slots.
     """
 
-    def __init__(self, entries: dict[int, float]):
+    def __init__(self, entries: dict[int, float], node_of: dict[int, int] | None = None):
         """Create and populate the table SHM.
 
         Args:
             entries: {block-start key: distance} — keys already relative
                 to the object base, distances unscaled floats.
+            node_of: optional {key: ICFG node index} for the node-visit
+                bitmap channel; unmapped keys get NODE_IDX_NONE.
         """
         scaled = {key: max(0, round(dist * 100)) for key, dist in entries.items() if key != 0}
         self.num_entries = len(scaled)
-        entry_bytes = 12  # {u64 key, u32 dist}
+        entry_bytes = 16  # {u64 key, u32 dist, u32 node_idx}
         if self.num_entries == 0:
             self.shm_id = -1
             self._ptr = None
@@ -1027,6 +1031,8 @@ class DistanceTableShm:
                 if ctypes.c_uint64.from_address(off).value == 0:
                     ctypes.c_uint64.from_address(off).value = key
                     ctypes.c_uint32.from_address(off + 8).value = dist
+                    idx = NODE_IDX_NONE if node_of is None else node_of.get(key, NODE_IDX_NONE)
+                    ctypes.c_uint32.from_address(off + 12).value = idx
                     break
                 pos = (pos + 1) % self.capacity
         self.env_id = str(self.shm_id)
@@ -1040,6 +1046,61 @@ class DistanceTableShm:
         makes that arithmetic succeed and produce a plausible near-null
         address to write through. ``None`` raises TypeError instead.
         """
+        if self._ptr:
+            _libc.shmdt(self._ptr)
+        self._ptr = None
+        if self.shm_id >= 0:
+            _libc.shmctl(self.shm_id, IPC_RMID, None)
+            self.shm_id = -1
+
+
+# node_idx sentinel for table entries with no ICFG mapping; the shim's
+# bounds check (idx < bitmap_bytes * 8) always rejects it.
+NODE_IDX_NONE = 0xFFFFFFFF
+
+
+class NodeBitmapShm:
+    """Per-iteration node-visit bitmap shared with the shim (K-Scheduler W2).
+
+    The shim sets ``bits[node_idx >> 3] |= 1 << (node_idx & 7)`` when the
+    distance-table probe matches an entry whose ``node_idx`` passes the
+    bounds check. Writes are eager (unlike the lazy distance tail), so
+    there is no destructor writer: Python calls ``read_and_clear()`` after
+    every execution — in forkserver mode the parent clears after read,
+    before forking the next child, which also keeps every fork starting
+    from a clean bitmap.
+
+    Layout::
+
+        uint32 size_bytes
+        uint8 bits[size_bytes]
+    """
+
+    def __init__(self, num_nodes: int):
+        self.num_nodes = num_nodes
+        self.size_bytes = max(1, (num_nodes + 7) // 8)
+        self.shm_bytes = 4 + self.size_bytes
+
+        self.shm_id = _libc.shmget(0, self.shm_bytes, IPC_CREAT | SHM_R | SHM_W)
+        if self.shm_id < 0:
+            raise OSError(f"shmget failed: {os.strerror(ctypes.get_errno())}")
+        self._ptr = _libc.shmat(self.shm_id, None, 0)
+        if self._ptr == ctypes.c_void_p(-1).value or self._ptr is None:
+            _libc.shmctl(self.shm_id, IPC_RMID, None)
+            raise OSError(f"shmat failed: {os.strerror(ctypes.get_errno())}")
+        ctypes.memset(self._ptr, 0, self.shm_bytes)
+        ctypes.c_uint32.from_address(self._ptr).value = self.size_bytes
+        self.env_id = str(self.shm_id)
+        atexit.register(self.cleanup)
+
+    def read_and_clear(self) -> bytes:
+        """Snapshot the bitmap and zero it atomically-enough for one
+        reader (the fuzzer process is the only reader)."""
+        buf = ctypes.string_at(self._ptr + 4, self.size_bytes)
+        ctypes.memset(self._ptr + 4, 0, self.size_bytes)
+        return buf
+
+    def cleanup(self):
         if self._ptr:
             _libc.shmdt(self._ptr)
         self._ptr = None

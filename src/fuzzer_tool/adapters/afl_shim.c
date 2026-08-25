@@ -185,6 +185,7 @@ static void __afl_cmplog_fini(void);
 #if __AFL_DISTANCE_MODE
 #include <dlfcn.h>
 static void __afl_map_dist_shm(void);
+static void __afl_map_node_shm(void);
 #endif
 
 #if __AFL_EDGE
@@ -488,6 +489,7 @@ void __afl_map_shm(void) {
 #if __AFL_DISTANCE_MODE
     __afl_mapping = 1;  /* map_dist_shm is instrumented; no ctx during setup */
     __afl_map_dist_shm();
+    __afl_map_node_shm();
     __afl_mapping = 0;
 #endif
 }
@@ -762,13 +764,16 @@ void __sanitizer_cov_trace_pc_guard_init(uint32_t *start, uint32_t *stop) {
 /* Layout must match DistanceTableShm (Python): 4-byte header = SLOT
  * capacity (power of two >= 2x entries — the slack guarantees empty
  * slots so the k == 0 probe break fires on misses instead of scanning
- * the whole table), then 12-byte entries (u64 key, u32 dist) inserted
- * at key % capacity with linear probing, exactly like the lookup
- * below.  Packed keeps the C stride at 12 — without it the struct pads
- * to 16 and every entry misreads. */
+ * the whole table), then 16-byte entries (u64 key, u32 dist, u32
+ * node_idx) inserted at key % capacity with linear probing, exactly
+ * like the lookup below. Packed keeps the C stride at 16 — without it
+ * the struct pads and every entry misreads. node_idx feeds the
+ * K-Scheduler node bitmap; NODE_IDX_NONE-equivalent values fail the
+ * bounds check below. */
 struct __afl_dist_entry {
     uint64_t key;
     uint32_t dist;
+    uint32_t node_idx;
 } __attribute__((packed));
 
 static uint32_t  *__afl_dist_count = NULL;  /* entries + count at segment head */
@@ -776,6 +781,25 @@ static struct __afl_dist_entry *__afl_dist_table = NULL;
 static uint64_t   __afl_base = 0;           /* dladdr-derived object base */
 static uint64_t   __afl_dist_sum = 0;
 static uint64_t   __afl_dist_hits = 0;
+
+/* K-Scheduler node-visit bitmap (see NodeBitmapShm): u32 size_bytes head,
+ * then the payload. Eagerly written on probe hits, read-and-cleared by
+ * Python after each execution — no destructor writer. */
+static uint8_t   *__afl_node_bitmap = NULL;
+static uint32_t   __afl_node_bitmap_bytes = 0;
+
+static void __afl_map_node_shm(void) {
+    char *id = getenv("__AFL_NODE_BITMAP_ID");
+    if (!id) return;
+    int shmid = atoi(id);
+    if (shmid < 0) return;
+    void *p = shmat(shmid, NULL, 0);
+    if (p == (void *)-1) return;
+    uint32_t bytes = *(uint32_t *)p;
+    if (bytes == 0 || bytes > (1u << 28)) return;  /* insane header: ignore */
+    __afl_node_bitmap_bytes = bytes;
+    __afl_node_bitmap = (uint8_t *)((uint8_t *)p + 4);
+}
 
 static void __afl_map_dist_shm(void) {
     char *id = getenv("__AFL_DIST_SHM_ID");
@@ -816,6 +840,10 @@ void __sanitizer_cov_trace_pc(void) {
         if (k == key) {
             __afl_dist_sum += __afl_dist_table[idx].dist;
             __afl_dist_hits++;
+            uint32_t nidx = __afl_dist_table[idx].node_idx;
+            if (__afl_area && __afl_node_bitmap &&
+                nidx < __afl_node_bitmap_bytes * 8u)
+                __afl_node_bitmap[nidx >> 3] |= (uint8_t)(1u << (nidx & 7u));
             break;
         }
     }

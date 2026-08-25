@@ -47,7 +47,14 @@ requires_z3 = pytest.mark.skipif(
 # is the half that stops it coming back -- otherwise the next leak is found
 # the same way this one was, by bisecting a suite.
 
-_ENV_OWNED = ("LD_PRELOAD", "_CMPLOG_OUT", "__AFL_SHM_ID", "__AFL_DIST_SHM_ID", "AFL_MAP_SIZE")
+_ENV_OWNED = (
+    "LD_PRELOAD",
+    "_CMPLOG_OUT",
+    "__AFL_SHM_ID",
+    "__AFL_DIST_SHM_ID",
+    "__AFL_NODE_BITMAP_ID",
+    "AFL_MAP_SIZE",
+)
 
 
 @pytest.fixture(autouse=True)

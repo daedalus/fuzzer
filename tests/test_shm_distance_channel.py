@@ -243,7 +243,7 @@ class TestDistanceTableLayout:
     never fires and every trace-pc miss scans the whole table.  Pure
     Python — no clang needed."""
 
-    ENTRY_BYTES = 12  # {u64 key, u32 dist}
+    ENTRY_BYTES = 16  # {u64 key, u32 dist, u32 node_idx}
 
     def _read_slots(self, table_shm):
         cap = ctypes.c_uint32.from_address(table_shm._ptr).value
@@ -251,6 +251,7 @@ class TestDistanceTableLayout:
             (
                 ctypes.c_uint64.from_address(table_shm._ptr + 4 + i * self.ENTRY_BYTES).value,
                 ctypes.c_uint32.from_address(table_shm._ptr + 4 + i * self.ENTRY_BYTES + 8).value,
+                ctypes.c_uint32.from_address(table_shm._ptr + 4 + i * self.ENTRY_BYTES + 12).value,
             )
             for i in range(cap)
         ]
@@ -262,7 +263,9 @@ class TestDistanceTableLayout:
             slots = self._read_slots(t)
             assert len(slots) >= 2 * len(keys)  # slack → empty slots exist
             assert len(slots) & (len(slots) - 1) == 0  # power of two
-            assert sum(1 for k, _ in slots if k != 0) == len(keys)
+            assert sum(1 for k, _, _ in slots if k != 0) == len(keys)
+            # No node_of → every entry carries the sentinel index.
+            assert all(n == 0xFFFFFFFF for k, _, n in slots if k != 0)
         finally:
             t.cleanup()
 
@@ -277,11 +280,13 @@ class TestDistanceTableLayout:
             cap = len(slots)
             assert cap >= 2 * len(keys)
             assert cap & (cap - 1) == 0  # power of two
-            stored = {k: d for k, d in slots if k != 0}
+            stored = {k: (d, n) for k, d, n in slots if k != 0}
             assert len(stored) == len(keys)
             for key, dist in keys.items():
-                assert stored[key] == max(0, round(dist * 100))
-                idx = next(i for i, (k, _) in enumerate(slots) if k == key)
+                d, n = stored[key]
+                assert d == max(0, round(dist * 100))
+                assert n == 0xFFFFFFFF
+                idx = next(i for i, (k, _, _) in enumerate(slots) if k == key)
                 pos = key % cap
                 walked = 0
                 while (pos + walked) % cap != idx:
