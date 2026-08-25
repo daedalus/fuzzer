@@ -1617,6 +1617,32 @@ def detect_ctx_bits(target: str) -> int | None:
     return best
 
 
+def detect_ngram_k(target: str) -> int:
+    """Read __AFL_NGRAM_K out of a target's symbol table.
+
+    Same marker-name scan as `detect_ctx_bits`: a `.so` may link several
+    instrumented TUs, and on disagreement the maximum wins so the map is
+    sized for the widest-instrumented TU rather than the first symbol
+    seen.
+
+    Unlike context bits there is no unknowable case: absence of the
+    marker means an older shim, whose behaviour IS k=2 (the compatibility
+    default), so 2 is returned instead of None.
+    """
+    try:
+        names = _symbol_names(target)
+    except Exception as e:  # noqa: BLE001
+        log.debug("ngram-k detection failed for %s: %s", target, e)
+        return 2
+    best = 2
+    for name in names:
+        if name.startswith("__afl_ngram_k_"):
+            suffix = name[len("__afl_ngram_k_") :]
+            if suffix.isdigit():
+                best = max(best, int(suffix))
+    return best
+
+
 def ctx_inflation_factor(ctx_bits: int | None) -> float:
     """How much context-sensitivity multiplies the distinct-edge count.
 
@@ -1637,9 +1663,28 @@ def ctx_inflation_factor(ctx_bits: int | None) -> float:
     return min(2.0 ** (ctx_bits / 2.0), 16.0)
 
 
-def _size_from_blocks(block_count: int, ctx_bits: int | None) -> int:
+def ngram_inflation_factor(k: int | None) -> float:
+    """How much n-gram history multiplies the distinct-edge count.
+
+    A k-gram hashes the current block with its k−1 predecessors, so live
+    cardinality grows toward E^(k−1) for a target with E reachable hops.
+    As with context bits, sizing for the ceiling would be absurd; this
+    heuristic (quadratic in k−1, capped at 32) only has to start the
+    runtime drop-counter feedback loop in the right neighbourhood.
+    """
+    if not k or k <= 2:
+        return 1.0
+    return min(float((k - 1) ** 2), 32.0)
+
+
+def _size_from_blocks(block_count: int, ctx_bits: int | None, ngram_k: int = 2) -> int:
     """Entries needed for ``block_count`` instrumented blocks."""
-    edges = block_count * EDGES_PER_BLOCK * ctx_inflation_factor(ctx_bits)
+    edges = (
+        block_count
+        * EDGES_PER_BLOCK
+        * ctx_inflation_factor(ctx_bits)
+        * ngram_inflation_factor(ngram_k)
+    )
     needed = int(edges / TARGET_LOAD_FACTOR)
     return max(MAP_SIZE_DEFAULT, min(_map_size_max(), _next_power_of_2(needed)))
 
@@ -1668,6 +1713,7 @@ class MapSizeEstimate(NamedTuple):
     blocks: int
     source: str
     ctx_bits: int
+    ngram_k: int
     capped: bool
 
     @property
@@ -1687,6 +1733,7 @@ def estimate_map_size_detail(target: str, profile: object | None = None) -> MapS
         MapSizeEstimate. `entries` is what estimate_map_size() returns.
     """
     ctx_bits = detect_ctx_bits(target) or 0
+    ngram_k = detect_ngram_k(target)
 
     blocks = 0
     source = "default"
@@ -1720,10 +1767,24 @@ def estimate_map_size_detail(target: str, profile: object | None = None) -> MapS
             blocks, source = int(bd * (ts_opt / 1024)), "branch_density"
 
     if not blocks:
-        return MapSizeEstimate(MAP_SIZE_DEFAULT, 0, "default", ctx_bits, False)
+        return MapSizeEstimate(
+            entries=MAP_SIZE_DEFAULT,
+            blocks=0,
+            source="default",
+            ctx_bits=ctx_bits,
+            ngram_k=ngram_k,
+            capped=False,
+        )
 
-    entries = _size_from_blocks(blocks, ctx_bits)
-    return MapSizeEstimate(entries, blocks, source, ctx_bits, entries >= _map_size_max())
+    entries = _size_from_blocks(blocks, ctx_bits, ngram_k)
+    return MapSizeEstimate(
+        entries=entries,
+        blocks=blocks,
+        source=source,
+        ctx_bits=ctx_bits,
+        ngram_k=ngram_k,
+        capped=entries >= _map_size_max(),
+    )
 
 
 def estimate_map_size(target: str, profile: object | None = None) -> int:

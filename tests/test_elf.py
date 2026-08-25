@@ -9,12 +9,15 @@ import pytest
 
 from fuzzer_tool.core.elf import (
     MAP_SIZE_DEFAULT,
+    MAP_SIZE_MAX,
     _map_size_max,
     _size_from_blocks,
     detect_ctx_bits,
+    detect_ngram_k,
     estimate_map_size,
     estimate_map_size_detail,
     find_load_segment,
+    ngram_inflation_factor,
     parse_sancov_guard_count,
     parse_sancov_offsets,
 )
@@ -1372,3 +1375,132 @@ class TestEstimateMapSizeProvenance:
         with caplog.at_level(logging.INFO, logger="fuzzer_tool.core.elf"):
             estimate_map_size("/bin/true")
         assert "ESTIMATED" in caplog.text
+
+
+class TestNgramKDetection:
+    """detect_ngram_k mirrors detect_ctx_bits: symbol-name scan, max wins
+    across TUs. Absence means 2 — the legacy depth IS 2, unlike ctx where
+    absence is unknowable."""
+
+    def test_absent_marker_is_legacy_2(self):
+        assert detect_ngram_k("/bin/true") == 2
+
+    def test_unreadable_path_is_legacy_2(self):
+        assert detect_ngram_k("/nonexistent/binary") == 2
+
+    def _compile_shim_binary(self, tmp_path, name, extra_flags):
+        import shutil
+        import subprocess
+
+        cc = shutil.which("clang") or shutil.which("gcc")
+        if cc is None:
+            pytest.skip("no C compiler")
+        shim = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "src",
+            "fuzzer_tool",
+            "adapters",
+            "afl_shim.c",
+        )
+        src = tmp_path / f"{name}.c"
+        src.write_text("int main(void){return 0;}\n")
+        exe = tmp_path / name
+        r = subprocess.run(
+            [cc, "-O1", *extra_flags, "-include", shim, "-o", str(exe), str(src)],
+            capture_output=True,
+            text=True,
+        )
+        assert r.returncode == 0, r.stderr
+        return str(exe)
+
+    def test_default_build_reports_2(self, tmp_path):
+        exe = self._compile_shim_binary(tmp_path, "ngdflt", [])
+        assert detect_ngram_k(exe) == 2
+
+    def test_explicit_k3_is_read_back(self, tmp_path):
+        exe = self._compile_shim_binary(tmp_path, "ng3", ["-D__AFL_NGRAM_K=3"])
+        assert detect_ngram_k(exe) == 3
+
+    def test_conflicting_tus_take_the_max(self, tmp_path):
+        """Two instrumented TUs built with different k: the map must be
+        sized for the widest one."""
+        import shutil
+        import subprocess
+
+        cc = shutil.which("clang") or shutil.which("gcc")
+        if cc is None:
+            pytest.skip("no C compiler")
+        shim = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "src",
+            "fuzzer_tool",
+            "adapters",
+            "afl_shim.c",
+        )
+        objs = []
+        for i, k in ((1, "2"), (2, "3")):
+            src = tmp_path / f"tu{i}.c"
+            src.write_text(f"int tu{i}(void){{return {i};}}\n")
+            obj = tmp_path / f"tu{i}.o"
+            r = subprocess.run(
+                [
+                    cc,
+                    "-O1",
+                    f"-D__AFL_NGRAM_K={k}",
+                    "-include",
+                    shim,
+                    "-c",
+                    str(src),
+                    "-o",
+                    str(obj),
+                ],
+                capture_output=True,
+                text=True,
+            )
+            assert r.returncode == 0, r.stderr
+            objs.append(str(obj))
+        main_c = tmp_path / "main.c"
+        main_c.write_text("int tu1(void);\nint tu2(void);\nint main(void){return tu1()+tu2();}\n")
+        exe = tmp_path / "mixed"
+        # Distinct-named markers coexist; the shared shim state needs the
+        # linker told to keep first definitions.
+        r = subprocess.run(
+            [cc, *objs, "-o", str(exe), str(main_c), "-Wl,--allow-multiple-definition"],
+            capture_output=True,
+            text=True,
+        )
+        assert r.returncode == 0, r.stderr
+        assert detect_ngram_k(str(exe)) == 3
+
+
+class TestNgramSizing:
+    def test_inflation_is_one_for_legacy_depths(self):
+        for k in (None, 0, 1, 2):
+            assert ngram_inflation_factor(k) == 1.0
+
+    def test_inflation_grows_and_caps(self):
+        assert ngram_inflation_factor(3) == 4.0
+        assert ngram_inflation_factor(5) == 16.0
+        assert ngram_inflation_factor(7) == 32.0  # capped
+        assert ngram_inflation_factor(50) == 32.0
+
+    def test_two_arg_call_keeps_legacy_sizing(self):
+        assert _size_from_blocks(5_000, 0) == _size_from_blocks(5_000, 0, 2)
+
+    def test_sizing_grows_with_k(self):
+        assert _size_from_blocks(1_000, 0, 3) > _size_from_blocks(1_000, 0)
+        assert _size_from_blocks(1_000, 8, 4) > _size_from_blocks(1_000, 8)
+
+    def test_sized_map_stays_power_of_two_within_cap(self):
+        n = _size_from_blocks(20_000, 8, 4)
+        assert n & (n - 1) == 0
+        assert n <= MAP_SIZE_MAX
+
+    def test_detail_carries_ngram_k(self, tmp_path):
+        """The NamedTuple must carry k through both constructor paths."""
+        fake = tmp_path / "not-an-elf"
+        fake.write_bytes(b"MZgarbage")
+        est = estimate_map_size_detail(str(fake))
+        assert est.ngram_k == 2
+        assert est.entries == MAP_SIZE_DEFAULT
+        assert est.source == "default"
