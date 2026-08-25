@@ -201,6 +201,10 @@ class EloTracker(RoundRecorderMixin):
             Unrated operators are excluded from ranking and selection.
     """
 
+    # Declares that init_arm() does NOT accept informative priors (arm
+    # state lives in scalar Elo ratings, not Beta-Bernoulli counts).
+    supports_priors = False
+
     def __init__(
         self,
         k_factor: float = 16.0,

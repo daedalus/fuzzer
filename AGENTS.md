@@ -58,6 +58,7 @@ fuzzer, not just the target.
 37. If the prompt indicates that a bug is being fixed, don't write the fix right away. First write the test. Observe it failing. Then write the fix. And observe the test passing.
 38. When implementing a new feature don't write it right away. First write the test. Observe it failing. Then write the feature. And observe the test passing (Test driven development).
 39. No retry-until-random-hit loops in tests (`for _ in range(N): if cond: break/found=True`). This tests luck, not behavior — it can pass while the code is broken and fails unreproducibly when it doesn't. Inject a scripted/fake RNG that deterministically drives the exact call sequence and assert the exact output. See `docs/refs/bug-classes.md` §Testing.
+40. Every scheduler armed through `_register_arms` (`src/fuzzer_tool/services/fuzzer.py`) must declare an explicit class-level `supports_priors` bool: `True` only when its `init_arm()` accepts an informative `(prior_alpha, prior_beta)` override. `_register_arms` gates priors behind `getattr(scheduler, "supports_priors", False)`, so a scheduler that omits the flag silently discards format-operator priors instead of failing loudly. Declare it directly after the class docstring with a one-line reason, following `monte_carlo.py` / `exp3.py`.
 
 
 ## Corpus Rules
@@ -152,6 +153,7 @@ docs/             # DEEP_DIVE.md (comprehensive reference), TODO.md, refs/ (agen
 ## Testing
 
 - **Run the full test suite after changes** — `pytest` must pass before a change is complete.
+- **No retry-until-random-hit loops** (Hard Rule 39). Inject a scripted RNG — `tests/support/scripted_rng.py` for `random`-API operators, same class for the `RandPool`-API `_rand_pool` seam — drive the exact draw sequence, and assert the exact output, deriving expected values from helpers/arithmetic rather than echoing literals back.
 - **No hardcoded counts in tests.** Use `>=` for minimum bounds, not `==` — operators and features are added frequently and `assert len(X) == N` breaks on every addition.
 - **Regression tests are mandatory** for every fixed bug (`test_regression_<description>`); equivalence assertions must derive one side independently of the code under test (see `docs/refs/bug-classes.md` §Testing).
 - **Hash functions must be consistent.** When matching filenames against content (corpus eviction, dedup), use `hash_data()` from `fuzzer_tool.adapters.filesystem` — not `hashlib.sha256()` directly. `hash_data()` prefers xxhash when installed; hardcoding SHA-256 causes silent data loss.

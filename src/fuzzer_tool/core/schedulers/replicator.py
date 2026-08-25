@@ -29,6 +29,10 @@ class ReplicatorScheduler:
         mutation_rate: Minimum probability floor (exploration guarantee).
     """
 
+    # Declares that init_arm() does NOT accept informative priors (arm
+    # state lives in the population simplex, not Beta-Bernoulli counts).
+    supports_priors = False
+
     def __init__(
         self,
         window_size: int = 200,

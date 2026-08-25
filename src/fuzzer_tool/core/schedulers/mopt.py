@@ -81,6 +81,10 @@ class MOptScheduler:
             coverage map keeps pulling the swarm toward itself forever.
     """
 
+    # Declares that init_arm() does NOT accept informative priors (PSO
+    # carries arm state in particle positions, not Beta-Bernoulli counts).
+    supports_priors = False
+
     def __init__(
         self,
         n_particles: int = 5,
