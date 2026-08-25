@@ -1,5 +1,6 @@
 """Edge coverage via ptrace breakpoints on closed-source binaries."""
 
+import collections
 import ctypes
 import logging
 import os
@@ -37,13 +38,22 @@ class PtraceCoverage:
         map_size: int = 65536,
         deep_coverage: bool = False,
         max_bps: int = 50000,
+        ngram_k: int = 2,
     ):
+        if ngram_k < 2:
+            raise ValueError(f"ngram_k must be >= 2, got {ngram_k}")
         self.target_path = target_path
         self.map_size = map_size
         self.bb_addrs: list[int] = []
         self.original_bytes: dict[int, int] = {}
         self.edge_map: bytearray = bytearray(map_size)
+        self.ngram_k = ngram_k
         self.prev_location = 0
+        # k−1 predecessor words for the n-gram XOR chain; at k=2 this
+        # mirrors prev_location exactly, so the legacy hash is unchanged.
+        self.prev_locations: collections.deque[int] = collections.deque(
+            [0] * (ngram_k - 1), maxlen=ngram_k - 1
+        )
         self.total_edges = 0
         self.cumulative_edges = 0
         self.total_bp_hits = 0
@@ -420,6 +430,11 @@ class PtraceCoverage:
 
     def reset_edge_map(self):
         self.prev_location = 0
+        # The ring must be cleared alongside prev_location or the next
+        # execution hashes its first breakpoints against the previous
+        # execution's history — identical inputs would diverge.
+        self.prev_locations.clear()
+        self.prev_locations.extend([0] * (self.ngram_k - 1))
         self.total_edges = 0
         self._map_snapshot = classify_counts(bytes(self.edge_map))
 
@@ -427,11 +442,15 @@ class PtraceCoverage:
         # Use relative addresses for edge hashing (consistent with AFL).
         # Absolute addresses cause spurious collisions under PIE/ASLR.
         rel = addr - self._base_address if self._base_address else addr
-        bucket = (rel ^ self.prev_location) % self.map_size
+        edge_id = rel
+        for p in self.prev_locations:
+            edge_id ^= p
+        bucket = edge_id % self.map_size
         # Shift the prev like the C shim's __afl_prev_loc = cur_loc >> 1: a
         # block that re-enters itself consecutively then hashes as
         # rel ^ (rel >> 1) != 0 instead of collapsing to bucket 0 (rel ^ rel).
         self.prev_location = rel >> 1
+        self.prev_locations.appendleft(rel >> 1)
         self.total_bp_hits += 1
         if self.edge_map[bucket] == 0:
             self.edge_map[bucket] = 1

@@ -2181,7 +2181,14 @@ class Fuzzer:
             log.warning("Forkserver unavailable, falling back to spawn-per-exec")
 
     def _setup_ptrace(self, target, deep_coverage, max_bps, fallback_hint=False):
-        cov = PtraceCoverage(target, deep_coverage=deep_coverage, max_bps=max_bps)
+        from fuzzer_tool.core.elf import detect_ngram_k
+
+        cov = PtraceCoverage(
+            target,
+            deep_coverage=deep_coverage,
+            max_bps=max_bps,
+            ngram_k=detect_ngram_k(target),
+        )
         if cov.bb_addrs:
             self.ptrace_cov = cov
             mode = "deep (pure decoder)" if cov.deep_coverage else "function-entry"
