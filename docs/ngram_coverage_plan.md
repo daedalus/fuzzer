@@ -142,6 +142,14 @@ identical coverage state by construction. Since the ring is a
 zero-initialized static array that this loop never writes to, it stays
 zero across all fork iterations with no extra code required.
 
+Shared reset infrastructure: the K-Scheduler port
+(`kscheduler_centrality_port.md` §3/W2) adds its own node-bitmap
+read-and-clear to this same function, next to the distance tail, and gives
+it the same `atexit` tail-writer treatment for one-shot runs. Keep every
+per-iteration clear (edge table, ring, node bitmap) in `__afl_map_reset`;
+if either feature ever needs state retained across iterations, split the
+reset contract explicitly instead of silently exempting one structure.
+
 ---
 
 ## Python-Side Changes

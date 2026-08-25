@@ -83,6 +83,16 @@ trace-pc-instrumented builds, so W2 still requires trace-pc targets.
 runs never call `__afl_map_reset`. The node bitmap needs the identical treatment
 or you silently lose the last iteration on every non-forkserver run.
 
+*Coupling:* `__afl_map_reset` is shared infrastructure — the n-gram plan
+(`ngram_coverage_plan.md`, Reset Path) also extends it with ring-slot and
+index clearing, and its pre-fork analysis explains why zero-initialized
+statics stay clean across fork iterations. Bitmap writes should ignore PCs
+absent from the node-index table: the shim's own setup code is
+coverage-instrumented too (see the `__afl_mapping` note at `afl_shim.c:285`),
+and those PCs are not CFG nodes. Keep all per-iteration clears in the one
+reset function; if either feature later wants cross-iteration retention,
+split the reset contract explicitly.
+
 **Option B — guard IDs.** `__sanitizer_cov_trace_pc_guard_init`
 (`afl_shim.c:684`) assigns sequential IDs from a link-order counter. Recovering
 the static mapping means replaying section order, and it breaks on every relink.
