@@ -57,6 +57,8 @@ class SeedPicker:
             available.append("boltzmann")
         if getattr(f, "_distance", None) is not None:
             available.append("aflgo")
+        if getattr(f, "_katz_channel", None) is not None and f.corpus:
+            available.append("katz")
 
         # Expose the eligible pool so the fuzzer records Elo matches only against
         # strategies that were actually selectable (no phantom opponents) and so
@@ -91,6 +93,7 @@ class SeedPicker:
             "boltzmann": lambda: self._pick_boltzmann_seed(),
             "aflgo": lambda: self._pick_aflgo_seed() if f._distance else None,
             "mcts": lambda: self._pick_mcts_seed(),
+            "katz": lambda: self._pick_katz_seed(),
         }
         handler = strategy_map.get(strategy)
         return handler() if handler else None
@@ -119,6 +122,33 @@ class SeedPicker:
         if selected is None:
             return None
         return key_to_seed.get(selected)
+
+    def _pick_katz_seed(self) -> bytes | None:
+        """Centrality-pure picker — the Elo-arbitrated 'katz' arm.
+
+        Picks the corpus seed with the highest normalized Katz centrality
+        over the horizon graph (rarely-hit horizons dominate beta). Falls
+        back to energy-weighted sampling when scores tie at zero so the
+        arm still explores; returns None only when nothing is scored.
+        """
+        f = self.f
+        ch = getattr(f, "_katz_channel", None)
+        if ch is None or not f.corpus:
+            return None
+        weights = []
+        for seed in f.corpus:
+            e = ch.seed_energy(f._seed_key(seed))
+            weights.append(max(e, 1e-4) ** 2)
+        total = sum(weights)
+        if total <= 0:
+            return None
+        r = random.random() * total
+        acc = 0.0
+        for seed, w in zip(f.corpus, weights, strict=False):
+            acc += w
+            if acc >= r:
+                return seed
+        return f.corpus[-1]
 
     def _pick_aflgo_seed(self) -> bytes | None:
         """Distance-pure seed picker — the Elo-arbitrated 'aflgo' arm.

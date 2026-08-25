@@ -54,7 +54,19 @@ class SeedScorer:
         t_x_minutes: Time to exploitation in minutes (AFLGo's -c).
     """
 
-    SCHEDULES = ("base", "fast", "coe", "rare", "mopt", "lin", "quad", "go", "aflgo", "entropic")
+    SCHEDULES = (
+        "base",
+        "fast",
+        "coe",
+        "rare",
+        "mopt",
+        "lin",
+        "quad",
+        "go",
+        "aflgo",
+        "entropic",
+        "katz",
+    )
     COOLING = ("exp", "log", "lin", "quad")
 
     def __init__(
@@ -115,6 +127,8 @@ class SeedScorer:
         min_distance: float = 0.0,
         elapsed_sec: float = 0.0,
         t_x_minutes: float = 60.0,
+        # K-Scheduler centrality (normalized 0-1 from the katz arm)
+        katz_energy: float = 0.0,
     ) -> float:
         """Compute the energy score for a queue entry.
 
@@ -253,6 +267,12 @@ class SeedScorer:
             )
         elif self.schedule == "entropic":
             perf_score *= self._entropic_factor(rare_edge_count, tc_ref)
+        elif self.schedule == "katz":
+            # Energy = seed's normalized Katz centrality, clamped to
+            # [1, max_mult]: one high-centrality seed cannot starve the
+            # queue (same clamp rationale as the paper's AFL integration).
+            norm = min(max(katz_energy, 0.0), 1.0)
+            perf_score *= 1.0 + norm * (self.max_mult - 1)
 
         # ── Honggfuzz power factors (applied on top of schedule) ────────
         perf_score *= self._honggfuzz_factors(

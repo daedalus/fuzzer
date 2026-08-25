@@ -85,6 +85,32 @@ def _returncode_to_signal(returncode: int) -> tuple[str | None, int | None]:
     return None, None
 
 
+def current_coverage_contract(f) -> dict:
+    """The coverage semantics this session runs under. Resume states are
+    only valid when both halves match (edge ids change with k; node-channel
+    state is meaningless without the bitmap)."""
+    from fuzzer_tool.core.elf import detect_ngram_k
+
+    return {
+        "ngram_k": detect_ngram_k(f.target),
+        "node_channel": getattr(f, "_katz_channel", None) is not None,
+    }
+
+
+def check_coverage_contract(saved: dict | None, current: dict) -> None:
+    """Refuse resume on any contract mismatch. States written before
+    contracts existed carry no section and resume freely."""
+    if not saved:
+        return
+    for key in ("ngram_k", "node_channel"):
+        if saved.get(key) != current.get(key):
+            raise RuntimeError(
+                f"coverage contract mismatch on {key!r}: "
+                f"state={saved.get(key)!r} vs current={current.get(key)!r} — "
+                "start a fresh corpus dir or rebuild the target to match the saved run"
+            )
+
+
 class CorpusManager:
     """Manages corpus persistence, state, and minimization.
 
@@ -214,10 +240,16 @@ class CorpusManager:
         store.set("crash_mi", f._crash_mi.save())
         if hasattr(f, "_seed_quality"):
             store.set("seed_quality", f._seed_quality.state_dict())
+        store.set("coverage_contract", current_coverage_contract(f))
+        if getattr(f, "_katz_channel", None) is not None:
+            store.set("katz", f._katz_channel.state_dict())
         store.save()
 
     def load_state(self):
         f = self.f
+        check_coverage_contract(
+            f._state_store.get("coverage_contract"), current_coverage_contract(f)
+        )
         state = f._state_store.get("corpus")
         if not state:
             return
@@ -307,6 +339,9 @@ class CorpusManager:
         sq_data = f._state_store.get("seed_quality")
         if sq_data is not None and hasattr(f, "_seed_quality"):
             f._seed_quality.load_state_dict(sq_data)
+        katz_data = f._state_store.get("katz")
+        if katz_data is not None and getattr(f, "_katz_channel", None) is not None:
+            f._katz_channel.load_state_dict(katz_data)
         log.info(
             "Fuzzer state loaded: execs=%d, crashes=%d, corpus=%d",
             f.exec_count,

@@ -86,6 +86,7 @@ _SEED_STRATEGY_NAMES = (
     "bayesian",
     "markov",
     "boltzmann",
+    "katz",
 )
 
 
@@ -1792,6 +1793,24 @@ class Fuzzer:
                 )
                 self._distance = None
 
+        # K-Scheduler node channel: mutually exclusive with directed mode
+        # (both upload __AFL_DIST_SHM_ID; evaluation campaigns are not
+        # directed).
+        self._katz_channel = None
+        if not targets:
+            try:
+                from fuzzer_tool.services.katz_channel import KatzChannel
+
+                ch = KatzChannel.build(target, use_cfg_cache=use_cfg_cache)
+                if ch is not None and ch.upload():
+                    self._katz_channel = ch
+                    print(
+                        f"[*] K-Scheduler node channel: {len(ch.node_of)} probe sites, "
+                        f"{ch.n_nodes} ICFG nodes"
+                    )
+            except Exception as e:  # noqa: BLE001
+                log.warning("Katz channel setup failed: %s", e)
+
         # Simulated annealing temperature schedule
         self._anneal_budget = anneal_budget  # 0 = no annealing (temperature always 1.0)
         self._temperature = 1.0
@@ -3467,6 +3486,15 @@ class Fuzzer:
             )
             if self.exec_count % 100 == 0:
                 self._ablation_file.flush()
+
+        # K-Scheduler bitmap sampling runs EVERY exec (beta needs R_i over
+        # all mutations); per-seed mask attribution only for corpus-worthy
+        # inputs, keyed like EdgeTracker.
+        if getattr(self, "_katz_channel", None) is not None:
+            bits = self._katz_channel.sample()
+            if bits is not None and bits.any():
+                katz_key = self._seed_key(data) if has_new_coverage else None
+                self._katz_channel.record(bits, seed_key=katz_key)
 
         # Record edges for per-seed tracking
         if has_new_coverage:
@@ -5222,6 +5250,11 @@ class Fuzzer:
                         min_distance=self._dist_min_observed or 0.0,
                         elapsed_sec=time.time() - self.start_time,
                         t_x_minutes=self._seed_scorer.t_x_minutes,
+                        katz_energy=(
+                            self._katz_channel.seed_energy(seed_key)
+                            if getattr(self, "_katz_channel", None) is not None
+                            else 0.0
+                        ),
                         **hf_kwargs,
                     )
                 else:
