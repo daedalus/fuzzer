@@ -9,7 +9,7 @@
 
 ## Background
 
-### Current edge hash (k = 1)
+### Current edge hash (legacy behaviour; `__AFL_NGRAM_K = 2`)
 
 ```
 edge_id = caller_ctx ^ __afl_prev_loc ^ cur_loc   [__AFL_CTX_SENSITIVE=1, default]
@@ -37,20 +37,33 @@ uint32_t __afl_prev_loc = 0;
 
 // After
 #ifndef __AFL_NGRAM_K
-#define __AFL_NGRAM_K 2     /* default: retain current 2-node behaviour */
+#define __AFL_NGRAM_K 2     /* default: bit-exact legacy behaviour */
 #endif
 
-#if __AFL_NGRAM_K > 1
+#if __AFL_NGRAM_K == 2
+/* Dedicated compatibility branch: byte-for-byte today's implementation. */
+uint32_t __afl_prev_loc = 0;         /* exported symbol, unchanged ABI */
+#elif __AFL_NGRAM_K > 2
+_Static_assert(__AFL_NGRAM_K <= 4096, "__AFL_NGRAM_K too large");
 static uint32_t __afl_prev_locs[__AFL_NGRAM_K - 1];
-static uint8_t  __afl_prev_idx  = 0;
+static uint32_t __afl_prev_idx = 0;  /* wide enough for any supported k */
 #else
-uint32_t __afl_prev_loc = 0;   /* k=1: unchanged ABI */
+#error "__AFL_NGRAM_K < 2 is not supported"
 #endif
 ```
 
-- `__AFL_NGRAM_K = 2` (default) keeps the existing single-word layout so no
-  existing binaries need recompilation.
-- The ring holds exactly k−1 entries; index wraps modulo k−1.
+- `__AFL_NGRAM_K = 2` (default) takes the dedicated compatibility branch:
+  the exported `__afl_prev_loc` symbol, the layout, and the XOR edge IDs
+  are all unchanged, so existing corpora and resume state stay valid.
+  The FNV/ring path is reached only at k > 2.
+- Only k > 2 introduces the ring; those builds deliberately change every
+  edge ID and require re-instrumentation plus a fresh corpus (see
+  Compatibility Concerns).
+- The ring holds exactly k−1 entries; the index wraps modulo k−1. The
+  index is `uint32_t`, not `uint8_t`: an 8-bit counter saturates at 256
+  and mis-indexes the ring once `__AFL_NGRAM_K - 1 > 255`. The
+  `_Static_assert` bounds the configured range so oversized k fails loudly
+  at compile time instead of wrapping silently.
 
 ### Symbol advertisement
 
@@ -67,7 +80,7 @@ Python detects k with the same scan used for context bits (`elf.py:1608`).
 
 ```c
 static inline void __afl_map_edge(uint32_t cur_loc) {
-#if __AFL_NGRAM_K > 1
+#if __AFL_NGRAM_K > 2
     /* FNV-1a mix over the ring + cur_loc */
     uint32_t h = 2166136261u;
     for (int i = 0; i < __AFL_NGRAM_K - 1; i++) {
@@ -82,14 +95,14 @@ static inline void __afl_map_edge(uint32_t cur_loc) {
 #else
     uint32_t edge_id = h;
 #endif
-#else
-    /* k=2 / original path — unchanged */
+#elif __AFL_NGRAM_K == 2
+    /* k=2 compatibility branch — legacy XOR path, byte-identical */
     ...
 #endif
     edge_id |= 1;   /* preserve empty-slot sentinel */
     ...
-    /* Advance ring */
-#if __AFL_NGRAM_K > 1
+    /* Advance history */
+#if __AFL_NGRAM_K > 2
     __afl_prev_locs[__afl_prev_idx] = cur_loc >> 1;
     __afl_prev_idx = (__afl_prev_idx + 1) % (__AFL_NGRAM_K - 1);
 #else
@@ -108,7 +121,7 @@ XOR becomes commutative and loses direction information.
 
 ```c
 /* __afl_map_reset, currently at afl_shim.c:850 */
-#if __AFL_NGRAM_K > 1
+#if __AFL_NGRAM_K > 2
     memset(__afl_prev_locs, 0, sizeof(__afl_prev_locs));
     __afl_prev_idx = 0;
 #else
@@ -136,8 +149,12 @@ zero across all fork iterations with no extra code required.
 ### `elf.py` — detection and map-size estimation
 
 1. **`detect_ngram_k(target: str) -> int`** (new, mirrors `detect_ctx_bits`
-   at `elf.py:1587`): scan the ELF symtab for `__afl_ngram_k_N`; return N.
-   Return 2 (current default) when the symbol is absent.
+   at `elf.py:1587`): scan all ELF symtab markers matching `__afl_ngram_k_N`;
+   if values disagree, select the maximum so the map is sized for the widest
+   instrumented translation unit — a `.so` can link several TUs built with
+   different k, and sizing for anything smaller under-counts. This matches
+   `detect_ctx_bits`'s documented widest-value policy (`elf.py:1611–1616`).
+   Return 2 (current default) when no marker is present.
 
 2. **`ngram_inflation_factor(k: int) -> float`**: k-gram cardinality grows
    roughly as `E^(k−1)` for a target with E distinct edges.  A conservative
@@ -154,8 +171,14 @@ zero across all fork iterations with no extra code required.
    Without this correction the default 8192-entry map saturates early
    (drop-rate exceeds 1 % at load > 0.75, see `afl_shim.c:336–339`).
 
-4. **`MapSizeEstimate` (`elf.py:1670`)**: add `ngram_k: int` field alongside
-   `ctx_bits: int`.
+4. **`MapSizeEstimate` (`elf.py:1647`)**: add `ngram_k: int` field alongside
+   `ctx_bits: int`. The NamedTuple grows to six fields, so every positional
+   construction breaks with `TypeError` until updated — both sites must
+   pass the new field: the fallback
+   `MapSizeEstimate(MAP_SIZE_DEFAULT, 0, "default", ctx_bits, False)`
+   (`elf.py:1723`) and the success-path construction (`elf.py:1726`).
+   Prefer keyword arguments at both call sites, and audit positional
+   consumers/unpackers and tests that still assume five fields.
 
 ### `shm.py` — no layout change
 
@@ -182,12 +205,16 @@ self.prev_locations.appendleft(rel >> 1)
 Note: the ptrace path has no `caller_ctx` and never will; this is an
 acknowledged coverage-mode gap (`ptrace_coverage.py:430` comment).
 
-`reset_edge_map` (`ptrace_coverage.py:421`) currently only zeros
-`self.prev_location`. It must also clear the new `prev_locations` deque
-(e.g. `self.prev_locations.clear()` then re-pad with zeros, or
-reassign a fresh `deque(maxlen=k-1)`), or the ring carries stale
-entries across iterations — the same aliasing bug the C-side reset
-is designed to prevent.
+This extension and its reset counterpart ship together.
+`reset_edge_map` (`ptrace_coverage.py:421`) currently zeros only
+`self.prev_location`; unless it also clears and reinitializes the new
+`prev_locations` deque there (e.g. `self.prev_locations.clear()` then
+re-pad with zeros, or reassign a fresh `deque(maxlen=k-1)`), the first
+breakpoints of execution N+1 hash against execution N's history — so
+identical inputs produce different coverage across iterations on the same
+`PtraceCoverage` instance. Clearing it alongside the existing edge-map
+reset is the Python counterpart of the C-side ring zeroing above and
+prevents the same aliasing bug.
 
 ### `fuzzer.py` — ASLR note
 
@@ -221,7 +248,7 @@ when built via SanitizerCoverage; the ASLR concern is unchanged.
 | `src/fuzzer_tool/adapters/afl_shim.c:848–853` | Zero ring in `__afl_map_reset` |
 | `src/fuzzer_tool/core/elf.py:1587` | Add `detect_ngram_k`, `ngram_inflation_factor` |
 | `src/fuzzer_tool/core/elf.py:1640` | `_size_from_blocks`: apply `ngram_inflation_factor` |
-| `src/fuzzer_tool/core/elf.py:1670` | `MapSizeEstimate`: add `ngram_k` field |
+| `src/fuzzer_tool/core/elf.py:1647` | `MapSizeEstimate`: add `ngram_k` field; update both constructor sites (`elf.py:1723`, `elf.py:1726`) to keyword form |
 | `src/fuzzer_tool/adapters/shm.py` | None (layout unchanged) |
 | `src/fuzzer_tool/services/ptrace_coverage.py:421` | `reset_edge_map`: clear `prev_locations` deque alongside `prev_location` |
 | `src/fuzzer_tool/services/ptrace_coverage.py:430` | Ring-based prev_location simulation |
