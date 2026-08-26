@@ -1,0 +1,13 @@
+# SQLite database file format tokens.
+# https://www.sqlite.org/fileformat2.html
+"SQLite format 3\x00"
+"table"
+"index"
+"view"
+"trigger"
+"sqlite_master"
+"sqlite_sequence"
+"CREATE TABLE"
+"CREATE INDEX"
+"PRIMARY KEY"
+"WITHOUT ROWID"

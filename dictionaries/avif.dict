@@ -1,0 +1,13 @@
+# AVIF-specific tokens on top of the shared ISO-BMFF/HEIF set (heif.dict):
+# AV1 brands, the AV1 codec-config/sample-entry fourccs, and AV1 image
+# sequence item types. See https://aomediacodec.github.io/av1-avif/
+"avif"
+"avis"
+"av01"
+"av1C"
+"av1s"
+"av1M"
+"MA1A"
+"MA1B"
+"tmap"
+"Exif"
