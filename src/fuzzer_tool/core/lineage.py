@@ -153,7 +153,11 @@ class LineageTree:
         child_sites = [int(s) for s in sites]
         node = LineageNode(
             key=child_key,
-            parent_key=parent_key,
+            # A child whose hash equals its parent's key (no-op mutation)
+            # or whose parent was pruned first resolves to no parent here;
+            # storing the dangling key would leave a self/cycle reference
+            # that spins lca()/ancestors() forever.
+            parent_key=parent_key if parent is not None else None,
             depth=depth,
             node_weight=int(new_edge_count),
             child_ops=child_ops,
@@ -194,35 +198,61 @@ class LineageTree:
     # ── ancestry / LCA ────────────────────────────────────────────────
 
     def ancestors(self, key: str) -> list[LineageNode]:
-        """Bottom-up list of ancestors of *key* (excluding itself)."""
+        """Bottom-up list of ancestors of *key* (excluding itself).
+
+        Walks are bounded by the node count so a corrupted forest
+        (parent cycle) degrades to a short answer instead of hanging
+        the fuzzer's hot path.
+        """
         result: list[LineageNode] = []
         node = self.nodes.get(key)
         if node is None or node.parent_key is None:
             return result
         cur = self.nodes.get(node.parent_key)
-        while cur is not None:
+        seen: set[str] = {key}
+        while cur is not None and len(seen) <= len(self.nodes):
+            if cur.key in seen:
+                break
+            seen.add(cur.key)
             result.append(cur)
             cur = self.nodes.get(cur.parent_key) if cur.parent_key else None
         return result
 
     def lca(self, a: str, b: str) -> str | None:
-        """Lowest common ancestor key of *a* and *b*, or None if disconnected."""
+        """Lowest common ancestor key of *a* and *b*, or None if disconnected.
+
+        Bounded by the node count: corrupt parent chains answer None
+        rather than spinning (regression: fresh-corpus --elo all hang).
+        """
         na = self.nodes.get(a)
         nb = self.nodes.get(b)
         if na is None or nb is None:
             return None
+        limit = len(self.nodes) + 1
+        steps = 0
         while na.depth > nb.depth:
             na = self.nodes.get(na.parent_key) if na.parent_key else None
             if na is None:
                 return None
+            steps += 1
+            if steps > limit:
+                return None
+        steps = 0
         while nb.depth > na.depth:
             nb = self.nodes.get(nb.parent_key) if nb.parent_key else None
             if nb is None:
                 return None
+            steps += 1
+            if steps > limit:
+                return None
+        steps = 0
         while na is not nb:
             na = self.nodes.get(na.parent_key) if na.parent_key else None
             nb = self.nodes.get(nb.parent_key) if nb.parent_key else None
             if na is None or nb is None:
+                return None
+            steps += 1
+            if steps > limit:
                 return None
         return na.key
 

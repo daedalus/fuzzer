@@ -59,10 +59,14 @@ class TestLineageTreeInsert:
         assert len(tree) == 2
 
     def test_insert_unknown_parent_creates_orphan_root(self):
+        """Dangling keys must normalize to None: a stored unresolvable
+        parent (e.g. self-hash from a no-op mutation) spins lca()/ancestors()
+        forever — regression behind the fresh-corpus --elo all hang."""
         tree = LineageTree()
         node = tree.insert("missing", "b", ["bitflip"], [1], 2)
         assert node.depth == 0
-        assert node.parent_key == "missing"
+        assert node.parent_key is None
+        assert "b" in tree._root_keys
         assert len(tree) == 1
 
     def test_subtree_weight_propagates_with_gamma(self):
@@ -590,6 +594,9 @@ class TestLineageInsertWiring:
         parent = b"PARENT" * 8
         child = b"CHILD" * 8
         f.save_to_corpus(parent)
+        # Live ordering guarantees the parent joined the tree before the
+        # child mutates from it; register it explicitly here.
+        f._lineage.insert(None, f._seed_key(parent), [], [], 0)
         f.corpus.append(child)  # simulate successful add
         f._last_ops_with_sites = [("bitflip", 2), ("havoc", 5)]
         f._last_new_edge_count = 7
