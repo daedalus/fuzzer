@@ -2187,6 +2187,34 @@ class OperatorEngine:
             mutated = self.f._riff_mutator._generate_random_riff(max_len=self.f.max_len, rng=rng)
         return bytearray(mutated[: self.f.max_len])
 
+    def _op_avif_chunk_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.avif import AvifMutator, parse_avif
+
+        if not hasattr(self.f, "_avif_mutator"):
+            self.f._avif_mutator = AvifMutator()
+        rng = self.f._rand_pool
+        if parse_avif(bytes(buf)):
+            mutated = self.f._avif_mutator.mutate(bytes(buf), max_len=self.f.max_len, rng=rng)
+        else:
+            mutated = self.f._avif_mutator._generate_random_avif(
+                max_len=self.f.max_len, rng=rng
+            )
+        return bytearray(mutated[: self.f.max_len])
+
+    def _op_sqlite_chunk_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.sqlite import SqliteMutator, parse_sqlite
+
+        if not hasattr(self.f, "_sqlite_mutator"):
+            self.f._sqlite_mutator = SqliteMutator()
+        rng = self.f._rand_pool
+        if parse_sqlite(bytes(buf)):
+            mutated = self.f._sqlite_mutator.mutate(bytes(buf), max_len=self.f.max_len, rng=rng)
+        else:
+            mutated = self.f._sqlite_mutator._generate_random_sqlite(
+                max_len=self.f.max_len, rng=rng
+            )
+        return bytearray(mutated[: self.f.max_len])
+
     def _op_protobuf_chunk_mutate(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations.protobuf import ProtobufMutator, parse_protobuf
 

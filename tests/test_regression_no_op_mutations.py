@@ -174,6 +174,72 @@ def _asf() -> bytes:
     return header_obj + data_obj
 
 
+def _adts() -> bytes:
+    """Two minimal ADTS AAC frames (7-byte header + 8-byte payload each).
+
+    ``adts_chunk_mutate`` and ``mp3_chunk_mutate`` had no battery sample of
+    their own and were reaching the sweep only through the format-operator
+    bootstrap lottery, which made their coverage here a function of how
+    much RNG the fixture happened to consume before the sweep ran. An
+    explicit sample makes both deterministically reachable.
+
+    Header: syncword 0xFFF, MPEG-4, layer 00, protection_absent=1, AAC LC,
+    44.1 kHz, 2 channels, frame_length 15.
+    """
+    frame = bytes([0xFF, 0xF1, 0x50, 0x80, 0x01, 0xFF, 0xFC]) + bytes(8)
+    return frame * 2
+
+
+def _mp3() -> bytes:
+    """Two MPEG-1 Layer III frame headers with short payloads.
+
+    Byte 1 is 0xFB rather than ADTS's 0xF1 precisely so the two sniffers'
+    cross-checks are exercised: 0xF1 has the reserved MP3 layer value and
+    0xFB fails ADTS's fixed-layer check, so neither sample matches the
+    other's operator.
+    """
+    return (bytes([0xFF, 0xFB, 0x90, 0x00]) + bytes(60)) * 2
+
+
+def _avif() -> bytes:
+    """Minimal AVIF: ftyp declaring the brand, then a meta box carrying a
+    single hdlr child. Built by hand rather than via ``AvifMutator``'s
+    generator so the sweep exercises the operator against an input it did
+    not itself produce, and kept short for the same corpus_invariants
+    reason as `_ogg`."""
+    ftyp_payload = b"avif" + bytes(4) + b"avifmif1"
+    ftyp = (8 + len(ftyp_payload)).to_bytes(4, "big") + b"ftyp" + ftyp_payload
+    hdlr_payload = bytes(8) + b"pict" + bytes(13)
+    hdlr = (8 + len(hdlr_payload)).to_bytes(4, "big") + b"hdlr" + hdlr_payload
+    meta_payload = bytes(4) + hdlr  # meta is a FullBox: version/flags first
+    meta = (8 + len(meta_payload)).to_bytes(4, "big") + b"meta" + meta_payload
+    return ftyp + meta
+
+
+def _sqlite() -> bytes:
+    """Minimal SQLite database: the 100-byte file header plus one empty
+    leaf page. Enough for the sniffer (which requires a full header) and
+    for every header-field operator; the b-tree operators find a valid but
+    cell-free page."""
+    page_size = 512
+    page = bytearray(page_size)
+    page[0:16] = b"SQLite format 3\x00"
+    page[16:18] = page_size.to_bytes(2, "big")
+    page[18] = 1  # write version
+    page[19] = 1  # read version
+    page[21] = 64  # max payload fraction
+    page[22] = 32  # min payload fraction
+    page[23] = 32  # leaf payload fraction
+    page[24:28] = (1).to_bytes(4, "big")  # change counter
+    page[28:32] = (1).to_bytes(4, "big")  # db size in pages
+    page[44:48] = (4).to_bytes(4, "big")  # schema format
+    page[56:60] = (1).to_bytes(4, "big")  # text encoding: utf8
+    page[92:96] = (1).to_bytes(4, "big")  # version-valid-for
+    page[100] = 0x0D  # leaf table b-tree page, zero cells
+    page[105:107] = (page_size & 0xFFFF).to_bytes(2, "big")  # content start
+    return bytes(page)
+
+
 def _battery() -> list[bytes]:
     """Fixed input battery: random inputs of several lengths (deterministic via
     a local seed) plus magic-prefixed samples so format-aware operators become
@@ -203,6 +269,10 @@ def _battery() -> list[bytes]:
         _ogg(),
         _flv(),
         _asf(),
+        _adts(),
+        _mp3(),
+        _avif(),
+        _sqlite(),
         # zlib stream: covers zlib_chunk_mutate and recompress_zlib, whose
         # sniffers check the CMF/FLG header rather than a magic string.
         zlib.compress(b"the quick brown fox jumps over the lazy dog" * 3, 6),
@@ -452,10 +522,19 @@ class TestStateGatedOperatorsAreNotNoOps:
         # that (33 samples, zero invariant bytes), which reads as a no-op but
         # is a property of the corpus. A real fuzzing corpus concentrates on
         # one format, so add entries that share a header.
+        #
+        # Those entries are also the *longest* in the corpus, deliberately.
+        # invariant_mask spans the largest prefix at least 16 entries reach,
+        # and only those entries contribute -- so making the shared-header
+        # block longer than every battery sample means it alone defines the
+        # mask. Sizing them at 64 bytes instead left the qualifying set full
+        # of random battery entries, with the mask surviving on a single
+        # lucky bit that any newly added battery sample could extinguish.
         shared_header = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+        tail = max(len(inp) for inp in _battery()) + 64 - len(shared_header)
         f.corpus = [bytearray(inp) for inp in _battery()]
         f.corpus += [
-            bytearray(shared_header + bytes((i * 37 + j) & 0xFF for j in range(48)))
+            bytearray(shared_header + bytes((i * 37 + j) & 0xFF for j in range(tail)))
             for i in range(20)
         ]
         from fuzzer_tool.core.randomness import corpus_invariants

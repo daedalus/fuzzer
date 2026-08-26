@@ -36,6 +36,7 @@ from __future__ import annotations
 import random
 import struct
 from dataclasses import dataclass, field
+from typing import Any
 
 from fuzzer_tool.core.mutations.isobmff import Box, serialize_boxes
 
@@ -164,7 +165,7 @@ def serialize_avif(doc: AvifDoc) -> bytes:
             out += struct.pack(">I", 8 + len(payload)) + b"meta" + payload
         else:
             payload = serialize_boxes(box.children) if box.children else bytes(box.data)
-            out += struct.pack(">I", 8 + len(payload)) + box.box_type + payload
+            out += struct.pack(">I", box.size_orig & 0xFFFFFFFF) + box.box_type + payload
     return bytes(out)
 
 
@@ -185,7 +186,7 @@ def _find_leaf(boxes: list[Box], *fourccs: bytes) -> list[tuple[list[Box], int]]
 # returns None when the payload is too short / malformed to touch safely.
 
 
-def _iloc_item_offsets(data: bytes) -> list[dict]:
+def _iloc_item_offsets(data: bytes) -> list[dict[str, Any]]:
     """Byte offsets of each iloc item's id/extent fields.
 
     ``version`` selects item_ID (16 vs 32 bit) and extent index (present
@@ -214,7 +215,7 @@ def _iloc_item_offsets(data: bytes) -> list[dict]:
         item_count = struct.unpack_from(">I", data, pos)[0]
         pos += 4
 
-    items: list[dict] = []
+    items: list[dict[str, Any]] = []
     for _ in range(min(item_count, 4096)):
         item_id_off = pos
         item_id_size = 2 if version < 2 else 4
@@ -278,11 +279,11 @@ class AvifMutator:
 
     _rng = random
 
-    def mutate(self, data: bytes, max_len: int = 65536, rng=None) -> bytes:
+    def mutate(self, data: bytes, max_len: int = 65536, rng: Any = None) -> bytes:
         self._rng = rng or random
         doc = parse_avif(data)
         if doc is None:
-            return self._generate_random_avif(max_len, rng=self._rng)
+            return self._generate_random_avif(max_len=max_len, rng=self._rng)
 
         mutators = [
             self._mutate_ftyp_brand,
@@ -292,7 +293,11 @@ class AvifMutator:
             self._mutate_pitm,
             self._mutate_iloc_extent,
             self._mutate_infe_item_type,
+            self._mutate_iinf_entry_count,
             self._mutate_ipma,
+            self._mutate_hdlr_type,
+            self._mutate_meta_version_flags,
+            self._mutate_mdat_obu,
             self._swap_meta_children,
             self._delete_meta_child,
             self._duplicate_meta_child,
@@ -446,6 +451,97 @@ class AvifMutator:
         box.data = bytes(raw)
         return doc
 
+    def _mutate_iinf_entry_count(self, doc: AvifDoc, max_len: int) -> AvifDoc:
+        """Corrupt iinf's declared entry_count without adding/removing infe
+        entries -- a declared-count-vs-actual-entries mismatch, the same
+        probe class as the box-size mutator one level up."""
+        found = _find_leaf(doc.meta_children, b"iinf")
+        if not found:
+            return doc
+        _parent, idx = found[0]
+        box = _parent[idx]
+        raw = bytearray(box.data)
+        # iinf FullBox: [version+flags:4][entry_count: u16 if version==0
+        # else u32], then the infe entries themselves.
+        if len(raw) < 6:
+            return doc
+        version = raw[0]
+        size = 2 if version == 0 else 4
+        if len(raw) < 4 + size:
+            return doc
+        _write_be(raw, 4, size, self._rng.choice(INT_VALUES))
+        box.data = bytes(raw)
+        return doc
+
+    def _mutate_hdlr_type(self, doc: AvifDoc, max_len: int) -> AvifDoc:
+        """Swap hdlr's handler_type away from "pict".
+
+        An AVIF ``meta`` box is only an image collection because its handler
+        says so; every other handler sends the reader down a different
+        item-walker, which is exactly the type-confusion path worth probing.
+        """
+        found = _find_leaf(doc.meta_children, b"hdlr")
+        if not found:
+            return doc
+        _parent, idx = found[0]
+        box = _parent[idx]
+        raw = bytearray(box.data)
+        # hdlr FullBox: [version+flags:4][pre_defined:4][handler_type:4]
+        if len(raw) < 12:
+            return doc
+        raw[8:12] = self._rng.choice(
+            [b"pict", b"vide", b"soun", b"meta", b"auxv"] + WEIRD_FOURCCS
+        )
+        box.data = bytes(raw)
+        return doc
+
+    def _mutate_meta_version_flags(self, doc: AvifDoc, max_len: int) -> AvifDoc:
+        """Corrupt meta's own FullBox version/flags word.
+
+        A non-zero version is undefined for ``meta``; readers that check it
+        bail early, and readers that do not go on to parse the following
+        bytes as a child box header regardless.
+        """
+        raw = bytearray(doc.meta_version_flags)
+        if len(raw) < 4:
+            return doc
+        if self._rng.random() < 0.5:
+            raw[0] = self._rng.choice([0, 1, 2, 0x7F, 0xFF])
+        else:
+            _write_be(raw, 1, 3, self._rng.choice(INT_VALUES))
+        doc.meta_version_flags = bytes(raw)
+        return doc
+
+    def _mutate_mdat_obu(self, doc: AvifDoc, max_len: int) -> AvifDoc:
+        """Mutate the AV1 payload in mdat at OBU granularity.
+
+        The mdat payload is the only part of an AVIF file the AV1 decoder
+        itself parses -- every other mutation here stops at the container
+        walker. An OBU is ``[header byte][leb128 size (if has_size_field)]
+        [payload]``; the header byte carries forbidden(1) | type(4) |
+        extension_flag(1) | has_size_field(1) | reserved(1).
+        """
+        if doc.mdat_idx is None:
+            return doc
+        box = doc.top_boxes[doc.mdat_idx]
+        raw = bytearray(box.data)
+        if not raw:
+            return doc
+        choice = self._rng.randint(0, 2)
+        if choice == 0:
+            # Retype the leading OBU (1=sequence header, 6=frame, 15=padding).
+            obu_type = self._rng.choice([1, 2, 3, 4, 5, 6, 7, 8, 15, 0])
+            raw[0] = (raw[0] & 0x81) | ((obu_type & 0x0F) << 3)
+        elif choice == 1 and len(raw) >= 2:
+            # Corrupt the leb128 size field: an oversized or continuation-
+            # heavy encoding is the classic "size runs past the buffer" probe.
+            raw[1] = self._rng.choice([0x00, 0x01, 0x7F, 0x80, 0xFF])
+        else:
+            pos = self._rng.randint(0, len(raw) - 1)
+            raw[pos] ^= 1 << self._rng.randint(0, 7)
+        box.data = bytes(raw)
+        return doc
+
     def _mutate_ipma(self, doc: AvifDoc, max_len: int) -> AvifDoc:
         """Flip a byte in ipma's association table (item_ID/index/essential bit)."""
         found = _find_leaf(doc.meta_children, b"ipma")
@@ -500,7 +596,7 @@ class AvifMutator:
 
     # ── generation ───────────────────────────────────────────────────
 
-    def _generate_random_avif(self, _doc=None, max_len: int = 65536, rng=None) -> bytes:
+    def _generate_random_avif(self, max_len: int = 65536, rng: Any = None) -> bytes:
         """Generate a minimal AVIF file: ftyp + meta(hdlr/pitm/iloc/iinf/iprp) + mdat."""
         self._rng = rng or self._rng or random
         r = self._rng
@@ -540,8 +636,15 @@ class AvifMutator:
             + b"\x00"  # item_name
         )
         infe = Box(b"infe", 8 + len(infe_data), infe_data)
-        iinf_data = struct.pack(">I", 0) + struct.pack(">H", 1)
-        iinf = Box(b"iinf", 8 + len(iinf_data) + infe.size_orig, iinf_data, children=[infe])
+        # iinf is a FullBox *and* a container: its payload is
+        # version/flags + entry_count followed by the infe boxes. ``Box``
+        # cannot hold both a payload prefix and children (serialize_boxes
+        # drops ``data`` whenever ``children`` is non-empty), and
+        # ``_parse_boxes`` keeps iinf as an opaque leaf on the way back in,
+        # so build it as a leaf whose data already contains the serialized
+        # entries -- which is exactly what ``_infe_entries`` walks.
+        iinf_data = struct.pack(">I", 0) + struct.pack(">H", 1) + serialize_boxes([infe])
+        iinf = Box(b"iinf", 8 + len(iinf_data), iinf_data)
 
         ispe_data = struct.pack(">I", 0) + struct.pack(">II", r.randint(1, 4096), r.randint(1, 4096))
         ispe = Box(b"ispe", 8 + len(ispe_data), ispe_data)
@@ -549,7 +652,10 @@ class AvifMutator:
         av1c_data = bytes([0x81, r.randint(0, 0x1F), 0x00, 0x00])
         av1c = Box(b"av1C", 8 + len(av1c_data), av1c_data)
 
-        ipco = Box(b"ipco", 0, children=[ispe, av1c])
+        # Container sizes must be real: serialize_boxes writes size_orig
+        # verbatim, and a declared size < 8 makes _parse_boxes stop at that
+        # box, silently truncating everything after it on the way back in.
+        ipco = Box(b"ipco", 8 + ispe.size_orig + av1c.size_orig, children=[ispe, av1c])
 
         ipma_data = (
             struct.pack(">I", 0)  # version 0, flags 0
@@ -560,7 +666,7 @@ class AvifMutator:
         )
         ipma = Box(b"ipma", 8 + len(ipma_data), ipma_data)
 
-        iprp = Box(b"iprp", 0, children=[ipco, ipma])
+        iprp = Box(b"iprp", 8 + ipco.size_orig + ipma.size_orig, children=[ipco, ipma])
 
         meta_children = [hdlr, pitm, iloc, iinf, iprp]
         meta_version_flags = struct.pack(">I", 0)

@@ -134,6 +134,8 @@ _CATEGORIES: dict[str, set[str]] = {
         "flv_chunk_mutate",
         "asf_chunk_mutate",
         "riff_chunk_mutate",
+        "avif_chunk_mutate",
+        "sqlite_chunk_mutate",
         "protobuf_chunk_mutate",
         "gif_chunk_mutate",
         "webp_chunk_mutate",
@@ -304,6 +306,28 @@ def _sniff_rar(d: bytes) -> bool:
     return d[:6] == b"Rar!\x1a\x07"
 
 
+def _sniff_avif(d: bytes) -> bool:
+    """Leading ftyp box declaring an AVIF-family brand.
+
+    Deliberately a *narrower* case of ``isobmff_chunk_mutate``'s bare
+    ``ftyp`` check rather than a disjoint one -- unlike the riff/webp pair,
+    these two operators do different work on the same file: the generic box
+    mutator walks the box tree, while the AVIF mutator understands that
+    ``meta`` is a FullBox and reaches the iloc/iinf/iprp fields the generic
+    parser mis-parses. Both being available on an AVIF input is the point.
+
+    The compatible-brands scan is 4-aligned and bounded by the box's own
+    declared size, so a hostile ftyp cannot make this walk the whole buffer.
+    """
+    if len(d) < 16 or d[4:8] != b"ftyp":
+        return False
+    if d[8:12] in (b"avif", b"avis"):
+        return True
+    size = struct.unpack_from(">I", d, 0)[0]
+    end = min(size, len(d), 256)
+    return any(d[i : i + 4] in (b"avif", b"avis") for i in range(16, max(16, end - 3), 4))
+
+
 # ── Format gating for bit_repack ────────────────────────────────────────
 #
 # bit_repack is in the bit band, not the format band, but it gets the same
@@ -376,6 +400,11 @@ _FORMAT_SNIFFERS: dict[str, Callable[[bytes], bool]] = {
     "riff_chunk_mutate": lambda d: (
         len(d) >= 12 and d[:4] == b"RIFF" and d[8:12] != b"WEBP"
     ),
+    "avif_chunk_mutate": _sniff_avif,
+    # SQLite: the 16-byte magic is exact and self-terminating (it ends in a
+    # NUL), so no secondary check is needed -- but the file header is 100
+    # bytes and every mutator here indexes into it, so require that much.
+    "sqlite_chunk_mutate": lambda d: len(d) >= 100 and d[:16] == b"SQLite format 3\x00",
     # ELF: magic + a valid class/endianness byte pair. Cheap enough to run on
     # every selection; the mutator itself never touches non-ELF input.
     "elf_chunk_mutate": lambda d: (

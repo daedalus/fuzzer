@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import random
 import struct
+from typing import Any
 
 MAGIC = b"SQLite format 3\x00"
 
@@ -93,13 +94,29 @@ PAGE_SIZE_VALUES = [1, 512, 1024, 2048, 4096, 8192, 16384, 32768, 0, 3, 65535]
 # rest plus a few invalid bytes are corruption probes.
 PAGE_TYPES = [0x02, 0x05, 0x0A, 0x0D, 0x00, 0x01, 0xFF]
 
+# Schema-text substitutions for the CREATE statement stored in
+# sqlite_master. Same length class as what they replace so the surrounding
+# record's declared payload length stays plausible; overlong ones are
+# truncated at the record boundary by the mutator.
+SQL_TOKENS = [
+    b"CREATE TABLE",
+    b"CREATE INDEX",
+    b"CREATE VIEW",
+    b"CREATE TRIGGER",
+    b"CREATE VIRTUAL TABLE",
+    b"PRIMARY KEY",
+    b"WITHOUT ROWID",
+    b"sqlite_master",
+    b"sqlite_sequence",
+]
+
 HEADER_SIZE = 100
 BTREE_HEADER_LEAF = 8
 BTREE_HEADER_INTERIOR = 12
 
 
 def _page_size_from_header(data: bytes) -> int | None:
-    raw = struct.unpack_from(">H", data, 16)[0]
+    raw = int(struct.unpack_from(">H", data, 16)[0])
     if raw == 1:
         return 65536
     if raw < 512 or (raw & (raw - 1)) != 0:
@@ -113,6 +130,89 @@ def _write_be(data: bytearray, off: int, size: int, value: int) -> None:
     if fmt is None:
         return
     struct.pack_into(fmt, data, off, value)
+
+
+def _varint(value: int) -> bytes:
+    """Encode SQLite's big-endian base-128 variable-length integer.
+
+    1-8 bytes carry 7 payload bits each with the high bit as a
+    continuation flag; the 9th byte, when reached, carries a full 8 bits.
+    """
+    value &= 0xFFFFFFFFFFFFFFFF
+    if value <= 0x7F:
+        return bytes([value])
+    if value > 0x00FFFFFFFFFFFFFF:
+        out = bytearray([value & 0xFF])
+        value >>= 8
+        for _ in range(8):
+            out.append((value & 0x7F) | 0x80)
+            value >>= 7
+        return bytes(reversed(out))
+    chunks = []
+    while value:
+        chunks.append(value & 0x7F)
+        value >>= 7
+    return bytes([c | 0x80 for c in reversed(chunks[1:])] + [chunks[0]])
+
+
+def _serial(value: int | bytes) -> tuple[int, bytes]:
+    """Return (serial_type, body_bytes) for one record column value."""
+    if isinstance(value, bytes):
+        return 13 + 2 * len(value), value  # TEXT (utf8)
+    if -128 <= value <= 127:
+        return 1, struct.pack(">b", value)
+    if -32768 <= value <= 32767:
+        return 2, struct.pack(">h", value)
+    return 4, struct.pack(">i", value)
+
+
+def _record(values: list[int | bytes]) -> bytes:
+    """Encode a SQLite record ("serial type" header + column bodies)."""
+    types = bytearray()
+    body = bytearray()
+    for value in values:
+        serial_type, raw = _serial(value)
+        types += _varint(serial_type)
+        body += raw
+    # The header length varint counts itself, so its own width has to be
+    # settled before it can be written; one retry always converges for any
+    # header this code produces.
+    header_len = len(types) + 1
+    if len(_varint(header_len)) != 1:
+        header_len = len(types) + len(_varint(len(types) + 2))
+    return _varint(header_len) + bytes(types) + bytes(body)
+
+
+def _table_leaf_cell(rowid: int, values: list[int | bytes]) -> bytes:
+    """Encode one table-leaf b-tree cell: payload length, rowid, record."""
+    payload = _record(values)
+    return _varint(len(payload)) + _varint(rowid) + payload
+
+
+def _write_leaf_page(page: bytearray, hdr_off: int, page_size: int, cells: list[bytes]) -> None:
+    """Lay out a table-leaf b-tree page in place.
+
+    ``hdr_off`` is where the b-tree header starts (0 for an ordinary page,
+    100 for page 1, which carries the file header first). Every *offset*
+    the page stores -- the cell pointers and the content-area start -- is
+    measured from byte 0 of the page regardless, which is the detail that
+    makes page 1 easy to get wrong.
+    """
+    content_start = page_size
+    pointers = []
+    for cell in cells:
+        content_start -= len(cell)
+        page[content_start : content_start + len(cell)] = cell
+        pointers.append(content_start)
+
+    page[hdr_off] = 0x0D  # leaf table b-tree page
+    struct.pack_into(">H", page, hdr_off + 1, 0)  # no freeblocks
+    struct.pack_into(">H", page, hdr_off + 3, len(cells))
+    # 0 encodes 65536; a full-size empty page is the only case that hits it.
+    struct.pack_into(">H", page, hdr_off + 5, content_start & 0xFFFF)
+    page[hdr_off + 7] = 0  # no fragmented free bytes
+    for i, ptr in enumerate(pointers):
+        struct.pack_into(">H", page, hdr_off + 8 + 2 * i, ptr)
 
 
 class SqliteDoc:
@@ -158,18 +258,19 @@ def serialize_sqlite(doc: SqliteDoc) -> bytes:
     return bytes(out)
 
 
-def _btree_header_len(page: bytearray, is_page1: bool) -> int:
+def _btree_header_len(page: bytearray) -> int:
+    """Length of the b-tree page header: interior pages carry a right-most
+    child pointer that leaf pages do not."""
     if not page:
         return 0
-    page_type = page[0]
-    return BTREE_HEADER_INTERIOR if page_type in (0x02, 0x05) else BTREE_HEADER_LEAF
+    return BTREE_HEADER_INTERIOR if page[0] in (0x02, 0x05) else BTREE_HEADER_LEAF
 
 
 def _cell_pointer_offsets(page: bytearray) -> list[int]:
     """Byte offsets (within *page*) of each entry in the cell pointer array."""
     if len(page) < BTREE_HEADER_LEAF:
         return []
-    hdr_len = _btree_header_len(page, is_page1=False)
+    hdr_len = _btree_header_len(page)
     ncells = struct.unpack_from(">H", page, 3)[0]
     ptrs = []
     pos = hdr_len
@@ -181,16 +282,35 @@ def _cell_pointer_offsets(page: bytearray) -> list[int]:
     return ptrs
 
 
+def _cell_starts(page: bytearray, is_page1: bool) -> list[int]:
+    """Where each cell begins, as an offset into *page*.
+
+    Cell pointers are stored relative to the start of the **page**, but
+    ``SqliteDoc.pages[0]`` holds page 1's *body* -- the 100-byte file
+    header is sliced off -- so page 1's pointers have to be rebased by
+    ``HEADER_SIZE`` before they index into it. Pointers that land outside
+    the buffer (already-corrupted input) are dropped rather than clamped.
+    """
+    base = HEADER_SIZE if is_page1 else 0
+    starts = []
+    for ptr_off in _cell_pointer_offsets(page):
+        ptr = struct.unpack_from(">H", page, ptr_off)[0]
+        rel = ptr - base
+        if 0 <= rel < len(page):
+            starts.append(rel)
+    return starts
+
+
 class SqliteMutator:
     """Structure-aware SQLite database file mutator."""
 
     _rng = random
 
-    def mutate(self, data: bytes, max_len: int = 65536, rng=None) -> bytes:
+    def mutate(self, data: bytes, max_len: int = 65536, rng: Any = None) -> bytes:
         self._rng = rng or random
         doc = parse_sqlite(data)
         if doc is None:
-            return self._generate_random_sqlite(max_len, rng=self._rng)
+            return self._generate_random_sqlite(max_len=max_len, rng=self._rng)
 
         mutators = [
             self._mutate_header_field,
@@ -201,6 +321,8 @@ class SqliteMutator:
             self._mutate_freeblock_offset,
             self._mutate_cell_pointer,
             self._mutate_rightmost_pointer,
+            self._mutate_cell_header,
+            self._mutate_schema_sql,
             self._flip_cell_byte,
             self._swap_pages,
             self._duplicate_page,
@@ -293,13 +415,64 @@ class SqliteMutator:
         i.e. in the cell content area (payload lengths, rowid varints,
         record header, or column data)."""
         page = self._rng.choice(doc.pages)
-        hdr_len = _btree_header_len(page, is_page1=False)
+        hdr_len = _btree_header_len(page)
         ncells = struct.unpack_from(">H", page, 3)[0] if len(page) >= 5 else 0
         start = hdr_len + 2 * min(ncells, 8192)
         if start >= len(page):
             return doc
         pos = self._rng.randint(start, len(page) - 1)
         page[pos] ^= 1 << self._rng.randint(0, 7)
+        return doc
+
+    def _mutate_cell_header(self, doc: SqliteDoc, max_len: int) -> SqliteDoc:
+        """Corrupt a cell's leading varints -- payload length, rowid, or the
+        record's own header length / first serial type.
+
+        These drive the record decoder rather than the b-tree walker: a
+        payload length that disagrees with the space actually available on
+        the page is what pushes SQLite onto its overflow-page path, and an
+        out-of-range serial type is what pushes it off the column type map.
+        Writing a byte < 0x80 over the first byte of a multi-byte varint
+        also truncates it, which shifts every field after it -- a
+        re-synchronization probe the fixed-offset header mutators cannot
+        reach.
+        """
+        candidates = [
+            (page, _cell_starts(page, is_page1=(i == 0)))
+            for i, page in enumerate(doc.pages)
+        ]
+        candidates = [(p, starts) for p, starts in candidates if starts]
+        if not candidates:
+            return doc
+        page, starts = self._rng.choice(candidates)
+        start = self._rng.choice(starts)
+        # Offsets 0/1 are the payload-length and rowid varints; 2/3 land in
+        # the record header (header length, then the first serial type).
+        pos = start + self._rng.randint(0, 3)
+        if pos >= len(page):
+            return doc
+        page[pos] = self._rng.choice([0x00, 0x01, 0x7F, 0x80, 0xFF, page[pos] ^ 0x80])
+        return doc
+
+    def _mutate_schema_sql(self, doc: SqliteDoc, max_len: int) -> SqliteDoc:
+        """Corrupt the CREATE statement text stored in ``sqlite_master``.
+
+        This is the only field in the file that SQLite feeds back through
+        its SQL parser, and it does so at open time before any query runs,
+        so it reaches an entirely different subsystem from every other
+        mutation here.
+        """
+        page = doc.pages[0]
+        idx = page.find(b"CREATE")
+        if idx < 0:
+            return doc
+        end = min(len(page), idx + 256)
+        if self._rng.random() < 0.5:
+            token = self._rng.choice(SQL_TOKENS)
+            page[idx : idx + len(token)] = token[: max(0, end - idx)]
+        else:
+            pos = self._rng.randint(idx, end - 1)
+            page[pos] = self._rng.choice([0x00, 0x28, 0x29, 0x22, 0x27, 0xFF])
         return doc
 
     # ── page-level structural mutations ─────────────────────────────
@@ -336,44 +509,75 @@ class SqliteMutator:
 
     # ── generation ───────────────────────────────────────────────────
 
-    def _generate_random_sqlite(self, _doc=None, max_len: int = 65536, rng=None) -> bytes:
-        """Generate a minimal single-table-page SQLite database: header +
-        page 1 (leaf table b-tree, one cell holding one integer column)."""
+    def _generate_random_sqlite(self, max_len: int = 65536, rng: Any = None) -> bytes:
+        """Generate a real, openable two-page SQLite database.
+
+        Page 1 is ``sqlite_master`` (one row describing one table), page 2
+        is that table's leaf page with a couple of rows. The output passes
+        ``PRAGMA integrity_check`` -- which matters more here than in the
+        other format generators: SQLite validates the file header and the
+        schema row before it walks anything else, so a seed that is merely
+        header-shaped gets rejected at the door and every mutation derived
+        from it explores the same three rejection paths. Falls back to a
+        valid *empty* single-page database when ``max_len`` is too small to
+        hold two pages.
+        """
         self._rng = rng or self._rng or random
         r = self._rng
 
-        page_size = 4096 if max_len >= 4096 else 512
+        # Largest legal page size that leaves room for both pages.
+        page_size = 512
+        for candidate in (1024, 2048, 4096):
+            if 2 * candidate <= max_len:
+                page_size = candidate
+        two_pages = 2 * page_size <= max_len
+
+        table = f"t{r.randint(0, 999)}"
+        sql = f"CREATE TABLE {table}(a)"
+
+        # ── page 1: the schema table ────────────────────────────────
+        # sqlite_master columns: type, name, tbl_name, rootpage, sql
+        page1 = bytearray(page_size)
+        page1[0:HEADER_SIZE] = self._build_header(page_size, 2 if two_pages else 1)
+        if two_pages:
+            schema_cell = _table_leaf_cell(
+                rowid=1,
+                values=[b"table", table.encode(), table.encode(), 2, sql.encode()],
+            )
+            _write_leaf_page(page1, HEADER_SIZE, page_size, [schema_cell])
+        else:
+            # Zero rows: a schema-less but entirely valid database.
+            _write_leaf_page(page1, HEADER_SIZE, page_size, [])
+            return bytes(page1)[:max_len]
+
+        # ── page 2: the table's own rows ────────────────────────────
+        page2 = bytearray(page_size)
+        rows = [
+            _table_leaf_cell(rowid=i + 1, values=[r.randint(0, 0x7FFF)])
+            for i in range(r.randint(1, 3))
+        ]
+        _write_leaf_page(page2, 0, page_size, rows)
+
+        return (bytes(page1) + bytes(page2))[:max_len]
+
+    @staticmethod
+    def _build_header(page_size: int, page_count: int) -> bytearray:
         header = bytearray(HEADER_SIZE)
         header[0:16] = MAGIC
-        struct.pack_into(">H", header, 16, page_size)
+        # page_size is stored as 1 for the 65536 special case; every other
+        # legal value fits the u16 directly.
+        struct.pack_into(">H", header, 16, 1 if page_size == 65536 else page_size)
         header[18] = 1  # file format write version: legacy
         header[19] = 1  # file format read version: legacy
         header[20] = 0  # reserved space
-        header[21] = 64  # max payload fraction
-        header[22] = 32  # min payload fraction
-        header[23] = 32  # leaf payload fraction
+        header[21] = 64  # max payload fraction (must be 64)
+        header[22] = 32  # min payload fraction (must be 32)
+        header[23] = 32  # leaf payload fraction (must be 32)
         struct.pack_into(">I", header, 24, 1)  # file change counter
-        struct.pack_into(">I", header, 28, 1)  # db size in pages
+        struct.pack_into(">I", header, 28, page_count)  # db size in pages
+        struct.pack_into(">I", header, 40, 1)  # schema cookie
         struct.pack_into(">I", header, 44, 4)  # schema format number
         struct.pack_into(">I", header, 56, 1)  # text encoding: utf8
-        struct.pack_into(">I", header, 92, 1)  # version-valid-for
+        struct.pack_into(">I", header, 92, 1)  # version-valid-for == change ctr
         struct.pack_into(">I", header, 96, 3045000)  # sqlite_version_number
-
-        # One cell: table-leaf layout is [varint payload_len][varint rowid]
-        # [record: header_len byte, serial_type varint, payload bytes].
-        value = r.randint(0, 127)
-        record = bytes([0x02, 0x01, value])  # header_len=2, serial_type=1 (8-bit int), payload
-        cell = bytes([len(record)]) + bytes([1]) + record  # payload_len, rowid=1, record
-
-        page1_body = bytearray(page_size - HEADER_SIZE)
-        cell_off = len(page1_body) - len(cell)
-        page1_body[cell_off : cell_off + len(cell)] = cell
-
-        page1_body[0] = 0x0D  # leaf table b-tree page
-        struct.pack_into(">H", page1_body, 1, 0)  # no freeblocks
-        struct.pack_into(">H", page1_body, 3, 1)  # one cell
-        struct.pack_into(">H", page1_body, 5, cell_off)  # content area start
-        page1_body[7] = 0  # no fragmented bytes
-        struct.pack_into(">H", page1_body, 8, cell_off)  # cell pointer array[0]
-
-        return bytes(header) + bytes(page1_body)
+        return header
