@@ -196,6 +196,12 @@ class _FakeFuzzerForSelectOp:
         self._hierarchical = None
         self._use_gp_ucb = False
         self._gp_ucb = None
+        # cmaes is on the Elo ballot like every other scheduler; the real
+        # Fuzzer always sets both attributes (services/fuzzer.py), and the
+        # no-Elo fallback chain reads _use_cmaes unguarded. This fake only
+        # got away without them while cmaes was missing from the ballot.
+        self._use_cmaes = False
+        self._cmaes = None
         self._use_contextual = False
         self._contextual = None
         self._use_elo = elo

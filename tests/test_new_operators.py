@@ -855,6 +855,12 @@ class TestEloMetaStrategyThrottle:
         f._use_eps_greedy = False
         f._use_hierarchical = False
         f._use_gp_ucb = False
+        # Set explicitly for the same reason as the other flags here: cmaes
+        # is a candidate on the Elo ballot, and this test pins how often the
+        # ballot is resolved, so leaving it unset would let the ballot's
+        # contents vary with whatever _make_minimal_fuzzer happens to build.
+        f._use_cmaes = False
+        f._cmaes = None
         f._use_contextual = False
         f._contextual = None
 

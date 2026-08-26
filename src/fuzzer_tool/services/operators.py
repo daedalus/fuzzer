@@ -3057,6 +3057,17 @@ class OperatorEngine:
             available.append("hierarchical")
         if f._use_gp_ucb and f._gp_ucb:
             available.append("gp_ucb")
+        # cmaes was missing from this list while `strategy == "cmaes"` had a
+        # dispatch branch below and `_use_cmaes` had a branch in the no-Elo
+        # fallback chain. The effect was not a preference, it was a
+        # disappearance: with --elo on and any other scheduler enabled, Elo
+        # picked a strategy from this list, the chain matched that strategy's
+        # branch, and the fallback chain -- the only place cmaes could ever
+        # be reached -- was never evaluated. `--cma-es --elo` ran CMA-ES that
+        # was arm-registered and fed record() on every outcome, and let it
+        # select nothing at all. Its dispatch branch was dead code.
+        if f._use_cmaes and f._cmaes:
+            available.append("cmaes")
         if f._use_contextual and f._contextual:
             available.append("contextual")
 
