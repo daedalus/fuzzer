@@ -2103,6 +2103,18 @@ class OperatorEngine:
             )
         return bytearray(mutated[: self.f.max_len])
 
+    def _op_mpegts_chunk_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.mpegts import MpegtsMutator, parse_ts_packets
+
+        if not hasattr(self.f, "_mpegts_mutator"):
+            self.f._mpegts_mutator = MpegtsMutator()
+        rng = self.f._rand_pool
+        if parse_ts_packets(bytes(buf)):
+            mutated = self.f._mpegts_mutator.mutate(bytes(buf), max_len=self.f.max_len, rng=rng)
+        else:
+            mutated = self.f._mpegts_mutator._generate_random_ts(max_len=self.f.max_len, rng=rng)
+        return bytearray(mutated[: self.f.max_len])
+
     def _op_protobuf_chunk_mutate(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations.protobuf import ProtobufMutator, parse_protobuf
 

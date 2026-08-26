@@ -127,6 +127,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "pgs_chunk_mutate",
         "isobmff_chunk_mutate",
         "nal_chunk_mutate",
+        "mpegts_chunk_mutate",
         "protobuf_chunk_mutate",
         "gif_chunk_mutate",
         "webp_chunk_mutate",
@@ -334,6 +335,12 @@ _FORMAT_SNIFFERS: dict[str, Callable[[bytes], bool]] = {
     "pgs_chunk_mutate": lambda d: d[:2] == b"PG",
     "nal_chunk_mutate": lambda d: (
         d[:4] in (b"\x00\x00\x00\x01", b"\x00\x00\x01\x00") or d[:3] == b"\x00\x00\x01"
+    ),
+    # MPEG-TS: 0x47 sync byte on a 188-byte grid. Require it at both offset 0
+    # and offset 188 (not just one sync byte) so a coincidental 0x47 in
+    # otherwise-random data doesn't falsely sniff as TS.
+    "mpegts_chunk_mutate": lambda d: (
+        len(d) >= 376 and d[0] == 0x47 and d[188] == 0x47
     ),
     # ELF: magic + a valid class/endianness byte pair. Cheap enough to run on
     # every selection; the mutator itself never touches non-ELF input.

@@ -112,6 +112,22 @@ def _pgs() -> bytes:
     return b"PG" + struct.pack(">IIBH", 1, 0, 0x16, len(payload)) + payload
 
 
+def _mpegts() -> bytes:
+    """Two synced 188-byte MPEG-TS packets: a PAT on PID 0, then one packet
+    carrying an adaptation field, so mpegts_chunk_mutate's sniffer (sync byte
+    at both offset 0 and 188) and its adaptation-field mutation both have
+    something to act on."""
+    pat_payload = bytes([0x00, 0x00, 0xB0, 0x0D, 0x00, 0x01, 0xC1, 0x00, 0x00])
+    pat_payload += bytes([0x00, 0x01, 0xE1, 0x00]) + bytes(4)
+    pat_header = bytes([0x47, 0x40, 0x00, 0x10])
+    pat = pat_header + pat_payload + b"\xff" * (188 - len(pat_header) - len(pat_payload))
+
+    af = bytes([0x01, 0x00])  # adaptation_field_length=1, no flags set
+    af_header = bytes([0x47, 0x01, 0x01, 0x30])  # PID 0x0101, adaptation+payload
+    af_pkt = af_header + af + b"\xff" * (188 - len(af_header) - len(af))
+    return pat + af_pkt
+
+
 def _h264_annexb() -> bytes:
     """Two Annex-B NAL units (SPS then PPS start codes)."""
     return (
@@ -147,6 +163,7 @@ def _battery() -> list[bytes]:
         _webp(),
         _pgs(),
         _h264_annexb(),
+        _mpegts(),
         # zlib stream: covers zlib_chunk_mutate and recompress_zlib, whose
         # sniffers check the CMF/FLG header rather than a magic string.
         zlib.compress(b"the quick brown fox jumps over the lazy dog" * 3, 6),
