@@ -102,7 +102,7 @@ class AsfMutator:
         target = rng.choice(objs)
         real = OBJECT_HEADER_LEN + len(target.data)
         target.declared_size = rng.choice(
-            [0, 0xFFFFFFFFFFFFFFFF, real + 1, max(0, real - 1), rng.getrandbits(32)]
+            [0, 0xFFFFFFFFFFFFFFFF, real + 1, max(0, real - 1), rng.randint(0, 0xFFFFFFFF)]
         )
 
     def _mutate_object_guid(self, objs: list[AsfObject], rng) -> None:
@@ -119,7 +119,7 @@ class AsfMutator:
             self._mutate_object_size(objs, rng)
             return
         body = bytearray(header.data)
-        bogus = rng.choice([0, 0xFFFFFFFF, rng.getrandbits(32)])
+        bogus = rng.choice([0, 0xFFFFFFFF, rng.randint(0, 0xFFFFFFFF)])
         body[0:4] = bogus.to_bytes(4, "little")
         header.data = bytes(body)
 

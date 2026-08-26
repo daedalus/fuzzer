@@ -138,6 +138,42 @@ def _h264_annexb() -> bytes:
     )
 
 
+def _ogg() -> bytes:
+    """One minimal Ogg BOS page: "OggS" header, no payload beyond a single
+    lacing byte, kept short so it doesn't skew corpus_invariants' shared-
+    byte accounting the way a full page with random payload would."""
+    header = (
+        b"OggS"
+        + bytes([0, 0x02])  # version, header_type=BOS
+        + bytes(8)  # granule_position
+        + bytes(4)  # serial_number
+        + bytes(4)  # sequence_number
+        + bytes(4)  # checksum
+        + bytes([1])  # page_segments
+        + bytes([4])  # segment_table: one 4-byte segment
+    )
+    return header + bytes(4)
+
+
+def _flv() -> bytes:
+    """Minimal FLV: 9-byte header, one small audio tag, trailing size."""
+    header = b"FLV" + bytes([1, 0x04]) + (9).to_bytes(4, "big")
+    data = bytes(8)
+    tag = bytes([8]) + len(data).to_bytes(3, "big") + bytes(4) + bytes(3) + data
+    return header + bytes(4) + tag + (11 + len(data)).to_bytes(4, "big")
+
+
+def _asf() -> bytes:
+    """Minimal ASF: empty Header Object followed by a small Data Object,
+    kept short for the same corpus_invariants reason as `_ogg`."""
+    header_obj_guid = bytes.fromhex("3026B2758E66CF11A6D900AA0062CE6C")
+    data_obj_guid = bytes.fromhex("3626B2758E66CF11A6D900AA0062CE6C")
+    header_obj = header_obj_guid + (24).to_bytes(8, "little")
+    data_body = bytes(8)
+    data_obj = data_obj_guid + (24 + len(data_body)).to_bytes(8, "little") + data_body
+    return header_obj + data_obj
+
+
 def _battery() -> list[bytes]:
     """Fixed input battery: random inputs of several lengths (deterministic via
     a local seed) plus magic-prefixed samples so format-aware operators become
@@ -164,6 +200,9 @@ def _battery() -> list[bytes]:
         _pgs(),
         _h264_annexb(),
         _mpegts(),
+        _ogg(),
+        _flv(),
+        _asf(),
         # zlib stream: covers zlib_chunk_mutate and recompress_zlib, whose
         # sniffers check the CMF/FLG header rather than a magic string.
         zlib.compress(b"the quick brown fox jumps over the lazy dog" * 3, 6),

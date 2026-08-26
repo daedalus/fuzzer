@@ -117,18 +117,18 @@ class OggMutator:
 
     def _mutate_granule_position(self, pages: list[OggPage], rng) -> None:
         target = rng.choice(pages)
-        target.granule_position = rng.choice([0, 0xFFFFFFFFFFFFFFFF, rng.getrandbits(64)])
+        target.granule_position = rng.choice([0, 0xFFFFFFFFFFFFFFFF, rng.randint(0, 0xFFFFFFFFFFFFFFFF)])
 
     def _mutate_serial_number(self, pages: list[OggPage], rng) -> None:
         """Remap a page to a different logical-stream serial — tests
         multiplexed-stream demux confusion."""
         target = rng.choice(pages)
         others = [p.serial_number for p in pages if p.serial_number != target.serial_number]
-        target.serial_number = rng.choice(others) if others else rng.getrandbits(32)
+        target.serial_number = rng.choice(others) if others else rng.randint(0, 0xFFFFFFFF)
 
     def _mutate_sequence_number(self, pages: list[OggPage], rng) -> None:
         target = rng.choice(pages)
-        target.sequence_number = rng.choice([0, 0xFFFFFFFF, rng.getrandbits(32)])
+        target.sequence_number = rng.choice([0, 0xFFFFFFFF, rng.randint(0, 0xFFFFFFFF)])
 
     def _mutate_segment_table(self, pages: list[OggPage], rng) -> None:
         """Corrupt one lacing-value byte in the segment table without
@@ -144,7 +144,7 @@ class OggMutator:
 
     def _mutate_checksum(self, pages: list[OggPage], rng) -> None:
         target = rng.choice(pages)
-        target.checksum = rng.getrandbits(32)
+        target.checksum = rng.randint(0, 0xFFFFFFFF)
 
     def _duplicate_page(self, pages: list[OggPage], rng) -> None:
         idx = rng.randint(0, len(pages) - 1)
@@ -168,7 +168,7 @@ class OggMutator:
             version=0,
             header_type=0x02,  # BOS
             granule_position=0,
-            serial_number=rng.getrandbits(32),
+            serial_number=rng.randint(0, 0xFFFFFFFF),
             sequence_number=0,
             checksum=0,
             segment_table=bytes([len(opus_head)]),

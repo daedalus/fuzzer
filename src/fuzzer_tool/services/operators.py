@@ -2115,6 +2115,78 @@ class OperatorEngine:
             mutated = self.f._mpegts_mutator._generate_random_ts(max_len=self.f.max_len, rng=rng)
         return bytearray(mutated[: self.f.max_len])
 
+    def _op_adts_chunk_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.adts import AdtsMutator, parse_adts_frames
+
+        if not hasattr(self.f, "_adts_mutator"):
+            self.f._adts_mutator = AdtsMutator()
+        rng = self.f._rand_pool
+        if parse_adts_frames(bytes(buf)):
+            mutated = self.f._adts_mutator.mutate(bytes(buf), max_len=self.f.max_len, rng=rng)
+        else:
+            mutated = self.f._adts_mutator._generate_random_adts(max_len=self.f.max_len, rng=rng)
+        return bytearray(mutated[: self.f.max_len])
+
+    def _op_mp3_chunk_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.mp3 import Mp3Mutator, parse_mp3_frames
+
+        if not hasattr(self.f, "_mp3_mutator"):
+            self.f._mp3_mutator = Mp3Mutator()
+        rng = self.f._rand_pool
+        if parse_mp3_frames(bytes(buf)):
+            mutated = self.f._mp3_mutator.mutate(bytes(buf), max_len=self.f.max_len, rng=rng)
+        else:
+            mutated = self.f._mp3_mutator._generate_random_mp3(max_len=self.f.max_len, rng=rng)
+        return bytearray(mutated[: self.f.max_len])
+
+    def _op_ogg_chunk_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.ogg import OggMutator, parse_ogg_pages
+
+        if not hasattr(self.f, "_ogg_mutator"):
+            self.f._ogg_mutator = OggMutator()
+        rng = self.f._rand_pool
+        if parse_ogg_pages(bytes(buf)):
+            mutated = self.f._ogg_mutator.mutate(bytes(buf), max_len=self.f.max_len, rng=rng)
+        else:
+            mutated = self.f._ogg_mutator._generate_random_ogg(max_len=self.f.max_len, rng=rng)
+        return bytearray(mutated[: self.f.max_len])
+
+    def _op_flv_chunk_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.flv import FlvMutator, parse_flv
+
+        if not hasattr(self.f, "_flv_mutator"):
+            self.f._flv_mutator = FlvMutator()
+        rng = self.f._rand_pool
+        if parse_flv(bytes(buf)):
+            mutated = self.f._flv_mutator.mutate(bytes(buf), max_len=self.f.max_len, rng=rng)
+        else:
+            mutated = self.f._flv_mutator._generate_random_flv(max_len=self.f.max_len, rng=rng)
+        return bytearray(mutated[: self.f.max_len])
+
+    def _op_asf_chunk_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.asf import AsfMutator, parse_asf_objects
+
+        if not hasattr(self.f, "_asf_mutator"):
+            self.f._asf_mutator = AsfMutator()
+        rng = self.f._rand_pool
+        if parse_asf_objects(bytes(buf)):
+            mutated = self.f._asf_mutator.mutate(bytes(buf), max_len=self.f.max_len, rng=rng)
+        else:
+            mutated = self.f._asf_mutator._generate_random_asf(max_len=self.f.max_len, rng=rng)
+        return bytearray(mutated[: self.f.max_len])
+
+    def _op_riff_chunk_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.riff import RiffMutator, parse_riff_chunks
+
+        if not hasattr(self.f, "_riff_mutator"):
+            self.f._riff_mutator = RiffMutator()
+        rng = self.f._rand_pool
+        if parse_riff_chunks(bytes(buf)):
+            mutated = self.f._riff_mutator.mutate(bytes(buf), max_len=self.f.max_len, rng=rng)
+        else:
+            mutated = self.f._riff_mutator._generate_random_riff(max_len=self.f.max_len, rng=rng)
+        return bytearray(mutated[: self.f.max_len])
+
     def _op_protobuf_chunk_mutate(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations.protobuf import ProtobufMutator, parse_protobuf
 

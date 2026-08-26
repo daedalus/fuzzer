@@ -128,6 +128,12 @@ _CATEGORIES: dict[str, set[str]] = {
         "isobmff_chunk_mutate",
         "nal_chunk_mutate",
         "mpegts_chunk_mutate",
+        "adts_chunk_mutate",
+        "mp3_chunk_mutate",
+        "ogg_chunk_mutate",
+        "flv_chunk_mutate",
+        "asf_chunk_mutate",
+        "riff_chunk_mutate",
         "protobuf_chunk_mutate",
         "gif_chunk_mutate",
         "webp_chunk_mutate",
@@ -341,6 +347,34 @@ _FORMAT_SNIFFERS: dict[str, Callable[[bytes], bool]] = {
     # otherwise-random data doesn't falsely sniff as TS.
     "mpegts_chunk_mutate": lambda d: (
         len(d) >= 376 and d[0] == 0x47 and d[188] == 0x47
+    ),
+    # ADTS AAC: 12-bit syncword (0xFFF) plus the layer field (bits 4-3 of
+    # byte 1) fixed at 0 -- MPEG-TS's sync byte is a single 0x47, so this
+    # needs the extra layer-field check to avoid false-triggering on an
+    # unrelated 0xFF byte pair.
+    "adts_chunk_mutate": lambda d: (
+        len(d) >= 7 and d[0] == 0xFF and (d[1] & 0xF6) == 0xF0
+    ),
+    # MP3: 11-bit syncword (top byte 0xFF, top 3 bits of next byte set),
+    # with version/layer fields that must be non-reserved (MPEG version
+    # != 01, layer != 00) -- narrows past ADTS's 12-bit sync, which this
+    # would otherwise also match on the all-1s prefix.
+    "mp3_chunk_mutate": lambda d: (
+        len(d) >= 4
+        and d[0] == 0xFF
+        and (d[1] & 0xE0) == 0xE0
+        and ((d[1] >> 3) & 0x03) != 0x01
+        and ((d[1] >> 1) & 0x03) != 0x00
+    ),
+    "ogg_chunk_mutate": lambda d: d[:4] == b"OggS",
+    "flv_chunk_mutate": lambda d: d[:3] == b"FLV",
+    "asf_chunk_mutate": lambda d: (
+        len(d) >= 16 and d[:16] == bytes.fromhex("3026B2758E66CF11A6D900AA0062CE6C")
+    ),
+    # RIFF: same container magic as webp_chunk_mutate, but declines the
+    # WEBP form so the two operators don't overlap on the same input.
+    "riff_chunk_mutate": lambda d: (
+        len(d) >= 12 and d[:4] == b"RIFF" and d[8:12] != b"WEBP"
     ),
     # ELF: magic + a valid class/endianness byte pair. Cheap enough to run on
     # every selection; the mutator itself never touches non-ELF input.
