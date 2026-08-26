@@ -2,7 +2,7 @@
 
 import math
 
-from fuzzer_tool.core.operator_categories import OPERATOR_CATEGORIES
+from fuzzer_tool.core.operator_categories import OPERATOR_CATEGORIES, category_of
 from fuzzer_tool.core.running_stats import RunningMoments
 
 
@@ -83,12 +83,40 @@ class GPUCBScheduler:
         """Register an operator. Initialises reward moments and feature vector."""
         if name not in self._moments:
             self._moments[name] = RunningMoments()
-            # Build one-hot feature vector from category membership
-            cat = self._op_to_cat.get(name, "unknown")
-            feat = [1.0 if c == cat else 0.0 for c in self._cat_names]
-            # Fallback: unknown operators get a feature vector of all zeros
-            # (no kernel similarity to any known category).
-            self._features[name] = feat
+            # Build one-hot feature vector from category membership.
+            #
+            # Resolved through category_of(), not a lookup in the snapshot
+            # taxonomy: _op_to_cat is seeded from OPERATOR_CATEGORIES as it
+            # stood at import, so anything added later via
+            # REGISTRY.register_mutator() missed it. The old fallback gave
+            # such an operator an all-zero vector, which is not "no
+            # similarity to any category" — under the RBF it sits at
+            # distance 1 from *every* one-hot, i.e. exp(-1/2) ~ 0.61
+            # similarity to all of them at the default length scale, well
+            # above kernel_floor. The arm then borrowed strength from the
+            # entire table indiscriminately.
+            cat = self._op_to_cat.get(name)
+            if cat is None:
+                cat = category_of(name)
+                self._op_to_cat[name] = cat
+            self._ensure_category(cat)
+            self._features[name] = [1.0 if c == cat else 0.0 for c in self._cat_names]
+
+    def _ensure_category(self, cat: str) -> None:
+        """Add *cat* to the one-hot basis, padding existing feature vectors.
+
+        _rbf() zips feature pairs with strict=True, so every vector must
+        stay the same length as _cat_names. Appending the new axis at the
+        end and zero-padding the older vectors preserves each existing
+        operator's encoding exactly — a one-hot for a category it does not
+        belong to is zero either way — so no kernel value changes.
+        """
+        if cat in self._cat_names:
+            return
+        self._cat_names.append(cat)
+        for feat in self._features.values():
+            feat.append(0.0)
+        self._kernel_cache = {}
 
     def _rbf(self, f_i: list[float], f_j: list[float]) -> float:
         """RBF kernel between two feature vectors."""

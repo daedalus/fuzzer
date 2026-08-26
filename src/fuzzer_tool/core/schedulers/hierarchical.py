@@ -2,7 +2,7 @@
 
 import random
 
-from fuzzer_tool.core.operator_categories import OPERATOR_CATEGORIES
+from fuzzer_tool.core.operator_categories import OPERATOR_CATEGORIES, category_of
 
 
 class HierarchicalBanditScheduler:
@@ -82,11 +82,37 @@ class HierarchicalBanditScheduler:
 
         self._total_pulls: int = 0
 
-    def init_arm(self, name: str) -> None:
-        """Register an operator. Initializes both category and operator posteriors."""
+    def _cat_for(self, name: str) -> str:
+        """Category for *name*, memoized, resolved against the live registry.
+
+        ``_op_to_cat`` is seeded from ``CATEGORIES``, a snapshot taken when
+        ``core.operator_categories`` was imported. Anything registered after
+        that — every operator added through ``REGISTRY.register_mutator()``,
+        the documented extension path — is absent from it.
+
+        This used to be a bare ``self._op_to_cat.get(name)``, and both
+        ``init_arm`` and ``select_op`` treated a miss as "skip this
+        operator". The arm was then never initialized *and* never a
+        candidate: measured at 0 pulls out of 60,000 selections for a
+        mutator the registry knew about and every other scheduler could
+        reach. A scheduler that cannot select part of the operator table is
+        not exploring a smaller space, it is exploring the wrong one.
+
+        Falling back to ``UNCATEGORIZED`` rather than dropping the arm keeps
+        the unknown-name case (test harnesses, an op list from a state file
+        written by a different build) selectable too — it lands in its own
+        top-level bucket, which is the honest answer for an operator whose
+        structural kin are unknown.
+        """
         cat = self._op_to_cat.get(name)
         if cat is None:
-            return  # unknown operator, skip
+            cat = category_of(name)
+            self._op_to_cat[name] = cat
+        return cat
+
+    def init_arm(self, name: str) -> None:
+        """Register an operator. Initializes both category and operator posteriors."""
+        cat = self._cat_for(name)
         self.cat_alpha.setdefault(cat, 1.0)
         self.cat_beta.setdefault(cat, 1.0)
         self.op_alpha.setdefault(name, 1.0)
@@ -110,13 +136,15 @@ class HierarchicalBanditScheduler:
         # iterated below instead of the set: iterating avail_cats made the
         # sequence of betavariate() draws depend on PYTHONHASHSEED, so a fixed
         # --seed did not fix this scheduler's behaviour at all.
+        # _cat_for(), not _op_to_cat.get(): a candidate missing from the
+        # snapshot taxonomy used to be dropped from cat_ops here and was
+        # therefore unselectable no matter how often it was offered.
         avail_cats: set[str] = set()
         cat_ops: dict[str, list[str]] = {}
         for op in ops:
-            cat = self._op_to_cat.get(op)
-            if cat:
-                avail_cats.add(cat)
-                cat_ops.setdefault(cat, []).append(op)
+            cat = self._cat_for(op)
+            avail_cats.add(cat)
+            cat_ops.setdefault(cat, []).append(op)
 
         # If no categorical mapping found, fall back to uniform random
         if not avail_cats:
@@ -161,9 +189,7 @@ class HierarchicalBanditScheduler:
         even when individual operators within them have mixed results.
         """
         self._total_pulls += 1
-        cat = self._op_to_cat.get(name)
-        if cat is None:
-            return
+        cat = self._cat_for(name)
 
         # Update bottom-level (per-operator)
         if success:

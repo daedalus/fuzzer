@@ -1403,13 +1403,24 @@ class TestHierarchicalBanditScheduler:
         assert "bit_flip" in hb.op_alpha
         assert "bit" in hb.cat_alpha
 
-    def test_init_arm_unknown_op_skipped(self):
+    def test_init_arm_unknown_op_registers_uncategorized(self):
+        from fuzzer_tool.core.operator_categories import UNCATEGORIZED
         from fuzzer_tool.core.schedulers import HierarchicalBanditScheduler
 
         hb = HierarchicalBanditScheduler()
         hb.init_arm("nonexistent_op_xyz")
-        # Unknown operators should not be registered
-        assert "nonexistent_op_xyz" not in hb.op_alpha
+        # This assertion used to be `not in`, pinning a silent skip for any
+        # name the import-time category snapshot did not contain. That is
+        # what made operators registered through REGISTRY.register_mutator()
+        # permanently unselectable by this scheduler -- measured at 0 pulls
+        # out of 60,000 -- since a runtime registration is by definition
+        # absent from a snapshot taken at import. An unrecognised name now
+        # lands in its own top-level bucket instead: the scheduler may know
+        # nothing about an operator's structural kin, but "unknown category"
+        # is not a reason to make it unreachable. See
+        # tests/test_regression_scheduler_operator_reach.py.
+        assert "nonexistent_op_xyz" in hb.op_alpha
+        assert UNCATEGORIZED in hb.cat_alpha
 
     def test_init_arm_idempotent(self):
         from fuzzer_tool.core.schedulers import HierarchicalBanditScheduler
