@@ -201,3 +201,19 @@ class TestChannelIntegration:
         beta = build_beta(ch._horizon, ch.hit_counts, float(ch.exec_count))
         assert beta.shape == (ch._horizon.n_u,)
         assert beta.max() - beta.min() > 0.1
+
+    def test_expensive_recompute_is_rate_limited(self):
+        """The exec gate alone let a costly recompute run every 50 execs."""
+        ch = self._channel()
+        ch.record(np.array([True] * 3 + [False] * 5), seed_key="s1")
+        ch.ensure_scores(force=True)
+        ch._last_cost = 10.0  # pretend the last rebuild took 10s
+        ch._dirty = True
+        ch.exec_count += 10_000  # exec gate wide open
+        before = ch._last_recompute_exec
+        ch.ensure_scores()
+        assert ch._last_recompute_exec == before  # cost gate held it back
+
+        ch._last_cost = 1e-9  # cheap rebuild: gate opens again
+        ch.ensure_scores()
+        assert ch._last_recompute_exec > before

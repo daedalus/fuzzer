@@ -11,12 +11,15 @@ Owns the lifecycle the W2/W3/W4 modules assume:
    execution (eager C-side writes need no destructor). Global per-node
    hit counts feed β; per-seed OR-accumulated masks feed V and seed
    attachment. Masks are keyed by the same content hash EdgeTracker uses.
-3. **scores** — lazily recomputed horizon+Katz when new coverage arrived
-   and a minimum interval elapsed (the paper's recompute trigger).
+3. **scores** — lazily recomputed horizon+Katz when new coverage arrived,
+   a minimum exec interval elapsed (the paper's recompute trigger), and
+   the previous recompute's measured cost has amortized below
+   ``_MAX_RECOMPUTE_OVERHEAD`` of wall time.
 """
 
 import logging
 import os
+import time
 
 import numpy as np
 
@@ -34,6 +37,17 @@ log = logging.getLogger(__name__)
 # new-coverage dirtiness alone would recompute every exec early on).
 _RECOMPUTE_MIN_INTERVAL = 50
 
+# Ceiling on the share of wall time the recompute may consume. The exec
+# interval bounds *how often* it runs; this bounds *what it costs*, which is
+# the quantity that actually varies — by two orders of magnitude between a
+# fresh campaign and a saturated one.
+_MAX_RECOMPUTE_OVERHEAD = 0.05
+
+# Below this, a recompute is not worth budgeting for: applying the overhead
+# ratio to a sub-millisecond rebuild would delay a refresh the campaign can
+# trivially afford, and on a small ICFG every rebuild is that cheap.
+_COST_GATE_FLOOR = 0.005
+
 
 class KatzChannel:
     """Per-campaign K-Scheduler state and SHM plumbing."""
@@ -50,6 +64,11 @@ class KatzChannel:
         self._scores = None
         self._dirty = True
         self._last_recompute_exec = -_RECOMPUTE_MIN_INTERVAL
+        # Seconds the last recompute took, and when it finished. Zero cost
+        # means "never measured", which lets the first recompute through on
+        # the exec gate alone.
+        self._last_cost = 0.0
+        self._last_recompute_wall = time.perf_counter()
         self.exec_count = 0  # caller updates so the interval gate works
 
     # ── setup ────────────────────────────────────────────────────────
@@ -135,7 +154,17 @@ class KatzChannel:
     def ensure_scores(self, force: bool = False):
         """Recompute horizon+Katz when dirty and the interval allows."""
         due = self.exec_count - self._last_recompute_exec >= _RECOMPUTE_MIN_INTERVAL
+        if due and self._last_cost >= _COST_GATE_FLOOR:
+            # The exec gate alone is not a budget: build_horizon_graph is a
+            # per-U BFS through V, so it costs most early in a campaign when
+            # U is the whole program, and a fixed 50-exec interval caps
+            # throughput at 1/cost * 50 regardless of how fast the target
+            # runs. Also require that the last recompute's cost amortize
+            # below _MAX_RECOMPUTE_OVERHEAD of the wall time since it ran.
+            elapsed = time.perf_counter() - self._last_recompute_wall
+            due = elapsed * _MAX_RECOMPUTE_OVERHEAD >= self._last_cost
         if self._scores is None or (self._dirty and due) or force:
+            t0 = time.perf_counter()
             masks = {k: v for k, v in self._masks.items() if len(v) * 8 >= self.n_nodes}
             self._horizon = build_horizon_graph(self.icfg, masks)
             # hit_counts is ICFG-indexed; build_beta translates through the
@@ -143,6 +172,8 @@ class KatzChannel:
             # the sum of per-node counts.
             beta = build_beta(self._horizon, self.hit_counts, float(self.exec_count))
             self._scores = katz_scores(self._horizon, beta=beta)
+            self._last_cost = time.perf_counter() - t0
+            self._last_recompute_wall = time.perf_counter()
             self._dirty = False
             self._last_recompute_exec = self.exec_count
         return self._scores
@@ -185,8 +216,10 @@ class KatzChannel:
                 self._masks[key] = packed
         self.exec_count = int(state.get("exec_count", 0))
         self._dirty = True
-        # Resume must refresh promptly rather than wait out the interval.
+        # Resume must refresh promptly rather than wait out either gate.
         self._last_recompute_exec = -_RECOMPUTE_MIN_INTERVAL
+        self._last_cost = 0.0
+        self._last_recompute_wall = time.perf_counter()
 
 
 def _target_has_trace_pc(target: str) -> bool:
