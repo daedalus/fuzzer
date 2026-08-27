@@ -519,6 +519,9 @@ class CmplogCollector:
 
         tokens = set()
         new_pairs = []
+        # Every distinct pair seen in *this* batch, first sighting or not.
+        # _pair_occurrence is incremented from this, not from new_pairs.
+        batch_pairs: set[tuple[bytes, bytes]] = set()
         lines_read = 0
         max_lines = 10_000  # cap per collection to bound CPU cost
         try:
@@ -545,6 +548,7 @@ class CmplogCollector:
                     self._pair_pc[pair] = c.base.pc
                 if c.base.result is not None and c.base.width is not None:
                     self._pair_cmp[pair] = (c.base.result, c.base.width)
+            batch_pairs.add(pair)
             tokens.add(c.base.op_a)
             tokens.add(c.base.op_b)
 
@@ -596,7 +600,19 @@ class CmplogCollector:
         # Track pair occurrence across runs for multi-run confidence.
         # Pairs seen in many runs are reliable I2S signals; rarely-seen
         # pairs may be noise from edge-case execution paths.
-        for pair in new_pairs:
+        #
+        # Counted over batch_pairs, NOT new_pairs. new_pairs holds only pairs
+        # absent from _pair_set, and every such pair is added to _pair_set in
+        # the same iteration -- so a pair could never be "new" twice, every
+        # count was pinned at 1 for the life of the run, pair_confidence()
+        # was a membership test wearing a counter's clothes, and
+        # high_confidence_pairs(min_occurrences=2) returned [] always.
+        #
+        # One increment per collection batch, not per logged line: the parser
+        # already dedups within a batch, and the intended unit is "runs that
+        # exercised this comparison", not "times the comparison fired".
+        # Raw fire counts come from the shim's own counters.
+        for pair in batch_pairs:
             self._pair_occurrence[pair] = self._pair_occurrence.get(pair, 0) + 1
 
         if new_tokens:
