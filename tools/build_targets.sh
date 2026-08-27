@@ -108,6 +108,10 @@ NOBUILTIN_CMP="$NOBUILTIN_CMP -fno-builtin-strstr -fno-builtin-memmem"
 # target clang chose to fold it in was invisible to the libc layer. This list
 # and the interceptor list in afl_shim.c must be kept in step.
 NOBUILTIN_CMP="$NOBUILTIN_CMP -fno-builtin-strcasestr"
+NOBUILTIN_CMP="$NOBUILTIN_CMP -fno-builtin-wmemcmp -fno-builtin-wcscmp"
+NOBUILTIN_CMP="$NOBUILTIN_CMP -fno-builtin-wcsncmp -fno-builtin-wcscasecmp"
+NOBUILTIN_CMP="$NOBUILTIN_CMP -fno-builtin-strpbrk -fno-builtin-strspn"
+NOBUILTIN_CMP="$NOBUILTIN_CMP -fno-builtin-strcspn -fno-builtin-memrchr"
 
 # ── Frame pointers: required by caller-context edge hashing ──────────────
 #

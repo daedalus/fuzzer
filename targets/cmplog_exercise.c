@@ -60,9 +60,62 @@ int fuzz_test(const unsigned char *buf, size_t len) {
     return score;
 }
 
+/* ── New cmplog interceptors: bcmp, wide-char, set-scan, memrchr ──── */
+static int new_cmplog_test(const unsigned char *buf, size_t len) {
+    int score = 0;
+    if (len < 16) return 0;
+
+    /* bcmp: byte-block comparison */
+    if (bcmp(buf, buf + 8, 8) == 0) score += 10;
+    if (bcmp(buf, buf + 8, 4) != 0) score += 3;
+
+    /* memrchr: find last occurrence of byte */
+    if (memrchr(buf, 'X', len) != NULL) score += 7;
+    if (memrchr(buf, '\0', len) != NULL) score += 5;
+    if (memrchr(buf, 0xff, len) == NULL) score += 2;
+
+    /* strpbrk: find first char from accept set */
+    if (strpbrk((char *)buf, "XYZ") != NULL) score += 6;
+    if (strpbrk((char *)buf, "ABC") != NULL) score += 3;
+
+    /* strspn: length of initial segment from accept set */
+    if (strspn((char *)buf, "ABCDEFGHIJKLMNOPQRSTUVWXYZ") > 4) score += 5;
+    if (strspn((char *)buf, "abcdefghijklmnopqrstuvwxyz") > 0) score += 3;
+
+    /* strcspn: length of initial segment from reject set */
+    if (strcspn((char *)buf, "0123456789") > 0) score += 5;
+    if (strcspn((char *)buf, "!@#$%") > 0) score += 3;
+
+    /* wide-char comparisons */
+    wchar_t wa[64], wb[64];
+    size_t wlen = len < 60 ? len : 60;
+    for (size_t i = 0; i < wlen; i++) wa[i] = (wchar_t)buf[i];
+    for (size_t i = 0; i < wlen; i++) wb[i] = (wchar_t)buf[wlen - 1 - i];
+    wa[wlen] = L'\0';
+    wb[wlen] = L'\0';
+
+    /* wmemcmp */
+    if (wmemcmp(wa, wb, wlen) == 0) score += 8;
+    if (wmemcmp(wa, wb, 4) != 0) score += 4;
+
+    /* wcscmp */
+    if (wcscmp(wa, wb) == 0) score += 6;
+    if (wcscmp(wa, wa) == 0) score += 3;
+
+    /* wcsncmp */
+    if (wcsncmp(wa, wb, 4) == 0) score += 5;
+    if (wcsncmp(wa, wa, wlen) == 0) score += 3;
+
+    /* wcscasecmp */
+    if (wcscasecmp(wa, wb) == 0) score += 6;
+    if (wcscasecmp(wa, wa) == 0) score += 3;
+
+    return score;
+}
+
 __attribute__((visibility("default")))
 int fuzz_shm_run(const unsigned char *buf, size_t size) {
-    return fuzz_test(buf, size);
+    return fuzz_test(buf, size) + new_cmplog_test(buf, size);
 }
 
 int main(void) {
@@ -70,5 +123,5 @@ int main(void) {
     ssize_t n = read(0, buf, sizeof(buf) - 1);
     if (n <= 0) return 0;
     buf[n] = '\0';
-    return fuzz_test((unsigned char *)buf, (size_t)n);
+    return fuzz_test((unsigned char *)buf, (size_t)n) + new_cmplog_test((unsigned char *)buf, (size_t)n);
 }

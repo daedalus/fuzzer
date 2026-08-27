@@ -24,7 +24,8 @@
  * With -D__AFL_CMPLOG=1 it additionally provides comparison logging
  * (formerly cmplog_shim.c), writing CMP records to $_CMPLOG_OUT:
  *   - libc interposition: memcmp/strcmp/strncmp/memchr/strcasecmp/
- *     strncasecmp/memmem/strstr/strcasestr
+ *     strncasecmp/memmem/strstr/strcasestr, plus bcmp, wmemcmp, wcscmp,
+ *     wcsncmp, wcscasecmp, strpbrk, strspn, strcspn, memrchr
  *   - Clang -fsanitize-coverage=trace-cmp callbacks
  *     (__sanitizer_cov_trace_cmp{1,2,4,8}, trace_const_cmp*, trace_switch)
  *   - __cmplog_reset() / __tracecmp_flush() / __tracecmp_reset()
@@ -169,6 +170,8 @@
 #if __AFL_CMPLOG
 #include <dlfcn.h>
 #include <fcntl.h>
+#include <strings.h>
+#include <wchar.h>
 static void __afl_cmplog_flush(void);
 static void __afl_cmplog_init(void);
 static void __afl_cmplog_fini(void);
@@ -1154,6 +1157,13 @@ typedef int   (*afl_strn_cmp_fn)(const char *, const char *, size_t);
 typedef void *(*afl_chr_fn)(const void *, int, size_t);
 typedef void *(*afl_memmem_fn)(const void *, size_t, const void *, size_t);
 typedef char *(*afl_str_str_fn)(const char *, const char *);
+typedef int   (*afl_wchar_cmp_fn)(const wchar_t *, const wchar_t *, size_t);
+typedef int   (*afl_wchar_cmp_2arg_fn)(const wchar_t *, const wchar_t *);
+typedef void *(*afl_memrchr_fn)(const void *, int, size_t);
+typedef char *(*afl_strpbrk_fn)(const char *, const char *);
+typedef size_t(*afl_strspn_fn)(const char *, const char *);
+typedef size_t(*afl_strcspn_fn)(const char *, const char *);
+typedef int   (*afl_bcmp_fn)(const void *, const void *, size_t);
 
 static afl_cmp_fn      real_memcmp      = NULL;
 static afl_str_cmp_fn  real_strcmp      = NULL;
@@ -1164,6 +1174,15 @@ static afl_strn_cmp_fn real_strncasecmp = NULL;
 static afl_memmem_fn   real_memmem      = NULL;
 static afl_str_str_fn  real_strstr      = NULL;
 static afl_str_str_fn  real_strcasestr  = NULL;
+static afl_wchar_cmp_fn      real_wmemcmp     = NULL;
+static afl_wchar_cmp_fn      real_wcsncmp     = NULL;
+static afl_wchar_cmp_2arg_fn real_wcscmp      = NULL;
+static afl_wchar_cmp_2arg_fn real_wcscasecmp  = NULL;
+static afl_memrchr_fn  real_memrchr     = NULL;
+static afl_strpbrk_fn real_strpbrk      = NULL;
+static afl_strspn_fn  real_strspn       = NULL;
+static afl_strcspn_fn real_strcspn      = NULL;
+static afl_bcmp_fn    real_bcmp        = NULL;
 
 /* Fallbacks. Only reached before the loader can satisfy dlsym, or if the
  * symbol genuinely is not there. Correctness first, speed irrelevant. */
@@ -1219,6 +1238,93 @@ static char *__afl_fb_strcasestr(const char *h, const char *n) {
     if (hl < nl) return NULL;
     for (size_t i = 0; i + nl <= hl; i++)
         if (__afl_fb_strncasecmp(h + i, n, nl) == 0) return (char *)(h + i);
+    return NULL;
+}
+
+/* ── Fallbacks: wide-char, set-scan, memrchr, bcmp ───────────────────
+ * Same contract as the existing fallbacks: correct first, speed
+ * irrelevant. Only reached before the loader can satisfy dlsym, or if
+ * the symbol genuinely is not present in the target's libc. */
+
+__AFL_NO_COV static int __afl_fb_bcmp(const void *a, const void *b, size_t n) {
+    const unsigned char *x = a, *y = b;
+    for (size_t i = 0; i < n; i++) if (x[i] != y[i]) return 1;
+    return 0;
+}
+
+__AFL_NO_COV static int __afl_fb_wmemcmp(const wchar_t *a, const wchar_t *b, size_t n) {
+    for (size_t i = 0; i < n; i++) if (a[i] != b[i]) return a[i] < b[i] ? -1 : 1;
+    return 0;
+}
+
+__AFL_NO_COV static size_t __afl_fb_wcslen(const wchar_t *s) {
+    const wchar_t *p = s;
+    while (*p) p++;
+    return (size_t)(p - s);
+}
+
+__AFL_NO_COV static int __afl_fb_wcsncmp(const wchar_t *a, const wchar_t *b, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        wchar_t x = a[i], y = b[i];
+        if (x != y) return x < y ? -1 : 1;
+        if (!x) return 0;
+    }
+    return 0;
+}
+
+__AFL_NO_COV static int __afl_fb_wcscmp(const wchar_t *a, const wchar_t *b) {
+    return __afl_fb_wcsncmp(a, b, (size_t)-1);
+}
+
+__AFL_NO_COV static wchar_t __afl_fb_wlower(wchar_t c) {
+    return (c >= L'A' && c <= L'Z') ? c + (L'a' - L'A') : c;
+}
+
+__AFL_NO_COV static int __afl_fb_wcscasecmp(const wchar_t *a, const wchar_t *b, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        wchar_t x = __afl_fb_wlower(a[i]), y = __afl_fb_wlower(b[i]);
+        if (x != y) return x < y ? -1 : 1;
+        if (!x) return 0;
+    }
+    return 0;
+}
+
+__AFL_NO_COV static char *__afl_fb_strpbrk(const char *s, const char *accept) {
+    for (const char *p = s; *p; p++)
+        for (const char *q = accept; *q; q++)
+            if (*p == *q) return (char *)p;
+    return NULL;
+}
+
+__AFL_NO_COV static size_t __afl_fb_strspn(const char *s, const char *accept) {
+    size_t n = 0;
+    for (const char *p = s; *p; p++) {
+        int found = 0;
+        for (const char *q = accept; *q; q++)
+            if (*p == *q) { found = 1; break; }
+        if (!found) break;
+        n++;
+    }
+    return n;
+}
+
+__AFL_NO_COV static size_t __afl_fb_strcspn(const char *s, const char *reject) {
+    size_t n = 0;
+    for (const char *p = s; *p; p++) {
+        int found = 0;
+        for (const char *q = reject; *q; q++)
+            if (*p == *q) { found = 1; break; }
+        if (found) break;
+        n++;
+    }
+    return n;
+}
+
+__AFL_NO_COV static void *__afl_fb_memrchr(const void *s, int c, size_t n) {
+    const unsigned char *p = s;
+    for (size_t i = n; i > 0; i--) {
+        if (p[i - 1] == (unsigned char)c) return (void *)(p + i - 1);
+    }
     return NULL;
 }
 
@@ -1365,6 +1471,124 @@ __AFL_NO_COV char *strcasestr(const char *h, const char *n) {
         while (k < nl && h[k]) k++;
         if (k > 0 && nl <= CMPLOG_MAX_OPERAND)
             __afl_cmplog_bytes(h, n, k, result ? 0 : -1);
+    }
+    return result;
+}
+
+/* ── New interceptors: bcmp, widec, set-scan, memrchr ─────────────
+ * Added to extend cmplog coverage beyond the original memcmp/strcmp/...
+ * set of functions. Patterns:
+ *   - memcmp-like: log two buffers
+ *   - wchar_t functions: log n * sizeof(wchar_t) bytes
+ *   - set-scan: log haystack vs set
+ *   - memrchr: materialize needle like memchr */
+
+__AFL_NO_COV int bcmp(const void *a, const void *b, size_t n) {
+    __AFL_RESOLVE(real_bcmp, int (*)(const void *, const void *, size_t), "bcmp", __afl_fb_bcmp);
+    int result = real_bcmp(a, b, n);
+    __afl_cmplog_bytes(a, b, n, result);
+    return result;
+}
+
+__AFL_NO_COV int wmemcmp(const wchar_t *a, const wchar_t *b, size_t n) {
+    __AFL_RESOLVE(real_wmemcmp, afl_wchar_cmp_fn, "wmemcmp", __afl_fb_wmemcmp);
+    int result = real_wmemcmp(a, b, n);
+    if (__afl_cmplog_fd >= 0 && n > 0) {
+        size_t k = n * sizeof(wchar_t);
+        if (k > CMPLOG_MAX_OPERAND) k = CMPLOG_MAX_OPERAND;
+        __afl_cmplog_bytes(a, b, k, result);
+    }
+    return result;
+}
+
+__AFL_NO_COV int wcsncmp(const wchar_t *a, const wchar_t *b, size_t n) {
+    __AFL_RESOLVE(real_wcsncmp, afl_wchar_cmp_fn, "wcsncmp", __afl_fb_wcsncmp);
+    int result = real_wcsncmp(a, b, n);
+    if (__afl_cmplog_fd >= 0 && n > 0) {
+        size_t k = n * sizeof(wchar_t);
+        if (k > CMPLOG_MAX_OPERAND) k = CMPLOG_MAX_OPERAND;
+        if (k > 0) __afl_cmplog_bytes(a, b, k, result);
+    }
+    return result;
+}
+
+__AFL_NO_COV int wcscmp(const wchar_t *a, const wchar_t *b) {
+    __AFL_RESOLVE(real_wcscmp, afl_wchar_cmp_2arg_fn, "wcscmp", __afl_fb_wcscmp);
+    int result = real_wcscmp(a, b);
+    if (__afl_cmplog_fd >= 0) {
+        size_t na = __afl_fb_wcslen(a), nb = __afl_fb_wcslen(b), n = na < nb ? na : nb;
+        if (n > 0) {
+            size_t k = n * sizeof(wchar_t);
+            if (k > CMPLOG_MAX_OPERAND) k = CMPLOG_MAX_OPERAND;
+            __afl_cmplog_bytes(a, b, k, result);
+        }
+    }
+    return result;
+}
+
+__AFL_NO_COV int wcscasecmp(const wchar_t *a, const wchar_t *b) {
+    __AFL_RESOLVE(real_wcscasecmp, afl_wchar_cmp_2arg_fn, "wcscasecmp", __afl_fb_wcscasecmp);
+    int result = real_wcscasecmp(a, b);
+    if (__afl_cmplog_fd >= 0) {
+        size_t na = __afl_fb_wcslen(a), nb = __afl_fb_wcslen(b), n = na < nb ? na : nb;
+        if (n > 0) {
+            size_t k = n * sizeof(wchar_t);
+            if (k > CMPLOG_MAX_OPERAND) k = CMPLOG_MAX_OPERAND;
+            __afl_cmplog_bytes(a, b, k, result);
+        }
+    }
+    return result;
+}
+
+__AFL_NO_COV char *strpbrk(const char *s, const char *accept) {
+    __AFL_RESOLVE(real_strpbrk, afl_strpbrk_fn, "strpbrk", __afl_fb_strpbrk);
+    char *result = real_strpbrk(s, accept);
+    if (__afl_cmplog_fd >= 0 && s && accept) {
+        size_t sl = __afl_fb_len(s), al = __afl_fb_len(accept);
+        if (sl > 0 && al > 0) {
+            size_t k = sl < al ? sl : al;
+            if (k > CMPLOG_MAX_OPERAND) k = CMPLOG_MAX_OPERAND;
+            __afl_cmplog_bytes(s, accept, k, result ? 0 : -1);
+        }
+    }
+    return result;
+}
+
+__AFL_NO_COV size_t strspn(const char *s, const char *accept) {
+    __AFL_RESOLVE(real_strspn, afl_strspn_fn, "strspn", __afl_fb_strspn);
+    size_t result = real_strspn(s, accept);
+    if (__afl_cmplog_fd >= 0 && s && accept) {
+        size_t sl = __afl_fb_len(s), al = __afl_fb_len(accept);
+        if (sl > 0 && al > 0) {
+            size_t k = sl < al ? sl : al;
+            if (k > CMPLOG_MAX_OPERAND) k = CMPLOG_MAX_OPERAND;
+            __afl_cmplog_bytes(s, accept, k, result ? (result > 0 ? 1 : 0) : 0);
+        }
+    }
+    return result;
+}
+
+__AFL_NO_COV size_t strcspn(const char *s, const char *reject) {
+    __AFL_RESOLVE(real_strcspn, afl_strcspn_fn, "strcspn", __afl_fb_strcspn);
+    size_t result = real_strcspn(s, reject);
+    if (__afl_cmplog_fd >= 0 && s && reject) {
+        size_t sl = __afl_fb_len(s), rl = __afl_fb_len(reject);
+        if (sl > 0 && rl > 0) {
+            size_t k = sl < rl ? sl : rl;
+            if (k > CMPLOG_MAX_OPERAND) k = CMPLOG_MAX_OPERAND;
+            __afl_cmplog_bytes(s, reject, k, result ? (result > 0 ? 1 : 0) : 0);
+        }
+    }
+    return result;
+}
+
+__AFL_NO_COV void *memrchr(const void *s, int c, size_t n) {
+    __AFL_RESOLVE(real_memrchr, afl_memrchr_fn, "memrchr", __afl_fb_memrchr);
+    void *result = real_memrchr(s, c, n);
+    if (__afl_cmplog_fd >= 0 && n > 0 && !result) {
+        unsigned char needle[CMPLOG_MAX_OPERAND];
+        for (size_t i = 0; i < CMPLOG_MAX_OPERAND; i++) needle[i] = (unsigned char)c;
+        __afl_cmplog_bytes(s, needle, n > CMPLOG_MAX_OPERAND ? CMPLOG_MAX_OPERAND : n, -1);
     }
     return result;
 }
