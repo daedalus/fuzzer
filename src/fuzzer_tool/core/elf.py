@@ -6,7 +6,7 @@ branch density, constant extraction, DIV detection, and ctrl-flow analysis.
 
 Consolidates the duplicated ELF parsing logic from shim_factory.py
 and fuzzer.py (PtraceCoverage). The embedded _PERSISTENT_LOADER script
-in persistent_loader.py retains its own copy since it runs in a
+in persistent_subprocess.py retains its own copy since it runs in a
 separate Python process.
 """
 

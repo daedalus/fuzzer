@@ -12,6 +12,14 @@ Protocol:
 Coverage never travels this pipe: instrumented targets write SHM directly
 (via __AFL_SHM_ID) and the caller reads the segment itself, so bmp_len is
 always 0. The field is kept so older readers keep parsing.
+
+Not to be confused with ``persistent_signal.py``, the other persistent mode
+in this package. That one fork+execve's an executable and drives it with
+SIGUSR1/SIGSTOP over a SysV segment; this one keeps a Python subprocess
+alive and calls a ``.so`` through ctypes. They share three method names and
+nothing else -- ``run_one`` does not even return the same type (``(rc,
+bitmap)`` here, ``(rc, message)`` there) -- so they are not interchangeable
+and have no common base.
 """
 
 import collections

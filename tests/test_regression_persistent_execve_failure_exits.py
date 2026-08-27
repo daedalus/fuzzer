@@ -37,7 +37,7 @@ def _run_target_test(nodeid: str) -> subprocess.CompletedProcess:
 
 def test_persistent_execve_failure_does_not_duplicate_session():
     result = _run_target_test(
-        "tests/test_persistent.py::TestPersistentRunner::test_start_nonexistent_target"
+        "tests/test_persistent_signal.py::TestPersistentRunner::test_start_nonexistent_target"
     )
     assert result.returncode == 0, result.stdout + result.stderr
     # An orphaned duplicate child re-runs (and re-reports) the same test.

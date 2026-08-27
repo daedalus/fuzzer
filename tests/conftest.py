@@ -153,7 +153,7 @@ def pytest_configure(config):
     # "thread" is the only method that survives a native hang, but it arms a
     # threading.Timer for every test, which makes the pytest process
     # multi-threaded for the whole session. This suite forks constantly
-    # (persistent.py, runner.py's ptrace launch, the inprocess loader), and
+    # (persistent_signal.py, runner.py's ptrace launch, the inprocess loader), and
     # fork-from-a-multi-threaded-process is a real deadlock hazard, not a
     # style warning -- see docs/handover/test_shm_hang_2026-08-14.md. Measured:
     # arming the thread method makes CPython emit its multi-threaded-fork

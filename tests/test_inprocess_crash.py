@@ -366,7 +366,7 @@ class TestWifexitedCrashCode:
         assert os.WIFEXITED(status)
         exit_code = os.WEXITSTATUS(status)
         assert exit_code == 134
-        # This mirrors the logic in persistent_loader.py's waitpid handler
+        # This mirrors the logic in persistent_subprocess.py's waitpid handler
         rc = -(exit_code - 128) if exit_code >= 128 else -2
         assert rc == -6, f"Expected rc=-6 for SIGABRT, got rc={rc}"
 

@@ -21,7 +21,7 @@ deadlocks in the child`.
 
 The mechanism is that `--timeout-method=thread` arms a `threading.Timer` for
 **every** test, so the pytest process is multi-threaded for the whole session.
-This suite forks from that process in at least three places (`persistent.py:72`,
+This suite forks from that process in at least three places (`persistent_signal.py:72`,
 `runner.py:311`, the inprocess loader). E3 in the same bug report is precisely
 that hazard, and `docs/handover/test_shm_hang_2026-08-14.md` is the time it
 actually cost a session.

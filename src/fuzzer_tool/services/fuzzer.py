@@ -1930,7 +1930,7 @@ class Fuzzer:
 
         self._persistent_runner = None
         if self.persistent:
-            from fuzzer_tool.adapters.persistent import PersistentRunner
+            from fuzzer_tool.adapters.persistent_signal import PersistentRunner
 
             self._persistent_runner = PersistentRunner(target=self.target, timeout=self.timeout)
             if self._persistent_runner.start():

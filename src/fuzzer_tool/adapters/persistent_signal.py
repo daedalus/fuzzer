@@ -8,6 +8,14 @@ that explicitly handle SIGUSR1 and read from __AFL_SHM_ID shared memory.
 For standard AFL persistent targets, use afl-showmap -P or AFL++'s own
 persistent mode support instead.
 
+Not to be confused with ``persistent_subprocess.py``, the other persistent
+mode in this package. That one keeps a Python subprocess alive and calls a
+``.so`` through ctypes over a pipe protocol; this one fork+execve's an
+executable and drives it with signals over a SysV segment. They share three
+method names and nothing else -- ``run_one`` does not even return the same
+type (``(rc, message)`` here, ``(rc, bitmap)`` there) -- so they are not
+interchangeable and have no common base.
+
 Protocol:
   - Runner writes [4-byte length][input data] to SHM
   - Runner sends SIGUSR1 to the target

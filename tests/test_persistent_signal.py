@@ -1,6 +1,6 @@
-"""Tests for adapters/persistent.py — PersistentRunner init and error paths."""
+"""Tests for adapters/persistent_signal.py — PersistentRunner init and error paths."""
 
-from fuzzer_tool.adapters.persistent import PersistentRunner
+from fuzzer_tool.adapters.persistent_signal import PersistentRunner
 
 
 class TestPersistentRunner:

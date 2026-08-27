@@ -307,7 +307,7 @@ class InProcessRunner:
             # via fork-per-call (SIGSEGV from ctypes kills the process).
             is_so = self.target.lower().endswith((".so", ".dylib", ".dll"))
             if cov or is_so:
-                from fuzzer_tool.adapters.persistent_loader import PersistentLoader
+                from fuzzer_tool.adapters.persistent_subprocess import PersistentLoader
 
                 self._persistent = PersistentLoader(
                     target=self.target,

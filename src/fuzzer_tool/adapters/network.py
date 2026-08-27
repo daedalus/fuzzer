@@ -1,6 +1,6 @@
 """Network adapter: fire-and-forget TCP/UDP fuzzing of a persistent target.
 
-Unlike PersistentRunner (persistent.py), there is no SIGUSR1/SIGSTOP
+Unlike PersistentRunner (persistent_signal.py), there is no SIGUSR1/SIGSTOP
 iteration boundary here — we're driving an ordinary socket-facing target
 as a black box, not a custom AFL-loop harness. Each iteration is:
 connect (or reuse a kept-alive connection), send exactly once, sleep a

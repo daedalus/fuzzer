@@ -1,6 +1,6 @@
 """Regression test: ctypes ``shmat()`` bindings must declare ``restype``.
 
-``adapters/persistent.py`` and ``services/minimize.py`` (twice) each built their
+``adapters/persistent_signal.py`` and ``services/minimize.py`` (twice) each built their
 own ``ctypes.CDLL("libc.so.6")`` handle and called ``shmat()`` on it without
 declaring ``restype``. ctypes then defaults to ``c_int``, so a 64-bit attach
 address such as ``0x7fa8adb96000`` came back sign-extended as
@@ -120,10 +120,10 @@ class TestCallSites:
         assert _read_shm_edges("999999", 4096) == bytearray(4096)
 
     def test_persistent_runner_shm_write_path(self, segment):
-        """The memmove at persistent.py that segfaulted on first use."""
+        """The memmove at persistent_signal.py that segfaulted on first use."""
         import struct
 
-        from fuzzer_tool.adapters.persistent import PersistentRunner
+        from fuzzer_tool.adapters.persistent_signal import PersistentRunner
 
         runner = PersistentRunner("/bin/true", map_size=MAP_SIZE)
         runner.shm_id = segment
@@ -140,7 +140,7 @@ class TestCallSites:
         runner.shm_ptr = 0
 
     def test_persistent_cleanup_detaches_and_destroys(self):
-        from fuzzer_tool.adapters.persistent import PersistentRunner
+        from fuzzer_tool.adapters.persistent_signal import PersistentRunner
 
         runner = PersistentRunner("/bin/true", map_size=MAP_SIZE)
         runner.shm_id = libc_shm.shmget(MAP_SIZE)

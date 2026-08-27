@@ -11,7 +11,7 @@ import ctypes
 import signal
 from unittest.mock import patch
 
-from fuzzer_tool.adapters.persistent import PersistentRunner
+from fuzzer_tool.adapters.persistent_signal import PersistentRunner
 from fuzzer_tool.core.gf2_common import GF2n
 from fuzzer_tool.core.mutations.generic import _log2_ceil, _NumNode, radamsa_mutate_num
 from fuzzer_tool.services.te_position import get_te_weighted_position
@@ -96,7 +96,7 @@ class TestVersifierDecimalDigits:
 
 
 class TestPersistentSigcont:
-    """#36 persistent.py:136-161 -- protocol docstring promises the runner
+    """#36 persistent_signal.py:136-161 -- protocol docstring promises the runner
     resumes the target with SIGCONT after reading the result, but the
     SIGSTOP branch of run_one() never sent it, wedging the target forever
     after the first iteration."""
