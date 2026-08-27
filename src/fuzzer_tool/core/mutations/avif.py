@@ -317,7 +317,12 @@ class AvifMutator:
         if self._rng.random() < 0.5:
             raw[0:4] = self._rng.choice([b for b in AVIF_BRANDS] + WEIRD_FOURCCS)
         else:
-            pos = self._rng.randrange(8, max(9, len(raw) - 3), 4) if len(raw) > 8 else 8
+            if len(raw) > 8:
+                stop = max(9, len(raw) - 3)
+                width = max(1, (stop - 8 + 3) // 4)  # ceil((stop-8)/4) steps of 4, starting at 8
+                pos = 8 + self._rng.randrange(width) * 4
+            else:
+                pos = 8
             if pos + 4 <= len(raw):
                 raw[pos : pos + 4] = self._rng.choice(COMPATIBLE_BRAND_POOL + WEIRD_FOURCCS)
             else:
