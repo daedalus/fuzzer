@@ -987,7 +987,7 @@ class Fuzzer:
                 from fuzzer_tool.core.elf import detect_cmplog_functions
 
                 funcs = detect_cmplog_functions(self.target)
-                funcs_str = ",".join(funcs) if funcs else "memcmp,strcmp,strncmp,memchr"
+                funcs_str = ",".join(funcs)
                 print(f"[*] Cmplog: comparison tracing enabled ({funcs_str})")
                 from fuzzer_tool.core.rq_encodings import encoders_summary
 
