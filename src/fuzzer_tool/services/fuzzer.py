@@ -37,6 +37,8 @@ from fuzzer_tool.core.sanitizer import SanitizerReport
 from fuzzer_tool.core.schedulers import (
     CMAESScheduler,
     ContextualLinUCBScheduler,
+    CUCBScheduler,
+    DUCBScheduler,
     EpsilonGreedyScheduler,
     Exp3Scheduler,
     GPUCBScheduler,
@@ -44,6 +46,7 @@ from fuzzer_tool.core.schedulers import (
     MonteCarloScheduler,
     MOptScheduler,
     ReplicatorScheduler,
+    SWUCBScheduler,
 )
 from fuzzer_tool.core.schedules import SeedScorer, compute_mean_log_n_fuzz
 from fuzzer_tool.core.secretary import DEFAULT_EXPLORATION_FRAC, SecretaryStopping
@@ -76,6 +79,9 @@ _OPERATOR_STRATEGY_NAMES = (
     "gp_ucb",
     "contextual",
     "cmaes",
+    "ducb",
+    "swucb",
+    "cucb",
 )
 _SEED_STRATEGY_NAMES = (
     "ga",
@@ -677,6 +683,12 @@ class Fuzzer:
         gp_ucb=False,
         gp_length_scale=1.0,
         gp_beta=2.0,
+        ducb=False,
+        ducb_gamma=0.9999,
+        swucb=False,
+        swucb_window=4000,
+        cucb=False,
+        cucb_gamma=0.9995,
         contextual=False,
         contextual_alpha=1.0,
         contextual_lambda=1.0,
@@ -1490,6 +1502,28 @@ class Fuzzer:
             self._gp_ucb = GPUCBScheduler(length_scale=gp_length_scale, beta=gp_beta)
             log.info("GP-UCB enabled (l=%.2f, beta=%.2f)", gp_length_scale, gp_beta)
 
+        # Recency-weighted UCB pair (Garivier & Moulines). Both take the
+        # shared RandPool per Hard Rule 16 so --seed reproduces the campaign.
+        self._use_ducb = ducb
+        self._ducb = None
+        if ducb:
+            self._ducb = DUCBScheduler(gamma=ducb_gamma, rng=self._rand_pool)
+            log.info("D-UCB enabled (gamma=%.5f)", ducb_gamma)
+
+        self._use_swucb = swucb
+        self._swucb = None
+        if swucb:
+            self._swucb = SWUCBScheduler(window=swucb_window, rng=self._rand_pool)
+            log.info("SW-UCB enabled (window=%d)", swucb_window)
+
+        # Combinatorial UCB: the only scheduler here that models the round's
+        # operator stack as one superarm rather than N independent pulls.
+        self._use_cucb = cucb
+        self._cucb = None
+        if cucb:
+            self._cucb = CUCBScheduler(gamma=cucb_gamma, rng=self._rand_pool)
+            log.info("CUCB enabled (gamma=%.5f)", cucb_gamma)
+
         self._use_contextual = contextual
         self._contextual = None
         if contextual:
@@ -1671,6 +1705,9 @@ class Fuzzer:
             # round's success exactly like the operator that did the work.
             or self._cmaes
             or self._contextual
+            or self._ducb
+            or self._swucb
+            or self._cucb
             or self._use_shapley
         )
 
@@ -1875,6 +1912,12 @@ class Fuzzer:
             _register_arms(self._hierarchical)
         if self._gp_ucb:
             _register_arms(self._gp_ucb)
+        if self._ducb:
+            _register_arms(self._ducb)
+        if self._swucb:
+            _register_arms(self._swucb)
+        if self._cucb:
+            _register_arms(self._cucb)
         if self._contextual:
             _register_arms(self._contextual)
         if self._elo:
@@ -3755,11 +3798,19 @@ class Fuzzer:
             self._hierarchical,
             self._gp_ucb,
             self._cmaes,
+            self._ducb,
+            self._swucb,
+            self._cucb,
         ):
             if scheduler is None:
                 continue
             for op, ok, w in op_rewards:
                 scheduler.record(op, ok, weight=w)
+
+        # CUCB batches the round rather than updating per operator, so the
+        # superarm is only complete once the loop above has run.
+        if self._cucb:
+            self._cucb.settle_round()
 
         if self._contextual:
             # LinUCB takes a feature vector rather than a success flag.
@@ -4711,6 +4762,12 @@ class Fuzzer:
             all_strategies.append("cmaes")
         if self._contextual:
             all_strategies.append("contextual")
+        if self._ducb:
+            all_strategies.append("ducb")
+        if self._swucb:
+            all_strategies.append("swucb")
+        if self._cucb:
+            all_strategies.append("cucb")
         for other in all_strategies:
             if other != self._meta_strategy:
                 self._elo.record_strategy_match(self._meta_strategy, other, score)
@@ -4776,6 +4833,12 @@ class Fuzzer:
             ops.append("cmaes")
         if getattr(self, "_contextual", False):
             ops.append("contextual")
+        if getattr(self, "_ducb", False):
+            ops.append("ducb")
+        if getattr(self, "_swucb", False):
+            ops.append("swucb")
+        if getattr(self, "_cucb", False):
+            ops.append("cucb")
         if getattr(self, "_use_shapley", False):
             ops.append("shapley")
         if ops:

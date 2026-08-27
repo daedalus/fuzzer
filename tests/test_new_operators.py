@@ -863,6 +863,13 @@ class TestEloMetaStrategyThrottle:
         f._cmaes = None
         f._use_contextual = False
         f._contextual = None
+        # Same reason: the recency/combinatorial family joins the ballot too.
+        f._use_ducb = False
+        f._ducb = None
+        f._use_swucb = False
+        f._swucb = None
+        f._use_cucb = False
+        f._cucb = None
 
         class _FakeMopt:
             def select_op(self, ops, prev_op=None):

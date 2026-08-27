@@ -76,6 +76,9 @@ def _all_operator_schedulers():
     hier = S.HierarchicalBanditScheduler()
     gp = S.GPUCBScheduler()
     lin = S.ContextualLinUCBScheduler(dim=CONTEXT_DIM)
+    ducb = S.DUCBScheduler()
+    swucb = S.SWUCBScheduler()
+    cucb = S.CUCBScheduler()
 
     def _ctx(_op):
         return [random.random() for _ in range(CONTEXT_DIM)]
@@ -97,6 +100,10 @@ def _all_operator_schedulers():
             lambda o: lin.select_op(o, _ctx),
             lambda n, ok: lin.record(n, _ctx(n), 1.0 if ok else 0.0),
         ),
+        ("DUCBScheduler", ducb, ducb.select_op, ducb.record),
+        ("SWUCBScheduler", swucb, swucb.select_op, swucb.record),
+        # CUCB batches a round; select_op() closes any round left open.
+        ("CUCBScheduler", cucb, cucb.select_op, cucb.record),
     ]
 
 

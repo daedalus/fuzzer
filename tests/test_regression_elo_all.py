@@ -132,6 +132,10 @@ class TestOperatorEloRecordsUsedOnly:
         # only when cmaes was the *selected* strategy.
         f._cmaes = False
         f._contextual = None
+        # The recency/combinatorial family joins the same opponent ballot.
+        f._ducb = None
+        f._swucb = None
+        f._cucb = None
         return f
 
     def test_records_against_enabled_schedulers_only(self):
@@ -201,6 +205,12 @@ class _FakeFuzzerForSelectOp:
         self._hierarchical = None
         self._use_gp_ucb = False
         self._gp_ucb = None
+        self._use_ducb = False
+        self._ducb = None
+        self._use_swucb = False
+        self._swucb = None
+        self._use_cucb = False
+        self._cucb = None
         # cmaes is on the Elo ballot like every other scheduler; the real
         # Fuzzer always sets both attributes (services/fuzzer.py), and the
         # no-Elo fallback chain reads _use_cmaes unguarded. This fake only

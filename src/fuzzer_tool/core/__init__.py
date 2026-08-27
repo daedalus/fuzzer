@@ -37,6 +37,8 @@ from fuzzer_tool.core.rate_distortion import RateDistortionCorpus
 from fuzzer_tool.core.renyi import CoverageSpectrumAnalyzer, RenyiEntropy
 from fuzzer_tool.core.sanitizer import SanitizerReport
 from fuzzer_tool.core.schedulers import (
+    CUCBScheduler,
+    DUCBScheduler,
     EpsilonGreedyScheduler,
     Exp3Scheduler,
     GPUCBScheduler,
@@ -44,6 +46,7 @@ from fuzzer_tool.core.schedulers import (
     MonteCarloScheduler,
     MOptScheduler,
     ReplicatorScheduler,
+    SWUCBScheduler,
 )
 from fuzzer_tool.core.seed_quality import BayesianSeedQuality
 from fuzzer_tool.core.shapley import ShapleyAttribution
@@ -69,7 +72,10 @@ __all__ = [
     "EpsilonGreedyScheduler",
     "Exp3Scheduler",
     "HierarchicalBanditScheduler",
+    "CUCBScheduler",
+    "DUCBScheduler",
     "GPUCBScheduler",
+    "SWUCBScheduler",
     "ShapleyAttribution",
     "MutualInformationTracker",
     "RenyiEntropy",

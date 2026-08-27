@@ -334,6 +334,12 @@ def cmd_fuzz(args):
             eps_greedy_decay=getattr(args, "eps_greedy_decay", 0.9995),
             hierarchical_bandit=getattr(args, "hierarchical_bandit", False),
             gp_ucb=getattr(args, "gp_ucb", False),
+            ducb=getattr(args, "ducb", False),
+            ducb_gamma=getattr(args, "ducb_gamma", 0.9999),
+            swucb=getattr(args, "swucb", False),
+            swucb_window=getattr(args, "swucb_window", 4000),
+            cucb=getattr(args, "cucb", False),
+            cucb_gamma=getattr(args, "cucb_gamma", 0.9995),
             gp_length_scale=getattr(args, "gp_length_scale", 1.0),
             gp_beta=getattr(args, "gp_beta", 2.0),
             contextual=getattr(args, "contextual", False),
@@ -368,6 +374,9 @@ def cmd_fuzz(args):
         args.eps_greedy = True
         args.hierarchical_bandit = True
         args.gp_ucb = True
+        args.ducb = True
+        args.swucb = True
+        args.cucb = True
         args.contextual = True
         args.ga = True
         args.qea = True
@@ -478,6 +487,12 @@ def cmd_fuzz(args):
         eps_greedy_decay=getattr(args, "eps_greedy_decay", 0.9995),
         hierarchical_bandit=getattr(args, "hierarchical_bandit", False),
         gp_ucb=getattr(args, "gp_ucb", False),
+        ducb=getattr(args, "ducb", False),
+        ducb_gamma=getattr(args, "ducb_gamma", 0.9999),
+        swucb=getattr(args, "swucb", False),
+        swucb_window=getattr(args, "swucb_window", 4000),
+        cucb=getattr(args, "cucb", False),
+        cucb_gamma=getattr(args, "cucb_gamma", 0.9995),
         gp_length_scale=getattr(args, "gp_length_scale", 1.0),
         gp_beta=getattr(args, "gp_beta", 2.0),
         contextual=getattr(args, "contextual", False),
@@ -1648,6 +1663,54 @@ def main() -> int:
         type=float,
         default=2.0,
         help="GP-UCB exploration parameter (default: 2.0)",
+    )
+    fuzz_parser.add_argument(
+        "--ducb",
+        action="store_true",
+        help=(
+            "Enable discounted-UCB operator scheduling (Garivier & Moulines): "
+            "exponentially discounted counts and rewards, so an operator whose "
+            "yield collapses is re-tried instead of exploited forever"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--ducb-gamma",
+        type=float,
+        default=0.9999,
+        help=(
+            "D-UCB discount per pull; effective memory is 1/(1-gamma) pulls "
+            "and must stay well above the operator count (default: 0.9999)"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--swucb",
+        action="store_true",
+        help=(
+            "Enable sliding-window UCB operator scheduling (Garivier & "
+            "Moulines): only the last --swucb-window pulls count"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--swucb-window",
+        type=int,
+        default=4000,
+        help="SW-UCB window length in pulls (default: 4000)",
+    )
+    fuzz_parser.add_argument(
+        "--cucb",
+        action="store_true",
+        help=(
+            "Enable combinatorial UCB operator scheduling (Chen et al.): "
+            "scores the round's whole operator stack as one superarm and "
+            "recovers per-operator rates by inclusion contrast, instead of "
+            "handing every operator in the stack the same shared outcome"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--cucb-gamma",
+        type=float,
+        default=0.9995,
+        help="CUCB discount per mutation round (default: 0.9995)",
     )
     fuzz_parser.add_argument(
         "--contextual",

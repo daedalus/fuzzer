@@ -83,6 +83,9 @@ class _FakeFuzzer:
             ("_use_gp_ucb", "_gp_ucb"),
             ("_use_cmaes", "_cmaes"),
             ("_use_contextual", "_contextual"),
+            ("_use_ducb", "_ducb"),
+            ("_use_swucb", "_swucb"),
+            ("_use_cucb", "_cucb"),
         ):
             setattr(self, flag, False)
             setattr(self, attr, None)

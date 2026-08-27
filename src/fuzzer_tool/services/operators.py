@@ -2196,9 +2196,7 @@ class OperatorEngine:
         if parse_avif(bytes(buf)):
             mutated = self.f._avif_mutator.mutate(bytes(buf), max_len=self.f.max_len, rng=rng)
         else:
-            mutated = self.f._avif_mutator._generate_random_avif(
-                max_len=self.f.max_len, rng=rng
-            )
+            mutated = self.f._avif_mutator._generate_random_avif(max_len=self.f.max_len, rng=rng)
         return bytearray(mutated[: self.f.max_len])
 
     def _op_sqlite_chunk_mutate(self, buf, _byte_idx, _data):
@@ -3070,6 +3068,12 @@ class OperatorEngine:
             available.append("cmaes")
         if f._use_contextual and f._contextual:
             available.append("contextual")
+        if f._use_ducb and f._ducb:
+            available.append("ducb")
+        if f._use_swucb and f._swucb:
+            available.append("swucb")
+        if f._use_cucb and f._cucb:
+            available.append("cucb")
 
         if f._use_elo and f._elo and len(available) >= 2:
             # Resolve the meta-strategy once per exec and reuse it for all
@@ -3127,6 +3131,15 @@ class OperatorEngine:
         elif strategy == "contextual" and f._contextual:
             op = f._contextual.select_op(ops, self._context_vector)
             f._last_mopt_particles.append(None)
+        elif strategy == "ducb" and f._ducb:
+            op = f._ducb.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif strategy == "swucb" and f._swucb:
+            op = f._swucb.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif strategy == "cucb" and f._cucb:
+            op = f._cucb.select_op(ops)
+            f._last_mopt_particles.append(None)
         elif f._use_replicator and f._replicator:
             op = f._replicator.select_op(ops)
             f._last_mopt_particles.append(None)
@@ -3154,6 +3167,15 @@ class OperatorEngine:
             f._last_mopt_particles.append(None)
         elif f._use_contextual and f._contextual:
             op = f._contextual.select_op(ops, self._context_vector)
+            f._last_mopt_particles.append(None)
+        elif f._use_ducb and f._ducb:
+            op = f._ducb.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif f._use_swucb and f._swucb:
+            op = f._swucb.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif f._use_cucb and f._cucb:
+            op = f._cucb.select_op(ops)
             f._last_mopt_particles.append(None)
         else:
             op = f._rand_pool.choice(ops)

@@ -2,7 +2,8 @@
 
 With Elo arbitration disabled, operators.select_op() falls back to a fixed
 chain (operators.py:1632–1656): replicator → mopt → bandit → exp3 →
-eps_greedy → hierarchical → gp_ucb → random. These tests pin that contract
+eps_greedy → hierarchical → gp_ucb → cmaes → contextual → ducb → swucb →
+cucb → random. These tests pin that contract
 so future scheduler additions/removals cannot silently change which
 scheduler wins, and document that cem is reachable only via Elo.
 """
@@ -26,6 +27,9 @@ _FALLBACK_PRECEDENCE = [
     "gp_ucb",
     "cmaes",
     "contextual",
+    "ducb",
+    "swucb",
+    "cucb",
 ]
 
 
@@ -85,6 +89,9 @@ class _FakeFuzzer:
         "gp_ucb": ("_use_gp_ucb", "_gp_ucb"),
         "cmaes": ("_use_cmaes", "_cmaes"),
         "contextual": ("_use_contextual", "_contextual"),
+        "ducb": ("_use_ducb", "_ducb"),
+        "swucb": ("_use_swucb", "_swucb"),
+        "cucb": ("_use_cucb", "_cucb"),
     }
 
     def __init__(self):
