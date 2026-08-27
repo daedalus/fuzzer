@@ -2886,7 +2886,19 @@ class Fuzzer:
 
         covered: set[int] = set()
         favored: set[str] = set()
-        for e in sorted(top_rated, key=lambda e: -self._edge_tracker.rare_edge_count(e)):
+        # Cover the rarest edges first: an edge reached by one seed forces that
+        # seed into the favored set, while an edge reached by many is likely to
+        # be picked up for free along the way.
+        #
+        # This used to sort by ``rare_edge_count(e)``, which is keyed by *seed*,
+        # not by edge. Passing an edge id looked up an absent seed and returned
+        # 0 for every edge, so the key was constant and ``sorted`` -- being
+        # stable -- left the edges in dict insertion order. The greedy cover ran
+        # in an arbitrary order and the rarity prioritisation this loop exists
+        # for never happened. The edge id breaks ties so the favored set is a
+        # function of the coverage data alone, not of insertion history.
+        et = self._edge_tracker
+        for e in sorted(top_rated, key=lambda e: (et.edge_owner_count(e), e)):
             if e in covered:
                 continue
             k = top_rated[e][0]

@@ -997,6 +997,91 @@ class TestCullQueue:
         f._cull_queue()
         assert f._favored == {"seed_a", "seed_c"}
 
+    @staticmethod
+    def _rarity_fixture(f, order):
+        """Populate a tracker where rarity ordering strictly beats insertion order.
+
+        Edges 1-3 are each reachable from the big seed and from a cheap narrow
+        seed (owner count 2). Edge 4 is reachable only from the big seed (owner
+        count 1). Covering edge 4 first pulls in the big seed, which covers
+        everything; covering edges 1-3 first picks the three cheap seeds and
+        still has to add the big seed for edge 4.
+        """
+        sets = {
+            "big": {1, 2, 3, 4},
+            "n1": {1},
+            "n2": {2},
+            "n3": {3},
+        }
+        for key in order:
+            f._edge_tracker.record_edges(key, sets[key])
+        f.seed_meta = {
+            "big": {"total_time": 1.0, "fuzz_count": 1, "input_size": 1000},
+            "n1": {"total_time": 1.0, "fuzz_count": 1, "input_size": 1},
+            "n2": {"total_time": 1.0, "fuzz_count": 1, "input_size": 1},
+            "n3": {"total_time": 1.0, "fuzz_count": 1, "input_size": 1},
+        }
+
+    def _make_bare_fuzzer(self):
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp(prefix="fuzz_test_")
+        with (
+            patch("os.path.isfile", return_value=True),
+            patch("os.access", return_value=True),
+        ):
+            return Fuzzer(
+                target="/bin/true",
+                corpus_dir=f"{tmpdir}/corpus",
+                crashes_dir=f"{tmpdir}/crashes",
+                max_len=256,
+                timeout=1,
+                mutations_per_input=2,
+            )
+
+    def test_cull_queue_covers_rarest_edges_first(self):
+        """The greedy cover starts from the edge fewest seeds reach.
+
+        Sorting by ``rare_edge_count(e)`` looked up an edge id in a seed-keyed
+        map, returned 0 for every edge, and left ``sorted`` (stable) with the
+        dict insertion order -- so this loop never prioritised anything.
+        """
+        f = self._make_bare_fuzzer()
+        self._rarity_fixture(f, ["big", "n1", "n2", "n3"])
+        f._cull_queue()
+        # Edge 4 has a single owner, so it is visited first and "big" alone
+        # covers the whole edge set.
+        assert f._favored == {"big"}
+
+    def test_cull_queue_is_independent_of_insertion_order(self):
+        """The favored set is a function of coverage, not of dict ordering."""
+        results = []
+        for order in (
+            ["big", "n1", "n2", "n3"],
+            ["n1", "n2", "n3", "big"],
+            ["n2", "big", "n3", "n1"],
+        ):
+            f = self._make_bare_fuzzer()
+            self._rarity_fixture(f, order)
+            f._cull_queue()
+            results.append(f._favored)
+        assert results[0] == results[1] == results[2] == {"big"}
+
+    def test_edge_owner_count_is_keyed_by_edge(self):
+        """``edge_owner_count`` counts seeds per edge; ``rare_edge_count`` does not."""
+        f = self._make_bare_fuzzer()
+        et = f._edge_tracker
+        et.record_edges("seed_a", {1, 2, 3})
+        et.record_edges("seed_b", {3, 4})
+        et.record_edges("seed_c", {3, 5})
+        assert et.edge_owner_count(3) == 3
+        assert et.edge_owner_count(1) == 1
+        assert et.edge_owner_count(99) == 0
+        # The seed-keyed function returns 0 when handed an edge id -- the
+        # confusion that silently disabled the cull queue ordering.
+        assert et.rare_edge_count(3) == 0
+        assert et.rare_edge_count("seed_a") == 3
+
     def test_cull_queue_empty_tracker(self):
         """Empty edge tracker produces empty favored set."""
         import tempfile

@@ -2050,6 +2050,17 @@ class EdgeTracker:
                 count += 1
         return count
 
+    def edge_owner_count(self, edge_id: int) -> int:
+        """How many distinct corpus seeds cover ``edge_id``.
+
+        This is the per-*edge* companion to :meth:`rare_edge_count`, which is
+        keyed by *seed*. The two take different key spaces and are easy to
+        confuse; callers ordering edges by rarity want this one.
+
+        Returns 0 for an edge no seed has covered.
+        """
+        return self._edge_owner_count.get(edge_id, 0)
+
     def edge_rarity_stats(self) -> dict:
         """Compute per-edge rarity statistics, in units of *seeds*.
 
