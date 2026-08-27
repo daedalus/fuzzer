@@ -21,6 +21,15 @@ from fuzzer_tool.core.crc32 import crc32
 
 log = logging.getLogger(__name__)
 
+# ── Edge rarity thresholds (units: distinct corpus seeds covering an edge) ──
+# An edge reached by at most this many seeds counts as rare. Matches the
+# singleton+cold buckets that EdgeTracker.edge_rarity_stats() reports.
+RARE_EDGE_OWNERS = 3
+# Multiplier on log2(1 + rare_count) for the rare-edge energy bonus.
+RARE_EDGE_GAIN = 0.5
+# Mean owners per edge above which a seed's coverage is considered crowded.
+CROWDED_EDGE_OWNERS = 10.0
+
 
 class SeedPicker:
     """Manages seed selection strategies.
@@ -466,30 +475,54 @@ class SeedPicker:
         return w, sub, spa
 
     def _weight_edge_penalties(self, seed_key: str, w: float, fuzz_count: int, f) -> float:
-        """Apply rare edge bonus, mean hits adjustment, gap score, and overlap penalty."""
-        seed_edges = f._edge_tracker.seed_edges.get(seed_key, set())
+        """Apply rare edge bonus, crowding adjustment, and overlap penalty.
+
+        Rarity is measured in *seeds* (``_edge_owner_count``), not in bucketed
+        execution hit volume (``_global_edge_hits``). The two were conflated
+        here: an edge inside a hot loop accumulates hundreds of counter units
+        from a single execution, so it could never fall under the old
+        ``hits <= 2`` test no matter how few seeds reached it, while an edge
+        touched once by one seed passed the test whether or not it was rare.
+        The same conflation was fixed in ``edge_rarity_stats()``; this was the
+        remaining instance, and it is the one that steered energy.
+
+        The bonus is also applied once rather than twice. ``rare_count`` and
+        ``gap_score`` were incremented under the same condition and then
+        multiplied in separately as ``(1 + 0.5r)(1 + 0.3r)``, a quadratic that
+        reached ~77x at r=20 with no ceiling -- enough to starve the rest of
+        the queue on a seed that happens to sit on a lot of fresh code.
+        """
+        tracker = f._edge_tracker
+        seed_edges = tracker.seed_edges.get(seed_key, set())
         if not seed_edges:
             return w
-        rare_count = gap_score = 0
-        total_hits = 0
+        owners = tracker._edge_owner_count
+        rare_count = 0
+        total_owners = 0
         for e in seed_edges:
-            hits = f._edge_tracker._global_edge_hits.get(e, 0)
-            total_hits += hits
-            if hits <= 2:
+            n = owners.get(e, 0)
+            total_owners += n
+            if n <= RARE_EDGE_OWNERS:
                 rare_count += 1
-                gap_score += 1
 
         if rare_count > 0:
-            w *= 1.0 + rare_count * 0.5
+            # log2 rather than linear: the marginal value of the twentieth rare
+            # edge on a seed is not twenty times that of the first, and a linear
+            # bonus lets one seed monopolise the queue. Matches the scaling the
+            # ENTROPIC schedule already uses for the same signal.
+            w *= 1.0 + RARE_EDGE_GAIN * math.log2(1.0 + rare_count)
 
-        mean_hits = total_hits / len(seed_edges)
-        if mean_hits > 3:
-            w *= 1.0 + (mean_hits - 3) * 0.1
-        elif mean_hits < 1.5 and fuzz_count > 10:
+        # Crowding: how many other seeds already reach the same code. A seed
+        # whose edges are reached by many others is redundant; one sitting on
+        # thinly-covered edges is worth more. The old version read mean hit
+        # *volume* and boosted seeds with high counts, which rewarded hot loops
+        # -- the opposite of what a rarity-driven schedule wants.
+        mean_owners = total_owners / len(seed_edges)
+        if mean_owners > CROWDED_EDGE_OWNERS:
+            w *= max(0.5, CROWDED_EDGE_OWNERS / mean_owners)
+        elif mean_owners < 1.5 and fuzz_count > 10:
+            # Thinly covered but already heavily fuzzed: diminishing returns.
             w *= 0.7
-
-        if gap_score > 0:
-            w *= 1.0 + gap_score * 0.3
 
         if hasattr(f, "_recent_seed_edges"):
             overlap = sum(len(seed_edges & recent) for recent in f._recent_seed_edges)
