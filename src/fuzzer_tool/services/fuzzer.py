@@ -984,7 +984,11 @@ class Fuzzer:
                 max_tokens=cmplog_max_tokens, max_pairs=cmplog_max_pairs, workdir=cmplog_workdir
             )
             if self._cmplog.start():
-                print("[*] Cmplog: comparison tracing enabled (memcmp/strcmp/strncmp/memchr)")
+                from fuzzer_tool.core.elf import detect_cmplog_functions
+
+                funcs = detect_cmplog_functions(self.target)
+                funcs_str = ",".join(funcs) if funcs else "memcmp,strcmp,strncmp,memchr"
+                print(f"[*] Cmplog: comparison tracing enabled ({funcs_str})")
                 from fuzzer_tool.core.rq_encodings import encoders_summary
 
                 encoders = encoders_summary()

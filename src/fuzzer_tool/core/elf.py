@@ -1643,6 +1643,23 @@ def detect_ngram_k(target: str) -> int:
     return best
 
 
+def detect_cmplog_functions(target: str) -> tuple[str, ...]:
+    """Read supported cmplog interceptors from the target's exported symbols.
+
+    When the shim is compiled with ``__AFL_CMPLOG=1`` each interceptor is
+    also exported as ``afl_cmp_<name>``.  This function scans for those
+    markers and returns the underlying function names, so the fuzzer
+    banner reflects the real interceptor set instead of a hardcoded list.
+    """
+    prefix = "afl_cmp_"
+    try:
+        names = _symbol_names(target)
+    except Exception as e:  # noqa: BLE001
+        log.debug("cmplog-function detection failed for %s: %s", target, e)
+        return ()
+    return tuple(name[len(prefix) :] for name in names if name.startswith(prefix))
+
+
 def ctx_inflation_factor(ctx_bits: int | None) -> float:
     """How much context-sensitivity multiplies the distinct-edge count.
 

@@ -1342,6 +1342,8 @@ __AFL_NO_COV int memcmp(const void *a, const void *b, size_t n) {
     __afl_cmplog_bytes(a, b, n, result);
     return result;
 }
+__AFL_NO_COV int afl_cmp_memcmp(const void *a, const void *b, size_t n)
+    __attribute__((weak, alias("memcmp")));
 
 __AFL_NO_COV int strcmp(const char *a, const char *b) {
     __AFL_RESOLVE(real_strcmp, afl_str_cmp_fn, "strcmp", __afl_fb_strcmp);
@@ -1350,6 +1352,8 @@ __AFL_NO_COV int strcmp(const char *a, const char *b) {
     if (n > 0) __afl_cmplog_bytes(a, b, n + 1, result);
     return result;
 }
+__AFL_NO_COV int afl_cmp_strcmp(const char *a, const char *b)
+    __attribute__((weak, alias("strcmp")));
 
 __AFL_NO_COV int strncmp(const char *a, const char *b, size_t n) {
     __AFL_RESOLVE(real_strncmp, afl_strn_cmp_fn, "strncmp", __afl_fb_strncmp);
@@ -1357,6 +1361,8 @@ __AFL_NO_COV int strncmp(const char *a, const char *b, size_t n) {
     if (n > 0) __afl_cmplog_bytes(a, b, n, result);
     return result;
 }
+__AFL_NO_COV int afl_cmp_strncmp(const char *a, const char *b, size_t n)
+    __attribute__((weak, alias("strncmp")));
 
 __AFL_NO_COV void *memchr(const void *s, int c, size_t n) {
     __AFL_RESOLVE(real_memchr, afl_chr_fn, "memchr", __afl_fb_memchr);
@@ -1376,6 +1382,8 @@ __AFL_NO_COV void *memchr(const void *s, int c, size_t n) {
     }
     return result;
 }
+__AFL_NO_COV void * afl_cmp_memchr(const void *s, int c, size_t n)
+    __attribute__((weak, alias("memchr")));
 
 __AFL_NO_COV int strcasecmp(const char *a, const char *b) {
     __AFL_RESOLVE(real_strcasecmp, afl_str_cmp_fn, "strcasecmp", __afl_fb_strcasecmp);
@@ -1384,6 +1392,8 @@ __AFL_NO_COV int strcasecmp(const char *a, const char *b) {
     if (n > 0) __afl_cmplog_bytes(a, b, n + 1, result);
     return result;
 }
+__AFL_NO_COV int afl_cmp_strcasecmp(const char *a, const char *b)
+    __attribute__((weak, alias("strcasecmp")));
 
 __AFL_NO_COV int strncasecmp(const char *a, const char *b, size_t n) {
     __AFL_RESOLVE(real_strncasecmp, afl_strn_cmp_fn, "strncasecmp", __afl_fb_strncasecmp);
@@ -1391,6 +1401,8 @@ __AFL_NO_COV int strncasecmp(const char *a, const char *b, size_t n) {
     if (n > 0) __afl_cmplog_bytes(a, b, n, result);
     return result;
 }
+__AFL_NO_COV int afl_cmp_strncasecmp(const char *a, const char *b, size_t n)
+    __attribute__((weak, alias("strncasecmp")));
 
 /* The NULL checks below are deliberate: these are declared nonnull, but a
  * fuzz target reaching them with NULL is a bug we want to log around, not
@@ -1446,6 +1458,8 @@ __AFL_NO_COV void *memmem(const void *h, size_t hl, const void *n, size_t nl) {
     }
     return result;
 }
+__AFL_NO_COV void * afl_cmp_memmem(const void *h, size_t hl, const void *n, size_t nl)
+    __attribute__((weak, alias("memmem")));
 
 __AFL_NO_COV char *strstr(const char *h, const char *n) {
     __AFL_RESOLVE(real_strstr, afl_str_str_fn, "strstr", __afl_fb_strstr);
@@ -1461,6 +1475,8 @@ __AFL_NO_COV char *strstr(const char *h, const char *n) {
     }
     return result;
 }
+__AFL_NO_COV char * afl_cmp_strstr(const char *h, const char *n)
+    __attribute__((weak, alias("strstr")));
 
 __AFL_NO_COV char *strcasestr(const char *h, const char *n) {
     __AFL_RESOLVE(real_strcasestr, afl_str_str_fn, "strcasestr", __afl_fb_strcasestr);
@@ -1474,6 +1490,8 @@ __AFL_NO_COV char *strcasestr(const char *h, const char *n) {
     }
     return result;
 }
+__AFL_NO_COV char * afl_cmp_strcasestr(const char *h, const char *n)
+    __attribute__((weak, alias("strcasestr")));
 
 /* ── New interceptors: bcmp, widec, set-scan, memrchr ─────────────
  * Added to extend cmplog coverage beyond the original memcmp/strcmp/...
@@ -1489,6 +1507,8 @@ __AFL_NO_COV int bcmp(const void *a, const void *b, size_t n) {
     __afl_cmplog_bytes(a, b, n, result);
     return result;
 }
+__AFL_NO_COV int afl_cmp_bcmp(const void *a, const void *b, size_t n)
+    __attribute__((weak, alias("bcmp")));
 
 __AFL_NO_COV int wmemcmp(const wchar_t *a, const wchar_t *b, size_t n) {
     __AFL_RESOLVE(real_wmemcmp, afl_wchar_cmp_fn, "wmemcmp", __afl_fb_wmemcmp);
@@ -1500,6 +1520,8 @@ __AFL_NO_COV int wmemcmp(const wchar_t *a, const wchar_t *b, size_t n) {
     }
     return result;
 }
+__AFL_NO_COV int afl_cmp_wmemcmp(const wchar_t *a, const wchar_t *b, size_t n)
+    __attribute__((weak, alias("wmemcmp")));
 
 __AFL_NO_COV int wcsncmp(const wchar_t *a, const wchar_t *b, size_t n) {
     __AFL_RESOLVE(real_wcsncmp, afl_wchar_cmp_fn, "wcsncmp", __afl_fb_wcsncmp);
@@ -1511,6 +1533,8 @@ __AFL_NO_COV int wcsncmp(const wchar_t *a, const wchar_t *b, size_t n) {
     }
     return result;
 }
+__AFL_NO_COV int afl_cmp_wcsncmp(const wchar_t *a, const wchar_t *b, size_t n)
+    __attribute__((weak, alias("wcsncmp")));
 
 __AFL_NO_COV int wcscmp(const wchar_t *a, const wchar_t *b) {
     __AFL_RESOLVE(real_wcscmp, afl_wchar_cmp_2arg_fn, "wcscmp", __afl_fb_wcscmp);
@@ -1525,6 +1549,8 @@ __AFL_NO_COV int wcscmp(const wchar_t *a, const wchar_t *b) {
     }
     return result;
 }
+__AFL_NO_COV int afl_cmp_wcscmp(const wchar_t *a, const wchar_t *b)
+    __attribute__((weak, alias("wcscmp")));
 
 __AFL_NO_COV int wcscasecmp(const wchar_t *a, const wchar_t *b) {
     __AFL_RESOLVE(real_wcscasecmp, afl_wchar_cmp_2arg_fn, "wcscasecmp", __afl_fb_wcscasecmp);
@@ -1539,6 +1565,8 @@ __AFL_NO_COV int wcscasecmp(const wchar_t *a, const wchar_t *b) {
     }
     return result;
 }
+__AFL_NO_COV int afl_cmp_wcscasecmp(const wchar_t *a, const wchar_t *b)
+    __attribute__((weak, alias("wcscasecmp")));
 
 __AFL_NO_COV char *strpbrk(const char *s, const char *accept) {
     __AFL_RESOLVE(real_strpbrk, afl_strpbrk_fn, "strpbrk", __afl_fb_strpbrk);
@@ -1553,6 +1581,8 @@ __AFL_NO_COV char *strpbrk(const char *s, const char *accept) {
     }
     return result;
 }
+__AFL_NO_COV char * afl_cmp_strpbrk(const char *s, const char *accept)
+    __attribute__((weak, alias("strpbrk")));
 
 __AFL_NO_COV size_t strspn(const char *s, const char *accept) {
     __AFL_RESOLVE(real_strspn, afl_strspn_fn, "strspn", __afl_fb_strspn);
@@ -1567,6 +1597,8 @@ __AFL_NO_COV size_t strspn(const char *s, const char *accept) {
     }
     return result;
 }
+__AFL_NO_COV size_t afl_cmp_strspn(const char *s, const char *accept)
+    __attribute__((weak, alias("strspn")));
 
 __AFL_NO_COV size_t strcspn(const char *s, const char *reject) {
     __AFL_RESOLVE(real_strcspn, afl_strcspn_fn, "strcspn", __afl_fb_strcspn);
@@ -1581,6 +1613,8 @@ __AFL_NO_COV size_t strcspn(const char *s, const char *reject) {
     }
     return result;
 }
+__AFL_NO_COV size_t afl_cmp_strcspn(const char *s, const char *reject)
+    __attribute__((weak, alias("strcspn")));
 
 __AFL_NO_COV void *memrchr(const void *s, int c, size_t n) {
     __AFL_RESOLVE(real_memrchr, afl_memrchr_fn, "memrchr", __afl_fb_memrchr);
@@ -1592,6 +1626,8 @@ __AFL_NO_COV void *memrchr(const void *s, int c, size_t n) {
     }
     return result;
 }
+__AFL_NO_COV void * afl_cmp_memrchr(const void *s, int c, size_t n)
+    __attribute__((weak, alias("memrchr")));
 
 /* ── Layer 2: Clang -fsanitize-coverage=trace-cmp callbacks ───────────
  *
