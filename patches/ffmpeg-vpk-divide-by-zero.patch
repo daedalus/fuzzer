@@ -1,0 +1,12 @@
+--- /home/dclavijo/my_code/fuzzer-new/vendor/ffmpeg/libavformat/vpk.c	2025-08-22 06:24:19.000000000 -0300
++++ /tmp/vpk_fixed.c	2026-08-27 09:32:22.978203543 -0300
+@@ -84,6 +84,9 @@
+     VPKDemuxContext *vpk = s->priv_data;
+     int ret, i;
+
++    if (par->ch_layout.nb_channels == 0)
++        return AVERROR_INVALIDDATA;
++
+     vpk->current_block++;
+     if (vpk->current_block == vpk->block_count) {
+         unsigned size = vpk->last_block_size / par->ch_layout.nb_channels;

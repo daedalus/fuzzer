@@ -298,6 +298,17 @@ verify the link before tuning schedulers or dictionaries. See
 
 ---
 
+## Trophy Case
+
+Bugs found by this fuzzer, with one-line summaries. Full details in [`docs/FINDINGS/`](docs/FINDINGS/).
+
+| Bug | One-line description |
+|-----|----------------------|
+| [FFmpeg VPK SIGFPE](docs/FINDINGS/ffmpeg.md) | 21-byte Sony VPK input triggers integer divide-by-zero in `vpk_read_packet` (`libavformat/vpk.c:89`) |
+| [fgrep regex crash](docs/FINDINGS/fgrep.md) | crafted regex triggers assertion failure in fgrep's pattern compiler |
+
+---
+
 ## Documentation
 
 | Document | Contents |

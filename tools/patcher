@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+"""Apply finding patches to vendored targets.
+
+Usage:
+    python tools/patcher
+    python tools/patcher --patch patches/ffmpeg-vpk-divide-by-zero.patch
+    python tools/patcher --list
+
+A patch that cannot be applied because the fix is already present is reported
+as ``already_fixed``, not as an error. All other failures surface the real
+``patch`` exit code and stderr.
+"""
+
+from __future__ import annotations
+
+import argparse
+import subprocess
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+PATCHES_DIR = REPO_ROOT / "patches"
+
+# patch file -> vendored relative paths to try, in order.
+# The first path that exists is used.
+PATCH_TARGETS: dict[str, list[str]] = {
+    "ffmpeg-vpk-divide-by-zero.patch": [
+        "vendor/ffmpeg/libavformat/vpk.c",
+        "vendor/ffmpeg_asan/libavformat/vpk.c",
+    ],
+    "fgrep-search-underflow-and-dual-load.patch": [
+        # fgrep is not vendored inside this repo; the canonical source lives
+        # at ~/my_code/fgrep. Patch it if the path exists.
+        "/home/dclavijo/my_code/fgrep/src/search.c",
+    ],
+    "fgrep-regex_engine-insensitive-match.patch": [
+        "/home/dclavijo/my_code/fgrep/src/regex_engine.c",
+    ],
+}
+
+
+def run(cmd: list[str]) -> tuple[int, str, str]:
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def apply_patch(patch_path: Path) -> tuple[str, str]:
+    """Return (status, message). status is one of: applied, already_fixed, error."""
+    if not patch_path.exists():
+        return "error", f"patch not found: {patch_path}"
+
+    targets = PATCH_TARGETS.get(patch_path.name, [])
+    if not targets:
+        return "error", f"no target mapping for {patch_path.name}"
+
+    target = None
+    for rel in targets:
+        p = REPO_ROOT / rel if not Path(rel).is_absolute() else Path(rel)
+        if p.exists():
+            target = p
+            break
+
+    if target is None:
+        return "error", (
+            "none of the target paths exist for this patch: "
+            + ", ".join(str(REPO_ROOT / r) if not Path(r).is_absolute() else r for r in targets)
+        )
+
+    rc, _, stderr = run(["patch", "--dry-run", "-p1", "-i", str(patch_path), str(target)])
+    if rc != 0:
+        msg = stderr.strip() or "patch --dry-run failed"
+        if "already applied" in msg.lower() or "already fixed" in msg.lower() or rc == 1:
+            return "already_fixed", f"{target}: fix already present ({msg})"
+        return "error", f"{target}: {msg}"
+
+    rc, _, stderr = run(["patch", "-p1", "-i", str(patch_path), str(target)])
+    if rc != 0:
+        return "error", f"{target}: patch failed: {stderr.strip()}"
+
+    return "applied", f"{target}: patch applied"
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Apply finding patches to vendored targets.")
+    parser.add_argument("--patch", type=Path, help="apply a single patch file")
+    parser.add_argument("--list", action="store_true", help="list available patches")
+    args = parser.parse_args()
+
+    if args.list:
+        for name in sorted(PATCH_TARGETS):
+            print(name)
+        return 0
+
+    patch_files = [args.patch] if args.patch else sorted(PATCHES_DIR.glob("*.patch"))
+
+    if not patch_files:
+        print(f"no patches found in {PATCHES_DIR}", file=sys.stderr)
+        return 1
+
+    results: dict[str, list[tuple[Path, str, str]]] = {
+        "applied": [],
+        "already_fixed": [],
+        "error": [],
+    }
+
+    for pf in patch_files:
+        status, msg = apply_patch(pf)
+        results.setdefault(status, []).append((pf, status, msg))
+
+    for status in ("applied", "already_fixed", "error"):
+        entries = results.get(status, [])
+        if not entries:
+            continue
+        label = status.upper()
+        print(f"\n=== {label} ===")
+        for pf, _, msg in entries:
+            print(f"[{status}] {pf.name}: {msg}")
+
+    return 0 if not results.get("error") else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

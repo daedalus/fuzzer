@@ -1,0 +1,10 @@
+--- /tmp/regex_engine_buggy.c	2026-08-27 09:33:01.350509492 -0300
++++ /home/dclavijo/my_code/fgrep/src/regex_engine.c	2026-07-20 08:58:47.361671072 -0300
+@@ -44,6 +44,7 @@
+         void *found = memchr_fn(data + i, (int)needle_char, len - i);
+         if (!found) return false;
+         i = (size_t)((const char *)found - data);
++        if (i + pat->fixed_len > len) return false;
+
+         bool match = true;
+         for (size_t j = 1; j < pat->fixed_len; j++) {
