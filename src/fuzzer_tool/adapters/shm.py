@@ -6,16 +6,22 @@ where each non-zero edge_id identifies exactly one edge (no hash collisions).
 
 The MAP_SIZE parameter is the number of hash table entries (power of 2),
 not the number of bytes.  SHM layout: 24-byte front header + map_size * 8 bytes.
+
+The System V calls come from :mod:`fuzzer_tool.adapters.libc_shm`.  This module
+used to carry its own copy of the four ``ctypes`` bindings -- correct, but a
+second ``CDLL`` handle for the same four functions, and the last place in the
+package still open-coding the ``(void *) -1`` attach-failure comparison that
+``libc_shm.shmat`` exists to make unrepresentable.
 """
 
 import atexit
 import ctypes
-import ctypes.util
 import logging
 import os
 
 import numpy as np
 
+from fuzzer_tool.adapters import libc_shm
 from fuzzer_tool.core.count_class import bucket_bits
 
 log = logging.getLogger(__name__)
@@ -78,26 +84,30 @@ VIRGIN_DENSE_MAX = 1 << 24
 # ShmCoverage._update_max_counts for why this is not strict `>`.
 MAX_COUNT_GROWTH_FACTOR = 1.5
 
-# shmget constants
-IPC_CREAT = 0o1000
-IPC_RMID = 0
-SHM_R = 0o400
-SHM_W = 0o200
 
-_libc_name = ctypes.util.find_library("c")
-_libc = ctypes.CDLL(_libc_name or "libc.so.6", use_errno=True)
+def _alloc_segment(size: int, what: str = "") -> tuple[int, int]:
+    """Create and attach a ``size``-byte segment; return ``(shm_id, addr)``.
 
-_libc.shmget.argtypes = [ctypes.c_long, ctypes.c_size_t, ctypes.c_int]
-_libc.shmget.restype = ctypes.c_int
+    Every allocation in this module wants the same four steps -- shmget,
+    check, shmat, and destroy the fresh segment if the attach failed -- so
+    they live here once rather than in each of the four constructors that
+    used to spell them out identically.
 
-_libc.shmat.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
-_libc.shmat.restype = ctypes.c_void_p
-
-_libc.shmdt.argtypes = [ctypes.c_void_p]
-_libc.shmdt.restype = ctypes.c_int
-
-_libc.shmctl.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
-_libc.shmctl.restype = ctypes.c_int
+    ``errno`` is read immediately after each failed call and before any
+    other ctypes traffic, because :func:`ctypes.get_errno` returns the value
+    saved by the *most recent* ``use_errno=True`` call: reading it after
+    ``shmctl_rmid`` would report that call's errno instead of the attach's.
+    """
+    tag = f" {what}" if what else ""
+    shm_id = libc_shm.shmget(size)
+    if shm_id is None:
+        raise OSError(f"shmget{tag} failed: {os.strerror(ctypes.get_errno())}")
+    addr = libc_shm.shmat(shm_id)
+    if addr is None:
+        errno = ctypes.get_errno()
+        libc_shm.shmctl_rmid(shm_id)
+        raise OSError(f"shmat{tag} failed: {os.strerror(errno)}")
+    return shm_id, addr
 
 
 def _entry_struct(size: int) -> type[ctypes.Structure]:
@@ -131,13 +141,7 @@ class ShmCoverage:
         self.table_bytes = size * SIZEOF_ENTRY
         self.shm_bytes = self.table_bytes + SHM_METADATA_SIZE + SHM_TAIL_SIZE
 
-        self.shm_id = _libc.shmget(0, self.shm_bytes, IPC_CREAT | SHM_R | SHM_W)
-        if self.shm_id < 0:
-            raise OSError(f"shmget failed: {os.strerror(ctypes.get_errno())}")
-        self._ptr = _libc.shmat(self.shm_id, None, 0)
-        if self._ptr == ctypes.c_void_p(-1).value or self._ptr is None:
-            _libc.shmctl(self.shm_id, IPC_RMID, None)
-            raise OSError(f"shmat failed: {os.strerror(ctypes.get_errno())}")
+        self.shm_id, self._ptr = _alloc_segment(self.shm_bytes)
 
         # Raw byte view for the edge table only (starts after front header)
         self._map = (ctypes.c_char * self.table_bytes).from_address(self._ptr + SHM_METADATA_SIZE)
@@ -869,14 +873,7 @@ class ShmCoverage:
         if new_table_bytes <= self.table_bytes:
             return
 
-        new_shm_id = _libc.shmget(0, new_total_bytes, IPC_CREAT | SHM_R | SHM_W)
-        if new_shm_id < 0:
-            raise OSError(f"shmget resize failed: {os.strerror(ctypes.get_errno())}")
-
-        new_ptr = _libc.shmat(new_shm_id, None, 0)
-        if new_ptr == ctypes.c_void_p(-1).value or new_ptr is None:
-            _libc.shmctl(new_shm_id, IPC_RMID, None)
-            raise OSError(f"shmat resize failed: {os.strerror(ctypes.get_errno())}")
+        new_shm_id, new_ptr = _alloc_segment(new_total_bytes, what="resize")
 
         ctypes.memset(new_ptr, 0, new_total_bytes)
         # Copy the HEADER only, not the table.
@@ -901,8 +898,8 @@ class ShmCoverage:
         self._map = None
         self._entries = None
         self._tail = None
-        _libc.shmdt(old_ptr)
-        _libc.shmctl(old_shm_id, IPC_RMID, None)
+        libc_shm.shmdt(old_ptr)
+        libc_shm.shmctl_rmid(old_shm_id)
 
         self._ptr = new_ptr
         self.shm_id = new_shm_id
@@ -955,10 +952,10 @@ class ShmCoverage:
         self._entries = None
         self._tail = None
         if self._ptr is not None:
-            _libc.shmdt(self._ptr)
+            libc_shm.shmdt(self._ptr)
             self._ptr = None
         if self.shm_id >= 0:
-            _libc.shmctl(self.shm_id, IPC_RMID, None)
+            libc_shm.shmctl_rmid(self.shm_id)
             self.shm_id = -1
 
     def __del__(self):
@@ -1015,13 +1012,7 @@ class DistanceTableShm:
             self.capacity *= 2
         self.shm_bytes = 4 + self.capacity * entry_bytes
 
-        self.shm_id = _libc.shmget(0, self.shm_bytes, IPC_CREAT | SHM_R | SHM_W)
-        if self.shm_id < 0:
-            raise OSError(f"shmget failed: {os.strerror(ctypes.get_errno())}")
-        self._ptr = _libc.shmat(self.shm_id, None, 0)
-        if self._ptr == ctypes.c_void_p(-1).value or self._ptr is None:
-            _libc.shmctl(self.shm_id, IPC_RMID, None)
-            raise OSError(f"shmat failed: {os.strerror(ctypes.get_errno())}")
+        self.shm_id, self._ptr = _alloc_segment(self.shm_bytes)
         ctypes.memset(self._ptr, 0, self.shm_bytes)
         ctypes.c_uint32.from_address(self._ptr).value = self.capacity
         for key, dist in scaled.items():
@@ -1047,10 +1038,10 @@ class DistanceTableShm:
         address to write through. ``None`` raises TypeError instead.
         """
         if self._ptr:
-            _libc.shmdt(self._ptr)
+            libc_shm.shmdt(self._ptr)
         self._ptr = None
         if self.shm_id >= 0:
-            _libc.shmctl(self.shm_id, IPC_RMID, None)
+            libc_shm.shmctl_rmid(self.shm_id)
             self.shm_id = -1
 
 
@@ -1081,13 +1072,7 @@ class NodeBitmapShm:
         self.size_bytes = max(1, (num_nodes + 7) // 8)
         self.shm_bytes = 4 + self.size_bytes
 
-        self.shm_id = _libc.shmget(0, self.shm_bytes, IPC_CREAT | SHM_R | SHM_W)
-        if self.shm_id < 0:
-            raise OSError(f"shmget failed: {os.strerror(ctypes.get_errno())}")
-        self._ptr = _libc.shmat(self.shm_id, None, 0)
-        if self._ptr == ctypes.c_void_p(-1).value or self._ptr is None:
-            _libc.shmctl(self.shm_id, IPC_RMID, None)
-            raise OSError(f"shmat failed: {os.strerror(ctypes.get_errno())}")
+        self.shm_id, self._ptr = _alloc_segment(self.shm_bytes)
         ctypes.memset(self._ptr, 0, self.shm_bytes)
         ctypes.c_uint32.from_address(self._ptr).value = self.size_bytes
         self.env_id = str(self.shm_id)
@@ -1102,8 +1087,8 @@ class NodeBitmapShm:
 
     def cleanup(self):
         if self._ptr:
-            _libc.shmdt(self._ptr)
+            libc_shm.shmdt(self._ptr)
         self._ptr = None
         if self.shm_id >= 0:
-            _libc.shmctl(self.shm_id, IPC_RMID, None)
+            libc_shm.shmctl_rmid(self.shm_id)
             self.shm_id = -1

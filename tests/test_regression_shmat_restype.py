@@ -7,7 +7,9 @@ address such as ``0x7fa8adb96000`` came back sign-extended as
 ``0xffffffffadba6000``. ``memmove`` through that pointer (persistent mode) and
 ``string_at`` through it (``minimize -c``) segfault or silently touch an
 unmapped page. ``adapters/shm.py`` had the binding right all along, which is
-what makes this a copy-the-neighbour bug rather than a knowledge gap.
+what makes this a copy-the-neighbour bug rather than a knowledge gap -- it has
+since been folded into :mod:`fuzzer_tool.adapters.libc_shm` too, so there is
+one binding of these four calls in the package rather than a model and a copy.
 
 The truncation also concealed the second half of the bug. ``shmat()`` signals
 failure with ``(void *) -1``; under the accidental ``c_int`` restype that
@@ -170,8 +172,10 @@ def test_no_module_guards_an_attach_address_against_minus_one():
     attach sites set ``restype = c_void_p`` (so they passed the scan below)
     and then checked ``if ptr and ptr != -1``, which a failed attach passes.
     ``reset_bitmap()`` then wrote through the sentinel and segfaulted the
-    fuzzer.  ``adapters/shm.py`` is the correct form to copy: it compares
-    against ``ctypes.c_void_p(-1).value``, not against ``-1``.
+    fuzzer.  ``adapters/shm.py`` used to be the form to copy -- it compared
+    against ``ctypes.c_void_p(-1).value`` rather than ``-1`` -- but it now
+    routes through ``libc_shm`` like everything else, so no module in the
+    package spells the sentinel comparison out any more.
     """
     offenders = []
     for path in sorted(SRC.rglob("*.py")):

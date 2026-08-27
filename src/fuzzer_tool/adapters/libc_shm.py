@@ -18,8 +18,11 @@ subsequent read would return garbage from an unmapped address.
 Both halves belong together, in one place.  Import :func:`shmat`, :func:`shmdt`
 and :func:`shmctl_rmid` from here rather than re-binding libc locally.
 
-``adapters/shm.py`` carries its own equivalent bindings; they are correct and
-predate this module, and are left alone deliberately.
+``adapters/shm.py`` used to carry its own equivalent bindings -- correct, and
+predating this module, so they were left alone at first.  They are gone now:
+identical bindings behind a second ``CDLL`` handle bought nothing, and the
+``== ctypes.c_void_p(-1).value`` guards they came with were the last copies in
+the package of the comparison :func:`shmat` returns ``None`` to retire.
 """
 
 import ctypes
