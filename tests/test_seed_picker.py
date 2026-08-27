@@ -342,7 +342,7 @@ class TestComputeWeightsArrayPath:
         sp.f = f
         # Phase-2 modifiers to identity: we assert the vectorized Phase 1.
         sp._weight_secretary_and_cached = lambda sk, w, classifications, f: (w, 1.0, 1.0)
-        sp._weight_edge_penalties = lambda sk, w, fuzz_count, f: w
+        sp._weight_edge_penalties = lambda sk, w, fuzz_count, f, recent_counts=None: w
         sp._weight_entropy_and_distance = lambda seed, sk, meta, w, f, em, me, md: w
         sp._weight_static_features = lambda seed, cov, w, f: w
         sp._weight_length_and_cross_target = lambda seed, meta, w, f: w
