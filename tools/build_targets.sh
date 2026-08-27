@@ -351,7 +351,14 @@ _pick_cc() {
     if command -v clang &>/dev/null; then
         echo "clang"
     else
-        warn "clang not found, falling back to gcc (shallower edge coverage — see README)"
+        # >&2 matters: warn() writes to stdout, and this function's whole
+        # stdout is captured by DEFAULT_CC="$(_pick_cc)". Without the
+        # redirect, DEFAULT_CC on a clang-less box becomes the warning text
+        # *and* "gcc" — a two-line value that is not a command, so every
+        # `$cc ...` compile fails with "command not found". Each compile
+        # helper redirects stderr to /dev/null, so the only symptom is a
+        # string of "objects failed" warnings and silently missing targets.
+        warn "clang not found, falling back to gcc (shallower edge coverage — see README)" >&2
         echo "gcc"
     fi
 }

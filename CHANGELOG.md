@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **`DEFAULT_CC` swallowed the gcc-fallback warning on any box without clang,
+  breaking every vendored-library compile.** `_pick_cc()` emitted its warning
+  through `warn()`, which writes to *stdout*, and the whole of its stdout is
+  captured by `DEFAULT_CC="$(_pick_cc)"` — so `DEFAULT_CC` became the warning
+  text followed by `gcc`, which is not a command. Every helper that compiles
+  with `$cc` redirects stderr to `/dev/null`, so the only visible symptom was a
+  run of "objects failed" warnings and targets silently missing from the
+  output. Redirected to stderr, with a regression test in
+  `tests/test_regression_build_flags.py`.
 - **`run_target_fast` had no timeout, deadlocked on chatty targets, and leaked
   the child it failed on.** Bug report 2026-08-21 CRITICAL #3. This is the
   *default* spawn-fallback path — `run_target` picks it whenever the run is

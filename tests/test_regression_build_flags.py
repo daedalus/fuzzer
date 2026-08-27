@@ -149,3 +149,20 @@ def test_default_compiler_prefers_clang(script_text: str):
     body = m.group(1)
     first_branch = body.split("else")[0]
     assert "clang" in first_branch, "clang should be preferred when available"
+
+
+def test_pick_cc_warning_does_not_contaminate_default_cc(script_text: str):
+    """`DEFAULT_CC="$(_pick_cc)"` captures this function's stdout, and warn()
+    writes to stdout, so the gcc-fallback warning must be redirected to
+    stderr. Without the redirect DEFAULT_CC on a clang-less box is the
+    warning text plus "gcc" — not a command — and every compile helper fails
+    with its stderr sent to /dev/null, so the build silently drops targets."""
+    m = re.search(r"_pick_cc\(\)\s*\{(.*?)\n\}", script_text, re.S)
+    assert m, "_pick_cc not found"
+    body = m.group(1)
+    warn_lines = [ln for ln in body.splitlines() if ln.strip().startswith("warn ")]
+    assert warn_lines, "expected a fallback warning in _pick_cc"
+    for line in warn_lines:
+        assert ">&2" in line, (
+            "_pick_cc must not write its warning to stdout — it would end up inside DEFAULT_CC"
+        )
