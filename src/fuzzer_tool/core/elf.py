@@ -934,7 +934,7 @@ def _decode_x86_64(text: bytes, base_addr: int):
 
 
 def _symbol_names(target: str) -> list[str]:
-    """Return every name in the ELF .symtab. Empty list when unreadable.
+    """Return every name in the ELF .symtab and .dynsym. Empty list when unreadable.
 
     Shared by parse_sancov_offsets() and detect_ctx_bits(); both need a
     symbol-name scan and neither needs anything else from the ELF.
@@ -954,7 +954,7 @@ def _symbol_names(target: str) -> list[str]:
         return out
     shstr_off = e_shoff + e_shstrndx * e_shentsize
     shstr_offset = struct.unpack_from("<Q", elf, shstr_off + 24)[0]
-    symtab_sec = strtab_sec = None
+    symtab_sec = strtab_sec = dynsym_sec = dynstr_sec = None
     for i in range(e_shnum):
         sh = e_shoff + i * e_shentsize
         sh_type = struct.unpack_from("<I", elf, sh + 4)[0]
@@ -964,23 +964,42 @@ def _symbol_names(target: str) -> list[str]:
             symtab_sec = sh
         elif sh_type == 3 and name == b".strtab":
             strtab_sec = sh
-    if symtab_sec is None or strtab_sec is None:
-        return out
-    sym_offset = struct.unpack_from("<Q", elf, symtab_sec + 24)[0]
-    sym_size = struct.unpack_from("<Q", elf, symtab_sec + 32)[0]
-    sym_entsize = struct.unpack_from("<Q", elf, symtab_sec + 56)[0]
-    if sym_entsize == 0:
-        return out
-    strtab_offset = struct.unpack_from("<Q", elf, strtab_sec + 24)[0]
-    for i in range(min(sym_size // sym_entsize, 20000)):
-        sym = sym_offset + i * sym_entsize
-        st_name_idx = struct.unpack_from("<I", elf, sym)[0]
-        out.append(
-            elf[strtab_offset + st_name_idx : strtab_offset + st_name_idx + 64]
-            .split(b"\x00")[0]
-            .decode(errors="replace")
-        )
-    return out
+        elif sh_type == 11:
+            dynsym_sec = sh
+        elif sh_type == 3 and name == b".dynstr":
+            dynstr_sec = sh
+
+    def _read_names(sym_sec: int | None, str_sec: int | None) -> list[str]:
+        if sym_sec is None or str_sec is None:
+            return []
+        sym_offset = struct.unpack_from("<Q", elf, sym_sec + 24)[0]
+        sym_size = struct.unpack_from("<Q", elf, sym_sec + 32)[0]
+        sym_entsize = struct.unpack_from("<Q", elf, sym_sec + 56)[0]
+        if sym_entsize == 0:
+            return []
+        strtab_offset = struct.unpack_from("<Q", elf, str_sec + 24)[0]
+        names: list[str] = []
+        for i in range(min(sym_size // sym_entsize, 20000)):
+            sym = sym_offset + i * sym_entsize
+            st_name_idx = struct.unpack_from("<I", elf, sym)[0]
+            names.append(
+                elf[strtab_offset + st_name_idx : strtab_offset + st_name_idx + 64]
+                .split(b"\x00")[0]
+                .decode(errors="replace")
+            )
+        return names
+
+    static_names = _read_names(symtab_sec, strtab_sec)
+    dynamic_names = _read_names(dynsym_sec, dynstr_sec)
+    out = static_names + dynamic_names
+    # Deduplicate while preserving order
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for name in out:
+        if name not in seen:
+            seen.add(name)
+            deduped.append(name)
+    return deduped
 
 
 def _sancov_section_bounds(target: str, section: str) -> tuple[int, int] | None:
