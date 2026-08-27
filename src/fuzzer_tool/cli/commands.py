@@ -449,7 +449,7 @@ def cmd_fuzz(args):
         cmplog_max_tokens=getattr(args, "cmplog_max_tokens", 0),
         cmplog_max_pairs=getattr(args, "cmplog_max_pairs", 0),
         cmplog_workdir=getattr(args, "cmplog_workdir", None)
-        or str(Path(corpus_dir) / f"{os.path.basename(args.target)}.cmplog"),
+        or None,  # Will fall back to cachedir in CmplogCollector
         max_corpus=args.max_corpus,
         max_corpus_bytes=getattr(args, "max_corpus_bytes", 0),
         minimize_every_execs=getattr(args, "minimize_every_execs", 0),
@@ -2059,8 +2059,8 @@ def main() -> int:
     fuzz_parser.add_argument(
         "--cmplog-workdir",
         type=str,
-        default="",
-        help="Directory for cmplog runtime log files (default <corpus_dir>/<target>.cmplog)",
+        default=None,
+        help="Directory for cmplog runtime log files (default ~/.cache/fuzzer_cmplog)",
     )
     fuzz_parser.add_argument(
         "--max-corpus",
