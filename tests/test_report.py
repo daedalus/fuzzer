@@ -149,7 +149,7 @@ class TestReportSections:
         f = _make_mock_fuzzer()
         with tempfile.TemporaryDirectory() as td:
             report = generate_report(f, td, td)
-        assert "Good-Turing" in report
+        assert "Chao2 Coverage Estimation" in report
         assert "18" in report
 
     def test_mutation_effectiveness(self):

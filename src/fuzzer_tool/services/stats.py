@@ -179,7 +179,12 @@ class StatsReporter:
         gt = f._edge_tracker.good_turing_estimate()
         if gt["n"] > 0:
             print(f"  Est. remaining:    {gt['estimated_undiscovered']} edges")
+            print(
+                f"  Total richness:    {gt.get('ci_low', 0):.0f} - "
+                f"{gt.get('ci_high', 0):.0f} (95% CI, Chao2)"
+            )
             print(f"  Saturation:        {gt['saturation']:.1%} ({gt['confidence']} confidence)")
+            print(f"  P(new code next):  {gt.get('discovery_probability', 0.0):.2%}")
 
         growth = f._edge_tracker.coverage_growth_model()
         if growth["confidence"] > 0.1:

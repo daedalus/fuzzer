@@ -25,6 +25,10 @@ from fuzzer_tool.core import fast_json as json
 from fuzzer_tool.core.crc32 import crc32_ieee
 
 # ── Memory bounds ────────────────────────────────────────────────────
+# Below this many doubleton edges the classic Chao2 ratio Q1^2/(2*Q2) swings on
+# a single edge changing owner count, so use the bias-corrected form instead.
+_CHAO_BIAS_CORRECT_BELOW = 10
+
 CORRELATION_MATRIX_MAX = 10_000  # max edge-pair entries in branch correlation
 COVERAGE_TIMELINE_MAX = 1_000  # max snapshots in coverage timeline
 
@@ -1844,7 +1848,14 @@ class EdgeTracker:
         return max(len(self.cumulative_edges), self._cumulative_edges_total)
 
     def _rebuild_frequency_spectrum(self):
-        """Rebuild frequency spectrum from global edge hits (lazy)."""
+        """Rebuild the *abundance* frequency spectrum from global edge hits (lazy).
+
+        This is a spectrum over bucketed execution hit volume. It no longer
+        feeds good_turing_estimate(), which is an incidence estimator and reads
+        _edge_owner_count instead; nothing else consumes it yet. Kept because
+        the hit-volume spectrum is the right input for Zipf-slope analysis of
+        loop structure, which is a separate question from richness.
+        """
         if not self._spectrum_dirty:
             return
         if _HAS_NUMPY:
@@ -1864,76 +1875,144 @@ class EdgeTracker:
         self._spectrum_dirty = False
 
     def good_turing_estimate(self) -> dict:
-        """Estimate undiscovered edges using Good-Turing frequency analysis.
+        """Estimate undiscovered edges from the *incidence* frequency spectrum.
 
-        The raw Good-Turing formula N1²/(2*N2) assumes random sampling.
-        Coverage-guided fuzzing samples non-randomly, producing more
-        singletons than random sampling would. This inflates the estimate.
+        The sampling unit is the corpus seed, and Q_k is the number of edges
+        reached by exactly k distinct seeds. That is the model Chao2 is built
+        for, and it is the one the coverage data actually supports.
 
-        We apply two corrections:
-        1. Damping: when N2 < 10, scale the estimate by N2/10. This
-           prevents a single doubleton change from causing a 4x swing.
-        2. Cap: limit estimate to 5*N to avoid absurd extrapolations
-           from sparse frequency data.
+        This used to read ``_global_edge_hits``, which sums AFL-bucketed hit
+        counters (1, 2, 4, 8, 16, 32, 128) across every execution. Under that
+        map "seen exactly twice" means the bucket values happened to add to
+        two -- a lattice artifact of the bucketing and of how often the seed
+        was re-run, not a doubleton in any species-sampling sense. The damping
+        factor and the 5*N cap the old code needed were compensating for the
+        wrong input rather than for anything about fuzzing.
+
+        Estimators (Chao 1987; Chao & Chiu 2016), with m sampling units and
+        A = (m - 1) / m:
+
+          Chao2   = S_obs + A * Q1^2 / (2*Q2)                     (Q2 >= 10)
+          Chao2bc = S_obs + A * Q1*(Q1 - 1) / (2*(Q2 + 1))        (Q2 < 10)
+
+        The bias-corrected form is the principled version of what the damping
+        hack was approximating: it stays finite at Q2 = 0 and is insensitive
+        to a single doubleton flipping.
+
+        Sample coverage (Chao & Jost 2012), with U = sum of incidences:
+
+          C = 1 - (Q1/U) * (m-1)*Q1 / ((m-1)*Q1 + 2*Q2)
+
+        1 - C estimates the probability that the next seed reaches code
+        nothing in the corpus reaches yet -- a direct, unbiased discovery-rate
+        signal rather than a proxy for one.
 
         Returns dict with:
-          - n: total distinct edges observed
-          - n1: edges seen exactly once (singletons)
-          - n2: edges seen exactly twice
-          - estimated_undiscovered: damped estimate
-          - saturation: 1.0 - (estimated_undiscovered / total)
-          - confidence: low/medium/high based on N1/N ratio
+          - n: total distinct edges observed (S_obs)
+          - n1, n2: Q1 (edges reached by one seed), Q2 (by exactly two)
+          - m: number of sampling units (seeds) the spectrum is built from
+          - estimated_undiscovered: Chao2 richness minus S_obs
+          - saturation: S_obs / Chao2
+          - sample_coverage: C above
+          - discovery_probability: 1 - C
+          - ci_low, ci_high: log-transformed 95% interval on total richness
+          - confidence: low/medium/high from the relative width of that interval
         """
-        self._rebuild_frequency_spectrum()
         n = len(self.cumulative_edges)
-        if n == 0:
-            return {
-                "n": 0,
-                "n1": 0,
-                "n2": 0,
-                "estimated_undiscovered": 0,
-                "saturation": 0.0,
-                "confidence": "low",
-            }
-        if self._morris_mode:
-            # In Morris mode, frequency spectrum is coarser.
-            # Use approximate thresholds: n1=edges with count≤1, n2=count 2-3.
-            counts = list(self._global_edge_hits.values())
-            n1 = sum(1 for c in counts if c <= 1)
-            n2 = sum(1 for c in counts if 2 <= c <= 3)
+        owners = self._edge_owner_count or {}
+        m = len(self.seed_edges)
+        empty = {
+            "n": n,
+            "n1": 0,
+            "n2": 0,
+            "m": m,
+            "estimated_undiscovered": 0,
+            "chao2": float(n),
+            "saturation": 1.0 if n else 0.0,
+            "sample_coverage": 1.0 if n else 0.0,
+            "discovery_probability": 0.0,
+            "ci_low": float(n),
+            "ci_high": float(n),
+            "confidence": "low",
+        }
+        if n == 0 or not owners:
+            empty["saturation"] = 0.0
+            return empty
+        # A single sampling unit carries no information about what a second one
+        # would add: every edge is a singleton by construction.
+        if m < 2:
+            return empty
+
+        counts = list(owners.values())
+        q1 = sum(1 for c in counts if c == 1)
+        q2 = sum(1 for c in counts if c == 2)
+        incidences = sum(counts)
+        s_obs = len(counts)
+
+        a = (m - 1) / m
+        if q2 >= _CHAO_BIAS_CORRECT_BELOW:
+            f0 = a * (q1 * q1) / (2.0 * q2)
         else:
-            n1 = self._frequency_spectrum.get(1, 0)
-            n2 = self._frequency_spectrum.get(2, 0)
-        if n2 > 0:
-            raw_est = (n1 * n1) / (2 * n2)
-        elif n1 > 0:
-            raw_est = float(n1)
+            f0 = a * (q1 * (q1 - 1)) / (2.0 * (q2 + 1))
+        chao2 = s_obs + f0
+
+        # Chao (1987) variance of the richness estimator.
+        if q2 > 0:
+            r = q1 / q2
+            var = q2 * ((a / 2.0) * r**2 + (a**2) * r**3 + (a**2 / 4.0) * r**4)
+        elif q1 > 0 and chao2 > 0:
+            var = (
+                a * q1 * (q1 - 1) / 2.0
+                + (a**2) * q1 * (2 * q1 - 1) ** 2 / 4.0
+                - (a**2) * q1**4 / (4.0 * chao2)
+            )
+            var = max(var, 0.0)
         else:
-            raw_est = 0.0
+            var = 0.0
 
-        # Damping: when N2 is small, the estimate is unstable.
-        # Scale by N2/10 to reduce sensitivity to single doubleton changes.
-        damping = min(1.0, n2 / 10.0) if n2 > 0 else 0.5
-        est_undiscovered = raw_est * damping
+        # Log transform (Chao 1987): asymmetric, and never puts the lower bound
+        # below the number of edges actually observed.
+        if f0 > 0 and var > 0:
+            k = math.exp(1.96 * math.sqrt(math.log(1.0 + var / (f0 * f0))))
+            ci_low = s_obs + f0 / k
+            ci_high = s_obs + f0 * k
+        else:
+            ci_low = ci_high = float(chao2)
 
-        # Cap: don't extrapolate more than 5x what we've already found
-        est_undiscovered = min(est_undiscovered, n * 5)
+        # Chao & Jost incidence-based sample coverage.
+        denom = (m - 1) * q1 + 2 * q2
+        if incidences > 0 and denom > 0:
+            coverage = 1.0 - (q1 / incidences) * ((m - 1) * q1 / denom)
+        else:
+            coverage = 1.0
+        coverage = min(max(coverage, 0.0), 1.0)
 
-        total = n + est_undiscovered
-        saturation = 1.0 - (est_undiscovered / total) if total > 0 else 1.0
-        ratio = n1 / n if n > 0 else 1.0
-        if ratio < 0.05:
+        saturation = s_obs / chao2 if chao2 > 0 else 1.0
+        # Confidence now reflects how tightly the data pins the total, which is
+        # what the word meant all along; the old N1/N ratio was a proxy.
+        rel_width = (ci_high - ci_low) / chao2 if chao2 > 0 else float("inf")
+        if rel_width < 0.25:
             confidence = "high"
-        elif ratio < 0.20:
+        elif rel_width < 1.0:
             confidence = "medium"
         else:
             confidence = "low"
+
         return {
             "n": n,
-            "n1": n1,
-            "n2": n2,
-            "estimated_undiscovered": int(est_undiscovered),
+            "n1": q1,
+            "n2": q2,
+            "m": m,
+            "estimated_undiscovered": int(f0),
+            # Exact point estimate. estimated_undiscovered is truncated to an
+            # int for the existing display callers, so n + that is a slightly
+            # low reading of the same quantity.
+            "chao2": chao2,
             "saturation": saturation,
+            "sample_coverage": coverage,
+            "discovery_probability": 1.0 - coverage,
+            "ci_low": ci_low,
+            "ci_high": ci_high,
             "confidence": confidence,
         }
 

@@ -838,12 +838,15 @@ def _good_turing(f) -> str:
         return ""
     lines = [
         "",
-        "--- Good-Turing Coverage Estimation ---",
-        f"  Edges observed:       {gt['n']}",
-        f"  Singletons (1x):     {gt['n1']}",
-        f"  Doubletons (2x):     {gt['n2']}",
+        "--- Chao2 Coverage Estimation (incidence) ---",
+        f"  Edges observed:      {gt['n']}",
+        f"  Seeds sampled:       {gt.get('m', 0)}",
+        f"  Q1 (1 seed):         {gt['n1']}",
+        f"  Q2 (2 seeds):        {gt['n2']}",
         f"  Est. undiscovered:   {gt['estimated_undiscovered']}",
+        f"  Total richness:      {gt.get('ci_low', 0):.0f} - {gt.get('ci_high', 0):.0f} (95% CI)",
         f"  Saturation:          {gt['saturation']:.1%}",
+        f"  P(next seed is new): {gt.get('discovery_probability', 0.0):.2%}",
         f"  Confidence:          {gt['confidence']}",
     ]
     if f.shm_cov:
