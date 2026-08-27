@@ -281,7 +281,10 @@ class TestCDFNorms:
     def test_missing_seed(self):
         et = EdgeTracker(map_size=256)
         w, ks, crps = et._cdf_norms("a", "b")
-        assert w == 256.0  # max distance = map_size
+        # Max distance is the width of the log2 hit-count axis, not map_size:
+        # the norms are no longer measured in edge-index units.
+        assert w == et._profile_axis_span()
+        assert ks == 1.0
 
     def test_corpus_diversity(self):
         et = self._make_tracker_with_seeds()

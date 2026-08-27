@@ -29,6 +29,10 @@ from fuzzer_tool.core.crc32 import crc32_ieee
 # a single edge changing owner count, so use the bias-corrected form instead.
 _CHAO_BIAS_CORRECT_BELOW = 10
 
+# Fraction of the coverage clock that counts as the discovery frontier in
+# compute_coverage_proximity().
+_FRONTIER_FRACTION = 0.25
+
 CORRELATION_MATRIX_MAX = 10_000  # max edge-pair entries in branch correlation
 COVERAGE_TIMELINE_MAX = 1_000  # max snapshots in coverage timeline
 
@@ -627,6 +631,7 @@ class EdgeTracker:
         # MinHash/LSH for approximate Jaccard and subsumption
         self._minhash = MinHashLSH(num_perm=64, num_bands=8)
         self._corpus_sig: array | None = None
+        self._corpus_profile_cache: dict[float, float] | None = None
         # Per-seed edge traces for directed distance: seed_key -> set of (prev, curr) edges
         self.seed_edge_traces: dict[str, set[tuple[int, int]]] = {}
         # Per-target cumulative edge sets: target_name -> set of edge indices
@@ -780,6 +785,7 @@ class EdgeTracker:
         # Invalidate caches
         self._aggregate_cache = None
         self._corpus_sig = None
+        self._corpus_profile_cache = None
 
         # Update temporal tracking
         self.record_edge_lifetimes(new_edges, len(self.cumulative_edges))
@@ -922,6 +928,7 @@ class EdgeTracker:
 
         self._aggregate_cache = None
         self._corpus_sig = None
+        self._corpus_profile_cache = None
 
     # ── Temporal coverage tracking methods ─────────────────────────────────
 
@@ -1360,37 +1367,23 @@ class EdgeTracker:
                     js += q * math.log(q / m)
         return 0.5 * js
 
-    def _wasserstein_vs_aggregate(self, seed_dist: dict[int, float]) -> float:
-        """Compute Wasserstein-1 distance between a seed and the aggregate centroid.
+    def _wasserstein_vs_aggregate(self, hc: dict[int, int]) -> float:
+        """Wasserstein-1 between a seed's hit-count profile and the corpus's.
 
-        Only iterates edges present in the seed (aggregate-only edges
-        contribute zero CDF difference since seed CDF is flat there).
-        O(|seed_edges|) instead of O(|all_edges|).
+        Takes the seed's raw {edge: count} map. Normalising to a probability
+        mass first would lose the absolute counts, and the absolute counts are
+        the coordinate -- a seed that hits a loop 500 times is what this is
+        meant to separate from one that hits it 5 times.
+
+        The distance is computed on the log2 hit-count axis; the edge index
+        carries no metric (see _hitcount_profile).
         """
-        total = self._aggregate_total_count
-        if total == 0:
-            return float(self.map_size)
-
-        all_edges = sorted(seed_dist.keys())
-        if not all_edges:
+        if not hc:
             return 0.0
-
-        cdf_diff = 0.0
-        wasserstein = 0.0
-        prev_edge = all_edges[0]
-
-        for edge in all_edges:
-            gap = edge - prev_edge
-            wasserstein += abs(cdf_diff) * gap
-            p = seed_dist.get(edge, 0.0)
-            q = self._aggregate_totals.get(edge, 0.0) / total
-            cdf_diff += p - q
-            prev_edge = edge
-
-        # Account for remaining aggregate mass after last seed edge
-        if cdf_diff != 0.0:
-            wasserstein += abs(cdf_diff) * (self.map_size - prev_edge)
-
+        corpus = self._corpus_hitcount_profile()
+        if not corpus:
+            return 0.0
+        wasserstein, _ks, _crps = self._cdf_walk(self._hitcount_profile(hc), corpus)
         return wasserstein
 
     def compute_hitcount_diversity_weight(self, seed_key: str) -> float:
@@ -1428,23 +1421,99 @@ class EdgeTracker:
         # Scale to [0.5, 2.0]: low divergence → 0.5, high → 2.0
         return 0.5 + 1.5 * normalized
 
+    def _hitcount_profile(self, hc: dict[int, int]) -> dict[float, float]:
+        """Empirical distribution of a seed's per-edge hit counts.
+
+        The coordinate is log2(1 + count) and each of the seed's edges
+        contributes equal mass. This is the axis the Wasserstein/KS/CRPS
+        family is defined on.
+
+        It used to be the edge index. That axis has no metric structure in
+        this fuzzer: afl_shim.c folds every site through
+        ``edge_id = caller_ctx ^ prev_loc ^ cur_loc`` (and the ptrace backend
+        hashes addresses the same way), so |e_a - e_b| is a property of the
+        XOR, not of the program. Two "adjacent" edge ids are unrelated code,
+        and renaming one location reshuffles every distance. Measured on a
+        30-seed corpus with realistic XOR ids, the resulting weight spanned
+        only [1.10, 1.34] and what spread it had tracked the hash layout.
+
+        Hit counts are genuinely ordered -- 500 hits is further from 5 than
+        50 is -- and separating those cases is what the docstring on
+        compute_hitcount_diversity_weight says this family is for. log2
+        matches the scale AFL's counter bucketing already imposes.
+        """
+        n = len(hc)
+        if not n:
+            return {}
+        prof: dict[float, float] = {}
+        w = 1.0 / n
+        for count in hc.values():
+            x = math.log2(1.0 + max(0, count))
+            prof[x] = prof.get(x, 0.0) + w
+        return prof
+
+    def _profile_axis_span(self) -> float:
+        """Width of the hit-count axis, for normalising distances onto [0, 1]."""
+        return max(1.0, math.log2(1.0 + max(1, self.max_hit_count)))
+
+    @staticmethod
+    def _cdf_walk(prof_a: dict[float, float], prof_b: dict[float, float]) -> tuple[float, ...]:
+        """L1, Linf and L2 norms of the CDF difference between two profiles.
+
+        One pass over the merged support. Returns (wasserstein, ks, crps).
+        """
+        xs = sorted(set(prof_a) | set(prof_b))
+        if not xs:
+            return 0.0, 0.0, 0.0
+        cdf_diff = 0.0
+        wasserstein = 0.0
+        ks = 0.0
+        crps = 0.0
+        prev = xs[0]
+        for x in xs:
+            gap = x - prev
+            abs_diff = abs(cdf_diff)
+            wasserstein += abs_diff * gap
+            ks = max(ks, abs_diff)
+            crps += cdf_diff * cdf_diff * gap
+            cdf_diff += prof_a.get(x, 0.0) - prof_b.get(x, 0.0)
+            prev = x
+        ks = max(ks, abs(cdf_diff))
+        return wasserstein, ks, crps
+
+    def _corpus_hitcount_profile(self) -> dict[float, float]:
+        """Corpus-wide hit-count profile, one observation per discovered edge.
+
+        Each edge's coordinate is its mean count over the seeds that reach it,
+        so a hot edge covered by many seeds is not counted once per seed.
+        """
+        if self._corpus_profile_cache is not None:
+            return self._corpus_profile_cache
+        totals = self._aggregate_totals
+        if not totals:
+            self._corpus_profile_cache = {}
+            return self._corpus_profile_cache
+        prof: dict[float, float] = {}
+        w = 1.0 / len(totals)
+        for edge, total in totals.items():
+            owners = max(1, self._edge_owner_count.get(edge, 1))
+            x = math.log2(1.0 + total / owners)
+            prof[x] = prof.get(x, 0.0) + w
+        self._corpus_profile_cache = prof
+        return prof
+
     def compute_wasserstein_distance(self, seed_key_a: str, seed_key_b: str) -> float:
-        """Compute 1D Wasserstein-1 distance between two seeds' edge profiles.
+        """Wasserstein-1 distance between two seeds' hit-count profiles.
 
-        Treats edge indices as positions on a line, so adjacent edges
-        are "close" even with no overlap. This captures coverage spatial
-        diversity that Jaccard and JS divergence miss — two seeds hitting
-        different but nearby edges are more similar than two seeds hitting
-        the same number of edges at opposite ends of the map.
-
-        Uses CDF-based algorithm: W = integral of |F_p(x) - F_q(x)| dx
-        over sorted edge positions. O(n log n) where n = |keys_a| + |keys_b|.
+        Measured on the log2 hit-count axis (see _hitcount_profile), so two
+        seeds that drive the same edges at very different intensities are far
+        apart even though Jaccard calls them identical.
         """
         wasserstein, _ks, _crps = self._cdf_norms(seed_key_a, seed_key_b)
         return wasserstein
 
     def compute_ks_distance(self, seed_key_a: str, seed_key_b: str) -> float:
-        """Kolmogorov-Smirnov statistic between two seeds' edge profiles.
+        """Kolmogorov-Smirnov statistic between two seeds' hit-count profiles.
 
         Maximum absolute CDF difference — L∞ norm of the same quantity
         Wasserstein measures in L¹. KS ∈ [0, 1].
@@ -1453,11 +1522,10 @@ class EdgeTracker:
         return ks
 
     def compute_crps(self, seed_key_a: str, seed_key_b: str) -> float:
-        """CRPS (Continuous Ranked Probability Score) between two edge profiles.
+        """CRPS (Continuous Ranked Probability Score) between two profiles.
 
-        L² integral of the CDF difference: ∫(F_a - F_b)² dy.
-        CRPS ∈ [0, map_size]. Measured in the same units as the edge index
-        space, so interpretable directly.
+        L² integral of the CDF difference. Measured in log2-hit-count units,
+        so it is bounded by the width of that axis.
         """
         _w, _ks, crps = self._cdf_norms(seed_key_a, seed_key_b)
         return crps
@@ -1465,85 +1533,57 @@ class EdgeTracker:
     def _cdf_norms(self, seed_key_a: str, seed_key_b: str) -> tuple[float, float, float]:
         """Compute Wasserstein-1, KS, and CRPS from a single CDF walk.
 
-        Returns (wasserstein, ks, crps) — L¹, L∞, and L² norms of the
-        same CDF difference, computed in one pass over sorted edge positions.
+        Returns (wasserstein, ks, crps) — L¹, L∞, and L² norms of the same
+        CDF difference over the log2 hit-count axis.
         """
         hc_a = self.seed_hit_counts.get(seed_key_a, {})
         hc_b = self.seed_hit_counts.get(seed_key_b, {})
+        span = self._profile_axis_span()
         if not hc_a or not hc_b:
-            return float(self.map_size), 1.0, float(self.map_size)
+            return span, 1.0, span
 
-        total_a = sum(hc_a.values())
-        total_b = sum(hc_b.values())
-        if total_a == 0 or total_b == 0:
-            return float(self.map_size), 1.0, float(self.map_size)
-
-        all_edges = sorted(set(hc_a) | set(hc_b))
-        n = len(all_edges)
-        if n == 0:
-            return 0.0, 0.0, 0.0
-
-        # Vectorized path for larger edge sets
-        if _HAS_NUMPY and n > 20:
-            p = np.array([hc_a.get(e, 0) / total_a for e in all_edges], dtype=np.float64)
-            q = np.array([hc_b.get(e, 0) / total_b for e in all_edges], dtype=np.float64)
-            gaps = np.diff(all_edges).astype(np.float64)
-            cdf_diff = np.cumsum(p - q)
-            wasserstein = float(np.sum(np.abs(cdf_diff[:-1]) * gaps))
-            ks = float(np.max(np.abs(cdf_diff)))
-            crps = float(np.sum(cdf_diff[:-1] ** 2 * gaps))
-            return wasserstein, ks, crps
-
-        # Pure-Python path for small edge sets or numpy unavailable
-        cdf_diff = 0.0
-        wasserstein = 0.0
-        ks = 0.0
-        crps = 0.0
-        prev_edge = all_edges[0]
-
-        for edge in all_edges:
-            gap = edge - prev_edge
-            abs_diff = abs(cdf_diff)
-            wasserstein += abs_diff * gap
-            ks = max(ks, abs_diff)
-            crps += cdf_diff * cdf_diff * gap
-            cdf_diff += hc_a.get(edge, 0) / total_a - hc_b.get(edge, 0) / total_b
-            prev_edge = edge
-
-        return wasserstein, ks, crps
+        w, ks, crps = self._cdf_walk(self._hitcount_profile(hc_a), self._hitcount_profile(hc_b))
+        return w, ks, crps
 
     def compute_coverage_proximity(self, seed_key: str, radius: int = 5) -> float:
-        """Compute how close a seed's edges are to uncovered edges.
+        """How much of a seed's coverage sits on the discovery frontier.
 
-        For each edge the seed hits, check if any uncovered edge is within
-        `radius` positions in the bitmap. Seeds close to uncovered edges
-        are more likely to reveal new code paths when mutated.
+        Returns the fraction of the seed's edges that were first discovered in
+        the most recent quarter of the coverage clock -- edges the fuzzer only
+        just reached. Seeds anchored there are the ones adjacent to whatever
+        the search is currently opening up, which is what this weight is for.
+
+        This previously counted, for each edge, whether any *uncovered* edge id
+        lay within ``radius`` positions. Edge ids come out of
+        ``caller_ctx ^ prev_loc ^ cur_loc``, so id adjacency is a property of
+        the XOR rather than of the program, and the result carried no signal:
+        measured over a 30-seed corpus with realistic ids it returned exactly
+        1.0 for every seed, making ``w *= 0.5 + cov`` a uniform 1.5x. It also
+        cost O(|seed_edges| * radius) per call plus a scan of the whole id
+        space to build the uncovered set.
 
         Returns a weight in [0.0, 1.0]:
-        - 0.0 = seed is far from any uncovered edge
-        - 1.0 = seed is adjacent to uncovered edges
+        - 0.0 = every edge is long-established code
+        - 1.0 = the seed lives entirely on newly discovered edges
+
+        ``radius`` is accepted and ignored; it described the old id-space
+        window and has no meaning on the coverage clock.
         """
         seed_edges = self.seed_edges.get(seed_key)
-        if not seed_edges or not self.cumulative_edges:
+        if not seed_edges or not self._edge_first_seen:
             return 0.5
 
-        # Compute uncovered edge positions
-        max_edge = max(self.cumulative_edges) + radius + 1
-        all_edges = set(range(min(self.map_size, max_edge)))
-        uncovered = all_edges - self.cumulative_edges
-        if not uncovered:
-            return 0.0
+        first_seen = self._edge_first_seen
+        clock = max(first_seen.values())
+        if clock <= 0:
+            return 0.5
+        # The clock is len(cumulative_edges) at discovery time, so this is the
+        # last quarter of coverage growth rather than the last quarter of wall
+        # time -- a long plateau does not age the frontier out.
+        cutoff = clock * (1.0 - _FRONTIER_FRACTION)
 
-        # Count how many of this seed's edges are within radius of an uncovered edge
-        close_count = 0
-        for edge in seed_edges:
-            for offset in range(-radius, radius + 1):
-                neighbor = edge + offset
-                if 0 <= neighbor < self.map_size and neighbor in uncovered:
-                    close_count += 1
-                    break
-
-        return close_count / len(seed_edges) if seed_edges else 0.0
+        recent = sum(1 for e in seed_edges if first_seen.get(e, 0) >= cutoff)
+        return recent / len(seed_edges)
 
     def compute_corpus_diversity(self) -> float:
         """Estimate corpus diversity using MinHash signatures.
@@ -1721,17 +1761,12 @@ class EdgeTracker:
         if self._aggregate_total_count == 0:
             return 1.0
 
-        # Build seed distribution
-        seed_total = sum(hc.values())
-        if seed_total == 0:
-            return 1.0
-        seed_dist = {e: c / seed_total for e, c in hc.items()}
+        # Raw counts, not a normalised mass: the count is the coordinate.
+        wasserstein = self._wasserstein_vs_aggregate(hc)
 
-        # Wasserstein computed directly against aggregate (no dict materialization)
-        wasserstein = self._wasserstein_vs_aggregate(seed_dist)
-
-        # Normalize: max possible Wasserstein is map_size
-        normalized = min(wasserstein / self.map_size, 1.0)
+        # Normalize against the width of the hit-count axis, not map_size:
+        # the distance is no longer measured in edge-index units.
+        normalized = min(wasserstein / self._profile_axis_span(), 1.0)
         # Scale to [0.5, 2.0]
         return 0.5 + 1.5 * normalized
 

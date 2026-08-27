@@ -128,24 +128,39 @@ class TestWassersteinDistance:
         et.seed_hit_counts["b"] = {10: 5, 20: 3}
         assert et.compute_wasserstein_distance("a", "b") == 0.0
 
-    def test_adjacent_profiles_small(self):
+    def test_different_edges_same_intensity_are_close(self):
+        """Which edge ids a seed touches is not the axis; how hard it drives
+        them is. Two seeds hitting different code at the same intensity have
+        the same hit-count profile."""
         et = EdgeTracker()
         et.seed_hit_counts["a"] = {10: 5}
-        et.seed_hit_counts["b"] = {11: 5}
-        w = et.compute_wasserstein_distance("a", "b")
-        assert 0.0 < w < 5.0
+        et.seed_hit_counts["b"] = {40000: 5}
+        assert et.compute_wasserstein_distance("a", "b") == 0.0
 
-    def test_distant_profiles_large(self):
+    def test_similar_intensities_small(self):
+        et = EdgeTracker()
+        et.seed_hit_counts["a"] = {10: 5}
+        et.seed_hit_counts["b"] = {10: 6}
+        w = et.compute_wasserstein_distance("a", "b")
+        assert 0.0 < w < 1.0
+
+    def test_distant_intensities_large(self):
+        """A seed that drives a loop 5000 times is far from one that grazes it."""
         et = EdgeTracker()
         et.seed_hit_counts["a"] = {0: 5}
-        et.seed_hit_counts["b"] = {1000: 5}
-        w = et.compute_wasserstein_distance("a", "b")
-        assert w > 900.0
+        et.seed_hit_counts["b"] = {0: 5000}
+        near = EdgeTracker()
+        near.seed_hit_counts["a"] = {0: 5}
+        near.seed_hit_counts["b"] = {0: 8}
+        assert et.compute_wasserstein_distance("a", "b") > 8.0
+        assert et.compute_wasserstein_distance("a", "b") > near.compute_wasserstein_distance(
+            "a", "b"
+        )
 
-    def test_missing_data_returns_map_size(self):
+    def test_missing_data_returns_axis_span(self):
         et = EdgeTracker()
         et.seed_hit_counts["a"] = {0: 1}
-        assert et.compute_wasserstein_distance("a", "missing") == 65536.0
+        assert et.compute_wasserstein_distance("a", "missing") == et._profile_axis_span()
 
     def test_symmetric(self):
         et = EdgeTracker()
@@ -193,14 +208,16 @@ class TestWassersteinWeight:
         w = et.compute_wasserstein_weight("s0")
         assert 0.5 <= w <= 1.0
 
-    def test_far_from_centroid_returns_high(self):
+    def test_unusual_intensity_returns_high(self):
+        """The corpus grazes its edges; one seed hammers them. That seed is
+        behaviourally distinct and earns more energy."""
         et = EdgeTracker()
-        # Most seeds at edge 0
+        # 30 distinct edges lightly grazed, so the corpus profile sits low.
         for i in range(10):
-            et.record_edges(f"s{i}", b"\x0a\x00\x00")
-        # One seed far away at edge 50
-        et.record_edges("far", b"\x00" * 50 + b"\x0a")
-        w = et.compute_wasserstein_weight("far")
+            edges = {100 + 3 * i, 101 + 3 * i, 102 + 3 * i}
+            et.record_edges(f"s{i}", edges, hit_counts=dict.fromkeys(edges, 2))
+        et.record_edges("hot", {4, 5, 6}, hit_counts={4: 4000, 5: 4000, 6: 4000})
+        w = et.compute_wasserstein_weight("hot")
         w_centroid = et.compute_wasserstein_weight("s0")
         assert w > w_centroid
 
