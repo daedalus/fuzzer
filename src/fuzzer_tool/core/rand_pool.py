@@ -262,10 +262,20 @@ class RandPool:
     def sample(self, population, k: int):
         """Return *k* unique elements from *population*.
 
-        Accepts either an int (range) or a sequence (list/tuple/bytes),
-        matching ``random.sample`` API.
+        Accepts either an int (range size) or a sequence (list/tuple/bytes/
+        bytearray/range), matching the ``random.sample`` API.
+
+        ``range`` has to be in the sequence tuple, not just tolerated: it is
+        the idiomatic population for ``random.sample`` and a dozen mutators
+        call ``rng.sample(range(len(x)), 2)``. Without it a range fell
+        through to the int branch below and raised
+        ``TypeError: '>' not supported between instances of 'int' and
+        'range'`` on the first comparison. That only fires when the pooled
+        RNG is in use rather than stdlib ``random``, which made it look like
+        a seed-dependent test flake instead of what it is: an exception
+        raised mid-campaign from an ordinary call.
         """
-        if isinstance(population, list | tuple | bytes):
+        if isinstance(population, list | tuple | bytes | bytearray | range):
             n = len(population)
             if k > n:
                 k = n

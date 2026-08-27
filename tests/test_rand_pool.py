@@ -417,6 +417,43 @@ class TestSample:
         assert len(result) == 2
         assert result[0] != result[1]
 
+    def test_range_population(self):
+        """sample(range(n), k) is the idiomatic random.sample call and a
+        dozen mutators use it (asf/riff/mp3/adts/... `sample(range(len(x)), 2)`).
+
+        range is not list/tuple/bytes, so it used to fall through to the
+        int branch and raise TypeError on `k > population`. That only
+        happens when the pooled RNG is active rather than stdlib random,
+        so it surfaced as a seed-dependent test flake rather than as the
+        mid-campaign exception it actually is.
+        """
+        p = RandPool()
+        result = p.sample(range(10), 2)
+        assert len(result) == 2
+        assert result[0] != result[1]
+        assert all(0 <= v < 10 for v in result)
+
+    def test_range_population_matches_indices(self):
+        """A range population yields its own elements, not positions in it."""
+        p = RandPool()
+        result = p.sample(range(100, 110), 3)
+        assert len(set(result)) == 3
+        assert all(100 <= v < 110 for v in result)
+
+    def test_bytearray_population(self):
+        """bytearray is a sequence too and must not hit the int branch."""
+        p = RandPool()
+        result = p.sample(bytearray(b"abcde"), 3)
+        assert len(result) == 3
+        assert len(set(result)) == 3
+
+    def test_range_k_exceeds_population(self):
+        """Clamping works on the sequence branch for ranges as well."""
+        p = RandPool()
+        assert len(p.sample(range(4), 10)) == 4
+        assert p.sample(range(4), 0) == []
+        assert len(p.sample(range(4), 1)) == 1
+
 
 # ── Shuffle edge cases ─────────────────────────────────────────────────
 

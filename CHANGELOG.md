@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **`RandPool.sample()` raised `TypeError` on a `range` population.** The
+  dispatch was `isinstance(population, list | tuple | bytes)`, so a `range`
+  missed the sequence branch, fell through to the int branch, and died on
+  `k > population` comparing an int to a range. `rng.sample(range(n), k)` is
+  the idiomatic `random.sample` call and roughly a dozen structure-aware
+  mutators use it (`asf.py`, `riff.py`, `mp3.py`, `adts.py`, …). It only
+  fires when the pooled RNG is active rather than stdlib `random`, so it
+  presented as a seed-dependent flake in `test_mutate_includes_splice`
+  rather than as what it is: an exception raised mid-campaign from an
+  ordinary call. `bytearray` was missing from the same tuple and is added
+  with it.
 - **`DEFAULT_CC` swallowed the gcc-fallback warning on any box without clang,
   breaking every vendored-library compile.** `_pick_cc()` emitted its warning
   through `warn()`, which writes to *stdout*, and the whole of its stdout is
