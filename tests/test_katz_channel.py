@@ -76,13 +76,28 @@ class TestScores:
         assert isinstance(second, KatzResult)
 
     def test_seed_energy_ranks_rare_over_hit(self):
-        """Oracle from W4: seed whose path holds the rare sink outscores
-        the one pinned to the saturated sink."""
-        ch = _channel()
-        for _ in range(10):
-            ch.record(_bits({1}))  # saturate u1 only
-        ch.record(_bits({3}), seed_key="rare")  # touches rare sink u3
-        ch.record(_bits({1}), seed_key="hit")  # touches hit sink u1
+        """Oracle from W4: the seed whose *approach* to unexplored ground is
+        rarely trodden outscores the one whose approach is saturated.
+
+        beta is a function of a horizon node's visited parents, not of the
+        horizon node itself (which is unvisited, so its own count is 0). The
+        two seeds therefore need to attach to different horizons via
+        differently-hammered parents — a seed sitting on a sink with no
+        unvisited successor attaches to nothing and scores 0 regardless of
+        how rare it is.
+        """
+        # Two disjoint approaches into unexplored ground:
+        #   0 -> 2 (2 unvisited),  1 -> 3 (3 unvisited)
+        src = np.array([0, 1], dtype=np.int64)
+        dst = np.array([2, 3], dtype=np.int64)
+        icfg = InterproceduralCFG(
+            [0x100 * i for i in range(4)], [f"f{i}" for i in range(4)], src, dst, {}
+        )
+        ch = KatzChannel(icfg, {k: k for k in range(4)})
+        for _ in range(50):
+            ch.record(_bits({0}))  # saturate the approach at node 0
+        ch.record(_bits({0}), seed_key="hit")
+        ch.record(_bits({1}), seed_key="rare")
         ch.ensure_scores(force=True)
         e_rare = ch.seed_energy("rare")
         e_hit = ch.seed_energy("hit")

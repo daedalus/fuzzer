@@ -26,7 +26,7 @@ from fuzzer_tool.core.icfg import (
     build_interprocedural_cfg,
     probe_key_node_table,
 )
-from fuzzer_tool.core.schedulers.katz import katz_scores
+from fuzzer_tool.core.schedulers.katz import build_beta, katz_scores
 
 log = logging.getLogger(__name__)
 
@@ -138,7 +138,11 @@ class KatzChannel:
         if self._scores is None or (self._dirty and due) or force:
             masks = {k: v for k, v in self._masks.items() if len(v) * 8 >= self.n_nodes}
             self._horizon = build_horizon_graph(self.icfg, masks)
-            self._scores = katz_scores(self._horizon, hit_counts=self.hit_counts.copy())
+            # hit_counts is ICFG-indexed; build_beta translates through the
+            # horizon's visited-parent sets and divides by executions, not by
+            # the sum of per-node counts.
+            beta = build_beta(self._horizon, self.hit_counts, float(self.exec_count))
+            self._scores = katz_scores(self._horizon, beta=beta)
             self._dirty = False
             self._last_recompute_exec = self.exec_count
         return self._scores

@@ -17,7 +17,12 @@ over the ICFG:
    seed's path.
 
 All indices into ``src``/``dst``/seed-edge sets refer to positions in
-``u_nodes`` (ascending original ICFG addresses).
+``u_nodes`` (ascending original ICFG addresses). That is a *different*
+index space from the ICFG's: U is the unvisited complement, so U-index i
+is ICFG node ``u_icfg_index[i]``, which is >= i and drifts further apart
+the more coverage a campaign has. Any per-node array a caller holds
+(hit counts, distances) is in the ICFG space and must be translated
+before it is used as a per-U quantity.
 """
 
 import numpy as np
@@ -36,6 +41,8 @@ class HorizonGraph:
         horizon_set: set[int],
         seed_names: list[str],
         seed_edges: dict[str, set[int]],
+        u_icfg_index: list[int] | None = None,
+        visited_parents: dict[int, set[int]] | None = None,
     ):
         self.u_nodes = u_nodes
         self.node_index: dict[int, int] = {a: i for i, a in enumerate(u_nodes)}
@@ -44,6 +51,18 @@ class HorizonGraph:
         self.horizon_set = horizon_set  # original ICFG addresses
         self.seed_names = seed_names
         self._seed_edges = seed_edges
+        # U-index -> original ICFG node index. The two spaces differ as soon
+        # as anything is visited, and every array the caller holds (hit
+        # counts, distances) is in the ICFG space, so the translation has to
+        # be carried on the graph rather than reconstructed by each consumer.
+        self.u_icfg_index: list[int] = (
+            list(u_icfg_index) if u_icfg_index is not None else list(range(len(u_nodes)))
+        )
+        # U-index -> ICFG indices of its *visited* parents. Empty for U nodes
+        # off the horizon. This is what the paper's beta is a function of:
+        # R_i counts mutations reaching node i's parents, not node i, which is
+        # unvisited by construction and therefore has R_i = 0.
+        self.visited_parents: dict[int, set[int]] = visited_parents or {}
 
     @property
     def n_u(self) -> int:
@@ -204,4 +223,6 @@ def build_horizon_graph(icfg: InterproceduralCFG, visited: dict[str, bytes]) -> 
         horizon_set=horizon_addrs,
         seed_names=seed_names,
         seed_edges=seed_edges,
+        u_icfg_index=kept,
+        visited_parents={renum[h]: vp for h, vp in parents_of_h.items()},
     )
