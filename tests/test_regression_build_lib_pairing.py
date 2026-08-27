@@ -25,6 +25,11 @@ PAIRED = {
     "png_read": ("PNG_INC", "PNG_LIBS"),
     "zlib_read": ("ZLIB_INC", "ZLIB_LIBS"),
     "gzip_read": ("ZLIB_INC", "GZIP_LIBS"),
+    # sqlite3.h is parsed under $SQLITE_DEFINES (carried in $SQLITE_INC) and
+    # must link the object compiled with that same define list: a header and
+    # a library that disagree about SQLITE_* build options is the same class
+    # of silent mismatch as the zlib version check above.
+    "sqlite_read": ("SQLITE_INC", "SQLITE_LIBS"),
 }
 
 

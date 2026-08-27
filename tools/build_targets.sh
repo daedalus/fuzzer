@@ -20,6 +20,7 @@
 #   tools/vendor_grep.sh     -> vendor/grep
 #   tools/vendor_ffmpeg.sh   -> vendor/ffmpeg
 #   tools/vendor_secp256k1.sh -> vendor/secp256k1 (secp256k1_read.so)
+#   tools/vendor_sqlite.sh   -> vendor/sqlite    (sqlite_read.so)
 
 set -e
 
@@ -54,6 +55,15 @@ TARGETS="targets"
 VENDOR="vendor"
 LZ4="${LZ4_DIR:-vendor/lz4}"
 SECP256K1="${SECP256K1_DIR:-vendor/secp256k1}"
+SQLITE="${SQLITE_DIR:-vendor/sqlite}"
+# Shared by compile_sqlite_objects and the sqlite_read.so link: the wrapper
+# includes sqlite3.h, and a header parsed under different SQLITE_* defines
+# than the library it links against is the classic silent-ABI-mismatch bug
+# (sqlite3_int64 widths, omitted APIs), so both sides use this one list.
+SQLITE_DEFINES="-DSQLITE_THREADSAFE=0 -DSQLITE_OMIT_LOAD_EXTENSION=1 \
+-DSQLITE_ENABLE_DESERIALIZE -DSQLITE_ENABLE_FTS4 -DSQLITE_ENABLE_FTS5 \
+-DSQLITE_ENABLE_RTREE -DSQLITE_ENABLE_GEOPOLY -DSQLITE_ENABLE_DBSTAT_VTAB \
+-DSQLITE_ENABLE_STMTVTAB"
 TARGETS_MD5=".target.md5"
 OPTS="${@:---all}"
 HAS_FGREP=0
@@ -463,6 +473,59 @@ compile_secp256k1_objects() {
         ok "secp256k1 objects${suffix:+ ($suffix)}"
     else
         warn "secp256k1 objects${suffix:+ ($suffix)} failed"
+        return 1
+    fi
+}
+
+# ── Compile the sqlite amalgamation object ─────────────────────────
+# Vendored via tools/vendor_sqlite.sh (extracts to vendor/sqlite/).
+#
+# One 9 MB translation unit, so this is the slowest single compile in the
+# script (~1 min at -O2) — the object is cached in $TMPDIR across runs by
+# suffix, same as the lz4/secp256k1 objects.
+#
+# Same shim discipline as those (Hard Rule 8): compiled WITHOUT
+# `-include $SHIM`, since that flag applies to every .c on a command line
+# and compiling sqlite3.c alongside sqlite_read.c would emit
+# __afl_map_shm / __afl_area / __afl_guarded_call into both objects and
+# fail the link with multiple-definition errors.
+#
+# Build defines follow SQLITE_ENABLE_* choices SQLite's own fuzzers use:
+#   THREADSAFE=0            — the fuzzer drives one connection on one thread;
+#                             mutex work is pure overhead per exec
+#   OMIT_LOAD_EXTENSION     — no dlopen surface from a hostile file
+#   ENABLE_DESERIALIZE      — sqlite3_deserialize(), the DB-image entry the
+#                             target uses; a no-op on >= 3.36 (on by default
+#                             unless SQLITE_OMIT_DESERIALIZE), kept for
+#                             older vendored versions
+#   FTS4/FTS5/RTREE/GEOPOLY/DBSTAT/STMTVTAB
+#                           — virtual tables reachable from a corrupt schema
+#                             or from SQL text; excluding them would hide the
+#                             module code from the fuzzer entirely
+# Coverage: trace-pc-guard instruments every basic block of the library
+# without emitting the shim's symbols, the same trick compile_secp256k1_objects
+# uses — without it the map only ever sees the wrapper's own landmarks.
+compile_sqlite_objects() {
+    local suffix="$1" flags="$2" cc="${3:-$DEFAULT_CC}" extra_cflags="${4:-}"
+    [ -f "$SQLITE/sqlite3.c" ] || return 1
+    echo "Compiling sqlite amalgamation${suffix:+ ($suffix)} (this takes a minute)..."
+    local rc=0
+    # trace-pc-guard is clang-only (see _pick_cc): gcc's -fsanitize-coverage=
+    # takes trace-pc and trace-cmp and errors out on this one, which would
+    # fail the whole compile and drop the target on a gcc-only box. Under gcc
+    # the object is built without it and coverage falls back to the wrapper's
+    # hand-placed __afl_map_edge() landmarks — shallower, but a working
+    # target beats a skipped one.
+    local cov_flag=""
+    case "$cc" in
+        *clang*) cov_flag="-fsanitize-coverage=trace-pc-guard" ;;
+    esac
+    $cc $flags $cov_flag -fPIC -O2 -g $extra_cflags $SQLITE_DEFINES -I"$SQLITE" \
+        -c "$SQLITE/sqlite3.c" -o "/tmp/sqlite3${suffix}.o" 2>/dev/null || rc=$?
+    if [ $rc -eq 0 ]; then
+        ok "sqlite object${suffix:+ ($suffix)}"
+    else
+        warn "sqlite object${suffix:+ ($suffix)} failed"
         return 1
     fi
 }
@@ -877,6 +940,30 @@ build_standalone_so_targets() {
     else
         warn "secp256k1_read${out_suffix}.so: vendor/secp256k1 not found, skipping (run tools/vendor_secp256k1.sh)"
     fi
+
+    # sqlite_read — vendored SQLite amalgamation (tools/vendor_sqlite.sh
+    # extracts to vendor/sqlite). Same object discipline as lz4_read and
+    # secp256k1_read above: sqlite3.c is compiled separately, without
+    # -include $SHIM. _nosan builds a distinct _nosan.so instead of
+    # overwriting the base .so.
+    local SQLITE_OBJS="/tmp/sqlite3${suffix}.o"
+    # -lm: sqlite's math functions; -lpthread even at THREADSAFE=0 because
+    # the shim's own machinery links against it.
+    local SQLITE_LIBS="$SQLITE_OBJS -lm -lpthread -Wl,--export-dynamic"
+    local SQLITE_INC="-I$SQLITE $SQLITE_DEFINES"
+    if [ ! -f "$TARGETS/sqlite_read.c" ]; then
+        :  # target source absent — nothing to build
+    elif [ ! -f "$SQLITE/sqlite3.c" ]; then
+        warn "sqlite_read${out_suffix}.so: vendor/sqlite not found, skipping (run tools/vendor_sqlite.sh)"
+    elif compile_sqlite_objects "$suffix" "$flags" "$DEFAULT_CC"; then
+        if [ "$suffix" = "_nosan" ]; then
+            build_so_target "$TARGETS/sqlite_read.c" "$TARGETS/sqlite_read_nosan.so" "$SQLITE_LIBS" "$flags $SQLITE_INC"
+        else
+            build_so_target "$TARGETS/sqlite_read.c" "$TARGETS/sqlite_read${out_suffix}.so" "$SQLITE_LIBS" "$flags $SQLITE_INC"
+        fi
+    else
+        warn "sqlite_read${out_suffix}.so: amalgamation failed to compile, skipping"
+    fi
 }
 
 # ── Compile vendored libraries with sancov instrumentation ───────
@@ -1009,6 +1096,7 @@ verify_afl() {
              "$TARGETS"/tailslayer_read "$TARGETS"/tailslayer_read.so \
              "$TARGETS"/lz4_read "$TARGETS"/lz4_read_nosan "$TARGETS"/lz4_read.so "$TARGETS"/lz4_read_nosan.so \
              "$TARGETS"/secp256k1_read.so "$TARGETS"/secp256k1_read_nosan.so \
+             "$TARGETS"/sqlite_read.so "$TARGETS"/sqlite_read_nosan.so \
              "$TARGETS"/grep_read "$TARGETS"/grep_read_nosan "$TARGETS"/grep_read.so "$TARGETS"/grep_read_nosan.so \
              "$TARGETS"/fuzzgoat_read "$TARGETS"/fuzzgoat_read_nosan "$TARGETS"/fuzzgoat_read.so "$TARGETS"/fuzzgoat_read_nosan.so; do
         [ -f "$f" ] || continue
@@ -1594,6 +1682,8 @@ print_feature_matrix() {
     printf '  %-20s %-12s %s\n' "fuzzgoat_read" "$state" "$([ "$HAS_FUZZGOAT" -eq 1 ] && echo "found at $VENDOR/fuzzgoat" || echo "not vendored — run tools/vendor_fuzzgoat.sh")"
     state=$([ -d "$SECP256K1/src" ] && echo "BUILD" || echo "SKIP")
     printf '  %-20s %-12s %s\n' "secp256k1_read" "$state" "$([ -d "$SECP256K1/src" ] && echo "found at $SECP256K1" || echo "not vendored — run tools/vendor_secp256k1.sh")"
+    state=$([ -f "$SQLITE/sqlite3.c" ] && echo "BUILD" || echo "SKIP")
+    printf '  %-20s %-12s %s\n' "sqlite_read" "$state" "$([ -f "$SQLITE/sqlite3.c" ] && echo "found at $SQLITE" || echo "not vendored — run tools/vendor_sqlite.sh")"
     echo ""
 }
 

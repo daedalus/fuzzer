@@ -854,7 +854,7 @@ The build script compiles every target as both an executable and a `.so` shared 
 Every invocation prints a **build feature matrix** before compiling: an always-on text table
 listing each feature flag (`cmplog`, `tracecmp`, `clang-scov`, `vendor-tracecmp`, `distance`,
 `ffmpeg-sancov`), the sanitizer variant set being built (ASAN/UBSAN/No-ASAN), and whether
-optional target groups (fgrep, tailslayer, lz4, secp256k1) will build or be skipped based on what the
+optional target groups (fgrep, tailslayer, lz4, secp256k1, sqlite) will build or be skipped based on what the
 script found on disk — so the exact effect of the passed flags is visible at a glance.
 
 **Dual vendored FFmpeg builds**: FFmpeg fuzz targets require coverage-instrumented
@@ -899,6 +899,51 @@ clobbers a previously-parsed value with the zeroed result of a failed iteration 
 the wrapper must keep the last *successful* parse in a separate object and never
 touch the loop-scratch object afterwards. Verified: 52 edges / ~79% map saturation
 on a 5k-exec campaign with zero crashes.
+
+### Vendored SQLite target (sqlite_read)
+
+`targets/sqlite_read.so` wraps the vendored SQLite amalgamation
+(`tools/vendor_sqlite.sh` → `vendor/sqlite/`), built the same way as
+lz4_read and secp256k1_read: a `.so`-only target from
+`build_standalone_so_targets()` via `compile_sqlite_objects()`, with
+`sqlite3.c` compiled as its own TU (no `-include $SHIM`) and linked into the
+wrapper. It is the slowest single compile in the script — one 9 MB
+translation unit, roughly a minute at `-O2`.
+
+`$SQLITE_DEFINES` is shared by the library compile and the wrapper link on
+purpose: `sqlite3.h` parsed under different `SQLITE_*` options than the
+object it links against is a silent ABI mismatch. The list follows what
+SQLite's own fuzzers enable — `THREADSAFE=0`, `OMIT_LOAD_EXTENSION`,
+`ENABLE_DESERIALIZE`, and the FTS4/FTS5/RTREE/GEOPOLY/DBSTAT/STMTVTAB
+virtual tables, which are reachable from a corrupt schema and would
+otherwise be invisible to the fuzzer.
+
+**The input has no mode byte, and that is the point.** The dispatch is
+`size >= 100 && memcmp(buf, "SQLite format 3\0", 16) == 0` → database image
+via `sqlite3_deserialize()`, anything else → SQL text. Those are the two
+conditions in the `sqlite_chunk_mutate` sniffer predicate
+(`core/operator_registry.py`), so the target and the structure-aware mutator
+agree by construction. A selector byte at offset 0 — the `lz4_read.c`
+convention — would push the magic to offset 1, the sniffer would never fire,
+and every database in the corpus would be mutated as an unstructured byte
+string while the campaign carried on reporting edges as usual.
+`tests/test_regression_sqlite_target.py` pins both sides.
+
+The DB path runs `PRAGMA integrity_check(4)` (walks every page, b-tree,
+overflow chain and index — where corrupt-image bugs live), reads
+`sqlite_master`, then scans up to 24 tables reading every column value, since
+without a column read the b-tree walk stops at the cell boundary and the
+record decoder never runs. Identifiers are quoted with `%w` so a table named
+`a"; DROP` is scanned rather than reinterpreted.
+
+**In-process discipline**: `direct_lite` runs this in the fuzzer's own
+process, so a hang or an OOM ends the campaign rather than one exec. The
+connection is `:memory:` with `DEFENSIVE` and `TRUSTED_SCHEMA=0` (SQLite's
+documented mitigation for untrusted database files), extension loading off,
+an authorizer denying ATTACH/DETACH/PRAGMA on the SQL path, a
+progress-handler opcode budget, and `sqlite3_hard_heap_limit64`. A corrupt
+file returning `SQLITE_CORRUPT`/`SQLITE_NOTADB` is the expected outcome and
+not a finding; a segfault or an assertion failure is.
 
 ### Build-time Cmplog for .so Targets
 

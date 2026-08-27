@@ -124,6 +124,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   slowdown to buy 2 function-entry edges. It stays behind explicit `--no-shm`.
 
 ### Added
+- **Vendored SQLite fuzz target (`targets/sqlite_read.c`).** Wraps the SQLite
+  amalgamation (`tools/vendor_sqlite.sh` → `vendor/sqlite/`) as a `.so` target
+  built like lz4_read and secp256k1_read: `sqlite3.c` compiled as its own TU
+  without the shim, linked into the wrapper, `$SQLITE_DEFINES` shared by both
+  sides so header and library cannot disagree about `SQLITE_*` options.
+
+  The input carries **no mode-selector byte**, unlike `lz4_read.c`. The
+  `sqlite_chunk_mutate` sniffer is `len(d) >= 100 and d[:16] == b"SQLite
+  format 3\x00"`, so a prefix byte would shift the magic to offset 1, stop the
+  sniffer firing, and flat-byte-mutate every database in the corpus while the
+  campaign kept reporting edges — a total loss of structure-awareness with no
+  symptom. The dispatch uses those same two conditions: magic → database image
+  via `sqlite3_deserialize()`, anything else → SQL text.
+  `tests/test_regression_sqlite_target.py` pins the agreement.
+
+  DB path: `PRAGMA integrity_check(4)`, `sqlite_master` read, then up to 24
+  table scans reading every column value (without a column read the b-tree
+  walk stops at the cell boundary and the record decoder never runs).
+  In-process safety, since `direct_lite` shares the fuzzer's process:
+  `:memory:` only, `DEFENSIVE` + `TRUSTED_SCHEMA=0`, extension loading off,
+  authorizer denying ATTACH/DETACH/PRAGMA on the SQL path, progress-handler
+  opcode budget, and `sqlite3_hard_heap_limit64`. Verified over 3,500 execs of
+  corrupt, truncated and random inputs: no crashes, RSS flat.
 - **Startup warns when the target has no edge instrumentation.** With coverage
   on by default the common failure is no longer "forgot `-c`" but "target was
   never built instrumented", and both produce the identical symptom. `run()`

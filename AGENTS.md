@@ -85,6 +85,7 @@ fuzzer, not just the target.
 3. For in-process mode, also build `<name>_read.so` (`-shared -fPIC`; link `-lasan` explicitly and use `-Wl,-Bsymbolic` when cmplog is on — see `tools/build_targets.sh`, and prefer adding the target there over hand-rolling the flags).
 4. Verify with `nm`: `__afl` symbols present in the executable, `fuzz_shm_run` present in the `.so`; then run `tools/build_targets.sh` and confirm the target appears in the feature matrix.
 5. Add a `dictionaries/` token file if the format has meaningful tokens.
+6. If the format already has a structure-aware mutator, check its sniffer predicate in `core/operator_registry.py` before choosing an input layout. A mode-selector prefix byte (as in `lz4_read.c`) shifts the magic off offset 0, the sniffer stops firing, and the corpus gets flat-byte mutated on a structured format with no visible symptom — see `targets/sqlite_read.c` and `tests/test_regression_sqlite_target.py`.
 
 ### Add a new op mutator
 
@@ -107,7 +108,7 @@ fuzzer, not just the target.
 | `ruff format src/ tests/` / `ruff check src/ tests/` | Format / lint |
 | `fuzzer-tool --help` | Show CLI help |
 | `tools/build_targets.sh` | Build all fuzz targets (ASAN + cmplog by default; see the script's flag list) |
-| `tools/vendor_lz4.sh` / `vendor_grep.sh` / `vendor_ffmpeg.sh` / `vendor_secp256k1.sh` | Fetch vendored library sources into `vendor/` (required before building the matching targets) |
+| `tools/vendor_lz4.sh` / `vendor_grep.sh` / `vendor_ffmpeg.sh` / `vendor_secp256k1.sh` / `vendor_sqlite.sh` | Fetch vendored library sources into `vendor/` (required before building the matching targets) |
 | `python tools/corpus_png.py --out corpus --download` | Generate PNG corpus |
 | `tools/bench.sh` / `tools/bench_sweep.sh` | Config comparison / feature sweep |
 | `lizard --CCN 15 -w .` | Cyclomatic complexity violations |
@@ -131,12 +132,12 @@ src/fuzzer_tool/
 │                 #   stats.py, corpus_manager.py, parallel.py, report.py
 └── cli/          # CLI entry point (commands.py, __main__.py)
 
-tools/            # build_targets.sh, vendor_<lib>.sh (ffmpeg/grep/lz4/secp256k1), corpus_png.py,
+tools/            # build_targets.sh, vendor_<lib>.sh (ffmpeg/grep/lz4/secp256k1/sqlite), corpus_png.py,
                   #   bench.sh, bench_sweep.sh, release.sh
 targets/          # Fuzz target sources (*.c) — compiled binaries are never committed
 dictionaries/     # Format token dicts (png.dict)
 vendor/           # Vendored library sources — gitignored, fetched by tools/vendor_<lib>.sh.
-                  #   FFmpeg 7.1.3, lz4, secp256k1 (+ zlib/libpng/libjpeg-turbo for trace-cmp builds)
+                  #   FFmpeg 7.1.3, lz4, secp256k1, sqlite (+ zlib/libpng/libjpeg-turbo for trace-cmp builds)
 docs/             # DEEP_DIVE.md (comprehensive reference), TODO.md, refs/ (agent reference files), per-feature docs
 ```
 
