@@ -125,6 +125,18 @@ def _make_mock_fuzzer(**overrides):
     f._exec_time_tracker.p99 = 0.015
     f._exec_time_tracker.suggested_timeout.return_value = 0.07
     f.discovery_rate = MagicMock(return_value=50.0)
+    # A blanket MagicMock answers comparison_stats()/total_comparisons() with
+    # more MagicMocks, which is not what any real collector returns and hides
+    # shape errors behind a mock that agrees with everything. Give the
+    # comparison-profile section real data to render.
+    f._cmplog = MagicMock()
+    f._cmplog.tokens = [b"tok"]
+    f._cmplog.pairs = [(b"a", b"b")]
+    f._cmplog.comparison_stats.return_value = {
+        "memcmp": (1200, 3),
+        "trace_switch": (40, 12),
+    }
+    f._cmplog.total_comparisons.return_value = (1240, 15)
     for k, v in overrides.items():
         setattr(f, k, v)
     return f
@@ -705,6 +717,52 @@ class TestReportCrashSignatures:
         del f.shm_cov._seen
         result = _edge_map_analysis(f)
         assert result == ""
+
+
+class TestComparisonProfile:
+    """The per-callback fired/asserted table.
+
+    Neither number is derivable from the CMP record stream: records carry no
+    callback identity, the collector dedups multiplicity away, and satisfied
+    layer-1 comparisons are dropped by the record writer on purpose.
+    """
+
+    def test_section_renders_per_callback_rows(self):
+        f = _make_mock_fuzzer()
+        with tempfile.TemporaryDirectory() as td:
+            report = generate_report(f, td, td)
+        assert "Comparison Profile" in report
+        assert "memcmp" in report
+        assert "1,200" in report
+
+    def test_rows_ordered_by_fire_count(self):
+        f = _make_mock_fuzzer()
+        with tempfile.TemporaryDirectory() as td:
+            report = generate_report(f, td, td)
+        assert report.index("memcmp") < report.index("trace_switch")
+
+    def test_assert_rate_is_shown(self):
+        """A hot site with a near-zero assert rate is the actionable case."""
+        f = _make_mock_fuzzer()
+        f._cmplog.comparison_stats.return_value = {"memcmp": (1000, 250)}
+        f._cmplog.total_comparisons.return_value = (1000, 250)
+        with tempfile.TemporaryDirectory() as td:
+            report = generate_report(f, td, td)
+        assert "25.0%" in report
+
+    def test_absent_when_no_counts_collected(self):
+        f = _make_mock_fuzzer()
+        f._cmplog.comparison_stats.return_value = {}
+        f._cmplog.total_comparisons.return_value = (0, 0)
+        with tempfile.TemporaryDirectory() as td:
+            report = generate_report(f, td, td)
+        assert "Comparison Profile" not in report
+
+    def test_absent_when_cmplog_disabled(self):
+        f = _make_mock_fuzzer(_cmplog=None)
+        with tempfile.TemporaryDirectory() as td:
+            report = generate_report(f, td, td)
+        assert "Comparison Profile" not in report
 
 
 class TestReportSMT:

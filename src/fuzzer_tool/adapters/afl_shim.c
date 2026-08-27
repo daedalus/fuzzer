@@ -1013,6 +1013,99 @@ static int    __afl_cmplog_fd  = -1;
 static char   __afl_cmplog_buf[CMPLOG_BUFFER_SIZE];
 static size_t __afl_cmplog_pos = 0;
 
+/* ── Per-callback comparison counters ($_CMPLOG_COUNTS) ───────────────
+ *
+ * The CMP record stream cannot answer "how many comparisons fired, and
+ * how many were satisfied", for three structural reasons:
+ *
+ *   1. No function identity. Every layer-1 interceptor funnels into
+ *      __afl_cmplog_bytes and every layer-2 callback into
+ *      __afl_cmplog_ints, so a record cannot say which one produced it:
+ *      const_cmp is indistinguishable from cmp, and a switch case is
+ *      indistinguishable from an 8-byte compare.
+ *   2. No multiplicity. The Python side dedups on (op_a, op_b, width)
+ *      per batch and again against the running pair set, then truncates
+ *      the log -- a comparison that fired a million times with the same
+ *      operands reaches the collector once.
+ *   3. No satisfied comparisons at all on layer 1. __afl_cmplog_bytes
+ *      drops result == 0 on purpose (see its comment): a solved compare
+ *      is exactly the pollution the pair pool must not carry. The record
+ *      that would prove the compare was satisfied is the one never written.
+ *
+ * Counting therefore lives in the interceptors, ahead of the record
+ * writer, and travels on its own channel. Two counters per site: fired
+ * (the interceptor was entered) and asserted (the comparison's predicate
+ * held -- operands equal for the cmp family, needle found for the search
+ * family, non-empty span for strspn/strcspn, a == b for trace-cmp).
+ *
+ * The counts go to $_CMPLOG_COUNTS rather than into $_CMPLOG_OUT because
+ * the collector caps its read of the record stream at 10k lines per pass
+ * and truncates regardless; a CNT record past the cap would be silently
+ * dropped, and rotation would eat it too.
+ *
+ * Dumps are DELTAS, zeroed as they are written. That makes summation on
+ * the Python side correct in every execution mode without the reader
+ * knowing anything about process lifetimes: a subprocess run dumps once
+ * at exit, a direct_lite run dumps repeatedly into the same file, and
+ * both simply add up.
+ *
+ * Counting is off unless _CMPLOG_COUNTS is set: memcmp is hot in most
+ * targets and an unread counter is pure overhead. */
+enum {
+    __AFL_CMP_MEMCMP = 0,
+    __AFL_CMP_STRCMP,
+    __AFL_CMP_STRNCMP,
+    __AFL_CMP_STRCASECMP,
+    __AFL_CMP_STRNCASECMP,
+    __AFL_CMP_BCMP,
+    __AFL_CMP_MEMCHR,
+    __AFL_CMP_MEMRCHR,
+    __AFL_CMP_MEMMEM,
+    __AFL_CMP_STRSTR,
+    __AFL_CMP_STRCASESTR,
+    __AFL_CMP_STRPBRK,
+    __AFL_CMP_STRSPN,
+    __AFL_CMP_STRCSPN,
+    __AFL_CMP_WMEMCMP,
+    __AFL_CMP_WCSNCMP,
+    __AFL_CMP_WCSCMP,
+    __AFL_CMP_WCSCASECMP,
+    __AFL_CMP_TRACE_CMP1,
+    __AFL_CMP_TRACE_CMP2,
+    __AFL_CMP_TRACE_CMP4,
+    __AFL_CMP_TRACE_CMP8,
+    __AFL_CMP_TRACE_CONST_CMP1,
+    __AFL_CMP_TRACE_CONST_CMP2,
+    __AFL_CMP_TRACE_CONST_CMP4,
+    __AFL_CMP_TRACE_CONST_CMP8,
+    __AFL_CMP_TRACE_SWITCH,
+    __AFL_CMP_SITES
+};
+
+/* Index-matched to the enum above. Longest is "trace_const_cmp1" (16). */
+static const char *const __afl_cmp_names[__AFL_CMP_SITES] = {
+    "memcmp",      "strcmp",      "strncmp",     "strcasecmp",
+    "strncasecmp", "bcmp",        "memchr",      "memrchr",
+    "memmem",      "strstr",      "strcasestr",  "strpbrk",
+    "strspn",      "strcspn",     "wmemcmp",     "wcsncmp",
+    "wcscmp",      "wcscasecmp",  "trace_cmp1",  "trace_cmp2",
+    "trace_cmp4",  "trace_cmp8",  "trace_const_cmp1", "trace_const_cmp2",
+    "trace_const_cmp4", "trace_const_cmp8", "trace_switch",
+};
+
+static uint64_t __afl_cmp_fired[__AFL_CMP_SITES];
+static uint64_t __afl_cmp_hit[__AFL_CMP_SITES];
+static int      __afl_cmp_counts_fd = -1;
+
+/* The fd doubles as the enable flag: no output file, no counting. */
+#define __AFL_CMP_COUNT(id, satisfied)                                   \
+    do {                                                                 \
+        if (__afl_cmp_counts_fd >= 0) {                                  \
+            __afl_cmp_fired[(id)]++;                                     \
+            if (satisfied) __afl_cmp_hit[(id)]++;                        \
+        }                                                                \
+    } while (0)
+
 __AFL_NO_COV static void __afl_cmplog_flush(void) {
     if (__afl_cmplog_pos == 0) {
         return;
@@ -1070,6 +1163,43 @@ static char *__afl_put_hexbytes(char *p, const unsigned char *b, size_t n) {
         *p++ = hex[b[i] & 0xf];
     }
     return p;
+}
+
+/* ── Counter dump: "CNT <name> <fired> <asserted>" ────────────────────
+ *
+ * Writes the delta since the previous dump and zeroes as it goes, so
+ * callers may dump as often as they like without double counting. Only
+ * sites that fired are emitted, which keeps the common case (a target
+ * touching three of the twenty-seven) to three short lines.
+ *
+ * write(2) and hand-rolled formatting only: this runs from the crash
+ * handler, where stdio is not async-signal-safe. Worst-case line is
+ * "CNT " + 16 name + 2 * 20 digits + 2 separators + newline = 63 bytes,
+ * so the 64-byte headroom check below cannot under-reserve. */
+__AFL_NO_COV static void __afl_cmp_dump_counts(void) {
+    if (__afl_cmp_counts_fd < 0) return;
+    char buf[2048];
+    char *p = buf;
+    for (int i = 0; i < __AFL_CMP_SITES; i++) {
+        if (__afl_cmp_fired[i] == 0) continue;
+        if ((size_t)(p - buf) + 64 > sizeof(buf)) break;  /* next dump gets the rest */
+        const char *nm = __afl_cmp_names[i];
+        *p++ = 'C'; *p++ = 'N'; *p++ = 'T'; *p++ = ' ';
+        while (*nm) *p++ = *nm++;
+        *p++ = ' ';
+        p = __afl_put_i64(p, (int64_t)__afl_cmp_fired[i]);
+        *p++ = ' ';
+        p = __afl_put_i64(p, (int64_t)__afl_cmp_hit[i]);
+        *p++ = '\n';
+        __afl_cmp_fired[i] = 0;
+        __afl_cmp_hit[i]   = 0;
+    }
+    size_t len = (size_t)(p - buf), off = 0;
+    while (off < len) {
+        ssize_t w = write(__afl_cmp_counts_fd, buf + off, len - off);
+        if (w <= 0) break;   /* EINTR/ENOSPC: drop the rest, never spin */
+        off += (size_t)w;
+    }
 }
 
 /* ── Layer 1 record: two byte buffers ─────────────────────────────────
@@ -1339,6 +1469,7 @@ __AFL_NO_COV static void *__afl_fb_memrchr(const void *s, int c, size_t n) {
 __AFL_NO_COV int memcmp(const void *a, const void *b, size_t n) {
     __AFL_RESOLVE(real_memcmp, afl_cmp_fn, "memcmp", __afl_fb_memcmp);
     int result = real_memcmp(a, b, n);
+    __AFL_CMP_COUNT(__AFL_CMP_MEMCMP, result == 0);
     __afl_cmplog_bytes(a, b, n, result);
     return result;
 }
@@ -1348,6 +1479,7 @@ __AFL_NO_COV int afl_cmp_memcmp(const void *a, const void *b, size_t n)
 __AFL_NO_COV int strcmp(const char *a, const char *b) {
     __AFL_RESOLVE(real_strcmp, afl_str_cmp_fn, "strcmp", __afl_fb_strcmp);
     int result = real_strcmp(a, b);
+    __AFL_CMP_COUNT(__AFL_CMP_STRCMP, result == 0);
     size_t na = __afl_fb_len(a), nb = __afl_fb_len(b), n = na < nb ? na : nb;
     if (n > 0) __afl_cmplog_bytes(a, b, n + 1, result);
     return result;
@@ -1358,6 +1490,7 @@ __AFL_NO_COV int afl_cmp_strcmp(const char *a, const char *b)
 __AFL_NO_COV int strncmp(const char *a, const char *b, size_t n) {
     __AFL_RESOLVE(real_strncmp, afl_strn_cmp_fn, "strncmp", __afl_fb_strncmp);
     int result = real_strncmp(a, b, n);
+    __AFL_CMP_COUNT(__AFL_CMP_STRNCMP, result == 0);
     if (n > 0) __afl_cmplog_bytes(a, b, n, result);
     return result;
 }
@@ -1367,6 +1500,7 @@ __AFL_NO_COV int afl_cmp_strncmp(const char *a, const char *b, size_t n)
 __AFL_NO_COV void *memchr(const void *s, int c, size_t n) {
     __AFL_RESOLVE(real_memchr, afl_chr_fn, "memchr", __afl_fb_memchr);
     void *result = real_memchr(s, c, n);
+    __AFL_CMP_COUNT(__AFL_CMP_MEMCHR, result != NULL);
     /* A one-byte pair (s[0] vs c) is memory-safe but a weak anchor: the
      * input-to-state indexer has a single byte to locate in the input, which
      * matches everywhere and therefore nowhere useful. Materialise the needle
@@ -1388,6 +1522,7 @@ __AFL_NO_COV void * afl_cmp_memchr(const void *s, int c, size_t n)
 __AFL_NO_COV int strcasecmp(const char *a, const char *b) {
     __AFL_RESOLVE(real_strcasecmp, afl_str_cmp_fn, "strcasecmp", __afl_fb_strcasecmp);
     int result = real_strcasecmp(a, b);
+    __AFL_CMP_COUNT(__AFL_CMP_STRCASECMP, result == 0);
     size_t na = __afl_fb_len(a), nb = __afl_fb_len(b), n = na < nb ? na : nb;
     if (n > 0) __afl_cmplog_bytes(a, b, n + 1, result);
     return result;
@@ -1398,6 +1533,7 @@ __AFL_NO_COV int afl_cmp_strcasecmp(const char *a, const char *b)
 __AFL_NO_COV int strncasecmp(const char *a, const char *b, size_t n) {
     __AFL_RESOLVE(real_strncasecmp, afl_strn_cmp_fn, "strncasecmp", __afl_fb_strncasecmp);
     int result = real_strncasecmp(a, b, n);
+    __AFL_CMP_COUNT(__AFL_CMP_STRNCASECMP, result == 0);
     if (n > 0) __afl_cmplog_bytes(a, b, n, result);
     return result;
 }
@@ -1436,6 +1572,7 @@ static inline const void *__afl_launder_ptr(const void *p) {
 __AFL_NO_COV void *memmem(const void *h, size_t hl, const void *n, size_t nl) {
     __AFL_RESOLVE(real_memmem, afl_memmem_fn, "memmem", __afl_fb_memmem);
     void *result = real_memmem(h, hl, n, nl);
+    __AFL_CMP_COUNT(__AFL_CMP_MEMMEM, result != NULL);
     /* input-to-state needs one half from the buffer and one to plant;
      * log haystack-vs-needle, not needle-vs-itself.
      *
@@ -1464,6 +1601,7 @@ __AFL_NO_COV void * afl_cmp_memmem(const void *h, size_t hl, const void *n, size
 __AFL_NO_COV char *strstr(const char *h, const char *n) {
     __AFL_RESOLVE(real_strstr, afl_str_str_fn, "strstr", __afl_fb_strstr);
     char *result = real_strstr(h, n);
+    __AFL_CMP_COUNT(__AFL_CMP_STRSTR, result != NULL);
     if (__afl_cmplog_fd >= 0 && __afl_launder_ptr(n) && __afl_launder_ptr(h)) {
         size_t nl = __afl_fb_len(n);
         /* min(strnlen(h, nl), nl): see memmem. A haystack shorter than the
@@ -1481,6 +1619,7 @@ __AFL_NO_COV char * afl_cmp_strstr(const char *h, const char *n)
 __AFL_NO_COV char *strcasestr(const char *h, const char *n) {
     __AFL_RESOLVE(real_strcasestr, afl_str_str_fn, "strcasestr", __afl_fb_strcasestr);
     char *result = real_strcasestr(h, n);
+    __AFL_CMP_COUNT(__AFL_CMP_STRCASESTR, result != NULL);
     if (__afl_cmplog_fd >= 0 && __afl_launder_ptr(n) && __afl_launder_ptr(h)) {
         size_t nl = __afl_fb_len(n);
         size_t k = 0;
@@ -1504,6 +1643,7 @@ __AFL_NO_COV char * afl_cmp_strcasestr(const char *h, const char *n)
 __AFL_NO_COV int bcmp(const void *a, const void *b, size_t n) {
     __AFL_RESOLVE(real_bcmp, int (*)(const void *, const void *, size_t), "bcmp", __afl_fb_bcmp);
     int result = real_bcmp(a, b, n);
+    __AFL_CMP_COUNT(__AFL_CMP_BCMP, result == 0);
     __afl_cmplog_bytes(a, b, n, result);
     return result;
 }
@@ -1513,6 +1653,7 @@ __AFL_NO_COV int afl_cmp_bcmp(const void *a, const void *b, size_t n)
 __AFL_NO_COV int wmemcmp(const wchar_t *a, const wchar_t *b, size_t n) {
     __AFL_RESOLVE(real_wmemcmp, afl_wchar_cmp_fn, "wmemcmp", __afl_fb_wmemcmp);
     int result = real_wmemcmp(a, b, n);
+    __AFL_CMP_COUNT(__AFL_CMP_WMEMCMP, result == 0);
     if (__afl_cmplog_fd >= 0 && n > 0) {
         size_t k = n * sizeof(wchar_t);
         if (k > CMPLOG_MAX_OPERAND) k = CMPLOG_MAX_OPERAND;
@@ -1526,6 +1667,7 @@ __AFL_NO_COV int afl_cmp_wmemcmp(const wchar_t *a, const wchar_t *b, size_t n)
 __AFL_NO_COV int wcsncmp(const wchar_t *a, const wchar_t *b, size_t n) {
     __AFL_RESOLVE(real_wcsncmp, afl_wchar_cmp_fn, "wcsncmp", __afl_fb_wcsncmp);
     int result = real_wcsncmp(a, b, n);
+    __AFL_CMP_COUNT(__AFL_CMP_WCSNCMP, result == 0);
     if (__afl_cmplog_fd >= 0 && n > 0) {
         size_t k = n * sizeof(wchar_t);
         if (k > CMPLOG_MAX_OPERAND) k = CMPLOG_MAX_OPERAND;
@@ -1539,6 +1681,7 @@ __AFL_NO_COV int afl_cmp_wcsncmp(const wchar_t *a, const wchar_t *b, size_t n)
 __AFL_NO_COV int wcscmp(const wchar_t *a, const wchar_t *b) {
     __AFL_RESOLVE(real_wcscmp, afl_wchar_cmp_2arg_fn, "wcscmp", __afl_fb_wcscmp);
     int result = real_wcscmp(a, b);
+    __AFL_CMP_COUNT(__AFL_CMP_WCSCMP, result == 0);
     if (__afl_cmplog_fd >= 0) {
         size_t na = __afl_fb_wcslen(a), nb = __afl_fb_wcslen(b), n = na < nb ? na : nb;
         if (n > 0) {
@@ -1555,6 +1698,7 @@ __AFL_NO_COV int afl_cmp_wcscmp(const wchar_t *a, const wchar_t *b)
 __AFL_NO_COV int wcscasecmp(const wchar_t *a, const wchar_t *b) {
     __AFL_RESOLVE(real_wcscasecmp, afl_wchar_cmp_2arg_fn, "wcscasecmp", __afl_fb_wcscasecmp);
     int result = real_wcscasecmp(a, b);
+    __AFL_CMP_COUNT(__AFL_CMP_WCSCASECMP, result == 0);
     if (__afl_cmplog_fd >= 0) {
         size_t na = __afl_fb_wcslen(a), nb = __afl_fb_wcslen(b), n = na < nb ? na : nb;
         if (n > 0) {
@@ -1571,6 +1715,7 @@ __AFL_NO_COV int afl_cmp_wcscasecmp(const wchar_t *a, const wchar_t *b)
 __AFL_NO_COV char *strpbrk(const char *s, const char *accept) {
     __AFL_RESOLVE(real_strpbrk, afl_strpbrk_fn, "strpbrk", __afl_fb_strpbrk);
     char *result = real_strpbrk(s, accept);
+    __AFL_CMP_COUNT(__AFL_CMP_STRPBRK, result != NULL);
     if (__afl_cmplog_fd >= 0 && s && accept) {
         size_t sl = __afl_fb_len(s), al = __afl_fb_len(accept);
         if (sl > 0 && al > 0) {
@@ -1587,6 +1732,7 @@ __AFL_NO_COV char * afl_cmp_strpbrk(const char *s, const char *accept)
 __AFL_NO_COV size_t strspn(const char *s, const char *accept) {
     __AFL_RESOLVE(real_strspn, afl_strspn_fn, "strspn", __afl_fb_strspn);
     size_t result = real_strspn(s, accept);
+    __AFL_CMP_COUNT(__AFL_CMP_STRSPN, result != 0);
     if (__afl_cmplog_fd >= 0 && s && accept) {
         size_t sl = __afl_fb_len(s), al = __afl_fb_len(accept);
         if (sl > 0 && al > 0) {
@@ -1603,6 +1749,7 @@ __AFL_NO_COV size_t afl_cmp_strspn(const char *s, const char *accept)
 __AFL_NO_COV size_t strcspn(const char *s, const char *reject) {
     __AFL_RESOLVE(real_strcspn, afl_strcspn_fn, "strcspn", __afl_fb_strcspn);
     size_t result = real_strcspn(s, reject);
+    __AFL_CMP_COUNT(__AFL_CMP_STRCSPN, result != 0);
     if (__afl_cmplog_fd >= 0 && s && reject) {
         size_t sl = __afl_fb_len(s), rl = __afl_fb_len(reject);
         if (sl > 0 && rl > 0) {
@@ -1619,6 +1766,7 @@ __AFL_NO_COV size_t afl_cmp_strcspn(const char *s, const char *reject)
 __AFL_NO_COV void *memrchr(const void *s, int c, size_t n) {
     __AFL_RESOLVE(real_memrchr, afl_memrchr_fn, "memrchr", __afl_fb_memrchr);
     void *result = real_memrchr(s, c, n);
+    __AFL_CMP_COUNT(__AFL_CMP_MEMRCHR, result != NULL);
     if (__afl_cmplog_fd >= 0 && n > 0 && !result) {
         unsigned char needle[CMPLOG_MAX_OPERAND];
         for (size_t i = 0; i < CMPLOG_MAX_OPERAND; i++) needle[i] = (unsigned char)c;
@@ -1645,27 +1793,35 @@ __AFL_NO_COV void * afl_cmp_memrchr(const void *s, int c, size_t n)
 #define MAX_SWITCH_CASES 256
 
 __AFL_CMP_VIS void __sanitizer_cov_trace_cmp1(uint8_t a, uint8_t b) {
+    __AFL_CMP_COUNT(__AFL_CMP_TRACE_CMP1, a == b);
     __afl_cmplog_ints(a, b, 1, __builtin_return_address(0));
 }
 __AFL_CMP_VIS void __sanitizer_cov_trace_cmp2(uint16_t a, uint16_t b) {
+    __AFL_CMP_COUNT(__AFL_CMP_TRACE_CMP2, a == b);
     __afl_cmplog_ints(a, b, 2, __builtin_return_address(0));
 }
 __AFL_CMP_VIS void __sanitizer_cov_trace_cmp4(uint32_t a, uint32_t b) {
+    __AFL_CMP_COUNT(__AFL_CMP_TRACE_CMP4, a == b);
     __afl_cmplog_ints(a, b, 4, __builtin_return_address(0));
 }
 __AFL_CMP_VIS void __sanitizer_cov_trace_cmp8(uint64_t a, uint64_t b) {
+    __AFL_CMP_COUNT(__AFL_CMP_TRACE_CMP8, a == b);
     __afl_cmplog_ints(a, b, 8, __builtin_return_address(0));
 }
 __AFL_CMP_VIS void __sanitizer_cov_trace_const_cmp1(uint8_t a, uint8_t b) {
+    __AFL_CMP_COUNT(__AFL_CMP_TRACE_CONST_CMP1, a == b);
     __afl_cmplog_ints(a, b, 1, __builtin_return_address(0));
 }
 __AFL_CMP_VIS void __sanitizer_cov_trace_const_cmp2(uint16_t a, uint16_t b) {
+    __AFL_CMP_COUNT(__AFL_CMP_TRACE_CONST_CMP2, a == b);
     __afl_cmplog_ints(a, b, 2, __builtin_return_address(0));
 }
 __AFL_CMP_VIS void __sanitizer_cov_trace_const_cmp4(uint32_t a, uint32_t b) {
+    __AFL_CMP_COUNT(__AFL_CMP_TRACE_CONST_CMP4, a == b);
     __afl_cmplog_ints(a, b, 4, __builtin_return_address(0));
 }
 __AFL_CMP_VIS void __sanitizer_cov_trace_const_cmp8(uint64_t a, uint64_t b) {
+    __AFL_CMP_COUNT(__AFL_CMP_TRACE_CONST_CMP8, a == b);
     __afl_cmplog_ints(a, b, 8, __builtin_return_address(0));
 }
 
@@ -1679,6 +1835,17 @@ __AFL_CMP_VIS void __sanitizer_cov_trace_switch(uint64_t val, void *cases) {
     int64_t count = (int64_t)ref[0];
     if (count <= 0 || count > MAX_SWITCH_CASES) return;
     void *pc = __builtin_return_address(0);
+    /* One dispatch is one comparison, whatever the case count. Counting
+     * inside the loop would report a 200-case jump table as 200 compares
+     * and, worse, as 199 unsatisfied ones -- the arm that was actually
+     * taken drowned in the arms that never could be. Asserted here means
+     * the value hit some case, i.e. the switch did not fall to default. */
+    if (__afl_cmp_counts_fd >= 0) {
+        int matched = 0;
+        for (int64_t i = 0; i < count; i++)
+            if (val == ref[2 + i]) { matched = 1; break; }
+        __AFL_CMP_COUNT(__AFL_CMP_TRACE_SWITCH, matched);
+    }
     for (int64_t i = 0; i < count; i++)
         __afl_cmplog_ints(val, ref[2 + i], 8, pc);
 }
@@ -1687,6 +1854,13 @@ __AFL_CMP_VIS void __sanitizer_cov_trace_switch(uint64_t val, void *cases) {
  * Called from __afl_auto_init (edge builds) or the preload-only
  * constructor below. */
 __AFL_NO_COV static void __afl_cmplog_init(void) {
+    /* Opened before the _CMPLOG_OUT check, and on its own fd: the counters
+     * are useful on their own (a target's comparison profile costs no
+     * record stream at all), and the record stream gets truncated and
+     * rotated on a schedule the counts must not share. */
+    const char *counts = getenv("_CMPLOG_COUNTS");
+    if (counts && counts[0])
+        __afl_cmp_counts_fd = open(counts, O_WRONLY | O_CREAT | O_APPEND, 0644);
     const char *path = getenv("_CMPLOG_OUT");
     if (!path || !path[0]) return;
     __afl_cmplog_fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
@@ -1694,6 +1868,13 @@ __AFL_NO_COV static void __afl_cmplog_init(void) {
 
 __AFL_NO_COV static void __afl_cmplog_fini(void) {
     __afl_cmplog_flush();
+    /* Last chance for a short-lived process: in subprocess mode this is the
+     * only dump the run ever gets. */
+    __afl_cmp_dump_counts();
+    if (__afl_cmp_counts_fd >= 0) {
+        close(__afl_cmp_counts_fd);
+        __afl_cmp_counts_fd = -1;
+    }
     if (__afl_cmplog_fd >= 0) {
         close(__afl_cmplog_fd);
         __afl_cmplog_fd = -1;
@@ -1707,6 +1888,10 @@ __AFL_NO_COV static void __afl_cmplog_fini(void) {
 __AFL_NO_COV __attribute__((visibility("default")))
 void __cmplog_reset(void) {
     __afl_cmplog_flush();
+    /* The per-iteration sync point in direct_lite/persistent modes. Dumping
+     * here (not from __afl_cmplog_flush, which also runs on buffer-full in
+     * the hot path) keeps the counts channel off the fast path. */
+    __afl_cmp_dump_counts();
     if (__afl_cmplog_fd >= 0) {
         if (ftruncate(__afl_cmplog_fd, 0) != 0) { /* best effort */ }
         lseek(__afl_cmplog_fd, 0, SEEK_SET);
@@ -1726,7 +1911,10 @@ __AFL_NO_COV __attribute__((visibility("default")))
 const char *__cmplog_get_path(void) { return getenv("_CMPLOG_OUT"); }
 
 __AFL_NO_COV __attribute__((visibility("default")))
-void __tracecmp_flush(void) { __afl_cmplog_flush(); }
+void __tracecmp_flush(void) {
+    __afl_cmplog_flush();
+    __afl_cmp_dump_counts();
+}
 
 __AFL_NO_COV __attribute__((visibility("default")))
 void __tracecmp_reset(void) { __cmplog_reset(); }
@@ -1769,6 +1957,9 @@ static void __afl_crash_handler(int sig) {
      * Folding it in here runs it on every crash, and __afl_cmplog_flush is
      * write(2)-based precisely so it is legal at this point. */
     __afl_cmplog_flush();
+    /* Same reasoning for the counters: a crashing execution's comparison
+     * profile is the one most worth having, and the dump is write(2)-only. */
+    __afl_cmp_dump_counts();
 #endif
     siglongjmp(__afl_jmp_buf, sig);
 }
@@ -1985,6 +2176,7 @@ static struct sigaction __afl_pre_old_fpe;
 
 __AFL_NO_COV static void __afl_preload_crash_handler(int sig) {
     __afl_cmplog_flush();
+    __afl_cmp_dump_counts();
     struct sigaction *old;
     int hardware_fault = 0;
     switch (sig) {

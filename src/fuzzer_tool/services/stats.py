@@ -44,6 +44,21 @@ from fuzzer_tool.services.te_position import (
 log = logging.getLogger(__name__)
 
 
+def _format_count(n: int) -> str:
+    """Abbreviate a count for the single-line live stats display.
+
+    Comparison counters reach the billions on a target that memcmps in a
+    loop, and the stats line has no room for the digits.
+    """
+    if n < 1000:
+        return str(n)
+    if n < 1_000_000:
+        return f"{n / 1000:.1f}k"
+    if n < 1_000_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    return f"{n / 1_000_000_000:.1f}G"
+
+
 class StatsReporter:
     """Manages statistics collection and reporting.
 
@@ -595,11 +610,16 @@ class StatsReporter:
         markov_str = " | markov: trained" if f.markov_trained else ""
         markov_str += "+gen" if f.markov_generate else ""
 
-        cmplog_str = (
-            f" | cmplog: {len(f._cmplog.tokens)}t {len(f._cmplog.pairs)}p"
-            if f._cmplog is not None
-            else ""
-        )
+        cmplog_str = ""
+        if f._cmplog is not None:
+            cmplog_str = f" | cmplog: {len(f._cmplog.tokens)}t {len(f._cmplog.pairs)}p"
+            fired, asserted = f._cmplog.total_comparisons()
+            if fired:
+                # Comparisons fired / of those, satisfied. Distinct from the
+                # token and pair counts beside it: those measure what the
+                # collector kept after dedup, this measures what the target
+                # actually executed.
+                cmplog_str += f" {_format_count(fired)}c/{_format_count(asserted)}a"
 
         smt_str = self._print_stats_smt_str(f)
 
@@ -961,6 +981,9 @@ class StatsReporter:
             if f._cmplog is not None:
                 rec["cmplog_tokens"] = len(f._cmplog.tokens)
                 rec["cmplog_pairs"] = len(f._cmplog.pairs)
+                fired, asserted = f._cmplog.total_comparisons()
+                rec["cmplog_cmp_fired"] = fired
+                rec["cmplog_cmp_asserted"] = asserted
             fh.write(json.dumps(rec, separators=(",", ":")) + "\n")
             fh.flush()
         except Exception:  # pragma: no cover - telemetry must never abort a run

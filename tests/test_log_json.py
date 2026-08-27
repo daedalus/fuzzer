@@ -74,11 +74,36 @@ class TestRecordContents:
 
     def test_cmplog_fields_only_when_enabled(self):
         buf = io.StringIO()
-        cmplog = SimpleNamespace(tokens=[1, 2, 3], pairs=[1, 2])
+        _emit(_fuzzer(_log_json_fh=buf))
+        assert "cmplog_tokens" not in json.loads(buf.getvalue())
+
+        buf = io.StringIO()
+        cmplog = SimpleNamespace(
+            tokens=[1, 2, 3],
+            pairs=[1, 2],
+            total_comparisons=lambda: (900, 17),
+        )
         _emit(_fuzzer(_log_json_fh=buf, _cmplog=cmplog))
         rec = json.loads(buf.getvalue())
         assert rec["cmplog_tokens"] == 3
         assert rec["cmplog_pairs"] == 2
+
+    def test_comparison_counters_recorded(self):
+        """Fired/asserted totals ride alongside the token and pair counts.
+
+        They measure different things: tokens and pairs are what survived
+        dedup, these are what the target actually executed.
+        """
+        buf = io.StringIO()
+        cmplog = SimpleNamespace(
+            tokens=[1, 2, 3],
+            pairs=[1, 2],
+            total_comparisons=lambda: (900, 17),
+        )
+        _emit(_fuzzer(_log_json_fh=buf, _cmplog=cmplog))
+        rec = json.loads(buf.getvalue())
+        assert rec["cmplog_cmp_fired"] == 900
+        assert rec["cmplog_cmp_asserted"] == 17
 
     def test_no_dictionary_reports_zero_not_crash(self):
         buf = io.StringIO()

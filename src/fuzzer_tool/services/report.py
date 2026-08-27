@@ -146,6 +146,7 @@ def generate_report(fuzzer, corpus_dir: str, crashes_dir: str) -> str:
     sections.append(_spectral_diagnostics(fuzzer))
     sections.append(_temporal_correlation(fuzzer))
     sections.append(_mdl_codelength(fuzzer))
+    sections.append(_comparison_profile(fuzzer))
     sections.append(_smt_solver_activity(fuzzer))
     sections.append(_seed_contribution(fuzzer))
     sections.append(_edge_rarity(fuzzer))
@@ -511,6 +512,46 @@ def _mutation_effectiveness(f) -> str:
             "  that format rather than synthesising one from scratch. RateA is n/a",
             "  where that never happened; the raw Rate still covers those runs.",
         ]
+    return "\n".join(lines)
+
+
+def _comparison_profile(f) -> str:
+    """Per-callback comparison counts from the shim's counter channel.
+
+    Answers what the CMP record stream structurally cannot: how many
+    comparisons each callback actually executed, and how many of those were
+    satisfied. The records carry no callback identity, the collector dedups
+    multiplicity away, and satisfied layer-1 comparisons are never written at
+    all -- the record writer drops ``result == 0`` to keep solved compares
+    out of the input-to-state pair pool.
+
+    Read it as a solve-progress signal: a site with a high fire count and a
+    near-zero assert rate is a comparison the campaign keeps reaching and
+    keeps failing, which is where cmplog-driven mutation has room to work.
+    """
+    cmplog = getattr(f, "_cmplog", None)
+    if cmplog is None:
+        return ""
+    stats = cmplog.comparison_stats()
+    if not stats:
+        return ""
+
+    total_fired, total_asserted = cmplog.total_comparisons()
+    lines = [
+        "",
+        "--- Comparison Profile ---",
+        f"  {'Callback':<20s} {'Fired':>14s} {'Asserted':>14s} {'Rate':>7s}",
+        f"  {'-' * 20} {'-' * 14} {'-' * 14} {'-' * 7}",
+    ]
+    for name, (fired, asserted) in sorted(stats.items(), key=lambda kv: -kv[1][0]):
+        rate = f"{asserted / fired * 100:>6.1f}%" if fired else f"{'n/a':>7s}"
+        lines.append(f"  {name:<20s} {fired:>14,d} {asserted:>14,d} {rate}")
+
+    total_rate = f"{total_asserted / total_fired * 100:>6.1f}%" if total_fired else f"{'n/a':>7s}"
+    lines.append(f"  {'TOTAL':<20s} {total_fired:>14,d} {total_asserted:>14,d} {total_rate}")
+    lines.append("  Fired = callback entered; Asserted = the predicate held (operands")
+    lines.append("  equal, needle found, non-empty span, or a matched switch case).")
+    lines.append("  A switch dispatch counts once, not once per case.")
     return "\n".join(lines)
 
 

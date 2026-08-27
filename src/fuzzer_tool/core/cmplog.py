@@ -58,7 +58,7 @@ def _cleanup_stale_cmplog_files():
     d = _get_cmplog_dir()
     removed = 0
     for entry in os.scandir(d):
-        if entry.name.endswith(".cmplog") and entry.is_file():
+        if entry.name.endswith((".cmplog", ".counts")) and entry.is_file():
             try:
                 os.unlink(entry.path)
                 removed += 1
@@ -119,6 +119,11 @@ def _prune_stale_shims(cmplog_dir: str, keep: str) -> int:
 CMPLOG_TOKENS_MAX = 10_000  # max unique operand tokens
 CMPLOG_PAIRS_MAX = 5_000  # max unique operand pairs
 CMPLOG_FILE_MAX_BYTES = 100 * 1024 * 1024  # max cmplog file size before rotation
+# The counts sidecar carries at most one short line per callback per dump,
+# so it grows orders of magnitude slower than the record stream and gets a
+# correspondingly smaller cap. Reaching it means the collector stopped
+# draining, not that the target is chatty.
+CMPLOG_COUNTS_MAX_BYTES = 4 * 1024 * 1024
 
 # Hash detection thresholds
 _HASH_MIN_BYTES = 8  # minimum operand length to consider as hash-like
@@ -177,6 +182,13 @@ class CmplogCollector:
         # Without this, collect_tokens re-reads the entire file (5M+ lines)
         # on every call, dominating runtime at 60%+ CPU.
         self._read_offset: int = 0
+        # Per-callback comparison counters, fed by the shim's $_CMPLOG_COUNTS
+        # sidecar. Keyed by callback name ("memcmp", "trace_const_cmp4", ...);
+        # cumulative for the run, summed from the shim's per-dump deltas.
+        self.counts_path: str | None = None
+        self.cmp_fired: dict[str, int] = {}
+        self.cmp_asserted: dict[str, int] = {}
+        self._counts_offset: int = 0
 
     def start(self) -> bool:
         """Compile the LD_PRELOAD comparison-logging shim.
@@ -256,6 +268,18 @@ class CmplogCollector:
 
         return self._shim_path is not None
 
+    def _counts_path_for(self, log_path: str) -> str:
+        """Sidecar path for the shim's per-callback comparison counters.
+
+        A separate file from the record stream on purpose. ``collect_tokens``
+        caps its read at 10k lines and truncates whatever it did not reach,
+        and ``_rotate_cmplog`` discards the stream wholesale past the size
+        cap -- a counter record riding along in it would be dropped silently
+        and the totals would drift low precisely on the noisiest targets.
+        """
+        base, dot, _ext = log_path.rpartition(".")
+        return (base if dot else log_path) + ".counts"
+
     def setup_env(self, env: dict[str, str]) -> dict[str, str]:
         """Add cmplog env vars to the execution environment.
 
@@ -285,8 +309,10 @@ class CmplogCollector:
             # Truncate so the child writes fresh data from position 0
             with contextlib.suppress(OSError), open(self.log_path, "w") as f:
                 f.truncate(0)
+        self.counts_path = self._counts_path_for(self.log_path)
         env = dict(env)  # copy
         env["_CMPLOG_OUT"] = self.log_path
+        env["_CMPLOG_COUNTS"] = self.counts_path
 
         # Prepend the unified shim to LD_PRELOAD
         if self._shim_path:
@@ -326,9 +352,13 @@ class CmplogCollector:
         # call would capture our own LD_PRELOAD and make restore a no-op --
         # and this is called before *every* execution, not once per run.
         if self._env_saved is None:
-            self._env_saved = {k: os.environ.get(k) for k in ("_CMPLOG_OUT", "LD_PRELOAD")}
+            self._env_saved = {
+                k: os.environ.get(k) for k in ("_CMPLOG_OUT", "_CMPLOG_COUNTS", "LD_PRELOAD")
+            }
 
+        self.counts_path = self._counts_path_for(self.log_path)
         os.environ["_CMPLOG_OUT"] = self.log_path
+        os.environ["_CMPLOG_COUNTS"] = self.counts_path
 
         if self._shim_path and self._shim_path not in os.environ.get("LD_PRELOAD", ""):
             existing = os.environ.get("LD_PRELOAD", "")
@@ -507,6 +537,13 @@ class CmplogCollector:
             Also populates self.pairs with (operand_a, operand_b) tuples
             for input-to-state redqueen matching.
         """
+        # Drained first, and outside the log-missing guard below: the
+        # counters live on their own file and stay meaningful even when the
+        # record stream is empty (a target whose comparisons all *pass*
+        # writes no layer-1 records at all, yet is exactly the target whose
+        # asserted counts you want to see).
+        self.collect_counts()
+
         if not self.log_path or not os.path.exists(self.log_path):
             log.debug("collect_tokens: log missing or empty path=%s", self.log_path)
             return []
@@ -632,6 +669,84 @@ class CmplogCollector:
 
         return new_tokens
 
+    def collect_counts(self) -> None:
+        """Fold the shim's per-callback counter deltas into the run totals.
+
+        The shim writes ``CNT <name> <fired> <asserted>`` lines to
+        ``$_CMPLOG_COUNTS`` at each sync point (per-iteration reset, flush,
+        process exit, crash), zeroing its counters as it writes. Every line
+        is therefore a *delta*, and summing them is correct in every
+        execution mode without this side knowing anything about process
+        lifetimes: a subprocess run contributes one dump per exec, a
+        direct_lite run contributes many dumps from one long-lived process.
+
+        Read from a saved offset rather than read-and-truncate: a subprocess
+        target can dump between the read and the truncate, and those counts
+        would vanish. Truncation happens only past the size cap, where the
+        loss is bounded and explicit.
+        """
+        if not self.counts_path or not os.path.exists(self.counts_path):
+            return
+
+        try:
+            if os.path.getsize(self.counts_path) > CMPLOG_COUNTS_MAX_BYTES:
+                # Same reasoning as _rotate_cmplog: truncate in place, keep
+                # the path. The shim holds the fd with O_APPEND, so its next
+                # write lands at the new end rather than re-growing a hole.
+                with open(self.counts_path, "r+b") as fh:
+                    fh.truncate(0)
+                self._counts_offset = 0
+                log.debug("Cmplog: truncated oversized counts file %s", self.counts_path)
+                return
+        except OSError:
+            pass
+
+        try:
+            with open(self.counts_path) as fh:
+                fh.seek(self._counts_offset)
+                new_lines = fh.readlines()
+                self._counts_offset = fh.tell()
+        except OSError as e:
+            log.debug("Failed to read cmplog counts file: %s", e)
+            return
+
+        for line in new_lines:
+            parts = line.split()
+            if len(parts) != 4 or parts[0] != "CNT":
+                continue
+            try:
+                fired = int(parts[2])
+                asserted = int(parts[3])
+            except ValueError:
+                continue
+            name = parts[1]
+            self.cmp_fired[name] = self.cmp_fired.get(name, 0) + fired
+            self.cmp_asserted[name] = self.cmp_asserted.get(name, 0) + asserted
+
+    def comparison_stats(self) -> dict[str, tuple[int, int]]:
+        """Per-callback ``(fired, asserted)`` counts, cumulative for the run.
+
+        ``fired`` is how many times the comparison callback was entered;
+        ``asserted`` is how many of those had their predicate hold --
+        operands equal for the cmp family, needle found for the search
+        family, a non-empty span for strspn/strcspn, ``a == b`` for the
+        trace-cmp callbacks, and a matched case for switch dispatch.
+
+        Neither number is derivable from the record stream: the records
+        carry no callback identity, the collector dedups away multiplicity,
+        and satisfied layer-1 comparisons are never written at all (the
+        record writer drops ``result == 0`` to keep solved comparisons out
+        of the I2S pair pool).
+        """
+        return {
+            name: (fired, self.cmp_asserted.get(name, 0))
+            for name, fired in sorted(self.cmp_fired.items())
+        }
+
+    def total_comparisons(self) -> tuple[int, int]:
+        """Run totals as ``(fired, asserted)`` across every callback."""
+        return sum(self.cmp_fired.values()), sum(self.cmp_asserted.values())
+
     def detect_hash_candidates(self, pairs: list[tuple[bytes, bytes]]) -> int:
         """Identify pairs that look like checksum/CRC comparisons.
 
@@ -723,6 +838,10 @@ class CmplogCollector:
         The shim itself is cached in tempdir for reuse and is not removed.
         """
         self.restore_env()
+        if self.counts_path and os.path.exists(self.counts_path):
+            with contextlib.suppress(OSError):
+                os.unlink(self.counts_path)
+        self.counts_path = None
         if self.log_path and os.path.exists(self.log_path):
             with contextlib.suppress(OSError):
                 os.unlink(self.log_path)
