@@ -4990,6 +4990,9 @@ class Fuzzer:
                         "(function, address, or file.c:line) to engage the "
                         "distance channel (dist: stats + aflgo schedule/elo arm)"
                     )
+        from fuzzer_tool.core.elf import detect_ngram_k
+
+        print(f"[*] Ngram: k={detect_ngram_k(self.target)}")
         print(f"[*] Selected schedulers: {self._selected_schedulers_str()}")
         # Static branch density: conditional branches per KB of .text
         from fuzzer_tool.core.elf import branch_density

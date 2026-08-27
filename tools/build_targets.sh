@@ -1102,7 +1102,23 @@ verify_afl() {
              "$TARGETS"/secp256k1_read.so "$TARGETS"/secp256k1_read_nosan.so \
              "$TARGETS"/sqlite_read.so "$TARGETS"/sqlite_read_nosan.so \
              "$TARGETS"/grep_read "$TARGETS"/grep_read_nosan "$TARGETS"/grep_read.so "$TARGETS"/grep_read_nosan.so \
-             "$TARGETS"/fuzzgoat_read "$TARGETS"/fuzzgoat_read_nosan "$TARGETS"/fuzzgoat_read.so "$TARGETS"/fuzzgoat_read_nosan.so; do
+             "$TARGETS"/fuzzgoat_read "$TARGETS"/fuzzgoat_read_nosan "$TARGETS"/fuzzgoat_read.so "$TARGETS"/fuzzgoat_read_nosan.so \
+             "$TARGETS"/grep_read_ng2.so "$TARGETS"/grep_read_ng3.so \
+             "$TARGETS"/asan_target_ng2.so "$TARGETS"/asan_target_ng3.so \
+             "$TARGETS"/test_target_ng2.so "$TARGETS"/test_target_ng3.so \
+             "$TARGETS"/proto_target_ng2.so "$TARGETS"/proto_target_ng3.so \
+             "$TARGETS"/png_read_ng2.so "$TARGETS"/png_read_ng3.so \
+             "$TARGETS"/zlib_read_ng2.so "$TARGETS"/zlib_read_ng3.so \
+             "$TARGETS"/gzip_read_ng2.so "$TARGETS"/gzip_read_ng3.so \
+             "$TARGETS"/jpeg_read_ng2.so "$TARGETS"/jpeg_read_ng3.so \
+             "$TARGETS"/ffmpeg_read_ng2.so "$TARGETS"/ffmpeg_read_ng3.so \
+             "$TARGETS"/nop_target_ng2.so "$TARGETS"/nop_target_ng3.so \
+             "$TARGETS"/fuzzgoat_read_ng2.so "$TARGETS"/fuzzgoat_read_ng3.so \
+             "$TARGETS"/tailslayer_read_ng2.so "$TARGETS"/tailslayer_read_ng3.so \
+             "$TARGETS"/lz4_read_ng2.so "$TARGETS"/lz4_read_ng3.so \
+             "$TARGETS"/secp256k1_read_ng2.so "$TARGETS"/secp256k1_read_ng3.so \
+             "$TARGETS"/sqlite_read_ng2.so "$TARGETS"/sqlite_read_ng3.so \
+             "$TARGETS"/fgrep_read_ng2.so "$TARGETS"/fgrep_read_ng3.so; do
         [ -f "$f" ] || continue
         [[ "$f" == *.c ]] && continue
         local n=$(nm "$f" 2>/dev/null | grep -c __afl || true)
@@ -1308,11 +1324,11 @@ build_distance_so_targets() {
     done
 }
 
-# ── Build png_read n-gram flavors (_ng2 / _ng3) ───────────────────
-# trace-pc wrapper + -D__AFL_NGRAM_K={2,3} + the AFLGo channel. Linked
-# against vendored libpng+zlib REBUILT with trace-pc so library blocks
-# emit __sanitizer_cov_trace_pc too — the K-Scheduler node table must
-# cover library code or the horizon graph sees only the wrapper
+# ── Build n-gram .so flavors (_ng2 / _ng3) for every target ────────
+# trace-pc wrapper + -D__AFL_NGRAM_K={2,3} + the AFLGo channel.
+# Vendored libraries for png_read are rebuilt with trace-pc so library
+# blocks emit __sanitizer_cov_trace_pc too — the K-Scheduler node table
+# must cover library code or the horizon graph sees only the wrapper
 # (docs/kscheduler_centrality_port.md §3 build-scope caveat).
 # NOTE: rebuilds vendor/<lib> in place, clobbering artifacts of earlier
 # vendor passes — same last-wins behaviour as --vendor-tracecmp. Run
@@ -1325,6 +1341,34 @@ build_ngram_so_targets() {
     fi
     echo "Building n-gram .so flavors (trace-pc + __AFL_NGRAM_K + AFLGo channel)..."
 
+    # Helper: build one ngram-flavor .so
+    build_ngram_flavor() {
+        local src="$1" out="$2" libs="$3" flags="$4" cc="${5:-$DEFAULT_CC}" extra_cflags="${6:-}" k="${7:-2}"
+        if [ ! -f "$src" ]; then
+            warn "Source not found: $src"
+            return 1
+        fi
+        local cmplog_cflags="" cmplog_libs=""
+        if [ "$WITH_CMPLOG" -eq 1 ]; then
+            cmplog_cflags="$CMPLOG_CFLAGS"
+            cmplog_libs="$CMPLOG_LIBS"
+        fi
+        local bsymbolic_flag=""
+        [ "$WITH_CMPLOG" -eq 1 ] && bsymbolic_flag="-Wl,-Bsymbolic"
+        local rc=0
+        $cc $flags -O2 -g $FRAME_POINTER -D__AFL_DISTANCE_MODE -D__AFL_NGRAM_K=${k} \
+            -fsanitize-coverage=trace-pc $extra_cflags $cmplog_cflags -shared -fPIC $bsymbolic_flag -include "$SHIM" \
+            -o "$out" "$src" $libs $cmplog_libs 2>/dev/null || rc=$?
+        if [ $rc -eq 0 ]; then
+            ok "$(basename "$out")"
+            record_target_md5 "$out"
+        else
+            warn "failed: $(basename "$out")"
+        fi
+    }
+
+    # png_read needs its vendored libs rebuilt with trace-pc so the K-Scheduler
+    # sees edges inside libpng/zlib, not just the wrapper.
     local NG_VENDOR_LIBS="-lpng -lz -lm"
     local NG_VENDOR_INC=""
     if [ -f "$VENDOR_LIBPNG_DIR/configure" ] && [ -f "$VENDOR_ZLIB_DIR/configure" ]; then
@@ -1355,8 +1399,8 @@ build_ngram_so_targets() {
     fi
 
     for k in 2 3; do
-        local cmplog_cflags=""
-        local cmplog_libs=""
+        # png_read (special vendored handling)
+        local cmplog_cflags="" cmplog_libs=""
         if [ "$WITH_CMPLOG" -eq 1 ]; then
             cmplog_cflags="$CMPLOG_CFLAGS"
             cmplog_libs="$CMPLOG_LIBS"
@@ -1370,6 +1414,92 @@ build_ngram_so_targets() {
             ok "png_read_ng${k}.so"
         else
             warn "failed: png_read_ng${k}.so"
+        fi
+
+        # Simple .so targets without vendored libs
+        build_ngram_flavor "$TARGETS/asan_target.c" "$TARGETS/asan_target_ng${k}.so" "" "" "" "" "$k"
+        build_ngram_flavor "$TARGETS/test_target.c" "$TARGETS/test_target_ng${k}.so" "" "" "" "" "$k"
+        build_ngram_flavor "$TARGETS/proto_target.c" "$TARGETS/proto_target_ng${k}.so" "" "" "" "" "$k"
+        build_ngram_flavor "$TARGETS/nop_target.c" "$TARGETS/nop_target_ng${k}.so" "" "" "" "" "$k"
+        build_ngram_flavor "$TARGETS/grep_read.c" "$TARGETS/grep_read_ng${k}.so" "" "" "" "" "$k"
+
+        # fuzzgoat_read
+        if [ "$HAS_FUZZGOAT" -eq 1 ]; then
+            compile_fuzzgoat_object "" "$DEFAULT_CC" ""
+            build_ngram_flavor "$TARGETS/fuzzgoat_read.c" "$TARGETS/fuzzgoat_read_ng${k}.so" "/tmp/fuzzgoat.o -lm" "" "$DEFAULT_CC" "-I$VENDOR/fuzzgoat" "$k"
+        fi
+
+        # zlib_read / gzip_read (prefer vendored zlib, fall back to system -lz)
+        local ZLIB_NG_LIBS="-lz"
+        local ZLIB_NG_INC=""
+        if [ -f "$VENDOR/zlib/libz.a" ]; then
+            ZLIB_NG_LIBS="$VENDOR/zlib/libz.a -lm"
+            ZLIB_NG_INC="-I$VENDOR/zlib"
+        fi
+        build_ngram_flavor "$TARGETS/zlib_read.c" "$TARGETS/zlib_read_ng${k}.so" "$ZLIB_NG_LIBS" "" "$DEFAULT_CC" "$ZLIB_NG_INC" "$k"
+        build_ngram_flavor "$TARGETS/gzip_read.c" "$TARGETS/gzip_read_ng${k}.so" "$ZLIB_NG_LIBS" "" "$DEFAULT_CC" "$ZLIB_NG_INC" "$k"
+
+        # jpeg_read
+        local JPEG_NG_LIBS="-ljpeg"
+        local JPEG_NG_INC=""
+        if [ -d "$VENDOR/libjpeg-turbo" ]; then
+            local JPEG_OBJS
+            JPEG_OBJS=$(ls "$VENDOR/libjpeg-turbo"/*.o 2>/dev/null | tr '\n' ' ')
+            if [ -n "$JPEG_OBJS" ]; then
+                JPEG_NG_LIBS="$JPEG_OBJS -lm -lpthread"
+                JPEG_NG_INC="-I$VENDOR/libjpeg-turbo"
+            fi
+        fi
+        build_ngram_flavor "$TARGETS/jpeg_read.c" "$TARGETS/jpeg_read_ng${k}.so" "$JPEG_NG_LIBS" "" "$DEFAULT_CC" "$JPEG_NG_INC" "$k"
+
+        # ffmpeg_read (prefer vendored ffmpeg libs, fall back to system -lavformat ...)
+        local FFMPEG_NG_LIBS="-lavformat -lavcodec -lavutil -lswresample -lm"
+        local FFMPEG_NG_INC="-I/usr/include/x86_64-linux-gnu"
+        if [ -f "$VENDOR/ffmpeg/libavformat/libavformat.a" ]; then
+            FFMPEG_NG_LIBS="$VENDOR/ffmpeg/libavformat/libavformat.a $VENDOR/ffmpeg/libavcodec/libavcodec.a $VENDOR/ffmpeg/libavutil/libavutil.a $VENDOR/ffmpeg/libswresample/libswresample.a -lm -lz -llzma -lbz2 -lpthread -ldl"
+            FFMPEG_NG_INC="-I$VENDOR/ffmpeg"
+        fi
+        build_ngram_flavor "$TARGETS/ffmpeg_read.c" "$TARGETS/ffmpeg_read_ng${k}.so" "$FFMPEG_NG_LIBS" "" "$DEFAULT_CC" "$FFMPEG_NG_INC" "$k"
+
+        # Standalone .so targets
+        # tailsayer_read (C++)
+        if [ -f "$TARGETS/tailsayer_read.cpp" ] && [ -d "$TAILSLAYER/include" ]; then
+            local TAILSLAYER_INC="-I$TAILSLAYER/include"
+            build_ngram_flavor "$TARGETS/tailsayer_read.cpp" "$TARGETS/tailsayer_read_ng${k}.so" "" "" "g++" "$TAILSLAYER_INC" "$k"
+        fi
+
+        # lz4_read
+        local LZ4_OBJS="/tmp/lz4${k}.o /tmp/lz4frame${k}.o /tmp/lz4hc${k}.o /tmp/xxhash${k}.o"
+        local LZ4_INC="-I$LZ4/lib -DXXH_NAMESPACE=LZ4_"
+        if compile_lz4_objects "$k" "" "$DEFAULT_CC"; then
+            build_ngram_flavor "$TARGETS/lz4_read.c" "$TARGETS/lz4_read_ng${k}.so" "$LZ4_OBJS -Wl,--export-dynamic -lpthread" "" "$DEFAULT_CC" "$LZ4_INC" "$k"
+        else
+            warn "lz4_read_ng${k}.so: vendor/lz4 not found, skipping (run tools/vendor_lz4.sh)"
+        fi
+
+        # secp256k1_read
+        local SECP256K1_OBJS="/tmp/secp256k1${k}.o /tmp/precomputed_ecmult${k}.o /tmp/precomputed_ecmult_gen${k}.o"
+        local SECP256K1_INC="-I$SECP256K1/src -I$SECP256K1/include"
+        if compile_secp256k1_objects "$k" "" "$DEFAULT_CC"; then
+            build_ngram_flavor "$TARGETS/secp256k1_read.c" "$TARGETS/secp256k1_read_ng${k}.so" "$SECP256K1_OBJS -Wl,--export-dynamic" "" "$DEFAULT_CC" "$SECP256K1_INC" "$k"
+        else
+            warn "secp256k1_read_ng${k}.so: vendor/secp256k1 not found, skipping (run tools/vendor_secp256k1.sh)"
+        fi
+
+        # sqlite_read
+        local SQLITE_OBJS="/tmp/sqlite3${k}.o"
+        local SQLITE_LIBS="$SQLITE_OBJS -lm -lpthread -Wl,--export-dynamic"
+        local SQLITE_INC="-I$SQLITE $SQLITE_DEFINES"
+        if [ -f "$SQLITE/sqlite3.c" ] && compile_sqlite_objects "$k" "" "$DEFAULT_CC"; then
+            build_ngram_flavor "$TARGETS/sqlite_read.c" "$TARGETS/sqlite_read_ng${k}.so" "$SQLITE_LIBS" "" "$DEFAULT_CC" "$SQLITE_INC" "$k"
+        else
+            warn "sqlite_read_ng${k}.so: vendor/sqlite not found, skipping (run tools/vendor_sqlite.sh)"
+        fi
+
+        # fgrep_read
+        if [ "$HAS_FGREP" -eq 1 ]; then
+            local FGREP_INC="-I$FGREP/include -I$FGREP/src"
+            build_ngram_flavor "$TARGETS/fgrep_read.c" "$TARGETS/fgrep_read_ng${k}.so" "$FGREP_INC -lpthread" "-mavx2" "$DEFAULT_CC" "" "$k"
         fi
     done
 }
