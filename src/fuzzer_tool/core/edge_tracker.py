@@ -455,8 +455,7 @@ class MinHashLSH:
             for lo in range(0, self.num_perm, band):
                 hi = lo + band
                 blk = (
-                    self._coeffs_a_np[lo:hi, None] * edges[None, :]
-                    + self._coeffs_b_np[lo:hi, None]
+                    self._coeffs_a_np[lo:hi, None] * edges[None, :] + self._coeffs_b_np[lo:hi, None]
                 )
                 out[lo:hi] = blk.min(axis=1)
             return array("Q", out)
@@ -589,7 +588,7 @@ class EdgeTracker:
     """
 
     def __init__(
-        self, map_size: int = 65536, max_tracked_seeds: int = 200, morris_mode: bool = False
+        self, map_size: int = 65536, max_tracked_seeds: int = 200_000, morris_mode: bool = False
     ):
         self.map_size = map_size
         self.max_tracked_seeds = max_tracked_seeds

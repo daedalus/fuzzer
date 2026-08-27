@@ -1046,7 +1046,6 @@ class SeedPicker:
             f._recent_seed_max = 20
 
         corpus_version = len(f.corpus)
-        edge_version = f.shm_cov.cumulative_edges if f.shm_cov else 0
         if not hasattr(f, "_weight_cache"):
             f._weight_cache = None
             f._weight_cache_key = (-1, -1)
@@ -1055,16 +1054,10 @@ class SeedPicker:
             keys = list(f._cached_weights)[: len(f._cached_weights) // 2]
             for k in keys:
                 del f._cached_weights[k]
-        cache_key = (corpus_version, edge_version)
+        cache_key = (corpus_version, f.exec_count // 50)
         if cache_key != f._weight_cache_key:
-            edge_changed = f._weight_cache_key[1] != edge_version
             f._weight_cache_key = cache_key
-            if (
-                edge_changed
-                or f._weight_cache is not None
-                and len(f._weight_cache) != corpus_version
-            ):
-                f._weight_cache = None
+            f._weight_cache = None
 
         if f._weight_cache is not None:
             weights = f._weight_cache

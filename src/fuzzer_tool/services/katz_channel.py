@@ -78,16 +78,31 @@ class KatzChannel:
         """Detect viability and build the ICFG; None when not applicable."""
         td_load_ok = _target_has_trace_pc(target)
         if not td_load_ok:
+            print("[katz] skipped: no trace_pc")
             return None
         from fuzzer_tool.core.distance import TargetDistance
 
+        t0 = time.perf_counter()
         td = TargetDistance(target, use_cfg_cache=use_cfg_cache)
+        print(f"[katz] TargetDistance init={time.perf_counter() - t0:.3f}s")
+        t0 = time.perf_counter()
         if not td.load():
+            print("[katz] skipped: td.load failed")
             return None
+        if not td.target_addrs:
+            print("[katz] skipped: no target functions")
+            return None
+        print(f"[katz] TargetDistance.load={time.perf_counter() - t0:.3f}s")
+        t0 = time.perf_counter()
         icfg = build_interprocedural_cfg(td)
+        print(
+            f"[katz] build_interprocedural_cfg={time.perf_counter() - t0:.3f}s nodes={None if icfg is None else icfg.n_nodes}"
+        )
         if icfg is None or icfg.n_nodes == 0:
             return None
+        t0 = time.perf_counter()
         node_of = probe_key_node_table(td, icfg)
+        print(f"[katz] probe_key_node_table={time.perf_counter() - t0:.3f}s n={len(node_of)}")
         if not node_of:
             return None
         ch = cls(icfg, node_of)

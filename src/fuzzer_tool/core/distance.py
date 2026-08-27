@@ -40,10 +40,12 @@ schedule (``core/schedules.py``), annealed over time from "maximize
 coverage" to "minimize distance."
 """
 
+import bisect
 import logging
 import multiprocessing
 import re
 import struct
+import time
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
@@ -69,19 +71,29 @@ _FILE_LINE_RE = re.compile(r"^(.*):(\d+)$")
 
 
 def _resolve_callee_with(
-    addr: int, functions: dict[str, tuple[int, int]], addr_to_func: dict[int, str]
+    addr: int,
+    functions: dict[str, tuple[int, int]],
+    addr_to_func: dict[int, str],
+    func_addrs_sorted: list[tuple[int, str]] | None = None,
 ) -> str | None:
     """Map a call target address to a function name (PLT-aware).
 
     Module-level so the parallel decode worker can use it without a
     TargetDistance instance; the method below delegates to this.
     """
-    # PLT stubs are named ".plt.<real>" or "plt.<real>" in the symtab.
     plt_name = addr_to_func.get(addr)
     if plt_name and (plt_name.startswith(".plt") or plt_name.startswith("plt.")):
         real_name = plt_name.replace(".plt.", "").replace("plt.", "")
         if real_name and real_name in functions:
             return real_name
+    if func_addrs_sorted:
+        idx = bisect.bisect_right(func_addrs_sorted, (addr, "")) - 1
+        if idx >= 0:
+            fname = func_addrs_sorted[idx][1]
+            start = func_addrs_sorted[idx][0]
+            if start <= addr < functions[fname][1]:
+                return fname
+        return None
     best_name = None
     best_start = -1
     for fname, (start, end) in functions.items():
@@ -101,18 +113,33 @@ def _decode_cfg_worker(task: tuple):
     failures must not cross the process boundary as exceptions.
     """
     name, file_off, nbytes, start_vaddr = task
-    path, functions, addr_to_func = _WORKER_CTX
+    path, functions, addr_to_func, func_addrs_sorted = _WORKER_CTX
     try:
         with open(path, "rb") as f:
             f.seek(file_off)
             code = f.read(nbytes)
         if len(code) != nbytes:
             return None
+
+        def _resolve(addr: int) -> str | None:
+            name = addr_to_func.get(addr)
+            if name and (name.startswith(".plt") or name.startswith("plt.")):
+                real_name = name.replace(".plt.", "").replace("plt.", "")
+                if real_name and real_name in functions:
+                    return real_name
+            idx = bisect.bisect_right(func_addrs_sorted, (addr, "")) - 1
+            if idx >= 0:
+                fname = func_addrs_sorted[idx][1]
+                start = func_addrs_sorted[idx][0]
+                if start <= addr < functions[fname][1]:
+                    return fname
+            return None
+
         cfg = build_function_cfg(
             name,
             code,
             start_vaddr,
-            lambda a: _resolve_callee_with(a, functions, addr_to_func),
+            _resolve,
         )
         return cfg if cfg.blocks else None
     except Exception:
@@ -125,10 +152,13 @@ _WORKER_CTX: tuple = ()
 
 
 def _decode_worker_init(
-    path: str, functions: dict[str, tuple[int, int]], addr_to_func: dict[int, str]
+    path: str,
+    functions: dict[str, tuple[int, int]],
+    addr_to_func: dict[int, str],
+    func_addrs_sorted: list[tuple[int, str]],
 ):
     global _WORKER_CTX
-    _WORKER_CTX = (path, functions, addr_to_func)
+    _WORKER_CTX = (path, functions, addr_to_func, func_addrs_sorted)
 
 
 class TargetDistance:
@@ -199,14 +229,28 @@ class TargetDistance:
             log.warning("Not an ELF file: %s", self.target)
             return False
 
+        t0 = time.perf_counter()
         if not self._parse_symbols(self._elf_data):
             return False
+        print(f"[dist] parse_symbols={time.perf_counter() - t0:.3f}s")
+        t0 = time.perf_counter()
         self._resolve_targets()
+        print(f"[dist] resolve_targets={time.perf_counter() - t0:.3f}s")
+        t0 = time.perf_counter()
         self._build_call_graph(self._elf_data)
+        print(f"[dist] build_call_graph={time.perf_counter() - t0:.3f}s")
+        t0 = time.perf_counter()
         self._compute_distances()
+        print(f"[dist] compute_distances={time.perf_counter() - t0:.3f}s")
+        t0 = time.perf_counter()
         self._build_cfgs()
+        print(f"[dist] build_cfgs={time.perf_counter() - t0:.3f}s")
+        t0 = time.perf_counter()
         self._compute_bb_values()
+        print(f"[dist] compute_bb_values={time.perf_counter() - t0:.3f}s")
+        t0 = time.perf_counter()
         self._build_np_index()
+        print(f"[dist] build_np_index={time.perf_counter() - t0:.3f}s")
 
         self._loaded = True
         log.info(
@@ -323,6 +367,8 @@ class TargetDistance:
             self.addr_to_func[addr] = name
 
         log.debug("Parsed %d functions from %s", len(func_addrs), self.target)
+        # Preserve the sorted order for O(log n) callee lookups.
+        self._func_addrs_sorted = [(addr, name) for name, addr in func_addrs]
         return len(func_addrs) > 0
 
     def _dwarf_resolver(self):
@@ -369,7 +415,27 @@ class TargetDistance:
 
     def _resolve_callee_name(self, addr: int) -> str | None:
         """Map a call target address to a function name (PLT-aware)."""
-        return _resolve_callee_with(addr, self.functions, self.addr_to_func)
+        name = self.addr_to_func.get(addr)
+        if name and (name.startswith(".plt") or name.startswith("plt.")):
+            real_name = name.replace(".plt.", "").replace("plt.", "")
+            if real_name and real_name in self.functions:
+                return real_name
+        starts = getattr(self, "_func_addrs_sorted", None)
+        if starts:
+            idx = bisect.bisect_right(starts, (addr, "")) - 1
+            if idx >= 0:
+                fname = starts[idx][1]
+                start = starts[idx][0]
+                if start <= addr < self.functions[fname][1]:
+                    return fname
+            return None
+        best_name = None
+        best_start = -1
+        for fname, (start, end) in self.functions.items():
+            if start <= addr < end and start > best_start:
+                best_name = fname
+                best_start = start
+        return best_name
 
     def _file_offset(self, vaddr: int) -> int | None:
         """Translate a virtual address to its file offset (or None)."""
@@ -413,6 +479,16 @@ class TargetDistance:
 
     def _addr_to_function(self, addr: int) -> str | None:
         """Map an address to its containing function via binary search."""
+        starts = getattr(self, "_func_addrs_sorted", None)
+        if starts:
+            idx = bisect.bisect_right(starts, (addr, "")) - 1
+            if idx >= 0:
+                fname = starts[idx][1]
+                start = starts[idx][0]
+                end = self.functions[fname][1]
+                if start <= addr < end:
+                    return fname
+            return None
         best_name = None
         best_start = -1
         for fname, (start, end) in self.functions.items():
@@ -544,7 +620,12 @@ class TargetDistance:
                 max_workers=cfg_cache.MAX_WORKERS,
                 mp_context=multiprocessing.get_context("fork"),
                 initializer=_decode_worker_init,
-                initargs=(self.target, self.functions, self.addr_to_func),
+                initargs=(
+                    self.target,
+                    self.functions,
+                    self.addr_to_func,
+                    getattr(self, "_func_addrs_sorted", []),
+                ),
             ) as ex:
                 for (_, _name, _, _), cfg in zip(
                     specs, ex.map(_decode_cfg_worker, tasks), strict=True
