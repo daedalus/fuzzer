@@ -1395,6 +1395,18 @@ class Fuzzer:
         self._det_execs: int = 0
 
         self.mc_bandit = mc_bandit
+        # ── Vectorized random number pool for mutation hotpath ────────
+        # Generates random values in batches (one numpy C-level call per
+        # batch) instead of per-call Python-level random() invocations.
+        #
+        # Constructed here, ahead of every scheduler, because a scheduler
+        # following Hard Rule 16 takes it as its `rng`. CMAESScheduler
+        # already did -- and read it ~9,000 characters before it was
+        # assigned, so `--cma-es` raised AttributeError at construction.
+        from fuzzer_tool.core.rand_pool import RandPool
+
+        self._rand_pool = RandPool(seed=seed)
+
         self.mc_cem = mc_cem
         self._use_mopt = mopt
         self.mc = (
@@ -1620,13 +1632,6 @@ class Fuzzer:
         self._cached_mean_log_n_fuzz: float = 0.0
         self._agg_cache_valid: bool = False
 
-        # ── Vectorized random number pool for mutation hotpath ────────
-        # Generates random values in batches (one numpy C-level call per
-        # batch) instead of per-call Python-level random() invocations.
-        from fuzzer_tool.core.rand_pool import RandPool
-
-        self._rand_pool = RandPool(seed=seed)
-
         # ── Dictionary scratch buffer (vectorized choice) ─────────────
         # Refilled in mutate() via one randint_list call; consumed by
         # dict-aware operators instead of calling random.choice(f.dictionary).
@@ -1659,6 +1664,12 @@ class Fuzzer:
             or self._eps_greedy
             or self._hierarchical
             or self._gp_ucb
+            # _cmaes was absent here while its dispatch branch in
+            # operators.py was live: with only --cma-es enabled,
+            # _track_op_effect stayed False, `effective` stayed None, and
+            # every no-op operator in the round was credited with the
+            # round's success exactly like the operator that did the work.
+            or self._cmaes
             or self._contextual
             or self._use_shapley
         )
@@ -4692,6 +4703,12 @@ class Fuzzer:
             all_strategies.append("hierarchical")
         if self._gp_ucb:
             all_strategies.append("gp_ucb")
+        # cmaes was missing from this ballot while operators.py::select_op
+        # listed it: a cmaes-vs-other match was recorded when cmaes was the
+        # selected strategy, but never when the other one was, so its rating
+        # moved on only half its games.
+        if self._cmaes:
+            all_strategies.append("cmaes")
         if self._contextual:
             all_strategies.append("contextual")
         for other in all_strategies:
@@ -4748,10 +4765,15 @@ class Fuzzer:
             ops.append("exp3")
         if getattr(self, "_eps_greedy", False):
             ops.append("eps_greedy")
-        if getattr(self, "_hierarchical_bandit", False):
+        # Was _hierarchical_bandit, an attribute that has never existed --
+        # the constructor stores _use_hierarchical -- so the banner silently
+        # omitted the hierarchical bandit on every run it was enabled.
+        if getattr(self, "_use_hierarchical", False):
             ops.append("hierarchical")
         if getattr(self, "_gp_ucb", False):
             ops.append("gp_ucb")
+        if getattr(self, "_cmaes", False):
+            ops.append("cmaes")
         if getattr(self, "_contextual", False):
             ops.append("contextual")
         if getattr(self, "_use_shapley", False):

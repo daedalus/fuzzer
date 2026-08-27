@@ -126,6 +126,11 @@ class TestOperatorEloRecordsUsedOnly:
         f._eps_greedy = False
         f._hierarchical = False
         f._gp_ucb = False
+        # cmaes joined the opponent ballot when the asymmetry was fixed: it
+        # had a dispatch branch and appeared on the select_op ballot, but was
+        # absent from all_strategies, so a cmaes-vs-other match was recorded
+        # only when cmaes was the *selected* strategy.
+        f._cmaes = False
         f._contextual = None
         return f
 
