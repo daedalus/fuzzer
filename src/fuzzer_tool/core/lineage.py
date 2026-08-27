@@ -299,6 +299,75 @@ class LineageTree:
 
         return dfs(key)
 
+    def pagerank_credit(
+        self,
+        damping: float = GAMMA,
+        max_iter: int = 100,
+        tol: float = 1e-12,
+    ) -> dict[str, float]:
+        """Per-node credit from a damped walk *up* the forest.
+
+        ``subtree_weight`` sums a node's descendants' weights discounted by
+        depth. That measures the volume a branch produced, and volume is
+        bought with mutations: a parent that sprayed 13 children worth one
+        edge each outranks a parent whose single child was worth twelve,
+        even though the second is twelve times the yield per mutation.
+
+        This is the same damped sum with the divisor PageRank uses — a
+        child hands its parent ``credit/siblings`` rather than its full
+        weight — so a branch's rank tracks yield per mutation instead of
+        fan-out. ``damping`` plays γ's role and the personalization vector
+        is the normalized node weights, so a node with no productive
+        descendants keeps only its own share.
+
+        Returns:
+            ``{key: credit}`` over active nodes, summing to ~1. Empty when
+            the forest has no weight to distribute yet.
+        """
+        keys = [k for k, n in self.nodes.items() if n.active]
+        if not keys:
+            return {}
+        idx = {k: i for i, k in enumerate(keys)}
+        n = len(keys)
+
+        weights = [float(max(self.nodes[k].node_weight, 0)) for k in keys]
+        total_w = sum(weights)
+        if total_w <= 0.0:
+            return dict.fromkeys(keys, 0.0)
+        base = [w / total_w for w in weights]
+
+        # Parent link and live-child count, both restricted to active nodes:
+        # a pruned parent is not a credit sink, and counting soft-deleted
+        # siblings in the divisor would dilute the survivors.
+        parent = [-1] * n
+        n_children = [0] * n
+        for k in keys:
+            pk = self.nodes[k].parent_key
+            pi = idx.get(pk) if pk is not None else None
+            if pi is not None:
+                parent[idx[k]] = pi
+                n_children[pi] += 1
+
+        rank = list(base)
+        for _ in range(max_iter):
+            nxt = [(1.0 - damping) * b for b in base]
+            for i in range(n):
+                p = parent[i]
+                if p >= 0:
+                    nxt[p] += damping * rank[i] / n_children[p]
+            delta = max(abs(a - b) for a, b in zip(nxt, rank, strict=False))
+            rank = nxt
+            if delta < tol:
+                break
+        # The walk only moves toward roots, so mass leaks out at every
+        # childless node and the raw vector is not a distribution. Rescale so
+        # callers can threshold on a share of total credit rather than on a
+        # figure that drifts with corpus size.
+        s = sum(rank)
+        if s > 0.0:
+            rank = [r / s for r in rank]
+        return dict(zip(keys, rank, strict=False))
+
     def operator_credit(self, op: str | int) -> float:
         """Global γ-discounted new-edge credit attributed to *op*.
 

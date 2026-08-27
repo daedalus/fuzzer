@@ -917,6 +917,18 @@ class CorpusManager:
                     meta.get("coverage_edges_baseline", 0),
                 )
 
+            # subtree_weight is a volume: a wide branch of one-edge children
+            # clears the < 1.0 gate that a narrow branch of high-yield
+            # children fails, so pruning was biased toward keeping the
+            # spray. pagerank_credit divides each child's contribution by
+            # its sibling count, which ranks branches by yield per mutation;
+            # requiring both keeps a branch alive if either measure rates it.
+            credit = f._lineage.pagerank_credit()
+            n_credited = sum(1 for v in credit.values() if v > 0.0)
+            # A share below 1/n of the distributed credit is below what an
+            # average productive node holds.
+            credit_floor = (1.0 / n_credited) if n_credited else 0.0
+
             subtree_drops: set[str] = set()
             for seed in f.corpus:
                 sk = self.seed_key(seed)
@@ -925,6 +937,7 @@ class CorpusManager:
                 if (
                     f._lineage.recent_credit(sk, _coverage_fn) == 0.0
                     and f._lineage.subtree_weight(sk) < 1.0
+                    and credit.get(sk, 0.0) < credit_floor
                 ):
                     for k in f._lineage.subtree_keys(sk):
                         s = key_to_seed.get(k)
