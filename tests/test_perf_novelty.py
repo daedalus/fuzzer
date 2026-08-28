@@ -160,9 +160,24 @@ class TestTimingWindow:
         assert "_dedup_mutate" not in body
 
     def test_perf_novelty_reaches_success_and_admission(self):
+        """Both assertions read the expression, not a fixed spelling of it.
+
+        These used to pin the literal substrings ``"or is_new_max)"`` and
+        ``"has_new_coverage or is_new_max:"``, which made them assertions
+        about who the *last* disjunct is rather than about is_new_max
+        reaching the bandits at all. Any later signal joining either
+        disjunction breaks them without anything being wrong -- which is
+        exactly what happened when the comparison-progress channel landed.
+        """
         src = inspect.getsource(fuzzer_mod.Fuzzer.fuzz_one)
-        assert "or is_new_max)" in src, "is_new_max must reach the bandits"
-        assert "has_new_coverage or is_new_max:" in src, (
+
+        success_expr = src.split("success = bool(")[1].split(")")[0]
+        assert "is_new_max" in success_expr, "is_new_max must reach the bandits"
+
+        admission = next(
+            line for line in src.splitlines() if line.strip().startswith("if is_interesting")
+        )
+        assert "is_new_max" in admission, (
             "performance-novel inputs must be admitted, or the signal cannot "
             "compound across generations"
         )

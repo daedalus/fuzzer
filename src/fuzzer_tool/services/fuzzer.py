@@ -27,7 +27,7 @@ from fuzzer_tool.adapters.process import (
     _child_pids,
     disable_aslr,
 )
-from fuzzer_tool.adapters.shm import ShmCoverage
+from fuzzer_tool.adapters.shm import MAX_COUNT_GROWTH_FACTOR, ShmCoverage
 from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.markov import MarkovChain, MarkovEnsemble
 from fuzzer_tool.core.mi import MI_MAX_POSITIONS, MutualInformationTracker
@@ -1163,6 +1163,18 @@ class Fuzzer:
         # coverage signal on purpose -- see ShmCoverage._update_max_counts.
         self._perf_novelty = perf_novelty
         self._perf_novelty_hits = 0
+        # Comparison progress (per-callback max asserted count in a single
+        # execution). The same shape as the per-edge maxima above, one
+        # channel over: an input that satisfies more comparisons of some
+        # family than any input before it got further into the parser, and
+        # says so even when it flipped no branch the map had not already
+        # seen. That is the regime the cmplog-band operators
+        # (magic_byte_search, climb_hill, gradient_descent, condstmt_solve)
+        # work in, and the only reward they had was the edge that arrives
+        # once the comparison is fully solved -- so seven of eight correct
+        # bytes paid exactly nothing.
+        self._cmp_max_asserted: dict[str, int] = {}
+        self._cmp_novelty_hits = 0
         self.crash_hashes: set[str] = set()
         self.crash_sigs: dict[str, int] = {}
         self.crash_frames: dict[str, list[str]] = {}  # sig -> frames for clustering
@@ -3055,6 +3067,35 @@ class Fuzzer:
             except (AttributeError, OSError):
                 pass
 
+    def _record_cmp_progress(self, asserted: dict[str, int]) -> bool:
+        """Fold one execution's asserted counts into the per-callback maxima.
+
+        Args:
+            asserted: This execution's ``{callback: satisfied count}``.
+                Empty whenever cmplog is off, which makes the whole channel
+                inert rather than needing a flag of its own.
+
+        Returns:
+            True if some callback's maximum grew enough to report.
+
+        The high-water mark is updated on every increase; only increases
+        past the growth threshold are *reported*. Separating the two is the
+        point: a climb of one extra satisfied comparison per input would
+        otherwise report on every step of the climb, and each report admits
+        an input to the corpus.
+        """
+        reported = False
+        for name, count in asserted.items():
+            prev = self._cmp_max_asserted.get(name, 0)
+            if count <= prev:
+                continue
+            if prev == 0 or count >= max(prev + 1, int(prev * MAX_COUNT_GROWTH_FACTOR)):
+                reported = True
+            self._cmp_max_asserted[name] = count
+        if reported:
+            self._cmp_novelty_hits += 1
+        return reported
+
     def fuzz_one(self, data: bytes) -> bool:
         # Invalidate Elo K-factor cache at the start of each iteration
         # so record_strategy_match calls recompute K from the current
@@ -3484,6 +3525,23 @@ class Fuzzer:
         if is_new_max:
             self._perf_novelty_hits += 1
 
+        # Comparison progress: a callback family this input satisfied more
+        # times, in one execution, than any input before it. Suppressed on
+        # timeout and crash for the same reason as above -- a truncated
+        # execution's counts are short, not extreme, and the crash handler's
+        # dump would be attributed to the wrong boundary.
+        #
+        # Growth rather than strict `>`, exactly as _update_max_counts
+        # argues: each report both rewards operators and admits an input, so
+        # the number of times one callback can report over a whole campaign
+        # has to be bounded. A first-ever assert reports unconditionally --
+        # unlike a first-seen edge it is not already covered by another
+        # signal, and there are only twenty-seven callbacks, so the
+        # unbounded-looking case is bounded at twenty-seven.
+        is_cmp_progress = False
+        if not is_timeout and not is_crash:
+            is_cmp_progress = self._record_cmp_progress(self._last_cmp_asserted)
+
         # Region liveness (item 4, handover_skittercreek_tailslayer_port.md):
         # fold this exec's coverage diff into the per-region
         # LiveBitMaskEstimator for whichever byte the mutation touched.
@@ -3736,7 +3794,20 @@ class Fuzzer:
             anneal_target = max(5000, self.max_len * 10)
             self._anneal_progress = min(1.0, self.exec_count / anneal_target)
 
-        success = bool(is_crash or is_interesting or has_new_coverage or is_slow or is_new_max)
+        # is_cmp_progress joins the disjunction rather than replacing any
+        # part of it: it is a weaker event than an edge (a comparison can be
+        # satisfied more often without the branch it guards ever flipping),
+        # but it arrives during exactly the stretches where the edge signal
+        # is silent, which is when the cmplog-band operators are doing their
+        # work and getting paid nothing for it.
+        success = bool(
+            is_crash
+            or is_interesting
+            or has_new_coverage
+            or is_slow
+            or is_new_max
+            or is_cmp_progress
+        )
 
         # Per-operator credit. An operator that was selected but left the
         # buffer unchanged cannot have caused this round's outcome, so it
@@ -4009,7 +4080,13 @@ class Fuzzer:
         # again. Bounded by the growth factor -- an edge can report at most
         # log_1.5(2^24) < 40 times over a whole run -- so this cannot run away
         # the way PerfFuzz's strict `>` would on a counted loop.
-        if is_interesting or has_new_coverage or is_new_max:
+        # is_cmp_progress admits for the reason is_new_max does: the signal
+        # cannot compound without it. Getting one comparison further into a
+        # length-prefixed header is only useful if the input that managed it
+        # becomes the parent for the input that gets one further still --
+        # and during a magic-bytes plateau, which is precisely when this
+        # fires, no other criterion is admitting anything at all.
+        if is_interesting or has_new_coverage or is_new_max or is_cmp_progress:
             _corpus_len_before = len(self.corpus)
             self.save_to_corpus(mutated, parent=data)
             self._record_lineage_insert(mutated, data, _corpus_len_before)
