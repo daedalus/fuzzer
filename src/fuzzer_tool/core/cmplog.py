@@ -124,6 +124,10 @@ CMPLOG_FILE_MAX_BYTES = 100 * 1024 * 1024  # max cmplog file size before rotatio
 # correspondingly smaller cap. Reaching it means the collector stopped
 # draining, not that the target is chatty.
 CMPLOG_COUNTS_MAX_BYTES = 4 * 1024 * 1024
+# The site sidecar carries one line per *call site* rather than per
+# callback, so it grows with the target's comparison density and gets a
+# correspondingly larger cap.
+CMPLOG_SITES_MAX_BYTES = 32 * 1024 * 1024
 
 # ── Wall detection ────────────────────────────────────────────────────
 #
@@ -163,7 +167,13 @@ class CmplogCollector:
         max_pairs: Cap on unique operand pairs (default CMPLOG_PAIRS_MAX).
     """
 
-    def __init__(self, max_tokens: int = 0, max_pairs: int = 0, workdir: str | None = None):
+    def __init__(
+        self,
+        max_tokens: int = 0,
+        max_pairs: int = 0,
+        workdir: str | None = None,
+        site_counts: bool = False,
+    ):
         self.log_path: str | None = None
         self.tokens: list[bytes] = []
         self._token_set: set[bytes] = set()
@@ -222,6 +232,15 @@ class CmplogCollector:
         # _update_rates.
         self.cmp_rate_fast: dict[str, float] = {}
         self.cmp_rate_slow: dict[str, float] = {}
+        # Per-SITE counters, keyed (callback, pc). Off unless asked for:
+        # the shim pays a hash and a probe per comparison for these, and
+        # nothing here is worth that on a target nobody is investigating.
+        self.site_counts_enabled = bool(site_counts)
+        self.sites_path: str | None = None
+        self.site_fired: dict[tuple[str, int], int] = {}
+        self.site_asserted: dict[tuple[str, int], int] = {}
+        self.site_dropped = 0
+        self._sites_offset: int = 0
 
     def start(self) -> bool:
         """Compile the LD_PRELOAD comparison-logging shim.
@@ -301,6 +320,16 @@ class CmplogCollector:
 
         return self._shim_path is not None
 
+    def _sites_path_for(self, log_path: str) -> str:
+        """Sidecar path for the per-site counters.
+
+        Its own file rather than more lines in the counts sidecar: this one
+        carries an entry per call site rather than per callback, so it is
+        the larger and noisier of the two and gets its own size cap and its
+        own read offset.
+        """
+        return log_path + ".sites"
+
     def _counts_path_for(self, log_path: str) -> str:
         """Sidecar path for the shim's per-callback comparison counters.
 
@@ -343,9 +372,13 @@ class CmplogCollector:
             with contextlib.suppress(OSError), open(self.log_path, "w") as f:
                 f.truncate(0)
         self.counts_path = self._counts_path_for(self.log_path)
+        if self.site_counts_enabled:
+            self.sites_path = self._sites_path_for(self.log_path)
         env = dict(env)  # copy
         env["_CMPLOG_OUT"] = self.log_path
         env["_CMPLOG_COUNTS"] = self.counts_path
+        if self.sites_path:
+            env["_CMPLOG_SITE_COUNTS"] = self.sites_path
 
         # Prepend the unified shim to LD_PRELOAD
         if self._shim_path:
@@ -386,12 +419,22 @@ class CmplogCollector:
         # and this is called before *every* execution, not once per run.
         if self._env_saved is None:
             self._env_saved = {
-                k: os.environ.get(k) for k in ("_CMPLOG_OUT", "_CMPLOG_COUNTS", "LD_PRELOAD")
+                k: os.environ.get(k)
+                for k in (
+                    "_CMPLOG_OUT",
+                    "_CMPLOG_COUNTS",
+                    "_CMPLOG_SITE_COUNTS",
+                    "LD_PRELOAD",
+                )
             }
 
         self.counts_path = self._counts_path_for(self.log_path)
+        if self.site_counts_enabled:
+            self.sites_path = self._sites_path_for(self.log_path)
         os.environ["_CMPLOG_OUT"] = self.log_path
         os.environ["_CMPLOG_COUNTS"] = self.counts_path
+        if self.sites_path:
+            os.environ["_CMPLOG_SITE_COUNTS"] = self.sites_path
 
         if self._shim_path and self._shim_path not in os.environ.get("LD_PRELOAD", ""):
             existing = os.environ.get("LD_PRELOAD", "")
@@ -775,7 +818,95 @@ class CmplogCollector:
                 self.last_asserted[name] = self.last_asserted.get(name, 0) + asserted
 
         self._update_rates()
+        self.collect_sites()
         return self.last_fired, self.last_asserted
+
+    def collect_sites(self) -> None:
+        """Fold the shim's per-site counter deltas into the run totals.
+
+        Same delta contract as :meth:`collect_counts` -- ``CNS <callback>
+        <pc-hex> <fired> <asserted>`` lines, zeroed by the shim as it writes
+        them, so summation is correct in every execution mode without this
+        side knowing anything about process lifetimes. ``CND <n>`` reports
+        insertions the shim's fixed-size table refused; a nonzero count
+        means the site figures below are a subset, not a census.
+
+        Keyed by absolute program counter, which is only stable because the
+        fuzzer disables ASLR for the target (personality(ADDR_NO_RANDOMIZE)
+        in adapters/process.py). Without that the same site would land in a
+        fresh slot on every execution and this would degenerate into a very
+        expensive way to count executions.
+        """
+        if not self.sites_path or not os.path.exists(self.sites_path):
+            return
+        try:
+            if os.path.getsize(self.sites_path) > CMPLOG_SITES_MAX_BYTES:
+                with open(self.sites_path, "r+b") as fh:
+                    fh.truncate(0)
+                self._sites_offset = 0
+                log.debug("Cmplog: truncated oversized sites file %s", self.sites_path)
+                return
+        except OSError:
+            pass
+
+        try:
+            with open(self.sites_path) as fh:
+                fh.seek(self._sites_offset)
+                new_lines = fh.readlines()
+                self._sites_offset = fh.tell()
+        except OSError as e:
+            log.debug("Failed to read cmplog sites file: %s", e)
+            return
+
+        for line in new_lines:
+            parts = line.split()
+            if not parts:
+                continue
+            if parts[0] == "CND" and len(parts) == 2:
+                with contextlib.suppress(ValueError):
+                    self.site_dropped += int(parts[1])
+                continue
+            if parts[0] != "CNS" or len(parts) != 5:
+                continue
+            try:
+                pc = int(parts[2], 16)
+                fired = int(parts[3])
+                asserted = int(parts[4])
+            except ValueError:
+                continue
+            key = (parts[1], pc)
+            self.site_fired[key] = self.site_fired.get(key, 0) + fired
+            self.site_asserted[key] = self.site_asserted.get(key, 0) + asserted
+
+    def site_walls(
+        self,
+        min_fired: int = CMP_WALL_MIN_FIRED,
+        max_assert_rate: float = CMP_WALL_MAX_ASSERT_RATE,
+    ) -> dict[tuple[str, int], tuple[int, int]]:
+        """Walls at call-site granularity: which comparison, not which family.
+
+        Returns:
+            ``{(callback, pc): (fired, asserted)}``, ordered by fire count.
+
+        This is the question :meth:`comparison_walls` cannot answer. A
+        target with one always-satisfied memcmp site and one never-satisfied
+        site reports a 75% assert rate for the memcmp *family* and hides the
+        wall completely; split by site, the two are simply two rows.
+
+        No trend here. The per-callback EWMAs ride on the drain of a file
+        with at most twenty-seven lines; carrying two floats per call site
+        would be a different order of bookkeeping for a signal that has not
+        been shown to be worth it at this granularity.
+        """
+        walls = {}
+        for key, fired in self.site_fired.items():
+            if fired < min_fired:
+                continue
+            asserted = self.site_asserted.get(key, 0)
+            if asserted > fired * max_assert_rate:
+                continue
+            walls[key] = (fired, asserted)
+        return dict(sorted(walls.items(), key=lambda kv: -kv[1][0]))
 
     def _update_rates(self) -> None:
         """Fold this drain's fire counts into the per-callback EWMAs.
@@ -1034,6 +1165,10 @@ class CmplogCollector:
             with contextlib.suppress(OSError):
                 os.unlink(self.counts_path)
         self.counts_path = None
+        if self.sites_path and os.path.exists(self.sites_path):
+            with contextlib.suppress(OSError):
+                os.unlink(self.sites_path)
+        self.sites_path = None
         if self.log_path and os.path.exists(self.log_path):
             with contextlib.suppress(OSError):
                 os.unlink(self.log_path)

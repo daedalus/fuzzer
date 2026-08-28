@@ -1097,12 +1097,96 @@ static uint64_t __afl_cmp_fired[__AFL_CMP_SITES];
 static uint64_t __afl_cmp_hit[__AFL_CMP_SITES];
 static int      __afl_cmp_counts_fd = -1;
 
+/* ── Per-SITE comparison counters ($_CMPLOG_SITE_COUNTS) ──────────────
+ *
+ * The per-callback counters above answer "which family is the wall" and
+ * can never answer "which comparison". Two memcmp call sites share one
+ * bucket, so a target with one satisfied memcmp per execution and a
+ * million unsatisfied ones reports a 10^-6 assert rate rather than the two
+ * separate facts it actually is.
+ *
+ * Keying by program counter separates them. The call site comes from
+ * __builtin_return_address(0) evaluated inside the interceptor, which is
+ * the instruction after the call -- so the counting macro picks it up
+ * without a single interceptor having to pass it, and layer 2 gets the
+ * same site identity it already puts in its records.
+ *
+ * Absolute addresses rather than module offsets, matching the pc field
+ * layer-2 records already carry. That is only sound because the fuzzer
+ * disables ASLR for the target (personality(ADDR_NO_RANDOMIZE), set in
+ * adapters/process.py and inherited across fork and exec); without it the
+ * same site would occupy a fresh slot on every execution and the table
+ * would fill with one-hit entries.
+ *
+ * Open addressing with linear probing and a hard probe bound. Never grows
+ * and never evicts: a full table stops admitting new sites and counts the
+ * refusals, which is the failure mode that can be reported rather than the
+ * one that silently reallocates on the hot path. Entries are zeroed by a
+ * dump but keep their keys, so a site pays its insertion cost once.
+ *
+ * On its own env var and its own fd, deliberately separate from
+ * $_CMPLOG_COUNTS: this is a hash and a probe per comparison, against two
+ * array increments for the per-callback counters, and memcmp is hot enough
+ * in most targets that the difference is not something to opt everyone
+ * into. */
+#define __AFL_CMP_SITE_SLOTS 4096u   /* power of two: mask instead of modulo */
+#define __AFL_CMP_SITE_PROBES 8      /* give up rather than walk the table */
+
+struct __afl_cmp_site {
+    uint64_t pc;        /* 0 = empty slot; a real return address is never 0 */
+    uint64_t fired;
+    uint64_t hit;
+    uint32_t id;        /* which callback, index into __afl_cmp_names */
+};
+
+static struct __afl_cmp_site __afl_cmp_sites[__AFL_CMP_SITE_SLOTS];
+static uint64_t __afl_cmp_site_dropped;   /* insertions the table refused */
+static int      __afl_cmp_sites_fd = -1;
+
+/* splitmix64's finalizer. The low bits of a return address are nearly
+ * constant across sites in one function, so the index has to come from
+ * mixed bits or every site in a hot loop lands in the same probe run. */
+__AFL_NO_COV static inline uint64_t __afl_cmp_site_hash(uint64_t pc, uint32_t id) {
+    uint64_t x = pc ^ ((uint64_t)id << 56);
+    x ^= x >> 30; x *= 0xbf58476d1ce4e5b9ULL;
+    x ^= x >> 27; x *= 0x94d049bb133111ebULL;
+    x ^= x >> 31;
+    return x;
+}
+
+__AFL_NO_COV static void __afl_cmp_site_count(uint32_t id, int satisfied, void *pc_ptr) {
+    uint64_t pc = (uint64_t)(uintptr_t)pc_ptr;
+    if (pc == 0) return;   /* no caller frame: nothing to key on */
+    uint64_t idx = __afl_cmp_site_hash(pc, id) & (__AFL_CMP_SITE_SLOTS - 1);
+    for (int probe = 0; probe < __AFL_CMP_SITE_PROBES; probe++) {
+        struct __afl_cmp_site *e = &__afl_cmp_sites[(idx + (uint64_t)probe)
+                                                    & (__AFL_CMP_SITE_SLOTS - 1)];
+        if (e->pc == 0) {
+            e->pc = pc;
+            e->id = id;
+        } else if (e->pc != pc || e->id != id) {
+            continue;
+        }
+        e->fired++;
+        if (satisfied) e->hit++;
+        return;
+    }
+    __afl_cmp_site_dropped++;
+}
+
 /* The fd doubles as the enable flag: no output file, no counting. */
 #define __AFL_CMP_COUNT(id, satisfied)                                   \
     do {                                                                 \
         if (__afl_cmp_counts_fd >= 0) {                                  \
             __afl_cmp_fired[(id)]++;                                     \
             if (satisfied) __afl_cmp_hit[(id)]++;                        \
+        }                                                                \
+        if (__afl_cmp_sites_fd >= 0) {                                   \
+            /* Expanded inside the interceptor, so frame 0's return       \
+             * address is the call site in the target. Every interceptor  \
+             * already invokes this macro; none needed editing. */        \
+            __afl_cmp_site_count((id), (satisfied),                      \
+                                 __builtin_return_address(0));           \
         }                                                                \
     } while (0)
 
@@ -1200,6 +1284,59 @@ __AFL_NO_COV static void __afl_cmp_dump_counts(void) {
         if (w <= 0) break;   /* EINTR/ENOSPC: drop the rest, never spin */
         off += (size_t)w;
     }
+}
+
+__AFL_NO_COV static void __afl_cmp_write_all(int fd, const char *buf, size_t len) {
+    size_t off = 0;
+    while (off < len) {
+        ssize_t w = write(fd, buf + off, len - off);
+        if (w <= 0) return;   /* EINTR/ENOSPC: drop the rest, never spin */
+        off += (size_t)w;
+    }
+}
+
+/* CNS <callback> <pc-hex> <fired> <asserted>, deltas, same contract as CNT.
+ * Keys survive the dump -- only the counters are zeroed -- so a site pays
+ * its insertion probe once for the life of the process rather than once
+ * per sync point. */
+__AFL_NO_COV static void __afl_cmp_dump_sites(void) {
+    if (__afl_cmp_sites_fd < 0) return;
+    char buf[4096];
+    char *p = buf;
+    for (unsigned i = 0; i < __AFL_CMP_SITE_SLOTS; i++) {
+        struct __afl_cmp_site *e = &__afl_cmp_sites[i];
+        if (e->pc == 0 || e->fired == 0) continue;
+        if ((size_t)(p - buf) + 96 > sizeof(buf)) {
+            /* Flush and keep going: the table is orders of magnitude
+             * larger than any sane stack buffer, and dropping the tail
+             * would systematically lose whichever sites hash high. */
+            __afl_cmp_write_all(__afl_cmp_sites_fd, buf, (size_t)(p - buf));
+            p = buf;
+        }
+        const char *nm = e->id < __AFL_CMP_SITES ? __afl_cmp_names[e->id] : "?";
+        *p++ = 'C'; *p++ = 'N'; *p++ = 'S'; *p++ = ' ';
+        while (*nm) *p++ = *nm++;
+        *p++ = ' ';
+        p = __afl_put_hex64(p, e->pc);
+        *p++ = ' ';
+        p = __afl_put_i64(p, (int64_t)e->fired);
+        *p++ = ' ';
+        p = __afl_put_i64(p, (int64_t)e->hit);
+        *p++ = '\n';
+        e->fired = 0;
+        e->hit   = 0;
+    }
+    if (__afl_cmp_site_dropped) {
+        if ((size_t)(p - buf) + 64 > sizeof(buf)) {
+            __afl_cmp_write_all(__afl_cmp_sites_fd, buf, (size_t)(p - buf));
+            p = buf;
+        }
+        *p++ = 'C'; *p++ = 'N'; *p++ = 'D'; *p++ = ' ';
+        p = __afl_put_i64(p, (int64_t)__afl_cmp_site_dropped);
+        *p++ = '\n';
+        __afl_cmp_site_dropped = 0;
+    }
+    if (p != buf) __afl_cmp_write_all(__afl_cmp_sites_fd, buf, (size_t)(p - buf));
 }
 
 /* ── Layer 1 record: two byte buffers ─────────────────────────────────
@@ -1861,6 +1998,13 @@ __AFL_NO_COV static void __afl_cmplog_init(void) {
     const char *counts = getenv("_CMPLOG_COUNTS");
     if (counts && counts[0])
         __afl_cmp_counts_fd = open(counts, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    /* Separate switch, not a mode of the one above: per-site counting is a
+     * hash and a probe per comparison against two array increments, and
+     * memcmp is hot enough in most targets that it is not something to opt
+     * everyone into. */
+    const char *sites = getenv("_CMPLOG_SITE_COUNTS");
+    if (sites && sites[0])
+        __afl_cmp_sites_fd = open(sites, O_WRONLY | O_CREAT | O_APPEND, 0644);
     const char *path = getenv("_CMPLOG_OUT");
     if (!path || !path[0]) return;
     __afl_cmplog_fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
@@ -1871,9 +2015,14 @@ __AFL_NO_COV static void __afl_cmplog_fini(void) {
     /* Last chance for a short-lived process: in subprocess mode this is the
      * only dump the run ever gets. */
     __afl_cmp_dump_counts();
+    __afl_cmp_dump_sites();
     if (__afl_cmp_counts_fd >= 0) {
         close(__afl_cmp_counts_fd);
         __afl_cmp_counts_fd = -1;
+    }
+    if (__afl_cmp_sites_fd >= 0) {
+        close(__afl_cmp_sites_fd);
+        __afl_cmp_sites_fd = -1;
     }
     if (__afl_cmplog_fd >= 0) {
         close(__afl_cmplog_fd);
@@ -1892,6 +2041,7 @@ void __cmplog_reset(void) {
      * here (not from __afl_cmplog_flush, which also runs on buffer-full in
      * the hot path) keeps the counts channel off the fast path. */
     __afl_cmp_dump_counts();
+    __afl_cmp_dump_sites();
     if (__afl_cmplog_fd >= 0) {
         if (ftruncate(__afl_cmplog_fd, 0) != 0) { /* best effort */ }
         lseek(__afl_cmplog_fd, 0, SEEK_SET);
@@ -1914,6 +2064,7 @@ __AFL_NO_COV __attribute__((visibility("default")))
 void __tracecmp_flush(void) {
     __afl_cmplog_flush();
     __afl_cmp_dump_counts();
+    __afl_cmp_dump_sites();
 }
 
 __AFL_NO_COV __attribute__((visibility("default")))
@@ -1960,6 +2111,7 @@ static void __afl_crash_handler(int sig) {
     /* Same reasoning for the counters: a crashing execution's comparison
      * profile is the one most worth having, and the dump is write(2)-only. */
     __afl_cmp_dump_counts();
+    __afl_cmp_dump_sites();
 #endif
     siglongjmp(__afl_jmp_buf, sig);
 }
@@ -2124,6 +2276,16 @@ static void __afl_start_forkserver(void) {
         __afl_cmp_fired[i] = 0;
         __afl_cmp_hit[i]   = 0;
     }
+    /* The site table inherits identically -- the opt-in strcmp above has a
+     * call site like any other, so without this it becomes a permanent
+     * phantom entry reporting one satisfied comparison per execution, at a
+     * PC inside the shim. Counters only: the keys are worth keeping, since
+     * a site the parent already inserted costs the children no probe. */
+    for (unsigned i = 0; i < __AFL_CMP_SITE_SLOTS; i++) {
+        __afl_cmp_sites[i].fired = 0;
+        __afl_cmp_sites[i].hit   = 0;
+    }
+    __afl_cmp_site_dropped = 0;
 #endif
 
     while (1) {
@@ -2204,6 +2366,7 @@ static struct sigaction __afl_pre_old_fpe;
 __AFL_NO_COV static void __afl_preload_crash_handler(int sig) {
     __afl_cmplog_flush();
     __afl_cmp_dump_counts();
+    __afl_cmp_dump_sites();
     struct sigaction *old;
     int hardware_fault = 0;
     switch (sig) {
