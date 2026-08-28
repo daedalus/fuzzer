@@ -13,20 +13,22 @@ from pathlib import Path
 from fuzzer_tool.core.mutations import load_dictionary
 from fuzzer_tool.services.fuzzer import Fuzzer
 
+_original_print = builtins.print
+_patched_print = builtins.print
+
 
 def _enable_timestamp_print() -> None:
-    """Monkey-patch builtins.print and configure logging to prefix every
-    message with a wall-clock timestamp."""
+    """Monkey-patch builtins.print to prefix every message with a timestamp."""
+    global _patched_print
     import logging as _logging
-
-    _original_print = builtins.print
 
     def _timestamped_print(*args, **kwargs):
         ts = datetime.datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
         args = (f"{ts} {args[0]}",) + args[1:] if args else (ts,)
         _original_print(*args, **kwargs)
 
-    builtins.print = _timestamped_print
+    _patched_print = _timestamped_print
+    builtins.print = _patched_print
 
     root = _logging.getLogger()
     if not any(isinstance(h, _logging.StreamHandler) for h in root.handlers):
@@ -143,6 +145,7 @@ def _run_fuzzer(fuzzer, args):
     finally:
         pr.disable()
         stats = pstats.Stats(pr)
+        builtins.print = _original_print
         print("\n" + "=" * 80)
         print(" TOP 60 BY TOTAL TIME (tottime) — self-time, no children")
         print("=" * 80)
@@ -160,6 +163,7 @@ def _run_fuzzer(fuzzer, args):
         stats.print_stats(30)
         profile_out = getattr(args, "profile_out", "/tmp/fuzzer_hotpath.prof")
         stats.dump_stats(profile_out)
+        builtins.print = _patched_print
         print(f"[*] cProfile stats saved to {profile_out}")
 
 
