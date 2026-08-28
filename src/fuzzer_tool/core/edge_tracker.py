@@ -925,6 +925,23 @@ class EdgeTracker:
             self.seed_hw_branch_misses.pop(key, None)
             self._minhash.remove(key)
 
+        # Owner counts are incremented in record_edges but were never adjusted
+        # here, so every prune left _edge_owner_count crediting edges to seeds
+        # that no longer exist. The counts only ever rose, which inflates
+        # mean_owners (suppressing the crowding bonus) and pushes edges above
+        # RARE_EDGE_OWNERS so they stop reading as rare -- a slow, silent decay
+        # of the rarity signal the whole schedule is steered by.
+        #
+        # Rebuilt from the survivors rather than decremented per evicted edge:
+        # this runs only on prune, and edge_owners above is already the exact
+        # pre-prune tally, so a rebuild is both cheap here and obviously right.
+        if keys_to_prune:
+            rebuilt: defaultdict[int, int] = defaultdict(int)
+            for edges in self.seed_edges.values():
+                for e in edges:
+                    rebuilt[e] += 1
+            self._edge_owner_count = rebuilt
+
         self._aggregate_cache = None
         self._corpus_sig = None
         self._corpus_profile_cache = None

@@ -749,3 +749,24 @@ class TestEdgeOwnerCountInvariants:
         et._corpus_profile_cache = None
         et._corpus_hitcount_profile()
         assert 77777 not in et._edge_owner_count
+
+    def test_prune_does_not_leave_counts_for_evicted_seeds(self):
+        et = EdgeTracker(map_size=64)
+        et.max_tracked_seeds = 5
+        for i in range(12):
+            et.record_edges(f"seed{i}", {1, 2, 100 + i})
+        assert len(et.seed_edges) == 5
+        actual = sum(1 for edges in et.seed_edges.values() if 1 in edges)
+        assert et._edge_owner_count[1] == actual
+
+    def test_prune_drops_counts_for_edges_no_survivor_covers(self):
+        """An evicted seed's private edges leave no owner behind, so they must
+        leave the map too -- otherwise edge_rarity_stats() reports a total edge
+        count that keeps climbing past what the corpus actually covers."""
+        et = EdgeTracker(map_size=64)
+        et.max_tracked_seeds = 4
+        for i in range(20):
+            et.record_edges(f"seed{i}", {500 + i})
+        live_edges = {e for edges in et.seed_edges.values() for e in edges}
+        assert set(et._edge_owner_count) == live_edges
+        assert et.edge_rarity_stats()["total"] == len(live_edges)
