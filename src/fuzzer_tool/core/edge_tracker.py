@@ -1495,7 +1495,11 @@ class EdgeTracker:
         prof: dict[float, float] = {}
         w = 1.0 / len(totals)
         for edge, total in totals.items():
-            owners = max(1, self._edge_owner_count[edge])
+            # .get, not a subscript: totals is keyed by execution hit volume,
+            # which includes edges hit by runs that were never admitted as
+            # seeds. Those have no owner entry, and subscripting a defaultdict
+            # would mint one per profile pass.
+            owners = max(1, self._edge_owner_count.get(edge, 1))
             x = math.log2(1.0 + total / owners)
             prof[x] = prof.get(x, 0.0) + w
         self._corpus_profile_cache = prof
@@ -2171,8 +2175,14 @@ class EdgeTracker:
         confuse; callers ordering edges by rarity want this one.
 
         Returns 0 for an edge no seed has covered.
+
+        Read with ``.get`` rather than a bare subscript: the backing map is a
+        defaultdict, so subscripting *inserts* a zero entry for every edge
+        queried. That turns a read-only accessor into a mutating one and grows
+        the map without bound -- fuzzer.py sorts candidate edges through here,
+        and most of those edges are unowned by construction.
         """
-        return self._edge_owner_count[edge_id]
+        return self._edge_owner_count.get(edge_id, 0)
 
     def edge_rarity_stats(self) -> dict:
         """Compute per-edge rarity statistics, in units of *seeds*.
@@ -2521,7 +2531,16 @@ class EdgeTracker:
         self._correlation_total = data.get("correlation_total", 0)
         self.seed_stack_depth = data.get("seed_stack_depth", {})
         self.seed_path_hash = data.get("seed_path_hash", {})
-        self._edge_owner_count = {int(e): c for e, c in data.get("edge_owner_count", {}).items()}
+        # defaultdict, not dict: __init__ establishes _edge_owner_count as a
+        # defaultdict(int) and the read sites subscript it bare (owners[e]) on
+        # that guarantee. Rebuilding it as a plain dict here dropped the
+        # invariant at the first state restore, so every bare subscript raised
+        # KeyError afterwards -- worst on a snapshot written before this field
+        # existed, where seed_edges restores fully against an empty owner map
+        # and rare_edge_count() dies on its first edge.
+        self._edge_owner_count = defaultdict(
+            int, {int(e): c for e, c in data.get("edge_owner_count", {}).items()}
+        )
         self.seed_hw_instructions = data.get("seed_hw_instructions", {})
         self.seed_hw_branches = data.get("seed_hw_branches", {})
         self.seed_hw_branch_misses = data.get("seed_hw_branch_misses", {})

@@ -702,3 +702,50 @@ class TestFrequencySpectrumAndRarity:
             et._edge_owner_count[edge] = n_seeds
         s = et.edge_rarity_stats()
         assert s["avg_seeds_per_edge"] <= n_seeds
+
+
+class TestEdgeOwnerCountInvariants:
+    """_edge_owner_count is a defaultdict whose bare subscripts are read in the
+    seed-picker hot loop. Three invariants keep those subscripts safe and the
+    counts truthful: the type survives a state round-trip, read-only accessors
+    do not mint entries, and pruning does not leave counts crediting evicted
+    seeds."""
+
+    def test_type_survives_state_round_trip(self):
+        et = EdgeTracker(map_size=64)
+        et.record_edges("seedA", {10, 11, 12})
+        restored = EdgeTracker(map_size=64)
+        restored.from_dict(et.to_dict())
+        # A plain dict here makes every bare subscript a KeyError.
+        assert restored._edge_owner_count.default_factory is int
+        assert restored._edge_owner_count[10] == 1
+
+    def test_restore_from_snapshot_without_owner_counts(self):
+        """Snapshots written before edge_owner_count existed restore seed_edges
+        fully against an empty owner map; rare_edge_count walks those edges."""
+        et = EdgeTracker(map_size=64)
+        et.record_edges("seedA", {10, 11, 12})
+        data = et.to_dict()
+        data.pop("edge_owner_count", None)
+        restored = EdgeTracker(map_size=64)
+        restored.from_dict(data)
+        assert restored.rare_edge_count("seedA") == 3
+
+    def test_accessor_does_not_insert(self):
+        """edge_owner_count() is documented to return 0 for an uncovered edge.
+        A bare subscript on a defaultdict returns 0 too -- and inserts."""
+        et = EdgeTracker(map_size=64)
+        et.record_edges("seedA", {10})
+        before = len(et._edge_owner_count)
+        assert et.edge_owner_count(99999) == 0
+        assert len(et._edge_owner_count) == before
+
+    def test_corpus_profile_does_not_insert_for_unowned_edges(self):
+        """_aggregate_totals is keyed by hit volume and carries edges that no
+        seed owns; the profile pass reads them once per rebuild."""
+        et = EdgeTracker(map_size=64)
+        et.record_edges("seedA", {10})
+        et._aggregate_totals = {10: 4, 77777: 9}
+        et._corpus_profile_cache = None
+        et._corpus_hitcount_profile()
+        assert 77777 not in et._edge_owner_count
