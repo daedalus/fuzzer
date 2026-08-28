@@ -4676,6 +4676,16 @@ class Fuzzer:
         if dispersion is not None:
             reason += f" + D={dispersion:.2f}"
 
+        # What the edge signal cannot distinguish: a stall the campaign is
+        # still driving into a comparison it never passes, versus a stall
+        # where it stopped reaching that comparison at all. Both are "no new
+        # edges for N execs"; the first wants budget on the wall, the second
+        # wants the parent seeds back.
+        if self._cmplog is not None:
+            walls = self._cmplog.wall_summary()
+            if walls:
+                reason += f" + {walls}"
+
         # Dispersion index override: a *significantly* overdispersed D
         # (chi-squared dispersion test, not a fixed cutoff — see
         # AllanVarianceDetector.is_overdispersed) means clusters of

@@ -537,6 +537,7 @@ def _comparison_profile(f) -> str:
         return ""
 
     total_fired, total_asserted = cmplog.total_comparisons()
+    walls = cmplog.comparison_walls()
     lines = [
         "",
         "--- Comparison Profile ---",
@@ -545,13 +546,22 @@ def _comparison_profile(f) -> str:
     ]
     for name, (fired, asserted) in sorted(stats.items(), key=lambda kv: -kv[1][0]):
         rate = f"{asserted / fired * 100:>6.1f}%" if fired else f"{'n/a':>7s}"
-        lines.append(f"  {name:<20s} {fired:>14,d} {asserted:>14,d} {rate}")
+        mark = ""
+        if name in walls:
+            trend = walls[name][2]
+            mark = f"  <- wall ({trend})" if trend != "unknown" else "  <- wall"
+        lines.append(f"  {name:<20s} {fired:>14,d} {asserted:>14,d} {rate}{mark}")
 
     total_rate = f"{total_asserted / total_fired * 100:>6.1f}%" if total_fired else f"{'n/a':>7s}"
     lines.append(f"  {'TOTAL':<20s} {total_fired:>14,d} {total_asserted:>14,d} {total_rate}")
     lines.append("  Fired = callback entered; Asserted = the predicate held (operands")
     lines.append("  equal, needle found, non-empty span, or a matched switch case).")
     lines.append("  A switch dispatch counts once, not once per case.")
+    if walls:
+        lines.append("  A wall is a family reached constantly and passed essentially never. The")
+        lines.append("  trend is its fire rate: rising means the campaign still reaches it and")
+        lines.append("  keeps failing; falling means it stopped reaching it. Family, not site --")
+        lines.append("  two call sites share one bucket.")
     return "\n".join(lines)
 
 

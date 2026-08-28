@@ -125,6 +125,28 @@ CMPLOG_FILE_MAX_BYTES = 100 * 1024 * 1024  # max cmplog file size before rotatio
 # draining, not that the target is chatty.
 CMPLOG_COUNTS_MAX_BYTES = 4 * 1024 * 1024
 
+# ── Wall detection ────────────────────────────────────────────────────
+#
+# A callback with a high fire count and a near-zero assert rate is a
+# comparison the campaign reaches constantly and never passes. Below
+# CMP_WALL_MIN_FIRED there is not enough evidence to call anything: a
+# callback entered twice and satisfied never is an accident, not a wall.
+CMP_WALL_MIN_FIRED = 1_000
+# Above this assert rate the comparison is being passed often enough that
+# whatever is failing is a minority of its call sites, which the callback
+# granularity cannot separate anyway.
+CMP_WALL_MAX_ASSERT_RATE = 0.001
+# Two EWMAs of the per-execution fire count give the trend without keeping
+# a history buffer. The ratio between them is what matters, not either
+# value: a stall whose fire count is rising means the campaign still
+# reaches the wall and keeps failing there, and a stall whose fire count is
+# falling means it stopped reaching the parser depth it used to. Those want
+# opposite remedies, and the edge signal is identical in both.
+CMP_RATE_FAST_ALPHA = 0.1
+CMP_RATE_SLOW_ALPHA = 0.01
+# How far the fast rate must diverge from the slow one to call a direction.
+CMP_RATE_TREND_MARGIN = 0.2
+
 # Hash detection thresholds
 _HASH_MIN_BYTES = 8  # minimum operand length to consider as hash-like
 _HASH_MAX_MATCH_BYTES = 2  # max matching byte positions for a hash-like pair
@@ -195,6 +217,11 @@ class CmplogCollector:
         # comparison vector rather than a slice of the run total.
         self.last_fired: dict[str, int] = {}
         self.last_asserted: dict[str, int] = {}
+        # Fast and slow EWMAs of the per-execution fire count, per callback.
+        # Fed only by drains that actually read something -- see
+        # _update_rates.
+        self.cmp_rate_fast: dict[str, float] = {}
+        self.cmp_rate_slow: dict[str, float] = {}
 
     def start(self) -> bool:
         """Compile the LD_PRELOAD comparison-logging shim.
@@ -747,7 +774,39 @@ class CmplogCollector:
             if asserted:
                 self.last_asserted[name] = self.last_asserted.get(name, 0) + asserted
 
+        self._update_rates()
         return self.last_fired, self.last_asserted
+
+    def _update_rates(self) -> None:
+        """Fold this drain's fire counts into the per-callback EWMAs.
+
+        Only non-empty drains count. A drain that read nothing is either an
+        execution that compared nothing or a redundant second drain of an
+        already-drained boundary, and from here those two are
+        indistinguishable -- so the rates are over *observed* executions
+        rather than over every execution, and a redundant drain cannot pull
+        every callback's rate toward zero.
+
+        Callbacks absent from a non-empty drain do decay, and must: a
+        comparison the campaign has stopped reaching is exactly the case
+        the falling-trend reading exists to name, and it presents as
+        absence, not as a zero.
+        """
+        if not self.last_fired:
+            return
+        for name in self.cmp_fired:
+            observed = float(self.last_fired.get(name, 0))
+            fast = self.cmp_rate_fast.get(name)
+            slow = self.cmp_rate_slow.get(name)
+            if fast is None:
+                # Seed both from the first observation instead of from zero,
+                # or every callback reads as "rising" for its first few
+                # hundred drains purely from the EWMAs warming up.
+                self.cmp_rate_fast[name] = observed
+                self.cmp_rate_slow[name] = observed
+                continue
+            self.cmp_rate_fast[name] = fast + CMP_RATE_FAST_ALPHA * (observed - fast)
+            self.cmp_rate_slow[name] = slow + CMP_RATE_SLOW_ALPHA * (observed - slow)
 
     def comparison_stats(self) -> dict[str, tuple[int, int]]:
         """Per-callback ``(fired, asserted)`` counts, cumulative for the run.
@@ -802,6 +861,83 @@ class CmplogCollector:
             else:
                 l1 = (l1[0] + fired, l1[1] + asserted)
         return l1, l2
+
+    def fire_trend(self, name: str) -> str:
+        """``"rising"``, ``"falling"`` or ``"flat"`` for one callback.
+
+        ``"unknown"`` until both EWMAs exist. Compares the fast rate against
+        the slow one rather than against an absolute figure: what the fire
+        count is worth knowing about is its direction, and the absolute
+        value varies by orders of magnitude between callbacks on the same
+        target.
+        """
+        fast = self.cmp_rate_fast.get(name)
+        slow = self.cmp_rate_slow.get(name)
+        if fast is None or slow is None:
+            return "unknown"
+        if slow <= 0:
+            return "rising" if fast > 0 else "flat"
+        ratio = fast / slow
+        if ratio > 1.0 + CMP_RATE_TREND_MARGIN:
+            return "rising"
+        if ratio < 1.0 - CMP_RATE_TREND_MARGIN:
+            return "falling"
+        return "flat"
+
+    def comparison_walls(
+        self,
+        min_fired: int = CMP_WALL_MIN_FIRED,
+        max_assert_rate: float = CMP_WALL_MAX_ASSERT_RATE,
+    ) -> dict[str, tuple[int, int, str]]:
+        """Callbacks the campaign reaches constantly and never passes.
+
+        Args:
+            min_fired: Evidence floor. A callback entered twice and
+                satisfied never is an accident, not a wall.
+            max_assert_rate: Above this the comparison is being passed often
+                enough that whatever is failing is a minority of its call
+                sites -- which callback granularity cannot separate anyway.
+
+        Returns:
+            ``{callback: (fired, asserted, trend)}`` for every wall, ordered
+            by fire count descending.
+
+        This is the question edge coverage cannot answer. A wall does not
+        show up as a plateau, because the campaign is not stuck -- it is
+        reaching the comparison over and over and failing it, which looks
+        identical from the map to not reaching it at all.
+
+        The honest limit is granularity: one bucket per callback, not per
+        call site, so this says *which family* is the wall and never which
+        comparison. Two memcmp sites are one bucket, and a target with one
+        satisfied memcmp per execution and a million unsatisfied ones reads
+        as an assert rate of 10^-6 rather than as two separate facts.
+        """
+        walls = {}
+        for name, fired in self.cmp_fired.items():
+            if fired < min_fired:
+                continue
+            asserted = self.cmp_asserted.get(name, 0)
+            if asserted > fired * max_assert_rate:
+                continue
+            walls[name] = (fired, asserted, self.fire_trend(name))
+        return dict(sorted(walls.items(), key=lambda kv: -kv[1][0]))
+
+    def wall_summary(self) -> str:
+        """One line naming the walls, or empty when there are none.
+
+        Written for the stall reason string, where a stall with a rising
+        fire count and a stall with a falling one are different animals and
+        currently read identically.
+        """
+        walls = self.comparison_walls()
+        if not walls:
+            return ""
+        parts = [
+            f"{name} {fired:,}x {trend}" if trend != "unknown" else f"{name} {fired:,}x"
+            for name, (fired, _asserted, trend) in list(walls.items())[:3]
+        ]
+        return "walls: " + ", ".join(parts)
 
     def detect_hash_candidates(self, pairs: list[tuple[bytes, bytes]]) -> int:
         """Identify pairs that look like checksum/CRC comparisons.
