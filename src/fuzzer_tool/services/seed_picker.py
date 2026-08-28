@@ -543,7 +543,7 @@ class SeedPicker:
             return w
         if recent_counts is None:
             recent_counts = self._recent_edge_counts(f)
-        owners_get = tracker._edge_owner_count.get
+        owners = tracker._edge_owner_count
         rare_threshold = RARE_EDGE_OWNERS
         recent_get = recent_counts.get if recent_counts else None
         rare_count = 0
@@ -554,14 +554,14 @@ class SeedPicker:
         # over a fuzzing session, and the branch is loop-invariant.
         if recent_get is not None:
             for e in seed_edges:
-                n = owners_get(e, 0)
+                n = owners[e]
                 total_owners += n
                 if n <= rare_threshold:
                     rare_count += 1
                 overlap += recent_get(e, 0)
         else:
             for e in seed_edges:
-                n = owners_get(e, 0)
+                n = owners[e]
                 total_owners += n
                 if n <= rare_threshold:
                     rare_count += 1

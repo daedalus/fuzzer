@@ -653,7 +653,7 @@ class EdgeTracker:
         self.seed_path_hash: dict[str, int] = {}
         # ── Rare edge tracking ──────────────────────────────────────────
         # Per-edge owner count: how many distinct seeds hit each edge
-        self._edge_owner_count: dict[int, int] = {}
+        self._edge_owner_count: defaultdict[int, int] = defaultdict(int)
         # ── Hardware perf metrics per seed ──────────────────────────────
         self.seed_hw_instructions: dict[str, int] = {}
         self.seed_hw_branches: dict[str, int] = {}
@@ -762,7 +762,7 @@ class EdgeTracker:
         # ownership share.
         already_owned = self.seed_edges[seed_key]
         for edge_id in new_edges - already_owned:
-            self._edge_owner_count[edge_id] = self._edge_owner_count.get(edge_id, 0) + 1
+            self._edge_owner_count[edge_id] = self._edge_owner_count[edge_id] + 1
 
         self.seed_edges[seed_key].update(new_edges)
 
@@ -1495,7 +1495,7 @@ class EdgeTracker:
         prof: dict[float, float] = {}
         w = 1.0 / len(totals)
         for edge, total in totals.items():
-            owners = max(1, self._edge_owner_count.get(edge, 1))
+            owners = max(1, self._edge_owner_count[edge])
             x = math.log2(1.0 + total / owners)
             prof[x] = prof.get(x, 0.0) + w
         self._corpus_profile_cache = prof
@@ -2159,7 +2159,7 @@ class EdgeTracker:
         edges = self.seed_edges.get(seed_key, set())
         count = 0
         for eid in edges:
-            if self._edge_owner_count.get(eid, 0) < threshold:
+            if self._edge_owner_count[eid] < threshold:
                 count += 1
         return count
 
@@ -2172,7 +2172,7 @@ class EdgeTracker:
 
         Returns 0 for an edge no seed has covered.
         """
-        return self._edge_owner_count.get(edge_id, 0)
+        return self._edge_owner_count[edge_id]
 
     def edge_rarity_stats(self) -> dict:
         """Compute per-edge rarity statistics, in units of *seeds*.
