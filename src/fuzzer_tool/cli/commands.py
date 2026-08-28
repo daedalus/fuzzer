@@ -24,7 +24,14 @@ def _enable_timestamp_print() -> None:
 
     def _timestamped_print(*args, **kwargs):
         ts = datetime.datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
-        args = (f"{ts} {args[0]}",) + args[1:] if args else (ts,)
+        if args:
+            first = args[0]
+            if first.startswith("\n"):
+                args = (ts + " " + first.lstrip("\n"),) + args[1:]
+            else:
+                args = (f"{ts} {first}",) + args[1:]
+        else:
+            args = (ts,)
         _original_print(*args, **kwargs)
 
     _patched_print = _timestamped_print
