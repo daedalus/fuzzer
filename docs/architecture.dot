@@ -1,0 +1,162 @@
+// fuzzer-tool subsystem architecture.
+//
+// Regenerate with:
+//   dot -Tpng -Gdpi=130 docs/architecture.dot -o docs/images/architecture.png
+//   dot -Tsvg            docs/architecture.dot -o docs/images/architecture.svg
+//
+// Node labels carry the real module paths under src/fuzzer_tool/, so the
+// diagram can be checked against the tree rather than trusted. Boxes are
+// subsystems, not files: a single box may cover several modules, and the
+// per-module detail lives in the README sections and docs/DEEP_DIVE.md.
+//
+// Reading order: the campaign loop runs down the dark spine -- pick a
+// seed, mutate it, execute it, measure what came back. The coloured edges
+// on the right are the return paths that close the loop:
+//   green  = coverage and reward feeding scheduling
+//   blue   = comparison signal feeding mutation and stall detection
+//   purple = corpus queue feeding seed selection
+
+digraph fuzzer_tool {
+    rankdir=TB;
+    compound=true;
+    newrank=true;
+    bgcolor="white";
+    splines=spline;
+    nodesep=0.34;
+    ranksep=0.60;
+
+    node [shape=box, style="rounded,filled", fontname="Helvetica",
+          fontsize=10, margin="0.17,0.11", penwidth=0, color="#00000000"];
+    edge [fontname="Helvetica", fontsize=8.5, color="#68727e",
+          arrowsize=0.68, penwidth=1.1];
+    graph [fontname="Helvetica Bold", fontsize=11,
+           style="rounded,filled", penwidth=1.3, labeljust="l"];
+
+    // ---------------------------------------------------------- startup
+    subgraph cluster_start {
+        label="Startup";
+        color="#c8ccd2"; fillcolor="#f6f7f9"; fontcolor="#3c4551";
+        cli [label="cli/commands.py\lfuzz · rank · minimize · sweep · tmin\lroot-cause · replay · verify · estimate\limport · ppmd\l",
+             fillcolor="#e3e7ec", fontcolor="#242a31"];
+        profiler [label="core/target_profiler.py   +   cfg · icfg · dwarf\lELF strings · magic bytes · DIV constants\lcall graph · CFG · DWARF line tables\l",
+                  fillcolor="#e3e7ec", fontcolor="#242a31"];
+    }
+
+    fuzzer [label="services/fuzzer.py   —   fuzz_one() campaign loop",
+            fillcolor="#3f4a58", fontcolor="white", fontsize=12.5,
+            margin="0.28,0.16"];
+
+    // ------------------------------------------------------- scheduling
+    subgraph cluster_sched {
+        label="1 · Scheduling   —   what to fuzz next";
+        color="#bcd0c4"; fillcolor="#f2f8f4"; fontcolor="#33604a";
+        picker [label="services/seed_picker.py  +  core/schedules.py\lweights · Pareto front · crowding · saturation gate\lFAST COE RARE MMOPT LIN QUAD GO AFLGO ENTROPIC KATZ\l",
+                fillcolor="#d8eade", fontcolor="#1f4433"];
+        bandit [label="core/schedulers/ (14)  +  elo · shapley\lmonte_carlo mopt exp3 gp_ucb cmaes contextual\lducb swucb cucb hierarchical replicator epsilon_greedy mcts katz\l",
+                fillcolor="#d8eade", fontcolor="#1f4433"];
+    }
+
+    // --------------------------------------------------------- mutation
+    subgraph cluster_mut {
+        label="2 · Mutation   —   147 operators / 9 categories";
+        color="#c3c6da"; fillcolor="#f4f4fa"; fontcolor="#454a75";
+        ops [label="services/operators.py\ldispatch · havoc (11 sub-ops, adaptive draw)\l",
+             fillcolor="#c9cbe6", fontcolor="#2f3560"];
+        lib [label="core/mutations/ (36 format ops)  ·  core/operator_registry.py\lpng jpeg gif webp webm avif zip gzip zlib riff ogg flv asf mp3\ladts mpegts nal isobmff pgs sqlite der elf protobuf x86 arm\lgrammar · tree_mutator · frameshift · markov · wfc · regularity\lchecksum_learner (Berlekamp-Massey)\l",
+             fillcolor="#dedff0", fontcolor="#2f3560"];
+    }
+
+    // -------------------------------------------------------- execution
+    subgraph cluster_exec {
+        label="3 · Execution";
+        color="#d9c2c2"; fillcolor="#fbf4f4"; fontcolor="#7a4a4a";
+        runner [label="services/runner.py  +  adapters/\lforkserver · process · inprocess\lpersistent_signal · network · ptrace\l",
+                fillcolor="#f2dcdc", fontcolor="#5c3232"];
+        shim [label="adapters/afl_shim.c\ledge map · forkserver\lcmplog interceptors (18 libc + 9 IR)\l",
+              fillcolor="#e8c9c9", fontcolor="#5c3232"];
+        target [label="TARGET", fillcolor="#5c3232", fontcolor="white",
+                shape=box, style="filled", margin="0.24,0.14"];
+    }
+
+    // --------------------------------------------------------- feedback
+    subgraph cluster_fb {
+        label="4 · Feedback   —   what came back";
+        color="#b9cbd8"; fillcolor="#f2f7fa"; fontcolor="#37596e";
+        cov [label="adapters/shm.py  →  core/edge_tracker.py\lSHM bitmap · hit buckets · per-edge max counts (PerfFuzz)\ledge_owner_count → rarity · Chao2 richness · first-seen\l",
+             fillcolor="#c6dcea", fontcolor="#22475c"];
+        cmplog [label="core/cmplog.py\lpairs + tokens · fired/asserted\lper callback and per call site (PC)\lwalls · progress reward\l",
+                fillcolor="#c6dcea", fontcolor="#22475c"];
+        infoth [label="mi · transfer_entropy · renyi · sensitivity\lallan_variance · critical_slowing · running_stats\lperf_event (HW counters)\l",
+                fillcolor="#d6e6f0", fontcolor="#22475c"];
+    }
+
+    // ----------------------------------------------------------- sinks
+    subgraph cluster_corpus {
+        label="5 · Corpus lifecycle";
+        color="#cfc6d8"; fillcolor="#f7f4fa"; fontcolor="#5a4a6b";
+        corpus [label="services/corpus_manager.py\ladmission · prune · sync\lga · qea · rate_distortion · bloom dedup\lstate_store (resume) · parallel workers\l",
+                fillcolor="#e6dcee", fontcolor="#453454"];
+    }
+
+    subgraph cluster_crash {
+        label="Crash pipeline";
+        color="#d8c4b0"; fillcolor="#fbf6f1"; fontcolor="#7a5638";
+        crash [label="core/sanitizer.py → crash_metadata.py\lASAN MSAN TSAN LSAN UBSAN · dedup · tiers\lservices/tmin · minimize · root_cause · differential\l",
+               fillcolor="#f0dfcd", fontcolor="#5c4227"];
+    }
+
+    subgraph cluster_obs {
+        label="Observability";
+        color="#c8ccd2"; fillcolor="#f6f7f9"; fontcolor="#3c4551";
+        obs [label="services/stats.py · stats_reporter.py · report.py\llive stat line · JSONL · --report · Comparison Profile\l",
+             fillcolor="#e3e7ec", fontcolor="#242a31"];
+    }
+
+    // ------------------------------------------------------------ spine
+    cli -> fuzzer [penwidth=1.8, color="#3f4a58"];
+    fuzzer -> picker [penwidth=1.8, color="#3f4a58", label="  pick seed"];
+    picker -> ops [penwidth=1.8, color="#3f4a58", label="  seed + energy"];
+    ops -> runner [penwidth=1.8, color="#3f4a58", label="  mutant"];
+    runner -> target [penwidth=1.5];
+    target -> cov [penwidth=1.8, color="#3f4a58", label="  bitmap"];
+
+    // startup feeds
+    profiler -> ops [style=dashed, label="dictionary tokens  "];
+    profiler -> picker [style=dashed, label="distance  "];
+
+    // within-stage
+    bandit -> ops [label="  operator"];
+    lib -> ops [dir=none, style=dotted];
+    shim -> target [dir=none, style=dotted, label="  linked in"];
+
+    // target outputs
+    target -> cmplog [label="  cmp channels"];
+    target -> crash [label="  signal / stderr"];
+
+    // downstream
+    cov -> infoth [style=dotted];
+    cov -> corpus [label="  new coverage"];
+    cmplog -> corpus [label="  cmp progress"];
+    crash -> corpus [style=dashed, label="  minimized"];
+
+    cov -> obs [style=dashed];
+    cmplog -> obs [style=dashed];
+    infoth -> obs [style=dashed];
+
+    // ------------------------------------------------------ return edges
+    cov -> picker [constraint=false, color="#2f7d5a", penwidth=1.6,
+                   label="rarity · Chao2  ", fontcolor="#2f7d5a"];
+    corpus -> picker [constraint=false, color="#7a5c99", penwidth=1.4,
+                      label="queue  ", fontcolor="#7a5c99"];
+    ops -> bandit [constraint=false, style=dashed, color="#2f7d5a",
+                   label="reward  ", fontcolor="#2f7d5a"];
+    cmplog -> ops [constraint=false, color="#22688c", penwidth=1.4,
+                   label="  redqueen · colorize\l  SMT · magic bytes\l",
+                   fontcolor="#22688c"];
+    cmplog -> bandit [constraint=false, style=dashed, color="#22688c",
+                      label="walls / stall  ", fontcolor="#22688c"];
+
+    { rank=same; picker; bandit; }
+    { rank=same; ops; lib; }
+    { rank=same; cov; cmplog; }
+}

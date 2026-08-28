@@ -8,6 +8,30 @@
 
 ---
 
+## Architecture
+
+![fuzzer-tool subsystem architecture](docs/images/architecture.png)
+
+The campaign loop runs down the dark spine — pick a seed, mutate it, execute it, measure what
+came back — and the coloured edges on the right are the return paths that close it:
+
+| Colour | Return path |
+|---|---|
+| green | coverage and operator reward feeding scheduling (`rarity · Chao2`, `reward`) |
+| blue | comparison signal feeding mutation and stall detection (`redqueen · colorize · SMT`, `walls / stall`) |
+| purple | corpus queue feeding seed selection |
+
+Boxes are *subsystems*, not files — one box can cover several modules — but every module path
+in the diagram is a real path under `src/fuzzer_tool/`. Source is
+[`docs/architecture.dot`](docs/architecture.dot); regenerate with:
+
+```bash
+dot -Tpng -Gdpi=130 docs/architecture.dot -o docs/images/architecture.png
+dot -Tsvg            docs/architecture.dot -o docs/images/architecture.svg
+```
+
+---
+
 ## Quick Start
 
 ```bash
@@ -435,6 +459,7 @@ verify the link before tuning schedulers or dictionaries. See
 
 | Document | Contents |
 |----------|----------|
+| [`docs/architecture.dot`](docs/architecture.dot) | Graphviz source for the subsystem diagram above |
 | [`docs/DEEP_DIVE.md`](docs/DEEP_DIVE.md) | Full reference: all features, options, API, building targets |
 | [`docs/ASAN-LIMITATION.md`](docs/ASAN-LIMITATION.md) | ASAN in-process limitation & root cause analysis |
 | [`docs/tracecmp-howto.md`](docs/tracecmp-howto.md) | Compiler-IR comparison tracing vendor build guide |
