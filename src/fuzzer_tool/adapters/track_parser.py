@@ -133,6 +133,77 @@ def parse_track_json(path: str) -> list[CondStmt]:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Single-operand records (trace-div / trace-gep)
+# ---------------------------------------------------------------------------
+
+# Operands below this are not worth a pair. Every loop counter and every
+# small struct offset is a GEP index; pairing them would flood the pool
+# with values plain havoc reaches by itself.
+OPERAND_MIN_VALUE = 256
+
+# Widths the shim emits: trace-div4/8 and trace-gep (pointer-sized).
+_OPERAND_WIDTHS = (4, 8)
+
+# What makes each operand kind interesting, as the value to substitute in.
+# A divisor wants 0 (division by zero) and 1 (degenerate quotient); an index
+# wants 0 and the all-ones word (out of bounds in both directions).
+_OPERAND_TARGETS: dict[str, tuple[bytes, ...]] = {}
+
+
+def _operand_targets(kind: str, width: int) -> tuple[bytes, ...]:
+    key = f"{kind}{width}"
+    cached = _OPERAND_TARGETS.get(key)
+    if cached is not None:
+        return cached
+    zero = (0).to_bytes(width, "little")
+    out = (zero, (1).to_bytes(width, "little")) if kind == "DIV" else (zero, b"\xff" * width)
+    _OPERAND_TARGETS[key] = out
+    return out
+
+
+def pairs_from_operand_records(lines: Iterable[str]) -> list[tuple[bytes, bytes]]:
+    """Build input-to-state pairs from ``DIV``/``GEP`` shim records.
+
+    The shim writes ``DIV <hex value> <width> 0x<pc>`` for every runtime
+    divisor and ``GEP <hex index> <width> 0x<pc>`` for every runtime GEP
+    index (``-fsanitize-coverage=trace-div,trace-gep``).
+
+    These are single operands, not comparisons: there is no second operand
+    to pair them with and no result to report, so they are deliberately not
+    ``CMP`` records -- ``comparison_stats``/``comparison_walls`` count
+    comparisons and a divisor would inflate both. Each operand becomes
+    ``(observed, interesting)`` pairs instead, which the redqueen mutator
+    already knows how to apply.
+    """
+    out: list[tuple[bytes, bytes]] = []
+    for raw in lines:
+        line = raw.strip()
+        kind = line[:3]
+        if kind not in ("DIV", "GEP") or not line[3:4].isspace():
+            continue
+
+        parts = line[4:].split()
+        if len(parts) < 2:
+            continue
+
+        try:
+            value = bytes.fromhex(parts[0])
+            width = int(parts[1])
+        except ValueError:
+            continue
+
+        if width not in _OPERAND_WIDTHS or len(value) != width:
+            continue
+        if int.from_bytes(value, "little") < OPERAND_MIN_VALUE:
+            continue
+
+        out.extend((value, target) for target in _operand_targets(kind, width))
+
+    log.debug("pairs_from_operand_records: built %d pairs", len(out))
+    return out
+
+
 def conds_from_cmplog_text(lines: Iterable[str]) -> list[CondStmt]:
     """Build CondStmt objects from raw cmplog log lines.
 

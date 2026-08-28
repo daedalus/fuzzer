@@ -1516,7 +1516,11 @@ build_vendored_tracecmp_targets() {
         warn "clang not found — --vendor-tracecmp requires clang"
         return 1
     fi
-    local TRACE_FLAGS="-fsanitize-coverage=trace-cmp,trace-pc-guard"
+    # trace-div/trace-gep feed the shim's layer-3 single-operand records
+    # (divisors, GEP indices). They are modifiers, not levels: alone in a
+    # -fsanitize-coverage= flag clang emits no call sites for them, so they
+    # ride along with trace-pc-guard rather than standing on their own.
+    local TRACE_FLAGS="-fsanitize-coverage=trace-cmp,trace-div,trace-gep,trace-pc-guard"
     # Caller-context edge hashing is default-on inside afl_shim.c, which only
     # the target TUs include; the libs here never see the define. What the
     # whole linked chain DOES need is frame pointers: the context walk
@@ -1701,7 +1705,11 @@ build_tracecmp_targets() {
     fi
 
     echo "Building trace-cmp targets ($CC)..."
-    local TRACE_FLAGS="-fsanitize-coverage=trace-cmp,trace-pc-guard"
+    # trace-div/trace-gep feed the shim's layer-3 single-operand records
+    # (divisors, GEP indices). They are modifiers, not levels: alone in a
+    # -fsanitize-coverage= flag clang emits no call sites for them, so they
+    # ride along with trace-pc-guard rather than standing on their own.
+    local TRACE_FLAGS="-fsanitize-coverage=trace-cmp,trace-div,trace-gep,trace-pc-guard"
 
     # The callbacks must be COMPILED IN, not LD_PRELOADed.
     #

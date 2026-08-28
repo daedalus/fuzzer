@@ -29,7 +29,10 @@ import logging
 import os
 import uuid
 
-from fuzzer_tool.adapters.track_parser import conds_from_cmplog_text
+from fuzzer_tool.adapters.track_parser import (
+    conds_from_cmplog_text,
+    pairs_from_operand_records,
+)
 
 log = logging.getLogger(__name__)
 
@@ -664,6 +667,17 @@ class CmplogCollector:
             batch_pairs.add(pair)
             tokens.add(c.base.op_a)
             tokens.add(c.base.op_b)
+
+        # Divisors and GEP indices (trace-div/trace-gep) arrive on the same
+        # stream as their own record kinds. They carry no result and no
+        # opponent operand, so they stay out of _pair_cmp/_pair_pc -- the
+        # wall statistics read those and a divisor is not a comparison.
+        for pair in pairs_from_operand_records(new_lines):
+            if pair not in self._pair_set:
+                self._pair_set.add(pair)
+                new_pairs.append(pair)
+            batch_pairs.add(pair)
+            tokens.add(pair[0])
 
         # Clear the log for next round.
         # Truncate (not delete) so the .so's file handle stays valid

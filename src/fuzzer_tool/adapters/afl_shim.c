@@ -28,6 +28,9 @@
  *     wcsncmp, wcscasecmp, strpbrk, strspn, strcspn, memrchr
  *   - Clang -fsanitize-coverage=trace-cmp callbacks
  *     (__sanitizer_cov_trace_cmp{1,2,4,8}, trace_const_cmp*, trace_switch)
+ *   - Clang -fsanitize-coverage=trace-div,trace-gep callbacks, written as
+ *     DIV/GEP records rather than CMP (__sanitizer_cov_trace_div{4,8},
+ *     trace_gep)
  *   - __cmplog_reset() / __tracecmp_flush() / __tracecmp_reset()
  *
  * ── Why the cmplog layer lives here and not in its own .so ────────────
@@ -1985,6 +1988,66 @@ __AFL_CMP_VIS void __sanitizer_cov_trace_switch(uint64_t val, void *cases) {
     }
     for (int64_t i = 0; i < count; i++)
         __afl_cmplog_ints(val, ref[2 + i], 8, pc);
+}
+
+/* ── Layer 3: single operands (-fsanitize-coverage=trace-div,trace-gep) ─
+ *
+ * trace-div hands us the runtime divisor of every non-constant division;
+ * trace-gep the runtime index of every GEP. Both are input-derived far more
+ * often than they are constant, and neither is visible to trace-cmp -- a
+ * division is not a comparison and an array index is only compared against
+ * the bound when the target bothers to check it.
+ *
+ * They get their own record kinds rather than a CMP with an invented
+ * opponent: the fuzzer counts CMP records to find comparison walls, and a
+ * divisor has nothing to be satisfied against. core/cmplog.py pairs each
+ * observed operand with the values that make it interesting (0/1 for a
+ * divisor, 0/all-ones for an index).
+ *
+ *   DIV <hex value> <width> 0x<pc>
+ *   GEP <hex index> <width> 0x<pc>
+ *
+ * The floor is the throttle. Every loop counter is a GEP index, so logging
+ * them all would cost more stream than the pairs are worth; below
+ * CMPLOG_OPERAND_MIN plain havoc reaches the value anyway. Keep it in step
+ * with track_parser.OPERAND_MIN_VALUE, which drops the same records again
+ * on the reading side. */
+#define CMPLOG_OPERAND_MIN 256
+
+__AFL_NO_COV static inline void __afl_cmplog_operand(const char *kind, uint64_t v,
+                                                     size_t n, void *pc) {
+    if (__afl_cmplog_fd < 0 || v < CMPLOG_OPERAND_MIN) return;
+    if (__afl_cmplog_busy) return;
+    __afl_cmplog_busy = 1;
+
+    if (__afl_cmplog_pos + CMPLOG_MAX_RECORD > CMPLOG_BUFFER_SIZE)
+        __afl_cmplog_flush();
+
+    unsigned char vb[8];
+    for (size_t i = 0; i < n; i++) vb[i] = (unsigned char)(v >> (i * 8));
+
+    char *p = __afl_cmplog_buf + __afl_cmplog_pos;
+    *p++ = kind[0]; *p++ = kind[1]; *p++ = kind[2]; *p++ = ' ';
+    p = __afl_put_hexbytes(p, vb, n);
+    *p++ = ' ';
+    p = __afl_put_i64(p, (int64_t)n);
+    *p++ = ' ';
+    p = __afl_put_hex64(p, (uint64_t)(uintptr_t)pc);
+    *p++ = '\n';
+    __afl_cmplog_pos = (size_t)(p - __afl_cmplog_buf);
+
+    __afl_cmplog_busy = 0;
+}
+
+__AFL_CMP_VIS void __sanitizer_cov_trace_div4(uint32_t val) {
+    __afl_cmplog_operand("DIV", val, 4, __builtin_return_address(0));
+}
+__AFL_CMP_VIS void __sanitizer_cov_trace_div8(uint64_t val) {
+    __afl_cmplog_operand("DIV", val, 8, __builtin_return_address(0));
+}
+__AFL_CMP_VIS void __sanitizer_cov_trace_gep(uintptr_t idx) {
+    __afl_cmplog_operand("GEP", (uint64_t)idx, sizeof(uintptr_t),
+                         __builtin_return_address(0));
 }
 
 /* ── Lifecycle ────────────────────────────────────────────────────────
