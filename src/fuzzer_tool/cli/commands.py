@@ -15,7 +15,10 @@ from fuzzer_tool.services.fuzzer import Fuzzer
 
 
 def _enable_timestamp_print() -> None:
-    """Monkey-patch builtins.print to prefix every message with a timestamp."""
+    """Monkey-patch builtins.print and configure logging to prefix every
+    message with a wall-clock timestamp."""
+    import logging as _logging
+
     _original_print = builtins.print
 
     def _timestamped_print(*args, **kwargs):
@@ -24,6 +27,14 @@ def _enable_timestamp_print() -> None:
         _original_print(*args, **kwargs)
 
     builtins.print = _timestamped_print
+
+    root = _logging.getLogger()
+    if not any(isinstance(h, _logging.StreamHandler) for h in root.handlers):
+        handler = _logging.StreamHandler()
+        handler.setFormatter(
+            _logging.Formatter("[%(asctime)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+        )
+        root.addHandler(handler)
 
 
 def _load_hash_list(path: str | None) -> set[str] | None:
