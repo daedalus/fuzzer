@@ -19,6 +19,7 @@ import time
 from collections import Counter
 
 from fuzzer_tool.core.crc32 import crc32
+from fuzzer_tool.core.validity import VALID_SEED_BONUS
 
 log = logging.getLogger(__name__)
 
@@ -713,6 +714,19 @@ class SeedPicker:
         modifier = 1.0 + blend * (0.5 - density)
         return w * max(modifier, 0.1)
 
+    def _weight_validity(self, meta: dict, w: float, f) -> float:
+        """Boost seeds the target accepted (Zest validity channel).
+
+        A boost rather than a gate: an invalid seed is often the shortest
+        path to a branch inside the parser, so validity ranks the corpus
+        and never excludes from it. A no-op when --reject-code is unset --
+        every seed is then unclassified and the metadata key is absent.
+        """
+        valid = meta.get("valid")
+        if valid is None or not valid:
+            return w
+        return w * VALID_SEED_BONUS
+
     def _weight_lineage_backtrack(
         self, seed_key: str, w: float, fuzz_count: int, f, key_to_seed: dict
     ) -> float:
@@ -936,6 +950,7 @@ class SeedPicker:
             w = self._weight_static_features(seed, meta["coverage_edges"], w, f)
             w = self._weight_length_and_cross_target(seed, meta, w, f)
             w = self._weight_overlap_density(sk, w, f)
+            w = self._weight_validity(meta, w, f)
             w *= lineage_div.get(sk, 1.0)
             w = self._weight_lineage_backtrack(sk, w, fuzz_count, f, bt_key_to_seed)
 

@@ -562,6 +562,7 @@ def cmd_fuzz(args):
         no_save_state=getattr(args, "no_save_state", False),
         dedup_execs=not getattr(args, "no_dedup_execs", False),
         perf_novelty=not getattr(args, "no_perf_novelty", False),
+        reject_code=getattr(args, "reject_code", None),
     )
     # shlex.join, not " ".join: this string is now persisted into state.json
     # and printed as the command that reproduces the run, so an argument
@@ -2156,6 +2157,18 @@ def main() -> int:
         "--no-dedup-execs",
         action="store_true",
         help="Do not filter already-executed mutants through the exec bloom filter",
+    )
+    fuzz_parser.add_argument(
+        "--reject-code",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Exit code the harness uses to say it rejected the input "
+            "(Zest validity channel: coverage reached on accepted inputs is "
+            "tracked separately, and a valid input covering new valid ground "
+            "is saved even when its total coverage is old)"
+        ),
     )
     fuzz_parser.add_argument(
         "--no-perf-novelty",

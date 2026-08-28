@@ -168,15 +168,19 @@ class TestTimingWindow:
         reaching the bandits at all. Any later signal joining either
         disjunction breaks them without anything being wrong -- which is
         exactly what happened when the comparison-progress channel landed.
+
+        The admission read is a slice up to save_to_corpus rather than a
+        single line for the same reason: once the disjunction grew past the
+        line limit ruff wrapped it, and a line-oriented scrape found no
+        line starting with the ``if``.
         """
         src = inspect.getsource(fuzzer_mod.Fuzzer.fuzz_one)
 
         success_expr = src.split("success = bool(")[1].split(")")[0]
         assert "is_new_max" in success_expr, "is_new_max must reach the bandits"
 
-        admission = next(
-            line for line in src.splitlines() if line.strip().startswith("if is_interesting")
-        )
+        head = src[: src.index("self.save_to_corpus")]
+        admission = head[head.rindex("is_interesting") :]
         assert "is_new_max" in admission, (
             "performance-novel inputs must be admitted, or the signal cannot "
             "compound across generations"

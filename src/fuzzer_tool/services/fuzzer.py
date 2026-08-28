@@ -53,6 +53,7 @@ from fuzzer_tool.core.secretary import DEFAULT_EXPLORATION_FRAC, SecretaryStoppi
 from fuzzer_tool.core.seed_quality import BayesianSeedQuality
 from fuzzer_tool.core.shapley import ShapleyAttribution
 from fuzzer_tool.core.skipdet import SkipDetector
+from fuzzer_tool.core.validity import Validity, ValidityChannel
 from fuzzer_tool.services.corpus_manager import CorpusManager
 from fuzzer_tool.services.operators import OperatorEngine
 from fuzzer_tool.services.ptrace_coverage import (
@@ -753,6 +754,7 @@ class Fuzzer:
         seed_slide_size=0,
         seed_slide_max_seeds=0,
         perf_novelty=True,
+        reject_code=None,
     ):
         self.target = target
         self.debug = debug
@@ -1163,6 +1165,11 @@ class Fuzzer:
         # coverage signal on purpose -- see ShmCoverage._update_max_counts.
         self._perf_novelty = perf_novelty
         self._perf_novelty_hits = 0
+        # Zest validity channel: the harness reports parser rejection with
+        # an exit code, and coverage reached on accepted inputs gets its own
+        # map. Inert without --reject-code -- see core/validity.py.
+        self._validity = ValidityChannel(reject_code)
+        self._validity_admits = 0
         # Comparison progress (per-callback max asserted count in a single
         # execution). The same shape as the per-edge maxima above, one
         # channel over: an input that satisfies more comparisons of some
@@ -3542,6 +3549,27 @@ class Fuzzer:
         if not is_timeout and not is_crash:
             is_cmp_progress = self._record_cmp_progress(self._last_cmp_asserted)
 
+        # Zest validity channel: coverage reached while the target ACCEPTED
+        # the input, tracked in its own map. An input that is valid and
+        # covers something no valid input covered before is worth keeping
+        # even when the main map has seen those edges already -- reached
+        # from the parser's error path, they lead nowhere; reached from an
+        # accepted input, they are the semantic stages behind the syntax
+        # check. Inert unless --reject-code gave the harness a way to say
+        # "rejected".
+        is_new_valid_coverage = False
+        validity = Validity.UNKNOWN
+        if self._validity.enabled and not is_timeout and not is_crash:
+            validity = self._validity.classify(returncode)
+            valid_edges = (
+                self._current_edges_cache
+                if self._current_edges_cache is not None
+                else self._get_current_edge_set()
+            )
+            is_new_valid_coverage = self._validity.record(validity, valid_edges)
+            if is_new_valid_coverage:
+                self._validity_admits += 1
+
         # Region liveness (item 4, handover_skittercreek_tailslayer_port.md):
         # fold this exec's coverage diff into the per-region
         # LiveBitMaskEstimator for whichever byte the mutation touched.
@@ -3807,6 +3835,7 @@ class Fuzzer:
             or is_slow
             or is_new_max
             or is_cmp_progress
+            or is_new_valid_coverage
         )
 
         # Per-operator credit. An operator that was selected but left the
@@ -4086,9 +4115,22 @@ class Fuzzer:
         # becomes the parent for the input that gets one further still --
         # and during a magic-bytes plateau, which is precisely when this
         # fires, no other criterion is admitting anything at all.
-        if is_interesting or has_new_coverage or is_new_max or is_cmp_progress:
+        if (
+            is_interesting
+            or has_new_coverage
+            or is_new_max
+            or is_cmp_progress
+            or is_new_valid_coverage
+        ):
             _corpus_len_before = len(self.corpus)
             self.save_to_corpus(mutated, parent=data)
+            # Validity is a property of this execution, so it is recorded
+            # here rather than reconstructed later: the seed picker reads it
+            # off the metadata and nothing re-runs the input to ask again.
+            if validity is not Validity.UNKNOWN:
+                meta = self.seed_meta.get(mutated)
+                if meta is not None:
+                    meta["valid"] = validity is Validity.VALID
             self._record_lineage_insert(mutated, data, _corpus_len_before)
             # GA: add new-coverage individual to population
             if self.ga and has_new_coverage:
@@ -5160,6 +5202,8 @@ class Fuzzer:
         from fuzzer_tool.core.elf import detect_ngram_k
 
         print(f"[*] Ngram: k={detect_ngram_k(self.target)}")
+        if self._validity.enabled:
+            print(f"[*] Validity channel: reject-code {self._validity.reject_code}")
         print(f"[*] Selected schedulers: {self._selected_schedulers_str()}")
         # Static branch density: conditional branches per KB of .text
         from fuzzer_tool.core.elf import branch_density
