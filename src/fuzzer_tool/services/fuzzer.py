@@ -5071,6 +5071,54 @@ class Fuzzer:
                 f"{baseline_edges} baseline edges "
                 f"({time.monotonic() - t0:.2f}s)"
             )
+        self._report_comparison_reach(len(self.corpus))
+
+    def _report_comparison_reach(self, n_execs: int) -> None:
+        """Say whether the comparison instrumentation reached the target.
+
+        "cmplog is on but doing nothing" is currently silent in every form
+        it takes, and it takes several: an -O2 build without -fno-builtin
+        (measured on cmplog_exercise.c: 20 call sites, 4 records), a preload
+        that lost the symbol-lookup race to the executable's own weak sancov
+        stubs, a target that never reaches its parser on the seeds it was
+        given. All of them look identical from the outside -- the campaign
+        runs, the token pool just stays empty -- and a user reads that as
+        "this target has no interesting comparisons".
+
+        The counters answer it directly, and calibration is where the
+        question is cheap: every seed has just been executed exactly once,
+        so the totals are over a known number of executions of unmutated
+        input, before the fuzz loop can muddy them.
+
+        Printed like the distance line, and warned about only in the case
+        with no benign reading. Zero fires across a whole seed pass is that
+        case: a target worth pointing a fuzzer at compares *something*.
+        """
+        if self._cmplog is None or n_execs <= 0:
+            return
+        self._reset_cmplog()
+        self._cmplog.collect_counts()
+        (l1_fired, _), (l2_fired, _) = self._cmplog.layer_totals()
+        total = l1_fired + l2_fired
+        if total == 0:
+            print(
+                "[!] Comparison instrumentation: no comparisons observed in "
+                f"{n_execs} seed executions — cmplog is enabled but not "
+                "reaching the target (check -fno-builtin-* on the target "
+                "build, and that the shim is linked in rather than preloaded)"
+            )
+            return
+        print(
+            f"[*] Comparison instrumentation: {total} comparisons over "
+            f"{n_execs} seed executions (libc {l1_fired}, trace-cmp {l2_fired})"
+        )
+        if l1_fired == 0:
+            print(
+                "[*]   Comparisons are inlined: the libc layer sees nothing, "
+                "so trace-cmp records the post-expansion (0, 1) pairs rather "
+                "than operands. Rebuild with -fno-builtin-memcmp "
+                "(and -strcmp, -strncmp) to recover them."
+            )
 
     def run(self, iterations=0):
         self._start_stack_heartbeat()

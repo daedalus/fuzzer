@@ -773,6 +773,36 @@ class CmplogCollector:
         """Run totals as ``(fired, asserted)`` across every callback."""
         return sum(self.cmp_fired.values()), sum(self.cmp_asserted.values())
 
+    def layer_totals(self) -> tuple[tuple[int, int], tuple[int, int]]:
+        """Totals split by instrumentation layer, as ``(layer1, layer2)``.
+
+        Layer 1 is the libc interposition (``memcmp``, ``strstr``, ...) and
+        sees real operands; layer 2 is the compiler's trace-cmp callbacks
+        and sees whatever survived to IR. The ratio says what kind of target
+        this is, and it is the only thing that does:
+
+        * layer 2 alone means the comparisons were inlined, which is the
+          regime where trace-cmp yields the degenerate ``(0, 1)`` pairs --
+          the record stream is nearly worthless there even though it is
+          large;
+        * layer 1 alone means the parser goes through libc, so token
+          extraction and the pair pool are worth the budget;
+        * neither means the instrumentation is not reaching the target at
+          all, which is otherwise entirely silent.
+
+        Classified on the ``trace_`` prefix rather than a second copy of the
+        callback list, so a new interceptor lands on the right side without
+        anyone having to remember this function exists.
+        """
+        l1 = l2 = (0, 0)
+        for name, fired in self.cmp_fired.items():
+            asserted = self.cmp_asserted.get(name, 0)
+            if name.startswith("trace_"):
+                l2 = (l2[0] + fired, l2[1] + asserted)
+            else:
+                l1 = (l1[0] + fired, l1[1] + asserted)
+        return l1, l2
+
     def detect_hash_candidates(self, pairs: list[tuple[bytes, bytes]]) -> int:
         """Identify pairs that look like checksum/CRC comparisons.
 
