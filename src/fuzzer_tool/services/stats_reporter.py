@@ -30,6 +30,7 @@ def record_discovery_snapshot(
     if len(discovery_execs) > 500:
         del discovery_execs[:250]
         del discovery_edges[:250]
+        del discovery_timestamps[:250]
 
 
 def discovery_rate(discovery_history: tuple[array, array, array]) -> float:
