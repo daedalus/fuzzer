@@ -262,7 +262,7 @@ class ProtobufMutator:
         self._rng = rng or random
         fields = parse_protobuf(data)
         if fields is None:
-            return self._generate_random_protobuf(max_len, rng=self._rng)
+            return self._generate_random_protobuf(max_len=max_len, rng=self._rng)
 
         op = self._rng.randint(0, 11)
         mutators = [
@@ -383,6 +383,12 @@ class ProtobufMutator:
 
     def _generate_random_protobuf(self, _fields=None, max_len: int = 4096, rng=None) -> bytes:
         """Generate a random protobuf message."""
+        # An int in the first slot is a max_len passed positionally. Without
+        # this the cap lands in the vestigial placeholder and is dropped, and
+        # the generator silently falls back to its own default -- the same
+        # overload bmp/gzip/jpeg/zlib already handle and document.
+        if isinstance(_fields, int):
+            max_len = _fields
         self._rng = rng or self._rng
         fields: list[Field] = []
         for _ in range(self._rng.randint(1, 6)):

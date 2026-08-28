@@ -218,7 +218,7 @@ class GifMutator:
         self._rng = rng or random
         nodes = parse_gif(data)
         if nodes is None:
-            return self._generate_random_gif(max_len, rng=self._rng)
+            return self._generate_random_gif(max_len=max_len, rng=self._rng)
 
         op = self._rng.randint(0, 10)
         mutators = [
@@ -387,6 +387,12 @@ class GifMutator:
 
     def _generate_random_gif(self, _nodes=None, max_len: int = 4096, rng=None) -> bytes:
         """Generate a minimal random GIF."""
+        # An int in the first slot is a max_len passed positionally. Without
+        # this the cap lands in the vestigial placeholder and is dropped, and
+        # the generator silently falls back to its own default -- the same
+        # overload bmp/gzip/jpeg/zlib already handle and document.
+        if isinstance(_nodes, int):
+            max_len = _nodes
         self._rng = rng or self._rng
         w = self._rng.randint(1, 32)
         h = self._rng.randint(1, 32)

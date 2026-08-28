@@ -246,7 +246,7 @@ class WebmMutator:
         self._rng = rng or random
         elements = parse_webm(data)
         if elements is None:
-            return self._generate_random_webm(max_len, rng=self._rng)
+            return self._generate_random_webm(max_len=max_len, rng=self._rng)
 
         op = self._rng.randint(0, 11)
         mutators = [
@@ -409,6 +409,12 @@ class WebmMutator:
 
     def _generate_random_webm(self, _elements=None, max_len: int = 4096, rng=None) -> bytes:
         """Generate a minimal random WebM file."""
+        # An int in the first slot is a max_len passed positionally. Without
+        # this the cap lands in the vestigial placeholder and is dropped, and
+        # the generator silently falls back to its own default -- the same
+        # overload bmp/gzip/jpeg/zlib already handle and document.
+        if isinstance(_elements, int):
+            max_len = _elements
         self._rng = rng or self._rng
 
         def leaf(elem_id: int, data: bytes) -> Element:

@@ -257,7 +257,7 @@ class ZipMutator:
         self._rng = rng or random
         doc = parse_zip(data)
         if doc is None:
-            return self._generate_random_zip(max_len, rng=self._rng)
+            return self._generate_random_zip(max_len=max_len, rng=self._rng)
 
         op = self._rng.randint(0, 11)
         mutators = [
@@ -404,6 +404,12 @@ class ZipMutator:
 
     def _generate_random_zip(self, _doc=None, max_len: int = 4096, rng=None) -> bytes:
         """Generate a minimal random ZIP archive (stored, no encryption)."""
+        # An int in the first slot is a max_len passed positionally. Without
+        # this the cap lands in the vestigial placeholder and is dropped, and
+        # the generator silently falls back to its own default -- the same
+        # overload bmp/gzip/jpeg/zlib already handle and document.
+        if isinstance(_doc, int):
+            max_len = _doc
         self._rng = rng or self._rng
 
         name = self._rng.choice([b"a.txt", b"data.bin", b"dir/file"])

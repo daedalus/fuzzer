@@ -496,3 +496,56 @@ class TestArmMutations:
         mut = ArmMutator()
         for data in (b"", b"\x00", b"\x00\x00", b"\x00" * 5):
             mut.mutate(data, max_len=4096, rng=_rng())
+
+
+class TestGeneratorMaxLenIsHonoured:
+    """Ten generators carry a vestigial first parameter (_chunks, _doc,
+    _boxes, ...) copied from the bmp/gzip/jpeg/zlib generators, where that slot
+    is a real overload. Nothing ever passes it, but mutate() called them as
+    gen(max_len, rng=...), so the cap landed in the placeholder and each
+    generator silently fell back to its own default -- 4096 or 65536 rather
+    than the caller's budget."""
+
+    CASES = [
+        ("fuzzer_tool.core.mutations.webp", "WebpMutator", "_generate_random_webp"),
+        ("fuzzer_tool.core.mutations.zip", "ZipMutator", "_generate_random_zip"),
+        ("fuzzer_tool.core.mutations.isobmff", "IsobmffMutator", "_generate_random_isobmff"),
+        ("fuzzer_tool.core.mutations.nal", "NalMutator", "_generate_random_nal_stream"),
+        ("fuzzer_tool.core.mutations.protobuf", "ProtobufMutator", "_generate_random_protobuf"),
+        ("fuzzer_tool.core.mutations.gif", "GifMutator", "_generate_random_gif"),
+        ("fuzzer_tool.core.mutations.pgs", "PgsMutator", "_generate_random_pgs"),
+        ("fuzzer_tool.core.mutations.webm", "WebmMutator", "_generate_random_webm"),
+        ("fuzzer_tool.core.mutations.x86", "X86Mutator", "_generate_random_x86"),
+        ("fuzzer_tool.core.mutations.arm", "ArmMutator", "_generate_random_arm"),
+    ]
+
+    @pytest.mark.parametrize("mod,cls,meth", CASES)
+    def test_positional_max_len_matches_keyword(self, mod, cls, meth):
+        import importlib
+
+        gen = getattr(getattr(importlib.import_module(mod), cls)(), meth)
+        assert len(gen(64, rng=_rng())) == len(gen(max_len=64, rng=_rng()))
+
+    @pytest.mark.parametrize("mod,cls,meth", CASES)
+    def test_generated_output_respects_a_small_cap(self, mod, cls, meth):
+        import importlib
+
+        gen = getattr(getattr(importlib.import_module(mod), cls)(), meth)
+        assert len(gen(max_len=64, rng=_rng())) <= 64
+
+    @pytest.mark.parametrize(
+        "mod,cls",
+        [
+            ("fuzzer_tool.core.mutations.webp", "WebpMutator"),
+            ("fuzzer_tool.core.mutations.isobmff", "IsobmffMutator"),
+            ("fuzzer_tool.core.mutations.zip", "ZipMutator"),
+            ("fuzzer_tool.core.mutations.webm", "WebmMutator"),
+        ],
+    )
+    def test_mutate_generator_branch_respects_cap(self, mod, cls):
+        """mutate() on unparseable input takes the generator branch and returns
+        its result directly, so the dropped cap reached real output."""
+        import importlib
+
+        m = getattr(importlib.import_module(mod), cls)()
+        assert len(m.mutate(b"xx", max_len=32, rng=_rng())) <= 32

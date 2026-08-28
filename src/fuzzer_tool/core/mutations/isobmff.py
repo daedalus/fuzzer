@@ -303,7 +303,7 @@ class IsobmffMutator:
         self._rng = rng or random
         boxes = parse_boxes(data)
         if boxes is None or not boxes:
-            return self._generate_random_isobmff(max_len, rng=self._rng)
+            return self._generate_random_isobmff(max_len=max_len, rng=self._rng)
 
         op = self._rng.randint(0, 9)
         mutators = [
@@ -421,6 +421,12 @@ class IsobmffMutator:
 
     def _generate_random_isobmff(self, _boxes=None, max_len: int = 65536, rng=None) -> bytes:
         """Generate a minimal random ISOBMFF file."""
+        # An int in the first slot is a max_len passed positionally. Without
+        # this the cap lands in the vestigial placeholder and is dropped, and
+        # the generator silently falls back to its own default -- the same
+        # overload bmp/gzip/jpeg/zlib already handle and document.
+        if isinstance(_boxes, int):
+            max_len = _boxes
         self._rng = rng or self._rng
 
         # ftyp box

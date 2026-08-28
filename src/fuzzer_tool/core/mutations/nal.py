@@ -164,7 +164,7 @@ class NalMutator:
         self._rng = rng or random
         units = parse_nal_units(data)
         if units is None or not units:
-            return self._generate_random_nal_stream(max_len, rng=self._rng)
+            return self._generate_random_nal_stream(max_len=max_len, rng=self._rng)
 
         op = self._rng.randint(0, 8)
         mutators = [
@@ -274,6 +274,12 @@ class NalMutator:
 
     def _generate_random_nal_stream(self, _units=None, max_len: int = 65536, rng=None) -> bytes:
         """Generate a minimal random H.264 NAL stream from scratch."""
+        # An int in the first slot is a max_len passed positionally. Without
+        # this the cap lands in the vestigial placeholder and is dropped, and
+        # the generator silently falls back to its own default -- the same
+        # overload bmp/gzip/jpeg/zlib already handle and document.
+        if isinstance(_units, int):
+            max_len = _units
         self._rng = rng or self._rng
         units: list[NalUnit] = []
 

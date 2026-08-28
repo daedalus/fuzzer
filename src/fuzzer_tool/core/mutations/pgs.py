@@ -106,10 +106,10 @@ class PgsMutator:
         self._rng = rng or random
         segments = parse_pgs_segments(data)
         if segments is None:
-            return self._generate_random_pgs(max_len, rng=self._rng)
+            return self._generate_random_pgs(max_len=max_len, rng=self._rng)
 
         if not segments:
-            return self._generate_random_pgs(max_len, rng=self._rng)
+            return self._generate_random_pgs(max_len=max_len, rng=self._rng)
 
         op = self._rng.randint(0, 8)
         mutators = [
@@ -208,6 +208,12 @@ class PgsMutator:
 
     def _generate_random_pgs(self, _segments=None, max_len: int = 65536, rng=None) -> bytes:
         """Generate a minimal random PGS stream."""
+        # An int in the first slot is a max_len passed positionally. Without
+        # this the cap lands in the vestigial placeholder and is dropped, and
+        # the generator silently falls back to its own default -- the same
+        # overload bmp/gzip/jpeg/zlib already handle and document.
+        if isinstance(_segments, int):
+            max_len = _segments
         self._rng = rng or self._rng
         segments: list[PgsSegment] = []
 

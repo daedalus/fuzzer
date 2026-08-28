@@ -140,7 +140,7 @@ class ArmMutator:
         self._rng = rng or random
         words = parse_arm(data)
         if words is None:
-            return self._generate_random_arm(max_len, rng=self._rng)
+            return self._generate_random_arm(max_len=max_len, rng=self._rng)
 
         op = self._rng.randint(0, 11)
         mutators = [
@@ -261,6 +261,12 @@ class ArmMutator:
 
     def _generate_random_arm(self, _words=None, max_len: int = 4096, rng=None) -> bytes:
         """Generate a random ARM stream of NOPs and BX LR returns."""
+        # An int in the first slot is a max_len passed positionally. Without
+        # this the cap lands in the vestigial placeholder and is dropped, and
+        # the generator silently falls back to its own default -- the same
+        # overload bmp/gzip/jpeg/zlib already handle and document.
+        if isinstance(_words, int):
+            max_len = _words
         self._rng = rng or self._rng
         out = bytearray()
         for _ in range(self._rng.randint(1, 16)):

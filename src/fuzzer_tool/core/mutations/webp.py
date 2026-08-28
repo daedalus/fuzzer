@@ -129,7 +129,7 @@ class WebpMutator:
         self._rng = rng or random
         chunks = parse_webp(data)
         if chunks is None:
-            return self._generate_random_webp(max_len, rng=self._rng)
+            return self._generate_random_webp(max_len=max_len, rng=self._rng)
 
         op = self._rng.randint(0, 10)
         mutators = [
@@ -298,6 +298,12 @@ class WebpMutator:
 
     def _generate_random_webp(self, _chunks=None, max_len: int = 4096, rng=None) -> bytes:
         """Generate a minimal random WebP file."""
+        # An int in the first slot is a max_len passed positionally. Without
+        # this the cap lands in the vestigial placeholder and is dropped, and
+        # the generator silently falls back to its own default -- the same
+        # overload bmp/gzip/jpeg/zlib already handle and document.
+        if isinstance(_chunks, int):
+            max_len = _chunks
         self._rng = rng or self._rng
 
         # VP8X chunk: flags + canvas dimensions (w-1, h-1)
