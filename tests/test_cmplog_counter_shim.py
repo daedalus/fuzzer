@@ -227,3 +227,129 @@ def test_counting_is_off_without_the_env_var(tmp_path, shim_obj):
     env["_CMPLOG_OUT"] = str(tmp_path / "records.cmplog")
     subprocess.run([str(exe)], capture_output=True, env=env, timeout=60, check=True)
     assert not counts_file.exists()
+
+
+# ── Forkserver: the counters must not be inherited ────────────────────
+#
+# Everything above runs the target once per process. Under the forkserver
+# every execution is a fork() from a parent that has already been through
+# the shim's constructor, so any comparison counted before the fork is
+# counted again in every child for the life of the campaign. The offender
+# is the server's own ``strcmp(optin, "1")`` opt-in check, which is
+# satisfied -- so it lands in the column that is supposed to be scarce.
+#
+# The target is built with the full shim rather than the preload-only
+# object the fixture above compiles: the forkserver lives behind
+# ``#if __AFL_EDGE``, which preload-only builds define to 0.
+
+AFL_FORKSRV_FD = 198
+
+
+@pytest.fixture(scope="module")
+def forkserver_target(tmp_path_factory) -> Path:
+    """A target making exactly one unsatisfied memcmp per execution."""
+    d = tmp_path_factory.mktemp("fsrv_counts")
+    src = d / "target.c"
+    src.write_text(
+        """
+        #include <stdio.h>
+        #include <string.h>
+        int main(void) {
+            volatile int r = memcmp("HELLO_WORLD", "GOODBYE_ABC", 11) == 0;
+            printf("%d\\n", r);
+            return 0;
+        }
+        """
+    )
+    exe = d / "target"
+    proc = subprocess.run(
+        [
+            "gcc",
+            "-O1",
+            "-fno-builtin-memcmp",
+            "-fno-builtin-strcmp",
+            "-D__AFL_CMPLOG=1",
+            "-include",
+            str(AFL_SHIM),
+            "-o",
+            str(exe),
+            str(src),
+            "-ldl",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        pytest.skip(f"forkserver target did not build: {proc.stderr[-400:]}")
+    return exe
+
+
+def _run_forkserver(exe: Path, counts: Path, execs: int) -> dict[str, tuple[int, int]]:
+    """Drive the real 198/199 protocol for *execs* runs and sum the dumps.
+
+    posix_spawn rather than Popen: the pipe ends have to land on those two
+    fd numbers exactly, and ``preexec_fn`` runs after the child has already
+    closed everything outside ``pass_fds``, so the dup2 targets do not
+    survive to exec. File actions are applied by the spawn itself.
+    """
+    ctl_r, ctl_w = os.pipe()
+    st_r, st_w = os.pipe()
+
+    env = dict(os.environ)
+    env["__AFL_FORKSRV"] = "1"
+    env["_CMPLOG_COUNTS"] = str(counts)
+    env["_CMPLOG_OUT"] = str(counts.with_suffix(".cmplog"))
+
+    pid = os.posix_spawn(
+        str(exe),
+        [str(exe)],
+        env,
+        file_actions=[
+            (os.POSIX_SPAWN_OPEN, 0, os.devnull, os.O_RDONLY, 0o666),
+            (os.POSIX_SPAWN_OPEN, 1, os.devnull, os.O_WRONLY, 0o666),
+            (os.POSIX_SPAWN_DUP2, ctl_r, AFL_FORKSRV_FD),
+            (os.POSIX_SPAWN_DUP2, st_w, AFL_FORKSRV_FD + 1),
+        ],
+    )
+    os.close(ctl_r)
+    os.close(st_w)
+    try:
+        with os.fdopen(st_r, "rb") as status, os.fdopen(ctl_w, "wb") as control:
+            assert len(status.read(4)) == 4, "forkserver sent no hello"
+            for _ in range(execs):
+                control.write(b"\0\0\0\0")
+                control.flush()
+                assert len(status.read(4)) == 4, "no child pid"
+                assert len(status.read(4)) == 4, "no wait status"
+        # Closing the control pipe ends the loop; the server _exit(0)s.
+        os.waitpid(pid, 0)
+    except BaseException:  # pragma: no cover - only on a hung or dead server
+        os.kill(pid, 9)
+        os.waitpid(pid, 0)
+        raise
+    return _parse_counts(counts)
+
+
+@pytest.mark.parametrize("execs", [5, 20, 100])
+def test_forkserver_children_do_not_inherit_counts(tmp_path, forkserver_target, execs):
+    """Two properties, one run.
+
+    ``memcmp == (execs, 0)`` is the per-execution vector: one comparison
+    per run, none of them satisfied, so fired must track the execution
+    count exactly. Unfixed it still does -- the leak is not in the
+    target's own bucket, which is precisely why totals looked fine.
+
+    ``strcmp`` absent is the discriminator. The only comparisons that can
+    be inherited are the ones between ``__afl_cmplog_init`` and the fork,
+    and in practice that window holds exactly one: the server's own
+    ``strcmp(optin, "1")``. It is *satisfied*, so unfixed this reports a
+    perfect solve rate, once per execution forever, for a comparison the
+    target never makes.
+
+    Asserted per key rather than against the whole dict: a libc that
+    routed some stdio internal through an interposed symbol would add a
+    row without saying anything about inheritance.
+    """
+    counts = _run_forkserver(forkserver_target, tmp_path / "counts.txt", execs)
+    assert counts["memcmp"] == (execs, 0)
+    assert "strcmp" not in counts, f"server's own comparison leaked: {counts}"

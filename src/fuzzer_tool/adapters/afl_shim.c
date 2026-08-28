@@ -2099,6 +2099,33 @@ static void __afl_start_forkserver(void) {
     struct __afl_entry *saved_area = __afl_area;
     __afl_area = NULL;
 
+#if __AFL_CMPLOG
+    /* Same argument, one layer over: every child forks from the parent's
+     * counter state, so anything counted before this point is re-counted
+     * once per execution, forever. The offender is this function's own
+     * strcmp(optin, "1") twenty lines above, which goes through the
+     * interceptor like any other call and lands in the SATISFIED column --
+     * the scarcer and more load-bearing of the two numbers. Measured
+     * against a target making exactly one unsatisfied memcmp per run,
+     * driven through the protocol below: 20 executions reported
+     * memcmp (20, 0) and strcmp (20, 20), a comparison the target never
+     * makes.
+     *
+     * Zeroed rather than dumped, for the reason the area above is detached
+     * rather than saved: this is the server's own bookkeeping, not the
+     * target's behaviour. Genuine comparisons from a constructor that ran
+     * before us go with it, which is the same trade the detach already
+     * makes for init edges -- identical on every execution, so they carry
+     * no per-execution signal.
+     *
+     * Totals were usable without this; per-execution vectors were not,
+     * since each carried a constant offset. */
+    for (int i = 0; i < __AFL_CMP_SITES; i++) {
+        __afl_cmp_fired[i] = 0;
+        __afl_cmp_hit[i]   = 0;
+    }
+#endif
+
     while (1) {
         char cmd[4];
         if (read(AFL_FORKSRV_FD, cmd, 4) != 4) _exit(0);
