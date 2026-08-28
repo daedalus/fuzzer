@@ -1,6 +1,8 @@
 """CLI commands for fuzzer-tool."""
 
 import argparse
+import builtins
+import datetime
 import os
 import shlex
 import shutil
@@ -10,6 +12,18 @@ from pathlib import Path
 
 from fuzzer_tool.core.mutations import load_dictionary
 from fuzzer_tool.services.fuzzer import Fuzzer
+
+
+def _enable_timestamp_print() -> None:
+    """Monkey-patch builtins.print to prefix every message with a timestamp."""
+    _original_print = builtins.print
+
+    def _timestamped_print(*args, **kwargs):
+        ts = datetime.datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
+        args = (f"{ts} {args[0]}",) + args[1:] if args else (ts,)
+        _original_print(*args, **kwargs)
+
+    builtins.print = _timestamped_print
 
 
 def _load_hash_list(path: str | None) -> set[str] | None:
@@ -1410,6 +1424,11 @@ def main() -> int:
         prog="fuzzer-tool",
         description="Coverage-guided binary fuzzer with crash analysis tools",
     )
+    parser.add_argument(
+        "--print-timestamp",
+        action="store_true",
+        help="Prefix every stdout/stderr message with a wall-clock timestamp",
+    )
     subparsers = parser.add_subparsers(dest="command")
 
     # --- fuzz (default) ---
@@ -2738,5 +2757,8 @@ def main() -> int:
         # Re-parse with fuzz defaults for backwards compatibility
         sys.argv.insert(1, "fuzz")
         args = parser.parse_args()
+
+    if getattr(args, "print_timestamp", False):
+        _enable_timestamp_print()
 
     return args.func(args)
