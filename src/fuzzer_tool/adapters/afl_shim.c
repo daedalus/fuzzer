@@ -743,6 +743,48 @@ void __sanitizer_cov_trace_pc_guard(uint32_t *guard) {
     __afl_map_edge(*guard);
 }
 
+/* ── SGFuzz state transitions (instrumented sources only) ─────────────
+ *
+ * core/state_vars.py rewrites every assignment to an enum-typed variable
+ * so it also calls here with (variable id, new value). A parser keeps its
+ * state in such a variable, and the assignments are the state machine's
+ * transitions -- which edge coverage cannot see as transitions at all: it
+ * records the code that performs one, so two runs visiting the same
+ * blocks in a different order are one bitmap.
+ *
+ * The transition is folded into the edge map rather than into a channel
+ * of its own. SGFuzz keeps an explicit State Transition Tree; an edge
+ * carries the same "this pair is new" signal and arrives already wired to
+ * every consumer of coverage -- scoring, scheduling, admission, the n-gram
+ * ring -- with no plumbing added. What it does not carry is the tree
+ * itself, so nothing can schedule *by state*; see docs/TODO.md.
+ *
+ * The hash mixes the previous value with the current one, so it is the
+ * transition that is the coverage item, not the state: reaching DONE from
+ * BODY and reaching DONE from INIT are different edges.
+ *
+ * No-op in an uninstrumented target -- nothing calls it. */
+#define SFUZZ_MAX_VARS 256
+
+static __thread uint64_t __sfuzz_prev[SFUZZ_MAX_VARS];
+
+__attribute__((visibility("default")))
+void __sfuzz_state(unsigned var_id, unsigned long long value) {
+    unsigned slot = var_id % SFUZZ_MAX_VARS;
+    uint64_t prev = __sfuzz_prev[slot];
+    __sfuzz_prev[slot] = (uint64_t)value;
+
+    /* FNV-1a over (id, previous, current). The high bit is set so the
+     * result can never be 0, which __afl_map_edge reads as an empty
+     * slot. */
+    uint64_t h = 1469598103934665603ULL;
+    h = (h ^ var_id) * 1099511628211ULL;
+    h = (h ^ prev) * 1099511628211ULL;
+    h = (h ^ (uint64_t)value) * 1099511628211ULL;
+
+    __afl_map_edge((uint32_t)(h >> 32) | 0x80000000u);
+}
+
 __attribute__((visibility("hidden")))
 void __sanitizer_cov_trace_pc_guard_init(uint32_t *start, uint32_t *stop) {
     static uint32_t guard_counter;
