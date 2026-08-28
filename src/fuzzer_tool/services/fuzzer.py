@@ -3720,6 +3720,7 @@ class Fuzzer:
                 if new:
                     self._last_new_edge_exec = self.exec_count
                     self._last_new_edge_count = len(new)
+                    self._saturation = None  # invalidate cached saturation
                     # Attribute new edges to the operators that ran this iteration.
                     # Proportional split: edges ÷ unique ops in _last_ops_used.
                     unique_ops = list(dict.fromkeys(self._last_ops_used))

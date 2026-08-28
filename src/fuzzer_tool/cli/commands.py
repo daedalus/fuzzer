@@ -594,7 +594,7 @@ def cmd_fuzz(args):
         enable_smt_z3=getattr(args, "enable_smt_z3", False),
         mod_solving=getattr(args, "mod_solving", "heuristic"),
         chi2_operator_interval=getattr(args, "chi2_operator_interval", 0),
-        quiet_stats=getattr(args, "profile_hotpath", False),
+        quiet_stats=False,
         no_save_state=getattr(args, "no_save_state", False),
         dedup_execs=not getattr(args, "no_dedup_execs", False),
         perf_novelty=not getattr(args, "no_perf_novelty", False),

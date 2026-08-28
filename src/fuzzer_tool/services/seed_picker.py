@@ -456,7 +456,14 @@ class SeedPicker:
             if stop:
                 w *= 0.01
         if seed_key not in f._cached_weights:
-            if seed_key in f._edge_tracker.seed_edges and f._edge_tracker.seed_edges[seed_key]:
+            # When saturated, skip the expensive edge-tracker analyses
+            # (subsumption, hitcount diversity, Wasserstein, coverage
+            # proximity) and return neutral multipliers. These mainly help
+            # discovery; at >= 99% saturation the corpus is already
+            # well-characterised and the per-seed analysis is wasted work.
+            if getattr(f, "_saturation", 0.0) >= 0.99:
+                f._cached_weights[seed_key] = (1.0, 1.0, 1.0, 0.5)
+            elif seed_key in f._edge_tracker.seed_edges and f._edge_tracker.seed_edges[seed_key]:
                 sub = f._edge_tracker.compute_subsumption_weight(seed_key)
                 div = f._edge_tracker.compute_hitcount_diversity_weight(seed_key)
                 spa = f._edge_tracker.compute_wasserstein_weight(seed_key)
@@ -537,25 +544,26 @@ class SeedPicker:
         if recent_counts is None:
             recent_counts = self._recent_edge_counts(f)
         owners_get = tracker._edge_owner_count.get
+        rare_threshold = RARE_EDGE_OWNERS
+        recent_get = recent_counts.get if recent_counts else None
         rare_count = 0
         total_owners = 0
         overlap = 0
         # Two loop bodies rather than a per-edge branch: this runs once per
         # corpus seed per weight pass, i.e. tens of millions of iterations
         # over a fuzzing session, and the branch is loop-invariant.
-        if recent_counts:
-            recent_get = recent_counts.get
+        if recent_get is not None:
             for e in seed_edges:
                 n = owners_get(e, 0)
                 total_owners += n
-                if n <= RARE_EDGE_OWNERS:
+                if n <= rare_threshold:
                     rare_count += 1
                 overlap += recent_get(e, 0)
         else:
             for e in seed_edges:
                 n = owners_get(e, 0)
                 total_owners += n
-                if n <= RARE_EDGE_OWNERS:
+                if n <= rare_threshold:
                     rare_count += 1
 
         if rare_count > 0:
@@ -615,11 +623,12 @@ class SeedPicker:
                     self._mean_entropy_cache_key = -1
                 cache_key = len(f._edge_tracker.seed_hit_counts)
                 if cache_key != self._mean_entropy_cache_key:
-                    entropies = [
-                        f._edge_tracker.shannon_entropy_seed(k)
-                        for k in f._edge_tracker.seed_hit_counts
-                        if f._edge_tracker.shannon_entropy_seed(k) > 0
-                    ]
+                    # Cache per-key results so each seed is computed once; the
+                    # old list-comprehension called shannon_entropy_seed() twice
+                    # per key (filter + value), which dominates weight passes.
+                    hit_counts = f._edge_tracker.seed_hit_counts
+                    ent_map = {k: f._edge_tracker.shannon_entropy_seed(k) for k in hit_counts}
+                    entropies = [v for v in ent_map.values() if v > 0]
                     self._mean_seed_entropy = sum(entropies) / len(entropies) if entropies else 0.0
                     self._mean_entropy_cache_key = cache_key
                 effective_mean = self._mean_seed_entropy
@@ -790,9 +799,19 @@ class SeedPicker:
         weights = [1.0] * n
         pareto_scores: list[tuple[float, float, float]] = [(1.0, 1.0, 1.0)] * n
 
-        if not hasattr(f, "_classify_cache") or f.exec_count % 100 == 0:
+        # Saturation gate: when coverage is >= 99%, skip expensive analyses
+        # that mainly help discovery. Re-enable automatically if saturation
+        # drops, so exploratory phases still get full analysis.
+        sat = getattr(f, "_saturation", None)
+        if sat is None:
+            gt = f._edge_tracker.good_turing_estimate()
+            sat = gt.get("saturation", 0.0)
+            f._saturation = sat
+        _saturated = sat >= 0.99
+
+        if not _saturated and (not hasattr(f, "_classify_cache") or f.exec_count % 100 == 0):
             f._classify_cache = f._edge_tracker.classify_seeds()
-        classifications = f._classify_cache
+        classifications = getattr(f, "_classify_cache", {})
 
         T = f._temperature
         seed_meta = f.seed_meta
@@ -864,7 +883,9 @@ class SeedPicker:
 
         # Compute FMM-clustered pairwise overlap density if enabled.
         # This runs before Phase 2 so the per-seed loop can consume it.
-        if getattr(f, "_use_overlap_density", False) and n >= 3:
+        # Skip when saturated: overlap density mainly helps discovery, and
+        # at >= 99% saturation the corpus is already well-characterised.
+        if not _saturated and getattr(f, "_use_overlap_density", False) and n >= 3:
             all_keys: list[str] = []
             for s in corpus:
                 all_keys.append(f._seed_key(s))
@@ -884,8 +905,15 @@ class SeedPicker:
         # LCA-based lineage diversity multipliers (Query 3): a seed whose
         # lineage subtree is far from a sampled set of peers gets a small
         # weight boost (mult = 1.0 + 0.5 * diversity, diversity in [0, 1]).
+        # Skip when saturated: this pass is O(n) with LCA queries and only
+        # helps exploratory scheduling, not exploitation at saturation.
         lineage_div: dict[str, float] = {}
-        if f._use_lineage and getattr(f, "_lineage", None) is not None and n >= 2:
+        if (
+            not _saturated
+            and f._use_lineage
+            and getattr(f, "_lineage", None) is not None
+            and n >= 2
+        ):
             tree = f._lineage
             max_depth = max((node.depth for node in tree.nodes.values()), default=0)
             if max_depth > 0:
@@ -1122,13 +1150,27 @@ class SeedPicker:
             keys = list(f._cached_weights)[: len(f._cached_weights) // 2]
             for k in keys:
                 del f._cached_weights[k]
-        cache_key = (corpus_version, f.exec_count // 50)
+        # Recompute weights every 200 execs instead of every 50, and only
+        # force recompute when the corpus has changed by a meaningful chunk.
+        # The old key `(corpus_version, exec_count // 50)` invalidated on
+        # every new seed, turning weight computation into an O(corpus_size)
+        # tax on each accepted seed during growth phases.
+        recompute_interval = 200
+        corpus_growth = corpus_version - getattr(f, "_last_weight_corpus_size", 0)
+        if abs(corpus_growth) >= 20:
+            f._weight_cache = None
+            f._last_weight_corpus_size = corpus_version
+        cache_key = f.exec_count // recompute_interval
         if cache_key != f._weight_cache_key:
             f._weight_cache_key = cache_key
             f._weight_cache = None
 
         if f._weight_cache is not None:
-            weights = f._weight_cache
+            cached = f._weight_cache
+            if len(cached) < corpus_version:
+                weights = cached + [1.0] * (corpus_version - len(cached))
+            else:
+                weights = cached
         else:
             weights = self._compute_weights(now)
             f._weight_cache = weights
