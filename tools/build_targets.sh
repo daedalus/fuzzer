@@ -309,6 +309,55 @@ verify_target_md5() {
 # -lm/-lpthread are no-ops where unneeded (glibc 2.34+ folds libpthread
 # into libc), which is the cheaper error than a missing symbol in one build
 # mode only.
+# ── FFmpeg link dependencies ──────────────────────────────────────
+#
+# The vendored FFmpeg's external link deps were spelled out by hand as
+# "-lm -lz -llzma -lbz2 -lpthread -ldl", which makes every one of them an
+# unconditional requirement regardless of what configure actually enabled.
+# On a --minimal tree configure disables lzma outright -- CONFIG_LZMA is not
+# even emitted into config.mak -- yet -llzma still had to resolve, so a box
+# without liblzma-dev lost all five ffmpeg_read variants to "cannot find
+# -llzma". The helpers send stderr to /dev/null, so the only symptom was
+# "WARN: failed: ffmpeg_read" with no cause.
+#
+# configure already records the answer. EXTRALIBS-<lib> in ffbuild/config.mak
+# is the exact set that tree needs; read it instead of guessing. -ldl is
+# appended because the shim's dlsym(RTLD_NEXT) layer needs it and that is a
+# property of our link, not of FFmpeg's.
+ffmpeg_extralibs() {
+    local root="$1"
+    local mak="$root/ffbuild/config.mak"
+    local libs=""
+    if [ -f "$mak" ]; then
+        libs=$(sed -n 's/^EXTRALIBS-\(avformat\|avcodec\|avutil\|swresample\)=//p' "$mak" \
+               | tr ' ' '\n' | grep -v '^$' | sort -u)
+    fi
+    # Fall back to the historical list only when config.mak is unreadable.
+    [ -n "$libs" ] || libs=$(printf '%s\n' -lm -lz -lbz2 -lpthread)
+
+    # EXTRALIBS is a superset: configure records what it detected, not what the
+    # static archives ended up referencing. A --minimal tree emits -lX11 via
+    # EXTRALIBS-avutil while libavutil.a contains no X11 symbol at all, so
+    # passing it through would fail the link on any box without libx11-dev --
+    # the same unconditional-requirement bug, one library over. Drop the ones
+    # that do not resolve: a library absent from the system cannot satisfy
+    # anything, so if it really was needed the error becomes an honest
+    # undefined reference naming the symbol instead of "cannot find -lfoo".
+    local probe out=""
+    for probe in $libs; do
+        case "$probe" in
+            -l*)
+                if echo 'int main(void){return 0;}' \
+                   | "${DEFAULT_CC:-cc}" -x c - "$probe" -o /dev/null 2>/dev/null; then
+                    out="$out $probe"
+                fi
+                ;;
+            *) out="$out $probe" ;;   # -pthread and friends are compiler flags
+        esac
+    done
+    echo "${out# } -ldl"
+}
+
 select_png_zlib_libs() {
     local vendor_zlib="$VENDOR/zlib/libz.a"
     local vendor_png="$VENDOR/libpng/.libs/libpng16.a"
@@ -672,7 +721,7 @@ build_simple_targets() {
         if [[ "$flags" == *-fsanitize=address* ]] && [ -f "$VENDOR/ffmpeg_asan/libavformat/libavformat.a" ]; then
             ffmpeg_root="$VENDOR/ffmpeg_asan"
         fi
-        FFMPEG_LIBS="$ffmpeg_root/libavformat/libavformat.a $ffmpeg_root/libavcodec/libavcodec.a $ffmpeg_root/libavutil/libavutil.a $ffmpeg_root/libswresample/libswresample.a -lm -lz -llzma -lbz2 -lpthread -ldl"
+        FFMPEG_LIBS="$ffmpeg_root/libavformat/libavformat.a $ffmpeg_root/libavcodec/libavcodec.a $ffmpeg_root/libavutil/libavutil.a $ffmpeg_root/libswresample/libswresample.a $(ffmpeg_extralibs "$ffmpeg_root")"
         FFMPEG_INC="-I$ffmpeg_root"
     fi
 
@@ -856,7 +905,7 @@ build_simple_so_targets() {
     [[ "$suffix" == _asan* ]] && ffmpeg_vendor_dir="$VENDOR/ffmpeg_asan"
     local VENDOR_FFMPEG_A="$ffmpeg_vendor_dir/libavformat/libavformat.a"
     if [ -f "$VENDOR_FFMPEG_A" ]; then
-        FFMPEG_LIBS="$ffmpeg_vendor_dir/libavformat/libavformat.a $ffmpeg_vendor_dir/libavcodec/libavcodec.a $ffmpeg_vendor_dir/libavutil/libavutil.a $ffmpeg_vendor_dir/libswresample/libswresample.a -lm -lz -llzma -lbz2 -lpthread -ldl"
+        FFMPEG_LIBS="$ffmpeg_vendor_dir/libavformat/libavformat.a $ffmpeg_vendor_dir/libavcodec/libavcodec.a $ffmpeg_vendor_dir/libavutil/libavutil.a $ffmpeg_vendor_dir/libswresample/libswresample.a $(ffmpeg_extralibs "$ffmpeg_vendor_dir")"
         FFMPEG_INC="-I$ffmpeg_vendor_dir"
         echo "  Using vendored FFmpeg static libraries ($ffmpeg_vendor_dir)"
     fi
