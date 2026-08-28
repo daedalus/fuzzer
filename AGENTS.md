@@ -59,7 +59,7 @@ fuzzer, not just the target.
 38. When implementing a new feature don't write it right away. First write the test. Observe it failing. Then write the feature. And observe the test passing (Test driven development).
 39. No retry-until-random-hit loops in tests (`for _ in range(N): if cond: break/found=True`). This tests luck, not behavior — it can pass while the code is broken and fails unreproducibly when it doesn't. Inject a scripted/fake RNG that deterministically drives the exact call sequence and assert the exact output. See `docs/refs/bug-classes.md` §Testing.
 40. Every scheduler armed through `_register_arms` (`src/fuzzer_tool/services/fuzzer.py`) must declare an explicit class-level `supports_priors` bool: `True` only when its `init_arm()` accepts an informative `(prior_alpha, prior_beta)` override. `_register_arms` gates priors behind `getattr(scheduler, "supports_priors", False)`, so a scheduler that omits the flag silently discards format-operator priors instead of failing loudly. Declare it directly after the class docstring with a one-line reason, following `monte_carlo.py` / `exp3.py`.
-
+41. Always check that the new features implemented or bug fixes do not introduce speed penalty regressions.
 
 ## Corpus Rules
 
