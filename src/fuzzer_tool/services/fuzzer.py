@@ -958,6 +958,10 @@ class Fuzzer:
 
         # Cmplog: comparison tracing via LD_PRELOAD
         self._cmplog = None
+        # The most recent execution's own comparison vector, refilled by the
+        # drain in fuzz_one and empty whenever cmplog is off.
+        self._last_cmp_fired: dict[str, int] = {}
+        self._last_cmp_asserted: dict[str, int] = {}
         self._redqueen_index = 0
         self._cmplog_skip_counter = 0  # adaptive cmplog collection skip
         # Tri-state: None = auto-detect, True = forced on, False = forced off.
@@ -3113,6 +3117,30 @@ class Fuzzer:
 
         # Flush tracecmp buffer before collecting tokens (direct_lite mode)
         self._reset_cmplog()
+
+        # Drain the comparison counters here, on the execution boundary, and
+        # NOT on the token-collection schedule below.
+        #
+        # collect_counts() was only ever reached through collect_tokens(),
+        # which throttles itself to every 5th and then every 20th iteration
+        # once the pair pool saturates. That is right for tokens -- parsing
+        # the record stream costs 14-23ms -- and wrong for the counters,
+        # which are a handful of short lines read from a saved offset. On
+        # the throttled schedule a delta is the sum over up to twenty
+        # executions, so it says nothing about which input produced it; on
+        # this schedule it is the executed input's own comparison vector.
+        #
+        # The reset above is what makes the shim dump: __tracecmp_flush and
+        # __cmplog_reset both call __afl_cmp_dump_counts, and in subprocess
+        # mode the exiting child has already dumped from __afl_cmplog_fini.
+        #
+        # Caveat: trimming re-executes the target on admission iterations,
+        # so those vectors carry the trim runs too. Those iterations found
+        # coverage by definition, which is the stronger signal anyway.
+        self._last_cmp_fired = {}
+        self._last_cmp_asserted = {}
+        if self._cmplog:
+            self._last_cmp_fired, self._last_cmp_asserted = self._cmplog.collect_counts()
 
         # Collect cmplog tokens — periodic sampling once pool is saturated.
         # collect_tokens() reads + parses the whole cmplog file (~14-23ms

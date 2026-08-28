@@ -189,6 +189,12 @@ class CmplogCollector:
         self.cmp_fired: dict[str, int] = {}
         self.cmp_asserted: dict[str, int] = {}
         self._counts_offset: int = 0
+        # What the most recent drain added, keyed the same way. Only useful
+        # when the drain happens on an execution boundary -- see
+        # collect_counts() -- in which case it is that execution's own
+        # comparison vector rather than a slice of the run total.
+        self.last_fired: dict[str, int] = {}
+        self.last_asserted: dict[str, int] = {}
 
     def start(self) -> bool:
         """Compile the LD_PRELOAD comparison-logging shim.
@@ -669,7 +675,7 @@ class CmplogCollector:
 
         return new_tokens
 
-    def collect_counts(self) -> None:
+    def collect_counts(self) -> tuple[dict[str, int], dict[str, int]]:
         """Fold the shim's per-callback counter deltas into the run totals.
 
         The shim writes ``CNT <name> <fired> <asserted>`` lines to
@@ -684,9 +690,23 @@ class CmplogCollector:
         target can dump between the read and the truncate, and those counts
         would vanish. Truncation happens only past the size cap, where the
         loss is bounded and explicit.
+
+        Also records what *this* drain added, in ``last_fired`` /
+        ``last_asserted``. Called on an execution boundary that is the
+        executed input's own comparison vector; called on the token-
+        collection schedule it is the sum over however many executions have
+        happened since, which is a different and much less useful quantity.
+        A drain that finds nothing clears both, so a stale vector is never
+        read as the current execution's.
+
+        Returns:
+            ``(fired, asserted)`` for this drain only -- the same dicts as
+            ``last_fired`` / ``last_asserted``.
         """
+        self.last_fired = {}
+        self.last_asserted = {}
         if not self.counts_path or not os.path.exists(self.counts_path):
-            return
+            return self.last_fired, self.last_asserted
 
         try:
             if os.path.getsize(self.counts_path) > CMPLOG_COUNTS_MAX_BYTES:
@@ -697,7 +717,7 @@ class CmplogCollector:
                     fh.truncate(0)
                 self._counts_offset = 0
                 log.debug("Cmplog: truncated oversized counts file %s", self.counts_path)
-                return
+                return self.last_fired, self.last_asserted
         except OSError:
             pass
 
@@ -708,7 +728,7 @@ class CmplogCollector:
                 self._counts_offset = fh.tell()
         except OSError as e:
             log.debug("Failed to read cmplog counts file: %s", e)
-            return
+            return self.last_fired, self.last_asserted
 
         for line in new_lines:
             parts = line.split()
@@ -722,6 +742,12 @@ class CmplogCollector:
             name = parts[1]
             self.cmp_fired[name] = self.cmp_fired.get(name, 0) + fired
             self.cmp_asserted[name] = self.cmp_asserted.get(name, 0) + asserted
+            if fired:
+                self.last_fired[name] = self.last_fired.get(name, 0) + fired
+            if asserted:
+                self.last_asserted[name] = self.last_asserted.get(name, 0) + asserted
+
+        return self.last_fired, self.last_asserted
 
     def comparison_stats(self) -> dict[str, tuple[int, int]]:
         """Per-callback ``(fired, asserted)`` counts, cumulative for the run.
