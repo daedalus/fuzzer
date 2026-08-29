@@ -198,6 +198,22 @@ only at operator selection. The scheduler-convergence harness is what would tell
 you whether the adaptive version actually beats the fixed 30s — build the fuzzer
 that can judge the algorithm, then build the algorithm.
 
+**D5. Read the per-seed cost ledger we already keep** (Persistence Mechanics,
+2026-08-29) — `meta["total_time"]` accumulates per-seed target time in
+`Fuzzer.fuzz_one`, and all three of its readers (`Fuzzer._cull_queue`,
+`Fuzzer.run`, `CorpusManager.auto_minimize_corpus`) divide it by `fuzz_count`
+to recover a mean `exec_us`. The accumulated quantity is never read as such.
+Three candidate consumers, ranked: stale-seed detection in
+`StatsReporter._print_summary_seeds` (currently `fuzz_count >= 50`, a count where
+cost is the question, and display-only so the change is nearly free); the energy
+term in `SeedPicker._pick_boltzmann_seed` (`E = log(fuzz_count + 1)`); and the
+age fallback in `EdgeTracker._maybe_prune`, which has no cost term at all.
+
+**All three collapse to nothing if per-seed exec cost is tightly clustered on our
+targets — measure that first**, and if it is, delete this entry and record the
+measurement. Full analysis, including what does *not* port from that source, in
+`docs/handover/handover_persistence_mechanics_2026-08-29.md`. **Effort S–M.**
+
 ---
 
 ## E — Corpus, reduction, crash triage
@@ -533,6 +549,20 @@ and `git show <commit>^:<path>`.
 
 Merged from four "not worth porting" lists. Each was considered and declined;
 that is a different state from "absent".
+
+**Persistence Mechanics: the dissipation density, the exponential filter, the
+contention model, the six pillars.** Evaluated 2026-08-29; only the cumulative
+ledger survived, as D5. `D = xi * K * f` is `perf_score` relettered —
+`core/schedules.py` is already multiplicative and `cost = exec_us * input_size`
+already exists in two places; adding a flux term is a category error, since a
+fuzzer chooses its transition rate rather than observing it. The exponential
+survival filter is the shipped `--boltzmann` arm. Appendix A's `rho / (1 - rho)`
+contention model, applied to the bounded linear probe in `adapters/afl_shim.c`,
+is strictly weaker than the drop rates already measured there against
+`ffmpeg_read` at load 0.77, and linear probing wants Knuth's closed form rather
+than a memoryless queue. The six pillars map onto subsystems without producing a
+decision. Nothing ports from the accompanying demo scripts, which are matplotlib
+illustration and do not faithfully implement the paper's own equation 8.
 
 **Do not disable cmplog.** One source disables cmplog/redqueen, reasoning that
 input-to-state machinery is built for byte-level mutation and only adds overhead
