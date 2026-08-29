@@ -880,7 +880,14 @@ class SeedPicker:
         T = f._temperature
         seed_meta = f.seed_meta
 
-        # Phase 1: extract metadata into parallel arrays for vectorized math
+        # Phase 1: extract metadata into parallel arrays for vectorized math.
+        # The extraction is unconditional. It used to sit INSIDE the numpy try
+        # block, so an ImportError left has_meta all-False, and the phase-2
+        # loop below -- which skips any seed without metadata -- did nothing
+        # at all: every weight stayed 1.0 and seed selection silently degraded
+        # to uniform random. numpy is a hard dependency, so this was only ever
+        # a defensive path, but a defensive path that disables the scheduler
+        # without a symptom is worse than no defensive path.
         has_meta = [False] * n
         fuzz_arr = None
         cov_arr = None
@@ -893,36 +900,36 @@ class SeedPicker:
         entropy_sum = 0.0
         entropy_count = 0
 
-        try:
-            import numpy as _np
+        fuzz_list = []
+        cov_list = []
+        age_list = []
+        mom_list = []
+        meta_indices = []
 
-            fuzz_list = []
-            cov_list = []
-            age_list = []
-            mom_list = []
-            meta_indices = []
+        for i, seed in enumerate(corpus):
+            meta = seed_meta.get(seed)
+            if meta is None:
+                continue
+            has_meta[i] = True
+            meta_indices.append(i)
+            fuzz_list.append(max(meta["fuzz_count"], 1))
+            cov_list.append(meta["coverage_edges"])
+            age_list.append(now - meta["added_at"])
+            mom_list.append(meta.get("momentum", 0.0))
 
-            for i, seed in enumerate(corpus):
-                meta = seed_meta.get(seed)
-                if meta is None:
-                    continue
-                has_meta[i] = True
-                meta_indices.append(i)
-                fuzz_list.append(max(meta["fuzz_count"], 1))
-                cov_list.append(meta["coverage_edges"])
-                age_list.append(now - meta["added_at"])
-                mom_list.append(meta.get("momentum", 0.0))
+            # Pre-compute seed key and entropy in same pass
+            sk = f._seed_key(seed)
+            seed_keys[i] = sk
+            ent = f._edge_tracker.shannon_entropy_seed(sk)
+            if ent > 0:
+                entropy_map[sk] = ent
+                entropy_sum += ent
+                entropy_count += 1
 
-                # Pre-compute seed key and entropy in same pass
-                sk = f._seed_key(seed)
-                seed_keys[i] = sk
-                ent = f._edge_tracker.shannon_entropy_seed(sk)
-                if ent > 0:
-                    entropy_map[sk] = ent
-                    entropy_sum += ent
-                    entropy_count += 1
+        if meta_indices:
+            try:
+                import numpy as _np
 
-            if meta_indices:
                 fuzz_arr = _np.array(fuzz_list, dtype=_np.float64)
                 cov_arr = _np.array(cov_list, dtype=_np.float64)
                 age_arr = _np.array(age_list, dtype=_np.float64)
@@ -942,8 +949,19 @@ class SeedPicker:
                 for j, idx in enumerate(meta_indices):
                     weights[idx] = float(w_vec[j])
                     pareto_scores[idx] = (1.0, float(burst_vec[j]), 1.0)
-        except ImportError:
-            pass
+            except ImportError:
+                # Scalar equivalent, through the same helper the vector math
+                # above mirrors, so the two definitions cannot drift.
+                for j, idx in enumerate(meta_indices):
+                    w_scalar, burst_scalar = self._weight_exploit_parts(
+                        {"momentum": mom_list[j]},
+                        fuzz_list[j],
+                        cov_list[j],
+                        age_list[j],
+                        T,
+                    )
+                    weights[idx] = w_scalar
+                    pareto_scores[idx] = (1.0, burst_scalar, 1.0)
 
         # Compute FMM-clustered pairwise overlap density if enabled.
         # This runs before Phase 2 so the per-seed loop can consume it.
