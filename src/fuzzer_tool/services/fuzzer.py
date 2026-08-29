@@ -5712,6 +5712,12 @@ class Fuzzer:
             samples = sum(len(v) for v in self._fluctuation._states.values())
             print(f"[*] Fluctuation: saved state (samples={samples})")
         self._save_state()
+        if self._cmplog is not None:
+            # Releases this run's .cmplog/.counts/.sites files. Nothing else
+            # called stop(), so every run left its trio behind under a fresh
+            # uuid and the cache directory grew for the life of the machine.
+            with contextlib.suppress(Exception):
+                self._cmplog.stop()
         if self._ablation_file:
             self._ablation_file.flush()
             self._ablation_file.close()

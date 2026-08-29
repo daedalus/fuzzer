@@ -27,6 +27,7 @@ import contextlib
 import hashlib
 import logging
 import os
+import time
 import uuid
 
 from fuzzer_tool.adapters.track_parser import (
@@ -56,19 +57,51 @@ def _get_cmplog_dir() -> str:
     return _CMPLOG_DIR
 
 
-def _cleanup_stale_cmplog_files():
-    """Remove stale cmplog log files from previous runs at startup."""
+# A cmplog artifact is only swept if nothing has touched it for this long.
+# The sweep cannot tell a file abandoned by a killed run from one a
+# CONCURRENT run is writing: parallel workers are separate processes sharing
+# this directory, and the names carry a uuid rather than a pid. A live
+# collector truncates its log on every setup_env() and the shim writes on
+# every execution, so an mtime this old means no fuzzer is driving it.
+_CMPLOG_STALE_AGE_S = 24 * 3600
+
+
+def _cleanup_stale_cmplog_files(max_age_s: float = _CMPLOG_STALE_AGE_S) -> int:
+    """Remove cmplog artifacts left behind by runs that never called stop().
+
+    ``CmplogCollector.stop()`` unlinks the log, counts and sites files of its
+    own run, but a run killed with SIGKILL, or one that died before reaching
+    shutdown, leaves them behind -- and every run mints a fresh uuid, so they
+    accumulate in the cache directory indefinitely.
+
+    Args:
+        max_age_s: Only remove files untouched for at least this long. See
+            _CMPLOG_STALE_AGE_S for why an age gate is required rather than
+            an unconditional sweep.
+
+    Returns:
+        The number of files removed.
+    """
     d = _get_cmplog_dir()
+    cutoff = time.time() - max_age_s
     removed = 0
-    for entry in os.scandir(d):
-        if entry.name.endswith((".cmplog", ".counts")) and entry.is_file():
-            try:
-                os.unlink(entry.path)
-                removed += 1
-            except OSError:
-                pass
+    try:
+        entries = list(os.scandir(d))
+    except OSError:
+        return 0
+    for entry in entries:
+        if not entry.name.endswith((".cmplog", ".counts", ".sites")):
+            continue
+        try:
+            if not entry.is_file() or entry.stat().st_mtime > cutoff:
+                continue
+            os.unlink(entry.path)
+            removed += 1
+        except OSError:
+            pass
     if removed:
         log.info("Cleaned %d stale cmplog file(s) from %s", removed, d)
+    return removed
 
 
 # Legacy fixed-name artifact from before the shim cache was keyed on the
@@ -267,6 +300,9 @@ class CmplogCollector:
 
         # Use disk-backed directory (avoid tmpfs-full failures)
         cmplog_dir = _get_cmplog_dir()
+        # Sweep artifacts abandoned by runs that never reached stop(). This
+        # is the same directory the shim cache prune below already walks.
+        _cleanup_stale_cmplog_files()
         # Key the cached artifact on the source digest so any edit to
         # afl_shim.c forces a recompile instead of silently loading a
         # stale .so for the life of the machine.
