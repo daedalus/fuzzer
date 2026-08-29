@@ -258,3 +258,31 @@ class TestCacheEvictionParity:
         # the next seed sharing that hash's diffs to the wrong region.
         assert len(engine._region_cache) <= _REGION_CACHE_MAX
         assert len(engine._region_liveness) <= _REGION_CACHE_MAX
+
+
+class TestRecordCoverageDiffDocstringPlacement:
+    """`record_coverage_diff`'s docstring sat *after* its first statement, so
+    it was a bare string expression rather than a docstring: `__doc__` was
+    None, and `help()` showed nothing for the method that carries the item-4
+    wiring contract. The stray statement above it was also a duplicate
+    `region_weights(data)` call -- the real one follows the docstring -- so
+    every liveness observation hashed the seed twice.
+
+    Asserted rather than left to review: this is invisible in a diff (the
+    text is right there, and reads like a docstring) and silent at runtime.
+    """
+
+    def test_docstring_is_reachable(self):
+        from fuzzer_tool.services.operators import OperatorEngine
+
+        doc = OperatorEngine.record_coverage_diff.__doc__
+        assert doc is not None, "docstring is a bare expression, not __doc__"
+        assert "region liveness" in doc
+
+    def test_region_weights_is_called_once_per_observation(self):
+        import inspect
+
+        from fuzzer_tool.services.operators import OperatorEngine
+
+        src = inspect.getsource(OperatorEngine.record_coverage_diff)
+        assert src.count("self.region_weights(data)") == 1

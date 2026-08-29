@@ -3236,7 +3236,6 @@ class OperatorEngine:
         mutant_edges: set,
         map_size: int = _LIVENESS_MAP_BITS,
     ) -> tuple[int, int] | None:
-        entry = self.region_weights(data)
         """Fold one mutation's coverage-edge diff into the region liveness
         estimator for whichever region *offset* falls in.
 
