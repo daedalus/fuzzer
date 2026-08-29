@@ -100,27 +100,36 @@ _LIVENESS_MAP_BITS = 65536
 # `switch_after` in {50, 100, 200, 400, 800}, with zero false-dead
 # verdicts.
 #
-# The FALSE-NEGATIVE rate is NOT established, and on the current target
-# matrix it is not measurable. All four campaigns produced zero
-# genuinely-dead regions to test against, for reasons that are
-# structural rather than sampling accidents: compressed data has no
-# padding, and any CRC-covered format rules out coverage-dead bytes
-# outright, since mutating any byte flips the CRC-check edge regardless
-# of semantic relevance. So this value and _LIVENESS_DEAD_WEIGHT below
-# are conservative guesses that have never been calibrated against a
-# true-dead region. Measuring them needs a target with neither a
-# whole-file nor a per-chunk checksum; if one is added to the matrix,
-# rerun the sweep before treating either number as tuned.
-# See handover_skittercreek_tailslayer_port.md, Sequencing step 6.
+# The FALSE-NEGATIVE rate is now measured, against the synthetic
+# known-dead target (`tools/gen_synthetic_target.py`), via
+# `tools/sweep_liveness_thresholds.py --synthetic-target --unstable 0`.
+# Result (docs/sweeps/synthetic_liveness_calibration_2026-08-29.md): the
+# dead region converges to a DEAD verdict at *every* switch_after in
+# {50, 100, 200, 400, 800}, in exactly switch_after samples, and the live
+# region never earns one -- false-negative and false-positive rate both 0.
+# So on a measurable dead region switch_after is unconstrained from below
+# by correctness; it only sets how many wasted mutations elapse before the
+# down-weight engages. It is NOT lowered from 200 because the case that
+# actually justifies a high floor -- a real cold-but-live region that emits
+# a long no-growth run before its first edge -- is exactly the case no
+# synthetic target can exhibit (the synthetic live region reveals an edge on
+# sample 1). The dead side is measured; the cold-live floor stays a stated
+# assumption about real targets. Rerun the sweep if a real target with a
+# genuine dead region is ever added to the matrix.
+# See handover_skittercreek_tailslayer_port.md ("What was removed", round 16).
 _LIVENESS_SWITCH_AFTER = 200
 # Multiplicative down-weight applied to a region's mutation-site weight
 # once its liveness estimator has converged with an empty mask (i.e.
 # "never once moved coverage across >= _LIVENESS_SWITCH_AFTER consecutive
 # mutations touching it"). Deliberately not 0.0: convergence is strong
 # evidence, not proof, and a hard-zero would make a misclassified region
-# permanently unreachable by this weighting path. See the false-negative
-# caveat on _LIVENESS_SWITCH_AFTER above: with the true-dead rate
-# unmeasured, "not 0.0" is what keeps a wrong verdict recoverable.
+# permanently unreachable by this weighting path. The synthetic-target
+# sweep (see _LIVENESS_SWITCH_AFTER above) confirms this down-weight fires
+# on the known-dead region and never on the live one, but it does not tune
+# the magnitude: 0.1-vs-0.0 is a recoverability choice, not a measured
+# optimum, and the synthetic target has no way to price the cost of a wrong
+# verdict against the benefit of a right one. "not 0.0" stays what keeps a
+# misclassified real cold-live region recoverable.
 _LIVENESS_DEAD_WEIGHT = 0.1
 
 # ── havoc sub-mutation weighting ─────────────────────────────────────────
@@ -3263,12 +3272,15 @@ class OperatorEngine:
         same round resized the buffer past the profiled seed's length).
 
         NOTE (validation status): the convergence threshold this feeds
-        (`_LIVENESS_SWITCH_AFTER`) is checked only against the synthetic
-        sweep in `tests/test_live_bit_mask.py`. Per the handover doc's
-        Sequencing step 6, a real-corpus sweep is still open; the
-        conservative `_LIVENESS_DEAD_WEIGHT` down-weight (not a hard
-        exclusion) is deliberately chosen to bound the damage if that
-        sweep finds the synthetic threshold doesn't transfer.
+        (`_LIVENESS_SWITCH_AFTER`) is now calibrated against a known-dead
+        region built by `tools/gen_synthetic_target.py`, via
+        `tools/sweep_liveness_thresholds.py --synthetic-target`. The dead
+        verdict is correct at every tested threshold and never fires on the
+        live region (docs/sweeps/synthetic_liveness_calibration_2026-08-29.md).
+        What stays unvalidated is generalisation to a real cold-but-live
+        region, which no synthetic target can produce; the conservative
+        `_LIVENESS_DEAD_WEIGHT` down-weight (not a hard exclusion) is what
+        bounds the damage there.
         """
         entry = self.region_weights(data)
         if entry is None:

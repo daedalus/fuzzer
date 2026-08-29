@@ -79,8 +79,14 @@ format rules out coverage-dead bytes outright. `tools/gen_synthetic_target.py`
 supplies one by construction (0/60 dead-region mutations move coverage,
 60/60 live-region ones do; see
 docs/sweeps/synthetic_target_ground_truth_2026-08-19.md). The false-negative
-rate has NOT yet been measured against it -- that run is the remaining work,
-and until it happens `_LIVENESS_DEAD_WEIGHT` stays a conservative guess.
+rate has now been measured against it via
+`tools/sweep_liveness_thresholds.py --synthetic-target`: the dead region
+earns a DEAD verdict at every switch_after tested and the live region never
+does (false-negative and false-positive rate both 0). What that run cannot
+measure is a real cold-but-live region -- one that emits a long no-growth
+run before its first edge -- so `_LIVENESS_DEAD_WEIGHT` stays a soft
+down-weight rather than a hard exclusion. See
+docs/sweeps/synthetic_liveness_calibration_2026-08-29.md.
 """
 
 from __future__ import annotations
