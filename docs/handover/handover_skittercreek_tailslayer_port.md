@@ -230,6 +230,21 @@ here.
   question (answered by the round-7 wiring).
 - **"What NOT to port"** — the source repos are done being mined; the only
   unported items are 3 and 13, whose own constraints are recorded above.
+- **The "Edge coverage analysis" appendix** — merged into this document as an
+  appendix in `852e274` (2026-08-18), then dropped by the round-13 cut
+  (`97c1d52`) the following day without an entry here. Recorded now, because
+  four source comments went on citing `docs/edge-coverage-analysis.md` for
+  another ten days after it stopped existing. Nothing in it is lost work: its
+  §2 reset cost is fixed in `1eb7979`, its probe-window bound shipped as
+  `__AFL_PROBE_MAX` (and the shim now carries better, *measured* drop rates
+  than the appendix's simulated table), unstable-edge calibration is (D),
+  cmplog-defaults-off is (E), path-hash-as-second-dimension is (F), the havoc
+  short-circuit is fixed, its "dead classes" list is obsolete, and its
+  §6 deterministic stage is wired and covered by
+  `tests/test_regression_havoc_short_circuit.py` and
+  `tests/test_deterministic_stage.py`. Its one genuinely open item, the
+  intermittent `shmat()` failure, is (G) above and carries every detail the
+  appendix had.
 
 ### Round 15
 

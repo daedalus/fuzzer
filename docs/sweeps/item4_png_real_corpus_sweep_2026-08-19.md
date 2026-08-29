@@ -50,10 +50,13 @@ not just the synthetic one.
 - Same env-gated `record_coverage_diff` instrumentation as round 9 (not
   present in the tree — reverted after collecting samples), extended to
   also log `offset` and region-bounds count for debugging the bug above.
-- Raw output: `docs/sweeps/item4_png_real_corpus_samples.tsv`, 16,063
-  samples (post-fix only — the pre-fix 27,518-sample run was discarded, it
-  only demonstrates the bug, not the estimator). Same two-column format as
-  the round-9 file.
+- Raw output: 16,063 samples (post-fix only — the pre-fix 27,518-sample run
+  was discarded, it only demonstrates the bug, not the estimator), same
+  two-column format as the round-9 file. **The TSV was never committed** —
+  only the round-9 zlib file (`item4_zlib_real_corpus_samples.tsv`) is in the
+  tree. The numbers below are therefore not reproducible from this repo; the
+  instrumentation that produced them was reverted too. Re-collect before
+  relying on them.
 - Replayed per-region, in order, through a fresh `LiveBitMaskEstimator(
   n_bits=65536, switch_after=N)` for `N ∈ {50, 100, 200, 400, 800}`.
 

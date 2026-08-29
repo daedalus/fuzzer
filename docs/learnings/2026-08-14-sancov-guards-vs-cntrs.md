@@ -41,7 +41,7 @@ of that function.
 
 The second-order effect is worse than the sizing itself. The estimate ran 4–16x
 high, and an over-sized map is exactly what makes the per-exec `memset` look
-expensive — which is the entire premise of `edge-coverage-analysis.md` §2's
+expensive — which is the entire premise of the edge-coverage analysis §2's
 generation-tagged reset, a hot-path change to the shim plus every numpy reader
 on the Python side. The defect was manufacturing the evidence for its own
 follow-up work.

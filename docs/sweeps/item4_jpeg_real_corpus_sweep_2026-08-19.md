@@ -36,9 +36,12 @@ edges across repeated runs against `targets/jpeg_read.so`.
   `FUZZER_LIVENESS_LOG` is unset). This bypasses the fuzzer's
   mutation/selection machinery to target large seeds and specific byte ranges
   directly.
-- Raw output: `docs/sweeps/item4_jpeg_real_corpus_samples.tsv`, 172 samples
-  across 5,800 mutation attempts (3.0% yield). Format: `region_idx<TAB>
-  comma-separated set-bit positions`.
+- Raw output: 172 samples across 5,800 mutation attempts (3.0% yield),
+  format `region_idx<TAB>comma-separated set-bit positions`. **The TSV was
+  never committed** — only the round-9 zlib file
+  (`item4_zlib_real_corpus_samples.tsv`) is in the tree. The numbers below are
+  therefore not reproducible from this repo; the instrumentation that produced
+  them was reverted too. Re-collect before relying on them.
 - Replayed per-region, in order, through a fresh `LiveBitMaskEstimator(
   n_bits=65536, switch_after=N)` for `N ∈ {50, 100, 200, 400, 800}`.
 

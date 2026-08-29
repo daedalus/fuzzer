@@ -192,7 +192,8 @@ class TestDropCounter:
             proc = subprocess.run([built[0], "4000"], env=env, capture_output=True)
             # Diagnostics, not decoration: this assertion has gone red once,
             # non-reproducibly, reading back a table the child should have
-            # filled (see "Loose thread" in docs/edge-coverage-analysis.md).
+            # filled (see item (G) in
+            # docs/handover/handover_skittercreek_tailslayer_port.md).
             # Without the header and the child's status in the message there
             # is no way to tell a child that failed to attach from a parent
             # that raced the read, which is exactly what the last sighting
@@ -390,8 +391,10 @@ class TestAttachFailureIsLoud:
     All three early returns in `__afl_map_shm()` used to be silent, so a
     child that could not attach exited 0 with an empty stderr and left an
     all-zero header — indistinguishable from a parent that raced the read.
-    That ambiguity is the "Loose thread" in docs/edge-coverage-analysis.md,
-    unresolved across three sightings for exactly this reason.
+    That ambiguity is the "Loose thread" of the 2026-08 edge-coverage
+    analysis, unresolved across three sightings for exactly this reason. Its
+    surviving remnant is item (G) in
+    docs/handover/handover_skittercreek_tailslayer_port.md.
     """
 
     @needs_cc

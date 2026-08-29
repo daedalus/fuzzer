@@ -1,11 +1,11 @@
 """Regression tests for the deterministic fuzzing stage.
 
-docs/edge-coverage-analysis.md §6 documented that AFL's deterministic
-operators (bitflip, byte-flip, arithmetic, interesting-value substitution)
-existed as one-shot handlers in operators.py and that core/skipdet.py's
-SkipDetector was fully implemented but never called from anywhere --
-nothing walked the operators systematically across a seed, and nothing
-decided which seeds deserved that treatment.
+Before this stage existed, AFL's deterministic operators (bitflip,
+byte-flip, arithmetic, interesting-value substitution) were one-shot
+handlers in operators.py, and core/skipdet.py's SkipDetector was fully
+implemented but never called from anywhere -- nothing walked the operators
+systematically across a seed, and nothing decided which seeds deserved that
+treatment.
 
 A first pass at wiring SkipDetector in landed directly in fuzzer.py as
 Fuzzer._run_deterministic_stage(): a standalone blocking loop that ran

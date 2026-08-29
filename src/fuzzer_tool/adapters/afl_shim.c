@@ -413,9 +413,12 @@ void __afl_map_shm(void) {
      * below left __afl_area NULL, the target then ran to completion and
      * exited 0 having recorded nothing, and the fuzzer read back an
      * all-zero header indistinguishable from "the child never wrote".
-     * That is the whole of the "Loose thread" in
-     * docs/edge-coverage-analysis.md -- three sightings across ~50 runs,
-     * unresolvable each time because neither side left a trace.
+     * That is the whole of the "Loose thread" from the 2026-08 edge-coverage
+     * analysis -- three sightings across ~50 runs, unresolvable each time
+     * because neither side left a trace. Its surviving remnant is item (G)
+     * in docs/handover/handover_skittercreek_tailslayer_port.md; the
+     * analysis document itself no longer exists (see the round-13 entry in
+     * that file's "What was removed").
      *
      * write(2) rather than fprintf: this runs from a constructor, before
      * the target's own stdio setup, and may run inside a forkserver child.
