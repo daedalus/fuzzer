@@ -32,6 +32,22 @@ RARE_EDGE_GAIN = 0.5
 # Mean owners per edge above which a seed's coverage is considered crowded.
 CROWDED_EDGE_OWNERS = 10.0
 
+# ── Saturation gate ────────────────────────────────────────────────────────
+# Above this estimated sample coverage the per-seed discovery analyses
+# (subsumption, hit-count diversity, Wasserstein, coverage proximity) are
+# replaced by neutral multipliers, on the theory that a fully characterised
+# corpus does not need them.
+SATURATION_GATE = 0.99
+# Executions after which the cached saturation estimate is recomputed even if
+# no new edge has arrived. The only other invalidation is the discovery of a
+# new edge, which is precisely what the gate suppresses signal for.
+SATURATION_REFRESH_EXECS = 2000
+# Executions without new coverage after which the gate is forced off. Chao2
+# reports saturation 1.0 for ANY plateau -- a closed universe and a stalled
+# run are indistinguishable to it -- so past this point the estimate has
+# stopped carrying information and the full analysis comes back.
+SATURATION_STALL_EXECS = 20000
+
 
 class SeedPicker:
     """Manages seed selection strategies.
@@ -461,7 +477,9 @@ class SeedPicker:
             # proximity) and return neutral multipliers. These mainly help
             # discovery; at >= 99% saturation the corpus is already
             # well-characterised and the per-seed analysis is wasted work.
-            if getattr(f, "_saturation", 0.0) >= 0.99:
+            # _saturation_gated, not the raw estimate: the gate also accounts
+            # for staleness and for the stall override (see _saturation_gate).
+            if getattr(f, "_saturation_gated", False):
                 f._cached_weights[seed_key] = (1.0, 1.0, 1.0, 0.5)
             elif seed_key in f._edge_tracker.seed_edges and f._edge_tracker.seed_edges[seed_key]:
                 sub = f._edge_tracker.compute_subsumption_weight(seed_key)
@@ -792,6 +810,60 @@ class SeedPicker:
         decay = getattr(f, "_lineage_backtrack_decay", 0.7)
         return w * max(decay**node.depth, 0.05)
 
+    def _saturation_gate(self) -> bool:
+        """Return whether the discovery analyses should be skipped this pass.
+
+        The gate exists so a fully characterised corpus does not pay for
+        subsumption, hit-count diversity, Wasserstein and coverage-proximity
+        analysis it cannot learn from. Three things keep it from latching on:
+
+        1. The cached estimate was invalidated ONLY when a new edge arrived
+           (``Fuzzer._saturation = None``). With the gate on, the picker is
+           worse at finding new edges, so the one event that could clear the
+           gate is the one the gate makes less likely. It is now also
+           recomputed every ``SATURATION_REFRESH_EXECS`` executions.
+        2. Chao2 reports saturation 1.0 for any plateau, not only for a truly
+           exhausted universe -- measured: 60 seeds drawn from a closed
+           500-edge universe give exactly 1.0, and so does a single starved
+           seed. So the gate turned itself on at precisely the moment the
+           discovery signals were most needed. After
+           ``SATURATION_STALL_EXECS`` without new coverage the gate is forced
+           off regardless of the estimate.
+        3. ``_cached_weights`` is only ever populated on absence, so the
+           neutral tuples written while saturated survived the gate turning
+           off and kept those seeds neutral for the rest of the run. The
+           cache is flushed whenever the gate flips, in either direction.
+
+        Returns:
+            True when the expensive per-seed analyses should be skipped.
+        """
+        f = self.f
+        sat = getattr(f, "_saturation", None)
+        last_eval = getattr(f, "_saturation_exec", None)
+        exec_count = getattr(f, "exec_count", 0)
+        if (
+            sat is None
+            or last_eval is None
+            or exec_count - last_eval >= SATURATION_REFRESH_EXECS
+        ):
+            gt = f._edge_tracker.good_turing_estimate()
+            sat = gt.get("saturation", 0.0)
+            f._saturation = sat
+            f._saturation_exec = exec_count
+
+        gated = sat >= SATURATION_GATE
+        if gated:
+            since_edge = exec_count - getattr(f, "_last_new_edge_exec", 0)
+            if since_edge >= SATURATION_STALL_EXECS:
+                gated = False
+
+        if gated != getattr(f, "_saturation_gated", False):
+            # Entries cached under the previous gate carry the wrong kind of
+            # value: neutral tuples if it was on, full analyses if it was off.
+            f._cached_weights = {}
+            f._saturation_gated = gated
+        return gated
+
     def _compute_weights(self, now: float) -> list[float]:
         f = self.f
         corpus = f.corpus
@@ -799,15 +871,7 @@ class SeedPicker:
         weights = [1.0] * n
         pareto_scores: list[tuple[float, float, float]] = [(1.0, 1.0, 1.0)] * n
 
-        # Saturation gate: when coverage is >= 99%, skip expensive analyses
-        # that mainly help discovery. Re-enable automatically if saturation
-        # drops, so exploratory phases still get full analysis.
-        sat = getattr(f, "_saturation", None)
-        if sat is None:
-            gt = f._edge_tracker.good_turing_estimate()
-            sat = gt.get("saturation", 0.0)
-            f._saturation = sat
-        _saturated = sat >= 0.99
+        _saturated = self._saturation_gate()
 
         if not _saturated and (not hasattr(f, "_classify_cache") or f.exec_count % 100 == 0):
             f._classify_cache = f._edge_tracker.classify_seeds()
