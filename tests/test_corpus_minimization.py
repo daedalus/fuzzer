@@ -67,6 +67,17 @@ class MockFuzzer:
         # reads this in save_to_corpus/trim_new_coverage.
         self._use_lineage = False
 
+    def mean_exec_time(self) -> float:
+        """Corpus-wide mean target time per execution, in seconds.
+
+        auto_minimize_corpus reads this for the >5000-edge set-cover tie-break;
+        the mock has no timing, so zero (= "nothing measured yet") is correct
+        and makes seed_exec_us fall back per seed.
+        """
+        total = sum(m.get("total_time", 0.0) for m in self.seed_meta.values())
+        samples = sum(m.get("cost_samples", 0) for m in self.seed_meta.values())
+        return total / samples if samples > 0 else 0.0
+
     def _defer_minimize(self):
         self._minimize_pending = True
 

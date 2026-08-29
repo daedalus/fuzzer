@@ -989,10 +989,18 @@ class TestCullQueue:
             "seed_c": {3},
         }
         f._edge_tracker._global_edge_hits = {1: 10, 2: 10, 3: 10}
+        # cost_samples is the ledger's denominator, not fuzz_count: the seed
+        # replay in run() bumps the count without crediting time, so a meta
+        # carrying time but no samples reads as unmeasured and falls back to
+        # the corpus mean. Without it all three seeds cost the same here and
+        # the cover is decided by dict order.
         f.seed_meta = {
-            "seed_a": {"total_time": 1.0, "fuzz_count": 1, "input_size": 100},
-            "seed_b": {"total_time": 0.5, "fuzz_count": 1, "input_size": 100},
-            "seed_c": {"total_time": 0.2, "fuzz_count": 1, "input_size": 100},
+            "seed_a": {"total_time": 1.0, "cost_samples": 1, "fuzz_count": 1,
+                       "input_size": 100},
+            "seed_b": {"total_time": 0.5, "cost_samples": 1, "fuzz_count": 1,
+                       "input_size": 100},
+            "seed_c": {"total_time": 0.2, "cost_samples": 1, "fuzz_count": 1,
+                       "input_size": 100},
         }
         f._cull_queue()
         assert f._favored == {"seed_a", "seed_c"}

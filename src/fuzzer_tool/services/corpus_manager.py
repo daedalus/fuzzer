@@ -28,6 +28,7 @@ from fuzzer_tool.adapters.filesystem import (
     save_irreplaceable,
     save_to_corpus,
 )
+from fuzzer_tool.core.cost_ledger import seed_exec_us
 from fuzzer_tool.core.periodicity import estimate_record_size
 from fuzzer_tool.core.running_stats import RunningMoments
 from fuzzer_tool.services.operators import HAVOC_SUB_OPS
@@ -223,6 +224,13 @@ class CorpusManager:
             rm_ser = [[m[0], m[1].hex(), m[2].hex()] for m in rm]
             state["seed_meta"][key] = {
                 "fuzz_count": meta["fuzz_count"],
+                # The cost ledger. total_time was not persisted before, so a
+                # resumed seed carried its restored fuzz_count against a zero
+                # numerator and read as the cheapest seed in the corpus for
+                # the rest of the campaign. cost_samples travels with it: the
+                # two are only meaningful as a pair.
+                "total_time": meta.get("total_time", 0.0),
+                "cost_samples": meta.get("cost_samples", 0),
                 "coverage_edges": meta["coverage_edges"],
                 "momentum": meta.get("momentum", 0.0),
                 "redqueen_offsets": meta["redqueen_offsets"],
@@ -307,6 +315,13 @@ class CorpusManager:
                 f.seed_meta[seed].update(
                     {
                         "fuzz_count": sm.get("fuzz_count", 0),
+                        # A state file written before the ledger was persisted
+                        # has neither key. Restoring 0/0 is correct: zero
+                        # samples means "no measurement", which the readers
+                        # substitute the corpus mean for, rather than the
+                        # 1 microsecond floor that a zero numerator produced.
+                        "total_time": sm.get("total_time", 0.0),
+                        "cost_samples": sm.get("cost_samples", 0),
                         "coverage_edges": sm.get("coverage_edges", 0),
                         "momentum": sm.get("momentum", 0.0),
                         "redqueen_offsets": sm.get("redqueen_offsets", []),
@@ -784,7 +799,9 @@ class CorpusManager:
             if seed_edge_map:
                 # Terminate against what these seeds can actually cover, not
                 # against cumulative_edges. EdgeTracker._prune_tracked_seeds drops
-                # entries from seed_edges once past max_tracked_seeds (200) but
+                # entries from seed_edges once past max_tracked_seeds (200,000
+                # since fe8fd42, up from 200 -- so in practice it no longer
+                # fires at all; see docs/TODO.md) but
                 # never removes their edges from cumulative_edges, so on any run
                 # past 200 seeds all_edges is a strict superset of anything the
                 # loop can reach. `covered != all_edges` was therefore permanently
@@ -794,18 +811,14 @@ class CorpusManager:
                 coverable = set().union(*seed_edge_map.values()) if seed_edge_map else set()
                 candidate_ids: set[int] = set(seed_edge_map.keys())
                 if len(candidate_ids) > 5000:
+                    mean_us = f.mean_exec_time() * 1_000_000
                     edge_to_seeds: dict[int, list[tuple[float, int]]] = {}
                     for seed in unique:
                         sid = id(seed)
                         if sid not in seed_edge_map:
                             continue
                         meta = f.seed_meta.get(seed, {})
-                        exec_us = max(
-                            1.0,
-                            meta.get("total_time", 0.0)
-                            / max(1, meta.get("fuzz_count", 1))
-                            * 1_000_000,
-                        )
+                        exec_us = seed_exec_us(meta, mean_us)
                         input_size = max(1, meta.get("input_size", 1))
                         cost = exec_us * input_size
                         for edge in seed_edge_map[sid]:

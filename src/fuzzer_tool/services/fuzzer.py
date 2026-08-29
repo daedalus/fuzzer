@@ -30,6 +30,7 @@ from fuzzer_tool.adapters.process import (
 from fuzzer_tool.adapters.shm import MAX_COUNT_GROWTH_FACTOR, ShmCoverage
 from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.byte_entropy import byte_entropy_pct
+from fuzzer_tool.core.cost_ledger import cost_samples, seed_exec_us
 from fuzzer_tool.core.markov import MarkovChain, MarkovEnsemble
 from fuzzer_tool.core.mi import MI_MAX_POSITIONS, MutualInformationTracker
 from fuzzer_tool.core.operator_registry import REGISTRY
@@ -1695,6 +1696,10 @@ class Fuzzer:
         # structure changes (add/remove/replace seeds).
         self._cached_total_time: float = 0.0
         self._cached_total_fuzz: int = 0
+        # Executions credited to _cached_total_time.  Not _cached_total_fuzz:
+        # the initial seed replay in run() bumps fuzz_count without timing
+        # anything, so the two diverge by the corpus size on every campaign.
+        self._cached_cost_samples: int = 0
         self._cached_total_edges: int = 0
         self._cached_mean_log_n_fuzz: float = 0.0
         self._agg_cache_valid: bool = False
@@ -2964,10 +2969,28 @@ class Fuzzer:
         """Recompute running aggregates from seed_meta."""
         self._cached_total_time = sum(m.get("total_time", 0.0) for m in self.seed_meta.values())
         self._cached_total_fuzz = sum(m.get("fuzz_count", 1) for m in self.seed_meta.values())
+        self._cached_cost_samples = sum(
+            cost_samples(m) for m in self.seed_meta.values()
+        )
         self._cached_total_edges = sum(m.get("coverage_edges", 0) for m in self.seed_meta.values())
         n_fuzz_vals = [m.get("fuzz_count", 0) for m in self.seed_meta.values()]
         self._cached_mean_log_n_fuzz = compute_mean_log_n_fuzz(n_fuzz_vals)
         self._agg_cache_valid = True
+
+    def mean_exec_time(self) -> float:
+        """Corpus-wide mean target time per execution, in seconds.
+
+        Zero until something has been timed.  This is the stand-in the cost
+        ledger uses for seeds it has no samples for — a resumed seed or one
+        that has never been fuzzed is *unmeasured*, not free, and giving it
+        the 1 microsecond floor made it beat every timed seed in the favored
+        set (see core/cost_ledger.py).
+        """
+        if not self._agg_cache_valid:
+            self._refresh_agg_cache()
+        if self._cached_cost_samples <= 0:
+            return 0.0
+        return self._cached_total_time / self._cached_cost_samples
 
     def _cull_queue(self) -> None:
         """Compute AFL-style top_rated / favored minimal-set-cover.
@@ -2977,12 +3000,10 @@ class Fuzzer:
         receive energy bonuses in FAST/COE schedules.
         """
         top_rated: dict[int, tuple[str, float]] = {}
+        mean_us = self.mean_exec_time() * 1_000_000
         for key, edges in self._edge_tracker.seed_edges.items():
             m = self.seed_meta.get(key) or {}
-            exec_us = max(
-                1.0,
-                m.get("total_time", 0.0) / max(1, m.get("fuzz_count", 1)) * 1_000_000,
-            )
+            exec_us = seed_exec_us(m, mean_us)
             input_size = max(1, m.get("input_size", 1))
             cost = exec_us * input_size
             for e in edges:
@@ -3177,7 +3198,9 @@ class Fuzzer:
         # Per-seed wall-clock cost
         if meta is not None:
             meta["total_time"] = meta.get("total_time", 0.0) + t_elapsed
+            meta["cost_samples"] = meta.get("cost_samples", 0) + 1
             self._cached_total_time += t_elapsed
+            self._cached_cost_samples += 1
 
         # Record execution time for adaptive timeout calibration
         self._exec_time_tracker.record(t_elapsed)
@@ -5497,18 +5520,12 @@ class Fuzzer:
                     # Lazy recompute aggregate cache when corpus changed
                     if not self._agg_cache_valid:
                         self._refresh_agg_cache()
-                    avg_exec_us = max(
-                        1,
-                        int(self._cached_total_time / max(1, self._cached_total_fuzz) * 1_000_000),
-                    )
-                    exec_us = max(
-                        1,
-                        int(
-                            meta.get("total_time", 0)
-                            / max(1, meta.get("fuzz_count", 1))
-                            * 1_000_000
-                        ),
-                    )
+                    # Denominator is the number of timed executions, not
+                    # fuzz_count: the seed replay above bumps fuzz_count with
+                    # no time credited, and a resumed seed used to carry a
+                    # restored count against a zero numerator.
+                    avg_exec_us = max(1, int(self.mean_exec_time() * 1_000_000))
+                    exec_us = max(1, int(seed_exec_us(meta, avg_exec_us)))
                     bitmap_size = meta.get("coverage_edges", 0)
                     avg_bitmap_size = max(
                         1,
