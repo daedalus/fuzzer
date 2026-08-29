@@ -29,6 +29,7 @@ from fuzzer_tool.adapters.process import (
 )
 from fuzzer_tool.adapters.shm import MAX_COUNT_GROWTH_FACTOR, ShmCoverage
 from fuzzer_tool.core.bloom import BloomFilter
+from fuzzer_tool.core.byte_entropy import byte_entropy_pct
 from fuzzer_tool.core.markov import MarkovChain, MarkovEnsemble
 from fuzzer_tool.core.mi import MI_MAX_POSITIONS, MutualInformationTracker
 from fuzzer_tool.core.operator_registry import REGISTRY
@@ -48,7 +49,12 @@ from fuzzer_tool.core.schedulers import (
     ReplicatorScheduler,
     SWUCBScheduler,
 )
-from fuzzer_tool.core.schedules import SeedScorer, compute_mean_log_n_fuzz
+from fuzzer_tool.core.schedules import (
+    ENTROPY_RANDOM_PCT,
+    ENTROPY_SPARSE_PCT,
+    SeedScorer,
+    compute_mean_log_n_fuzz,
+)
 from fuzzer_tool.core.secretary import DEFAULT_EXPLORATION_FRAC, SecretaryStopping
 from fuzzer_tool.core.seed_quality import BayesianSeedQuality
 from fuzzer_tool.core.shapley import ShapleyAttribution
@@ -2523,6 +2529,25 @@ class Fuzzer:
             mutated = self.mutate(data)
         self._dedup_gaveup += 1
         return mutated
+
+    def _seed_entropy_pct(self, seed: bytes, meta: dict | None) -> float:
+        """Byte entropy of ``seed`` on the 0-100 scale, memoised in seed_meta.
+
+        Entropy is a pure function of the seed bytes and seeds are immutable,
+        so this is computed once per seed and cached alongside ``input_size``.
+        Caching in ``seed_meta`` rather than a companion dict is deliberate:
+        ``seed_meta`` is already rebuilt from survivors when the corpus is
+        pruned (corpus_manager._maybe_prune), so the cache cannot outlive its
+        seed. A separate seed-keyed map would need its own eviction and is
+        exactly the shape that has leaked stale entries here before.
+        """
+        if meta is None:
+            return byte_entropy_pct(seed)
+        cached = meta.get("input_entropy")
+        if cached is None:
+            cached = byte_entropy_pct(seed)
+            meta["input_entropy"] = cached
+        return cached
 
     def _cost_adjusted_weight(self, op: str, base_weight: float) -> float:
         """Scale a bandit reward by inverse operator cost.
@@ -5525,12 +5550,19 @@ class Fuzzer:
                                 self._hf_density_boosts += 1
                         if timed_out:
                             self._hf_timeout_penalties += 1
+                        input_entropy = self._seed_entropy_pct(seed, meta)
+                        if (
+                            input_entropy > ENTROPY_RANDOM_PCT
+                            or input_entropy < ENTROPY_SPARSE_PCT
+                        ):
+                            self._hf_entropy_penalties += 1
 
                         hf_kwargs = dict(
                             new_edges=new_edges,
                             time_added=time_added,
                             now=now,
                             input_size=len(seed),
+                            input_entropy=input_entropy,
                             select_count=select_count,
                             child_count=child_count,
                             rare_edge_count=rare_edges,

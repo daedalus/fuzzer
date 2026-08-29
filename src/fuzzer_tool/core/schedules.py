@@ -37,6 +37,17 @@ Honggfuzz factors (applied multiplicatively on top of schedule scoring):
 
 import math
 
+# Byte-entropy cut points for the honggfuzz energy factor, on the 0-100
+# scale produced by core.byte_entropy.byte_entropy_pct. These correspond to
+# 7.44, 4.96 and 2.00 bits/byte, which is where random/compressed, plain
+# text and near-zero inputs respectively fall. Named so the stats counter in
+# services.fuzzer classifies against the same numbers the factor applies;
+# the two drifting apart would make the reported "ent:" count describe a
+# penalty the scorer never charged.
+ENTROPY_RANDOM_PCT = 93.0
+ENTROPY_STRUCTURED_PCT = 62.0
+ENTROPY_SPARSE_PCT = 25.0
+
 
 class SeedScorer:
     """Compute energy scores for queue entries using various power schedules.
@@ -378,11 +389,11 @@ class SeedScorer:
 
         # Entropy: penalize random blobs and very sparse data
         if 0 <= input_entropy <= 100:
-            if input_entropy > 93:
+            if input_entropy > ENTROPY_RANDOM_PCT:
                 factor *= 0.5  # High entropy (compressed/random)
-            elif input_entropy < 25:
+            elif input_entropy < ENTROPY_SPARSE_PCT:
                 factor *= 0.5  # Very low entropy (zeros)
-            elif input_entropy < 62:
+            elif input_entropy < ENTROPY_STRUCTURED_PCT:
                 factor *= 1.5  # Text/structured data boost
 
         # Timeout: heavy penalty
