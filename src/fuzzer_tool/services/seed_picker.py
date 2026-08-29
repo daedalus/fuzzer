@@ -1154,8 +1154,34 @@ class SeedPicker:
         else:
             return random.choices(f.corpus, weights=weights, k=1)[0]
 
-    def _log_pick_signals(self, selected: bytes, now: float) -> None:
-        """Log ablation pick signals for debugging."""
+    def _log_pick_signals(
+        self, selected: bytes, now: float, weights: list[float] | None = None
+    ) -> None:
+        """Record the ablation signal breakdown for the seed just picked.
+
+        ``final_w`` is the weight the picker actually drew with, taken from
+        the weight vector rather than recomputed. The recomputation this
+        replaces had drifted from the live formula: it dropped the
+        temperature from both the explore term and the burst factor
+        (``max(1, 5 - age/60)`` against the live
+        ``max(1, 1 + T*4 - (age/60)*T)``), compared staleness against a fixed
+        50 instead of ``50*T``, and ignored momentum along with every
+        multiplier applied in phase 2 -- rarity and crowding, entropy,
+        distance, static features, length, overlap density, validity, lineage
+        diversity and backtracking. The log exists to attribute contributions
+        to signals, so a number that no signal produced is worse than none.
+
+        The remaining scalar terms come from ``_weight_exploit_parts``, the
+        same helper the vectorised path mirrors, so the two cannot drift
+        apart again without the helper changing.
+
+        Args:
+            selected: The seed that was picked.
+            now: Pass timestamp, for the age term.
+            weights: The weight vector the pick was drawn from. When absent
+                (older callers), the scalar terms are recombined instead and
+                the result is only the pre-phase-2 weight.
+        """
         f = self.f
         if not f._ablation_file:
             return
@@ -1163,27 +1189,39 @@ class SeedPicker:
         if not meta:
             return
         seed_key = f._seed_key(selected)
-        cached = f._cached_weights.get(seed_key, (1.0, 1.0, 1.0))
+        # Four-element default: the cache stores (sub, div, spa, cov) and the
+        # recombination below reads cached[3]. The old three-element default
+        # raised IndexError for any seed missing from the cache -- reachable
+        # whenever the gate flushed it, and invisible without --schedule-ablation.
+        cached = f._cached_weights.get(seed_key, (1.0, 1.0, 1.0, 0.5))
         fuzz_count = max(meta["fuzz_count"], 1)
         coverage = meta["coverage_edges"]
         age = now - meta["added_at"]
-        base_w = (1.0 / math.sqrt(fuzz_count)) * (1.0 + coverage * 0.5) / (1.0 + age * 0.01)
-        burst_factor = max(1.0, 5.0 - (age / 60.0))
+        temperature = getattr(f, "_temperature", 1.0)
+        # base_w already carries momentum and the staleness penalty.
+        base_w, burst_factor = self._weight_exploit_parts(
+            meta, fuzz_count, coverage, age, temperature
+        )
         staleness = fuzz_count / max(coverage + 1, 1)
-        penalty = 0.01 if staleness > 50 else 1.0
-        w = base_w * burst_factor * penalty * cached[0] * cached[1] * cached[2]
-        w *= 0.5 + cached[3]
+        penalty = 0.01 if staleness > 50.0 * temperature else 1.0
         mdl_weight = 1.0
         if f.markov_trained:
             cl_ratio = f.markov.codelength_ratio(selected)
             mdl_weight = 1.0 + min(cl_ratio / 8.0, 1.0)
+        seed_idx = f.corpus.index(selected)
+        if weights is not None and seed_idx < len(weights):
+            w = weights[seed_idx]
+        else:
+            w = base_w * burst_factor * cached[0] * cached[1] * cached[2]
+            w *= 0.5 + cached[3]
             w *= mdl_weight
         f._last_pick_signals = {
-            "seed_idx": f.corpus.index(selected),
+            "seed_idx": seed_idx,
             "seed_hash": selected[:4].hex(),
             "fuzz_count": fuzz_count,
             "coverage_edges": coverage,
             "age_s": f"{age:.1f}",
+            "temperature": f"{temperature:.3f}",
             "base_w": f"{base_w:.4f}",
             "burst": f"{burst_factor:.2f}",
             "penalty": f"{penalty:.2f}",
@@ -1248,5 +1286,5 @@ class SeedPicker:
             if len(f._recent_seed_edges) > f._recent_seed_max:
                 f._recent_seed_edges.pop(0)
 
-        self._log_pick_signals(selected, now)
+        self._log_pick_signals(selected, now, weights)
         return selected

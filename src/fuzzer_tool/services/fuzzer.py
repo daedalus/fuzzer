@@ -1295,8 +1295,8 @@ class Fuzzer:
             self._ablation_file = open(self._ablation_path, "w")  # noqa: SIM115
             self._ablation_file.write(
                 "iter,seed_idx,seed_hash,fuzz_count,coverage_edges,age_s,"
-                "base_w,burst,penalty,subsumption,diversity,spatial,mdl,"
-                "final_w,new_coverage,new_crash\n"
+                "temperature,base_w,burst,penalty,subsumption,diversity,"
+                "spatial,mdl,final_w,new_coverage,new_crash\n"
             )
             self._ablation_file.flush()
 
@@ -3663,7 +3663,7 @@ class Fuzzer:
             self._ablation_file.write(
                 f"{self.exec_count},{ps['seed_idx']},{ps['seed_hash']},"
                 f"{ps['fuzz_count']},{ps['coverage_edges']},{ps['age_s']},"
-                f"{ps['base_w']},{ps['burst']},{ps['penalty']},"
+                f"{ps['temperature']},{ps['base_w']},{ps['burst']},{ps['penalty']},"
                 f"{ps['subsumption']},{ps['diversity']},{ps['spatial']},"
                 f"{ps['mdl']},{ps['final_w']},"
                 f"{1 if has_new_coverage else 0},{1 if is_crash else 0}\n"
