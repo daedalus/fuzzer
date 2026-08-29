@@ -151,9 +151,57 @@ class TestSyntheticCalibrationEndToEnd:
             assert cols[1] == "DEAD", f"dead region misclassified: {row}"
             assert cols[3] == "LIVE", f"live region given a dead verdict: {row}"
 
-    def test_unstable_variant_is_flagged_not_silently_calibrated(self):
-        """`--unstable > 0` destroys the liveness signal via ASLR. The tool
-        must say so rather than emit numbers that look like a calibration."""
+    def test_calibration_does_not_disable_aslr_process_wide(self, report):
+        """personality() is process-global and irreversible, so disabling
+        ASLR in *this* process would leave every later test in the same
+        pytest run without it -- which makes
+        test_synthetic_target.py's unstable-variant checks silently skip
+        rather than fail. A suite quietly losing coverage is worse than a
+        red test, so the sweep sets it per-child instead."""
+        import ctypes
+        import ctypes.util
+
+        from fuzzer_tool.adapters.process import ADDR_NO_RANDOMIZE
+
+        libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=True)
+        libc.personality.argtypes = [ctypes.c_ulong]
+        libc.personality.restype = ctypes.c_int
+        assert not (libc.personality(0xFFFFFFFF) & ADDR_NO_RANDOMIZE), (
+            "the calibration leaked ADDR_NO_RANDOMIZE into the test process"
+        )
+
+    def test_calibration_runs_with_aslr_disabled_like_production(self, report):
+        """services/fuzzer.py disables ASLR for every target it runs, so a
+        calibration under ASLR *on* characterises a target the fuzzer never
+        executes. The first version of this tool did exactly that."""
+        assert "ASLR disabled (production condition): True" in report
+
+    def test_unstable_variant_is_deterministic_once_aslr_is_off(self):
+        """The --unstable blocks are gated on a heap address, so they are
+        only nondeterministic while ASLR is on. With it off they still fire,
+        as a fixed predicate -- so the variant becomes a valid calibration
+        target rather than a ruined one."""
+        cfg = SweepConfig(
+            synthetic_target=True,
+            blocks=200,
+            fanout=16,
+            unstable=4,
+            calib_samples=40,
+            switch_grid=(10,),
+        )
+        out = _synthetic_report(cfg)
+        assert "identical-input reruns stable: True" in out
+        assert "dead-region mutations moving coverage: 0/40" in out
+        assert "WARNING" not in out
+
+    def test_nondeterminism_is_flagged_not_silently_calibrated(self):
+        """With --keep-aslr the ASLR-gated blocks make the target
+        nondeterministic, which makes a dead verdict unfalsifiable. The tool
+        must say so rather than emit numbers that look like a calibration.
+
+        Keyed on observed instability, not on the --unstable flag: the flag
+        was never what mattered, and a target can lose determinism for
+        reasons that have nothing to do with it."""
         cfg = SweepConfig(
             synthetic_target=True,
             blocks=200,
@@ -161,6 +209,13 @@ class TestSyntheticCalibrationEndToEnd:
             unstable=4,
             calib_samples=30,
             switch_grid=(10,),
+            keep_aslr=True,
         )
         out = _synthetic_report(cfg)
-        assert "WARNING: --unstable > 0" in out
+        assert "ASLR disabled (production condition): False" in out
+        # ASLR variance is probabilistic; only assert the flagging logic when
+        # the run actually lost determinism, or the test is flaky by
+        # construction (the lesson from the ground-truth doc's postscript).
+        if "identical-input reruns stable: False" in out:
+            assert "WARNING: the target is not deterministic" in out
+            assert "INCONCLUSIVE" in out

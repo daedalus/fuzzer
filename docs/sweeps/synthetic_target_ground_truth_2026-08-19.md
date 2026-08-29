@@ -117,6 +117,18 @@ keeps absorbing energy every iteration, which is the exact cost the feature
 exists to remove. Detecting "at least one" is not enough either, since the
 remaining unmasked edges go on producing endless false novelty.
 
+**Caveat added 2026-08-29:** this whole section measures ASLR-gated
+instability, and `services/fuzzer.py` calls `disable_aslr()` before running
+any target (`personality(ADDR_NO_RANDOMIZE)`, inherited across fork and
+execve). With ASLR off the same `--unstable 4` variant is fully
+deterministic — 0 unstable edges over 30 runs, and the blocks still fire
+(167 distinct edges either way; their address bit is simply constant). So
+the "3 unstable edges" ground truth resampled below does not exist under the
+conditions the fuzzer actually runs targets in. The *shape* of the detection
+curve still holds for any genuinely nondeterministic target; the specific
+instance does not. See
+`docs/sweeps/synthetic_liveness_calibration_2026-08-29.md`.
+
 Recommendation: the `--calibrate-stability N` help text should point at 8,
 not 3, and the handover's original "run each new seed 3×" suggestion should
 be treated as folklore rather than a measured default. Note this is one

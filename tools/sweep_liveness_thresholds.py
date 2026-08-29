@@ -47,6 +47,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from fuzzer_tool.adapters.process import ADDR_NO_RANDOMIZE
 from fuzzer_tool.core.format_learner import FormatLearner
 from fuzzer_tool.core.live_bit_mask import LiveBitMaskEstimator
 
@@ -92,6 +93,7 @@ class SweepConfig:
     unstable: int = 0
     calib_samples: int = 900
     map_bits: int = DEFAULT_MAP_BITS
+    keep_aslr: bool = False
     switch_grid: tuple[int, ...] = field(default_factory=lambda: (50, 100, 200, 400, 800))
 
 
@@ -353,7 +355,31 @@ def _build_synthetic_target(workdir: Path, cfg: SweepConfig) -> Path:
     return exe
 
 
-def _run_synthetic(exe: Path, workdir: Path, data: bytes, size: int = 8192) -> frozenset[int]:
+def _child_disable_aslr() -> None:
+    """Set ADDR_NO_RANDOMIZE in the forked child, before exec.
+
+    Production sets this once in the fuzzer parent and relies on
+    inheritance (see adapters/process.disable_aslr), which is right for a
+    fuzzer but wrong for a sweep tool: personality() is process-global and
+    irreversible, so calling it here would leave every later test in the
+    same pytest process running without ASLR. That silently *skips*
+    tests/test_synthetic_target.py's unstable-variant ground-truth checks,
+    which is a suite quietly losing coverage rather than reporting a
+    problem. Doing it per-child gives the target byte-identical conditions
+    with no global state.
+    """
+    import ctypes
+    import ctypes.util
+
+    libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=True)
+    libc.personality.argtypes = [ctypes.c_ulong]
+    libc.personality.restype = ctypes.c_int
+    libc.personality(ctypes.c_ulong(ADDR_NO_RANDOMIZE))
+
+
+def _run_synthetic(
+    exe: Path, workdir: Path, data: bytes, size: int = 8192, aslr_off: bool = True
+) -> frozenset[int]:
     """Execute the target on one input and return the edge-id set."""
     from fuzzer_tool.adapters.shm import ShmCoverage
 
@@ -362,7 +388,12 @@ def _run_synthetic(exe: Path, workdir: Path, data: bytes, size: int = 8192) -> f
         inp = workdir / "in.bin"
         inp.write_bytes(data)
         env = dict(os.environ, __AFL_SHM_ID=str(cov.shm_id), AFL_MAP_SIZE=str(size))
-        subprocess.run([str(exe), str(inp)], env=env, capture_output=True)
+        subprocess.run(
+            [str(exe), str(inp)],
+            env=env,
+            capture_output=True,
+            preexec_fn=_child_disable_aslr if aslr_off else None,
+        )
         return frozenset(cov.get_edge_ids())
     finally:
         cov.cleanup()
@@ -394,12 +425,15 @@ def _collect_diff_sequence(
     n: int,
     rng: random.Random,
     map_bits: int,
+    aslr_off: bool = True,
 ) -> list[int]:
     """Run ``n`` single-bit-flip mutations that land in ``region`` and record
     the per-execution coverage diff the production estimator would see."""
     return [
         _diff_bits(
-            baseline, _run_synthetic(exe, workdir, _flip_in_region(rng, base, region)), map_bits
+            baseline,
+            _run_synthetic(exe, workdir, _flip_in_region(rng, base, region), aslr_off=aslr_off),
+            map_bits,
         )
         for _ in range(n)
     ]
@@ -449,17 +483,26 @@ def _synthetic_report(cfg: SweepConfig) -> str:
         raise RuntimeError(f"afl_shim.c not found at {AFL_SHIM}")
 
     lines: list[str] = []
+    # Match production: services/fuzzer.py calls disable_aslr() at startup,
+    # and personality(ADDR_NO_RANDOMIZE) is inherited across fork and execve,
+    # so every target the fuzzer runs executes with ASLR off. A calibration
+    # run under ASLR *on* is measuring a target the fuzzer never runs -- see
+    # the ASLR section of the 2026-08-29 sweep doc, where the same
+    # --unstable 4 variant is nondeterministic with ASLR on and fully
+    # deterministic with it off.
+    aslr_off = not cfg.keep_aslr
+
     with tempfile.TemporaryDirectory() as td:
         workdir = Path(td)
         exe = _build_synthetic_target(workdir, cfg)
         rng = random.Random(cfg.seed)
         base = bytes(rng.randrange(256) for _ in range(256))
-        baseline = _run_synthetic(exe, workdir, base)
+        baseline = _run_synthetic(exe, workdir, base, aslr_off=aslr_off)
 
         # Determinism check: on --unstable 0 the target must be stable, or
         # "the dead region moved coverage" is unfalsifiable (the exact
         # failure mode that made the unstable variant useless for this).
-        reruns = [_run_synthetic(exe, workdir, base) for _ in range(8)]
+        reruns = [_run_synthetic(exe, workdir, base, aslr_off=aslr_off) for _ in range(8)]
         stable = all(r == baseline for r in reruns)
 
         dead_seq = _collect_diff_sequence(
@@ -471,6 +514,7 @@ def _synthetic_report(cfg: SweepConfig) -> str:
             cfg.calib_samples,
             random.Random(cfg.seed + 1),
             cfg.map_bits,
+            aslr_off,
         )
         live_seq = _collect_diff_sequence(
             exe,
@@ -481,6 +525,7 @@ def _synthetic_report(cfg: SweepConfig) -> str:
             cfg.calib_samples,
             random.Random(cfg.seed + 2),
             cfg.map_bits,
+            aslr_off,
         )
 
     dead_nonzero = sum(1 for x in dead_seq if x)
@@ -494,18 +539,29 @@ def _synthetic_report(cfg: SweepConfig) -> str:
     )
     lines.append(f"- dead region {SYNTH_DEAD_REGION}, live region {SYNTH_LIVE_REGION}")
     lines.append(f"- calibration samples per region: {cfg.calib_samples}")
+    lines.append(f"- ASLR disabled (production condition): {aslr_off}")
     lines.append(f"- identical-input reruns stable: {stable}")
     lines.append(f"- dead-region mutations moving coverage: {dead_nonzero}/{cfg.calib_samples}")
     lines.append(f"- live-region mutations moving coverage: {live_nonzero}/{cfg.calib_samples}")
     lines.append("")
 
-    if cfg.unstable > 0:
+    if cfg.unstable > 0 and not stable:
         lines.append(
-            "WARNING: --unstable > 0. ASLR-gated edges make dead-region "
-            "mutations appear to move coverage, so the liveness signal is "
-            "destroyed and these numbers are not a calibration. Use "
-            "--unstable 0. (This is why the calibration variant is the "
-            "deterministic one; see the sweep doc.)"
+            "WARNING: the target is not deterministic, so dead-region "
+            "mutations appear to move coverage and the liveness signal is "
+            "destroyed. These numbers are not a calibration. Use "
+            "--unstable 0, or drop --keep-aslr: with ASLR off (the "
+            "condition the fuzzer actually runs targets under) the "
+            "ASLR-gated blocks become deterministic and the signal returns."
+        )
+        lines.append("")
+    elif cfg.unstable > 0:
+        lines.append(
+            f"Note: --unstable {cfg.unstable} was requested but the target "
+            "is deterministic anyway, because the ASLR-gated blocks are only "
+            "nondeterministic when ASLR is on. The gates still fire -- their "
+            "address bit is simply now constant -- so this is a valid "
+            "calibration rather than a target with the blocks removed."
         )
         lines.append("")
 
@@ -533,11 +589,11 @@ def _synthetic_report(cfg: SweepConfig) -> str:
 
     lines.append("## Verdict")
     lines.append("")
-    if not stable and cfg.unstable == 0:
+    if not stable:
         lines.append(
-            "INCONCLUSIVE: target was not deterministic on --unstable 0. "
-            "Something in the environment is adding nondeterminism; do not "
-            "trust these numbers."
+            "INCONCLUSIVE: the target was not deterministic, so a "
+            "dead-region verdict is unfalsifiable. Do not trust these "
+            "numbers as a calibration."
         )
     elif dead_ok and live_ok:
         lines.append(
@@ -655,6 +711,13 @@ def main(argv: list[str] | None = None) -> int:
         "liveness -- any >0 destroys the signal (see sweep doc).",
     )
     p.add_argument(
+        "--keep-aslr",
+        action="store_true",
+        help="synthetic: do NOT disable ASLR. Off by default because the "
+        "fuzzer disables it for every target it runs; use this only to "
+        "reproduce the ASLR-on nondeterminism measurement.",
+    )
+    p.add_argument(
         "--calib-samples",
         type=int,
         default=900,
@@ -674,6 +737,7 @@ def main(argv: list[str] | None = None) -> int:
         fanout=args.fanout,
         unstable=args.unstable,
         calib_samples=args.calib_samples,
+        keep_aslr=args.keep_aslr,
     )
 
     if cfg.synthetic_target:

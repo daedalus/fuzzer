@@ -75,15 +75,59 @@ but 0.1-vs-0.0 is a recoverability choice — the synthetic target cannot price
 the cost of a wrong verdict against the benefit of a right one. It stays a
 soft down-weight so a misclassified real cold-live region is recoverable.
 
-## Why `--unstable 0` is mandatory (measured)
+## ASLR: the harness was measuring a target the fuzzer never runs
 
-The handover flagged this; it reproduces exactly. On `--unstable 4` (three
-ASLR-gated edges: 331, 477, 479 here), identical-input reruns already differ,
-and dead-region mutations appear to move coverage **66 / 120** purely from
-ASLR noise. The estimator then reads the dead region as LIVE — a false
-negative manufactured entirely by nondeterminism. The tool prints a WARNING
-and refuses to treat an `--unstable > 0` run as a calibration. The practical
-consequence for real targets: a target that has not been
-stability-calibrated first (see the `--calibrate-stability` finding,
-`synthetic_target_ground_truth_2026-08-19.md` §3) will produce a liveness
-signal that is noise, not padding evidence.
+The handover warned that `--unstable 0` is mandatory because ASLR-gated
+edges destroy the liveness signal. That reproduced — but only under a
+condition production does not have.
+
+`services/fuzzer.py` calls `disable_aslr()` at startup, and
+`personality(ADDR_NO_RANDOMIZE)` is inherited across both fork and execve,
+so **every target the fuzzer runs executes with ASLR off.** The first
+version of this calibration used a plain `subprocess.run`, i.e. ASLR on, so
+it was characterising a target the fuzzer never actually runs. The sweep now
+disables it per-child (`preexec_fn`) rather than by calling
+`disable_aslr()`; `--keep-aslr` reproduces the old condition.
+
+The per-child detail is not incidental. `personality()` is process-global
+and irreversible, so calling `disable_aslr()` inside the sweep leaves every
+later test in the same pytest process running without ASLR — which makes
+`tests/test_synthetic_target.py`'s unstable-variant ground-truth checks
+**skip** instead of run, depending on file order. That was observed, not
+theorised: 7 passed alone, 5 passed + 2 skipped when the sweep tests ran
+first. A suite that quietly loses coverage is worse than a red one, so the
+tool sets the personality in the forked child, where it is inherited across
+execve and dies with the process.
+
+Same `--unstable 4` variant, same seed, both conditions:
+
+| | identical-input unstable edges (30 runs) | dead-region mutations moving coverage | dead verdict |
+|---|---:|---:|---|
+| ASLR on (`--keep-aslr`) | 1–3 | 56–66 / 120 | LIVE (wrong) |
+| **ASLR off (production)** | **0** | **0 / 120** | **DEAD (correct)** |
+
+So with ASLR off the *unstable* variant is a valid calibration target. The
+blocks have not been removed or silenced: distinct edges over 40 varied
+inputs is 167 either way, and the high guard ids are still present. The heap
+address the gates test is simply constant now, so each gate is a fixed
+predicate per input rather than a coin flip.
+
+Two consequences worth keeping:
+
+- The `--unstable 0` requirement is really a *determinism* requirement, and
+  ASLR is only one way to lose it. The tool now keys its warning and its
+  INCONCLUSIVE verdict on observed rerun stability rather than on the
+  `--unstable` flag, because the flag was never the thing that mattered.
+- The headline calibration is unaffected: `--unstable 0` is deterministic
+  under both conditions, and re-running it with ASLR off reproduces the
+  table above exactly (0/900, 900/900, DEAD at every threshold). The item-B
+  result stands.
+
+This also puts a caveat on §3 of
+`synthetic_target_ground_truth_2026-08-19.md`: the
+`--calibrate-stability` curve was measured against ASLR-gated instability,
+which is not instability the fuzzer would ever encounter, since it disables
+ASLR before running anything. The shape of the detection curve is still
+informative, but the specific "3 unstable edges" ground truth it resamples
+does not exist under production conditions. Whatever `--calibrate-stability`
+is worth catching in a real campaign, it is not this.
