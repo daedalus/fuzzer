@@ -10,32 +10,66 @@ This is the Sequenced step 6 validation called out in
 standalone script rather than a pytest because the sweep spans parameter
 ranges, not a single fixed scenario.
 
+There are two modes:
+
+* Default / ``--corpus``: a FormatLearner sweep that answers whether the
+  padding *hypotheses* are stable across the parameter grid. That question
+  was settled over four real campaigns. It does not execute a target -- the
+  ``--corpus`` path drives FormatLearner over fabricated transitions, and
+  ``--target`` currently only selects that fallback (no real per-target
+  execution happens on this path).
+
+* ``--synthetic-target``: the handover item-B calibration. It builds
+  ``gen_synthetic_target.py``'s known-ground-truth target and drives the
+  *real* ``LiveBitMaskEstimator`` against its coverage-dead region -- the
+  measurement that was blocked for four rounds because no real target has a
+  genuinely dead region. This is the mode the handover's "one run left"
+  refers to; the older ``--target`` example never actually executed anything.
+
 Usage examples::
 
-    # Synthetic-only sweep (fast, CI-friendly)
+    # Padding-hypothesis stability sweep (fast, CI-friendly)
     python tools/sweep_liveness_thresholds.py
 
-    # Real-corpus sweep: load PNG seeds and run the target for coverage
-    python tools/sweep_liveness_thresholds.py --corpus ~/fuzzing/png_corpus/seeds --target targets/png_read.so --samples 200
+    # Item-B calibration against the synthetic known-dead region
+    python tools/sweep_liveness_thresholds.py --synthetic-target --unstable 0
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import random
+import shutil
+import subprocess
 import sys
-from dataclasses import dataclass
+import tempfile
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from fuzzer_tool.core.format_learner import FormatLearner
+from fuzzer_tool.core.live_bit_mask import LiveBitMaskEstimator
 
 # Reproduce the operator-side defaults so the sweep can override them.
 from fuzzer_tool.services.operators import (
     _LIVENESS_DEAD_WEIGHT as DEFAULT_DEAD_WEIGHT,
 )
 from fuzzer_tool.services.operators import (
+    _LIVENESS_MAP_BITS as DEFAULT_MAP_BITS,
+)
+from fuzzer_tool.services.operators import (
     _LIVENESS_SWITCH_AFTER as DEFAULT_SWITCH_AFTER,
 )
+
+ROOT = Path(__file__).resolve().parent.parent
+GEN_SYNTHETIC = ROOT / "tools" / "gen_synthetic_target.py"
+AFL_SHIM = ROOT / "src" / "fuzzer_tool" / "adapters" / "afl_shim.c"
+
+# Ground-truth region bounds baked into gen_synthetic_target.py's default
+# layout (live prefix, then a read-but-never-branched-on dead region). Kept
+# in sync with tests/test_synthetic_target.py, which asserts they still hold.
+SYNTH_LIVE_REGION = (0, 32)
+SYNTH_DEAD_REGION = (32, 96)
 
 
 @dataclass
@@ -48,6 +82,17 @@ class SweepConfig:
     corpus: Path | None = None
     target: Path | None = None
     samples: int = 200
+    # Synthetic-target calibration mode (handover item B). When set, the
+    # sweep builds gen_synthetic_target.py's known-ground-truth target and
+    # drives the real LiveBitMaskEstimator against its dead and live
+    # regions, instead of running FormatLearner over fabricated transitions.
+    synthetic_target: bool = False
+    blocks: int = 400
+    fanout: int = 32
+    unstable: int = 0
+    calib_samples: int = 900
+    map_bits: int = DEFAULT_MAP_BITS
+    switch_grid: tuple[int, ...] = field(default_factory=lambda: (50, 100, 200, 400, 800))
 
 
 def _load_real_seeds(corpus: Path, limit: int, rng: random.Random) -> list[bytes]:
@@ -219,6 +264,313 @@ def _run_sweep(cfg: SweepConfig) -> list[dict]:
     return rows
 
 
+# ── synthetic-target calibration (handover item B) ───────────────────────
+#
+# The FormatLearner sweep above answers a different question: whether the
+# padding *hypotheses* are stable across the parameter grid. That was
+# established over four real campaigns. What stayed open for four rounds is
+# the LiveBitMaskEstimator's FALSE-NEGATIVE rate against a genuinely
+# coverage-dead region -- and no real target in the matrix has one
+# (compressed data has no padding; any checksum makes every byte live). The
+# synthetic target supplies one by construction, so the calibration below
+# drives the *real* estimator against known ground truth rather than a
+# fabricated event stream.
+
+_DRIVER_C = """
+#include <stdio.h>
+#include <stdlib.h>
+extern int fuzz_synthetic(const unsigned char *, size_t);
+int main(int argc, char **argv) {
+    FILE *f = fopen(argv[1], "rb");
+    if (!f) return 1;
+    static unsigned char buf[65536];
+    size_t n = fread(buf, 1, sizeof buf, f);
+    fclose(f);
+    fuzz_synthetic(buf, n);
+    return 0;
+}
+"""
+
+
+def _build_synthetic_target(workdir: Path, cfg: SweepConfig) -> Path:
+    """Generate, compile and link the synthetic target driver.
+
+    Uses the same gcc + ``-DSYNTH_MANUAL_GUARDS`` recipe as
+    ``tests/test_synthetic_target.py`` (gcc cannot do
+    ``-fsanitize-coverage=trace-pc-guard``; the generated blocks call the
+    shim's guard callback themselves, which is the same entry point clang's
+    instrumentation targets). ``-D__AFL_CTX_SENSITIVE=0`` keeps one edge per
+    synthetic guard so the region-level counts stay interpretable.
+    """
+    src = workdir / "synthetic_cov.c"
+    r = subprocess.run(
+        [
+            sys.executable,
+            str(GEN_SYNTHETIC),
+            "--blocks",
+            str(cfg.blocks),
+            "--fanout",
+            str(cfg.fanout),
+            "--unstable",
+            str(cfg.unstable),
+            "-o",
+            str(src),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(f"gen_synthetic_target failed: {r.stderr}")
+
+    obj = workdir / "synthetic_cov.o"
+    r = subprocess.run(
+        ["gcc", "-O1", "-DSYNTH_MANUAL_GUARDS", "-c", str(src), "-o", str(obj)],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(f"synthetic target compile failed: {r.stderr[-800:]}")
+
+    drv = workdir / "driver.c"
+    drv.write_text(_DRIVER_C)
+    exe = workdir / "drive_synthetic"
+    r = subprocess.run(
+        [
+            "gcc",
+            "-O1",
+            "-D__AFL_CTX_SENSITIVE=0",
+            f"-include{AFL_SHIM}",
+            "-o",
+            str(exe),
+            str(drv),
+            str(obj),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(f"synthetic driver link failed: {r.stderr[-800:]}")
+    return exe
+
+
+def _run_synthetic(exe: Path, workdir: Path, data: bytes, size: int = 8192) -> frozenset[int]:
+    """Execute the target on one input and return the edge-id set."""
+    from fuzzer_tool.adapters.shm import ShmCoverage
+
+    cov = ShmCoverage(size=size)
+    try:
+        inp = workdir / "in.bin"
+        inp.write_bytes(data)
+        env = dict(os.environ, __AFL_SHM_ID=str(cov.shm_id), AFL_MAP_SIZE=str(size))
+        subprocess.run([str(exe), str(inp)], env=env, capture_output=True)
+        return frozenset(cov.get_edge_ids())
+    finally:
+        cov.cleanup()
+
+
+def _diff_bits(baseline: frozenset[int], mutant: frozenset[int], map_bits: int) -> int:
+    """Fold the symmetric difference of two edge sets into a bit-mask, the
+    exact transform ``operators.record_coverage_diff`` hands to
+    ``LiveBitMaskEstimator.observe(0, diff_bits)``."""
+    bits = 0
+    for edge_id in baseline ^ mutant:
+        bits |= 1 << (edge_id % map_bits)
+    return bits
+
+
+def _flip_in_region(rng: random.Random, base: bytes, region: tuple[int, int]) -> bytes:
+    d = bytearray(base)
+    o = rng.randrange(*region)
+    d[o] ^= 1 << rng.randrange(8)
+    return bytes(d)
+
+
+def _collect_diff_sequence(
+    exe: Path,
+    workdir: Path,
+    base: bytes,
+    baseline: frozenset[int],
+    region: tuple[int, int],
+    n: int,
+    rng: random.Random,
+    map_bits: int,
+) -> list[int]:
+    """Run ``n`` single-bit-flip mutations that land in ``region`` and record
+    the per-execution coverage diff the production estimator would see."""
+    return [
+        _diff_bits(
+            baseline, _run_synthetic(exe, workdir, _flip_in_region(rng, base, region)), map_bits
+        )
+        for _ in range(n)
+    ]
+
+
+def _replay_estimator(seq: list[int], switch_after: int, map_bits: int) -> dict:
+    """Replay a diff sequence through a real estimator at one threshold.
+
+    Mirrors ``_region_liveness_factor``: the region is DEAD iff the estimator
+    converged with an empty mask, LIVE the moment any edge is revealed
+    (mask != 0), UNRESOLVED otherwise. Also reports the first sample at which
+    ``switch_after`` consecutive no-growth samples were first reached, and the
+    length of the leading all-zero run (the window in which a live region
+    could, in principle, be mistaken for dead)."""
+    est = LiveBitMaskEstimator(n_bits=map_bits, switch_after=switch_after)
+    converged_at = None
+    leading_zero_run = 0
+    counting_leading = True
+    for i, db in enumerate(seq, 1):
+        if db:
+            counting_leading = False
+        elif counting_leading:
+            leading_zero_run += 1
+        est.observe(0, db)
+        if converged_at is None and est.is_converged:
+            converged_at = i
+    if est.is_converged and est.mask == 0:
+        verdict = "DEAD"
+    elif est.mask != 0:
+        verdict = "LIVE"
+    else:
+        verdict = "UNRESOLVED"
+    return {
+        "switch_after": switch_after,
+        "verdict": verdict,
+        "converged_at": converged_at,
+        "final_converged": est.is_converged,
+        "mask_bits": bin(est.mask).count("1"),
+        "leading_zero_run": leading_zero_run,
+    }
+
+
+def _synthetic_report(cfg: SweepConfig) -> str:
+    if shutil.which("gcc") is None:
+        raise RuntimeError("synthetic-target mode needs gcc")
+    if not AFL_SHIM.exists():
+        raise RuntimeError(f"afl_shim.c not found at {AFL_SHIM}")
+
+    lines: list[str] = []
+    with tempfile.TemporaryDirectory() as td:
+        workdir = Path(td)
+        exe = _build_synthetic_target(workdir, cfg)
+        rng = random.Random(cfg.seed)
+        base = bytes(rng.randrange(256) for _ in range(256))
+        baseline = _run_synthetic(exe, workdir, base)
+
+        # Determinism check: on --unstable 0 the target must be stable, or
+        # "the dead region moved coverage" is unfalsifiable (the exact
+        # failure mode that made the unstable variant useless for this).
+        reruns = [_run_synthetic(exe, workdir, base) for _ in range(8)]
+        stable = all(r == baseline for r in reruns)
+
+        dead_seq = _collect_diff_sequence(
+            exe,
+            workdir,
+            base,
+            baseline,
+            SYNTH_DEAD_REGION,
+            cfg.calib_samples,
+            random.Random(cfg.seed + 1),
+            cfg.map_bits,
+        )
+        live_seq = _collect_diff_sequence(
+            exe,
+            workdir,
+            base,
+            baseline,
+            SYNTH_LIVE_REGION,
+            cfg.calib_samples,
+            random.Random(cfg.seed + 2),
+            cfg.map_bits,
+        )
+
+    dead_nonzero = sum(1 for x in dead_seq if x)
+    live_nonzero = sum(1 for x in live_seq if x)
+
+    lines.append("# Synthetic-target liveness calibration (handover item B)")
+    lines.append("")
+    lines.append(
+        f"- target: {cfg.blocks} blocks, fanout {cfg.fanout}, "
+        f"--unstable {cfg.unstable}; baseline edges {len(baseline)}"
+    )
+    lines.append(f"- dead region {SYNTH_DEAD_REGION}, live region {SYNTH_LIVE_REGION}")
+    lines.append(f"- calibration samples per region: {cfg.calib_samples}")
+    lines.append(f"- identical-input reruns stable: {stable}")
+    lines.append(f"- dead-region mutations moving coverage: {dead_nonzero}/{cfg.calib_samples}")
+    lines.append(f"- live-region mutations moving coverage: {live_nonzero}/{cfg.calib_samples}")
+    lines.append("")
+
+    if cfg.unstable > 0:
+        lines.append(
+            "WARNING: --unstable > 0. ASLR-gated edges make dead-region "
+            "mutations appear to move coverage, so the liveness signal is "
+            "destroyed and these numbers are not a calibration. Use "
+            "--unstable 0. (This is why the calibration variant is the "
+            "deterministic one; see the sweep doc.)"
+        )
+        lines.append("")
+
+    lines.append("## Estimator verdict by switch_after")
+    lines.append("")
+    lines.append(
+        "| switch_after | dead verdict | dead conv@ | live verdict | live mask bits | live leading-zero run |"
+    )
+    lines.append("|---:|---|---:|---|---:|---:|")
+    dead_ok = True
+    live_ok = True
+    for sa in cfg.switch_grid:
+        d = _replay_estimator(dead_seq, sa, cfg.map_bits)
+        live_row = _replay_estimator(live_seq, sa, cfg.map_bits)
+        if d["verdict"] != "DEAD":
+            dead_ok = False
+        if live_row["verdict"] == "DEAD":
+            live_ok = False
+        lines.append(
+            f"| {sa} | {d['verdict']} | {d['converged_at']} | "
+            f"{live_row['verdict']} | {live_row['mask_bits']} | "
+            f"{live_row['leading_zero_run']} |"
+        )
+    lines.append("")
+
+    lines.append("## Verdict")
+    lines.append("")
+    if not stable and cfg.unstable == 0:
+        lines.append(
+            "INCONCLUSIVE: target was not deterministic on --unstable 0. "
+            "Something in the environment is adding nondeterminism; do not "
+            "trust these numbers."
+        )
+    elif dead_ok and live_ok:
+        lines.append(
+            "CORRECT across the grid: every switch_after gives the known-dead "
+            "region a DEAD verdict (in exactly switch_after samples) and never "
+            "gives the live region one. False-negative rate 0, false-positive "
+            "rate 0 on this target."
+        )
+        lines.append("")
+        lines.append(
+            "Reading: on the synthetic target switch_after is unconstrained "
+            "from below by *correctness* -- even 50 classifies both regions "
+            "right -- because the live region reveals an edge on sample 1 "
+            "(leading-zero run ~0), so its mask is never empty and the dead "
+            "verdict cannot fire on it. switch_after only sets how many wasted "
+            "mutations elapse before the dead down-weight engages. The floor "
+            "that actually justifies keeping it high is a real cold-but-live "
+            "region -- one that produces a long no-growth run before its first "
+            "edge -- which this target cannot exhibit by construction. So the "
+            f"default {DEFAULT_SWITCH_AFTER} is retained on that basis, not "
+            "lowered; the dead side is now measured, the cold-live floor "
+            "remains an assumption about real targets."
+        )
+    else:
+        lines.append(
+            "MISCLASSIFICATION: the estimator's verdict disagreed with ground "
+            "truth for at least one switch_after. Investigate before shipping "
+            "any threshold change."
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
 def _stability_report(rows: list[dict]) -> str:
     lines = []
     by_switch: dict[int, list[dict]] = {}
@@ -287,6 +639,27 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--corpus", type=Path, default=None)
     p.add_argument("--target", type=Path, default=None)
     p.add_argument("--samples", type=int, default=200)
+    p.add_argument(
+        "--synthetic-target",
+        action="store_true",
+        help="build gen_synthetic_target.py and drive the real "
+        "LiveBitMaskEstimator against its known-dead region (handover item B)",
+    )
+    p.add_argument("--blocks", type=int, default=400, help="synthetic: guard count")
+    p.add_argument("--fanout", type=int, default=32, help="synthetic: edges per exec")
+    p.add_argument(
+        "--unstable",
+        type=int,
+        default=0,
+        help="synthetic: ASLR-gated unstable blocks. MUST be 0 to calibrate "
+        "liveness -- any >0 destroys the signal (see sweep doc).",
+    )
+    p.add_argument(
+        "--calib-samples",
+        type=int,
+        default=900,
+        help="synthetic: mutations per region (>= max switch_after to converge)",
+    )
     args = p.parse_args(argv)
 
     cfg = SweepConfig(
@@ -296,9 +669,18 @@ def main(argv: list[str] | None = None) -> int:
         corpus=args.corpus,
         target=args.target,
         samples=args.samples,
+        synthetic_target=args.synthetic_target,
+        blocks=args.blocks,
+        fanout=args.fanout,
+        unstable=args.unstable,
+        calib_samples=args.calib_samples,
     )
-    rows = _run_sweep(cfg)
-    report = _stability_report(rows)
+
+    if cfg.synthetic_target:
+        report = _synthetic_report(cfg)
+    else:
+        rows = _run_sweep(cfg)
+        report = _stability_report(rows)
 
     if args.output == "-":
         print(report)
