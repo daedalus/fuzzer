@@ -1,12 +1,20 @@
-# Porting K-Scheduler into `daedalus/fuzzer`
+# K-Scheduler in `daedalus/fuzzer` — design reference
 
-> **Status: implemented** (W1–W5). Deviations from the text below:
-> the node bitmap writes eagerly during execution, so W2 needs **no**
-> destructor/atexit writer — Python read-and-clear per exec suffices;
-> the `_ng2`/`_ng3` png_read flavors rebuild vendored libpng+zlib with
-> trace-pc, resolving §3's build-scope caveat for the evaluation targets;
-> Katz recomputes lazily on new coverage gated by a 50-exec interval
-> (Algorithm 2's timer), not on a wall clock.
+> **This is a reference, not a plan.** The port is shipped: `core/icfg.py`
+> (whole-program ICFG), the shim's node bitmap channel, `core/horizon.py`,
+> `core/schedulers/katz.py` and the `katz` arm in the seed picker and
+> `SeedScorer.SCHEDULES`. The phased implementation plan and effort estimate
+> that used to sit here are pruned; what remains is why the algorithm needs
+> what it needs, which is what `core/icfg.py`, `core/cfg_cache.py` and
+> `tools/build_targets.sh` point at when they cite this file, plus the
+> calibration notes you need to read a Katz campaign's numbers honestly.
+>
+> Deviations from the paper as shipped: the node bitmap writes eagerly during
+> execution, so no destructor/atexit writer is needed — Python read-and-clear
+> per exec suffices; the `_ng2`/`_ng3` png_read flavors rebuild vendored
+> libpng+zlib with trace-pc, which resolves the build-scope caveat in §3 for
+> the evaluation targets; Katz recomputes lazily on new coverage gated by a
+> 50-exec interval (Algorithm 2's timer), not on a wall clock.
 
 **Paper:** She, Shah, Jana — *Effective Seed Scheduling for Fuzzing with Graph
 Centrality Analysis*, IEEE S&P 2022 (arXiv:2203.12064).
@@ -117,77 +125,7 @@ a fair evaluation, not a nice-to-have.
 
 ---
 
-## 4. Phased plan
-
-### W1 — whole-program ICFG (`core/icfg.py`)
-Lift `_build_cfgs` out of the target-function restriction into
-`build_interprocedural_cfg(td: TargetDistance) -> (node_index, src[], dst[])` as
-numpy arrays. Inter-procedural edges: for each block with a resolved callee,
-add `blk → entry(callee)`. Caller→callee only — the return back-edge is exactly
-what the paper's loop-removal step deletes anyway.
-
-`_MAX_CFG_FUNC_SIZE` (256 KiB, `distance.py:58`) already bounds per-function
-cost, but whole-program decode is a new regime.
-
-> **Time-box this first.** The pure-Python x86-64 decoder over an entire binary
-> is the real cost of this port, not Katz. Measure decode wall-time on your
-> largest target before writing W3/W4. If it's minutes, the answer is a
-> build-id-keyed on-disk CFG cache, not a faster decoder.
-
-Surface `indirect_call`/`indirect_jump` blocks as candidates for a β penalty —
-the paper explicitly leaves this to future work and you already have the flags.
-
-### W2 — node channel (`afl_shim.c` + `adapters/shm.py`)
-Per §3 Option A. Ship with a round-trip test: known target, known PC set,
-assert the bitmap matches the CFG node indices.
-
-### W3 — edge horizon graph (`core/horizon.py`)
-- `V` = union of per-seed node bitmaps; `U` = complement.
-- `H`: vectorized as `dst[visited[src] & ~visited[dst]]`.
-- Unvisited-only subgraph: mask `~visited[src] & ~visited[dst]` — free.
-- Seed→horizon edges: mask per seed — free.
-- **Visited-node deletion with connectivity preservation** is the one non-trivial
-  part. It only matters for U→V→…→V→U paths. Skipping it is a cheap
-  approximation; doing it properly needs a contracted-graph pass. Decide
-  explicitly and record the choice.
-- **Loop removal → DAG.** Tarjan SCC on the U-subgraph, drop intra-SCC edges.
-  Pure Python and numpy-hostile, but the U-subgraph shrinks monotonically over a
-  campaign.
-
-### W4 — Katz (`core/schedulers/katz.py`)
-No scipy needed. The SpMV is one line:
-
-```python
-c = alpha * np.bincount(src, weights=c[dst], minlength=n) + beta
-```
-
-Iterate to tolerance or ~30 steps. `α = 0.5` default (their Table XI), tunable.
-
-β from W2's accumulated per-node hit counts (`1 − Rᵢ/T`) — note `Rᵢ` counts
-**all** mutations reaching node *i*'s parents, not just corpus-adds, so the
-bitmap must be sampled every exec, not only on new coverage.
-
-Convergence needs `α < 1/λ_max`. On a DAG `λ_max = 0`, so any α converges in
-≤ depth iterations — assert the DAG property, since W3's loop removal is
-precisely what makes W4 safe.
-
-### W5 — wiring
-- `seed_picker._pick_katz_seed()`; append `"katz"` to `available` in
-  `_pick_seed_elo` when a node channel exists, and to `strategy_map`.
-  **This is strictly better than the paper's evaluation setup**: Elo will rate
-  it head-to-head against `aflgo`, `weighted`, `pareto` etc. for free, instead
-  of you asserting a win from a single run.
-- Energy: add `"katz"` to `SeedScorer.SCHEDULES`. Their AFL integration sets
-  energy = centrality directly; clamp against `max_mult` or one high-centrality
-  seed starves the queue.
-- Recompute trigger (their Algorithm 2): on new coverage **or** timer `k`.
-  Reuse the existing corpus-add hook.
-- Persist the centrality vector in `state.pkl.gz`; cache the ICFG keyed on
-  target build-id.
-
----
-
-## 5. Risks and calibration
+## 4. Risks and calibration
 
 1. **Decode cost dominates.** See W1. Everything downstream is cheap.
 2. **Context-sensitive coverage.** `__AFL_CTX_SENSITIVE` qualifies *edges* by
@@ -211,13 +149,3 @@ precisely what makes W4 safe.
    rather than a replacement for the existing pickers.
 
 ---
-
-## 6. Effort estimate
-
-| Phase | Estimate | Unknown |
-|---|---|---|
-| W1 ICFG | ~1 session | decode wall-time |
-| W2 node channel | ~½ session | — |
-| W3 horizon graph | ~1 session | connectivity-preserving deletion |
-| W4 Katz | ~½ session | — |
-| W5 wiring | ~½ session | — |

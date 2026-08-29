@@ -1,11 +1,17 @@
-# n-gram Edge Coverage — Implementation Plan
+# n-gram Edge Coverage — design reference
 
-> **Status: implemented** (k=2 compat branch, ring+FNV for k>2, marker
-> symbol, Python detection/sizing, ptrace twin, `--ngram` build flavors).
-> One refinement vs. the text below: the K-Scheduler node bitmap is
-> *eagerly* written by the shim, so it needs no `atexit`/destructor tail
-> writer — Python's read-and-clear after each execution replaces that
-> (see `kscheduler_centrality_port.md` §3).
+> **This is a reference, not a plan.** The port is shipped: the k=2 compat
+> branch, ring buffer + FNV for k>2, the `__afl_ngram_k_N` marker symbol,
+> Python-side detection and map sizing, the ptrace twin, and the `--ngram`
+> build flavors. The files-to-change checklist and test plan that used to sit
+> here are pruned; what remains is the edge-ID and reset semantics, which is
+> what `afl_shim.c` points at when it cites this file for why existing corpora
+> and resume state stay valid.
+>
+> One refinement vs. the text below: the K-Scheduler node bitmap is *eagerly*
+> written by the shim, so it needs no `atexit`/destructor tail writer —
+> Python's read-and-clear after each execution replaces that (see
+> `kscheduler_centrality_port.md` §3).
 
 > Research basis: analysis of `src/fuzzer_tool/adapters/afl_shim.c` (1668 lines),
 > `src/fuzzer_tool/adapters/shm.py`, `src/fuzzer_tool/core/elf.py`,
@@ -250,41 +256,3 @@ when built via SanitizerCoverage; the ASLR concern is unchanged.
 | **`direct_lite` mode** | `.so` and fuzzer share address space; ring lives in `.so` BSS | Reset path updated (`__afl_map_reset`) → no new concern |
 | **Map-size pressure** | k=3 can triple cardinality, pushing load above 0.9 | `ngram_inflation_factor` + `recommended_map_size` (`edge_tracker.py`) must account for k |
 | **`AFL_MAP_SIZE` env** | Python sets this from `MapSizeEstimate` (`runner.py:249`) | `_size_from_blocks` correction (above) is the fix; without it the map saturates silently |
-
----
-
-## Files to Change (Complete List)
-
-| File | Change |
-|---|---|
-| `src/fuzzer_tool/adapters/afl_shim.c:283` | `uint32_t __afl_prev_loc` → ring + index (k > 2) |
-| `src/fuzzer_tool/adapters/afl_shim.c:272` | Add `__afl_ngram_k_N` symbol advertisement |
-| `src/fuzzer_tool/adapters/afl_shim.c:578–668` | n-gram FNV hash in `__afl_map_edge` |
-| `src/fuzzer_tool/adapters/afl_shim.c:848–853` | Zero ring in `__afl_map_reset` |
-| `src/fuzzer_tool/core/elf.py:1587` | Add `detect_ngram_k`, `ngram_inflation_factor` |
-| `src/fuzzer_tool/core/elf.py:1640` | `_size_from_blocks`: apply `ngram_inflation_factor` |
-| `src/fuzzer_tool/core/elf.py:1647` | `MapSizeEstimate`: add `ngram_k` field; update both constructor sites (`elf.py:1723`, `elf.py:1726`) to keyword form |
-| `src/fuzzer_tool/adapters/shm.py` | None (layout unchanged) |
-| `src/fuzzer_tool/services/ptrace_coverage.py:421` | `reset_edge_map`: clear `prev_locations` deque alongside `prev_location` |
-| `src/fuzzer_tool/services/ptrace_coverage.py:430` | Ring-based prev_location simulation |
-| `src/fuzzer_tool/core/edge_tracker.py` | `recommended_map_size` — account for k |
-| `state.json` / resume logic | Record and validate `ngram_k` on resume |
-
-No change needed at the fork-server init (`afl_shim.c:1552`): see the
-Reset Path section above — the ring is never written there, so it
-carries no explicit zeroing step of its own.
-
----
-
-## Test Plan
-
-- **Falsification**: build target with `__AFL_NGRAM_K=3`; confirm that two
-  inputs that share the same final edge but differ in their k−2 predecessors
-  produce distinct edge_ids.
-- **Adversarial**: fill the map to > 0.8 load with k=3; confirm drop-rate
-  stays below the expected 1 % window bound (`afl_shim.c:338`).
-- **Regression**: existing k=2 corpus loads and resumes without error when
-  `state.json` records `ngram_k=2`.
-- **Reset invariant**: after `__afl_guarded_reset`, all ring slots must be
-  zero and `__afl_prev_idx` must be 0; verify via a unit test that calls
-  the reset and then asserts deterministic output for a known input sequence.
