@@ -56,6 +56,14 @@ def _gdb_crash_replay(f, data: bytes, returncode: int) -> str:
 
 _use_xxhash = True
 
+# Protected copies kept under corpus/seeds/crashing/ per crash signature.
+# Every distinct crashing input used to be written there and marked
+# irreplaceable, so a single easily-hit bug grew that directory without bound
+# and no pruning path could reclaim it. Keeping a bounded sample per signature
+# preserves the reason the directory exists -- triage material for each
+# distinct crash -- without letting one signature own the disk.
+CRASHING_SEEDS_PER_SIG = 64
+
 SIGNAL_NAMES = {
     6: "SIGABRT",
     7: "SIGBUS",
@@ -381,9 +389,21 @@ class CorpusManager:
 
         # Preserve the crashing input as corpus material: stored under
         # seeds/crashing/ and marked irreplaceable so no pruning path can drop
-        # it. Runs for every crash exec; the writer dedups to a stat() for
-        # repeats of the same input.
-        if f.corpus_dir:
+        # it. The writer dedups to a stat() for repeats of the same input, but
+        # a signature that is trivially reachable produces a fresh input on
+        # every execution, so the count is bounded per signature: a novel
+        # crash is always preserved, and repeats stop once the signature has
+        # CRASHING_SEEDS_PER_SIG samples on disk. Without the bound the
+        # directory grows forever and, being irreplaceable, cannot be pruned.
+        #
+        # The budget is keyed by the signature this crash is COUNTED under,
+        # which for a fuzzy match is the existing signature it folds into, not
+        # its own: keying by verdict.signature would leave every fuzzy-matched
+        # crash reading a count of zero and so exempt from the bound.
+        counted_sig = verdict.matched_signature or verdict.signature
+        if f.corpus_dir and (
+            verdict.novel or f.crash_sigs.get(counted_sig, 0) < CRASHING_SEEDS_PER_SIG
+        ):
             save_crashing_seed(data, f.corpus_dir, f.seen_hashes, f.irreplaceable_hashes, f.bloom)
 
         report = verdict.report
