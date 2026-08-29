@@ -22,11 +22,16 @@ from fuzzer_tool.core.edge_tracker import EdgeTracker
 class TestSetCoverTerminates:
     """The greedy set-cover must terminate against reachable edges.
 
-    EdgeTracker.max_tracked_seeds (200) bounds seed_edges, and
-    _prune_tracked_seeds drops entries without removing their edges from
-    cumulative_edges. Any campaign past 200 seeds therefore has
-    cumulative_edges as a strict superset of anything the seeds still
-    tracked can cover.
+    EdgeTracker.max_tracked_seeds bounds seed_edges, and _prune_tracked_seeds
+    drops entries without removing their edges from cumulative_edges. Any
+    campaign past that cap therefore has cumulative_edges as a strict superset
+    of anything the seeds still tracked can cover.
+
+    The cap was 200 when this was written and is 200,000 since fe8fd42, so the
+    situation no longer arises by itself on a real campaign (see docs/TODO.md).
+    The tests below construct it directly, which is why they still hold: the
+    set-cover termination bug is a property of the divergence between
+    seed_edges and cumulative_edges, not of how the divergence arose.
     """
 
     def test_pruning_makes_cumulative_edges_unreachable(self):

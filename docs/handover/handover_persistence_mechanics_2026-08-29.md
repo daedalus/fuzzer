@@ -14,6 +14,13 @@ This document is analysis, not a plan. Effort estimates are absent on purpose:
 §1 is three independent changes to three subsystems and each wants its own
 measurement before it is worth writing.
 
+**Status (round 17).** The gating measurement was run and the ledger is not
+clustered, so §1 survives — see
+`docs/learnings/2026-08-29-per-seed-cost-ledger.md`. §1a and §1b are
+implemented on top of a new `core/cost_ledger.py`. §1c is **not** written and
+should not be: its host function no longer runs (see the note under §1c). Two
+factual corrections to what follows are marked inline.
+
 ---
 
 ## What the paper claims
@@ -46,9 +53,25 @@ names a gap we have, independently of anything else in the paper.
 `meta["total_time"]` is a per-seed accumulator. It is written in
 `Fuzzer.fuzz_one` (`services/fuzzer.py`, under the comment *"Per-seed wall-clock
 cost"*) and it is clean: the timing-contamination fix moved `t_start` below the
-mutation call, so it measures target execution and nothing else. It also
-survives resume, and `_maybe_prune` rebuilds `seed_meta` from survivors, so it
-cannot outlive its seed.
+mutation call, so it measures target execution and nothing else.
+
+**Correction (round 17): it did not survive resume.** This paragraph originally
+claimed it did. `total_time` was absent from `CorpusManager.save_state` and
+`load_state` while `fuzz_count` was persisted, so a resumed seed carried a
+large restored count against a zero numerator, hit the `max(1.0, ...)` floor in
+every reader, and read as the cheapest seed in the corpus — permanently, since
+the numerator restarts at zero and the count does not. Measured on `png_read`:
+after a 200-execution resume, 116 of 216 fuzzed seeds carried
+`total_time == 0.0` against 407 restored fuzzes.
+
+**Second correction: `fuzz_count` was the wrong denominator even within one
+run.** The initial seed replay in `Fuzzer.run` increments the count without
+crediting any time; the two disagreed on 126 of 147 timed seeds in the same
+campaign. `core/cost_ledger.py` introduces `cost_samples`, a denominator
+counting exactly the executions whose time is in the numerator, persisted
+alongside `total_time`. It also makes *unmeasured* and *measured as free*
+distinguishable — before, a zero numerator and the 1 microsecond floor were the
+same value, so an untimed seed won every edge in the favored set.
 
 It has exactly three readers. **All three divide it by `fuzz_count`** to recover
 a mean `exec_us`:
@@ -77,12 +100,19 @@ that verdict. `total_time` is in the same dict. Cost-based futility —
 *"spent more than X seconds of target time and found nothing"* — is the question
 a scheduler actually wants answered, and needs no new plumbing.
 
-**Before writing this**: measure the spread of `total_time / fuzz_count` across a
-real corpus on a campaign that has run long enough to have stale seeds. If exec
-times are tightly clustered on our targets the two criteria agree and this is not
-worth the churn. On `ffmpeg_read` they will not be clustered; on `png_read` they
-may well be. This is display-only today, so the measurement is cheap and the
-change is low risk — do this one first.
+**Measured, and this guess was backwards.** `png_read` at a realistic
+`max_len` is the *spread* target (p90/p10 4.32x, CV 1.455) and the flat
+decompressor `gzip_read` is the clustered one (1.32x, CV 0.106): cost disperses
+where the input controls how much work the target does and concentrates where a
+fixed overhead dominates. The count criterion and an equal-sized cost criterion
+disagreed on 10 of 13 flagged seeds on `png_read`, and the seeds it called
+exhausted had burned between 6.9 ms and 116.9 ms for the same verdict. Full
+numbers in `docs/learnings/2026-08-29-per-seed-cost-ledger.md`.
+
+**Implemented** in `StatsReporter._print_summary_seeds` against
+`effective_fuzz_count`, with the threshold named `STALE_SEED_EXEC_EQUIVALENTS`
+and carried over at 50 verbatim — it was never calibrated and is not calibrated
+here.
 
 ### 1b. The Boltzmann arm's energy term
 
@@ -101,6 +131,20 @@ A/B through `tools/bench_paired.py` like everything else in the backlog, because
 it changes seed selection and could plausibly make things worse: down-weighting
 expensive seeds is down-weighting deep paths on targets where depth costs time.
 
+**Implemented, with one correction to the shape above.** The energy must not be
+`log(total_time + 1)` on raw seconds: for any campaign shorter than a few
+seconds of target time per seed that puts the whole corpus at `E ~ 0` and turns
+the arm uniform without `T` changing — a silent behaviour change disguised as a
+one-line substitution. `effective_fuzz_count` converts the ledger to
+average-cost executions instead, which keeps `T` meaning what it meant and
+makes the substitution *exactly* the identity under uniform cost rather than
+approximately so. Measured on `png_read`, `fuzz_count` and `total_time` order
+the corpus only weakly alike (Kendall tau 0.46), so this does change selection
+there.
+
+**The A/B is still owed.** It was not run here. This changes seed selection and
+the argument above for why it could make things worse still stands untested.
+
 ### 1c. `_maybe_prune` has no cost term at all
 
 `EdgeTracker._maybe_prune` (`core/edge_tracker.py`) evicts by subsumption first
@@ -113,6 +157,24 @@ least an argued one.
 
 Lowest confidence of the three. Eviction changes which seeds exist, so it is the
 hardest to A/B cleanly, and the age fallback rarely fires.
+
+**Not written, and the reason is stronger than low confidence: the host
+function no longer runs at all.** `_maybe_prune` returns immediately unless
+`len(seed_edges) > max_tracked_seeds`, and that default went from 200 to
+200,000 in `fe8fd42` ("perf: skip Katz ICFG when no targets and reduce
+seed-picker/calibration overhead", 2026-08-27) — a 1000x change inside a
+performance commit whose message does not mention it. Verified: 500 seeds
+recorded, zero pruned. Campaigns in this measurement reached 221-403 seeds, so
+neither phase fires any more. Putting a cost term in the age fallback would be
+adding a heuristic to dead code, which is precisely the bug family §2 of this
+document catalogues.
+
+That cap change has consequences past §1c and is tracked as its own open item
+in `docs/TODO.md`: the memory bound `_maybe_prune` provided is gone, and the
+`_edge_owner_count` rebuild that lives in the same function (added because
+stale owner counts degrade the rarity signal that drives the schedule) no
+longer runs either. Whether 200,000 was intended is a separate question from
+this port and is not decided here.
 
 ---
 
@@ -181,3 +243,13 @@ If §1a's measurement comes back saying exec times are clustered on our targets,
 all three of §1a/1b/1c collapse and this document should be deleted, with the
 measurement recorded in `docs/learnings/`. That outcome is worth as much as the
 port and costs less to find out.
+
+**It did not come back that way** — see
+`docs/learnings/2026-08-29-per-seed-cost-ledger.md`. The measurement is
+recorded there regardless, because the *shape* of the result is the reusable
+part: clustering is a joint property of target and corpus, not of the target,
+and the same target moved from 2.00x to 4.32x purely by raising `max_len`. Any
+future consumer of this ledger should be written against
+`effective_fuzz_count` for the same reason §1a and §1b were — it collapses to
+the count form on a clustered target by construction, so the gate does not have
+to be re-argued per target.

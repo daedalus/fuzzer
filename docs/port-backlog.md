@@ -199,20 +199,33 @@ you whether the adaptive version actually beats the fixed 30s — build the fuzz
 that can judge the algorithm, then build the algorithm.
 
 **D5. Read the per-seed cost ledger we already keep** (Persistence Mechanics,
-2026-08-29) — `meta["total_time"]` accumulates per-seed target time in
-`Fuzzer.fuzz_one`, and all three of its readers (`Fuzzer._cull_queue`,
-`Fuzzer.run`, `CorpusManager.auto_minimize_corpus`) divide it by `fuzz_count`
-to recover a mean `exec_us`. The accumulated quantity is never read as such.
-Three candidate consumers, ranked: stale-seed detection in
-`StatsReporter._print_summary_seeds` (currently `fuzz_count >= 50`, a count where
-cost is the question, and display-only so the change is nearly free); the energy
-term in `SeedPicker._pick_boltzmann_seed` (`E = log(fuzz_count + 1)`); and the
-age fallback in `EdgeTracker._maybe_prune`, which has no cost term at all.
+2026-08-29) — **mostly shipped, round 17.** The gating measurement said
+per-seed exec cost is *not* clustered
+(`docs/learnings/2026-08-29-per-seed-cost-ledger.md`), so the entry survived.
+`core/cost_ledger.py` now carries the ledger: `cost_samples` as a denominator
+counting exactly the executions whose time is in `total_time`, both persisted
+across resume (they were not), and `effective_fuzz_count`, which expresses the
+ledger in average-cost executions so any consumer built on it is arithmetically
+a no-op on a target where cost does not vary.
 
-**All three collapse to nothing if per-seed exec cost is tightly clustered on our
-targets — measure that first**, and if it is, delete this entry and record the
-measurement. Full analysis, including what does *not* port from that source, in
-`docs/handover/handover_persistence_mechanics_2026-08-29.md`. **Effort S–M.**
+Shipped consumers: stale-seed detection in
+`StatsReporter._print_summary_seeds`, and the energy term in
+`SeedPicker._pick_boltzmann_seed`. The three original readers
+(`Fuzzer._cull_queue`, `Fuzzer.run`, `CorpusManager.auto_minimize_corpus`) were
+rewired off `fuzz_count` at the same time.
+
+**Still open on this entry:**
+
+- The **A/B for the Boltzmann change** through `tools/bench_paired.py`. It
+  changes seed selection and was not benchmarked. Down-weighting expensive
+  seeds is down-weighting deep paths on targets where depth costs time, and
+  that risk is unmeasured.
+- The third candidate consumer, the age fallback in
+  `EdgeTracker._maybe_prune`, is **not** shipped and should not be attempted as
+  written: that function no longer runs (`max_tracked_seeds` went 200 →
+  200,000 in `fe8fd42`). Tracked separately in `docs/TODO.md`.
+
+**Effort S–M** for what remains.
 
 ---
 
