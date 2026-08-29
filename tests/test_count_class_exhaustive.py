@@ -1,6 +1,7 @@
-"""Exhaustive enumeration over ``core/count_class.py`` (port item P2-6).
+"""Exhaustive enumeration over ``core/count_class.py``.
 
-See ``docs/tigerbeetle_four_fuzzers_port.md``. The kernel of matklad's point
+See ``docs/learnings/2026-08-22-count-class-exhaustive.md``. The kernel of
+matklad's point
 is that when an input space is small enough to enumerate, sampling it is
 strictly worse than walking it: a hand-picked example asserts the author's
 mental model at one point, and the points the author did not think of are

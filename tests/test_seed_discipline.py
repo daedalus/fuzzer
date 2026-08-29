@@ -1,4 +1,4 @@
-"""Guard for P0-1 seed discipline (docs/tigerbeetle_four_fuzzers_port.md).
+"""Guard for seed discipline (docs/port-backlog.md, item F6).
 
 The seed plugin in ``conftest.py`` is worth nothing if new tests keep
 constructing their own unseeded RNGs, so the rule is enforced here rather than
@@ -9,9 +9,9 @@ left to review. Two things are checked:
    unreproducible. This is not hypothetical: the sweep that landed P0-1 found
    ``test_new_operators.py::TestMagicValues::test_inserts_magic_value``
    failing on 0.66% of runs with nothing to re-run, and
-   ``docs/tigerbeetle_four_fuzzers_port.md`` records two more of the same
-   shape already confirmed and fixed (``test_bloom_exec_dedup`` at 0.33%,
-   ``test_mb_cbh_reanchor`` at 1.0%).
+   two more of the same shape were confirmed and fixed alongside it
+   (``test_bloom_exec_dedup`` at 0.33%, ``test_mb_cbh_reanchor`` at 1.0%),
+   all unseeded RNGs in tests asserting statistical properties.
 
 2. **The plugin itself still works.** ``pytest_report_header`` must emit the
    seed, and ``--fuzz-seed`` must round-trip, because the whole design rests

@@ -58,7 +58,7 @@ fuzzer -- and therefore compile a target binary -- to call
 rather than in ``operators.py`` because this interface has no
 implementors yet: there is no ``MutatorBase`` subclass anywhere in
 ``src/``. Once there is one that reads ``ctx["fuzzer"]``, the door is open
-permanently. See docs/tigerbeetle_four_fuzzers_port.md, item P1-4.
+permanently. See docs/port-backlog.md, item F1.
 
 A mutator that needs state the context does not carry should get a named
 field added to ``MutationContext``, not reach around it. That is cheap

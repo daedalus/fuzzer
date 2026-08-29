@@ -17,7 +17,7 @@ from fuzzer_tool.services.operators import OperatorEngine
 from .support.operator_env import make_minimal_fuzzer
 from .support.scripted_rng import ScriptedRng
 
-# ── Seed discipline (docs/tigerbeetle_four_fuzzers_port.md, P0-1) ─────
+# ── Seed discipline (docs/port-backlog.md, item F6) ──────────────────
 #
 # The dual-run pattern: run every randomised assertion twice, once under a
 # fixed seed and once under the session seed from ``--fuzz-seed``. The fixed

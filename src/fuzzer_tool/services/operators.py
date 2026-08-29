@@ -1913,9 +1913,9 @@ class OperatorEngine:
             tree = f._tree_mutator.parse(bytes(buf), chunk_size=stride)
 
             # Incrementally harvest newly-added corpus entries into the
-            # shared subtree population (subtree-population crossover, see
-            # docs/web_research_port_candidates_2026-08.md #8) instead of
-            # reparsing the whole corpus on every call.
+            # shared subtree population (subtree-population crossover, after
+            # GRIIN (ASE '23) / Grammarinator x AFL++) instead of reparsing
+            # the whole corpus on every call.
             corpus = getattr(f, "corpus", None) or []
             next_idx = f._subtree_pop_next_idx
             if next_idx > len(corpus):

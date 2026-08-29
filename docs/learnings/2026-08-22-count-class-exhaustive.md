@@ -5,8 +5,10 @@ Date: 2026-08-22
 Added: `tests/test_count_class_exhaustive.py`.
 Changed: `src/fuzzer_tool/core/count_class.py`, `tests/test_count_class.py`.
 
-Port items P1-5 / P2-6 from `docs/tigerbeetle_four_fuzzers_port.md`, applied to
-the smallest subsystem in the repo that has a fully enumerable input space.
+Port items P1-5 / P2-6 from the TigerBeetle "A Tale Of Four Fuzzers" survey
+(merged into `docs/port-backlog.md`; both items are shipped, so only their open
+siblings survive there), applied to the smallest subsystem in the repo that has
+a fully enumerable input space.
 
 ## Why this module
 

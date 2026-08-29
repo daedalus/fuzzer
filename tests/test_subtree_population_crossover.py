@@ -1,4 +1,4 @@
-"""Tests for subtree-population crossover (docs/web_research_port_candidates_2026-08.md #8).
+"""Tests for subtree-population crossover.
 
 Port of GRIIN (ASE '23) / Grammarinator x AFL++ (2026): grammar-aware tree
 crossover should be able to splice in a subtree harvested from a *different*

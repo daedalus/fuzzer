@@ -1,7 +1,7 @@
 """A ``RandPool``-shaped generator that enumerates every path instead of sampling one.
 
-Port item P1-5 from ``docs/tigerbeetle_four_fuzzers_port.md``, after
-matklad's ``Gen`` in *A Tale Of Four Fuzzers*. The observation the whole
+After matklad's ``Gen`` in *A Tale Of Four Fuzzers*; what building it found
+is in ``docs/learnings/2026-08-22-exhaustive-pool-p1-5.md``. The observation the whole
 thing rests on is that ``core/rand_pool.py`` is already the abstraction
 required: every discrete draw carries an explicit bound, and operators
 receive the pool as a parameter rather than reaching for a module-level

@@ -6,9 +6,9 @@ byte-level operator nominally requires a full fuzzer -- and
 reach ``_op_bit_flip``. The mock below is the cheap substitute two test
 suites now share rather than duplicate.
 
-Its size is the argument for port item P1-4: 29 attributes, mostly None or
-False, all of them present only because the operator's declared contract is
-the whole ``Fuzzer`` object. See ``docs/tigerbeetle_four_fuzzers_port.md``.
+Its size is the argument for the minimal-interface extraction: 29 attributes,
+mostly None or False, all of them present only because the operator's declared
+contract is the whole ``Fuzzer`` object. See ``docs/port-backlog.md``, item F1.
 """
 
 from __future__ import annotations

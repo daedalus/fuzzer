@@ -1,6 +1,6 @@
-"""Exhaustive enumeration through the PRNG interface (port item P1-5).
+"""Exhaustive enumeration through the PRNG interface.
 
-See ``docs/tigerbeetle_four_fuzzers_port.md``. Two halves:
+See ``docs/learnings/2026-08-22-exhaustive-pool-p1-5.md``. Two halves:
 
 1. ``ExhaustivePool`` itself, checked against spaces whose cardinality is
    known in closed form -- products, ``n!``, ``n!/(n-k)!`` -- because a

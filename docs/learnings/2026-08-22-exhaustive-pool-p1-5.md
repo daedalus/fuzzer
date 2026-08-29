@@ -6,7 +6,9 @@ Added: `src/fuzzer_tool/core/exhaustive_pool.py`, `tests/test_exhaustive_pool.py
 `tests/support/operator_env.py`.
 Changed: `src/fuzzer_tool/services/operators.py`, `tests/test_new_operators.py`.
 
-Port item P1-5 from `docs/tigerbeetle_four_fuzzers_port.md`.
+Port item P1-5 from the TigerBeetle "A Tale Of Four Fuzzers" survey (merged
+into `docs/port-backlog.md`; this item is shipped, so only its open siblings
+survive there).
 
 ## The trick
 
