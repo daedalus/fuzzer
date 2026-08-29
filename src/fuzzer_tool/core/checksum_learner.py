@@ -85,6 +85,10 @@ from fuzzer_tool.core.xor_map_solver import (
 # call blocked fuzz_one() for 30+ seconds once the pair set reached a few
 # hundred entries -- eps collapsed to single digits.
 CHECKSUM_PAIRS_MAX = 128  # cap the pair set GCD reduction runs over
+# Byte budget for the pairs carried in the run state file. The count cap
+# above bounds the list length but not its size -- one pair's data half is a
+# whole checksummed region -- and the state file is rewritten on every save.
+CHECKSUM_STATE_BYTES_MAX = 256 * 1024
 
 # _maybe_recover() previously re-ran full recovery whenever pair count
 # changed AT ALL -- during active fuzzing with cmplog/format-extraction
@@ -607,11 +611,35 @@ class ChecksumLearner:
     # ------------------------------------------------------------------
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize the learner for the run state file.
+
+        The observed pairs are persisted, not just their count. Recovery
+        needs ``min_pairs`` (64) of them before it will run at all, so a
+        resume that dropped the evidence restarted collection from zero --
+        a run repeatedly stopped and resumed could never reach the threshold
+        no matter how many pairs it had seen in total.
+
+        Pairs are kept newest-first under a byte budget rather than by count:
+        a pair's data half is a whole checksummed region (a PNG IDAT chunk
+        can be megabytes), so ``CHECKSUM_PAIRS_MAX`` alone bounds the list
+        but not its size, and the state file is written on every save.
+        """
+        kept: list[tuple[bytes, int]] = []
+        budget = CHECKSUM_STATE_BYTES_MAX
+        for data, checksum in reversed(self._pairs):
+            budget -= len(data) + 8
+            if budget < 0:
+                break
+            kept.append((data, checksum))
+        kept.reverse()
         return {
             "poly": self._poly,
             "poly_width": self._poly_width,
             "reflect": self._reflect,
             "pair_count": self.pair_count,
+            "pairs": kept,
+            "total_pairs_seen": self._total_pairs_seen,
+            "pairs_attempted_at": self._pairs_attempted_at,
             "int_model": model_to_dict(self._int_model),
             "xor_model": xor_model_to_dict(self._xor_model),
         }
@@ -623,6 +651,27 @@ class ChecksumLearner:
             learner._poly = data.get("poly")
             learner._poly_width = data.get("poly_width", 32)
             learner._reflect = data.get("reflect", False)
+            # Restore the evidence, not just its count. Anything malformed is
+            # dropped pair by pair: a corrupt state file must not take down
+            # the run, the same contract model_from_dict already follows.
+            restored: list[tuple[bytes, int]] = []
+            for item in data.get("pairs") or ():
+                try:
+                    pair_data, checksum = item
+                    if isinstance(pair_data, bytes | bytearray) and isinstance(checksum, int):
+                        restored.append((bytes(pair_data), checksum))
+                except (TypeError, ValueError):
+                    continue
+            learner._pairs = restored[-CHECKSUM_PAIRS_MAX:]
+            # total_pairs_seen gates the retry throttle, and pairs_attempted_at
+            # records where the last recovery attempt ran. Restoring the first
+            # without the second would make the next add_pairs() look like a
+            # full RECOVERY_RETRY_BATCH had arrived and re-run recovery
+            # immediately; restoring neither re-runs it on the 64th new pair.
+            seen = data.get("total_pairs_seen")
+            learner._total_pairs_seen = seen if isinstance(seen, int) else len(learner._pairs)
+            attempted = data.get("pairs_attempted_at")
+            learner._pairs_attempted_at = attempted if isinstance(attempted, int) else -1
             # model_from_dict returns None for malformed input rather than
             # raising -- a corrupt state.json must not take down the run.
             learner._int_model = model_from_dict(data.get("int_model"))
