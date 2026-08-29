@@ -6,14 +6,21 @@ operators, 10 schedulers.
 
 ## Status
 
+Landed and pruned from this file: P1-3 scheduler convergence (five defects
+found, four fixed — `docs/learnings/2026-08-21-scheduler-convergence.md`), P1-5
+exhaustive enumeration (`core/exhaustive_pool.py`, 70 of 134 operators fully
+enumerable — `docs/learnings/2026-08-22-exhaustive-pool-p1-5.md`), and P2-6
+negative space (`tests/test_count_class_exhaustive.py` —
+`docs/learnings/2026-08-22-count-class-exhaustive.md`). What each of them found
+is in those learnings notes, which is where to look rather than here.
+
+What is still open:
+
 | item | state |
 |---|---|
 | P0-1 seed discipline | **partly done** — plugin landed; all 14 bare `Random()` migrated and guarded by `tests/test_seed_discipline.py`. The ~250 hardcoded seed literals have *not* been migrated, deliberately: see the note in that commit. |
 | P0-2 distribution assertions | **pattern established** in `tests/test_scheduler_convergence.py::TestHarnessCoverage`, not yet applied to the operator registry or cmplog. |
-| P1-3 scheduler convergence | **done.** See `docs/learnings/2026-08-21-scheduler-convergence.md`. Found five defects; four fixed. Section below is preserved as written, before any of it was known. |
 | P1-4 minimal interface | **prerequisite done** — `MutationContext` replaces the `Fuzzer` in `core/mutator_interface.py`'s `mutate()` and `is_available()`, closing the `**ctx` leak while that interface still had no implementors. The `operators.py` extraction itself (365 `self.f` attribute reads, 29 distinct, 249 of them `max_len`/`_rand_pool`) is not started. |
-| P1-5 exhaustive enumeration | **done.** `core/exhaustive_pool.py` implements the `Gen` odometer behind the `RandPool` method names; 70 of 134 operators are fully enumerable through it. Found two `max_len` escapes. See `docs/learnings/2026-08-22-exhaustive-pool-p1-5.md`. Also applied to `core/count_class.py` (`tests/test_count_class_exhaustive.py`). |
-| P2-6 negative space | **pattern established** in the same file — position-invariance of `new_bits`, which is what found the word-loop/tail disagreement. See `docs/learnings/2026-08-22-count-class-exhaustive.md`. |
 | P2-7 swarm harness | not started |
 | P2-8 `--performance` mode | not started |
 | `parallel.py` measure-don't-model | not started |
@@ -23,22 +30,14 @@ Three of the flakes this document predicted have since been confirmed and fixed
 `test_inserts_magic_value` at 0.658%), all unseeded RNGs in tests asserting
 statistical properties.
 
-The enumeration items have so far found three live defects — `new_bits`
-returning a different answer for the same byte pair depending on its offset in
-the buffer, and `_op_regex_bomb` / `_op_utf8_widen` growing past `max_len` on
-paths random testing never reached — plus three docstring claims contradicted
-by the code.
-
-A finding that changes the shape of the remaining work: **20** operators are
-unenumerable *only* because a coin flip is written `rng.random() < 0.5` rather
-than `rng.randint(0, 1)`. Converting them is mechanical, does not change the
-distribution, and would roughly double the enumerable set.
-
-Recount 2026-08-22: 20 coin-flip sites remain (of 31 `rng.random()` uses in
-`core/`), across `arm.py`, `der.py`, `webm.py`, `isobmff.py`, `protobuf.py`,
-`gif.py`, `webp.py`, `structured.py`, `wfc.py` and `schedulers/cmaes.py`. The
-original count of 21 predates the `_op_regex_bomb` / `_op_utf8_widen` fixes.
-This is a **P1-5 follow-up, not unfinished P1-5** — P1-5 itself is done.
+**Open follow-up from P1-5, not unfinished P1-5.** 20 operators are unenumerable
+*only* because a coin flip is written `rng.random() < 0.5` rather than
+`rng.randint(0, 1)`. Converting them is mechanical, does not change the
+distribution, and would roughly double the enumerable set. Recount 2026-08-22:
+20 sites remain (of 31 `rng.random()` uses in `core/`), across `arm.py`,
+`der.py`, `webm.py`, `isobmff.py`, `protobuf.py`, `gif.py`, `webp.py`,
+`structured.py`, `wfc.py` and `schedulers/cmaes.py`. The original count of 21
+predates the `_op_regex_bomb` / `_op_utf8_widen` fixes.
 
 ## The framing that matters
 
@@ -138,73 +137,6 @@ goes red.
 
 ---
 
-## P1-3 — The idealized-lab convergence fuzzer for the 10 schedulers (DONE)
-
-> Landed. Everything below is preserved as originally written, before the
-> harness was built — including the guess about what it would find, which is
-> worth comparing against what it actually found in
-> `docs/learnings/2026-08-21-scheduler-convergence.md`.
-
-This is Fuzzer #3, and it maps onto your codebase almost one-for-one.
-
-**Current state.** `core/schedulers/` has ten schedulers behind an already-clean
-shared interface: `select_op(ops) -> str` and
-`record(name, success: bool, weight: float)`. Existing tests
-(`test_regression_scheduler_independence.py`, `test_regression_scheduler_fallback_precedence.py`,
-`test_cmaes.py`, `test_montecarlo.py`, `test_contextual.py`) check import-graph
-independence, fallback ordering, and structural properties. **None of them
-asserts that any scheduler converges to the best arm.**
-
-You have a decade's worth of bandit theory in the repo and no ground-truth test
-that the bandits bandit.
-
-**Port.** Build the analogue of matklad's ring-of-replicas: a synthetic
-environment where the optimal answer is known *by construction*, and then be
-strict about it.
-
-```python
-# Ground truth: arm k has Bernoulli reward p_k, best arm is argmax p_k.
-# Not realistic — deliberately. Realism is the *other* fuzzer's job.
-def converges(scheduler_cls, seed, n=20_000):
-    ops = [f"op{i}" for i in range(12)]
-    p = {...}                       # one clearly-best arm
-    best = max(p, key=p.get)
-    sched = scheduler_cls()
-    picks = Counter()
-    for _ in range(n):
-        op = sched.select_op(ops)
-        picks[op] += 1
-        sched.record(op, success=rng.random() < p[op])
-    return picks[best] / n
-```
-
-Assertions worth making strict, in ascending difficulty:
-
-1. Best-arm selection frequency in the final 10% of rounds exceeds a threshold.
-2. Cumulative regret is sublinear (fit `log(regret)` vs `log(t)`, slope < 1).
-3. **Non-stationary variant** — decay `p_best` toward zero partway through
-   (coverage saturation, which is the actual regime) and assert the scheduler
-   re-converges to the new best arm within a bounded number of rounds. Most
-   bandits fail here, and this is where the Elo arbitration layer's behaviour
-   becomes testable.
-4. Run all ten under the same environment and assert their ranking is stable
-   across seeds — otherwise the Elo arbitration is ranking noise.
-
-**The reason this matters more than the assertion itself.** matklad's ARR fuzzer
-did not find a coding bug; it found that his *cost function* was wrong (median +
-maximum, missing the sum term), and then that his mental model of what the
-latencies even measured was wrong. Your equivalent latent risk is the reward
-definition: `record(name, success: bool, weight: float)` attributes a coverage
-find to a single operator name, but havoc stacks operators, and
-`test_regression_elo_op_attribution.py` suggests attribution has already been
-contested once. A ground-truth harness is the only way to discover that the
-reward signal is measuring something other than what the scheduler assumes.
-
-Quote worth pinning above this work: *"Don't write fuzzers to find bugs in the
-code, write fuzzers to find bugs in your understanding of the problem."*
-
----
-
 ## P1-4 — The minimal-interface argument, with numbers
 
 matklad: pass `op: u64`, not the whole `Prepare`. Injecting the whole `Replica`
@@ -263,95 +195,6 @@ divisor cache. That is exactly the right pattern. Extend it: `_havoc_table`,
 `_havoc_trials`, `_elite_pool_corpus_len`, `_redqueen_sorted_version`,
 `_region_cache`, and `_invariants_corpus_len` are all derived caches of corpus
 state whose staleness would be silent. Each deserves a line in `_invariants()`.
-
----
-
-## P1-5 — Exhaustive enumeration through the PRNG interface ("Generate All The Things")
-
-**Current state.** `core/rand_pool.py` is already the required abstraction — a
-single `RandPool` class with `randrange(n)`, `randint(a, b)`, `choice(seq)`,
-`weighted_choice(seq, w)`, `shuffle`, `sample`. Every draw has an explicit bound.
-And `MutatorBase.mutate(data, rng, ...)` already takes it as a parameter. You are
-one class away from matklad's trick.
-
-**Port.** Implement `ExhaustivePool` with the same method names, backed by his
-`Gen` state machine (`v[32]` of `(value, bound)`, `done()`, `p`/`p_max`). Then:
-
-```python
-gen = ExhaustivePool()
-while not gen.done():
-    out = engine._op_bit_offset_span(bytearray(b"\x00\x01\x02\x03"), 0, data)
-    assert out is None or len(out) <= max_len
-```
-
-...and you have enumerated *every* output that operator can produce on a 4-byte
-buffer, with no recursion written by hand.
-
-**Two honest caveats specific to your `RandPool`:**
-
-1. Its API is much larger than Zig's `int_inclusive`. `random()`, `gauss`,
-   `expovariate`, `betavariate`, `gammavariate`, `lognormvariate` are continuous
-   and **cannot** be enumerated. Split the interface: a *discrete core* (the six
-   bounded methods) that `ExhaustivePool` implements, and a continuous extension
-   it raises on. Operators drawing continuous values are simply out of scope for
-   exhaustive mode — that is fine and worth stating in the docstring rather than
-   papering over.
-2. The `_list` bulk variants (`randrange_list`, `randbytes`, `randint_list`,
-   `choice_list`) blow up the enumeration tree combinatorially. Cap them, or
-   restrict exhaustive mode to operators that only draw scalars.
-
-**Bonus, cheap and immediate.** `core/count_class.py` is a small finite space
-that is currently under-tested. `tests/test_count_class.py` asserts
-`len(table) == 65536` three times but never verifies the table's *contents*
-against the scalar `_classify_byte` reference. A four-line exhaustive sweep
-subsumes ~20 hand-written range tests:
-
-```python
-for v in range(65536):
-    lo, hi = v & 0xFF, v >> 8
-    assert LOOKUP_U16[v] == _classify_byte(lo) | (_classify_byte(hi) << 8)
-```
-
-Same for `bucket_bit` over 0..255, and a differential exhaustive check of the
-numpy `classify_counts` path against the pure-Python path across all 256 byte
-values and both parities of buffer length. That numpy/scalar divergence is
-exactly the failure mode `test_regression_hotpath_invariants.py` was written to
-guard against elsewhere.
-
----
-
-## P2-6 — Negative space for the deserializers: `serialize ∘ deserialize`
-
-matklad's split — `deserialize ∘ serialize == id` is positive space,
-`serialize ∘ deserialize` is negative space — with the crucial refinement that
-*purely random inputs bounce off the edges*. You must generate mostly-valid data
-with a corrupted bit.
-
-**Highest-value target: `core/state_store.py`.** `_SafeUnpickler.find_class` +
-`_safe_loads` + `UnsafeStateError` is a restricted unpickler over on-disk state,
-with a legacy JSON fallback path. It is the one deserializer in the repo with a
-security-relevant allowlist and the one where "silently misinterpret valid data"
-is worst. matklad's argument for offensive programming applies directly: the
-call sites should assert loudly rather than fall back quietly.
-
-Port his three-tier generator shape verbatim:
-
-```python
-raw = valid_pickle_bytes(state)           # start from a real serialization
-if prng.chance(1, 20):
-    raw = flip_one_bit(raw)               # hug the valid/invalid boundary
-if prng.chance(1, 20):
-    raw = prng.randbytes(len(raw))        # ...but keep some pure noise
-# Contract: loads, or raises UnsafeStateError. Nothing else. Never executes.
-```
-
-Then count and assert both outcomes occur, per P0-2.
-
-Same treatment, descending priority: `field_constraints._pack/_unpack` (:115,
-:119), `structural_constraints.serialize_tlv` (:407), the nine `encode` methods
-in `rq_encodings.py`, `grammar.serialize` (:396), `elf._decode_x86_64` (:128).
-`docs/learnings/2026-08-10-structured-roundtrip-determinism.md` shows you have
-been round-tripping already — this is the missing inverse direction.
 
 ---
 
@@ -453,12 +296,13 @@ the algorithm.
 
 ## Suggested sequence
 
-1. P0-1 seed plugin (half a day, unblocks everything else).
-2. P2-6 `count_class` exhaustive sweep (an hour, proves the pattern, deletes ~20 tests).
-3. P1-3 scheduler convergence harness (the highest-value item; likely to change
-   your mind about something, which is the point).
-4. P1-4 `MutationContext` extraction — but do the `mutator_interface.py` `**ctx`
-   fix *first* and separately, before it accretes users.
-5. P1-5 `ExhaustivePool` on the discrete core, pointed at the byte-level operators.
-6. P0-2 distribution assertions retrofitted as each of the above lands.
-7. P2-7 / P2-8 as follow-on.
+1. P1-4 `MutationContext` extraction in `operators.py` — the `mutator_interface.py`
+   `**ctx` fix is already done and was deliberately done first, before it
+   accreted users.
+2. P0-2 distribution assertions, retrofitted onto the operator registry and
+   cmplog as other work touches them.
+3. P0-1's remaining ~250 hardcoded seed literals, if and when they cost
+   something.
+4. P2-7 / P2-8 as follow-on.
+5. `parallel.py` measure-don't-model — the one genuine algorithmic port here,
+   and independent of the rest.

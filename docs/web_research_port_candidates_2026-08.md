@@ -18,29 +18,19 @@ Effort estimates are guesses until a per-item audit happens against live code.
 
 ## Status
 
-**2026-08-24**: Items #1, #2, #3 landed (see `docs/TODO.md` Scheduling section). #3
-(`cluster_crashes`) already existed in `core/crash_metadata.py` but was dead code —
-it is now wired into `services/report.py::_crash_signatures`. #4–7 remain: #4/#5
-require `afl_shim.c` changes (excluded from this pass); #6/#7 are `L` effort
-needing new feedback plumbing, not yet started.
+Tier 1 is closed and is pruned from this file. #1 autotokens, #2 entropic power
+schedule, #3 stack-hash crash clustering and #8 subtree-population crossover
+landed 2026-08-24; #4 trace-div/trace-gep and #5 n-gram edge coverage shipped
+afterwards (`afl_shim.c` layer 3, and `__AFL_NGRAM_K` — see
+`docs/ngram_coverage_plan.md`); #6 Zest validity channel and #7 SGFuzz enum
+states shipped as mechanism (`--reject-code`, `__sfuzz_state`) but each left an
+open design question, and those two questions — and only those two — are now
+tracked in `docs/TODO.md` under Scheduling rather than here.
 
-**2026-08-24 (later)**: #8 (Subtree-population crossover) landed. `TreeMutator`
-already documented a "subtree splice" op that was never implemented; added
-`SubtreePopulation` (bounded reservoir per rule name) and `_tree_splice`,
-wired into `mutate_tree` and incrementally populated from the corpus in
-`services/operators.py::_op_grammar_tree_mutate`.
-
-### Tier 1 — quick wins
-
-| # | Candidate | Source | Mechanism | Lands in | Effort |
-|---|---|---|---|---|---|
-| 1 | autotokens (✅ landed 2026-08-24) | AFL++ | Tokenize ASCII corpus into whole-token dictionary entries; no grammar needed | `import_corpus.py::build_autotoken_dictionary`/`extract_tokens`, `import --autotokens` | Trivial |
-| 2 | Entropic power schedule (✅ landed 2026-08-24) | libFuzzer `-entropic` | Energy ∝ log(rare-feature count), updated from feature-frequency histograms we already collect | `SeedScorer._entropic_factor` (`schedules.py`), `--schedule entropic` | Trivial |
-| 3 | Stack-hash crash clustering (✅ landed 2026-08-24) | ClusterFuzz; CASR/LibCASR (embeddable Python API, maintained 2024–25) | Exact-match then LCS-distance stack similarity + hierarchical clustering over ASAN replay output | `report.py::_crash_signatures` now calls the pre-existing `core/crash_metadata.py::cluster_crashes` | Trivial–L |
-| 4 | trace-div / trace-gep | clang `-fsanitize-coverage=trace-div,trace-gep` | Callbacks carry every non-constant divisor/GEP index — dynamic operand feedback complementing static DIV extraction | cmplog-style handlers in `afl_shim.c` plumbing | L |
-| 5 | N-gram edge coverage | AFL++ (`AFL_NGRAM_ENV`, RAID'19) | Hash last-N executed edges into the map key; separates deep parser states that collide under lone-edge hashing | map-update arithmetic in `afl_shim.c` (CTX already default-on; n-gram is the missing sibling) | L |
-| 6 | Zest validity channel | Zest/JQF (ISSTA'19) | Input *validity* (parser acceptance rate) as second fitness channel alongside coverage; saves valid-and-new inputs to steer past syntax checks into semantic stages | outcome recording in `runner.py`/`fuzzer.py` + scheduler feature | L |
-| 7 | SGFuzz enum-state variables | SGFuzz (USENIX Sec '22) | Regex/AST-extract enum-typed state variables, instrument assignments, runtime State Transition Tree as feedback; upstream ships a Python instrumentation script; composes with Markov generation | new instrumentation pass + feedback feature | L |
+Everything below is Tier 2 and Tier 3, none of it started. The effort estimates
+are still guesses: they were made from the sources alone, and no per-item audit
+against live code has happened for these rows. Tier 1 is the warning — two of
+its seven rows turned out to be things the tree could already nearly do.
 
 ### Tier 2 — medium effort, high value
 
@@ -87,7 +77,7 @@ wired into `mutate_tree` and incrementally populated from the corpus in
   GPU; SeedMind <$0.5/harness — cost-effective without API dependence.
 - **Crash-count ground truth (Igor)**: coverage-profile dedup inflates bug
   counts 2–3 orders of magnitude; stack hashes 1–2 orders; LCS-based
-  clustering (#3) is the cheapest accuracy upgrade.
+  clustering (Tier 1 #3, shipped) is the cheapest accuracy upgrade.
 
 ## Excluded after review
 

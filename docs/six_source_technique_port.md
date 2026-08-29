@@ -24,24 +24,34 @@ source proposed. That is the same failure mode the TODO/bugreport audits keep
 finding, except here the stale document was the one being written, before it was
 ever committed.
 
-The status table below is the useful part of this file. The prose that follows
-is only for the items that survived.
+The already-implemented items are pruned to a one-line list under Status. The
+prose that follows covers only the items that survived.
 
 ## Status
 
+The drafted items the audit found already covered by the tree are pruned from
+this file — operator validation harness (`tools/measure_operators.py`),
+statistical A/B harness (`tools/bench_paired.py`, McNemar exact on discordant
+pairs, which is the correct test for a paired design and better than the
+source's unpaired Mann-Whitney), candidate enumeration before selection
+(`REGISTRY.available` / `OperatorEngine.build_ops`), crash-site triage
+(`core/trace.py`), differential trace alignment (`core/root_cause.py`,
+byte-level rather than trace-level but the same question), grammar-aware
+mutation (`core/grammar.py`, `core/tree_mutator.py`), post-mutation repair
+(`core/checksum_learner.py`, `core/int_checksum.py`, `core/crc32.py`,
+`core/field_constraints.py`, `core/structural_constraints.py`), depth-prioritized
+energy (`core/cfg.py` + `core/distance.py`, real static distance beating
+PowerFuzz's inferred-depth proxy), and novelty signal (PPMD seed novelty,
+honggfuzz power factors, per-edge max hit count). Listed by name only so nobody
+re-surveys them; the per-item justification is in git history.
+
+Four of them left a narrow residue that is NOT covered — see R5. Of what
+remains, two items are demoted rather than queued (NG5, NG6).
+
 | item | source | state |
 |---|---|---|
-| Operator validation harness | A | **already done, better.** `tools/measure_operators.py` reports avail%/change%/err%/dlen/us-per-call per operator against a synthetic battery or a real corpus, and explicitly separates "offered" from "changed the buffer" — the no-op metric. It already caught the `byte_shuffle` no-op (fixed in `f4835f6`). The source's version only classifies compiler error categories. |
-| Statistical A/B harness | B | **already done, better.** `tools/bench_paired.py` runs arms over a frozen `(target, seed)` matrix and tests with **McNemar's exact test on discordant pairs**, which is the correct test for a paired design. The source uses Mann-Whitney U on unpaired final coverage. My initial recommendation of Mann-Whitney was wrong for this harness — it throws away the pairing, and `bench_paired.py` already reports an unpaired Fisher only for comparison. |
-| Candidate enumeration before selection | B | **already done.** `REGISTRY.available(fuzzer, data)` returns the applicable operator list and `OperatorEngine.build_ops(data)` consumes it, so selection is already enumerate-then-choose at the top level. The source's `mutatis` two-phase design is our existing architecture. **Narrow residue below.** |
-| Crash-site triage / dedup | A | **mostly done.** `core/trace.py` does GDB backtrace + registers + disassembly per crash; `services/report.py` handles reporting. **Residue below:** message normalization and cross-worker grouping. |
-| Differential trace alignment | E | **already done, differently.** `core/root_cause.py` Levenshtein-aligns a crashing input against a known-good baseline and isolates the minimal responsible edit. Byte-level rather than trace-level, but the same question. |
-| Grammar-aware mutation | A | **partly done.** `core/grammar.py` (own S-expression grammar format) and `core/tree_mutator.py` (Radamsa `sed-tree-*` port, delimiter-inferred, no grammar needed). **Residue below:** the tree-sitter ecosystem and the type-indexed corpus bank. |
-| Post-mutation repair ("fixup") | B | **partly done.** `core/checksum_learner.py`, `core/int_checksum.py`, `core/crc32.py`, `core/field_constraints.py`, `core/structural_constraints.py`. Repair exists per-format and per-operator; it is not a stage. **Residue below.** |
-| Depth-prioritized energy | E | **already done, better.** `core/cfg.py` builds real intra-procedural CFGs from the in-tree x86-64 decoder for AFLGo-style distance (`core/distance.py`, `tools/gen_distance_table.py`). Static distance to a target dominates PowerFuzz's inferred-depth proxy. |
-| Novelty signal | E | **already done, several ways.** PPMD seed novelty (`services/seed_picker.py:530`), honggfuzz power factors, and `2f848aa`'s per-edge max hit count. **Residue below:** a campaign-level *rate*, which is a metric not a signal. |
 | Component-set bisect | C | **not started.** Genuinely absent — the only `bisect` in `services/fuzzer.py` is the stdlib CDF lookup in the havoc sub-op table. |
-| Invariant-violation feedback | D | **not started.** The nearest thing is the operator invariant audit in `docs/TODO.md:86`, which is about our operators, not the target's registers. |
+| Invariant-violation feedback | D | **not started.** The nearest thing is the operator invariant audit in `docs/TODO.md`, which is about our operators, not the target's registers. |
 | Ordered edge trace / path-prefix tree | E | **not started**, and mostly not wanted. See NG5. |
 | Identifier canonicalization | A | **not started.** Cheap. |
 | `cycle_lock` operator | G | **not started.** Cheap. |
