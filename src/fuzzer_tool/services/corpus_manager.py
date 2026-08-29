@@ -352,70 +352,88 @@ class CorpusManager:
     def save_crash(self, data: bytes, returncode: int, stderr: str) -> str | None:
         f = self.f
         from fuzzer_tool.adapters.filesystem import (
+            classify_crash,
             hash_data,
             save_crashing_seed,
         )
         from fuzzer_tool.core.crash_metadata import CrashMetadata, find_nearest_corpus
 
-        # Preserve the crashing input as corpus material before anything else:
-        # stored under seeds/crashing/ and marked irreplaceable so no pruning
-        # path can drop it. Runs for every crash exec; the writer dedups to a
-        # stat() for repeats of the same input.
+        fault_addr = getattr(f, "_last_fault_addr", None)
+
+        # Decide FIRST whether this crash is one we will keep. Enrichment below
+        # (nearest-corpus search over the whole corpus, GDB replay, target
+        # hashing) costs from tens of milliseconds to a second per call, and
+        # save_crash() throws all of it away for a crash whose signature is
+        # already on disk. Crashes are rare only until the first bug is found;
+        # after that every mutation of the crashing seed lands here, so paying
+        # triage cost per crashing execution collapses throughput exactly when
+        # the fuzzer is producing results.
+        verdict = classify_crash(
+            data,
+            returncode,
+            stderr,
+            f.crash_hashes,
+            f.crash_sigs,
+            fault_addr=fault_addr,
+            crash_blocklist=f.crash_blocklist if f.crash_blocklist else None,
+            crash_allowlist=f.crash_allowlist if f.crash_allowlist else None,
+        )
+
+        # Preserve the crashing input as corpus material: stored under
+        # seeds/crashing/ and marked irreplaceable so no pruning path can drop
+        # it. Runs for every crash exec; the writer dedups to a stat() for
+        # repeats of the same input.
         if f.corpus_dir:
             save_crashing_seed(data, f.corpus_dir, f.seen_hashes, f.irreplaceable_hashes, f.bloom)
 
-        meta = CrashMetadata()
-        meta.exec_count = f.exec_count
-        meta.corpus_size = len(f.corpus)
-        meta.target = f.target
-        meta.mutation_ops = list(f._last_ops_used)
-        meta.parent_sites = [s for _, s in getattr(f, "_last_ops_with_sites", [])]
-        meta.elapsed = f._stats.format_elapsed()
+        report = verdict.report
+        if report and report.is_valid() and verdict.signature not in f.crash_frames:
+            f.crash_frames[verdict.signature] = report.frames
 
-        if f.corpus:
-            parent = f._last_parent_seed if hasattr(f, "_last_parent_seed") else None
-            if parent:
-                meta.parent_seed_hash = hash_data(parent)
+        meta: CrashMetadata | None = None
+        if verdict.novel:
+            meta = CrashMetadata()
+            meta.exec_count = f.exec_count
+            meta.corpus_size = len(f.corpus)
+            meta.target = f.target
+            meta.mutation_ops = list(f._last_ops_used)
+            meta.parent_sites = [s for _, s in getattr(f, "_last_ops_with_sites", [])]
+            meta.elapsed = f._stats.format_elapsed()
 
-        if not hasattr(f, "_target_sha256"):
-            try:
-                f._target_sha256 = hashlib.sha256(Path(f.target).read_bytes()).hexdigest()[:16]
-            except Exception:
-                f._target_sha256 = "unknown"
-        meta.target_sha256 = f._target_sha256
+            if f.corpus:
+                parent = f._last_parent_seed if hasattr(f, "_last_parent_seed") else None
+                if parent:
+                    meta.parent_seed_hash = hash_data(parent)
 
-        if f.corpus:
-            label, sim, diffs, _ = find_nearest_corpus(data, f.corpus)
-            meta.nearest_corpus_file = label
-            meta.nearest_similarity = sim
-            meta.diff_bytes = diffs
+            if not hasattr(f, "_target_sha256"):
+                try:
+                    f._target_sha256 = hashlib.sha256(Path(f.target).read_bytes()).hexdigest()[:16]
+                except Exception:
+                    f._target_sha256 = "unknown"
+            meta.target_sha256 = f._target_sha256
 
-        if hasattr(f, "_last_regs") and (f.ptrace_cov or f._last_regs):
-            meta.rip = f._last_regs.get("rip", 0)
-            meta.rsp = f._last_regs.get("rsp", 0)
-            meta.rbp = f._last_regs.get("rbp", 0)
-        fault_addr = getattr(f, "_last_fault_addr", None)
-        if fault_addr is not None:
-            meta.fault_addr = f"0x{fault_addr:x}"
+            if f.corpus:
+                label, sim, diffs, _ = find_nearest_corpus(data, f.corpus)
+                meta.nearest_corpus_file = label
+                meta.nearest_similarity = sim
+                meta.diff_bytes = diffs
 
-        # Populate error_type from return code for subprocess/inprocess
-        # mode where ptrace isn't available and sanitizer reports are absent.
-        if not meta.error_type:
-            sig_name, sig_num = _returncode_to_signal(returncode)
-            if sig_name is not None:
-                meta.error_type = sig_name
+            if hasattr(f, "_last_regs") and (f.ptrace_cov or f._last_regs):
+                meta.rip = f._last_regs.get("rip", 0)
+                meta.rsp = f._last_regs.get("rsp", 0)
+                meta.rbp = f._last_regs.get("rbp", 0)
+            if fault_addr is not None:
+                meta.fault_addr = f"0x{fault_addr:x}"
 
-        from fuzzer_tool.core.sanitizer import SanitizerReport
+            # Populate error_type from return code for subprocess/inprocess
+            # mode where ptrace isn't available and sanitizer reports are absent.
+            if not meta.error_type:
+                sig_name, _sig_num = _returncode_to_signal(returncode)
+                if sig_name is not None:
+                    meta.error_type = sig_name
 
-        report = SanitizerReport.parse(stderr)
-        if report and report.is_valid():
-            sig = report.signature
-            if sig not in f.crash_frames:
-                f.crash_frames[sig] = report.frames
-        del report  # free SanitizerReport object
-
-        # Embed the GDB crash replay in the report sidecar (best-effort).
-        meta.gdb_replay = _gdb_crash_replay(f, data, returncode)
+            # Embed the GDB crash replay in the report sidecar (best-effort).
+            meta.gdb_replay = _gdb_crash_replay(f, data, returncode)
 
         return save_crash(
             data,
@@ -429,6 +447,7 @@ class CorpusManager:
             crash_blocklist=f.crash_blocklist if f.crash_blocklist else None,
             crash_allowlist=f.crash_allowlist if f.crash_allowlist else None,
             crash_min_sizes=f.crash_min_sizes if f.save_smaller else None,
+            verdict=verdict,
         )
 
     def save_to_corpus(self, data: bytes, parent: bytes | None = None):

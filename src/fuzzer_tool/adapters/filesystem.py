@@ -14,6 +14,7 @@ import json
 import os
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.crash_metadata import CrashMetadata
@@ -675,6 +676,110 @@ def save_crashing_seed(
     return is_new
 
 
+class CrashVerdict(NamedTuple):
+    """The dedup decision for one crashing execution, without side effects.
+
+    Attributes:
+        novel: True when this crash would be written to disk.
+        input_hash: Content hash of the crashing input.
+        signature: Crash signature derived from the sanitizer report, or
+            from the signal (plus fault address when known).
+        stack_hash: Stack hash from the sanitizer report, "" when absent.
+        report: The parsed sanitizer report, or None.
+        matched_signature: The already-known signature this crash folds
+            into (itself for an exact signature repeat, another signature
+            for a fuzzy match), or None.
+        blocked: True when the stack hash is blocklisted and not allowlisted.
+        duplicate_input: True when this exact input already crashed.
+    """
+
+    novel: bool
+    input_hash: str
+    signature: str
+    stack_hash: str
+    report: SanitizerReport | None
+    matched_signature: str | None
+    blocked: bool
+    duplicate_input: bool
+
+
+def classify_crash(
+    data: bytes,
+    returncode: int,
+    stderr: str,
+    crash_hashes: set[str],
+    crash_sigs: dict[str, int],
+    fault_addr: int | None = None,
+    crash_blocklist: set[str] | None = None,
+    crash_allowlist: set[str] | None = None,
+) -> CrashVerdict:
+    """Classify a crash against what is already known, recording nothing.
+
+    This is the dedup half of :func:`save_crash`, split out so a caller can
+    learn whether a crash is new *before* paying for triage enrichment.
+    Everything expensive about a crash (GDB replay, nearest-corpus search,
+    reproducer generation) is worth doing only for a crash that will be
+    written, and after the first bug is found the overwhelming majority of
+    crashing executions are repeats of a signature already on disk.
+
+    Pure: neither ``crash_hashes`` nor ``crash_sigs`` is mutated here.
+
+    Args:
+        data: Crashing input bytes.
+        returncode: Process return code.
+        stderr: Standard error output from the crashing run.
+        crash_hashes: Set of already-seen crash input hashes.
+        crash_sigs: Dict of signature -> count seen so far.
+        fault_addr: Optional faulting address (si_addr) from the ptrace
+            runner, folded into the fallback signature.
+        crash_blocklist: Set of stack hashes to skip (known crashes).
+        crash_allowlist: Set of stack hashes that override the blocklist.
+
+    Returns:
+        A :class:`CrashVerdict` describing the decision and the derived
+        signature material, so the caller need not re-parse the report.
+    """
+    h = hash_data(data)
+    report = SanitizerReport.parse(stderr)
+    if report and report.is_valid():
+        sig = report.signature
+    elif fault_addr is not None:
+        # Distinguish NULL-deref / wild-pointer / stack-overflow crashes that
+        # all share the same signal number but fault at different addresses.
+        sig = f"signal:{abs(returncode)}@{fault_addr:#x}"
+    else:
+        sig = f"signal:{abs(returncode)}"
+    stack_h = report.stack_hash() if report else ""
+
+    if h in crash_hashes:
+        return CrashVerdict(False, h, sig, stack_h, report, None, False, True)
+
+    # Blocklist check: skip crashes with known stack hashes unless allowlisted
+    if (
+        crash_blocklist
+        and stack_h
+        and stack_h in crash_blocklist
+        and stack_h not in (crash_allowlist or set())
+    ):
+        return CrashVerdict(False, h, sig, stack_h, report, None, True, False)
+
+    # Deduplicate by signature: skip if this crash signature was already seen.
+    if sig in crash_sigs:
+        return CrashVerdict(False, h, sig, stack_h, report, sig, False, False)
+
+    # Fuzzy matching groups crashes at the same function with different
+    # instruction offsets or inlined frames. Only sanitizer signatures are
+    # fuzzy-matched: normalize_frame() strips 0x-addresses and numbers, which
+    # is noise for ASAN sigs but IS the distinguishing signal for
+    # address-bearing fallback sigs like "signal:11@0xdead0000".
+    if report and report.is_valid() and "@" in sig:
+        for existing_sig in crash_sigs:
+            if crash_signature_similarity(sig, existing_sig) >= 0.8:
+                return CrashVerdict(False, h, sig, stack_h, report, existing_sig, False, False)
+
+    return CrashVerdict(True, h, sig, stack_h, report, None, False, False)
+
+
 def save_crash(
     data: bytes,
     returncode: int,
@@ -687,6 +792,7 @@ def save_crash(
     crash_allowlist: set[str] | None = None,
     crash_min_sizes: dict[str, int] | None = None,
     fault_addr: int | None = None,
+    verdict: CrashVerdict | None = None,
 ) -> bool:
     """Save crash input with enriched triage metadata.
 
@@ -715,51 +821,32 @@ def save_crash(
         Base name of saved files (e.g. "crash_1234567890_abc12345_sig_signal6"),
         or False if duplicate or filtered.
     """
-    h = hash_data(data)
-    if h in crash_hashes:
+    # The caller may already have classified this crash (see classify_crash)
+    # to decide whether triage enrichment was worth running; reuse its verdict
+    # rather than re-parsing the sanitizer report a second time.
+    v = (
+        verdict
+        if verdict is not None
+        else classify_crash(
+            data,
+            returncode,
+            stderr,
+            crash_hashes,
+            crash_sigs,
+            fault_addr=fault_addr,
+            crash_blocklist=crash_blocklist,
+            crash_allowlist=crash_allowlist,
+        )
+    )
+    h, sig, stack_h, report = v.input_hash, v.signature, v.stack_hash, v.report
+
+    if v.duplicate_input:
         return False
-
-    report = SanitizerReport.parse(stderr)
-    if report and report.is_valid():
-        sig = report.signature
-    elif fault_addr is not None:
-        # Distinguish NULL-deref / wild-pointer / stack-overflow crashes that
-        # all share the same signal number but fault at different addresses.
-        sig = f"signal:{abs(returncode)}@{fault_addr:#x}"
-    else:
-        sig = f"signal:{abs(returncode)}"
-
-    # Stack hash for blocklist/allowlist filtering
-    stack_h = report.stack_hash() if report else ""
-
-    # Blocklist check: skip crashes with known stack hashes unless allowlisted
-    if (
-        crash_blocklist
-        and stack_h
-        and stack_h in crash_blocklist
-        and stack_h not in (crash_allowlist or set())
-    ):
+    if not v.novel:
         crash_hashes.add(h)
-        crash_sigs[sig] = crash_sigs.get(sig, 0) + 1
+        counted = v.matched_signature or sig
+        crash_sigs[counted] = crash_sigs.get(counted, 0) + 1
         return False
-
-    # Deduplicate by signature: skip if this crash signature was already seen.
-    # Uses Levenshtein similarity for fuzzy matching — crashes at the same
-    # function with different instruction offsets or inlined frames are grouped.
-    # Only fuzzy-match sanitizer signatures: normalize_frame() strips 0x-addresses
-    # and numbers, which is noise for ASAN sigs but IS the distinguishing signal
-    # for address-bearing fallback sigs like "signal:11@0xdead0000".
-    if sig in crash_sigs:
-        crash_hashes.add(h)
-        crash_sigs[sig] += 1
-        return False
-
-    if report and report.is_valid() and "@" in sig:
-        for existing_sig in crash_sigs:
-            if crash_signature_similarity(sig, existing_sig) >= 0.8:
-                crash_hashes.add(h)
-                crash_sigs[existing_sig] += 1
-                return False
 
     crash_hashes.add(h)
     crash_sigs[sig] = 1
