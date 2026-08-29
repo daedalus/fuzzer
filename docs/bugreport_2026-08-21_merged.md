@@ -5,6 +5,12 @@ Consolidation of two independent read-only audits of the whole tree
 Findings found by both audits are marked **[corroborated]**; findings confirmed
 by execution or line-trace during the merge are marked **[verified]**.
 
+**Closed findings are pruned from this file.** What remains is open work only.
+Finding numbers are the ORIGINAL ones and are deliberately not renumbered, so
+the gaps are closed items and any reference to a number from a commit message,
+a learnings note or a source comment still resolves to the same finding in git
+history.
+
 Method: audit 1 — five parallel subsystem reviews (main loop, mutation engine,
 adapters/coverage, scheduler math, parsing/services) guided by
 `docs/refs/bug-classes.md`, cross-checked against callers. Audit 2 — six parallel
@@ -23,46 +29,6 @@ completeness (134/134), builtin `hash()` in persisted keys.
 
 ## TEST-SUITE EVIDENCE (dynamic)
 
-**E1. Plain `pytest` can hang forever — no timeout configured.** **FIXED 2026-08-22.**
-`tests/conftest.py` sets a 300s default via `pytest_configure`, and
-`pytest-timeout` is now a declared `dev` dependency. The method is `signal`, not
-`thread`: the thread method arms a `threading.Timer` per test, which makes the
-pytest process multi-threaded for the whole session and so makes every fork in
-E3 riskier. The Z3 modules — the ones that actually block in native code, where
-SIGALRM never lands — opt into `thread` individually via
-`pytest_collection_modifyitems`. Set programmatically rather than in `addopts`
-so a dev env without the plugin still runs.
-`tests/test_structural_constraints.py:295` wedged >9 min inside `solver.add()`
-(`core/structural_constraints.py:186`); Z3's `timeout` parameter bounds only
-`check()`, not assertion processing. SIGTERM could not kill it (stuck in native
-code); SIGKILL required. `pyproject.toml` has no pytest-timeout setting.
-**[verified]**
-
-**E2. Production code leaks `os.environ`; three tests fail as a result.**
-**FIXED 2026-08-22**, both halves. `CmplogCollector.restore_env()` undoes
-`setup_env_for_run()`'s `_CMPLOG_OUT`/`LD_PRELOAD` mutations from a snapshot
-taken before the *first* mutation (re-snapshotting would capture our own
-preload and make restore a no-op); wired into `stop()` and the end of
-`Fuzzer.run()`. `adapters/process.py:50` now distinguishes `None` (inherit)
-from `{}` (empty), so a caller asking for a scrubbed env gets one. An autouse
-`_env_isolation` fixture in `tests/conftest.py` restores the five leaked keys
-after every test, with `--env-leak-strict` to name the leaking test instead of
-quietly repairing it. Regression test `tests/test_regression_env_leak.py`.
-The `adapters/inprocess.py` / `stats.py` SHM-id writers are unchanged: still
-global, now contained at the test boundary rather than at the source.
-Probe-attributed leaks: `LD_PRELOAD=<cmplog shim>.so` + `_CMPLOG_OUT`
-(written with no restore at `core/cmplog.py:315-321`) and
-`__AFL_SHM_ID` / `__AFL_DIST_SHM_ID` / `AFL_MAP_SIZE` (`fuzzer.py:4417`,
-`stats.py:501`, `inprocess.py:237`). Consequences, all reproduced:
-- `test_asan_finds_heap_buffer_overflow` and
-  `test_asan_all_modes[default_subprocess]`: 101 execs at eps 337, **0 crashes**
-  (`shm: 0`, `map: 0.0%`) — every exec inherits the cmplog shim preload, which
-  conflicts with the ASAN runtime. Passes in isolation. **[verified]**
-- `test_process.py::TestCleanEnv::test_no_preload` fails via an aggravating
-  production bug: `adapters/process.py:50` uses `dict(env or os.environ)` — an
-  explicitly *empty* env dict is falsy, so callers asking for a scrubbed
-  environment silently get the full parent env. **[verified]**
-
 **E3. Fork-in-multithreaded-process hazard.** `persistent.py:72`,
 `runner.py:311`, inprocess loader call `os.fork()` while threads exist
 (CPython DeprecationWarning; deadlock risk). Also breaks
@@ -72,108 +38,13 @@ summary reprints the inner test name, so its `count(...) == 1` assertion sees 2.
 
 ---
 
-## CRITICAL
-
-1. **`adapters/persistent.py:61`** [corroborated, verified] — **FIXED
-   2026-08-21.** `libc.shmat()` without `restype=c_void_p`. Default ctypes
-   restype truncates the 64-bit address to 32 bits; `memmove` through the
-   truncated pointer segfaults or silently corrupts memory on first use of
-   `PersistentRunner`. Now routed through `adapters/libc_shm.py`; regression
-   test `tests/test_regression_shmat_restype.py`.
-
-2. **`cli/commands.py:297-304` + `services/parallel.py:216`** [verified] — **FIXED
-   2026-08-21** (`6f7a866`). `cmd_fuzz` passes `contextual*`/`lineage_backtrack` kwargs that
-   `run_parallel()` does not accept. Every `--jobs > 1` CLI run dies with
-   `TypeError` before spawning a worker; parallel fuzzing is unreachable from
-   the CLI.
-
-3. **`adapters/process.py:227` via `services/runner.py:228`** [corroborated] — **FIXED
-   2026-08-22.** All three halves: `run_target_fast` now takes `timeout` (forwarded
-   from `f.timeout` by `runner.py`), drains stderr concurrently via `poll()` instead
-   of after the reap, spawns into its own process group so the kill reaches
-   grandchildren, and returns the real pid on exception after killing and reaping the
-   child. Thread-free by design — a watchdog thread would re-open the multi-threaded
-   fork hazard (E3). Measured: no throughput cost (980 vs 989 eps, overlapping
-   ranges). Regression test `tests/test_regression_fast_path_timeout.py`.
-   Original text follows.
-   Default spawn-fallback path (`run_target_fast`) enforces **no timeout**
-   (`os.waitpid(pid, 0)`), returns `pid=0` on exception (crash attribution lost,
-   child leaked), and drains stderr only after reaping (64 KiB pipe deadlock).
-   One infinite-looping or chatty target hangs the campaign forever. Every other
-   backend honors `f.timeout`.
-
-4. **`services/minimize.py:27,140`** [corroborated, verified] — **FIXED
-   2026-08-21.** Second/third missing-restype `shmat`: truncated pointer fed to
-   `string_at` → segfault or garbage bitmaps driving greedy set-cover cmin.
-   Reference-correct site: `adapters/shm.py:88`. Both sites now use
-   `adapters/libc_shm.py`. Note #5 is independent and still open, so
-   `minimize -c` against an uninstrumented target still prunes the corpus.
-
-5. **`services/minimize.py:126-146`** [verified] — **FIXED 2026-08-21** (`c6fa0ce`): minimize now discovers sharded corpora and refuses to prune on an all-zero bitmap. Original text follows. — SHM failure or uninstrumented
-   target yields all-zero bitmaps; zero-bitmap files contribute no edges, so set
-   cover moves them to `pruned/`. Against an uninstrumented target the **entire
-   corpus** is pruned. Combined with #4, `minimize -c` is broken end-to-end on
-   x86-64.
-
 ## HIGH
 
-6. **`services/runner.py:395-464`** [corroborated, verified] — **FIXED
-   2026-08-23** (`7ba1054`): deadline expiry is now an explicit `timed_out`
-   flag rather than a return code reconstructed from the last consumed
-   wait status, and returns the `(-1, "timeout")` pair `is_timeout` tests
-   for (`fuzzer.py:3298`). The blind-`PTRACE_CONT` wait is a bounded poll
-   against the same deadline instead of a blocking `waitpid(pid, 0)`.
-   `tests/test_regression_ptrace_timeout.py` (6 tests). Original text
-   follows. — ptrace-mode
-   timeouts are never reported as timeouts. On deadline expiry `status` holds the
-   last consumed event: with ≥1 breakpoint handled, the post-loop
-   `waitpid(WNOHANG)` returns `(0,0)`, stale SIGTRAP status yields `rc=-5`
-   ("crash signal 5"); with none, the else-branch SIGKILLs and the SIGKILL death
-   status yields `rc=-9`. `is_timeout` (`rc==-1`) can never fire; slow inputs
-   flood `crashes/` and poison signature dedup. Additionally the post-deadline
-   blocking `waitpid(pid, 0)` after blind `PTRACE_CONT` can hang forever and
-   swallows fatal signals delivered at that point.
-
-7. **`core/rand_pool.py:146-157`** [verified empirically] — **FIXED 2026-08-21** (`3712812`): `randint` width-256 fast path adds the offset `a` back. Original text follows. — `randint(a,b)`
-   silently drops offset `a` when `b-a+1 == 256` (fast path returns
-   `self._m256_l[pos]` without `a + ...`). Verified: `randint(-128,127)` → zero
-   negative draws in 5000. Live call site: `operators.py:562`.
-
-8. **`core/grammar.py:726-790`** [corroborated, verified] — **FIXED 2026-08-21** (`3712812`): `hierarchical_shrink` returns `best` instead of None. Original text follows. —
-   `TreeMutator.hierarchical_shrink` has no `return best`; always returns None →
-   `TypeError` in `tmin.py:191`. Grammar-mode crash minimization fails 100%.
-
-9. **`core/schedules.py:227-229`** [verified] — **FIXED 2026-08-21** (`3712812`): COE skip returns floor energy, not `max_mult*100`. Original text follows. — COE power schedule inverted:
-   seeds that should be *skipped* (`coe_skip() == True`) receive max energy
-   (`max_mult * 100`). Exactly backwards.
-
-10. **`cli/commands.py` env/global state** [verified] — see E2/E3: import-time
+10. **`cli/commands.py` env/global state** [verified] — see E3: import-time
     signal handlers + child-killing atexit (`fuzzer.py:159-168`), unrestored
     `os.environ` writes across cmplog/fuzzer/stats/inprocess, fork-in-threaded
     process. Breaks test isolation, library reuse, and reproducibility
     simultaneously.
-
-11. **`services/fuzzer.py:1080-1086 et al.`** [verified] — **FIXED 2026-08-23.**
-    Both halves. `StateStore.start_empty()` marks the store loaded-and-empty so
-    `get()` cannot lazy-load; `Fuzzer.__init__` calls it on the non-resume
-    branch. Gating `load()` on `self.resume` had only DEFERRED the read to the
-    first `get()`, not prevented it — the lazy load in `get()` is wanted by the
-    standalone readers (`report.py`, `tmin.py`, `cli/commands.py`), so the opt-out
-    belongs at the fuzzing call site rather than in `get()`. The legacy-JSON
-    migration path was the same hazard by another route and is closed with it.
-    The GA restore and its banner moved out of the `if self._diff_target:` block
-    into `if self._ga_enabled:`, next to `ga.initialize()`, mirroring the QEA
-    block directly below. `tests/test_regression_fresh_run_state.py` (9 tests);
-    the GA half is asserted against `run()`'s AST, since which block a statement
-    sits in is exactly what was wrong and constructing a Fuzzer needs a built
-    target. Original text follows. — persisted component
-    state restored on *non-resume* runs: `StateStore.get()` lazy-loads
-    `state.pkl.gz` even without `--resume`, so a second "fresh" run inherits the
-    previous campaign's Markov model (skips retraining), Elo ratings, crash-MI
-    counters — poisoning A/B schedule comparisons. Related: GA restore nested
-    inside the differential block (`fuzzer.py:4840-4855`) →
-    `--differential-target` without `--ga` crashes at startup;
-    `--ga --resume` silently restarts GA.
 
 12. **`services/fuzzer.py:3369` (also :3795, :5061)** — multi-target mode reads
     per-run edges from `self.shm_cov` instead of the per-target segment in
@@ -186,36 +57,6 @@ summary reprints the inner test name, so its `count(...) == 1` assertion sees 2.
     target can never be stopped. First wild-pointer input under
     `--inprocess-direct` freezes the fuzzer permanently.
 
-14. **`adapters/persistent_loader.py:511-529`** [verified] — **FIXED 2026-08-21** (`3712812`): throughput watchdog stops the old process before `start()`. Original text follows. — slowdown watchdog
-    "restart" is a no-op: sets `_ready=False` then calls `start()`, which
-    early-returns because the old loader is alive-but-slow. All subsequent
-    `run_one` return `-2` forever, silently.
-
-15. **`services/parallel.py:199-213`** [corroborated, verified] — **FIXED
-    2026-08-23.** Both halves, plus two more found while fixing. `_sync_corpus_in`
-    now walks `<worker>/seeds/**/id_*` instead of listing the worker directory
-    non-recursively, and the index cursor is replaced by a per-sibling set of
-    consumed FILENAMES — seed names are content hashes, so their sort order is
-    unrelated to creation order and any insertion before the cursor was skipped
-    permanently. Because the filename IS the hash, a seed already held is now
-    skipped without being read. Also: `pruned/` is excluded, matching
-    `load_corpus` (re-importing a sibling's pruned entries would undo its
-    minimization); a worker no longer syncs from its own directory; and a
-    name/content hash mismatch is treated as a torn read from a sibling's
-    non-atomic write and retried next round rather than imported. Deltas are
-    deliberately not transferred — a delta names a parent hash the importing
-    worker may not hold. **Every test in `tests/test_parallel.py` and
-    `tests/test_parallel_unit.py` wrote seeds flat at the worker-dir top level,
-    a layout `save_to_corpus` has never produced**, so 14 passing tests
-    certified a transfer path that moved zero seeds; both files were rewritten
-    onto the shipping writer. Original text follows. — `-j N` corpus
-    sync has two defects: (a) it filters top-level *files*, but seeds live under
-    `seeds/<hh>/id_*` — zero seeds ever transfer, and the only top-level file,
-    `state.pkl.gz`, is imported as a garbage seed by every sibling worker;
-    (b) even once fixed, its index cursor over a `sorted()` listing of
-    hash-named files permanently skips any insertion sorting before the cursor.
-    Worker corpus sharing has never worked.
-
 16. **`core/transfer_entropy.py:84-105`** [verified empirically] — plug-in TE
     estimator reports ~2.6 bits for *independent* uniform byte streams (n=1500);
     no bias correction for context cardinality. `byte_to_edge_flow` /
@@ -225,55 +66,12 @@ summary reprints the inner test name, so its `count(...) == 1` assertion sees 2.
     inputs, so `byte_total == joint_crash` always; "MI" degenerates to position
     frequency × log₂(1/p_crash). Crash ETA and mutation targeting driven by noise.
 
-18. **`core/schedulers/monte_carlo.py:195-263`** [corroborated] — **FIXED
-    2026-08-23.** `_prev_op` is now advanced by `record()` alone, at the end,
-    unconditionally. Two defects in one: the sole assignment sat in `select_op`
-    *after* the early return taken whenever the matrix is empty, so it could
-    never run; and it assigned the operator being SELECTED, so had it run,
-    `record()` for that same operator would have hit the `_prev_op != name`
-    guard. Measured on a harness where the reward exists only on a specific
-    transition (`b` pays only after `a`), 8 seeds x 3000 steps:
-    `pairwise_blend=0.6` scores 83.0 mean vs 64.2 for pure Thompson — before the
-    fix the two configurations were bit-identical, since the blend branch was
-    unreachable. Note the residual limitation, not a defect: only successful
-    transitions are counted and the unconditional arm posterior still punishes
-    a setup move that never pays off on its own, so a required predecessor stays
-    under-selected. `tests/test_regression_pairwise_bootstrap.py` (6 tests).
-    **All nine pairwise tests in `tests/test_montecarlo.py` assign `mc._prev_op`
-    by hand before calling `record()`**, pre-loading exactly the internal state
-    the production path cannot reach; they are left in place as unit tests of
-    `record()`, with the new file driving the public interface only. Original
-    text follows. — pairwise
-    transition tracking can never bootstrap: `record()` needs `_prev_op`, which
-    only `select_op()` sets inside the branch requiring non-empty transitions.
-    Blending/stationary/spectral_gap dead on fresh runs.
-
-19. **`adapters/shm.py:313` + `adapters/afl_shim.c:810-815`** — **FIXED
-    2026-08-23** (`189e387`): `ShmCoverage.reset_edge_map()` wipes the edge
-    table when the tag returns to 0. The wipe already existed in
-    `__afl_map_reset()` with the same reasoning, but that function still
-    has no callers, so it sat on a dead path while the live reset is the
-    Python one; fixing it there also keeps a single writer of the header.
-    Reproduced first (edge read as live again at exactly N = 256, 512),
-    and `tests/test_regression_generation_wrap.py` (5 tests) asserts the
-    aliasing period rather than "no ghosts eventually". Original text
-    follows. — generation tag
-    wraps at 256 execs; the anti-wrap table wipe exists in C
-    (`__afl_map_reset`) but has **zero callers**, so ghost edges from 256 execs
-    ago re-enter the live set every wrap.
-
 20. **`adapters/inprocess.py:513-595` + `runner.py:154`** — `direct_lite`
     (hardcoded-on default) never resets SHM between iterations → every exec
     reports the cumulative union of all prior coverage; per-exec attribution and
     stability calibration meaningless. Compounded by `inprocess.py:391-414`
     memsetting entry-*count* as bytes (wipes header + ⅛ of table, forcing
     generation to 0 so stale entries look current).
-
-21. **`services/fuzzer.py:3224`** [verified] — **FIXED 2026-08-21** (`3712812`): `rc == -1` is treated as a timeout regardless of stderr text. Original text follows. — `is_timeout = rc==-1 and
-    stderr=="timeout"` matches only some backends: forkserver (the default)
-    returns `(-1,"")`, the C loader reports `RC -1 <n>` with target stderr.
-    Default-run hangs are never counted; honggfuzz timeout penalty inert; under
-    `--metropolis` hung inputs eligible for corpus admission.
 
 22. **`services/fuzzer.py:3751,3756` + `stats_reporter.py:66-85`** [verified] —
     crash-replay keys use `crash_sigs.get(crash_name, crash_name)` (signature
@@ -318,44 +116,6 @@ summary reprints the inner test name, so its `count(...) == 1` assertion sees 2.
     covers `width-1` bytes of a `width`-byte field (stale top byte retained) and
     the max_len guard compares the wrong expression.
 
-30. **`qea.py:267,361` + `monte_carlo.py:778,895`** [verified] — **FIXED
-    2026-08-22.** `Fuzzer._seed_global_numpy()` seeds the legacy global
-    `np.random` state from `__init__` (next to `random.seed`) and from
-    `_reseed_after_stall`, folding wider seeds into `[0, 2**32)`. The
-    stall-reseed docstring's claim that `np.random` backs `RandPool` was false
-    and is corrected — `RandPool` owns an independent `default_rng`, which is
-    precisely why the global went unseeded. Regression test
-    `tests/test_regression_numpy_global_seed.py` (10 tests) asserts draw-sequence
-    reproducibility, not that a seeding call was made. Original text follows. — global numpy
-    RNG never seeded anywhere in `src/` → `--seed` reproducibility broken
-    whenever QEA is active; stall-reseed docstring falsely claims `np.random`
-    backs RandPool.
-
-31. **`services/differential.py:78`** [verified] — **FIXED 2026-08-22.** The
-    branch now sets `diverged = True`, but only when neither side produced a
-    valid sanitizer report: when both crashed with the SAME `error_type` the
-    branches above have already adjudicated them as matching, and their stderr
-    still differs every run by allocation addresses, pids and thread ids —
-    flagging on that would report a divergence for every identical crash pair.
-    `tests/test_differential.py::test_different_stderr` ASSERTED THE BUG
-    (`assert not diverged  # stderr differs but not diverged`, written from
-    observed output rather than the documented contract) and is corrected in the
-    same commit — same shape as the `test_hex_escape` case in docs/TODO.md.
-    Regression test `tests/test_regression_stderr_divergence.py` (11 tests).
-    Original text follows. — stderr divergence appends a
-    reason but never sets `diverged=True`; documented contract says stderr must
-    match. (Supersedes an earlier audit note that cleared this file.)
-
-32. **`services/report.py:763,770`** [verified] — **FIXED 2026-08-22.**
-    `_crash_analysis` filters on `CRASH_INPUT_SUFFIX` (`.bin`), the extension
-    `save_crash` gives the input; `.txt`/`.sh`/`.hex` are sidecars. This also
-    repaired the size histogram and the sample list, which were being fed
-    sidecar TEXT as though it were crash input — the count was the visible
-    symptom, not the whole defect. Regression tests in
-    `tests/test_regression_crash_count_and_rss.py`. Original text follows. — crash counting iterates all
-    files in `crashes_dir`; `.txt/.sh/.hex` sidecars + sanitizer JSONs inflate
-    "Total crashes" ~4-5×.
-
 33. **`adapters/filesystem.py:608-627`** — a blocklisted crash poisons its coarse
     signature in dedup state; a different later crash sharing only the top-frame
     signature is silently discarded without being saved.
@@ -368,13 +128,6 @@ summary reprints the inner test name, so its `count(...) == 1` assertion sees 2.
 35. **`adapters/fuzz_loader.c:595-611`** — timeout longjmps out of the target
     mid-execution (locks/state possibly held) yet keeps serving RUNs from the
     poisoned process; AFL++ respawns workers here.
-
-36. **`adapters/persistent.py:136-161`** [corroborated] — **FIXED 2026-08-24.**
-    `run_one` now sends `SIGCONT` right after reading the return code from the
-    `SIGSTOP` branch. Original text follows. — protocol never sends
-    SIGCONT per its own docstring; after the first `run_one` the target stays
-    SIGSTOPped, every later iteration times out and SIGKILLs it — persistent
-    mode is single-shot.
 
 37. **`adapters/persistent_loader.py:80`** [corroborated] — **STALE ENTRY, NOT A
     BUG as of 2026-08-22.** Verified against the code, not against commit
@@ -394,10 +147,6 @@ summary reprints the inner test name, so its `count(...) == 1` assertion sees 2.
 
 39. **`fuzzer.py:776,5093`** [verified] — `_last_new_edge_exec` not restored on
     `--resume` → every resume immediately false-triggers stall recovery.
-
-40. **`runner.py:584`** [verified] — **FIXED 2026-08-21** (`3712812`): `is_interesting` excludes rc `-2` as infrastructure, like `-1`. Original text follows. — `is_interesting` treats rc `-2`
-    (infrastructure/exec-failure sentinel) as discovery → junk corpus entries
-    with phantom coverage credit (`is_crash` correctly excludes it).
 
 41. **`core/kalman.py:370-388`** [verified] — RobustKF computes adaptive `_r_eff`
     but never feeds it into filtering; advertised self-tuning measurement noise
@@ -474,71 +223,16 @@ summary reprints the inner test name, so its `count(...) == 1` assertion sees 2.
     silently disabling DWARF resolution for all later valid CUs. (One audit
     cleared DWARF generally; this specific path was line-verified by the other.)
 
-56. **`seed_picker.py:206,391,840-861,886-926`** [verified] — **FIXED
-    2026-08-24** (`seed_picker.py:391` only): the generic-format fallback now
-    clamps the lower bound with `min(4, f.max_len)` instead of a bare `4`, so
-    `--max-len < 4` no longer raises `ValueError`. The remaining sub-findings
-    (Pareto sweep, global-`random` sampling, stale front cache) are unrelated
-    and still open. Regression test
-    `tests/test_regression_bugreport_easy_fixes.py::TestSeedPickerGenericSeedShortMaxLen`.
-    Original text follows. — `randint(4,
-    min(64, max_len))` raises ValueError with `--max-len < 4` and empty corpus;
-    3-D Pareto sweep excludes genuinely non-dominated seeds (running maxima from
-    different items); Pareto sampling uses global `random` (breaks seeded
-    reproducibility); front cache keyed on `len(corpus)` goes stale after
-    in-place trim.
-
-57. **`import_corpus.py:196-213`** [corroborated] — **FIXED 2026-08-22.**
-    `--format` now defaults to None so argparse can distinguish "unspecified"
-    from an explicit `--format afl`, and detection moved into
-    `_detect_source_format()`, checked most-specific-first (honggfuzz markers,
-    then AFL `queue/`/`fuzzer_stats`, then flat = libFuzzer) because an AFL
-    output tree also has top-level files and would otherwise look like a
-    libFuzzer corpus. Regression tests in
-    `tests/test_regression_crash_count_and_rss.py`. Original text follows. — format auto-detect is dead
-    code (`args.format == "afl" or …` always true on default); libFuzzer corpora
-    import 0 seeds with a success message.
-
-58. **`generic.py:1498` + `grammar.py:204,218`** [verified] — **FIXED
-    2026-08-24** (partial): the two RNG-leak sites the audit actually pointed
-    at are fixed — `radamsa_mutate_num`'s op==9 sign draw now uses the
-    injected `rng` instead of module-global `random`
-    (`core/mutations/generic.py:1858`), and `Grammar._expand_rule`/
-    `_expand_tokens` now honor `self._rng` (set by `mutate()`) instead of
-    always drawing from the global `random` module
-    (`core/grammar.py:277,291`). Regression tests in
-    `tests/test_regression_bugreport_easy_fixes.py`
-    (`TestRadamsaMutateNumInjectedRng`, `TestGrammarGenerateUsesInjectedRng`).
-    Original text follows. — radamsa_num draws
-    from module-global `random` despite injected RNG plumbing (~1/10 of draws
-    break `-s` reproducibility); same leak in grammar versifier paths.
-
-59. **`fuzzer.py:2667-2680`** [verified] — **FIXED 2026-08-22.** New module-level
-    `_current_rss_kb()` reads resident pages from `/proc/self/statm` and converts
-    via `SC_PAGE_SIZE`, returning None (check skipped) when /proc is unreadable
-    or unparseable. The docstring claiming `getrusage` reports current RSS is
-    corrected. Regression tests in `tests/test_regression_crash_count_and_rss.py`
-    include a falsification that allocates and frees 200 MiB and asserts the
-    reading drops back BELOW `ru_maxrss`. Original text follows. — memory prune keyed off peak RSS
-    (`ru_maxrss`, monotonic) labeled as current RSS → pruner arms forever after
-    one spike; warning prints stale numbers as current usage.
+56. **`seed_picker.py:206,840-861,886-926`** [verified] — three sub-findings,
+    all open (the `randint(4, min(64, max_len))` half was fixed 2026-08-24 and
+    is pruned): the 3-D Pareto sweep excludes genuinely non-dominated seeds
+    (running maxima taken from different items); Pareto sampling uses global
+    `random`, breaking seeded reproducibility; the front cache is keyed on
+    `len(corpus)` and goes stale after an in-place trim.
 
 60. **`fuzzer.py:2318-2329`** [verified] — `_check_differential` discards
     computed results and records hardcoded zeros; drift stats meaningless
     whenever `--differential-target` is used.
-
-61. **`fuzzer.py:4785-5122`** [verified] — **FIXED 2026-08-22.** `run()` now
-    also catches `Exception`, logs the traceback via `log.exception` (loud, not
-    swallowed — Hard Rule 20) and sets `_aborted_by_error`, so every
-    `_state_store.set`, both `_save_state` calls and the ablation fd close below
-    the try are reached. The end-of-run summary says "aborted by an unexpected
-    error" rather than "stopped" so an aborted run is not mistaken for a clean
-    one. `BaseException` deliberately still propagates. Regression test
-    `tests/test_regression_end_of_run_persistence.py` (10 tests). Original text
-    follows. — main loop catches only
-    `(KeyboardInterrupt, SystemExit, OSError)`; any other exception skips all
-    end-of-run persistence (`_dump_stats`, every `_state_store.set`, both
-    `_save_state`) and leaks the ablation fd — hours of campaign state lost.
 
 62. **`fuzzer.py:2593-2612 vs :3756-3762`** [verified] — `_prune_crash_data`
     evicts `_crash_replays` but not `_crash_sanitizer_replays` (pins full input
@@ -560,31 +254,6 @@ summary reprints the inner test name, so its `count(...) == 1` assertion sees 2.
     the 200k cap resets in-memory dedup and per-seed statistics (fuzz_count=0)
     every 200k unique seeds.
 
-67. **`minimize.py:75-77` + `root_cause.py:25-38`** [verified] — **FIXED
-    2026-08-23.** Both halves, but they were fixed nine days apart and that is
-    the point of this entry. `minimize.py` was corrected as fallout from
-    findings 4/5; `root_cause.py` was named in the same line of the same
-    finding and sat untouched, so `root-cause --corpus-dir <real corpus>`
-    listed the directory non-recursively, found no seeds under
-    `seeds/<hh>/id_*`, and fell back to the only top-level regular files a live
-    corpus holds. It then printed `state.pkl.gz` as the "nearest corpus seed"
-    and diffed the crash against gzip bytes — a complete, confident,
-    meaningless root-cause report. Original text follows. — corpus scan
-    ignores the standard `seeds/<hh>/` layout; replays/offers `state.pkl.gz` as
-    the only "seed".
-
-    The walk now lives once, in `adapters/filesystem.discover_seed_files()`,
-    which is where the layout constants already were; `minimize` and
-    `root_cause` pass their own exclusions to it. The exclusions genuinely
-    differ and must not be collapsed: `minimize` drops `irreplaceable/`
-    because those entries are never-prune and so are not prune candidates,
-    while `root_cause` keeps them because they are ordinary seeds and make
-    perfectly good baselines. Both drop `crashing/`, for different reasons.
-    `tests/test_regression_seed_discovery_layout.py` (14 tests) asserts on
-    the returned BYTES; four of them fail against the pre-fix source, and a
-    test asserting only `len(seeds) > 0` passes against it, which is how this
-    survived.
-
 68. **`state_store.py:190-194` + `stats.py:349-406`** — temp-file+rename without
     fsync (power loss can persist empty/truncated `state.pkl.gz`); stats and
     coverage JSON written non-atomically (partial write on kill corrupts file).
@@ -593,16 +262,6 @@ summary reprints the inner test name, so its `count(...) == 1` assertion sees 2.
     bytes → phantom CALL edges distort AFLGo distances (accurate decoder exists
     in-tree); penalty distance for unreachable functions derived from `visited`
     left over from the last target's BFS (unstable across runs).
-
-70. **`chi_squared.py:55`** [verified] — **FIXED 2026-08-22.** The spurious
-    `0.5 * _LOG_2 * 7.0` term is gone; `_log_gamma` now agrees with
-    `math.lgamma` to ~1e-15 (it was off by a constant 2.426). `_LOG_2` became
-    unused and was removed with it. Still dead on CPython, so the regression
-    test `tests/test_regression_log_gamma_constant.py` (20 tests) calls
-    `_log_gamma` directly and derives expectations from closed-form identities
-    (Gamma(n)=(n-1)!, Gamma(1/2)=sqrt(pi), Euler reflection) rather than from a
-    recorded run. Original text follows. — Lanczos `_log_gamma` fallback adds
-    spurious `+ln 2^3.5` (dead code today; garbage p-values if `lgamma` absent).
 
 71. **`edge_tracker.py:781`** [verified] — `record_edge_lifetimes` fed two
     different time axes (cumulative-edge count vs exec_count) → lifetime stats
@@ -615,15 +274,6 @@ summary reprints the inner test name, so its `count(...) == 1` assertion sees 2.
 73. `rand_pool.py:173-191` [verified] — `randbytes(n)` replays consumed pool
     when n ≡ 0 mod pool size; batch methods silently cap at 4096 items
     (`rand_pool.py:94-141`, latent).
-74. `jpeg.py:669` [verified] — **FIXED 2026-08-24.** `scan_len`'s upper bound is
-    now clamped with `max(1, ...)`, so a small `max_len` no longer collapses
-    the `randint` range below 1. Original text follows. — unclamped `randint(1, negative)` for small
-    max_len; currently masked by RandPool's silent lo-return on empty ranges
-    (itself a masking hazard: converts class-#1 crashes into silent degradation).
-75. `generic.py:1723-1728` [corroborated] — **FIXED 2026-08-24.** `_NumNode.Generate`
-    now appends the generated digits to `buf` in the `base == 10` case too.
-    Original text follows. — versifier never emits decimal digits
-    (no else for base 10).
 76. `generic.py:1242` [verified] — ascii_num_replace negative-token handling
     unreachable (spans contain digits only).
 77. `generic.py:2033-2054` — `_structure_keyvalue` duplicates the value node
@@ -641,16 +291,6 @@ summary reprints the inner test name, so its `count(...) == 1` assertion sees 2.
 83. `count_class.py:41-49` — extra "64" bucket vs AFL's merged [32-127] class;
     63→64 registers as novel where AFL wouldn't.
 84. `shapley.py:174-176` — `operator_synergy` formula ≤0 by construction.
-85. `gf2_common.py:192` [verified] — **FIXED 2026-08-24.** Parenthesized as
-    `e = e % self.m if a != 0 else e`, so `e` is left untouched when `a == 0`
-    instead of being reduced modulo itself. Original text follows. — `e %= self.m if a != 0 else e` parses as
-    `e %= (…)`; `pow(0, e>0)` returns 1.
-86. `te_position.py:48` [verified] — **FIXED 2026-08-24.**
-    `get_te_weighted_position` now selects the position with the highest
-    total edge-hit weight (`max(byte_edges, key=...)`) instead of the
-    numerically highest byte offset. Original text follows. — returns `max(byte_edges.keys())` (highest
-    offset); TE weights never consulted despite docstring and dedicated tests
-    that only check bounds.
 87. `periodicity.py:152-153` — latent IndexError when caller passes `max_lag` >
     analyzed window.
 88. `qea.py:609-617` — empty population at generation boundary raises ValueError
@@ -673,84 +313,65 @@ summary reprints the inner test name, so its `count(...) == 1` assertion sees 2.
 
 ---
 
-## Audit 2026-08-22 (high-ROI pass)
+## Patterns the closed findings left behind
 
-Seven findings fixed in this series (30, 31, 32, 57, 59, 61, 70) and one
-(37) found to be a stale entry that was never a bug. Each was verified
-against the source before being touched, per the standing warning in
-docs/TODO.md that an open-looking entry is not evidence of anything — a
-warning that earned its keep again here: 37 read as open and was already
-correct.
+The closed findings themselves are pruned — `CHANGELOG.md` and git history hold
+them. These are the patterns that kept recurring across them, and each one has
+already cost time more than once.
 
-Two observations worth carrying forward:
+- **The count was not the bug.** Two separate findings were filed on a wrong
+  NUMBER (crash totals ~4x high; the memory pruner arming forever). In both
+  cases the number was the visible edge of a wrong SOURCE — sidecar text
+  feeding a size histogram, a monotonic high-water mark feeding a threshold
+  check. Fixing only the reported symptom would have left both half-broken.
 
-- **The count was not the bug.** Findings 32 and 59 were both filed on a
-  wrong NUMBER (crash totals ~4x high; pruner arming forever). In both cases
-  the number was the visible edge of a wrong SOURCE — sidecar text feeding a
-  size histogram, a monotonic high-water mark feeding a threshold check.
-  Fixing only the reported symptom would have left both half-broken.
+- **A test asserted the defect.** `test_different_stderr` pinned a divergence
+  bug in place with `assert not diverged  # stderr differs but not diverged`,
+  contradicting the module's own docstring; `test_hex_escape` did the same for
+  the grammar escape bug. Both were written by recording what the code
+  returned. The value-free-assertion sweep in `docs/TODO.md` measures a related
+  but distinct hazard: these assertions were specific and strong, and wrong.
+  Worth a sweep for tests whose comments explain away a surprising expected
+  value.
 
-- **A test asserted the defect, again.** `test_different_stderr` pinned
-  finding 31 in place with `assert not diverged  # stderr differs but not
-  diverged`, contradicting the module's own docstring. That is the second
-  instance of this pattern in this tree after `test_hex_escape`. Both were
-  written by recording what the code returned. The value-free-assertion sweep
-  recorded in docs/TODO.md (573 of ~4,956 tests) measures a related but
-  distinct hazard: these two assertions were specific and strong, and wrong.
-  Worth a separate sweep for tests whose comments explain away a surprising
-  expected value.
+- **A test that pre-loads unreachable internal state.** The Monte-Carlo
+  transition finding had nine existing tests that set `mc._prev_op = "a"` and
+  then asserted `record()` counted the transition. `record()` was correct;
+  nothing could ever set `_prev_op`, so the feature was dead and the tests were
+  green. The parallel corpus-sync finding had fourteen tests writing seeds flat
+  at the worker-dir top level — a directory shape `save_to_corpus` has never
+  produced. Not "assert the value the code returns" but "assert against the
+  arrangement the code expects", and both survived the value-free sweep because
+  both assert real values. **A unit test that constructs its own fixture is only
+  as good as that fixture's fidelity to what the system produces.** Where a
+  writer exists, call it rather than hand-rolling the layout.
 
-## Audit 2026-08-23 (parallel / scheduling / state pass)
-
-Three HIGH findings closed: 11, 15, 18. Each was reproduced through the
-production call path before being touched, and each new regression file was
-run against the pre-fix source to confirm it fails there.
-
-The theme is one pattern, now seen five times in this tree:
-
-- **A test that pre-loads unreachable internal state.** Finding 18's nine
-  existing tests set `mc._prev_op = "a"` and then asserted `record()` counted
-  the transition. `record()` was correct. Nothing could ever set `_prev_op`,
-  so the feature was dead and the tests were green. Finding 15's fourteen
-  tests wrote seeds flat at the worker-dir top level — a directory shape
-  `save_to_corpus` has never produced — and asserted the sync function found
-  them. This is the same failure as `test_hex_escape` and
-  `test_different_stderr`, one level up: not "assert the value the code
-  returns" but "assert against the arrangement the code expects". Both
-  survived the value-free-assertion sweep recorded in docs/TODO.md, because
-  both assert real values. **A unit test that constructs its own fixture is
-  only as good as that fixture's fidelity to what the system produces.**
-  Where a writer exists, tests should call it rather than hand-rolling the
-  layout — that alone would have caught finding 15.
-
-- **A gate that reads as authoritative and is not.** Finding 11's
+- **A gate that reads as authoritative and is not.**
   `if self.resume: self._state_store.load()` looks like it decides whether
   state is read. It decides only *when*, because `get()` lazy-loads. A guard
   that omits an action does not prevent that action if something downstream
   performs it on demand. Worth a sweep for other `if flag: do_x()` sites whose
   callee has a lazy or self-healing path.
 
+- **Verify before starting.** Every pass over this file has found at least one
+  entry that read as open and was already correct. Check the source, not the
+  marker.
+
 ## Cross-cutting patterns worth regression tests
 
-- **ctypes hygiene**: every libc function returning a pointer needs explicit
-  `restype` (offenders: persistent.py, minimize.py ×2; shm.py is
-  reference-correct). `enable_on_exec` is attr bit 12. *Addressed for the SysV
-  SHM calls: `adapters/libc_shm.py` is now the single binding site and
-  `tests/test_regression_shmat_restype.py` scans the package for re-binders.
-  Sibling hazard, **fixed 2026-08-23**: the `(void *) -1` failure sentinel does
-  NOT compare equal to `-1` once `restype=c_void_p` is declared, so adding the
-  restype without rewriting the `== -1` guard silences the failure path.
-  `adapters/inprocess.py` was in exactly that half-fixed state at all three of
-  its attach sites — restype declared (so it passed the scan), guard left as
-  `if ptr and ptr != -1` (so it admitted every failure). `reset_bitmap()`
-  therefore called `memset()` through `0xffffffffffffffff`, which SIGSEGVs the
-  fuzzer and is not catchable by the enclosing `except Exception`; the sentinel
-  was then cached, pinning the runner to the dead pointer. All three now route
-  through `libc_shm`, which returns None. The scan was extended to reject
-  `ptr == -1` / `ptr != -1` in any module that calls `shmat` — a scan that
-  checks only for the declared restype certifies the visible half of the fix
-  and is what let this sit. See
-  `docs/learnings/2026-08-23-shmat-sentinel-and-header-clobber.md`.*
+- **ctypes hygiene**: every libc function returning a pointer needs an explicit
+  `restype`. `adapters/libc_shm.py` is the single binding site for the SysV SHM
+  calls and `tests/test_regression_shmat_restype.py` scans the package for
+  re-binders. **Sibling hazard, and the reason the scan alone is not enough:**
+  the `(void *) -1` failure sentinel does NOT compare equal to `-1` once
+  `restype=c_void_p` is declared, so adding the restype without rewriting the
+  `== -1` guard silences the failure path — a module can pass the restype scan
+  while admitting every attach failure, then `memset()` through
+  `0xffffffffffffffff`, which SIGSEGVs the fuzzer and is not catchable by an
+  enclosing `except Exception`. The scan now rejects `ptr == -1` / `ptr != -1`
+  in any module that calls `shmat`. Any new pointer-returning binding needs both
+  halves. `enable_on_exec` is attr bit 12. See
+  `docs/learnings/2026-08-23-shmat-sentinel-and-header-clobber.md`.
 - **Timeout invariant**: a wait ending without definitive status must yield -1
   (timeout), never a stale-status-derived "crash" nor an eternal freeze. Three
   backends violate it today (ptrace post-loop, run_target_fast, direct modes);
