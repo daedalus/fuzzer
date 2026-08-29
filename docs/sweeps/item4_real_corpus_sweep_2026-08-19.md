@@ -1,6 +1,6 @@
 # Item 4 real-corpus sensitivity sweep (round 9)
 
-Sequencing step 6 of `docs/handover_skittercreek_tailslayer_port.md`: run
+Sequencing step 6 of `docs/handover/handover_skittercreek_tailslayer_port.md`: run
 `LiveBitMaskEstimator`'s convergence-threshold sensitivity sweep (previously
 only run synthetically, in `tests/test_live_bit_mask.py`) against real
 coverage-diff samples from an actual campaign, before trusting the

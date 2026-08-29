@@ -203,7 +203,7 @@ class FormatLearner:
     def record_liveness(self, offset: int, width: int, confirmed_dead: bool) -> None:
         """Corroborating evidence from item 4's `LiveBitMaskEstimator`
         (`core/live_bit_mask.py`, per
-        `docs/handover_skittercreek_tailslayer_port.md`).
+        `docs/handover/handover_skittercreek_tailslayer_port.md`).
 
         A byte range whose liveness estimator has *converged* with an
         empty mask -- i.e. many consecutive mutations touching it never

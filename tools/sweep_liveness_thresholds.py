@@ -6,7 +6,7 @@ reasonable ranges on representative campaign data and reports whether the
 current defaults produce stable padding hypotheses.
 
 This is the Sequenced step 6 validation called out in
-``docs/handover_skittercreek_tailslayer_port.md``. It is intentionally a
+``docs/handover/handover_skittercreek_tailslayer_port.md``. It is intentionally a
 standalone script rather than a pytest because the sweep spans parameter
 ranges, not a single fixed scenario.
 

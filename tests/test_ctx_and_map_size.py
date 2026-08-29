@@ -9,7 +9,7 @@ which is the code path under test anyway.
 If the drop-counter tests below go intermittently red in CI, do not just
 re-run them: this is the one place the open intermittent ``shmat()`` failure
 is expected to surface (see the "Open loose threads" section of
-docs/handover_skittercreek_tailslayer_port.md). Twice in roughly fifty runs,
+docs/handover/handover_skittercreek_tailslayer_port.md). Twice in roughly fifty runs,
 the first ``ShmCoverage`` constructed in a process read back an empty edge
 table after a child that exited 0, and the SHM header was not captured at
 the time -- so it is still unknown whether the child failed to attach or the

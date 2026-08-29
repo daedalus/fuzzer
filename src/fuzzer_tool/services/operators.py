@@ -3232,7 +3232,7 @@ class OperatorEngine:
         estimator for whichever region *offset* falls in.
 
         Item 4 (`core/live_bit_mask.py`) wiring, per
-        `docs/handover_skittercreek_tailslayer_port.md`: `baseline_edges`
+        `docs/handover/handover_skittercreek_tailslayer_port.md`: `baseline_edges`
         is the parent seed's known edge set (e.g.
         `edge_tracker.seed_edges[seed_key]`), `mutant_edges` is the edge
         set from executing the mutant derived from it, and `offset` is the

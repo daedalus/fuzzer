@@ -1,7 +1,7 @@
 """Regression tests: item 4 (LiveBitMaskEstimator) wired into
 OperatorEngine's region weighting as a down-weighting signal.
 
-Per docs/handover_skittercreek_tailslayer_port.md item 4: this covers the
+Per docs/handover/handover_skittercreek_tailslayer_port.md item 4: this covers the
 wiring mechanism itself (record_coverage_diff -> _region_liveness_factor
 -> _region_weighted_position), using synthetic coverage-edge diffs. It is
 NOT the real-corpus sensitivity sweep the handover doc's Sequencing step 6
