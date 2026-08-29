@@ -23,28 +23,31 @@ began with five "gaps" and four of them were already implemented.
 
 # Part I — Engine features (GitHub fuzzer survey)
 
-## Headline finding: most of the obvious shortlist is already implemented
+## Headline finding: most of the obvious shortlist was already implemented
 
 The first-pass shortlist from the sources was: Redqueen colorization, CmpLog
 transformation solving, MendelFuzz deterministic-stage pruning, Entropic power
-schedule, autotokens. **Four of the five already exist in the tree.** Anyone
-picking this up should grep before writing anything — the survey sources describe
-these as AFL++/libFuzzer novelties, and they read as gaps until you look.
+schedule, autotokens. **Four of the five already existed in the tree.** The
+per-row audit is pruned — these are shipped features, not port candidates — but
+the list of names stays, because the survey sources describe all five as
+AFL++/libFuzzer novelties and they read as gaps until you look:
+`core/colorization.py`, `core/rq_encodings.py` +
+`services/operators.py::_op_redqueen_xform`, `core/skipdet.py`,
+`core/schedules.py::SeedScorer._entropic_factor`, and
+`import_corpus.py` + `import --autotokens`. **Grep before writing anything.**
 
-| Candidate | Source | Status in tree |
-|---|---|---|
-| Redqueen colorization | AFL++ `src/afl-fuzz-redqueen.c`, RUB-SysSec/redqueen | **Present** — `core/colorization.py` (binary-search over ranges, path-checksum preserved, taint regions returned); driven from `services/fuzzer.py::_colorize_seed` (~4404), cached per seed. **Off by default** (`--colorize`, `colorize_max_execs=512`). |
-| CmpLog transformation solving | AFL++ `-l 3` / `AFL_CMPLOG_TRANSFORM` | **Present** — `core/rq_encodings.py` (plain substitution, zero/sign extension, ASCII-number, C-string termination, split 64-bit words) driven by `services/operators.py::_op_redqueen_xform` (~486), with single-byte XOR/arith/boundary/hex/toupper/tolower fallback. |
-| MendelFuzz / SkipDet | HexHive/MendelFuzz-Artifact; AFL++ default `skipdet` | **Present** — `core/skipdet.py` (`SkipDetector`, `trace_mini_from_edges`, inference stage with block flips), wired at `services/fuzzer.py:1422`. Note the adaptation already documented in that module: our `edge_id` is a `ctx ^ prev_loc ^ cur_loc` hash, not a map index, so the positional bitmap SkipDet wants has to be synthesised. |
-| Entropic power schedule | libFuzzer `-entropic` (FSE'20, STADS) | **Present** — landed 2026-08-24, `core/schedules.py::SeedScorer._entropic_factor`, `--schedule entropic`. Worth knowing: Entropic and our Chao2 rewrite (`good_turing_estimate`) come from the same STADS framework, so they should be reasoned about together, not as two unrelated estimators. |
-| autotokens | AFL++ LTO auto-dictionary | **Present** — landed 2026-08-24, `import_corpus.py`, `import --autotokens`. |
+Two things from that audit are open work rather than a record of it, and stay:
 
-Only two of those are default-on. **Colorization being opt-out-by-default is the
-single most actionable item in this doc**: it is the precondition that makes the
-transformation solver's operand→offset mapping unambiguous, and we now have
-per-site PC keys (`300d649`) that make the candidate filter sharper than AFL++'s
-callback-level one. Before flipping the default, measure the exec cost against
-the `--colorize` budget on a real target (ffmpeg recipe below).
+- **Colorization is opt-in (`--colorize`, `colorize_max_execs=512`) and should
+  probably be opt-out.** This is the single most actionable item in this
+  document: colorization is the precondition that makes the transformation
+  solver's operand→offset mapping unambiguous, and the per-site PC keys added in
+  `300d649` make the candidate filter sharper than AFL++'s callback-level one.
+  Measure the exec cost against the `--colorize` budget on a real target first
+  (ffmpeg recipe below).
+- **Entropic and our Chao2 rewrite (`good_turing_estimate`) come from the same
+  STADS framework** and should be reasoned about together rather than as two
+  unrelated estimators. Nobody has.
 
 ## Genuinely absent — ranked
 
@@ -349,9 +352,7 @@ the ffmpeg work.
 to `(w, h)` with `w = round(exp(d) * 16384 / e)` and `h ≤ 16384 / w`, so the *area* stays
 under a cap while the aspect ratio spans exponentially. Our image generators
 (`mutations/webp.py`, `png.py`, `isobmff.py`) pick dimensions independently, which means
-they generate area outliers that are pure timeout fodder. Note these are the same three
-files carrying the unfixed positional-argument defect in open thread 3 below — if someone
-is opening them anyway, fix both.
+they generate area outliers that are pure timeout fodder.
 
 **Reject impossible configurations early.** `sws:130-135`:
 `if (mask && (mask & (mask - 1))) return 0;` — more than one scaler bit set is not a
@@ -407,31 +408,22 @@ Steps 5-7 are optional for a first pass. Steps 1-4 are the ones that carry the v
 
 ## Open threads inherited by whoever picks this up
 
-Threads 1-3 were verified against `300d649` and re-checked at `a8ccf8c`; all still open.
+Re-verified against live source. Two of the four threads this document opened have
+since closed upstream and are pruned: the weight-cache key is no longer
+`(corpus_version, exec_count // 50)` — it is `exec_count // 200` with a
+corpus-growth threshold of 20 (`seed_picker.py:1273-1285`) — and the
+positional-argument defect in the generators is fixed, by keyword call sites
+plus an `isinstance(..., int)` coercion in ten generator signatures, not the
+three this document named. What remains:
 
-1. **`_record_cmp_progress` is still callback-granular** (`services/fuzzer.py:3070`,
-   called at `:3543`). There are only 27 callback buckets, so the reward it feeds
+1. **`_record_cmp_progress` is still callback-granular** (`services/fuzzer.py:3077`,
+   called at `:3550`). There are only 27 callback buckets, so the reward it feeds
    is 27-dimensional. The per-site PC table from `300d649` is what makes it dense.
    The measurement that justifies it: a target with one always-satisfied and one
    never-satisfied `memcmp` reads as `memcmp (4, 3)` per callback — 75% satisfied,
    no wall visible — but `(3,3)` and `(1,0)` per site. The bucket inverts the
    reading, it does not merely blur it.
-2. **Weight-cache invalidation** (`services/seed_picker.py:1110`):
-   `cache_key = (corpus_version, f.exec_count // 50)` with
-   `corpus_version = len(f.corpus)`, so every corpus admission forces a full
-   recompute (measured: 271 recomputes in 1500 execs, one per 5.5 execs, against
-   the intended one per 50). Not fixable without a semantic decision, because
-   `weights` is positionally bound to `f.corpus`: either pad new seeds with a
-   neutral weight until the next 50-bucket, or splice per-seed weights onto the
-   cached list (needs the pass aggregates and the Pareto front).
-3. **Positional-argument defect in three generators** — still present:
-   `webp.py:132` calls `_generate_random_webp(max_len, rng=...)` against
-   `def _generate_random_webp(self, _chunks=None, max_len=4096, rng=None)`;
-   same shape at `zip.py:260` / `zip.py:405` (`_doc`) and `isobmff.py:306` /
-   `isobmff.py:422` (`_boxes`). `max_len` lands in the first parameter and the
-   real `max_len` keeps its default. Silent — no exception, just an ignored bound.
-   See the bounded-product note in II.6: the same three files.
-4. **`tools/profile_hotpath.py` cannot drive the ffmpeg target.** It has
+2. **`tools/profile_hotpath.py` cannot drive the ffmpeg target.** It has
    `os.chdir("/home/dclavijo/my_code/fuzzer")` hardcoded and does not emit
    `--inprocess-direct/--inprocess-func`. Any before/after measurement for Part II
    steps 2 and 3 needs this fixed or needs another instrument.
