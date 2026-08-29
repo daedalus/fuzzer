@@ -1,5 +1,14 @@
 # Handover — `tests/test_shm.py::TestShimEdgeCountEndToEnd::test_shim_updates_edge_count_after_target_call` hang investigation
 
+**Status: FIXED**, in `a267ff8` and its follow-up — see "Resolution" at the end.
+Kept for the resolution, not the investigation: the first fix landed only half
+of Option B (the shim gate went in and no loader ever set `__AFL_FORKSRV`), so
+the forkserver silently fell back to `run_executable()` for every RUN and all
+eight assertions in `tests/test_regression_forkserver_shm.py` passed either way.
+That is the lesson worth keeping — the two execution modes were externally
+indistinguishable over the protocol, so the test suite could not tell that the
+feature had effectively been reverted.
+
 ## Symptom
 The test `test_shim_updates_edge_count_after_target_call` is reported to hang.
 It exercises a tiny GCC-compiled `.so` built with `-include afl_shim.c`, loaded via `ctypes.CDLL`, whose exported `fuzz_shm_run()` calls `__afl_map_edge()` three times and then returns.

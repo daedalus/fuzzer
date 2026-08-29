@@ -27,6 +27,9 @@
 - [ ] **No format-aware patcher for integer checksums** — `_op_crc_learn` patches only the generic trailing field when an integer model is active. A real zlib/IDAT Adler patcher belongs in the `recompress_zlib` mutator, not here.
 - [ ] **`field_constraints.py` bounded-integer pre-pass** (handover §1, deprioritized) — z3 is already fast on these small bitwidth systems, so the win is thin. Revisit only if the integer-checksum pattern proves out.
 
+## Testing
+- [ ] **One retry-until-random-hit test is left** (2026-08-29) — Hard Rules 39/40 landed and `tests/support/scripted_rng.py` is the shared helper, but `tests/test_new_operators.py::test_fuse_old` (~line 305) still loops 30 times waiting for `_op_fuse_old` to change the buffer and `break`s on the first hit. Last survivor of the 2026-08-24 determinism pass, and it tests luck: it can pass while the operator is broken and fail unreproducibly when it is not. `_op_fuse_old` draws through `self.f._rand_pool` (`rng.choice` over the fuse-memory ring), so the `ScriptedRng` seam used elsewhere applies directly — drive the exact draw, assert the exact output.
+
 ## Standing notes
 
 These are not work items. They are the lessons the closed work left behind, and

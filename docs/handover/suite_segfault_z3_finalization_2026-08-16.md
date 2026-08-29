@@ -2,7 +2,17 @@
 
 **Date:** 2026-08-16
 **Base:** `725168d`, plus this session's two commits (`88b865c`, `2bc899c`)
-**Status:** root cause **identified and captured**; fix **not yet written**
+**Status: FIXED.** `core/z3_lifecycle.py` (`guard_z3_shutdown`, wired into
+`core/smt_solver.py` and `core/structural_constraints.py`) closed this in
+`a537614`. The header used to say "fix not yet written", which stayed wrong for
+two weeks.
+
+Kept because the *investigation* is still worth something: this is the four
+falsified hypotheses and the reproduction harness. It is also the motivating
+case for the component-set bisect in `docs/port-backlog.md` (F5) — a `SIGSEGV`
+with `ip 0` and a silent faulthandler cost a session on BLAS-thread and
+shutdown-buffering theories before the cause turned out to be a vendored-zlib
+link mismatch, which an operator-set bisect would have ruled out in minutes.
 
 ---
 
