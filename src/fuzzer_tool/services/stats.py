@@ -23,6 +23,7 @@ import os
 import random
 import time
 
+from fuzzer_tool.core.cost_ledger import effective_fuzz_count
 from fuzzer_tool.core.kalman import RobustKF
 from fuzzer_tool.services.stats_reporter import (
     discovery_rate as _discovery_rate,
@@ -57,6 +58,13 @@ def _format_count(n: int) -> str:
     if n < 1_000_000_000:
         return f"{n / 1_000_000:.1f}M"
     return f"{n / 1_000_000_000:.1f}G"
+
+
+# A seed that has consumed this many average-cost executions without finding an
+# edge is reported as stale. Carried over verbatim from the `fuzz_count >= 50`
+# criterion this replaced so the two agree on a target with uniform execution
+# cost; the number itself was never calibrated and is not calibrated here.
+STALE_SEED_EXEC_EQUIVALENTS = 50
 
 
 class StatsReporter:
@@ -228,14 +236,27 @@ class StatsReporter:
 
         edges_per_seed = [m.get("coverage_edges", 0) for m in f.seed_meta.values()]
         productive = sum(1 for e in edges_per_seed if e > 0)
+        # Futility is a question about budget spent, not about how many times a
+        # seed happened to be picked. `fuzz_count >= 50` declared a 200 ms seed
+        # and a 0.2 ms seed equally exhausted; measured against png_read, the
+        # seeds it flagged had burned between 6.9 ms and 116.9 ms of target
+        # time for the same verdict. effective_fuzz_count converts the cost
+        # ledger back into executions at the corpus mean rate, so the 50 keeps
+        # its meaning and the criterion collapses to the old one exactly when
+        # per-execution cost does not vary (see core/cost_ledger.py).
+        mean_exec = f.mean_exec_time()
         stale = sum(
             1
             for m in f.seed_meta.values()
-            if m.get("fuzz_count", 0) >= 50 and m.get("coverage_edges", 0) == 0
+            if effective_fuzz_count(m, mean_exec) >= STALE_SEED_EXEC_EQUIVALENTS
+            and m.get("coverage_edges", 0) == 0
         )
         total_seeds = len(f.seed_meta)
         print(f"  Productive seeds:  {productive}/{total_seeds} discovered edges")
-        print(f"  Stale seeds:       {stale}/{total_seeds} (50+ fuzzes, 0 edges)")
+        print(
+            f"  Stale seeds:       {stale}/{total_seeds} "
+            f"({STALE_SEED_EXEC_EQUIVALENTS}+ avg-cost execs, 0 edges)"
+        )
 
         self._print_summary_classification(f)
 
