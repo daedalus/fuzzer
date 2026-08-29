@@ -1377,8 +1377,8 @@ build_distance_so_targets() {
 # trace-pc wrapper + -D__AFL_NGRAM_K={2,3} + the AFLGo channel.
 # Vendored libraries for png_read are rebuilt with trace-pc so library
 # blocks emit __sanitizer_cov_trace_pc too — the K-Scheduler node table
-# must cover library code or the horizon graph sees only the wrapper
-# (docs/kscheduler_centrality_port.md §3 build-scope caveat).
+# must cover library code or the horizon graph sees only the wrapper,
+# which makes any centrality comparison a measurement of the harness.
 # NOTE: rebuilds vendor/<lib> in place, clobbering artifacts of earlier
 # vendor passes — same last-wins behaviour as --vendor-tracecmp. Run
 # this pass last if you need both flavors' libs.

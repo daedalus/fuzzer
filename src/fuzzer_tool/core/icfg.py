@@ -3,8 +3,10 @@
 Lifts distance.py's ``_build_cfgs`` target-function restriction: every
 function is decoded, its blocks become nodes, and each resolved direct
 call adds a caller→callee-entry edge. Return edges are deliberately
-absent — the paper's loop-removal step deletes them anyway
-(docs/kscheduler_centrality_port.md W1). ``indirect_call`` blocks carry
+absent — the paper's loop-removal step deletes them anyway (She, Shah,
+Jana, *Effective Seed Scheduling for Fuzzing with Graph Centrality
+Analysis*, S&P'22, arXiv:2203.12064 §4; the DAG conversion that performs
+it is ``core/horizon.py``). ``indirect_call`` blocks carry
 no static successor; the port surfaces them for a future β penalty.
 
 Also emits the runtime probe-key table that fills the ``node_idx``

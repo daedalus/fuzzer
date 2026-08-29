@@ -283,8 +283,10 @@ const uint32_t __AFL_CAT(__afl_ctx_bits_, __AFL_CTX_BITS) = __AFL_CTX_BITS;
  * k = blocks encoded into one edge id: the current block plus its k−1
  * predecessors. k=2 IS the historical behaviour and stays byte-identical:
  * same layout, same exported __afl_prev_loc, same XOR edge ids, so existing
- * corpora and resume state remain valid (docs/ngram_coverage_plan.md,
- * Compatibility Concerns). Only k>2 introduces the ring buffer and the
+ * corpora and resume state remain valid. k is recorded in the resume
+ * state's coverage contract and a mismatch refuses the resume outright
+ * (corpus_manager.check_coverage_contract), because k>2 changes every
+ * edge id. Only k>2 introduces the ring buffer and the
  * FNV-1a mix, which deliberately changes every edge id.
  */
 #ifndef __AFL_NGRAM_K

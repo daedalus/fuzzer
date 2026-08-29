@@ -1,8 +1,9 @@
 """On-disk cache for decoded function CFGs.
 
 Amortizes the pure-Python x86-64 decode cost across runs: today
-``TargetDistance._build_cfgs``, tomorrow the whole-program ICFG
-(docs/kscheduler_centrality_port.md W1). Artifacts live under
+``TargetDistance._build_cfgs`` and the whole-program ICFG
+(``core/icfg.py``), which reuses this identity/load/store API
+unchanged. Artifacts live under
 ``~/.cache/fuzzer_cfgcache/`` (XDG_CACHE_HOME aware), one gzip pickle per
 (binary, decoder) pair.
 
