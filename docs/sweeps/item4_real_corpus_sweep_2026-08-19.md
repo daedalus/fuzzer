@@ -86,3 +86,13 @@ chosen to bound. Recommend keeping the current conservative weighting and
 re-running this same methodology against `png_read` or another
 chunk-structured target with known padding fields as the next step, rather
 than treating this as the final word.
+
+**Update (2026-08-29):** step 6 is now closed, but not by the route
+suggested above. Chasing a chunk-structured *real* target was the wrong next
+step — `png_read` is CRC-covered, so every byte is live and it can never
+produce a dead region either. The dead-region false-negative test was
+finally run against a purpose-built synthetic target instead:
+`docs/sweeps/synthetic_liveness_calibration_2026-08-29.md`. Kept here
+because the recommendation above is a plausible-looking dead end, and the
+reason it fails (checksums make every byte live) is the same structural fact
+that defeated four earlier campaigns.

@@ -41,8 +41,15 @@ noise.
 
 This is the case that closes step 6. `_LIVENESS_DEAD_WEIGHT = 0.1` and
 `_LIVENESS_SWITCH_AFTER = 200` can now be calibrated against a known-dead
-region instead of left as conservative guesses — that run has not been done
-yet, and is the obvious next step.
+region instead of left as conservative guesses.
+
+**That calibration has since been run** (2026-08-29):
+`docs/sweeps/synthetic_liveness_calibration_2026-08-29.md`. Both constants
+are retained, and the reason they are retained rather than tuned is recorded
+there — the dead side is measured at 0 false negatives and 0 false
+positives across the whole `switch_after` grid, but the case that justifies a
+high `switch_after` floor is a real *cold-but-live* region, which this target
+cannot exhibit by construction.
 
 ## 2. The probe-window trade, measured rather than simulated
 

@@ -11,47 +11,16 @@ Sources, for the two items still unported:
 - `LaurieWired/tailslayer` — `discovery/trefi_probe.c`,
   `discovery/benchmark/benchmark.cpp`, `discovery/benchmark/stats.cpp`.
 
-**Status (round 15):** items 1, 2, 4, 5, 6 and 7 are implemented, wired and
-tested. Rounds 13 and 14 closed everything else that was open except two
-things: G, the intermittent `shmat()` failure, and B, item 4's validation gate.
-Items 3 and 13 stay deferred by design (H). The closed rounds' writeups are
-pruned; the ledger at the end says where each one's artifacts live.
+**Status (round 16):** items 1, 2, 4, 5, 6 and 7 are implemented, wired and
+tested. Round 16 closed B (item 4's validation gate — calibrated against the
+synthetic known-dead region). The only genuinely open thread left is G, the
+intermittent `shmat()` failure. Items 3 and 13 stay deferred by design (H).
+The closed rounds' writeups are pruned; the ledger at the end says where each
+one's artifacts live.
 
 ---
 
 ## Open work
-
-### B. Item 4 — false-negative dead-region case — **UNBLOCKED, one run left**
-
-`LiveBitMaskEstimator` is implemented and wired into both consumers, with
-`_LIVENESS_SWITCH_AFTER = 200` and `_LIVENESS_DEAD_WEIGHT = 0.1`. Step 6 was
-stuck for four rounds not on the estimator but on the target matrix: zlib,
-png (twice) and jpeg all produced zero genuinely-dead regions, so the
-false-negative rate had nothing to be measured against. Two of those misses
-are structural rather than accidental — compressed data has no padding, and
-any CRC-covered format rules out coverage-dead bytes outright, since
-mutating any byte moves the CRC-check edge regardless of semantic relevance.
-
-**That blocker is gone.** `tools/gen_synthetic_target.py` produces a target
-with a byte region that is read but provably never reaches a branch, and no
-checksum anywhere. Measured on the deterministic variant: live prefix 60/60
-mutations move coverage, dead region **0/60**, identical-input reruns 0/20
-differ. Ground truth by construction, asserted in
-`tests/test_synthetic_target.py` so it cannot silently rot.
-
-**Remaining work is one sweep**, not a decision any more: run
-`tools/sweep_liveness_thresholds.py` against the synthetic target and
-calibrate `_LIVENESS_DEAD_WEIGHT` and `_LIVENESS_SWITCH_AFTER` against a
-known-dead region. Until that runs, both stay conservative guesses and the
-comments at `services/operators.py` and `core/live_bit_mask.py` say so.
-
-One caveat to carry into that sweep: use `--unstable 0`. On the unstable
-variant, dead-region mutations appear to move coverage 40/60 of the time
-purely from ASLR-gated edges — nondeterminism destroys the liveness signal
-outright, which is worth knowing before running this against any real target
-that has not been stability-calibrated first.
-
-See `docs/sweeps/synthetic_target_ground_truth_2026-08-19.md`.
 
 ### G. Intermittent `shmat()` failure — open thread, no fix
 
@@ -183,11 +152,19 @@ sizing.
   docstring.
 - ~~For item 4 / (B): does a target exist in this tree with neither a
   whole-file nor a per-chunk checksum?~~ **Answered: no real one, so one was
-  built.** See (B) and `tools/gen_synthetic_target.py`. The follow-on
-  question is whether calibrating `_LIVENESS_DEAD_WEIGHT` against a
-  synthetic dead region is worth acting on, given no real format in the
-  matrix has such a region — the calibration is sound, but its
-  generalisation to real targets is an assumption worth stating out loud.
+  built.** See `tools/gen_synthetic_target.py`.
+- ~~The follow-on: is calibrating the liveness thresholds against a synthetic
+  dead region worth acting on, given no real format has one?~~ **Answered by
+  the round-16 sweep** (`docs/sweeps/synthetic_liveness_calibration_2026-08-29.md`).
+  Yes for the dead side: the estimator gives the known-dead region a correct
+  DEAD verdict at every `switch_after` and never misclassifies the live
+  region. No for lowering the default: `switch_after` is unconstrained from
+  below by correctness *on this target*, because the case a high floor
+  guards against — a real cold-but-live region that emits a long no-growth
+  run before its first edge — is exactly what a synthetic target cannot
+  exhibit. So the dead side is now measured and the cold-live floor is a
+  stated assumption about real targets, not a guess. The generalisation
+  caveat you asked to state out loud is stated, at both constants.
 
 ---
 
@@ -260,3 +237,23 @@ here.
 - **(E) `--cmplog` defaults off** — done.
 - **(F) path hash as a second coverage dimension** — closed as superseded, not
   implemented. Do not re-propose it without reading why in git history first.
+
+### Round 16
+
+- **(B) item 4's step-6 validation gate** — done. The blocker turned out not
+  to be the run but the tool: `tools/sweep_liveness_thresholds.py` could not
+  execute a target at all (its `--target` arg was dead, no `--unstable`
+  flag, both paths drove `FormatLearner` over fabricated transitions). Fixed
+  by adding a `--synthetic-target` mode that builds
+  `gen_synthetic_target.py`'s known-dead target and drives the real
+  `LiveBitMaskEstimator` against it. Result: the dead region earns a DEAD
+  verdict at every `switch_after` in {50,100,200,400,800} (in exactly
+  `switch_after` samples) and the live region never does — false-negative and
+  false-positive rate both 0. `_LIVENESS_SWITCH_AFTER = 200` and
+  `_LIVENESS_DEAD_WEIGHT = 0.1` are retained, but their comments now cite the
+  measurement instead of calling themselves guesses; the one thing the
+  synthetic target cannot calibrate (a real cold-but-live region's no-growth
+  floor) is stated at both constants. Full numbers and the `--unstable 0`
+  requirement (reproduced: 66/120 dead-region mutations move coverage on
+  `--unstable 4`) in `docs/sweeps/synthetic_liveness_calibration_2026-08-29.md`.
+  Regression coverage in `tests/test_sweep_liveness_thresholds.py`.
