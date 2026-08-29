@@ -1,8 +1,9 @@
 """Runtime K-Scheduler channel: node bitmap → horizon graph → Katz energy.
 
-Owns the lifecycle the W2/W3/W4 modules assume:
+Owns the lifecycle the bitmap channel, the horizon graph and the Katz
+solver all assume:
 
-1. **build/upload** — whole-program ICFG (W1), the probe-key→node table,
+1. **build/upload** — whole-program ICFG, the probe-key→node table,
    a ``DistanceTableShm`` carrying ``node_idx``, and a ``NodeBitmapShm``
    segment exported via ``__AFL_NODE_BITMAP_ID``. Only viable on trace-pc
    targets; returns None otherwise so non-instrumented campaigns are

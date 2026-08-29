@@ -1,4 +1,4 @@
-"""Katz centrality over the horizon graph (K-Scheduler W4).
+"""Katz centrality over the horizon graph (K-Scheduler).
 
 Fixed point (paper §5, out-degree variant, α from their Table XI):
 
@@ -76,7 +76,8 @@ def build_beta(
     carry the full baseline.
 
     Args:
-        horizon: W3 output; supplies the visited-parent sets.
+        horizon: :func:`~fuzzer_tool.core.horizon.build_horizon_graph`
+            output; supplies the visited-parent sets.
         icfg_hit_counts: per-ICFG-node execution counts, length
             ``icfg.n_nodes``.
         total_execs: executions performed (the paper's T). Values <= 0
@@ -145,7 +146,8 @@ def katz_scores(
     """Solve the fixed point over U + seeds.
 
     Args:
-        horizon: W3 output.
+        horizon: :func:`~fuzzer_tool.core.horizon.build_horizon_graph`
+            output.
         hit_counts: per-U-node β *source*, length ``horizon.n_u``. Callers
             holding ICFG-indexed counts want :func:`build_beta` instead;
             passing them straight through is the mis-indexing this

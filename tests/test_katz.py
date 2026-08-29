@@ -1,4 +1,4 @@
-"""Tests for Katz centrality over the horizon graph (K-Scheduler W4).
+"""Tests for Katz centrality over the horizon graph (K-Scheduler).
 
 Fixed-point form used (paper §5, out-degree Katz):
     c[u] = alpha * sum(c[v] for v in successors(u)) + beta[u]
@@ -109,7 +109,7 @@ class TestSeedAttachment:
 
 class TestContractEnforcement:
     def test_cycle_is_rejected(self):
-        """W3 promises a DAG; feeding a cycle back must fail loudly, not
+        """build_horizon_graph promises a DAG; feeding a cycle back must fail loudly, not
         silently diverge."""
         g = _graph([(0, 1), (1, 0)], n_u=2)
         with pytest.raises(ValueError, match="[Dd][Aa][Gg]"):

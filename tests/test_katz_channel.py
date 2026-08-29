@@ -76,7 +76,7 @@ class TestScores:
         assert isinstance(second, KatzResult)
 
     def test_seed_energy_ranks_rare_over_hit(self):
-        """Oracle from W4: the seed whose *approach* to unexplored ground is
+        """Oracle from the centrality definition: the seed whose *approach* to unexplored ground is
         rarely trodden outscores the one whose approach is saturated.
 
         beta is a function of a horizon node's visited parents, not of the

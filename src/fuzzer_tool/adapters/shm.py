@@ -1116,7 +1116,7 @@ NODE_IDX_NONE = 0xFFFFFFFF
 
 
 class NodeBitmapShm:
-    """Per-iteration node-visit bitmap shared with the shim (K-Scheduler W2).
+    """Per-iteration node-visit bitmap shared with the shim (K-Scheduler).
 
     The shim sets ``bits[node_idx >> 3] |= 1 << (node_idx & 7)`` when the
     distance-table probe matches an entry whose ``node_idx`` passes the

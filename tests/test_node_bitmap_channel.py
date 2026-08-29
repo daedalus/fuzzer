@@ -1,4 +1,4 @@
-"""Tests for the K-Scheduler node-visit bitmap channel (W2).
+"""Tests for the K-Scheduler node-visit bitmap channel.
 
 Two pieces under test:
 

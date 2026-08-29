@@ -1,4 +1,4 @@
-"""Tests for the K-Scheduler edge-horizon graph (W3).
+"""Tests for the K-Scheduler edge-horizon graph.
 
 Paper semantics (She et al., S&P'22 §4): delete visited nodes while
 preserving connectivity, turn the unvisited remainder into a DAG by

@@ -1,4 +1,4 @@
-"""Tests for whole-program ICFG construction (K-Scheduler W1).
+"""Tests for whole-program ICFG construction (K-Scheduler).
 
 The fixture compiles the same self-contained trace-pc target the SHM
 channel tests use, builds a TargetDistance against it, and lifts the
@@ -84,7 +84,8 @@ def tp_icfg(tp_target):
 
 class TestWholeProgramScope:
     def test_nodes_cover_non_target_functions(self, tp_icfg):
-        """The point of W1: not just the target function's blocks."""
+        """The point of the whole-program ICFG: not just the target
+        function's blocks."""
         _, icfg = tp_icfg
         funcs = set(icfg.node_funcs)
         assert {"main", "LLVMFuzzerTestOneInput", "target_fn"} <= funcs

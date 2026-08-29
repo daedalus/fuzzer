@@ -1,4 +1,4 @@
-"""Whole-program interprocedural CFG for K-Scheduler (W1).
+"""Whole-program interprocedural CFG for K-Scheduler.
 
 Lifts distance.py's ``_build_cfgs`` target-function restriction: every
 function is decoded, its blocks become nodes, and each resolved direct

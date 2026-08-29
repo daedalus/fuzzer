@@ -1,4 +1,4 @@
-"""Regression tests for the K-Scheduler beta injection (W4).
+"""Regression tests for the K-Scheduler beta injection.
 
 Three defects made beta a no-op while leaving every existing test green,
 because the tests exercised ``katz_scores`` with already-correct inputs and

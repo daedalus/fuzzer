@@ -1,4 +1,4 @@
-"""Edge horizon graph for K-Scheduler (W3).
+"""Edge horizon graph for K-Scheduler.
 
 Paper: She, Shah, Jana — *Effective Seed Scheduling for Fuzzing with
 Graph Centrality Analysis*, S&P'22, §4. Given per-seed visited-node sets
@@ -11,7 +11,7 @@ over the ICFG:
    reachability across covered regions.
 3. **DAG conversion.** Iterative Tarjan SCC over the contracted U-graph;
    intra-SCC edges are dropped so any α converges in ≤ depth iterations
-   (W4's safety argument).
+   (the Katz solver's convergence argument).
 4. **Seed attachment.** One node per seed with edges to every horizon
    node (unvisited, ≥1 visited parent) whose visited parent lies on that
    seed's path.
@@ -131,10 +131,10 @@ def _tarjan_scc(m: int, adj: list[list[int]]) -> list[int]:
 
 
 def build_horizon_graph(icfg: InterproceduralCFG, visited: dict[str, bytes]) -> HorizonGraph:
-    """Build W3's edge-horizon graph.
+    """Build the edge-horizon graph.
 
     Args:
-        icfg: whole-program graph (W1).
+        icfg: whole-program graph.
         visited: {seed name: node bitmap} — NodeBitmapShm layout, one bit
             per ICFG node, sampled every execution and OR-accumulated per
             seed by the caller.
