@@ -11,6 +11,16 @@ the gaps are closed items and any reference to a number from a commit message,
 a learnings note or a source comment still resolves to the same finding in git
 history.
 
+**Line numbers are as of 2026-08-21 and have drifted.** The tree has moved a
+great deal since; spot-checking the surviving findings shows several now point
+at unrelated code. Locate a finding by the symbol it names, not by its line —
+and confirm the defect is still there before working on it, for the same reason
+`docs/TODO.md` says an unchecked box is not evidence of anything. Finding 83 is
+the worked example: `core/count_class.py` now documents the extra "64" bucket
+as deliberate, with the two ladders pinned separately in
+`tests/test_count_class_exhaustive.py`, so what was filed as a defect has since
+been settled as intended behaviour without the entry being touched.
+
 Method: audit 1 — five parallel subsystem reviews (main loop, mutation engine,
 adapters/coverage, scheduler math, parsing/services) guided by
 `docs/refs/bug-classes.md`, cross-checked against callers. Audit 2 — six parallel
