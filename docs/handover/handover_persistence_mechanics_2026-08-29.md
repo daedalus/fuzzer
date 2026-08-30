@@ -188,10 +188,10 @@ against it:
   ends. Two seeds jointly owning an edge each see an owner count of 2, so the
   snapshot protects neither and evicting both drops the edge the phase exists
   to protect. Reproduced, then fixed by revalidating at the moment of eviction.
-* *"The age fallback rarely fires."* It is the only path that fires. Measured
-  on a corpus-shaped workload, subsumption evicted 0 seeds and the fallback
-  evicted all 420: every seed owns a unique edge precisely because owning one
-  is what got it admitted, so subsumption almost never has a candidate.
+* *"The age fallback rarely fires."* Wrong, but see the correction below for
+  how. Instrumented over real png_read and gzip_read campaigns, 99.9% of
+  tracked candidates are fully subsumed, so the coverage-loss figure is a total
+  tie and the tiebreak alone decides which seeds are evicted.
 
 The second correction promotes §1c rather than closing it. The fallback is not
 a corner case to be tidied — it is the eviction policy. It now orders by how

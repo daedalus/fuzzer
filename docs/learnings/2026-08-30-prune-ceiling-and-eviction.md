@@ -84,17 +84,47 @@ age remains the tiebreak it always was.
 
 The `_maybe_prune` docstring, and the §1c analysis in
 `docs/handover/handover_persistence_mechanics_2026-08-29.md`, both treat
-age-based eviction as a rarely-taken last resort. Measured on a corpus-shaped
-workload — overlapping edges plus the one unique edge each seed was admitted
-for — subsumption evicted **0** seeds and the fallback evicted **all 420**.
+age-based eviction as a rarely-taken last resort. It is not: which seed gets
+evicted is settled by the tiebreak in essentially every prune.
 
-The reason is structural and should have been predictable: a seed is admitted
-to the corpus *because* it contributed coverage no other seed had. Owning a
-unique edge is therefore the normal state of a tracked seed, not the exception,
-so the subsumption phase almost never has a candidate. Everything that matters
-about eviction quality lives in the path that was assumed not to matter.
+**Correction, 2026-08-30.** The first version of this section reached that
+conclusion from the wrong evidence and gave the wrong reason, and both are
+worth recording because the mistake is an easy one to repeat.
 
-That is the general lesson here, and it is the same one twice: **a mechanism
-that never runs, and a branch that always runs, both look like the thing you
-expected from the outside.** The ceiling made the first invisible; the docstring
-made the second invisible. Only counting which branch fired distinguished them.
+It reported that subsumption evicted 0 of 420 seeds while the fallback evicted
+all of them, measured on a synthetic workload — and explained it with a
+structural argument: a seed is admitted because it contributed coverage no
+other seed had, so owning a unique edge must be the normal state. The argument
+is plausible and the number was real. But the synthetic workload gave every
+seed a guaranteed-unique edge *by construction*, so a loss of at least 1 for
+every candidate was an artifact of the generator, not a finding. The reasoning
+was invented to explain data that had been arranged to produce it.
+
+Instrumenting real campaigns instead — every `_maybe_prune` call over png_read
+(ceiling 150) and gzip_read (ceiling 60) — gives the opposite distribution:
+
+| target | candidates with loss 0 | frontier loss | cost spread inside the tie |
+|---|---|---|---|
+| png_read | 99.9% | 0 at every prune | 148x – 864x (median 352x) |
+| gzip_read | 99.9% | 0 at every prune | 8x – 710x (median 69x) |
+
+Nearly every tracked seed is *fully subsumed*, not uniquely-covering. The
+missing half of the structural argument is that uniqueness decays: a seed is
+admitted for coverage no other seed had, and then later seeds cover it too.
+By the time the ceiling binds, the edge space has saturated and redundancy is
+the normal state.
+
+So the original conclusion survives and its reason does not. The coverage-loss
+ordering is right to have, because it is exactly what protects the 0.1% of
+candidates that still hold unique coverage — but it is a tie for everything
+else, and the tiebreak carries the decision. That is what makes §1c worth
+doing: among coverage-equivalent candidates, accumulated cost is the only
+signal that varies, and it varies by two to three orders of magnitude.
+
+The general lesson is the same one twice over: **a mechanism that never runs
+and a branch that always runs both look, from the outside, like the thing you
+expected.** The ceiling made the first invisible and the docstring made the
+second invisible. And the follow-on: a synthetic workload will confirm whatever
+its generator was written to contain, so a measurement that produces a
+satisfying structural explanation is exactly the one to re-run against real
+data.
