@@ -73,3 +73,7 @@ src/fuzzer_tool/adapters/*.so
 .target.md5
 .target.md5.prev
 docs/sweeps/*.tsv
+
+# Benchmark run artefacts. Raw cells are large and machine-specific; the
+# analysis and the learnings doc are the durable record.
+results/

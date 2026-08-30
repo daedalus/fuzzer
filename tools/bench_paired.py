@@ -51,6 +51,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import bench_lock  # noqa: E402
 from eval_set import DEFAULT_ITERS, SEEDS, TARGET_SETS, cells  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
@@ -115,7 +116,9 @@ def _parse(log: str) -> dict:
     }
 
 
-def run_cell(arm: str, target: str, flags: str, seed: int, iters: int, timeout: int) -> dict:
+def run_cell(
+    arm: str, target: str, flags: str, seed: int, iters: int, timeout: int, rep: int = 0
+) -> dict:
     """Run one campaign and return its parsed outcome."""
     workdir = Path(tempfile.mkdtemp(prefix=f"paired_{arm}_"))
     cmd = [
@@ -151,6 +154,7 @@ def run_cell(arm: str, target: str, flags: str, seed: int, iters: int, timeout: 
         "arm": arm,
         "target": target,
         "seed": seed,
+        "rep": rep,
         "iters": iters,
         "secs": round(time.time() - t0, 2),
         "rc": rc,
@@ -160,6 +164,9 @@ def run_cell(arm: str, target: str, flags: str, seed: int, iters: int, timeout: 
 
 
 def cmd_run(args: argparse.Namespace) -> int:
+    # Refuse to share the machine with another campaign when asked to:
+    # contention perturbs mean_exec, which the Boltzmann arm reads.
+    lock = bench_lock.engage(getattr(args, "lock_single_thread", False))
     seeds = [int(s) for s in args.seeds.split(",")] if args.seeds else SEEDS
     arms = args.arms.split(",")
     unknown = [a for a in arms if a not in ARMS]
@@ -170,8 +177,18 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     RESULTS.mkdir(parents=True, exist_ok=True)
     matrix = list(cells(args.set, seeds))
-    total = len(matrix) * len(arms)
-    print(f"[*] {len(arms)} arms x {len(matrix)} cells = {total} campaigns @ {args.iters} execs")
+    if args.targets:
+        want = set(args.targets.split(","))
+        matrix = [c for c in matrix if Path(c[0]).name in want]
+        unknown = want - {Path(c[0]).name for c in list(cells(args.set, seeds))}
+        if unknown:
+            print(f"[!] not in set {args.set}: {', '.join(sorted(unknown))}", file=sys.stderr)
+            return 2
+    total = len(matrix) * len(arms) * args.reps
+    print(
+        f"[*] {len(arms)} arms x {len(matrix)} cells x {args.reps} reps = "
+        f"{total} campaigns @ {args.iters} execs"
+    )
 
     missing = sorted({t for t, _, _ in matrix if not (REPO / t).exists()})
     if missing:
@@ -181,7 +198,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"[!] not built, cells skipped: {', '.join(Path(m).name for m in missing)}")
         print("    build them with tools/build_targets.sh before quoting a result")
         matrix = [c for c in matrix if c[0] not in set(missing)]
-        total = len(matrix) * len(arms)
+        total = len(matrix) * len(arms) * args.reps
         if not matrix:
             print("[!] no targets available", file=sys.stderr)
             return 1
@@ -201,28 +218,33 @@ def cmd_run(args: argparse.Namespace) -> int:
                 rows = json.loads(out.read_text())
             except (OSError, json.JSONDecodeError):
                 rows = []
-        have = {(r["target"], r["seed"]) for r in rows}
+        have = {(r["target"], r["seed"], r.get("rep", 0)) for r in rows}
         if have:
             print(f"[*] {arm}: resuming, {len(have)} cells already recorded in {out.name}")
 
         for target, flags, seed in matrix:
-            done += 1
-            if (target, seed) in have:
-                continue
-            row = run_cell(arm, target, flags, seed, args.iters, args.timeout)
-            rows.append(row)
-            flag = "" if row["coverage_attached"] else "  [NO COVERAGE]"
-            print(
-                f"  [{done:>4}/{total}] {arm:<18} {Path(target).name:<18} "
-                f"seed={seed:<3} edges={row['edges']:<6} {row['secs']:>6.1f}s{flag}",
-                flush=True,
-            )
-            # Checkpoint after every cell, via a temp file and an atomic
-            # rename so an interruption mid-write cannot truncate the results.
-            tmp = out.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps(rows, indent=1))
-            tmp.replace(out)
+            for rep in range(args.reps):
+                done += 1
+                if (target, seed, rep) in have:
+                    continue
+                row = run_cell(arm, target, flags, seed, args.iters, args.timeout, rep)
+                rows.append(row)
+                flag = "" if row["coverage_attached"] else "  [NO COVERAGE]"
+                print(
+                    f"  [{done:>4}/{total}] {arm:<18} {Path(target).name:<18} "
+                    f"seed={seed:<3} rep={rep} edges={row['edges']:<6} "
+                    f"{row['secs']:>6.1f}s{flag}",
+                    flush=True,
+                )
+                # Checkpoint after every cell, via a temp file and an atomic
+                # rename so an interruption mid-write cannot truncate the
+                # results.
+                tmp = out.with_suffix(".json.tmp")
+                tmp.write_text(json.dumps(rows, indent=1))
+                tmp.replace(out)
         print(f"[*] wrote {out} ({len(rows)} cells)")
+    if lock:
+        lock.release()
     return 0
 
 
@@ -269,10 +291,39 @@ def _key(row: dict) -> tuple[str, int]:
     return row["target"], row["seed"]
 
 
+def _collapse(rows: list[dict], metric: str) -> dict[tuple[str, int], dict]:
+    """Reduce a cell's replicates to one row, using the median metric.
+
+    A cell is not a fixed function of its seed -- see the noise floor
+    recorded in eval_set.DIRECT_LITE_SIGNAL_TARGETS -- so with --reps the
+    unit of analysis is the cell's median across replicates, not a single
+    draw. Median rather than mean because the replicate distribution on
+    png is visibly skewed by occasional low outliers (45 against a 57-63
+    cluster), and one bad draw should not decide a paired cell.
+
+    ``coverage_attached`` is required of *every* replicate: a cell where
+    coverage failed to attach even once is not one whose median can be
+    trusted, and dropping it is the same choice the single-replicate path
+    already makes.
+    """
+    by: dict[tuple[str, int], list[dict]] = {}
+    for r in rows:
+        by.setdefault(_key(r), []).append(r)
+    out = {}
+    for k, group in by.items():
+        merged = dict(group[0])
+        merged[metric] = statistics.median(r[metric] for r in group)
+        merged["coverage_attached"] = all(r["coverage_attached"] for r in group)
+        merged["reps"] = len(group)
+        merged["spread"] = max(r[metric] for r in group) - min(r[metric] for r in group)
+        out[k] = merged
+    return out
+
+
 def compare(base: list[dict], test: list[dict], metric: str = "edges") -> dict:
     """Pair two arms' rows by (target, seed) and score them."""
-    b_by = {_key(r): r for r in base}
-    t_by = {_key(r): r for r in test}
+    b_by = _collapse(base, metric)
+    t_by = _collapse(test, metric)
     shared = sorted(b_by.keys() & t_by.keys())
 
     wins = losses = ties = 0
@@ -293,8 +344,15 @@ def compare(base: list[dict], test: list[dict], metric: str = "edges") -> dict:
             ties += 1
 
     n = wins + losses + ties
+    spreads = [b_by[k]["spread"] for k in shared] + [t_by[k]["spread"] for k in shared]
+    reps = [b_by[k]["reps"] for k in shared] + [t_by[k]["reps"] for k in shared]
     return {
         "cells": n,
+        "reps": min(reps) if reps else 0,
+        # The within-arm spread is the yardstick the median delta has to be
+        # read against: an effect smaller than the noise it sits in is not a
+        # result, however the p-value comes out.
+        "median_spread": statistics.median(spreads) if spreads else 0,
         "dropped_no_coverage": dropped,
         "wins": wins,
         "losses": losses,
@@ -328,14 +386,18 @@ def cmd_analyse(args: argparse.Namespace) -> int:
 
     base = loaded.pop(args.baseline)
     print(f"baseline: {args.baseline}  ({len(base)} cells)\n")
-    hdr = f"{'arm':<20} {'cells':>5} {'W':>4} {'L':>4} {'T':>4} {'McNemar':>9} {'Fisher':>9} {'med Δ':>7}"
+    hdr = (
+        f"{'arm':<20} {'cells':>5} {'rep':>3} {'W':>4} {'L':>4} {'T':>4} "
+        f"{'McNemar':>9} {'Fisher':>9} {'med Δ':>7} {'noise':>6}"
+    )
     print(hdr)
     print("-" * len(hdr))
     for arm, rows in sorted(loaded.items()):
         r = compare(base, rows, args.metric)
         print(
-            f"{arm:<20} {r['cells']:>5} {r['wins']:>4} {r['losses']:>4} {r['ties']:>4} "
-            f"{r['mcnemar_p']:>9.3g} {r['fisher_p']:>9.3g} {r['median_delta']:>+7.1f}"
+            f"{arm:<20} {r['cells']:>5} {r['reps']:>3} {r['wins']:>4} {r['losses']:>4} "
+            f"{r['ties']:>4} {r['mcnemar_p']:>9.3g} {r['fisher_p']:>9.3g} "
+            f"{r['median_delta']:>+7.1f} {r['median_spread']:>6.1f}"
         )
         if r["dropped_no_coverage"]:
             print(f"{'':<20} dropped {r['dropped_no_coverage']} cells: coverage did not attach")
@@ -348,7 +410,10 @@ def cmd_analyse(args: argparse.Namespace) -> int:
         # per target so the shape of the result is visible, not just its sum.
         for arm, rows in sorted(loaded.items()):
             print(f"\nper-target: {arm} vs {args.baseline}")
-            sub = f"{'target':<20} {'cells':>5} {'W':>4} {'L':>4} {'T':>4} {'McNemar':>9} {'med Δ':>7}"
+            sub = (
+                f"{'target':<20} {'cells':>5} {'rep':>3} {'W':>4} {'L':>4} {'T':>4} "
+                f"{'McNemar':>9} {'med Δ':>7} {'noise':>6}"
+            )
             print(sub)
             print("-" * len(sub))
             targets = sorted({r["target"] for r in base} | {r["target"] for r in rows})
@@ -359,8 +424,9 @@ def cmd_analyse(args: argparse.Namespace) -> int:
                     continue
                 r = compare(b, t, args.metric)
                 print(
-                    f"{Path(tgt).name:<20} {r['cells']:>5} {r['wins']:>4} {r['losses']:>4} "
-                    f"{r['ties']:>4} {r['mcnemar_p']:>9.3g} {r['median_delta']:>+7.1f}"
+                    f"{Path(tgt).name:<20} {r['cells']:>5} {r['reps']:>3} {r['wins']:>4} "
+                    f"{r['losses']:>4} {r['ties']:>4} {r['mcnemar_p']:>9.3g} "
+                    f"{r['median_delta']:>+7.1f} {r['median_spread']:>6.1f}"
                 )
 
     print(
@@ -370,6 +436,11 @@ def cmd_analyse(args: argparse.Namespace) -> int:
     print(
         "A ~10-point difference in per-cell win rate needs roughly 100 paired cells "
         "to resolve; check the cells column before believing a p-value."
+    )
+    print(
+        "noise is the median within-arm spread across a cell's replicates -- the "
+        "yardstick med \u0394 has to beat. At rep=1 it reads 0 because a single "
+        "draw cannot show its own spread, not because the cell is reproducible."
     )
     return 0
 
@@ -386,13 +457,33 @@ def main() -> int:
     # drifted from eval_set.py and silently rejected a set that exists.
     r.add_argument("--set", default="locked", choices=tuple(TARGET_SETS))
     r.add_argument("--seeds", default=None, help="comma-separated seed override")
+    r.add_argument(
+        "--targets",
+        default=None,
+        help=(
+            "comma-separated basenames to slice this invocation down to, e.g. "
+            "png_read.so,jpeg_read.so. Slices a set, it does not redefine one: "
+            "the results file is still keyed by the set, and cells left out here "
+            "are filled in by a later resuming run"
+        ),
+    )
     r.add_argument("--iters", type=int, default=DEFAULT_ITERS)
+    r.add_argument(
+        "--reps",
+        type=int,
+        default=1,
+        help=(
+            "replicates per cell; the cell's median is what the pairing uses. "
+            "1 reproduces the old single-draw behaviour"
+        ),
+    )
     r.add_argument("--timeout", type=int, default=900, help="per-campaign timeout, seconds")
     r.add_argument(
         "--restart",
         action="store_true",
         help="discard any recorded cells for these arms and re-run the matrix from scratch",
     )
+    bench_lock.add_argument(r)
     r.set_defaults(func=cmd_run)
 
     a = sub.add_parser("analyse", help="paired analysis of recorded runs")

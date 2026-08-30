@@ -96,10 +96,68 @@ DIRECT_LITE_TARGETS: list[tuple[str, str]] = [
     ("targets/gzip_read.so", ""),
 ]
 
+# direct_lite_signal: the three targets of `direct_lite` that can carry a
+# result, meant to be run with replicated cells (bench_paired --reps).
+#
+# Again a new set, not an edit, per the rule at the top of this file.
+#
+# `direct_lite` fixed the flat-cost problem that disqualified `locked`, but
+# it left a second one in place: it assumed a cell is a fixed function of
+# its seed. It is not. The fuzzer carries wall-clock state -- `age = now -
+# added_at`, and `mean_exec` itself -- so re-running one cell under the
+# *same* arm does not reproduce its edge count. Measured, same arm, same
+# seed, 5 replicates each:
+#
+#     target          spread                CV
+#     png_read.so     45-63 / 39-66         0.118 / 0.189
+#     jpeg_read.so    201-206 / 196-209     0.010 / 0.026
+#     grep_read.so    792-803 (3 reps)      0.007
+#     zlib_read.so    12 flat               0
+#     lz4_read.so     12 flat               0
+#     gzip_read.so    36 flat               0
+#
+# Two separate problems are visible there.
+#
+# Half the set carries no information at all. zlib, lz4 and gzip are
+# bit-for-bit reproducible and saturated -- 12, 12 and 36 edges on every
+# replicate of every seed. They cannot produce a discordant pair for any
+# arm, so their 60 cells per arm are pure cost. The handover predicted
+# zlib and gzip would be no-ops from the flat-cost identity; the real
+# reason is stronger and applies to lz4 too, which that argument missed.
+#
+# The rest is noisy enough to matter. Across replicate pairs of the *same*
+# arm, 46% differ -- each one a pair McNemar would have scored as a win or
+# a loss had the two replicates carried different arm labels. That does not
+# invalidate the test: arm assignment is independent of the noise, so the
+# discordant pairs still split 50/50 under the null and the type I error is
+# controlled. What it destroys is power. One replicate per cell on png puts
+# a ~7-edge standard deviation against an unknown and probably smaller arm
+# effect.
+#
+# Note what cannot be done about it. The obvious repair is to virtualise the
+# clock so cells reproduce exactly, and it is unavailable: `effective_fuzz_count`
+# is `total_time / mean_exec`, which under constant per-execution cost reduces
+# to `fuzz_count` exactly -- the same identity that disqualifies `locked`. A
+# deterministic clock would collapse the two arms into the same computation.
+# The timing variance *is* the quantity under test, so the only way to buy
+# power is replication.
+#
+# Hence: drop the three saturated targets, and spend the freed budget on
+# replicates of the three that move. grep carries its own caveat -- it is the
+# best cost-signal carrier in the set now that it runs its engines in-process
+# (753 edges of real DFA work, cost varying with pattern complexity) but it is
+# ~250 s per cell against ~22 s, so it is priced in seeds rather than reps.
+DIRECT_LITE_SIGNAL_TARGETS: list[tuple[str, str]] = [
+    ("targets/png_read.so", "-D dictionaries/png.dict -m 65536"),
+    ("targets/jpeg_read.so", "-D dictionaries/jpeg.dict -m 65536"),
+    ("targets/grep_read.so", ""),
+]
+
 TARGET_SETS: dict[str, list[tuple[str, str]]] = {
     "locked": LOCKED_TARGETS,
     "cmplog": CMPLOG_TARGETS,
     "direct_lite": DIRECT_LITE_TARGETS,
+    "direct_lite_signal": DIRECT_LITE_SIGNAL_TARGETS,
 }
 
 # ── Seeds ──────────────────────────────────────────────────────────────
