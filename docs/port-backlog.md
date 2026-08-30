@@ -221,9 +221,16 @@ rewired off `fuzz_count` at the same time.
   seeds is down-weighting deep paths on targets where depth costs time, and
   that risk is unmeasured.
 - The third candidate consumer, the age fallback in
-  `EdgeTracker._maybe_prune`, is **not** shipped and should not be attempted as
-  written: that function no longer runs (`max_tracked_seeds` went 200 →
-  200,000 in `fe8fd42`). Tracked separately in `docs/TODO.md`.
+  `EdgeTracker._maybe_prune`, is **unblocked but not shipped**. That function
+  did not run at all (`max_tracked_seeds` went 200 → 200,000 in `fe8fd42`);
+  the ceiling is now 1,000 with batched pruning and it runs again. Two premises
+  behind the original write-up turned out to be wrong — the subsumption phase
+  was *not* correct as it stood, and the fallback does not fire rarely, it is
+  the only path that fires. Eviction now orders by unique coverage lost, which
+  settles the "oldest first has no defence" complaint; whether cumulative
+  execution cost also belongs in that ordering is the open part. Tracked in
+  `docs/TODO.md`; measurements in
+  `docs/learnings/2026-08-30-prune-ceiling-and-eviction.md`.
 
 **Effort S–M** for what remains.
 

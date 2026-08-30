@@ -176,6 +176,32 @@ stale owner counts degrade the rarity signal that drives the schedule) no
 longer runs either. Whether 200,000 was intended is a separate question from
 this port and is not decided here.
 
+**Update (round 18): the blocker is fixed and two of this section's premises
+were wrong.** The ceiling is 1,000 with batched pruning, so `_maybe_prune`
+runs again; details in `docs/learnings/2026-08-30-prune-ceiling-and-eviction.md`.
+Correcting what is written above, because a later reader would otherwise plan
+against it:
+
+* *"The subsumption phase is correct as it stands and should not be touched."*
+  It was not. Its protection test was a snapshot taken before any eviction,
+  which is only sound when exactly one seed is evicted — the situation batching
+  ends. Two seeds jointly owning an edge each see an owner count of 2, so the
+  snapshot protects neither and evicting both drops the edge the phase exists
+  to protect. Reproduced, then fixed by revalidating at the moment of eviction.
+* *"The age fallback rarely fires."* It is the only path that fires. Measured
+  on a corpus-shaped workload, subsumption evicted 0 seeds and the fallback
+  evicted all 420: every seed owns a unique edge precisely because owning one
+  is what got it admitted, so subsumption almost never has a candidate.
+
+The second correction promotes §1c rather than closing it. The fallback is not
+a corner case to be tidied — it is the eviction policy. It now orders by how
+much unique coverage an eviction costs, which is a defensible tiebreak where
+insertion order was not, so the specific complaint in this section ("oldest
+first is a tiebreak with no defence behind it") is answered. Whether *cumulative
+execution cost* should enter that ordering as well is now a live, testable
+question rather than a blocked one, and it inherits the A/B requirement from
+§1b since it changes which seeds exist.
+
 ---
 
 ## 2. Already in the tree — do not re-propose

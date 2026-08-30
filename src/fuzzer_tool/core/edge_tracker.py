@@ -12,6 +12,7 @@ ends of the map are "far". This captures coverage spatial diversity that
 Jaccard (set overlap) and JS (frequency divergence) miss.
 """
 
+import heapq
 import logging
 import math
 import random
@@ -35,6 +36,29 @@ _FRONTIER_FRACTION = 0.25
 
 CORRELATION_MATRIX_MAX = 10_000  # max edge-pair entries in branch correlation
 COVERAGE_TIMELINE_MAX = 1_000  # max snapshots in coverage timeline
+
+# Tracked-seed ceiling, and the fraction of it a prune drops back to.
+#
+# The ceiling exists to bound memory: seed_edges plus its eight companion maps
+# cost, measured, 95 KiB per tracked seed on a png_read-shaped target (~500
+# live edges) and 592 KiB on an ffmpeg_read-shaped one (8,189). At 1,000 seeds
+# that is 93 MiB and 578 MiB respectively. The 200,000 this replaces was not a
+# bound at all -- it works out to 113 GiB on the ffmpeg figure, which is to say
+# the tracker grew without limit and _maybe_prune never fired.
+#
+# The low-water mark is what makes the ceiling affordable. Pruning back to the
+# ceiling exactly leaves the tracker one insertion over it again immediately,
+# so the O(seeds x edges) owner-count pass ran on *every* record_edges call to
+# evict a single seed; measured at 18x the cost of not pruning at all. Dropping
+# to 90% amortises that pass over the next ~10% of the ceiling in insertions.
+#
+# The batch is floored by truncation, not by max(1, ...), so a ceiling under 10
+# gets a batch of zero and keeps the exact prune-to-the-ceiling behaviour.
+# Hysteresis engages only where it buys something, and the small ceilings that
+# tests use to force pruning in a handful of insertions keep their semantics
+# rather than being pruned to half.
+MAX_TRACKED_SEEDS = 1_000
+PRUNE_BATCH_FRAC = 0.1
 
 try:
     import numpy as np
@@ -588,7 +612,10 @@ class EdgeTracker:
     """
 
     def __init__(
-        self, map_size: int = 65536, max_tracked_seeds: int = 200_000, morris_mode: bool = False
+        self,
+        map_size: int = 65536,
+        max_tracked_seeds: int = MAX_TRACKED_SEEDS,
+        morris_mode: bool = False,
     ):
         self.map_size = map_size
         self.max_tracked_seeds = max_tracked_seeds
@@ -874,14 +901,25 @@ class EdgeTracker:
     def _maybe_prune(self):
         """Prune tracked seeds when count exceeds max_tracked_seeds.
 
-        Prefers dropping fully-subsumed seeds whose edges are all covered by
-        other still-tracked seeds.  Only falls back to age-based pruning when
-        every candidate owns at least one edge that no other tracked seed covers.
+        Evicts cheapest-first by how much unique coverage is lost with the
+        seed, so fully-subsumed seeds go before any seed that owns an edge no
+        other tracked seed covers; ties keep insertion order.
+
+        Overflowing the ceiling prunes back below it by PRUNE_BATCH_FRAC, not
+        to the ceiling itself.  Without that margin ``excess`` is 1 in steady
+        state, so the owner-count pass below -- O(tracked seeds x edges per
+        seed) -- ran on every single record_edges call to evict one seed.
+        Measured on 600 insertions of 800 edges each: 14.78s with the pass
+        firing every call against 0.81s with it never firing, which is why the
+        ceiling was raised to 200,000 in fe8fd42 rather than the cost being
+        paid.  Pruning in batches amortises the pass and keeps the bound.
         """
         if len(self.seed_edges) <= self.max_tracked_seeds:
             return
 
-        excess = len(self.seed_edges) - self.max_tracked_seeds
+        batch = int(self.max_tracked_seeds * PRUNE_BATCH_FRAC)
+        low_water = max(1, self.max_tracked_seeds - batch)
+        excess = len(self.seed_edges) - low_water
 
         # Count how many currently-tracked seeds own each edge.
         edge_owners: dict[int, int] = {}
@@ -889,29 +927,54 @@ class EdgeTracker:
             for e in edges:
                 edge_owners[e] = edge_owners.get(e, 0) + 1
 
-        # Seeds that own at least one singleton edge among tracked seeds are
-        # protected: pruning them would silently lose that edge from coverage.
-        protected_keys: set[str] = set()
-        for key, edges in self.seed_edges.items():
-            if any(edge_owners.get(e, 0) <= 1 for e in edges):
-                protected_keys.add(key)
-
-        # Phase 1 — subsumption pass: drop oldest non-protected seeds first.
+        # One revalidating pass, cheapest-first by how much unique coverage
+        # goes with the seed.  A seed whose every edge is held by another
+        # still-tracked seed has loss 0, so fully-subsumed seeds drain first
+        # and the old two-phase behaviour falls out of the ordering; ties keep
+        # insertion order, so age remains the tiebreak it always was.
+        #
+        # Two phases against a snapshot cannot get this right, and both ways
+        # it fails lose coverage silently:
+        #
+        #   * Two seeds jointly owning one edge each see an owner count of 2,
+        #     so a snapshot marks neither protected and evicting both drops
+        #     the edge.  Unreachable while ``excess`` was always 1; routine
+        #     once batches are pruned.
+        #   * Evicting a subsumed seed can make another seed's edges unique.
+        #     A subsumption phase would evict A because B covered for it, then
+        #     an age phase would evict B, dropping an edge that neither
+        #     eviction loses on its own.
+        #
+        # Hence the loss is recomputed at the moment of eviction and the entry
+        # re-queued if it went stale, rather than being ordered once up front.
+        #
+        # This fallback is also not the rare corner it was taken for.  Measured
+        # on a corpus-shaped workload -- overlapping edges plus the one unique
+        # edge each seed was admitted for -- the subsumption path evicted 0 of
+        # 420 seeds: every seed owns a singleton precisely *because* owning one
+        # is what got it admitted.  Eviction is nearly always a choice between
+        # seeds that all cost something, which is why the ordering carries the
+        # weight here.
         keys_to_prune: list[str] = []
-        for key in self.seed_edges:
-            if key not in protected_keys:
-                keys_to_prune.append(key)
-            if len(keys_to_prune) >= excess:
-                break
+        evicted: set[str] = set()
 
-        # Phase 2 — age fallback: if still over budget, sacrifice the oldest
-        # protected seeds as a last resort.
-        if len(keys_to_prune) < excess:
-            for key in list(self.seed_edges):
-                if key in protected_keys and key not in keys_to_prune:
-                    keys_to_prune.append(key)
-                    if len(keys_to_prune) >= excess:
-                        break
+        def _unique_loss(key: str) -> int:
+            return sum(1 for e in self.seed_edges[key] if edge_owners.get(e, 0) <= 1)
+
+        heap = [(_unique_loss(k), i, k) for i, k in enumerate(self.seed_edges)]
+        heapq.heapify(heap)
+        while len(keys_to_prune) < excess and heap:
+            loss, order, key = heapq.heappop(heap)
+            if key in evicted:
+                continue
+            current = _unique_loss(key)
+            if current != loss:
+                heapq.heappush(heap, (current, order, key))
+                continue
+            keys_to_prune.append(key)
+            evicted.add(key)
+            for e in self.seed_edges[key]:
+                edge_owners[e] -= 1
 
         for key in keys_to_prune:
             self.seed_edges.pop(key, None)
@@ -932,14 +995,17 @@ class EdgeTracker:
         # RARE_EDGE_OWNERS so they stop reading as rare -- a slow, silent decay
         # of the rarity signal the whole schedule is steered by.
         #
-        # Rebuilt from the survivors rather than decremented per evicted edge:
-        # this runs only on prune, and edge_owners above is already the exact
-        # pre-prune tally, so a rebuild is both cheap here and obviously right.
+        # edge_owners was decremented as each seed was selected above, so it is
+        # already the survivor tally exactly -- no second O(seeds x edges) pass
+        # is needed to rebuild it. Zero and negative entries are dropped rather
+        # than stored: _edge_owner_count is read by bare subscript on a
+        # defaultdict, so keeping them would grow the map with edges no seed
+        # owns.
         if keys_to_prune:
             rebuilt: defaultdict[int, int] = defaultdict(int)
-            for edges in self.seed_edges.values():
-                for e in edges:
-                    rebuilt[e] += 1
+            for e, n in edge_owners.items():
+                if n > 0:
+                    rebuilt[e] = n
             self._edge_owner_count = rebuilt
 
         self._aggregate_cache = None
