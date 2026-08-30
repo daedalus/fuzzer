@@ -517,7 +517,7 @@ across every registered demuxer, decoder, and parser, built with ASAN and AFL ed
 | Bug | Severity | Summary |
 |---|---|---|
 | [Reachable `av_assert0(0)` in the subtitle decoder](docs/FINDINGS/ffmpeg/av_assert0_subtitle_decoder.md) | **HIGH** | `libavcodec/decode.c:464`. The `send_packet`/`receive_frame` API dispatches subtitle decoders into a path asserting the codec type is VIDEO or AUDIO, but subtitle codecs are type SUBTITLE. A 46-byte input aborts any FFmpeg-based application — reliable DoS in release builds. |
-| [Integer divide-by-zero in `vpk_read_packet`](docs/FINDINGS/ffmpeg/vpk_divide_by_zero.md) | Medium | `libavformat/vpk.c:89`. `last_block_size` is divided by `ch_layout.nb_channels` with no zero check; a malformed VPK header sets `nb_channels = 0` and the final-block branch takes `SIGFPE`. 21-byte reproducer. |
+| [Integer divide-by-zero in `vpk_read_packet`](docs/FINDINGS/ffmpeg/vpk_divide_by_zero.md) | Medium | `libavformat/vpk.c:89`. `last_block_size` is divided by `ch_layout.nb_channels` with no zero check; a failed decoder open inside `avformat_find_stream_info()` zeroes the container's channel count and the final-block branch takes `SIGFPE`. 21-byte reproducer. Reported as [FFmpeg#24290](https://code.ffmpeg.org/FFmpeg/FFmpeg/issues/24290), fix pending in [PR #24297](https://code.ffmpeg.org/FFmpeg/FFmpeg/pulls/24297). |
 
 ### fgrep
 

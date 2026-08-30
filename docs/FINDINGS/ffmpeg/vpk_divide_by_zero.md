@@ -2,7 +2,7 @@
 
 **File**: `libavformat/vpk.c:89`
 **Severity**: Medium — crafted 21-byte input crashes any FFmpeg-based application that opens a malicious `.vpk` file or stream
-**Root cause**: `vpk_read_packet` divides `vpk->last_block_size` by `par->ch_layout.nb_channels` without checking whether `nb_channels` is zero. A malformed VPK header can set `nb_channels = 0`, causing `SIGFPE` on the division.
+**Root cause**: `vpk_read_packet` divides `vpk->last_block_size` by `par->ch_layout.nb_channels` without checking whether `nb_channels` is zero. The header cannot set it to zero — `vpk_read_header` rejects `<= 0` — but a failed `avcodec_open2()` inside `avformat_find_stream_info()` zeroes `ch_layout`, and the empty layout is copied back over the container's channel count, so the division is reached with a zero divisor. (Corrected 2026-08-30; the original report blamed a probe/packet data divergence in the custom-AVIO path. See [Upstream Status](#upstream-status).)
 **Discovered by**: fuzzer-tool with ASAN via `targets/ffmpeg_read.c`
 
 ---
@@ -74,8 +74,24 @@ Both `size` and `skip` divide by `par->ch_layout.nb_channels`. When `nb_channels
 ## Trigger Chain
 
 1. **Demuxer probe** (`vpk_probe`) matches the `VPK ` big-endian magic and assigns the input to the VPK demuxer.
-2. **`vpk_read_header`** parses the 24-byte header. The fuzz input sets `nb_channels = 0` at header bytes `0x0e`–`0x11`. `vpk_read_header` does validate `nb_channels > 0`, but in the fuzzer's custom-AVIO path the probe/header data and the later packet-read data can diverge: by the time `vpk_read_packet` runs, `par->ch_layout.nb_channels` has reverted to `0` from the original fuzz stream while `vpk->last_block_size` and `vpk->block_count` were computed from probe data with a valid channel count. The division is therefore reached with a live-but-zero divisor.
-3. **`vpk_read_packet`** reaches the final-block branch and divides by zero on both `size` and `skip`.
+2. **`vpk_read_header`** parses the 24-byte header and *does* validate the channel count (`nb_channels <= 0` is rejected), so the demuxer sets a positive value — 80 for this input. Nothing is wrong yet.
+3. **`avformat_find_stream_info`** probes the stream, fails to open the `adpcm_psx` decoder, and copies codec parameters back from the decoder context anyway. A failed `avcodec_open2()` has already zeroed the context's `ch_layout` via `ff_codec_close()` → `av_opt_free()` (`ch_layout` is an `AV_OPT_TYPE_CHLAYOUT` option), so the empty layout is written over the container's 80 channels on `codecpar`. `adpcm_psx` has no parser and does not set `AVSTREAM_PARSE_*`, so the demuxer header was the only source of the channel count — unlike mp3, where the decoder is expected to fill the layout.
+4. **`vpk_read_packet`** reaches the final-block branch with a live-but-zero divisor and divides by zero on both `size` and `skip`.
+
+> **Correction (2026-08-30).** Steps 2–3 above replace the original explanation, which claimed the probe data and the packet-read data diverge in the fuzzer's custom-AVIO path. That was a hypothesis, never checked against `libavformat`, and it is not what upstream found: the zeroing happens in `avformat_find_stream_info` and does not depend on custom AVIO. The wrong version is quoted verbatim in [issue #24290](https://code.ffmpeg.org/FFmpeg/FFmpeg/issues/24290) and in third-party coverage, so it is corrected here rather than silently dropped. Mechanism per Jun Zhao's analysis in [PR #24297](https://code.ffmpeg.org/FFmpeg/FFmpeg/pulls/24297).
+
+## ffmpeg CLI Reproducibility
+
+An independent attempt with the ffmpeg CLI (6.1.1, Ubuntu) did **not** crash — see [External Coverage](#external-coverage):
+
+```sh
+printf '\x20\x4b\x50\x56\x56\x50\x00\xf8\x04\x00\x3b\x03\x61\x39\x56\x32\x36\x36\x30\x38\x50' > vpk_crash.bin
+ffmpeg -i vpk_crash.bin -c:a copy -f null -
+```
+
+FFmpeg detected the VPK container, reported a 942,683,702 Hz / 80-channel audio stream, failed to open the ADPCM decoder, and exited with a demuxing error.
+
+The failed decoder open — the first half of the upstream root cause — *does* happen on the CLI path, and the 80 channels it prints is the container value upstream's fix exists to preserve. So the custom-AVIO explanation cannot be why the CLI escapes: that explanation is wrong (see the correction above). What the difference actually is has not been established here. The plausible candidate is the read loop — `targets/ffmpeg_read.c:548` drives `av_read_frame()` until it fails, while the CLI stops at the first demux error — so the harness may simply be the only one that reaches the final-block branch. Unverified; do not repeat it as fact.
 
 ## Crash Input
 
@@ -86,8 +102,20 @@ Hex dump of the 21-byte crash input (`crash_1787378545_34bc062c_sig_signal8.bin`
 00000010  36 36 30 38 50                                    |6608P|
 ```
 
-- Bytes 0–3: `20 4b 50 56` — ASCII `" KPV"`, which is the VPK big-endian magic `VPK ` byte-reversed across a word boundary
-- Byte 0x0e–0x11: `00 00 00 00` — `nb_channels = 0`, the crash trigger
+Decoded against `vpk_read_header`, which reads six little-endian 32-bit fields:
+
+| Offset | Bytes | Field | Value |
+|---|---|---|---|
+| `0x00` | `20 4b 50 56` | magic | `AV_RL32` = `MKBETAG('V','P','K',' ')`, i.e. the tag stored big-endian — what `vpk_probe` requires |
+| `0x04` | `56 50 00 f8` | duration source | `0xf8005056` |
+| `0x08` | `04 00 3b 03` | `offset` | `0x033b0004` |
+| `0x0c` | `61 39 56 32` | `block_align` | `0x32563961` = 844,511,585 |
+| `0x10` | `36 36 30 38` | `sample_rate` | `0x38303636` = 942,683,702 |
+| `0x14` | `50` + EOF | `nb_channels` | `0x50` = **80** — the field is truncated by the 21-byte input, so `avio_rl32` pads with zeros |
+
+Two of these are confirmed against an independent ffmpeg CLI run, which reports exactly 942,683,702 Hz and 80 channels for this input (see [ffmpeg CLI Reproducibility](#ffmpeg-cli-reproducibility)); upstream's FATE regression test asserts the same 80.
+
+> **Correction (2026-08-30).** This section previously claimed `00 00 00 00` at `0x0e`–`0x11` was `nb_channels = 0` and "the crash trigger". That is wrong on every count: the bytes at that offset are `56 32 36 36`, no field starts at `0x0e`, and the channel count this input parses to is 80, not 0. Nothing in the 21 bytes sets a zero channel count — the zero is manufactured later by `libavformat` itself.
 
 ## GDB Backtrace
 
@@ -153,6 +181,8 @@ static int vpk_read_packet(AVFormatContext *s, AVPacket *pkt)
 
 This is consistent with the existing validation in `vpk_read_header` (`if (st->codecpar->ch_layout.nb_channels <= 0) return AVERROR_INVALIDDATA;`) and returns a clean error instead of `SIGFPE`.
 
+This is what we proposed upstream, and it is only half of what landed in review: it stops the `SIGFPE` but leaves the channel count silently clobbered. See [Upstream Status](#upstream-status) for the `avformat_find_stream_info()` change that fixes the cause rather than the symptom.
+
 ## Regression Test
 
 ```c
@@ -168,10 +198,25 @@ static const unsigned char vpk_crash[] = {
 
 ## Upstream Status
 
-Not reported upstream at the time of discovery. The bug is present in FFmpeg 7.1.3 (vendored) and confirmed reproducible against the current `ffmpeg_read_nosan` binary built from that source tree.
+Reported upstream on 2026-08-27 as **[FFmpeg/FFmpeg#24290 — Integer Divide-by-Zero in `vpk_read_packet` (VPK Demuxer)](https://code.ffmpeg.org/FFmpeg/FFmpeg/issues/24290)**. Status as of 2026-08-30: **open**, fix pending review.
 
-**To report** (per [ffmpeg.org/bugreports.html](https://www.ffmpeg.org/bugreports.html)):
-1. Verify the bug still exists against the **latest development branch** (`git HEAD`), not just the vendored 7.1.3.
-2. Register at [code.ffmpeg.org](https://code.ffmpeg.org/user/sign_up) and submit an issue at [code.ffmpeg.org/FFmpeg/FFmpeg/issues](https://code.ffmpeg.org/FFmpeg/FFmpeg/issues).
-3. Include: the 21-byte crash input, the GDB backtrace, and the regression test above.
-4. Upload the crash sample to [streams.videolan.org/upload/](https://streams.videolan.org/upload/) (select FFmpeg project).
+| | |
+|---|---|
+| Issue | [#24290](https://code.ffmpeg.org/FFmpeg/FFmpeg/issues/24290) — open, filed 2026-08-27 |
+| Fix | [PR #24297 `fix/24290-vpk-div0`](https://code.ffmpeg.org/FFmpeg/FFmpeg/pulls/24297) by Jun Zhao — open, 3 commits, +32 −3, all FATE checks green, 0/1 approvals |
+| Prior art | [ffmpeg-devel, November 2024](https://ffmpeg.org/pipermail/ffmpeg-devel/2024-November/335598.html) — flagged by Jun Zhao as the same issue; the guard was proposed then and never landed |
+| Credit | `Reported-by: Darío Clavijo`; the vpk guard carries `Original-patch-by: Kacper Michajłow` from that 2024 thread |
+
+The upstream fix is broader than the guard suggested above. Its three commits:
+
+1. **`avformat: Restore the container channel layout after a failed decoder open`** — the actual root cause. `avformat_find_stream_info()` writes codec parameters back from the decoder context even when `avcodec_open2()` failed, and a failed open zeroes `ch_layout` through `ff_codec_close()` → `av_opt_free()`. The commit restores the container layout when it was specified and the decoder result is unspecified, matching the existing restore of color metadata in `parameters_from_context()`.
+2. **`avformat/vpk: Check the channel count before dividing in the last block`** — the defence-in-depth guard, the same shape as the one suggested above.
+3. **`tests/fate: Add a VPK regression test for a zeroed channel layout`** — generates the 21-byte sample from the issue and asserts the dump still reports 80 channels. `ffprobe -show_entries` is not usable because the decoder cannot be opened at all.
+
+Commit 1 is the part our report missed: we proposed only the divisor guard, which stops the `SIGFPE` but leaves the channel count silently clobbered for every codec in that class. Worth carrying into future reports — a guard at the faulting instruction is a symptom fix, and the maintainer will look for where the bad value came from.
+
+The commit trailers also read `Found-by: OSS-Fuzz` and reference `issues.oss-fuzz.com/issues/42536474`, so the same defect was in the OSS-Fuzz queue independently.
+
+## External Coverage
+
+- **[21 Bytes Can Crash FFmpeg: Inside the Vibecoded Fuzzer That Found What Years of Audits Missed](https://dev.to/jamilxt/21-bytes-can-crash-ffmpeg-inside-the-vibecoded-fuzzer-that-found-what-years-of-audits-missed-fpe)** — dev.to, jamilxt, 2026-08-29. Independent writeup: clones this repo, walks `targets/ffmpeg_read.c` and `AGENTS.md`, and attempts a reproduction against a system ffmpeg — which does not crash. Its output is the source of [ffmpeg CLI Reproducibility](#ffmpeg-cli-reproducibility) above. It repeats this document's original custom-AVIO explanation, which the correction above supersedes.

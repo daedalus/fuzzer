@@ -44,4 +44,4 @@ Covers all registered demuxers, decoders, and parsers. Compiled with ASAN (`-fsa
 ## Bugs
 
 - **[av_assert0_subtitle_decoder](av_assert0_subtitle_decoder.md)** — Reachable `av_assert0(0)` in `decode_simple_internal` via subtitle decoder. 46-byte PGS subtitle input triggers assertion failure in `avcodec_send_packet`. Severity: HIGH.
-- **[vpk_divide_by_zero](vpk_divide_by_zero.md)** — Integer divide-by-zero in `vpk_read_packet` (VPK demuxer). 21-byte VPK header with `nb_channels=0` causes `SIGFPE`. Severity: Medium.
+- **[vpk_divide_by_zero](vpk_divide_by_zero.md)** — Integer divide-by-zero in `vpk_read_packet` (VPK demuxer). A 21-byte VPK stream whose channel count is zeroed by a failed decoder open causes `SIGFPE`. Severity: Medium. Reported as [FFmpeg#24290](https://code.ffmpeg.org/FFmpeg/FFmpeg/issues/24290); fix pending in [PR #24297](https://code.ffmpeg.org/FFmpeg/FFmpeg/pulls/24297).
