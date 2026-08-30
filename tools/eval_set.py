@@ -61,9 +61,45 @@ CMPLOG_TARGETS: list[tuple[str, str]] = [
     ("targets/secp256k1_read", "--cmplog"),
 ]
 
+# direct_lite: the same targets as `locked`, as .so rather than executables.
+#
+# A new set rather than an edit to `locked`, per the rule at the top of this
+# file: results are not comparable across the two, and every number quoted
+# from here must say so.
+#
+# The reason it exists is that `locked` cannot resolve any arm whose effect
+# depends on per-seed execution cost. Measured on png_read, mean cost per seed
+# across a campaign's corpus:
+#
+#     targets/png_read     (subprocess)   p90/p10 1.06x   CV 0.023
+#     targets/png_read.so  (direct_lite)  p90/p10 4.32x   CV 1.455
+#
+# ~9 ms of fork/exec dominates ~0.2 ms of decode, so in subprocess mode every
+# seed costs the same to within noise and the signal is gone before any arm
+# sees it. An arm read against `locked` would come back "no difference" whether
+# or not it has one -- a false negative, not a null result.
+#
+# Cost is also why the whole matrix is affordable here: 22 s per cell against
+# 217 s, a 10x speedup, because process spawn was most of the old budget.
+#
+# -m 65536 on the format targets: the 4096 default truncates away exactly the
+# large inputs whose decode cost varies, so the default is not a neutral
+# choice for a cost-sensitive arm -- it is one that suppresses the quantity
+# under test. Measured on png_read.so, raising the cap moves p90/p10 from
+# 2.00x to 4.32x. The compressed-stream targets keep the default.
+DIRECT_LITE_TARGETS: list[tuple[str, str]] = [
+    ("targets/png_read.so", "-D dictionaries/png.dict -m 65536"),
+    ("targets/jpeg_read.so", "-D dictionaries/jpeg.dict -m 65536"),
+    ("targets/zlib_read.so", ""),
+    ("targets/lz4_read.so", ""),
+    ("targets/grep_read.so", ""),
+    ("targets/gzip_read.so", ""),
+]
+
 TARGET_SETS: dict[str, list[tuple[str, str]]] = {
     "locked": LOCKED_TARGETS,
     "cmplog": CMPLOG_TARGETS,
+    "direct_lite": DIRECT_LITE_TARGETS,
 }
 
 # ── Seeds ──────────────────────────────────────────────────────────────

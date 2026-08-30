@@ -51,7 +51,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from eval_set import DEFAULT_ITERS, SEEDS, cells  # noqa: E402
+from eval_set import DEFAULT_ITERS, SEEDS, TARGET_SETS, cells  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 RESULTS = REPO / "results" / "paired"
@@ -68,6 +68,14 @@ ARMS: dict[str, list[str]] = {
     "qea-elite-reset": ["--qea", "--qea-elite-reset", "8"],
     "qea-no-rotation": ["--qea", "--qea-rotation-angle", "0.0"],
     "qea-no-bias": ["--qea", "--qea-strong-bias", "0.5"],
+    # Boltzmann seed energy. Both arms pass the same flag and differ only in
+    # a code edit (see UNWIRED_ARMS), so they must be run in separate
+    # invocations with the source swapped between them. --boltzmann without
+    # --elo makes _pick_boltzmann_seed the sole seed strategy, which is what
+    # keeps this single-variable: under --elo it would be one arbitrated arm
+    # among several and most picks would not go through the code under test.
+    "boltzmann-count": ["--boltzmann"],
+    "boltzmann-cost": ["--boltzmann"],
 }
 
 # Arms that are compile-time rather than flag-driven still belong here, as
@@ -76,7 +84,16 @@ ARMS: dict[str, list[str]] = {
 # core/mb_cbh.py with no CLI surface, because giving every internal search
 # constant a flag is how the flag space stops being reviewable. To test it,
 # edit _CBH_MAX_SITES and record the arm name by hand.
-UNWIRED_ARMS = {"cbh-reanchor": "core/mb_cbh.py:_CBH_MAX_SITES = 4"}
+UNWIRED_ARMS = {
+    "cbh-reanchor": "core/mb_cbh.py:_CBH_MAX_SITES = 4",
+    # The energy term in SeedPicker._pick_boltzmann_seed. "cost" is the
+    # shipped code; "count" is the pre-ab07835 form, restored by hand:
+    #     n = max(meta.get("fuzz_count", 1), 1)
+    # in place of the effective_fuzz_count call. No flag, deliberately: the
+    # arm is a question about which quantity is right, not a knob to keep.
+    "boltzmann-count": 'services/seed_picker.py: n = max(meta.get("fuzz_count", 1), 1)',
+    "boltzmann-cost": "services/seed_picker.py: n = effective_fuzz_count(meta, mean_exec)",
+}
 
 # ── Running ────────────────────────────────────────────────────────────
 
@@ -171,19 +188,41 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     done = 0
     for arm in arms:
+        out = RESULTS / f"{args.set}_{arm}.json"
+        # Resume from whatever is already on disk. A full matrix is hours of
+        # compute and the results file used to be written once, after the last
+        # cell of an arm -- so an interrupted run lost every cell it had
+        # completed. Cells are keyed by (target, seed), which is the same key
+        # the pairing uses, so a resumed file is indistinguishable from one
+        # produced in a single pass.
         rows = []
+        if out.exists() and not args.restart:
+            try:
+                rows = json.loads(out.read_text())
+            except (OSError, json.JSONDecodeError):
+                rows = []
+        have = {(r["target"], r["seed"]) for r in rows}
+        if have:
+            print(f"[*] {arm}: resuming, {len(have)} cells already recorded in {out.name}")
+
         for target, flags, seed in matrix:
+            done += 1
+            if (target, seed) in have:
+                continue
             row = run_cell(arm, target, flags, seed, args.iters, args.timeout)
             rows.append(row)
-            done += 1
             flag = "" if row["coverage_attached"] else "  [NO COVERAGE]"
             print(
                 f"  [{done:>4}/{total}] {arm:<18} {Path(target).name:<18} "
-                f"seed={seed:<3} edges={row['edges']:<6} {row['secs']:>6.1f}s{flag}"
+                f"seed={seed:<3} edges={row['edges']:<6} {row['secs']:>6.1f}s{flag}",
+                flush=True,
             )
-        out = RESULTS / f"{args.set}_{arm}.json"
-        out.write_text(json.dumps(rows, indent=1))
-        print(f"[*] wrote {out}")
+            # Checkpoint after every cell, via a temp file and an atomic
+            # rename so an interruption mid-write cannot truncate the results.
+            tmp = out.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(rows, indent=1))
+            tmp.replace(out)
+        print(f"[*] wrote {out} ({len(rows)} cells)")
     return 0
 
 
@@ -320,10 +359,17 @@ def main() -> int:
 
     r = sub.add_parser("run", help="run arms over the locked matrix")
     r.add_argument("--arms", default="baseline", help=f"comma-separated; known: {','.join(ARMS)}")
-    r.add_argument("--set", default="locked", choices=("locked", "cmplog"))
+    # Derived from TARGET_SETS rather than hardcoded: the choices tuple had
+    # drifted from eval_set.py and silently rejected a set that exists.
+    r.add_argument("--set", default="locked", choices=tuple(TARGET_SETS))
     r.add_argument("--seeds", default=None, help="comma-separated seed override")
     r.add_argument("--iters", type=int, default=DEFAULT_ITERS)
     r.add_argument("--timeout", type=int, default=900, help="per-campaign timeout, seconds")
+    r.add_argument(
+        "--restart",
+        action="store_true",
+        help="discard any recorded cells for these arms and re-run the matrix from scratch",
+    )
     r.set_defaults(func=cmd_run)
 
     a = sub.add_parser("analyse", help="paired analysis of recorded runs")
