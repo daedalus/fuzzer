@@ -54,6 +54,23 @@ PERF_SHIM="src/fuzzer_tool/adapters/perf_shim.c"
 TARGETS="targets"
 VENDOR="vendor"
 LZ4="${LZ4_DIR:-vendor/lz4}"
+GREP_SRC="${GREP_DIR:-vendor/grep}"
+GREP_INC="-I$GREP_SRC -I$GREP_SRC/lib -I$GREP_SRC/src"
+grep_objs() { echo "/tmp/grep_dfa$1.o /tmp/grep_localeinfo$1.o /tmp/grep_kwset$1.o"; }
+# grep -P's engine is optional: config.h defines HAVE_LIBPCRE only when
+# configure found pcre2, and the header can be present without the library
+# being linkable. Probe by linking rather than trusting either, for the same
+# reason ffmpeg_extralibs() test-links each -l it derives: a library named in
+# a config file is a record of what configure saw, not of what links here.
+GREP_PCRE_FLAGS=""
+GREP_PCRE_LIBS=""
+if [ -f "$GREP_SRC/config.h" ] && grep -q "define HAVE_LIBPCRE 1" "$GREP_SRC/config.h" 2>/dev/null; then
+    if echo 'int main(void){return 0;}' | \
+       ${DEFAULT_CC:-cc} -x c - -lpcre2-8 -o /dev/null >/dev/null 2>&1; then
+        GREP_PCRE_FLAGS="-DGREP_HAVE_PCRE2"
+        GREP_PCRE_LIBS="-lpcre2-8"
+    fi
+fi
 SECP256K1="${SECP256K1_DIR:-vendor/secp256k1}"
 SQLITE="${SQLITE_DIR:-vendor/sqlite}"
 # Shared by compile_sqlite_objects and the sqlite_read.so link: the wrapper
@@ -487,6 +504,47 @@ compile_lz4_objects() {
     fi
 }
 
+# ── Compile GNU Grep engine objects ────────────────────────────────
+# Vendored via tools/vendor_grep.sh (extracts to vendor/grep/).
+#
+# targets/grep_read.c drives grep's matcher engines in-process. Only the
+# three files it actually exercises are recompiled here with coverage
+# instrumentation; the remaining gnulib support code comes from the
+# prebuilt lib/libgreputils.a, which the linker pulls from only for symbols
+# these objects leave undefined. Instrumenting all of gnulib would spend
+# bitmap slots on code no pattern can reach.
+#
+# Same shim discipline as the lz4/secp256k1 objects (Hard Rule 8): compiled
+# WITHOUT `-include $SHIM`, which applies to every .c on a command line and
+# would emit __afl_map_shm / __afl_area into each object and fail the link.
+#
+# -include config.h is mandatory and must come first: gnulib's replacement
+# headers under vendor/grep/lib #error out if config.h has not been seen.
+# That also constrains the wrapper's own compile line, where the config.h
+# -include has to precede the -include of the shim for the same reason.
+compile_grep_objects() {
+    local suffix="$1" flags="$2" cc="${3:-$DEFAULT_CC}" extra_cflags="${4:-}"
+    [ -f "$GREP_SRC/lib/libgreputils.a" ] || return 1
+    echo "Compiling grep objects${suffix:+ ($suffix)}..."
+    local cov_flag="-fsanitize-coverage=trace-pc-guard"
+    case "$cc" in
+        *clang*) cov_flag="-fsanitize-coverage=trace-pc-guard" ;;
+        *) cov_flag="" ;;   # gcc has no trace-pc-guard; see _pick_cc
+    esac
+    local rc=0
+    for src in lib/dfa lib/localeinfo src/kwset; do
+        $cc $flags $cov_flag -fPIC -O2 -g $extra_cflags \
+            -include "$GREP_SRC/config.h" $GREP_INC \
+            -c "$GREP_SRC/${src}.c" -o "/tmp/grep_$(basename "$src")${suffix}.o" 2>/dev/null || rc=$?
+    done
+    if [ $rc -eq 0 ]; then
+        ok "grep objects${suffix:+ ($suffix)}"
+    else
+        warn "grep objects${suffix:+ ($suffix)} failed"
+        return 1
+    fi
+}
+
 # ── Compile secp256k1 library objects ─────────────────────────────
 # Vendored via tools/vendor_secp256k1.sh (extracts to vendor/secp256k1/).
 # libsecp256k1 is a plain source drop: the precomputed ECMULT tables are
@@ -736,7 +794,17 @@ build_simple_targets() {
     build_target "$TARGETS/gzip_read.c" "$TARGETS/gzip_read${out_suffix}" "$GZIP_LIBS" "$flags" "$cc" "$extra_cflags $ZLIB_INC"
     build_target "$TARGETS/jpeg_read.c" "$TARGETS/jpeg_read${out_suffix}" "-ljpeg" "$flags" "$cc" "$extra_cflags"
     build_target "$TARGETS/ffmpeg_read.c" "$TARGETS/ffmpeg_read${out_suffix}" "$FFMPEG_LIBS" "$flags" "$DEFAULT_CC" "$FFMPEG_INC"
-    build_target "$TARGETS/grep_read.c" "$TARGETS/grep_read${out_suffix}" "" "$flags"
+    # grep_read — vendored GNU Grep (tools/vendor_grep.sh extracts to
+    # vendor/grep). Skipped rather than built against the system grep: the
+    # target links grep's matcher engines in-process, so without the vendored
+    # source there is nothing to link.
+    if compile_grep_objects "$suffix" "$flags" "$cc" "$extra_cflags"; then
+        build_target "$TARGETS/grep_read.c" "$TARGETS/grep_read${out_suffix}" \
+            "$(grep_objs "$suffix") $GREP_SRC/lib/libgreputils.a $GREP_PCRE_LIBS" \
+            "$flags" "$cc" "$extra_cflags -include $GREP_SRC/config.h $GREP_INC $GREP_PCRE_FLAGS"
+    else
+        warn "grep_read${out_suffix}: vendor/grep not found, skipping (run tools/vendor_grep.sh)"
+    fi
     if [ "$HAS_FUZZGOAT" -eq 1 ]; then
         compile_fuzzgoat_object "$flags" "$cc" "$extra_cflags"
         build_target "$TARGETS/fuzzgoat_read.c" "$TARGETS/fuzzgoat_read${out_suffix}" "/tmp/fuzzgoat.o -lm" "$flags" "$cc" "-I$VENDOR/fuzzgoat"
@@ -919,7 +987,17 @@ build_simple_so_targets() {
     build_so_target "$TARGETS/jpeg_read.c" "$TARGETS/jpeg_read${out_suffix}.so" "-ljpeg" "$flags" "$cc" "$extra_cflags"
     build_so_target "$TARGETS/nop_target.c" "$TARGETS/nop_target${out_suffix}.so" "" "$flags" "$cc" "$extra_cflags"
     build_so_target "$TARGETS/ffmpeg_read.c" "$TARGETS/ffmpeg_read${out_suffix}.so" "$FFMPEG_LIBS" "$flags" "$cc" "$extra_cflags $FFMPEG_INC"
-    build_so_target "$TARGETS/grep_read.c" "$TARGETS/grep_read${out_suffix}.so" "" "$flags" "$cc" "$extra_cflags"
+    # grep_read.so — see the note on the executable build above. The
+    # config.h -include has to precede the shim's, which build_so_target
+    # appends after $extra_cflags; gnulib's replacement headers #error out
+    # if config.h has not been seen first.
+    if compile_grep_objects "$suffix" "$flags" "$cc" "$extra_cflags"; then
+        build_so_target "$TARGETS/grep_read.c" "$TARGETS/grep_read${out_suffix}.so" \
+            "$(grep_objs "$suffix") $GREP_SRC/lib/libgreputils.a $GREP_PCRE_LIBS -Wl,--export-dynamic" \
+            "$flags" "$cc" "$extra_cflags -include $GREP_SRC/config.h $GREP_INC $GREP_PCRE_FLAGS"
+    else
+        warn "grep_read${out_suffix}.so: vendor/grep not found, skipping (run tools/vendor_grep.sh)"
+    fi
     if [ "$HAS_FUZZGOAT" -eq 1 ]; then
         compile_fuzzgoat_object "$flags" "$cc" "-I$VENDOR/fuzzgoat"
         build_so_target "$TARGETS/fuzzgoat_read.c" "$TARGETS/fuzzgoat_read${out_suffix}.so" "/tmp/fuzzgoat.o -lm" "$flags" "$cc" "-I$VENDOR/fuzzgoat"
