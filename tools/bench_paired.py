@@ -340,6 +340,29 @@ def cmd_analyse(args: argparse.Namespace) -> int:
         if r["dropped_no_coverage"]:
             print(f"{'':<20} dropped {r['dropped_no_coverage']} cells: coverage did not attach")
 
+    if args.by_target:
+        # A pooled row is not enough to read an arm whose effect is expected on
+        # some targets and absent by construction on others: cells that cannot
+        # move dilute a real effect, and a target near coverage saturation
+        # contributes ties that read as agreement. Break the same pairing out
+        # per target so the shape of the result is visible, not just its sum.
+        for arm, rows in sorted(loaded.items()):
+            print(f"\nper-target: {arm} vs {args.baseline}")
+            sub = f"{'target':<20} {'cells':>5} {'W':>4} {'L':>4} {'T':>4} {'McNemar':>9} {'med Δ':>7}"
+            print(sub)
+            print("-" * len(sub))
+            targets = sorted({r["target"] for r in base} | {r["target"] for r in rows})
+            for tgt in targets:
+                b = [r for r in base if r["target"] == tgt]
+                t = [r for r in rows if r["target"] == tgt]
+                if not b or not t:
+                    continue
+                r = compare(b, t, args.metric)
+                print(
+                    f"{Path(tgt).name:<20} {r['cells']:>5} {r['wins']:>4} {r['losses']:>4} "
+                    f"{r['ties']:>4} {r['mcnemar_p']:>9.3g} {r['median_delta']:>+7.1f}"
+                )
+
     print(
         "\nMcNemar is the test to read: the matrix is paired by construction. "
         "Fisher is shown only to make the cost of discarding the pairing visible."
@@ -376,6 +399,11 @@ def main() -> int:
     a.add_argument("files", nargs="+")
     a.add_argument("--baseline", default="baseline")
     a.add_argument("--metric", default="edges", choices=("edges", "corpus", "crashes"))
+    a.add_argument(
+        "--by-target",
+        action="store_true",
+        help="also break the pairing out per target, not just pooled",
+    )
     a.set_defaults(func=cmd_analyse)
 
     args = ap.parse_args()
