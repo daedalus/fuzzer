@@ -971,13 +971,21 @@ def cmd_rank(args):
         et.from_dict(et_data)
 
     # Load seed metadata from state store
+    from fuzzer_tool.services.corpus_manager import seed_key as seed_key_for
+
     seed_meta = {}
     now = time.time()
     state = store.get("corpus")
     if state:
         saved = state.get("seed_meta", {})
         for seed in corpus:
-            key = seed.hex()
+            # Same key scheme as CorpusManager.save_state: content hash,
+            # falling back to the legacy seed.hex() key for older states.
+            key = seed_key_for(seed)
+            if key not in saved:
+                legacy = seed.hex()
+                if legacy in saved:
+                    key = legacy
             if key in saved:
                 sm = saved[key]
                 seed_meta[seed] = {

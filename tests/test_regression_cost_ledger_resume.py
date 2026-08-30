@@ -26,7 +26,7 @@ from types import SimpleNamespace
 
 from fuzzer_tool.core.cost_ledger import seed_exec_us
 from fuzzer_tool.core.state_store import StateStore
-from fuzzer_tool.services.corpus_manager import CorpusManager
+from fuzzer_tool.services.corpus_manager import CorpusManager, seed_key
 from fuzzer_tool.services.operators import OperatorEngine
 
 
@@ -149,7 +149,7 @@ class TestLegacyState:
 
             # Simulate a pre-ledger state file by deleting the two keys.
             raw = saved._state_store.get("corpus")
-            entry = raw["seed_meta"][seed.hex()]
+            entry = raw["seed_meta"][seed_key(seed)]
             entry.pop("total_time", None)
             entry.pop("cost_samples", None)
             saved._state_store.set("corpus", raw)

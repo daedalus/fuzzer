@@ -120,6 +120,22 @@ def check_coverage_contract(saved: dict | None, current: dict) -> None:
             )
 
 
+def seed_key(data: bytes) -> str:
+    """Content hash used as the persisted ``seed_meta`` key.
+
+    Kept at module level because three call sites outside CorpusManager
+    read persisted seed_meta -- cli/commands.py and services/tmin.py among
+    them -- and they must agree on the key scheme. They previously did not:
+    the entries were keyed by ``seed.hex()`` while the ``parent_key`` values
+    stored inside them were already these hashes, so tmin's lineage walk
+    looked up a 16-char hash in a map keyed by full seed content and could
+    never resolve a chain for any seed longer than 8 bytes.
+    """
+    if _use_xxhash:
+        return xxhash.xxh64(data).hexdigest()[:16]
+    return hashlib.sha256(data).hexdigest()[:16]
+
+
 class CorpusManager:
     """Manages corpus persistence, state, and minimization.
 
@@ -171,9 +187,7 @@ class CorpusManager:
             self.load_state()
 
     def seed_key(self, data: bytes) -> str:
-        if _use_xxhash:
-            return xxhash.xxh64(data).hexdigest()[:16]
-        return hashlib.sha256(data).hexdigest()[:16]
+        return seed_key(data)
 
     def save_state(self):
         f = self.f
@@ -217,9 +231,30 @@ class CorpusManager:
             "invocation": getattr(f, "original_invocation", "") or getattr(f, "invocation", ""),
         }
         for seed, meta in f.seed_meta.items():
-            key = seed.hex()
-            if len(key) >= 256:
-                continue
+            # Keyed by the content hash, not by seed.hex().
+            #
+            # 289c85f skipped keys >= 256 chars to drop corrupted tracker
+            # JSON that had been loaded as corpus seeds, on the stated
+            # assumption that "seed keys should be hex hashes (< 256
+            # chars)". They were not hashes: seed.hex() is the hex of the
+            # seed's whole content, so the guard actually dropped every
+            # seed larger than 128 bytes -- and with it the entire meta
+            # entry, not just the suspect part. Measured on a live png
+            # campaign: the corpus held seeds up to 2858 bytes while the
+            # longest persisted key was 234 chars (117 bytes), and no key
+            # >= 256 existed in the state at all. Across --resume that
+            # lost fuzz_count, coverage_edges, added_at, momentum,
+            # lineage_depth, redqueen offsets/matches and the cost ledger
+            # for essentially every realistic seed.
+            #
+            # Hashing makes the assumption true instead of removing the
+            # guard and re-admitting the bloat it was reaching for: keys
+            # are now 16 chars regardless of seed size, which bounds the
+            # state file far more tightly than the 128-byte cliff did.
+            # It also makes these keys agree with the parent_key values
+            # stored *inside* each entry, which are already seed_key()
+            # hashes -- see the lineage walk in services/tmin.py.
+            key = self.seed_key(seed)
             rm = meta.get("redqueen_matches", [])
             rm_ser = [[m[0], m[1].hex(), m[2].hex()] for m in rm]
             state["seed_meta"][key] = {
@@ -309,8 +344,16 @@ class CorpusManager:
         f._corpus_size_history = array("I", state.get("corpus_size_history", []))
         saved_meta = state.get("seed_meta", {})
         for seed in f.corpus:
-            key = seed.hex()
-            if key in saved_meta and len(key) < 256:
+            # Hash key first, then the legacy seed.hex() key so state files
+            # written before the change still restore. Old files only ever
+            # held seeds under 128 bytes -- larger ones were dropped at save
+            # time -- so the fallback recovers exactly what is there and
+            # nothing is silently reinterpreted.
+            key = self.seed_key(seed)
+            if key not in saved_meta:
+                legacy = seed.hex()
+                key = legacy if legacy in saved_meta else key
+            if key in saved_meta:
                 sm = saved_meta[key]
                 f.seed_meta[seed].update(
                     {
