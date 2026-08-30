@@ -6,29 +6,43 @@
 `ab07835` shipped `SeedPicker._pick_boltzmann_seed` reading
 `effective_fuzz_count` instead of `fuzz_count`.
 **Verdict: no significant difference, with a bound.** The change is not
-detectably better and not detectably worse. What is new here is that the
-matrix can say *how large* an effect it would have caught, so this is a
-bounded null rather than a bare one.
+detectably better and not detectably worse on any of the three targets that
+can carry it. What is new here is that the matrix can say *how large* an
+effect it would have caught, so this is a bounded null rather than a bare
+one.
 
 ---
 
 ## 1. The result
 
-Ten seeds per target, three replicates per cell, both arms, `direct_lite`
-at `-m 65536`, 10k execs, in-process.
+Three replicates per cell, both arms paired in time, `direct_lite` at
+`-m 65536`, 10k execs, in-process. Ten seeds on png and jpeg; twenty on
+grep, for the reason in §1.
 
-| target | cost wins | loses | ties | median Δ | McNemar p |
-|---|---|---|---|---|---|
-| `png_read.so` | 3 | 6 | 1 | −2.0 edges | 0.508 |
-| `jpeg_read.so` | 2 | 5 | 3 | −1.5 edges | 0.453 |
-| pooled *(reference only)* | 5 | 11 | 4 | −2.0 | 0.210 |
+| target | seeds | cost wins | loses | ties | median Δ | McNemar p |
+|---|---|---|---|---|---|---|
+| `png_read.so` | 10 | 3 | 6 | 1 | −2.0 edges | 0.508 |
+| `jpeg_read.so` | 10 | 2 | 5 | 3 | −1.5 edges | 0.453 |
+| `grep_read.so` | 20 | 12 | 7 | 1 | +3.0 edges | 0.359 |
 
-The direction is consistently against the shipped change on both targets —
-11 losses to 5 wins pooled — which is the direction `docs/TODO.md` warned
-about: down-weighting expensive seeds is down-weighting deep paths on
-targets where depth costs time. It is not significant and should not be
-reported as a loss. It is a lean, and it is the lean the risk predicted,
-which is worth remembering if this is ever revisited.
+No target reaches significance and the directions do not agree: png and
+jpeg lean slightly against the change, grep slightly for it. Nothing here
+supports either sign.
+
+The grep half is worth recording in full because it is a lesson about
+reading interim results. The first ten grep seeds came back 7 wins to 2
+losses, median +4.5, p = 0.180 — and grep is the one target measured to
+have strongly varying per-seed cost (CV 0.922, p90/p10 7.18x), which is
+precisely where the cost-based energy is supposed to help. That is a
+mechanism-consistent story and it was tempting. Seeds 10-19 were then run
+to settle it and came back **5 wins to 5 losses**: an exact coin flip. The
+combined 12/7 with p = 0.359 is the honest number, and the apparent signal
+in the first half was noise that happened to line up with the theory.
+
+The general point: an interim split on half a matrix is not a weak version
+of the result, it is a different quantity. With a per-cell standard
+deviation of 12.3 edges, a 7/2 split over ten cells is entirely ordinary
+under the null.
 
 ## 2. What the matrix could have resolved
 
@@ -37,21 +51,27 @@ within-cell spread (mean sd 4.6 edges on png, 4.7 on jpeg; per-cell
 comparison se ≈ 3.7 after three replicates), for the paired sign test at
 α = 0.05 over 10 cells:
 
-| true effect | power |
-|---|---|
-| 2 edges | 15% |
-| 5 edges | ~77% |
-| 10 edges | ~100% |
-| 20 edges | ~100% |
+| true effect | png / jpeg (10 cells, sd ~4.6) | grep (20 cells, sd 12.3) |
+|---|---|---|
+| 2 edges | 15% | 9% |
+| 5 edges | ~77% | 38% |
+| 10 edges | ~100% | 91% |
+| 20 edges | ~100% | 100% |
+
+grep needed twice the seeds to reach comparable power because its
+within-cell spread is ~12 edges in absolute terms against png's ~4.6. Low
+*relative* noise (CV 0.007 on a base of ~800) is not low noise for this
+purpose: what competes with the effect size is the absolute spread.
 
 So an effect of 10 edges or more would almost certainly have shown, and a
 5-edge effect probably would have. A 2-edge effect would not. The observed
 median Δ is −2, sitting exactly in the band the design cannot resolve.
 
-**The usable statement:** on png and jpeg, the cost-based energy changes
-edge discovery by less than about 5 edges in either direction — under ~8%
-of png's ~60 and ~2.5% of jpeg's ~205. Anyone wanting to resolve smaller
-than that needs more replicates, not more seeds: the noise is within-cell.
+**The usable statement:** on png and jpeg the cost-based energy changes
+edge discovery by under about 5 edges in either direction (under ~8% of
+png's ~60, ~2.5% of jpeg's ~205); on grep, by under about 10 edges (~1.2%
+of ~800). Resolving smaller than that needs more replicates on png and
+jpeg, where the noise is within-cell, and more of both on grep.
 
 ## 3. Why the original matrix could not have produced this
 
@@ -115,22 +135,52 @@ exclusion, the refusal code, unclean holder death, and the thread caps;
 falsified by switching `LOCK_EX` to `LOCK_SH`, at which point 2 of the 6
 fail on behaviour.
 
-## 5. What is still open
+## 5. A cost estimate that was wrong by 5x
 
-`grep_read.so` was not run. It is the strongest remaining candidate and the
-reason is specific: its per-seed cost varies with DFA construction, so it
-carries more of the signal the arm consumes than any format target, and it
-now runs in-process. It was excluded on budget — ~250 s per cell against
-~22 s, so a 10-seed 3-replicate pair is about 4 hours. Measured noise is
-sd 5.5 on a base of ~800 edges over 3 replicates.
+`grep_read.so` was first deferred on the grounds that it cost ~250 s per
+cell, putting a paired 10x3 run at about four hours. That number was stale:
+it predates the in-process grep port in `7eb1c2a`. Measured, a grep cell is
+**~40 s**, and the full 20-seed paired run took about 80 minutes.
 
-Note that the low relative noise does not by itself buy power: what matters
-is sd against effect size, and 5.5 is comparable to png's 4.6 in absolute
-edges. A grep run at 3 replicates and 10 seeds would resolve roughly the
-same ~5-edge floor, at ten times the cost. Worth doing only if the question
-is specifically whether grep's wider cost dispersion changes the answer —
-which is a real question, not a formality, since it is the one target where
-the arm's input actually varies strongly.
+The item was filed as reasonably deprioritised when it was in fact the
+cheapest remaining thing to do, and the deferral reasoning was written up
+in enough detail to look considered. Worth a habit: when a cost estimate is
+load-bearing for a decision to *not* do something, measure it rather than
+carrying it forward from an earlier write-up, especially across a port that
+changed the execution path.
+
+`tools/cost_dispersion.py` was added on the way. The identity from §1 of the
+Boltzmann handover -- that under uniform per-execution cost the two arms are
+arithmetically the same computation -- is a property of the *target*, not of
+the harness, so it needs checking per target before cells are spent on one.
+Measured on grep: CV 0.922, p90/p10 7.18x, max/min 32.5x, over 810 seeds
+carrying cost samples. That is by far the widest dispersion of any target in
+the set, which is why grep was the interesting one to run even though it did
+not produce a result.
+
+## 6. An operational trap worth not repeating
+
+The lock did its job in production: a duplicate launch of the grep run was
+refused with rc 3 and named the holder. But the refused process still ran
+the shell's trailing `; echo DONE > stamp`, so a completion stamp appeared
+while the real run had 17 cells left. Anything wrapping a harness in
+`cmd; echo DONE > stamp` inherits this -- the stamp records that *a*
+process exited, not that the work finished.
+
+Check the results file, or the holder pid, not the stamp. The run log is
+also unreliable for this: two processes redirecting to the same path
+interleave and the file reads as binary, so `grep -c` under-counts. The
+checkpointed JSON is the only honest progress record.
+
+## 7. What is still open
+
+
+Resolving the sign on grep, if anyone wants it. The 12/7 split leaves a
+possible effect of up to ~10 edges unresolved, and grep is the target where
+the arm's input genuinely varies. Closing that would take roughly 40 seeds
+at 3 replicates, or 20 seeds at 6 -- two to three hours either way. Whether
+that is worth spending on an effect bounded under 1.2% is a judgement call,
+and the honest default is no.
 
 The eviction-ordering item (`docs/TODO.md`) inherits all of this: the same
 replicated design, the same lock, and the same ~5-edge resolution floor.
