@@ -1455,6 +1455,106 @@ def cmd_sweep(args):
     return 0
 
 
+# store_true / BooleanOptionalAction dests that represent an opt-in feature,
+# strategy, or diagnostic (i.e. "off by default, flipping it on only adds
+# behavior"). --hail-mary force-enables every one of these that the user
+# didn't already touch on the command line. Deliberately excluded: the
+# "--no-*" opt-outs (forkserver, deterministic, shm, cfg-cache, adaptive-havoc,
+# kill-children, dedup-execs, save-state, perf-novelty) since those are
+# already on by default and this flag is additive, not destructive; and
+# --resume, since forcing it on would fail outright with no prior state.
+_HAIL_MARY_FLAGS = (
+    "continue_until_crash",
+    "deep_coverage",
+    "ptrace",
+    "adaptive_timeout",
+    "file_mode",
+    "markov",
+    "markov_gen",
+    "markov_blend",
+    "mc_bandit",
+    "mc_cem",
+    "mopt",
+    "cma_es",
+    "replicator",
+    "shapley",
+    "bayesian",
+    "mi_guided",
+    "renyi_weight",
+    "transfer_entropy",
+    "lineage",
+    "lineage_backtrack",
+    "exp3",
+    "eps_greedy",
+    "hierarchical_bandit",
+    "gp_ucb",
+    "ducb",
+    "swucb",
+    "cucb",
+    "contextual",
+    "overlap_density",
+    "secretary",
+    "sensitivity",
+    "region_profile",
+    "ga",
+    "qea",
+    "mcts",
+    "fluctuation_theorems",
+    "wfc",
+    "path_negation",
+    "enable_smt_z3",
+    "qea_correlation",
+    "boltzmann",
+    "metropolis",
+    "auto_timeout",
+    "bootstrap",
+    "trace",
+    "learn_format",
+    "corpus_ppmd",
+    "persistent",
+    "net_keepalive",
+    "inprocess",
+    "inprocess_direct",
+    "save_smaller",
+    "honggfuzz",
+    "hw_perf",
+    "debug",
+    "refresh_profile",
+    "profile_hotpath",
+    "colorize",
+    "enable_regex_bomb_mutations",
+    "x86_mutate",
+    "arm_mutate",
+    "reseed_on_stall",
+)
+
+
+def _apply_hail_mary(args: argparse.Namespace, fuzz_parser: argparse.ArgumentParser) -> None:
+    """Force-enable every opt-in fuzzing flag left at its default value."""
+    for dest in _HAIL_MARY_FLAGS:
+        if getattr(args, dest, None) == fuzz_parser.get_default(dest):
+            setattr(args, dest, True)
+
+    # --elo takes a value ('all' turns on every meta/seed/mutation scheduler
+    # it arbitrates between), not a plain bool -- special-case it.
+    if args.elo == fuzz_parser.get_default("elo"):
+        args.elo = "all"
+
+    # --cmplog is a tri-state (None=auto, True=on, False=off); force it on.
+    if args.cmplog == fuzz_parser.get_default("cmplog"):
+        args.cmplog = True
+
+    # Boltzmann/Metropolis annealing is inert without a nonzero budget --
+    # give it one so enabling the flags actually does something.
+    if args.anneal_budget == fuzz_parser.get_default("anneal_budget"):
+        args.anneal_budget = 10000
+
+    print(
+        "[hail-mary] every left-at-default fuzzing option has been force-enabled; "
+        "expect a slow, noisy, exploratory run."
+    )
+
+
 def main() -> int:
     sys.stdout.reconfigure(line_buffering=True)
     sys.stderr.reconfigure(line_buffering=True)
@@ -1490,6 +1590,16 @@ def main() -> int:
         "--continue-until-crash",
         action="store_true",
         help="Ignore -n, fuzz until the first crash is found",
+    )
+    fuzz_parser.add_argument(
+        "--hail-mary",
+        action="store_true",
+        help="Kitchen-sink mode: flip on every optional scheduler, mutation "
+        "strategy, and diagnostic flag at once (all bandits, GA/QEA/CMA-ES, "
+        "Markov, lineage/MCTS, SMT/path-negation, honggfuzz/hw-perf, tracing, "
+        "etc.). Explicit flags you also pass are left as you set them; only "
+        "options still at their default get force-enabled. Very slow, very "
+        "noisy, exploratory last resort -- not a normal run mode.",
     )
     fuzz_parser.add_argument("-M", "--mutations", type=int, default=8, help="Mutations per input")
     fuzz_parser.add_argument(
@@ -2851,5 +2961,8 @@ def main() -> int:
 
     if getattr(args, "print_timestamp", False):
         _enable_timestamp_print()
+
+    if args.command == "fuzz" and getattr(args, "hail_mary", False):
+        _apply_hail_mary(args, fuzz_parser)
 
     return args.func(args)
