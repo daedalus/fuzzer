@@ -31,6 +31,7 @@ from fuzzer_tool.adapters.shm import MAX_COUNT_GROWTH_FACTOR, ShmCoverage
 from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.byte_entropy import byte_entropy_pct
 from fuzzer_tool.core.cost_ledger import cost_samples, seed_exec_us
+from fuzzer_tool.core.coverage_regime import CoverageRegime
 from fuzzer_tool.core.markov import MarkovChain, MarkovEnsemble
 from fuzzer_tool.core.mi import MI_MAX_POSITIONS, MutualInformationTracker
 from fuzzer_tool.core.operator_registry import REGISTRY
@@ -1717,7 +1718,9 @@ class Fuzzer:
         self._last_hamming_distance: int = -1
         self._last_mutation_offset: int = 0
 
-        # Critical slowing down detector
+        from fuzzer_tool.core.coverage_regime import (
+            CoverageRegimeDetector,
+        )
         from fuzzer_tool.core.critical_slowing import (
             CoverageHomogeneityDetector,
             CriticalSlowingDown,
@@ -1733,6 +1736,16 @@ class Fuzzer:
             homogeneity_p_threshold=0.01,
         )
         self._homogeneity_col_cumulative: list[int] = [0] * num_cols
+
+        # Coverage regime detector: percolation phase classification
+        # (subcritical / critical / supercritical).  Wraps the existing
+        # CriticalSlowingDown + CoverageHomogeneityDetector + stall
+        # threshold into a single actionable signal for the main loop.
+        self._regime = CoverageRegimeDetector(
+            csd=self._csd,
+            homogeneity=self._homogeneity,
+            stall_threshold=self._stall_threshold,
+        )
 
         # Allan variance detector for stall detection (edge discovery rate)
         from fuzzer_tool.core.allan_variance import AllanVarianceDetector
@@ -5731,14 +5744,57 @@ class Fuzzer:
                                 )
                         except Exception as ex:
                             log.debug("Coverage homogeneity check failed: %s", ex)
+                    # Capture the homogeneity result for the regime detector.
+                    # `result` is only defined inside the shm_cov branch above;
+                    # fall back to None when the detector wasn't initialised
+                    # or shm_cov isn't available.
+                    homogeneity_result = (
+                        result if (self.shm_cov and hasattr(self, "_homogeneity")) else None
+                    )
+
                     # Record coverage snapshot for temporal analysis
                     self._edge_tracker.record_coverage_snapshot(self.exec_count)
                     if not self.quiet_stats:
                         self.print_stats()
                     self._append_coverage_log()
                     self._record_discovery_snapshot()
-                    # Stall detection: no new edges in threshold execs
+                    # Feed the regime detector with all observed signals.
+                    # The CriticalSlowingDown detector is already fed from
+                    # _print_stats_dr_str (stats.py:583); we only read its
+                    # state here.  The homogeneity detector is fed above.
                     execs_since_edge = self.exec_count - self._last_new_edge_exec
+                    self._regime.observe(
+                        discovery_rate=self._stats.discovery_rate(),
+                        allan_delta=delta,
+                        homogeneity_result=homogeneity_result,
+                        execs_since_edge=execs_since_edge,
+                        exec_count=self.exec_count,
+                    )
+                    # Regime-driven strategy adjustment
+                    if self._regime.actionable:
+                        regime = self._regime.regime
+                        reason = self._regime.reason
+                        log.info("REGIME: %s — %s", regime.value, reason)
+                        if regime is CoverageRegime.SUBCRITICAL:
+                            # Subcritical: escalate mutation diversity, force stall recovery
+                            if not self._stall_recovery_active:
+                                self._maybe_trigger_stall_recovery(execs_since_edge)
+                            # Bump havoc energy if the operator engine exposes that knob
+                            ops = getattr(self, "_operators", None)
+                            if ops is not None and hasattr(ops, "_havoc_energy_scale"):
+                                ops._havoc_energy_scale = min(
+                                    getattr(ops, "_havoc_energy_scale", 1.0) * 1.5, 5.0
+                                )
+                        elif regime is CoverageRegime.CRITICAL:
+                            # CSD: near a coverage jump — preserve current strategy
+                            log.info("REGIME: critical — preserving strategy (%s)", reason)
+                        elif regime is CoverageRegime.SUPERCRITICAL:
+                            # Healthy: clear any emergency state
+                            if self._stall_recovery_active:
+                                self._stall_recovery_active = False
+                                log.info("REGIME: supercritical — clearing stall recovery")
+                        self._regime.acknowledge()
+                    # Stall detection: no new edges in threshold execs
                     if (
                         not self._stall_recovery_active
                         and execs_since_edge >= self._stall_threshold
