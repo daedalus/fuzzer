@@ -205,6 +205,52 @@ class TestRotationGate:
         for i in range(8, 16):
             assert result[i] < 0.5 - 1e-10, f"bit {i} should decrease"
 
+    def test_rotation_is_angular_not_linear(self):
+        """α ← cos(Δθ)·α ± sin(Δθ)·β, not α ← α ± delta.
+
+        Regression test for the handover finding that `rotation_gate` was
+        a linear walk in amplitude space rather than a true rotation on
+        the (α, β) unit circle. A linear walk moves every starting α by
+        the same amount for a given delta; a true rotation decelerates
+        near the poles (dα/dθ → 0 as α → 1) because the β term shrinks
+        there. This checks that deceleration directly, and that it
+        matches the closed-form cos/sin update rather than α ± delta.
+        """
+        delta = 0.2  # large enough to make linear vs. angular diverge visibly
+
+        # Deceleration: the same delta moves a near-certain α (0.9) less
+        # than it moves a mid-range α (0.5), when both rotate in the
+        # direction that pushes toward the pole they're already near.
+        near_pole = np.array([0.9], dtype=np.float64)
+        mid_range = np.array([0.5], dtype=np.float64)
+        rotation_gate(near_pole, b"\x00", improved=True, delta=delta)  # bit=0 → α increases
+        rotation_gate(mid_range, b"\x00", improved=True, delta=delta)
+        pole_change = near_pole[0] - 0.9
+        mid_change = mid_range[0] - 0.5
+        assert 0 < pole_change < mid_change, (
+            f"expected deceleration near the pole: pole_change={pole_change:.4f} "
+            f"should be smaller than mid_change={mid_change:.4f}"
+        )
+        # A linear α ± delta walk would have moved both by exactly `delta`
+        # (before clamping) -- neither actually did.
+        assert not math.isclose(mid_change, delta, abs_tol=1e-9)
+
+        # Matches the closed-form rotation, not the old α ± delta formula.
+        alpha0 = 0.6
+        beta0 = math.sqrt(1 - alpha0 * alpha0)
+        expected = alpha0 * math.cos(delta) + beta0 * math.sin(delta)
+        amps = np.array([alpha0], dtype=np.float64)
+        rotation_gate(amps, b"\x00", improved=True, delta=delta)
+        assert math.isclose(amps[0], expected, abs_tol=1e-9)
+        assert not math.isclose(amps[0], alpha0 + delta, abs_tol=1e-9)
+
+    def test_rotation_zero_delta_is_no_op(self):
+        """Δθ=0 leaves α unchanged (cos(0)=1, sin(0)=0)."""
+        amps = np.array([0.37, 0.5, 0.82], dtype=np.float64)
+        original = amps.copy()
+        rotation_gate(amps, b"\xa5", improved=True, delta=0.0)
+        np.testing.assert_allclose(amps, original)
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # 3. Amplitude mutation

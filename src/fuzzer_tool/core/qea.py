@@ -282,22 +282,36 @@ def rotation_gate(
 ) -> np.ndarray:
     """Apply QEA rotation gate to update amplitudes based on fitness feedback.
 
-    Vectorized: single ``np.where`` call replaces the per-bit Python loop
-    (~19× faster than the list-based implementation).
+    This is a true rotation on the (α, β) unit circle, matching Han & Kim's
+    formulation: α ← cos(Δθ)·α ∓ sin(Δθ)·β, with β = √(1-α²) implicit (see
+    module docstring — only the real, non-negative quarter-circle is
+    represented, so β is always recoverable from α). ``delta`` is the
+    rotation angle Δθ in radians, not a linear step in amplitude space.
 
-    The rotation gate nudges each bit's amplitude toward or away from the
-    collapsed value depending on whether that value was beneficial:
+    Rotating (α, β) as a pair rather than walking α alone reproduces the
+    literature's built-in deceleration near the poles: dα/dθ → 0 as
+    θ → 0 (α → 1), so a bit that has become nearly certain resists being
+    knocked back into contention by a single ``improved`` flip, the way an
+    ``α ± delta`` walk would. Values are still clamped to
+    [alpha_min, alpha_max] afterward — that floor/ceiling isn't optional
+    even with the trig deceleration, since it's what keeps a bit from
+    fully collapsing to certainty (see ALPHA_MIN/ALPHA_MAX docstring) and
+    what stops the rotation from walking α past the edge of the
+    represented quarter-circle when β is small.
 
-    - bit=0, improved=True  → α increases (rotate toward |0⟩)
-    - bit=0, improved=False → α decreases (rotate toward |1⟩)
-    - bit=1, improved=True  → α decreases (rotate toward |1⟩)
-    - bit=1, improved=False → α increases (rotate toward |0⟩)
+    Vectorized: trig identities applied over the whole array via numpy
+    instead of a per-bit Python loop.
+
+    - bit=0, improved=True  → α increases (rotate toward |0⟩, Δθ < 0)
+    - bit=0, improved=False → α decreases (rotate toward |1⟩, Δθ > 0)
+    - bit=1, improved=True  → α decreases (rotate toward |1⟩, Δθ > 0)
+    - bit=1, improved=False → α increases (rotate toward |0⟩, Δθ < 0)
 
     Args:
         amplitudes: Current α values to update (in-place + return).
         collapsed: Concrete bytes that the amplitudes produced.
         improved: Whether the collapsed outcome was beneficial.
-        delta: Base rotation magnitude (default 0.05).
+        delta: Rotation angle Δθ in radians (default 0.05 ≈ 2.9°).
         alpha_min: Minimum amplitude clamp (default 0.01).
         alpha_max: Maximum amplitude clamp (default 0.99).
 
@@ -311,20 +325,22 @@ def rotation_gate(
     bits = np.unpackbits(np.frombuffer(collapsed, dtype=np.uint8))
     bits = np.pad(bits, (0, n_bits - len(bits))) if len(bits) < n_bits else bits[:n_bits]
 
-    if improved:
-        # bit=0 → increase α; bit=1 → decrease α
-        amplitudes[:] = np.where(
-            bits == 0,
-            np.minimum(amplitudes + delta, alpha_max),
-            np.maximum(amplitudes - delta, alpha_min),
-        )
-    else:
-        # bit=0 → decrease α; bit=1 → increase α
-        amplitudes[:] = np.where(
-            bits == 0,
-            np.maximum(amplitudes - delta, alpha_min),
-            np.minimum(amplitudes + delta, alpha_max),
-        )
+    # bit=0 XOR improved=False → increase α (rotate toward |0⟩, Δθ < 0);
+    # the complementary set decreases α (Δθ > 0). Same truth table as the
+    # original linear version, just implemented as a rotation direction.
+    increase_alpha = (bits == 0) if improved else (bits == 1)
+
+    beta = np.sqrt(np.maximum(0.0, 1.0 - amplitudes * amplitudes))
+    cos_d = math.cos(delta)
+    sin_d = math.sin(delta)
+
+    # cos(-Δθ)=cos(Δθ) and sin(-Δθ)=-sin(Δθ), so the two rotation
+    # directions only differ in the sign in front of the β term.
+    rotated_toward_zero = amplitudes * cos_d + beta * sin_d  # Δθ < 0, α increases
+    rotated_toward_one = amplitudes * cos_d - beta * sin_d  # Δθ > 0, α decreases
+
+    new_alpha = np.where(increase_alpha, rotated_toward_zero, rotated_toward_one)
+    amplitudes[:] = np.clip(new_alpha, alpha_min, alpha_max)
     return amplitudes
 
 
@@ -389,6 +405,8 @@ class QEALifecycle:
         elite_fraction: float = 0.1,
         generation_size: int = 500,
         rotation_angle: float = 0.05,
+        # ^ radians (Δθ in rotation_gate's cos/sin rotation), not a linear
+        # amplitude step -- see rotation_gate() docstring.
         mutation_prob: float = 0.02,
         init_alpha: float = ALPHA_UNIFORM,
         strong_bias: float = ALPHA_STRONG,
