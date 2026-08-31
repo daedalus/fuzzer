@@ -130,6 +130,13 @@ class QEAIndividual:
         best_fitness: Fitness of the best collapsed output.
         seed_key: SHA-256 hash prefix of best_collapsed.
         crash: Whether this individual triggered a crash.
+        coupling: Optional per-byte intra-byte coupling tensor, shape
+            (num_bytes, 8, 8). None (the default) means this individual
+            carries no learned bit-pair correlation and behaves exactly
+            as it did before this field existed -- collapse()/rotation_gate()
+            never look at it. Only populated when QEALifecycle is
+            constructed with use_correlation=True; see
+            collapse_correlated()/update_couplings() below.
     """
 
     amplitudes: np.ndarray | list[float]
@@ -145,6 +152,7 @@ class QEAIndividual:
     best_fitness: float = 0.0
     seed_key: str = ""
     crash: bool = False
+    coupling: np.ndarray | list | None = None
 
     def __post_init__(self):
         if not self.seed_key and self.best_collapsed:
@@ -152,6 +160,8 @@ class QEAIndividual:
         # Ensure amplitudes are always ndarray
         if isinstance(self.amplitudes, list):
             self.amplitudes = np.array(self.amplitudes, dtype=np.float64)
+        if self.coupling is not None and not isinstance(self.coupling, np.ndarray):
+            self.coupling = np.array(self.coupling, dtype=np.float64)
 
     @property
     def num_bytes(self) -> int:
@@ -176,11 +186,16 @@ class QEAIndividual:
             "best_fitness": self.best_fitness,
             "seed_key": self.seed_key,
             "crash": self.crash,
+            # Same rounding rationale as amplitudes above. Omitted (null)
+            # for the common case (use_correlation=False) rather than
+            # serializing a same-shaped zero tensor for every individual.
+            "coupling": self.coupling.round(6).tolist() if self.coupling is not None else None,
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> QEAIndividual:
         bc = d.get("best_collapsed", "")
+        coupling = d.get("coupling")
         return cls(
             amplitudes=np.array(d.get("amplitudes", []), dtype=np.float64),
             fitness=d.get("fitness", 0.0),
@@ -195,6 +210,7 @@ class QEAIndividual:
             best_fitness=d.get("best_fitness", 0.0),
             seed_key=d.get("seed_key", ""),
             crash=d.get("crash", False),
+            coupling=np.array(coupling, dtype=np.float64) if coupling is not None else None,
         )
 
 
@@ -381,6 +397,191 @@ def mutate_amplitudes(
     return amplitudes
 
 
+# ── Intra-byte correlation (partial entanglement) ───────────────────────
+#
+# The product-state representation above (one independent α per bit) is
+# what makes QEA O(n) instead of O(2^n), but it structurally cannot learn
+# that e.g. bit 0 and bit 1 of a magic byte tend to be right or wrong
+# together — every α update in rotation_gate() depends only on that bit's
+# own collapsed value. See docs/handover/handover_qea_hilbert_space_analysis_2026-08-31.md
+# for the full analysis this section implements.
+#
+# This adds a small (8x8) symmetric coupling matrix per byte: a classical
+# pairwise (Ising-like) correlation, not a real Hilbert-space entangled
+# state -- there is still no joint amplitude vector over 2^8 basis states,
+# just a bias term coupling bit i's conditional distribution to bit j's
+# current value. Cost is O(n) amplitudes + O(n) coupling entries (fixed
+# 64 floats per byte), so it stays linear in n, unlike a true n-qubit
+# state. Scoped to within a byte deliberately: cross-byte correlation
+# (e.g. a length field several bytes away) is exactly what the structural/
+# grammar mutators already handle via field_constraints.py, and extending
+# the coupling matrix across byte boundaries would reintroduce the O(n^2)
+# (or worse) cost this representation exists to avoid.
+#
+# This is opt-in (QEALifecycle(use_correlation=True)) and additive: with
+# it off, QEAIndividual.coupling stays None and every function below is
+# unused, so existing behavior and existing tests are unaffected.
+
+COUPLING_MAX_DEFAULT = 2.0  # clip magnitude for a single J_ij entry
+CORRELATION_SWEEPS_DEFAULT = 3  # Gibbs sweeps per collapse_correlated() call
+
+
+def _zero_coupling(num_bytes: int) -> np.ndarray:
+    """An all-zero (uncoupled) coupling tensor for *num_bytes* bytes.
+
+    Shape (num_bytes, 8, 8). Zero coupling reduces collapse_correlated()
+    to independent per-bit sampling, i.e. identical to collapse() -- this
+    is the correct initial state for a freshly created individual that
+    hasn't learned any pairwise structure yet.
+    """
+    return np.zeros((max(1, num_bytes), 8, 8), dtype=np.float64)
+
+
+def _alpha_to_field(alpha: np.ndarray) -> np.ndarray:
+    """Convert per-bit amplitudes to Ising-style local fields.
+
+    P(bit=0) = α², P(bit=1) = 1 - α². Define state s = +1 for bit=0,
+    s = -1 for bit=1; the local field is the log-odds of s=+1:
+    h = ln(P(bit=0) / P(bit=1)) = ln(α² / (1 - α²)).
+
+    Clipped away from the α∈{0,1} boundary before the division/log so a
+    saturated amplitude (already clamped to [ALPHA_MIN, ALPHA_MAX]
+    elsewhere, but this function is also called on raw amplitude arrays)
+    can't produce inf/nan.
+    """
+    a2 = np.clip(np.asarray(alpha, dtype=np.float64) ** 2, 1e-6, 1 - 1e-6)
+    return np.log(a2 / (1 - a2))
+
+
+def _sigmoid(x: np.ndarray) -> np.ndarray:
+    """Numerically stable logistic sigmoid, clipped to avoid overflow."""
+    return 1.0 / (1.0 + np.exp(-np.clip(x, -30.0, 30.0)))
+
+
+def collapse_correlated(
+    amplitudes: np.ndarray,
+    coupling: np.ndarray,
+    *,
+    n_sweeps: int = CORRELATION_SWEEPS_DEFAULT,
+) -> bytes:
+    """Sample concrete bytes jointly within each byte via Gibbs sampling.
+
+    Unlike collapse(), which draws every bit independently from its own
+    α, this draws each byte's 8 bits from an Ising-like model combining
+    the per-bit field (from ``amplitudes``) with the byte's pairwise
+    coupling matrix, so correlated bit pairs the individual has learned
+    (via update_couplings()) bias each other's draw.
+
+    With an all-zero coupling matrix this is equivalent to collapse() up
+    to sampling order (each sweep step reduces to independent per-bit
+    sampling from the field alone), so a freshly created individual
+    behaves identically to the uncorrelated representation until its
+    coupling matrix accumulates signal.
+
+    Args:
+        amplitudes: α values, length = 8 * num_bytes.
+        coupling: Symmetric per-byte coupling tensor, shape
+            (num_bytes, 8, 8), zero diagonal.
+        n_sweeps: Number of full Gibbs sweeps (one update per bit each)
+            to run before reading out the sample. More sweeps mix the
+            joint distribution closer to its stationary point; the
+            default of 3 is a cheap approximation, not an exact sample.
+
+    Returns:
+        Collapsed concrete byte string.
+    """
+    amplitudes = np.asarray(amplitudes, dtype=np.float64)
+    n_bits = len(amplitudes)
+    if n_bits == 0:
+        return b""
+    num_bytes = n_bits // BITS_PER_BYTE
+    coupling = np.asarray(coupling, dtype=np.float64)
+
+    fields = _alpha_to_field(amplitudes).reshape(num_bytes, BITS_PER_BYTE)
+
+    # Initialize state independently from the field alone (sweep 0 of a
+    # zero-coupling model), then refine with coupled Gibbs sweeps.
+    #
+    # No factor-of-2 here: _alpha_to_field() is defined so that
+    # sigmoid(field) == α² directly (that's the whole point of using
+    # ln(α²/(1-α²)) rather than the textbook Ising h with an implied
+    # H = -h·s/2). The standard Ising "P(s=+1|rest) = sigmoid(2·(h+ΣJs))"
+    # doubling is a convention tied to a Hamiltonian written as
+    # -h·s - ΣJ·s·s'; that's not the parameterization in use here, and
+    # applying it anyway silently shifts every marginal away from α²
+    # even at zero coupling (P(bit=0)=0.9² doubled to ~0.94 instead of
+    # 0.81) -- caught by test_zero_coupling_matches_marginals.
+    p_plus0 = _sigmoid(fields)
+    state = np.where(np.random.random((num_bytes, BITS_PER_BYTE)) < p_plus0, 1, -1)
+
+    for _ in range(max(0, n_sweeps)):
+        for bit_idx in range(BITS_PER_BYTE):
+            # sum_j J[bit_idx, j] * s_j, diagonal is zero so no self-term
+            # to subtract, but coupling isn't guaranteed zero-diagonal by
+            # callers -- guard explicitly rather than trust that invariant.
+            j_row = coupling[:, bit_idx, :].copy()
+            j_row[:, bit_idx] = 0.0
+            local_field = fields[:, bit_idx] + np.einsum("bj,bj->b", j_row, state)
+            p_plus = _sigmoid(local_field)
+            draw = np.random.random(num_bytes) < p_plus
+            state[:, bit_idx] = np.where(draw, 1, -1)
+
+    bits = (state == -1).astype(np.uint8).reshape(-1)  # s=+1 -> bit 0, s=-1 -> bit 1
+    return bytes(np.packbits(bits).tobytes())
+
+
+def update_couplings(
+    coupling: np.ndarray,
+    collapsed: bytes,
+    *,
+    improved: bool,
+    delta: float = 0.02,
+    coupling_max: float = COUPLING_MAX_DEFAULT,
+) -> np.ndarray:
+    """Hebbian-style update of the per-byte coupling matrix.
+
+    For each byte, with state s_i = +1 (bit=0) or -1 (bit=1): when the
+    collapsed bytes were an improvement, nudge every pair's coupling
+    J_ij toward reinforcing the sign relationship the pair actually had
+    (ΔJ_ij = +delta * s_i * s_j -- same-sign pairs get a more positive
+    J, opposite-sign pairs get a more negative J, both of which raise
+    the probability of repeating that same relationship next collapse).
+    When it wasn't an improvement, the update is negated, pushing away
+    from repeating that specific pairwise combination.
+
+    Args:
+        coupling: Coupling tensor to update, shape (num_bytes, 8, 8).
+            Modified in place and returned.
+        collapsed: Concrete bytes the coupling's individual produced.
+        improved: Whether the collapsed outcome was beneficial.
+        delta: Per-pair coupling learning rate.
+        coupling_max: Clip magnitude for any single J_ij entry, keeping
+            the local-field sum in collapse_correlated() from growing
+            unbounded over many updates (mirrors ALPHA_MIN/MAX clamping
+            amplitudes in rotation_gate()).
+
+    Returns:
+        Updated coupling tensor (same ndarray object, modified in place).
+    """
+    coupling = np.asarray(coupling, dtype=np.float64)
+    num_bytes = coupling.shape[0]
+    n_bits = num_bytes * BITS_PER_BYTE
+
+    bits = np.unpackbits(np.frombuffer(collapsed, dtype=np.uint8))
+    bits = np.pad(bits, (0, n_bits - len(bits))) if len(bits) < n_bits else bits[:n_bits]
+    state = np.where(bits.reshape(num_bytes, BITS_PER_BYTE) == 0, 1, -1).astype(np.float64)
+
+    sign = delta if improved else -delta
+    outer = np.einsum("bi,bj->bij", state, state)  # s_i * s_j per byte
+    idx = np.arange(BITS_PER_BYTE)
+    outer[:, idx, idx] = 0.0  # never couple a bit to itself
+
+    coupling += sign * outer
+    coupling[:, idx, idx] = 0.0  # re-zero diagonal in case caller passed nonzero
+    np.clip(coupling, -coupling_max, coupling_max, out=coupling)
+    return coupling
+
+
 # ── QEALifecycle ───────────────────────────────────────────────────────
 
 
@@ -413,6 +614,13 @@ class QEALifecycle:
         tournament_size: int = 3,
         speciation_threshold: float = 0.3,
         elite_reset_every: int = 0,
+        use_correlation: bool = False,
+        # ^ Opt-in intra-byte coupling (see "Intra-byte correlation" section
+        # above collapse_correlated()). Default off: existing behavior,
+        # existing tests, and existing saved populations are unaffected.
+        correlation_delta: float = 0.02,
+        correlation_max: float = COUPLING_MAX_DEFAULT,
+        correlation_sweeps: int = CORRELATION_SWEEPS_DEFAULT,
         fitness: FitnessFunction | None = None,
     ):
         self.pop_size = pop_size
@@ -425,6 +633,10 @@ class QEALifecycle:
         self.tournament_size = tournament_size
         self.speciation_threshold = speciation_threshold
         self.elite_reset_every = elite_reset_every
+        self.use_correlation = use_correlation
+        self.correlation_delta = correlation_delta
+        self.correlation_max = correlation_max
+        self.correlation_sweeps = correlation_sweeps
 
         # Lazy import to avoid circular dependency at module level
         from fuzzer_tool.core.ga import FitnessFunction as _FF
@@ -467,6 +679,7 @@ class QEALifecycle:
                 generation=0,
                 best_collapsed=capped,
                 seed_key=seed_key,
+                coupling=_zero_coupling(len(capped)) if self.use_correlation else None,
             )
             self.population.append(ind)
 
@@ -488,7 +701,12 @@ class QEALifecycle:
             return b"\x00" * 64
 
         parent = self._tournament_select(self.population)
-        collapsed_data = collapse(parent.amplitudes)
+        if self.use_correlation and parent.coupling is not None:
+            collapsed_data = collapse_correlated(
+                parent.amplitudes, parent.coupling, n_sweeps=self.correlation_sweeps
+            )
+        else:
+            collapsed_data = collapse(parent.amplitudes)
 
         # Store for rotation gate feedback
         self._last_parent = parent
@@ -536,6 +754,14 @@ class QEALifecycle:
                 improved=new_coverage,
                 delta=self.rotation_angle,
             )
+            if self.use_correlation and self._last_parent.coupling is not None:
+                update_couplings(
+                    self._last_parent.coupling,
+                    self._last_collapsed,
+                    improved=new_coverage,
+                    delta=self.correlation_delta,
+                    coupling_max=self.correlation_max,
+                )
             self._last_parent = None
             self._last_collapsed = b""
 
@@ -552,6 +778,7 @@ class QEALifecycle:
                 generation=self.generation,
                 best_collapsed=capped,
                 seed_key=seed_key,
+                coupling=_zero_coupling(len(capped)) if self.use_correlation else None,
             )
             # Score before returning: add_to_population() admits on fitness,
             # and an unscored individual carries fitness 0.0, which loses to
@@ -634,9 +861,23 @@ class QEALifecycle:
             parent_a = self._tournament_select(self.population)
             parent_b = self._tournament_select(self.population)
 
-            # Collapse both parents and crossover the committed bytes
-            bytes_a = collapse(parent_a.amplitudes)
-            bytes_b = collapse(parent_b.amplitudes)
+            # Collapse both parents and crossover the committed bytes. Use
+            # each parent's learned coupling when available so a parent's
+            # correlated bit pairs (e.g. a magic-byte pattern it converged
+            # on) show up in the bytes actually crossed over, not just in
+            # its own future collapses.
+            if self.use_correlation and parent_a.coupling is not None:
+                bytes_a = collapse_correlated(
+                    parent_a.amplitudes, parent_a.coupling, n_sweeps=self.correlation_sweeps
+                )
+            else:
+                bytes_a = collapse(parent_a.amplitudes)
+            if self.use_correlation and parent_b.coupling is not None:
+                bytes_b = collapse_correlated(
+                    parent_b.amplitudes, parent_b.coupling, n_sweeps=self.correlation_sweeps
+                )
+            else:
+                bytes_b = collapse(parent_b.amplitudes)
 
             # Use two-point crossover (from mutations module)
             child_bytes = crossover(bytes_a, bytes_b)
@@ -646,11 +887,19 @@ class QEALifecycle:
             # relying on that invariant holding as this code evolves.
             child_bytes = _qea_cap(child_bytes)
 
-            # Create child with amplitudes biased toward the crossed bytes
+            # Create child with amplitudes biased toward the crossed bytes.
+            # Coupling is deliberately NOT inherited from either parent --
+            # crossover already scrambles which bytes came from which
+            # parent, so a carried-over coupling matrix would describe
+            # correlations for bytes that may no longer sit at those
+            # positions. The child starts uncoupled and learns its own,
+            # same as _bias_amplitudes_from() already discards the
+            # parents' amplitude nuance in favor of a fresh bias.
             child = QEAIndividual(
                 amplitudes=_bias_amplitudes_from(child_bytes, strong_prob=self.strong_bias),
                 generation=self.generation + 1,
                 best_collapsed=child_bytes,
+                coupling=_zero_coupling(len(child_bytes)) if self.use_correlation else None,
             )
 
             # Apply amplitude mutation for diversity

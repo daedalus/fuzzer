@@ -765,6 +765,10 @@ class Fuzzer:
         qea_rotation_angle=0.05,
         qea_strong_bias=None,
         qea_elite_reset=0,
+        qea_correlation=False,
+        qea_correlation_delta=0.02,
+        qea_correlation_max=2.0,
+        qea_correlation_sweeps=3,
         calibrate=0,
         stall_threshold=1000,
         resize_map_on_stall=True,
@@ -952,6 +956,10 @@ class Fuzzer:
         self._qea_rotation_angle = qea_rotation_angle
         self._qea_strong_bias = qea_strong_bias
         self._qea_elite_reset = qea_elite_reset
+        self._qea_correlation = qea_correlation
+        self._qea_correlation_delta = qea_correlation_delta
+        self._qea_correlation_max = qea_correlation_max
+        self._qea_correlation_sweeps = qea_correlation_sweeps
         self.ga = None  # Initialized in run() when --ga is set
 
         # QEA lifecycle
@@ -5530,6 +5538,10 @@ class Fuzzer:
                         ALPHA_STRONG if self._qea_strong_bias is None else self._qea_strong_bias
                     ),
                     elite_reset_every=self._qea_elite_reset,
+                    use_correlation=self._qea_correlation,
+                    correlation_delta=self._qea_correlation_delta,
+                    correlation_max=self._qea_correlation_max,
+                    correlation_sweeps=self._qea_correlation_sweeps,
                 )
                 self.qea.initialize(self.corpus, self._edge_tracker)
                 qea_data = self._state_store.get("qea")
@@ -5541,6 +5553,12 @@ class Fuzzer:
                     f"gen_size={self.qea.generation_size}, "
                     f"rotation_angle={self.qea.rotation_angle}, "
                     f"mutation_prob={self.qea.mutation_prob}"
+                    + (
+                        f", correlation=on (delta={self.qea.correlation_delta}, "
+                        f"max={self.qea.correlation_max}, sweeps={self.qea.correlation_sweeps})"
+                        if self.qea.use_correlation
+                        else ""
+                    )
                 )
 
             if self._cmaes:

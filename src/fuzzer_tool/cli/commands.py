@@ -573,6 +573,10 @@ def cmd_fuzz(args):
         qea_rotation_angle=getattr(args, "qea_rotation_angle", 0.05),
         qea_strong_bias=getattr(args, "qea_strong_bias", None),
         qea_elite_reset=getattr(args, "qea_elite_reset", 0),
+        qea_correlation=getattr(args, "qea_correlation", False),
+        qea_correlation_delta=getattr(args, "qea_correlation_delta", 0.02),
+        qea_correlation_max=getattr(args, "qea_correlation_max", 2.0),
+        qea_correlation_sweeps=getattr(args, "qea_correlation_sweeps", 3),
         continue_until_crash=getattr(args, "continue_until_crash", False),
         calibrate=getattr(args, "calibrate", 0),
         stall_threshold=getattr(args, "stall", 1000),
@@ -1954,6 +1958,37 @@ def main() -> int:
         metavar="N",
         help="Breed the full QEA population every N generations instead of "
         "carrying elites forward; 0 disables (default: 0)",
+    )
+    fuzz_parser.add_argument(
+        "--qea-correlation",
+        action="store_true",
+        help="Enable intra-byte coupling: each QEA individual learns an 8x8 "
+        "pairwise correlation matrix per byte (Hebbian-updated alongside the "
+        "rotation gate) so collapse can bias toward bit combinations that "
+        "worked together, not just individually-likely bits. Off by default "
+        "-- existing amplitude-only behavior is unchanged either way.",
+    )
+    fuzz_parser.add_argument(
+        "--qea-correlation-delta",
+        type=float,
+        default=0.02,
+        help="Per-pair coupling learning rate when --qea-correlation is set "
+        "(default: 0.02)",
+    )
+    fuzz_parser.add_argument(
+        "--qea-correlation-max",
+        type=float,
+        default=2.0,
+        help="Clip magnitude for a single coupling entry when "
+        "--qea-correlation is set (default: 2.0)",
+    )
+    fuzz_parser.add_argument(
+        "--qea-correlation-sweeps",
+        type=int,
+        default=3,
+        help="Gibbs sweeps per correlated collapse when --qea-correlation "
+        "is set; more sweeps mix closer to the joint distribution's "
+        "stationary point at proportionally higher cost (default: 3)",
     )
     fuzz_parser.add_argument(
         "--ga-crossover-rate",
