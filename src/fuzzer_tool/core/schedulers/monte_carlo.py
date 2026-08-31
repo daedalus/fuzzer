@@ -17,6 +17,11 @@ from pathlib import Path
 
 from fuzzer_tool.core.allan_variance import DispersionIndex
 from fuzzer_tool.core.edge_tracker import ks_significance_threshold
+from fuzzer_tool.core.running_stats import (
+    RunningMoments,
+    kelly_fraction,
+    sharpe_ratio,
+)
 
 try:
     import numpy as np
@@ -122,6 +127,14 @@ class MonteCarloScheduler:
         # should decay faster.
         self._op_dispersion: dict[str, DispersionIndex] = {}
 
+        # Per-operator reward moments for Sharpe/Kelly risk-adjusted selection.
+        # Tracks the scalar cost-adjusted reward stream per arm so that
+        # variance-normalized quality scores can be computed on demand.
+        self._op_reward_moments: dict[str, RunningMoments] = {}
+        # Blend weight for Sharpe/Kelly vs Thompson sampling.
+        # 0.0 = pure Thompson (default), 1.0 = pure Sharpe/Kelly score.
+        self._sharpe_kelly_blend: float = 0.0
+
     def init_arm(self, name: str, prior_alpha: float = 1.0, prior_beta: float = 1.0) -> None:
         """Register a mutation operator arm with a Beta prior.
 
@@ -163,6 +176,9 @@ class MonteCarloScheduler:
         the unconditional Thompson sample with a pairwise-conditional sample
         that favors operators that historically followed prev_op.
 
+        When sharpe_kelly_blend > 0, risk-normalized scores are blended with
+        Thompson draws so high-variance lottery-ticket arms are down-weighted.
+
         Args:
             ops: Available mutation operators.
             prev_op: The operator used in the previous mutation step (for
@@ -180,7 +196,7 @@ class MonteCarloScheduler:
         force_refresh = self._selects_since_refresh >= self._draw_refresh_interval
         if force_refresh:
             self._selects_since_refresh = 0
-        thompson_vals = {}
+        thompson_vals: dict[str, float] = {}
         for op in ops:
             a, b = self._get_effective_params(op)
             cached = self._thompson_draw_cache.get(op)
@@ -191,10 +207,39 @@ class MonteCarloScheduler:
                 self._thompson_draw_cache[op] = (a, b, draw)
                 thompson_vals[op] = draw
 
-        # If no pairwise data or blend is zero, use pure Thompson
+        # Sharpe/Kelly blend: when enabled, risk-normalized scores replace
+        # or supplement the Thompson draws so high-variance lottery-ticket
+        # arms are down-weighted relative to consistent performers.
+        if self._sharpe_kelly_blend > 0:
+            raw_sk: dict[str, float] = {}
+            for op in ops:
+                rm = self._op_reward_moments.get(op)
+                if rm is None or rm.count < 3:
+                    raw_sk[op] = 0.0
+                    continue
+                s = sharpe_ratio(rm.mean, rm.stddev)
+                k = kelly_fraction(rm.mean, rm.variance)
+                raw_sk[op] = s + k
+            sk_min = min(raw_sk.values())
+            sk_max = max(raw_sk.values())
+            if math.isinf(sk_max):
+                # One or more arms have infinite SK (zero variance, positive
+                # mean). Those arms get norm=1; everything else gets 0.
+                sk_norm = {op: (1.0 if math.isinf(v) else 0.0) for op, v in raw_sk.items()}
+            else:
+                rng = sk_max - sk_min
+                if rng > 0.0:
+                    sk_norm = {op: (v - sk_min) / rng for op, v in raw_sk.items()}
+                else:
+                    sk_norm = {op: 0.5 for op in raw_sk}
+            blend = self._sharpe_kelly_blend
+            for op in ops:
+                thompson_vals[op] = blend * sk_norm[op] + (1 - blend) * thompson_vals[op]
+
+        # If no pairwise data or blend is zero, use current scores (Thompson
+        # or SK-blended) directly.
         if self.pairwise_blend <= 0 or prev_op is None or prev_op not in self.transition_total:
-            best_op = max(ops, key=lambda o: thompson_vals[o])
-            return best_op
+            return max(ops, key=lambda o: thompson_vals[o])
 
         # Pairwise score: Dirichlet-Multinomial over transition counts
         # With uniform prior (alpha=1), score = count + 1
@@ -204,11 +249,10 @@ class MonteCarloScheduler:
             count = self.transition_counts[prev_op].get(op, 0)
             pair_scores[op] = (count + 1) / (total + len(ops))
 
-        # Blend: w * pair + (1-w) * thompson
+        # Blend: w * pair + (1-w) * thompson (or SK-blended Thompson)
         w = self.pairwise_blend
-        blended = {}
         for op in ops:
-            blended[op] = w * pair_scores[op] + (1 - w) * thompson_vals[op]
+            thompson_vals[op] = w * pair_scores[op] + (1 - w) * thompson_vals[op]
 
         # NOTE: `self._prev_op` is deliberately NOT written here. It is the
         # *previously recorded* operator and is advanced by record(), which is
@@ -217,7 +261,7 @@ class MonteCarloScheduler:
         # record() ran for that same operator the `_prev_op != name` guard
         # rejected the pair — and because this line sits after the pure-Thompson
         # early return, it never executed until transitions already existed.
-        return max(ops, key=lambda o: blended[o])
+        return max(ops, key=lambda o: thompson_vals[o])
 
     def record(self, name: str, success: bool, weight: float = 1.0) -> None:
         """Record outcome for a mutation operator arm.
@@ -261,6 +305,11 @@ class MonteCarloScheduler:
         if name not in self._op_dispersion:
             self._op_dispersion[name] = DispersionIndex(window=200)
         self._op_dispersion[name].update(float(success))
+
+        # Per-operator reward moments for Sharpe/Kelly selection.
+        # Tracks the scalar cost-adjusted weight so risk-adjusted scores
+        # can be computed without another pass over history.
+        self._op_reward_moments.setdefault(name, RunningMoments()).update(weight)
 
         # Update pairwise transition matrix on success. `_prev_op` is the
         # operator recorded immediately before this one; record() is called in
@@ -331,6 +380,43 @@ class MonteCarloScheduler:
             mean_actual = sum(o for _, o in pairs) / len(pairs)
             report[f"{b * 10}-{b * 10 + 10}%"] = (mean_pred, mean_actual, len(pairs))
         return report
+
+    # ------------------------------------------------------------------
+    # Sharpe / Kelly risk-adjusted selection helpers
+    # ------------------------------------------------------------------
+
+    def set_sharpe_kelly_blend(self, blend: float) -> None:
+        """Set the Sharpe/Kelly blend weight for risk-adjusted selection.
+
+        Args:
+            blend: 0.0 = pure Thompson sampling (default), 1.0 = pure
+                Sharpe/Kelly score.  Values between blend the two signals.
+        """
+        self._sharpe_kelly_blend = max(0.0, min(blend, 1.0))
+
+    def sharpe(self, op: str) -> float:
+        """Sharpe ratio for *op* from the recorded reward stream.
+
+        Returns 0.0 if fewer than 3 observations have been recorded for
+        this arm, or if the standard deviation is zero.
+        """
+        rm = self._op_reward_moments.get(op)
+        if rm is None or rm.count < 3:
+            return 0.0
+        return sharpe_ratio(rm.mean, rm.stddev)
+
+    def kelly_fraction(self, op: str) -> float:
+        """Kelly criterion fraction for *op* from the recorded reward stream.
+
+        Returns 0.0 if fewer than 3 observations have been recorded for
+        this arm, or if the variance is zero.  Negative Kelly means the
+        arm is a net loser; the clamp returns 0.0 rather than a negative
+        fraction.
+        """
+        rm = self._op_reward_moments.get(op)
+        if rm is None or rm.count < 3:
+            return 0.0
+        return kelly_fraction(rm.mean, rm.variance)
 
     def add_elite(self, data: bytes, score: int, temperature: float = 1.0) -> None:
         """Add an input to the elite set for CEM fitting.

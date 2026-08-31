@@ -231,3 +231,41 @@ class RunningMoments:
                 self._sums_stale = True
         else:
             self._buf = collections.deque(data.get("buf", []))
+
+
+# ------------------------------------------------------------------
+# Sharpe / Kelly helpers (module-level, no class dependency)
+# ------------------------------------------------------------------
+
+
+def sharpe_ratio(mean: float, stddev: float) -> float:
+    """Instantaneous Sharpe ratio from running mean and stddev.
+
+    Annualization factors are not meaningful in fuzzing; returns the raw
+    ratio.  Returns 0.0 when stddev is zero and mean is also zero, or
+    when stddev is negative (invalid input); returns +inf when stddev
+    is zero and mean is positive (a perfect risk-free return); returns
+    -inf when stddev is zero and mean is negative.
+    """
+    if stddev < 0.0:
+        return 0.0
+    if stddev == 0.0:
+        if mean > 0.0:
+            return float("inf")
+        if mean < 0.0:
+            return float("-inf")
+        return 0.0
+    return mean / stddev
+
+
+def kelly_fraction(mean: float, variance: float) -> float:
+    """Kelly criterion optimal allocation fraction from running moments.
+
+    Computes f* = mean / variance, which is the fraction of remaining
+    budget that maximises log-growth under i.i.d. returns.  Clamped to
+    [0.0, 1.0]: negative values mean the arm is a net loser and should
+    receive zero allocation.
+    """
+    if variance <= 0.0:
+        return 0.0
+    return max(0.0, min(mean / variance, 1.0))

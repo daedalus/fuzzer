@@ -149,6 +149,8 @@ def _restore_environ() -> None:
         for key, value in _environ_snapshot.items():
             if os.environ.get(key) != value:
                 os.environ[key] = value
+
+
 """Whether teardown SIGKILLs child process groups.
 
 On by default: a fuzzer that exits leaving target processes behind will
@@ -803,6 +805,7 @@ class Fuzzer:
         seed_slide_max_seeds=0,
         perf_novelty=True,
         reject_code=None,
+        sharpe_kelly_blend=0.0,
     ):
         # Snapshot os.environ before anything below (or later in run()) can
         # write __AFL_DIST_SHM_ID / __AFL_SHM_ID / AFL_MAP_SIZE / LD_PRELOAD /
@@ -1487,6 +1490,7 @@ class Fuzzer:
         self._det_execs: int = 0
 
         self.mc_bandit = mc_bandit
+        self._sharpe_kelly_blend = sharpe_kelly_blend
         # ── Vectorized random number pool for mutation hotpath ────────
         # Generates random values in batches (one numpy C-level call per
         # batch) instead of per-call Python-level random() invocations.
@@ -1511,6 +1515,8 @@ class Fuzzer:
             if (mc_bandit or mc_cem or mopt)
             else None
         )
+        if self.mc is not None and sharpe_kelly_blend > 0:
+            self.mc.set_sharpe_kelly_blend(sharpe_kelly_blend)
         self._mopt = None
         if mopt:
             self._mopt = MOptScheduler(n_particles=5, window_size=200)
@@ -3015,9 +3021,7 @@ class Fuzzer:
         """Recompute running aggregates from seed_meta."""
         self._cached_total_time = sum(m.get("total_time", 0.0) for m in self.seed_meta.values())
         self._cached_total_fuzz = sum(m.get("fuzz_count", 1) for m in self.seed_meta.values())
-        self._cached_cost_samples = sum(
-            cost_samples(m) for m in self.seed_meta.values()
-        )
+        self._cached_cost_samples = sum(cost_samples(m) for m in self.seed_meta.values())
         self._cached_total_edges = sum(m.get("coverage_edges", 0) for m in self.seed_meta.values())
         n_fuzz_vals = [m.get("fuzz_count", 0) for m in self.seed_meta.values()]
         self._cached_mean_log_n_fuzz = compute_mean_log_n_fuzz(n_fuzz_vals)
@@ -5620,10 +5624,7 @@ class Fuzzer:
                         if timed_out:
                             self._hf_timeout_penalties += 1
                         input_entropy = self._seed_entropy_pct(seed, meta)
-                        if (
-                            input_entropy > ENTROPY_RANDOM_PCT
-                            or input_entropy < ENTROPY_SPARSE_PCT
-                        ):
+                        if input_entropy > ENTROPY_RANDOM_PCT or input_entropy < ENTROPY_SPARSE_PCT:
                             self._hf_entropy_penalties += 1
 
                         hf_kwargs = dict(

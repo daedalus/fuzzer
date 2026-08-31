@@ -349,6 +349,7 @@ def cmd_fuzz(args):
             mc_refit_interval=args.mc_refit_int,
             mc_decay_interval=getattr(args, "mc_decay_interval", 100),
             pairwise_blend=getattr(args, "pairwise_blend", 0.0),
+            sharpe_kelly_blend=getattr(args, "sharpe_kelly_blend", 0.0),
             stats_file=args.stats_file,
             stats_interval=args.stats_interval,
             coverage_report=args.coverage_report,
@@ -464,6 +465,7 @@ def cmd_fuzz(args):
         mc_refit_interval=args.mc_refit_int,
         mc_decay_interval=getattr(args, "mc_decay_interval", 100),
         pairwise_blend=getattr(args, "pairwise_blend", 0.0),
+        sharpe_kelly_blend=getattr(args, "sharpe_kelly_blend", 0.0),
         stats_file=args.stats_file,
         stats_interval=args.stats_interval,
         coverage_report=args.coverage_report,
@@ -1569,6 +1571,16 @@ def main() -> int:
         type=float,
         default=0.0,
         help="Blend factor for pairwise operator transitions (0.0=pure Thompson, 1.0=pure pairwise)",
+    )
+    fuzz_parser.add_argument(
+        "--sharpe-kelly-blend",
+        type=float,
+        default=0.0,
+        metavar="W",
+        help="Blend weight for Sharpe/Kelly risk-adjusted operator selection "
+        "(0.0=off, 1.0=pure Sharpe/Kelly). When > 0, per-operator reward "
+        "moments are tracked and Thompson draws are blended with "
+        "risk-normalized scores to down-weight high-variance lottery tickets.",
     )
     fuzz_parser.add_argument("--mc-cem", action="store_true", help="Enable cross-entropy method")
     fuzz_parser.add_argument(
