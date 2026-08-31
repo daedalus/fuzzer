@@ -369,16 +369,12 @@ _FORMAT_SNIFFERS: dict[str, Callable[[bytes], bool]] = {
     # MPEG-TS: 0x47 sync byte on a 188-byte grid. Require it at both offset 0
     # and offset 188 (not just one sync byte) so a coincidental 0x47 in
     # otherwise-random data doesn't falsely sniff as TS.
-    "mpegts_chunk_mutate": lambda d: (
-        len(d) >= 376 and d[0] == 0x47 and d[188] == 0x47
-    ),
+    "mpegts_chunk_mutate": lambda d: len(d) >= 376 and d[0] == 0x47 and d[188] == 0x47,
     # ADTS AAC: 12-bit syncword (0xFFF) plus the layer field (bits 4-3 of
     # byte 1) fixed at 0 -- MPEG-TS's sync byte is a single 0x47, so this
     # needs the extra layer-field check to avoid false-triggering on an
     # unrelated 0xFF byte pair.
-    "adts_chunk_mutate": lambda d: (
-        len(d) >= 7 and d[0] == 0xFF and (d[1] & 0xF6) == 0xF0
-    ),
+    "adts_chunk_mutate": lambda d: len(d) >= 7 and d[0] == 0xFF and (d[1] & 0xF6) == 0xF0,
     # MP3: 11-bit syncword (top byte 0xFF, top 3 bits of next byte set),
     # with version/layer fields that must be non-reserved (MPEG version
     # != 01, layer != 00) -- narrows past ADTS's 12-bit sync, which this
@@ -397,9 +393,7 @@ _FORMAT_SNIFFERS: dict[str, Callable[[bytes], bool]] = {
     ),
     # RIFF: same container magic as webp_chunk_mutate, but declines the
     # WEBP form so the two operators don't overlap on the same input.
-    "riff_chunk_mutate": lambda d: (
-        len(d) >= 12 and d[:4] == b"RIFF" and d[8:12] != b"WEBP"
-    ),
+    "riff_chunk_mutate": lambda d: len(d) >= 12 and d[:4] == b"RIFF" and d[8:12] != b"WEBP",
     "avif_chunk_mutate": _sniff_avif,
     # SQLite: the 16-byte magic is exact and self-terminating (it ends in a
     # NUL), so no secondary check is needed -- but the file header is 100

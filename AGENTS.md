@@ -63,6 +63,7 @@ fuzzer, not just the target.
 42. When implementing new features always think of edge cases for the tests.
 43. Always maintain succinct, brief, down to the point and updated documentation.
 44. When adding, removing or wiring a new subsystem update `architecture.png`.
+45. Every time a new source `file.py` is created run `lizard --CCN=15 file.py` and fix warnings.
 
 ## Corpus Rules
 

@@ -2,12 +2,17 @@
 
 **Date:** 2026-08-31 (updated 2026-09-01)
 **Base:** `fuzzer-new`
-**Status: Module 2 (Coverage Phase Transition Detection) IMPLEMENTED.** The
-remaining modules (1, 3, 4, 5, 6) are still planning proposals. Each section
-states what exists today, what percolation adds, and — for Module 2 — what
-was built and how to verify it.
+**Status: Modules 1 (Bootstrap Percolation) and 2 (Coverage Phase Transition
+Detection) IMPLEMENTED.** The remaining modules (3, 4, 5, 6) are still
+planning proposals. Each section states what exists today, what percolation
+adds, and — for Modules 1 and 2 — what was built and how to verify it.
 
 ---
+
+## 0 Rule 1.
+
+The file where all the percolation primitives live is `core/percolation.py`.
+
 
 ## 1. The framing: fuzzing as a percolation process
 
@@ -32,44 +37,54 @@ modules 1, 3, 4, 5, 6 remain as proposed designs.
 
 ---
 
-## 2. Module 1: Bootstrap Percolation Corpus Minimization
+## 2. Module 1: Bootstrap Percolation Corpus Minimization — ✅ IMPLEMENTED
 
 ### What exists
 
-`CorpusManager.auto_minimize_corpus()` (`services/corpus_manager.py:735`)
+`CorpusManager.auto_minimize_corpus()` (`services/corpus_manager.py:742`)
 already does greedy set cover: iteratively remove seeds whose edge coverage
 is fully subsumed by the remaining corpus. `EdgeTracker._maybe_prune()`
 (`core/edge_tracker.py:901`) evicts cheapest-first by unique edge loss. The
 system is already "percolation-aware" in spirit but not in structure.
 
-### What percolation adds
-
-Bootstrap percolation (`wikipedia/Bootstrap_percolation`) formalizes this:
-a seed is removed if it has fewer than `k` "active" neighbors, iterated until
-fixed point. The remaining set is the **rigid core** — the minimal corpus
-that cannot be further reduced without breaking connectivity.
-
-The existing greedy set cover is single-pass and greedy. Bootstrap
-percolation is iterative and captures transitive redundancy: seed A
-subsumes B, B subsumes C, but A does not directly subsume C. Greedy keeps
-A and C; bootstrap removes both B and C once A absorbs the cluster.
-
-### Implementation plan
+### What was built
 
 **New file:** `src/fuzzer_tool/core/percolation.py`
 
+`bootstrap_minimize_corpus()` iteratively removes seeds with fewer than `k`
+singleton edges (edges covered by no other seed in the corpus). After each
+removal round, unique-edge counts are recomputed and the process repeats
+until no seed changes state. The result is the **k-rigid core** — the
+smallest corpus where every seed has at least k singleton edges.
+
+This captures transitive redundancy that single-pass greedy set-cover
+misses. Example: A={1,2}, B={2,3}, C={3,4}, D={4,5}. Greedy set-cover
+keeps A, C, D (each has a unique edge). Bootstrap removes B and C in
+round 1 (0 unique edges each), leaving A and D — a smaller corpus with
+the same coverable edges.
+
 ```python
-def bootstrap_minimize_corpus(corpus, edge_tracker, k=2):
-    """Iteratively remove seeds subsumed by >=k neighbors.
-    ...
-    """
+def bootstrap_minimize_corpus(corpus, edge_tracker, k=1):
+    """Iteratively remove seeds with < k unique edges to fixed point."""
 ```
 
-**Integration point:** Call from `auto_minimize_corpus()` as a post-pass
-after the existing greedy reduction.
+**Integration:** Post-pass in `auto_minimize_corpus()` after the existing
+greedy reduction and coverage recovery. Controlled by `--bootstrap` flag
+(default off) and `--bootstrap-k` (default 1).
 
-**Test:** `tests/test_percolation.py` — construct a known graph where
-greedy keeps 3 seeds but bootstrap correctly reduces to 2.
+**Tests:** `tests/test_percolation.py` — 10 tests covering transitive
+redundancy, k-value filtering, edge cases, idempotency, and the
+`CoverageRegime` enum import.
+
+### Files touched
+
+| File | Change |
+|---|---|
+| `src/fuzzer_tool/core/percolation.py` | **New** — `bootstrap_minimize_corpus()` + `CoverageRegime` enum |
+| `src/fuzzer_tool/services/corpus_manager.py` | **Modify** — post-pass call in `auto_minimize_corpus()` |
+| `src/fuzzer_tool/services/fuzzer.py` | **Modify** — `_use_bootstrap` / `_bootstrap_k` init |
+| `src/fuzzer_tool/cli/commands.py` | **Modify** — `--bootstrap` / `--bootstrap-k` CLI args |
+| `tests/test_percolation.py` | **New** — 10 unit tests |
 
 ---
 
@@ -336,15 +351,16 @@ from a structurally similar target.
 
 | Order | Module | Status | Effort | Payoff | Dependency |
 |-------|--------|--------|--------|--------|------------|
-| 1 | Bootstrap minimization | Proposed | Low | Medium | None |
+| 1 | Bootstrap minimization | **DONE** | Low | Medium | None |
 | 2 | Phase transition detection | **DONE** | Medium | High | None |
 | 3 | Target difficulty estimation | Proposed | Medium | Medium | None |
 | 4 | Invasion percolation | Proposed | Low | Low-Medium | Module 2 |
 | 5 | First passage time budgeting | Proposed | Medium | Medium | Modules 2, 4 |
 | 6 | Universality strategy transfer | Proposed | High | High (long-term) | Modules 3, 4 |
 
-Module 2 is complete. Modules 1 and 3 are independent and can be developed
-next in parallel. Module 4 builds on Module 2's regime signal.
+Modules 1 and 2 are complete. Module 3 (Target Difficulty Estimation) is
+independent and can be developed next. Module 4 builds on Module 2's
+regime signal.
 
 ---
 
@@ -373,14 +389,16 @@ next in parallel. Module 4 builds on Module 2's regime signal.
 
 | File | Relevance |
 |---|---|
-| `src/fuzzer_tool/core/coverage_regime.py` | **NEW** — `CoverageRegimeDetector` + `CoverageRegime` enum |
-| `tests/test_coverage_regime.py` | **NEW** — 12 tests for the regime detector |
+| `src/fuzzer_tool/core/percolation.py` | **NEW** — `bootstrap_minimize_corpus()` + `CoverageRegime` enum |
+| `src/fuzzer_tool/core/coverage_regime.py` | `CoverageRegimeDetector` (imports `CoverageRegime` from percolation) |
+| `tests/test_percolation.py` | **NEW** — 10 tests for bootstrap percolation |
+| `tests/test_coverage_regime.py` | 12 tests for the regime detector |
 | `src/fuzzer_tool/services/fuzzer.py:1740` | Regime detector instantiation |
 | `src/fuzzer_tool/services/fuzzer.py:5770` | Main-loop feeding + strategy wiring |
+| `src/fuzzer_tool/services/corpus_manager.py:1096` | Bootstrap post-pass in `auto_minimize_corpus()` |
 | `src/fuzzer_tool/services/corpus_manager.py:290` | `save_state()` persistence |
 | `src/fuzzer_tool/services/corpus_manager.py:396` | `load_state()` restore |
 | `src/fuzzer_tool/core/critical_slowing.py:51` | `CriticalSlowingDown` — wrapped by regime detector |
 | `src/fuzzer_tool/core/critical_slowing.py:233` | `CoverageHomogeneityDetector` — wrapped by regime detector |
-| `src/fuzzer_tool/services/corpus_manager.py:735` | `auto_minimize_corpus()` — integration point for bootstrap |
 | `src/fuzzer_tool/core/edge_tracker.py:901` | `_maybe_prune()` — existing eviction logic |
 | `src/fuzzer_tool/services/seed_picker.py` | Integration point for invasion percolation |

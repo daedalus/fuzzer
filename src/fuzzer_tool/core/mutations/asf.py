@@ -30,7 +30,12 @@ DATA_OBJECT_GUID = bytes.fromhex("3626B2758E66CF11A6D900AA0062CE6C")
 FILE_PROPERTIES_GUID = bytes.fromhex("A1DCAB8C47A9CF118EE400C00C205365")
 STREAM_PROPERTIES_GUID = bytes.fromhex("9107DCB7B7A9CF118EE600C00C205365")
 HEADER_EXTENSION_GUID = bytes.fromhex("B503BFF5EA9F0F4385BB40CC50D30B5A")
-OTHER_KNOWN_GUIDS = [FILE_PROPERTIES_GUID, STREAM_PROPERTIES_GUID, HEADER_EXTENSION_GUID, DATA_OBJECT_GUID]
+OTHER_KNOWN_GUIDS = [
+    FILE_PROPERTIES_GUID,
+    STREAM_PROPERTIES_GUID,
+    HEADER_EXTENSION_GUID,
+    DATA_OBJECT_GUID,
+]
 
 
 @dataclass
@@ -40,7 +45,9 @@ class AsfObject:
     data: bytes
 
     def to_bytes(self) -> bytes:
-        return self.guid + (self.declared_size & 0xFFFFFFFFFFFFFFFF).to_bytes(8, "little") + self.data
+        return (
+            self.guid + (self.declared_size & 0xFFFFFFFFFFFFFFFF).to_bytes(8, "little") + self.data
+        )
 
 
 def _parse_object_sequence(buf: bytes) -> list[AsfObject]:
@@ -108,7 +115,9 @@ class AsfMutator:
     def _mutate_object_guid(self, objs: list[AsfObject], rng) -> None:
         """Relabel an object's type GUID — tests type-dispatch confusion."""
         target = rng.choice(objs)
-        target.guid = rng.choice(OTHER_KNOWN_GUIDS + [bytes(rng.randint(0, 255) for _ in range(16))])
+        target.guid = rng.choice(
+            OTHER_KNOWN_GUIDS + [bytes(rng.randint(0, 255) for _ in range(16))]
+        )
 
     def _mutate_header_object_count(self, objs: list[AsfObject], rng) -> None:
         """Patch the Header Object's leading NumberOfHeaderObjects (u32 LE)
@@ -154,14 +163,20 @@ class AsfMutator:
         rng = rng or random
         # File Properties Object as the sole header sub-object.
         file_props_body = bytes(rng.randint(0, 255) for _ in range(80))
-        file_props = AsfObject(FILE_PROPERTIES_GUID, OBJECT_HEADER_LEN + len(file_props_body), file_props_body)
+        file_props = AsfObject(
+            FILE_PROPERTIES_GUID, OBJECT_HEADER_LEN + len(file_props_body), file_props_body
+        )
 
         num_header_objects = 1
         reserved = bytes([1, 2])
         header_body = num_header_objects.to_bytes(4, "little") + reserved + file_props.to_bytes()
-        header_obj = AsfObject(HEADER_OBJECT_GUID, OBJECT_HEADER_LEN + len(header_body), header_body)
+        header_obj = AsfObject(
+            HEADER_OBJECT_GUID, OBJECT_HEADER_LEN + len(header_body), header_body
+        )
 
-        data_body = bytes(16) + bytes(rng.randint(0, 255) for _ in range(32))  # file_id placeholder + padding
+        data_body = bytes(16) + bytes(
+            rng.randint(0, 255) for _ in range(32)
+        )  # file_id placeholder + padding
         data_obj = AsfObject(DATA_OBJECT_GUID, OBJECT_HEADER_LEN + len(data_body), data_body)
 
         return serialize_asf_objects([header_obj, data_obj])[:max_len]

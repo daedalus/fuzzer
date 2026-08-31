@@ -5,6 +5,10 @@
 
 ---
 
+## 0 Rule 1.
+
+The file where all the percolation primitives live is `core/minimax.py`.
+
 ## 1. What the three algorithms are (and why they matter here)
 
 ### 1.1 Minimax estimator (statistical decision theory)

@@ -29,8 +29,18 @@ class _Fuzzer:
         self.corpus = list(SEEDS)
         self.seed_meta = {
             SEEDS[0]: {"fuzz_count": 1, "coverage_edges": 50, "added_at": now, "momentum": 0.0},
-            SEEDS[1]: {"fuzz_count": 40, "coverage_edges": 1, "added_at": now - 600, "momentum": 0.0},
-            SEEDS[2]: {"fuzz_count": 4, "coverage_edges": 10, "added_at": now - 60, "momentum": 0.5},
+            SEEDS[1]: {
+                "fuzz_count": 40,
+                "coverage_edges": 1,
+                "added_at": now - 600,
+                "momentum": 0.0,
+            },
+            SEEDS[2]: {
+                "fuzz_count": 4,
+                "coverage_edges": 10,
+                "added_at": now - 60,
+                "momentum": 0.5,
+            },
         }
         self._edge_tracker = EdgeTracker()
         self._edge_tracker.good_turing_estimate = lambda: {"saturation": 0.0}

@@ -63,7 +63,9 @@ class AdtsFrame:
 
     @property
     def frame_length(self) -> int:
-        return ((self.header[3] & 0x03) << 11) | (self.header[4] << 3) | ((self.header[5] >> 5) & 0x07)
+        return (
+            ((self.header[3] & 0x03) << 11) | (self.header[4] << 3) | ((self.header[5] >> 5) & 0x07)
+        )
 
     def to_bytes(self) -> bytes:
         return self.header + self.payload
@@ -200,7 +202,11 @@ class AdtsMutator:
         hdr = bytearray(7)
         hdr[0] = 0xFF
         hdr[1] = 0xF1  # syncword low nibble=1111, ID=0, layer=00, protection_absent=1
-        hdr[2] = ((profile & 0x03) << 6) | ((sampling_freq_index & 0x0F) << 2) | ((channel_config >> 2) & 0x01)
+        hdr[2] = (
+            ((profile & 0x03) << 6)
+            | ((sampling_freq_index & 0x0F) << 2)
+            | ((channel_config >> 2) & 0x01)
+        )
         hdr[3] = ((channel_config & 0x03) << 6) | ((frame_len >> 11) & 0x03)
         hdr[4] = (frame_len >> 3) & 0xFF
         hdr[5] = ((frame_len & 0x07) << 5) | 0x1F

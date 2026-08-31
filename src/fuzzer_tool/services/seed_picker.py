@@ -855,11 +855,7 @@ class SeedPicker:
         sat = getattr(f, "_saturation", None)
         last_eval = getattr(f, "_saturation_exec", None)
         exec_count = getattr(f, "exec_count", 0)
-        if (
-            sat is None
-            or last_eval is None
-            or exec_count - last_eval >= SATURATION_REFRESH_EXECS
-        ):
+        if sat is None or last_eval is None or exec_count - last_eval >= SATURATION_REFRESH_EXECS:
             gt = f._edge_tracker.good_turing_estimate()
             sat = gt.get("saturation", 0.0)
             f._saturation = sat

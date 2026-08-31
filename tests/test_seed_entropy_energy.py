@@ -47,9 +47,7 @@ class TestByteEntropy:
 
     def test_pct_is_bits_over_eight(self):
         data = bytes(range(64)) * 16
-        assert byte_entropy_pct(data) == pytest.approx(
-            byte_entropy_bits(data) / 8.0 * 100.0
-        )
+        assert byte_entropy_pct(data) == pytest.approx(byte_entropy_bits(data) / 8.0 * 100.0)
 
     def test_cap_bounds_the_scan(self):
         # Uniform head, high-entropy tail beyond the cap: the tail must not
@@ -63,9 +61,7 @@ class TestByteEntropy:
         for b in data[:ENTROPY_SAMPLE_CAP]:
             counts[b] = counts.get(b, 0) + 1
         total = sum(counts.values())
-        expected = -sum(
-            (c / total) * math.log2(c / total) for c in counts.values()
-        )
+        expected = -sum((c / total) * math.log2(c / total) for c in counts.values())
         assert byte_entropy_bits(data) == pytest.approx(expected, abs=1e-9)
 
 
@@ -163,8 +159,7 @@ class TestEntropyReachesTheScorer:
         block = src[start : pos + 1]
         assert "input_size=" in block, "block extraction is wrong"
         assert "input_entropy=" in block, (
-            "hf_kwargs no longer passes input_entropy; the honggfuzz entropy "
-            "factor is dead again"
+            "hf_kwargs no longer passes input_entropy; the honggfuzz entropy factor is dead again"
         )
 
     def test_scorer_signature_still_accepts_input_entropy(self):

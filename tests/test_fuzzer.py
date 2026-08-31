@@ -995,12 +995,9 @@ class TestCullQueue:
         # the corpus mean. Without it all three seeds cost the same here and
         # the cover is decided by dict order.
         f.seed_meta = {
-            "seed_a": {"total_time": 1.0, "cost_samples": 1, "fuzz_count": 1,
-                       "input_size": 100},
-            "seed_b": {"total_time": 0.5, "cost_samples": 1, "fuzz_count": 1,
-                       "input_size": 100},
-            "seed_c": {"total_time": 0.2, "cost_samples": 1, "fuzz_count": 1,
-                       "input_size": 100},
+            "seed_a": {"total_time": 1.0, "cost_samples": 1, "fuzz_count": 1, "input_size": 100},
+            "seed_b": {"total_time": 0.5, "cost_samples": 1, "fuzz_count": 1, "input_size": 100},
+            "seed_c": {"total_time": 0.2, "cost_samples": 1, "fuzz_count": 1, "input_size": 100},
         }
         f._cull_queue()
         assert f._favored == {"seed_a", "seed_c"}

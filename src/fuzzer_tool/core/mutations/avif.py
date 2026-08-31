@@ -239,11 +239,14 @@ def _iloc_item_offsets(data: bytes) -> list[dict[str, Any]]:
             if pos > len(data):
                 return items
             extents.append(
-                {"offset_off": offset_off, "offset_size": offset_size,
-                 "length_off": length_off, "length_size": length_size}
+                {
+                    "offset_off": offset_off,
+                    "offset_size": offset_size,
+                    "length_off": length_off,
+                    "length_size": length_size,
+                }
             )
-        items.append({"item_id_off": item_id_off, "item_id_size": item_id_size,
-                       "extents": extents})
+        items.append({"item_id_off": item_id_off, "item_id_size": item_id_size, "extents": extents})
     return items
 
 
@@ -423,7 +426,9 @@ class AvifMutator:
             field_name = self._rng.choice(["offset", "length"])
             off, size = extent[f"{field_name}_off"], extent[f"{field_name}_size"]
             if size:
-                value = self._rng.choice([0, 1, len(raw), max_len, self._rng.randint(0, max_len * 4)])
+                value = self._rng.choice(
+                    [0, 1, len(raw), max_len, self._rng.randint(0, max_len * 4)]
+                )
                 _write_be(raw, off, size, value)
         elif item["item_id_size"]:
             _write_be(raw, item["item_id_off"], item["item_id_size"], self._rng.choice(INT_VALUES))
@@ -494,9 +499,7 @@ class AvifMutator:
         # hdlr FullBox: [version+flags:4][pre_defined:4][handler_type:4]
         if len(raw) < 12:
             return doc
-        raw[8:12] = self._rng.choice(
-            [b"pict", b"vide", b"soun", b"meta", b"auxv"] + WEIRD_FOURCCS
-        )
+        raw[8:12] = self._rng.choice([b"pict", b"vide", b"soun", b"meta", b"auxv"] + WEIRD_FOURCCS)
         box.data = bytes(raw)
         return doc
 
@@ -613,8 +616,11 @@ class AvifMutator:
         mdat = Box(b"mdat", 8 + len(av1_payload), av1_payload)
 
         hdlr_data = (
-            struct.pack(">I", 0) + struct.pack(">I", 0) + b"pict"
-            + struct.pack(">III", 0, 0, 0) + b"\x00"
+            struct.pack(">I", 0)
+            + struct.pack(">I", 0)
+            + b"pict"
+            + struct.pack(">III", 0, 0, 0)
+            + b"\x00"
         )
         hdlr = Box(b"hdlr", 8 + len(hdlr_data), hdlr_data)
 
@@ -651,7 +657,9 @@ class AvifMutator:
         iinf_data = struct.pack(">I", 0) + struct.pack(">H", 1) + serialize_boxes([infe])
         iinf = Box(b"iinf", 8 + len(iinf_data), iinf_data)
 
-        ispe_data = struct.pack(">I", 0) + struct.pack(">II", r.randint(1, 4096), r.randint(1, 4096))
+        ispe_data = struct.pack(">I", 0) + struct.pack(
+            ">II", r.randint(1, 4096), r.randint(1, 4096)
+        )
         ispe = Box(b"ispe", 8 + len(ispe_data), ispe_data)
 
         av1c_data = bytes([0x81, r.randint(0, 0x1F), 0x00, 0x00])

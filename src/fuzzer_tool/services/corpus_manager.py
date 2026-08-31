@@ -294,6 +294,9 @@ class CorpusManager:
         store.set("coverage_contract", current_coverage_contract(f))
         if getattr(f, "_katz_channel", None) is not None:
             store.set("katz", f._katz_channel.state_dict())
+        # Coverage regime detector state (percolation phase classification)
+        if hasattr(f, "_regime"):
+            store.set("regime", f._regime.save())
         store.save()
 
     def load_state(self):
@@ -389,6 +392,10 @@ class CorpusManager:
         et_data = f._state_store.get("edge_tracker")
         if et_data is not None:
             f._edge_tracker.from_dict(et_data)
+        # Restore coverage regime detector state
+        regime_data = f._state_store.get("regime")
+        if regime_data is not None and hasattr(f, "_regime"):
+            f._regime.load(regime_data)
         # Restore checksum learner state
         cl_data = state.get("checksum_learner")
         if cl_data and hasattr(f, "checksum_learner") and f.checksum_learner is not None:
@@ -1085,6 +1092,20 @@ class CorpusManager:
                         recovered_count,
                         len(uncovered),
                     )
+
+        # Bootstrap percolation post-pass: capture transitive redundancy that
+        # single-pass greedy set-cover leaves behind. Disabled by default.
+        if getattr(f, "_use_bootstrap", False) and len(unique) > 1:
+            from fuzzer_tool.core.percolation import bootstrap_minimize_corpus
+
+            unique, bootstrap_removed = bootstrap_minimize_corpus(
+                unique, f._edge_tracker, k=getattr(f, "_bootstrap_k", 1)
+            )
+            if bootstrap_removed:
+                log.info(
+                    "Bootstrap percolation removed %d seeds (transitive redundancy)",
+                    len(bootstrap_removed),
+                )
 
         removed = len(f.corpus) - len(unique)
         if removed > 0:

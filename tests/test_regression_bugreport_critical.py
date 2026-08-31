@@ -41,8 +41,13 @@ class TestParallelSignature:
         from fuzzer_tool.services.fuzzer import Fuzzer
 
         fuzzer_params = inspect.signature(Fuzzer.__init__).parameters
-        for kwarg in ("contextual", "contextual_alpha", "contextual_lambda",
-                      "lineage", "lineage_backtrack"):
+        for kwarg in (
+            "contextual",
+            "contextual_alpha",
+            "contextual_lambda",
+            "lineage",
+            "lineage_backtrack",
+        ):
             assert kwarg in fuzzer_params
 
 

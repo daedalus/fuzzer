@@ -1,13 +1,11 @@
 """Tests for CoverageRegimeDetector and its wiring into the fuzzer."""
 
-from fuzzer_tool.core.coverage_regime import (
-    CoverageRegime,
-    CoverageRegimeDetector,
-)
+from fuzzer_tool.core.coverage_regime import CoverageRegimeDetector
 from fuzzer_tool.core.critical_slowing import (
     CoverageHomogeneityDetector,
     CriticalSlowingDown,
 )
+from fuzzer_tool.core.percolation import CoverageRegime
 
 
 class TestCoverageRegimeDetector:

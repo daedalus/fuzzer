@@ -181,14 +181,10 @@ class ContextualLinUCBScheduler:
         n = len(ops)
         ops_t = tuple(ops)
         if ops_t != self._sel_ops:
-            idx = np.fromiter(
-                (self._index[op] for op in ops), dtype=np.intp, count=n
-            )
+            idx = np.fromiter((self._index[op] for op in ops), dtype=np.intp, count=n)
             self._sel_ops = ops_t
             self._sel_idx = idx
-            self._sel_contig = bool(
-                n <= len(self._names) and np.array_equal(idx, np.arange(n))
-            )
+            self._sel_contig = bool(n <= len(self._names) and np.array_equal(idx, np.arange(n)))
 
         if self._sel_contig:
             return self._A_inv_arr[:n], self._b_arr[:n]

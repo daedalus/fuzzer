@@ -492,6 +492,8 @@ def cmd_fuzz(args):
         max_corpus_bytes=getattr(args, "max_corpus_bytes", 0),
         minimize_every_execs=getattr(args, "minimize_every_execs", 0),
         prune_corpus_max_memory=getattr(args, "prune_corpus_on_max_memory", 80),
+        bootstrap=getattr(args, "bootstrap", False),
+        bootstrap_k=getattr(args, "bootstrap_k", 1),
         no_shm=args.no_shm,
         use_ptrace=args.ptrace,
         adaptive_havoc=not getattr(args, "no_adaptive_havoc", False),
@@ -2135,6 +2137,18 @@ def main() -> int:
         type=int,
         default=0,
         help="Auto-minimize corpus when total seed bytes exceeds N (0=unlimited)",
+    )
+    fuzz_parser.add_argument(
+        "--bootstrap",
+        action="store_true",
+        help="Enable bootstrap percolation post-pass in corpus minimization "
+        "(removes transitively-redundant seeds that single-pass set-cover leaves behind)",
+    )
+    fuzz_parser.add_argument(
+        "--bootstrap-k",
+        type=int,
+        default=1,
+        help="Minimum unique edges required to keep a seed during bootstrap percolation (default: 1)",
     )
     fuzz_parser.add_argument(
         "--corpus-boost",

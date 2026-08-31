@@ -127,9 +127,7 @@ class TestAvifMutations:
         mutator._rng = _FixedRng()
         mutator._mutate_ispe(doc, max_len=4096)
 
-        ispe = next(
-            b for b in doc.meta_children[4].children[0].children if b.box_type == b"ispe"
-        )
+        ispe = next(b for b in doc.meta_children[4].children[0].children if b.box_type == b"ispe")
         width = struct.unpack_from(">I", ispe.data, 4)[0]
         assert width == 0  # INT_VALUES[0]
 
@@ -596,7 +594,9 @@ class TestNewMutationOperators:
         ops = [
             name
             for name in dir(mutator)
-            if name.startswith(("_mutate_", "_flip_", "_swap_", "_delete_", "_duplicate_", "_truncate_"))
+            if name.startswith(
+                ("_mutate_", "_flip_", "_swap_", "_delete_", "_duplicate_", "_truncate_")
+            )
         ]
         assert len(ops) >= 15
         for name in ops:

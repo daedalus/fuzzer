@@ -116,12 +116,11 @@ def parse_ts_packets(data: bytes) -> list[TsPacket] | None:
         cursor = 4
         adaptation_field = b""
         payload = b""
-        if adaptation_field_control in (0x2, 0x3):
-            if cursor < len(pkt):
-                af_len = pkt[cursor]
-                af_end = min(cursor + 1 + af_len, len(pkt))
-                adaptation_field = pkt[cursor:af_end]
-                cursor = af_end
+        if adaptation_field_control in (0x2, 0x3) and cursor < len(pkt):
+            af_len = pkt[cursor]
+            af_end = min(cursor + 1 + af_len, len(pkt))
+            adaptation_field = pkt[cursor:af_end]
+            cursor = af_end
         if adaptation_field_control in (0x1, 0x3):
             payload = pkt[cursor:]
         packets.append(
@@ -184,7 +183,9 @@ class MpegtsMutator:
         """Remap a random packet's PID — exercises PID-table lookups and
         stream/program (mis)association in the demuxer."""
         target = self._rng.choice(packets)
-        target.pid = self._rng.choice([PAT_PID, NULL_PID, 0x0100, 0x1FFE, self._rng.randint(0, 0x1FFF)])
+        target.pid = self._rng.choice(
+            [PAT_PID, NULL_PID, 0x0100, 0x1FFE, self._rng.randint(0, 0x1FFF)]
+        )
         return packets
 
     def _mutate_continuity_counter(self, packets: list[TsPacket], max_len: int) -> list[TsPacket]:

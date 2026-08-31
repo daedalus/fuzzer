@@ -438,8 +438,7 @@ class SqliteMutator:
         reach.
         """
         candidates = [
-            (page, _cell_starts(page, is_page1=(i == 0)))
-            for i, page in enumerate(doc.pages)
+            (page, _cell_starts(page, is_page1=(i == 0))) for i, page in enumerate(doc.pages)
         ]
         candidates = [(p, starts) for p, starts in candidates if starts]
         if not candidates:

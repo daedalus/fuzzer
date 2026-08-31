@@ -132,7 +132,13 @@ class FlvMutator:
         """Corrupt declared data_size independent of the real data length."""
         target = rng.choice(tags)
         target.data_size = rng.choice(
-            [0, 0xFFFFFF, len(target.data) + 1, max(0, len(target.data) - 1), rng.randint(0, 0xFFFFFF)]
+            [
+                0,
+                0xFFFFFF,
+                len(target.data) + 1,
+                max(0, len(target.data) - 1),
+                rng.randint(0, 0xFFFFFF),
+            ]
         )
 
     def _mutate_timestamp(self, tags: list[FlvTag], rng) -> None:
@@ -155,7 +161,14 @@ class FlvMutator:
         orig = tags[idx]
         tags.insert(
             idx + 1,
-            FlvTag(orig.prev_tag_size, orig.tag_type, orig.data_size, orig.timestamp, orig.stream_id, orig.data),
+            FlvTag(
+                orig.prev_tag_size,
+                orig.tag_type,
+                orig.data_size,
+                orig.timestamp,
+                orig.stream_id,
+                orig.data,
+            ),
         )
 
     def _delete_tag(self, tags: list[FlvTag], rng) -> None:
@@ -168,5 +181,12 @@ class FlvMutator:
         payload = bytes([0x17, 0x00, 0x00, 0x00, 0x00]) + bytes(
             rng.randint(0, 255) for _ in range(64)
         )
-        tag = FlvTag(prev_tag_size=0, tag_type=TAG_VIDEO, data_size=len(payload), timestamp=0, stream_id=0, data=payload)
+        tag = FlvTag(
+            prev_tag_size=0,
+            tag_type=TAG_VIDEO,
+            data_size=len(payload),
+            timestamp=0,
+            stream_id=0,
+            data=payload,
+        )
         return serialize_flv(header, [tag], None)[:max_len]

@@ -37,8 +37,6 @@ def _read_shm_edges(shm_id: str, size: int = 65536) -> bytearray:
     return bytearray(data)
 
 
-
-
 def _discover_corpus_files(corpus_path: Path) -> list[Path]:
     """Find corpus files under either the sharded or a flat layout.
 

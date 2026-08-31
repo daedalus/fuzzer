@@ -76,7 +76,9 @@ def parse_ogg_pages(data: bytes) -> list[OggPage] | None:
         data_start = seg_end
         data_end = min(data_start + data_len, n)
         page_data = data[data_start:data_end]
-        pages.append(OggPage(version, header_type, granule, serial, seq, checksum, seg_table, page_data))
+        pages.append(
+            OggPage(version, header_type, granule, serial, seq, checksum, seg_table, page_data)
+        )
         pos = data_end
 
     return pages if pages else None
@@ -117,7 +119,9 @@ class OggMutator:
 
     def _mutate_granule_position(self, pages: list[OggPage], rng) -> None:
         target = rng.choice(pages)
-        target.granule_position = rng.choice([0, 0xFFFFFFFFFFFFFFFF, rng.randint(0, 0xFFFFFFFFFFFFFFFF)])
+        target.granule_position = rng.choice(
+            [0, 0xFFFFFFFFFFFFFFFF, rng.randint(0, 0xFFFFFFFFFFFFFFFF)]
+        )
 
     def _mutate_serial_number(self, pages: list[OggPage], rng) -> None:
         """Remap a page to a different logical-stream serial — tests
@@ -151,8 +155,16 @@ class OggMutator:
         orig = pages[idx]
         pages.insert(
             idx + 1,
-            OggPage(orig.version, orig.header_type, orig.granule_position, orig.serial_number,
-                    orig.sequence_number, orig.checksum, orig.segment_table, orig.data),
+            OggPage(
+                orig.version,
+                orig.header_type,
+                orig.granule_position,
+                orig.serial_number,
+                orig.sequence_number,
+                orig.checksum,
+                orig.segment_table,
+                orig.data,
+            ),
         )
 
     def _delete_page(self, pages: list[OggPage], rng) -> None:

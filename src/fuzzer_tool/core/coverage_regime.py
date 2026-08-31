@@ -5,27 +5,19 @@ Combines CriticalSlowingDown (discovery-rate CSD), CoverageHomogeneityDetector
 into a single phase classifier.  Emits actionable regime labels to the main
 loop via a property; the loop does not embed strategy logic in the detector.
 
-Phase semantics (percolation framing):
-- SUBCRITICAL    — discovery rate decays exponentially; fuzzer stuck in isolated clusters
-- CRITICAL       — power-law regime; maximum sensitivity; near a coverage jump
-- SUPERCRITICAL  — compounding discovery; each input unlocks multiple paths
+``CoverageRegime`` is defined in ``fuzzer_tool.core.percolation`` and imported
+here for use by the detector.
 """
 
-import enum
 import logging
 
 from fuzzer_tool.core.critical_slowing import (
     CoverageHomogeneityDetector,
     CriticalSlowingDown,
 )
+from fuzzer_tool.core.percolation import CoverageRegime
 
 log = logging.getLogger(__name__)
-
-
-class CoverageRegime(enum.Enum):
-    SUBCRITICAL = "subcritical"
-    CRITICAL = "critical"
-    SUPERCRITICAL = "supercritical"
 
 
 class CoverageRegimeDetector:

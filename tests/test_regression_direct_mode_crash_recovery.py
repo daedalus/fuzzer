@@ -117,20 +117,15 @@ class TestDirectModeCrashRecovery:
         Must return well within the watchdog window with the 128+SIGSEGV
         convention (139), not time out.
         """
-        result = _run_probe(
-            str(Path(__file__).parent.parent / "src"), str(target_so), b"CRASHS"
-        )
+        result = _run_probe(str(Path(__file__).parent.parent / "src"), str(target_so), b"CRASHS")
         assert result.returncode == 0, (
-            f"probe did not exit cleanly (stdout={result.stdout!r} "
-            f"stderr={result.stderr!r})"
+            f"probe did not exit cleanly (stdout={result.stdout!r} stderr={result.stderr!r})"
         )
         assert "RC=139" in result.stdout, result.stdout
 
     def test_abort_trigger_recovers(self, target_so):
         """CRASHA hits abort(), intercepted by afl_shim.c's override — rc=0."""
-        result = _run_probe(
-            str(Path(__file__).parent.parent / "src"), str(target_so), b"CRASHA"
-        )
+        result = _run_probe(str(Path(__file__).parent.parent / "src"), str(target_so), b"CRASHA")
         assert result.returncode == 0, result.stderr
         assert "RC=0" in result.stdout
 
@@ -150,17 +145,36 @@ class TestPreFixSourceActuallyHung:
 
         repo_root = Path(__file__).parent.parent
         # Commit that introduced the fix; ^ is the pre-fix parent.
-        fix_commit = sp.run(
-            ["git", "log", "--format=%H", "-1", "--follow", "--diff-filter=M",
-             "--grep=finding #13", "--", "src/fuzzer_tool/adapters/inprocess.py"],
-            cwd=repo_root, capture_output=True, text=True, check=True,
-        ).stdout.strip().splitlines()
+        fix_commit = (
+            sp.run(
+                [
+                    "git",
+                    "log",
+                    "--format=%H",
+                    "-1",
+                    "--follow",
+                    "--diff-filter=M",
+                    "--grep=finding #13",
+                    "--",
+                    "src/fuzzer_tool/adapters/inprocess.py",
+                ],
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            .stdout.strip()
+            .splitlines()
+        )
         if not fix_commit:
             pytest.skip("fix commit for finding #13 not found in history")
         fix_sha = fix_commit[0]
         old_src = sp.run(
             ["git", "show", f"{fix_sha}^:src/fuzzer_tool/adapters/inprocess.py"],
-            cwd=repo_root, capture_output=True, text=True, check=True,
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=True,
         ).stdout
         assert "signal.signal(signal.SIGSEGV, _crash_handler)" in old_src, (
             "expected the pre-fix source to contain the broken Python-level "

@@ -61,7 +61,9 @@ class TestSniffer:
         assert format_gate_matches("mpegts_chunk_mutate", _pat_packet()) is False
 
     def test_non_ts_not_detected(self):
-        assert format_gate_matches("mpegts_chunk_mutate", b"\x89PNG\r\n\x1a\n" + bytes(400)) is False
+        assert (
+            format_gate_matches("mpegts_chunk_mutate", b"\x89PNG\r\n\x1a\n" + bytes(400)) is False
+        )
 
 
 class TestParseSerializeRoundTrip:

@@ -30,9 +30,23 @@ from dataclasses import dataclass
 
 RIFF_HEADER_LEN = 12  # "RIFF" + size(4) + form_type(4)
 KNOWN_FOURCCS = [
-    b"fmt ", b"data", b"fact", b"LIST", b"JUNK", b"idx1",
-    b"hdrl", b"strl", b"strh", b"strf", b"strd", b"strn",
-    b"movi", b"avih", b"vprp", b"INFO", b"PAD ",
+    b"fmt ",
+    b"data",
+    b"fact",
+    b"LIST",
+    b"JUNK",
+    b"idx1",
+    b"hdrl",
+    b"strl",
+    b"strh",
+    b"strf",
+    b"strd",
+    b"strn",
+    b"movi",
+    b"avih",
+    b"vprp",
+    b"INFO",
+    b"PAD ",
 ]
 
 
@@ -117,7 +131,13 @@ class RiffMutator:
         — the classic RIFF-parser desync/OOB-read trigger."""
         target = rng.choice(chunks)
         target.declared_size = rng.choice(
-            [0, 0xFFFFFFFF, len(target.data) + 1, max(0, len(target.data) - 1), rng.randint(0, 0xFFFFFFFF)]
+            [
+                0,
+                0xFFFFFFFF,
+                len(target.data) + 1,
+                max(0, len(target.data) - 1),
+                rng.randint(0, 0xFFFFFFFF),
+            ]
         )
 
     def _mutate_fourcc(self, chunks: list[RiffChunk], rng) -> None:
@@ -134,7 +154,9 @@ class RiffMutator:
             self._mutate_fourcc(chunks, rng)
             return
         target = rng.choice(candidates)
-        new_type = rng.choice([b"hdrl", b"strl", b"movi", bytes(rng.randint(0, 255) for _ in range(4))])
+        new_type = rng.choice(
+            [b"hdrl", b"strl", b"movi", bytes(rng.randint(0, 255) for _ in range(4))]
+        )
         target.data = new_type + target.data[4:]
 
     def _duplicate_chunk(self, chunks: list[RiffChunk], rng) -> None:

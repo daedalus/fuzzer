@@ -31,10 +31,10 @@ from fuzzer_tool.adapters.shm import MAX_COUNT_GROWTH_FACTOR, ShmCoverage
 from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.byte_entropy import byte_entropy_pct
 from fuzzer_tool.core.cost_ledger import cost_samples, seed_exec_us
-from fuzzer_tool.core.coverage_regime import CoverageRegime
 from fuzzer_tool.core.markov import MarkovChain, MarkovEnsemble
 from fuzzer_tool.core.mi import MI_MAX_POSITIONS, MutualInformationTracker
 from fuzzer_tool.core.operator_registry import REGISTRY
+from fuzzer_tool.core.percolation import CoverageRegime
 from fuzzer_tool.core.running_stats import RunningMoments
 from fuzzer_tool.core.sanitizer import SanitizerReport
 from fuzzer_tool.core.schedulers import (
@@ -807,6 +807,8 @@ class Fuzzer:
         perf_novelty=True,
         reject_code=None,
         sharpe_kelly_blend=0.0,
+        bootstrap=False,
+        bootstrap_k=1,
     ):
         # Snapshot os.environ before anything below (or later in run()) can
         # write __AFL_DIST_SHM_ID / __AFL_SHM_ID / AFL_MAP_SIZE / LD_PRELOAD /
@@ -1492,6 +1494,9 @@ class Fuzzer:
 
         self.mc_bandit = mc_bandit
         self._sharpe_kelly_blend = sharpe_kelly_blend
+        # Bootstrap percolation corpus minimization
+        self._use_bootstrap = bootstrap
+        self._bootstrap_k = bootstrap_k
         # ── Vectorized random number pool for mutation hotpath ────────
         # Generates random values in batches (one numpy C-level call per
         # batch) instead of per-call Python-level random() invocations.

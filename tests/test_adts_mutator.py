@@ -40,7 +40,11 @@ class TestParseSerializeRoundTrip:
         assert len(_frame_bytes()) >= ADTS_HEADER_LEN
 
     def test_round_trip_preserves_frame_count(self):
-        data = _frame_bytes(random.Random(1)) + _frame_bytes(random.Random(2)) + _frame_bytes(random.Random(3))
+        data = (
+            _frame_bytes(random.Random(1))
+            + _frame_bytes(random.Random(2))
+            + _frame_bytes(random.Random(3))
+        )
         frames = parse_adts_frames(data)
         assert frames is not None
         assert len(frames) == 3
@@ -60,7 +64,11 @@ class TestParseSerializeRoundTrip:
 
 class TestAdtsMutator:
     def _frames_and_data(self):
-        data = _frame_bytes(random.Random(1)) + _frame_bytes(random.Random(2)) + _frame_bytes(random.Random(3))
+        data = (
+            _frame_bytes(random.Random(1))
+            + _frame_bytes(random.Random(2))
+            + _frame_bytes(random.Random(3))
+        )
         return parse_adts_frames(data), data
 
     def test_mutate_changes_output_over_many_trials(self):

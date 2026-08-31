@@ -102,17 +102,11 @@ class TestRootCauseBaselineDiscovery:
 
 class TestSharedDiscovery:
     def test_default_excludes_pruned_and_crashing_keeps_irreplaceable(self, corpus):
-        assert _bytes(discover_seed_files(corpus)) == sorted(
-            [*SEEDS, b"seed-irreplaceable"]
-        )
+        assert _bytes(discover_seed_files(corpus)) == sorted([*SEEDS, b"seed-irreplaceable"])
 
     def test_opt_in_subtrees(self, corpus):
-        got = _bytes(
-            discover_seed_files(corpus, include_pruned=True, include_crashing=True)
-        )
-        assert got == sorted(
-            [*SEEDS, b"seed-irreplaceable", b"seed-crashing", b"seed-pruned"]
-        )
+        got = _bytes(discover_seed_files(corpus, include_pruned=True, include_crashing=True))
+        assert got == sorted([*SEEDS, b"seed-irreplaceable", b"seed-crashing", b"seed-pruned"])
 
     def test_sidecars_never_returned(self, corpus):
         for p in discover_seed_files(corpus, include_pruned=True, include_crashing=True):
