@@ -516,34 +516,37 @@ class InProcessRunner:
     def _run_c_direct(self, data: bytes) -> tuple[int, str]:
         """Direct ctypes.CDLL call — zero overhead.
 
-        Catches SIGSEGV/SIGABRT via signal handler so target crashes
-        and ASAN errors don't kill the fuzzer process.
         Timeout via SIGALRM + setitimer.
+
+        Crash survival goes through ``__afl_guarded_call`` (afl_shim.c),
+        the same C-level sigsetjmp/siglongjmp escape ``_run_c_direct_lite``
+        uses, when the shim exports it. A pure-Python ``signal.signal()``
+        handler cannot do this job: SIGSEGV/SIGABRT are synchronous faults
+        delivered at the faulting instruction, and returning normally from
+        a Python handler resumes execution at that same instruction —
+        producing an infinite fault loop that freezes the fuzzer
+        permanently on the first wild-pointer input, not a caught crash.
+        Only a handler that unwinds the stack itself (siglongjmp, done
+        C-side) can actually escape. Without the shim symbol, a target
+        crash here kills the fuzzer process — same as the module-level
+        contract for ``--inprocess-direct`` targets that don't opt in.
         """
         if self._lib is None or self._func_ptr is None:
             return -2, "runner not initialized"
         if self._coverage_enabled():
             self.reset_bitmap()
 
-        crashed = False
-        crashed_sig = 0
         timed_out = False
-        stderr_buf = []
-
-        def _crash_handler(signum, frame):
-            nonlocal crashed, crashed_sig
-            crashed = True
-            crashed_sig = signum
 
         def _alarm_handler(signum, frame):
             nonlocal timed_out
             timed_out = True
 
-        old_segv = signal.signal(signal.SIGSEGV, _crash_handler)
-        old_abrt = signal.signal(signal.SIGABRT, _crash_handler)
         old_alarm = signal.signal(signal.SIGALRM, _alarm_handler)
         signal.setitimer(signal.ITIMER_REAL, self.timeout)
         result: tuple[int, str] | None = None
+        old_stderr_fd = None
+        read_fd = None
         try:
             # Capture stderr for ASAN output
             old_stderr_fd = os.dup(2)
@@ -552,15 +555,34 @@ class InProcessRunner:
             os.close(write_fd)
 
             buf = (ctypes.c_uint8 * len(data))(*data)
-            rc = self._func_ptr(buf, len(data))
+            _guarded = getattr(self._lib, "__afl_guarded_call", None)
+            if _guarded is not None:
+                _guarded.restype = ctypes.c_int
+                _guarded.argtypes = [
+                    ctypes.c_void_p,
+                    ctypes.POINTER(ctypes.c_uint8),
+                    ctypes.c_size_t,
+                ]
+                _func_ptr_raw = ctypes.cast(self._func_ptr, ctypes.c_void_p)
+                rc = _guarded(_func_ptr_raw, buf, len(data))
+                # rc < 0 means a signal crashed us; __afl_guarded_call
+                # siglongjmp'd back with -sig. Convert to the 128+sig
+                # convention used elsewhere in this module.
+                if rc < 0:
+                    rc = 128 + (-rc)
+            else:
+                rc = self._func_ptr(buf, len(data))
 
             # Restore stderr and read any captured output
             os.dup2(old_stderr_fd, 2)
             os.close(old_stderr_fd)
+            old_stderr_fd = None
             os.set_blocking(read_fd, False)
+            stderr_buf = []
             with contextlib.suppress(OSError):
                 stderr_buf.append(os.read(read_fd, 65536))
             os.close(read_fd)
+            read_fd = None
 
             if timed_out:
                 result = (-1, "timeout")
@@ -569,18 +591,16 @@ class InProcessRunner:
         except Exception as e:
             # Restore stderr on exception
             with contextlib.suppress(Exception):
-                os.dup2(old_stderr_fd, 2)
-                os.close(old_stderr_fd)
+                if old_stderr_fd is not None:
+                    os.dup2(old_stderr_fd, 2)
+                    os.close(old_stderr_fd)
+                if read_fd is not None:
+                    os.close(read_fd)
             result = (-2, str(e))
         finally:
             signal.setitimer(signal.ITIMER_REAL, 0)
             signal.signal(signal.SIGALRM, old_alarm)
-            signal.signal(signal.SIGSEGV, old_segv)
-            signal.signal(signal.SIGABRT, old_abrt)
             self._flush_distance_tail()
-        if crashed:
-            # 128 + signal number
-            return 128 + crashed_sig, ""
         return result or (-2, "runner not initialized")
 
     def _run_c_direct_lite(self, data: bytes) -> tuple[int, str]:
