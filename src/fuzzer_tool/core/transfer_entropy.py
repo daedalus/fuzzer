@@ -24,6 +24,7 @@ Provides:
 """
 
 import math
+import random
 from collections import defaultdict
 
 try:
@@ -48,36 +49,18 @@ class TransferEntropy:
         self.k = history_length
         self.n_bins = n_bins
 
-    def transfer_entropy(
+    def _build_joints(
         self,
         source: list[int],
         target: list[int],
-    ) -> float:
-        """Compute T_{source → target} in bits.
-
-        T_{X→Y} = H(Y_{t+1} | Y_t^{(k)}) - H(Y_{t+1} | Y_t^{(k)}, X_t)
-
-        where Y_t^{(k)} = (Y_t, Y_{t-1}, ..., Y_{t-k+1}) is the k-length
-        history of Y.
-
-        Args:
-            source: Time series of source values (X).
-            target: Time series of target values (Y). Must be same length.
-
-        Returns:
-            Transfer entropy in bits. Positive means X→Y information flow.
-            Zero means no directed influence.
-        """
+    ) -> tuple[dict, dict, int, int]:
+        """Build the joint-count distributions used by transfer_entropy."""
         n = min(len(source), len(target))
-        if n < self.k + 2:
-            return 0.0
 
-        # Build joint distributions
         # P(Y_{t+1}, Y_t^{(k)}) — target alone
-        joint_target = defaultdict(int)
+        joint_target: dict = defaultdict(int)
         # P(Y_{t+1}, Y_t^{(k)}, X_t) — with source
-        joint_both = defaultdict(int)
-        # Marginal counts
+        joint_both: dict = defaultdict(int)
         count_target = 0
         count_both = 0
 
@@ -92,17 +75,88 @@ class TransferEntropy:
             joint_both[(y_future, y_hist, x_present)] += 1
             count_both += 1
 
+        return joint_target, joint_both, count_target, count_both
+
+    def transfer_entropy(
+        self,
+        source: list[int],
+        target: list[int],
+        n_surrogates: int = 15,
+    ) -> float:
+        """Compute T_{source → target} in bits.
+
+        T_{X→Y} = H(Y_{t+1} | Y_t^{(k)}) - H(Y_{t+1} | Y_t^{(k)}, X_t)
+
+        where Y_t^{(k)} = (Y_t, Y_{t-1}, ..., Y_{t-k+1}) is the k-length
+        history of Y.
+
+        The plug-in estimator above is biased upward whenever the joint
+        context (Y_t^{(k)}, X_t) has many distinct values relative to the
+        sample size — as it always does for byte-level fuzzing data — because
+        sparse contexts let H(Y|Y_hist,X_t) be estimated as artificially low
+        (in the extreme, every context is observed once, and that single
+        observation "predicts" y_future perfectly). This reports substantial
+        spurious TE even between statistically independent streams.
+
+        To correct for this, we estimate the bias directly: recompute the
+        same plug-in statistic on `n_surrogates` random permutations of
+        `source`. Shuffling destroys any real X→Y coupling while leaving both
+        series' own marginal statistics — and therefore the context
+        cardinality/sparsity that drives the bias — unchanged, so the average
+        surrogate TE is a direct estimate of the bias floor (the "effective
+        transfer entropy" correction of Marschinski & Kantz 2002). We report
+        max(0, raw TE - bias).
+
+        Args:
+            source: Time series of source values (X).
+            target: Time series of target values (Y). Must be same length.
+            n_surrogates: Number of shuffled surrogates used to estimate the
+                bias floor. 0 disables the correction and returns the raw
+                (upward-biased) plug-in estimate.
+
+        Returns:
+            Transfer entropy in bits. Positive means X→Y information flow.
+            Zero means no directed influence beyond the estimation noise
+            floor for this sample size and context cardinality.
+        """
+        n = min(len(source), len(target))
+        if n < self.k + 2:
+            return 0.0
+
+        joint_target, joint_both, count_target, count_both = self._build_joints(source, target)
         if count_target == 0 or count_both == 0:
             return 0.0
 
-        # Compute conditional entropies
         # H(Y_{t+1} | Y_t^{(k)})
         h_target = self._conditional_entropy_target(joint_target, count_target)
         # H(Y_{t+1} | Y_t^{(k)}, X_t)
         h_both = self._conditional_entropy_both(joint_both, count_both)
+        te_raw = h_target - h_both
 
-        te = h_target - h_both
-        return max(0.0, te)  # TE should be non-negative
+        if n_surrogates <= 0:
+            return max(0.0, te_raw)
+
+        # Deterministic, call-local RNG: reproducible bias estimate that
+        # doesn't consume or perturb any shared/global random state.
+        seed = (hash(tuple(source[:64])) ^ hash(tuple(target[:64])) ^ n) & 0xFFFFFFFF
+        rng = random.Random(seed)
+        shuffled = list(source)
+        bias_sum = 0.0
+        surrogates_used = 0
+        for _ in range(n_surrogates):
+            rng.shuffle(shuffled)
+            _, joint_both_s, _, count_both_s = self._build_joints(shuffled, target)
+            if count_both_s == 0:
+                continue
+            h_both_s = self._conditional_entropy_both(joint_both_s, count_both_s)
+            bias_sum += h_target - h_both_s
+            surrogates_used += 1
+
+        if surrogates_used == 0:
+            return max(0.0, te_raw)
+
+        bias = bias_sum / surrogates_used
+        return max(0.0, te_raw - bias)
 
     def _conditional_entropy_target(self, joint: dict, count: int) -> float:
         """Compute H(Y_{t+1} | Y_t^{(k)}) from joint distribution."""

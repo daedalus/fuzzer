@@ -258,9 +258,11 @@ class TestTransferEntropy:
         target = [random.randint(0, 10) for _ in range(200)]
         te_xy = te.transfer_entropy(source, target)
         te_yx = te.transfer_entropy(target, source)
-        # Both should be similar magnitude (both noisy)
-        # The key test: neither should be much larger than the other
-        assert abs(te_xy - te_yx) < max(te_xy, te_yx) * 0.5
+        # Both should be similar magnitude (both noisy), and with proper
+        # bias correction for independent series both collapse close to 0 --
+        # neither should dominate the other.
+        assert max(te_xy, te_yx) < 0.5
+        assert abs(te_xy - te_yx) <= max(te_xy, te_yx) * 0.5 + 0.05
 
     def test_te_perfect_causal(self):
         te = TransferEntropy()
