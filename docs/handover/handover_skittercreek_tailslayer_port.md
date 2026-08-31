@@ -11,10 +11,11 @@ Sources, for the two items still unported:
 - `LaurieWired/tailslayer` — `discovery/trefi_probe.c`,
   `discovery/benchmark/benchmark.cpp`, `discovery/benchmark/stats.cpp`.
 
-**Status (round 16):** items 1, 2, 4, 5, 6 and 7 are implemented, wired and
+**Status (round 17):** items 1, 2, 3, 4, 5, 6 and 7 are implemented, wired and
 tested. Round 16 closed B (item 4's validation gate — calibrated against the
-synthetic known-dead region). The only genuinely open thread left is G, the
-intermittent `shmat()` failure. Items 3 and 13 stay deferred by design (H).
+synthetic known-dead region). Round 17 closed the scoped version of item 3
+(I). The only genuinely open thread left is G, the intermittent `shmat()`
+failure. Item 13 stays deferred by design (H).
 The closed rounds' writeups are pruned; the ledger at the end says where each
 one's artifacts live.
 
@@ -45,25 +46,10 @@ Note the segment is created and read successfully by the parent in the same
 test, and `ipcs -m` shows no leak, so segment exhaustion (limit 4096) is not
 the explanation.
 
-### H. Deferred by design — items 3 and 13
+### H. Deferred by design — item 13
 
-Both correctly deferred rather than dropped. Kept here so they are not
-silently reinvented without the context of why they were skipped.
-
-**Item 3 — `compose_bitmask_maps` over `lineage.py` mutation chains.**
-`compose_bitmask_maps` exists in `core/gf2_common.py` and has zero callers.
-The blocker is real: `lineage.py`'s mutation chain is heterogeneous — havoc
-byte flips, splices, dictionary insertions, structural mutations — and most
-are **not** linear in GF(2). Insertions and deletions change length; splices
-aren't bitwise-linear; only pure bit/byte-flip operators are XOR-linear.
-Composition is only valid when every step in the chain is a fixed-width
-XOR-linear map, which is a small subset of the operator set (see the
-"bitflip" family in `operator_categories.py`). Do not build a general
-lineage-composition feature around this. If a concrete need appears — e.g.
-compressing a long run of consecutive pure-bitflip mutations into one composed
-map for faster replay — the scoped version is: filter the chain to maximal
-runs of XOR-linear-only operators, compose only within those runs, leave
-everything else alone.
+Correctly deferred rather than dropped. Kept here so it is not silently
+reinvented without the context of why it was skipped.
 
 **Item 13 — item 5 × item 7, byte-level attribution of timing anomalies.**
 Joining `ExecTimeCalibrator`'s anomaly timestamps to the mutation-event
@@ -167,6 +153,24 @@ sizing.
   caveat you asked to state out loud is stated, at both constants.
 
 ---
+
+### Round 17
+
+- **(I) Item 3's scoped version** — done. `operator_categories.py` gains
+  `XOR_LINEAR_OPS` (the "bitflip family": `{"bit_flip", "byte_flip"}`, the
+  fixed-width constant-XOR operators — deliberately *not* the whole `"bit"`
+  category, since `bit_rotate`/`bit_transpose_*`/etc. are permutations, not
+  constant-XORs, and widening to them needs its own composition proof) and
+  `is_xor_linear()`. `core/gf2_common.py` gains `compose_linear_runs()` —
+  `compose_bitmask_maps`'s first caller — which walks an ordered
+  `(op_name, masks)` chain, folds maximal runs of consecutive
+  `is_xor_linear()` steps into one composed map via `compose_bitmask_maps`,
+  and passes every non-linear step through unchanged at its original
+  position; a run never crosses a non-linear step. It does not derive
+  `masks` itself — a caller replaying actual mutations supplies the
+  concrete per-step mask, per the scoping note this closes. Tests:
+  `tests/test_gf2_common.py::TestComposeLinearRuns`,
+  `tests/test_operator_categories_xor_linear.py`.
 
 ## What was removed
 

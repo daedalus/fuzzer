@@ -15,6 +15,7 @@ from fuzzer_tool.core.gf2_common import (
     apply_bitmask_map,
     bitmask_from_indices,
     compose_bitmask_maps,
+    compose_linear_runs,
     find_irreducible,
     find_primitive_root,
     indices_from_bitmask,
@@ -452,3 +453,107 @@ class TestComposeBitmaskMaps:
         outer = [0b100]  # references bit 2, which doesn't exist in inner
         with pytest.raises(ValueError):
             compose_bitmask_maps(inner, outer)
+
+
+class TestComposeLinearRuns:
+    """`compose_linear_runs` — the scoped item-3 implementation.
+
+    "bit_flip" / "byte_flip" stand in for the XOR-linear family here;
+    any other name stands in for a non-linear op (splice, insert, ...).
+    Only the op *name* drives run boundaries -- these tests use small
+    random invertible maps as stand-ins for whatever masks a real
+    XOR-linear step would carry.
+    """
+
+    def test_empty_chain(self):
+        assert compose_linear_runs([]) == []
+
+    def test_single_linear_step_is_unchanged(self):
+        rng = random.Random(1)
+        m = _random_invertible(4, rng)
+        assert compose_linear_runs([("bit_flip", m)]) == [("bit_flip", m)]
+
+    def test_single_nonlinear_step_is_unchanged(self):
+        rng = random.Random(2)
+        m = _random_invertible(4, rng)
+        assert compose_linear_runs([("byte_insert", m)]) == [("byte_insert", m)]
+
+    def test_run_of_linear_steps_composes_matches_sequential_apply(self):
+        rng = random.Random(3)
+        n = 6
+        steps = [
+            ("bit_flip", _random_invertible(n, rng)),
+            ("byte_flip", _random_invertible(n, rng)),
+            ("bit_flip", _random_invertible(n, rng)),
+        ]
+        result = compose_linear_runs(steps)
+        assert len(result) == 1
+        name, composed = result[0]
+        assert name == "bit_flip+byte_flip+bit_flip"
+        for _ in range(15):
+            v = rng.randrange(1 << n)
+            expected = v
+            for _, masks in steps:
+                expected = apply_bitmask_map(masks, expected)
+            assert apply_bitmask_map(composed, v) == expected
+
+    def test_nonlinear_step_breaks_the_run(self):
+        rng = random.Random(4)
+        n = 5
+        a = _random_invertible(n, rng)
+        b = _random_invertible(n, rng)
+        c = _random_invertible(n, rng)
+        chain = [("bit_flip", a), ("byte_insert", b), ("byte_flip", c)]
+        result = compose_linear_runs(chain)
+        # Nothing merges across the non-linear step: 3 steps in, 3 out.
+        assert [name for name, _ in result] == ["bit_flip", "byte_insert", "byte_flip"]
+        assert result[0][1] == a
+        assert result[1][1] == b
+        assert result[2][1] == c
+
+    def test_leading_and_trailing_nonlinear_steps_pass_through(self):
+        rng = random.Random(6)
+        n = 4
+        pre = _random_invertible(n, rng)
+        x = _random_invertible(n, rng)
+        y = _random_invertible(n, rng)
+        post = _random_invertible(n, rng)
+        chain = [
+            ("dict_insert", pre),
+            ("bit_flip", x),
+            ("byte_flip", y),
+            ("splice", post),
+        ]
+        result = compose_linear_runs(chain)
+        assert [name for name, _ in result] == ["dict_insert", "bit_flip+byte_flip", "splice"]
+        assert result[0] == ("dict_insert", pre)
+        assert result[2] == ("splice", post)
+        for _ in range(10):
+            v = rng.randrange(1 << n)
+            expected = apply_bitmask_map(y, apply_bitmask_map(x, v))
+            assert apply_bitmask_map(result[1][1], v) == expected
+
+    def test_multiple_separate_runs_each_compose_independently(self):
+        rng = random.Random(7)
+        n = 4
+        a = _random_invertible(n, rng)
+        b = _random_invertible(n, rng)
+        c = _random_invertible(n, rng)
+        d = _random_invertible(n, rng)
+        chain = [
+            ("bit_flip", a),
+            ("bit_flip", b),
+            ("block_delete", c),
+            ("byte_flip", d),
+        ]
+        result = compose_linear_runs(chain)
+        assert [name for name, _ in result] == ["bit_flip+bit_flip", "block_delete", "byte_flip"]
+        assert result[2] == ("byte_flip", d)
+
+    def test_all_linear_chain_single_composed_result(self):
+        rng = random.Random(8)
+        n = 5
+        steps = [("byte_flip", _random_invertible(n, rng)) for _ in range(4)]
+        result = compose_linear_runs(steps)
+        assert len(result) == 1
+        assert result[0][0] == "byte_flip+byte_flip+byte_flip+byte_flip"

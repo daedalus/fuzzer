@@ -33,12 +33,15 @@ Callers in this repo
   ``poly_gcd`` (polynomial layer).
 - :mod:`fuzzer_tool.core.cook_mertz` — Cook-Mertz MLE interpolation field
   layer, which imports :class:`GF2n` from here (polynomial layer).
-- The bitmask-vector layer has no dependents yet. Per the handover doc,
-  it's a leaf utility landed ahead of its intended consumer
+- :func:`compose_linear_runs` (bitmask-vector layer) is the first caller
+  of :func:`compose_bitmask_maps`, added for item 3 of the handover doc:
+  folding maximal runs of XOR-linear operators (the "bitflip family",
+  see :data:`fuzzer_tool.core.operator_categories.XOR_LINEAR_OPS`) in a
+  mutation chain into one composed map. Its own intended consumer
   (:mod:`fuzzer_tool.core.root_cause`, for mapping a minimized
-  transformed-domain diff back through a recovered linear map's
-  inverse) -- wiring that in is a separate, later change gated on that
-  need actually materializing, not spec work to do speculatively here.
+  transformed-domain diff back through a recovered linear map's inverse)
+  is still separate, later work gated on that need materializing -- not
+  done speculatively here.
 """
 
 from __future__ import annotations
@@ -400,6 +403,74 @@ def verified_apply_inverse(masks_fwd: list[int], masks_inv: list[int], value: in
     if apply_bitmask_map(masks_fwd, candidate) != value:
         return None
     return candidate
+
+
+def compose_linear_runs(
+    chain: list[tuple[str, list[int]]],
+) -> list[tuple[str, list[int]]]:
+    """Compress maximal runs of XOR-linear operators in a mutation chain.
+
+    Per ``docs/handover/handover_skittercreek_tailslayer_port.md`` item 3
+    (the scoped version, since the general "compose the whole lineage"
+    feature was rejected there): ``lineage.py``'s mutation chains are
+    heterogeneous -- havoc byte flips, splices, dictionary insertions,
+    structural mutations -- and only the ones drawn from
+    :data:`fuzzer_tool.core.operator_categories.XOR_LINEAR_OPS` (the
+    "bitflip family") are fixed-width, non-shifting XOR-linear maps that
+    :func:`compose_bitmask_maps` can validly fold together. This function
+    is the first caller of :func:`compose_bitmask_maps` in the tree; see
+    that module's docstring for why it landed ahead of one.
+
+    ``chain`` is an ordered sequence of ``(op_name, masks)`` steps applied
+    in that order -- ``masks`` a bitmask map (see the module docstring for
+    the representation) already known for that step, all over the same bit
+    width. This function does not derive ``masks`` itself: a caller
+    driving actual mutation replay is the one that knows, at the time each
+    step runs, what its concrete XOR mask was.
+
+    Returns a new chain where every maximal run of consecutive
+    XOR-linear-only steps is replaced by a single composed step (name
+    ``"+".join`` of the run's op names, in order), and every non-linear
+    step is passed through unchanged, in its original position. Composing
+    a run of length 1 is a no-op (returned unchanged, not renamed) so
+    single isolated linear steps round-trip identically instead of
+    growing a spurious composite name.
+
+    Non-linear steps are never merged across, into, or with each other --
+    only consecutive linear steps compose; a run is broken the moment a
+    non-linear op appears, even if a linear op follows it.
+    """
+    from fuzzer_tool.core.operator_categories import is_xor_linear
+
+    result: list[tuple[str, list[int]]] = []
+    run_names: list[str] = []
+    run_masks: list[int] | None = None
+
+    def _flush() -> None:
+        nonlocal run_names, run_masks
+        if run_masks is None:
+            return
+        if len(run_names) == 1:
+            result.append((run_names[0], run_masks))
+        else:
+            result.append(("+".join(run_names), run_masks))
+        run_names = []
+        run_masks = None
+
+    for name, masks in chain:
+        if is_xor_linear(name):
+            if run_masks is None:
+                run_masks = masks
+            else:
+                # Sequential application: apply the run so far, then this
+                # step -- result(x) == masks(run_so_far(x)).
+                run_masks = compose_bitmask_maps(run_masks, masks)
+            run_names.append(name)
+        else:
+            _flush()
+            result.append((name, masks))
+    _flush()
+    return result
 
 
 def compose_bitmask_maps(inner: list[int], outer: list[int]) -> list[int]:

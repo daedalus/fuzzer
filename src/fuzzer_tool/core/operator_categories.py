@@ -57,3 +57,32 @@ def category_of(name: str) -> str:
         return REGISTRY.category_of(name)
     except KeyError:
         return UNCATEGORIZED
+
+
+#: The "bitflip family": operators whose per-application transform is a pure
+#: fixed-width XOR against the buffer -- ``buf[i] ^= K`` for some constant
+#: ``K`` that does not depend on the buffer's current contents, at a byte
+#: position that does not move and without changing the buffer's length.
+#: Per ``docs/handover/handover_skittercreek_tailslayer_port.md`` item 3:
+#: this is the boundary for when composing consecutive mutation steps into
+#: one combined map (:func:`fuzzer_tool.core.gf2_common.compose_bitmask_maps`
+#: via :func:`fuzzer_tool.core.gf2_common.compose_linear_runs`) is valid.
+#:
+#: Deliberately narrow. Most of the ``"bit"`` category (``bit_offset_flip``,
+#: ``bit_rotate``, ``bit_shift``, ``bit_transpose_*``, ``span_invert``,
+#: ``bit_repack``) is excluded even though several of those are, in the
+#: strict linear-algebra sense, also GF(2)-linear (a rotation is a
+#: permutation matrix) -- because this set is deliberately scoped to what
+#: item 3 actually asked for and verified: consecutive constant-XOR
+#: mutations that commute and compose by simply XOR-ing their masks
+#: together. Widening this set to permutation-like operators is a separate,
+#: later change that needs its own composition proof and its own tests, not
+#: an assumption to fold in here. Splices, insertions, deletions, and any
+#: other length-changing or position-shifting operator are never
+#: XOR-linear in this sense and must never be added.
+XOR_LINEAR_OPS: frozenset[str] = frozenset({"bit_flip", "byte_flip"})
+
+
+def is_xor_linear(name: str) -> bool:
+    """Whether operator *name* is in the XOR-linear family (:data:`XOR_LINEAR_OPS`)."""
+    return name in XOR_LINEAR_OPS
