@@ -60,6 +60,9 @@ fuzzer, not just the target.
 39. No retry-until-random-hit loops in tests (`for _ in range(N): if cond: break/found=True`). This tests luck, not behavior — it can pass while the code is broken and fails unreproducibly when it doesn't. Inject a scripted/fake RNG that deterministically drives the exact call sequence and assert the exact output. See `docs/refs/bug-classes.md` §Testing.
 40. Every scheduler armed through `_register_arms` (`src/fuzzer_tool/services/fuzzer.py`) must declare an explicit class-level `supports_priors` bool: `True` only when its `init_arm()` accepts an informative `(prior_alpha, prior_beta)` override. `_register_arms` gates priors behind `getattr(scheduler, "supports_priors", False)`, so a scheduler that omits the flag silently discards format-operator priors instead of failing loudly. Declare it directly after the class docstring with a one-line reason, following `monte_carlo.py` / `exp3.py`.
 41. Always check that the new features implemented or bug fixes do not introduce speed penalty regressions.
+42. When implementing new features always think of edge cases for the tests.
+43. Always maintain succinct, brief, down to the point and updated documentation.
+44. When adding, removing or wiring a new subsystem update `architecture.png`.
 
 ## Corpus Rules
 
@@ -114,6 +117,7 @@ fuzzer, not just the target.
 | `lizard --CCN 15 -w .` | Cyclomatic complexity violations |
 | `vulture --min-confidence 80 .` | Find duplicated code |
 | `fuzzer-tool fuzz <target> -d <corpus> -n <iters> --profile-hotpath [--profile-out PATH]` | cProfile hotpath profile of the fuzz run (tottime/cumtime/ncalls tables; dump defaults to `/tmp/fuzzer_hotpath.prof`) |
+| `dot -Tpng -Gdpi=130 docs/architecture.dot -o docs/images/architecture.png; dot -Tsvg            docs/architecture.dot -o docs/images/architecture.svg` |  To rebuild the architecture png |
 
 
 

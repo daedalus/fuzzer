@@ -23,12 +23,7 @@ came back — and the coloured edges on the right are the return paths that clos
 
 Boxes are *subsystems*, not files — one box can cover several modules — but every module path
 in the diagram is a real path under `src/fuzzer_tool/`. Source is
-[`docs/architecture.dot`](docs/architecture.dot); regenerate with:
-
-```bash
-dot -Tpng -Gdpi=130 docs/architecture.dot -o docs/images/architecture.png
-dot -Tsvg            docs/architecture.dot -o docs/images/architecture.svg
-```
+[`docs/architecture.dot`](docs/architecture.dot)
 
 ---
 
