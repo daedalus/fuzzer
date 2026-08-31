@@ -109,6 +109,46 @@ _kill_children_enabled = os.environ.get("FUZZER_DISABLE_KILL_CHILDREN", "") not 
     "true",
     "yes",
 )
+
+_environ_snapshot: dict[str, str] | None = None
+"""os.environ as it stood before the first Fuzzer() in this process touched it.
+
+Fuzzer.__init__ / run() write __AFL_DIST_SHM_ID, __AFL_SHM_ID, AFL_MAP_SIZE,
+LD_PRELOAD (ASAN) and UBSAN_OPTIONS directly into the process environment,
+because those keys have to be visible to subprocess.Popen()/os.exec* calls
+made throughout the run. Only the cmplog shim's LD_PRELOAD edit was ever
+restored (see the end of run()) -- the rest leaked into whatever ran next in
+the same process: a second target in a multi-target session, a caller
+embedding Fuzzer as a library, or the next test in a pytest run. Captured
+once per process (not per Fuzzer instance) so a second Fuzzer() built while
+the first is still mutating the environment doesn't re-baseline over those
+mutations and adopt them as "original".
+"""
+
+
+def _snapshot_environ_once() -> None:
+    global _environ_snapshot
+    if _environ_snapshot is None:
+        _environ_snapshot = dict(os.environ)
+
+
+def _restore_environ() -> None:
+    """Put os.environ back the way ``_snapshot_environ_once`` found it.
+
+    Removes keys this process added and restores keys it changed. Safe to
+    call more than once (idempotent) and safe to call from atexit (no
+    exceptions escape).
+    """
+    global _environ_snapshot
+    if _environ_snapshot is None:
+        return
+    with contextlib.suppress(Exception):
+        for key in list(os.environ.keys()):
+            if key not in _environ_snapshot:
+                os.environ.pop(key, None)
+        for key, value in _environ_snapshot.items():
+            if os.environ.get(key) != value:
+                os.environ[key] = value
 """Whether teardown SIGKILLs child process groups.
 
 On by default: a fuzzer that exits leaving target processes behind will
@@ -172,6 +212,7 @@ def install_cleanup_handlers() -> bool:
     than fatal.
     """
     atexit.register(_kill_children)
+    atexit.register(_restore_environ)
     try:
         signal.signal(signal.SIGTERM, _kill_children)
         signal.signal(signal.SIGINT, _kill_children)
@@ -763,6 +804,11 @@ class Fuzzer:
         perf_novelty=True,
         reject_code=None,
     ):
+        # Snapshot os.environ before anything below (or later in run()) can
+        # write __AFL_DIST_SHM_ID / __AFL_SHM_ID / AFL_MAP_SIZE / LD_PRELOAD /
+        # UBSAN_OPTIONS into it, so run() can hand the process environment
+        # back afterwards. See _restore_environ()/finding #10.
+        _snapshot_environ_once()
         self.target = target
         self.debug = debug
         # Persistent-loader ptrace self-trace for fault-address/register
@@ -5864,3 +5910,10 @@ class Fuzzer:
         # embedding Fuzzer -- would silently find no crashes.
         if self._cmplog is not None:
             self._cmplog.restore_env()
+        # cmplog's restore_env() above only ever undid its own LD_PRELOAD
+        # edit. __AFL_DIST_SHM_ID, __AFL_SHM_ID, AFL_MAP_SIZE, the ASAN
+        # LD_PRELOAD injection and UBSAN_OPTIONS were never restored, so
+        # they leaked into whatever ran next in this process -- see
+        # finding #10. _restore_environ() puts back everything this Fuzzer
+        # (or an earlier one in the same process) changed.
+        _restore_environ()
