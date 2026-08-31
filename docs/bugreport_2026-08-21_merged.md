@@ -54,7 +54,15 @@ summary reprints the inner test name, so its `count(...) == 1` assertion sees 2.
     signal handlers + child-killing atexit (`fuzzer.py:159-168`), unrestored
     `os.environ` writes across cmplog/fuzzer/stats/inprocess, fork-in-threaded
     process. Breaks test isolation, library reuse, and reproducibility
-    simultaneously.
+    simultaneously. *Partly closed 2026-08-31: the unrestored-`os.environ`
+    half is fixed — `__init__` now snapshots `os.environ` once per process
+    before `__AFL_DIST_SHM_ID`/`__AFL_SHM_ID`/`AFL_MAP_SIZE`/the ASAN
+    `LD_PRELOAD` injection/`UBSAN_OPTIONS` can touch it, and `run()` restores
+    the snapshot at normal completion plus via `atexit` for
+    crashes/SIGTERM/SIGINT (`tests/test_regression_environ_restore.py`).
+    Still open: import-time signal-handler installation, the child-killing
+    atexit hazard, and the E3 fork-in-multithreaded-process hazard itself
+    (`persistent.py:72`, `runner.py:311`) — none of those were touched.*
 
 16. **`core/transfer_entropy.py:84-105`** [verified empirically] — plug-in TE
     estimator reports ~2.6 bits for *independent* uniform byte streams (n=1500);
