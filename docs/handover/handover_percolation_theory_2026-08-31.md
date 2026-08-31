@@ -1,11 +1,23 @@
 # Handover — Percolation Theory Applied to Coverage-Guided Fuzzing
 
-**Date:** 2026-08-31 (updated 2026-09-01)
+**Date:** 2026-08-31 (updated 2026-09-01, literature update 2026-08-31)
 **Base:** `fuzzer-new`
 **Status: Modules 1 (Bootstrap Percolation) and 2 (Coverage Phase Transition
 Detection) IMPLEMENTED.** The remaining modules (3, 4, 5, 6) are still
 planning proposals. Each section states what exists today, what percolation
 adds, and — for Modules 1 and 2 — what was built and how to verify it.
+
+**Literature update (2026-08-31):** Diskin, Easo, Radhakrishnan, Sudakov &
+Tassion, *"Supercritical sharpness of percolation"* (arXiv:2603.03257,
+Mar 2026), proves supercritical sharpness — exponential tail decay of finite
+cluster size above `p_c` — for **every infinite transitive graph**, with no
+assumption on degree distribution or growth type. Previously this was only
+known for `Z^d`, transitive graphs of polynomial growth, and nonamenable
+graphs. The bound is stated purely in terms of the graph's isoperimetric
+function `Φ(n) = min{|∂S| : S ⊂ V, n ≤ |S| < ∞}`, not degree or clustering
+statistics. This directly answers the "heavy-tailed degree distribution"
+falsifier in §9 and changes the recommended design of Module 3 and Module 5
+below — see the inline notes in those sections.
 
 ---
 
@@ -229,31 +241,70 @@ are restored from `state.json`.
 The fuzzer has no pre-fuzz static analysis. All targets get the same
 default strategy and time budget.
 
-### What percolation adds
+### What percolation adds — revised per Diskin–Easo–Radhakrishnan–Sudakov–
+### Tassion (2026)
 
-For an Erdős-Rényi random graph, `p_c = 1/⟨k⟩` where `⟨k⟩` is the average
-degree. For clustered networks, `p_c = 1/((1-C) · g_1'(1))` where `C` is
-the clustering coefficient. Higher `p_c` = harder to percolate = harder
-to fuzz.
+The original plan below (`⟨k⟩`, `C`) assumes the target's CFG behaves like
+an Erdős-Rényi or configuration-model random graph. Real CFGs don't: basic
+blocks near parsers/dispatch loops have heavy-tailed branching, which is
+exactly the case flagged as a potential falsifier in §9.1. The new paper
+sidesteps the degree-distribution question entirely — its bound
 
-Estimate these statically from the target binary's CFG:
-- `⟨k⟩` ≈ average branching factor per basic block
-- `C` ≈ density of redundant paths (multiple paths to same block)
+```
+P_p(n ≤ |cluster| < ∞) ≤ exp(-c · Φ(n))
+```
+
+(Theorem 1) holds on **any** infinite transitive graph, using only the
+isoperimetric function `Φ(n) = min{|∂S| : S ⊂ V, n ≤ |S| < ∞}` — the
+minimum edge-boundary over all vertex sets of size ≥ n. `Φ` is a purely
+combinatorial cut quantity; it needs no degree-distribution assumption and
+is well defined whether the coverage graph is regular, scale-free, or
+anything else. This means Module 3 should target **estimating `Φ`
+directly** rather than reconstructing `p_c` from `⟨k⟩`/`C`:
+
+- Higher `Φ` (well-connected CFG, few narrow chokepoints) → coverage
+  clusters escape to new regions easily → fuzzer-friendly target.
+- Low/flat `Φ` (narrow bridges — e.g. a single dispatch switch or checksum
+  gate) → the isoperimetric bound is weak → expect a hard target where
+  progress requires clearing a specific bottleneck edge, not "more time."
+
+`Φ` is exactly a min-cut computation, so it is *more* tractable to estimate
+than `⟨k⟩`/`C`-based `p_c` formulas (which additionally require deciding
+whether the ER or configuration-model formula applies before you can trust
+the number).
 
 ### Implementation plan
 
 **New file:** `src/fuzzer_tool/core/target_difficulty.py`
 
 ```python
-def estimate_percolation_threshold(elf_path: str) -> dict:
-    """Static estimate of p_c from the target's CFG."""
+def estimate_isoperimetric_profile(elf_path: str, sizes: list[int]) -> dict[int, int]:
+    """Approximate Φ(n) for the target's CFG at each requested cluster size n.
+
+    Build the CFG as an undirected graph over basic blocks (edges = observed
+    or statically-recovered branches). For each n in `sizes`, approximate
+    min{|∂S| : S ⊂ V, |S| = n} with a bounded number of randomized min-cut /
+    local expansion probes (exact min-cut over all size-n subsets is
+    intractable; a small-n greedy-growth heuristic, e.g. repeatedly adding
+    the vertex with cheapest marginal boundary cost, is a reasonable
+    first-pass approximation and is what [CMT24]-style numerics use).
+    """
 ```
 
-**Integration point:** Called at fuzzer startup. Drives time budget, initial
-corpus size, and operator preselection.
+`estimate_percolation_threshold()` from the original plan can still be kept
+as a cheap fallback for targets where a full CFG recovery isn't available
+(e.g. no symbols), but it should be treated as a fallback, not the primary
+estimator.
 
-**First step:** Extract `⟨k⟩` from existing targets using `objdump -d` and
-rank by estimated `p_c`.
+**Integration point:** Called at fuzzer startup. A flat/low `Φ` profile near
+some `n` flags a likely chokepoint — drives time budget, initial corpus
+size, and operator preselection (e.g. bias toward operators historically
+good at clearing narrow gates: checksum/length-field mutations).
+
+**First step:** Recover an approximate CFG from `objdump -d` (or existing
+static-analysis tooling if the project has any) and compute `Φ(n)` at a few
+small `n` for the current target set; rank targets by their `Φ` profile
+instead of by `⟨k⟩`.
 
 ---
 
@@ -300,6 +351,30 @@ how long until the cluster reaches a given point? For the fuzzer:
 estimate time to reach the next uncovered region. If high, allocate more
 time. If low, move on.
 
+**Literature note:** Theorem 3 of the 2026 paper gives an explicit,
+non-heuristic answer to a closely related question — how fast does the
+*reachable neighborhood itself* grow — for any transitive graph, purely in
+terms of `Φ`:
+
+```
+∫[|S| to v_n] (1/(c·Φ(t))) dt = n
+```
+
+i.e. `v_n` (the guaranteed lower bound on reachable-set size after "time"
+`n`) is defined implicitly by inverting the integral of `1/Φ`. If Module 3
+produces an estimated `Φ` profile for a target, `v_n` can be computed
+directly from it (numerically invert the integral) instead of learning a
+separate empirical growth-rate model per target. This gives `Module 5` a
+principled prior for "expected executions to reach the next uncovered
+region" that only needs Module 3's `Φ` estimate as input, rather than a
+freestanding heuristic — treat `estimate_time_to_next_discovery()` below as
+the inverse of `v_n(·)`. Two extremes worth sanity-checking once `Φ`
+estimation exists (Remark 7.2 of the paper): polynomial-growth-like CFGs
+give `v_n ≍ n^d`-ish neighborhoods; near-nonamenable ones (few chokepoints,
+`Φ(x) ≳ x`) give `v_n` growing exponentially in `n` — i.e. discovery should
+compound rather than plateau, a good cross-check against the existing
+`CoverageRegimeDetector` SUPERCRITICAL classification.
+
 ### Implementation plan
 
 **Extend:** `percolation.py` (from Module 1) with time estimation.
@@ -308,7 +383,11 @@ time. If low, move on.
 def estimate_time_to_next_discovery(
     edge_tracker, operator_stats, coverage_regime
 ) -> float:
-    """Expected executions to reach the next uncovered edge."""
+    """Expected executions to reach the next uncovered edge.
+
+    If a Φ profile is available from target_difficulty.py, prefer inverting
+    the v_n integral above over ad hoc discovery-rate extrapolation.
+    """
 ```
 
 **Integration point:** Used in multi-target fuzzing to dynamically allocate
@@ -366,11 +445,24 @@ regime signal.
 
 ## 9. What could falsify this framing
 
-1. **The coverage graph is not random.** If the program's state-space
-   graph has heavy-tailed degree distribution (scale-free), the Erdős-Rényi
-   `p_c = 1/⟨k⟩` formula does not apply. Check: plot the degree distribution
-   of the coverage graph for a real target. If it's heavy-tailed, Modules
-   3-6 need different formulas (Molloy-Reed for configuration models).
+1. ~~**The coverage graph is not random.**~~ **Largely addressed
+   (2026-08-31).** If the program's state-space graph has heavy-tailed
+   degree distribution (scale-free), the Erdős-Rényi `p_c = 1/⟨k⟩` formula
+   does not apply, and this was flagged as an open risk for Modules 3-6.
+   Diskin–Easo–Radhakrishnan–Sudakov–Tassion (arXiv:2603.03257) prove
+   supercritical sharpness for *every* infinite transitive graph using only
+   the isoperimetric function `Φ(n)`, with no degree-distribution
+   assumption — see §4 (Module 3) and §6 (Module 5) above, both revised to
+   use `Φ` instead of `⟨k⟩`/`C`. Two caveats remain: (a) the fuzzer's
+   coverage graph is finite and non-transitive (no exact vertex-symmetry),
+   so this is an analogy, not a literal application of the theorem — the
+   graphs it applies to are infinite and transitive by definition; treat
+   `Φ`-based estimates as a well-motivated heuristic, not a guarantee. (b)
+   `Φ(n)` itself is a min-cut-style quantity and is NP-hard to compute
+   exactly for general n; Module 3's plan above only proposes a cheap
+   approximation. Check once implemented: does the approximated `Φ` profile
+   for a real target actually correlate with observed discovery slowdowns
+   at narrow CFG chokepoints (e.g. checksum/length gates)?
 
 2. **Bootstrap minimization removes useful diversity.** If the rigid core
    preserves coverage edges but loses behavioral diversity, the fuzzer
@@ -402,3 +494,10 @@ regime signal.
 | `src/fuzzer_tool/core/critical_slowing.py:233` | `CoverageHomogeneityDetector` — wrapped by regime detector |
 | `src/fuzzer_tool/core/edge_tracker.py:901` | `_maybe_prune()` — existing eviction logic |
 | `src/fuzzer_tool/services/seed_picker.py` | Integration point for invasion percolation |
+| `src/fuzzer_tool/core/target_difficulty.py` | **PROPOSED (revised)** — `estimate_isoperimetric_profile()`, Module 3 |
+
+## 11. References
+
+- Diskin, Easo, Radhakrishnan, Sudakov, Tassion. *Supercritical sharpness
+  of percolation.* arXiv:2603.03257 [math.PR], Mar 2026. Source for the
+  `Φ`-based revisions to Modules 3 and 5 and for closing falsifier §9.1.
