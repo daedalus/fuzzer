@@ -67,12 +67,17 @@ class CrashMITracker:
         if is_crash:
             self.total_crashes += 1
             self._cache_valid = False
-            # Only track positions for crashes (non-crashes add noise)
-            n = min(len(input_bytes), self.max_positions)
-            for pos in range(n):
-                byte_val = input_bytes[pos]
-                self.position_counts[pos] += 1
-                self.byte_total[pos][byte_val] += 1
+
+        # Track every execution's byte values, crash or not — MI needs the
+        # non-crash outcomes as the contrasting class, otherwise
+        # byte_total == joint_crash and every byte looks perfectly
+        # crash-predictive.
+        n = min(len(input_bytes), self.max_positions)
+        for pos in range(n):
+            byte_val = input_bytes[pos]
+            self.position_counts[pos] += 1
+            self.byte_total[pos][byte_val] += 1
+            if is_crash:
                 self.joint_crash[pos][byte_val] += 1
 
         # Prune per-position byte values to cap memory growth

@@ -206,21 +206,30 @@ class TestSHMCoverage:
 class TestCrashETA:
     """Tests for crash_eta optimizations."""
 
-    def test_record_crashes_only(self):
+    def test_record_tracks_both_crash_and_non_crash(self):
+        """#17 crash_eta.py:66-135 -- record() used to skip non-crash inputs
+        entirely, so byte_total == joint_crash always and MI degenerated to
+        position frequency x log2(1/p_crash). Both outcomes must feed
+        byte_total; only crashes should additionally feed joint_crash."""
         from fuzzer_tool.core.crash_eta import CrashMITracker
 
         tracker = CrashMITracker()
 
-        # Non-crash should not track positions
+        # Non-crash should still be tracked in byte_total/position_counts,
+        # just not in joint_crash.
         tracker.total_execs = 0
         tracker.record(b"test input", is_crash=False)
         assert tracker.total_execs == 1
-        assert len(tracker.position_counts) == 0  # Not tracked for non-crashes
+        assert len(tracker.position_counts) > 0
+        assert len(tracker.joint_crash) == 0  # no crash observed yet
 
-        # Crash should track positions
+        # Crash should track positions in both byte_total and joint_crash.
         tracker.record(b"crash input", is_crash=True)
         assert tracker.total_execs == 2
         assert len(tracker.position_counts) > 0
+        assert len(tracker.joint_crash) > 0
+        # byte_total must not equal joint_crash (the original bug's symptom)
+        assert tracker.byte_total != tracker.joint_crash
 
     def test_weighted_position_caching(self):
         from fuzzer_tool.core.crash_eta import CrashMITracker
