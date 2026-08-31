@@ -2,10 +2,11 @@
 
 **Date:** 2026-08-31 (updated 2026-09-01, literature update 2026-08-31)
 **Base:** `fuzzer-new`
-**Status: Modules 1 (Bootstrap Percolation) and 2 (Coverage Phase Transition
-Detection) IMPLEMENTED.** The remaining modules (3, 4, 5, 6) are still
-planning proposals. Each section states what exists today, what percolation
-adds, and — for Modules 1 and 2 — what was built and how to verify it.
+**Status: Modules 1 (Bootstrap Percolation), 2 (Coverage Phase Transition
+Detection), and 3 (Target Difficulty Estimation) IMPLEMENTED.** The
+remaining modules (4, 5, 6) are still planning proposals. Each section
+states what exists today, what percolation adds, and — for Modules 1, 2,
+and 3 — what was built and how to verify it.
 
 **Literature update (2026-08-31):** Diskin, Easo, Radhakrishnan, Sudakov &
 Tassion, *"Supercritical sharpness of percolation"* (arXiv:2603.03257,

@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`src/fuzzer_tool/core/target_difficulty.py` (percolation handover Module
+  3, revised per Diskin–Easo–Radhakrishnan–Sudakov–Tassion, "Supercritical
+  sharpness of percolation," arXiv:2603.03257).** Static pre-fuzz difficulty
+  estimation via the isoperimetric function Φ(n) = min{|∂S| : S ⊂ V,
+  n ≤ |S| < ∞} over a target's CFG, approximated by a greedy boundary-growth
+  heuristic with multiple restarts (`estimate_isoperimetric_profile`).
+  Accepts either an `InterproceduralCFG` (`core/icfg.py`) or a plain
+  adjacency dict for testing. `estimate_percolation_threshold` kept as a
+  cheap degree-only fallback for targets where a full profile isn't
+  affordable. `estimate_growth_curve` Euler-integrates the reachable-cluster
+  growth curve from a Φ profile (Theorem 3 of the same paper).
+
+  Each restart grows once to the largest requested size and keeps a
+  suffix-min of the boundary sequence, since a witness set of size k is also
+  a valid witness for any n ≤ k — this is what keeps the returned profile
+  non-decreasing in n (an independent per-size probe can otherwise report a
+  smaller boundary at a larger n than at a smaller one, since the two sizes
+  can take different greedy paths from the same seed).
+
+  `tests/test_target_difficulty.py`: 17 tests including chokepoint,
+  monotonicity, restart-improvement, and adversarial (non-positive sizes,
+  negative step count) cases.
+
 ### Fixed
 - **`os.environ` writes were never restored, leaking state across runs in
   the same process.** Bug report 2026-08-21 HIGH #10. `run()` only ever
