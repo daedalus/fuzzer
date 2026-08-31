@@ -56,17 +56,6 @@ summary reprints the inner test name, so its `count(...) == 1` assertion sees 2.
     process. Breaks test isolation, library reuse, and reproducibility
     simultaneously.
 
-12. **`services/fuzzer.py:3369` (also :3795, :5061)** — multi-target mode reads
-    per-run edges from `self.shm_cov` instead of the per-target segment in
-    `_target_shm_covs`; seed edges/momentum/stall detection run on empty data.
-
-13. **`adapters/inprocess.py:443-494`** [corroborated, verified] —
-    `_run_c_direct` cannot survive real faults: returning Python SIGSEGV handler
-    re-executes the faulting instruction (infinite fault loop); `timed_out` flag
-    checked only after the blocking ctypes call returns, so a looping native
-    target can never be stopped. First wild-pointer input under
-    `--inprocess-direct` freezes the fuzzer permanently.
-
 16. **`core/transfer_entropy.py:84-105`** [verified empirically] — plug-in TE
     estimator reports ~2.6 bits for *independent* uniform byte streams (n=1500);
     no bias correction for context cardinality. `byte_to_edge_flow` /

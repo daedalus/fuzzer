@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **`os.environ` writes were never restored, leaking state across runs in
+  the same process.** Bug report 2026-08-21 HIGH #10. `run()` only ever
+  undid the cmplog shim's own `LD_PRELOAD` edit (`self._cmplog.restore_env()`)
+  — `__AFL_DIST_SHM_ID`, `__AFL_SHM_ID`, `AFL_MAP_SIZE`, the ASAN `LD_PRELOAD`
+  injection, and `UBSAN_OPTIONS` were all written directly into the process
+  environment and never put back. That leaked into whatever ran next in the
+  same process: the next target in a multi-target session, a caller
+  embedding `Fuzzer` as a library, or the next test in a pytest run. Added a
+  process-wide snapshot taken once in `__init__` (before any of the above
+  can mutate it) and a restore that runs both at the natural end of `run()`
+  and via `atexit` as a safety net for crashes/SIGTERM/SIGINT. Regression
+  tests in `tests/test_regression_environ_restore.py`.
+- **Findings #12 and #13 (2026-08-21 bug report) fixed and pruned from
+  `docs/bugreport_2026-08-21_merged.md`** — multi-target mode reading edges
+  from the wrong SHM segment, and `--inprocess-direct` freezing permanently
+  on the first wild-pointer crash. See `a927e62` and `ffc4437` /
+  `ca9fdd0`.
 - **`RandPool.sample()` raised `TypeError` on a `range` population.** The
   dispatch was `isinstance(population, list | tuple | bytes)`, so a `range`
   missed the sequence branch, fell through to the int branch, and died on
