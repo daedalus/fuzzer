@@ -49,6 +49,83 @@ SATURATION_REFRESH_EXECS = 2000
 # stopped carrying information and the full analysis comes back.
 SATURATION_STALL_EXECS = 20000
 
+# ── Invasion percolation operator selection (percolation handover Module 4) ─
+# Resistance at or above which an operator counts as stuck: success_rate <=
+# 1/INVASION_STUCK_THRESHOLD, i.e. 10% here. Chosen to match the existing
+# stall-recovery posture elsewhere in the fuzzer (a handful of tries per
+# operator before giving up on it), not derived from data.
+INVASION_STUCK_THRESHOLD = 10.0
+
+
+def _resistance(successes: float, failures: float) -> float:
+    """Inverse success rate for one operator arm.
+
+    An arm with no observations (successes == failures == 0) has no
+    resistance estimate at all. Treating it as maximally attractive (0
+    resistance, the lowest possible) means invasion tries unknown operators
+    before writing them off -- the same optimism-under-uncertainty the UCB
+    schedulers use elsewhere (core/schedulers/*ucb.py), applied here instead
+    of a separate confidence-bound term.
+    """
+    total = successes + failures
+    if total <= 0:
+        return 0.0
+    success_rate = successes / total
+    if success_rate <= 0.0:
+        return float("inf")
+    return 1.0 / success_rate
+
+
+def invasion_select(
+    operator_stats: dict[str, tuple[float, float]],
+    frontier_edges: set[int] | None = None,
+    resistance_threshold: float = INVASION_STUCK_THRESHOLD,
+) -> str | None:
+    """Select the operator with lowest resistance on the current frontier.
+
+    Percolation handover Module 4: invasion percolation grows a cluster by
+    always adding the bond with the lowest resistance -- greedy, no
+    backtracking. Applied to operator selection: always pick the operator
+    whose resistance (inverse observed success rate) is lowest. When every
+    operator's resistance is at or above ``resistance_threshold``, the
+    cluster is stuck -- the caller should trigger a reseed or strategy
+    switch instead of continuing to invade.
+
+    Args:
+        operator_stats: name -> (successes, failures), the shape every
+            scheduler's ``bandit_stats()`` returns (e.g.
+            ``core/schedulers/monte_carlo.py``'s ``bandit_stats()``).
+        frontier_edges: the coverage discovery frontier (see
+            ``EdgeTracker.compute_coverage_proximity``) this selection is
+            being made for. Only used to short-circuit: passing an empty
+            (but non-``None``) collection means there is nothing left to
+            invade on this frontier, regardless of operator stats.
+        resistance_threshold: resistance at or above which an operator
+            counts as stuck on this frontier.
+
+    Returns:
+        The lowest-resistance operator name, or ``None`` when
+        ``operator_stats`` is empty, ``frontier_edges`` is an empty
+        collection, or every operator is stuck.
+    """
+    if not operator_stats:
+        return None
+    if frontier_edges is not None and not frontier_edges:
+        return None
+
+    best_op: str | None = None
+    best_resistance: float | None = None
+    for op in sorted(operator_stats):  # sorted: deterministic tie-break
+        successes, failures = operator_stats[op]
+        resistance = _resistance(successes, failures)
+        if best_resistance is None or resistance < best_resistance:
+            best_op, best_resistance = op, resistance
+
+    if best_resistance is None or best_resistance >= resistance_threshold:
+        return None  # every operator stuck
+
+    return best_op
+
 
 class SeedPicker:
     """Manages seed selection strategies.
