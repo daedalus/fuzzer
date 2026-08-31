@@ -1,25 +1,39 @@
-"""Unit tests for Weizz-style get_deps / place_tags (structure tags)."""
+"""Unit tests for consolidated Weizz-style structure tags.
+
+Covers both collection paths against the shared ByteTag / StructureMap model:
+- active/differential: get_deps + place_tags
+- passive/cmplog:      build_tag_map_from_cmplog + collect_structure_map
+plus the RLE / seed-metadata glue shared by both.
+"""
 
 from __future__ import annotations
 
 from fuzzer_tool.core.weizz_tags import (
-    TAG_IS_LEN,
-    Tag,
-    TagsInfo,
+    ByteTag,
+    StructureMap,
+    TagCollectorConfig,
+    TagFlags,
+    attach_tags_to_meta,
+    build_tag_map_from_cmplog,
+    collect_structure_map,
     get_deps,
+    load_tags_from_meta,
     place_tags,
     synthetic_exec_fn,
 )
 
 
-def test_empty_input():
-    info = get_deps(b"", lambda d: (0, {}))
-    assert info is not None
-    assert info.length == 0
-    assert info.ntypes == 0
+# ── Active / differential path (get_deps / place_tags) ──────────────────
 
 
-def test_over_max_len_skipped():
+def test_get_deps_empty_input():
+    smap = get_deps(b"", lambda d: (0, {}))
+    assert smap is not None
+    assert smap.length == 0
+    assert smap.ntypes == 0
+
+
+def test_get_deps_over_max_len_skipped():
     data = b"x" * 100
     assert get_deps(data, lambda d: (0, {}), max_len=50) is None
 
@@ -40,22 +54,22 @@ def test_get_deps_finds_byte_dependencies():
     exec_fn = synthetic_exec_fn(comparisons)
     data = b"ABxxCDyy"
 
-    info = get_deps(data, exec_fn, byte_level=True, max_len=64)
-    assert info is not None
-    assert info.exec_count >= 1 + len(data)
+    smap = get_deps(data, exec_fn, byte_level=True, max_len=64)
+    assert smap is not None
+    assert smap.exec_count >= 1 + len(data)
+    assert smap.from_differential
 
     # Bytes 0,1 should depend on cmp 1; 4,5 on cmp 2.
-    # After place_tags, those spans should carry the matching cmp_id.
-    spans = info.field_spans()
+    spans = smap.field_spans()
     cmp_ids = {cid for _, _, cid in spans}
-    assert 1 in cmp_ids or any(t.cmp_id == 1 for t in info.tags)
-    assert 2 in cmp_ids or any(t.cmp_id == 2 for t in info.tags)
+    assert 1 in cmp_ids or any(t.cmp_id == 1 for t in smap.tags)
+    assert 2 in cmp_ids or any(t.cmp_id == 2 for t in smap.tags)
 
     # Direct dep check
-    assert info.deps
+    assert smap.deps
     affected_by_1 = set()
     affected_by_2 = set()
-    for (cid, _), (v0, v1) in info.deps.items():
+    for (cid, _), (v0, v1) in smap.deps.items():
         if cid == 1:
             affected_by_1 |= set(v0) | set(v1)
         if cid == 2:
@@ -70,37 +84,27 @@ def test_place_tags_field_spans():
         (10, 0): (frozenset({0, 1, 2}), frozenset()),
         (20, 0): (frozenset({5, 6, 7}), frozenset()),
     }
-    info = place_tags(10, deps)
-    assert info.ntypes == 2
-    spans = info.field_spans()
+    smap = place_tags(10, deps)
+    assert smap.ntypes == 2
+    spans = smap.field_spans()
     assert (0, 3, 10) in spans
     assert (5, 8, 20) in spans
-    assert info.tags[0].cmp_id == 10
-    assert info.tags[5].cmp_id == 20
-    assert info.tags[3].cmp_id == 0  # gap
+    assert smap.tags[0].cmp_id == 10
+    assert smap.tags[5].cmp_id == 20
+    assert smap.tags[3].cmp_id == 0  # gap
 
 
 def test_place_tags_length_flag():
-    # Single-byte dependency whose members span a wide region → TAG_IS_LEN.
+    # Single-byte dependency whose members span a wide region → IS_LEN.
     deps = {
         (7, 0): (frozenset({1}), frozenset(range(2, 20))),
     }
-    info = place_tags(24, deps)
+    smap = place_tags(24, deps)
     # Byte 1 is the tight tag; members cover a wide window.
-    assert info.tags[1].cmp_id == 7
+    assert smap.tags[1].cmp_id == 7
     # Length heuristic may or may not fire depending on span-of-tag vs members;
     # at least the tag is placed.
-    assert any(t.cmp_id == 7 for t in info.tags)
-
-
-def test_tags_info_chunk_spans():
-    tags = [Tag() for _ in range(8)]
-    for i in range(2, 6):
-        tags[i].cmp_id = 3
-        tags[i].parent = 9
-    info = TagsInfo(tags=tags, ntypes=1)
-    chunks = info.chunk_spans()
-    assert chunks == [(2, 6, 9)]
+    assert any(t.cmp_id == 7 for t in smap.tags)
 
 
 def test_bit_level_vs_byte_level():
@@ -110,16 +114,182 @@ def test_bit_level_vs_byte_level():
     exec_fn = synthetic_exec_fn([(1, 0, -1, op)])
     data = b"\x00\x00\x00\x00"
 
-    info_byte = get_deps(data, exec_fn, byte_level=True)
-    info_bit = get_deps(data, exec_fn, byte_level=False, max_execs=40)
-    assert info_byte is not None and info_bit is not None
-    # Both should discover that byte 0 affects cmp 1.
-    def affects(info, cid=1):
+    smap_byte = get_deps(data, exec_fn, byte_level=True)
+    smap_bit = get_deps(data, exec_fn, byte_level=False, max_execs=40)
+    assert smap_byte is not None and smap_bit is not None
+
+    def affects(smap, cid=1):
         out = set()
-        for (c, _), (v0, v1) in info.deps.items():
+        for (c, _), (v0, v1) in smap.deps.items():
             if c == cid:
                 out |= set(v0) | set(v1)
         return out
 
-    assert 0 in affects(info_byte)
-    assert 0 in affects(info_bit)
+    assert 0 in affects(smap_byte)
+    assert 0 in affects(smap_bit)
+
+
+# ── Shared model: chunk_spans nesting ────────────────────────────────────
+
+
+def test_chunk_spans_nested_child():
+    tags = [ByteTag() for _ in range(8)]
+    for i in range(2, 6):
+        tags[i].cmp_id = 3
+        tags[i].parent = 9
+    smap = StructureMap(tags=tags, ntypes=1)
+    # children of parent 9
+    assert smap.chunk_spans(parent=9) == [(2, 6, 9)]
+    # no top-level (parent==0) tagged spans in this synthetic map
+    assert smap.chunk_spans(parent=None) == []
+
+
+def test_chunk_spans_top_level():
+    data = b"AAAABBBB"
+    pairs = [(b"AAAA", b"AAAA"), (b"BBBB", b"BBBB")]
+    smap = build_tag_map_from_cmplog(data, pairs)
+    chunks = smap.chunk_spans(parent=None)
+    assert len(chunks) >= 1
+
+
+# ── Passive / cmplog path (build_tag_map_from_cmplog) ────────────────────
+
+
+def test_cmplog_empty_input():
+    smap = build_tag_map_from_cmplog(b"", [])
+    assert smap.input_len == 0
+    assert smap.ntypes == 0
+    assert smap.field_spans() == []
+
+
+def test_cmplog_size_gate():
+    cfg = TagCollectorConfig(max_input_len=4)
+    data = b"ABCDEFGH"
+    pairs = [(b"AB", b"\x00\x00")]
+    smap = build_tag_map_from_cmplog(data, pairs, config=cfg)
+    assert smap.ntypes == 0  # gated out
+    assert all(t.cmp_id == 0 for t in smap.tags)
+
+
+def test_cmplog_simple_field_from_pair():
+    # synthetic: magic "RIFF" then length then data
+    data = b"RIFF\x08\x00\x00\x00WAVEdata"
+    pairs = [
+        (b"RIFF", b"RIFF"),  # magic compare
+        (b"\x08\x00\x00\x00", b"\x08\x00\x00\x00"),  # length
+        (b"WAVE", b"WAVE"),
+    ]
+    smap = build_tag_map_from_cmplog(data, pairs)
+    assert smap.ntypes >= 2
+    spans = smap.field_spans()
+    assert spans, "expected at least one field span"
+    # first span should cover RIFF
+    start, end, cid = spans[0]
+    assert data[start:end] == b"RIFF"
+    assert cid != 0
+    # length field flagged
+    len_tags = [t for t in smap.tags if t.flags & TagFlags.IS_LEN]
+    assert len_tags, "expected IS_LEN on length operand bytes"
+
+
+def test_cmplog_nested_parent():
+    # outer chunk "AAAA...." with inner "BB" that also appears as operand
+    data = b"AAAAXXBBXXAAAA"
+    pairs = [
+        (b"AAAA", b"AAAA"),
+        (b"BB", b"BB"),
+    ]
+    smap = build_tag_map_from_cmplog(data, pairs)
+    spans = smap.field_spans()
+    assert len(spans) >= 2
+    assert any(smap.tags[i].cmp_id for i in range(len(data)) if data[i : i + 2] == b"BB")
+
+
+def test_cmplog_taint_soft_tags():
+    data = b"XXXXYYYYZZZZ"
+    pairs = [(b"XXXX", b"XXXX")]
+    # taint covers the middle untagged region
+    taints = [(4, 7)]  # YYYY inclusive
+    smap = build_tag_map_from_cmplog(data, pairs, taint_regions=taints)
+    # YYYY should pick up IS_IMPL from nearest cmp
+    mid = smap.tags[5]
+    assert mid.cmp_id != 0
+    assert mid.flags & TagFlags.IS_IMPL
+    assert smap.from_differential
+
+
+def test_cmplog_prefer_shorter_operand():
+    data = b"ABCDEFGH"
+    # longer pair also matches prefix; shorter should claim first under sort
+    pairs = [
+        (b"ABCDEFGH", b"\x00" * 8),
+        (b"AB", b"AB"),
+    ]
+    smap = build_tag_map_from_cmplog(data, pairs)
+    assert smap.tags[0].cmp_id != 0
+    assert smap.tags[1].cmp_id != 0
+
+
+def test_collect_structure_map_from_cmplog_object():
+    class FakeCmplog:
+        pairs = [(b"HELLO", b"HELLO")]
+        _pair_pc = {}
+
+    smap = collect_structure_map(b"HELLOworld", FakeCmplog())
+    assert smap.from_cmplog
+    assert smap.ntypes >= 1
+
+
+# ── RLE / metadata glue (shared model) ────────────────────────────────────
+
+
+def test_rle_roundtrip():
+    data = b"ABCABC"
+    pairs = [(b"ABC", b"ABC")]
+    smap = build_tag_map_from_cmplog(data, pairs)
+    rle = smap.to_rle()
+    restored = StructureMap.from_rle(rle, len(data), from_cmplog=True)
+    assert restored.input_len == smap.input_len
+    assert restored.ntypes == smap.ntypes
+    for a, b in zip(smap.tags, restored.tags):
+        assert a.cmp_id == b.cmp_id
+        assert a.parent == b.parent
+        assert a.flags == b.flags
+
+
+def test_meta_attach_load():
+    data = b"HEADBODY"
+    pairs = [(b"HEAD", b"HEAD")]
+    smap = build_tag_map_from_cmplog(data, pairs)
+    meta = attach_tags_to_meta({}, smap)
+    assert "weizz_tags_rle" in meta
+    loaded = load_tags_from_meta(meta)
+    assert loaded is not None
+    assert loaded.ntypes == smap.ntypes
+    assert loaded.field_spans() == smap.field_spans()
+
+
+def test_dirty_flag():
+    tags = [ByteTag(cmp_id=1), ByteTag(cmp_id=1), ByteTag(cmp_id=2)]
+    smap = StructureMap(tags=tags, ntypes=2, input_len=3)
+    smap.mark_dirty(0, 2)
+    assert smap.tags[0].flags & TagFlags.DIRTY
+    assert smap.tags[1].flags & TagFlags.DIRTY
+    assert not (smap.tags[2].flags & TagFlags.DIRTY)
+
+
+if __name__ == "__main__":
+    import traceback
+
+    tests = [v for k, v in list(globals().items()) if k.startswith("test_") and callable(v)]
+    failed = 0
+    for t in tests:
+        try:
+            t()
+            print(f"  OK  {t.__name__}")
+        except Exception:
+            failed += 1
+            print(f"FAIL  {t.__name__}")
+            traceback.print_exc()
+    print(f"\n{len(tests) - failed}/{len(tests)} passed")
+    raise SystemExit(failed)
