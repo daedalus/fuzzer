@@ -3732,8 +3732,12 @@ class Fuzzer:
         if has_new_coverage:
             seed_key = self._seed_key(data)
             # Prefer sparse edge set with counts (SHM), fall back to byte bitmap (ptrace)
-            if self.shm_cov and not self.ptrace_cov:
-                hit_counts = self.shm_cov.get_edge_counts()
+            # Must read from `scanned_shm` (the segment actually scanned above —
+            # the per-target one in multi-target mode), not unconditionally
+            # from `self.shm_cov`, which in multi-target mode is a separate,
+            # unscanned shared segment.
+            if scanned_shm is not None and not self.ptrace_cov:
+                hit_counts = scanned_shm.get_edge_counts()
                 hit_edges = set(hit_counts.keys())
             else:
                 hit_edges = (
@@ -3746,13 +3750,15 @@ class Fuzzer:
                 # Read stack depth and path hash from SHM metadata (if available)
                 stack_depth = 0
                 path_hash = 0
-                if self.shm_cov:
-                    stack_depth = self.shm_cov.read_stack_depth()
-                    path_hash = self.shm_cov.read_path_hash()
+                if scanned_shm is not None:
+                    stack_depth = scanned_shm.read_stack_depth()
+                    path_hash = scanned_shm.read_path_hash()
                 # Fallback: compute path hash from edge IDs in Python
                 if path_hash == 0 and hit_edges and not isinstance(hit_edges, bytes):
                     path_hash = (
-                        self.shm_cov.compute_path_hash_from_edges(hit_edges) if self.shm_cov else 0
+                        scanned_shm.compute_path_hash_from_edges(hit_edges)
+                        if scanned_shm is not None
+                        else 0
                     )
                 new = self._edge_tracker.record_edges(
                     seed_key,
