@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`invasion_select()` in `src/fuzzer_tool/services/seed_picker.py`**
+  (percolation handover Module 4). Greedy, no-backtracking operator
+  selection: picks the operator with the lowest resistance (inverse
+  observed success rate, from any scheduler's `bandit_stats()`). Untried
+  operators get resistance 0 (optimistic exploration, matching the UCB
+  schedulers' posture) so they're tried before being written off. Returns
+  `None` — signalling "stuck, reseed or switch strategy" — when every
+  operator's resistance is at or above `INVASION_STUCK_THRESHOLD`, or when
+  an explicit (non-`None`) `frontier_edges` collection is empty.
+
+  `tests/test_invasion_select.py`: 11 tests covering selection,
+  exploration-over-low-success-rate, deterministic tie-break, the stuck
+  threshold, and adversarial all-zero-success cases.
+
+  Not yet wired into the Elo meta-scheduler (`services/fuzzer.py`) — left
+  for a follow-up given the size of that call site.
 - **`src/fuzzer_tool/core/target_difficulty.py` (percolation handover Module
   3, revised per Diskin–Easo–Radhakrishnan–Sudakov–Tassion, "Supercritical
   sharpness of percolation," arXiv:2603.03257).** Static pre-fuzz difficulty

@@ -3,10 +3,10 @@
 **Date:** 2026-08-31 (updated 2026-09-01, literature update 2026-08-31)
 **Base:** `fuzzer-new`
 **Status: Modules 1 (Bootstrap Percolation), 2 (Coverage Phase Transition
-Detection), and 3 (Target Difficulty Estimation) IMPLEMENTED.** The
-remaining modules (4, 5, 6) are still planning proposals. Each section
-states what exists today, what percolation adds, and — for Modules 1, 2,
-and 3 — what was built and how to verify it.
+Detection), 3 (Target Difficulty Estimation), and 4 (Invasion Percolation
+Operator Selection) IMPLEMENTED.** The remaining modules (5, 6) are still
+planning proposals. Each section states what exists today, what percolation
+adds, and — for Modules 1–4 — what was built and how to verify it.
 
 **Literature update (2026-08-31):** Diskin, Easo, Radhakrishnan, Sudakov &
 Tassion, *"Supercritical sharpness of percolation"* (arXiv:2603.03257,
@@ -309,7 +309,7 @@ instead of by `⟨k⟩`.
 
 ---
 
-## 5. Module 4: Invasion Percolation for Operator Selection
+## 5. Module 4: Invasion Percolation for Operator Selection — ✅ IMPLEMENTED
 
 ### What exists
 
@@ -325,16 +325,36 @@ the operator whose resistance (inverse success rate) is lowest at the
 current frontier. When all operators exceed a resistance threshold, the
 cluster is stuck — trigger a reseed or strategy switch.
 
-### Implementation plan
+### What was built
 
-**Extend:** `services/seed_picker.py` with a resistance-aware wrapper.
+**Extended:** `src/fuzzer_tool/services/seed_picker.py`
 
 ```python
-def invasion_select(operator_stats: dict, frontier_edges: set) -> str:
+def invasion_select(
+    operator_stats: dict[str, tuple[float, float]],
+    frontier_edges: set[int] | None = None,
+    resistance_threshold: float = INVASION_STUCK_THRESHOLD,
+) -> str | None:
     """Select the operator with lowest resistance on the current frontier."""
 ```
 
+`operator_stats` takes the `(successes, failures)` shape every scheduler's
+`bandit_stats()` already returns — no new stats tracking needed. Resistance
+is `1 / success_rate`; an untried arm (no observations at all) gets
+resistance 0, so invasion tries it before writing it off, matching the
+optimism-under-uncertainty the UCB schedulers already use elsewhere.
+Returns `None` (stuck) when every operator's resistance is at or above
+`resistance_threshold`, or when an explicit empty `frontier_edges` is
+passed (nothing left to invade on this frontier).
+
+**Not yet done:** wiring this into the Elo scheduler in `services/fuzzer.py`
+as an additional signal — the integration point below is still a proposal.
+
 **Integration point:** Used inside the Elo scheduler as an additional signal.
+
+**Tests:** `tests/test_invasion_select.py` — 11 tests: selection,
+exploration-over-low-success-rate, deterministic tie-break, stuck
+threshold, adversarial all-zero-success cases.
 
 ---
 
@@ -434,7 +454,7 @@ from a structurally similar target.
 | 1 | Bootstrap minimization | **DONE** | Low | Medium | None |
 | 2 | Phase transition detection | **DONE** | Medium | High | None |
 | 3 | Target difficulty estimation | Proposed | Medium | Medium | None |
-| 4 | Invasion percolation | Proposed | Low | Low-Medium | Module 2 |
+| 4 | Invasion percolation | **DONE** | Low | Low-Medium | Module 2 |
 | 5 | First passage time budgeting | Proposed | Medium | Medium | Modules 2, 4 |
 | 6 | Universality strategy transfer | Proposed | High | High (long-term) | Modules 3, 4 |
 
