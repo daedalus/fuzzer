@@ -439,6 +439,7 @@ def cmd_fuzz(args):
         args.qea = True
         args.bayesian = True
         args.boltzmann = True
+        args.ecofuzz = True
         args.markov_gen = True
         # Mutation-side schedulers/features that are not Elo-arbitrated but are
         # part of the scheduling stack; flip them on so --elo all is the
@@ -480,6 +481,7 @@ def cmd_fuzz(args):
         use_cfg_cache=not getattr(args, "no_cfg_cache", False),
         anneal_budget=getattr(args, "anneal_budget", 0),
         boltzmann=getattr(args, "boltzmann", False),
+        ecofuzz=getattr(args, "ecofuzz", False),
         metropolis=getattr(args, "metropolis", False),
         mc_elite_frac=args.mc_elite_frac,
         mc_refit_interval=args.mc_refit_int,
@@ -1537,6 +1539,7 @@ _HAIL_MARY_FLAGS = (
     "qea_correlation",
     "qea_cooling",
     "boltzmann",
+    "ecofuzz",
     "metropolis",
     "auto_timeout",
     "bootstrap",
@@ -2211,6 +2214,15 @@ def main() -> int:
         default=False,
         help="Boltzmann seed selection: P(seed) ∝ exp(-E/T) with E=log(fuzz_count+1). "
         "Requires --anneal-budget > 0.",
+    )
+    fuzz_parser.add_argument(
+        "--ecofuzz",
+        action="store_true",
+        default=False,
+        help="EcoFuzz seed selection: energy = reward_prob / cost, where "
+        "reward_prob=(coverage_edges+1)/(fuzz_count+2) and cost is the "
+        "cost-ledger's effective_fuzz_count. Weighs new-edge reward against "
+        "observed execution cost instead of Boltzmann's pure pick-count rarity.",
     )
     fuzz_parser.add_argument(
         "--metropolis",

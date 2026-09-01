@@ -161,6 +161,8 @@ class SeedPicker:
             available.append("markov")
         if getattr(f, "_use_boltzmann", False):
             available.append("boltzmann")
+        if getattr(f, "_use_ecofuzz", False):
+            available.append("ecofuzz")
         if getattr(f, "_distance", None) is not None:
             available.append("aflgo")
         if getattr(f, "_katz_channel", None) is not None and f.corpus:
@@ -197,6 +199,7 @@ class SeedPicker:
                 self._pick_markov_seed() if f.markov_generate and f.markov_trained else None
             ),
             "boltzmann": lambda: self._pick_boltzmann_seed(),
+            "ecofuzz": lambda: self._pick_ecofuzz_seed(),
             "aflgo": lambda: self._pick_aflgo_seed() if f._distance else None,
             "mcts": lambda: self._pick_mcts_seed(),
             "katz": lambda: self._pick_katz_seed(),
@@ -314,6 +317,8 @@ class SeedPicker:
         if f.corpus and f.seed_meta:
             if getattr(f, "_use_boltzmann", False):
                 return self._pick_boltzmann_seed()
+            if getattr(f, "_use_ecofuzz", False):
+                return self._pick_ecofuzz_seed()
             return self.weighted_pick_seed()
         if f.corpus:
             return rng.choice(f.corpus)
@@ -387,6 +392,55 @@ class SeedPicker:
         total = sum(weights)
         if total <= 0:
             return f._rand_pool.choice(f.corpus)
+        r = rng.random() * total
+        cumulative = 0.0
+        for i, seed in enumerate(f.corpus):
+            cumulative += weights[i]
+            if r <= cumulative:
+                return seed
+        return f.corpus[-1]
+
+    def _pick_ecofuzz_seed(self) -> bytes:
+        """Pick seed via EcoFuzz-style energy: reward probability over cost.
+
+        energy(seed) = reward_prob / cost, where:
+
+        * ``reward_prob = (coverage_edges + 1) / (fuzz_count + 2)`` is a
+          Laplace-smoothed estimate of "does one more pick of this seed
+          yield a new edge", using ``coverage_edges`` (edges attributed to
+          mutations of this seed, see ``fuzzer.py``'s
+          ``meta["coverage_edges"] += len(new)``) as the reward signal.
+        * ``cost = effective_fuzz_count(meta, mean_exec)`` is the same
+          cost-ledger normalization Boltzmann uses (average-cost-execution
+          units), floored at 1.0.
+
+        Unlike ``_pick_boltzmann_seed`` (pure pick-count rarity, blind to
+        whether a seed ever produced anything), EcoFuzz decays a seed that
+        keeps failing to find new edges toward the trickle rate as its
+        fuzz_count grows, while a cheap-but-productive seed keeps its
+        energy up. Falls back to random choice if corpus or seed_meta is
+        empty.
+        """
+        f = self.f
+        rng = f._rand_pool
+        if not f.corpus or not f.seed_meta:
+            return self._format_aware_seed()
+        mean_exec = f.mean_exec_time()
+        weights = []
+        for seed in f.corpus:
+            meta = f.seed_meta.get(seed)
+            if meta is None:
+                weights.append(1e-6)
+                continue
+            fuzz_count = meta.get("fuzz_count", 0)
+            successes = meta.get("coverage_edges", 0)
+            reward_prob = (successes + 1) / (fuzz_count + 2)
+            cost = max(effective_fuzz_count(meta, mean_exec), 1.0)
+            w = reward_prob / cost
+            weights.append(max(w, 1e-6))
+        total = sum(weights)
+        if total <= 0:
+            return rng.choice(f.corpus)
         r = rng.random() * total
         cumulative = 0.0
         for i, seed in enumerate(f.corpus):

@@ -102,6 +102,7 @@ _SEED_STRATEGY_NAMES = (
     "bayesian",
     "markov",
     "boltzmann",
+    "ecofuzz",
     "katz",
 )
 
@@ -664,6 +665,7 @@ class Fuzzer:
         targets=None,
         anneal_budget=0,
         boltzmann=False,
+        ecofuzz=False,
         metropolis=False,
         mc_elite_frac=0.1,
         mc_refit_interval=1000,
@@ -1597,6 +1599,7 @@ class Fuzzer:
         self._seed_strategy_pool: list[str] = []
         self._seed_strategies_used: set[str] = set()
         self._use_boltzmann = boltzmann
+        self._use_ecofuzz = ecofuzz
         self._metropolis = metropolis
         self._op_dispatch = self._build_dispatch()
         self._replicator = None
@@ -5250,6 +5253,8 @@ class Fuzzer:
             seeds.append("bayesian")
         if getattr(self, "_use_boltzmann", False):
             seeds.append("boltzmann")
+        if getattr(self, "_use_ecofuzz", False):
+            seeds.append("ecofuzz")
         if getattr(self, "_distance", None) is not None:
             seeds.append("aflgo")
         if seeds:

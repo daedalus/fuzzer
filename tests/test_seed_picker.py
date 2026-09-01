@@ -148,6 +148,128 @@ class TestBoltzmannSelection:
         assert "boltzmann" in available
 
 
+class TestEcoFuzzSelection:
+    """EcoFuzz seed selection: energy = reward_prob / cost.
+
+    reward_prob = (coverage_edges + 1) / (fuzz_count + 2), Laplace-smoothed
+    estimate of "does fuzzing this seed yield a new edge". cost = the
+    cost-ledger's effective_fuzz_count (average-cost-execution units),
+    the same normalization Boltzmann uses for its rarity term. Unlike
+    Boltzmann, EcoFuzz weighs reward against cost instead of pure pick-count
+    rarity, so two equally-rare seeds can still get different energy.
+    """
+
+    def _make_fuzzer_mock(self, seed_metas, use_ecofuzz=True):
+        """Build a minimal Fuzzer-like object with enough attrs for
+        _pick_ecofuzz_seed(). seed_metas is a list of meta dicts, one per
+        seed (seed_0, seed_1, ...)."""
+
+        class MockFuzzer:
+            corpus = [f"seed_{i}".encode() for i in range(len(seed_metas))]
+            seed_meta = dict(zip(corpus, seed_metas, strict=False))
+            _rand_pool = random
+            _use_ecofuzz = use_ecofuzz
+            _profile = type("obj", (object,), {"format_signature": None})()
+
+            def mean_exec_time(self):
+                return 0.0  # no corpus-wide timing signal in these tests
+
+            def _seed_key(self, data):
+                return data.hex()
+
+        return MockFuzzer()
+
+    def test_ecofuzz_prefers_high_reward_over_low_reward_same_cost(self):
+        """Same fuzz_count (same cost, no cost samples) but seed_0 has found
+        far more new edges per pick than seed_1 -> seed_0 gets higher energy."""
+        f = self._make_fuzzer_mock(
+            [
+                {"fuzz_count": 10, "coverage_edges": 8},  # high reward rate
+                {"fuzz_count": 10, "coverage_edges": 0},  # never rewarded
+            ]
+        )
+        sp = SeedPicker(type("o", (object,), {"__init__": lambda s: None})())
+        sp.f = f
+
+        def energy(meta):
+            reward_prob = (meta["coverage_edges"] + 1) / (meta["fuzz_count"] + 2)
+            cost = max(meta["fuzz_count"], 1.0)  # no cost samples -> falls back
+            return reward_prob / cost
+
+        e0 = energy(f.seed_meta[f.corpus[0]])
+        e1 = energy(f.seed_meta[f.corpus[1]])
+        assert e0 > e1
+
+    def test_ecofuzz_distinguishes_equally_rare_seeds_unlike_boltzmann(self):
+        """Falsification: two seeds with identical fuzz_count (Boltzmann would
+        weight them identically) but different coverage_edges must get
+        different EcoFuzz energy -- the reward term must actually matter."""
+        f = self._make_fuzzer_mock(
+            [
+                {"fuzz_count": 5, "coverage_edges": 4},
+                {"fuzz_count": 5, "coverage_edges": 0},
+            ]
+        )
+        sp = SeedPicker(type("o", (object,), {"__init__": lambda s: None})())
+        sp.f = f
+
+        rng = random.Random(1234)
+        f._rand_pool = rng
+        picks = [sp._pick_ecofuzz_seed() for _ in range(500)]
+        assert picks.count(f.corpus[0]) > picks.count(f.corpus[1])
+
+    def test_ecofuzz_never_zero_weight_for_unrewarded_fresh_seed(self):
+        """Adversarial: a brand-new seed (fuzz_count=0, coverage_edges=0,
+        possibly missing keys) must not crash and must not get pruned to
+        zero energy -- Laplace smoothing keeps it selectable."""
+        f = self._make_fuzzer_mock(
+            [
+                {},  # missing keys entirely
+                {"fuzz_count": 0, "coverage_edges": 0},
+            ]
+        )
+        sp = SeedPicker(type("o", (object,), {"__init__": lambda s: None})())
+        sp.f = f
+        picked = sp._pick_ecofuzz_seed()
+        assert picked in f.corpus
+
+    def test_ecofuzz_empty_corpus_fallback(self):
+        """_pick_ecofuzz_seed falls back when corpus is empty."""
+        sp = SeedPicker(type("o", (object,), {"__init__": lambda s: None})())
+        f = self._make_fuzzer_mock([])
+        sp.f = f
+        with pytest.raises(AttributeError):
+            sp._pick_ecofuzz_seed()
+
+    def test_ecofuzz_elo_registered(self):
+        """When _use_elo=True and _use_ecofuzz=True, the available list
+        includes 'ecofuzz'."""
+        f = self._make_fuzzer_mock([{"fuzz_count": 1, "coverage_edges": 0}])
+        f._use_elo = True
+        f._elo = type(
+            "obj",
+            (object,),
+            {
+                "select_strategy": lambda s, a: next(x for x in a if "ecofuzz" in x),
+                "initial_mu": 1500.0,
+                "initial_sigma": 400.0,
+            },
+        )()
+        f.ga = None
+        f.qea = None
+        f.markov_generate = False
+        f.markov_trained = False
+        f._use_bayesian = False
+        f._use_boltzmann = False
+        f._seed_strategies_used = set()
+
+        sp = SeedPicker(type("o", (object,), {"__init__": lambda s: None})())
+        sp.f = f
+        result = sp._pick_seed_elo()
+        assert "ecofuzz" in f._seed_strategy_pool
+        assert result in f.corpus
+
+
 class TestAflgoEloStrategy:
     """AFLGo distance-pure seed strategy (Elo-arbitrated 'aflgo' arm)."""
 
