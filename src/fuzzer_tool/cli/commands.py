@@ -1488,8 +1488,11 @@ def cmd_sweep(args):
 # didn't already touch on the command line. Deliberately excluded: the
 # "--no-*" opt-outs (forkserver, deterministic, shm, cfg-cache, adaptive-havoc,
 # kill-children, dedup-execs, save-state, perf-novelty) since those are
-# already on by default and this flag is additive, not destructive; and
-# --resume, since forcing it on would fail outright with no prior state.
+# already on by default and this flag is additive, not destructive;
+# --resume, since forcing it on would fail outright with no prior state;
+# --refresh-profile and --profile-hotpath, since hail-mary is already slow
+# and adding full profiling/cProfile overhead per iteration makes it
+# untrackable rather than exploratory.
 _HAIL_MARY_FLAGS = (
     "continue_until_crash",
     "deep_coverage",
@@ -1548,8 +1551,6 @@ _HAIL_MARY_FLAGS = (
     "honggfuzz",
     "hw_perf",
     "debug",
-    "refresh_profile",
-    "profile_hotpath",
     "colorize",
     "weizz_tags",
     "enable_regex_bomb_mutations",

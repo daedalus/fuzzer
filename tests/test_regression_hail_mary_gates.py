@@ -21,8 +21,6 @@ import re
 import sys
 from pathlib import Path
 
-import pytest
-
 from fuzzer_tool.cli import commands
 
 _COMMANDS_PATH = Path(commands.__file__).resolve()
@@ -30,6 +28,8 @@ _COMMANDS_PATH = Path(commands.__file__).resolve()
 # Documented exclusions next to _HAIL_MARY_FLAGS in commands.py:
 #   * the meta flag itself
 #   * --resume (fails without prior state)
+#   * --refresh-profile / --profile-hotpath (hail-mary already slow; profiling
+#     makes exploratory run untrackable)
 # Special-cased inside _apply_hail_mary (not plain bool dests in the tuple):
 #   * elo (string value "all")
 #   * cmplog (tri-state None/True/False)
@@ -40,6 +40,8 @@ _EXCLUDED_OPT_IN = frozenset(
         "hail_mary",
         "resume",
         "cmplog",  # special-cased
+        "refresh_profile",  # profiling: hail-mary already slow, full re-analysis per run is overkill
+        "profile_hotpath",  # cProfile overhead makes exploratory run untrackable
     }
 )
 
@@ -156,8 +158,7 @@ class TestHailMaryWiresEveryOptInGate:
             all_bool.add(dest)
         unknown = sorted(set(commands._HAIL_MARY_FLAGS) - all_bool)
         assert not unknown, (
-            "_HAIL_MARY_FLAGS entries that are not boolean destinations on "
-            f"fuzz_parser: {unknown}"
+            f"_HAIL_MARY_FLAGS entries that are not boolean destinations on fuzz_parser: {unknown}"
         )
 
     def test_apply_hail_mary_sets_every_listed_flag(self, monkeypatch):
@@ -169,9 +170,7 @@ class TestHailMaryWiresEveryOptInGate:
             return 0
 
         monkeypatch.setattr(commands, "cmd_fuzz", _spy)
-        monkeypatch.setattr(
-            sys, "argv", ["fuzzer-tool", "fuzz", "/bin/true", "--hail-mary"]
-        )
+        monkeypatch.setattr(sys, "argv", ["fuzzer-tool", "fuzz", "/bin/true", "--hail-mary"])
         rc = commands.main()
         assert rc == 0
         assert "args" in captured
