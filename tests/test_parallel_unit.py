@@ -97,3 +97,40 @@ class TestSyncCorpus:
         _sync_corpus_in(parent, fuzzer, max_new=50)
 
         assert fuzzer.added == [b"dup"]
+
+    def test_sync_default_unaffected_by_partition_params(self, tmp_path):
+        """worker_id/n_workers default to None: behavior must be unchanged."""
+        parent = tmp_path / "work"
+        write_seed(parent / ".w0", b"from_w0")
+        write_seed(parent / ".w1", b"from_w1")
+
+        fuzzer = MockFuzzer()
+        _sync_corpus_in(parent, fuzzer, max_new=50)
+
+        assert set(fuzzer.added) == {b"from_w0", b"from_w1"}
+
+    def test_sync_fractal_partition_filters_non_owned_seeds(self, tmp_path):
+        """With partitioning on, a worker only pulls owned or boundary seeds."""
+        from fuzzer_tool.core.parallel_fractal_partition import accept_for_worker
+
+        parent = tmp_path / "work"
+        w1 = parent / ".w1"
+        seeds = [f"seed-{i}".encode() for i in range(60)]
+        for s in seeds:
+            write_seed(w1, s)
+
+        fuzzer = MockFuzzer()
+        _sync_corpus_in(
+            parent,
+            fuzzer,
+            max_new=1000,
+            self_dir=parent / ".w0",
+            worker_id=0,
+            n_workers=3,
+        )
+
+        expected = {s for s in seeds if accept_for_worker(s, 0, 3)}
+        assert set(fuzzer.added) == expected
+        # Sanity: partitioning actually excluded at least one seed, or the
+        # test corpus was too small/unlucky to exercise the filter.
+        assert len(expected) < len(seeds)

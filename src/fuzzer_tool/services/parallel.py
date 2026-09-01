@@ -204,7 +204,16 @@ _sync_seen: dict[str, set[str]] = {}
 _SYNC_SEEN_MAX = 200_000
 
 
-def _sync_corpus_in(parent_dir: Path, fuzzer, max_new: int = 50, self_dir: Path | None = None):
+def _sync_corpus_in(
+    parent_dir: Path,
+    fuzzer,
+    max_new: int = 50,
+    self_dir: Path | None = None,
+    *,
+    worker_id: int | None = None,
+    n_workers: int | None = None,
+    fractal_depth: int = 3,
+):
     """Pull new corpus entries from sibling worker dirs.
 
     Seeds live at ``<worker>/seeds/<hh>/id_<hash>`` (plus the
@@ -225,8 +234,24 @@ def _sync_corpus_in(parent_dir: Path, fuzzer, max_new: int = 50, self_dir: Path 
         fuzzer: The importing worker's Fuzzer.
         max_new: Cap on seeds imported per call.
         self_dir: This worker's own corpus dir, skipped if given.
+        worker_id: This worker's index. When given together with
+            ``n_workers``, sync is restricted to fractal Voronoi
+            partitioning (Approach C, ``core/parallel_fractal_partition.py``):
+            a sibling's seed is only imported if this worker owns its root
+            cell, or the seed crosses a fractal boundary. ``None`` (the
+            default) keeps the original fully-shared behavior.
+        n_workers: Total worker count for the same partitioning. Ignored
+            unless ``worker_id`` is also given.
+        fractal_depth: Fractal layer depth for the partition, only used
+            when partitioning is active.
     """
     from fuzzer_tool.adapters.filesystem import hash_data
+
+    partition = None
+    if worker_id is not None and n_workers:
+        from fuzzer_tool.core.parallel_fractal_partition import accept_for_worker
+
+        partition = (worker_id, n_workers, fractal_depth)
 
     added = 0
     own = Path(self_dir).name if self_dir is not None else None
@@ -274,6 +299,12 @@ def _sync_corpus_in(parent_dir: Path, fuzzer, max_new: int = 50, self_dir: Path 
             # the entry unmarked so the next round retries it.
             if hash_data(data) != name_hash:
                 continue
+
+            if partition is not None:
+                wid, n, depth = partition
+                if not accept_for_worker(data, wid, n, depth):
+                    seen_names.add(name)  # not ours; do not keep re-checking it
+                    continue
 
             seen_names.add(name)
             fuzzer.save_to_corpus(data)
