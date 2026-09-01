@@ -5,7 +5,9 @@ chain (operators.py:1632–1656): replicator → mopt → bandit → exp3 →
 eps_greedy → hierarchical → gp_ucb → cmaes → contextual → ducb → swucb →
 cucb → random. These tests pin that contract
 so future scheduler additions/removals cannot silently change which
-scheduler wins, and document that cem is reachable only via Elo.
+scheduler wins, and document that cem and invasion are reachable only via
+Elo (see tests/test_invasion_elo_integration.py for invasion's own ballot
+and dispatch coverage).
 """
 
 import pytest
@@ -108,6 +110,10 @@ class _FakeFuzzer:
         self.mc_bandit = False
         self.mc_cem = False
         self._op_time_ema: dict = {}
+        # invasion has no scheduler object of its own (unlike everything in
+        # _SCHEDULER_ATTRS) -- it reads f.mc.bandit_stats() directly, gated
+        # on _use_invasion and mc_bandit alone.
+        self._use_invasion = False
         for flag, attr in self._SCHEDULER_ATTRS.values():
             setattr(self, flag, False)
             setattr(self, attr, None)

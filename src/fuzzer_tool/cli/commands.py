@@ -365,6 +365,7 @@ def cmd_fuzz(args):
             overlap_density_blend=getattr(args, "overlap_blend", 0.5),
             resize_map_on_stall=getattr(args, "resize_map_on_stall", True),
             exp3=getattr(args, "exp3", False),
+            invasion=getattr(args, "invasion", False),
             exp3_gamma=getattr(args, "exp3_gamma", 0.1),
             eps_greedy=getattr(args, "eps_greedy", False),
             eps_greedy_epsilon0=getattr(args, "eps_greedy_epsilon0", 1.0),
@@ -415,6 +416,7 @@ def cmd_fuzz(args):
         args.swucb = True
         args.cucb = True
         args.contextual = True
+        args.invasion = True
         args.ga = True
         args.qea = True
         args.bayesian = True
@@ -521,6 +523,7 @@ def cmd_fuzz(args):
         t_x_minutes=getattr(args, "t_x", 60.0),
         replicator=getattr(args, "replicator", False),
         exp3=getattr(args, "exp3", False),
+        invasion=getattr(args, "invasion", False),
         exp3_gamma=getattr(args, "exp3_gamma", 0.1),
         eps_greedy=getattr(args, "eps_greedy", False),
         eps_greedy_epsilon0=getattr(args, "eps_greedy_epsilon0", 1.0),
@@ -1494,6 +1497,7 @@ _HAIL_MARY_FLAGS = (
     "swucb",
     "cucb",
     "contextual",
+    "invasion",
     "overlap_density",
     "secretary",
     "sensitivity",
@@ -1800,6 +1804,14 @@ def main() -> int:
         "--exp3", action="store_true", help="Enable EXP3 adversarial bandit operator scheduling"
     )
     fuzz_parser.add_argument(
+        "--invasion",
+        action="store_true",
+        help="Enable invasion percolation operator selection as an additional Elo-arbitrated "
+        "strategy: always picks the operator with the lowest resistance (inverse observed "
+        "success rate) from the MC bandit's stats. Requires --mc-bandit; has no effect "
+        "without it.",
+    )
+    fuzz_parser.add_argument(
         "--exp3-gamma",
         type=float,
         default=0.1,
@@ -2084,8 +2096,7 @@ def main() -> int:
         "--qea-correlation-delta",
         type=float,
         default=0.02,
-        help="Per-pair coupling learning rate when --qea-correlation is set "
-        "(default: 0.02)",
+        help="Per-pair coupling learning rate when --qea-correlation is set (default: 0.02)",
     )
     fuzz_parser.add_argument(
         "--qea-correlation-max",

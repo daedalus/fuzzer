@@ -91,6 +91,7 @@ _OPERATOR_STRATEGY_NAMES = (
     "ducb",
     "swucb",
     "cucb",
+    "invasion",
 )
 _SEED_STRATEGY_NAMES = (
     "ga",
@@ -726,6 +727,7 @@ class Fuzzer:
         secretary_window=500,
         secretary_exploration=None,
         elo=False,
+        invasion=False,
         exp3=False,
         exp3_gamma=0.1,
         eps_greedy=False,
@@ -1871,6 +1873,18 @@ class Fuzzer:
                 self._elo._strategy_mu.setdefault(key, self._elo.initial_mu)
                 self._elo._strategy_sigma_sq.setdefault(key, self._elo.initial_sigma**2)
                 self._elo._strategy_match_count.setdefault(key, 0)
+
+        # Invasion percolation operator selection (percolation handover
+        # Module 4): an additional Elo-arbitrated strategy, not a bandit
+        # family of its own -- it reads f.mc's existing bandit_stats() as
+        # its resistance signal rather than tracking separate arm state, so
+        # it also requires f.mc/mc_bandit to be enabled.
+        self._use_invasion = invasion
+        if invasion and not (self.mc and self.mc_bandit):
+            log.warning(
+                "--invasion has no effect without --mc-bandit (invasion_select "
+                "reads operator success/failure stats from the MC bandit tracker)"
+            )
 
         # Chi-squared operator heterogeneity test interval
         self._chi2_operator_interval = chi2_operator_interval
@@ -5122,6 +5136,8 @@ class Fuzzer:
             all_strategies.append("swucb")
         if self._cucb:
             all_strategies.append("cucb")
+        if self._use_invasion and self.mc and self.mc_bandit:
+            all_strategies.append("invasion")
         for other in all_strategies:
             if other != self._meta_strategy:
                 self._elo.record_strategy_match(self._meta_strategy, other, score)
@@ -5193,6 +5209,8 @@ class Fuzzer:
             ops.append("swucb")
         if getattr(self, "_cucb", False):
             ops.append("cucb")
+        if getattr(self, "_use_invasion", False) and self.mc_bandit:
+            ops.append("invasion")
         if getattr(self, "_use_shapley", False):
             ops.append("shapley")
         if ops:

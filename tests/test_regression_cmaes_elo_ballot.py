@@ -89,6 +89,7 @@ class _FakeFuzzer:
         ):
             setattr(self, flag, False)
             setattr(self, attr, None)
+        self._use_invasion = False
         self._use_elo = False
         self._elo = None
 

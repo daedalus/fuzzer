@@ -870,6 +870,9 @@ class TestEloMetaStrategyThrottle:
         f._swucb = None
         f._use_cucb = False
         f._cucb = None
+        # Same reason: invasion joins the ballot too (reads f.mc.bandit_stats
+        # directly, no scheduler object of its own).
+        f._use_invasion = False
 
         class _FakeMopt:
             def select_op(self, ops, prev_op=None):

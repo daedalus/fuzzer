@@ -48,6 +48,7 @@ from fuzzer_tool.core.mutations import (
 )
 from fuzzer_tool.core.operator_registry import REGISTRY, format_gate_matches
 from fuzzer_tool.core.skipdet import MAX_DET_MUTATIONS, trace_mini_from_edges
+from fuzzer_tool.services.seed_picker import invasion_select
 
 log = logging.getLogger(__name__)
 
@@ -2031,9 +2032,7 @@ class OperatorEngine:
                 try:
                     encoded = payload_len.to_bytes(width, endian)
                 except OverflowError:
-                    encoded = (payload_len & ((1 << (8 * width)) - 1)).to_bytes(
-                        width, endian
-                    )
+                    encoded = (payload_len & ((1 << (8 * width)) - 1)).to_bytes(width, endian)
                 out[start:end] = encoded
                 repaired = True
 
@@ -3295,6 +3294,8 @@ class OperatorEngine:
             available.append("swucb")
         if f._use_cucb and f._cucb:
             available.append("cucb")
+        if f._use_invasion and f.mc and f.mc_bandit:
+            available.append("invasion")
 
         if f._use_elo and f._elo and len(available) >= 2:
             # Resolve the meta-strategy once per exec and reuse it for all
@@ -3360,6 +3361,23 @@ class OperatorEngine:
             f._last_mopt_particles.append(None)
         elif strategy == "cucb" and f._cucb:
             op = f._cucb.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif strategy == "invasion" and f.mc and f.mc_bandit:
+            # No fallback-chain branch below by design: invasion reads
+            # f.mc's own bandit_stats() as its resistance signal, so
+            # without Elo the plain "bandit" branch already covers the
+            # same f.mc/mc_bandit condition earlier in that chain -- an
+            # invasion branch there would be dead code (see the cmaes note
+            # above for what that failure mode looks like in practice).
+            #
+            # bandit_stats() covers every registered arm, not just this
+            # call's candidate `ops`, so it's filtered down first --
+            # passing the unfiltered dict could return an operator outside
+            # `ops`, which every other branch here treats as a contract
+            # violation.
+            all_stats = f.mc.bandit_stats()
+            op_stats = {op: all_stats[op] for op in ops if op in all_stats}
+            op = invasion_select(op_stats) or f._rand_pool.choice(ops)
             f._last_mopt_particles.append(None)
         elif f._use_replicator and f._replicator:
             op = f._replicator.select_op(ops)

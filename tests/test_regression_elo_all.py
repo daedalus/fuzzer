@@ -136,6 +136,7 @@ class TestOperatorEloRecordsUsedOnly:
         f._ducb = None
         f._swucb = None
         f._cucb = None
+        f._use_invasion = False
         return f
 
     def test_records_against_enabled_schedulers_only(self):
@@ -219,6 +220,9 @@ class _FakeFuzzerForSelectOp:
         self._cmaes = None
         self._use_contextual = False
         self._contextual = None
+        # invasion has no scheduler object of its own -- it reads
+        # f.mc.bandit_stats(), gated on _use_invasion and mc_bandit alone.
+        self._use_invasion = False
         self._use_elo = elo
         self._elo = BayesianEloTracker() if elo else None
         import random
