@@ -1209,14 +1209,15 @@ def _temporal_correlation(f) -> str:
         disc_edges = getattr(f, "_discovery_edges", None)
         if not (cov_ts and disc_ts):
             return ""
-        if len(cov_ts) < 2 or len(disc_ts) < 2:
+        n_cov = min(len(cov_ts), len(cov_execs), len(cov_edges))
+        n_disc = min(len(disc_ts), len(disc_execs), len(disc_edges))
+        if n_cov < 2 or n_disc < 2:
             return ""
         coverage_stream = [
-            (float(cov_ts[i]), (int(cov_execs[i]), int(cov_edges[i]))) for i in range(len(cov_ts))
+            (float(cov_ts[i]), (int(cov_execs[i]), int(cov_edges[i]))) for i in range(n_cov)
         ]
         discovery_stream = [
-            (float(disc_ts[i]), (int(disc_execs[i]), int(disc_edges[i])))
-            for i in range(len(disc_ts))
+            (float(disc_ts[i]), (int(disc_execs[i]), int(disc_edges[i]))) for i in range(n_disc)
         ]
         joined = join_streams([coverage_stream, discovery_stream], max_gap=5.0)
         if not joined:
