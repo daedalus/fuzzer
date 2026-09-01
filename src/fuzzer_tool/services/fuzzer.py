@@ -5394,6 +5394,140 @@ class Fuzzer:
                 "(and -strcmp, -strncmp) to recover them."
             )
 
+    def _print_enabled_features(self) -> None:
+        """Print every enabled feature, grouped by category."""
+        groups: dict[str, list[str]] = {
+            "Scheduling": [],
+            "Seed selection": [],
+            "Mutation": [],
+            "Analysis": [],
+            "Generation": [],
+            "Execution": [],
+            "Output": [],
+        }
+
+        sched_pol = getattr(self, "_power_schedule", "base")
+        if sched_pol != "base":
+            groups["Scheduling"].append(f"power-schedule={sched_pol}")
+
+        ops = []
+        if self.mc_bandit:
+            ops.append("bandit")
+        if self.mc_cem:
+            ops.append("cem")
+        if getattr(self, "_use_mopt", False):
+            ops.append("mopt")
+        if getattr(self, "_use_replicator", False):
+            ops.append("replicator")
+        if getattr(self, "_use_exp3", False):
+            ops.append("exp3")
+        if getattr(self, "_eps_greedy", False):
+            ops.append("eps-greedy")
+        if getattr(self, "_use_hierarchical", False):
+            ops.append("hierarchical")
+        if getattr(self, "_gp_ucb", False):
+            ops.append("gp-ucb")
+        if getattr(self, "_ducb", False):
+            ops.append("ducb")
+        if getattr(self, "_swucb", False):
+            ops.append("swucb")
+        if getattr(self, "_cucb", False):
+            ops.append("cucb")
+        if getattr(self, "_use_contextual", False):
+            ops.append("contextual")
+        if getattr(self, "_use_invasion", False):
+            ops.append("invasion")
+        if getattr(self, "_use_shapley", False):
+            ops.append("shapley")
+        if getattr(self, "_cmaes", False):
+            groups["Scheduling"].append("cma-es")
+        if ops:
+            groups["Scheduling"].extend(ops)
+
+        if getattr(self, "_use_elo", False):
+            groups["Scheduling"].append("elo")
+
+        if self.ga:
+            groups["Seed selection"].append("ga")
+        if self.qea:
+            groups["Seed selection"].append("qea")
+        if getattr(self, "_use_bayesian", False):
+            groups["Seed selection"].append("bayesian")
+        if getattr(self, "_use_boltzmann", False):
+            groups["Seed selection"].append("boltzmann")
+        if self.markov_generate:
+            groups["Seed selection"].append("markov-gen")
+        if getattr(self, "_distance", None) is not None:
+            groups["Seed selection"].append("aflgo")
+
+        if self.markov_trained:
+            groups["Mutation"].append("markov")
+        if getattr(self, "_adaptive_havoc", False):
+            groups["Mutation"].append("adaptive-havoc")
+        if self.enable_x86_mutator:
+            groups["Mutation"].append("x86-mutator")
+        if self.enable_arm_mutator:
+            groups["Mutation"].append("arm-mutator")
+        if self.enable_regex_bomb:
+            groups["Mutation"].append("regex-bomb")
+        if self.weizz_tags:
+            groups["Mutation"].append("weizz-tags")
+        if self.colorize:
+            groups["Mutation"].append("colorize")
+
+        if getattr(self, "_use_mi", False):
+            groups["Analysis"].append("mi-guided")
+        if getattr(self, "_use_renyi_weight", False):
+            groups["Analysis"].append("renyi")
+        if getattr(self, "_use_transfer_entropy", False):
+            groups["Analysis"].append("transfer-entropy")
+        if getattr(self, "_use_sensitivity", False):
+            groups["Analysis"].append("sensitivity")
+        if getattr(self, "_use_lineage", False):
+            groups["Analysis"].append("lineage")
+        if getattr(self, "_use_lineage_backtrack", False):
+            groups["Analysis"].append("lineage-backtrack")
+        if getattr(self, "_use_overlap_density", False):
+            groups["Analysis"].append("overlap-density")
+        if getattr(self, "_use_region_profile", False):
+            groups["Analysis"].append("region-profile")
+        if getattr(self, "_calibrate", 0) > 0:
+            groups["Analysis"].append(f"calibrate={self._calibrate}")
+
+        if getattr(self, "_wfc_enabled", False):
+            groups["Generation"].append("wfc")
+        if getattr(self, "_use_mcts", False):
+            groups["Generation"].append("mcts")
+        if getattr(self, "_corpus_boost", 0) > 0:
+            groups["Generation"].append(f"corpus-boost={self._corpus_boost}")
+        if getattr(self, "_use_bootstrap", False):
+            groups["Generation"].append("bootstrap")
+
+        if self.persistent:
+            groups["Execution"].append("persistent")
+        if self._inprocess_runner:
+            groups["Execution"].append("inprocess")
+        if self._adaptive_timeout:
+            groups["Execution"].append("adaptive-timeout")
+        if self.honggfuzz:
+            groups["Execution"].append("honggfuzz")
+        if self.hw_perf:
+            groups["Execution"].append("hw-perf")
+        if self._diff_target:
+            groups["Execution"].append("differential")
+
+        if self.debug:
+            groups["Output"].append("debug")
+        if self._tracer is not None:
+            groups["Output"].append("trace-crashes")
+        if self._format_learner is not None:
+            groups["Output"].append("learn-format")
+
+        print("[*] Enabled features:")
+        for group, feats in groups.items():
+            if feats:
+                print(f"    {group}: {', '.join(feats)}")
+
     def run(self, iterations=0):
         self._start_stack_heartbeat()
         if self.multi_targets:
@@ -5521,6 +5655,7 @@ class Fuzzer:
             f"[*] Epoch start: {epoch_start:.3f} ({datetime.datetime.fromtimestamp(epoch_start).isoformat()})"
         )
         print(f"[*] Boot ticks start: {boot_start:.3f}")
+        self._print_enabled_features()
         print("[*] Starting fuzzing...\n")
 
         # Quick raw-target-speed measurement before the main loop
