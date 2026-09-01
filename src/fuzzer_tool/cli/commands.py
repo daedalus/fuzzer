@@ -313,10 +313,11 @@ def cmd_fuzz(args):
         dictionary = load_dictionary(args.dict)
         print(f"[*] Loaded {len(dictionary)} tokens from {args.dict}")
 
-    # QEA and GA are mutually exclusive — QEA takes precedence
+    # QEA and GA now run simultaneously when both are set — they share the
+    # corpus and edge tracker but maintain independent populations, competing
+    # for coverage discoveries and corpus slots.
     if getattr(args, "qea", False) and getattr(args, "ga", False):
-        print("[*] --qea and --ga both set: --ga disabled (QEA takes precedence)")
-        args.ga = False
+        print("[*] --qea and --ga both set: both enabled (competing mode)")
 
     use_markov = args.markov or args.markov_gen
 
