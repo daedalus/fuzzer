@@ -62,9 +62,12 @@ smap2 = load_tags_from_meta(meta)
 ## Acceptance (from handover §8)
 
 - [x] Tag collector produces stable tags on synthetic nested / magic+length input
-- [x] Field + chunk operators (P2): `weizz_field_havoc`, `weizz_chunk_dup`,
-      `weizz_chunk_delete`, `weizz_chunk_swap` under structural category;
-      availability gated on seed tags via `_weizz_tags_available`
+- [x] Field + chunk operators (P2), two complementary paths under structural:
+      - Engine `_op_*`: `weizz_field_havoc`, `weizz_chunk_dup` /
+        `weizz_chunk_delete` / `weizz_chunk_swap` (seed_meta RLE cache)
+      - Class MutatorBase: `weizz_field_mutate`, `weizz_chunk_mutate` in
+        `mutations/weizz_structural.py` (rebuild map from
+        `context.cmplog_pairs`; gated by `context.weizz_tags_enabled`)
 - [x] Flag default off + size/lineage gate (`--weizz-tags`, `--weizz-tags-max-len`;
       collector hooks on coverage gain, once-per-lineage via meta RLE)
 - [ ] Paired bench (still open — measure with `tools/bench_paired.py`)

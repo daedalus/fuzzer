@@ -780,3 +780,9 @@ for _cat in _CATEGORIES:
                 available=_AVAILABLE.get(_op),
             )
         )
+
+# Class-based Weizz P2 mutators (MutatorBase). Import triggers self-register
+# via REGISTRY.register_mutator; is_available stays False until --weizz-tags.
+# Kept separate from the static _CATEGORIES table so the function-based
+# weizz_field_havoc / weizz_chunk_* ops coexist under different names.
+import fuzzer_tool.core.mutations.weizz_structural  # noqa: E402,F401

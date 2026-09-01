@@ -94,7 +94,13 @@ class MutationContext:
         ctx = MutationContext(max_len=64, dictionary=[b"GET", b"POST"])
     """
 
-    __slots__ = ("cmplog_pairs", "corpus", "dictionary", "max_len")
+    __slots__ = (
+        "cmplog_pairs",
+        "corpus",
+        "dictionary",
+        "max_len",
+        "weizz_tags_enabled",
+    )
 
     def __init__(
         self,
@@ -103,6 +109,7 @@ class MutationContext:
         dictionary: Sequence[bytes] = (),
         cmplog_pairs: Sequence[tuple[bytes, bytes]] = (),
         corpus: Sequence[bytes] = (),
+        weizz_tags_enabled: bool = False,
     ) -> None:
         #: Length cap for the returned buffer; 0 means uncapped.
         self.max_len = max_len
@@ -112,10 +119,12 @@ class MutationContext:
         self.cmplog_pairs = cmplog_pairs
         #: Current corpus entries, for splice-style mutations.
         self.corpus = corpus
+        #: True when ``--weizz-tags`` is set (Weizz structure-aware ops).
+        self.weizz_tags_enabled = weizz_tags_enabled
 
     @classmethod
     def from_fuzzer(cls, fuzzer) -> MutationContext:
-        """Project a ``Fuzzer`` onto the four fields above.
+        """Project a ``Fuzzer`` onto the declared context fields.
 
         ``getattr`` throughout rather than direct access: the adapter runs
         against partially-constructed fuzzers in tests and against a
@@ -129,6 +138,7 @@ class MutationContext:
             dictionary=getattr(fuzzer, "dictionary", None) or (),
             cmplog_pairs=getattr(cmplog, "pairs", None) or (),
             corpus=getattr(fuzzer, "corpus", None) or (),
+            weizz_tags_enabled=bool(getattr(fuzzer, "weizz_tags", False)),
         )
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
@@ -136,7 +146,8 @@ class MutationContext:
             f"<MutationContext max_len={self.max_len} "
             f"dictionary={len(self.dictionary)} "
             f"cmplog_pairs={len(self.cmplog_pairs)} "
-            f"corpus={len(self.corpus)}>"
+            f"corpus={len(self.corpus)} "
+            f"weizz_tags_enabled={self.weizz_tags_enabled}>"
         )
 
 

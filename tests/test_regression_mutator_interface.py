@@ -303,21 +303,24 @@ class TestCoverageFeedback:
 
 
 class TestGlobalRegistryUnaffected:
-    def test_builtin_registry_has_no_mutators_by_default(self):
-        """Port 3 is opt-in scaffolding: registering nothing must leave
-        the shipped operator table exactly as it was."""
+    def test_builtin_registry_mutators_are_known(self):
+        """Shipped MutatorBase plugins are an explicit allow-list.
+
+        Originally empty (port-3 scaffolding). Weizz P2 class mutators are
+        the first in-tree implementors; anything else here is a surprise.
+        """
         from fuzzer_tool.core.operator_registry import REGISTRY
 
-        assert REGISTRY.mutators() == []
+        names = sorted(m.name for m in REGISTRY.mutators())
+        assert names == ["weizz_chunk_mutate", "weizz_field_mutate"]
 
 
 class TestMutationContext:
     """The narrow interface itself (port item P1-4).
 
-    ``mutate()`` and ``is_available()`` used to be handed the whole
-    ``Fuzzer``. These pin the replacement while it still has no
-    implementors -- ``src/`` contains no ``MutatorBase`` subclass, which is
-    the only reason the signature could be changed at all.
+    ``mutate()`` / ``is_available()`` used to receive the whole ``Fuzzer``.
+    These pin the declared surface; new fields are added only when a
+    MutatorBase implementor needs them (e.g. ``weizz_tags_enabled``).
     """
 
     def test_constructible_with_no_fuzzer_at_all(self):
@@ -333,14 +336,17 @@ class TestMutationContext:
         assert ctx.dictionary == [b"GET", b"POST"]
         assert ctx.cmplog_pairs == ()
         assert ctx.corpus == ()
+        assert ctx.weizz_tags_enabled is False
 
-    def test_from_fuzzer_projects_the_four_fields(self):
+    def test_from_fuzzer_projects_declared_fields(self):
         f = _FakeFuzzer(dictionary=[b"A"], cmplog_pairs=[(b"x", b"y")], corpus=[b"seed"])
+        f.weizz_tags = True
         ctx = MutationContext.from_fuzzer(f)
         assert ctx.max_len == 64
         assert ctx.dictionary == [b"A"]
         assert ctx.cmplog_pairs == [(b"x", b"y")]
         assert ctx.corpus == [b"seed"]
+        assert ctx.weizz_tags_enabled is True
 
     def test_from_fuzzer_tolerates_missing_state(self):
         """cmplog is absent whenever --cmplog is off, which is the default.
@@ -358,13 +364,14 @@ class TestMutationContext:
         assert ctx.dictionary == ()
         assert ctx.cmplog_pairs == ()
         assert ctx.corpus == ()
+        assert ctx.weizz_tags_enabled is False
 
     def test_from_fuzzer_maps_none_cmplog_to_empty_pairs(self):
         ctx = MutationContext.from_fuzzer(_FakeFuzzer())
         assert ctx.cmplog_pairs == ()
 
     def test_context_carries_no_reference_to_the_fuzzer(self):
-        """Not a style point: it is what makes the four fields the contract.
+        """Not a style point: it is what makes the declared fields the contract.
 
         If the instance kept the fuzzer anywhere reachable, a mutator
         could go around the interface and the declared surface would stop
@@ -376,6 +383,7 @@ class TestMutationContext:
             "dictionary",
             "cmplog_pairs",
             "corpus",
+            "weizz_tags_enabled",
         }
         assert not hasattr(ctx, "__dict__")
         with pytest.raises(AttributeError):
