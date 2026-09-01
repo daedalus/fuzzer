@@ -1066,12 +1066,25 @@ class Fuzzer:
         self._unstable_edges: set[int] = set()
         self._stability_calibrations = 0
         self._cmplog_auto = cmplog is None
+        # Always detect whether the target is instrumented, regardless of
+        # the tri-state. The detection result drives the confirmation
+        # message; the tri-state decides whether cmplog runs.
+        has_cmplog = _detect_cmplog(self.target)
         if cmplog is None:
-            cmplog = _detect_cmplog(self.target)
+            cmplog = has_cmplog
             if cmplog:
                 print(
                     "[*] Cmplog: target is instrumented, enabling automatically (--no-cmplog to disable)"
                 )
+        elif cmplog and has_cmplog:
+            # Force-enabled via --cmplog or --hail-mary; confirm detection.
+            print("[*] Cmplog: target is instrumented, cmplog enabled")
+        elif cmplog and not has_cmplog:
+            # Force-enabled but target has no cmplog instrumentation.
+            print(
+                "[!] Cmplog: --cmplog enabled but target is not instrumented; "
+                "shim compilation will be attempted"
+            )
         if cmplog:
             from fuzzer_tool.core.cmplog import CmplogCollector
 

@@ -1552,7 +1552,6 @@ _HAIL_MARY_FLAGS = (
     "hw_perf",
     "colorize",
     "weizz_tags",
-    "enable_regex_bomb_mutations",
     "reseed_on_stall",
 )
 
@@ -1571,6 +1570,8 @@ def _apply_hail_mary(args: argparse.Namespace, fuzz_parser: argparse.ArgumentPar
     # --cmplog is a tri-state (None=auto, True=on, False=off); force it on.
     if args.cmplog == fuzz_parser.get_default("cmplog"):
         args.cmplog = True
+        # Note: cmplog initialization will always call _detect_cmplog() and
+        # print an appropriate message regardless of how cmplog was enabled.
 
     # Boltzmann/Metropolis annealing is inert without a nonzero budget --
     # give it one so enabling the flags actually does something.
