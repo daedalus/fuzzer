@@ -153,12 +153,18 @@ def apply_delta_v2(parent: bytes, diff: list[list]) -> bytes:
 # now accepts both spellings -- see _delta_candidates.
 _CORPUS_FULL_ROOTS = ("seeds",)  # recursively scanned; pruned/ skipped inside
 _CORPUS_DELTA_ROOTS = ("deltas", "seeds")  # seeds/ kept for legacy layouts
-_REHYDRATE_FULL_ROOTS = ("seeds", "seeds/pruned", "seeds/irreplaceable", "seeds/crashing")
+_REHYDRATE_FULL_ROOTS = (
+    "seeds",
+    "seeds/pruned",
+    "seeds/irreplaceable",
+    "seeds/crashing",
+    "seeds/timeouts",
+)
 _REHYDRATE_DELTA_ROOTS = ("deltas", "deltas/pruned")
 
 # Subtrees under seeds/ that carry a meaning beyond "a corpus entry", and so
 # are opted into rather than scanned by default.
-_SEED_SUBTREES = ("pruned", "crashing", "irreplaceable")
+_SEED_SUBTREES = ("pruned", "crashing", "irreplaceable", "timeouts")
 
 # Sidecars that share the corpus directory with seeds. Any consumer that
 # lists the directory instead of walking seeds/ picks these up INSTEAD of
@@ -413,7 +419,7 @@ def load_corpus(
             # silently a no-op on those entries. The seeds are still loaded
             # either way -- the flag only decides whether they are tracked.
             sub_mark = mark_irreplaceable or (
-                load_irreplaceable and sub.name in ("irreplaceable", "crashing")
+                load_irreplaceable and sub.name in ("irreplaceable", "crashing", "timeouts")
             )
             _load_full_from_dir(sub, mark_irreplaceable=sub_mark)
 
@@ -652,6 +658,44 @@ def save_crashing_seed(
     """
     h = hash_data(data)
     dest_dir = corpus_dir / "seeds" / "crashing" / h[:2]
+    dest = dest_dir / f"id_{h}"
+    if h in irreplaceable_hashes and dest.is_file():
+        return False
+
+    is_new = True
+    if bloom is not None:
+        if not bloom.query(h):
+            bloom.add(h)
+        elif h in seen_hashes:
+            is_new = False
+        else:
+            bloom.add(h)
+    elif h in seen_hashes:
+        is_new = False
+    seen_hashes.add(h)
+    irreplaceable_hashes.add(h)
+    if len(seen_hashes) > SEEN_HASHES_MAX:
+        seen_hashes.clear()
+
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(data)
+    return is_new
+
+
+def save_timeout_seed(
+    data: bytes,
+    corpus_dir: Path,
+    seen_hashes: set[str],
+    irreplaceable_hashes: set[str],
+    bloom: BloomFilter | None = None,
+) -> bool:
+    """Save an input that timed out under seeds/timeouts/ and mark irreplaceable.
+
+    Mirrors save_crashing_seed(): timeout inputs are protected from pruning
+    so they survive corpus minimization and can be triaged after the run.
+    """
+    h = hash_data(data)
+    dest_dir = corpus_dir / "seeds" / "timeouts" / h[:2]
     dest = dest_dir / f"id_{h}"
     if h in irreplaceable_hashes and dest.is_file():
         return False

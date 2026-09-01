@@ -26,6 +26,7 @@ from fuzzer_tool.adapters.filesystem import (
     load_corpus,
     save_crash,
     save_irreplaceable,
+    save_timeout_seed,
     save_to_corpus,
 )
 from fuzzer_tool.core.cost_ledger import seed_exec_us
@@ -161,6 +162,9 @@ class CorpusManager:
         # here and marked irreplaceable, so the dir must exist before the
         # first crash.
         (f.corpus_dir / "seeds" / "crashing").mkdir(parents=True, exist_ok=True)
+        # Same for timeouts/: inputs that timed out are stored here and
+        # marked irreplaceable, so the dir must exist before the first timeout.
+        (f.corpus_dir / "seeds" / "timeouts").mkdir(parents=True, exist_ok=True)
 
     def init_seed_metadata(self):
         f = self.f
@@ -552,6 +556,10 @@ class CorpusManager:
             except Exception as exc:  # never let mail failure kill the campaign
                 print(f"[!] crash email failed: {exc}")
         return result
+
+    def save_timeout(self, data: bytes) -> None:
+        f = self.f
+        save_timeout_seed(data, f.corpus_dir, f.seen_hashes, f.irreplaceable_hashes, f.bloom)
 
     def save_to_corpus(self, data: bytes, parent: bytes | None = None):
         f = self.f

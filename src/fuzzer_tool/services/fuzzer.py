@@ -3637,6 +3637,7 @@ class Fuzzer:
             parent_meta = self.seed_meta.get(self._last_parent_seed)
             if parent_meta is not None:
                 parent_meta["timed_out"] = True
+            self._corpus_manager.save_timeout(mutated)
 
         is_crash = self._is_crash(returncode, stderr)
         is_interesting = self._is_interesting(returncode, stderr)
@@ -5318,6 +5319,7 @@ class Fuzzer:
                 continue
             if returncode == -1:  # timeout sentinel
                 self.timeout_count += 1
+                self._corpus_manager.save_timeout(seed)
                 continue
             has_new, edge_ids = self.shm_cov.is_new_coverage_with_edges()
             if not edge_ids:
