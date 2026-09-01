@@ -306,13 +306,19 @@ class TestGlobalRegistryUnaffected:
     def test_builtin_registry_mutators_are_known(self):
         """Shipped MutatorBase plugins are an explicit allow-list.
 
-        Originally empty (port-3 scaffolding). Weizz P2 class mutators are
-        the first in-tree implementors; anything else here is a surprise.
+        Originally empty (port-3 scaffolding). Weizz P2 class mutators were
+        the first in-tree implementors; ``fractal_voronoi`` (spatial
+        meta-mutator, see docs/handover/fractal-voronoi-integration.md) is
+        the second. Anything else here is a surprise.
         """
         from fuzzer_tool.core.operator_registry import REGISTRY
 
         names = sorted(m.name for m in REGISTRY.mutators())
-        assert names == ["weizz_chunk_mutate", "weizz_field_mutate"]
+        assert names == [
+            "fractal_voronoi",
+            "weizz_chunk_mutate",
+            "weizz_field_mutate",
+        ]
 
 
 class TestMutationContext:
