@@ -33,6 +33,10 @@ class MailConfig:
     auth_password: str | None = None
     require_tls: bool = False
     from_addr: str | None = None
+    # Optional subject template. Supports ``{target}``, ``{target_base}``,
+    # ``{base_name}``, ``{returncode}``, ``{exec_count}``. When unset, a
+    # default "[fuzzer-tool] crash …" subject is used.
+    subject: str | None = None
     extra_to: tuple[str, ...] = field(default_factory=tuple)
 
     @classmethod
@@ -43,6 +47,7 @@ class MailConfig:
         auth: str | None = None,
         require_tls: bool = False,
         from_addr: str | None = None,
+        subject: str | None = None,
     ) -> MailConfig:
         user = password = None
         if auth:
@@ -60,6 +65,7 @@ class MailConfig:
             auth_password=password,
             require_tls=bool(require_tls),
             from_addr=(from_addr.strip() if from_addr else None),
+            subject=(subject.strip() if subject else None),
         )
 
     def resolve_from(self) -> str:
@@ -69,6 +75,31 @@ class MailConfig:
             return self.auth_user
         host = socket.gethostname() or "localhost"
         return f"fuzzer-tool@{host}"
+
+    def resolve_subject(
+        self,
+        *,
+        target: str,
+        base_name: str,
+        returncode: int = 0,
+        exec_count: int = 0,
+    ) -> str:
+        target_base = os.path.basename(target) if target else "target"
+        default = f"[fuzzer-tool] crash {base_name} ({target_base})"
+        if not self.subject:
+            return default
+        try:
+            return self.subject.format(
+                target=target,
+                target_base=target_base,
+                base_name=base_name,
+                returncode=returncode,
+                exec_count=exec_count,
+            )
+        except (KeyError, IndexError, ValueError):
+            # Unknown placeholders or bad format string — send the template as-is
+            # rather than failing the notification.
+            return self.subject
 
 
 def _parse_smtp_server(server: str) -> tuple[str, int]:
@@ -268,8 +299,12 @@ def send_crash_email(
         stderr=stderr,
         sidecar_text=sidecar_text,
     )
-    target_base = os.path.basename(target) if target else "target"
-    subject = f"[fuzzer-tool] crash {base_name} ({target_base})"
+    subject = config.resolve_subject(
+        target=target,
+        base_name=base_name,
+        returncode=returncode,
+        exec_count=exec_count,
+    )
     msg = build_crash_message(
         config, subject=subject, body=body, attachments=attachments
     )

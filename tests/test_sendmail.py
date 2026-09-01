@@ -34,11 +34,15 @@ class TestMailConfig:
             smtp_server="smtp.example:587",
             auth="user@ex:s3cret",
             require_tls=True,
+            from_addr="from@ex.com",
+            subject="crash {base_name}",
         )
         assert cfg.auth_user == "user@ex"
         assert cfg.auth_password == "s3cret"
         assert cfg.require_tls is True
         assert cfg.smtp_server == "smtp.example:587"
+        assert cfg.from_addr == "from@ex.com"
+        assert cfg.subject == "crash {base_name}"
 
     def test_from_cli_auth_requires_colon(self):
         with pytest.raises(ValueError, match="USER:PASSWORD"):
@@ -51,6 +55,39 @@ class TestMailConfig:
     def test_resolve_from_prefers_auth_user_with_at(self):
         cfg = MailConfig(to="a@b.c", auth_user="bot@example.com", auth_password="x")
         assert cfg.resolve_from() == "bot@example.com"
+
+    def test_resolve_from_explicit_from_wins(self):
+        cfg = MailConfig(
+            to="a@b.c",
+            from_addr="explicit@ex.com",
+            auth_user="bot@example.com",
+            auth_password="x",
+        )
+        assert cfg.resolve_from() == "explicit@ex.com"
+
+    def test_resolve_subject_default(self):
+        cfg = MailConfig(to="a@b.c")
+        subj = cfg.resolve_subject(target="/tmp/my_target", base_name="crash_1_sig")
+        assert "crash_1_sig" in subj
+        assert "my_target" in subj
+        assert subj.startswith("[fuzzer-tool]")
+
+    def test_resolve_subject_template(self):
+        cfg = MailConfig(
+            to="a@b.c",
+            subject="[{target_base}] {base_name} rc={returncode} n={exec_count}",
+        )
+        subj = cfg.resolve_subject(
+            target="/bin/foo",
+            base_name="crash_9",
+            returncode=-11,
+            exec_count=100,
+        )
+        assert subj == "[foo] crash_9 rc=-11 n=100"
+
+    def test_resolve_subject_bad_placeholder_falls_back_to_raw(self):
+        cfg = MailConfig(to="a@b.c", subject="broken {unknown_key}")
+        assert cfg.resolve_subject(target="t", base_name="b") == "broken {unknown_key}"
 
 
 class TestParseSmtpServer:
@@ -167,7 +204,11 @@ class TestSendMessage:
         base = "crash_1_sig"
         (tmp_path / f"{base}.bin").write_bytes(b"\x41\x42")
         (tmp_path / f"{base}.txt").write_text("ERROR: SEGV\n")
-        cfg = MailConfig(to="a@b.c", from_addr="src@b.c")
+        cfg = MailConfig(
+            to="a@b.c",
+            from_addr="src@b.c",
+            subject="ALERT {target_base} {base_name}",
+        )
         with patch("fuzzer_tool.services.sendmail.send_message") as send:
             send_crash_email(
                 cfg,
@@ -179,6 +220,7 @@ class TestSendMessage:
             )
         send.assert_called_once()
         msg: EmailMessage = send.call_args[0][1]
-        assert "crash_1_sig" in msg["Subject"]
+        assert msg["From"] == "src@b.c"
+        assert msg["Subject"] == "ALERT target crash_1_sig"
         assert "SEGV" in msg.get_body().get_content()
         assert len(list(msg.iter_attachments())) == 2

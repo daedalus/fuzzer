@@ -58,6 +58,8 @@ def _mail_config_from_args(args):
         smtp_server=getattr(args, "send_mail_smtp_server", None),
         auth=getattr(args, "send_mail_auth", None),
         require_tls=getattr(args, "send_mail_require_tls", False),
+        from_addr=getattr(args, "send_email_from", None),
+        subject=getattr(args, "send_email_subject", None),
     )
 
 
@@ -2503,6 +2505,25 @@ def main() -> int:
             "Send a triage report email (with .bin/.txt/.sh/.hex attachments) "
             "to EMAIL whenever a *novel* crash is saved. Uses the system MTA "
             "(sendmail -t) unless --send-mail-smtp-server is set."
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--send-email-from",
+        default=None,
+        metavar="EMAIL",
+        help=(
+            "From: address for --send-email-on-crash (default: auth user if it "
+            "looks like an email, otherwise fuzzer-tool@<hostname>)"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--send-email-subject",
+        default=None,
+        metavar="TEXT",
+        help=(
+            "Subject line for --send-email-on-crash. Optional placeholders: "
+            "{target}, {target_base}, {base_name}, {returncode}, {exec_count}. "
+            "Default: [fuzzer-tool] crash {base_name} ({target_base})"
         ),
     )
     fuzz_parser.add_argument(
