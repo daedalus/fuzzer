@@ -520,7 +520,7 @@ class CorpusManager:
             # Embed the GDB crash replay in the report sidecar (best-effort).
             meta.gdb_replay = _gdb_crash_replay(f, data, returncode)
 
-        return save_crash(
+        result = save_crash(
             data,
             returncode,
             stderr,
@@ -534,6 +534,23 @@ class CorpusManager:
             crash_min_sizes=f.crash_min_sizes if f.save_smaller else None,
             verdict=verdict,
         )
+        # Novel crashes return a base name string; duplicates return False.
+        if result and getattr(f, "email_on_crash", None) is not None:
+            try:
+                from fuzzer_tool.services.sendmail import send_crash_email
+
+                send_crash_email(
+                    f.email_on_crash,
+                    target=str(f.target),
+                    base_name=str(result),
+                    crashes_dir=f.crashes_dir,
+                    returncode=returncode,
+                    exec_count=getattr(f, "exec_count", 0),
+                    stderr=stderr or "",
+                )
+            except Exception as exc:  # never let mail failure kill the campaign
+                print(f"[!] crash email failed: {exc}")
+        return result
 
     def save_to_corpus(self, data: bytes, parent: bytes | None = None):
         f = self.f

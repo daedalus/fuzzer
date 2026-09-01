@@ -46,6 +46,21 @@ def _enable_timestamp_print() -> None:
         root.addHandler(handler)
 
 
+def _mail_config_from_args(args):
+    """Build MailConfig from CLI, or None when --send-email-on-crash is unset."""
+    to = getattr(args, "send_email_on_crash", None)
+    if not to:
+        return None
+    from fuzzer_tool.services.sendmail import MailConfig
+
+    return MailConfig.from_cli(
+        to=to,
+        smtp_server=getattr(args, "send_mail_smtp_server", None),
+        auth=getattr(args, "send_mail_auth", None),
+        require_tls=getattr(args, "send_mail_require_tls", False),
+    )
+
+
 def _load_hash_list(path: str | None) -> set[str] | None:
     """Load a file of hex hashes (one per line) into a set."""
     if not path:
@@ -591,6 +606,7 @@ def cmd_fuzz(args):
         colorize_max_execs=getattr(args, "colorize_max_execs", 512),
         weizz_tags=getattr(args, "weizz_tags", False),
         weizz_tags_max_len=getattr(args, "weizz_tags_max_len", 8192),
+        email_on_crash=_mail_config_from_args(args),
         enable_x86_mutator=getattr(args, "x86_mutate", False),
         enable_arm_mutator=getattr(args, "arm_mutate", False),
         refresh_profile=getattr(args, "refresh_profile", False),
@@ -2478,6 +2494,40 @@ def main() -> int:
         default=None,
         metavar="FILE",
         help="File with stack hashes that override the blocklist (always save these)",
+    )
+    fuzz_parser.add_argument(
+        "--send-email-on-crash",
+        default=None,
+        metavar="EMAIL",
+        help=(
+            "Send a triage report email (with .bin/.txt/.sh/.hex attachments) "
+            "to EMAIL whenever a *novel* crash is saved. Uses the system MTA "
+            "(sendmail -t) unless --send-mail-smtp-server is set."
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--send-mail-smtp-server",
+        default=None,
+        metavar="HOST[:PORT]",
+        help=(
+            "SMTP server for --send-email-on-crash (default port 25; use "
+            "HOST:587 with --send-mail-require-tls for submission). When "
+            "omitted, the system sendmail/MTA is used instead."
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--send-mail-auth",
+        default=None,
+        metavar="USER:PASSWORD",
+        help="SMTP AUTH credentials for --send-mail-smtp-server (USER:PASSWORD)",
+    )
+    fuzz_parser.add_argument(
+        "--send-mail-require-tls",
+        action="store_true",
+        help=(
+            "Require STARTTLS (or use implicit SSL on port 465) when talking "
+            "to --send-mail-smtp-server"
+        ),
     )
     fuzz_parser.add_argument(
         "--save-smaller",

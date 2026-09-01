@@ -819,6 +819,7 @@ class Fuzzer:
         # end so positional callers of Fuzzer() are not shifted.
         weizz_tags=False,
         weizz_tags_max_len=8192,
+        email_on_crash=None,
     ):
         # Snapshot os.environ before anything below (or later in run()) can
         # write __AFL_DIST_SHM_ID / __AFL_SHM_ID / AFL_MAP_SIZE / LD_PRELOAD /
@@ -942,6 +943,8 @@ class Fuzzer:
         self.weizz_tags = weizz_tags
         self.weizz_tags_max_len = weizz_tags_max_len
         self._weizz_tags_collected = 0
+        # MailConfig | None — novel-crash email notification (see services/sendmail.py)
+        self.email_on_crash = email_on_crash
         self.enable_x86_mutator = enable_x86_mutator
         self.enable_arm_mutator = enable_arm_mutator
         self.seed = seed
