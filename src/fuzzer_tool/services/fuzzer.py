@@ -771,6 +771,9 @@ class Fuzzer:
         qea_correlation_delta=0.02,
         qea_correlation_max=2.0,
         qea_correlation_sweeps=3,
+        qea_cooling=False,
+        qea_cooling_decay=0.98,
+        qea_cooling_min_angle=0.005,
         calibrate=0,
         stall_threshold=1000,
         resize_map_on_stall=True,
@@ -975,6 +978,9 @@ class Fuzzer:
         self._qea_correlation_delta = qea_correlation_delta
         self._qea_correlation_max = qea_correlation_max
         self._qea_correlation_sweeps = qea_correlation_sweeps
+        self._qea_cooling = qea_cooling
+        self._qea_cooling_decay = qea_cooling_decay
+        self._qea_cooling_min_angle = qea_cooling_min_angle
         self.ga = None  # Initialized in run() when --ga is set
 
         # QEA lifecycle
@@ -5625,6 +5631,9 @@ class Fuzzer:
                     correlation_delta=self._qea_correlation_delta,
                     correlation_max=self._qea_correlation_max,
                     correlation_sweeps=self._qea_correlation_sweeps,
+                    use_cooling=self._qea_cooling,
+                    cooling_decay=self._qea_cooling_decay,
+                    cooling_min_angle=self._qea_cooling_min_angle,
                 )
                 self.qea.initialize(self.corpus, self._edge_tracker)
                 qea_data = self._state_store.get("qea")

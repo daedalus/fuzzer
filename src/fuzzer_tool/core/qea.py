@@ -426,6 +426,38 @@ COUPLING_MAX_DEFAULT = 2.0  # clip magnitude for a single J_ij entry
 CORRELATION_SWEEPS_DEFAULT = 3  # Gibbs sweeps per collapse_correlated() call
 
 
+# ── Algorithmic cooling (opt-in rotation-angle decay) ───────────────────
+#
+# rotation_gate()'s cos(Δθ)/sin(Δθ) rotation already decelerates *per bit*
+# as that bit's own amplitude approaches certainty (dα/dθ -> 0 near the
+# poles) -- see the Aug 31 Hilbert-space handover, section 4. That is a
+# local effect with no memory of generation count. "Algorithmic cooling"
+# here is a separate, *global* schedule that shrinks the base angle Δθ
+# itself as generations pass, on top of that per-bit deceleration --
+# large steps while the population is still unconverged, smaller steps
+# as it settles, the way a simulated-annealing temperature schedule
+# would.
+#
+# This fuzzer's QEA run has no fixed generation budget (unlike the
+# combinatorial-optimization benchmarks the technique is usually applied
+# to), so decaying Δθ monotonically across the whole run and never
+# recovering would eventually flatten it to the floor and leave
+# mutate_amplitudes()'s fixed 2%-per-bit random reset as the only
+# remaining source of adaptation -- working against new coverage that
+# shows up late in a long-running session. Anchored instead to
+# elite_reset_every: Δθ decays within each reset cycle and snaps back to
+# its base value at every elite reset, so cooling and the existing
+# incumbent-anchoring fix cooperate (both keyed to the same cycle
+# boundary) instead of one undermining the other. With
+# elite_reset_every=0 (resets disabled) there is no cycle boundary to
+# anchor to, so cooling falls back to decaying against the raw
+# generation count -- callers who want indefinite cooling without elite
+# resets get that, but should pick a floor they're comfortable settling
+# at permanently.
+COOLING_DECAY_DEFAULT = 0.98  # per-generation multiplicative decay
+COOLING_MIN_ANGLE_DEFAULT = 0.005  # floor Δθ never decays past (radians)
+
+
 def _zero_coupling(num_bytes: int) -> np.ndarray:
     """An all-zero (uncoupled) coupling tensor for *num_bytes* bytes.
 
@@ -621,6 +653,13 @@ class QEALifecycle:
         correlation_delta: float = 0.02,
         correlation_max: float = COUPLING_MAX_DEFAULT,
         correlation_sweeps: int = CORRELATION_SWEEPS_DEFAULT,
+        use_cooling: bool = False,
+        # ^ Opt-in global Δθ decay schedule (see "Algorithmic cooling"
+        # section above). Default off: existing behavior, existing tests,
+        # and existing saved populations are unaffected -- rotation_angle
+        # stays constant across generations exactly as before.
+        cooling_decay: float = COOLING_DECAY_DEFAULT,
+        cooling_min_angle: float = COOLING_MIN_ANGLE_DEFAULT,
         fitness: FitnessFunction | None = None,
     ):
         self.pop_size = pop_size
@@ -637,6 +676,9 @@ class QEALifecycle:
         self.correlation_delta = correlation_delta
         self.correlation_max = correlation_max
         self.correlation_sweeps = correlation_sweeps
+        self.use_cooling = use_cooling
+        self.cooling_decay = cooling_decay
+        self.cooling_min_angle = cooling_min_angle
 
         # Lazy import to avoid circular dependency at module level
         from fuzzer_tool.core.ga import FitnessFunction as _FF
@@ -684,6 +726,38 @@ class QEALifecycle:
             self.population.append(ind)
 
         self._evaluate_all(edge_tracker)
+
+    # ── Algorithmic cooling ────────────────────────────────────────
+
+    def _effective_rotation_angle(self) -> float:
+        """Current Δθ, decayed by generation if ``use_cooling`` is set.
+
+        With cooling off, returns ``self.rotation_angle`` unchanged --
+        identical to every call site before this feature existed.
+
+        With cooling on, decays multiplicatively by
+        ``cooling_decay ** g`` where ``g`` is the generation count
+        *within the current elite-reset cycle* (``generation %
+        elite_reset_every``), floored at ``cooling_min_angle``. Using
+        the in-cycle generation rather than the raw count means Δθ
+        snaps back to ``rotation_angle`` at every elite reset instead
+        of decaying once toward the floor for the life of the run --
+        see the "Algorithmic cooling" section above collapse_correlated()
+        for why an unrecovered decay is the wrong default for a
+        fuzzing run with no fixed generation budget. With
+        ``elite_reset_every == 0`` (resets disabled) there's no cycle
+        boundary to anchor to, so this falls back to decaying against
+        the raw generation count for the rest of the run.
+        """
+        if not self.use_cooling:
+            return self.rotation_angle
+        gen_in_cycle = (
+            self.generation % self.elite_reset_every
+            if self.elite_reset_every > 0
+            else self.generation
+        )
+        decayed = self.rotation_angle * (self.cooling_decay**gen_in_cycle)
+        return max(self.cooling_min_angle, decayed)
 
     # ── Core lifecycle ──────────────────────────────────────────────
 
@@ -752,7 +826,7 @@ class QEALifecycle:
                 self._last_parent.amplitudes,
                 self._last_collapsed,
                 improved=new_coverage,
-                delta=self.rotation_angle,
+                delta=self._effective_rotation_angle(),
             )
             if self.use_correlation and self._last_parent.coupling is not None:
                 update_couplings(

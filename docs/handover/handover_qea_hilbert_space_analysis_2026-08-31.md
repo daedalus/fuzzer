@@ -205,3 +205,67 @@ under-covering intra-byte correlation; no A/B evidence is claimed here that
 `use_correlation=True` improves fuzzing outcomes on any target. Treat it the
 same way `elite_reset_every` and the coupling-magnitude CLI flags are
 treated in commit `9657454`: an arm to test, not a default.
+
+## 8. Algorithmic cooling (opt-in Δθ decay), added 2026-09-01
+
+**Status: implemented.** §4 noted the trig rotation already gives a
+per-bit deceleration as that bit's own amplitude approaches certainty
+(`dα/dθ → 0` near the poles) -- a *local* annealing effect with no
+memory of generation count. This section adds a separate, *global*
+schedule that decays the base rotation angle `Δθ` itself as generations
+pass, the way a simulated-annealing temperature schedule would: larger
+steps while the population is unconverged, smaller steps as it settles.
+
+**Why it isn't a plain monotonic decay.** The technique's usual home is
+bounded combinatorial-optimization runs with a known generation budget,
+where annealing all the way to a near-frozen state by the end is
+correct. This fuzzer's QEA run has no such budget -- it's expected to
+keep finding new coverage indefinitely. A schedule that decays once
+across the whole run would eventually flatten `Δθ` to its floor and
+leave `mutate_amplitudes()`'s fixed 2%-per-bit random reset as the only
+remaining source of adaptation, working against coverage that shows up
+late in a long session.
+
+**The fix: anchor cooling to `elite_reset_every`'s cycle.** `Δθ` decays
+against `generation % elite_reset_every` rather than the raw generation
+count, so it resets to full strength at every elite reset instead of
+decaying once toward the floor for the life of the run. Cooling and the
+§ "Elitism" incumbent-anchoring fix (`elite_reset_every`, already in
+`_evolve()`) are both keyed to the same cycle boundary, so enabling both
+makes them cooperate -- each reset gives the population both a fresh
+breeding pool *and* a fresh full-strength rotation step -- rather than
+cooling quietly undermining what the reset just restored. With
+`elite_reset_every=0` (resets disabled) there's no cycle boundary to
+anchor to, so cooling falls back to decaying against the raw generation
+count for the rest of the run; callers taking that combination should
+pick a floor (`cooling_min_angle`) they're comfortable settling at
+permanently.
+
+**Implementation.** `QEALifecycle._effective_rotation_angle()` computes
+`rotation_angle * cooling_decay ** gen_in_cycle`, floored at
+`cooling_min_angle`, and is called from `on_fuzz_result()` in place of
+the raw `self.rotation_angle` that used to go straight into
+`rotation_gate()`. `_evolve()`'s breeding path doesn't call
+`rotation_gate()` at all (it biases fresh amplitudes from crossed-over
+bytes instead), so cooling only affects the feedback loop in
+`on_fuzz_result()` -- exactly where the existing constant `rotation_angle`
+was already being consumed.
+
+**Lifecycle wiring.** `QEALifecycle` gained `use_cooling` (default
+`False`), `cooling_decay` (default `0.98`), `cooling_min_angle` (default
+`0.005`). CLI flags: `--qea-cooling`, `--qea-cooling-decay`,
+`--qea-cooling-min-angle`; `qea_cooling` was also added to
+`_HAIL_MARY_FLAGS` alongside `qea_correlation` for consistency with how
+`--hail-mary` treats other opt-in QEA arms.
+
+**Cost.** `_effective_rotation_angle()` is one float multiply and a
+`max()` per call to `on_fuzz_result()` -- no new arrays, no change to
+`rotation_gate()`'s O(n) cost, and a no-op (returns `self.rotation_angle`
+unchanged) when `use_cooling=False`.
+
+**What this doesn't change.** Same caveat as §7's correlation feature:
+this was implemented on explicit request, not because a benchmark showed
+constant-Δθ under-converging on any target. No A/B evidence is claimed
+that `use_cooling=True` improves fuzzing outcomes. Treat it the same way
+`elite_reset_every` and `use_correlation` are treated -- an arm to test,
+not a default.

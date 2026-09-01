@@ -597,6 +597,9 @@ def cmd_fuzz(args):
         qea_correlation_delta=getattr(args, "qea_correlation_delta", 0.02),
         qea_correlation_max=getattr(args, "qea_correlation_max", 2.0),
         qea_correlation_sweeps=getattr(args, "qea_correlation_sweeps", 3),
+        qea_cooling=getattr(args, "qea_cooling", False),
+        qea_cooling_decay=getattr(args, "qea_cooling_decay", 0.98),
+        qea_cooling_min_angle=getattr(args, "qea_cooling_min_angle", 0.005),
         continue_until_crash=getattr(args, "continue_until_crash", False),
         calibrate=getattr(args, "calibrate", 0),
         stall_threshold=getattr(args, "stall", 1000),
@@ -1528,6 +1531,7 @@ _HAIL_MARY_FLAGS = (
     "path_negation",
     "enable_smt_z3",
     "qea_correlation",
+    "qea_cooling",
     "boltzmann",
     "metropolis",
     "auto_timeout",
@@ -2131,6 +2135,33 @@ def main() -> int:
         help="Gibbs sweeps per correlated collapse when --qea-correlation "
         "is set; more sweeps mix closer to the joint distribution's "
         "stationary point at proportionally higher cost (default: 3)",
+    )
+    fuzz_parser.add_argument(
+        "--qea-cooling",
+        action="store_true",
+        help="Enable algorithmic cooling: decay the rotation gate's step "
+        "angle across generations instead of holding it constant, so "
+        "search takes larger steps early and smaller ones as the "
+        "population settles. Anchored to --qea-elite-reset's cycle -- Δθ "
+        "resets to full strength at every elite reset -- so cooling and "
+        "resets cooperate instead of one flattening the other; with "
+        "--qea-elite-reset=0 the decay instead runs against the raw "
+        "generation count for the rest of the session. Off by default -- "
+        "existing constant-angle behavior is unchanged either way.",
+    )
+    fuzz_parser.add_argument(
+        "--qea-cooling-decay",
+        type=float,
+        default=0.98,
+        help="Per-generation multiplicative decay applied to the rotation "
+        "angle when --qea-cooling is set (default: 0.98)",
+    )
+    fuzz_parser.add_argument(
+        "--qea-cooling-min-angle",
+        type=float,
+        default=0.005,
+        help="Floor (radians) the rotation angle never decays past when "
+        "--qea-cooling is set (default: 0.005)",
     )
     fuzz_parser.add_argument(
         "--ga-crossover-rate",
