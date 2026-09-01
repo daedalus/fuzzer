@@ -813,6 +813,10 @@ class Fuzzer:
         sharpe_kelly_blend=0.0,
         bootstrap=False,
         bootstrap_k=1,
+        # Weizz structure tags (P1 collector + P2 operators). Appended at the
+        # end so positional callers of Fuzzer() are not shifted.
+        weizz_tags=False,
+        weizz_tags_max_len=8192,
     ):
         # Snapshot os.environ before anything below (or later in run()) can
         # write __AFL_DIST_SHM_ID / __AFL_SHM_ID / AFL_MAP_SIZE / LD_PRELOAD /
@@ -930,6 +934,12 @@ class Fuzzer:
         self.colorize_max_execs = colorize_max_execs
         self._colorize_taint_cache: dict[int, object] = {}
         self._colorize_execs = 0
+        # Weizz structure tags (--weizz-tags): off by default. Passive
+        # collector consumes existing cmplog pairs; field/chunk operators
+        # only fire when a seed carries a StructureMap in seed_meta.
+        self.weizz_tags = weizz_tags
+        self.weizz_tags_max_len = weizz_tags_max_len
+        self._weizz_tags_collected = 0
         self.enable_x86_mutator = enable_x86_mutator
         self.enable_arm_mutator = enable_arm_mutator
         self.seed = seed
@@ -3737,6 +3747,17 @@ class Fuzzer:
         if has_new_coverage and self._cmplog:
             self._cmplog.mark_coverage_gain()
 
+        # Weizz structure tags: once-per-lineage passive collection after a
+        # coverage gain, gated by --weizz-tags and max_len. Uses existing
+        # cmplog pairs (+ optional colorize taints); no second tracer.
+        if (
+            has_new_coverage
+            and self.weizz_tags
+            and self._cmplog is not None
+            and len(mutated) <= self.weizz_tags_max_len
+        ):
+            self._maybe_collect_weizz_tags(mutated)
+
         # Record crash MI: I(byte_position; crash_outcome)
         if self._crash_mi:
             self._crash_mi.record(mutated, is_crash)
@@ -4647,6 +4668,47 @@ class Fuzzer:
             cache.clear()
         cache[key] = taints
         return taints
+
+    def _maybe_collect_weizz_tags(self, data: bytes) -> None:
+        """Passive Weizz structure-tag collection for one coverage-gaining seed.
+
+        Once-per-lineage: if ``seed_meta`` already carries a non-dirty RLE
+        map for this exact byte string, skip. Size-gated by
+        ``weizz_tags_max_len``. Does not run the differential path (that
+        stays available via ``get_deps`` for callers that need causality).
+        """
+        if not data or self._cmplog is None:
+            return
+        meta = self.seed_meta.get(data)
+        if meta is not None:
+            existing = meta.get("weizz_tags_rle")
+            if existing and not meta.get("weizz_tags_dirty", False):
+                return
+        try:
+            from fuzzer_tool.core.weizz_tags import (
+                TagCollectorConfig,
+                attach_tags_to_meta,
+                collect_structure_map,
+            )
+
+            taints = None
+            if self.colorize:
+                taints = self._colorize_seed(data)
+            smap = collect_structure_map(
+                data,
+                self._cmplog,
+                colorization_result=taints,
+                config=TagCollectorConfig(max_input_len=self.weizz_tags_max_len),
+            )
+            if smap is None or smap.ntypes == 0:
+                return
+            if meta is None:
+                meta = {}
+                self.seed_meta[data] = meta
+            attach_tags_to_meta(meta, smap)
+            self._weizz_tags_collected += 1
+        except Exception:  # noqa: BLE001 — never take down the fuzz loop
+            log.debug("weizz tag collection failed", exc_info=True)
 
     def _get_current_edge_set(self) -> set[int]:
         """Return the set of currently-active edge IDs.

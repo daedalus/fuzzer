@@ -586,6 +586,8 @@ def cmd_fuzz(args):
         enable_regex_bomb=getattr(args, "enable_regex_bomb_mutations", False),
         colorize=getattr(args, "colorize", False),
         colorize_max_execs=getattr(args, "colorize_max_execs", 512),
+        weizz_tags=getattr(args, "weizz_tags", False),
+        weizz_tags_max_len=getattr(args, "weizz_tags_max_len", 8192),
         enable_x86_mutator=getattr(args, "x86_mutate", False),
         enable_arm_mutator=getattr(args, "arm_mutate", False),
         refresh_profile=getattr(args, "refresh_profile", False),
@@ -2690,6 +2692,25 @@ def main() -> int:
         default=512,
         metavar="N",
         help="Per-seed execution budget for --colorize (default: 512)",
+    )
+    fuzz_parser.add_argument(
+        "--weizz-tags",
+        action="store_true",
+        help=(
+            "Build Weizz-style structure tags from cmplog (+ optional colorize) "
+            "and enable field/chunk operators that consume them. Off by default; "
+            "see docs/handover/handover_weizz_structure_aware_port_2026-08-31.md"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--weizz-tags-max-len",
+        type=int,
+        default=8192,
+        metavar="N",
+        help=(
+            "Skip Weizz tag collection for seeds longer than N bytes "
+            "(Weizz -L analogue; default: 8192)"
+        ),
     )
     fuzz_parser.add_argument(
         "--enable-regex-bomb-mutations",

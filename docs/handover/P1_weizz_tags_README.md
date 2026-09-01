@@ -62,11 +62,15 @@ smap2 = load_tags_from_meta(meta)
 ## Acceptance (from handover §8)
 
 - [x] Tag collector produces stable tags on synthetic nested / magic+length input
-- [ ] Field + chunk operators (P2 — not this change)
-- [ ] Flag default off + size/lineage gate (wire in CLI)
-- [ ] Paired bench (after P2)
+- [x] Field + chunk operators (P2): `weizz_field_havoc`, `weizz_chunk_dup`,
+      `weizz_chunk_delete`, `weizz_chunk_swap` under structural category;
+      availability gated on seed tags via `_weizz_tags_available`
+- [x] Flag default off + size/lineage gate (`--weizz-tags`, `--weizz-tags-max-len`;
+      collector hooks on coverage gain, once-per-lineage via meta RLE)
+- [ ] Paired bench (still open — measure with `tools/bench_paired.py`)
 - [x] No new comparison tracer
-- [x] Stale-tag behaviour defined (`TagFlags.DIRTY` + meta drop)
+- [x] Stale-tag behaviour defined (`TagFlags.DIRTY` + meta `weizz_tags_dirty`
+      set by length-changing chunk ops)
 
 ## Design notes
 

@@ -1841,6 +1841,146 @@ class OperatorEngine:
                 stride = parent_meta.get("record_stride")
             return bytearray(chunk_shuffle(bytes(buf), rng=rng, stride=stride)[: self.f.max_len])
 
+    # ── Weizz P2: field / chunk operators ─────────────────────────────────
+
+    def _weizz_structure_map(self, data: bytes):
+        """Load StructureMap for *data* from seed_meta, or None."""
+        from fuzzer_tool.core.weizz_tags import load_tags_from_meta
+
+        meta = self.f.seed_meta.get(data)
+        if meta is None:
+            return None
+        if meta.get("weizz_tags_dirty"):
+            return None
+        return load_tags_from_meta(meta)
+
+    def _weizz_mark_dirty(self, data: bytes) -> None:
+        """Mark tags on parent seed dirty after a length-changing mutation."""
+        meta = self.f.seed_meta.get(data)
+        if meta is not None and "weizz_tags_rle" in meta:
+            meta["weizz_tags_dirty"] = True
+
+    def _op_weizz_field_havoc(self, buf, _byte_idx, data):
+        """Havoc only inside one Weizz-tagged field (same-cmp_id run).
+
+        Length-preserving: flips / arithmetic / interesting values within a
+        randomly chosen field span. Falls back to None when no tags.
+        """
+        smap = self._weizz_structure_map(data)
+        if smap is None or not buf:
+            return None
+        spans = smap.field_spans()
+        if not spans:
+            return None
+        rng = self.f._rand_pool
+        start, end, _cid = rng.choice(spans)
+        if end <= start:
+            return None
+        out = bytearray(buf)
+        width = end - start
+        # A few intra-field havoc steps (length-preserving).
+        for _ in range(rng.randint(1, 4)):
+            if width <= 0:
+                break
+            mode = rng.randint(0, 3)
+            if mode == 0:
+                # bit flip
+                i = start + rng.randint(0, width - 1)
+                if i < len(out):
+                    out[i] ^= 1 << rng.randint(0, 7)
+            elif mode == 1:
+                # interesting 8-bit
+                i = start + rng.randint(0, width - 1)
+                if i < len(out):
+                    out[i] = rng.choice(INTERESTING_8) & 0xFF
+            elif mode == 2 and width >= 2:
+                i = start + rng.randint(0, width - 2)
+                if i + 1 < len(out):
+                    val = rng.choice(INTERESTING_16)
+                    out[i] = val & 0xFF
+                    out[i + 1] = (val >> 8) & 0xFF
+            else:
+                # arithmetic on one byte
+                i = start + rng.randint(0, width - 1)
+                if i < len(out):
+                    out[i] = (out[i] + rng.randint(-35, 35)) & 0xFF
+        return out[: self.f.max_len]
+
+    def _op_weizz_chunk_dup(self, buf, _byte_idx, data):
+        """Duplicate a Weizz top-level chunk span (insert a second copy)."""
+        smap = self._weizz_structure_map(data)
+        if smap is None or not buf:
+            return None
+        spans = smap.chunk_spans(parent=None)
+        if not spans:
+            spans = smap.field_spans()
+        if not spans:
+            return None
+        rng = self.f._rand_pool
+        start, end, _ = rng.choice(spans)
+        chunk = bytes(buf[start:end])
+        if not chunk:
+            return None
+        # Insert duplicate after the original chunk.
+        out = bytearray(buf[:end]) + bytearray(chunk) + bytearray(buf[end:])
+        self._weizz_mark_dirty(data)
+        return out[: self.f.max_len]
+
+    def _op_weizz_chunk_delete(self, buf, _byte_idx, data):
+        """Delete a Weizz field or top-level chunk span (never the whole buffer)."""
+        smap = self._weizz_structure_map(data)
+        if smap is None or not buf or len(buf) < 4:
+            return None
+        # Prefer field spans: chunk_spans(parent=None) may collapse the entire
+        # continuous top-level region into one span equal to the buffer.
+        spans = smap.field_spans()
+        if not spans:
+            spans = smap.chunk_spans(parent=None)
+        if not spans:
+            return None
+        candidates = [s for s in spans if 0 < (s[1] - s[0]) < len(buf)]
+        if not candidates:
+            return None
+        rng = self.f._rand_pool
+        start, end, _ = rng.choice(candidates)
+        out = bytearray(buf[:start]) + bytearray(buf[end:])
+        if not out:
+            return None
+        self._weizz_mark_dirty(data)
+        return out[: self.f.max_len]
+
+    def _op_weizz_chunk_swap(self, buf, _byte_idx, data):
+        """Swap two Weizz top-level chunk spans."""
+        smap = self._weizz_structure_map(data)
+        if smap is None or not buf:
+            return None
+        spans = smap.chunk_spans(parent=None)
+        if len(spans) < 2:
+            spans = smap.field_spans()
+        if len(spans) < 2:
+            return None
+        rng = self.f._rand_pool
+        a, b = rng.sample(spans, 2)
+        if a[0] > b[0]:
+            a, b = b, a
+        a0, a1, _ = a
+        b0, b1, _ = b
+        if a1 > b0:
+            # Overlapping — skip
+            return None
+        out = (
+            bytearray(buf[:a0])
+            + bytearray(buf[b0:b1])
+            + bytearray(buf[a1:b0])
+            + bytearray(buf[a0:a1])
+            + bytearray(buf[b1:])
+        )
+        # Length-preserving swap: tags remain valid position-wise only if
+        # spans had equal length; mark dirty when lengths differ.
+        if (a1 - a0) != (b1 - b0):
+            self._weizz_mark_dirty(data)
+        return out[: self.f.max_len]
+
     def _op_block_shuffle_variable(self, buf, _byte_idx, _data):
         """Shuffle variable-width blocks using order-statistics spacings trick.
 

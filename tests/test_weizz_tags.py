@@ -278,6 +278,107 @@ def test_dirty_flag():
     assert not (smap.tags[2].flags & TagFlags.DIRTY)
 
 
+# ── P2 operator smoke (handlers via a minimal fuzzer stub) ───────────────
+
+
+class _FakeRng:
+    def __init__(self, seed=0):
+        import random
+
+        self._r = random.Random(seed)
+
+    def choice(self, seq):
+        return self._r.choice(seq)
+
+    def sample(self, seq, k):
+        return self._r.sample(list(seq), k)
+
+    def randint(self, a, b):
+        return self._r.randint(a, b)
+
+    def random(self):
+        return self._r.random()
+
+
+class _FakeFuzzer:
+    def __init__(self, data: bytes, smap: StructureMap, max_len: int = 4096):
+        self.max_len = max_len
+        self.weizz_tags = True
+        self._rand_pool = _FakeRng(42)
+        meta = attach_tags_to_meta({}, smap)
+        self.seed_meta = {data: meta}
+
+
+def _make_engine(data: bytes, smap: StructureMap):
+    from fuzzer_tool.services.operators import OperatorEngine
+
+    f = _FakeFuzzer(data, smap)
+    return OperatorEngine(f), f
+
+
+def test_weizz_field_havoc_length_preserving():
+    data = b"AAAABBBBCCCC"
+    # Tag first 4 as field 1, next 4 as field 2
+    tags = (
+        [ByteTag(cmp_id=1)] * 4
+        + [ByteTag(cmp_id=2)] * 4
+        + [ByteTag(cmp_id=3)] * 4
+    )
+    smap = StructureMap(tags=tags, ntypes=3, input_len=len(data), from_cmplog=True)
+    eng, _f = _make_engine(data, smap)
+    out = eng._op_weizz_field_havoc(bytearray(data), 0, data)
+    assert out is not None
+    assert len(out) == len(data)
+
+
+def test_weizz_chunk_dup_grows():
+    data = b"AAAABBBB"
+    tags = [ByteTag(cmp_id=1, parent=0)] * 4 + [ByteTag(cmp_id=2, parent=0)] * 4
+    smap = StructureMap(tags=tags, ntypes=2, input_len=len(data), from_cmplog=True)
+    eng, f = _make_engine(data, smap)
+    out = eng._op_weizz_chunk_dup(bytearray(data), 0, data)
+    assert out is not None
+    assert len(out) > len(data)
+    assert f.seed_meta[data].get("weizz_tags_dirty") is True
+
+
+def test_weizz_chunk_delete_shrinks():
+    data = b"AAAABBBBCCCC"
+    tags = (
+        [ByteTag(cmp_id=1, parent=0)] * 4
+        + [ByteTag(cmp_id=2, parent=0)] * 4
+        + [ByteTag(cmp_id=3, parent=0)] * 4
+    )
+    smap = StructureMap(tags=tags, ntypes=3, input_len=len(data), from_cmplog=True)
+    eng, f = _make_engine(data, smap)
+    out = eng._op_weizz_chunk_delete(bytearray(data), 0, data)
+    assert out is not None
+    assert len(out) < len(data)
+    assert f.seed_meta[data].get("weizz_tags_dirty") is True
+
+
+def test_weizz_chunk_swap():
+    data = b"AAAABBBB"
+    tags = [ByteTag(cmp_id=1, parent=0)] * 4 + [ByteTag(cmp_id=2, parent=0)] * 4
+    smap = StructureMap(tags=tags, ntypes=2, input_len=len(data), from_cmplog=True)
+    eng, _f = _make_engine(data, smap)
+    out = eng._op_weizz_chunk_swap(bytearray(data), 0, data)
+    assert out is not None
+    assert len(out) == len(data)
+    # One of the two possible orderings after swap
+    assert bytes(out) in (b"BBBBAAAA", b"AAAABBBB")
+
+
+def test_weizz_ops_unavailable_without_tags():
+    from fuzzer_tool.core.operator_registry import _weizz_tags_available
+
+    class F:
+        weizz_tags = True
+        seed_meta = {}
+
+    assert _weizz_tags_available(F(), b"x") is False
+
+
 if __name__ == "__main__":
     import traceback
 

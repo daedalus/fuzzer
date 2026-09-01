@@ -105,6 +105,11 @@ _CATEGORIES: dict[str, set[str]] = {
         "corpus_literal_insert",
         "insert_range_from_other",
         "versifier_generate",
+        # Weizz P2 — field/chunk scoped; availability gated on seed tags
+        "weizz_field_havoc",
+        "weizz_chunk_dup",
+        "weizz_chunk_delete",
+        "weizz_chunk_swap",
     },
     "radamsa": {
         "fuse_this",
@@ -507,6 +512,26 @@ def format_gate_matches(name: str, data: bytes) -> bool | None:
         return False
 
 
+def _weizz_tags_available(f, data: bytes) -> bool:
+    """True when --weizz-tags is on and *data* has a usable StructureMap."""
+    if not getattr(f, "weizz_tags", False):
+        return False
+    meta = getattr(f, "seed_meta", None)
+    if not meta:
+        return False
+    # seed_meta may be keyed by bytes or by seed key string; try both.
+    entry = meta.get(data)
+    if entry is None:
+        key_fn = getattr(f, "_seed_key", None)
+        if key_fn is not None:
+            entry = meta.get(key_fn(data))
+    if not entry:
+        return False
+    if entry.get("weizz_tags_dirty"):
+        return False
+    return bool(entry.get("weizz_tags_rle"))
+
+
 # Availability predicates mirror the historic build_ops() conditions.
 _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     # format ops — gated on the format being relevant to this target
@@ -571,6 +596,12 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     # execute anything. The real pass is core/colorization.py, driven by
     # Fuzzer._colorize_seed() under --colorize.
     "colorization": lambda f, _d: bool(getattr(getattr(f, "_cmplog", None), "pairs", None)),
+    # Weizz P2 field/chunk operators — only when the feature is enabled and
+    # the parent seed already carries a non-dirty StructureMap in seed_meta.
+    "weizz_field_havoc": _weizz_tags_available,
+    "weizz_chunk_dup": _weizz_tags_available,
+    "weizz_chunk_delete": _weizz_tags_available,
+    "weizz_chunk_swap": _weizz_tags_available,
 }
 
 
