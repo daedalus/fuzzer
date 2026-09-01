@@ -77,3 +77,5 @@ docs/sweeps/*.tsv
 # Benchmark run artefacts. Raw cells are large and machine-specific; the
 # analysis and the learnings doc are the durable record.
 results/
+targets/fuzzgoat_read
+targets/fuzzgoat_read_nosan

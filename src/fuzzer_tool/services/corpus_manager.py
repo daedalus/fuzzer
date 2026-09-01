@@ -30,6 +30,7 @@ from fuzzer_tool.adapters.filesystem import (
 )
 from fuzzer_tool.core.cost_ledger import seed_exec_us
 from fuzzer_tool.core.periodicity import estimate_record_size
+from fuzzer_tool.core.rate_distortion import RateDistortionCorpus
 from fuzzer_tool.core.running_stats import RunningMoments
 from fuzzer_tool.services.operators import HAVOC_SUB_OPS
 
@@ -1194,6 +1195,48 @@ class CorpusManager:
                 len(f.corpus),
                 stale_ratio,
             )
+
+    def minimax_robust_admission(self, candidate_seeds: list[bytes]) -> list[bytes]:
+        """Apply minimax-robust corpus admission using rate-distortion analysis.
+
+        This selects seeds to minimize maximum coverage loss if any single seed
+        is removed — the minimax-robust version of corpus admission.
+
+        Args:
+            candidate_seeds: List of seed bytes to consider for admission.
+
+        Returns:
+            List of seeds to admit (in selection order).
+        """
+        f = self.f
+        et = f._edge_tracker
+
+        if not candidate_seeds or not et or not et.seed_edges:
+            return candidate_seeds
+
+        # Build seed_edges dict for the candidates
+        seed_edges: dict[str, set[int]] = {}
+        for seed in candidate_seeds:
+            sk = self.seed_key(seed)
+            edges = et.seed_edges.get(sk, set())
+            if edges:
+                seed_edges[sk] = edges
+
+        if not seed_edges:
+            return candidate_seeds[:1] if candidate_seeds else []
+
+        # Use the rate-distortion module's minimax-robust selection
+        rd = RateDistortionCorpus()
+        max_seeds = getattr(f, "_minimax_corpus_size", len(candidate_seeds))
+        selected_keys = rd.minimax_robust_corpus_admission(seed_edges, max_seeds)
+
+        # Map back to seeds
+        key_to_seed: dict[str, bytes] = {}
+        for seed in candidate_seeds:
+            key_to_seed[self.seed_key(seed)] = seed
+
+        result = [key_to_seed[k] for k in selected_keys if k in key_to_seed]
+        return result
 
     def deprioritize_near_duplicates(self):
         f = self.f

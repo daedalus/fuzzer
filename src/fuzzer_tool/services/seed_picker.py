@@ -20,6 +20,7 @@ from collections import Counter
 
 from fuzzer_tool.core.cost_ledger import effective_fuzz_count
 from fuzzer_tool.core.crc32 import crc32
+from fuzzer_tool.core.schedulers.mcts import AlphaBetaMCTSSeedScheduler
 from fuzzer_tool.core.validity import VALID_SEED_BONUS
 
 log = logging.getLogger(__name__)
@@ -204,13 +205,12 @@ class SeedPicker:
         return handler() if handler else None
 
     def _pick_mcts_seed(self) -> bytes | None:
-        """MCTS/UCT descent over the lineage tree — the Elo-arbitrated 'mcts' arm.
+        """Alpha-Beta descent over the lineage tree — the Elo-arbitrated 'mcts' arm.
 
         Every other strategy scores the corpus as a flat pool. This one walks
         the parent/child genealogy the lineage tree already maintains and
-        picks a seed by UCT, so budget flows toward *regions* of the tree that
-        are still producing coverage rather than toward individually
-        high-scoring seeds.
+        picks a seed by Alpha-Beta minimax, pruning suboptimal paths to focus
+        on productive regions of the tree.
 
         Returns None (caller falls through to another strategy) when the tree
         offers no live seed — e.g. before the first corpus insert, or when
@@ -218,10 +218,10 @@ class SeedPicker:
         """
         f = self.f
         tree = getattr(f, "_lineage", None)
-        mcts = getattr(f, "_mcts", None)
-        if tree is None or mcts is None or not f.corpus:
+        if tree is None or not f.corpus:
             return None
-
+        # Use AlphaBetaMCTSSeedScheduler
+        mcts = AlphaBetaMCTSSeedScheduler()
         key_to_seed = {f._seed_key(s): s for s in f.corpus}
         selected = mcts.select(tree, set(key_to_seed))
         if selected is None:

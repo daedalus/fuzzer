@@ -101,15 +101,15 @@ class RateDistortionCorpus:
 
         return curve
 
-    def optimal_pruning(
+    def minimax_robust_pruning(
         self,
         seed_edges: dict[str, set[int]],
         target_fraction: float = 0.95,
     ) -> tuple[list[str], float]:
-        """Find the smallest corpus preserving target_fraction of coverage.
+        """Find the smallest corpus preserving target_fraction of coverage using minimax-robust criterion.
 
-        Uses greedy set-cover: repeatedly add the seed covering the most
-        uncovered edges until target is met.
+        This is the minimax-robust version of optimal_pruning: instead of greedy set-cover,
+        we minimize the maximum coverage loss if any single seed is removed.
 
         Args:
             seed_edges: Dict mapping seed_key -> set of edge indices.
@@ -131,11 +131,13 @@ class RateDistortionCorpus:
         if target_count == 0:
             return [], 1.0
 
-        # Greedy set cover
+        # Build minimax-robust corpus: select seeds to minimize maximum coverage loss
+        # when any single seed is removed
         covered: set[int] = set()
         selected: list[str] = []
         remaining = dict(seed_edges)
 
+        # First pass: select seeds that cover unique edges (maximize coverage)
         while covered < all_edges and len(covered) < target_count and remaining:
             # Pick seed covering the most uncovered edges
             best_key = max(
@@ -147,6 +149,98 @@ class RateDistortionCorpus:
 
             if not new_edges:
                 break  # diminishing returns
+
+            covered.update(new_edges)
+            selected.append(best_key)
+            del remaining[best_key]
+
+        # Second pass: add seeds to minimize maximum regret (coverage loss if removed)
+        # This is the minimax-robust criterion: minimize max_{c in selected} coverage(C \ {c})
+        while len(selected) < target_count and remaining:
+            # For each remaining seed, compute the maximum coverage loss it would cause
+            # if added to the selected set
+            best_key = None
+            best_max_loss = float("inf")
+            best_new_coverage = 0
+
+            for key, edges in remaining.items():
+                # Simulate adding this seed
+                temp_selected = selected + [key]
+                temp_covered = covered | edges
+
+                # Compute maximum coverage loss if any seed in temp_selected is removed
+                max_loss = 0
+                for candidate_key in temp_selected:
+                    if candidate_key in seed_edges:
+                        candidate_edges = seed_edges[candidate_key]
+                        loss = len(temp_covered - (temp_covered - candidate_edges))
+                        max_loss = max(max_loss, loss)
+
+                # Also compute new coverage
+                new_coverage = len(temp_covered)
+
+                # Choose seed that minimizes maximum loss (minimax criterion)
+                if max_loss < best_max_loss or (
+                    max_loss == best_max_loss and new_coverage > best_new_coverage
+                ):
+                    best_max_loss = max_loss
+                    best_new_coverage = new_coverage
+                    best_key = key
+
+            if best_key is None:
+                break
+
+            # Add the best seed
+            selected.append(best_key)
+            covered.update(seed_edges[best_key])
+            del remaining[best_key]
+
+        actual_frac = len(covered) / total if total > 0 else 0.0
+        return selected, actual_frac
+
+    def optimal_pruning(
+        self,
+        seed_edges: dict[str, set[int]],
+        target_fraction: float = 0.95,
+    ) -> tuple[list[str], float]:
+        """Find the smallest corpus preserving target_fraction of coverage.
+
+        Uses greedy set-cover: repeatedly add the seed covering the most
+        uncovered edges until target is met.
+
+        Args:
+            seed_edges: Dict mapping seed_key -> set of edge indices.
+            target_fraction: Minimum coverage fraction to preserve (0.0-1.0).
+
+        Returns:
+            Tuple of (selected_seed_keys, actual_coverage_fraction).
+        """
+        if not seed_edges:
+            return [], 0.0
+
+        all_edges: set[int] = set()
+        for edges in seed_edges.values():
+            all_edges.update(edges)
+        total = len(all_edges)
+        target_count = int(math.ceil(total * target_fraction))
+
+        if target_count == 0:
+            return [], 1.0
+
+        covered: set[int] = set()
+        selected: list[str] = []
+        remaining = dict(seed_edges)
+
+        while covered < all_edges and len(covered) < target_count and remaining:
+            best_key = max(
+                remaining,
+                key=lambda k: len(remaining[k] - covered),
+            )
+            best_edges = remaining[best_key]
+            new_edges = best_edges - covered
+
+            if not new_edges:
+                break
 
             covered.update(new_edges)
             selected.append(best_key)
@@ -237,6 +331,95 @@ class RateDistortionCorpus:
 
             covered.update(remaining[best_key])
             selected.append(best_key)
+            del remaining[best_key]
+
+        return selected
+
+    def minimax_robust_corpus_admission(
+        self,
+        seed_edges: dict[str, set[int]],
+        max_seeds: int,
+    ) -> list[str]:
+        """Apply minimax-robust corpus admission: select seeds to minimize maximum coverage loss
+        if any single seed is removed.
+
+        This is the direct analog of the minimax estimator's "least favorable prior" —
+        the corpus that is robust to the worst-case loss of any single seed.
+
+        Args:
+            seed_edges: Dict mapping seed_key -> set of edge indices.
+            max_seeds: Maximum number of seeds to select.
+
+        Returns:
+            List of selected seed keys, ordered by selection (best first).
+        """
+        if not seed_edges or max_seeds <= 0:
+            return []
+
+        all_edges: set[int] = set()
+        for edges in seed_edges.values():
+            all_edges.update(edges)
+
+        covered: set[int] = set()
+        selected: list[str] = []
+        remaining = dict(seed_edges)
+
+        # First pass: select seeds that cover unique edges (maximize coverage)
+        while len(selected) < max_seeds and remaining:
+            # Pick seed covering the most uncovered edges
+            best_key = max(
+                remaining,
+                key=lambda k: len(remaining[k] - covered),
+            )
+            best_edges = remaining[best_key]
+            new_edges = best_edges - covered
+
+            if not new_edges:
+                break  # diminishing returns
+
+            covered.update(new_edges)
+            selected.append(best_key)
+            del remaining[best_key]
+
+        # Second pass: add seeds to minimize maximum regret (coverage loss if removed)
+        # This is the minimax-robust criterion: minimize max_{c in selected} coverage(C \ {c})
+        while len(selected) < max_seeds and remaining:
+            # For each remaining seed, compute the maximum coverage loss it would cause
+            # if added to the selected set
+            best_key = None
+            best_max_loss = float("inf")
+            best_new_coverage = 0
+
+            for key, edges in remaining.items():
+                # Simulate adding this seed
+                temp_selected = selected + [key]
+                temp_covered = covered | edges
+
+                # Compute maximum coverage loss if any seed in temp_selected is removed
+                max_loss = 0
+                for candidate_key in temp_selected:
+                    if candidate_key in seed_edges:
+                        candidate_edges = seed_edges[candidate_key]
+                        loss = len(temp_covered - (temp_covered - candidate_edges))
+                        max_loss = max(max_loss, loss)
+
+                # Also compute new coverage
+                new_coverage = len(temp_covered)
+
+                # Choose seed that minimizes maximum loss (minimax criterion)
+                if max_loss < best_max_loss or (
+                    max_loss == best_max_loss and new_coverage > best_new_coverage
+                ):
+                    best_max_loss = max_loss
+                    best_new_coverage = new_coverage
+                    best_key = key
+
+            if best_key is None:
+                break
+
+            # Add the best seed
+            selected.append(best_key)
+            covered.update(seed_edges[best_key])
             del remaining[best_key]
 
         return selected

@@ -1310,3 +1310,104 @@ class MonteCarloScheduler:
         if _HAS_NUMPY:
             return self._operator_covariance_numpy(recent, segment_size, operators, op_idx)
         return self._operator_covariance_py(recent, segment_size, operators, op_idx)
+
+    def select_op_minimax(
+        self,
+        operators: list[str],
+        depth: int = 3,
+        beam_width: int = 4,
+    ) -> str:
+        """Select operator using adversarial minimax sequencing (Phase 4).
+
+        Models operator selection as a two-player game:
+        - Fuzzer (maximizer): chooses the next operator to apply
+        - Target (minimizer): the target's coverage response resists progress
+
+        Uses alpha-beta pruning over a game tree where each ply alternates
+        between fuzzer and target moves. The evaluation function estimates
+        the expected edge-discovery rate from a sequence of operators.
+
+        Args:
+            operators: Candidate operators to choose from.
+            depth: Search depth (number of plies).
+            beam_width: Maximum number of candidates to explore per ply.
+
+        Returns:
+            Selected operator name.
+        """
+        if not operators:
+            return ""
+        if len(operators) == 1:
+            return operators[0]
+
+        # Get current operator statistics
+        alphas = self.arm_alpha
+        betas = self.arm_beta
+
+        def evaluate(op: str) -> float:
+            """Estimate expected reward for an operator using Thompson sample."""
+            a = alphas.get(op, 1.0)
+            b = betas.get(op, 1.0)
+            # Use mean of Beta distribution as point estimate
+            return a / (a + b) if (a + b) > 0 else 0.5
+
+        def minimax(
+            ops: list[str],
+            d: int,
+            alpha: float,
+            beta: float,
+            maximizing: bool,
+            visited: set[str],
+        ) -> float:
+            """Alpha-beta minimax over operator sequences."""
+            if d == 0 or not ops:
+                return 0.0
+
+            # Beam search: only consider top candidates
+            scored_ops = sorted(ops, key=evaluate, reverse=True)
+            beam = scored_ops[:beam_width]
+
+            if maximizing:
+                best = -float("inf")
+                for op in beam:
+                    # Fuzzer's move: apply operator, get reward
+                    reward = evaluate(op)
+                    # Simulate: after applying op, target responds
+                    remaining = [o for o in ops if o != op]
+                    val = reward + 0.5 * minimax(
+                        remaining, d - 1, alpha, beta, False, visited | {op}
+                    )
+                    best = max(best, val)
+                    alpha = max(alpha, best)
+                    if beta <= alpha:
+                        break  # Beta cutoff
+                return best
+            else:
+                # Target's move: minimize fuzzer's reward
+                worst = float("inf")
+                for op in beam:
+                    # Target "blocks" this operator (reduces its effectiveness)
+                    penalty = evaluate(op) * 0.3
+                    remaining = [o for o in ops if o != op]
+                    val = -penalty + 0.5 * minimax(
+                        remaining, d - 1, alpha, beta, True, visited | {op}
+                    )
+                    worst = min(worst, val)
+                    beta = min(beta, worst)
+                    if beta <= alpha:
+                        break  # Alpha cutoff
+                return worst
+
+        # Find the operator that maximizes the minimax value
+        best_op = operators[0]
+        best_val = -float("inf")
+        for op in operators[:beam_width]:
+            reward = evaluate(op)
+            remaining = [o for o in operators if o != op]
+            val = reward + 0.5 * minimax(
+                remaining, depth - 1, -float("inf"), float("inf"), False, {op}
+            )
+            if val > best_val:
+                best_val = val
+                best_op = op
+        return best_op

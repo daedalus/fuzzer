@@ -572,3 +572,129 @@ class Z3Solver:
             self._cache.pop(oldest, None)
         self._cache[key] = value
         self._cache_order.append(key)
+
+    # ── Comparison-wall solving as minimax game ────────────────────────
+
+    def solve_comparison_wall(
+        self,
+        conditions: list[CondStmt],
+        max_mutations: int = 4,
+        max_depth: int = 8,
+    ) -> list[CondStmt] | None:
+        """Solve a sequence of comparisons as a two-player minimax game.
+
+        Models a comparison wall (a chain of interdependent comparisons
+        where satisfying one may unsatisfy another) as:
+        - Fuzzer (maximizer): chooses which comparison to solve next
+        - Target (minimizer): the wall's structure resists progress
+
+        Uses alpha-beta pruning to efficiently explore the mutation
+        sequence space. Returns a list of CondStmt objects in the order
+        to solve them, or None if the wall is unsolvable within budget.
+
+        Args:
+            conditions: List of CondStmt objects forming the wall.
+            max_mutations: Max mutations per condition (search budget).
+            max_depth: Max search depth (number of conditions to consider).
+
+        Returns:
+            List of CondStmts in solution order, or None if unsolvable.
+        """
+        if not conditions:
+            return None
+
+        # Filter to conditions that are not yet solved
+        pending = [c for c in conditions if c.state not in (CondStmt.state.__class__.SOLVED,)]
+        # Use isinstance with the imported class via module
+        from fuzzer_tool.core.cond_stmt import CondState as _CS
+
+        pending = [c for c in conditions if c.state not in (_CS.SOLVED, _CS.UNSOLVABLE)]
+        if not pending:
+            return list(conditions)
+
+        # Run alpha-beta minimax to find best sequence
+        best_sequence = self._alpha_beta_wall(pending, max_mutations, max_depth)
+        return best_sequence if best_sequence else None
+
+    def _alpha_beta_wall(
+        self,
+        conditions: list,
+        max_mutations: int,
+        max_depth: int,
+    ) -> list | None:
+        """Alpha-beta minimax over comparison-wall solution order.
+
+        Returns the order that maximizes coverage of comparisons while
+        minimizing conflicts, or None if no solution found.
+        """
+        if not conditions:
+            return []
+
+        # Evaluation function: count of comparisons that can be solved
+        # independently. We approximate: a comparison is "solvable" if
+        # its operands are in taint ranges that don't overlap with
+        # another comparison's constraints.
+
+        def evaluate(cond_subset: list) -> float:
+            """Score a subset of comparisons on solvability."""
+            if not cond_subset:
+                return 0.0
+            score = 0.0
+            covered_offsets: set[int] = set()
+            for c in cond_subset:
+                # Prefer conditions with smaller, non-overlapping taint
+                if c.offsets:
+                    overlap = len(set(c.offsets) & covered_offsets)
+                    unique = len(c.offsets) - overlap
+                    score += unique * 2.0 - overlap
+                    covered_offsets.update(c.offsets)
+                else:
+                    # No taint info: assume low confidence
+                    score += 0.5
+            return score
+
+        def minimax(
+            remaining: list,
+            depth: int,
+            alpha: float,
+            beta: float,
+            maximizing: bool,
+        ) -> tuple[float, list | None]:
+            """Alpha-beta minimax with depth limit."""
+            if depth == 0 or not remaining:
+                return evaluate(remaining), remaining
+
+            if maximizing:
+                best_val = -float("inf")
+                best_seq = None
+                for i, cond in enumerate(remaining):
+                    new_remaining = remaining[:i] + remaining[i + 1 :]
+                    val, seq = minimax(new_remaining, depth - 1, alpha, beta, False)
+                    val += evaluate([cond])  # reward for solving this one
+                    if val > best_val:
+                        best_val = val
+                        best_seq = [cond] + (seq or [])
+                    alpha = max(alpha, val)
+                    if beta <= alpha:
+                        break  # beta cutoff
+                return best_val, best_seq
+            else:
+                # Minimizer: target's worst case (conflict resolution)
+                worst_val = float("inf")
+                worst_seq = None
+                for i, cond in enumerate(remaining):
+                    new_remaining = remaining[:i] + remaining[i + 1 :]
+                    val, seq = minimax(new_remaining, depth - 1, alpha, beta, True)
+                    val -= evaluate([cond])  # target tries to reduce benefit
+                    if val < worst_val:
+                        worst_val = val
+                        worst_seq = [cond] + (seq or [])
+                    beta = min(beta, val)
+                    if beta <= alpha:
+                        break  # alpha cutoff
+                return worst_val, worst_seq
+
+        # Start with all conditions; search for best order
+        depth = min(max_depth, len(conditions))
+        _, best_order = minimax(conditions, depth, -float("inf"), float("inf"), True)
+        return best_order

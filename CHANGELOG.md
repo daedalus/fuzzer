@@ -8,6 +8,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Minimax estimator and algorithm for fuzzer enhancement**
+  (`src/fuzzer_tool/core/schedulers/mcts.py`,
+  `src/fuzzer_tool/core/schedulers/monte_carlo.py`,
+  `src/fuzzer_tool/core/cond_stmt.py`,
+  `src/fuzzer_tool/core/smt_solver.py`,
+  `src/fuzzer_tool/core/elo.py`,
+  `src/fuzzer_tool/core/rate_distortion.py`,
+  `src/fuzzer_tool/services/corpus_manager.py`,
+  `src/fuzzer_tool/services/seed_picker.py`,
+  `tools/bench_paired.py`).
+  Five-phase implementation of minimax, alpha-beta pruning, and adversarial
+  search applied to fuzzer scheduling:
+  - **Phase 1 (P0):** `AlphaBetaMCTSSeedScheduler` — alpha-beta minimax
+    over the lineage tree, replacing UCT descent for seed selection.
+  - **Phase 2 (P1):** Minimax-robust scheduler selection — `EloTracker`
+    extended with a risk matrix and `select_minimax_scheduler()` for
+    worst-case-optimal scheduler choice. `bench_paired.py --risk-matrix`
+    outputs the risk matrix from benchmark sweeps.
+  - **Phase 3 (P1):** Comparison-wall solving as a minimax game —
+    `solve_comparison_wall_minimax()` in `cond_stmt.py` with alpha-beta
+    pruning; `Z3Solver.solve_comparison_wall()` in `smt_solver.py`.
+  - **Phase 4 (P2):** Adversarial operator sequencing —
+    `MonteCarloScheduler.select_op_minimax()` models operator selection as
+    a two-player game with multi-ply lookahead.
+  - **Phase 5 (P2):** Minimax-robust corpus admission —
+    `RateDistortionCorpus.minimax_robust_corpus_admission()` and
+    `minimax_robust_pruning()` minimize maximum coverage loss;
+    `CorpusManager.minimax_robust_admission()` integration.
+
+  See `docs/handover/handover_minimax_implementation_2026-09-01.md` for
+  full documentation.
+
 - **`invasion_select()` in `src/fuzzer_tool/services/seed_picker.py`**
   (percolation handover Module 4). Greedy, no-backtracking operator
   selection: picks the operator with the lowest resistance (inverse

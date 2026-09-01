@@ -429,6 +429,14 @@ def cmd_analyse(args: argparse.Namespace) -> int:
                     f"{r['median_delta']:>+7.1f} {r['median_spread']:>6.1f}"
                 )
 
+    # Compute and output risk matrix if requested
+    if args.risk_matrix:
+        risk_matrix = compute_risk_matrix(loaded)
+        print("\nRisk Matrix (for minimax-robust scheduler selection):")
+        print("Format: {scheduler: {target: worst_case_regret}}")
+        print(json.dumps(risk_matrix, indent=2))
+        print("\nThis can be used to update the EloTracker's risk matrix.")
+
     print(
         "\nMcNemar is the test to read: the matrix is paired by construction. "
         "Fisher is shown only to make the cost of discarding the pairing visible."
@@ -443,6 +451,95 @@ def cmd_analyse(args: argparse.Namespace) -> int:
         "draw cannot show its own spread, not because the cell is reproducible."
     )
     return 0
+
+
+def compute_risk_matrix(loaded: dict[str, list[dict]]) -> dict[str, dict[str, float]]:
+    """Compute risk matrix from benchmark results.
+
+    For each arm (scheduler) and target, compute the worst-case regret across seeds.
+    Regret = 1.0 - average_score, where average_score is the arm's average performance
+    in head-to-head matchups against other arms on the same (target, seed) cell.
+    Worst-case regret = maximum regret across seeds for that target.
+    """
+    if not loaded:
+        return {}
+
+    # Get all arms and targets
+    arms = list(loaded.keys())
+    if not arms:
+        return {}
+
+    # Get all targets from the first arm's results
+    first_arm_results = loaded[arms[0]]
+    if not first_arm_results:
+        return {}
+
+    targets = sorted(set(r["target"] for r in first_arm_results))
+    if not targets:
+        return {}
+
+    # Initialize risk matrix: arm -> target -> list of regrets per seed
+    risk_matrix: dict[str, dict[str, list[float]]] = {
+        arm: {target: [] for target in targets} for arm in arms
+    }
+
+    # For each target and seed, collect results from all arms
+    for target in targets:
+        # Group results by (arm, seed) for this target
+        arm_seed_results: dict[tuple[str, int], dict] = {}
+        for arm in arms:
+            for result in loaded[arm]:
+                if result["target"] == target:
+                    seed = result["seed"]
+                    arm_seed_results[(arm, seed)] = result
+
+        # For each seed, compute head-to-head performance
+        seeds = set(seed for (_, seed) in arm_seed_results)
+        for seed in seeds:
+            # Get results for all arms on this (target, seed)
+            arm_results: dict[str, dict] = {}
+            for arm in arms:
+                if (arm, seed) in arm_seed_results:
+                    arm_results[arm] = arm_seed_results[(arm, seed)]
+
+            if len(arm_results) < 2:
+                # Need at least two arms to compare
+                continue
+
+            # For each arm, compute its average score against all other arms
+            for arm, result in arm_results.items():
+                scores = []
+                for other_arm, other_result in arm_results.items():
+                    if arm == other_arm:
+                        continue
+                    # Determine who won based on edge count
+                    edges_a = result["edges"]
+                    edges_b = other_result["edges"]
+                    if edges_a > edges_b:
+                        score_a = 1.0  # arm won
+                    elif edges_a < edges_b:
+                        score_a = 0.0  # arm lost
+                    else:
+                        score_a = 0.5  # tie
+                    scores.append(score_a)
+
+                if scores:
+                    avg_score = sum(scores) / len(scores)
+                    regret = 1.0 - avg_score
+                    risk_matrix[arm][target].append(regret)
+
+    # Compute worst-case regret (maximum regret across seeds) for each arm-target pair
+    worst_case_risk_matrix: dict[str, dict[str, float]] = {}
+    for arm in arms:
+        worst_case_risk_matrix[arm] = {}
+        for target in targets:
+            regrets = risk_matrix[arm][target]
+            if regrets:
+                worst_case_risk_matrix[arm][target] = max(regrets)
+            else:
+                worst_case_risk_matrix[arm][target] = 0.0  # No data, assume no regret
+
+    return worst_case_risk_matrix
 
 
 def main() -> int:
@@ -494,6 +591,11 @@ def main() -> int:
         "--by-target",
         action="store_true",
         help="also break the pairing out per target, not just pooled",
+    )
+    a.add_argument(
+        "--risk-matrix",
+        action="store_true",
+        help="output risk matrix for minimax-robust scheduler selection",
     )
     a.set_defaults(func=cmd_analyse)
 

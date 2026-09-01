@@ -190,7 +190,7 @@ class RoundRecorderMixin:
 
 
 class EloTracker(RoundRecorderMixin):
-    """Elo rating tracker for fuzzer operators.
+    """Elo rating tracker for fuzzer operators with minimax-robust selection.
 
     Args:
         k_factor: Maximum rating change per match (higher = more reactive).
@@ -199,6 +199,7 @@ class EloTracker(RoundRecorderMixin):
         crash_track: If True, maintain separate crash-focused ratings.
         min_matches: Minimum matches before an operator is considered "rated".
             Unrated operators are excluded from ranking and selection.
+        use_minimax: If True, use minimax-robust scheduler selection instead of standard Elo.
     """
 
     # Declares that init_arm() does NOT accept informative priors (arm
@@ -212,17 +213,22 @@ class EloTracker(RoundRecorderMixin):
         decay: float = 0.99,
         crash_track: bool = True,
         min_matches: int = 10,
+        use_minimax: bool = False,
     ):
         self.k_factor = k_factor
         self.default_rating = default_rating
         self.decay = decay
         self.crash_track = crash_track
         self.min_matches = min_matches
+        self.use_minimax = use_minimax
 
         self.ratings: dict[str, float] = {}
         self.crash_ratings: dict[str, float] = {}
         self._match_count: dict[str, int] = {}
         self._decay_ticks: int = 0
+        self.risk_matrix: dict[
+            str, dict[str, float]
+        ] = {}  # scheduler -> target -> worst-case regret
 
         self._strategy_ratings: dict[str, float] = {}
         self._strategy_match_count: dict[str, int] = {}
@@ -327,7 +333,9 @@ class EloTracker(RoundRecorderMixin):
         """Expected score for player A against player B."""
         return 1.0 / (1.0 + 10.0 ** ((rb - ra) / 400.0))
 
-    def record_match(self, op_a: str, op_b: str, score_a: float, crash: bool = False) -> None:
+    def record_match(
+        self, op_a: str, op_b: str, score_a: float, crash: bool = False, target: str | None = None
+    ) -> None:
         """Record a match between two operators.
 
         Args:
@@ -335,6 +343,7 @@ class EloTracker(RoundRecorderMixin):
             op_b: Second operator name.
             score_a: Score for op_a (1.0=win, 0.5=draw, 0.0=loss).
             crash: If True, also update crash-specific ratings.
+            target: Optional target class for risk matrix population.
         """
         ra = self.ratings.get(op_a, self.default_rating)
         rb = self.ratings.get(op_b, self.default_rating)
@@ -350,6 +359,22 @@ class EloTracker(RoundRecorderMixin):
         # Track reward distribution per operator
         self.record_reward(op_a, score_a)
         self.record_reward(op_b, 1.0 - score_a)
+
+        # Update risk matrix if target is specified and minimax mode is enabled
+        if target is not None and self.use_minimax:
+            # Initialize risk entries if not present
+            if op_a not in self.risk_matrix:
+                self.risk_matrix[op_a] = {}
+            if op_b not in self.risk_matrix:
+                self.risk_matrix[op_b] = {}
+
+            # Calculate regret for each operator
+            regret_a = 1.0 - score_a
+            regret_b = score_a
+
+            # Update worst-case regret for each operator-target pair
+            self.risk_matrix[op_a][target] = max(self.risk_matrix[op_a].get(target, 0.0), regret_a)
+            self.risk_matrix[op_b][target] = max(self.risk_matrix[op_b].get(target, 0.0), regret_b)
 
         if crash and self.crash_track:
             cra = self.crash_ratings.get(op_a, self.default_rating)
@@ -523,6 +548,37 @@ class EloTracker(RoundRecorderMixin):
                 + (self._strategy_ratings[name] - self.default_rating) * self.decay
             )
 
+    def select_minimax_scheduler(self, schedulers: list[str], targets: list[str]) -> str:
+        """Select scheduler using minimax criterion: argmin_i max_j R_{i,j}.
+
+        This is the minimax-robust scheduler selection: choose the scheduler
+        that minimizes the maximum regret across all targets.
+
+        Args:
+            schedulers: List of scheduler names to choose from.
+            targets: List of target class names for risk evaluation.
+
+        Returns:
+            The scheduler name with minimum maximum regret, or random choice if
+            use_minimax is False or no data available.
+        """
+        if not self.use_minimax or not schedulers or not targets:
+            return random.choice(schedulers) if schedulers else ""
+
+        best_scheduler = None
+        min_max_regret = float("inf")
+
+        for scheduler in schedulers:
+            # Compute max regret across all targets for this scheduler
+            max_regret = max(
+                self.risk_matrix.get(scheduler, {}).get(target, 0.0) for target in targets
+            )
+            if max_regret < min_max_regret:
+                min_max_regret = max_regret
+                best_scheduler = scheduler
+
+        return best_scheduler if best_scheduler is not None else random.choice(schedulers)
+
     def get_rating(self, name: str) -> float:
         """Get current Elo rating for an operator."""
         return self.ratings.get(name, self.default_rating)
@@ -542,6 +598,8 @@ class EloTracker(RoundRecorderMixin):
             "decay": self.decay,
             "crash_track": self.crash_track,
             "min_matches": self.min_matches,
+            "use_minimax": self.use_minimax,
+            "risk_matrix": self.risk_matrix,
             "ratings": self.ratings,
             "crash_ratings": self.crash_ratings,
             "match_count": self._match_count,
@@ -558,6 +616,8 @@ class EloTracker(RoundRecorderMixin):
         self.decay = data.get("decay", self.decay)
         self.crash_track = data.get("crash_track", self.crash_track)
         self.min_matches = data.get("min_matches", self.min_matches)
+        self.use_minimax = data.get("use_minimax", False)
+        self.risk_matrix = data.get("risk_matrix", {})
         self.ratings = data.get("ratings", {})
         self.crash_ratings = data.get("crash_ratings", {})
         self._match_count = data.get("match_count", {})

@@ -291,3 +291,119 @@ def conds_from_cmplog_pairs(
         out.append(c)
         cmpid += 1
     return out
+
+
+# ---------------------------------------------------------------------------
+# Minimax comparison-wall solver (Phase 3)
+# ---------------------------------------------------------------------------
+
+
+def _check_comparison_satisfied(cond: CondStmt, data: bytes) -> bool:
+    """Check if a comparison is satisfied by the given input.
+
+    Simplified heuristic: looks for the expected operand at taint offsets.
+    A full implementation would use the SMT solver.
+    """
+    if not cond.base.op_a or not cond.base.op_b:
+        return False
+    for offset in cond.offsets:
+        if offset + cond.base.width <= len(data):
+            chunk = data[offset : offset + cond.base.width]
+            if chunk == cond.base.op_a or chunk == cond.base.op_b:
+                return True
+    return False
+
+
+def solve_comparison_wall_minimax(
+    wall: list[CondStmt],
+    max_depth: int = 10,
+    branching_limit: int = 16,
+) -> tuple[list[bytes], float]:
+    """Solve a comparison wall as a minimax game.
+
+    A "comparison wall" is a sequence of comparison statements that must all
+    be satisfied to flip a branch. The fuzzer (maximizer) chooses byte
+    mutations; the target (minimizer) resists by selecting which comparison
+    to check next. The minimax value is the minimum number of mutations
+    needed to satisfy all comparisons in the worst case.
+
+    Args:
+        wall: List of CondStmt objects forming the comparison wall.
+        max_depth: Maximum search depth for alpha-beta pruning.
+        branching_limit: Maximum number of candidate mutations per node.
+
+    Returns:
+        Tuple of (mutation_sequence, minimax_value).
+    """
+    if not wall:
+        return [], 0.0
+
+    def evaluate_state(states: dict) -> float:
+        """Evaluate the minimax value: count unsolved comparisons (lower is better)."""
+        return sum(1 for s in states.values() if s is CondState.UNSOLVED)
+
+    def generate_mutations(cond: CondStmt, current_input: bytes) -> list[bytes]:
+        """Generate candidate mutations for a comparison."""
+        candidates = []
+        for offset in cond.offsets:
+            if cond.base.width == 1 and offset < len(current_input):
+                target_byte = cond.base.op_b[0] if cond.base.op_b else 0
+                mutated = bytearray(current_input)
+                mutated[offset] = target_byte
+                candidates.append(bytes(mutated))
+            elif offset < len(current_input):
+                for delta in (-1, 1, -2, 2):
+                    mutated = bytearray(current_input)
+                    mutated[offset] = max(0, min(255, current_input[offset] + delta))
+                    candidates.append(bytes(mutated))
+        return candidates[:branching_limit]
+
+    def alpha_beta(
+        states: dict,
+        current_input: bytes,
+        depth: int,
+        alpha: float,
+        beta: float,
+        maximizing: bool,
+    ) -> tuple[float, list[bytes]]:
+        """Alpha-beta minimax search over comparison-wall mutations."""
+        unsolved = [c for c in wall if states.get(c.key) is CondState.UNSOLVED]
+        if depth <= 0 or not unsolved:
+            return evaluate_state(states), []
+
+        if maximizing:
+            best_value = float("inf")
+            best_seq: list[bytes] = []
+            next_cond = unsolved[0]
+            candidates = generate_mutations(next_cond, current_input)
+            if not candidates:
+                return evaluate_state(states), []
+            for candidate in candidates:
+                new_states = dict(states)
+                if _check_comparison_satisfied(next_cond, candidate):
+                    new_states[next_cond.key] = CondState.SOLVED
+                val, seq = alpha_beta(new_states, candidate, depth - 1, alpha, beta, False)
+                if val < best_value:
+                    best_value = val
+                    best_seq = [candidate] + seq
+                    alpha = max(alpha, val)
+                if beta <= alpha:
+                    break
+            return best_value, best_seq
+        else:
+            worst_value = -float("inf")
+            worst_seq: list[bytes] = []
+            for _cond in unsolved:
+                val, seq = alpha_beta(states, current_input, depth - 1, alpha, beta, True)
+                if val > worst_value:
+                    worst_value = val
+                    worst_seq = seq
+                    beta = min(beta, val)
+                if beta <= alpha:
+                    break
+            return worst_value, worst_seq
+
+    initial_states = {c.key: c.state for c in wall}
+    width = max((c.base.width for c in wall), default=1)
+    initial_input = b"\x00" * width
+    return alpha_beta(initial_states, initial_input, max_depth, -float("inf"), float("inf"), True)
