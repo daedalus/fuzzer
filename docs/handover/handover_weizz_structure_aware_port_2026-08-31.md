@@ -8,6 +8,15 @@
 
 **Status: ANALYSIS ONLY — nothing implemented.** This document is the port plan and the ranking against live code. No operators, no tag map, no A/B flag yet. Before writing code, re-grep the items in §3 against `src/fuzzer_tool/`; several neighbouring techniques (cmplog, colorization, TLV/FrameShift, checksum learner) already exist and must not be duplicated.
 
+**Update (implementation status, see `docs/handover/P1_weizz_tags_README.md` for detail):**
+P1–P3 and P5 are implemented and tested; P4 (tag-restricted surgical solve,
+`_weizz_restricted_find` in `_op_condstmt_solve`) is implemented as of this
+update. The only item left from §8's acceptance checklist is the paired
+bench against baseline (`tools/bench_paired.py`) — an evaluation run
+against a live target, not a code change. The rest of this document is
+kept as-written for the original rationale/ranking; treat the "Status"
+line above as historical.
+
 **Relation to `docs/port-backlog.md`:** this is a concrete instance of group **A — Structure-aware generation**, closest in spirit to **A1 (Grimoire-style generalization)** but driven by comparison-dependency tags rather than coverage-preserving blanking. It does not replace A1; it is an alternate structure signal that can feed the same mutation registry.
 
 ---
@@ -187,12 +196,12 @@ These paths are workspace artifacts from the 2026-08-31 analysis session; they a
 
 ## 8. Acceptance checklist (when someone implements)
 
-- [ ] Tag collector produces stable tags on a synthetic nested-chunk input with known `cmp_id`s.
-- [ ] At least one field operator and one chunk operator registered and selected under Elo shadow.
-- [ ] Flag default off; size/lineage gate documented.
+- [x] Tag collector produces stable tags on a synthetic nested-chunk input with known `cmp_id`s.
+- [x] At least one field operator and one chunk operator registered and selected under Elo shadow.
+- [x] Flag default off; size/lineage gate documented.
 - [ ] Paired bench vs baseline on at least one container-like target; numbers recorded under `docs/` or FINDINGS with the flag name.
-- [ ] No new comparison tracer; cmplog remains the single source of comparison truth.
-- [ ] Stale-tag behaviour after length-changing mutations defined and tested.
+- [x] No new comparison tracer; cmplog remains the single source of comparison truth.
+- [x] Stale-tag behaviour after length-changing mutations defined and tested.
 
 ---
 

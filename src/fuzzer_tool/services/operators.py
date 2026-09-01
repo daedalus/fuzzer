@@ -1724,8 +1724,19 @@ class OperatorEngine:
         source_value = target.base.op_a if target_value is target.base.op_b else target.base.op_b
         width = target.base.width
 
-        # Find the first offset where the source operand appears.
-        idx = data.find(source_value[:width])
+        # P4 (weizz): when a tag map is already cached for this lineage
+        # (P1's collector hook, no extra pass paid here), restrict the
+        # candidate offset to ones the tags say are an actual field rather
+        # than the first byte-pattern match `bytes.find` happens to hit --
+        # a short operand can coincidentally recur in untagged padding/noise,
+        # and solving against that occurrence produces a mutation that does
+        # not touch the real dependency site for this comparison. Tags are
+        # approximate (see the port handover's "landmines" section) so this
+        # is a preference among matches, not a hard filter: any tagged
+        # occurrence wins over an untagged one, but an untagged occurrence
+        # is still used when no tagged one exists.
+        idx = self._weizz_restricted_find(data, source_value[:width])
+
         if idx != -1 and idx + width <= len(buf):
             buf[idx : idx + width] = target_value[:width]
             target.mark_solved()
@@ -1841,6 +1852,59 @@ class OperatorEngine:
             if parent_meta and rng.random() < 0.5:
                 stride = parent_meta.get("record_stride")
             return bytearray(chunk_shuffle(bytes(buf), rng=rng, stride=stride)[: self.f.max_len])
+
+    # ── Weizz P4: tag-restricted surgical solve ────────────────────────────
+
+    # Bound on occurrences scanned when restricting candidates by tag --
+    # a 1-2 byte operand can recur very often in a large buffer, and the
+    # solve only needs "some tagged occurrence", not an exhaustive one.
+    _WEIZZ_FIND_SCAN_CAP = 64
+
+    def _weizz_restricted_find(self, data: bytes, needle: bytes) -> int:
+        """First occurrence of *needle* in *data*, preferring a tagged one.
+
+        Same contract as ``bytes.find``: returns -1 on no match. When a
+        (non-dirty, already-cached) StructureMap exists for the parent seed
+        the mutation is being applied to, occurrences that fall inside a
+        tagged field span are preferred over the plain first match --
+        restricting the surgical-solve candidate set to bytes the tags say
+        actually belong to a comparison-derived field (handover doc P4).
+        Declines to a plain ``data.find`` when tags are unavailable, empty,
+        or no occurrence lands inside a tagged span, so behaviour without
+        ``--weizz-tags`` is unchanged.
+        """
+        if not needle:
+            return -1
+        first = data.find(needle)
+        if first == -1:
+            return -1
+
+        smap = self._weizz_structure_map(data)
+        if smap is None:
+            return first
+        spans = smap.field_spans()
+        if not spans:
+            return first
+
+        occurrences = [first]
+        pos = first + 1
+        while len(occurrences) < self._WEIZZ_FIND_SCAN_CAP:
+            nxt = data.find(needle, pos)
+            if nxt == -1:
+                break
+            occurrences.append(nxt)
+            pos = nxt + 1
+
+        for off in occurrences:
+            end = off + len(needle)
+            # "Inside a tagged field": every byte the write would touch
+            # belongs to some field span, not necessarily the same one --
+            # matches this operator's existing tolerance for approximate,
+            # partial tags rather than requiring exact cmp_id identity
+            # between CondStmt's own IDs and weizz_tags' cmp_id space.
+            if any(s <= off and end <= e for s, e, _cid in spans):
+                return off
+        return first
 
     # ── Weizz P2: field / chunk operators ─────────────────────────────────
 

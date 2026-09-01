@@ -463,6 +463,53 @@ def test_inherit_tags_no_parent():
     assert inherit_tags_from_parent({}, b"ab", b"ab") == {}
 
 
+# ── P4 tag-restricted surgical solve ─────────────────────────────────────
+
+
+def test_weizz_restricted_find_prefers_tagged_occurrence():
+    # b"AB" occurs at offset 2 (untagged noise) and offset 6 (a real field).
+    data = b"XXABYYABZZ"
+    tags = (
+        [ByteTag(cmp_id=0)] * 6
+        + [ByteTag(cmp_id=9)] * 2  # offsets 6:8 -> the real "AB" field
+        + [ByteTag(cmp_id=0)] * 2
+    )
+    smap = StructureMap(tags=tags, ntypes=1, input_len=len(data), from_cmplog=True)
+    eng, _f = _make_engine(data, smap)
+    assert data.find(b"AB") == 2  # plain find would hit the noise occurrence
+    assert eng._weizz_restricted_find(data, b"AB") == 6
+
+
+def test_weizz_restricted_find_falls_back_without_tags():
+    from fuzzer_tool.services.operators import OperatorEngine
+
+    data = b"XXABYYABZZ"
+
+    class F:
+        max_len = 4096
+        weizz_tags = True
+        seed_meta: dict = {}  # no entry for `data` -> no cached tags
+
+    eng = OperatorEngine(F())
+    assert eng._weizz_restricted_find(data, b"AB") == data.find(b"AB") == 2
+
+
+def test_weizz_restricted_find_no_match_returns_minus_one():
+    data = b"AAAABBBB"
+    tags = [ByteTag(cmp_id=1)] * 4 + [ByteTag(cmp_id=2)] * 4
+    smap = StructureMap(tags=tags, ntypes=2, input_len=len(data), from_cmplog=True)
+    eng, _f = _make_engine(data, smap)
+    assert eng._weizz_restricted_find(data, b"ZZ") == -1
+
+
+def test_weizz_restricted_find_untagged_only_falls_back_to_first():
+    # A tag map exists but has no tagged spans at all -> plain first match.
+    data = b"XXABYYABZZ"
+    smap = StructureMap(tags=[ByteTag() for _ in range(len(data))], input_len=len(data))
+    eng, _f = _make_engine(data, smap)
+    assert eng._weizz_restricted_find(data, b"AB") == 2
+
+
 if __name__ == "__main__":
     import traceback
 

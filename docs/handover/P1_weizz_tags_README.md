@@ -80,6 +80,13 @@ smap2 = load_tags_from_meta(meta)
 - [x] P5 derived-tag inheritance: `inherit_tags_from_parent` in
       `save_to_corpus` — length-preserving children reuse RLE; length-
       changing children get a dirty map until the next collector pass
+- [x] P4 tag-restricted surgical solve: `_op_condstmt_solve` now calls
+      `_weizz_restricted_find` — when a non-dirty tag map is already cached
+      for the parent seed (no extra collector pass paid here), a comparison
+      operand occurrence inside a tagged field span is preferred over the
+      plain first `bytes.find` match, so the solve doesn't latch onto a
+      coincidental byte-pattern match in untagged noise. Falls back to
+      identical old behaviour with tags absent/off/no tagged occurrence.
 
 ## Design notes
 
