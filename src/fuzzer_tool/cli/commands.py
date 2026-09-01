@@ -1528,6 +1528,7 @@ _HAIL_MARY_FLAGS = (
     "refresh_profile",
     "profile_hotpath",
     "colorize",
+    "weizz_tags",
     "enable_regex_bomb_mutations",
     "x86_mutate",
     "arm_mutate",
