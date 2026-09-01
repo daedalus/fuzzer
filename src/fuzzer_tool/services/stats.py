@@ -966,7 +966,83 @@ class StatsReporter:
         if bayes.get("p_stalled") is not None and bayes["p_stalled"] > 0.3:
             line += f" | P(stall): {bayes['p_stalled']:.0%}"
         print(line, flush=True)
+        self._print_stats_supplementary()
         self._emit_json_stats(elapsed, eps)
+
+    def _print_stats_supplementary(self) -> None:
+        """Print a second line of supplementary stats that don't fit on the main line."""
+        f = self.f
+        parts = []
+
+        # Pruning / dedup
+        if f._pruned_count > 0:
+            parts.append(f"pruned:{f._pruned_count}")
+        if f._duplicate_reject_count > 0:
+            parts.append(f"dup:{f._duplicate_reject_count}")
+
+        # Stall recovery
+        if f._stall_recovery_count > 0:
+            parts.append(f"stall-rec:{f._stall_recovery_count}")
+
+        # Corpus byte size
+        corpus_bytes = sum(len(s) for s in f.corpus)
+        if corpus_bytes > 1024 * 1024:
+            parts.append(f"corpus-mb:{corpus_bytes // (1024 * 1024)}")
+        elif corpus_bytes > 1024:
+            parts.append(f"corpus-kb:{corpus_bytes // 1024}")
+
+        # Average input size
+        if f.corpus:
+            avg_len = corpus_bytes // len(f.corpus)
+            parts.append(f"avg-len:{avg_len}")
+
+        # Replay stats
+        if f._crash_replays:
+            done = [v for v in f._crash_replays.values() if len(v) >= f.replay_n]
+            if done:
+                avg_repro = (
+                    sum(sum(1 for r in replays if r >= 0) / len(replays) for replays in done)
+                    / len(done)
+                    * 100
+                )
+                parts.append(f"repro:{avg_repro:.0f}%")
+
+        # CMA-ES
+        if getattr(f, "_cmaes", None):
+            try:
+                stats = f._cmaes.convergence_stats()
+                parts.append(f"cmaes:gen={stats['generation']} sigma={stats['sigma']:.3f}")
+            except (AttributeError, TypeError):
+                pass
+
+        # Sensitivity detailed
+        sens = getattr(f, "_sensitivity", None)
+        if sens:
+            try:
+                analyzed = len(getattr(sens, "_analyzed", set()))
+                if analyzed > 0:
+                    parts.append(f"sens:{analyzed}s")
+            except (AttributeError, TypeError):
+                pass
+
+        # AFLGo distance
+        if getattr(f, "_distance", None) is not None:
+            try:
+                shm = (
+                    f._target_shm_covs.get(f.target, f.shm_cov)
+                    if getattr(f, "multi_targets", False)
+                    else f.shm_cov
+                )
+                if shm is not None:
+                    d_sum, d_count = shm.read_distance_tail()
+                    if d_count > 0:
+                        tail_avg = d_sum / d_count / 100.0
+                        parts.append(f"dist:{tail_avg:.1f}")
+            except (AttributeError, OSError):
+                pass
+
+        if parts:
+            print("    " + " | ".join(parts), flush=True)
 
     def _emit_json_stats(self, elapsed: float, eps: float) -> None:
         """Write one JSON object per stats tick, if --log-json is on.
