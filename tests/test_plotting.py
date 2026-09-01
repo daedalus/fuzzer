@@ -52,6 +52,25 @@ class TestReadCoverageLog:
         rows = read_coverage_log(p)
         assert len(rows) == 1
 
+    def test_parses_optional_novel_input_column(self, tmp_path):
+        """Newer logs carry a 6th column; older 5-column logs still parse
+        without it (checked in test_parses_valid_rows above)."""
+        p = tmp_path / "cov.csv"
+        p.write_text("1.0,10,5,2,0,3\n2.0,20,8,3,1,7\n")
+        rows = read_coverage_log(p)
+        assert len(rows) == 2
+        assert rows[0]["novel_input_count"] == 3
+        assert rows[1]["novel_input_count"] == 7
+
+    def test_mixed_old_and_new_column_counts(self, tmp_path):
+        """A log started before the field existed, then upgraded mid-run."""
+        p = tmp_path / "cov.csv"
+        p.write_text("1.0,10,5,2,0\n2.0,20,8,3,1,7\n")
+        rows = read_coverage_log(p)
+        assert len(rows) == 2
+        assert "novel_input_count" not in rows[0]
+        assert rows[1]["novel_input_count"] == 7
+
 
 class TestDeriveExecRate:
     def test_empty_input(self):

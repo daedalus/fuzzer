@@ -428,3 +428,40 @@ class TestPrintStatsSMT:
         assert "smt: 2/3 (67%)" in line
         assert "tot: 5/10 (50%)" in line
         assert "ch:1" in line
+
+
+class TestAppendCoverageLog:
+    """The coverage-log CSV gains a 6th column, novel_input_count, which is
+    the raw signal behind the campaign-level novelty rate (docs/port-backlog
+    §C2): the count of executions that discovered ≥1 previously-unseen edge.
+    """
+
+    def test_writes_six_columns_including_novel_input_count(self, tmp_path):
+        log_path = tmp_path / "cov.csv"
+        f = SimpleNamespace(
+            coverage_log=log_path,
+            shm_cov=SimpleNamespace(cumulative_edges=42),
+            ptrace_cov=None,
+            start_time=time.time() - 5,
+            exec_count=1000,
+            corpus=[b"a", b"b"],
+            crash_count=1,
+            _novel_input_count=17,
+        )
+        reporter = StatsReporter.__new__(StatsReporter)
+        reporter.f = f
+        reporter.append_coverage_log()
+        line = log_path.read_text().strip()
+        parts = line.split(",")
+        assert len(parts) == 6
+        assert parts[1] == "1000"
+        assert parts[2] == "42"
+        assert parts[3] == "2"
+        assert parts[4] == "1"
+        assert parts[5] == "17"
+
+    def test_noop_when_coverage_log_unset(self, tmp_path):
+        f = SimpleNamespace(coverage_log=None)
+        reporter = StatsReporter.__new__(StatsReporter)
+        reporter.f = f
+        reporter.append_coverage_log()  # must not raise

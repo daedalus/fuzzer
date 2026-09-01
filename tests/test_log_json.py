@@ -110,6 +110,18 @@ class TestRecordContents:
         _emit(_fuzzer(_log_json_fh=buf, dictionary=None))
         assert json.loads(buf.getvalue())["dict_tokens"] == 0
 
+    def test_novel_inputs_defaults_to_zero_when_absent(self):
+        """A fuzzer instance that predates the counter must not crash the
+        emitter -- getattr fallback, not a hard attribute access."""
+        buf = io.StringIO()
+        _emit(_fuzzer(_log_json_fh=buf))
+        assert json.loads(buf.getvalue())["novel_inputs"] == 0
+
+    def test_novel_inputs_reported_when_present(self):
+        buf = io.StringIO()
+        _emit(_fuzzer(_log_json_fh=buf, _novel_input_count=42))
+        assert json.loads(buf.getvalue())["novel_inputs"] == 42
+
 
 class TestStreamDiscipline:
     def test_disabled_by_default_writes_nothing(self):

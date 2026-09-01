@@ -882,6 +882,7 @@ class Fuzzer:
         self._reseed_on_stall = reseed_on_stall
         self._max_collision_risk = max_collision_risk
         self._last_new_edge_exec = 0
+        self._novel_input_count = 0  # execs where record_edges found ≥1 new edge
         self._stall_recovery_active = False
         self._stall_recovery_count = 0  # times recovery was activated
         self._stall_recovery_execs = 0  # execs spent in recovery mode
@@ -3894,6 +3895,7 @@ class Fuzzer:
                 if new:
                     self._last_new_edge_exec = self.exec_count
                     self._last_new_edge_count = len(new)
+                    self._novel_input_count += 1
                     self._saturation = None  # invalidate cached saturation
                     # Attribute new edges to the operators that ran this iteration.
                     # Proportional split: edges ÷ unique ops in _last_ops_used.

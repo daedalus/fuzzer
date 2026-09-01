@@ -458,7 +458,10 @@ class StatsReporter:
         elif hasattr(f, "_edge_tracker"):
             cumulative = f._edge_tracker.get_cumulative_edge_count()
         elapsed = time.time() - f.start_time
-        line = f"{elapsed:.1f},{f.exec_count},{cumulative},{len(f.corpus)},{f.crash_count}\n"
+        line = (
+            f"{elapsed:.1f},{f.exec_count},{cumulative},{len(f.corpus)},"
+            f"{f.crash_count},{f._novel_input_count}\n"
+        )
         with open(f.coverage_log, "a") as fh:
             fh.write(line)
 
@@ -999,6 +1002,7 @@ class StatsReporter:
             if f.shm_cov is not None:
                 rec["edges"] = int(getattr(f.shm_cov, "cumulative_edges", 0))
                 rec["dropped_edges"] = int(f.shm_cov.read_dropped_edges())
+            rec["novel_inputs"] = getattr(f, "_novel_input_count", 0)
             if f._cmplog is not None:
                 rec["cmplog_tokens"] = len(f._cmplog.tokens)
                 rec["cmplog_pairs"] = len(f._cmplog.pairs)

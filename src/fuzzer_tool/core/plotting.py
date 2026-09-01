@@ -13,7 +13,10 @@ def _esc(value) -> str:
 
 
 def read_coverage_log(path):
-    """Read coverage log CSV: elapsed,exec_count,cumulative_edges,corpus_size,crash_count."""
+    """Read coverage log CSV: elapsed,exec_count,cumulative_edges,corpus_size,
+    crash_count[,novel_input_count]. The last column is optional so logs
+    written before it existed still parse.
+    """
     rows = []
     p = Path(path)
     if not p.exists():
@@ -22,18 +25,19 @@ def read_coverage_log(path):
     with p.open() as f:
         for line in f:
             parts = line.strip().split(",")
-            if len(parts) != 5:
+            if len(parts) not in (5, 6):
                 continue
             try:
-                rows.append(
-                    {
-                        "elapsed": float(parts[0]),
-                        "exec_count": int(parts[1]),
-                        "cumulative_edges": int(parts[2]),
-                        "corpus_size": int(parts[3]),
-                        "crash_count": int(parts[4]),
-                    }
-                )
+                row = {
+                    "elapsed": float(parts[0]),
+                    "exec_count": int(parts[1]),
+                    "cumulative_edges": int(parts[2]),
+                    "corpus_size": int(parts[3]),
+                    "crash_count": int(parts[4]),
+                }
+                if len(parts) == 6:
+                    row["novel_input_count"] = int(parts[5])
+                rows.append(row)
             except (ValueError, IndexError):
                 continue
     log.debug("read_coverage_log: parsed %d rows from %s", len(rows), path)
