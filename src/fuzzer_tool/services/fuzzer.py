@@ -691,6 +691,7 @@ class Fuzzer:
         cmplog_max_tokens=0,
         cmplog_max_pairs=0,
         cmplog_workdir=None,
+        cmplog_fifo_sink=False,
         asan_target=None,
         ubsan_target=None,
         max_corpus=0,
@@ -1091,7 +1092,10 @@ class Fuzzer:
             from fuzzer_tool.core.cmplog import CmplogCollector
 
             self._cmplog = CmplogCollector(
-                max_tokens=cmplog_max_tokens, max_pairs=cmplog_max_pairs, workdir=cmplog_workdir
+                max_tokens=cmplog_max_tokens,
+                max_pairs=cmplog_max_pairs,
+                workdir=cmplog_workdir,
+                fifo_sink=cmplog_fifo_sink,
             )
             if self._cmplog.start():
                 from fuzzer_tool.core.elf import detect_cmplog_functions
@@ -3222,14 +3226,16 @@ class Fuzzer:
         )
 
     def _reset_cmplog(self):
-        """Flush cmplog buffer to disk before collecting tokens.
+        """Flush cmplog buffer to disk/FIFO before collecting tokens.
 
         In direct_lite mode with cmplog compiled into the target .so,
         the shim buffers CMP lines in a 256KB internal buffer. This flushes
-        that buffer to disk so collect_tokens() can read the data.
+        that buffer to disk/FIFO so collect_tokens() can read the data.
 
         Does NOT truncate the file — collect_tokens() handles truncation
-        after reading.
+        after reading. In fifo_sink mode the flush still happens (the shim
+        buffer must be emptied into the pipe); only the file-truncate is
+        skipped.
         """
         if self._cmplog is None:
             return

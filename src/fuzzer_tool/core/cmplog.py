@@ -24,9 +24,12 @@ machinery at all, so it cannot preempt an instrumented target's
 """
 
 import contextlib
+import errno
 import hashlib
 import logging
 import os
+import select
+import threading
 import time
 import uuid
 
@@ -192,6 +195,85 @@ _HASH_MIN_BYTES = 8  # minimum operand length to consider as hash-like
 _HASH_MAX_MATCH_BYTES = 2  # max matching byte positions for a hash-like pair
 
 
+class _FifoDrain:
+    """Background reader for a FIFO-backed cmplog sink.
+
+    Gated behind ``--cmplog-fifo-sink``. Replaces the file-based
+    read-then-truncate protocol (``reset_log``/``_rotate_cmplog``/the
+    ``f.seek(self._read_offset)`` loop in ``collect_tokens``) with a
+    continuously-drained pipe, because none of that protocol has a
+    coherent meaning for a stream: ftruncate/lseek fail with ESPIPE on a
+    FIFO, and there is no "size on disk" to cap or rotate.
+
+    Two fds are opened. The read end is what the drain thread services.
+    The write end is never written to -- it exists purely so the FIFO
+    always has at least one writer. POSIX only signals EOF to a reader
+    once *every* writer has closed; the shim's own writer opens and
+    closes per lazy-reopen cycle (see ``__afl_cmplog_flush``), and
+    without a second, permanently-open writer here, the drain thread
+    would see a spurious EOF the moment the target process exits or is
+    killed between executions.
+    """
+
+    # Best-effort stream, not a bounded file: past this many buffered
+    # bytes, oldest data is dropped rather than held or blocking the
+    # writer. Mirrors CMPLOG_FILE_MAX_BYTES in spirit (a cap exists) but
+    # not in mechanism (there is nothing to rotate on a pipe).
+    _MAX_BUFFERED = 8 * 1024 * 1024
+
+    def __init__(self, path: str):
+        self.path = path
+        os.mkfifo(path, 0o644)
+        self._rfd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        self._keepalive_wfd = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
+        self._buf = bytearray()
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="cmplog-fifo-drain", daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        while not self._stop.is_set():
+            try:
+                ready, _, _ = select.select([self._rfd], [], [], 0.2)
+            except OSError:
+                return
+            if not ready:
+                continue
+            try:
+                chunk = os.read(self._rfd, 262144)
+            except OSError as e:
+                if e.errno in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EINTR):
+                    continue
+                return
+            if not chunk:
+                # Would mean every writer closed; can't happen while our
+                # own keepalive fd is open, but never busy-loop on it.
+                continue
+            print(f"[*] Cmplog read {len(chunk)} bytes from cmplog sink")
+            with self._lock:
+                self._buf.extend(chunk)
+                overflow = len(self._buf) - self._MAX_BUFFERED
+                if overflow > 0:
+                    del self._buf[:overflow]
+
+    def drain(self) -> bytes:
+        """Return and clear everything buffered since the last drain."""
+        with self._lock:
+            data = bytes(self._buf)
+            self._buf.clear()
+        return data
+
+    def close(self):
+        self._stop.set()
+        self._thread.join(timeout=1.0)
+        for fd in (self._rfd, self._keepalive_wfd):
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        with contextlib.suppress(OSError):
+            os.unlink(self.path)
+
+
 class CmplogCollector:
     """Collect and process comparison tracing data from the cmplog shim.
 
@@ -209,8 +291,18 @@ class CmplogCollector:
         max_pairs: int = 0,
         workdir: str | None = None,
         site_counts: bool = False,
+        fifo_sink: bool = False,
     ):
         self.log_path: str | None = None
+        # --cmplog-fifo-sink: _CMPLOG_OUT is a FIFO drained continuously by
+        # a background thread (_FifoDrain) instead of a regular file read
+        # with seek/truncate. See _FifoDrain's docstring for why.
+        self.fifo_sink = bool(fifo_sink)
+        self._fifo: _FifoDrain | None = None
+        # Trailing bytes from the last drain with no terminating '\n' yet
+        # -- carried over so a line split across two drains isn't parsed
+        # (and discarded) as two partial records.
+        self._fifo_partial: bytes = b""
         self.tokens: list[bytes] = []
         self._token_set: set[bytes] = set()
         # Operand pairs: (operand_a, operand_b) for input-to-state matching
@@ -381,6 +473,26 @@ class CmplogCollector:
         base, dot, _ext = log_path.rpartition(".")
         return (base if dot else log_path) + ".counts"
 
+    def _ensure_log_path(self):
+        """Pick ``log_path`` once and, in fifo_sink mode, create the FIFO
+        and start its drain thread before returning.
+
+        Creating the FIFO (and starting the reader) here rather than
+        leaving it to whatever opens ``_CMPLOG_OUT`` first matters: the
+        reader must exist before the target's shim constructor runs, or
+        the shim's first (lazy-reopen-driven) open finds no reader and
+        the record it was about to write is dropped rather than queued.
+        """
+        if self.log_path is not None:
+            return
+        log_dir = self.workdir or _get_cmplog_dir()
+        os.makedirs(log_dir, exist_ok=True)
+        local_id = uuid.uuid4().hex[:12]
+        self.log_path = os.path.join(log_dir, f"fuzz_cmplog_{local_id}.cmplog")
+        if self.fifo_sink:
+            self._fifo = _FifoDrain(self.log_path)
+            print(f"[*] Cmplog: open fifo file {self.log_path}")
+
     def setup_env(self, env: dict[str, str]) -> dict[str, str]:
         """Add cmplog env vars to the execution environment.
 
@@ -401,13 +513,12 @@ class CmplogCollector:
         if not self._shim_path:
             return env
 
-        if self.log_path is None or not os.path.exists(self.log_path):
-            log_dir = self.workdir or _get_cmplog_dir()
-            os.makedirs(log_dir, exist_ok=True)
-            local_id = uuid.uuid4().hex[:12]
-            self.log_path = os.path.join(log_dir, f"fuzz_cmplog_{local_id}.cmplog")
-        else:
-            # Truncate so the child writes fresh data from position 0
+        self._ensure_log_path()
+        if not self.fifo_sink and os.path.exists(self.log_path):
+            # Truncate so the child writes fresh data from position 0.
+            # Not applicable in fifo_sink mode: the pipe is continuously
+            # drained by _FifoDrain, so there is never stale data sitting
+            # in it to truncate away.
             with contextlib.suppress(OSError), open(self.log_path, "w") as f:
                 f.truncate(0)
         self.counts_path = self._counts_path_for(self.log_path)
@@ -447,11 +558,7 @@ class CmplogCollector:
         preload turns every later subprocess exec into a run that finds
         nothing, with no error anywhere. See ``restore_env``.
         """
-        if self.log_path is None or not os.path.exists(self.log_path):
-            log_dir = self.workdir or _get_cmplog_dir()
-            os.makedirs(log_dir, exist_ok=True)
-            local_id = uuid.uuid4().hex[:12]
-            self.log_path = os.path.join(log_dir, f"fuzz_cmplog_{local_id}.cmplog")
+        self._ensure_log_path()
 
         # Snapshot once, before the first mutation. Re-snapshotting on a later
         # call would capture our own LD_PRELOAD and make restore a no-op --
@@ -563,6 +670,13 @@ class CmplogCollector:
         if not self.log_path:
             return
 
+        if self.fifo_sink:
+            # No-op by design: the background drain thread already owns
+            # and continuously empties the pipe, so there is no on-disk
+            # backlog to truncate and no size cap to check against (see
+            # _FifoDrain._MAX_BUFFERED for the analogous bound instead).
+            return
+
         try:
             size = os.path.getsize(self.log_path)
         except OSError:
@@ -659,6 +773,9 @@ class CmplogCollector:
         # asserted counts you want to see).
         self.collect_counts()
 
+        if self.fifo_sink:
+            return self._collect_tokens_fifo()
+
         if not self.log_path or not os.path.exists(self.log_path):
             log.debug("collect_tokens: log missing or empty path=%s", self.log_path)
             return []
@@ -669,11 +786,6 @@ class CmplogCollector:
         except OSError:
             pass
 
-        tokens = set()
-        new_pairs = []
-        # Every distinct pair seen in *this* batch, first sighting or not.
-        # _pair_occurrence is incremented from this, not from new_pairs.
-        batch_pairs: set[tuple[bytes, bytes]] = set()
         lines_read = 0
         max_lines = 10_000  # cap per collection to bound CPU cost
         try:
@@ -691,6 +803,49 @@ class CmplogCollector:
             new_lines = []
 
         log.debug("collect_tokens: read %d new lines from %s", len(new_lines), self.log_path)
+
+        new_tokens = self._parse_lines(new_lines)
+
+        with contextlib.suppress(OSError), open(self.log_path, "w") as f:
+            f.truncate(0)
+        self._read_offset = 0
+
+        return new_tokens
+
+    def _collect_tokens_fifo(self) -> list[bytes]:
+        """FIFO-sink variant of collect_tokens.
+
+        Drains the background thread's buffer instead of reading a file.
+        No seek/truncate/rotate: the pipe is continuously emptied by
+        _FifoDrain, so there is no on-disk backlog to manage.
+        """
+        if not self._fifo:
+            return []
+
+        data = self._fifo.drain()
+        if not data:
+            return []
+
+        # Reassemble lines split across drain boundaries.
+        data = self._fifo_partial + data
+        if not data.endswith(b"\n"):
+            last_nl = data.rfind(b"\n")
+            if last_nl == -1:
+                self._fifo_partial = data
+                return []
+            self._fifo_partial = data[last_nl + 1 :]
+            data = data[: last_nl + 1]
+        else:
+            self._fifo_partial = b""
+
+        new_lines = data.decode("latin-1").splitlines()
+        return self._parse_lines(new_lines)
+
+    def _parse_lines(self, new_lines: list[str]) -> list[bytes]:
+        """Shared line parser for both file and FIFO paths."""
+        tokens = set()
+        new_pairs = []
+        batch_pairs: set[tuple[bytes, bytes]] = set()
         for c in conds_from_cmplog_text(new_lines):
             pair = (c.base.op_a, c.base.op_b)
             if pair not in self._pair_set:
@@ -704,10 +859,6 @@ class CmplogCollector:
             tokens.add(c.base.op_a)
             tokens.add(c.base.op_b)
 
-        # Divisors and GEP indices (trace-div/trace-gep) arrive on the same
-        # stream as their own record kinds. They carry no result and no
-        # opponent operand, so they stay out of _pair_cmp/_pair_pc -- the
-        # wall statistics read those and a divisor is not a comparison.
         for pair in pairs_from_operand_records(new_lines):
             if pair not in self._pair_set:
                 self._pair_set.add(pair)
@@ -715,24 +866,18 @@ class CmplogCollector:
             batch_pairs.add(pair)
             tokens.add(pair[0])
 
-        # Clear the log for next round.
-        # Truncate (not delete) so the .so's file handle stays valid
-        # when cmplog is compiled into the target (direct_lite mode).
-        with contextlib.suppress(OSError), open(self.log_path, "w") as f:
-            f.truncate(0)
-        self._read_offset = 0
+        for pair in batch_pairs:
+            self._pair_occurrence[pair] = self._pair_occurrence.get(pair, 0) + 1
 
         new_tokens = [t for t in tokens if t not in self._token_set]
         self._token_set.update(tokens)
         self.tokens.extend(new_tokens)
         self.pairs.extend(new_pairs)
 
-        # Cap token/pair lists to bound memory.
-        # Preserves highest-value-density entries instead of simple recency.
         if len(self.tokens) > self._max_tokens:
             excess = len(self.tokens) - self._max_tokens
             scored = [(self._token_value.get(t, 0) / max(len(t), 1), t) for t in self._token_set]
-            scored.sort(key=lambda x: x[0])  # lowest value-density first
+            scored.sort(key=lambda x: x[0])
             for _, t in scored[:excess]:
                 self._token_set.discard(t)
                 self._token_value.pop(t, None)
@@ -743,40 +888,13 @@ class CmplogCollector:
                 (self._pair_value.get(p, 0) / max(len(p[0]) + len(p[1]), 1), p)
                 for p in self._pair_set
             ]
-            scored.sort(key=lambda x: x[0])  # lowest value-density first
+            scored.sort(key=lambda x: x[0])
             for _, p in scored[:excess]:
                 self._pair_set.discard(p)
                 self._pair_value.pop(p, None)
-                # Side tables must be evicted with the pair, not just the
-                # pair set: they are keyed by pair and otherwise grow without
-                # bound for the life of the run, regardless of max_pairs.
                 self._pair_cmp.pop(p, None)
                 self._pair_pc.pop(p, None)
-                # _pair_occurrence is deliberately left alone: it is
-                # repopulated below for this batch, and its whole purpose is
-                # to count sightings across runs, so it has to outlive the
-                # pair set. It does grow unbounded — a separate concern from
-                # this eviction, and one that cannot be fixed here without
-                # changing what pair_confidence() means.
             self.pairs = list(self._pair_set)
-
-        # Track pair occurrence across runs for multi-run confidence.
-        # Pairs seen in many runs are reliable I2S signals; rarely-seen
-        # pairs may be noise from edge-case execution paths.
-        #
-        # Counted over batch_pairs, NOT new_pairs. new_pairs holds only pairs
-        # absent from _pair_set, and every such pair is added to _pair_set in
-        # the same iteration -- so a pair could never be "new" twice, every
-        # count was pinned at 1 for the life of the run, pair_confidence()
-        # was a membership test wearing a counter's clothes, and
-        # high_confidence_pairs(min_occurrences=2) returned [] always.
-        #
-        # One increment per collection batch, not per logged line: the parser
-        # already dedups within a batch, and the intended unit is "runs that
-        # exercised this comparison", not "times the comparison fired".
-        # Raw fire counts come from the shim's own counters.
-        for pair in batch_pairs:
-            self._pair_occurrence[pair] = self._pair_occurrence.get(pair, 0) + 1
 
         if new_tokens:
             log.info(
@@ -787,7 +905,6 @@ class CmplogCollector:
                 len(self.pairs),
             )
 
-        # Run hash detection on new pairs
         if new_pairs:
             n_hash = self.detect_hash_candidates(new_pairs)
             if n_hash:

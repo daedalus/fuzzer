@@ -168,6 +168,7 @@
 #include <unistd.h>
 #include <sys/ipc.h>
 #include <sys/shm.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 
 #if __AFL_CMPLOG
@@ -1246,11 +1247,22 @@ __AFL_NO_COV static void __afl_cmplog_flush(void) {
     }
     /* Lazy reopen: if Python rotated the log and closed the fd, reopen
      * from the current _CMPLOG_OUT so the next write doesn't silently
-     * drop cmplog records. */
+     * drop cmplog records.
+     *
+     * O_NONBLOCK here is what makes _CMPLOG_OUT safe to point at a FIFO:
+     * a blocking open(2) of a FIFO for write-only stalls until a reader
+     * shows up, and this call can run from __afl_auto_init before the
+     * forkserver hello handshake. With O_NONBLOCK, opening a FIFO with no
+     * reader yet fails immediately (ENXIO) instead of hanging, and this
+     * lazy-reopen path already retries on every flush -- so the reader
+     * (the Python-side FIFO drain thread) just needs to exist by the time
+     * the *next* flush fires, not before this one. No-op for a regular
+     * file: O_NONBLOCK only changes open(2)/write(2) semantics for FIFOs
+     * and some device nodes. */
     if (__afl_cmplog_fd < 0) {
         const char *path = getenv("_CMPLOG_OUT");
         if (path && path[0]) {
-            __afl_cmplog_fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+            __afl_cmplog_fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_NONBLOCK, 0644);
         }
         if (__afl_cmplog_fd < 0) {
             __afl_cmplog_pos = 0;
@@ -1261,7 +1273,12 @@ __AFL_NO_COV static void __afl_cmplog_flush(void) {
     while (off < __afl_cmplog_pos) {
         ssize_t w = write(__afl_cmplog_fd, __afl_cmplog_buf + off,
                           __afl_cmplog_pos - off);
-        if (w <= 0) break;   /* EINTR/ENOSPC: drop the rest, never spin */
+        /* w <= 0 covers EAGAIN (pipe full, nothing draining it right now)
+         * the same way it already covered EINTR/ENOSPC: drop the rest of
+         * this batch and move on, never block or spin. On a regular file
+         * this is unreachable in practice; on a FIFO it is the expected
+         * steady-state path whenever the collector falls behind. */
+        if (w <= 0) break;
         off += (size_t)w;
     }
     __afl_cmplog_pos = 0;
@@ -2117,7 +2134,12 @@ __AFL_NO_COV static void __afl_cmplog_init(void) {
         __afl_cmp_sites_fd = open(sites, O_WRONLY | O_CREAT | O_APPEND, 0644);
     const char *path = getenv("_CMPLOG_OUT");
     if (!path || !path[0]) return;
-    __afl_cmplog_fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    /* O_NONBLOCK: see the matching comment in __afl_cmplog_flush. Without
+     * it, a FIFO sink with no reader open yet would hang the target here,
+     * before the forkserver hello -- the loader would then be waiting on
+     * a hello that never arrives, with nothing in the logs to explain
+     * why. */
+    __afl_cmplog_fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_NONBLOCK, 0644);
 }
 
 __AFL_NO_COV static void __afl_cmplog_fini(void) {
@@ -2153,8 +2175,19 @@ void __cmplog_reset(void) {
     __afl_cmp_dump_counts();
     __afl_cmp_dump_sites();
     if (__afl_cmplog_fd >= 0) {
-        if (ftruncate(__afl_cmplog_fd, 0) != 0) { /* best effort */ }
-        lseek(__afl_cmplog_fd, 0, SEEK_SET);
+        /* ftruncate/lseek are meaningless on a FIFO (ESPIPE) -- the
+         * truncate-to-resync protocol direct_lite relies on only applies
+         * to a seekable, size-bounded sink. fstat guards the syscalls
+         * instead of just letting them fail: on a pipe there is nothing
+         * to reset because there is nothing sitting on disk to begin
+         * with -- the Python-side drain thread already owns and empties
+         * it continuously, so "reset" is correctly a no-op here rather
+         * than a silently-ignored error. */
+        struct stat __cmplog_st;
+        if (fstat(__afl_cmplog_fd, &__cmplog_st) == 0 && S_ISREG(__cmplog_st.st_mode)) {
+            if (ftruncate(__afl_cmplog_fd, 0) != 0) { /* best effort */ }
+            lseek(__afl_cmplog_fd, 0, SEEK_SET);
+        }
     }
 }
 

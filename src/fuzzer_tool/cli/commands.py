@@ -510,6 +510,7 @@ def cmd_fuzz(args):
         cmplog_max_pairs=getattr(args, "cmplog_max_pairs", 0),
         cmplog_workdir=getattr(args, "cmplog_workdir", None)
         or None,  # Will fall back to cachedir in CmplogCollector
+        cmplog_fifo_sink=getattr(args, "cmplog_fifo_sink", False),
         max_corpus=args.max_corpus,
         max_corpus_bytes=getattr(args, "max_corpus_bytes", 0),
         minimize_every_execs=getattr(args, "minimize_every_execs", 0),
@@ -2345,6 +2346,18 @@ def main() -> int:
         type=str,
         default=None,
         help="Directory for cmplog runtime log files (default ~/.cache/fuzzer_cmplog)",
+    )
+    fuzz_parser.add_argument(
+        "--cmplog-fifo-sink",
+        action="store_true",
+        default=False,
+        help=(
+            "Use a FIFO (named pipe) for cmplog output instead of a regular file. "
+            "The FIFO is drained continuously by a background thread, so the cmplog "
+            "shim never blocks on write and the collector never needs to truncate/rotate. "
+            "Avoids the init-order bug where the shim's constructor runs before _CMPLOG_OUT "
+            "is set, and the unbounded-file growth that comes with high-comparison targets."
+        ),
     )
     fuzz_parser.add_argument(
         "--max-corpus",
