@@ -1550,12 +1550,9 @@ _HAIL_MARY_FLAGS = (
     "save_smaller",
     "honggfuzz",
     "hw_perf",
-    "debug",
     "colorize",
     "weizz_tags",
     "enable_regex_bomb_mutations",
-    "x86_mutate",
-    "arm_mutate",
     "reseed_on_stall",
 )
 
