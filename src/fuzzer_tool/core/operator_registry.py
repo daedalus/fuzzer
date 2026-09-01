@@ -105,11 +105,12 @@ _CATEGORIES: dict[str, set[str]] = {
         "corpus_literal_insert",
         "insert_range_from_other",
         "versifier_generate",
-        # Weizz P2 — field/chunk scoped; availability gated on seed tags
+        # Weizz P2/P3 — field/chunk/repair; availability gated on seed tags
         "weizz_field_havoc",
         "weizz_chunk_dup",
         "weizz_chunk_delete",
         "weizz_chunk_swap",
+        "weizz_tag_repair",
     },
     "radamsa": {
         "fuse_this",
@@ -596,12 +597,13 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     # execute anything. The real pass is core/colorization.py, driven by
     # Fuzzer._colorize_seed() under --colorize.
     "colorization": lambda f, _d: bool(getattr(getattr(f, "_cmplog", None), "pairs", None)),
-    # Weizz P2 field/chunk operators — only when the feature is enabled and
-    # the parent seed already carries a non-dirty StructureMap in seed_meta.
+    # Weizz P2/P3 field/chunk/repair operators — only when the feature is
+    # enabled and the parent seed already carries a non-dirty StructureMap.
     "weizz_field_havoc": _weizz_tags_available,
     "weizz_chunk_dup": _weizz_tags_available,
     "weizz_chunk_delete": _weizz_tags_available,
     "weizz_chunk_swap": _weizz_tags_available,
+    "weizz_tag_repair": _weizz_tags_available,
 }
 
 

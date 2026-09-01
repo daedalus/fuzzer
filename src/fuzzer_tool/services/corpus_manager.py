@@ -605,6 +605,19 @@ class CorpusManager:
                         "coverage_edges_baseline": 0,
                     }
                 )
+            # Weizz P5: derived-tag inheritance. Length-preserving children
+            # reuse the parent StructureMap; length-changing ones inherit
+            # a dirty map so P2/P3 skip until the next collector pass.
+            if getattr(f, "weizz_tags", False) and parent is not None:
+                try:
+                    from fuzzer_tool.core.weizz_tags import inherit_tags_from_parent
+
+                    parent_meta = f.seed_meta.get(parent)
+                    inherited = inherit_tags_from_parent(parent_meta, parent, data)
+                    if inherited:
+                        f.seed_meta[data].update(inherited)
+                except Exception:  # noqa: BLE001 — never block corpus save
+                    pass
             # Propagate actual coverage_edges from EdgeTracker — when called
             # from fuzz_one, the seed's edges were already recorded by
             # record_edges before save_to_corpus.  For the parallel-sync path

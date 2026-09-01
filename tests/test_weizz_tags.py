@@ -17,6 +17,7 @@ from fuzzer_tool.core.weizz_tags import (
     build_tag_map_from_cmplog,
     collect_structure_map,
     get_deps,
+    inherit_tags_from_parent,
     load_tags_from_meta,
     place_tags,
     synthetic_exec_fn,
@@ -377,6 +378,89 @@ def test_weizz_ops_unavailable_without_tags():
         seed_meta = {}
 
     assert _weizz_tags_available(F(), b"x") is False
+
+
+# ── P3 tag repair ────────────────────────────────────────────────────────
+
+
+def test_flagged_spans_is_len():
+    tags = (
+        [ByteTag(cmp_id=1, flags=TagFlags.IS_LEN)] * 2
+        + [ByteTag(cmp_id=2)] * 4
+        + [ByteTag(cmp_id=3, flags=TagFlags.IS_CHECKSUM)] * 4
+    )
+    smap = StructureMap(tags=tags, ntypes=3, input_len=10)
+    assert smap.flagged_spans(TagFlags.IS_LEN) == [(0, 2, 1)]
+    assert smap.flagged_spans(TagFlags.IS_CHECKSUM) == [(6, 10, 3)]
+
+
+def test_weizz_tag_repair_length_field():
+    # 2-byte LE length + 4-byte payload
+    data = b"\x04\x00ABCD"
+    tags = [ByteTag(cmp_id=1, flags=TagFlags.IS_LEN)] * 2 + [ByteTag(cmp_id=2)] * 4
+    smap = StructureMap(tags=tags, ntypes=2, input_len=len(data), from_cmplog=True)
+    eng, _f = _make_engine(data, smap)
+    out = eng._op_weizz_tag_repair(bytearray(data), 0, data)
+    assert out is not None
+    assert len(out) == len(data)
+
+
+def test_weizz_tag_repair_checksum_field():
+    from fuzzer_tool.core.crc32 import crc32
+
+    body = b"PAYLOAD!!"
+    # Force CRC path: only IS_CHECKSUM, no IS_LEN
+    digest = crc32(body) & 0xFFFFFFFF
+    data = body + digest.to_bytes(4, "little")
+    tags = [ByteTag(cmp_id=1)] * len(body) + [
+        ByteTag(cmp_id=2, flags=TagFlags.IS_CHECKSUM)
+    ] * 4
+    smap = StructureMap(tags=tags, ntypes=2, input_len=len(data), from_cmplog=True)
+    eng, _f = _make_engine(data, smap)
+    # Corrupt the CRC so repair has work to do
+    buf = bytearray(data)
+    buf[-4:] = b"\x00\x00\x00\x00"
+    out = eng._op_weizz_tag_repair(buf, 0, data)
+    assert out is not None
+    assert len(out) == len(data)
+    # Repair writes either LE or BE CRC of prefix
+    got = bytes(out[-4:])
+    le = digest.to_bytes(4, "little")
+    be = digest.to_bytes(4, "big")
+    assert got in (le, be)
+
+
+# ── P5 derived-tag inheritance ───────────────────────────────────────────
+
+
+def test_inherit_tags_length_preserving():
+    parent = b"AAAABBBB"
+    tags = [ByteTag(cmp_id=1)] * 4 + [ByteTag(cmp_id=2)] * 4
+    smap = StructureMap(tags=tags, ntypes=2, input_len=len(parent), from_cmplog=True)
+    parent_meta = attach_tags_to_meta({}, smap)
+    child = b"AAAABBBX"  # same length
+    out = inherit_tags_from_parent(parent_meta, parent, child)
+    assert out.get("weizz_tags_rle")
+    assert out.get("weizz_tags_dirty") is False
+    assert out.get("weizz_tags_inherited") is True
+    assert out.get("weizz_tags_len") == len(parent)
+
+
+def test_inherit_tags_length_changing_marks_dirty():
+    parent = b"AAAABBBB"
+    tags = [ByteTag(cmp_id=1)] * 4 + [ByteTag(cmp_id=2)] * 4
+    smap = StructureMap(tags=tags, ntypes=2, input_len=len(parent), from_cmplog=True)
+    parent_meta = attach_tags_to_meta({}, smap)
+    child = parent + b"EXTRA"
+    out = inherit_tags_from_parent(parent_meta, parent, child)
+    assert out.get("weizz_tags_dirty") is True
+    assert out.get("weizz_tags_inherited") is True
+    assert out.get("weizz_tags_len") == len(child)
+
+
+def test_inherit_tags_no_parent():
+    assert inherit_tags_from_parent(None, None, b"x") == {}
+    assert inherit_tags_from_parent({}, b"ab", b"ab") == {}
 
 
 if __name__ == "__main__":

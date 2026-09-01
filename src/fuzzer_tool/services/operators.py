@@ -1981,6 +1981,78 @@ class OperatorEngine:
             self._weizz_mark_dirty(data)
         return out[: self.f.max_len]
 
+    def _op_weizz_tag_repair(self, buf, _byte_idx, data):
+        """P3 — rewrite IS_LEN / IS_CHECKSUM fields using the tag map.
+
+        Thin glue onto existing repair ideas (FrameShift / checksum_repair)
+        but driven by Weizz flags rather than format sniffers:
+
+        * IS_LEN field of width w: encode the byte-length of the region that
+          follows the field up to the next sibling field (or EOF) as a
+          little- or big-endian integer of width w.
+        * IS_CHECKSUM field of width 4: CRC-32 of the preceding bytes of the
+          same parent chunk (or the whole prefix when no parent is known).
+
+        Length-preserving; returns None when no flagged field can be repaired.
+        """
+        from fuzzer_tool.core.weizz_tags import TagFlags
+
+        smap = self._weizz_structure_map(data)
+        if smap is None or not buf:
+            return None
+        rng = self.f._rand_pool
+        out = bytearray(buf)
+        repaired = False
+
+        # ── length fields ──────────────────────────────────────────────
+        len_spans = smap.flagged_spans(TagFlags.IS_LEN)
+        if len_spans:
+            start, end, _cid = rng.choice(len_spans)
+            width = end - start
+            if 1 <= width <= 8 and end <= len(out):
+                # Region whose size we advertise: from end of length field to
+                # the start of the next field, or EOF.
+                fields = smap.field_spans()
+                next_start = len(out)
+                for fs, _fe, _ in fields:
+                    if fs >= end:
+                        next_start = fs
+                        break
+                payload_len = max(0, next_start - end)
+                # Occasionally use off-by-one / double for adversarial value.
+                mode = rng.randint(0, 5)
+                if mode == 0:
+                    payload_len = (payload_len + 1) & ((1 << (8 * width)) - 1)
+                elif mode == 1:
+                    payload_len = (payload_len * 2) & ((1 << (8 * width)) - 1)
+                elif mode == 2:
+                    payload_len = 0
+                endian = "little" if rng.randint(0, 1) == 0 else "big"
+                try:
+                    encoded = payload_len.to_bytes(width, endian)
+                except OverflowError:
+                    encoded = (payload_len & ((1 << (8 * width)) - 1)).to_bytes(
+                        width, endian
+                    )
+                out[start:end] = encoded
+                repaired = True
+
+        # ── checksum fields ────────────────────────────────────────────
+        crc_spans = smap.flagged_spans(TagFlags.IS_CHECKSUM)
+        if crc_spans and not repaired:
+            start, end, _cid = rng.choice(crc_spans)
+            width = end - start
+            if width == 4 and end <= len(out):
+                body = bytes(out[:start])
+                digest = crc32(body) & 0xFFFFFFFF
+                endian = "little" if rng.randint(0, 1) == 0 else "big"
+                out[start:end] = digest.to_bytes(4, endian)
+                repaired = True
+
+        if not repaired:
+            return None
+        return out[: self.f.max_len]
+
     def _op_block_shuffle_variable(self, buf, _byte_idx, _data):
         """Shuffle variable-width blocks using order-statistics spacings trick.
 

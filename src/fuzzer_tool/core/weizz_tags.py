@@ -141,6 +141,14 @@ class StructureMap:
             i = j
         return spans
 
+    def flagged_spans(self, flag: TagFlags) -> list[tuple[int, int, int]]:
+        """Field spans whose first byte carries *flag* (e.g. IS_LEN, IS_CHECKSUM)."""
+        out: list[tuple[int, int, int]] = []
+        for start, end, cid in self.field_spans():
+            if start < len(self.tags) and (self.tags[start].flags & flag):
+                out.append((start, end, cid))
+        return out
+
     def chunk_spans(self, parent: int | None = None) -> list[tuple[int, int, int]]:
         """Spans that share the same parent cmp_id (chunk approximation).
 
@@ -521,6 +529,29 @@ def _looks_like_magic(op_a: bytes, op_b: bytes) -> bool:
     return False
 
 
+def _looks_like_checksum(op: bytes) -> bool:
+    """Heuristic: 2/4/8-byte operands that look like CRC/checksum digests.
+
+    Purely shape-based — Weizz never claims a sound parse. Prefer 4-byte
+    (CRC-32 / Adler) and avoid tagging short lengths as checksums when they
+    already look like lengths (caller should check IS_LEN first).
+    """
+    if len(op) not in (2, 4, 8):
+        return False
+    # High entropy-ish: not all zeros/ones and not a tiny integer in either endian.
+    if op in (b"\x00" * len(op), b"\xff" * len(op)):
+        return False
+    for endian in ("little", "big"):
+        try:
+            v = int.from_bytes(op, endian)
+        except ValueError:
+            continue
+        if 0 < v < 0x10000 and len(op) >= 4:
+            # Looks more like a length/count than a CRC.
+            return False
+    return True
+
+
 def _stable_cmp_id(op_a: bytes, op_b: bytes, pc: int | None = None) -> int:
     """Stable non-zero id for a comparison site / operand group.
 
@@ -619,6 +650,9 @@ def build_tag_map_from_cmplog(
         flags = TagFlags.NONE
         if _looks_like_length(op_a, n) or _looks_like_length(op_b, n):
             flags |= TagFlags.IS_LEN
+        elif _looks_like_checksum(op_a) or _looks_like_checksum(op_b):
+            # IS_LEN takes priority over checksum on the same operand.
+            flags |= TagFlags.IS_CHECKSUM
         if _looks_like_magic(op_a, op_b):
             flags |= TagFlags.IS_MAGIC
 
@@ -792,6 +826,44 @@ def load_tags_from_meta(meta: dict) -> StructureMap | None:
     return StructureMap.from_rle(rle, int(length), from_cmplog=True)
 
 
+def inherit_tags_from_parent(
+    parent_meta: dict | None,
+    parent_data: bytes | None,
+    child_data: bytes,
+) -> dict:
+    """P5 — derived-tag inheritance for a child of a tagged parent.
+
+    Weizz ``use_derived_tags``: children reuse the parent map when the
+    mutation was length-preserving; otherwise the map is marked dirty so
+    operators skip it until the next collector pass.
+
+    Returns a dict of ``weizz_tags_*`` keys to merge into the child's meta
+    (empty when the parent had nothing useful).
+    """
+    if not parent_meta or parent_data is None:
+        return {}
+    smap = load_tags_from_meta(parent_meta)
+    if smap is None:
+        return {}
+    out: dict = {}
+    if len(child_data) == len(parent_data) and not parent_meta.get("weizz_tags_dirty"):
+        # Length-preserving: reuse RLE as-is.
+        out["weizz_tags_rle"] = parent_meta.get("weizz_tags_rle")
+        out["weizz_tags_len"] = parent_meta.get("weizz_tags_len")
+        out["weizz_tags_ntypes"] = parent_meta.get("weizz_tags_ntypes", smap.ntypes)
+        out["weizz_tags_dirty"] = False
+        out["weizz_tags_inherited"] = True
+    else:
+        # Length changed or parent already dirty: mark dirty on child so
+        # P2/P3 do not consume a misaligned map.
+        out["weizz_tags_rle"] = parent_meta.get("weizz_tags_rle")
+        out["weizz_tags_len"] = len(child_data)
+        out["weizz_tags_ntypes"] = parent_meta.get("weizz_tags_ntypes", smap.ntypes)
+        out["weizz_tags_dirty"] = True
+        out["weizz_tags_inherited"] = True
+    return out
+
+
 __all__ = [
     "TagFlags",
     "ByteTag",
@@ -807,4 +879,5 @@ __all__ = [
     "collect_structure_map",
     "attach_tags_to_meta",
     "load_tags_from_meta",
+    "inherit_tags_from_parent",
 ]

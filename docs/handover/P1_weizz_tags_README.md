@@ -71,6 +71,12 @@ smap2 = load_tags_from_meta(meta)
 - [x] No new comparison tracer
 - [x] Stale-tag behaviour defined (`TagFlags.DIRTY` + meta `weizz_tags_dirty`
       set by length-changing chunk ops)
+- [x] P3 tag-guided repair: `weizz_tag_repair` rewrites `IS_LEN` /
+      `IS_CHECKSUM` fields; `flagged_spans` + `_looks_like_checksum` on the
+      passive collector
+- [x] P5 derived-tag inheritance: `inherit_tags_from_parent` in
+      `save_to_corpus` — length-preserving children reuse RLE; length-
+      changing children get a dirty map until the next collector pass
 
 ## Design notes
 
