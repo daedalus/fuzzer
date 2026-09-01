@@ -22,8 +22,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exploration-over-low-success-rate, deterministic tie-break, the stuck
   threshold, and adversarial all-zero-success cases.
 
-  Not yet wired into the Elo meta-scheduler (`services/fuzzer.py`) — left
-  for a follow-up given the size of that call site.
+  Wired into the Elo meta-scheduler as of the entry below.
+- **Invasion percolation wired into the Elo meta-scheduler
+  (`services/fuzzer.py`, `services/operators.py`, `cli/commands.py`).**
+  `--invasion` (also enabled by `--elo all` and `--hail-mary`) adds
+  `"invasion"` as a candidate on the Elo ballot, alongside `bandit`, `mopt`,
+  `exp3`, etc. Requires `--mc-bandit` (invasion reads `f.mc.bandit_stats()`
+  as its resistance signal rather than tracking its own arm state) — a
+  warning is logged if enabled without it, and `select_op()`'s dispatch
+  branch filters `bandit_stats()` down to the current call's candidate
+  operators before selecting, since the unfiltered dict covers every
+  registered arm and could otherwise return an operator outside the
+  candidate set. Falls back to the random terminal when `invasion_select`
+  reports "stuck". Deliberately has no fallback-chain branch outside Elo —
+  the same `f.mc`/`mc_bandit` condition is already covered earlier in that
+  chain by the plain `bandit` branch, so a second branch there would be
+  dead code (the exact failure mode `test_regression_cmaes_elo_ballot.py`
+  documents for cmaes). Also added to the opponent ballot
+  `record_strategy_match` iterates over (`all_strategies`) — omitting it
+  there is the same cmaes bug in a different spot, where a strategy's
+  Elo rating only moves on the exec it wins and never on the execs it
+  loses.
+
+  `tests/test_invasion_elo_integration.py`: 7 tests — ballot inclusion,
+  ballot absence without `mc_bandit`, candidate-set filtering, stuck
+  fallback, no-Elo unreachability, and opponent-ballot inclusion.
 - **`src/fuzzer_tool/core/target_difficulty.py` (percolation handover Module
   3, revised per Diskin–Easo–Radhakrishnan–Sudakov–Tassion, "Supercritical
   sharpness of percolation," arXiv:2603.03257).** Static pre-fuzz difficulty

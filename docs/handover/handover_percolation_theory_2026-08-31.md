@@ -347,14 +347,34 @@ Returns `None` (stuck) when every operator's resistance is at or above
 `resistance_threshold`, or when an explicit empty `frontier_edges` is
 passed (nothing left to invade on this frontier).
 
-**Not yet done:** wiring this into the Elo scheduler in `services/fuzzer.py`
-as an additional signal — the integration point below is still a proposal.
-
 **Integration point:** Used inside the Elo scheduler as an additional signal.
 
 **Tests:** `tests/test_invasion_select.py` — 11 tests: selection,
 exploration-over-low-success-rate, deterministic tie-break, stuck
 threshold, adversarial all-zero-success cases.
+
+### Integration — ✅ DONE
+
+`--invasion` (also set by `--elo all` and `--hail-mary`) adds `"invasion"`
+to the Elo ballot in `services/operators.py::select_op()`, gated on
+`f._use_invasion and f.mc and f.mc_bandit` — it has no arm state of its
+own, reading `f.mc.bandit_stats()` directly, so it requires `--mc-bandit`
+(a warning is logged at startup if enabled without it). The dispatch
+branch filters `bandit_stats()` down to the call's candidate `ops` before
+selecting, since the unfiltered dict covers every registered arm. On
+"stuck" (`invasion_select` returns `None`), falls back to the random
+terminal. No fallback-chain branch outside Elo by design — the plain
+`bandit` branch earlier in that chain already covers the same
+`f.mc`/`mc_bandit` condition, so a second branch would be dead code (the
+cmaes ballot bug, in a different spot). Also added to `all_strategies` in
+`fuzzer.py::_record_operator_strategy_matches` — the opponent ballot,
+omitting it there is the same cmaes bug class, just affecting whether its
+Elo rating moves on the executions it loses rather than only the ones it
+wins.
+
+**Tests:** `tests/test_invasion_elo_integration.py` — 7 tests: ballot
+inclusion, ballot absence without `mc_bandit`, candidate-set filtering,
+stuck fallback, no-Elo unreachability, opponent-ballot inclusion.
 
 ---
 
