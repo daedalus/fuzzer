@@ -2361,6 +2361,46 @@ class Fuzzer:
             # --inprocess-direct, so try direct regardless — ASAN-detected bugs
             # may abort the process, but that's the user's accepted tradeoff.
             direct_ok = inprocess_direct
+            # Cmplog: mirror the auto-detect .so branch's env/shim setup
+            # (see above). This branch is taken whenever --inprocess is
+            # explicit -- including via --hail-mary, which force-enables
+            # both --inprocess and --inprocess-direct. Without this block,
+            # _CMPLOG_OUT never gets set before InProcessRunner loads the
+            # target below, so a compiled-in cmplog shim has nowhere to
+            # write and cmplog silently collects nothing even though
+            # _detect_cmplog() reports the target as instrumented.
+            if self._cmplog is not None:
+                has_cmplog = _detect_cmplog(self.target)
+                has_tracecmp = _detect_tracecmp_target(self.target)
+                if has_cmplog or has_tracecmp:
+                    if has_cmplog:
+                        print("[*] Cmplog: compiled into target .so (direct_lite compatible)")
+                    else:
+                        print(
+                            "[*] Trace-cmp: compiled into target .so "
+                            "(direct_lite compatible, preloading shim)"
+                        )
+                elif direct_ok:
+                    # Not compiled in -- direct ctypes mode needs either an
+                    # externally LD_PRELOAD'd shim (LD_PRELOAD is fixed at
+                    # process start, so it still applies to a ctypes-loaded
+                    # .so) or falls back to the subprocess loader, which
+                    # picks up the shim via preload_shims()/_CMPLOG_OUT
+                    # like any other cmplog-off-by-default path.
+                    ld_preload = os.environ.get("LD_PRELOAD", "")
+                    shim_in_preload = (
+                        "cmplog_shim" in ld_preload or "tracecmp_shim" in ld_preload
+                    )
+                    if not shim_in_preload:
+                        direct_ok = False
+                    else:
+                        print("[*] Cmplog: externally LD_PRELOAD'd (direct_lite compatible)")
+                # Must happen regardless of execution mode: direct ctypes
+                # loads the .so in-process (needs the env var set before
+                # CDLL below), subprocess loader inherits os.environ.
+                self._cmplog.setup_env_for_run()
+                if direct_ok:
+                    self._cmplog.preload_shims()
             self._inprocess_runner = InProcessRunner(
                 target=self.target,
                 function_name=func,
