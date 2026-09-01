@@ -692,6 +692,7 @@ class Fuzzer:
         cmplog_max_pairs=0,
         cmplog_workdir=None,
         cmplog_fifo_sink=False,
+        cmplog_fifo_sink_size=None,
         asan_target=None,
         ubsan_target=None,
         max_corpus=0,
@@ -1096,6 +1097,8 @@ class Fuzzer:
                 max_pairs=cmplog_max_pairs,
                 workdir=cmplog_workdir,
                 fifo_sink=cmplog_fifo_sink,
+                fifo_max_buffered=cmplog_fifo_sink_size,
+                debug=self.debug,
             )
             if self._cmplog.start():
                 from fuzzer_tool.core.elf import detect_cmplog_functions

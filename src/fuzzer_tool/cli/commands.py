@@ -511,6 +511,7 @@ def cmd_fuzz(args):
         cmplog_workdir=getattr(args, "cmplog_workdir", None)
         or None,  # Will fall back to cachedir in CmplogCollector
         cmplog_fifo_sink=getattr(args, "cmplog_fifo_sink", False),
+        cmplog_fifo_sink_size=getattr(args, "cmplog_fifo_sink_size", None),
         max_corpus=args.max_corpus,
         max_corpus_bytes=getattr(args, "max_corpus_bytes", 0),
         minimize_every_execs=getattr(args, "minimize_every_execs", 0),
@@ -2348,6 +2349,12 @@ def main() -> int:
         help="Directory for cmplog runtime log files (default ~/.cache/fuzzer_cmplog)",
     )
     fuzz_parser.add_argument(
+        "--cmplog-fifo-sink-size",
+        type=int,
+        default=None,
+        help="Maximum size in bytes of the FIFO buffer (default 8 MB). Set to 0 for unlimited.",
+    )
+    fuzz_parser.add_argument(
         "--cmplog-fifo-sink",
         action="store_true",
         default=False,
@@ -2356,7 +2363,8 @@ def main() -> int:
             "The FIFO is drained continuously by a background thread, so the cmplog "
             "shim never blocks on write and the collector never needs to truncate/rotate. "
             "Avoids the init-order bug where the shim's constructor runs before _CMPLOG_OUT "
-            "is set, and the unbounded-file growth that comes with high-comparison targets."
+            "is set, and the unbounded-file growth that comes with high-comparison targets. "
+            "Per-drain read counts are logged only with --debug."
         ),
     )
     fuzz_parser.add_argument(

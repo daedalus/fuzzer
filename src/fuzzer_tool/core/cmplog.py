@@ -221,14 +221,20 @@ class _FifoDrain:
     # not in mechanism (there is nothing to rotate on a pipe).
     _MAX_BUFFERED = 8 * 1024 * 1024
 
-    def __init__(self, path: str):
+    def __init__(self, path: str, max_buffered: int | None = None, debug: bool = False):
         self.path = path
+        # None → use the class default. 0 → unlimited. >0 → cap in bytes.
+        if max_buffered is None:
+            self._max_buffered = self._MAX_BUFFERED
+        else:
+            self._max_buffered = max_buffered
         os.mkfifo(path, 0o644)
         self._rfd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
         self._keepalive_wfd = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
         self._buf = bytearray()
         self._lock = threading.Lock()
         self._stop = threading.Event()
+        self._debug = bool(debug)
         self._thread = threading.Thread(target=self._run, name="cmplog-fifo-drain", daemon=True)
         self._thread.start()
 
@@ -250,10 +256,11 @@ class _FifoDrain:
                 # Would mean every writer closed; can't happen while our
                 # own keepalive fd is open, but never busy-loop on it.
                 continue
-            print(f"[*] Cmplog read {len(chunk)} bytes from cmplog sink")
+            if self._debug:
+                print(f"[*] Cmplog read {len(chunk)} bytes from cmplog sink")
             with self._lock:
                 self._buf.extend(chunk)
-                overflow = len(self._buf) - self._MAX_BUFFERED
+                overflow = len(self._buf) - self._max_buffered
                 if overflow > 0:
                     del self._buf[:overflow]
 
@@ -292,12 +299,19 @@ class CmplogCollector:
         workdir: str | None = None,
         site_counts: bool = False,
         fifo_sink: bool = False,
+        fifo_max_buffered: int | None = None,
+        debug: bool = False,
     ):
         self.log_path: str | None = None
         # --cmplog-fifo-sink: _CMPLOG_OUT is a FIFO drained continuously by
         # a background thread (_FifoDrain) instead of a regular file read
         # with seek/truncate. See _FifoDrain's docstring for why.
         self.fifo_sink = bool(fifo_sink)
+        # Maximum bytes buffered in the FIFO drain thread. None means 8 MB default.
+        # 0 means unlimited (buffer grows until OOM).
+        self.fifo_max_buffered = fifo_max_buffered
+        # Gated per-drain read message; see CmplogCollector(debug=).
+        self.debug = bool(debug)
         self._fifo: _FifoDrain | None = None
         # Trailing bytes from the last drain with no terminating '\n' yet
         # -- carried over so a line split across two drains isn't parsed
@@ -490,7 +504,9 @@ class CmplogCollector:
         local_id = uuid.uuid4().hex[:12]
         self.log_path = os.path.join(log_dir, f"fuzz_cmplog_{local_id}.cmplog")
         if self.fifo_sink:
-            self._fifo = _FifoDrain(self.log_path)
+            self._fifo = _FifoDrain(
+                self.log_path, max_buffered=self.fifo_max_buffered, debug=self.debug
+            )
             print(f"[*] Cmplog: open fifo file {self.log_path}")
 
     def setup_env(self, env: dict[str, str]) -> dict[str, str]:
