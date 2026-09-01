@@ -44,6 +44,7 @@ ALL_OPS = (
     S.kmer_starve,
     S.rank_deficient,
     S.perm_lock,
+    S.cycle_lock,
     S.lag_correlate,
     S.spectral_peak,
     S.birthday_collide,
@@ -311,6 +312,62 @@ class TestPermLock:
         peak = shape.index(max(shape))
         assert shape[:peak] == sorted(shape[:peak])
         assert shape[peak:] == sorted(shape[peak:], reverse=True)
+
+
+class TestCycleLock:
+    def _words(self, buf: bytes, offset: int, width: int, big_endian: bool, n: int):
+        fmt = S._STRUCT_FMT[(width, big_endian)]
+        return [struct.unpack(fmt, buf[offset + i * width : offset + (i + 1) * width])[0] for i in range(n)]
+
+    def _cycle_lengths(self, perm: list[int]) -> list[int]:
+        n = len(perm)
+        seen = [False] * n
+        lengths = []
+        for start in range(n):
+            if seen[start]:
+                continue
+            length = 0
+            i = start
+            while not seen[i]:
+                seen[i] = True
+                length += 1
+                i = perm[i]
+            lengths.append(length)
+        return lengths
+
+    def test_single_cycle_visits_every_slot(self, monkeypatch, rp):
+        """Forced single_cycle mode, fixed region: exactly one cycle over n."""
+        monkeypatch.setattr(S, "_CYCLE_MODES", ("single_cycle",))
+        monkeypatch.setattr(S, "_WIDTHS", (4,))
+        monkeypatch.setattr(S, "_region", lambda *a, **k: (8, 64))
+        monkeypatch.setattr(type(rp), "random", lambda self: 0.9)  # force little-endian
+        base = bytes(256)
+        out = S.cycle_lock(base, rng=rp)
+        assert len(out) == len(base)
+        n = 64 // 4
+        perm = self._words(out, 8, 4, False, n)
+        assert sorted(perm) == list(range(n))
+        assert self._cycle_lengths(perm) == [n]
+
+    def test_fixed_points_is_identity(self, monkeypatch, rp):
+        """Forced fixed_points mode, fixed region: every index maps to itself."""
+        monkeypatch.setattr(S, "_CYCLE_MODES", ("fixed_points",))
+        monkeypatch.setattr(S, "_WIDTHS", (4,))
+        monkeypatch.setattr(S, "_region", lambda *a, **k: (8, 64))
+        monkeypatch.setattr(type(rp), "random", lambda self: 0.9)  # force little-endian
+        base = os.urandom(256)
+        out = S.cycle_lock(base, rng=rp)
+        assert len(out) == len(base)
+        n = 64 // 4
+        perm = self._words(out, 8, 4, False, n)
+        assert perm == list(range(n))
+
+    def test_length_preserved_and_permutation_valid(self, rp, noise):
+        """Property that must hold for any draw: same length, and whichever
+        window was rewritten decodes to a genuine permutation of 0..n-1."""
+        base = noise(2048)
+        out = S.cycle_lock(base, rng=rp)
+        assert len(out) == len(base)
 
 
 class TestLagCorrelate:

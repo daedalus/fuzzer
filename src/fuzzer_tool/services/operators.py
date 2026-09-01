@@ -2881,6 +2881,11 @@ class OperatorEngine:
 
         return self._regularity(perm_lock, buf)
 
+    def _op_cycle_lock(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import cycle_lock
+
+        return self._regularity(cycle_lock, buf)
+
     def _op_lag_correlate(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations.structured import lag_correlate
 

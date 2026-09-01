@@ -554,6 +554,52 @@ def perm_lock(data: bytes, rng=None) -> bytes:
     return _splice(data, offset, _pack_words(values, width, big_endian))
 
 
+# ── 5b. single n-cycle / all-fixed-points permutation ──────────────────
+
+_CYCLE_MODES = ("single_cycle", "fixed_points")
+
+
+def cycle_lock(data: bytes, rng=None) -> bytes:
+    """Overwrite a region with an index permutation at a traversal extreme.
+
+    ``perm_lock`` targets comparison-sort orderings; this targets index-chase
+    depth. Interpreting each word as a 0-based next-index pointer, a random
+    permutation has expected cycle length O(log n) (mean ~log n, longest
+    cycle concentrated well below n). Two shapes sit at the opposite ends of
+    that distribution:
+
+    - ``single_cycle``: one n-cycle (``i -> (i+1) mod n``) — the worst case
+      for any bounded pointer-chase, since following it visits every slot
+      before repeating.
+    - ``fixed_points``: the identity (``i -> i``) — the other extreme,
+      every chase terminates in one step.
+
+    Both are degenerate under the same permutation-cycle statistic and both
+    are adversarial for code that walks an index chain expecting short
+    cycles: hash open-addressing probe sequences, a linked list stored as
+    array indices, jump tables, and union-find parent arrays.
+
+    Args:
+        data: Input bytes.
+        rng: RandPool or stdlib random.
+
+    Returns:
+        Mutated bytes, the same length as *data*.
+    """
+    rng = _get_rng(rng)
+    width = rng.choice(_WIDTHS)
+    offset, length = _region(len(data), rng, min_len=width * 4, align=width)
+    if length < width * 4:
+        return data
+    big_endian = rng.random() < 0.5
+    n = length // width
+    if rng.choice(_CYCLE_MODES) == "single_cycle":
+        values = [(i + 1) % n for i in range(n)]
+    else:
+        values = list(range(n))
+    return _splice(data, offset, _pack_words(values, width, big_endian))
+
+
 # ── 6. rgb_lagged_sums inverse ─────────────────────────────────────────
 
 # Lags worth forcing: powers of two (alignment and stride readers), small

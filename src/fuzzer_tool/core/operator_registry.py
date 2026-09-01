@@ -172,6 +172,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "kmer_starve",
         "rank_deficient",
         "perm_lock",
+        "cycle_lock",
         "lag_correlate",
         "spectral_peak",
         "birthday_collide",
