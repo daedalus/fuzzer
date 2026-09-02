@@ -2354,10 +2354,10 @@ def main() -> int:
         "--auto-timeout", action="store_true", help="Auto-tune timeout by probing target at startup"
     )
     # cmplog (comparison tracing via LD_PRELOAD memcmp/strcmp/memchr interception)
-# is always enabled by default; _detect_cmplog() identifies instrumented
-# targets reliably, so making the user remember the flag cost coverage for no
-# reason. --no-cmplog-fifo-sink disables the FIFO drain mode instead of
-# disabling cmplog entirely.
+    # is always enabled by default; _detect_cmplog() identifies instrumented
+    # targets reliably, so making the user remember the flag cost coverage for no
+    # reason. --no-cmplog-fifo-sink disables the FIFO drain mode instead of
+    # disabling cmplog entirely.
     fuzz_parser.add_argument(
         "--calibrate-stability",
         type=int,

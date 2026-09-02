@@ -197,12 +197,21 @@ class TestPoissonDiskAdmissionCLI:
         from fuzzer_tool.cli import commands
 
         monkeypatch.setattr(commands, "cmd_fuzz", _spy)
-        monkeypatch.setattr(sys, "argv", [
-            "fuzzer-tool", "fuzz", "/bin/true",
-            "--poisson-disk-admission",
-            "--poisson-disk-min-jaccard", "0.4",
-            "-n", "1", "--no-shm",
-        ])
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "fuzzer-tool",
+                "fuzz",
+                "/bin/true",
+                "--poisson-disk-admission",
+                "--poisson-disk-min-jaccard",
+                "0.4",
+                "-n",
+                "1",
+                "--no-shm",
+            ],
+        )
         rc = commands.main()
         assert rc == 0
         assert captured["poisson_disk_admission"] is True

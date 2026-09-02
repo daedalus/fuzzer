@@ -125,7 +125,6 @@ class PoissonDiskAdmission:
         for band_idx in range(minhash.num_bands):
             start = band_idx * minhash.band_size
             end = start + minhash.band_size
-            import struct
 
             band_bytes = struct.pack(f"<{end - start}Q", *sig[start:end])
             from fuzzer_tool.core.edge_tracker import crc32_ieee
@@ -149,7 +148,6 @@ class PoissonDiskAdmission:
             sig = minhash.signatures.get(sk)
             if sig is None:
                 continue
-            import struct
 
             for band_idx in range(minhash.num_bands):
                 start = band_idx * minhash.band_size

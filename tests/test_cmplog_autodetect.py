@@ -86,7 +86,6 @@ class TestWiring:
     def test_no_cmplog_argparse_flag(self):
         """There is no --cmplog flag; cmplog is always enabled when the
         target has instrumentation. The only opt-out is --no-cmplog-fifo-sink."""
-        import argparse
         import inspect
 
         from fuzzer_tool.cli import commands
