@@ -705,7 +705,7 @@ class Fuzzer:
         use_cfg_cache=True,
         adaptive_timeout=False,
         resume=False,
-        trace_crashes=False,
+        trace_crashes=True,
         learn_format=False,
         corpus_ppmd=False,
         seed=42,
@@ -2398,9 +2398,7 @@ class Fuzzer:
                     # picks up the shim via preload_shims()/_CMPLOG_OUT
                     # like any other cmplog-off-by-default path.
                     ld_preload = os.environ.get("LD_PRELOAD", "")
-                    shim_in_preload = (
-                        "cmplog_shim" in ld_preload or "tracecmp_shim" in ld_preload
-                    )
+                    shim_in_preload = "cmplog_shim" in ld_preload or "tracecmp_shim" in ld_preload
                     if not shim_in_preload:
                         direct_ok = False
                     else:

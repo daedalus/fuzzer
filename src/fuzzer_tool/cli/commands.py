@@ -909,7 +909,7 @@ def cmd_verify(args):
         if report and report.is_valid():
             print(f"  [+] {crash_file.name}: {report.sanitizer}:{report.error_type}")
             confirmed += 1
-        elif abs(returncode) in SIGNAL_CRASH_CODES:
+        elif returncode in SIGNAL_CRASH_CODES or returncode < 0:
             print(f"  [+] {crash_file.name}: signal {abs(returncode)}")
             confirmed += 1
         elif returncode == -1 and stderr == "timeout":
@@ -944,7 +944,7 @@ def cmd_replay(args):
         if args.file_mode:
             tmp_dir = Path("/tmp") / f"replay_{os.getpid()}"
             tmp_dir.mkdir(parents=True, exist_ok=True)
-            returncode, stderr = run_target_file(
+            returncode, stderr, _pid = run_target_file(
                 target=args.target,
                 data=data,
                 timeout=args.timeout,
@@ -953,7 +953,7 @@ def cmd_replay(args):
                 env=env,
             )
         else:
-            returncode, stderr = run_target_stdin(
+            returncode, stderr, _pid = run_target_stdin(
                 target=args.target, data=data, timeout=args.timeout, env=env
             )
     finally:
@@ -974,7 +974,7 @@ def cmd_replay(args):
                 print(f"      #{i} {frame}")
         return 0
 
-    if abs(returncode) in SIGNAL_CRASH_CODES:
+    if returncode in SIGNAL_CRASH_CODES or returncode < 0:
         print(f"[+] Crash reproduced: signal {abs(returncode)}")
         return 0
 
@@ -1553,7 +1553,6 @@ _HAIL_MARY_FLAGS = (
     "metropolis",
     "auto_timeout",
     "bootstrap",
-    "trace",
     "learn_format",
     "corpus_ppmd",
     "persistent",
@@ -1566,6 +1565,7 @@ _HAIL_MARY_FLAGS = (
     "colorize",
     "weizz_tags",
     "reseed_on_stall",
+    "fractal_diversity",
 )
 
 
@@ -2542,9 +2542,14 @@ def main() -> int:
         ),
     )
     fuzz_parser.add_argument(
-        "--trace",
-        action="store_true",
-        help="Generate GDB backtrace + strace reports for crash inputs",
+        "--no-trace",
+        dest="trace",
+        action="store_false",
+        default=True,
+        help=(
+            "Skip GDB backtrace + strace reports for crash inputs "
+            "(default: on; --no-trace disables tracing)"
+        ),
     )
     fuzz_parser.add_argument(
         "--learn-format",
