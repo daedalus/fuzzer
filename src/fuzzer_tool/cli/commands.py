@@ -456,6 +456,7 @@ def cmd_fuzz(args):
         args.wfc = True
         args.lineage = True
         args.mcts = True
+        args.alphabeta = True
         args.schedule = "fast"
 
     fuzzer = Fuzzer(
@@ -596,6 +597,7 @@ def cmd_fuzz(args):
         wfc=getattr(args, "wfc", False),
         path_negation=getattr(args, "path_negation", False),
         mcts=getattr(args, "mcts", False),
+        alphabeta=getattr(args, "alphabeta", False),
         ga_pop_size=getattr(args, "ga_pop_size", 200),
         ga_gen_size=getattr(args, "ga_gen_size", 500),
         ga_elite_frac=getattr(args, "ga_elite_frac", 0.1),
@@ -1542,6 +1544,7 @@ _HAIL_MARY_FLAGS = (
     "ga",
     "qea",
     "mcts",
+    "alphabeta",
     "fluctuation_theorems",
     "wfc",
     "path_negation",
@@ -2078,6 +2081,12 @@ def main() -> int:
         action="store_true",
         help="Enable MCTS/UCT seed scheduling over the mutation lineage tree "
         "(implies --lineage; competes as an Elo-arbitrated seed strategy)",
+    )
+    fuzz_parser.add_argument(
+        "--alphabeta",
+        action="store_true",
+        help="Enable alpha-beta minimax seed scheduling over the mutation lineage tree "
+        "(implies --lineage; competes as a distinct Elo-arbitrated seed strategy)",
     )
     fuzz_parser.add_argument(
         "--fluctuation-theorems",

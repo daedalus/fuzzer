@@ -481,14 +481,15 @@ class TestHarnessCoverage:
     def test_every_exported_operator_scheduler_is_adaptable(self):
         """Adding a scheduler must not silently skip convergence testing.
 
-        MCTSSeedScheduler is excluded by name: it schedules *seeds* against a
-        LineageTree, not operators, and needs its own environment.
+        MCTSSeedScheduler and AlphaBetaMCTSSeedScheduler are excluded by name:
+        they schedule *seeds* against a LineageTree, not operators, and need
+        their own environment.
         """
         import fuzzer_tool.core.schedulers as pkg
 
         env = StationaryBernoulli.build()
         for cls_name in pkg.__all__:
-            if cls_name == "MCTSSeedScheduler":
+            if cls_name in ("MCTSSeedScheduler", "AlphaBetaMCTSSeedScheduler"):
                 continue
             cls = getattr(pkg, cls_name)
             sched = cls(dim=4) if cls_name == "ContextualLinUCBScheduler" else cls()

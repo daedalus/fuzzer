@@ -20,7 +20,6 @@ from collections import Counter
 
 from fuzzer_tool.core.cost_ledger import effective_fuzz_count
 from fuzzer_tool.core.crc32 import crc32
-from fuzzer_tool.core.schedulers.mcts import AlphaBetaMCTSSeedScheduler
 from fuzzer_tool.core.validity import VALID_SEED_BONUS
 
 log = logging.getLogger(__name__)
@@ -151,6 +150,8 @@ class SeedPicker:
         available.append("weighted")
         if getattr(f, "_mcts", None) is not None and getattr(f, "_lineage", None):
             available.append("mcts")
+        if getattr(f, "_alphabeta", None) is not None and getattr(f, "_lineage", None):
+            available.append("alphabeta")
         if f.corpus and f.seed_meta:
             available.append("pareto")
         if f._profile.format_signature:
@@ -202,18 +203,19 @@ class SeedPicker:
             "ecofuzz": lambda: self._pick_ecofuzz_seed(),
             "aflgo": lambda: self._pick_aflgo_seed() if f._distance else None,
             "mcts": lambda: self._pick_mcts_seed(),
+            "alphabeta": lambda: self._pick_alphabeta_seed(),
             "katz": lambda: self._pick_katz_seed(),
         }
         handler = strategy_map.get(strategy)
         return handler() if handler else None
 
     def _pick_mcts_seed(self) -> bytes | None:
-        """Alpha-Beta descent over the lineage tree — the Elo-arbitrated 'mcts' arm.
+        """UCT descent over the lineage tree — the Elo-arbitrated 'mcts' arm.
 
         Every other strategy scores the corpus as a flat pool. This one walks
         the parent/child genealogy the lineage tree already maintains and
-        picks a seed by Alpha-Beta minimax, pruning suboptimal paths to focus
-        on productive regions of the tree.
+        picks a seed by UCT, the descent updating the persisted scheduler on
+        ``f._mcts`` so subsequent picks concentrate on productive subtrees.
 
         Returns None (caller falls through to another strategy) when the tree
         offers no live seed — e.g. before the first corpus insert, or when
@@ -221,12 +223,33 @@ class SeedPicker:
         """
         f = self.f
         tree = getattr(f, "_lineage", None)
-        if tree is None or not f.corpus:
+        mcts = getattr(f, "_mcts", None)
+        if tree is None or mcts is None or not f.corpus:
             return None
-        # Use AlphaBetaMCTSSeedScheduler
-        mcts = AlphaBetaMCTSSeedScheduler()
         key_to_seed = {f._seed_key(s): s for s in f.corpus}
         selected = mcts.select(tree, set(key_to_seed))
+        if selected is None:
+            return None
+        return key_to_seed.get(selected)
+
+    def _pick_alphabeta_seed(self) -> bytes | None:
+        """Alpha-beta minimax over the lineage tree — the Elo-arbitrated 'alphabeta' arm.
+
+        A distinct strategy from the UCT 'mcts' arm: instead of UCT bandit
+        descent, iterates alpha-beta pruning over the lineage forest. Fuzz the
+        maximizer, target response the minimizer; leaf evaluation is the
+        scheduler's running mean reward for the node.
+
+        Returns None (caller falls through to another strategy) when the tree
+        offers no live seed.
+        """
+        f = self.f
+        tree = getattr(f, "_lineage", None)
+        ab = getattr(f, "_alphabeta", None)
+        if tree is None or ab is None or not f.corpus:
+            return None
+        key_to_seed = {f._seed_key(s): s for s in f.corpus}
+        selected = ab.select(tree, set(key_to_seed))
         if selected is None:
             return None
         return key_to_seed.get(selected)

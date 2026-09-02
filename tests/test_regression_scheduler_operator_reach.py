@@ -161,7 +161,7 @@ class TestAllSchedulersReachAllOperators:
         nothing checks for reachability.
         """
         covered = {entry[0] for entry in _all_operator_schedulers()}
-        exported = set(S.__all__) - {"MCTSSeedScheduler"}
+        exported = set(S.__all__) - {"MCTSSeedScheduler", "AlphaBetaMCTSSeedScheduler"}
         assert exported == covered, f"uncovered schedulers: {sorted(exported - covered)}"
 
 

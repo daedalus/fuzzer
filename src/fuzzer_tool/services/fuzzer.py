@@ -104,6 +104,8 @@ _SEED_STRATEGY_NAMES = (
     "boltzmann",
     "ecofuzz",
     "katz",
+    "mcts",
+    "alphabeta",
 )
 
 
@@ -760,6 +762,7 @@ class Fuzzer:
         lineage=False,
         lineage_backtrack=False,
         mcts=False,
+        alphabeta=False,
         sensitivity=False,
         ga=False,
         qea=False,
@@ -1499,6 +1502,15 @@ class Fuzzer:
             lineage = True
             log.info("--mcts implies --lineage (MCTS schedules over the lineage tree)")
 
+        # Alpha-beta MCTS: same lineage dependency, distinct descent algorithm.
+        self._use_alphabeta = bool(alphabeta)
+        self._alphabeta = None
+        if self._use_alphabeta and not lineage:
+            lineage = True
+            log.info(
+                "--alphabeta implies --lineage (alpha-beta MCTS schedules over the lineage tree)"
+            )
+
         self._lineage = None
         if lineage:
             from fuzzer_tool.core.lineage import LineageTree
@@ -1511,6 +1523,12 @@ class Fuzzer:
 
             self._mcts = MCTSSeedScheduler()
             log.info("MCTS seed scheduling enabled")
+
+        if self._use_alphabeta and self._lineage is not None:
+            from fuzzer_tool.core.schedulers.mcts import AlphaBetaMCTSSeedScheduler
+
+            self._alphabeta = AlphaBetaMCTSSeedScheduler()
+            log.info("Alpha-beta MCTS seed scheduling enabled")
 
         self._load_corpus()
         self._apply_seed_transforms()
@@ -5575,6 +5593,8 @@ class Fuzzer:
             groups["Generation"].append("wfc")
         if getattr(self, "_use_mcts", False):
             groups["Generation"].append("mcts")
+        if getattr(self, "_use_alphabeta", False):
+            groups["Generation"].append("alphabeta")
         if getattr(self, "_corpus_boost", 0) > 0:
             groups["Generation"].append(f"corpus-boost={self._corpus_boost}")
         if getattr(self, "_use_bootstrap", False):
@@ -5893,6 +5913,18 @@ class Fuzzer:
                     )
                 print(f"[*] MCTS seed scheduling: exploration={self._mcts.exploration:.3f}")
 
+            if self._alphabeta is not None:
+                ab_data = self._state_store.get("alphabeta")
+                if self.resume and ab_data is not None:
+                    self._alphabeta.from_dict(ab_data)
+                    print(
+                        "[*] AlphaBeta: loaded state from state store "
+                        f"(nodes={self._alphabeta.stats()['tracked_nodes']})"
+                    )
+                print(
+                    f"[*] Alpha-beta MCTS seed scheduling: exploration={self._alphabeta.exploration:.3f}"
+                )
+
             # Print WFC mode status
             if self._wfc_enabled:
                 print("[*] WFC: enabled — structural chunk reordering and pixel generation active")
@@ -6030,6 +6062,8 @@ class Fuzzer:
                 # Elo hands the pick to another strategy.
                 if self._mcts is not None:
                     self._mcts.update(self._last_new_edge_count)
+                if self._alphabeta is not None:
+                    self._alphabeta.update(self._last_new_edge_count)
                 i += 1
                 effective_interval = self._stats_effective_interval()
                 if self.exec_count - self._last_stats_exec >= effective_interval:
@@ -6194,6 +6228,11 @@ class Fuzzer:
                 self._mcts.prune(set(self._lineage.nodes))
             self._state_store.set("mcts", self._mcts.to_dict())
             print(f"[*] MCTS: saved state ({self._mcts.stats()['tracked_nodes']} nodes)")
+        if self._alphabeta is not None:
+            if self._lineage is not None:
+                self._alphabeta.prune(set(self._lineage.nodes))
+            self._state_store.set("alphabeta", self._alphabeta.to_dict())
+            print(f"[*] AlphaBeta: saved state ({self._alphabeta.stats()['tracked_nodes']} nodes)")
         if self._fluctuation is not None:
             self._state_store.set("fluctuation", self._fluctuation.snapshot())
             samples = sum(len(v) for v in self._fluctuation._states.values())
