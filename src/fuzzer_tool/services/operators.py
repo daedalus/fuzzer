@@ -324,26 +324,41 @@ def _deterministic_mutation_stream(data: bytes, max_mutations: int = MAX_DET_MUT
 class OperatorEngine:
     """Manages mutation operator selection and execution.
 
-    Holds a reference to the Fuzzer instance for accessing shared state
-    (dictionary, markov, mc, grammar, corpus, seed_meta, etc.).
+    Holds a reference to the Fuzzer instance. Scheduler/bandit machinery
+    (``select_op``, ``build_ops``, ``maybe_deterministic_mutation``,
+    ``select_position``, ``_build_shared_context``, havoc-subop credit
+    tracking) reads ``self.f`` directly and legitimately -- that code
+    picks *which* operator runs and needs deep, mutable fuzzer state
+    (bandit stats, dictionary-scratch cursor position, EMA timers) that
+    doesn't fit a read-only per-round snapshot.
 
-    ``self.ctx`` narrows part of that to a ``MutationContext`` (see
-    ``core/mutator_interface.py``, docs/port-backlog.md item F1): the
-    ``max_len``/``rand_pool``/``corpus`` reads that dominate ``_op_*``
-    handlers -- 320 of 439 ``self.f.<attr>`` reads, measured -- go through
-    ``self.ctx`` instead of ``self.f`` directly. It is a property, not a
-    field cached at construction time, because ``OperatorEngine`` is built
-    before the Fuzzer finishes its own ``__init__`` (before ``_rand_pool``
-    exists yet); a property re-derives it from live ``self.f`` state on
-    every access, same freshness guarantee ``self.f.max_len`` always had,
-    at the ~1us construction cost ``MutationContext`` documents.
+    ``self.ctx`` narrows the state actually read by the ``_op_*`` mutation
+    handlers themselves (see ``core/mutator_interface.py``,
+    docs/port-backlog.md item F1) to a ``MutationContext``. It is a
+    property, not a field cached at construction time, because
+    ``OperatorEngine`` is built before the Fuzzer finishes its own
+    ``__init__`` (before ``_rand_pool``/``corpus`` exist yet); a property
+    re-derives it from live ``self.f`` state on every access, same
+    freshness guarantee direct ``self.f.<attr>`` reads always had. Backed
+    by a per-round cache (``self._ctx_cache``, refreshed at the top of
+    ``mutate()``) rather than rebuilt on every property access -- rebuilding
+    per access measured ~19% of round latency on a no-op target; per-round
+    caching brought that back to baseline.
 
-    The remaining state (cmplog beyond its pairs, crash_mi, seed_meta, mc,
-    markov, grammar, ...) still comes from ``self.f`` -- narrowing those
-    needs either a use each is genuinely reaching for (cmplog tokens
-    alongside pairs) or a judgment call about whether they belong in a
-    *mutation* context at all (crash_mi, seed_meta arguably don't). Left
-    for a follow-up pass rather than guessed at here.
+    What made it into ``_op_*`` handlers via ``self.f`` directly: 439
+    ``self.f.<attr>`` reads (counting the local ``f = self.f`` alias form)
+    across 34 distinct attributes, dominated by ``max_len``/``_rand_pool``
+    (69%) and 26 lazily-constructed format-mutator singletons
+    (``_png_mutator``, ...). All but two categories now go through
+    ``self.ctx`` or operator-owned lazy caches (relocated the same way the
+    format-mutator singletons were): ``_length_tracker`` stays on
+    ``self.f`` because it's genuine campaign-lifecycle state fed by the
+    coverage-recording path elsewhere in fuzzer.py and persisted via the
+    state store, not an operator-local read; and ``_op_condstmt_solve``'s
+    redqueen-adjacent internals reach ``ctx.cmplog`` (the raw collector)
+    rather than a flat field, for the same reason ``markov``/``mc``/
+    ``grammar`` are opaque object references on ``ctx`` rather than
+    decomposed data.
     """
 
     def __init__(self, fuzzer):
@@ -552,9 +567,8 @@ class OperatorEngine:
         Falls back to single-byte transforms (XOR, arithmetic, boundary) when
         the encoding engine yields no applicable mutations for the current pair.
         """
-        f = self.f
         rng = self.ctx.rand_pool
-        if not hasattr(f, "_cmplog") or not f._cmplog or not f._cmplog.pairs:
+        if not self.ctx.cmplog_pairs:
             return
         if not buf or len(buf) < 2:
             return
@@ -564,7 +578,7 @@ class OperatorEngine:
         # (they're more likely to be found in the buffer).
         # Use cached sorted pair list, resorting only when pairs change,
         # to avoid O(N log N) sort on every invocation.
-        cmplog_pairs = f._cmplog.pairs
+        cmplog_pairs = self.ctx.cmplog_pairs
         _version = id(cmplog_pairs) + len(cmplog_pairs)
         if not self._redqueen_sorted_pairs or _version != self._redqueen_sorted_version:
             _temp = [(len(p[0]), p) for p in cmplog_pairs]
@@ -594,9 +608,7 @@ class OperatorEngine:
                 cmp_type,
                 input_bytes,
                 hammer=True,
-                is_hash=f._cmplog.is_hash_candidate
-                if hasattr(f._cmplog, "is_hash_candidate")
-                else None,
+                is_hash=getattr(self.ctx.cmplog, "is_hash_candidate", None),
             )
             if mutations:
                 offsets, replacements, enc = rng.choice(mutations)
@@ -672,9 +684,8 @@ class OperatorEngine:
         amplitude arrays, 8 float64s per byte) turn that into an OOM.
         Clamp explicitly here rather than relying on the caller.
         """
-        f = self.f
         rng = self.ctx.rand_pool
-        max_len = getattr(f, "max_len", 65536)
+        max_len = self.ctx.max_len or 65536
         if len(buf) < 4:
             return
         p1 = rng.randint(0, len(buf) - 2)
@@ -714,8 +725,7 @@ class OperatorEngine:
         with suffix of a random corpus entry at a shared position.
         """
         rng = self.ctx.rand_pool
-        f = self.f
-        corpus = getattr(f, "corpus", [])
+        corpus = self.ctx.corpus
         if not corpus or len(buf) < 3:
             return
         other = bytes(rng.choice(corpus))
@@ -757,7 +767,7 @@ class OperatorEngine:
         p_old = rng.randint(1, len(old) - 1)
         tail_old = bytes(old[p_old:])
         result = bytearray(buf[:p_cur]) + tail_old
-        if len(result) <= getattr(self.f, "max_len", 65536):
+        if len(result) <= (self.ctx.max_len or 65536):
             buf[:] = result
 
     def _op_tree_mutate(self, buf, _byte_idx, _data):
@@ -818,7 +828,7 @@ class OperatorEngine:
         zero-width joiners, illegal surrogates, NFKC expansion bombs, etc.
         """
         rng = self.ctx.rand_pool
-        if not buf or len(buf) >= getattr(self.f, "max_len", 65536):
+        if not buf or len(buf) >= (self.ctx.max_len or 65536):
             return
         from fuzzer_tool.core.mutations import _FUNNY_UNICODE  # noqa: PLC0415
 
@@ -873,7 +883,7 @@ class OperatorEngine:
             dst = rng.randint(0, len(parts) - 1)
             parts.insert(dst, parts[src])
         result = b"\n".join(parts)
-        if len(result) <= getattr(self.f, "max_len", 65536) and result != bytes(buf):
+        if len(result) <= (self.ctx.max_len or 65536) and result != bytes(buf):
             buf[:] = result
 
     def _op_colorization(self, buf, _byte_idx, _data):
@@ -891,8 +901,7 @@ class OperatorEngine:
             return
         tbl = _COLORIZE_TBL
         # Try to use cmplog-derived colorization mask for targeted selection
-        f = self.f
-        cmplog_pairs = getattr(f._cmplog, "pairs", None) if hasattr(f, "_cmplog") else None
+        cmplog_pairs = self.ctx.cmplog_pairs
         if cmplog_pairs:
             from fuzzer_tool.core.colorizer import CmplogColorizer  # noqa: PLC0415
 
@@ -1156,17 +1165,16 @@ class OperatorEngine:
         """
         if not buf:
             return None
-        f = self.f
         if (
-            not hasattr(f, "_corpus_literals")
-            or f._corpus_literals is None
-            or getattr(f, "_corpus_literals_len", 0) != len(self.ctx.corpus)
+            not hasattr(self, "_corpus_literals")
+            or self._corpus_literals is None
+            or getattr(self, "_corpus_literals_len", 0) != len(self.ctx.corpus)
         ):
             from fuzzer_tool.core.mutations import extract_corpus_literals
 
-            f._corpus_literals = extract_corpus_literals(list(self.ctx.corpus))
-            f._corpus_literals_len = len(self.ctx.corpus)
-        int_lits, str_lits = f._corpus_literals
+            self._corpus_literals = extract_corpus_literals(list(self.ctx.corpus))
+            self._corpus_literals_len = len(self.ctx.corpus)
+        int_lits, str_lits = self._corpus_literals
         if not int_lits and not str_lits:
             return None
         rng = self.ctx.rand_pool
@@ -1216,7 +1224,7 @@ class OperatorEngine:
         """
         if not buf or len(buf) < 4:
             return
-        learner = getattr(self.f, "checksum_learner", None)
+        learner = self.ctx.checksum_learner
         if not learner:
             return
         rng = self.ctx.rand_pool
@@ -1753,9 +1761,8 @@ class OperatorEngine:
         ``TIMEOUT`` so the solver does not waste budget on it again.
         Falls back to havoc when no applicable branch exists.
         """
-        f = self.f
         rng = self.ctx.rand_pool
-        if not (buf and hasattr(f, "_cmplog") and f._cmplog and f._cmplog.pairs):
+        if not (buf and self.ctx.cmplog_pairs):
             return self._op_havoc(buf, _byte_idx, _data)
 
         conds = self._get_cond_stmts()
@@ -1803,28 +1810,26 @@ class OperatorEngine:
 
     def _get_cond_stmts(self) -> list[CondStmt]:
         """Lazily build and cache the CondStmt list from cmplog pairs."""
-        f = self.f
-        cached = getattr(f, "_cond_stmts", None)
+        cached = getattr(self, "_cond_stmts", None)
         if cached is not None:
             # Invalidate when the pair list changes.
-            pair_id = id(f._cmplog.pairs) if f._cmplog and f._cmplog.pairs else -1
-            if getattr(f, "_cond_stmts_pair_id", None) == pair_id:
+            pair_id = id(self.ctx.cmplog_pairs) if self.ctx.cmplog_pairs else -1
+            if getattr(self, "_cond_stmts_pair_id", None) == pair_id:
                 return cached
         from fuzzer_tool.core.cond_stmt import (
             conds_from_cmplog_pairs,
         )
 
-        pair_meta = (
-            getattr(f._cmplog, "_pair_cmp", {}) if hasattr(f, "_cmplog") and f._cmplog else {}
-        )
-        pair_pc = getattr(f._cmplog, "_pair_pc", {}) if hasattr(f, "_cmplog") and f._cmplog else {}
+        cmplog = self.ctx.cmplog
+        pair_meta = getattr(cmplog, "_pair_cmp", {}) if cmplog else {}
+        pair_pc = getattr(cmplog, "_pair_pc", {}) if cmplog else {}
         cached = conds_from_cmplog_pairs(
-            f._cmplog.pairs if f._cmplog and f._cmplog.pairs else [],
+            self.ctx.cmplog_pairs,
             pair_meta=pair_meta,
             pair_pc=pair_pc,
         )
-        f._cond_stmts = cached
-        f._cond_stmts_pair_id = id(f._cmplog.pairs) if f._cmplog and f._cmplog.pairs else -1
+        self._cond_stmts = cached
+        self._cond_stmts_pair_id = id(self.ctx.cmplog_pairs) if self.ctx.cmplog_pairs else -1
         return cached
 
     def _op_special_strings(self, buf, _byte_idx, _data):
@@ -2188,7 +2193,6 @@ class OperatorEngine:
         dictionary entries with a random separator.
         """
         rng = self.ctx.rand_pool
-        f = self.f
         if not self.ctx.dictionary or len(self.ctx.dictionary) < 2:
             return
         if not buf or len(buf) >= self.ctx.max_len:
@@ -2235,32 +2239,31 @@ class OperatorEngine:
         if self.ctx.grammar:
             from fuzzer_tool.core.grammar import SubtreePopulation, TreeMutator
 
-            f = self.f
             rng = self.ctx.rand_pool
-            if not hasattr(f, "_tree_mutator"):
-                f._tree_mutator = TreeMutator(f.grammar)
-                f._subtree_population = SubtreePopulation()
-                f._subtree_pop_next_idx = 0
-            parent_meta = f.seed_meta.get(data)
+            if not hasattr(self, "_tree_mutator"):
+                self._tree_mutator = TreeMutator(self.ctx.grammar)
+                self._subtree_population = SubtreePopulation()
+                self._subtree_pop_next_idx = 0
+            parent_meta = (self.ctx.seed_meta or {}).get(data)
             stride = parent_meta.get("record_stride") if parent_meta else None
-            tree = f._tree_mutator.parse(bytes(buf), chunk_size=stride)
+            tree = self._tree_mutator.parse(bytes(buf), chunk_size=stride)
 
             # Incrementally harvest newly-added corpus entries into the
             # shared subtree population (subtree-population crossover, after
             # GRIIN (ASE '23) / Grammarinator x AFL++) instead of reparsing
             # the whole corpus on every call.
-            corpus = getattr(f, "corpus", None) or []
-            next_idx = f._subtree_pop_next_idx
+            corpus = self.ctx.corpus
+            next_idx = self._subtree_pop_next_idx
             if next_idx > len(corpus):
                 next_idx = 0  # corpus was replaced/shrunk — restart harvesting
             for seed in corpus[next_idx:]:
-                donor_tree = f._tree_mutator.parse(bytes(seed))
-                f._subtree_population.add(donor_tree, rng=rng)
-            f._subtree_pop_next_idx = len(corpus)
+                donor_tree = self._tree_mutator.parse(bytes(seed))
+                self._subtree_population.add(donor_tree, rng=rng)
+            self._subtree_pop_next_idx = len(corpus)
 
             return bytearray(
-                f._tree_mutator.mutate_tree(
-                    tree, max_len=self.ctx.max_len, rng=rng, population=f._subtree_population
+                self._tree_mutator.mutate_tree(
+                    tree, max_len=self.ctx.max_len, rng=rng, population=self._subtree_population
                 )[: self.ctx.max_len]
             )
 
@@ -2271,12 +2274,11 @@ class OperatorEngine:
         whitespace/alphanum/numeric/control/bracket/kv/list/line nodes,
         then generates structurally similar text from the learned grammar.
         """
-        if not buf or not hasattr(self.f, "corpus") or not self.ctx.corpus:
+        if not buf or not self.ctx.corpus:
             return None
-        f = self.f
         rng = self.ctx.rand_pool
-        verse = getattr(f, "_versifier_verse", None)
-        if verse is None or getattr(f, "_versifier_corpus_len", 0) != len(self.ctx.corpus):
+        verse = getattr(self, "_versifier_verse", None)
+        if verse is None or getattr(self, "_versifier_corpus_len", 0) != len(self.ctx.corpus):
             from fuzzer_tool.core.mutations.generic import _build_verse
 
             corpus = self.ctx.corpus
@@ -2286,8 +2288,8 @@ class OperatorEngine:
                 if candidate is not None:
                     verse = candidate
                     break
-            f._versifier_verse = verse
-            f._versifier_corpus_len = len(corpus)
+            self._versifier_verse = verse
+            self._versifier_corpus_len = len(corpus)
         if verse is None:
             return None
         result = verse.Rhyme()
@@ -2301,7 +2303,7 @@ class OperatorEngine:
         if not hasattr(self, "_png_mutator"):
             self._png_mutator = PngChunkMutator()
         # Set WFC mode from fuzzer state
-        self._png_mutator.use_wfc = getattr(self.f, "_wfc_enabled", False)
+        self._png_mutator.use_wfc = self.ctx.wfc_enabled
         rng = self.ctx.rand_pool
         if parse_png_chunks(bytes(buf)):
             mutated = self._png_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
@@ -2314,7 +2316,7 @@ class OperatorEngine:
 
         if not hasattr(self, "_jpeg_mutator"):
             self._jpeg_mutator = JpegMutator()
-        self._jpeg_mutator.use_wfc = getattr(self.f, "_wfc_enabled", False)
+        self._jpeg_mutator.use_wfc = self.ctx.wfc_enabled
         rng = self.ctx.rand_pool
         if parse_jpeg_markers(bytes(buf)):
             mutated = self._jpeg_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
@@ -2364,7 +2366,7 @@ class OperatorEngine:
 
         if not hasattr(self, "_bmp_mutator"):
             self._bmp_mutator = BmpMutator()
-        self._bmp_mutator.use_wfc = getattr(self.f, "_wfc_enabled", False)
+        self._bmp_mutator.use_wfc = self.ctx.wfc_enabled
         parent_meta = self.ctx.seed_meta.get(data)
         stride = parent_meta.get("record_stride") if parent_meta else None
         self._bmp_mutator.tile_bytes = stride
@@ -2777,8 +2779,8 @@ class OperatorEngine:
         """
         from fuzzer_tool.core.path_constraints import records_from_collector
 
-        cmplog = getattr(self.f, "_cmplog", None)
-        solver = getattr(self.f, "_path_solver", None)
+        cmplog = self.ctx.cmplog
+        solver = self.ctx.path_solver
         # _path_solver is None unless --path-negation was passed (or z3 is
         # missing). Respect that rather than constructing a private solver:
         # the flag is the single control, and the fuzzer's instance carries
@@ -2978,7 +2980,7 @@ class OperatorEngine:
         """
         from fuzzer_tool.core.randomness import corpus_invariants
 
-        corpus = getattr(self.f, "corpus", None)
+        corpus = self.ctx.corpus
         if not corpus or len(corpus) < _INVARIANT_MIN_SAMPLES:
             return None
         if self._invariants is None or self._invariants_corpus_len != len(corpus):
@@ -3012,10 +3014,10 @@ class OperatorEngine:
         """
         import heapq  # noqa: PLC0415
 
-        corpus = getattr(self.f, "corpus", None)
+        corpus = self.ctx.corpus
         if not corpus or len(corpus) < _ELITE_FUSE_MIN_CORPUS:
             return []
-        seed_meta = getattr(self.f, "seed_meta", None) or {}
+        seed_meta = self.ctx.seed_meta or {}
         if self._elite_pool is None or self._elite_pool_corpus_len != len(corpus):
             pool_size = min(_ELITE_FUSE_POOL_SIZE, len(corpus))
             # seed_meta is keyed by bytes (see Fuzzer._seed_key/save_to_corpus);

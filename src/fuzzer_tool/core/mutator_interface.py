@@ -95,6 +95,8 @@ class MutationContext:
     """
 
     __slots__ = (
+        "checksum_learner",
+        "cmplog",
         "cmplog_pairs",
         "cmplog_tokens",
         "corpus",
@@ -104,10 +106,12 @@ class MutationContext:
         "markov",
         "max_len",
         "mc",
+        "path_solver",
         "rand_pool",
         "seed_meta",
         "stall_recovery_active",
         "weizz_tags_enabled",
+        "wfc_enabled",
     )
 
     def __init__(
@@ -126,6 +130,10 @@ class MutationContext:
         grammar=None,
         crash_mi=None,
         stall_recovery_active: bool = False,
+        cmplog=None,
+        checksum_learner=None,
+        path_solver=None,
+        wfc_enabled: bool = False,
     ) -> None:
         #: Length cap for the returned buffer; 0 means uncapped.
         self.max_len = max_len
@@ -167,6 +175,28 @@ class MutationContext:
         self.crash_mi = crash_mi
         #: True while the fuzzer's stall-recovery mode is active.
         self.stall_recovery_active = stall_recovery_active
+        #: The raw cmplog collector object, when cmplog is enabled. Kept
+        #: alongside ``cmplog_pairs``/``cmplog_tokens`` rather than
+        #: replaced by them: a few call sites need collector internals
+        #: those two fields don't expose (``is_hash_candidate()``, the
+        #: ``_pair_cmp``/``_pair_pc`` maps, or the whole object as an
+        #: opaque handle passed to ``records_from_collector()`` for path
+        #: negation). Reach for ``cmplog_pairs``/``cmplog_tokens`` first;
+        #: this is for when those aren't enough.
+        self.cmplog = cmplog
+        #: Recovered checksum model (CRC/Adler/XOR-bitmask), when one has
+        #: been learned from observed inputs. ``None`` until a model
+        #: verifies.
+        self.checksum_learner = checksum_learner
+        #: Shared z3 path-constraint solver, when ``--path-negation`` is on
+        #: and z3 is installed. ``None`` otherwise -- callers respect that
+        #: as "the feature is off" rather than constructing a private
+        #: solver, since the fuzzer's instance carries the shared frontier
+        #: multiple call sites solve against together.
+        self.path_solver = path_solver
+        #: True when wave-function-collapse mode is enabled for the
+        #: format-aware chunk mutators (PNG/JPEG/BMP) that support it.
+        self.wfc_enabled = wfc_enabled
 
     @classmethod
     def from_fuzzer(cls, fuzzer) -> MutationContext:
@@ -193,6 +223,10 @@ class MutationContext:
             grammar=getattr(fuzzer, "grammar", None),
             crash_mi=getattr(fuzzer, "_crash_mi", None),
             stall_recovery_active=bool(getattr(fuzzer, "_stall_recovery_active", False)),
+            cmplog=cmplog,
+            checksum_learner=getattr(fuzzer, "checksum_learner", None),
+            path_solver=getattr(fuzzer, "_path_solver", None),
+            wfc_enabled=bool(getattr(fuzzer, "_wfc_enabled", False)),
         )
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid

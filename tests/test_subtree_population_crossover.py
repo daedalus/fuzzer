@@ -147,15 +147,17 @@ class TestGrammarTreeMutateOperatorWiring:
         engine = self._engine_with_grammar(corpus)
         buf = bytearray(b'{"key":"value"}')
         engine._op_grammar_tree_mutate(buf, 0, bytes(buf))
-        f = engine.f
-        assert hasattr(f, "_subtree_population")
-        assert len(f._subtree_population) > 0
-        assert f._subtree_pop_next_idx == len(corpus)
+        # Owned by the OperatorEngine, not the Fuzzer (docs/port-backlog.md
+        # F1): a lazy per-engine cache, same relocation as the
+        # format-mutator singletons.
+        assert hasattr(engine, "_subtree_population")
+        assert len(engine._subtree_population) > 0
+        assert engine._subtree_pop_next_idx == len(corpus)
 
         # Corpus growth is picked up incrementally on the next call.
         corpus.append(b'{"c":"seed_three"}')
         engine._op_grammar_tree_mutate(buf, 0, bytes(buf))
-        assert f._subtree_pop_next_idx == len(corpus)
+        assert engine._subtree_pop_next_idx == len(corpus)
 
     def test_grammar_tree_mutate_returns_bytes(self):
         corpus = [b'{"a":"seed_one"}']

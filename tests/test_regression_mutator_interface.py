@@ -398,6 +398,10 @@ class TestMutationContext:
             "grammar",
             "crash_mi",
             "stall_recovery_active",
+            "cmplog",
+            "checksum_learner",
+            "path_solver",
+            "wfc_enabled",
         }
         assert not hasattr(ctx, "__dict__")
         with pytest.raises(AttributeError):
