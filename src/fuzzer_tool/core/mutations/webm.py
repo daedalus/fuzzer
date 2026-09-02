@@ -15,6 +15,8 @@ one recursive pass).
 
 from __future__ import annotations
 
+from fuzzer_tool.core.mutations.generic import _swap_pair
+
 import random
 import struct
 from dataclasses import dataclass, field
@@ -367,8 +369,8 @@ class WebmMutator:
         return elements
 
     def _swap_elements(self, elements: list[Element], max_len: int) -> list[Element]:
-        if len(elements) >= 2:
-            i, j = self._rng.sample(list(range(len(elements))), 2)
+        if (pair := _swap_pair(len(elements), self._rng)) is not None:
+            i, j = pair
             elements[i], elements[j] = elements[j], elements[i]
         return elements
 

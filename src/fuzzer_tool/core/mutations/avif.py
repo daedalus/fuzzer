@@ -33,6 +33,8 @@ full re-parsing round-trip fidelity is not needed for a corruption probe.
 
 from __future__ import annotations
 
+from fuzzer_tool.core.mutations.generic import _swap_pair
+
 import random
 import struct
 from dataclasses import dataclass, field
@@ -576,8 +578,8 @@ class AvifMutator:
         return doc
 
     def _swap_meta_children(self, doc: AvifDoc, max_len: int) -> AvifDoc:
-        if len(doc.meta_children) >= 2:
-            i, j = self._rng.sample(list(range(len(doc.meta_children))), 2)
+        if (pair := _swap_pair(len(doc.meta_children), self._rng)) is not None:
+            i, j = pair
             doc.meta_children[i], doc.meta_children[j] = (
                 doc.meta_children[j],
                 doc.meta_children[i],

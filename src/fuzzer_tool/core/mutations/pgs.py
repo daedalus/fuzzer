@@ -16,6 +16,8 @@ the area with the highest confirmed hit rate in the fuzz target.
 
 from __future__ import annotations
 
+from fuzzer_tool.core.mutations.generic import _swap_pair
+
 import random
 import struct
 from dataclasses import dataclass, field
@@ -183,8 +185,8 @@ class PgsMutator:
 
     def _reorder_segments(self, segments: list[PgsSegment], max_len: int) -> list[PgsSegment]:
         """Swap two random segments."""
-        if len(segments) >= 2:
-            i, j = self._rng.sample(list(range(len(segments))), 2)
+        if (pair := _swap_pair(len(segments), self._rng)) is not None:
+            i, j = pair
             segments[i], segments[j] = segments[j], segments[i]
         return segments
 

@@ -13,6 +13,8 @@ is a 16-bit Thumb instruction.
 
 from __future__ import annotations
 
+from fuzzer_tool.core.mutations.generic import _swap_pair
+
 import random
 import struct
 from dataclasses import dataclass
@@ -219,8 +221,8 @@ class ArmMutator:
 
     def _word_swap(self, words: list[Word], max_len: int) -> list[Word]:
         swapable = [i for i, w in enumerate(words) if w.kind != "raw"]
-        if len(swapable) >= 2:
-            i, j = self._rng.sample(swapable, 2)
+        if (pair := _swap_pair(swapable, self._rng)) is not None:
+            i, j = pair
             words[i], words[j] = words[j], words[i]
         return words
 

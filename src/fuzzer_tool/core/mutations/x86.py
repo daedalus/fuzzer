@@ -17,6 +17,8 @@ Immediate width follows the 66 prefix (operand16) and REX.W.
 
 from __future__ import annotations
 
+from fuzzer_tool.core.mutations.generic import _swap_pair
+
 import random
 from dataclasses import dataclass
 
@@ -511,8 +513,8 @@ class X86Mutator:
         return insns
 
     def _swap_insns(self, insns: list[Insn], max_len: int) -> list[Insn]:
-        if len(insns) >= 2:
-            i, j = self._rng.sample(list(range(len(insns))), 2)
+        if (pair := _swap_pair(len(insns), self._rng)) is not None:
+            i, j = pair
             insns[i], insns[j] = insns[j], insns[i]
         return insns
 

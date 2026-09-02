@@ -22,6 +22,8 @@ NAL types (H.265): 19=IDR_W_RADL, 20=IDR_N_LP, 32=VPS, 33=SPS, 34=PPS
 
 from __future__ import annotations
 
+from fuzzer_tool.core.mutations.generic import _swap_pair
+
 import random
 from dataclasses import dataclass, field
 
@@ -267,8 +269,8 @@ class NalMutator:
 
     def _reorder_nal(self, units: list[NalUnit], max_len: int) -> list[NalUnit]:
         """Swap two random NAL units."""
-        if len(units) >= 2:
-            i, j = self._rng.sample(list(range(len(units))), 2)
+        if (pair := _swap_pair(len(units), self._rng)) is not None:
+            i, j = pair
             units[i], units[j] = units[j], units[i]
         return units
 

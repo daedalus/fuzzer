@@ -20,6 +20,8 @@ structure back into an invalid file.
 
 from __future__ import annotations
 
+from fuzzer_tool.core.mutations.generic import _swap_pair
+
 import random
 from dataclasses import dataclass
 
@@ -155,8 +157,8 @@ class AsfMutator:
             objs.pop(idx)
 
     def _reorder_objects(self, objs: list[AsfObject], rng) -> None:
-        if len(objs) >= 2:
-            i, j = rng.sample(range(len(objs)), 2)
+        if (pair := _swap_pair(len(objs), rng)) is not None:
+            i, j = pair
             objs[i], objs[j] = objs[j], objs[i]
 
     def _generate_random_asf(self, max_len: int = 65536, rng=None) -> bytes:

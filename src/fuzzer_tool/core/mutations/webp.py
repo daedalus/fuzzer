@@ -18,6 +18,8 @@ recomputes only the outer RIFF size field.
 
 from __future__ import annotations
 
+from fuzzer_tool.core.mutations.generic import _swap_pair
+
 import random
 import struct
 from dataclasses import dataclass, field
@@ -264,8 +266,8 @@ class WebpMutator:
         return chunks
 
     def _swap_chunks(self, chunks: list[Chunk], max_len: int) -> list[Chunk]:
-        if len(chunks) >= 2:
-            i, j = self._rng.sample(list(range(len(chunks))), 2)
+        if (pair := _swap_pair(len(chunks), self._rng)) is not None:
+            i, j = pair
             chunks[i], chunks[j] = chunks[j], chunks[i]
         return chunks
 

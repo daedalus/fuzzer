@@ -8,6 +8,47 @@ def _get_rng(rng=None):
     return rng or random
 
 
+def _swap_pair(domain, rng, *, start=0):
+    """Pick two distinct indices/elements to swap — the C(n,2) primitive
+    duplicated across the per-format mutators (see handover
+    ``docs/handover/handover_combinatorics_permutations_2026-09-02.md``,
+    §2/§10a).
+
+    Covers all three shapes found at the 13+ call sites:
+
+    - ``_swap_pair(len(seq), rng)`` — plain ``range(len(seq))`` sample,
+      the common case (10+ files).
+    - ``_swap_pair(len(seq), rng, start=1)`` — offset range, e.g.
+      ``sqlite._swap_pages`` keeps index 0 (the file header page) fixed.
+    - ``_swap_pair(candidates, rng)`` — an explicit candidate sequence
+      instead of a length, e.g. ``arm._word_swap`` swaps only over a
+      pre-filtered subset of indices.
+
+    Args:
+        domain: an ``int`` (sampled as ``range(start, domain)``) or an
+            explicit sequence of eligible indices/values to sample from
+            (``start`` is ignored for a sequence domain).
+        rng: a ``RandPool`` or stdlib-``random``-compatible object
+            exposing ``.sample(population, k)``.
+        start: for the int-domain case, the inclusive lower bound of the
+            eligible range. Ignored when ``domain`` is a sequence.
+
+    Returns:
+        A tuple ``(i, j)`` of two distinct values drawn from the domain,
+        or ``None`` if the effective domain has fewer than 2 elements.
+    """
+    if isinstance(domain, int):
+        if domain - start < 2:
+            return None
+        i, j = rng.sample(range(start, domain), 2)
+        return i, j
+    candidates = domain
+    if len(candidates) < 2:
+        return None
+    i, j = rng.sample(candidates, 2)
+    return i, j
+
+
 INTERESTING_8 = [
     -128,  # Overflow signed 8-bit when decremented
     -1,

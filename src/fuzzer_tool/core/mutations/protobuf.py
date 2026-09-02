@@ -16,6 +16,8 @@ were canonically encoded (non-canonical varints are normalized).
 
 from __future__ import annotations
 
+from fuzzer_tool.core.mutations.generic import _swap_pair
+
 import random
 from dataclasses import dataclass
 
@@ -350,8 +352,8 @@ class ProtobufMutator:
         return fields
 
     def _swap_fields(self, fields: ProtoFields, max_len: int) -> ProtoFields:
-        if len(fields) >= 2:
-            i, j = self._rng.sample(list(range(len(fields))), 2)
+        if (pair := _swap_pair(len(fields), self._rng)) is not None:
+            i, j = pair
             fields[i], fields[j] = fields[j], fields[i]
         return fields
 

@@ -29,6 +29,8 @@ demux stage that unwraps them before nal.py's target code ever runs.
 
 from __future__ import annotations
 
+from fuzzer_tool.core.mutations.generic import _swap_pair
+
 import random
 from dataclasses import dataclass, field
 
@@ -303,8 +305,8 @@ class MpegtsMutator:
     def _reorder_packets(self, packets: list[TsPacket], max_len: int) -> list[TsPacket]:
         """Swap two packets — out-of-order PES continuation is a real
         broadcast-noise condition FFmpeg's TS demuxer must tolerate."""
-        if len(packets) >= 2:
-            i, j = self._rng.sample(list(range(len(packets))), 2)
+        if (pair := _swap_pair(len(packets), self._rng)) is not None:
+            i, j = pair
             packets[i], packets[j] = packets[j], packets[i]
         return packets
 

@@ -21,6 +21,8 @@ byte-identically.
 
 from __future__ import annotations
 
+from fuzzer_tool.core.mutations.generic import _swap_pair
+
 import random
 import struct
 from dataclasses import dataclass
@@ -362,8 +364,8 @@ class ZipMutator:
         return bytes(raw)
 
     def _swap_entries(self, doc: ZipDoc, max_len: int) -> ZipDoc:
-        if len(doc.entries) >= 2:
-            i, j = self._rng.sample(list(range(len(doc.entries))), 2)
+        if (pair := _swap_pair(len(doc.entries), self._rng)) is not None:
+            i, j = pair
             doc.entries[i], doc.entries[j] = doc.entries[j], doc.entries[i]
         return doc
 

@@ -51,6 +51,8 @@ cell.
 
 from __future__ import annotations
 
+from fuzzer_tool.core.mutations.generic import _swap_pair
+
 import random
 import struct
 from typing import Any
@@ -480,8 +482,8 @@ class SqliteMutator:
         """Swap two non-page-1 pages (page 1 carries the file header and
         its b-tree header offsets are relied on by _generate_random_sqlite's
         callers elsewhere, so it is left in place)."""
-        if len(doc.pages) >= 3:
-            i, j = self._rng.sample(range(1, len(doc.pages)), 2)
+        if (pair := _swap_pair(len(doc.pages), self._rng, start=1)) is not None:
+            i, j = pair
             doc.pages[i], doc.pages[j] = doc.pages[j], doc.pages[i]
         return doc
 

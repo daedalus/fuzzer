@@ -30,6 +30,8 @@ present), matching nal.py's choice not to interpret RBSP contents.
 
 from __future__ import annotations
 
+from fuzzer_tool.core.mutations.generic import _swap_pair
+
 import random
 from dataclasses import dataclass
 
@@ -185,8 +187,8 @@ class AdtsMutator:
             frames.pop(rng.randint(0, len(frames) - 1))
 
     def _reorder_frames(self, frames: list[AdtsFrame], rng) -> None:
-        if len(frames) >= 2:
-            i, j = rng.sample(range(len(frames)), 2)
+        if (pair := _swap_pair(len(frames), rng)) is not None:
+            i, j = pair
             frames[i], frames[j] = frames[j], frames[i]
 
     def _generate_random_adts(self, max_len: int = 65536, rng=None) -> bytes:

@@ -25,6 +25,8 @@ exercises the recursive-descent entry into it.
 
 from __future__ import annotations
 
+from fuzzer_tool.core.mutations.generic import _swap_pair
+
 import random
 from dataclasses import dataclass
 
@@ -169,8 +171,8 @@ class RiffMutator:
             chunks.pop(rng.randint(0, len(chunks) - 1))
 
     def _reorder_chunks(self, chunks: list[RiffChunk], rng) -> None:
-        if len(chunks) >= 2:
-            i, j = rng.sample(range(len(chunks)), 2)
+        if (pair := _swap_pair(len(chunks), rng)) is not None:
+            i, j = pair
             chunks[i], chunks[j] = chunks[j], chunks[i]
 
     def _truncate_chunk_data(self, chunks: list[RiffChunk], rng) -> None:
