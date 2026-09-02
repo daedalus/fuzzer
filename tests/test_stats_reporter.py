@@ -326,7 +326,10 @@ class TestPrintStats:
         reporter = StatsReporter(fuzzer)
         with patch("builtins.print") as mock_print:
             reporter.print_stats()
-            line = mock_print.call_args[0][0]
+            # print_stats() also emits a supplementary line containing only
+            # `dist:<tail_avg>` — check the first (main) call, which holds
+            # the full avg/min/max dist summary.
+            line = mock_print.call_args_list[0][0][0]
             assert "dist: avg:2.5 min:2.0 max:9.5" in line, f"expected dist stats in: {line[:300]}"
 
     def test_dist_stats_no_data_when_directed(self):
