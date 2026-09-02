@@ -59,6 +59,9 @@ import math
 import struct
 from functools import lru_cache
 
+from fuzzer_tool.core.debruijn_cache import fingerprint as _db_fingerprint
+from fuzzer_tool.core.debruijn_cache import load as _db_cache_load
+from fuzzer_tool.core.debruijn_cache import store as _db_cache_store
 from fuzzer_tool.core.mutations.generic import _get_rng
 
 # Largest region any single operator will rewrite. Operators that scribble
@@ -285,6 +288,13 @@ def _de_bruijn_symbols(k: int, n: int) -> list[int]:
     return seq
 
 
+# Fingerprint of the construction algorithm, folded into every disk-cache
+# filename (see core/debruijn_cache.py, handover 10f): computed once at
+# import time since _de_bruijn_symbols is fixed for the life of the
+# process, rather than re-hashing its source on every cache access.
+_DB_FINGERPRINT = _db_fingerprint(_de_bruijn_symbols)
+
+
 @lru_cache(maxsize=32)
 def de_bruijn_bytes(k: int, n: int) -> bytes:
     """Cached de Bruijn sequence B(k, n) rendered as bytes (``k <= 256``).
@@ -292,9 +302,20 @@ def de_bruijn_bytes(k: int, n: int) -> bytes:
     Returns an immutable ``bytes`` precisely so the cache cannot be mutated
     through: caching a mutable sequence here would corrupt every later caller
     the first time an operator wrote through the result.
+
+    Checks the on-disk cache (shared across processes on the same machine)
+    before falling back to construction, and populates it on a miss --
+    the in-memory ``@lru_cache`` above this still avoids the disk round
+    trip for repeat calls within one process.
     """
+    cache_key = f"k{k}_n{n}"
+    cached = _db_cache_load("bytes", cache_key, _DB_FINGERPRINT)
+    if cached is not None:
+        return cached
     step = 256 // k if k < 256 else 1
-    return bytes((s * step) & 0xFF for s in _de_bruijn_symbols(k, n))
+    data = bytes((s * step) & 0xFF for s in _de_bruijn_symbols(k, n))
+    _db_cache_store("bytes", cache_key, _DB_FINGERPRINT, data)
+    return data
 
 
 # (alphabet size, word length), smallest output first. k=2 with a long word
@@ -401,9 +422,18 @@ def de_bruijn_bits(n: int) -> bytes:
     Packing bit-tight also buys density for free: the same n-bit window
     space that costs ``2**n`` bytes in ``de_bruijn_bytes`` costs ``2**n``
     *bits* here, so a buffer 8x smaller reaches the same order of coverage.
+
+    Same on-disk cache as :func:`de_bruijn_bytes` (see handover 10f),
+    keyed by ``n`` alone since the alphabet is fixed at k=2 here.
     """
     n = max(n, 3)  # below 3, 2**n is not byte-aligned once packed
-    return _pack_bits_msb(_de_bruijn_symbols(2, n))
+    cache_key = f"n{n}"
+    cached = _db_cache_load("bits", cache_key, _DB_FINGERPRINT)
+    if cached is not None:
+        return cached
+    data = _pack_bits_msb(_de_bruijn_symbols(2, n))
+    _db_cache_store("bits", cache_key, _DB_FINGERPRINT, data)
+    return data
 
 
 # Bit-window widths, smallest period first. All base 2 (this variant only
