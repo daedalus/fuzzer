@@ -382,6 +382,11 @@ def cmd_fuzz(args):
             overlap_min_jaccard=getattr(args, "overlap_min_jaccard", 0.25),
             overlap_density_blend=getattr(args, "overlap_blend", 0.5),
             resize_map_on_stall=getattr(args, "resize_map_on_stall", True),
+            fractal_partition=getattr(args, "fractal_partition", False),
+            fractal_partition_depth=getattr(args, "fractal_partition_depth", 3),
+            fractal_diversity=getattr(args, "fractal_diversity", False),
+            fractal_diversity_depth=getattr(args, "fractal_diversity_depth", 3),
+            fractal_diversity_bonus=getattr(args, "fractal_diversity_bonus", 1.3),
             exp3=getattr(args, "exp3", False),
             invasion=getattr(args, "invasion", False),
             exp3_gamma=getattr(args, "exp3_gamma", 0.1),
@@ -578,6 +583,9 @@ def cmd_fuzz(args):
         overlap_density_mode=getattr(args, "overlap_mode", "modifier"),
         overlap_min_jaccard=getattr(args, "overlap_min_jaccard", 0.25),
         overlap_density_blend=getattr(args, "overlap_blend", 0.5),
+        fractal_diversity=getattr(args, "fractal_diversity", False),
+        fractal_diversity_depth=getattr(args, "fractal_diversity_depth", 3),
+        fractal_diversity_bonus=getattr(args, "fractal_diversity_bonus", 1.3),
         sensitivity=getattr(args, "sensitivity", False),
         region_profile=getattr(args, "region_profile", False),
         fluctuation=getattr(args, "fluctuation_theorems", False),
@@ -1977,6 +1985,45 @@ def main() -> int:
         type=float,
         default=0.5,
         help="Blend factor for overlap density weight modifier, 0-1 (default: 0.5)",
+    )
+    fuzz_parser.add_argument(
+        "--fractal-diversity",
+        action="store_true",
+        default=False,
+        help=(
+            "Boost seeds sitting on a fractal Voronoi boundary in the "
+            "corpus's content-hash space, as a diversity signal against "
+            "mode collapse toward one region of the hash space"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--fractal-diversity-depth",
+        type=int,
+        default=3,
+        help="Fractal layer depth for --fractal-diversity (default: 3)",
+    )
+    fuzz_parser.add_argument(
+        "--fractal-diversity-bonus",
+        type=float,
+        default=1.3,
+        help="Weight multiplier applied to boundary seeds under --fractal-diversity (default: 1.3)",
+    )
+    fuzz_parser.add_argument(
+        "--fractal-partition",
+        action="store_true",
+        default=False,
+        help=(
+            "In parallel mode (--jobs > 1), partition the shared corpus "
+            "across workers by fractal Voronoi root cell instead of fully "
+            "sharing it: a worker only pulls a sibling's seed if it owns "
+            "that seed's root cell, or the seed crosses a fractal boundary"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--fractal-partition-depth",
+        type=int,
+        default=3,
+        help="Fractal layer depth for --fractal-partition (default: 3)",
     )
     fuzz_parser.add_argument(
         "--secretary",

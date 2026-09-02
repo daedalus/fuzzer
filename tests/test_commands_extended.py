@@ -400,6 +400,43 @@ class TestCmdFuzzConstruction:
         assert dump.exists()
         assert dump.stat().st_size > 0
 
+    def test_fuzz_forwards_fractal_diversity_flags(self, monkeypatch, tmp_path):
+        """--fractal-diversity* args must reach the Fuzzer constructor."""
+        args = self._make_default_args(tmp_path)
+        args.fractal_diversity = True
+        args.fractal_diversity_depth = 5
+        args.fractal_diversity_bonus = 2.0
+        captured = {}
+
+        def fake_fuzzer(**kwargs):
+            captured.update(kwargs)
+            return MagicMock()
+
+        monkeypatch.setattr("fuzzer_tool.cli.commands.Fuzzer", fake_fuzzer)
+
+        result = cmd_fuzz(args)
+        assert result == 0
+        assert captured["fractal_diversity"] is True
+        assert captured["fractal_diversity_depth"] == 5
+        assert captured["fractal_diversity_bonus"] == 2.0
+
+    def test_fuzz_fractal_diversity_defaults_when_absent(self, monkeypatch, tmp_path):
+        """Namespace without the new attrs must not raise (getattr fallback)."""
+        args = self._make_default_args(tmp_path)  # no fractal_diversity* attrs set
+        captured = {}
+
+        def fake_fuzzer(**kwargs):
+            captured.update(kwargs)
+            return MagicMock()
+
+        monkeypatch.setattr("fuzzer_tool.cli.commands.Fuzzer", fake_fuzzer)
+
+        result = cmd_fuzz(args)
+        assert result == 0
+        assert captured["fractal_diversity"] is False
+        assert captured["fractal_diversity_depth"] == 3
+        assert captured["fractal_diversity_bonus"] == 1.3
+
     def test_fuzz_profile_hotpath_off_writes_nothing(self, monkeypatch, tmp_path):
         """Default (no --profile-hotpath) should not write a profile dump."""
         args = self._make_default_args(tmp_path)

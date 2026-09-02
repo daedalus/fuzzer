@@ -754,6 +754,9 @@ class Fuzzer:
         overlap_density_mode="modifier",
         overlap_min_jaccard=0.25,
         overlap_density_blend=0.5,
+        fractal_diversity=False,
+        fractal_diversity_depth=3,
+        fractal_diversity_bonus=1.3,
         lineage=False,
         lineage_backtrack=False,
         mcts=False,
@@ -1962,6 +1965,13 @@ class Fuzzer:
         self._overlap_min_jaccard = overlap_min_jaccard
         self._overlap_density_blend = overlap_density_blend
         self._overlap_density_cache: dict[str, float] = {}
+
+        # Fractal Voronoi corpus-diversity bonus (see
+        # core/parallel_fractal_partition.py; applied here within one
+        # corpus rather than across parallel workers)
+        self._use_fractal_diversity = fractal_diversity
+        self._fractal_diversity_depth = fractal_diversity_depth
+        self._fractal_diversity_bonus = fractal_diversity_bonus
 
         # Entropy rate tracking: (exec_count, shannon_entropy) samples
         self._entropy_execs: array = array("Q")  # exec_count per entropy sample

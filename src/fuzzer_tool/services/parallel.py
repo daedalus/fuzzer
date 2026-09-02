@@ -66,6 +66,12 @@ def _worker_main(
     contextual_alpha: float = 1.0,
     contextual_lambda: float = 1.0,
     resize_map_on_stall: bool = True,
+    n_workers: int = 1,
+    fractal_partition: bool = False,
+    fractal_partition_depth: int = 3,
+    fractal_diversity: bool = False,
+    fractal_diversity_depth: int = 3,
+    fractal_diversity_bonus: float = 1.3,
 ):
     """Entry point for each fuzzing worker process."""
     from fuzzer_tool.services.fuzzer import Fuzzer
@@ -134,6 +140,9 @@ def _worker_main(
         contextual_alpha=contextual_alpha,
         contextual_lambda=contextual_lambda,
         resize_map_on_stall=resize_map_on_stall,
+        fractal_diversity=fractal_diversity,
+        fractal_diversity_depth=fractal_diversity_depth,
+        fractal_diversity_bonus=fractal_diversity_bonus,
     )
 
     print(f"{prefix} Started (target={target})")
@@ -148,7 +157,14 @@ def _worker_main(
 
             now = time.time()
             if now - last_sync >= sync_interval:
-                _sync_corpus_in(Path(corpus_dir), fuzzer, self_dir=worker_corpus)
+                _sync_corpus_in(
+                    Path(corpus_dir),
+                    fuzzer,
+                    self_dir=worker_corpus,
+                    worker_id=worker_id if fractal_partition else None,
+                    n_workers=n_workers if fractal_partition else None,
+                    fractal_depth=fractal_partition_depth,
+                )
                 last_sync = now
 
             seed_data = fuzzer._pick_seed()
@@ -368,6 +384,11 @@ def run_parallel(
     contextual_alpha: float = 1.0,
     contextual_lambda: float = 1.0,
     resize_map_on_stall: bool = True,
+    fractal_partition: bool = False,
+    fractal_partition_depth: int = 3,
+    fractal_diversity: bool = False,
+    fractal_diversity_depth: int = 3,
+    fractal_diversity_bonus: float = 1.3,
 ):
     """Launch N parallel fuzzer workers sharing the same corpus directory.
 
@@ -456,6 +477,12 @@ def run_parallel(
         contextual_alpha=contextual_alpha,
         contextual_lambda=contextual_lambda,
         resize_map_on_stall=resize_map_on_stall,
+        n_workers=jobs,
+        fractal_partition=fractal_partition,
+        fractal_partition_depth=fractal_partition_depth,
+        fractal_diversity=fractal_diversity,
+        fractal_diversity_depth=fractal_diversity_depth,
+        fractal_diversity_bonus=fractal_diversity_bonus,
     )
 
     def _spawn_worker(worker_id: int, rng_seed: int) -> multiprocessing.Process:

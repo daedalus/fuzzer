@@ -886,6 +886,39 @@ class SeedPicker:
         modifier = 1.0 + blend * (0.5 - density)
         return w * max(modifier, 0.1)
 
+    def _weight_fractal_diversity(self, seed: bytes, w: float, f) -> float:
+        """Boost seeds on a fractal Voronoi boundary in content-hash space.
+
+        Reuses the deterministic partition ``core/parallel_fractal_partition``
+        uses for cross-worker assignment (Approach C), applied here within a
+        single corpus instead: a seed whose content hash sits on a partition
+        "coastline" is one a small content change could plausibly have
+        pushed into a neighboring cluster, so it is mildly boosted as a
+        cheap counter to mode collapse toward one region of the corpus's
+        own hash space.
+
+        This intentionally says nothing about program or coverage
+        structure -- only about spread across a partition of content
+        hashes -- unlike the bitmap-remapping idea from
+        ``docs/handover/fractal-voronoi-integration.md``'s Approach B,
+        which would inherit the same lack of signal
+        ``EdgeTracker.compute_coverage_proximity`` already documents for
+        edge-id adjacency (see that method's docstring): edge/bitmap
+        positions come from a hash and carry no spatial meaning, whereas a
+        seed's content hash is exactly what it claims to be.
+
+        A no-op unless ``--fractal-diversity`` is set.
+        """
+        if not getattr(f, "_use_fractal_diversity", False):
+            return w
+        from fuzzer_tool.core.parallel_fractal_partition import crosses_boundary
+
+        depth = getattr(f, "_fractal_diversity_depth", 3)
+        bonus = getattr(f, "_fractal_diversity_bonus", 1.3)
+        if crosses_boundary(seed, depth):
+            return w * bonus
+        return w
+
     def _weight_validity(self, meta: dict, w: float, f) -> float:
         """Boost seeds the target accepted (Zest validity channel).
 
@@ -1201,6 +1234,7 @@ class SeedPicker:
             w = self._weight_static_features(seed, meta["coverage_edges"], w, f)
             w = self._weight_length_and_cross_target(seed, meta, w, f)
             w = self._weight_overlap_density(sk, w, f)
+            w = self._weight_fractal_diversity(seed, w, f)
             w = self._weight_validity(meta, w, f)
             w *= lineage_div.get(sk, 1.0)
             w = self._weight_lineage_backtrack(sk, w, fuzz_count, f, bt_key_to_seed)
