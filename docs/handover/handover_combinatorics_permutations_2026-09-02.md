@@ -26,6 +26,29 @@ across all 13 — three distinct shapes exist, which changes the shape of the
   blend weight below 1.0. See the revised §10i for the argument and the
   one real (narrower) edge case found instead.
 
+**Revision (2026-09-02, second implementation pass — §10f, and a bug
+caught by §10a's own test suite):**
+- **§10f implemented.** `core/debruijn_cache.py` — see the revised §10f
+  for details.
+- **A real regression was caught, not just a hypothetical one.**
+  `_swap_pair`'s first version passed a bare `range(start, domain)` to
+  `rng.sample(...)`. That's fine under stdlib `random` and `RandPool`,
+  but `ExhaustivePool.sample()` only recognizes `list | tuple | bytes`
+  as a sequence population and misreads a bare `range` as the
+  population *size*, crashing with `TypeError` the first time an
+  operator ran under exhaustive enumeration
+  (`tests/test_exhaustive_pool.py` caught it: 4 failures, all in
+  `x86._swap_insns`). This is exactly the failure mode 10 of the
+  original 13 call sites avoided by wrapping in `list(range(...))` —
+  the other 3 (`asf`, `riff`, `adts`) only got away with a bare `range`
+  because nothing had exercised them under `ExhaustivePool` yet.
+  Fixed by wrapping in `list(...)` inside the helper; 4 new regression
+  tests drive `_swap_pair` directly through `ExhaustivePool.runs()` so
+  this is pinned independent of which operator sweep happens to
+  exercise it. Full suite: 21 failed → 17 failed (the removed 4 were
+  all in `test_exhaustive_pool.py`; the remaining 17 match the
+  pre-existing baseline, confirmed via `git stash`).
+
 ---
 
 ## 0. Rule
@@ -775,6 +798,8 @@ canonical form, and forcing one would break the existing parser.
 
 ### 10f — The cache for de Bruijn constructions is per-process only
 
+**Status: implemented (2026-09-02).**
+
 **Where:** `core/mutations/structured.py:288-298` (`de_bruijn_bytes`)
 and `core/mutations/structured.py:390-407` (`de_bruijn_bits`).
 
@@ -785,6 +810,21 @@ hits; across N processes each rebuilds.
 **Risk:** low — the sequences are pure functions of `(k, n)`. A
 content-addressed cache keyed by `(k, n)` would deduplicate across
 processes automatically.
+
+**What shipped:** `core/debruijn_cache.py`, following the existing
+`cfg_cache.py` convention (XDG-aware `~/.cache/`,
+`FUZZER_DISABLE_DEBRUIJN_CACHE` env override, atomic tempfile+replace
+writes, best-effort with logged warnings on I/O failure), simplified
+since the payload is raw `bytes` rather than a pickled class graph —
+invalidation is one sha256 fingerprint over `_de_bruijn_symbols`'
+source folded into the filename, so an algorithm edit just orphans the
+old artifacts instead of needing runtime validation. Both functions
+check the disk cache before falling back to construction and populate
+it on a miss; the `@lru_cache` above each still absorbs repeat calls
+within one process. Verified end-to-end with two real subprocesses
+sharing one cache directory (`tests/test_debruijn_cache.py`) — the
+second reads the artifact the first wrote, byte-identical output,
+without recomputing.
 
 ### 10g — The `byte_shuffle` operator is registered but only the byte version exists
 
