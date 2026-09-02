@@ -13,6 +13,19 @@ swap-pair call sites directly. The idiom is **not textually identical**
 across all 13 — three distinct shapes exist, which changes the shape of the
 `_swap_pair` helper proposed in §10a. See the updated §2 and §10a below.
 
+**Revision (2026-09-02, implementation pass on §10a / §10i):**
+- **§10a implemented.** `_swap_pair(domain, rng, *, start=0)` added to
+  `core/mutations/generic.py`; all 15 call sites refactored (13 from the
+  original table plus `zip.py`/`webp.py`, which use the identical idiom
+  but were missing from the original survey — see §2). 20 new regression
+  tests in `tests/test_swap_pair.py`, all passing; full existing suite
+  re-run before/after with no new failures attributable to this change.
+- **§10i downgraded from "gap" to "verified no-op."** The literal fix
+  proposed there was checked by direct computation before implementing
+  it: it does not change the scheduler's selection behavior for any
+  blend weight below 1.0. See the revised §10i for the argument and the
+  one real (narrower) edge case found instead.
+
 ---
 
 ## 0. Rule
@@ -798,20 +811,45 @@ implemented is a read-the-source question I haven't verified.
 
 **Where:** `core/schedulers/monte_carlo.py:241-264` (`select_op`).
 
-The chain can only blend toward pair scores after it has at least one
-transition recorded. Before that, `pairwise_blend` is silently ignored
-(early return at line 241). The transition matrix bootstrap is by
-design, but it means **the first ~1000 selections get no benefit from
-the pairwise structure**, even though that's exactly when bias toward
-useful operators would help.
+**Revision (2026-09-02, verified by direct computation — see below):**
+the fix as originally proposed here **does not change behavior** for any
+realistic configuration. Downgraded from "gap to implement" to "verified
+no-op, one real edge case identified instead."
 
-**The fix:** seed the transition matrix with a uniform prior (every
-op→op transition has count 1) so the pair-score is informative from
-the first selection.
+The existing pair-score formula (`monte_carlo.py:250`) —
+`pair_scores[op] = (count + 1) / (total + len(ops))` — is *already* a
+uniform Dirichlet(α=1) prior. When `total == 0` (no transitions recorded
+yet from this specific `prev_op`), every op gets the identical score
+`1 / len(ops)`. Blended as `w * pair + (1 - w) * thompson` (line 255),
+adding the same constant to every op's score under a positive multiplier
+`(1 - w)` is a monotonic transform of the Thompson scores — it **cannot
+change the argmax** for any blend weight `w < 1`. Verified numerically
+across `w ∈ {0, 0.1, 0.5, 0.9, 0.999}`: the early-return path
+(`prev_op not in transition_total` → pure Thompson) and the "always
+compute the blend" path select the identical operator every time.
 
-**Risk:** changes the meaning of the matrix — the prior would
-contaminate early estimates. A "burn-in" threshold that ignores the
-prior once observed counts exceed a floor would mitigate.
+So the early-return at line 241 is not a bug suppressing an available
+signal — it's a (redundant but harmless) special case of behavior the
+formula already produces on its own. Seeding literal uniform prior
+counts, as originally proposed, would reproduce the same no-op.
+
+**The one real finding:** the equivalence breaks at the edge case
+`pairwise_blend == 1.0` *and* `total == 0`. There, the early-return
+correctly falls back to pure Thompson, while an "always blend" version
+would collapse every op's score to the same constant and `max()` would
+deterministically return `ops[0]` — an arbitrary, order-dependent
+selection with zero informational basis. This is a narrower latent
+edge case than what this section originally described (a config-only
+corner: `pairwise_blend` is user/caller-supplied and 1.0 is an extreme,
+probably-unintended value), not the "first ~1000 selections get no
+benefit" claim.
+
+**Status: closed as originally stated.** If the `pairwise_blend == 1.0`
+edge case is worth guarding, the fix is a one-line clamp
+(`min(pairwise_blend, some_max_below_1)` at the config boundary or a
+`w == 1.0` special-case in `select_op`), not a transition-matrix prior —
+scoped separately from this section since it's a different mechanism
+than what was proposed here.
 
 ---
 
