@@ -175,11 +175,13 @@ class TargetDistance:
         target: str,
         targets: list[str] | None = None,
         use_cfg_cache: bool = True,
+        debug: bool = False,
     ):
         self.target = target
         self.target_names: list[str] = targets or []
         self.target_addrs: set[int] = set()
         self._use_cfg_cache = use_cfg_cache
+        self._debug = debug
 
         # Function table: name -> (start_addr, end_addr)
         self.functions: dict[str, tuple[int, int]] = {}
@@ -232,25 +234,32 @@ class TargetDistance:
         t0 = time.perf_counter()
         if not self._parse_symbols(self._elf_data):
             return False
-        print(f"[dist] parse_symbols={time.perf_counter() - t0:.3f}s")
+        if self._debug:
+            print(f"[dist] parse_symbols={time.perf_counter() - t0:.3f}s")
         t0 = time.perf_counter()
         self._resolve_targets()
-        print(f"[dist] resolve_targets={time.perf_counter() - t0:.3f}s")
+        if self._debug:
+            print(f"[dist] resolve_targets={time.perf_counter() - t0:.3f}s")
         t0 = time.perf_counter()
         self._build_call_graph(self._elf_data)
-        print(f"[dist] build_call_graph={time.perf_counter() - t0:.3f}s")
+        if self._debug:
+            print(f"[dist] build_call_graph={time.perf_counter() - t0:.3f}s")
         t0 = time.perf_counter()
         self._compute_distances()
-        print(f"[dist] compute_distances={time.perf_counter() - t0:.3f}s")
+        if self._debug:
+            print(f"[dist] compute_distances={time.perf_counter() - t0:.3f}s")
         t0 = time.perf_counter()
         self._build_cfgs()
-        print(f"[dist] build_cfgs={time.perf_counter() - t0:.3f}s")
+        if self._debug:
+            print(f"[dist] build_cfgs={time.perf_counter() - t0:.3f}s")
         t0 = time.perf_counter()
         self._compute_bb_values()
-        print(f"[dist] compute_bb_values={time.perf_counter() - t0:.3f}s")
+        if self._debug:
+            print(f"[dist] compute_bb_values={time.perf_counter() - t0:.3f}s")
         t0 = time.perf_counter()
         self._build_np_index()
-        print(f"[dist] build_np_index={time.perf_counter() - t0:.3f}s")
+        if self._debug:
+            print(f"[dist] build_np_index={time.perf_counter() - t0:.3f}s")
 
         self._loaded = True
         log.info(

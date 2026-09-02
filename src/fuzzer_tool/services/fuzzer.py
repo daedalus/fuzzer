@@ -13,6 +13,10 @@ import sys
 import tempfile
 import threading
 import time
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from fuzzer_tool.services.corpus_manager import PoissonDiskAdmission as _PoissonDiskAdmission
 from array import array
 from pathlib import Path
 
@@ -2025,7 +2029,9 @@ class Fuzzer:
         if targets:
             from fuzzer_tool.core.distance import TargetDistance
 
-            self._distance = TargetDistance(target, targets, use_cfg_cache=use_cfg_cache)
+            self._distance = TargetDistance(
+                target, targets, use_cfg_cache=use_cfg_cache, debug=self.debug
+            )
             self._dist_table_shm = None
             if self._distance.load():
                 print(
@@ -2069,7 +2075,7 @@ class Fuzzer:
             try:
                 from fuzzer_tool.services.katz_channel import KatzChannel
 
-                ch = KatzChannel.build(target, use_cfg_cache=use_cfg_cache)
+                ch = KatzChannel.build(target, use_cfg_cache=use_cfg_cache, debug=self.debug)
                 if ch is not None and ch.upload():
                     self._katz_channel = ch
                     print(
