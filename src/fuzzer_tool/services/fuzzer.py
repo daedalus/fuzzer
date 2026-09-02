@@ -689,11 +689,13 @@ class Fuzzer:
         inprocess_direct=False,
         inprocess_func="LLVMFuzzerTestOneInput",
         calibrate_stability=0,
-        cmplog=None,  # None = auto-detect, True = force on, False = force off
+        # cmplog is always on by default; --no-cmplog-fifo-sink disables
+        # the FIFO drain mode but not the comparison tracing itself.
+        cmplog=True,
         cmplog_max_tokens=0,
         cmplog_max_pairs=0,
         cmplog_workdir=None,
-        cmplog_fifo_sink=False,
+        cmplog_fifo_sink=True,
         cmplog_fifo_sink_size=None,
         asan_target=None,
         ubsan_target=None,
@@ -833,6 +835,10 @@ class Fuzzer:
         weizz_tags=False,
         weizz_tags_max_len=8192,
         email_on_crash=None,
+        # Poisson-disk admission (proactive corpus diversity via MinHash LSH).
+        # Appended at the end so positional callers of Fuzzer() are not shifted.
+        poisson_disk_admission=False,
+        poisson_disk_min_jaccard=0.25,
     ):
         # Snapshot os.environ before anything below (or later in run()) can
         # write __AFL_DIST_SHM_ID / __AFL_SHM_ID / AFL_MAP_SIZE / LD_PRELOAD /
@@ -1075,27 +1081,19 @@ class Fuzzer:
         self._calibrate_stability = int(calibrate_stability or 0)
         self._unstable_edges: set[int] = set()
         self._stability_calibrations = 0
-        self._cmplog_auto = cmplog is None
-        # Always detect whether the target is instrumented, regardless of
-        # the tri-state. The detection result drives the confirmation
-        # message; the tri-state decides whether cmplog runs.
-        has_cmplog = _detect_cmplog(self.target)
-        if cmplog is None:
-            cmplog = has_cmplog
-            if cmplog:
-                print(
-                    "[*] Cmplog: target is instrumented, enabling automatically (--no-cmplog to disable)"
-                )
-        elif cmplog and has_cmplog:
-            # Force-enabled via --cmplog or --hail-mary; confirm detection.
-            print("[*] Cmplog: target is instrumented, cmplog enabled")
-        elif cmplog and not has_cmplog:
-            # Force-enabled but target has no cmplog instrumentation.
-            print(
-                "[!] Cmplog: --cmplog enabled but target is not instrumented; "
-                "shim compilation will be attempted"
-            )
+        self._cmplog_auto = True  # always auto-detect; no tri-state any more
+        # Cmplog is always on by default; detection runs unconditionally to
+        # drive the confirmation message and decide whether to build the shim.
+        # cmplog=False is accepted for programmatic callers that need it off.
         if cmplog:
+            has_cmplog = _detect_cmplog(self.target)
+            if has_cmplog:
+                print("[*] Cmplog: target is instrumented, enabling comparison tracing")
+            else:
+                print(
+                    "[!] Cmplog: target does not appear to be instrumented; "
+                    "shim compilation will be attempted"
+                )
             from fuzzer_tool.core.cmplog import CmplogCollector
 
             self._cmplog = CmplogCollector(
@@ -1437,6 +1435,10 @@ class Fuzzer:
         self._runner = TargetRunner(self)
         self._stats = StatsReporter(self)
         self._corpus_manager = CorpusManager(self)
+        self._poisson_admission = None  # lazy-init; created on first save_to_corpus()
+        # PoissonDiskAdmission holds a reference to _edge_tracker._minhash,
+        # which is only fully initialized after corpus init; lazily create it
+        # on first admission check so the reference is valid.
 
         # Hardware performance counters (optional, requires CAP_PERFMON)
         self._perf_counters = None
@@ -1983,6 +1985,23 @@ class Fuzzer:
         self._overlap_min_jaccard = overlap_min_jaccard
         self._overlap_density_blend = overlap_density_blend
         self._overlap_density_cache: dict[str, float] = {}
+
+        # Poisson-disk admission (proactive corpus diversity).
+        # Bridges Bridson/Mitchell Poisson-disk sampling into the fuzzer's
+        # corpus save path: query MinHashLSH.find_similar() at admission
+        # time and reject seeds whose edge signature is closer than the
+        # Jaccard radius to any already-admitted corpus member, with a
+        # rare-edge safety valve so seeds contributing new edges are kept.
+        self._use_poisson_disk_admission = poisson_disk_admission
+        self._poisson_disk_min_jaccard = poisson_disk_min_jaccard
+        self._admitted_keys: set[str] = set()
+        self._redundant_admission_count = 0
+        self._poisson_reject_count = 0
+        self._poisson_near_dup_admit_count = 0
+        self._poisson_admission: _PoissonDiskAdmission | None = None
+        # Track distinct LSH buckets touched for maximality signal.
+        self._poisson_occupied_buckets: set[tuple[int, int]] = set()
+        self._poisson_last_new_bucket_exec = 0
 
         # Fractal Voronoi corpus-diversity bonus (see
         # core/parallel_fractal_partition.py; applied here within one

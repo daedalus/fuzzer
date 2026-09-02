@@ -232,6 +232,15 @@ def _run_summary(f) -> str:
         lines.append(f"  Cmplog:          enabled ({n_tok}t {n_prs}p)")
     else:
         lines.append("  Cmplog:          disabled")
+    if getattr(f, "_use_poisson_disk_admission", False):
+        rej = getattr(f, "_poisson_reject_count", 0)
+        near = getattr(f, "_poisson_near_dup_admit_count", 0)
+        n_admitted = len(getattr(f, "_admitted_keys", set()) or ())
+        n_buckets = len(getattr(f, "_poisson_occupied_buckets", set()) or ())
+        lines.append(f"  Poisson disk:     enabled")
+        lines.append(f"  Admitted seeds:   {n_admitted}")
+        lines.append(f"  Poisson rejects:  {rej} (near-dup admitted: {near})")
+        lines.append(f"  Occupied buckets: {n_buckets}")
     smt_enabled = False
     with contextlib.suppress(AttributeError):
         smt_enabled = (

@@ -311,6 +311,14 @@ class StatsReporter:
             print(
                 f"  Recovery execs:    {f._stall_recovery_execs:,} ({f._stall_recovery_execs / max(1, f.exec_count) * 100:.1f}%)"
             )
+        if getattr(f, "_use_poisson_disk_admission", False):
+            print(
+                f"  Poisson rejects:   {getattr(f, '_poisson_reject_count', 0)} "
+                f"(near-dup admitted: {getattr(f, '_poisson_near_dup_admit_count', 0)})"
+            )
+            print(
+                f"  Poisson occupied buckets: {len(getattr(f, '_poisson_occupied_buckets', set()) or ())}"
+            )
         self._print_summary_coverage(f)
         self._print_summary_seeds(f)
         self._print_summary_rarity(f)
@@ -895,6 +903,18 @@ class StatsReporter:
         except (AttributeError, TypeError):
             pass
 
+        # Poisson-disk admission: surface admit/reject counts in the live line.
+        poisson_str = ""
+        if getattr(f, "_use_poisson_disk_admission", False):
+            try:
+                rej = getattr(f, "_poisson_reject_count", 0)
+                near = getattr(f, "_poisson_near_dup_admit_count", 0)
+                n_admitted = len(getattr(f, "_admitted_keys", set()) or ())
+                n_buckets = len(getattr(f, "_poisson_occupied_buckets", set()) or ())
+                poisson_str = f" | poisson: {n_admitted} ad rej:{rej} near:{near} bk:{n_buckets}"
+            except (AttributeError, TypeError):
+                pass
+
         bayes_str = ""
         if getattr(f, "_use_bayesian", False) and getattr(f, "_seed_quality", None):
             try:
@@ -943,6 +963,7 @@ class StatsReporter:
             f"{smt_str}{cov_str}{ph_str}{dropped_str}{dist_str}{mc_str}{qea_str}{ga_str}{mi_str}{elo_str}"
             f"{sens_str}{te_str}{sec_str}{shap_str}{fs_str}{rep_str}{mopt_str}"
             f"{bayes_str}{misc_str}"
+            f"{poisson_str}"
             f"{div_str}{jac_str}{dr_str}{density_str}{repro_str}{brier_str}{crps_str}"
             f"{ent_str}{simp_str}{rate_str}{fmt_str}{perf_str}{hf_str}{ops_str}"
         )
@@ -974,38 +995,39 @@ class StatsReporter:
         f = self.f
         parts = []
 
-        # Pruning / dedup
-        if f._pruned_count > 0:
-            parts.append(f"pruned:{f._pruned_count}")
-        if f._duplicate_reject_count > 0:
-            parts.append(f"dup:{f._duplicate_reject_count}")
+        # Pruning / dedup / stall recovery / corpus size / replay stats.
+        # All of these read fuzzer attributes that may not exist on a
+        # mock fuzzer or a freshly constructed one; wrap them so a missing
+        # attribute silently drops the stat rather than crashing the tick.
+        try:
+            if f._pruned_count > 0:
+                parts.append(f"pruned:{f._pruned_count}")
+            if f._duplicate_reject_count > 0:
+                parts.append(f"dup:{f._duplicate_reject_count}")
+            if f._stall_recovery_count > 0:
+                parts.append(f"stall-rec:{f._stall_recovery_count}")
 
-        # Stall recovery
-        if f._stall_recovery_count > 0:
-            parts.append(f"stall-rec:{f._stall_recovery_count}")
+            corpus_bytes = sum(len(s) for s in f.corpus)
+            if corpus_bytes > 1024 * 1024:
+                parts.append(f"corpus-mb:{corpus_bytes // (1024 * 1024)}")
+            elif corpus_bytes > 1024:
+                parts.append(f"corpus-kb:{corpus_bytes // 1024}")
 
-        # Corpus byte size
-        corpus_bytes = sum(len(s) for s in f.corpus)
-        if corpus_bytes > 1024 * 1024:
-            parts.append(f"corpus-mb:{corpus_bytes // (1024 * 1024)}")
-        elif corpus_bytes > 1024:
-            parts.append(f"corpus-kb:{corpus_bytes // 1024}")
+            if f.corpus:
+                avg_len = corpus_bytes // len(f.corpus)
+                parts.append(f"avg-len:{avg_len}")
 
-        # Average input size
-        if f.corpus:
-            avg_len = corpus_bytes // len(f.corpus)
-            parts.append(f"avg-len:{avg_len}")
-
-        # Replay stats
-        if f._crash_replays:
-            done = [v for v in f._crash_replays.values() if len(v) >= f.replay_n]
-            if done:
-                avg_repro = (
-                    sum(sum(1 for r in replays if r >= 0) / len(replays) for replays in done)
-                    / len(done)
-                    * 100
-                )
-                parts.append(f"repro:{avg_repro:.0f}%")
+            if f._crash_replays:
+                done = [v for v in f._crash_replays.values() if len(v) >= f.replay_n]
+                if done:
+                    avg_repro = (
+                        sum(sum(1 for r in replays if r >= 0) / len(replays) for replays in done)
+                        / len(done)
+                        * 100
+                    )
+                    parts.append(f"repro:{avg_repro:.0f}%")
+        except (AttributeError, TypeError):
+            pass
 
         # CMA-ES
         if getattr(f, "_cmaes", None):

@@ -381,6 +381,8 @@ def cmd_fuzz(args):
             overlap_density_mode=getattr(args, "overlap_mode", "modifier"),
             overlap_min_jaccard=getattr(args, "overlap_min_jaccard", 0.25),
             overlap_density_blend=getattr(args, "overlap_blend", 0.5),
+            poisson_disk_admission=getattr(args, "poisson_disk_admission", False),
+            poisson_disk_min_jaccard=getattr(args, "poisson_disk_min_jaccard", 0.25),
             resize_map_on_stall=getattr(args, "resize_map_on_stall", True),
             fractal_partition=getattr(args, "fractal_partition", False),
             fractal_partition_depth=getattr(args, "fractal_partition_depth", 3),
@@ -511,12 +513,12 @@ def cmd_fuzz(args):
         net_keepalive=getattr(args, "net_keepalive", False),
         net_settle_ms=getattr(args, "net_settle_ms", 10),
         calibrate_stability=getattr(args, "calibrate_stability", 0),
-        cmplog=args.cmplog,
+        cmplog=True,
         cmplog_max_tokens=getattr(args, "cmplog_max_tokens", 0),
         cmplog_max_pairs=getattr(args, "cmplog_max_pairs", 0),
         cmplog_workdir=getattr(args, "cmplog_workdir", None)
         or None,  # Will fall back to cachedir in CmplogCollector
-        cmplog_fifo_sink=getattr(args, "cmplog_fifo_sink", False),
+        cmplog_fifo_sink=getattr(args, "cmplog_fifo_sink", True),
         cmplog_fifo_sink_size=getattr(args, "cmplog_fifo_sink_size", None),
         max_corpus=args.max_corpus,
         max_corpus_bytes=getattr(args, "max_corpus_bytes", 0),
@@ -584,6 +586,8 @@ def cmd_fuzz(args):
         overlap_density_mode=getattr(args, "overlap_mode", "modifier"),
         overlap_min_jaccard=getattr(args, "overlap_min_jaccard", 0.25),
         overlap_density_blend=getattr(args, "overlap_blend", 0.5),
+        poisson_disk_admission=getattr(args, "poisson_disk_admission", False),
+        poisson_disk_min_jaccard=getattr(args, "poisson_disk_min_jaccard", 0.25),
         fractal_diversity=getattr(args, "fractal_diversity", False),
         fractal_diversity_depth=getattr(args, "fractal_diversity_depth", 3),
         fractal_diversity_bonus=getattr(args, "fractal_diversity_bonus", 1.3),
@@ -1299,6 +1303,8 @@ def cmd_estimate(args):
         crashes_dir=args.corpus + "/crashes",
         timeout=5,
         calibrate=args.calibrate,
+        cmplog=True,
+        cmplog_fifo_sink=True,
     )
     fuzzer._run_calibration(args.calibrate)
 
@@ -1507,6 +1513,14 @@ def cmd_sweep(args):
 # --refresh-profile and --profile-hotpath, since hail-mary is already slow
 # and adding full profiling/cProfile overhead per iteration makes it
 # untrackable rather than exploratory.
+# Also excluded (not strategy gates): --debug (verbose noise),
+# --arm-mutate/--x86-mutate (require cross-arch toolchain),
+# --enable-regex-bomb-mutations (experimental),
+# --send-mail-require-tls (email config).
+# poisson_disk_admission was added by PR: poisson-disk admission gate.
+# cmplog_fifo_sink was changed to --no-cmplog-fifo-sink (opt-out,
+# default=True) in the same commit; added to _HAIL_MARY_FLAGS so the
+# FIFO drain is force-enabled alongside the rest of the strategy set.
 _HAIL_MARY_FLAGS = (
     "continue_until_crash",
     "deep_coverage",
@@ -1535,9 +1549,11 @@ _HAIL_MARY_FLAGS = (
     "ducb",
     "swucb",
     "cucb",
+    "fractal_partition",
     "contextual",
     "invasion",
     "overlap_density",
+    "poisson_disk_admission",
     "secretary",
     "sensitivity",
     "region_profile",
@@ -1567,6 +1583,7 @@ _HAIL_MARY_FLAGS = (
     "hw_perf",
     "colorize",
     "weizz_tags",
+    "cmplog_fifo_sink",
     "reseed_on_stall",
     "fractal_diversity",
 )
@@ -1582,12 +1599,6 @@ def _apply_hail_mary(args: argparse.Namespace, fuzz_parser: argparse.ArgumentPar
     # it arbitrates between), not a plain bool -- special-case it.
     if args.elo == fuzz_parser.get_default("elo"):
         args.elo = "all"
-
-    # --cmplog is a tri-state (None=auto, True=on, False=off); force it on.
-    if args.cmplog == fuzz_parser.get_default("cmplog"):
-        args.cmplog = True
-        # Note: cmplog initialization will always call _detect_cmplog() and
-        # print an appropriate message regardless of how cmplog was enabled.
 
     # Boltzmann/Metropolis annealing is inert without a nonzero budget --
     # give it one so enabling the flags actually does something.
@@ -1990,6 +2001,18 @@ def main() -> int:
         help="Blend factor for overlap density weight modifier, 0-1 (default: 0.5)",
     )
     fuzz_parser.add_argument(
+        "--poisson-disk-admission",
+        action="store_true",
+        default=False,
+        help="Enable Poisson-disk admission (proactive corpus diversity gate via MinHash LSH)",
+    )
+    fuzz_parser.add_argument(
+        "--poisson-disk-min-jaccard",
+        type=float,
+        default=0.25,
+        help="Minimum Jaccard similarity threshold for Poisson-disk admission (default: 0.25)",
+    )
+    fuzz_parser.add_argument(
         "--fractal-diversity",
         action="store_true",
         default=False,
@@ -2330,12 +2353,11 @@ def main() -> int:
     fuzz_parser.add_argument(
         "--auto-timeout", action="store_true", help="Auto-tune timeout by probing target at startup"
     )
-    # Tri-state: None = auto (enable when the target is detected as
-    # cmplog/tracecmp-instrumented), True = force on, False = force off.
-    # Magic-value and checksum branches are where edge discovery plateaus on
-    # real formats, and _detect_cmplog() identifies instrumented targets
-    # reliably, so making the user remember the flag cost coverage for no
-    # reason. --no-cmplog is the opt-out, matching --no-forkserver.
+    # cmplog (comparison tracing via LD_PRELOAD memcmp/strcmp/memchr interception)
+# is always enabled by default; _detect_cmplog() identifies instrumented
+# targets reliably, so making the user remember the flag cost coverage for no
+# reason. --no-cmplog-fifo-sink disables the FIFO drain mode instead of
+# disabling cmplog entirely.
     fuzz_parser.add_argument(
         "--calibrate-stability",
         type=int,
@@ -2350,17 +2372,6 @@ def main() -> int:
             "N=8 recovers it 87%% of the time. See "
             "docs/sweeps/synthetic_target_ground_truth_2026-08-19.md. "
             "Costs N extra executions per accepted seed."
-        ),
-    )
-    fuzz_parser.add_argument(
-        "--cmplog",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help=(
-            "Comparison tracing via LD_PRELOAD "
-            "(memcmp/strcmp/strncmp/memchr interception). "
-            "Default: on when the target is detected as instrumented; "
-            "--no-cmplog forces it off."
         ),
     )
     fuzz_parser.add_argument(
@@ -2412,8 +2423,8 @@ def main() -> int:
     )
     fuzz_parser.add_argument(
         "--cmplog-fifo-sink",
-        action="store_true",
-        default=False,
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help=(
             "Use a FIFO (named pipe) for cmplog output instead of a regular file. "
             "The FIFO is drained continuously by a background thread, so the cmplog "

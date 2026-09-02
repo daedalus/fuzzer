@@ -13,6 +13,12 @@ This test derives the set of opt-in gates from the *shipped* source of
 Deliberate exclusions documented next to ``_HAIL_MARY_FLAGS`` are allow-listed.
 An end-to-end check runs the real parser with ``--hail-mary`` and verifies
 every listed dest is force-enabled.
+
+Note: cmplog (comparison tracing) is always enabled by default with no
+dedicated argparse dest; the cmplog-related flags (``--cmplog-max-tokens``,
+``--cmplog-max-pairs``, ``--cmplog-workdir``, ``--cmplog-fifo-sink``)
+are --cmplog-conditional and do not gate whether cmplog is on.
+``--no-cmplog-fifo-sink`` is an opt-out for the FIFO drain mode only.
 """
 
 from __future__ import annotations
@@ -30,18 +36,28 @@ _COMMANDS_PATH = Path(commands.__file__).resolve()
 #   * --resume (fails without prior state)
 #   * --refresh-profile / --profile-hotpath (hail-mary already slow; profiling
 #     makes exploratory run untrackable)
+#   * --debug (hail-mary is already verbose; extra debug is noise)
+#   * --arm-mutate / --x86-mutate (require cross-arch toolchain; hail-mary
+#     force-enables only the x86 path by default)
+#   * --enable-regex-bomb-mutations (experimental, untested; not a strategy)
+#   * --send-mail-require-tls (email config; not a strategy)
 # Special-cased inside _apply_hail_mary (not plain bool dests in the tuple):
 #   * elo (string value "all")
-#   * cmplog (tri-state None/True/False)
 #   * anneal_budget (int)
 # Default-on BooleanOptionalAction features are not additive opt-ins.
+# cmplog is always on (no argparse dest).  cmplog_fifo_sink is default-on
+# BooleanOptionalAction, so it is in the tuple, not the exclusion set.
 _EXCLUDED_OPT_IN = frozenset(
     {
         "hail_mary",
         "resume",
-        "cmplog",  # special-cased
         "refresh_profile",  # profiling: hail-mary already slow, full re-analysis per run is overkill
         "profile_hotpath",  # cProfile overhead makes exploratory run untrackable
+        "debug",  # hail-mary is already verbose; extra debug is noise
+        "arm_mutate",  # cross-arch toolchain; hail-mary force-enables only x86
+        "x86_mutate",  # cross-arch toolchain; hail-mary force-enables only x86
+        "enable_regex_bomb_mutations",  # experimental, untested
+        "send_mail_require_tls",  # email config, not a strategy
     }
 )
 
@@ -178,5 +194,4 @@ class TestHailMaryWiresEveryOptInGate:
         for dest in commands._HAIL_MARY_FLAGS:
             assert getattr(args, dest) is True, f"--hail-mary left {dest!r} off"
         assert args.elo == "all"
-        assert args.cmplog is True
         assert args.anneal_budget == 10000

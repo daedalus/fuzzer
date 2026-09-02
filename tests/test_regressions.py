@@ -1503,7 +1503,7 @@ class TestResumeWithSensitivityJson:
 
 
 class TestSmtRequiresCmplog:
-    """--enable-smt-z3 without --cmplog must not leave SMT enabled."""
+    """--enable-smt-z3 with cmplog=False must not leave SMT enabled."""
 
     def test_smt_disabled_when_cmplog_missing(self):
         from unittest.mock import patch

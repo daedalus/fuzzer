@@ -16,8 +16,10 @@ import hashlib
 import logging
 import os
 import shutil
+import struct
 import time
 from array import array
+from enum import Enum
 from pathlib import Path
 
 import xxhash
@@ -36,6 +38,131 @@ from fuzzer_tool.core.running_stats import RunningMoments
 from fuzzer_tool.services.operators import HAVOC_SUB_OPS
 
 log = logging.getLogger(__name__)
+
+
+class PoissonAdmissionDecision(Enum):
+    """Outcome of Poisson-disk admission check."""
+
+    ADMIT = "admit"
+    ADMIT_NEAR_DUP = "admit_near_dup"
+    REJECT_NEAR_DUP = "reject_near_dup"
+
+
+class PoissonDiskAdmission:
+    """Proactive corpus diversity gate via MinHashLSH disk-exclusion.
+
+    Bridges Bridson/Mitchell Poisson-disk sampling into the fuzzer's save_to_corpus
+    path.  Instead of admitting everything and pruning near-duplicates reactively,
+    we query MinHashLSH.find_similar() at admission time and reject seeds whose
+    edge-signature is closer than the Jaccard radius to any already-admitted
+    corpus member.
+
+    Rare-edge safety valve: a seed is admitted even if it is Jaccard-similar when it
+    contributes at least one edge not owned by any of its similar neighbors.  This
+    prevents rare/frontier edge coverage from being discarded under redundancy pressure.
+    """
+
+    def __init__(self, fuzzer, min_jaccard: float = 0.25):
+        self._fuzzer = fuzzer
+        self._min_jaccard = min_jaccard
+
+    def _minhash(self):
+        return self._fuzzer._edge_tracker._minhash
+
+    def _admitted_keys(self) -> set[str]:
+        return self._fuzzer._admitted_keys
+
+    def check(self, data: bytes, seed_key: str) -> PoissonAdmissionDecision:
+        """Determine whether *seed_key* may be admitted to the corpus.
+
+        Must be called after the seed's edge signature has already been registered
+        in the MinHashLSH index (record_edges runs before save_to_corpus in fuzz_one).
+        The find_similar result is filtered against the admitted_keys set so the seed
+        does not match itself.
+        """
+        admitted = self._admitted_keys()
+        minhash = self._minhash()
+
+        # Step 1: LSH similarity query — returns all seeds sharing ≥1 band.
+        # Filtering against admitted_keys is essential: record_edges already
+        # registered this seed's signature before save_to_corpus is called, so
+        # an unfiltered find_similar would always match the seed against itself.
+        all_similar = minhash.find_similar(seed_key, min_jaccard=self._min_jaccard)
+        similar_neighbors = all_similar & admitted
+        if not similar_neighbors:
+            # Disk empty — admit normally and track this seed's LSH occupancy.
+            self._fuzzer._admitted_keys.add(seed_key)
+            self._track_occupancy(seed_key, minhash)
+            return PoissonAdmissionDecision.ADMIT
+
+        # Step 2: Similar neighbors exist.  Check rare-edge safety valve:
+        # admit if this seed owns any edge not already covered by neighbors.
+        if self._has_unique_edges(seed_key, similar_neighbors):
+            self._fuzzer._admitted_keys.add(seed_key)
+            self._track_occupancy(seed_key, minhash)
+            return PoissonAdmissionDecision.ADMIT_NEAR_DUP
+
+        # No unique edges and within disk radius of admitted members → reject.
+        return PoissonAdmissionDecision.REJECT_NEAR_DUP
+
+    def _has_unique_edges(self, seed_key: str, neighbor_keys: set[str]) -> bool:
+        """Return True if *seed_key* owns at least one edge no neighbor covers."""
+        edge_tracker = self._fuzzer._edge_tracker
+        seed_edges = edge_tracker.seed_edges.get(seed_key, set())
+        if not seed_edges:
+            return False
+        neighbor_edges: set[int] = set()
+        for nk in neighbor_keys:
+            neighbor_edges |= edge_tracker.seed_edges.get(nk, set())
+        return bool(seed_edges - neighbor_edges)
+
+    def _track_occupancy(self, seed_key: str, minhash) -> None:
+        """Update LSH bucket occupancy for maximality detection."""
+        sig = minhash.signatures.get(seed_key)
+        if sig is None:
+            return
+        f = self._fuzzer
+        for band_idx in range(minhash.num_bands):
+            start = band_idx * minhash.band_size
+            end = start + minhash.band_size
+            import struct
+
+            band_bytes = struct.pack(f"<{end - start}Q", *sig[start:end])
+            from fuzzer_tool.core.edge_tracker import crc32_ieee
+
+            band_hash = crc32_ieee(band_bytes)
+            bucket_key = (band_idx, band_hash)
+            if bucket_key not in f._poisson_occupied_buckets:
+                f._poisson_occupied_buckets.add(bucket_key)
+                f._poisson_last_new_bucket_exec = f.exec_count
+
+    def occupancy_ratio(self) -> float:
+        """Fraction of admitted seeds that touch distinct LSH buckets (grid coverage)."""
+        admitted = self._admitted_keys()
+        if not admitted:
+            return 0.0
+        # Each admitted seed touches num_bands buckets.  Distinct bucket count /
+        # (admitted_count * num_bands) is the bucket utilisation ratio.
+        minhash = self._minhash()
+        buckets_touched: set[tuple[int, int]] = set()
+        for sk in admitted:
+            sig = minhash.signatures.get(sk)
+            if sig is None:
+                continue
+            import struct
+
+            for band_idx in range(minhash.num_bands):
+                start = band_idx * minhash.band_size
+                end = start + minhash.band_size
+                band_bytes = struct.pack(f"<{end - start}Q", *sig[start:end])
+                from fuzzer_tool.core.edge_tracker import crc32_ieee
+
+                band_hash = crc32_ieee(band_bytes)
+                buckets_touched.add((band_idx, band_hash))
+        total_slots = len(admitted) * minhash.num_bands
+        if total_slots == 0:
+            return 0.0
+        return len(buckets_touched) / total_slots
 
 
 def _gdb_crash_replay(f, data: bytes, returncode: int) -> str:
@@ -571,6 +698,10 @@ class CorpusManager:
                 parent_meta["child_count"] = parent_meta.get("child_count", 0) + 1
 
         f._total_corpus_attempts += 1
+        # Compute seed_key early: the Poisson-disk admission check (and the
+        # downstream GA population block below) both need it, but the old
+        # placement at line 800 was after the check that consumed it.
+        seed_key = self.seed_key(data)
         if save_to_corpus(
             data,
             f.corpus_dir,
@@ -587,6 +718,29 @@ class CorpusManager:
                 # where the QEA population is the sole seed source.
                 not f.qea or getattr(f, "_use_elo", False)
             ):
+                # Poisson-disk admission check (proactive near-duplicate rejection).
+                # Runs after the bloom/seen-hash novelty gate but before corpus
+                # insertion and heavy bookkeeping.  This prevents redundant seeds
+                # from entering the pipeline at all.
+                if getattr(f, "_use_poisson_disk_admission", False):
+                    # Lazy-init PoissonDiskAdmission on first use; the _edge_tracker
+                    # ._minhash reference is only valid after fuzzer construction completes.
+                    if f._poisson_admission is None:
+                        f._poisson_admission = PoissonDiskAdmission(f, f._poisson_disk_min_jaccard)
+                    decision = f._poisson_admission.check(data, seed_key)
+                    if decision == PoissonAdmissionDecision.REJECT_NEAR_DUP:
+                        f._duplicate_reject_count += 1
+                        f._poisson_reject_count += 1
+                        # Record that this seed was rejected for redundancy — but
+                        # don't remove edges already tracked by record_edges; those
+                        # are part of corpus coverage history.  Just skip corpus entry.
+                        return
+                    elif decision == PoissonAdmissionDecision.ADMIT_NEAR_DUP:
+                        # Admit normally but flag as near-duplicate for deprioritized
+                        # weighting.  This preserves the seed's edges while signaling
+                        # it should be weighted lower in seed_key/population selection.
+                        f.seed_meta[data]["_is_near_duplicate"] = True
+
                 f.corpus.append(data)
             if f.ga:
                 import hashlib as _hashlib
@@ -648,7 +802,6 @@ class CorpusManager:
             # from fuzz_one, the seed's edges were already recorded by
             # record_edges before save_to_corpus.  For the parallel-sync path
             # (no prior fuzz_one), edge_count stays 0, which is correct.
-            seed_key = self.seed_key(data)
             edge_count = len(f._edge_tracker.seed_edges.get(seed_key, set()))
             if edge_count > 0:
                 f.seed_meta[data]["coverage_edges"] = edge_count
@@ -1248,6 +1401,14 @@ class CorpusManager:
 
     def deprioritize_near_duplicates(self):
         f = self.f
+        # Short-circuit: if Poisson-disk admission is active and hasn't seen
+        # enough redundant admissions, skip the expensive O(N) scan entirely.
+        # This turns the periodic scan into an amortized O(1) check.
+        if getattr(f, "_use_poisson_disk_admission", False):
+            if f._redundant_admission_count < 50:
+                return
+            f._redundant_admission_count = 0  # reset after scan
+
         if len(f.corpus) < 10:
             return
 
