@@ -87,7 +87,7 @@ def _resolve_callee_with(
         if real_name and real_name in functions:
             return real_name
     if func_addrs_sorted:
-        idx = bisect.bisect_right(func_addrs_sorted, (addr, "")) - 1
+        idx = bisect.bisect_right(func_addrs_sorted, (addr, "\uffff")) - 1
         if idx >= 0:
             fname = func_addrs_sorted[idx][1]
             start = func_addrs_sorted[idx][0]
@@ -127,7 +127,7 @@ def _decode_cfg_worker(task: tuple):
                 real_name = name.replace(".plt.", "").replace("plt.", "")
                 if real_name and real_name in functions:
                     return real_name
-            idx = bisect.bisect_right(func_addrs_sorted, (addr, "")) - 1
+            idx = bisect.bisect_right(func_addrs_sorted, (addr, "\uffff")) - 1
             if idx >= 0:
                 fname = func_addrs_sorted[idx][1]
                 start = func_addrs_sorted[idx][0]
@@ -422,7 +422,7 @@ class TargetDistance:
                 return real_name
         starts = getattr(self, "_func_addrs_sorted", None)
         if starts:
-            idx = bisect.bisect_right(starts, (addr, "")) - 1
+            idx = bisect.bisect_right(starts, (addr, "\uffff")) - 1
             if idx >= 0:
                 fname = starts[idx][1]
                 start = starts[idx][0]
@@ -481,7 +481,7 @@ class TargetDistance:
         """Map an address to its containing function via binary search."""
         starts = getattr(self, "_func_addrs_sorted", None)
         if starts:
-            idx = bisect.bisect_right(starts, (addr, "")) - 1
+            idx = bisect.bisect_right(starts, (addr, "\uffff")) - 1
             if idx >= 0:
                 fname = starts[idx][1]
                 start = starts[idx][0]
