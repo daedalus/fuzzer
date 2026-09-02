@@ -99,6 +99,7 @@ class MutationContext:
         "corpus",
         "dictionary",
         "max_len",
+        "rand_pool",
         "weizz_tags_enabled",
     )
 
@@ -110,6 +111,7 @@ class MutationContext:
         cmplog_pairs: Sequence[tuple[bytes, bytes]] = (),
         corpus: Sequence[bytes] = (),
         weizz_tags_enabled: bool = False,
+        rand_pool=None,
     ) -> None:
         #: Length cap for the returned buffer; 0 means uncapped.
         self.max_len = max_len
@@ -121,6 +123,14 @@ class MutationContext:
         self.corpus = corpus
         #: True when ``--weizz-tags`` is set (Weizz structure-aware ops).
         self.weizz_tags_enabled = weizz_tags_enabled
+        #: The fuzzer's shared PRNG (``randint``/``choice``/...). Optional
+        #: because most implementors of this interface receive ``rng`` as
+        #: its own positional argument to ``mutate()`` already; carried here
+        #: too so ``OperatorEngine``'s existing ``_op_*`` handlers -- which
+        #: read it dozens of times per call, see docs/port-backlog.md F1 --
+        #: can read ``ctx.rand_pool`` instead of reaching around the context
+        #: at ``self.f._rand_pool``.
+        self.rand_pool = rand_pool
 
     @classmethod
     def from_fuzzer(cls, fuzzer) -> MutationContext:
@@ -139,6 +149,7 @@ class MutationContext:
             cmplog_pairs=getattr(cmplog, "pairs", None) or (),
             corpus=getattr(fuzzer, "corpus", None) or (),
             weizz_tags_enabled=bool(getattr(fuzzer, "weizz_tags", False)),
+            rand_pool=getattr(fuzzer, "_rand_pool", None),
         )
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid

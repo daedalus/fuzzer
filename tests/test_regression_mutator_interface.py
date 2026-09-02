@@ -390,6 +390,7 @@ class TestMutationContext:
             "cmplog_pairs",
             "corpus",
             "weizz_tags_enabled",
+            "rand_pool",
         }
         assert not hasattr(ctx, "__dict__")
         with pytest.raises(AttributeError):
