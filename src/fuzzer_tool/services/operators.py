@@ -959,14 +959,14 @@ class OperatorEngine:
             return
         f = self.f
         # Use dictionary tokens as "auto-extras" if available
-        if f.dictionary:
+        if self.ctx.dictionary:
             tid = (
                 f._dict_scratch[f._dict_scratch_idx]
                 if f._dict_scratch_idx < len(f._dict_scratch)
                 else 0
             )
             f._dict_scratch_idx += 1
-            token = f.dictionary[tid]
+            token = self.ctx.dictionary[tid]
             if isinstance(token, str):
                 token = token.encode()
             if len(token) <= len(buf):
@@ -990,8 +990,8 @@ class OperatorEngine:
     def _op_interesting_8(self, buf, byte_idx, _data):
         rng = self.ctx.rand_pool
         if buf:
-            if self.f._crash_mi and self.f._crash_mi.total_execs >= 50 and rng.random() < 0.3:
-                crash_vals = self.f._crash_mi.top_values(byte_idx, k=5)
+            if self.ctx.crash_mi and self.ctx.crash_mi.total_execs >= 50 and rng.random() < 0.3:
+                crash_vals = self.ctx.crash_mi.top_values(byte_idx, k=5)
                 if crash_vals:
                     buf[byte_idx] = rng.choice(crash_vals) & 0xFF
                     return
@@ -1002,8 +1002,8 @@ class OperatorEngine:
         rng = self.ctx.rand_pool
         if len(buf) >= 2:
             idx = rng.randint(0, len(buf) - 2)
-            if self.f._crash_mi and self.f._crash_mi.total_execs >= 50 and rng.random() < 0.3:
-                crash_vals = self.f._crash_mi.top_values(idx, k=5)
+            if self.ctx.crash_mi and self.ctx.crash_mi.total_execs >= 50 and rng.random() < 0.3:
+                crash_vals = self.ctx.crash_mi.top_values(idx, k=5)
                 if crash_vals:
                     v = rng.choice(crash_vals)
                     fmt = "<H" if v > 32767 or v < -32768 else "<h"
@@ -1019,8 +1019,8 @@ class OperatorEngine:
         rng = self.ctx.rand_pool
         if len(buf) >= 4:
             idx = rng.randint(0, len(buf) - 4)
-            if self.f._crash_mi and self.f._crash_mi.total_execs >= 50 and rng.random() < 0.3:
-                crash_vals = self.f._crash_mi.top_values(idx, k=5)
+            if self.ctx.crash_mi and self.ctx.crash_mi.total_execs >= 50 and rng.random() < 0.3:
+                crash_vals = self.ctx.crash_mi.top_values(idx, k=5)
                 if crash_vals:
                     v = rng.choice(crash_vals)
                     fmt = "<I" if v > 2147483647 or v < -2147483648 else "<i"
@@ -1108,8 +1108,8 @@ class OperatorEngine:
     def _op_dict_insert(self, buf, _byte_idx, _data):
         rng = self.ctx.rand_pool
         f = self.f
-        if f.dictionary and f._dict_scratch_idx < len(f._dict_scratch):
-            token = f.dictionary[f._dict_scratch[f._dict_scratch_idx]]
+        if self.ctx.dictionary and f._dict_scratch_idx < len(f._dict_scratch):
+            token = self.ctx.dictionary[f._dict_scratch[f._dict_scratch_idx]]
             f._dict_scratch_idx += 1
             if len(buf) + len(token) <= self.ctx.max_len:
                 buf[rng.randint(0, len(buf)) : 0] = token
@@ -1117,8 +1117,8 @@ class OperatorEngine:
     def _op_dict_replace(self, buf, _byte_idx, _data):
         rng = self.ctx.rand_pool
         f = self.f
-        if f.dictionary and buf and f._dict_scratch_idx < len(f._dict_scratch):
-            token = f.dictionary[f._dict_scratch[f._dict_scratch_idx]]
+        if self.ctx.dictionary and buf and f._dict_scratch_idx < len(f._dict_scratch):
+            token = self.ctx.dictionary[f._dict_scratch[f._dict_scratch_idx]]
             f._dict_scratch_idx += 1
             idx = rng.randint(0, len(buf) - 1)
             end = min(idx + len(token), len(buf))
@@ -1126,23 +1126,23 @@ class OperatorEngine:
 
     def _op_dict_overwrite(self, buf, _byte_idx, _data):
         f = self.f
-        if f.dictionary and f._dict_scratch_idx < len(f._dict_scratch):
-            token = f.dictionary[f._dict_scratch[f._dict_scratch_idx]]
+        if self.ctx.dictionary and f._dict_scratch_idx < len(f._dict_scratch):
+            token = self.ctx.dictionary[f._dict_scratch[f._dict_scratch_idx]]
             f._dict_scratch_idx += 1
             return bytearray(token[: self.ctx.max_len])
 
     def _op_dict_prepend(self, buf, _byte_idx, _data):
         f = self.f
-        if f.dictionary and f._dict_scratch_idx < len(f._dict_scratch):
-            token = f.dictionary[f._dict_scratch[f._dict_scratch_idx]]
+        if self.ctx.dictionary and f._dict_scratch_idx < len(f._dict_scratch):
+            token = self.ctx.dictionary[f._dict_scratch[f._dict_scratch_idx]]
             f._dict_scratch_idx += 1
             if len(buf) + len(token) <= self.ctx.max_len:
                 return bytearray(token) + buf
 
     def _op_dict_append(self, buf, _byte_idx, _data):
         f = self.f
-        if f.dictionary and f._dict_scratch_idx < len(f._dict_scratch):
-            token = f.dictionary[f._dict_scratch[f._dict_scratch_idx]]
+        if self.ctx.dictionary and f._dict_scratch_idx < len(f._dict_scratch):
+            token = self.ctx.dictionary[f._dict_scratch[f._dict_scratch_idx]]
             f._dict_scratch_idx += 1
             if len(buf) + len(token) <= self.ctx.max_len:
                 buf.extend(token)
@@ -1321,8 +1321,8 @@ class OperatorEngine:
     def _op_token_dup(self, buf, _byte_idx, _data):
         rng = self.ctx.rand_pool
         f = self.f
-        if f.dictionary and buf and f._dict_scratch_idx < len(f._dict_scratch):
-            token = f.dictionary[f._dict_scratch[f._dict_scratch_idx]]
+        if self.ctx.dictionary and buf and f._dict_scratch_idx < len(f._dict_scratch):
+            token = self.ctx.dictionary[f._dict_scratch[f._dict_scratch_idx]]
             f._dict_scratch_idx += 1
             if len(buf) + len(token) <= self.ctx.max_len:
                 buf[rng.randint(0, len(buf)) : 0] = token
@@ -1332,17 +1332,17 @@ class OperatorEngine:
         if buf:
             idx = rng.randint(0, len(buf) - 1)
             ctx = (
-                bytes(buf[max(0, idx - self.f.markov.order) : idx]) if self.f.markov.order else b""
+                bytes(buf[max(0, idx - self.ctx.markov.order) : idx]) if self.ctx.markov.order else b""
             )
-            buf[idx] = self.f.markov.sample_byte(ctx)
+            buf[idx] = self.ctx.markov.sample_byte(ctx)
 
     def _op_cem_bytes(self, buf, _byte_idx, _data):
         rng = self.ctx.rand_pool
-        if self.f.mc and self.f.mc.cem_fitted:
+        if self.ctx.mc and self.ctx.mc.cem_fitted:
             if buf:
-                buf[rng.randint(0, len(buf) - 1)] = self.f.mc.cem_byte(rng.randint(0, len(buf) - 1))
+                buf[rng.randint(0, len(buf) - 1)] = self.ctx.mc.cem_byte(rng.randint(0, len(buf) - 1))
             else:
-                return bytearray(self.f.mc.cem_sample(rng.randint(1, min(32, self.ctx.max_len))))
+                return bytearray(self.ctx.mc.cem_sample(rng.randint(1, min(32, self.ctx.max_len))))
 
     def _op_splice(self, buf, _byte_idx, data):
         rng = self.ctx.rand_pool
@@ -1704,9 +1704,9 @@ class OperatorEngine:
     def _op_gradient_cmp(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.gradient_cmp import gradient_cmp
 
-        if buf and self.f._cmplog and self.f._cmplog.pairs:
+        if buf and self.ctx.cmplog_pairs:
             return bytearray(
-                gradient_cmp(bytes(buf), self.f._cmplog.pairs, rng=self.ctx.rand_pool)[
+                gradient_cmp(bytes(buf), self.ctx.cmplog_pairs, rng=self.ctx.rand_pool)[
                     : self.ctx.max_len
                 ]
             )
@@ -1714,9 +1714,9 @@ class OperatorEngine:
     def _op_gradient_descent(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.gradient_descent import gradient_descent
 
-        if not (buf and self.f._cmplog and self.f._cmplog.pairs):
+        if not (buf and self.ctx.cmplog_pairs):
             return
-        pair = self.ctx.rand_pool.choice(self.f._cmplog.pairs)
+        pair = self.ctx.rand_pool.choice(self.ctx.cmplog_pairs)
         result = gradient_descent(bytes(buf), pair, max_len=self.ctx.max_len, rng=self.ctx.rand_pool)
         if result and result != bytes(buf):
             return bytearray(result[: self.ctx.max_len])
@@ -1725,9 +1725,9 @@ class OperatorEngine:
         """Plant a cmplog operand verbatim at a candidate site (Angora MB)."""
         from fuzzer_tool.core.mb_cbh import magic_byte_search
 
-        if not (buf and self.f._cmplog and self.f._cmplog.pairs):
+        if not (buf and self.ctx.cmplog_pairs):
             return
-        pair = self.ctx.rand_pool.choice(self.f._cmplog.pairs)
+        pair = self.ctx.rand_pool.choice(self.ctx.cmplog_pairs)
         result = magic_byte_search(bytes(buf), pair, self.ctx.rand_pool, max_len=self.ctx.max_len)
         if result and result != bytes(buf):
             return bytearray(result[: self.ctx.max_len])
@@ -1736,9 +1736,9 @@ class OperatorEngine:
         """Stochastic hill-climb toward a cmplog operand (Angora CBH)."""
         from fuzzer_tool.core.mb_cbh import climb_hill
 
-        if not (buf and self.f._cmplog and self.f._cmplog.pairs):
+        if not (buf and self.ctx.cmplog_pairs):
             return
-        pair = self.ctx.rand_pool.choice(self.f._cmplog.pairs)
+        pair = self.ctx.rand_pool.choice(self.ctx.cmplog_pairs)
         result = climb_hill(bytes(buf), pair, self.ctx.rand_pool, max_len=self.ctx.max_len)
         if result and result != bytes(buf):
             return bytearray(result[: self.ctx.max_len])
@@ -1896,7 +1896,7 @@ class OperatorEngine:
 
         if buf and len(buf) >= 8:
             rng = self.ctx.rand_pool
-            parent_meta = self.f.seed_meta.get(data)
+            parent_meta = self.ctx.seed_meta.get(data)
             stride = None
             if parent_meta and rng.random() < 0.5:
                 stride = parent_meta.get("record_stride")
@@ -1961,7 +1961,7 @@ class OperatorEngine:
         """Load StructureMap for *data* from seed_meta, or None."""
         from fuzzer_tool.core.weizz_tags import load_tags_from_meta
 
-        meta = self.f.seed_meta.get(data)
+        meta = self.ctx.seed_meta.get(data)
         if meta is None:
             return None
         if meta.get("weizz_tags_dirty"):
@@ -1970,7 +1970,7 @@ class OperatorEngine:
 
     def _weizz_mark_dirty(self, data: bytes) -> None:
         """Mark tags on parent seed dirty after a length-changing mutation."""
-        meta = self.f.seed_meta.get(data)
+        meta = self.ctx.seed_meta.get(data)
         if meta is not None and "weizz_tags_rle" in meta:
             meta["weizz_tags_dirty"] = True
 
@@ -2189,14 +2189,14 @@ class OperatorEngine:
         """
         rng = self.ctx.rand_pool
         f = self.f
-        if not f.dictionary or len(f.dictionary) < 2:
+        if not self.ctx.dictionary or len(self.ctx.dictionary) < 2:
             return
         if not buf or len(buf) >= self.ctx.max_len:
             return
         from fuzzer_tool.core.mutations import DICT_COMPOUND_SEPARATORS
 
-        t1 = rng.choice(f.dictionary)
-        t2 = rng.choice(f.dictionary)
+        t1 = rng.choice(self.ctx.dictionary)
+        t2 = rng.choice(self.ctx.dictionary)
         sep = rng.choice(DICT_COMPOUND_SEPARATORS)
         if isinstance(t1, str):
             t1 = t1.encode()
@@ -2224,15 +2224,15 @@ class OperatorEngine:
         buf[pos:pos] = chars
 
     def _op_grammar_mutate(self, buf, _byte_idx, _data):
-        if self.f.grammar:
+        if self.ctx.grammar:
             return bytearray(
-                self.f.grammar.mutate(bytes(buf), max_len=self.ctx.max_len, rng=self.ctx.rand_pool)[
+                self.ctx.grammar.mutate(bytes(buf), max_len=self.ctx.max_len, rng=self.ctx.rand_pool)[
                     : self.ctx.max_len
                 ]
             )
 
     def _op_grammar_tree_mutate(self, buf, _byte_idx, data):
-        if self.f.grammar:
+        if self.ctx.grammar:
             from fuzzer_tool.core.grammar import SubtreePopulation, TreeMutator
 
             f = self.f
@@ -2365,7 +2365,7 @@ class OperatorEngine:
         if not hasattr(self, "_bmp_mutator"):
             self._bmp_mutator = BmpMutator()
         self._bmp_mutator.use_wfc = getattr(self.f, "_wfc_enabled", False)
-        parent_meta = self.f.seed_meta.get(data)
+        parent_meta = self.ctx.seed_meta.get(data)
         stride = parent_meta.get("record_stride") if parent_meta else None
         self._bmp_mutator.tile_bytes = stride
         rng = self.ctx.rand_pool
@@ -2853,7 +2853,7 @@ class OperatorEngine:
 
     def _op_redqueen(self, buf, _byte_idx, data):
         rng = self.ctx.rand_pool
-        parent_meta = self.f.seed_meta.get(data)
+        parent_meta = self.ctx.seed_meta.get(data)
         if not (buf and parent_meta):
             return
         matches = parent_meta.get("redqueen_matches", [])
@@ -2866,11 +2866,11 @@ class OperatorEngine:
                     for j, b_val in enumerate(op_b):
                         if off + j < len(buf):
                             buf[off + j] = b_val
-        elif offsets and self.f._cmplog and self.f._cmplog.tokens:
+        elif offsets and self.ctx.cmplog_tokens:
             for _ in range(rng.randint(1, min(4, len(offsets)))):
                 off = rng.choice(offsets)
                 if off < len(buf):
-                    token = rng.choice(self.f._cmplog.tokens)
+                    token = rng.choice(self.ctx.cmplog_tokens)
                     for j, b_val in enumerate(token):
                         if off + j < len(buf):
                             buf[off + j] = b_val
@@ -3079,7 +3079,7 @@ class OperatorEngine:
         During stall recovery: 8-16 mutations (honggfuzz-style escalation).
         """
         rng = self.ctx.rand_pool
-        if self.f._stall_recovery_active:
+        if self.ctx.stall_recovery_active:
             n = rng.randint_list(8, 16, 1)[0]
         else:
             n = rng.randint_list(2, 8, 1)[0]
@@ -3978,11 +3978,11 @@ class OperatorEngine:
             n_mutations = max(n_mutations, 16)
 
         # Pre-fetch dictionary indices for dict-aware operators in one
-        # vectorized call, replacing N individual random.choice(f.dictionary)
+        # vectorized call, replacing N individual random.choice(self.ctx.dictionary)
         # calls across _op_dict_* methods.
-        if f.dictionary:
+        if self.ctx.dictionary:
             f._dict_scratch = self.ctx.rand_pool.randint_list(
-                0, len(f.dictionary) - 1, max(n_mutations * 8, 64)
+                0, len(self.ctx.dictionary) - 1, max(n_mutations * 8, 64)
             )
             f._dict_scratch_idx = 0
 

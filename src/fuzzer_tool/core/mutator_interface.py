@@ -96,10 +96,17 @@ class MutationContext:
 
     __slots__ = (
         "cmplog_pairs",
+        "cmplog_tokens",
         "corpus",
+        "crash_mi",
         "dictionary",
+        "grammar",
+        "markov",
         "max_len",
+        "mc",
         "rand_pool",
+        "seed_meta",
+        "stall_recovery_active",
         "weizz_tags_enabled",
     )
 
@@ -109,9 +116,16 @@ class MutationContext:
         max_len: int = 0,
         dictionary: Sequence[bytes] = (),
         cmplog_pairs: Sequence[tuple[bytes, bytes]] = (),
+        cmplog_tokens: Sequence[bytes] = (),
         corpus: Sequence[bytes] = (),
         weizz_tags_enabled: bool = False,
         rand_pool=None,
+        seed_meta=None,
+        markov=None,
+        mc=None,
+        grammar=None,
+        crash_mi=None,
+        stall_recovery_active: bool = False,
     ) -> None:
         #: Length cap for the returned buffer; 0 means uncapped.
         self.max_len = max_len
@@ -119,6 +133,12 @@ class MutationContext:
         self.dictionary = dictionary
         #: Comparison operand pairs recovered by cmplog, possibly empty.
         self.cmplog_pairs = cmplog_pairs
+        #: Comparison-operand tokens recovered by cmplog, possibly empty.
+        #: A separate field from ``cmplog_pairs`` rather than derived from
+        #: it -- cmplog collects them independently (tokens are singletons
+        #: harvested from operand bytes, pairs are the two-sided
+        #: comparisons), so there's no cheap way to get one from the other.
+        self.cmplog_tokens = cmplog_tokens
         #: Current corpus entries, for splice-style mutations.
         self.corpus = corpus
         #: True when ``--weizz-tags`` is set (Weizz structure-aware ops).
@@ -131,6 +151,22 @@ class MutationContext:
         #: can read ``ctx.rand_pool`` instead of reaching around the context
         #: at ``self.f._rand_pool``.
         self.rand_pool = rand_pool
+        #: Per-seed metadata dict, keyed by raw seed bytes (record_stride,
+        #: seed_passed_det, ...). A live reference like ``corpus`` and
+        #: ``dictionary``, not a copy -- see their docstrings above.
+        self.seed_meta = seed_meta
+        #: Markov-chain byte model, when trained. ``None`` if untrained or
+        #: disabled -- callers already guard on this before use upstream.
+        self.markov = markov
+        #: Monte-Carlo / cross-entropy byte model, when fitted. Same
+        #: None-means-absent convention as ``markov``.
+        self.mc = mc
+        #: Grammar-based structural mutator, when a grammar is loaded.
+        self.grammar = grammar
+        #: Crash-guided mutual-information estimator, when populated.
+        self.crash_mi = crash_mi
+        #: True while the fuzzer's stall-recovery mode is active.
+        self.stall_recovery_active = stall_recovery_active
 
     @classmethod
     def from_fuzzer(cls, fuzzer) -> MutationContext:
@@ -147,9 +183,16 @@ class MutationContext:
             max_len=getattr(fuzzer, "max_len", 0) or 0,
             dictionary=getattr(fuzzer, "dictionary", None) or (),
             cmplog_pairs=getattr(cmplog, "pairs", None) or (),
+            cmplog_tokens=getattr(cmplog, "tokens", None) or (),
             corpus=getattr(fuzzer, "corpus", None) or (),
             weizz_tags_enabled=bool(getattr(fuzzer, "weizz_tags", False)),
             rand_pool=getattr(fuzzer, "_rand_pool", None),
+            seed_meta=getattr(fuzzer, "seed_meta", None),
+            markov=getattr(fuzzer, "markov", None),
+            mc=getattr(fuzzer, "mc", None),
+            grammar=getattr(fuzzer, "grammar", None),
+            crash_mi=getattr(fuzzer, "_crash_mi", None),
+            stall_recovery_active=bool(getattr(fuzzer, "_stall_recovery_active", False)),
         )
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid

@@ -388,9 +388,16 @@ class TestMutationContext:
             "max_len",
             "dictionary",
             "cmplog_pairs",
+            "cmplog_tokens",
             "corpus",
             "weizz_tags_enabled",
             "rand_pool",
+            "seed_meta",
+            "markov",
+            "mc",
+            "grammar",
+            "crash_mi",
+            "stall_recovery_active",
         }
         assert not hasattr(ctx, "__dict__")
         with pytest.raises(AttributeError):
