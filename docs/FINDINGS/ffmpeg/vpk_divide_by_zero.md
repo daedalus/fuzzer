@@ -80,22 +80,25 @@ Both `size` and `skip` divide by `par->ch_layout.nb_channels`. When `nb_channels
 
 > **Correction (2026-08-30).** Steps 2–3 above replace the original explanation, which claimed the probe data and the packet-read data diverge in the fuzzer's custom-AVIO path. That was a hypothesis, never checked against `libavformat`, and it is not what upstream found: the zeroing happens in `avformat_find_stream_info` and does not depend on custom AVIO. The wrong version is quoted verbatim in [issue #24290](https://code.ffmpeg.org/FFmpeg/FFmpeg/issues/24290) and in third-party coverage, so it is corrected here rather than silently dropped. Mechanism per Jun Zhao's analysis in [PR #24297](https://code.ffmpeg.org/FFmpeg/FFmpeg/pulls/24297).
 
-## ffmpeg CLI Reproducibility
+## gdb Backtrace
 
-An independent attempt with the ffmpeg CLI (6.1.1, Ubuntu) did **not** crash — see [External Coverage](#external-coverage):
-
-```sh
-printf '\x20\x4b\x50\x56\x56\x50\x00\xf8\x04\x00\x3b\x03\x61\x39\x56\x32\x36\x36\x30\x38\x50' > vpk_crash.bin
-ffmpeg -i vpk_crash.bin -c:a copy -f null -
 ```
+Program received signal SIGFPE, Arithmetic exception.
+0x00005555557a9877 in vpk_read_packet (s=0x555557fed700, pkt=0x555557fed300)
+    at libavformat/vpk.c:89
+89   unsigned size = vpk->last_block_size / par->ch_layout.nb_channels;
 
-FFmpeg detected the VPK container, reported a 942,683,702 Hz / 80-channel audio stream, failed to open the ADPCM decoder, and exited with a demuxing error.
-
-The failed decoder open — the first half of the upstream root cause — *does* happen on the CLI path, and the 80 channels it prints is the container value upstream's fix exists to preserve. So the custom-AVIO explanation cannot be why the CLI escapes: that explanation is wrong (see the correction above). What the difference actually is has not been established here. The plausible candidate is the read loop — `targets/ffmpeg_read.c:548` drives `av_read_frame()` until it fails, while the CLI stops at the first demux error — so the harness may simply be the only one that reaches the final-block branch. Unverified; do not repeat it as fact.
+#0  vpk_read_packet
+#1  ff_read_packet
+#2  read_frame_internal
+#3  av_read_frame
+#4  fuzz_ffmpeg
+#5  main
+```
 
 ## Crash Input
 
-Hex dump of the 21-byte crash input (`crash_1787378545_34bc062c_sig_signal8.bin`):
+Hex dump of the 21-byte crash input:
 
 ```
 00000000  20 4b 50 56 56 50 00 f8 04 00 3b 03 61 39 56 32  | KPVVP....;.a9V2|
@@ -113,31 +116,13 @@ Decoded against `vpk_read_header`, which reads six little-endian 32-bit fields:
 | `0x10` | `36 36 30 38` | `sample_rate` | `0x38303636` = 942,683,702 |
 | `0x14` | `50` + EOF | `nb_channels` | `0x50` = **80** — the field is truncated by the 21-byte input, so `avio_rl32` pads with zeros |
 
-Two of these are confirmed against an independent ffmpeg CLI run, which reports exactly 942,683,702 Hz and 80 channels for this input (see [ffmpeg CLI Reproducibility](#ffmpeg-cli-reproducibility)); upstream's FATE regression test asserts the same 80.
-
 > **Correction (2026-08-30).** This section previously claimed `00 00 00 00` at `0x0e`–`0x11` was `nb_channels = 0` and "the crash trigger". That is wrong on every count: the bytes at that offset are `56 32 36 36`, no field starts at `0x0e`, and the channel count this input parses to is 80, not 0. Nothing in the 21 bytes sets a zero channel count — the zero is manufactured later by `libavformat` itself.
-
-## GDB Backtrace
-
-```
-Program received signal SIGFPE, Arithmetic exception.
-0x00005555557a9877 in vpk_read_packet (s=0x555557fed700, pkt=0x555557fed300)
-    at libavformat/vpk.c:89
-89   unsigned size = vpk->last_block_size / par->ch_layout.nb_channels;
-
-#0  vpk_read_packet
-#1  ff_read_packet
-#2  read_frame_internal
-#3  av_read_frame
-#4  fuzz_ffmpeg
-#5  main
-```
 
 ## Crash Metadata
 
 | Field | Value |
 |---|---|
-| Signal | `SIGFPE` (returncode −8) |
+| Signal | `SIGFPE` (returncode -8) |
 | Fault address / RIP | `0x7ffff48a66d7` (instruction itself) |
 | RSP | `0x7fffffffcce0` |
 | Execs to find | 495,211 |
