@@ -975,6 +975,13 @@ def save_crash(
     sidecar = crashes_dir / f"{base_name}.txt"
     sidecar.write_text(metadata.format_sidecar())
 
+    # Companion machine-readable sidecar: same fields, JSON-encoded so
+    # dashboards and downstream tools can ingest a crash without re-parsing
+    # the .txt. Written after the .txt so the human-readable artifact is
+    # the primary one on disk; the .json is the structured companion.
+    json_sidecar = crashes_dir / f"{base_name}.json"
+    json_sidecar.write_text(json.dumps(metadata.to_dict(), indent=2, default=str))
+
     # Write reproducer script
     script = crashes_dir / f"{base_name}.sh"
     script.write_text(metadata.format_reproducer(data, metadata.target or "./target"))

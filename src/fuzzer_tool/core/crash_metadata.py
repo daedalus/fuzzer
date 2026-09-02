@@ -262,6 +262,59 @@ class CrashMetadata:
         )
         return "\n".join(lines)
 
+    def to_dict(self) -> dict:
+        """Serialize the metadata to a JSON-compatible dict.
+
+        Mirrors ``format_sidecar()`` field-for-field (the ``.txt`` sidecar
+        is the human-readable rendering; this dict is the machine-readable
+        equivalent written as ``.json`` next to the ``.bin`` so dashboards
+        and downstream tools can ingest a crash without re-parsing the txt).
+
+        The list fields are kept as lists (not stringified), the
+        ``returncode`` stays an int-or-None, and the empty-string defaults
+        are kept as strings -- the on-disk sidecar preserves the same
+        shape whether the value was filled or left at default.
+        """
+        return {
+            "timestamp": self.timestamp,
+            "fuzzer_pid": self.fuzzer_pid,
+            "exec_count": self.exec_count,
+            "corpus_size": self.corpus_size,
+            "elapsed": self.elapsed,
+            "target": self.target,
+            "target_sha256": self.target_sha256,
+            "sanitizer": self.sanitizer,
+            "error_type": self.error_type,
+            "fault_addr": self.fault_addr,
+            "access_type": self.access_type,
+            "access_size": self.access_size,
+            "shadow_info": self.shadow_info,
+            "exploitability": self.exploitability,
+            "cluster_id": self.cluster_id,
+            "returncode": self.returncode,
+            "parent_seed_hash": self.parent_seed_hash,
+            "mutation_ops": list(self.mutation_ops),
+            "parent_sites": list(self.parent_sites),
+            "frames": list(self.frames),
+            "alloc_frames": list(self.alloc_frames) if self.alloc_frames is not None else None,
+            "dealloc_frames": list(self.dealloc_frames)
+            if self.dealloc_frames is not None
+            else None,
+            "registers": {
+                "rip": self.rip,
+                "rsp": self.rsp,
+                "rbp": self.rbp,
+                "instruction_bytes": self.instruction_bytes,
+            },
+            "gdb_replay": self.gdb_replay,
+            "nearest_corpus_file": self.nearest_corpus_file,
+            "nearest_similarity": self.nearest_similarity,
+            "diff_bytes": list(self.diff_bytes),
+            "raw_stderr": self.raw_stderr,
+            "input_hexdump": self.input_hexdump,
+            "input_text_repr": self.input_text_repr,
+        }
+
 
 def find_nearest_corpus(
     crash_data: bytes, corpus: list[bytes], max_check: int = 100
