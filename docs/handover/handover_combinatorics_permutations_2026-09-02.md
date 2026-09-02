@@ -8,6 +8,11 @@ under-exploited. No code changes proposed yet — the goal is to surface the
 shape of the combinatorial surface area so follow-up implementations can be
 scoped against it.
 
+**Revision (2026-09-02, verification pass on §2 / §10a):** confirmed all 13
+swap-pair call sites directly. The idiom is **not textually identical**
+across all 13 — three distinct shapes exist, which changes the shape of the
+`_swap_pair` helper proposed in §10a. See the updated §2 and §10a below.
+
 ---
 
 ## 0. Rule
@@ -107,12 +112,25 @@ OOB / uninitialized-struct-member / wrong-page-type bugs in the indexing
 code. The sqlite C(n,2) swap of B-tree pages is the most aggressive
 example — it directly attacks the page lookup table.
 
-**Gap 2a — duplication of the swap-pair primitive across 13 files.** Every
-file inlines the same `i, j = self._rng.sample(list(range(len(...))), 2)`.
-A helper in `core/mutations/generic.py` (something like
-`_swap_pair(seq, rng)`) would centralize the 13 near-duplicates and let all
-share the same regression test (assertion: it picks a non-degenerate pair,
-handles k<2, handles non-list sequences).
+**Gap 2a — duplication of the swap-pair primitive across 13 files, in
+three distinct shapes.** Verified directly (not just grepped) at all 13
+call sites. They are **not** textually identical:
+
+| Shape | Files | Idiom |
+|---|---|---|
+| Plain range, listed | `avif`, `isobmff`, `mpegts`, `nal`, `pgs`, `protobuf`, `webm`, `webp`, `x86`, `zip` (10) | `i, j = self._rng.sample(list(range(len(x))), 2)` |
+| Plain range, unlisted | `asf`, `riff`, `adts` (3) | `i, j = rng.sample(range(len(x)), 2)` — `Random.sample` accepts a `range` directly, so the `list(...)` wrap is a no-op difference, not a behavior difference |
+| Offset range | `sqlite` (`_swap_pages`, line 484) | `i, j = self._rng.sample(range(1, len(doc.pages)), 2)` — **excludes index 0** because page 1 carries the file header; page 1 is deliberately never swapped |
+| Filtered candidate list | `arm` (`_word_swap`, line 223) | `i, j = self._rng.sample(swapable, 2)` where `swapable = [i for i, w in enumerate(words) if w.kind != "raw"]` — swaps only over a **pre-filtered index subset**, not the full range |
+
+The first two rows are one primitive (10 + 3 = 13 files use `sample` over
+a contiguous 0-based range — the `list()` wrap doesn't matter). The
+`sqlite` and `arm` cases are genuinely different: they sample over a
+**restricted domain** (an offset range, or an arbitrary index subset),
+not `range(len(x))`. A single `_swap_pair(seq, rng)` helper that only
+takes a sequence and returns two random indices into it would not cover
+`sqlite` or `arm` without also accepting either a `start` offset or an
+explicit candidate list — see the revised fix in §10a.
 
 The reason the duplication exists is the intentional per-format isolation
 mandated by AGENTS.md rule 36 (don't punch through layers; each format's
@@ -664,17 +682,35 @@ on a generic structure map harvested from the corpus.
 These are the surfaces where the analysis above surfaces a real gap.
 Follow-up implementations should be scoped against §0's litmus test.
 
-### 10a — The C(n,2) swap-pair primitive is duplicated 13+ times
+### 10a — The C(n,2) swap-pair primitive is duplicated 13 times, in 3 shapes
 
-**Where:** every per-format mutator in `core/mutations/`.
+**Where:** every per-format mutator in `core/mutations/`. Verified at all
+13 call sites (§2, revised) — not a single idiom, three:
+1. sample over `range(len(x))` (13 files — the `list()` wrap in 10 of
+   them is cosmetic, `Random.sample` accepts a bare `range`);
+2. sample over an **offset** range `range(1, len(x))` (`sqlite`, to keep
+   page 1 fixed);
+3. sample over a **filtered candidate list** (`arm`, to exclude `raw`
+   words from the swap).
 
-**The fix:** a `_swap_pair(seq, rng)` helper in `core/mutations/generic.py`
-that returns `(i, j)` with `i < j` or `None` for `len(seq) < 2`. Centralizes
-the 13 near-duplicates and gives them a single regression test.
+**The fix:** a `_swap_pair(seq_or_len, rng, *, start=0, candidates=None)`
+helper in `core/mutations/generic.py`:
+- default call `_swap_pair(len(x), rng)` covers the 13-file plain-range
+  case;
+- `_swap_pair(len(doc.pages), rng, start=1)` covers `sqlite`;
+- `_swap_pair(None, rng, candidates=swapable)` covers `arm`.
+
+Returns `(i, j)` with `i != j`, or `None` when the effective domain has
+fewer than 2 elements. One helper, one regression test suite covering
+all three call shapes (non-degenerate pair, `k<2` degenerate case, offset
+correctness, candidate-list correctness) — replaces 13 inlined variants,
+not 13 identical copies of one variant.
 
 **Why it doesn't violate AGENTS.md rule 36:** the swap-pair primitive
-reads no format-specific structure. It's a combinatorics utility below
-the format-parser layer.
+reads no format-specific structure — the format-specific part (which
+indices are eligible: all of them, all but page 1, all but `raw` words)
+stays in the caller and is passed in via `start`/`candidates`. Only the
+"pick 2 distinct, non-degenerate" mechanics move into the shared helper.
 
 ### 10b — The exhaustive pool's `allow_bulk` gate is over-conservative
 
@@ -783,8 +819,12 @@ prior once observed counts exceed a floor would mitigate.
 
 This is the read-the-source list for any reviewer:
 
-1. **§2 — C(n,2) swap duplication:** grep
-   `i, j = self._rng.sample(list(range(` in `core/mutations/`.
+1. **§2 — C(n,2) swap duplication:** grep `_rng.sample(` /
+   `rng.sample(` in `core/mutations/` — a plain grep on
+   `list(range(` undercounts by 3 (`asf`, `riff`, `adts` skip the
+   `list()` wrap) and misses the 2 non-plain-range shapes entirely
+   (`sqlite`'s offset range, `arm`'s filtered candidate list). Read each
+   of the 13 hits directly rather than trusting the pattern match.
 2. **§3 — three shuffle arms:** grep `token_shuffle`/`chunk_shuffle`/
    `byte_shuffle` in `core/operator_registry.py`.
 3. **§4 — `perm_lock` and `cycle_lock`:** read `core/mutations/structured.py`
