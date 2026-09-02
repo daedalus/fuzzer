@@ -20,6 +20,7 @@ import random
 
 import pytest
 
+from fuzzer_tool.core.exhaustive_pool import ExhaustivePool
 from fuzzer_tool.core.mutations.generic import _swap_pair
 from fuzzer_tool.core.rand_pool import RandPool
 
@@ -117,3 +118,59 @@ def test_plain_length_pair_selection_is_not_always_the_same(rng):
     # the same pair regardless of the rng's draws.
     seen = {_swap_pair(20, rng) for _ in range(100)}
     assert len(seen) > 1
+
+
+# ── ExhaustivePool compatibility (regression: bare range broke it) ──────
+#
+# ExhaustivePool.sample() (core/exhaustive_pool.py) only recognizes
+# list | tuple | bytes as a sequence population -- unlike RandPool.sample,
+# which deliberately special-cases range (see its docstring). A first
+# version of _swap_pair passed a bare range(start, domain) straight
+# through and crashed the first time it ran under exhaustive enumeration
+# (TypeError: '>' not supported between instances of 'int' and 'range').
+# These tests pin the fix (wrapping in list(...)) directly, independent
+# of whichever operator sweep happens to exercise it.
+
+
+def test_plain_length_domain_works_under_exhaustive_pool():
+    pool = ExhaustivePool()
+    for _ in pool.runs():
+        pair = _swap_pair(5, pool)
+        assert pair is not None
+        i, j = pair
+        assert i != j
+        assert 0 <= i < 5
+        assert 0 <= j < 5
+
+
+def test_offset_range_domain_works_under_exhaustive_pool():
+    pool = ExhaustivePool()
+    for _ in pool.runs():
+        pair = _swap_pair(5, pool, start=1)
+        assert pair is not None
+        i, j = pair
+        assert i != 0 and j != 0
+        assert i != j
+
+
+def test_candidate_sequence_domain_works_under_exhaustive_pool():
+    pool = ExhaustivePool()
+    for _ in pool.runs():
+        pair = _swap_pair([1, 3, 4, 7], pool)
+        assert pair is not None
+        i, j = pair
+        assert i != j
+        assert i in (1, 3, 4, 7)
+        assert j in (1, 3, 4, 7)
+
+
+def test_exhaustive_pool_enumerates_every_pair_over_a_full_sweep():
+    # ExhaustivePool's whole purpose is falsification-by-enumeration: over
+    # the full run it must produce every reachable ordered (i, j) pair
+    # for a small domain, not just avoid crashing on one call.
+    pool = ExhaustivePool()
+    seen = {_swap_pair(4, pool) for _ in pool.runs()}
+    assert pool.exhausted
+    assert seen == {
+        (i, j) for i in range(4) for j in range(4) if i != j
+    }

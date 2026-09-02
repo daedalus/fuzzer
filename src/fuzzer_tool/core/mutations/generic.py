@@ -29,7 +29,19 @@ def _swap_pair(domain, rng, *, start=0):
             explicit sequence of eligible indices/values to sample from
             (``start`` is ignored for a sequence domain).
         rng: a ``RandPool`` or stdlib-``random``-compatible object
-            exposing ``.sample(population, k)``.
+            exposing ``.sample(population, k)``. The int-domain range is
+            passed as a ``list``, not a bare ``range``: ``RandPool.sample``
+            special-cases ``range`` deliberately (see its docstring), but
+            ``ExhaustivePool.sample`` (``core/exhaustive_pool.py``) only
+            recognizes ``list | tuple | bytes`` as a sequence population
+            and silently misreads a bare ``range`` as the population
+            *size* instead, raising ``TypeError`` deep inside `.sample()`
+            the first time an int is compared against it. Wrapping in
+            ``list(...)`` here is the same fix 10 of the original 13 call
+            sites already applied inline (§2) — centralizing the helper
+            must not regress the 3 that got away with a bare ``range``
+            only because they hadn't been exercised under
+            ``ExhaustivePool`` yet.
         start: for the int-domain case, the inclusive lower bound of the
             eligible range. Ignored when ``domain`` is a sequence.
 
@@ -40,7 +52,7 @@ def _swap_pair(domain, rng, *, start=0):
     if isinstance(domain, int):
         if domain - start < 2:
             return None
-        i, j = rng.sample(range(start, domain), 2)
+        i, j = rng.sample(list(range(start, domain)), 2)
         return i, j
     candidates = domain
     if len(candidates) < 2:
