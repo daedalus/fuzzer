@@ -60,6 +60,43 @@ class TestTargetDistanceUnit:
         assert td._addr_to_function(0x11FF) == "a"
         assert td._addr_to_function(0x1200) == "b"
 
+    def test_addr_to_function_bisect_path_entry_exact(self):
+        """Regression: bisect_right with "" resolved past the target function for exact
+        entry addresses, returning the previous function instead. "\uffff" sorts after
+        all real names so bisect_right lands on the correct function's index."""
+        td = self._make_td(
+            functions={
+                "prev_fn": (0x1000, 0x1100),
+                "target_fn": (0x2000, 0x2100),
+                "next_fn": (0x3000, 0x3100),
+            }
+        )
+        # Populate _func_addrs_sorted to enable the bisect fast path
+        td._func_addrs_sorted = sorted(
+            [(start, name) for name, (start, _) in td.functions.items()],
+            key=lambda x: x[0],
+        )
+        # Address exactly at target_fn entry must resolve to target_fn, not prev_fn
+        assert td._addr_to_function(0x2000) == "target_fn"
+        assert td._addr_to_function(0x3000) == "next_fn"
+        assert td._addr_to_function(0x1000) == "prev_fn"
+
+    def test_resolve_callee_name_bisect_path_entry_exact(self):
+        """Regression: _resolve_callee_name uses the same bisect pattern as
+        _addr_to_function — exact function-entry addresses must resolve."""
+        td = self._make_td(
+            functions={
+                "callee": (0x4000, 0x4100),
+                "caller": (0x5000, 0x5100),
+            }
+        )
+        td._func_addrs_sorted = sorted(
+            [(start, name) for name, (start, _) in td.functions.items()],
+            key=lambda x: x[0],
+        )
+        # Callee entry address resolves to callee, not caller
+        assert td._resolve_callee_name(0x4000) == "callee"
+
     def test_resolve_targets_by_name(self):
         td = self._make_td(
             functions={"target_func": (0x3000, 0x3100), "other": (0x4000, 0x4100)},
