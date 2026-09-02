@@ -148,7 +148,7 @@ class TestSaveCrash:
         assert _h(b"crash_data") in hashes
         assert "signal:11" in sigs
         files = list(tmp_path.iterdir())
-        assert len(files) == 4  # .bin + .txt + .sh + .hex
+        assert len(files) == 5  # .bin + .txt + .sh + .hex + .json
 
     def test_rejects_duplicate_crash(self, tmp_path):
         hashes = set()

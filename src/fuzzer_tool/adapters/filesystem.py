@@ -11,6 +11,7 @@ Supports delta-encoded corpus storage with periodic full snapshots:
 
 import hashlib
 import json
+import logging
 import os
 import time
 from pathlib import Path
@@ -22,6 +23,14 @@ from fuzzer_tool.core.sanitizer import SanitizerReport
 from fuzzer_tool.core.similarity import crash_signature_similarity
 
 SNAPSHOT_INTERVAL = 20
+
+log = logging.getLogger(__name__)
+
+# Crash-sidecar artifacts are read-only on disk so a stray cleanup pass or
+# corpus-minimizer sweep can't silently overwrite a discovered reproducer.
+# The reproducer shell script keeps 0o755 so the user can run it directly.
+_READONLY_FILE_MODE = 0o444
+_REPRODUCER_MODE = 0o755
 
 # ── Memory bounds ────────────────────────────────────────────────────
 SEEN_HASHES_MAX = 200_000  # max unique seed hashes retained
@@ -905,7 +914,7 @@ def save_crash(
         elif old_min is not None:
             # New trigger is smaller — find and remove the old crash files
             for f in crashes_dir.iterdir():
-                if f.is_file() and f.suffix in (".bin", ".txt", ".sh", ".hex"):
+                if f.is_file() and f.suffix in (".bin", ".txt", ".sh", ".hex", ".json"):
                     try:
                         old_data = f.read_bytes() if f.suffix == ".bin" else None
                         if old_data and hash_data(old_data) != h:
@@ -917,7 +926,7 @@ def save_crash(
                             )
                             if old_report and old_report.stack_hash() == stack_h:
                                 # Remove old crash files
-                                for ext in (".bin", ".txt", ".sh", ".hex"):
+                                for ext in (".bin", ".txt", ".sh", ".hex", ".json"):
                                     old_file = crashes_dir / f"{f.stem}{ext}"
                                     if old_file.exists():
                                         old_file.unlink()
@@ -956,6 +965,7 @@ def save_crash(
     # Write crash input
     crash_file = crashes_dir / f"{base_name}.bin"
     crash_file.write_bytes(data)
+    _chmod_readonly(crash_file)
 
     # Build and write enriched sidecar
     if report:
@@ -974,6 +984,7 @@ def save_crash(
 
     sidecar = crashes_dir / f"{base_name}.txt"
     sidecar.write_text(metadata.format_sidecar())
+    _chmod_readonly(sidecar)
 
     # Companion machine-readable sidecar: same fields, JSON-encoded so
     # dashboards and downstream tools can ingest a crash without re-parsing
@@ -981,16 +992,34 @@ def save_crash(
     # the primary one on disk; the .json is the structured companion.
     json_sidecar = crashes_dir / f"{base_name}.json"
     json_sidecar.write_text(json.dumps(metadata.to_dict(), indent=2, default=str))
+    _chmod_readonly(json_sidecar)
 
     # Write reproducer script
     script = crashes_dir / f"{base_name}.sh"
     script.write_text(metadata.format_reproducer(data, metadata.target or "./target"))
-    script.chmod(0o755)
+    script.chmod(_REPRODUCER_MODE)
 
     # Write hexdump
     hexdump_file = crashes_dir / f"{base_name}.hex"
     metadata.build_hexdump(data)
     metadata.build_text_repr(data)
     hexdump_file.write_text(metadata.input_hexdump + "\n\n" + metadata.input_text_repr + "\n")
+    _chmod_readonly(hexdump_file)
 
     return base_name
+
+
+def _chmod_readonly(path: Path) -> None:
+    """Lock a crash-sidecar artifact to read-only on disk.
+
+    A discovered crash reproducer is the only authoritative record of a
+    sanitizer hit; a corpus-minimize sweep or crash-dedup that mutates an
+    existing artifact silently destroys it. Locking per-file is a stronger
+    guarantee than a directory-mode bit because the sidecar set can be
+    added to incrementally — the directory is the writable boundary, the
+    files inside it are not.
+    """
+    try:
+        path.chmod(0o444)
+    except OSError as e:
+        log.debug("Could not chmod %s read-only: %s", path, e)
