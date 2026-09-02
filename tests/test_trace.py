@@ -189,6 +189,32 @@ class TestSoProbe:
         with patch("subprocess.run", return_value=r):
             assert _probe_so_function("x.so") is None
 
+    def test_probe_finds_fuzz_shm_run_beyond_truncation(self):
+        # Regression: ffmpeg_read.so exports ~3910 symbols and the ``fuzz_*``
+        # entries sort alphabetically after ``av_*``, so a max_funcs cap
+        # smaller than that cut them off and the probe returned None -- which
+        # made GDB skip the replay and the crash sidecar contain only the
+        # signal line. Build a mock that mirrors the real ordering.
+        lines = []
+        for i in range(20):
+            lines.append(f"0000 T av_func_{i:04d}\n")
+        lines.append("0000 T fuzz_ffmpeg\n")
+        lines.append("0000 T fuzz_shm_run\n")
+        r = MagicMock(stdout="".join(lines), returncode=0)
+        with patch("subprocess.run", return_value=r):
+            assert _probe_so_function("x.so") == "fuzz_shm_run"
+
+    def test_probe_finds_fuzz_prefix_beyond_truncation(self):
+        # Same regression, but with only a non-preferred fuzz_* symbol
+        # available after the cap.
+        lines = []
+        for i in range(20):
+            lines.append(f"0000 T av_func_{i:04d}\n")
+        lines.append("0000 T fuzz_ffmpeg\n")
+        r = MagicMock(stdout="".join(lines), returncode=0)
+        with patch("subprocess.run", return_value=r):
+            assert _probe_so_function("x.so") == "fuzz_ffmpeg"
+
 
 class TestGdbSoReplay:
     """Real GDB replay of a crashing .so (skips when gdb/clang unavailable)."""

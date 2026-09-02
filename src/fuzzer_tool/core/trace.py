@@ -82,15 +82,18 @@ def _probe_so_function(target: str) -> str | None:
 
     Mirrors Fuzzer._probe_so_function's preference: fuzz_shm_run, else the
     first exported fuzz_* symbol. Returns None when nothing callable is found.
+
+    Filters by the ``fuzz_`` prefix *before* truncating: large libraries
+    (e.g. ffmpeg) export thousands of symbols and the ``fuzz_*`` entries
+    sort alphabetically after ``av_*`` / ``avformat_*``, so a 20- or
+    100-symbol cap would cut them off before ``fuzz_shm_run`` is seen.
     """
-    funcs = _get_exported_functions(target, max_funcs=100)
+    funcs = _get_exported_functions(target, max_funcs=10000)
+    fuzz_funcs = [name for name in funcs if name.startswith("fuzz")]
     for preferred in ("fuzz_shm_run", "fuzz_test"):
-        if preferred in funcs:
+        if preferred in fuzz_funcs:
             return preferred
-    for name in funcs:
-        if name.startswith("fuzz"):
-            return name
-    return None
+    return fuzz_funcs[0] if fuzz_funcs else None
 
 
 @dataclass
