@@ -11,6 +11,8 @@ Extracted from Fuzzer class (~lines 2232-2735). Contains:
 - _pick_from_pareto_front() — frontier sampling
 """
 
+import bisect as _bisect_mod
+import itertools
 import logging
 import math
 import random
@@ -55,6 +57,51 @@ SATURATION_STALL_EXECS = 20000
 # stall-recovery posture elsewhere in the fuzzer (a handful of tries per
 # operator before giving up on it), not derived from data.
 INVASION_STUCK_THRESHOLD = 10.0
+
+
+def _cdf_pick(population: list, weights: list[float], store: dict, slot: str):
+    """``random.choices(population, weights=weights, k=1)[0]`` with a cached CDF.
+
+    ``random.choices`` rebuilds ``list(accumulate(weights))`` on every call.
+    That prefix sum is O(len(population)) and it is the same vector every
+    time: ``weighted_pick_seed`` already holds the weight list fixed for 200
+    execs or until the corpus grows by 20 seeds. Sampling only needs the
+    prefix sum, and the prefix sum only changes when the weights do, so it
+    belongs with the weights rather than with the draw.
+
+    ``store`` maps ``slot`` to ``(weights_ref, cum, total)``. The cache is
+    validated by object identity against the weight list itself, and the
+    reference is held here, so an ``is`` test cannot be fooled by a recycled
+    id: a new weight vector is a new list, and a new list misses.
+
+    Draw equivalence is exact rather than statistical. This mirrors
+    CPython's implementation term for term -- the same
+    ``itertools.accumulate`` (so the same floating-point prefix sums), the
+    same ``random() * total`` scaling, the same ``hi = n - 1`` clamp against
+    overshoot -- and consumes exactly one ``random()`` per pick, as
+    ``choices`` does. Under a fixed ``--seed`` the sequence of selected seeds
+    is therefore unchanged, which is the property the reproducibility tests
+    rest on.
+
+    Anything the fast path is not certain about is handed back to
+    ``random.choices``: a length mismatch between population and weights, a
+    non-positive total and a non-finite total all raise there today, and
+    still do.
+    """
+    n = len(population)
+    if n == 0 or len(weights) != n:
+        return random.choices(population, weights=weights, k=1)[0]
+    entry = store.get(slot)
+    if entry is None or entry[0] is not weights:
+        cum = list(itertools.accumulate(weights))
+        total = cum[-1] + 0.0
+        if not (total > 0.0) or not math.isfinite(total):
+            # Let random.choices raise exactly the error it raised before.
+            return random.choices(population, weights=weights, k=1)[0]
+        entry = (weights, cum, total)
+        store[slot] = entry
+    _w, cum, total = entry
+    return population[_bisect_mod.bisect(cum, random.random() * total, 0, n - 1)]
 
 
 def _resistance(successes: float, failures: float) -> float:
@@ -1327,8 +1374,10 @@ class SeedPicker:
         # 'pareto' strategy reaches this directly, so ensure it exists.
         if not hasattr(f, "_cached_weights"):
             f._cached_weights = {}
+        if not hasattr(f, "_cdf_cache"):
+            f._cdf_cache = {}
         if len(f.corpus) < 3 or not f.seed_meta:
-            return random.choices(f.corpus, weights=weights, k=1)[0]
+            return _cdf_pick(f.corpus, weights, f._cdf_cache, "corpus")
 
         # Cache Pareto scores - recompute every 100 execs or when corpus changes
         cache_key = len(f.corpus)
@@ -1363,12 +1412,22 @@ class SeedPicker:
         front = f._pareto_front_cache
 
         if len(front) >= 2:
-            front_indices = sorted(front)
-            front_weights = [weights[i] for i in front_indices]
-            front_seeds = [f.corpus[i] for i in front_indices]
-            return random.choices(front_seeds, weights=front_weights, k=1)[0]
+            # The front slice is rebuilt from two objects that are themselves
+            # cached (the front set and the weight vector), so it is rebuilt
+            # only when one of them is replaced. Without this the slice --
+            # and therefore its CDF -- would be a fresh list on every pick
+            # and the cache below could never hit.
+            slice_entry = getattr(f, "_front_slice_cache", None)
+            if slice_entry is None or slice_entry[0] is not front or slice_entry[1] is not weights:
+                front_indices = sorted(front)
+                front_weights = [weights[i] for i in front_indices]
+                front_seeds = [f.corpus[i] for i in front_indices]
+                slice_entry = (front, weights, front_seeds, front_weights)
+                f._front_slice_cache = slice_entry
+            _fr, _w, front_seeds, front_weights = slice_entry
+            return _cdf_pick(front_seeds, front_weights, f._cdf_cache, "front")
         else:
-            return random.choices(f.corpus, weights=weights, k=1)[0]
+            return _cdf_pick(f.corpus, weights, f._cdf_cache, "corpus")
 
     def _log_pick_signals(
         self, selected: bytes, now: float, weights: list[float] | None = None
@@ -1486,7 +1545,13 @@ class SeedPicker:
         if f._weight_cache is not None:
             cached = f._weight_cache
             if len(cached) < corpus_version:
+                # Store the padded vector back. Seeds admitted since the last
+                # recompute score 1.0 either way, so the values are the same;
+                # what changes is that the list object stays put instead of
+                # being rebuilt per pick, which is what lets the CDF cache in
+                # _cdf_pick hit during a growth phase.
                 weights = cached + [1.0] * (corpus_version - len(cached))
+                f._weight_cache = weights
             else:
                 weights = cached
         else:
