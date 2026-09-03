@@ -95,6 +95,86 @@ if [ "${IN_TREE_TARGETS_SRC:-0}" = "1" ]; then
 fi
 mkdir -p "$VENDOR" "$TARGETS"
 
+# ── Build log ─────────────────────────────────────────────────────────
+# Every compile, link, configure and make in this script sent its
+# diagnostics to /dev/null, so a failure surfaced as a bare
+# "WARN: failed: <target>" with the cause discarded. That is how the
+# `-llzma` hardcode (a link requirement for a feature config.mak did not
+# even enable), the `_pick_cc` stdout capture (DEFAULT_CC set to prose),
+# and the missing `--disable-x86asm` in build_vendored_ffmpeg_sancov
+# (nasm absent -> "configure failed", no reason) each cost a debugging
+# session apiece. Keep the console output as terse as it was and send the
+# discarded stream to a file instead.
+#
+# The log is truncated per run, not appended across runs: the question it
+# answers is "why did *this* build warn", and an ever-growing file makes
+# the answer harder to find, not easier. Pass --log-file= to relocate it
+# (BUILD_LOG=... does the same); the default sits beside the artifacts.
+BUILD_LOG="${BUILD_LOG:-$TARGETS/build.log}"
+for arg in "$@"; do
+    case "$arg" in
+        --log-file=*) BUILD_LOG="${arg#--log-file=}" ;;
+    esac
+done
+BUILD_FAILURES=0
+
+log_init() {
+    mkdir -p "$(dirname "$BUILD_LOG")"
+    {
+        echo "=== build_targets.sh — $(date -Is) ==="
+        echo "argv         : $*"
+        echo "vendor root  : $VENDOR"
+        echo "build root   : $TARGETS"
+        echo "target src   : ${TARGETS_SRC:-$TARGETS}"
+        echo "compiler     : $(${DEFAULT_CC:-cc} --version 2>&1 | head -1)"
+        echo "cwd          : $(pwd)"
+    } > "$BUILD_LOG" 2>/dev/null || true
+}
+
+# A banner per build phase, so a diagnostic in the log can be traced back
+# to the phase that produced it without echoing every command line. Like
+# log_cmd it moves the excerpt mark: a phase that redirects a whole
+# configure/make into the log has no per-command mark of its own, and
+# without this its failure excerpt would quote the last *target* that ran.
+log_section() {
+    printf '\n\n===== %s =====\n' "$*" >> "$BUILD_LOG" 2>/dev/null || true
+    BUILD_LOG_MARK=$(( $(wc -c < "$BUILD_LOG" 2>/dev/null || echo 0) + 1 ))
+}
+
+# The command that is about to run, recorded immediately before it runs.
+# Without this the log holds diagnostics with no way to tell which of the
+# five variants of the same target emitted them.
+#
+# The byte offset is what makes warn_failed's excerpt belong to *this*
+# command: grepping the whole log would report the first error of the run
+# for every subsequent failure, which is worse than no excerpt at all.
+BUILD_LOG_MARK=1
+log_cmd() {
+    printf '\n+ %s\n' "$*" >> "$BUILD_LOG" 2>/dev/null || true
+    BUILD_LOG_MARK=$(( $(wc -c < "$BUILD_LOG" 2>/dev/null || echo 0) + 1 ))
+}
+
+# A build failure, reported on the console with a pointer and the first
+# real error line from that command's own output. "See the log" alone is
+# one step too many when the log already knows which line matters.
+warn_failed() {
+    BUILD_FAILURES=$((BUILD_FAILURES + 1))
+    warn "failed: $1 (see $BUILD_LOG)"
+    local out first
+    out=$(tail -c "+$BUILD_LOG_MARK" "$BUILD_LOG" 2>/dev/null || true)
+    first=$(printf '%s\n' "$out" | grep -m1 -E 'error:|fatal error|undefined reference|cannot find' || true)
+    # A configure script that fails does not necessarily say "error"
+    # ("nasm not found or too old" is the whole diagnosis), so fall back
+    # to its last line rather than printing nothing.
+    # First line, not last: FFmpeg's configure signs off with a generic
+    # "if you think configure made a mistake" blurb, so the tail is boilerplate
+    # while the head is the diagnosis. Failures with a real error line never
+    # reach this branch.
+    [ -n "$first" ] || first=$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | head -n1)
+    [ -n "$first" ] && echo "         ${first:0:200}" >&2
+    return 0
+}
+
 FGREP="${FGREP_DIR:-$VENDOR/fgrep}"
 TAILSLAYER="${TAILSLAYER_DIR:-/home/dclavijo/code/tailslayer}"
 SHIM="src/fuzzer_tool/adapters/afl_shim.c"
@@ -512,7 +592,7 @@ compile_perf_shim() {
         return 1
     fi
     local rc=0
-    $cc -O2 -g -shared -fPIC -o "$out" "$PERF_SHIM" 2>/dev/null || rc=$?
+    $cc -O2 -g -shared -fPIC -o "$out" "$PERF_SHIM" 2>>"$BUILD_LOG" || rc=$?
     if [ $rc -eq 0 ]; then
         ok "perf_shim.so"
     else
@@ -553,7 +633,7 @@ compile_lz4_objects() {
     local rc=0
     for src in lz4 lz4frame lz4hc xxhash; do
         $cc $flags -fPIC -O2 -g $extra_cflags -DXXH_NAMESPACE=LZ4_ -I"$LZ4/lib" \
-            -c "$LZ4/lib/${src}.c" -o "/tmp/${src}${suffix}.o" 2>/dev/null || rc=$?
+            -c "$LZ4/lib/${src}.c" -o "/tmp/${src}${suffix}.o" 2>>"$BUILD_LOG" || rc=$?
     done
     if [ $rc -eq 0 ]; then
         ok "lz4 objects${suffix:+ ($suffix)}"
@@ -594,7 +674,7 @@ compile_grep_objects() {
     for src in lib/dfa lib/localeinfo src/kwset; do
         $cc $flags $cov_flag -fPIC -O2 -g $extra_cflags \
             -include "$GREP_SRC/config.h" $GREP_INC \
-            -c "$GREP_SRC/${src}.c" -o "/tmp/grep_$(basename "$src")${suffix}.o" 2>/dev/null || rc=$?
+            -c "$GREP_SRC/${src}.c" -o "/tmp/grep_$(basename "$src")${suffix}.o" 2>>"$BUILD_LOG" || rc=$?
     done
     if [ $rc -eq 0 ]; then
         ok "grep objects${suffix:+ ($suffix)}"
@@ -637,7 +717,7 @@ compile_secp256k1_objects() {
     for src in secp256k1 precomputed_ecmult precomputed_ecmult_gen; do
         $cc $flags $cov_flag -fPIC -O2 -g $extra_cflags $module_flags \
             -I"$SECP256K1/src" -I"$SECP256K1/include" \
-            -c "$SECP256K1/src/${src}.c" -o "/tmp/${src}${suffix}.o" 2>/dev/null || rc=$?
+            -c "$SECP256K1/src/${src}.c" -o "/tmp/${src}${suffix}.o" 2>>"$BUILD_LOG" || rc=$?
     done
     if [ $rc -eq 0 ]; then
         ok "secp256k1 objects${suffix:+ ($suffix)}"
@@ -691,7 +771,7 @@ compile_sqlite_objects() {
         *clang*) cov_flag="-fsanitize-coverage=trace-pc-guard" ;;
     esac
     $cc $flags $cov_flag -fPIC -O2 -g $extra_cflags $SQLITE_DEFINES -I"$SQLITE" \
-        -c "$SQLITE/sqlite3.c" -o "/tmp/sqlite3${suffix}.o" 2>/dev/null || rc=$?
+        -c "$SQLITE/sqlite3.c" -o "/tmp/sqlite3${suffix}.o" 2>>"$BUILD_LOG" || rc=$?
     if [ $rc -eq 0 ]; then
         ok "sqlite object${suffix:+ ($suffix)}"
     else
@@ -711,7 +791,7 @@ compile_fuzzgoat_object() {
     # the whole build.  Callers gate on $HAS_FUZZGOAT.
     [ -f "$VENDOR/fuzzgoat/fuzzgoat.c" ] || return 0
     $cc $flags -O2 -g $extra_cflags -I"$VENDOR/fuzzgoat" \
-        -c "$VENDOR/fuzzgoat/fuzzgoat.c" -o /tmp/fuzzgoat.o 2>/dev/null
+        -c "$VENDOR/fuzzgoat/fuzzgoat.c" -o /tmp/fuzzgoat.o 2>>"$BUILD_LOG"
 }
 
 # ── Build a target ────────────────────────────────────────────────
@@ -736,13 +816,14 @@ build_target() {
     fi
     local rc=0
     # FRAME_POINTER: ctx hashing is default-on in afl_shim.c; see the header.
+    log_cmd "$cc $extra_flags -O2 -g $FRAME_POINTER $extra_cflags $cmplog_cflags -include $SHIM -o $out $src $libs $cmplog_libs"
     $cc $extra_flags -O2 -g $FRAME_POINTER $extra_cflags $cmplog_cflags -include "$SHIM" \
-        -o "$out" "$src" $libs $cmplog_libs 2>/dev/null || rc=$?
+        -o "$out" "$src" $libs $cmplog_libs 2>>"$BUILD_LOG" || rc=$?
     if [ $rc -eq 0 ]; then
         ok "$(basename "$out")"
         record_target_md5 "$out"
     else
-        warn "failed: $(basename "$out")"
+        warn_failed "$(basename "$out")"
     fi
 }
 
@@ -784,13 +865,14 @@ build_so_target() {
         fi
     fi
     # FRAME_POINTER: ctx hashing is default-on in afl_shim.c; see the header.
+    log_cmd "$target_cc $extra_flags -O2 -g $FRAME_POINTER $extra_cflags $cmplog_cflags -shared -fPIC $bsymbolic_flag -include $SHIM -o $out $src $libs $cmplog_libs"
     $target_cc $extra_flags -O2 -g $FRAME_POINTER $extra_cflags $cmplog_cflags -shared -fPIC $bsymbolic_flag -include "$SHIM" \
-        -o "$out" "$src" $libs $cmplog_libs 2>/dev/null || rc=$?
+        -o "$out" "$src" $libs $cmplog_libs 2>>"$BUILD_LOG" || rc=$?
     if [ $rc -eq 0 ]; then
         ok "$(basename "$out")"
         record_target_md5 "$out"
     else
-        warn "failed: $(basename "$out")"
+        warn_failed "$(basename "$out")"
     fi
 }
 
@@ -1019,6 +1101,7 @@ STUBEOF
     if [ "${USE_CCACHE:-1}" = "1" ] && command -v ccache &>/dev/null; then
         make_cc="ccache clang"
     fi
+    log_section "vendored FFmpeg${label}: configure"
     if (cd "$FFMPEG_DIR" && CC="$make_cc" ./configure --cc="$cc" --extra-cflags="$COV_FLAGS" \
         --extra-ldflags="-L$stub_dir $LINK_FLAGS" --extra-libs="$EXTRA_LIBS" \
         --enable-static --disable-shared --disable-programs --disable-doc \
@@ -1026,8 +1109,9 @@ STUBEOF
         --disable-parsers --disable-bsfs --disable-avdevice \
         --disable-pthreads --disable-network --disable-hwaccels --disable-cuvid \
         --disable-nvenc --disable-vaapi --disable-vdpau --disable-vulkan \
-        >/dev/null 2>&1); then
-        if (cd "$FFMPEG_DIR" && make -j$(nproc) CC="$make_cc" -s >/dev/null 2>&1); then
+        >>"$BUILD_LOG" 2>&1); then
+        log_section "vendored FFmpeg${label}: make"
+        if (cd "$FFMPEG_DIR" && make -j$(nproc) CC="$make_cc" -s >>"$BUILD_LOG" 2>&1); then
             # Promote the .a artifacts to the canonical build location.
             for lib in libavformat libavcodec libavutil libswresample libswscale; do
                 if [ -d "$FFMPEG_DIR/$lib" ]; then
@@ -1046,10 +1130,10 @@ STUBEOF
             done
             ok "vendored FFmpeg${label} → $OUT_DIR"
         else
-            warn "vendored FFmpeg${label} build failed"
+            warn_failed "vendored FFmpeg${label} build"
         fi
     else
-        warn "vendored FFmpeg${label} configure failed"
+        warn_failed "vendored FFmpeg${label} configure"
     fi
     rm -rf "$stub_dir"
 }
@@ -1607,7 +1691,7 @@ build_ngram_so_targets() {
         local rc=0
         $cc $flags -O2 -g $FRAME_POINTER -D__AFL_DISTANCE_MODE -D__AFL_NGRAM_K=${k} \
             -fsanitize-coverage=trace-pc $extra_cflags $cmplog_cflags -shared -fPIC $bsymbolic_flag -include "$SHIM" \
-            -o "$out" "$src" $libs $cmplog_libs 2>/dev/null || rc=$?
+            -o "$out" "$src" $libs $cmplog_libs 2>>"$BUILD_LOG" || rc=$?
         if [ $rc -eq 0 ]; then
             ok "$(basename "$out")"
             record_target_md5 "$out"
@@ -2086,6 +2170,8 @@ print_feature_matrix() {
 
 # ── Main ──────────────────────────────────────────────────────────
 echo "=== Building fuzz targets ==="
+log_init "$@"
+echo "  log: $BUILD_LOG"
 
 snapshot_target_md5
 
@@ -2218,4 +2304,7 @@ verify_cmplog
 verify_vendor_tracecmp
 verify_target_md5
 build_tracecmp_targets
+if [ "$BUILD_FAILURES" -gt 0 ]; then
+    warn "$BUILD_FAILURES build failure(s) — full output in $BUILD_LOG"
+fi
 echo "=== Done ==="
