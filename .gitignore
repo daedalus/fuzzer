@@ -61,6 +61,7 @@ targets/unrar_read
 src/fuzzer_tool/adapters/fuzz_loader
 corpus/
 corpora/
+corpus_ffmpeg/
 .mimocode/
 
 # Vendored library sources (built with clang -fsanitize-coverage)
