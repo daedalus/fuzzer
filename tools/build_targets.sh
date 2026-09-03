@@ -1113,25 +1113,52 @@ build_vendored_ffmpeg_sancov() {
     # Build dir: $FUZZ_BUILD_ROOT/ffmpeg[_asan]/ — sources staged here, never in vendoring.
     local BUILD_DIR="$FUZZ_BUILD_ROOT/ffmpeg${asan_suffix}"
     mkdir -p "$BUILD_DIR"
-    # Stage a clean copy of the source. This is the only place FFmpeg is
-    # actually built; the read-only $VENDOR/ffmpeg tree is never touched.
+    # Stage the source. This is the only place FFmpeg is actually built;
+    # the read-only $VENDOR/ffmpeg tree is never touched.
+    #
+    # The stage is updated in place, not recreated. `rm -rf` here meant a
+    # full re-copy of ~180MB and then a from-scratch compile of the whole
+    # component set on every invocation, because the .o files live in the
+    # stage and were deleted along with it. rsync without --delete leaves
+    # them: only sources that actually changed upstream are copied, and
+    # make then rebuilds only what those touched. --delete would be wrong
+    # for the same reason — the objects have no counterpart in $SRC_DIR.
     local STAGE_DIR="$BUILD_DIR/src"
-    rm -rf "$STAGE_DIR"
     mkdir -p "$STAGE_DIR"
     # Copy source WITHOUT .git (1.8GB on FFmpeg 9.0.1) and other heavy unneeded dirs.
     # FFmpeg's configure/make is in-tree, so we need a full source copy, but
     # .git/.forgejo are not required for the build. Note: tests/ and doc/ are
     # referenced by FFmpeg's top-level Makefile, so leave them in place.
-    rsync -a --exclude='.git' --exclude='.forgejo' \
-              --exclude='presets' \
-              "$SRC_DIR"/ "$STAGE_DIR"/
     local FFMPEG_DIR="$STAGE_DIR"
     # Output dir: $BUILD_DIR/libav*/ — the static .a artifacts.
     local OUT_DIR="$BUILD_DIR"
-    [ -d "$FFMPEG_DIR" ] || return 0
-    # Check if FFmpeg libs already have desired instrumentation
-    local has_cov=$(nm "$FFMPEG_DIR/libavformat/libavformat.a" 2>/dev/null | grep -c '__sanitizer_cov_trace_pc_guard' || true)
-    # [ "$has_cov" -gt 10 ] && return 0  # early-return removed: always rebuild to pick up patched sources
+
+    # Two stamps, because the two halves have different costs and
+    # different triggers.
+    #
+    #   config stamp — configure flags and the compiler. A change here
+    #     invalidates config.mak and every object built against it, so it
+    #     forces reconfigure + make clean.
+    #   source stamp — the vendored tree's revision and the contents of
+    #     patches/. A change here needs no reconfigure: rsync brings the
+    #     edited files over and make rebuilds their objects.
+    #
+    # The early return this replaces was commented out with "always
+    # rebuild to pick up patched sources" (see git history). That reason
+    # was sound and the remedy was not: rebuilding everything, always, to
+    # notice a patch that usually has not changed. The source stamp
+    # notices the patch directly.
+    local cc_id; cc_id=$(clang --version 2>/dev/null | head -1)
+    local src_stamp cfg_stamp
+    src_stamp=$( { (cd "$SRC_DIR" && git rev-parse HEAD 2>/dev/null) || echo "no-git"
+                   find "$SRC_DIR" -name '*.c' -newer "$SRC_DIR/configure" 2>/dev/null | sort
+                   cat patches/*.patch 2>/dev/null; } | md5sum | cut -d' ' -f1)
+    local stamp_file="$BUILD_DIR/.sancov_stamp"
+    local prev_src="" prev_cfg=""
+    if [ -f "$stamp_file" ]; then
+        prev_src=$(sed -n '1p' "$stamp_file")
+        prev_cfg=$(sed -n '2p' "$stamp_file")
+    fi
 
     local label="${asan_suffix:-" (nosan)"}"
     echo "Building vendored FFmpeg${label} with sancov coverage..."
@@ -1170,7 +1197,36 @@ STUBEOF
         LINK_FLAGS="-fsanitize=address"
         EXTRA_LIBS="-lsancov_stub"
     fi
-    (cd "$FFMPEG_DIR" && make clean >/dev/null 2>&1 || true)
+    local cfg_stamp
+    cfg_stamp=$(printf '%s|%s|%s|%s' "$COV_FLAGS" "$LINK_FLAGS" "$EXTRA_LIBS" "$cc_id" \
+                | md5sum | cut -d' ' -f1)
+
+    # Nothing changed and the archives are all there: this is the common
+    # case for a repeat run, and it used to cost a 180MB re-copy plus a
+    # full recompile of the component set.
+    local lib have_all=1
+    for lib in libavformat libavcodec libavutil libswresample; do
+        [ -f "$OUT_DIR/$lib/$lib.a" ] || have_all=0
+    done
+    if [ "$FORCE_REBUILD" -eq 0 ] && [ "$have_all" -eq 1 ] \
+       && [ "$src_stamp" = "$prev_src" ] && [ "$cfg_stamp" = "$prev_cfg" ]; then
+        ok "vendored FFmpeg${label}: up to date"
+        rm -rf "$stub_dir"
+        return 0
+    fi
+
+    rsync -a --exclude='.git' --exclude='.forgejo' \
+              --exclude='presets' \
+              "$SRC_DIR"/ "$STAGE_DIR"/
+
+    # Only a configure-level change needs the reconfigure and the clean.
+    # A source-only change (a new patch, an updated vendored tree) is
+    # exactly what make is for, and cleaning first would throw away every
+    # object that the change did not touch.
+    local need_configure=0
+    [ "$cfg_stamp" = "$prev_cfg" ] || need_configure=1
+    [ -f "$FFMPEG_DIR/ffbuild/config.mak" ] || need_configure=1
+
     # Set CC=ccache clang in the make environment so individual file
     # compilations cache. ccache decides based on argv[0] whether to cache;
     # it works correctly with "ccache clang foo.c" but not with
@@ -1180,15 +1236,20 @@ STUBEOF
     if [ "${USE_CCACHE:-1}" = "1" ] && command -v ccache &>/dev/null; then
         make_cc="ccache clang"
     fi
-    log_section "vendored FFmpeg${label}: configure"
-    if (cd "$FFMPEG_DIR" && CC="$make_cc" ./configure --cc="$cc" --extra-cflags="$COV_FLAGS" \
-        --extra-ldflags="-L$stub_dir $LINK_FLAGS" --extra-libs="$EXTRA_LIBS" \
-        --enable-static --disable-shared --disable-programs --disable-doc \
-        --disable-encoders --disable-muxers --disable-devices --disable-filters \
-        --disable-parsers --disable-bsfs --disable-avdevice \
-        --disable-pthreads --disable-network --disable-hwaccels --disable-cuvid \
-        --disable-nvenc --disable-vaapi --disable-vdpau --disable-vulkan \
-        >>"$BUILD_LOG" 2>&1); then
+    local cfg_ok=1
+    if [ "$need_configure" -eq 1 ]; then
+        (cd "$FFMPEG_DIR" && make clean >>"$BUILD_LOG" 2>&1 || true)
+        log_section "vendored FFmpeg${label}: configure"
+        (cd "$FFMPEG_DIR" && CC="$make_cc" ./configure --cc="$cc" --extra-cflags="$COV_FLAGS" \
+            --extra-ldflags="-L$stub_dir $LINK_FLAGS" --extra-libs="$EXTRA_LIBS" \
+            --enable-static --disable-shared --disable-programs --disable-doc \
+            --disable-encoders --disable-muxers --disable-devices --disable-filters \
+            --disable-parsers --disable-bsfs --disable-avdevice \
+            --disable-pthreads --disable-network --disable-hwaccels --disable-cuvid \
+            --disable-nvenc --disable-vaapi --disable-vdpau --disable-vulkan \
+            >>"$BUILD_LOG" 2>&1) || cfg_ok=0
+    fi
+    if [ "$cfg_ok" -eq 1 ]; then
         log_section "vendored FFmpeg${label}: make"
         if (cd "$FFMPEG_DIR" && make -j$(nproc) CC="$make_cc" -s >>"$BUILD_LOG" 2>&1); then
             # Promote the .a artifacts to the canonical build location.
@@ -1207,6 +1268,7 @@ STUBEOF
                 [ -d "$OUT_DIR/$hdr" ] || continue
                 cp -rn "$FFMPEG_DIR/$hdr"/*.h "$OUT_DIR/$hdr/" 2>/dev/null || true
             done
+            printf '%s\n%s\n' "$src_stamp" "$cfg_stamp" > "$stamp_file"
             ok "vendored FFmpeg${label} → $OUT_DIR"
         else
             warn_failed "vendored FFmpeg${label} build"
