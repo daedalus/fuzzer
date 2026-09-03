@@ -363,6 +363,7 @@ def cmd_fuzz(args):
             markov_blend=getattr(args, "markov_blend", False),
             mc_bandit=args.mc_bandit,
             mc_cem=args.mc_cem,
+            mc_cycle_detect=getattr(args, "mc_cycle_detect", False),
             mc_elite_frac=args.mc_elite_frac,
             mc_refit_interval=args.mc_refit_int,
             mc_decay_interval=getattr(args, "mc_decay_interval", 100),
@@ -479,6 +480,7 @@ def cmd_fuzz(args):
         markov_generate=args.markov_gen,
         mc_bandit=args.mc_bandit,
         mc_cem=args.mc_cem,
+        mc_cycle_detect=getattr(args, "mc_cycle_detect", False),
         mopt=getattr(args, "mopt", False),
         cmaes=getattr(args, "cma_es", False),
         cmaes_pop_size=getattr(args, "cmaes_pop_size", 8),
@@ -1521,6 +1523,13 @@ def cmd_sweep(args):
 # cmplog_fifo_sink was changed to --no-cmplog-fifo-sink (opt-out,
 # default=True) in the same commit; added to _HAIL_MARY_FLAGS so the
 # FIFO drain is force-enabled alongside the rest of the strategy set.
+#
+# mc_cycle_detect (--mc-cycle-detect) is intentionally excluded (see
+# tests/test_regression_hail_mary_gates.py::_EXCLUDED_OPT_IN): it is a
+# diagnostic on top of the MC scheduler, not a fuzzing strategy, and it
+# recomputes the operator-transition stationary distribution on every
+# stats tick when enabled -- real overhead that --hail-mary (already the
+# heaviest preset) shouldn't add silently on everyone's behalf.
 _HAIL_MARY_FLAGS = (
     "continue_until_crash",
     "deep_coverage",
@@ -1755,6 +1764,15 @@ def main() -> int:
         "risk-normalized scores to down-weight high-variance lottery tickets.",
     )
     fuzz_parser.add_argument("--mc-cem", action="store_true", help="Enable cross-entropy method")
+    fuzz_parser.add_argument(
+        "--mc-cycle-detect",
+        action="store_true",
+        help="Opt in to Floyd cycle detection on the MC operator-transition "
+        "stationary distribution (periodic-chain diagnosis). Off by default: "
+        "costs extra computation on top of an already non-converged power "
+        "iteration. Requires --mc-bandit or --mc-cem. Stats surface in the "
+        "live stats line and the final report.",
+    )
     fuzz_parser.add_argument(
         "--mopt",
         action="store_true",

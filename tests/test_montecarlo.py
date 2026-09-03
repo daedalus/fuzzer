@@ -1672,26 +1672,81 @@ class TestStationaryDistributionPeriodicity:
 
     def test_periodic_chain_detected_numpy_path(self):
         mc = self._bipartite_period_two()
-        pi, diag = mc.stationary_distribution(return_diagnostics=True)
+        pi, diag = mc.stationary_distribution(return_diagnostics=True, detect_cycles=True)
         assert diag.periodic
         assert diag.period == 2
         assert not diag.converged
+        assert diag.cycle_checked
         assert pi["A"] == pytest.approx(0.5, abs=1e-6)
         assert pi["B"] == pytest.approx(0.15, abs=1e-6)
         assert pi["C"] == pytest.approx(0.35, abs=1e-6)
         assert sum(pi.values()) == pytest.approx(1.0, abs=1e-9)
+        assert mc.cycle_checks == 1
+        assert mc.cycle_detections == 1
+        assert mc.last_cycle_period == 2
 
     def test_periodic_chain_detected_python_fallback_matches_numpy(self, monkeypatch):
         import fuzzer_tool.core.schedulers.monte_carlo as mc_module
 
         monkeypatch.setattr(mc_module, "_HAS_NUMPY", False)
         mc = self._bipartite_period_two()
-        pi, diag = mc.stationary_distribution(return_diagnostics=True)
+        pi, diag = mc.stationary_distribution(return_diagnostics=True, detect_cycles=True)
         assert diag.periodic
         assert diag.period == 2
+        assert diag.cycle_checked
         assert pi["A"] == pytest.approx(0.5, abs=1e-6)
         assert pi["B"] == pytest.approx(0.15, abs=1e-6)
         assert pi["C"] == pytest.approx(0.35, abs=1e-6)
+
+    def test_cycle_detection_is_opt_in_and_off_by_default(self):
+        """Without detect_cycles=True, a periodic chain's non-convergence
+        is reported as-is: no Floyd check runs, cycle_checked is False,
+        and the returned pi is the raw non-converged snapshot rather than
+        the Cesaro average -- the whole point of making this opt-in."""
+        mc = self._bipartite_period_two()
+        pi, diag = mc.stationary_distribution(return_diagnostics=True)
+        assert not diag.converged
+        assert not diag.periodic
+        assert not diag.cycle_checked
+        assert mc.cycle_checks == 0
+        assert mc.cycle_detections == 0
+        # Not the Cesaro average -- confirms the fallback snapshot, not a
+        # skipped-but-still-averaged result.
+        assert pi["A"] != pytest.approx(0.5, abs=1e-6)
+
+    def test_cycle_detection_opt_in_python_fallback(self, monkeypatch):
+        import fuzzer_tool.core.schedulers.monte_carlo as mc_module
+
+        monkeypatch.setattr(mc_module, "_HAS_NUMPY", False)
+        mc = self._bipartite_period_two()
+        pi, diag = mc.stationary_distribution(return_diagnostics=True)
+        assert not diag.cycle_checked
+        assert mc.cycle_checks == 0
+
+    def test_cycle_stats_accumulate_across_calls(self):
+        mc = self._bipartite_period_two()
+        for _ in range(3):
+            mc.stationary_distribution(return_diagnostics=True, detect_cycles=True)
+        stats = mc.cycle_stats()
+        assert stats["checks"] == 3
+        assert stats["detections"] == 3
+        assert stats["last_period"] == 2
+        assert stats["max_period"] == 2
+
+    def test_normal_convergent_chain_cycle_checked_false_even_with_detect_cycles(self):
+        """A chain that converges normally never reaches the Floyd check,
+        regardless of detect_cycles."""
+        mc = MonteCarloScheduler()
+        mc.transition_counts["A"]["A"] = 1
+        mc.transition_counts["A"]["B"] = 9
+        mc.transition_total["A"] = 10
+        mc.transition_counts["B"]["A"] = 5
+        mc.transition_counts["B"]["B"] = 5
+        mc.transition_total["B"] = 10
+        pi, diag = mc.stationary_distribution(return_diagnostics=True, detect_cycles=True)
+        assert diag.converged
+        assert not diag.cycle_checked
+        assert mc.cycle_checks == 0
 
     def test_default_call_signature_unchanged_without_diagnostics(self):
         """return_diagnostics defaults to False: existing callers keep

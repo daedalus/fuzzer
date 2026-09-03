@@ -1651,6 +1651,22 @@ def _fuzzing_strategy(f) -> str:
             f"  MC CEM:           elite_frac={f.mc.elite_frac}, elite_set={len(f.mc.elite_set)}"
         )
 
+    # MC Floyd cycle detection (opt-in; --mc-cycle-detect). Only shown once
+    # the check has actually run at least once -- cycle_checks stays 0 both
+    # when the flag was never passed and when every power iteration so far
+    # converged normally without needing the check, so this line only
+    # appears when there's something to report.
+    if f.mc and getattr(f, "mc_cycle_detect", False) and f.mc.cycle_checks > 0:
+        stats = f.mc.cycle_stats()
+        strategies.append(
+            f"  MC Cycle-detect:  {stats['checks']} check(s), "
+            f"{stats['detections']} periodic chain(s) found"
+        )
+        if stats["detections"] > 0:
+            strategies.append(
+                f"    Period:         last={stats['last_period']}, max={stats['max_period']}"
+            )
+
     # MOpt
     if f._mopt:
         strategies.append(

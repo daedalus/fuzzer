@@ -662,6 +662,7 @@ class Fuzzer:
         markov_blend=False,
         mc_bandit=False,
         mc_cem=False,
+        mc_cycle_detect=False,
         mopt=False,
         cmaes=False,
         cmaes_pop_size=8,
@@ -1589,6 +1590,13 @@ class Fuzzer:
         self._rand_pool = RandPool(seed=seed)
 
         self.mc_cem = mc_cem
+        # Opt-in Floyd cycle detection on the MC operator-transition
+        # stationary distribution (see MonteCarloScheduler.stationary_distribution).
+        # Off by default -- costs extra computation on top of an already
+        # non-converged power iteration. Only meaningful alongside mc_bandit
+        # or mc_cem, since it's the transition chain those build that gets
+        # checked.
+        self.mc_cycle_detect = mc_cycle_detect
         self._use_mopt = mopt
         self.mc = (
             MonteCarloScheduler(

@@ -41,6 +41,9 @@ _COMMANDS_PATH = Path(commands.__file__).resolve()
 #     force-enables only the x86 path by default)
 #   * --enable-regex-bomb-mutations (experimental, untested; not a strategy)
 #   * --send-mail-require-tls (email config; not a strategy)
+#   * --mc-cycle-detect (diagnostic on the MC scheduler, not a strategy;
+#     recomputes the stationary distribution every stats tick when on --
+#     real overhead --hail-mary shouldn't add silently)
 # Special-cased inside _apply_hail_mary (not plain bool dests in the tuple):
 #   * elo (string value "all")
 #   * anneal_budget (int)
@@ -58,6 +61,7 @@ _EXCLUDED_OPT_IN = frozenset(
         "x86_mutate",  # cross-arch toolchain; hail-mary force-enables only x86
         "enable_regex_bomb_mutations",  # experimental, untested
         "send_mail_require_tls",  # email config, not a strategy
+        "mc_cycle_detect",  # MC diagnostic, not a strategy; has real per-tick overhead
     }
 )
 

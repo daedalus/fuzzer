@@ -697,6 +697,26 @@ class StatsReporter:
                 for p, cond in [("bandit", f.mc_bandit), (f"cem:{len(f.mc.elite_set)}", f.mc_cem)]
                 if cond
             ]
+            # Opt-in Floyd cycle detection (--mc-cycle-detect). Recomputing
+            # the stationary distribution here is what actually drives the
+            # check -- it's otherwise dead weight, since nothing else in
+            # the main loop calls stationary_distribution(). Only run it
+            # once the transition chain has enough data to be meaningful,
+            # and only on requested ticks (this is not free: it's a power
+            # iteration plus, if that fails to converge, up to 20*max_iter
+            # extra Floyd steps).
+            if getattr(f, "mc_cycle_detect", False) and f.mc.transition_total:
+                try:
+                    _, cycle_diag = f.mc.stationary_distribution(
+                        return_diagnostics=True, detect_cycles=True
+                    )
+                    if cycle_diag.cycle_checked:
+                        if cycle_diag.periodic:
+                            parts.append(f"cyc:period={cycle_diag.period}")
+                        else:
+                            parts.append("cyc:none")
+                except (ValueError, ZeroDivisionError, ArithmeticError):
+                    pass
             if parts:
                 mc_str = " | mc: " + "+".join(parts)
 

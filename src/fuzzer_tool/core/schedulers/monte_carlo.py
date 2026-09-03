@@ -59,12 +59,21 @@ class StationaryDiagnostics:
         period: Cycle length. 1 when not periodic.
         iterations: Power-iteration rounds run before the tol check (or
             the cycle-detection phase, if that's how the loop ended).
+        cycle_checked: True if Floyd's algorithm actually ran (i.e.
+            `detect_cycles=True` was passed and power iteration failed
+            to converge). False when the check was skipped entirely —
+            either because iteration converged normally, or because
+            cycle detection is opt-in and wasn't requested. Lets a
+            caller distinguish "checked, no cycle" (periodic=False,
+            cycle_checked=True) from "never checked"
+            (periodic=False, cycle_checked=False).
     """
 
     converged: bool
     periodic: bool
     period: int
     iterations: int
+    cycle_checked: bool = False
 
 
 class MonteCarloScheduler:
@@ -162,6 +171,28 @@ class MonteCarloScheduler:
         # Blend weight for Sharpe/Kelly vs Thompson sampling.
         # 0.0 = pure Thompson (default), 1.0 = pure Sharpe/Kelly score.
         self._sharpe_kelly_blend: float = 0.0
+
+        # Floyd cycle-detection stats for stationary_distribution(). Cycle
+        # detection itself is opt-in (detect_cycles=False by default) since
+        # it costs up to 20 * max_iter extra `step` calls on top of a
+        # failed power iteration; these counters only move when a caller
+        # actually passes detect_cycles=True, so they double as a record
+        # of whether the check has ever run.
+        self.cycle_checks: int = 0
+        self.cycle_detections: int = 0
+        self.last_cycle_period: int = 0
+        self.max_cycle_period: int = 0
+
+    def _record_cycle_check(self, cycle) -> None:
+        """Update cycle-detection counters after an opt-in Floyd check.
+
+        `cycle` is the `CycleResult | None` returned by `floyd_detect`.
+        """
+        self.cycle_checks += 1
+        if cycle is not None and cycle.period > 1:
+            self.cycle_detections += 1
+            self.last_cycle_period = cycle.period
+            self.max_cycle_period = max(self.max_cycle_period, cycle.period)
 
     def init_arm(self, name: str, prior_alpha: float = 1.0, prior_beta: float = 1.0) -> None:
         """Register a mutation operator arm with a Beta prior.
@@ -740,7 +771,13 @@ class MonteCarloScheduler:
             return False
 
     def _stationary_numpy(
-        self, operators: list[str], op_idx: dict[str, int], n: int, max_iter: int, tol: float
+        self,
+        operators: list[str],
+        op_idx: dict[str, int],
+        n: int,
+        max_iter: int,
+        tol: float,
+        detect_cycles: bool = False,
     ) -> tuple[dict[str, float], StationaryDiagnostics]:
         """Numpy path for stationary_distribution."""
         P = np.zeros((n, n), dtype=np.float64)
@@ -784,13 +821,16 @@ class MonteCarloScheduler:
         diag = StationaryDiagnostics(
             converged=converged, periodic=False, period=1, iterations=iterations
         )
-        if not converged:
+        if not converged and detect_cycles:
             # Slow convergence and an exact non-convergent oscillation both
             # look like "diff never dropped below tol" from the loop above.
             # Floyd's algorithm tells them apart: a periodic chain's
             # sub-dominant eigenmodes decay away, so by the time max_iter
             # is exhausted `pi` is already (up to float noise) inside the
             # limit cycle if one exists — cheap to confirm from here.
+            # Opt-in only (detect_cycles=False by default): this costs up
+            # to 20 * max_iter additional `step` calls on top of an
+            # already-failed power iteration.
             tol_cycle = max(tol * 100, 1e-6)
             cycle = floyd_detect(
                 pi,
@@ -798,10 +838,23 @@ class MonteCarloScheduler:
                 is_close=lambda a, b: bool(np.abs(a - b).sum() < tol_cycle),
                 max_steps=20 * max_iter,
             )
+            self._record_cycle_check(cycle)
             if cycle is not None and cycle.period > 1:
                 pi = cesaro_average(cycle.state, step, cycle.period)
                 diag = StationaryDiagnostics(
-                    converged=False, periodic=True, period=cycle.period, iterations=iterations
+                    converged=False,
+                    periodic=True,
+                    period=cycle.period,
+                    iterations=iterations,
+                    cycle_checked=True,
+                )
+            else:
+                diag = StationaryDiagnostics(
+                    converged=False,
+                    periodic=False,
+                    period=1,
+                    iterations=iterations,
+                    cycle_checked=True,
                 )
         return {op: float(pi[op_idx[op]]) for op in operators}, diag
 
@@ -886,7 +939,13 @@ class MonteCarloScheduler:
         return p_matrix
 
     def _stationary_py(
-        self, operators: list[str], op_idx: dict[str, int], n: int, max_iter: int, tol: float
+        self,
+        operators: list[str],
+        op_idx: dict[str, int],
+        n: int,
+        max_iter: int,
+        tol: float,
+        detect_cycles: bool = False,
     ) -> tuple[dict[str, float], StationaryDiagnostics]:
         """Pure-Python fallback for stationary_distribution."""
         p_matrix = self._build_transition_matrix_py(
@@ -899,7 +958,7 @@ class MonteCarloScheduler:
         diag = StationaryDiagnostics(
             converged=converged, periodic=False, period=1, iterations=iterations
         )
-        if not converged:
+        if not converged and detect_cycles:
             tol_cycle = max(tol * 100, 1e-6)
 
             def step(v: list[float]) -> list[float]:
@@ -909,6 +968,7 @@ class MonteCarloScheduler:
                 return sum(abs(x - y) for x, y in zip(a, b, strict=False)) < tol_cycle
 
             cycle = floyd_detect(pi, step, is_close, max_steps=20 * max_iter)
+            self._record_cycle_check(cycle)
             if cycle is not None and cycle.period > 1:
                 pi = cesaro_average(
                     cycle.state,
@@ -918,12 +978,28 @@ class MonteCarloScheduler:
                     scale=lambda a, k: [x * k for x in a],
                 )
                 diag = StationaryDiagnostics(
-                    converged=False, periodic=True, period=cycle.period, iterations=iterations
+                    converged=False,
+                    periodic=True,
+                    period=cycle.period,
+                    iterations=iterations,
+                    cycle_checked=True,
+                )
+            else:
+                diag = StationaryDiagnostics(
+                    converged=False,
+                    periodic=False,
+                    period=1,
+                    iterations=iterations,
+                    cycle_checked=True,
                 )
         return {op: pi[op_idx[op]] for op in operators}, diag
 
     def stationary_distribution(
-        self, max_iter: int = 200, tol: float = 1e-8, return_diagnostics: bool = False
+        self,
+        max_iter: int = 200,
+        tol: float = 1e-8,
+        return_diagnostics: bool = False,
+        detect_cycles: bool = False,
     ) -> dict[str, float] | tuple[dict[str, float], StationaryDiagnostics]:
         """Compute the stationary distribution π of the transition Markov chain.
 
@@ -934,19 +1010,29 @@ class MonteCarloScheduler:
         Some operator-transition chains are exactly periodic (e.g. an
         alternation A -> B -> A -> B): power iteration on those never
         satisfies the tolerance check and no π_k is individually "the"
-        stationary distribution. When that's detected (via Floyd cycle
-        detection on the iterate sequence, see `core/cycle_detect.py`),
-        the result returned is instead the Cesaro (time) average over one
-        full period, which is the value that's actually meaningful for a
-        periodic chain — rather than an arbitrary non-converged snapshot
-        from whichever iteration max_iter happened to cut off at.
+        stationary distribution. When `detect_cycles=True` and that
+        happens, Floyd cycle detection runs on the iterate sequence (see
+        `core/cycle_detect.py`) and the result returned is instead the
+        Cesaro (time) average over one full period, which is the value
+        that's actually meaningful for a periodic chain — rather than an
+        arbitrary non-converged snapshot from whichever iteration
+        max_iter happened to cut off at.
 
         Args:
             max_iter: Maximum power iteration steps.
             tol: Convergence tolerance (L1 norm of change).
             return_diagnostics: If True, also return a
                 `StationaryDiagnostics` describing how the result was
-                reached (converged normally / periodic-averaged / neither).
+                reached (converged normally / periodic-averaged / neither
+                / not checked).
+            detect_cycles: Opt-in. If True and power iteration fails to
+                converge, run Floyd's algorithm to check for an exact
+                limit cycle. Off by default: the check costs up to
+                20 * max_iter extra `step` calls on top of an
+                already-failed power iteration, and most callers only
+                want the fast non-converged snapshot. When False (the
+                default), a non-converged result is returned as-is and
+                `StationaryDiagnostics.cycle_checked` is False.
 
         Returns:
             Dict mapping operator name -> stationary probability, or
@@ -978,10 +1064,30 @@ class MonteCarloScheduler:
         op_idx = {op: i for i, op in enumerate(operators)}
 
         if _HAS_NUMPY:
-            pi_dict, diag = self._stationary_numpy(operators, op_idx, n, max_iter, tol)
+            pi_dict, diag = self._stationary_numpy(
+                operators, op_idx, n, max_iter, tol, detect_cycles=detect_cycles
+            )
         else:
-            pi_dict, diag = self._stationary_py(operators, op_idx, n, max_iter, tol)
+            pi_dict, diag = self._stationary_py(
+                operators, op_idx, n, max_iter, tol, detect_cycles=detect_cycles
+            )
         return (pi_dict, diag) if return_diagnostics else pi_dict
+
+    def cycle_stats(self) -> dict[str, int]:
+        """Snapshot of Floyd cycle-detection stats accumulated so far.
+
+        Only moves when `stationary_distribution(detect_cycles=True)` has
+        actually been called and power iteration failed to converge at
+        least once; all zero means the check has never run (either
+        because it's never been requested, or every call so far
+        converged normally).
+        """
+        return {
+            "checks": self.cycle_checks,
+            "detections": self.cycle_detections,
+            "last_period": self.last_cycle_period,
+            "max_period": self.max_cycle_period,
+        }
 
     def _spectral_gap_numpy(
         self, operators: list[str], op_idx: dict[str, int], n: int, max_iter: int, tol: float
