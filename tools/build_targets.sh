@@ -1247,6 +1247,7 @@ STUBEOF
             --disable-parsers --disable-bsfs --disable-avdevice \
             --disable-pthreads --disable-network --disable-hwaccels --disable-cuvid \
             --disable-nvenc --disable-vaapi --disable-vdpau --disable-vulkan \
+            --disable-x86asm \
             >>"$BUILD_LOG" 2>&1) || cfg_ok=0
     fi
     if [ "$cfg_ok" -eq 1 ]; then
