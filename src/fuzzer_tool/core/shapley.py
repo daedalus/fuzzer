@@ -261,10 +261,15 @@ class ShapleyAttribution:
         for i, op_i in enumerate(operators):
             for j, op_j in enumerate(operators):
                 K[i, j] = kernel[op_i].get(op_j, 0.0)
-        degrees = K.sum(axis=1)
-        d_inv_sqrt = np.zeros((n, n), dtype=np.float64)
-        np.fill_diagonal(d_inv_sqrt, 1.0 / np.sqrt(np.maximum(degrees, 1e-12)))
-        L = np.eye(n, dtype=np.float64) - d_inv_sqrt @ K @ d_inv_sqrt
+        # D^-1/2 K D^-1/2 with D diagonal is a row-and-column rescale, not a
+        # pair of matrix products: (D^-1/2 K D^-1/2)_ij == K_ij * s_i * s_j
+        # for s = diag(D)^-1/2. Materializing D^-1/2 as a dense n-by-n and
+        # multiplying through spends 2*O(n^3) to apply n numbers; the outer
+        # form is O(n^2) and, since every product is a scalar times an
+        # entry rather than a summed row, bit-identical rather than merely
+        # equal to tolerance.
+        s = 1.0 / np.sqrt(np.maximum(K.sum(axis=1), 1e-12))
+        L = np.eye(n, dtype=np.float64) - K * s[:, None] * s[None, :]
         eigvals, eigvecs = np.linalg.eigh(L)
         embedding: dict[str, list[float]] = {}
         for idx, op in enumerate(operators):
