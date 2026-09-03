@@ -46,6 +46,7 @@ import multiprocessing
 import re
 import struct
 import time
+from collections import deque
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
@@ -509,9 +510,9 @@ class TargetDistance:
     def _reachable_from(self, start_func: str) -> set[str]:
         """BFS from start_func through call graph, return reachable function names."""
         visited = {start_func}
-        queue = [start_func]
+        queue = deque([start_func])
         while queue:
-            current = queue.pop(0)
+            current = queue.popleft()
             for callee in self.call_graph.get(current, set()):
                 if callee not in visited:
                     visited.add(callee)
@@ -550,12 +551,19 @@ class TargetDistance:
         # Per-function accumulation of 1/(1 + d) over reachable targets.
         sum_inv: dict[str, float] = {}
         count: dict[str, int] = {}
+        # Max BFS distance over *every* target, not just the last one. This
+        # used to read `visited` after the loop, where it holds only the
+        # final target's frontier -- so the unreachable penalty was derived
+        # from whichever target happened to be iterated last out of a set,
+        # which is neither the documented "max reachable distance" nor
+        # stable across runs.
+        reachable_max = 0.0
         for t in target_names:
             # BFS over the reverse graph from target t.
             visited = {t: 0.0}
-            queue = [t]
+            queue = deque([t])
             while queue:
-                current = queue.pop(0)
+                current = queue.popleft()
                 current_dist = visited[current]
                 sum_inv[current] = sum_inv.get(current, 0.0) + 1.0 / (1.0 + current_dist)
                 count[current] = count.get(current, 0) + 1
@@ -563,8 +571,8 @@ class TargetDistance:
                     if caller not in visited:
                         visited[caller] = current_dist + 1.0
                         queue.append(caller)
-
-        reachable_max = max(visited.values()) if visited else 1.0
+            if visited:
+                reachable_max = max(reachable_max, max(visited.values()))
         for fname in self.functions:
             if count.get(fname, 0) > 0:
                 self._distances[fname] = count[fname] / sum_inv[fname]
@@ -693,9 +701,9 @@ class TargetDistance:
             count: dict[int, int] = {}
             for t in tbbs:
                 visited = {t: 0.0}
-                queue = [t]
+                queue = deque([t])
                 while queue:
-                    current = queue.pop(0)
+                    current = queue.popleft()
                     d = visited[current]
                     sum_inv[current] = sum_inv.get(current, 0.0) + 1.0 / (1.0 + d)
                     count[current] = count.get(current, 0) + 1

@@ -598,7 +598,10 @@ class CorpusInvariants:
     def locked_bit_ratio(self) -> float:
         if not self.mask:
             return 0.0
-        return sum(bin(m).count("1") for m in self.mask) / (8.0 * len(self.mask))
+        # One popcount over the whole mask rather than one per byte: the
+        # concatenation of the bytes has the same population count as the
+        # sum of theirs, and int.bit_count() runs it word at a time.
+        return int.from_bytes(self.mask, "big").bit_count() / (8.0 * len(self.mask))
 
     def is_structural(self, offset: int) -> bool:
         """Whether *offset* is fully locked.
