@@ -21,7 +21,19 @@
 
 set -e
 
-VENDOR_DIR="$(cd "$(dirname "$0")/.." && pwd)/vendor"
+# VENDOR_ROOT: see vendor_ffmpeg.sh for the layout rationale.
+#   default: ~/fuzzing/vendoring/   (canonical home)
+#   override: FUZZ_VENDOR_ROOT=...
+#   legacy:   --in-tree-vendor restores the in-tree `vendor/` location.
+: "${FUZZ_VENDOR_ROOT:=$HOME/fuzzing/vendoring}"
+VENDOR_DIR="${IN_TREE_VENDOR:+$(cd "$(dirname "$0")/.." && pwd)/vendor}"
+VENDOR_DIR="${VENDOR_ROOT:-$VENDOR_DIR}"
+VENDOR_DIR="${VENDOR_DIR:-$FUZZ_VENDOR_ROOT}"
+mkdir -p "$VENDOR_DIR"
+for arg in "$@"; do
+    [ "$arg" = "--in-tree-vendor" ] && VENDOR_DIR="$(cd "$(dirname "$0")/.." && pwd)/vendor"
+done
+
 LZ4_VERSION="${LZ4_VERSION:-1.10.0}"
 LZ4_DIR="$VENDOR_DIR/lz4"
 DOWNLOAD_URL="https://github.com/lz4/lz4/archive/refs/tags/v${LZ4_VERSION}.tar.gz"

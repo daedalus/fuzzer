@@ -1,12 +1,40 @@
---- /home/dclavijo/my_code/fuzzer-new/vendor/ffmpeg/libavformat/vpk.c	2025-08-22 06:24:19.000000000 -0300
-+++ /tmp/vpk_fixed.c	2026-08-27 09:32:22.978203543 -0300
-@@ -84,6 +84,9 @@
-     VPKDemuxContext *vpk = s->priv_data;
-     int ret, i;
+--- a/libavformat/vpk.c
++++ b/libavformat/vpk.c
+@@ -87,9 +87,14 @@ static int vpk_read_packet(AVFormatContext *s, AVPacket *pkt)
 
-+    if (par->ch_layout.nb_channels == 0)
-+        return AVERROR_INVALIDDATA;
-+
      vpk->current_block++;
      if (vpk->current_block == vpk->block_count) {
-         unsigned size = vpk->last_block_size / par->ch_layout.nb_channels;
+-        unsigned size = vpk->last_block_size / par->ch_layout.nb_channels;
+-        unsigned skip = (par->block_align - vpk->last_block_size) / par->ch_layout.nb_channels;
+-        uint64_t pos = avio_tell(s->pb);
++        unsigned size, skip;
++        uint64_t pos;
++
++        if (par->ch_layout.nb_channels <= 0)
++            return AVERROR_INVALIDDATA;
++        size = vpk->last_block_size / par->ch_layout.nb_channels;
++        skip = (par->block_align - vpk->last_block_size) / par->ch_layout.nb_channels;
++        pos = avio_tell(s->pb);
+
+         ret = av_new_packet(pkt, vpk->last_block_size);
+         if (ret < 0)
+
+--- a/libavformat/demux.c
++++ b/libavformat/demux.c
+@@ -2597,6 +2597,16 @@ static int parameters_from_context(AVFormatContext *ic, AVCodecParameters *par,
+     if (par_tmp->chroma_location != AVCHROMA_LOC_UNSPECIFIED)
+         par->chroma_location = par_tmp->chroma_location;
+
++    /* A failed avcodec_open2() zeroes ch_layout through
++     * ff_codec_close() -> av_opt_free(); do not copy that empty layout
++     * over a container-signaled one. Other AVOption types used here are
++     * integers and are not cleared. */
++    if (par_tmp->ch_layout.nb_channels > 0 && !par->ch_layout.nb_channels) {
++        ret = av_channel_layout_copy(&par->ch_layout, &par_tmp->ch_layout);
++        if (ret < 0)
++            goto fail;
++    }
++
+     ret = 0;
+ fail:
+     avcodec_parameters_free(&par_tmp);

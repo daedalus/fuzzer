@@ -16,11 +16,22 @@
 #
 # Some targets need vendored sources fetched first (all are optional — the
 # build warns and skips when the tree is absent):
-#   tools/vendor_lz4.sh      -> vendor/lz4      (lz4_read / lz4_read.so)
-#   tools/vendor_grep.sh     -> vendor/grep
-#   tools/vendor_ffmpeg.sh   -> vendor/ffmpeg
-#   tools/vendor_secp256k1.sh -> vendor/secp256k1 (secp256k1_read.so)
-#   tools/vendor_sqlite.sh   -> vendor/sqlite    (sqlite_read.so)
+#   tools/vendor_lz4.sh       -> $FUZZ_VENDOR_ROOT/lz4        (lz4_read / lz4_read.so)
+#   tools/vendor_grep.sh      -> $FUZZ_VENDOR_ROOT/grep
+#   tools/vendor_ffmpeg.sh    -> $FUZZ_VENDOR_ROOT/ffmpeg
+#   tools/vendor_secp256k1.sh -> $FUZZ_VENDOR_ROOT/secp256k1  (secp256k1_read.so)
+#   tools/vendor_sqlite.sh    -> $FUZZ_VENDOR_ROOT/sqlite     (sqlite_read.so)
+#
+# Layout (2026-09-03, see session notes):
+#   $FUZZ_VENDOR_ROOT/<lib>/     sources (read-only here, fetched by vendor scripts)
+#   $FUZZ_BUILD_ROOT/<lib>/      build trees (configured + compiled output)
+#   $FUZZ_BUILD_ROOT/<lib>/<b>.so   shared-object target artifacts
+#   $FUZZ_BUILD_ROOT/<lib>/<b>     executable target artifacts
+# Default values: ~/fuzzing/vendoring and ~/fuzzing/targets. The legacy
+# in-tree `vendor/` and `targets/` paths are still honored via
+# `--in-tree-vendor` (or `IN_TREE_VENDOR=1`) and `--in-tree-targets`
+# (or `IN_TREE_TARGETS=1`) for back-compat with existing checkouts that
+# have patches applied in-place.
 
 set -e
 
@@ -42,7 +53,49 @@ if [ -z "${TMPDIR:-}" ]; then
     export TMPDIR=/home/dclavijo/tmp
 fi
 
-FGREP="${FGREP_DIR:-vendor/fgrep}"
+# ── Path roots ────────────────────────────────────────────────────────
+# FUZZ_VENDOR_ROOT: where vendored **sources** live. Defaults to
+#   ~/fuzzing/vendoring/; override with FUZZ_VENDOR_ROOT=...
+#   Legacy: pass --in-tree-vendor to fall back to the in-tree `vendor/`.
+# FUZZ_BUILD_ROOT: where the **build** artifacts (configured trees and
+#   target binaries) are written. Defaults to ~/fuzzing/targets/;
+#   override with FUZZ_BUILD_ROOT=... Legacy: --in-tree-targets for
+#   the in-tree `targets/` path.
+# Behavior on first run with a fresh $FUZZ_VENDOR_ROOT:
+#   - source layout is read-only (`<root>/<lib>/` populated by vendor scripts)
+#   - build layout is created on demand (`<root>/<lib>/<build-dir>/` per invocation)
+for arg in "$@"; do
+    case "$arg" in
+        --in-tree-vendor)  IN_TREE_VENDOR=1  ;;
+        --in-tree-targets) IN_TREE_TARGETS=1 ;;
+        --in-tree-targets-src) IN_TREE_TARGETS_SRC=1 ;;
+        --no-ccache)       USE_CCACHE=0      ;;
+    esac
+done
+: "${FUZZ_VENDOR_ROOT:=$HOME/fuzzing/vendoring}"
+: "${FUZZ_BUILD_ROOT:=$HOME/fuzzing/builds}"
+if [ "${IN_TREE_VENDOR:-0}" = "1" ]; then
+    VENDOR="$(cd "$(dirname "$0")/.." && pwd)/vendor"
+else
+    VENDOR="$FUZZ_VENDOR_ROOT"
+fi
+if [ "${IN_TREE_TARGETS:-0}" = "1" ]; then
+    TARGETS="$(cd "$(dirname "$0")/.." && pwd)/targets"
+else
+    TARGETS="$FUZZ_BUILD_ROOT"
+fi
+# Separate the source (.c files) location from the output (.so/.exe) location
+# when --in-tree-targets-src is passed: read sources from ./targets/*.c, write
+# outputs to $FUZZ_BUILD_ROOT.
+if [ "${IN_TREE_TARGETS_SRC:-0}" = "1" ]; then
+    TARGETS_SRC="$(cd "$(dirname "$0")/.." && pwd)/targets"
+    if [ "${IN_TREE_TARGETS:-0}" = "0" ]; then
+        mkdir -p "$TARGETS"
+    fi
+fi
+mkdir -p "$VENDOR" "$TARGETS"
+
+FGREP="${FGREP_DIR:-$VENDOR/fgrep}"
 TAILSLAYER="${TAILSLAYER_DIR:-/home/dclavijo/code/tailslayer}"
 SHIM="src/fuzzer_tool/adapters/afl_shim.c"
 # Comparison logging lives in $SHIM behind -D__AFL_CMPLOG=1 (it used to be a
@@ -51,10 +104,8 @@ SHIM="src/fuzzer_tool/adapters/afl_shim.c"
 CMPLOG_CFLAGS="-D__AFL_CMPLOG=1"
 CMPLOG_LIBS="-ldl"
 PERF_SHIM="src/fuzzer_tool/adapters/perf_shim.c"
-TARGETS="targets"
-VENDOR="vendor"
-LZ4="${LZ4_DIR:-vendor/lz4}"
-GREP_SRC="${GREP_DIR:-vendor/grep}"
+LZ4="${LZ4_DIR:-$VENDOR/lz4}"
+GREP_SRC="${GREP_DIR:-$VENDOR/grep}"
 GREP_INC="-I$GREP_SRC -I$GREP_SRC/lib -I$GREP_SRC/src"
 grep_objs() { echo "/tmp/grep_dfa$1.o /tmp/grep_localeinfo$1.o /tmp/grep_kwset$1.o"; }
 # grep -P's engine is optional: config.h defines HAVE_LIBPCRE only when
@@ -71,8 +122,8 @@ if [ -f "$GREP_SRC/config.h" ] && grep -q "define HAVE_LIBPCRE 1" "$GREP_SRC/con
         GREP_PCRE_LIBS="-lpcre2-8"
     fi
 fi
-SECP256K1="${SECP256K1_DIR:-vendor/secp256k1}"
-SQLITE="${SQLITE_DIR:-vendor/sqlite}"
+SECP256K1="${SECP256K1_DIR:-$VENDOR/secp256k1}"
+SQLITE="${SQLITE_DIR:-$VENDOR/sqlite}"
 # Shared by compile_sqlite_objects and the sqlite_read.so link: the wrapper
 # includes sqlite3.h, and a header parsed under different SQLITE_* defines
 # than the library it links against is the classic silent-ABI-mismatch bug
@@ -428,6 +479,14 @@ select_png_zlib_libs() {
 # gcc still builds every target correctly and is a fine fallback; it just
 # yields shallower coverage. See README "Feature Compatibility Matrix".
 _pick_cc() {
+    if [ "${USE_CCACHE:-1}" = "1" ] && command -v ccache &>/dev/null; then
+        # Wrap clang with ccache. The `$cc` substitutions in compile_target
+        # and build_target see "ccache clang" as a single command.
+        if command -v clang &>/dev/null; then
+            echo "ccache clang"
+            return
+        fi
+    fi
     if command -v clang &>/dev/null; then
         echo "clang"
     else
@@ -746,7 +805,7 @@ build_fgrep_targets() {
     local out_suffix=""
     [ "$suffix" = "_nosan" ] && out_suffix="_nosan"
     # fgrep_read includes fgrep .c files directly and needs -mavx2 for AVX2 intrinsics
-    build_target "$TARGETS/fgrep_read.c" "$TARGETS/fgrep_read${out_suffix}" "$FGREP_INC -lpthread" "$flags -mavx2"
+    build_target "${TARGETS_SRC:-$TARGETS}/fgrep_read.c" "$TARGETS/fgrep_read${out_suffix}" "$FGREP_INC -lpthread" "$flags -mavx2"
 }
 
 # ── Build fgrep .so targets ─────────────────────────────────────
@@ -758,7 +817,7 @@ build_fgrep_so_targets() {
     local out_suffix=""
     [[ "$suffix" == _asan* ]] && out_suffix="$suffix"
     # fgrep_read includes fgrep .c files directly — needs -mavx2 for AVX2 intrinsics
-    build_so_target "$TARGETS/fgrep_read.c" "$TARGETS/fgrep_read${out_suffix}.so" "$FGREP_INC -lpthread" "$flags -mavx2"
+    build_so_target "${TARGETS_SRC:-$TARGETS}/fgrep_read.c" "$TARGETS/fgrep_read${out_suffix}.so" "$FGREP_INC -lpthread" "$flags -mavx2"
 }
 
 # ── Build simple targets ─────────────────────────────────────────
@@ -770,15 +829,29 @@ build_simple_targets() {
 
     local FFMPEG_LIBS="-lavformat -lavcodec -lavutil -lswresample -lm"
     local FFMPEG_INC="-I/usr/include/x86_64-linux-gnu"
-    local VENDOR_FFMPEG_A="$VENDOR/ffmpeg/libavformat/libavformat.a"
-    if [ -f "$VENDOR_FFMPEG_A" ]; then
-        # Prefer the vendored tree (coverage-built; system ffmpeg headers are
-        # not installed on every box), picking the ASAN-instrumented tree for
-        # sanitizer passes.
-        local ffmpeg_root="$VENDOR/ffmpeg"
-        if [[ "$flags" == *-fsanitize=address* ]] && [ -f "$VENDOR/ffmpeg_asan/libavformat/libavformat.a" ]; then
+    # Vendored .a files live in $FUZZ_BUILD_ROOT (after build_vendored_ffmpeg_sancov
+    # promotes them there). Fall back to legacy in-tree $VENDOR/ffmpeg location.
+    # The ASAN and nosan build roots are independent: the nosan tree may not exist
+    # yet when this function runs for an ASAN build, so the ASAN selection must
+    # not be gated behind the nosan check.
+    local ffmpeg_build_root="$FUZZ_BUILD_ROOT/ffmpeg"
+    local ffmpeg_asan_build_root="$FUZZ_BUILD_ROOT/ffmpeg_asan"
+    local ffmpeg_root=""
+    if [[ "$flags" == *-fsanitize=address* ]]; then
+        if [ -f "$ffmpeg_asan_build_root/libavformat/libavformat.a" ]; then
+            ffmpeg_root="$ffmpeg_asan_build_root"
+        elif [ -f "$VENDOR/ffmpeg_asan/libavformat/libavformat.a" ]; then
             ffmpeg_root="$VENDOR/ffmpeg_asan"
         fi
+    fi
+    if [ -z "$ffmpeg_root" ]; then
+        if [ -f "$ffmpeg_build_root/libavformat/libavformat.a" ]; then
+            ffmpeg_root="$ffmpeg_build_root"
+        elif [ -f "$VENDOR/ffmpeg/libavformat/libavformat.a" ]; then
+            ffmpeg_root="$VENDOR/ffmpeg"
+        fi
+    fi
+    if [ -n "$ffmpeg_root" ]; then
         FFMPEG_LIBS="$ffmpeg_root/libavformat/libavformat.a $ffmpeg_root/libavcodec/libavcodec.a $ffmpeg_root/libavutil/libavutil.a $ffmpeg_root/libswresample/libswresample.a $(ffmpeg_extralibs "$ffmpeg_root")"
         FFMPEG_INC="-I$ffmpeg_root"
     fi
@@ -786,20 +859,20 @@ build_simple_targets() {
     local PNG_LIBS ZLIB_LIBS GZIP_LIBS PNG_INC ZLIB_INC
     select_png_zlib_libs
 
-    build_target "$TARGETS/asan_target.c" "$TARGETS/asan_target${out_suffix}" "" "$flags" "$cc" "$extra_cflags"
-    build_target "$TARGETS/test_target.c" "$TARGETS/test_target${out_suffix}" "" "$flags" "$cc" "$extra_cflags"
-    build_target "$TARGETS/proto_target.c" "$TARGETS/proto_target${out_suffix}" "" "$flags" "$cc" "$extra_cflags"
-    build_target "$TARGETS/png_read.c" "$TARGETS/png_read${out_suffix}" "$PNG_LIBS" "$flags" "$cc" "$extra_cflags $PNG_INC"
-    build_target "$TARGETS/zlib_read.c" "$TARGETS/zlib_read${out_suffix}" "$ZLIB_LIBS" "$flags" "$cc" "$extra_cflags $ZLIB_INC"
-    build_target "$TARGETS/gzip_read.c" "$TARGETS/gzip_read${out_suffix}" "$GZIP_LIBS" "$flags" "$cc" "$extra_cflags $ZLIB_INC"
-    build_target "$TARGETS/jpeg_read.c" "$TARGETS/jpeg_read${out_suffix}" "-ljpeg" "$flags" "$cc" "$extra_cflags"
-    build_target "$TARGETS/ffmpeg_read.c" "$TARGETS/ffmpeg_read${out_suffix}" "$FFMPEG_LIBS" "$flags" "$DEFAULT_CC" "$FFMPEG_INC"
+    build_target "${TARGETS_SRC:-$TARGETS}/asan_target.c" "$TARGETS/asan_target${out_suffix}" "" "$flags" "$cc" "$extra_cflags"
+    build_target "${TARGETS_SRC:-$TARGETS}/test_target.c" "$TARGETS/test_target${out_suffix}" "" "$flags" "$cc" "$extra_cflags"
+    build_target "${TARGETS_SRC:-$TARGETS}/proto_target.c" "$TARGETS/proto_target${out_suffix}" "" "$flags" "$cc" "$extra_cflags"
+    build_target "${TARGETS_SRC:-$TARGETS}/png_read.c" "$TARGETS/png_read${out_suffix}" "$PNG_LIBS" "$flags" "$cc" "$extra_cflags $PNG_INC"
+    build_target "${TARGETS_SRC:-$TARGETS}/zlib_read.c" "$TARGETS/zlib_read${out_suffix}" "$ZLIB_LIBS" "$flags" "$cc" "$extra_cflags $ZLIB_INC"
+    build_target "${TARGETS_SRC:-$TARGETS}/gzip_read.c" "$TARGETS/gzip_read${out_suffix}" "$GZIP_LIBS" "$flags" "$cc" "$extra_cflags $ZLIB_INC"
+    build_target "${TARGETS_SRC:-$TARGETS}/jpeg_read.c" "$TARGETS/jpeg_read${out_suffix}" "-ljpeg" "$flags" "$cc" "$extra_cflags"
+    build_target "${TARGETS_SRC:-$TARGETS}/ffmpeg_read.c" "$TARGETS/ffmpeg_read${out_suffix}" "$FFMPEG_LIBS" "$flags" "$cc" "$FFMPEG_INC"
     # grep_read — vendored GNU Grep (tools/vendor_grep.sh extracts to
     # vendor/grep). Skipped rather than built against the system grep: the
     # target links grep's matcher engines in-process, so without the vendored
     # source there is nothing to link.
     if compile_grep_objects "$suffix" "$flags" "$cc" "$extra_cflags"; then
-        build_target "$TARGETS/grep_read.c" "$TARGETS/grep_read${out_suffix}" \
+        build_target "${TARGETS_SRC:-$TARGETS}/grep_read.c" "$TARGETS/grep_read${out_suffix}" \
             "$(grep_objs "$suffix") $GREP_SRC/lib/libgreputils.a $GREP_PCRE_LIBS" \
             "$flags" "$cc" "$extra_cflags -include $GREP_SRC/config.h $GREP_INC $GREP_PCRE_FLAGS"
     else
@@ -807,7 +880,7 @@ build_simple_targets() {
     fi
     if [ "$HAS_FUZZGOAT" -eq 1 ]; then
         compile_fuzzgoat_object "$flags" "$cc" "$extra_cflags"
-        build_target "$TARGETS/fuzzgoat_read.c" "$TARGETS/fuzzgoat_read${out_suffix}" "/tmp/fuzzgoat.o -lm" "$flags" "$cc" "-I$VENDOR/fuzzgoat"
+        build_target "${TARGETS_SRC:-$TARGETS}/fuzzgoat_read.c" "$TARGETS/fuzzgoat_read${out_suffix}" "/tmp/fuzzgoat.o -lm" "$flags" "$cc" "-I$VENDOR/fuzzgoat"
     fi
 }
 
@@ -841,13 +914,13 @@ build_sanitizer_targets() {
     # -fno-omit-frame-pointer keeps stack traces usable in the reports that
     # sanitizer.py parses; -fPIE/-pie is required by MSAN.
     local common="$flags -fno-omit-frame-pointer -fPIE -pie"
-    build_target "$TARGETS/asan_target.c" "$TARGETS/asan_target${suffix}" "" "$common" "clang"
-    build_target "$TARGETS/test_target.c" "$TARGETS/test_target${suffix}" "" "$common" "clang"
-    build_target "$TARGETS/proto_target.c" "$TARGETS/proto_target${suffix}" "" "$common" "clang"
-    build_target "$TARGETS/grep_read.c" "$TARGETS/grep_read${suffix}" "" "$common" "clang"
+    build_target "${TARGETS_SRC:-$TARGETS}/asan_target.c" "$TARGETS/asan_target${suffix}" "" "$common" "clang"
+    build_target "${TARGETS_SRC:-$TARGETS}/test_target.c" "$TARGETS/test_target${suffix}" "" "$common" "clang"
+    build_target "${TARGETS_SRC:-$TARGETS}/proto_target.c" "$TARGETS/proto_target${suffix}" "" "$common" "clang"
+    build_target "${TARGETS_SRC:-$TARGETS}/grep_read.c" "$TARGETS/grep_read${suffix}" "" "$common" "clang"
     if [ "$HAS_FUZZGOAT" -eq 1 ]; then
         compile_fuzzgoat_object "$common" "clang" "-I$VENDOR/fuzzgoat"
-        build_target "$TARGETS/fuzzgoat_read.c" "$TARGETS/fuzzgoat_read${suffix}" "/tmp/fuzzgoat.o -lm" "$common" "clang" "-I$VENDOR/fuzzgoat"
+        build_target "${TARGETS_SRC:-$TARGETS}/fuzzgoat_read.c" "$TARGETS/fuzzgoat_read${suffix}" "/tmp/fuzzgoat.o -lm" "$common" "clang" "-I$VENDOR/fuzzgoat"
     fi
     # Targets linking uninstrumented system libraries (libpng/libz/libjpeg)
     # are intentionally omitted for MSAN: without an instrumented build of
@@ -857,36 +930,54 @@ build_sanitizer_targets() {
     if [ "$label" != "MSAN" ]; then
         local PNG_LIBS ZLIB_LIBS GZIP_LIBS PNG_INC ZLIB_INC
         select_png_zlib_libs
-        build_target "$TARGETS/png_read.c" "$TARGETS/png_read${suffix}" "$PNG_LIBS" "$common" "clang" "$PNG_INC"
-        build_target "$TARGETS/zlib_read.c" "$TARGETS/zlib_read${suffix}" "$ZLIB_LIBS" "$common" "clang" "$ZLIB_INC"
-        build_target "$TARGETS/gzip_read.c" "$TARGETS/gzip_read${suffix}" "$GZIP_LIBS" "$common" "clang" "$ZLIB_INC"
+        build_target "${TARGETS_SRC:-$TARGETS}/png_read.c" "$TARGETS/png_read${suffix}" "$PNG_LIBS" "$common" "clang" "$PNG_INC"
+        build_target "${TARGETS_SRC:-$TARGETS}/zlib_read.c" "$TARGETS/zlib_read${suffix}" "$ZLIB_LIBS" "$common" "clang" "$ZLIB_INC"
+        build_target "${TARGETS_SRC:-$TARGETS}/gzip_read.c" "$TARGETS/gzip_read${suffix}" "$GZIP_LIBS" "$common" "clang" "$ZLIB_INC"
     fi
 }
 
 # ── Rebuild vendored FFmpeg with sancov coverage ───────────────
 # Builds two variants:
-#   suffix=""      →  vendor/ffmpeg/       (coverage only, no ASAN)
-#   suffix="_asan" →  vendor/ffmpeg_asan/   (coverage + ASAN)
+#   suffix=""      →  $FUZZ_BUILD_ROOT/ffmpeg/libav*/        (coverage only, no ASAN)
+#   suffix="_asan" →  $FUZZ_BUILD_ROOT/ffmpeg_asan/libav*/   (coverage + ASAN)
+# Source is copied from $FUZZ_VENDOR_ROOT/ffmpeg to a scratch dir under
+# $FUZZ_BUILD_ROOT so the read-only vendoring tree is never modified.
 # FFmpeg's configure needs a stub for __sanitizer_cov_trace_pc_guard
 # since those symbols are provided by cmplog_shim.o at final link.
 build_vendored_ffmpeg_sancov() {
     local asan_suffix="${1:-}"  # "" or "_asan"
     [ "$WITH_FFMPEG_SANCOV" -eq 0 ] && return 0
     local SRC_DIR="$VENDOR/ffmpeg"
-    local FFMPEG_DIR="$VENDOR/ffmpeg${asan_suffix}"
     [ -d "$SRC_DIR" ] || return 0
-    # For the ASAN variant, copy source from the base if not already separate
-    if [ "$asan_suffix" = "_asan" ] && [ ! -d "$FFMPEG_DIR" ]; then
-        echo "  Copying FFmpeg source to vendor/ffmpeg_asan/..."
-        cp -a "$SRC_DIR" "$FFMPEG_DIR"
-    fi
+    # Build dir: $FUZZ_BUILD_ROOT/ffmpeg[_asan]/ — sources staged here, never in vendoring.
+    local BUILD_DIR="$FUZZ_BUILD_ROOT/ffmpeg${asan_suffix}"
+    mkdir -p "$BUILD_DIR"
+    # Stage a clean copy of the source. This is the only place FFmpeg is
+    # actually built; the read-only $VENDOR/ffmpeg tree is never touched.
+    local STAGE_DIR="$BUILD_DIR/src"
+    rm -rf "$STAGE_DIR"
+    mkdir -p "$STAGE_DIR"
+    # Copy source WITHOUT .git (1.8GB on FFmpeg 9.0.1) and other heavy unneeded dirs.
+    # FFmpeg's configure/make is in-tree, so we need a full source copy, but
+    # .git/.forgejo are not required for the build. Note: tests/ and doc/ are
+    # referenced by FFmpeg's top-level Makefile, so leave them in place.
+    rsync -a --exclude='.git' --exclude='.forgejo' \
+              --exclude='presets' \
+              "$SRC_DIR"/ "$STAGE_DIR"/
+    local FFMPEG_DIR="$STAGE_DIR"
+    # Output dir: $BUILD_DIR/libav*/ — the static .a artifacts.
+    local OUT_DIR="$BUILD_DIR"
     [ -d "$FFMPEG_DIR" ] || return 0
     # Check if FFmpeg libs already have desired instrumentation
     local has_cov=$(nm "$FFMPEG_DIR/libavformat/libavformat.a" 2>/dev/null | grep -c '__sanitizer_cov_trace_pc_guard' || true)
-    [ "$has_cov" -gt 10 ] && return 0  # already instrumented
+    # [ "$has_cov" -gt 10 ] && return 0  # early-return removed: always rebuild to pick up patched sources
 
     local label="${asan_suffix:-" (nosan)"}"
     echo "Building vendored FFmpeg${label} with sancov coverage..."
+    # FFmpeg's configure runs a link test that does not pass through ccache
+    # cleanly (configure invokes "ccache clang" as if it were a cross-compiler
+    # and aborts). Use plain clang for configure; the make step that follows
+    # can still use ccache via the CC= env var we set later.
     local cc="clang"
     if ! command -v clang &>/dev/null; then
         warn "clang not found — cannot rebuild FFmpeg with coverage"
@@ -919,16 +1010,41 @@ STUBEOF
         EXTRA_LIBS="-lsancov_stub"
     fi
     (cd "$FFMPEG_DIR" && make clean >/dev/null 2>&1 || true)
-    if (cd "$FFMPEG_DIR" && ./configure --cc="$cc" --extra-cflags="$COV_FLAGS" \
+    # Set CC=ccache clang in the make environment so individual file
+    # compilations cache. ccache decides based on argv[0] whether to cache;
+    # it works correctly with "ccache clang foo.c" but not with
+    # "ccache clang -c foo.c -o foo.o" via clang's internal driver. Either
+    # way, setting CC=ccache clang makes the .o compilations cacheable.
+    local make_cc="clang"
+    if [ "${USE_CCACHE:-1}" = "1" ] && command -v ccache &>/dev/null; then
+        make_cc="ccache clang"
+    fi
+    if (cd "$FFMPEG_DIR" && CC="$make_cc" ./configure --cc="$cc" --extra-cflags="$COV_FLAGS" \
         --extra-ldflags="-L$stub_dir $LINK_FLAGS" --extra-libs="$EXTRA_LIBS" \
         --enable-static --disable-shared --disable-programs --disable-doc \
         --disable-encoders --disable-muxers --disable-devices --disable-filters \
-        --disable-parsers --disable-bsfs --disable-postproc --disable-avdevice \
+        --disable-parsers --disable-bsfs --disable-avdevice \
         --disable-pthreads --disable-network --disable-hwaccels --disable-cuvid \
         --disable-nvenc --disable-vaapi --disable-vdpau --disable-vulkan \
         >/dev/null 2>&1); then
         if (cd "$FFMPEG_DIR" && make -j$(nproc) -s >/dev/null 2>&1); then
-            ok "vendored FFmpeg${label}"
+            # Promote the .a artifacts to the canonical build location.
+            for lib in libavformat libavcodec libavutil libswresample libswscale; do
+                if [ -d "$FFMPEG_DIR/$lib" ]; then
+                    mkdir -p "$OUT_DIR/$lib"
+                    [ -f "$FFMPEG_DIR/$lib/$lib.a" ] && cp -f "$FFMPEG_DIR/$lib/$lib.a" "$OUT_DIR/$lib/$lib.a"
+                    # Headers: copy dir contents (not the dir itself).
+                    if [ -d "$FFMPEG_DIR/$lib" ]; then
+                        cp -rn "$FFMPEG_DIR/$lib"/*.h "$OUT_DIR/$lib/" 2>/dev/null || true
+                    fi
+                fi
+            done
+            # Top-level include headers (libavformat/avformat.h, etc.) live in $FFMPEG_DIR.
+            for hdr in libavformat libavcodec libavutil libswresample libswscale; do
+                [ -d "$OUT_DIR/$hdr" ] || continue
+                cp -rn "$FFMPEG_DIR/$hdr"/*.h "$OUT_DIR/$hdr/" 2>/dev/null || true
+            done
+            ok "vendored FFmpeg${label} → $OUT_DIR"
         else
             warn "vendored FFmpeg${label} build failed"
         fi
@@ -966,11 +1082,17 @@ build_simple_so_targets() {
 
     local FFMPEG_LIBS="-lavformat -lavcodec -lavutil -lswresample -lm"
     local FFMPEG_INC="-I/usr/include/x86_64-linux-gnu"
-    # Select vendored FFmpeg path based on suffix:
-    #   _asan → vendor/ffmpeg_asan/ (ASAN + coverage)
-    #   _ubsan / _nosan / "" → vendor/ffmpeg/ (coverage only)
-    local ffmpeg_vendor_dir="$VENDOR/ffmpeg"
-    [[ "$suffix" == _asan* ]] && ffmpeg_vendor_dir="$VENDOR/ffmpeg_asan"
+    # Select FFmpeg build dir based on suffix. Prefer $FUZZ_BUILD_ROOT (the
+    # canonical build location for the .a files), fall back to legacy
+    # $VENDOR/ffmpeg in-tree vendoring.
+    #   _asan → $FUZZ_BUILD_ROOT/ffmpeg_asan/ (ASAN + coverage)
+    #   _ubsan / _nosan / "" → $FUZZ_BUILD_ROOT/ffmpeg/ (coverage only)
+    local ffmpeg_vendor_dir="$FUZZ_BUILD_ROOT/ffmpeg"
+    [[ "$suffix" == _asan* ]] && ffmpeg_vendor_dir="$FUZZ_BUILD_ROOT/ffmpeg_asan"
+    if [ ! -f "$ffmpeg_vendor_dir/libavformat/libavformat.a" ]; then
+        ffmpeg_vendor_dir="$VENDOR/ffmpeg"
+        [[ "$suffix" == _asan* ]] && ffmpeg_vendor_dir="$VENDOR/ffmpeg_asan"
+    fi
     local VENDOR_FFMPEG_A="$ffmpeg_vendor_dir/libavformat/libavformat.a"
     if [ -f "$VENDOR_FFMPEG_A" ]; then
         FFMPEG_LIBS="$ffmpeg_vendor_dir/libavformat/libavformat.a $ffmpeg_vendor_dir/libavcodec/libavcodec.a $ffmpeg_vendor_dir/libavutil/libavutil.a $ffmpeg_vendor_dir/libswresample/libswresample.a $(ffmpeg_extralibs "$ffmpeg_vendor_dir")"
@@ -978,21 +1100,21 @@ build_simple_so_targets() {
         echo "  Using vendored FFmpeg static libraries ($ffmpeg_vendor_dir)"
     fi
 
-    build_so_target "$TARGETS/asan_target.c" "$TARGETS/asan_target${out_suffix}.so" "" "$flags" "$cc" "$extra_cflags"
-    build_so_target "$TARGETS/test_target.c" "$TARGETS/test_target${out_suffix}.so" "" "$flags" "$cc" "$extra_cflags"
-    build_so_target "$TARGETS/proto_target.c" "$TARGETS/proto_target${out_suffix}.so" "" "$flags" "$cc" "$extra_cflags"
-    build_so_target "$TARGETS/png_read.c" "$TARGETS/png_read${out_suffix}.so" "$PNG_LIBS" "$flags" "$cc" "$extra_cflags $PNG_INC"
-    build_so_target "$TARGETS/zlib_read.c" "$TARGETS/zlib_read${out_suffix}.so" "$ZLIB_LIBS" "$flags" "$cc" "$extra_cflags $ZLIB_INC"
-    build_so_target "$TARGETS/gzip_read.c" "$TARGETS/gzip_read${out_suffix}.so" "$GZIP_LIBS" "$flags" "$cc" "$extra_cflags $ZLIB_INC"
-    build_so_target "$TARGETS/jpeg_read.c" "$TARGETS/jpeg_read${out_suffix}.so" "-ljpeg" "$flags" "$cc" "$extra_cflags"
-    build_so_target "$TARGETS/nop_target.c" "$TARGETS/nop_target${out_suffix}.so" "" "$flags" "$cc" "$extra_cflags"
-    build_so_target "$TARGETS/ffmpeg_read.c" "$TARGETS/ffmpeg_read${out_suffix}.so" "$FFMPEG_LIBS" "$flags" "$cc" "$extra_cflags $FFMPEG_INC"
+    build_so_target "${TARGETS_SRC:-$TARGETS}/asan_target.c" "$TARGETS/asan_target${out_suffix}.so" "" "$flags" "$cc" "$extra_cflags"
+    build_so_target "${TARGETS_SRC:-$TARGETS}/test_target.c" "$TARGETS/test_target${out_suffix}.so" "" "$flags" "$cc" "$extra_cflags"
+    build_so_target "${TARGETS_SRC:-$TARGETS}/proto_target.c" "$TARGETS/proto_target${out_suffix}.so" "" "$flags" "$cc" "$extra_cflags"
+    build_so_target "${TARGETS_SRC:-$TARGETS}/png_read.c" "$TARGETS/png_read${out_suffix}.so" "$PNG_LIBS" "$flags" "$cc" "$extra_cflags $PNG_INC"
+    build_so_target "${TARGETS_SRC:-$TARGETS}/zlib_read.c" "$TARGETS/zlib_read${out_suffix}.so" "$ZLIB_LIBS" "$flags" "$cc" "$extra_cflags $ZLIB_INC"
+    build_so_target "${TARGETS_SRC:-$TARGETS}/gzip_read.c" "$TARGETS/gzip_read${out_suffix}.so" "$GZIP_LIBS" "$flags" "$cc" "$extra_cflags $ZLIB_INC"
+    build_so_target "${TARGETS_SRC:-$TARGETS}/jpeg_read.c" "$TARGETS/jpeg_read${out_suffix}.so" "-ljpeg" "$flags" "$cc" "$extra_cflags"
+    build_so_target "${TARGETS_SRC:-$TARGETS}/nop_target.c" "$TARGETS/nop_target${out_suffix}.so" "" "$flags" "$cc" "$extra_cflags"
+    build_so_target "${TARGETS_SRC:-$TARGETS}/ffmpeg_read.c" "$TARGETS/ffmpeg_read${out_suffix}.so" "$FFMPEG_LIBS" "$flags" "$cc" "$extra_cflags $FFMPEG_INC"
     # grep_read.so — see the note on the executable build above. The
     # config.h -include has to precede the shim's, which build_so_target
     # appends after $extra_cflags; gnulib's replacement headers #error out
     # if config.h has not been seen first.
     if compile_grep_objects "$suffix" "$flags" "$cc" "$extra_cflags"; then
-        build_so_target "$TARGETS/grep_read.c" "$TARGETS/grep_read${out_suffix}.so" \
+        build_so_target "${TARGETS_SRC:-$TARGETS}/grep_read.c" "$TARGETS/grep_read${out_suffix}.so" \
             "$(grep_objs "$suffix") $GREP_SRC/lib/libgreputils.a $GREP_PCRE_LIBS -Wl,--export-dynamic" \
             "$flags" "$cc" "$extra_cflags -include $GREP_SRC/config.h $GREP_INC $GREP_PCRE_FLAGS"
     else
@@ -1000,7 +1122,7 @@ build_simple_so_targets() {
     fi
     if [ "$HAS_FUZZGOAT" -eq 1 ]; then
         compile_fuzzgoat_object "$flags" "$cc" "-I$VENDOR/fuzzgoat"
-        build_so_target "$TARGETS/fuzzgoat_read.c" "$TARGETS/fuzzgoat_read${out_suffix}.so" "/tmp/fuzzgoat.o -lm" "$flags" "$cc" "-I$VENDOR/fuzzgoat"
+        build_so_target "${TARGETS_SRC:-$TARGETS}/fuzzgoat_read.c" "$TARGETS/fuzzgoat_read${out_suffix}.so" "/tmp/fuzzgoat.o -lm" "$flags" "$cc" "-I$VENDOR/fuzzgoat"
     fi
 }
 
@@ -1042,10 +1164,10 @@ build_standalone_so_targets() {
     # link with multiple-definition errors (Hard Rule 8).
     local LZ4_OBJS="/tmp/lz4$suffix.o /tmp/lz4frame$suffix.o /tmp/lz4hc$suffix.o /tmp/xxhash$suffix.o"
     local LZ4_INC="-I$LZ4/lib -DXXH_NAMESPACE=LZ4_"
-    if [ ! -f "$TARGETS/lz4_read.c" ]; then
+    if [ ! -f "${TARGETS_SRC:-$TARGETS}/lz4_read.c" ]; then
         :  # target source absent — nothing to build
     elif compile_lz4_objects "$suffix" "$flags" "$DEFAULT_CC"; then
-        build_so_target "$TARGETS/lz4_read.c" "$TARGETS/lz4_read${out_suffix}.so" "$LZ4_OBJS -Wl,--export-dynamic -lpthread" "$flags $LZ4_INC"
+        build_so_target "${TARGETS_SRC:-$TARGETS}/lz4_read.c" "$TARGETS/lz4_read${out_suffix}.so" "$LZ4_OBJS -Wl,--export-dynamic -lpthread" "$flags $LZ4_INC"
     else
         warn "lz4_read${out_suffix}.so: vendor/lz4 not found, skipping (run tools/vendor_lz4.sh)"
     fi
@@ -1056,18 +1178,18 @@ build_standalone_so_targets() {
     # _nosan builds a distinct _nosan.so instead of overwriting the base .so.
     local SECP256K1_OBJS="/tmp/secp256k1${suffix}.o /tmp/precomputed_ecmult${suffix}.o /tmp/precomputed_ecmult_gen${suffix}.o"
     local SECP256K1_INC="-I$SECP256K1/src -I$SECP256K1/include"
-    if [ ! -f "$TARGETS/secp256k1_read.c" ]; then
+    if [ ! -f "${TARGETS_SRC:-$TARGETS}/secp256k1_read.c" ]; then
         :  # target source absent — nothing to build
     elif [ "$suffix" = "_nosan" ]; then
         # Always compile fresh _nosan objects with coverage, and emit a
         # distinct _nosan.so so the base .so from the "" pass is preserved.
         if compile_secp256k1_objects "$suffix" "$flags" "$DEFAULT_CC"; then
-            build_so_target "$TARGETS/secp256k1_read.c" "$TARGETS/secp256k1_read_nosan.so" "$SECP256K1_OBJS -Wl,--export-dynamic" "$flags $SECP256K1_INC"
+            build_so_target "${TARGETS_SRC:-$TARGETS}/secp256k1_read.c" "$TARGETS/secp256k1_read_nosan.so" "$SECP256K1_OBJS -Wl,--export-dynamic" "$flags $SECP256K1_INC"
         else
             warn "secp256k1_read_nosan.so: compile failed, skipping"
         fi
     elif compile_secp256k1_objects "$suffix" "$flags" "$DEFAULT_CC"; then
-        build_so_target "$TARGETS/secp256k1_read.c" "$TARGETS/secp256k1_read${out_suffix}.so" "$SECP256K1_OBJS -Wl,--export-dynamic" "$flags $SECP256K1_INC"
+        build_so_target "${TARGETS_SRC:-$TARGETS}/secp256k1_read.c" "$TARGETS/secp256k1_read${out_suffix}.so" "$SECP256K1_OBJS -Wl,--export-dynamic" "$flags $SECP256K1_INC"
     else
         warn "secp256k1_read${out_suffix}.so: vendor/secp256k1 not found, skipping (run tools/vendor_secp256k1.sh)"
     fi
@@ -1082,15 +1204,15 @@ build_standalone_so_targets() {
     # the shim's own machinery links against it.
     local SQLITE_LIBS="$SQLITE_OBJS -lm -lpthread -Wl,--export-dynamic"
     local SQLITE_INC="-I$SQLITE $SQLITE_DEFINES"
-    if [ ! -f "$TARGETS/sqlite_read.c" ]; then
+    if [ ! -f "${TARGETS_SRC:-$TARGETS}/sqlite_read.c" ]; then
         :  # target source absent — nothing to build
     elif [ ! -f "$SQLITE/sqlite3.c" ]; then
         warn "sqlite_read${out_suffix}.so: vendor/sqlite not found, skipping (run tools/vendor_sqlite.sh)"
     elif compile_sqlite_objects "$suffix" "$flags" "$DEFAULT_CC"; then
         if [ "$suffix" = "_nosan" ]; then
-            build_so_target "$TARGETS/sqlite_read.c" "$TARGETS/sqlite_read_nosan.so" "$SQLITE_LIBS" "$flags $SQLITE_INC"
+            build_so_target "${TARGETS_SRC:-$TARGETS}/sqlite_read.c" "$TARGETS/sqlite_read_nosan.so" "$SQLITE_LIBS" "$flags $SQLITE_INC"
         else
-            build_so_target "$TARGETS/sqlite_read.c" "$TARGETS/sqlite_read${out_suffix}.so" "$SQLITE_LIBS" "$flags $SQLITE_INC"
+            build_so_target "${TARGETS_SRC:-$TARGETS}/sqlite_read.c" "$TARGETS/sqlite_read${out_suffix}.so" "$SQLITE_LIBS" "$flags $SQLITE_INC"
         fi
     else
         warn "sqlite_read${out_suffix}.so: amalgamation failed to compile, skipping"
@@ -1178,7 +1300,7 @@ build_vendored_so_targets() {
 
     # png_read.so — vendored libpng + zlib
     if [ -n "$PNG_OBJS" ] && [ -n "$ZLIB_OBJS" ]; then
-        build_so_target "$TARGETS/png_read.c" "$TARGETS/png_read${out_suffix}_scov.so" \
+        build_so_target "${TARGETS_SRC:-$TARGETS}/png_read.c" "$TARGETS/png_read${out_suffix}_scov.so" \
             "$PNG_OBJS $ZLIB_OBJS -lm -lpthread" "$flags" "$cc" "$extra_cflags $PNG_INC $ZLIB_INC"
     else
         warn "png_read${out_suffix}_scov.so: vendored objects missing, skipping"
@@ -1186,7 +1308,7 @@ build_vendored_so_targets() {
 
     # zlib_read.so — vendored zlib
     if [ -n "$ZLIB_OBJS" ]; then
-        build_so_target "$TARGETS/zlib_read.c" "$TARGETS/zlib_read${out_suffix}_scov.so" \
+        build_so_target "${TARGETS_SRC:-$TARGETS}/zlib_read.c" "$TARGETS/zlib_read${out_suffix}_scov.so" \
             "$ZLIB_OBJS -lm" "$flags" "$cc" "$extra_cflags $ZLIB_INC"
     else
         warn "zlib_read${out_suffix}_scov.so: vendored zlib objects missing, skipping"
@@ -1194,7 +1316,7 @@ build_vendored_so_targets() {
 
     # gzip_read.so — vendored zlib
     if [ -n "$ZLIB_OBJS" ]; then
-        build_so_target "$TARGETS/gzip_read.c" "$TARGETS/gzip_read${out_suffix}_scov.so" \
+        build_so_target "${TARGETS_SRC:-$TARGETS}/gzip_read.c" "$TARGETS/gzip_read${out_suffix}_scov.so" \
             "$ZLIB_OBJS -lm" "$flags" "$cc" "$extra_cflags $ZLIB_INC"
     else
         warn "gzip_read${out_suffix}_scov.so: vendored zlib objects missing, skipping"
@@ -1202,7 +1324,7 @@ build_vendored_so_targets() {
 
     # jpeg_read.so — vendored libjpeg-turbo
     if [ -n "$JPEG_OBJS" ]; then
-        build_so_target "$TARGETS/jpeg_read.c" "$TARGETS/jpeg_read${out_suffix}_scov.so" \
+        build_so_target "${TARGETS_SRC:-$TARGETS}/jpeg_read.c" "$TARGETS/jpeg_read${out_suffix}_scov.so" \
             "$JPEG_OBJS -lm -lpthread" "$flags" "$cc" "$extra_cflags $JPEG_INC"
     else
         warn "jpeg_read${out_suffix}_scov.so: vendored libjpeg-turbo objects missing, skipping"
@@ -1431,7 +1553,7 @@ build_distance_so_targets() {
         for spec in "png_read:-lpng -lz" "zlib_read:-lz" "gzip_read:-lz" "jpeg_read:-ljpeg" "test_target:" "proto_target:"; do
             local name="${spec%%:*}"
             local libs="${spec#*:}"
-            [ -f "$TARGETS/$name.c" ] || continue
+            [ -f "${TARGETS_SRC:-$TARGETS}/$name.c" ] || continue
             local cmplog_cflags=""
             local cmplog_libs=""
             if [ "$WITH_CMPLOG" -eq 1 ]; then
@@ -1440,7 +1562,7 @@ build_distance_so_targets() {
             fi
             clang $extra_flags -g $FRAME_POINTER -D__AFL_DISTANCE_MODE -fsanitize-coverage=trace-pc \
                 $cmplog_cflags -shared -fPIC -Wl,-Bsymbolic -include "$SHIM" \
-                -o "$TARGETS/${name}${out_suffix}.so" "$TARGETS/$name.c" \
+                -o "$TARGETS/${name}${out_suffix}.so" "${TARGETS_SRC:-$TARGETS}/$name.c" \
                 $libs $cmplog_libs 2>/dev/null
             if [ -f "$TARGETS/${name}${out_suffix}.so" ]; then
                 ok "${name}${out_suffix}.so ($label)"
@@ -1535,7 +1657,7 @@ build_ngram_so_targets() {
         clang -O2 -g $FRAME_POINTER -D__AFL_DISTANCE_MODE -D__AFL_NGRAM_K=$k \
             -fsanitize-coverage=trace-pc $cmplog_cflags \
             -shared -fPIC -Wl,-Bsymbolic -include "$SHIM" \
-            -o "$TARGETS/png_read_ng${k}.so" "$TARGETS/png_read.c" \
+            -o "$TARGETS/png_read_ng${k}.so" "${TARGETS_SRC:-$TARGETS}/png_read.c" \
             $NG_VENDOR_LIBS $NG_VENDOR_INC $cmplog_libs 2>/dev/null
         if [ -f "$TARGETS/png_read_ng${k}.so" ]; then
             ok "png_read_ng${k}.so"
@@ -1544,16 +1666,16 @@ build_ngram_so_targets() {
         fi
 
         # Simple .so targets without vendored libs
-        build_ngram_flavor "$TARGETS/asan_target.c" "$TARGETS/asan_target_ng${k}.so" "" "" "" "" "$k"
-        build_ngram_flavor "$TARGETS/test_target.c" "$TARGETS/test_target_ng${k}.so" "" "" "" "" "$k"
-        build_ngram_flavor "$TARGETS/proto_target.c" "$TARGETS/proto_target_ng${k}.so" "" "" "" "" "$k"
-        build_ngram_flavor "$TARGETS/nop_target.c" "$TARGETS/nop_target_ng${k}.so" "" "" "" "" "$k"
-        build_ngram_flavor "$TARGETS/grep_read.c" "$TARGETS/grep_read_ng${k}.so" "" "" "" "" "$k"
+        build_ngram_flavor "${TARGETS_SRC:-$TARGETS}/asan_target.c" "$TARGETS/asan_target_ng${k}.so" "" "" "" "" "$k"
+        build_ngram_flavor "${TARGETS_SRC:-$TARGETS}/test_target.c" "$TARGETS/test_target_ng${k}.so" "" "" "" "" "$k"
+        build_ngram_flavor "${TARGETS_SRC:-$TARGETS}/proto_target.c" "$TARGETS/proto_target_ng${k}.so" "" "" "" "" "$k"
+        build_ngram_flavor "${TARGETS_SRC:-$TARGETS}/nop_target.c" "$TARGETS/nop_target_ng${k}.so" "" "" "" "" "$k"
+        build_ngram_flavor "${TARGETS_SRC:-$TARGETS}/grep_read.c" "$TARGETS/grep_read_ng${k}.so" "" "" "" "" "$k"
 
         # fuzzgoat_read
         if [ "$HAS_FUZZGOAT" -eq 1 ]; then
             compile_fuzzgoat_object "" "$DEFAULT_CC" ""
-            build_ngram_flavor "$TARGETS/fuzzgoat_read.c" "$TARGETS/fuzzgoat_read_ng${k}.so" "/tmp/fuzzgoat.o -lm" "" "$DEFAULT_CC" "-I$VENDOR/fuzzgoat" "$k"
+            build_ngram_flavor "${TARGETS_SRC:-$TARGETS}/fuzzgoat_read.c" "$TARGETS/fuzzgoat_read_ng${k}.so" "/tmp/fuzzgoat.o -lm" "" "$DEFAULT_CC" "-I$VENDOR/fuzzgoat" "$k"
         fi
 
         # zlib_read / gzip_read (prefer vendored zlib, fall back to system -lz)
@@ -1563,8 +1685,8 @@ build_ngram_so_targets() {
             ZLIB_NG_LIBS="$VENDOR/zlib/libz.a -lm"
             ZLIB_NG_INC="-I$VENDOR/zlib"
         fi
-        build_ngram_flavor "$TARGETS/zlib_read.c" "$TARGETS/zlib_read_ng${k}.so" "$ZLIB_NG_LIBS" "" "$DEFAULT_CC" "$ZLIB_NG_INC" "$k"
-        build_ngram_flavor "$TARGETS/gzip_read.c" "$TARGETS/gzip_read_ng${k}.so" "$ZLIB_NG_LIBS" "" "$DEFAULT_CC" "$ZLIB_NG_INC" "$k"
+        build_ngram_flavor "${TARGETS_SRC:-$TARGETS}/zlib_read.c" "$TARGETS/zlib_read_ng${k}.so" "$ZLIB_NG_LIBS" "" "$DEFAULT_CC" "$ZLIB_NG_INC" "$k"
+        build_ngram_flavor "${TARGETS_SRC:-$TARGETS}/gzip_read.c" "$TARGETS/gzip_read_ng${k}.so" "$ZLIB_NG_LIBS" "" "$DEFAULT_CC" "$ZLIB_NG_INC" "$k"
 
         # jpeg_read
         local JPEG_NG_LIBS="-ljpeg"
@@ -1577,16 +1699,22 @@ build_ngram_so_targets() {
                 JPEG_NG_INC="-I$VENDOR/libjpeg-turbo"
             fi
         fi
-        build_ngram_flavor "$TARGETS/jpeg_read.c" "$TARGETS/jpeg_read_ng${k}.so" "$JPEG_NG_LIBS" "" "$DEFAULT_CC" "$JPEG_NG_INC" "$k"
+        build_ngram_flavor "${TARGETS_SRC:-$TARGETS}/jpeg_read.c" "$TARGETS/jpeg_read_ng${k}.so" "$JPEG_NG_LIBS" "" "$DEFAULT_CC" "$JPEG_NG_INC" "$k"
 
-        # ffmpeg_read (prefer vendored ffmpeg libs, fall back to system -lavformat ...)
+        # ffmpeg_read (prefer build_root ffmpeg libs, fall back to in-tree vendoring, then system)
         local FFMPEG_NG_LIBS="-lavformat -lavcodec -lavutil -lswresample -lm"
         local FFMPEG_NG_INC="-I/usr/include/x86_64-linux-gnu"
-        if [ -f "$VENDOR/ffmpeg/libavformat/libavformat.a" ]; then
-            FFMPEG_NG_LIBS="$VENDOR/ffmpeg/libavformat/libavformat.a $VENDOR/ffmpeg/libavcodec/libavcodec.a $VENDOR/ffmpeg/libavutil/libavutil.a $VENDOR/ffmpeg/libswresample/libswresample.a -lm -lz -llzma -lbz2 -lpthread -ldl"
-            FFMPEG_NG_INC="-I$VENDOR/ffmpeg"
+        local ffmpeg_ng_root=""
+        if [ -f "$FUZZ_BUILD_ROOT/ffmpeg/libavformat/libavformat.a" ]; then
+            ffmpeg_ng_root="$FUZZ_BUILD_ROOT/ffmpeg"
+        elif [ -f "$VENDOR/ffmpeg/libavformat/libavformat.a" ]; then
+            ffmpeg_ng_root="$VENDOR/ffmpeg"
         fi
-        build_ngram_flavor "$TARGETS/ffmpeg_read.c" "$TARGETS/ffmpeg_read_ng${k}.so" "$FFMPEG_NG_LIBS" "" "$DEFAULT_CC" "$FFMPEG_NG_INC" "$k"
+        if [ -n "$ffmpeg_ng_root" ]; then
+            FFMPEG_NG_LIBS="$ffmpeg_ng_root/libavformat/libavformat.a $ffmpeg_ng_root/libavcodec/libavcodec.a $ffmpeg_ng_root/libavutil/libavutil.a $ffmpeg_ng_root/libswresample/libswresample.a -lm -lz -llzma -lbz2 -lpthread -ldl"
+            FFMPEG_NG_INC="-I$ffmpeg_ng_root"
+        fi
+        build_ngram_flavor "${TARGETS_SRC:-$TARGETS}/ffmpeg_read.c" "$TARGETS/ffmpeg_read_ng${k}.so" "$FFMPEG_NG_LIBS" "" "$DEFAULT_CC" "$FFMPEG_NG_INC" "$k"
 
         # Standalone .so targets
         # tailsayer_read (C++)
@@ -1599,7 +1727,7 @@ build_ngram_so_targets() {
         local LZ4_OBJS="/tmp/lz4${k}.o /tmp/lz4frame${k}.o /tmp/lz4hc${k}.o /tmp/xxhash${k}.o"
         local LZ4_INC="-I$LZ4/lib -DXXH_NAMESPACE=LZ4_"
         if compile_lz4_objects "$k" "" "$DEFAULT_CC"; then
-            build_ngram_flavor "$TARGETS/lz4_read.c" "$TARGETS/lz4_read_ng${k}.so" "$LZ4_OBJS -Wl,--export-dynamic -lpthread" "" "$DEFAULT_CC" "$LZ4_INC" "$k"
+            build_ngram_flavor "${TARGETS_SRC:-$TARGETS}/lz4_read.c" "$TARGETS/lz4_read_ng${k}.so" "$LZ4_OBJS -Wl,--export-dynamic -lpthread" "" "$DEFAULT_CC" "$LZ4_INC" "$k"
         else
             warn "lz4_read_ng${k}.so: vendor/lz4 not found, skipping (run tools/vendor_lz4.sh)"
         fi
@@ -1608,7 +1736,7 @@ build_ngram_so_targets() {
         local SECP256K1_OBJS="/tmp/secp256k1${k}.o /tmp/precomputed_ecmult${k}.o /tmp/precomputed_ecmult_gen${k}.o"
         local SECP256K1_INC="-I$SECP256K1/src -I$SECP256K1/include"
         if compile_secp256k1_objects "$k" "" "$DEFAULT_CC"; then
-            build_ngram_flavor "$TARGETS/secp256k1_read.c" "$TARGETS/secp256k1_read_ng${k}.so" "$SECP256K1_OBJS -Wl,--export-dynamic" "" "$DEFAULT_CC" "$SECP256K1_INC" "$k"
+            build_ngram_flavor "${TARGETS_SRC:-$TARGETS}/secp256k1_read.c" "$TARGETS/secp256k1_read_ng${k}.so" "$SECP256K1_OBJS -Wl,--export-dynamic" "" "$DEFAULT_CC" "$SECP256K1_INC" "$k"
         else
             warn "secp256k1_read_ng${k}.so: vendor/secp256k1 not found, skipping (run tools/vendor_secp256k1.sh)"
         fi
@@ -1618,7 +1746,7 @@ build_ngram_so_targets() {
         local SQLITE_LIBS="$SQLITE_OBJS -lm -lpthread -Wl,--export-dynamic"
         local SQLITE_INC="-I$SQLITE $SQLITE_DEFINES"
         if [ -f "$SQLITE/sqlite3.c" ] && compile_sqlite_objects "$k" "" "$DEFAULT_CC"; then
-            build_ngram_flavor "$TARGETS/sqlite_read.c" "$TARGETS/sqlite_read_ng${k}.so" "$SQLITE_LIBS" "" "$DEFAULT_CC" "$SQLITE_INC" "$k"
+            build_ngram_flavor "${TARGETS_SRC:-$TARGETS}/sqlite_read.c" "$TARGETS/sqlite_read_ng${k}.so" "$SQLITE_LIBS" "" "$DEFAULT_CC" "$SQLITE_INC" "$k"
         else
             warn "sqlite_read_ng${k}.so: vendor/sqlite not found, skipping (run tools/vendor_sqlite.sh)"
         fi
@@ -1626,7 +1754,7 @@ build_ngram_so_targets() {
         # fgrep_read
         if [ "$HAS_FGREP" -eq 1 ]; then
             local FGREP_INC="-I$FGREP/include -I$FGREP/src"
-            build_ngram_flavor "$TARGETS/fgrep_read.c" "$TARGETS/fgrep_read_ng${k}.so" "$FGREP_INC -lpthread" "-mavx2" "$DEFAULT_CC" "" "$k"
+            build_ngram_flavor "${TARGETS_SRC:-$TARGETS}/fgrep_read.c" "$TARGETS/fgrep_read_ng${k}.so" "$FGREP_INC -lpthread" "-mavx2" "$DEFAULT_CC" "" "$k"
         fi
     done
 }
@@ -1712,34 +1840,34 @@ build_vendored_tracecmp_targets() {
     local ALL_FLAGS="$CTX_FLAGS $TRACE_FLAGS $ASAN_FLAGS"
 
     # png_read
-    if [ -f "$TARGETS/png_read.c" ]; then
+    if [ -f "${TARGETS_SRC:-$TARGETS}/png_read.c" ]; then
         $CC -O2 -g $ALL_FLAGS -shared -fPIC -include "$SHIM" \
             -o "$TARGETS/png_read${OUT_SUFFIX}.so" \
-            "$TARGETS/png_read.c" $VENDOR_LIBS $VENDOR_INC 2>/dev/null && \
+            "${TARGETS_SRC:-$TARGETS}/png_read.c" $VENDOR_LIBS $VENDOR_INC 2>/dev/null && \
             ok "png_read${OUT_SUFFIX}.so" || warn "failed: png_read${OUT_SUFFIX}.so"
     fi
 
     # zlib_read
-    if [ -f "$TARGETS/zlib_read.c" ]; then
+    if [ -f "${TARGETS_SRC:-$TARGETS}/zlib_read.c" ]; then
         $CC -O2 -g $ALL_FLAGS -shared -fPIC -include "$SHIM" \
             -o "$TARGETS/zlib_read${OUT_SUFFIX}.so" \
-            "$TARGETS/zlib_read.c" "$ZLIB_A" $LIBS 2>/dev/null && \
+            "${TARGETS_SRC:-$TARGETS}/zlib_read.c" "$ZLIB_A" $LIBS 2>/dev/null && \
             ok "zlib_read${OUT_SUFFIX}.so" || warn "failed: zlib_read${OUT_SUFFIX}.so"
     fi
 
     # gzip_read
-    if [ -f "$TARGETS/gzip_read.c" ]; then
+    if [ -f "${TARGETS_SRC:-$TARGETS}/gzip_read.c" ]; then
         $CC -O2 -g $ALL_FLAGS -shared -fPIC -include "$SHIM" \
             -o "$TARGETS/gzip_read${OUT_SUFFIX}.so" \
-            "$TARGETS/gzip_read.c" "$ZLIB_A" $LIBS 2>/dev/null && \
+            "${TARGETS_SRC:-$TARGETS}/gzip_read.c" "$ZLIB_A" $LIBS 2>/dev/null && \
             ok "gzip_read${OUT_SUFFIX}.so" || warn "failed: gzip_read${OUT_SUFFIX}.so"
     fi
 
     # jpeg_read (needs system libjpeg — no vendored jpeg yet)
-    if [ -f "$TARGETS/jpeg_read.c" ]; then
+    if [ -f "${TARGETS_SRC:-$TARGETS}/jpeg_read.c" ]; then
         $CC -O2 -g $ALL_FLAGS -shared -fPIC -include "$SHIM" \
             -o "$TARGETS/jpeg_read${OUT_SUFFIX}.so" \
-            "$TARGETS/jpeg_read.c" -ljpeg $LIBS 2>/dev/null && \
+            "${TARGETS_SRC:-$TARGETS}/jpeg_read.c" -ljpeg $LIBS 2>/dev/null && \
             ok "jpeg_read${OUT_SUFFIX}.so" || warn "failed: jpeg_read${OUT_SUFFIX}.so"
     fi
 
@@ -1762,7 +1890,7 @@ build_vendored_tracecmp_targets() {
     # Only builds when --asan is passed.
     local HAS_ASAN=0
     for _arg in "$@"; do [ "$_arg" = "--asan" ] && HAS_ASAN=1; done
-    if [ "$HAS_ASAN" -eq 1 ] && [ -f "$TARGETS/png_read.c" ] && [ -f "src/fuzzer_tool/adapters/tracecmp_shim.c" ]; then
+    if [ "$HAS_ASAN" -eq 1 ] && [ -f "${TARGETS_SRC:-$TARGETS}/png_read.c" ] && [ -f "src/fuzzer_tool/adapters/tracecmp_shim.c" ]; then
         local TC_SHIM_OBJ="/tmp/tracecmp_shim_asan_$$.o"
         # Link ASAN runtime statically via libasan.a to avoid LD_PRELOAD
         local ASAN_LIB="/usr/lib/gcc/x86_64-linux-gnu/14/libasan.a"
@@ -1779,7 +1907,7 @@ build_vendored_tracecmp_targets() {
                 -shared -fPIC \
                 -include "$SHIM" \
                 -o "$TARGETS/png_read_asan_tracecmp.so" \
-                "$TARGETS/png_read.c" "$TC_SHIM_OBJ" \
+                "${TARGETS_SRC:-$TARGETS}/png_read.c" "$TC_SHIM_OBJ" \
                 $VENDOR_LIBS $VENDOR_INC \
                 -Wl,--whole-archive "$ASAN_LIB" -Wl,--no-whole-archive \
                 2>/dev/null && \
@@ -1795,7 +1923,7 @@ build_vendored_tracecmp_targets() {
     # Verify trace-cmp callbacks (non-ASAN targets have U symbols)
     echo "  Verifying trace-cmp callbacks in output targets..."
     for src in png_read zlib_read gzip_read; do
-        local src_file="$TARGETS/$src.c"
+        local src_file="${TARGETS_SRC:-$TARGETS}/$src.c"
         local out_file="$TARGETS/${src}${OUT_SUFFIX}"
         [ -f "$src_file" ] || continue
         # Pick the right libs per target
@@ -1857,7 +1985,7 @@ build_tracecmp_targets() {
     local rc=0
     local spec src
     for spec in "tracecmp_target" "cmplog_exercise"; do
-        src="$TARGETS/$spec.c"
+        src="${TARGETS_SRC:-$TARGETS}/$spec.c"
         [ -f "$src" ] || { warn "source not found: $src"; continue; }
 
         rc=0
@@ -1990,9 +2118,9 @@ if [ "$BUILD_ASAN" -eq 1 ]; then
         warn "clang not found — .so targets will lack auto edge coverage (manual __afl_map_edge only)"
         [ "$HAS_FGREP" -eq 1 ] && compile_fgrep_objects "_asan_tcg" "-fsanitize=address"
     fi
+    build_vendored_ffmpeg_sancov "_asan"
     build_simple_targets "_asan" "-fsanitize=address" "ASAN"
     [ "$HAS_FGREP" -eq 1 ] && build_fgrep_so_targets "_asan_tcg" "-fsanitize=address" "ASAN"
-    build_vendored_ffmpeg_sancov "_asan"
     build_simple_so_targets "_asan" "-fsanitize=address" "ASAN"
     build_standalone_so_targets "_asan" "-fsanitize=address" "ASAN"
 fi

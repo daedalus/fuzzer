@@ -27,7 +27,16 @@
 
 set -e
 
-VENDOR_DIR="$(cd "$(dirname "$0")/.." && pwd)/vendor"
+# VENDOR_ROOT: see vendor_ffmpeg.sh for the layout rationale.
+: "${FUZZ_VENDOR_ROOT:=$HOME/fuzzing/vendoring}"
+VENDOR_DIR="${IN_TREE_VENDOR:+$(cd "$(dirname "$0")/.." && pwd)/vendor}"
+VENDOR_DIR="${VENDOR_ROOT:-$VENDOR_DIR}"
+VENDOR_DIR="${VENDOR_DIR:-$FUZZ_VENDOR_ROOT}"
+mkdir -p "$VENDOR_DIR"
+for arg in "$@"; do
+    [ "$arg" = "--in-tree-vendor" ] && VENDOR_DIR="$(cd "$(dirname "$0")/.." && pwd)/vendor"
+done
+
 SECP256K1_VERSION="${SECP256K1_VERSION:-0.8.0}"
 SECP256K1_DIR="$VENDOR_DIR/secp256k1"
 DOWNLOAD_URL="https://github.com/bitcoin-core/secp256k1/archive/refs/tags/v${SECP256K1_VERSION}.tar.gz"

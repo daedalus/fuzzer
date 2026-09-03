@@ -31,7 +31,16 @@
 
 set -e
 
-VENDOR_DIR="$(cd "$(dirname "$0")/.." && pwd)/vendor"
+# VENDOR_ROOT: see vendor_ffmpeg.sh for the layout rationale.
+: "${FUZZ_VENDOR_ROOT:=$HOME/fuzzing/vendoring}"
+VENDOR_DIR="${IN_TREE_VENDOR:+$(cd "$(dirname "$0")/.." && pwd)/vendor}"
+VENDOR_DIR="${VENDOR_ROOT:-$VENDOR_DIR}"
+VENDOR_DIR="${VENDOR_DIR:-$FUZZ_VENDOR_ROOT}"
+mkdir -p "$VENDOR_DIR"
+for arg in "$@"; do
+    [ "$arg" = "--in-tree-vendor" ] && VENDOR_DIR="$(cd "$(dirname "$0")/.." && pwd)/vendor"
+done
+
 SQLITE_VERSION="${SQLITE_VERSION:-3.53.4}"
 SQLITE_DIR="$VENDOR_DIR/sqlite"
 DOWNLOAD_URL="${SQLITE_URL:-}"

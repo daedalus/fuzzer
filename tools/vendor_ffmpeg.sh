@@ -17,9 +17,10 @@
 #   FFMPEG_COMPONENTS  = space-separated configure flags to override the component set entirely.
 #
 # Source (tried in order; first reachable wins). Override with FFMPEG_SRC=<url-or-gitref>.
-#   1. https://ffmpeg.org/releases/ffmpeg-<ver>.tar.xz        (upstream release tarball)
-#   2. https://codeload.github.com/FFmpeg/FFmpeg/tar.gz/refs/tags/n<ver>   (GitHub tarball mirror)
-#   3. git clone --depth 1 --branch n<ver> https://github.com/FFmpeg/FFmpeg   (git fallback)
+#   1. https://code.ffmpeg.org/FFmpeg/FFmpeg        (canonical git, primary)
+#   2. https://ffmpeg.org/releases/ffmpeg-<ver>.tar.xz        (upstream release tarball)
+#   3. https://codeload.github.com/FFmpeg/FFmpeg/tar.gz/refs/tags/n<ver>   (GitHub tarball mirror)
+#   4. git clone --depth 1 --branch n<ver> https://github.com/FFmpeg/FFmpeg   (git fallback)
 # The GitHub mirrors matter in locked-down/CI networks where ffmpeg.org egress is blocked.
 #
 # Requirements: clang (for --nosan/--asan), make, curl or git, tar/xz.
@@ -27,8 +28,22 @@
 
 set -e
 
-VENDOR_DIR="$(cd "$(dirname "$0")/.." && pwd)/vendor"
-FFMPEG_VERSION="${FFMPEG_VERSION:-7.1.3}"
+# VENDOR_ROOT: where the **source** tree lives.
+#   default: ~/fuzzing/vendoring/   (canonical home; sources are read-only here)
+#   override: set FUZZ_VENDOR_ROOT=... to relocate (e.g. CI cache, container mount)
+#   legacy:   the old in-tree `vendor/` is still supported via `--in-tree-vendor`
+#             (kept for back-compat with existing checkouts that have patches
+#             applied in-place; the new default keeps vendored sources out of
+#             the source tree entirely).
+: "${FUZZ_VENDOR_ROOT:=$HOME/fuzzing/vendoring}"
+if [ "${IN_TREE_VENDOR:-0}" = "1" ]; then
+    VENDOR_DIR="$(cd "$(dirname "$0")/.." && pwd)/vendor"
+else
+    VENDOR_DIR="$FUZZ_VENDOR_ROOT"
+fi
+mkdir -p "$VENDOR_DIR"
+
+FFMPEG_VERSION="${FFMPEG_VERSION:-9.0.1}"
 
 # ── Parse flags ──────────────────────────────────────────────────
 MODE="nosan"          # nosan | asan | fast
@@ -39,6 +54,7 @@ for arg in "$@"; do
         --asan)  MODE="asan" ;;
         --fast)  MODE="fast" ;;
         --minimal) MINIMAL=1 ;;
+        --in-tree-vendor) IN_TREE_VENDOR=1; VENDOR_DIR="$(cd "$(dirname "$0")/.." && pwd)/vendor" ;;
         *) echo "unknown arg: $arg" >&2; exit 2 ;;
     esac
 done
@@ -120,7 +136,6 @@ else
         --enable-protocol=file --disable-network --disable-autodetect"
 fi
 
-mkdir -p "$VENDOR_DIR"
 
 # ── Step 1: Acquire source (multi-source with fallbacks) ─────────
 fetch_source() {
@@ -139,25 +154,31 @@ fetch_source() {
         echo "ERROR: FFMPEG_SRC fetch failed" >&2; return 1
     fi
 
-    # 1. upstream release tarball
-    echo "[1/4] Trying ffmpeg.org release tarball..."
+    # 1. canonical FFmpeg git (code.ffmpeg.org)
+    echo "[1/4] Trying code.ffmpeg.org git clone (tag n${FFMPEG_VERSION})..."
+    if git clone --depth 1 --branch "n${FFMPEG_VERSION}" \
+         https://code.ffmpeg.org/FFmpeg/FFmpeg "$FFMPEG_DIR" 2>/dev/null; then
+        return 0
+    fi
+    # 2. upstream release tarball
+    echo "    code.ffmpeg.org unreachable — trying ffmpeg.org release tarball..."
     if curl -fL --connect-timeout 15 -o "$tarball" \
          "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz" 2>/dev/null; then
         _extract "$tarball" && return 0
     fi
-    # 2. GitHub codeload tarball (works where ffmpeg.org is blocked)
+    # 3. GitHub codeload tarball (works where ffmpeg.org is blocked)
     echo "    ffmpeg.org unreachable — trying GitHub codeload tarball..."
     if curl -fL --connect-timeout 15 -o "$tarball" \
          "https://codeload.github.com/FFmpeg/FFmpeg/tar.gz/refs/tags/n${FFMPEG_VERSION}" 2>/dev/null; then
         _extract "$tarball" && return 0
     fi
-    # 3. git clone fallback
+    # 4. git clone fallback
     echo "    codeload failed — trying git clone of tag n${FFMPEG_VERSION}..."
     if git clone --depth 1 --branch "n${FFMPEG_VERSION}" \
          https://github.com/FFmpeg/FFmpeg "$FFMPEG_DIR" 2>/dev/null; then
         return 0
     fi
-    echo "ERROR: all FFmpeg source mirrors failed (ffmpeg.org, codeload, github git)." >&2
+    echo "ERROR: all FFmpeg source mirrors failed (code.ffmpeg.org, ffmpeg.org, codeload, github git)." >&2
     echo "       Set FFMPEG_SRC=<tarball-url|git-url> to a reachable mirror." >&2
     return 1
 }
