@@ -852,7 +852,7 @@ build_simple_targets() {
         fi
     fi
     if [ -n "$ffmpeg_root" ]; then
-        FFMPEG_LIBS="$ffmpeg_root/libavformat/libavformat.a $ffmpeg_root/libavcodec/libavcodec.a $ffmpeg_root/libavutil/libavutil.a $ffmpeg_root/libswresample/libswresample.a $(ffmpeg_extralibs "$ffmpeg_root")"
+        FFMPEG_LIBS="$ffmpeg_root/libavformat/libavformat.a $ffmpeg_root/libavcodec/libavcodec.a $ffmpeg_root/libavutil/libavutil.a $ffmpeg_root/libswresample/libswresample.a -lm $(ffmpeg_extralibs "$ffmpeg_root")"
         FFMPEG_INC="-I$ffmpeg_root"
     fi
 
@@ -1027,7 +1027,7 @@ STUBEOF
         --disable-pthreads --disable-network --disable-hwaccels --disable-cuvid \
         --disable-nvenc --disable-vaapi --disable-vdpau --disable-vulkan \
         >/dev/null 2>&1); then
-        if (cd "$FFMPEG_DIR" && make -j$(nproc) -s >/dev/null 2>&1); then
+        if (cd "$FFMPEG_DIR" && make -j$(nproc) CC="$make_cc" -s >/dev/null 2>&1); then
             # Promote the .a artifacts to the canonical build location.
             for lib in libavformat libavcodec libavutil libswresample libswscale; do
                 if [ -d "$FFMPEG_DIR/$lib" ]; then
