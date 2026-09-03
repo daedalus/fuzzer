@@ -84,14 +84,20 @@ if [ "${IN_TREE_TARGETS:-0}" = "1" ]; then
 else
     TARGETS="$FUZZ_BUILD_ROOT"
 fi
-# Separate the source (.c files) location from the output (.so/.exe) location
-# when --in-tree-targets-src is passed: read sources from ./targets/*.c, write
-# outputs to $FUZZ_BUILD_ROOT.
-if [ "${IN_TREE_TARGETS_SRC:-0}" = "1" ]; then
-    TARGETS_SRC="$(cd "$(dirname "$0")/.." && pwd)/targets"
-    if [ "${IN_TREE_TARGETS:-0}" = "0" ]; then
-        mkdir -p "$TARGETS"
-    fi
+# Separate the source (.c files) location from the output (.so/.exe) location.
+# The target sources are tracked in git and live in ./targets/ -- they are
+# never generated and never written to the build root -- so this defaults to
+# the in-tree path rather than being set only under --in-tree-targets-src.
+# It was conditional, and the 70-odd "${TARGETS_SRC:-$TARGETS}/x.c" references
+# then resolved against $FUZZ_BUILD_ROOT, where no .c file has ever existed:
+# a bare `tools/build_targets.sh` died on its first target with
+# "Source not found: $FUZZ_BUILD_ROOT/asan_target.c", since `set -e` turns
+# build_target's `return 1` into an abort. That is the invocation AGENTS.md
+# documents. --in-tree-targets-src is kept as an accepted no-op so existing
+# scripts and muscle memory keep working.
+TARGETS_SRC="$(cd "$(dirname "$0")/.." && pwd)/targets"
+if [ "${IN_TREE_TARGETS_SRC:-0}" = "1" ] && [ "${IN_TREE_TARGETS:-0}" = "0" ]; then
+    mkdir -p "$TARGETS"
 fi
 mkdir -p "$VENDOR" "$TARGETS"
 
