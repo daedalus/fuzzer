@@ -26,6 +26,17 @@ across all 13 — three distinct shapes exist, which changes the shape of the
   blend weight below 1.0. See the revised §10i for the argument and the
   one real (narrower) edge case found instead.
 
+**Revision (2026-09-03, C(n,2+k) generalization analysis + empirical
+validation on §10a.1):** new §10a.1 added, analyzing the generalization of
+`_swap_pair`'s C(n,2) primitive to C(n,2+k) and empirically validating the
+"validity cliff" hypothesis against two real parsers (`libsqlite3` via the
+Python `sqlite3` module, `libavformat` via both a standalone ASAN build and
+a real coverage-guided `fuzzer-tool` campaign with clang instrumentation).
+Also independently reproduced the parity-trap finding via a from-scratch
+Cayley-graph BFS and found it recurs at every odd m under the rotation-only
+generator, not only m=3 — a gap in the original recommendation. Analysis
+and validation only; `_swap_tuple` itself is not implemented.
+
 **Revision (2026-09-02, second implementation pass — §10f, and a bug
 caught by §10a's own test suite):**
 - **§10f implemented.** `core/debruijn_cache.py` — see the revised §10f
@@ -748,6 +759,136 @@ indices are eligible: all of them, all but page 1, all but `raw` words)
 stays in the caller and is passed in via `start`/`candidates`. Only the
 "pick 2 distinct, non-degenerate" mechanics move into the shared helper.
 
+### 10a.1 — Generalizing C(n,2) to C(n,2+k): analysis and empirical validation
+
+**Status: analysis + empirical validation only, no implementation.** Follow-up
+to §10a asking what happens if `_swap_pair`'s pick-2 primitive generalizes to
+picking `m = 2+k` elements (`k >= 0`) and permuting them, instead of always
+swapping exactly 2.
+
+**Analysis (container inspection at HEAD `7796726`, the 3 `math-identities-round2`
+commits, ascending):**
+
+1. At k=0, C(n,2) does double duty — it counts the subset *and* the
+   rearrangement, because 2 elements have exactly one non-identity
+   permutation. For `m = 2+k`, a permutation must also be chosen: output
+   space is `C(n,m)·!m` (subfactorial), not `C(n,m)`. n=64:
+   2016 (m=2) → 8.3e4 (m=3) → 5.7e6 (m=4) → 3.4e8 (m=5).
+2. **Parity trap at k=1.** Under a generator restricted to pure rotation
+   (the cost-efficient form — see point 6 below), 3-cycles are even
+   permutations; BFS on the Cayley graph reaches only `A_n`, half of `S_n`:
+   360/720 (n=6), 2520/5040 (n=7), 20160/40320 (n=8). A pure-rotation m=3
+   operator can never produce a single transposition — it is a
+   **regression**, not an extension, relative to the current m=2 operator.
+3. Hit rate on a specific pair does not collapse as naively feared:
+   `P = [m(m−1)/(n(n−1))]·[!(m−2)/!m]`. Relative to m=2: m=3 → 0 (exact),
+   m=4 → 0.667, m=5 → 0.455, m=6 → 0.509, m=7 → 0.498 — plateaus around 0.5,
+   independent of n (checked n=16, 64, 256).
+4. The real payoff is Cayley-graph diameter (BFS, unrestricted permutation
+   generators): m=2 → n−1 (5,6,7 for n=6,7,8); m=3 → 3,3,4; m=4 → 2,3,3;
+   m=5 → 2,2,2. Under corpus admission gating each intermediate step must be
+   independently interesting to be saved, so diameter is the number of
+   *accepted* corpus entries needed, not raw runs — the one non-cosmetic
+   argument for k>0.
+5. Hard cost: `ExhaustivePool` enumerates `n!/(n−k)!` exactly. n=16: k=2 →
+   240, k=3 → 3,360, k=4 → 43,680, k=5 → 524,160 runs, against
+   `DEFAULT_MAX_RUNS = 1,000,000`. At n=20, m=5 → 1,860,480, over budget —
+   `exhausted=False`, `budget_exhausted=True`, silently degrading the
+   guarantee for that operator-test class.
+6. n varies wildly across formats — isobmff/webp top-level counts ~4,
+   mpegts/NAL/x86 reach the thousands. A fixed k is wrong for all of them;
+   m would need to scale with n.
+
+**Untested at the time, flagged for measurement:** the "validity cliff"
+hypothesis — that in offset-table formats (isobmff `stco`/`stsz`, zip's
+central directory, sqlite's page pointers) a permutation of m elements
+breaks m pointers instead of 2, so early parser rejection should be more
+likely, leaving fewer deep paths reachable.
+
+**Empirical validation (2026-09-03, HEAD still `7796726`):**
+
+Independently reproduced finding 2 with a from-scratch BFS (no dependency
+on the container's earlier run) and found a gap in the doc's own
+recommendation:
+- Generators = *all* non-identity permutations of the chosen m-subset
+  (i.e. the `!m` used for the output-space count in finding 1) reach full
+  `S_n` at m=3 — that generator set includes transpositions-fixing-one-
+  element, which are odd. This does *not* reproduce finding 2's numbers.
+- Generators = *pure rotation only* (the m-cycle and its inverse — the
+  "cheap alternative: rotation of a contiguous window" named in the
+  Recommended form below) reproduce finding 2 exactly: 360/720, 2520/5040,
+  20160/40320 at m=3.
+- **New finding: the parity trap is not specific to m=3.** Under the same
+  rotation-only generator, m=5 also reaches only `A_n` (half of `S_n`) at
+  n=6,7,8 — any odd-length cycle is an even permutation. Finding 2 names
+  only k=1/m=3; the recommendation below needs the same exclusion (or an
+  explicit fallback to arbitrary-permutation mode) for *every odd m*, not
+  just m=3, if implemented as rotation.
+
+Tested the validity-cliff hypothesis against two real parsers, not modeled:
+
+- **sqlite**, via the real `sqlite3` C library. Built a real 206-page,
+  400-row multi-table database. Random-position `_swap_tuple`-style swaps
+  at m=2..8 (80 trials/m): zero `open_fail`/`query_fail` at any m — a
+  full-table `COUNT(*)` is structurally insensitive to page order, since
+  every page is visited once regardless of order. Forcing the swap to
+  always include the b-tree root/interior page: still zero rejections;
+  sqlite silently reads whatever content landed at that page number and
+  reports a badly wrong row count (2 instead of 400) with no error at all.
+  Only `PRAGMA integrity_check` reliably flags the corruption
+  ("Rowid out of order"), at every m>=2 including the existing m=2 baseline.
+- **ffmpeg**, via both a standalone ASAN build and the project's real
+  coverage-instrumented `.so` harness (clang, `vendor_ffmpeg.sh --nosan
+  --minimal` + `build_ffmpeg_ready.sh`, run through `fuzzer-tool fuzz
+  --inprocess-direct -c --elo all --cmplog`, the actual tool this repo
+  ships). Real mov/mkv/wav seeds via system ffmpeg. Top-level isobmff box
+  swaps at m=2/3/4 (30 trials each, including `moov`↔`mdat`): zero
+  rejections, zero ASAN crashes at any m — ISO-BMFF top-level box order is
+  unconstrained by spec and the mov demuxer already linear-scans for
+  `moov` regardless of position, so whole-box reordering can't produce the
+  hypothesized cliff (it would need to disturb `stco`/`stsz` entries
+  *inside* moov relative to mdat's shifted absolute offset, not just box
+  order). A ~3,700-exec real coverage-guided campaign against the same
+  target found 0 crashes/timeouts; the isobmff box mutator (`_swap_pair`
+  lives inside it) was rarely offered on this corpus (10/~3,700 execs —
+  corpus composition, not an operator fault) but changed the buffer 70% of
+  the time and found new edges on 100% of those changes (4/4) — a small
+  sample, but real signal that swap-family mutations are not inert on
+  ffmpeg's coverage, contrary to what the crash-only ASAN result alone
+  would suggest.
+
+**Verdict on the validity-cliff hypothesis: not supported, in the opposite
+direction of what was assumed.** Two independent, mature real-world
+parsers (`libsqlite3`, `libavformat`) respond to offset-table corruption
+from this swap family by *silently degrading output* rather than
+rejecting early. The actual risk to the fuzzer is not "fewer deep paths
+from early rejection" — it's that a crash/coverage-only harness gets close
+to zero signal from many of these mutations regardless of m, which is a
+corpus-scheduling problem (the mutation looks like a boring no-op run),
+not a coverage-depth problem. This should be weighed against finding 4
+(diameter as accepted-corpus-entries) before treating k>0 as a net win:
+diameter improves, but the concrete offset-table failure mode motivating
+part of the original interest in k>0 does not manifest as hypothesized,
+at least for these two formats.
+
+**Not yet tested:** zip's central directory and a harness that actually
+dereferences `stco` sample-table entries deep enough to hit a stale
+absolute offset (both ffmpeg runs above may not exercise that path at
+all — they didn't crash, but nothing here confirms they reached it,
+either). Also untested: `_swap_tuple(m)` at m>2 for real edge yield —
+the 100% figure above is m=2 rotation-shaped behavior (`_swap_pair` as it
+exists today), not a generalized operator, since `_swap_tuple` has not
+been implemented.
+
+**Recommended form, revised:** `_swap_tuple(domain, rng, m)` with m drawn
+from a truncated distribution, m=2 kept as a separate bandit arm (unchanged
+from the original recommendation). The parity exclusion must cover every
+odd m if the cheap rotation form is used, not just m=3 — either exclude
+all odd m from rotation-only mode, or fall back to arbitrary-permutation
+mode (costs the `!m` factor) specifically for odd m. Cheap alternative
+unchanged: rotation of a contiguous window costs O(n) draws instead of
+C(n,m), but see the parity caveat above before using it as-is.
+
 ### 10b — The exhaustive pool's `allow_bulk` gate is over-conservative
 
 **Where:** `core/exhaustive_pool.py:317-321` (`randbytes`).
@@ -936,6 +1077,12 @@ before treating them as facts.
   combinatorial primitive it would add or centralize. None are
   implementation proposals yet.
 - §11 is the verification checklist for the next reviewer.
+- §10a.1 (C(n,2+k) generalization) is analysis plus empirical validation
+  against two real parsers (`libsqlite3`, `libavformat`) and a real
+  coverage-guided fuzzing campaign. The validity-cliff hypothesis it set
+  out to test is not supported by that data. `_swap_tuple` itself remains
+  unimplemented; the parity caveat found there must be addressed (every
+  odd m, not just m=3) before implementing the rotation-only form.
 - No code changes proposed. The goal is to surface the combinatorial
   surface area so follow-up implementations can be scoped against §0's
   three-job litmus test.
