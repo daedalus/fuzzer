@@ -2471,3 +2471,14 @@ if [ "$BUILD_FAILURES" -gt 0 ]; then
     warn "$BUILD_FAILURES build failure(s) — full output in $BUILD_LOG"
 fi
 echo "=== Done ==="
+# warn_failed returns 0 on purpose so one optional target missing a system
+# header does not trip `set -e` and kill the rest of the build. That leaves
+# the count as the only record, and nothing turned it into an exit status: a
+# run ending "WARN: 2 build failure(s)" still exited 0, so any CI step or
+# wrapper checking $? saw a clean build. Same shape as the defect the build
+# log was added to fix -- a real failure that never reaches the person who
+# needs it -- one level up. FUZZ_BUILD_TOLERATE_FAILURES=1 restores the old
+# behaviour for local runs where a missing optional dep is expected.
+if [ "$BUILD_FAILURES" -gt 0 ] && [ "${FUZZ_BUILD_TOLERATE_FAILURES:-0}" != "1" ]; then
+    exit 1
+fi
