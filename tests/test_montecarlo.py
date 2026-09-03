@@ -3,6 +3,8 @@
 import math
 import random
 
+import pytest
+
 from fuzzer_tool.core.schedulers import MonteCarloScheduler, MOptScheduler
 
 
@@ -1637,3 +1639,113 @@ class TestGPUCBScheduler:
         stats = gp.bandit_stats()
         assert stats["gp_ucb_pulls"] == 1
         assert stats["operators_tracked"] == 1
+
+
+class TestStationaryDistributionPeriodicity:
+    """`stationary_distribution` power iteration on an exactly-periodic
+    operator-transition chain never satisfies the diff<tol check; these
+    confirm the Floyd-cycle-detection fallback (core/cycle_detect.py)
+    kicks in and returns the Cesaro average over the limit cycle instead
+    of an arbitrary non-converged snapshot at max_iter. Also covers the
+    dangling-row indexing bug (`P[mask, np.arange(n)]`) hit alongside this
+    work, which previously crashed `stationary_distribution` for any chain
+    with no dangling rows at all.
+    """
+
+    def _bipartite_period_two(self):
+        """A -> {B: 0.3, C: 0.7}; B -> A; C -> A.
+
+        Not a pure permutation (branching out of A), so power iteration
+        from the uniform start doesn't trivially land on a fixed point —
+        hand-computed: oscillates between [2/3, .1, 7/30] and
+        [1/3, .2, 7/15], Cesaro average [0.5, 0.15, 0.35].
+        """
+        mc = MonteCarloScheduler()
+        mc.transition_counts["A"]["B"] = 3
+        mc.transition_counts["A"]["C"] = 7
+        mc.transition_total["A"] = 10
+        mc.transition_counts["B"]["A"] = 10
+        mc.transition_total["B"] = 10
+        mc.transition_counts["C"]["A"] = 10
+        mc.transition_total["C"] = 10
+        return mc
+
+    def test_periodic_chain_detected_numpy_path(self):
+        mc = self._bipartite_period_two()
+        pi, diag = mc.stationary_distribution(return_diagnostics=True)
+        assert diag.periodic
+        assert diag.period == 2
+        assert not diag.converged
+        assert pi["A"] == pytest.approx(0.5, abs=1e-6)
+        assert pi["B"] == pytest.approx(0.15, abs=1e-6)
+        assert pi["C"] == pytest.approx(0.35, abs=1e-6)
+        assert sum(pi.values()) == pytest.approx(1.0, abs=1e-9)
+
+    def test_periodic_chain_detected_python_fallback_matches_numpy(self, monkeypatch):
+        import fuzzer_tool.core.schedulers.monte_carlo as mc_module
+
+        monkeypatch.setattr(mc_module, "_HAS_NUMPY", False)
+        mc = self._bipartite_period_two()
+        pi, diag = mc.stationary_distribution(return_diagnostics=True)
+        assert diag.periodic
+        assert diag.period == 2
+        assert pi["A"] == pytest.approx(0.5, abs=1e-6)
+        assert pi["B"] == pytest.approx(0.15, abs=1e-6)
+        assert pi["C"] == pytest.approx(0.35, abs=1e-6)
+
+    def test_default_call_signature_unchanged_without_diagnostics(self):
+        """return_diagnostics defaults to False: existing callers keep
+        getting a plain dict, not a tuple."""
+        mc = self._bipartite_period_two()
+        pi = mc.stationary_distribution()
+        assert isinstance(pi, dict)
+        assert set(pi) == {"A", "B", "C"}
+
+    def test_normal_convergent_chain_is_unaffected(self):
+        """A chain that actually converges should report converged=True,
+        periodic=False, and be unchanged by the new code path."""
+        mc = MonteCarloScheduler()
+        mc.transition_counts["A"]["A"] = 1
+        mc.transition_counts["A"]["B"] = 9
+        mc.transition_total["A"] = 10
+        mc.transition_counts["B"]["A"] = 5
+        mc.transition_counts["B"]["B"] = 5
+        mc.transition_total["B"] = 10
+        pi, diag = mc.stationary_distribution(return_diagnostics=True)
+        assert diag.converged
+        assert not diag.periodic
+        assert diag.period == 1
+        assert pi["A"] + pi["B"] == pytest.approx(1.0, abs=1e-9)
+
+    def test_dangling_row_no_longer_crashes(self):
+        """Regression: an operator with zero outgoing transitions used to
+        raise IndexError from `P[mask, np.arange(n)]` whenever the mask
+        and n weren't the same length (i.e. almost always). `D` here only
+        ever appears as a transition target, never as a source.
+        """
+        mc = MonteCarloScheduler()
+        mc.transition_counts["A"]["D"] = 1
+        mc.transition_total["A"] = 1
+        pi, diag = mc.stationary_distribution(return_diagnostics=True)
+        assert set(pi) == {"A", "D"}
+        assert sum(pi.values()) == pytest.approx(1.0, abs=1e-9)
+
+    def test_spectral_gap_dangling_row_no_longer_crashes(self):
+        mc = MonteCarloScheduler()
+        mc.transition_counts["A"]["D"] = 1
+        mc.transition_total["A"] = 1
+        gap = mc.spectral_gap()
+        assert 0.0 <= gap <= 1.0
+
+    def test_empty_and_single_operator_diagnostics(self):
+        mc = MonteCarloScheduler()
+        pi, diag = mc.stationary_distribution(return_diagnostics=True)
+        assert pi == {}
+        assert diag.converged
+
+        mc2 = MonteCarloScheduler()
+        mc2.transition_counts["A"]["A"] = 1
+        mc2.transition_total["A"] = 1
+        pi2, diag2 = mc2.stationary_distribution(return_diagnostics=True)
+        assert pi2 == {"A": 1.0}
+        assert diag2.converged

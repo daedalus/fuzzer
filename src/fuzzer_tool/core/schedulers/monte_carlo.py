@@ -13,9 +13,11 @@ import math
 import random
 from array import array
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 
 from fuzzer_tool.core.allan_variance import DispersionIndex
+from fuzzer_tool.core.cycle_detect import cesaro_average, floyd_detect
 from fuzzer_tool.core.edge_tracker import ks_significance_threshold
 from fuzzer_tool.core.running_stats import (
     RunningMoments,
@@ -37,6 +39,32 @@ log = logging.getLogger(__name__)
 # (e.g. a caller passing 0 or a negative value) without silently overriding
 # intentionally weak-but-valid priors above this threshold.
 MIN_BETA_PARAM = 1e-6
+
+
+@dataclass(frozen=True)
+class StationaryDiagnostics:
+    """How `stationary_distribution`'s power iteration actually ended.
+
+    `diff < tol` and "the chain is periodic" are indistinguishable from
+    the raw loop alone — both look like "still running at max_iter". This
+    disambiguates them so a caller can tell "give it more iterations"
+    apart from "it will never converge, this is the correct answer".
+
+    Attributes:
+        converged: True if the L1-tolerance check fired before max_iter.
+        periodic: True if non-convergence was diagnosed as an exact limit
+            cycle (via Floyd's algorithm) rather than plain slow mixing.
+            When True, the returned distribution is the Cesaro average
+            over one full period, not a single non-converged iterate.
+        period: Cycle length. 1 when not periodic.
+        iterations: Power-iteration rounds run before the tol check (or
+            the cycle-detection phase, if that's how the loop ended).
+    """
+
+    converged: bool
+    periodic: bool
+    period: int
+    iterations: int
 
 
 class MonteCarloScheduler:
@@ -713,7 +741,7 @@ class MonteCarloScheduler:
 
     def _stationary_numpy(
         self, operators: list[str], op_idx: dict[str, int], n: int, max_iter: int, tol: float
-    ) -> dict[str, float]:
+    ) -> tuple[dict[str, float], StationaryDiagnostics]:
         """Numpy path for stationary_distribution."""
         P = np.zeros((n, n), dtype=np.float64)
         for prev_op, total in self.transition_total.items():
@@ -725,19 +753,57 @@ class MonteCarloScheduler:
                 if next_op in op_idx:
                     P[i, op_idx[next_op]] = count / total
         row_sums = P.sum(axis=1)
-        P[row_sums < 1e-12, :] = 0.0
-        P[row_sums < 1e-12, np.arange(n)] = 1.0
+        # Dangling rows (an operator that only ever appears as a target,
+        # never as a source) get a self-loop so P stays row-stochastic.
+        # `P[mask, np.arange(n)]` pairs a length-k boolean-derived index
+        # array with a length-n one elementwise and only avoided an
+        # IndexError by accident when k happened to equal n; np.where +
+        # matching row/col indices is what "set the diagonal of these
+        # rows to 1" actually means.
+        dangling = np.where(row_sums < 1e-12)[0]
+        P[dangling, :] = 0.0
+        P[dangling, dangling] = 1.0
+
+        def step(v: np.ndarray) -> np.ndarray:
+            new_v = v @ P
+            total = float(new_v.sum())
+            return new_v / total if total > 0 else new_v
+
         pi = np.full(n, 1.0 / n)
-        for _ in range(max_iter):
-            new_pi = pi @ P
-            total = float(new_pi.sum())
-            if total > 0:
-                new_pi /= total
+        converged = False
+        iterations = 0
+        for i in range(max_iter):
+            new_pi = step(pi)
             diff = float(np.abs(pi - new_pi).sum())
             pi = new_pi
+            iterations = i + 1
             if diff < tol:
+                converged = True
                 break
-        return {op: float(pi[op_idx[op]]) for op in operators}
+
+        diag = StationaryDiagnostics(
+            converged=converged, periodic=False, period=1, iterations=iterations
+        )
+        if not converged:
+            # Slow convergence and an exact non-convergent oscillation both
+            # look like "diff never dropped below tol" from the loop above.
+            # Floyd's algorithm tells them apart: a periodic chain's
+            # sub-dominant eigenmodes decay away, so by the time max_iter
+            # is exhausted `pi` is already (up to float noise) inside the
+            # limit cycle if one exists — cheap to confirm from here.
+            tol_cycle = max(tol * 100, 1e-6)
+            cycle = floyd_detect(
+                pi,
+                step,
+                is_close=lambda a, b: bool(np.abs(a - b).sum() < tol_cycle),
+                max_steps=20 * max_iter,
+            )
+            if cycle is not None and cycle.period > 1:
+                pi = cesaro_average(cycle.state, step, cycle.period)
+                diag = StationaryDiagnostics(
+                    converged=False, periodic=True, period=cycle.period, iterations=iterations
+                )
+        return {op: float(pi[op_idx[op]]) for op in operators}, diag
 
     @staticmethod
     def _power_iteration_py(
@@ -762,21 +828,45 @@ class MonteCarloScheduler:
     @staticmethod
     def _power_iteration_py_transpose(
         v: list[float], p_matrix: list[list[float]], n: int, max_iter: int, tol: float
-    ) -> list[float]:
-        """Pure-Python power iteration: v_{k+1} = v_k @ P with convergence check."""
-        for _ in range(max_iter):
+    ) -> tuple[list[float], bool, int]:
+        """Pure-Python power iteration: v_{k+1} = v_k @ P with convergence check.
+
+        Returns (v, converged, iterations) — see `_power_iteration_py_step`
+        for the reusable per-round update this shares with the
+        periodicity check in `_stationary_py`.
+        """
+        converged = False
+        iterations = 0
+        for i in range(max_iter):
             new_v = [0.0] * n
             for j in range(n):
-                for i in range(n):
-                    new_v[j] += v[i] * p_matrix[i][j]
+                for i2 in range(n):
+                    new_v[j] += v[i2] * p_matrix[i2][j]
             total = sum(new_v)
             if total > 0:
                 new_v = [x / total for x in new_v]
             diff = sum(abs(a - b) for a, b in zip(v, new_v, strict=False))
             v = new_v
+            iterations = i + 1
             if diff < tol:
+                converged = True
                 break
-        return v
+        return v, converged, iterations
+
+    @staticmethod
+    def _power_iteration_py_transpose_step(
+        v: list[float], p_matrix: list[list[float]], n: int
+    ) -> list[float]:
+        """Single round of `v_{k+1} = v_k @ P`, row-normalized. Shared step
+        function for both the main loop above and the Floyd cycle check in
+        `_stationary_py`, so both walk the exact same sequence.
+        """
+        new_v = [0.0] * n
+        for j in range(n):
+            for i in range(n):
+                new_v[j] += v[i] * p_matrix[i][j]
+        total = sum(new_v)
+        return [x / total for x in new_v] if total > 0 else new_v
 
     @staticmethod
     def _build_transition_matrix_py(transition_total, transition_counts, op_idx, n):
@@ -797,30 +887,76 @@ class MonteCarloScheduler:
 
     def _stationary_py(
         self, operators: list[str], op_idx: dict[str, int], n: int, max_iter: int, tol: float
-    ) -> dict[str, float]:
+    ) -> tuple[dict[str, float], StationaryDiagnostics]:
         """Pure-Python fallback for stationary_distribution."""
         p_matrix = self._build_transition_matrix_py(
             self.transition_total, self.transition_counts, op_idx, n
         )
-        pi = self._power_iteration_py_transpose([1.0 / n] * n, p_matrix, n, max_iter, tol)
-        return {op: pi[op_idx[op]] for op in operators}
+        pi, converged, iterations = self._power_iteration_py_transpose(
+            [1.0 / n] * n, p_matrix, n, max_iter, tol
+        )
 
-    def stationary_distribution(self, max_iter: int = 200, tol: float = 1e-8) -> dict[str, float]:
+        diag = StationaryDiagnostics(
+            converged=converged, periodic=False, period=1, iterations=iterations
+        )
+        if not converged:
+            tol_cycle = max(tol * 100, 1e-6)
+
+            def step(v: list[float]) -> list[float]:
+                return self._power_iteration_py_transpose_step(v, p_matrix, n)
+
+            def is_close(a: list[float], b: list[float]) -> bool:
+                return sum(abs(x - y) for x, y in zip(a, b, strict=False)) < tol_cycle
+
+            cycle = floyd_detect(pi, step, is_close, max_steps=20 * max_iter)
+            if cycle is not None and cycle.period > 1:
+                pi = cesaro_average(
+                    cycle.state,
+                    step,
+                    cycle.period,
+                    add=lambda a, b: [x + y for x, y in zip(a, b, strict=False)],
+                    scale=lambda a, k: [x * k for x in a],
+                )
+                diag = StationaryDiagnostics(
+                    converged=False, periodic=True, period=cycle.period, iterations=iterations
+                )
+        return {op: pi[op_idx[op]] for op in operators}, diag
+
+    def stationary_distribution(
+        self, max_iter: int = 200, tol: float = 1e-8, return_diagnostics: bool = False
+    ) -> dict[str, float] | tuple[dict[str, float], StationaryDiagnostics]:
         """Compute the stationary distribution π of the transition Markov chain.
 
         Uses power iteration: π_{k+1} = π_k · P until convergence.
         The stationary distribution satisfies πP = π — it tells you which
         operator sequences the fuzzer naturally settles into.
 
+        Some operator-transition chains are exactly periodic (e.g. an
+        alternation A -> B -> A -> B): power iteration on those never
+        satisfies the tolerance check and no π_k is individually "the"
+        stationary distribution. When that's detected (via Floyd cycle
+        detection on the iterate sequence, see `core/cycle_detect.py`),
+        the result returned is instead the Cesaro (time) average over one
+        full period, which is the value that's actually meaningful for a
+        periodic chain — rather than an arbitrary non-converged snapshot
+        from whichever iteration max_iter happened to cut off at.
+
         Args:
             max_iter: Maximum power iteration steps.
             tol: Convergence tolerance (L1 norm of change).
+            return_diagnostics: If True, also return a
+                `StationaryDiagnostics` describing how the result was
+                reached (converged normally / periodic-averaged / neither).
 
         Returns:
-            Dict mapping operator name -> stationary probability.
+            Dict mapping operator name -> stationary probability, or
+            `(dict, StationaryDiagnostics)` if `return_diagnostics` is True.
         """
         if not self.transition_total:
-            return {}
+            empty_diag = StationaryDiagnostics(
+                converged=True, periodic=False, period=1, iterations=0
+            )
+            return ({}, empty_diag) if return_diagnostics else {}
 
         operators = sorted(
             set(self.transition_total.keys())
@@ -828,15 +964,24 @@ class MonteCarloScheduler:
         )
         n = len(operators)
         if n == 0:
-            return {}
+            empty_diag = StationaryDiagnostics(
+                converged=True, periodic=False, period=1, iterations=0
+            )
+            return ({}, empty_diag) if return_diagnostics else {}
         if n == 1:
-            return {operators[0]: 1.0}
+            single = {operators[0]: 1.0}
+            single_diag = StationaryDiagnostics(
+                converged=True, periodic=False, period=1, iterations=0
+            )
+            return (single, single_diag) if return_diagnostics else single
 
         op_idx = {op: i for i, op in enumerate(operators)}
 
         if _HAS_NUMPY:
-            return self._stationary_numpy(operators, op_idx, n, max_iter, tol)
-        return self._stationary_py(operators, op_idx, n, max_iter, tol)
+            pi_dict, diag = self._stationary_numpy(operators, op_idx, n, max_iter, tol)
+        else:
+            pi_dict, diag = self._stationary_py(operators, op_idx, n, max_iter, tol)
+        return (pi_dict, diag) if return_diagnostics else pi_dict
 
     def _spectral_gap_numpy(
         self, operators: list[str], op_idx: dict[str, int], n: int, max_iter: int, tol: float
@@ -852,8 +997,11 @@ class MonteCarloScheduler:
                 if next_op in op_idx:
                     P[i, op_idx[next_op]] = count / total
         row_sums = P.sum(axis=1)
-        P[row_sums < 1e-12, :] = 0.0
-        P[row_sums < 1e-12, np.arange(n)] = 1.0
+        # Same dangling-row fix as `_stationary_numpy` — see the comment
+        # there for why `P[mask, np.arange(n)]` was broken.
+        dangling = np.where(row_sums < 1e-12)[0]
+        P[dangling, :] = 0.0
+        P[dangling, dangling] = 1.0
 
         # Power iteration for dominant eigenvector (left eigenvector = stationary dist)
         v = np.full(n, 1.0 / math.sqrt(n))
