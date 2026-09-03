@@ -35,7 +35,19 @@ a real coverage-guided `fuzzer-tool` campaign with clang instrumentation).
 Also independently reproduced the parity-trap finding via a from-scratch
 Cayley-graph BFS and found it recurs at every odd m under the rotation-only
 generator, not only m=3 — a gap in the original recommendation. Analysis
-and validation only; `_swap_tuple` itself is not implemented.
+and validation only; `_swap_tuple` itself was not implemented as of this
+revision.
+
+**Revision (2026-09-03, `_swap_tuple` implemented + §10a.2 added):**
+`_swap_tuple(domain, rng, m)` is now implemented per §10a.1's
+recommended form (see the updated §10a.1 for details). New §10a.2
+analyzes and empirically rejects an alternative m-parametrization
+(`m = 2k` instead of `m = 2+k`) considered before wiring up a caller —
+it always avoids the parity trap by construction, but the Cayley-graph
+diameter data shows it does so by discarding the two m values that
+empirically minimize diameter, not by avoiding a real cost (the odd-m
+fallback is already a single bounded draw, not the unsafe retry loop
+the trap originally implied).
 
 **Revision (2026-09-02, second implementation pass — §10f, and a bug
 caught by §10a's own test suite):**
@@ -877,8 +889,7 @@ absolute offset (both ffmpeg runs above may not exercise that path at
 all — they didn't crash, but nothing here confirms they reached it,
 either). Also untested: `_swap_tuple(m)` at m>2 for real edge yield —
 the 100% figure above is m=2 rotation-shaped behavior (`_swap_pair` as it
-exists today), not a generalized operator, since `_swap_tuple` has not
-been implemented.
+exists today), not the generalized operator.
 
 **Recommended form, revised:** `_swap_tuple(domain, rng, m)` with m drawn
 from a truncated distribution, m=2 kept as a separate bandit arm (unchanged
@@ -888,6 +899,88 @@ all odd m from rotation-only mode, or fall back to arbitrary-permutation
 mode (costs the `!m` factor) specifically for odd m. Cheap alternative
 unchanged: rotation of a contiguous window costs O(n) draws instead of
 C(n,m), but see the parity caveat above before using it as-is.
+
+**Implemented (2026-09-03):** `_swap_tuple(domain, rng, m, *, start=0)`
+added to `core/mutations/generic.py`, matching this recommended form.
+Even m rotates the picked window (cheap, O(m); safe because an
+even-length cycle is an odd permutation). Odd m does not use a
+rejection-sampling retry loop to find a non-identity permutation — that
+is unsafe under `ExhaustivePool`'s full enumeration, which must walk the
+branch where every retry keeps landing on the identity, and never
+terminates. Instead it draws a single `rng.choice` over the precomputed
+`m! - 1` non-identity permutations of `range(m)`. 25 new regression
+tests in `tests/test_swap_tuple.py`, including both `ExhaustivePool`
+branches. No caller wires it in yet (m is not being drawn from a
+truncated distribution anywhere) — it exists as a tested primitive, not
+yet an operator. See §10a.2 below for a follow-up analysis of an
+alternative m-parametrization considered before wiring up a caller.
+
+### 10a.2 — Should m be drawn as `2k` instead of `2+k`? Analysis only
+
+**Status: analysis + empirical validation, no implementation.** Follow-up
+to §10a.1 asking what changes if the truncated distribution that picks m
+draws `m = 2k` (k>0 — i.e. m restricted to 2, 4, 6, 8, ...) instead of
+`m = 2+k` (k>=0 — i.e. every integer m>=2). Both include m=2 as the
+smallest option, so this is purely a question of which larger m values
+the distribution can reach.
+
+**The headline property: `2k` is always even.** Every m it produces
+takes `_swap_tuple`'s rotation branch; the odd-m fallback added in the
+implementation above (§10a.1) would never fire for a caller that only
+ever passes `m=2*k`. This looks like a simplification — it sidesteps
+the parity trap by construction instead of working around it — but the
+fallback it would avoid is a single precomputed `rng.choice`, not the
+unsafe retry loop that was actually the expensive/risky part. There is
+no remaining cost being saved.
+
+**Diameter data says the opposite of what the simplification implies.**
+Re-ran the §10a.1 Cayley-graph BFS using the generator `_swap_tuple`
+actually implements per parity — rotation for even m, the full
+non-identity permutation set for odd m (not rotation-only, which is why
+these numbers differ from the doc's earlier rotation-only-generator
+table) — for n=6, 7, 8:
+
+| m | n=6 diam | n=7 diam | n=8 diam |
+|---|---|---|---|
+| 2 | 5 | 6 | 7 |
+| 3 | **3** | **3** | **4** |
+| 4 | 4 | 4 | 5 |
+| 5 | **2** | **2** | **2** |
+| 6 | — | 9 | 7 |
+| 7 | — | — | (untested — generator set too large to BFS in budget) |
+
+Odd m (3, 5) gives the smallest diameter at every n tested, beating both
+even neighbors every time. `m=2k` cannot reach either of those arms — the
+best it can do is m=4 (diam 4-5), worse than m=3 or m=5 (diam 2-4). This
+is exactly the metric §10a.1's finding 4 called "the one non-cosmetic
+argument for k>0" (diameter as accepted-corpus-entries under gated
+admission). Restricting to `2k` discards the best-performing part of the
+design space, not the worst.
+
+**Combinatorial cost grows twice as fast in k.** Because m increases by
+2 per k-step instead of 1, both the output-space size `C(n,m)·!m` and the
+`ExhaustivePool` enumeration cost `n!/(n−m)!` roughly double their growth
+rate per unit of k spent:
+
+- Output space, n=64, k=3: `2+k` → m=5 → 3.4e8; `2k` → m=6 → 2.0e10
+  (~58x larger for the same k).
+- `ExhaustivePool` cost crosses `DEFAULT_MAX_RUNS=1,000,000` one k-step
+  earlier under `2k` than under `2+k` (n=16: k=4 vs k=3), so the
+  falsification-by-enumeration guarantee (§7.2, Hard Rule 39) degrades to
+  `budget_exhausted=True` sooner for the same truncated-k-distribution
+  support.
+
+**Unaffected:** the hit-rate-on-a-specific-pair formula from §10a.1,
+`P(m) = [m(m−1)/(n(n−1))]·[!(m−2)/!m]`, only depends on the resulting m,
+not on how it was chosen — the ~0.5x plateau for m>=4 holds identically
+under either parametrization, confirmed at n=16, 64, 256.
+
+**Verdict: not recommended.** `2k` buys back an implementation cost
+(the odd-m fallback) that is already cheap as shipped, at the price of
+permanently excluding the two m values (3 and 5, at every n tested) that
+empirically minimize Cayley-graph diameter. If a caller is eventually
+wired up to draw m from a truncated distribution, `m = 2+k` (all m>=2)
+is the form to use, not `m = 2k`.
 
 ### 10b — The exhaustive pool's `allow_bulk` gate is over-conservative
 
@@ -1080,9 +1173,20 @@ before treating them as facts.
 - §10a.1 (C(n,2+k) generalization) is analysis plus empirical validation
   against two real parsers (`libsqlite3`, `libavformat`) and a real
   coverage-guided fuzzing campaign. The validity-cliff hypothesis it set
-  out to test is not supported by that data. `_swap_tuple` itself remains
-  unimplemented; the parity caveat found there must be addressed (every
-  odd m, not just m=3) before implementing the rotation-only form.
-- No code changes proposed. The goal is to surface the combinatorial
-  surface area so follow-up implementations can be scoped against §0's
-  three-job litmus test.
+  out to test is not supported by that data. **`_swap_tuple` is now
+  implemented** (`core/mutations/generic.py`, 25 tests in
+  `tests/test_swap_tuple.py`) addressing the parity caveat (every odd m,
+  not just m=3) via a single bounded draw over precomputed non-identity
+  permutations rather than an `ExhaustivePool`-unsafe retry loop. No
+  caller draws m from a distribution yet — the primitive exists,
+  unwired.
+- §10a.2 (m drawn as `2k` vs `2+k`) is analysis plus a Cayley-graph BFS
+  re-run using `_swap_tuple`'s actual per-parity generator (n=6,7,8).
+  Verdict: not recommended — it discards the two m values (3, 5) that
+  empirically minimize diameter at every n tested, to avoid an
+  implementation cost (the odd-m fallback) that is already cheap as
+  shipped.
+- Outside §10a's implementation and §10a.1/§10a.2's validation and
+  analysis, no other code changes proposed. The goal is to surface the
+  combinatorial surface area so further follow-ups can be scoped against
+  §0's three-job litmus test.
