@@ -109,8 +109,6 @@ def _sig_matches(sig_a, sig_b) -> int:
     return int(np.count_nonzero(a[:k] == b[:k]))
 
 
-from fuzzer_tool.core.similarity import hamming_distance  # noqa: E402
-
 log = logging.getLogger(__name__)
 
 MORRIS_A = 30
@@ -1916,11 +1914,36 @@ class EdgeTracker:
         return 0.5 + 1.5 * normalized
 
     def compute_hamming_bitmap_distance(self, seed_key_a: str, seed_key_b: str) -> float:
-        """Compute Hamming distance between two seeds' edge bitmaps.
+        """Bit-level Hamming distance between two seeds' edge bitmaps.
 
-        Converts each seed's edge set to a fixed-length bitmap and counts
-        differing positions. Faster than Jaccard/Wasserstein for detecting
-        seeds that are byte-level near-duplicates.
+        The bitmaps are indicator vectors over the edge universe, so their
+        Hamming distance is the size of the symmetric difference:
+
+            |A XOR B| = |A| + |B| - 2|A AND B|
+
+        which ``len(edges_a ^ edges_b)`` evaluates directly. No bitmap is
+        built at all, and the answer is exact rather than an approximation
+        of one.
+
+        This used to pack both sets into byte bitmaps and hand them to
+        ``similarity.hamming_distance``, which counts differing *byte*
+        positions -- while the divisor below counts *bits*. Numerator in
+        bytes over a denominator in bits undercounts by up to 8x, and it
+        collapses distinctions: eight edges differing inside one byte
+        scored exactly the same as one edge differing (0.0096 in both
+        cases on a 13-byte map), and a 64-edge difference scored 0.0769
+        where the true distance is 0.6154.
+
+        Note on the divisor, which is unchanged here and is a separate
+        question: it is the bitmap width, so it grows with the largest
+        edge *id* while the numerator grows with the number of *live*
+        edges. On a 256 KiB map two seeds carrying ~1800 edges each cannot
+        exceed ~0.014 however different they are, so the 0.05 default in
+        find_near_duplicate_seeds is not a binding threshold on a real
+        target -- the MinHash LSH pre-filter is what actually selects the
+        pairs. Making it binding means normalising by |A OR B| instead
+        (i.e. Jaccard distance), which changes what the number means and
+        wants its own calibration rather than riding along with a bug fix.
 
         Args:
             seed_key_a: First seed key.
@@ -1937,18 +1960,11 @@ class EdgeTracker:
         if not edges_a or not edges_b:
             return 1.0
 
-        # Build compact bitmaps
+        # Width of the bitmap the two sets would have occupied, kept
+        # byte-aligned so the scale matches what callers were calibrated on.
         max_edge = max(max(edges_a), max(edges_b)) + 1
-        size = (max_edge + 7) // 8
-        bm_a = bytearray(size)
-        bm_b = bytearray(size)
-        for e in edges_a:
-            bm_a[e >> 3] |= 1 << (e & 7)
-        for e in edges_b:
-            bm_b[e >> 3] |= 1 << (e & 7)
-
-        dist = hamming_distance(bytes(bm_a), bytes(bm_b))
-        return dist / (size * 8) if size > 0 else 0.0
+        bits = ((max_edge + 7) // 8) * 8
+        return len(edges_a ^ edges_b) / bits if bits > 0 else 0.0
 
     def find_near_duplicate_seeds(self, max_hamming: float = 0.05) -> list[tuple[str, str, float]]:
         """Find pairs of seeds with near-identical edge bitmaps.
