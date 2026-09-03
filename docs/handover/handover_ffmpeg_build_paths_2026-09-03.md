@@ -327,3 +327,237 @@ call, not inside it). Not investigated.
   have changed it.
 - The test suite was not run. No baseline failure count exists for this
   container at `09b188c`.
+
+---
+
+# Addendum — second pass, same day, later
+
+**Tree:** `426480b` plus this doc. Four commits landed in the working tree
+between the first pass and this one (`bbb2645`, `8204cf3`, `71f2e02`,
+`426480b`), all touching `tools/build_targets.sh`. They change the answers
+above. This section says which ones, retracts one finding, and adds six.
+
+`tools/build_targets.sh --nosan --in-tree-targets-src` **completed** on this
+tree: 62 `OK` lines, 2 failures, 24 targets carrying AFL symbols, 28 `.so`
+targets with `fuzz_shm_run` and cmplog.
+
+## A. Retraction — F7 did not cause the configure failure
+
+F7 above guessed that `WARN: vendored FFmpeg_asan configure failed` came from
+a concurrent run `rm -rf`-ing the shared stage. **That guess was wrong.** The
+cause was `nasm` being absent: FFmpeg's configure aborts with `nasm not found
+or too old`, and the message went to `/dev/null`. `426480b` adds
+`--disable-x86asm` to the in-script configure, matching what
+`vendor_ffmpeg.sh:212` already passed, and the failure is gone —
+`OK: vendored FFmpeg_asan → /root/fuzzing/builds/ffmpeg_asan`.
+
+The reasoning error is worth naming: two runs *were* colliding, so a collision
+was available as an explanation and I reached for it instead of reading the
+one line that would have settled it. The collision was real and the diagnosis
+was still wrong. F7's substance — a fixed stage path opened with `rm -rf` and
+no lock — stands as a hazard; it just wasn't this failure.
+
+## B. What the four commits fixed
+
+- **F4 is fixed** by `71f2e02`. The `rm -rf "$STAGE_DIR"` is gone, the stage
+  persists with its objects, and two stamps (config flags + compiler; vendored
+  revision + `patches/`) gate the work. Verified on the third call in one run:
+  `OK: vendored FFmpeg (nosan): up to date`, no rebuild.
+- **F6 is fixed** by `bbb2645`. `configure`/`make`/every compile now append to
+  `$BUILD_LOG`, and `warn_failed` prints the first real error line. The
+  jpeg failure below reported itself as
+  `targets/jpeg_read.c:15:10: fatal error: 'jpeglib.h' file not found` —
+  exactly what the old `/dev/null` would have swallowed.
+- **F1, F2, F3, F5, F8, F9, F10 are unchanged.** `TARGETS_SRC` is still
+  assigned only under `--in-tree-targets-src` (`:90`), `FUZZ_BUILD_ROOT` still
+  defaults to `~/fuzzing/builds` against three documents saying `targets`
+  (`:76`), `build_ffmpeg_ready.sh:29` still hardcodes `VENDOR="$ROOT/vendor"`,
+  and the `/home/dclavijo` paths are still at `:51-53` and `:98`.
+
+## C. New findings
+
+### N1 — the source stamp records filenames, not contents
+
+`build_targets.sh:1153`:
+
+```sh
+src_stamp=$( { (cd "$SRC_DIR" && git rev-parse HEAD 2>/dev/null) || echo "no-git"
+               find "$SRC_DIR" -name '*.c' -newer "$SRC_DIR/configure" 2>/dev/null | sort
+               cat patches/*.patch 2>/dev/null; } | md5sum | cut -d' ' -f1)
+```
+
+The `find` contributes a **list of paths**. Once a file is newer than
+`configure` it is in the list, and further edits to it do not change the list.
+`git rev-parse HEAD` does not move for a dirty tree. So the second and every
+later in-place edit to a vendored source produces an identical stamp and the
+whole rebuild is skipped.
+
+Demonstrated with three different file contents:
+
+```
+after first edit : f045549bf3e1e2abe6b7089314fae1d7
+after second edit: f045549bf3e1e2abe6b7089314fae1d7
+after third edit : f045549bf3e1e2abe6b7089314fae1d7
+```
+
+The realistic way to hit this is the obvious one: edit a demuxer in
+`~/fuzzing/vendoring/ffmpeg`, build, test, edit again, build — and from the
+second iteration onward you are testing the first edit. It is the exact
+failure the removed early-return was guarding against, reintroduced in a
+narrower form, and it is silent. Hashing the contents of the listed files
+rather than their names costs one `xargs md5sum` and closes it.
+
+Two smaller notes on the same expression: `cat patches/*.patch` is
+CWD-relative where everything around it is absolute, so it contributes nothing
+when the script is run from elsewhere (the rest of the script assumes the repo
+root anyway, so this is a consistency point, not a live bug); and a *deleted*
+source is invisible to `-newer` entirely.
+
+### N2 — `ffmpeg_extralibs()` never reads `config.mak`, so its fallback is the only path
+
+The function looks for `"$root/ffbuild/config.mak"` where `$root` is the
+**promoted** directory. The promotion loop copies `libav*/libav*.a` and
+headers and nothing else — `ffbuild/` is never promoted:
+
+```
+$ ls /root/fuzzing/builds/ffmpeg/
+libavcodec  libavformat  libavutil  libswresample  libswscale  src
+$ ls /root/fuzzing/builds/ffmpeg/ffbuild
+ls: cannot access ...: No such file or directory
+```
+
+So `[ -f "$mak" ]` is false on every build, `libs` takes the hardcoded
+historical fallback, and the config.mak derivation — the entire point of the
+change — is dead code on the primary path. The observed link line is the
+fallback verbatim:
+
+```
+-lm -lz -lbz2 -lpthread -ldl -ldl
+```
+
+The real `config.mak` is one directory down, in the stage at
+`$root/src/ffbuild/config.mak`, and it says:
+
+```
+EXTRALIBS-avformat=-lm -lbz2 -lz -latomic
+EXTRALIBS-avutil=-lm -lz -latomic -lX11
+```
+
+which is where the `-latomic` recorded on the older tree came from, and where
+the `-lX11` that the probe loop exists to drop actually lives. The derivation
+works only when `ffmpeg_root` falls back to the legacy `$VENDOR/ffmpeg`, which
+does keep its `ffbuild/`. Fix is one line: promote `ffbuild/config.mak` beside
+the archives, or read from `$root/src`.
+
+Cosmetic consequence of the fallback: the caller prepends `-lm` and the
+fallback list also contains `-lm`, and `-ldl` appears twice. Harmless, but it
+is the tell that nothing was derived.
+
+### N3 — `--minimal` does not reach the libraries that get linked
+
+Quantifying F5 on this build. Demuxers enabled, `CONFIG_*_DEMUXER=yes`:
+
+| tree | demuxers |
+|---|---|
+| `~/fuzzing/vendoring/ffmpeg` (what `vendor_ffmpeg.sh --minimal` built) | 7 |
+| `~/fuzzing/builds/ffmpeg/src` (what `ffmpeg_read` links) | 355 |
+
+The sancov configure passes none of `--disable-everything`, the `--enable-demuxer`
+list, or `--enable-decoder`. So `--minimal` governs a tree that is copied and
+then reconfigured out of existence: you pay the minimal build, then pay a
+355-demuxer build, then fuzz the second one. Either propagate the component
+set into `build_vendored_ffmpeg_sancov` or stop advertising `--minimal` as
+affecting anything downstream of vendoring.
+
+`--disable-parsers` remains in that configure, so the parser layer is still
+not compiled into the target.
+
+### N4 — a failed FFmpeg rebuild silently falls back to stale archives
+
+`build_vendored_ffmpeg_sancov` writes into `$OUT_DIR` only on success, which
+is right. But on failure it returns after `warn_failed`, and
+`build_simple_targets` then finds the *previous* run's archives still sitting
+in `$OUT_DIR` and links against them. The console says
+`WARN: failed: vendored FFmpeg build` followed by `OK: ffmpeg_read`, and the
+target that reports OK contains the old code. Nothing marks the archives as
+stale. A sentinel written next to `.sancov_stamp` on entry and cleared on
+success would let the link step refuse.
+
+### N5 — the script exits 0 with failures
+
+`:2449-2452`:
+
+```sh
+if [ "$BUILD_FAILURES" -gt 0 ]; then
+    warn "$BUILD_FAILURES build failure(s) — full output in $BUILD_LOG"
+fi
+echo "=== Done ==="
+```
+
+`warn_failed` deliberately `return 0`s so a failed optional target does not
+trip `set -e` — correct. But nothing converts the accumulated count into an
+exit status, and `echo` is the last statement, so the script exits 0. This run
+ended `WARN: 2 build failure(s)` / `=== Done ===` / `$? = 0`. Any wrapper or CI
+step that checks the exit code sees a clean build. This is the same shape as
+the defect `bbb2645` set out to fix — a real failure that does not reach the
+person who needs it — one level up: the cause is now in the log, but the
+signal still is not in the status. `exit 1` when `BUILD_FAILURES > 0`, or a
+flag to opt out for local runs.
+
+### N6 — `--disable-x86asm` is now hardcoded in both scripts
+
+`vendor_ffmpeg.sh:212` and `build_targets.sh:1250`. The trigger was a real
+failure (no `nasm` here), and hardcoding it makes the build work everywhere.
+It also means the vendored FFmpeg contains **no hand-written assembly on any
+machine**, including machines that have `nasm`. For a decoder fuzz target that
+is not a neutral choice: the SIMD paths are a large, heavily-optimised slice of
+`libavcodec`, they are where a good deal of the historical memory-safety
+history lives, and the C fallbacks that replace them are a different code path
+with different bounds behaviour. Coverage and bug surface both shrink, quietly.
+
+Better shape: probe for `nasm` once, pass `--disable-x86asm` only when it is
+absent, warn when doing so, and add `nasm` to the documented prerequisites
+alongside `clang`.
+
+## D. Build results, `--nosan --in-tree-targets-src`
+
+Both failures were the same missing header:
+
+```
+WARN: failed: jpeg_read       targets/jpeg_read.c:15:10: fatal error: 'jpeglib.h' file not found
+WARN: failed: jpeg_read_asan.so
+```
+
+`libjpeg-dev` was absent. Installing it mid-run gave a natural experiment: the
+later jpeg targets in the same run — `jpeg_read.so`, `jpeg_read_nosan`,
+`jpeg_read_ubsan.so` — all built and were reported as new binaries. So the two
+failures are environmental, not a defect in the script, and `libjpeg-dev`
+belongs in the prerequisites next to `nasm`.
+
+Every FFmpeg target linked, which answers the question the first pass left
+open — `09b188c`'s reordering does what it claims:
+
+```
+OK: vendored FFmpeg_asan → /root/fuzzing/builds/ffmpeg_asan
+OK: ffmpeg_read
+OK: ffmpeg_read_asan.so
+OK: ffmpeg_read_ubsan.so
+OK: ffmpeg_read_nosan
+OK: ffmpeg_read.so
+```
+
+Verify pass: 24 targets with AFL symbols, 28 `.so` with `fuzz_shm_run`, 28
+with cmplog, 33 unchanged / 4 new / 4 changed by checksum.
+
+## E. Revised order
+
+1. **N2** — one line; until it lands, the config.mak derivation is not running
+   at all and nobody would know.
+2. **F1** — still the reason the documented invocation does not work.
+3. **N5** — one line; a build that fails should say so in `$?`.
+4. **N1** — hash contents, not names.
+5. **F3** — port `build_ffmpeg_ready.sh` to the new roots.
+6. **N4**, **N3 / F5**, **N6**, then **F2**, **F8**, **F9**, **F10**.
+
+Still not done: the test suite has not been run, so there is no baseline
+failure count for this container on this tree.
