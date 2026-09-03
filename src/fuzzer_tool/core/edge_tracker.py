@@ -1731,6 +1731,24 @@ class EdgeTracker:
         This is the Jaccard index exposed as a metric — useful for monitoring
         corpus redundancy over time. High average Jaccard means the corpus
         is heavily redundant; low means seeds cover diverse code regions.
+
+        Computed by the pair-counting identity rather than pairwise. The
+        quantity wanted is
+
+            mean_{i<j} (1/p) * sum_k [s_ik == s_jk]
+
+        Swapping the two sums moves the work from "for every pair, walk the
+        signature" to "for every signature column, count how the pairs fall
+        out of the value multiplicities":
+
+            = (1 / (p * C(n,2))) * sum_k sum_v C(m_kv, 2)
+
+        where m_kv is how many seeds carry value v in column k. Same number
+        (this is an identity, not an approximation — the two paths agree
+        bit-for-bit), but O(n*p) instead of O(n^2 * p), and no (n, n, p)
+        intermediate. That intermediate was the real problem: at n=2000
+        seeds and p=128 the broadcast allocated 512 MB to produce one float,
+        and stats.py calls this on the display path.
         """
         keys = list(self._minhash.signatures.keys())
         if len(keys) < 2:
@@ -1739,13 +1757,16 @@ class EdgeTracker:
         n = len(keys)
         num_perm = self._minhash.num_perm
 
-        # Vectorized path: broadcasting (n, 1, p) == (1, n, p) → (n, n, p)
         if _HAS_NUMPY and n > 20:
             sigs = np.array([self._minhash.signatures[k] for k in keys], dtype=np.uint64)
-            matches = np.sum(sigs[:, None, :] == sigs[None, :, :], axis=2)
-            jaccard_matrix = matches / num_perm
-            triu = np.triu_indices(n, k=1)
-            return float(np.mean(jaccard_matrix[triu]))
+            matching_pairs = 0
+            for col in range(sigs.shape[1]):
+                # Multiplicities of each distinct value in this column; a value
+                # shared by m seeds contributes C(m,2) agreeing pairs.
+                mult = np.unique(sigs[:, col], return_counts=True)[1].astype(np.int64)
+                matching_pairs += int((mult * (mult - 1) // 2).sum())
+            total_pairs = n * (n - 1) // 2
+            return matching_pairs / (num_perm * total_pairs)
 
         # Pure-Python path
         total_jaccard = 0.0
