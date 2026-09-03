@@ -148,17 +148,30 @@ def serial_test(data: bytes, m: int = 8) -> float:
     if n < (1 << m) * 5 or m < 2:
         return 1.0
 
-    def psi2(mm: int) -> float:
-        if mm <= 0:
-            return 0.0
-        ext = np.concatenate([b, b[: mm - 1]])
+    def window(mm: int) -> np.ndarray:
+        """The mm-bit sliding window at every position, as an integer."""
+        ext = np.concatenate([b, b[: mm - 1]]) if mm > 1 else b
         idx = np.zeros(n, dtype=np.int64)
         for k in range(mm):
             idx = (idx << 1) | ext[k : k + n]
-        counts = np.bincount(idx, minlength=1 << mm)
-        return float(np.sum(counts.astype(np.float64) ** 2)) * (1 << mm) / n - n
+        return idx
 
-    d1 = psi2(m) - psi2(m - 1)
+    def psi2_from(idx: np.ndarray, mm: int) -> float:
+        if mm <= 0:
+            return 0.0
+        counts = np.bincount(idx, minlength=1 << mm)
+        return float(counts @ counts) * (1 << mm) / n - n
+
+    # The (m-1)-bit window is the m-bit window with its last bit dropped,
+    # and the windows are built most-significant-bit first, so
+    #
+    #     idx_{m-1}[i] == idx_m[i] >> 1
+    #
+    # exactly -- wraparound included, since both wrap circularly over the
+    # same n positions. Building the second window from scratch recomputed
+    # m-1 shifts and a second concatenate for a value already in hand.
+    idx_m = window(m)
+    d1 = psi2_from(idx_m, m) - psi2_from(idx_m >> 1, m - 1)
     # NIST SP 800-22: nabla psi^2_m ~ chi^2(2^(m-1))
     return chisq_sf(d1, 1 << (m - 1))
 
@@ -675,6 +688,7 @@ def corpus_invariants(
 # ── sequence diagnostics for scheduler output ─────────────────────────
 
 _PERM_INDEX: dict[int, dict[tuple[int, ...], int]] = {}
+_PERM_RADIX: dict[int, tuple[np.ndarray, np.ndarray]] = {}
 
 
 def _perm_index(k: int) -> dict[tuple[int, ...], int]:
@@ -683,6 +697,56 @@ def _perm_index(k: int) -> dict[tuple[int, ...], int]:
 
         _PERM_INDEX[k] = {p: i for i, p in enumerate(permutations(range(k)))}
     return _PERM_INDEX[k]
+
+
+def _rank_rows(blocks: np.ndarray) -> np.ndarray:
+    """Row-wise rank vectors: rank[i, j] is the rank of blocks[i, j].
+
+    One argsort and a scatter, not two argsorts. ``argsort`` returns the
+    *positions* in sorted order; the rank vector is its inverse
+    permutation, and inverting a permutation is a scatter rather than a
+    second sort.
+
+    Kept as a named function rather than inlined because the difference
+    between a rank vector and its inverse is invisible downstream:
+    ``permutation_test`` histograms permutation *labels*, and the inverse
+    map is a bijection on those labels, so substituting one for the other
+    only relabels the histogram and leaves the chi-square identical. A
+    test on the returned p-value therefore cannot tell them apart -- the
+    property has to be asserted here, on this function.
+    """
+    order = np.argsort(blocks, axis=1)
+    ranks = np.empty_like(order)
+    np.put_along_axis(ranks, order, np.arange(blocks.shape[1]), axis=1)
+    return ranks
+
+
+def _perm_radix_table(k: int) -> tuple[np.ndarray, np.ndarray]:
+    """(powers, lookup) mapping a rank vector to its permutation index.
+
+    A rank vector is a permutation of range(k), so every digit is below k
+    and reading it as a base-k numeral is injective:
+
+        key = sum_i rank_i * k^i
+
+    That makes ``lookup[key]`` a perfect hash into the same ordering
+    ``_perm_index`` assigns, at the cost of a k**k table -- 15625 entries
+    at k=5, 46656 at k=6, both trivial and built once. The point is that
+    the key is a dot product, so the whole (n, k) block of ranks converts
+    in one vectorized pass instead of one tuple construction and one dict
+    lookup per row.
+
+    Non-permutation keys are unreachable from ``permutation_test`` (ranks
+    always are permutations) and are left at -1 so a future misuse fails
+    loudly on an index rather than silently scoring as row 0.
+    """
+    if k not in _PERM_RADIX:
+        powers = k ** np.arange(k, dtype=np.int64)
+        lookup = np.full(k**k, -1, dtype=np.int64)
+        for perm, idx in _perm_index(k).items():
+            lookup[int(np.dot(np.asarray(perm, dtype=np.int64), powers))] = idx
+        _PERM_RADIX[k] = (powers, lookup)
+    return _PERM_RADIX[k]
 
 
 def permutation_test(draws, k: int = 5) -> float:
@@ -714,12 +778,15 @@ def permutation_test(draws, k: int = 5) -> float:
     if n < 10 * ncell:
         return 1.0
     blocks = d[: n * k].reshape(n, k)
-    blocks = blocks[(np.sort(blocks, axis=1)[:, 1:] != np.sort(blocks, axis=1)[:, :-1]).all(axis=1)]
+    # One sort, reused for both halves of the tie test. The comparison
+    # needs the sorted block twice but the sort itself only once.
+    ordered = np.sort(blocks, axis=1)
+    blocks = blocks[(ordered[:, 1:] != ordered[:, :-1]).all(axis=1)]
     if blocks.shape[0] < 10 * ncell:
         return 1.0
-    index = _perm_index(k)
-    ranks = np.argsort(np.argsort(blocks, axis=1), axis=1)
-    idx = np.fromiter((index[tuple(r)] for r in ranks.tolist()), dtype=np.int64, count=len(ranks))
+    ranks = _rank_rows(blocks)
+    powers, lookup = _perm_radix_table(k)
+    idx = lookup[ranks @ powers]
     counts = np.bincount(idx, minlength=ncell)
     exp = blocks.shape[0] / ncell
     x2 = float(np.sum((counts - exp) ** 2) / exp)
