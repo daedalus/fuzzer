@@ -1,6 +1,8 @@
 """Mutation operators and dictionary handling."""
 
+import itertools
 import random
+from functools import lru_cache
 
 
 # Helper: resolve rng parameter to RandPool or stdlib random
@@ -59,6 +61,105 @@ def _swap_pair(domain, rng, *, start=0):
         return None
     i, j = rng.sample(candidates, 2)
     return i, j
+
+
+@lru_cache(maxsize=None)
+def _non_identity_permutations(m: int) -> tuple[tuple[int, ...], ...]:
+    """The ``m! - 1`` non-identity orderings of ``range(m)``, cached by m.
+
+    Used by ``_swap_tuple``'s odd-m branch as a single ``rng.choice``
+    draw instead of a rejection-sampling retry loop (see its docstring
+    for why the retry form is unsafe under ``ExhaustivePool``).
+    """
+    identity = tuple(range(m))
+    return tuple(p for p in itertools.permutations(identity) if p != identity)
+
+
+def _swap_tuple(domain, rng, m, *, start=0):
+    """Pick ``m`` distinct indices/elements from ``domain`` and return a
+    non-identity rearrangement of them — the C(n,2) ``_swap_pair``
+    primitive generalized to C(n,m), per the handover's §10a.1
+    "Recommended form, revised" (``docs/handover/
+    handover_combinatorics_permutations_2026-09-02.md``). §10a.1 is
+    analysis and empirical validation only; this is the first
+    implementation of what it recommends.
+
+    ``m=2`` stays wired through ``_swap_pair`` as its own bandit arm per
+    that recommendation — this helper is additive for callers that want
+    ``m>2``, not a replacement for the 15 existing ``_swap_pair`` call
+    sites or their tests.
+
+    **Generator choice (the parity trap, §10a.1's empirical finding):**
+    a pure rotation of the picked window costs O(m) draws instead of the
+    full C(n,m)·!m enumeration, but an m-cycle is an *even* permutation
+    whenever m is odd (any odd-length cycle is even — parity is
+    ``(-1)**(m-1)``). A rotation-only generator over odd m can therefore
+    never produce a transposition and stalls on A_n, half of S_n — this
+    was empirically confirmed to recur at every odd m (not just m=3, the
+    case originally named). So:
+
+    - **even m:** rotate the picked window by one position. Cheap
+      (O(m)) and safe — an even-length cycle is an *odd* permutation, so
+      composing rotations from different windows/positions is not
+      confined to A_n.
+    - **odd m:** rotation is unsafe, so this falls back to the
+      handover's named alternative — an explicit random non-identity
+      permutation of the picked elements (the "arbitrary-permutation
+      mode" that costs the ``!m`` factor). Implemented as a single
+      ``rng.choice`` over the ``m! - 1`` non-identity orderings of
+      ``range(m)`` rather than rejection-sampled reshuffles: a retry
+      loop looks equivalent under plain sampling, but it is not safe
+      under ``ExhaustivePool`` — enumeration must walk the branch where
+      every retry keeps landing on the identity, which never
+      terminates. A single bounded draw over a precomputed non-identity
+      list has no such branch.
+
+    Args:
+        domain: same as ``_swap_pair`` — an ``int`` (sampled as
+            ``range(start, domain)``) or an explicit sequence of
+            eligible indices/values to sample from (``start`` is
+            ignored for a sequence domain).
+        rng: a ``RandPool`` or stdlib-``random``-compatible object
+            exposing ``.sample(population, k)``.
+        m: tuple size, must be ``>= 2``. Per the handover, m=2 should
+            keep going through ``_swap_pair`` directly rather than here.
+        start: for the int-domain case, the inclusive lower bound of the
+            eligible range. Ignored when ``domain`` is a sequence.
+
+    Returns:
+        A tuple ``(picked, permuted)`` of two ``m``-tuples holding the
+        same multiset of values: ``picked`` is the ``m`` distinct values
+        drawn from the domain, in draw order; ``permuted`` is a
+        non-identity rearrangement of ``picked`` to assign back in that
+        same order, i.e. the caller applies it as
+        ``for pos, val in zip(picked, permuted): new[pos] = old[val]``.
+        Returns ``None`` if ``m < 2`` or the effective domain has fewer
+        than ``m`` elements.
+    """
+    if m < 2:
+        return None
+    if isinstance(domain, int):
+        if domain - start < m:
+            return None
+        picked = tuple(rng.sample(list(range(start, domain)), m))
+    else:
+        candidates = domain
+        if len(candidates) < m:
+            return None
+        picked = tuple(rng.sample(candidates, m))
+
+    if m % 2 == 0:
+        # Even-length cycle: an odd permutation, safe as a pure rotation.
+        permuted = picked[1:] + picked[:1]
+    else:
+        # Odd-length cycle would be even (the parity trap) -- fall back
+        # to an arbitrary non-identity permutation instead of a
+        # rotation, via a single bounded draw (see
+        # _non_identity_permutations' docstring for why not a retry loop).
+        order = rng.choice(_non_identity_permutations(m))
+        permuted = tuple(picked[k] for k in order)
+
+    return picked, permuted
 
 
 INTERESTING_8 = [
