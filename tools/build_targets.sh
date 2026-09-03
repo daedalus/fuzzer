@@ -542,7 +542,12 @@ ffmpeg_extralibs() {
                | tr ' ' '\n' | grep -v '^$' | sort -u)
     fi
     # Fall back to the historical list only when config.mak is unreadable.
-    [ -n "$libs" ] || libs=$(printf '%s\n' -lm -lz -lbz2 -lpthread)
+    # -lpthread is not in it: it moved to the unconditional tail below, so the
+    # derived path gets it too. config.mak never names pthread (configure folds
+    # it into --extra-libs), and dropping it from a link that used to have it
+    # would be a silent regression on any glibc older than 2.34, where
+    # libpthread is still a separate object.
+    [ -n "$libs" ] || libs=$(printf '%s\n' -lm -lz -lbz2)
 
     # EXTRALIBS is a superset: configure records what it detected, not what the
     # static archives ended up referencing. A --minimal tree emits -lX11 via
@@ -564,7 +569,7 @@ ffmpeg_extralibs() {
             *) out="$out $probe" ;;   # -pthread and friends are compiler flags
         esac
     done
-    echo "${out# } -ldl"
+    echo "${out# } -lpthread -ldl"
 }
 
 select_png_zlib_libs() {
@@ -1269,6 +1274,16 @@ STUBEOF
                 [ -d "$OUT_DIR/$hdr" ] || continue
                 cp -rn "$FFMPEG_DIR/$hdr"/*.h "$OUT_DIR/$hdr/" 2>/dev/null || true
             done
+            # ffbuild/config.mak records EXTRALIBS-<lib>, which is what
+            # ffmpeg_extralibs() reads to derive the link line. Without it
+            # promoted here, that function's [ -f "$root/ffbuild/config.mak" ]
+            # is false for every caller passing the promoted directory, the
+            # derivation is skipped and the hardcoded fallback is the only path
+            # ever taken -- silently, since a fallback link line looks fine.
+            if [ -f "$FFMPEG_DIR/ffbuild/config.mak" ]; then
+                mkdir -p "$OUT_DIR/ffbuild"
+                cp -f "$FFMPEG_DIR/ffbuild/config.mak" "$OUT_DIR/ffbuild/config.mak"
+            fi
             printf '%s\n%s\n' "$src_stamp" "$cfg_stamp" > "$stamp_file"
             ok "vendored FFmpeg${label} → $OUT_DIR"
         else
