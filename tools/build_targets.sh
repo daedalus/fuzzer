@@ -328,6 +328,67 @@ NC='\033[0m'
 ok() { echo -e "  ${GREEN}OK${NC}: $1"; }
 warn() { echo -e "  ${YELLOW}WARN${NC}: $1"; }
 
+# ── Incremental rebuild ─────────────────────────────────────────────
+# The script relinked all 37 targets on every invocation, including a run
+# that changed nothing. .target.md5 already noticed this — it reported
+# "0 targets unchanged, 37 new targets" — but it is a post-hoc report, not
+# a build-avoidance mechanism: it hashes artifacts after the compiler has
+# already run.
+#
+# The check has two halves and needs both. mtime alone cannot distinguish
+# png_read.so from png_read_asan.so: same source, same shim, different
+# flags, and on a flag change the artifact is newer than every input while
+# being wrong. The command line alone cannot notice an edited source. So
+# the recorded command line must match *and* no input may be newer than
+# the artifact.
+#
+# Inputs are taken from the command line itself: every path in it that is
+# a real file is a dependency. That covers the source, the shim, and the
+# vendored .a archives (which is what makes a rebuilt FFmpeg relink
+# ffmpeg_read) without a second list to keep in sync. It does not cover
+# headers a source pulls in — see BUILD_DEP_EXTRA below for the ones that
+# matter here.
+BUILD_CACHE="$TARGETS/.build_cache"
+FORCE_REBUILD=0
+for arg in "$@"; do
+    case "$arg" in
+        --force|-B) FORCE_REBUILD=1 ;;
+    esac
+done
+
+# afl_shim.c is -include'd into every target, so an edit to it invalidates
+# all of them; it is on the command line, so the generic check catches it.
+# The headers it includes are not, and the shim is where nearly all the
+# instrumentation lives, so treat that directory's headers as a dependency
+# of every target rather than silently serving stale binaries after a
+# header-only change.
+BUILD_DEP_EXTRA=$(ls src/fuzzer_tool/adapters/*.h 2>/dev/null || true)
+
+_stamp_path() { printf '%s/%s.cmd' "$BUILD_CACHE" "$(printf '%s' "$1" | md5sum | cut -d' ' -f1)"; }
+
+# True when $out does not need rebuilding. $@ after $out is the exact
+# command line that would build it.
+target_is_current() {
+    local out="$1"; shift
+    [ "$FORCE_REBUILD" -eq 0 ] || return 1
+    [ -f "$out" ] || return 1
+    local stamp; stamp=$(_stamp_path "$out")
+    [ -f "$stamp" ] || return 1
+    [ "$(cat "$stamp")" = "$*" ] || return 1
+    local dep
+    for dep in "$@" $BUILD_DEP_EXTRA; do
+        if [ -f "$dep" ] && [ "$dep" -nt "$out" ]; then return 1; fi
+    done
+    return 0
+}
+
+record_target_stamp() {
+    local out="$1"; shift
+    [ -f "$out" ] || return 0
+    mkdir -p "$BUILD_CACHE"
+    printf '%s' "$*" > "$(_stamp_path "$out")"
+}
+
 # ── Target checksum tracking (.target.md5, gitignored) ──────────────
 # Records MD5 of every built binary and verifies them at the end.
 # Escape a path for use in a POSIX basic/extended regex. Unescaped dots in
@@ -816,11 +877,20 @@ build_target() {
     fi
     local rc=0
     # FRAME_POINTER: ctx hashing is default-on in afl_shim.c; see the header.
-    log_cmd "$cc $extra_flags -O2 -g $FRAME_POINTER $extra_cflags $cmplog_cflags -include $SHIM -o $out $src $libs $cmplog_libs"
+    local cmd="$cc $extra_flags -O2 -g $FRAME_POINTER $extra_cflags $cmplog_cflags -include $SHIM -o $out $src $libs $cmplog_libs"
+    # shellcheck disable=SC2086
+    if target_is_current "$out" $cmd; then
+        ok "$(basename "$out") (up to date)"
+        record_target_md5 "$out"
+        return 0
+    fi
+    log_cmd "$cmd"
     $cc $extra_flags -O2 -g $FRAME_POINTER $extra_cflags $cmplog_cflags -include "$SHIM" \
         -o "$out" "$src" $libs $cmplog_libs 2>>"$BUILD_LOG" || rc=$?
     if [ $rc -eq 0 ]; then
         ok "$(basename "$out")"
+        # shellcheck disable=SC2086
+        record_target_stamp "$out" $cmd
         record_target_md5 "$out"
     else
         warn_failed "$(basename "$out")"
@@ -865,11 +935,20 @@ build_so_target() {
         fi
     fi
     # FRAME_POINTER: ctx hashing is default-on in afl_shim.c; see the header.
-    log_cmd "$target_cc $extra_flags -O2 -g $FRAME_POINTER $extra_cflags $cmplog_cflags -shared -fPIC $bsymbolic_flag -include $SHIM -o $out $src $libs $cmplog_libs"
+    local cmd="$target_cc $extra_flags -O2 -g $FRAME_POINTER $extra_cflags $cmplog_cflags -shared -fPIC $bsymbolic_flag -include $SHIM -o $out $src $libs $cmplog_libs"
+    # shellcheck disable=SC2086
+    if target_is_current "$out" $cmd; then
+        ok "$(basename "$out") (up to date)"
+        record_target_md5 "$out"
+        return 0
+    fi
+    log_cmd "$cmd"
     $target_cc $extra_flags -O2 -g $FRAME_POINTER $extra_cflags $cmplog_cflags -shared -fPIC $bsymbolic_flag -include "$SHIM" \
         -o "$out" "$src" $libs $cmplog_libs 2>>"$BUILD_LOG" || rc=$?
     if [ $rc -eq 0 ]; then
         ok "$(basename "$out")"
+        # shellcheck disable=SC2086
+        record_target_stamp "$out" $cmd
         record_target_md5 "$out"
     else
         warn_failed "$(basename "$out")"
