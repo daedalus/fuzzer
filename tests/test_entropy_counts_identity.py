@@ -84,7 +84,9 @@ class TestByteEntropyIdentity:
         monkeypatch.setattr(byte_entropy, "_HAS_NUMPY", False)
         rng = random.Random(7)
         for _ in range(120):
-            chunk = bytes(rng.randrange(rng.choice([2, 16, 256])) for _ in range(rng.randrange(1, 3000)))
+            chunk = bytes(
+                rng.randrange(rng.choice([2, 16, 256])) for _ in range(rng.randrange(1, 3000))
+            )
             assert byte_entropy_bits(chunk) == pytest.approx(probability_form(chunk), abs=1e-12)
 
     def test_input_longer_than_table_does_not_fall_off_the_end(self):
