@@ -37,6 +37,32 @@ MAX_BITS_PER_BYTE = 8.0
 #: Bytes sampled from the head of an input. Matches report._corpus_byte_entropy.
 ENTROPY_SAMPLE_CAP = 4096
 
+# Entropy is computed in its counts form rather than its probability form:
+#
+#     H = -sum_i (c_i/N) log2(c_i/N)
+#       = -(1/N) sum_i c_i (log2 c_i - log2 N)
+#       = log2(N) - (1/N) sum_i c_i log2(c_i)
+#
+# The rearrangement keeps the counts as integers all the way through. That
+# removes the probability array (an allocation and a division per distinct
+# byte value) and, more usefully, makes the only transcendental term a
+# function of an integer bounded by the sample cap -- so it is a table
+# lookup. c log2 c is 0 at c = 0, which is the same convention the masked
+# probability form encoded by dropping zero counts, so no mask is needed
+# either.
+if _HAS_NUMPY:
+
+    def _build_c_log2_c(size: int) -> np.ndarray:
+        c = np.arange(size + 1, dtype=np.float64)
+        table = np.zeros(size + 1, dtype=np.float64)
+        np.log2(c[1:], out=table[1:])
+        table[1:] *= c[1:]
+        return table
+
+    #: c * log2(c) for c in [0, cap]. Sized for the default cap; callers
+    #: passing a larger one grow it once rather than falling off the end.
+    _C_LOG2_C = _build_c_log2_c(ENTROPY_SAMPLE_CAP)
+
 
 def byte_entropy_bits(data: bytes, cap: int = ENTROPY_SAMPLE_CAP) -> float:
     """Shannon entropy of ``data``'s byte distribution, in bits/byte.
@@ -49,16 +75,18 @@ def byte_entropy_bits(data: bytes, cap: int = ENTROPY_SAMPLE_CAP) -> float:
     if not chunk:
         return 0.0
     if _HAS_NUMPY:
+        global _C_LOG2_C
         arr = np.frombuffer(chunk, dtype=np.uint8)
+        if arr.size >= _C_LOG2_C.size:
+            _C_LOG2_C = _build_c_log2_c(arr.size)
         counts = np.bincount(arr, minlength=256)
-        probs = counts[counts > 0] / arr.size
-        ent = float(-np.sum(probs * np.log2(probs)))
+        ent = math.log2(arr.size) - float(_C_LOG2_C[counts].sum()) / arr.size
     else:
         total = len(chunk)
-        ent = 0.0
+        acc = 0.0
         for count in Counter(chunk).values():
-            p = count / total
-            ent -= p * math.log2(p)
+            acc += count * math.log2(count)
+        ent = math.log2(total) - acc / total
     # A single-symbol input sums to -0.0; clamp so callers comparing against
     # zero and formatting the value never see a negative zero.
     return ent if ent > 0.0 else 0.0

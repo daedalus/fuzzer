@@ -74,6 +74,20 @@ from fuzzer_tool.core.elf import (  # noqa: E402
 )
 
 
+def _clamp_entropy(value: float) -> float:
+    """Pin a counts-form entropy to its non-negative range.
+
+    ``log2(T) - (1/T) sum c log2 c`` is exact in exact arithmetic, but it
+    is a difference of two quantities of size log2(T), so the absolute
+    error is eps*log2(T) rather than eps*H. Everywhere but H = 0 that is
+    far below anything a caller can see; at H = 0 it is the whole value,
+    and a seed covering one edge can come back at -4e-16. Entropy is
+    non-negative by definition, so clamping restores a property the
+    probability form got for free rather than hiding an error.
+    """
+    return value if value > 0.0 else 0.0
+
+
 def _sig_np(sig):
     """Zero-copy uint64 view of a MinHash signature (array('Q') or list)."""
     if isinstance(sig, array) and array("Q").itemsize == 8:
@@ -1830,6 +1844,25 @@ class EdgeTracker:
 
         Seeds with unusual entropy profiles (very high or very low relative
         to the corpus average) are behaviorally distinct.
+
+        Computed in counts form,
+
+            H = log2(T) - (1/T) * sum_i c_i log2(c_i)
+
+        which is the same number without the intermediate probability array.
+        The rearrangement pays off more here than it does for byte entropy:
+        hit counts arrive already bucketed by ``count_class``, so a seed
+        covering thousands of edges still carries only a handful of distinct
+        count values. Binning first collapses one log2 per edge into one
+        log2 per distinct bucket.
+
+        The counts form trades one rounding property for the speed: it is a
+        difference of two quantities of size log2(T), so its absolute error
+        is eps*log2(T) rather than eps*H. That is invisible everywhere
+        except at H = 0, where the probability form returned an exact zero
+        and this returns a few ulps either side of it. ``_clamp_entropy``
+        pins that boundary, which is the same thing ``byte_entropy_bits``
+        does and for the same reason.
         """
         hc = self.seed_hit_counts.get(seed_key)
         if not hc:
@@ -1838,15 +1871,21 @@ class EdgeTracker:
         if total == 0:
             return 0.0
         if _HAS_NUMPY and len(hc) > 50:
-            arr = np.fromiter(hc.values(), dtype=np.float64)
-            arr = arr[arr > 0] / total
-            return -float(np.sum(arr * np.log2(arr)))
-        h = 0.0
+            arr = np.fromiter(hc.values(), dtype=np.int64, count=len(hc))
+            arr = arr[arr > 0]
+            if arr.size == 0:
+                return 0.0
+            # bincount over the bucketed values, then one log2 per distinct
+            # bucket rather than one per edge.
+            mult = np.bincount(arr)
+            nz = np.flatnonzero(mult)
+            acc = float(np.sum(mult[nz] * nz * np.log2(nz)))
+            return _clamp_entropy(math.log2(total) - acc / total)
+        acc = 0.0
         for count in hc.values():
             if count > 0:
-                p = count / total
-                h -= p * math.log2(p)
-        return h
+                acc += count * math.log2(count)
+        return _clamp_entropy(math.log2(total) - acc / total)
 
     def compute_wasserstein_weight(self, seed_key: str) -> float:
         """Compute scheduling weight based on Wasserstein distance to corpus centroid.
