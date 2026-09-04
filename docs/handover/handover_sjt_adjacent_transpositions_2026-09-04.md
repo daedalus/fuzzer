@@ -205,3 +205,85 @@ only supplies a different distance metric on the same symmetric group.
 ---
 
 *End of handover.*
+
+---
+
+# Addendum, 2026-09-04: audited, measured, and not adopted
+
+The plan above was audited against live source and then tested. The premise
+holds and the algorithm is correct; the operator it proposes does not earn its
+place. Recorded here rather than deleted, because "considered and rejected" and
+"never considered" are different states.
+
+## Corrections to the survey above
+
+- **§1 says 15 `_swap_pair` call sites.** It is 16 (mp3.py joined). All 16 sit
+  inside `*_chunk_mutate` operators, and all of those are in the `format` band.
+- **§1's table omits `_swap_tuple`**, which exists (`core/mutations/generic.py`)
+  with the even-m rotation / odd-m parity fallback, and has **zero production
+  call sites** — only `tests/test_swap_tuple.py`. The tree already carries one
+  unwired permutation primitive.
+- **Base is stale.** The doc states `be05bd7`; it landed six commits later.
+  Nothing in those six affects the analysis.
+- **The band is wrong.** §1 surveys the `format` band and §3.2 lands SJT in
+  `structural`. An adjacent swap of two bytes is not an adjacent swap of two
+  ISOBMFF boxes, and §2's locality argument (length fields, checksums, relative
+  offsets) only has teeth in the band the plan does not target. §6's
+  "do not touch" list omits `format` — the one band where the case was strong.
+
+## §3.3's state design cannot work
+
+Three independent reasons, all measured:
+
+1. `id(seed_buf)` is address reuse. Five sequential `bytearray(64)`
+   allocations produce **1 distinct id**.
+2. The "weak-key LRU" alternative does not exist: `weakref.ref` on `bytes` and
+   `bytearray` raises TypeError.
+3. Window selection follows the block operators, which redraw
+   `idx = rng.randint(...)` every call.
+
+Simulating 20,000 execs: the random-slice branch **hits** 51.3% of the time and
+the whole-buffer-small branch 99.985% — every hit a recycled address, 5,269 of
+10,269 carrying a window created for a differently-sized buffer. The generator
+does not restart; it silently continues an unrelated input's walk. The fix, had
+the operator been worth landing, is `ctx.seed_meta` (already a
+`MutationContext` slot) and a mandatory randomised start, not the optional one
+§3.1 describes.
+
+## §0 item 3 is not delivered
+
+SJT is deterministic and draws nothing, so `ExhaustivePool` has no tree to
+enumerate. The house falsification seam is
+`tests/support/operator_env.py::make_minimal_fuzzer(pool=...)` (port item P1-5;
+`tests/test_swap_pair.py` is the worked example), and a no-draw core yields
+exactly one run under it. All the randomness lives in window selection, which
+§3.4 explicitly declines to cover.
+
+## The measurement
+
+Full result in `docs/sweeps/region_order_attribution_2026-09-04.md`. Against a
+target with per-region ground truth, five arms, five seeds:
+
+- SJT walking from the identity is **indistinguishable from a random adjacent
+  swap** on every seed, and shares its false-DEAD error on a cold-but-live
+  region.
+- SJT with a randomised start loses to a free permutation confined to one
+  region (wrong on 2 of 5 seeds vs 0 of 5).
+- With its state broken — which §3.3 guarantees — `sjt_adjacent_swap` degrades
+  to a single adjacent swap from the parent, which saturates at **7 distinct
+  outputs at n=8** against `_swap_pair`'s 28. A 4x regression against the
+  primitive it claims to complement.
+
+Why, and it is the general lesson: deciding whether an ordering matters wants
+**independent samples** of S_n, not a **connected walk**. The Gray-code
+property trades independence for locality. At n=8 the value that fires the cold
+region does not reach slot 0 until step 5376 of 40320 — SJT's exhaustiveness is
+asymptotic, and inside a bounded budget it is a local sampler.
+
+## What did land
+
+The audit's by-product, not its subject: `_last_mutation_offset` was published
+from `select_position()` for operators that never read it, so the region
+liveness estimator was fed a fabricated attribution. `_DELOCALISED_OPS` stops
+that and `region_shuffle` supplies a confined ordering mutation that can report
+a true offset. Status: **closed, not adopted.**
