@@ -59,8 +59,9 @@ fi
 #   Legacy: pass --in-tree-vendor to fall back to the in-tree `vendor/`.
 # FUZZ_BUILD_ROOT: where the **build** artifacts (configured trees and
 #   target binaries) are written. Defaults to ~/fuzzing/targets/;
-#   override with FUZZ_BUILD_ROOT=... Legacy: --in-tree-targets for
-#   the in-tree `targets/` path.
+#   override with FUZZ_BUILD_ROOT=... Legacy: --in-tree-targets puts the
+#   whole build root in the in-tree `targets/` path -- binaries, the staged
+#   and promoted FFmpeg trees, .build_cache and build.log together.
 # Behavior on first run with a fresh $FUZZ_VENDOR_ROOT:
 #   - source layout is read-only (`<root>/<lib>/` populated by vendor scripts)
 #   - build layout is created on demand (`<root>/<lib>/<build-dir>/` per invocation)
@@ -81,6 +82,16 @@ else
 fi
 if [ "${IN_TREE_TARGETS:-0}" = "1" ]; then
     TARGETS="$(cd "$(dirname "$0")/.." && pwd)/targets"
+    # --in-tree-targets moved the target binaries in-tree but not the vendored
+    # FFmpeg trees: BUILD_DIR, the ffmpeg_root selection and the tracecmp
+    # selection all read $FUZZ_BUILD_ROOT directly, so the stage, the promoted
+    # archives and .sancov_stamp stayed under $HOME/fuzzing/builds while the
+    # binaries linked from them sat in ./targets. That half-and-half tree is
+    # not what the flag says it does, and there was no way to get a wholly
+    # in-tree build. Point the build root at the same place; BUILD_LOG and
+    # BUILD_CACHE already follow $TARGETS, so everything lands together.
+    # The flag is explicit, so it wins over an inherited FUZZ_BUILD_ROOT.
+    FUZZ_BUILD_ROOT="$TARGETS"
 else
     TARGETS="$FUZZ_BUILD_ROOT"
 fi

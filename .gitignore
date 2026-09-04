@@ -68,6 +68,12 @@ corpus_ffmpeg/
 vendor/
 *.profile_cache
 targets/*.profile_cache
+# --in-tree-targets puts the whole build root here: staged and promoted
+# FFmpeg trees, the target cache and the build log.
+targets/ffmpeg/
+targets/ffmpeg_asan/
+targets/.build_cache/
+targets/build.log
 src/fuzzer_tool/adapters/*.so
 .runtime_calls.json
 .runtime_calls.json.lock
