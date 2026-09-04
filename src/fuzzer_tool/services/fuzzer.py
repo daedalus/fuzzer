@@ -1012,6 +1012,7 @@ class Fuzzer:
         # Differential fuzzing
         self._diff_target = differential_target
         self._diff_tracker = None
+        self._diff_divergences = 0
 
         # WFC structural generation mode
         self._wfc_enabled = wfc
@@ -2716,17 +2717,45 @@ class Fuzzer:
         return self._runner.run_target(data)
 
     def _check_differential(self, data: bytes):
-        """Run data on differential target and track divergence."""
+        """Run data on differential target and track divergence.
+
+        Both levels of the comparison run off one execution pair. The per-input
+        verdict is logged; the observations behind it feed the statistical
+        drift tracker.
+
+        This used to call diff_run(), which returns only the verdict, and then
+        record constants -- ``record(0, "", 0, "", ...)``. Both counters filled
+        with the same single category, so KL(B || A) was 0 by construction and
+        drift could never be detected. The comment claimed "diff_run already
+        logs", which it does not; the verdict was dropped too.
+        """
         if not self._diff_tracker or not self._diff_target:
             return
-        from fuzzer_tool.services.differential import diff_run
+        from fuzzer_tool.services.differential import diff_run_detailed
 
-        diverged, desc = diff_run(self.target, self._diff_target, data)
-        rc_b, stderr_b = 0, ""
-        if diverged:
-            pass  # diff_run already logs; stats tracked in _diff_tracker
-        # track drift
-        self._diff_tracker.record(0, "", rc_b, stderr_b)
+        outcome = diff_run_detailed(self.target, self._diff_target, data)
+        if outcome.diverged:
+            log.warning("Differential divergence: %s", outcome.description)
+            self._diff_divergences += 1
+
+        was_drifting = self._diff_tracker.drift_detected
+        self._diff_tracker.record(
+            outcome.rc_a,
+            outcome.stderr_a,
+            outcome.rc_b,
+            outcome.stderr_b,
+            outcome.time_a,
+            outcome.time_b,
+        )
+        # Report on the transition only. The tracker recomputes every 10 inputs
+        # and stays latched once it trips, so logging on the flag itself would
+        # emit the same line for the rest of the campaign.
+        if self._diff_tracker.drift_detected and not was_drifting:
+            log.warning(
+                "Differential drift detected after %d inputs: %s",
+                self._diff_tracker.total_inputs,
+                self._diff_tracker.drift_description,
+            )
 
     def _ptrace_handle_breakpoint(self, pid: int, libc, cov: PtraceCoverage, regs_buf):
         return self._runner._ptrace_handle_breakpoint(pid, libc, cov, regs_buf)

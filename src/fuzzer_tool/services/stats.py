@@ -390,6 +390,23 @@ class StatsReporter:
                         for k, v in renyi.entropy_spectrum(list(edge_hits.values())).items()
                     },
                 }
+        # Nothing outside differential.py read drift_detected, last_kl_* or
+        # get_report(), so even a correct KL had no consumer. Surface it.
+        diff_tracker = getattr(f, "_diff_tracker", None)
+        if diff_tracker is not None:
+            report = diff_tracker.get_report()
+            stats["differential"] = {
+                "target": f._diff_target,
+                "inputs_compared": report["total_inputs"],
+                "divergences": getattr(f, "_diff_divergences", 0),
+                "drift_detected": report["drift_detected"],
+                "kl_returncode": round(report["kl_returncode"], 4),
+                "kl_signature": round(report["kl_signature"], 4),
+                "returncode_dist_a": report["returncode_dist_a"],
+                "returncode_dist_b": report["returncode_dist_b"],
+            }
+            if report["drift_detected"]:
+                stats["differential"]["drift_description"] = report["drift_description"]
         if f._use_transfer_entropy:
             stats["transfer_entropy"] = {
                 "history_len": len(f._te_input_history),

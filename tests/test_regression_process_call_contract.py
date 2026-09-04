@@ -149,26 +149,44 @@ def test_run_target_file_callers_pass_target_args():
     assert not bad, "incomplete call:\n" + "\n".join(bad)
 
 
+def _mock_payloads(tree):
+    """Tuples configured as a mock's return_value / side_effect.
+
+    Scoped deliberately to mock configuration rather than every tuple literal in
+    the file: an assertion on diff_run's own ``(diverged, description)`` return
+    is a legitimate 2-tuple and must not be flagged.
+    """
+    for node in ast.walk(tree):
+        value = None
+        if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Attribute):
+            if node.targets[0].attr in ("return_value", "side_effect"):
+                value = node.value
+        elif isinstance(node, ast.Call):
+            for kw in node.keywords:
+                if kw.arg in ("return_value", "side_effect"):
+                    value = kw.value
+        if value is None:
+            continue
+        items = value.elts if isinstance(value, ast.List | ast.Tuple) else [value]
+        for item in items:
+            if isinstance(item, ast.Tuple):
+                yield item
+
+
 def test_diff_run_mocks_use_the_real_arity():
     """The suite's own mocks are the reason this drifted undetected. Assert that
-    no test hands diff_run a tuple narrower than the helper really returns."""
+    no test configures a process-helper mock narrower than the real return."""
     expected = _declared_arity("run_target_stdin")
     bad = []
     for path in TESTS_ROOT.glob("test_*differential*.py"):
-        tree = ast.parse(path.read_text())
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Tuple):
-                continue
-            # only literal tuples whose first element looks like a returncode
-            if not node.elts or not all(
-                isinstance(e, ast.Constant | ast.UnaryOp | ast.Name) for e in node.elts
-            ):
-                continue
-            if len(node.elts) == 2 and isinstance(node.elts[1], ast.Constant):
-                if isinstance(node.elts[1].value, str):
-                    bad.append(f"{path.name}:{node.lineno} 2-tuple mock")
+        source = path.read_text()
+        if "run_target_stdin" not in source and "run_target_file" not in source:
+            continue
+        for item in _mock_payloads(ast.parse(source)):
+            if len(item.elts) != expected:
+                bad.append(f"{path.name}:{item.lineno} {len(item.elts)}-tuple mock")
     assert not bad, (
-        f"process helpers return {expected} values; these mocks encode 2:\n"
+        f"process helpers return {expected} values; these mocks disagree:\n"
         + "\n".join(bad)
     )
 

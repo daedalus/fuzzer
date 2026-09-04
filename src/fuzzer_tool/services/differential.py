@@ -10,11 +10,37 @@ import math
 import os
 import shutil
 import tempfile
+import time
 from collections import Counter
+from dataclasses import dataclass, field
 
 from fuzzer_tool.adapters.process import run_target_file, run_target_stdin
 from fuzzer_tool.core.edge_tracker import ks_two_sample
 from fuzzer_tool.core.sanitizer import SanitizerReport
+
+
+@dataclass
+class DiffOutcome:
+    """Everything one differential execution observed.
+
+    ``diff_run`` returns only the verdict, which is all the per-input check
+    needs. The statistical layer needs the observations themselves, and they
+    were being discarded at the end of ``diff_run`` -- so the caller had nothing
+    to hand DifferentialTracker and passed constants instead. This carries them
+    out.
+    """
+
+    diverged: bool
+    description: str
+    rc_a: int = 0
+    rc_b: int = 0
+    stderr_a: str = field(default="", repr=False)
+    stderr_b: str = field(default="", repr=False)
+    time_a: float = 0.0
+    time_b: float = 0.0
+
+    def as_verdict(self) -> tuple[bool, str]:
+        return self.diverged, self.description
 
 
 def diff_run(
@@ -30,25 +56,48 @@ def diff_run(
     Returns:
         Tuple of (diverged: bool, description: str).
     """
+    return diff_run_detailed(
+        target_a, target_b, data, timeout, file_mode, target_args
+    ).as_verdict()
+
+
+def diff_run_detailed(
+    target_a: str,
+    target_b: str,
+    data: bytes,
+    timeout: float = 5.0,
+    file_mode: bool = False,
+    target_args: list[str] | None = None,
+) -> DiffOutcome:
+    """diff_run, keeping the per-target observations instead of dropping them.
+
+    Returns:
+        DiffOutcome with the verdict plus both targets' returncode, stderr and
+        wall time.
+    """
     env = os.environ.copy()
     tmp_dir = tempfile.mkdtemp(prefix="diff_") if file_mode else None
 
     try:
         # Run target A
+        _t0 = time.perf_counter()
         if file_mode:
             rc_a, stderr_a, _pid_a = run_target_file(
                 target_a, data, timeout, tmp_dir, target_args or [], env=env
             )
         else:
             rc_a, stderr_a, _pid_a = run_target_stdin(target_a, data, timeout, env=env)
+        time_a = time.perf_counter() - _t0
 
         # Run target B
+        _t0 = time.perf_counter()
         if file_mode:
             rc_b, stderr_b, _pid_b = run_target_file(
                 target_b, data, timeout, tmp_dir, target_args or [], env=env
             )
         else:
             rc_b, stderr_b, _pid_b = run_target_stdin(target_b, data, timeout, env=env)
+        time_b = time.perf_counter() - _t0
     finally:
         if tmp_dir:
             shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -93,7 +142,16 @@ def diff_run(
         reasons.append("different stderr output")
 
     description = "; ".join(reasons) if reasons else "identical"
-    return diverged, description
+    return DiffOutcome(
+        diverged=diverged,
+        description=description,
+        rc_a=rc_a,
+        rc_b=rc_b,
+        stderr_a=stderr_a,
+        stderr_b=stderr_b,
+        time_a=time_a,
+        time_b=time_b,
+    )
 
 
 class DifferentialTracker:
