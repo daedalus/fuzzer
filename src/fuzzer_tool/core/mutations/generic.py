@@ -894,6 +894,7 @@ MUTATIONS = [
     "magic_values",
     "ascii_num_arithmetic",
     "chunk_shuffle",
+    "region_shuffle",
     "block_shuffle_variable",
     "dict_compound",
     "punctuation_insert",

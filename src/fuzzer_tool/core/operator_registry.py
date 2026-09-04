@@ -98,6 +98,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "tlv_mutate",
         "token_shuffle",
         "chunk_shuffle",
+        "region_shuffle",
         "punctuation_insert",
         "special_strings",
         "magic_values",
@@ -556,6 +557,10 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     ),
     "grammar_mutate": lambda f, _d: bool(getattr(f, "grammar", None)),
     "grammar_tree_mutate": lambda f, _d: bool(getattr(f, "grammar", None)),
+    # Needs a parent region profile to confine itself to; _REGION_MIN_LEN in
+    # services/operators.py is the same 512, kept as a literal here so the
+    # registry stays free of a services import.
+    "region_shuffle": lambda _f, d: len(d) >= 512,
     "redqueen_xform": _has_cmplog_pairs,
     "gradient_cmp": _has_cmplog_pairs,
     "gradient_descent": _has_cmplog_pairs,

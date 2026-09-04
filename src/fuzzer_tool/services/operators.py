@@ -1939,6 +1939,78 @@ class OperatorEngine:
                 stride = parent_meta.get("record_stride")
             return bytearray(chunk_shuffle(bytes(buf), rng=rng, stride=stride)[: self.ctx.max_len])
 
+    def _op_region_shuffle(self, buf, byte_idx, data):
+        """Reorder fixed-size records inside the ONE region *byte_idx* falls in.
+
+        `chunk_shuffle` reorders records across the whole buffer, which is why
+        it has no single offset to report and sits in `_DELOCALISED_OPS`. This
+        operator confines the same reordering to one region of the parent's
+        profile, so `byte_idx` -- the position the mutation loop already drew
+        and published -- stays a true description of what was touched, and the
+        region liveness estimator receives an honest observation.
+
+        That honesty is the whole point of the operator, not a side effect:
+        measured against a target with per-region ground truth
+        (docs/sweeps/region_order_attribution_2026-09-04.md), a whole-buffer
+        shuffle misreads both known-dead regions as live on every seed, while
+        this one classifies all four regions correctly on every seed.
+
+        Region bounds come from the *parent* profile, so `hi` is clamped to the
+        buffer: an earlier operator in the same round may have shortened it.
+        The clamp is about record alignment, not memory safety -- slicing a
+        bytearray past its end is already benign, and the join preserves the
+        window's byte count either way. What it buys is that `stride` and
+        `n_records` are derived from bytes that actually exist, so the record
+        boundaries the operator reorders are the ones the buffer has.
+
+        Stride is the parent's inferred `record_stride` when it fits the
+        region, otherwise the region is cut into `_REGION_SHUFFLE_RECORDS`
+        equal pieces. Length is preserved either way, which is what keeps the
+        edit a pure reordering rather than a reordering plus a resize.
+        """
+        entry = self.region_weights(data)
+        if entry is None:
+            return None
+        _cumulative, bounds, _total = entry
+        lo = hi = None
+        for r_lo, r_hi in bounds:
+            if r_lo <= byte_idx < r_hi:
+                lo, hi = r_lo, r_hi
+                break
+        if lo is None:
+            return None
+
+        hi = min(hi, len(buf))
+        span = hi - lo
+        if span < 2:
+            return None
+
+        meta = self.ctx.seed_meta.get(data)
+        stride = meta.get("record_stride") if meta else None
+        if not stride or stride <= 0 or stride * 2 > span:
+            stride = max(1, span // _REGION_SHUFFLE_RECORDS)
+        n_records = span // stride
+        if n_records < 2:
+            return None
+
+        rng = self.ctx.rand_pool
+        order = list(range(n_records))
+        rng.shuffle(order)
+        if order == list(range(n_records)):
+            # An identity draw writes the buffer back unchanged. Skipping the
+            # write is an optimisation and nothing more: the handler returns
+            # None on both paths and the effectiveness tracker already scores
+            # an unchanged buffer as ineffective by hashing it. Pinned by a
+            # source-level test for that reason -- there is no behavioural
+            # difference to assert on.
+            return None
+
+        window = bytes(buf[lo : lo + n_records * stride])
+        buf[lo : lo + n_records * stride] = b"".join(
+            window[r * stride : (r + 1) * stride] for r in order
+        )
+        return None
+
     # ── Weizz P4: tag-restricted surgical solve ────────────────────────────
 
     # Bound on occurrences scanned when restricting candidates by tag --
