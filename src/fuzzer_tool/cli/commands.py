@@ -889,11 +889,12 @@ def cmd_verify(args):
                 tmp_dir = Path("/tmp") / f"verify_{os.getpid()}"
                 tmp_dir.mkdir(parents=True, exist_ok=True)
                 try:
-                    returncode, stderr = run_target_file(
+                    returncode, stderr, _pid = run_target_file(
                         target=args.asan_target,
                         data=data,
                         timeout=args.timeout,
                         tmp_dir=str(tmp_dir),
+                        target_args=getattr(args, "target_args", None) or [],
                         env=os.environ.copy(),
                     )
                 finally:

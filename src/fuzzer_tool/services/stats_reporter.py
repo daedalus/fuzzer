@@ -87,7 +87,7 @@ def run_crash_replays(
             continue
         try:
             data = crash_file.read_bytes()
-            rc, _ = run_target_stdin(target, data, timeout)
+            rc, _stderr, _pid = run_target_stdin(target, data, timeout)
             replays.append(rc)
         except Exception:
             replays.append(-2)

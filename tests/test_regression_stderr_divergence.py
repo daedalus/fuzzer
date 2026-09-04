@@ -36,7 +36,7 @@ ASAN_UAF = (
 def _run(stderr_a, stderr_b, rc_a=0, rc_b=0):
     with patch(
         "fuzzer_tool.services.differential.run_target_stdin",
-        side_effect=[(rc_a, stderr_a), (rc_b, stderr_b)],
+        side_effect=[(rc_a, stderr_a, 111), (rc_b, stderr_b, 222)],
     ):
         return diff_run("/bin/true", "/bin/false", b"input")
 

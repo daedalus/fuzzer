@@ -36,19 +36,19 @@ def diff_run(
     try:
         # Run target A
         if file_mode:
-            rc_a, stderr_a = run_target_file(
+            rc_a, stderr_a, _pid_a = run_target_file(
                 target_a, data, timeout, tmp_dir, target_args or [], env=env
             )
         else:
-            rc_a, stderr_a = run_target_stdin(target_a, data, timeout, env=env)
+            rc_a, stderr_a, _pid_a = run_target_stdin(target_a, data, timeout, env=env)
 
         # Run target B
         if file_mode:
-            rc_b, stderr_b = run_target_file(
+            rc_b, stderr_b, _pid_b = run_target_file(
                 target_b, data, timeout, tmp_dir, target_args or [], env=env
             )
         else:
-            rc_b, stderr_b = run_target_stdin(target_b, data, timeout, env=env)
+            rc_b, stderr_b, _pid_b = run_target_stdin(target_b, data, timeout, env=env)
     finally:
         if tmp_dir:
             shutil.rmtree(tmp_dir, ignore_errors=True)

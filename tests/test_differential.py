@@ -9,14 +9,14 @@ from fuzzer_tool.services.differential import DifferentialTracker, diff_run
 class TestDiffRun:
     @patch("fuzzer_tool.services.differential.run_target_stdin")
     def test_identical_outputs(self, mock_run):
-        mock_run.return_value = (0, "")
+        mock_run.return_value = (0, "", 111)
         diverged, desc = diff_run("target_a", "target_b", b"test")
         assert not diverged
         assert desc == "identical"
 
     @patch("fuzzer_tool.services.differential.run_target_stdin")
     def test_different_returncodes(self, mock_run):
-        mock_run.side_effect = [(0, ""), (1, "")]
+        mock_run.side_effect = [(0, "", 111), (1, "", 222)]
         diverged, desc = diff_run("target_a", "target_b", b"test")
         assert diverged
         assert "returncode" in desc
@@ -32,7 +32,7 @@ class TestDiffRun:
         # left the boolean False. Same shape as the `test_hex_escape` case
         # recorded in docs/TODO.md: an assertion strong enough to pass review
         # that pins the defect in place.
-        mock_run.side_effect = [(0, "error A"), (0, "error B")]
+        mock_run.side_effect = [(0, "error A", 111), (0, "error B", 222)]
         diverged, desc = diff_run("target_a", "target_b", b"test")
         assert diverged
         assert "different stderr" in desc
@@ -40,22 +40,20 @@ class TestDiffRun:
     @patch("fuzzer_tool.services.differential.run_target_stdin")
     def test_asan_only_in_a(self, mock_run):
         asan_a = "ERROR: AddressSanitizer: heap-buffer-overflow\nABORTING"
-        mock_run.side_effect = [(1, asan_a), (0, "")]
+        mock_run.side_effect = [(1, asan_a, 111), (0, "", 222)]
         diverged, desc = diff_run("a", "b", b"test")
         assert diverged
         assert "crashes" in desc
 
     @patch("fuzzer_tool.services.differential.run_target_file")
     def test_file_mode(self, mock_run):
-        # diff_run unpacks 2 values — run_target_file returns 3 (rc, stderr, pid)
-        # This is a latent bug in diff_run — mock returns what the caller expects
-        mock_run.return_value = (0, "")
+        mock_run.return_value = (0, "", 111)
         diverged, desc = diff_run("a", "b", b"test", file_mode=True)
         assert not diverged
 
     @patch("fuzzer_tool.services.differential.run_target_stdin")
     def test_with_target_args(self, mock_run):
-        mock_run.return_value = (0, "")
+        mock_run.return_value = (0, "", 111)
         diverged, desc = diff_run("a", "b", b"test", target_args=["--flag"])
         assert not diverged
 
