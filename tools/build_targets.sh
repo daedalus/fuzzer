@@ -95,7 +95,8 @@ fi
 # build_target's `return 1` into an abort. That is the invocation AGENTS.md
 # documents. --in-tree-targets-src is kept as an accepted no-op so existing
 # scripts and muscle memory keep working.
-TARGETS_SRC="$(cd "$(dirname "$0")/.." && pwd)/targets"
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+TARGETS_SRC="$REPO_ROOT/targets"
 if [ "${IN_TREE_TARGETS_SRC:-0}" = "1" ] && [ "${IN_TREE_TARGETS:-0}" = "0" ]; then
     mkdir -p "$TARGETS"
 fi
@@ -1161,9 +1162,28 @@ build_vendored_ffmpeg_sancov() {
     # notices the patch directly.
     local cc_id; cc_id=$(clang --version 2>/dev/null | head -1)
     local src_stamp cfg_stamp
+    # What this has to detect is "the vendored source changed since the build
+    # whose stamp is on disk". The previous expression contributed a *list of
+    # paths* from `find -newer`: once a file was newer than configure it was in
+    # the list, and every later edit to it produced a byte-identical list. Since
+    # a fresh checkout leaves nearly every file newer than configure (3412 of
+    # 3417 .c files here), the list was effectively constant, `git rev-parse
+    # HEAD` does not move for a dirty tree, and so editing a demuxer, building,
+    # editing again and rebuilding silently reused the first build from the
+    # second iteration on -- the exact failure the removed early-return was
+    # guarding against, in a narrower and quieter form.
+    #
+    # Stat metadata instead: path + mtime + size over the whole tree. It changes
+    # on every write, and dropping -newer means added and deleted files register
+    # too. Hashing contents would also work and is what you would reach for
+    # first, but it reads 21 MB per call (4.1s here, twice per invocation)
+    # against 0.03s for the stat walk -- and metadata errs toward rebuilding
+    # when nothing changed, which is the safe direction. Headers are included:
+    # a header-only edit was invisible to the old expression twice over.
     src_stamp=$( { (cd "$SRC_DIR" && git rev-parse HEAD 2>/dev/null) || echo "no-git"
-                   find "$SRC_DIR" -name '*.c' -newer "$SRC_DIR/configure" 2>/dev/null | sort
-                   cat patches/*.patch 2>/dev/null; } | md5sum | cut -d' ' -f1)
+                   find "$SRC_DIR" \( -name '*.c' -o -name '*.h' \) \
+                        -printf '%P %T@ %s\n' 2>/dev/null | sort
+                   cat "$REPO_ROOT"/patches/*.patch 2>/dev/null; } | md5sum | cut -d' ' -f1)
     local stamp_file="$BUILD_DIR/.sancov_stamp"
     local prev_src="" prev_cfg=""
     if [ -f "$stamp_file" ]; then
