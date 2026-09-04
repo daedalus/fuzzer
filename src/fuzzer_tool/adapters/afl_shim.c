@@ -1406,12 +1406,71 @@ __AFL_NO_COV static void __afl_cmp_dump_sites(void) {
     if (p != buf) __afl_cmp_write_all(__afl_cmp_sites_fd, buf, (size_t)(p - buf));
 }
 
+/* ── Operand readability ──────────────────────────────────────────────
+ * The length an interceptor hands us is a semantic bound -- how many bytes
+ * the real call was allowed to look at -- not a readable one. strncmp stops
+ * at the first NUL or mismatch, so strncmp(p, "http:", 5) on a 2-byte p that
+ * differs at byte 1 is legal C, and logging 5 bytes of p reads 3 past the
+ * end. FFmpeg's url_find_protocol does exactly that against the protocol
+ * table; a campaign against ffmpeg_read surfaced it as an ASAN
+ * heap-buffer-overflow whose top frames were __afl_put_hexbytes and
+ * __afl_cmplog_bytes -- our own instrumentation crashing, reported as a
+ * crash in the target.
+ *
+ * Bounding it inside each interceptor is what the file has been doing
+ * (strcmp measures with __afl_fb_len; the memmem site carries a comment
+ * about the same class of read), and strncmp and strncasecmp are the two
+ * that were missed out of 18 call sites. So the bound belongs here, at the
+ * one place that dereferences the operands, where a new interceptor cannot
+ * forget it.
+ *
+ * Two layers, because they cover different builds:
+ *   - Page clamp, always. A read that stays inside the page holding p cannot
+ *     fault: the caller just read from that page. This is the only guard a
+ *     non-ASAN target gets, and it is the one that matters there -- a fault
+ *     in the nosan .so is an in-process SIGSEGV with our frame on top and no
+ *     redzone diagnostic to say whose fault it was.
+ *   - __asan_region_is_poisoned when it resolves. Weak symbol: present in an
+ *     ASAN build, NULL otherwise. Gives the exact object bound, not the page
+ *     bound.
+ *
+ * Deliberately not a truncation to the first mismatch. That is provably safe
+ * and destroys the point of the record: with buf all 'A',
+ * strncmp(buf, "PREFIX_", 7) mismatches at byte 0, so the semantic bound is
+ * one byte and the literal never reaches the pool -- the token redqueen
+ * exists to inject. Clamping by readability keeps the whole operand whenever
+ * it is legal to read, and shortens only when it is not. */
+extern const void *__asan_region_is_poisoned(const void *p, size_t n)
+    __attribute__((weak));
+
+__AFL_NO_COV static size_t __afl_readable_len(const void *p, size_t want) {
+    static size_t page_size = 0;
+    if (!p || want == 0) return 0;
+    if (page_size == 0) {
+        long ps = sysconf(_SC_PAGESIZE);
+        page_size = ps > 0 ? (size_t)ps : 4096;
+    }
+    uintptr_t addr = (uintptr_t)p;
+    size_t to_page_end = page_size - (size_t)(addr & (uintptr_t)(page_size - 1));
+    if (want > to_page_end) want = to_page_end;
+    if (__asan_region_is_poisoned) {
+        const void *bad = __asan_region_is_poisoned(p, want);
+        if (bad) want = (size_t)((const char *)bad - (const char *)p);
+    }
+    return want;
+}
+
 /* ── Layer 1 record: two byte buffers ─────────────────────────────────
  * result == 0 is dropped: an already-satisfied comparison is exactly the
  * "looks unsolved but is solved" pollution the pair pool must not carry. */
 __AFL_NO_COV static void __afl_cmplog_bytes(const void *a, const void *b, size_t n, int result) {
     if (__afl_cmplog_fd < 0 || !a || !b || n == 0 || result == 0) return;
     size_t k = n > CMPLOG_MAX_OPERAND ? CMPLOG_MAX_OPERAND : n;
+    /* Both operands are hexdumped at the same width, so the record can only
+     * be as wide as the shorter readable side. */
+    size_t ka = __afl_readable_len(a, k), kb = __afl_readable_len(b, k);
+    k = ka < kb ? ka : kb;
+    if (k == 0) return;
     if (__afl_cmplog_pos + CMPLOG_MAX_RECORD > CMPLOG_BUFFER_SIZE)
         __afl_cmplog_flush();
     char *p = __afl_cmplog_buf + __afl_cmplog_pos;
