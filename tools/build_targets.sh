@@ -999,7 +999,7 @@ build_fgrep_targets() {
     echo "Building fgrep targets ($label)..."
     local FGREP_INC="-I$FGREP/include -I$FGREP/src"
 
-    local out_suffix=""
+    local out_suffix="_noasan"
     [ "$suffix" = "_nosan" ] && out_suffix="_nosan"
     # fgrep_read includes fgrep .c files directly and needs -mavx2 for AVX2 intrinsics
     build_target "${TARGETS_SRC:-$TARGETS}/fgrep_read.c" "$TARGETS/fgrep_read${out_suffix}" "$FGREP_INC -lpthread" "$flags -mavx2"
@@ -1011,8 +1011,8 @@ build_fgrep_so_targets() {
     echo "Building fgrep .so targets ($label)..."
     local FGREP_INC="-I$FGREP/include -I$FGREP/src"
 
-    local out_suffix=""
-    [[ "$suffix" == _asan* ]] && out_suffix="$suffix"
+    local out_suffix="_noasan"
+    [[ "$suffix" == _asan* || "$suffix" == _ubsan* ]] && out_suffix="$suffix"
     # fgrep_read includes fgrep .c files directly — needs -mavx2 for AVX2 intrinsics
     build_so_target "${TARGETS_SRC:-$TARGETS}/fgrep_read.c" "$TARGETS/fgrep_read${out_suffix}.so" "$FGREP_INC -lpthread" "$flags -mavx2"
 }
@@ -1021,7 +1021,7 @@ build_fgrep_so_targets() {
 build_simple_targets() {
     local suffix="$1" flags="$2" label="$3" cc="${4:-$DEFAULT_CC}" extra_cflags="${5:-}"
     echo "Building simple targets ($label)..."
-    local out_suffix=""
+    local out_suffix="_noasan"
     [ "$suffix" = "_nosan" ] && out_suffix="_nosan"
 
     local FFMPEG_LIBS="-lavformat -lavcodec -lavutil -lswresample -lm"
@@ -1371,7 +1371,7 @@ STUBEOF
 build_simple_so_targets() {
     local suffix="$1" flags="$2" label="$3" cc="${4:-$DEFAULT_CC}" extra_cflags="${5:-}"
     echo "Building simple .so targets ($label)..."
-    local out_suffix=""
+    local out_suffix="_noasan"
     [[ "$suffix" == _asan* || "$suffix" == _ubsan* ]] && out_suffix="$suffix"
 
     # No-ASAN .so targets link the vendored libpng/zlib/ffmpeg archives and
@@ -1401,10 +1401,10 @@ build_simple_so_targets() {
     #   _asan → $FUZZ_BUILD_ROOT/ffmpeg_asan/ (ASAN + coverage)
     #   _ubsan / _nosan / "" → $FUZZ_BUILD_ROOT/ffmpeg/ (coverage only)
     local ffmpeg_vendor_dir="$FUZZ_BUILD_ROOT/ffmpeg"
-    [[ "$suffix" == _asan* ]] && ffmpeg_vendor_dir="$FUZZ_BUILD_ROOT/ffmpeg_asan"
+    [[ "$suffix" == _asan* || "$suffix" == _ubsan* ]] && ffmpeg_vendor_dir="$FUZZ_BUILD_ROOT/ffmpeg_asan"
     if [ ! -f "$ffmpeg_vendor_dir/libavformat/libavformat.a" ]; then
         ffmpeg_vendor_dir="$VENDOR/ffmpeg"
-        [[ "$suffix" == _asan* ]] && ffmpeg_vendor_dir="$VENDOR/ffmpeg_asan"
+        [[ "$suffix" == _asan* || "$suffix" == _ubsan* ]] && ffmpeg_vendor_dir="$VENDOR/ffmpeg_asan"
     fi
     local VENDOR_FFMPEG_A="$ffmpeg_vendor_dir/libavformat/libavformat.a"
     if [ -f "$VENDOR_FFMPEG_A" ]; then
@@ -1442,7 +1442,7 @@ build_simple_so_targets() {
 # ── Build standalone .so targets with external deps ─────────────
 build_standalone_so_targets() {
     local suffix="$1" flags="$2" label="$3" cc="${4:-$DEFAULT_CC}" extra_cflags="${5:-}"
-    local out_suffix=""
+    local out_suffix="_noasan"
     [[ "$suffix" == _asan* || "$suffix" == _ubsan* ]] && out_suffix="$suffix"
 
     # tailslayer — C++ target (g++), header-only library
@@ -1579,8 +1579,8 @@ compile_vendored_libs() {
 build_vendored_so_targets() {
     local suffix="$1" flags="$2" label="$3" cc="${4:-$DEFAULT_CC}" extra_cflags="${5:-}"
     echo "Building vendored .so targets ($label)..."
-    local out_suffix=""
-    [[ "$suffix" == _asan* ]] && out_suffix="$suffix"
+    local out_suffix="_noasan"
+    [[ "$suffix" == _asan* || "$suffix" == _ubsan* ]] && out_suffix="$suffix"
 
     local ZLIB_OBJS=""
     local ZLIB_INC=""
