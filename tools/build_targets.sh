@@ -1056,7 +1056,7 @@ build_simple_targets() {
         if [ -f "$ffmpeg_root/.stale" ]; then
             warn "$ffmpeg_root archives are from a build that later failed — targets linked against them are stale"
         fi
-        FFMPEG_LIBS="$ffmpeg_root/libavformat/libavformat.a $ffmpeg_root/libavcodec/libavcodec.a $ffmpeg_root/libavutil/libavutil.a $ffmpeg_root/libswresample/libswresample.a -lm $(ffmpeg_extralibs "$ffmpeg_root")"
+        FFMPEG_LIBS="$ffmpeg_root/libavformat/libavformat.a $ffmpeg_root/libavcodec/libavcodec.a $ffmpeg_root/libavutil/libavutil.a $ffmpeg_root/libswresample/libswresample.a -lm -llzma -latomic -lX11 $(ffmpeg_extralibs "$ffmpeg_root")"
         FFMPEG_INC="-I$ffmpeg_root"
     fi
 
@@ -1408,7 +1408,7 @@ build_simple_so_targets() {
     fi
     local VENDOR_FFMPEG_A="$ffmpeg_vendor_dir/libavformat/libavformat.a"
     if [ -f "$VENDOR_FFMPEG_A" ]; then
-        FFMPEG_LIBS="$ffmpeg_vendor_dir/libavformat/libavformat.a $ffmpeg_vendor_dir/libavcodec/libavcodec.a $ffmpeg_vendor_dir/libavutil/libavutil.a $ffmpeg_vendor_dir/libswresample/libswresample.a $(ffmpeg_extralibs "$ffmpeg_vendor_dir")"
+        FFMPEG_LIBS="$ffmpeg_vendor_dir/libavformat/libavformat.a $ffmpeg_vendor_dir/libavcodec/libavcodec.a $ffmpeg_vendor_dir/libavutil/libavutil.a $ffmpeg_vendor_dir/libswresample/libswresample.a -lm -llzma -latomic -lX11 $(ffmpeg_extralibs "$ffmpeg_vendor_dir")"
         FFMPEG_INC="-I$ffmpeg_vendor_dir"
         echo "  Using vendored FFmpeg static libraries ($ffmpeg_vendor_dir)"
     fi
