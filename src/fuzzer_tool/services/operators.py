@@ -134,6 +134,38 @@ _LIVENESS_SWITCH_AFTER = 200
 # misclassified real cold-live region recoverable.
 _LIVENESS_DEAD_WEIGHT = 0.1
 
+# Operators whose edit is spread across the whole buffer, so that no single
+# byte position describes what they touched. They take `_byte_idx` and never
+# read it; the mutation loop nonetheless used to publish that unread position
+# as `_last_mutation_offset`, which `Fuzzer.fuzz_one` hands straight to
+# `record_coverage_diff` as "the byte position the mutation touched". The
+# region liveness estimator then folded a whole-buffer reordering's coverage
+# diff into whichever region a uniform draw happened to land in.
+#
+# Measured against a target with per-region ground truth
+# (docs/sweeps/region_order_attribution_2026-09-04.md): under the fabricated
+# offset the attribution is sound in 0.4% of observations and both known-dead
+# regions are misread as live on every seed. Reporting None instead skips the
+# observation, which is the honest outcome: `fuzz_one` already guards on
+# `_liveness_offset is not None`, so no caller changes.
+#
+# Deliberately a short explicit list and not "every handler that takes
+# `_byte_idx`" (139 of 156 do). A single-site operator that picks its own
+# position is still misattributed, but it *has* a true offset to report; the
+# fix there is to let handlers report one, which is a wider change than this.
+# These four have no true offset to report at all.
+_DELOCALISED_OPS = frozenset(
+    {
+        "block_shuffle_variable",
+        "byte_shuffle",
+        "chunk_shuffle",
+        "token_shuffle",
+    }
+)
+
+# Records per region when the parent seed carries no inferred `record_stride`.
+_REGION_SHUFFLE_RECORDS = 8
+
 # ── havoc sub-mutation weighting ─────────────────────────────────────────
 # _apply_single_mutation() dispatches to one of 11 inline branches. That
 # choice was `r[0] % 11` -- flat odds, no feedback -- while every top-level
@@ -4001,7 +4033,10 @@ class OperatorEngine:
             f._last_ops_used.append(op)
 
             byte_idx = self.select_position(buf, data)
-            f._last_mutation_offset = byte_idx
+            # A delocalised operator never read this position, so publishing
+            # it as the mutation offset fabricates the region attribution the
+            # liveness estimator is built on. See _DELOCALISED_OPS.
+            f._last_mutation_offset = None if op in _DELOCALISED_OPS else byte_idx
             f._last_ops_with_sites.append((op, byte_idx))
             old_len = len(buf)
 
