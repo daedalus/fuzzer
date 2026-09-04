@@ -97,6 +97,19 @@ fi
 # scripts and muscle memory keep working.
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TARGETS_SRC="$REPO_ROOT/targets"
+# FFmpeg's configure aborts with "nasm not found or too old" when x86
+# assembly is enabled and no assembler is installed, which is why
+# --disable-x86asm was hardcoded here and in vendor_ffmpeg.sh. Hardcoding it
+# also means the vendored FFmpeg contains no hand-written assembly on any
+# machine, including ones that have nasm -- and for a decoder fuzz target
+# that is not neutral: the SIMD paths are a large, heavily optimised slice of
+# libavcodec with their own bounds behaviour, and the C fallbacks that
+# replace them are different code. Probe instead, and say so when disabling.
+if command -v nasm >/dev/null 2>&1 || command -v yasm >/dev/null 2>&1; then
+    FFMPEG_ASM_FLAG=""
+else
+    FFMPEG_ASM_FLAG="--disable-x86asm"
+fi
 if [ "${IN_TREE_TARGETS_SRC:-0}" = "1" ] && [ "${IN_TREE_TARGETS:-0}" = "0" ]; then
     mkdir -p "$TARGETS"
 fi
@@ -1236,8 +1249,11 @@ STUBEOF
         EXTRA_LIBS="-lsancov_stub"
     fi
     local cfg_stamp
-    cfg_stamp=$(printf '%s|%s|%s|%s' "$COV_FLAGS" "$LINK_FLAGS" "$EXTRA_LIBS" "$cc_id" \
-                | md5sum | cut -d' ' -f1)
+    # $FFMPEG_ASM_FLAG is part of the configure line, so installing or removing
+    # nasm has to invalidate the stamp; without it the tree would keep the
+    # assembly setting of whichever build happened to run first.
+    cfg_stamp=$(printf '%s|%s|%s|%s|%s' "$COV_FLAGS" "$LINK_FLAGS" "$EXTRA_LIBS" "$cc_id" \
+                       "$FFMPEG_ASM_FLAG" | md5sum | cut -d' ' -f1)
 
     # Nothing changed and the archives are all there: this is the common
     # case for a repeat run, and it used to cost a 180MB re-copy plus a
@@ -1289,7 +1305,7 @@ STUBEOF
             --disable-parsers --disable-bsfs --disable-avdevice \
             --disable-pthreads --disable-network --disable-hwaccels --disable-cuvid \
             --disable-nvenc --disable-vaapi --disable-vdpau --disable-vulkan \
-            --disable-x86asm \
+            $FFMPEG_ASM_FLAG \
             >>"$BUILD_LOG" 2>&1) || cfg_ok=0
     fi
     if [ "$cfg_ok" -eq 1 ]; then

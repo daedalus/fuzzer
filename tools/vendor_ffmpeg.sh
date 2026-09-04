@@ -44,6 +44,15 @@ fi
 mkdir -p "$VENDOR_DIR"
 
 FFMPEG_VERSION="${FFMPEG_VERSION:-9.0.1}"
+# See build_targets.sh: --disable-x86asm was hardcoded because configure
+# aborts without nasm. Probe so machines that have an assembler keep the
+# SIMD paths, which are a large part of what a decoder target exercises.
+if command -v nasm >/dev/null 2>&1 || command -v yasm >/dev/null 2>&1; then
+    FFMPEG_ASM_FLAG=""
+else
+    FFMPEG_ASM_FLAG="--disable-x86asm"
+    echo "note: no nasm/yasm found — configuring with --disable-x86asm (no SIMD)"
+fi
 
 # ── Parse flags ──────────────────────────────────────────────────
 MODE="nosan"          # nosan | asan | fast
@@ -209,7 +218,7 @@ echo "[2/4] Configuring FFmpeg ($MODE${MINIMAL:+, minimal})..."
         --disable-txtpages \
         --disable-programs \
         --disable-debug \
-        --disable-x86asm \
+        $FFMPEG_ASM_FLAG \
         --extra-cflags="$CFLAGS" \
         --extra-ldflags="$SAN_FLAGS $SCOV_FLAGS $STUB_LDFLAGS" \
     2>&1 | tail -5) || {
