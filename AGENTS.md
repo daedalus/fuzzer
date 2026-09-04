@@ -18,7 +18,7 @@ fuzzer, not just the target.
 ## Hard Rules
 
 0. Always make surgical changes.
-1. **Always follow existing conventions.** Before adding anything — a target, a script, a scheduler, a test fixture — find the closest existing example and match it: directory layout, file naming, function shape, flag names, error handling, comment style. Read the surrounding code first; do not invent a parallel way of doing something the repo already does. Concretely: vendored library sources go in `$FUZZ_VENDOR_ROOT/<lib>/` (default `~/fuzzing/vendoring/<lib>/`, legacy `vendor/<lib>/` via `--in-tree-vendor`), fetched by a `tools/vendor_<lib>.sh` script — never committed and never under the build root (`$FUZZ_BUILD_ROOT/<lib>/`, default `~/fuzzing/targets/`, legacy `targets/` via `--in-tree-targets`); new fuzz targets are wired into `tools/build_targets.sh` rather than built by hand; new schedulers register in `_OPERATOR_STRATEGY_NAMES` and follow the `select_op`/`record`/`bandit_stats` interface. If a convention appears wrong, fix it in one place for everything rather than working around it locally, and say so.
+1. **Always follow existing conventions.** Before adding anything — a target, a script, a scheduler, a test fixture — find the closest existing example and match it: directory layout, file naming, function shape, flag names, error handling, comment style. Read the surrounding code first; do not invent a parallel way of doing something the repo already does. Concretely: vendored library sources go in `$FUZZ_VENDOR_ROOT/<lib>/` (default `~/fuzzing/vendoring/<lib>/`, legacy `vendor/<lib>/` via `--in-tree-vendor`), fetched by a `tools/vendor_<lib>.sh` script — never committed and never under the build root (`$FUZZ_BUILD_ROOT/<lib>/`, default `~/fuzzing/builds/`, legacy `targets/` via `--in-tree-targets`); new fuzz targets are wired into `tools/build_targets.sh` rather than built by hand; new schedulers register in `_OPERATOR_STRATEGY_NAMES` and follow the `select_op`/`record`/`bandit_stats` interface. If a convention appears wrong, fix it in one place for everything rather than working around it locally, and say so.
 2. Never bypass the pre-commit hooks (`--no-verify`). Fix the warnings, then recommit.
 3. Always fix impactguard breaking changes.
 4. Always use clang, never gcc (build scripts prefer clang automatically).
@@ -83,7 +83,7 @@ fuzzer, not just the target.
 
 ### Add a new fuzz target
 
-0. If the target needs a library that isn't a system package, vendor it first: add `tools/vendor_<lib>.sh` modelled on `tools/vendor_lz4.sh` (download → extract to `$FUZZ_VENDOR_ROOT/<lib>/`, default `~/fuzzing/vendoring/<lib>/`; legacy `vendor/<lib>/` with `--in-tree-vendor` → verify). The vendored source root is gitignored — never commit the sources, and never put them under the build root (`$FUZZ_BUILD_ROOT/`, default `~/fuzzing/targets/`; legacy `targets/` with `--in-tree-targets`).
+0. If the target needs a library that isn't a system package, vendor it first: add `tools/vendor_<lib>.sh` modelled on `tools/vendor_lz4.sh` (download → extract to `$FUZZ_VENDOR_ROOT/<lib>/`, default `~/fuzzing/vendoring/<lib>/`; legacy `vendor/<lib>/` with `--in-tree-vendor` → verify). The vendored source root is gitignored — never commit the sources, and never put them under the build root (`$FUZZ_BUILD_ROOT/`, default `~/fuzzing/builds/`; legacy `targets/` with `--in-tree-targets`).
 1. Write `targets/<name>_read.c` following the pattern of an existing target (e.g. `targets/png_read.c`): read the input from stdin/file, call the library's parse/decode entry point. Expose `fuzz_shm_run(const unsigned char *, size_t)` for in-process/`direct_lite` mode.
 2. Compile with clang: `-fsanitize=address -include src/fuzzer_tool/adapters/afl_shim.c`; pre-compile library sources as `.o` files and link the shim only into the wrapper. `-include` applies to *every* `.c` on a command line, so passing library sources alongside the wrapper emits `__afl_map_shm`/`__afl_area`/`__afl_guarded_call` into each object and fails the link with multiple-definition errors — compile them in a separate pass (see `compile_lz4_objects` in `tools/build_targets.sh`).
 3. For in-process mode, also build `<name>_read.so` (`-shared -fPIC`; link `-lasan` explicitly and use `-Wl,-Bsymbolic` when cmplog is on — see `tools/build_targets.sh`, and prefer adding the target there over hand-rolling the flags).
@@ -113,7 +113,7 @@ fuzzer, not just the target.
 | `fuzzer-tool --help` | Show CLI help |
 | `tools/build_targets.sh` | Build all fuzz targets (ASAN + cmplog by default; see the script's flag list) |
 | `tools/vendor_lz4.sh` / `vendor_grep.sh` / `vendor_ffmpeg.sh` / `vendor_secp256k1.sh` / `vendor_sqlite.sh` | Fetch vendored library sources into `$FUZZ_VENDOR_ROOT/<lib>/` (default `~/fuzzing/vendoring/`; legacy `vendor/` via `--in-tree-vendor`); required before building the matching targets |
-| `FUZZ_VENDOR_ROOT=...` / `FUZZ_BUILD_ROOT=...` | Env-var knobs; defaults are `~/fuzzing/vendoring/` (sources) and `~/fuzzing/targets/` (build artifacts). Both have legacy `--in-tree-*` flags. |
+| `FUZZ_VENDOR_ROOT=...` / `FUZZ_BUILD_ROOT=...` | Env-var knobs; defaults are `~/fuzzing/vendoring/` (sources) and `~/fuzzing/builds/` (build artifacts). Both have legacy `--in-tree-*` flags. |
 | `python tools/corpus_png.py --out corpus --download` | Generate PNG corpus |
 | `tools/bench.sh` / `tools/bench_sweep.sh` | Config comparison / feature sweep |
 | `lizard --CCN 15 -w .` | Cyclomatic complexity violations |
@@ -141,7 +141,7 @@ src/fuzzer_tool/
 tools/            # build_targets.sh, vendor_<lib>.sh (ffmpeg/grep/lz4/secp256k1/sqlite), corpus_png.py,
                   #   bench.sh, bench_sweep.sh, release.sh
 targets/          # Fuzz target sources (*.c) + built artifacts (.so/.bin) under legacy layout.
-                  #   Default build output is $FUZZ_BUILD_ROOT (~/fuzzing/targets/); this in-tree
+                  #   Default build output is $FUZZ_BUILD_ROOT (~/fuzzing/builds/); this in-tree
                   #   `targets/` is the legacy path (use --in-tree-targets for back-compat).
 dictionaries/     # Format token dicts (png.dict)
 vendor/           # Vendored library sources — gitignored, fetched by tools/vendor_<lib>.sh.

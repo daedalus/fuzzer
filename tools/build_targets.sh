@@ -27,7 +27,7 @@
 #   $FUZZ_BUILD_ROOT/<lib>/      build trees (configured + compiled output)
 #   $FUZZ_BUILD_ROOT/<lib>/<b>.so   shared-object target artifacts
 #   $FUZZ_BUILD_ROOT/<lib>/<b>     executable target artifacts
-# Default values: ~/fuzzing/vendoring and ~/fuzzing/targets. The legacy
+# Default values: ~/fuzzing/vendoring and ~/fuzzing/builds. The legacy
 # in-tree `vendor/` and `targets/` paths are still honored via
 # `--in-tree-vendor` (or `IN_TREE_VENDOR=1`) and `--in-tree-targets`
 # (or `IN_TREE_TARGETS=1`) for back-compat with existing checkouts that
@@ -58,7 +58,7 @@ fi
 #   ~/fuzzing/vendoring/; override with FUZZ_VENDOR_ROOT=...
 #   Legacy: pass --in-tree-vendor to fall back to the in-tree `vendor/`.
 # FUZZ_BUILD_ROOT: where the **build** artifacts (configured trees and
-#   target binaries) are written. Defaults to ~/fuzzing/targets/;
+#   target binaries) are written. Defaults to ~/fuzzing/builds/;
 #   override with FUZZ_BUILD_ROOT=... Legacy: --in-tree-targets puts the
 #   whole build root in the in-tree `targets/` path -- binaries, the staged
 #   and promoted FFmpeg trees, .build_cache and build.log together.
