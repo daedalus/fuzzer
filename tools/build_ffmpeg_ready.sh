@@ -21,12 +21,13 @@
 #   tools/build_ffmpeg_ready.sh --minimal      # + minimal audio component set (fast)
 #   tools/build_ffmpeg_ready.sh --asan         # also build the ASAN repro executable
 #   tools/build_ffmpeg_ready.sh --no-vendor    # fail instead of auto-vendoring
+#   tools/build_ffmpeg_ready.sh --in-tree-vendor  # legacy ./vendor instead of
+#                                                 # $FUZZ_VENDOR_ROOT
 
 set -e
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SHIM="$ROOT/src/fuzzer_tool/adapters/afl_shim.c"
 TARGETS="$ROOT/targets"
-VENDOR="$ROOT/vendor"
 HARNESS="$TARGETS/ffmpeg_read.c"
 
 MINIMAL_ARG=""; DO_ASAN=0; AUTOVENDOR=1
@@ -35,9 +36,28 @@ for a in "$@"; do
         --minimal)   MINIMAL_ARG="--minimal" ;;
         --asan)      DO_ASAN=1 ;;
         --no-vendor) AUTOVENDOR=0 ;;
+        --in-tree-vendor) IN_TREE_VENDOR=1 ;;
         *) echo "unknown arg: $a" >&2; exit 2 ;;
     esac
 done
+
+# Vendored sources live under $FUZZ_VENDOR_ROOT by default, with the legacy
+# in-tree ./vendor behind --in-tree-vendor -- the same convention as
+# vendor_ffmpeg.sh and build_targets.sh. This script was left behind when that
+# moved: it hardcoded VENDOR="$ROOT/vendor", so on a fresh checkout have_tree
+# was false, it shelled out to vendor_ffmpeg.sh, that wrote to
+# $FUZZ_VENDOR_ROOT/ffmpeg, and this script then linked against
+# $ROOT/vendor/ffmpeg -- paying a full FFmpeg build and failing at link every
+# time, with --no-vendor failing immediately even right after a successful
+# vendoring run. Resolve it the same way everyone else does, and export the
+# choice so the child vendor run agrees.
+: "${FUZZ_VENDOR_ROOT:=$HOME/fuzzing/vendoring}"
+if [ "${IN_TREE_VENDOR:-0}" = "1" ]; then
+    VENDOR="$ROOT/vendor"
+    export IN_TREE_VENDOR
+else
+    VENDOR="$FUZZ_VENDOR_ROOT"
+fi
 
 command -v clang &>/dev/null || { echo "ERROR: clang required" >&2; exit 1; }
 
