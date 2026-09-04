@@ -399,7 +399,17 @@ class SeedPicker:
         rng = f._rand_pool
         from fuzzer_tool.core.edge_tracker import ks_significance_threshold
 
-        plateau_threshold = ks_significance_threshold(max(1, f.markov._contexts_seen), alpha=0.05)
+        # Gate on the threshold the plateau decision actually used. This used to
+        # recompute one from the ensemble's own _contexts_seen while comparing it
+        # against a JS aggregated across chains by a different rule, so this
+        # branch could report "not plateaued" in the same iteration that
+        # snapshot_and_check_plateau() reported "plateaued".
+        plateau_threshold = getattr(f.markov, "last_plateau_threshold", 0.0)
+        if plateau_threshold <= 0.0:
+            # No plateau decision has been taken yet (no previous snapshot).
+            plateau_threshold = ks_significance_threshold(
+                max(1, f.markov._contexts_seen), alpha=0.05
+            )
         gen_rate = 0.03 if f.markov.last_js_divergence < plateau_threshold else 0.15
 
         if not hasattr(self, "_last_corpus_pp"):

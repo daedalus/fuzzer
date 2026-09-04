@@ -50,6 +50,10 @@ class MarkovChain:
             collections.Counter
         )
         self._contexts_seen = 0
+        # The threshold this chain's last plateau decision used. Published so
+        # consumers gate on the same number the decision was made with instead
+        # of recomputing one from a different sample size.
+        self.last_plateau_threshold = 0.0
         self._prev_snapshot: dict[bytes, dict[int, float]] | None = None
         self.last_js_divergence: float = 0.0
         self._snapshot_interval: int = 50  # snapshot every N train_corpus calls
@@ -277,6 +281,7 @@ class MarkovChain:
         # at this sample size — the distribution isn't meaningfully changing.
         # Requires a previous snapshot to compare against (not the first one).
         threshold = ks_significance_threshold(self._contexts_seen, alpha=0.05)
+        self.last_plateau_threshold = threshold
         return (
             has_previous
             and self.last_js_divergence < threshold
@@ -425,6 +430,7 @@ class MarkovEnsemble:
         self.transitions = self.chains[self.order].transitions
         self._contexts_seen = 0
         self.last_js_divergence = 0.0
+        self.last_plateau_threshold = 0.0
         self._snapshot_interval = 50
         self._trains_since_snapshot = 0
 
@@ -524,13 +530,59 @@ class MarkovEnsemble:
         best = min(self.chains.values(), key=lambda c: c.corpus_perplexity(corpus)["mean"])
         return best.corpus_perplexity(corpus)
 
+    def _selection_weights(self) -> dict[int, float]:
+        """The weights _select_chain draws with, normalised.
+
+        Aggregating the per-chain plateau signal has to use the same weights
+        generation samples with, or the reported number describes a chain that
+        generation rarely draws from.
+        """
+        raw = {
+            order: max(self.chains[order]._contexts_seen, 1) * (1 + order * 0.5)
+            for order in self.orders
+        }
+        total = sum(raw.values())
+        if total <= 0:
+            n = max(1, len(raw))
+            return dict.fromkeys(raw, 1.0 / n)
+        return {order: w / total for order, w in raw.items()}
+
     def snapshot_and_check_plateau(self) -> bool:
-        """Check if any chain has plateaued."""
-        results = [c.snapshot_and_check_plateau() for c in self.chains.values()]
-        self.last_js_divergence = max(
-            (c.last_js_divergence for c in self.chains.values()), default=0.0
+        """Check whether the ensemble, as generation samples it, has plateaued.
+
+        This returned ``any(results)`` while setting ``last_js_divergence`` to
+        the ``max`` across chains -- the flag came from the most converged chain
+        and the number from the least converged one, so the boolean and the
+        scalar answered opposite questions about the same object. Measured on
+        high-entropy input with orders 0/1/2: returned True (order-0 had
+        converged) while reporting JS=0.0886 against order-2's own threshold of
+        0.0124. corpus_manager logged "plateau detected (JS=0.0886)" for a chain
+        that by this code's own test had not plateaued, and seed_picker -- gating
+        on that same field -- evaluated 0.0886 < 0.0124 as False and kept the
+        generation rate high. The two consumers of one field disagreed by
+        construction.
+
+        Both are now derived from the selection-weighted mean, so the flag and
+        the number agree, and the threshold that produced the flag is published
+        alongside it.
+        """
+        results = {
+            order: chain.snapshot_and_check_plateau() for order, chain in self.chains.items()
+        }
+        weights = self._selection_weights()
+        self.last_js_divergence = sum(
+            weights[order] * self.chains[order].last_js_divergence for order in self.orders
         )
-        return any(results)
+        self.last_plateau_threshold = sum(
+            weights[order] * self.chains[order].last_plateau_threshold for order in self.orders
+        )
+        # A chain that has not yet judged itself (no previous snapshot) carries
+        # threshold 0.0, which correctly makes the weighted threshold
+        # unreachable until enough of the selection mass has something to say.
+        return (
+            any(results.values())
+            and self.last_js_divergence < self.last_plateau_threshold
+        )
 
     def to_dict(self) -> dict:
         """Serialize all chains to a dict (for StateStore pickle)."""
