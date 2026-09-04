@@ -1025,6 +1025,13 @@ build_simple_targets() {
         fi
     fi
     if [ -n "$ffmpeg_root" ]; then
+        # build_vendored_ffmpeg_sancov drops .stale here when a rebuild failed
+        # and left the previous run's archives behind. Linking against them
+        # produces a target that reports OK and contains the old code, which is
+        # worse than not building it, so say so at the point of use.
+        if [ -f "$ffmpeg_root/.stale" ]; then
+            warn "$ffmpeg_root archives are from a build that later failed — targets linked against them are stale"
+        fi
         FFMPEG_LIBS="$ffmpeg_root/libavformat/libavformat.a $ffmpeg_root/libavcodec/libavcodec.a $ffmpeg_root/libavutil/libavutil.a $ffmpeg_root/libswresample/libswresample.a -lm $(ffmpeg_extralibs "$ffmpeg_root")"
         FFMPEG_INC="-I$ffmpeg_root"
     fi
@@ -1241,6 +1248,10 @@ STUBEOF
     done
     if [ "$FORCE_REBUILD" -eq 0 ] && [ "$have_all" -eq 1 ] \
        && [ "$src_stamp" = "$prev_src" ] && [ "$cfg_stamp" = "$prev_cfg" ]; then
+        # The stamp is written only on a successful build, and success clears
+        # .stale, so reaching here with .stale present means it outlived the
+        # failure it recorded. Clear it rather than warn forever.
+        rm -f "$OUT_DIR/.stale"
         ok "vendored FFmpeg${label}: up to date"
         rm -rf "$stub_dir"
         return 0
@@ -1311,11 +1322,19 @@ STUBEOF
                 cp -f "$FFMPEG_DIR/ffbuild/config.mak" "$OUT_DIR/ffbuild/config.mak"
             fi
             printf '%s\n%s\n' "$src_stamp" "$cfg_stamp" > "$stamp_file"
+            rm -f "$OUT_DIR/.stale"
             ok "vendored FFmpeg${label} → $OUT_DIR"
         else
+            # A failed rebuild leaves the previous run's archives sitting in
+            # $OUT_DIR, and the link step happily used them: the console read
+            # "WARN: failed: vendored FFmpeg build" followed by "OK: ffmpeg_read",
+            # and the target reported OK contained the old code. Mark them so
+            # the link step can say so.
+            touch "$OUT_DIR/.stale" 2>/dev/null || true
             warn_failed "vendored FFmpeg${label} build"
         fi
     else
+        touch "$OUT_DIR/.stale" 2>/dev/null || true
         warn_failed "vendored FFmpeg${label} configure"
     fi
     rm -rf "$stub_dir"
