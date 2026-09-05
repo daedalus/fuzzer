@@ -711,7 +711,13 @@ class CorpusManager:
         # signatures.
         if result:
             f._last_crash_signature = counted_sig
-            f._crash_files[counted_sig] = str(result)
+            # getattr rather than a bare subscript, matching how this function
+            # already reaches email_on_crash/_last_regs: several call sites
+            # pass a partial fuzzer-like, and a crash write must not fail on a
+            # bookkeeping map.
+            crash_files = getattr(f, "_crash_files", None)
+            if crash_files is not None:
+                crash_files[counted_sig] = str(result)
         else:
             f._last_crash_signature = None
         if result and getattr(f, "email_on_crash", None) is not None:

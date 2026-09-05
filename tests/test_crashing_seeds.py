@@ -73,6 +73,10 @@ class MockFuzzer:
         self.crash_hashes: set[str] = set()
         self.crash_sigs: dict = {}
         self.crash_frames: dict = {}
+        # Mirrors Fuzzer: save_crash() publishes the signature it counted
+        # the crash under, and the file it wrote, for the replay scheduler.
+        self._crash_files: dict = {}
+        self._last_crash_signature = None
         self.save_smaller = False
         self.crash_blocklist: set = set()
         self.crash_allowlist: set = set()
