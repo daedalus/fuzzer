@@ -16,9 +16,14 @@ For fuzzing:
 - Rényi spectrum (H_α across α values) characterizes the "shape" of coverage
 
 Also provides:
-- Rényi divergence: generalization of KL divergence for comparing distributions
 - Tsallis entropy: another non-extensive entropy measure
 - Coverage spectrum analysis: per-edge hit count distribution profiling
+
+Scope: this module measures the entropy of one distribution. It does not compare
+two. The Jensen-Shannon divergence the fuzzer uses lives in
+edge_tracker._js_divergence and the one asymmetric KL in DifferentialTracker.
+The list above used to promise a Renyi divergence; no such function was ever
+written here.
 """
 
 import math

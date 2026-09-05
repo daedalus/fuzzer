@@ -255,6 +255,35 @@ class TestDeadParameters:
             "RenyiEntropy docstring mentions smoothing but it is not implemented"
         )
 
+    def test_renyi_module_advertises_no_missing_divergence(self):
+        """The module docstring promised a Renyi divergence -- "generalization of
+        KL divergence for comparing distributions" -- and the file contains no
+        divergence function at all, only single-distribution entropies. Same
+        class of false advertisement as the smoothing claim above."""
+        import inspect
+
+        from fuzzer_tool.core import renyi
+
+        # Only the "Also provides" list advertises API; prose after it may
+        # legitimately mention divergences to say where they actually live.
+        doc = renyi.__doc__ or ""
+        marker = "Also provides:"
+        if marker not in doc:
+            return
+        advertised = doc.split(marker, 1)[1]
+        advertised = advertised.split("\n\n", 1)[0].lower()
+        if "divergence" not in advertised:
+            return
+        names = [n for n, _ in inspect.getmembers(renyi, callable)]
+        names += [
+            n
+            for cls in (renyi.RenyiEntropy, renyi.CoverageSpectrumAnalyzer)
+            for n, _ in inspect.getmembers(cls, callable)
+        ]
+        assert any("divergence" in n.lower() for n in names), (
+            "renyi module docstring advertises a divergence but implements none"
+        )
+
 
 # ============================================================================
 # T7: Grammar repeat hi < lo after clamping (commit 82d2114)
