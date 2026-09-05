@@ -64,6 +64,7 @@ fuzzer, not just the target.
 43. Always maintain succinct, brief, down to the point and updated documentation.
 44. When adding, removing or wiring a new subsystem update `architecture.png`.
 45. Every time a new source `file.py` is created run `lizard --CCN=15 file.py` and fix warnings.
+46. **Always run the control against itself; it's what exposes a broken oracle.** Whenever a test compares an implementation against a reference — two samples, two policies, old code as oracle — also compare the reference against a second run of *itself*, and assert that control passes first. A control that fails means the comparison is wrong, not the code. Measured here: comparing two Thompson selection policies with `stats.chisquare(obs, exp)` treats one sample's counts as fixed frequencies, halves the variance and roughly doubles chi2 — it reported `chi2=526` on 264 arms (df 264, p=0.0000) for two implementations that were in fact identical. The control run under the correct `stats.chi2_contingency` gives p=0.74. The tell was the ~2x ratio to the degrees of freedom, and only the self-comparison surfaces it. See `tests/test_seed_quality_beta_identity.py::test_matches_betavariate_in_distribution`. This is the statistical sibling of Hard Rule 39: an oracle that cannot fail on identical inputs is not an oracle.
 
 ## Corpus Rules
 
