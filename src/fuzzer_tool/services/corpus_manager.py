@@ -665,6 +665,21 @@ class CorpusManager:
             verdict=verdict,
         )
         # Novel crashes return a base name string; duplicates return False.
+        #
+        # Publish the signature this crash was counted under, and the base
+        # name it was written as, for the replay scheduler. Both are already
+        # known exactly here; the scheduler used to re-derive the key with
+        # `crash_sigs.get(crash_name, crash_name)`, feeding a FILENAME into a
+        # signature-keyed dict, so the lookup always missed and the fallback
+        # made the filename itself the key (finding #22). _prune_crash_data()
+        # pops _crash_replays by signature and so never matched either, and
+        # the reproducibility report printed filenames where it labels
+        # signatures.
+        if result:
+            f._last_crash_signature = counted_sig
+            f._crash_files[counted_sig] = str(result)
+        else:
+            f._last_crash_signature = None
         if result and getattr(f, "email_on_crash", None) is not None:
             try:
                 from fuzzer_tool.services.sendmail import send_crash_email

@@ -177,6 +177,7 @@ class StatsReporter:
             f.replay_n,
             f._seed_key,
             budget_ms,
+            getattr(f, "_crash_files", None),
         )
 
     def _print_summary_coverage(self, f) -> None:

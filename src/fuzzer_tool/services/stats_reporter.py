@@ -56,8 +56,28 @@ def run_crash_replays(
     replay_n: int,
     seed_key_fn,
     budget_ms: float = 200,
+    crash_files: dict[str, str] | None = None,
 ) -> None:
-    """Replay pending crashes for reproducibility scoring (non-blocking)."""
+    """Replay pending crashes for reproducibility scoring (non-blocking).
+
+    ``crash_files`` maps a crash signature to the base name ``save_crash()``
+    wrote it under, which is the only exact way back to the input that
+    produced that signature.
+
+    Without it the lookup was a guess, and a wrong one: the fallback matched
+    ``f.stem.startswith(sig[:12])`` against names shaped
+    ``crash_<unix_ts>_<cluster>_<san>_<err>``, so twelve characters cover
+    ``crash_`` plus six digits of a ten-digit timestamp -- every crash within
+    the same 10^4-second (~2.7h) window compares equal, and the FIRST such
+    file in directory order won. Reproducibility scores were therefore
+    computed by replaying some other crash's input. The sibling
+    ``seed_key_fn(crash_data) == sig`` test compared a content hash against a
+    crash signature and could not match at all. Finding #22.
+
+    The scan survives only as a fallback for signatures with no recorded
+    file -- state restored from an older run -- and now uses the content-hash
+    identity alone, never a prefix.
+    """
     if replay_n <= 0 or not crash_replays:
         return
     from fuzzer_tool.adapters.process import run_target_stdin
@@ -68,20 +88,20 @@ def run_crash_replays(
         if (time.monotonic() - t0) * 1000 > budget_ms:
             break
         crash_file = None
-        for f in crashes_dir.iterdir():
-            if f.is_file() and not f.name.endswith((".json", ".txt")):
-                try:
-                    crash_data = f.read_bytes()
-                    if seed_key_fn(crash_data) == sig or f.stem.startswith(sig[:12]):
-                        crash_file = f
-                        break
-                except Exception:
-                    continue
+        base_name = (crash_files or {}).get(sig)
+        if base_name:
+            candidate = crashes_dir / f"{base_name}.bin"
+            if candidate.is_file():
+                crash_file = candidate
         if crash_file is None:
             for f in crashes_dir.iterdir():
-                if f.is_file() and sig[:12] in f.name:
-                    crash_file = f
-                    break
+                if f.is_file() and not f.name.endswith((".json", ".txt")):
+                    try:
+                        if seed_key_fn(f.read_bytes()) == sig:
+                            crash_file = f
+                            break
+                    except Exception:
+                        continue
         if crash_file is None:
             replays.append(-3)
             continue

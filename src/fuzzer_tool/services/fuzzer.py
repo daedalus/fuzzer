@@ -1345,6 +1345,12 @@ class Fuzzer:
         self._total_exec_time = 0.0
         self._replay_budget_ms: float = 0.2  # max 200ms per batch for crash replay
         self._crash_replays: dict[str, list[int]] = {}  # sig -> list of replay return codes
+        # sig -> crash base name on disk, so the replay scheduler can open the
+        # right file instead of guessing at it by filename prefix (finding #22).
+        self._crash_files: dict[str, str] = {}
+        # Signature the most recent save_crash() counted its crash under, or
+        # None when that crash was not written. Set by CorpusManager.save_crash.
+        self._last_crash_signature: str | None = None
         self.replay_n: int = replay_n  # --replay-N: replay each crash N times
         self.asan_target: str | None = asan_target  # --asan-target: ASAN-instrumented variant
         self.ubsan_target: str | None = ubsan_target  # --ubsan-target: UBSAN-instrumented variant
@@ -3058,6 +3064,7 @@ class Fuzzer:
             self.crash_frames.pop(sig, None)
             self.crash_min_sizes.pop(sig, None)
             self._crash_replays.pop(sig, None)
+            self._crash_files.pop(sig, None)
 
     def save_to_corpus(self, data: bytes, parent: bytes | None = None):
         return self._corpus_manager.save_to_corpus(data, parent)
@@ -4417,14 +4424,21 @@ class Fuzzer:
             if self.mc and self.mc_cem:
                 self.mc.add_elite(mutated, 3, temperature=self._temperature)
                 self.mc.maybe_refit()
-            # Schedule crash replay for reproducibility check
-            if self.replay_n > 0 and crash_name:
-                sig = self.crash_sigs.get(crash_name, crash_name)
+            # Schedule crash replay for reproducibility check.
+            #
+            # The key is the signature save_crash() counted this crash under,
+            # published on the fuzzer rather than re-derived here. The old
+            # `self.crash_sigs.get(crash_name, crash_name)` looked a FILENAME
+            # up in a signature-keyed dict: it always missed, so the key
+            # became the filename, and every downstream consumer that keys by
+            # signature (_prune_crash_data, the reproducibility report) was
+            # working against a different key space (finding #22).
+            sig = self._last_crash_signature
+            if self.replay_n > 0 and sig:
                 if sig not in self._crash_replays:
                     self._crash_replays[sig] = []
             # Schedule sanitizer replay: re-run crash on ASAN/UBSAN targets
-            if (self.asan_target or self.ubsan_target) and crash_name:
-                sig = self.crash_sigs.get(crash_name, crash_name)
+            if (self.asan_target or self.ubsan_target) and sig:
                 if sig not in self._crash_sanitizer_replays:
                     self._crash_sanitizer_replays[sig] = {
                         "data": mutated,
