@@ -1194,6 +1194,86 @@ def find_load_segment(elf_data: bytes, vaddr: int) -> tuple[int, int, int] | Non
     return None
 
 
+# The fields this module reads out of an Elf64_Shdr live at sh_name 0,
+# sh_type 4, sh_addr 16, sh_offset 24, sh_size 32 -- so an entry shorter
+# than 40 bytes cannot hold them.  A real ELF64 always uses 64.
+_ELF64_SHDR_MIN = 40
+
+
+def _find_text_section(elf: bytes) -> tuple[bytes, int, int] | None:
+    """Locate ``.text`` in a 64-bit little-endian ELF image.
+
+    Returns ``(text_data, sh_addr, sh_size)``, or ``None`` when the image is
+    not a usable ELF64 or its section-header table does not fit inside the
+    buffer.
+
+    Every offset derived from the header is attacker-controlled -- the target
+    path is a command-line argument, and a corrupt or hostile binary must make
+    the fuzzer decline to analyse it, not abort out of startup.  The four
+    callers each inlined this prologue with no bounds check on ``e_shoff``, so
+    a crafted value reached ``struct.unpack_from("<Q", elf, shstr_off + 24)``
+    and raised ``struct.error`` before any target ran (finding #23; it also
+    violates the repo's own bounds-check rule).  The per-entry
+    ``sh + e_shentsize > len(elf)`` guard the loops did have is not enough on
+    its own: it says nothing about where the table starts, and it passes for a
+    small ``e_shentsize`` while ``sh + 32`` still reads past the buffer.
+
+    Sharing one prologue is the other half of the fix.  Four copies of the
+    same parse is exactly the "fixed classes recur in sibling files" pattern
+    the bug report calls out, and the next bounds bug found here would
+    otherwise have to be fixed four times again.
+    """
+    n = len(elf)
+    if n < 64 or elf[:4] != b"\x7fELF" or elf[4] != 2 or elf[5] != 1:
+        return None
+
+    e_shoff = struct.unpack_from("<Q", elf, 40)[0]
+    e_shnum = struct.unpack_from("<H", elf, 60)[0]
+    e_shentsize = struct.unpack_from("<H", elf, 58)[0]
+    e_shstrndx = struct.unpack_from("<H", elf, 62)[0]
+
+    if e_shnum == 0 or e_shstrndx >= e_shnum:
+        return None
+    if e_shentsize < _ELF64_SHDR_MIN:
+        return None
+    # The whole section-header table must lie inside the buffer.  Phrased as
+    # a subtraction so a 64-bit e_shoff cannot overflow the comparison.
+    if e_shoff == 0 or e_shoff > n or e_shnum * e_shentsize > n - e_shoff:
+        return None
+
+    shstr_off = e_shoff + e_shstrndx * e_shentsize
+    shstr_offset = struct.unpack_from("<Q", elf, shstr_off + 24)[0]
+
+    for i in range(e_shnum):
+        sh = e_shoff + i * e_shentsize
+        sh_type = struct.unpack_from("<I", elf, sh + 4)[0]
+        if sh_type != 1:  # SHT_PROGBITS
+            continue
+        sh_name_idx = struct.unpack_from("<I", elf, sh)[0]
+        name_at = min(shstr_offset + sh_name_idx, n)
+        # Slicing clamps, so an out-of-range name reads as empty and simply
+        # fails the comparison below -- same outcome as before, without the
+        # unpack that used to precede it.
+        if elf[name_at : name_at + 32].split(b"\x00")[0] != b".text":
+            continue
+        sh_addr = struct.unpack_from("<Q", elf, sh + 16)[0]
+        sh_offset = struct.unpack_from("<Q", elf, sh + 24)[0]
+        sh_size = struct.unpack_from("<Q", elf, sh + 32)[0]
+        # sh_size is returned unclamped for _text_size(), which reports the
+        # declared size; text_data is the slice, which clamps on its own.
+        return elf[sh_offset : sh_offset + sh_size], sh_addr, sh_size
+    return None
+
+
+def _read_target_elf(target: str) -> bytes | None:
+    """Read a target binary, returning None instead of raising on I/O error."""
+    try:
+        with open(target, "rb") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
 def branch_density(target: str) -> float | None:
     """Compute branch density (conditional branches per KB) of a binary.
 
@@ -1212,45 +1292,15 @@ def branch_density(target: str) -> float | None:
     Returns:
         Branches per KB (float), or None on failure.
     """
-    try:
-        with open(target, "rb") as f:
-            elf = f.read()
-    except OSError:
+    elf = _read_target_elf(target)
+    if elf is None:
         return None
 
-    if len(elf) < 64 or elf[:4] != b"\x7fELF":
+    found = _find_text_section(elf)
+    if found is None:
         return None
-    if elf[4] != 2 or elf[5] != 1:
-        return None
-
-    # Find .text section
-    e_shoff = struct.unpack_from("<Q", elf, 40)[0]
-    e_shnum = struct.unpack_from("<H", elf, 60)[0]
-    e_shentsize = struct.unpack_from("<H", elf, 58)[0]
-    e_shstrndx = struct.unpack_from("<H", elf, 62)[0]
-    if e_shnum == 0 or e_shstrndx >= e_shnum:
-        return None
-
-    shstr_off = e_shoff + e_shstrndx * e_shentsize
-    shstr_offset = struct.unpack_from("<Q", elf, shstr_off + 24)[0]
-
-    text_data = None
-    text_vaddr = 0
-    for i in range(e_shnum):
-        sh = e_shoff + i * e_shentsize
-        if sh + e_shentsize > len(elf):
-            break
-        sh_type = struct.unpack_from("<I", elf, sh + 4)[0]
-        sh_name_idx = struct.unpack_from("<I", elf, sh)[0]
-        name = elf[shstr_offset + sh_name_idx : shstr_offset + sh_name_idx + 32].split(b"\x00")[0]
-        if sh_type == 1 and name == b".text":
-            sh_offset = struct.unpack_from("<Q", elf, sh + 24)[0]
-            sh_size = struct.unpack_from("<Q", elf, sh + 32)[0]
-            text_vaddr = struct.unpack_from("<Q", elf, sh + 16)[0]
-            text_data = elf[sh_offset : sh_offset + sh_size]
-            break
-
-    if text_data is None or len(text_data) == 0:
+    text_data, text_vaddr, _ = found
+    if not text_data:
         return None
 
     # Disassemble and count conditional branches
@@ -1320,35 +1370,14 @@ def _branch_density_objdump(target: str) -> float | None:
 
 def _text_size(target: str) -> int | None:
     """Get .text section size in bytes from ELF binary."""
-    try:
-        with open(target, "rb") as f:
-            elf = f.read()
-    except OSError:
+    elf = _read_target_elf(target)
+    if elf is None:
         return None
 
-    if len(elf) < 64 or elf[:4] != b"\x7fELF" or elf[4] != 2 or elf[5] != 1:
+    found = _find_text_section(elf)
+    if found is None:
         return None
-
-    e_shoff = struct.unpack_from("<Q", elf, 40)[0]
-    e_shnum = struct.unpack_from("<H", elf, 60)[0]
-    e_shentsize = struct.unpack_from("<H", elf, 58)[0]
-    e_shstrndx = struct.unpack_from("<H", elf, 62)[0]
-    if e_shnum == 0 or e_shstrndx >= e_shnum:
-        return None
-
-    shstr_off = e_shoff + e_shstrndx * e_shentsize
-    shstr_offset = struct.unpack_from("<Q", elf, shstr_off + 24)[0]
-
-    for i in range(e_shnum):
-        sh = e_shoff + i * e_shentsize
-        if sh + e_shentsize > len(elf):
-            break
-        sh_type = struct.unpack_from("<I", elf, sh + 4)[0]
-        sh_name_idx = struct.unpack_from("<I", elf, sh)[0]
-        name = elf[shstr_offset + sh_name_idx : shstr_offset + sh_name_idx + 32].split(b"\x00")[0]
-        if sh_type == 1 and name == b".text":
-            return struct.unpack_from("<Q", elf, sh + 32)[0]
-    return None
+    return found[2]
 
 
 def _next_power_of_2(n: int) -> int:
@@ -1383,43 +1412,15 @@ def extract_constants_pure(target: str) -> list[bytes]:
     Returns:
         List of unique byte values (deduplicated, truncated to 256 entries).
     """
-    try:
-        with open(target, "rb") as f:
-            elf = f.read()
-    except OSError:
+    elf = _read_target_elf(target)
+    if elf is None:
         return []
 
-    if len(elf) < 64 or elf[:4] != b"\x7fELF" or elf[4] != 2 or elf[5] != 1:
+    found = _find_text_section(elf)
+    if found is None:
         return []
-
-    # Find .text section
-    e_shoff = struct.unpack_from("<Q", elf, 40)[0]
-    e_shnum = struct.unpack_from("<H", elf, 60)[0]
-    e_shentsize = struct.unpack_from("<H", elf, 58)[0]
-    e_shstrndx = struct.unpack_from("<H", elf, 62)[0]
-    if e_shnum == 0 or e_shstrndx >= e_shnum:
-        return []
-
-    shstr_off = e_shoff + e_shstrndx * e_shentsize
-    shstr_offset = struct.unpack_from("<Q", elf, shstr_off + 24)[0]
-
-    text_data = None
-    text_vaddr = 0
-    for i in range(e_shnum):
-        sh = e_shoff + i * e_shentsize
-        if sh + e_shentsize > len(elf):
-            break
-        sh_type = struct.unpack_from("<I", elf, sh + 4)[0]
-        sh_name_idx = struct.unpack_from("<I", elf, sh)[0]
-        name = elf[shstr_offset + sh_name_idx : shstr_offset + sh_name_idx + 32].split(b"\x00")[0]
-        if sh_type == 1 and name == b".text":
-            sh_offset = struct.unpack_from("<Q", elf, sh + 24)[0]
-            sh_size = struct.unpack_from("<Q", elf, sh + 32)[0]
-            text_vaddr = struct.unpack_from("<Q", elf, sh + 16)[0]
-            text_data = elf[sh_offset : sh_offset + sh_size]
-            break
-
-    if text_data is None or len(text_data) == 0:
+    text_data, text_vaddr, _ = found
+    if not text_data:
         return []
 
     # Instructions whose immediate operands are likely comparison constants.
@@ -1963,41 +1964,14 @@ def extract_div_constants(target: str) -> tuple[dict[int, int], set[int]]:
           (variable divisor at runtime).  The solver can still try the
           heuristic common-divisor set for these.
     """
-    try:
-        with open(target, "rb") as f:
-            elf = f.read()
-    except OSError:
+    elf = _read_target_elf(target)
+    if elf is None:
         return {}, set()
 
-    if len(elf) < 64 or elf[:4] != b"\x7fELF" or elf[4] != 2 or elf[5] != 1:
+    found = _find_text_section(elf)
+    if found is None:
         return {}, set()
-
-    e_shoff = struct.unpack_from("<Q", elf, 40)[0]
-    e_shnum = struct.unpack_from("<H", elf, 60)[0]
-    e_shentsize = struct.unpack_from("<H", elf, 58)[0]
-    e_shstrndx = struct.unpack_from("<H", elf, 62)[0]
-    if e_shnum == 0 or e_shstrndx >= e_shnum:
-        return {}, set()
-
-    shstr_off = e_shoff + e_shstrndx * e_shentsize
-    shstr_offset = struct.unpack_from("<Q", elf, shstr_off + 24)[0]
-
-    text_data = None
-    text_vaddr = 0
-    for i in range(e_shnum):
-        sh = e_shoff + i * e_shentsize
-        if sh + e_shentsize > len(elf):
-            break
-        sh_type = struct.unpack_from("<I", elf, sh + 4)[0]
-        sh_name_idx = struct.unpack_from("<I", elf, sh)[0]
-        name = elf[shstr_offset + sh_name_idx : shstr_offset + sh_name_idx + 32].split(b"\x00")[0]
-        if sh_type == 1 and name == b".text":
-            sh_offset = struct.unpack_from("<Q", elf, sh + 24)[0]
-            sh_size = struct.unpack_from("<Q", elf, sh + 32)[0]
-            text_vaddr = struct.unpack_from("<Q", elf, sh + 16)[0]
-            text_data = elf[sh_offset : sh_offset + sh_size]
-            break
-
+    text_data, text_vaddr, _ = found
     if not text_data:
         return {}, set()
 
