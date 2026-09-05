@@ -19,7 +19,43 @@ import logging
 import random
 from dataclasses import dataclass, field
 
+import numpy as np
+
 log = logging.getLogger(__name__)
+
+# Offset that would map a byte back onto itself under the shift below, so
+# it is the one draw the replacement has to reject.
+_SELF_OFFSET = 0xFF
+
+
+def _diverse_copy(data: bytes) -> bytearray:
+    """Return a copy in which every byte differs from its original.
+
+    Drawing until the value differs is a shifted draw done once: uniform on
+    {0..255} minus ``x`` is exactly ``(x + 1 + u) mod 256`` for ``u`` uniform
+    on {0..254}. That removes the retry loop, and the shift is then plain
+    arithmetic over the whole buffer instead of a per-byte Python round trip.
+
+    Entropy still comes from ``random`` -- numpy does the arithmetic only --
+    so ``--seed`` keeps determining the result.
+    """
+    n = len(data)
+    if n == 0:
+        return bytearray()
+
+    # 255 offsets do not tile a 256-value byte, so the one offset that is a
+    # no-op is rejected. Expected redraws are n/256; `find` scans in C.
+    offsets = bytearray(random.randbytes(n))
+    pos = offsets.find(_SELF_OFFSET)
+    while pos != -1:
+        drawn = random.randbytes(1)[0]
+        offsets[pos] = drawn
+        if drawn != _SELF_OFFSET:
+            pos = offsets.find(_SELF_OFFSET, pos + 1)
+
+    original = np.frombuffer(data, dtype=np.uint8)
+    shifted = original + np.uint8(1) + np.frombuffer(bytes(offsets), dtype=np.uint8)
+    return bytearray(shifted.tobytes())
 
 
 @dataclass
@@ -84,12 +120,7 @@ def colorize(
 
         changed = bytearray(type_replace_byte(b) for b in data)
     else:
-        changed = bytearray(length)
-        for i in range(length):
-            c = random.randint(0, 255)
-            while c == data[i]:
-                c = random.randint(0, 255)
-            changed[i] = c
+        changed = _diverse_copy(data)
 
     # Initialize with one range covering the entire input
     ranges: list[list[int]] = [[0, length - 1]]  # [start, end] inclusive
