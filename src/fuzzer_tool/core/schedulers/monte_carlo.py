@@ -567,7 +567,7 @@ class MonteCarloScheduler:
         alpha_0 increases (stronger prior). When data is uniform (high entropy),
         alpha_0 stays near 1 (weak prior).
 
-        Order-statistics connection (see order_statistics.py Part 3):
+        Order-statistics connection (docs/learnings/order-statistics-learnings.md):
         The gaps (spacings) between sorted Uniform(0,1) draws are jointly
         distributed as Dirichlet(1,...,1) — equivalently, normalized i.i.d.
         Exponential(1) draws. This is the same Dirichlet family that CEM uses

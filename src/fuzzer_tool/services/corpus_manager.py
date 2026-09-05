@@ -977,7 +977,7 @@ class CorpusManager:
         # a seed with `fuzz_count` attempts and 0 discoveries has discovery
         # probability below 0.01.
         #
-        # Extreme-value asymptotics (order_statistics.py Part 4):
+        # Extreme-value asymptotics (docs/learnings/order-statistics-learnings.md):
         # n * min(U1..Un) → Exp(1) as n → ∞. If a seed's discovery probability
         # is the minimum of n independent tries, P(discovery < ε) ≈ 1 - exp(-n*ε).
         # For n = fuzz_count and ε = 0.01, this gives a simpler approximation:

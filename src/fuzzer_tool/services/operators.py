@@ -2278,7 +2278,7 @@ class OperatorEngine:
         """Shuffle variable-width blocks using order-statistics spacings trick.
 
         Divides the input into 2-5 random-width blocks using the normalized-
-        Exponential spacing trick (order_statistics.py Part 3). Unlike
+        Exponential spacing trick. Unlike
         chunk_shuffle (fixed-width chunks), this produces variable-width
         blocks that can rearrange structural elements at any granularity.
         """

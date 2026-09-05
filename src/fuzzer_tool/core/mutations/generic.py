@@ -686,7 +686,7 @@ def block_shuffle_variable(data: bytes, rng=None) -> bytes:
 
     Divides the input into k random blocks (2 ≤ k ≤ 5) using cut points
     generated via the normalized-Exponential spacing trick (see
-    order_statistics.py Part 3). The cut points have the same joint
+    docs/learnings/order-statistics-learnings.md). The cut points have the same joint
     distribution as sorted Uniform(0, len(data)) draws, but without
     needing a sort. Blocks are then randomly permuted.
 
@@ -708,9 +708,14 @@ def block_shuffle_variable(data: bytes, rng=None) -> bytes:
 
     # Spacings trick: n_cuts+1 i.i.d. Exponential(1) draws, normalized,
     # give the same joint law as the gaps between n_cuts sorted
-    # Uniform(0,1) points — i.e. Dirichlet(1,...,1) (Part 3 of
-    # order_statistics.py). Cumulative sums give sorted cut points
-    # without an explicit sort.
+    # Uniform(0,1) points — i.e. Dirichlet(1,...,1). Cumulative sums give
+    # sorted cut points without an explicit sort.
+    #
+    # The sort it avoids is not what costs. Measured against
+    # sorted(r.random() for _ in range(n_cuts)) this loses by 2.3-2.6x at
+    # every size from k=1 to k=32 -- the Python cumsum is dearer than the
+    # sort it removes. Kept as the operator's defining construction, and
+    # because its draw sequence is part of what --seed reproduces.
     exps = [r.expovariate(1.0) for _ in range(n_cuts + 1)]
     s = sum(exps)
     cum = 0.0
