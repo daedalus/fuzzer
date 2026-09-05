@@ -77,6 +77,15 @@ ARMS: dict[str, list[str]] = {
     # among several and most picks would not go through the code under test.
     "boltzmann-count": ["--boltzmann"],
     "boltzmann-cost": ["--boltzmann"],
+    # GARCH volatility. Single-variable against `baseline`: the model only
+    # feeds the regime detector's new branch, nothing else changes.
+    "garch": ["--garch"],
+    # Continuum flux ranking. Its baseline is `invasion`, not `baseline`:
+    # the flux map only reaches invasion_select, so measuring it against a
+    # run with no invasion arm at all would attribute invasion's own effect
+    # to the continuum.
+    "invasion": ["--mc-bandit", "--invasion"],
+    "continuum": ["--mc-bandit", "--invasion", "--continuum"],
 }
 
 # Arms that are compile-time rather than flag-driven still belong here, as

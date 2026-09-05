@@ -153,11 +153,28 @@ DIRECT_LITE_SIGNAL_TARGETS: list[tuple[str, str]] = [
     ("targets/grep_read.so", ""),
 ]
 
+# container_signal: the direct_lite_signal shape, restricted to what a
+# clean container can build without vendoring, and using the build-root
+# artifact names rather than the legacy in-tree ones.
+#
+# A new set rather than an edit, per the rule at the top of this file:
+# grep_read is absent (it needs tools/vendor_grep.sh), so numbers from here
+# are NOT comparable with direct_lite_signal, and any figure quoted from it
+# must name this set. zlib and gzip are excluded for the reason recorded
+# above -- bit-for-bit reproducible and saturated at 12 and 36 edges on
+# every replicate, so they cannot produce a discordant pair for any arm and
+# their cells are pure cost.
+CONTAINER_SIGNAL_TARGETS: list[tuple[str, str]] = [
+    ("/root/fuzzing/builds/png_read_noasan.so", "-D dictionaries/png.dict -m 65536"),
+    ("/root/fuzzing/builds/jpeg_read_noasan.so", "-D dictionaries/jpeg.dict -m 65536"),
+]
+
 TARGET_SETS: dict[str, list[tuple[str, str]]] = {
     "locked": LOCKED_TARGETS,
     "cmplog": CMPLOG_TARGETS,
     "direct_lite": DIRECT_LITE_TARGETS,
     "direct_lite_signal": DIRECT_LITE_SIGNAL_TARGETS,
+    "container_signal": CONTAINER_SIGNAL_TARGETS,
 }
 
 # ── Seeds ──────────────────────────────────────────────────────────────
