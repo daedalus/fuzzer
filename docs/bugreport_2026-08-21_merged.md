@@ -11,6 +11,25 @@ the gaps are closed items and any reference to a number from a commit message,
 a learnings note or a source comment still resolves to the same finding in git
 history.
 
+**Removal ledger.** A file that gets pruned repeatedly loses documents without
+anyone noticing (that is how `docs/edge-coverage-analysis.md` disappeared), so
+each round records what left and where its artefacts live.
+
+- *Round 1 (2026-08-2x)* — 30 findings plus E1/E2; the whole CRITICAL section.
+- *Round 2 (2026-09-05)* — 16, 17, 20, 22, 23, 24, 25, 26, 27, 72. Each was
+  re-verified against live source before removal, not trusted from a marker;
+  16, 17 and 26 turned out to have been fixed upstream already, the other seven
+  were fixed in this round. Artefacts: `tests/test_regression_elf_header_bounds.py`,
+  `test_regression_grammar_expansion_budget.py`,
+  `test_regression_crash_replay_keys.py`,
+  `test_regression_trim_persistence.py`,
+  `test_regression_direct_lite_reset.py`,
+  `test_regression_coverage_timeline_alignment.py`. Finding 72 was closed by
+  the same change as 26 (persisted `seed_meta` keyed by `seed_key()`), so it
+  has no separate artefact. Three of the entries were only PARTLY defective —
+  see the last three bullets of "Patterns the closed findings left behind" for
+  what that cost and what was deliberately left alone.
+
 **Line numbers are as of 2026-08-21 and have drifted.** The tree has moved a
 great deal since; spot-checking the surviving findings shows several now point
 at unrelated code. Locate a finding by the symbol it names, not by its line —
@@ -63,53 +82,6 @@ summary reprints the inner test name, so its `count(...) == 1` assertion sees 2.
     Still open: import-time signal-handler installation, the child-killing
     atexit hazard, and the E3 fork-in-multithreaded-process hazard itself
     (`persistent.py:72`, `runner.py:311`) — none of those were touched.*
-
-16. **`core/transfer_entropy.py:84-105`** [verified empirically] — plug-in TE
-    estimator reports ~2.6 bits for *independent* uniform byte streams (n=1500);
-    no bias correction for context cardinality. `byte_to_edge_flow` /
-    `causal_chains` produce spurious causal edges on essentially any input.
-
-17. **`core/crash_eta.py:66-135`** — `CrashMITracker` records only crashing
-    inputs, so `byte_total == joint_crash` always; "MI" degenerates to position
-    frequency × log₂(1/p_crash). Crash ETA and mutation targeting driven by noise.
-
-20. **`adapters/inprocess.py:513-595` + `runner.py:154`** — `direct_lite`
-    (hardcoded-on default) never resets SHM between iterations → every exec
-    reports the cumulative union of all prior coverage; per-exec attribution and
-    stability calibration meaningless. Compounded by `inprocess.py:391-414`
-    memsetting entry-*count* as bytes (wipes header + ⅛ of table, forcing
-    generation to 0 so stale entries look current).
-
-22. **`services/fuzzer.py:3751,3756` + `stats_reporter.py:66-85`** [verified] —
-    crash-replay keys use `crash_sigs.get(crash_name, crash_name)` (signature
-    map fed filenames); fallback `stem.startswith(sig[:12])` matches any crash
-    within a ~2.7h window → reproducibility scores computed from the wrong
-    crash's input.
-
-23. **`core/elf.py:1159-1837` (4 sites)** [verified] — unguarded
-    `struct.unpack_from` on attacker-controlled `e_shoff`/section offsets in
-    `branch_density`/`_text_size`/`extract_constants_pure`/
-    `extract_div_constants` → malformed target ELF crashes the fuzzer at startup
-    (violates repo's own bounds-check rule).
-
-24. **`core/grammar.py:167-221`** [verified] — per-token repeats clamped but not
-    their product: chained `{32}` rules expand fully before `max_len`
-    truncation → crafted grammar file OOMs/hangs the fuzzer itself.
-
-25. **`stats_reporter.py:30-32` + `edge_tracker.py:943-947` +
-    `report.py:1115-1144`** [corroborated] — snapshot trims shrink exec/edge
-    arrays but never timestamps → arrays desync, temporal join pairs wrong
-    indices, and past snapshot caps an uncaught `IndexError` aborts report
-    generation.
-
-26. **`services/tmin.py:41-59` + `corpus_manager.py:173 vs 434`** [verified] —
-    lineage walk looks up xxhash-prefix keys in a content-hex-keyed dict → chain
-    walk never passes the immediate parent; advertised root-shrink never happens.
-
-27. **`services/corpus_manager.py:507-566`** [corroborated] — trim replaces seeds
-    in memory only: original file later pruned from disk while trimmed bytes are
-    never written → seed lost entirely on resume; `seen_hashes` still holds the
-    old hash so regenerated originals are rejected as dupes.
 
 28. **`mutations/x86.py:146-148,187,253`** [verified empirically] — decoder
     treats accumulator-immediate ALU ops (no ModRM) and far call/jmp (6-byte
@@ -276,8 +248,6 @@ summary reprints the inner test name, so its `count(...) == 1` assertion sees 2.
 
 ## LOW
 
-72. `corpus_manager.py:174,247` [verified] — resume metadata skipped for seeds
-    ≥128 bytes (`len(hex) >= 256`); most real seeds reset `fuzz_count=0`.
 73. `rand_pool.py:173-191` [verified] — `randbytes(n)` replays consumed pool
     when n ≡ 0 mod pool size; batch methods silently cap at 4096 items
     (`rand_pool.py:94-141`, latent).
@@ -363,6 +333,32 @@ already cost time more than once.
 - **Verify before starting.** Every pass over this file has found at least one
   entry that read as open and was already correct. Check the source, not the
   marker.
+
+- **An optimization can outlive its justification.** Finding 20's exclusion was
+  landed deliberately as `perf: skip SHM bitmap reset in direct_lite mode`
+  (66b026e, 17 Aug), and it was correct that day: `reset_edge_map()` was then a
+  full `table_bytes` memset, ~86.9us per execution. Generation tagging
+  (1eb7979) made the reset O(1) the NEXT DAY and nobody revisited the
+  exclusion, so the fuzzer traded its per-execution coverage signal for
+  1.55us/exec for weeks. A commit that skips work because that work is
+  expensive should name the cost it is avoiding, so the next person to make
+  that work cheap can find every site that assumed otherwise.
+
+- **Removing a symptom can hide the cause.** Finding 25 was filed partly for an
+  uncaught `IndexError` that aborted report generation. That was fixed by
+  clamping the join with `min(len(...))` — which removed the crash and left the
+  desync, so the temporal join went from failing loudly to silently pairing a
+  timestamp with another snapshot's counts. When a fix makes an error
+  condition unreachable rather than impossible, check what the error was
+  reporting.
+
+- **A finding can be right about the defect and wrong about the remedy.**
+  Finding 27's second clause ("`seen_hashes` still holds the old hash so
+  regenerated originals are rejected as dupes") only bit while the trimmed
+  bytes were being lost. Once an equivalent smaller seed is on disk, keeping
+  the hash is correct — re-admitting the original would undo the trim on every
+  regeneration. It was left as-is with the reasoning in a comment. Not every
+  clause of a corroborated finding is part of the bug.
 
 ## Cross-cutting patterns worth regression tests
 
