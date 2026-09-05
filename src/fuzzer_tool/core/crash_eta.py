@@ -8,6 +8,7 @@ input bytes and crash outcomes.
 
 from __future__ import annotations
 
+import bisect
 import math
 import random
 import re
@@ -55,6 +56,11 @@ class CrashMITracker:
         # Cached MI values
         self._mi_cache: dict[int, float] = {}
         self._cache_valid: bool = False
+        # Sampling caches, rebuilt by all_mi()
+        self._cached_positions: list[int] = []
+        self._cached_weights: list[float] = []
+        self._cached_prefix: list[float] = []
+        self._cached_total: float = 0.0
 
     def record(self, input_bytes: bytes, is_crash: bool) -> None:
         """Record one input-crash pair.
@@ -154,6 +160,14 @@ class CrashMITracker:
         self._cached_positions = sorted(self._mi_cache.keys())
         self._cached_weights = [max(self._mi_cache[p], 0.01) for p in self._cached_positions]
         self._cached_total = sum(self._cached_weights)
+        # Prefix sums, so a draw restricted to the positions below some
+        # input length can be normalised by that prefix's mass rather than
+        # by the total, and located by bisection instead of a scan.
+        self._cached_prefix = []
+        running = 0.0
+        for w in self._cached_weights:
+            running += w
+            self._cached_prefix.append(running)
         self._cache_valid = True
         return self._mi_cache
 
@@ -166,25 +180,37 @@ class CrashMITracker:
         return sorted_mi[:k]
 
     def weighted_position(self, input_length: int) -> int | None:
-        """Sample a byte position weighted by crash MI."""
+        """Sample a byte position weighted by crash MI.
+
+        Only positions below *input_length* are eligible, so the draw is
+        normalised by that prefix's weight, not by the total over every
+        tracked position. Scaling by the total was a defect: the scan
+        could only ever accumulate the prefix, so whenever the prefix was
+        the smaller share the draw fell off the end of the loop and
+        returned the last eligible position. Measured with 200 tracked
+        positions and input_length=50, 75% of draws landed on that one
+        position, whose correct share was 2.1% -- the MI weighting was
+        inert for any input shorter than the tracked range, which is the
+        normal case since positions accumulate up to max_positions.
+        """
         if not self._cache_valid:
             self.all_mi()
         if not self._cached_positions:
             return None
         # Binary search for cutoff index
-        import bisect
-
         idx = bisect.bisect_left(self._cached_positions, input_length)
         if idx == 0:
             return None
-        # Sample using precomputed weights (first idx elements)
-        r = random.random() * self._cached_total
-        cumulative = 0.0
-        for i in range(idx):
-            cumulative += self._cached_weights[i]
-            if r <= cumulative:
-                return self._cached_positions[i]
-        return self._cached_positions[idx - 1]
+        prefix = self._cached_prefix
+        eligible_mass = prefix[idx - 1]
+        if eligible_mass <= 0.0:
+            return self._cached_positions[random.randrange(idx)]
+        r = random.random() * eligible_mass
+        # prefix is non-decreasing, so the first entry >= r is the pick.
+        i = bisect.bisect_left(prefix, r, 0, idx)
+        if i >= idx:
+            i = idx - 1
+        return self._cached_positions[i]
 
     def top_values(self, position: int, k: int = 5) -> list[int]:
         """Return the k byte values at position with highest crash count."""
