@@ -101,18 +101,42 @@ class RandPool:
         """Return a random float in [0.0, 1.0).  ``random.random()`` equivalent."""
         return self._draw() / 4294967296.0  # 2^32
 
+    def _take(self, count: int) -> np.ndarray:
+        """Return exactly *count* pool words, spanning refills when needed.
+
+        A slice past the end of ``self._pool`` truncates rather than raising,
+        so a bare ``self._pool[idx : idx + count]`` returned short whenever
+        *count* exceeded the pool while ``_idx`` advanced by the full amount.
+
+        Counts that fit in one pool keep the original refill-then-slice
+        sequence exactly, so existing seeded runs are unchanged; only the
+        previously-broken oversized path is new.
+        """
+        if count <= _POOL_ENTRIES:
+            if self._idx + count > _POOL_ENTRIES:
+                self._refill()
+            out = self._pool[self._idx : self._idx + count]
+            self._idx += count
+            return out
+
+        parts = []
+        while count > 0:
+            if self._idx >= _POOL_ENTRIES:
+                self._refill()
+            take = min(count, _POOL_ENTRIES - self._idx)
+            parts.append(self._pool[self._idx : self._idx + take].copy())
+            self._idx += take
+            count -= take
+        return np.concatenate(parts)
+
     def random_list(self, count: int) -> list[float]:
         """Return *count* random floats in [0.0, 1.0).  Vectorized.
 
-        All values are generated from one pool slice.
+        Values span pool refills when *count* exceeds one pool.
         """
         if count <= 0:
             return []
-        if self._idx + count > _POOL_ENTRIES:
-            self._refill()
-        raw = self._pool[self._idx : self._idx + count]
-        self._idx += count
-        return (raw.astype(np.float64) / 4294967296.0).tolist()
+        return (self._take(count).astype(np.float64) / 4294967296.0).tolist()
 
     def randint_list(self, a: int, b: int, count: int) -> list[int]:
         """Generate *count* random integers in [a, b] using vectorized numpy.
@@ -124,21 +148,19 @@ class RandPool:
         width = b - a + 1
         if width <= 0 or count <= 0:
             return []
-        # Ensure we have enough values in the pool
-        if self._idx + count > _POOL_ENTRIES:
-            self._refill()
-        # Slice: vectorized C-level read of count values
-        raw = self._pool[self._idx : self._idx + count]
-        self._idx += count
-        # Vectorized modulo + offset, then fast tolist() for Python ints
-        if width == 256:
-            # Fast path: pre-computed % 256 array
-            result = self._m256[self._idx - count : self._idx]
+        # Fast path: pre-computed % 256 array, only while the request fits
+        # in the current pool -- the spanning path has no matching _m256 run.
+        if width == 256 and count <= _POOL_ENTRIES:
+            if self._idx + count > _POOL_ENTRIES:
+                self._refill()
+            result = self._m256[self._idx : self._idx + count]
+            self._idx += count
             if a == 0:
                 return result.tolist()
-            return [a + int(x) for x in result]
-        result = (raw % width) + a
-        return result.tolist()
+            return (result.astype(np.int64) + a).tolist()
+        # int64 before the offset: the pool is uint32, and numpy rejects a
+        # negative Python int against an unsigned array outright.
+        return ((self._take(count) % width).astype(np.int64) + a).tolist()
 
     def randrange(self, n: int) -> int:
         return self._draw() % n if n > 0 else 0
