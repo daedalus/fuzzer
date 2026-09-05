@@ -1438,21 +1438,51 @@ class EdgeTracker:
         return self._aggregate_cache
 
     def _js_divergence_vs_aggregate(self, seed_dist: dict[int, float]) -> float:
-        """Compute JS divergence between a seed's distribution and the aggregate.
+        """JS divergence between a seed's profile and the corpus's, on the
+        edges the seed actually exercises.
 
-        Only iterates edges where the seed has non-zero probability —
-        edges where the seed is zero contribute 0 to KL(P || M).
-        O(|seed_edges|) instead of O(|all_edges|).
+        The aggregate is renormalised over the seed's support, so both arguments
+        are probability distributions on the same set and the result is a proper
+        divergence in [0, ln 2]. Cost stays O(|seed_edges|).
+
+        This used to iterate only the seed's edges while comparing against the
+        *unconditioned* aggregate, justified as "edges where the seed is zero
+        contribute 0 to KL(P || M)". That is true of the KL(P || M) term and
+        false of KL(Q || M): where p = 0 the mixture is m = q/2, so the
+        contribution is q*ln2, not zero. The omitted mass was exactly
+        0.5 * ln2 * (1 - Q_seed) -- measured 0.204 as-coded against a true JS of
+        0.506 on a 40-seed, 2000-edge corpus.
+
+        Adding the missing term back was measured and rejected. The dropped
+        quantity is a monotone function of how much of the corpus the seed does
+        *not* cover, so restoring it makes this a breadth proxy: across a
+        60-seed corpus the full JS correlates -0.988 with edge count and only
+        -0.161 with whether the seed actually has an unusual hit-count profile.
+        The as-coded version was already mostly that (-0.965 and -0.129). Both
+        rank a narrow seed with a perfectly flat profile above a seed with three
+        edges hit 500 times, which inverts what this weight is for, and breadth
+        is already carried by compute_subsumption_weight.
+
+        Conditioning on the seed's support measures what the docstring on
+        compute_hitcount_diversity_weight actually describes -- same edges,
+        different frequency profile -- and measures nothing else: -0.026 with
+        edge count, +0.789 with loopiness on the same corpus.
         """
-        total = self._aggregate_total_count
-        if total == 0:
+        if self._aggregate_total_count == 0:
+            return 0.0
+
+        # Aggregate mass on the seed's own edges; the conditioning constant.
+        mass = 0.0
+        for e in seed_dist:
+            mass += self._aggregate_totals.get(e, 0.0)
+        if mass <= 0.0:
             return 0.0
 
         js = 0.0
         for e, p in seed_dist.items():
             if p <= 0.0:
                 continue
-            q = self._aggregate_totals.get(e, 0.0) / total
+            q = self._aggregate_totals.get(e, 0.0) / mass
             m = 0.5 * (p + q)
             if m > 0.0:
                 js += p * math.log(p / m)
@@ -1487,9 +1517,22 @@ class EdgeTracker:
         is behaviorally distinct even with zero new edges.
 
         Returns a weight in [0.5, 2.0]:
-        - 1.0 = typical profile (JS divergence near corpus average)
-        - 2.0 = unusual profile (high JS — exercises edges differently)
-        - 0.5 = near-identical profile to aggregate (redundant)
+        - 2.0 = unusual profile (high JS — exercises its edges very differently)
+        - 0.5 = profile matching the corpus on those edges (redundant)
+
+        The comparison is made on the seed's own edges: the aggregate is
+        conditioned on that support, so this measures frequency profile and not
+        coverage breadth, which compute_subsumption_weight already covers. See
+        _js_divergence_vs_aggregate for why restoring the unconditioned form was
+        measured and rejected.
+
+        The full band is reachable -- a seed with one edge hit 5000x scores
+        1.48, and the ceiling needs a profile more extreme still -- but ordinary
+        seeds sit low: on a 60-seed corpus with a third of the seeds carrying
+        hot loops the observed range was [0.54, 0.90]. The mapping below is left
+        as it was rather than recentred, because rescaling changes which seeds
+        get energy and deserves to be decided on its own evidence instead of
+        riding along inside a correctness fix.
 
         JS divergence is bounded in [0, ln(2)] ≈ [0, 0.693].
         We normalize to [0, 1] and scale to [0.5, 2.0].
