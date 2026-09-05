@@ -827,6 +827,10 @@ class TestCrashDataPruning:
         f.crash_frames = {f"sig_{i}": [f"frame_{i}_0", f"frame_{i}_1"] for i in range(n_sigs)}
         f.crash_min_sizes = {f"stack_{i}": 10 + i for i in range(n_sigs)}
         f._crash_replays = {f"sig_{i}": [i] for i in range(n_sigs)}
+        # Per-signature like its neighbours, and evicted with them: the replay
+        # scheduler records the crash file each signature was written as, so
+        # this map has to shrink with crash_sigs or it outlives the run.
+        f._crash_files = {f"sig_{i}": f"crash_{i}_cluster_sig_signal11" for i in range(n_sigs)}
         return f
 
     def test_regression_prune_crash_data_caps_sigs(self):
@@ -843,7 +847,7 @@ class TestCrashDataPruning:
         assert len(f.crash_sigs) >= target
 
     def test_regression_prune_crash_data_evicts_associated_structures(self):
-        """Evicted sigs are removed from crash_frames, crash_min_sizes, _crash_replays."""
+        """Evicted sigs are removed from every per-signature structure."""
         from fuzzer_tool.services.fuzzer import MAX_CRASH_SIGS
 
         n = MAX_CRASH_SIGS * 2
@@ -856,11 +860,13 @@ class TestCrashDataPruning:
         for sig in evicted:
             assert sig not in f.crash_frames
             assert sig not in f._crash_replays
+            assert sig not in f._crash_files
             # crash_min_sizes keys on stack hash, not sig — verify the
             # total number of entries doesn't exceed kept_sigs count
         # All associated dicts should have at most as many entries as crash_sigs
         assert len(f.crash_frames) <= len(f.crash_sigs)
         assert len(f._crash_replays) <= len(f.crash_sigs)
+        assert len(f._crash_files) <= len(f.crash_sigs)
 
     def test_regression_prune_crash_data_below_limit_noop(self):
         """_prune_crash_data is a no-op when crash_sigs is under MAX_CRASH_SIGS."""
