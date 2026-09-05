@@ -191,17 +191,35 @@ class HierarchicalBanditScheduler:
         self._total_pulls += 1
         cat = self._cat_for(name)
 
+        # A Beta posterior is a pair, but the branches below each move one
+        # side only, so an arm that has seen a single kind of outcome exists
+        # in one dict and not the other. The decay block in select_op() walks
+        # op_alpha and subscripts op_beta bare, which is a KeyError at the
+        # next decay tick. init_arm() pairs both dicts for operators armed at
+        # startup; ones that self-register at runtime through
+        # REGISTRY.register_mutator() reach record() without it.
+        #
+        # The beta side is the sentinel: it is missing on a first success and
+        # created here on a first failure, so testing it alone covers both
+        # entry orders and costs one failed dict lookup per call afterwards.
+        if name not in self.op_beta:
+            self.op_alpha.setdefault(name, 1.0)
+            self.op_beta[name] = 1.0
+        if cat not in self.cat_beta:
+            self.cat_alpha.setdefault(cat, 1.0)
+            self.cat_beta[cat] = 1.0
+
         # Update bottom-level (per-operator)
         if success:
-            self.op_alpha[name] = self.op_alpha.get(name, 1.0) + weight
+            self.op_alpha[name] += weight
         else:
-            self.op_beta[name] = self.op_beta.get(name, 1.0) + 1
+            self.op_beta[name] += 1
 
         # Update top-level (per-category) — same success signal
         if success:
-            self.cat_alpha[cat] = self.cat_alpha.get(cat, 1.0) + weight
+            self.cat_alpha[cat] += weight
         else:
-            self.cat_beta[cat] = self.cat_beta.get(cat, 1.0) + 1
+            self.cat_beta[cat] += 1
 
         self._cap(self.op_alpha, self.op_beta, name)
         self._cap(self.cat_alpha, self.cat_beta, cat)
