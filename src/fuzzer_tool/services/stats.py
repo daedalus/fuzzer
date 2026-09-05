@@ -615,27 +615,38 @@ class StatsReporter:
                 s += f" [CSD: {csd_reason}]"
         return s
 
+    @staticmethod
+    def _is_number(value) -> bool:
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+
     def _print_stats_garch_str(self, f) -> str:
         """Format the GARCH volatility forecast, when the model is enabled."""
         g = getattr(f, "_garch", None)
         if g is None:
             return ""
 
+        # Type-check rather than None-check: print_stats runs against
+        # whatever is on the fuzzer, and a stand-in that answers every
+        # attribute (a test double, a partially restored object) returns a
+        # non-None non-number here and takes down the whole stats line.
         forecast = g.forecast()
-        if forecast is None:
+        persistence = getattr(g, "persistence", None)
+        if not self._is_number(forecast) or not self._is_number(persistence):
             return ""
 
-        flag = " clust" if g.clustering else ""
-        return f" | vol: {forecast:.2f} (p={g.persistence:.2f}){flag}"
+        flag = " clust" if g.clustering is True else ""
+        return f" | vol: {forecast:.2f} (p={persistence:.2f}){flag}"
 
     def _print_stats_continuum_str(self, f) -> str:
         """Format the steady continuum diagnostics, when the field exists."""
         field = getattr(f, "_continuum", None)
-        diag = field.diagnostics if field is not None else None
-        if diag is None:
+        diag = getattr(field, "diagnostics", None)
+        re_value = getattr(diag, "reynolds", None)
+        gradient = getattr(diag, "pressure_gradient", None)
+        if not self._is_number(re_value) or not self._is_number(gradient):
             return ""
 
-        return f" | Re: {diag.reynolds:.2f} gp: {diag.pressure_gradient:.2f}"
+        return f" | Re: {re_value:.2f} gp: {gradient:.2f}"
 
     def print_stats(self):
         f = self.f
