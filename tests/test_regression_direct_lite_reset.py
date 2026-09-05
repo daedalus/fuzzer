@@ -131,7 +131,7 @@ class TestDirectLiteCoverageIsPerExecution:
         assert len(set(observations)) == len(observations), (
             f"inputs collided onto one edge: {observations}"
         )
-        for earlier, later in zip(observations, observations[1:]):
+        for earlier, later in zip(observations[:-1], observations[1:], strict=True):
             assert not (earlier & later), "an edge survived into the next execution"
 
 
