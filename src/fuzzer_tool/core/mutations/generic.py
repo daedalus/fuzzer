@@ -312,17 +312,86 @@ def choose_len(n: int, rng=None) -> int:
     return rng.randint(1, n)
 
 
-def extract_corpus_literals(corpus: list[bytes]) -> tuple[list[bytes], list[bytes]]:
+#: Byte classes for the corpus-literal scanner, indexed by byte value.
+#: A table lookup replaces up to four chained range comparisons per byte
+#: in what is otherwise a pure-Python scan over the whole corpus.
+#:
+#: These are flags, not an enum, because underscore belongs to two runs.
+#: The original predicates were "letter or underscore" for the alpha run
+#: and "printable and not (digit or letter)" for the symbol run, and 0x5F
+#: satisfies both -- a symbol run continues through an underscore. Only
+#: the run *start* is ordered, alpha before symbol, so a run beginning at
+#: an underscore is an alpha run.
+_LIT_DIGIT = 1
+_LIT_ALPHA = 2
+_LIT_SYMBOL = 4
+
+
+def _build_literal_classes() -> bytes:
+    table = bytearray(256)
+    for b in range(256):
+        flags = 0
+        if 0x30 <= b <= 0x39:
+            flags |= _LIT_DIGIT
+        if (0x61 <= b <= 0x7A) or (0x41 <= b <= 0x5A) or b == 0x5F:
+            flags |= _LIT_ALPHA
+        if 0x20 <= b <= 0x7E and not (
+            (0x30 <= b <= 0x39) or (0x61 <= b <= 0x7A) or (0x41 <= b <= 0x5A)
+        ):
+            flags |= _LIT_SYMBOL
+        table[b] = flags
+    return bytes(table)
+
+
+_LIT_CLASS = _build_literal_classes()
+
+
+class LiteralAccumulator:
+    """Running set of literals seen across a corpus.
+
+    Lets a caller feed only the seeds it has not scanned yet. The scan is
+    linear in the bytes handed to it, but ``extract_corpus_literals`` was
+    being called with the whole corpus every time the corpus grew, so the
+    cost was quadratic in corpus size over a campaign: measured 47 ms per
+    call, 30 calls and 1.4 s in a 4000-exec run on a 65-seed corpus, and
+    that grows with both factors.
+    """
+
+    __slots__ = ("int_lits", "str_lits", "seen_int", "seen_str", "scanned")
+
+    def __init__(self) -> None:
+        self.int_lits: list[bytes] = []
+        self.str_lits: list[bytes] = []
+        self.seen_int: set[bytes] = set()
+        self.seen_str: set[bytes] = set()
+        #: Number of corpus entries already folded in, for callers that
+        #: append to a list and want to feed only the tail.
+        self.scanned: int = 0
+
+    def result(self) -> tuple[list[bytes], list[bytes]]:
+        return self.int_lits, self.str_lits
+
+
+def extract_corpus_literals(
+    corpus: list[bytes],
+    accumulator: LiteralAccumulator | None = None,
+) -> tuple[list[bytes], list[bytes]]:
     """Extract integer and string literals from the corpus.
 
     Returns (int_lits, str_lits) where int_lits are digit sequences of
     length >= 2 (optionally with leading '-') and str_lits are printable
     ASCII runs of length >= 3 that are not pure digits.
+
+    Pass an *accumulator* to fold *corpus* into an existing result instead
+    of starting from nothing; the same tuple is returned either way. This
+    is how a caller avoids rescanning seeds it has already seen.
     """
-    int_lits: list[bytes] = []
-    str_lits: list[bytes] = []
-    seen_int = set()
-    seen_str = set()
+    acc = accumulator if accumulator is not None else LiteralAccumulator()
+    int_lits = acc.int_lits
+    str_lits = acc.str_lits
+    seen_int = acc.seen_int
+    seen_str = acc.seen_str
+    classes = _LIT_CLASS
     for raw in corpus:
         # Coerce to bytes. The annotation says list[bytes], but the live
         # corpus holds bytearray -- Fuzzer.corpus is bytearray from startup
@@ -331,12 +400,14 @@ def extract_corpus_literals(corpus: list[bytes]) -> tuple[list[bytes], list[byte
         # raises TypeError on the very first literal found, so this function
         # never returned anything on a real corpus.
         raw = bytes(raw)
+        n = len(raw)
         i = 0
-        while i < len(raw):
+        while i < n:
+            cls = classes[raw[i]]
             # Digit runs take priority over everything else.
-            if 0x30 <= raw[i] <= 0x39:
+            if cls & _LIT_DIGIT:
                 j = i + 1
-                while j < len(raw) and 0x30 <= raw[j] <= 0x39:
+                while j < n and classes[raw[j]] & _LIT_DIGIT:
                     j += 1
                 if j - i >= 2:
                     lit = raw[i:j]
@@ -348,11 +419,12 @@ def extract_corpus_literals(corpus: list[bytes]) -> tuple[list[bytes], list[byte
             # Integer literal: optional '-', then >=2 digits.
             if (
                 raw[i] == 45
-                and i + 2 < len(raw)
-                and all(0x30 <= b <= 0x39 for b in raw[i + 1 : i + 3])
+                and i + 2 < n
+                and classes[raw[i + 1]] & _LIT_DIGIT
+                and classes[raw[i + 2]] & _LIT_DIGIT
             ):
                 j = i + 1
-                while j < len(raw) and 0x30 <= raw[j] <= 0x39:
+                while j < n and classes[raw[j]] & _LIT_DIGIT:
                     j += 1
                 lit = raw[i:j]
                 if lit not in seen_int:
@@ -361,11 +433,9 @@ def extract_corpus_literals(corpus: list[bytes]) -> tuple[list[bytes], list[byte
                 i = j
                 continue
             # Alpha run: letters and underscore, length >= 3.
-            if (0x61 <= raw[i] <= 0x7A) or (0x41 <= raw[i] <= 0x5A) or raw[i] == 0x5F:
+            if cls & _LIT_ALPHA:
                 j = i + 1
-                while j < len(raw) and (
-                    (0x61 <= raw[j] <= 0x7A) or (0x41 <= raw[j] <= 0x5A) or raw[j] == 0x5F
-                ):
+                while j < n and classes[raw[j]] & _LIT_ALPHA:
                     j += 1
                 if j - i >= 3:
                     lit = raw[i:j]
@@ -375,19 +445,9 @@ def extract_corpus_literals(corpus: list[bytes]) -> tuple[list[bytes], list[byte
                 i = j
                 continue
             # Symbol run: printable non-alphanum, length >= 3.
-            if 0x20 <= raw[i] <= 0x7E and not (
-                (0x30 <= raw[i] <= 0x39) or (0x61 <= raw[i] <= 0x7A) or (0x41 <= raw[i] <= 0x5A)
-            ):
+            if cls & _LIT_SYMBOL:
                 j = i + 1
-                while (
-                    j < len(raw)
-                    and 0x20 <= raw[j] <= 0x7E
-                    and not (
-                        (0x30 <= raw[j] <= 0x39)
-                        or (0x61 <= raw[j] <= 0x7A)
-                        or (0x41 <= raw[j] <= 0x5A)
-                    )
-                ):
+                while j < n and classes[raw[j]] & _LIT_SYMBOL:
                     j += 1
                 if j - i >= 3:
                     lit = raw[i:j]
@@ -397,6 +457,7 @@ def extract_corpus_literals(corpus: list[bytes]) -> tuple[list[bytes], list[byte
                 i = j
                 continue
             i += 1
+    acc.scanned += len(corpus)
     return int_lits, str_lits
 
 
