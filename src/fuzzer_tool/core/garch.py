@@ -231,6 +231,15 @@ class OnlineGarch11:
         """alpha + beta: how long a variance shock survives."""
         return self._alpha + self._beta
 
+    @property
+    def unconditional_variance(self) -> float:
+        """omega / (1 - alpha - beta): the level the recursion reverts to.
+
+        Finite because the constructor and :meth:`fit` both keep persistence
+        below :data:`_MAX_PERSISTENCE`.
+        """
+        return self._omega_eff() / max(1.0 - self.persistence, 1.0 - _MAX_PERSISTENCE)
+
     def forecast(self) -> float | None:
         """One-step-ahead conditional variance, or ``None`` before *min_obs*."""
         if self._count < self._min_obs:

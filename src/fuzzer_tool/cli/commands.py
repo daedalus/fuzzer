@@ -392,6 +392,7 @@ def cmd_fuzz(args):
             fractal_diversity_bonus=getattr(args, "fractal_diversity_bonus", 1.3),
             exp3=getattr(args, "exp3", False),
             invasion=getattr(args, "invasion", False),
+            garch=getattr(args, "garch", False),
             exp3_gamma=getattr(args, "exp3_gamma", 0.1),
             eps_greedy=getattr(args, "eps_greedy", False),
             eps_greedy_epsilon0=getattr(args, "eps_greedy_epsilon0", 1.0),
@@ -443,6 +444,7 @@ def cmd_fuzz(args):
         args.cucb = True
         args.contextual = True
         args.invasion = True
+        args.garch = True
         args.ga = True
         args.qea = True
         args.bayesian = True
@@ -556,6 +558,7 @@ def cmd_fuzz(args):
         replicator=getattr(args, "replicator", False),
         exp3=getattr(args, "exp3", False),
         invasion=getattr(args, "invasion", False),
+        garch=getattr(args, "garch", False),
         exp3_gamma=getattr(args, "exp3_gamma", 0.1),
         eps_greedy=getattr(args, "eps_greedy", False),
         eps_greedy_epsilon0=getattr(args, "eps_greedy_epsilon0", 1.0),
@@ -1562,6 +1565,7 @@ _HAIL_MARY_FLAGS = (
     "fractal_partition",
     "contextual",
     "invasion",
+    "garch",
     "overlap_density",
     "poisson_disk_admission",
     "secretary",
@@ -1879,6 +1883,13 @@ def main() -> int:
         "strategy: always picks the operator with the lowest resistance (inverse observed "
         "success rate) from the MC bandit's stats. Requires --mc-bandit; has no effect "
         "without it.",
+    )
+    fuzz_parser.add_argument(
+        "--garch",
+        action="store_true",
+        help="Model the conditional variance of the per-tick edge-discovery delta with an "
+        "online GARCH(1,1). Emits a one-step volatility forecast on the stats line and can "
+        "raise an otherwise-healthy tick to CRITICAL when clustering is statistically real.",
     )
     fuzz_parser.add_argument(
         "--exp3-gamma",

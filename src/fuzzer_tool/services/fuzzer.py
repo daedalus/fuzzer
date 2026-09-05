@@ -741,6 +741,7 @@ class Fuzzer:
         secretary_exploration=None,
         elo=False,
         invasion=False,
+        garch=False,
         exp3=False,
         exp3_gamma=0.1,
         eps_greedy=False,
@@ -1825,6 +1826,7 @@ class Fuzzer:
             CoverageHomogeneityDetector,
             CriticalSlowingDown,
         )
+        from fuzzer_tool.core.garch import OnlineGarch11
 
         self._csd = CriticalSlowingDown(window_size=50, rise_threshold=1.5, min_observations=20)
 
@@ -1837,6 +1839,14 @@ class Fuzzer:
         )
         self._homogeneity_col_cumulative: list[int] = [0] * num_cols
 
+        # GARCH(1,1) conditional variance of the edge-discovery series.
+        # Fed the same non-overlapping per-tick delta as the Allan detector
+        # (see the feed site in run()); deliberately NOT discovery_rate(),
+        # whose 5-snapshot sliding window fabricates ARCH -- see the module
+        # docstring for the measurement.
+        self._use_garch = garch
+        self._garch = OnlineGarch11() if garch else None
+
         # Coverage regime detector: percolation phase classification
         # (subcritical / critical / supercritical).  Wraps the existing
         # CriticalSlowingDown + CoverageHomogeneityDetector + stall
@@ -1845,7 +1855,10 @@ class Fuzzer:
             csd=self._csd,
             homogeneity=self._homogeneity,
             stall_threshold=self._stall_threshold,
+            garch=self._garch,
         )
+        if self._garch is not None:
+            self._garch.load(self._state_store.get("garch") or {})
 
         # Allan variance detector for stall detection (edge discovery rate)
         from fuzzer_tool.core.allan_variance import AllanVarianceDetector
@@ -6154,6 +6167,8 @@ class Fuzzer:
                     current_edges = self._edge_tracker.get_cumulative_edge_count()
                     delta = current_edges - self._last_allan_edge_count
                     self._allan.update(delta)
+                    if self._garch is not None:
+                        self._garch.update(delta)
                     self._last_allan_edge_count = current_edges
                     # Feed per-column edge counts to CoverageHomogeneityDetector
                     if self.shm_cov and hasattr(self, "_homogeneity"):
@@ -6313,6 +6328,8 @@ class Fuzzer:
             self._state_store.set("fluctuation", self._fluctuation.snapshot())
             samples = sum(len(v) for v in self._fluctuation._states.values())
             print(f"[*] Fluctuation: saved state (samples={samples})")
+        if self._garch is not None:
+            self._state_store.set("garch", self._garch.save())
         self._save_state()
         if self._cmplog is not None:
             # Releases this run's .cmplog/.counts/.sites files. Nothing else

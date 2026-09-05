@@ -615,6 +615,19 @@ class StatsReporter:
                 s += f" [CSD: {csd_reason}]"
         return s
 
+    def _print_stats_garch_str(self, f) -> str:
+        """Format the GARCH volatility forecast, when the model is enabled."""
+        g = getattr(f, "_garch", None)
+        if g is None:
+            return ""
+
+        forecast = g.forecast()
+        if forecast is None:
+            return ""
+
+        flag = " clust" if g.clustering else ""
+        return f" | vol: {forecast:.2f} (p={g.persistence:.2f}){flag}"
+
     def print_stats(self):
         f = self.f
         elapsed = time.time() - f.start_time
@@ -760,7 +773,7 @@ class StatsReporter:
             else ""
         )
 
-        dr_str = self._print_stats_dr_str(f)
+        dr_str = self._print_stats_dr_str(f) + self._print_stats_garch_str(f)
 
         density_str = self._print_stats_density_str(f)
 

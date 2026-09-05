@@ -19,6 +19,11 @@ from fuzzer_tool.core.percolation import CoverageRegime
 
 log = logging.getLogger(__name__)
 
+# A one-step-ahead conditional variance this many times the model's
+# unconditional level counts as a volatility spike.  Same shape and default
+# as ``csd_rise_threshold``: both ask "how far above baseline".
+_GARCH_SPIKE_FACTOR = 1.5
+
 
 class CoverageRegimeDetector:
     """Classify coverage exploration into percolation phases.
@@ -30,6 +35,11 @@ class CoverageRegimeDetector:
             subcritical.  Defaults to the fuzzer's _stall_threshold.
         csd_rise_threshold: Multiplier above baseline for CSD detection.
         regime_history_size: Observations kept in regime_history.
+        garch: Optional :class:`~fuzzer_tool.core.garch.OnlineGarch11`.  When
+            supplied it can only *raise* an otherwise-supercritical tick to
+            CRITICAL; it never overrides a stall or a CSD detection.  The
+            model is fed from the main loop, not from here -- this detector
+            reads state, it does not drive detectors.
     """
 
     def __init__(
@@ -39,12 +49,14 @@ class CoverageRegimeDetector:
         stall_threshold: int = 5000,
         csd_rise_threshold: float = 1.5,
         regime_history_size: int = 100,
+        garch=None,
     ) -> None:
         self._csd = csd
         self._homogeneity = homogeneity
         self._stall_threshold = stall_threshold
         self._csd_rise_threshold = csd_rise_threshold
         self._regime_history_size = regime_history_size
+        self._garch = garch
 
         self._regime: CoverageRegime = CoverageRegime.SUPERCRITICAL
         self._last_regime: CoverageRegime | None = None
@@ -137,6 +149,17 @@ class CoverageRegimeDetector:
             self._actionable = self._last_regime != CoverageRegime.CRITICAL
             return
 
+        # GARCH: the conditional variance is forecast well above its own
+        # unconditional level while the clustering is statistically real.
+        # Rising variance is the same precursor CSD looks for; this leg only
+        # sees it one tick earlier, so it sits directly after CSD.
+        spike_reason = self._garch_spike()
+        if spike_reason:
+            self._regime = CoverageRegime.CRITICAL
+            self._reason = spike_reason
+            self._actionable = self._last_regime != CoverageRegime.CRITICAL
+            return
+
         # Homogeneity: clustered coverage without a CSD signal = biased
         # exploration, i.e. subcritical in the percolation sense.
         if homogeneity_result is not None and not homogeneity_result.get("homogeneous", True):
@@ -155,6 +178,25 @@ class CoverageRegimeDetector:
         self._actionable = (
             self._last_regime is not None and self._last_regime != CoverageRegime.SUPERCRITICAL
         )
+
+    def _garch_spike(self) -> str:
+        """Reason string for a forecast volatility spike, or "" for none."""
+        if self._garch is None or not self._garch.clustering:
+            return ""
+
+        forecast = self._garch.forecast()
+        baseline = self._garch.unconditional_variance
+        if forecast is None or forecast < _GARCH_SPIKE_FACTOR * baseline:
+            return ""
+
+        return (
+            f"volatility clustering (sigma2 {forecast:.3g} vs {baseline:.3g} baseline, "
+            f"persistence {self._garch.persistence:.2f}) -- critical: variance spike ahead"
+        )
+
+    @property
+    def garch(self):
+        return self._garch
 
     @property
     def regime(self) -> CoverageRegime:
@@ -183,6 +225,8 @@ class CoverageRegimeDetector:
         self._actionable = False
         self._regime_history.clear()
         self._stall_triggered = False
+        if self._garch is not None:
+            self._garch.reset()
         if self._csd is not None:
             self._csd.reset()
         if self._homogeneity is not None:
@@ -193,7 +237,7 @@ class CoverageRegimeDetector:
             )
 
     def save(self) -> dict:
-        return {
+        data = {
             "regime": self._regime.value,
             "reason": self._reason,
             "actionable": self._actionable,
@@ -203,6 +247,9 @@ class CoverageRegimeDetector:
             # CoverageHomogeneityDetector has no save(); its
             # _column_histories are recomputed from the replay buffer.
         }
+        if self._garch is not None:
+            data["garch"] = self._garch.save()
+        return data
 
     def load(self, data: dict) -> None:
         if not data:
@@ -214,6 +261,8 @@ class CoverageRegimeDetector:
         self._stall_triggered = data.get("stall_triggered", False)
         if "csd" in data:
             self._csd.load(data["csd"])
+        if "garch" in data and self._garch is not None:
+            self._garch.load(data["garch"])
         # CoverageHomogeneityDetector is re-created fresh on load;
         # its column history is rebuilt by replaying the fuzzer's
         # record_coverage_snapshot() calls during resume.
