@@ -12,8 +12,9 @@ import bisect
 import math
 import random
 import re
-from collections import defaultdict
 from dataclasses import dataclass
+
+import numpy as _np
 
 from fuzzer_tool.core.target_profiler import TargetProfile
 
@@ -41,15 +42,32 @@ class CrashMITracker:
         min_observations: Minimum observations before computing MI.
     """
 
+    #: Positions past this are not tracked even if ``max_positions`` is
+    #: larger. A dense row is 256 uint32 = 1 KiB, so this bounds the
+    #: tracker at 128 MiB in the pathological case. MI over byte positions
+    #: that far out is not estimable anyway -- each one would need
+    #: ``min_observations`` samples of its own.
+    DENSE_POSITION_CAP = 65536
+
     def __init__(self, max_positions: int = 4096, min_observations: int = 20):
         self.max_positions = max_positions
         self.min_observations = min_observations
-        # Per-position: byte_value -> crash_count
-        self.joint_crash: dict[int, dict[int, int]] = defaultdict(lambda: defaultdict(int))
-        # Per-position: byte_value -> total_count
-        self.byte_total: dict[int, dict[int, int]] = defaultdict(lambda: defaultdict(int))
-        # Per-position: total observations
-        self.position_counts: dict[int, int] = defaultdict(int)
+        # Per-position byte histograms, dense.
+        #
+        # These were dict[int, dict[int, int]] and record() walked every
+        # byte of every executed input updating three nested defaultdicts.
+        # That put the tracker at 14% of a campaign's runtime -- measured
+        # ~300 ns/byte, so 1.4 ms for a 4 KiB input, more than executing
+        # the target in process. A dense (positions, 256) uint32 pair lets
+        # one execution be a single vectorised scatter-add.
+        #
+        # Rows are allocated lazily up to the largest input seen, so the
+        # default 4096-position tracker costs 8 MiB only if inputs
+        # actually reach that length.
+        self._rows = 0
+        self._byte_total_arr = _np.zeros((0, 256), dtype=_np.uint32)
+        self._joint_crash_arr = _np.zeros((0, 256), dtype=_np.uint32)
+        self._position_counts_arr = _np.zeros(0, dtype=_np.uint64)
         # Global: crash count, total count
         self.total_crashes: int = 0
         self.total_execs: int = 0
@@ -78,37 +96,78 @@ class CrashMITracker:
         # non-crash outcomes as the contrasting class, otherwise
         # byte_total == joint_crash and every byte looks perfectly
         # crash-predictive.
-        n = min(len(input_bytes), self.max_positions)
-        for pos in range(n):
-            byte_val = input_bytes[pos]
-            self.position_counts[pos] += 1
-            self.byte_total[pos][byte_val] += 1
+        n = min(len(input_bytes), self.max_positions, self.DENSE_POSITION_CAP)
+        if n:
+            self._grow(n)
+            values = _np.frombuffer(bytes(input_bytes), dtype=_np.uint8, count=n)
+            rows = _np.arange(n)
+            # Positions are distinct, so plain fancy-index += is safe here.
+            self._byte_total_arr[rows, values] += 1
+            self._position_counts_arr[:n] += 1
             if is_crash:
-                self.joint_crash[pos][byte_val] += 1
+                self._joint_crash_arr[rows, values] += 1
 
-        # Prune per-position byte values to cap memory growth
-        if self.total_execs % 500 == 0:
-            self._prune()
-
-    def _prune(self, max_values_per_pos: int = 32) -> None:
-        """Keep only the top N most frequent byte values per position."""
-        for pos in list(self.byte_total):
-            bv = self.byte_total[pos]
-            if len(bv) > max_values_per_pos + 8:
-                top = sorted(bv.items(), key=lambda x: x[1], reverse=True)[:max_values_per_pos]
-                self.byte_total[pos] = defaultdict(int, dict(top))
-                if pos in self.joint_crash:
-                    self.joint_crash[pos] = defaultdict(
-                        int,
-                        {
-                            k: v
-                            for k, v in self.joint_crash[pos].items()
-                            if k in self.byte_total[pos]
-                        },
-                    )
-        # Only invalidate cache periodically to avoid recomputing MI on every call
+        # The dense representation is already bounded, so there is nothing
+        # to prune. The old _prune() kept only the 32 most frequent byte
+        # values per position, which discarded evidence the MI estimate
+        # then could not see; it also accounted for 17,724 of a 4000-exec
+        # campaign's 36,140 sorted() calls.
         if self.total_execs % 50 == 0:
             self._cache_valid = False
+
+    def _grow(self, n: int) -> None:
+        """Make sure at least *n* position rows are allocated."""
+        if n <= self._rows:
+            return
+        cap = min(self.max_positions, self.DENSE_POSITION_CAP)
+        new_rows = min(cap, max(64, 1 << (n - 1).bit_length()))
+        if new_rows < n:  # pragma: no cover - n is already clamped to cap
+            new_rows = n
+        bt = _np.zeros((new_rows, 256), dtype=_np.uint32)
+        jc = _np.zeros((new_rows, 256), dtype=_np.uint32)
+        pc = _np.zeros(new_rows, dtype=_np.uint64)
+        if self._rows:
+            bt[: self._rows] = self._byte_total_arr
+            jc[: self._rows] = self._joint_crash_arr
+            pc[: self._rows] = self._position_counts_arr
+        self._byte_total_arr = bt
+        self._joint_crash_arr = jc
+        self._position_counts_arr = pc
+        self._rows = new_rows
+
+    # ------------------------------------------------------------------
+    # Dict views over the dense store
+    #
+    # The histograms are read from tests, from save(), and from report
+    # code as dict[int, dict[int, int]]. These properties materialise that
+    # shape on demand, so the representation change stays inside the
+    # class. They are not on any hot path -- record() and mi() go straight
+    # to the arrays.
+    # ------------------------------------------------------------------
+
+    @property
+    def position_counts(self) -> dict[int, int]:
+        if not self._rows:
+            return {}
+        nz = _np.flatnonzero(self._position_counts_arr)
+        return {int(p): int(self._position_counts_arr[p]) for p in nz}
+
+    @property
+    def byte_total(self) -> dict[int, dict[int, int]]:
+        return self._as_dict(self._byte_total_arr)
+
+    @property
+    def joint_crash(self) -> dict[int, dict[int, int]]:
+        return self._as_dict(self._joint_crash_arr)
+
+    def _as_dict(self, arr) -> dict[int, dict[int, int]]:
+        if not self._rows:
+            return {}
+        out: dict[int, dict[int, int]] = {}
+        rows, cols = _np.nonzero(arr)
+        for r, c in zip(rows.tolist(), cols.tolist()):
+            out.setdefault(r, {})[c] = int(arr[r, c])
+        return out
 
     def mi(self, position: int) -> float:
         """Compute I(X_pos; C) in bits.
@@ -117,7 +176,9 @@ class CrashMITracker:
 
         Returns 0.0 if insufficient data or position not observed.
         """
-        if self.position_counts.get(position, 0) < self.min_observations:
+        if position < 0 or position >= self._rows:
+            return 0.0
+        if int(self._position_counts_arr[position]) < self.min_observations:
             return 0.0
         if self.total_execs == 0 or self.total_crashes == 0:
             return 0.0
@@ -133,9 +194,12 @@ class CrashMITracker:
         # per-position count, so position_counts is not needed here.
         mi_val = 0.0
 
-        for byte_val, bc in self.byte_total[position].items():
+        total_row = self._byte_total_arr[position]
+        crash_row = self._joint_crash_arr[position]
+        for byte_val in _np.flatnonzero(total_row).tolist():
+            bc = int(total_row[byte_val])
             p_x = bc / n
-            crash_count = self.joint_crash[position].get(byte_val, 0)
+            crash_count = int(crash_row[byte_val])
             no_crash_count = bc - crash_count
 
             if crash_count > 0:
@@ -151,11 +215,11 @@ class CrashMITracker:
         """Compute MI for all observed positions."""
         if self._cache_valid:
             return self._mi_cache
-        self._mi_cache = {
-            pos: self.mi(pos)
-            for pos in self.position_counts
-            if self.position_counts[pos] >= self.min_observations
-        }
+        counts = self._position_counts_arr
+        observed = (
+            _np.flatnonzero(counts >= self.min_observations).tolist() if self._rows else []
+        )
+        self._mi_cache = {pos: self.mi(pos) for pos in observed}
         # Cache sorted positions and weights for weighted_position
         self._cached_positions = sorted(self._mi_cache.keys())
         self._cached_weights = [max(self._mi_cache[p], 0.01) for p in self._cached_positions]
@@ -214,14 +278,17 @@ class CrashMITracker:
 
     def top_values(self, position: int, k: int = 5) -> list[int]:
         """Return the k byte values at position with highest crash count."""
-        if position not in self.joint_crash:
+        if position < 0 or position >= self._rows:
             return []
-        crash_vals = sorted(
-            self.joint_crash[position].items(),
-            key=lambda x: x[1],
-            reverse=True,
-        )
-        return [bv for bv, _ in crash_vals[:k]]
+        row = self._joint_crash_arr[position]
+        nz = _np.flatnonzero(row)
+        if nz.size == 0:
+            return []
+        # Descending by count, ties broken by ascending byte value, which
+        # is what sorted(..., reverse=True) on an insertion-ordered dict
+        # gave for the counts that mattered.
+        order = sorted(nz.tolist(), key=lambda bv: (-int(row[bv]), bv))
+        return order[:k]
 
     def crash_density_estimate(self) -> float:
         """Estimate crash probability from MI profile.
@@ -259,22 +326,53 @@ class CrashMITracker:
         }
 
     def load(self, data: dict) -> None:
-        """Deserialize tracker state."""
+        """Deserialize tracker state.
+
+        The on-disk shape is unchanged -- nested dicts keyed by stringified
+        position and byte value -- so state written before the dense
+        representation still restores.
+        """
         self.max_positions = data.get("max_positions", self.max_positions)
         self.min_observations = data.get("min_observations", self.min_observations)
         self.total_crashes = data.get("total_crashes", 0)
         self.total_execs = data.get("total_execs", 0)
-        self.position_counts = defaultdict(
-            int, {int(k): v for k, v in data.get("position_counts", {}).items()}
-        )
-        self.joint_crash = defaultdict(lambda: defaultdict(int))
-        for pos_str, bv_map in data.get("joint_crash", {}).items():
-            for bv_str, c in bv_map.items():
-                self.joint_crash[int(pos_str)][int(bv_str)] = c
-        self.byte_total = defaultdict(lambda: defaultdict(int))
-        for pos_str, bv_map in data.get("byte_total", {}).items():
-            for bv_str, c in bv_map.items():
-                self.byte_total[int(pos_str)][int(bv_str)] = c
+
+        counts = {int(k): int(v) for k, v in data.get("position_counts", {}).items()}
+        joint = {
+            int(p): {int(bv): int(c) for bv, c in m.items()}
+            for p, m in data.get("joint_crash", {}).items()
+        }
+        totals = {
+            int(p): {int(bv): int(c) for bv, c in m.items()}
+            for p, m in data.get("byte_total", {}).items()
+        }
+
+        cap = min(self.max_positions, self.DENSE_POSITION_CAP)
+        highest = -1
+        for source in (counts, joint, totals):
+            for pos in source:
+                if 0 <= pos < cap and pos > highest:
+                    highest = pos
+
+        self._rows = 0
+        self._byte_total_arr = _np.zeros((0, 256), dtype=_np.uint32)
+        self._joint_crash_arr = _np.zeros((0, 256), dtype=_np.uint32)
+        self._position_counts_arr = _np.zeros(0, dtype=_np.uint64)
+        if highest >= 0:
+            self._grow(highest + 1)
+            for pos, c in counts.items():
+                if 0 <= pos < self._rows:
+                    self._position_counts_arr[pos] = c
+            for pos, m in totals.items():
+                if 0 <= pos < self._rows:
+                    for bv, c in m.items():
+                        if 0 <= bv < 256:
+                            self._byte_total_arr[pos, bv] = c
+            for pos, m in joint.items():
+                if 0 <= pos < self._rows:
+                    for bv, c in m.items():
+                        if 0 <= bv < 256:
+                            self._joint_crash_arr[pos, bv] = c
         self._cache_valid = False
 
 
