@@ -17,7 +17,6 @@ import pytest
 
 from fuzzer_tool.core.crash_eta import CrashMITracker
 
-
 # ---------------------------------------------------------------------------
 # Oracle: the old dict-of-dicts counting, without the prune.
 # ---------------------------------------------------------------------------

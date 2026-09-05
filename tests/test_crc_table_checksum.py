@@ -17,7 +17,6 @@ import pytest
 
 from fuzzer_tool.core.berlekamp_massey import _crc_table, _reverse_bits, compute_checksum
 
-
 # ---------------------------------------------------------------------------
 # Oracle: the bit-at-a-time loops, verbatim.
 # ---------------------------------------------------------------------------

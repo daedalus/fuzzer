@@ -16,7 +16,6 @@ import pytest
 
 from fuzzer_tool.core.mutations.fractal_voronoi import FractalVoronoiMutator
 
-
 # ---------------------------------------------------------------------------
 # Oracle: the pre-optimisation implementation, verbatim.
 # ---------------------------------------------------------------------------
@@ -165,11 +164,20 @@ def test_plan_is_reused_across_calls_of_the_same_length():
     """Repeat calls at one length must not rebuild the geometry."""
     m = FractalVoronoiMutator()
     m.mutate(os.urandom(400), None)
-    hits_before = FractalVoronoiMutator._plan.cache_info().hits
+    assert len(m._plan_cache) == 1
+    cached = next(iter(m._plan_cache.values()))
     for _ in range(5):
         m.mutate(os.urandom(400), None)
-    hits_after = FractalVoronoiMutator._plan.cache_info().hits
-    assert hits_after - hits_before >= 5
+    assert len(m._plan_cache) == 1
+    assert next(iter(m._plan_cache.values())) is cached
+
+
+def test_plan_cache_is_bounded_and_per_instance():
+    m = FractalVoronoiMutator()
+    for n in range(64, 64 + m._PLAN_CACHE_MAX + 4):
+        m.mutate(os.urandom(n), None)
+    assert len(m._plan_cache) <= m._PLAN_CACHE_MAX
+    assert FractalVoronoiMutator()._plan_cache == {}
 
 
 def test_max_len_still_truncates():

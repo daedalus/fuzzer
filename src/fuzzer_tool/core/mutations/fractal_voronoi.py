@@ -49,6 +49,13 @@ class FractalVoronoiMutator(MutatorBase):
             raise ValueError("max_depth must be >= 1")
         self.max_depth = max_depth
         self.cell_ops = cell_ops or []
+        # Per-instance geometry caches. These are plain dicts rather than
+        # lru_cache-decorated methods so they are bounded explicitly and
+        # released with the instance -- a method-level lru_cache keys on
+        # self and would keep every mutator that ever ran alive.
+        self._boundary_cache: dict[tuple[int, tuple[int, int]], bool] = {}
+        self._root_hash_cache: dict[tuple[int, int], int] = {}
+        self._plan_cache: dict[tuple[int, int, int], tuple] = {}
 
     # ------------------------------------------------------------------
     # Voronoi geometry (deterministic, cached)
@@ -134,7 +141,6 @@ class FractalVoronoiMutator(MutatorBase):
             depth -= 1
         return cell
 
-    @lru_cache(maxsize=4096)
     def _boundary_cell(self, depth: int, cell: tuple[int, int]) -> bool:
         """Whether *cell* touches a cell with a different root.
 
@@ -142,14 +148,21 @@ class FractalVoronoiMutator(MutatorBase):
         point falls in, so it is cacheable on the cell. Every point inside
         a cell shares one answer.
         """
+        key = (depth, cell)
+        cached = self._boundary_cache.get(key)
+        if cached is not None:
+            return cached
         root = self._root(depth, cell)
+        answer = False
         for dx, dy in (
             (-1, 0), (1, 0), (0, -1), (0, 1),
             (-1, -1), (-1, 1), (1, -1), (1, 1),
         ):
             if self._root(depth, (cell[0] + dx, cell[1] + dy)) != root:
-                return True
-        return False
+                answer = True
+                break
+        self._boundary_cache[key] = answer
+        return answer
 
     def _is_boundary(
         self, depth: int, px: float, py: float
@@ -158,7 +171,6 @@ class FractalVoronoiMutator(MutatorBase):
         cell, _ = self._nearest_site(depth, (px, py))
         return self._boundary_cell(depth, cell)
 
-    @lru_cache(maxsize=1024)
     def _root_hash(self, root: tuple[int, int]) -> int:
         """Digest of a root cell.
 
@@ -167,9 +179,17 @@ class FractalVoronoiMutator(MutatorBase):
         roots, so this collapses one SHA-256 plus a 256-bit int parse per
         byte down to one per root.
         """
-        return int(hashlib.sha256(f"root:{root}".encode()).hexdigest(), 16)
+        cached = self._root_hash_cache.get(root)
+        if cached is None:
+            cached = int(hashlib.sha256(f"root:{root}".encode()).hexdigest(), 16)
+            self._root_hash_cache[root] = cached
+        return cached
 
-    @lru_cache(maxsize=16)
+    #: Distinct input lengths whose plans are kept. Small on purpose: a
+    #: plan is one entry per byte, so a handful of long inputs is already
+    #: megabytes.
+    _PLAN_CACHE_MAX = 16
+
     def _plan(self, side: int, n: int) -> tuple[tuple[int, bool, tuple[int, int], float, float], ...]:
         """Per-index ``(root_hash, on_boundary, root, px, py)``.
 
@@ -180,6 +200,10 @@ class FractalVoronoiMutator(MutatorBase):
         computing it once per distinct input length makes repeat calls
         arithmetic.
         """
+        key = (side, n, self.max_depth)
+        cached = self._plan_cache.get(key)
+        if cached is not None:
+            return cached
         plan = []
         for idx in range(n):
             y, x = divmod(idx, side)
@@ -196,7 +220,11 @@ class FractalVoronoiMutator(MutatorBase):
                     py,
                 )
             )
-        return tuple(plan)
+        result = tuple(plan)
+        if len(self._plan_cache) >= self._PLAN_CACHE_MAX:
+            self._plan_cache.clear()
+        self._plan_cache[key] = result
+        return result
 
     # ------------------------------------------------------------------
     # MutatorBase contract

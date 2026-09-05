@@ -165,7 +165,7 @@ class CrashMITracker:
             return {}
         out: dict[int, dict[int, int]] = {}
         rows, cols = _np.nonzero(arr)
-        for r, c in zip(rows.tolist(), cols.tolist()):
+        for r, c in zip(rows.tolist(), cols.tolist(), strict=True):
             out.setdefault(r, {})[c] = int(arr[r, c])
         return out
 

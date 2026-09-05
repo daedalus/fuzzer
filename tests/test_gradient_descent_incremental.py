@@ -22,9 +22,7 @@ from fuzzer_tool.core.gradient_descent import (
     _interesting_for_width,
     _window_distance,
     gradient_descent,
-    pick_target,
 )
-
 
 # ---------------------------------------------------------------------------
 # Oracle: the old copy-and-rescore probe loop, verbatim, over a fixed site.

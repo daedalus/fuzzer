@@ -23,7 +23,6 @@ from fuzzer_tool.core.mutations.generic import (
     _LIT_SYMBOL,
 )
 
-
 # ---------------------------------------------------------------------------
 # Oracle: the original predicates, inline.
 # ---------------------------------------------------------------------------
