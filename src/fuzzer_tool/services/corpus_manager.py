@@ -263,6 +263,40 @@ def seed_key(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()[:16]
 
 
+def _retire_seed_file(corpus_dir: Path, h: str) -> bool:
+    """Move the on-disk record for content hash *h* into the ``pruned/`` subtrees.
+
+    Retire rather than unlink: ``rehydrate_by_hash()`` searches
+    ``seeds/pruned/`` and ``deltas/pruned/``, so a child seed stored as a
+    delta against this one can still be reconstructed afterwards. This is the
+    same move ``auto_minimize_corpus()`` performs; that one walks every file
+    against a kept-set, this one looks up a single hash.
+
+    Returns True if something was moved.
+    """
+    if not corpus_dir:
+        return False
+    corpus_dir = Path(corpus_dir)
+    moved = False
+
+    full = corpus_dir / "seeds" / h[:2] / f"id_{h}"
+    if full.is_file():
+        dest = corpus_dir / "seeds" / "pruned" / h[:2]
+        dest.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(full), str(dest / full.name))
+        moved = True
+
+    deltas_dir = corpus_dir / "deltas"
+    for delta in (deltas_dir / f"delta_{h}.json", deltas_dir / h[:2] / f"delta_{h}.json"):
+        if delta.is_file():
+            dest = deltas_dir / "pruned" / h[:2]
+            dest.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(delta), str(dest / delta.name))
+            moved = True
+
+    return moved
+
+
 class CorpusManager:
     """Manages corpus persistence, state, and minimization.
 
@@ -920,6 +954,26 @@ class CorpusManager:
         if data in f.corpus:
             idx = f.corpus.index(data)
             f.corpus[idx] = trimmed
+            # Persist the swap. The in-memory replacement alone lost the seed
+            # outright (finding #27): the trimmed bytes were never written, and
+            # auto_minimize_corpus() builds its kept-set from f.corpus, so the
+            # ORIGINAL file -- whose hash is no longer in that set -- was moved
+            # to pruned/ on the next minimize pass. After a resume the corpus
+            # held neither. Persistence belongs inside the mutating function,
+            # which is the rule this violated.
+            #
+            # parent=None on purpose: a delta would be encoded against the
+            # original, which is being retired in the same breath.
+            from fuzzer_tool.adapters.filesystem import save_to_corpus as _save_to_corpus
+
+            _save_to_corpus(trimmed, f.corpus_dir, f.seen_hashes, f.bloom)
+            # Retire, not unlink, so any child stored as a delta against the
+            # original can still be rehydrated out of pruned/.
+            _retire_seed_file(f.corpus_dir, hash_data(data))
+            # hash_data(data) deliberately STAYS in seen_hashes. The original
+            # was not lost, it was replaced by a smaller input covering the
+            # same edges; re-admitting it later would undo the trim on every
+            # regeneration.
             f.seed_meta[trimmed] = {
                 "fuzz_count": 0,
                 "coverage_edges": f._edge_tracker.get_seed_edge_count(seed_key),
