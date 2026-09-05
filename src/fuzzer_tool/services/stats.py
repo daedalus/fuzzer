@@ -628,6 +628,15 @@ class StatsReporter:
         flag = " clust" if g.clustering else ""
         return f" | vol: {forecast:.2f} (p={g.persistence:.2f}){flag}"
 
+    def _print_stats_continuum_str(self, f) -> str:
+        """Format the steady continuum diagnostics, when the field exists."""
+        field = getattr(f, "_continuum", None)
+        diag = field.diagnostics if field is not None else None
+        if diag is None:
+            return ""
+
+        return f" | Re: {diag.reynolds:.2f} gp: {diag.pressure_gradient:.2f}"
+
     def print_stats(self):
         f = self.f
         elapsed = time.time() - f.start_time
@@ -773,7 +782,11 @@ class StatsReporter:
             else ""
         )
 
-        dr_str = self._print_stats_dr_str(f) + self._print_stats_garch_str(f)
+        dr_str = (
+            self._print_stats_dr_str(f)
+            + self._print_stats_garch_str(f)
+            + self._print_stats_continuum_str(f)
+        )
 
         density_str = self._print_stats_density_str(f)
 

@@ -393,6 +393,7 @@ def cmd_fuzz(args):
             exp3=getattr(args, "exp3", False),
             invasion=getattr(args, "invasion", False),
             garch=getattr(args, "garch", False),
+            continuum=getattr(args, "continuum", False),
             exp3_gamma=getattr(args, "exp3_gamma", 0.1),
             eps_greedy=getattr(args, "eps_greedy", False),
             eps_greedy_epsilon0=getattr(args, "eps_greedy_epsilon0", 1.0),
@@ -445,6 +446,7 @@ def cmd_fuzz(args):
         args.contextual = True
         args.invasion = True
         args.garch = True
+        args.continuum = True
         args.ga = True
         args.qea = True
         args.bayesian = True
@@ -559,6 +561,7 @@ def cmd_fuzz(args):
         exp3=getattr(args, "exp3", False),
         invasion=getattr(args, "invasion", False),
         garch=getattr(args, "garch", False),
+        continuum=getattr(args, "continuum", False),
         exp3_gamma=getattr(args, "exp3_gamma", 0.1),
         eps_greedy=getattr(args, "eps_greedy", False),
         eps_greedy_epsilon0=getattr(args, "eps_greedy_epsilon0", 1.0),
@@ -1566,6 +1569,7 @@ _HAIL_MARY_FLAGS = (
     "contextual",
     "invasion",
     "garch",
+    "continuum",
     "overlap_density",
     "poisson_disk_admission",
     "secretary",
@@ -1890,6 +1894,14 @@ def main() -> int:
         help="Model the conditional variance of the per-tick edge-discovery delta with an "
         "online GARCH(1,1). Emits a one-step volatility forecast on the stats line and can "
         "raise an otherwise-healthy tick to CRITICAL when clustering is statistically real.",
+    )
+    fuzz_parser.add_argument(
+        "--continuum",
+        action="store_true",
+        help="Steady continuum diagnostics over the coverage frontier (pressure, gradient, "
+        "viscosity, graph Reynolds ratio). Records against the regime label and, with "
+        "--mc-bandit, ranks invasion operators by predicted flux instead of raw resistance. "
+        "Nothing is time-integrated.",
     )
     fuzz_parser.add_argument(
         "--exp3-gamma",

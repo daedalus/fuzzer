@@ -3610,7 +3610,12 @@ class OperatorEngine:
             # violation.
             all_stats = f.mc.bandit_stats()
             op_stats = {op: all_stats[op] for op in ops if op in all_stats}
-            op = invasion_select(op_stats) or self.ctx.rand_pool.choice(ops)
+            # Continuum ranking when a field exists: same stuck contract,
+            # different winner. flux_map() is empty until the field has been
+            # observed, and an empty map falls back to pure resistance.
+            continuum = getattr(f, "_continuum", None)
+            flux_map = continuum.flux_map(op_stats) if continuum is not None else None
+            op = invasion_select(op_stats, flux_map=flux_map) or self.ctx.rand_pool.choice(ops)
             f._last_mopt_particles.append(None)
         elif f._use_replicator and f._replicator:
             op = f._replicator.select_op(ops)

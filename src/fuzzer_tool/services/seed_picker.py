@@ -127,6 +127,7 @@ def invasion_select(
     operator_stats: dict[str, tuple[float, float]],
     frontier_edges: set[int] | None = None,
     resistance_threshold: float = INVASION_STUCK_THRESHOLD,
+    flux_map: dict[str, float] | None = None,
 ) -> str | None:
     """Select the operator with lowest resistance on the current frontier.
 
@@ -149,27 +150,67 @@ def invasion_select(
             invade on this frontier, regardless of operator stats.
         resistance_threshold: resistance at or above which an operator
             counts as stuck on this frontier.
+        flux_map: optional name -> predicted flux from
+            ``core/navier_stokes.ContinuumField.flux_map()``.  The continuum
+            generalisation of the discrete rule: rank by highest predicted
+            flux instead of lowest raw resistance.  Entries absent from
+            ``operator_stats`` are ignored, so a stale map can never return
+            an operator the caller did not offer.
 
     Returns:
-        The lowest-resistance operator name, or ``None`` when
-        ``operator_stats`` is empty, ``frontier_edges`` is an empty
-        collection, or every operator is stuck.
+        The selected operator name, or ``None`` when ``operator_stats`` is
+        empty, ``frontier_edges`` is an empty collection, or every operator
+        is stuck.
+
+    The stuck test is *always* the resistance predicate, in both modes.
+    Flux decides which arm wins; it never decides whether the cluster is
+    stuck, so the Elo ballot sees exactly the same "give up" contract with
+    the continuum path on or off.
     """
     if not operator_stats:
         return None
     if frontier_edges is not None and not frontier_edges:
         return None
 
-    best_op: str | None = None
-    best_resistance: float | None = None
-    for op in sorted(operator_stats):  # sorted: deterministic tie-break
-        successes, failures = operator_stats[op]
-        resistance = _resistance(successes, failures)
-        if best_resistance is None or resistance < best_resistance:
-            best_op, best_resistance = op, resistance
+    best_op = _rank_by_flux(operator_stats, flux_map) or _rank_by_resistance(operator_stats)
+    if best_op is None:
+        return None
 
-    if best_resistance is None or best_resistance >= resistance_threshold:
+    successes, failures = operator_stats[best_op]
+    if _resistance(successes, failures) >= resistance_threshold:
         return None  # every operator stuck
+
+    return best_op
+
+
+def _rank_by_resistance(operator_stats: dict[str, tuple[float, float]]) -> str | None:
+    """Lowest inverse success rate; sorted() keys give a deterministic tie-break."""
+    best_op: str | None = None
+    best: float | None = None
+    for op in sorted(operator_stats):
+        resistance = _resistance(*operator_stats[op])
+        if best is None or resistance < best:
+            best_op, best = op, resistance
+
+    return best_op
+
+
+def _rank_by_flux(
+    operator_stats: dict[str, tuple[float, float]],
+    flux_map: dict[str, float] | None,
+) -> str | None:
+    """Highest predicted flux among offered operators; None when unusable."""
+    if not flux_map:
+        return None
+
+    best_op: str | None = None
+    best: float | None = None
+    for op in sorted(operator_stats):
+        value = flux_map.get(op)
+        if value is None:
+            continue
+        if best is None or value > best:
+            best_op, best = op, value
 
     return best_op
 

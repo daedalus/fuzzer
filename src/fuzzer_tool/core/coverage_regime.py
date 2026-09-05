@@ -40,6 +40,15 @@ class CoverageRegimeDetector:
             CRITICAL; it never overrides a stall or a CSD detection.  The
             model is fed from the main loop, not from here -- this detector
             reads state, it does not drive detectors.
+        continuum: Optional
+            :class:`~fuzzer_tool.core.navier_stokes.ContinuumField`.
+            Instrumentation only: it annotates ``reason`` and feeds
+            :meth:`continuum_correlation`, and never changes the label.
+            Handover §6 orders the work that way -- the Reynolds diagnostic
+            is promoted to a classification input only once it has been
+            shown to track the existing CRITICAL label, and correlation is
+            what makes that check possible.  If it never does, the lift adds
+            no information and the field should be dropped.
     """
 
     def __init__(
@@ -50,6 +59,7 @@ class CoverageRegimeDetector:
         csd_rise_threshold: float = 1.5,
         regime_history_size: int = 100,
         garch=None,
+        continuum=None,
     ) -> None:
         self._csd = csd
         self._homogeneity = homogeneity
@@ -57,6 +67,8 @@ class CoverageRegimeDetector:
         self._csd_rise_threshold = csd_rise_threshold
         self._regime_history_size = regime_history_size
         self._garch = garch
+        self._continuum = continuum
+        self._continuum_history: list[tuple[CoverageRegime, float]] = []
 
         self._regime: CoverageRegime = CoverageRegime.SUPERCRITICAL
         self._last_regime: CoverageRegime | None = None
@@ -105,6 +117,8 @@ class CoverageRegimeDetector:
             execs_since_edge=execs_since_edge,
             exec_count=exec_count,
         )
+
+        self._record_continuum()
 
         # Persist the stall-triggered flag.
         if execs_since_edge >= self._stall_threshold:
@@ -179,6 +193,33 @@ class CoverageRegimeDetector:
             self._last_regime is not None and self._last_regime != CoverageRegime.SUPERCRITICAL
         )
 
+    def _record_continuum(self) -> None:
+        """Annotate the reason and log (regime, Re) for the correlation check."""
+        diag = self._continuum.diagnostics if self._continuum is not None else None
+        if diag is None:
+            return
+
+        self._reason += f" | Re={diag.reynolds:.3g} |grad p|={diag.pressure_gradient:.3g}"
+        self._continuum_history.append((self._regime, diag.reynolds))
+        if len(self._continuum_history) > self._regime_history_size:
+            self._continuum_history = self._continuum_history[-self._regime_history_size :]
+
+    def continuum_correlation(self) -> dict:
+        """Mean Reynolds ratio per regime label over the recorded window.
+
+        Handover §6 step 2: the continuum lift is only worth promoting if Re
+        separates the labels the discrete detector already produces.
+        """
+        buckets: dict[CoverageRegime, list[float]] = {}
+        for regime, re_value in self._continuum_history:
+            buckets.setdefault(regime, []).append(re_value)
+
+        return {k: sum(v) / len(v) for k, v in buckets.items()}
+
+    @property
+    def continuum(self):
+        return self._continuum
+
     def _garch_spike(self) -> str:
         """Reason string for a forecast volatility spike, or "" for none."""
         if self._garch is None or not self._garch.clustering:
@@ -224,7 +265,10 @@ class CoverageRegimeDetector:
         self._reason = "reset"
         self._actionable = False
         self._regime_history.clear()
+        self._continuum_history.clear()
         self._stall_triggered = False
+        if self._continuum is not None:
+            self._continuum.reset()
         if self._garch is not None:
             self._garch.reset()
         if self._csd is not None:
@@ -249,6 +293,8 @@ class CoverageRegimeDetector:
         }
         if self._garch is not None:
             data["garch"] = self._garch.save()
+        if self._continuum is not None:
+            data["continuum"] = self._continuum.save()
         return data
 
     def load(self, data: dict) -> None:
@@ -263,6 +309,8 @@ class CoverageRegimeDetector:
             self._csd.load(data["csd"])
         if "garch" in data and self._garch is not None:
             self._garch.load(data["garch"])
+        if "continuum" in data and self._continuum is not None:
+            self._continuum.load(data["continuum"])
         # CoverageHomogeneityDetector is re-created fresh on load;
         # its column history is rebuilt by replaying the fuzzer's
         # record_coverage_snapshot() calls during resume.

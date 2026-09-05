@@ -340,6 +340,12 @@ META_STRATEGY_CHOICES_MAX = 1_000  # max meta-strategy choice history entries
 # ── Allan variance detector ───────────────────────────────────────────
 ALLAN_BUFFER_POW = 8  # 2^8 = 256 samples
 ALLAN_MIN_SAMPLES = 8  # minimum before noise_type() returns a result
+
+# ── Continuum diagnostics ─────────────────────────────────────────────
+# Stats ticks between co-occurrence graph rebuilds, and pairs kept per
+# rebuild. The rebuild is the only non-O(1) part of the continuum path.
+CONTINUUM_GRAPH_TICKS = 10
+CONTINUUM_GRAPH_PAIRS = 64
 # ── Stall reseeding (--reseed-on-stall) ───────────────────────────────
 # splitmix64 constants: the derived seed must decorrelate from `self.seed`
 # even though it is a small additive offset away from it.  A bare
@@ -742,6 +748,7 @@ class Fuzzer:
         elo=False,
         invasion=False,
         garch=False,
+        continuum=False,
         exp3=False,
         exp3_gamma=0.1,
         eps_greedy=False,
@@ -1827,6 +1834,7 @@ class Fuzzer:
             CriticalSlowingDown,
         )
         from fuzzer_tool.core.garch import OnlineGarch11
+        from fuzzer_tool.core.navier_stokes import ContinuumField
 
         self._csd = CriticalSlowingDown(window_size=50, rise_threshold=1.5, min_observations=20)
 
@@ -1847,6 +1855,15 @@ class Fuzzer:
         self._use_garch = garch
         self._garch = OnlineGarch11() if garch else None
 
+        # Steady continuum diagnostics over the frontier.  Instrumentation
+        # for the regime detector; the only behavioural use is the flux
+        # ranking inside invasion_select, which needs the MC bandit's stats
+        # for the same reason --invasion does.
+        self._use_continuum = continuum
+        self._continuum = ContinuumField() if continuum else None
+        self._continuum_adjacency: dict = {}
+        self._continuum_graph_tick = 0
+
         # Coverage regime detector: percolation phase classification
         # (subcritical / critical / supercritical).  Wraps the existing
         # CriticalSlowingDown + CoverageHomogeneityDetector + stall
@@ -1856,6 +1873,7 @@ class Fuzzer:
             homogeneity=self._homogeneity,
             stall_threshold=self._stall_threshold,
             garch=self._garch,
+            continuum=self._continuum,
         )
         if self._garch is not None:
             self._garch.load(self._state_store.get("garch") or {})
@@ -1972,6 +1990,13 @@ class Fuzzer:
             log.warning(
                 "--invasion has no effect without --mc-bandit (invasion_select "
                 "reads operator success/failure stats from the MC bandit tracker)"
+            )
+
+        if continuum and not (self.mc and self.mc_bandit):
+            log.warning(
+                "--continuum has no effect on operator ranking without --mc-bandit "
+                "(the flux map is built from the MC bandit's success/failure stats); "
+                "regime diagnostics still record"
             )
 
         # Chi-squared operator heterogeneity test interval
@@ -4982,6 +5007,48 @@ class Fuzzer:
             return self.stats_interval
         return max(1, int(10 * last_avg_eps))
 
+    def _continuum_graph(self) -> dict:
+        """Frontier adjacency from edge co-occurrence, refreshed on a budget.
+
+        ``edge_cooccurrence`` walks every seed's edge set to build its
+        edge->seeds map, so it is O(sum of seed edge counts) per call --
+        affordable occasionally, not every tick (Hard Rule 41).  The cached
+        graph is reused in between; a stale graph only softens the pressure
+        gradient, it cannot select an operator the caller did not offer.
+        """
+        self._continuum_graph_tick += 1
+        stale = self._continuum_graph_tick % CONTINUUM_GRAPH_TICKS == 1
+        if self._continuum_adjacency and not stale:
+            return self._continuum_adjacency
+
+        adjacency: dict[int, set[int]] = {}
+        for edge_a, edge_b, _jaccard in self._edge_tracker.edge_cooccurrence(
+            top_k=CONTINUUM_GRAPH_PAIRS
+        ):
+            adjacency.setdefault(edge_a, set()).add(edge_b)
+            adjacency.setdefault(edge_b, set()).add(edge_a)
+
+        self._continuum_adjacency = adjacency
+        return adjacency
+
+    def _observe_continuum(self, delta: int, hit_counts: dict) -> None:
+        """Recompute the steady continuum fields for this tick."""
+        if self._continuum is None:
+            return
+
+        stats = self.mc.bandit_stats() if (self.mc and self.mc_bandit) else {}
+        wins = sum(s for s, _f in stats.values())
+        losses = sum(f for _s, f in stats.values())
+        total = wins + losses
+        failure_rate = losses / total if total > 0 else 0.0
+
+        self._continuum.observe(
+            occupancy=hit_counts,
+            adjacency=self._continuum_graph(),
+            velocity=float(delta),
+            failure_rate=failure_rate,
+        )
+
     def _record_entropy_sample(self, sh):
         """Append a Shannon-entropy sample and trim history to a bounded size."""
         self._entropy_execs.append(self.exec_count)
@@ -6198,6 +6265,7 @@ class Fuzzer:
                                 )
                         except Exception as ex:
                             log.debug("Coverage homogeneity check failed: %s", ex)
+                        self._observe_continuum(delta, hit_counts)
                     # Capture the homogeneity result for the regime detector.
                     # `result` is only defined inside the shm_cov branch above;
                     # fall back to None when the detector wasn't initialised
@@ -6330,6 +6398,8 @@ class Fuzzer:
             print(f"[*] Fluctuation: saved state (samples={samples})")
         if self._garch is not None:
             self._state_store.set("garch", self._garch.save())
+        if self._continuum is not None:
+            self._state_store.set("continuum", self._continuum.save())
         self._save_state()
         if self._cmplog is not None:
             # Releases this run's .cmplog/.counts/.sites files. Nothing else
