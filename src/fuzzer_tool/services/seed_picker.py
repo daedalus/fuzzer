@@ -557,13 +557,11 @@ class SeedPicker:
             if sid not in f._seed_quality._alpha:
                 f._seed_quality.init_seed(sid)
 
-        # Thompson sample: pick the seed with the highest posterior draw
-        chosen_id = f._seed_quality.select_seed(seed_ids)
-        # Map back to the seed bytes
-        for s in f.corpus:
-            if f._seed_key(s) == chosen_id:
-                return s
-        return f._rand_pool.choice(f.corpus)
+        # Thompson sample: pick the seed with the highest posterior draw.
+        # seed_ids was built from f.corpus in order, so the winner's index
+        # is its position in the corpus -- taking the id back and scanning
+        # for it hashed the whole corpus a second time on every pick.
+        return f.corpus[f._seed_quality.select_index(seed_ids)]
 
     def _pick_by_similarity(self) -> bytes:
         """Pick a seed diverse from recently fuzzed ones using byte-level similarity.
