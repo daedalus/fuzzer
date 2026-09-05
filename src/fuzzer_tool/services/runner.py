@@ -173,7 +173,30 @@ class TargetRunner:
             # iterations' metadata (save_crash runs after run_target in fuzz_one).
             f._last_fault_addr = None
             f._last_regs = {}
-            if shm and not f._inprocess_runner.direct_lite:
+            # Every execution path resets the edge map first, direct_lite
+            # included. It used to be excluded (66b026e, "perf: skip SHM
+            # bitmap reset in direct_lite mode"), and at the time that was a
+            # real saving: reset_edge_map() was a full table_bytes memset,
+            # ~86.9us per execution at the default 65,536-entry map.
+            # Generation tagging landed the NEXT DAY (1eb7979) and made the
+            # reset O(1), but the exclusion was never revisited -- an
+            # optimization that outlived its justification by one commit.
+            #
+            # The cost of keeping it was correctness on the default in-process
+            # path: without a generation bump nothing ever ages entries out,
+            # so every entry ever written reads as live and get_edge_ids()
+            # returns the cumulative union of the run rather than the edges of
+            # the execution just performed. Measured on a shim-linked .so that
+            # marks exactly one distinct edge per input, eight executions:
+            # [1, 2, 3, 4, 5, 6, 7, 8] without the reset, [1, 1, 1, 1, 1, 1,
+            # 1, 1] with it. Per-execution attribution, stability calibration
+            # and the trim's subset test were all reading the union.
+            #
+            # Measured cost now, on a no-op target where the whole execution
+            # is 3.69us: +1.55us/exec. That is the worst case by construction
+            # -- it is the cheapest possible target -- and it buys back a
+            # signal every consumer of coverage depends on.
+            if shm:
                 shm.reset_edge_map()
             # Open perf counters on current process (pid=0, no extra perms needed)
             # so in-process target calls (direct/direct_lite) are counted.
