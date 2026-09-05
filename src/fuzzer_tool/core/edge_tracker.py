@@ -1049,6 +1049,16 @@ class EdgeTracker:
         if len(self._coverage_execs) > COVERAGE_TIMELINE_MAX:
             del self._coverage_execs[:250]
             del self._coverage_edges[:250]
+            # The timestamps array is trimmed with its siblings. It used to be
+            # left alone, so it kept growing while the other two were cut, and
+            # report._temporal_correlation reads all three at the same index i:
+            # after one trim, index i paired the timestamp of snapshot i with
+            # the exec/edge of snapshot i + 250. Measured over 1300 snapshots:
+            # lengths 800/800/1300, with _coverage_execs[0] holding the count
+            # from snapshot 500 while _coverage_timestamps[0] still held the
+            # clock reading from snapshot 0. The join then matched on a
+            # timestamp that belonged to a different pair (finding #25).
+            del self._coverage_timestamps[:250]
 
     def update_correlation(self, edge_set: set[int]):
         """Update branch correlation matrix with co-occurring edges.
@@ -2685,7 +2695,13 @@ class EdgeTracker:
             "edge_first_seen": {str(e): c for e, c in self._edge_first_seen.items()},
             "edge_last_seen": {str(e): c for e, c in self._edge_last_seen.items()},
             "coverage_timeline": [
-                list(p) for p in zip(self._coverage_execs, self._coverage_edges, strict=True)
+                list(p)
+                for p in zip(
+                    self._coverage_execs,
+                    self._coverage_edges,
+                    self._coverage_timestamps,
+                    strict=True,
+                )
             ],
             "correlation_matrix": {f"{a},{b}": c for (a, b), c in self._correlation_matrix.items()},
             "correlation_total": self._correlation_total,
@@ -2725,6 +2741,17 @@ class EdgeTracker:
         tl = data.get("coverage_timeline", [])
         self._coverage_execs = array("Q", (t[0] for t in tl))
         self._coverage_edges = array("Q", (t[1] for t in tl))
+        # Entries were pairs before timestamps joined the timeline. A snapshot
+        # written then carries no clock readings, and there is nothing honest
+        # to put in their place -- synthesising them from the current wall
+        # clock would hand _temporal_correlation a fabricated join. Restore
+        # them only when every entry has one, so a partial timeline leaves the
+        # array empty and the report's `if not cov_ts` guard skips the
+        # section rather than correlating against invented times.
+        if tl and all(len(t) >= 3 for t in tl):
+            self._coverage_timestamps = array("d", (float(t[2]) for t in tl))
+        else:
+            self._coverage_timestamps = array("d")
         corr_data = data.get("correlation_matrix", {})
         self._correlation_matrix = {
             (int(k.split(",")[0]), int(k.split(",")[1])): v for k, v in corr_data.items()
