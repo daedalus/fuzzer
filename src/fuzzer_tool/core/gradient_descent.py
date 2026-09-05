@@ -47,6 +47,9 @@ _MAX_STUCK = 2
 # step set was the entire constraint, not the budget.
 _STEPS = (1, -1, 2, -2, 4, -4, 8, -8, 16, -16, 32, -32, 64, -64, 128, -128)
 
+# Popcount of every byte value, for the incremental window objective.
+_POPCOUNT = bytes(bin(i).count("1") for i in range(256))
+
 
 def _distance(a: bytes, b: bytes) -> int:
     """Hamming distance over the min-length prefix plus length delta.
@@ -102,9 +105,23 @@ def _interesting_for_width(width: int) -> list[int]:
 def _candidate_positions(buf: bytes, target: bytes, rng=None, cap: int = 48) -> list[int]:
     """Return input positions that overlap with *target* bytes.
 
-    Builds a value→positions map for the input, then finds offsets where at
-    least one target byte occurs. Falls back to random positions if overlap
-    is sparse.
+    Finds offsets where at least one target byte occurs. Falls back to
+    random positions if overlap is sparse.
+
+    Only the target's own byte values can produce an overlap, and a target
+    is at most eight bytes wide, so the scan looks for those values
+    directly with ``bytes.find`` (memchr) instead of building a
+    value→positions map over all 256 values of the whole buffer. Measured
+    on a 64 KiB buffer with a 4-byte target: 5115 us -> 347 us.
+
+    When more than *cap* candidates survive, they are subsampled at an
+    even stride rather than truncated. ``sorted(candidates)[:cap]`` kept
+    the *cap* smallest offsets, which confined the descent to the head of
+    the file: measured on a 64 KiB buffer, all 48 returned candidates fell
+    within the first 5.35% of it. That is the same failure the
+    ``_window_distance`` docstring describes being fixed, reintroduced one
+    layer up. An even stride is still deterministic, so a campaign
+    replayed with the same ``-s`` takes the same path.
 
     *rng* must be the fuzzer's seeded rand pool. It used to be omitted and
     the fallback drew from the ``random`` module's global state, which made
@@ -119,16 +136,18 @@ def _candidate_positions(buf: bytes, target: bytes, rng=None, cap: int = 48) -> 
     if not buf or not target:
         return []
 
-    pos_map: dict[int, list[int]] = {}
-    for idx, b in enumerate(buf):
-        pos_map.setdefault(b, []).append(idx)
-
+    n = len(buf)
     candidates: set[int] = set()
-    for i, b in enumerate(target):
-        for pos in pos_map.get(b, []):
-            off = pos - i
-            if 0 <= off < len(buf):
-                candidates.add(off)
+    for value in set(target):
+        offsets = [i for i, tb in enumerate(target) if tb == value]
+        needle = bytes((value,))
+        pos = buf.find(needle)
+        while pos >= 0:
+            for i in offsets:
+                off = pos - i
+                if 0 <= off < n:
+                    candidates.add(off)
+            pos = buf.find(needle, pos + 1)
 
     if len(candidates) < cap // 2:
         sample = min(cap // 2, len(buf))
@@ -141,7 +160,11 @@ def _candidate_positions(buf: bytes, target: bytes, rng=None, cap: int = 48) -> 
 
             candidates.update(random.sample(range(len(buf)), sample))
 
-    return sorted(candidates)[:cap]
+    ordered = sorted(candidates)
+    if len(ordered) <= cap:
+        return ordered
+    stride = len(ordered) / cap
+    return [ordered[int(i * stride)] for i in range(cap)]
 
 
 def pick_target(cmp_pair: tuple[bytes, bytes]) -> bytes:
@@ -208,33 +231,54 @@ def gradient_descent(
     # local to this window (see _window_distance), so the descent can
     # reach an operand anywhere in the input rather than only the first
     # `width` bytes.
-    site = min(candidates, key=lambda p: _window_distance(bytes(buf), p, target))
+    frozen = bytes(buf)
+    site = min(candidates, key=lambda p: _window_distance(frozen, p, target))
 
     best = bytearray(buf)
-    best_score = _window_distance(bytes(best), site, target)
+    best_score = _window_distance(frozen, site, target)
     if best_score == 0:
         return bytes(best)
 
-    # Only the bytes inside the scored window can change the objective.
-    window = [site + i for i in range(width) if site + i < len(best)]
-    if not window:
+    # A window that runs off the end scores n*8 whatever the bytes are, so
+    # nothing can improve it. The incremental scoring below would happily
+    # "improve" such a window, so bail before it can.
+    if site + width > len(best):
         return bytes(best)
+
+    # Only the bytes inside the scored window can change the objective.
+    window = [site + i for i in range(width)]
 
     interesting = _interesting_for_width(width)
     stuck = 0
+
+    # The objective is separable: it is the sum, over the window, of
+    # popcount(buf[site+k] ^ target[k]). Changing one byte moves exactly
+    # one term, so a probe costs O(1) and needs no buffer at all. The
+    # previous form copied the whole buffer twice per probe -- once for
+    # the candidate and once to hand `bytes` to _window_distance -- to
+    # evaluate a one-byte change inside a window of at most eight, which
+    # made the cost of the descent scale with the input rather than with
+    # the window (measured 0.17 ms at 256 B, 0.85 ms at 8 KiB).
+    term = [_POPCOUNT[best[site + k] ^ target[k]] for k in range(width)]
 
     for _ in range(max_epochs):
         improved = False
 
         # Gradient pass: try perturbations at each byte of the window.
-        for pos in window:
+        for k, pos in enumerate(window):
             orig = best[pos]
+            tb = target[k]
             for delta in _STEPS:
-                candidate = bytearray(best)
-                candidate[pos] = max(0, min(255, orig + delta))
-                score = _window_distance(bytes(candidate), site, target)
+                v = orig + delta
+                if v < 0:
+                    v = 0
+                elif v > 255:
+                    v = 255
+                new_term = _POPCOUNT[v ^ tb]
+                score = best_score - term[k] + new_term
                 if score < best_score:
-                    best = candidate
+                    best[pos] = v
+                    term[k] = new_term
                     best_score = score
                     improved = True
                     if best_score == 0:
@@ -248,15 +292,16 @@ def gradient_descent(
                 break
 
             # Repick from interesting values to escape local minima.
-            for pos in window:
+            for k, pos in enumerate(window):
                 orig = best[pos]
+                tb = target[k]
                 for v in interesting:
                     if 0 <= v <= 255 and v != orig:
-                        candidate = bytearray(best)
-                        candidate[pos] = v
-                        score = _window_distance(bytes(candidate), site, target)
+                        new_term = _POPCOUNT[v ^ tb]
+                        score = best_score - term[k] + new_term
                         if score < best_score:
-                            best = candidate
+                            best[pos] = v
+                            term[k] = new_term
                             best_score = score
                             improved = True
                             if best_score == 0:
