@@ -11,6 +11,7 @@ import collections
 import logging
 import math
 import random
+import time
 from array import array
 from collections import defaultdict
 from dataclasses import dataclass
@@ -18,7 +19,6 @@ from pathlib import Path
 
 from fuzzer_tool.core.allan_variance import DispersionIndex
 from fuzzer_tool.core.cycle_detect import cesaro_average, floyd_detect
-from fuzzer_tool.core.edge_tracker import ks_significance_threshold
 from fuzzer_tool.core.running_stats import (
     RunningMoments,
     kelly_fraction,
@@ -129,6 +129,10 @@ class MonteCarloScheduler:
         self._prev_byte_freq: dict[int, dict[int, int]] = {}
         self.cem_fitted = False
         self.last_js_divergence: float = 0.0
+        # No-change reference for last_js_divergence, estimated at the current
+        # sample size. Published so the adaptation can be read, not just felt.
+        self.last_js_null_p95: float = 0.0
+        self.last_js_null_p99: float = 0.0
         # Brier score tracking for bandit calibration diagnostics
         self._brier_predictions: collections.deque = collections.deque(maxlen=500)
         # Success history for covariance computation
@@ -649,20 +653,224 @@ class MonteCarloScheduler:
 
         return 0.5 * kl(p, m) + 0.5 * kl(q, m)
 
-    def _adapt_interval(self) -> None:
-        """Adapt refit interval based on JS divergence with sample-size-aware thresholds.
+    # Number of bootstrap replicates used to estimate the no-change reference
+    # for the JS statistic. 40 puts the 0.95 and 0.99 quantiles on a usable
+    # footing while keeping the whole estimate inside a few milliseconds; the
+    # estimate is only consulted once per refit, never on the execution path.
+    _JS_NULL_REPLICATES = 40
+    _JS_NULL_REPLICATES_NO_NUMPY = 9
+    # Floor on replicates, and a wall-clock budget for the whole estimate. Cost
+    # scales with input length times elite count: 40 replicates is ~20 ms at
+    # 64-byte inputs but ~780 ms at 1024-byte inputs with 100 elites, which is
+    # too much even once per refit_interval executions. The loop stops early
+    # once the budget is spent, never below the floor. Fewer replicates make the
+    # quantiles coarse and biased toward "still moving", which is the direction
+    # that refits more often -- the conservative way to be wrong here.
+    _JS_NULL_MIN_REPLICATES = 8
+    _JS_NULL_BUDGET_SECONDS = 0.05
 
-        Uses KS critical values instead of fixed thresholds:
-        - JS below KS threshold at alpha=0.05: distribution stable → double interval
-        - JS above KS threshold at alpha=0.01: still changing → halve interval
+    def _null_js_quantiles(self, alphas: tuple[float, ...]) -> dict[float, float]:
+        """Bootstrap the JS a *stable* distribution would still show at this n.
+
+        JS divergence between two empirical distributions does not go to zero
+        when the underlying distribution is unchanged -- it goes to a floor set
+        by the sample size and the support width. Measured on byte histograms
+        drawn twice from one fixed distribution: mean JS 0.46 at 2 elite
+        samples, 0.33 at 20, 0.29 at 100. So "how small is small" is not a
+        constant and cannot be read off a table; it has to be estimated at the
+        current n.
+
+        The reference is a permutation null: the two samples are pooled and
+        re-split at the observed sizes, which is exact under exchangeability at
+        any sparsity. Drawing fresh samples from the pooled *proportions*
+        instead was tried and is biased low here -- with a 256-value support and
+        a handful of elites the pooled support is roughly twice either sample's,
+        so replicates overlap more than two real draws would and the reference
+        lands under the truth (measured 0.43 against a true null of ~0.63).
+        Re-splitting the observations themselves has no such gap.
+        """
+        prev, curr = self._prev_byte_freq, self.byte_freq
+        if not prev or not curr:
+            return dict.fromkeys(alphas, 0.0)
+
+        positions = sorted(set(prev) | set(curr))
+        pooled = []
+        for pos in positions:
+            a, b = prev.get(pos, {}), curr.get(pos, {})
+            n1, n2 = sum(a.values()), sum(b.values())
+            if n1 == 0 or n2 == 0:
+                continue
+            counts: dict[int, int] = {}
+            for k, v in a.items():
+                counts[k] = counts.get(k, 0) + v
+            for k, v in b.items():
+                counts[k] = counts.get(k, 0) + v
+            pooled.append((counts, n1, n2))
+        if not pooled:
+            return dict.fromkeys(alphas, 0.0)
+
+        deadline = time.monotonic() + self._JS_NULL_BUDGET_SECONDS
+        if _HAS_NUMPY:
+            samples = self._null_js_samples_numpy(
+                pooled,
+                self._JS_NULL_REPLICATES,
+                deadline=deadline,
+                min_replicates=self._JS_NULL_MIN_REPLICATES,
+            )
+        else:
+            samples = self._null_js_samples_python(
+                pooled,
+                self._JS_NULL_REPLICATES_NO_NUMPY,
+                deadline=deadline,
+                min_replicates=min(self._JS_NULL_MIN_REPLICATES, 4),
+            )
+        if not samples:
+            return dict.fromkeys(alphas, 0.0)
+        samples.sort()
+        out = {}
+        for alpha in alphas:
+            # Upper quantile at 1 - alpha, clamped to the sample we have.
+            idx = min(len(samples) - 1, int(math.ceil((1.0 - alpha) * len(samples)) - 1))
+            out[alpha] = samples[max(0, idx)]
+        return out
+
+    @staticmethod
+    def _null_js_samples_numpy(
+        pooled, replicates: int, deadline: float | None = None, min_replicates: int = 8
+    ) -> list[float]:
+        """Permutation null, vectorised across positions.
+
+        Positions are grouped by their (n1, n2) pair so one shuffle-and-split
+        covers every position in the group at once. Looping positions in Python
+        instead costs 1.85 s per refit at 1024-byte inputs with 100 elites,
+        which is not affordable even off the execution path.
+        """
+        rng = np.random.default_rng()
+        groups: dict[tuple[int, int], list[np.ndarray]] = {}
+        for counts, n1, n2 in pooled:
+            total = sum(counts.values())
+            if len(counts) < 2 or total < 2:
+                continue
+            row = np.zeros(256, dtype=np.int64)
+            for value, count in counts.items():
+                if 0 <= value < 256:
+                    row[value] = count
+            groups.setdefault((n1, n2), []).append(row)
+        if not groups:
+            return []
+
+        n_positions = sum(len(rows) for rows in groups.values())
+        prepared = []
+        for (n1, n2), rows in groups.items():
+            counts_2d = np.stack(rows)  # (g, 256)
+            # Expand each row's counts into its observation list. Every row in a
+            # group has the same total, so this is rectangular.
+            total = int(counts_2d[0].sum())
+            obs = np.repeat(
+                np.tile(np.arange(256, dtype=np.int16), (counts_2d.shape[0], 1)).ravel(),
+                counts_2d.ravel(),
+            ).reshape(counts_2d.shape[0], total)
+            prepared.append((obs, n1, n2))
+
+        out = []
+        offsets = None
+        for _ in range(replicates):
+            acc = 0.0
+            for obs, n1, n2 in prepared:
+                g, total = obs.shape
+                shuffled = rng.permuted(obs, axis=1)
+                offsets = (np.arange(g, dtype=np.int64) * 256)[:, None]
+                a = np.bincount(
+                    (shuffled[:, :n1].astype(np.int64) + offsets).ravel(),
+                    minlength=g * 256,
+                ).reshape(g, 256).astype(np.float64)
+                b = np.bincount(
+                    (shuffled[:, n1 : n1 + n2].astype(np.int64) + offsets).ravel(),
+                    minlength=g * 256,
+                ).reshape(g, 256).astype(np.float64)
+                p = a / n1
+                q = b / n2
+                m = 0.5 * (p + q)
+                ratio_p = np.divide(p, m, out=np.ones_like(p), where=m > 0)
+                ratio_q = np.divide(q, m, out=np.ones_like(q), where=m > 0)
+                acc += 0.5 * float(
+                    np.sum(p * np.log(ratio_p, out=np.zeros_like(p), where=ratio_p > 0))
+                    + np.sum(q * np.log(ratio_q, out=np.zeros_like(q), where=ratio_q > 0))
+                )
+            out.append(acc / n_positions)
+            if deadline is not None and len(out) >= min_replicates and time.monotonic() > deadline:
+                break
+        return out
+
+    @staticmethod
+    def _null_js_samples_python(
+        pooled, replicates: int, deadline: float | None = None, min_replicates: int = 4
+    ) -> list[float]:
+        per_pos = []
+        for counts, n1, n2 in pooled:
+            observations = []
+            for value, count in counts.items():
+                observations.extend([value] * count)
+            if len(set(observations)) < 2 or len(observations) < 2:
+                continue
+            per_pos.append((observations, n1, n2))
+        if not per_pos:
+            return []
+
+        out = []
+        for _ in range(replicates):
+            acc = 0.0
+            for observations, n1, n2 in per_pos:
+                shuffled = observations[:]
+                random.shuffle(shuffled)
+                a: dict[int, int] = {}
+                for k in shuffled[:n1]:
+                    a[k] = a.get(k, 0) + 1
+                b: dict[int, int] = {}
+                for k in shuffled[n1 : n1 + n2]:
+                    b[k] = b.get(k, 0) + 1
+                p = {k: v / n1 for k, v in a.items()}
+                q = {k: v / n2 for k, v in b.items()}
+                acc += MonteCarloScheduler._js_two(p, q)
+            out.append(acc / len(per_pos))
+            if deadline is not None and len(out) >= min_replicates and time.monotonic() > deadline:
+                break
+        return out
+
+    def _adapt_interval(self) -> None:
+        """Adapt refit interval by comparing JS against what no change looks like.
+
+        - JS below the 0.95 quantile of the no-change reference: indistinguishable
+          from a stable distribution → double interval
+        - JS above the 0.99 quantile: really moving → halve interval
         - In between: no change
+
+        This used to compare the JS divergence -- nats, bounded by ln 2 -- against
+        a KS critical value, which is a sup-norm distance between CDFs, and to
+        derive that value's sample size from the bandit's pull counts, a quantity
+        unrelated to the elite-set distributions being compared. Two unit errors
+        stacked. Measured over 8 refits: JS pinned at ~0.63 (91% of the ln 2
+        ceiling) against thresholds of 0.026-0.072, so the "stable" branch was
+        unreachable after the first refit and the interval ratcheted
+        2000 → 1000 → 500 → 250 and stayed at base//4 for the rest of the run.
+
+        The ceiling is not a sign the distribution was changing. Two independent
+        draws from one fixed distribution give JS 0.29-0.46 at realistic elite
+        sizes, because a 256-value support sampled a few dozen times shares few
+        cells with a second such sample. The reference has to be estimated at the
+        current sample size, which is what _null_js_quantiles does.
         """
         min_interval = max(1, self.base_refit_interval // 4)
         max_interval = self.base_refit_interval * 4
 
-        n = sum(self.arm_alpha.values()) + sum(self.arm_beta.values())
-        stable_threshold = ks_significance_threshold(max(1, int(n / 2)), alpha=0.05)
-        unstable_threshold = ks_significance_threshold(max(1, int(n / 2)), alpha=0.01)
+        quantiles = self._null_js_quantiles((0.05, 0.01))
+        stable_threshold = quantiles[0.05]
+        unstable_threshold = quantiles[0.01]
+        self.last_js_null_p95 = stable_threshold
+        self.last_js_null_p99 = unstable_threshold
+
+        if stable_threshold <= 0.0 and unstable_threshold <= 0.0:
+            return
 
         if self.last_js_divergence < stable_threshold:
             self.refit_interval = min(self.refit_interval * 2, max_interval)

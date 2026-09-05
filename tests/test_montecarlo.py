@@ -748,59 +748,74 @@ class TestAdaptiveRefit:
         js = MonteCarloScheduler._js_two({0: 1.0}, {1: 1.0})
         assert js > 0.0
 
+    @staticmethod
+    def _seed_distributions(mc, n_positions=8, n_samples=40, shifted=False):
+        """Give the scheduler two real byte histograms to reason about.
+
+        _adapt_interval now measures the JS against a permutation null estimated
+        from these, so it needs the counts themselves. The old tests drove the
+        threshold by setting arm_alpha/arm_beta -- the bandit's pull counts --
+        which is the defect this class of test is meant to catch: that sample
+        size has nothing to do with the elite distributions being compared.
+        """
+        prev, curr = {}, {}
+        for pos in range(n_positions):
+            prev[pos] = {v: n_samples // 4 for v in range(pos, pos + 4)}
+            base = pos + 128 if shifted else pos
+            curr[pos] = {v: n_samples // 4 for v in range(base, base + 4)}
+        mc._prev_byte_freq = prev
+        mc.byte_freq = curr
+
     def test_adapt_interval_stable(self):
         mc = MonteCarloScheduler(refit_interval=100)
-        # Need enough observations for KS threshold to be low
-        mc.arm_alpha["test"] = 100.0
-        mc.arm_beta["test"] = 100.0
-        mc.last_js_divergence = 0.0001  # very stable
+        self._seed_distributions(mc)
+        mc.last_js_divergence = 0.0001  # far below anything sampling noise gives
         mc._adapt_interval()
         assert mc.refit_interval == 200  # doubled
+        assert mc.last_js_null_p95 > 0.0
 
     def test_adapt_interval_shifting(self):
         mc = MonteCarloScheduler(refit_interval=100)
-        # Need enough observations for KS threshold to be meaningful
-        mc.arm_alpha["test"] = 100.0
-        mc.arm_beta["test"] = 100.0
-        mc.last_js_divergence = 0.5  # very shifting
+        self._seed_distributions(mc)
+        mc.last_js_divergence = math.log(2)  # the ceiling: nothing shared
         mc._adapt_interval()
         assert mc.refit_interval == 50  # halved
 
-    def test_adapt_interval_no_change_medium(self):
+    def test_adapt_interval_reference_is_not_a_ks_value(self):
+        """Regression: the threshold came from a KS critical value computed off
+        the bandit's pull counts. Changing those must not move the decision."""
+        results = []
+        for pulls in (2.0, 200.0, 20000.0):
+            mc = MonteCarloScheduler(refit_interval=100)
+            self._seed_distributions(mc)
+            mc.arm_alpha["test"] = pulls
+            mc.arm_beta["test"] = pulls
+            mc.last_js_divergence = 0.0001
+            mc._adapt_interval()
+            results.append(mc.refit_interval)
+        assert len(set(results)) == 1, f"pull counts still steer the decision: {results}"
+
+    def test_adapt_interval_no_reference_holds(self):
+        """With no distributions to compare there is no reference, so the
+        interval must not move rather than move on a fabricated threshold."""
         mc = MonteCarloScheduler(refit_interval=100)
-        # With enough observations, KS thresholds narrow
-        # JS=0.15 with n=200 → stable_threshold≈0.096, unstable≈0.115
-        # 0.15 > 0.115 → should halve
-        mc.arm_alpha["test"] = 200.0
-        mc.arm_beta["test"] = 200.0
         mc.last_js_divergence = 0.15
         mc._adapt_interval()
-        assert mc.refit_interval == 50  # halved
-
-    def test_adapt_interval_wide_threshold_no_change(self):
-        mc = MonteCarloScheduler(refit_interval=100)
-        # With very few observations, KS thresholds are wide → no change
-        mc.last_js_divergence = 0.05
-        mc._adapt_interval()
-        # n=0 → stable_threshold very high → 0.05 < threshold → doubles
-        # This is correct behavior: with no data, JS=0.05 looks stable
-        assert mc.refit_interval in (50, 100, 200)  # depends on n
+        assert mc.refit_interval == 100
 
     def test_adapt_interval_cap_max(self):
         mc = MonteCarloScheduler(refit_interval=100)
+        self._seed_distributions(mc)
         mc.refit_interval = 350
-        mc.arm_alpha["test"] = 100.0
-        mc.arm_beta["test"] = 100.0
         mc.last_js_divergence = 0.0001
         mc._adapt_interval()
         assert mc.refit_interval == 400  # capped at 4x base
 
     def test_adapt_interval_floor_min(self):
         mc = MonteCarloScheduler(refit_interval=100)
+        self._seed_distributions(mc)
         mc.refit_interval = 30
-        mc.arm_alpha["test"] = 100.0
-        mc.arm_beta["test"] = 100.0
-        mc.last_js_divergence = 0.5
+        mc.last_js_divergence = math.log(2)
         mc._adapt_interval()
         assert mc.refit_interval == 25  # floor at 0.25x base
 
