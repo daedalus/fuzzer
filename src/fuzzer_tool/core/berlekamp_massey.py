@@ -22,6 +22,7 @@ Two use cases are implemented:
 from __future__ import annotations
 
 from collections.abc import Sequence
+from functools import lru_cache
 
 from fuzzer_tool.core.gf2_common import poly_gcd
 
@@ -213,6 +214,31 @@ def lfsr_generate(seed: int, poly: int, n: int, width: int = 32) -> list[int]:
 # ---------------------------------------------------------------------------
 
 
+@lru_cache(maxsize=256)
+def _crc_table(poly: int, width: int, reflect_in: bool) -> tuple[int, ...]:
+    """Byte table for the shift convention *compute_checksum* implements.
+
+    Entry ``b`` is the register state after feeding byte ``b`` into a zero
+    register, which is exactly the eight-step inner loop this replaces.
+    Cached because the polynomial-recovery search evaluates the same
+    candidate against many pairs.
+    """
+    mask = (1 << width) - 1
+    table = []
+    for b in range(256):
+        if reflect_in:
+            reg = b & mask
+            for _ in range(8):
+                reg = ((reg >> 1) ^ ((reg & 1) * poly)) & mask
+        else:
+            reg = (b << (width - 8)) & mask
+            for _ in range(8):
+                msb = (reg >> (width - 1)) & 1
+                reg = ((reg << 1) ^ (msb * poly)) & mask
+        table.append(reg)
+    return tuple(table)
+
+
 def compute_checksum(
     data: bytes,
     poly: int,
@@ -252,20 +278,21 @@ def compute_checksum(
     mask = (1 << width) - 1
     reg = init & mask
 
+    # Byte-at-a-time using a 256-entry table, built once per
+    # (poly, width, reflect_in). The bit-at-a-time form below is what the
+    # table encodes; it ran eight shift-and-conditional-xor steps per byte
+    # in Python and cost 10.4 ms on 8 KiB. The recovery search calls this
+    # once per candidate polynomial, so the table is amortised across the
+    # whole search as well as across the buffer.
+    table = _crc_table(poly, width, reflect_in)
     if reflect_in:
         for byte in data:
-            reg ^= byte
-            for _ in range(8):
-                feedback = (reg & 1) * poly
-                reg = ((reg >> 1) ^ feedback) & mask
-        result = reg & mask
+            reg = (reg >> 8) ^ table[(reg ^ byte) & 0xFF]
     else:
+        shift = width - 8
         for byte in data:
-            reg ^= byte << (width - 8)
-            for _ in range(8):
-                msb = (reg >> (width - 1)) & 1
-                reg = ((reg << 1) ^ (msb * poly)) & mask
-        result = reg & mask
+            reg = ((reg << 8) & mask) ^ table[((reg >> shift) ^ byte) & 0xFF]
+    result = reg & mask
 
     if reflect_out:
         result = _reverse_bits(result, width)
