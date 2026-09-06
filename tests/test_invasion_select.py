@@ -87,3 +87,60 @@ def test_discovery_frontier_edges_shape():
     assert frontier is not None
     assert 10 not in frontier
     assert 20 in frontier and 30 in frontier
+
+
+class TestDiscoveryFrontierMemo:
+    """discovery_frontier_edges is called per operator selection (P2-3)."""
+
+    def _tracker(self, first_seen):
+        from fuzzer_tool.core.edge_tracker import EdgeTracker
+
+        et = EdgeTracker()
+        et._edge_first_seen = dict(first_seen)
+        et._frontier_cache = None
+        return et
+
+    def test_memo_matches_uncached_result(self):
+        import random
+
+        from fuzzer_tool.core.edge_tracker import _FRONTIER_FRACTION
+
+        rnd = random.Random(4)
+        fs = {e: rnd.randrange(1, 5000) for e in range(500)}
+        et = self._tracker(fs)
+
+        clock = max(fs.values())
+        cutoff = clock * (1.0 - _FRONTIER_FRACTION)
+        expected = {e for e, t0 in fs.items() if t0 >= cutoff}
+
+        assert et.discovery_frontier_edges() == expected
+        # Second call is served from the memo and must agree.
+        assert et.discovery_frontier_edges() == expected
+
+    def test_memo_invalidates_when_an_edge_is_recorded(self):
+        et = self._tracker({1: 100, 2: 200})
+        before = set(et.discovery_frontier_edges())
+        et._edge_first_seen[3] = 1000
+        after = et.discovery_frontier_edges()
+        assert after != before
+        assert after == {3}
+
+    def test_empty_and_zero_clock_return_none(self):
+        assert self._tracker({}).discovery_frontier_edges() is None
+        et = self._tracker({1: 0, 2: 0})
+        assert et.discovery_frontier_edges() is None
+        # Cached None is returned unchanged.
+        assert et.discovery_frontier_edges() is None
+
+    def test_from_dict_drops_a_stale_memo(self):
+        et = self._tracker({1: 10, 2: 20, 3: 30})
+        et.discovery_frontier_edges()
+        # A restored map of the same size must not reuse the old answer.
+        et.from_dict({"edge_first_seen": {"7": 10, "8": 20, "9": 30}})
+        assert et.discovery_frontier_edges() == {9}
+
+    def test_memo_is_not_serialized(self):
+        et = self._tracker({1: 10, 2: 20})
+        et.discovery_frontier_edges()
+        assert "frontier_cache" not in et.to_dict()
+        assert "_frontier_cache" not in et.to_dict()
