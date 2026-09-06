@@ -309,12 +309,23 @@ class TestGlobalRegistryUnaffected:
         Originally empty (port-3 scaffolding). Weizz P2 class mutators were
         the first in-tree implementors; ``fractal_voronoi`` (spatial
         meta-mutator, see docs/handover/fractal-voronoi-integration.md) is
-        the second. Anything else here is a surprise.
+        the second; the four ``ff_*`` FormatFuzzer template mutators are the
+        third. Anything else here is a surprise.
+
+        Note the ``ff_*`` entries are registered at import, unconditionally,
+        even though the feature is gated behind ``--formatfuzzer`` -- so they
+        are always present in the global registry and belong in this list.
+        Whether eager registration is the right choice for a gated feature is
+        a separate question; this test only pins what is actually there.
         """
         from fuzzer_tool.core.operator_registry import REGISTRY
 
         names = sorted(m.name for m in REGISTRY.mutators())
         assert names == [
+            "ff_isobmff",
+            "ff_jpeg",
+            "ff_png",
+            "ff_zip",
             "fractal_voronoi",
             "weizz_chunk_mutate",
             "weizz_field_mutate",
@@ -402,6 +413,7 @@ class TestMutationContext:
             "checksum_learner",
             "path_solver",
             "wfc_enabled",
+            "formatfuzzer_enabled",
         }
         assert not hasattr(ctx, "__dict__")
         with pytest.raises(AttributeError):

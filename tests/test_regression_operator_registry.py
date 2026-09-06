@@ -270,6 +270,7 @@ class TestRegularityOperators:
     REGULARITY_OPS = frozenset(
         {
             "birthday_collide",
+            "cycle_lock",
             "degenerate_geometry",
             "float_squeeze",
             "gcd_worst_case",
