@@ -21,16 +21,23 @@ DEFAULT_EXPLORATION_FRAC = 1.0 / math.e
 
 
 class SecretaryStopping:
-    """Adaptive secretary-problem optimal stopping.
+    """Adaptive secretary-problem rank tracker (display / experiment hook).
 
-    Tracks a sliding window of quality observations and applies rank-based
-    stopping. The "rank" is the decay-weighted count of record-setting
-    observations (new all-time bests) currently in the window. A high rank
-    means many recent improvements; a low rank means quality has plateaued.
+    **Status (P2-4):** production only *observes* values into
+    ``Fuzzer._op_secretary`` / ``_seed_secretary`` and surfaces a count in
+    ``services/stats.py``.  Nothing in the fuzz loop calls
+    :meth:`should_stop` to skip, reweight, or retire an arm.  Treat this as
+    instrumentation, not a stopping rule, until a consumer is designed
+    (handover P3-2 retirement-value is the stated successor).
 
-    After the exploration phase (~1/e of observations), stops when
-    rank <= floor(N / e) — meaning few records remain in the window,
-    indicating diminishing returns.
+    Tracks a sliding window of quality observations and a rank-based
+    stopping predicate. The "rank" is the decay-weighted count of
+    record-setting observations (new all-time bests) currently in the
+    window. A high rank means many recent improvements; a low rank means
+    quality has plateaued.
+
+    After the exploration phase (~1/e of observations), ``should_stop`` is
+    true when rank <= floor(N / e) — few records remain in the window.
 
     Args:
         window_size: Maximum number of observations to keep (sliding window).

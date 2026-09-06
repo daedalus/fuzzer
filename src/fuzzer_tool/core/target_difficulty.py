@@ -1,7 +1,12 @@
 """Static pre-fuzz difficulty estimation via the isoperimetric function.
 
-Percolation handover Module 3 (docs/handover/handover_pending_2026-09-06.md
-§4), revised per Diskin, Easo, Radhakrishnan, Sudakov, Tassion, "Supercritical
+**Status (P2-1):** diagnostic only.  Nothing in the production fuzz loop
+imports this module — it does not drive time budget, initial corpus size,
+or operator preselection.  Call it from analysis tools or offline reports;
+do not assume a scheduling role until that wiring is designed and reviewed.
+
+Percolation handover Module 3 (docs/handover/handover_pending_2026-09-06.md),
+revised per Diskin, Easo, Radhakrishnan, Sudakov, Tassion, "Supercritical
 sharpness of percolation" (arXiv:2603.03257): supercritical cluster-size decay
 is governed by the isoperimetric function
 
@@ -10,7 +15,7 @@ is governed by the isoperimetric function
 on ANY infinite transitive graph — no assumption about degree distribution
 or clustering is needed. A CFG-derived coverage graph is finite and not
 transitive, so this module treats Φ as a heuristic difficulty signal, not a
-literal application of the theorem (see handover §9.1).
+literal application of the theorem.
 
 Exact Φ(n) is a min-cut-style computation over all size-n subsets and is
 intractable in general; ``estimate_isoperimetric_profile`` approximates it
