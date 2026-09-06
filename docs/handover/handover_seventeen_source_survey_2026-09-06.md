@@ -842,3 +842,130 @@ For every feature that lands:
 *Updated 2026-09-06 — added full opt-in-gated implementation plan for every
 accepted item from the seventeen-source survey. All new behaviour is behind
 explicit flags; baseline remains unchanged.*
+
+---
+
+## Audit of the shipped implementation (2026-09-06, after `12a49ca`)
+
+A1, A2, B1 and C2 were implemented in `cb602c5` and `12a49ca`, all behind
+opt-in flags. Auditing what landed turned up two bugs and one open quality
+failure. Recorded here because in each case the output looked plausible and no
+existing test could have caught it.
+
+### A1 — the Myers backtrack was wrong (fixed, `15ccd22`)
+
+The path returned edit scripts that do not rebuild the target. Replaying a
+script against its source input reproduces `b` only at edit distance 1:
+
+```
+n=512, 1 flip    ops=515  rebuilds = True
+n=512, 2 flips   ops=481  rebuilds = False
+n=512, 8 flips   ops=271  rebuilds = False
+n=512, 20 flips  ops= 73  rebuilds = False
+```
+
+Op count *falling* as edit distance rises is the tell. `_myers_backtrack`
+unwound snakes greedily rather than bounding them by the previous endpoint, so
+at level `d` it consumed match runs belonging to lower levels, then left the
+loop with `(x, y)` short of the origin and returned what had accumulated: a
+script that is well-formed, monotone in position, raises nothing, and is
+silently short.
+
+`root_cause` replays these scripts positionally during delta debugging, so a
+truncated script reconstructs a candidate that is not the crash — and the
+failure surfaces as "minimisation did not reproduce", not as a diff bug.
+
+**Testing note worth keeping.** The first regression test for this passed
+against the broken code. Whether the greedy unwind over-consumed depends on
+where match runs happen to fall, so most hand-picked inputs round-trip either
+way. The test only became real once a falsifying pair was searched for and
+pinned as literals (70 bytes, 3 edits). A parametrised sweep over "reasonable"
+sizes is not a substitute for one input known to fail.
+
+### A1 — the gate was wrong too (fixed, `6a8ed35`)
+
+Shipping this behind `--diff-myers` left the default path allocating the same
+`4*n*m` table the change exists to remove: 1233 ms / 286 MB at n=8192, 17.2 GB
+for a 64 KiB pair. It is a latent OOM fix, not a benchmark, so it cannot be
+opt-in.
+
+Ungating as-shipped was itself a regression: Myers costs ~`O(D^2)` here, and
+`_myers_max_d` allowed `D` up to `min(4N, 65536)`, so a 4 KiB random pair ran
+to D=7224 and took 7.4 s against the DP's 97 ms. Dispatch is now on
+affordability rather than on a flag: DP while its table fits the budget
+(unchanged behaviour for everything already survivable), Myers only where the
+DP cannot run, coarse block diff if Myers also bails. Measured, median of 5:
+dissimilar 0.97–1.10x (no regression), similar 86x at 8 KiB, 167x at 16 KiB,
+and 64 KiB completes in 64 ms where it previously died.
+
+### C2 — `span_relocate` put the span somewhere it did not choose (fixed, `5abb3e0`)
+
+The destination is drawn from `[0, len - span]`, already the valid insertion
+range into the post-removal buffer, but was then shifted left by `span`. That
+pulled every destination toward the front and went negative whenever
+`span > src` — 5.1% of draws over 200k. Python reads a negative slice index as
+an offset from the end, so those draws dropped the span near the tail.
+
+Undetectable downstream: the result is still a permutation of the input with
+the correct length, which is the whole operator contract. Only the destination
+distribution was wrong (head 768 / tail 362 per 20k draws on a 64-byte buffer,
+where the two should be comparable).
+
+### A2 — LSH clustering loses ~80% of the pairs it should merge (OPEN)
+
+**Not fixed. Still opt-in and default-off, so nothing ships broken — but it
+does not work as written.**
+
+Against the dense implementation as oracle, 83 of 360 configurations disagree,
+and the LSH version always *under*-merges — frequently returning `n` clusters,
+i.e. nothing merged at all:
+
+```
+t=0  th=0.50  sigs    n=14   oracle=11 clusters   lsh=14
+t=5  th=0.50  sigs    n=21   oracle=16 clusters   lsh=21
+t=6  th=0.50  frames  n=20   oracle=17 clusters   lsh=20
+```
+
+Direct recall probe, 20 signatures with 5 pairs above threshold by ground
+truth: the dense path finds all 5 (15 clusters), LSH finds 1 (19 clusters).
+**Recall ≈ 20%.** For crash triage that means duplicates reported as distinct
+bugs, which is the failure mode clustering exists to prevent.
+
+The cause is a metric mismatch, not a tuning problem. MinHash LSH approximates
+**Jaccard** over token sets; the clustering threshold is on **Levenshtein**
+similarity. A pair can sit at Levenshtein 0.8 with a Jaccard well below the
+band threshold and never become a candidate. No banding parameter fixes that,
+because the two metrics do not order pairs the same way.
+
+**Recommended direction — sparsify with exact bounds instead.** Both metrics
+have the form `1 - dist/max_len`, so a pair can only clear `threshold` if
+`dist <= (1 - threshold) * max_len`. Two sound lower bounds on `dist` follow,
+and both are far cheaper than the alignment they replace:
+
+- `dist >= | len_a - len_b |`, so the shorter side must be at least
+  `threshold * len_longer` — a window over length-sorted order.
+- `dist >= max_len - |bag_a ∩ bag_b|`, since only equal elements match at zero
+  cost — so the multiset intersection must reach `threshold * max_len`.
+
+Plus a third saving that is not a bound: this is single-linkage, so any pair
+already in the same component can be skipped outright.
+
+Unlike LSH these prune only pairs that provably cannot clear the threshold, so
+recall is exact by construction. A prototype of this shape was checked against
+the dense oracle over 1080 configurations (n up to 25, thresholds 0.5/0.7/0.85,
+frame-list present/absent/partial) with **0 mismatches** and a clean
+self-control. That is the version to finish, not a retuned LSH.
+
+Note also that the dense implementation's own union-find has path halving but
+no union by rank, and that `crash_signature_similarity` is exactly
+`levenshtein_similarity(normalize_frame(x).encode(), ...)` while
+`frame_sequence_similarity` already truncates at 8 frames — so hoisting
+`normalize_frame` out of the pair loop is an exact transformation and worth
+doing regardless of which sparsifier lands.
+
+### B1 — Floyd sampling: audited, no defects
+
+Uniform over the k-subsets (chi2 = 20.9, df = 19), no duplicates and nothing
+out of range across n up to 65536 and k up to 32, and the `k == 1` / `k == 2`
+fast paths produce byte-identical sequences with the flag on or off — so the
+dozen mutators calling `rng.sample(range(len(x)), 2)` keep their seeded output.
