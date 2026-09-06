@@ -327,8 +327,24 @@ def _sync_corpus_in(
             added += 1
 
 
-def _distribute_initial_corpus(parent_dir: Path, n_workers: int) -> int:
-    """Round-robin pre-existing seeds from *parent_dir* into ``.wN`` dirs.
+def _is_under_worker_dir(path: Path) -> bool:
+    """True when *path* lives inside a ``.wN`` worker corpus directory.
+
+    The obvious spelling ``".w" not in path.parts`` does not work: the parts
+    are ``.w0``, ``.w1``, … and never the bare prefix, so that test matches
+    nothing and every worker-owned seed leaks back into the distributor.
+    """
+    return any(part.startswith(".w") and part[2:].isdigit() for part in path.parts)
+
+
+def _distribute_initial_corpus(
+    parent_dir: Path,
+    n_workers: int,
+    *,
+    fractal_partition: bool = False,
+    fractal_depth: int = 3,
+) -> int:
+    """Hand pre-existing seeds in *parent_dir* to the ``.wN`` dir that owns them.
 
     Workers start with empty ``.wN`` directories and only learn about
     siblings via ``_sync_corpus_in``.  Seeds that already live in the
@@ -336,8 +352,22 @@ def _distribute_initial_corpus(parent_dir: Path, n_workers: int) -> int:
     so every campaign began from an empty queue.  This is the same class
     of failure ``_sync_corpus_in``'s docstring records one level up.
 
+    Assignment is by seed **content**, never by enumeration order:
+
+    * with ``fractal_partition`` on, by ``assign_worker`` — the same
+      function ``_sync_corpus_in`` enforces via ``accept_for_worker``.
+      Round-robin disagreed with it, so a worker started fuzzing seeds
+      outside its own cell while every sibling refused to import them.
+    * with it off, by a stable digest of the content.  Sync is fully
+      shared in that mode so ownership does not matter for correctness,
+      but a stable map keeps a seed on the same worker across restarts
+      and across changes in discovery order — the property the fractal
+      partition exists to provide, given up by ``idx % n_workers``.
+
     Returns the number of seed files distributed.
     """
+    import hashlib
+
     from fuzzer_tool.adapters.filesystem import (
         _SEED_SKIP_SUFFIXES,
         discover_seed_files,
@@ -358,20 +388,35 @@ def _distribute_initial_corpus(parent_dir: Path, n_workers: int) -> int:
                 seeds.append(entry)
 
     # Exclude anything already under a worker dir (restarts / nested layouts).
-    seeds = [p for p in seeds if ".w" not in p.parts]
+    # Without a ``seeds/`` tree at the top level, discover_seed_files walks
+    # into ``.w0``/``.w1`` and returns their contents, which would then be
+    # re-scattered across the other workers on every restart.
+    seeds = [p for p in seeds if not _is_under_worker_dir(p)]
     if not seeds:
         return 0
 
     for i in range(n_workers):
         (parent_dir / f".w{i}").mkdir(parents=True, exist_ok=True)
 
+    if fractal_partition:
+        from fuzzer_tool.core.parallel_fractal_partition import assign_worker
+
+        def _owner(data: bytes) -> int:
+            return assign_worker(data, n_workers, fractal_depth)
+
+    else:
+
+        def _owner(data: bytes) -> int:
+            digest = hashlib.sha256(data).digest()
+            return int.from_bytes(digest[:8], "big") % n_workers
+
     distributed = 0
-    for idx, path in enumerate(seeds):
+    for path in seeds:
         try:
             data = path.read_bytes()
         except OSError:
             continue
-        worker_dir = parent_dir / f".w{idx % n_workers}"
+        worker_dir = parent_dir / f".w{_owner(data)}"
         # save_to_corpus is idempotent on content hash; ignore return.
         save_to_corpus(data, worker_dir, set())
         distributed += 1
@@ -456,7 +501,12 @@ def run_parallel(
     Path(corpus_dir).mkdir(parents=True, exist_ok=True)
     Path(crashes_dir).mkdir(parents=True, exist_ok=True)
 
-    n_seed_files = _distribute_initial_corpus(Path(corpus_dir), jobs)
+    n_seed_files = _distribute_initial_corpus(
+        Path(corpus_dir),
+        jobs,
+        fractal_partition=fractal_partition,
+        fractal_depth=fractal_partition_depth,
+    )
     if n_seed_files:
         print(f"[*] Distributed {n_seed_files} pre-existing seed(s) across {jobs} workers")
 

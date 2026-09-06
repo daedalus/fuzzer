@@ -124,7 +124,7 @@ class TestSyncCorpusIn:
 class TestDistributeInitialCorpus:
     """Regression for P0-2: pre-existing corpus was never given to workers."""
 
-    def test_round_robin_into_worker_dirs(self, tmp_path):
+    def test_seeds_reach_worker_dirs(self, tmp_path):
         from fuzzer_tool.adapters.filesystem import discover_seed_files, save_to_corpus
         from fuzzer_tool.services.parallel import _distribute_initial_corpus
 
@@ -134,23 +134,15 @@ class TestDistributeInitialCorpus:
         (parent / "seed_a").write_bytes(b"alpha")
         (parent / "seed_b").write_bytes(b"bravo")
         (parent / "seed_c").write_bytes(b"charlie")
-        seeds_dir = parent / "seeds" / "ab"
-        seeds_dir.mkdir(parents=True)
         save_to_corpus(b"delta", parent, set())
 
         n = _distribute_initial_corpus(parent, n_workers=2)
         assert n >= 4
 
-        w0 = discover_seed_files(parent / ".w0")
-        w1 = discover_seed_files(parent / ".w1")
-        assert len(w0) >= 1
-        assert len(w1) >= 1
-        # Combined content covers the originals.
-        bodies = {p.read_bytes() for p in w0 + w1}
-        assert b"alpha" in bodies
-        assert b"bravo" in bodies
-        assert b"charlie" in bodies
-        assert b"delta" in bodies
+        bodies = set()
+        for w in (".w0", ".w1"):
+            bodies |= {p.read_bytes() for p in discover_seed_files(parent / w)}
+        assert {b"alpha", b"bravo", b"charlie", b"delta"} <= bodies
 
     def test_empty_corpus_is_noop(self, tmp_path):
         from fuzzer_tool.services.parallel import _distribute_initial_corpus
@@ -158,3 +150,97 @@ class TestDistributeInitialCorpus:
         parent = tmp_path / "empty"
         parent.mkdir()
         assert _distribute_initial_corpus(parent, n_workers=3) == 0
+
+
+class TestDistributeInitialCorpusOwnership:
+    """The distributor must agree with the partition the sync path enforces."""
+
+    def test_worker_dir_contents_are_not_redistributed(self, tmp_path):
+        """``".w" not in path.parts`` matched nothing -- the parts are ``.w0``.
+
+        Without a top-level ``seeds/`` tree, discover_seed_files walks into
+        the worker directories, so every restart re-scattered each worker's
+        own corpus across its siblings.
+        """
+        from fuzzer_tool.services.parallel import _distribute_initial_corpus
+
+        parent = tmp_path / "corpus"
+        (parent / ".w0").mkdir(parents=True)
+        (parent / ".w1").mkdir(parents=True)
+        (parent / ".w0" / "id_owned0").write_bytes(b"already-w0")
+        (parent / ".w1" / "id_owned1").write_bytes(b"already-w1")
+        (parent / "fresh").write_bytes(b"fresh-seed")
+
+        n = _distribute_initial_corpus(parent, n_workers=2)
+        assert n == 1, "only the fresh top-level seed should be distributed"
+
+        distributed = {
+            p.read_bytes()
+            for w in (".w0", ".w1")
+            for p in (parent / w).rglob("id_*")
+            if p.is_file() and p.name not in ("id_owned0", "id_owned1")
+        }
+        assert distributed == {b"fresh-seed"}
+
+    def test_is_under_worker_dir_predicate(self):
+        from pathlib import Path
+
+        from fuzzer_tool.services.parallel import _is_under_worker_dir
+
+        assert _is_under_worker_dir(Path("/c/.w0/seed"))
+        assert _is_under_worker_dir(Path("/c/.w12/seeds/ab/id_x"))
+        assert not _is_under_worker_dir(Path("/c/seeds/ab/id_x"))
+        assert not _is_under_worker_dir(Path("/c/.weights/id_x"))
+
+    def test_assignment_is_stable_across_enumeration_order(self, tmp_path):
+        """Assignment is by content, so file order and restarts cannot move a seed."""
+        from fuzzer_tool.services.parallel import _distribute_initial_corpus
+
+        payloads = [f"seed-{i}".encode() for i in range(12)]
+
+        def place(names):
+            root = tmp_path / f"c{len(list(tmp_path.iterdir()))}"
+            root.mkdir()
+            for name, body in zip(names, payloads, strict=True):
+                (root / name).write_bytes(body)
+            _distribute_initial_corpus(root, n_workers=4)
+            return {
+                p.read_bytes(): w
+                for w in (".w0", ".w1", ".w2", ".w3")
+                for p in (root / w).rglob("id_*")
+                if p.is_file()
+            }
+
+        first = place([f"a{i:02d}" for i in range(12)])
+        # Same content, names that enumerate in the opposite order.
+        second = place([f"z{11 - i:02d}" for i in range(12)])
+        assert first == second
+
+    def test_fractal_partition_assignment_matches_sync_filter(self, tmp_path):
+        """A seed must land on the worker ``accept_for_worker`` would keep it on."""
+        from fuzzer_tool.core.parallel_fractal_partition import assign_worker
+        from fuzzer_tool.services.parallel import _distribute_initial_corpus
+
+        parent = tmp_path / "corpus"
+        parent.mkdir()
+        payloads = [f"payload-{i}".encode() for i in range(16)]
+        for i, body in enumerate(payloads):
+            (parent / f"seed_{i:02d}").write_bytes(body)
+
+        n_workers, depth = 4, 3
+        _distribute_initial_corpus(
+            parent,
+            n_workers=n_workers,
+            fractal_partition=True,
+            fractal_depth=depth,
+        )
+
+        for w in range(n_workers):
+            for path in (parent / f".w{w}").rglob("id_*"):
+                if not path.is_file():
+                    continue
+                data = path.read_bytes()
+                assert assign_worker(data, n_workers, depth) == w, (
+                    f"{data!r} placed on .w{w} but owned by "
+                    f".w{assign_worker(data, n_workers, depth)}"
+                )
