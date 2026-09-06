@@ -79,6 +79,7 @@ class TestDeterministicMutationStream:
         data = b"ABCD"
         muts = list(_deterministic_mutation_stream(data, max_mutations=10_000))
         assert len(muts) == _expected_mutation_count(data)
+        assert _deterministic_mutation_stream.last_truncated == 0
 
     def test_every_mutant_differs_from_original(self):
         data = b"ABCD"
@@ -90,9 +91,67 @@ class TestDeterministicMutationStream:
         data = b"A" * 100
         muts = list(_deterministic_mutation_stream(data, max_mutations=50))
         assert len(muts) == 50
+        # Full schedule is 33*100 = 3300; we truncated.
+        assert _deterministic_mutation_stream.last_truncated == 3300 - 50
 
     def test_empty_data_yields_nothing(self):
         assert list(_deterministic_mutation_stream(b"", max_mutations=1000)) == []
+        assert _deterministic_mutation_stream.last_truncated == 0
+
+    def test_per_pass_quota_keeps_all_four_passes(self):
+        """Regression for P0-1: a flat prefix deleted later passes entirely.
+
+        With max_mutations=65536 and a seed long enough that the old prefix
+        cap exhausted the budget inside bitflip/byteflip, arithmetic and
+        interesting never ran.  Proportional per-pass quotas give every
+        family a share and consume the full budget.
+        """
+        from fuzzer_tool.core.mutations import ARITHMETIC_DELTAS, INTERESTING_UNSIGNED_8
+
+        # Varied bytes so bitflip / byteflip / arith / interesting don't
+        # collapse into the same (orig, mutant) pairs.
+        data = bytes(range(256)) * 16  # length 4096; full cost = 135168
+        muts = list(_deterministic_mutation_stream(data, max_mutations=65536))
+        assert len(muts) == 65536
+        assert _deterministic_mutation_stream.last_truncated == 135168 - 65536
+
+        # Classify by exclusive signatures where possible.  Interesting
+        # and arithmetic can emit a no-op when the chosen value equals the
+        # original byte; those are still evidence the pass ran.
+        orig = data
+        seen_bit = seen_byte = seen_arith = seen_interesting = 0
+        deltas = set(ARITHMETIC_DELTAS)
+        interesting = set(v & 0xFF for v in INTERESTING_UNSIGNED_8)
+        for m in muts:
+            diffs = [i for i in range(len(orig)) if m[i] != orig[i]]
+            if len(diffs) == 0:
+                # No-op from interesting/arith landing on the original value.
+                seen_interesting += 1  # conservatively attribute
+                continue
+            assert len(diffs) == 1
+            i = diffs[0]
+            o, n = orig[i], m[i]
+            xor = n ^ o
+            if xor.bit_count() == 1:
+                seen_bit += 1
+            elif n == (o ^ 0xFF):
+                seen_byte += 1
+            elif ((n - o) & 0xFF) in deltas or ((o - n) & 0xFF) in deltas:
+                seen_arith += 1
+            elif n in interesting:
+                seen_interesting += 1
+            else:
+                raise AssertionError(f"unclassified mutant at {i}: {o:#x} -> {n:#x}")
+
+        assert seen_bit > 0, "bitflip pass was deleted"
+        assert seen_byte > 0, "byteflip pass was deleted"
+        assert seen_arith > 0, "arithmetic pass was deleted"
+        assert seen_interesting > 0, "interesting pass was deleted"
+        # Proportional shares: bit≈8/33, byte≈1/33, arith≈16/33, int≈8/33.
+        assert seen_bit >= 1000
+        assert seen_byte >= 100
+        assert seen_arith >= 2000
+        assert seen_interesting >= 1000
 
 
 class TestTraceMiniFromEdges:

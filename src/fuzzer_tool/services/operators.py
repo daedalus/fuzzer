@@ -285,14 +285,22 @@ def _deterministic_mutation_stream(data: bytes, max_mutations: int = MAX_DET_MUT
     adding more passes below; the gating and queueing around it doesn't
     change.
 
+    When *max_mutations* is smaller than the full schedule cost (33 mutants
+    per byte), the budget is split as a **per-pass quota** rather than a
+    flat prefix.  A prefix cap would silently delete entire later passes
+    (interesting-value at len≥2621, arithmetic at len≥7281, byte-flip at
+    len≥8192).  Proportional per-pass quotas keep every operator family
+    running on large seeds and consume the full budget.  The number of mutants that would have been
+    produced beyond the cap is recorded on
+    ``_deterministic_mutation_stream.last_truncated`` for stats.
+
     Args:
         data: The seed to generate a deterministic schedule for. Not
             mutated -- each yielded mutant is a fresh bytearray.
         max_mutations: Hard cap on total mutants yielded, so one huge seed
             can't turn a single deterministic pass into an unbounded stall.
-            Bitflip 1/1 alone costs 8*len(data) mutants; the cap simply
-            truncates the schedule when it's exceeded, same as AFL++'s own
-            time-boxing of deterministic stages on large inputs.
+            Distributed as a per-pass quota when the full schedule exceeds
+            the cap.
 
     Yields:
         bytes mutants, each one mutation away from *data*.
@@ -301,56 +309,109 @@ def _deterministic_mutation_stream(data: bytes, max_mutations: int = MAX_DET_MUT
 
     length = len(data)
     if length == 0:
+        _deterministic_mutation_stream.last_truncated = 0
         return
 
+    # Natural schedule costs (mutants per byte): bitflip=8, byteflip=1,
+    # arithmetic=16 (8 deltas × ±), interesting=8.  Total 33.
+    n_arith_deltas = len(ARITHMETIC_DELTAS)
+    n_interesting = len(INTERESTING_UNSIGNED_8)
+    cost_bit = length * 8
+    cost_byte = length
+    cost_arith = length * n_arith_deltas * 2
+    cost_interesting = length * n_interesting
+    full_cost = cost_bit + cost_byte + cost_arith + cost_interesting
+
+    if full_cost <= max_mutations:
+        quotas = [cost_bit, cost_byte, cost_arith, cost_interesting]
+        _deterministic_mutation_stream.last_truncated = 0
+    else:
+        # Proportional per-pass quotas (by natural cost).  A flat prefix
+        # would delete later passes entirely on large seeds; proportional
+        # shares keep every family running and consume the full budget.
+        costs = [cost_bit, cost_byte, cost_arith, cost_interesting]
+        quotas = [int(max_mutations * c / full_cost) for c in costs]
+        # Distribute rounding remainder to the largest under-allocated passes.
+        shortfall = max_mutations - sum(quotas)
+        order = sorted(range(4), key=lambda i: costs[i] - quotas[i], reverse=True)
+        for i in order:
+            if shortfall <= 0:
+                break
+            add = min(shortfall, costs[i] - quotas[i])
+            if add > 0:
+                quotas[i] += add
+                shortfall -= add
+        _deterministic_mutation_stream.last_truncated = full_cost - max_mutations
+
     n = 0
+    q_bit, q_byte, q_arith, q_interesting = quotas
 
     # bitflip 1/1: flip every bit in turn.
+    pass_n = 0
     for byte_idx in range(length):
+        if pass_n >= q_bit:
+            break
         orig = data[byte_idx]
         for bit in range(8):
-            if n >= max_mutations:
-                return
+            if pass_n >= q_bit:
+                break
             mutant = bytearray(data)
             mutant[byte_idx] = orig ^ (1 << bit)
             yield bytes(mutant)
+            pass_n += 1
             n += 1
 
     # byte flip 8/8: XOR every byte with 0xFF in turn.
+    pass_n = 0
     for byte_idx in range(length):
-        if n >= max_mutations:
-            return
+        if pass_n >= q_byte:
+            break
         mutant = bytearray(data)
         mutant[byte_idx] ^= 0xFF
         yield bytes(mutant)
+        pass_n += 1
         n += 1
 
     # arithmetic 8-bit: add/subtract each delta at every byte position.
+    pass_n = 0
     for byte_idx in range(length):
+        if pass_n >= q_arith:
+            break
         orig = data[byte_idx]
         for delta in ARITHMETIC_DELTAS:
-            if n >= max_mutations:
-                return
+            if pass_n >= q_arith:
+                break
             mutant = bytearray(data)
             mutant[byte_idx] = (orig + delta) & 0xFF
             yield bytes(mutant)
+            pass_n += 1
             n += 1
-            if n >= max_mutations:
-                return
+            if pass_n >= q_arith:
+                break
             mutant = bytearray(data)
             mutant[byte_idx] = (orig - delta) & 0xFF
             yield bytes(mutant)
+            pass_n += 1
             n += 1
 
     # interesting values 8-bit: substitute each known-interesting byte.
+    pass_n = 0
     for byte_idx in range(length):
+        if pass_n >= q_interesting:
+            break
         for val in INTERESTING_UNSIGNED_8:
-            if n >= max_mutations:
-                return
+            if pass_n >= q_interesting:
+                break
             mutant = bytearray(data)
             mutant[byte_idx] = val & 0xFF
             yield bytes(mutant)
+            pass_n += 1
             n += 1
+
+
+# Mutants the most recent call would have produced beyond max_mutations.
+# Surfaced for stats; 0 when the schedule fit under the cap.
+_deterministic_mutation_stream.last_truncated = 0
 
 
 class OperatorEngine:
@@ -937,10 +998,13 @@ class OperatorEngine:
         if cmplog_pairs:
             from fuzzer_tool.core.colorizer import CmplogColorizer  # noqa: PLC0415
 
-            # Cache color mask per (input hash, cmplog pairs id)
+            # Cache color mask per (input hash, cmplog pairs identity).
+            # Mix len() into the id key: CPython reuses object ids after free,
+            # so a rebuilt pairs list can collide with a stale cache entry
+            # (same shape as the neighbouring redqueen memo at _version).
             buf_bytes = bytes(buf)
             buf_hash = hash(buf_bytes)
-            pairs_id = id(cmplog_pairs)
+            pairs_id = id(cmplog_pairs) + len(cmplog_pairs)
             cache = getattr(self, "_colorize_cache", None)
             if cache is None:
                 self._colorize_cache = {}
@@ -1883,7 +1947,8 @@ class OperatorEngine:
         cached = getattr(self, "_cond_stmts", None)
         if cached is not None:
             # Invalidate when the pair list changes.
-            pair_id = id(self.ctx.cmplog_pairs) if self.ctx.cmplog_pairs else -1
+            pairs = self.ctx.cmplog_pairs
+            pair_id = (id(pairs) + len(pairs)) if pairs else -1
             if getattr(self, "_cond_stmts_pair_id", None) == pair_id:
                 return cached
         from fuzzer_tool.core.cond_stmt import (
@@ -1899,7 +1964,8 @@ class OperatorEngine:
             pair_pc=pair_pc,
         )
         self._cond_stmts = cached
-        self._cond_stmts_pair_id = id(self.ctx.cmplog_pairs) if self.ctx.cmplog_pairs else -1
+        pairs = self.ctx.cmplog_pairs
+        self._cond_stmts_pair_id = (id(pairs) + len(pairs)) if pairs else -1
         return cached
 
     def _op_special_strings(self, buf, _byte_idx, _data):
