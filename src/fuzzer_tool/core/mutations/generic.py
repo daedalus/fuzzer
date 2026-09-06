@@ -937,6 +937,8 @@ MUTATIONS = [
     "bit_rotate",
     "bit_shift",
     "span_invert",
+    "span_reverse",
+    "span_relocate",
     "bit_repack",
     "simd_boundary",
     "regex_bomb",
@@ -1904,6 +1906,69 @@ def span_invert(data: bytes, rng=None) -> bytes:
     if last > first + 1:
         result[first + 1 : last] = result[first + 1 : last].translate(_INVERT_TABLE)
     return bytes(result)
+
+
+def span_reverse(data: bytes, rng=None) -> bytes:
+    """Reverse a contiguous byte span (TSP 2-opt neighbourhood).
+
+    A uniform shuffle of *k* bytes hits the exact reversal with probability
+    ``1/k!``; this operator produces it in one step. Useful for endian-sensitive
+    multi-byte fields and length-prefixed records.
+
+    Opt-in via ``--op-span-reverse`` (gated in the operator registry).
+
+    Args:
+        data: Input bytes.
+        rng: Optional RNG.
+
+    Returns:
+        Bytes with one contiguous span reversed. Length unchanged.
+    """
+    if len(data) < 2:
+        return data
+    r = _get_rng(rng)
+    # Prefer short-to-medium spans; long reverses are less realistic corruptions.
+    max_span = min(len(data), r.choice((2, 2, 4, 4, 8, 8, 16, 16, 32, 64, len(data))))
+    span = r.randint(2, max_span)
+    start = r.randint(0, len(data) - span)
+    end = start + span
+    result = bytearray(data)
+    result[start:end] = result[start:end][::-1]
+    return bytes(result)
+
+
+def span_relocate(data: bytes, rng=None) -> bytes:
+    """Relocate a short contiguous span elsewhere, preserving length (Or-opt).
+
+    Length-preserving move of a block. Distinct from the two-step composition
+    ``block_delete`` + ``block_insert`` that the bandit must discover.
+
+    Opt-in via ``--op-span-relocate`` (gated in the operator registry).
+
+    Args:
+        data: Input bytes.
+        rng: Optional RNG.
+
+    Returns:
+        Bytes with one span moved. Length unchanged.
+    """
+    if len(data) < 3:
+        return data
+    r = _get_rng(rng)
+    span = r.randint(1, min(16, len(data) - 1))
+    src = r.randint(0, len(data) - span)
+    # Destination must leave room for the span and differ from src.
+    dest = r.randint(0, len(data) - span)
+    if dest == src:
+        dest = (src + 1) % (len(data) - span + 1)
+    chunk = data[src : src + span]
+    # Remove then insert so length is preserved.
+    without = data[:src] + data[src + span :]
+    # Adjust dest if it was after the removed region.
+    if dest > src:
+        dest -= span
+    result = without[:dest] + chunk + without[dest:]
+    return result
 
 
 # Element widths for bit_repack, weighted toward the ones real formats use:

@@ -1700,6 +1700,35 @@ class OperatorEngine:
             buf[i : i + size] = b
             buf[j : j + size] = a
 
+    def _op_span_reverse(self, buf, _byte_idx, _data):
+        """TSP 2-opt: reverse a contiguous byte span in place."""
+        rng = self.ctx.rand_pool
+        n = len(buf)
+        if n < 2:
+            return
+        max_span = min(n, rng.choice([2, 2, 4, 4, 8, 8, 16, 16, 32, 64, n]))
+        span = rng.randint(2, max_span)
+        start = rng.randint(0, n - span)
+        end = start + span
+        buf[start:end] = buf[start:end][::-1]
+
+    def _op_span_relocate(self, buf, _byte_idx, _data):
+        """Or-opt: relocate a short span elsewhere, length preserved."""
+        rng = self.ctx.rand_pool
+        n = len(buf)
+        if n < 3:
+            return
+        span = rng.randint(1, min(16, n - 1))
+        src = rng.randint(0, n - span)
+        dest = rng.randint(0, n - span)
+        if dest == src:
+            dest = (src + 1) % (n - span + 1)
+        chunk = bytes(buf[src : src + span])
+        del buf[src : src + span]
+        if dest > src:
+            dest -= span
+        buf[dest:dest] = chunk
+
     def _op_swap_bytes(self, buf, _byte_idx, _data):
         rng = self.ctx.rand_pool
         if len(buf) >= 2:

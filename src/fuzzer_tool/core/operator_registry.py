@@ -73,6 +73,9 @@ _CATEGORIES: dict[str, set[str]] = {
         "transpose_64",
         "simd_boundary",
         "block_shuffle_variable",
+        # TSP neighbourhood (opt-in via --op-span-reverse / --op-span-relocate)
+        "span_reverse",
+        "span_relocate",
     },
     "dict": {
         "dict_insert",
@@ -585,6 +588,9 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     "regex_bomb": lambda f, _d: bool(getattr(f, "enable_regex_bomb", False)),
     "x86_chunk_mutate": lambda f, _d: bool(getattr(f, "enable_x86_mutator", False)),
     "arm_chunk_mutate": lambda f, _d: bool(getattr(f, "enable_arm_mutator", False)),
+    # TSP neighbourhood (Phase 1 / C2) — off until --op-span-reverse / --op-span-relocate
+    "span_reverse": lambda f, _d: bool(getattr(f, "op_span_reverse", False)),
+    "span_relocate": lambda f, _d: bool(getattr(f, "op_span_relocate", False)),
     # dispatch-only, never selectable
     # colorization: gated on cmplog pairs. The handler is a byte randomizer
     # that prefers offsets appearing in comparison operands (CmplogColorizer),

@@ -852,6 +852,9 @@ class Fuzzer:
         # Appended at the end so positional callers of Fuzzer() are not shifted.
         poisson_disk_admission=False,
         poisson_disk_min_jaccard=0.25,
+        # TSP neighbourhood operators (Phase 1 / C2). Appended at the end.
+        op_span_reverse=False,
+        op_span_relocate=False,
     ):
         # Snapshot os.environ before anything below (or later in run()) can
         # write __AFL_DIST_SHM_ID / __AFL_SHM_ID / AFL_MAP_SIZE / LD_PRELOAD /
@@ -976,6 +979,9 @@ class Fuzzer:
         self.weizz_tags = weizz_tags
         self.weizz_tags_max_len = weizz_tags_max_len
         self._weizz_tags_collected = 0
+        # TSP neighbourhood operators (Phase 1 / C2) — gated availability.
+        self.op_span_reverse = op_span_reverse
+        self.op_span_relocate = op_span_relocate
         # MailConfig | None — novel-crash email notification (see services/sendmail.py)
         self.email_on_crash = email_on_crash
         self.enable_x86_mutator = enable_x86_mutator

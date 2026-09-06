@@ -216,6 +216,26 @@ def cmd_fuzz(args):
             f"max_bytes={getattr(args, 'diff_myers_max_bytes', 64 * 1024 * 1024)})"
         )
 
+    # Phase 0 / A2 — LSH-sparsified crash clustering.
+    if getattr(args, "crash_cluster_lsh", False):
+        from fuzzer_tool.core.crash_metadata import configure_crash_cluster_lsh
+
+        configure_crash_cluster_lsh(
+            enabled=True,
+            threshold=getattr(args, "crash_cluster_lsh_threshold", 0.7),
+        )
+        print(
+            f"[*] LSH crash clustering enabled "
+            f"(threshold={getattr(args, 'crash_cluster_lsh_threshold', 0.7)})"
+        )
+
+    # Phase 1 / B1 — Floyd sampling.
+    if getattr(args, "rand_floyd_sample", False):
+        from fuzzer_tool.core.rand_pool import configure_rand_floyd
+
+        configure_rand_floyd(True)
+        print("[*] Floyd sampling enabled for RandPool.sample (k>=3)")
+
     # Normalize targets: support both old single-target and new multi-target
     import glob as _glob
 
@@ -675,6 +695,8 @@ def cmd_fuzz(args):
         dedup_execs=not getattr(args, "no_dedup_execs", False),
         perf_novelty=not getattr(args, "no_perf_novelty", False),
         reject_code=getattr(args, "reject_code", None),
+        op_span_reverse=getattr(args, "op_span_reverse", False),
+        op_span_relocate=getattr(args, "op_span_relocate", False),
     )
     # shlex.join, not " ".join: this string is now persisted into state.json
     # and printed as the command that reproduces the run, so an argument
@@ -3028,6 +3050,50 @@ def main() -> int:
         default=64 * 1024 * 1024,
         metavar="N",
         help="Byte budget for the numpy DP fallback table (default: 64 MiB)",
+    )
+    # --- Phase 0 / A2 ---
+    fuzz_parser.add_argument(
+        "--crash-cluster-lsh",
+        action="store_true",
+        help=(
+            "Opt-in LSH-sparsified crash clustering (MinHash banding over "
+            "signature tokens / frames). Only LSH candidate pairs pay full "
+            "similarity cost. Union-find uses rank. Default path unchanged."
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--crash-cluster-lsh-threshold",
+        type=float,
+        default=0.7,
+        metavar="T",
+        help="Similarity threshold for LSH crash clustering (default: 0.7)",
+    )
+    # --- Phase 1 / B1 ---
+    fuzz_parser.add_argument(
+        "--rand-floyd-sample",
+        action="store_true",
+        help=(
+            "Opt-in Floyd sampling for RandPool.sample (k>=3). Exactly k "
+            "draws from the pool stream, no numpy round-trip. k==1/k==2 "
+            "fast paths unchanged so seeded runs stay identical when off."
+        ),
+    )
+    # --- Phase 1 / C2 ---
+    fuzz_parser.add_argument(
+        "--op-span-reverse",
+        action="store_true",
+        help=(
+            "Enable span_reverse mutation operator (TSP 2-opt: reverse a "
+            "contiguous byte span). Off by default."
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--op-span-relocate",
+        action="store_true",
+        help=(
+            "Enable span_relocate mutation operator (Or-opt: length-preserving "
+            "relocation of a short span). Off by default."
+        ),
     )
     fuzz_parser.set_defaults(func=cmd_fuzz)
 

@@ -1,6 +1,9 @@
 """Crash metadata collection for enriched triage output."""
 
+from __future__ import annotations
+
 import hashlib
+import os
 from dataclasses import dataclass, field
 
 from fuzzer_tool.core.similarity import (
@@ -10,6 +13,28 @@ from fuzzer_tool.core.similarity import (
     levenshtein_diff_offsets,
     levenshtein_similarity,
 )
+
+# Opt-in LSH-sparsified clustering (Phase 0 / A2 of the seventeen-source survey).
+_CRASH_CLUSTER_LSH: bool = os.environ.get("FUZZER_CRASH_CLUSTER_LSH", "").strip() in (
+    "1",
+    "true",
+    "yes",
+)
+_CRASH_CLUSTER_LSH_THRESHOLD: float = float(
+    os.environ.get("FUZZER_CRASH_CLUSTER_LSH_THRESHOLD", "0.7") or "0.7"
+)
+
+
+def configure_crash_cluster_lsh(enabled: bool = False, threshold: float = 0.7) -> None:
+    """Enable/disable LSH-sparsified crash clustering and set the threshold."""
+    global _CRASH_CLUSTER_LSH, _CRASH_CLUSTER_LSH_THRESHOLD
+    _CRASH_CLUSTER_LSH = bool(enabled)
+    _CRASH_CLUSTER_LSH_THRESHOLD = float(threshold)
+
+
+def crash_cluster_lsh_enabled() -> bool:
+    """Return whether LSH-sparsified clustering is active."""
+    return _CRASH_CLUSTER_LSH
 
 
 @dataclass
@@ -377,10 +402,29 @@ def find_nearest_corpus(
     return label, sim, diff[:30], edit_summary
 
 
+def _crash_token_set(sig: str, frames: list[str] | None = None) -> set[int]:
+    """Build a stable integer token set for MinHash from a crash signature.
+
+    Uses frame names when available, otherwise 4-grams of the signature string.
+    Tokens are hashed to uint64-range ints so they plug into MinHashLSH.
+    """
+    tokens: set[int] = set()
+    if frames:
+        for fr in frames:
+            tokens.add(hash(fr) & 0xFFFFFFFFFFFFFFFF)
+    # Always include signature 4-grams for extra discrimination.
+    s = sig or ""
+    for i in range(max(0, len(s) - 3)):
+        tokens.add(hash(s[i : i + 4]) & 0xFFFFFFFFFFFFFFFF)
+    if not tokens:
+        tokens.add(0)
+    return tokens
+
+
 def cluster_crashes(
     signatures: list[str],
     frame_lists: list[list[str]] | None = None,
-    threshold: float = 0.7,
+    threshold: float | None = None,
 ) -> list[list[int]]:
     """Cluster crash signatures by Levenshtein similarity.
 
@@ -388,10 +432,16 @@ def cluster_crashes(
     Levenshtein (correctly distinguishes A->B->C from C->B->A).
     Otherwise falls back to signature-string Levenshtein.
 
+    When ``--crash-cluster-lsh`` is enabled, candidate pairs are first
+    filtered via MinHash LSH (re-using ``MinHashLSH`` from edge_tracker)
+    so the quadratic full-similarity work only runs on LSH candidates.
+    Union-find uses path-halving + union-by-rank.
+
     Args:
         signatures: List of crash signature strings.
         frame_lists: Optional list of frame lists (in call order) per crash.
         threshold: Minimum similarity to group into the same cluster.
+            Defaults to 0.7, or the configured LSH threshold when LSH is on.
 
     Returns:
         List of clusters, where each cluster is a list of indices into
@@ -400,28 +450,68 @@ def cluster_crashes(
     if not signatures:
         return []
 
+    if threshold is None:
+        threshold = _CRASH_CLUSTER_LSH_THRESHOLD if _CRASH_CLUSTER_LSH else 0.7
+
     n = len(signatures)
     parent = list(range(n))
+    rank = [0] * n
 
     def find(x: int) -> int:
         while parent[x] != x:
-            parent[x] = parent[parent[x]]
+            parent[x] = parent[parent[x]]  # path halving
             x = parent[x]
         return x
 
     def union(x: int, y: int) -> None:
         px, py = find(x), find(y)
-        if px != py:
+        if px == py:
+            return
+        # Union by rank
+        if rank[px] < rank[py]:
             parent[px] = py
+        elif rank[px] > rank[py]:
+            parent[py] = px
+        else:
+            parent[py] = px
+            rank[px] += 1
 
-    for i in range(n):
-        for j in range(i + 1, n):
-            if frame_lists and i < len(frame_lists) and j < len(frame_lists):
-                sim = frame_sequence_similarity(frame_lists[i], frame_lists[j])
-            else:
-                sim = crash_signature_similarity(signatures[i], signatures[j])
-            if sim >= threshold:
-                union(i, j)
+    def _sim(i: int, j: int) -> float:
+        if frame_lists and i < len(frame_lists) and j < len(frame_lists):
+            return frame_sequence_similarity(frame_lists[i], frame_lists[j])
+        return crash_signature_similarity(signatures[i], signatures[j])
+
+    if _CRASH_CLUSTER_LSH and n > 8:
+        # Sparsify via MinHash LSH: only full-sim pairs that share a band.
+        from fuzzer_tool.core.edge_tracker import MinHashLSH
+
+        lsh = MinHashLSH(num_perm=64, num_bands=8, seed=42)
+        keys = [str(i) for i in range(n)]
+        for i, key in enumerate(keys):
+            frames = frame_lists[i] if frame_lists and i < len(frame_lists) else None
+            tok = _crash_token_set(signatures[i], frames)
+            sig = lsh.compute_signature(tok)
+            lsh.add(key, sig)
+
+        seen_pairs: set[tuple[int, int]] = set()
+        for i, key in enumerate(keys):
+            candidates = lsh.find_similar(key, min_jaccard=max(0.1, threshold - 0.3))
+            for ck in candidates:
+                j = int(ck)
+                if j <= i:
+                    continue
+                pair = (i, j)
+                if pair in seen_pairs:
+                    continue
+                seen_pairs.add(pair)
+                if _sim(i, j) >= threshold:
+                    union(i, j)
+    else:
+        # Original dense O(n^2) path (default).
+        for i in range(n):
+            for j in range(i + 1, n):
+                if _sim(i, j) >= threshold:
+                    union(i, j)
 
     clusters_map: dict[int, list[int]] = {}
     for i in range(n):

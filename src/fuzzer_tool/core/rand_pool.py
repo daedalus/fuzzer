@@ -9,16 +9,39 @@ Key optimisations over ``random`` module:
 - ``shuffle`` / ``sample`` delegate to the Generator's C-level functions.
 - Inlined ``choice`` avoids method call indirection.
 
+Opt-in Floyd sampling (``--rand-floyd-sample`` / ``FUZZER_RAND_FLOYD=1``):
+  When enabled, the ``k >= 3`` branch of ``sample()`` uses Floyd's algorithm
+  (exactly *k* draws from ``_draw()``, O(k) space, no numpy round-trip).
+  The k==1 and k==2 fast paths are never touched so seeded runs remain
+  byte-identical when the flag is off.
+
 Modulo bias is acceptable for fuzzing — we are generating test inputs, not
 cryptographic keys.  The pool is not thread-safe.
 """
 
+from __future__ import annotations
+
 import bisect
 import itertools
+import os
 
 import numpy as np
 
 _POOL_ENTRIES = 4096  # refill every 4K draws
+
+# Opt-in Floyd path (Phase 1 / B1 of the seventeen-source survey).
+_RAND_FLOYD: bool = os.environ.get("FUZZER_RAND_FLOYD", "").strip() in ("1", "true", "yes")
+
+
+def configure_rand_floyd(enabled: bool = False) -> None:
+    """Enable/disable Floyd sampling for ``RandPool.sample`` (k >= 3)."""
+    global _RAND_FLOYD
+    _RAND_FLOYD = bool(enabled)
+
+
+def rand_floyd_enabled() -> bool:
+    """Return whether Floyd sampling is currently active."""
+    return _RAND_FLOYD
 
 
 class RandPool:
@@ -281,6 +304,21 @@ class RandPool:
         else:
             self._rng.shuffle(seq)
 
+    def _floyd_indices(self, n: int, k: int) -> list[int]:
+        """Floyd's sampling: exactly *k* unique indices in ``[0, n)``.
+
+        Uses only ``_draw()`` so the result stays on the pool's RNG stream.
+        O(k) space, exactly k draws.
+        """
+        s: set[int] = set()
+        for j in range(n - k, n):
+            t = self._draw() % (j + 1)
+            if t in s:
+                s.add(j)
+            else:
+                s.add(t)
+        return list(s)
+
     def sample(self, population, k: int):
         """Return *k* unique elements from *population*.
 
@@ -296,6 +334,11 @@ class RandPool:
         RNG is in use rather than stdlib ``random``, which made it look like
         a seed-dependent test flake instead of what it is: an exception
         raised mid-campaign from an ordinary call.
+
+        When ``--rand-floyd-sample`` is enabled the ``k >= 3`` branch uses
+        Floyd's algorithm (exactly k ``_draw()`` calls). The k==1 / k==2
+        fast paths are never altered so seeded runs stay identical when
+        the flag is off.
         """
         if isinstance(population, list | tuple | bytes | bytearray | range):
             n = len(population)
@@ -311,7 +354,10 @@ class RandPool:
                 if b >= a:
                     b += 1
                 return [population[a], population[b]]
-            indices = list(self._rng.choice(n, size=k, replace=False))
+            if _RAND_FLOYD:
+                indices = self._floyd_indices(n, k)
+            else:
+                indices = list(self._rng.choice(n, size=k, replace=False))
             return [population[i] for i in indices]
         # Original: population is an int (range size)
         if k > population:
@@ -324,6 +370,8 @@ class RandPool:
             a = self._draw() % population
             b = self._draw() % (population - 1)
             return [a, b if b < a else b + 1]
+        if _RAND_FLOYD:
+            return self._floyd_indices(population, k)
         return list(self._rng.choice(population, size=k, replace=False))
 
     # ── Continuous distributions ──────────────────────────────────────
