@@ -327,6 +327,57 @@ def _sync_corpus_in(
             added += 1
 
 
+def _distribute_initial_corpus(parent_dir: Path, n_workers: int) -> int:
+    """Round-robin pre-existing seeds from *parent_dir* into ``.wN`` dirs.
+
+    Workers start with empty ``.wN`` directories and only learn about
+    siblings via ``_sync_corpus_in``.  Seeds that already live in the
+    shared corpus (loose files or under ``seeds/``) were never copied in,
+    so every campaign began from an empty queue.  This is the same class
+    of failure ``_sync_corpus_in``'s docstring records one level up.
+
+    Returns the number of seed files distributed.
+    """
+    from fuzzer_tool.adapters.filesystem import (
+        _SEED_SKIP_SUFFIXES,
+        discover_seed_files,
+        save_to_corpus,
+    )
+
+    seeds = list(discover_seed_files(parent_dir))
+    # Also pick up loose top-level files when a ``seeds/`` tree coexists
+    # (discover_seed_files prefers the tree and skips siblings).
+    for entry in sorted(parent_dir.iterdir()):
+        if (
+            entry.is_file()
+            and not entry.is_symlink()
+            and entry.suffix not in _SEED_SKIP_SUFFIXES
+            and entry.name not in ("state.pkl.gz", "state.json")
+        ):
+            if entry not in seeds:
+                seeds.append(entry)
+
+    # Exclude anything already under a worker dir (restarts / nested layouts).
+    seeds = [p for p in seeds if ".w" not in p.parts]
+    if not seeds:
+        return 0
+
+    for i in range(n_workers):
+        (parent_dir / f".w{i}").mkdir(parents=True, exist_ok=True)
+
+    distributed = 0
+    for idx, path in enumerate(seeds):
+        try:
+            data = path.read_bytes()
+        except OSError:
+            continue
+        worker_dir = parent_dir / f".w{idx % n_workers}"
+        # save_to_corpus is idempotent on content hash; ignore return.
+        save_to_corpus(data, worker_dir, set())
+        distributed += 1
+    return distributed
+
+
 def run_parallel(
     target: str,
     jobs: int,
@@ -404,6 +455,10 @@ def run_parallel(
 
     Path(corpus_dir).mkdir(parents=True, exist_ok=True)
     Path(crashes_dir).mkdir(parents=True, exist_ok=True)
+
+    n_seed_files = _distribute_initial_corpus(Path(corpus_dir), jobs)
+    if n_seed_files:
+        print(f"[*] Distributed {n_seed_files} pre-existing seed(s) across {jobs} workers")
 
     stop_event = multiprocessing.Event()
     result_queue = multiprocessing.Queue()

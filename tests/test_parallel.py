@@ -119,3 +119,42 @@ class TestSyncCorpusIn:
         fuzzer.save_to_corpus = MagicMock()
         _sync_corpus_in(parent, fuzzer)
         fuzzer.save_to_corpus.assert_not_called()
+
+
+class TestDistributeInitialCorpus:
+    """Regression for P0-2: pre-existing corpus was never given to workers."""
+
+    def test_round_robin_into_worker_dirs(self, tmp_path):
+        from fuzzer_tool.adapters.filesystem import discover_seed_files, save_to_corpus
+        from fuzzer_tool.services.parallel import _distribute_initial_corpus
+
+        parent = tmp_path / "corpus"
+        parent.mkdir()
+        # Loose seeds + one under seeds/ (discover_seed_files handles both).
+        (parent / "seed_a").write_bytes(b"alpha")
+        (parent / "seed_b").write_bytes(b"bravo")
+        (parent / "seed_c").write_bytes(b"charlie")
+        seeds_dir = parent / "seeds" / "ab"
+        seeds_dir.mkdir(parents=True)
+        save_to_corpus(b"delta", parent, set())
+
+        n = _distribute_initial_corpus(parent, n_workers=2)
+        assert n >= 4
+
+        w0 = discover_seed_files(parent / ".w0")
+        w1 = discover_seed_files(parent / ".w1")
+        assert len(w0) >= 1
+        assert len(w1) >= 1
+        # Combined content covers the originals.
+        bodies = {p.read_bytes() for p in w0 + w1}
+        assert b"alpha" in bodies
+        assert b"bravo" in bodies
+        assert b"charlie" in bodies
+        assert b"delta" in bodies
+
+    def test_empty_corpus_is_noop(self, tmp_path):
+        from fuzzer_tool.services.parallel import _distribute_initial_corpus
+
+        parent = tmp_path / "empty"
+        parent.mkdir()
+        assert _distribute_initial_corpus(parent, n_workers=3) == 0
