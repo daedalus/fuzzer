@@ -2,7 +2,7 @@
 
 Port of `xoreaxeaxeax/skitter-creek-bath-salts`'s
 `analysis/gather_aliases.py:363-400` (`MaskState`, `observe_hit`), per
-`docs/handover/handover_skittercreek_tailslayer_port.md` item 4.
+`docs/handover/handover_done_2026-09-06.md` item 4.
 
 What this answers, and how it differs from item 1
 ---------------------------------------------------

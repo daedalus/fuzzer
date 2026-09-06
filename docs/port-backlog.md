@@ -370,7 +370,7 @@ already extracted non-JIT-specific) — bisect the **set of enabled components**
 not the input. Needs a consistent reproducer, stable identifiers, the ability to
 set the active list, and the ability to observe which were used; `REGISTRY` has
 all four. The motivating case is already paid for:
-`docs/handover/suite_segfault_z3_finalization_2026-08-16.md`, where a `SIGSEGV`
+`docs/handover/handover_done_2026-09-06.md`, where a `SIGSEGV`
 (`ip 0`, silent faulthandler) cost a session to hypotheses about BLAS threads
 and shutdown-timing buffering before the cause turned out to be a vendored-zlib
 link mismatch. An operator-set bisect answers "is any operator implicated at

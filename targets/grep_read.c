@@ -12,7 +12,7 @@
  *      process image with no instrumentation.  Every edge this target
  *      reported was an edge of the harness.
  *   2. A process spawn per execution.  That is the same fork/exec cost
- *      that docs/handover/handover_boltzmann_ab_2026-08-30.md §1 uses to
+ *      that docs/handover/handover_done_2026-09-06.md §8 uses to
  *      disqualify the `locked` target set for cost-sensitive arms — so a
  *      .so in the `direct_lite` set reintroduced exactly what that set
  *      exists to avoid.  Measured: ~1.3 ms of matcher time per execution

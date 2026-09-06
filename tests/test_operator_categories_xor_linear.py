@@ -1,6 +1,6 @@
 """Tests for the XOR-linear ("bitflip family") classification added to
 operator_categories.py for handover doc item 3 -- see
-docs/handover/handover_skittercreek_tailslayer_port.md.
+docs/handover/handover_done_2026-09-06.md.
 """
 
 from __future__ import annotations

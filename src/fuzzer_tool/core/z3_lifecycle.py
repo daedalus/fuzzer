@@ -15,7 +15,7 @@ context loses that race, ``Z3_del_context`` faults inside the native library:
 Observed as an intermittent ``Segmentation fault`` on a full test suite run
 -- roughly one run in eight, *after* every test had already passed, so the
 only visible symptom was a run that ended without its summary line. See
-``docs/handover/suite_segfault_z3_finalization_2026-08-16.md``.
+``docs/handover/handover_done_2026-09-06.md``.
 
 The fix is to not destroy the context at shutdown at all. ``__del__`` is
 guarded on ``self.owner``, so clearing that flag from an ``atexit`` hook --

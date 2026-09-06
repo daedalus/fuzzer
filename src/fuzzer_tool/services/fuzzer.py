@@ -253,7 +253,7 @@ install_cleanup_handlers()
 #  * Owning the signal *suppressed* faulthandler, which does work. An
 #    intermittent suite crash was silent for exactly this reason until
 #    SIGSEGV was handed back -- see
-#    docs/handover/suite_segfault_z3_finalization_2026-08-16.md.
+#    docs/handover/handover_done_2026-09-06.md.
 #
 # Also registers SIGUSR1 for on-demand live traces: `kill -USR1 <fuzzer-pid>`
 # dumps every thread's Python stack to stderr without killing the process.

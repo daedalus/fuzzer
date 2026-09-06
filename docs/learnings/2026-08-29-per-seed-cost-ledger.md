@@ -1,7 +1,7 @@
 # Per-seed execution cost is not clustered — the cost ledger carries signal
 
 **Date.** 2026-08-29. **Base.** `14054a5`. **Why.**
-`docs/handover/handover_persistence_mechanics_2026-08-29.md` §1 gated all three
+`docs/handover/handover_done_2026-09-06.md` §5 gated all three
 of its proposed changes on one measurement: *is `total_time / fuzz_count`
 tightly clustered across a real corpus?* If yes, the count criterion and the
 cost criterion agree, none of §1a/1b/1c is worth writing, and the handover gets

@@ -1,6 +1,6 @@
 """Fractal jittered Voronoi partitioning of the parallel-worker hash space.
 
-Approach C from ``docs/handover/fractal-voronoi-integration.md``: partition
+Approach C from ``docs/handover/handover_done_2026-09-06.md``: partition
 seeds across ``-j N`` workers by the fractal Voronoi root cell of a
 deterministic hash of their content, instead of round-robin or a flat
 ``hash(seed) % N``. Two things fall out of that for free:

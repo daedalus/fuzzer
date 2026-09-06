@@ -1,7 +1,7 @@
 """P2 — field- and chunk-scoped operators driven by Weizz structure tags.
 
 Port of the second item in
-``docs/handover/handover_weizz_structure_aware_port_2026-08-31.md``: mutation
+``docs/handover/handover_done_2026-09-06.md``: mutation
 operators that treat a per-seed :class:`~fuzzer_tool.core.weizz_tags.StructureMap`
 as a set of fields (same-``cmp_id`` runs) and chunks (top-level same-parent
 spans), rather than mutating at arbitrary byte offsets.

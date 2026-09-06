@@ -9,7 +9,7 @@ That had two consequences, and neither one was visible as a failure:
   covering none of grep.
 - A process spawn per execution reintroduced exactly the cost that the
   `direct_lite` set exists to avoid (see
-  docs/handover/handover_boltzmann_ab_2026-08-30.md section 1).
+  docs/handover/handover_done_2026-09-06.md section 1).
 
 Both failure modes are silent, so the first test here is a revert guard: if
 the target ever goes back to spawning a process, the suite says so instead

@@ -1,7 +1,7 @@
 """Regression tests for ``core.mutations.generic._swap_pair``.
 
 Covers the centralization proposed in the combinatorics handover
-(``docs/handover/handover_combinatorics_permutations_2026-09-02.md``,
+(``docs/handover/handover_done_2026-09-06.md``,
 §10a): the C(n,2) swap-pair primitive that was previously inlined in 15
 per-format mutators (``avif``, ``isobmff``, ``mpegts``, ``nal``, ``pgs``,
 ``protobuf``, ``webm``, ``webp``, ``x86``, ``zip``, ``asf``, ``riff``,

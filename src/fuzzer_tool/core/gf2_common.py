@@ -17,7 +17,7 @@ in cross-file navigation than it bought in separation:
   GF(2^n) consumer.
 
 **Bitmask-vector layer** (merged in from the former ``gf2_linalg.py``,
-per `docs/handover/handover_skittercreek_tailslayer_port.md` item 2): GF(2)
+per `docs/handover/handover_done_2026-09-06.md` item 2): GF(2)
 linear-map algebra over bitmask-encoded maps, operating on an
 *already-solved* ``f: {0,1}^n -> {0,1}^n`` XOR-bitmask map -- inverting
 it, composing two of them, applying one to a value. This is a different
@@ -410,7 +410,7 @@ def compose_linear_runs(
 ) -> list[tuple[str, list[int]]]:
     """Compress maximal runs of XOR-linear operators in a mutation chain.
 
-    Per ``docs/handover/handover_skittercreek_tailslayer_port.md`` item 3
+    Per ``docs/handover/handover_done_2026-09-06.md`` item 3
     (the scoped version, since the general "compose the whole lineage"
     feature was rejected there): ``lineage.py``'s mutation chains are
     heterogeneous -- havoc byte flips, splices, dictionary insertions,

@@ -184,7 +184,7 @@ def test_regression_default_timeout_method_spawns_no_thread(request):
     the wrong one here, and this pins the reason. That method arms a
     threading.Timer per test, and this suite forks from the pytest process in
     at least three places. fork() from a multi-threaded process is the hazard
-    behind docs/handover/test_shm_hang_2026-08-14.md, so buying a bound on
+    behind docs/handover/handover_done_2026-09-06.md, so buying a bound on
     native hangs by making every fork riskier is a net loss.
 
     Measured, on a test that forks and is otherwise silent: under the thread

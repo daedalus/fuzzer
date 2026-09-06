@@ -1019,7 +1019,7 @@ class SeedPicker:
         This intentionally says nothing about program or coverage
         structure -- only about spread across a partition of content
         hashes -- unlike the bitmap-remapping idea from
-        ``docs/handover/fractal-voronoi-integration.md``'s Approach B,
+        ``docs/handover/handover_pending_2026-09-06.md``'s Approach B,
         which would inherit the same lack of signal
         ``EdgeTracker.compute_coverage_proximity`` already documents for
         edge-id adjacency (see that method's docstring): edge/bitmap

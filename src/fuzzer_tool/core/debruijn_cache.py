@@ -1,7 +1,7 @@
 """On-disk cache for de Bruijn sequence construction.
 
 Implements handover 10f
-(``docs/handover/handover_combinatorics_permutations_2026-09-02.md``):
+(``docs/handover/handover_done_2026-09-06.md``):
 ``core/mutations/structured.py``'s ``de_bruijn_bytes`` and
 ``de_bruijn_bits`` are pure functions of ``(k, n)`` (or ``n`` alone for
 the bit variant) already memoized per-process via ``@lru_cache``, but a

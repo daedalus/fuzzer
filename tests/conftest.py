@@ -117,8 +117,8 @@ def _fuzz_loader_built():
 # The seed is generated at configure time and printed by
 # pytest_report_header -- i.e. before collection, not inside the test. That
 # placement is the whole point. A test that segfaults or hangs (both of which
-# this suite has done: see docs/handover/suite_segfault_z3_finalization_
-# 2026-08-16.md and docs/handover/test_shm_hang_2026-08-14.md) never gets to
+# this suite has done: see docs/handover/handover_done_2026-09-06.md §10,
+# which absorbed both the z3-finalization and shm-hang writeups) never gets to
 # print anything itself, and a seed you cannot recover from a CI log is the
 # same as no seed at all.
 
@@ -155,7 +155,7 @@ def pytest_configure(config):
     # multi-threaded for the whole session. This suite forks constantly
     # (persistent_signal.py, runner.py's ptrace launch, the inprocess loader), and
     # fork-from-a-multi-threaded-process is a real deadlock hazard, not a
-    # style warning -- see docs/handover/test_shm_hang_2026-08-14.md. Measured:
+    # style warning -- see docs/handover/handover_done_2026-09-06.md. Measured:
     # arming the thread method makes CPython emit its multi-threaded-fork
     # DeprecationWarning on a test that is otherwise silent. Bounding the suite
     # is not worth making every fork in it riskier.

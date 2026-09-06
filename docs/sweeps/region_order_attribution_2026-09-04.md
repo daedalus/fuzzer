@@ -63,7 +63,7 @@ The measurement was set up to test whether a Steinhaus-Johnson-Trotter walk
 over records — an adjacent-transposition Gray code — earns a place here, on
 the argument that it is the only generator that is both exhaustive over all
 n! orderings and moves by a single localized edit each step
-(`docs/handover/handover_sjt_adjacent_transpositions_2026-09-04.md`). It does
+(`docs/handover/handover_done_2026-09-06.md` §10). It does
 not. Deciding whether a region is order-live wants **independent samples** of
 S_n, not a **connected walk** through it; the Gray-code property trades
 independence for locality and locality is not the scarce thing.

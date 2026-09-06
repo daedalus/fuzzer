@@ -1,6 +1,6 @@
 """Tests for the intra-byte correlation (partial entanglement) extension to QEA.
 
-See docs/handover/handover_qea_hilbert_space_analysis_2026-08-31.md for the
+See docs/handover/handover_done_2026-09-06.md for the
 analysis this implements: QEA's per-bit independent amplitudes are a
 product-state approximation that cannot represent that two bits within a
 byte tend to be right or wrong together. This adds an opt-in (default off)

@@ -4,7 +4,7 @@ Wraps external FormatFuzzer generators/parsers (Dutra, Gopinath, Zeller —
 ACM TOSEM 2023) as ``MutatorBase`` operators so the Elo/bandit/MCTS
 schedulers can use high-validity structural mutations.
 
-Design (see ``docs/handover/handover_formatfuzzer_integration_2026-09-06.md``):
+Design (see ``docs/handover/handover_done_2026-09-06.md``):
 
 * One operator instance per template (``ff_png``, ``ff_zip``, …).
 * Category ``"format"`` — peers of the hand-written ``*_chunk_mutate`` ops.

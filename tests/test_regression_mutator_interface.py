@@ -308,7 +308,7 @@ class TestGlobalRegistryUnaffected:
 
         Originally empty (port-3 scaffolding). Weizz P2 class mutators were
         the first in-tree implementors; ``fractal_voronoi`` (spatial
-        meta-mutator, see docs/handover/fractal-voronoi-integration.md) is
+        meta-mutator, see docs/handover/handover_done_2026-09-06.md) is
         the second; the four ``ff_*`` FormatFuzzer template mutators are the
         third. Anything else here is a surprise.
 

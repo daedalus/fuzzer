@@ -9,7 +9,7 @@ which is the code path under test anyway.
 If the drop-counter tests below go intermittently red in CI, do not just
 re-run them: this is the one place the open intermittent ``shmat()`` failure
 is expected to surface (see the "Open loose threads" section of
-docs/handover/handover_skittercreek_tailslayer_port.md). Twice in roughly fifty runs,
+docs/handover/handover_pending_2026-09-06.md). Twice in roughly fifty runs,
 the first ``ShmCoverage`` constructed in a process read back an empty edge
 table after a child that exited 0, and the SHM header was not captured at
 the time -- so it is still unknown whether the child failed to attach or the
@@ -193,7 +193,7 @@ class TestDropCounter:
             # Diagnostics, not decoration: this assertion has gone red once,
             # non-reproducibly, reading back a table the child should have
             # filled (see item (G) in
-            # docs/handover/handover_skittercreek_tailslayer_port.md).
+            # docs/handover/handover_pending_2026-09-06.md).
             # Without the header and the child's status in the message there
             # is no way to tell a child that failed to attach from a parent
             # that raced the read, which is exactly what the last sighting
@@ -394,7 +394,7 @@ class TestAttachFailureIsLoud:
     That ambiguity is the "Loose thread" of the 2026-08 edge-coverage
     analysis, unresolved across three sightings for exactly this reason. Its
     surviving remnant is item (G) in
-    docs/handover/handover_skittercreek_tailslayer_port.md.
+    docs/handover/handover_pending_2026-09-06.md.
     """
 
     @needs_cc

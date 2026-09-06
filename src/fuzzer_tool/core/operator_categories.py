@@ -63,7 +63,7 @@ def category_of(name: str) -> str:
 #: fixed-width XOR against the buffer -- ``buf[i] ^= K`` for some constant
 #: ``K`` that does not depend on the buffer's current contents, at a byte
 #: position that does not move and without changing the buffer's length.
-#: Per ``docs/handover/handover_skittercreek_tailslayer_port.md`` item 3:
+#: Per ``docs/handover/handover_done_2026-09-06.md`` item 3:
 #: this is the boundary for when composing consecutive mutation steps into
 #: one combined map (:func:`fuzzer_tool.core.gf2_common.compose_bitmask_maps`
 #: via :func:`fuzzer_tool.core.gf2_common.compose_linear_runs`) is valid.

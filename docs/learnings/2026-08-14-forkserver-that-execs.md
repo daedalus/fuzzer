@@ -3,7 +3,7 @@
 **Date:** 2026-08-14
 **Closes:** §1 of the 2026-08 edge-coverage analysis (that document no longer
 exists — see the round-13 entry in
-`docs/handover/handover_skittercreek_tailslayer_port.md`, "What was removed")
+`docs/handover/handover_done_2026-09-06.md` §12, "What was removed")
 **Commits:** `feat(shim): add a real AFL-style forkserver to afl_shim.c` and the three
 that follow it.
 

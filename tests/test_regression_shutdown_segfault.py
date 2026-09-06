@@ -17,7 +17,7 @@ Two separate defects kept it invisible for as long as it was:
 A third, latent defect was found while investigating and is covered here too:
 ``ShmCoverage.cleanup()`` left ctypes views bound to the detached address.
 
-See ``docs/handover/suite_segfault_z3_finalization_2026-08-16.md``.
+See ``docs/handover/handover_done_2026-09-06.md``.
 """
 
 from __future__ import annotations

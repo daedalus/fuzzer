@@ -2992,7 +2992,7 @@ def main() -> int:
         help=(
             "Build Weizz-style structure tags from cmplog (+ optional colorize) "
             "and enable field/chunk operators that consume them. Off by default; "
-            "see docs/handover/handover_weizz_structure_aware_port_2026-08-31.md"
+            "see docs/handover/handover_done_2026-09-06.md section 4"
         ),
     )
     fuzz_parser.add_argument(
@@ -3011,7 +3011,7 @@ def main() -> int:
         help=(
             "Enable FormatFuzzer structural mutators (ff_png, ff_zip, …). "
             "Requires FormatFuzzer binaries on PATH or under --ff-bin-dir. "
-            "See docs/handover/handover_formatfuzzer_integration_2026-09-06.md"
+            "See docs/handover/handover_done_2026-09-06.md section 4"
         ),
     )
     fuzz_parser.add_argument(

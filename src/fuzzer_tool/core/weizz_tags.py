@@ -33,8 +33,8 @@ approximates chunks. Tags are approximate — operators must tolerate partial
 or wrong tags (same contract as AFLSmart under a bad model).
 
 Gate behind ``--weizz-tags`` / ``--structure-tags`` and a size limit analogous
-to Weizz ``-L``. See ``docs/handover/handover_weizz_structure_aware_port_2026-08-31.md``
-and ``docs/handover/P1_weizz_tags_README.md``.
+to Weizz ``-L``. See ``docs/handover/handover_done_2026-09-06.md`` §4, which
+absorbed both the Weizz port plan and the P1 tag-map writeup.
 """
 
 from __future__ import annotations

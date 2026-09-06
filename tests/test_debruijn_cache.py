@@ -2,7 +2,7 @@
 ``core.mutations.structured.de_bruijn_bytes`` / ``de_bruijn_bits``.
 
 Covers handover 10f
-(``docs/handover/handover_combinatorics_permutations_2026-09-02.md``):
+(``docs/handover/handover_done_2026-09-06.md``):
 the de Bruijn construction is a pure function of ``(k, n)`` and was
 previously re-derived by every process in a parallel fuzzing campaign.
 These tests exercise the disk cache directly (module-level, isolated

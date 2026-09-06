@@ -3,7 +3,7 @@
 Covers the first implementation of the C(n,m) generalization of
 ``_swap_pair`` proposed (analysis + empirical validation only, not
 implemented there) in the combinatorics handover
-(``docs/handover/handover_combinatorics_permutations_2026-09-02.md``,
+(``docs/handover/handover_done_2026-09-06.md``,
 §10a.1, "Recommended form, revised"): ``_swap_tuple(domain, rng, m)``.
 
 The one finding that has to hold here is the parity trap: an m-cycle is

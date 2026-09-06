@@ -23,7 +23,7 @@ land on.
 whose per-execution cost does not vary it equals the sample count, so any
 consumer written against it is a no-op exactly where the cost signal carries
 nothing, and diverges only where it does.  That is the falsification condition
-from ``docs/handover/handover_persistence_mechanics_2026-08-29.md`` expressed
+from ``docs/handover/handover_done_2026-09-06.md`` expressed
 in the code instead of in a comment.
 """
 

@@ -403,7 +403,7 @@ def mutate_amplitudes(
 # what makes QEA O(n) instead of O(2^n), but it structurally cannot learn
 # that e.g. bit 0 and bit 1 of a magic byte tend to be right or wrong
 # together — every α update in rotation_gate() depends only on that bit's
-# own collapsed value. See docs/handover/handover_qea_hilbert_space_analysis_2026-08-31.md
+# own collapsed value. See docs/handover/handover_done_2026-09-06.md
 # for the full analysis this section implements.
 #
 # This adds a small (8x8) symmetric coupling matrix per byte: a classical

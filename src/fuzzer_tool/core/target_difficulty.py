@@ -1,6 +1,6 @@
 """Static pre-fuzz difficulty estimation via the isoperimetric function.
 
-Percolation handover Module 3 (docs/handover/handover_percolation_theory_2026-08-31.md
+Percolation handover Module 3 (docs/handover/handover_pending_2026-09-06.md
 §4), revised per Diskin, Easo, Radhakrishnan, Sudakov, Tassion, "Supercritical
 sharpness of percolation" (arXiv:2603.03257): supercritical cluster-size decay
 is governed by the isoperimetric function

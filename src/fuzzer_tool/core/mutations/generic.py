@@ -13,7 +13,7 @@ def _get_rng(rng=None):
 def _swap_pair(domain, rng, *, start=0):
     """Pick two distinct indices/elements to swap — the C(n,2) primitive
     duplicated across the per-format mutators (see handover
-    ``docs/handover/handover_combinatorics_permutations_2026-09-02.md``,
+    ``docs/handover/handover_done_2026-09-06.md``,
     §2/§10a).
 
     Covers all three shapes found at the 13+ call sites:
@@ -78,9 +78,11 @@ def _non_identity_permutations(m: int) -> tuple[tuple[int, ...], ...]:
 def _swap_tuple(domain, rng, m, *, start=0):
     """Pick ``m`` distinct indices/elements from ``domain`` and return a
     non-identity rearrangement of them — the C(n,2) ``_swap_pair``
-    primitive generalized to C(n,m), per the handover's §10a.1
-    "Recommended form, revised" (``docs/handover/
-    handover_combinatorics_permutations_2026-09-02.md``). §10a.1 is
+    primitive generalized to C(n,m), per the combinatorics survey's
+    §10a.1 "Recommended form, revised" (measured constraints carried
+    into ``docs/handover/handover_done_2026-09-06.md`` §3; the fact that
+    this helper still has no production call site is tracked as P2-2 in
+    ``docs/handover/handover_pending_2026-09-06.md``). §10a.1 was
     analysis and empirical validation only; this is the first
     implementation of what it recommends.
 

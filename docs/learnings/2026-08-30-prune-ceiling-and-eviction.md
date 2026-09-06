@@ -83,7 +83,7 @@ age remains the tiebreak it always was.
 ## The age fallback is not a corner case
 
 The `_maybe_prune` docstring, and the §1c analysis in
-`docs/handover/handover_persistence_mechanics_2026-08-29.md`, both treat
+`docs/handover/handover_done_2026-09-06.md` §5, both treat
 age-based eviction as a rarely-taken last resort. It is not: which seed gets
 evicted is settled by the tiebreak in essentially every prune.
 

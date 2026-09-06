@@ -23,7 +23,7 @@ The mechanism is that `--timeout-method=thread` arms a `threading.Timer` for
 **every** test, so the pytest process is multi-threaded for the whole session.
 This suite forks from that process in at least three places (`persistent_signal.py:72`,
 `runner.py:311`, the inprocess loader). E3 in the same bug report is precisely
-that hazard, and `docs/handover/test_shm_hang_2026-08-14.md` is the time it
+that hazard, and `docs/handover/handover_done_2026-09-06.md` §10 is the time it
 actually cost a session.
 
 So the obvious fix for E1 makes E3 worse, permanently, on every test. Measured

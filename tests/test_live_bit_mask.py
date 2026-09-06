@@ -1,7 +1,7 @@
 """Falsification-first tests for LiveBitMaskEstimator.
 
 Covers the three validation items from
-`docs/handover/handover_skittercreek_tailslayer_port.md` item 4:
+`docs/handover/handover_done_2026-09-06.md` item 4:
 
   1. Synthetic ground truth: byte-level projection of the converged mask
      exactly equals a known-live byte set.

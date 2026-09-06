@@ -419,7 +419,7 @@ void __afl_map_shm(void) {
      * That is the whole of the "Loose thread" from the 2026-08 edge-coverage
      * analysis -- three sightings across ~50 runs, unresolvable each time
      * because neither side left a trace. Its surviving remnant is item (G)
-     * in docs/handover/handover_skittercreek_tailslayer_port.md; the
+     * in docs/handover/handover_done_2026-09-06.md §1; the
      * analysis document itself no longer exists (see the round-13 entry in
      * that file's "What was removed").
      *

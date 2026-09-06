@@ -1,6 +1,6 @@
 """The two cost-ledger consumers, exercised through the real code paths.
 
-``docs/handover/handover_persistence_mechanics_2026-08-29.md`` §1a and §1b.
+``docs/handover/handover_done_2026-09-06.md`` §1a and §1b.
 Both consumers read ``effective_fuzz_count``, which converts the per-seed cost
 ledger back into executions at the corpus mean rate.  That form is a no-op
 exactly where per-execution cost does not vary, so each class below asserts
