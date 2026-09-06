@@ -848,9 +848,14 @@ explicit flags; baseline remains unchanged.*
 ## Audit of the shipped implementation (2026-09-06, after `12a49ca`)
 
 A1, A2, B1 and C2 were implemented in `cb602c5` and `12a49ca`, all behind
-opt-in flags. Auditing what landed turned up two bugs and one open quality
-failure. Recorded here because in each case the output looked plausible and no
-existing test could have caught it.
+opt-in flags. Auditing what landed turned up three bugs, all now fixed.
+Recorded here because in each case the output looked plausible and no existing
+test could have caught it.
+
+Status: A1 backtrack, A1 gating, C2 `span_relocate` and A2 sparsification are
+all resolved. B1 was audited and needed nothing. Nothing from this survey is
+left open in the code; what remains open is the *design* work in B2 and B3,
+whose questions are unchanged at the top of this document.
 
 ### A1 — the Myers backtrack was wrong (fixed, `15ccd22`)
 
@@ -911,10 +916,7 @@ the correct length, which is the whole operator contract. Only the destination
 distribution was wrong (head 768 / tail 362 per 20k draws on a 64-byte buffer,
 where the two should be comparable).
 
-### A2 — LSH clustering loses ~80% of the pairs it should merge (OPEN)
-
-**Not fixed. Still opt-in and default-off, so nothing ships broken — but it
-does not work as written.**
+### A2 — LSH clustering lost ~80% of the pairs it should merge (fixed, `df2f6e3`)
 
 Against the dense implementation as oracle, 83 of 360 configurations disagree,
 and the LSH version always *under*-merges — frequently returning `n` clusters,
@@ -951,17 +953,32 @@ Plus a third saving that is not a bound: this is single-linkage, so any pair
 already in the same component can be skipped outright.
 
 Unlike LSH these prune only pairs that provably cannot clear the threshold, so
-recall is exact by construction. A prototype of this shape was checked against
-the dense oracle over 1080 configurations (n up to 25, thresholds 0.5/0.7/0.85,
-frame-list present/absent/partial) with **0 mismatches** and a clean
-self-control. That is the version to finish, not a retuned LSH.
+recall is exact by construction — the clusters are identical to comparing every
+pair, which is why the flag is gone rather than defaulted on. Verified over 1080
+configurations against the dense oracle (n up to 25, thresholds 0.5/0.7/0.85,
+frame-list none/all/partial/empty): **0 mismatches**, clean self-control.
 
-Note also that the dense implementation's own union-find has path halving but
-no union by rank, and that `crash_signature_similarity` is exactly
-`levenshtein_similarity(normalize_frame(x).encode(), ...)` while
-`frame_sequence_similarity` already truncates at 8 frames — so hoisting
-`normalize_frame` out of the pair loop is an exact transformation and worth
-doing regardless of which sparsifier lands.
+Cost on the signature-string metric, clusters identical throughout:
+
+```
+n=100    4.34 s -> 0.094 s     46x
+n=200   17.30 s -> 0.203 s     85x
+n=400   69.09 s -> 0.516 s    134x
+```
+
+`normalize_frame` is also hoisted out of the pair loop, which is exact:
+`crash_signature_similarity` is by definition
+`levenshtein_similarity(normalize_frame(x).encode(), ...)` and
+`frame_sequence_similarity` already truncates at 8 frames. Union-by-rank kept
+from the LSH commit. The dead `_crash_token_set` is gone — worth noting that it
+fed builtin `hash()` into the bands, which is per-process randomised, so the LSH
+candidate set was not reproducible across runs either.
+
+The regression test carries its own copy of the dense oracle rather than
+importing one, so changing the production code cannot move the oracle with it.
+It is falsified twice: 10 of 16 fail against the LSH implementation forced on,
+and 6 of 16 against a deliberately unsound multiset bound, so it catches both
+the shipped defect and pruning errors in general.
 
 ### B1 — Floyd sampling: audited, no defects
 
