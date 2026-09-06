@@ -81,8 +81,7 @@ def _swap_tuple(domain, rng, m, *, start=0):
     primitive generalized to C(n,m), per the combinatorics survey's
     §10a.1 "Recommended form, revised" (measured constraints carried
     into ``docs/handover/handover_done_2026-09-06.md`` §3; the fact that
-    this helper still has no production call site is tracked as P2-2 in
-    ``docs/handover/handover_pending_2026-09-06.md``). §10a.1 was
+    production call site is ``OperatorEngine._op_swap_bytes`` (P2-2)). §10a.1 was
     analysis and empirical validation only; this is the first
     implementation of what it recommends.
 
