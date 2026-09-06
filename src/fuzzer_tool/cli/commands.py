@@ -204,25 +204,21 @@ def cmd_fuzz(args):
     # A1 — alignment cost limits. The Myers path itself is unconditional (it
     # fixes an OOM, not a benchmark); these only tune where it gives up.
     _diff_max_d = getattr(args, "diff_myers_max_d", 0) or 0
-    _diff_max_bytes = getattr(args, "diff_myers_max_bytes", 64 * 1024 * 1024)
-    if _diff_max_d or _diff_max_bytes != 64 * 1024 * 1024:
+    _diff_max_bytes = getattr(args, "diff_myers_max_bytes", 128 * 1024 * 1024)
+    if _diff_max_d or _diff_max_bytes != 128 * 1024 * 1024:
         from fuzzer_tool.core.similarity import configure_diff_limits
 
         configure_diff_limits(max_d=_diff_max_d, max_bytes=_diff_max_bytes)
         print(f"[*] diff limits: max_d={_diff_max_d or 'auto'}, max_bytes={_diff_max_bytes}")
 
-    # Phase 0 / A2 — LSH-sparsified crash clustering.
-    if getattr(args, "crash_cluster_lsh", False):
-        from fuzzer_tool.core.crash_metadata import configure_crash_cluster_lsh
+    # A2 — crash clustering threshold. The pruning itself is exact and
+    # therefore unconditional; only the threshold is tunable.
+    _cc_threshold = getattr(args, "crash_cluster_threshold", 0.7)
+    if _cc_threshold != 0.7:
+        from fuzzer_tool.core.crash_metadata import configure_crash_cluster
 
-        configure_crash_cluster_lsh(
-            enabled=True,
-            threshold=getattr(args, "crash_cluster_lsh_threshold", 0.7),
-        )
-        print(
-            f"[*] LSH crash clustering enabled "
-            f"(threshold={getattr(args, 'crash_cluster_lsh_threshold', 0.7)})"
-        )
+        configure_crash_cluster(threshold=_cc_threshold)
+        print(f"[*] crash clustering threshold: {_cc_threshold}")
 
     # Phase 1 / B1 — Floyd sampling.
     if getattr(args, "rand_floyd_sample", False):
@@ -3034,26 +3030,26 @@ def main() -> int:
     fuzz_parser.add_argument(
         "--diff-myers-max-bytes",
         type=int,
-        default=64 * 1024 * 1024,
+        default=128 * 1024 * 1024,
         metavar="N",
-        help="Byte budget for the numpy DP fallback table (default: 64 MiB)",
-    )
-    # --- Phase 0 / A2 ---
-    fuzz_parser.add_argument(
-        "--crash-cluster-lsh",
-        action="store_true",
         help=(
-            "Opt-in LSH-sparsified crash clustering (MinHash banding over "
-            "signature tokens / frames). Only LSH candidate pairs pay full "
-            "similarity cost. Union-find uses rank. Default path unchanged."
+            "Byte budget for the numpy DP alignment table (default: 128 MiB). "
+            "Above it, Myers runs instead; if Myers also bails, a coarse block "
+            "diff is returned rather than allocating."
         ),
     )
+    # --- Crash clustering (seventeen-source survey A2) ---
+    # No --crash-cluster-lsh switch: the MinHash sparsifier it enabled dropped
+    # ~80% of the pairs it should have merged (Jaccard bands under a
+    # Levenshtein threshold). The exact length / multiset bounds that replaced
+    # it give the same clusters as comparing every pair, so there is nothing to
+    # opt into.
     fuzz_parser.add_argument(
-        "--crash-cluster-lsh-threshold",
+        "--crash-cluster-threshold",
         type=float,
         default=0.7,
         metavar="T",
-        help="Similarity threshold for LSH crash clustering (default: 0.7)",
+        help="Similarity threshold for crash clustering (default: 0.7)",
     )
     # --- Phase 1 / B1 ---
     fuzz_parser.add_argument(

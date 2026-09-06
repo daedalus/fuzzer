@@ -4,37 +4,27 @@ from __future__ import annotations
 
 import hashlib
 import os
+from collections import Counter
 from dataclasses import dataclass, field
 
 from fuzzer_tool.core.similarity import (
-    crash_signature_similarity,
-    frame_sequence_similarity,
     hamming_similarity,
     levenshtein_diff_offsets,
     levenshtein_similarity,
+    normalize_frame,
+    normalized_frame_similarity,
 )
 
-# Opt-in LSH-sparsified clustering (Phase 0 / A2 of the seventeen-source survey).
-_CRASH_CLUSTER_LSH: bool = os.environ.get("FUZZER_CRASH_CLUSTER_LSH", "").strip() in (
-    "1",
-    "true",
-    "yes",
-)
-_CRASH_CLUSTER_LSH_THRESHOLD: float = float(
-    os.environ.get("FUZZER_CRASH_CLUSTER_LSH_THRESHOLD", "0.7") or "0.7"
+# Crash clustering threshold (A2 of the seventeen-source survey).
+_CRASH_CLUSTER_THRESHOLD: float = float(
+    os.environ.get("FUZZER_CRASH_CLUSTER_THRESHOLD", "0.7") or "0.7"
 )
 
 
-def configure_crash_cluster_lsh(enabled: bool = False, threshold: float = 0.7) -> None:
-    """Enable/disable LSH-sparsified crash clustering and set the threshold."""
-    global _CRASH_CLUSTER_LSH, _CRASH_CLUSTER_LSH_THRESHOLD
-    _CRASH_CLUSTER_LSH = bool(enabled)
-    _CRASH_CLUSTER_LSH_THRESHOLD = float(threshold)
-
-
-def crash_cluster_lsh_enabled() -> bool:
-    """Return whether LSH-sparsified clustering is active."""
-    return _CRASH_CLUSTER_LSH
+def configure_crash_cluster(threshold: float = 0.7) -> None:
+    """Set the default crash-clustering similarity threshold."""
+    global _CRASH_CLUSTER_THRESHOLD
+    _CRASH_CLUSTER_THRESHOLD = float(threshold)
 
 
 @dataclass
@@ -402,46 +392,32 @@ def find_nearest_corpus(
     return label, sim, diff[:30], edit_summary
 
 
-def _crash_token_set(sig: str, frames: list[str] | None = None) -> set[int]:
-    """Build a stable integer token set for MinHash from a crash signature.
-
-    Uses frame names when available, otherwise 4-grams of the signature string.
-    Tokens are hashed to uint64-range ints so they plug into MinHashLSH.
-    """
-    tokens: set[int] = set()
-    if frames:
-        for fr in frames:
-            tokens.add(hash(fr) & 0xFFFFFFFFFFFFFFFF)
-    # Always include signature 4-grams for extra discrimination.
-    s = sig or ""
-    for i in range(max(0, len(s) - 3)):
-        tokens.add(hash(s[i : i + 4]) & 0xFFFFFFFFFFFFFFFF)
-    if not tokens:
-        tokens.add(0)
-    return tokens
-
-
 def cluster_crashes(
     signatures: list[str],
     frame_lists: list[list[str]] | None = None,
     threshold: float | None = None,
 ) -> list[list[int]]:
-    """Cluster crash signatures by Levenshtein similarity.
+    """Cluster crash signatures by Levenshtein similarity (single linkage).
 
-    When frame_lists is provided, uses order-aware frame-sequence
-    Levenshtein (correctly distinguishes A->B->C from C->B->A).
-    Otherwise falls back to signature-string Levenshtein.
+    When ``frame_lists`` is provided, pairs where both sides have frames use
+    order-aware frame-sequence Levenshtein (which distinguishes A->B->C from
+    C->B->A); every other pair falls back to the signature-string metric.
 
-    When ``--crash-cluster-lsh`` is enabled, candidate pairs are first
-    filtered via MinHash LSH (re-using ``MinHashLSH`` from edge_tracker)
-    so the quadratic full-similarity work only runs on LSH candidates.
-    Union-find uses path-halving + union-by-rank.
+    The pair loop is pruned with two *exact* lower bounds on edit distance, so
+    the result is identical to comparing all ``n*(n-1)/2`` pairs -- only the
+    cost differs. An earlier version sparsified with MinHash LSH instead and
+    lost about 80% of the pairs it should have merged, because MinHash
+    approximates Jaccard while the threshold here is on Levenshtein: a pair can
+    sit at Levenshtein 0.8 with a Jaccard far below the band threshold and never
+    become a candidate. No banding parameter fixes that, so the bounds below are
+    used instead -- they discard only pairs that provably cannot clear the
+    threshold.
 
     Args:
         signatures: List of crash signature strings.
         frame_lists: Optional list of frame lists (in call order) per crash.
         threshold: Minimum similarity to group into the same cluster.
-            Defaults to 0.7, or the configured LSH threshold when LSH is on.
+            Defaults to the configured value (0.7).
 
     Returns:
         List of clusters, where each cluster is a list of indices into
@@ -451,7 +427,7 @@ def cluster_crashes(
         return []
 
     if threshold is None:
-        threshold = _CRASH_CLUSTER_LSH_THRESHOLD if _CRASH_CLUSTER_LSH else 0.7
+        threshold = _CRASH_CLUSTER_THRESHOLD
 
     n = len(signatures)
     parent = list(range(n))
@@ -467,7 +443,6 @@ def cluster_crashes(
         px, py = find(x), find(y)
         if px == py:
             return
-        # Union by rank
         if rank[px] < rank[py]:
             parent[px] = py
         elif rank[px] > rank[py]:
@@ -476,42 +451,74 @@ def cluster_crashes(
             parent[py] = px
             rank[px] += 1
 
-    def _sim(i: int, j: int) -> float:
-        if frame_lists and i < len(frame_lists) and j < len(frame_lists):
-            return frame_sequence_similarity(frame_lists[i], frame_lists[j])
-        return crash_signature_similarity(signatures[i], signatures[j])
+    # Both metrics are 1 - dist/max_len, so the pass is driven by the slack the
+    # threshold leaves: a pair can only clear it if
+    # dist <= (1 - threshold) * max_len. Two sound lower bounds on dist follow,
+    # and both are far cheaper than the alignment they replace:
+    #   * dist >= |len_a - len_b|, so the shorter side must be at least
+    #     threshold * len of the longer one -- a window over length-sorted
+    #     order, advanced with a monotone pointer.
+    #   * dist >= max_len - |bag_a & bag_b|, since only equal elements can be
+    #     matched at zero cost, so the multiset intersection must reach
+    #     threshold * max_len.
+    # The third saving is not a bound: this is single linkage, so a pair already
+    # in the same component contributes nothing and is skipped outright.
+    #
+    # normalize_frame is hoisted out of the pair loop here. It is applied once
+    # per input rather than twice per pair, which is exact --
+    # crash_signature_similarity is by definition
+    # levenshtein_similarity(normalize_frame(x).encode(), ...) and
+    # frame_sequence_similarity already truncates at 8 frames.
+    framed = frame_lists is not None and len(frame_lists) > 0
+    n_framed = len(frame_lists) if framed else 0
 
-    if _CRASH_CLUSTER_LSH and n > 8:
-        # Sparsify via MinHash LSH: only full-sim pairs that share a band.
-        from fuzzer_tool.core.edge_tracker import MinHashLSH
+    tok_keys: list[list[str]] = []
+    if framed:
+        tok_keys = [[normalize_frame(f) for f in frames[:8]] for frames in frame_lists]
+    sig_keys = [normalize_frame(sig).encode() for sig in signatures]
 
-        lsh = MinHashLSH(num_perm=64, num_bands=8, seed=42)
-        keys = [str(i) for i in range(n)]
-        for i, key in enumerate(keys):
-            frames = frame_lists[i] if frame_lists and i < len(frame_lists) else None
-            tok = _crash_token_set(signatures[i], frames)
-            sig = lsh.compute_signature(tok)
-            lsh.add(key, sig)
-
-        seen_pairs: set[tuple[int, int]] = set()
-        for i, key in enumerate(keys):
-            candidates = lsh.find_similar(key, min_jaccard=max(0.1, threshold - 0.3))
-            for ck in candidates:
-                j = int(ck)
-                if j <= i:
+    def _pass(idxs, keys, sim_fn, skip_both) -> None:
+        if len(idxs) < 2:
+            return
+        order = sorted(idxs, key=lambda i: len(keys[i]))
+        bags = {i: Counter(keys[i]) for i in order}
+        lo = 0
+        for b in range(len(order)):
+            j = order[b]
+            len_j = len(keys[j])
+            # Lengths are non-decreasing along `order`, so this pointer only
+            # moves forward: anything shorter than threshold * len_j can never
+            # close the length gap, for this j or any later one.
+            while lo < b and len(keys[order[lo]]) < threshold * len_j:
+                lo += 1
+            bag_j = bags[j]
+            for a in range(lo, b):
+                i = order[a]
+                if skip_both is not None and i in skip_both and j in skip_both:
                     continue
-                pair = (i, j)
-                if pair in seen_pairs:
+                if find(i) == find(j):
                     continue
-                seen_pairs.add(pair)
-                if _sim(i, j) >= threshold:
+                max_len = len_j or len(keys[i])
+                if max_len and sum((bags[i] & bag_j).values()) < threshold * max_len:
+                    continue
+                if sim_fn(i, j) >= threshold:
                     union(i, j)
-    else:
-        # Original dense O(n^2) path (default).
-        for i in range(n):
-            for j in range(i + 1, n):
-                if _sim(i, j) >= threshold:
-                    union(i, j)
+
+    if framed:
+        _pass(
+            [i for i in range(n) if i < n_framed],
+            tok_keys,
+            lambda i, j: normalized_frame_similarity(tok_keys[i], tok_keys[j]),
+            None,
+        )
+    # Every pair the frame pass did not own falls back to the signature metric,
+    # matching the original `frame_lists and i < len and j < len` dispatch.
+    _pass(
+        list(range(n)),
+        sig_keys,
+        lambda i, j: levenshtein_similarity(sig_keys[i], sig_keys[j]),
+        {i for i in range(n) if i < n_framed} if framed else None,
+    )
 
     clusters_map: dict[int, list[int]] = {}
     for i in range(n):

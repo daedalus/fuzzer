@@ -731,6 +731,22 @@ def _levenshtein_tokens(a: list[str], b: list[str]) -> int:
     return prev[len(a)]
 
 
+def normalized_frame_similarity(norm_a: list[str], norm_b: list[str]) -> float:
+    """:func:`frame_sequence_similarity` on frames that are already normalised.
+
+    Same metric, with the per-frame regex hoisted out. Callers that compare one
+    list against many -- ``crash_metadata.cluster_crashes`` -- would otherwise
+    re-normalise the same frames once per pair, i.e. O(n^2) regex passes over
+    O(n) distinct inputs.
+    """
+    if not norm_a and not norm_b:
+        return 1.0
+    max_len = max(len(norm_a), len(norm_b))
+    if max_len == 0:
+        return 1.0
+    return 1.0 - _levenshtein_tokens(norm_a, norm_b) / max_len
+
+
 def frame_sequence_similarity(frames_a: list[str], frames_b: list[str]) -> float:
     """Levenshtein similarity on frame sequences (order-aware, token-level).
 
