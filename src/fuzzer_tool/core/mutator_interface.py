@@ -112,6 +112,7 @@ class MutationContext:
         "stall_recovery_active",
         "weizz_tags_enabled",
         "wfc_enabled",
+        "formatfuzzer_enabled",
     )
 
     def __init__(
@@ -134,6 +135,7 @@ class MutationContext:
         checksum_learner=None,
         path_solver=None,
         wfc_enabled: bool = False,
+        formatfuzzer_enabled: bool = False,
     ) -> None:
         #: Length cap for the returned buffer; 0 means uncapped.
         self.max_len = max_len
@@ -197,6 +199,8 @@ class MutationContext:
         #: True when wave-function-collapse mode is enabled for the
         #: format-aware chunk mutators (PNG/JPEG/BMP) that support it.
         self.wfc_enabled = wfc_enabled
+        #: True when ``--formatfuzzer`` is set (FormatFuzzer structural ops).
+        self.formatfuzzer_enabled = formatfuzzer_enabled
 
     @classmethod
     def from_fuzzer(cls, fuzzer) -> MutationContext:
@@ -227,6 +231,7 @@ class MutationContext:
             checksum_learner=getattr(fuzzer, "checksum_learner", None),
             path_solver=getattr(fuzzer, "_path_solver", None),
             wfc_enabled=bool(getattr(fuzzer, "_wfc_enabled", False)),
+            formatfuzzer_enabled=bool(getattr(fuzzer, "formatfuzzer", False)),
         )
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
@@ -235,7 +240,7 @@ class MutationContext:
             f"dictionary={len(self.dictionary)} "
             f"cmplog_pairs={len(self.cmplog_pairs)} "
             f"corpus={len(self.corpus)} "
-            f"weizz_tags_enabled={self.weizz_tags_enabled}>"
+            f"weizz_tags_enabled={self.weizz_tags_enabled} formatfuzzer_enabled={self.formatfuzzer_enabled}>"
         )
 
 

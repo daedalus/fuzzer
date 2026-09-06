@@ -798,3 +798,8 @@ for _cat in _CATEGORIES:
 # Kept separate from the static _CATEGORIES table so the function-based
 # weizz_field_havoc / weizz_chunk_* ops coexist under different names.
 import fuzzer_tool.core.mutations.weizz_structural  # noqa: E402,F401
+
+# FormatFuzzer structural mutators (MutatorBase). Self-register on import;
+# is_available stays False until --formatfuzzer is set and the matching
+# binary is present. See docs/handover/handover_formatfuzzer_integration_2026-09-06.md.
+import fuzzer_tool.core.mutations.formatfuzzer  # noqa: E402,F401
