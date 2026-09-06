@@ -1343,7 +1343,9 @@ class Fuzzer:
         # work in, and the only reward they had was the edge that arrives
         # once the comparison is fully solved -- so seven of eight correct
         # bytes paid exactly nothing.
-        self._cmp_max_asserted: dict[str, int] = {}
+        # Keyed by callback name and, when the shim's site counters are
+        # available, by (callback, pc).  The two key spaces are disjoint.
+        self._cmp_max_asserted: dict[str | tuple[str, int], int] = {}
         self._cmp_novelty_hits = 0
         self.crash_hashes: set[str] = set()
         self.crash_sigs: dict[str, int] = {}
@@ -3462,17 +3464,20 @@ class Fuzzer:
             except (AttributeError, OSError):
                 pass
 
-    def _record_cmp_progress(self, asserted: dict) -> bool:
+    def _record_cmp_progress(self, *vectors: dict) -> bool:
         """Fold one execution's asserted counts into the per-site maxima.
 
         Args:
-            asserted: This execution's satisfied counts.  Prefer
-                ``{(callback, pc): count}`` from ``CmplogCollector.last_site_asserted``
-                so progress at one comparison site is not folded with
-                stagnation at another (P0-3).  Falls back to
-                ``{callback: count}`` when site counters are unavailable.
-                Empty whenever cmplog is off, which makes the whole channel
-                inert rather than needing a flag of its own.
+            *vectors: One or more ``{key: satisfied count}`` maps for this
+                execution.  ``{(callback, pc): count}`` from
+                ``CmplogCollector.last_site_asserted`` is the fine-grained
+                axis (P0-3): folding by callback family mixes progress at
+                one comparison site with stagnation at another.
+                ``{callback: count}`` is the coarse axis.  Both may be
+                passed; str and tuple keys never collide, so the two
+                high-water maps live side by side in one dict.  All empty
+                whenever cmplog is off, which makes the whole channel inert
+                rather than needing a flag of its own.
 
         Returns:
             True if some site's (or callback's) maximum grew enough to report.
@@ -3482,15 +3487,22 @@ class Fuzzer:
         point: a climb of one extra satisfied comparison per input would
         otherwise report on every step of the climb, and each report admits
         an input to the corpus.
+
+        Every vector is walked before returning -- an early exit on the
+        first report would leave the remaining maxima stale and turn the
+        next execution's flat counts into a phantom climb.
         """
         reported = False
-        for key, count in asserted.items():
-            prev = self._cmp_max_asserted.get(key, 0)
-            if count <= prev:
-                continue
-            if prev == 0 or count >= max(prev + 1, int(prev * MAX_COUNT_GROWTH_FACTOR)):
-                reported = True
-            self._cmp_max_asserted[key] = count
+        for asserted in vectors:
+            for key, count in asserted.items():
+                prev = self._cmp_max_asserted.get(key, 0)
+                if count <= prev:
+                    continue
+                if prev == 0 or count >= max(
+                    prev + 1, int(prev * MAX_COUNT_GROWTH_FACTOR)
+                ):
+                    reported = True
+                self._cmp_max_asserted[key] = count
         if reported:
             self._cmp_novelty_hits += 1
         return reported
@@ -3942,14 +3954,20 @@ class Fuzzer:
         # unbounded-looking case is bounded at twenty-seven.
         is_cmp_progress = False
         if not is_timeout and not is_crash:
-            # Prefer per-PC-site asserted counts when the collector has them;
-            # per-callback folding merges progress at one site with stagnation
-            # at another (measured memcmp (4,3) vs sites (3,3)+(1,0)).
+            # Per-PC-site asserted counts are the fine-grained axis; folding
+            # by callback merges progress at one site with stagnation at
+            # another (measured memcmp (4,3) vs sites (3,3)+(1,0)).  Feed
+            # BOTH axes rather than preferring one: the shim's site table is
+            # fixed-size and never evicts, so once it saturates the per-site
+            # view is a subset and the sites it refused would silently lose
+            # their progress signal.  Keys cannot collide -- sites are
+            # (callback, pc) tuples, callbacks are strings.
             site_asserted = (
                 getattr(self._cmplog, "last_site_asserted", None) if self._cmplog else None
             )
-            progress_vec = site_asserted if site_asserted else self._last_cmp_asserted
-            is_cmp_progress = self._record_cmp_progress(progress_vec)
+            is_cmp_progress = self._record_cmp_progress(
+                self._last_cmp_asserted, site_asserted or {}
+            )
 
         # Zest validity channel: coverage reached while the target ACCEPTED
         # the input, tracked in its own map. An input that is valid and

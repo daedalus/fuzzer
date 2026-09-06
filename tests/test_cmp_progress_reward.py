@@ -129,3 +129,70 @@ def test_callback_keys_still_work_as_fallback(f):
     """When site counters are off, {callback: count} remains valid."""
     assert f._record_cmp_progress({"memcmp": 2}) is True
     assert f._record_cmp_progress({"memcmp": 2}) is False
+
+
+class TestSiteSaturationFallback:
+    """P0-3 left no degradation path when the shim's site table fills up."""
+
+    def _fuzzer(self):
+        from fuzzer_tool.services.fuzzer import Fuzzer
+
+        f = Fuzzer.__new__(Fuzzer)
+        f._cmp_max_asserted = {}
+        f._cmp_novelty_hits = 0
+        return f
+
+    def test_both_axes_are_recorded(self):
+        f = self._fuzzer()
+        # First execution seeds both high-water maps.
+        f._record_cmp_progress({"memcmp": 4}, {("memcmp", 0x1000): 3})
+        assert f._cmp_max_asserted["memcmp"] == 4
+        assert f._cmp_max_asserted[("memcmp", 0x1000)] == 3
+
+    def test_progress_at_a_dropped_site_still_reports(self):
+        """A site the table refused has no tuple key; the callback axis covers it."""
+        f = self._fuzzer()
+        # Site 0x1000 is admitted; site 0x2000 was refused, so only its
+        # contribution to the callback total is visible.
+        assert f._record_cmp_progress({"memcmp": 3}, {("memcmp", 0x1000): 3})
+        # Next execution: admitted site flat, refused site climbs 3 -> 9.
+        assert f._record_cmp_progress({"memcmp": 9}, {("memcmp", 0x1000): 3})
+
+    def test_second_vector_is_not_skipped_after_a_report(self):
+        """An early return on the first report would leave later maxima stale."""
+        f = self._fuzzer()
+        f._record_cmp_progress({"memcmp": 1}, {("memcmp", 0x10): 1})
+        # Callback axis reports; the site axis must still be updated.
+        f._record_cmp_progress({"memcmp": 50}, {("memcmp", 0x10): 40})
+        assert f._cmp_max_asserted[("memcmp", 0x10)] == 40
+
+    def test_novelty_counter_increments_once_per_execution(self):
+        f = self._fuzzer()
+        f._record_cmp_progress({"memcmp": 10}, {("memcmp", 0x10): 10})
+        assert f._cmp_novelty_hits == 1
+
+    def test_empty_vectors_are_inert(self):
+        f = self._fuzzer()
+        assert f._record_cmp_progress({}, {}) is False
+        assert f._cmp_novelty_hits == 0
+
+
+class TestSiteTableSaturationFlag:
+    def test_cnd_line_sets_sites_saturated(self, tmp_path):
+        from fuzzer_tool.core.cmplog import CmplogCollector
+
+        c = CmplogCollector.__new__(CmplogCollector)
+        c.site_fired = {}
+        c.site_asserted = {}
+        c.last_site_fired = {}
+        c.last_site_asserted = {}
+        c.site_dropped = 0
+        c.sites_saturated = False
+        c._sites_offset = 0
+        sites = tmp_path / "s.sites"
+        sites.write_text("CNS memcmp 1000 4 3\nCND 7\n")
+        c.sites_path = str(sites)
+        c.collect_sites()
+        assert c.site_dropped == 7
+        assert c.sites_saturated is True
+        assert c.site_asserted[("memcmp", 0x1000)] == 3

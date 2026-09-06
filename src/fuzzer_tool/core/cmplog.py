@@ -386,6 +386,12 @@ class CmplogCollector:
         self.last_site_fired: dict[tuple[str, int], int] = {}
         self.last_site_asserted: dict[tuple[str, int], int] = {}
         self.site_dropped = 0
+        # True once the shim's fixed-size site table has refused at least one
+        # insertion.  The table never grows or evicts, so from that point the
+        # per-site view is a subset rather than a census and consumers that
+        # need completeness (the cmp-progress channel) must keep reading the
+        # per-callback vector too.
+        self.sites_saturated = False
         self._sites_offset: int = 0
 
     def start(self) -> bool:
@@ -965,6 +971,10 @@ class CmplogCollector:
         self.last_site_fired = {}
         self.last_site_asserted = {}
         if not self.counts_path or not os.path.exists(self.counts_path):
+            # Sites live in their own file and their own offset; drain them
+            # even when the counts file is missing, or their totals go stale
+            # for the rest of the run.
+            self.collect_sites()
             return self.last_fired, self.last_asserted
 
         try:
@@ -976,7 +986,7 @@ class CmplogCollector:
                     fh.truncate(0)
                 self._counts_offset = 0
                 log.debug("Cmplog: truncated oversized counts file %s", self.counts_path)
-                # Sites ride the same drain; leave last_site_* empty too.
+                self.collect_sites()
                 return self.last_fired, self.last_asserted
         except OSError:
             pass
@@ -1060,7 +1070,17 @@ class CmplogCollector:
                 continue
             if parts[0] == "CND" and len(parts) == 2:
                 with contextlib.suppress(ValueError):
-                    self.site_dropped += int(parts[1])
+                    dropped = int(parts[1])
+                    self.site_dropped += dropped
+                    if dropped:
+                        if not self.sites_saturated:
+                            log.warning(
+                                "Cmplog: per-site counter table is full "
+                                "(%d insertion(s) refused); per-site figures "
+                                "are a subset from here on",
+                                self.site_dropped,
+                            )
+                        self.sites_saturated = True
                 continue
             if parts[0] != "CNS" or len(parts) != 5:
                 continue
