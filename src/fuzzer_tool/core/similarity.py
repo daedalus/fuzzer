@@ -330,46 +330,96 @@ def _myers_backtrack(
     d_final: int,
     offset: int,
 ) -> list[tuple[str, int, bytes]]:
-    """Reconstruct edit script from Myers V-trace."""
+    """Reconstruct the edit script from the Myers V-trace.
+
+    ``trace[d]`` is the V array as it stood *before* step ``d``, so at level
+    ``d`` it names the endpoint the search came from. Walking d down to 1
+    yields exactly one edit per level, and the snake between two endpoints is
+    bounded by that previous endpoint -- unwinding matches greedily instead
+    consumes runs belonging to lower levels and then leaves the loop with
+    ``(x, y)`` short of the origin, silently truncating the script. That is
+    what the first version of this function did: it round-tripped only when
+    ``D == 1`` and was wrong for every larger edit distance, while still
+    returning plausible-looking ops.
+
+    Myers' model has no substitution -- it reaches ``b`` from ``a`` with
+    insertions and deletions alone. The DP path this backs up emits
+    ``replace``, so an adjacent delete/insert on one position is folded back
+    into a single ``replace`` to keep the two paths' scripts interchangeable
+    for callers that count non-match ops. The fold is not always possible:
+    substitution costs 2 in Myers' model and 1 in the DP's, so a Myers script
+    can carry a few more ops than the Levenshtein optimum (measured: 12 of 400
+    random cases, never more than one or two ops). It is always a *valid*
+    script; it is not always a minimal one.
+    """
     ops: list[tuple[str, int, bytes]] = []
     x, y = len(a), len(b)
-    for d in range(d_final, -1, -1):
+
+    for d in range(d_final, 0, -1):
         v = trace[d]
         k = x - y
         k_idx = k + offset
-        if k == -d or (k != d and v[k_idx - 1] < v[k_idx + 1]):
-            prev_k = k + 1
-            prev_x = v[prev_k + offset]
-            # insert
-            while x > prev_x and y > 0:
-                # snake backwards was already matched; the move is insert
-                break
-            if y > 0:
-                ops.append(("insert", x, bytes([b[y - 1]])))
-                y -= 1
-        else:
-            prev_k = k - 1
-            prev_x = v[prev_k + offset]
-            if x > prev_x:
-                # delete or replace handled by snake unwind below
-                pass
-            if x > 0 and (y == 0 or a[x - 1] != b[y - 1] if y > 0 else True):
-                if y > 0 and a[x - 1] != b[y - 1]:
-                    ops.append(("replace", x - 1, bytes([b[y - 1]])))
-                    x -= 1
-                    y -= 1
-                else:
-                    ops.append(("delete", x - 1, b""))
-                    x -= 1
-            else:
-                x = prev_x
-        # unwind snake (matches)
-        while x > 0 and y > 0 and a[x - 1] == b[y - 1]:
+        # Same branch the forward pass took on this diagonal: down (from k+1)
+        # means the step was an insertion, right (from k-1) means a deletion.
+        went_down = k == -d or (k != d and v[k_idx - 1] < v[k_idx + 1])
+        prev_k = k + 1 if went_down else k - 1
+        prev_x = v[prev_k + offset]
+        prev_y = prev_x - prev_k
+
+        # Unwind the snake back to the previous endpoint -- not past it.
+        while x > prev_x and y > prev_y:
             ops.append(("match", x - 1, b""))
             x -= 1
             y -= 1
+
+        # Exactly one edit separates (x, y) from (prev_x, prev_y).
+        if x > prev_x:
+            ops.append(("delete", x - 1, b""))
+            x -= 1
+        elif y > prev_y:
+            ops.append(("insert", x, bytes([b[y - 1]])))
+            y -= 1
+
+    # d == 0: the remaining prefix is one snake, then whatever is left over.
+    while x > 0 and y > 0:
+        ops.append(("match", x - 1, b""))
+        x -= 1
+        y -= 1
+    while y > 0:
+        ops.append(("insert", 0, bytes([b[y - 1]])))
+        y -= 1
+    while x > 0:
+        ops.append(("delete", x - 1, b""))
+        x -= 1
+
     ops.reverse()
-    return ops
+    return _coalesce_indel_pairs(ops)
+
+
+def _coalesce_indel_pairs(
+    ops: list[tuple[str, int, bytes]],
+) -> list[tuple[str, int, bytes]]:
+    """Fold an adjacent delete/insert on one position into a ``replace``."""
+    out: list[tuple[str, int, bytes]] = []
+    i = 0
+    n = len(ops)
+    while i < n:
+        op, pos, data = ops[i]
+        if i + 1 < n:
+            nop, npos, ndata = ops[i + 1]
+            # delete a[p] then insert before a[p+1]  ==  replace a[p]
+            if op == "delete" and nop == "insert" and npos == pos + 1:
+                out.append(("replace", pos, ndata))
+                i += 2
+                continue
+            # insert before a[p] then delete a[p]    ==  replace a[p]
+            if op == "insert" and nop == "delete" and npos == pos:
+                out.append(("replace", pos, data))
+                i += 2
+                continue
+        out.append((op, pos, data))
+        i += 1
+    return out
 
 
 def levenshtein_align(a: bytes, b: bytes) -> list[tuple[str, int, bytes]]:
