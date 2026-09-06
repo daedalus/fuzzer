@@ -855,6 +855,10 @@ class Fuzzer:
         # TSP neighbourhood operators (Phase 1 / C2). Appended at the end.
         op_span_reverse=False,
         op_span_relocate=False,
+        # FormatFuzzer structural mutators (see handover_formatfuzzer_integration).
+        formatfuzzer=False,
+        ff_bin_dir=None,
+        ff_templates=None,
     ):
         # Snapshot os.environ before anything below (or later in run()) can
         # write __AFL_DIST_SHM_ID / __AFL_SHM_ID / AFL_MAP_SIZE / LD_PRELOAD /
@@ -979,6 +983,26 @@ class Fuzzer:
         self.weizz_tags = weizz_tags
         self.weizz_tags_max_len = weizz_tags_max_len
         self._weizz_tags_collected = 0
+        # FormatFuzzer structural mutators (--formatfuzzer): off by default.
+        # Operators self-register on import; is_available gates on this flag
+        # plus binary presence. Also enabled by --hail-mary.
+        self.formatfuzzer = formatfuzzer
+        self.ff_bin_dir = ff_bin_dir
+        self.ff_templates = ff_templates
+        if formatfuzzer:
+            try:
+                from fuzzer_tool.core.mutations.formatfuzzer import (
+                    register_formatfuzzer_mutators,
+                )
+                templates = None
+                if ff_templates:
+                    templates = [t.strip() for t in ff_templates.split(",") if t.strip()]
+                register_formatfuzzer_mutators(templates=templates, bin_dir=ff_bin_dir)
+            except Exception as exc:  # noqa: BLE001
+                import logging
+                logging.getLogger(__name__).warning(
+                    "FormatFuzzer registration failed: %s", exc
+                )
         # TSP neighbourhood operators (Phase 1 / C2) — gated availability.
         self.op_span_reverse = op_span_reverse
         self.op_span_relocate = op_span_relocate

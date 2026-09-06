@@ -664,6 +664,9 @@ def cmd_fuzz(args):
         colorize_max_execs=getattr(args, "colorize_max_execs", 512),
         weizz_tags=getattr(args, "weizz_tags", False),
         weizz_tags_max_len=getattr(args, "weizz_tags_max_len", 8192),
+        formatfuzzer=getattr(args, "formatfuzzer", False),
+        ff_bin_dir=getattr(args, "ff_bin_dir", None),
+        ff_templates=getattr(args, "ff_templates", None),
         email_on_crash=_mail_config_from_args(args),
         enable_x86_mutator=getattr(args, "x86_mutate", False),
         enable_arm_mutator=getattr(args, "arm_mutate", False),
@@ -1629,6 +1632,7 @@ _HAIL_MARY_FLAGS = (
     "hw_perf",
     "colorize",
     "weizz_tags",
+    "formatfuzzer",
     "cmplog_fifo_sink",
     "reseed_on_stall",
     "fractal_diversity",
@@ -2999,6 +3003,33 @@ def main() -> int:
         help=(
             "Skip Weizz tag collection for seeds longer than N bytes "
             "(Weizz -L analogue; default: 8192)"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--formatfuzzer",
+        action="store_true",
+        help=(
+            "Enable FormatFuzzer structural mutators (ff_png, ff_zip, …). "
+            "Requires FormatFuzzer binaries on PATH or under --ff-bin-dir. "
+            "See docs/handover/handover_formatfuzzer_integration_2026-09-06.md"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--ff-bin-dir",
+        metavar="DIR",
+        default=None,
+        help=(
+            "Directory containing FormatFuzzer executables "
+            "(default: $FORMATFUZZER_BIN or /usr/local/lib/formatfuzzer)"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--ff-templates",
+        metavar="LIST",
+        default=None,
+        help=(
+            "Comma-separated FormatFuzzer templates to enable "
+            "(default: png,zip,isobmff,jpeg)"
         ),
     )
     fuzz_parser.add_argument(
