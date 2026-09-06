@@ -103,3 +103,29 @@ def test_threshold_matches_the_shared_growth_factor(f):
     just_under = int(100 * MAX_COUNT_GROWTH_FACTOR) - 1
     assert f._record_cmp_progress({"memcmp": just_under}) is False
     assert f._record_cmp_progress({"memcmp": int(just_under * MAX_COUNT_GROWTH_FACTOR)}) is True
+
+
+def test_per_site_progress_not_folded_across_sites(f):
+    """Regression P0-3: growth is per (callback, pc), not per callback family.
+
+    memcmp site A fully solved (3,3) and site B stagnant (1,0) must not share
+    one family high-water mark.  Progress at B reports even when the family
+    total already matches A's contribution.
+    """
+    site_a = ("memcmp", 0x401000)
+    site_b = ("memcmp", 0x402000)
+    # Site A saturates first.
+    assert f._record_cmp_progress({site_a: 3}) is True
+    assert f._cmp_max_asserted[site_a] == 3
+    # Same total under the old family key would look like a match; per-site,
+    # B's first assert is still novelty.
+    assert f._record_cmp_progress({site_a: 3, site_b: 1}) is True
+    assert f._cmp_max_asserted[site_b] == 1
+    # Replaying the same site vector is not progress.
+    assert f._record_cmp_progress({site_a: 3, site_b: 1}) is False
+
+
+def test_callback_keys_still_work_as_fallback(f):
+    """When site counters are off, {callback: count} remains valid."""
+    assert f._record_cmp_progress({"memcmp": 2}) is True
+    assert f._record_cmp_progress({"memcmp": 2}) is False

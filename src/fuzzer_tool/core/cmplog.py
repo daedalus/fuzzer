@@ -381,6 +381,10 @@ class CmplogCollector:
         self.sites_path: str | None = None
         self.site_fired: dict[tuple[str, int], int] = {}
         self.site_asserted: dict[tuple[str, int], int] = {}
+        # Per-drain site vector, parallel to last_asserted.  Only meaningful
+        # when collect_sites runs on an execution boundary (via collect_counts).
+        self.last_site_fired: dict[tuple[str, int], int] = {}
+        self.last_site_asserted: dict[tuple[str, int], int] = {}
         self.site_dropped = 0
         self._sites_offset: int = 0
 
@@ -958,6 +962,8 @@ class CmplogCollector:
         """
         self.last_fired = {}
         self.last_asserted = {}
+        self.last_site_fired = {}
+        self.last_site_asserted = {}
         if not self.counts_path or not os.path.exists(self.counts_path):
             return self.last_fired, self.last_asserted
 
@@ -970,6 +976,7 @@ class CmplogCollector:
                     fh.truncate(0)
                 self._counts_offset = 0
                 log.debug("Cmplog: truncated oversized counts file %s", self.counts_path)
+                # Sites ride the same drain; leave last_site_* empty too.
                 return self.last_fired, self.last_asserted
         except OSError:
             pass
@@ -1013,6 +1020,12 @@ class CmplogCollector:
         side knowing anything about process lifetimes. ``CND <n>`` reports
         insertions the shim's fixed-size table refused; a nonzero count
         means the site figures below are a subset, not a census.
+
+        Also records what *this* drain added in ``last_site_fired`` /
+        ``last_site_asserted`` (cleared by :meth:`collect_counts` at the
+        start of the drain).  The progress channel in services/fuzzer.py
+        reads those so growth is measured per PC site, not per callback
+        family -- folding sites into one family max was P0-3.
 
         Keyed by absolute program counter, which is only stable because the
         fuzzer disables ASLR for the target (personality(ADDR_NO_RANDOMIZE)
@@ -1060,6 +1073,12 @@ class CmplogCollector:
             key = (parts[1], pc)
             self.site_fired[key] = self.site_fired.get(key, 0) + fired
             self.site_asserted[key] = self.site_asserted.get(key, 0) + asserted
+            if fired:
+                self.last_site_fired[key] = self.last_site_fired.get(key, 0) + fired
+            if asserted:
+                self.last_site_asserted[key] = (
+                    self.last_site_asserted.get(key, 0) + asserted
+                )
 
     def site_walls(
         self,

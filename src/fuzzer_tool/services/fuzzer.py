@@ -1147,6 +1147,10 @@ class Fuzzer:
                 fifo_sink=cmplog_fifo_sink,
                 fifo_max_buffered=cmplog_fifo_sink_size,
                 debug=self.debug,
+                # Per-PC-site counters feed _record_cmp_progress so growth is
+                # measured per comparison site, not folded across a family
+                # (P0-3).  The shim cost is one hash probe per comparison.
+                site_counts=True,
             )
             if self._cmplog.start():
                 from fuzzer_tool.core.elf import detect_cmplog_functions
@@ -3458,16 +3462,20 @@ class Fuzzer:
             except (AttributeError, OSError):
                 pass
 
-    def _record_cmp_progress(self, asserted: dict[str, int]) -> bool:
-        """Fold one execution's asserted counts into the per-callback maxima.
+    def _record_cmp_progress(self, asserted: dict) -> bool:
+        """Fold one execution's asserted counts into the per-site maxima.
 
         Args:
-            asserted: This execution's ``{callback: satisfied count}``.
+            asserted: This execution's satisfied counts.  Prefer
+                ``{(callback, pc): count}`` from ``CmplogCollector.last_site_asserted``
+                so progress at one comparison site is not folded with
+                stagnation at another (P0-3).  Falls back to
+                ``{callback: count}`` when site counters are unavailable.
                 Empty whenever cmplog is off, which makes the whole channel
                 inert rather than needing a flag of its own.
 
         Returns:
-            True if some callback's maximum grew enough to report.
+            True if some site's (or callback's) maximum grew enough to report.
 
         The high-water mark is updated on every increase; only increases
         past the growth threshold are *reported*. Separating the two is the
@@ -3476,13 +3484,13 @@ class Fuzzer:
         an input to the corpus.
         """
         reported = False
-        for name, count in asserted.items():
-            prev = self._cmp_max_asserted.get(name, 0)
+        for key, count in asserted.items():
+            prev = self._cmp_max_asserted.get(key, 0)
             if count <= prev:
                 continue
             if prev == 0 or count >= max(prev + 1, int(prev * MAX_COUNT_GROWTH_FACTOR)):
                 reported = True
-            self._cmp_max_asserted[name] = count
+            self._cmp_max_asserted[key] = count
         if reported:
             self._cmp_novelty_hits += 1
         return reported
@@ -3934,7 +3942,14 @@ class Fuzzer:
         # unbounded-looking case is bounded at twenty-seven.
         is_cmp_progress = False
         if not is_timeout and not is_crash:
-            is_cmp_progress = self._record_cmp_progress(self._last_cmp_asserted)
+            # Prefer per-PC-site asserted counts when the collector has them;
+            # per-callback folding merges progress at one site with stagnation
+            # at another (measured memcmp (4,3) vs sites (3,3)+(1,0)).
+            site_asserted = (
+                getattr(self._cmplog, "last_site_asserted", None) if self._cmplog else None
+            )
+            progress_vec = site_asserted if site_asserted else self._last_cmp_asserted
+            is_cmp_progress = self._record_cmp_progress(progress_vec)
 
         # Zest validity channel: coverage reached while the target ACCEPTED
         # the input, tracked in its own map. An input that is valid and
