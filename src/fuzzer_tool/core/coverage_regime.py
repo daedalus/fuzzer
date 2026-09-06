@@ -76,6 +76,9 @@ class CoverageRegimeDetector:
         self._actionable: bool = False
         self._regime_history: list[tuple[int, CoverageRegime]] = []
         self._stall_triggered: bool = False
+        self._last_discovery_rate: float = 0.0
+        self._last_allan_delta: int = 0
+        self._last_exec_count: int = 0
 
     def observe(
         self,
@@ -84,43 +87,46 @@ class CoverageRegimeDetector:
         homogeneity_result: dict | None,
         execs_since_edge: int,
         exec_count: int,
-    ) -> None:
-        """Record one observation tick and recompute the regime.
+    ) -> CoverageRegime:
+        """Update regime classification from current observations.
 
         Args:
-            discovery_rate: Edges per 1000 executions.  The CriticalSlowingDown
-                detector is already fed this value from the stats reporter
-                (stats.py:583).  We only read its state here.
-            allan_delta: Edge count delta since last observation (unused directly;
-                _stall_triggered is based on execs_since_edge alone).
-            homogeneity_result: Dict from CoverageHomogeneityDetector.is_homogeneous()
-                or None.  The homogeneity detector is already fed from the main loop
-                (fuzzer.py:5720).  We only read its state here.
-            execs_since_edge: Executions since the last new edge.
-            exec_count: Total executions so far.
+            discovery_rate: Edges per 1000 executions.  Used as a weak
+                subcritical signal when every other detector is silent and
+                the rate has collapsed near zero under a long stall window.
+            allan_delta: Edge count delta since last observation.  Stored for
+                diagnostics; classification reads CSD's own window instead.
+            homogeneity_result: Output of CoverageHomogeneityDetector.detect(),
+                or None when the detector is not configured.
+            execs_since_edge: Executions since the last new edge was found.
+            exec_count: Total executions so far (history axis only).
+
+        Returns:
+            The current :class:`CoverageRegime` after classification.
         """
-        # Store the observation for the history.
+        # Last-seen signals for diagnostics / continuum correlation.  These
+        # used to be passed into _classify and then ignored (P2-5), which is
+        # the hole any sixth argument would fall into.  Store them explicitly
+        # and only feed _classify what it actually reads.
+        self._last_discovery_rate = discovery_rate
+        self._last_allan_delta = allan_delta
+        self._last_exec_count = exec_count
+
         self._regime_history.append((exec_count, self._regime))
         if len(self._regime_history) > self._regime_history_size:
             self._regime_history = self._regime_history[-self._regime_history_size :]
 
-        # Reset actionable whenever we re-observe; it flips True only
-        # when the regime actually changes (see classify).
         self._actionable = False
         self._last_regime = self._regime
 
-        # Classify (reads the detectors' internal state; does NOT re-feed them).
         self._classify(
             discovery_rate=discovery_rate,
-            allan_delta=allan_delta,
             homogeneity_result=homogeneity_result,
             execs_since_edge=execs_since_edge,
-            exec_count=exec_count,
         )
 
         self._record_continuum()
 
-        # Persist the stall-triggered flag.
         if execs_since_edge >= self._stall_threshold:
             self._stall_triggered = True
         return self._regime
@@ -128,12 +134,15 @@ class CoverageRegimeDetector:
     def _classify(
         self,
         discovery_rate: float,
-        allan_delta: int,
         homogeneity_result: dict | None,
         execs_since_edge: int,
-        exec_count: int,
     ) -> None:
-        """Recompute _regime and _reason from current signals."""
+        """Recompute _regime and _reason from current signals.
+
+        Only arguments that participate in a branch are parameters.  Signals
+        kept for diagnostics live on the detector (``_last_*``) rather than
+        as ignored formal args (P2-5).
+        """
         is_stalled = execs_since_edge >= self._stall_threshold
 
         # Check CSD first — it's the most sensitive near-transition signal.
@@ -182,6 +191,20 @@ class CoverageRegimeDetector:
             self._regime = CoverageRegime.SUBCRITICAL
             self._reason = (
                 f"clustered coverage (χ²={chi2:.2f}, p={p:.4f}) — subcritical: biased exploration"
+            )
+            self._actionable = self._last_regime != CoverageRegime.SUBCRITICAL
+            return
+
+        # Near-zero discovery rate with a long quiet stretch: subcritical even
+        # when homogeneity has not yet fired.  discovery_rate was previously
+        # accepted by _classify and never read (P2-5).
+        if discovery_rate is not None and discovery_rate <= 0.0 and execs_since_edge >= max(
+            1, self._stall_threshold // 4
+        ):
+            self._regime = CoverageRegime.SUBCRITICAL
+            self._reason = (
+                f"discovery rate collapsed ({discovery_rate:.4g}) after "
+                f"{execs_since_edge} execs without new edge — subcritical"
             )
             self._actionable = self._last_regime != CoverageRegime.SUBCRITICAL
             return
