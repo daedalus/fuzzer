@@ -593,7 +593,7 @@ its own measurement, like everything else in `docs/port-backlog.md`.
 
 ---
 
-## Suggested sequencing
+## Suggested sequencing (unchanged rationale)
 
 A1 first and alone. It is the only item that fixes a crash rather than improving
 a number, it is measured, and B2's homologous crossover depends on it. A2 next,
@@ -608,7 +608,219 @@ description for B3).
 
 C1, C3, C4, C5 are genuine but none of them is blocking anything.
 
-## Open questions
+---
+
+## Implementation Plan — all new features opt-in gated
+
+**Hard rule (from AGENTS.md + this survey):** every addition is behind an
+explicit opt-in flag (CLI long option + matching config/env key where
+applicable). Default behaviour of the fuzzer must remain byte-for-byte identical
+to the tree at the commit this plan is based on. No new operator, scheduler
+arm, selection policy, or distance path is active unless the user passes the
+flag. Registration still happens so the feature appears in `--help` and
+`bandit_stats`, but the hot path stays cold until enabled.
+
+Conventions that every item below must obey:
+
+- Surgical diffs only; match existing naming, error handling, logging, and
+  comment style of the nearest sibling module.
+- New mutators go through `REGISTRY.register_mutator()` (or the structured
+  equivalent) and appear under an existing category or a new one that is itself
+  gated.
+- New scheduler policies register in `_OPERATOR_STRATEGY_NAMES` / the Elo /
+  hierarchical tables exactly like the current ones.
+- All random draws go through `RandPool` / `_draw()` so `--seed` remains
+  deterministic.
+- Tests: unit tests for the new path, plus a paired A/B (or multi-arm) entry in
+  `tools/bench_paired.py` or the relevant sweep script so the feature can be
+  falsified.
+- Documentation: one paragraph in CHANGELOG under "Experimental / opt-in" and
+  a short note in the relevant README section.
+
+### Phase 0 — Safety / crash fixes (A1, A2) — still opt-in for the new path
+
+These are correctness/robustness fixes, but the *new algorithm* must still be
+selectable so we can A/B against the old path and roll back instantly.
+
+#### A1 — Linear-space Myers + backstop for Levenshtein
+
+- **Flag:** `--diff-myers` (bool, default false).  
+  Env: `FUZZER_DIFF_MYERS=1`.  
+  When false: existing numpy DP path unchanged (including the 512-byte guard in
+  `adapters/filesystem.py`).
+- **Modules:** `core/similarity.py` (new `myers_diff` / `levenshtein_align_myers`),
+  call sites in `core/root_cause.py` and `core/crash_metadata.py` become
+  conditional.
+- **Behaviour when enabled:**
+  1. Common prefix/suffix trim (already present).
+  2. Myers forward pass; abort if `D` exceeds a tunable bound
+     (`--diff-myers-max-d`, default derived from `O(N^1.5 log N)` heuristic).
+  3. On abort or when `n·m` exceeds a byte budget (`--diff-myers-max-bytes`,
+     default 64 MiB): fall back to the existing numpy DP *only if it fits*, else
+     return a coarse block-level diff (documented contract change for
+     `root_cause`).
+- **Tests:** unit tests on the measured sizes from the survey; regression that
+  seeded runs with the flag off produce identical edit scripts.
+- **Risk:** `root_cause` currently consumes positional edit scripts. The coarse
+  fallback must either emit a compatible script or be rejected by that path.
+
+#### A2 — LSH-sparsified crash clustering
+
+- **Flag:** `--crash-cluster-lsh` (bool, default false).  
+  Companion: `--crash-cluster-lsh-threshold` (float, default 0.7, same as today).
+- **Modules:** `core/crash_metadata.py::cluster_crashes`. Re-use the existing
+  MinHash LSH banding from `core/ga.py` Speciation (do not re-implement).
+- **Behaviour when enabled:** candidate pairs come from LSH buckets; only those
+  pairs pay the full similarity cost. Union-find gains rank (free correctness
+  fix, always on once the path is taken). Optional future: return the full MST
+  so `report.py` can show hierarchy at multiple thresholds.
+- **Tests:** recover the same 5 synthetic families; timing assertion that n=400
+  drops well below 59 s.
+
+### Phase 1 — Cheap, independent wins (B1, C2)
+
+#### B1 — Floyd sampling in RandPool
+
+- **Flag:** `--rand-floyd-sample` (bool, default false).  
+  Only affects the `k >= 3` branch of `RandPool.sample`; k=1 and k=2 fast paths
+  stay exactly as they are so seeded runs remain identical when the flag is off.
+- **Module:** `core/rand_pool.py`.
+- **Behaviour:** pure-Python Floyd (exactly k draws from `_draw()`). No numpy
+  round-trip.
+- **Tests:** statistical equivalence of the produced samples under the same
+  seed; micro-benchmark confirming the 4–9× range on the sizes in the survey.
+
+#### C2 — TSP neighbourhood operators
+
+- **Flags (two independent operators):**
+  - `--op-span-reverse` (bool, default false) → registers `span_reverse`.
+  - `--op-span-relocate` (bool, default false) → registers `span_relocate`.
+- **Module:** `core/mutations/generic.py` (or the havoc family) + registration
+  in the operator registry under the existing `block` / `byte` category.
+- **Behaviour:** classic 2-opt (contiguous reverse) and Or-opt (length-preserving
+  relocate of a short span). Both respect the usual length / region constraints
+  of the surrounding mutators.
+- **Tests:** unit tests that the operators are reachable only when the flags are
+  set; seeded determinism; a tiny corpus A/B that the new operators can discover
+  a known endian-sensitive crash that pure shuffle misses.
+
+### Phase 2 — Design-heavy items (B2, B3) — require answering open questions first
+
+#### B2 — Lexicase selection for GA
+
+- **Flag:** `--ga-lexicase` (bool, default false).  
+  Tunables (only meaningful when the flag is on):
+  - `--ga-lexicase-tests {rare,sample,all}` (default `rare`).
+  - `--ga-lexicase-sample-size N` (when `sample`).
+- **Module:** `core/ga.py` — new selection path beside the existing rank-based
+  tournament; the scalar `FitnessFunction` remains the default.
+- **Behaviour:** filter population by successive random (or rare-edge) tests
+  until one individual remains. Edge sets are already available.
+- **Open question gate:** do not land until an A/B design exists that can return
+  “no difference” vs the current rare-edge bonus. Prefer the `rare` test set
+  first because it is cheapest and closest to existing machinery.
+- **Tests:** population diversity metrics; edge-ownership entropy; paired
+  campaign on a target with known rare edges.
+
+#### B3 — Growing-Tree / Houston parameterisation of seed & operator selection
+
+- **Flag:** `--scheduler-growing-tree` (bool, default false).  
+  Policy string (Jamis-style): `--growing-tree-policy "random:50,newest:30,oldest:20"`  
+  Houston hybrid: `--houston-switch-frac 0.3` (run cheap biased policy until
+  that fraction of the frontier has been visited, then switch to uniform).
+- **Modules:** new thin wrapper around existing seed_picker / operator
+  schedulers; does *not* replace the nine named schedulers unless the paper
+  exercise shows real subsumption.
+- **Open question gate:** answer on paper whether the parameterisation actually
+  collapses any two existing schedulers before writing code. If it is only a
+  description, document it and stop.
+- **Tests:** continuum sweep in `bench_paired.py`; bias/uniformity diagnostics
+  inspired by the astrolog table.
+
+### Phase 3 — Moderate / speculative (C1, C3, C4, C5)
+
+#### C1 — Perlin-noise intensity field (sibling of fractal_voronoi)
+
+- **Flag:** `--op-perlin` (bool, default false) → registers a new mutator
+  `perlin_intensity` (or similar) under the spatial/meta category.
+- **Module:** new file `core/mutations/perlin.py` (or extend the fractal family).
+- **Behaviour:** deterministic Perlin (correct indices — do not copy the buggy
+  snippet from the article) samples a smooth field used as mutation probability
+  or arithmetic magnitude. Frequency / octaves exposed as
+  `--perlin-freq` / `--perlin-octaves`.
+- **Tests:** visual / statistical smoothness; cost comparison vs Voronoi; seeded
+  reproducibility.
+
+#### C3 — In-place mutate + undo discipline (dancing-links style)
+
+- **Flag:** `--mutate-in-place-undo` (bool, default false).  
+  Applies to the candidate-evaluation loops identified in the survey
+  (`gradient_cmp`, colourisation, tag-map builders, etc.).
+- **Behaviour:** when enabled, those loops mutate the buffer in place and restore
+  by relinking / memcpy of the changed span only. Default remains the current
+  copy-per-candidate path.
+- **Tests:** bit-identical results to the copy path; measured allocation drop.
+
+#### C4 — Critical-destroy / escalating neighbourhood + objective randomisation on stall
+
+- **Flags:**
+  - `--stall-critical-destroy` (bool) — destroy the region indicated by the
+    current comparison wall / colourisation map rather than a random span.
+  - `--stall-escalate-k` (int, default 0) — on repeated failure, widen the
+    destroy radius by this many rings.
+  - `--stall-random-objective` (bool) — on stall, switch the fitness / reward
+    signal to a random objective for a configurable number of iterations
+    instead of (or in addition to) `--reseed-on-stall`.
+- **Open question:** A/B the random-objective claim against the existing reseed
+  claim on the same stall detector.
+- **Modules:** stall handling in the main campaign loop + operator selection.
+
+#### C5 — Structure-aware DEFLATE mutation
+
+- **Flag:** `--op-deflate-structure` (bool, default false) → registers a new
+  mutator that touches block type, dynamic Huffman header fields, code-length
+  permutation, and back-reference (distance, length) pairs while keeping the
+  stream decodable enough to reach the error paths.
+- **Module:** extend `mutations/recompress.py` / new sibling; stay within the
+  existing inflate size caps and memoisation.
+- **Scope:** zlib / gzip / lz4 only; do not pull zstd.
+- **Tests:** streams that survive the first-stage decoder but fail deeper;
+  no size-budget violations.
+
+### Rejected items stay rejected
+
+D1, D2, R1–R3 remain negative results. Do not open implementation work against
+them. If the distance channel ever becomes weighted, revisit D2 under a new
+handover; until then it is closed.
+
+### Global CLI / config surface
+
+All flags above must appear in:
+
+- `fuzzer-tool fuzz --help` under an “Experimental / opt-in” section.
+- The JSON schema / config file loader (if present) with the same names.
+- `docs/CHANGELOG.md` and a short entry in `docs/port-backlog.md` pointing back
+  to this handover.
+
+No flag may change default behaviour. A campaign started with zero of these
+flags must produce the same edge map, crash set, and seed ranking (within RNG
+noise) as the baseline tree.
+
+### Validation requirements before merge
+
+For every feature that lands:
+
+1. Unit tests green under both the flag-off and flag-on paths.
+2. At least one paired A/B (or multi-arm) run on a real target (png / jpeg /
+   grep / ffmpeg subset) showing either a measurable win or an explicit “no
+   difference” result that is recorded in the handover or VALIDATION_LOG.
+3. `tools/bench_paired.py` (or the relevant sweep) entry so the experiment is
+   reproducible.
+4. Impactguard / pre-commit clean; no new warnings.
+
+---
+
+## Open questions (still open — gate the design-heavy items)
 
 - **B2:** what is the right test set for lexicase? All edges (8,189 on ffmpeg,
   too slow), a random sample per selection, or rare edges only? The third is
@@ -624,3 +836,9 @@ C1, C3, C4, C5 are genuine but none of them is blocking anything.
 - **C4:** randomise the objective on stall (thesis) vs. reseed the input
   (current `--reseed-on-stall`). These are different claims and can be tested
   against each other on the same stall condition.
+
+---
+
+*Updated 2026-09-06 — added full opt-in-gated implementation plan for every
+accepted item from the seventeen-source survey. All new behaviour is behind
+explicit flags; baseline remains unchanged.*
