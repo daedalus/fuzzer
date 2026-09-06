@@ -6,10 +6,52 @@ Use cases in this fuzzer:
   - Hamming: fast byte-level seed dedup (equal-length inputs)
   - Levenshtein: crash signature clustering, stack trace similarity
   - Both: fuzzy corpus dedup, mutation novelty detection
+
+Opt-in Myers path (``--diff-myers`` / ``FUZZER_DIFF_MYERS=1``):
+  When enabled, ``levenshtein_align`` prefers a linear-space Myers O(ND)
+  algorithm with a "Too Expensive" bail-out and a byte-budget guard that
+  falls back to the existing numpy DP only when the table fits, otherwise
+  returns a coarse block-level diff.  Default behaviour is unchanged.
 """
 
+from __future__ import annotations
+
+import os
 import re
 from array import array
+
+# ---------------------------------------------------------------------------
+# Opt-in Myers control (Phase 0 / A1 of the seventeen-source survey)
+# ---------------------------------------------------------------------------
+# Default off so seeded campaigns remain byte-identical.  Set via
+# ``configure_diff_myers()`` from the CLI or by the environment variable
+# FUZZER_DIFF_MYERS=1 (useful for tests without going through argparse).
+_DIFF_MYERS: bool = os.environ.get("FUZZER_DIFF_MYERS", "").strip() in ("1", "true", "yes")
+_DIFF_MYERS_MAX_D: int = int(os.environ.get("FUZZER_DIFF_MYERS_MAX_D", "0") or "0")  # 0 = auto
+_DIFF_MYERS_MAX_BYTES: int = int(
+    os.environ.get("FUZZER_DIFF_MYERS_MAX_BYTES", str(64 * 1024 * 1024))
+)  # 64 MiB default
+
+
+def configure_diff_myers(
+    enabled: bool = False,
+    max_d: int = 0,
+    max_bytes: int = 64 * 1024 * 1024,
+) -> None:
+    """Enable/disable the Myers path and its safety limits.
+
+    Called from the CLI when ``--diff-myers`` (and companions) are parsed.
+    ``max_d == 0`` means derive an automatic bound from input length.
+    """
+    global _DIFF_MYERS, _DIFF_MYERS_MAX_D, _DIFF_MYERS_MAX_BYTES
+    _DIFF_MYERS = bool(enabled)
+    _DIFF_MYERS_MAX_D = int(max_d)
+    _DIFF_MYERS_MAX_BYTES = int(max_bytes)
+
+
+def diff_myers_enabled() -> bool:
+    """Return whether the Myers path is currently active."""
+    return _DIFF_MYERS
 
 
 def _hamming_dist(a: bytes, b: bytes) -> int:
@@ -200,6 +242,136 @@ def crash_signature_similarity(sig_a: str, sig_b: str) -> float:
     return levenshtein_similarity(norm_a, norm_b)
 
 
+def _myers_max_d(n: int, m: int) -> int:
+    """Automatic 'Too Expensive' bound for Myers (roughly O(N^1.5 log N) spirit)."""
+    nmax = max(n, m, 1)
+    # Conservative practical bound: keep D small enough that O(ND) stays cheap.
+    # For the production path (near-identical inputs after Jaccard pre-filter)
+    # D is tiny; this only fires on adversarial dissimilar pairs.
+    return max(256, min(nmax * 4, 1 << 16))
+
+
+def _coarse_block_diff(a: bytes, b: bytes, block: int = 64) -> list[tuple[str, int, bytes]]:
+    """Fallback when Myers bails or the DP table would OOM.
+
+    Emits a simple block-level script: matching runs become ``match``,
+    differing blocks become a sequence of replaces / inserts / deletes.
+    Contract is weaker than a true edit script (used only when the full
+    alignment is unaffordable); callers that need positional scripts should
+    keep inputs under the byte budget.
+    """
+    ops: list[tuple[str, int, bytes]] = []
+    i = j = 0
+    n, m = len(a), len(b)
+    while i < n or j < m:
+        if i < n and j < m and a[i] == b[j]:
+            start = i
+            while i < n and j < m and a[i] == b[j]:
+                i += 1
+                j += 1
+            for k in range(start, i):
+                ops.append(("match", k, b""))
+            continue
+        end_i = min(i + block, n)
+        end_j = min(j + block, m)
+        while i < end_i and j < end_j:
+            ops.append(("replace", i, bytes([b[j]])))
+            i += 1
+            j += 1
+        while i < end_i:
+            ops.append(("delete", i, b""))
+            i += 1
+        while j < end_j:
+            ops.append(("insert", i, bytes([b[j]])))
+            j += 1
+    return ops
+
+
+def _myers_ses(a: bytes, b: bytes, max_d: int) -> list[tuple[str, int, bytes]] | None:
+    """Myers O(ND) shortest-edit-script (forward + backtrack).
+
+    Returns the edit script or ``None`` if D exceeds ``max_d`` (Too Expensive).
+    Linear space for the V arrays; the trace stores one V per D for backtrack.
+    """
+    n, m = len(a), len(b)
+    if n == 0 and m == 0:
+        return []
+    max_d = max(1, max_d)
+    offset = max_d
+    # V[k] = furthest x reached on diagonal k
+    v = array("i", [-1] * (2 * max_d + 1))
+    v[1 + offset] = 0
+    trace: list[array] = []
+
+    for d in range(max_d + 1):
+        v_copy = array("i", v)
+        trace.append(v_copy)
+        for k in range(-d, d + 1, 2):
+            k_idx = k + offset
+            if k == -d or (k != d and v[k_idx - 1] < v[k_idx + 1]):
+                x = v[k_idx + 1]
+            else:
+                x = v[k_idx - 1] + 1
+            y = x - k
+            while x < n and y < m and a[x] == b[y]:
+                x += 1
+                y += 1
+            v[k_idx] = x
+            if x >= n and y >= m:
+                return _myers_backtrack(a, b, trace, d, offset)
+        # Continue to next d
+    return None  # Too Expensive
+
+
+def _myers_backtrack(
+    a: bytes,
+    b: bytes,
+    trace: list,
+    d_final: int,
+    offset: int,
+) -> list[tuple[str, int, bytes]]:
+    """Reconstruct edit script from Myers V-trace."""
+    ops: list[tuple[str, int, bytes]] = []
+    x, y = len(a), len(b)
+    for d in range(d_final, -1, -1):
+        v = trace[d]
+        k = x - y
+        k_idx = k + offset
+        if k == -d or (k != d and v[k_idx - 1] < v[k_idx + 1]):
+            prev_k = k + 1
+            prev_x = v[prev_k + offset]
+            # insert
+            while x > prev_x and y > 0:
+                # snake backwards was already matched; the move is insert
+                break
+            if y > 0:
+                ops.append(("insert", x, bytes([b[y - 1]])))
+                y -= 1
+        else:
+            prev_k = k - 1
+            prev_x = v[prev_k + offset]
+            if x > prev_x:
+                # delete or replace handled by snake unwind below
+                pass
+            if x > 0 and (y == 0 or a[x - 1] != b[y - 1] if y > 0 else True):
+                if y > 0 and a[x - 1] != b[y - 1]:
+                    ops.append(("replace", x - 1, bytes([b[y - 1]])))
+                    x -= 1
+                    y -= 1
+                else:
+                    ops.append(("delete", x - 1, b""))
+                    x -= 1
+            else:
+                x = prev_x
+        # unwind snake (matches)
+        while x > 0 and y > 0 and a[x - 1] == b[y - 1]:
+            ops.append(("match", x - 1, b""))
+            x -= 1
+            y -= 1
+    ops.reverse()
+    return ops
+
+
 def levenshtein_align(a: bytes, b: bytes) -> list[tuple[str, int, bytes]]:
     """Compute Levenshtein alignment as an edit script.
 
@@ -212,7 +384,9 @@ def levenshtein_align(a: bytes, b: bytes) -> list[tuple[str, int, bytes]]:
     Optimized implementation:
     1. Prefix/suffix trimming — skip common leading/trailing bytes
     2. Direct Python DP for small remaining inputs (< 64 bytes each)
-    3. Numpy-vectorized DP for larger inputs
+    3. When ``--diff-myers`` is enabled: Myers O(ND) with bail-out, then
+       numpy DP only if the table fits the byte budget, else coarse block diff
+    4. Otherwise (default): Numpy-vectorized DP for larger inputs
 
     Args:
         a: Original byte sequence.
@@ -254,6 +428,18 @@ def levenshtein_align(a: bytes, b: bytes) -> list[tuple[str, int, bytes]]:
     # For very small remaining inputs, use direct Python (no numpy overhead)
     if na < 64 and nb < 64:
         mid_ops = _levenshtein_align_small(a_mid, b_mid)
+    elif _DIFF_MYERS:
+        max_d = _DIFF_MYERS_MAX_D or _myers_max_d(na, nb)
+        myers_ops = _myers_ses(a_mid, b_mid, max_d)
+        if myers_ops is not None:
+            mid_ops = myers_ops
+        else:
+            # Too Expensive or bail — try numpy only if the table fits
+            table_bytes = (na + 1) * (nb + 1) * 4  # int32
+            if table_bytes <= _DIFF_MYERS_MAX_BYTES:
+                mid_ops = _levenshtein_align_numpy(a_mid, b_mid)
+            else:
+                mid_ops = _coarse_block_diff(a_mid, b_mid)
     else:
         mid_ops = _levenshtein_align_numpy(a_mid, b_mid)
 

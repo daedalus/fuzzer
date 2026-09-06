@@ -201,6 +201,21 @@ def cmd_fuzz(args):
         set_kill_children_enabled(False)
         print("[*] Child process groups will NOT be killed on exit")
 
+    # Phase 0 / A1 — opt-in Myers path for levenshtein_align (default off).
+    if getattr(args, "diff_myers", False):
+        from fuzzer_tool.core.similarity import configure_diff_myers
+
+        configure_diff_myers(
+            enabled=True,
+            max_d=getattr(args, "diff_myers_max_d", 0) or 0,
+            max_bytes=getattr(args, "diff_myers_max_bytes", 64 * 1024 * 1024),
+        )
+        print(
+            f"[*] Myers O(ND) diff path enabled "
+            f"(max_d={getattr(args, 'diff_myers_max_d', 0) or 'auto'}, "
+            f"max_bytes={getattr(args, 'diff_myers_max_bytes', 64 * 1024 * 1024)})"
+        )
+
     # Normalize targets: support both old single-target and new multi-target
     import glob as _glob
 
@@ -2987,6 +3002,32 @@ def main() -> int:
         "--arm-mutate",
         action="store_true",
         help="Enable ARM instruction-stream mutations (decode-and-mutate binary code)",
+    )
+    # --- Experimental / opt-in (seventeen-source survey Phase 0 / A1) ---
+    fuzz_parser.add_argument(
+        "--diff-myers",
+        action="store_true",
+        help=(
+            "Opt-in linear-space Myers O(ND) path for levenshtein_align "
+            "(crash triage / root-cause). Falls back to numpy DP only when "
+            "the table fits --diff-myers-max-bytes, else a coarse block diff. "
+            "Default path unchanged. See "
+            "docs/handover/handover_seventeen_source_survey_2026-09-06.md"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--diff-myers-max-d",
+        type=int,
+        default=0,
+        metavar="D",
+        help="Myers 'Too Expensive' bail-out on edit distance D (0 = auto from length)",
+    )
+    fuzz_parser.add_argument(
+        "--diff-myers-max-bytes",
+        type=int,
+        default=64 * 1024 * 1024,
+        metavar="N",
+        help="Byte budget for the numpy DP fallback table (default: 64 MiB)",
     )
     fuzz_parser.set_defaults(func=cmd_fuzz)
 
