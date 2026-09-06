@@ -346,6 +346,11 @@ def _deterministic_mutation_stream(data: bytes, max_mutations: int = MAX_DET_MUT
     n = 0
     q_bit, q_byte, q_arith, q_interesting = quotas
 
+    # --- Persistent scratch buffer: mutate in place, yield, restore ---
+    # Avoids O(n) bytearray(data) allocation per mutant (P1-1).
+    # The bytes(scratch) copy per yield is still required by contract.
+    scratch = bytearray(data)
+
     # bitflip 1/1: flip every bit in turn.
     pass_n = 0
     for byte_idx in range(length):
@@ -355,20 +360,21 @@ def _deterministic_mutation_stream(data: bytes, max_mutations: int = MAX_DET_MUT
         for bit in range(8):
             if pass_n >= q_bit:
                 break
-            mutant = bytearray(data)
-            mutant[byte_idx] = orig ^ (1 << bit)
-            yield bytes(mutant)
+            scratch[byte_idx] = orig ^ (1 << bit)
+            yield bytes(scratch)
             pass_n += 1
             n += 1
+        scratch[byte_idx] = orig  # restore
 
     # byte flip 8/8: XOR every byte with 0xFF in turn.
     pass_n = 0
     for byte_idx in range(length):
         if pass_n >= q_byte:
             break
-        mutant = bytearray(data)
-        mutant[byte_idx] ^= 0xFF
-        yield bytes(mutant)
+        orig = data[byte_idx]
+        scratch[byte_idx] = orig ^ 0xFF
+        yield bytes(scratch)
+        scratch[byte_idx] = orig  # restore
         pass_n += 1
         n += 1
 
@@ -381,32 +387,33 @@ def _deterministic_mutation_stream(data: bytes, max_mutations: int = MAX_DET_MUT
         for delta in ARITHMETIC_DELTAS:
             if pass_n >= q_arith:
                 break
-            mutant = bytearray(data)
-            mutant[byte_idx] = (orig + delta) & 0xFF
-            yield bytes(mutant)
+            scratch[byte_idx] = (orig + delta) & 0xFF
+            yield bytes(scratch)
             pass_n += 1
             n += 1
             if pass_n >= q_arith:
+                scratch[byte_idx] = orig  # restore before break
                 break
-            mutant = bytearray(data)
-            mutant[byte_idx] = (orig - delta) & 0xFF
-            yield bytes(mutant)
+            scratch[byte_idx] = (orig - delta) & 0xFF
+            yield bytes(scratch)
             pass_n += 1
             n += 1
+        scratch[byte_idx] = orig  # restore
 
     # interesting values 8-bit: substitute each known-interesting byte.
     pass_n = 0
     for byte_idx in range(length):
         if pass_n >= q_interesting:
             break
+        orig = data[byte_idx]
         for val in INTERESTING_UNSIGNED_8:
             if pass_n >= q_interesting:
                 break
-            mutant = bytearray(data)
-            mutant[byte_idx] = val & 0xFF
-            yield bytes(mutant)
+            scratch[byte_idx] = val & 0xFF
+            yield bytes(scratch)
             pass_n += 1
             n += 1
+        scratch[byte_idx] = orig  # restore
 
 
 # Mutants the most recent call would have produced beyond max_mutations.
