@@ -3019,8 +3019,9 @@ def main() -> int:
         metavar="DIR",
         default=None,
         help=(
-            "Directory containing FormatFuzzer executables "
-            "(default: $FORMATFUZZER_BIN or /usr/local/lib/formatfuzzer)"
+            "Directory containing FormatFuzzer executables, named "
+            "<format>-fuzzer (default: $FORMATFUZZER_BIN or "
+            "/usr/local/lib/formatfuzzer, then PATH)"
         ),
     )
     fuzz_parser.add_argument(
@@ -3028,8 +3029,8 @@ def main() -> int:
         metavar="LIST",
         default=None,
         help=(
-            "Comma-separated FormatFuzzer templates to enable "
-            "(default: png,zip,isobmff,jpeg)"
+            "Comma-separated FormatFuzzer templates to enable, using "
+            "upstream's template names (default: png,zip,mp4,jpg)"
         ),
     )
     fuzz_parser.add_argument(

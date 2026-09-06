@@ -993,11 +993,18 @@ class Fuzzer:
             try:
                 from fuzzer_tool.core.mutations.formatfuzzer import (
                     register_formatfuzzer_mutators,
+                    report_availability,
                 )
                 templates = None
                 if ff_templates:
                     templates = [t.strip() for t in ff_templates.split(",") if t.strip()]
-                register_formatfuzzer_mutators(templates=templates, bin_dir=ff_bin_dir)
+                muts = register_formatfuzzer_mutators(
+                    templates=templates, bin_dir=ff_bin_dir
+                )
+                # Registration is silent by design (it runs on every import).
+                # Say something here, or --formatfuzzer with nothing installed
+                # yields operators that never fire and no message at all.
+                report_availability(muts)
             except Exception as exc:  # noqa: BLE001
                 import logging
                 logging.getLogger(__name__).warning(
