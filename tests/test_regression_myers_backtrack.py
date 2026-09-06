@@ -16,7 +16,11 @@ import random
 
 import pytest
 
-from fuzzer_tool.core.similarity import configure_diff_myers, levenshtein_align
+from fuzzer_tool.core.similarity import (
+    _levenshtein_align_numpy,
+    configure_diff_limits,
+    levenshtein_align,
+)
 
 
 def apply_script(base: bytes, ops: list[tuple[str, int, bytes]]) -> bytes:
@@ -40,9 +44,18 @@ def non_match(ops) -> int:
 
 @pytest.fixture
 def myers_on():
-    configure_diff_myers(True)
+    """Force the Myers branch by making the DP table unaffordable.
+
+    There is no on/off switch any more -- A1 shipped behind ``--diff-myers``
+    and that gate was dropped, because the DP it guarded allocates 4*n*m bytes
+    and a 64 KiB crash against a 64 KiB seed asks for 17 GB. Dispatch is now on
+    affordability: the DP runs whenever its table fits the byte budget, and
+    Myers runs when it does not. Setting the budget to zero is therefore the
+    only way to exercise Myers on inputs small enough to test quickly.
+    """
+    configure_diff_limits(max_d=0, max_bytes=0)
     yield
-    configure_diff_myers(False)
+    configure_diff_limits()
 
 
 # Whether the greedy unwind over-consumed depended on where match runs happened
@@ -67,10 +80,9 @@ def test_pinned_case_rebuilds_target(myers_on):
     assert apply_script(_PINNED_A, ops) == _PINNED_B
 
 
-def test_pinned_case_default_path(_unused=None):
-    """Control: the DP path must pass the same oracle, or the oracle is wrong."""
-    configure_diff_myers(False)
-    ops = levenshtein_align(_PINNED_A, _PINNED_B)
+def test_pinned_case_default_path():
+    """Control: the DP must pass the same oracle, or the oracle is wrong."""
+    ops = _levenshtein_align_numpy(_PINNED_A, _PINNED_B)
     assert apply_script(_PINNED_A, ops) == _PINNED_B
 
 
@@ -133,9 +145,9 @@ def test_myers_never_beats_levenshtein_and_is_close(myers_on):
                 b.insert(p, rng.randrange(256))
         b = bytes(b)
 
-        configure_diff_myers(False)
-        dp = non_match(levenshtein_align(a, b))
-        configure_diff_myers(True)
+        if len(a) < 64 and len(b) < 64:
+            continue  # small inputs take the exact Python DP, not Myers
+        dp = non_match(_levenshtein_align_numpy(a, b))
         my = non_match(levenshtein_align(a, b))
 
         assert my >= dp, f"seed {t}: myers={my} < dp={dp}, script cannot be valid"

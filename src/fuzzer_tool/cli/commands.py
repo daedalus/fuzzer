@@ -201,20 +201,15 @@ def cmd_fuzz(args):
         set_kill_children_enabled(False)
         print("[*] Child process groups will NOT be killed on exit")
 
-    # Phase 0 / A1 — opt-in Myers path for levenshtein_align (default off).
-    if getattr(args, "diff_myers", False):
-        from fuzzer_tool.core.similarity import configure_diff_myers
+    # A1 — alignment cost limits. The Myers path itself is unconditional (it
+    # fixes an OOM, not a benchmark); these only tune where it gives up.
+    _diff_max_d = getattr(args, "diff_myers_max_d", 0) or 0
+    _diff_max_bytes = getattr(args, "diff_myers_max_bytes", 64 * 1024 * 1024)
+    if _diff_max_d or _diff_max_bytes != 64 * 1024 * 1024:
+        from fuzzer_tool.core.similarity import configure_diff_limits
 
-        configure_diff_myers(
-            enabled=True,
-            max_d=getattr(args, "diff_myers_max_d", 0) or 0,
-            max_bytes=getattr(args, "diff_myers_max_bytes", 64 * 1024 * 1024),
-        )
-        print(
-            f"[*] Myers O(ND) diff path enabled "
-            f"(max_d={getattr(args, 'diff_myers_max_d', 0) or 'auto'}, "
-            f"max_bytes={getattr(args, 'diff_myers_max_bytes', 64 * 1024 * 1024)})"
-        )
+        configure_diff_limits(max_d=_diff_max_d, max_bytes=_diff_max_bytes)
+        print(f"[*] diff limits: max_d={_diff_max_d or 'auto'}, max_bytes={_diff_max_bytes}")
 
     # Phase 0 / A2 — LSH-sparsified crash clustering.
     if getattr(args, "crash_cluster_lsh", False):
@@ -3025,18 +3020,10 @@ def main() -> int:
         action="store_true",
         help="Enable ARM instruction-stream mutations (decode-and-mutate binary code)",
     )
-    # --- Experimental / opt-in (seventeen-source survey Phase 0 / A1) ---
-    fuzz_parser.add_argument(
-        "--diff-myers",
-        action="store_true",
-        help=(
-            "Opt-in linear-space Myers O(ND) path for levenshtein_align "
-            "(crash triage / root-cause). Falls back to numpy DP only when "
-            "the table fits --diff-myers-max-bytes, else a coarse block diff. "
-            "Default path unchanged. See "
-            "docs/handover/handover_seventeen_source_survey_2026-09-06.md"
-        ),
-    )
+    # --- Alignment cost limits (seventeen-source survey A1) ---
+    # There is no --diff-myers on/off switch: the Myers path is unconditional
+    # because the DP it replaces allocates a 4*n*m table, which is a latent OOM
+    # on real crash sizes rather than a slow path. These tune the bail-out.
     fuzz_parser.add_argument(
         "--diff-myers-max-d",
         type=int,

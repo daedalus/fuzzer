@@ -7,11 +7,13 @@ Use cases in this fuzzer:
   - Levenshtein: crash signature clustering, stack trace similarity
   - Both: fuzzy corpus dedup, mutation novelty detection
 
-Opt-in Myers path (``--diff-myers`` / ``FUZZER_DIFF_MYERS=1``):
-  When enabled, ``levenshtein_align`` prefers a linear-space Myers O(ND)
-  algorithm with a "Too Expensive" bail-out and a byte-budget guard that
-  falls back to the existing numpy DP only when the table fits, otherwise
-  returns a coarse block-level diff.  Default behaviour is unchanged.
+Alignment cost control:
+  ``levenshtein_align`` runs Myers O(ND) with a "Too Expensive" bail-out,
+  then falls back to the numpy DP only when its table fits the byte budget,
+  and to a coarse block diff above that. The budget is not an optimisation
+  knob -- the DP table is 4*n*m bytes, so a 64 KiB crash against a 64 KiB
+  corpus seed asks for 17 GB and dies. Tunable via
+  ``--diff-myers-max-d`` / ``--diff-myers-max-bytes``.
 """
 
 from __future__ import annotations
@@ -21,37 +23,30 @@ import re
 from array import array
 
 # ---------------------------------------------------------------------------
-# Opt-in Myers control (Phase 0 / A1 of the seventeen-source survey)
+# Alignment cost limits (A1 of the seventeen-source survey)
 # ---------------------------------------------------------------------------
-# Default off so seeded campaigns remain byte-identical.  Set via
-# ``configure_diff_myers()`` from the CLI or by the environment variable
-# FUZZER_DIFF_MYERS=1 (useful for tests without going through argparse).
-_DIFF_MYERS: bool = os.environ.get("FUZZER_DIFF_MYERS", "").strip() in ("1", "true", "yes")
+# These bound the work; they do not select an algorithm. The Myers path is
+# unconditional because the unbounded DP it replaces is a latent OOM on any
+# crash large enough to matter, not because it is faster on average.
 _DIFF_MYERS_MAX_D: int = int(os.environ.get("FUZZER_DIFF_MYERS_MAX_D", "0") or "0")  # 0 = auto
 _DIFF_MYERS_MAX_BYTES: int = int(
-    os.environ.get("FUZZER_DIFF_MYERS_MAX_BYTES", str(64 * 1024 * 1024))
+    os.environ.get("FUZZER_DIFF_MYERS_MAX_BYTES", str(128 * 1024 * 1024))
 )  # 64 MiB default
 
 
-def configure_diff_myers(
-    enabled: bool = False,
+def configure_diff_limits(
     max_d: int = 0,
-    max_bytes: int = 64 * 1024 * 1024,
+    max_bytes: int = 128 * 1024 * 1024,
 ) -> None:
-    """Enable/disable the Myers path and its safety limits.
+    """Set the alignment safety limits.
 
-    Called from the CLI when ``--diff-myers`` (and companions) are parsed.
     ``max_d == 0`` means derive an automatic bound from input length.
+    ``max_bytes`` caps the DP fallback table; above it the coarse block diff
+    is used instead of allocating.
     """
-    global _DIFF_MYERS, _DIFF_MYERS_MAX_D, _DIFF_MYERS_MAX_BYTES
-    _DIFF_MYERS = bool(enabled)
+    global _DIFF_MYERS_MAX_D, _DIFF_MYERS_MAX_BYTES
     _DIFF_MYERS_MAX_D = int(max_d)
     _DIFF_MYERS_MAX_BYTES = int(max_bytes)
-
-
-def diff_myers_enabled() -> bool:
-    """Return whether the Myers path is currently active."""
-    return _DIFF_MYERS
 
 
 def _hamming_dist(a: bytes, b: bytes) -> int:
@@ -242,13 +237,23 @@ def crash_signature_similarity(sig_a: str, sig_b: str) -> float:
     return levenshtein_similarity(norm_a, norm_b)
 
 
+# Myers' cost here is dominated by the per-level diagonal sweep, so it grows as
+# roughly O(D^2 + N) rather than O(N*D): measured 253 ms at n=65536 with D=652
+# (long snakes, cheap) against 7.4 s at n=4096 with D=7224 (no snakes, 52M
+# diagonal steps). Bounding D therefore bounds the work directly. 2048 caps a
+# full bail-out at ~4M steps, about half a second, while still clearing the
+# D values similar inputs actually produce (D=652 for a 64 KiB pair with one
+# flip per 200 bytes).
+_MYERS_STEP_BUDGET = 2048
+
+
 def _myers_max_d(n: int, m: int) -> int:
-    """Automatic 'Too Expensive' bound for Myers (roughly O(N^1.5 log N) spirit)."""
-    nmax = max(n, m, 1)
-    # Conservative practical bound: keep D small enough that O(ND) stays cheap.
-    # For the production path (near-identical inputs after Jaccard pre-filter)
-    # D is tiny; this only fires on adversarial dissimilar pairs.
-    return max(256, min(nmax * 4, 1 << 16))
+    """'Too Expensive' bound for Myers.
+
+    Independent of length on purpose: the cost is set by D, not by N, and a
+    length-scaled bound let a 4 KiB dissimilar pair run to D=7224.
+    """
+    return _MYERS_STEP_BUDGET
 
 
 def _coarse_block_diff(a: bytes, b: bytes, block: int = 64) -> list[tuple[str, int, bytes]]:
@@ -478,20 +483,23 @@ def levenshtein_align(a: bytes, b: bytes) -> list[tuple[str, int, bytes]]:
     # For very small remaining inputs, use direct Python (no numpy overhead)
     if na < 64 and nb < 64:
         mid_ops = _levenshtein_align_small(a_mid, b_mid)
-    elif _DIFF_MYERS:
-        max_d = _DIFF_MYERS_MAX_D or _myers_max_d(na, nb)
-        myers_ops = _myers_ses(a_mid, b_mid, max_d)
-        if myers_ops is not None:
-            mid_ops = myers_ops
-        else:
-            # Too Expensive or bail — try numpy only if the table fits
-            table_bytes = (na + 1) * (nb + 1) * 4  # int32
-            if table_bytes <= _DIFF_MYERS_MAX_BYTES:
-                mid_ops = _levenshtein_align_numpy(a_mid, b_mid)
-            else:
-                mid_ops = _coarse_block_diff(a_mid, b_mid)
     else:
-        mid_ops = _levenshtein_align_numpy(a_mid, b_mid)
+        # The DP is exact and vectorised in C; when its table is affordable it
+        # is simply the better choice, and taking it keeps behaviour identical
+        # to before this change for every input that was already survivable.
+        # Myers is reached only where the DP cannot run at all -- that is the
+        # bug being fixed, not a benchmark being won.
+        table_bytes = (na + 1) * (nb + 1) * 4  # int32
+        if table_bytes <= _DIFF_MYERS_MAX_BYTES:
+            mid_ops = _levenshtein_align_numpy(a_mid, b_mid)
+        else:
+            max_d = _DIFF_MYERS_MAX_D or _myers_max_d(na, nb)
+            myers_ops = _myers_ses(a_mid, b_mid, max_d)
+            # Dissimilar *and* too big for the DP: no exact script is
+            # affordable, so degrade to blocks rather than allocate.
+            mid_ops = (
+                myers_ops if myers_ops is not None else _coarse_block_diff(a_mid, b_mid)
+            )
 
     # Reconstruct full script with prefix/suffix offsets
     result: list[tuple[str, int, bytes]] = []
