@@ -238,6 +238,10 @@ for _b in range(256):
         _COLORIZE_TBL[_b] = 0x21 + (_b * 31 + 11) % 94
 _COLORIZE_TBL = bytes(_COLORIZE_TBL)
 
+# Sentinel for "no cached pairs list yet", distinct from None -- None is a
+# legitimate value of ctx.cmplog_pairs and must not read as a cache hit.
+_MISSING = object()
+
 # ── Contextual bandit (LinUCB) feature schema ────────────────────────────
 # Coarse format buckets for the context one-hot. Deliberately coarser than
 # _FORMAT_SNIFFERS in operator_registry.py (which gates ~15 format-specific
@@ -1005,18 +1009,26 @@ class OperatorEngine:
         if cmplog_pairs:
             from fuzzer_tool.core.colorizer import CmplogColorizer  # noqa: PLC0415
 
-            # Cache color mask per (input hash, cmplog pairs identity).
-            # Mix len() into the id key: CPython reuses object ids after free,
-            # so a rebuilt pairs list can collide with a stale cache entry
-            # (same shape as the neighbouring redqueen memo at _version).
+            # Cache the colour mask per input hash, scoped to the pairs list
+            # it was derived from.
+            #
+            # Identity, not id(): CPython reuses an address after the object
+            # at it is freed, so a rebuilt pairs list can land on the address
+            # of the one the cache was built from.  Mixing len() into the id
+            # only narrows that -- a rebuild of the same length still
+            # collides, and two live objects whose ids differ by exactly
+            # their length difference alias in the other direction.  Holding
+            # a reference to the owning list makes the check exact: the
+            # object cannot be freed (so its address cannot be reused) while
+            # the entries derived from it are still live.
             buf_bytes = bytes(buf)
             buf_hash = hash(buf_bytes)
-            pairs_id = id(cmplog_pairs) + len(cmplog_pairs)
             cache = getattr(self, "_colorize_cache", None)
-            if cache is None:
-                self._colorize_cache = {}
-                cache = self._colorize_cache
-            cached = cache.get((buf_hash, pairs_id))
+            if cache is None or getattr(self, "_colorize_cache_owner", None) is not cmplog_pairs:
+                cache = {}
+                self._colorize_cache = cache
+                self._colorize_cache_owner = cmplog_pairs
+            cached = cache.get(buf_hash)
             if cached is None:
                 colorizer = CmplogColorizer()
                 mask = colorizer.colorize_from_cmplog(buf_bytes, cmplog_pairs)
@@ -1025,7 +1037,7 @@ class OperatorEngine:
                 # Bounded cache: evict when > 256 entries
                 if len(cache) > 256:
                     cache.clear()
-                cache[(buf_hash, pairs_id)] = cached
+                cache[buf_hash] = cached
             colorable = cached
             if colorable:
                 n_mutate = max(1, min(len(colorable), len(buf) // rng.randint(2, 10)))
@@ -1975,10 +1987,12 @@ class OperatorEngine:
         """Lazily build and cache the CondStmt list from cmplog pairs."""
         cached = getattr(self, "_cond_stmts", None)
         if cached is not None:
-            # Invalidate when the pair list changes.
+            # Invalidate when the pair list changes.  Compared by identity
+            # and kept alive by the stored reference, for the same reason as
+            # the colorize cache above: id() alone (even mixed with len())
+            # can collide with a rebuilt list at a reused address.
             pairs = self.ctx.cmplog_pairs
-            pair_id = (id(pairs) + len(pairs)) if pairs else -1
-            if getattr(self, "_cond_stmts_pair_id", None) == pair_id:
+            if getattr(self, "_cond_stmts_pairs", _MISSING) is pairs:
                 return cached
         from fuzzer_tool.core.cond_stmt import (
             conds_from_cmplog_pairs,
@@ -1993,8 +2007,7 @@ class OperatorEngine:
             pair_pc=pair_pc,
         )
         self._cond_stmts = cached
-        pairs = self.ctx.cmplog_pairs
-        self._cond_stmts_pair_id = (id(pairs) + len(pairs)) if pairs else -1
+        self._cond_stmts_pairs = self.ctx.cmplog_pairs
         return cached
 
     def _op_special_strings(self, buf, _byte_idx, _data):
