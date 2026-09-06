@@ -1735,6 +1735,25 @@ class EdgeTracker:
         recent = sum(1 for e in seed_edges if first_seen.get(e, 0) >= cutoff)
         return recent / len(seed_edges)
 
+
+    def discovery_frontier_edges(self) -> set[int] | None:
+        """Edges first seen in the most recent quarter of the coverage clock.
+
+        Returns ``None`` when the frontier is unknown (no discoveries yet), so
+        callers that pass the result to ``invasion_select`` keep the default
+        "do not short-circuit" behaviour.  Returns an empty set only when the
+        clock exists but no edge falls in the recent window — the case
+        ``invasion_select`` treats as "nothing left to invade".
+        """
+        first_seen = self._edge_first_seen
+        if not first_seen:
+            return None
+        clock = max(first_seen.values())
+        if clock <= 0:
+            return None
+        cutoff = clock * (1.0 - _FRONTIER_FRACTION)
+        return {e for e, t0 in first_seen.items() if t0 >= cutoff}
+
     def compute_corpus_diversity(self) -> float:
         """Estimate corpus diversity using MinHash signatures.
 

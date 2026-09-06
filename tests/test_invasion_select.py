@@ -68,3 +68,22 @@ class TestInvasionSelectAdversarial:
         # not reported as stuck.
         stats = {"only": (0.0, 0.0)}
         assert invasion_select(stats) == "only"
+
+
+def test_nonempty_frontier_does_not_block_selection():
+    """Production now passes discovery_frontier_edges(); a live set must not short-circuit."""
+    stats = {"havoc": (9.0, 1.0), "splice": (1.0, 9.0)}
+    assert invasion_select(stats, frontier_edges={1, 2, 3}) == "havoc"
+
+
+def test_discovery_frontier_edges_shape():
+    from fuzzer_tool.core.edge_tracker import EdgeTracker
+
+    et = EdgeTracker.__new__(EdgeTracker)
+    et._edge_first_seen = {}
+    assert et.discovery_frontier_edges() is None
+    et._edge_first_seen = {10: 1, 20: 100, 30: 101}
+    frontier = et.discovery_frontier_edges()
+    assert frontier is not None
+    assert 10 not in frontier
+    assert 20 in frontier and 30 in frontier

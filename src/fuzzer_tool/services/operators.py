@@ -1794,10 +1794,32 @@ class OperatorEngine:
         buf[dest:dest] = chunk
 
     def _op_swap_bytes(self, buf, _byte_idx, _data):
+        """Swap two bytes, or with low probability a longer tuple via ``_swap_tuple``.
+
+        ``m=2`` stays the common path (separate scale signal for the bandit).
+        Larger ``m`` is drawn relative to ``len(buf)``; pure ``m=3`` is not the
+        only extension (odd cycles alone generate only A_n — handover P2-2).
+        """
+        from fuzzer_tool.core.mutations.generic import _swap_pair, _swap_tuple
+
         rng = self.ctx.rand_pool
-        if len(buf) >= 2:
-            i, j = rng.sample(len(buf), 2)
-            buf[i], buf[j] = buf[j], buf[i]
+        n = len(buf)
+        if n < 2:
+            return
+        # Prefer the pair arm; only occasionally take a longer cycle.
+        if n >= 4 and rng.random() < 0.15:
+            m = 4 if n < 8 else (5 if rng.random() < 0.5 else 4)
+            m = min(m, n)
+            result = _swap_tuple(n, rng, m)
+            if result is not None:
+                picked, permuted = result
+                # Snapshot values at the *source* indices, then write.
+                src_vals = {i: buf[i] for i in picked}
+                for pos, src in zip(picked, permuted):
+                    buf[pos] = src_vals[src]
+                return
+        i, j = _swap_pair(n, rng)
+        buf[i], buf[j] = buf[j], buf[i]
 
     def _op_endianness_swap(self, buf, _byte_idx, _data):
         rng = self.ctx.rand_pool
@@ -3710,7 +3732,14 @@ class OperatorEngine:
             # observed, and an empty map falls back to pure resistance.
             continuum = getattr(f, "_continuum", None)
             flux_map = continuum.flux_map(op_stats) if continuum is not None else None
-            op = invasion_select(op_stats, flux_map=flux_map) or self.ctx.rand_pool.choice(ops)
+            frontier = None
+            et = getattr(self.f, "_edge_tracker", None)
+            if et is not None and hasattr(et, "discovery_frontier_edges"):
+                frontier = et.discovery_frontier_edges()
+            op = (
+                invasion_select(op_stats, frontier_edges=frontier, flux_map=flux_map)
+                or self.ctx.rand_pool.choice(ops)
+            )
             f._last_mopt_particles.append(None)
         elif f._use_replicator and f._replicator:
             op = f._replicator.select_op(ops)
