@@ -10,6 +10,7 @@ here for use by the detector.
 """
 
 import logging
+import math
 
 from fuzzer_tool.core.critical_slowing import (
     CoverageHomogeneityDetector,
@@ -23,6 +24,125 @@ log = logging.getLogger(__name__)
 # unconditional level counts as a volatility spike.  Same shape and default
 # as ``csd_rise_threshold``: both ask "how far above baseline".
 _GARCH_SPIKE_FACTOR = 1.5
+
+# Ordinal rank of each percolation phase.  CoverageRegime is a plain
+# enum.Enum (no IntEnum ordering), so the monotonic association between the
+# discrete label and the continuous Reynolds number is defined here, not by
+# enum comparison.  SUBCRITICAL < CRITICAL < SUPERCRITICAL.
+_REGIME_RANK: dict[CoverageRegime, int] = {
+    CoverageRegime.SUBCRITICAL: 0,
+    CoverageRegime.CRITICAL: 1,
+    CoverageRegime.SUPERCRITICAL: 2,
+}
+
+
+def _average_ranks(values: list[float]) -> list[float]:
+    """Rank *values*, averaging across ties (competition ranking)."""
+    order = sorted(range(len(values)), key=lambda i: values[i])
+    ranks = [0.0] * len(values)
+    i = 0
+    while i < len(values):
+        j = i
+        while j + 1 < len(values) and values[order[j + 1]] == values[order[i]]:
+            j += 1
+        avg = (i + 1 + j + 1) / 2.0
+        for k in range(i, j + 1):
+            ranks[order[k]] = avg
+        i = j + 1
+    return ranks
+
+
+def _betacf(a: float, b: float, x: float) -> float:
+    """Continued fraction for the incomplete beta function (Lentz)."""
+    MAXIT, EPS, FPMIN = 300, 3e-16, 1e-300
+    qab = a + b
+    qap = a + 1.0
+    qam = a - 1.0
+    c = 1.0
+    d = 1.0 - qab * x / qap
+    if abs(d) < FPMIN:
+        d = FPMIN
+    d = 1.0 / d
+    h = d
+    for m in range(1, MAXIT + 1):
+        m2 = 2 * m
+        aa = m * (b - m) * x / ((qam + m2) * (a + m2))
+        d = 1.0 + aa * d
+        if abs(d) < FPMIN:
+            d = FPMIN
+        c = 1.0 + aa / c
+        if abs(c) < FPMIN:
+            c = FPMIN
+        d = 1.0 / d
+        h *= d * c
+        aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
+        d = 1.0 + aa * d
+        if abs(d) < FPMIN:
+            d = FPMIN
+        c = 1.0 + aa / c
+        if abs(c) < FPMIN:
+            c = FPMIN
+        d = 1.0 / d
+        delta = d * c
+        h *= delta
+        if abs(delta - 1.0) < EPS:
+            break
+    return h
+
+
+def _betai(a: float, b: float, x: float) -> float:
+    """Regularized incomplete beta function I_x(a, b)."""
+    if x <= 0.0:
+        return 0.0
+    if x >= 1.0:
+        return 1.0
+    lbeta = math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b)
+    bt = math.exp(lbeta + a * math.log(x) + b * math.log(1.0 - x))
+    if x < (a + 1.0) / (a + b + 2.0):
+        return bt * _betacf(a, b, x) / a
+    return 1.0 - bt * _betacf(b, a, 1.0 - x) / b
+
+
+def _student_t_cdf(t: float, df: float) -> float:
+    """CDF of Student's t with *df* degrees of freedom at *t*."""
+    if df <= 0:
+        return 0.5
+    x = df / (df + t * t)
+    tail = 0.5 * _betai(0.5 * df, 0.5, x)
+    return 1.0 - tail if t >= 0.0 else tail
+
+
+def _spearman_rank_correlation(xs: list[float], ys: list[float]) -> tuple[float, float]:
+    """Spearman's rho and two-sided p-value for two paired series.
+
+    Pearson on average-tied ranks.  The p-value comes from the t-statistic
+    t = rho * sqrt((n-2)/(1-rho^2)); a constant series carries no rank
+    information and returns rho 0.0, p 1.0 rather than dividing by zero.
+    """
+    n = len(xs)
+    if n < 3:
+        return 0.0, 1.0
+    rx = _average_ranks(xs)
+    ry = _average_ranks(ys)
+    mx = sum(rx) / n
+    my = sum(ry) / n
+    cov = sum((rx[i] - mx) * (ry[i] - my) for i in range(n))
+    sx = math.sqrt(sum((r - mx) ** 2 for r in rx))
+    sy = math.sqrt(sum((r - my) ** 2 for r in ry))
+    if sx == 0.0 or sy == 0.0:
+        return 0.0, 1.0
+    rho = cov / (sx * sy)
+    # Clamp to [-1, 1] and snap anything within floating-point noise of a
+    # perfect correlation to exactly +/-1 with p=0.0. Without the snap the
+    # t-statistic is computed from (1 - rho^2) and a perfect rank order
+    # comes out as 0.9999999999999998, which yields a tiny-but-nonzero p.
+    if rho >= 1.0 - 1e-12:
+        return 1.0, 0.0
+    if rho <= -1.0 + 1e-12:
+        return -1.0, 0.0
+    t = rho * math.sqrt((n - 2) / (1.0 - rho * rho))
+    p = 2.0 * (1.0 - _student_t_cdf(abs(t), n - 2))
+    return rho, min(1.0, max(0.0, p))
 
 
 class CoverageRegimeDetector:
@@ -198,8 +318,10 @@ class CoverageRegimeDetector:
         # Near-zero discovery rate with a long quiet stretch: subcritical even
         # when homogeneity has not yet fired.  discovery_rate was previously
         # accepted by _classify and never read (P2-5).
-        if discovery_rate is not None and discovery_rate <= 0.0 and execs_since_edge >= max(
-            1, self._stall_threshold // 4
+        if (
+            discovery_rate is not None
+            and discovery_rate <= 0.0
+            and execs_since_edge >= max(1, self._stall_threshold // 4)
         ):
             self._regime = CoverageRegime.SUBCRITICAL
             self._reason = (
@@ -228,16 +350,30 @@ class CoverageRegimeDetector:
             self._continuum_history = self._continuum_history[-self._regime_history_size :]
 
     def continuum_correlation(self) -> dict:
-        """Mean Reynolds ratio per regime label over the recorded window.
+        """Spearman correlation between regime rank and Reynolds number.
 
-        Handover §6 step 2: the continuum lift is only worth promoting if Re
-        separates the labels the discrete detector already produces.
+        The recorded window is a set of (regime, Re) pairs -- regime ordinal,
+        Re continuous and possibly non-linear in it.  Pearson on either raw
+        or rank-transformed values would be the wrong coefficient; Spearman
+        asks exactly the question the continuum lift is gated on: does Re
+        separate the discrete labels the detector already produces?
+
+        Returns ``rho`` and a two-sided p-value alongside the bucket means,
+        which are kept (under ``bucket_means``) so callers that only read the
+        per-regime Reynolds figure keep working.
         """
+        if not self._continuum_history:
+            return {"rho": 0.0, "p_value": 1.0, "bucket_means": {}}
+
+        regimes = [_REGIME_RANK[r] for r, _ in self._continuum_history]
+        re_values = [re_value for _, re_value in self._continuum_history]
+        rho, p_value = _spearman_rank_correlation(regimes, re_values)
+
         buckets: dict[CoverageRegime, list[float]] = {}
         for regime, re_value in self._continuum_history:
             buckets.setdefault(regime, []).append(re_value)
-
-        return {k: sum(v) / len(v) for k, v in buckets.items()}
+        bucket_means = {k: sum(v) / len(v) for k, v in buckets.items()}
+        return {"rho": rho, "p_value": p_value, "bucket_means": bucket_means}
 
     @property
     def continuum(self):

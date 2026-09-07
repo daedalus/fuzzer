@@ -57,6 +57,22 @@ def test_wasserstein_weight_separates_loop_heavy_seeds():
     assert all(0.5 <= w <= 2.0 for w in weights.values())
 
 
+def test_ks_distance_separates_loop_heavy_seeds():
+    """KS is the Linf norm of the same CDF difference Wasserstein measures in L1.
+
+    Wasserstein integrates the whole hit-count axis and can miss one localized
+    spike; KS is the single largest CDF gap, so a seed with one edge hit 500
+    times against a flat corpus is maximal in KS even when its L1 distance is
+    only moderate. That is the case this metric family exists to catch, so KS
+    must separate loud from quiet seeds here too.
+    """
+    et, keys = _xor_corpus()
+    loud = [et.ks_vs_aggregate(et.seed_hit_counts[f"s{i}"]) for i in range(30) if i % 5 == 0]
+    quiet = [et.ks_vs_aggregate(et.seed_hit_counts[f"s{i}"]) for i in range(30) if i % 5]
+    assert sum(loud) / len(loud) > 1.5 * (sum(quiet) / len(quiet))
+    assert all(0.0 <= d <= 1.0 for d in loud + quiet)
+
+
 def test_coverage_proximity_is_not_constant():
     """Measured over this corpus the id-space version returned exactly 1.0 for
     every seed, making ``w *= 0.5 + cov`` a uniform 1.5x."""

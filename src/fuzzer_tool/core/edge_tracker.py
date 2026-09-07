@@ -1504,6 +1504,22 @@ class EdgeTracker:
                     js += q * math.log(q / m)
         return 0.5 * js
 
+    def _aggregate_norms(self, hc: dict[int, int]) -> tuple[float, float]:
+        """L1 (Wasserstein) and Linf (KS) of the seed's hit-count profile vs the corpus.
+
+        Shared by the two aggregate-distance entry points.  ``_cdf_walk`` also
+        returns the L2 (CRPS) norm on the same pass; it is not surfaced here
+        because nothing consumes it and keeping the return pair narrow keeps
+        the call site honest about what is being measured.
+        """
+        if not hc:
+            return 0.0, 0.0
+        corpus = self._corpus_hitcount_profile()
+        if not corpus:
+            return 0.0, 0.0
+        wasserstein, ks, _crps = self._cdf_walk(self._hitcount_profile(hc), corpus)
+        return wasserstein, ks
+
     def _wasserstein_vs_aggregate(self, hc: dict[int, int]) -> float:
         """Wasserstein-1 between a seed's hit-count profile and the corpus's.
 
@@ -1515,13 +1531,22 @@ class EdgeTracker:
         The distance is computed on the log2 hit-count axis; the edge index
         carries no metric (see _hitcount_profile).
         """
-        if not hc:
-            return 0.0
-        corpus = self._corpus_hitcount_profile()
-        if not corpus:
-            return 0.0
-        wasserstein, _ks, _crps = self._cdf_walk(self._hitcount_profile(hc), corpus)
-        return wasserstein
+        return self._aggregate_norms(hc)[0]
+
+    def ks_vs_aggregate(self, hc: dict[int, int]) -> float:
+        """Kolmogorov-Smirnov distance between a seed's hit-count profile and the corpus.
+
+        The single largest absolute CDF gap -- the Linf norm of the same
+        CDF-difference quantity Wasserstein measures in L1.  Where
+        Wasserstein integrates the whole axis and is comparatively blind to
+        one localized spike, KS flags a seed with one sharply anomalous
+        hit-count bucket even if the rest of its profile matches the corpus
+        closely.  That is the "three edges hit 500 times" case this metric
+        family exists to catch, and it is why KS is surfaced alongside
+        Wasserstein rather than left discarded (it was already computed on
+        every call by ``_cdf_walk``).
+        """
+        return self._aggregate_norms(hc)[1]
 
     def compute_hitcount_diversity_weight(self, seed_key: str) -> float:
         """Compute weight based on JS divergence of hit-count distribution.
@@ -1738,7 +1763,6 @@ class EdgeTracker:
 
         recent = sum(1 for e in seed_edges if first_seen.get(e, 0) >= cutoff)
         return recent / len(seed_edges)
-
 
     def discovery_frontier_edges(self) -> set[int] | None:
         """Edges first seen in the most recent quarter of the coverage clock.

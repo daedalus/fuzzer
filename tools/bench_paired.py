@@ -47,6 +47,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from itertools import product
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -276,6 +277,65 @@ def _mcnemar_exact(b: int, c: int) -> float:
     return min(1.0, 2 * tail)
 
 
+def _wilcoxon_signed_rank(deltas: list[float]) -> tuple[float, float]:
+    """Two-sided Wilcoxon signed-rank test on paired deltas.
+
+    McNemar binarises the same deltas (sign only) for the binary outcome; this
+    uses the magnitude rank instead, giving more power at the same cell count
+    because it is the right test for a paired continuous measurement. Zeros
+    carry no sign information and are dropped before ranking.
+
+    Returns ``(statistic, p_value)`` where *statistic* is the smaller of the
+    two rank sums (W- by convention). Exact permutation distribution for
+    n <= 20, normal approximation with continuity correction above.
+    """
+    ranked = sorted((abs(d), i) for i, d in enumerate(deltas) if d != 0.0)
+    if not ranked:
+        return 0.0, 1.0
+
+    # Average ranks for tied absolute values so the null is exact under H0.
+    ranks = [0.0] * len(ranked)
+    i = 0
+    while i < len(ranked):
+        j = i
+        while j + 1 < len(ranked) and ranked[j + 1][0] == ranked[i][0]:
+            j += 1
+        avg = (i + 1 + j + 1) / 2.0
+        for k in range(i, j + 1):
+            ranks[k] = avg
+        i = j + 1
+
+    signs = [1.0 if deltas[idx] > 0 else -1.0 for _, idx in ranked]
+    w_pos = sum(r for r, s in zip(ranks, signs, strict=False) if s > 0)
+    w_neg = sum(r for r, s in zip(ranks, signs, strict=False) if s < 0)
+    stat = min(w_pos, w_neg)
+    total = sum(ranks)
+
+    n = len(ranked)
+    if n <= 20:
+        # Enumerate all 2^n sign assignments; W+ under the null is the sum of
+        # a random subset of the ranks, so every assignment is equally likely.
+        count_le = count_ge = 0
+        for signs in product((-1, 1), repeat=n):
+            w = sum(r for r, s in zip(ranks, signs, strict=False) if s > 0)
+            if w <= stat + 1e-12:
+                count_le += 1
+            if w >= total - stat - 1e-12:
+                count_ge += 1
+        p = min(1.0, 2.0 * min(count_le, count_ge) / (2**n))
+        return stat, p
+
+    # Normal approximation with continuity correction.
+    mean = n * (n + 1) / 4.0
+    var = n * (n + 1) * (2 * n + 1) / 24.0
+    z = (abs(w_pos - mean) - 0.5) / math.sqrt(var)
+    if z < 0:
+        return stat, 1.0
+    # Standard normal tail via the error function.
+    p = math.erfc(z / math.sqrt(2.0))
+    return stat, min(1.0, p)
+
+
 def _fisher_exact(a: int, b: int, c: int, d: int) -> float:
     """Two-sided Fisher exact p-value for the 2x2 table [[a, b], [c, d]].
 
@@ -337,11 +397,18 @@ def compare(base: list[dict], test: list[dict], metric: str = "edges") -> dict:
 
     wins = losses = ties = 0
     deltas = []
-    dropped = 0
+    dropped_base = dropped_test = 0
     for k in shared:
         rb, rt = b_by[k], t_by[k]
+        # A cell is only scorable when BOTH arms attached coverage. Which arm
+        # failed is the MCAR/MNAR diagnostic: if the drop rate differs between
+        # base and test, the reported win rate is optimistic for whichever arm
+        # drops less, because McNemar/Wilcoxon are computed on the survivors.
+        if not rb["coverage_attached"]:
+            dropped_base += 1
+        if not rt["coverage_attached"]:
+            dropped_test += 1
         if not (rb["coverage_attached"] and rt["coverage_attached"]):
-            dropped += 1
             continue
         d = rt[metric] - rb[metric]
         deltas.append(d)
@@ -353,6 +420,7 @@ def compare(base: list[dict], test: list[dict], metric: str = "edges") -> dict:
             ties += 1
 
     n = wins + losses + ties
+    wilcoxon_stat, wilcoxon_p = _wilcoxon_signed_rank(deltas)
     spreads = [b_by[k]["spread"] for k in shared] + [t_by[k]["spread"] for k in shared]
     reps = [b_by[k]["reps"] for k in shared] + [t_by[k]["reps"] for k in shared]
     return {
@@ -362,12 +430,16 @@ def compare(base: list[dict], test: list[dict], metric: str = "edges") -> dict:
         # read against: an effect smaller than the noise it sits in is not a
         # result, however the p-value comes out.
         "median_spread": statistics.median(spreads) if spreads else 0,
-        "dropped_no_coverage": dropped,
+        "dropped_no_coverage": dropped_base + dropped_test,
+        "dropped_base": dropped_base,
+        "dropped_test": dropped_test,
         "wins": wins,
         "losses": losses,
         "ties": ties,
         "mcnemar_p": _mcnemar_exact(wins, losses),
         "fisher_p": _fisher_exact(wins, ties + losses, losses, ties + wins),
+        "wilcoxon_stat": wilcoxon_stat,
+        "wilcoxon_p": wilcoxon_p,
         "median_delta": statistics.median(deltas) if deltas else 0,
         "iqr": (
             (
@@ -409,7 +481,14 @@ def cmd_analyse(args: argparse.Namespace) -> int:
             f"{r['median_delta']:>+7.1f} {r['median_spread']:>6.1f}"
         )
         if r["dropped_no_coverage"]:
-            print(f"{'':<20} dropped {r['dropped_no_coverage']} cells: coverage did not attach")
+            db, dt = r["dropped_base"], r["dropped_test"]
+            if db == dt:
+                print(f"{'':<20} dropped {r['dropped_no_coverage']} cells: coverage did not attach")
+            else:
+                print(
+                    f"{'':<20} dropped base {db} / test {dt}: coverage did not attach "
+                    f"(MCAR check -- unequal drop rates bias the surviving-cell win rate)"
+                )
 
     if args.by_target:
         # A pooled row is not enough to read an arm whose effect is expected on
@@ -421,7 +500,7 @@ def cmd_analyse(args: argparse.Namespace) -> int:
             print(f"\nper-target: {arm} vs {args.baseline}")
             sub = (
                 f"{'target':<20} {'cells':>5} {'rep':>3} {'W':>4} {'L':>4} {'T':>4} "
-                f"{'McNemar':>9} {'med Δ':>7} {'noise':>6}"
+                f"{'McNemar':>9} {'Wilcox':>8} {'med Δ':>7} {'noise':>6}"
             )
             print(sub)
             print("-" * len(sub))
@@ -435,7 +514,8 @@ def cmd_analyse(args: argparse.Namespace) -> int:
                 print(
                     f"{Path(tgt).name:<20} {r['cells']:>5} {r['reps']:>3} {r['wins']:>4} "
                     f"{r['losses']:>4} {r['ties']:>4} {r['mcnemar_p']:>9.3g} "
-                    f"{r['median_delta']:>+7.1f} {r['median_spread']:>6.1f}"
+                    f"{r['wilcoxon_p']:>8.3g} {r['median_delta']:>+7.1f} "
+                    f"{r['median_spread']:>6.1f}"
                 )
 
     # Compute and output risk matrix if requested

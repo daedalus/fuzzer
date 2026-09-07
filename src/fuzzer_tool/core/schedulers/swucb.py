@@ -41,6 +41,7 @@ import collections
 import math
 
 from fuzzer_tool.core.rand_pool import RandPool
+from fuzzer_tool.core.schedulers._kl_ucb import kl_upper_bound
 
 MIN_LOG_ARG = 1.0 + 1e-9
 
@@ -82,6 +83,7 @@ class SWUCBScheduler:
         window: int = 4000,
         xi: float = 0.15,
         b: float = 1.0,
+        kl_ucb: bool = False,
         rng: RandPool | None = None,
     ):
         if window <= 0:
@@ -92,6 +94,13 @@ class SWUCBScheduler:
         self.window = window
         self.xi = xi
         self.b = b
+        # Same KL-UCB tightening as DUCBScheduler. Off by default for the same
+        # reason: the convergence floors in test_scheduler_convergence.py were
+        # pinned against the Gaussian form, and KL-UCB is a strict tightening
+        # that would move every scheduler off its measured floor. Enable
+        # per-target once tools/measure_klucb_signal.py has shown it buys tail
+        # share without starving the best arm on that target's distribution.
+        self.kl_ucb = kl_ucb
 
         # Hard Rule 16: see ducb.py. Window eviction makes arms look unpulled
         # again, so this draw happens throughout the campaign, not just at
@@ -148,12 +157,25 @@ class SWUCBScheduler:
         best_score = -math.inf
         for op in ops:
             n = self._counts[op]
-            score = self._sums.get(op, 0.0) / n + width_scale / math.sqrt(n)
+            mean = self._sums.get(op, 0.0) / n
+            score = mean + self._width(mean, n, log_n, width_scale)
             if score > best_score:
                 best_score = score
                 best_op = op
 
         return best_op
+
+    def _width(self, mean: float, n: int, log_n: float, width_scale: float) -> float:
+        """Confidence width added to one arm's index.
+
+        The Gaussian form is the paper's ``B*sqrt(xi*log(min(t,tau))/N_t(i))``;
+        *width_scale* carries the ``b*sqrt(xi*log_n)`` prefix, so the width is
+        that divided by sqrt(n). The KL form is the Bernoulli upper bound at
+        budget ``xi*log_n/n`` minus the empirical mean.
+        """
+        if self.kl_ucb:
+            return kl_upper_bound(mean, self.xi * log_n / n) - mean
+        return width_scale / math.sqrt(n)
 
     # -- update -----------------------------------------------------------
 
