@@ -207,6 +207,7 @@ class CoverageRegimeDetector:
         homogeneity_result: dict | None,
         execs_since_edge: int,
         exec_count: int,
+        f0_plateau: bool | None = None,
     ) -> CoverageRegime:
         """Update regime classification from current observations.
 
@@ -220,6 +221,13 @@ class CoverageRegimeDetector:
                 or None when the detector is not configured.
             execs_since_edge: Executions since the last new edge was found.
             exec_count: Total executions so far (history axis only).
+            f0_plateau: Optional streaming F0 cardinality plateau flag from
+                the edge tracker (see EdgeTracker.f0_plateau).  When True the
+                distinct-edge estimate has stopped growing, which is a
+                subcritical signal that does not depend on the stall window:
+                the cardinality itself has saturated.  None (the default)
+                leaves classification unchanged, so callers without an F0
+                estimator are unaffected.
 
         Returns:
             The current :class:`CoverageRegime` after classification.
@@ -231,6 +239,7 @@ class CoverageRegimeDetector:
         self._last_discovery_rate = discovery_rate
         self._last_allan_delta = allan_delta
         self._last_exec_count = exec_count
+        self._last_f0_plateau = f0_plateau
 
         self._regime_history.append((exec_count, self._regime))
         if len(self._regime_history) > self._regime_history_size:
@@ -243,6 +252,7 @@ class CoverageRegimeDetector:
             discovery_rate=discovery_rate,
             homogeneity_result=homogeneity_result,
             execs_since_edge=execs_since_edge,
+            f0_plateau=f0_plateau,
         )
 
         self._record_continuum()
@@ -256,6 +266,7 @@ class CoverageRegimeDetector:
         discovery_rate: float,
         homogeneity_result: dict | None,
         execs_since_edge: int,
+        f0_plateau: bool | None = None,
     ) -> None:
         """Recompute _regime and _reason from current signals.
 
@@ -328,6 +339,19 @@ class CoverageRegimeDetector:
                 f"discovery rate collapsed ({discovery_rate:.4g}) after "
                 f"{execs_since_edge} execs without new edge — subcritical"
             )
+            self._actionable = self._last_regime != CoverageRegime.SUBCRITICAL
+            return
+
+        # F0 cardinality plateau: the streaming distinct-edge estimate has
+        # stopped growing.  This is a different and stronger subcritical
+        # signal than a small discovery delta -- it says the cardinality
+        # itself has saturated, not merely that the last few executions found
+        # nothing -- and it does not depend on the stall window at all.  It
+        # is opt-in: None (no F0 estimator wired) leaves classification
+        # unchanged.
+        if f0_plateau:
+            self._regime = CoverageRegime.SUBCRITICAL
+            self._reason = "cardinality plateau (F0 estimate saturated) — subcritical"
             self._actionable = self._last_regime != CoverageRegime.SUBCRITICAL
             return
 

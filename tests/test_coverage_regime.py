@@ -59,6 +59,48 @@ class TestCoverageRegimeDetector:
         assert regime is CoverageRegime.SUBCRITICAL
         assert "biased exploration" in d.reason
 
+    def test_f0_plateau_triggers_subcritical_without_stall(self):
+        """A saturated cardinality estimate is subcritical even when the
+        stall window has not been reached -- the plateau is a signal that
+        does not depend on execs_since_edge."""
+        d = self._detector(stall_threshold=10_000)
+        regime = d.observe(
+            discovery_rate=2.5,
+            allan_delta=0,
+            homogeneity_result=None,
+            execs_since_edge=5,
+            exec_count=500,
+            f0_plateau=True,
+        )
+        assert regime is CoverageRegime.SUBCRITICAL
+        assert "cardinality plateau" in d.reason
+        assert d.actionable
+
+    def test_f0_plateau_none_is_inert(self):
+        """The default (no F0 estimator wired) must not change classification."""
+        d = self._detector(stall_threshold=10_000)
+        regime = d.observe(
+            discovery_rate=2.5,
+            allan_delta=0,
+            homogeneity_result=None,
+            execs_since_edge=5,
+            exec_count=500,
+            f0_plateau=None,
+        )
+        assert regime is CoverageRegime.SUPERCRITICAL
+
+    def test_f0_plateau_false_is_inert(self):
+        d = self._detector(stall_threshold=10_000)
+        regime = d.observe(
+            discovery_rate=2.5,
+            allan_delta=0,
+            homogeneity_result=None,
+            execs_since_edge=5,
+            exec_count=500,
+            f0_plateau=False,
+        )
+        assert regime is CoverageRegime.SUPERCRITICAL
+
     def test_csd_firing_triggers_critical(self):
         csd = CriticalSlowingDown()
         # Force the CSD detector into a state where it fires by feeding

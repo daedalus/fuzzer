@@ -20,10 +20,8 @@ from __future__ import annotations
 
 import hashlib
 import random
-from typing import Any, List, Optional, Union
 
-
-Key = Union[str, bytes]
+Key = str | bytes
 
 
 class CuckooFilter:
@@ -52,6 +50,10 @@ class CuckooFilter:
             raise ValueError("capacity must be >= 1")
         if fingerprint_size < 1 or fingerprint_size > 64:
             raise ValueError("fingerprint_size must be in 1..64")
+        if bucket_size < 1:
+            raise ValueError("bucket_size must be >= 1")
+        if max_kicks < 0:
+            raise ValueError("max_kicks must be >= 0")
 
         self.capacity = capacity
         self.bucket_size = bucket_size
@@ -62,8 +64,14 @@ class CuckooFilter:
         raw = max(1, capacity // bucket_size)
         self.size = self._next_power_of_two(raw)
         self._mask = self.size - 1
-        self.buckets: List[List[int]] = [[] for _ in range(self.size)]
+        self.buckets: list[list[int]] = [[] for _ in range(self.size)]
         self.count = 0
+        # Distinct-insertion counter, mirroring BloomFilter.n_added.  It is
+        # the quantity the generational reset gate reads (see update_bytes),
+        # and it differs from `count` only in that it is not decremented by
+        # remove() -- a removed item still counts towards the "this filter
+        # has absorbed capacity keys" threshold, same as the bloom.
+        self.n_added = 0
         self._fp_mask = (1 << fingerprint_size) - 1
 
     @staticmethod
@@ -117,9 +125,11 @@ class CuckooFilter:
 
         if self._insert_fingerprint(i1, fingerprint):
             self.count += 1
+            self.n_added += 1
             return True
         if self._insert_fingerprint(i2, fingerprint):
             self.count += 1
+            self.n_added += 1
             return True
 
         # Cuckoo kicking
@@ -130,6 +140,7 @@ class CuckooFilter:
                 # Should not happen, but be safe
                 bucket.append(fingerprint)
                 self.count += 1
+                self.n_added += 1
                 return True
 
             victim_pos = random.randrange(len(bucket))
@@ -141,6 +152,7 @@ class CuckooFilter:
 
             if self._insert_fingerprint(current_index, fingerprint):
                 self.count += 1
+                self.n_added += 1
                 return True
 
         return False
@@ -181,9 +193,32 @@ class CuckooFilter:
         self.add(item)
         return False
 
+    def update_bytes(self, key: bytes, reset_on_full: bool = False) -> bool:
+        """Check-then-add for a raw ``bytes`` key.  Returns ``True`` if seen.
+
+        Hot-path variant of :meth:`update` that takes the digest over the
+        raw buffer rather than round-tripping through ``str``/``utf-8``,
+        matching :meth:`fuzzer_tool.core.bloom.BloomFilter.update_bytes`.
+
+        Args:
+            key: Raw bytes to test and insert.
+            reset_on_full: When ``n_added`` has reached ``capacity``, wipe
+                the filter before inserting.  Keeps the realised
+                false-positive rate bounded for unbounded streams at the
+                cost of forgetting older keys -- a generational filter in
+                one array, exactly like the bloom's ``reset_on_full``.
+        """
+        if reset_on_full and self.n_added >= self.capacity:
+            self.clear()
+        if self.contains(key):
+            return True
+        self.add(key)
+        return False
+
     def clear(self) -> None:
         self.buckets = [[] for _ in range(self.size)]
         self.count = 0
+        self.n_added = 0
 
     def __contains__(self, item: Key) -> bool:
         return self.contains(item)

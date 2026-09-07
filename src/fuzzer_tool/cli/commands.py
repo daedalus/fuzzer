@@ -704,6 +704,7 @@ def cmd_fuzz(args):
         quiet_stats=False,
         no_save_state=getattr(args, "no_save_state", False),
         dedup_execs=not getattr(args, "no_dedup_execs", False),
+        exec_dedup_backend=getattr(args, "exec_dedup_backend", "bloom"),
         perf_novelty=not getattr(args, "no_perf_novelty", False),
         reject_code=getattr(args, "reject_code", None),
         op_span_reverse=getattr(args, "op_span_reverse", False),
@@ -2659,6 +2660,18 @@ def main() -> int:
         "--no-dedup-execs",
         action="store_true",
         help="Do not filter already-executed mutants through the exec bloom filter",
+    )
+    fuzz_parser.add_argument(
+        "--exec-dedup-backend",
+        choices=["bloom", "cuckoo"],
+        default="bloom",
+        help=(
+            "Which structure backs the exec-dedup gate. 'bloom' (default) is "
+            "the historic BloomFilter with generational reset; 'cuckoo' swaps "
+            "in a CuckooFilter, which supports deletions and a lower realised "
+            "false-positive rate per bit. Both expose the same update_bytes "
+            "contract, so the choice is opt-in and the default is unchanged."
+        ),
     )
     fuzz_parser.add_argument(
         "--reject-code",

@@ -8,6 +8,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+
+- **Ported `CuckooFilter`, `F0Estimator` (CVM), and `Feistel` from AIscripts** in
+  `src/fuzzer_tool/core/{cuckoo,cvm,feistel}.py`
+  (handover `docs/handover/handover_daedalus_aiscripts_port.md`). Three
+  statistical primitives cleaned and dropped into the core layer:
+
+  - **`CuckooFilter`** (`core/cuckoo.py`) — a classic cuckoo hash filter with
+    `add`/`contains`/`query`/`remove`/`update`/`clear`/`load_factor`, plus a
+    `update_bytes(key, reset_on_full=False)` hot path mirroring
+    `BloomFilter.update_bytes` so it can stand in for the bloom as an
+    exec-dedup backend.  Supports deletions, which the bloom does not.
+  - **`F0Estimator`** (`core/cvm.py`) — a streaming distinct-elements
+    estimator (arXiv:2301.10191) with `update()`/`estimate()`/`clear()`/
+    `size`, an (eps, delta) guarantee, and a `None` (perp) return when the
+    down-sample cannot recover.  Feeds the edge-ID stream in
+    `EdgeTracker.record_edges()` when `enable_f0=True`.
+  - **`feistel_scramble`** (`core/feistel.py`) — a keyed bijective block
+    transform, registered as a regularity-band mutation operator.
+
+  `tests/test_cuckoo.py`: 23 tests covering add/query/remove/update/clear,
+  load factor, parameter validation, cuckoo kicking, alt-index consistency,
+  `n_added`, and the `update_bytes` generational reset.
+  `tests/test_cvm.py`: 17 tests covering construction validation, the
+  update/estimate contract, `clear`, down-sampling (including the perp
+  return), and an (eps, delta) property test over 200 seeded runs.
+
+- **`--exec-dedup-backend {bloom,cuckoo}`** in `src/fuzzer_tool/cli/commands.py`
+  and `exec_dedup_backend` on `Fuzzer` (`services/fuzzer.py`).  The exec-dedup
+  gate (`_dedup_mutate`) now picks its structure at construction time rather
+  than hard-coding `BloomFilter`; the default is unchanged (`"bloom"`), so
+  every existing campaign is byte-for-byte identical.  The Cuckoo backend is
+  opt-in and exposes the same `update_bytes(key, reset_on_full=True)` contract
+  the method already drives.  `tests/test_bloom_exec_dedup.py` gains
+  `TestCuckooDedupBackend` (6 tests) driving the same `_StubFuzzer` against
+  both structures.
+
+- **Streaming F0 cardinality signal in `EdgeTracker`** (`core/edge_tracker.py`).
+  Opt-in via `enable_f0=True`; when on, `record_edges()` feeds the edge-ID
+  stream into an `F0Estimator` and three new methods are exposed:
+  `estimate_distinct_edges_f0()`, `f0_calibration()` (estimate vs exact
+  count, for tuning eps/delta on a real corpus), and `f0_plateau()` — a
+  saturation flag that is a distinct subcritical signal from the stall
+  window.  The exact count (`get_cumulative_edge_count()`) is always
+  authoritative; the F0 estimate is a memory-bounded approximate sibling.
+  `tests/test_edge_tracker.py` gains `TestF0Cardinality` (6 tests).
+
+- **F0 plateau threaded into `CoverageRegime._classify`**
+  (`core/coverage_regime.py`).  `observe()` accepts an optional
+  `f0_plateau` flag; when True and no earlier branch fired, the regime is
+  `SUBCRITICAL` with reason `"cardinality plateau (F0 estimate saturated)"`.
+  The branch sits after the discovery-rate collapse check and does not
+  depend on the stall window.  `None` (no estimator wired) is inert, so
+  callers without an F0 tracker are unaffected.  `services/fuzzer.py` feeds
+  `self._edge_tracker.f0_plateau()` into `observe()`; `tests/test_coverage_regime.py`
+  gains 3 plateau tests.
+
+- **F0-derived weight fed into `BayesianSeedQuality.record_outcome`**
+  (`services/fuzzer.py`).  The `weight` parameter is the documented
+  injection point for discovery rarity; when the F0 estimator is wired the
+  weight becomes `observed / f0`, bounded in (0, 1] — near 1 when the
+  estimate is saturated (each remaining discovery is rare), near 0 when
+  lots is undiscovered (discoveries are common).  It never inflates a
+  posterior beyond the default; it only ever re-weights.  `tests/test_seed_quality.py`
+  gains `TestF0DerivedWeight` (3 tests).
+
+### Fixed
 - **Minimax estimator and algorithm for fuzzer enhancement**
   (`src/fuzzer_tool/core/schedulers/mcts.py`,
   `src/fuzzer_tool/core/schedulers/monte_carlo.py`,

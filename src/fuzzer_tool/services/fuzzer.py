@@ -832,6 +832,13 @@ class Fuzzer:
         quiet_stats=False,
         no_save_state=False,
         dedup_execs=True,
+        # Exec-dedup backend.  "bloom" is the historic default (a
+        # BloomFilter with generational reset); "cuckoo" swaps in a
+        # CuckooFilter, which supports deletions and has a lower realised
+        # FP rate per bit.  Both expose the same update_bytes(key,
+        # reset_on_full) contract that _dedup_mutate drives, so the
+        # branch lives in one place: here, at construction.
+        exec_dedup_backend="bloom",
         fluctuation=False,
         fluctuation_beta=1.0,
         fluctuation_window=1000,
@@ -1332,8 +1339,18 @@ class Fuzzer:
         # exec, so re-rolling the mutation on a hit is close to free.
         # Generational: wiped once `capacity` inputs are absorbed, which keeps
         # the realised FP rate at 1e-3 over an unbounded exec stream.
-        self._exec_bloom = BloomFilter(capacity=EXEC_BLOOM_CAPACITY, error_rate=1e-3)
         self._dedup_execs = dedup_execs
+        self._exec_dedup_backend = exec_dedup_backend
+        if exec_dedup_backend == "cuckoo":
+            from fuzzer_tool.core.cuckoo import CuckooFilter
+
+            self._exec_bloom = CuckooFilter(capacity=EXEC_BLOOM_CAPACITY)
+        elif exec_dedup_backend == "bloom":
+            self._exec_bloom = BloomFilter(capacity=EXEC_BLOOM_CAPACITY, error_rate=1e-3)
+        else:
+            raise ValueError(
+                f"unknown exec_dedup_backend {exec_dedup_backend!r}; expected 'bloom' or 'cuckoo'"
+            )
         self._dedup_hits = 0
         self._dedup_gaveup = 0
         # Performance novelty (per-edge max hit count). Separate from the
@@ -4051,10 +4068,32 @@ class Fuzzer:
 
         # Bayesian seed quality feedback: record whether this parent seed
         # produced new coverage (Thompson sampling posterior update).
+        #
+        # The outcome weight is proportional to discovery rarity, per
+        # seed_quality.record_outcome's contract.  When the F0 estimator is
+        # wired (edge_tracker.enable_f0) it supplies that rarity signal
+        # directly: in an unsaturated corpus a new edge is common, so the
+        # weight is small; as the estimate saturates toward the exact count
+        # each remaining discovery is rare, so the weight rises toward 1.
+        # The weight is bounded above by 1.0, so the F0 signal never inflates
+        # a posterior beyond the default -- it only ever re-weights.
         if self._seed_quality:
             parent_key = self._seed_key(data)
             self._seed_quality.init_seed(parent_key)
-            self._seed_quality.record_outcome(parent_key, discovered=bool(has_new_coverage))
+            weight = 1.0
+            f0_est = self._edge_tracker.estimate_distinct_edges_f0()
+            if f0_est is not None:
+                observed = self._edge_tracker.get_cumulative_edge_count()
+                # Fraction of the estimated total that has been discovered.
+                # Near 1 = saturated -> each remaining discovery is rare ->
+                # weight rises toward 1.  Near 0 = lots undiscovered ->
+                # discoveries are common -> weight shrinks.  Bounded in
+                # (0, 1], so the F0 signal never inflates a posterior
+                # beyond the default -- it only ever re-weights.
+                weight = observed / max(1.0, f0_est)
+            self._seed_quality.record_outcome(
+                parent_key, discovered=bool(has_new_coverage), weight=weight
+            )
 
         # Mark cmplog tokens/pairs present during a coverage gain as more
         # valuable — they survive eviction longer.
@@ -6405,12 +6444,18 @@ class Fuzzer:
                     # _print_stats_dr_str (stats.py:583); we only read its
                     # state here.  The homogeneity detector is fed above.
                     execs_since_edge = self.exec_count - self._last_new_edge_exec
+                    # F0 plateau: the streaming distinct-edge estimate has
+                    # stopped growing.  Opt-in via the edge tracker's
+                    # enable_f0 flag; None when the estimator is not wired,
+                    # so observe() leaves classification unchanged.
+                    f0_plateau = self._edge_tracker.f0_plateau()
                     self._regime.observe(
                         discovery_rate=self._stats.discovery_rate(),
                         allan_delta=delta,
                         homogeneity_result=homogeneity_result,
                         execs_since_edge=execs_since_edge,
                         exec_count=self.exec_count,
+                        f0_plateau=f0_plateau,
                     )
                     # Regime-driven strategy adjustment
                     if self._regime.actionable:

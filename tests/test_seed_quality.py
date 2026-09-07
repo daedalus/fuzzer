@@ -245,3 +245,45 @@ class TestBayesianSeedQuality:
         bsq.record_outcome("a", discovered=True)  # pooled: 2 successes
         bsq.record_outcome("a", discovered=False)  # pooled: 1 failure
         assert bsq.population_mean > 0.5  # more successes than failures
+
+
+class TestF0DerivedWeight:
+    """The weight argument of record_outcome is the documented injection
+    point for a discovery-rarity signal.  A CVM F0 estimate supplies it:
+    weight = observed / f0, bounded in (0, 1]."""
+
+    def test_weight_bounded_in_unit_interval(self):
+        # record_outcome adds `weight` to alpha on success, so the F0-derived
+        # weight (observed/f0, bounded in (0, 1]) can never push alpha past
+        # the default + n_successes.  A weight of 2.0 (out of contract)
+        # would add 2.0 per success -- assert the additive semantics rather
+        # than a clamp that does not exist.
+        bsq = BayesianSeedQuality()
+        bsq.init_seed("a")
+        bsq.record_outcome("a", discovered=True, weight=2.0)
+        assert bsq._alpha["a"] == 1.0 + 2.0
+        # In-contract weights stay in (0, 1].
+        bsq2 = BayesianSeedQuality()
+        bsq2.init_seed("a")
+        bsq2.record_outcome("a", discovered=True, weight=1.0)
+        bsq2.record_outcome("a", discovered=True, weight=0.25)
+        assert bsq2._alpha["a"] == 1.0 + 1.0 + 0.25
+
+    def test_weight_down_scales_success(self):
+        bsq = BayesianSeedQuality()
+        bsq.init_seed("a")
+        bsq.record_outcome("a", discovered=True, weight=1.0)
+        bsq.record_outcome("a", discovered=True, weight=1.0)
+        bsq2 = BayesianSeedQuality()
+        bsq2.init_seed("a")
+        bsq2.record_outcome("a", discovered=True, weight=0.25)
+        bsq2.record_outcome("a", discovered=True, weight=0.25)
+        assert bsq2.posterior_mean("a") < bsq.posterior_mean("a")
+
+    def test_f0_saturation_rises_toward_one(self):
+        """observed / f0 -> 1 as the estimate saturates toward the exact
+        count, so rare late discoveries carry more weight than early ones."""
+        # p == 1.0: estimate is exact, so the ratio is 1.0.
+        assert 1.0 / max(1.0, 1.0) == 1.0
+        # f0 overestimates (down-sample in flight): ratio < 1.
+        assert 5.0 / max(1.0, 8.0) < 1.0

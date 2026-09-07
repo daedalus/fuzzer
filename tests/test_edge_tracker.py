@@ -770,3 +770,113 @@ class TestEdgeOwnerCountInvariants:
         live_edges = {e for edges in et.seed_edges.values() for e in edges}
         assert set(et._edge_owner_count) == live_edges
         assert et.edge_rarity_stats()["total"] == len(live_edges)
+
+
+class TestF0Cardinality:
+    """Streaming F0 (CVM) distinct-elements estimator, opt-in via enable_f0."""
+
+    def test_disabled_by_default(self):
+        et = EdgeTracker(map_size=64)
+        assert et.estimate_distinct_edges_f0() is None
+        assert et.f0_calibration() is None
+        assert et.f0_plateau() is None
+
+    def test_estimate_matches_exact_when_p_is_one(self):
+        et = EdgeTracker(
+            map_size=64,
+            enable_f0=True,
+            f0_eps=0.5,
+            f0_delta=0.25,
+            f0_plateau_window=4,
+        )
+        for i in range(20):
+            et.record_edges("seed", {i})
+        assert et.estimate_distinct_edges_f0() == 20.0
+        assert et.get_cumulative_edge_count() == 20
+
+    def test_calibration_reports_relative_error(self):
+        et = EdgeTracker(
+            map_size=64,
+            enable_f0=True,
+            f0_eps=0.5,
+            f0_delta=0.25,
+            f0_plateau_window=4,
+        )
+        for i in range(20):
+            et.record_edges("seed", {i})
+        cal = et.f0_calibration()
+        assert cal["estimate"] == 20.0
+        assert cal["exact"] == 20
+        assert cal["abs_error"] == 0.0
+        assert cal["rel_error"] == 0.0
+        assert cal["p"] == 1.0
+
+    def test_plateau_returns_none_until_enough_history(self):
+        et = EdgeTracker(
+            map_size=64,
+            enable_f0=True,
+            f0_eps=0.5,
+            f0_delta=0.25,
+            f0_plateau_window=8,
+        )
+        for i in range(5):
+            et.record_edges("seed", {i})
+        assert et.f0_plateau() is None  # only 5 samples < window of 8
+
+    def test_plateau_detects_saturation(self):
+        # Distinct edges grow for the first window, then the same ids are
+        # re-fed so the F0 estimate stops growing -> plateau fires.
+        et = EdgeTracker(
+            map_size=64,
+            enable_f0=True,
+            f0_eps=0.5,
+            f0_delta=0.25,
+            f0_plateau_window=4,
+            f0_plateau_threshold=0.02,
+        )
+        for i in range(8):
+            et.record_edges("seed", {i})
+        assert et.f0_plateau() is False  # still growing
+        for _ in range(8):
+            et.record_edges("seed", {i % 8 for i in range(8)})  # saturated
+        assert et.f0_plateau() is True
+
+    def test_f0_does_not_disturb_exact_count(self):
+        """Enabling F0 must not change the exact cardinality path."""
+        plain = EdgeTracker(map_size=64)
+        with_f0 = EdgeTracker(map_size=64, enable_f0=True)
+        for i in range(15):
+            plain.record_edges("seed", {i})
+            with_f0.record_edges("seed", {i})
+        assert plain.get_cumulative_edge_count() == with_f0.get_cumulative_edge_count()
+
+    def test_corpus_profile_does_not_insert_for_unowned_edges(self):
+        """_aggregate_totals is keyed by hit volume and carries edges that no
+        seed owns; the profile pass reads them once per rebuild."""
+        et = EdgeTracker(map_size=64)
+        et.record_edges("seedA", {10})
+        et._aggregate_totals = {10: 4, 77777: 9}
+        et._corpus_profile_cache = None
+        et._corpus_hitcount_profile()
+        assert 77777 not in et._edge_owner_count
+
+    def test_prune_does_not_leave_counts_for_evicted_seeds(self):
+        et = EdgeTracker(map_size=64)
+        et.max_tracked_seeds = 5
+        for i in range(12):
+            et.record_edges(f"seed{i}", {1, 2, 100 + i})
+        assert len(et.seed_edges) == 5
+        actual = sum(1 for edges in et.seed_edges.values() if 1 in edges)
+        assert et._edge_owner_count[1] == actual
+
+    def test_prune_drops_counts_for_edges_no_survivor_covers(self):
+        """An evicted seed's private edges leave no owner behind, so they must
+        leave the map too -- otherwise edge_rarity_stats() reports a total edge
+        count that keeps climbing past what the corpus actually covers."""
+        et = EdgeTracker(map_size=64)
+        et.max_tracked_seeds = 4
+        for i in range(20):
+            et.record_edges(f"seed{i}", {500 + i})
+        live_edges = {e for edges in et.seed_edges.values() for e in edges}
+        assert set(et._edge_owner_count) == live_edges
+        assert et.edge_rarity_stats()["total"] == len(live_edges)

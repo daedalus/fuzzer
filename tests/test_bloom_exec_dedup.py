@@ -2,6 +2,8 @@
 
 import random
 
+import pytest
+
 from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.services.fuzzer import EXEC_DEDUP_RETRIES, Fuzzer
 
@@ -124,12 +126,26 @@ class TestUpdateBytes:
 
 
 class _StubFuzzer:
-    """Minimal stand-in exposing only what _dedup_mutate touches."""
+    """Minimal stand-in exposing only what _dedup_mutate touches.
 
-    def __init__(self, mutants, dedup_execs=True, capacity=1000):
+    The exec-dedup structure is pluggable: pass ``backend="bloom"`` (the
+    historic default) or ``backend="cuckoo"`` to drive the same
+    ``_dedup_mutate`` method against either.  Both expose the
+    ``update_bytes(key, reset_on_full)`` contract the method needs.
+    """
+
+    def __init__(self, mutants, dedup_execs=True, capacity=1000, backend="bloom"):
         self._mutants = list(mutants)
         self._dedup_execs = dedup_execs
-        self._exec_bloom = BloomFilter(capacity=capacity, error_rate=1e-3)
+        self._backend = backend
+        if backend == "bloom":
+            self._exec_bloom = BloomFilter(capacity=capacity, error_rate=1e-3)
+        elif backend == "cuckoo":
+            from fuzzer_tool.core.cuckoo import CuckooFilter
+
+            self._exec_bloom = CuckooFilter(capacity=capacity)
+        else:
+            raise ValueError(f"unknown backend {backend!r}")
         self._dedup_hits = 0
         self._dedup_gaveup = 0
         self.mutate_calls = 0
@@ -181,3 +197,44 @@ class TestDedupMutate:
         f = _StubFuzzer([b"a", b"b"])
         f._dedup_mutate(b"seed")
         assert f._exec_bloom.update_bytes(b"a") is True
+
+
+class TestCuckooDedupBackend:
+    """The same _dedup_mutate contract, driven against a CuckooFilter."""
+
+    def test_novel_mutant_passes_through_with_one_mutate(self):
+        f = _StubFuzzer([b"novel"], backend="cuckoo")
+        assert f._dedup_mutate(b"seed") == b"novel"
+        assert f.mutate_calls == 1
+        assert f._dedup_hits == 0
+
+    def test_repeat_is_rerolled(self):
+        f = _StubFuzzer([b"dup", b"dup", b"fresh"], backend="cuckoo")
+        f._exec_bloom.update_bytes(b"dup")
+        assert f._dedup_mutate(b"seed") == b"fresh"
+        assert f._dedup_hits == 2
+        assert f._dedup_gaveup == 0
+
+    def test_gives_up_after_retry_budget(self):
+        f = _StubFuzzer([b"dup"] * 8, backend="cuckoo")
+        f._exec_bloom.update_bytes(b"dup")
+        assert f._dedup_mutate(b"seed") == b"dup"
+        assert f._dedup_hits == EXEC_DEDUP_RETRIES
+        assert f._dedup_gaveup == 1
+        assert f.mutate_calls == EXEC_DEDUP_RETRIES + 1
+
+    def test_disabled_skips_the_filter(self):
+        f = _StubFuzzer([b"dup"], dedup_execs=False, backend="cuckoo")
+        f._exec_bloom.update_bytes(b"dup")
+        assert f._dedup_mutate(b"seed") == b"dup"
+        assert f.mutate_calls == 1
+        assert f._dedup_hits == 0
+
+    def test_filter_is_populated_as_a_side_effect(self):
+        f = _StubFuzzer([b"a", b"b"], backend="cuckoo")
+        f._dedup_mutate(b"seed")
+        assert f._exec_bloom.update_bytes(b"a") is True
+
+    def test_backend_unknown_raises(self):
+        with pytest.raises(ValueError):
+            _StubFuzzer([b"x"], backend="bogus")
