@@ -602,6 +602,7 @@ def cmd_fuzz(args):
         replicator=getattr(args, "replicator", False),
         exp3=getattr(args, "exp3", False),
         invasion=getattr(args, "invasion", False),
+        round_robin=getattr(args, "round_robin", False),
         garch=getattr(args, "garch", False),
         continuum=getattr(args, "continuum", False),
         exp3_gamma=getattr(args, "exp3_gamma", 0.1),
@@ -1623,6 +1624,7 @@ _HAIL_MARY_FLAGS = (
     "sensitivity",
     "region_profile",
     "ga",
+    "round_robin",
     "qea",
     "mcts",
     "alphabeta",
@@ -1951,6 +1953,11 @@ def main() -> int:
         "viscosity, graph Reynolds ratio). Records against the regime label and, with "
         "--mc-bandit, ranks invasion operators by predicted flux instead of raw resistance. "
         "Nothing is time-integrated.",
+    )
+    fuzz_parser.add_argument(
+        "--round-robin",
+        action="store_true",
+        help="Enable round-robin operator scheduling (deterministic cycling through operators)",
     )
     fuzz_parser.add_argument(
         "--exp3-gamma",

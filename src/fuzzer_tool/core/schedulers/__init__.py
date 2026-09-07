@@ -12,6 +12,7 @@ from fuzzer_tool.core.schedulers.mcts import AlphaBetaMCTSSeedScheduler, MCTSSee
 from fuzzer_tool.core.schedulers.monte_carlo import MonteCarloScheduler
 from fuzzer_tool.core.schedulers.mopt import MOptScheduler
 from fuzzer_tool.core.schedulers.replicator import ReplicatorScheduler
+from fuzzer_tool.core.schedulers.round_robin import RoundRobinScheduler
 from fuzzer_tool.core.schedulers.swucb import SWUCBScheduler
 
 __all__ = [
@@ -29,4 +30,5 @@ __all__ = [
     "CUCBScheduler",
     "DUCBScheduler",
     "SWUCBScheduler",
+    "RoundRobinScheduler",
 ]

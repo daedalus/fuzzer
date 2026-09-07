@@ -53,6 +53,7 @@ from fuzzer_tool.core.schedulers import (
     MonteCarloScheduler,
     MOptScheduler,
     ReplicatorScheduler,
+    RoundRobinScheduler,
     SWUCBScheduler,
 )
 from fuzzer_tool.core.schedules import (
@@ -96,6 +97,7 @@ _OPERATOR_STRATEGY_NAMES = (
     "swucb",
     "cucb",
     "invasion",
+    "round_robin",
 )
 _SEED_STRATEGY_NAMES = (
     "ga",
@@ -751,6 +753,7 @@ class Fuzzer:
         secretary_exploration=None,
         elo=False,
         invasion=False,
+        round_robin=False,
         garch=False,
         continuum=False,
         exp3=False,
@@ -1771,6 +1774,15 @@ class Fuzzer:
             self._cucb = CUCBScheduler(gamma=cucb_gamma, rng=self._rand_pool)
             log.info("CUCB enabled (gamma=%.5f)", cucb_gamma)
 
+        # Round-robin: deterministic baseline. --seed should reproduce
+        # exactly, so no RandPool is used here -- the cycling order is
+        # the registration order, fully driven by operator init.
+        self._use_round_robin = round_robin
+        self._round_robin = None
+        if round_robin:
+            self._round_robin = RoundRobinScheduler()
+            log.info("Round-robin operator scheduling enabled")
+
         self._use_contextual = contextual
         self._contextual = None
         if contextual:
@@ -2251,6 +2263,8 @@ class Fuzzer:
             _register_arms(self._cucb)
         if self._contextual:
             _register_arms(self._contextual)
+        if self._round_robin:
+            _register_arms(self._round_robin)
         if self._elo:
             _register_arms(self._elo)
         del _format_priors  # free priors dict after arm registration
