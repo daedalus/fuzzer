@@ -3,6 +3,7 @@
 import argparse
 import builtins
 import datetime
+import glob
 import os
 import shlex
 import shutil
@@ -333,11 +334,23 @@ def cmd_fuzz(args):
 
     dictionary = []
     if args.dict:
-        if not os.path.isfile(args.dict):
-            print(f"[-] Dictionary not found: {args.dict}")
-            sys.exit(1)
-        dictionary = load_dictionary(args.dict)
-        print(f"[*] Loaded {len(dictionary)} tokens from {args.dict}")
+        for dict_path in args.dict:
+            # Expand globs
+            paths = glob.glob(dict_path)
+            if not paths:
+                print(f"[-] Dictionary not found: {dict_path}")
+                sys.exit(1)
+            for p in paths:
+                if not os.path.isfile(p):
+                    print(f"[-] Dictionary not found: {p}")
+                    sys.exit(1)
+                tokens = load_dictionary(p)
+                dictionary.extend(tokens)
+                print(f"[*] Loaded {len(tokens)} tokens from {p}")
+        # Deduplicate while preserving order
+        seen = set()
+        dictionary = [d for d in dictionary if not (d in seen or seen.add(d))]
+        print(f"[*] Loaded {len(dictionary)} total tokens from {len(args.dict)} dictionary file(s)")
 
     # QEA and GA now run simultaneously when both are set — they share the
     # corpus and edge tracker but maintain independent populations, competing
@@ -1764,7 +1777,7 @@ def main() -> int:
         "default: the suggestion is derived from one target's observed timings "
         "and is not a safe global",
     )
-    fuzz_parser.add_argument("-D", "--dict", help="Dictionary file")
+    fuzz_parser.add_argument("-D", "--dict", nargs="+", help="Dictionary file(s)")
     fuzz_parser.add_argument(
         "-F", "--file-mode", action="store_true", help="Write input to temp file instead of stdin"
     )

@@ -367,7 +367,7 @@ class TestCmdFuzzConstruction:
         args = self._make_default_args(tmp_path)
         dict_file = tmp_path / "dict.txt"
         dict_file.write_text("token1\ntoken2\n")
-        args.dict = str(dict_file)
+        args.dict = [str(dict_file)]
         mock_fuzzer = MagicMock()
         monkeypatch.setattr("fuzzer_tool.cli.commands.Fuzzer", lambda **kwargs: mock_fuzzer)
         monkeypatch.setattr(
@@ -377,10 +377,46 @@ class TestCmdFuzzConstruction:
         result = cmd_fuzz(args)
         assert result == 0
 
+    def test_fuzz_with_multiple_dicts(self, monkeypatch, tmp_path):
+        """cmd_fuzz with --dict should support multiple dictionary files."""
+        args = self._make_default_args(tmp_path)
+        dict1 = tmp_path / "dict1.txt"
+        dict2 = tmp_path / "dict2.txt"
+        dict1.write_text("token1\ntoken2\n")
+        dict2.write_text("token3\ntoken4\n")
+        args.dict = [str(dict1), str(dict2)]
+        mock_fuzzer = MagicMock()
+        monkeypatch.setattr("fuzzer_tool.cli.commands.Fuzzer", lambda **kwargs: mock_fuzzer)
+        monkeypatch.setattr(
+            "fuzzer_tool.core.mutations.load_dictionary",
+            lambda *a, **k: ["token1", "token2", "token3", "token4"],
+        )
+
+        result = cmd_fuzz(args)
+        assert result == 0
+
+    def test_fuzz_with_dict_glob(self, monkeypatch, tmp_path):
+        """cmd_fuzz with --dict should expand glob patterns."""
+        args = self._make_default_args(tmp_path)
+        dict1 = tmp_path / "a.dict"
+        dict2 = tmp_path / "b.dict"
+        dict1.write_text("token1\n")
+        dict2.write_text("token2\n")
+        args.dict = [str(tmp_path / "*.dict")]
+        mock_fuzzer = MagicMock()
+        monkeypatch.setattr("fuzzer_tool.cli.commands.Fuzzer", lambda **kwargs: mock_fuzzer)
+        monkeypatch.setattr(
+            "fuzzer_tool.core.mutations.load_dictionary",
+            lambda *a, **k: ["token1", "token2"],
+        )
+
+        result = cmd_fuzz(args)
+        assert result == 0
+
     def test_fuzz_with_dict_missing(self, monkeypatch, tmp_path):
         """cmd_fuzz with missing dict should exit."""
         args = self._make_default_args(tmp_path)
-        args.dict = "/nonexistent/dict.txt"
+        args.dict = ["/nonexistent/dict.txt"]
 
         with pytest.raises(SystemExit):
             cmd_fuzz(args)
