@@ -6175,14 +6175,14 @@ class Fuzzer:
                     f"[*] Alpha-beta MCTS seed scheduling: exploration={self._alphabeta.exploration:.3f}"
                 )
 
-            self._print_enabled_features()
-            print("[*] Starting fuzzing...\n")
-
             # Print WFC mode status
             if self._wfc_enabled:
                 print("[*] WFC: enabled — structural chunk reordering and pixel generation active")
 
             self._calibrate_seed_baselines()
+
+            self._print_enabled_features()
+            print("[*] Starting fuzzing...\n")
 
             while not _shutdown:
                 if iterations and i >= iterations:
