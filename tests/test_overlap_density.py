@@ -1,9 +1,12 @@
 """Tests for FMM-clustered pairwise overlap density (overlap_density.py)."""
 
+import math
 import random
 
 from fuzzer_tool.core.edge_tracker import EdgeTracker, MinHashLSH
 from fuzzer_tool.core.overlap_density import (
+    _UnionFind,
+    _build_clusters,
     compute_corpus_overlap_density,
 )
 
@@ -476,3 +479,143 @@ class TestFMMCohesionGate:
                 f"Phase 2 should not change result for {sk}: "
                 f"phase1={fmm_phase1_only[sk]:.4f}, two_phase={fmm_two_phase[sk]:.4f}"
             )
+
+
+# ── Union-find internals ──────────────────────────────────────────────
+
+
+class _ChainMinHash:
+    """Minimal stand-in for MinHashLSH exposing only what _build_clusters
+    needs (.signatures for presence checks, .find_similar for neighbors).
+
+    Wires up a chain 0~1~2~...~n-1: each seed is "similar" only to its
+    immediate neighbors. This is the adversarial shape for a union-find
+    that attaches roots unconditionally (it degrades to an O(n)-deep
+    tree), so it's a good regression fixture for the union-by-size fix.
+    """
+
+    def __init__(self, n: int) -> None:
+        self.signatures = {f"s{i}": True for i in range(n)}
+
+    def find_similar(self, seed_key: str, min_jaccard: float = 0.3) -> set[str]:
+        idx = int(seed_key[1:])
+        n = len(self.signatures)
+        neighbors = set()
+        if idx > 0:
+            neighbors.add(f"s{idx - 1}")
+        if idx < n - 1:
+            neighbors.add(f"s{idx + 1}")
+        return neighbors
+
+
+class TestBuildClustersChainRegression:
+    """Chain-shaped similarity graph should still merge into one cluster
+    (correctness), independent of the union-find's internal tree shape.
+    """
+
+    def test_chain_similarity_forms_single_cluster(self):
+        n = 50
+        seed_keys = [f"s{i}" for i in range(n)]
+        minhash = _ChainMinHash(n)
+
+        clusters, seed_to_cluster = _build_clusters(seed_keys, minhash, min_jaccard=0.3)
+
+        assert len(clusters) == 1
+        assert sorted(clusters[0]) == list(range(n))
+        assert len(seed_to_cluster) == n
+        assert len(set(seed_to_cluster.values())) == 1
+
+    def test_disconnected_chains_form_separate_clusters(self):
+        """Two disjoint chains (no cross-similarity) must stay as two clusters."""
+        n_each = 20
+        seed_keys = [f"a{i}" for i in range(n_each)] + [f"b{i}" for i in range(n_each)]
+
+        class _TwoChainMinHash:
+            def __init__(self) -> None:
+                self.signatures = {k: True for k in seed_keys}
+
+            def find_similar(self, seed_key: str, min_jaccard: float = 0.3) -> set[str]:
+                prefix, idx = seed_key[0], int(seed_key[1:])
+                neighbors = set()
+                if idx > 0:
+                    neighbors.add(f"{prefix}{idx - 1}")
+                if idx < n_each - 1:
+                    neighbors.add(f"{prefix}{idx + 1}")
+                return neighbors
+
+        clusters, seed_to_cluster = _build_clusters(seed_keys, _TwoChainMinHash(), min_jaccard=0.3)
+
+        assert len(clusters) == 2
+        assert len({seed_to_cluster[i] for i in range(n_each)}) == 1
+        assert len({seed_to_cluster[i] for i in range(n_each, 2 * n_each)}) == 1
+        assert seed_to_cluster[0] != seed_to_cluster[n_each]
+
+
+class TestUnionFind:
+    """Direct tests of the _UnionFind helper (union-by-size + path halving)."""
+
+    def test_size_invariant_after_random_unions(self):
+        n = 200
+        uf = _UnionFind(n)
+        rng = random.Random(7)
+        for _ in range(500):
+            a, b = rng.randrange(n), rng.randrange(n)
+            uf.union(a, b)
+
+        counts: dict[int, int] = {}
+        for i in range(n):
+            root = uf.find(i)
+            counts[root] = counts.get(root, 0) + 1
+
+        for root, count in counts.items():
+            assert uf.size[root] == count, (
+                f"size[{root}]={uf.size[root]} but {count} members map to it"
+            )
+
+    def test_union_by_size_bounds_chain_depth(self):
+        """A chain 0-1-2-...-(n-1) unioned in order must not degrade to
+        O(n) depth the way unconditional root-attachment does (see the
+        companion test below)."""
+        n = 512
+        uf = _UnionFind(n)
+        for i in range(n - 1):
+            uf.union(i, i + 1)
+
+        max_depth = max(uf.depth(i) for i in range(n))
+        bound = 2 * math.log2(n) + 2
+        assert max_depth <= bound, (
+            f"max depth {max_depth} exceeds O(log n) bound {bound:.1f} for n={n}"
+        )
+
+    def test_naive_unconditional_attach_is_the_adversarial_case(self):
+        """Sanity check that the chain scenario above is actually adversarial
+        for the *old* union() (unconditional `parent[ra] = rb`, no size
+        check) — confirms the depth bound in the previous test is a
+        meaningful regression guard rather than a tautology."""
+        n = 512
+        parent = list(range(n))
+
+        def find(x: int) -> int:
+            while parent[x] != x:
+                x = parent[x]
+            return x
+
+        def naive_union(a: int, b: int) -> None:
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[ra] = rb  # old behavior: unconditional attach
+
+        for i in range(n - 1):
+            naive_union(i, i + 1)
+
+        def depth(x: int) -> int:
+            d = 0
+            while parent[x] != x:
+                x = parent[x]
+                d += 1
+            return d
+
+        max_depth = max(depth(i) for i in range(n))
+        assert max_depth >= n - 2, (
+            f"expected the naive union to degrade to ~O(n) depth, got {max_depth}"
+        )
