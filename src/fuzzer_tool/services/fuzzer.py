@@ -999,21 +999,19 @@ class Fuzzer:
                     register_formatfuzzer_mutators,
                     report_availability,
                 )
+
                 templates = None
                 if ff_templates:
                     templates = [t.strip() for t in ff_templates.split(",") if t.strip()]
-                muts = register_formatfuzzer_mutators(
-                    templates=templates, bin_dir=ff_bin_dir
-                )
+                muts = register_formatfuzzer_mutators(templates=templates, bin_dir=ff_bin_dir)
                 # Registration is silent by design (it runs on every import).
                 # Say something here, or --formatfuzzer with nothing installed
                 # yields operators that never fire and no message at all.
                 report_availability(muts)
             except Exception as exc:  # noqa: BLE001
                 import logging
-                logging.getLogger(__name__).warning(
-                    "FormatFuzzer registration failed: %s", exc
-                )
+
+                logging.getLogger(__name__).warning("FormatFuzzer registration failed: %s", exc)
         # TSP neighbourhood operators (Phase 1 / C2) — gated availability.
         self.op_span_reverse = op_span_reverse
         self.op_span_relocate = op_span_relocate
@@ -3516,9 +3514,7 @@ class Fuzzer:
                 prev = self._cmp_max_asserted.get(key, 0)
                 if count <= prev:
                     continue
-                if prev == 0 or count >= max(
-                    prev + 1, int(prev * MAX_COUNT_GROWTH_FACTOR)
-                ):
+                if prev == 0 or count >= max(prev + 1, int(prev * MAX_COUNT_GROWTH_FACTOR)):
                     reported = True
                 self._cmp_max_asserted[key] = count
         if reported:
@@ -4560,17 +4556,19 @@ class Fuzzer:
             # signature (_prune_crash_data, the reproducibility report) was
             # working against a different key space (finding #22).
             sig = self._last_crash_signature
-            if self.replay_n > 0 and sig:
-                if sig not in self._crash_replays:
-                    self._crash_replays[sig] = []
+            if self.replay_n > 0 and sig and sig not in self._crash_replays:
+                self._crash_replays[sig] = []
             # Schedule sanitizer replay: re-run crash on ASAN/UBSAN targets
-            if (self.asan_target or self.ubsan_target) and sig:
-                if sig not in self._crash_sanitizer_replays:
-                    self._crash_sanitizer_replays[sig] = {
-                        "data": mutated,
-                        "asan": None,
-                        "ubsan": None,
-                    }
+            if (
+                (self.asan_target or self.ubsan_target)
+                and sig
+                and sig not in self._crash_sanitizer_replays
+            ):
+                self._crash_sanitizer_replays[sig] = {
+                    "data": mutated,
+                    "asan": None,
+                    "ubsan": None,
+                }
             self._record_fluctuation_observation("crash", self._get_current_edge_set())
             return True
 
@@ -5794,10 +5792,20 @@ class Fuzzer:
             groups["Seed selection"].append("bayesian")
         if getattr(self, "_use_boltzmann", False):
             groups["Seed selection"].append("boltzmann")
+        if getattr(self, "_use_ecofuzz", False):
+            groups["Seed selection"].append("ecofuzz")
         if self.markov_generate:
             groups["Seed selection"].append("markov-gen")
+        if getattr(self, "_use_mcts", False):
+            groups["Seed selection"].append("mcts")
+        if getattr(self, "_use_alphabeta", False):
+            groups["Seed selection"].append("alphabeta")
         if getattr(self, "_distance", None) is not None:
             groups["Seed selection"].append("aflgo")
+        if getattr(self, "_katz_channel", None) is not None:
+            groups["Seed selection"].append("katz")
+        if getattr(self, "_tang", None) is not None:
+            groups["Seed selection"].append("tang")
 
         if self.markov_trained:
             groups["Mutation"].append("markov")
@@ -5996,8 +6004,6 @@ class Fuzzer:
             f"[*] Epoch start: {epoch_start:.3f} ({datetime.datetime.fromtimestamp(epoch_start).isoformat()})"
         )
         print(f"[*] Boot ticks start: {boot_start:.3f}")
-        self._print_enabled_features()
-        print("[*] Starting fuzzing...\n")
 
         # Quick raw-target-speed measurement before the main loop
         try:
@@ -6168,6 +6174,9 @@ class Fuzzer:
                 print(
                     f"[*] Alpha-beta MCTS seed scheduling: exploration={self._alphabeta.exploration:.3f}"
                 )
+
+            self._print_enabled_features()
+            print("[*] Starting fuzzing...\n")
 
             # Print WFC mode status
             if self._wfc_enabled:
