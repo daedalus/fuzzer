@@ -110,6 +110,7 @@ _SEED_STRATEGY_NAMES = (
     "katz",
     "mcts",
     "alphabeta",
+    "tang",
 )
 
 
@@ -678,6 +679,9 @@ class Fuzzer:
         targets=None,
         anneal_budget=0,
         boltzmann=False,
+        tang=False,
+        tang_rank=10,
+        tang_refit_interval=2000,
         ecofuzz=False,
         metropolis=False,
         mc_elite_frac=0.1,
@@ -1699,6 +1703,13 @@ class Fuzzer:
         self._seed_strategy_pool: list[str] = []
         self._seed_strategies_used: set[str] = set()
         self._use_boltzmann = boltzmann
+        self._tang = None
+        if tang:
+            from fuzzer_tool.core.schedulers.tang import TangRecommendationScheduler
+
+            self._tang = TangRecommendationScheduler(
+                self._rand_pool, rank=tang_rank, refit_interval=tang_refit_interval
+            )
         self._use_ecofuzz = ecofuzz
         self._metropolis = metropolis
         self._op_dispatch = self._build_dispatch()
@@ -4117,6 +4128,13 @@ class Fuzzer:
             if bits is not None and bits.any():
                 katz_key = self._seed_key(data) if has_new_coverage else None
                 self._katz_channel.record(bits, seed_key=katz_key)
+
+        # Tang low-rank refit. Gated on the interval inside maybe_refit, and
+        # placed here rather than on the pick path because the SVD plus the
+        # matrix build is 100ms+ at ffmpeg scale -- three orders of magnitude
+        # past the per-pick budget the seed-picker profiling established.
+        if self._tang is not None:
+            self._tang.maybe_refit(self._edge_tracker, self.exec_count)
 
         # Record edges for per-seed tracking
         if has_new_coverage:

@@ -256,6 +256,8 @@ class SeedPicker:
             available.append("aflgo")
         if getattr(f, "_katz_channel", None) is not None and f.corpus:
             available.append("katz")
+        if getattr(f, "_tang", None) is not None and f._tang.fitted and f.corpus:
+            available.append("tang")
 
         # Expose the eligible pool so the fuzzer records Elo matches only against
         # strategies that were actually selectable (no phantom opponents) and so
@@ -293,6 +295,7 @@ class SeedPicker:
             "mcts": lambda: self._pick_mcts_seed(),
             "alphabeta": lambda: self._pick_alphabeta_seed(),
             "katz": lambda: self._pick_katz_seed(),
+            "tang": lambda: self._pick_tang_seed(),
         }
         handler = strategy_map.get(strategy)
         return handler() if handler else None
@@ -358,6 +361,36 @@ class SeedPicker:
         for seed in f.corpus:
             e = ch.seed_energy(f._seed_key(seed))
             weights.append(max(e, 1e-4) ** 2)
+        total = sum(weights)
+        if total <= 0:
+            return None
+        r = random.random() * total
+        acc = 0.0
+        for seed, w in zip(f.corpus, weights, strict=False):
+            acc += w
+            if acc >= r:
+                return seed
+        return f.corpus[-1]
+
+    def _pick_tang_seed(self) -> bytes | None:
+        """Low-rank recommendation picker -- the Elo-arbitrated 'tang' arm.
+
+        P(seed) is proportional to the seed's Tang energy, the l2 mass its
+        low-rank row places on the edges it already covers (Algorithm 3 read
+        as a scorer rather than a recommender). Seeds admitted since the last
+        refit score 0 and fall back to the floor, so a growing corpus explores
+        rather than starving.
+
+        Returns None when nothing is scored, which hands the pick back to the
+        Elo caller instead of degrading to uniform silently -- the failure
+        mode that made the Hierarchical arm's runtime-registered operators
+        invisible for 60,000 pulls.
+        """
+        f = self.f
+        tang = getattr(f, "_tang", None)
+        if tang is None or not tang.fitted or not f.corpus:
+            return None
+        weights = [max(tang.seed_energy(f._seed_key(s)), 1e-4) for s in f.corpus]
         total = sum(weights)
         if total <= 0:
             return None

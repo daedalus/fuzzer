@@ -521,6 +521,9 @@ def cmd_fuzz(args):
         use_cfg_cache=not getattr(args, "no_cfg_cache", False),
         anneal_budget=getattr(args, "anneal_budget", 0),
         boltzmann=getattr(args, "boltzmann", False),
+        tang=getattr(args, "tang", False),
+        tang_rank=getattr(args, "tang_rank", 10),
+        tang_refit_interval=getattr(args, "tang_refit_interval", 2000),
         ecofuzz=getattr(args, "ecofuzz", False),
         metropolis=getattr(args, "metropolis", False),
         mc_elite_frac=args.mc_elite_frac,
@@ -1617,6 +1620,7 @@ _HAIL_MARY_FLAGS = (
     "qea_correlation",
     "qea_cooling",
     "boltzmann",
+    "tang",
     "ecofuzz",
     "metropolis",
     "auto_timeout",
@@ -2369,6 +2373,27 @@ def main() -> int:
         default=False,
         help="Boltzmann seed selection: P(seed) ∝ exp(-E/T) with E=log(fuzz_count+1). "
         "Requires --anneal-budget > 0.",
+    )
+    fuzz_parser.add_argument(
+        "--tang",
+        action="store_true",
+        default=False,
+        help="Tang quantum-inspired low-rank seed scheduling (arXiv:1807.04271): adds a "
+        "'tang' Elo seed arm scoring seeds by the l2 mass of their rank-k coverage row. "
+        "OFF by default and measured to add nothing over total hit volume -- see "
+        "docs/handover/handover_tang_recommendation_2026-09-07.md before enabling.",
+    )
+    fuzz_parser.add_argument(
+        "--tang-rank",
+        type=int,
+        default=10,
+        help="Rank of the Tang low-rank approximation (default: 10).",
+    )
+    fuzz_parser.add_argument(
+        "--tang-refit-interval",
+        type=int,
+        default=2000,
+        help="Executions between Tang low-rank refits (default: 2000).",
     )
     fuzz_parser.add_argument(
         "--ecofuzz",
