@@ -5545,6 +5545,8 @@ class Fuzzer:
             all_strategies.append("cucb")
         if self._use_invasion and self.mc and self.mc_bandit:
             all_strategies.append("invasion")
+        if self._use_round_robin and self._round_robin:
+            all_strategies.append("round_robin")
         for other in all_strategies:
             if other != self._meta_strategy:
                 self._elo.record_strategy_match(self._meta_strategy, other, score)
@@ -5618,6 +5620,8 @@ class Fuzzer:
             ops.append("cucb")
         if getattr(self, "_use_invasion", False) and self.mc_bandit:
             ops.append("invasion")
+        if getattr(self, "_use_round_robin", False) and self._round_robin:
+            ops.append("round_robin")
         if getattr(self, "_use_shapley", False):
             ops.append("shapley")
         if ops:
