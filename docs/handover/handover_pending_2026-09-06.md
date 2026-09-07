@@ -677,6 +677,15 @@ harness.
 - **E3. Alpha-beta MCTS A/B** against the plain `MCTSSeedScheduler` on
   `targets/png_read` and `targets/ffmpeg_read`.
 - **E4. Fractal Voronoi A/B** — the operator shipped without one.
+- **E6. Tang low-rank seed arm A/B.** `--tang` shipped opt-in on 2026-09-07 with
+  a measured *negative* on predictive validity but **no interventional run**:
+  the score adds nothing over `A.sum(1)` (mean partial Spearman +0.006 over ten
+  campaigns, Wilcoxon p=1.0). Full findings, and the seven methodology gaps that
+  qualify them, in `docs/handover/handover_tang_recommendation_2026-09-07.md`.
+  The higher-value run is item 2 of that document's §10 — re-measure the
+  low-rank structure on ffmpeg, where the assumption plausibly holds — because
+  a negative A/B on png/zlib would not distinguish "the method fails" from
+  "these targets are too small".
 - **E5. GARCH and `--continuum`** — both shipped opt-in and unmeasured. For
   GARCH specifically, the ACF study needs **snapshots dumped to disk, not live
   state**: `record_discovery_snapshot` caps history at 500 and trims to 250, one
