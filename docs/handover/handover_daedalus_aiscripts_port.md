@@ -1,8 +1,8 @@
 # Handover: Portable items from AIscripts → fuzzer-tool
 
-**Date:** 2026-09-07  
-**Source:** https://github.com/daedalus/AIscripts  
-**Target:** https://github.com/daedalus/fuzzer  
+**Date:** 2026-09-07
+**Source:** https://github.com/daedalus/AIscripts
+**Target:** https://github.com/daedalus/fuzzer
 **Author context:** Same author; AIscripts is the experimental playground, fuzzer is the production-grade information-dense binary fuzzer.
 
 ## Summary
@@ -13,7 +13,7 @@ AIscripts contains many experimental algorithms. Only a small subset has a clean
 
 ### 1. Cuckoo Filter (High priority) — `cuckoofilter.py`
 
-**Why:**  
+**Why:**
 Fuzzer uses Bloom for exec-dedup and near-duplicate detection. Cuckoo filters support **deletions**, have lower false-positive rates for the same space in many regimes, and store fingerprints. Useful for:
 - Corpus / path / edge tracking that needs eviction
 - Generational or sliding-window membership
@@ -29,7 +29,7 @@ Fuzzer uses Bloom for exec-dedup and near-duplicate detection. Cuckoo filters su
 
 ### 2. CVM F₀ Estimator (High priority) — `CVM.py`
 
-**Why:**  
+**Why:**
 Streaming approximate distinct-elements (F₀) count with tunable ε/δ. Complements existing Chao2 rarity, Renyi spectrum, rate-distortion, and edge-tracker modules without materializing the full set. Ideal for:
 - Estimating unique edges / paths / comparison sites seen so far
 - Novelty / coverage cardinality signals for seed quality or scheduling
@@ -43,7 +43,7 @@ Streaming approximate distinct-elements (F₀) count with tunable ε/δ. Complem
 
 ### 3. Minimal Feistel Network (Medium) — `minimal_feistel_network.py`
 
-**Why:**  
+**Why:**
 Compact, invertible 64-bit Feistel. Useful as:
 - Building block for new adaptive / regularity operators that need bijective byte permutations
 - Keyed deterministic transforms
@@ -58,7 +58,7 @@ Compact, invertible 64-bit Feistel. Useful as:
 
 ### 4. Cassowary linear constraint solver (Medium) — `cassowary.py`
 
-**Why:**  
+**Why:**
 Classic incremental linear arithmetic solver. Fuzzer already has `field_constraints.py`, `path_constraints.py`, `cond_stmt.py`, frameshift, and cmplog-style solving. Cassowary can strengthen length-field repair, structural constraints, or path-condition handling.
 
 **Port notes:**
@@ -68,7 +68,7 @@ Classic incremental linear arithmetic solver. Fuzzer already has `field_constrai
 
 ### 5. Meta Gradient Descent / MGD (Research / Medium-High) — `MGD.py`
 
-**Why:**  
+**Why:**
 Meta-optimizer that differentiates through a training (or campaign) process to tune meta-parameters. Could sit above the Elo + bandit layer to adapt operator weights, temperatures, elite fractions, etc.
 
 **Port notes:**
