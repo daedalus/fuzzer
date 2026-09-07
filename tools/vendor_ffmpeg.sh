@@ -210,7 +210,7 @@ fetch_source
 
 # Apply patches after fetching source
 apply_patches() {
-    local patch_file="${SCRIPT_DIR}/patches/ffmpeg-vpk-divide-by-zero.patch"
+    local patch_file="${SCRIPT_DIR}/../patches/ffmpeg-vpk-divide-by-zero.patch"
     if [ ! -f "$patch_file" ]; then
         echo "[2/5] No ffmpeg patches found at $patch_file"
         return 0
