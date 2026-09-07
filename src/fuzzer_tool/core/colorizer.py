@@ -30,6 +30,8 @@ Usage:
 import array
 import logging
 
+from fuzzer_tool.core.aho_corasick import scanner_for_pairs
+
 log = logging.getLogger(__name__)
 
 # State constants
@@ -177,19 +179,17 @@ class CmplogColorizer:
         n = len(input_data)
         self.color_info = array.array("b", [UNKNOWN] * n)
 
-        for op_a, op_b in cmplog_pairs:
-            for token in (op_a, op_b):
-                if len(token) < 2:
-                    continue
-                pos = 0
-                while pos <= n - len(token):
-                    idx = input_data.find(token, pos)
-                    if idx == -1:
-                        break
-                    for i in range(idx, idx + len(token)):
-                        if i < n:
-                            self.color_info[i] = COLORABLE
-                    pos = idx + 1
+        # One multi-pattern pass over the pool instead of one find loop per
+        # operand.  Marking is idempotent and position-wise, so the order the
+        # spans come back in does not matter here -- unlike the tag builder,
+        # which needs the pool's own ordering (see weizz_tags).
+        scanner = scanner_for_pairs(cmplog_pairs)
+        spans = scanner.scan(input_data, min_len=2)
+        for token, offsets in spans.items():
+            width = len(token)
+            for idx in offsets:
+                for i in range(idx, min(idx + width, n)):
+                    self.color_info[i] = COLORABLE
 
         return self.color_mask()
 

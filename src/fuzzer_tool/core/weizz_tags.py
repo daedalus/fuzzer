@@ -44,6 +44,8 @@ from dataclasses import dataclass, field
 from enum import IntFlag
 from typing import Callable, Sequence
 
+from fuzzer_tool.core.aho_corasick import scanner_for_pairs
+
 log = logging.getLogger(__name__)
 
 # ── Flags (mirror Weizz TAG_* bits, extended for this tree) ─────────────
@@ -486,21 +488,6 @@ def synthetic_exec_fn(
 # ── Passive path: consume existing cmplog pairs ──────────────────────────
 
 
-def _find_all(haystack: bytes, needle: bytes) -> list[int]:
-    """All start offsets of *needle* in *haystack* (non-overlapping scan)."""
-    if not needle or len(needle) > len(haystack):
-        return []
-    out: list[int] = []
-    start = 0
-    while True:
-        i = haystack.find(needle, start)
-        if i < 0:
-            break
-        out.append(i)
-        start = i + 1
-    return out
-
-
 def _looks_like_length(op: bytes, input_len: int) -> bool:
     """Heuristic: small integer that could be a length/size field."""
     if not op or len(op) > 8:
@@ -630,6 +617,14 @@ def build_tag_map_from_cmplog(
 
     ordered = sorted(pairs, key=_pair_key)
 
+    # Locate every operand in one multi-pattern pass, then consume the results
+    # in ``ordered``.  The claim loop below is order-dependent -- shorter, more
+    # specific operands take bytes first and later ones only fill what is still
+    # untagged -- so the automaton is used to *collect* offsets, never to apply
+    # them.  The application order is unchanged, which is what makes the tag
+    # map identical byte for byte.
+    offsets = scanner_for_pairs(pairs).scan(data, min_len=cfg.min_operand_len)
+
     for op_a, op_b in ordered:
         if not op_a and not op_b:
             continue
@@ -658,7 +653,7 @@ def build_tag_map_from_cmplog(
 
         claimed = False
         for op, _side in candidates:
-            for off in _find_all(data, op):
+            for off in offsets.get(op, ()):
                 end = off + len(op)
                 # only claim still-untagged bytes (shorter operands win)
                 any_free = any(tags[i].cmp_id == 0 for i in range(off, end))

@@ -83,7 +83,7 @@ class WeizzFieldMutator(MutatorBase):
         if not _preconditions_ok(data, context):
             return None
 
-        smap = build_tag_map_from_cmplog(bytes(data), list(context.cmplog_pairs))
+        smap = build_tag_map_from_cmplog(bytes(data), context.cmplog_pairs)
         spans = smap.field_spans()
         if not spans:
             return None
@@ -143,7 +143,7 @@ class WeizzChunkMutator(MutatorBase):
         if not _preconditions_ok(data, context):
             return None
 
-        smap = build_tag_map_from_cmplog(bytes(data), list(context.cmplog_pairs))
+        smap = build_tag_map_from_cmplog(bytes(data), context.cmplog_pairs)
         chunks = smap.chunk_spans(parent=None)
         if not chunks:
             return None
