@@ -371,7 +371,20 @@ def cmd_fuzz(args):
     if args.grammar:
         from fuzzer_tool.core.grammar import load_grammar
 
-        grammar = load_grammar(args.grammar)
+        # Expand glob patterns in grammar path
+        if any(c in args.grammar for c in "*?["):
+            matches = glob.glob(args.grammar)
+            if not matches:
+                print(f"[-] No grammar files found matching pattern: {args.grammar}")
+                sys.exit(1)
+            # Use the first match (consistent with single-value argument behavior)
+            grammar_path = matches[0]
+            if len(matches) > 1:
+                print(f"[*] Multiple grammar files match {args.grammar}, using: {grammar_path}")
+        else:
+            grammar_path = args.grammar
+
+        grammar = load_grammar(grammar_path)
         print(f"[*] Grammar loaded: {len(grammar.rules)} rules")
 
     # Parallel mode
@@ -826,7 +839,19 @@ def cmd_tmin(args):
     if args.grammar:
         from fuzzer_tool.core.grammar import load_grammar
 
-        grammar = load_grammar(args.grammar)
+        # Expand glob patterns in grammar path
+        if any(c in args.grammar for c in "*?["):
+            matches = glob.glob(args.grammar)
+            if not matches:
+                print(f"[-] No grammar files found matching pattern: {args.grammar}")
+                sys.exit(1)
+            grammar_path = matches[0]
+            if len(matches) > 1:
+                print(f"[*] Multiple grammar files match {args.grammar}, using: {grammar_path}")
+        else:
+            grammar_path = args.grammar
+
+        grammar = load_grammar(grammar_path)
         print(f"[*] Grammar loaded: {len(grammar.rules)} rules (tree-level shrinking enabled)")
 
     minimized = tmin(
