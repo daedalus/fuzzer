@@ -168,6 +168,11 @@ class FormatLearner:
             # Too few observations for z-score — fall back to nonzero check
             has_effect = delta != 0 or bool(entry.new_edges) or bool(entry.lost_edges)
 
+        # Delocalised ops set `mutation_offset=None`; they have no single byte
+        # to attribute, so skip field-hypothesis updates rather than crashing.
+        if offset is None:
+            return
+
         existing = None
         for h in self.hypotheses:
             if h.offset <= offset < h.offset + h.width:

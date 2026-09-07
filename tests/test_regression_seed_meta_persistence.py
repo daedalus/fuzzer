@@ -28,9 +28,12 @@ import tempfile
 from array import array
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from fuzzer_tool.core.state_store import StateStore
+from fuzzer_tool.core.weizz_tags import StructureMap
 from fuzzer_tool.services.corpus_manager import CorpusManager, seed_key
+from fuzzer_tool.services.fuzzer import Fuzzer
 from fuzzer_tool.services.operators import OperatorEngine
 
 # Past the old 128-byte cliff by a wide margin: hex of this is 4096 chars,
@@ -200,3 +203,30 @@ class TestLegacyState:
             cm = CorpusManager(loaded)
             cm.init_seed_metadata()
             assert loaded.seed_meta[SMALL_SEED]["fuzz_count"] == 77
+
+
+class TestWeizzTagPathDoesNotDropFuzzCount:
+    def test_new_seed_gets_full_meta_when_tags_are_collected(self):
+        """`_maybe_collect_weizz_tags` must initialise missing seed_meta
+        entries with the same defaults as `save_to_corpus`, not a bare dict."""
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            seed = b"weizz-seed"
+            f = _make_fuzzer(tmp, [seed], {})
+            f.seed_meta = {}
+            f._cmplog = object()
+            f._colorize_seed = lambda data: None
+            f.weizz_tags_max_len = 4096
+            f._weizz_tags_collected = 0
+            f.colorize = False
+
+            smap = StructureMap(tags=[], ntypes=1, input_len=len(seed))
+            with patch(
+                "fuzzer_tool.core.weizz_tags.collect_structure_map",
+                return_value=smap,
+            ):
+                Fuzzer._maybe_collect_weizz_tags(f, seed)
+
+            assert seed in f.seed_meta
+            assert f.seed_meta[seed]["fuzz_count"] == 0
+            CorpusManager(f).save_state()

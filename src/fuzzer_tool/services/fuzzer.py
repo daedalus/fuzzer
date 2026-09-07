@@ -5034,9 +5034,18 @@ class Fuzzer:
             if smap is None or smap.ntypes == 0:
                 return
             if meta is None:
-                meta = {}
+                meta = {
+                    "fuzz_count": 0,
+                    "coverage_edges": 0,
+                    "momentum": 0.0,
+                    "edge_bitmap": bytearray(0),
+                    "redqueen_offsets": [],
+                    "added_at": time.time(),
+                    "record_stride": None,
+                    "seed_passed_det": False,
+                }
                 self.seed_meta[data] = meta
-            attach_tags_to_meta(meta, smap)
+            meta = attach_tags_to_meta(meta, smap)
             self._weizz_tags_collected += 1
         except Exception:  # noqa: BLE001 — never take down the fuzz loop
             log.debug("weizz tag collection failed", exc_info=True)

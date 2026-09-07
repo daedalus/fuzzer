@@ -435,10 +435,26 @@ class TestZScoreHasEffect:
         assert fl._delta_moments.count >= 10
 
 
-class TestRecordLiveness:
-    """Item 4 wiring: LiveBitMaskEstimator convergence as corroborating
-    padding evidence, per handover doc item 4's format_learner.py note."""
+class TestDelocalisedOffset:
+    def test_none_offset_does_not_crash(self):
+        """Delocalised ops set mutation_offset=None; the format learner must
+        skip hypothesis updates without raising."""
+        fl = FormatLearner()
+        fl.record_transition(
+            input_bytes=b"\x00" * 16,
+            mutation_op="byte_shuffle",
+            mutation_offset=None,
+            mutation_width=8,
+            coverage_before=10,
+            coverage_after=12,
+            new_edges={1, 2},
+            lost_edges=set(),
+        )
+        assert len(fl.timeline) == 1
+        assert fl.hypotheses == []
 
+
+class TestRecordLiveness:
     def test_not_confirmed_dead_is_a_noop(self):
         fl = FormatLearner()
         fl.record_liveness(offset=10, width=4, confirmed_dead=False)
