@@ -13,7 +13,6 @@ Round function is SHA-256 based (first 32 bits).
 from __future__ import annotations
 
 import hashlib
-import random
 from collections.abc import Sequence
 
 
@@ -105,26 +104,3 @@ def feistel_unpermute(data: bytes, keys: Sequence[int], rounds: int = 4) -> byte
         i += 8
     out.extend(data[i:])
     return bytes(out)
-
-
-def feistel_scramble(data: bytes, rng=None, rounds: int = 4) -> bytes:
-    """Mutation-operator entry point: keyed, length-preserving byte scramble.
-
-    Draws fresh round keys from *rng* (a ``RandPool`` or stdlib
-    ``random.Random``; falls back to the module-level ``random`` if
-    ``None``) and applies :func:`feistel_permute` to *data*. Unlike havoc
-    byte-flips, the transform is a bijection on each 8-byte block: no byte
-    value is lost, only redistributed, which makes it a structured
-    alternative to random overwrite for targets whose fast path depends on
-    byte-value distribution rather than specific magic bytes.
-
-    Trailing bytes that don't fill a full 8-byte block are left untouched,
-    same as :func:`feistel_permute`. Returns *data* unchanged if it is
-    shorter than one block, since there is nothing to scramble.
-    """
-    if len(data) < 8:
-        return data
-    r = rng if rng is not None else random
-    key_count = r.randint(1, rounds)
-    keys = [r.randint(0, 0xFFFFFFFF) for _ in range(key_count)]
-    return feistel_permute(data, keys, rounds)

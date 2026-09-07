@@ -2,7 +2,7 @@
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/daedalus/fuzzer)
 
-**Information-dense, coverage-guided binary fuzzer**: 147 mutation operators across 9 categories, 14 bandit and optimizer scheduler modules under Elo arbitration, AFL-style forkserver and SHM edge coverage, comparison tracing down to the individual call site, and information-theoretic seed scoring.
+**Information-dense, coverage-guided binary fuzzer**: 148 mutation operators across 9 categories, 14 bandit and optimizer scheduler modules under Elo arbitration, AFL-style forkserver and SHM edge coverage, comparison tracing down to the individual call site, and information-theoretic seed scoring.
 
 > **Honest caveat**: This is probably the most complex fuzzer from an information-theory standpoint, and also the slowest raw-throughput. The tradeoff is speed for edge-discovery novelty. For production fuzzing at scale, AFL family fuzzers remain the best choice.
 
@@ -57,7 +57,7 @@ fuzzer-tool fuzz ./target --resume
 
 ### Mutation Engine
 
-**147 operators in 9 categories.** Every scheduler picks from the same registry, and
+**148 operators in 9 categories.** Every scheduler picks from the same registry, and
 `REGISTRY.register_mutator()` adds operators at runtime without a restart.
 
 | Category | Count | Representative operators |
@@ -69,7 +69,7 @@ fuzzer-tool fuzz ./target --resume
 | `structural` | 20 | `splice_common_prefix`, `crossover`, `elite_fuse`, `tlv_mutate`, `token_shuffle`, `special_strings`, `punctuation_insert`, `versifier_generate` |
 | `radamsa` | 7 | `tree_mutate`, `line_mutate`, `fuse_this`/`fuse_next`/`fuse_old`, `utf8_widen`, `utf8_insert` |
 | `format` | 36 | one `*_chunk_mutate` per container format, plus `format_lock`, `field_repair`, `png_crc_fix`, `recompress_{gzip,zlib}` |
-| `regularity` | 14 | `spectral_peak`, `rank_deficient`, `monotone_fill`, `kmer_saturate`, `popcount_lock`, `birthday_collide`, `gcd_worst_case`, `float_squeeze` |
+| `regularity` | 15 | `spectral_peak`, `rank_deficient`, `monotone_fill`, `kmer_saturate`, `popcount_lock`, `birthday_collide`, `gcd_worst_case`, `float_squeeze`, `feistel_scramble` |
 | `adaptive` | 22 | `havoc`, `redqueen`, `colorization`, `condstmt_solve`, `gradient_descent`, `magic_byte_search`, `crc_learn`, `markov_bytes`, `cem_bytes`, `path_negate`, `skipdet_probe` |
 
 **Regularity operators** are the statistical batteries run backwards: instead of testing a

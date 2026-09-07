@@ -27,7 +27,6 @@ import xxhash
 from fuzzer_tool.core.cond_stmt import CondState, CondStmt
 from fuzzer_tool.core.crc32 import crc32
 from fuzzer_tool.core.live_bit_mask import LiveBitMaskEstimator
-from fuzzer_tool.core.mutator_interface import MutationContext
 from fuzzer_tool.core.mutations import (
     INTERESTING_8,
     INTERESTING_16,
@@ -47,6 +46,7 @@ from fuzzer_tool.core.mutations import (
     splice_common_prefix,
     splice_diff_located,
 )
+from fuzzer_tool.core.mutator_interface import MutationContext
 from fuzzer_tool.core.operator_registry import REGISTRY, format_gate_matches
 from fuzzer_tool.core.skipdet import MAX_DET_MUTATIONS, trace_mini_from_edges
 from fuzzer_tool.services.seed_picker import invasion_select
@@ -886,7 +886,9 @@ class OperatorEngine:
         """
         from fuzzer_tool.core.tree_mutator import lightweight_tree_mutate  # noqa: PLC0415
 
-        result = lightweight_tree_mutate(bytes(buf), max_len=self.ctx.max_len, rng=self.ctx.rand_pool)
+        result = lightweight_tree_mutate(
+            bytes(buf), max_len=self.ctx.max_len, rng=self.ctx.rand_pool
+        )
         if result != bytes(buf):
             buf[:] = result[: len(buf)]
 
@@ -1464,7 +1466,9 @@ class OperatorEngine:
         if buf:
             idx = rng.randint(0, len(buf) - 1)
             ctx = (
-                bytes(buf[max(0, idx - self.ctx.markov.order) : idx]) if self.ctx.markov.order else b""
+                bytes(buf[max(0, idx - self.ctx.markov.order) : idx])
+                if self.ctx.markov.order
+                else b""
             )
             buf[idx] = self.ctx.markov.sample_byte(ctx)
 
@@ -1472,7 +1476,9 @@ class OperatorEngine:
         rng = self.ctx.rand_pool
         if self.ctx.mc and self.ctx.mc.cem_fitted:
             if buf:
-                buf[rng.randint(0, len(buf) - 1)] = self.ctx.mc.cem_byte(rng.randint(0, len(buf) - 1))
+                buf[rng.randint(0, len(buf) - 1)] = self.ctx.mc.cem_byte(
+                    rng.randint(0, len(buf) - 1)
+                )
             else:
                 return bytearray(self.ctx.mc.cem_sample(rng.randint(1, min(32, self.ctx.max_len))))
 
@@ -1578,7 +1584,9 @@ class OperatorEngine:
         from fuzzer_tool.core.mutations import ascii_num_replace
 
         if buf:
-            return bytearray(ascii_num_replace(bytes(buf), rng=self.ctx.rand_pool)[: self.ctx.max_len])
+            return bytearray(
+                ascii_num_replace(bytes(buf), rng=self.ctx.rand_pool)[: self.ctx.max_len]
+            )
 
     def _op_digit_replace(self, buf, _byte_idx, _data):
         """Replace a single ASCII digit with another random digit.
@@ -1614,7 +1622,9 @@ class OperatorEngine:
 
         if buf and len(buf) < self.ctx.max_len:
             return bytearray(
-                byte_insert(bytes(buf), self.ctx.max_len, rng=self.ctx.rand_pool)[: self.ctx.max_len]
+                byte_insert(bytes(buf), self.ctx.max_len, rng=self.ctx.rand_pool)[
+                    : self.ctx.max_len
+                ]
             )
 
     def _op_insert_ascii_num(self, buf, _byte_idx, _data):
@@ -1655,25 +1665,33 @@ class OperatorEngine:
         from fuzzer_tool.core.mutations import bit_transpose
 
         if buf:
-            return bytearray(bit_transpose(bytes(buf), 1, rng=self.ctx.rand_pool)[: self.ctx.max_len])
+            return bytearray(
+                bit_transpose(bytes(buf), 1, rng=self.ctx.rand_pool)[: self.ctx.max_len]
+            )
 
     def _op_bit_transpose_16(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import bit_transpose
 
         if len(buf) >= 2:
-            return bytearray(bit_transpose(bytes(buf), 2, rng=self.ctx.rand_pool)[: self.ctx.max_len])
+            return bytearray(
+                bit_transpose(bytes(buf), 2, rng=self.ctx.rand_pool)[: self.ctx.max_len]
+            )
 
     def _op_bit_transpose_32(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import bit_transpose
 
         if len(buf) >= 4:
-            return bytearray(bit_transpose(bytes(buf), 4, rng=self.ctx.rand_pool)[: self.ctx.max_len])
+            return bytearray(
+                bit_transpose(bytes(buf), 4, rng=self.ctx.rand_pool)[: self.ctx.max_len]
+            )
 
     def _op_bit_transpose_64(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import bit_transpose
 
         if len(buf) >= 8:
-            return bytearray(bit_transpose(bytes(buf), 8, rng=self.ctx.rand_pool)[: self.ctx.max_len])
+            return bytearray(
+                bit_transpose(bytes(buf), 8, rng=self.ctx.rand_pool)[: self.ctx.max_len]
+            )
 
     # These three pick their own word width from what the buffer can hold, so
     # unlike the bit_transpose family they need no per-width length guard --
@@ -1834,7 +1852,7 @@ class OperatorEngine:
                 picked, permuted = result
                 # Snapshot values at the *source* indices, then write.
                 src_vals = {i: buf[i] for i in picked}
-                for pos, src in zip(picked, permuted):
+                for pos, src in zip(picked, permuted, strict=False):
                     buf[pos] = src_vals[src]
                 return
         i, j = _swap_pair(n, rng)
@@ -1900,7 +1918,9 @@ class OperatorEngine:
         if not (buf and self.ctx.cmplog_pairs):
             return
         pair = self.ctx.rand_pool.choice(self.ctx.cmplog_pairs)
-        result = gradient_descent(bytes(buf), pair, max_len=self.ctx.max_len, rng=self.ctx.rand_pool)
+        result = gradient_descent(
+            bytes(buf), pair, max_len=self.ctx.max_len, rng=self.ctx.rand_pool
+        )
         if result and result != bytes(buf):
             return bytearray(result[: self.ctx.max_len])
 
@@ -2480,9 +2500,9 @@ class OperatorEngine:
     def _op_grammar_mutate(self, buf, _byte_idx, _data):
         if self.ctx.grammar:
             return bytearray(
-                self.ctx.grammar.mutate(bytes(buf), max_len=self.ctx.max_len, rng=self.ctx.rand_pool)[
-                    : self.ctx.max_len
-                ]
+                self.ctx.grammar.mutate(
+                    bytes(buf), max_len=self.ctx.max_len, rng=self.ctx.rand_pool
+                )[: self.ctx.max_len]
             )
 
     def _op_grammar_tree_mutate(self, buf, _byte_idx, data):
@@ -3217,6 +3237,15 @@ class OperatorEngine:
 
         return self._regularity(popcount_lock, buf)
 
+    def _op_feistel_scramble(self, buf, _byte_idx, _data):
+        # Not a diehard/dieharder inverse like its neighbours above; lives in
+        # core/feistel.py rather than mutations/structured.py because it's a
+        # keyed bijective transform, not a statistic-tail construction. See
+        # docs/handover/handover_daedalus_aiscripts_port.md.
+        from fuzzer_tool.core.feistel import feistel_scramble
+
+        return self._regularity(feistel_scramble, buf)
+
     def corpus_invariants(self):
         """Cached ``CorpusInvariants`` for the current corpus, or None.
 
@@ -3756,10 +3785,9 @@ class OperatorEngine:
             et = getattr(self.f, "_edge_tracker", None)
             if et is not None and hasattr(et, "discovery_frontier_edges"):
                 frontier = et.discovery_frontier_edges()
-            op = (
-                invasion_select(op_stats, frontier_edges=frontier, flux_map=flux_map)
-                or self.ctx.rand_pool.choice(ops)
-            )
+            op = invasion_select(
+                op_stats, frontier_edges=frontier, flux_map=flux_map
+            ) or self.ctx.rand_pool.choice(ops)
             f._last_mopt_particles.append(None)
         elif f._use_replicator and f._replicator:
             op = f._replicator.select_op(ops)

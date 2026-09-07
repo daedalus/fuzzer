@@ -272,6 +272,7 @@ class TestRegularityOperators:
             "birthday_collide",
             "cycle_lock",
             "degenerate_geometry",
+            "feistel_scramble",
             "float_squeeze",
             "gcd_worst_case",
             "invariant_break",
