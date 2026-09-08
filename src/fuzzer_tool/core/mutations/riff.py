@@ -25,10 +25,10 @@ exercises the recursive-descent entry into it.
 
 from __future__ import annotations
 
-from fuzzer_tool.core.mutations.generic import _swap_pair
-
 import random
 from dataclasses import dataclass
+
+from fuzzer_tool.core.mutations.generic import _swap_pair
 
 RIFF_HEADER_LEN = 12  # "RIFF" + size(4) + form_type(4)
 KNOWN_FOURCCS = [

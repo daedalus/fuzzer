@@ -33,13 +33,12 @@ full re-parsing round-trip fidelity is not needed for a corruption probe.
 
 from __future__ import annotations
 
-from fuzzer_tool.core.mutations.generic import _swap_pair
-
 import random
 import struct
 from dataclasses import dataclass, field
 from typing import Any
 
+from fuzzer_tool.core.mutations.generic import _swap_pair
 from fuzzer_tool.core.mutations.isobmff import Box, serialize_boxes
 
 # ftyp brands that mark a file as (an image derived from) AVIF

@@ -56,9 +56,7 @@ def diff_run(
     Returns:
         Tuple of (diverged: bool, description: str).
     """
-    return diff_run_detailed(
-        target_a, target_b, data, timeout, file_mode, target_args
-    ).as_verdict()
+    return diff_run_detailed(target_a, target_b, data, timeout, file_mode, target_args).as_verdict()
 
 
 def diff_run_detailed(

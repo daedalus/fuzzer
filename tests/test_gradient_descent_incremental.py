@@ -177,8 +177,7 @@ def test_candidates_span_the_whole_buffer():
     cands = _candidate_positions(buf, target, rng=None)
     assert cands, "no candidates found in 64 KiB of random data"
     assert max(cands) > len(buf) * 0.75, (
-        f"candidates stop at {max(cands)} of {len(buf)} "
-        f"({max(cands) / len(buf) * 100:.2f}% in)"
+        f"candidates stop at {max(cands)} of {len(buf)} ({max(cands) / len(buf) * 100:.2f}% in)"
     )
     assert min(cands) < len(buf) * 0.25
 

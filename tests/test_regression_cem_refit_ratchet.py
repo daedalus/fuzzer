@@ -48,9 +48,7 @@ SHIFTED_ALPHABET = b"MNOPQRST"
 
 
 def _elite(rng, n, alphabet, length=64):
-    return [
-        (rng.random(), bytes(rng.choice(alphabet) for _ in range(length))) for _ in range(n)
-    ]
+    return [(rng.random(), bytes(rng.choice(alphabet) for _ in range(length))) for _ in range(n)]
 
 
 def _pull_arms(mc, pulls=2000.0):

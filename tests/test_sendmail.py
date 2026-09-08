@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import smtplib
 from email.message import EmailMessage
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -11,12 +10,12 @@ import pytest
 
 from fuzzer_tool.services.sendmail import (
     MailConfig,
+    _parse_smtp_server,
     build_crash_message,
     crash_attachments,
     format_crash_body,
     send_crash_email,
     send_message,
-    _parse_smtp_server,
 )
 
 
@@ -176,9 +175,7 @@ class TestSendMessage:
         )
         msg = build_crash_message(cfg, subject="s", body="b")
         fake = MagicMock()
-        with patch(
-            "fuzzer_tool.services.sendmail.smtplib.SMTP_SSL", return_value=fake
-        ) as ssl_cls:
+        with patch("fuzzer_tool.services.sendmail.smtplib.SMTP_SSL", return_value=fake) as ssl_cls:
             send_message(cfg, msg)
         ssl_cls.assert_called_once_with("smtp.example", 465, timeout=30)
         fake.starttls.assert_not_called()
@@ -190,9 +187,7 @@ class TestSendMessage:
         with (
             patch("fuzzer_tool.services.sendmail.os.path.isfile", return_value=True),
             patch("fuzzer_tool.services.sendmail.os.access", return_value=True),
-            patch(
-                "fuzzer_tool.services.sendmail.subprocess.run", return_value=completed
-            ) as run,
+            patch("fuzzer_tool.services.sendmail.subprocess.run", return_value=completed) as run,
         ):
             send_message(cfg, msg)
         run.assert_called_once()

@@ -1096,9 +1096,7 @@ class CmplogCollector:
             if fired:
                 self.last_site_fired[key] = self.last_site_fired.get(key, 0) + fired
             if asserted:
-                self.last_site_asserted[key] = (
-                    self.last_site_asserted.get(key, 0) + asserted
-                )
+                self.last_site_asserted[key] = self.last_site_asserted.get(key, 0) + asserted
 
     def site_walls(
         self,

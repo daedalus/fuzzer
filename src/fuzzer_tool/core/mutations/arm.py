@@ -13,11 +13,11 @@ is a 16-bit Thumb instruction.
 
 from __future__ import annotations
 
-from fuzzer_tool.core.mutations.generic import _swap_pair
-
 import random
 import struct
 from dataclasses import dataclass
+
+from fuzzer_tool.core.mutations.generic import _swap_pair
 
 # Interesting word values for arithmetic mutation
 WORD_VALUES = [0x00000000, 0x00000001, 0x0000FFFF, 0x7FFFFFFF, 0x80000000, 0xFFFFFFFF]

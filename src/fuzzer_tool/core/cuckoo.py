@@ -20,10 +20,8 @@ from __future__ import annotations
 
 import hashlib
 import random
-from typing import Any, List, Optional, Union
 
-
-Key = Union[str, bytes]
+Key = str | bytes
 
 
 class CuckooFilter:
@@ -62,7 +60,7 @@ class CuckooFilter:
         raw = max(1, capacity // bucket_size)
         self.size = self._next_power_of_two(raw)
         self._mask = self.size - 1
-        self.buckets: List[List[int]] = [[] for _ in range(self.size)]
+        self.buckets: list[list[int]] = [[] for _ in range(self.size)]
         self.count = 0
         self._fp_mask = (1 << fingerprint_size) - 1
 

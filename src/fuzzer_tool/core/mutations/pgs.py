@@ -16,11 +16,11 @@ the area with the highest confirmed hit rate in the fuzz target.
 
 from __future__ import annotations
 
-from fuzzer_tool.core.mutations.generic import _swap_pair
-
 import random
 import struct
 from dataclasses import dataclass, field
+
+from fuzzer_tool.core.mutations.generic import _swap_pair
 
 PG_MAGIC = b"\x50\x47"
 

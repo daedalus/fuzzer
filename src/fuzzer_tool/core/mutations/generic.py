@@ -2,7 +2,7 @@
 
 import itertools
 import random
-from functools import lru_cache
+from functools import cache
 
 
 # Helper: resolve rng parameter to RandPool or stdlib random
@@ -63,7 +63,7 @@ def _swap_pair(domain, rng, *, start=0):
     return i, j
 
 
-@lru_cache(maxsize=None)
+@cache
 def _non_identity_permutations(m: int) -> tuple[tuple[int, ...], ...]:
     """The ``m! - 1`` non-identity orderings of ``range(m)``, cached by m.
 

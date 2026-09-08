@@ -59,9 +59,7 @@ log = logging.getLogger(__name__)
 
 # Default search path for FormatFuzzer binaries. Overridable via env or
 # the --ff-bin-dir CLI flag (propagated through MutationContext later).
-_DEFAULT_BIN_DIR = Path(
-    os.environ.get("FORMATFUZZER_BIN", "/usr/local/lib/formatfuzzer")
-)
+_DEFAULT_BIN_DIR = Path(os.environ.get("FORMATFUZZER_BIN", "/usr/local/lib/formatfuzzer"))
 
 # Templates enabled when --formatfuzzer is set and no explicit list is given.
 # The spellings are kept as they shipped so the operator names (and the
@@ -367,9 +365,7 @@ class FormatFuzzerMutator(MutatorBase):
                     buf = bytearray(dec.read_bytes())
                     self._perturb_decisions(buf, rng)
                     dec.write_bytes(bytes(buf))
-                    mutated = self._exec(
-                        ["fuzz", "--decisions", str(dec), str(out)]
-                    )
+                    mutated = self._exec(["fuzz", "--decisions", str(dec), str(out)])
 
             if not mutated and not self._exec(["fuzz", str(out)]):
                 return None
@@ -399,6 +395,7 @@ class FormatFuzzerMutator(MutatorBase):
 # ---------------------------------------------------------------------------
 # Registration helpers
 # ---------------------------------------------------------------------------
+
 
 def register_formatfuzzer_mutators(
     templates: list[str] | tuple[str, ...] | None = None,
@@ -479,11 +476,7 @@ def _register_on_import() -> None:
     """
     # Honour an explicit env list so tests / CI can restrict templates.
     env = os.environ.get("FORMATFUZZER_TEMPLATES")
-    templates = (
-        tuple(t.strip() for t in env.split(",") if t.strip())
-        if env
-        else _DEFAULT_TEMPLATES
-    )
+    templates = tuple(t.strip() for t in env.split(",") if t.strip()) if env else _DEFAULT_TEMPLATES
     # No bin_dir: import time must not pin a directory, or a later
     # --ff-bin-dir would have nothing to rebind against.
     register_formatfuzzer_mutators(templates)

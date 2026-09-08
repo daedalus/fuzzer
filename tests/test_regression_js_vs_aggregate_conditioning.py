@@ -140,9 +140,7 @@ class TestMeasuresProfileNotBreadth:
         n = len(xs)
         mx, my = sum(xs) / n, sum(ys) / n
         num = sum((a - mx) * (b - my) for a, b in zip(xs, ys, strict=True))
-        den = math.sqrt(
-            sum((a - mx) ** 2 for a in xs) * sum((b - my) ** 2 for b in ys)
-        )
+        den = math.sqrt(sum((a - mx) ** 2 for a in xs) * sum((b - my) ** 2 for b in ys))
         return num / den if den else 0.0
 
     def test_weight_is_not_a_breadth_proxy(self):

@@ -16,8 +16,12 @@ def test_prune_does_not_bias_by_edge_id_half():
     n_rounds = (SHAPLEY_EDGES_MAX // 4) + 500
     for i in range(n_rounds):
         low_edges = {i % 30000, (i + 1) % 30000, (i + 2) % 30000, (i + 3) % 30000}
-        high_edges = {32768 + (i % 30000), 32768 + ((i + 1) % 30000),
-                      32768 + ((i + 2) % 30000), 32768 + ((i + 3) % 30000)}
+        high_edges = {
+            32768 + (i % 30000),
+            32768 + ((i + 1) % 30000),
+            32768 + ((i + 2) % 30000),
+            32768 + ((i + 3) % 30000),
+        }
         s.record([low_op], new_edges=len(low_edges), edge_indices=low_edges)
         s.record([high_op], new_edges=len(high_edges), edge_indices=high_edges)
 

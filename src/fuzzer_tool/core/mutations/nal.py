@@ -22,10 +22,10 @@ NAL types (H.265): 19=IDR_W_RADL, 20=IDR_N_LP, 32=VPS, 33=SPS, 34=PPS
 
 from __future__ import annotations
 
-from fuzzer_tool.core.mutations.generic import _swap_pair
-
 import random
 from dataclasses import dataclass, field
+
+from fuzzer_tool.core.mutations.generic import _swap_pair
 
 # Start code patterns
 START_CODE_3 = b"\x00\x00\x01"

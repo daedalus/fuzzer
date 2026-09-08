@@ -171,6 +171,4 @@ def test_exhaustive_pool_enumerates_every_pair_over_a_full_sweep():
     pool = ExhaustivePool()
     seen = {_swap_pair(4, pool) for _ in pool.runs()}
     assert pool.exhausted
-    assert seen == {
-        (i, j) for i in range(4) for j in range(4) if i != j
-    }
+    assert seen == {(i, j) for i in range(4) for j in range(4) if i != j}

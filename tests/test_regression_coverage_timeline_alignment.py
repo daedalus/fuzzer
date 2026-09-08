@@ -36,11 +36,7 @@ class TestArraysStayInStep:
     )
     def test_all_three_arrays_have_equal_length(self, n):
         et = _snapshots(n)
-        assert (
-            len(et._coverage_execs)
-            == len(et._coverage_edges)
-            == len(et._coverage_timestamps)
-        ), (
+        assert len(et._coverage_execs) == len(et._coverage_edges) == len(et._coverage_timestamps), (
             f"after {n} snapshots: execs={len(et._coverage_execs)} "
             f"edges={len(et._coverage_edges)} ts={len(et._coverage_timestamps)}"
         )

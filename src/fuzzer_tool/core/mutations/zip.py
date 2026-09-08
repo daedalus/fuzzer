@@ -21,13 +21,12 @@ byte-identically.
 
 from __future__ import annotations
 
-from fuzzer_tool.core.mutations.generic import _swap_pair
-
 import random
 import struct
 from dataclasses import dataclass
 
 from fuzzer_tool.core.crc32 import crc32
+from fuzzer_tool.core.mutations.generic import _swap_pair
 
 # Interesting compression methods to swap in
 METHOD_VALUES = [0, 8, 9, 12, 14, 93, 0xFFFF]

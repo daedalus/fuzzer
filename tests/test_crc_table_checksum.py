@@ -67,9 +67,7 @@ def test_matches_the_bitwise_loop_over_random_configurations():
         data = os.urandom(rnd.randrange(0, 40))
         assert compute_checksum(
             data, poly, width, init, final_xor, reflect_in, reflect_out
-        ) == _bitwise_checksum(
-            data, poly, width, init, final_xor, reflect_in, reflect_out
-        )
+        ) == _bitwise_checksum(data, poly, width, init, final_xor, reflect_in, reflect_out)
 
 
 @pytest.mark.parametrize("width", [8, 16, 32])
@@ -98,9 +96,7 @@ def test_crc32_matches_zlib():
 def test_empty_data_returns_the_configured_init():
     for width in (8, 16, 32):
         mask = (1 << width) - 1
-        assert compute_checksum(b"", 0x1234 & mask, width, 0xAB & mask, 0) == (
-            0xAB & mask
-        )
+        assert compute_checksum(b"", 0x1234 & mask, width, 0xAB & mask, 0) == (0xAB & mask)
 
 
 def test_table_is_cached_per_configuration():

@@ -18,11 +18,11 @@ recomputes only the outer RIFF size field.
 
 from __future__ import annotations
 
-from fuzzer_tool.core.mutations.generic import _swap_pair
-
 import random
 import struct
 from dataclasses import dataclass, field
+
+from fuzzer_tool.core.mutations.generic import _swap_pair
 
 # Chunk fourcc values that can be swapped in
 CHUNK_TYPES = [b"VP8 ", b"VP8L", b"VP8X", b"ANIM", b"ANMF", b"ALPH", b"EXIF", b"ICCP", b"XMP "]

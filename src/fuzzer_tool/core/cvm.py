@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import math
 import random
-from typing import Any, Hashable, Optional, Set
+from collections.abc import Hashable
 
 
 class F0Estimator:
@@ -43,11 +43,11 @@ class F0Estimator:
         self.delta = delta
         self.m = m
         # thresh ≈ (2/ε²) · ln(8m/δ)
-        self.thresh = math.ceil((2.0 / (eps ** 2)) * math.log((8.0 * m) / delta))
-        self.X: Set[Hashable] = set()
+        self.thresh = math.ceil((2.0 / (eps**2)) * math.log((8.0 * m) / delta))
+        self.X: set[Hashable] = set()
         self.p: float = 1.0  # current sampling probability
 
-    def update(self, a: Hashable) -> Optional[bool]:
+    def update(self, a: Hashable) -> bool | None:
         """Process one stream element.
 
         Returns
@@ -69,7 +69,7 @@ class F0Estimator:
 
         # Down-sample when the working set reaches the threshold
         if len(self.X) == self.thresh:
-            new_X: Set[Hashable] = set()
+            new_X: set[Hashable] = set()
             for x in self.X:
                 if random.random() < 0.5:
                     new_X.add(x)

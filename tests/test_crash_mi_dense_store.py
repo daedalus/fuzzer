@@ -44,9 +44,7 @@ def _reference_counts(inputs, max_positions):
 
 def test_counts_match_the_dict_of_dicts_oracle():
     rnd = random.Random(0)
-    inputs = [
-        (os.urandom(rnd.randrange(1, 600)), rnd.random() < 0.05) for _ in range(400)
-    ]
+    inputs = [(os.urandom(rnd.randrange(1, 600)), rnd.random() < 0.05) for _ in range(400)]
     tracker = CrashMITracker(max_positions=512)
     for data, is_crash in inputs:
         tracker.record(data, is_crash)

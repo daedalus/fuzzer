@@ -84,7 +84,9 @@ def test_shoff_just_past_eof_does_not_raise(fn, sentinel, write_elf):
     # One byte over is as fatal as four billion, and is the case an
     # "is it plausible?" heuristic would wave through.
     body = b"\x00" * 256
-    path = write_elf(_elf64(e_shoff=64 + len(body), e_shnum=1, e_shentsize=64, e_shstrndx=0, body=body))
+    path = write_elf(
+        _elf64(e_shoff=64 + len(body), e_shnum=1, e_shentsize=64, e_shstrndx=0, body=body)
+    )
     assert fn(path) == sentinel
 
 
@@ -156,7 +158,5 @@ def test_shstrtab_offset_past_eof_finds_nothing(write_elf):
     struct.pack_into("<I", shdr, 0, 4)  # sh_name
     struct.pack_into("<I", shdr, 4, 1)  # sh_type = SHT_PROGBITS
     struct.pack_into("<Q", shdr, 24, 0xFFFFFFFF)  # sh_offset, way past EOF
-    path = write_elf(
-        _elf64(e_shoff=64, e_shnum=1, e_shentsize=64, e_shstrndx=0, body=bytes(shdr))
-    )
+    path = write_elf(_elf64(e_shoff=64, e_shnum=1, e_shentsize=64, e_shstrndx=0, body=bytes(shdr)))
     assert _find_text_section(Path(path).read_bytes()) is None

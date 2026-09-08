@@ -216,9 +216,7 @@ class CrashMITracker:
         if self._cache_valid:
             return self._mi_cache
         counts = self._position_counts_arr
-        observed = (
-            _np.flatnonzero(counts >= self.min_observations).tolist() if self._rows else []
-        )
+        observed = _np.flatnonzero(counts >= self.min_observations).tolist() if self._rows else []
         self._mi_cache = {pos: self.mi(pos) for pos in observed}
         # Cache sorted positions and weights for weighted_position
         self._cached_positions = sorted(self._mi_cache.keys())

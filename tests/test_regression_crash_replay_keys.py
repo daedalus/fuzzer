@@ -179,9 +179,7 @@ class TestSchedulerKeySpace:
 
         src = inspect.getsource(fuzzer_mod.Fuzzer.fuzz_one)
         # Comments in the fix quote the old expression, so scan code only.
-        code = "\n".join(
-            line for line in src.splitlines() if not line.lstrip().startswith("#")
-        )
+        code = "\n".join(line for line in src.splitlines() if not line.lstrip().startswith("#"))
         assert "crash_sigs.get(crash_name" not in code, (
             "the replay key is being re-derived by looking a filename up in a "
             "signature-keyed dict; use _last_crash_signature"

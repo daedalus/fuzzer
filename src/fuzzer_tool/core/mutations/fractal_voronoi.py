@@ -16,10 +16,100 @@ from __future__ import annotations
 
 import hashlib
 import math
+from collections.abc import Callable
 from functools import lru_cache
-from typing import Callable
 
 from fuzzer_tool.core.mutator_interface import MutationContext, MutatorBase
+
+# Geometry helpers are pure functions of (layer, cell): the jittered
+# Voronoi grid is deterministic and reads no instance state, so they are
+# cached at module scope. A method-level lru_cache would key on self and
+# keep every mutator that ever ran alive (B019).
+
+
+def _hash2(layer: int, cell: tuple[int, int]) -> tuple[float, float]:
+    """Deterministic PRNG for a cell — two floats in [0, 1)."""
+    h = hashlib.sha256(f"{layer}:{cell[0]}:{cell[1]}".encode()).digest()
+    return (h[0] / 256.0, h[1] / 256.0)
+
+
+@lru_cache(maxsize=4096)
+def _site(layer: int, cell: tuple[int, int]) -> tuple[float, float]:
+    """Return the site belonging to an integer grid cell (x, y)."""
+    s = 2.0 ** (-layer)
+    ox, oy = _hash2(layer, cell)
+    return (s * (cell[0] + ox), s * (cell[1] + oy))
+
+
+@lru_cache(maxsize=4096)
+def _nearest_site(
+    layer: int, p: tuple[float, float]
+) -> tuple[tuple[int, int], tuple[float, float]]:
+    """Find the layer-i site nearest to point p.
+
+    The 5×5 neighbourhood is the safe bound for a jittered Voronoi
+    grid, but the winner is almost always inside the 3×3 core. For
+    non-negative *p* the cell index below is a true floor, so *p* lies
+    in ``[s*cx, s*(cx+1))``; a site two cells out then sits at
+    L-infinity distance strictly greater than ``s``, and can only beat
+    the 3×3 winner when that winner is itself farther than ``s``.
+    Testing the core first and expanding to the outer ring only under
+    that condition returns the same site the full sweep would, while
+    cutting the common case from 25 site lookups to 9.
+
+    The bound depends on the floor property, and ``int()`` truncates
+    toward zero, so it does not hold for negative coordinates — those
+    take the full sweep unconditionally. ``mutate`` only ever passes
+    points in ``[0, 1)``; the negative case arises inside ``_root``,
+    where a parent site can sit at a negative coordinate. Measured
+    over 200k random probes in ``[0, 1)``: the ring is examined 0.021%
+    of the time and the core never disagreed with the full sweep.
+    """
+    s = 2.0 ** (-layer)
+    cx = int(p[0] / s)
+    cy = int(p[1] / s)
+    px, py = p
+    site = _site
+
+    best_cell: tuple[int, int] | None = None
+    best_site: tuple[float, float] | None = None
+    best_distance = float("inf")
+
+    for dx in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            cell = (cx + dx, cy + dy)
+            q = site(layer, cell)
+            d = (px - q[0]) ** 2 + (py - q[1]) ** 2
+            if d < best_distance:
+                best_distance = d
+                best_cell = cell
+                best_site = q
+
+    if best_distance > s * s or px < 0.0 or py < 0.0:
+        for dx in (-2, -1, 0, 1, 2):
+            for dy in (-2, -1, 0, 1, 2):
+                if -2 < dx < 2 and -2 < dy < 2:
+                    continue  # already covered by the 3×3 core
+                cell = (cx + dx, cy + dy)
+                q = site(layer, cell)
+                d = (px - q[0]) ** 2 + (py - q[1]) ** 2
+                if d < best_distance:
+                    best_distance = d
+                    best_cell = cell
+                    best_site = q
+
+    # best_cell is never None because the loop always runs at least once
+    return best_cell, best_site  # type: ignore[return-value]
+
+
+@lru_cache(maxsize=4096)
+def _root(depth: int, cell: tuple[int, int]) -> tuple[int, int]:
+    """Trace parent chain up to layer 0."""
+    while depth > 0:
+        p = _site(depth, cell)
+        cell, _ = _nearest_site(depth - 1, p)
+        depth -= 1
+    return cell
 
 
 class FractalVoronoiMutator(MutatorBase):
@@ -61,85 +151,19 @@ class FractalVoronoiMutator(MutatorBase):
     # Voronoi geometry (deterministic, cached)
     # ------------------------------------------------------------------
 
-    def _hash2(self, layer: int, cell: tuple[int, int]) -> tuple[float, float]:
-        """Deterministic PRNG for a cell — two floats in [0, 1)."""
-        h = hashlib.sha256(f"{layer}:{cell[0]}:{cell[1]}".encode()).digest()
-        return (h[0] / 256.0, h[1] / 256.0)
-
-    @lru_cache(maxsize=4096)
     def _site(self, layer: int, cell: tuple[int, int]) -> tuple[float, float]:
         """Return the site belonging to an integer grid cell (x, y)."""
-        s = 2.0 ** (-layer)
-        ox, oy = self._hash2(layer, cell)
-        return (s * (cell[0] + ox), s * (cell[1] + oy))
+        return _site(layer, cell)
 
     def _nearest_site(
         self, layer: int, p: tuple[float, float]
     ) -> tuple[tuple[int, int], tuple[float, float]]:
-        """Find the layer-i site nearest to point p.
+        """Find the layer-i site nearest to point p."""
+        return _nearest_site(layer, p)
 
-        The 5×5 neighbourhood is the safe bound for a jittered Voronoi
-        grid, but the winner is almost always inside the 3×3 core. For
-        non-negative *p* the cell index below is a true floor, so *p* lies
-        in ``[s*cx, s*(cx+1))``; a site two cells out then sits at
-        L-infinity distance strictly greater than ``s``, and can only beat
-        the 3×3 winner when that winner is itself farther than ``s``.
-        Testing the core first and expanding to the outer ring only under
-        that condition returns the same site the full sweep would, while
-        cutting the common case from 25 site lookups to 9.
-
-        The bound depends on the floor property, and ``int()`` truncates
-        toward zero, so it does not hold for negative coordinates — those
-        take the full sweep unconditionally. ``mutate`` only ever passes
-        points in ``[0, 1)``; the negative case arises inside ``_root``,
-        where a parent site can sit at a negative coordinate. Measured
-        over 200k random probes in ``[0, 1)``: the ring is examined 0.021%
-        of the time and the core never disagreed with the full sweep.
-        """
-        s = 2.0 ** (-layer)
-        cx = int(p[0] / s)
-        cy = int(p[1] / s)
-        px, py = p
-        site = self._site
-
-        best_cell: tuple[int, int] | None = None
-        best_site: tuple[float, float] | None = None
-        best_distance = float("inf")
-
-        for dx in (-1, 0, 1):
-            for dy in (-1, 0, 1):
-                cell = (cx + dx, cy + dy)
-                q = site(layer, cell)
-                d = (px - q[0]) ** 2 + (py - q[1]) ** 2
-                if d < best_distance:
-                    best_distance = d
-                    best_cell = cell
-                    best_site = q
-
-        if best_distance > s * s or px < 0.0 or py < 0.0:
-            for dx in (-2, -1, 0, 1, 2):
-                for dy in (-2, -1, 0, 1, 2):
-                    if -2 < dx < 2 and -2 < dy < 2:
-                        continue  # already covered by the 3×3 core
-                    cell = (cx + dx, cy + dy)
-                    q = site(layer, cell)
-                    d = (px - q[0]) ** 2 + (py - q[1]) ** 2
-                    if d < best_distance:
-                        best_distance = d
-                        best_cell = cell
-                        best_site = q
-
-        # best_cell is never None because the loop always runs at least once
-        return best_cell, best_site  # type: ignore[return-value]
-
-    @lru_cache(maxsize=4096)
     def _root(self, depth: int, cell: tuple[int, int]) -> tuple[int, int]:
         """Trace parent chain up to layer 0."""
-        while depth > 0:
-            p = self._site(depth, cell)
-            cell, _ = self._nearest_site(depth - 1, p)
-            depth -= 1
-        return cell
+        return _root(depth, cell)
 
     def _boundary_cell(self, depth: int, cell: tuple[int, int]) -> bool:
         """Whether *cell* touches a cell with a different root.
@@ -155,8 +179,14 @@ class FractalVoronoiMutator(MutatorBase):
         root = self._root(depth, cell)
         answer = False
         for dx, dy in (
-            (-1, 0), (1, 0), (0, -1), (0, 1),
-            (-1, -1), (-1, 1), (1, -1), (1, 1),
+            (-1, 0),
+            (1, 0),
+            (0, -1),
+            (0, 1),
+            (-1, -1),
+            (-1, 1),
+            (1, -1),
+            (1, 1),
         ):
             if self._root(depth, (cell[0] + dx, cell[1] + dy)) != root:
                 answer = True
@@ -164,9 +194,7 @@ class FractalVoronoiMutator(MutatorBase):
         self._boundary_cache[key] = answer
         return answer
 
-    def _is_boundary(
-        self, depth: int, px: float, py: float
-    ) -> bool:
+    def _is_boundary(self, depth: int, px: float, py: float) -> bool:
         """Check if point (px, py) lies on a fractal boundary at given depth."""
         cell, _ = self._nearest_site(depth, (px, py))
         return self._boundary_cell(depth, cell)
@@ -190,7 +218,9 @@ class FractalVoronoiMutator(MutatorBase):
     #: megabytes.
     _PLAN_CACHE_MAX = 16
 
-    def _plan(self, side: int, n: int) -> tuple[tuple[int, bool, tuple[int, int], float, float], ...]:
+    def _plan(
+        self, side: int, n: int
+    ) -> tuple[tuple[int, bool, tuple[int, int], float, float], ...]:
         """Per-index ``(root_hash, on_boundary, root, px, py)``.
 
         The partition is a property of the grid geometry alone — it is a
@@ -275,7 +305,7 @@ class FractalVoronoiMutator(MutatorBase):
             else:
                 # Fallback: simple XOR when no sub-operators configured
                 if (root_hash + idx) % 5 == 0:
-                    out[idx] ^= (root_hash & 0xFF)
+                    out[idx] ^= root_hash & 0xFF
 
             # Boundary bonus: if on a fractal coastline, add extra jitter
             if on_boundary:
@@ -284,7 +314,7 @@ class FractalVoronoiMutator(MutatorBase):
                     16,
                 )
                 if (boundary_hash + idx) % 3 == 0:
-                    out[idx] ^= ((boundary_hash >> 8) & 0xFF)
+                    out[idx] ^= (boundary_hash >> 8) & 0xFF
 
         result = bytes(out)
         if max_len and len(result) > max_len:
@@ -295,6 +325,7 @@ class FractalVoronoiMutator(MutatorBase):
 # ------------------------------------------------------------------
 # Self-registration on module import
 # ------------------------------------------------------------------
+
 
 def _register() -> None:
     from fuzzer_tool.core.operator_registry import REGISTRY

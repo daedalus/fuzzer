@@ -51,11 +51,11 @@ cell.
 
 from __future__ import annotations
 
-from fuzzer_tool.core.mutations.generic import _swap_pair
-
 import random
 import struct
 from typing import Any
+
+from fuzzer_tool.core.mutations.generic import _swap_pair
 
 MAGIC = b"SQLite format 3\x00"
 

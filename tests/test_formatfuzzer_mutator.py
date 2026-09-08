@@ -162,7 +162,7 @@ def ff_bin(tmp_path):
     """A stand-in honouring the real CLI: command first, output to a file."""
     d = tmp_path / "ffbin"
     d.mkdir()
-    exe = d / "png-fuzzer"      # upstream spells it with a HYPHEN
+    exe = d / "png-fuzzer"  # upstream spells it with a HYPHEN
     exe.write_text(FAKE_FF)
     exe.chmod(0o755)
     return d
@@ -183,17 +183,15 @@ class TestBinaryDiscovery:
             calls.append(name)
             return None
 
-        monkeypatch.setattr(
-            "fuzzer_tool.core.mutations.formatfuzzer.shutil.which", fake_which
-        )
+        monkeypatch.setattr("fuzzer_tool.core.mutations.formatfuzzer.shutil.which", fake_which)
         FormatFuzzerMutator(template="zip", bin_dir=tmp_path)
         assert "zip" not in calls, f"bare format name searched on PATH: {calls}"
         assert "zip-fuzzer" in calls
 
     def test_alias_looks_for_the_upstream_binary(self, tmp_path):
         m = FormatFuzzerMutator(template="isobmff", bin_dir=tmp_path)
-        assert m.name == "ff_isobmff"       # registry inventory unchanged
-        assert m.format == "mp4"            # but mp4-fuzzer is what exists
+        assert m.name == "ff_isobmff"  # registry inventory unchanged
+        assert m.format == "mp4"  # but mp4-fuzzer is what exists
 
 
 class TestProbe:
@@ -267,9 +265,7 @@ class TestMutateAgainstRealContract:
 
 
 class TestBinDirRebind:
-    def test_ff_bin_dir_rebinds_an_already_registered_operator(
-        self, ff_bin, registry_restored
-    ):
+    def test_ff_bin_dir_rebinds_an_already_registered_operator(self, ff_bin, registry_restored):
         """--ff-bin-dir was a no-op for every default template.
 
         The module self-registers the defaults at import time with the
@@ -281,9 +277,7 @@ class TestBinDirRebind:
         (ff_bin / "rebindfmt-fuzzer").write_text((ff_bin / "png-fuzzer").read_text())
         (ff_bin / "rebindfmt-fuzzer").chmod(0o755)
 
-        first = register_formatfuzzer_mutators(
-            templates=["rebindfmt"], bin_dir="/nonexistent"
-        )
+        first = register_formatfuzzer_mutators(templates=["rebindfmt"], bin_dir="/nonexistent")
         assert first[0]._bin_available is False
 
         second = register_formatfuzzer_mutators(templates=["rebindfmt"], bin_dir=ff_bin)

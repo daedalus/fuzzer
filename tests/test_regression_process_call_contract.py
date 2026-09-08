@@ -140,9 +140,7 @@ def test_run_target_file_callers_pass_target_args():
                 continue
             supplied = {k.arg for k in node.keywords if k.arg}
             missing = [
-                a
-                for i, a in enumerate(required)
-                if i >= len(node.args) and a not in supplied
+                a for i, a in enumerate(required) if i >= len(node.args) and a not in supplied
             ]
             if missing:
                 bad.append(f"{path}:{node.lineno} missing {missing}")
@@ -186,8 +184,7 @@ def test_diff_run_mocks_use_the_real_arity():
             if len(item.elts) != expected:
                 bad.append(f"{path.name}:{item.lineno} {len(item.elts)}-tuple mock")
     assert not bad, (
-        f"process helpers return {expected} values; these mocks disagree:\n"
-        + "\n".join(bad)
+        f"process helpers return {expected} values; these mocks disagree:\n" + "\n".join(bad)
     )
 
 

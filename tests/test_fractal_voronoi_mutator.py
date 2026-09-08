@@ -109,6 +109,7 @@ class TestFractalVoronoiMutator:
 
     def test_cell_ops_integration(self):
         """Custom cell_ops are applied deterministically."""
+
         def invert_byte(b: bytes) -> bytes:
             return bytes([b[0] ^ 0xFF])
 

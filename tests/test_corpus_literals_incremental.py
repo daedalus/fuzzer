@@ -76,9 +76,7 @@ def _old_extract(corpus):
                 i = j
                 continue
             if 0x20 <= raw[i] <= 0x7E and not (
-                (0x30 <= raw[i] <= 0x39)
-                or (0x61 <= raw[i] <= 0x7A)
-                or (0x41 <= raw[i] <= 0x5A)
+                (0x30 <= raw[i] <= 0x39) or (0x61 <= raw[i] <= 0x7A) or (0x41 <= raw[i] <= 0x5A)
             ):
                 j = i + 1
                 while (
@@ -109,9 +107,7 @@ def test_class_table_matches_the_original_predicates():
     for b in range(256):
         flags = _LIT_CLASS[b]
         assert bool(flags & _LIT_DIGIT) == (0x30 <= b <= 0x39)
-        assert bool(flags & _LIT_ALPHA) == (
-            (0x61 <= b <= 0x7A) or (0x41 <= b <= 0x5A) or b == 0x5F
-        )
+        assert bool(flags & _LIT_ALPHA) == ((0x61 <= b <= 0x7A) or (0x41 <= b <= 0x5A) or b == 0x5F)
         assert bool(flags & _LIT_SYMBOL) == (
             0x20 <= b <= 0x7E
             and not ((0x30 <= b <= 0x39) or (0x61 <= b <= 0x7A) or (0x41 <= b <= 0x5A))
@@ -147,8 +143,7 @@ def test_incremental_equals_one_full_scan():
     rnd = random.Random(1)
     for _ in range(150):
         corpus = [
-            bytes(rnd.choice(b"abc_12-=;") for _ in range(rnd.randrange(0, 200)))
-            for _ in range(6)
+            bytes(rnd.choice(b"abc_12-=;") for _ in range(rnd.randrange(0, 200))) for _ in range(6)
         ]
         acc = LiteralAccumulator()
         for seed in corpus:

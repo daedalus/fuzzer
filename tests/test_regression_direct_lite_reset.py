@@ -122,8 +122,7 @@ class TestDirectLiteCoverageIsPerExecution:
         """
         counts = [len(s) for s in observations]
         assert counts == [1] * len(counts), (
-            f"direct_lite is reporting the cumulative union, not this "
-            f"execution: {counts}"
+            f"direct_lite is reporting the cumulative union, not this execution: {counts}"
         )
 
     def test_edge_identity_tracks_the_input(self, observations):
@@ -142,11 +141,11 @@ class TestNoBackendIsExcluded:
         from fuzzer_tool.services.runner import TargetRunner
 
         src = inspect.getsource(TargetRunner.run_target)
-        code = "\n".join(
-            line for line in src.splitlines() if not line.lstrip().startswith("#")
-        )
+        code = "\n".join(line for line in src.splitlines() if not line.lstrip().startswith("#"))
         assert "shm.reset_edge_map()" in code
-        assert "not f._inprocess_runner.direct_lite:\n                shm.reset_edge_map" not in code
+        assert (
+            "not f._inprocess_runner.direct_lite:\n                shm.reset_edge_map" not in code
+        )
         # The one remaining direct_lite branch is the read side (skip the
         # read_bitmap copy because the target writes into shm_cov directly),
         # which is correct and must survive.

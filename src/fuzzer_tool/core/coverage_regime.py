@@ -198,8 +198,10 @@ class CoverageRegimeDetector:
         # Near-zero discovery rate with a long quiet stretch: subcritical even
         # when homogeneity has not yet fired.  discovery_rate was previously
         # accepted by _classify and never read (P2-5).
-        if discovery_rate is not None and discovery_rate <= 0.0 and execs_since_edge >= max(
-            1, self._stall_threshold // 4
+        if (
+            discovery_rate is not None
+            and discovery_rate <= 0.0
+            and execs_since_edge >= max(1, self._stall_threshold // 4)
         ):
             self._regime = CoverageRegime.SUBCRITICAL
             self._reason = (

@@ -23,7 +23,6 @@ from fuzzer_tool.core.weizz_tags import (
     synthetic_exec_fn,
 )
 
-
 # ── Active / differential path (get_deps / place_tags) ──────────────────
 
 
@@ -252,7 +251,7 @@ def test_rle_roundtrip():
     restored = StructureMap.from_rle(rle, len(data), from_cmplog=True)
     assert restored.input_len == smap.input_len
     assert restored.ntypes == smap.ntypes
-    for a, b in zip(smap.tags, restored.tags):
+    for a, b in zip(smap.tags, restored.tags, strict=False):
         assert a.cmp_id == b.cmp_id
         assert a.parent == b.parent
         assert a.flags == b.flags
@@ -320,11 +319,7 @@ def _make_engine(data: bytes, smap: StructureMap):
 def test_weizz_field_havoc_length_preserving():
     data = b"AAAABBBBCCCC"
     # Tag first 4 as field 1, next 4 as field 2
-    tags = (
-        [ByteTag(cmp_id=1)] * 4
-        + [ByteTag(cmp_id=2)] * 4
-        + [ByteTag(cmp_id=3)] * 4
-    )
+    tags = [ByteTag(cmp_id=1)] * 4 + [ByteTag(cmp_id=2)] * 4 + [ByteTag(cmp_id=3)] * 4
     smap = StructureMap(tags=tags, ntypes=3, input_len=len(data), from_cmplog=True)
     eng, _f = _make_engine(data, smap)
     out = eng._op_weizz_field_havoc(bytearray(data), 0, data)
@@ -412,9 +407,7 @@ def test_weizz_tag_repair_checksum_field():
     # Force CRC path: only IS_CHECKSUM, no IS_LEN
     digest = crc32(body) & 0xFFFFFFFF
     data = body + digest.to_bytes(4, "little")
-    tags = [ByteTag(cmp_id=1)] * len(body) + [
-        ByteTag(cmp_id=2, flags=TagFlags.IS_CHECKSUM)
-    ] * 4
+    tags = [ByteTag(cmp_id=1)] * len(body) + [ByteTag(cmp_id=2, flags=TagFlags.IS_CHECKSUM)] * 4
     smap = StructureMap(tags=tags, ntypes=2, input_len=len(data), from_cmplog=True)
     eng, _f = _make_engine(data, smap)
     # Corrupt the CRC so repair has work to do

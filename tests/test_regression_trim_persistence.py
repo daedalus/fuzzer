@@ -123,9 +123,7 @@ class TestTrimIsPersisted:
         CorpusManager(fuzzer).trim_new_coverage(ORIGINAL, ORIGINAL)
 
         seeds_dir = fuzzer.corpus_dir / "seeds"
-        live_files = [
-            p for p in seeds_dir.rglob("id_*") if p.is_file() and "pruned" not in p.parts
-        ]
+        live_files = [p for p in seeds_dir.rglob("id_*") if p.is_file() and "pruned" not in p.parts]
         assert len(live_files) == 1
         assert live_files[0].read_bytes() == TRIMMED
 

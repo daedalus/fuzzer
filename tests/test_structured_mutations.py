@@ -317,7 +317,10 @@ class TestPermLock:
 class TestCycleLock:
     def _words(self, buf: bytes, offset: int, width: int, big_endian: bool, n: int):
         fmt = S._STRUCT_FMT[(width, big_endian)]
-        return [struct.unpack(fmt, buf[offset + i * width : offset + (i + 1) * width])[0] for i in range(n)]
+        return [
+            struct.unpack(fmt, buf[offset + i * width : offset + (i + 1) * width])[0]
+            for i in range(n)
+        ]
 
     def _cycle_lengths(self, perm: list[int]) -> list[int]:
         n = len(perm)

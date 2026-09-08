@@ -72,12 +72,8 @@ def _build(monkeypatch, *, has_cmplog: bool, inprocess_direct: bool = True):
             runner_kwargs.update(k)
 
     monkeypatch.setattr(fuzzer_mod, "InProcessRunner", _StubInProcessRunner, raising=False)
-    monkeypatch.setattr(
-        "fuzzer_tool.adapters.inprocess.InProcessRunner", _StubInProcessRunner
-    )
-    monkeypatch.setattr(
-        Fuzzer, "_probe_so_function", lambda self, target: "LLVMFuzzerTestOneInput"
-    )
+    monkeypatch.setattr("fuzzer_tool.adapters.inprocess.InProcessRunner", _StubInProcessRunner)
+    monkeypatch.setattr(Fuzzer, "_probe_so_function", lambda self, target: "LLVMFuzzerTestOneInput")
 
     tmpdir = tempfile.mkdtemp(prefix="cmplog_explicit_inprocess_")
     with patch("os.path.isfile", return_value=True), patch("os.access", return_value=True):
@@ -103,29 +99,21 @@ class TestExplicitInprocessCmplogWiring:
         assert env_calls == [True]
 
     def test_shims_are_preloaded_for_direct_ctypes_mode(self, monkeypatch):
-        _f, _env, preload_calls, _kw = _build(
-            monkeypatch, has_cmplog=True, inprocess_direct=True
-        )
+        _f, _env, preload_calls, _kw = _build(monkeypatch, has_cmplog=True, inprocess_direct=True)
         assert preload_calls == [True]
 
-    def test_env_is_still_set_up_when_not_compiled_in_but_cmplog_requested(
-        self, monkeypatch
-    ):
+    def test_env_is_still_set_up_when_not_compiled_in_but_cmplog_requested(self, monkeypatch):
         """setup_env_for_run() must run regardless of detection outcome --
         e.g. an externally LD_PRELOAD'd shim in subprocess-loader mode
         still needs _CMPLOG_OUT."""
         _f, env_calls, _preload, _kw = _build(monkeypatch, has_cmplog=False)
         assert env_calls == [True]
 
-    def test_direct_mode_is_declined_when_not_compiled_in_and_not_preloaded(
-        self, monkeypatch
-    ):
+    def test_direct_mode_is_declined_when_not_compiled_in_and_not_preloaded(self, monkeypatch):
         """Without compiled-in cmplog or an LD_PRELOAD'd shim, forcing
         direct ctypes mode would load a .so with unresolved cmplog
         callbacks; fall back to the subprocess loader instead."""
-        f, _env, preload_calls, kw = _build(
-            monkeypatch, has_cmplog=False, inprocess_direct=True
-        )
+        f, _env, preload_calls, kw = _build(monkeypatch, has_cmplog=False, inprocess_direct=True)
         assert preload_calls == []
         assert f._inprocess_runner is not None
         assert kw.get("direct") is False

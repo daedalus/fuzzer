@@ -15,11 +15,11 @@ one recursive pass).
 
 from __future__ import annotations
 
-from fuzzer_tool.core.mutations.generic import _swap_pair
-
 import random
 import struct
 from dataclasses import dataclass, field
+
+from fuzzer_tool.core.mutations.generic import _swap_pair
 
 # Matroska/WebM container element IDs (recurse into children)
 CONTAINER_IDS = {

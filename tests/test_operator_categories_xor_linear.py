@@ -13,7 +13,7 @@ from fuzzer_tool.core.operator_categories import (
 
 
 def test_xor_linear_ops_contains_bit_and_byte_flip():
-    assert XOR_LINEAR_OPS == frozenset({"bit_flip", "byte_flip"})
+    assert frozenset({"bit_flip", "byte_flip"}) == XOR_LINEAR_OPS
 
 
 def test_is_xor_linear_true_for_family_members():
@@ -40,4 +40,4 @@ def test_xor_linear_ops_is_subset_of_registered_bit_category():
     # "bit"/"byte" categories respectively) -- a typo here would silently
     # make compose_linear_runs never fire.
     all_registered = {op for ops in OPERATOR_CATEGORIES.values() for op in ops}
-    assert XOR_LINEAR_OPS <= all_registered
+    assert all_registered >= XOR_LINEAR_OPS

@@ -497,9 +497,7 @@ def levenshtein_align(a: bytes, b: bytes) -> list[tuple[str, int, bytes]]:
             myers_ops = _myers_ses(a_mid, b_mid, max_d)
             # Dissimilar *and* too big for the DP: no exact script is
             # affordable, so degrade to blocks rather than allocate.
-            mid_ops = (
-                myers_ops if myers_ops is not None else _coarse_block_diff(a_mid, b_mid)
-            )
+            mid_ops = myers_ops if myers_ops is not None else _coarse_block_diff(a_mid, b_mid)
 
     # Reconstruct full script with prefix/suffix offsets
     result: list[tuple[str, int, bytes]] = []

@@ -30,10 +30,10 @@ present), matching nal.py's choice not to interpret RBSP contents.
 
 from __future__ import annotations
 
-from fuzzer_tool.core.mutations.generic import _swap_pair
-
 import random
 from dataclasses import dataclass
+
+from fuzzer_tool.core.mutations.generic import _swap_pair
 
 ADTS_HEADER_LEN = 7  # fixed + variable header, CRC (if any) folds into payload
 

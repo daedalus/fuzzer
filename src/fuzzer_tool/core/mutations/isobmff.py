@@ -18,11 +18,11 @@ that target hdlr handler_type and stsd codec fourcc fields.
 
 from __future__ import annotations
 
-from fuzzer_tool.core.mutations.generic import _swap_pair
-
 import random
 import struct
 from dataclasses import dataclass, field
+
+from fuzzer_tool.core.mutations.generic import _swap_pair
 
 # Box types that contain sub-boxes
 CONTAINER_TYPES = {

@@ -1739,7 +1739,6 @@ class EdgeTracker:
         recent = sum(1 for e in seed_edges if first_seen.get(e, 0) >= cutoff)
         return recent / len(seed_edges)
 
-
     def discovery_frontier_edges(self) -> set[int] | None:
         """Edges first seen in the most recent quarter of the coverage clock.
 

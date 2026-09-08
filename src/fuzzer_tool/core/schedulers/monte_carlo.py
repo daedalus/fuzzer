@@ -780,14 +780,22 @@ class MonteCarloScheduler:
                 g, total = obs.shape
                 shuffled = rng.permuted(obs, axis=1)
                 offsets = (np.arange(g, dtype=np.int64) * 256)[:, None]
-                a = np.bincount(
-                    (shuffled[:, :n1].astype(np.int64) + offsets).ravel(),
-                    minlength=g * 256,
-                ).reshape(g, 256).astype(np.float64)
-                b = np.bincount(
-                    (shuffled[:, n1 : n1 + n2].astype(np.int64) + offsets).ravel(),
-                    minlength=g * 256,
-                ).reshape(g, 256).astype(np.float64)
+                a = (
+                    np.bincount(
+                        (shuffled[:, :n1].astype(np.int64) + offsets).ravel(),
+                        minlength=g * 256,
+                    )
+                    .reshape(g, 256)
+                    .astype(np.float64)
+                )
+                b = (
+                    np.bincount(
+                        (shuffled[:, n1 : n1 + n2].astype(np.int64) + offsets).ravel(),
+                        minlength=g * 256,
+                    )
+                    .reshape(g, 256)
+                    .astype(np.float64)
+                )
                 p = a / n1
                 q = b / n2
                 m = 0.5 * (p + q)
@@ -1679,7 +1687,6 @@ class MonteCarloScheduler:
                 best_score = score
                 best_op = op
         return best_op if best_op is not None else ops[0]
-
 
     def _build_segment_rates(
         self, recent: list, segment_size: int, operators: list[str], op_idx: dict[str, int]

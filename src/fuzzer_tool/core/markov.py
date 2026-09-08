@@ -579,10 +579,7 @@ class MarkovEnsemble:
         # A chain that has not yet judged itself (no previous snapshot) carries
         # threshold 0.0, which correctly makes the weighted threshold
         # unreachable until enough of the selection mass has something to say.
-        return (
-            any(results.values())
-            and self.last_js_divergence < self.last_plateau_threshold
-        )
+        return any(results.values()) and self.last_js_divergence < self.last_plateau_threshold
 
     def to_dict(self) -> dict:
         """Serialize all chains to a dict (for StateStore pickle)."""

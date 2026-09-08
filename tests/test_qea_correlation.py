@@ -416,7 +416,9 @@ class TestCorrelationLearning:
         drive that pair's coupling positive over many iterations, the
         correlation analogue of test_rotation_improves_fitness_sequence
         in test_qea.py."""
-        qea = QEALifecycle(pop_size=1, rotation_angle=0.1, use_correlation=True, correlation_delta=0.05)
+        qea = QEALifecycle(
+            pop_size=1, rotation_angle=0.1, use_correlation=True, correlation_delta=0.05
+        )
         ind = QEAIndividual(
             amplitudes=[ALPHA_UNIFORM] * 8,
             best_collapsed=b"\x00",
@@ -434,7 +436,9 @@ class TestCorrelationLearning:
         )
 
     def test_repeated_reward_of_mismatched_pair_learns_negative_coupling(self):
-        qea = QEALifecycle(pop_size=1, rotation_angle=0.1, use_correlation=True, correlation_delta=0.05)
+        qea = QEALifecycle(
+            pop_size=1, rotation_angle=0.1, use_correlation=True, correlation_delta=0.05
+        )
         ind = QEAIndividual(
             amplitudes=[ALPHA_UNIFORM] * 8,
             best_collapsed=b"\x00",

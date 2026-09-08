@@ -12,15 +12,16 @@ Transport selection:
 
 from __future__ import annotations
 
+import contextlib
 import mimetypes
 import os
 import smtplib
 import socket
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from email.message import EmailMessage
 from pathlib import Path
-from typing import Iterable, Sequence
 
 
 @dataclass(frozen=True)
@@ -52,9 +53,7 @@ class MailConfig:
         user = password = None
         if auth:
             if ":" not in auth:
-                raise ValueError(
-                    "--send-mail-auth must be USER:PASSWORD (colon-separated)"
-                )
+                raise ValueError("--send-mail-auth must be USER:PASSWORD (colon-separated)")
             user, password = auth.split(":", 1)
             if not user:
                 raise ValueError("--send-mail-auth USER part is empty")
@@ -186,9 +185,7 @@ def _send_via_sendmail(msg: EmailMessage) -> None:
     )
     if proc.returncode != 0:
         err = (proc.stderr or b"").decode("utf-8", errors="replace").strip()
-        raise RuntimeError(
-            f"sendmail exited {proc.returncode}" + (f": {err}" if err else "")
-        )
+        raise RuntimeError(f"sendmail exited {proc.returncode}" + (f": {err}" if err else ""))
 
 
 def _send_via_smtp(config: MailConfig, msg: EmailMessage) -> None:
@@ -204,18 +201,15 @@ def _send_via_smtp(config: MailConfig, msg: EmailMessage) -> None:
         smtp = smtplib.SMTP(host, port, timeout=30)
     try:
         smtp.ehlo()
-        if config.require_tls or port == 587:
-            if not use_ssl:
-                smtp.starttls()
-                smtp.ehlo()
+        if (config.require_tls or port == 587) and not use_ssl:
+            smtp.starttls()
+            smtp.ehlo()
         if config.auth_user is not None:
             smtp.login(config.auth_user, config.auth_password or "")
         smtp.send_message(msg, to_addrs=recipients)
     finally:
-        try:
+        with contextlib.suppress(Exception):
             smtp.quit()
-        except Exception:
-            pass
 
 
 def send_message(config: MailConfig, msg: EmailMessage) -> None:
@@ -305,9 +299,7 @@ def send_crash_email(
         returncode=returncode,
         exec_count=exec_count,
     )
-    msg = build_crash_message(
-        config, subject=subject, body=body, attachments=attachments
-    )
+    msg = build_crash_message(config, subject=subject, body=body, attachments=attachments)
     send_message(config, msg)
 
 

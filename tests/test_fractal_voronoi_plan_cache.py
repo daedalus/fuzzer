@@ -68,17 +68,21 @@ def _old_mutate(m: FractalVoronoiMutator, data: bytes, max_len: int = 0):
         broot = m._root(m.max_depth, bcell)
         on_boundary = False
         for dx, dy in (
-            (-1, 0), (1, 0), (0, -1), (0, 1),
-            (-1, -1), (-1, 1), (1, -1), (1, 1),
+            (-1, 0),
+            (1, 0),
+            (0, -1),
+            (0, 1),
+            (-1, -1),
+            (-1, 1),
+            (1, -1),
+            (1, 1),
         ):
             if m._root(m.max_depth, (bcell[0] + dx, bcell[1] + dy)) != broot:
                 on_boundary = True
                 break
         if on_boundary:
             boundary_hash = int(
-                hashlib.sha256(
-                    f"boundary:{root}:{px:.6f}:{py:.6f}".encode()
-                ).hexdigest(),
+                hashlib.sha256(f"boundary:{root}:{px:.6f}:{py:.6f}".encode()).hexdigest(),
                 16,
             )
             if (boundary_hash + idx) % 3 == 0:
@@ -209,4 +213,3 @@ def test_nearest_site_full_sweep_for_negative_coordinates():
         layer = rnd.randrange(0, 7)
         p = (rnd.uniform(-2.0, 2.0), rnd.uniform(-2.0, 2.0))
         assert m._nearest_site(layer, p) == _old_nearest_site(m, layer, p)
-

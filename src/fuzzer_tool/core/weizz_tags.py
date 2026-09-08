@@ -40,9 +40,9 @@ absorbed both the Weizz port plan and the P1 tag-map writeup.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from enum import IntFlag
-from typing import Callable, Sequence
 
 from fuzzer_tool.core.aho_corasick import scanner_for_pairs
 
@@ -107,9 +107,7 @@ class StructureMap:
     dep_bytes: set[int] = field(default_factory=set)
     # Optional dense dep bitvectors kept for debugging / repair glue
     # (populated by get_deps). Keyed by (cmp_id, hit_index) → (v0, v1) byte sets.
-    deps: dict[tuple[int, int], tuple[frozenset[int], frozenset[int]]] = field(
-        default_factory=dict
-    )
+    deps: dict[tuple[int, int], tuple[frozenset[int], frozenset[int]]] = field(default_factory=dict)
     exec_count: int = 0
     fully_colorized: bool = False
 
@@ -308,10 +306,7 @@ def get_deps(
         return deps[key]
 
     # Indices to flip: byte starts, or every bit.
-    if byte_level:
-        flip_indices = list(range(n))  # treat as "byte i"
-    else:
-        flip_indices = list(range(n * 8))
+    flip_indices = list(range(n)) if byte_level else list(range(n * 8))
 
     if max_execs <= 0:
         max_execs = len(flip_indices) + 1
@@ -447,9 +442,11 @@ def place_tags(
         for (cid, _), (v0, v1) in deps.items():
             if cid == chosen:
                 members |= v0 | v1
-        if members and (max(members) - min(members) + 1) >= 8 and len(
-            [b for b in range(length) if chosen in byte_to_cmps[b]]
-        ) <= 4:
+        if (
+            members
+            and (max(members) - min(members) + 1) >= 8
+            and len([b for b in range(length) if chosen in byte_to_cmps[b]]) <= 4
+        ):
             tags[i].flags |= TagFlags.IS_LEN
 
     return StructureMap(
@@ -511,9 +508,7 @@ def _looks_like_magic(op_a: bytes, op_b: bytes) -> bool:
         ):
             return True
     # typical fourcc / magic length
-    if len(op_a) in (2, 4, 8) and len(op_b) in (2, 4, 8):
-        return True
-    return False
+    return len(op_a) in (2, 4, 8) and len(op_b) in (2, 4, 8)
 
 
 def _looks_like_checksum(op: bytes) -> bool:

@@ -17,10 +17,10 @@ Immediate width follows the 66 prefix (operand16) and REX.W.
 
 from __future__ import annotations
 
-from fuzzer_tool.core.mutations.generic import _swap_pair
-
 import random
 from dataclasses import dataclass
+
+from fuzzer_tool.core.mutations.generic import _swap_pair
 
 LEGACY_PREFIXES = {0x66, 0x67, 0xF0, 0xF2, 0xF3, 0x2E, 0x36, 0x3E, 0x26, 0x64, 0x65}
 

@@ -16,10 +16,10 @@ were canonically encoded (non-canonical varints are normalized).
 
 from __future__ import annotations
 
-from fuzzer_tool.core.mutations.generic import _swap_pair
-
 import random
 from dataclasses import dataclass
+
+from fuzzer_tool.core.mutations.generic import _swap_pair
 
 MAX_FIELD_NUM = (1 << 29) - 1
 
