@@ -43,6 +43,11 @@ NEW_OPS = frozenset(
         "bitcast_int32",
         "size_field_overflow",
         "bpe",
+        "golomb",
+        "endian_convert",
+        "count_overflow",
+        "zero_run_amplify",
+        "zero_run_suppress",
     }
 )
 
@@ -233,6 +238,62 @@ class TestRoundTrip:
         data = bytes([i % 16 for i in range(256)])
         buf = bytearray(data)
         result = dispatch["bpe"](buf, 0, data)
+        assert result is not None
+        assert len(result) == len(data)
+
+    def test_golomb_handler_roundtrip_invariant(self):
+        fuzzer = _MockFuzzer()
+        fuzzer._rand_pool = RandPool(seed=42)
+        engine = OperatorEngine(fuzzer)
+        dispatch = REGISTRY.dispatch(engine)
+        data = bytes(range(256)) * 4
+        buf = bytearray(data)
+        result = dispatch["golomb"](buf, 0, data)
+        assert result is not None
+        assert len(result) == len(data)
+
+    def test_endian_convert_handler_roundtrip_invariant(self):
+        fuzzer = _MockFuzzer()
+        fuzzer._rand_pool = RandPool(seed=42)
+        engine = OperatorEngine(fuzzer)
+        dispatch = REGISTRY.dispatch(engine)
+        data = bytes(range(256)) * 4
+        buf = bytearray(data)
+        result = dispatch["endian_convert"](buf, 0, data)
+        assert result is not None
+        assert len(result) == len(data)
+
+    def test_count_overflow_handler_roundtrip_invariant(self):
+        fuzzer = _MockFuzzer()
+        fuzzer._rand_pool = RandPool(seed=42)
+        engine = OperatorEngine(fuzzer)
+        dispatch = REGISTRY.dispatch(engine)
+        data = bytes(range(256)) * 4
+        buf = bytearray(data)
+        result = dispatch["count_overflow"](buf, 0, data)
+        assert result is not None
+        assert len(result) == len(data)
+
+    def test_zero_run_amplify_handler_roundtrip_invariant(self):
+        fuzzer = _MockFuzzer()
+        fuzzer._rand_pool = RandPool(seed=42)
+        engine = OperatorEngine(fuzzer)
+        dispatch = REGISTRY.dispatch(engine)
+        # Data with zero runs.
+        data = bytes([i % 8 * 32 for i in range(256)])
+        buf = bytearray(data)
+        result = dispatch["zero_run_amplify"](buf, 0, data)
+        assert result is not None
+        assert len(result) == len(data)
+
+    def test_zero_run_suppress_handler_roundtrip_invariant(self):
+        fuzzer = _MockFuzzer()
+        fuzzer._rand_pool = RandPool(seed=42)
+        engine = OperatorEngine(fuzzer)
+        dispatch = REGISTRY.dispatch(engine)
+        data = bytes([i % 8 * 32 for i in range(256)])
+        buf = bytearray(data)
+        result = dispatch["zero_run_suppress"](buf, 0, data)
         assert result is not None
         assert len(result) == len(data)
 

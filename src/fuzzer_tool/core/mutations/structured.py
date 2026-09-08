@@ -1534,3 +1534,299 @@ def bpe(data: bytes, rng=None) -> bytes:
             restored[j] = hi
             j += 1
     return _splice(data, offset, bytes(restored[:length]))
+
+
+def golomb(data: bytes, rng=None) -> bytes:
+    """Golomb/Rice code a region, edit codewords, decode back.
+
+    Golomb coding is the optimal prefix code for geometric-distribution
+    integers.  Many binary formats encode run lengths, coefficient counts,
+    and delta values with Golomb/Rice codes because they concentrate
+    small integers into very short bit sequences.
+
+    This operator edits the codeword stream in place, preserving the
+    codebook parameters.  A single edit can turn a short codeword into
+    a long one or vice versa, probing parser decoders that assume
+    codeword lengths stay within a valid range.
+
+    Uses Rice parameter k=4 as a reasonable default; the codebook is
+    fixed for the duration of the mutation so the decoder sees a
+    consistent stream.
+
+    Args:
+        data: Input bytes.
+        rng: RandPool or stdlib random.
+
+    Returns:
+        Mutated bytes, the same length as *data*.
+    """
+    if len(data) < 2:
+        return data
+    rng = _get_rng(rng)
+    offset, length = _region(len(data), rng, min_len=2)
+    if length < 2:
+        return data
+    block = bytearray(data[offset : offset + length])
+    k = rng.choice((2, 3, 4, 5, 6))
+    mask = (1 << k) - 1
+    # Encode to Golomb-Rice bitstream (LSB-first quotient, then remainder).
+    bits = bytearray()
+    for b in block:
+        q = b >> k
+        r = b & mask
+        # quotient in unary: q ones followed by a zero.
+        bits.extend([1] * q + [0])
+        # remainder in k bits, LSB-first.
+        for i in range(k):
+            bits.append((r >> i) & 1)
+    if not bits:
+        return data
+    # Mutate the bitstream: flip/toggle/insert/delete bits.
+    n_mut = rng.randint(1, min(8, len(bits) // 2 + 1))
+    for _ in range(n_mut):
+        action = rng.randint(0, 3)
+        pos = rng.randint(0, len(bits) - 1)
+        if action == 0:
+            bits[pos] ^= 1
+        elif action == 1 and len(bits) < length * 16:
+            bits.insert(pos, rng.randint(0, 1))
+        elif action == 2 and len(bits) > length // 2:
+            del bits[pos]
+        elif action == 3:
+            bits[pos] = 1 if bits[pos] == 0 else 0
+    # Decode back: read unary quotient then k-bit remainder.
+    restored = bytearray(length)
+    ridx = 0
+    bidx = 0
+    while ridx < length and bidx < len(bits):
+        q = 0
+        while bidx < len(bits) and bits[bidx] == 1:
+            q += 1
+            bidx += 1
+        if bidx >= len(bits):
+            break
+        bidx += 1  # skip the terminating 0.
+        r = 0
+        for i in range(k):
+            if bidx + i < len(bits):
+                r |= bits[bidx + i] << i
+        restored[ridx] = ((q << k) | r) & 0xFF
+        ridx += 1
+        bidx += k
+    # Pad any remaining bytes with random values to keep length fixed.
+    while ridx < length:
+        restored[ridx] = rng.randint(0, 255)
+        ridx += 1
+    return _splice(data, offset, bytes(restored[:length]))
+
+
+def endian_convert(data: bytes, rng=None) -> bytes:
+    """Flip endianness of integer fields in a region.
+
+    Many binary formats store multi-byte integers in a fixed endianness,
+    but mixed-endian protocols, network-byte-order fields adjacent to
+    native-order fields, and misparsed headers all create situations
+    where the parser's byte-swap assumption is wrong.  Flipping
+    endianness of a region probes exactly those paths.
+
+    The operator scans for runs of 2, 4, or 8-byte integers in a
+    randomly-selected region and reverses each word in place.  The
+    width is uniform across the region so adjacent fields stay
+    aligned to the chosen stride.
+
+    Args:
+        data: Input bytes.
+        rng: RandPool or stdlib random.
+
+    Returns:
+        Mutated bytes, the same length as *data*.
+    """
+    if len(data) < 2:
+        return data
+    rng = _get_rng(rng)
+    offset, length = _region(len(data), rng, min_len=2)
+    if length < 2:
+        return data
+    width = rng.choice((2, 4, 8))
+    # Align offset to word boundary.
+    if offset % width != 0:
+        offset += width - (offset % width)
+        length = max(0, data[offset : offset + length].__len__())
+    if length < width:
+        return data
+    n_words = length // width
+    if n_words == 0:
+        return data
+    block = bytearray(data[offset : offset + n_words * width])
+    # Reverse bytes within each word.
+    for i in range(0, len(block), width):
+        block[i : i + width] = block[i : i + width][::-1]
+    return _splice(data, offset, bytes(block))
+
+
+def count_overflow(data: bytes, rng=None) -> bytes:
+    """Overwrite count/n fields with integer-overflow trigger values.
+
+    Like :func:`size_field_overflow`, but targets count fields rather
+    than declared-size fields.  Count fields control how many elements
+    a parser iterates over, so setting them to -1, MAX_SIGNED, or
+    MAX_UNSIGNED triggers out-of-bounds reads, infinite loops, or
+    allocation miscalculations.
+
+    The scanner looks for 2/4-byte integers at aligned offsets whose
+    value is small enough to plausibly be a count (not already at
+    overflow range) and overwrites one with a trigger.
+
+    Args:
+        data: Input bytes.
+        rng: RandPool or stdlib random.
+
+    Returns:
+        Mutated bytes, the same length as *data*.
+    """
+    if len(data) < 4:
+        return data
+    rng = _get_rng(rng)
+    width = rng.choice((2, 4))
+    if len(data) < width + 1:
+        return data
+    max_offset = len(data) - width
+    candidates = []
+    for off in range(0, max_offset, max(1, width)):
+        raw = data[off : off + width]
+        if len(raw) < width:
+            continue
+        if all(32 <= b < 127 for b in raw):
+            continue
+        val = int.from_bytes(raw, "little")
+        # Prefer fields whose current value is in a plausible count range.
+        if 0 <= val < min(1024, (1 << (width * 8 - 1)) - 1):
+            candidates.append(off)
+    if not candidates:
+        offset = rng.randint(0, max_offset)
+    else:
+        offset = candidates[rng.randint(0, len(candidates) - 1)]
+    endian = "<" if rng.random() < 0.5 else ">"
+    fmt = f"{endian}H" if width == 2 else f"{endian}I"
+    max_signed = (1 << (width * 8 - 1)) - 1
+    max_unsigned = (1 << (width * 8)) - 1
+    triggers = (-1, max_signed, max_unsigned)
+    new_val = triggers[rng.randint(0, len(triggers) - 1)]
+    try:
+        packed = struct.pack(fmt, new_val & max_unsigned)
+    except (struct.error, OverflowError):
+        return data
+    out = bytearray(data)
+    out[offset : offset + width] = packed
+    return bytes(out)
+
+
+def zero_run_amplify(data: bytes, rng=None) -> bytes:
+    """Extend zero runs in a region.
+
+    Zero runs trigger fast paths in image/video codecs, compression
+    routines, and memset-optimized memory functions.  Amplifying a zero
+    run probes those fast paths for missing length/width checks.
+
+    The operator finds a zero run in a randomly-selected region and
+    extends it by converting neighbouring non-zero bytes to zero,
+    compensated by converting an equal number of zero bytes at the
+    opposite end of the region back to random values so the total
+    length is preserved.
+
+    Args:
+        data: Input bytes.
+        rng: RandPool or stdlib random.
+
+    Returns:
+        Mutated bytes, the same length as *data*.
+    """
+    if len(data) < 4:
+        return data
+    rng = _get_rng(rng)
+    offset, length = _region(len(data), rng, min_len=4)
+    if length < 4:
+        return data
+    block = bytearray(data[offset : offset + length])
+    # Find the longest contiguous zero run.
+    best_start, best_len = 0, 0
+    run_start, run_len = 0, 0
+    for i in range(len(block)):
+        if block[i] == 0:
+            if run_len == 0:
+                run_start = i
+            run_len += 1
+        else:
+            if run_len > best_len:
+                best_start, best_len = run_start, run_len
+            run_len = 0
+    if run_len > best_len:
+        best_start, best_len = run_start, run_len
+    if best_len < 1:
+        return data
+    # Extend the run by up to min(best_len, available non-zero neighbours).
+    extend = rng.randint(1, min(best_len, len(block) - best_len))
+    # Grow from both ends of the run.
+    left = min(extend, best_start)
+    right = min(extend - left, len(block) - best_start - best_len)
+    for i in range(best_start - left, best_start):
+        block[i] = 0
+    for i in range(best_start + best_len, best_start + best_len + right):
+        block[i] = 0
+    # Compensate: overwrite 'extend' zero bytes at the region edges with
+    # random values so the zero-count change is localised to the run.
+    edges = []
+    for i in range(len(block)):
+        if block[i] == 0 and not (best_start - left <= i < best_start + best_len + right):
+            edges.append(i)
+    for i in rng.sample(edges, min(extend, len(edges))):
+        block[i] = rng.randint(1, 255)
+    return _splice(data, offset, bytes(block))
+
+
+def zero_run_suppress(data: bytes, rng=None) -> bytes:
+    """Break zero runs by injecting non-zero bytes.
+
+    The inverse of :func:`zero_run_amplify`: finds a zero run and
+    breaks it by overwriting bytes within the run with non-zero values.
+    Targets parsers that special-case contiguous-zero regions — a
+    broken zero run can change the execution path from a fast memset
+    clone to a general-purpose copy loop.
+
+    Args:
+        data: Input bytes.
+        rng: RandPool or stdlib random.
+
+    Returns:
+        Mutated bytes, the same length as *data*.
+    """
+    if len(data) < 4:
+        return data
+    rng = _get_rng(rng)
+    offset, length = _region(len(data), rng, min_len=4)
+    if length < 4:
+        return data
+    block = bytearray(data[offset : offset + length])
+    # Find all zero runs longer than 1 byte.
+    runs = []
+    run_start, run_len = 0, 0
+    for i in range(len(block)):
+        if block[i] == 0:
+            if run_len == 0:
+                run_start = i
+            run_len += 1
+        else:
+            if run_len > 1:
+                runs.append((run_start, run_len))
+            run_len = 0
+    if run_len > 1:
+        runs.append((run_start, run_len))
+    if not runs:
+        return data
+    start, run_len = runs[rng.randint(0, len(runs) - 1)]
+    # Break the run by overwriting 1..min(3, run_len-1) bytes.
+    n_break = rng.randint(1, min(3, run_len - 1))
+    positions = rng.sample(range(start, start + run_len), n_break)
+    for pos in positions:
+        block[pos] = rng.randint(1, 255)
+    return _splice(data, offset, bytes(block))

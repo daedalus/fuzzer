@@ -978,6 +978,11 @@ MUTATIONS = [
     "bitcast_int32",
     "size_field_overflow",
     "bpe",
+    "golomb",
+    "endian_convert",
+    "count_overflow",
+    "zero_run_amplify",
+    "zero_run_suppress",
 ]
 
 # Format-aware mutations: structure-aware operators for specific file formats.

@@ -194,6 +194,11 @@ _CATEGORIES: dict[str, set[str]] = {
         "bitcast_int32",
         "size_field_overflow",
         "bpe",
+        "golomb",
+        "endian_convert",
+        "count_overflow",
+        "zero_run_amplify",
+        "zero_run_suppress",
     },
     "adaptive": {
         "markov_bytes",

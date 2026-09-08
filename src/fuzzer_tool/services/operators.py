@@ -3290,6 +3290,31 @@ class OperatorEngine:
 
         return self._regularity(bpe, buf)
 
+    def _op_golomb(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import golomb
+
+        return self._regularity(golomb, buf)
+
+    def _op_endian_convert(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import endian_convert
+
+        return self._regularity(endian_convert, buf)
+
+    def _op_count_overflow(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import count_overflow
+
+        return self._regularity(count_overflow, buf)
+
+    def _op_zero_run_amplify(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import zero_run_amplify
+
+        return self._regularity(zero_run_amplify, buf)
+
+    def _op_zero_run_suppress(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import zero_run_suppress
+
+        return self._regularity(zero_run_suppress, buf)
+
     def corpus_invariants(self):
         """Cached ``CorpusInvariants`` for the current corpus, or None.
 
