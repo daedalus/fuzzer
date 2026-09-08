@@ -1199,15 +1199,9 @@ class Fuzzer:
                 print("[!] Cmplog: failed to compile shim, disabling")
                 self._cmplog = None
 
-        # Checksum learner: recovers unknown linear checksum polynomials
-        # from observed (data, checksum) pairs via Berlekamp-Massey / GCD.
-        self.checksum_learner = None
-        try:
-            from fuzzer_tool.core.checksum_learner import ChecksumLearner
-
-            self.checksum_learner = ChecksumLearner(self)
-        except Exception as exc:
-            log.debug("ChecksumLearner init failed: %s", exc)
+        # self.checksum_learner: constructed by analyzer_registry.wire_all()
+        # below (swallow_errors=True there reproduces this analyzer's
+        # original try/except-on-construction fail-open behaviour).
 
         # SMT solver: arithmetic constraint solving on cmplog pairs
         self._smt_solver = None
@@ -1444,16 +1438,8 @@ class Fuzzer:
         self._hf_timeout_penalties: int = 0
         self._favored: set[str] = set()
 
-        # Execution time tracking for adaptive timeout calibration
-        from fuzzer_tool.core.execution_time import ExecutionTimeTracker
-
-        self._exec_time_tracker = ExecutionTimeTracker()
-
-        # Calibrated anomaly detection for unusually slow executions.
-        # Additive only: never replaces the hard f.timeout hang ceiling.
-        from fuzzer_tool.core.exec_time_anomaly import ExecTimeCalibrator
-
-        self._exec_time_anomaly = ExecTimeCalibrator()
+        # self._exec_time_tracker / self._exec_time_anomaly: constructed by
+        # analyzer_registry.wire_all() below.
 
         self._last_child_pid: int | None = None
 
@@ -1552,15 +1538,14 @@ class Fuzzer:
         # memory between minimization passes, which is the primary cause of
         # the 10 GB RSS growth during long stalls.
 
-        # Per-byte sensitivity tracker (Lyapunov exponent). Constructed
-        # before _init_seed_metadata so load_state (resume) can restore
+        # Per-byte sensitivity tracker (Lyapunov exponent). Constructed here
+        # (via the "early" analyzer_registry phase, before
+        # _init_seed_metadata) so load_state (resume) can restore
         # sensitivity.json — it crashed with AttributeError otherwise.
         self._use_sensitivity = sensitivity
-        from fuzzer_tool.core.sensitivity import ByteSensitivityTracker
+        from fuzzer_tool.core.analyzer_registry import REGISTRY as _ANALYZER_REGISTRY
 
-        self._sensitivity = ByteSensitivityTracker(
-            max_seeds=50, max_bytes=max_len, sample_rate=0.02
-        )
+        _ANALYZER_REGISTRY.wire_all(self, phase="early")
 
         # Statistical region profiling (randomness.profile_buffer): labels
         # each window of a seed incompressible / tabular / textual /
@@ -1873,18 +1858,32 @@ class Fuzzer:
         self._use_transfer_entropy = transfer_entropy
         self._te_byte_edges: dict[int, dict[int, int]] = {}  # pos → {edge: count}
 
+        # Gating flags read by analyzer_registry specs below (elo, garch,
+        # continuum, format_learner, corpus_compression, distance, trace all
+        # look these up off self via `available(f)` rather than taking them
+        # as factory arguments -- see the registry module docstring).
+        self._use_elo = elo
+        self._use_garch = garch
+        self._use_continuum = continuum
+        self._learn_format_requested = learn_format
+        self._corpus_ppmd_requested = corpus_ppmd
+        self._distance_targets = targets
+        self._use_cfg_cache = use_cfg_cache
+        self._trace_crashes_requested = trace_crashes
+
         # Crash MI tracker, length-edge tracker, transfer entropy, Allan
-        # variance, and fluctuation tracking are constructed here in one
-        # pass — see core/analyzer_registry.py, the single source of truth
-        # for which analyzers exist and what gates each one.
+        # variance, fluctuation tracking, execution-time tracking, frameshift,
+        # the coverage-regime cluster (csd / coverage_homogeneity / garch /
+        # continuum / coverage_regime), format learner, corpus PPMD
+        # compression, Elo, directed-distance, crash tracing, and the
+        # checksum learner are all constructed here in one pass — see
+        # core/analyzer_registry.py, the single source of truth for which
+        # analyzers exist and what gates each one.
         from fuzzer_tool.core.analyzer_registry import REGISTRY as _ANALYZER_REGISTRY
 
         _ANALYZER_REGISTRY.wire_all(self)
 
-        # FrameShift: universal length-field auto-adjustment
-        from fuzzer_tool.core.frameshift import FrameShift
-
-        self._frameshift = FrameShift(max_relations=64)
+        # self._frameshift: constructed by analyzer_registry.wire_all() above.
         self._last_ops_used: list[str] = []
         # Subset of _last_ops_used that actually changed the buffer. Set by
         # OperatorEngine.mutate() when _track_op_effect is on; consumed by
@@ -1908,57 +1907,11 @@ class Fuzzer:
         self._last_hamming_distance: int = -1
         self._last_mutation_offset: int = 0
 
-        from fuzzer_tool.core.coverage_regime import (
-            CoverageRegimeDetector,
-        )
-        from fuzzer_tool.core.critical_slowing import (
-            CoverageHomogeneityDetector,
-            CriticalSlowingDown,
-        )
-        from fuzzer_tool.core.garch import OnlineGarch11
-        from fuzzer_tool.core.navier_stokes import ContinuumField
-
-        self._csd = CriticalSlowingDown(window_size=50, rise_threshold=1.5, min_observations=20)
-
-        # Coverage-column homogeneity detector — spatial clustering check
-        num_cols = max(1, self.map_size // 8192)
-        self._homogeneity = CoverageHomogeneityDetector(
-            num_columns=num_cols,
-            window_size=10,
-            homogeneity_p_threshold=0.01,
-        )
-        self._homogeneity_col_cumulative: list[int] = [0] * num_cols
-
-        # GARCH(1,1) conditional variance of the edge-discovery series.
-        # Fed the same non-overlapping per-tick delta as the Allan detector
-        # (see the feed site in run()); deliberately NOT discovery_rate(),
-        # whose 5-snapshot sliding window fabricates ARCH -- see the module
-        # docstring for the measurement.
-        self._use_garch = garch
-        self._garch = OnlineGarch11() if garch else None
-
-        # Steady continuum diagnostics over the frontier.  Instrumentation
-        # for the regime detector; the only behavioural use is the flux
-        # ranking inside invasion_select, which needs the MC bandit's stats
-        # for the same reason --invasion does.
-        self._use_continuum = continuum
-        self._continuum = ContinuumField() if continuum else None
-        self._continuum_adjacency: dict = {}
-        self._continuum_graph_tick = 0
-
-        # Coverage regime detector: percolation phase classification
-        # (subcritical / critical / supercritical).  Wraps the existing
-        # CriticalSlowingDown + CoverageHomogeneityDetector + stall
-        # threshold into a single actionable signal for the main loop.
-        self._regime = CoverageRegimeDetector(
-            csd=self._csd,
-            homogeneity=self._homogeneity,
-            stall_threshold=self._stall_threshold,
-            garch=self._garch,
-            continuum=self._continuum,
-        )
-        if self._garch is not None:
-            self._garch.load(self._state_store.get("garch") or {})
+        # self._csd / self._homogeneity / self._homogeneity_col_cumulative /
+        # self._garch / self._continuum / self._continuum_adjacency /
+        # self._continuum_graph_tick / self._regime: constructed by
+        # analyzer_registry.wire_all() above (csd, coverage_homogeneity,
+        # garch, continuum, coverage_regime specs, in that dependency order).
 
         # self._allan / self._last_allan_edge_count: constructed by
         # analyzer_registry.wire_all() above, alongside crash_mi,
@@ -1984,19 +1937,9 @@ class Fuzzer:
         self._dict_scratch: list[int] = []
         self._dict_scratch_idx = 0
 
-        # Format structure learner (schema-harness methodology)
-        self._format_learner = None
-        if learn_format:
-            from fuzzer_tool.core.format_learner import FormatLearner
-
-            self._format_learner = FormatLearner(max_timeline=10000)
-
-        # Corpus PPMD compression for seed novelty scoring
-        self._ppmd = None
-        if corpus_ppmd:
-            from fuzzer_tool.core.corpus_compression import CorpusCompressor
-
-            self._ppmd = CorpusCompressor()
+        # self._format_learner / self._ppmd: constructed by
+        # analyzer_registry.wire_all() above (format_learner,
+        # corpus_compression specs).
 
         # Per-operator buffer-change tracking costs one xxh3 digest per
         # mutation (~3.4us at 64KiB, no copy). Only pay it when something
@@ -2024,40 +1967,9 @@ class Fuzzer:
             or self._use_shapley
         )
 
-        # Elo rating system for operator scheduling
-        self._use_elo = elo
-        self._elo = None
-        if elo:
-            from fuzzer_tool.core.elo import BayesianEloTracker
-
-            self._elo = BayesianEloTracker(
-                initial_mu=1500,
-                initial_sigma=350,
-                beta=200,
-                tau=5.0,
-                min_matches=10,
-            )
-
-            log.info("Elo rating system enabled (k=16, decay=0.99)")
-            self._elo_decay_interval = 100  # apply decay every N iterations
-            self._elo_decay_counter = 0
-            self._elo_match_window: list[tuple[str, str, float, bool]] = []
-            elo_data = self._state_store.get("elo")
-            if elo_data is not None:
-                self._elo.from_dict(elo_data)
-                log.info("Elo tracker loaded from state store (%d operators)", len(self._elo.mu))
-
-            # Pre-register all strategy names so Elo can arbitrate immediately
-            # (without this, select_strategy requires min_matches before considering a strategy)
-            for s in _OPERATOR_STRATEGY_NAMES:
-                self._elo._strategy_mu.setdefault(s, self._elo.initial_mu)
-                self._elo._strategy_sigma_sq.setdefault(s, self._elo.initial_sigma**2)
-                self._elo._strategy_match_count.setdefault(s, 0)
-            for s in _SEED_STRATEGY_NAMES:
-                key = f"seed_{s}"
-                self._elo._strategy_mu.setdefault(key, self._elo.initial_mu)
-                self._elo._strategy_sigma_sq.setdefault(key, self._elo.initial_sigma**2)
-                self._elo._strategy_match_count.setdefault(key, 0)
+        # self._elo (+ its decay/match-window state): constructed by
+        # analyzer_registry.wire_all() above (elo spec). self._use_elo is
+        # set earlier, alongside the registry's other gating flags.
 
         # Invasion percolation operator selection (percolation handover
         # Module 4): an additional Elo-arbitrated strategy, not a bandit
@@ -2150,54 +2062,15 @@ class Fuzzer:
         self._entropy_execs: array = array("Q")  # exec_count per entropy sample
         self._entropy_vals: array = array("d")  # shannon entropy per sample
 
-        # Directed distance for targeted fuzzing
-        self._distance = None
-        self._distance_targets = targets
+        # self._distance / self._dist_table_shm: constructed by
+        # analyzer_registry.wire_all() above (distance spec).
+        # self._distance_targets is set earlier, alongside the registry's
+        # other gating flags.
         self._anneal_progress = 0.0  # 0.0 = pure coverage, 1.0 = pure distance
         # Running min/max of observed per-seed distances (AFLGo queue
         # normalization); the no-data sentinel (20.0) is excluded.
         self._dist_min_observed: float | None = None
         self._dist_max_observed: float | None = None
-        if targets:
-            from fuzzer_tool.core.distance import TargetDistance
-
-            self._distance = TargetDistance(
-                target, targets, use_cfg_cache=use_cfg_cache, debug=self.debug
-            )
-            self._dist_table_shm = None
-            if self._distance.load():
-                print(
-                    f"[*] Directed mode: {len(self._distance.target_addrs)} target(s), "
-                    f"{len(self._distance.functions)} functions mapped"
-                )
-                if self._distance._bb_value:
-                    try:
-                        from fuzzer_tool.adapters.shm import DistanceTableShm
-
-                        # Keys are trace-pc call-site addresses relative
-                        # to the object base (__sancov_pcs); the shim
-                        # looks up pc - dladdr_base.
-                        table = self._distance.pc_distance_table()
-                        if not table:
-                            base = self._distance._base_addr or 0
-                            table = {
-                                bb_start - base: dist
-                                for bb_start, dist in self._distance._bb_value.items()
-                            }
-                        self._dist_table_shm = DistanceTableShm(table)
-                        if self._dist_table_shm.shm_id >= 0:
-                            os.environ["__AFL_DIST_SHM_ID"] = self._dist_table_shm.env_id
-                            print(
-                                f"[*] AFLGo distance table: {len(table)} sites "
-                                "uploaded (SHM-tail channel active)"
-                            )
-                    except OSError as e:
-                        log.warning("Distance table upload failed: %s", e)
-            else:
-                print(
-                    "[!] Directed mode: failed to load target distances, falling back to coverage"
-                )
-                self._distance = None
 
         # K-Scheduler node channel: mutually exclusive with directed mode
         # (both upload __AFL_DIST_SHM_ID; evaluation campaigns are not
@@ -2221,12 +2094,9 @@ class Fuzzer:
         self._anneal_budget = anneal_budget  # 0 = no annealing (temperature always 1.0)
         self._temperature = 1.0
 
-        # Crash tracing: GDB backtrace + strace on crash inputs
-        self._tracer = None
-        if trace_crashes:
-            from fuzzer_tool.core.trace import CrashTracer
-
-            self._tracer = CrashTracer(target)
+        # self._tracer: constructed by analyzer_registry.wire_all() above
+        # (trace spec). self._trace_crashes_requested is set earlier,
+        # alongside the registry's other gating flags.
 
         def _register_arms(scheduler, priors=None):
             """Register all mutation arms on a scheduler (mc, mopt, replicator, elo).

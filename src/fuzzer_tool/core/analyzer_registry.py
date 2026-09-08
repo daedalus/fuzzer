@@ -33,14 +33,19 @@ Adding an analyzer means one ``REGISTRY.register(...)`` call here -- nothing
 else. Fuzzer.__init__ should not import an analyzer module directly; if it
 does, that analyzer belongs in this registry instead.
 
-Migration status: this registry currently covers ``fluctuation``,
-``transfer_entropy``, ``crash_mi``, ``length_tracker``, and ``allan`` -- the
-cleanest, self-contained cluster (no cross-dependencies on other analyzers).
-See docs/handover/handover_analyzer_registry_2026-09-07.md for the remaining
-components still wired inline in ``Fuzzer.__init__`` (elo, distance, trace,
-kalman, garch/critical_slowing/coverage_regime, navier_stokes,
-execution_time, exec_time_anomaly, sensitivity, frameshift, format_learner,
-corpus_compression, checksum_learner) and the plan to move each one here.
+Migration status: complete. All ~20 analyzer/detector components previously
+wired inline in Fuzzer.__init__ are registered here -- fluctuation,
+transfer_entropy, crash_mi, length_tracker, allan, sensitivity,
+execution_time, exec_time_anomaly, frameshift, format_learner,
+corpus_compression, elo, distance, trace, checksum_learner, csd,
+coverage_homogeneity, garch, continuum, coverage_regime. The one deliberate
+exception is `kalman` (core.kalman.RobustKF): every usage found is embedded
+in something else's construction (a network-adapter settle-time smoother; a
+separate, unconditional filter-smoothing usage in services/stats.py), not a
+standalone analyzer with its own gating flag, so there's no good single
+construction site to migrate. See
+docs/handover/handover_analyzer_registry_2026-09-07.md for the full
+per-component history and verification notes.
 """
 
 import logging
@@ -69,6 +74,19 @@ class AnalyzerSpec:
     activate: Callable[[FuzzerLike], None]
     available: Callable[[FuzzerLike], bool] | None = None
     deactivate: Callable[[FuzzerLike], None] | None = None
+    # "main" (default) is the single wire_all() call near the top of
+    # Fuzzer.__init__. "early" is for the rare analyzer with a real ordering
+    # constraint on something later in __init__ (currently just
+    # `sensitivity`, which must exist before _init_seed_metadata() so resume
+    # can restore sensitivity.json) -- wired from its own earlier call.
+    phase: str = "main"
+    # True only for analyzers whose original inline construction was itself
+    # wrapped in try/except (currently just `checksum_learner`). wire_all()
+    # catches and logs instead of propagating, exactly reproducing that
+    # analyzer's original fail-open behaviour -- this is NOT a general
+    # error-swallowing switch; every other analyzer still fails Fuzzer()
+    # the way its inline predecessor would have.
+    swallow_errors: bool = False
 
 
 class AnalyzerRegistry:
@@ -92,19 +110,31 @@ class AnalyzerRegistry:
             cats.setdefault(spec.category, set()).add(spec.name)
         return cats
 
-    def wire_all(self, fuzzer: FuzzerLike) -> dict[str, bool]:
-        """Construct every available analyzer on *fuzzer*, in order.
+    def wire_all(self, fuzzer: FuzzerLike, phase: str = "main") -> dict[str, bool]:
+        """Construct every available *phase*-matching analyzer, in order.
 
         Returns ``{name: True}`` for each analyzer that was activated and
         ``{name: False}`` for each that was left at its off-default --
         useful for tests and for a one-line startup summary. Construction
-        errors are not swallowed here: a broken analyzer should fail
-        ``Fuzzer()`` the same way its inline predecessor would have.
+        errors propagate (a broken analyzer fails ``Fuzzer()`` the same way
+        its inline predecessor would have) unless the spec sets
+        ``swallow_errors=True``, in which case they're logged and treated
+        as "not activated" instead.
         """
         activated: dict[str, bool] = {}
         for name, spec in self._specs.items():
+            if spec.phase != phase:
+                continue
             is_available = spec.available(fuzzer) if spec.available is not None else True
-            if is_available:
+            if is_available and spec.swallow_errors:
+                try:
+                    spec.activate(fuzzer)
+                except Exception as exc:  # noqa: BLE001 - mirrors the original inline try/except
+                    log.debug("%s init failed: %s", name, exc)
+                    is_available = False
+                    if spec.deactivate is not None:
+                        spec.deactivate(fuzzer)
+            elif is_available:
                 spec.activate(fuzzer)
             elif spec.deactivate is not None:
                 spec.deactivate(fuzzer)
@@ -232,5 +262,375 @@ REGISTRY.register(
         name="allan",
         category="regime_detection",
         activate=_activate_allan,
+    )
+)
+
+
+def _activate_sensitivity(f: FuzzerLike) -> None:
+    from fuzzer_tool.core.sensitivity import ByteSensitivityTracker
+
+    f._sensitivity = ByteSensitivityTracker(max_seeds=50, max_bytes=f.max_len, sample_rate=0.02)
+
+
+REGISTRY.register(
+    AnalyzerSpec(
+        name="sensitivity",
+        category="mutation_feedback",
+        activate=_activate_sensitivity,
+        # Constructed before Fuzzer._init_seed_metadata() so a resumed run
+        # can restore sensitivity.json -- it raised AttributeError
+        # otherwise. Its own usage is separately gated at call time by the
+        # `_use_sensitivity` flag (set directly in __init__, not through
+        # this registry); construction itself is unconditional.
+        phase="early",
+    )
+)
+
+
+def _activate_execution_time(f: FuzzerLike) -> None:
+    from fuzzer_tool.core.execution_time import ExecutionTimeTracker
+
+    f._exec_time_tracker = ExecutionTimeTracker()
+
+
+REGISTRY.register(
+    AnalyzerSpec(
+        name="execution_time",
+        category="timing",
+        activate=_activate_execution_time,
+    )
+)
+
+
+def _activate_exec_time_anomaly(f: FuzzerLike) -> None:
+    from fuzzer_tool.core.exec_time_anomaly import ExecTimeCalibrator
+
+    f._exec_time_anomaly = ExecTimeCalibrator()
+
+
+REGISTRY.register(
+    AnalyzerSpec(
+        name="exec_time_anomaly",
+        category="timing",
+        activate=_activate_exec_time_anomaly,
+    )
+)
+
+
+def _activate_frameshift(f: FuzzerLike) -> None:
+    from fuzzer_tool.core.frameshift import FrameShift
+
+    f._frameshift = FrameShift(max_relations=64)
+
+
+REGISTRY.register(
+    AnalyzerSpec(
+        name="frameshift",
+        category="structural",
+        activate=_activate_frameshift,
+    )
+)
+
+
+def _activate_format_learner(f: FuzzerLike) -> None:
+    from fuzzer_tool.core.format_learner import FormatLearner
+
+    f._format_learner = FormatLearner(max_timeline=10000)
+
+
+def _deactivate_format_learner(f: FuzzerLike) -> None:
+    f._format_learner = None
+
+
+REGISTRY.register(
+    AnalyzerSpec(
+        name="format_learner",
+        category="structural",
+        available=lambda f: bool(getattr(f, "_learn_format_requested", False)),
+        activate=_activate_format_learner,
+        deactivate=_deactivate_format_learner,
+    )
+)
+
+
+def _activate_corpus_compression(f: FuzzerLike) -> None:
+    from fuzzer_tool.core.corpus_compression import CorpusCompressor
+
+    f._ppmd = CorpusCompressor()
+
+
+def _deactivate_corpus_compression(f: FuzzerLike) -> None:
+    f._ppmd = None
+
+
+REGISTRY.register(
+    AnalyzerSpec(
+        name="corpus_compression",
+        category="structural",
+        available=lambda f: bool(getattr(f, "_corpus_ppmd_requested", False)),
+        activate=_activate_corpus_compression,
+        deactivate=_deactivate_corpus_compression,
+    )
+)
+
+
+def _activate_elo(f: FuzzerLike) -> None:
+    from fuzzer_tool.core.elo import BayesianEloTracker
+
+    # Local import: services.fuzzer defines _OPERATOR_STRATEGY_NAMES /
+    # _SEED_STRATEGY_NAMES and imports this registry module at load time.
+    from fuzzer_tool.services import fuzzer as _fuzzer_mod
+
+    f._elo = BayesianEloTracker(
+        initial_mu=1500,
+        initial_sigma=350,
+        beta=200,
+        tau=5.0,
+        min_matches=10,
+    )
+    log.info("Elo rating system enabled (k=16, decay=0.99)")
+    f._elo_decay_interval = 100
+    f._elo_decay_counter = 0
+    f._elo_match_window = []
+    elo_data = f._state_store.get("elo")
+    if elo_data is not None:
+        f._elo.from_dict(elo_data)
+        log.info("Elo tracker loaded from state store (%d operators)", len(f._elo.mu))
+
+    # Pre-register all strategy names so Elo can arbitrate immediately
+    # (without this, select_strategy requires min_matches before considering
+    # a strategy).
+    for s in _fuzzer_mod._OPERATOR_STRATEGY_NAMES:
+        f._elo._strategy_mu.setdefault(s, f._elo.initial_mu)
+        f._elo._strategy_sigma_sq.setdefault(s, f._elo.initial_sigma**2)
+        f._elo._strategy_match_count.setdefault(s, 0)
+    for s in _fuzzer_mod._SEED_STRATEGY_NAMES:
+        key = f"seed_{s}"
+        f._elo._strategy_mu.setdefault(key, f._elo.initial_mu)
+        f._elo._strategy_sigma_sq.setdefault(key, f._elo.initial_sigma**2)
+        f._elo._strategy_match_count.setdefault(key, 0)
+
+
+def _deactivate_elo(f: FuzzerLike) -> None:
+    f._elo = None
+
+
+REGISTRY.register(
+    AnalyzerSpec(
+        name="elo",
+        category="scheduling",
+        available=lambda f: bool(getattr(f, "_use_elo", False)),
+        activate=_activate_elo,
+        deactivate=_deactivate_elo,
+    )
+)
+
+
+def _activate_distance(f: FuzzerLike) -> None:
+    import os
+
+    from fuzzer_tool.core.distance import TargetDistance
+
+    f._distance = TargetDistance(
+        f.target, f._distance_targets, use_cfg_cache=f._use_cfg_cache, debug=f.debug
+    )
+    f._dist_table_shm = None
+    if f._distance.load():
+        print(
+            f"[*] Directed mode: {len(f._distance.target_addrs)} target(s), "
+            f"{len(f._distance.functions)} functions mapped"
+        )
+        if f._distance._bb_value:
+            try:
+                from fuzzer_tool.adapters.shm import DistanceTableShm
+
+                # Keys are trace-pc call-site addresses relative to the
+                # object base (__sancov_pcs); the shim looks up
+                # pc - dladdr_base.
+                table = f._distance.pc_distance_table()
+                if not table:
+                    base = f._distance._base_addr or 0
+                    table = {
+                        bb_start - base: dist for bb_start, dist in f._distance._bb_value.items()
+                    }
+                f._dist_table_shm = DistanceTableShm(table)
+                if f._dist_table_shm.shm_id >= 0:
+                    os.environ["__AFL_DIST_SHM_ID"] = f._dist_table_shm.env_id
+                    print(
+                        f"[*] AFLGo distance table: {len(table)} sites "
+                        "uploaded (SHM-tail channel active)"
+                    )
+            except OSError as e:
+                log.warning("Distance table upload failed: %s", e)
+    else:
+        print("[!] Directed mode: failed to load target distances, falling back to coverage")
+        f._distance = None
+
+
+def _deactivate_distance(f: FuzzerLike) -> None:
+    f._distance = None
+    f._dist_table_shm = None
+
+
+REGISTRY.register(
+    AnalyzerSpec(
+        name="distance",
+        category="directed_fuzzing",
+        available=lambda f: bool(getattr(f, "_distance_targets", None)),
+        activate=_activate_distance,
+        deactivate=_deactivate_distance,
+    )
+)
+
+
+def _activate_trace(f: FuzzerLike) -> None:
+    from fuzzer_tool.core.trace import CrashTracer
+
+    f._tracer = CrashTracer(f.target)
+
+
+def _deactivate_trace(f: FuzzerLike) -> None:
+    f._tracer = None
+
+
+REGISTRY.register(
+    AnalyzerSpec(
+        name="trace",
+        category="crash_triage",
+        available=lambda f: bool(getattr(f, "_trace_crashes_requested", False)),
+        activate=_activate_trace,
+        deactivate=_deactivate_trace,
+    )
+)
+
+
+def _activate_checksum_learner(f: FuzzerLike) -> None:
+    from fuzzer_tool.core.checksum_learner import ChecksumLearner
+
+    f.checksum_learner = ChecksumLearner(f)
+
+
+def _deactivate_checksum_learner(f: FuzzerLike) -> None:
+    f.checksum_learner = None
+
+
+REGISTRY.register(
+    AnalyzerSpec(
+        name="checksum_learner",
+        category="format_recovery",
+        activate=_activate_checksum_learner,
+        deactivate=_deactivate_checksum_learner,
+        # The only analyzer whose original inline construction was itself
+        # wrapped in try/except: recovers unknown linear checksum
+        # polynomials via Berlekamp-Massey/GCD, which can fail on inputs
+        # that don't fit that model. That was never meant to fail Fuzzer().
+        swallow_errors=True,
+    )
+)
+
+
+def _activate_csd(f: FuzzerLike) -> None:
+    from fuzzer_tool.core.critical_slowing import CriticalSlowingDown
+
+    f._csd = CriticalSlowingDown(window_size=50, rise_threshold=1.5, min_observations=20)
+
+
+REGISTRY.register(
+    AnalyzerSpec(
+        name="csd",
+        category="regime_detection",
+        activate=_activate_csd,
+    )
+)
+
+
+def _activate_coverage_homogeneity(f: FuzzerLike) -> None:
+    from fuzzer_tool.core.critical_slowing import CoverageHomogeneityDetector
+
+    num_cols = max(1, f.map_size // 8192)
+    f._homogeneity = CoverageHomogeneityDetector(
+        num_columns=num_cols,
+        window_size=10,
+        homogeneity_p_threshold=0.01,
+    )
+    f._homogeneity_col_cumulative = [0] * num_cols
+
+
+REGISTRY.register(
+    AnalyzerSpec(
+        name="coverage_homogeneity",
+        category="regime_detection",
+        activate=_activate_coverage_homogeneity,
+    )
+)
+
+
+def _activate_garch(f: FuzzerLike) -> None:
+    from fuzzer_tool.core.garch import OnlineGarch11
+
+    f._garch = OnlineGarch11()
+    f._garch.load(f._state_store.get("garch") or {})
+
+
+def _deactivate_garch(f: FuzzerLike) -> None:
+    f._garch = None
+
+
+REGISTRY.register(
+    AnalyzerSpec(
+        name="garch",
+        category="regime_detection",
+        available=lambda f: bool(getattr(f, "_use_garch", False)),
+        activate=_activate_garch,
+        deactivate=_deactivate_garch,
+    )
+)
+
+
+def _activate_continuum(f: FuzzerLike) -> None:
+    from fuzzer_tool.core.navier_stokes import ContinuumField
+
+    f._continuum = ContinuumField()
+    f._continuum_adjacency = {}
+    f._continuum_graph_tick = 0
+
+
+def _deactivate_continuum(f: FuzzerLike) -> None:
+    f._continuum = None
+    f._continuum_adjacency = {}
+    f._continuum_graph_tick = 0
+
+
+REGISTRY.register(
+    AnalyzerSpec(
+        name="continuum",
+        category="regime_detection",
+        available=lambda f: bool(getattr(f, "_use_continuum", False)),
+        activate=_activate_continuum,
+        deactivate=_deactivate_continuum,
+    )
+)
+
+
+def _activate_coverage_regime(f: FuzzerLike) -> None:
+    from fuzzer_tool.core.coverage_regime import CoverageRegimeDetector
+
+    # Composite: depends on csd / coverage_homogeneity / garch / continuum
+    # having already run. Registration order guarantees that within one
+    # wire_all() pass -- see the four specs directly above.
+    f._regime = CoverageRegimeDetector(
+        csd=f._csd,
+        homogeneity=f._homogeneity,
+        stall_threshold=f._stall_threshold,
+        garch=f._garch,
+        continuum=f._continuum,
+    )
+
+
+REGISTRY.register(
+    AnalyzerSpec(
+        name="coverage_regime",
+        category="regime_detection",
+        activate=_activate_coverage_regime,
     )
 )
