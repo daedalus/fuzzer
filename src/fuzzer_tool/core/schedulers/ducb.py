@@ -42,21 +42,13 @@ this one deliberately does not.
 import math
 
 from fuzzer_tool.core.rand_pool import RandPool
-
-#: Below this the relative statistics are rescaled back to an absolute basis.
-#: 1e-12 leaves ~4 orders of float64 headroom above the point where
-#: 1/_discount stops being exactly representable.
-RENORM_FLOOR = 1e-12
-
-#: The index is only defined for n_t >= 1. Clamping the log argument is what
-#: keeps the width real rather than NaN over the first few pulls.
-MIN_LOG_ARG = 1.0 + 1e-9
+from fuzzer_tool.core.schedulers.ucb_common import DiscountedUCBBase
 
 #: Paper's leading coefficient on the confidence width.
 UCB_WIDTH_COEFF = 2.0
 
 
-class DUCBScheduler:
+class DUCBScheduler(DiscountedUCBBase):
     """Discounted UCB (Garivier & Moulines) over mutation operators.
 
     Args:
@@ -89,8 +81,6 @@ class DUCBScheduler:
             an arm with no discounted evidence.
     """
 
-    # Beta-Bernoulli priors have no meaning for a discounted-sum index: there
-    # is no (alpha, beta) pair to seed.
     supports_priors = False
 
     def __init__(
@@ -101,141 +91,19 @@ class DUCBScheduler:
         exploration: float = 0.25,
         rng: RandPool | None = None,
     ):
-        if not 0.0 < gamma <= 1.0:
-            raise ValueError(f"gamma must be in (0, 1], got {gamma!r}")
         if xi <= 0.0:
             raise ValueError(f"xi must be positive, got {xi!r}")
         if exploration <= 0.0:
             raise ValueError(f"exploration must be positive, got {exploration!r}")
-
-        self.gamma = gamma
         self.xi = xi
         self.b = b
         self.exploration = exploration
+        super().__init__(gamma=gamma, rng=rng)
 
-        # Hard Rule 16: all randomness comes from RandPool, so --seed
-        # determines which unpulled arm is opened first and a crash found
-        # under this scheduler replays. Same convention as cmaes.py.
-        self._rng = rng if rng is not None else RandPool()
-
-        # Relative statistics: the true discounted value is the stored value
-        # times self._discount. Keeping the discount in one place is what
-        # makes record() O(1) instead of O(K).
-        self._n_rel: dict[str, float] = {}
-        self._x_rel: dict[str, float] = {}
-        self._discount: float = 1.0
-        self._total_pulls: int = 0
-
-    # -- arm bookkeeping --------------------------------------------------
-
-    def init_arm(self, name: str) -> None:
-        """Register an operator with zero discounted count and reward."""
-        self._n_rel.setdefault(name, 0.0)
-        self._x_rel.setdefault(name, 0.0)
-
-    def _renormalise(self) -> None:
-        """Fold the accumulated discount back into the per-arm statistics."""
-        d = self._discount
-        for k in self._n_rel:
-            self._n_rel[k] *= d
-        for k in self._x_rel:
-            self._x_rel[k] *= d
-        self._discount = 1.0
-
-    # -- selection --------------------------------------------------------
-
-    def select_op(self, ops: list[str]) -> str:
-        """Select the operator with the highest discounted-UCB index.
-
-        Arms with zero discounted count are opened first. That is the standard
-        UCB initialisation, and it also handles operators registered at runtime
-        via ``REGISTRY.register_mutator()``: an arm this scheduler has never
-        seen is indistinguishable from one whose evidence has fully decayed,
-        and both should be tried.
-        """
-        if not ops:
-            return ""
-
-        if len(ops) == 1:
-            return ops[0]
-
-        d = self._discount
-
-        # n_t is the discounted total over the *candidate* arms, matching the
-        # index's own denominator. Summing over every registered arm instead
-        # would inflate log(n_t) on every build_ops() call that filters the
-        # operator list by sniffer applicability.
-        n_total = 0.0
-        unpulled = []
-        for op in ops:
-            n = self._n_rel.get(op, 0.0) * d
-            if n <= 0.0:
-                unpulled.append(op)
-                continue
-            n_total += n
-
-        if unpulled:
-            return self._rng.choice(unpulled)
-
-        log_n = math.log(max(n_total, MIN_LOG_ARG))
-        width_scale = self.exploration * UCB_WIDTH_COEFF * self.b * math.sqrt(self.xi * log_n)
-
-        best_op = ops[0]
-        best_score = -math.inf
-        for op in ops:
-            n = self._n_rel.get(op, 0.0) * d
-            mean = (self._x_rel.get(op, 0.0) * d) / n
-            score = mean + self._width(mean, n, log_n, width_scale)
-            if score > best_score:
-                best_score = score
-                best_op = op
-
-        return best_op
-
-    def _width(self, mean: float, n: float, log_n: float, gaussian_scale: float) -> float:
-        """Confidence width added to one arm's index.
-
-        The Gaussian form is the paper's ``2B*sqrt(xi*log(n_t)/N_t(i))`` --
-        *gaussian_scale* already carries the ``exploration * UCB_WIDTH_COEFF *
-        b`` prefix and the sqrt(xi*log_n) factor, so the width is that divided
-        by sqrt(n).
-        """
+    def _width(self, mean: float, n: float, log_n: float) -> float:
+        """Gaussian confidence width: exploration * 2B * sqrt(xi*log(n) / n)."""
+        gaussian_scale = self.exploration * UCB_WIDTH_COEFF * self.b * math.sqrt(self.xi * log_n)
         return gaussian_scale / math.sqrt(n)
-
-    # -- update -----------------------------------------------------------
-
-    def record(self, name: str, success: bool, weight: float = 1.0) -> None:
-        """Discount every arm, then credit *name* with this round's reward."""
-        self._total_pulls += 1
-        reward = weight if success else 0.0
-
-        if self.gamma < 1.0:
-            self._discount *= self.gamma
-            if self._discount < RENORM_FLOOR:
-                self._renormalise()
-
-        # Adding an absolute 1 to a value stored relative to _discount means
-        # adding 1/_discount in relative space.
-        inv = 1.0 / self._discount
-        self._n_rel[name] = self._n_rel.get(name, 0.0) + inv
-        if reward:
-            self._x_rel[name] = self._x_rel.get(name, 0.0) + reward * inv
-
-    # -- diagnostics ------------------------------------------------------
-
-    def discounted_counts(self) -> dict[str, float]:
-        """Per-arm discounted pull count N_t(i), in absolute units."""
-        d = self._discount
-        return {k: v * d for k, v in self._n_rel.items()}
-
-    def discounted_means(self) -> dict[str, float]:
-        """Per-arm discounted empirical mean X_t(i)/N_t(i)."""
-        d = self._discount
-        out = {}
-        for k, n_rel in self._n_rel.items():
-            n = n_rel * d
-            out[k] = (self._x_rel.get(k, 0.0) * d / n) if n > 0 else 0.0
-        return out
 
     def bandit_stats(self) -> dict:
         """Return D-UCB diagnostics."""

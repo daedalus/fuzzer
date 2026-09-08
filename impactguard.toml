@@ -15,10 +15,56 @@
 # called from outside that function) and were hoisted into a _UnionFind
 # class so the disjoint-set logic is unit-testable in its own right. The
 # only external import of the module is compute_corpus_overlap_density.
+#
+# The UCB scheduler consolidation moved init_arm, record, select_op, and
+# the helper methods (discounted_counts/means, windowed_counts/means) from
+# four individual scheduler modules into ucb_common.py base classes. The
+# public class API is unchanged — methods are inherited, not removed.
+#
+# Format: full path relative to repo root, then :Class.method.
 [impactguard.analysis]
 suppress = [
     "src/fuzzer_tool/core/periodicity.py:detect_periodicity",
     "src/fuzzer_tool/core/berlekamp_massey.py:poly_gcd",
     "src/fuzzer_tool/core/overlap_density.py:find",
     "src/fuzzer_tool/core/overlap_density.py:union",
+    # DUCB → DiscountedUCBBase (methods inherited, not removed)
+    "src/fuzzer_tool/core/schedulers/ducb.py:DUCBScheduler.init_arm",
+    "src/fuzzer_tool/core/schedulers/ducb.py:DUCBScheduler.record",
+    "src/fuzzer_tool/core/schedulers/ducb.py:DUCBScheduler.select_op",
+    "src/fuzzer_tool/core/schedulers/ducb.py:DUCBScheduler.discounted_counts",
+    "src/fuzzer_tool/core/schedulers/ducb.py:DUCBScheduler.discounted_means",
+    # KL-DUCB → DiscountedUCBBase
+    "src/fuzzer_tool/core/schedulers/kl_ducb.py:KL_DUCBScheduler.init_arm",
+    "src/fuzzer_tool/core/schedulers/kl_ducb.py:KL_DUCBScheduler.record",
+    "src/fuzzer_tool/core/schedulers/kl_ducb.py:KL_DUCBScheduler.select_op",
+    "src/fuzzer_tool/core/schedulers/kl_ducb.py:KL_DUCBScheduler.discounted_counts",
+    "src/fuzzer_tool/core/schedulers/kl_ducb.py:KL_DUCBScheduler.discounted_means",
+    # SW-UCB → WindowedUCBBase
+    "src/fuzzer_tool/core/schedulers/swucb.py:SWUCBScheduler.init_arm",
+    "src/fuzzer_tool/core/schedulers/swucb.py:SWUCBScheduler.record",
+    "src/fuzzer_tool/core/schedulers/swucb.py:SWUCBScheduler.select_op",
+    "src/fuzzer_tool/core/schedulers/swucb.py:SWUCBScheduler.windowed_counts",
+    "src/fuzzer_tool/core/schedulers/swucb.py:SWUCBScheduler.windowed_means",
+    # KL-SW-UCB → WindowedUCBBase
+    "src/fuzzer_tool/core/schedulers/kl_swucb.py:KL_SWUCBScheduler.init_arm",
+    "src/fuzzer_tool/core/schedulers/kl_swucb.py:KL_SWUCBScheduler.record",
+    "src/fuzzer_tool/core/schedulers/kl_swucb.py:KL_SWUCBScheduler.select_op",
+    "src/fuzzer_tool/core/schedulers/kl_swucb.py:KL_SWUCBScheduler.windowed_counts",
+    "src/fuzzer_tool/core/schedulers/kl_swucb.py:KL_SWUCBScheduler.windowed_means",
+    # ucb_common.py cascade: concrete implementations of abstract UCBBase
+    "src/fuzzer_tool/core/schedulers/ucb_common.py:UCBBase.bandit_stats",
+    "src/fuzzer_tool/core/schedulers/ucb_common.py:UCBBase.init_arm",
+    "src/fuzzer_tool/core/schedulers/ucb_common.py:UCBBase.record",
+    "src/fuzzer_tool/core/schedulers/ucb_common.py:UCBBase.select_op",
+    "src/fuzzer_tool/core/schedulers/ucb_common.py:DiscountedUCBBase.bandit_stats",
+    "src/fuzzer_tool/core/schedulers/ucb_common.py:DiscountedUCBBase.init_arm",
+    "src/fuzzer_tool/core/schedulers/ucb_common.py:DiscountedUCBBase.record",
+    "src/fuzzer_tool/core/schedulers/ucb_common.py:DiscountedUCBBase.select_op",
+    "src/fuzzer_tool/core/schedulers/ucb_common.py:WindowedUCBBase.bandit_stats",
+    "src/fuzzer_tool/core/schedulers/ucb_common.py:WindowedUCBBase.init_arm",
+    "src/fuzzer_tool/core/schedulers/ucb_common.py:WindowedUCBBase.record",
+    "src/fuzzer_tool/core/schedulers/ucb_common.py:WindowedUCBBase.select_op",
+    "src/fuzzer_tool/core/schedulers/ucb_common.py:WindowedUCBBase.windowed_counts",
+    "src/fuzzer_tool/core/schedulers/ucb_common.py:WindowedUCBBase.windowed_means",
 ]
